@@ -4,44 +4,36 @@
 # table[3352]: uv_ptr=6023070 mat_ptr=1415108 mesh_ptr=10820794
 # table[3353]: uv_ptr=6023358 mat_ptr=1415244 mesh_ptr=10821175
 face   0: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=0 bi=1 SKIP=0 have_uv=1 uv_word=6022966 sheet=0 tile=( 512, 256) 128x128 colorbase=94
+  -- raw UV stream u16 (pv,pu) from model start uv_word=6022966 --
+  word  +0 (off 6022966): pv= 1024 pu= 1024
+  word  +2 (off 6022968): pv=    0 pu= 1536
+  word  +4 (off 6022970): pv= 1024 pu= 2048
+  word  +6 (off 6022972): pv= 1024 pu= 1024
+  word  +8 (off 6022974): pv=    0 pu= 1536
+  word +10 (off 6022976): pv= 1024 pu= 2048
+  word +12 (off 6022978): pv=    0 pu= 1536
+  word +14 (off 6022980): pv= 1024 pu= 2048
+  word +16 (off 6022982): pv= 1024 pu= 1024
+  word +18 (off 6022984): pv= 1024 pu= 1024
+  word +20 (off 6022986): pv=    0 pu= 1536
+  word +22 (off 6022988): pv= 1024 pu= 2048
+  word +24 (off 6022990): pv=    0 pu=    0
+  word +26 (off 6022992): pv=    0 pu=    0
+  word +28 (off 6022994): pv=    0 pu=    0
+  word +30 (off 6022996): pv=    0 pu=    0
+  word +32 (off 6022998): pv=    0 pu=    0
+  word +34 (off 6023000): pv=    0 pu=    0
+  word +36 (off 6023002): pv=    0 pu=    0
+  word +38 (off 6023004): pv=    0 pu=    0
+  word +40 (off 6023006): pv= 2040 pu= 1456
+  word +42 (off 6023008): pv= 2216 pu= 1536
+  word +44 (off 6023010): pv= 3736 pu= 1360
+  word +46 (off 6023012): pv= 4096 pu= 1024
 face   1: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=1 SKIP=0 have_uv=1 uv_word=6022974 sheet=0 tile=( 512, 256) 128x128 colorbase=94
 face   2: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=4 SKIP=0 have_uv=1 uv_word=6022982 sheet=0 tile=( 512, 256) 128x128 colorbase=94
 face   3: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=6 SKIP=0 have_uv=1 uv_word=6022990 sheet=0 tile=( 512, 256) 128x128 colorbase=94
 face   4: th0=0000 th2=0000 th3=1780  textured=0 nv=4 f1=1 ai=8 bi=6 SKIP=0 have_uv=1 uv_word=6022998 sheet=0 tile=(   0,   0) 32x32 colorbase=94
 face   5: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=-1 bi=-1 SKIP=1 have_uv=1 uv_word=6023006 sheet=0 tile=( 384,   0) 128x256 colorbase=22
-  -- raw UV stream u16 (pv,pu) around uv_word=6023006 --
-  word -16 (off 6022990): pv=    0 pu=    0
-  word -14 (off 6022992): pv=    0 pu=    0
-  word -12 (off 6022994): pv=    0 pu=    0
-  word -10 (off 6022996): pv=    0 pu=    0
-  word  -8 (off 6022998): pv=    0 pu=    0
-  word  -6 (off 6023000): pv=    0 pu=    0
-  word  -4 (off 6023002): pv=    0 pu=    0
-  word  -2 (off 6023004): pv=    0 pu=    0
-  word  +0 (off 6023006): pv= 2040 pu= 1456
-  word  +2 (off 6023008): pv= 2216 pu= 1536
-  word  +4 (off 6023010): pv= 3736 pu= 1360
-  word  +6 (off 6023012): pv= 4096 pu= 1024
-  word  +8 (off 6023014): pv= 1688 pu=  336
-  word +10 (off 6023016): pv=  168 pu=  512
-  word +12 (off 6023018): pv= 1688 pu=  680
-  word +14 (off 6023020): pv= 2048 pu=  512
-  word +16 (off 6023022): pv= 3736 pu=  680
-  word +18 (off 6023024): pv= 2216 pu=  512
-  word +20 (off 6023026): pv= 2040 pu=  584
-  word +22 (off 6023028): pv= 4096 pu= 1024
-  word +24 (off 6023030): pv=    0 pu=    0
-  word +26 (off 6023032): pv=    0 pu=    0
-  word +28 (off 6023034): pv=    0 pu=    0
-  word +30 (off 6023036): pv=    0 pu=    0
-  word +32 (off 6023038): pv=    0 pu= 2048
-  word +34 (off 6023040): pv= 2048 pu= 1608
-  word +36 (off 6023042): pv= 2048 pu= 1456
-  word +38 (off 6023044): pv=    0 pu= 1024
-  word +40 (off 6023046): pv=    0 pu=    0
-  word +42 (off 6023048): pv=    0 pu=    0
-  word +44 (off 6023050): pv=    0 pu=    0
-  word +46 (off 6023052): pv=    0 pu=    0
 face   6: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=13 SKIP=0 have_uv=1 uv_word=6023014 sheet=0 tile=( 384,   0) 128x256 colorbase=22
 face   7: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=14 SKIP=0 have_uv=1 uv_word=6023022 sheet=0 tile=( 384,   0) 128x256 colorbase=22
 face   8: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=16 SKIP=0 have_uv=1 uv_word=6023030 sheet=0 tile=( 384,   0) 128x256 colorbase=22

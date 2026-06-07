@@ -1208,9 +1208,9 @@ static inline void geo3d_decode_model(int model_idx,
                         ai, bi, _skip, have_uv?1:0, uv_word, texsheet, texx, texy, texw, texh, matidx);
                         /* Raw UV-stream window around the first cone face, to find the
                          * real (pv,pu) pairs and the correct per-face stride. */
-                        if (fi == 5) {
-                            fprintf(mtf, "  -- raw UV stream u16 (pv,pu) around uv_word=%u --\n", uv_word);
-                            for (int w = -16; w < 48; w += 2) {
+                        if (fi == 0) {
+                            fprintf(mtf, "  -- raw UV stream u16 (pv,pu) from model start uv_word=%u --\n", uv_word);
+                            for (int w = 0; w < 48; w += 2) {
                                 long bo = ((long)uv_word + w) * 2;
                                 if (bo >= 0 && (size_t)bo + 4 <= materials_size) {
                                     uint16_t v0 = (uint16_t)materials[bo]   | ((uint16_t)materials[bo+1] << 8);
@@ -1261,7 +1261,7 @@ static inline void geo3d_decode_model(int model_idx,
                 }
             }
         }
-        uv_word += 4u * 2u;   /* 4 (pv,pu) pairs per iteration (incl. sentinels) */
+        uv_word += (uint32_t)nv * 2u;   /* nv (pv,pu) pairs per iteration (3 tri / 4 quad) */
         g_dbg_tex_faces++;
         if (textured) g_dbg_tex_textured++;
         if (uvu[0] >= 0.0f || uvu[1] >= 0.0f) g_dbg_tex_uv_faces++;
