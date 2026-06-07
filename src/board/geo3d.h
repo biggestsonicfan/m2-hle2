@@ -386,6 +386,16 @@ static bool g_uv_flip_v = true;
  * [A,B,C,D] ({0,1,2,3}). Wrong order swaps the C/D corners → scrambled texture
  * that swap/flip can't fix. Dial live to un-scramble. */
 static int  g_uv_quad_order = 0;
+
+/* Flat shading ("definition"): MAME shades each polygon by luminance =
+ * |normal·light|*diffuse + ambient (model2_v.cpp geo_parse), which modulates
+ * the texel luma.  We don't compute the game's lighting, so models read flat.
+ * Approximate it: per-face geometric normal (cross of transformed edges) · a
+ * tunable light dir, modulating the face color.  Tunable live in the 3D window. */
+static int   g_light_enable  = 1;
+static float g_light_dir[3]  = {0.3f, 0.5f, 1.0f};
+static float g_light_ambient = 0.45f;
+static float g_light_diffuse = 0.55f;
 /* Debug: when == a model index, dump that model's per-face texture tiles
  * (sheet,texx,texy,texw,texh) to model_tex.txt while it is decoded. -1 = off. */
 static int  g_dump_model_tex = -1;
@@ -1298,6 +1308,26 @@ static inline void geo3d_decode_model(int model_idx,
         vec3_t D = has_D ? sv[di] : (vec3_t){0,0,0};
 
         bool is_tri = tri_cnt || !has_C || !has_D;
+
+        /* Flat shading: modulate the face color by |normal·light|*diffuse+ambient,
+         * approximating MAME's per-polygon luminance.  Normal = cross of the
+         * transformed edges (two-sided via |dot|).  fr/fg/fb are recomputed per
+         * face from the palette, so modulating them in place is safe. */
+        if (g_light_enable && has_C) {
+            float e1x=B.x-A.x, e1y=B.y-A.y, e1z=B.z-A.z;
+            float e2x=C.x-A.x, e2y=C.y-A.y, e2z=C.z-A.z;
+            float nx=e1y*e2z-e1z*e2y, ny=e1z*e2x-e1x*e2z, nz=e1x*e2y-e1y*e2x;
+            float nl=sqrtf(nx*nx+ny*ny+nz*nz);
+            float ll=sqrtf(g_light_dir[0]*g_light_dir[0]+g_light_dir[1]*g_light_dir[1]+g_light_dir[2]*g_light_dir[2]);
+            float shade=g_light_ambient;
+            if (nl>1e-6f && ll>1e-6f) {
+                float d=(nx*g_light_dir[0]+ny*g_light_dir[1]+nz*g_light_dir[2])/(nl*ll);
+                if (d<0) d=-d;
+                shade += g_light_diffuse*d;
+            }
+            if (shade>1.0f) shade=1.0f;
+            fr*=shade; fg*=shade; fb*=shade;
+        }
 
         if (is_tri) {
             if (has_C) {

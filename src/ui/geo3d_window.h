@@ -177,6 +177,15 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     }
 
     igSeparator();
+    igText("Flat shading (definition):");
+    { bool le = g_light_enable != 0; if (igCheckbox("enable lighting", &le)) g_light_enable = le; }
+    igDragFloatEx("light X", &g_light_dir[0], 0.05f, -2.0f, 2.0f, "%.2f", 0);
+    igDragFloatEx("light Y", &g_light_dir[1], 0.05f, -2.0f, 2.0f, "%.2f", 0);
+    igDragFloatEx("light Z", &g_light_dir[2], 0.05f, -2.0f, 2.0f, "%.2f", 0);
+    igDragFloatEx("ambient", &g_light_ambient, 0.02f, 0.0f, 1.0f, "%.2f", 0);
+    igDragFloatEx("diffuse", &g_light_diffuse, 0.02f, 0.0f, 1.0f, "%.2f", 0);
+
+    igSeparator();
     igText("Texture UV orientation:");
     igCheckbox("swap u/v (rotate 90)", &g_uv_swap);
     igCheckbox("flip u (horizontal)",  &g_uv_flip_u);
