@@ -54,9 +54,10 @@ static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
 
 /* timers→interrupts rework, additive step: when nonzero, the run loop ticks the
  * board timers so the (already-enabled) timer IRQ fires and its ISR runs, ON TOP
- * of the existing HLE bypasses (no bypass removed → no idle-loop hang).  Default
- * 0 = unchanged.  Lets us verify the timer ISR runs + whether it fills texram0. */
-static int g_real_irq = 0;
+ * of the existing HLE bypasses (no bypass removed → no idle-loop hang).  DEFAULT
+ * ON: the timer ISR drives the real attract-mode progression (our bypass froze
+ * it).  Toggle off via --realirq=0 path / UI if needed. */
+static int g_real_irq = 1;
 
 /* ---- Board timer register access (0xF00000 + off), 4 bytes per timer ---- */
 
