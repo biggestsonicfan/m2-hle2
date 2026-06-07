@@ -34,11 +34,14 @@ typedef struct {
     float r, g, b, a;
 } game_render_line_vertex_t;
 
-/* Textured fill vertex: position + flat color + atlas UV (u<0 → untextured). */
+/* Textured fill vertex: position + flat color + tile-relative texel UV + atlas
+ * tile rect (tx,ty,tw,th in pixels; tw<=0 → untextured).  The shader wraps the
+ * interpolated UV within the tile per-pixel before sampling the atlas. */
 typedef struct {
     float x, y, z;
     float r, g, b, a;
     float u, v;
+    float tx, ty, tw, th;
 } game_render_tex_vertex_t;
 
 typedef struct {
@@ -156,12 +159,14 @@ static const char *game_render_fill_vs_glsl =
     "layout(location=0) in vec3 a_pos;\n"
     "layout(location=1) in vec4 a_color;\n"
     "layout(location=2) in vec2 a_uv;\n"
+    "layout(location=3) in vec4 a_tile;\n"
     "out vec4 color;\n"
     "out vec2 uv;\n"
+    "out vec4 tile;\n"
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
-    "  color = a_color; uv = a_uv;\n"
+    "  color = a_color; uv = a_uv; tile = a_tile;\n"
     "}\n";
 
 static const char *game_render_fill_fs_glsl =
@@ -169,11 +174,14 @@ static const char *game_render_fill_fs_glsl =
     "uniform sampler2D atlas_smp;\n"
     "in vec4 color;\n"
     "in vec2 uv;\n"
+    "in vec4 tile;\n"
     "out vec4 frag_color;\n"
     "void main() {\n"
     "  vec3 rgb = color.rgb;\n"
-    "  if (uv.x >= 0.0) {\n"
-    "    float luma = texture(atlas_smp, uv).r;\n"
+    "  if (tile.z > 0.0) {\n"                         /* tw>0 → textured */
+    "    vec2 w = uv - tile.zw * floor(uv / tile.zw);\n"   /* per-pixel wrap into tile */
+    "    vec2 auv = (tile.xy + w) / vec2(2048.0, 2048.0);\n"
+    "    float luma = texture(atlas_smp, auv).r;\n"
     "    if (luma > 0.0) rgb = clamp(color.rgb * luma * 2.0, 0.0, 1.0);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
@@ -181,23 +189,25 @@ static const char *game_render_fill_fs_glsl =
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
-    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; };\n"
+    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
-    "  outp.color = inp.color; outp.uv = inp.uv;\n"
+    "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile;\n"
     "  return outp;\n"
     "}\n";
 
 static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> atlas : register(t0);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; };\n"
     "float4 main(fs_in inp) : SV_Target0 {\n"
     "  float3 rgb = inp.color.rgb;\n"
-    "  if (inp.uv.x >= 0.0) {\n"
-    "    float luma = atlas.Sample(smp, inp.uv).r;\n"
+    "  if (inp.tile.z > 0.0) {\n"
+    "    float2 w = inp.uv - inp.tile.zw * floor(inp.uv / inp.tile.zw);\n"
+    "    float2 auv = (inp.tile.xy + w) / float2(2048.0, 2048.0);\n"
+    "    float luma = atlas.Sample(smp, auv).r;\n"
     "    if (luma > 0.0) rgb = clamp(inp.color.rgb * luma * 2.0, 0.0, 1.0);\n"
     "  }\n"
     "  return float4(rgb, 1.0);\n"
@@ -362,7 +372,8 @@ static inline void game_render_init(void) {
         memset(&d, 0, sizeof(d));
         d.attrs[0].hlsl_sem_name  = "POSITION"; d.attrs[0].base_type = SG_SHADERATTRBASETYPE_FLOAT;
         d.attrs[1].hlsl_sem_name  = "COLOR";    d.attrs[1].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[2].hlsl_sem_name  = "TEXCOORD"; d.attrs[2].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+        d.attrs[2].hlsl_sem_name  = "TEXCOORD"; d.attrs[2].hlsl_sem_index = 0; d.attrs[2].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+        d.attrs[3].hlsl_sem_name  = "TEXCOORD"; d.attrs[3].hlsl_sem_index = 1; d.attrs[3].base_type = SG_SHADERATTRBASETYPE_FLOAT;
         d.uniform_blocks[0].stage                 = SG_SHADERSTAGE_VERTEX;
         d.uniform_blocks[0].size                  = sizeof(game_render_vs_params_t);
         d.uniform_blocks[0].hlsl_register_b_n     = 0;
@@ -409,6 +420,8 @@ static inline void game_render_init(void) {
         p.layout.attrs[1].offset   = offsetof(game_render_tex_vertex_t, r);
         p.layout.attrs[2].format   = SG_VERTEXFORMAT_FLOAT2;
         p.layout.attrs[2].offset   = offsetof(game_render_tex_vertex_t, u);
+        p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
+        p.layout.attrs[3].offset   = offsetof(game_render_tex_vertex_t, tx);
         p.layout.buffers[0].stride = sizeof(game_render_tex_vertex_t);
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
         p.depth.write_enabled      = true;
@@ -654,6 +667,9 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
         v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].r=T->r; v[0].g=T->g; v[0].b=T->b; v[0].a=1.f; v[0].u=T->u0; v[0].v=T->v0;
         v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].r=T->r; v[1].g=T->g; v[1].b=T->b; v[1].a=1.f; v[1].u=T->u1; v[1].v=T->v1;
         v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].r=T->r; v[2].g=T->g; v[2].b=T->b; v[2].a=1.f; v[2].u=T->u2; v[2].v=T->v2;
+        for (int _k = 0; _k < 3; _k++) {
+            v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
+        }
     }
     int vcount = n * 3;
     sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){

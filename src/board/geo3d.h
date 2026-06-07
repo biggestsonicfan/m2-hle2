@@ -184,10 +184,11 @@ static inline void geo3d_lines_reset(void) { g_geo3d_lines.count = 0; }
 #define GEO3D_MAX_TRIS GEO3D_MAX_LINES
 
 typedef struct {
-    float x0, y0, z0,  u0, v0;
+    float x0, y0, z0,  u0, v0;   /* u,v = tile-relative texel (may run past the tile) */
     float x1, y1, z1,  u1, v1;
     float x2, y2, z2,  u2, v2;
     float r, g, b;
+    float tx, ty, tw, th;        /* atlas tile rect (pixels); tw<=0 → untextured */
 } geo3d_tri_t;
 
 typedef struct {
@@ -199,26 +200,31 @@ static geo3d_tri_buf_t g_geo3d_tris = {0};
 
 static inline void geo3d_tris_reset(void) { g_geo3d_tris.count = 0; }
 
-/* Emit a textured triangle: per-vertex position + atlas UV, plus a flat color. */
+/* Emit a textured triangle: per-vertex position + tile-relative texel UV, the
+ * atlas tile rect (tx,ty,tw,th in pixels), plus a flat color.  The shader wraps
+ * the interpolated UV within [0,tw)x[0,th) per-pixel before sampling the atlas;
+ * tw<=0 means untextured (flat color). */
 static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, float v0,
                                       float x1, float y1, float z1, float u1, float v1,
                                       float x2, float y2, float z2, float u2, float v2,
-                                      float r,  float g,  float b) {
+                                      float r,  float g,  float b,
+                                      float tx, float ty, float tw, float th) {
     if (g_geo3d_tris.count >= GEO3D_MAX_TRIS) return;
     geo3d_tri_t *T = &g_geo3d_tris.tris[g_geo3d_tris.count++];
     T->x0=x0; T->y0=y0; T->z0=z0; T->u0=u0; T->v0=v0;
     T->x1=x1; T->y1=y1; T->z1=z1; T->u1=u1; T->v1=v1;
     T->x2=x2; T->y2=y2; T->z2=z2; T->u2=u2; T->v2=v2;
     T->r=r;   T->g=g;   T->b=b;
+    T->tx=tx; T->ty=ty; T->tw=tw; T->th=th;
 }
 
-/* Backward-compatible: untextured triangle (UV = -1 → shader uses flat color). */
+/* Backward-compatible: untextured triangle (tw=0 → shader uses flat color). */
 static inline void geo3d_emit_tri(float x0, float y0, float z0,
                                    float x1, float y1, float z1,
                                    float x2, float y2, float z2,
                                    float r,  float g,  float b) {
-    geo3d_emit_tri_uv(x0,y0,z0,-1.0f,-1.0f, x1,y1,z1,-1.0f,-1.0f,
-                      x2,y2,z2,-1.0f,-1.0f, r,g,b);
+    geo3d_emit_tri_uv(x0,y0,z0,0.0f,0.0f, x1,y1,z1,0.0f,0.0f,
+                      x2,y2,z2,0.0f,0.0f, r,g,b, 0.0f,0.0f,0.0f,0.0f);
 }
 
 static inline void geo3d_emit_line(float x0, float y0, float z0,
@@ -1224,9 +1230,17 @@ static inline void geo3d_decode_model(int model_idx,
             }
         }
 
+        /* Atlas tile rect (pixels) for this face — passed to the shader for the
+         * per-pixel wrap. tw=0 → untextured (flat color). */
+        float ftx = (float)texx;
+        float fty = (float)((uint32_t)texsheet * GEO3D_SHEET_H + texy);
+        float ftw = textured ? (float)texw : 0.0f;
+        float fth = (float)texh;
+
         /* ---- UV stream: nv (pv,pu) pairs, mapped to [A,B,D,C]/[A,B,C] ---- */
-        /* uvv[] indexed by vertex slot: 0=A 1=B 2=C 3=D */
-        float uvu[4] = {-1,-1,-1,-1}, uvv[4] = {-1,-1,-1,-1};
+        /* uvv[] indexed by vertex slot: 0=A 1=B 2=C 3=D.  Stored as tile-relative
+         * texel coords (may run past the tile); the shader wraps per-pixel. */
+        float uvu[4] = {0,0,0,0}, uvv[4] = {0,0,0,0};
         uint16_t cap_pu = 0, cap_pv = 0;
         if (have_uv) {
             static const int quad_slot_abdc[4] = {0,1,3,2};  /* stream k → A,B,D,C */
@@ -1248,16 +1262,13 @@ static inline void geo3d_decode_model(int model_idx,
                 if (g_uv_flip_u) tu = (float)texw - tu;
                 if (g_uv_flip_v) tv = (float)texh - tv;
                 if (g_uv_swap)   { float t = tu; tu = tv; tv = t; }
-                float au = ((float)texx + tu) / (float)GEO3D_ATLAS_W;
-                float av = ((float)(texsheet * GEO3D_SHEET_H) + (float)texy + tv)
-                            / (float)GEO3D_ATLAS_H;
-                uvu[slot[k]] = au; uvv[slot[k]] = av;
+                uvu[slot[k]] = tu; uvv[slot[k]] = tv;   /* tile-texel; shader wraps */
                 if (model_idx == g_dump_model_tex && fi <= 12) {
                     static FILE *uf = NULL;
                     if (fi == 0 && k == 0) { if (uf) fclose(uf); uf = fopen("model_uv.txt", "w"); }
                     if (!uf) uf = fopen("model_uv.txt", "a");
-                    if (uf) { fprintf(uf, "face %2d k=%d nv=%d pu=%u pv=%u -> tu=%.1f tv=%.1f au=%.4f av=%.4f\n",
-                                      fi, k, nv, pu, pv, tu, tv, au, av); fflush(uf); }
+                    if (uf) { fprintf(uf, "face %2d k=%d nv=%d pu=%u pv=%u -> tu=%.1f tv=%.1f tile=(%.0f,%.0f) %.0fx%.0f\n",
+                                      fi, k, nv, pu, pv, tu, tv, ftx, fty, ftw, fth); fflush(uf); }
                 }
             }
         }
@@ -1295,7 +1306,7 @@ static inline void geo3d_decode_model(int model_idx,
                 geo3d_emit_line(C.x,C.y,C.z, A.x,A.y,A.z, fr,fg,fb);
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth);
             } else {
                 geo3d_emit_line(A.x,A.y,A.z, B.x,B.y,B.z, fr,fg,fb);
             }
@@ -1309,10 +1320,10 @@ static inline void geo3d_decode_model(int model_idx,
             if (has_D) {
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
-                                  D.x,D.y,D.z, uvu[3],uvv[3], fr,fg,fb);
+                                  D.x,D.y,D.z, uvu[3],uvv[3], fr,fg,fb, ftx,fty,ftw,fth);
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   D.x,D.y,D.z, uvu[3],uvv[3],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth);
             }
         }
         efi++;   /* this face was emitted → consumes one material record */

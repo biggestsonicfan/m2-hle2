@@ -29,15 +29,15 @@ face   0: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=0 bi=1 SKIP=0 have
   word +42 (off 6023008): pv= 2216 pu= 1536
   word +44 (off 6023010): pv= 3736 pu= 1360
   word +46 (off 6023012): pv= 4096 pu= 1024
-face   1: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=1 SKIP=0 have_uv=1 uv_word=6022974 sheet=0 tile=( 512, 256) 128x128 colorbase=94
-face   2: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=4 SKIP=0 have_uv=1 uv_word=6022982 sheet=0 tile=( 512, 256) 128x128 colorbase=94
-face   3: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=6 SKIP=0 have_uv=1 uv_word=6022990 sheet=0 tile=( 512, 256) 128x128 colorbase=94
-face   4: th0=0000 th2=0000 th3=1780  textured=0 nv=4 f1=1 ai=8 bi=6 SKIP=0 have_uv=1 uv_word=6022998 sheet=0 tile=(   0,   0) 32x32 colorbase=94
-face   5: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=-1 bi=-1 SKIP=1 have_uv=1 uv_word=6023006 sheet=0 tile=( 384,   0) 128x256 colorbase=22
-face   6: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=13 SKIP=0 have_uv=1 uv_word=6023014 sheet=0 tile=( 384,   0) 128x256 colorbase=22
-face   7: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=14 SKIP=0 have_uv=1 uv_word=6023022 sheet=0 tile=( 384,   0) 128x256 colorbase=22
-face   8: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=16 SKIP=0 have_uv=1 uv_word=6023030 sheet=0 tile=( 384,   0) 128x256 colorbase=22
-face   9: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=-1 bi=-1 SKIP=1 have_uv=1 uv_word=6023038 sheet=0 tile=(1920,   0) 128x256 colorbase=122
-face  10: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=20 bi=21 SKIP=0 have_uv=1 uv_word=6023046 sheet=0 tile=(1920,   0) 128x256 colorbase=122
-face  11: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=-1 bi=-1 SKIP=1 have_uv=1 uv_word=6023054 sheet=0 tile=(1920,   0) 128x256 colorbase=122
-face  12: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=24 bi=25 SKIP=0 have_uv=1 uv_word=6023062 sheet=0 tile=(1920,   0) 128x256 colorbase=122
+face   1: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=1 SKIP=0 have_uv=1 uv_word=6022972 sheet=0 tile=( 512, 256) 128x128 colorbase=94
+face   2: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=4 SKIP=0 have_uv=1 uv_word=6022978 sheet=0 tile=( 512, 256) 128x128 colorbase=94
+face   3: th0=4012 th2=0A10 th3=1780  textured=1 nv=3 f1=2 ai=2 bi=6 SKIP=0 have_uv=1 uv_word=6022984 sheet=0 tile=( 512, 256) 128x128 colorbase=94
+face   4: th0=0000 th2=0000 th3=1780  textured=0 nv=4 f1=1 ai=8 bi=6 SKIP=0 have_uv=1 uv_word=6022990 sheet=0 tile=(   0,   0) 32x32 colorbase=94
+face   5: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=-1 bi=-1 SKIP=1 have_uv=1 uv_word=6022998 sheet=0 tile=( 384,   0) 128x256 colorbase=22
+face   6: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=13 SKIP=0 have_uv=1 uv_word=6023006 sheet=0 tile=( 384,   0) 128x256 colorbase=22
+face   7: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=14 SKIP=0 have_uv=1 uv_word=6023014 sheet=0 tile=( 384,   0) 128x256 colorbase=22
+face   8: th0=401A th2=080C th3=0580  textured=1 nv=4 f1=1 ai=12 bi=16 SKIP=0 have_uv=1 uv_word=6023022 sheet=0 tile=( 384,   0) 128x256 colorbase=22
+face   9: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=-1 bi=-1 SKIP=1 have_uv=1 uv_word=6023030 sheet=0 tile=(1920,   0) 128x256 colorbase=122
+face  10: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=20 bi=21 SKIP=0 have_uv=1 uv_word=6023038 sheet=0 tile=(1920,   0) 128x256 colorbase=122
+face  11: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=-1 bi=-1 SKIP=1 have_uv=1 uv_word=6023046 sheet=0 tile=(1920,   0) 128x256 colorbase=122
+face  12: th0=601A th2=083C th3=1E80  textured=1 nv=4 f1=1 ai=24 bi=25 SKIP=0 have_uv=1 uv_word=6023054 sheet=0 tile=(1920,   0) 128x256 colorbase=122
