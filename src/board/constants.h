@@ -142,7 +142,12 @@
 /* Texture RAM: 1MB each, mirrored.  0x11000000 & 0x11100000 alias texram0,
  * 0x11200000 & 0x11300000 alias texram1 (matches MAME model2b map).  The game
  * uploads textures via the 0x111xxxxx mirror; the rasterizer/atlas reads the
- * same 1MB buffer, so the mirror MUST alias or texel offsets are wrong. */
+ * same 1MB buffer, so the mirror MUST alias or texel offsets are wrong.
+ * STF also keeps a THIRD texram0 alias at 0x10F00000 (the i960 var `texram_0`
+ * = 0x10F00000; IDA notes "MAME says this is 0x11000000").  The game uploads
+ * stage/object textures through it, so it MUST alias texram0 or those textures
+ * are dropped (object 3545's sheet-0 tiles came up blank without this). */
+#define TEXRAM0_ALIAS_BASE         0x10F00000
 #define TEXRAM0_BASE               0x11000000
 #define TEXRAM0_SIZE               0x00100000
 #define TEXRAM0_MIRROR_BASE        0x11100000
