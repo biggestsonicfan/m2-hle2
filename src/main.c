@@ -331,7 +331,8 @@ static void frame(void) {
     if (state.geo3d.use_game_view && g_active_profile &&
             g_active_profile->quirks.camera_struct_addr && state.emu_started) {
         geo3d_read_game_view(&state.geo3d, &state.bus,
-                             g_active_profile->quirks.camera_struct_addr);
+                             g_active_profile->quirks.camera_struct_addr,
+                             g_active_profile->quirks.camera_angle_addr);
     }
 
     /* Sub-frame interpolation factor: time since the last game frame ended,

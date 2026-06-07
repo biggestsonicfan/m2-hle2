@@ -391,7 +391,8 @@ static const game_profile_t fvipers_profile = {
         .mesh_ptr_add       = 0x10,
         .model_table_offset = 0x000E0004,   /* TODO: find in IDA */
         .model_table_count  = 5412,            /* TODO */
-        .camera_struct_addr = 0x00515598,   /* TODO: find camera struct in RAM */
+        .camera_struct_addr = 0x00515598,   /* eye x,y,z (g13+0x18) — confirmed MAME + IDA */
+        .camera_angle_addr  = 0x00515584,   /* yaw = high16 (g13+0x06); camera_control ldos/stos 6(g13) */
     },
 };
 

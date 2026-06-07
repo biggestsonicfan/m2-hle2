@@ -88,7 +88,11 @@ typedef struct {
     uint32_t mesh_ptr_add;          /* 0 = board default 0x10 */
     uint32_t model_table_offset;    /* byte offset of model table within main_data */
     uint32_t model_table_count;     /* number of entries in the model table */
-    uint32_t camera_struct_addr;    /* RAM address of camera struct (0 = no game camera) */
+    uint32_t camera_struct_addr;    /* RAM address of camera eye (x,y,z f32; 0 = no game camera) */
+    /* Absolute RAM address of the camera angle word (low16 = pitch, high16 = yaw).
+     * The struct layout differs per game: STF packs it at eye+0xC (0x519EA4);
+     * FV keeps it separate at 0x515584. 0 = default to camera_struct_addr + 0xC. */
+    uint32_t camera_angle_addr;
     bool     enable_68k_sound;      /* false = skip M68K/SCSP init (use when sound driver not yet ported) */
 
     /* Real interrupt delivery (board IRQ controller in irq_timer.h).

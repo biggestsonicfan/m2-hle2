@@ -1287,8 +1287,13 @@ static inline void geo3d_build_wireframes(geo3d_state_t *geo,
  */
 static inline void geo3d_read_game_view(geo3d_state_t *geo,
                                          memory_bus_t *bus,
-                                         uint32_t cam_addr) {
+                                         uint32_t cam_addr,
+                                         uint32_t ang_addr) {
     if (!cam_addr || !bus) return;
+    /* The camera angle word layout differs per game. STF packs it at eye+0xC;
+     * FV keeps it separate (yaw = high16 @0x515584). ang_addr from the profile;
+     * 0 falls back to the STF-style eye+0xC. */
+    if (!ang_addr) ang_addr = cam_addr + 0x0C;
 
 #define GEO3D_READ_F32(addr) do { \
         uint32_t _u = mem_read32(bus, (addr)); \
@@ -1302,7 +1307,7 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
     GEO3D_READ_F32(cam_addr + 0x04); float ypos = _result_f;
     GEO3D_READ_F32(cam_addr + 0x08); float zpos = _result_f;
 
-    uint32_t ang_word = mem_read32(bus, cam_addr + 0x0C);
+    uint32_t ang_word = mem_read32(bus, ang_addr);
     int16_t xang16 = (int16_t)(ang_word & 0xFFFF);
     int16_t yang16 = (int16_t)((ang_word >> 16) & 0xFFFF);
 
