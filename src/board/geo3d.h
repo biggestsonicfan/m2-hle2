@@ -389,7 +389,7 @@ static int   g_geo_wireframe = 0;
 /* Backface culling: 0 = none, 1 = cull back (CW front), 2 = cull back (CCW front).
  * MAME backface-tests via normal·viewdir; winding cull is simpler — flip 1/2 to
  * match the model winding (whichever shows outer shells, not interiors). */
-static int   g_backface_cull = 2;
+static int   g_backface_cull = 0;
 static float g_light_dir[3]  = {0.3f, 0.5f, 1.0f};
 static float g_light_ambient = 0.45f;
 static float g_light_diffuse = 0.55f;
