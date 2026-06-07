@@ -1,0 +1,70 @@
+# Build output
+build/
+build_vs22/
+out/
+bin/
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.cmake/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+CMakeSettings.json.user
+
+# Emscripten
+*.wasm
+*.js.mem
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ROMs / proprietary content (never commit)
+*.zip
+roms/
+sfight/
+schamp/
+epr-*.bin
+epr-*.15
+epr-*.16
+mpr-*.bin
+
+# Reference assets (large, external)
+3d-reference/
+*.obj
+
+# Vendored deps tarballs / archives
+vendor/*.tar.gz
+vendor/*.zip
+
+# Local notes
+NOTES.local.md
+TODO.local.md
+
+# Runtime artifacts
+m2hle.log
+*.log
+
+# Python (mcp_server)
+__pycache__/
+*.pyc
+mcp_server/.venv/
