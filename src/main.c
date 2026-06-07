@@ -493,6 +493,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_cam_log = 1;            /* dump cam_ours.csv per game frame */
         } else if (strcmp(argv[i], "--nowarnskip") == 0) {
             g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
+        } else if (strcmp(argv[i], "--realirq") == 0) {
+            g_real_irq = 1;           /* tick board timers → real timer ISR delivery */
         } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             g_browse_model = atoi(argv[++i]);  /* single-model browser on N */
         }

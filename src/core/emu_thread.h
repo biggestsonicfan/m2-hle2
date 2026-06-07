@@ -195,6 +195,9 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
 
             emu_mutex_lock(&ctx->mutex);
             g_frame_done = 0;
+            /* Additive: advance the board timers one frame of cycles so the
+             * enabled timer IRQ (bit5) expires and vectors its ISR. */
+            if (g_real_irq) irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC);
             emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
             for (int i = 0;
                  i < EMU_STEPS_PER_SLICE

@@ -52,6 +52,12 @@ static inline void     irqt_enable_write(uint32_t d)  { g_irqt.intena = d; }
 /* Assert a pending bit (from timer expiry / vblank / sound UART). */
 static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
 
+/* timers→interrupts rework, additive step: when nonzero, the run loop ticks the
+ * board timers so the (already-enabled) timer IRQ fires and its ISR runs, ON TOP
+ * of the existing HLE bypasses (no bypass removed → no idle-loop hang).  Default
+ * 0 = unchanged.  Lets us verify the timer ISR runs + whether it fills texram0. */
+static int g_real_irq = 0;
+
 /* ---- Board timer register access (0xF00000 + off), 4 bytes per timer ---- */
 
 static inline void irqt_timer_write(uint32_t off, uint32_t val) {
