@@ -380,6 +380,9 @@ static bool g_uv_flip_v = true;
  * [A,B,C,D] ({0,1,2,3}). Wrong order swaps the C/D corners → scrambled texture
  * that swap/flip can't fix. Dial live to un-scramble. */
 static int  g_uv_quad_order = 0;
+/* Debug: when == a model index, dump that model's per-face texture tiles
+ * (sheet,texx,texy,texw,texh) to model_tex.txt while it is decoded. -1 = off. */
+static int  g_dump_model_tex = -1;
 /* Texture bank override: 0=auto (texsheet bit12), 1=force sheet0, 2=force sheet1,
  * 3=swap (invert the bit12 selection). */
 static int  g_uv_bank_mode = 0;
@@ -1139,6 +1142,12 @@ static inline void geo3d_decode_model(int model_idx,
     }
 
     /* Face loop — emit wireframe edges, stopping 2 groups before the tail. */
+    /* Material records are written per EMITTED face (sentinel/degenerate strip
+     * groups get none), while the UV stream stores 4 (pv,pu) pairs per face-loop
+     * ITERATION (incl. sentinels). So material is indexed by emitted-count (efi)
+     * and the UV stream advances 8 words every iteration. Verified on model 3351:
+     * 13 iterations, 3 sentinels → 10 material records, 104-word UV stream. */
+    int efi = 0;
     for (int i = 0; i < n_idx - 8; i += 4) {
         int fi = i / 4;
         int ai = idx[i], bi = idx[i + 1], ci = idx[i + 2], di = idx[i + 3];
@@ -1154,7 +1163,7 @@ static inline void geo3d_decode_model(int model_idx,
         uint32_t texx = 0, texy = 0, texw = 32, texh = 32, texsheet = 0;
         bool textured = false;               /* texheader[0] bit14 = textured */
         if (have_mat) {
-            uint32_t rec = mat_base + (uint32_t)fi * 8u;
+            uint32_t rec = mat_base + (uint32_t)efi * 8u;
             if ((size_t)rec + 8 <= materials_size) {
                 uint16_t th0 = (uint16_t)materials[rec+0] | ((uint16_t)materials[rec+1]<<8);
                 uint16_t th2 = (uint16_t)materials[rec+4] | ((uint16_t)materials[rec+5]<<8);
@@ -1174,6 +1183,43 @@ static inline void geo3d_decode_model(int model_idx,
                     uint16_t cw = (uint16_t)main_data[pal] |
                                   ((uint16_t)main_data[pal + 1] << 8);
                     geo3d_bgr555(cw, &fr, &fg, &fb);
+                }
+                /* Debug dump of this model's per-face texture tiles. */
+                if (model_idx == g_dump_model_tex) {
+                    static FILE *mtf = NULL;
+                    if (fi == 0) { if (mtf) fclose(mtf); mtf = fopen("model_tex.txt", "w");
+                        if (mtf) {
+                            fprintf(mtf, "# model %d texture tiles  th0 th2 th3 -> sheet (texx,texy) texw x texh\n", model_idx);
+                            /* Neighbouring model-table entries: uv_ptr(+0)/mat_ptr(+4)/mesh_ptr(+8).
+                             * UV-stream length for this model = uv_ptr[next] - uv_ptr[this]. */
+                            for (int mi = model_idx - 1; mi <= model_idx + 2; mi++) {
+                                if (mi < 0 || (uint32_t)mi >= table_count) continue;
+                                uint32_t te = table_off + (uint32_t)mi * MODEL_ENTRY_SIZE;
+                                if ((size_t)te + MODEL_ENTRY_SIZE > main_data_size) continue;
+                                fprintf(mtf, "# table[%d]: uv_ptr=%u mat_ptr=%u mesh_ptr=%u\n", mi,
+                                        read_u32_le(main_data + te + 0), read_u32_le(main_data + te + 4),
+                                        read_u32_le(main_data + te + 8));
+                            }
+                        } }
+                    int _skip = (ai < 0 || ai >= n_sv || bi < 0 || bi >= n_sv);
+                    if (mtf) { fprintf(mtf,
+                        "face %3d: th0=%04X th2=%04X th3=%04X  textured=%d nv=%d f1=%d ai=%d bi=%d SKIP=%d have_uv=%d uv_word=%u sheet=%u tile=(%4u,%4u) %ux%u colorbase=%u\n",
+                        fi, th0, th2, th3, textured?1:0, nv, (fi < n_qt ? qt[fi] : -1),
+                        ai, bi, _skip, have_uv?1:0, uv_word, texsheet, texx, texy, texw, texh, matidx);
+                        /* Raw UV-stream window around the first cone face, to find the
+                         * real (pv,pu) pairs and the correct per-face stride. */
+                        if (fi == 5) {
+                            fprintf(mtf, "  -- raw UV stream u16 (pv,pu) around uv_word=%u --\n", uv_word);
+                            for (int w = -16; w < 48; w += 2) {
+                                long bo = ((long)uv_word + w) * 2;
+                                if (bo >= 0 && (size_t)bo + 4 <= materials_size) {
+                                    uint16_t v0 = (uint16_t)materials[bo]   | ((uint16_t)materials[bo+1] << 8);
+                                    uint16_t v1 = (uint16_t)materials[bo+2] | ((uint16_t)materials[bo+3] << 8);
+                                    fprintf(mtf, "  word %+3d (off %u): pv=%5u pu=%5u\n", w, uv_word + w, v0, v1);
+                                }
+                            }
+                        }
+                        fflush(mtf); }
                 }
             }
         }
@@ -1206,9 +1252,16 @@ static inline void geo3d_decode_model(int model_idx,
                 float av = ((float)(texsheet * GEO3D_SHEET_H) + (float)texy + tv)
                             / (float)GEO3D_ATLAS_H;
                 uvu[slot[k]] = au; uvv[slot[k]] = av;
+                if (model_idx == g_dump_model_tex && fi <= 12) {
+                    static FILE *uf = NULL;
+                    if (fi == 0 && k == 0) { if (uf) fclose(uf); uf = fopen("model_uv.txt", "w"); }
+                    if (!uf) uf = fopen("model_uv.txt", "a");
+                    if (uf) { fprintf(uf, "face %2d k=%d nv=%d pu=%u pv=%u -> tu=%.1f tv=%.1f au=%.4f av=%.4f\n",
+                                      fi, k, nv, pu, pv, tu, tv, au, av); fflush(uf); }
+                }
             }
         }
-        uv_word += (uint32_t)nv * 2u;        /* advance for EVERY group */
+        uv_word += 4u * 2u;   /* 4 (pv,pu) pairs per iteration (incl. sentinels) */
         g_dbg_tex_faces++;
         if (textured) g_dbg_tex_textured++;
         if (uvu[0] >= 0.0f || uvu[1] >= 0.0f) g_dbg_tex_uv_faces++;
@@ -1262,6 +1315,7 @@ static inline void geo3d_decode_model(int model_idx,
                                   C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb);
             }
         }
+        efi++;   /* this face was emitted → consumes one material record */
     }
 }
 

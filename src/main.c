@@ -49,6 +49,7 @@
 
 static char g_rom_path[512] = {0};
 static int  g_autorun = 0;
+static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 
 static struct {
     sg_pass_action   pass_action;
@@ -289,6 +290,11 @@ static void init(void) {
     game_render_init();
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
+    if (g_browse_model >= 0) {            /* --model N: browse + dump its texture tiles */
+        state.geo3d.use_captures = false;
+        state.geo3d.model_index  = g_browse_model;
+        g_dump_model_tex         = g_browse_model;
+    }
 
     /* SCSP HLE PCM mixer + sokol_audio output (sources the 68K wave RAM + SCSP regs). */
     scsp_hle_init(g_sound.wave, M68K_WAVE_SIZE, g_sound.comm, M68K_SCSP_SIZE);
@@ -486,6 +492,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_cam_log = 1;            /* dump cam_ours.csv per game frame */
         } else if (strcmp(argv[i], "--nowarnskip") == 0) {
             g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
+        } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+            g_browse_model = atoi(argv[++i]);  /* single-model browser on N */
         }
     }
     return (sapp_desc){
