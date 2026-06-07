@@ -61,10 +61,13 @@ typedef struct {
     sg_shader   line_shader;
     sg_pipeline line_pipeline;
 
-    /* Fill (3D solid/textured triangle) pipeline */
+    /* Fill (3D solid/textured triangle) pipeline.  Three variants for the
+     * backface-cull toggle: none / cull-CW-front / cull-CCW-front. */
     sg_buffer   fill_vbuf;
     sg_shader   fill_shader;
-    sg_pipeline fill_pipeline;
+    sg_pipeline fill_pipeline;        /* no cull */
+    sg_pipeline fill_pipeline_cw;     /* cull back, CW = front */
+    sg_pipeline fill_pipeline_ccw;    /* cull back, CCW = front */
 
     /* Texture luma atlas (decoded from texram0): 2048×1024 R8 */
     sg_image    atlas_image;
@@ -504,7 +507,13 @@ static inline void game_render_init(void) {
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
         p.depth.write_enabled      = true;
         p.label = "game-render-fill-pipeline";
+        p.cull_mode = SG_CULLMODE_NONE;
         g_game_render.fill_pipeline = sg_make_pipeline(&p);
+        p.cull_mode = SG_CULLMODE_BACK;
+        p.face_winding = SG_FACEWINDING_CW;   p.label = "fill-cull-cw";
+        g_game_render.fill_pipeline_cw = sg_make_pipeline(&p);
+        p.face_winding = SG_FACEWINDING_CCW;  p.label = "fill-cull-ccw";
+        g_game_render.fill_pipeline_ccw = sg_make_pipeline(&p);
     }
 
     /* ---- Texture luma atlas ---------------------------------------------- */
@@ -554,6 +563,8 @@ static inline void game_render_shutdown(void) {
     sg_destroy_view(g_game_render.cxlat_view);
     sg_destroy_image(g_game_render.cxlat_image);
     sg_destroy_pipeline(g_game_render.fill_pipeline);
+    sg_destroy_pipeline(g_game_render.fill_pipeline_cw);
+    sg_destroy_pipeline(g_game_render.fill_pipeline_ccw);
     sg_destroy_shader(g_game_render.fill_shader);
     sg_destroy_buffer(g_game_render.fill_vbuf);
     sg_destroy_pipeline(g_game_render.line_pipeline);
@@ -803,7 +814,9 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
 
-    sg_apply_pipeline(g_game_render.fill_pipeline);
+    sg_apply_pipeline(g_backface_cull == 1 ? g_game_render.fill_pipeline_cw
+                    : g_backface_cull == 2 ? g_game_render.fill_pipeline_ccw
+                    :                        g_game_render.fill_pipeline);
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.fill_vbuf,
         .views[0]          = g_game_render.atlas_view,

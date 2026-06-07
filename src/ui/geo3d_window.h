@@ -36,6 +36,10 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     }
     igCheckbox("Test triangle",     &geo->test_triangle);
     { bool wf = g_geo_wireframe != 0; if (igCheckbox("Wireframe overlay", &wf)) g_geo_wireframe = wf; }
+    igText("Backface cull:"); igSameLine();
+    if (igRadioButtonIntPtr("off", &g_backface_cull, 0)) {} igSameLine();
+    if (igRadioButtonIntPtr("CW", &g_backface_cull, 1)) {} igSameLine();
+    if (igRadioButtonIntPtr("CCW", &g_backface_cull, 2)) {}
 
     igSeparator();
     igText("Captured: %d / %d   Lines: %d / %d",
