@@ -238,6 +238,7 @@ static void draw_menu_bar(void) {
         igMenuItemBoolPtr("Break on unknown COP cmd", NULL, (bool*)&g_sharc.break_on_unknown, true);
         igMenuItemBoolPtr("3D viewer",        NULL, &state.show_geo3d,       true);
         if (igMenuItem("Dump 3D captures")) geo3d_log_captures(&state.geo3d);
+        if (igMenuItem("Dump COP stream"))  geo3d_dump_capture_stream();
         igMenuItemBoolPtr("68K sound CPU",    NULL, &state.show_m68k_cpu,    true);
         igMenuItemBoolPtr("68K memory viewer", NULL, &state.show_m68k_mem,   true);
         igMenuItemBoolPtr("Log sound writes", NULL, &g_sound.log_writes,     true);

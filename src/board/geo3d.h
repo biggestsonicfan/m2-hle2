@@ -350,6 +350,16 @@ static int g_cam_rot_only = 0;
 static int g_cam_mode_value = -1;   /* last read; -1 = unknown */
 static int g_cam_auto_rot   = 0;    /* if set: g_cam_rot_only := (cam_mode != 9) */
 
+/* Raw camera eye (0x519E98 xpos,ypos,zpos) for the eye-bake auto-detector. */
+static float g_cam_eye_raw[3] = {0.0f, 0.0f, 0.0f};
+/* Auto eye-baked detection: a scene that emits a base SETPOS ≈ (−eye.x, −eye.y,
+ * eye.z) bakes the camera translation into its geometry (STF intro carnival),
+ * so that frame must render rotation-only.  When set, the scanner detects this
+ * per frame and drives g_cam_rot_only.  Confirmed from the COP stream:
+ * SETPOS [-17.4,-30.6,-7.5] ≈ −eye precedes the carnival objects.
+ * Default ON: improves the carnival/eye-baked attract scenes; toggle off to debug. */
+static int g_cam_auto_baked = 1;
+
 /* Texture UV orientation (dial in live via the geo3d window).  Defaults to the
  * user-observed correction: rotate 90 (swap u/v) + horizontal flip. */
 static bool g_uv_swap   = false;
@@ -498,6 +508,15 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
      * 0x1B803737 selects which slot (pid*16+bone_idx) for the next mesh.
      * Indexed: P1 bone N → tgp_bone[N], P2 bone N → tgp_bone[16+N]. */
     int     scan_active_bslot = -1;
+
+    /* Eye-bake auto-detect: a base SETPOS ≈ (−eye.x, −eye.y, eye.z) means this
+     * frame's geometry is already world−eye (carnival intro) → render rot-only. */
+    int   frame_eye_baked = 0;
+    /* The eye-bake base SETPOS ≈ −raw_eye on ALL axes (raw zpos is positive;
+     * the camera readout shows −z only because cam_z = −zpos). */
+    float eb_x = -g_cam_eye_raw[0], eb_y = -g_cam_eye_raw[1], eb_z = -g_cam_eye_raw[2];
+    bool  eb_valid = (fabsf(g_cam_eye_raw[0]) + fabsf(g_cam_eye_raw[1])
+                      + fabsf(g_cam_eye_raw[2])) > 5.0f;
 
     for (int i = 0; i < total && geo->captured_count < MAX_GEO_MODELS; i++) {
         int idx = (head - total + i + GEO_CAPTURE_SIZE) & (GEO_CAPTURE_SIZE - 1);
@@ -722,6 +741,11 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
                 p[j] = u32_as_float(fv);
             }
             if (all_sane) {
+                /* Eye-bake marker: a SETPOS whose raw args ≈ (−eye.x,−eye.y,eye.z)
+                 * is the base translation that makes subsequent geometry world−eye. */
+                if (eb_valid && fabsf(p[0]-eb_x) < 3.0f && fabsf(p[1]-eb_y) < 3.0f
+                             && fabsf(p[2]-eb_z) < 3.0f)
+                    frame_eye_baked = 1;
                 /* SHARC: T += rot × args (additive, rot-relative offset → world).
                  * scan_rot is column-major [col][row]; result[r] = Σ_c rot[c][r]*p[c]. */
                 float (*r)[3] = scan_rot;
@@ -960,6 +984,11 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
          * set_window (fixes adv_movie_egg phase 2/3/4 missing scissor rect). */
         (void)mesh_ptr_add;
     }
+
+    /* Auto eye-baked: if this frame established a base SETPOS ≈ −eye, its
+     * geometry is world−eye → render rotation-only (no second −eye subtract). */
+    if (g_cam_auto_baked)
+        g_cam_rot_only = frame_eye_baked;
 }
 
 /* ---- J=1.0 index-array polygon decoder ---------------------------------- */
@@ -1352,6 +1381,9 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
     geo->rot_y = g_cam_sign_ry * ((float)yang16 / 65536.0f) * TWO_PI;
     geo->has_game_view = true;
 
+    /* Raw eye for the eye-bake auto-detector (scanner compares base SETPOS to −eye). */
+    g_cam_eye_raw[0] = xpos; g_cam_eye_raw[1] = ypos; g_cam_eye_raw[2] = zpos;
+
     /* cam_mode = camera_struct +0x28 (g13+0x40). Drives the per-scene baking
      * heuristic: cam_mode 9 = fight look-at (world); others = attract (eye-baked). */
     g_cam_mode_value = (int)(mem_read32(bus, cam_addr + 0x28) & 0xFF);
@@ -1392,6 +1424,66 @@ static inline void geo3d_log_captures(const geo3d_state_t *geo) {
     }
     if (geo->captured_count > 16)
         LOG_INFO("  ... %d more", geo->captured_count - 16);
+}
+
+/* ---- Raw COP capture-stream dump (for per-pass view-base analysis) -------- */
+
+/* Walk the current frame's geo_capture ring and write an annotated, decoded
+ * dump (push/pop/identity/matrix/set_pos/scale/ang/bone/window/obj) to
+ * cop_stream_<N>.txt.  N increments each call so consecutive dumps (e.g.
+ * carnival then console) land in separate files for diffing.  Used to find
+ * whether a pass establishes a view-base matrix before its objects. */
+static inline void geo3d_dump_capture_stream(void) {
+    static int dump_n = 0;
+    char path[64];
+    snprintf(path, sizeof(path), "cop_stream_%d.txt", dump_n++);
+    FILE *f = fopen(path, "w");
+    if (!f) { LOG_WARN("cop dump: cannot open %s", path); return; }
+
+    int total = g_cop.geo_capture_count;
+    int head  = g_cop.geo_capture_head;
+    if (total > GEO_CAPTURE_SIZE) total = GEO_CAPTURE_SIZE;
+    fprintf(f, "# COP capture stream: %d words\n", total);
+
+    for (int i = 0; i < total; i++) {
+        int idx = (head - total + i + GEO_CAPTURE_SIZE) & (GEO_CAPTURE_SIZE - 1);
+        uint32_t v = g_cop.geo_capture[idx];
+        #define GC(o) g_cop.geo_capture[(idx + (o)) & (GEO_CAPTURE_SIZE - 1)]
+        #define F(o)  (is_sane_float(GC(o)) ? u32_as_float(GC(o)) : 0.0f)
+
+        if (v == 0x00800101)      { fprintf(f, "%5d  PUSH\n", i); }
+        else if (v == 0x01000202) { fprintf(f, "%5d  POP\n", i); }
+        else if (v == 0x01800303) { fprintf(f, "%5d  IDENTITY\n", i); }
+        else if (v == 0x02000404 || v == 0x05800B0B) {
+            fprintf(f, "%5d  MATRIX(%08X)  R0[%.3f %.3f %.3f] R1[%.3f %.3f %.3f] R2[%.3f %.3f %.3f] T[%.3f %.3f %.3f]\n",
+                    i, v, F(1),F(2),F(3), F(4),F(5),F(6), F(7),F(8),F(9), F(10),F(11),F(12));
+            i += 12;
+        }
+        else if (v == 0x03000606) { fprintf(f, "%5d  SETPOS [%.3f %.3f %.3f]\n", i, F(1),F(2),F(3)); i += 3; }
+        else if (v == 0x03800707) { fprintf(f, "%5d  SCALE  [%.3f %.3f %.3f]\n", i, F(1),F(2),F(3)); i += 3; }
+        else if (v == 0x04000808) { fprintf(f, "%5d  ANG_X  %d\n", i, (int)(int16_t)(GC(1)&0xFFFF)); i += 1; }
+        else if (v == 0x04800909) { fprintf(f, "%5d  ANG_Y  %d\n", i, (int)(int16_t)(GC(1)&0xFFFF)); i += 1; }
+        else if (v == 0x05000A0A) { fprintf(f, "%5d  ANG_Z  %d\n", i, (int)(int16_t)(GC(1)&0xFFFF)); i += 1; }
+        else if (v == 0x1F803F3F) { fprintf(f, "%5d  ANG_XYZ z=%d y=%d x=%d\n", i,
+                                            (int)(int16_t)(GC(1)&0xFFFF),(int)(int16_t)(GC(2)&0xFFFF),(int)(int16_t)(GC(3)&0xFFFF)); i += 3; }
+        else if (v == 0x1B003636) { fprintf(f, "%5d  BONE_LOAD pid=%u slot=%u\n", i, GC(1)&0xFF, (GC(2))/12); i += 2; }
+        else if (v == 0x1B803737) { fprintf(f, "%5d  BONE_SEL  pid=%u bone=%u\n", i, GC(1)&1, (GC(2)&0xFF)/0xC); i += 2; }
+        else if (v == GEO_WIN_SENTINEL) {
+            fprintf(f, "%5d  WINDOW  c0=%08X c1=%08X c2=%08X\n", i, GC(1),GC(2),GC(3)); i += 6;
+        }
+        else if (v == 0x3C007878) {
+            fprintf(f, "%5d  OBJ  mesh=%08X\n", i, GC(5)); i += 8;
+        }
+        else {
+            int na = sharc_args_for_cmd(v);
+            if (na > 0) { fprintf(f, "%5d  cmd %08X (+%d args)\n", i, v, na); i += na; }
+            else        { fprintf(f, "%5d  word %08X\n", i, v); }
+        }
+        #undef GC
+        #undef F
+    }
+    fclose(f);
+    LOG_INFO("cop dump -> %s (%d words)", path, total);
 }
 
 #endif /* GEO3D_H */
