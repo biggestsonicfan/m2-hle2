@@ -490,17 +490,22 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                       oy = m[1][0]*ix + m[1][1]*iy + m[1][2]*niz + m[1][3];
                       oz = m[2][0]*ix + m[2][1]*iy + m[2][2]*iz  + m[2][3];
                   } else {
-                      /* 0x35006A6A: FV PM 0x020715: output = M_rot * (v − T).
-                       * Firmware subtracts slot[9..11]=T from input first, then applies
-                       * the same 3×3 multiply with NO translation re-added.
-                       * z-negation convention matches 0x14802929 (both call 0x02014C). */
+                      /* 0x35006A6A world->model = R^T*(v-T) — the true INVERSE of our
+                       * verified model->world (0x14802929 = R*v+T, with R[i][j]=rot[j][i];
+                       * the matrix-build z-neg and the -iz input cancel to a clean R).
+                       * So the inverse contracts by rot COLUMN with NO z-negation.
+                       * Used by snc_eye_thd_set (head/eye look-at): camera -> head-bone
+                       * local frame -> atan2 look angles. The old code used the SAME
+                       * row contraction as model->world (R*(v-T)) = not the inverse →
+                       * pose-dependent head rotation error.
+                       * EXPERIMENT: branch fix/world2model-transpose. */
                       float rx = ix - g_sharc.pos[0];
                       float ry = iy - g_sharc.pos[1];
                       float rz = iz - g_sharc.pos[2];
-                      float nrz = -rz;
-                      ox = m[0][0]*rx + m[0][1]*ry + m[0][2]*nrz;
-                      oy = m[1][0]*rx + m[1][1]*ry + m[1][2]*nrz;
-                      oz = m[2][0]*rx + m[2][1]*ry + m[2][2]*rz;
+                      float (*r)[3] = g_sharc.rot;
+                      ox = r[0][0]*rx + r[0][1]*ry + r[0][2]*rz;
+                      oy = r[1][0]*rx + r[1][1]*ry + r[1][2]*rz;
+                      oz = r[2][0]*rx + r[2][1]*ry + r[2][2]*rz;
                   }
                 }
                 sharc_push_f(ox); sharc_push_f(oy); sharc_push_f(oz);
