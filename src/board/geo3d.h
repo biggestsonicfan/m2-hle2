@@ -189,6 +189,7 @@ typedef struct {
     float x2, y2, z2,  u2, v2;
     float r, g, b;
     float tx, ty, tw, th;        /* atlas tile rect (pixels); tw<=0 → untextured */
+    float lb, pl;                /* lumabase (lumaram band) + poly_luma (0..1 lighting) */
 } geo3d_tri_t;
 
 typedef struct {
@@ -208,7 +209,8 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
                                       float x1, float y1, float z1, float u1, float v1,
                                       float x2, float y2, float z2, float u2, float v2,
                                       float r,  float g,  float b,
-                                      float tx, float ty, float tw, float th) {
+                                      float tx, float ty, float tw, float th,
+                                      float lb, float pl) {
     if (g_geo3d_tris.count >= GEO3D_MAX_TRIS) return;
     geo3d_tri_t *T = &g_geo3d_tris.tris[g_geo3d_tris.count++];
     T->x0=x0; T->y0=y0; T->z0=z0; T->u0=u0; T->v0=v0;
@@ -216,6 +218,7 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
     T->x2=x2; T->y2=y2; T->z2=z2; T->u2=u2; T->v2=v2;
     T->r=r;   T->g=g;   T->b=b;
     T->tx=tx; T->ty=ty; T->tw=tw; T->th=th;
+    T->lb=lb; T->pl=pl;
 }
 
 /* Backward-compatible: untextured triangle (tw=0 → shader uses flat color). */
@@ -224,7 +227,7 @@ static inline void geo3d_emit_tri(float x0, float y0, float z0,
                                    float x2, float y2, float z2,
                                    float r,  float g,  float b) {
     geo3d_emit_tri_uv(x0,y0,z0,0.0f,0.0f, x1,y1,z1,0.0f,0.0f,
-                      x2,y2,z2,0.0f,0.0f, r,g,b, 0.0f,0.0f,0.0f,0.0f);
+                      x2,y2,z2,0.0f,0.0f, r,g,b, 0.0f,0.0f,0.0f,0.0f, 0.0f,1.0f);
 }
 
 static inline void geo3d_emit_line(float x0, float y0, float z0,
@@ -393,6 +396,9 @@ static int  g_uv_quad_order = 0;
  * Approximate it: per-face geometric normal (cross of transformed edges) · a
  * tunable light dir, modulating the face color.  Tunable live in the 3D window. */
 static int   g_light_enable  = 1;
+/* MAME per-pixel colorxlat luma ramp (lumaram + colorxlat LUTs in the shader).
+ * Default ON; off falls back to flat_color×luma. */
+static int   g_luma_ramp     = 1;
 /* 3D wireframe overlay (the line pass over the solid fills). Default OFF —
  * the lines clutter the shaded fills. */
 static int   g_geo_wireframe = 0;
@@ -1180,13 +1186,16 @@ static inline void geo3d_decode_model(int model_idx,
         /* ---- texture header (tile rect + palette index) ---- */
         float fr = cr, fg = cg, fb = cb;     /* flat color (palette) */
         uint32_t texx = 0, texy = 0, texw = 32, texh = 32, texsheet = 0;
+        uint32_t lumabase = 0;               /* texheader[1] low byte << 7 (lumaram band) */
         bool textured = false;               /* texheader[0] bit14 = textured */
         if (have_mat) {
             uint32_t rec = mat_base + (uint32_t)efi * 8u;
             if ((size_t)rec + 8 <= materials_size) {
                 uint16_t th0 = (uint16_t)materials[rec+0] | ((uint16_t)materials[rec+1]<<8);
+                uint16_t th1 = (uint16_t)materials[rec+2] | ((uint16_t)materials[rec+3]<<8);
                 uint16_t th2 = (uint16_t)materials[rec+4] | ((uint16_t)materials[rec+5]<<8);
                 uint16_t th3 = (uint16_t)materials[rec+6] | ((uint16_t)materials[rec+7]<<8);
+                lumabase = (uint32_t)(th1 & 0xff) << 7;
                 textured = (th0 & 0x4000) != 0;
                 texw = 32u << (th0 & 0x7);
                 texh = 32u << ((th0 >> 3) & 0x7);
@@ -1312,10 +1321,12 @@ static inline void geo3d_decode_model(int model_idx,
 
         bool is_tri = tri_cnt || !has_C || !has_D;
 
-        /* Flat shading: modulate the face color by |normal·light|*diffuse+ambient,
-         * approximating MAME's per-polygon luminance.  Normal = cross of the
-         * transformed edges (two-sided via |dot|).  fr/fg/fb are recomputed per
-         * face from the palette, so modulating them in place is safe. */
+        /* Per-face luminance (poly_luma) = |normal·light|*diffuse + ambient,
+         * approximating MAME's per-polygon lighting (model2_v.cpp geo_parse).
+         * NOT folded into the color — it's passed through so the colorxlat luma
+         * ramp can use it (luma6 = lumaram[lumabase+texel]*poly_luma/256).
+         * Normal = cross of the transformed edges (two-sided via |dot|). */
+        float pl = 1.0f;
         if (g_light_enable && has_C) {
             float e1x=B.x-A.x, e1y=B.y-A.y, e1z=B.z-A.z;
             float e2x=C.x-A.x, e2y=C.y-A.y, e2z=C.z-A.z;
@@ -1329,7 +1340,7 @@ static inline void geo3d_decode_model(int model_idx,
                 shade += g_light_diffuse*d;
             }
             if (shade>1.0f) shade=1.0f;
-            fr*=shade; fg*=shade; fb*=shade;
+            pl = shade;
         }
 
         if (is_tri) {
@@ -1339,7 +1350,7 @@ static inline void geo3d_decode_model(int model_idx,
                 geo3d_emit_line(C.x,C.y,C.z, A.x,A.y,A.z, fr,fg,fb);
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
             } else {
                 geo3d_emit_line(A.x,A.y,A.z, B.x,B.y,B.z, fr,fg,fb);
             }
@@ -1353,10 +1364,10 @@ static inline void geo3d_decode_model(int model_idx,
             if (has_D) {
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
-                                  D.x,D.y,D.z, uvu[3],uvv[3], fr,fg,fb, ftx,fty,ftw,fth);
+                                  D.x,D.y,D.z, uvu[3],uvv[3], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   D.x,D.y,D.z, uvu[3],uvv[3],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
             }
         }
         efi++;   /* this face was emitted → consumes one material record */

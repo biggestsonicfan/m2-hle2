@@ -414,6 +414,7 @@ static void frame(void) {
                               VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
         /* Decode both 4-bit luma texture banks → GPU atlas for textured fills. */
         game_render_upload_atlas(state.bus.texram0, state.bus.texram1, TEXRAM0_SIZE);
+        game_render_upload_luts(state.bus.luma, state.bus.colorxlat);
         /* Layer order: back colour → background tiles → 3D scene → foreground/HUD. */
         game_render_draw_game(state.video.back_view, ox, oy, w, h);
         game_render_draw_game(state.video.bg_view,   ox, oy, w, h);

@@ -42,6 +42,7 @@ typedef struct {
     float r, g, b, a;
     float u, v;
     float tx, ty, tw, th;
+    float lb, pl;               /* lumabase + poly_luma for the colorxlat luma ramp */
 } game_render_tex_vertex_t;
 
 typedef struct {
@@ -69,6 +70,14 @@ typedef struct {
     sg_image    atlas_image;
     sg_view     atlas_view;
     sg_sampler  atlas_sampler;
+
+    /* Live luma-ramp LUTs (re-uploaded each frame from the bus): lumaram
+     * (0x11400000, 256×512 R8) + colorxlat (0x01810000, 256×192 R8). */
+    sg_image    luma_image;
+    sg_view     luma_view;
+    sg_image    cxlat_image;
+    sg_view     cxlat_view;
+    sg_sampler  lut_sampler;
 
     /* CPU scratch for line uploads — 2 verts per geo3d_line_t */
     game_render_line_vertex_t line_verts[GEO3D_MAX_LINES * 2];
@@ -160,55 +169,100 @@ static const char *game_render_fill_vs_glsl =
     "layout(location=1) in vec4 a_color;\n"
     "layout(location=2) in vec2 a_uv;\n"
     "layout(location=3) in vec4 a_tile;\n"
+    "layout(location=4) in vec2 a_lbpl;\n"
     "out vec4 color;\n"
     "out vec2 uv;\n"
     "out vec4 tile;\n"
+    "out vec2 lbpl;\n"
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
-    "  color = a_color; uv = a_uv; tile = a_tile;\n"
+    "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl;\n"
     "}\n";
 
+/* MAME luma ramp: texel(4-bit) → lumaram[2*lumabase + texel*16] (even-byte
+ * layout) → luma6 = min(lram*poly_luma/256, 63) → colorxlat[ch][(c5<<8)+luma6]
+ * → gamma max(c-64,0)*255/191.  lumaram=256x512, colorxlat=256x192 (3 ch @
+ * byte 0/0x4000/0x8000).  lb<0 falls back to the old flat_color*luma path. */
 static const char *game_render_fill_fs_glsl =
     "#version 410\n"
     "uniform sampler2D atlas_smp;\n"
+    "uniform sampler2D luma_smp;\n"
+    "uniform sampler2D cxlat_smp;\n"
     "in vec4 color;\n"
     "in vec2 uv;\n"
     "in vec4 tile;\n"
+    "in vec2 lbpl;\n"
     "out vec4 frag_color;\n"
     "void main() {\n"
     "  vec3 rgb = color.rgb;\n"
-    "  if (tile.z > 0.0) {\n"                         /* tw>0 → textured */
-    "    vec2 w = uv - tile.zw * floor(uv / tile.zw);\n"   /* per-pixel wrap into tile */
+    "  if (tile.z > 0.0) {\n"
+    "    vec2 w = uv - tile.zw * floor(uv / tile.zw);\n"
     "    vec2 auv = (tile.xy + w) / vec2(2048.0, 2048.0);\n"
-    "    float luma = texture(atlas_smp, auv).r;\n"
-    "    if (luma > 0.0) rgb = clamp(color.rgb * luma * 2.0, 0.0, 1.0);\n"
+    "    float al = texture(atlas_smp, auv).r;\n"
+    "    if (lbpl.x < 0.0) {\n"
+    "      if (al > 0.0) rgb = clamp(color.rgb * al * 2.0, 0.0, 1.0);\n"
+    "    } else {\n"
+    "      int texel4 = int(al * 15.0 + 0.5);\n"
+    "      int lbyte = 2 * int(lbpl.x) + texel4 * 16;\n"
+    "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
+    "      float poly = clamp(lbpl.y, 0.0, 1.0) * 255.0;\n"
+    "      int li = int(min(lram * poly / 256.0, 63.0) + 0.5);\n"
+    "      int r5 = int(color.r*31.0+0.5), g5 = int(color.g*31.0+0.5), b5 = int(color.b*31.0+0.5);\n"
+    "      int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
+    "      float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
+    "      float cg = texelFetch(cxlat_smp, ivec2(bg & 255, bg >> 8), 0).r * 255.0;\n"
+    "      float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
+    "      vec3 c = max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0);\n"
+    "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
+    "    }\n"
+    "  } else {\n"
+    "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
     "}\n";
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
-    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; };\n"
+    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
-    "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile;\n"
+    "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl;\n"
     "  return outp;\n"
     "}\n";
 
 static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> atlas : register(t0);\n"
+    "Texture2D<float4> lumat : register(t1);\n"
+    "Texture2D<float4> cxlat : register(t2);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
     "float4 main(fs_in inp) : SV_Target0 {\n"
     "  float3 rgb = inp.color.rgb;\n"
     "  if (inp.tile.z > 0.0) {\n"
     "    float2 w = inp.uv - inp.tile.zw * floor(inp.uv / inp.tile.zw);\n"
     "    float2 auv = (inp.tile.xy + w) / float2(2048.0, 2048.0);\n"
-    "    float luma = atlas.Sample(smp, auv).r;\n"
-    "    if (luma > 0.0) rgb = clamp(inp.color.rgb * luma * 2.0, 0.0, 1.0);\n"
+    "    float al = atlas.Sample(smp, auv).r;\n"
+    "    if (inp.lbpl.x < 0.0) {\n"
+    "      if (al > 0.0) rgb = clamp(inp.color.rgb * al * 2.0, 0.0, 1.0);\n"
+    "    } else {\n"
+    "      int texel4 = (int)(al * 15.0 + 0.5);\n"
+    "      int lbyte = 2 * (int)inp.lbpl.x + texel4 * 16;\n"
+    "      float lram = lumat.Load(int3(lbyte & 255, lbyte >> 8, 0)).r * 255.0;\n"
+    "      float poly = clamp(inp.lbpl.y, 0.0, 1.0) * 255.0;\n"
+    "      int li = (int)(min(lram * poly / 256.0, 63.0) + 0.5);\n"
+    "      int r5 = (int)(inp.color.r*31.0+0.5), g5 = (int)(inp.color.g*31.0+0.5), b5 = (int)(inp.color.b*31.0+0.5);\n"
+    "      int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
+    "      float cr = cxlat.Load(int3(br & 255, br >> 8, 0)).r * 255.0;\n"
+    "      float cg = cxlat.Load(int3(bg & 255, bg >> 8, 0)).r * 255.0;\n"
+    "      float cb = cxlat.Load(int3(bb & 255, bb >> 8, 0)).r * 255.0;\n"
+    "      float3 c = max(float3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0);\n"
+    "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
+    "    }\n"
+    "  } else {\n"
+    "    rgb = inp.color.rgb * clamp(inp.lbpl.y, 0.0, 1.0);\n"
     "  }\n"
     "  return float4(rgb, 1.0);\n"
     "}\n";
@@ -374,6 +428,7 @@ static inline void game_render_init(void) {
         d.attrs[1].hlsl_sem_name  = "COLOR";    d.attrs[1].base_type = SG_SHADERATTRBASETYPE_FLOAT;
         d.attrs[2].hlsl_sem_name  = "TEXCOORD"; d.attrs[2].hlsl_sem_index = 0; d.attrs[2].base_type = SG_SHADERATTRBASETYPE_FLOAT;
         d.attrs[3].hlsl_sem_name  = "TEXCOORD"; d.attrs[3].hlsl_sem_index = 1; d.attrs[3].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+        d.attrs[4].hlsl_sem_name  = "TEXCOORD"; d.attrs[4].hlsl_sem_index = 2; d.attrs[4].base_type = SG_SHADERATTRBASETYPE_FLOAT;
         d.uniform_blocks[0].stage                 = SG_SHADERSTAGE_VERTEX;
         d.uniform_blocks[0].size                  = sizeof(game_render_vs_params_t);
         d.uniform_blocks[0].hlsl_register_b_n     = 0;
@@ -397,6 +452,27 @@ static inline void game_render_init(void) {
         d.texture_sampler_pairs[0].view_slot    = 0;
         d.texture_sampler_pairs[0].sampler_slot = 0;
         d.texture_sampler_pairs[0].glsl_name    = "atlas_smp";
+        /* Luma-ramp LUTs: lumaram (t1) + colorxlat (t2), integer-fetched. */
+        d.views[1].texture.stage              = SG_SHADERSTAGE_FRAGMENT;
+        d.views[1].texture.image_type         = SG_IMAGETYPE_2D;
+        d.views[1].texture.sample_type        = SG_IMAGESAMPLETYPE_FLOAT;
+        d.views[1].texture.hlsl_register_t_n  = 1;
+        d.views[1].texture.msl_texture_n      = 1;
+        d.views[1].texture.wgsl_group1_binding_n = 2;
+        d.views[2].texture.stage              = SG_SHADERSTAGE_FRAGMENT;
+        d.views[2].texture.image_type         = SG_IMAGETYPE_2D;
+        d.views[2].texture.sample_type        = SG_IMAGESAMPLETYPE_FLOAT;
+        d.views[2].texture.hlsl_register_t_n  = 2;
+        d.views[2].texture.msl_texture_n      = 2;
+        d.views[2].texture.wgsl_group1_binding_n = 3;
+        d.texture_sampler_pairs[1].stage        = SG_SHADERSTAGE_FRAGMENT;
+        d.texture_sampler_pairs[1].view_slot    = 1;
+        d.texture_sampler_pairs[1].sampler_slot = 0;
+        d.texture_sampler_pairs[1].glsl_name    = "luma_smp";
+        d.texture_sampler_pairs[2].stage        = SG_SHADERSTAGE_FRAGMENT;
+        d.texture_sampler_pairs[2].view_slot    = 2;
+        d.texture_sampler_pairs[2].sampler_slot = 0;
+        d.texture_sampler_pairs[2].glsl_name    = "cxlat_smp";
         d.label = "game-render-fill-shader";
         if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
             d.vertex_func.source   = game_render_fill_vs_glsl;
@@ -422,6 +498,8 @@ static inline void game_render_init(void) {
         p.layout.attrs[2].offset   = offsetof(game_render_tex_vertex_t, u);
         p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
         p.layout.attrs[3].offset   = offsetof(game_render_tex_vertex_t, tx);
+        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT2;
+        p.layout.attrs[4].offset   = offsetof(game_render_tex_vertex_t, lb);
         p.layout.buffers[0].stride = sizeof(game_render_tex_vertex_t);
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
         p.depth.write_enabled      = true;
@@ -445,6 +523,22 @@ static inline void game_render_init(void) {
         .label = "geo3d-atlas-sampler",
     });
 
+    /* Luma-ramp LUTs: lumaram (0x20000 = 256×512) + colorxlat (0xC000 = 256×192). */
+    g_game_render.luma_image = sg_make_image(&(sg_image_desc){
+        .width = 256, .height = (int)(LUMA_SIZE / 256), .pixel_format = SG_PIXELFORMAT_R8,
+        .usage = { .stream_update = true }, .label = "geo3d-lumaram" });
+    g_game_render.luma_view = sg_make_view(&(sg_view_desc){
+        .texture.image = g_game_render.luma_image, .label = "geo3d-lumaram-view" });
+    g_game_render.cxlat_image = sg_make_image(&(sg_image_desc){
+        .width = 256, .height = (int)(COLORXLAT_SIZE / 256), .pixel_format = SG_PIXELFORMAT_R8,
+        .usage = { .stream_update = true }, .label = "geo3d-colorxlat" });
+    g_game_render.cxlat_view = sg_make_view(&(sg_view_desc){
+        .texture.image = g_game_render.cxlat_image, .label = "geo3d-colorxlat-view" });
+    g_game_render.lut_sampler = sg_make_sampler(&(sg_sampler_desc){
+        .min_filter = SG_FILTER_NEAREST, .mag_filter = SG_FILTER_NEAREST,
+        .wrap_u = SG_WRAP_CLAMP_TO_EDGE, .wrap_v = SG_WRAP_CLAMP_TO_EDGE,
+        .label = "geo3d-lut-sampler" });
+
     g_game_render.initialized = true;
     LOG_INFO("game_render_init: complete");
 }
@@ -454,6 +548,11 @@ static inline void game_render_shutdown(void) {
     sg_destroy_sampler(g_game_render.atlas_sampler);
     sg_destroy_view(g_game_render.atlas_view);
     sg_destroy_image(g_game_render.atlas_image);
+    sg_destroy_sampler(g_game_render.lut_sampler);
+    sg_destroy_view(g_game_render.luma_view);
+    sg_destroy_image(g_game_render.luma_image);
+    sg_destroy_view(g_game_render.cxlat_view);
+    sg_destroy_image(g_game_render.cxlat_image);
     sg_destroy_pipeline(g_game_render.fill_pipeline);
     sg_destroy_shader(g_game_render.fill_shader);
     sg_destroy_buffer(g_game_render.fill_vbuf);
@@ -571,6 +670,19 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
     });
 }
 
+/* Upload the live lumaram + colorxlat tables (raw bus bytes) to the LUT
+ * textures the fill shader integer-fetches for the MAME luma ramp.  Cheap
+ * (~180 KB/frame); call once per frame before drawing fills. */
+static inline void game_render_upload_luts(const uint8_t *luma, const uint8_t *colorxlat) {
+    if (!g_game_render.initialized) return;
+    if (luma)
+        sg_update_image(g_game_render.luma_image, &(sg_image_data){
+            .mip_levels[0] = { .ptr = luma, .size = LUMA_SIZE } });
+    if (colorxlat)
+        sg_update_image(g_game_render.cxlat_image, &(sg_image_data){
+            .mip_levels[0] = { .ptr = colorxlat, .size = COLORXLAT_SIZE } });
+}
+
 /* ---- Per-frame draw ------------------------------------------------------ */
 
 /*
@@ -667,8 +779,10 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
         v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].r=T->r; v[0].g=T->g; v[0].b=T->b; v[0].a=1.f; v[0].u=T->u0; v[0].v=T->v0;
         v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].r=T->r; v[1].g=T->g; v[1].b=T->b; v[1].a=1.f; v[1].u=T->u1; v[1].v=T->v1;
         v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].r=T->r; v[2].g=T->g; v[2].b=T->b; v[2].a=1.f; v[2].u=T->u2; v[2].v=T->v2;
+        float lb = g_luma_ramp ? T->lb : -1.0f;   /* -1 → old flat_color×luma path */
         for (int _k = 0; _k < 3; _k++) {
             v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
+            v[_k].lb=lb;    v[_k].pl=T->pl;
         }
     }
     int vcount = n * 3;
@@ -693,6 +807,8 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.fill_vbuf,
         .views[0]          = g_game_render.atlas_view,
+        .views[1]          = g_game_render.luma_view,
+        .views[2]          = g_game_render.cxlat_view,
         .samplers[0]       = g_game_render.atlas_sampler,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });

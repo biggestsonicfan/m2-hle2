@@ -179,6 +179,7 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
 
     igSeparator();
     igText("Flat shading (definition):");
+    { bool lr = g_luma_ramp != 0; if (igCheckbox("MAME luma ramp (colorxlat)", &lr)) g_luma_ramp = lr; }
     { bool le = g_light_enable != 0; if (igCheckbox("enable lighting", &le)) g_light_enable = le; }
     igDragFloatEx("light X", &g_light_dir[0], 0.05f, -2.0f, 2.0f, "%.2f", 0);
     igDragFloatEx("light Y", &g_light_dir[1], 0.05f, -2.0f, 2.0f, "%.2f", 0);
