@@ -151,6 +151,9 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
         }
         bool ro = g_cam_rot_only != 0;
         if (igCheckbox("rotation only (eye baked)", &ro)) g_cam_rot_only = ro;
+        igText("cam_mode = %d  (9=fight look-at, 0=attract movie)", g_cam_mode_value);
+        bool ar = g_cam_auto_rot != 0;
+        if (igCheckbox("auto rot-only when cam_mode != 9", &ar)) g_cam_auto_rot = ar;
     }
 
     igSeparator();

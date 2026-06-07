@@ -343,6 +343,13 @@ static int g_cam_log = 0;
  * set, the view is R·p, correct for already-eye-baked geometry. */
 static int g_cam_rot_only = 0;
 
+/* cam_mode (camera struct +0x28; STF 0x519EC0 = g13+0x40). The fight's camera_init
+ * sets cam_mode=9 (look-at, world-space geometry); ADV_MOVIE attract scenes set
+ * cam_mode=0 (scripted, candidate eye-baked). Auto-select rotation-only when
+ * cam_mode != 9 to test cam_mode as the per-scene baking discriminator. */
+static int g_cam_mode_value = -1;   /* last read; -1 = unknown */
+static int g_cam_auto_rot   = 0;    /* if set: g_cam_rot_only := (cam_mode != 9) */
+
 /* Texture UV orientation (dial in live via the geo3d window).  Defaults to the
  * user-observed correction: rotate 90 (swap u/v) + horizontal flip. */
 static bool g_uv_swap   = false;
@@ -1344,6 +1351,12 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
     geo->rot_x = g_cam_sign_rx * ((float)xang16 / 65536.0f) * TWO_PI;
     geo->rot_y = g_cam_sign_ry * ((float)yang16 / 65536.0f) * TWO_PI;
     geo->has_game_view = true;
+
+    /* cam_mode = camera_struct +0x28 (g13+0x40). Drives the per-scene baking
+     * heuristic: cam_mode 9 = fight look-at (world); others = attract (eye-baked). */
+    g_cam_mode_value = (int)(mem_read32(bus, cam_addr + 0x28) & 0xFF);
+    if (g_cam_auto_rot)
+        g_cam_rot_only = (g_cam_mode_value != 9) ? 1 : 0;
 
     /* Debug: dump the raw camera struct per game frame for MAME comparison
      * (MAME = ground truth). Keyed by the STF frame counter so the two
