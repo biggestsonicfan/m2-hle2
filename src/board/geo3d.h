@@ -334,7 +334,7 @@ static float g_cam_sign_x  =  1.0f;
 static float g_cam_sign_y  =  1.0f;
 static float g_cam_sign_z  = -1.0f;  /* cam_z = -zpos */
 static float g_cam_sign_rx =  1.0f;  /* pitch = +xang */
-static float g_cam_sign_ry = -1.0f;  /* yaw   = -yang */
+static float g_cam_sign_ry =  1.0f;  /* yaw   = +yang (neg yaw off by default) */
 
 /* Debug: dump the RAW camera struct (eye + angle word) once per game frame to
  * cam_ours.csv, keyed by the STF frame counter (0x500020). Attract is
@@ -393,6 +393,9 @@ static int  g_uv_quad_order = 0;
  * Approximate it: per-face geometric normal (cross of transformed edges) · a
  * tunable light dir, modulating the face color.  Tunable live in the 3D window. */
 static int   g_light_enable  = 1;
+/* 3D wireframe overlay (the line pass over the solid fills). Default OFF —
+ * the lines clutter the shaded fills. */
+static int   g_geo_wireframe = 0;
 static float g_light_dir[3]  = {0.3f, 0.5f, 1.0f};
 static float g_light_ambient = 0.45f;
 static float g_light_diffuse = 0.55f;

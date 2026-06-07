@@ -608,7 +608,7 @@ static inline void game_render_draw_lines(float cam_x, float cam_y, float cam_z,
                                            float rot_y, float rot_x, float fov_deg,
                                            float aspect_override) {
     if (!g_game_render.initialized) return;
-    if (g_geo3d_lines.count <= 0) return;
+    if (!g_geo_wireframe || g_geo3d_lines.count <= 0) return;
 
     /* Pack the line buffer into the GPU vertex format. */
     int n = g_geo3d_lines.count;

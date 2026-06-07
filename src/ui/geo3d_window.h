@@ -35,6 +35,7 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
         igPopStyleColor();
     }
     igCheckbox("Test triangle",     &geo->test_triangle);
+    { bool wf = g_geo_wireframe != 0; if (igCheckbox("Wireframe overlay", &wf)) g_geo_wireframe = wf; }
 
     igSeparator();
     igText("Captured: %d / %d   Lines: %d / %d",
@@ -147,7 +148,7 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
         if (igCheckbox("neg yaw",    &nry)) g_cam_sign_ry = nry ? -1.0f : 1.0f;
         if (igButton("Reset convention")) {
             g_cam_sign_x = 1.0f; g_cam_sign_y = 1.0f; g_cam_sign_z = -1.0f;
-            g_cam_sign_rx = 1.0f; g_cam_sign_ry = -1.0f;
+            g_cam_sign_rx = 1.0f; g_cam_sign_ry = 1.0f;
         }
         bool ro = g_cam_rot_only != 0;
         if (igCheckbox("rotation only (eye baked)", &ro)) g_cam_rot_only = ro;
