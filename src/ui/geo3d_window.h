@@ -181,6 +181,8 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     igCheckbox("swap u/v (rotate 90)", &g_uv_swap);
     igCheckbox("flip u (horizontal)",  &g_uv_flip_u);
     igCheckbox("flip v (vertical)",    &g_uv_flip_v);
+    { bool qo = g_uv_quad_order != 0;
+      if (igCheckbox("quad UV order A,B,C,D (vs A,B,D,C)", &qo)) g_uv_quad_order = qo; }
     igText("Texture bank:");
     igRadioButtonIntPtr("auto (bit12)",  &g_uv_bank_mode, 0);
     igRadioButtonIntPtr("force sheet 0", &g_uv_bank_mode, 1);

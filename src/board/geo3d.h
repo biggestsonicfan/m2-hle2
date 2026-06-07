@@ -371,11 +371,15 @@ static int g_geo_windows_enabled = 1;
  * correctly) while keeping window support. Experimental A/B; default OFF. */
 static int g_geo_subwin_game_cam = 0;
 
-/* Texture UV orientation (dial in live via the geo3d window).  Defaults to the
- * user-observed correction: rotate 90 (swap u/v) + horizontal flip. */
+/* Texture UV orientation (dial in live via the geo3d window).  User-confirmed
+ * correct orientation on STF geo models = flip u + flip v (no swap). */
 static bool g_uv_swap   = false;
-static bool g_uv_flip_u = false;
-static bool g_uv_flip_v = false;
+static bool g_uv_flip_u = true;
+static bool g_uv_flip_v = true;
+/* Quad UV→vertex order: 0 = stream maps to [A,B,D,C] (slots {0,1,3,2}); 1 =
+ * [A,B,C,D] ({0,1,2,3}). Wrong order swaps the C/D corners → scrambled texture
+ * that swap/flip can't fix. Dial live to un-scramble. */
+static int  g_uv_quad_order = 0;
 /* Texture bank override: 0=auto (texsheet bit12), 1=force sheet0, 2=force sheet1,
  * 3=swap (invert the bit12 selection). */
 static int  g_uv_bank_mode = 0;
@@ -1179,9 +1183,11 @@ static inline void geo3d_decode_model(int model_idx,
         float uvu[4] = {-1,-1,-1,-1}, uvv[4] = {-1,-1,-1,-1};
         uint16_t cap_pu = 0, cap_pv = 0;
         if (have_uv) {
-            static const int quad_slot[4] = {0,1,3,2};  /* stream k → A,B,D,C */
-            static const int tri_slot[3]  = {0,1,2};    /* stream k → A,B,C   */
-            const int *slot = tri_cnt ? tri_slot : quad_slot;
+            static const int quad_slot_abdc[4] = {0,1,3,2};  /* stream k → A,B,D,C */
+            static const int quad_slot_abcd[4] = {0,1,2,3};  /* stream k → A,B,C,D */
+            static const int tri_slot[3]  = {0,1,2};         /* stream k → A,B,C   */
+            const int *slot = tri_cnt ? tri_slot
+                            : (g_uv_quad_order ? quad_slot_abcd : quad_slot_abdc);
             for (int k = 0; k < nv; k++) {
                 uint32_t b = (uv_word + (uint32_t)k * 2u) * 2u;  /* byte offset */
                 if ((size_t)b + 4 > materials_size) break;
