@@ -892,57 +892,11 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
             int sw = (int)cm->clip_win_w * w / VIDEO_WIDTH;
             int sh = (int)cm->clip_win_h * h / VIDEO_HEIGHT;
             float cell_aspect = (sh > 0) ? (float)sw / (float)sh : 1.0f;
-            /* Viewport maps NDC (-1..1) to this sub-window — objects project
-             * relative to the sub-window center rather than the full screen. */
+            /* Viewport + scissor the sub-window; render it with the game camera. */
             sg_apply_viewport(sx, sy, sw, sh, true);
             sg_apply_scissor_rect(sx, sy, sw, sh, true);
-            /* All clip-window scenes (portrait chars, adv_movie rooms, Egg Robo
-             * sequences) are fixed-view: the i960 encodes positions in world
-             * space relative to a neutral camera.  The fighting camera tracks
-             * players that don't exist in these scenes and produces wrong
-             * geometry.  clip_win_neutral_cam distinguishes portrait aspect
-             * but both branches use the neutral camera.
-             * For portrait cells (each cell = one single-model character), aim the
-             * neutral camera at the character's own Y so it sits centered in the cell.
-             * The revealed-state set_pos uses y=-0.8 (ndc_y ~ -0.35 → low, spilling out
-             * the bottom); matching the camera Y re-centers it (intro state y=0 is
-             * unaffected).  Scoped to portrait cells so multi-part scenes (Eggman lab)
-             * keep the origin camera.
-             * g_portrait_cam_y_frac scales how much of the char Y the camera
-             * follows; g_portrait_fov_deg (if >0) overrides the FOV to zoom in. */
-            float pcam_y = 0.0f;
-            if (cm->clip_win_neutral_cam) {
-                pcam_y = cm->matrix[7] * g_portrait_cam_y_frac;
-                /* Per-row snap: top row sits low in its cell, bottom row high —
-                 * both pulled toward the screen-center label band where the
-                 * circles cluster.  Camera up (+y) renders the model lower. */
-                pcam_y += (cm->clip_win_y < VIDEO_HEIGHT / 2)
-                        ? g_portrait_row_shift : -g_portrait_row_shift;
-            }
-            float pfov = fov_deg;
-            if (cm->clip_win_neutral_cam) {
-                if (g_portrait_fov_deg > 0.0f) {
-                    pfov = g_portrait_fov_deg;          /* manual dial override */
-                } else {
-                    /* Auto: the real hardware renders the full frame at the global
-                     * FOV and the window crops a slice.  The cell covers clip_win_h
-                     * of the VIDEO_HEIGHT-tall frame, so its vertical angular extent
-                     * is 2*atan(tan(fov/2) * clip_win_h / VIDEO_HEIGHT).  A 136-tall
-                     * cell at fov 60 → ~23 deg. */
-                    float t = tanf(fov_deg * 0.5f * 3.14159265f / 180.0f)
-                            * (float)cm->clip_win_h / (float)VIDEO_HEIGHT;
-                    pfov = 2.0f * atanf(t) * 180.0f / 3.14159265f;
-                }
-            }
-            if (!cm->clip_win_neutral_cam && g_geo_subwin_game_cam) {
-                /* Non-portrait sub-window (e.g. Eggman stage): use the game camera
-                 * within the scissor so it rotates, instead of the neutral cam. */
-                game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
-                game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
-            } else {
-                game_render_draw_fills(0.0f, pcam_y, 0.0f, 0.0f, 0.0f, pfov, cell_aspect);
-                game_render_draw_lines(0.0f, pcam_y, 0.0f, 0.0f, 0.0f, pfov, cell_aspect);
-            }
+            game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
+            game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
         } else {
             sg_apply_viewport(ox, oy, w, h, true);
             sg_apply_scissor_rect(ox, oy, w, h, true);

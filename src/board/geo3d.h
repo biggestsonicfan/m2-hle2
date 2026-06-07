@@ -140,11 +140,8 @@ typedef struct {
     float    color[3];
     /* Clip window (screen-space, game coords 0–495 × 0–383).
      * Set when a GEO_WIN_SENTINEL precedes this model in the capture stream.
-     * clip_win_x/y are the top-left origin of the window in game pixels.
-     * clip_win_neutral_cam: true → portrait (neutral camera);
-     *                       false → sub-window (game camera). */
+     * clip_win_x/y are the top-left origin of the window in game pixels. */
     bool     has_clip_win;
-    bool     clip_win_neutral_cam;
     /* True when this model was placed via the bone path (scan_active_bslot, i.e.
      * a fighter rob).  Bone geometry is in WORLD space; non-bone fight-stage
      * geometry comes through the FIFO already camera-relative (view space). */
@@ -319,14 +316,6 @@ static geo3d_lookup_t g_geo3d_lookup = {0};
  * until the proper stage-floor source is wired. */
 static float g_geo_shadow_floor_y = 0.0f;
 
-/* Portrait clip-window (chaos-portrait attract) framing tunables, dialed in via
- * the MCP bridge ("set_portrait_fov" / "set_portrait_cam_y").
- *   g_portrait_fov_deg : 0 = use the global FOV; >0 = override (smaller = zoom in).
- *   g_portrait_cam_y_frac : fraction of the character's own Y the neutral camera
- *     follows (1.0 = center on the char; 0.0 = origin camera). */
-static float g_portrait_fov_deg    = 0.0f;  /* 0 = auto-derive from cell height (~23 deg) */
-static float g_portrait_cam_y_frac = 0.0f;  /* 0 = no vertical centering (origin camera) */
-static float g_portrait_row_shift  = 0.5f;  /* push top row down / bottom row up (toward screen center) */
 
 /* Game-camera convention signs (dial live via the 3D window for the attract
  * "camera moving in wrong directions" bug). Multipliers applied in
@@ -370,15 +359,10 @@ static float g_cam_eye_raw[3] = {0.0f, 0.0f, 0.0f};
 static int g_cam_auto_baked = 1;
 
 /* Clip-window ("set_window") support. ON: GEO_WIN_SENTINEL sets per-model clip
- * rects + the slow per-window render path (portrait neutral cams, sub-windows).
+ * rects + the slow per-window render path (scissor + game camera per window).
  * OFF: ignore windows entirely → every model renders full-screen through the
  * single game camera (fast path). Debug A/B for what the windows are doing. */
 static int g_geo_windows_enabled = 1;
-
-/* Non-portrait sub-windows: use the game camera (rotation) within the scissor
- * instead of the neutral camera. Fixes the Eggman-scene stage part (rotates
- * correctly) while keeping window support. Experimental A/B; default OFF. */
-static int g_geo_subwin_game_cam = 0;
 
 /* Texture UV orientation (dial in live via the geo3d window).  User-confirmed
  * correct orientation on STF geo models = flip u + flip v (no swap). */
@@ -539,11 +523,8 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
     int   scan_stk_top = 0;
 
     /* Clip window from GEO_WIN_SENTINEL — carries the clip rect for the
-     * next draw call.  x/y/w/h are in game pixels (0–495, 0–383).
-     * clip_win_is_portrait=true → portrait cell (neutral camera);
-     * clip_win_is_portrait=false → sub-window (game camera). */
+     * next draw call.  x/y/w/h are in game pixels (0–495, 0–383). */
     bool   have_clip_win      = false;
-    bool   clip_win_is_portrait = false;
     int16_t clip_win_x = 0, clip_win_y = 0, clip_win_w = 0, clip_win_h = 0;
 
     /* Bone transform state (0x35806B6B + 0x1B803737).
@@ -685,62 +666,27 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
          *   words[3..5] = same as word[2]
          * All coordinates in game pixels (0–495 x, 0–383 y).
          *
-         * If the center (cx,cy) matches one of the 8 STF chaos portrait cell
-         * centers (off_9781C), apply a portrait-cell viewport + neutral camera.
-         * Otherwise apply the rect as a sub-window viewport + game camera. */
+         * Apply the rect as a sub-window viewport + scissor (game camera). */
         if (val == GEO_WIN_SENTINEL && i + 6 < total) {
             if (!g_geo_windows_enabled) { i += 6; continue; }  /* ignore windows (full-screen A/B) */
             /* Decode corners from FIFO words 0 and 1. */
             uint32_t fw0 = g_cop.geo_capture[(idx + 1) & (GEO_CAPTURE_SIZE-1)];
             uint32_t fw1 = g_cop.geo_capture[(idx + 2) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t fw2 = g_cop.geo_capture[(idx + 3) & (GEO_CAPTURE_SIZE-1)];
             int16_t xa   = (int16_t)(fw0 >> 16);
             int16_t ya   = (int16_t)(511 - (int16_t)(fw0 & 0xFFFF));
             int16_t xb   = (int16_t)(fw1 >> 16);
             int16_t yb   = (int16_t)(511 - (int16_t)(fw1 & 0xFFFF));
-            int16_t x_cx = (int16_t)(fw2 >> 16);
-            int16_t y_cy = (int16_t)(511 - (int16_t)(fw2 & 0xFFFF));
             /* Full rect from corners. */
             int16_t wl = (xa < xb) ? xa : xb;  /* left   */
             int16_t wr = (xa > xb) ? xa : xb;  /* right  */
             int16_t wt = (ya < yb) ? ya : yb;  /* top    */
             int16_t wb = (ya > yb) ? ya : yb;  /* bottom */
-            /* Portrait centers (STF off_9781C). */
-            static const int16_t px[4] = {60, 184, 308, 432};
-            static const int16_t py[2] = {124, 260};
-            bool is_portrait = false;
-            for (int _xi = 0; _xi < 4 && !is_portrait; _xi++)
-                for (int _yi = 0; _yi < 2 && !is_portrait; _yi++)
-                    if (x_cx == px[_xi] && y_cy == py[_yi]) is_portrait = true;
-            if (is_portrait) {
-                /* Use the ACTUAL window rect — it is centered on the real portrait
-                 * cell (py = 124 / 260), not the snapped VIDEO/4 x VIDEO/2 grid
-                 * whose centers (96 / 288) put the top row ~28px high and forced
-                 * an oversized 124x192 viewport (character looked small/far).
-                 * Fall back to the snapped grid only if the rect is degenerate. */
-                if (wr > wl && wb > wt) {
-                    clip_win_x     = wl;
-                    clip_win_y     = wt;
-                    clip_win_w     = (int16_t)(wr - wl);
-                    clip_win_h     = (int16_t)(wb - wt);
-                } else {
-                    int cell_w = VIDEO_WIDTH  / 4;
-                    int cell_h = VIDEO_HEIGHT / 2;
-                    clip_win_x = (int16_t)((x_cx / cell_w) * cell_w);
-                    clip_win_y = (int16_t)((y_cy / cell_h) * cell_h);
-                    clip_win_w = (int16_t)cell_w;
-                    clip_win_h = (int16_t)cell_h;
-                }
-                have_clip_win      = true;
-                clip_win_is_portrait = true;
-            } else if (wr > wl && wb > wt) {
-                /* Non-portrait sub-window: use actual rect, game camera. */
-                clip_win_x         = wl;
-                clip_win_y         = wt;
-                clip_win_w         = (int16_t)(wr - wl);
-                clip_win_h         = (int16_t)(wb - wt);
-                have_clip_win      = true;
-                clip_win_is_portrait = false;
+            if (wr > wl && wb > wt) {
+                clip_win_x    = wl;
+                clip_win_y    = wt;
+                clip_win_w    = (int16_t)(wr - wl);
+                clip_win_h    = (int16_t)(wb - wt);
+                have_clip_win = true;
             }
             i += 6;
             continue;
@@ -997,7 +943,6 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
         }
 
         cm->has_clip_win         = have_clip_win;
-        cm->clip_win_neutral_cam = clip_win_is_portrait;
         cm->from_bone            = (scan_active_bslot >= 0 && scan_active_bslot < 32);
         cm->clip_win_x           = clip_win_x;
         cm->clip_win_y           = clip_win_y;

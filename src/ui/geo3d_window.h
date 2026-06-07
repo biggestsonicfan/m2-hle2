@@ -159,22 +159,6 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
         if (igCheckbox("auto rot-only when cam_mode != 9", &ar)) g_cam_auto_rot = ar;
         bool we = g_geo_windows_enabled != 0;
         if (igCheckbox("window (set_window) support", &we)) g_geo_windows_enabled = we;
-        bool sg = g_geo_subwin_game_cam != 0;
-        if (igCheckbox("sub-window uses game camera", &sg)) g_geo_subwin_game_cam = sg;
-    }
-
-    igSeparator();
-    igText("Portrait cells (chaos attract):");
-    igDragFloatEx("Portrait FOV", &g_portrait_fov_deg, 0.5f, 0.0f, 120.0f,
-                  "%.1f deg (0=auto ~23)", 0);
-    igDragFloatEx("Portrait camY", &g_portrait_cam_y_frac, 0.02f, -2.0f, 2.0f,
-                  "%.2f (1=centered)", 0);
-    igDragFloatEx("Portrait rowSnap", &g_portrait_row_shift, 0.02f, -2.0f, 2.0f,
-                  "%.2f (top down/bot up)", 0);
-    if (igButton("Reset Portrait")) {
-        g_portrait_fov_deg    = 0.0f;
-        g_portrait_cam_y_frac = 0.0f;
-        g_portrait_row_shift  = 0.5f;
     }
 
     igSeparator();
