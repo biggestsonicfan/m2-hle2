@@ -802,8 +802,15 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
                     pfov = 2.0f * atanf(t) * 180.0f / 3.14159265f;
                 }
             }
-            game_render_draw_fills(0.0f, pcam_y, 0.0f, 0.0f, 0.0f, pfov, cell_aspect);
-            game_render_draw_lines(0.0f, pcam_y, 0.0f, 0.0f, 0.0f, pfov, cell_aspect);
+            if (!cm->clip_win_neutral_cam && g_geo_subwin_game_cam) {
+                /* Non-portrait sub-window (e.g. Eggman stage): use the game camera
+                 * within the scissor so it rotates, instead of the neutral cam. */
+                game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
+                game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
+            } else {
+                game_render_draw_fills(0.0f, pcam_y, 0.0f, 0.0f, 0.0f, pfov, cell_aspect);
+                game_render_draw_lines(0.0f, pcam_y, 0.0f, 0.0f, 0.0f, pfov, cell_aspect);
+            }
         } else {
             sg_apply_viewport(ox, oy, w, h, true);
             sg_apply_scissor_rect(ox, oy, w, h, true);

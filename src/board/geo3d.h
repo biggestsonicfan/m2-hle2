@@ -360,6 +360,17 @@ static float g_cam_eye_raw[3] = {0.0f, 0.0f, 0.0f};
  * Default ON: improves the carnival/eye-baked attract scenes; toggle off to debug. */
 static int g_cam_auto_baked = 1;
 
+/* Clip-window ("set_window") support. ON: GEO_WIN_SENTINEL sets per-model clip
+ * rects + the slow per-window render path (portrait neutral cams, sub-windows).
+ * OFF: ignore windows entirely → every model renders full-screen through the
+ * single game camera (fast path). Debug A/B for what the windows are doing. */
+static int g_geo_windows_enabled = 1;
+
+/* Non-portrait sub-windows: use the game camera (rotation) within the scissor
+ * instead of the neutral camera. Fixes the Eggman-scene stage part (rotates
+ * correctly) while keeping window support. Experimental A/B; default OFF. */
+static int g_geo_subwin_game_cam = 0;
+
 /* Texture UV orientation (dial in live via the geo3d window).  Defaults to the
  * user-observed correction: rotate 90 (swap u/v) + horizontal flip. */
 static bool g_uv_swap   = false;
@@ -646,6 +657,7 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
          * centers (off_9781C), apply a portrait-cell viewport + neutral camera.
          * Otherwise apply the rect as a sub-window viewport + game camera. */
         if (val == GEO_WIN_SENTINEL && i + 6 < total) {
+            if (!g_geo_windows_enabled) { i += 6; continue; }  /* ignore windows (full-screen A/B) */
             /* Decode corners from FIFO words 0 and 1. */
             uint32_t fw0 = g_cop.geo_capture[(idx + 1) & (GEO_CAPTURE_SIZE-1)];
             uint32_t fw1 = g_cop.geo_capture[(idx + 2) & (GEO_CAPTURE_SIZE-1)];

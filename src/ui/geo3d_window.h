@@ -156,6 +156,10 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
         igText("cam_mode = %d  (9=fight look-at, 0=attract movie)", g_cam_mode_value);
         bool ar = g_cam_auto_rot != 0;
         if (igCheckbox("auto rot-only when cam_mode != 9", &ar)) g_cam_auto_rot = ar;
+        bool we = g_geo_windows_enabled != 0;
+        if (igCheckbox("window (set_window) support", &we)) g_geo_windows_enabled = we;
+        bool sg = g_geo_subwin_game_cam != 0;
+        if (igCheckbox("sub-window uses game camera", &sg)) g_geo_subwin_game_cam = sg;
     }
 
     igSeparator();
