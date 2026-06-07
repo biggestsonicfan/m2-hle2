@@ -505,6 +505,10 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
     m[10] =  cp*cyy;
     m[11] = -sp*cy - cp*(syy*cx + cyy*cz);
     m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1.0f;
+
+    /* Rotation-only: drop the (−eye) translation for geometry that already has
+     * the eye baked in (intro carnival flythrough etc.). */
+    if (g_cam_rot_only) { m[3] = 0.0f; m[7] = 0.0f; m[11] = 0.0f; }
 }
 
 /* ---- Texture atlas upload ------------------------------------------------ */

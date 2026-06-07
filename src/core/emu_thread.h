@@ -143,13 +143,18 @@ static inline void emu_sleep_us(int64_t us) {
 static bool s_irq_in_service     = false;
 static int  s_irq_baseline_depth = 0;
 
+/* Warning-screen auto-skip. ON normally; turn OFF to keep our attract timeline
+ * frame-aligned with MAME (which shows the warning for its full duration) when
+ * comparing camera data by the game frame counter. */
+static volatile int g_warning_skip = 1;
+
 static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (!g_active_profile) return;
     i960_cpu_t          *cpu = ctx->cpu;
     const game_quirks_t *q   = &g_active_profile->quirks;
 
     /* Auto-skip the boot warning screen by holding its ack flag at 1. */
-    if (q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
+    if (g_warning_skip && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
 
     /* Did the in-service handler return? (frame unwound to/below baseline) */
     if (s_irq_in_service && cpu->frame_depth <= s_irq_baseline_depth)

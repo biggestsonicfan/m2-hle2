@@ -136,6 +136,24 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     }
 
     igSeparator();
+    igText("Game-camera convention (attract dir):");
+    {
+        bool nx = g_cam_sign_x < 0, ny = g_cam_sign_y < 0, nz = g_cam_sign_z < 0;
+        bool nrx = g_cam_sign_rx < 0, nry = g_cam_sign_ry < 0;
+        if (igCheckbox("neg eye X",  &nx))  g_cam_sign_x  = nx  ? -1.0f : 1.0f;
+        igSameLine(); if (igCheckbox("neg eye Y", &ny))  g_cam_sign_y  = ny  ? -1.0f : 1.0f;
+        if (igCheckbox("neg eye Z",  &nz))  g_cam_sign_z  = nz  ? -1.0f : 1.0f;
+        igSameLine(); if (igCheckbox("neg pitch", &nrx)) g_cam_sign_rx = nrx ? -1.0f : 1.0f;
+        if (igCheckbox("neg yaw",    &nry)) g_cam_sign_ry = nry ? -1.0f : 1.0f;
+        if (igButton("Reset convention")) {
+            g_cam_sign_x = 1.0f; g_cam_sign_y = 1.0f; g_cam_sign_z = -1.0f;
+            g_cam_sign_rx = 1.0f; g_cam_sign_ry = -1.0f;
+        }
+        bool ro = g_cam_rot_only != 0;
+        if (igCheckbox("rotation only (eye baked)", &ro)) g_cam_rot_only = ro;
+    }
+
+    igSeparator();
     igText("Portrait cells (chaos attract):");
     igDragFloatEx("Portrait FOV", &g_portrait_fov_deg, 0.5f, 0.0f, 120.0f,
                   "%.1f deg (0=auto ~23)", 0);

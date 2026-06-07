@@ -241,6 +241,8 @@ static void draw_menu_bar(void) {
         igMenuItemBoolPtr("68K sound CPU",    NULL, &state.show_m68k_cpu,    true);
         igMenuItemBoolPtr("68K memory viewer", NULL, &state.show_m68k_mem,   true);
         igMenuItemBoolPtr("Log sound writes", NULL, &g_sound.log_writes,     true);
+        { bool ws = g_warning_skip != 0;  if (igMenuItemBoolPtr("Warning-screen skip", NULL, &ws, true)) g_warning_skip = ws; }
+        { bool cl = g_cam_log != 0;        if (igMenuItemBoolPtr("Log camera CSV",      NULL, &cl, true)) g_cam_log = cl; }
         igSeparator();
         igMenuItemBoolPtr("CPU opcode tests", NULL, &state.show_debug, true);
         igMenuItemBoolPtr("ImGui demo window", NULL, &state.show_demo, true);
@@ -479,6 +481,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             strncpy(g_rom_path, argv[++i], sizeof(g_rom_path) - 1);
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
+        } else if (strcmp(argv[i], "--camlog") == 0) {
+            g_cam_log = 1;            /* dump cam_ours.csv per game frame */
+        } else if (strcmp(argv[i], "--nowarnskip") == 0) {
+            g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
         }
     }
     return (sapp_desc){

@@ -319,6 +319,30 @@ static float g_portrait_fov_deg    = 0.0f;  /* 0 = auto-derive from cell height 
 static float g_portrait_cam_y_frac = 0.0f;  /* 0 = no vertical centering (origin camera) */
 static float g_portrait_row_shift  = 0.5f;  /* push top row down / bottom row up (toward screen center) */
 
+/* Game-camera convention signs (dial live via the 3D window for the attract
+ * "camera moving in wrong directions" bug). Multipliers applied in
+ * geo3d_read_game_view to the camera struct's eye + angles. Defaults reproduce
+ * the historical convention EXACTLY (z negated, yaw negated) so nothing changes
+ * until toggled — once the right combo is found on-screen, bake it here. */
+static float g_cam_sign_x  =  1.0f;
+static float g_cam_sign_y  =  1.0f;
+static float g_cam_sign_z  = -1.0f;  /* cam_z = -zpos */
+static float g_cam_sign_rx =  1.0f;  /* pitch = +xang */
+static float g_cam_sign_ry = -1.0f;  /* yaw   = -yang */
+
+/* Debug: dump the RAW camera struct (eye + angle word) once per game frame to
+ * cam_ours.csv, keyed by the STF frame counter (0x500020). Attract is
+ * deterministic from boot, so this aligns frame-for-frame with a MAME capture
+ * → compare to localise wrong-camera-direction (values vs our render convention). */
+static int g_cam_log = 0;
+
+/* Rotation-only view: apply the camera ROTATION but NOT its (−eye) translation.
+ * Some scenes (e.g. the STF intro carnival flythrough) bake the eye-translation
+ * into the captured COP geometry (it = world−eye already), so the normal
+ * R·(p−eye) view subtracts the eye a second time → double-translation. With this
+ * set, the view is R·p, correct for already-eye-baked geometry. */
+static int g_cam_rot_only = 0;
+
 /* Texture UV orientation (dial in live via the geo3d window).  Defaults to the
  * user-observed correction: rotate 90 (swap u/v) + horizontal flip. */
 static bool g_uv_swap   = false;
@@ -1314,12 +1338,26 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
 #undef GEO3D_READ_F32
 
     static const float TWO_PI = 6.28318530717959f;
-    geo->cam_x = xpos;
-    geo->cam_y = ypos;
-    geo->cam_z = -zpos;
-    geo->rot_x =  ((float)xang16 / 65536.0f) * TWO_PI;
-    geo->rot_y = -((float)yang16 / 65536.0f) * TWO_PI;
+    geo->cam_x = g_cam_sign_x * xpos;
+    geo->cam_y = g_cam_sign_y * ypos;
+    geo->cam_z = g_cam_sign_z * zpos;
+    geo->rot_x = g_cam_sign_rx * ((float)xang16 / 65536.0f) * TWO_PI;
+    geo->rot_y = g_cam_sign_ry * ((float)yang16 / 65536.0f) * TWO_PI;
     geo->has_game_view = true;
+
+    /* Debug: dump the raw camera struct per game frame for MAME comparison
+     * (MAME = ground truth). Keyed by the STF frame counter so the two
+     * deterministic-from-boot attract runs align frame-for-frame. */
+    if (g_cam_log) {
+        static FILE *cf = NULL; static uint32_t prevf = 0xFFFFFFFFu;
+        uint32_t fr = mem_read32(bus, 0x00500020);
+        if (!cf) { cf = fopen("cam_ours.csv", "w");
+                   if (cf) fprintf(cf, "frame,ex,ey,ez,xang,yang\n"); }
+        if (cf && fr != prevf) { prevf = fr;
+            fprintf(cf, "%u,%.4f,%.4f,%.4f,%d,%d\n",
+                    fr, xpos, ypos, zpos, (int)xang16, (int)yang16);
+            fflush(cf); }
+    }
 }
 
 /* ---- Debug: log a summary of the current capture list ------------------- */
