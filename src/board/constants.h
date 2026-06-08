@@ -24,8 +24,12 @@
 
 /* ---- Geometry capture ---------------------------------------------------- */
 
-/* Smaller than this wraps mid-frame and produces partial 3D snapshots. */
-#define GEO_CAPTURE_SIZE           32768
+/* Must hold a FULL frame of COP commands or the scanner falls back to the last
+ * GEO_CAPTURE_SIZE words, dropping early-frame geometry (camera_init's cage/poles)
+ * → those props parse from overwritten data and jump/fly. The heavy stage-1 fight
+ * frame exceeds 32768 words (gcount pegged), so size for the worst case. Power of 2
+ * (ring is masked with SIZE-1). 262144 words = 1 MB. */
+#define GEO_CAPTURE_SIZE           262144
 
 /* ---- Memory map ---------------------------------------------------------- */
 /* Region table is linear-scanned in declaration order in memory.h.
