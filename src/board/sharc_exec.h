@@ -91,7 +91,7 @@ static inline int sharc_args_for_cmd(uint32_t cmd) {
         case 0x1B003636: return 2;
         /* smooth_int: reset bone slot to identity + 9 ang ops (Z,Y,X,X,Y,Z,Y,Z,X) */
         case 0x2A005454: return 9;
-        case 0x2A805555: return 0;  /* dispatch[0x55] PM 0x02115F — MAME-verified: 0 args, 0 outputs */
+        case 0x2A805555: return 9;  /* dispatch[0x55] PM 0x02115F — 9 args (3 triples) / 3 outputs. i960 sends opcode+3 stt then reads 3 (e.g. loop @0x2FB00). 0-arg desynced the FIFO. */
         case 0x08001010: return 0;  /* dispatch[0x10] PM 0x20460 — IDA: 0 args, 0 outputs (kira_kira_disp) */
         case 0x34006868: return 1;  /* dispatch[0x68] PM 0x205A3 — IDA: 1 arg, 0 outputs (name_char_kage_disp) */
         case 0x3B807777: return 4;  /* dispatch[0x77] PM 0x20B1F — IDA: 4 args (x,y,z,flags), 9 outputs */
@@ -660,9 +660,15 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * (1.0 = 0x4000) packed in lower 16 bits of 32-bit FIFO words.
          * i960 reads these with ldis (16-bit signed) and uses arithmetic right shifts to
          * compute bone correction deltas stored at 0x690(g7)+bone*12. */
-        /* 0x2A805555: dispatch[0x55] — PM 0x02115F. 0 args, 0 outputs.
-         * MAME-verified: no FIFO output (reads are stalls/zero). */
+        /* 0x2A805555: dispatch[0x55] — PM 0x02115F. 9 args (3 triples) in, 3 out.
+         * The i960 sends 0x2A805555 + 3 stt triples then reads 3 results back (e.g.
+         * the 12-iteration loop @0x2FB00). Treating it as 0-arg desynced the input
+         * FIFO: every following data word (the triples) was misread as an opcode →
+         * the 0xFFFF.../0.5f "unknown cmd" WARN spam → corrupted ALL downstream COP
+         * state, including the stage/cage matrix (cage/pole drift cascade).
+         * Reads return zero (MAME), so consume the 9 args and emit 3 zero outputs. */
         case 0x2A805555:
+            sharc_push_u(0); sharc_push_u(0); sharc_push_u(0);
             return;
 
         /* 0x08001010: dispatch[0x10] — PM 0x020460. 0 args, 0 outputs.
@@ -767,6 +773,18 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * 5 args: (r15, r13, r14, r11, r12) set up sphere collision tables for a player.
          * cpres1 _L20BBA return path: no dm(m0,i1) writes -> 0 FIFO outputs. */
         case 0x38007070:
+            /* PM 0x20BBE: stage-object CLIP/BOUNDS classifier. Reads 5 args (stage
+             * bounds), classifies up to 32 objects (positions DM[0x1403e80]/[0x1407e80],
+             * vis DM[0x30600]/[0x30700]) against the bounds, outputs 22 words → i960
+             * stores to g13+0x118.. and g7+0x650/0x660/0xA58/0x614..
+             * STUB for now: a faithful port needs the SHARC DM object table our HLE
+             * doesn't model. MAME ground-truth (one fight frame, for the eventual port):
+             *   g13+118=0x33000 g13+124=0x33000  (clip masks)
+             *   g7+710=2.56  g7+A5C=7.30
+             *   g7+650..65C = 8.70,5.47,8.66,5.83  (arena bounds; init 100.0 minimized)
+             *   g7+614=0x9000 g7+618=0x9000        (remapped masks)
+             *   all other dests = 0
+             * The empty-set default (0s+100.0) was verified WRONG vs MAME, reverted. */
             return;
 
         case 0x24004848:
