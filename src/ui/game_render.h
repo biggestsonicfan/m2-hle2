@@ -905,11 +905,16 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
             int sw = (int)cm->clip_win_w * w / VIDEO_WIDTH;
             int sh = (int)cm->clip_win_h * h / VIDEO_HEIGHT;
             float cell_aspect = (sh > 0) ? (float)sw / (float)sh : 1.0f;
-            /* Viewport + scissor the sub-window; render it with the game camera. */
+            /* Sub-window cells (character-select portraits, emeralds) are head-on
+             * previews placed in VIEW-relative space — every cell's geometry sits
+             * at the same ≈(0,-0.8,-4.0) in front, framed by its own cell viewport.
+             * Render with an IDENTITY view (no scene camera): the scene's look-at
+             * rotation (e.g. -90° Y) would swing them onto the camera plane and
+             * scissor them away, which is what left the cells black. */
             sg_apply_viewport(sx, sy, sw, sh, true);
             sg_apply_scissor_rect(sx, sy, sw, sh, true);
-            game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
-            game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, cell_aspect);
+            game_render_draw_fills(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, fov_deg, cell_aspect);
+            game_render_draw_lines(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, fov_deg, cell_aspect);
         } else {
             sg_apply_viewport(ox, oy, w, h, true);
             sg_apply_scissor_rect(ox, oy, w, h, true);
