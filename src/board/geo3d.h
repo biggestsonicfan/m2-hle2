@@ -764,6 +764,7 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
         if (val == 0x3A007474 && i + 7 < total) {
             uint32_t pid_w = g_cop.geo_capture[(idx + 1) & (GEO_CAPTURE_SIZE-1)];
             uint32_t boff  = g_cop.geo_capture[(idx + 2) & (GEO_CAPTURE_SIZE-1)];
+            uint32_t offy_w= g_cop.geo_capture[(idx + 5) & (GEO_CAPTURE_SIZE-1)]; /* off.y */
             int pid  = (int)(pid_w & 1);
             int bidx = (int)((boff & 0xFF) / 0xC);
             int slot = pid * 16 + bidx;
@@ -780,7 +781,28 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
             for (int _c = 0; _c < 3; _c++)
                 for (int _r = 0; _r < 3; _r++)
                     scan_rot[_c][_r] = g_sharc.shadow_rot[_c][_r];
-            current_pos[1] = g_geo_shadow_floor_y;   /* ground plane (tunable) */
+            /* off.y is 0 (game-frame floor); our render places fighters at negative Y,
+             * so the shadow floor must be the character's FEET in our frame = the
+             * extreme bone Y. Find the populated-bone Y range for this player. */
+            (void)offy_w;
+            float _ymin = 1e9f;
+            for (int _bi = 0; _bi < 16; _bi++) {
+                const float *bb = g_sharc.tgp_bone[pid * 16 + _bi];
+                float _brs = 0.0f; for (int _k = 0; _k < 9; _k++) _brs += bb[_k]*bb[_k];
+                if (_brs > 1e-6f && bb[10] < _ymin) _ymin = bb[10];
+            }
+            /* The arena floor = the lowest the feet ever reach (standing); jumps only
+             * raise the feet ABOVE it. So track a running min of the feet Y → a fixed
+             * ground plane the shadow stays on when a fighter jumps. Slow upward drift
+             * re-levels on stage/match changes. */
+            static float s_floor_y = 1e9f;
+            if (_ymin < 1e8f) {
+                if (_ymin < s_floor_y) s_floor_y = _ymin;                /* grab the floor */
+                else                   s_floor_y += (_ymin - s_floor_y) * 0.003f; /* re-level slowly */
+                current_pos[1] = s_floor_y;
+            } else {
+                current_pos[1] = g_geo_shadow_floor_y;
+            }
             have_ang = true;
             have_pos = true;
             i += 7; continue;
