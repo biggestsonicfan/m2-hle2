@@ -66,16 +66,33 @@ typedef struct {
 
 static cop_state_t g_cop = {0};
 
-/* GEO FIFO window capture state — tracks in-progress set_window calls.
- * Filled by the GEO_PROGRAM write callback in memory.h; emits a
- * GEO_WIN_SENTINEL + 6 words into geo_capture once all 6 words arrive. */
+/* GEO clip-window capture (set_window @ i960 0x5564).
+ *
+ * set_window is NOT a COP FIFO command — it writes to GEO MMIO: 0x303 to GEO+0x30
+ * (→ geo_win_start) then 6 packed vertex words to the GEO_PROGRAM FIFO
+ * (→ geo_win_push). Both writes are intercepted by the callbacks in memory.h.
+ *
+ * Rather than splice a synthetic sentinel into the COP command stream, we record
+ * each completed set_window as a DISCRETE EVENT tagged with the stream position
+ * (geo_capture_head) at which it took effect, plus the two corner words. The geo3d
+ * scanner replays these in stream order alongside the draws (decoding + full-screen
+ * detection live in the geo layer), so the COP command ring stays pure. */
 typedef struct {
-    bool     active;
+    bool     active;                    /* a set_window is mid-collection */
     int      count;
     uint32_t words[GEO_WIN_FIFO_MAX];
-} geo_win_state_t;
+} geo_win_collect_t;
 
-static geo_win_state_t g_geo_win = {0};
+static geo_win_collect_t g_geo_win = {0};
+
+typedef struct {
+    int      head_pos;   /* geo_capture_head when the window took effect (monotonic) */
+    uint32_t w0, w1;     /* the two corner vertex words (packed screen coords) */
+} geo_win_event_t;
+
+#define GEO_WIN_EVENTS_MAX 128   /* power of 2; ring of recent set_window events */
+static geo_win_event_t g_win_events[GEO_WIN_EVENTS_MAX] = {0};
+static int g_win_event_head = 0; /* monotonic write index into the event ring */
 
 static inline void geo_win_start(void) {
     g_geo_win.active = true;
@@ -89,17 +106,12 @@ static inline void geo_win_push(uint32_t val) {
     if (g_geo_win.count < GEO_WIN_FIFO_MAX) return;
 
     g_geo_win.active = false;
-    /* Emit GEO_WIN_SENTINEL + 6 words into the geo_capture ring so the
-     * geo3d scanner can associate the clip window with the next draw. */
-    uint32_t *gc   = g_cop.geo_capture;
-    int      *head = &g_cop.geo_capture_head;
-    int      *cnt  = &g_cop.geo_capture_count;
-    gc[(*head)++ & (GEO_CAPTURE_SIZE-1)] = GEO_WIN_SENTINEL;
-    if (*cnt < GEO_CAPTURE_SIZE) (*cnt)++;
-    for (int _i = 0; _i < GEO_WIN_FIFO_MAX; _i++) {
-        gc[(*head)++ & (GEO_CAPTURE_SIZE-1)] = g_geo_win.words[_i];
-        if (*cnt < GEO_CAPTURE_SIZE) (*cnt)++;
-    }
+    /* Record a discrete window event at the current stream position. */
+    geo_win_event_t *e = &g_win_events[g_win_event_head & (GEO_WIN_EVENTS_MAX - 1)];
+    e->head_pos = g_cop.geo_capture_head;
+    e->w0       = g_geo_win.words[0];
+    e->w1       = g_geo_win.words[1];
+    g_win_event_head++;
 }
 
 /* sharc_exec.h defines sharc_args_for_cmd / sharc_exec; it transitively

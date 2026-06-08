@@ -526,8 +526,10 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
     int   scan_bs_stk[16];     /* saved scan_active_bslot per push level */
     int   scan_stk_top = 0;
 
-    /* Clip window from GEO_WIN_SENTINEL — carries the clip rect for the
-     * next draw call.  x/y/w/h are in game pixels (0–495, 0–383). */
+    /* Active clip window — set/cleared by the set_window event cursor (below) as
+     * the scan passes each event's stream position; stays active across draws
+     * until the next event. x/y/w/h in game pixels (0–495, 0–383); full-screen
+     * windows clear it (no clip). */
     bool   have_clip_win      = false;
     int16_t clip_win_x = 0, clip_win_y = 0, clip_win_w = 0, clip_win_h = 0;
 
@@ -546,9 +548,42 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
     bool  eb_valid = (fabsf(g_cam_eye_raw[0]) + fabsf(g_cam_eye_raw[1])
                       + fabsf(g_cam_eye_raw[2])) > 5.0f;
 
+    /* Clip-window cursor: replay the discrete set_window events (cop.h
+     * g_win_events[]) in stream order alongside the draws. Each event is tagged
+     * with the geo_capture_head at which it took effect; this frame spans
+     * [head-total, head). Advance the cursor to the oldest event still in range. */
+    int win_ev = g_win_event_head - GEO_WIN_EVENTS_MAX; if (win_ev < 0) win_ev = 0;
+    {   int win_frame_start = head - total;
+        while (win_ev < g_win_event_head &&
+               g_win_events[win_ev & (GEO_WIN_EVENTS_MAX-1)].head_pos < win_frame_start) win_ev++;
+    }
+
     for (int i = 0; i < total && geo->captured_count < MAX_GEO_MODELS; i++) {
         int idx = (head - total + i + GEO_CAPTURE_SIZE) & (GEO_CAPTURE_SIZE - 1);
         uint32_t val = g_cop.geo_capture[idx];
+
+        /* Apply any set_window events that take effect at or before this stream
+         * position. Decode the two corner words (X = high16, Y = 511 - low16,
+         * verified against captured words); a full-screen window CLEARS the clip
+         * (so fights, which only set full-screen, stay on the fast path). */
+        if (g_geo_windows_enabled) {
+            int abs_pos = head - total + i;
+            while (win_ev < g_win_event_head &&
+                   g_win_events[win_ev & (GEO_WIN_EVENTS_MAX-1)].head_pos <= abs_pos) {
+                const geo_win_event_t *we = &g_win_events[win_ev & (GEO_WIN_EVENTS_MAX-1)];
+                int xa=(int)(int16_t)(we->w0>>16), ya=511-(int)(int16_t)(we->w0 & 0xFFFF);
+                int xb=(int)(int16_t)(we->w1>>16), yb=511-(int)(int16_t)(we->w1 & 0xFFFF);
+                int wl=xa<xb?xa:xb, wr=xa>xb?xa:xb, wt=ya<yb?ya:yb, wb=ya>yb?ya:yb;
+                if (wl<=0 && wt<=0 && wr>=495 && wb>=383) {
+                    have_clip_win = false;                  /* full-screen → no clip */
+                } else if (wr>wl && wb>wt) {
+                    have_clip_win = true;
+                    clip_win_x=(int16_t)wl; clip_win_y=(int16_t)wt;
+                    clip_win_w=(int16_t)(wr-wl); clip_win_h=(int16_t)(wb-wt);
+                }
+                win_ev++;
+            }
+        }
 
         /* --- Matrix stack: push / identity / pop ----------------------------- */
         if (val == 0x00800101) {
@@ -662,39 +697,10 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
             i += 2; continue;
         }
 
-        /* --- GEO_WIN_SENTINEL: clip window from set_window intercept (6 words) ---
-         * FIFO words (after sentinel):
-         *   word[0] = (x1<<16)|(511-y1)  — one corner of the clip rect
-         *   word[1] = (x2<<16)|(511-y2)  — opposite corner
-         *   word[2] = (cx<<16)|(511-cy)  — repeating center value (used for ID)
-         *   words[3..5] = same as word[2]
-         * All coordinates in game pixels (0–495 x, 0–383 y).
-         *
-         * Apply the rect as a sub-window viewport + scissor (game camera). */
-        if (val == GEO_WIN_SENTINEL && i + 6 < total) {
-            if (!g_geo_windows_enabled) { i += 6; continue; }  /* ignore windows (full-screen A/B) */
-            /* Decode corners from FIFO words 0 and 1. */
-            uint32_t fw0 = g_cop.geo_capture[(idx + 1) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t fw1 = g_cop.geo_capture[(idx + 2) & (GEO_CAPTURE_SIZE-1)];
-            int16_t xa   = (int16_t)(fw0 >> 16);
-            int16_t ya   = (int16_t)(511 - (int16_t)(fw0 & 0xFFFF));
-            int16_t xb   = (int16_t)(fw1 >> 16);
-            int16_t yb   = (int16_t)(511 - (int16_t)(fw1 & 0xFFFF));
-            /* Full rect from corners. */
-            int16_t wl = (xa < xb) ? xa : xb;  /* left   */
-            int16_t wr = (xa > xb) ? xa : xb;  /* right  */
-            int16_t wt = (ya < yb) ? ya : yb;  /* top    */
-            int16_t wb = (ya > yb) ? ya : yb;  /* bottom */
-            if (wr > wl && wb > wt) {
-                clip_win_x    = wl;
-                clip_win_y    = wt;
-                clip_win_w    = (int16_t)(wr - wl);
-                clip_win_h    = (int16_t)(wb - wt);
-                have_clip_win = true;
-            }
-            i += 6;
-            continue;
-        }
+        /* Clip windows are no longer spliced into this command stream as a
+         * synthetic sentinel. set_window now records discrete events (cop.h
+         * g_win_events[]) tagged with the stream position; the cursor at the top
+         * of this loop activates/clears have_clip_win as the scan passes them. */
 
         /* --- 0x02000404 / 0x05800B0B: matrix (12 floats follow) ---
          * 0x02000404: written directly by the i960 with a freshly-built transform.
