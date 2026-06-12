@@ -1062,7 +1062,8 @@ static inline int geo3d__dl_args(const uint32_t *L, uint32_t nw, uint32_t p, uin
 static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
         const uint32_t *buff_ram, uint32_t buff_words, uint32_t rstart,
         const uint8_t *main_data, size_t main_data_size,
-        uint32_t table_off, uint32_t table_count) {
+        uint32_t table_off, uint32_t table_count,
+        const uint8_t *palette, size_t palette_size) {
     if (!main_data || !buff_ram) { geo->captured_count = 0; return; }
     geo3d_lookup_build(main_data, main_data_size, table_off, table_count);
 
@@ -1110,11 +1111,22 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
                     memset(cm, 0, sizeof(*cm));
                     cm->model_idx    = model_idx;
                     cm->material_ptr = read_u32_le(main_data + toff + 4);
-                    /* The homebrew picks color per-object via the object_data tha
-                     * (a colorbase header), which we don't decode yet — model 456's
-                     * table material is meaningless here, so use a visible placeholder
-                     * until the per-object colorbase is wired up. */
-                    cm->color[0] = 1.0f; cm->color[1] = 1.0f; cm->color[2] = 1.0f;
+                    /* Per-object flat colour: the homebrew encodes the colorbase in
+                     * the object_data `tha` (= GEO_TEXRAM_BIT 0x800000 | colorbase*4)
+                     * and stores the hue at palram[colorbase + 0x1000] (BGR555), set
+                     * via m2_setcolor. Read it live from palette RAM. */
+                    cm->color[0] = cm->color[1] = cm->color[2] = 1.0f;  /* fallback white */
+                    {
+                        uint32_t tha = buff_ram[p + 2];
+                        uint32_t cb  = (tha & 0x007FFFFFu) >> 2;
+                        uint32_t poff = (cb + 0x1000u) * 2u;
+                        if (palette && poff + 1u < palette_size) {
+                            uint16_t bgr = (uint16_t)(palette[poff] | (palette[poff + 1] << 8));
+                            cm->color[0] = ( bgr        & 0x1F) / 31.0f;   /* R = bits[4:0]  */
+                            cm->color[1] = ((bgr >> 5)  & 0x1F) / 31.0f;   /* G = bits[9:5]  */
+                            cm->color[2] = ((bgr >> 10) & 0x1F) / 31.0f;   /* B = bits[14:10] */
+                        }
+                    }
                     cm->dbg_mesh_ptr = oba;
                     if (have_mat) {
                         memcpy(cm->matrix, cur_mat, sizeof(cm->matrix));

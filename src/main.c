@@ -388,7 +388,8 @@ static void frame(void) {
                 geo3d_scan_displaylist(&state.geo3d,
                                        g_geodl_snap, BUFF_RAM_SIZE / 4, 0x10000,
                                        state.romset.main_data, state.romset.main_data_size,
-                                       q->model_table_offset, q->model_table_count);
+                                       q->model_table_offset, q->model_table_count,
+                                       state.bus.palette, PALETTE_SIZE);
         } else {
             geo3d_scan_captures(&state.geo3d,
                                 state.romset.main_data, state.romset.main_data_size,
