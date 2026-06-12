@@ -12,11 +12,13 @@
 #include "game_profile.h"
 #include "sfight.h"
 #include "fvipers.h"
+#include "m2snake.h"
 /* Future: vf2.h, daytona.h, vcop.h, ... */
 
 const game_profile_t *const g_profiles[] = {
     &sfight_profile,
     &fvipers_profile,
+    &m2snake_profile,
 };
 
 const size_t g_profile_count = sizeof(g_profiles) / sizeof(g_profiles[0]);

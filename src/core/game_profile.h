@@ -109,6 +109,22 @@ typedef struct {
     /* Convenience: RAM flag poked to 1 each slice to auto-skip the boot warning
      * screen (0 = disabled).  STF: 0x500410. */
     uint32_t warning_skip_addr;
+
+    /* Board-level vblank: when true, the emu thread raises the vblank pending
+     * bit (intreq bit 0, 0xE80000) once per 60 Hz slice — exactly as the real
+     * board / MAME do at scanline 384. This lets a self-pacing homebrew (one
+     * that polls + ACKs the vblank bit, like STF's frame loop) run with NO HLE
+     * hook and NO hardcoded addresses. STF/FV leave this false because their
+     * vsync work is HLE-hooked instead. With intena bit0 clear (poll-only) it
+     * never vectors an IRQ, so it's inert for games that don't poll it. */
+    bool     board_vblank;
+
+    /* GEO display-list rendering: when true, render 3D by decoding the GEO
+     * display list the i960 builds in bufferram (object_data draws), instead of
+     * reconstructing it from the STF COP bone stream. This is the authentic
+     * hardware path — required for non-STF games and homebrew that drive the GEO
+     * directly. STF/FV leave this false (their 3D is HLE'd from the COP stream). */
+    bool     geo_displaylist;
 } game_quirks_t;
 
 /* ---- Loader / installer function-pointer types --------------------------- */

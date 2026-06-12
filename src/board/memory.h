@@ -166,6 +166,66 @@ static void coprogram_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int
     if (size == 4) cop_write(val);
 }
 
+/* ---- DIAGNOSTIC (observation-only): GEO display-list capture + validator ------
+ * On real hardware (and in MAME), the i960 builds a GEO display list in bufferram
+ * via the encoded geo_w port (push_geo_data) and the GEO chip rasterizes it
+ * (geo_parse). m2-hle2 instead renders from the COP capture ring. To evaluate
+ * whether the authentic display-list pipeline is viable here, we mirror MAME's
+ * geo_w encoding into a PARALLEL buffer (no effect on rendering) and, when the
+ * read-start pointer is written, walk both that buffer and BUFF_RAM with the
+ * geo_parse command grammar to see whether a valid display list is present. */
+static uint32_t  g_geodl[0x8000];
+static uint32_t  g_geodl_wstart = 0, g_geodl_rstart = 0;
+static int       g_geodl_dumped = 0;
+static uint32_t *g_geodl_buffram = NULL;
+
+/* SHARC-free snapshot of the bufferram display list. m2-hle2 aliases the SHARC's
+ * external DM onto bufferram (g_sharc.sharc_dm_ext = bus->buff_ram), so the COP HLE
+ * clobbers the i960's GEO list between frames; and the i960 writes bufferram via a
+ * direct-pointer fast path that bypasses the region write_cb, so callbacks can't see
+ * the list build. The emu thread therefore copies bufferram into this snapshot at
+ * slice end (mutex held, i960 idle, homebrew vblank-waiting just after geo_flush —
+ * the list is intact there); the UI display-list scanner reads the snapshot. */
+static uint32_t     g_geodl_snap[0x8000];
+static volatile int g_geodl_snap_ready = 0;
+
+static int geodl_args(const uint32_t *L, uint32_t nw, uint32_t p, uint32_t cmd) {
+    switch (cmd) {
+        case 1: case 0x11: return 4;
+        case 3: case 0x13: return 6;
+        case 7: case 0x17: case 8: case 0x18: case 0x10: case 0x16: case 0x1e: return 1;
+        case 9: case 0x19: return 2;
+        case 0xa: case 0x1a: case 0xc: case 0x1c: return 3;
+        case 0xb: case 0x1b: return 12;
+        case 0xd: return 2;
+        case 4: case 0x14: case 5: case 0x15: return 2 + (int)(p + 2 < nw ? L[p + 2] : 0);
+        case 6: return 2 + 2 * (int)(p + 2 < nw ? L[p + 2] : 0);
+        default: return 0;
+    }
+}
+static void geodl_validate(const char *src, const uint32_t *L, uint32_t nw, uint32_t rstart) {
+    if (!L) { LOG_INFO("GEODL[%s] (null)", src); return; }
+    uint32_t p = (rstart & 0x1ffff) / 4;
+    char line[200]; int o = 0;
+    for (uint32_t i = 0; i < 16 && p + i < nw; i++) o += snprintf(line + o, sizeof line - o, "%08X ", L[p + i]);
+    LOG_INFO("GEODL[%s] read_start=0x%X raw: %s", src, rstart, line);
+    for (int k = 0; k < 24 && p < nw; k++) {
+        uint32_t op = L[p];
+        if (op & 0x80000000u) { LOG_INFO("  [%05X] %08X JUMP->%05X", p, op, (op & 0x1ffff) / 4); break; }
+        uint32_t cmd = (op >> 23) & 0x1f;
+        const char *nm = (cmd==1||cmd==0x11)?"OBJECT":(cmd==0xb||cmd==0x1b)?"matrix":
+                         (cmd==7||cmd==0x17)?"mode":(cmd==6)?"texparam":(cmd==3)?"window":
+                         (cmd==0xf||cmd==0x1f)?"END":(cmd==8)?"zsort":(cmd==9)?"focal":
+                         (cmd==0xa)?"light":(cmd==0x10)?"dummy":(cmd==0x16)?"lod":"?";
+        if (cmd==1||cmd==0x11)
+            LOG_INFO("  [%05X] %08X OBJECT oba=%08X obc=%08X", p, op, p+3<nw?L[p+3]:0, p+4<nw?L[p+4]:0);
+        else
+            LOG_INFO("  [%05X] %08X %s", p, op, nm);
+        if (cmd==0xf || cmd==0x1f) break;
+        p += 1 + geodl_args(L, nw, p, cmd);
+    }
+}
+
 /* GEO base (0x800000): set_window writes 0x303 to offset 0x30, signalling the
  * start of a 6-word clip-window sequence. */
 static void geo_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
@@ -174,6 +234,33 @@ static void geo_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size)
         memcpy(r->data + off, &val, 4);
     if (size == 4 && off == 0x30 && val == 0x303)
         geo_win_start();
+
+    /* DIAGNOSTIC: mirror MAME's geo_w encoding into the parallel display list */
+    if (size == 4) {
+        if (off < 0x1000) {
+            uint32_t cmd = (off >> 4) & 0x3f, rr = 0xFFFFFFFFu;
+            if (val & 0x80000000u)     rr = (val & 0x800fffffu) | (cmd << 23);
+            else if ((off & 0xf) == 0) rr = (val & 0x000fffffu) | (cmd << 23);
+            if (rr != 0xFFFFFFFFu && (g_geodl_wstart >> 2) < 0x8000) {
+                g_geodl[g_geodl_wstart >> 2] = rr;
+                g_geodl_wstart += 4;
+            }
+        } else if (off == 0x1008) {
+            g_geodl_wstart = val & 0xfffff;
+        } else if (off == 0x3008) {
+            g_geodl_rstart = val & 0xfffff;
+            /* Fire periodically (every ~120 frames) across both double-buffers to
+               rule out timing / buffer-selection. */
+            if ((g_geodl_dumped % 120) == 0 && g_geodl_dumped < 1200 && g_geodl_rstart != 0) {
+                LOG_INFO("GEODL frame#%d read_start=0x%X write_start=0x%X",
+                         g_geodl_dumped, g_geodl_rstart, g_geodl_wstart);
+                geodl_validate("buf@rstart", g_geodl_buffram, BUFF_RAM_SIZE / 4, g_geodl_rstart);
+                geodl_validate("buf@wstart", g_geodl_buffram, BUFF_RAM_SIZE / 4, g_geodl_wstart);
+                geodl_validate("port@wstart", g_geodl, 0x8000, g_geodl_wstart);
+            }
+            g_geodl_dumped++;
+        }
+    }
 }
 
 /* GEO_PROGRAM FIFO port (0x804000): the 6 packed (x,y) clip words arrive here. */
@@ -183,6 +270,15 @@ static void geo_program_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, i
         memcpy(r->data + off, &val, 4);
     if (size == 4 && off == 0)
         geo_win_push(val);
+}
+
+/* Snapshot bufferram into the SHARC-free g_geodl_snap. Called by the emu thread at
+ * slice end (mutex held, i960 idle) so the GEO display-list scanner reads an intact
+ * list. See the g_geodl_snap comment for why callbacks/aliasing make this necessary. */
+static inline void geodl_capture(const memory_bus_t *bus) {
+    if (!bus) return;
+    memcpy(g_geodl_snap, bus->buff_ram, sizeof g_geodl_snap);
+    g_geodl_snap_ready = 1;
 }
 
 /* ---- IRQ controller / board timer MMIO callbacks ------------------------ */
@@ -261,6 +357,8 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
      * cop_reset() zeroed the field, so set it here (after reset, after alloc). */
     g_sharc.sharc_dm_ext      = bus->buff_ram;
     g_sharc.sharc_dm_ext_size = BUFF_RAM_SIZE;
+    g_geodl_buffram = (uint32_t *)bus->buff_ram;   /* DIAGNOSTIC: display-list validator */
+    g_geodl_wstart = g_geodl_rstart = 0; g_geodl_dumped = 0;
     mem_add_region(bus, "COPRO_CTL",       COPRO_CONTROL1_BASE,  COPRO_CONTROL1_SIZE,  bus->copro_ctl,     0);
     mem_add_region(bus, "MIDI",            MIDI_BASE,            MIDI_SIZE,            bus->midi,          0);
     mem_add_region(bus, "CPU_CTRL",        CPU_CTRL_BASE,        CPU_CTRL_SIZE,        bus->cpu_ctrl,      0);

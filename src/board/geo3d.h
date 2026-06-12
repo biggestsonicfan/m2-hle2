@@ -46,6 +46,12 @@
 #define GEO3D_IA_MAX_VERTS (GEO3D_IA_MAX_VPS * 2)
 #define GEO3D_IA_MAX_IDX   (4 + GEO3D_IA_MAX_VPS * 4)
 
+/* Upper bound on words scanned when the per-frame geo window is unusable (first
+ * frame, or a board_vblank marking race). Caps the cost of accumulated draws ×
+ * the O(model_table_count) lookup so a raced frame can't freeze the render. One
+ * real game frame is far smaller than this. */
+#define GEO3D_SCAN_FALLBACK_MAX 8192
+
 /* Global face-color palette in main_data (STF): BGR555 LE u16 per entry,
  * indexed by the per-face material index.  color = pal[main_data + OFF + matidx*2].
  * STF-specific; move to game_quirks_t if another ROMset places it elsewhere. */
@@ -264,6 +270,7 @@ typedef struct {
     bool             use_matrix;      /* apply captured per-object transform */
     bool             use_game_view;   /* read view matrix from game RAM */
     bool             test_triangle;   /* draw a hard-coded triangle (sanity) */
+    bool             lines_only;      /* skip filled tris (homebrew wireframe; no overdraw) */
 
     /* Capture filter */
     bool             filter_enabled;
@@ -483,9 +490,16 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
     int frame_start = g_cop.geo_frame_start;
     int total = frame_end - frame_start;
     if (total <= 0 || total > GEO_CAPTURE_SIZE) {
-        /* Hook hasn't fired yet (first frame) — fall back to full ring. */
+        /* Hook hasn't fired yet (first frame), OR the board_vblank marking raced
+         * with this UI-thread read and produced an empty/inverted window. Scan a
+         * BOUNDED recent slice — never the whole ring. The full ring can hold
+         * thousands of accumulated object draws, and each 0x3C007878 costs an
+         * O(model_table_count) lookup; scanning all of them would freeze the
+         * render for seconds (the m2snake "hang"). One game frame is far smaller
+         * than this bound, so a real first frame is unaffected; a raced frame
+         * just scans a little extra and self-corrects next frame. */
         total = g_cop.geo_capture_count;
-        if (total > GEO_CAPTURE_SIZE) total = GEO_CAPTURE_SIZE;
+        if (total > GEO3D_SCAN_FALLBACK_MAX) total = GEO3D_SCAN_FALLBACK_MAX;
         frame_end = g_cop.geo_capture_head;
     }
     int head = frame_end;
@@ -1012,6 +1026,114 @@ static inline void geo3d_scan_captures(geo3d_state_t *geo,
         g_cam_rot_only = frame_eye_baked;
 }
 
+/* ---- GEO display-list scanner (authentic hardware path) ----------------- *
+ * Non-STF games and the m2-snake homebrew drive the GEO directly: the i960
+ * builds a display list in bufferram and points the GEO read pointer at it.
+ * (STF is reconstructed from the COP bone stream by geo3d_scan_captures above.)
+ * This walks that list with the geo_parse command grammar and turns each
+ * (MATRIX, OBJECT) pair into a captured_model_t — reusing the same mesh+matrix
+ * render path. Only object_data (cmd 1) is emitted; direct_data (cmd 2) inline
+ * geometry is not yet decoded (warned once and stops the walk).               */
+static inline int geo3d__dl_args(const uint32_t *L, uint32_t nw, uint32_t p, uint32_t cmd) {
+    switch (cmd) {
+        case 1: case 0x11: return 4;                          /* object_data        */
+        case 3: case 0x13: return 6;                          /* window/clip        */
+        case 7: case 0x17: case 8: case 0x18:
+        case 0x10: case 0x16: case 0x1e: return 1;            /* mode/zsort/lod/...  */
+        case 9: case 0x19: return 2;                          /* focal              */
+        case 0xa: case 0x1a: case 0xc: case 0x1c: return 3;   /* light              */
+        case 0xb: case 0x1b: return 12;                       /* matrix             */
+        case 0xd: return 2;
+        case 4: case 0x14: case 5: case 0x15:                 /* texdata: 2 + count  */
+            return 2 + (int)(p + 2 < nw ? L[p + 2] : 0);
+        case 6: return 2 + 2 * (int)(p + 2 < nw ? L[p + 2] : 0);  /* texparam        */
+        default: return 0;
+    }
+}
+
+static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
+        const uint32_t *buff_ram, uint32_t buff_words, uint32_t rstart,
+        const uint8_t *main_data, size_t main_data_size,
+        uint32_t table_off, uint32_t table_count) {
+    if (!main_data || !buff_ram) { geo->captured_count = 0; return; }
+    geo3d_lookup_build(main_data, main_data_size, table_off, table_count);
+
+    /* Snapshot the prev list for interpolation, once per vblank frame (same
+     * cadence the COP-stream scanner uses). */
+    if (g_cop.geo_frame_end != geo->last_frame_end) {
+        memcpy(geo->captured_prev, geo->captured,
+               (size_t)geo->captured_count * sizeof(captured_model_t));
+        geo->captured_prev_count = geo->captured_count;
+        geo->last_frame_end      = g_cop.geo_frame_end;
+    }
+    geo->captured_count = 0;
+
+    float cur_mat[12];
+    bool  have_mat = false;
+    static int warned_direct = 0;
+    uint32_t p = (rstart & (buff_words * 4u - 1u)) / 4u;   /* wrap within bufferram */
+    for (uint32_t guard = 0; guard < buff_words && p < buff_words
+                             && geo->captured_count < MAX_GEO_MODELS; guard++) {
+        uint32_t op = buff_ram[p];
+        if (op & 0x80000000u) break;                          /* JUMP -> flat list ends */
+        uint32_t cmd = (op >> 23) & 0x1f;
+        if (cmd == 0xf || cmd == 0x1f) break;                 /* END */
+
+        if ((cmd == 0xb || cmd == 0x1b) && p + 12u < buff_words) {
+            /* MATRIX: 12 floats stored column-major (col0,col1,col2,T) — convert
+             * to the captured_model_t row-major 3x4 layout. */
+            float m[12];
+            for (int k = 0; k < 12; k++) memcpy(&m[k], &buff_ram[p + 1 + (uint32_t)k], 4);
+            for (int r = 0; r < 3; r++) {
+                for (int c = 0; c < 3; c++) cur_mat[r * 4 + c] = m[c * 3 + r];
+                cur_mat[r * 4 + 3] = m[9 + r];
+            }
+            have_mat = true;
+        } else if ((cmd == 1 || cmd == 0x11) && p + 4u < buff_words) {
+            /* OBJECT: args = tpa, tha, oba(mesh ptr), obc. The homebrew's oba is a
+             * model-table mesh pointer, so reverse-map it to a model index and reuse
+             * the STF mesh+matrix renderer. */
+            uint32_t oba = buff_ram[p + 3];
+            int model_idx = geo3d_lookup_by_pol(oba);
+            if (model_idx >= 0) {
+                uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
+                if ((size_t)toff + MODEL_ENTRY_SIZE <= main_data_size) {
+                    captured_model_t *cm = &geo->captured[geo->captured_count];
+                    memset(cm, 0, sizeof(*cm));
+                    cm->model_idx    = model_idx;
+                    cm->material_ptr = read_u32_le(main_data + toff + 4);
+                    material_ptr_to_color(cm->material_ptr,
+                                          &cm->color[0], &cm->color[1], &cm->color[2]);
+                    cm->dbg_mesh_ptr = oba;
+                    if (have_mat) {
+                        memcpy(cm->matrix, cur_mat, sizeof(cm->matrix));
+                        /* Homebrew geometry is camera space with +z forward (GEO
+                         * projects screen = focal*x/z); the GL renderer looks down -z,
+                         * so negate the whole Z-output row (row 2 = matrix[8..11]). */
+                        cm->matrix[8]  = -cur_mat[8];
+                        cm->matrix[9]  = -cur_mat[9];
+                        cm->matrix[10] = -cur_mat[10];
+                        cm->matrix[11] = -cur_mat[11];
+                        cm->has_matrix = true;
+                        cm->dbg_have_mat = 1;
+                        cm->dbg_pos[0] = cur_mat[3];
+                        cm->dbg_pos[1] = cur_mat[7];
+                        cm->dbg_pos[2] = -cur_mat[11];
+                    }
+                    geo->captured_count++;
+                }
+            }
+        } else if (cmd == 2 || cmd == 0x12) {
+            if (!warned_direct) {
+                LOG_WARN("geo3d displaylist: direct_data (cmd 2) not yet decoded; stopping walk");
+                warned_direct = 1;
+            }
+            break;   /* variable-length inline geometry — can't skip reliably yet */
+        }
+        p += 1u + (uint32_t)geo3d__dl_args(buff_ram, buff_words, p, cmd);
+    }
+}
+
 /* ---- J=1.0 index-array polygon decoder ---------------------------------- */
 
 /*
@@ -1349,6 +1471,124 @@ static inline void geo3d_decode_model(int model_idx,
         }
         efi++;   /* this face was emitted → consumes one material record */
     }
+}
+
+/* ---- Programmatic per-model texture extractor -------------------------------
+ * Pulls a model's texture data straight from ROM — no MAME memory capture for
+ * the descriptors.  Walks the per-face material records (8 bytes each) at
+ * mat_ptr*2 in the textures ROM, decoding the SAME fields the renderer uses:
+ * tile rect, texsheet (bank), colorbase, and the flat BGR555 colour from the
+ * main_data palette (GEO3D_PALETTE_OFF + colorbase*2).  Each distinct textured
+ * tile is copied from the CORRECT bank — texsheet 0 → texram0, 1 → texram1.
+ * Face count comes from the model-table mat_ptr delta to the next entry
+ * (8-byte records → (mat_next - mat_ptr)/4 faces).
+ *   Writes  model_<N>_tex.txt  (manifest: per-face + tile list + colours)
+ *           model_<N>_tile_<i>_s<bank>_<W>x<H>_<X>_<Y>.bin  (4-bit luma tiles) */
+static int g_extract_model   = -1;   /* set via --extract N; run from the main loop */
+static int g_extract_seq     = -1;   /* >=0: append seqNNN to filenames (map cycle) */
+static int g_extract_rombank = -1;   /* --rombank N: read texels from the static 16MB
+                                      * textures ROM bank N (N*0x100000) instead of
+                                      * runtime texram. -1 = use live texram0/1. */
+
+static void geo3d_extract_model_texture(int model_idx,
+        const uint8_t *main_data, size_t main_data_size,
+        const uint8_t *materials, size_t materials_size,
+        const uint8_t *texram0,   const uint8_t *texram1,
+        uint32_t table_off, uint32_t table_count) {
+    if (!main_data || !materials || model_idx < 0 ||
+        (uint32_t)(model_idx + 1) >= table_count) return;
+    uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
+    if ((size_t)toff + 2u * MODEL_ENTRY_SIZE > main_data_size) return;
+    uint32_t uv_ptr   = read_u32_le(main_data + toff + 0);
+    uint32_t mat_ptr  = read_u32_le(main_data + toff + 4);
+    uint32_t mesh_ptr = read_u32_le(main_data + toff + 8);
+    uint32_t mat_next = read_u32_le(main_data + toff + MODEL_ENTRY_SIZE + 4);
+    if (mat_next <= mat_ptr) return;
+    uint32_t nfaces = (mat_next - mat_ptr) / 4u;   /* 8-byte (4 u16) records/face */
+    if (nfaces > 8192u) nfaces = 8192u;
+    uint32_t mat_base = mat_ptr * 2u;
+
+    struct { uint32_t s, x, y, w, h; } tiles[256]; int nt = 0;
+    char path[160];
+    snprintf(path, sizeof path, "model_%d_tex.txt", model_idx);
+    FILE *mf = fopen(path, "w");
+    if (mf) fprintf(mf, "# model %d  uv_ptr=%u mat_ptr=%u mesh_ptr=%u  faces=%u\n",
+                    model_idx, uv_ptr, mat_ptr, mesh_ptr, nfaces);
+
+    for (uint32_t f = 0; f < nfaces; f++) {
+        uint32_t rec = mat_base + f * 8u;
+        if ((size_t)rec + 8 > materials_size) break;
+        uint16_t th0 = (uint16_t)materials[rec+0] | ((uint16_t)materials[rec+1] << 8);
+        uint16_t th2 = (uint16_t)materials[rec+4] | ((uint16_t)materials[rec+5] << 8);
+        uint16_t th3 = (uint16_t)materials[rec+6] | ((uint16_t)materials[rec+7] << 8);
+        int      textured = (th0 & 0x4000) != 0;
+        uint32_t w  = 32u << (th0 & 7u), h = 32u << ((th0 >> 3) & 7u);
+        uint32_t x  = 32u * (th2 & 0x3fu), y = 32u * ((th2 >> 6) & 0x1fu);
+        uint32_t s  = (th2 >> 12) & 1u;          /* texture bank (texsheet) */
+        if      (g_uv_bank_mode == 1) s = 0u;    /* --bank override: force sheet 0 */
+        else if (g_uv_bank_mode == 2) s = 1u;    /*                  force sheet 1 */
+        else if (g_uv_bank_mode == 3) s ^= 1u;   /*                  swap banks    */
+        uint32_t cb = (th3 >> 6) & 0x3ffu;       /* colorbase */
+        uint32_t pal = GEO3D_PALETTE_OFF + cb * 2u;
+        uint16_t col = ((size_t)pal + 2 <= main_data_size)
+                       ? ((uint16_t)main_data[pal] | ((uint16_t)main_data[pal+1] << 8)) : 0;
+        if (mf) fprintf(mf,
+            "face %4u th0=%04X th2=%04X th3=%04X textured=%d bank=%u tile=(%u,%u) %ux%u colorbase=%u color=%04X\n",
+            f, th0, th2, th3, textured, s, x, y, w, h, cb, col);
+        if (textured) {
+            int hit = -1;
+            for (int t = 0; t < nt; t++)
+                if (tiles[t].s==s && tiles[t].x==x && tiles[t].y==y &&
+                    tiles[t].w==w && tiles[t].h==h) { hit = t; break; }
+            if (hit < 0 && nt < 256) {
+                tiles[nt].s=s; tiles[nt].x=x; tiles[nt].y=y; tiles[nt].w=w; tiles[nt].h=h; nt++;
+            }
+        }
+    }
+    if (mf) fprintf(mf, "# %d distinct textured tiles\n", nt);
+
+    for (int t = 0; t < nt; t++) {
+        const uint8_t *bank;
+        if (g_extract_rombank >= 0) {
+            /* static source: bank N of the 16MB textures ROM (1MB sheet each) */
+            size_t bo = (size_t)g_extract_rombank * 0x100000u;
+            bank = (bo + 0x100000u <= materials_size) ? (materials + bo) : NULL;
+        } else {
+            bank = tiles[t].s ? texram1 : texram0;   /* live texram, correct bank */
+        }
+        if (!bank) continue;
+        const uint32_t *sheet = (const uint32_t *)bank;
+        uint32_t tx = tiles[t].x, ty = tiles[t].y, tw = tiles[t].w, th = tiles[t].h;
+        /* Binary PGM (P5) grayscale: each 4-bit luma texel -> 0..255, decoded with
+         * the EXACT texram swizzle the renderer uses (16-bit halfword = 2x2 nibble
+         * block; x>=1024 folds to y^=1024). Directly viewable / convertible. */
+        if (g_extract_seq >= 0)
+            snprintf(path, sizeof path, "model_%d_seq%03d_tile_%d_s%u_%ux%u_%u_%u.pgm",
+                     model_idx, g_extract_seq, t, tiles[t].s, tw, th, tx, ty);
+        else
+            snprintf(path, sizeof path, "model_%d_tile_%d_s%u_%ux%u_%u_%u.pgm",
+                     model_idx, t, tiles[t].s, tw, th, tx, ty);
+        FILE *tf = fopen(path, "wb");
+        if (!tf) continue;
+        fprintf(tf, "P5\n%u %u\n255\n", tw, th);
+        for (uint32_t y = ty; y < ty + th; y++) {
+            for (uint32_t x = tx; x < tx + tw; x++) {
+                uint32_t x2 = x, y2 = y;
+                if (x2 >= 1024u) { x2 -= 1024u; y2 ^= 1024u; }
+                uint32_t off  = (y2 / 2u) * 512u + (x2 / 2u);
+                uint32_t word = sheet[off >> 1];
+                if (off & 1u)       word >>= 16;
+                if ((y & 1u) == 0u) word >>= 8;
+                if ((x & 1u) == 0u) word >>= 4;
+                fputc((int)((word & 0xfu) * 17u), tf);
+            }
+        }
+        fclose(tf);
+        if (mf) fprintf(mf, "# tile %d bank=%u (%u,%u) %ux%u -> %s\n",
+                        t, tiles[t].s, tx, ty, tw, th, path);
+    }
+    if (mf) fclose(mf);
+    LOG_INFO("geo3d_extract_model_texture: model %d  %u faces  %d tiles", model_idx, nfaces, nt);
 }
 
 /* ---- Build wireframes for the current capture list --------------------- */

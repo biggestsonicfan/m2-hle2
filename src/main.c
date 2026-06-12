@@ -42,6 +42,7 @@
 #include "m68k_memview.h"
 #include "input.h"
 #include "debug_window.h"
+#include "mcp_bridge.h"    /* --mcp TCP debug server (ported from m2-hle) */
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
  * g_active_profile and pulls in every per-game profile header. */
@@ -50,6 +51,8 @@
 static char g_rom_path[512] = {0};
 static int  g_autorun = 0;
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
+static int  g_mcp_enable = 0;      /* --mcp: start the TCP debug server */
+static int  g_mcp_port   = 7172;   /* --mcp-port N */
 
 static struct {
     sg_pass_action   pass_action;
@@ -77,6 +80,8 @@ static struct {
 static void emu_ensure_started(void) {
     if (!state.emu_started) {
         emu_thread_init(&state.emu, &state.cpu, &state.bus);
+        mcp_bridge_init(&state.emu, &state.cpu, &state.bus);
+        if (g_mcp_enable) mcp_bridge_start(g_mcp_port);
         state.emu_started = true;
     }
 }
@@ -367,11 +372,23 @@ static void frame(void) {
     if (state.geo3d.enabled && g_active_profile &&
             state.romset.main_data && state.romset.polygons) {
         const game_quirks_t *q = &g_active_profile->quirks;
-        geo3d_scan_captures(&state.geo3d,
-                            state.romset.main_data, state.romset.main_data_size,
-                            state.romset.polygons_size,
-                            q->model_table_offset, q->model_table_count,
-                            q->mesh_ptr_subtract, q->mesh_ptr_add);
+        if (q->geo_displaylist) {
+            /* Authentic hardware path: decode the GEO display list the i960 built
+             * in bufferram. Scan the snapshot captured at geo_flush (g_geodl_snap),
+             * not live bufferram — the SHARC HLE aliases bufferram and clobbers the
+             * list between flushes. Every m2-snake homebrew uses read_start 0x10000. */
+            if (g_geodl_snap_ready)
+                geo3d_scan_displaylist(&state.geo3d,
+                                       g_geodl_snap, BUFF_RAM_SIZE / 4, 0x10000,
+                                       state.romset.main_data, state.romset.main_data_size,
+                                       q->model_table_offset, q->model_table_count);
+        } else {
+            geo3d_scan_captures(&state.geo3d,
+                                state.romset.main_data, state.romset.main_data_size,
+                                state.romset.polygons_size,
+                                q->model_table_offset, q->model_table_count,
+                                q->mesh_ptr_subtract, q->mesh_ptr_add);
+        }
     } else {
         geo3d_lines_reset();
     }
@@ -415,12 +432,29 @@ static void frame(void) {
         /* Decode both 4-bit luma texture banks → GPU atlas for textured fills. */
         game_render_upload_atlas(state.bus.texram0, state.bus.texram1, TEXRAM0_SIZE);
         game_render_upload_luts(state.bus.luma, state.bus.colorxlat);
+        { static int _cs=0; if ((++_cs % 30)==0) {
+            for (int i=0;i<state.geo3d.captured_count;i++){ const captured_model_t *cm=&state.geo3d.captured[i];
+                if (cm->model_idx==519 || cm->model_idx==2833)
+                    LOG_INFO("CAGE m=%d bone=%d clip=%d mat=%d T=(%.2f,%.2f,%.2f) R0=(%.2f,%.2f,%.2f) R1=(%.2f,%.2f,%.2f) R2=(%.2f,%.2f,%.2f)",
+                        cm->model_idx, cm->from_bone, cm->has_clip_win, cm->has_matrix,
+                        cm->matrix[3],cm->matrix[7],cm->matrix[11],
+                        cm->matrix[0],cm->matrix[1],cm->matrix[2],
+                        cm->matrix[4],cm->matrix[5],cm->matrix[6],
+                        cm->matrix[8],cm->matrix[9],cm->matrix[10]); } } }
         /* Layer order: back colour → background tiles → 3D scene → foreground/HUD. */
         game_render_draw_game(state.video.back_view, ox, oy, w, h);
         game_render_draw_game(state.video.bg_view,   ox, oy, w, h);
         if (state.geo3d.enabled && g_active_profile &&
                 state.romset.main_data && state.romset.polygons) {
             const game_quirks_t *q = &g_active_profile->quirks;
+            /* The geo_displaylist path emits geometry already in camera space (the
+             * homebrew's own view() did the camera transform; the GEO projects with
+             * focal). Render it with an IDENTITY view + a focal-matched fov
+             * (tan(fov/2)=VIDEO_HEIGHT/2 / 300 → ~65°), not the scene camera. */
+            float cx = state.geo3d.cam_x, cy = state.geo3d.cam_y, cz = state.geo3d.cam_z;
+            float ry = state.geo3d.rot_y, rx = state.geo3d.rot_x, fov = state.geo3d.fov_deg;
+            state.geo3d.lines_only = q->geo_displaylist;   /* homebrew = wireframe (no fill overdraw) */
+            if (q->geo_displaylist) { cx = cy = cz = 0.0f; ry = rx = 0.0f; fov = 65.0f; }
             game_render_draw_captured_models(&state.geo3d,
                                              state.romset.main_data, state.romset.main_data_size,
                                              state.romset.polygons,  state.romset.polygons_size,
@@ -428,11 +462,26 @@ static void frame(void) {
                                              q->model_table_offset, q->model_table_count,
                                              q->mesh_ptr_subtract, q->mesh_ptr_add,
                                              ox, oy, w, h,
-                                             state.geo3d.cam_x, state.geo3d.cam_y, state.geo3d.cam_z,
-                                             state.geo3d.rot_y, state.geo3d.rot_x, state.geo3d.fov_deg,
+                                             cx, cy, cz, ry, rx, fov,
                                              lerp_t);
         }
         game_render_draw_game(state.video.fg_view,   ox, oy, w, h);
+
+        /* Programmatic per-model texture extractor (--extract N). Re-runs ~once/
+         * sec while set, so you can navigate to a scene where the model's texels
+         * are loaded; the ROM-side manifest/colours are always correct. */
+        if (g_extract_model >= 0 && g_active_profile && state.romset.main_data) {
+            static int _ec = 0;
+            if ((_ec++ % 60) == 0) {
+                const game_quirks_t *q = &g_active_profile->quirks;
+                geo3d_extract_model_texture(g_extract_model,
+                    state.romset.main_data, state.romset.main_data_size,
+                    state.romset.textures,  state.romset.textures_size,
+                    state.bus.texram0, state.bus.texram1,
+                    q->model_table_offset, q->model_table_count);
+                if (g_extract_seq >= 0) g_extract_seq++;
+            }
+        }
     }
 
     simgui_render();
@@ -497,6 +546,18 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_real_irq = 1;           /* tick board timers → real timer ISR delivery */
         } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             g_browse_model = atoi(argv[++i]);  /* single-model browser on N */
+        } else if (strcmp(argv[i], "--extract") == 0 && i + 1 < argc) {
+            g_extract_model = atoi(argv[++i]); /* dump model N's tiles+colours */
+        } else if (strcmp(argv[i], "--bank") == 0 && i + 1 < argc) {
+            g_uv_bank_mode = atoi(argv[++i]);  /* 0=auto 1=sheet0 2=sheet1 3=swap */
+        } else if (strcmp(argv[i], "--rombank") == 0 && i + 1 < argc) {
+            g_extract_rombank = atoi(argv[++i]); /* texel source = textures ROM bank N */
+        } else if (strcmp(argv[i], "--cyclemaps") == 0) {
+            g_extract_seq = 0;                   /* number each dump to capture every map */
+        } else if (strcmp(argv[i], "--mcp") == 0) {
+            g_mcp_enable = 1;                  /* start TCP debug server */
+        } else if (strcmp(argv[i], "--mcp-port") == 0 && i + 1 < argc) {
+            g_mcp_port = atoi(argv[++i]);
         }
     }
     return (sapp_desc){

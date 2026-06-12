@@ -865,7 +865,8 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
                                table_off, table_count,
                                mesh_ptr_subtract, mesh_ptr_add, lerp_t,
                                cam_x, cam_y, cam_z);
-        game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
+        if (!geo->lines_only)
+            game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
         game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
         return;
     }

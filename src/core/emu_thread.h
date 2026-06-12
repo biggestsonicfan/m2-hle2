@@ -195,6 +195,23 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
 
             emu_mutex_lock(&ctx->mutex);
             g_frame_done = 0;
+            /* Board-level vblank (opt-in per profile): raise the vsync pending
+             * bit once per 60 Hz slice, like the real board / MAME at scanline
+             * 384. A self-pacing homebrew that polls + ACKs intreq bit0 then
+             * advances one frame per slice (fallback timing paces the slice) —
+             * no HLE hook or hardcoded address needed. Inert unless polled. */
+            bool board_vblank = g_active_profile && g_active_profile->quirks.board_vblank;
+            if (board_vblank) {
+                irqt_raise(0x1u);
+                g_vblank_acked = 0;     /* the homebrew's vsync-ACK ends this slice */
+                /* Mark the geo capture frame boundary, exactly as sfight/fvipers
+                 * do in their HLE frame hook. Without it geo3d falls back to
+                 * scanning the WHOLE capture ring (the 24K-word COP boot firmware
+                 * + every accumulated frame) instead of just this frame's draws,
+                 * so a homebrew object draw never isolates / renders. */
+                g_cop.geo_frame_start = g_cop.geo_frame_end;
+                g_cop.geo_frame_end   = g_cop.geo_capture_head;
+            }
             /* Additive: advance the board timers one frame of cycles so the
              * enabled timer IRQ (bit5) expires and vectors its ISR. */
             if (g_real_irq) irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC);
@@ -202,6 +219,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             for (int i = 0;
                  i < EMU_STEPS_PER_SLICE
                  && !g_frame_done
+                 && !(board_vblank && g_vblank_acked)   /* stop at the frame's vsync-ACK */
                  && !ctx->request_stop
                  && !ctx->cpu->halted;
                  i++)
@@ -219,6 +237,12 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             }
             /* Run the 68K sound CPU proportional to the i960 batch. */
             sound_step(M68K_STEPS_PER_SLICE);
+
+            /* Snapshot the GEO display list while the i960 is idle (mutex held) — the
+             * homebrew is vblank-waiting just past geo_flush, so bufferram holds the
+             * intact list before the next frame's SHARC math clobbers it. */
+            if (g_active_profile && g_active_profile->quirks.geo_displaylist)
+                geodl_capture(ctx->bus);
 
             ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
             ctx->cpu_snapshot      = *ctx->cpu;
@@ -250,8 +274,10 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                     LOG_WARN("emu: CPU halted @ IP=0x%08X (steps=%llu)",
                              ctx->cpu->sfr.ip, (unsigned long long)ctx->total_steps);
                 }
-            } else if (g_frame_done) {
-                /* Per-game frame hook fired — pace to the next 16.67ms tick. */
+            } else if (g_frame_done || (board_vblank && g_vblank_acked)) {
+                /* Frame boundary (HLE hook, or the homebrew's vsync-ACK) — pace to
+                 * the next 16.67ms tick. For board_vblank this also ends the i960's
+                 * vsync busy-spin, throttling it to 60 Hz and freeing the host CPU. */
                 int64_t now = emu_now_us();
                 if (ctx->frame_deadline_us == 0) {
                     ctx->frame_deadline_us = now + EMU_SLICE_US;
@@ -271,6 +297,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 int64_t elapsed   = emu_now_us() - slice_start;
                 int64_t remaining = EMU_SLICE_US - elapsed;
                 if (remaining > 0) emu_sleep_us(remaining);
+                else               emu_sleep_us(500);   /* board_vblank slices can exceed one frame; always yield briefly so the UI / MCP thread can grab the emu mutex (else get_status etc. starve) */
             }
         }
         else if (s == EMU_STEPPING) {

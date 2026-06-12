@@ -44,8 +44,17 @@ static irq_timer_t g_irqt = {0};
 
 /* ---- IRQ controller register access (called from memory.h) -------------- */
 
+/* Set when the game ACKs (clears) the vblank pending bit (intreq bit0) — i.e. it
+ * finished a frame and consumed the vsync. The emu thread uses this to end a
+ * board_vblank slice at the frame boundary instead of busy-spinning the homebrew's
+ * vsync wait loop, which both throttles the i960 to 60 Hz and frees the host CPU. */
+static volatile int g_vblank_acked = 0;
+
 static inline uint32_t irqt_request_read(void)        { return g_irqt.intreq; }
-static inline void     irqt_request_ack (uint32_t d)  { g_irqt.intreq &= d; }   /* write = ACK */
+static inline void     irqt_request_ack (uint32_t d)  {
+    if ((g_irqt.intreq & 1u) && !(d & 1u)) g_vblank_acked = 1;   /* vblank consumed */
+    g_irqt.intreq &= d;                                          /* write = ACK */
+}
 static inline uint32_t irqt_enable_read (void)        { return g_irqt.intena; }
 static inline void     irqt_enable_write(uint32_t d)  { g_irqt.intena = d; }
 
