@@ -202,6 +202,16 @@ typedef struct {
 
 static geo3d_tri_buf_t g_geo3d_tris = {0};
 
+/* Flat-colour override: ignore the model's ROM material (colour + texture) and
+ * shade every face with the caller's flat colour. Used by the homebrew display
+ * list, where geometry is instanced from a placeholder ROM quad (model 456) whose
+ * material is meaningless — the real colour comes from the per-object colorbase.
+ * Also gates the near-plane vertex reject in the emit helpers (the homebrew emits
+ * camera-space geometry; STF does not). */
+static int   g_geo_flat_color = 0;
+/* Near-plane cull distance (camera-space units) for the homebrew flat-colour path. */
+#define GEO3D_NEAR_CULL 6.0f
+
 static inline void geo3d_tris_reset(void) { g_geo3d_tris.count = 0; }
 
 /* Emit a textured triangle: per-vertex position + tile-relative texel UV, the
@@ -215,6 +225,12 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
                                       float tx, float ty, float tw, float th,
                                       float lb, float pl) {
     if (g_geo3d_tris.count >= GEO3D_MAX_TRIS) return;
+    /* Homebrew (camera-space) near-plane reject: a face with any vertex closer than
+     * GEO3D_NEAR_CULL blows up into a huge filled wedge across the screen.  Drop it —
+     * legitimate scene geometry sits well in front (claw at z≈−9). Gated to the
+     * flat-colour homebrew path so it can't clip close STF geometry. */
+    if (g_geo_flat_color &&
+        (z0 > -GEO3D_NEAR_CULL || z1 > -GEO3D_NEAR_CULL || z2 > -GEO3D_NEAR_CULL)) return;
     geo3d_tri_t *T = &g_geo3d_tris.tris[g_geo3d_tris.count++];
     T->x0=x0; T->y0=y0; T->z0=z0; T->u0=u0; T->v0=v0;
     T->x1=x1; T->y1=y1; T->z1=z1; T->u1=u1; T->v1=v1;
@@ -237,14 +253,13 @@ static inline void geo3d_emit_line(float x0, float y0, float z0,
                                     float x1, float y1, float z1,
                                     float r,  float g,  float b) {
     if (g_geo3d_lines.count >= GEO3D_MAX_LINES) return;
-    /* Near-plane reject: the host camera looks down −z, so any endpoint at or behind
-     * the camera plane (z >= −NEAR) makes the perspective divide blow up into a streak
-     * from a screen edge.  Drop such lines — legitimate scene geometry sits well in
-     * front (z far below −NEAR).  (camera-space coords; see geo_displaylist path.) */
-    {
-        const float GEO3D_LINE_NEAR = 0.5f;
-        if (z0 > -GEO3D_LINE_NEAR || z1 > -GEO3D_LINE_NEAR) return;
-    }
+    /* Near-plane reject (homebrew camera-space geometry): the host camera looks down
+     * −z, so any endpoint closer than GEO3D_NEAR_CULL makes the perspective divide
+     * blow up into a streak/wedge from a screen edge.  The homebrew's nearest real
+     * geometry is the claw at z≈−9 (Z_NEAR_W 10 − CLAW_FWD), so −6 culls only the
+     * near-camera stragglers (stars/effects passing the eye). Gated to the flat-colour
+     * homebrew path so it can't clip close STF geometry. */
+    if (g_geo_flat_color && (z0 > -GEO3D_NEAR_CULL || z1 > -GEO3D_NEAR_CULL)) return;
     geo3d_line_t *L = &g_geo3d_lines.lines[g_geo3d_lines.count++];
     L->x0 = x0; L->y0 = y0; L->z0 = z0;
     L->x1 = x1; L->y1 = y1; L->z1 = z1;
@@ -1377,6 +1392,10 @@ static inline void geo3d_decode_model(int model_idx,
                 }
             }
         }
+
+        /* Flat-colour override (homebrew display list): keep the caller's colour,
+         * force untextured — model 456's ROM material/texture is meaningless here. */
+        if (g_geo_flat_color) { textured = false; fr = cr; fg = cg; fb = cb; }
 
         /* Atlas tile rect (pixels) for this face — passed to the shader for the
          * per-pixel wrap. tw=0 → untextured (flat color). */

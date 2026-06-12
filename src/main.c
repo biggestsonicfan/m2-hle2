@@ -459,12 +459,22 @@ static void frame(void) {
              * homebrew's own view() did the camera transform; the GEO projects with
              * focal). Render it as wireframe with the geo3d camera (live-tunable via
              * the set_camera bridge cmd; defaults set on profile load). */
-            state.geo3d.lines_only = q->geo_displaylist;
+            /* Homebrew renders SOLID: the tube walls are filled quads (geo_obj_quad)
+             * and even its "lines" are thin filled quads — so draw fills, not pure
+             * wireframe. Keep the bright wireframe overlay on for the rim/divider
+             * cores, and force flat per-object colour (model 456's ROM material is a
+             * meaningless placeholder). The homebrew does its own software backface
+             * cull, so render double-sided (cull none). */
+            state.geo3d.lines_only = false;
+            if (q->geo_displaylist) {
+                g_geo_wireframe  = 1;
+                g_geo_flat_color = 1;
+                g_backface_cull  = 0;
+            }
             /* The homebrew's display-list object order changes every frame (stars
              * move, enemies spawn/die), so captured_prev[i] is a DIFFERENT object —
              * sub-frame interpolation would smear the geometry. Disable it (lerp=1). */
             float dl_lerp = q->geo_displaylist ? 1.0f : lerp_t;
-            if (q->geo_displaylist) g_geo_wireframe = 1;   /* homebrew draws as wireframe lines */
             game_render_draw_captured_models(&state.geo3d,
                                              state.romset.main_data, state.romset.main_data_size,
                                              state.romset.polygons,  state.romset.polygons_size,
