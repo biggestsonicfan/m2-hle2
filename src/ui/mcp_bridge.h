@@ -147,6 +147,28 @@ static void mcp_cmd_set_input(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"held\":\"0x%08X\"}", held);
 }
 
+/* Live-tune the 3D camera (for the geo_displaylist render path) without rebuilding.
+ * Any omitted field keeps its current value. e.g.
+ *   {"cmd":"set_camera","cam_z":"0","fov":"65","rot_y":"0"} */
+static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
+    if (!g_geo3d_state) { snprintf(resp,(size_t)cap,"{\"ok\":false,\"error\":\"geo3d not ready\"}"); return; }
+    char v[32];
+    if (mcp_json_get_str(req,"cam_x",v,sizeof v)) g_geo3d_state->cam_x   = (float)atof(v);
+    if (mcp_json_get_str(req,"cam_y",v,sizeof v)) g_geo3d_state->cam_y   = (float)atof(v);
+    if (mcp_json_get_str(req,"cam_z",v,sizeof v)) g_geo3d_state->cam_z   = (float)atof(v);
+    if (mcp_json_get_str(req,"rot_y",v,sizeof v)) g_geo3d_state->rot_y   = (float)atof(v);
+    if (mcp_json_get_str(req,"rot_x",v,sizeof v)) g_geo3d_state->rot_x   = (float)atof(v);
+    if (mcp_json_get_str(req,"fov",  v,sizeof v)) g_geo3d_state->fov_deg = (float)atof(v);
+    if (mcp_json_get_str(req,"test", v,sizeof v)) g_geo3d_state->test_triangle = (atoi(v) != 0);
+    if (mcp_json_get_str(req,"lines_only",v,sizeof v)) g_geo3d_state->lines_only = (atoi(v) != 0);
+    snprintf(resp,(size_t)cap,
+             "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
+             "\"lines\":%d,\"tris\":%d,\"test\":%d}",
+             g_geo3d_state->cam_x,g_geo3d_state->cam_y,g_geo3d_state->cam_z,
+             g_geo3d_state->rot_y,g_geo3d_state->rot_x,g_geo3d_state->fov_deg,
+             g_geo3d_lines.count, g_geo3d_tris.count, g_geo3d_state->test_triangle ? 1 : 0);
+}
+
 static void mcp_cmd_get_registers(char *resp, int cap) {
     if (!g_mcp.emu || !g_mcp.emu->thread_alive) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emu not started\"}"); return; }
 
@@ -735,6 +757,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
 
     if      (strcmp(cmd, "get_status")       == 0) mcp_cmd_get_status(resp, cap);
     else if (strcmp(cmd, "set_input")        == 0) mcp_cmd_set_input(req, resp, cap);
+    else if (strcmp(cmd, "set_camera")       == 0) mcp_cmd_set_camera(req, resp, cap);
     else if (strcmp(cmd, "get_registers")    == 0) mcp_cmd_get_registers(resp, cap);
     else if (strcmp(cmd, "read_memory")      == 0) mcp_cmd_read_memory(req, resp, cap);
     else if (strcmp(cmd, "write_memory")     == 0) mcp_cmd_write_memory(req, resp, cap);

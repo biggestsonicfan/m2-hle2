@@ -843,8 +843,15 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     reg_write(cpu, (idx), _u_); \
                 } while(0)
 
-                #define FP_SRC1 (m1 ? cpu->fp_regs[src1_idx & 3] : INT_REG_AS_DOUBLE(src1_idx))
-                #define FP_SRC2 (m2 ? cpu->fp_regs[src2_idx & 3] : INT_REG_AS_DOUBLE(src2_idx))
+                // In FP-register mode (m=1) the 5-bit operand also encodes the
+                // i960 floating-point LITERALS: 16 (0b10000) = +0.0, 22 (0b10110)
+                // = +1.0. gcc960 emits these as `0f0.0`/`0f1.0` (e.g. `subr g,0f1.0,g`
+                // for `1.0 - x`). Without this, every 1.0 constant read as fp_regs[2]
+                // ≈ 0, breaking all `1.0 - x` math (zoom/camera/view collapse).
+                #define FP_LIT_OR_REG(idx) ((idx) == 22 ? 1.0 : (idx) == 16 ? 0.0 \
+                                                              : cpu->fp_regs[(idx) & 3])
+                #define FP_SRC1 (m1 ? FP_LIT_OR_REG(src1_idx) : INT_REG_AS_DOUBLE(src1_idx))
+                #define FP_SRC2 (m2 ? FP_LIT_OR_REG(src2_idx) : INT_REG_AS_DOUBLE(src2_idx))
                 #define FP_DST_WRITE(val) do { \
                     if (m3) cpu->fp_regs[dst_idx & 3] = (val); \
                     else WRITE_FLOAT_TO_INT_REG(dst_idx, (val)); \

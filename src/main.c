@@ -157,6 +157,13 @@ static void load_active_profile(const char *primary_zip) {
          * interrupt), so attach the I/O read callback after the bus re-init. */
         input_reset();
         input_attach(&state.bus);
+        /* geo_displaylist profiles emit camera-space geometry: start from an identity
+         * view + focal-matched fov (live-tunable via the set_camera bridge cmd). */
+        if (g_active_profile->quirks.geo_displaylist) {
+            state.geo3d.cam_x = state.geo3d.cam_y = state.geo3d.cam_z = 0.0f;
+            state.geo3d.rot_x = state.geo3d.rot_y = 0.0f;
+            state.geo3d.fov_deg = 65.0f;
+        }
         emu_ensure_started();
         emu_update_snapshots(&state.emu);
         LOG_INFO("profile '%s' loaded; reset IP = 0x%08X",
@@ -449,12 +456,10 @@ static void frame(void) {
             const game_quirks_t *q = &g_active_profile->quirks;
             /* The geo_displaylist path emits geometry already in camera space (the
              * homebrew's own view() did the camera transform; the GEO projects with
-             * focal). Render it with an IDENTITY view + a focal-matched fov
-             * (tan(fov/2)=VIDEO_HEIGHT/2 / 300 → ~65°), not the scene camera. */
-            float cx = state.geo3d.cam_x, cy = state.geo3d.cam_y, cz = state.geo3d.cam_z;
-            float ry = state.geo3d.rot_y, rx = state.geo3d.rot_x, fov = state.geo3d.fov_deg;
-            state.geo3d.lines_only = q->geo_displaylist;   /* homebrew = wireframe (no fill overdraw) */
-            if (q->geo_displaylist) { cx = cy = cz = 0.0f; ry = rx = 0.0f; fov = 65.0f; }
+             * focal). Render it as wireframe with the geo3d camera (live-tunable via
+             * the set_camera bridge cmd; defaults set on profile load). */
+            state.geo3d.lines_only = q->geo_displaylist;
+            if (q->geo_displaylist) g_geo_wireframe = 1;   /* homebrew draws as wireframe lines */
             game_render_draw_captured_models(&state.geo3d,
                                              state.romset.main_data, state.romset.main_data_size,
                                              state.romset.polygons,  state.romset.polygons_size,
@@ -462,7 +467,8 @@ static void frame(void) {
                                              q->model_table_offset, q->model_table_count,
                                              q->mesh_ptr_subtract, q->mesh_ptr_add,
                                              ox, oy, w, h,
-                                             cx, cy, cz, ry, rx, fov,
+                                             state.geo3d.cam_x, state.geo3d.cam_y, state.geo3d.cam_z,
+                                             state.geo3d.rot_y, state.geo3d.rot_x, state.geo3d.fov_deg,
                                              lerp_t);
         }
         game_render_draw_game(state.video.fg_view,   ox, oy, w, h);

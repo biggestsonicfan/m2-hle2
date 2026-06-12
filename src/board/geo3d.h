@@ -1102,8 +1102,11 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
                     memset(cm, 0, sizeof(*cm));
                     cm->model_idx    = model_idx;
                     cm->material_ptr = read_u32_le(main_data + toff + 4);
-                    material_ptr_to_color(cm->material_ptr,
-                                          &cm->color[0], &cm->color[1], &cm->color[2]);
+                    /* The homebrew picks color per-object via the object_data tha
+                     * (a colorbase header), which we don't decode yet — model 456's
+                     * table material is meaningless here, so use a visible placeholder
+                     * until the per-object colorbase is wired up. */
+                    cm->color[0] = 1.0f; cm->color[1] = 1.0f; cm->color[2] = 1.0f;
                     cm->dbg_mesh_ptr = oba;
                     if (have_mat) {
                         memcpy(cm->matrix, cur_mat, sizeof(cm->matrix));
