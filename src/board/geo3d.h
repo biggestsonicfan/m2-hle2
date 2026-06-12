@@ -237,6 +237,14 @@ static inline void geo3d_emit_line(float x0, float y0, float z0,
                                     float x1, float y1, float z1,
                                     float r,  float g,  float b) {
     if (g_geo3d_lines.count >= GEO3D_MAX_LINES) return;
+    /* Near-plane reject: the host camera looks down −z, so any endpoint at or behind
+     * the camera plane (z >= −NEAR) makes the perspective divide blow up into a streak
+     * from a screen edge.  Drop such lines — legitimate scene geometry sits well in
+     * front (z far below −NEAR).  (camera-space coords; see geo_displaylist path.) */
+    {
+        const float GEO3D_LINE_NEAR = 0.5f;
+        if (z0 > -GEO3D_LINE_NEAR || z1 > -GEO3D_LINE_NEAR) return;
+    }
     geo3d_line_t *L = &g_geo3d_lines.lines[g_geo3d_lines.count++];
     L->x0 = x0; L->y0 = y0; L->z0 = z0;
     L->x1 = x1; L->y1 = y1; L->z1 = z1;
@@ -1123,7 +1131,11 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
                         cm->dbg_pos[1] = cur_mat[7];
                         cm->dbg_pos[2] = -cur_mat[11];
                     }
-                    geo->captured_count++;
+                    /* Near-plane cull: objects at/behind the camera (z >= ~0) project
+                     * to infinity and streak across the screen (e.g. the starfield
+                     * passing the camera). Keep only those safely in front. */
+                    if (!have_mat || cm->matrix[11] <= -1.0f)
+                        geo->captured_count++;
                 }
             }
         } else if (cmd == 2 || cmd == 0x12) {

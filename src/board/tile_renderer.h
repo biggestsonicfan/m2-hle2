@@ -128,7 +128,7 @@ static inline uint16_t tileram_word(const memory_bus_t *bus, uint32_t word_off) 
  */
 static inline uint16_t tile_sample_px(const memory_bus_t *bus, uint32_t tmap_offset,
                                       int map_w, int map_h, int wx, int wy,
-                                      uint8_t *color_idx) {
+                                      uint8_t *color_idx, uint8_t *prio) {
     int map_px_w = map_w * 8;
     int map_px_h = map_h * 8;
     wx &= (map_px_w - 1);
@@ -147,6 +147,7 @@ static inline uint16_t tile_sample_px(const memory_bus_t *bus, uint32_t tmap_off
 
     uint8_t ci = tile_pixel_4bpp(bus, tile_idx, px, py);
     if (color_idx) *color_idx = ci;
+    if (prio)      *prio = (uint8_t)((entry >> 15) & 1);   /* bit15: 1 = in front of 3D */
     return pal_read16(bus, pal_bank * 16 + ci);   /* stride = 16 */
 }
 
@@ -160,7 +161,7 @@ static inline void render_tile_layer(const memory_bus_t *bus,
         for (int sx = 0; sx < VIDEO_WIDTH; sx++) {
             uint8_t  color_idx;
             uint16_t color = tile_sample_px(bus, tmap_offset, map_w, map_h,
-                                            sx + scroll_x, sy + scroll_y, &color_idx);
+                                            sx + scroll_x, sy + scroll_y, &color_idx, NULL);
             int i = sy * VIDEO_WIDTH + sx;
             output[i] = color;
             if (alpha_out)
@@ -202,9 +203,18 @@ static inline uint16_t back_color_555(const memory_bus_t *bus) {
  *
  * `opaque`: pair 1 (BG) writes every pixel (color idx 0 → palette[bank*16]); pair 0
  * (FG) writes alpha = (color idx != 0).
+ *
+ * Per-tile priority (bit15): on real hardware bit15 selects whether a tile draws
+ * IN FRONT of the 3D framebuffer (bit15=1) or BEHIND it (bit15=0) — independent of
+ * which layer it lives on.  When `out_lo`/`alpha_lo` are non-NULL, a non-transparent
+ * pixel whose tile has bit15 CLEAR is routed there (the behind-3D buffer) instead of
+ * the primary (in-front) `out`.  The homebrew Tempest relies on this: it paints a
+ * full-screen Earth on layer 0 (the FG pair) with bit15 cleared, expecting it behind
+ * the 3D tube.  STF is unaffected — its tiles already carry hardware-correct bit15.
  */
 static inline void render_sys24_pair(const memory_bus_t *bus, uint16_t *out,
-                                     uint8_t *alpha, int pair, bool opaque) {
+                                     uint8_t *alpha, int pair, bool opaque,
+                                     uint16_t *out_lo, uint8_t *alpha_lo) {
     const int MW = 64, MH = 64;
     uint32_t l0_off = (pair == 0) ? 0x0000u : 0x4000u;   /* even layer tilemap */
     uint32_t l1_off = l0_off + 0x2000u;                  /* odd layer tilemap  */
@@ -243,23 +253,32 @@ static inline void render_sys24_pair(const memory_bus_t *bus, uint16_t *out,
             } else {
                 tmap = l0_off;   /* plain single-layer / uniform scroll */
             }
-            uint8_t ci;
-            uint16_t color = tile_sample_px(bus, tmap, MW, MH, sx + h, wy, &ci);
+            uint8_t ci, pr;
+            uint16_t color = tile_sample_px(bus, tmap, MW, MH, sx + h, wy, &ci, &pr);
             int i = sy * VIDEO_WIDTH + sx;
-            out[i] = color;
-            if (alpha) alpha[i] = opaque ? 255 : (ci != 0 ? 255 : 0);
+            /* Route bit15-clear (behind-3D) pixels to the lo buffer when provided. */
+            if (out_lo && !opaque && ci != 0 && pr == 0) {
+                out_lo[i] = color;
+                if (alpha_lo) alpha_lo[i] = 255;
+                if (alpha)    alpha[i]    = 0;   /* not in the in-front (FG) layer */
+            } else {
+                out[i] = color;
+                if (alpha) alpha[i] = opaque ? 255 : (ci != 0 ? 255 : 0);
+            }
         }
     }
 }
 
 /* Background = sys24 pair B (layers 2/3), opaque.  Empty cells render palette[0]. */
 static inline void render_bg_layer(const memory_bus_t *bus, tile_layers_t *t) {
-    render_sys24_pair(bus, t->bg, t->bg_alpha, 1, true);
+    render_sys24_pair(bus, t->bg, t->bg_alpha, 1, true, NULL, NULL);
 }
 
-/* Foreground / HUD = sys24 pair A (layers 0/1), color-0 transparent. */
+/* Foreground / HUD = sys24 pair A (layers 0/1), color-0 transparent.  Per-tile bit15
+ * routes behind-3D pixels onto the (already-rendered) BG buffer; call AFTER
+ * render_bg_layer so they overlay the opaque background. */
 static inline void render_fg_layer(const memory_bus_t *bus, tile_layers_t *t) {
-    render_sys24_pair(bus, t->fg, t->alpha, 0, false);
+    render_sys24_pair(bus, t->fg, t->alpha, 0, false, t->bg, t->bg_alpha);
 }
 
 /* ---- Compositor ---------------------------------------------------------- */

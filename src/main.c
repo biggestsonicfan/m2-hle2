@@ -459,6 +459,10 @@ static void frame(void) {
              * focal). Render it as wireframe with the geo3d camera (live-tunable via
              * the set_camera bridge cmd; defaults set on profile load). */
             state.geo3d.lines_only = q->geo_displaylist;
+            /* The homebrew's display-list object order changes every frame (stars
+             * move, enemies spawn/die), so captured_prev[i] is a DIFFERENT object —
+             * sub-frame interpolation would smear the geometry. Disable it (lerp=1). */
+            float dl_lerp = q->geo_displaylist ? 1.0f : lerp_t;
             if (q->geo_displaylist) g_geo_wireframe = 1;   /* homebrew draws as wireframe lines */
             game_render_draw_captured_models(&state.geo3d,
                                              state.romset.main_data, state.romset.main_data_size,
@@ -469,7 +473,7 @@ static void frame(void) {
                                              ox, oy, w, h,
                                              state.geo3d.cam_x, state.geo3d.cam_y, state.geo3d.cam_z,
                                              state.geo3d.rot_y, state.geo3d.rot_x, state.geo3d.fov_deg,
-                                             lerp_t);
+                                             dl_lerp);
         }
         game_render_draw_game(state.video.fg_view,   ox, oy, w, h);
 
