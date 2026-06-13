@@ -435,8 +435,14 @@ static void frame(void) {
      * Layer order: back-back colour → background tiles → (3D, Phase 9) → FG/HUD. */
     {
         int ox, oy, w, h;
-        game_render_letterbox(sapp_width(), sapp_height(),
+        /* Reserve the top main-menu-bar strip so the game (and its row-0 HUD) isn't
+         * occluded by the opaque ImGui bar drawn on top. */
+        int menu_h = (int)(igGetFrameHeight() * sapp_dpi_scale());
+        int avail_h = sapp_height() - menu_h;
+        if (avail_h < 1) avail_h = 1;
+        game_render_letterbox(sapp_width(), avail_h,
                               VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
+        oy += menu_h;
         /* Decode both 4-bit luma texture banks → GPU atlas for textured fills. */
         game_render_upload_atlas(state.bus.texram0, state.bus.texram1, TEXRAM0_SIZE);
         game_render_upload_luts(state.bus.luma, state.bus.colorxlat);
