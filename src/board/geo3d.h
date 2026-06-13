@@ -212,8 +212,11 @@ static int   g_geo_flat_color = 0;
 /* Luma brightening for the homebrew flat path: approximates the GEO colorxlat ramp
  * that brightens lit faces above their dark base hue (live-tunable). */
 static float g_geo_flat_boost = 2.0f;
-/* Near-plane cull distance (camera-space units) for the homebrew flat-colour path. */
-#define GEO3D_NEAR_CULL 6.0f
+/* Near-plane cull distance (camera-space units) for the homebrew flat-colour path.
+ * Must stay below the closest legitimate geometry — the HUD lives icons sit at
+ * HUD_LZ=5.0 (z=-5) — while still rejecting the near-camera streak stars that cross
+ * z≈0. 4.0 keeps the lives with margin and kills the explosive crossers. */
+#define GEO3D_NEAR_CULL 4.0f
 
 static inline void geo3d_tris_reset(void) { g_geo3d_tris.count = 0; }
 
@@ -234,6 +237,19 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
      * flat-colour homebrew path so it can't clip close STF geometry. */
     if (g_geo_flat_color &&
         (z0 > -GEO3D_NEAR_CULL || z1 > -GEO3D_NEAR_CULL || z2 > -GEO3D_NEAR_CULL)) return;
+    /* Degenerate close-quad reject: the homebrew's small HUD geo_obj_line elements
+     * (lives icons at z≈-5) occasionally decode with a bad col0 that stretches one
+     * thin-quad edge across the screen (a vertex collapses toward x≈0). A genuine
+     * HUD claw spans well under a unit; reject a near-camera tri whose planar extent
+     * is implausibly large (the streak) while keeping the small real glyphs. */
+    if (g_geo_flat_color) {
+        float zc = (z0 + z1 + z2) * (1.0f / 3.0f);
+        if (zc > -8.0f) {                       /* HUD / near-camera region only */
+            float mnx = fminf(x0, fminf(x1, x2)), mxx = fmaxf(x0, fmaxf(x1, x2));
+            float mny = fminf(y0, fminf(y1, y2)), mxy = fmaxf(y0, fmaxf(y1, y2));
+            if ((mxx - mnx) > 1.5f || (mxy - mny) > 1.5f) return;
+        }
+    }
     geo3d_tri_t *T = &g_geo3d_tris.tris[g_geo3d_tris.count++];
     T->x0=x0; T->y0=y0; T->z0=z0; T->u0=u0; T->v0=v0;
     T->x1=x1; T->y1=y1; T->z1=z1; T->u1=u1; T->v1=v1;
