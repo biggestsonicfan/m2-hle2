@@ -1168,6 +1168,16 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
                         geo->captured_count++;
                 }
             }
+        } else if (cmd == 0xa && p + 3u < buff_words) {
+            /* LIGHT (0x05000A0A): 3 floats (x,y,z). The GEO lights each face by
+             * normal·light; mirror it into the renderer's light dir so the flat
+             * panels shade like the HLE. Camera space — negate z to match the
+             * Z-row negation the host (−z forward) applies to the geometry. */
+            float lx, ly, lz;
+            memcpy(&lx, &buff_ram[p + 1], 4);
+            memcpy(&ly, &buff_ram[p + 2], 4);
+            memcpy(&lz, &buff_ram[p + 3], 4);
+            g_light_dir[0] = lx; g_light_dir[1] = ly; g_light_dir[2] = -lz;
         } else if (cmd == 2 || cmd == 0x12) {
             if (!warned_direct) {
                 LOG_WARN("geo3d displaylist: direct_data (cmd 2) not yet decoded; stopping walk");
