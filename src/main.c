@@ -331,6 +331,27 @@ static void init(void) {
             .clear_value = 1.0f,
         },
     };
+
+#if defined(_WIN32)
+    /* Grab keyboard focus on launch so the user doesn't have to click the window
+     * before input works. SetForegroundWindow on its own is usually blocked by
+     * Windows' focus-stealing guard, so briefly attach our input queue to the
+     * current foreground thread's to be granted the foreground. */
+    {
+        HWND hwnd = (HWND)sapp_win32_get_hwnd();
+        if (hwnd) {
+            HWND  fg     = GetForegroundWindow();
+            DWORD fg_tid = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+            DWORD my_tid = GetCurrentThreadId();
+            if (fg_tid && fg_tid != my_tid) AttachThreadInput(fg_tid, my_tid, TRUE);
+            ShowWindow(hwnd, SW_SHOW);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+            if (fg_tid && fg_tid != my_tid) AttachThreadInput(fg_tid, my_tid, FALSE);
+        }
+    }
+#endif
 }
 
 static void frame(void) {
