@@ -209,6 +209,9 @@ static geo3d_tri_buf_t g_geo3d_tris = {0};
  * Also gates the near-plane vertex reject in the emit helpers (the homebrew emits
  * camera-space geometry; STF does not). */
 static int   g_geo_flat_color = 0;
+/* Luma brightening for the homebrew flat path: approximates the GEO colorxlat ramp
+ * that brightens lit faces above their dark base hue (live-tunable). */
+static float g_geo_flat_boost = 2.0f;
 /* Near-plane cull distance (camera-space units) for the homebrew flat-colour path. */
 #define GEO3D_NEAR_CULL 6.0f
 
@@ -1486,6 +1489,19 @@ static inline void geo3d_decode_model(int model_idx,
             }
             if (shade>1.0f) shade=1.0f;
             pl = shade;
+        }
+
+        /* Homebrew flat panels: the GEO brightens lit faces via the colorxlat luma
+         * ramp (dark base hue + lit normal → bright panel). The shader's flat path
+         * only darkens (×pl≤1), so the dark C_TUBE base never brightens. Approximate
+         * the ramp by scaling the flat colour up with poly-luma, then neutralise the
+         * shader's own ×pl so it isn't applied twice. */
+        if (g_geo_flat_color) {
+            float boost = pl * g_geo_flat_boost;
+            fr = fminf(fr * boost, 1.0f);
+            fg = fminf(fg * boost, 1.0f);
+            fb = fminf(fb * boost, 1.0f);
+            pl = 1.0f;
         }
 
         if (is_tri) {

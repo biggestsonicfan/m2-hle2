@@ -467,7 +467,7 @@ static void frame(void) {
              * cull, so render double-sided (cull none). */
             state.geo3d.lines_only = false;
             if (q->geo_displaylist) {
-                g_geo_wireframe  = 1;
+                g_geo_wireframe  = 0;   /* dividers/rims are filled thin-quads, not wireframe */
                 g_geo_flat_color = 1;
                 g_backface_cull  = 0;
             }
