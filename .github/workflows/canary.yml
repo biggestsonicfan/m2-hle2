@@ -1,0 +1,130 @@
+name: canary
+
+# Rolling canary: every push to master builds, tests, and republishes a single
+# pre-release tagged `canary`. Download URLs are therefore stable:
+#   https://github.com/<owner>/m2-hle2/releases/download/canary/m2hle-windows-x64.zip
+on:
+  push:
+    branches: [master]
+    # tools/ is the Node grading harness — it never changes the binary.
+    paths-ignore: ['**.md', 'tools/**']
+  workflow_dispatch:
+  # schedule:
+  #   - cron: '0 7 * * *'   # uncomment for a nightly build even without pushes
+
+# One canary at a time; a newer push supersedes an in-flight build.
+concurrency:
+  group: canary
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # needed to move the tag and publish the release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            exe: m2hle.exe
+          - os: ubuntu-latest
+            name: linux-x64
+            exe: m2hle
+            # Linux/X11 path is unproven; don't let it block the Windows canary.
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # git describe / commit count for the version stamp
+          submodules: false     # vendor/noclip feeds tools/, not the CMake build
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libgl1-mesa-dev
+
+      - name: Stamp version
+        id: ver
+        shell: bash
+        run: |
+          echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DM2HLE_VERSION="${{ steps.ver.outputs.version }}"
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      # rom_test / boot_test / geo_test / input_test hardcode a dev-machine ROM
+      # path and cannot run here. The rest are self-contained.
+      - name: Test
+        run: >
+          ctest --test-dir build -C Release --output-on-failure
+          -R "^(mem_test|i960_test|cop_test|m68k_test|emu_test)$"
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/stage
+          cp build/Release/${{ matrix.exe }} dist/stage/
+          cp README.md dist/stage/
+          echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
+          cd dist/stage
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a ../m2hle-${{ matrix.name }}.zip ./*
+          else
+            zip -r ../m2hle-${{ matrix.name }}.zip ./*
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m2hle-${{ matrix.name }}
+          path: dist/*.zip
+          retention-days: 14   # per-commit history, independent of the rolling release
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, submodules: false }
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+          pattern: m2hle-*
+          merge-multiple: true
+
+      - name: Move the canary tag to this commit
+        run: |
+          git tag -f canary "$GITHUB_SHA"
+          git push -f origin refs/tags/canary
+
+      - name: Publish / replace the rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Rolling canary build of \`master\`.
+
+          Commit: ${GITHUB_SHA}
+          Built: $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          $(git log -5 --pretty='- %s (%h)')
+
+          Unsigned development build. No ROMs are included — supply your own."
+          if gh release view canary >/dev/null 2>&1; then
+            gh release edit canary --notes "$NOTES" --prerelease --latest=false
+          else
+            gh release create canary --title "Canary (master)" --notes "$NOTES" \
+              --prerelease --latest=false
+          fi
+          gh release upload canary dl/*.zip --clobber

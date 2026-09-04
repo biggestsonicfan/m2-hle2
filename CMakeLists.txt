@@ -15,6 +15,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(VENDOR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set(SRC    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# Version stamp. CI (.github/workflows/canary.yml) passes -DM2HLE_VERSION=rNNN-<sha>;
+# a local build just reports "dev".
+set(M2HLE_VERSION "dev" CACHE STRING "Version string baked into the binary")
+add_compile_definitions(M2HLE_VERSION="${M2HLE_VERSION}")
+
 # ---------------------------------------------------------------------------
 # cimgui + imgui (single static lib)
 #
