@@ -68,3 +68,18 @@ m2hle.log
 __pycache__/
 *.pyc
 mcp_server/.venv/
+
+# Homebrew / ROM staging used for local m2snake testing (contains ROM images)
+test_m2snake/
+
+# Runtime debug dumps written by geo3d.h / the camera logger
+cam_ours.csv
+model_tex.txt
+model_uv.txt
+
+# mcp_server/ holds one real server + client; everything else there is
+# throwaway diagnostic scripts and screenshots. Whitelist the real files.
+mcp_server/*
+!mcp_server/server.py
+!mcp_server/m2hle_client.py
+!mcp_server/requirements.txt
