@@ -48,6 +48,8 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
   ROM list + CRC32s, quirks).
 - [tests/](tests/) — nine standalone CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input).
 - [mcp_server/](mcp_server/) — Python MCP server that drives a running emulator over the bridge.
+- [tools/](tools/) — graders that measure this emulator against an independent implementation
+  of the same ROM formats, with a MAME digest as the third point. See [tools/README.md](tools/README.md).
 - [vendor/](vendor/) — cimgui (dear_bindings), Sokol, ImGuiFileDialog, miniz, vendored in tree.
 
 Everything except `main.c`, `sokol_impl.c/.m`, and the vendored `.c` files is a header-only
@@ -63,6 +65,8 @@ Everything except `main.c`, `sokol_impl.c/.m`, and the vendored `.c` files is a 
   restart. Supersedes PROPOSAL.md where they disagree.
 - [PROPOSAL.md](PROPOSAL.md) — the original architecture proposal, kept for context.
 - [MCP_GUIDE.md](MCP_GUIDE.md) — the emulator's automation protocol and tool reference.
+- [tools/README.md](tools/README.md) — the grading harness: what it measures, what it cannot,
+  and the numbers it currently reports.
 
 ---
 

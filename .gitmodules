@@ -1,0 +1,3 @@
+[submodule "vendor/noclip"]
+	path = vendor/noclip
+	url = https://github.com/biggestsonicfan/noclip.git

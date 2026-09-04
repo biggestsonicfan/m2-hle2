@@ -202,6 +202,17 @@ typedef struct {
 
 static geo3d_tri_buf_t g_geo3d_tris = {0};
 
+/* Where emitted triangles land.
+ *
+ * Normally the buffer above, which the renderer draws. A tool that wants to
+ * decode a model without drawing it — the MCP bridge's model dump, which sweeps
+ * every entry in the table — points this at a buffer of its own instead, so it
+ * is not competing with the render thread for the one the frame is built in.
+ * While it is redirected g_geo3d_dump_busy is set, and geo3d_build_wireframes
+ * leaves the scene alone rather than resetting a buffer it no longer owns. */
+static geo3d_tri_buf_t *g_geo3d_tri_sink   = &g_geo3d_tris;
+static volatile int     g_geo3d_dump_busy  = 0;
+
 /* Flat-colour override: ignore the model's ROM material (colour + texture) and
  * shade every face with the caller's flat colour. Used by the homebrew display
  * list, where geometry is instanced from a placeholder ROM quad (model 456) whose
@@ -218,7 +229,7 @@ static float g_geo_flat_boost = 2.0f;
  * z≈0. 4.0 keeps the lives with margin and kills the explosive crossers. */
 #define GEO3D_NEAR_CULL 4.0f
 
-static inline void geo3d_tris_reset(void) { g_geo3d_tris.count = 0; }
+static inline void geo3d_tris_reset(void) { g_geo3d_tri_sink->count = 0; }
 
 /* Emit a textured triangle: per-vertex position + tile-relative texel UV, the
  * atlas tile rect (tx,ty,tw,th in pixels), plus a flat color.  The shader wraps
@@ -230,7 +241,7 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
                                       float r,  float g,  float b,
                                       float tx, float ty, float tw, float th,
                                       float lb, float pl) {
-    if (g_geo3d_tris.count >= GEO3D_MAX_TRIS) return;
+    if (g_geo3d_tri_sink->count >= GEO3D_MAX_TRIS) return;
     /* Homebrew (camera-space) near-plane reject: a face with any vertex closer than
      * GEO3D_NEAR_CULL blows up into a huge filled wedge across the screen.  Drop it —
      * legitimate scene geometry sits well in front (claw at z≈−9). Gated to the
@@ -250,7 +261,7 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
             if ((mxx - mnx) > 1.5f || (mxy - mny) > 1.5f) return;
         }
     }
-    geo3d_tri_t *T = &g_geo3d_tris.tris[g_geo3d_tris.count++];
+    geo3d_tri_t *T = &g_geo3d_tri_sink->tris[g_geo3d_tri_sink->count++];
     T->x0=x0; T->y0=y0; T->z0=z0; T->u0=u0; T->v0=v0;
     T->x1=x1; T->y1=y1; T->z1=z1; T->u1=u1; T->v1=v1;
     T->x2=x2; T->y2=y2; T->z2=z2; T->u2=u2; T->v2=v2;
@@ -1705,6 +1716,9 @@ static inline void geo3d_build_wireframes(geo3d_state_t *geo,
                                            uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
                                            float lerp_t,
                                            float cam_x, float cam_y, float cam_z) {
+    /* A bridge model dump owns the emit sink for the moment; leave the scene as
+     * it stands rather than resetting a buffer this frame will not refill. */
+    if (g_geo3d_dump_busy) return;
     geo3d_lines_reset();
     geo3d_tris_reset();
     if (!geo->enabled) return;

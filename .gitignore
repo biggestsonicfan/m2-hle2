@@ -83,3 +83,15 @@ mcp_server/*
 !mcp_server/server.py
 !mcp_server/m2hle_client.py
 !mcp_server/requirements.txt
+
+# Grading harness output — captures of the running game (its own data) and the
+# model dumps. tools/ defaults to a temp directory outside the checkout; these
+# cover a run that was pointed here instead.
+tools/out/
+tools/**/capture.json
+texram0.bin
+texram1.bin
+lumaram.bin
+colorxlat.bin
+palram.bin
+build_vs22_*.log

@@ -275,6 +275,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                              ctx->cpu->sfr.ip, (unsigned long long)ctx->total_steps);
                 }
             } else if (g_frame_done || (board_vblank && g_vblank_acked)) {
+                g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
                 /* Frame boundary (HLE hook, or the homebrew's vsync-ACK) — pace to
                  * the next 16.67ms tick. For board_vblank this also ends the i960's
                  * vsync busy-spin, throttling it to 60 Hz and freeing the host CPU. */
