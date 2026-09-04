@@ -50,7 +50,16 @@ ROM set: MAME `sfight.zip` (clone of `schamp.zip`). The emulator looks for `scha
 ### Status and registers
 
 **`get_status()`**
-Returns: `running` (bool), `halted` (bool), `ip` (hex string), `steps_per_second` (int), `profile` (string).
+Returns: `running` (bool), `halted` (bool), `ip` (hex string), `steps_per_second` (int),
+`profile` (string), `frames` (int), `rom_loaded` (bool).
+
+`frames` is a monotonic count of completed game frames — the emulator's own frame
+clock, which is what a capture should pace on rather than wall time or steps/s.
+
+`rom_loaded` is not the same question as `profile`. The profile resolves from the
+set's CRC32s while the ROM regions are still being assembled, so a tool that
+treats a resolved profile as "the data is there" can read a table of zeros.
+Anything that decodes out of the ROM must wait for `rom_loaded`.
 
 **`get_registers()`**
 Returns a full i960 CPU snapshot:
@@ -76,6 +85,30 @@ Read up to 4096 bytes from the bus. `addr` is a hex string (`"0x00500700"`). Ret
 **`write_memory(addr: str, data: str)`**
 Write bytes to the bus. `data` is a hex string with no spaces. Returns `bytes_written`.
 
+**`dump_memory_file(addr: str, size: int, path: str)`**
+Copy a bus range straight to a file, up to 32 MB in one call. `read_memory` caps
+at 4096 bytes to keep a reply inside the 128 kB buffer, so pulling a 1 MB
+texture sheet through it is 256 round trips and twice that again in hex on the
+wire; this is one request. The copy is made under the emu mutex, so the range is
+one consistent snapshot rather than a run of reads the i960 wrote through the
+middle of — which matters for anything the game is still filling.
+
+Returns `bytes`, `nonzero` (how many of them are not zero, useful for telling a
+filled region from an empty one without moving it) and `frames`.
+
+**`dump_model(model: int, count: int, path: str)`**
+Run the emulator's own index-array polygon decoder over a range of the model
+table and write the triangles out. No matrix is applied and the emulator need
+not be running — this decodes out of the ROM regions, not out of the running
+machine — but `rom_loaded` must be true.
+
+Geometry only: colour, texture tile and UV all depend on what the running game
+has uploaded, and a decoder comparison should not be measuring that.
+
+File format, little-endian: `"M2MD"`, u32 version=1, u32 first, u32 count, then
+per model a u32 index, a u32 triangle count and that many `9 * f32` triples.
+Returns `first`, `count`, `nonempty`, `tris`.
+
 ### Execution control
 
 **`emu_run()`** — Start free-running execution (equivalent to F9 / Resume).
@@ -83,6 +116,18 @@ Write bytes to the bus. `data` is a hex string with no spaces. Returns `bytes_wr
 **`emu_stop()`** — Pause execution.
 
 **`emu_step(count: int = 1)`** — Step `count` instructions. Emulator must be stopped. Count range: 1–1 000 000.
+
+**`wait_frames(count: int = 1, timeout_ms: int = 30000)`**
+Block until the game has advanced `count` frames. Returns `frames` (the clock),
+`advanced`, `reached` (bool) and `elapsed_ms`. `reached` is false if the game
+stalled or stopped instead, so a driver can tell "slow" from "stopped" rather
+than assuming the frames happened.
+
+A stopped emulator produces no frames and the call gives up on one — but only
+after four seconds, because the bridge accepts a client well before a 17 MB ROM
+set has finished loading and before `--run` has taken effect. Bailing out
+immediately there would hand every caller `reached: false` the moment it
+connected.
 
 **`wait_for_stop(timeout_ms: int = 30000)`**
 Block until the emulator stops (breakpoint hit, CPU halt, or manual pause). Returns:

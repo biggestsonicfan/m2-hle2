@@ -25,6 +25,12 @@
  * cut short and the thread sleeps until the next 16.67 ms tick. */
 static volatile int g_frame_done = 0;
 
+/* Monotonic count of completed game frames. The emu thread bumps it at every
+ * frame boundary (HLE pace hook or board vblank ACK). Tooling outside the
+ * emulator needs a frame clock to pace a capture by — MAME's drivers use the
+ * screen's frame notifier for exactly this — and steps/s is not one. */
+static volatile unsigned g_emu_frames = 0;
+
 /* Simulate an i960 `ret`: restore the previous register window and set IP to
  * the saved return address.  Use this in hooks that bypass whole functions. */
 static inline void hle_ret(i960_cpu_t *cpu) {

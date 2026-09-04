@@ -25,6 +25,7 @@
 #include "breakpoint.h"
 #include "log.h"
 #include "game_profile.h"
+#include "rom_loader.h"   /* romset_t — the regions the model decoder reads */
 #include "input.h"     /* g_input.held — drive the game's I/O ports over the bridge */
 
 #ifdef _WIN32
@@ -48,6 +49,16 @@
 #  define mcp_sockerr()     errno
 #endif
 
+/* Largest range dump_memory_file will copy in one call — enough for a whole
+ * 1 MB texture sheet or the 32 MB main-data region, and a bound on how much the
+ * bridge will allocate for a single request. */
+#define MCP_DUMP_MAX_BYTES  (32u * 1024u * 1024u)
+
+/* How long wait_frames will sit on a stopped emulator before concluding no
+ * frame is coming. Long enough to cover a ROM load — the bridge accepts a
+ * client well before --run has taken effect. */
+#define MCP_STOPPED_GRACE_MS  4000u
+
 /* ---- Module state -------------------------------------------------------- */
 
 typedef struct {
@@ -56,6 +67,10 @@ typedef struct {
     emu_thread_ctx_t *emu;
     i960_cpu_t       *cpu;
     memory_bus_t     *bus;
+    /* The assembled ROM regions, for commands that decode straight out of them
+     * rather than out of the running machine's RAM. Set by main.c after a load;
+     * null until then, and every such command has to check. */
+    const romset_t   *romset;
 
 #ifdef _WIN32
     HANDLE            thread;
@@ -131,10 +146,13 @@ static void mcp_cmd_get_status(char *resp, int cap) {
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
-             "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"profile\":\"%s\"}",
+             "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"profile\":\"%s\","
+             "\"frames\":%u,\"rom_loaded\":%s}",
              running ? "true" : "false",
              halted  ? "true" : "false",
-             ip, sps, profile_id);
+             ip, sps, profile_id,
+             g_emu_frames,
+             (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false");
 }
 
 /* Drive game input: set the active-high held mask (0x500700 layout, same bits the
@@ -748,6 +766,192 @@ static void mcp_cmd_wait_for_stop(const char *req, char *resp, int cap) {
 
 /* ---- Command dispatch ---------------------------------------------------- */
 
+/* Dump a bus range straight to a file.
+ *
+ * read_memory caps at 4096 bytes to keep a response inside the 128 kB reply
+ * buffer, so pulling texture RAM through it is 512 round trips a sheet. The
+ * grading tools want whole regions — two 1 MB sheets, luma RAM, colorxlat —
+ * and want them as bytes rather than as hex, so this writes the range out
+ * from inside the emulator and hands back only the count. Same reason MAME's
+ * capture Lua writes its own files rather than shipping words over the bridge.
+ *
+ * The read goes through mem_read8 rather than at the region's backing store so
+ * a range that spans regions, or one behind an MMIO callback, dumps the same
+ * bytes the i960 would see. */
+static void mcp_cmd_dump_memory_file(const char *req, char *resp, int cap) {
+    uint32_t addr = 0, size = 0;
+    char path[512] = {0};
+    if (!mcp_json_get_u32(req, "addr", &addr) || !mcp_json_get_u32(req, "size", &size) ||
+        !mcp_json_get_str(req, "path", path, sizeof(path))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing addr, size or path\"}");
+        return;
+    }
+    if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
+    if (size > MCP_DUMP_MAX_BYTES) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"size above %u\"}", (unsigned)MCP_DUMP_MAX_BYTES);
+        return;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(size ? size : 1);
+    if (!buf) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return; }
+
+    /* One consistent snapshot: the i960 must not write half of texture RAM
+     * between the first byte and the last. Copy under the emu mutex, write the
+     * file outside it — disk I/O inside the critical section stalls the UI. */
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; i < size; i++) {
+        uint8_t b = mem_read8(g_mcp.bus, addr + i);
+        buf[i] = b;
+        if (b) nonzero++;
+    }
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        free(buf);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"cannot open file\"}");
+        return;
+    }
+    size_t wrote = fwrite(buf, 1, size, f);
+    fclose(f);
+    free(buf);
+
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":%s,\"addr\":\"0x%08X\",\"bytes\":%u,\"nonzero\":%u,\"frames\":%u}",
+             wrote == size ? "true" : "false", addr, (unsigned)wrote, nonzero, g_emu_frames);
+}
+
+/* Block until the game has advanced N frames, then report the frame clock.
+ *
+ * The capture drivers pace by game frame, not by wall clock: "let it run four
+ * frames and dump" has to mean four of the board's frames however fast the host
+ * is. A stalled game (no frame hook firing) returns advanced < count rather
+ * than hanging, so a caller can tell "slow" from "stopped". */
+static void mcp_cmd_wait_frames(const char *req, char *resp, int cap) {
+    uint32_t count = 1, timeout_ms = 30000;
+    mcp_json_get_u32(req, "count", &count);
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    if (timeout_ms > 300000) timeout_ms = 300000;
+
+    unsigned start = g_emu_frames;
+    uint32_t elapsed = 0;
+    /* A stopped emulator produces no frames, so give up on one rather than sit
+     * out the whole timeout — but only after it has been stopped a while. On
+     * startup the bridge is listening before the ROM has finished loading and
+     * before --run takes effect, and an immediate bail there would hand every
+     * caller reached:false the moment it connected. */
+    uint32_t idle_ms = 0;
+    while (elapsed < timeout_ms && (g_emu_frames - start) < count) {
+        if (g_mcp.emu && !emu_is_running(g_mcp.emu)) {
+            idle_ms += 2;
+            if (idle_ms >= MCP_STOPPED_GRACE_MS) break;
+        } else {
+            idle_ms = 0;
+        }
+        emu_sleep_ms(2);
+        elapsed += 2;
+    }
+    unsigned advanced = g_emu_frames - start;
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"frames\":%u,\"advanced\":%u,\"reached\":%s,\"elapsed_ms\":%u}",
+             g_emu_frames, advanced, advanced >= count ? "true" : "false", elapsed);
+}
+
+/* Decode model-table entries and write the triangles out as a file.
+ *
+ * This is the emulator's own index-array polygon decoder — the one in geo3d.h,
+ * with the connectivity rules CLAUDE.md calls load-bearing — run over a range
+ * of the model table with no matrix, so its output can be held against another
+ * implementation of the same format.
+ *
+ * Geometry only. Colour, texture tile and UV all depend on what the running
+ * game has uploaded, and a decoder grade should not be measuring that; what
+ * comes out is positions, which are a pure function of the ROM.
+ *
+ * The emit sink is redirected for the duration so the sweep does not fight the
+ * render thread for the buffer the current frame is being built in, and
+ * geo3d_build_wireframes stands down while it is (see g_geo3d_dump_busy).
+ *
+ * Format, little-endian throughout:
+ *   magic "M2MD" | u32 version=1 | u32 first | u32 count
+ *   then per model: u32 index | u32 tris | tris * 9 * f32 (x,y,z per vertex)
+ */
+static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
+    uint32_t first = 0, count = 1;
+    char path[512] = {0};
+    mcp_json_get_u32(req, "model", &first);
+    mcp_json_get_u32(req, "count", &count);
+    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    /* `loaded` and not merely allocated. The regions are calloc'd before they
+     * are filled, and a profile resolves in between — decoding out of the gap
+     * reads zero mesh pointers and reports every model empty, which looks like
+     * a decoder that agrees about nothing rather than like a race. */
+    if (!g_mcp.romset || !g_mcp.romset->loaded ||
+        !g_mcp.romset->main_data || !g_mcp.romset->polygons) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"no ROM loaded yet\"}"); return;
+    }
+    if (!g_active_profile) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no game profile\"}"); return;
+    }
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (first >= q->model_table_count) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"model %u is past the table's %u\"}",
+                 first, q->model_table_count);
+        return;
+    }
+    if (count > q->model_table_count - first) count = q->model_table_count - first;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"cannot open file\"}"); return; }
+
+    /* One private sink for the whole sweep. It is the same size as the shared
+     * one, which is why it is static rather than on the bridge thread's stack. */
+    static geo3d_tri_buf_t dump_buf;
+    geo3d_tri_buf_t *saved = g_geo3d_tri_sink;
+    g_geo3d_dump_busy = 1;
+    g_geo3d_tri_sink  = &dump_buf;
+
+    uint32_t hdr[4];
+    memcpy(hdr, "M2MD", 4);
+    hdr[1] = 1; hdr[2] = first; hdr[3] = count;
+    fwrite(hdr, 4, 4, f);
+
+    uint32_t nonempty = 0, total_tris = 0;
+    for (uint32_t m = first; m < first + count; m++) {
+        dump_buf.count = 0;
+        geo3d_decode_model((int)m,
+                           g_mcp.romset->main_data, g_mcp.romset->main_data_size,
+                           g_mcp.romset->polygons,  g_mcp.romset->polygons_size,
+                           g_mcp.romset->textures,  g_mcp.romset->textures_size,
+                           q->model_table_offset, q->model_table_count,
+                           q->mesh_ptr_subtract, q->mesh_ptr_add,
+                           NULL, 1.0f, 1.0f, 1.0f);
+        uint32_t n = (uint32_t)dump_buf.count;
+        uint32_t rec[2] = { m, n };
+        fwrite(rec, 4, 2, f);
+        for (uint32_t i = 0; i < n; i++) {
+            const geo3d_tri_t *T = &dump_buf.tris[i];
+            float v[9] = { T->x0, T->y0, T->z0, T->x1, T->y1, T->z1, T->x2, T->y2, T->z2 };
+            fwrite(v, 4, 9, f);
+        }
+        if (n) { nonempty++; total_tris += n; }
+    }
+
+    g_geo3d_tri_sink  = saved;
+    g_geo3d_dump_busy = 0;
+    fclose(f);
+
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"first\":%u,\"count\":%u,\"nonempty\":%u,\"tris\":%u}",
+             first, count, nonempty, total_tris);
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -761,6 +965,9 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "get_registers")    == 0) mcp_cmd_get_registers(resp, cap);
     else if (strcmp(cmd, "read_memory")      == 0) mcp_cmd_read_memory(req, resp, cap);
     else if (strcmp(cmd, "write_memory")     == 0) mcp_cmd_write_memory(req, resp, cap);
+    else if (strcmp(cmd, "dump_memory_file") == 0) mcp_cmd_dump_memory_file(req, resp, cap);
+    else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
+    else if (strcmp(cmd, "dump_model")       == 0) mcp_cmd_dump_model(req, resp, cap);
     else if (strcmp(cmd, "emu_run")          == 0) mcp_cmd_emu_run(resp, cap);
     else if (strcmp(cmd, "emu_stop")         == 0) mcp_cmd_emu_stop(resp, cap);
     else if (strcmp(cmd, "emu_step")         == 0) mcp_cmd_emu_step(req, resp, cap);
@@ -971,6 +1178,10 @@ static inline void mcp_bridge_init(emu_thread_ctx_t *emu, i960_cpu_t *cpu, memor
     g_mcp.cpu = cpu;
     g_mcp.bus = bus;
 }
+
+/* The assembled ROM regions, once a set has been loaded. dump_model decodes
+ * straight out of these rather than out of the running machine. */
+static inline void mcp_bridge_set_romset(const romset_t *rs) { g_mcp.romset = rs; }
 
 static inline int mcp_bridge_start(int port) {
 #ifdef _WIN32

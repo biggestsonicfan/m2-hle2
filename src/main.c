@@ -81,6 +81,7 @@ static void emu_ensure_started(void) {
     if (!state.emu_started) {
         emu_thread_init(&state.emu, &state.cpu, &state.bus);
         mcp_bridge_init(&state.emu, &state.cpu, &state.bus);
+        mcp_bridge_set_romset(&state.romset);
         if (g_mcp_enable) mcp_bridge_start(g_mcp_port);
         state.emu_started = true;
     }

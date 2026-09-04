@@ -1,0 +1,14 @@
+{
+  "name": "m2-hle2-tools",
+  "version": "1.0.0",
+  "description": "Graders that hold the m2-hle2 emulator against the Sonic The Fighters explorer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dump": "node dump-board.mjs",
+    "grade": "node grade-all.mjs",
+    "grade:models": "node grade-models.mjs",
+    "grade:texram": "node grade-texram.mjs",
+    "grade:colors": "node grade-colors.mjs"
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "note": "SHA-256 over a MAME capture of the real board, cut at the slices test-texram.mjs and test-colors.mjs compare at. Not derived from the ported routines — regenerating it from those would make both checks tautologies. See texref.mjs.",
+  "source": "MAME capture, South Island on screen, set 16 left resident by the attract and character-select screens",
+  "stage": 0,
+  "sets": [
+    16,
+    1,
+    2
+  ],
+  "cycledRows": [
+    18,
+    19
+  ],
+  "cycleBand": [
+    48,
+    64
+  ],
+  "lumaram": "322dbb31abb48d292fc1271bdb2819a31e4968ea0a7aa483c9aa57b6192c824d",
+  "texram0": {
+    "whole": "da89dd3ebfb0edec48ec41eb6cc6572f1d4adb766cfe88bf02173e212d68e058",
+    "blocks": [
+      "69a9cb1724e17927",
+      "851d83e5d9a6de13",
+      "1c68785eda214037",
+      "359a9c8a57d7e1a9",
+      "b15ac005d5667750",
+      "5f49a80dcfd9b73f",
+      "6c1208e16a17d239",
+      "7fdad6543deef0da",
+      "cf1994481986b9e8",
+      "9011fbb5d0265e4b",
+      "06a0f0397de13b09",
+      "0b08ad959f4e8715",
+      "faffb9180ec89c76",
+      "c8c25e2d42b93cae",
+      "b3914a43578f24a7",
+      "e1b957ba670977e8"
+    ]
+  },
+  "texram1": {
+    "whole": "b63ceaa8a524e436756bd23d628157313476e8df54eda4e4fe643e236cdcb155",
+    "blocks": [
+      "26549f922923b1bb",
+      "36073bbec57252a4",
+      "06262c9c7ae40ef6",
+      "e3e379ae144f8c05",
+      "521f25e861dfa2ff",
+      "4d37e4f09ab2f33c",
+      "e20fb7723f6111a9",
+      "ece835931c2708de",
+      "ad07e0d51bd463de",
+      "2a748ca5ee233361",
+      "cd7949f3b0d4910b",
+      "21a8eb3b27465262",
+      "7826f687afe5b1a2",
+      "3c33a55e2b3c8008",
+      "8fcf67e787538c85",
+      "900ef2efbbe9a6d4"
+    ]
+  },
+  "colorxlat": {
+    "rows": {
+      "0": "f78d1a1846162c94b74824982d8afbb2c6167fdec6395f06dbc0236ba7a6d8e9",
+      "1": "9a8b86fbaafe5e774a12b2b1dc31d6a777e70e80aaa08f562156991d788b8668",
+      "2": "a070c4e333dcdc08e6c8849bc0902633bcc4a1c1a4ece6d22ec7c7b56d101a91",
+      "3": "e75dc278ab97f506cc780d4f1842b5d388368943a38fca413b763dcef259624f",
+      "4": "c448bdff067ff31137a29951c4da1d00a3b975ddd3296dd724293ac519a7ee3e",
+      "5": "dfa616ef1e743d782582389f910fc8f77badb58378aa1ea8aa10becb38624c38",
+      "6": "1514b8258d3e1ab5e821c7f412d986ad30a5a8c5c92d582c6b3dee6d296b7662",
+      "7": "f32fe152f9de85db33cb6fc1e395e44c737f78d83ebf3395f5ee3150d0dd3efd",
+      "8": "90742ed5c9e64029d3fc0608dec5d01fae7b4433049860ce6b6b0052ea92e6b8",
+      "9": "e9f38e860353f97301510e67733baf786ef28cbfed1f7a8047fdb111018bff90",
+      "10": "63fc7cb60681456515b8910075972ecb6d46b01ea0f2266682eb04edd20ccafc",
+      "11": "67d5e80ef9e9eb972a5613f0b8c5b99aac1aec4da5627513fcf25234b3e78fb4",
+      "12": "2ae8b1f516813519f91bdfcbbae0b30ad2fad4adc25c8860d90f2afca080d8b7",
+      "13": "4a389a5028ee2389de4c3af07a62111882f3fa5d240f04b8b09f41121d311edd",
+      "14": "eaad2132995dfa014a1fb5693b58ff49858f1c6faec3ff960f85ad921ed3f1e7",
+      "15": "54c6e5187a464fd6242eca595a336f3ceb7fcc6e6dabce5a4ef2fb0b8d632177",
+      "16": "d3aea8ba8e34888108d393dc3be0e3215e8770600cb157019b50ac4f06a6003e",
+      "17": "228065e303c698e906238215ccdd99bce2729284257c47b986f75369a60d389e",
+      "18": "ef15668fc5c796cf9a671fd155d4f916230c7eb44f456bbabfff84dc678494aa",
+      "19": "ca14c555ea43ef00ac07795f2e3f6d938fcc9dff5fe5156774a6b80afbbadf59",
+      "20": "10ff68163c1a447f7ccade2cb5569aa4453ccb2bc08e5602db06308e93512a98",
+      "21": "1c78cd22c94c9bb350718ceb462074e951d4400ff4b28668d120fd890d72f79c",
+      "22": "51a32acc55c9d7e592618833e0f7c25a09b048516cab5043bbd07094e2070ebb",
+      "23": "e2daccb51326dc259e961e6a4bd814e39131244a48f76a086a9b71d8365beefa",
+      "24": "c7f03bbe9f95241213c140b6a39221588a9b2328b7238b659365497bebfec47e",
+      "25": "d27d9665872ac954d235149929301c020f610b7d5980ce2a89ce8ba8873311a3",
+      "26": "2536f4a9e27d9d152b7fbbd83b9e3b528efdea92e49b53ac1342b99d8cd5b4cb",
+      "27": "aca540ece2c7882afe871ab83108221522e2561cf8fb405a7bacaed9ed54720f",
+      "28": "f561234e8e741daf27e705694dc4de100ea3f9c6110ce47becc3d63593549c53",
+      "29": "c588266e74534b396b7e38a247cd672cea3adc29a49ff778b9724c68bb86cfba",
+      "30": "b1cc59a4ea61065a9dbfa3abb61b8dd0034854cd22604ffe92237a61cb998e33",
+      "31": "36d7be7065cb8bb353c17f73d6b44facddc410565d7ab80ae6f58ac4f9116bb3"
+    },
+    "fighterRows": {
+      "0": "d4f97187223e8b94df6f5119bf0887c7354357a8cfe0e6d5da70c12a076e45a1",
+      "1": "16024717fbb7ac915059774a9d6e505cfec03b373a73d746efc67330e2a048dd",
+      "2": "beb06bc27ce74f1bb799fa88f02aded07499a70d488f559fa176d6f509b6f42b",
+      "3": "bbbe1e55a495996d5f6db105bba5d3705ce82591d22d5f8067449470ebe3babc",
+      "4": "51cf325e94e8c4e8b03175443d6fc7cf4cdb83a9bbd76f3b2f36e3d62158f138",
+      "28": "8d503cab8bcbc855eae9dc162e0c90e10a669d0e92d474bb60f482e42254147a",
+      "29": "4e5459b12b0eabe4ea7afdcea06d044811991f6faa590659bf7e61c9bb41b3cb"
+    },
+    "cycledBands": {
+      "18": "2fb12ad8a67ad62db99e9bd323a3878c664ae88570e2ed32a78a3cd3ab0a2f2a",
+      "19": "0121a35f666cee51aac33840298fc52c4268b837020537f973e914e4530f4047"
+    }
+  }
+}

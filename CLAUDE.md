@@ -129,18 +129,16 @@ For other Model 2 games, see **MAME** (`src/mame/sega/model2.cpp`) as a cross-re
 
 ## Build
 
-CMake ≥ 3.20 is not on `PATH` on the dev machine; use the VS-bundled binary:
+`cmake` is on `PATH` (`C:\Program Files\CMake\bin\cmake`). The installed toolchain is **Visual Studio 2022**; a `build/` tree configured for an older generator fails with "could not find specified instance of Visual Studio" — configure a fresh directory rather than reusing it.
 
 ```
-C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
+cmake -S <repo> -B <repo>/build_vs22 -G "Visual Studio 17 2022" -A x64
+cmake --build <repo>/build_vs22 --config Release --target ALL_BUILD -j 16
 ```
 
-```
-cmake -S <repo> -B <repo>/build
-cmake --build <repo>/build --config Release --target ALL_BUILD -j 16 --
-```
+Output: `build_vs22\Release\m2hle.exe`. No automated tests — validation is interactive through the GUI. The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
 
-Output: `build\Release\demo.exe`. No automated tests — validation is interactive through the GUI. The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
+**Grading harness** — [tools/](tools/) measures this emulator against an independent implementation of the same ROM formats (the STF explorer, a submodule at `vendor/noclip`), with SHA-256 over a MAME capture as a third point so the two ports cannot simply agree with each other and be wrong together. `node tools/grade-models.mjs` is the one to run after touching `geo3d.h`. See [tools/README.md](tools/README.md).
 
 ---
 
