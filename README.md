@@ -10,10 +10,16 @@ while the geometry coprocessor, parts of the frame loop, and the audio path are 
 and reimplemented in C rather than simulated gate-for-gate.
 
 ```
+git clone --recurse-submodules <this repo>       # or: git submodule update --init
+python -m pip install ply==3.11                  # dear_bindings generates the ImGui C bindings
 cmake -S . -B build
 cmake --build build --config Release -j
 build/Release/m2hle.exe --rom <romset>.zip --run
 ```
+
+Dependencies are git submodules under [vendor/](vendor/); `vendor/noclip` is only needed by
+[tools/](tools/), so `git submodule update --init vendor/imgui vendor/dear_bindings vendor/sokol
+vendor/miniz vendor/ImGuiFileDialog` is enough to build.
 
 No ROMs, ROM-derived data, or other copyrighted material is included in this repository, and
 none will be accepted into it. You must supply your own dumps.
@@ -50,9 +56,11 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
 - [mcp_server/](mcp_server/) — Python MCP server that drives a running emulator over the bridge.
 - [tools/](tools/) — graders that measure this emulator against an independent implementation
   of the same ROM formats, with a MAME digest as the third point. See [tools/README.md](tools/README.md).
-- [vendor/](vendor/) — cimgui (dear_bindings), Sokol, ImGuiFileDialog, miniz, vendored in tree.
+- [vendor/](vendor/) — dependencies, all git submodules pinned to an exact upstream commit:
+  Dear ImGui, dear_bindings (generates the `ig*` C bindings into the build tree at build
+  time — nothing generated is committed), Sokol, ImGuiFileDialog, miniz, and noclip.
 
-Everything except `main.c`, `sokol_impl.c/.m`, and the vendored `.c` files is a header-only
+Everything except `main.c`, `sokol_impl.c/.m`, and the submodules' `.c` files is a header-only
 `.h` module. That is deliberate — see [CLAUDE.md](CLAUDE.md).
 
 ## Documents
@@ -166,5 +174,5 @@ against it.
 
 ## Licence
 
-The vendored dependencies under [vendor/](vendor/) keep their own licences. No licence has been
+The dependencies under [vendor/](vendor/) keep their own licences. No licence has been
 chosen for the first-party code yet.

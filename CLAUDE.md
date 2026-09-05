@@ -131,6 +131,10 @@ For other Model 2 games, see **MAME** (`src/mame/sega/model2.cpp`) as a cross-re
 
 `cmake` is on `PATH` (`C:\Program Files\CMake\bin\cmake`). The installed toolchain is **Visual Studio 2022**; a `build/` tree configured for an older generator fails with "could not find specified instance of Visual Studio" — configure a fresh directory rather than reusing it.
 
+Everything under `vendor/` is a **git submodule pinned to an exact upstream commit** — `imgui`, `dear_bindings`, `sokol`, `miniz`, `ImGuiFileDialog`, and `noclip` (the last only feeds `tools/`). A tree cloned without them fails configure with the `git submodule update --init …` line to run.
+
+The cimgui C bindings are **not committed**: CMake runs `vendor/dear_bindings/dear_bindings.py` over `vendor/imgui/imgui.h` into `<build>/cimgui-gen/` at build time, with `--replace-prefix ImGui_=ig` to keep the `ig*` spelling that `src/` and `sokol_imgui.h`'s "original cimgui" path expect. That needs Python 3 with `ply` (`python -m pip install ply==3.11`); configure fails with the exact install line if the interpreter CMake picks up cannot import it. Do **not** swap this for the `cimgui/cimgui` repo — that is a different generator, and it produced an `ImGuiIO` ABI mismatch here (`MousePos` updated, `MouseDown` stuck at 0).
+
 ```
 cmake -S <repo> -B <repo>/build_vs22 -G "Visual Studio 17 2022" -A x64
 cmake --build <repo>/build_vs22 --config Release --target ALL_BUILD -j 16

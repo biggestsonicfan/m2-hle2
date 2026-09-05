@@ -21,24 +21,88 @@ set(M2HLE_VERSION "dev" CACHE STRING "Version string baked into the binary")
 add_compile_definitions(M2HLE_VERSION="${M2HLE_VERSION}")
 
 # ---------------------------------------------------------------------------
+# Vendored dependencies are git submodules. Fail early and usefully if the
+# tree was cloned without them.
+# ---------------------------------------------------------------------------
+set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog)
+foreach(probe imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp)
+    if(NOT EXISTS ${VENDOR}/${probe})
+        message(FATAL_ERROR
+            "vendor/${probe} is missing. The vendored dependencies are git submodules:\n"
+            "  git submodule update --init ${M2HLE_SUBMODULE_PATHS}")
+    endif()
+endforeach()
+
+# ---------------------------------------------------------------------------
 # cimgui + imgui (single static lib)
 #
-# We use the dear_bindings-generated cimgui (flat layout, imgui sources alongside
-# cimgui.cpp). The earlier setup with cimgui/cimgui as a submodule produced an
-# ImGuiIO ABI mismatch — MousePos updated but MouseDown stayed 0, suggesting
-# field offsets in the generated C header didn't align with the imgui C++ build.
-# These files come from a known-working dear_bindings drop (imgui 1.92.6).
+# Dear ImGui (vendor/imgui) and the dear_bindings generator
+# (vendor/dear_bindings) are submodules; the C bindings are generated into the
+# build tree at build time, so no generated source is committed.
+#
+# The bindings MUST come from dear_bindings and not from the cimgui/cimgui
+# repo — that is a different generator, and its C structs did not line up with
+# the imgui C++ build here: an ImGuiIO ABI mismatch where MousePos updated but
+# MouseDown stayed 0.
+#
+# '--replace-prefix ImGui_=ig' keeps the ig* spelling that src/ uses and that
+# sokol_imgui.h detects as the 'original cimgui' flavour.
+#
+# Needs Python 3 with ply:  python -m pip install ply==3.11
 # ---------------------------------------------------------------------------
+set(IMGUI_DIR         ${VENDOR}/imgui)
+set(DEAR_BINDINGS_DIR ${VENDOR}/dear_bindings)
+set(CIMGUI_GEN_DIR    ${CMAKE_BINARY_DIR}/cimgui-gen)
+
+find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import ply"
+    RESULT_VARIABLE CIMGUI_PLY_RESULT
+    OUTPUT_QUIET ERROR_QUIET)
+if(NOT CIMGUI_PLY_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "dear_bindings needs the Python 'ply' module, which ${Python3_EXECUTABLE} cannot import.\n"
+        "  \"${Python3_EXECUTABLE}\" -m pip install ply==3.11")
+endif()
+
+file(MAKE_DIRECTORY ${CIMGUI_GEN_DIR})
+
+add_custom_command(
+    OUTPUT ${CIMGUI_GEN_DIR}/cimgui.h ${CIMGUI_GEN_DIR}/cimgui.cpp
+    COMMAND ${Python3_EXECUTABLE} ${DEAR_BINDINGS_DIR}/dear_bindings.py
+            -o ${CIMGUI_GEN_DIR}/cimgui
+            --replace-prefix ImGui_=ig
+            ${IMGUI_DIR}/imgui.h
+    DEPENDS ${IMGUI_DIR}/imgui.h ${IMGUI_DIR}/imconfig.h ${DEAR_BINDINGS_DIR}/dear_bindings.py
+    COMMENT "dear_bindings: cimgui.{h,cpp} from imgui.h"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT ${CIMGUI_GEN_DIR}/cimgui_internal.h ${CIMGUI_GEN_DIR}/cimgui_internal.cpp
+    COMMAND ${Python3_EXECUTABLE} ${DEAR_BINDINGS_DIR}/dear_bindings.py
+            -o ${CIMGUI_GEN_DIR}/cimgui_internal
+            --include ${IMGUI_DIR}/imgui.h
+            --replace-prefix ImGui_=ig
+            ${IMGUI_DIR}/imgui_internal.h
+    DEPENDS ${IMGUI_DIR}/imgui_internal.h ${IMGUI_DIR}/imgui.h ${IMGUI_DIR}/imconfig.h
+            ${DEAR_BINDINGS_DIR}/dear_bindings.py
+    COMMENT "dear_bindings: cimgui_internal.{h,cpp} from imgui_internal.h"
+    VERBATIM)
+
 add_library(cimgui STATIC
-    ${VENDOR}/cimgui/cimgui.cpp
-    ${VENDOR}/cimgui/cimgui_internal.cpp
-    ${VENDOR}/cimgui/imgui.cpp
-    ${VENDOR}/cimgui/imgui_demo.cpp
-    ${VENDOR}/cimgui/imgui_draw.cpp
-    ${VENDOR}/cimgui/imgui_tables.cpp
-    ${VENDOR}/cimgui/imgui_widgets.cpp
+    ${CIMGUI_GEN_DIR}/cimgui.h
+    ${CIMGUI_GEN_DIR}/cimgui.cpp
+    ${CIMGUI_GEN_DIR}/cimgui_internal.h
+    ${CIMGUI_GEN_DIR}/cimgui_internal.cpp
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
 )
-target_include_directories(cimgui PUBLIC ${VENDOR}/cimgui)
+# cimgui.h includes imconfig.h, and the generated .cpp files include imgui.h,
+# so both directories are public.
+target_include_directories(cimgui PUBLIC ${CIMGUI_GEN_DIR} ${IMGUI_DIR})
 
 # ---------------------------------------------------------------------------
 # ImGuiFileDialog
