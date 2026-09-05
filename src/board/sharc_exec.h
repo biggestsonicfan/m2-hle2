@@ -850,10 +850,19 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          *   args[0..2]  = skel_offset (a0,a1,a2): local bone offset in parent space
          *   args[3..8]  = 6 joint angles (i16 fixed-pt): Rz,Ry,Rx,Ry,Rx,Rz order
          *   args[9..11] = target pos (a9,a10,a11): world-space IK target
-         *   args[12]    = a12: upper bone segment length
-         *   args[13]    = a13: lower bone segment length
-         *   args[14]    = TGP word address for upper bone output matrix
-         *   args[15]    = TGP word address for lower bone output matrix
+         *   args[12]    = a12: lower bone length — forearm or shin. Named by a
+         *                 MAME capture of a real fight: stf-tools/motion-pose.csv
+         *                 holds args[12] against the character record's forearm
+         *                 slot and args[13] against its upper arm, and the two
+         *                 differ (0.3932 against 0.3464 for a thigh and shin),
+         *                 so the pairing is not a coin toss.
+         *   args[13]    = a13: upper bone length — upper arm or thigh. This is
+         *                 the bone that hangs at the pivot; a12 carries on from
+         *                 the elbow it reaches.
+         *   args[14]    = TGP word address for the LOWER bone's matrix
+         *                 (left arm: 0x3A30, slot 4, the forearm)
+         *   args[15]    = TGP word address for the UPPER bone's matrix
+         *                 (left arm: 0x3A24, slot 3, the upper arm)
          *   args[16]    = flip flag: 0 = elbow below, non-zero = elbow above (negates sin_sh/sin_el) */
         case 0x35806B6B: {
             if (n < 17) { sharc_push_u(0); return; }
@@ -957,15 +966,18 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 }
             }
 
-#define WRITE_TGP(tgp_addr) do { \
+/* Store one solved bone into the TGP slot its address names, and into the
+ * SHARC's own data space beside it. The two bones of a chain do not sit in the
+ * same place, so the matrix and the translation are both passed in. */
+#define WRITE_TGP(tgp_addr, mat, tr) do { \
     uint32_t _a = (tgp_addr); \
     int _idx = (_a >= 0x3B00 && _a < 0x3C00) ? (int)(16 + (_a - 0x3B00) / 0xC) \
              : (_a >= 0x3A00 && _a < 0x3B00) ? (int)(     (_a - 0x3A00) / 0xC) \
              : -1; \
     if (_idx >= 0 && _idx < 32) { \
         float *_d = g_sharc.tgp_bone[_idx]; \
-        int _k; for (_k = 0; _k < 9; _k++) _d[_k] = M[_k]; \
-        _d[9] = T[0]; _d[10] = T[1]; _d[11] = T[2]; \
+        int _k; for (_k = 0; _k < 9; _k++) _d[_k] = (mat)[_k]; \
+        _d[9] = (tr)[0]; _d[10] = (tr)[1]; _d[11] = (tr)[2]; \
         if (g_sharc.sharc_dm_ext) { \
             uint32_t _bo = _a * 4; \
             if (_bo + 48 <= g_sharc.sharc_dm_ext_size) { \
@@ -978,9 +990,40 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
     } \
 } while(0)
 
+            /* The chain is two bones and they do not start in the same place.
+             * The upper one — upper arm or thigh, a13 — hangs at the pivot; the
+             * lower one — forearm or shin, a12 — carries on from the elbow the
+             * upper one reaches, which is one upper-bone length along the upper
+             * bone's own +X.  args[14] names the lower bone's slot and args[15]
+             * the upper's: TGP addresses step 0x0C a slot from 0x3A00, so the
+             * left arm's pair is 0x3A30 (slot 4, the forearm) and 0x3A24
+             * (slot 3, the upper arm).
+             *
+             * Both matrices come out of one post-multiply chain — the first
+             * turn is the lower bone's frame, the second the upper's — so the
+             * lower's has to be kept before the second turn overwrites it.
+             *
+             * Writing them the other way round still leaves the limb touching
+             * its target, because the triangle's two edges add to the same
+             * point whichever order they are walked in, and it still bends by
+             * the right angle.  What moves is the elbow, to the far corner of
+             * that parallelogram: the two bones swap ends, so the thigh is
+             * drawn from the knee down and the joint folds backwards.  Which is
+             * why this was worth measuring rather than eyeballing —
+             * tools/grade-pose.mjs put it at 0.385 world units, one bone
+             * length, against the explorer's rig. */
+            float M_low[9], T_low[3], T_up[3];
+            T_up[0] = T[0]; T_up[1] = T[1]; T_up[2] = T[2];
+
             if ((a12 + a13) <= d_total) {
-                WRITE_TGP(slot14);
-                WRITE_TGP(slot15);
+                /* Out of reach: the chain gives up bending and lies straight
+                 * along the aim, the elbow still an upper bone from the pivot. */
+                memcpy(M_low, M, sizeof(M_low));
+                T_low[0] = T_up[0] + a13 * M[0];
+                T_low[1] = T_up[1] + a13 * M[1];
+                T_low[2] = T_up[2] + a13 * M[2];
+                WRITE_TGP(slot15, M, T_up);
+                WRITE_TGP(slot14, M_low, T_low);
                 /* IK reads parent-body scratchpad but does NOT write back to it.
                  * Mark dirty so the next arm reinitializes from g_sharc.rot/pos. */
                 g_sharc.bone_dirty = true;
@@ -1001,12 +1044,8 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 }
             }
 
-            WRITE_TGP(slot14);
-
-            /* Advance T from hip to knee: one upper-bone length along the thigh axis. */
-            T[0] += a12 * M[0];
-            T[1] += a12 * M[1];
-            T[2] += a12 * M[2];
+            /* The lower bone's frame, before the elbow turn is folded in. */
+            memcpy(M_low, M, sizeof(M_low));
 
             {
                 int flip = (args[16] != 0);
@@ -1021,7 +1060,13 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 }
             }
 
-            WRITE_TGP(slot15);
+            /* M is the upper bone now; the elbow is one upper bone along it. */
+            T_low[0] = T_up[0] + a13 * M[0];
+            T_low[1] = T_up[1] + a13 * M[1];
+            T_low[2] = T_up[2] + a13 * M[2];
+
+            WRITE_TGP(slot15, M, T_up);
+            WRITE_TGP(slot14, M_low, T_low);
 
             /* IK reads parent-body scratchpad but does NOT write back to it.
              * Mark dirty so the next arm reinitializes from g_sharc.rot/pos. */
