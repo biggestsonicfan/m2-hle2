@@ -148,7 +148,7 @@ cmake --build <repo>/build_vs22 --config Release --target ALL_BUILD -j 16
 
 Output: `build_vs22\Release\m2hle.exe`. No automated tests — validation is interactive through the GUI. The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
 
-**Grading harness** — [tools/](tools/) measures this emulator against an independent implementation of the same ROM formats (the STF explorer, a submodule at `vendor/noclip`), with SHA-256 over a MAME capture as a third point so the two ports cannot simply agree with each other and be wrong together. `node tools/grade-models.mjs` is the one to run after touching `geo3d.h`. See [tools/README.md](tools/README.md).
+**Grading harness** — [tools/](tools/) measures this emulator against an independent implementation of the same ROM formats (the STF explorer, a submodule at `vendor/noclip`), with SHA-256 over a MAME capture as a third point so the two ports cannot simply agree with each other and be wrong together. `node tools/grade-models.mjs` is the one to run after touching `geo3d.h`, and `node tools/grade-pose.mjs` after touching the COP bone handlers in `sharc_exec.h` — the latter replays 328 frames of rig arguments captured off a real board, so it needs a sibling `stf-tools` checkout for `motion-pose.csv` and skips cleanly without one. See [tools/README.md](tools/README.md).
 
 ---
 

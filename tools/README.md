@@ -59,6 +59,7 @@ outside the checkout by default, and that is deliberate.
 
 ```sh
 node tools/grade-models.mjs        # the one to run after touching geo3d.h
+node tools/grade-pose.mjs          # ... and after touching the bone handlers
 node tools/grade-all.mjs           # capture a scene, then grade everything
 node tools/grade-all.mjs --no-capture
 ```
@@ -71,6 +72,7 @@ one you already have running with `--mcp`.
 | script | what it measures |
 |---|---|
 | `grade-models.mjs` | the index-array polygon decoder, over all 5103 model-table entries, against the explorer's. Geometry only — colour and UV depend on what the running game uploaded, and a decoder grade should not be measuring that. Needs no scene and no capture, which is what makes it the one to run after changing `geo3d.h` |
+| `grade-pose.mjs` | the coprocessor's rig maths: op `0x62`, the body matrix, and op `0x6B`, the four two-bone IK chains that place twelve of a fighter's sixteen slots. Replays 328 frames of arguments captured off a real board (`stf-tools/motion-pose.csv`) through the coprocessor port and holds what comes back against the explorer's rig. Needs no scene and no capture either, which makes it the one to run after touching the bone handlers in `sharc_exec.h` |
 | `grade-texram.mjs` | texture RAM. ~85% of the pages are compressed in ROM, so a sheet is a megabyte of output from a long run of the game's own code: a wrong bit anywhere in the i960 core, the bus or the decompressor lands in it |
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
@@ -93,9 +95,13 @@ somewhere to go here, and each became a bridge command:
 | write megabytes out from inside the emulator | `dump_memory_file` — copies a bus range to a file under the emu mutex, so it is one consistent snapshot rather than a run of reads the i960 wrote through the middle of |
 | drive the front end | `set_input`, straight at the I/O port bitmask |
 
-Plus two the MAME side did not need: `dump_model`, which runs the emulator's own
-polygon decoder over a range of the model table and writes the triangles out,
-and `rom_loaded` on `get_status`.
+Plus four the MAME side did not need. `dump_model` runs the emulator's own
+polygon decoder over a range of the model table and writes the triangles out.
+`cop_exec` pushes raw words at the coprocessor port, exactly as the i960 does,
+and `dump_tgp` reads the whole 32-slot bone table back at full precision — which
+is what lets `grade-pose.mjs` replay a board capture's rig arguments without a
+running fight, and what makes an argument count that is wrong by one desync here
+the same way it would in a game. And `rom_loaded` on `get_status`.
 
 That last one is small and load-bearing. A profile resolves from the ROM's
 CRC32s while the regions are still being assembled, so "which game is this" and
@@ -147,6 +153,45 @@ vertex picks. The disagreement is clustered, worst at models 4154–4157
 (J ≈ 0.63–0.72) and in a run at 4012–4018, with models 22, 658, 1146 and 2042
 all at exactly 0.8140, which is one mesh repeated.
 
+**The rig — and one bone length of daylight, since closed.**
+
+`grade-pose.mjs` found a real bug on its first run, which is the argument for
+having built it. The two-bone IK op wrote its two output slots the wrong way
+round: the forearm's matrix went to the shoulder and the upper arm's to the
+elbow, and the elbow itself was stepped along the *forearm* by the forearm's own
+length rather than along the upper arm by the upper arm's.
+
+That is a mistake with a hiding place. The two edges of the triangle add to the
+same point whichever order they are walked in, so the limb still ended exactly
+on its IK target and still bent by the right angle — the hand and the foot
+landed where they belonged. Only the joint between them moved, to the far corner
+of the parallelogram, which draws a thigh from the knee down and folds the joint
+backwards. The measurement was unambiguous where a screenshot would have been
+arguable: 0.385 world units against the explorer, which is one arm bone.
+
+```
+before   op 0x6B — limb positions, trig held equal     3.85e-1 world units
+after    op 0x6B — limb positions, trig held equal     3.52e-6 world units
+```
+
+Everything else in the two ops already agreed. With the trig conventions held
+equal the body matrix comes out at 6.0e-8 and the limb rotations at 1.2e-5 over
+2624 transforms — and every one of the worst of those is a limb at reach 1.000,
+stretched dead straight at a target it can only just span, which is exactly
+where `sqrt(1 - c*c)` loses its leading digits and float32 parts company with
+the explorer's float64. A precision floor, not a rule.
+
+**The cosine table is not settled, and the grader says so rather than guessing.**
+The explorer quantises an angle to its top byte and reads a 256-entry table;
+this emulator calls `cosf` on all sixteen bits. On the board's own angles that
+is worth 3.0e-2 of rotation and 9.6e-3 of position, and nothing available here
+can say which is the hardware's — the check that would, `stf-tools/test-head-mame.mjs`,
+says of itself that it is incomplete. So the run is taken twice, once on the
+board's angles and once with every input angle snapped to the table's grid, and
+the difference between the two rows is the whole cost of the disagreement.
+Settling it needs the board's own matrices, which means the display-list work
+below.
+
 **Luma RAM — byte-exact, all three ways.** The emulator, the explorer and the
 MAME capture agree on all 131072 bytes. This is the one place the three-way
 comparison currently closes, and it says the emulator's luma ramp is the
@@ -183,7 +228,20 @@ end to end. It needs a raw capture of both FIFO ports in write order; m2-hle2's
 processor's `0x804000` writes are handled separately for clip windows. Adding a
 unified dual-port capture is the next piece of bridge work.
 
-**No motion, pose or osage graders.** The explorer has the rig, the IK chains and
-the sway chains, and its checks hold them against real captures. Grading this
-emulator's COP bone handlers against them is the natural next step and needs
-nothing new from the bridge beyond what `dump_bones` already gives.
+**Nothing above the waist, and no osage grader.** `grade-pose.mjs` covers the
+twelve slots the body matrix and the IK chains place. The other four — the
+waist's own slot, the chest, the head and the pelvis — are not arguments to
+anything: the board builds them by stacking translate, `0x3F` and angle ops on
+the body matrix and hands the result to op `0x67`, so grading them means
+replaying that stream rather than reading a capture's columns. The explorer's
+toolkit is at the same place and says why (`stf-tools/test-head-mame.mjs`: at
+least ops `0x29` and `0x39` carry angles and are not decoded yet, so a replay
+has already drifted before the head). The sway chains — `js/osage.js`, and
+`stf-tools/osage-*.json` beside it — are untouched here in either direction.
+
+**The head aim is unsettled on both sides.** The explorer aims the head at float
+object 14 and notes that the board's head block is followed by three angles that
+are zero in every capture taken so far — but every one of those captures is a
+stance held for the whole run, which is where head data is baked. Settling it
+needs a capture of a real exchange, with the fighters apart and off their idle
+motions. Worth knowing before trusting either port's head.

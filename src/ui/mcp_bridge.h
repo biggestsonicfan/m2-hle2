@@ -675,6 +675,81 @@ static void mcp_cmd_dump_bones(char *resp, int cap) {
 #undef BAPPEND
 }
 
+/* cop_exec — hand the coprocessor a stream of words, exactly as the i960 does.
+ *
+ * `dump_model` runs the emulator's own polygon decoder over ROM the running
+ * game never has to reach. This is that idea for the coprocessor: a caller
+ * hands it the words a real board was captured sending — a set_body and the
+ * four IK chains that follow it — and reads the transforms back with
+ * `dump_tgp`, so the COP handlers can be measured without driving the game to
+ * a fight first.
+ *
+ * The words go in through cop_write(), which is the MMIO path itself: argument
+ * counting, dispatch and all the running matrix state included. An argument
+ * count that is wrong by one desyncs here exactly as it would in a game, which
+ * is the point of not calling sharc_exec() directly.
+ *
+ * "reset" clears COP and SHARC state first, so one call cannot inherit the
+ * matrix another left behind.
+ */
+static void mcp_cmd_cop_exec(const char *req, char *resp, int cap) {
+    char words[8192];
+    uint32_t reset = 0;
+    mcp_json_get_u32(req, "reset", &reset);
+    if (!mcp_json_get_str(req, "words", words, (int)sizeof(words))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing words\"}");
+        return;
+    }
+    size_t len = strlen(words);
+    if (len == 0 || (len % 8u) != 0u) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"words is %u hex chars; want 8 per 32-bit word\"}",
+                 (unsigned)len);
+        return;
+    }
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    if (reset) cop_reset();
+    int n = 0;
+    for (size_t i = 0; i + 8u <= len; i += 8u) {
+        char w[9];
+        memcpy(w, words + i, 8); w[8] = '\0';
+        cop_write((uint32_t)strtoul(w, NULL, 16));
+        n++;
+    }
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"words\":%d}", n);
+}
+
+/* dump_tgp — the bone slots the geometry decoder draws a fighter from.
+ *
+ * `dump_bones` is a four-slot summary at three decimal places, for a human
+ * reading a debug window. This is the whole 32-slot table — P1 on 0..15, P2 on
+ * 16..31, each a column-major 3x4 — with the current matrix beside it, printed
+ * with enough digits to be differenced against another implementation rather
+ * than eyeballed.
+ */
+static void mcp_cmd_dump_tgp(char *resp, int cap) {
+    char *p = resp; int left = cap, n;
+#define TAPPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); \
+                          if (n < 0 || n >= left) n = left - 1; \
+                          p += n; left -= n; } while (0)
+    TAPPEND("{\"ok\":true,\"pos\":[%.9g,%.9g,%.9g],\"rot\":[",
+            g_sharc.pos[0], g_sharc.pos[1], g_sharc.pos[2]);
+    for (int c = 0; c < 3; c++)
+        for (int r = 0; r < 3; r++)
+            TAPPEND("%s%.9g", (c || r) ? "," : "", g_sharc.rot[c][r]);
+    TAPPEND("],\"tgp\":[");
+    for (int s = 0; s < 32; s++) {
+        TAPPEND("%s[", s ? "," : "");
+        for (int k = 0; k < 12; k++)
+            TAPPEND("%s%.9g", k ? "," : "", g_sharc.tgp_bone[s][k]);
+        TAPPEND("]");
+    }
+    TAPPEND("]}");
+#undef TAPPEND
+}
+
 static void mcp_cmd_set_break_on_unknown_cop(const char *req, char *resp, int cap) {
     uint32_t enable = 1;
     mcp_json_get_u32(req, "enable", &enable);
@@ -986,6 +1061,8 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "get_cop_diagnostics")      == 0) mcp_cmd_get_cop_diagnostics(resp, cap);
     else if (strcmp(cmd, "get_geo_captures")         == 0) mcp_cmd_get_geo_captures(resp, cap);
     else if (strcmp(cmd, "dump_bones")               == 0) mcp_cmd_dump_bones(resp, cap);
+    else if (strcmp(cmd, "dump_tgp")                 == 0) mcp_cmd_dump_tgp(resp, cap);
+    else if (strcmp(cmd, "cop_exec")                 == 0) mcp_cmd_cop_exec(req, resp, cap);
     else if (strcmp(cmd, "sound_status")             == 0) mcp_cmd_sound_status(resp, cap);
     else if (strcmp(cmd, "dump_midi_log")            == 0) mcp_cmd_dump_midi_log(resp, cap);
     else if (strcmp(cmd, "read_wave")                == 0) {
