@@ -1463,29 +1463,65 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             return;
         }
 
-        /* 0x33806767: copy current 12-word bone slot (rot 3×3 + pos) to BUFF_RAM.
-         * Firmware PM 0x020597: I7 = DM[0x3033F] (current slot ptr),
-         * I6 = DM[0x01400000 + arg0], LCNTR=12, DM(I6,1)=DM(I7,1).
-         * arg0 = word offset into BUFF_RAM (e.g. 0x3A00 for P1 bone 0).
-         * Also snapshots to shadow_rot for the kage-matrix (arg=0x3D00) path. */
+        /* 0x33806767: store the current matrix into the TGP slot arg0 names.
+         *
+         * Firmware PM 0x020597: I7 = DM[0x3033F] (the current slot pointer),
+         * I6 = DM[0x01400000 + arg0], LCNTR=12, DM(I6,1)=DM(I7,1) — twelve
+         * words, so arg0 is a word offset, and 0x3A00 is P1 bone 0.
+         *
+         * This is how the four slots the IK never reaches get filled.
+         * `calc_rob_angle_cont` places the waist, the chest, the head and the
+         * pelvis by stacking translate / 0x3F / angle ops on the body matrix and
+         * then handing the result to this op — the explorer's toolkit rebuilds
+         * exactly those four that way (stf-tools/dl-rig.mjs), because the slots
+         * cannot be read back out of either ADSP's data space.
+         *
+         * The addresses are the ones the IK writes too: 0x0C a slot from 0x3A00
+         * for P1 and 0x3B00 for P2. So a store in that window has to reach
+         * g_sharc.tgp_bone[] as well as the SHARC's data space, or the geometry
+         * decoder can draw the slot stale — 0x1B803737 selects a slot and
+         * geo3d.h reads the transform straight out of tgp_bone.
+         *
+         * Measured in attract, this mirror is currently inert: 0x67 only ever
+         * stores slots 0, 1, 16 and 17 (the two waists and the two chests), and
+         * 0x1A803535 — the attract path's calc_unit_mat, which writes all 32 —
+         * was the last writer before the draw every time it could be seen. It
+         * closes a gap rather than fixing a visible symptom, and it matters
+         * wherever 0x67 is the last writer instead. The two do not agree: every
+         * 0x67 store differed from what 0x35 had left in the slot, by up to 4.5
+         * world units, so the ordering is doing real work.
+         *
+         * shadow_rot is the kage-matrix path, which comes through here with
+         * arg0 = 0x3D00 — outside the slot window, and left alone by it. */
         case 0x33806767: {
             for (int _c = 0; _c < 3; _c++)
                 for (int _r = 0; _r < 3; _r++)
                     g_sharc.shadow_rot[_c][_r] = g_sharc.rot[_c][_r];
-            if (n >= 1 && g_sharc.sharc_dm_ext) {
-                uint32_t byte_off = args[0] * 4;
-                if (byte_off + 12 * 4 <= g_sharc.sharc_dm_ext_size) {
-                    /* Write 9 col-major rotation words then 3 translation words. */
-                    for (int _c = 0; _c < 3; _c++)
-                        for (int _r = 0; _r < 3; _r++) {
-                            uint32_t u = sharc_float_to_bits(g_sharc.rot[_c][_r]);
-                            memcpy(g_sharc.sharc_dm_ext + byte_off + (_c*3+_r)*4, &u, 4);
-                        }
-                    for (int _i = 0; _i < 3; _i++) {
-                        uint32_t u = sharc_float_to_bits(g_sharc.pos[_i]);
-                        memcpy(g_sharc.sharc_dm_ext + byte_off + (9+_i)*4, &u, 4);
-                    }
+            if (n >= 1) {
+                uint32_t addr = args[0];
+                float slot[12];
+                for (int _c = 0; _c < 3; _c++)
+                    for (int _r = 0; _r < 3; _r++)
+                        slot[_c*3+_r] = g_sharc.rot[_c][_r];
+                slot[9]  = g_sharc.pos[0];
+                slot[10] = g_sharc.pos[1];
+                slot[11] = g_sharc.pos[2];
 
+                int idx = (addr >= 0x3B00 && addr < 0x3C00) ? (int)(16 + (addr - 0x3B00) / 0xC)
+                        : (addr >= 0x3A00 && addr < 0x3B00) ? (int)(     (addr - 0x3A00) / 0xC)
+                        : -1;
+                if (idx >= 0 && idx < 32)
+                    memcpy(g_sharc.tgp_bone[idx], slot, sizeof(slot));
+
+                if (g_sharc.sharc_dm_ext) {
+                    uint32_t byte_off = addr * 4;
+                    if (byte_off + 12 * 4 <= g_sharc.sharc_dm_ext_size) {
+                        /* 9 col-major rotation words, then 3 translation words. */
+                        for (int _k = 0; _k < 12; _k++) {
+                            uint32_t u = sharc_float_to_bits(slot[_k]);
+                            memcpy(g_sharc.sharc_dm_ext + byte_off + _k*4, &u, 4);
+                        }
+                    }
                 }
             }
             return;
