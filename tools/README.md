@@ -71,7 +71,7 @@ one you already have running with `--mcp`.
 
 | script | what it measures |
 |---|---|
-| `grade-models.mjs` | the index-array polygon decoder, over all 5103 model-table entries, against the explorer's. Geometry only — colour and UV depend on what the running game uploaded, and a decoder grade should not be measuring that. Needs no scene and no capture, which is what makes it the one to run after changing `geo3d.h` |
+| `grade-models.mjs` | the index-array polygon decoder, over all 5103 model-table entries, against the explorer's: triangle positions, then which tile each textured face names and which coordinate each corner carries. All of that is a function of the ROM; what is *in* a tile depends on what the running game uploaded, which is `grade-texram`'s business. Needs no scene and no capture, which is what makes it the one to run after changing `geo3d.h` |
 | `grade-pose.mjs` | the coprocessor's rig maths: op `0x62`, the body matrix, and op `0x6B`, the four two-bone IK chains that place twelve of a fighter's sixteen slots. Replays 328 frames of arguments captured off a real board (`stf-tools/motion-pose.csv`) through the coprocessor port and holds what comes back against the explorer's rig. Needs no scene and no capture either, which makes it the one to run after touching the bone handlers in `sharc_exec.h` |
 | `grade-texram.mjs` | texture RAM. ~85% of the pages are compressed in ROM, so a sheet is a megabyte of output from a long run of the game's own code: a wrong bit anywhere in the i960 core, the bus or the decompressor lands in it |
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
@@ -147,11 +147,47 @@ FAIL  geometry is identical (Jaccard = 1)               J = 0.990154 over 601690
 
 Both decoders agree on which entries carry geometry and on how many triangles
 each produces — every one of 4404 — and disagree about vertex positions on 408
-of them. Counts agreeing while positions do not points at the connectivity rules
-rather than at the face loop: the same faces are being built from different
-vertex picks. The disagreement is clustered, worst at models 4154–4157
+of them. The disagreement is clustered, worst at models 4154–4157
 (J ≈ 0.63–0.72) and in a run at 4012–4018, with models 22, 658, 1146 and 2042
 all at exactly 0.8140, which is one mesh repeated.
+
+*Since closed, and it was not the connectivity rules.* Counts agreeing while
+positions did not looked like the same faces built from different vertex
+picks. It was the same *corners* cut into triangles along different diagonals.
+Grading against a copy of the explorer with its decal cut turned off gave
+J = 1.000000 on the unchanged emulator, so every one of the 408 was that rule.
+A decal is a surface's own faces emitted a second time with a cut-out texture.
+The explorer cuts a quad whose four corners it has already emitted along the
+same diagonal as before, so the two copies are the same triangles and a
+`LESS_EQUAL` depth test lands the decal on top. `geo3d.h` now does the same:
+
+```
+PASS  geometry is identical (Jaccard = 1)   J = 1.000000 over 598728 triangles;
+                                            4404 of 4404 models exact
+```
+
+**Texture addressing — 2.57% of corners, since closed.** Once the geometry
+matched, the same sweep could compare what each triangle's corners address:
+which tile a face names and which coordinate each corner carries. The tiles
+agreed. The coordinates did not: 46,089 of 1,795,005 corners exactly, 62%
+even modulo the tile. The two decoders assigned the UV stream to corners in
+different orders — here A,B,D,C with U and V flipped, which had been chosen by
+eye, and there B,A,C,D with no flips.
+
+The strips decide it without trusting either side. A vertex shared by two
+faces of a strip carries one UV in ROM, so the right order agrees with itself
+across shared corners: 96.5% for B,A,C,D, 75.5% for the old reading. After
+the switch:
+
+```
+PASS  the same faces are textured                  598335 textured in both, 0 only here, 0 only there
+PASS  textured faces name the same tile            598335 of 598335
+PASS  every textured corner carries the same coordinate   1795005 of 1795005 corners (100.00%)
+```
+
+On screen, attract mode's hangar "CAUTION" sign had been drawing upside down
+and back to front, and the bricks of the pyramid behind the Sonic-vs-Bean ring
+ran diagonally.
 
 **The rig — and one bone length of daylight, since closed.**
 

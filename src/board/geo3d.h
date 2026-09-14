@@ -104,6 +104,67 @@ static inline vec3_t apply_matrix(vec3_t v, const float *m) {
     return r;
 }
 
+/* ---- Decal quad cut ------------------------------------------------------
+ * A decal on this board is not a face floating in front of a surface: it is
+ * the surface's own faces emitted a second time with a cut-out texture, so the
+ * holes let the first copy show (Sonic's shouting head, model 3544, is six such
+ * quads on six of the muzzle's; 504 models carry at least one). The board never
+ * compares the two — both take their z from the same corners and the later
+ * submission keeps the bucket — and a LESS_EQUAL depth test reproduces that for
+ * free, but only while the copies are the same triangles.
+ *
+ * They are not always. A quad is filled as two triangles along a diagonal that
+ * comes from where its strip anchored, and the copy anchors elsewhere: a quad
+ * with any warp in it bulges one way under one cut and the other way under the
+ * other, and the half that bulges behind the original is drawn behind it. So a
+ * quad whose four corners were emitted before in this model is cut the way that
+ * one was — same corners, same winding, same UVs on the same corners.
+ *
+ * The corner key is noclip's `cornerKey` (vendor/noclip js/model.js) bit for
+ * bit — untransformed Z-negated position, rounded to 1/4096 the way
+ * Math.round rounds, FNV over two 16-bit halves — so tools/grade-models.mjs
+ * holds the two decoders to J = 1 on exactly the same triangles. The whole of
+ * the J = 0.990 that tool first measured was this rule and nothing else. */
+#define GEO3D_SPLIT_SLOTS 8192u   /* power of two, > 2 × GEO3D_IA_MAX_VPS */
+
+static inline uint32_t geo3d_corner_key(vec3_t p) {
+    const float c[3] = { p.x, p.y, p.z };
+    uint32_t h = 2166136261u;
+    for (int a = 0; a < 3; a++) {
+        uint32_t q = (uint32_t)(int32_t)floor((double)c[a] * 4096.0 + 0.5);
+        h = (h ^ (q & 0xffffu)) * 16777619u;
+        h = (h ^ ((q >> 16) & 0xffffu)) * 16777619u;
+    }
+    return h;
+}
+
+static uint32_t g_geo3d_split_gen;
+static uint32_t g_geo3d_split_stamp[GEO3D_SPLIT_SLOTS];
+static uint32_t g_geo3d_split_quad[GEO3D_SPLIT_SLOTS];
+static uint32_t g_geo3d_split_cut[GEO3D_SPLIT_SLOTS];
+
+/* Forget every quad seen so far — once per model. */
+static inline void geo3d_split_reset(void) {
+    if (++g_geo3d_split_gen == 0) {
+        memset(g_geo3d_split_stamp, 0, sizeof g_geo3d_split_stamp);
+        g_geo3d_split_gen = 1;
+    }
+}
+
+/* True when a quad with these corners was already cut along the other diagonal.
+ * The first sighting records its cut and answers false. */
+static inline bool geo3d_split_other_way(uint32_t quad, uint32_t cut) {
+    uint32_t i = (quad * 2654435761u) & (GEO3D_SPLIT_SLOTS - 1u);
+    while (g_geo3d_split_stamp[i] == g_geo3d_split_gen) {
+        if (g_geo3d_split_quad[i] == quad) return g_geo3d_split_cut[i] != cut;
+        i = (i + 1u) & (GEO3D_SPLIT_SLOTS - 1u);
+    }
+    g_geo3d_split_stamp[i] = g_geo3d_split_gen;
+    g_geo3d_split_quad[i]  = quad;
+    g_geo3d_split_cut[i]   = cut;
+    return false;
+}
+
 /* Decode a Model 2 BGR555 colour word to normalized float RGB.
  *   bits 0-4 = R, bits 5-9 = G, bits 10-14 = B  (matches game's colpal()).
  * The material stream stores this as a little-endian uint16. */
@@ -424,14 +485,26 @@ static int g_cam_auto_baked = 1;
  * single game camera (fast path). Debug A/B for what the windows are doing. */
 static int g_geo_windows_enabled = 1;
 
-/* Texture UV orientation (dial in live via the geo3d window).  User-confirmed
- * correct orientation on STF geo models = flip u + flip v (no swap). */
+/* Texture UV orientation debug dials (geo3d window). The board needs none of
+ * them: with the stream order below the raw coordinates are already right. */
 static bool g_uv_swap   = false;
-static bool g_uv_flip_u = true;
-static bool g_uv_flip_v = true;
-/* Quad UV→vertex order: 0 = stream maps to [A,B,D,C] (slots {0,1,3,2}); 1 =
- * [A,B,C,D] ({0,1,2,3}). Wrong order swaps the C/D corners → scrambled texture
- * that swap/flip can't fix. Dial live to un-scramble. */
+static bool g_uv_flip_u = false;
+static bool g_uv_flip_v = false;
+/* UV stream → corner order. The stream walks each face's loop the opposite way
+ * from the index array, because negating Z on read reverses the winding: a
+ * quad's corners come out A,B,D,C and its stream runs B,A,C,D (slots
+ * {1,0,2,3}); a triangle's runs B,A,C ({1,0,2}).
+ *
+ * The strips settle it without a reference image. A vertex shared by two faces
+ * of one strip carries one UV in ROM, so the right order is the one that agrees
+ * with itself across shared corners: over every STF model, 96.5% for this order
+ * against 75.5% for the previous A,B,D,C-with-both-flips, which read forwards and
+ * mirrored every face whose texture axis runs along it. The explorer found and
+ * documents the same thing (vendor/noclip TECHNICAL.md, "the UV stream runs
+ * against the reconstructed winding") and tools/grade-models.mjs holds this
+ * decoder to its coordinates corner for corner.
+ *
+ * 1 = the previous A,B,D,C / A,B,C reading, kept as a debug A/B. */
 static int  g_uv_quad_order = 0;
 
 /* Flat shading ("definition"): MAME shades each polygon by luminance =
@@ -1245,6 +1318,7 @@ static inline void geo3d_decode_model(int model_idx,
                                        const float *matrix,
                                        float cr, float cg, float cb) {
     static vec3_t sv[GEO3D_IA_MAX_VERTS];
+    static uint32_t svk[GEO3D_IA_MAX_VERTS];   /* geo3d_corner_key, pre-transform */
     static int    qt[GEO3D_IA_MAX_VPS];
     static int    idx[GEO3D_IA_MAX_IDX];
 
@@ -1307,6 +1381,9 @@ static inline void geo3d_decode_model(int model_idx,
         uint8_t f1    = vp[24];
         uint8_t iflag = vp[25] & 0x03;
 
+        svk[n_sv]     = geo3d_corner_key(v1);
+        svk[n_sv + 1] = geo3d_corner_key(v2);
+
         if (matrix) { v1 = apply_matrix(v1, matrix); v2 = apply_matrix(v2, matrix); }
 
         sv[n_sv++] = v1;
@@ -1354,6 +1431,7 @@ static inline void geo3d_decode_model(int model_idx,
      * and the UV stream advances 8 words every iteration. Verified on model 3351:
      * 13 iterations, 3 sentinels → 10 material records, 104-word UV stream. */
     int efi = 0;
+    geo3d_split_reset();
     for (int i = 0; i < n_idx - 8; i += 4) {
         int fi = i / 4;
         int ai = idx[i], bi = idx[i + 1], ci = idx[i + 2], di = idx[i + 3];
@@ -1450,11 +1528,12 @@ static inline void geo3d_decode_model(int model_idx,
         float uvu[4] = {0,0,0,0}, uvv[4] = {0,0,0,0};
         uint16_t cap_pu = 0, cap_pv = 0;
         if (have_uv) {
-            static const int quad_slot_abdc[4] = {0,1,3,2};  /* stream k → A,B,D,C */
-            static const int quad_slot_abcd[4] = {0,1,2,3};  /* stream k → A,B,C,D */
-            static const int tri_slot[3]  = {0,1,2};         /* stream k → A,B,C   */
-            const int *slot = tri_cnt ? tri_slot
-                            : (g_uv_quad_order ? quad_slot_abcd : quad_slot_abdc);
+            static const int quad_slot[4]     = {1,0,2,3};  /* stream k → B,A,C,D */
+            static const int tri_slot[3]      = {1,0,2};    /* stream k → B,A,C   */
+            static const int quad_slot_fwd[4] = {0,1,3,2};  /* old: A,B,D,C */
+            static const int tri_slot_fwd[3]  = {0,1,2};    /* old: A,B,C   */
+            const int *slot = g_uv_quad_order ? (tri_cnt ? tri_slot_fwd : quad_slot_fwd)
+                                              : (tri_cnt ? tri_slot     : quad_slot);
             for (int k = 0; k < nv; k++) {
                 uint32_t b = (uv_word + (uint32_t)k * 2u) * 2u;  /* byte offset */
                 if ((size_t)b + 4 > materials_size) break;
@@ -1558,8 +1637,17 @@ static inline void geo3d_decode_model(int model_idx,
             geo3d_emit_line(B.x,B.y,B.z, D.x,D.y,D.z, fr,fg,fb);
             geo3d_emit_line(D.x,D.y,D.z, C.x,C.y,C.z, fr,fg,fb);
             geo3d_emit_line(C.x,C.y,C.z, A.x,A.y,A.z, fr,fg,fb);
-            /* Solid fill: two triangles ABD and ADC (slots 0,1,3 and 0,3,2) */
-            if (has_D) {
+            /* Solid fill: ABD + ADC (slots 0,1,3 / 0,3,2), or ABC + BDC along
+             * the other diagonal when a decal copy must match an earlier cut. */
+            uint32_t kA = svk[ai], kB = svk[bi], kC = svk[ci], kD = svk[di];
+            if (geo3d_split_other_way(kA ^ kB ^ kC ^ kD, kA ^ kD)) {
+                geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
+                                  B.x,B.y,B.z, uvu[1],uvv[1],
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
+                geo3d_emit_tri_uv(B.x,B.y,B.z, uvu[1],uvv[1],
+                                  D.x,D.y,D.z, uvu[3],uvv[3],
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
+            } else {
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
                                   D.x,D.y,D.z, uvu[3],uvv[3], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);

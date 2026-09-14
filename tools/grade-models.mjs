@@ -15,11 +15,13 @@
  * up as a Jaccard below 1 on the models that exercise it, and the report names
  * the worst ones rather than just the average.
  *
- * Geometry only, deliberately. Colour, texture tile and UV depend on what the
- * running game has uploaded into texture RAM; grading the decoder should not be
- * measuring that. Positions are a pure function of the ROM, so this check needs
- * no scene, no driving and no capture — which is what makes it the one to run
- * after touching geo3d.h.
+ * Geometry first, then texture addressing: which tile rectangle a face names
+ * and which texture coordinate each of its corners carries. Both come out of
+ * the texture ROM beside the material records, so like the positions they are
+ * a pure function of the ROM. What is *in* the rectangle depends on what the
+ * running game uploaded, and that is grade-texram's business, not this one's.
+ * None of it needs a scene, driving or a capture — which is what makes this
+ * the one to run after touching geo3d.h.
  *
  *   node tools/grade-models.mjs                # the whole table
  *   node tools/grade-models.mjs --first 500 --count 100
@@ -87,8 +89,12 @@ let bothEmpty = 0, bothGeometry = 0, onlyEmu = 0, onlyExplorer = 0;
 let exactTris = 0, sameCount = 0;
 let interTotal = 0, unionTotal = 0;
 const perModel = [];
+/* Texture addressing, over triangles both decoders emitted. */
+const tex = { faces: 0, texturedBoth: 0, texturedHere: 0, texturedThere: 0,
+              tileSame: 0, corners: 0, cornersExact: 0, cornersWrapped: 0 };
+const perModelUv = [];
 
-for (const { index, tris } of models) {
+for (const { index, tris, uvs, tiles } of models) {
     const theirs = decodeModel(rom, index);
     const theirTris = theirs ? theirs.positions.length / 9 : 0;
     const ourTris = tris.length / 9;
@@ -108,6 +114,11 @@ for (const { index, tris } of models) {
     const j = union ? inter / union : 1;
     if (j === 1) exactTris++;
     else perModel.push({ index, j, ourTris, theirTris });
+
+    const u = gradeTexture({ tris, uvs, tiles }, theirs);
+    if (u.corners && u.cornersExact < u.corners) {
+        perModelUv.push({ index, frac: u.cornersExact / u.corners, ...u });
+    }
 }
 
 const measured = bothGeometry;
@@ -138,9 +149,142 @@ if (perModel.length) {
     }
 }
 
+rep.check('the same faces are textured',
+          tex.texturedHere === 0 && tex.texturedThere === 0,
+          `${tex.texturedBoth} textured in both, ${tex.texturedHere} only here, ` +
+          `${tex.texturedThere} only there, of ${tex.faces} matched triangles`);
+
+rep.check('textured faces name the same tile', tex.tileSame === tex.texturedBoth,
+          `${tex.tileSame} of ${tex.texturedBoth}`);
+
+/* Exact is the claim: the explorer mirrors a coordinate that has run into an
+ * odd copy of a tile (texheader bits 8 and 9), so u and u + w are not the same
+ * texel there. Agreement modulo the tile is reported beside it because that is
+ * all a plain repeat can see, and the gap between the two rows is a wrap
+ * convention rather than a different texel under the corner. */
+rep.check('every textured corner carries the same coordinate',
+          tex.cornersExact === tex.corners,
+          `${tex.cornersExact} of ${tex.corners} corners ` +
+          `(${pct(tex.cornersExact, tex.corners)}); ` +
+          `${tex.cornersWrapped} (${pct(tex.cornersWrapped, tex.corners)}) modulo the tile`);
+
+if (perModelUv.length) {
+    const worst = args.num('worst', 10);
+    perModelUv.sort((x, y) => x.frac - y.frac);
+    rep.note(`worst ${Math.min(worst, perModelUv.length)} of ${perModelUv.length} models ` +
+             `by texture coordinate:`);
+    for (const m of perModelUv.slice(0, worst)) {
+        rep.note(`  model ${m.index}: ${m.cornersExact} of ${m.corners} corners exact, ` +
+                 `${m.cornersWrapped} modulo the tile`);
+    }
+}
+
 rep.finish();
 
 /* ---- helpers ------------------------------------------------------------- */
+
+function pct(a, b) { return b ? `${(100 * a / b).toFixed(2)}%` : 'n/a'; }
+
+/**
+ * Hold one model's texture addressing against the explorer's, triangle by
+ * triangle and corner by corner.
+ *
+ * Triangles are paired on their three corner positions — the same key the
+ * geometry check uses, so a pair is the same surface — and corners inside a
+ * pair on their own position, so neither decoder's choice of starting corner
+ * matters. Where one surface is emitted more than once (a decal is a surface's
+ * own faces again) the copies are paired whichever way agrees best.
+ */
+function gradeTexture(ours, theirs) {
+    const out = { corners: 0, cornersExact: 0, cornersWrapped: 0 };
+    if (!theirs) return out;
+    const byKey = new Map();
+    const tp = theirs.positions;
+    for (let t = 0; t < tp.length / 9; t++) {
+        const key = triKey(tp, t);
+        if (!byKey.has(key)) byKey.set(key, []);
+        byKey.get(key).push({
+            t, used: false,
+            corners: [0, 1, 2].map((k) => ({
+                p: cornerKey(tp, t * 9 + k * 3),
+                u: theirs.uvs[t * 6 + k * 2], v: theirs.uvs[t * 6 + k * 2 + 1],
+            })),
+            tile: Array.from(theirs.tiles.subarray(t * 12, t * 12 + 4)),
+        });
+    }
+
+    for (let t = 0; t < ours.tris.length / 9; t++) {
+        const cands = byKey.get(triKey(ours.tris, t));
+        if (!cands) continue;
+        const mine = [0, 1, 2].map((k) => ({
+            p: cornerKey(ours.tris, t * 9 + k * 3),
+            u: ours.uvs[t * 6 + k * 2], v: ours.uvs[t * 6 + k * 2 + 1],
+        }));
+        const tile = Array.from(ours.tiles.subarray(t * 4, t * 4 + 4));
+
+        let best = null, bestScore = -1;
+        for (const c of cands) {
+            if (c.used) continue;
+            const s = scoreCorners(mine, tile, c);
+            const score = s.exact * 2 + (sameTile(tile, c.tile) ? 1 : 0);
+            if (score > bestScore) { best = c; bestScore = score; }
+        }
+        if (!best) continue;
+        best.used = true;
+        tex.faces++;
+
+        const hereTex = tile[2] > 0, thereTex = best.tile[2] > 0;
+        if (hereTex && thereTex) tex.texturedBoth++;
+        else if (hereTex) { tex.texturedHere++; continue; }
+        else if (thereTex) { tex.texturedThere++; continue; }
+        else continue;
+        if (sameTile(tile, best.tile)) tex.tileSame++;
+
+        const s = scoreCorners(mine, tile, best);
+        for (const r of [out, tex]) {
+            r.corners += 3;
+            r.cornersExact += s.exact;
+            r.cornersWrapped += s.wrapped;
+        }
+    }
+    return out;
+}
+
+function sameTile(a, b) {
+    /* An untextured face's height is a placeholder on both sides; only a
+     * textured face's rectangle names anything. */
+    if (!(a[2] > 0) && !(b[2] > 0)) return true;
+    return a.every((x, i) => Math.abs(x - b[i]) < 1e-3);
+}
+
+function scoreCorners(mine, tile, cand) {
+    const w = tile[2] || 1, h = tile[3] || 1;
+    const mod = (x, m) => ((x % m) + m) % m;
+    const near = (a, b, m) => {
+        const d = Math.abs(a - b);
+        return m ? Math.min(d, m - d) < 1e-3 : d < 1e-3;
+    };
+    let exact = 0, wrapped = 0;
+    const taken = [false, false, false];
+    for (const a of mine) {
+        const k = cand.corners.findIndex((b, i) => !taken[i] && b.p === a.p);
+        if (k < 0) continue;
+        taken[k] = true;
+        const b = cand.corners[k];
+        if (near(a.u, b.u) && near(a.v, b.v)) exact++;
+        if (near(mod(a.u, w), mod(b.u, w), w) && near(mod(a.v, h), mod(b.v, h), h)) wrapped++;
+    }
+    return { exact, wrapped };
+}
+
+function cornerKey(pos, o) {
+    return [Math.round(pos[o] * QUANT), Math.round(pos[o + 1] * QUANT),
+            Math.round(pos[o + 2] * QUANT)].join(',');
+}
+
+function triKey(pos, t) {
+    return [0, 1, 2].map((k) => cornerKey(pos, t * 9 + k * 3)).sort().join('|');
+}
 
 /**
  * A triangle as a key that does not depend on which corner either decoder
@@ -170,7 +314,9 @@ function readDump(file) {
     const b = fs.readFileSync(file);
     if (b.toString('latin1', 0, 4) !== 'M2MD') throw new Error(`${file} is not a model dump`);
     const version = b.readUInt32LE(4);
-    if (version !== 1) throw new Error(`model dump version ${version}, expected 1`);
+    if (version !== 2) {
+        throw new Error(`model dump version ${version}, expected 2 — rebuild the emulator`);
+    }
     const count = b.readUInt32LE(12);
     const out = [];
     let o = 16;
@@ -178,11 +324,16 @@ function readDump(file) {
         const index = b.readUInt32LE(o);
         const n = b.readUInt32LE(o + 4);
         o += 8;
-        const floats = n * 9;
-        const tris = new Float32Array(floats);
-        for (let k = 0; k < floats; k++) tris[k] = b.readFloatLE(o + k * 4);
-        o += floats * 4;
-        out.push({ index, tris });
+        const tris = new Float32Array(n * 9);
+        const uvs = new Float32Array(n * 6);
+        const tiles = new Float32Array(n * 4);
+        for (let t = 0; t < n; t++) {
+            for (let k = 0; k < 9; k++) tris[t * 9 + k] = b.readFloatLE(o + k * 4);
+            for (let k = 0; k < 6; k++) uvs[t * 6 + k] = b.readFloatLE(o + (9 + k) * 4);
+            for (let k = 0; k < 4; k++) tiles[t * 4 + k] = b.readFloatLE(o + (15 + k) * 4);
+            o += 19 * 4;
+        }
+        out.push({ index, tris, uvs, tiles });
     }
     return out;
 }
