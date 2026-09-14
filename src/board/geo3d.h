@@ -254,7 +254,28 @@ typedef struct {
     float r, g, b;
     float tx, ty, tw, th;        /* atlas tile rect (pixels); tw<=0 → untextured */
     float lb, pl;                /* lumabase (lumaram band) + poly_luma (0..1 lighting) */
+    float fl;                    /* GEO3D_FACE_* bits, carried as a float to the shader */
 } geo3d_tri_t;
+
+/* Per-face fill flags out of the texture header — the same bits, in the same
+ * places, as the explorer's face flags (vendor/noclip js/model.js), so
+ * tools/grade-models.mjs compares them as they stand.
+ *   TRANSPARENT  texheader[0] bit 13 on a textured face: the board's
+ *                transparent renderer, where a texel of 15 is a hole
+ *                (model2rd.ipp, the Translucent draw_scanline_tex). Cuts the
+ *                palm fronds, billboard trees, clouds and ring ropes out.
+ *   CHECKER      bit 15: drawn on every other screen pixel — the board's
+ *                half transparency (South Island's water planes, waterfall).
+ *   SHEET1       the tile's full-size level is on texram1; the mip chain
+ *                alternates sheets from there.
+ *   MIRROR_X/Y   bits 8 / 9: a coordinate that runs into an odd copy of the
+ *                tile is inverted (fetch_bilinear_texel `u = ~u`) instead of
+ *                repeating. */
+#define GEO3D_FACE_TRANSPARENT 1u
+#define GEO3D_FACE_CHECKER     2u
+#define GEO3D_FACE_SHEET1      4u
+#define GEO3D_FACE_MIRROR_X    8u
+#define GEO3D_FACE_MIRROR_Y    16u
 
 typedef struct {
     geo3d_tri_t tris[GEO3D_MAX_TRIS];
@@ -301,7 +322,7 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
                                       float x2, float y2, float z2, float u2, float v2,
                                       float r,  float g,  float b,
                                       float tx, float ty, float tw, float th,
-                                      float lb, float pl) {
+                                      float lb, float pl, float fl) {
     if (g_geo3d_tri_sink->count >= GEO3D_MAX_TRIS) return;
     /* Homebrew (camera-space) near-plane reject: a face with any vertex closer than
      * GEO3D_NEAR_CULL blows up into a huge filled wedge across the screen.  Drop it —
@@ -328,7 +349,7 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
     T->x2=x2; T->y2=y2; T->z2=z2; T->u2=u2; T->v2=v2;
     T->r=r;   T->g=g;   T->b=b;
     T->tx=tx; T->ty=ty; T->tw=tw; T->th=th;
-    T->lb=lb; T->pl=pl;
+    T->lb=lb; T->pl=pl; T->fl=fl;
 }
 
 /* Backward-compatible: untextured triangle (tw=0 → shader uses flat color). */
@@ -337,7 +358,7 @@ static inline void geo3d_emit_tri(float x0, float y0, float z0,
                                    float x2, float y2, float z2,
                                    float r,  float g,  float b) {
     geo3d_emit_tri_uv(x0,y0,z0,0.0f,0.0f, x1,y1,z1,0.0f,0.0f,
-                      x2,y2,z2,0.0f,0.0f, r,g,b, 0.0f,0.0f,0.0f,0.0f, 0.0f,1.0f);
+                      x2,y2,z2,0.0f,0.0f, r,g,b, 0.0f,0.0f,0.0f,0.0f, 0.0f,1.0f, 0.0f);
 }
 
 static inline void geo3d_emit_line(float x0, float y0, float z0,
@@ -1447,6 +1468,7 @@ static inline void geo3d_decode_model(int model_idx,
         uint32_t texx = 0, texy = 0, texw = 32, texh = 32, texsheet = 0;
         uint32_t lumabase = 0;               /* texheader[1] low byte << 7 (lumaram band) */
         bool textured = false;               /* texheader[0] bit14 = textured */
+        uint32_t fflags = 0;                 /* GEO3D_FACE_* */
         if (have_mat) {
             uint32_t rec = mat_base + (uint32_t)efi * 8u;
             if ((size_t)rec + 8 <= materials_size) {
@@ -1464,6 +1486,11 @@ static inline void geo3d_decode_model(int model_idx,
                 if      (g_uv_bank_mode == 1) texsheet = 0u;
                 else if (g_uv_bank_mode == 2) texsheet = 1u;
                 else if (g_uv_bank_mode == 3) texsheet ^= 1u;
+                if (textured && (th0 & 0x2000)) fflags |= GEO3D_FACE_TRANSPARENT;
+                if (th0 & 0x8000)               fflags |= GEO3D_FACE_CHECKER;
+                if (texsheet)                   fflags |= GEO3D_FACE_SHEET1;
+                if ((th0 >> 8) & 1)             fflags |= GEO3D_FACE_MIRROR_X;
+                if ((th0 >> 9) & 1)             fflags |= GEO3D_FACE_MIRROR_Y;
                 uint32_t matidx = (th3 >> 6) & 0x3ff;   /* colorbase → palette */
                 uint32_t pal = GEO3D_PALETTE_OFF + matidx * 2u;
                 if (main_data && (size_t)pal + 2 <= main_data_size) {
@@ -1513,7 +1540,8 @@ static inline void geo3d_decode_model(int model_idx,
 
         /* Flat-colour override (homebrew display list): keep the caller's colour,
          * force untextured — model 456's ROM material/texture is meaningless here. */
-        if (g_geo_flat_color) { textured = false; fr = cr; fg = cg; fb = cb; }
+        if (g_geo_flat_color) { textured = false; fr = cr; fg = cg; fb = cb; fflags = 0; }
+        float ffl = (float)fflags;
 
         /* Atlas tile rect (pixels) for this face — passed to the shader for the
          * per-pixel wrap. tw=0 → untextured (flat color). */
@@ -1627,7 +1655,7 @@ static inline void geo3d_decode_model(int model_idx,
                 geo3d_emit_line(C.x,C.y,C.z, A.x,A.y,A.z, fr,fg,fb);
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl, ffl);
             } else {
                 geo3d_emit_line(A.x,A.y,A.z, B.x,B.y,B.z, fr,fg,fb);
             }
@@ -1643,17 +1671,17 @@ static inline void geo3d_decode_model(int model_idx,
             if (geo3d_split_other_way(kA ^ kB ^ kC ^ kD, kA ^ kD)) {
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl, ffl);
                 geo3d_emit_tri_uv(B.x,B.y,B.z, uvu[1],uvv[1],
                                   D.x,D.y,D.z, uvu[3],uvv[3],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl, ffl);
             } else {
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   B.x,B.y,B.z, uvu[1],uvv[1],
-                                  D.x,D.y,D.z, uvu[3],uvv[3], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
+                                  D.x,D.y,D.z, uvu[3],uvv[3], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl, ffl);
                 geo3d_emit_tri_uv(A.x,A.y,A.z, uvu[0],uvv[0],
                                   D.x,D.y,D.z, uvu[3],uvv[3],
-                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl);
+                                  C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, (float)lumabase,pl, ffl);
             }
         }
         efi++;   /* this face was emitted → consumes one material record */

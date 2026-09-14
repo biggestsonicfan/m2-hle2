@@ -43,6 +43,7 @@ typedef struct {
     float u, v;
     float tx, ty, tw, th;
     float lb, pl;               /* lumabase + poly_luma for the colorxlat luma ramp */
+    float fl;                   /* GEO3D_FACE_* flags */
 } game_render_tex_vertex_t;
 
 typedef struct {
@@ -172,21 +173,44 @@ static const char *game_render_fill_vs_glsl =
     "layout(location=1) in vec4 a_color;\n"
     "layout(location=2) in vec2 a_uv;\n"
     "layout(location=3) in vec4 a_tile;\n"
-    "layout(location=4) in vec2 a_lbpl;\n"
+    "layout(location=4) in vec3 a_lbpl;\n"
     "out vec4 color;\n"
     "out vec2 uv;\n"
-    "out vec4 tile;\n"
-    "out vec2 lbpl;\n"
+    "flat out vec4 tile;\n"
+    "flat out vec3 lbpl;\n"
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl;\n"
     "}\n";
 
-/* MAME luma ramp: texel(4-bit) → lumaram[2*lumabase + texel*16] (even-byte
- * layout) → luma6 = min(lram*poly_luma/256, 63) → colorxlat[ch][(c5<<8)+luma6]
- * → gamma max(c-64,0)*255/191.  lumaram=256x512, colorxlat=256x192 (3 ch @
- * byte 0/0x4000/0x8000).  lb<0 falls back to the old flat_color*luma path. */
+/*
+ * The fill — MAME's model2rd.ipp draw_scanline_tex, as the explorer ports it
+ * (vendor/noclip js/viewer.js FRAG_SHADER), whose texel path this follows line
+ * for line so the two can be held against each other.
+ *
+ *   texel     bilinear over the 4-bit sheet with the board's half-texel offset,
+ *             each tap wrapped within the tile the way the index mask wraps,
+ *             and mirrored in an odd copy when the face says so (u = ~u).
+ *   level     the mip chain send_lod_data_q box-filters into texture RAM: level
+ *             L of a tile sits at ((tx-2048)>>L)&2047, ((ty-1024)>>L)&1023 on
+ *             the sheet that alternates with L (fetch_bilinear_texel). Picked
+ *             from screen-space derivatives, since the board's texlod is
+ *             calibrated to 496x384 and this draws at the window's size.
+ *   holes     on the transparent renderer a texel of 15 carries no colour: it
+ *             borrows its pair's, and the four holes' weights blend into a
+ *             coverage that must reach half a texel for the pixel to survive.
+ *   checker   the half-transparency bit draws every other pixel.
+ *   ramp      lumaram[lumabase + (t >> 1)] with t the *filtered* texel in 8.4,
+ *             * poly_luma → luma6 → colorxlat[ch][(c5<<8)+luma6] → gamma
+ *             max(c-64,0)*255/191. Indexing by the nearest of the sixteen
+ *             texels instead quantises a blended pixel onto a neighbouring
+ *             palette slot, a different colour rather than a nearby shade.
+ *
+ * Atlas texels are nibble*17, so a hole reads back exactly 1.0. The lod is
+ * taken before any discard or branch: derivatives are undefined past either.
+ * lb < 0 falls back to the old flat_color*luma path.
+ */
 static const char *game_render_fill_fs_glsl =
     "#version 410\n"
     "uniform sampler2D atlas_smp;\n"
@@ -194,20 +218,66 @@ static const char *game_render_fill_fs_glsl =
     "uniform sampler2D cxlat_smp;\n"
     "in vec4 color;\n"
     "in vec2 uv;\n"
-    "in vec4 tile;\n"
-    "in vec2 lbpl;\n"
+    "flat in vec4 tile;\n"
+    "flat in vec3 lbpl;\n"
     "out vec4 frag_color;\n"
+    "bool has(int bit) { return (int(lbpl.z + 0.5) & bit) != 0; }\n"
+    "ivec4 level_tile(int L) {\n"
+    "  int sheet = has(4) ? 1 : 0;\n"
+    "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
+    "  uint y = (uint(int(tile.y) - sheet * 1024) - 1024u) >> uint(L);\n"
+    "  return ivec4(int(x & 2047u), int(y & 1023u) + ((sheet + L) & 1) * 1024,\n"
+    "               max(int(tile.z) >> L, 1), max(int(tile.w) >> L, 1));\n"
+    "}\n"
+    "float tile_texel(ivec4 t, ivec2 p) {\n"
+    "  ivec2 size = t.zw;\n"
+    "  ivec2 s = p + size * 8;\n"
+    "  ivec2 q = s % size;\n"
+    "  ivec2 copy = s / size;\n"
+    "  if (has(8) && (copy.x & 1) != 0) q.x = size.x - 1 - q.x;\n"
+    "  if (has(16) && (copy.y & 1) != 0) q.y = size.y - 1 - q.y;\n"
+    "  return texelFetch(atlas_smp, (t.xy + q) & 2047, 0).r;\n"
+    "}\n"
+    "vec2 sample_level(int L) {\n"
+    "  ivec4 t = level_tile(L);\n"
+    "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
+    "  ivec2 i0 = ivec2(floor(c));\n"
+    "  vec2 f = fract(c);\n"
+    "  float t00 = tile_texel(t, i0);\n"
+    "  float t10 = tile_texel(t, i0 + ivec2(1, 0));\n"
+    "  float t01 = tile_texel(t, i0 + ivec2(0, 1));\n"
+    "  float t11 = tile_texel(t, i0 + ivec2(1, 1));\n"
+    "  float a = 1.0;\n"
+    "  if (has(1)) {\n"
+    "    vec4 cover = 1.0 - step(1.0, vec4(t00, t10, t01, t11));\n"
+    "    a = mix(mix(cover.x, cover.y, f.x), mix(cover.z, cover.w, f.x), f.y);\n"
+    "    if (t00 == 1.0) t00 = t10;\n"
+    "    if (t10 == 1.0) t10 = t00;\n"
+    "    if (t01 == 1.0) t01 = t11;\n"
+    "    if (t11 == 1.0) t11 = t01;\n"
+    "  }\n"
+    "  float row0 = mix(t00, t10, f.x);\n"
+    "  float row1 = mix(t01, t11, f.x);\n"
+    "  if (has(1)) {\n"
+    "    if (row0 == 1.0) row0 = row1;\n"
+    "    if (row1 == 1.0) row1 = row0;\n"
+    "  }\n"
+    "  return vec2(mix(row0, row1, f.y), a);\n"
+    "}\n"
     "void main() {\n"
+    "  float lmax = max(log2(max(min(tile.z, tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
+    "  if (has(2) && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
     "  vec3 rgb = color.rgb;\n"
     "  if (tile.z > 0.0) {\n"
-    "    vec2 w = uv - tile.zw * floor(uv / tile.zw);\n"
-    "    vec2 auv = (tile.xy + w) / vec2(2048.0, 2048.0);\n"
-    "    float al = texture(atlas_smp, auv).r;\n"
+    "    int L0 = int(floor(lod));\n"
+    "    vec2 tx = mix(sample_level(L0), sample_level(L0 + 1), fract(lod));\n"
+    "    if (has(1) && tx.y < 0.5) discard;\n"
+    "    float al = tx.x;\n"
     "    if (lbpl.x < 0.0) {\n"
     "      if (al > 0.0) rgb = clamp(color.rgb * al * 2.0, 0.0, 1.0);\n"
     "    } else {\n"
-    "      int texel4 = int(al * 15.0 + 0.5);\n"
-    "      int lbyte = 2 * int(lbpl.x) + texel4 * 16;\n"
+    "      int lbyte = 2 * (int(lbpl.x) + int(al * 120.0));\n"
     "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
     "      float poly = clamp(lbpl.y, 0.0, 1.0) * 255.0;\n"
     "      int li = int(min(lram * poly / 256.0, 63.0) + 0.5);\n"
@@ -227,8 +297,8 @@ static const char *game_render_fill_fs_glsl =
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
-    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
+    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float3 lbpl : TEXCOORD2; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float3 lbpl : TEXCOORD2; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
@@ -241,18 +311,66 @@ static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> lumat : register(t1);\n"
     "Texture2D<float4> cxlat : register(t2);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float3 lbpl : TEXCOORD2; };\n"
+    "bool has(float fl, int bit) { return (((int)(fl + 0.5)) & bit) != 0; }\n"
+    "int4 level_tile(float4 tile, float fl, int L) {\n"
+    "  int sheet = has(fl, 4) ? 1 : 0;\n"
+    "  uint x = ((uint)(int)tile.x - 2048u) >> (uint)L;\n"
+    "  uint y = ((uint)((int)tile.y - sheet * 1024) - 1024u) >> (uint)L;\n"
+    "  return int4((int)(x & 2047u), (int)(y & 1023u) + ((sheet + L) & 1) * 1024,\n"
+    "              max(((int)tile.z) >> L, 1), max(((int)tile.w) >> L, 1));\n"
+    "}\n"
+    "float tile_texel(int4 t, float fl, int2 p) {\n"
+    "  int2 size = t.zw;\n"
+    "  int2 s = p + size * 8;\n"
+    "  int2 q = s % size;\n"
+    "  int2 copy = s / size;\n"
+    "  if (has(fl, 8) && (copy.x & 1) != 0) q.x = size.x - 1 - q.x;\n"
+    "  if (has(fl, 16) && (copy.y & 1) != 0) q.y = size.y - 1 - q.y;\n"
+    "  return atlas.Load(int3((t.xy + q) & 2047, 0)).r;\n"
+    "}\n"
+    "float2 sample_level(float2 uv, float4 tile, float fl, int L) {\n"
+    "  int4 t = level_tile(tile, fl, L);\n"
+    "  float2 c = uv / pow(2.0, (float)L) - 0.5;\n"
+    "  int2 i0 = (int2)floor(c);\n"
+    "  float2 f = frac(c);\n"
+    "  float t00 = tile_texel(t, fl, i0);\n"
+    "  float t10 = tile_texel(t, fl, i0 + int2(1, 0));\n"
+    "  float t01 = tile_texel(t, fl, i0 + int2(0, 1));\n"
+    "  float t11 = tile_texel(t, fl, i0 + int2(1, 1));\n"
+    "  float a = 1.0;\n"
+    "  if (has(fl, 1)) {\n"
+    "    float4 cover = 1.0 - step(1.0, float4(t00, t10, t01, t11));\n"
+    "    a = lerp(lerp(cover.x, cover.y, f.x), lerp(cover.z, cover.w, f.x), f.y);\n"
+    "    if (t00 == 1.0) t00 = t10;\n"
+    "    if (t10 == 1.0) t10 = t00;\n"
+    "    if (t01 == 1.0) t01 = t11;\n"
+    "    if (t11 == 1.0) t11 = t01;\n"
+    "  }\n"
+    "  float row0 = lerp(t00, t10, f.x);\n"
+    "  float row1 = lerp(t01, t11, f.x);\n"
+    "  if (has(fl, 1)) {\n"
+    "    if (row0 == 1.0) row0 = row1;\n"
+    "    if (row1 == 1.0) row1 = row0;\n"
+    "  }\n"
+    "  return float2(lerp(row0, row1, f.y), a);\n"
+    "}\n"
     "float4 main(fs_in inp) : SV_Target0 {\n"
+    "  float fl = inp.lbpl.z;\n"
+    "  float lmax = max(log2(max(min(inp.tile.z, inp.tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lod = clamp(log2(max(length(ddx(inp.uv)), length(ddy(inp.uv)))), 0.0, lmax);\n"
+    "  if (has(fl, 2) && ((((int)inp.pos.x) ^ ((int)inp.pos.y)) & 1) == 0) discard;\n"
     "  float3 rgb = inp.color.rgb;\n"
     "  if (inp.tile.z > 0.0) {\n"
-    "    float2 w = inp.uv - inp.tile.zw * floor(inp.uv / inp.tile.zw);\n"
-    "    float2 auv = (inp.tile.xy + w) / float2(2048.0, 2048.0);\n"
-    "    float al = atlas.Sample(smp, auv).r;\n"
+    "    int L0 = (int)floor(lod);\n"
+    "    float2 tx = lerp(sample_level(inp.uv, inp.tile, fl, L0),\n"
+    "                     sample_level(inp.uv, inp.tile, fl, L0 + 1), frac(lod));\n"
+    "    if (has(fl, 1) && tx.y < 0.5) discard;\n"
+    "    float al = tx.x;\n"
     "    if (inp.lbpl.x < 0.0) {\n"
     "      if (al > 0.0) rgb = clamp(inp.color.rgb * al * 2.0, 0.0, 1.0);\n"
     "    } else {\n"
-    "      int texel4 = (int)(al * 15.0 + 0.5);\n"
-    "      int lbyte = 2 * (int)inp.lbpl.x + texel4 * 16;\n"
+    "      int lbyte = 2 * ((int)inp.lbpl.x + (int)(al * 120.0));\n"
     "      float lram = lumat.Load(int3(lbyte & 255, lbyte >> 8, 0)).r * 255.0;\n"
     "      float poly = clamp(inp.lbpl.y, 0.0, 1.0) * 255.0;\n"
     "      int li = (int)(min(lram * poly / 256.0, 63.0) + 0.5);\n"
@@ -501,7 +619,7 @@ static inline void game_render_init(void) {
         p.layout.attrs[2].offset   = offsetof(game_render_tex_vertex_t, u);
         p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
         p.layout.attrs[3].offset   = offsetof(game_render_tex_vertex_t, tx);
-        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT2;
+        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT3;
         p.layout.attrs[4].offset   = offsetof(game_render_tex_vertex_t, lb);
         p.layout.buffers[0].stride = sizeof(game_render_tex_vertex_t);
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
@@ -793,7 +911,7 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
         float lb = g_luma_ramp ? T->lb : -1.0f;   /* -1 → old flat_color×luma path */
         for (int _k = 0; _k < 3; _k++) {
             v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
-            v[_k].lb=lb;    v[_k].pl=T->pl;
+            v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=T->fl;
         }
     }
     int vcount = n * 3;

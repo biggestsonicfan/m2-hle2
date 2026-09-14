@@ -90,6 +90,12 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
 
 - **The UV stream runs B,A,C,D for a quad and B,A,C for a triangle — no flips.** Negating Z reverses the winding, so the stream walks each face's loop the other way from the index array. Corners shared along a strip carry one UV in ROM, so the right order is the one that agrees with itself: 96.5% of shared corners for this order, 75.5% for the old A,B,D,C-with-flip-U-and-V, which had been picked by eye and left 38% of corners on a different texel (STF's "CAUTION" sign drew upside down and mirrored). `tools/grade-models.mjs` now holds all 1,795,005 textured corners to the explorer's exactly.
 - **A quad whose four corners were already emitted in this model is cut along the same diagonal as before.** A decal is the surface's own faces emitted again with a cut-out texture; if the copy is cut along the other diagonal, a warped quad bulges differently and half the decal sinks behind the surface. The corner key is the explorer's `cornerKey`, bit for bit. This rule, and nothing in the connectivity logic, was the whole of the J = 0.990 that `grade-models.mjs` first measured. It is now J = 1.000000 over 598,728 triangles.
+- **The fill follows `model2rd.ipp`, through the explorer's port of it** (`game_render.h` fill shader against `vendor/noclip/js/viewer.js`). Texture-header bits it depends on:
+  - bit 13 on a textured face: the transparent renderer, where texel 15 is a hole (four-tap coverage ≥ 0.5 survives)
+  - bit 15: checker, drawn on every other pixel
+  - bits 8 / 9: mirror X / Y, where an odd repeat of the tile reads back to front
+
+  Sampling is bilinear with the half-texel offset. The lumaram band is indexed with the *filtered* texel (`lumabase + t*120`), not the nearest of 16. Mip level L sits at `((tx-2048)>>L)&2047, ((ty-1024)>>L)&1023`, on alternating sheets. `grade-models.mjs` checks the face flags against the explorer.
 
 **Model-table mesh pointer is encoded, not a raw offset**: actual ROM offset = `(ptr * 4) - 0x02000010 + 0x10` for STF. The `* 4` is hardware; the base may shift per game — verify before trusting on a new ROMset.
 

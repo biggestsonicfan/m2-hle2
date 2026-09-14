@@ -941,11 +941,11 @@ static void mcp_cmd_wait_frames(const char *req, char *resp, int cap) {
  * of the model table with no matrix, so its output can be held against another
  * implementation of the same format.
  *
- * Positions, and the texture coordinates and tile rectangle each corner
- * carries. All three are a pure function of the ROM — the UV stream and the
- * texture headers sit in the texture ROM beside the material records. What the
- * running game has uploaded decides which *texels* are in that rectangle, and
- * none of that is written here.
+ * Positions, the texture coordinates and tile rectangle each corner carries,
+ * and the face's fill flags. All of it is a pure function of the ROM — the UV
+ * stream and the texture headers sit in the texture ROM beside the material
+ * records. What the running game has uploaded decides which *texels* are in
+ * that rectangle, and none of that is written here.
  *
  * The emit sink is redirected for the duration so the sweep does not fight the
  * render thread for the buffer the current frame is being built in, and
@@ -953,8 +953,8 @@ static void mcp_cmd_wait_frames(const char *req, char *resp, int cap) {
  *
  * Format, little-endian throughout:
  *   magic "M2MD" | u32 version=2 | u32 first | u32 count
- *   then per model: u32 index | u32 tris | tris * 19 * f32, each triangle
- *   (x,y,z) * 3 | (u,v) * 3 | tile x,y,w,h   (w = 0 for an untextured face)
+ *   then per model: u32 index | u32 tris | tris * 20 * f32, each triangle
+ *   (x,y,z) * 3 | (u,v) * 3 | tile x,y,w,h (w = 0 untextured) | GEO3D_FACE_* flags
  */
 static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
     uint32_t first = 0, count = 1;
@@ -1015,10 +1015,10 @@ static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
         fwrite(rec, 4, 2, f);
         for (uint32_t i = 0; i < n; i++) {
             const geo3d_tri_t *T = &dump_buf.tris[i];
-            float v[19] = { T->x0, T->y0, T->z0, T->x1, T->y1, T->z1, T->x2, T->y2, T->z2,
+            float v[20] = { T->x0, T->y0, T->z0, T->x1, T->y1, T->z1, T->x2, T->y2, T->z2,
                             T->u0, T->v0, T->u1, T->v1, T->u2, T->v2,
-                            T->tx, T->ty, T->tw, T->th };
-            fwrite(v, 4, 19, f);
+                            T->tx, T->ty, T->tw, T->th, T->fl };
+            fwrite(v, 4, 20, f);
         }
         if (n) { nonempty++; total_tris += n; }
     }

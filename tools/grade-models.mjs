@@ -91,10 +91,15 @@ let interTotal = 0, unionTotal = 0;
 const perModel = [];
 /* Texture addressing, over triangles both decoders emitted. */
 const tex = { faces: 0, texturedBoth: 0, texturedHere: 0, texturedThere: 0,
-              tileSame: 0, corners: 0, cornersExact: 0, cornersWrapped: 0 };
+              tileSame: 0, corners: 0, cornersExact: 0, cornersWrapped: 0,
+              flagsSame: 0, flagsDiffer: new Map() };
+/* The fill flags both decoders carry in the same bits: transparent renderer,
+ * checker, starting sheet, mirror X and Y. The explorer's higher bits (z source,
+ * two-sided) are not carried here yet. */
+const FILL_FLAGS = 31;
 const perModelUv = [];
 
-for (const { index, tris, uvs, tiles } of models) {
+for (const { index, tris, uvs, tiles, flags } of models) {
     const theirs = decodeModel(rom, index);
     const theirTris = theirs ? theirs.positions.length / 9 : 0;
     const ourTris = tris.length / 9;
@@ -115,7 +120,7 @@ for (const { index, tris, uvs, tiles } of models) {
     if (j === 1) exactTris++;
     else perModel.push({ index, j, ourTris, theirTris });
 
-    const u = gradeTexture({ tris, uvs, tiles }, theirs);
+    const u = gradeTexture({ tris, uvs, tiles, flags }, theirs);
     if (u.corners && u.cornersExact < u.corners) {
         perModelUv.push({ index, frac: u.cornersExact / u.corners, ...u });
     }
@@ -156,6 +161,10 @@ rep.check('the same faces are textured',
 
 rep.check('textured faces name the same tile', tex.tileSame === tex.texturedBoth,
           `${tex.tileSame} of ${tex.texturedBoth}`);
+
+rep.check('faces carry the same fill flags', tex.flagsSame === tex.faces,
+          `${tex.flagsSame} of ${tex.faces} matched triangles` +
+          [...tex.flagsDiffer].map(([k, n]) => `; ${n} with ${k}`).join(''));
 
 /* Exact is the claim: the explorer mirrors a coordinate that has run into an
  * odd copy of a tile (texheader bits 8 and 9), so u and u + w are not the same
@@ -210,6 +219,7 @@ function gradeTexture(ours, theirs) {
                 u: theirs.uvs[t * 6 + k * 2], v: theirs.uvs[t * 6 + k * 2 + 1],
             })),
             tile: Array.from(theirs.tiles.subarray(t * 12, t * 12 + 4)),
+            flags: theirs.flags[t * 3] & FILL_FLAGS,
         });
     }
 
@@ -232,6 +242,12 @@ function gradeTexture(ours, theirs) {
         if (!best) continue;
         best.used = true;
         tex.faces++;
+        const fl = ours.flags[t] & FILL_FLAGS;
+        if (fl === best.flags) tex.flagsSame++;
+        else {
+            const k = `${fl} here, ${best.flags} there`;
+            tex.flagsDiffer.set(k, (tex.flagsDiffer.get(k) ?? 0) + 1);
+        }
 
         const hereTex = tile[2] > 0, thereTex = best.tile[2] > 0;
         if (hereTex && thereTex) tex.texturedBoth++;
@@ -327,13 +343,15 @@ function readDump(file) {
         const tris = new Float32Array(n * 9);
         const uvs = new Float32Array(n * 6);
         const tiles = new Float32Array(n * 4);
+        const flags = new Uint32Array(n);
         for (let t = 0; t < n; t++) {
             for (let k = 0; k < 9; k++) tris[t * 9 + k] = b.readFloatLE(o + k * 4);
             for (let k = 0; k < 6; k++) uvs[t * 6 + k] = b.readFloatLE(o + (9 + k) * 4);
             for (let k = 0; k < 4; k++) tiles[t * 4 + k] = b.readFloatLE(o + (15 + k) * 4);
-            o += 19 * 4;
+            flags[t] = b.readFloatLE(o + 19 * 4);
+            o += 20 * 4;
         }
-        out.push({ index, tris, uvs, tiles });
+        out.push({ index, tris, uvs, tiles, flags });
     }
     return out;
 }
