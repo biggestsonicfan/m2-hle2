@@ -175,7 +175,7 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (!h) return;                          /* pin not yet delivered (still HLE) */
 
     s_irq_baseline_depth = cpu->frame_depth;
-    hle_call(cpu, h, cpu->sfr.ip);           /* vector to handler; ret resumes */
+    hle_interrupt(cpu, h);                   /* vector to handler; ret resumes, AC/PC restored */
     s_irq_in_service = true;
     g_irqt.deliver_count++;
     g_irqt.deliver_by_pin[pin & 3]++;

@@ -40,6 +40,10 @@ These are facts reverse-engineered or debugged into the original implementation.
 - **FP-from-GPR is bit-reinterpret, not int→float convert** — `memcpy` semantics.
 - **`call` / `ret` frame layout**: align SP to 64 bytes (`(sp + 63) & ~63`), zero the new locals, save `pfp` / `sp` / `rip`, sync `g15` (frame pointer) every call. `ret` restores all locals.
 - **Register-pair (`reg_quad`) ops are big-endian** even though the CPU is little-endian overall.
+- **The four "not" logicals invert different operands**: `andnot` = src2 & ~src1, `notand` = src1 & ~src2, `ornot` = src2 | ~src1, `notor` = src1 | ~src2 (MAME `i960.cpp`). `notand` used to be a copy of `andnot`.
+  - *Symptom that surfaced this in STF:* the top quarter of both texture sheets was never written. `sub_4C444` clears bit 0 of each mip destination with `notand g6, 1, g6`, so every mip level went to the wrong address. Once fixed, `tools/grade-texram.mjs` shows both sheets byte-identical to the explorer.
+- **An interrupt is not a call: `ret` from a handler restores AC and PC.** Deliver interrupts with `hle_interrupt`, never `hle_call`. Otherwise a handler's compares leak into the condition code of the instruction it interrupted.
+  - *Symptom that surfaced this in STF:* attract crashed about 45 s in. A timer interrupt landed between `cmpo r14, 0x10` and `bg` in `unpack_lod_data`'s bit-buffer refill, the Huffman decode lost sync, and its output overran into the code tree. It only showed once the `notand` fix changed attract timing; the bug predates that fix.
 
 ### Coprocessor (COP) — board-level math, every Model 2 game
 

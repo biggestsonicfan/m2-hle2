@@ -120,6 +120,17 @@ static void dbg_tests_ctrl(void) {
     dbg_rec(G, "ret target",      c.sfr.ip     == 4, "ip=0x%X",  c.sfr.ip);
     dbg_rec(G, "ret frame_depth", c.frame_depth == 0, "depth=%d", c.frame_depth);
 
+    /* An interrupt's ret puts back the condition code it interrupted; a
+     * plain call's ret leaves whatever the callee set. */
+    c = dbg_mk_cpu(CC_E);
+    c.sfr.ip = 4;
+    hle_interrupt(&c, 8);
+    set_cc(&c, CC_L);                           /* the handler compares */
+    memcpy(g_dbg_scratch + 8, &(uint32_t){enc_ctrl(0x0A, 0)}, 4);
+    i960_step(&c, g_dbg_bus);
+    dbg_rec(G, "irq ret resumes",   c.sfr.ip == 4,           "ip=0x%X", c.sfr.ip);
+    dbg_rec(G, "irq ret restores cc", get_cc(&c) == CC_E,    "cc=%u",   get_cc(&c));
+
     c = dbg_mk_cpu(CC_NO); dbg_step(&c, enc_ctrl(0x10, 8), 0);
     dbg_rec(G, "bno cc=NO→taken", c.sfr.ip == 8, "ip=0x%X", c.sfr.ip);
     c = dbg_mk_cpu(CC_G);  dbg_step(&c, enc_ctrl(0x10, 8), 0);
@@ -439,13 +450,16 @@ static void dbg_tests_reg_logic(void) {
 
     c = dbg_mk_cpu(CC_NO); c.locals.r[0] = 0xFF; c.locals.r[1] = 0xFF00;
     dbg_step(&c, enc_reg(0x584, 0, 1, 2), 0);
-    dbg_rec(G, "notand", c.locals.r[2] == 0xFF00, "got=0x%X", c.locals.r[2]);
+    /* src1 & ~src2 — the operand that differs from andnot's is the point. */
+    dbg_rec(G, "notand", c.locals.r[2] == 0xFF, "got=0x%X", c.locals.r[2]);
 
-    c = dbg_mk_cpu(CC_NO); c.locals.r[0] = 0; c.locals.r[1] = 0xFFFFFF00;
+    /* src2 | ~src1 */
+    c = dbg_mk_cpu(CC_NO); c.locals.r[0] = 0xFFFFFF00; c.locals.r[1] = 0x0F;
     dbg_step(&c, enc_reg(0x58b, 0, 1, 2), 0);
     dbg_rec(G, "ornot",  c.locals.r[2] == 0xFF, "got=0x%X", c.locals.r[2]);
 
-    c = dbg_mk_cpu(CC_NO); c.locals.r[0] = 0xFFFFFF00; c.locals.r[1] = 0xFF;
+    /* src1 | ~src2 */
+    c = dbg_mk_cpu(CC_NO); c.locals.r[0] = 0x0F; c.locals.r[1] = 0xFFFFFF00;
     dbg_step(&c, enc_reg(0x58d, 0, 1, 2), 0);
     dbg_rec(G, "notor",  c.locals.r[2] == 0xFF, "got=0x%X", c.locals.r[2]);
 

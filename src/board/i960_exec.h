@@ -174,6 +174,7 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     // Save current frame
                     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
+                        cpu->frame_irq[cpu->frame_depth] = 0;
                         cpu->frame_depth++;
                     } else {
                         LOG_ERROR("Frame stack overflow at 0x%08X", ip);
@@ -202,6 +203,11 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                         uint32_t return_ip = cpu->locals.rip;
                         cpu->frame_depth--;
                         cpu->locals = cpu->frame_stack[cpu->frame_depth];
+                        if (cpu->frame_irq[cpu->frame_depth]) {   /* interrupt return */
+                            cpu->sfr.ac = cpu->frame_irq_ac[cpu->frame_depth];
+                            cpu->sfr.pc = cpu->frame_irq_pc[cpu->frame_depth];
+                            cpu->frame_irq[cpu->frame_depth] = 0;
+                        }
                         cpu->sfr.ip = return_ip;
                         cpu->globals.fp = cpu->locals.pfp;
                         return 0;
@@ -574,8 +580,16 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                 case 0x583: // setbit
                     reg_write(cpu, dst_idx, src2 | (1 << (src1 & 31)));
                     break;
+                /* The four "not" logicals are not two pairs of synonyms: which
+                 * operand is inverted is the whole difference. andnot / ornot
+                 * invert src1, notand / notor invert src2 (MAME i960.cpp,
+                 * Intel's reference). notand used to be a copy of andnot, which
+                 * sent every STF mip level to an odd texram address —
+                 * sub_4C444 builds the chain's destinations with
+                 * `notand g6, 1, g6` to clear bit 0 — so the top quarter of
+                 * both sheets was never filled. */
                 case 0x584: // notand
-                    reg_write(cpu, dst_idx, (~src1) & src2);
+                    reg_write(cpu, dst_idx, src1 & (~src2));
                     break;
                 case 0x582: // andnot
                     reg_write(cpu, dst_idx, (~src1) & src2);
@@ -587,13 +601,13 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     reg_write(cpu, dst_idx, ~(src1 ^ src2));
                     break;
                 case 0x58b: // ornot
-                    reg_write(cpu, dst_idx, src1 | (~src2));
+                    reg_write(cpu, dst_idx, src2 | (~src1));
                     break;
                 case 0x58c: // clrbit
                     reg_write(cpu, dst_idx, src2 & ~(1 << (src1 & 31)));
                     break;
                 case 0x58d: // notor
-                    reg_write(cpu, dst_idx, (~src1) | src2);
+                    reg_write(cpu, dst_idx, src1 | (~src2));
                     break;
                 case 0x58e: // nand
                     reg_write(cpu, dst_idx, ~(src1 & src2));
@@ -1076,6 +1090,7 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                 {
                     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
+                        cpu->frame_irq[cpu->frame_depth] = 0;
                         cpu->frame_depth++;
                     } else {
                         LOG_ERROR("Frame stack overflow at 0x%08X", ip);

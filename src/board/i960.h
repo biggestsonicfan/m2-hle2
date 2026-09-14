@@ -76,6 +76,15 @@ typedef struct i960_cpu {
     local_regs_t   frame_stack[FRAME_STACK_DEPTH];
     int            frame_depth;
 
+    /* Interrupt frames. The processor saves PC and AC in the frame it builds
+     * for an interrupt, and `ret` restores both when the frame's return status
+     * says it was one. frame_irq[d] marks frame_stack[d] that way; every push
+     * sets it, every pop reads it. Without it a handler's own compares leak
+     * into the condition code of whatever instruction it interrupted. */
+    uint8_t        frame_irq[FRAME_STACK_DEPTH];
+    uint32_t       frame_irq_ac[FRAME_STACK_DEPTH];
+    uint32_t       frame_irq_pc[FRAME_STACK_DEPTH];
+
     // Running state
     int            halted;
 } i960_cpu_t;

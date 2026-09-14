@@ -239,6 +239,28 @@ it: the emulator fills 768 KB of each 1 MB sheet and leaves the last 256 KB
 untouched. The explorer's own build is byte-exact against the MAME digests, so
 the reference side is sound and the gap is this emulator's.
 
+*Since closed, and it was the CPU.* That quarter is where the mip chain lives,
+and the explorer's `pageDestinations` shows how its addresses are built: each
+level's coordinates are halved, then cleared to even. The i960 does the clearing
+with `notand g6, 1, g6` in `sub_4C444`, and this emulator's `notand` was a copy
+of `andnot`: it inverted the wrong operand. A watchpoint showed the mip pass
+running, and writing to odd addresses. With the op fixed (along with `ornot` and
+`notor`, which were swapped):
+
+```
+PASS  texram0: emulator vs explorer  1048576 bytes identical
+PASS  texram1: emulator vs explorer  1048576 bytes identical
+```
+
+Fixing it changed attract mode's timing, and that exposed a second CPU bug.
+Interrupts were delivered as plain calls, so returning from a handler did not
+restore the condition code. A timer interrupt between a compare and its branch
+in `unpack_lod_data` then desynced the decoder about 45 seconds in. It was
+found the same way these tools work: the explorer's `texture.js` is a bit-exact
+port of that routine, so the i960's per-row decoder state was diffed against
+it. Every row agreed up to the crash, which put the fault inside a row, and an
+instruction trace there showed the interrupt landing.
+
 ## What is not here yet
 
 **The emulator-vs-board comparison has not actually been taken.** The board
