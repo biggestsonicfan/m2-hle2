@@ -39,6 +39,7 @@
 #  define mcp_close(s)      closesocket(s)
 #  define mcp_sockerr()     WSAGetLastError()
 #else
+#  include <errno.h>
 #  include <sys/socket.h>
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
