@@ -26,6 +26,7 @@
 
 #include <stdint.h>
 #include "m68k.h"
+#include "m68k_timing.h"
 #include "log.h"
 
 /* ================================================================ helpers */
@@ -46,7 +47,9 @@ static inline int32_t m68k_sign_ext(uint32_t v, int sz) {
     return (int32_t)v;
 }
 
-/* ---- bus access ---- */
+/* ---- bus access ----
+ * Time is charged per instruction from Motorola's tables (m68k_timing.h), in
+ * m68k_step, not per access. */
 static inline uint8_t  m68k_rb(m68k_state_t *s, uint32_t a)
     { return (uint8_t)s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 1); }
 static inline uint16_t m68k_rw(m68k_state_t *s, uint32_t a)
@@ -631,7 +634,8 @@ static inline int m68k_step(m68k_state_t *s) {
     uint16_t    op    = m68k_fetch(s);
     int         grp   = (op >> 12) & 0xF;
 
-    c->cycles += 4;
+    if (!m68k_time_ready) m68k_timing_init();
+    c->cycles += m68k_time[op];
 
     switch (grp) {
 
@@ -963,6 +967,7 @@ static inline int m68k_step(m68k_state_t *s) {
             int sz_long = (op >> 6) & 1; /* 0=word, 1=long */
             int isz     = sz_long ? SZ_L : SZ_W;
             uint16_t reglist = m68k_fetch(s);
+            for (uint16_t b = reglist; b; b &= (uint16_t)(b - 1)) c->cycles += sz_long ? 8u : 4u;
             if (!to_regs) {
                 /* registers → memory */
                 if (mode == 4) {
@@ -1082,12 +1087,14 @@ static inline int m68k_step(m68k_state_t *s) {
                 if (!m68k_test_cc(c, cc)) {
                     uint16_t cnt = (uint16_t)(c->d[reg] & 0xFFFF) - 1;
                     c->d[reg] = (c->d[reg] & 0xFFFF0000u) | cnt;
-                    if (cnt != 0xFFFF) { c->pc = op_pc + 2 + (int32_t)d16; }
+                    if (cnt != 0xFFFF) { c->pc = op_pc + 2 + (int32_t)d16; c->cycles -= 2; }   /* 10 */
+                    else c->cycles += 2;                                                     /* 14 */
                 }
                 break;
             } else {
                 /* Scc: set byte if condition true */
                 uint8_t val2 = m68k_test_cc(c, cc) ? 0xFF : 0x00;
+                if (val2 && mode == 0) c->cycles += 2;
                 m68k_rmw_w(s, mode, reg, SZ_B, val2);
                 break;
             }
@@ -1131,6 +1138,7 @@ static inline int m68k_step(m68k_state_t *s) {
         } else if (cc == 0 || m68k_test_cc(c, cc)) {
             /* BRA or BCC taken */
             c->pc = target;
+            if (cc) c->cycles += disp == 0 ? -2 : 2;   /* taken: 10 either way */
         }
         break;
     }
@@ -1292,12 +1300,14 @@ static inline int m68k_step(m68k_state_t *s) {
             if (!dir) {
                 /* MULU.W */
                 uint16_t src = (uint16_t)m68k_ea_read(s, mode, reg, SZ_W);
+                for (uint16_t b = src; b; b &= (uint16_t)(b - 1)) c->cycles += 2;   /* 38 + 2 per set bit */
                 uint32_t r   = (c->d[dn] & 0xFFFF) * src;
                 c->d[dn] = r;
                 m68k_flags_logic(c, r, SZ_L);
             } else {
                 /* MULS.W */
                 int16_t src2 = (int16_t)(uint16_t)m68k_ea_read(s, mode, reg, SZ_W);
+                for (uint32_t b = ((uint32_t)(uint16_t)src2 << 1) ^ (uint16_t)src2; b & 0xFFFFu; b &= b - 1) c->cycles += 2;   /* 38 + 2 per 01/10 pair */
                 int32_t r2   = (int32_t)(int16_t)(uint16_t)(c->d[dn] & 0xFFFF) * src2;
                 c->d[dn] = (uint32_t)r2;
                 m68k_flags_logic(c, (uint32_t)r2, SZ_L);
@@ -1403,6 +1413,7 @@ static inline int m68k_step(m68k_state_t *s) {
         int isz  = (sz_bits==0)?SZ_B:(sz_bits==1)?SZ_W:SZ_L;
         int ir   = (op >> 5) & 1; /* 0=immediate, 1=register count */
         int cnt  = ir ? (int)(c->d[(op>>9)&7] % 64) : (((op>>9)&7) ? (op>>9)&7 : 8);
+        c->cycles += 2u * (unsigned)cnt;
 
         uint32_t v = c->d[reg] & m68k_sz_mask(isz);
         uint32_t r2;
@@ -1473,6 +1484,7 @@ static inline int m68k_interrupt(m68k_state_t *s, int level) {
     c->pc      = handler;
     c->stopped = 0;
     c->halted  = 0;
+    c->cycles += 44;       /* interrupt exception processing */
     return 1;
 }
 

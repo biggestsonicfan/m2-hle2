@@ -42,16 +42,20 @@ These are facts reverse-engineered or debugged into the original implementation.
 - **Register-pair (`reg_quad`) ops are big-endian** even though the CPU is little-endian overall.
 - **The four "not" logicals invert different operands**: `andnot` = src2 & ~src1, `notand` = src1 & ~src2, `ornot` = src2 | ~src1, `notor` = src1 | ~src2 (MAME `i960.cpp`). `notand` used to be a copy of `andnot`.
   - *Symptom that surfaced this in STF:* the top quarter of both texture sheets was never written. `sub_4C444` clears bit 0 of each mip destination with `notand g6, 1, g6`, so every mip level went to the wrong address. Once fixed, `tools/grade-texram.mjs` shows both sheets byte-identical to the explorer.
+- **`movl` / `movt` / `movq` honour the literal flag: a literal source fills every destination register** (MAME `i960.cpp`). They used to read registers regardless, so `movq 0, r4` copied pfp/sp/rip/r3 into r4–r7.
+  - *Symptom that surfaced this in STF:* a few thousand frames into a fight the game stopped itself on its "max poly / err poly" screen. `adv_set_action` "clears" each fighter's damage and crush-stage arrays with `movq 0, r4` + `stq`, so the stages held a return address (0xBD80). `damage_unit` indexed the empty crush table with it, ran the Fighting Vipers armour-break effect, and `efc_crush_parts_set` wrote model numbers like 0x3000 over the forearms and shins; `set_obj` rejected them.
 - **An interrupt is not a call: `ret` from a handler restores AC and PC.** Deliver interrupts with `hle_interrupt`, never `hle_call`. Otherwise a handler's compares leak into the condition code of the instruction it interrupted.
   - *Symptom that surfaced this in STF:* attract crashed about 45 s in. A timer interrupt landed between `cmpo r14, 0x10` and `bg` in `unpack_lod_data`'s bit-buffer refill, the Huffman decode lost sync, and its output overran into the code tree. It only showed once the `notand` fix changed attract timing; the bug predates that fix.
 
 ### Coprocessor (COP) — board-level math, every Model 2 game
 
+The SHARC firmware itself is the reference for every handler here: `C:\Users\bigge\source\repos\ai\stf-sharc` holds annotated, reassemblable sources with Sega's own handler labels. They reassemble bit-for-bit to the ROM images. `cpres1.asm` is the COP (transform/math engine, 136 commands) and `cpres2.asm` the GEO feed. A `cpres1 PM 0x2xxxx` citation in `sharc_exec.h` is an address in `cpres1.asm`.
+
 - **Rotation is accumulated by post-multiply**, not rebuilt from stored angles. `g_sharc.rot[3][3]` is column-major (SHARC convention): `rot[col][row]`. Each ang command post-multiplies the running matrix:
   - `ang_y` (0x04800909 → PM 0x201BF): `new_col0 = c·col0 + s·col2`, `new_col2 = −s·col0 + c·col2`
   - `ang_x` (0x04000808 → PM 0x201AA): `new_col1 = c·col1 − s·col2`, `new_col2 = s·col1 + c·col2`
   - `ang_z` (0x05000A0A → PM 0x201D4): `new_col0 = c·col0 − s·col1`, `new_col1 = s·col0 + c·col1`
-  - Verified by reading SHARC firmware dispatch table at DM[0x30000] in `C:\temp\sharc_bone.asm`.
+  - Verified by reading SHARC firmware dispatch table at DM[0x30000] (originally `C:\temp\sharc_bone.asm`; the firmware sources now live in `stf-sharc`, below).
   - **Previous versions of this doc had ang_x and ang_z PM addresses and formulas swapped — now corrected.**
   - The old "M = Ry_LH × Rx × Rz rebuild" was only correct for a single clean ang sequence from identity.
 - **Z-negation in matrix storage** (HLE convention): `matrix[r][2] = −rot[2][r]` for rows 0 and 1; `matrix[2][2] = rot[2][2]`. The 0x14802929/0x35006A6A handlers use `−iz` for rows 0/1 and `+iz` for row 2. This asymmetric negation together with the negated col2 storage produces output identical to the SHARC's raw column-major multiply.
@@ -66,6 +70,13 @@ These are facts reverse-engineered or debugged into the original implementation.
   - The pairing is pinned by a MAME capture of a real fight (`stf-tools/motion-pose.csv`), which holds `args[12]` against the character record's forearm and `args[13]` against its upper arm; the two differ (0.3932 against 0.3464 for a shin and thigh), so it is not a coin toss.
   - *Why this hides:* getting it backwards still lands the hand or foot exactly on the IK target and still bends the limb by the right angle, because the triangle's two edges add to the same point whichever order they are walked in. Only the joint between them moves, to the far corner of that parallelogram — the bones swap ends and the knee folds backwards. It was worth 0.385 world units, one arm bone, and it took `tools/grade-pose.mjs` rather than a screenshot to say so.
   - The rotations either side of it were already right: both turns come out of one post-multiply chain, the first giving the lower bone's frame and the second the upper's, so the lower's has to be kept before the second turn overwrites it.
+- **`0x19003232` (`Fn_fcurve_spl`, the motion Hermite) uses both tangents**: args are (span, t, v0, v1, m0, m1), with m0 the earlier key's out-tangent and m1 the later key's in-tangent. Both are scaled by span/30 (firmware constant `0x3D08882F`, cpres1 PM 0x210E9). Every spline channel of every motion goes through it: `get_fcurve_value_f` hands the coprocessor the segment and reads the value back.
+  - *Symptom that surfaced this in STF:* the handler dropped m1. Stance motion 278 came out 2–3 binary radians off the board (MAME `motion-pose.csv`), and a turn (motion 265) about 15° off. `tools/grade-motion.mjs` now holds both fighters' motion arguments exact across the attract intro and a fight.
+- **`0x1A003434` (`Fn_mov_matrix`) writes the current matrix into the GEO display list** at the byte offset its argument names (12 words, col0/col1/col2/T as the slot holds them), then replies 0. `set_obj_tpd` opens every draw with it and adds its own object command, and that draw carries replaced texture points.
+  - *Symptom that surfaced this in STF:* the heads were empty shells. The eyes are drawn this way, their texture points shifted by the gaze (`snc_eye_thd_set` → `clip_medama` → `move_tpd_req`), and with a reply-only stub they took whatever matrix an earlier list had left at that offset.
+- **Fight collision is a COP chain that passes state along in the firmware's own memory** (`sharc_coli.h`, ported from `cpres1.asm`). The chain is `0x7F`/`0x38`/`0x39` (ball world positions, previous positions kept 0x60 words on) → `0x3E` (into the P0→P1 frame) → `0x3A` (broad phase) → `0x70` ×2 (arena: **22 replies**) → `0x3B` (narrow phase: **4 replies**, plus the unit-overlap table at bufferram `0x90F600` that `coli_attack_chk` reads) → `0x3D` (push-out onto the unit matrices) / `0x72` (1 reply).
+  - The radii, radius scales and ball→unit maps arrive through `Fn_write_ram` (`0x49`) at boot and on character load, so `g_sharc.dm` has to take those writes.
+  - *Symptom that surfaced this in STF:* with stubs, no hit ever landed, fighters walked through each other, and every round timed out as a draw.
 - **Command `0x2F005E5E` is scalar-then-vector**: arg0 = scalar, args 1–3 = vector → returns `(s*x, s*y, s*z)`.
 - *Note:* command opcodes documented here are the ones confirmed in STF. Other games may use additional opcodes — log unknown commands at WARN and extend the dispatch table.
 
@@ -112,6 +123,21 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
 - **16-bit byteswap on pixel bytes**: indices `[0,1,2,3]` are read as `[1,0,3,2]` (XOR low bit of byte index). Within each swapped word, high nibble = left pixel, low nibble = right.
 - **Tilemap entry (7-bit fields)**: bit15=priority, bit14=h_flip, bits[13:7]=pal_bank (7-bit, 0–127), bits[6:0]=char (7-bit). Full tile index = `entry & 0x3FFF` (= `(pal_bank<<7)|char`). Palette LUT index = `pal_bank * 16 + color_idx` (stride=16 entries = 32 bytes per bank). Verified: CG87 palette written to pal+0x660 = bank 51×32; tile entry pal_bank=(0x9980>>7)&0x7F=51; pal+51×32=0x660 ✓.
 - **Color index 0 is transparent on foreground layers only**; background layers fully opaque (pass `NULL` for `alpha_out`).
+
+### Sound board (board-level — `sound.h`, `scsp.h`, `m68k_exec.h`)
+
+The 68000 runs the game's own sound driver (per-game code: three Hiro driver versions across the catalogue), and the SCSP is emulated at its register interface, **one sample at a time in lockstep with the 68000** — 256 clock periods per 44.1 kHz sample. The host audio callback (`core/audio_out.h`) only drains a ring.
+
+- **Do not go back to a key-on event mixer on the audio thread.** The driver reads the chip back and acts on it: the slot monitor's play position CA (0x408/0x409, MSLC-selected) paces its streaming of long samples 8 KB at a time and decides which voice to take back; KYONB clears itself when a voice ends; SCIPD, the timers and the MIDI input buffer are its clock and command channel; the DSP's delay line is in sound RAM. With the old mixer the driver kept 25–32 voices keyed where MAME holds 5–16, and the voice allocation split from MAME 2.5 s into the music.
+- **The 68000 sees all 8 MB of sample ROM**: 0x800000 (first 2 MB), 0xA00000 bank 4 (+2 MB), 0xE00000 bank 5 (+6 MB); the sound-control register at 0x400000 only re-banks sets larger than 8 MB. STF keeps 458 of its 602 samples above 0xA00000 — the old 2 MB window copied silence for three quarters of the instruments.
+- **i960 bytes go straight into the SCSP's MIDI buffer** (MAME `model2_serial_w`); the UART status at 0x9C0004 reads transmitter-ready. A whole command arrives together on the board, so `emu_service_sound_again` re-runs the sound handler within a slice while the i960's queue has bytes (one byte per frame put commands ~50 ms late).
+- **Timing is what makes the music keep time, and it is measured, not assumed:**
+  - 68000 instruction time comes from Motorola's tables (`m68k_timing.h`) plus the run-dependent parts (branch taken, DBcc, shift count, MOVEM registers, MULx bits). A bus-access count ran 0.2% fast.
+  - SCSP timers count from the write, in clock periods, not whole samples: the driver reloads them inside its interrupt handler, and that delay is part of every period (MAME: 49.884 samples for a 49-sample timer B). Rounding to samples ran 2% fast.
+  - The 68000 compares its interrupt lines with the mask `SOUND_IPL_LEAD` (10) periods before an instruction ends, and a mask lowered by the instruction itself (RTE) is only acted on after the next one. Fitted to timer B's period to 0.003%; timer A is still 0.01% short (505.25 vs 505.30 samples), which is what decides the first slot race.
+- **MAME quirks reproduced on purpose** (it is the oracle; each is marked `MAME:` in `scsp.h`): timer period (255 − reload) samples; interrupt sources raise lines one at a time in the order A, B, C, MIDI and lines stay up until SCIRE; reading the monitor overwrites MSLC; the DSP touches delay memory only on odd steps.
+- **The board's output carries a DC offset** (~5000/32768 in STF, from the DSP path, identical in MAME's WAV). Keep it in the board for grading; `audio_out.h` high-passes it for the host.
+- Grade with `tools/mame/snd_capture.py` → `tests/snd_replay.c` → `tools/mame/snd_compare.py` (see tools/README.md, "The sound board").
 
 ### HLE Hooks (game-specific addresses, board-level patterns)
 

@@ -209,6 +209,8 @@ static const char *game_render_fill_vs_glsl =
  *
  * Atlas texels are nibble*17, so a hole reads back exactly 1.0. The lod is
  * taken before any discard or branch: derivatives are undefined past either.
+ * An untextured face goes through the same colorxlat ramp with luma
+ * poly_luma >> 2 and no texel (model2rd.ipp draw_scanline_solid).
  * lb < 0 falls back to the old flat_color*luma path.
  */
 static const char *game_render_fill_fs_glsl =
@@ -289,8 +291,16 @@ static const char *game_render_fill_fs_glsl =
     "      vec3 c = max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0);\n"
     "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
     "    }\n"
-    "  } else {\n"
+    "  } else if (lbpl.x < 0.0) {\n"
     "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
+    "  } else {\n"
+    "    int li = min(int(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5) >> 2, 63);\n"
+    "    int r5 = int(color.r*31.0+0.5), g5 = int(color.g*31.0+0.5), b5 = int(color.b*31.0+0.5);\n"
+    "    int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
+    "    float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
+    "    float cg = texelFetch(cxlat_smp, ivec2(bg & 255, bg >> 8), 0).r * 255.0;\n"
+    "    float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
+    "    rgb = clamp(max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
     "}\n";
@@ -382,8 +392,16 @@ static const char *game_render_fill_fs_hlsl =
     "      float3 c = max(float3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0);\n"
     "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
     "    }\n"
-    "  } else {\n"
+    "  } else if (inp.lbpl.x < 0.0) {\n"
     "    rgb = inp.color.rgb * clamp(inp.lbpl.y, 0.0, 1.0);\n"
+    "  } else {\n"
+    "    int li = min(((int)(clamp(inp.lbpl.y, 0.0, 1.0) * 255.0 + 0.5)) >> 2, 63);\n"
+    "    int r5 = (int)(inp.color.r*31.0+0.5), g5 = (int)(inp.color.g*31.0+0.5), b5 = (int)(inp.color.b*31.0+0.5);\n"
+    "    int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
+    "    float cr = cxlat.Load(int3(br & 255, br >> 8, 0)).r * 255.0;\n"
+    "    float cg = cxlat.Load(int3(bg & 255, bg >> 8, 0)).r * 255.0;\n"
+    "    float cb = cxlat.Load(int3(bb & 255, bb >> 8, 0)).r * 255.0;\n"
+    "    rgb = clamp(max(float3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "  }\n"
     "  return float4(rgb, 1.0);\n"
     "}\n";
@@ -838,6 +856,9 @@ static inline void game_render_draw_game(sg_view tile_view,
     sg_draw(0, 6, 1);
 }
 
+static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int vcount);
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int vcount);
+
 /*
  * Draw the 3D wireframe lines currently in g_geo3d_lines over the tile quad.
  * Call inside the same swapchain pass, after game_render_draw_game(), so the
@@ -880,7 +901,11 @@ static inline void game_render_draw_lines(float cam_x, float cam_y, float cam_z,
 
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
+    game_render_submit_lines(&vs_params, vcount);
+}
 
+static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int vcount) {
+    const game_render_vs_params_t vs_params = *vs;
     sg_apply_pipeline(g_game_render.line_pipeline);
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.line_vbuf,
@@ -931,7 +956,11 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
 
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
+    game_render_submit_fills(&vs_params, vcount);
+}
 
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int vcount) {
+    const game_render_vs_params_t vs_params = *vs;
     sg_apply_pipeline(g_backface_cull == 1 ? g_game_render.fill_pipeline_cw
                     : g_backface_cull == 2 ? g_game_render.fill_pipeline_ccw
                     :                        g_game_render.fill_pipeline);
@@ -944,6 +973,143 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });
     sg_draw(0, vcount, 1);
+}
+
+/* Pack the emitted geometry and draw it with a ready-made (row-major) MVP. */
+static inline void game_render_flush_mvp(const float *mvp, bool lines_only) {
+    float mvp_t[16];
+    gm_mat4_transpose(mvp_t, mvp);
+    game_render_vs_params_t vs;
+    memcpy(vs.mvp, mvp_t, sizeof mvp_t);
+
+    if (!lines_only && g_geo3d_tris.count > 0) {
+        int n = g_geo3d_tris.count > GEO3D_MAX_TRIS ? GEO3D_MAX_TRIS : g_geo3d_tris.count;
+        for (int i = 0; i < n; i++) {
+            const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
+            game_render_tex_vertex_t *v = &g_game_render.fill_verts[i * 3];
+            v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].u=T->u0; v[0].v=T->v0;
+            v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
+            v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].u=T->u2; v[2].v=T->v2;
+            float lb = g_luma_ramp ? T->lb : -1.0f;
+            for (int k = 0; k < 3; k++) {
+                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=1.0f;
+                v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
+                v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=T->fl;
+            }
+        }
+        sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
+            .ptr = g_game_render.fill_verts, .size = (size_t)n * 3 * sizeof(game_render_tex_vertex_t) });
+        game_render_submit_fills(&vs, n * 3);
+    }
+    if (g_geo_wireframe && g_geo3d_lines.count > 0) {
+        int n = g_geo3d_lines.count > GEO3D_MAX_LINES ? GEO3D_MAX_LINES : g_geo3d_lines.count;
+        for (int i = 0; i < n; i++) {
+            const geo3d_line_t *L = &g_geo3d_lines.lines[i];
+            game_render_line_vertex_t *v = &g_game_render.line_verts[i * 2];
+            v[0].x = L->x0; v[0].y = L->y0; v[0].z = L->z0; v[0].r = L->r; v[0].g = L->g; v[0].b = L->b; v[0].a = 1.0f;
+            v[1].x = L->x1; v[1].y = L->y1; v[1].z = L->z1; v[1].r = L->r; v[1].g = L->g; v[1].b = L->b; v[1].a = 1.0f;
+        }
+        sg_update_buffer(g_game_render.line_vbuf, &(sg_range){
+            .ptr = g_game_render.line_verts, .size = (size_t)n * 2 * sizeof(game_render_line_vertex_t) });
+        game_render_submit_lines(&vs, n * 2);
+    }
+}
+
+/*
+ * The board's projection for eye-space geometry from the GEO display list
+ * (geo3d_scan_geo_list): screen x = cx + fx*x/z, y = cy - fy*y/z over the
+ * 496x384 screen, host eye space being the board's with z negated. Depth is an
+ * ordinary perspective range squeezed into a slice per window, the last window
+ * nearest: the board's rasterizer fills each pixel once, walking the windows
+ * last to first and each window's polygons nearest first (model2_v.cpp
+ * model2_3d_frame_end, the fillmap test in model2rd.ipp), so a later window
+ * covers an earlier one while depth still sorts inside each window. Row-major. The slice is worked in a [0, 1] depth range and
+ * stretched to [-1, 1] on GL: D3D11 clips clip-space z to [0, w], so a slice
+ * placed below zero there is not drawn at all.
+ */
+static inline void gm_mat4_geo_projection(float *m, const float *gproj, int win, int windows) {
+    const float W = (float)VIDEO_WIDTH, H = (float)VIDEO_HEIGHT;
+    const float n = 0.05f, f = 20000.0f;
+    float nwin = (float)(windows > 0 ? windows : 1);
+    memset(m, 0, 64);
+    m[0]  = 2.0f * gproj[0] / W;
+    m[2]  = -(2.0f * gproj[2] / W - 1.0f);
+    m[5]  = 2.0f * gproj[1] / H;
+    m[6]  = -(1.0f - 2.0f * gproj[3] / H);
+    m[14] = -1.0f;
+    /* depth in [0, 1]: z = (f/(n-f))*zh + f*n/(n-f), w = -zh; then z/N + (win/N)*w */
+    float slice = (float)((windows > 0 ? windows : 1) - 1 - win);
+    float z10 = f / ((n - f) * nwin) - slice / nwin;
+    float z11 = f * n / ((n - f) * nwin);
+    sg_backend backend = sg_query_backend();
+    if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+        m[10] = 2.0f * z10 + 1.0f;      /* 2*z - w, w's z term being -1 */
+        m[11] = 2.0f * z11;
+    } else {
+        m[10] = z10;
+        m[11] = z11;
+    }
+}
+
+/*
+ * Draw the frame's GEO display list: runs of objects that share a projection
+ * and window are decoded together and drawn with that window's scissor.
+ */
+static inline void game_render_draw_geo_list(geo3d_state_t *geo,
+                                              const uint8_t *main_data, size_t main_data_size,
+                                              const uint8_t *polygons,  size_t polygons_size,
+                                              const uint8_t *materials, size_t materials_size,
+                                              uint32_t table_off, uint32_t table_count,
+                                              uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+                                              int ox, int oy, int w, int h) {
+    if (g_geo3d_dump_busy) return;
+    const int count = geo->captured_count;
+    float saved_light[3] = { g_light_dir[0], g_light_dir[1], g_light_dir[2] };
+    sg_apply_viewport(ox, oy, w, h, true);
+    for (int i = 0; i < count; ) {
+        const captured_model_t *c0 = &geo->captured[i];
+        int j = i;
+        geo3d_lines_reset();
+        geo3d_tris_reset();
+        for (; j < count; j++) {
+            const captured_model_t *cm = &geo->captured[j];
+            if (cm->window != c0->window || memcmp(cm->gproj, c0->gproj, sizeof cm->gproj) != 0
+                    || memcmp(cm->vp, c0->vp, sizeof cm->vp) != 0)
+                break;
+            if (geo->isolate_index >= 0 && j != geo->isolate_index) continue;
+            if (geo->filter_enabled && (j < geo->filter_min || j > geo->filter_max)) continue;
+            g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
+            g_geo3d_obj_tpa = cm->tpa;
+            g_geo3d_obj_tha = cm->tha;
+            g_geo3d_board_luma = 1;
+            if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
+                uint32_t w = cm->dbg_mesh_ptr & 0x7FFFu;
+                g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][w];
+                g_geo3d_obj_mesh_size = (0x8000u - w) * 4u;
+            }
+            geo3d_decode_model(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
+                               materials, materials_size, table_off, table_count,
+                               mesh_ptr_subtract, mesh_ptr_add,
+                               geo->use_matrix ? cm->matrix : NULL,
+                               cm->color[0], cm->color[1], cm->color[2]);
+            g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
+            g_geo3d_board_luma = 0;
+            g_geo3d_obj_mesh = NULL;
+        }
+        int x0 = c0->vp[0] < 0 ? 0 : c0->vp[0], y0 = c0->vp[1] < 0 ? 0 : c0->vp[1];
+        int x1 = c0->vp[2] > VIDEO_WIDTH ? VIDEO_WIDTH : c0->vp[2];
+        int y1 = c0->vp[3] > VIDEO_HEIGHT ? VIDEO_HEIGHT : c0->vp[3];
+        if (x1 > x0 && y1 > y0) {
+            sg_apply_scissor_rect(ox + x0 * w / VIDEO_WIDTH, oy + y0 * h / VIDEO_HEIGHT,
+                                  (x1 - x0) * w / VIDEO_WIDTH, (y1 - y0) * h / VIDEO_HEIGHT, true);
+            float mvp[16];
+            gm_mat4_geo_projection(mvp, c0->gproj, c0->window, geo->geo_windows);
+            game_render_flush_mvp(mvp, geo->lines_only);
+        }
+        i = j;
+    }
+    g_light_dir[0] = saved_light[0]; g_light_dir[1] = saved_light[1]; g_light_dir[2] = saved_light[2];
+    sg_apply_scissor_rect(ox, oy, w, h, true);
 }
 
 /*
@@ -967,6 +1133,13 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
                                                      float lerp_t) {
     if (!g_game_render.initialized) return;
     if (!geo->enabled) { geo3d_lines_reset(); return; }
+
+    if (geo->use_captures && geo->captured_count > 0 && geo->captured[0].view_space && !geo->test_triangle) {
+        game_render_draw_geo_list(geo, main_data, main_data_size, polygons, polygons_size,
+                                  materials, materials_size, table_off, table_count,
+                                  mesh_ptr_subtract, mesh_ptr_add, ox, oy, w, h);
+        return;
+    }
 
     /* Check whether any captured model carries a clip window. */
     bool any_clip = false;

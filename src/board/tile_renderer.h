@@ -281,6 +281,37 @@ static inline void render_fg_layer(const memory_bus_t *bus, tile_layers_t *t) {
     render_sys24_pair(bus, t->fg, t->alpha, 0, false, t->bg, t->bg_alpha);
 }
 
+/* ---- Pen colour --------------------------------------------------------- */
+
+/*
+ * A 15-bit palette colour as the screen shows it. The board does not put
+ * palette RAM on screen as is: each channel's 5 bits index its colour
+ * translation table at luma 0x40, and the result goes through the monitor
+ * curve max((v - 64) * 255 / 191, 0) — model2.cpp palette_w, the same tables
+ * and curve the 3D fill ends on. Skipping it made every tile a brighter,
+ * more saturated colour than the polygons drawn against it, so a 3D cloud or
+ * sign whose edge matches the sky on the board showed as a box.
+ *
+ * Built once a frame into `lut` (0x8000 entries, RGB). Until the game has
+ * loaded the tables (all zero at boot, and never for a program that does not
+ * use them) the palette colour is shown directly.
+ */
+static inline void tile_pen_lut(const memory_bus_t *bus, uint8_t lut[0x8000][3]) {
+    int loaded = 0;
+    for (int c5 = 0; c5 < 32 && !loaded; c5++)
+        for (int ch = 0; ch < 3 && !loaded; ch++)
+            if (bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u]) loaded = 1;
+    for (int c = 0; c < 0x8000; c++) {
+        int c5[3] = { c & 0x1F, (c >> 5) & 0x1F, (c >> 10) & 0x1F };
+        for (int ch = 0; ch < 3; ch++) {
+            if (!loaded) { lut[c][ch] = (uint8_t)(c5[ch] << 3); continue; }
+            int v = bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5[ch] << 8)) * 2u];
+            int g = (v - 64) * 255 / 191;
+            lut[c][ch] = (uint8_t)(g < 0 ? 0 : g);
+        }
+    }
+}
+
 /* ---- Compositor ---------------------------------------------------------- */
 
 /*

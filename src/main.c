@@ -38,6 +38,7 @@
 #include "game_render.h"
 #include "geo3d_window.h"
 #include "sound.h"
+#include "audio_out.h"
 #include "m68k_window.h"
 #include "m68k_memview.h"
 #include "input.h"
@@ -149,10 +150,8 @@ static void load_active_profile(const char *primary_zip) {
             sound_attach(&state.bus);
             if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
                 sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
-            if (state.romset.samples && state.romset.samples_size > 0) {
+            if (state.romset.samples && state.romset.samples_size > 0)
                 sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
-                scsp_hle_set_sample_rom(state.romset.samples, (uint32_t)state.romset.samples_size);
-            }
         }
         /* Inputs are delivered via the I/O ports (read by the game's vblank
          * interrupt), so attach the I/O read callback after the bus re-init. */
@@ -309,8 +308,8 @@ static void init(void) {
         g_dump_model_tex         = g_browse_model;
     }
 
-    /* SCSP HLE PCM mixer + sokol_audio output (sources the 68K wave RAM + SCSP regs). */
-    scsp_hle_init(g_sound.wave, M68K_WAVE_SIZE, g_sound.comm, M68K_SCSP_SIZE);
+    /* Host audio output, drained from the sound board's sample ring. */
+    audio_out_init();
 
     /* Start the (initially STOPPED) emu thread up front so Run/Step work even
      * before a ROM is chosen via the menu. */
@@ -412,7 +411,15 @@ static void frame(void) {
                                        state.romset.main_data, state.romset.main_data_size,
                                        q->model_table_offset, q->model_table_count,
                                        state.bus.palette, PALETTE_SIZE);
-        } else {
+        } else if (!(g_geo_use_list && g_geodl_snap_ready &&
+                     geo3d_scan_geo_list(&state.geo3d, g_geodl_snap, BUFF_RAM_SIZE / 4,
+                                         g_geodl_snap_rstart,
+                                         (int16_t)mem_read16(&state.bus, H_SYNC_BASE),
+                                         (int16_t)mem_read16(&state.bus, V_SYNC_BASE),
+                                         state.romset.main_data, state.romset.main_data_size,
+                                         q->model_table_offset, q->model_table_count))) {
+            /* No display list yet (or it did not reach END): rebuild the frame
+             * from the COP command stream the old way. */
             geo3d_scan_captures(&state.geo3d,
                                 state.romset.main_data, state.romset.main_data_size,
                                 state.romset.polygons_size,
@@ -503,6 +510,9 @@ static void frame(void) {
              * move, enemies spawn/die), so captured_prev[i] is a DIFFERENT object —
              * sub-frame interpolation would smear the geometry. Disable it (lerp=1). */
             float dl_lerp = q->geo_displaylist ? 1.0f : lerp_t;
+            /* Faces take their colour from palette RAM, as the rasterizer does. */
+            g_geo3d_palram      = state.bus.palette;
+            g_geo3d_palram_size = PALETTE_SIZE;
             game_render_draw_captured_models(&state.geo3d,
                                              state.romset.main_data, state.romset.main_data_size,
                                              state.romset.polygons,  state.romset.polygons_size,
@@ -513,6 +523,7 @@ static void frame(void) {
                                              state.geo3d.cam_x, state.geo3d.cam_y, state.geo3d.cam_z,
                                              state.geo3d.rot_y, state.geo3d.rot_x, state.geo3d.fov_deg,
                                              dl_lerp);
+            g_geo3d_palram = NULL;
         }
         game_render_draw_game(state.video.fg_view,   ox, oy, w, h);
 
@@ -540,7 +551,7 @@ static void frame(void) {
 
 static void cleanup(void) {
     if (state.emu_started) emu_thread_shutdown(&state.emu);
-    scsp_hle_shutdown();   /* stop audio after the emu thread (no more ring writes) */
+    audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
     romset_free(&state.romset);
     game_render_shutdown();

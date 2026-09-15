@@ -161,6 +161,10 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
 
+    /* The COP reads its sine/cosine tables straight out of this ROM. */
+    g_sharc_copro_rom      = rs->copro_data;
+    g_sharc_copro_rom_size = rs->copro_data_size;
+
     if (rs->main_data && bus->main_data) {
         size_t n = rs->main_data_size < MAIN_DATA_SIZE ? rs->main_data_size : MAIN_DATA_SIZE;
         memcpy(bus->main_data, rs->main_data, n);

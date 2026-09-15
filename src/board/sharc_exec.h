@@ -45,6 +45,7 @@
 #define SHARC_EXEC_H
 
 #include "sharc.h"
+#include "sharc_coli.h"
 
 /* ---- Argument count table ------------------------------------------------ */
 
@@ -102,6 +103,7 @@ static inline int sharc_args_for_cmd(uint32_t cmd) {
         case 0x1E803D3D: return 6;
         case 0x39007272: return 3;
         case 0x38007070: return 5;
+        case 0x38807171: return 2;  /* Fn_ball_to_unit: mask, player -> 1 */
         /* Math: 1-in / 1-out */
         case 0x10802121: return 1;
         case 0x11002222: return 1;
@@ -166,6 +168,189 @@ static inline int sharc_args_for_cmd(uint32_t cmd) {
     }
 }
 
+/* ---- Matrix helpers shared by several commands ---------------------------- */
+
+/* push: copy the current matrix one level down the stack (0x00800101). */
+static inline void sharc_push_stack(void) {
+    if (g_sharc.stack_top >= SHARC_STACK_DEPTH) return;
+    int sp = g_sharc.stack_top++;
+    memcpy(g_sharc.stack[sp].rot, g_sharc.rot, sizeof(g_sharc.rot));
+    memcpy(g_sharc.stack[sp].ang, g_sharc.ang, sizeof(g_sharc.ang));
+    memcpy(g_sharc.stack[sp].pos, g_sharc.pos, sizeof(g_sharc.pos));
+    memcpy(g_sharc.stack[sp].world_pos, g_sharc.world_pos, sizeof(g_sharc.world_pos));
+}
+
+/* _L201EA, as 0x37 and 0x45 use it: the current matrix composed with B
+ * (12 words, column-major 3x3 then T) — each new column is rot * B's column,
+ * T += rot * B's T. */
+static inline void sharc_compose(const float *B) {
+    float (*r)[3] = g_sharc.rot;
+    float nr[3][3], np[3];
+    for (int j = 0; j < 3; j++)
+        for (int i = 0; i < 3; i++) {
+            float s = 0.0f;
+            for (int k = 0; k < 3; k++) s += B[j*3+k] * r[k][i];
+            nr[j][i] = s;
+        }
+    for (int i = 0; i < 3; i++) {
+        float s = g_sharc.pos[i];
+        for (int k = 0; k < 3; k++) s += B[9+k] * r[k][i];
+        np[i] = s;
+    }
+    memcpy(g_sharc.rot, nr, sizeof nr);
+    memcpy(g_sharc.pos, np, sizeof np);
+    g_sharc.matrix_dirty = true;
+    g_sharc.bone_dirty   = true;
+}
+
+/* 0x37's composition with a unit-matrix cache slot (player arg, slot*12 arg). */
+static inline void sharc_compose_unit(uint32_t player_arg, uint32_t slot_arg) {
+    int player = (player_arg & 0xFF) == 1 ? 1 : 0;
+    int slot   = (int)slot_arg / 12;
+    if ((unsigned)slot < 16u) sharc_compose(g_sharc.rot_cache[player * 16 + slot]);
+}
+
+/* _L2021F, as 0x46 and kage_poly use it: B applied after the current matrix —
+ * each current column (and T) is transformed by B, then B's T added:
+ * current = B * current. (Read the other way round it only ever agreed where
+ * the two commuted; the board's shadows and 0x46 disagreed everywhere else.) */
+static inline void sharc_compose_rev(const float *pm) {
+    float (*r)[3] = g_sharc.rot;
+    float nr[3][3], np[3];
+    for (int c = 0; c < 3; c++)
+        for (int w = 0; w < 3; w++) {
+            float v = r[c][0] * pm[w];
+            v = v + r[c][1] * pm[3 + w];
+            v = v + r[c][2] * pm[6 + w];
+            nr[c][w] = v;
+        }
+    for (int w = 0; w < 3; w++) {
+        float v = g_sharc.pos[0] * pm[w];
+        v = v + g_sharc.pos[1] * pm[3 + w];
+        v = v + g_sharc.pos[2] * pm[6 + w];
+        np[w] = v + pm[9 + w];
+    }
+    memcpy(g_sharc.rot, nr, sizeof nr);
+    memcpy(g_sharc.pos, np, sizeof np);
+    g_sharc.matrix_dirty = true;
+    g_sharc.bone_dirty   = true;
+}
+
+/* 0x44: the inner bank's matrix n becomes the current matrix. */
+static inline void sharc_load_inner(int n) {
+    const float *pm = g_sharc.pm_bone[n & 0xF];
+    for (int c = 0; c < 3; c++)
+        for (int w = 0; w < 3; w++) g_sharc.rot[c][w] = pm[c*3 + w];
+    for (int w = 0; w < 3; w++) g_sharc.pos[w] = pm[9 + w];
+    g_sharc.matrix_dirty = true;
+    g_sharc.bone_dirty   = true;
+}
+
+/* The shadow reorients kage_poly calls, read word for word off _L20516 and
+ * _L20529 (slot words: 0..2 col0, 3..5 col1, 6..8 col2). */
+static inline void sharc_kage_leave_x(void) {       /* Fn_kage_leave_x_axis */
+    float (*r)[3] = g_sharc.rot;
+    float x = r[0][0], z = r[0][2], m = x*x + z*z, k = m > 0.0f ? 1.0f / sqrtf(m) : 0.0f;
+    float nx = x * k, nz = z * k;
+    r[1][0] = nx;  r[1][2] = nz;
+    r[2][0] = -nz; r[2][2] = nx;
+}
+static inline void sharc_kage_leave_z(void) {       /* Fn_kage_leave_z_axis */
+    float (*r)[3] = g_sharc.rot;
+    float x = r[2][0], z = r[2][2], m = x*x + z*z, k = m > 0.0f ? 1.0f / sqrtf(m) : 0.0f;
+    float nx = x * k, nz = z * k;
+    r[1][0] = nx;  r[1][2] = nz;
+    r[0][2] = -nx; r[0][0] = nz;
+}
+
+/* pop: the matrix one level up the stack becomes current (0x01000202). */
+static inline void sharc_pop_stack(void) {
+    if (g_sharc.stack_top <= 0) return;
+    int sp = --g_sharc.stack_top;
+    memcpy(g_sharc.rot, g_sharc.stack[sp].rot, sizeof(g_sharc.rot));
+    memcpy(g_sharc.ang, g_sharc.stack[sp].ang, sizeof(g_sharc.ang));
+    memcpy(g_sharc.pos, g_sharc.stack[sp].pos, sizeof(g_sharc.pos));
+    memcpy(g_sharc.world_pos, g_sharc.stack[sp].world_pos, sizeof(g_sharc.world_pos));
+    g_sharc.matrix_dirty = true;
+    g_sharc.bone_dirty   = true;
+}
+
+/* the current matrix into the inner bank's slot n (_L2053E) */
+static inline void sharc_store_inner(int n) {
+    float *pm = g_sharc.pm_bone[n & 0xF];
+    for (int c = 0; c < 3; c++)
+        for (int w = 0; w < 3; w++) pm[c*3 + w] = g_sharc.rot[c][w];
+    for (int w = 0; w < 3; w++) pm[9 + w] = g_sharc.pos[w];
+}
+
+static inline void sharc_ang_y(int32_t a) { float s_, c_; sharc_sincos(a, &s_, &c_); sharc_postmul_ry(c_, s_); }
+static inline void sharc_ang_x(int32_t a) { float s_, c_; sharc_sincos(a, &s_, &c_); sharc_postmul_rx(c_, s_); }
+static inline void sharc_scale3(float x, float y, float z) {
+    for (int w = 0; w < 3; w++) { g_sharc.rot[0][w] *= x; g_sharc.rot[1][w] *= y; g_sharc.rot[2][w] *= z; }
+}
+
+/* Fn_kage_mat (0x73, PM 0x20D1F): the three shadow projections kage_poly
+ * composes a part with, into inner slots 1, 2 and 0. The light comes down at
+ * elevation a0 from azimuth a1; each projection turns into the light's frame
+ * (Ry(a1 + 0x8000)), shears or flattens there, and turns back:
+ *   inner[1] = cur * Ry * S(1, 1, 1/sin a0) * Ry^-1
+ *   inner[2] = cur * Ry * T(0, floor, -floor * cot a0) * S(1, 1, 1/sin a0) * Ry^-1
+ *   inner[0] = I * Ry * S(1, 0, 1) * Rx(a0 - 0x4000) * Ry^-1
+ * where floor is the stage height Fn_area_coli last took (DM 0x30800). */
+static inline void sharc_kage_mat(uint32_t a0, uint32_t a1) {
+    float s_, c_;
+    sharc_sincos((int32_t)a0, &s_, &c_);
+    float inv = 1.0f / s_;                         /* recips + Newton-Raphson */
+    float cot = inv * c_;
+    float floor_y = sharc_dm_getf(0x30800u);
+    float back = -floor_y;
+    back = back * cot;
+    int32_t ry = (int32_t)(a1 ^ 0x8000u), ryi = -ry;
+    sharc_push_stack();
+    sharc_ang_y(ry); sharc_scale3(1.0f, 1.0f, inv); sharc_ang_y(ryi);
+    sharc_store_inner(1);
+    sharc_pop_stack();
+    sharc_push_stack();
+    sharc_ang_y(ry);
+    for (int w = 0; w < 3; w++) g_sharc.pos[w] += g_sharc.rot[1][w] * floor_y + g_sharc.rot[2][w] * back;
+    sharc_scale3(1.0f, 1.0f, inv); sharc_ang_y(ryi);
+    sharc_store_inner(2);
+    sharc_pop_stack();
+    sharc_push_stack();
+    sharc_rot_identity();
+    g_sharc.pos[0] = g_sharc.pos[1] = g_sharc.pos[2] = 0.0f;
+    sharc_ang_y(ry); sharc_scale3(1.0f, 0.0f, 1.0f); sharc_ang_x((int32_t)a0 - 0x4000); sharc_ang_y(ryi);
+    sharc_store_inner(0);
+    sharc_pop_stack();
+}
+
+/* Fn_kage_flag (0x75, PM 0x20CBF): which of a fighter's 16 shadow balls land
+ * near (mask 1) or far (mask 2) once slid along the light onto the floor.
+ * a0 player, a1 round (nonzero) or square test, a2/a3 the slide per unit of
+ * height in x/z, a4 the near limit, a5 the far limit. */
+static inline void sharc_kage_flag(uint32_t a0, uint32_t a1, float kx, float kz, float near_, float far_) {
+    uint32_t table = a0 ? 0x1407E80u : 0x1403E80u, ptrs = a0 ? 0x307E0u : 0x306E0u;
+    uint32_t m_near = 0, m_far = 0;
+    for (uint32_t b = 0; b < 16u; b++) {
+        uint32_t addr = table + 3u * sharc_dm_get(ptrs + b);
+        float x = sharc_dm_getf(addr), y = sharc_dm_getf(addr + 1u), z = sharc_dm_getf(addr + 2u);
+        float fx = kx * y; fx = fx + x;
+        float fz = kz * y; fz = fz + z;
+        float d;
+        if (a1) {
+            float r2 = fx * fx; r2 = r2 + fz * fz;
+            d = 0.70710677f * sharc_fw_sqrt(r2);
+        } else {
+            float ax = fabsf(fx), az = fabsf(fz);
+            d = ax < az ? az : ax;
+        }
+        if (!(sharc_float_to_bits(y) >> 31) && !(d > near_)) m_near |= 1u << b;
+        else if (!(d < far_))                               m_far  |= 1u << b;
+    }
+    sharc_push_u(m_near);
+    sharc_push_u(m_far);
+}
+
 /* ---- Command executor ---------------------------------------------------- */
 
 static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
@@ -208,8 +393,8 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             g_sharc.ip_set_ang_x = g_last_store_ip;
             if (n >= 1) {
                 g_sharc.ang[0] = (int32_t)args[0];
-                { float a = sharc_angle_to_rad(g_sharc.ang[0]);
-                  sharc_postmul_rx(cosf(a), sinf(a)); }
+                { float s_, c_; sharc_sincos(g_sharc.ang[0], &s_, &c_);
+                  sharc_postmul_rx(c_, s_); }
                 g_sharc.matrix_dirty = true;
                 g_sharc.bone_dirty   = true;
             }
@@ -218,8 +403,8 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             g_sharc.ip_set_ang_y = g_last_store_ip;
             if (n >= 1) {
                 g_sharc.ang[1] = (int32_t)args[0];
-                { float a = sharc_angle_to_rad(g_sharc.ang[1]);
-                  sharc_postmul_ry(cosf(a), sinf(a)); }
+                { float s_, c_; sharc_sincos(g_sharc.ang[1], &s_, &c_);
+                  sharc_postmul_ry(c_, s_); }
                 g_sharc.matrix_dirty = true;
                 g_sharc.bone_dirty   = true;
                 g_sharc.world_pos[0] = g_sharc.pos[0];
@@ -231,14 +416,38 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             g_sharc.ip_set_ang_z = g_last_store_ip;
             if (n >= 1) {
                 g_sharc.ang[2] = (int32_t)args[0];
-                { float a = sharc_angle_to_rad(g_sharc.ang[2]);
-                  sharc_postmul_rz(cosf(a), sinf(a)); }
+                { float s_, c_; sharc_sincos(g_sharc.ang[2], &s_, &c_);
+                  sharc_postmul_rz(c_, s_); }
                 g_sharc.matrix_dirty = true;
                 g_sharc.bone_dirty   = true;
             }
             return;
-        case 0x06000C0C:
+        case 0x06000C0C: {
+            /* Fn_inv_matrix (PM 0x2041F, _L2023D): the current matrix inverted in
+             * place — a general 3x3 inverse (adjugate over determinant, so scale
+             * survives), then T' = -inverse * T. It was a no-op, and the osage
+             * collision path (get_point, inv_matrix, point_trans) read garbage. */
+            float (*r)[3] = g_sharc.rot;   /* r[col][row] */
+            double a = r[0][0], b = r[1][0], c = r[2][0];   /* row 0 */
+            double d = r[0][1], e = r[1][1], f = r[2][1];   /* row 1 */
+            double g = r[0][2], h = r[1][2], k = r[2][2];   /* row 2 */
+            double det = a*(e*k - f*h) - b*(d*k - f*g) + c*(d*h - e*g);
+            if (det != 0.0) {
+                double inv[3][3] = {                         /* inv[row][col] */
+                    { (e*k - f*h) / det, (c*h - b*k) / det, (b*f - c*e) / det },
+                    { (f*g - d*k) / det, (a*k - c*g) / det, (c*d - a*f) / det },
+                    { (d*h - e*g) / det, (b*g - a*h) / det, (a*e - b*d) / det },
+                };
+                double t[3] = { g_sharc.pos[0], g_sharc.pos[1], g_sharc.pos[2] };
+                for (int row = 0; row < 3; row++) {
+                    for (int col = 0; col < 3; col++) r[col][row] = (float)inv[row][col];
+                    g_sharc.pos[row] = (float)-(inv[row][0]*t[0] + inv[row][1]*t[1] + inv[row][2]*t[2]);
+                }
+                g_sharc.matrix_dirty = true;
+                g_sharc.bone_dirty   = true;
+            }
             return;
+        }
         case 0x06800D0D:
             /* STF PM 0x02042A / FV PM 0x0203EF: `DM(I7, 0x09)` post-modify-by-9
              * advances I7 from slot[0] to slot[9]=T[0], then zeros slot[9..11].
@@ -334,7 +543,8 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             if (n >= 2) {
                 int16_t ang16 = (int16_t)(args[0] & 0xFFFF);
                 float   rad   = ((float)ang16 / 65536.0f) * (2.0f * 3.14159265358979f);
-                float   r     = sinf(rad) * sharc_bits_to_float(args[1]);
+                float s_, c_; (void)rad; sharc_sincos(ang16, &s_, &c_);
+                float   r     = s_ * sharc_bits_to_float(args[1]);
                 SANITIZE(r);
                 sharc_push_f(r);
             }
@@ -344,34 +554,48 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             if (n >= 2) {
                 int16_t ang16 = (int16_t)(args[0] & 0xFFFF);
                 float   rad   = ((float)ang16 / 65536.0f) * (2.0f * 3.14159265358979f);
-                float   r     = cosf(rad) * sharc_bits_to_float(args[1]);
+                float s_, c_; (void)rad; sharc_sincos(ang16, &s_, &c_);
+                float   r     = c_ * sharc_bits_to_float(args[1]);
                 SANITIZE(r);
                 sharc_push_f(r);
             }
             return;
 
-        /* 0x19003232: f-curve interpolation (get_fcurve_value_f).
-         * Args: (t_span, t, v0, v1, tan_out, v_next).
-         * Cubic Hermite: u=t/span, m0=tan_out*span/30, m1=0 (zero in-tangent at v1).
-         * Verified 55/62 exact matches against MAME fvipers. */
+        /* 0x19003232: Fn_fcurve_spl, the Hermite segment get_fcurve_value_f
+         * hands over for every spline channel of a motion.
+         * Args: (span, t, v0, v1, m0, m1) — the key interval, the time into it,
+         * the two key values, the earlier key's out-tangent and the later key's
+         * in-tangent (i960 0x30CD0: key record +8 and +4).
+         *
+         * Both tangents count. The firmware (cpres1 PM 0x210E9) reads all six
+         * and sums the two tangents into the cubic, each scaled by span / 30
+         * (0x3D08882F) because the curves are authored at 30 fps and store rates
+         * per second. This used to drop m1 — "zero in-tangent at v1", 55 of 62
+         * against MAME — which leaves any segment ending on a key with a slope
+         * slightly wrong: STF's stance motion 278 came out 2-3 binary radians
+         * off the board on frames 30-38, and a steep turn (motion 265) thousands
+         * off. Evaluated in double: the board's own capture agrees with a
+         * double-precision Hermite to the binary radian (tools/grade-motion.mjs). */
         case 0x19003232:
             if (n >= 6) {
-                float span    = sharc_bits_to_float(args[0]);
-                float t       = sharc_bits_to_float(args[1]);
-                float v0      = sharc_bits_to_float(args[2]);
-                float v1      = sharc_bits_to_float(args[3]);
-                float tan_out = sharc_bits_to_float(args[4]);
+                double span = sharc_bits_to_float(args[0]);
+                double t    = sharc_bits_to_float(args[1]);
+                double v0   = sharc_bits_to_float(args[2]);
+                double v1   = sharc_bits_to_float(args[3]);
+                double k    = span / 30.0;
+                double m0   = sharc_bits_to_float(args[4]) * k;
+                double m1   = sharc_bits_to_float(args[5]) * k;
                 float r;
-                if (span > 0.0f) {
-                    float u  = t / span;
-                    float u2 = u * u;
-                    float u3 = u2 * u;
-                    float m0 = tan_out * (span / 30.0f);
-                    r = (2.0f*u3 - 3.0f*u2 + 1.0f) * v0
-                      + (u3 - 2.0f*u2 + u)         * m0
-                      + (-2.0f*u3 + 3.0f*u2)        * v1;
+                if (span > 0.0) {
+                    double u  = t / span;
+                    double u2 = u * u;
+                    double u3 = u2 * u;
+                    r = (float)((2.0*u3 - 3.0*u2 + 1.0) * v0
+                              + (u3 - 2.0*u2 + u)       * m0
+                              + (-2.0*u3 + 3.0*u2)      * v1
+                              + (u3 - u2)               * m1);
                 } else {
-                    r = v0;
+                    r = (float)v0;
                 }
                 SANITIZE(r);
                 sharc_push_f(r);
@@ -386,12 +610,40 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             }
             return;
 
-        case 0x3C007878:  /* polygon submission — MAME verified 9/9 */
+        case 0x3C007878:
+            /* Fn_put_poly (PM 0x20AF1): lay one object into the GEO display list.
+             * args: list offset (bytes into bufferram), variant flag, tpa, tha,
+             * oba, count word (low 16 bits polygons, >> 14 a texture-header
+             * offset), and two polygon counters. It writes 18 words at the offset
+             * — matrix command 0x05800B0B and the current matrix as the slot holds
+             * it (col0, col1, col2, T), then object command 0x00800101 with tpa,
+             * tha, oba and the polygon count — and answers the two counters. With
+             * the variant flag set the header moves on by count >> 14 and the first
+             * counter advances as well. This matrix, not anything rebuilt from the
+             * command stream, is what the GEO transforms the object by. */
             if (n >= 8) {
-                uint32_t poly_in    = args[7];
-                uint32_t poly_count = args[5] & 0xFFFF;
-                sharc_push_u(poly_in);
-                sharc_push_u(poly_in + poly_count);
+                uint32_t count = args[5] & 0xFFFF;
+                uint32_t tha   = args[3];
+                uint32_t out0  = args[6];
+                if (args[1] != 0) { tha += args[5] >> 14; out0 += count; }
+                if (g_sharc.sharc_dm_ext) {
+                    uint32_t w[18];
+                    w[0] = 0x05800B0Bu;
+                    for (int c = 0; c < 3; c++)
+                        for (int r_ = 0; r_ < 3; r_++) w[1 + c*3 + r_] = sharc_float_to_bits(g_sharc.rot[c][r_]);
+                    for (int r_ = 0; r_ < 3; r_++) w[10 + r_] = sharc_float_to_bits(g_sharc.pos[r_]);
+                    w[13] = 0x00800101u;
+                    w[14] = args[2];
+                    w[15] = tha;
+                    w[16] = args[4];
+                    w[17] = count;
+                    uint32_t mask = g_sharc.sharc_dm_ext_size / 4 - 1;
+                    uint32_t base = args[0] >> 2;
+                    for (int k = 0; k < 18; k++)
+                        memcpy(g_sharc.sharc_dm_ext + ((base + (uint32_t)k) & mask) * 4u, &w[k], 4);
+                }
+                sharc_push_u(out0);
+                sharc_push_u(args[7] + count);
             } else {
                 LOG_WARN("SHARC 3C007878: n=%d < 8, no push!", n);
             }
@@ -404,9 +656,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 float a = sharc_bits_to_float(args[0]);
                 float b = sharc_bits_to_float(args[1]);
                 if (cmd == 0x13802727) {
-                    float ang = atan2f(b, a);
-                    uint32_t ang_u = (uint32_t)(int32_t)(ang * (65536.0f / (2.0f * 3.14159265f)));
-                    sharc_push_u(ang_u);
+                    sharc_push_u(sharc_angle_word(atan2f(b, a)));
                     return;
                 }
                 float r;
@@ -424,21 +674,41 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
 
         /* ---- Math: 1-in / 1-out ---- */
         case 0x10802121:  /* sin(i16 fixed-pt angle) → float  MAME-verified vs sub_7800 */
-            if (n >= 1) { float _r = sinf(sharc_angle_to_rad(args[0])); sharc_push_f(_r); }
+            if (n >= 1) { float s_, c_; sharc_sincos((int32_t)args[0], &s_, &c_); sharc_push_f(s_); }
             return;
         case 0x11002222:  /* cos(i16 fixed-pt angle) → float  MAME-verified vs sub_7800 */
-            if (n >= 1) { float _r = cosf(sharc_angle_to_rad(args[0])); sharc_push_f(_r); }
+            if (n >= 1) { float s_, c_; sharc_sincos((int32_t)args[0], &s_, &c_); sharc_push_f(c_); }
             return;
         case 0x0B801717:
             /* FV PM 0x02059D: F0 = FLOAT R1 — converts integer arg to float. */
             if (n >= 1) { float _r = (float)(int32_t)args[0]; sharc_push_f(_r); }
             return;
         case 0x0C001818:
-            if (n >= 1) sharc_push_u(args[0]);
+            /* Fn_cvtsw (PM 0x205DE): `fix` -- float to int, truncated (MODE1 TRUNCATE).
+             * Echoing the float's bits sent the i960 4000.0 where it wanted 0xFA0. */
+            if (n >= 1) sharc_push_u((uint32_t)(int32_t)sharc_bits_to_float(args[0]));
             else        sharc_push_u(0);
             return;
 
         case 0x1A003434:
+            /* Fn_mov_matrix (PM 0x2049E): the current matrix, as the slot holds it
+             * (col0, col1, col2, T), into the GEO display list at byte offset a0 —
+             * the matrix command set_obj_tpd opens and then follows with its own
+             * object command. The eyes are drawn this way (their texture points are
+             * the gaze), so without it they took whatever an earlier list left there. */
+            if (n >= 1 && g_sharc.sharc_dm_ext) {
+                uint32_t mask = g_sharc.sharc_dm_ext_size / 4 - 1;
+                uint32_t base = args[0] >> 2;
+                for (int c = 0; c < 3; c++)
+                    for (int r_ = 0; r_ < 3; r_++) {
+                        uint32_t w = sharc_float_to_bits(g_sharc.rot[c][r_]);
+                        memcpy(g_sharc.sharc_dm_ext + ((base + (uint32_t)(c*3 + r_)) & mask) * 4u, &w, 4);
+                    }
+                for (int r_ = 0; r_ < 3; r_++) {
+                    uint32_t w = sharc_float_to_bits(g_sharc.pos[r_]);
+                    memcpy(g_sharc.sharc_dm_ext + ((base + 9u + (uint32_t)r_) & mask) * 4u, &w, 4);
+                }
+            }
             sharc_push_u(0);
             return;
 
@@ -456,9 +726,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             if (n >= 4) {
                 float z1 = sharc_bits_to_float(args[0]), z2 = sharc_bits_to_float(args[1]);
                 float x2 = sharc_bits_to_float(args[2]), x1 = sharc_bits_to_float(args[3]);
-                float ang = atan2f(-(x2-x1), z2-z1);
-                uint32_t ang_u = (uint32_t)(int32_t)(ang * (65536.0f / (2.0f * 3.14159265f)));
-                sharc_push_u(ang_u);
+                sharc_push_u(sharc_angle_word(atan2f(-(x2-x1), z2-z1)));
             }
             return;
         case 0x2F005E5E:  /* scale_vec3: (scale, x, y, z) → (s*x, s*y, s*z) */
@@ -600,9 +868,10 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * Reads 3 float args (x,y,z) in local bone space, transforms to world space
          * using current rot[]/pos[] (raw, no Z-negation — mirrors SHARC subroutine
          * 0x020173 which uses slot[0..11] directly without col2 sign-flip).
-         * arg4 = slot_off: DM word offset from coli_buf_base (= bone_slot * 3).
-         * Writes 3 world-space floats to BUFF_RAM at coli_buf_base + slot_off*4,
-         * and again at coli_buf_base + (slot_off + 0x60)*4 (double-buffer). */
+         * arg4 = slot_off: DM word offset from the ball table 0x38 selected (= ball * 3).
+         * The world position replaces the ball's entry, and the entry it replaces
+         * moves 0x60 words on: last frame's position, for the swept tests
+         * (Fn_coli_point_trans, sharc_coli.h). */
         case 0x1C803939: {
             if (n >= 4 && g_sharc.sharc_dm_ext) {
                 float ix = sharc_bits_to_float(args[0]);
@@ -614,25 +883,17 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 float ox = g_sharc.pos[0] + r[0][0]*ix + r[1][0]*iy + r[2][0]*iz;
                 float oy = g_sharc.pos[1] + r[0][1]*ix + r[1][1]*iy + r[2][1]*iz;
                 float oz = g_sharc.pos[2] + r[0][2]*ix + r[1][2]*iy + r[2][2]*iz;
-                uint32_t base = g_sharc.coli_buf_base;
-                uint32_t off1 = base + slot_off * 4;
-                uint32_t off2 = base + (slot_off + 0x60u) * 4;
-                if (off1 + 12 <= g_sharc.sharc_dm_ext_size) {
-                    memcpy(g_sharc.sharc_dm_ext + off1 + 0, &ox, 4);
-                    memcpy(g_sharc.sharc_dm_ext + off1 + 4, &oy, 4);
-                    memcpy(g_sharc.sharc_dm_ext + off1 + 8, &oz, 4);
-                }
-                if (off2 + 12 <= g_sharc.sharc_dm_ext_size) {
-                    memcpy(g_sharc.sharc_dm_ext + off2 + 0, &ox, 4);
-                    memcpy(g_sharc.sharc_dm_ext + off2 + 4, &oy, 4);
-                    memcpy(g_sharc.sharc_dm_ext + off2 + 8, &oz, 4);
-                }
+                float w_[3] = { ox, oy, oz };
+                sharc_coli_point_trans(w_, slot_off);
             }
             return;
         }
 
-        /* 0x24804949: COP internal write — PM 0x02058D. 2 args, no output. */
+        /* 0x24804949: Fn_write_ram — PM 0x2058D. DM[a0] = a1: how the i960
+         * uploads the collision radii, ball maps and pointer tables. */
         case 0x24804949:
+            if (n >= 2) sharc_dm_set(args[0], args[1]);
+            return;
 
         /* 0x40808181: COP internal — PM 0x0208E1. 0 args, no output. */
         case 0x40808181:
@@ -640,20 +901,12 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
         case 0x43008686:
             return;
 
-        /* 0x22004444: save_bone_to_PM_scratch — PM 0x02054C.
-         * 1 arg: N. Copy current 12-word bone (rot+pos, col-major) to pm_bone[N].
-         * cpres1 PM 0x02054C: r3=N*12; i8=0x21F20+r3; lcntr=12; dm(i7,m1)->pm(i8,m9). */
-        case 0x22004444: {
-            if (n >= 1) {
-                int _s = (int)(args[0]) & 0xF;
-                float (*r)[3] = g_sharc.rot; float *pm = g_sharc.pm_bone[_s];
-                pm[0]=r[0][0]; pm[1]=r[0][1]; pm[2]=r[0][2];
-                pm[3]=r[1][0]; pm[4]=r[1][1]; pm[5]=r[1][2];
-                pm[6]=r[2][0]; pm[7]=r[2][1]; pm[8]=r[2][2];
-                pm[9]=g_sharc.pos[0]; pm[10]=g_sharc.pos[1]; pm[11]=g_sharc.pos[2];
-            }
+        /* 0x22004444: Fn_load_matrix_inner (PM 0x2054C) — inner bank
+         * PM[0x21F20 + 12n] -> current matrix. 0x43 is the store; this was a
+         * second store, and 0x45 below the load, one op off all the way along. */
+        case 0x22004444:
+            if (n >= 1) sharc_load_inner((int)args[0]);
             return;
-        }
 
         /* 0x2A005454: smooth_int — STF PM 0x021121 / FV PM 0x020EC7.
          * Applies 9 ang ops (Z,Y,X,X,Y,Z,Y,Z,X) to identity, outputs col0 as 3 × int16 Q14
@@ -694,10 +947,15 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
         /* 0x2D005A5A: dispatch[0x5A] — PM 0x0206F4. 2 args, 2 outputs.
          * IDA os_set_coli: args (col0.x, col0.y); 2 reads back into g4, g5.
          * With identity rotation the outputs equal the inputs; treat as passthrough. */
-        case 0x2D005A5A:
-            sharc_push_f(n > 0 ? sharc_bits_to_float(args[0]) : 0.0f);
-            sharc_push_f(n > 1 ? sharc_bits_to_float(args[1]) : 0.0f);
+        case 0x2D005A5A: {
+            /* Fn_regular_vector_2d (PM 0x206F4): (x, y) scaled by 1/|v| (0 for a zero vector). */
+            float _x = n > 0 ? sharc_bits_to_float(args[0]) : 0.0f;
+            float _y = n > 1 ? sharc_bits_to_float(args[1]) : 0.0f;
+            float _m = _x*_x + _y*_y, _k = _m > 0.0f ? 1.0f / sqrtf(_m) : 0.0f;
+            sharc_push_f(_x * _k);
+            sharc_push_f(_y * _k);
             return;
+        }
 
         case 0x2A005454: {
             if (n < 9) { sharc_push_u(0); sharc_push_u(0); sharc_push_u(0); return; }
@@ -710,7 +968,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             int si_i, si_row;
             for (si_i = 0; si_i < 9; si_i++) {
                 float si_a = sharc_angle_to_rad((int32_t)args[si_i]);
-                float si_c = cosf(si_a), si_s = sinf(si_a);
+                float si_c, si_s; (void)si_a; sharc_sincos((int32_t)args[si_i], &si_s, &si_c);
                 int8_t si_ax = si_axes[si_i];
                 if (si_ax == 1) {       /* ang_y: col0,col2 */
                     for (si_row=0;si_row<3;si_row++){float t=r[0][si_row];r[0][si_row]=si_c*t+si_s*r[2][si_row];r[2][si_row]=-si_s*t+si_c*r[2][si_row];}
@@ -747,67 +1005,66 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             return;
         }
 
-        /* 0x1E803D3D: add_pos_delta — PM 0x0204F2.
-         * 6 float args as two (x,y,z) triplets. Reads a 16-element float array at
-         * DM[0x30429], accumulates arg1..3 into it, and similarly arg4..6 into the
-         * parallel array at DM[0x304E9]. Used for collision geometry offsets. */
-        case 0x1E803D3D:
-
-        /* 0x1D003A3A: init_coll_slot — PM 0x020DDF.
-         * 4 args: stores arg1 → DM[I3+0x11], arg2 → DM[I3+0x12],
-         * arg3 → DM[0x3041A], arg4 → DM[0x3041B]. Clears DM[I3+0x10]=0,
-         * fills 32 words at DM[0x01403E20] with 0xFFFFFFFF, sets DM[I3+5]=1. */
-        case 0x1D003A3A:
-
-        /* 0x1F003E3E: COP collision — PM 0x0210B2. 5 args, no output. */
-        case 0x1F003E3E:
+        /* The collision chain — sharc_coli.h has the firmware ports and how the
+         * i960 drives them each frame. */
+        case 0x1E803D3D: {                                  /* Fn_coli_trans_mat */
+            float d0[3], d1[3];
+            for (int c = 0; c < 3; c++) {
+                d0[c] = n > c ? sharc_bits_to_float(args[c]) : 0.0f;
+                d1[c] = n > 3 + c ? sharc_bits_to_float(args[3 + c]) : 0.0f;
+            }
+            sharc_coli_trans_mat(d0, d1);
             return;
-        /* 0x1D803B3B: collision_setup_v2 — PM 0x020ED5.
-         * 7 args, no FIFO output. Sets up streaming animation collision data buffers. */
-        case 0x1D803B3B:
+        }
+        case 0x1D003A3A:                                    /* Fn_area_table_gen */
+            if (n >= 4) sharc_coli_area_table_gen(args[0], args[1], args[2], args[3]);
             return;
-        case 0x39007272:
-            sharc_push_u(0);
+        case 0x1F003E3E:                                    /* Fn_coli_trans_xz */
+            if (n >= 5)
+                sharc_coli_trans_xz(sharc_bits_to_float(args[0]), sharc_bits_to_float(args[1]),
+                                    sharc_bits_to_float(args[2]), sharc_bits_to_float(args[3]),
+                                    sharc_bits_to_float(args[4]));
             return;
-        /* 0x38007070: init_coli_sphere_sys — PM 0x020BBE.
-         * 5 args: (r15, r13, r14, r11, r12) set up sphere collision tables for a player.
-         * cpres1 _L20BBA return path: no dm(m0,i1) writes -> 0 FIFO outputs. */
-        case 0x38007070:
-            /* PM 0x20BBE: stage-object CLIP/BOUNDS classifier. Reads 5 args (stage
-             * bounds), classifies up to 32 objects (positions DM[0x1403e80]/[0x1407e80],
-             * vis DM[0x30600]/[0x30700]) against the bounds, outputs 22 words → i960
-             * stores to g13+0x118.. and g7+0x650/0x660/0xA58/0x614..
-             * STUB for now: a faithful port needs the SHARC DM object table our HLE
-             * doesn't model. MAME ground-truth (one fight frame, for the eventual port):
-             *   g13+118=0x33000 g13+124=0x33000  (clip masks)
-             *   g7+710=2.56  g7+A5C=7.30
-             *   g7+650..65C = 8.70,5.47,8.66,5.83  (arena bounds; init 100.0 minimized)
-             *   g7+614=0x9000 g7+618=0x9000        (remapped masks)
-             *   all other dests = 0
-             * The empty-set default (0s+100.0) was verified WRONG vs MAME, reverted. */
+        case 0x1D803B3B:                                    /* Fn_calc_coli_flag: 4 replies */
+            if (n >= 7) sharc_coli_calc_flag(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+            return;
+        case 0x39007272:                                    /* Fn_outside_ball: 1 reply */
+            if (n >= 3) sharc_coli_outside_ball(args[0], sharc_bits_to_float(args[1]), sharc_bits_to_float(args[2]));
+            return;
+        case 0x38007070:                                    /* Fn_area_coli: 22 replies */
+            if (n >= 5) sharc_coli_area_coli(args[0], args[1], args[2], args[3], args[4]);
+            return;
+        case 0x38807171:                                    /* Fn_ball_to_unit: 1 reply */
+            if (n >= 2) sharc_coli_ball_to_unit(args[0], args[1]);
             return;
 
-        case 0x24004848:
-            sharc_push_u(0);
+        case 0x24004848:                                    /* Fn_read_ram: DM[a0] */
+            sharc_push_u(n >= 1 ? sharc_dm_get(args[0]) : 0);
             return;
 
         case 0x2B005656:
             /* Read col0 of current matrix (first 3 words in SHARC column-major layout).
              * In row-major terms: [m[0][0], m[1][0], m[2][0]]. */
-            if (g_sharc.matrix_dirty) sharc_build_matrix();
-            sharc_push_f(g_sharc.matrix[0][0]);
-            sharc_push_f(g_sharc.matrix[1][0]);
-            sharc_push_f(g_sharc.matrix[2][0]);
+            sharc_push_f(g_sharc.rot[0][0]);
+            sharc_push_f(g_sharc.rot[0][1]);
+            sharc_push_f(g_sharc.rot[0][2]);
             return;
 
         /* 0x2D805B5B: passthrough_yz — PM 0x020700.
          * 3 args (entity_idx, y, z) -> 2 floats: (y, z).
          * MAME-verified: stride-2 stall pattern; real outputs = args[1], args[2].
          * When entity_idx == 0 the outputs equal the inputs unchanged. */
-        case 0x2D805B5B:
-            sharc_push_f(n > 1 ? sharc_bits_to_float(args[1]) : 0.0f);
-            sharc_push_f(n > 2 ? sharc_bits_to_float(args[2]) : 0.0f);
+        case 0x2D805B5B: {
+            /* Fn_rot_2d (PM 0x20700): (x, y) turned by a 16-bit angle --
+             * (x cos - y sin, x sin + y cos), sin/cos from the ROM table. */
+            float s_ = 0.0f, c_ = 1.0f;
+            if (n > 0) sharc_sincos((int32_t)args[0], &s_, &c_);
+            float _x = n > 1 ? sharc_bits_to_float(args[1]) : 0.0f;
+            float _y = n > 2 ? sharc_bits_to_float(args[2]) : 0.0f;
+            sharc_push_f(c_*_x - s_*_y);
+            sharc_push_f(s_*_x + c_*_y);
             return;
+        }
         /* 0x2C805959: dot2D — PM 0x02068C.
          * 4 args (a,b,c,d) -> 1 float: a*b + c*d.
          * cpres1 PM 0x02068C: f8=f0*f4+f1*f5 where (f0,f1)=(arg0,arg2), (f4,f5)=(arg1,arg3). */
@@ -825,13 +1082,15 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * NOTE: FV firmware maps index 0x7F to the error/hang handler — this command
          * is STF-specific and must not be sent by FV game code. */
         case 0x3F807F7F:
+            if (n >= 1) sharc_coli_copy_unit_matrix(args[0]);
+            return;
 
         /* 0x1C003838: select_bone_buf — PM 0x020DA8.
          * Writes base pointer to DM[0x3033E]: 0x01403E80 (arg≠1) or 0x01407E80 (arg=1).
          * P1 buf → BUFF_RAM+0x00FA00, P2 buf → BUFF_RAM+0x01FA00.
          * Selects active player's bone animation data buffer. No FIFO output. */
         case 0x1C003838:
-            g_sharc.coli_buf_base = (n >= 1 && (args[0] & 0xFF) == 1) ? 0x1FA00u : 0xFA00u;
+            if (n >= 1) sharc_coli_set_ball_adrs(args[0]);
             return;
 
         case 0x09001212:
@@ -905,21 +1164,21 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             T[2] += a0*M[2] + a1*M[5] + a2*M[8];
 
 #define BONE_RZ(ang) do { \
-    float _r = sharc_angle_to_rad(ang); float _c = cosf(_r), _s = sinf(_r); \
+    float _c, _s; sharc_sincos((int32_t)(ang), &_s, &_c); \
     int _i; for (_i = 0; _i < 3; _i++) { \
         float _x = M[_i], _y = M[_i+3]; \
         M[_i]   = _c*_x - _s*_y; \
         M[_i+3] = _s*_x + _c*_y; } \
 } while(0)
 #define BONE_RY(ang) do { \
-    float _r = sharc_angle_to_rad(ang); float _c = cosf(_r), _s = sinf(_r); \
+    float _c, _s; sharc_sincos((int32_t)(ang), &_s, &_c); \
     int _i; for (_i = 0; _i < 3; _i++) { \
         float _x = M[_i], _z = M[_i+6]; \
         M[_i]   = _c*_x + _s*_z; \
         M[_i+6] = _c*_z - _s*_x; } \
 } while(0)
 #define BONE_RX(ang) do { \
-    float _r = sharc_angle_to_rad(ang); float _c = cosf(_r), _s = sinf(_r); \
+    float _c, _s; sharc_sincos((int32_t)(ang), &_s, &_c); \
     int _i; for (_i = 0; _i < 3; _i++) { \
         float _y = M[_i+3], _z = M[_i+6]; \
         M[_i+3] = _c*_y - _s*_z; \
@@ -1086,7 +1345,23 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * from STF here.  Until STF's true semantics are captured from MAME, return
          * zeros — which matches MAME for all observed inputs. */
         case 0x31806363:
-            sharc_push_u(0); sharc_push_u(0); sharc_push_u(0);
+            /* That MAME reading was the i960 side of the FIFO, where a read the
+             * COP has not answered yet stalls and shows as 0. The SHARC's own side
+             * gives the firmware formula (args[3] a 16-bit angle), e.g. args
+             * (-3,-1.2,3, 0x9000, 10,1,0) -> (-10.8624, 2.2, 7.74652). */
+            if (n >= 7) {
+                float A = sharc_bits_to_float(args[0]), B = sharc_bits_to_float(args[1]);
+                float C = sharc_bits_to_float(args[2]);
+                float E = sharc_bits_to_float(args[4]), F = sharc_bits_to_float(args[5]);
+                float G = sharc_bits_to_float(args[6]);
+                float s_, c_; sharc_sincos((int32_t)args[3], &s_, &c_);
+                float dx = E - A, dz = G - C;
+                sharc_push_f(dx*c_ + dz*s_);
+                sharc_push_f(F - B);
+                sharc_push_f(dz*c_ - dx*s_);
+            } else {
+                sharc_push_u(0); sharc_push_u(0); sharc_push_u(0);
+            }
             return;
 
         /* 0x08801111: load 3×3 rotation into current slot — PM 0x020443.
@@ -1107,20 +1382,17 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             sharc_push_u(0);
             return;
 
-        /* 0x18003030: rotate2D_passz  dispatch index 0x30  PM 0x206E3
-         * args: (angle_i16, x, y) → (x*cos - y*sin, x*sin + y*cos, y unchanged)
-         * Firmware (cpres1 PM 0x206E3): call _L202C1(angle) → cos/sin,
-         *   f8=cos*x-sin*y, f9=sin*x+cos*y → output f8,f9.
-         * STF firmware outputs 3 values (i960 reads 3 with ldt); 3rd = z passthrough. */
         case 0x18003030:
+            /* Not a rotate: dispatch 0x30 is Fn_regular_vector (PM 0x206E3), the
+             * 3D normalise -- (x, y, z) * 1/|v|, via _L20356. The rotate is 0x5B. */
             if (n >= 3) {
-                float _ang = sharc_angle_to_rad((int32_t)args[0]);
-                float _c = cosf(_ang), _s = sinf(_ang);
-                float _x = sharc_bits_to_float(args[1]);
-                float _y = sharc_bits_to_float(args[2]);
-                sharc_push_f(_c*_x - _s*_y);
-                sharc_push_f(_s*_x + _c*_y);
-                sharc_push_u(args[2]);  /* z passthrough */
+                float _x = sharc_bits_to_float(args[0]);
+                float _y = sharc_bits_to_float(args[1]);
+                float _z = sharc_bits_to_float(args[2]);
+                float _m = _x*_x + _y*_y + _z*_z, _k = _m > 0.0f ? 1.0f / sqrtf(_m) : 0.0f;
+                sharc_push_f(_x * _k);
+                sharc_push_f(_y * _k);
+                sharc_push_f(_z * _k);
             } else {
                 sharc_push_u(0); sharc_push_u(0); sharc_push_u(0);
             }
@@ -1135,9 +1407,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 float _a = sharc_bits_to_float(args[0]);
                 if (_a >  1.0f) _a =  1.0f;
                 if (_a < -1.0f) _a = -1.0f;
-                float _ang = asinf(_a);
-                uint32_t _u = (uint32_t)(int32_t)(_ang * (65536.0f / (2.0f * 3.14159265358979f)));
-                sharc_push_u(_u);
+                sharc_push_u(_a == 1.0f ? 0x4000u : _a == -1.0f ? 0xC000u : sharc_angle_word(asinf(_a)));
             }
             return;
 
@@ -1148,9 +1418,9 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 g_sharc.ang[2] = (int32_t)args[0];  /* z angle */
                 g_sharc.ang[1] = (int32_t)args[1];  /* y angle */
                 g_sharc.ang[0] = (int32_t)args[2];  /* x angle */
-                { float a = sharc_angle_to_rad(g_sharc.ang[2]); sharc_postmul_rz(cosf(a), sinf(a)); }
-                { float a = sharc_angle_to_rad(g_sharc.ang[1]); sharc_postmul_ry(cosf(a), sinf(a)); }
-                { float a = sharc_angle_to_rad(g_sharc.ang[0]); sharc_postmul_rx(cosf(a), sinf(a)); }
+                { float s_, c_; sharc_sincos(g_sharc.ang[2], &s_, &c_); sharc_postmul_rz(c_, s_); }
+                { float s_, c_; sharc_sincos(g_sharc.ang[1], &s_, &c_); sharc_postmul_ry(c_, s_); }
+                { float s_, c_; sharc_sincos(g_sharc.ang[0], &s_, &c_); sharc_postmul_rx(c_, s_); }
                 g_sharc.matrix_dirty = true;
                 g_sharc.bone_dirty   = true;
             }
@@ -1207,6 +1477,17 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * is reset to identity by the preceding 0x01800303 and is written by the
          * subsequent ang commands, so there is nothing to mirror here. */
         case 0x07000E0E:
+            /* Fn_load_point (PM 0x20433): the three args ARE the translation --
+             * `dm(i7,9)` post-modifies to T. calc_unit_mat opens every part with
+             * load_point(0, +0x678, 0); ignoring it left whatever T the previous
+             * matrix had, and STF's unit matrices came out tens of units away. */
+            if (n >= 3) {
+                g_sharc.pos[0] = sharc_bits_to_float(args[0]);
+                g_sharc.pos[1] = sharc_bits_to_float(args[1]);
+                g_sharc.pos[2] = sharc_bits_to_float(args[2]);
+                g_sharc.matrix_dirty = true;
+                g_sharc.bone_dirty   = true;
+            }
             return;
 
         /* 0x1A803535: save current matrix to bone cache — PM 0x0204AE.
@@ -1249,8 +1530,8 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                             g_sharc.rot[_col][_row] = sharc_bits_to_float(u);
                         }
                     if (n >= 2) {
-                        float a = sharc_angle_to_rad((int32_t)args[1]);
-                        sharc_premul_ry(cosf(a), sinf(a));
+                        float s_, c_; sharc_sincos((int32_t)args[1], &s_, &c_);
+                        sharc_premul_ry(c_, s_);
                     }
                     g_sharc.matrix_dirty = true;
                     g_sharc.bone_dirty   = true;
@@ -1299,21 +1580,19 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             g_sharc.pos[1] = sharc_bits_to_float(args[1]);
             g_sharc.pos[2] = sharc_bits_to_float(args[2]);
             /* build rotation matrix from body angles (args[3..5]) via PM 0x0211C0 */
-            { float c3 = cosf(sharc_angle_to_rad((int32_t)args[3]));
-              float s3 = sinf(sharc_angle_to_rad((int32_t)args[3]));
-              float c4 = cosf(sharc_angle_to_rad((int32_t)args[4]));
-              float s4 = sinf(sharc_angle_to_rad((int32_t)args[4]));
-              float c5 = cosf(sharc_angle_to_rad((int32_t)args[5]));
-              float s5 = sinf(sharc_angle_to_rad((int32_t)args[5]));
+            { float c3, s3, c4, s4, c5, s5;
+              sharc_sincos((int32_t)args[3], &s3, &c3);
+              sharc_sincos((int32_t)args[4], &s4, &c4);
+              sharc_sincos((int32_t)args[5], &s5, &c5);
               float (*r)[3] = g_sharc.rot;
               r[0][0] =  c4*c3;              r[0][1] = -c4*s3;              r[0][2] =  s4;
               r[1][0] =  s3*c5 + c3*s4*s5;  r[1][1] =  c3*c5 - s3*s4*s5;  r[1][2] = -c4*s5;
               r[2][0] =  s3*s5 - c3*s4*c5;  r[2][1] =  c3*s5 + s3*s4*c5;  r[2][2] =  c4*c5;
             }
             /* post-multiply world angles: ang_y(args[6]), ang_x(args[7]), ang_z(args[8]) */
-            { float _a = sharc_angle_to_rad((int32_t)args[6]); sharc_postmul_ry(cosf(_a), sinf(_a)); }
-            { float _a = sharc_angle_to_rad((int32_t)args[7]); sharc_postmul_rx(cosf(_a), sinf(_a)); }
-            { float _a = sharc_angle_to_rad((int32_t)args[8]); sharc_postmul_rz(cosf(_a), sinf(_a)); }
+            { float s_, c_; sharc_sincos((int32_t)args[6], &s_, &c_); sharc_postmul_ry(c_, s_); }
+            { float s_, c_; sharc_sincos((int32_t)args[7], &s_, &c_); sharc_postmul_rx(c_, s_); }
+            { float s_, c_; sharc_sincos((int32_t)args[8], &s_, &c_); sharc_postmul_rz(c_, s_); }
             g_sharc.ang[0] = g_sharc.ang[1] = g_sharc.ang[2] = 0;
             g_sharc.matrix_dirty = true;
             g_sharc.bone_dirty   = true;
@@ -1334,53 +1613,53 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             return;
         }
 
-        /* 0x22804545: load_bone_from_PM_scratch — PM 0x02055C.
-         * 1 arg: N. Copy pm_bone[N] (col-major 3x4) to current bone slot. */
-        case 0x22804545: {
-            if (n >= 1) {
-                int _s = (int)(args[0]) & 0xF;
-                float *pm = g_sharc.pm_bone[_s];
-                g_sharc.rot[0][0]=pm[0]; g_sharc.rot[0][1]=pm[1]; g_sharc.rot[0][2]=pm[2];
-                g_sharc.rot[1][0]=pm[3]; g_sharc.rot[1][1]=pm[4]; g_sharc.rot[1][2]=pm[5];
-                g_sharc.rot[2][0]=pm[6]; g_sharc.rot[2][1]=pm[7]; g_sharc.rot[2][2]=pm[8];
-                g_sharc.pos[0]=pm[9]; g_sharc.pos[1]=pm[10]; g_sharc.pos[2]=pm[11];
-                g_sharc.matrix_dirty = true;
-                g_sharc.bone_dirty   = true;
-            }
+        /* 0x22804545: Fn_mul_matrix_inner (PM 0x2055C, _L201EA) — the current
+         * matrix composed with inner[n], the same multiply 0x37 does with a unit
+         * matrix. */
+        case 0x22804545:
+            if (n >= 1) sharc_compose(g_sharc.pm_bone[(int)args[0] & 0xF]);
             return;
-        }
 
         /* 0x39807373: COP internal — PM 0x020D1F. 2 args, no output. */
-        case 0x39807373:
+        case 0x39807373:                                    /* Fn_kage_mat */
+            if (n >= 2) sharc_kage_mat(args[0], args[1]);
             return;
-        case 0x3A807575:
-            sharc_push_u(0x00000000);
-            sharc_push_u(0x0000FFFF);
+        case 0x3A807575:                                    /* Fn_kage_flag: 2 replies */
+            if (n >= 6)
+                sharc_kage_flag(args[0], args[1], sharc_bits_to_float(args[2]), sharc_bits_to_float(args[3]),
+                                sharc_bits_to_float(args[4]), sharc_bits_to_float(args[5]));
             return;
-        /* 0x3A007474: COP internal — PM 0x020D0A. 7 args, no output. */
+        /* 0x3A007474: Fn_kage_poly (PM 0x20D0A) — a fighter part's shadow.
+         * args: player, slot (as 0x37), flags, x, y, z, inner index.
+         *   push; current composed with the unit matrix (0x37);
+         *   flags bit 2: T += rot * (x, y, z);
+         *   flags bit 1: keep the Z axis (_L20529), else bit 0: keep X (_L20516);
+         *   current = current * inner[index] (0x46).
+         * The matrix is left pushed: the i960 pops after the draw. As a no-op
+         * that pop took one level too many, and every shadow's matrix was wrong. */
         case 0x3A007474:
-            return;
-
-        /* 0x23004646: mul_bone_by_PM_scratch — PM 0x02056E.
-         * 1 arg: N. Compose current bone with pm_bone[N]: new_bone = bone x pm_bone[N].
-         * cpres1 _L2021F: DM[i7] x PM[i8] -> DM[i7] (col-major 3x4 multiplication). */
-        case 0x23004646: {
-            if (n >= 1) {
-                int _s = (int)(args[0]) & 0xF;
-                float (*r)[3] = g_sharc.rot; float *pm = g_sharc.pm_bone[_s];
-                float nr[3][3]; float np[3]; int _c, _w;
-                for (_c = 0; _c < 3; _c++)
-                    for (_w = 0; _w < 3; _w++)
-                        nr[_c][_w] = r[0][_w]*pm[_c*3] + r[1][_w]*pm[_c*3+1] + r[2][_w]*pm[_c*3+2];
-                for (_w = 0; _w < 3; _w++)
-                    np[_w] = g_sharc.pos[_w] + r[0][_w]*pm[9] + r[1][_w]*pm[10] + r[2][_w]*pm[11];
-                memcpy(g_sharc.rot, nr, sizeof(nr));
-                memcpy(g_sharc.pos, np, sizeof(np));
+            if (n >= 7) {
+                sharc_push_stack();
+                sharc_compose_unit(args[0], args[1]);
+                uint32_t flags = args[2];
+                if (flags & 4) {
+                    float v[3] = { sharc_bits_to_float(args[3]), sharc_bits_to_float(args[4]), sharc_bits_to_float(args[5]) };
+                    for (int r_ = 0; r_ < 3; r_++)
+                        g_sharc.pos[r_] += g_sharc.rot[0][r_]*v[0] + g_sharc.rot[1][r_]*v[1] + g_sharc.rot[2][r_]*v[2];
+                }
+                if (flags & 2)      sharc_kage_leave_z();
+                else if (flags & 1) sharc_kage_leave_x();
+                sharc_compose_rev(g_sharc.pm_bone[(int)args[6] & 0xF]);
                 g_sharc.matrix_dirty = true;
                 g_sharc.bone_dirty   = true;
             }
             return;
-        }
+
+        /* 0x23004646: Fn_mul_matrix_inner_rev (PM 0x2056E -> _L2021F): the
+         * current matrix transformed by inner[n] — current = inner[n] * current. */
+        case 0x23004646:
+            if (n >= 1) sharc_compose_rev(g_sharc.pm_bone[(int)args[0] & 0xF]);
+            return;
 
         /* 0x2B805757: read_col1 — PM 0x02044E.
          * Advances I7 by 3 (past col0) then reads slot[3..5] = rot[1][0..2] → 3 FIFO words. */
@@ -1404,9 +1683,9 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * result = sin/cos = tan(angle).  Returns 1 float. */
         case 0x11802323:
             if (n >= 1) {
-                float a = sharc_angle_to_rad(args[0]);
-                float c = cosf(a);
-                float r = (c != 0.0f) ? (sinf(a) / c) : 0.0f;
+                float s_, c; sharc_sincos((int32_t)args[0], &s_, &c);
+                
+                float r = (c != 0.0f) ? (s_ / c) : 0.0f;
                 SANITIZE(r);
                 sharc_push_f(r);
             }

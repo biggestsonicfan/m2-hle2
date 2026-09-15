@@ -466,7 +466,7 @@ static void mcp_cmd_get_geo_captures(char *resp, int cap) {
                 "\"scale\":[%.3f,%.3f,%.3f],"
                 "\"up\":[%.2f,%.2f,%.2f],"
                 "\"clip\":%d,\"cx\":%d,\"cy\":%d,\"cw\":%d,\"ch\":%d,"
-                "\"bone\":%d}",
+                "\"bone\":%d,\"vs\":%d,\"win\":%d,\"vp\":[%d,%d,%d,%d],\"gp\":[%.1f,%.1f,%.1f,%.1f],\"tpa\":\"0x%X\",\"tha\":\"0x%X\",\"matptr\":\"0x%X\",\"m\":[",
                 i ? "," : "",
                 i, cm->model_idx, cm->dbg_mesh_ptr,
                 cm->dbg_pos[0], cm->dbg_pos[1], cm->dbg_pos[2],
@@ -478,124 +478,43 @@ static void mcp_cmd_get_geo_captures(char *resp, int cap) {
                 cm->matrix[1], cm->matrix[5], cm->matrix[9],
                 cm->has_clip_win ? 1 : 0, cm->clip_win_x, cm->clip_win_y,
                 cm->clip_win_w, cm->clip_win_h,
-                cm->from_bone ? 1 : 0);
+                cm->from_bone ? 1 : 0, cm->view_space ? 1 : 0, cm->window,
+                cm->vp[0], cm->vp[1], cm->vp[2], cm->vp[3],
+                cm->gproj[0], cm->gproj[1], cm->gproj[2], cm->gproj[3],
+                cm->tpa, cm->tha, cm->material_ptr);
+        for (int k = 0; k < 12; k++) GAPPEND("%s%.5g", k ? "," : "", cm->matrix[k]);
+        GAPPEND("]}");
     }
     GAPPEND("]}");
 #undef GAPPEND
 }
 
+/* sound_status: the sound board at a glance — the 68000, the SCSP's interrupt
+ * and timer state, which slots are sounding, and the host output ring. */
 static void mcp_cmd_sound_status(char *resp, int cap) {
-    int active = 0;
-    for (int i = 0; i < SCSP_VOICES; i++)
-        if (g_scsp.voices[i].active) active++;
-    /* 68K driver work RAM: a6 base = 0x1000, a5 = SCSP @ 0x100000.
-     * Sequencer tracks at a6+0x2000 (= wave[0x3000]+n*0x10), active = bit7 of byte 0.
-     * Timer reloads at a6+0x1440/0x1441 (= wave[0x2440/0x2441]); master flag a6+0x1406. */
-    int seq_active = 0;
-    for (int n = 0; n < 8; n++)
-        if (g_sound.wave[0x3000 + n*0x10] & 0x80) seq_active++;
-    unsigned tb = g_sound.wave[0x2440], ta = g_sound.wave[0x2441];
-    unsigned master = g_sound.wave[0x2406];
-    /* command ring ($1404 wptr / $1406 count / $1408 rptr, a6=0x1000) */
-    unsigned ring_w = (g_sound.wave[0x2404]<<8)|g_sound.wave[0x2405];
-    unsigned ring_c = g_sound.wave[0x2406];
-    unsigned ring_r = (g_sound.wave[0x2408]<<8)|g_sound.wave[0x2409];
-    /* Survey soundram (wave RAM) for any copied sample data, sampled every 256B.
-     * The SCSP plays from soundram only, so samples must be copied here. */
-    int wave_nz = 0;
-    for (uint32_t k = 0; k < M68K_WAVE_SIZE; k += 256)
-        if (g_sound.wave[k]) wave_nz++;
-    /* IRQ delivery diagnostics */
-    unsigned inten = (g_mcp.cpu && (g_mcp.cpu->sfr.pc & 0x2000)) ? 1 : 0;
-    unsigned sqc = 0, sqs = 0xFF;
-    if (g_mcp.bus && g_active_profile) {
-        uint32_t ca = g_active_profile->quirks.sound_queue_count_addr;
-        uint32_t sa = g_active_profile->quirks.sound_queue_state_addr;
-        if (ca) sqc = mem_read8(g_mcp.bus, ca);
-        if (sa) sqs = mem_read8(g_mcp.bus, sa);
+    const scsp_t *sc = &g_sound.scsp;
+    uint32_t keyed = 0, active = 0;
+    for (int i = 0; i < 32; i++) {
+        if (sc->slot[i].r[0] & 0x0800) keyed |= 1u << i;
+        if (sc->slot[i].active)        active |= 1u << i;
     }
+    uint32_t fill = (g_sound.out_w - g_sound.out_r) & (SOUND_OUT_FRAMES - 1);
     snprintf(resp, (size_t)cap,
-             "{\"ok\":true,"
-             "\"i960_midi_writes\":%llu,"      /* i960 → 68K MIDI bytes sent       */
-             "\"i960_comm_reads\":%llu,"
-             "\"m68k_pc\":\"0x%06X\","          /* where the 68K driver is executing */
-             "\"m68k_steps\":%u,"
-             "\"rom_loaded\":%s,"
-             "\"scsp_keyon_count\":%u,\"scsp_keyoff_count\":%u,"
-             "\"noteon\":%u,\"noteoff\":%u,\"m68k_sr\":\"0x%04X\","
-             "\"audio_cb_count\":%u,"           /* sokol_audio callback fires       */
-             "\"active_voices\":%d,"            /* voices currently sounding        */
-             "\"scsp_loaded\":%s,"
-             "\"saudio_valid\":%s,"
-             "\"sample_rate\":%d,"
-             "\"sample_rom\":%s,"
-             "\"seq_tracks_active\":%d,"        /* 68K sequencer tracks with a song   */
-             "\"timer_b_reload\":%u,"
-             "\"timer_a_reload\":%u,"
-             "\"master_flag\":\"0x%02X\","      /* a6+0x1406; 0xFF = sound disabled    */
-             "\"irq_intreq\":\"0x%X\",\"irq_intena\":\"0x%X\","
-             "\"irq_delivered\":%llu,\"i960_inten\":%u,"
-             "\"snd_q_count\":%u,\"snd_q_state\":\"0x%02X\","
-             "\"scsp_tB_hi\":\"0x%02X\",\"scsp_tB_lo\":\"0x%02X\","
-             "\"ko_oct\":%u,\"ko_fns\":%u,\"ko_tl\":%u,\"ko_disdl\":%u,\"ko_dipan\":%u,"
-             "\"ko_step\":%.4f,\"ko_vol_l\":%.4f,\"ko_vol_r\":%.4f,"
-             "\"sample_rom_reads\":%u,\"samples_size\":%u,\"wave_nonzero\":%d,"
-             "\"dsc_count\":%u,\"dsc_b0\":%u,\"dsc_b1\":%u,"
-             "\"loadsong\":%u,\"sc07\":%u,\"sc07_post\":%u,\"sc05\":%u,"
-             "\"dsc7\":%u,\"sc07_d0\":%u,"
-             "\"sc07_stk\":[\"%06X\",\"%06X\",\"%06X\",\"%06X\",\"%06X\",\"%06X\"],"
-             "\"dsc_song\":%u,\"dsc_fade\":%u,\"dsc_zero\":%u,\"dsc_song_b0\":%u,\"dsc_song_b1\":%u,"
-             "\"dsc_zero_b1\":%u,\"ring_w\":%u,\"ring_c\":%u,\"ring_r\":%u,"
-             "\"enq\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u],\"c3\":%u,\"c4\":%u,"
-             "\"d1hist\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u],"
-             "\"sp\":\"%08X\",\"ssp\":\"%08X\",\"cmd_leak\":%d,\"chain_leak\":%d,"
-             "\"cmd1_stk\":[\"%08X\",\"%08X\",\"%08X\",\"%08X\",\"%08X\",\"%08X\"],"
-             "\"crash_pc\":\"%06X\",\"crash_target\":\"%06X\",\"crash_sp\":\"%08X\","
-             "\"crash_stk\":[\"%08X\",\"%08X\",\"%08X\",\"%08X\",\"%08X\",\"%08X\",\"%08X\",\"%08X\"]}",
-             (unsigned long long)g_sound.write_count,
-             (unsigned long long)g_sound.read_count,
-             g_sound.m68k.cpu.pc,
-             g_sound_step_total,
-             g_sound.rom_loaded ? "true" : "false",
-             g_scsp.keyon_count, g_scsp.keyoff_count,
-             g_sound_noteon, g_sound_noteoff, (unsigned)g_sound.m68k.cpu.sr,
-             g_scsp.cb_count,
-             active,
-             g_scsp.loaded ? "true" : "false",
-             saudio_isvalid() ? "true" : "false",
-             saudio_isvalid() ? saudio_sample_rate() : 0,
-             g_scsp.sample_rom ? "true" : "false",
-             seq_active, tb, ta, master,
-             g_irqt.intreq, g_irqt.intena,
-             (unsigned long long)g_irqt.deliver_count, inten,
-             sqc, sqs,
-             g_sound.comm[0x41A], g_sound.comm[0x41B],
-             g_scsp.dbg_oct, g_scsp.dbg_fns, g_scsp.dbg_tl,
-             g_scsp.dbg_disdl, g_scsp.dbg_dipan,
-             g_scsp.dbg_step, g_scsp.dbg_vol_l, g_scsp.dbg_vol_r,
-             g_sound.sample_rom_reads, g_sound.samples_size, wave_nz,
-             g_sound.dbg_dsc_count, g_sound.dbg_dsc_b0, g_sound.dbg_dsc_b1,
-             g_sound.dbg_loadsong, g_sound.dbg_sc07, g_sound.dbg_sc07_post, g_sound.dbg_sc05,
-             g_sound.dbg_dsc7, g_sound.dbg_sc07_d0,
-             g_sound.dbg_sc07_stk[0], g_sound.dbg_sc07_stk[1], g_sound.dbg_sc07_stk[2],
-             g_sound.dbg_sc07_stk[3], g_sound.dbg_sc07_stk[4], g_sound.dbg_sc07_stk[5],
-             g_sound.dbg_dsc_song, g_sound.dbg_dsc_fade, g_sound.dbg_dsc_zero,
-             g_sound.dbg_dsc_song_b0, g_sound.dbg_dsc_song_b1,
-             g_sound.dbg_dsc_zero_b1, ring_w, ring_c, ring_r,
-             g_sound.dbg_enq[0], g_sound.dbg_enq[1], g_sound.dbg_enq[2], g_sound.dbg_enq[3],
-             g_sound.dbg_enq[4], g_sound.dbg_enq[5], g_sound.dbg_enq[6], g_sound.dbg_enq[7],
-             g_sound.dbg_enq[8], g_sound.dbg_enq[9], g_sound.dbg_enq[10],
-             g_sound.dbg_c3, g_sound.dbg_c4,
-             g_sound.dbg_d1hist[0],g_sound.dbg_d1hist[1],g_sound.dbg_d1hist[2],g_sound.dbg_d1hist[3],
-             g_sound.dbg_d1hist[4],g_sound.dbg_d1hist[5],g_sound.dbg_d1hist[6],g_sound.dbg_d1hist[7],
-             g_sound.dbg_d1hist[8],g_sound.dbg_d1hist[9],g_sound.dbg_d1hist[10],g_sound.dbg_d1hist[11],
-             g_sound.dbg_d1hist[12],g_sound.dbg_d1hist[13],g_sound.dbg_d1hist[14],g_sound.dbg_d1hist[15],
-             g_sound.m68k.cpu.a[7], g_sound.m68k.cpu.ssp, g_sound.dbg_cmd_leak, g_sound.dbg_chain_leak,
-             g_sound.dbg_cmd1_stk[0], g_sound.dbg_cmd1_stk[1], g_sound.dbg_cmd1_stk[2],
-             g_sound.dbg_cmd1_stk[3], g_sound.dbg_cmd1_stk[4], g_sound.dbg_cmd1_stk[5],
-             g_sound.dbg_crash_pc, g_sound.dbg_crash_target, g_sound.dbg_crash_sp,
-             g_sound.dbg_crash_stk[0], g_sound.dbg_crash_stk[1], g_sound.dbg_crash_stk[2], g_sound.dbg_crash_stk[3],
-             g_sound.dbg_crash_stk[4], g_sound.dbg_crash_stk[5], g_sound.dbg_crash_stk[6], g_sound.dbg_crash_stk[7]);
+             "{\"ok\":true,\"rom_loaded\":%s,\"samples_size\":%u,\"m68k_pc\":\"0x%06X\",\"m68k_sr\":\"0x%04X\","
+             "\"cycles\":%llu,\"samples\":%llu,\"irqs\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu],"
+             "\"midi_writes\":%llu,\"midi_fifo\":%u,\"scieb\":\"0x%03X\",\"scipd\":\"0x%03X\",\"lines\":\"0x%02X\","
+             "\"levels\":[%u,%u,%u],\"timers\":[\"0x%04X\",\"0x%04X\",\"0x%04X\"],\"keyed\":\"0x%08X\",\"active\":\"0x%08X\","
+             "\"dsp_steps\":%d,\"out_fill\":%u,\"out_dropped\":%llu}",
+             g_sound.rom_loaded ? "true" : "false", g_sound.samples_size,
+             g_sound.m68k.cpu.pc, (unsigned)g_sound.m68k.cpu.sr,
+             (unsigned long long)g_sound.m68k.cpu.cycles, (unsigned long long)sc->samples,
+             (unsigned long long)g_sound.irqs[1], (unsigned long long)g_sound.irqs[2], (unsigned long long)g_sound.irqs[3],
+             (unsigned long long)g_sound.irqs[4], (unsigned long long)g_sound.irqs[5], (unsigned long long)g_sound.irqs[6],
+             (unsigned long long)g_sound.irqs[7],
+             (unsigned long long)g_sound.write_count, (unsigned)((sc->mi_w - sc->mi_r) & 31),
+             sc->c[0x0F], sc->c[0x10], sc->lines, sc->lvl_ta, sc->lvl_tbc, sc->lvl_midi,
+             sc->c[0x0C], sc->c[0x0D], sc->c[0x0E], keyed, active,
+             sc->dsp.stopped ? -1 : sc->dsp.last_step, fill, (unsigned long long)g_sound.out_dropped);
 }
 
 static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
@@ -628,20 +547,6 @@ static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
     }
     DAPPEND("]}");
 #undef DAPPEND
-}
-
-static void mcp_cmd_dump_slot_regs(char *resp, int cap) {
-    char *p = resp; int left = cap, n;
-#define SAPPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); p += n; left -= n; } while(0)
-    SAPPEND("{\"ok\":true,\"slot\":%u,\"sa\":\"0x%05X\",\"regs\":[",
-            g_sound.dbg_slot_idx, g_sound.dbg_sa);
-    for (int i = 0; i < 32; i++)
-        SAPPEND("%s%u", i ? "," : "", g_sound.dbg_slot_regs[i]);
-    SAPPEND("],\"wave_at_sa\":[");
-    for (int i = 0; i < 16; i++)
-        SAPPEND("%s%u", i ? "," : "", g_sound.dbg_wave_at_sa[i]);
-    SAPPEND("]}");
-#undef SAPPEND
 }
 
 static void mcp_cmd_dump_midi_log(char *resp, int cap) {
@@ -853,6 +758,53 @@ static void mcp_cmd_wait_for_stop(const char *req, char *resp, int cap) {
  * The read goes through mem_read8 rather than at the region's backing store so
  * a range that spans regions, or one behind an MMIO callback, dumps the same
  * bytes the i960 would see. */
+/* dump_geo_list — the GEO display list the renderer walks: the copy published
+ * when the game last set the read pointer. Writes <path> as u32 read pointer,
+ * u32 publish count, u16 H-sync, u16 V-sync, then bufferram's words. */
+/* set_geo_isolate: draw only captured object `index` (-1 for all), to find which
+ * object puts a given thing on screen. */
+static void mcp_cmd_set_geo_isolate(const char *req, char *resp, int cap) {
+    uint32_t idx = 0xFFFFFFFFu;
+    mcp_json_get_u32(req, "index", &idx);
+    if (!g_geo3d_state) { snprintf(resp, (size_t)cap, "{\"ok\":false}"); return; }
+    g_geo3d_state->isolate_index = (idx == 0xFFFFFFFFu) ? -1 : (int)idx;
+    { uint32_t dm = 0xFFFFFFFFu; if (mcp_json_get_u32(req, "dump_tex", &dm)) g_dump_model_tex = (dm == 0xFFFFFFFFu) ? -1 : (int)dm; }
+    {   /* from/to: draw only captures in [from, to]; to < from turns the range off */
+        uint32_t lo = 0, hi = 0;
+        if (mcp_json_get_u32(req, "from", &lo) && mcp_json_get_u32(req, "to", &hi)) {
+            g_geo3d_state->filter_enabled = hi >= lo;
+            g_geo3d_state->filter_min = (int)lo;
+            g_geo3d_state->filter_max = (int)hi;
+        }
+    }
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"isolate\":%d}", g_geo3d_state->isolate_index);
+}
+
+static void mcp_cmd_dump_geo_list(const char *req, char *resp, int cap) {
+    char path[512] = {0};
+    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    if (!g_mcp.bus || !g_geodl_snap_ready) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no display list published yet\"}"); return;
+    }
+    static uint32_t words[BUFF_RAM_SIZE / 4];
+    uint32_t head[2]; uint16_t sync[2];
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    memcpy(words, g_geodl_snap, sizeof words);
+    head[0] = g_geodl_snap_rstart; head[1] = (uint32_t)g_geodl_snap_seq;
+    sync[0] = (uint16_t)mem_read16(g_mcp.bus, H_SYNC_BASE);
+    sync[1] = (uint16_t)mem_read16(g_mcp.bus, V_SYNC_BASE);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    FILE *f = fopen(path, "wb");
+    int ok = f && fwrite(head, 4, 2, f) == 2 && fwrite(sync, 2, 2, f) == 2
+               && fwrite(words, 4, BUFF_RAM_SIZE / 4, f) == BUFF_RAM_SIZE / 4;
+    if (f) fclose(f);
+    snprintf(resp, (size_t)cap, "{\"ok\":%s,\"read_start\":%u,\"seq\":%u,\"hsync\":%d,\"vsync\":%d}",
+             ok ? "true" : "false", head[0], head[1], (int16_t)sync[0], (int16_t)sync[1]);
+}
+
 static void mcp_cmd_dump_memory_file(const char *req, char *resp, int cap) {
     uint32_t addr = 0, size = 0;
     char path[512] = {0};
@@ -1032,6 +984,242 @@ static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
              first, count, nonempty, total_tris);
 }
 
+/* Record the display list: every write to the geometry processor and the
+ * coprocessor for `frames` whole frames, in write order. See the display-list
+ * tap in memory.h for what is recorded and why.
+ *
+ * Request: frames, path, probes ("addr:size,addr:size,..." read at each frame
+ * edge, size 1/2/4), optional max_words and timeout_ms, and optional lo / hi
+ * to record only part of the window (the coprocessor FIFO alone is a fraction
+ * of the words, which is what makes a long capture of the rig affordable).
+ *
+ * Writes the explorer toolkit's MAME capture format, little-endian:
+ *   <path>.bin    (u32 address, u32 value) per write
+ *   <path>.json   {"words", "frames", "overflow", "probes", "marks"} where each
+ *                 mark is [frame, word index, probe values...] and a pair of
+ *                 consecutive marks brackets exactly one frame
+ * The tools lay the probes out in whichever order a given check reads them. */
+/* capture_snd {path, frames, timeout_ms, async}: the sound board's side of the
+ * next `frames` game frames, in tools/mame/snd-capture.lua's format (sound.h).
+ * With async:1 it only arms (so a driver can arm before emu_run and catch
+ * power-on); capture_snd_finish then waits for it and writes the index. */
+static char     g_sndcap_path[512];
+static uint32_t (*g_sndcap_marks)[4];
+
+static void mcp_cmd_capture_snd_finish(const char *req, char *resp, int cap) {
+    uint32_t timeout_ms = 600000;
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    if (!g_sndcap_marks) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no capture armed\"}"); return; }
+    uint32_t elapsed = 0, idle_ms = 0;
+    while (!g_sndcap.done && elapsed < timeout_ms) {
+        if (!emu_is_running(g_mcp.emu)) { idle_ms += 5; if (idle_ms >= MCP_STOPPED_GRACE_MS) break; }
+        else idle_ms = 0;
+        emu_sleep_ms(5);
+        elapsed += 5;
+    }
+    emu_mutex_lock(&g_mcp.emu->mutex);
+    sndcap_stop();
+    uint32_t n = g_sndcap.n, nmarks = g_sndcap.nmarks;
+    uint32_t (*marks)[4] = g_sndcap_marks;
+    g_sndcap.marks = NULL; g_sndcap_marks = NULL;
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+
+    char file[600];
+    snprintf(file, sizeof file, "%s.json", g_sndcap_path);
+    FILE *m = fopen(file, "w");
+    if (m) {
+        fprintf(m, "{\"source\":\"m2hle-snd\",\"records\":%u,\"ram_base\":4096,\"ram_size\":16384,\"regs_words\":536,\"marks\":[", n);
+        for (uint32_t i = 0; i < nmarks; i++)
+            fprintf(m, "%s[%u,%u,%u,%u]", i ? "," : "", marks[i][0], marks[i][1], marks[i][2], marks[i][3]);
+        fprintf(m, "]}\n");
+        fclose(m);
+    }
+    free(marks);
+    snprintf(resp, (size_t)cap, "{\"ok\":%s,\"records\":%u,\"frames\":%u}", m ? "true" : "false", n, nmarks);
+}
+
+static void mcp_cmd_capture_snd(const char *req, char *resp, int cap) {
+    uint32_t frames = 600, async = 0;
+    char path[512] = {0};
+    mcp_json_get_u32(req, "frames", &frames);
+    mcp_json_get_u32(req, "async", &async);
+    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    if (!g_mcp.emu) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emulator not ready\"}"); return; }
+    if (g_sndcap_marks) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"a capture is already armed\"}"); return; }
+    if (frames == 0) frames = 1;
+    char file[600];
+    uint32_t (*marks)[4] = calloc((size_t)frames + 2, sizeof *marks);
+    snprintf(file, sizeof file, "%s.bin", path);      FILE *f  = fopen(file, "wb");
+    snprintf(file, sizeof file, "%s.ram.bin", path);  FILE *fr = fopen(file, "wb");
+    snprintf(file, sizeof file, "%s.regs.bin", path); FILE *fg = fopen(file, "wb");
+    if (!marks || !f || !fr || !fg) {
+        if (f) fclose(f);
+        if (fr) fclose(fr);
+        if (fg) fclose(fg);
+        free(marks);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"cannot open output\"}"); return;
+    }
+    snprintf(g_sndcap_path, sizeof g_sndcap_path, "%s", path);
+    g_sndcap_marks = marks;
+    emu_mutex_lock(&g_mcp.emu->mutex);
+    memset(&g_sndcap, 0, sizeof g_sndcap);
+    g_sndcap.f = f; g_sndcap.ramf = fr; g_sndcap.regsf = fg;
+    g_sndcap.marks = marks; g_sndcap.want = frames;
+    g_sndcap.active = 1;
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+    if (async) { snprintf(resp, (size_t)cap, "{\"ok\":true,\"armed\":true}"); return; }
+    mcp_cmd_capture_snd_finish(req, resp, cap);
+}
+
+static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
+    uint32_t frames = 60, max_words = 8u * 1024u * 1024u, timeout_ms = 120000;
+    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_tgp = 0, want_slots = 0, want_unit = 0;
+    char path[512] = {0}, probes[2048] = {0};
+    mcp_json_get_u32(req, "tgp", &want_tgp);
+    mcp_json_get_u32(req, "slots", &want_slots);
+    mcp_json_get_u32(req, "unit", &want_unit);
+    mcp_json_get_u32(req, "lo", &lo);
+    mcp_json_get_u32(req, "hi", &hi);
+    if (lo < DL_TAP_LO) lo = DL_TAP_LO;
+    if (hi > DL_TAP_HI || hi <= lo) hi = DL_TAP_HI;
+    mcp_json_get_u32(req, "frames", &frames);
+    mcp_json_get_u32(req, "max_words", &max_words);
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    mcp_json_get_str(req, "probes", probes, sizeof(probes));
+    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    if (!g_mcp.bus || !g_mcp.emu) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emulator not ready\"}"); return;
+    }
+    if (frames == 0 || frames > 3600) frames = frames ? 3600 : 1;
+    if (max_words > 64u * 1024u * 1024u) max_words = 64u * 1024u * 1024u;
+
+    uint32_t paddr[DL_MAX_PROBES]; uint8_t psize[DL_MAX_PROBES]; int np = 0;
+    for (char *tok = strtok(probes, ","); tok && np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
+        char *colon = strchr(tok, ':');
+        paddr[np] = (uint32_t)strtoul(tok, NULL, 16);
+        uint32_t sz = colon ? (uint32_t)strtoul(colon + 1, NULL, 10) : 4;
+        psize[np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
+    }
+
+    dl_rec_t  *recs  = (dl_rec_t *)malloc((size_t)max_words * sizeof(dl_rec_t));
+    dl_mark_t *marks = (dl_mark_t *)calloc((size_t)frames + 2, sizeof(dl_mark_t));
+    const size_t tgp_per_mark = sizeof g_sharc.tgp_bone / sizeof(float);
+    float     *tgp   = want_tgp ? (float *)calloc(((size_t)frames + 2) * tgp_per_mark, sizeof(float)) : NULL;
+    uint32_t  *slots = want_slots ? (uint32_t *)calloc(((size_t)frames + 2) * DL_SLOT_WORDS, sizeof(uint32_t)) : NULL;
+    const size_t unit_per_mark = sizeof g_sharc.rot_cache / sizeof(float);
+    float     *unit  = want_unit ? (float *)calloc(((size_t)frames + 2) * unit_per_mark, sizeof(float)) : NULL;
+    if (!recs || !marks || (want_tgp && !tgp) || (want_slots && !slots) || (want_unit && !unit)) {
+        free(recs); free(marks); free(tgp); free(slots); free(unit);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
+    }
+
+    emu_mutex_lock(&g_mcp.emu->mutex);
+    memset(&g_dl, 0, sizeof g_dl);
+    g_dl.recs = recs;   g_dl.cap = max_words;
+    g_dl.marks = marks; g_dl.capmarks = (size_t)frames + 2;
+    g_dl.want = frames;
+    g_dl.lo = lo; g_dl.hi = hi;
+    g_dl.tgp = tgp;
+    g_dl.slots = slots;
+    g_dl.unit = unit;
+    g_dl.nprobes = np;
+    memcpy(g_dl.probe_addr, paddr, sizeof(uint32_t) * (size_t)np);
+    memcpy(g_dl.probe_size, psize, (size_t)np);
+    g_dl.armed = 1;
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+
+    /* Wait out the frames without holding the mutex, as wait_frames does. */
+    uint32_t elapsed = 0, idle_ms = 0;
+    while (!g_dl.done && elapsed < timeout_ms) {
+        if (!emu_is_running(g_mcp.emu)) {
+            idle_ms += 2;
+            if (idle_ms >= MCP_STOPPED_GRACE_MS) break;
+        } else {
+            idle_ms = 0;
+        }
+        emu_sleep_ms(2);
+        elapsed += 2;
+    }
+
+    emu_mutex_lock(&g_mcp.emu->mutex);
+    g_dl.armed = 0; g_dl.active = 0;
+    size_t n = g_dl.n, nmarks = g_dl.nmarks;
+    int overflow = g_dl.overflow, done = g_dl.done;
+    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.tgp = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+
+    char file[600];
+    snprintf(file, sizeof file, "%s.bin", path);
+    FILE *f = fopen(file, "wb");
+    int wrote_ok = f != NULL;
+    if (f) {
+        for (size_t i = 0; i < n; i++) {
+            uint32_t pair[2] = { recs[i].addr, recs[i].val };
+            if (fwrite(pair, 4, 2, f) != 2) { wrote_ok = 0; break; }
+        }
+        fclose(f);
+    }
+    snprintf(file, sizeof file, "%s.json", path);
+    f = wrote_ok ? fopen(file, "w") : NULL;
+    if (f) {
+        fprintf(f, "{\"words\":%zu,\"frames\":%zu,\"overflow\":%s,\"probes\":[",
+                n, nmarks ? nmarks - 1 : 0, overflow ? "true" : "false");
+        for (int i = 0; i < np; i++)
+            fprintf(f, "%s\"0x%06X:%u\"", i ? "," : "", paddr[i], psize[i]);
+        fprintf(f, "],\"marks\":[");
+        for (size_t m = 0; m < nmarks; m++) {
+            fprintf(f, "%s[%u,%u", m ? "," : "", marks[m].frame, marks[m].index);
+            for (int i = 0; i < np; i++) fprintf(f, ",%u", marks[m].probe[i]);
+            fprintf(f, "]");
+        }
+        fprintf(f, "]}\n");
+        fclose(f);
+    } else {
+        wrote_ok = 0;
+    }
+    if (tgp && wrote_ok) {
+        /* <path>.tgp.bin: one record per mark, 32 slots × 12 f32 in the HLE's
+         * tgp_bone order (P1 slots 0..15, then P2's). */
+        snprintf(file, sizeof file, "%s.tgp.bin", path);
+        f = fopen(file, "wb");
+        if (f) {
+            if (fwrite(tgp, sizeof(float) * tgp_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
+            fclose(f);
+        } else {
+            wrote_ok = 0;
+        }
+    }
+    /* <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
+     * TGP layout); <path>.unit.bin: the unit-matrix cache, 32 × 12 f32 per mark. */
+    if (slots && wrote_ok) {
+        snprintf(file, sizeof file, "%s.slots.bin", path);
+        f = fopen(file, "wb");
+        if (!f || fwrite(slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks, f) != nmarks) wrote_ok = 0;
+        if (f) fclose(f);
+    }
+    if (unit && wrote_ok) {
+        snprintf(file, sizeof file, "%s.unit.bin", path);
+        f = fopen(file, "wb");
+        if (!f || fwrite(unit, sizeof(float) * unit_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
+        if (f) fclose(f);
+    }
+    free(recs);
+    free(marks);
+    free(tgp);
+    free(slots);
+    free(unit);
+
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":%s,\"words\":%zu,\"frames\":%zu,\"complete\":%s,\"overflow\":%s%s}",
+             wrote_ok ? "true" : "false", n, nmarks ? nmarks - 1 : 0,
+             done ? "true" : "false", overflow ? "true" : "false",
+             wrote_ok ? "" : ",\"error\":\"cannot write capture\"");
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -1048,6 +1236,11 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "dump_memory_file") == 0) mcp_cmd_dump_memory_file(req, resp, cap);
     else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
     else if (strcmp(cmd, "dump_model")       == 0) mcp_cmd_dump_model(req, resp, cap);
+    else if (strcmp(cmd, "capture_dl")       == 0) mcp_cmd_capture_dl(req, resp, cap);
+    else if (strcmp(cmd, "capture_snd")      == 0) mcp_cmd_capture_snd(req, resp, cap);
+    else if (strcmp(cmd, "capture_snd_finish") == 0) mcp_cmd_capture_snd_finish(req, resp, cap);
+    else if (strcmp(cmd, "dump_geo_list")    == 0) mcp_cmd_dump_geo_list(req, resp, cap);
+    else if (strcmp(cmd, "set_geo_isolate")  == 0) mcp_cmd_set_geo_isolate(req, resp, cap);
     else if (strcmp(cmd, "emu_run")          == 0) mcp_cmd_emu_run(resp, cap);
     else if (strcmp(cmd, "emu_stop")         == 0) mcp_cmd_emu_stop(resp, cap);
     else if (strcmp(cmd, "emu_step")         == 0) mcp_cmd_emu_step(req, resp, cap);
@@ -1070,80 +1263,27 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "cop_exec")                 == 0) mcp_cmd_cop_exec(req, resp, cap);
     else if (strcmp(cmd, "sound_status")             == 0) mcp_cmd_sound_status(resp, cap);
     else if (strcmp(cmd, "dump_midi_log")            == 0) mcp_cmd_dump_midi_log(resp, cap);
-    else if (strcmp(cmd, "read_wave")                == 0) {
+    else if (strcmp(cmd, "read_wave")                == 0) {   /* sound RAM bytes */
         uint32_t addr=0,len=0; mcp_json_get_u32(req,"addr",&addr); mcp_json_get_u32(req,"len",&len);
         if (len>256) len=256;
         char *p=resp; int left=cap; int n;
         n=snprintf(p,(size_t)left,"{\"ok\":true,\"addr\":\"%06X\",\"b\":[",addr); p+=n; left-=n;
-        for (uint32_t i=0;i<len && (addr+i)<M68K_WAVE_SIZE && left>6;i++){
-            n=snprintf(p,(size_t)left,"%s%u",i?",":"",g_sound.wave[addr+i]); p+=n; left-=n;
+        for (uint32_t i=0;i<len && (addr+i)<SOUND_RAM_SIZE && left>6;i++){
+            n=snprintf(p,(size_t)left,"%s%u",i?",":"",g_sound.ram[addr+i]); p+=n; left-=n;
         }
         snprintf(p,(size_t)left,"]}");
     }
-    else if (strcmp(cmd, "dump_scsprd")              == 0) {
-        char *p=resp; int left=cap; int n;
-        n=snprintf(p,(size_t)left,"{\"ok\":true,\"r\":["); p+=n; left-=n;
-        for (int i=0;i<g_sound.dbg_scsprd_n && left>40;i++){
-            n=snprintf(p,(size_t)left,"%s{\"off\":\"%03X\",\"val\":%u,\"pc\":\"%06X\",\"cnt\":%u}",
-                i?",":"", g_sound.dbg_scsprd_off[i], g_sound.dbg_scsprd_val[i],
-                g_sound.dbg_scsprd_pc[i], g_sound.dbg_scsprd_cnt[i]); p+=n; left-=n;
-        }
-        snprintf(p,(size_t)left,"]}");
-    }
-    else if (strcmp(cmd, "read_comm")                == 0) {
+    else if (strcmp(cmd, "read_comm")                == 0) {   /* SCSP register bytes, no side effects */
         uint32_t addr=0,len=0; mcp_json_get_u32(req,"addr",&addr); mcp_json_get_u32(req,"len",&len);
         if (len>256) len=256;
         char *p=resp; int left=cap; int n;
         n=snprintf(p,(size_t)left,"{\"ok\":true,\"addr\":\"%03X\",\"b\":[",addr); p+=n; left-=n;
         for (uint32_t i=0;i<len && (addr+i)<M68K_SCSP_SIZE && left>6;i++){
-            n=snprintf(p,(size_t)left,"%s%u",i?",":"",g_sound.comm[addr+i]); p+=n; left-=n;
+            uint16_t w = scsp_peek16(&g_sound.scsp, (addr+i) & ~1u);
+            n=snprintf(p,(size_t)left,"%s%u",i?",":"",((addr+i)&1) ? (w&0xFF) : (w>>8)); p+=n; left-=n;
         }
         snprintf(p,(size_t)left,"]}");
     }
-    else if (strcmp(cmd, "dump_ctrl")                == 0) {
-        char *p = resp; int left = cap; int n;
-        n = snprintf(p, (size_t)left, "{\"ok\":true,\"w\":["); p += n; left -= n;
-        for (int i = 0; i < 64 && left > 30; i++) {
-            int idx = (g_sound.dbg_ctrl_pos + i) & 63;
-            n = snprintf(p, (size_t)left, "%s[\"%06X\",%u,%u]", i?",":"",
-                         g_sound.dbg_ctrl_pc[idx], (g_sound.dbg_ctrl_si[idx]>>8)&0xFF,
-                         g_sound.dbg_ctrl_si[idx]&0xFF); p += n; left -= n;
-        }
-        snprintf(p, (size_t)left, "]}");
-    }
-    else if (strcmp(cmd, "dump_voices")              == 0) {
-        char *p = resp; int left = cap; int n;
-        n = snprintf(p, (size_t)left, "{\"ok\":true,\"v\":["); p += n; left -= n;
-        int first = 1;
-        for (int i = 0; i < SCSP_VOICES && left > 80; i++) {
-            if (!g_scsp.voices[i].active) continue;
-            uint32_t o = (uint32_t)i * 0x20u;
-            unsigned w8  = ((unsigned)g_sound.comm[o+0x08]<<8)|g_sound.comm[o+0x09];
-            unsigned wA  = ((unsigned)g_sound.comm[o+0x0A]<<8)|g_sound.comm[o+0x0B];
-            unsigned d2r = (w8>>11)&0x1F, d1r=(w8>>6)&0x1F, ar=w8&0x1F;
-            unsigned rr  = wA&0x1F, dl=(wA>>5)&0x1F;
-            unsigned kyonb = (g_sound.comm[o+0x00]>>3)&1;
-            n = snprintf(p, (size_t)left,
-                "%s{\"s\":%d,\"age\":%u,\"loop\":%d,\"rel\":%d,\"tl\":%u,\"kyonb\":%u,"
-                "\"ar\":%u,\"d1r\":%u,\"d2r\":%u,\"dl\":%u,\"rr\":%u}",
-                first?"":",", i, g_scsp.voices[i].age, g_scsp.voices[i].loop?1:0,
-                g_scsp.voices[i].releasing?1:0, g_sound.comm[o+0x0D], kyonb,
-                ar, d1r, d2r, dl, rr);
-            p += n; left -= n; first = 0;
-        }
-        snprintf(p, (size_t)left, "]}");
-    }
-    else if (strcmp(cmd, "dump_pcr")                 == 0) {
-        char *p = resp; int left = cap; int n;
-        n = snprintf(p, (size_t)left, "{\"ok\":true,\"snapped\":%d,\"trace\":[", g_sound.dbg_pcr_snapped); p += n; left -= n;
-        for (int i = 0; i < 128 && left > 28; i++) {
-            int idx = (g_sound.dbg_pcr_pos + i) % 128;  /* chronological from oldest */
-            n = snprintf(p, (size_t)left, "%s[\"%06X\",\"%06X\"]", i?",":"",
-                         g_sound.dbg_pcr_snap[idx], g_sound.dbg_pcr_sp[idx]); p += n; left -= n;
-        }
-        snprintf(p, (size_t)left, "]}");
-    }
-    else if (strcmp(cmd, "dump_slot_regs")           == 0) mcp_cmd_dump_slot_regs(resp, cap);
     else if (strcmp(cmd, "dump_geo_stream")          == 0) mcp_cmd_dump_geo_stream(resp, cap);
     else if (strcmp(cmd, "set_shadow_floor")         == 0) {
         char ystr[32] = {0};

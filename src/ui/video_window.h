@@ -105,30 +105,33 @@ static inline void video_update(video_state_t *vid, memory_bus_t *bus) {
     render_bg_layer(bus, &vid->layers);
     render_fg_layer(bus, &vid->layers);
 
+    static uint8_t pen[0x8000][3];
+    tile_pen_lut(bus, pen);
+
     int n = VIDEO_WIDTH * VIDEO_HEIGHT;
     for (int i = 0; i < n; i++) {
         int o = i * 4;
         /* BG tiles, OPAQUE (matches MAME TILEMAP_DRAW_OPAQUE for layers C/D);
          * empty cells render palette[0] = the backdrop colour. */
-        uint16_t bc = vid->layers.bg[i];
-        vid->bg_pixels[o+0] = (uint8_t)BGR555_R(bc);
-        vid->bg_pixels[o+1] = (uint8_t)BGR555_G(bc);
-        vid->bg_pixels[o+2] = (uint8_t)BGR555_B(bc);
+        uint16_t bc = vid->layers.bg[i] & 0x7FFF;
+        vid->bg_pixels[o+0] = pen[bc][0];
+        vid->bg_pixels[o+1] = pen[bc][1];
+        vid->bg_pixels[o+2] = pen[bc][2];
         vid->bg_pixels[o+3] = 255;
 
         /* FG tiles, alpha-keyed. */
-        uint16_t fc = vid->layers.fg[i];
-        vid->fg_pixels[o+0] = (uint8_t)BGR555_R(fc);
-        vid->fg_pixels[o+1] = (uint8_t)BGR555_G(fc);
-        vid->fg_pixels[o+2] = (uint8_t)BGR555_B(fc);
+        uint16_t fc = vid->layers.fg[i] & 0x7FFF;
+        vid->fg_pixels[o+0] = pen[fc][0];
+        vid->fg_pixels[o+1] = pen[fc][1];
+        vid->fg_pixels[o+2] = pen[fc][2];
         vid->fg_pixels[o+3] = vid->layers.alpha[i];
     }
 
     /* 1×1 solid back-back colour (change_bg_color → palette[0x1002]). */
-    uint16_t back = back_color_555(bus);
-    vid->back_pixel[0] = (uint8_t)BGR555_R(back);
-    vid->back_pixel[1] = (uint8_t)BGR555_G(back);
-    vid->back_pixel[2] = (uint8_t)BGR555_B(back);
+    uint16_t back = back_color_555(bus) & 0x7FFF;
+    vid->back_pixel[0] = pen[back][0];
+    vid->back_pixel[1] = pen[back][1];
+    vid->back_pixel[2] = pen[back][2];
     vid->back_pixel[3] = 255;
 
     sg_update_image(vid->bg_image, &(sg_image_data){

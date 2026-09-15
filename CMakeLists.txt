@@ -222,11 +222,24 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(geo_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/geo_test.c)
     add_executable(m68k_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/m68k_opcode_test.c)
     add_executable(input_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/input_test.c)
+    # Not a ctest: replays a MAME capture of the COP conversation (needs a capture file).
+    add_executable(cop_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/cop_replay.c)
+    target_include_directories(cop_replay PRIVATE ${TEST_INCLUDES})
+    if(MSVC)
+        target_compile_definitions(cop_replay PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    # Not a ctest: replays a MAME sound capture's MIDI stream through the sound board.
+    add_executable(snd_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/snd_replay.c)
+    target_include_directories(snd_replay PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(snd_replay PRIVATE miniz)
+    if(MSVC)
+        target_compile_definitions(snd_replay PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
     target_link_libraries(rom_test   PRIVATE miniz)
     target_link_libraries(boot_test  PRIVATE miniz)
     target_link_libraries(geo_test   PRIVATE miniz)
-    # emu_test/input_test pull emu_thread.h -> sound.h -> scsp_hle.h (sokol
-    # headers) and input.h -> sokol_app.h; linking sokol propagates the includes.
+    # emu_test/input_test pull input.h -> sokol_app.h (and sokol_gfx through the
+    # UI headers); linking sokol propagates the includes.
     target_link_libraries(emu_test   PRIVATE sokol)
     target_link_libraries(input_test PRIVATE miniz sokol)
 
