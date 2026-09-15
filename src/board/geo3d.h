@@ -168,10 +168,19 @@ static inline bool geo3d_split_other_way(uint32_t quad, uint32_t cut) {
 /* Decode a Model 2 BGR555 colour word to normalized float RGB.
  *   bits 0-4 = R, bits 5-9 = G, bits 10-14 = B  (matches game's colpal()).
  * The material stream stores this as a little-endian uint16. */
+#define GEO3D_C5(i) ((float)((i) * 255 / 31) / 255.0f)
+static const float g_geo3d_c5[32] = {   /* the three divisions per channel below, folded */
+    GEO3D_C5(0),  GEO3D_C5(1),  GEO3D_C5(2),  GEO3D_C5(3),  GEO3D_C5(4),  GEO3D_C5(5),  GEO3D_C5(6),  GEO3D_C5(7),
+    GEO3D_C5(8),  GEO3D_C5(9),  GEO3D_C5(10), GEO3D_C5(11), GEO3D_C5(12), GEO3D_C5(13), GEO3D_C5(14), GEO3D_C5(15),
+    GEO3D_C5(16), GEO3D_C5(17), GEO3D_C5(18), GEO3D_C5(19), GEO3D_C5(20), GEO3D_C5(21), GEO3D_C5(22), GEO3D_C5(23),
+    GEO3D_C5(24), GEO3D_C5(25), GEO3D_C5(26), GEO3D_C5(27), GEO3D_C5(28), GEO3D_C5(29), GEO3D_C5(30), GEO3D_C5(31),
+};
+#undef GEO3D_C5
+
 static inline void geo3d_bgr555(uint16_t cw, float *r, float *g, float *b) {
-    *r = (float)(((cw      ) & 0x1F) * 255 / 31) / 255.0f;
-    *g = (float)(((cw >>  5) & 0x1F) * 255 / 31) / 255.0f;
-    *b = (float)(((cw >> 10) & 0x1F) * 255 / 31) / 255.0f;
+    *r = g_geo3d_c5[(cw      ) & 0x1F];   /* (c5 * 255 / 31) / 255.0f */
+    *g = g_geo3d_c5[(cw >>  5) & 0x1F];
+    *b = g_geo3d_c5[(cw >> 10) & 0x1F];
 }
 
 /* Material pointer → stable distinct RGB.  Same material always maps to the

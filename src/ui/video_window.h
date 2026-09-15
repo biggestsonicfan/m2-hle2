@@ -73,6 +73,9 @@ typedef struct {
     /* The bus generations the layers show (see memory.h change_gen). */
     bool          composed;
     uint32_t      composed_tile, composed_gfx, composed_pal, composed_lut;
+    /* Screen value of each channel's 5 bits (video_pen_channels): a pen's
+     * colour is pen_chan[0][r5], pen_chan[1][g5], pen_chan[2][b5]. */
+    uint8_t       pen_chan[3][32];
 
     /* GPU compositor (GL backends): RAM textures, layer targets, shader. */
     bool          gpu;
@@ -320,6 +323,25 @@ static inline void video_shutdown(video_state_t *vid) {
 /* Screen colours for every 15-bit palette colour (tile_pen_lut, rebuilt on use). */
 static uint8_t g_video_pen[0x8000][3];
 
+/* tile_pen_lut one channel at a time. Each channel of a pen depends only on its
+ * own 5 bits, so 3 x 32 values give every entry of the 0x8000-entry table:
+ * lut[c][ch] == chan[ch][(c >> 5 * ch) & 31]. The GPU path needs 8192 pens per
+ * palette change, not 32768 built with a division each. --verify-gpu-tiles
+ * holds this to tile_pen_lut, which the CPU compositor still uses. */
+static inline void video_pen_channels(const memory_bus_t *bus, uint8_t chan[3][32]) {
+    int loaded = 0;
+    for (int c5 = 0; c5 < 32 && !loaded; c5++)
+        for (int ch = 0; ch < 3 && !loaded; ch++)
+            if (bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u]) loaded = 1;
+    for (int ch = 0; ch < 3; ch++)
+        for (int c5 = 0; c5 < 32; c5++) {
+            if (!loaded) { chan[ch][c5] = (uint8_t)(c5 << 3); continue; }
+            int v = bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u];
+            int g = (v - 64) * 255 / 191;
+            chan[ch][c5] = (uint8_t)(g < 0 ? 0 : g);
+        }
+}
+
 /* Compose both layers on the CPU into bg_pixels / fg_pixels (RGBA, row 0 top). */
 static inline void video_compose_cpu(video_state_t *vid, memory_bus_t *bus) {
     render_bg_layer(bus, &vid->layers);
@@ -357,11 +379,11 @@ static inline void video__compose_gpu(video_state_t *vid, memory_bus_t *bus,
         sg_update_image(vid->gfx_ram, &(sg_image_data){
             .mip_levels[0] = { .ptr = bus->tmapgfx, .size = TMAPGFX_SIZE } });
     if (pens_changed) {
-        tile_pen_lut(bus, g_video_pen);
+        const uint8_t (*pc)[32] = vid->pen_chan;
         for (int i = 0; i < VIDEO_PAL_GPU_W * VIDEO_PAL_GPU_H; i++) {
-            uint16_t c = pal_read16(bus, i) & 0x7FFF;
+            uint16_t c = pal_read16(bus, i);
             uint8_t *t = &vid->pal_texels[i * 4];
-            t[0] = g_video_pen[c][0]; t[1] = g_video_pen[c][1]; t[2] = g_video_pen[c][2]; t[3] = 255;
+            t[0] = pc[0][c & 31]; t[1] = pc[1][(c >> 5) & 31]; t[2] = pc[2][(c >> 10) & 31]; t[3] = 255;
         }
         sg_update_image(vid->pal_rgba, &(sg_image_data){
             .mip_levels[0] = { .ptr = vid->pal_texels, .size = sizeof vid->pal_texels } });
@@ -413,6 +435,7 @@ static inline void video_update(video_state_t *vid, memory_bus_t *bus) {
     vid->composed_gfx  = gfx;
     vid->composed_pal  = pal;
     vid->composed_lut  = lut;
+    if (pens_changed) video_pen_channels(bus, vid->pen_chan);
 
     if (vid->gpu) {
         video__compose_gpu(vid, bus, tile_changed, gfx_changed, pens_changed);
@@ -426,14 +449,14 @@ static inline void video_update(video_state_t *vid, memory_bus_t *bus) {
         });
     }
 
-    /* 1×1 solid back-back colour (palette[0] through the pen table); only the
-     * palette or the colour tables can change it. Both paths just built the
-     * table when either changed. */
+    /* 1×1 solid back-back colour (palette[0] through the pen tables); only the
+     * palette or the colour tables can change it, and pen_chan was rebuilt
+     * above when either did. */
     if (pens_changed) {
-        uint16_t back = back_color_555(bus) & 0x7FFF;
-        vid->back_pixel[0] = g_video_pen[back][0];
-        vid->back_pixel[1] = g_video_pen[back][1];
-        vid->back_pixel[2] = g_video_pen[back][2];
+        uint16_t back = back_color_555(bus);
+        vid->back_pixel[0] = vid->pen_chan[0][back & 31];
+        vid->back_pixel[1] = vid->pen_chan[1][(back >> 5) & 31];
+        vid->back_pixel[2] = vid->pen_chan[2][(back >> 10) & 31];
         vid->back_pixel[3] = 255;
         sg_update_image(vid->back_image, &(sg_image_data){
             .mip_levels[0] = { .ptr = vid->back_pixel, .size = sizeof(vid->back_pixel) },

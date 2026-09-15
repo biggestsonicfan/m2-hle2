@@ -89,30 +89,31 @@ static inline void hle_interrupt(i960_cpu_t *cpu, uint32_t handler) {
     }
 }
 
-/* One bit per (ip >> 2) & 0xFFF, set for every hook address of the profile it
- * was built for: a clear bit means no hook can match, so the table walk is
- * skipped for nearly every instruction. */
+/* One bit per (ip >> 2) & 0xFFFF, set for every hook address of the profile it
+ * was built for (none without a profile): a clear bit means no hook can match,
+ * so the table walk is skipped. 16 bits of instruction index, 8 KB: an address
+ * shares a bit with a hook only once in 64 KB of code, where 12 bits sent one
+ * instruction in a few dozen through the walk. */
 static const game_profile_t *s_hle_filter_profile = NULL;
-static uint8_t               s_hle_filter[4096 / 8];
+static uint8_t               s_hle_filter[65536 / 8];
 
 /* Dispatch: walk the active profile's hook table and call the first match. */
 static inline int hle_check(i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (!g_active_profile || g_active_profile->hook_count == 0)
-        return 1;
+    const game_profile_t *p = g_active_profile;
     uint32_t ip = cpu->sfr.ip;
-    const hle_hook_entry_t *h = g_active_profile->hooks;
-    size_t n = g_active_profile->hook_count;
-    if (s_hle_filter_profile != g_active_profile) {
+    if (s_hle_filter_profile != p) {
         memset(s_hle_filter, 0, sizeof(s_hle_filter));
-        for (size_t i = 0; i < n; i++) {
-            uint32_t k = (h[i].addr >> 2) & 0xFFFu;
+        for (size_t i = 0; p && i < p->hook_count; i++) {
+            uint32_t k = (p->hooks[i].addr >> 2) & 0xFFFFu;
             s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
         }
-        s_hle_filter_profile = g_active_profile;
+        s_hle_filter_profile = p;
     }
-    uint32_t k = (ip >> 2) & 0xFFFu;
+    uint32_t k = (ip >> 2) & 0xFFFFu;
     if (!(s_hle_filter[k >> 3] & (1u << (k & 7u))))
         return 1;
+    const hle_hook_entry_t *h = p->hooks;
+    size_t n = p->hook_count;
     for (size_t i = 0; i < n; i++) {
         if (h[i].addr == ip)
             return h[i].fn(cpu, bus);

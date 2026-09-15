@@ -17,6 +17,7 @@
  *   arc_bench <romset.zip> [--seconds N] [--threads] [--pace] [--sound]
  *             [--no-render] [--max-temp C] [--report S] [--frames N]
  *             [--draw-digest FILE] [--no-mesh-cache] [--profile FILE]
+ *             [--verify-atlas]
  *
  * Default: one thread, emu then render, flat out (throughput).
  * --pace     sleep each slice out to 1/60 s.
@@ -269,7 +270,7 @@ __attribute__((noinline)) static void emu_slice(void) {
     {
         if (prof && cpu.sfr.ip < 0x400000) g_prof[cpu.sfr.ip >> 2]++;
         if (bp_check(cpu.sfr.ip)) break;
-        if (i960_step(&cpu, &bus) != 0) break;
+        if (i960_step_hot(&cpu, &bus) != 0) break;
         ctx.total_steps++;
         if (s_irq_in_service && g_active_profile) emu_service_sound_again(&ctx);
         if (g_log.warn_triggered) break;
@@ -321,6 +322,51 @@ __attribute__((noinline)) static void render_frame(void) {
     g_rs.stage_us[R_UPLOAD] += t->upload_us  - before.upload_us;
     g_rs.stage_us[R_3D]     += t->draw3d_us  - before.draw3d_us;
     g_rs.stage_us[R_QUADS]  += t->tiles_us   - before.tiles_us;
+}
+
+/* ---- --verify-atlas: the incremental atlas against a whole decode ----------
+ * After a render that saw texture RAM change, decode both banks in full the way
+ * game_render_upload_atlas always did and compare with the atlas it keeps. The
+ * bench is single-threaded here, so both see the same RAM. Until the banks hold
+ * anything the atlas is not decoded at all; the whole decode of empty banks is
+ * zero, as is the atlas then. */
+static bool     g_verify_atlas = false;
+static uint64_t g_atlas_checks = 0, g_atlas_bad = 0;
+
+static void verify_atlas(void) {
+    static uint32_t last_gen = 0;
+    static bool     have_gen = false;
+    if (have_gen && bus.gen_tex == last_gen) return;
+    size_t probe = 0;   /* upload_atlas's empty-bank skip: no decode happened, nothing to hold it to */
+    for (size_t k = 0; k < TEXRAM0_SIZE && probe < 16; k += 0x1000) probe += bus.texram0[k] ? 1 : 0;
+    for (size_t k = 0; k < TEXRAM1_SIZE && probe < 16; k += 0x1000) probe += bus.texram1[k] ? 1 : 0;
+    if (probe == 0) return;
+    last_gen = bus.gen_tex;
+    have_gen = true;
+    static uint8_t ref[GEO3D_ATLAS_W * GEO3D_ATLAS_H];
+    const uint32_t *sheets[2] = { (const uint32_t *)bus.texram0, (const uint32_t *)bus.texram1 };
+    size_t nwords = TEXRAM0_SIZE / 4;
+    for (int s = 0; s < 2; s++)
+        for (int y = 0; y < GEO3D_SHEET_H; y++)
+            for (int x = 0; x < GEO3D_ATLAS_W; x++) {
+                int x2 = x, y2 = y;
+                if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
+                uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
+                uint32_t word = ((off >> 1) < nwords) ? sheets[s][off >> 1] : 0;
+                if (off & 1) word >>= 16;
+                if ((y & 1) == 0) word >>= 8;
+                if ((x & 1) == 0) word >>= 4;
+                ref[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] = (uint8_t)((word & 0xf) * 17u);
+            }
+    g_atlas_checks++;
+    if (memcmp(ref, g_game_render_atlas_px, sizeof ref) != 0) {
+        size_t i = 0;
+        while (ref[i] == g_game_render_atlas_px[i]) i++;
+        if (g_atlas_bad++ < 5)
+            fprintf(stderr, "verify-atlas: game frame %llu differs first at x=%zu y=%zu (%u, want %u)\n",
+                    (unsigned long long)g_es.frames, i % GEO3D_ATLAS_W, i / GEO3D_ATLAS_W,
+                    g_game_render_atlas_px[i], ref[i]);
+    }
 }
 
 /* ---- Threads and pacing --------------------------------------------------- */
@@ -402,6 +448,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--render-fps") && i + 1 < argc) render_fps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) prof_path = argv[++i];
         else if (!strcmp(argv[i], "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
+        else if (!strcmp(argv[i], "--verify-atlas")) g_verify_atlas = true;
         else if (!strcmp(argv[i], "--draw-digest") && i + 1 < argc) digest_path = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) max_frames = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--profile-from") && i + 1 < argc) g_prof_from = strtoull(argv[++i], NULL, 0);
@@ -459,7 +506,7 @@ int main(int argc, char **argv) {
     while (now_us() - start < (int64_t)(seconds * 1e6)) {
         int64_t a = now_us();
         if (!threads) emu_slice();
-        if (render) render_frame();
+        if (render) { render_frame(); if (g_verify_atlas && !threads) verify_atlas(); }
         else if (threads) emu_sleep_us(EMU_SLICE_US);
         if (do_pace && (render || !threads)) pace(&deadline, a, render_period_us);
 
@@ -495,6 +542,9 @@ int main(int argc, char **argv) {
     report(&first, &end, (end.wall - start) / 1e6);
     printf("mesh cache: %s, %llu builds, %llu hits, %u meshes held\n", g_geo3d_mesh_cache ? "on" : "off",
            (unsigned long long)g_geo3d_mesh_builds, (unsigned long long)g_geo3d_mesh_hits, g_geo3d_mesh_count);
+    if (g_verify_atlas)
+        printf("verify-atlas: %llu texture changes checked, %llu differed\n",
+               (unsigned long long)g_atlas_checks, (unsigned long long)g_atlas_bad);
 
     if (g_prof) {
         FILE *pf = fopen(prof_path, "w");

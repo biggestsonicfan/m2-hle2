@@ -840,19 +840,34 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
 
 /* ---- Texture atlas upload ------------------------------------------------ */
 
+/* The decoded atlas as last uploaded: 2048×2048 R8, sheet 0 over sheet 1. */
+static uint8_t g_game_render_atlas_px[GEO3D_ATLAS_W * GEO3D_ATLAS_H];
+
 /*
  * Decode the 4-bit luma texture sheet (texram0) into the R8 atlas and upload.
  * Logical layout 2048×1024 (per MAME model2rd.ipp get_texel): the sheet is
  * stored 1024×2048, so x>=1024 wraps to the other half via y^=1024.  Each
  * 32-bit word holds a 2×2 block of nibbles selected by (x&1,y&1).
  * Call once per frame (cheap; 2M texels) before drawing fills.
+ *
+ * Incremental: dirty0/dirty1 hold one flag per KB of each bank (memory.h
+ * dirty_kb; NULL decodes that bank whole). A KB is one row of 256 words, and
+ * word row q feeds exactly two atlas rows of the sheet, 2(q & 511) and the one
+ * below, over x 0..1023 for q < 512 and x 1024..2047 above. Only flagged rows
+ * are decoded again, into an atlas that persists between calls, so a texture
+ * load that touches a few KB a frame no longer re-decodes all 4 million texels.
+ * Each flag is cleared before its KB is read, so a write landing meanwhile
+ * flags it again for the next call.
  */
 static inline void game_render_upload_atlas(const uint8_t *texram0,
                                             const uint8_t *texram1,
-                                            size_t sheet_size) {
+                                            size_t sheet_size,
+                                            volatile uint8_t *dirty0,
+                                            volatile uint8_t *dirty1) {
     if (!g_game_render.initialized || !texram0) return;
     /* Skip the multi-megatexel decode while both texture banks are empty (early
-     * boot, before the i960 uploads textures) — fills fall back to flat color. */
+     * boot, before the i960 uploads textures) — fills fall back to flat color.
+     * The flags stay set, so the first decode covers everything written. */
     {
         size_t probe = 0;
         for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram0[k] ? 1 : 0;
@@ -860,28 +875,41 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
             for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram1[k] ? 1 : 0;
         if (probe == 0) return;
     }
-    static uint8_t atlas[GEO3D_ATLAS_W * GEO3D_ATLAS_H];   /* 2048×2048 (two sheets) */
+    uint8_t *atlas = g_game_render_atlas_px;
     const uint32_t *sheets[2] = { (const uint32_t *)texram0, (const uint32_t *)texram1 };
+    volatile uint8_t *dirty[2] = { dirty0, dirty1 };
     size_t nwords = sheet_size / 4;
+    uint32_t rows = (uint32_t)(sheet_size >> 10);          /* word rows (KB) per bank */
+    bool any = false;
     for (int s = 0; s < 2; s++) {
         const uint32_t *sheet = sheets[s];
         if (!sheet) continue;
-        for (int y = 0; y < GEO3D_SHEET_H; y++) {
-            for (int x = 0; x < GEO3D_ATLAS_W; x++) {
-                int x2 = x, y2 = y;
-                if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
-                uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
-                uint32_t word = ((off >> 1) < nwords) ? sheet[off >> 1] : 0;
-                if (off & 1) word >>= 16;
-                if ((y & 1) == 0) word >>= 8;
-                if ((x & 1) == 0) word >>= 4;
-                atlas[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] =
-                    (uint8_t)((word & 0xf) * 17u);          /* 0..15 → 0..255 */
+        for (uint32_t q = 0; q < rows && q < 1024u; q++) {
+            if (dirty[s]) {
+                if (!dirty[s][q]) continue;
+                dirty[s][q] = 0;
+            }
+            any = true;
+            int y0 = (int)((q & 511u) * 2u);
+            int x0 = q < 512u ? 0 : 1024;
+            for (int y = y0; y < y0 + 2; y++) {
+                for (int x = x0; x < x0 + 1024; x++) {
+                    int x2 = x, y2 = y;
+                    if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
+                    uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
+                    uint32_t word = ((off >> 1) < nwords) ? sheet[off >> 1] : 0;
+                    if (off & 1) word >>= 16;
+                    if ((y & 1) == 0) word >>= 8;
+                    if ((x & 1) == 0) word >>= 4;
+                    atlas[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] =
+                        (uint8_t)((word & 0xf) * 17u);          /* 0..15 → 0..255 */
+                }
             }
         }
     }
+    if (!any) return;
     sg_update_image(g_game_render.atlas_image, &(sg_image_data){
-        .mip_levels[0] = { .ptr = atlas, .size = sizeof(atlas) },
+        .mip_levels[0] = { .ptr = atlas, .size = sizeof g_game_render_atlas_px },
     });
 }
 

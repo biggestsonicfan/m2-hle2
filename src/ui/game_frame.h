@@ -122,7 +122,8 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
     static uint32_t s_atlas_gen, s_luts_gen;
     uint32_t tex_gen = bus->gen_tex, lut_gen = bus->gen_lut;
     if (!s_atlas_valid || tex_gen != s_atlas_gen) {
-        game_render_upload_atlas(bus->texram0, bus->texram1, TEXRAM0_SIZE);
+        game_render_upload_atlas(bus->texram0, bus->texram1, TEXRAM0_SIZE,
+                                 bus->tex_dirty[0], bus->tex_dirty[1]);
         s_atlas_valid = true;
         s_atlas_gen   = tex_gen;
     }
