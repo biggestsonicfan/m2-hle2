@@ -24,6 +24,7 @@
 #define EMU_THREAD_H
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "constants.h"
@@ -34,10 +35,9 @@
 #include "breakpoint.h"
 #include "hle_hooks.h"   /* g_frame_done, hle_call, g_active_profile */
 #include "irq_timer.h"   /* board IRQ controller + timers */
-#include "../board/sound.h"  /* sound_step (68K), SCSP */
+#include "../board/sound.h"  /* sound_run_slice: the 68000 + SCSP */
 
 /* 68K at ~11.3 MHz vs i960 at 25 MHz — run 45% as many steps per slice. */
-#define M68K_STEPS_PER_SLICE  (EMU_STEPS_PER_SLICE * 45 / 100)
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -181,6 +181,28 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     g_irqt.deliver_by_pin[pin & 3]++;
 }
 
+/* The sound UART is ready for its next byte the moment the last one is out
+ * (MAME: all three bytes of a command land in the SCSP together), so when the
+ * sound handler returns and the i960 still has bytes queued, run it again in
+ * this slice instead of the next — one byte per frame put every sound command
+ * ~50 ms late. Only the sound pin: the frame-paced pins keep their cadence. */
+static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
+    if (!s_irq_in_service || ctx->cpu->frame_depth > s_irq_baseline_depth) return;
+    s_irq_in_service = false;
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (!q->sound_queue_count_addr || !q->irq_handler[3]) return;
+    uint32_t cnt   = mem_read8(ctx->bus, q->sound_queue_count_addr);
+    uint32_t state = q->sound_queue_state_addr ? mem_read8(ctx->bus, q->sound_queue_state_addr) : 0xFFu;
+    if (cnt == 0 && state == 0xFFu) return;
+    irqt_raise(0x400u);
+    if (irqt_pending_pin() != 3) return;
+    s_irq_baseline_depth = ctx->cpu->frame_depth;
+    hle_interrupt(ctx->cpu, q->irq_handler[3]);
+    s_irq_in_service = true;
+    g_irqt.deliver_count++;
+    g_irqt.deliver_by_pin[3]++;
+}
+
 /* ---- Run loop ------------------------------------------------------------ */
 
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
@@ -231,6 +253,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 }
                 if (i960_step(ctx->cpu, ctx->bus) != 0) break;
                 ctx->total_steps++;
+                if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
                 if (g_log.warn_triggered) break;
                 if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
                 if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
@@ -240,8 +263,9 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             if (g_frame_done || (board_vblank && g_vblank_acked))
                 dl_frame_edge(ctx->bus, g_emu_frames);
 
-            /* Run the 68K sound CPU proportional to the i960 batch. */
-            sound_step(M68K_STEPS_PER_SLICE);
+            /* The sound board runs on its own sample clock: a slice's worth of
+             * 44.1 kHz samples, the 68000 in lockstep with the SCSP. */
+            sound_run_slice(EMU_SLICES_PER_SEC);
 
             /* Snapshot the GEO display list while the i960 is idle (mutex held) — the
              * homebrew is vblank-waiting just past geo_flush, so bufferram holds the
@@ -281,6 +305,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 }
             } else if (g_frame_done || (board_vblank && g_vblank_acked)) {
                 g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
+                if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
                 /* Frame boundary (HLE hook, or the homebrew's vsync-ACK) — pace to
                  * the next 16.67ms tick. For board_vblank this also ends the i960's
                  * vsync busy-spin, throttling it to 60 Hz and freeing the host CPU. */
@@ -295,15 +320,26 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                         ctx->frame_deadline_us = now + EMU_SLICE_US;
                     }
                 }
+                /* M2HLE_UNTHROTTLE=1: no 60 Hz pacing, for automated runs that
+                 * have to reach rare states (the UI still gets the mutex, since
+                 * every frame boundary unlocks it). */
+                static int unthrottled = -1;
+                if (unthrottled < 0) { const char *e = getenv("M2HLE_UNTHROTTLE"); unthrottled = e && e[0] == '1'; }
                 int64_t sleep_us = ctx->frame_deadline_us - emu_now_us();
-                if (sleep_us > 0) emu_sleep_us(sleep_us);
+                if (unthrottled) ctx->frame_deadline_us = 0;
+                else if (sleep_us > 0) emu_sleep_us(sleep_us);
             } else {
                 /* No game-pace hook yet — fall back to fixed slice timing
                  * so the host CPU doesn't pin at 100%. */
                 int64_t elapsed   = emu_now_us() - slice_start;
                 int64_t remaining = EMU_SLICE_US - elapsed;
                 if (remaining > 0) emu_sleep_us(remaining);
-                else               emu_sleep_us(500);   /* board_vblank slices can exceed one frame; always yield briefly so the UI / MCP thread can grab the emu mutex (else get_status etc. starve) */
+                /* A slice that ran past its frame (board_vblank homebrew, or a game
+                 * stuck in its own error loop) still has to let the UI / MCP thread
+                 * take the mutex. emu_sleep_us rounds anything under 1 ms to nothing
+                 * on Windows, and a critical section is not fair, so a sub-ms sleep
+                 * let the UI starve ("Not Responding"). */
+                else               emu_sleep_ms(1);
             }
         }
         else if (s == EMU_STEPPING) {

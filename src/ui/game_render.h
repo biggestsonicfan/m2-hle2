@@ -1219,6 +1219,11 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_obj_tpa = cm->tpa;
                 g_geo3d_obj_tha = cm->tha;
                 g_geo3d_board_luma = 1;
+                if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
+                    uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
+                    g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
+                    g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
+                }
                 geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
                                           materials, materials_size, table_off, table_count,
                                           mesh_ptr_subtract, mesh_ptr_add,
@@ -1226,6 +1231,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                                           cm->color[0], cm->color[1], cm->color[2]);
                 g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
                 g_geo3d_board_luma = 0;
+                g_geo3d_obj_mesh = NULL;
             }
             /* The run filled the shared buffer after earlier runs: draw those and
              * decode it again into an empty buffer, where it gets the whole

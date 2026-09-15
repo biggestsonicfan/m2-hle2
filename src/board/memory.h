@@ -62,7 +62,8 @@ typedef struct mem_region {
      * the hair/cape physics two frames in three. */
     int          no_burst;
     /* An earlier region overlaps this one, so a lookup must not trust a cached
-     * hit on it — the linear scan's first-match order decides (TILE vs H_SYNC). */
+     * hit on it — the linear scan's first-match order decides (TILE_MIRROR
+     * before TILE, TILE before H_SYNC). */
     int          shadowed;
     /* Change counter this region's writes feed (NULL: untracked). A write that
      * changes a byte bumps it, so a consumer that recorded the value can skip
@@ -231,6 +232,66 @@ static uint32_t     g_geodl_snap_rstart   = 0;
 static volatile int g_geodl_snap_ready    = 0;
 static volatile int g_geodl_snap_seq      = 0;
 
+/* What a display list leaves behind in the geometrizer for later frames
+ * (model2_v.cpp): texture RAM (command 4, addresses with bit 23), the two
+ * polygon RAMs objects can be built in (command 5; bit 24 of the address picks
+ * the fast one), and the 32 material slots (command 6: diffuse, ambient). A
+ * list can upload once and draw for many frames, so these are applied on the
+ * emulator thread to every list as it is published, not by the renderer, which
+ * only ever sees the latest. */
+static uint16_t g_geo_texram_words[0x10000];
+static uint32_t g_geo_polyram[2][0x8000];          /* [0] slow, [1] fast */
+static float    g_geo_texparam[32][2];
+
+static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart) {
+    uint32_t p = (rstart & 0x1FFFFu) >> 2;
+    for (uint32_t guard = 0; guard < 0x8000u && p < nw; guard++) {
+        uint32_t op = L[p];
+        if (op & 0x80000000u) { p = (op & 0x1FFFFu) >> 2; continue; }
+        uint32_t cmd = (op >> 23) & 0x1F;
+        #define LA(k) (p + 1u + (k) < nw ? L[p + 1u + (k)] : 0u)
+        uint32_t len = 0;
+        switch (cmd) {
+            case 0x01: case 0x11: len = 4; break;
+            case 0x03: case 0x13: len = 6; break;
+            case 0x04: {
+                uint32_t addr = LA(0), cnt = LA(1);
+                len = 2 + cnt;
+                if (addr & 0x800000u)
+                    for (uint32_t k = 0; k < cnt; k++) g_geo_texram_words[(addr + k) & 0xFFFFu] = (uint16_t)LA(2 + k);
+                break;
+            }
+            case 0x05: case 0x15: {
+                uint32_t addr = LA(0), cnt = LA(1);
+                len = 2 + cnt;
+                uint32_t *ram = g_geo_polyram[(addr & 0x01000000u) ? 1 : 0];
+                for (uint32_t k = 0; k < cnt; k++) ram[(addr + k) & 0x7FFFu] = LA(2 + k);
+                break;
+            }
+            case 0x06: {
+                uint32_t index = LA(0) >> 2, cnt = LA(1);
+                len = 2 + 2 * cnt;
+                for (uint32_t k = 0; k < cnt; k++, index++) {
+                    uint32_t param = LA(2 + 2 * k);
+                    g_geo_texparam[index & 0x1F][0] = (float)(param & 0xFF);
+                    g_geo_texparam[index & 0x1F][1] = (float)((param >> 8) & 0xFF);
+                }
+                break;
+            }
+            case 0x14: len = 2 + LA(1); break;
+            case 0x07: case 0x17: case 0x08: case 0x18: case 0x10: case 0x16: case 0x1E: len = 1; break;
+            case 0x09: case 0x19: case 0x0D: len = 2; break;
+            case 0x0A: case 0x1A: case 0x0C: case 0x1C: len = 3; break;
+            case 0x0B: case 0x1B: len = 12; break;
+            case 0x1D: len = 2 + 3 * LA(1); break;
+            case 0x02: case 0x12: case 0x0F: case 0x1F: return;   /* inline polygons (unwalkable) / END */
+            default: break;
+        }
+        #undef LA
+        p += 1u + len;
+    }
+}
+
 static inline void geo_push(uint32_t word) {
     if (!g_geo.buff) return;
     uint32_t w = (g_geo.wstart >> 2) & (BUFF_RAM_SIZE / 4 - 1);
@@ -243,6 +304,7 @@ static inline void geodl_publish(uint32_t rstart) {
     if (!g_geo.buff) return;
     uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[1] : g_geodl_snaps[0];
     memcpy(back, g_geo.buff, sizeof g_geodl_snaps[0]);
+    geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart);
     g_geodl_snap_rstart = rstart;
     g_geodl_snap        = back;
     g_geodl_snap_seq++;
@@ -337,7 +399,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     memset(bus, 0, sizeof(*bus));
     bus->rom = rom_data;
     bus->rom_size = rom_size;
-    /* Every (re)init is new 2D content: start past any generation a consumer
+    /* Every (re)init is new content: start past any generation a consumer
      * could have recorded from the previous bus. */
     static uint32_t s_init_count = 0;
     bus->gen_tile = bus->gen_gfx = bus->gen_pal = bus->gen_tex = bus->gen_lut = ++s_init_count << 20;
@@ -396,6 +458,12 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
       if (r) { r->read_cb = irq_region_read; r->write_cb = irq_region_write; } }
     { mem_region_t *r = mem_add_region(bus, "TIMERS", TIMERS_BASE, TIMERS_SIZE, bus->timers, 0);
       if (r) { r->read_cb = timers_region_read; r->write_cb = timers_region_write; } }
+    /* Tile RAM is 64K and repeats at 0x01010000 (MAME: mirror 0x110000). Games
+     * lean on it: STF's NEXT MATCH places a nameplate one tile left with a
+     * zero-extended -2 byte offset (0xFFFE), so Knuckles' and Metal Sonic's
+     * plates are written at 0x0101xxxx. It shares TILE's buffer and must come
+     * before TILE, whose flat span also covers these addresses. */
+    mem_add_region(bus, "TILE_MIRROR",     TILE_BASE + 0x10000u, 0x10000u,             bus->tile,          0);
     mem_add_region(bus, "TILE",            TILE_BASE,            TILE_SIZE,            bus->tile,          0);
     mem_add_region(bus, "TMAPGFX",         TMAPGFX_BASE,         TMAPGFX_SIZE,         bus->tmapgfx,       0);
     mem_add_region(bus, "VID_EXT_RAM",     VID_EXT_RAM_BASE,     VID_EXT_RAM_SIZE,     bus->vid_ext_ram,   0);
@@ -428,7 +496,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
             if (strcmp(bus->regions[i].name, no_burst[k]) == 0) bus->regions[i].no_burst = 1;
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
-        if (!strcmp(r->name, "TILE"))
+        if (!strcmp(r->name, "TILE") || !strcmp(r->name, "TILE_MIRROR"))   /* one buffer */
             r->change_gen = &bus->gen_tile;
         else if (!strcmp(r->name, "TMAPGFX"))
             r->change_gen = &bus->gen_gfx;
@@ -648,7 +716,7 @@ static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     if (!r->data)    return;
     uint32_t off = addr - r->base;
     if (r->change_gen && ((uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8)
-                        | ((uint32_t)r->data[off + 2] << 16) | ((uint32_t)r->data[off + 3] << 24)) != val)
+                          | ((uint32_t)r->data[off + 2] << 16) | ((uint32_t)r->data[off + 3] << 24)) != val)
         (*r->change_gen)++;
     r->data[off]     = (uint8_t)(val & 0xFF);
     r->data[off + 1] = (uint8_t)((val >> 8) & 0xFF);

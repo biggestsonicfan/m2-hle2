@@ -261,6 +261,35 @@ port of that routine, so the i960's per-row decoder state was diffed against
 it. Every row agreed up to the crash, which put the fault inside a row, and an
 instruction trace there showed the interrupt landing.
 
+## The sound board
+
+The explorer has no sound, so the sound board is graded straight against MAME,
+in three steps that keep the i960 out of it:
+
+```sh
+# 1. MAME, from power-on: every MIDI byte, SCSP write, changed SCSP read and
+#    interrupt, with 68000 clock-period timestamps, plus MAME's own WAV
+MAME_ROMPATH=<zips> claude_mame/mcp_server/.venv/Scripts/python.exe tools/mame/snd_capture.py cap/mame 5400
+# 2. MAME's MIDI stream, byte for byte at the same clock period, through board/sound.h
+build_vs22/Release/snd_replay.exe cap/mame cap/ours
+# 3. line them up on the music-start command and compare
+python tools/mame/snd_compare.py cap/mame cap/ours 70
+```
+
+`capture_snd` (bridge) takes the same capture off a running emulator, i960
+included. MAME runs about 1 frame a second once the 3D starts, so a 90-second
+capture is a 25-minute wait; the slot monitor (0x408) is left out on both sides
+because the driver polls it 50,000 times a second.
+
+First full run (70 s of attract music, after the sound board rebuild): the same
+3094 key-ons and 3080 key-offs as MAME; 91% of MAME's notes reproduced within
+30 ms with a median timing error of 0.8 ms; events identical in order, slot for
+slot, for the first 12.8 s (901 events), where a timer-A race first picks a
+different slot; audio envelope correlation 0.992 and loudness within 1% in every
+5-second window. Before the rebuild, the same comparison matched about half the
+notes of the first five seconds and held 25-32 voices keyed where MAME holds
+5-16.
+
 ## What is not here yet
 
 **The emulator-vs-board comparison has not actually been taken.** The board

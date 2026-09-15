@@ -695,21 +695,24 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                 case 0x5cc: // mov
                     reg_write(cpu, dst_idx, src1);
                     break;
+                /* movl / movt / movq take a literal source too, and a literal
+                 * fills every destination register (MAME i960.cpp). Reading
+                 * registers for `movq 0, r4` copied pfp/sp/rip/r3 instead of
+                 * zeros: STF's adv_set_action clears each fighter's damage and
+                 * crush-stage arrays that way, the garbage stages sent
+                 * damage_unit into the Fighting Vipers armour-break code, and it
+                 * wrote model numbers like 0x3000 over the forearms and shins
+                 * until set_obj stopped the game ("max poly / err poly"). */
                 case 0x5dc: // movl (move long, 2 regs)
-                    reg_write(cpu, dst_idx, reg_read(cpu, src1_idx));
-                    reg_write(cpu, dst_idx + 1, reg_read(cpu, src1_idx + 1));
-                    break;
                 case 0x5ec: // movt (move triple, 3 regs)
-                    reg_write(cpu, dst_idx, reg_read(cpu, src1_idx));
-                    reg_write(cpu, dst_idx + 1, reg_read(cpu, src1_idx + 1));
-                    reg_write(cpu, dst_idx + 2, reg_read(cpu, src1_idx + 2));
-                    break;
                 case 0x5fc: // movq (move quad, 4 regs)
-                    reg_write(cpu, dst_idx, reg_read(cpu, src1_idx));
-                    reg_write(cpu, dst_idx + 1, reg_read(cpu, src1_idx + 1));
-                    reg_write(cpu, dst_idx + 2, reg_read(cpu, src1_idx + 2));
-                    reg_write(cpu, dst_idx + 3, reg_read(cpu, src1_idx + 3));
+                {
+                    int nreg = opcode == 0x5dc ? 2 : opcode == 0x5ec ? 3 : 4;
+                    uint32_t v[4];
+                    for (int k = 0; k < nreg; k++) v[k] = m1 ? src1 : reg_read(cpu, src1_idx + k);
+                    for (int k = 0; k < nreg; k++) reg_write(cpu, dst_idx + k, v[k]);
                     break;
+                }
 
                 // Synchronized moves
                 // synmov encoding: src1 (bits 0-4) = dst addr reg, src2 (bits 14-18) = src addr reg

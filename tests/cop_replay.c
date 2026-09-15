@@ -13,7 +13,8 @@
  *   0x4000PPOO            the firmware's current matrix just before command OO,
  *                         as command PP left it (value: slot pointer), followed
  *                         by 12 records 0x41000000 holding its words
- * with <prefix>.bufram.bin holding bufferram as it stood when capture began, and
+ * with <prefix>.bufram.bin holding bufferram as it stood when capture began,
+ * <prefix>.dm.bin the SHARC's DM 0x30000-0x30FFF at the same moment (optional), and
  * $COPRO_ROM optionally naming the COP data ROM (the sin/cos tables).
  *
  * Each command runs through sharc_exec() with the arguments the firmware
@@ -92,7 +93,7 @@ static const fw_op_t FW[256] = {
     [0x38] = { "Fn_coli_set_ball_adrs", 1, 0 },
     [0x39] = { "Fn_coli_point_trans", 4, 0 },
     [0x3a] = { "Fn_area_table_gen", 4, 0 },
-    [0x3b] = { "Fn_calc_coli_flag", 7, 0 },
+    [0x3b] = { "Fn_calc_coli_flag", 7, 4 },
     [0x3c] = { "Fn_coli_sink", 0, 0 },
     [0x3d] = { "Fn_coli_trans_mat", 6, 0 },
     [0x3e] = { "Fn_coli_trans_xz", 5, 0 },
@@ -145,9 +146,9 @@ static const fw_op_t FW[256] = {
     [0x6d] = { "Fn_y_rot_e", 0, 0 },
     [0x6e] = { "Fn_z_rot_e", 0, 0 },
     [0x6f] = { "Fn_trans_e", 0, 0 },
-    [0x70] = { "Fn_area_coli", 1, 0 },
-    [0x71] = { "Fn_ball_to_unit", -1, -1 },
-    [0x72] = { "Fn_outside_ball", 3, 0 },
+    [0x70] = { "Fn_area_coli", 5, 22 },
+    [0x71] = { "Fn_ball_to_unit", 2, 1 },
+    [0x72] = { "Fn_outside_ball", 3, 1 },
     [0x73] = { "Fn_kage_mat", 2, 0 },
     [0x74] = { "Fn_kage_poly", 5, 0 },
     [0x75] = { "Fn_kage_flag", 6, 0 },
@@ -225,6 +226,17 @@ int main(int argc, char **argv) {
     cop_reset();
     g_sharc.sharc_dm_ext      = g_bufram;
     g_sharc.sharc_dm_ext_size = BUFF_RAM_SIZE;
+    /* The firmware's own DM 0x30000-0x30FFF as capture began: what the i960
+     * uploaded before it (collision radii and ball maps, via Fn_write_ram) and
+     * the unit-matrix cache at 0x30420. */
+    snprintf(path, sizeof path, "%s.dm.bin", argv[1]);
+    FILE *fm = fopen(path, "rb");
+    if (fm) {
+        static uint32_t dmw[0x1000];
+        size_t got = fread(dmw, 4, 0x1000, fm); fclose(fm);
+        for (size_t k = 0; k < got; k++) sharc_dm_set(0x30000u + (uint32_t)k, dmw[k]);
+        printf("SHARC DM snapshot: %zu words\n", got);
+    }
     for (int i = 0; i < 256; i++) {
         S[i].in_min = S[i].out_min = S[i].hle_out_min = 1 << 30;
         S[i].in_max = S[i].out_max = S[i].hle_out_max = -1;

@@ -8,7 +8,8 @@
 --     0x30000000                  the SHARC wrote a word to its output FIFO
 --     0x900000..0x97ffff          the i960 wrote into bufferram (SHARC DM 0x1400000)
 -- plus one mark per frame edge (frame number, record count, work-RAM probes) and
--- a bufferram snapshot at the moment capture starts.
+-- a bufferram snapshot and a SHARC DM 0x30000-0x30FFF snapshot (<path>.dm.bin) at
+-- the moment capture starts.
 
 local M = {}
 _G.COPCAP = M
@@ -108,6 +109,14 @@ function M.start()
     local snap = {}
     for a = 0x900000, 0x91fffc, 4 do snap[#snap + 1] = s:read_u32(a) end
     M.snap = snap
+    -- the SHARC's own memory as capture begins: the tables the i960 uploaded with
+    -- Fn_write_ram at boot (collision radii, ball maps) that the replay must start from
+    local ok, dm = pcall(function()
+        local c, t = codata(), {}
+        for a = 0x30000, 0x30fff do t[#t + 1] = c:read_u32(a) end
+        return t
+    end)
+    M.dmsnap = ok and dm or nil
     local words, offs = M.words, M.offs
     local function rec(addr, data)
         local n = M.n + 1
@@ -167,6 +176,14 @@ function M.write(path)
     end
     if #chunk > 0 then f:write(table.concat(chunk)) end
     f:close()
+
+    if M.dmsnap then
+        local d = assert(io.open(path .. ".dm.bin", "wb"))
+        local c = {}
+        for i, w in ipairs(M.dmsnap) do c[i] = string.pack("<I4", w) end
+        d:write(table.concat(c))
+        d:close()
+    end
 
     local b = assert(io.open(path .. ".bufram.bin", "wb"))
     local c = {}

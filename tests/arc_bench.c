@@ -4,15 +4,19 @@
  * Runs the same work the app does per 60 Hz slice, timed per stage, with no
  * window and no GL:
  *   emu     the RUNNING branch of emu_thread_run_loop (IRQ service, i960 batch
- *           to the frame hook, frame edge, optional 68K) minus mutex and sleep
- *   render  main.c frame() minus ImGui: tile compositor, GEO scan, atlas/LUT
- *           decode + upload, vertex build — sokol_gfx on its dummy backend, so
- *           every CPU-side cost runs and the GPU calls are no-ops
+ *           to the frame hook with the sound UART re-serviced, frame edge,
+ *           optional sound board) minus mutex and sleep
+ *   render  game_frame_prepare / game_frame_draw (game_frame.h), what both
+ *           frontends run: tile compositor, GEO scan, atlas/LUT upload, model
+ *           decode and vertex build — sokol_gfx on its dummy backend, so every
+ *           CPU-side cost runs and the GPU calls are no-ops (the dummy backend
+ *           also keeps tile composing on the CPU path)
  *
- * Audio is out of scope: no SCSP mixer, and the 68K only runs with --sound.
+ * The sound board (68000 + SCSP) only runs with --sound.
  *
  *   arc_bench <romset.zip> [--seconds N] [--threads] [--pace] [--sound]
- *             [--no-render] [--max-temp C] [--report S]
+ *             [--no-render] [--max-temp C] [--report S] [--frames N]
+ *             [--draw-digest FILE] [--no-mesh-cache] [--profile FILE]
  *
  * Default: one thread, emu then render, flat out (throughput).
  * --pace     sleep each slice out to 1/60 s.
@@ -143,6 +147,7 @@ static void digest_install(const char *path) {
 #include "geo3d.h"
 #include "game_render.h"
 #include "video_window.h"
+#include "game_frame.h"
 #include "sound.h"
 #include "input.h"
 #include "registry.h"
@@ -170,8 +175,8 @@ static int read_milli(const char *path) {
 
 /* ---- Stats: cumulative counters, reported as deltas ---------------------- */
 
-enum { R_TILES, R_SCAN, R_ATLAS, R_LUTS, R_DRAW, R_STAGES };
-static const char *const r_names[R_STAGES] = { "tiles", "scan", "atlas", "luts", "draw" };
+enum { R_TILES, R_SCAN, R_UPLOAD, R_3D, R_QUADS, R_STAGES };
+static const char *const r_names[R_STAGES] = { "tiles", "scan", "upload", "3d", "quads" };
 
 typedef struct {
     uint64_t slices, frames, steps;
@@ -224,10 +229,8 @@ static int load_rom(const char *zip, bool sound) {
         sound_attach(&bus);
         if (romset.audiocpu && romset.audiocpu_size > 0)
             sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
-        if (romset.samples && romset.samples_size > 0) {
+        if (romset.samples && romset.samples_size > 0)
             sound_load_samples(romset.samples, (uint32_t)romset.samples_size);
-            scsp_hle_set_sample_rom(romset.samples, (uint32_t)romset.samples_size);
-        }
     }
     input_reset();
     input_attach(&bus);
@@ -268,13 +271,14 @@ __attribute__((noinline)) static void emu_slice(void) {
         if (bp_check(cpu.sfr.ip)) break;
         if (i960_step(&cpu, &bus) != 0) break;
         ctx.total_steps++;
+        if (s_irq_in_service && g_active_profile) emu_service_sound_again(&ctx);
         if (g_log.warn_triggered) break;
         if (g_wp.hit) break;
         if (g_sharc.unknown_triggered) break;
     }
     bool frame = g_frame_done || (board_vblank && g_vblank_acked);
     if (frame) dl_frame_edge(&bus, g_emu_frames);
-    if (g_with_68k) sound_step(M68K_STEPS_PER_SLICE);
+    if (g_with_68k) sound_run_slice(EMU_SLICES_PER_SEC);
     if (q->geo_displaylist) geodl_capture(&bus);
     ctx.cpu_prev_snapshot = ctx.cpu_snapshot;
     ctx.cpu_snapshot      = cpu;
@@ -289,136 +293,13 @@ __attribute__((noinline)) static void emu_slice(void) {
     if (d > g_es.max_us) g_es.max_us = d;
 }
 
-/* ---- --verify-tiles: the per-pixel pair renderer the run-based one replaced,
- * kept verbatim as the oracle. Each rendered frame both fill their own layer
- * buffers (stale values included) and all four must match byte for byte. */
-
-static void ref_sys24_pair(const memory_bus_t *bus, uint16_t *out, uint8_t *alpha,
-                           int pair, bool opaque, uint16_t *out_lo, uint8_t *alpha_lo) {
-    const int MW = 64, MH = 64;
-    uint32_t l0_off = (pair == 0) ? 0x0000u : 0x4000u;
-    uint32_t l1_off = l0_off + 0x2000u;
-    uint32_t hscr_w = (pair == 0) ? 0x5000u : 0x5002u;
-    uint32_t vc_w   = (pair == 0) ? 0x5004u : 0x5006u;
-    uint32_t hstb_w = (pair == 0) ? 0x4000u : 0x4400u;
-    uint16_t hscr = tileram_word(bus, hscr_w);
-    uint16_t vc   = tileram_word(bus, vc_w);
-    int vy = vc & 0x1ff;
-    uint16_t backc = opaque ? back_color_555(bus) : 0;
-    int n = VIDEO_WIDTH * VIDEO_HEIGHT;
-    if (vc & 0x8000) {
-        for (int i = 0; i < n; i++) { out[i] = backc; if (alpha) alpha[i] = 0; }
-        return;
-    }
-    bool window    = (vc & 0x6000) != 0;
-    bool rowscroll = (hscr & 0x8000) != 0;
-    for (int sy = 0; sy < VIDEO_HEIGHT; sy++) {
-        int wy = sy + vy;
-        uint16_t rh = rowscroll ? tileram_word(bus, hstb_w + (uint32_t)sy) : hscr;
-        int h = rh & 0x1ff;
-        int l1_is_even = (rh & 0x200) ? 1 : 0;
-        for (int sx = 0; sx < VIDEO_WIDTH; sx++) {
-            uint32_t tmap;
-            if (window && rowscroll) {
-                int left = (sx < h);
-                int use_even = left ? l1_is_even : !l1_is_even;
-                tmap = use_even ? l0_off : l1_off;
-            } else {
-                tmap = l0_off;
-            }
-            uint8_t ci, pr;
-            uint16_t color = tile_sample_px(bus, tmap, MW, MH, sx + h, wy, &ci, &pr);
-            int i = sy * VIDEO_WIDTH + sx;
-            if (out_lo && !opaque && ci != 0 && pr == 0) {
-                out_lo[i] = color;
-                if (alpha_lo) alpha_lo[i] = 255;
-                if (alpha)    alpha[i]    = 0;
-            } else {
-                out[i] = color;
-                if (alpha) alpha[i] = opaque ? 255 : (ci != 0 ? 255 : 0);
-            }
-        }
-    }
-}
-
-static bool          g_verify_tiles = false;
-static tile_layers_t g_ref_layers, g_new_layers;
-static uint64_t      g_verify_frames = 0, g_verify_bad = 0;
-static int64_t       g_ref_us = 0, g_new_us = 0;
-static uint64_t      g_changed[4], g_changed_mark = 0, g_changed_hist[64];   /* tile, gfx, pal, any */
-static int           g_changed_buckets = 0;
-
-static void verify_tiles(void) {
-    int64_t ref_start = now_us();
-    ref_sys24_pair(&bus, g_ref_layers.bg, g_ref_layers.bg_alpha, 1, true, NULL, NULL);
-    ref_sys24_pair(&bus, g_ref_layers.fg, g_ref_layers.alpha, 0, false,
-                   g_ref_layers.bg, g_ref_layers.bg_alpha);
-    int64_t new_start = now_us();
-    render_bg_layer(&bus, &g_new_layers);   /* timing only: the same work video_update did */
-    render_fg_layer(&bus, &g_new_layers);
-    g_new_us += now_us() - new_start;
-    g_ref_us += new_start - ref_start;
-
-    /* How often does the 2D input change between rendered frames at all? */
-    static uint8_t prev_tile[TILE_SIZE], prev_gfx[TMAPGFX_SIZE], prev_pal[PALETTE_SIZE];
-    bool dt = memcmp(prev_tile, bus.tile, TILE_SIZE) != 0;
-    bool dg = memcmp(prev_gfx, bus.tmapgfx, TMAPGFX_SIZE) != 0;
-    bool dp = memcmp(prev_pal, bus.palette, PALETTE_SIZE) != 0;
-    if (dt) { memcpy(prev_tile, bus.tile, TILE_SIZE); g_changed[0]++; }
-    if (dg) { memcpy(prev_gfx, bus.tmapgfx, TMAPGFX_SIZE); g_changed[1]++; }
-    if (dp) { memcpy(prev_pal, bus.palette, PALETTE_SIZE); g_changed[2]++; }
-    if (dt || dg || dp) g_changed[3]++;
-    if (g_verify_frames % 600 == 0) {
-        g_changed_hist[g_changed_buckets++ % 64] = g_changed[3] - g_changed_mark;
-        g_changed_mark = g_changed[3];
-    }
-    size_t n = (size_t)VIDEO_WIDTH * VIDEO_HEIGHT;
-    const tile_layers_t *a = &video.layers, *b = &g_ref_layers;
-    bool same = !memcmp(a->bg, b->bg, n * sizeof(uint16_t)) && !memcmp(a->fg, b->fg, n * sizeof(uint16_t))
-             && !memcmp(a->alpha, b->alpha, n) && !memcmp(a->bg_alpha, b->bg_alpha, n);
-    g_verify_frames++;
-    if (!same && g_verify_bad++ < 5)
-        printf("verify-tiles: MISMATCH at rendered frame %llu (game frame %llu)\n",
-               (unsigned long long)g_verify_frames, (unsigned long long)g_es.frames);
-}
-
-/* ---- Render: main.c frame() with the ImGui and debug-dump parts removed -- */
+/* ---- Render: game_frame.h, as both frontends run it ------------------------ */
 
 __attribute__((noinline)) static void render_frame(void) {
-    const game_quirks_t *q = &g_active_profile->quirks;
-    int64_t t[R_STAGES + 1];
-    t[0] = now_us();
-
-    video_update(&video, &bus);
-    t[1] = now_us();
-    if (g_verify_tiles) { verify_tiles(); t[0] += now_us() - t[1]; t[1] = now_us(); }
-
-    if (geo3d.use_game_view && q->camera_struct_addr)
-        geo3d_read_game_view(&geo3d, &bus, q->camera_struct_addr, q->camera_angle_addr);
-    if (geo3d.enabled && romset.main_data && romset.polygons) {
-        if (q->geo_displaylist) {
-            if (g_geodl_snap_ready)
-                geo3d_scan_displaylist(&geo3d, g_geodl_snap, BUFF_RAM_SIZE / 4, 0x10000,
-                                       romset.main_data, romset.main_data_size,
-                                       q->model_table_offset, q->model_table_count,
-                                       bus.palette, PALETTE_SIZE);
-        } else if (!(g_geo_use_list && g_geodl_snap_ready &&
-                     geo3d_scan_geo_list(&geo3d, g_geodl_snap, BUFF_RAM_SIZE / 4,
-                                         g_geodl_snap_rstart,
-                                         (int16_t)mem_read16(&bus, H_SYNC_BASE),
-                                         (int16_t)mem_read16(&bus, V_SYNC_BASE),
-                                         romset.main_data, romset.main_data_size,
-                                         q->model_table_offset, q->model_table_count))) {
-            geo3d_scan_captures(&geo3d, romset.main_data, romset.main_data_size,
-                                romset.polygons_size,
-                                q->model_table_offset, q->model_table_count,
-                                q->mesh_ptr_subtract, q->mesh_ptr_add);
-        }
-    } else {
-        geo3d_lines_reset();
-    }
-    t[2] = now_us();
-
+    int64_t a = now_us();
+    game_frame_times_t before = g_game_frame_times;
+    game_frame_prepare(&video, &geo3d, &bus, &romset, true);
+    float lerp_t = 1.0f;
     sg_begin_pass(&(sg_pass){
         .swapchain = { .width = FB_W, .height = FB_H, .sample_count = 1,
                        .color_format = SG_PIXELFORMAT_RGBA8,
@@ -426,38 +307,20 @@ __attribute__((noinline)) static void render_frame(void) {
     });
     int ox, oy, w, h;
     game_render_letterbox(FB_W, FB_H, VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
-    game_render_upload_atlas(bus.texram0, bus.texram1, TEXRAM0_SIZE);
-    t[3] = now_us();
-    game_render_upload_luts(bus.luma, bus.colorxlat);
-    t[4] = now_us();
-
-    game_render_draw_game(video.back_view, ox, oy, w, h);
-    game_render_draw_game(video.bg_view,   ox, oy, w, h);
-    if (geo3d.enabled && romset.main_data && romset.polygons) {
-        g_geo3d_palram      = bus.palette;
-        g_geo3d_palram_size = PALETTE_SIZE;
-        game_render_draw_captured_models(&geo3d,
-                                         romset.main_data, romset.main_data_size,
-                                         romset.polygons,  romset.polygons_size,
-                                         romset.textures,  romset.textures_size,
-                                         q->model_table_offset, q->model_table_count,
-                                         q->mesh_ptr_subtract, q->mesh_ptr_add,
-                                         ox, oy, w, h,
-                                         geo3d.cam_x, geo3d.cam_y, geo3d.cam_z,
-                                         geo3d.rot_y, geo3d.rot_x, geo3d.fov_deg,
-                                         1.0f);
-        g_geo3d_palram = NULL;
-    }
-    game_render_draw_game(video.fg_view, ox, oy, w, h);
+    game_frame_draw(&video, &geo3d, &bus, &romset, ox, oy, w, h, lerp_t);
     sg_end_pass();
     sg_commit();
-    t[5] = now_us();
 
-    int64_t d = t[5] - t[0];
+    int64_t d = now_us() - a;
+    const game_frame_times_t *t = &g_game_frame_times;
     g_rs.frames++;
     g_rs.us += d;
     if (d > g_rs.max_us) g_rs.max_us = d;
-    for (int s = 0; s < R_STAGES; s++) g_rs.stage_us[s] += t[s + 1] - t[s];
+    g_rs.stage_us[R_TILES]  += t->compose_us - before.compose_us;
+    g_rs.stage_us[R_SCAN]   += t->scan_us    - before.scan_us;
+    g_rs.stage_us[R_UPLOAD] += t->upload_us  - before.upload_us;
+    g_rs.stage_us[R_3D]     += t->draw3d_us  - before.draw3d_us;
+    g_rs.stage_us[R_QUADS]  += t->tiles_us   - before.tiles_us;
 }
 
 /* ---- Threads and pacing --------------------------------------------------- */
@@ -538,7 +401,6 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--max-temp") && i + 1 < argc) max_temp = atof(argv[++i]);
         else if (!strcmp(argv[i], "--render-fps") && i + 1 < argc) render_fps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) prof_path = argv[++i];
-        else if (!strcmp(argv[i], "--verify-tiles")) g_verify_tiles = true;
         else if (!strcmp(argv[i], "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
         else if (!strcmp(argv[i], "--draw-digest") && i + 1 < argc) digest_path = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) max_frames = strtoull(argv[++i], NULL, 0);
@@ -555,11 +417,6 @@ int main(int argc, char **argv) {
     if (render_fps > 0.0) threads = do_pace = true;
     int64_t render_period_us = render_fps > 0.0 ? (int64_t)(1e6 / render_fps) : EMU_SLICE_US;
     if (prof_path) g_prof = calloc(PROF_WORDS, sizeof(uint32_t));
-    if (g_verify_tiles) {
-        if (threads) { fprintf(stderr, "--verify-tiles needs a single thread\n"); return 2; }
-        tile_layers_init(&g_ref_layers);
-        tile_layers_init(&g_new_layers);
-    }
 
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
@@ -638,23 +495,6 @@ int main(int argc, char **argv) {
     report(&first, &end, (end.wall - start) / 1e6);
     printf("mesh cache: %s, %llu builds, %llu hits, %u meshes held\n", g_geo3d_mesh_cache ? "on" : "off",
            (unsigned long long)g_geo3d_mesh_builds, (unsigned long long)g_geo3d_mesh_hits, g_geo3d_mesh_count);
-
-    if (g_verify_tiles)
-        printf("verify-tiles: %llu rendered frames, %llu mismatched; both layers "
-               "per frame: per-pixel %.3f ms, run-based %.3f ms\n",
-               (unsigned long long)g_verify_frames, (unsigned long long)g_verify_bad,
-               g_ref_us / 1000.0 / (g_verify_frames ? g_verify_frames : 1),
-               g_new_us / 1000.0 / (g_verify_frames ? g_verify_frames : 1));
-    if (g_verify_tiles) {
-        printf("2D input changed on %llu of %llu rendered frames (tile %llu, gfx %llu, palette %llu)\n"
-               "changed frames per 600 rendered:",
-               (unsigned long long)g_changed[3], (unsigned long long)g_verify_frames,
-               (unsigned long long)g_changed[0], (unsigned long long)g_changed[1],
-               (unsigned long long)g_changed[2]);
-        for (int k = 0; k < g_changed_buckets && k < 64; k++)
-            printf(" %llu", (unsigned long long)g_changed_hist[k]);
-        printf("\n");
-    }
 
     if (g_prof) {
         FILE *pf = fopen(prof_path, "w");

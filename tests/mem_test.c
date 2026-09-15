@@ -35,6 +35,10 @@ int main(void) {
     CHECK(rt && strcmp(rt->name, "TILE") == 0, "0x01000000 -> TILE");
     CHECK(rh && strcmp(rh->name, "TILE") == 0, "0x01040000 (H_SYNC) routes to TILE");
 
+    /* Tile RAM (64K) repeats at 0x01010000. */
+    mem_write16(&bus, TILE_BASE + 0x11442, 0xA5A5);
+    CHECK(mem_read16(&bus, TILE_BASE + 0x1442) == 0xA5A5, "tile RAM mirrors at 0x01010000");
+
     /* Round-trips at each width in work RAM. */
     mem_write8(&bus, RAM_BASE + 0x10, 0xAB);
     CHECK(mem_read8(&bus, RAM_BASE + 0x10) == 0xAB, "write8/read8 round-trip");

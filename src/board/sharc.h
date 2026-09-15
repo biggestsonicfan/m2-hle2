@@ -147,6 +147,12 @@ typedef struct {
      * P1 = 0xFA00, P2 = 0x1FA00 (byte offset into sharc_dm_ext). */
     uint32_t coli_buf_base;
 
+    /* The firmware's own data memory, DM 0x30000..0x32FFF, one word each —
+     * what Fn_write_ram (0x49) fills and Fn_read_ram (0x48) reads, and the
+     * state the collision commands hand each other (sharc_dm_get/set; the
+     * unit-matrix cache at 0x30420..0x3059F is rot_cache, not this array). */
+    uint32_t dm[0x3000];
+
     /* Activity counters. */
     uint32_t unknown_cmds;
     uint32_t transform_count;
