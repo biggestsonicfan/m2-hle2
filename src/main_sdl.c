@@ -463,6 +463,7 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--verify-fill"))        opt.verify_fill = true;
         else if (!strcmp(a, "--fill-ref"))           g_game_render_fill_use_ref = 1;
         else if (!strcmp(a, "--fill-no-split"))      g_game_render_fill_split = 0;
+        else if (!strcmp(a, "--fill-no-ramp"))       g_game_render_fill_ramp = 0;
         else if (!strcmp(a, "--filter") && more) {
             const char *f = argv[++i];
             if (!strcmp(f, "linear")) opt.linear = true;

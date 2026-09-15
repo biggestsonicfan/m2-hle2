@@ -106,6 +106,19 @@ typedef struct {
     sg_view     cxlat_view;
     sg_sampler  lut_sampler;
 
+    /* Colour ramps (GL backends): row r holds, for luma index 0..63, the screen
+     * colour of the face colour ramp_key[r] (r5 << 10 | g5 << 5 | b5) through the
+     * colorxlat snapshot and the monitor curve, as 8-bit RGB. A fill vertex names
+     * its row in colour alpha (row + 2; below 1.5 means none), so the shader
+     * fetches the finished colour once instead of three colorxlat texels. */
+    bool        ramp_enabled;
+    sg_image    ramp_image;
+    sg_view     ramp_view;
+    int         ramp_count;
+    bool        ramp_dirty;
+    bool        cxlat_valid;
+    uint8_t     cxlat_snap[COLORXLAT_SIZE];
+
     /* CPU scratch for line uploads — 2 verts per geo3d_line_t */
     game_render_line_vertex_t line_verts[GEO3D_MAX_LINES * 2];
 
@@ -116,6 +129,16 @@ typedef struct {
 } game_render_t;
 
 static game_render_t g_game_render = {0};
+
+/* Colour ramp rows (see game_render_t ramp_*): which row a colour key has, the
+ * key of each row, the texels, and whether they went up this frame. */
+#define GAME_RENDER_RAMP_ROWS 1024
+static uint16_t g_ramp_row_of[0x8000];                     /* key -> row + 1; 0: none */
+static uint16_t g_ramp_key[GAME_RENDER_RAMP_ROWS];
+static uint8_t  g_ramp_px[GAME_RENDER_RAMP_ROWS * 64 * 4];
+static bool     g_ramp_uploaded;                           /* this frame; cleared at commit */
+
+static void game_render__ramp_commit(void *user) { (void)user; g_ramp_uploaded = false; }
 
 /* --verify-fill: set before game_render_init to build the reference fill shader.
  * While on, every fill draw of the frame is logged (viewport, scissor, matrix,
@@ -129,6 +152,9 @@ static int g_game_render_fill_use_ref = 0;
 /* Draw faces that cannot discard with the discard-free fill shader (default);
  * 0 draws every face with the one shader (timing comparisons). */
 static int g_game_render_fill_split = 1;
+/* Give faces colour ramp rows (default); 0 keeps the shader's colorxlat lookup
+ * for all of them (timing comparisons). Set before game_render_init. */
+static int g_game_render_fill_ramp = 1;
 
 /* src with every "discard;" turned into an empty statement, into buf. */
 static inline const char *game_render_strip_discard(const char *src, char *buf, size_t cap) {
@@ -258,12 +284,14 @@ static const char *game_render_fill_vs_glsl =
      * 5-bit channels. A face's three vertices carry the same values. */
     "flat out ivec4 face;\n"
     "flat out ivec2 tile_log2;\n"   /* log2 of the tile sides (GLSL ES 3.00 has no findMSB) */
+    "flat out int ramp_row;\n"      /* colour alpha - 2: the face's colour ramp row, or -1 */
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl;\n"
     "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
     "  if (tw > 0 && th > 0 && (tw & (tw - 1)) == 0 && (th & (th - 1)) == 0) fl |= 64;\n"
+    "  ramp_row = int(a_color.a + 0.5) - 2;\n"
     "  tile_log2 = ivec2(0);\n"
     "  for (int i = 1; i < 16; i++) {\n"
     "    if ((tw >> i) != 0) tile_log2.x = i;\n"
@@ -413,8 +441,10 @@ static const char *game_render_fill_fs_glsl =
     "in vec2 uv;\n"
     "flat in vec4 tile;\n"
     "flat in vec3 lbpl;\n"
+    "uniform sampler2D ramp_smp;\n"
     "flat in ivec4 face;\n"
     "flat in ivec2 tile_log2;\n"
+    "flat in int ramp_row;\n"
     "out vec4 frag_color;\n"
     "ivec4 level_tile(int L) {\n"
     "  int sheet = (face.x & 4) != 0 ? 1 : 0;\n"
@@ -466,6 +496,12 @@ static const char *game_render_fill_fs_glsl =
     "  float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
     "  return vec3(cr, cg, cb);\n"
     "}\n"
+    /* The screen colour at luma index li: the face's colour ramp row when it has
+     * one (the same bytes, worked out on the CPU), else the colorxlat texels. */
+    "vec3 shade(int li) {\n"
+    "  if (ramp_row >= 0) return texelFetch(ramp_smp, ivec2(li, ramp_row), 0).rgb;\n"
+    "  return clamp(max(ramp(li) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
+    "}\n"
     "void main() {\n"
     "  float lmax = max(log2(max(min(tile.z, tile.w), 2.0)) - 1.0, 0.0);\n"
     "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
@@ -485,14 +521,13 @@ static const char *game_render_fill_fs_glsl =
     "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
     "      float poly = clamp(lbpl.y, 0.0, 1.0) * 255.0;\n"
     "      int li = int(min(lram * poly / 256.0, 63.0) + 0.5);\n"
-    "      vec3 c = max(ramp(li) - 64.0, 0.0) * (255.0/191.0);\n"
-    "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
+    "      rgb = shade(li);\n"
     "    }\n"
     "  } else if (lbpl.x < 0.0) {\n"
     "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
     "  } else {\n"
     "    int li = min(int(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5) >> 2, 63);\n"
-    "    rgb = clamp(max(ramp(li) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
+    "    rgb = shade(li);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
     "}\n";
@@ -892,6 +927,17 @@ static inline void game_render_init(void) {
         d.texture_sampler_pairs[2].view_slot    = 2;
         d.texture_sampler_pairs[2].sampler_slot = 0;
         d.texture_sampler_pairs[2].glsl_name    = "cxlat_smp";
+        /* Colour ramps (t3): read by the GL fill shader only. */
+        d.views[3].texture.stage              = SG_SHADERSTAGE_FRAGMENT;
+        d.views[3].texture.image_type         = SG_IMAGETYPE_2D;
+        d.views[3].texture.sample_type        = SG_IMAGESAMPLETYPE_FLOAT;
+        d.views[3].texture.hlsl_register_t_n  = 3;
+        d.views[3].texture.msl_texture_n      = 3;
+        d.views[3].texture.wgsl_group1_binding_n = 4;
+        d.texture_sampler_pairs[3].stage        = SG_SHADERSTAGE_FRAGMENT;
+        d.texture_sampler_pairs[3].view_slot    = 3;
+        d.texture_sampler_pairs[3].sampler_slot = 0;
+        d.texture_sampler_pairs[3].glsl_name    = "ramp_smp";
         d.label = "game-render-fill-shader";
         if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
             d.vertex_func.source   = game_render_glsl(backend, game_render_fill_vs_glsl, 0);
@@ -998,6 +1044,18 @@ static inline void game_render_init(void) {
         .wrap_u = SG_WRAP_CLAMP_TO_EDGE, .wrap_v = SG_WRAP_CLAMP_TO_EDGE,
         .label = "geo3d-lut-sampler" });
 
+    /* Colour ramps: the image exists on every backend (the fill shaders all
+     * declare it); rows are only handed out where the GL fill shader reads them. */
+    g_game_render.ramp_image = sg_make_image(&(sg_image_desc){
+        .width = 64, .height = GAME_RENDER_RAMP_ROWS, .pixel_format = SG_PIXELFORMAT_RGBA8,
+        .usage = { .dynamic_update = true }, .label = "geo3d-colour-ramps" });
+    g_game_render.ramp_view = sg_make_view(&(sg_view_desc){
+        .texture.image = g_game_render.ramp_image, .label = "geo3d-colour-ramps-view" });
+    g_game_render.ramp_enabled = g_game_render_fill_ramp && (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3);
+    g_game_render.ramp_count = 0;
+    memset(g_ramp_row_of, 0, sizeof g_ramp_row_of);
+    sg_add_commit_listener((sg_commit_listener){ .func = game_render__ramp_commit });
+
     g_game_render.initialized = true;
     LOG_INFO("game_render_init: complete");
 }
@@ -1012,6 +1070,9 @@ static inline void game_render_shutdown(void) {
     sg_destroy_image(g_game_render.luma_image);
     sg_destroy_view(g_game_render.cxlat_view);
     sg_destroy_image(g_game_render.cxlat_image);
+    sg_destroy_view(g_game_render.ramp_view);
+    sg_destroy_image(g_game_render.ramp_image);
+    sg_remove_commit_listener((sg_commit_listener){ .func = game_render__ramp_commit });
     sg_destroy_pipeline(g_game_render.fill_pipeline);
     sg_destroy_pipeline(g_game_render.fill_pipeline_cw);
     sg_destroy_pipeline(g_game_render.fill_pipeline_ccw);
@@ -1169,17 +1230,81 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
     });
 }
 
+/* ---- Colour ramps ---------------------------------------------------------- */
+
+/* Row r's 64 colours from the colorxlat snapshot: the fill shader's ramp step,
+ * colorxlat[ch][(c5 << 8) + li] then max(c - 64, 0) * 255 / 191, as the 8-bit
+ * value the target stores. (c - 64) * 255 / 191 is never k + 0.5, so rounding
+ * it here gives the byte the shader's float result is written as. */
+static inline void game_render__ramp_fill(int r) {
+    uint16_t key = g_ramp_key[r];
+    int c5[3] = { (key >> 10) & 31, (key >> 5) & 31, key & 31 };
+    for (int li = 0; li < 64; li++) {
+        uint8_t *px = &g_ramp_px[(r * 64 + li) * 4];
+        for (int ch = 0; ch < 3; ch++) {
+            int v = g_game_render.cxlat_snap[ch * 0x4000 + ((c5[ch] << 8) + li) * 2];
+            double x = v > 64 ? (double)(v - 64) * 255.0 / 191.0 : 0.0;
+            px[ch] = (uint8_t)(x >= 255.0 ? 255 : (int)(x + 0.5));
+        }
+        px[3] = 255;
+    }
+}
+
+/* Start a batch: once the ramps are mostly used and none has gone up this frame,
+ * forget them all, so rows follow the colours on screen. */
+static inline void game_render__ramp_begin(void) {
+    if (!g_game_render.ramp_enabled || g_ramp_uploaded) return;
+    if (g_game_render.ramp_count <= GAME_RENDER_RAMP_ROWS * 3 / 4) return;
+    for (int r = 0; r < g_game_render.ramp_count; r++) g_ramp_row_of[g_ramp_key[r]] = 0;
+    g_game_render.ramp_count = 0;
+}
+
+/* The ramp row for a fill colour (as the shader rounds it to 5 bits a channel),
+ * made if new; -1 when the face keeps the shader's own lookup: no ramps on this
+ * backend or no tables yet, a channel out of range, all rows taken, or a new
+ * colour after this frame's ramps went up. */
+static inline int game_render__ramp_row(float r, float g, float b) {
+    if (!g_game_render.ramp_enabled || !g_game_render.cxlat_valid) return -1;
+    int r5 = (int)(r * 31.0f + 0.5f), g5 = (int)(g * 31.0f + 0.5f), b5 = (int)(b * 31.0f + 0.5f);
+    if ((unsigned)r5 > 31u || (unsigned)g5 > 31u || (unsigned)b5 > 31u) return -1;
+    int key = (r5 << 10) | (g5 << 5) | b5;
+    if (g_ramp_row_of[key]) return g_ramp_row_of[key] - 1;
+    if (g_ramp_uploaded || g_game_render.ramp_count == GAME_RENDER_RAMP_ROWS) return -1;
+    int row = g_game_render.ramp_count++;
+    g_ramp_row_of[key] = (uint16_t)(row + 1);
+    g_ramp_key[row] = (uint16_t)key;
+    game_render__ramp_fill(row);
+    g_game_render.ramp_dirty = true;
+    return row;
+}
+
+/* Upload the ramps if any row changed, at most once a frame. */
+static inline void game_render__ramp_upload(void) {
+    if (!g_game_render.ramp_enabled || !g_game_render.ramp_dirty || g_ramp_uploaded) return;
+    sg_update_image(g_game_render.ramp_image, &(sg_image_data){
+        .mip_levels[0] = { .ptr = g_ramp_px, .size = sizeof g_ramp_px } });
+    g_ramp_uploaded = true;
+    g_game_render.ramp_dirty = false;
+}
+
 /* Upload the live lumaram + colorxlat tables (raw bus bytes) to the LUT
  * textures the fill shader integer-fetches for the MAME luma ramp.  Cheap
- * (~180 KB/frame); call once per frame before drawing fills. */
+ * (~180 KB/frame); call once per frame before drawing fills. colorxlat goes up
+ * from a snapshot, which the colour ramps are rebuilt from, so both views of
+ * the table always agree. */
 static inline void game_render_upload_luts(const uint8_t *luma, const uint8_t *colorxlat) {
     if (!g_game_render.initialized) return;
     if (luma)
         sg_update_image(g_game_render.luma_image, &(sg_image_data){
             .mip_levels[0] = { .ptr = luma, .size = LUMA_SIZE } });
-    if (colorxlat)
+    if (colorxlat) {
+        memcpy(g_game_render.cxlat_snap, colorxlat, COLORXLAT_SIZE);
         sg_update_image(g_game_render.cxlat_image, &(sg_image_data){
-            .mip_levels[0] = { .ptr = colorxlat, .size = COLORXLAT_SIZE } });
+            .mip_levels[0] = { .ptr = g_game_render.cxlat_snap, .size = COLORXLAT_SIZE } });
+        g_game_render.cxlat_valid = true;
+        for (int r = 0; r < g_game_render.ramp_count; r++) game_render__ramp_fill(r);
+        if (g_game_render.ramp_count) g_game_render.ramp_dirty = true;
+    }
 }
 
 /* ---- Per-frame draw ------------------------------------------------------ */
@@ -1370,6 +1495,7 @@ static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs
         .views[0]          = g_game_render.atlas_view,
         .views[1]          = g_game_render.luma_view,
         .views[2]          = g_game_render.cxlat_view,
+        .views[3]          = g_game_render.ramp_view,
         .samplers[0]       = g_game_render.atlas_sampler,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });
@@ -1399,6 +1525,7 @@ static inline void game_render_replay_fills(bool ref, sg_view back_view, sg_view
             .views[0]          = g_game_render.atlas_view,
             .views[1]          = g_game_render.luma_view,
             .views[2]          = g_game_render.cxlat_view,
+            .views[3]          = g_game_render.ramp_view,
             .samplers[0]       = g_game_render.atlas_sampler,
         });
         game_render_vs_params_t vs;
@@ -1442,6 +1569,7 @@ static inline void game_render_batch_flush(bool lines_only) {
      * that cannot go through the discard-free shader. */
     static uint8_t can_discard[GEO3D_MAX_TRIS];
     if (fills) {
+        game_render__ramp_begin();
         for (int i = 0; i < nt; i++) {
             const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
             can_discard[i] = ((int)(T->fl + 0.5f) & (int)(GEO3D_FACE_TRANSPARENT | GEO3D_FACE_CHECKER)) != 0;
@@ -1450,14 +1578,21 @@ static inline void game_render_batch_flush(bool lines_only) {
             v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
             v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].u=T->u2; v[2].v=T->v2;
             float lb = g_luma_ramp ? T->lb : -1.0f;
+            /* colour alpha: the face's ramp row + 2 (1.0, as before, without one) */
+            float ramp = 1.0f;
+            if (g_game_render.ramp_enabled) {
+                int row = game_render__ramp_row(T->r, T->g, T->b);
+                if (row >= 0) ramp = (float)(row + 2);
+            }
             for (int k = 0; k < 3; k++) {
-                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=1.0f;
+                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=ramp;
                 v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
                 v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=T->fl;
             }
         }
         sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
             .ptr = g_game_render.fill_verts, .size = (size_t)nt * 3 * sizeof(game_render_tex_vertex_t) });
+        game_render__ramp_upload();
         g_fill_log.uploads++;
     }
     if (lines) {
