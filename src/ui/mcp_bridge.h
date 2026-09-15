@@ -1091,12 +1091,15 @@ static void mcp_cmd_capture_snd(const char *req, char *resp, int cap) {
 
 static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     uint32_t frames = 60, max_words = 8u * 1024u * 1024u, timeout_ms = 120000;
-    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_tgp = 0, want_slots = 0, want_unit = 0;
+    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_tgp = 0, want_slots = 0, want_unit = 0, want_cop = 0;
     char path[512] = {0}, probes[2048] = {0}, blockspec[512] = {0};
     mcp_json_get_str(req, "blocks", blockspec, sizeof(blockspec));
     mcp_json_get_u32(req, "tgp", &want_tgp);
     mcp_json_get_u32(req, "slots", &want_slots);
     mcp_json_get_u32(req, "unit", &want_unit);
+    /* cop: the coprocessor conversation in a MAME SHARC-side capture's format
+     * (tests/cop_replay), with <path>.bufram.bin and <path>.dm.bin beside it. */
+    mcp_json_get_u32(req, "cop", &want_cop);
     mcp_json_get_u32(req, "lo", &lo);
     mcp_json_get_u32(req, "hi", &hi);
     if (lo < DL_TAP_LO) lo = DL_TAP_LO;
@@ -1141,8 +1144,11 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     const size_t unit_per_mark = sizeof g_sharc.rot_cache / sizeof(float);
     float     *unit  = want_unit ? (float *)calloc(((size_t)frames + 2) * unit_per_mark, sizeof(float)) : NULL;
     uint8_t   *blocks = nb ? (uint8_t *)calloc(((size_t)frames + 2), bbytes) : NULL;
-    if (!recs || !marks || (want_tgp && !tgp) || (want_slots && !slots) || (want_unit && !unit) || (nb && !blocks)) {
-        free(recs); free(marks); free(tgp); free(slots); free(unit); free(blocks);
+    uint8_t   *cop_bufram = want_cop ? (uint8_t *)calloc(BUFF_RAM_SIZE, 1) : NULL;
+    uint32_t  *cop_dm = want_cop ? (uint32_t *)calloc(0x1000, sizeof(uint32_t)) : NULL;
+    if (!recs || !marks || (want_tgp && !tgp) || (want_slots && !slots) || (want_unit && !unit) || (nb && !blocks)
+        || (want_cop && (!cop_bufram || !cop_dm))) {
+        free(recs); free(marks); free(tgp); free(slots); free(unit); free(blocks); free(cop_bufram); free(cop_dm);
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
     }
 
@@ -1158,6 +1164,8 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     g_dl.nblocks = nb; g_dl.block_bytes = bbytes; g_dl.blocks = blocks;
     memcpy(g_dl.block_addr, baddr, sizeof(uint32_t) * (size_t)nb);
     memcpy(g_dl.block_len, blen, sizeof(uint32_t) * (size_t)nb);
+    g_dl.cop = want_cop != 0; g_dl.cop_bufram = cop_bufram; g_dl.cop_dm = cop_dm;
+    g_cop_tap = want_cop ? dl_cop_tap : NULL;
     g_dl.nprobes = np;
     memcpy(g_dl.probe_addr, paddr, sizeof(uint32_t) * (size_t)np);
     memcpy(g_dl.probe_size, psize, (size_t)np);
@@ -1183,6 +1191,7 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     int overflow = g_dl.overflow, done = g_dl.done;
     g_dl.recs = NULL; g_dl.marks = NULL; g_dl.tgp = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
     g_dl.blocks = NULL; g_dl.nblocks = 0; g_dl.block_bytes = 0;
+    g_dl.cop = 0; g_dl.cop_bufram = NULL; g_dl.cop_dm = NULL; g_cop_tap = NULL;
     emu_mutex_unlock(&g_mcp.emu->mutex);
 
     char file[600];
@@ -1246,6 +1255,18 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
         if (!f || fwrite(blocks, bbytes, nmarks, f) != nmarks) wrote_ok = 0;
         if (f) fclose(f);
     }
+    if (cop_bufram && wrote_ok) {
+        snprintf(file, sizeof file, "%s.bufram.bin", path);
+        f = fopen(file, "wb");
+        if (!f || fwrite(cop_bufram, 1, BUFF_RAM_SIZE, f) != BUFF_RAM_SIZE) wrote_ok = 0;
+        if (f) fclose(f);
+        snprintf(file, sizeof file, "%s.dm.bin", path);
+        f = fopen(file, "wb");
+        if (!f || fwrite(cop_dm, sizeof(uint32_t), 0x1000, f) != 0x1000) wrote_ok = 0;
+        if (f) fclose(f);
+    }
+    free(cop_bufram);
+    free(cop_dm);
     free(recs);
     free(marks);
     free(tgp);

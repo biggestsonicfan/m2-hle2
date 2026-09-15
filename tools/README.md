@@ -78,6 +78,7 @@ one you already have running with `--mcp`.
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
 | `grade-cull.mjs` | which of the arena's sixteen ground chunks are drawn. It captures a fight, replays the coprocessor's matrix to the point `ground_disp` tests from, and runs the ROM's own `clip_point_check_yoko` + `area_clip` on it (lattice and corner tables read from ROM). The chunks drawn have to be exactly that selection, in that order, at the explorer's matrix. The explorer names the chunks: its ground layer has to be the record's 16 slots |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
+| `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
 | `watch-var.mjs` | who writes this address, and what do they write? A bus watchpoint that reports the value and the IP behind it, so a variable whose owner is unknown can be traced back to its routine |
@@ -369,6 +370,58 @@ Still differing, with no effect on the fight so far:
 - the rig from +382;
 - the sign of zero in TGP bufferram.
 
+## Sway chains (osage) at character select
+
+```
+node tools/grade-osage.mjs --mame     # MAME's captures of Fang and Bean at select, headless (~15 min)
+node tools/grade-osage.mjs            # capture the same here and grade (~40 s)
+```
+
+`Fn_osage` (op `0x4A`) walks typed records the i960 lays in bufferram:
+
+- the matrix a chain hangs from;
+- its limits;
+- its start point;
+- one record a segment.
+
+It answers a draw matrix a segment. A chain can therefore be wrong in the port or
+in its inputs, and the grader checks each:
+
+- **The port.** `tools/mame/osage-select.lua` coins up, walks P1's cursor onto
+  each fighter and takes a SHARC-side capture (`cop-capture.lua`) while the
+  model turns, plus a snapshot every 15 frames. `tests/cop_replay` replays it:
+  every `Fn_osage` word has to be the board's.
+- **Its inputs.** The ops that build the record's matrix have to leave the
+  board's matrix: `0x04` loads the camera in `osage_dsp`, and `0x45` composes
+  it. Then m2hle captures the same scene (`capture_dl` with `cop: 1`, which
+  writes the MAME capture's format), and the matrix each chain hangs from has
+  to be as orthonormal as the board's.
+
+The m2hle capture boots once per fighter: after one capture the select cursor
+stops answering the stick. `OSAGE=<file>` on `cop_replay` dumps every call's
+records and answers.
+
+What it found: `Fn_load_matrix` read its 12 words as a row-major, Z-negated
+render matrix, the old `Fn_get_matrix` format. `osage_dsp` loads the camera
+with it at select, so every chain was composed onto a sheared matrix, with
+column lengths 1.21 / 0.60 / 1.38. Fang's tail came out as stretched spikes
+and Bean's feathers landed on the floor. Attract never sends `0x04`, which is
+why the attract captures had `Fn_osage` exact and still missed it.
+
+`cop_replay` runs a command only when the next command word arrives. It now
+holds back bufferram writes the i960 makes after the command has started
+answering. Otherwise `os_set_osage_after`'s carry zeroing reached `Fn_osage`
+before its own write-back did.
+
+Two things to know before trusting a row:
+
+- m2hle's select screen does not always run at MAME's rate. Some runs make one
+  `Fn_osage` call pair every other emulator frame. A run on that path may never
+  send `0x04`, so the "here" shape row can pass on broken code. The MAME-side
+  `0x04` / `0x45` rows do not depend on it.
+- The `Fn_get_sm_ang_f` rows still differ: an angle comes out `0xFFFF` on the
+  board and `0` here. This is unrelated to the chains.
+
 ## The sound board
 
 The explorer has no sound, so the sound board is graded straight against MAME,
@@ -423,7 +476,7 @@ end to end. It needs a raw capture of both FIFO ports in write order; m2-hle2's
 processor's `0x804000` writes are handled separately for clip windows. Adding a
 unified dual-port capture is the next piece of bridge work.
 
-**Nothing above the waist, and no osage grader.** `grade-pose.mjs` covers the
+**Nothing above the waist.** `grade-pose.mjs` covers the
 twelve slots the body matrix and the IK chains place. The other four — the
 waist's own slot, the chest, the head and the pelvis — are not arguments to
 anything: the board builds them by stacking translate, `0x3F` and angle ops on
@@ -431,8 +484,7 @@ the body matrix and hands the result to op `0x67`, so grading them means
 replaying that stream rather than reading a capture's columns. The explorer's
 toolkit is at the same place and says why (`stf-tools/test-head-mame.mjs`: at
 least ops `0x29` and `0x39` carry angles and are not decoded yet, so a replay
-has already drifted before the head). The sway chains — `js/osage.js`, and
-`stf-tools/osage-*.json` beside it — are untouched here in either direction.
+has already drifted before the head). The sway chains are graded against MAME at character select (`grade-osage.mjs`, above), but not yet against the explorer's `js/osage.js` or `stf-tools/osage-*.json`.
 
 **The head aim is unsettled on both sides.** The explorer aims the head at float
 object 14 and notes that the board's head block is followed by three angles that

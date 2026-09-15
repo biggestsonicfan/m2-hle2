@@ -837,22 +837,15 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             return;
         }
         case 0x02000404: {
-            /* set_matrix: restore 12 row-major floats into rot[] and pos[].
-             * Inverse of 0x02800505: undo z-negation stored in our row-major format.
-             *   m[r][0..1] = rot[0..1][r]  → rot[c][r] = m[r][c]
-             *   m[r][2]    = -rot[2][r]    → rot[2][r] = -m[r][2]  for r=0,1
-             *   m[2][2]    =  rot[2][2]    → rot[2][2] =  m[2][2]
-             * SHARC firmware handler at 0x203AA reads 12 FIFO words → DM[DM[0x3033F]]. */
+            /* Fn_load_matrix (cpres1 PM 0x203AA): the 12 words straight into the
+             * slot, col0, col1, col2, T — what Fn_get_matrix (0x05) hands back.
+             * It used to read them as a row-major, Z-negated render matrix, the
+             * old 0x05's format. osage_dsp loads the camera with it, so every
+             * sway chain was composed onto a sheared matrix. */
             if (n >= 12) {
-                float (*r)[3] = g_sharc.rot;
-                int row;
-                for (row = 0; row < 3; row++) {
-                    r[0][row] =  sharc_bits_to_float(args[row*4 + 0]);
-                    r[1][row] =  sharc_bits_to_float(args[row*4 + 1]);
-                    r[2][row] = (row < 2) ? -sharc_bits_to_float(args[row*4 + 2])
-                                          :  sharc_bits_to_float(args[row*4 + 2]);
-                    g_sharc.pos[row] = sharc_bits_to_float(args[row*4 + 3]);
-                }
+                for (int c = 0; c < 3; c++)
+                    for (int r = 0; r < 3; r++) g_sharc.rot[c][r] = sharc_bits_to_float(args[c*3 + r]);
+                for (int r = 0; r < 3; r++) g_sharc.pos[r] = sharc_bits_to_float(args[9 + r]);
                 g_sharc.matrix_dirty = true;
                 g_sharc.bone_dirty   = true;
             }
