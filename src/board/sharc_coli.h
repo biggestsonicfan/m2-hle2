@@ -22,6 +22,11 @@
  *     0x3D Fn_coli_trans_mat          the push-out applied to the unit matrices
  *     0x72 Fn_outside_ball x2         balls outside the arena square
  *
+ *   and outside the chain, off the world balls 0x39 left:
+ *     0x77 Fn_parts_oidasi            one loose sphere (a projectile, a flying part)
+ *                                     against both fighters: 9 replies, the unit masks
+ *                                     being every projectile hit
+ *
  * The tables the chain reads (radii, radius scale, ball->unit maps, pointer
  * tables) are uploaded by the i960 with Fn_write_ram at boot and on character
  * load, so DM writes have to land (g_sharc.dm, sharc_dm_get/set).
@@ -73,13 +78,18 @@ static inline float sharc_fw_sqrt(float x) {
     return sqrtf(x);
 }
 
-/* _L20D97: a ball bitmask remapped to units, through the player's ball->unit table */
-static inline uint32_t sharc_coli_remap(uint32_t mask) {
-    uint32_t tbl = (sharc_dm_get(0x307F2u) & 1u) ? 0x307A0u : 0x306A0u;
+/* _L20D98: a ball bitmask remapped to units, through player r1's ball->unit table */
+static inline uint32_t sharc_coli_remap_player(uint32_t mask, uint32_t player) {
+    uint32_t tbl = (player & 1u) ? 0x307A0u : 0x306A0u;
     uint32_t r = 0;
     for (uint32_t b = 0; b < 32u; b++)
         if (mask & (1u << b)) r |= 1u << (sharc_dm_get(tbl + b) & 31u);
     return r;
+}
+
+/* _L20D97: the same, for the player DM 0x307F2 names */
+static inline uint32_t sharc_coli_remap(uint32_t mask) {
+    return sharc_coli_remap_player(mask, sharc_dm_get(0x307F2u));
 }
 
 /* ---- Fn_coli_set_ball_adrs (0x38, PM 0x20DA8) ------------------------------- */
@@ -399,6 +409,83 @@ static inline void sharc_coli_outside_ball(uint32_t sel, float dx, float dz) {
         if (x > R || !(z < R)) n++;
     }
     sharc_push_u(n);
+}
+
+/* _L2034C: |v|, through _L202AE. The caller's division below reuses f11, and
+ * the square root leaves 3.0 there (0 for a zero vector), so hand that back. */
+static inline float sharc_coli_mag3(float x, float y, float z, float *f11) {
+    float s = x * x + y * y;
+    s = s + z * z;
+    *f11 = sharc_float_to_bits(s) == 0 ? 0.0f : 3.0f;
+    return sharc_fw_sqrt(s);
+}
+
+/* _L20B80: one fighter's balls against a sphere at c, radius in DM 0x3031B.
+ * i3 = 0x30300 is the scratch frame; the offsets below are the firmware's. */
+static inline void sharc_coli_parts_trace(uint32_t table, uint32_t rad, const float c[3]) {
+    sharc_dm_set(0x3031Fu, 0);                               /* a hit this pass */
+    sharc_dm_set(0x30312u, 0);                               /* hit ball mask */
+    float f11;
+    float d13 = sharc_coli_mag3(sharc_dm_getf(table + 0x27u) - c[0], sharc_dm_getf(table + 0x28u) - c[1],
+                                sharc_dm_getf(table + 0x29u) - c[2], &f11);
+    if (!(d13 <= 3.0f)) return;                              /* ball 13 more than 3 units off */
+    for (uint32_t k = 0; k < 32u; k++) {
+        uint32_t Rb = sharc_dm_get(rad + k);
+        if (Rb == 0) continue;
+        float dx = sharc_dm_getf(table + 3u * k) - c[0];
+        float dy = sharc_dm_getf(table + 3u * k + 1u) - c[1];
+        float dz = sharc_dm_getf(table + 3u * k + 2u) - c[2];
+        float dist = sharc_coli_mag3(dx, dy, dz, &f11);
+        float S = sharc_bits_to_float(Rb) + sharc_dm_getf(0x3031Bu);
+        if (!(dist <= S)) continue;
+        /* dist/S by RECIPS and three Newton steps — but f11 holds the sqrt's 3.0
+         * where 2.0 belongs, so this settles on 2·dist/S. That is the board. */
+        float f4 = 1.0f / S, f14 = f4 * S, f2 = dist * f4;
+        f4 = f11 - f14;
+        for (int it = 0; it < 2; it++) { f14 = f4 * f14; f2 = f2 * f4; f4 = f11 - f14; }
+        float f0 = sharc_dm_getf(0x30301u) - f2 * f4;        /* 1.0 - ... */
+        sharc_dm_setf(0x3031Cu, sharc_dm_getf(0x3031Cu) + dx * f0);
+        sharc_dm_setf(0x3031Eu, sharc_dm_getf(0x3031Eu) + dz * f0);
+        sharc_dm_setf(0x3031Fu, f0);
+        sharc_dm_set(0x30319u, k);
+        sharc_dm_set(0x30312u, sharc_dm_get(0x30312u) | (1u << k));
+    }
+}
+
+/* ---- Fn_parts_oidasi (0x77, PM 0x20B1F): a loose sphere — a projectile, a
+ *      flying part — against both fighters' balls. 9 replies: the push-out in
+ *      x and z, the last fighter hit (-1 none), its ball and unit, then each
+ *      fighter's hit ball mask and unit mask. Every projectile hit comes out of
+ *      the unit masks (tobi +0x40/+0x42). */
+static inline void sharc_coli_parts_oidasi(float x, float y, float z, uint32_t r) {
+    const float c[3] = { x, y, z };
+    sharc_dm_set(0x3031Bu, r);
+    sharc_dm_set(0x30318u, 0);
+    sharc_dm_set(0x30319u, 0);
+    for (uint32_t k = 0x30313u; k <= 0x30316u; k++) sharc_dm_set(k, 0);
+    sharc_dm_set(0x3031Au, 0xFFFFFFFFu);
+    sharc_dm_set(0x3031Cu, 0);
+    sharc_dm_set(0x3031Eu, 0);
+    sharc_dm_set(0x3031Fu, 0);
+    for (uint32_t p = 0; p < 2u; p++) {
+        sharc_coli_parts_trace(p ? 0x1407E80u : 0x1403E80u, p ? 0x30700u : 0x30600u, c);
+        uint32_t mask = sharc_dm_get(0x30312u);
+        sharc_dm_set(0x30313u + p, mask);
+        sharc_dm_set(0x30315u + p, sharc_coli_remap_player(mask, p));
+        if (sharc_dm_get(0x3031Fu) != 0) {
+            sharc_dm_set(0x3031Au, p);
+            sharc_dm_set(0x30318u, sharc_dm_get((p ? 0x307A0u : 0x306A0u) + sharc_dm_get(0x30319u)));
+        }
+    }
+    sharc_push_u(sharc_dm_get(0x3031Cu));
+    sharc_push_u(sharc_dm_get(0x3031Eu));
+    sharc_push_u(sharc_dm_get(0x3031Au));
+    sharc_push_u(sharc_dm_get(0x30319u));
+    sharc_push_u(sharc_dm_get(0x30318u));
+    sharc_push_u(sharc_dm_get(0x30313u));
+    sharc_push_u(sharc_dm_get(0x30315u));
+    sharc_push_u(sharc_dm_get(0x30314u));
+    sharc_push_u(sharc_dm_get(0x30316u));
 }
 
 /* ---- Fn_ball_to_unit (0x71, PM 0x20D8E) --------------------------------------- */
