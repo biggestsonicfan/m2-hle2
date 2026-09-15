@@ -44,6 +44,7 @@ typedef struct {
     float tx, ty, tw, th;
     float lb, pl;               /* lumabase + poly_luma for the colorxlat luma ramp */
     float fl;                   /* GEO3D_FACE_* flags */
+    float texlod;               /* the board's texlod, or GEO3D_TEXLOD_NONE */
 } game_render_tex_vertex_t;
 
 typedef struct {
@@ -274,11 +275,12 @@ static const char *game_render_fill_vs_glsl =
     "layout(location=1) in vec4 a_color;\n"
     "layout(location=2) in vec2 a_uv;\n"
     "layout(location=3) in vec4 a_tile;\n"
-    "layout(location=4) in vec3 a_lbpl;\n"
+    "layout(location=4) in vec4 a_lbpl;\n"
     "out vec4 color;\n"
     "out vec2 uv;\n"
+    "out float ez;\n"
     "flat out vec4 tile;\n"
-    "flat out vec3 lbpl;\n"
+    "flat out vec4 lbpl;\n"
     /* Per-face integers the fill works out per pixel otherwise: the GEO3D_FACE_*
      * flags (plus 64 when both tile sides are powers of two) and the colour's
      * 5-bit channels. A face's three vertices carry the same values. */
@@ -288,7 +290,7 @@ static const char *game_render_fill_vs_glsl =
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
-    "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl;\n"
+    "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl; ez = -a_pos.z;\n"
     "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
     "  if (tw > 0 && th > 0 && (tw & (tw - 1)) == 0 && (th & (th - 1)) == 0) fl |= 64;\n"
     "  ramp_row = int(a_color.a + 0.5) - 2;\n"
@@ -299,6 +301,13 @@ static const char *game_render_fill_vs_glsl =
     "  }\n"
     "  face = ivec4(fl, int(a_color.r*31.0+0.5), int(a_color.g*31.0+0.5), int(a_color.b*31.0+0.5));\n"
     "}\n";
+
+/* model2rd.ipp fast_log2's fraction table: floor(256 * log2(1 + i/128)). */
+#define GAME_RENDER_LOG2_TABLE \
+    "0,2,5,8,11,14,16,19,22,25,27,30,33,35,38,40,43,46,48,51,53,56,58,61,63,65,68,70,73,75,77,80," \
+    "82,84,87,89,91,93,96,98,100,102,104,106,109,111,113,115,117,119,121,123,125,127,129,132,134,136,138,140,141,143,145,147," \
+    "149,151,153,155,157,159,161,162,164,166,168,170,172,173,175,177,179,181,182,184,186,188,189,191,193,194,196,198,200,201,203,205," \
+    "206,208,209,211,213,214,216,218,219,221,222,224,225,227,229,230,232,233,235,236,238,239,241,242,244,245,247,248,250,251,253,254"
 
 /*
  * The fill — MAME's model2rd.ipp draw_scanline_tex, as the explorer ports it
@@ -311,8 +320,15 @@ static const char *game_render_fill_vs_glsl =
  *   level     the mip chain send_lod_data_q box-filters into texture RAM: level
  *             L of a tile sits at ((tx-2048)>>L)&2047, ((ty-1024)>>L)&1023 on
  *             the sheet that alternates with L (fetch_bilinear_texel). Picked
- *             from screen-space derivatives, since the board's texlod is
- *             calibrated to 496x384 and this draws at the window's size.
+ *             the board's way (draw_scanline_tex): mml = fast_log2(z) - texlod
+ *             in 1/128ths, level mml >> 7, and a blend (mml & 127) << 1 of the
+ *             next level down. z is eye depth, so the choice does not depend on
+ *             the window's size, and texlod comes from the geometrizer's LOD
+ *             distance: a game sets how blurry a surface is per polygon. The
+ *             title's Death Egg names tiny coefficients, and a screen-space
+ *             pick there left its lone bright texels unfiltered, over the
+ *             colorxlat step: twice MAME's white pixels. Faces with no texlod
+ *             (not from a display list) fall back to screen-space derivatives.
  *   holes     on the transparent renderer a texel of 15 carries no colour: it
  *             borrows its pair's, and the four holes' weights blend into a
  *             coverage that must reach half a texel for the pixel to survive.
@@ -336,10 +352,22 @@ static const char *game_render_fill_fs_ref_glsl =
     "uniform sampler2D cxlat_smp;\n"
     "in vec4 color;\n"
     "in vec2 uv;\n"
+    "in float ez;\n"
     "flat in vec4 tile;\n"
-    "flat in vec3 lbpl;\n"
+    "flat in vec4 lbpl;\n"
     "out vec4 frag_color;\n"
+    "const int LOG2[128] = int[128](" GAME_RENDER_LOG2_TABLE ");\n"
+    /* ldexp(1.0, e), which GLSL ES 3.00 lacks: exact for |e| <= 30 */
+    "float pow2i(int e) { return e >= 0 ? float(1 << min(e, 30)) : 1.0 / float(1 << min(-e, 30)); }\n"
     "bool has(int bit) { return (int(lbpl.z + 0.5) & bit) != 0; }\n"
+    "int fast_log2(float z) {\n"
+    "  if (z <= 0.0) return 0;\n"
+    "  float e = floor(log2(z));\n"
+    "  float m = z / pow2i(int(e));\n"
+    "  if (m >= 2.0) { e += 1.0; m *= 0.5; }\n"
+    "  if (m < 1.0) { e -= 1.0; m *= 2.0; }\n"
+    "  return int(e) * 256 + LOG2[min(int((m - 1.0) * 128.0), 127)];\n"
+    "}\n"
     "ivec4 level_tile(int L) {\n"
     "  int sheet = has(4) ? 1 : 0;\n"
     "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
@@ -383,13 +411,20 @@ static const char *game_render_fill_fs_ref_glsl =
     "  return vec2(mix(row0, row1, f.y), a);\n"
     "}\n"
     "void main() {\n"
-    "  float lmax = max(log2(max(min(tile.z, tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lmax = floor(log2(max(min(tile.z, tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
     "  if (has(2) && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
     "  vec3 rgb = color.rgb;\n"
     "  if (tile.z > 0.0) {\n"
     "    int L0 = int(floor(lod));\n"
-    "    vec2 tx = mix(sample_level(L0), sample_level(L0 + 1), fract(lod));\n"
+    "    float blend = fract(lod);\n"
+    "    if (lbpl.w < 100000.0) {\n"
+    "      int mml = fast_log2(ez) - int(lbpl.w);\n"
+    "      int maxl = int(lmax);\n"
+    "      L0 = clamp(mml >= 0 ? mml / 128 : -((127 - mml) / 128), 0, maxl);\n"
+    "      blend = (mml > 0 && L0 < maxl) ? float((mml % 128) * 2) / 256.0 : 0.0;\n"
+    "    }\n"
+    "    vec2 tx = mix(sample_level(L0), sample_level(L0 + 1), blend);\n"
     "    if (has(1) && tx.y < 0.5) discard;\n"
     "    float al = tx.x;\n"
     "    if (lbpl.x < 0.0) {\n"
@@ -397,8 +432,8 @@ static const char *game_render_fill_fs_ref_glsl =
     "    } else {\n"
     "      int lbyte = 2 * (int(lbpl.x) + int(al * 120.0));\n"
     "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
-    "      float poly = clamp(lbpl.y, 0.0, 1.0) * 255.0;\n"
-    "      int li = int(min(lram * poly / 256.0, 63.0) + 0.5);\n"
+    "      float poly = floor(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5);\n"
+    "      int li = int(min(floor(lram * poly / 256.0), 63.0));\n"
     "      int r5 = int(color.r*31.0+0.5), g5 = int(color.g*31.0+0.5), b5 = int(color.b*31.0+0.5);\n"
     "      int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
     "      float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
@@ -410,7 +445,7 @@ static const char *game_render_fill_fs_ref_glsl =
     "  } else if (lbpl.x < 0.0) {\n"
     "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
     "  } else {\n"
-    "    int li = min(int(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5) >> 2, 63);\n"
+    "    int li = min(int(floor(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5)) >> 2, 63);\n"
     "    int r5 = int(color.r*31.0+0.5), g5 = int(color.g*31.0+0.5), b5 = int(color.b*31.0+0.5);\n"
     "    int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
     "    float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
@@ -439,13 +474,25 @@ static const char *game_render_fill_fs_glsl =
     "uniform sampler2D cxlat_smp;\n"
     "in vec4 color;\n"
     "in vec2 uv;\n"
+    "in float ez;\n"
     "flat in vec4 tile;\n"
-    "flat in vec3 lbpl;\n"
+    "flat in vec4 lbpl;\n"
     "uniform sampler2D ramp_smp;\n"
     "flat in ivec4 face;\n"
     "flat in ivec2 tile_log2;\n"
     "flat in int ramp_row;\n"
     "out vec4 frag_color;\n"
+    "const int LOG2[128] = int[128](" GAME_RENDER_LOG2_TABLE ");\n"
+    /* ldexp(1.0, e), which GLSL ES 3.00 lacks: exact for |e| <= 30 */
+    "float pow2i(int e) { return e >= 0 ? float(1 << min(e, 30)) : 1.0 / float(1 << min(-e, 30)); }\n"
+    "int fast_log2(float z) {\n"
+    "  if (z <= 0.0) return 0;\n"
+    "  float e = floor(log2(z));\n"
+    "  float m = z / pow2i(int(e));\n"
+    "  if (m >= 2.0) { e += 1.0; m *= 0.5; }\n"
+    "  if (m < 1.0) { e -= 1.0; m *= 2.0; }\n"
+    "  return int(e) * 256 + LOG2[min(int((m - 1.0) * 128.0), 127)];\n"
+    "}\n"
     "ivec4 level_tile(int L) {\n"
     "  int sheet = (face.x & 4) != 0 ? 1 : 0;\n"
     "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
@@ -503,15 +550,21 @@ static const char *game_render_fill_fs_glsl =
     "  return clamp(max(ramp(li) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "}\n"
     "void main() {\n"
-    "  float lmax = max(log2(max(min(tile.z, tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lmax = floor(log2(max(min(tile.z, tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
     "  if ((face.x & 2) != 0 && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
     "  vec3 rgb = color.rgb;\n"
     "  if (tile.z > 0.0) {\n"
     "    int L0 = int(floor(lod));\n"
-    "    float lf = fract(lod);\n"
+    "    float blend = fract(lod);\n"
+    "    if (lbpl.w < 100000.0) {\n"
+    "      int mml = fast_log2(ez) - int(lbpl.w);\n"
+    "      int maxl = int(lmax);\n"
+    "      L0 = clamp(mml >= 0 ? mml / 128 : -((127 - mml) / 128), 0, maxl);\n"
+    "      blend = (mml > 0 && L0 < maxl) ? float((mml % 128) * 2) / 256.0 : 0.0;\n"
+    "    }\n"
     "    vec2 tx = sample_level(L0);\n"
-    "    if (lf != 0.0) tx = mix(tx, sample_level(L0 + 1), lf);\n"
+    "    if (blend != 0.0) tx = mix(tx, sample_level(L0 + 1), blend);\n"
     "    if ((face.x & 1) != 0 && tx.y < 0.5) discard;\n"
     "    float al = tx.x;\n"
     "    if (lbpl.x < 0.0) {\n"
@@ -519,14 +572,14 @@ static const char *game_render_fill_fs_glsl =
     "    } else {\n"
     "      int lbyte = 2 * (int(lbpl.x) + int(al * 120.0));\n"
     "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
-    "      float poly = clamp(lbpl.y, 0.0, 1.0) * 255.0;\n"
-    "      int li = int(min(lram * poly / 256.0, 63.0) + 0.5);\n"
+    "      float poly = floor(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5);\n"
+    "      int li = int(min(floor(lram * poly / 256.0), 63.0));\n"
     "      rgb = shade(li);\n"
     "    }\n"
     "  } else if (lbpl.x < 0.0) {\n"
     "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
     "  } else {\n"
-    "    int li = min(int(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5) >> 2, 63);\n"
+    "    int li = min(int(floor(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5)) >> 2, 63);\n"
     "    rgb = shade(li);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
@@ -534,12 +587,12 @@ static const char *game_render_fill_fs_glsl =
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
-    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float3 lbpl : TEXCOORD2; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float3 lbpl : TEXCOORD2; };\n"
+    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float4 lbpl : TEXCOORD2; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
-    "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl;\n"
+    "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl; outp.ez = -inp.pos.z;\n"
     "  return outp;\n"
     "}\n";
 
@@ -548,8 +601,17 @@ static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> lumat : register(t1);\n"
     "Texture2D<float4> cxlat : register(t2);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float3 lbpl : TEXCOORD2; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; };\n"
+    "static const int LOG2[128] = { " GAME_RENDER_LOG2_TABLE " };\n"
     "bool has(float fl, int bit) { return (((int)(fl + 0.5)) & bit) != 0; }\n"
+    "int fast_log2(float z) {\n"
+    "  if (z <= 0.0) return 0;\n"
+    "  float e = floor(log2(z));\n"
+    "  float m = z / ldexp(1.0, e);\n"
+    "  if (m >= 2.0) { e += 1.0; m *= 0.5; }\n"
+    "  if (m < 1.0) { e -= 1.0; m *= 2.0; }\n"
+    "  return (int)e * 256 + LOG2[min((int)((m - 1.0) * 128.0), 127)];\n"
+    "}\n"
     "int4 level_tile(float4 tile, float fl, int L) {\n"
     "  int sheet = has(fl, 4) ? 1 : 0;\n"
     "  uint x = ((uint)(int)tile.x - 2048u) >> (uint)L;\n"
@@ -594,14 +656,21 @@ static const char *game_render_fill_fs_hlsl =
     "}\n"
     "float4 main(fs_in inp) : SV_Target0 {\n"
     "  float fl = inp.lbpl.z;\n"
-    "  float lmax = max(log2(max(min(inp.tile.z, inp.tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lmax = floor(log2(max(min(inp.tile.z, inp.tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(ddx(inp.uv)), length(ddy(inp.uv)))), 0.0, lmax);\n"
     "  if (has(fl, 2) && ((((int)inp.pos.x) ^ ((int)inp.pos.y)) & 1) == 0) discard;\n"
     "  float3 rgb = inp.color.rgb;\n"
     "  if (inp.tile.z > 0.0) {\n"
     "    int L0 = (int)floor(lod);\n"
+    "    float blend = frac(lod);\n"
+    "    if (inp.lbpl.w < 100000.0) {\n"
+    "      int mml = fast_log2(inp.ez) - (int)inp.lbpl.w;\n"
+    "      int maxl = (int)lmax;\n"
+    "      L0 = clamp(mml >= 0 ? mml / 128 : -((127 - mml) / 128), 0, maxl);\n"
+    "      blend = (mml > 0 && L0 < maxl) ? (float)((mml % 128) * 2) / 256.0 : 0.0;\n"
+    "    }\n"
     "    float2 tx = lerp(sample_level(inp.uv, inp.tile, fl, L0),\n"
-    "                     sample_level(inp.uv, inp.tile, fl, L0 + 1), frac(lod));\n"
+    "                     sample_level(inp.uv, inp.tile, fl, L0 + 1), blend);\n"
     "    if (has(fl, 1) && tx.y < 0.5) discard;\n"
     "    float al = tx.x;\n"
     "    if (inp.lbpl.x < 0.0) {\n"
@@ -609,8 +678,8 @@ static const char *game_render_fill_fs_hlsl =
     "    } else {\n"
     "      int lbyte = 2 * ((int)inp.lbpl.x + (int)(al * 120.0));\n"
     "      float lram = lumat.Load(int3(lbyte & 255, lbyte >> 8, 0)).r * 255.0;\n"
-    "      float poly = clamp(inp.lbpl.y, 0.0, 1.0) * 255.0;\n"
-    "      int li = (int)(min(lram * poly / 256.0, 63.0) + 0.5);\n"
+    "      float poly = floor(clamp(inp.lbpl.y, 0.0, 1.0) * 255.0 + 0.5);\n"
+    "      int li = (int)min(floor(lram * poly / 256.0), 63.0);\n"
     "      int r5 = (int)(inp.color.r*31.0+0.5), g5 = (int)(inp.color.g*31.0+0.5), b5 = (int)(inp.color.b*31.0+0.5);\n"
     "      int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
     "      float cr = cxlat.Load(int3(br & 255, br >> 8, 0)).r * 255.0;\n"
@@ -622,7 +691,7 @@ static const char *game_render_fill_fs_hlsl =
     "  } else if (inp.lbpl.x < 0.0) {\n"
     "    rgb = inp.color.rgb * clamp(inp.lbpl.y, 0.0, 1.0);\n"
     "  } else {\n"
-    "    int li = min(((int)(clamp(inp.lbpl.y, 0.0, 1.0) * 255.0 + 0.5)) >> 2, 63);\n"
+    "    int li = min(((int)floor(clamp(inp.lbpl.y, 0.0, 1.0) * 255.0 + 0.5)) >> 2, 63);\n"
     "    int r5 = (int)(inp.color.r*31.0+0.5), g5 = (int)(inp.color.g*31.0+0.5), b5 = (int)(inp.color.b*31.0+0.5);\n"
     "    int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
     "    float cr = cxlat.Load(int3(br & 255, br >> 8, 0)).r * 255.0;\n"
@@ -979,7 +1048,7 @@ static inline void game_render_init(void) {
         p.layout.attrs[2].offset   = offsetof(game_render_tex_vertex_t, u);
         p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
         p.layout.attrs[3].offset   = offsetof(game_render_tex_vertex_t, tx);
-        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT3;
+        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT4;
         p.layout.attrs[4].offset   = offsetof(game_render_tex_vertex_t, lb);
         p.layout.buffers[0].stride = sizeof(game_render_tex_vertex_t);
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
@@ -1452,7 +1521,7 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
         float lb = g_luma_ramp ? T->lb : -1.0f;   /* -1 → old flat_color×luma path */
         for (int _k = 0; _k < 3; _k++) {
             v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
-            v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=T->fl;
+            v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=T->fl; v[_k].texlod=T->texlod;
         }
     }
     int vcount = n * 3;
@@ -1587,7 +1656,7 @@ static inline void game_render_batch_flush(bool lines_only) {
             for (int k = 0; k < 3; k++) {
                 v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=ramp;
                 v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
-                v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=T->fl;
+                v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=T->fl; v[k].texlod=T->texlod;
             }
         }
         sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
@@ -1722,6 +1791,8 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_obj_tpa = cm->tpa;
                 g_geo3d_obj_tha = cm->tha;
                 g_geo3d_board_luma = 1;
+                g_geo3d_mode = cm->geo_mode;
+                g_geo3d_lod  = cm->geo_lod;
                 if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
                     uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
                     g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
