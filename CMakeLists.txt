@@ -156,7 +156,8 @@ else() # Linux / BSD
     add_library(sokol STATIC ${SRC}/sokol_impl.c)
     target_compile_definitions(sokol PUBLIC SOKOL_GLCORE)
     find_package(Threads REQUIRED)
-    target_link_libraries(sokol PUBLIC X11 Xi Xcursor GL dl m Threads::Threads)
+    # asound: sokol_audio's Linux backend is ALSA (audio_out.h plays the sound board).
+    target_link_libraries(sokol PUBLIC X11 Xi Xcursor GL asound dl m Threads::Threads)
 endif()
 target_include_directories(sokol PUBLIC ${VENDOR}/sokol ${VENDOR}/sokol/util)
 # sokol_imgui pulls in cimgui; sokol's TU must see the cimgui headers.
