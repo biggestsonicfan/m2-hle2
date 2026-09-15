@@ -229,6 +229,8 @@ typedef struct {
     int16_t  vp[4];
     uint16_t window;
     float    light[3];
+    uint32_t geo_mode;      /* the list's mode word (bit 0: specular) and LOD scale */
+    float    geo_lod;       /* when the object was drawn (model2_v.cpp commands 07, 16) */
     uint32_t tpa, tha;      /* the object command's texture point / header addresses */
     /* Debug fields populated by the scanner */
     uint32_t dbg_mesh_ptr;
@@ -268,7 +270,17 @@ typedef struct {
     float tx, ty, tw, th;        /* atlas tile rect (pixels); tw<=0 → untextured */
     float lb, pl;                /* lumabase (lumaram band) + poly_luma (0..1 lighting) */
     float fl;                    /* GEO3D_FACE_* bits, carried as a float to the shader */
+    float texlod;                /* the board's per-polygon texlod, or GEO3D_TEXLOD_NONE */
 } geo3d_tri_t;
+
+/* A polygon's texture LOD as the rasterizer takes it (model2_v.cpp, raster
+ * command 01): log2 of the geometrizer's LOD distance in 1/128ths, the integer
+ * part from the float's exponent and the fraction out of log RAM. The fill
+ * picks the mip level per pixel as (log2(z^2) - texlod) >> 7. Faces not drawn
+ * from a display list carry NONE, and the shader falls back to screen-space
+ * derivatives for them. */
+#define GEO3D_TEXLOD_NONE 1.0e6f
+static float g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
 
 /* Per-face fill flags out of the texture header — the same bits, in the same
  * places, as the explorer's face flags (vendor/noclip js/model.js), so
@@ -363,6 +375,7 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
     T->r=r;   T->g=g;   T->b=b;
     T->tx=tx; T->ty=ty; T->tw=tw; T->th=th;
     T->lb=lb; T->pl=pl; T->fl=fl;
+    T->texlod = g_geo3d_emit_texlod;
 }
 
 /* Backward-compatible: untextured triangle (tw=0 → shader uses flat color). */
@@ -1341,10 +1354,15 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
  * A polygon's attribute word names its slot, bits 18..22. While
  * g_geo3d_board_luma is set the decoder lights faces with them the way the
  * geometrizer does (geo_parse_np_ns) instead of its fixed approximation:
- *   luminance = (N.L * N.P < 0) ? 0 : |N.L|,  luma = clamp(luminance*diffuse + ambient, 0, 255)
+ *   luminance = (N.L * N.P < 0) ? 0 : |N.L|,  luma = clamp(luminance*diffuse + ambient + specular, 0, 255)
  * N the polygon's own normal from ROM, L the list's light vector, P a corner,
- * all in eye space. */
+ * all in eye space. Specular is the z of L reflected about N, raised by the
+ * slot's control and scaled, and only in a mode with bit 0 set (geo_parse_np_s).
+ * The same pass gives each face the rasterizer's texlod from the slot's
+ * distance coefficient, |N.P| and the list's LOD scale. */
 static int            g_geo3d_board_luma  = 0;
+static uint32_t       g_geo3d_mode        = 0;
+static float          g_geo3d_lod         = 0.0f;
 /* A mesh in polygon RAM rather than ROM (an object address without bit 23):
  * while set, the decoder reads it from here, with the texture addresses above. */
 static const uint8_t *g_geo3d_obj_mesh      = NULL;
@@ -1399,6 +1417,9 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
     float    raw[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };   /* column-major, as the COP wrote it */
     float    fx = 280.0f, fy = 280.0f;
     float    light[3] = { 0.0f, 0.0f, 1.0f };
+    /* Mode and LOD are the geometrizer's own state and outlive a list. */
+    static uint32_t mode = 0;
+    static float    lod  = 0.0f;
     int16_t  wvp[4]  = { 0, 0, 496, 384 };                /* viewport, list coordinates */
     int16_t  wc[4][2] = { {248, 192}, {248, 192}, {248, 192}, {248, 192} };
     int      window = 0;
@@ -1455,6 +1476,8 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
                 cm->vp[3] = (int16_t)((384 - wvp[1]) + yoff);
                 cm->window   = (uint16_t)window;
                 cm->light[0] = light[0]; cm->light[1] = light[1]; cm->light[2] = -light[2];
+                cm->geo_mode = mode;
+                cm->geo_lod  = lod;
                 cm->dbg_mesh_ptr = A(2);
                 cm->tpa = A(0);
                 cm->tha = A(1);
@@ -1483,8 +1506,9 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
              * (geodl_apply_state) applied them when the list was published */
             case 0x04: case 0x14: case 0x05: case 0x15: len = 2 + A(1); break;
             case 0x06: len = 2 + 2 * A(1); break;
-            case 0x07: case 0x17: case 0x08: case 0x18:
-            case 0x10: case 0x16: case 0x1E: len = 1; break;
+            case 0x07: case 0x17: len = 1; mode = A(0); break;
+            case 0x16:            len = 1; lod = u32_as_float(A(0)); break;
+            case 0x08: case 0x18: case 0x10: case 0x1E: len = 1; break;
             case 0x09: case 0x19:                              /* focal lengths */
                 len = 2;
                 fx = u32_as_float(A(0)); fy = u32_as_float(A(1));
@@ -1854,6 +1878,7 @@ static inline void geo3d_decode_model(int model_idx,
          * ramp can use it (luma6 = lumaram[lumabase+texel]*poly_luma/256).
          * Normal = cross of the transformed edges (two-sided via |dot|). */
         float pl = 1.0f;
+        g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
         bool board_cull = false;             /* the geometrizer would not draw this face */
         vec3_t fn = (fi < n_qt) ? qn[fi] : (vec3_t){0, 0, 0};
         /* No fallback to the approximation for a zero normal: the board lights
@@ -1870,11 +1895,31 @@ static inline void geo3d_decode_model(int model_idx,
              * (bits 8..9) is never drawn. */
             uint32_t at = (fi < n_qt) ? qa[fi] : 0u;
             board_cull = (((at >> 17) & 1u) == 0 && dotp < 0.0f) || ((at >> 8) & 3u) == 0;
-            const float *tp = g_geo_texparam[(qa[fi] >> 18) & 0x1F];
-            float luma = lum * tp[0] + tp[1];
+            const float *tp = g_geo_texparam[(at >> 18) & 0x1F];
+            float spec = 0.0f;
+            if (g_geo3d_mode & 1u) {
+                /* Board z is this space's -z, for the normal and the light alike. */
+                uint32_t ctl = (uint32_t)tp[3];
+                spec = g_light_dir[2] - 2.0f * dotl * nz;
+                if (spec < 0.0f || ctl == 0) spec = 0.0f;
+                if ((ctl >> 1) != 0) spec *= spec;
+                if ((ctl >> 2) != 0) spec *= spec;
+                if (((ctl + 1) >> 3) != 0) spec *= spec;
+                spec *= tp[2];
+            }
+            float luma = lum * tp[0] + tp[1] + spec;
             if (luma < 0.0f) luma = 0.0f;
             if (luma > 255.0f) luma = 255.0f;
-            pl = luma / 255.0f;
+            pl = (float)(int)luma / 255.0f;
+            /* The rasterizer gets f2u(distance) >> 8 and splits it: exponent
+             * (bits 23-30) as the integer part, the next 15 bits' log from log
+             * RAM as the fraction. A zero distance gives texlod 0 (the oracle's
+             * model2_v.cpp; stock MAME would pick the coarsest level). */
+            float dist = g_geo_coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
+            uint32_t db;
+            memcpy(&db, &dist, 4);
+            g_geo3d_emit_texlod = (db >> 8) == 0 ? 0.0f
+                : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_logram[(db >> 8) & 0x7FFFu]);
         } else if (g_light_enable && has_C) {
             float e1x=B.x-A.x, e1y=B.y-A.y, e1z=B.z-A.z;
             float e2x=C.x-A.x, e2y=C.y-A.y, e2z=C.z-A.z;
@@ -1948,6 +1993,7 @@ static inline void geo3d_decode_model(int model_idx,
         }
         efi++;   /* this face was emitted → consumes one material record */
     }
+    g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
 }
 
 /* ---- Programmatic per-model texture extractor -------------------------------

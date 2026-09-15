@@ -211,13 +211,18 @@ static volatile int g_geodl_snap_seq      = 0;
 /* What a display list leaves behind in the geometrizer for later frames
  * (model2_v.cpp): texture RAM (command 4, addresses with bit 23), the two
  * polygon RAMs objects can be built in (command 5; bit 24 of the address picks
- * the fast one), and the 32 material slots (command 6: diffuse, ambient). A
- * list can upload once and draw for many frames, so these are applied on the
- * emulator thread to every list as it is published, not by the renderer, which
- * only ever sees the latest. */
+ * the fast one), the 32 material slots (command 6: diffuse, ambient, specular
+ * scale and control, and the slot's LOD distance coefficient) and log RAM
+ * (command 0x14, or command 4 to an address without bit 23 — the rasterizer's
+ * log2 table for the mantissa of a polygon's LOD distance). A list can upload
+ * once and draw for many frames, so these are applied on the emulator thread
+ * to every list as it is published, not by the renderer, which only ever sees
+ * the latest. */
 static uint16_t g_geo_texram_words[0x10000];
 static uint32_t g_geo_polyram[2][0x8000];          /* [0] slow, [1] fast */
-static float    g_geo_texparam[32][2];
+static float    g_geo_texparam[32][4];             /* diffuse, ambient, specular scale, specular control */
+static float    g_geo_coef[32];                    /* distance coefficient, indexed by attribute >> 27 */
+static uint8_t  g_geo_logram[0x8000];
 
 static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart) {
     uint32_t p = (rstart & 0x1FFFFu) >> 2;
@@ -233,8 +238,20 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             case 0x04: {
                 uint32_t addr = LA(0), cnt = LA(1);
                 len = 2 + cnt;
-                if (addr & 0x800000u)
-                    for (uint32_t k = 0; k < cnt; k++) g_geo_texram_words[(addr + k) & 0xFFFFu] = (uint16_t)LA(2 + k);
+                for (uint32_t k = 0; k < cnt; k++) {
+                    if (addr & 0x800000u) g_geo_texram_words[(addr + k) & 0xFFFFu] = (uint16_t)LA(2 + k);
+                    else                  g_geo_logram[(addr + k) & 0x7FFFu] = (uint8_t)LA(2 + k);
+                }
+                break;
+            }
+            case 0x14: {                    /* log data: a byte at a time, through command 4's write */
+                uint32_t addr = LA(0), cnt = LA(1);
+                len = 2 + cnt;
+                for (uint32_t k = 0; k < 4u * cnt; k++) {
+                    uint8_t b = (uint8_t)(LA(2 + k / 4u) >> (8u * (k % 4u)));
+                    if (addr & 0x800000u) g_geo_texram_words[(addr + k) & 0xFFFFu] = b;
+                    else                  g_geo_logram[(addr + k) & 0x7FFFu] = b;
+                }
                 break;
             }
             case 0x05: case 0x15: {
@@ -248,13 +265,15 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
                 uint32_t index = LA(0) >> 2, cnt = LA(1);
                 len = 2 + 2 * cnt;
                 for (uint32_t k = 0; k < cnt; k++, index++) {
-                    uint32_t param = LA(2 + 2 * k);
+                    uint32_t param = LA(2 + 2 * k), coef = LA(3 + 2 * k);
                     g_geo_texparam[index & 0x1F][0] = (float)(param & 0xFF);
                     g_geo_texparam[index & 0x1F][1] = (float)((param >> 8) & 0xFF);
+                    g_geo_texparam[index & 0x1F][2] = (float)((param >> 16) & 0xFF);
+                    g_geo_texparam[index & 0x1F][3] = (float)((param >> 24) & 0xFF);
+                    memcpy(&g_geo_coef[index & 0x1F], &coef, 4);
                 }
                 break;
             }
-            case 0x14: len = 2 + LA(1); break;
             case 0x07: case 0x17: case 0x08: case 0x18: case 0x10: case 0x16: case 0x1E: len = 1; break;
             case 0x09: case 0x19: case 0x0D: len = 2; break;
             case 0x0A: case 0x1A: case 0x0C: case 0x1C: len = 3; break;
