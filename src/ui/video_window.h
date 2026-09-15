@@ -36,6 +36,8 @@ typedef struct {
     uint8_t       back_pixel[4];   /* 1×1 back-back colour, stretched over the view */
     tile_layers_t layers;
     bool          initialized;
+    bool          composed;       /* layers + textures hold the bus state at composed_gen */
+    uint32_t      composed_gen;
 } video_state_t;
 
 static inline sg_image video__make_img(const char *label) {
@@ -77,6 +79,7 @@ static inline void video_init(video_state_t *vid) {
         .label      = "game-sampler",
     });
 
+    vid->composed    = false;
     vid->initialized = true;
 }
 
@@ -101,6 +104,14 @@ static inline void video_shutdown(video_state_t *vid) {
  */
 static inline void video_update(video_state_t *vid, memory_bus_t *bus) {
     if (!vid->initialized) return;
+
+    /* Nothing 2D changed since the last compose: the layers and the uploaded
+     * textures already show it. Sample the generation before composing, so a
+     * write that lands mid-compose makes the next frame compose again. */
+    uint32_t gen = bus->gen_2d;
+    if (vid->composed && gen == vid->composed_gen) return;
+    vid->composed     = true;
+    vid->composed_gen = gen;
 
     render_bg_layer(bus, &vid->layers);
     render_fg_layer(bus, &vid->layers);

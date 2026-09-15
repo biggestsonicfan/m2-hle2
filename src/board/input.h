@@ -73,19 +73,22 @@ static inline int input_keycode_to_action(int kc) {
     }
 }
 
-static inline void input_key_down(int kc) {
-    int act = input_keycode_to_action(kc);
+/* Press / release an abstract action (GAME_INPUT_*) — the entry point for any
+ * host device: the keyboard below, a gamepad in main_sdl.c. */
+static inline void input_action_down(int act) {
     if (act < 0 || act >= GAME_INPUT_COUNT || !g_active_profile) return;
     uint32_t bit = g_active_profile->input.bits[act];
     if (bit) g_input.held |= bit;
 }
 
-static inline void input_key_up(int kc) {
-    int act = input_keycode_to_action(kc);
+static inline void input_action_up(int act) {
     if (act < 0 || act >= GAME_INPUT_COUNT || !g_active_profile) return;
     uint32_t bit = g_active_profile->input.bits[act];
     if (bit) g_input.held &= ~bit;
 }
+
+static inline void input_key_down(int kc) { input_action_down(input_keycode_to_action(kc)); }
+static inline void input_key_up(int kc)   { input_action_up(input_keycode_to_action(kc)); }
 
 /* ---- I/O port serving ---------------------------------------------------- */
 

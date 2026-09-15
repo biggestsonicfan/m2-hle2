@@ -58,6 +58,8 @@ static inline void bp_remove(int index) {
 
 /* Called from the emu thread before each instruction. */
 static inline int bp_check(uint32_t ip) {
+    /* Walking all BP_MAX slots per instruction was half the emu thread's cost. */
+    if (g_bp.count == 0) return 0;
     for (int i = 0; i < BP_MAX; i++) {
         if (g_bp.list[i].active && g_bp.list[i].enabled && g_bp.list[i].addr == ip) {
             g_bp.hit = 1;

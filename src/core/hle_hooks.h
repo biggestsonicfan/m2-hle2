@@ -89,6 +89,12 @@ static inline void hle_interrupt(i960_cpu_t *cpu, uint32_t handler) {
     }
 }
 
+/* One bit per (ip >> 2) & 0xFFF, set for every hook address of the profile it
+ * was built for: a clear bit means no hook can match, so the table walk is
+ * skipped for nearly every instruction. */
+static const game_profile_t *s_hle_filter_profile = NULL;
+static uint8_t               s_hle_filter[4096 / 8];
+
 /* Dispatch: walk the active profile's hook table and call the first match. */
 static inline int hle_check(i960_cpu_t *cpu, memory_bus_t *bus) {
     if (!g_active_profile || g_active_profile->hook_count == 0)
@@ -96,6 +102,17 @@ static inline int hle_check(i960_cpu_t *cpu, memory_bus_t *bus) {
     uint32_t ip = cpu->sfr.ip;
     const hle_hook_entry_t *h = g_active_profile->hooks;
     size_t n = g_active_profile->hook_count;
+    if (s_hle_filter_profile != g_active_profile) {
+        memset(s_hle_filter, 0, sizeof(s_hle_filter));
+        for (size_t i = 0; i < n; i++) {
+            uint32_t k = (h[i].addr >> 2) & 0xFFFu;
+            s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
+        }
+        s_hle_filter_profile = g_active_profile;
+    }
+    uint32_t k = (ip >> 2) & 0xFFFu;
+    if (!(s_hle_filter[k >> 3] & (1u << (k & 7u))))
+        return 1;
     for (size_t i = 0; i < n; i++) {
         if (h[i].addr == ip)
             return h[i].fn(cpu, bus);

@@ -236,35 +236,60 @@ static inline void render_sys24_pair(const memory_bus_t *bus, uint16_t *out,
     bool window    = (vc & 0x6000) != 0;
     bool rowscroll = (hscr & 0x8000) != 0;
 
+    /* Every lookup below stays in bounds without the checks tile_sample_px makes:
+     * the char index is 14 bits, the palette bank 8, the tilemap 64x64 words. */
+    _Static_assert(0x3FFF * 32 + 32 <= TMAPGFX_SIZE, "tile gfx index fits");
+    _Static_assert(0xFF * 32 + 32 <= PALETTE_SIZE, "palette bank fits");
+    _Static_assert(0x6000 + 64 * 64 * 2 <= TILE_SIZE, "tilemap fits");
+    const uint8_t *tile = bus->tile, *gfx = bus->tmapgfx, *pal = bus->palette;
+
     for (int sy = 0; sy < VIDEO_HEIGHT; sy++) {
-        int wy = sy + vy;
+        int wy = (sy + vy) & (MH * 8 - 1);
         uint16_t rh = rowscroll ? tileram_word(bus, hstb_w + (uint32_t)sy) : hscr;
         int h = rh & 0x1ff;
         /* Per-row window split (MAME case 2/3): left of x=h uses l1, right uses
          * l1^1, where l1 = (rh & 0x200) ? even-layer : odd-layer. */
         int l1_is_even = (rh & 0x200) ? 1 : 0;
+        uint32_t map_row = (uint32_t)(wy >> 3) * MW;
+        uint32_t gfx_row = (uint32_t)(wy & 7) * 4;
+        int i = sy * VIDEO_WIDTH;
 
-        for (int sx = 0; sx < VIDEO_WIDTH; sx++) {
-            uint32_t tmap;
+        /* Pixels come in runs that share one tilemap entry: up to the tile's
+         * right edge, the window split at x=h, or the screen edge. Each run
+         * decodes the entry once, as tile_sample_px would for every pixel. */
+        for (int sx = 0; sx < VIDEO_WIDTH; ) {
+            int wx  = (sx + h) & (MW * 8 - 1);
+            int run = 8 - (wx & 7);
+            uint32_t tmap = l0_off;   /* plain single-layer / uniform scroll */
             if (window && rowscroll) {
                 int left = (sx < h);
+                if (left && h - sx < run) run = h - sx;
                 int use_even = left ? l1_is_even : !l1_is_even;
                 tmap = use_even ? l0_off : l1_off;
-            } else {
-                tmap = l0_off;   /* plain single-layer / uniform scroll */
             }
-            uint8_t ci, pr;
-            uint16_t color = tile_sample_px(bus, tmap, MW, MH, sx + h, wy, &ci, &pr);
-            int i = sy * VIDEO_WIDTH + sx;
-            /* Route bit15-clear (behind-3D) pixels to the lo buffer when provided. */
-            if (out_lo && !opaque && ci != 0 && pr == 0) {
-                out_lo[i] = color;
-                if (alpha_lo) alpha_lo[i] = 255;
-                if (alpha)    alpha[i]    = 0;   /* not in the in-front (FG) layer */
-            } else {
-                out[i] = color;
-                if (alpha) alpha[i] = opaque ? 255 : (ci != 0 ? 255 : 0);
+            if (run > VIDEO_WIDTH - sx) run = VIDEO_WIDTH - sx;
+
+            uint32_t te = tmap + (map_row + (uint32_t)(wx >> 3)) * 2;
+            uint16_t entry = (uint16_t)(tile[te] | (tile[te + 1] << 8));
+            uint32_t pal_off = ((entry >> 7) & 0xFFu) * 32;   /* bank * 16 entries * 2 bytes */
+            const uint8_t *row = gfx + (uint32_t)(entry & 0x3FFF) * 32 + gfx_row;
+            uint8_t pr = (uint8_t)(entry >> 15);   /* bit15: 1 = in front of 3D */
+
+            for (int px = wx & 7, end = px + run; px < end; px++, i++) {
+                uint8_t b  = row[(px >> 1) ^ 1];   /* 16-bit byteswap within the row */
+                uint8_t ci = (px & 1) ? (b & 0x0F) : (b >> 4);
+                uint16_t color = (uint16_t)(pal[pal_off + ci * 2u] | (pal[pal_off + ci * 2u + 1] << 8));
+                /* Route bit15-clear (behind-3D) pixels to the lo buffer when provided. */
+                if (out_lo && !opaque && ci != 0 && pr == 0) {
+                    out_lo[i] = color;
+                    if (alpha_lo) alpha_lo[i] = 255;
+                    if (alpha)    alpha[i]    = 0;   /* not in the in-front (FG) layer */
+                } else {
+                    out[i] = color;
+                    if (alpha) alpha[i] = opaque ? 255 : (ci != 0 ? 255 : 0);
+                }
             }
+            sx += run;
         }
     }
 }
