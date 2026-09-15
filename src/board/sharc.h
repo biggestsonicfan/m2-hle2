@@ -44,7 +44,7 @@
 
 /* ---- Limits -------------------------------------------------------------- */
 
-#define SHARC_REPLY_MAX       32
+#define SHARC_REPLY_MAX       1024  /* Fn_osage answers 13 words a sway segment in one command */
 #define SHARC_UNKNOWN_LOG_MAX 64
 
 /* ---- State --------------------------------------------------------------- */
@@ -232,15 +232,201 @@ static inline void sharc_sincos(int32_t angle, float *s, float *c) {
     *c = cosf(r);
 }
 
-/* An angle the firmware hands back (_L202CA): its atan2 answers in [0, 2pi),
- * that times 0x4622F983 (32768/pi as a float), `fix`ed -- the COP runs with
- * MODE1 TRUNCATE -- then the low 16 bits, zero-extended; callers read it with
- * ldis. The wrap is what makes a hair below zero come back as 0xFFFF, not 0. */
-static inline uint32_t sharc_angle_word(float rad) {
-    if (rad < 0.0f) rad += 6.28318548f;
-    float scaled = rad * 10430.3779296875f;
-    return (uint32_t)(int32_t)scaled & 0xFFFFu;
+/* ---- The coprocessor's own arithmetic ------------------------------------
+ *
+ * The firmware never takes an exact square root, reciprocal or arctangent. It
+ * seeds from the chip's RSQRTS / RECIPS tables (8 bits of mantissa) and runs
+ * three Newton steps, and its atan2 is Analog Devices' runtime routine: range
+ * reduction by those divides and a rational minimax polynomial. The answers
+ * agree with sqrtf / 1/x / atan2f to six digits and differ in the low bits,
+ * and the i960 feeds them back: a fighter's facing, its distance to the other
+ * and the push-out between them go into next frame's positions. Host libm
+ * drifted the first attract fight off the board within ~350 frames and turned
+ * a thrown grab around 690 frames in, so each helper below is the firmware's
+ * register sequence, operation for operation (cpres1.asm), with the seeds from
+ * MAME's adsp21062 (compute.hxx). */
+
+static const uint32_t k_sharc_recips_lut[128] = {
+    0x007f8000, 0x007e0000, 0x007c0000, 0x007a0000, 0x00780000, 0x00760000, 0x00740000, 0x00720000,
+    0x00700000, 0x006f0000, 0x006d0000, 0x006b0000, 0x006a0000, 0x00680000, 0x00660000, 0x00650000,
+    0x00630000, 0x00610000, 0x00600000, 0x005e0000, 0x005d0000, 0x005b0000, 0x005a0000, 0x00590000,
+    0x00570000, 0x00560000, 0x00540000, 0x00530000, 0x00520000, 0x00500000, 0x004f0000, 0x004e0000,
+    0x004c0000, 0x004b0000, 0x004a0000, 0x00490000, 0x00470000, 0x00460000, 0x00450000, 0x00440000,
+    0x00430000, 0x00410000, 0x00400000, 0x003f0000, 0x003e0000, 0x003d0000, 0x003c0000, 0x003b0000,
+    0x003a0000, 0x00390000, 0x00380000, 0x00370000, 0x00360000, 0x00350000, 0x00340000, 0x00330000,
+    0x00320000, 0x00310000, 0x00300000, 0x002f0000, 0x002e0000, 0x002d0000, 0x002c0000, 0x002b0000,
+    0x002a0000, 0x00290000, 0x00280000, 0x00280000, 0x00270000, 0x00260000, 0x00250000, 0x00240000,
+    0x00230000, 0x00230000, 0x00220000, 0x00210000, 0x00200000, 0x001f0000, 0x001f0000, 0x001e0000,
+    0x001d0000, 0x001c0000, 0x001c0000, 0x001b0000, 0x001a0000, 0x00190000, 0x00190000, 0x00180000,
+    0x00170000, 0x00170000, 0x00160000, 0x00150000, 0x00140000, 0x00140000, 0x00130000, 0x00120000,
+    0x00120000, 0x00110000, 0x00100000, 0x00100000, 0x000f0000, 0x000f0000, 0x000e0000, 0x000d0000,
+    0x000d0000, 0x000c0000, 0x000c0000, 0x000b0000, 0x000a0000, 0x000a0000, 0x00090000, 0x00090000,
+    0x00080000, 0x00070000, 0x00070000, 0x00060000, 0x00060000, 0x00050000, 0x00050000, 0x00040000,
+    0x00040000, 0x00030000, 0x00030000, 0x00020000, 0x00020000, 0x00010000, 0x00010000, 0x00000000,
+};
+
+static const uint32_t k_sharc_rsqrts_lut[128] = {
+    0x00350000, 0x00330000, 0x00320000, 0x00300000, 0x002f0000, 0x002e0000, 0x002d0000, 0x002b0000,
+    0x002a0000, 0x00290000, 0x00280000, 0x00270000, 0x00260000, 0x00250000, 0x00230000, 0x00220000,
+    0x00210000, 0x00200000, 0x001f0000, 0x001e0000, 0x001e0000, 0x001d0000, 0x001c0000, 0x001b0000,
+    0x001a0000, 0x00190000, 0x00180000, 0x00170000, 0x00160000, 0x00160000, 0x00150000, 0x00140000,
+    0x00130000, 0x00130000, 0x00120000, 0x00110000, 0x00100000, 0x00100000, 0x000f0000, 0x000e0000,
+    0x000e0000, 0x000d0000, 0x000c0000, 0x000b0000, 0x000b0000, 0x000a0000, 0x000a0000, 0x00090000,
+    0x00080000, 0x00080000, 0x00070000, 0x00070000, 0x00060000, 0x00050000, 0x00050000, 0x00040000,
+    0x00040000, 0x00030000, 0x00030000, 0x00020000, 0x00020000, 0x00010000, 0x00010000, 0x00000000,
+    0x007f8000, 0x007e0000, 0x007c0000, 0x007a0000, 0x00780000, 0x00760000, 0x00740000, 0x00730000,
+    0x00710000, 0x006f0000, 0x006e0000, 0x006c0000, 0x006a0000, 0x00690000, 0x00670000, 0x00660000,
+    0x00640000, 0x00630000, 0x00620000, 0x00600000, 0x005f0000, 0x005e0000, 0x005c0000, 0x005b0000,
+    0x005a0000, 0x00590000, 0x00570000, 0x00560000, 0x00550000, 0x00540000, 0x00530000, 0x00520000,
+    0x00510000, 0x004f0000, 0x004e0000, 0x004d0000, 0x004c0000, 0x004b0000, 0x004a0000, 0x00490000,
+    0x00480000, 0x00470000, 0x00460000, 0x00450000, 0x00450000, 0x00440000, 0x00430000, 0x00420000,
+    0x00410000, 0x00400000, 0x003f0000, 0x003e0000, 0x003e0000, 0x003d0000, 0x003c0000, 0x003b0000,
+    0x003a0000, 0x003a0000, 0x00390000, 0x00380000, 0x00370000, 0x00370000, 0x00360000, 0x00350000,
+};
+
+#define SHARC_FLOAT_NAN 0xFFFFFFFFu   /* MAME's FLOAT_CANONICAL_NAN */
+
+static inline int sharc_float_is_nan(uint32_t v)  { return (v & 0x7F800000u) == 0x7F800000u && (v & 0x007FFFFFu); }
+static inline int sharc_float_is_zero(uint32_t v) { return (v & 0x7FFFFFFFu) == 0; }
+
+/* Fn = RECIPS Fx */
+static inline float sharc_recips(float x) {
+    uint32_t v = sharc_float_to_bits(x), sign = v & 0x80000000u, r;
+    if (sharc_float_is_nan(v))       r = SHARC_FLOAT_NAN;
+    else if (sharc_float_is_zero(v)) r = sign | 0x7F800000u;
+    else {
+        int32_t e = -((int32_t)((v >> 23) & 0xFFu) - 127) - 1;
+        uint32_t m = k_sharc_recips_lut[(v & 0x007FFFFFu) >> 16];
+        if (e > 125 || e < -126) { e = 0; m = 0; }
+        else                     e = (e + 127) & 0xFF;
+        r = sign | ((uint32_t)e << 23) | m;
+    }
+    return sharc_bits_to_float(r);
 }
+
+/* Fn = RSQRTS Fx */
+static inline float sharc_rsqrts(float x) {
+    uint32_t v = sharc_float_to_bits(x), r;
+    if (v > 0x80000000u || sharc_float_is_nan(v)) r = SHARC_FLOAT_NAN;
+    else {
+        int32_t ue = (int32_t)((v >> 23) & 0xFFu) - 127;
+        int32_t e  = -(ue >> 1) - 1;
+        r = (v & 0x80000000u) | ((uint32_t)((e + 127) & 0xFF) << 23) | k_sharc_rsqrts_lut[(v & 0xFFFFFFu) >> 17];
+    }
+    return sharc_bits_to_float(r);
+}
+
+/* Rn = LOGB Fx */
+static inline int32_t sharc_logb(float x) {
+    uint32_t v = sharc_float_to_bits(x);
+    if ((v & 0x7FFFFFFFu) == 0x7F800000u) return 0x7F800000;
+    if (sharc_float_is_zero(v))           return (int32_t)0xFF800000u;
+    if (sharc_float_is_nan(v))            return (int32_t)SHARC_FLOAT_NAN;
+    return (int32_t)((v >> 23) & 0xFFu) - 127;
+}
+
+/* _L205D0 and its inline copies: num / d by RECIPS and three Newton steps with
+ * two = 2.0. *last gets the step register's final value, which atan2 goes on
+ * to use. */
+static inline float sharc_fw_div_ex(float num, float d, float *last) {
+    float f3 = sharc_recips(d), f4 = num, f12 = f3 * d;
+    f4 = f3 * f4; f3 = 2.0f - f12;
+    f12 = f3 * f12; f4 = f3 * f4; f3 = 2.0f - f12;
+    f12 = f3 * f12; f4 = f3 * f4; f3 = 2.0f - f12;
+    if (last) *last = f3;
+    return f3 * f4;
+}
+static inline float sharc_fw_div(float num, float d) { return sharc_fw_div_ex(num, d, NULL); }
+
+/* _L2029B: 1/sqrt(x) by RSQRTS and three Newton steps; 0 for a zero input */
+static inline float sharc_fw_rsqrt(float x) {
+    if (sharc_float_to_bits(x) == 0) return 0.0f;
+    float f4 = sharc_rsqrts(x), f12;
+    for (int i = 0; i < 3; i++) {
+        f12 = f4 * f4;
+        f12 = x * f12;
+        f4 = 0.5f * f4; f12 = 3.0f - f12;
+        f4 = f4 * f12;
+    }
+    return f4;
+}
+
+/* _L202AE: sqrt(x) = x * the same 1/sqrt; a zero input comes back untouched */
+static inline float sharc_fw_sqrt(float x) {
+    if (sharc_float_to_bits(x) == 0) return x;
+    float f4 = sharc_rsqrts(x), f15;
+    for (int i = 0; i < 3; i++) {
+        f15 = f4 * f4;
+        f15 = x * f15;
+        f4 = 0.5f * f4; f15 = 3.0f - f15;
+        f4 = f4 * f15;
+    }
+    return x * f4;
+}
+
+/* _L202D1: atan2(y, x) in radians, [-pi, pi]. The coefficients are the ones
+ * _L20154 writes to DM 0x30290 at boot. */
+static inline float sharc_fw_atan2(float y, float x) {
+    const float TAN15 = sharc_bits_to_float(0x3E8930A2u), SQRT3 = sharc_bits_to_float(0x3FDDB3D7u),
+                EPS   = sharc_bits_to_float(0x39800000u),
+                P0 = sharc_bits_to_float(0xBF3853ADu), P1 = sharc_bits_to_float(0xBFB854A7u),
+                Q0 = sharc_bits_to_float(0x4098123Bu), Q1 = sharc_bits_to_float(0x408A3F7Du),
+                HALF_PI = sharc_bits_to_float(0x3FC90FDAu), PI = sharc_bits_to_float(0x40490FDAu);
+    const float OCTANT[4] = { 0.0f, sharc_bits_to_float(0x3F060A91u), HALF_PI, sharc_bits_to_float(0x3F860A91u) };
+    uint32_t xb = sharc_float_to_bits(x), yb = sharc_float_to_bits(y);
+    float f0 = y, f15;
+    if (!(xb & 0x7F800000u)) {                               /* _L2032F: pass treats a denormal as zero */
+        if (!(yb & 0x7F800000u)) return y;
+        f15 = HALF_PI;
+    } else {
+        float f2 = (xb & 0x80000000u) ? PI : 0.0f;
+        int32_t de = (int32_t)((uint32_t)sharc_logb(y) - (uint32_t)sharc_logb(x));
+        if (de >= 0x7C) {
+            f15 = HALF_PI;                                   /* _L2032C */
+        } else {
+            if (de <= -0x7C) {
+                f15 = 0.0f;                                  /* _L20329 */
+            } else {
+                float f7;
+                f0 = sharc_fw_div_ex(y, x, &f7);
+                if (sharc_float_to_bits(f2) != 0) f0 = -f0;
+                int k = 0;
+                f15 = fabsf(f0);
+                f7 = 1.0f;
+                if (!(f15 <= f7)) { f15 = sharc_fw_div_ex(1.0f, f15, &f7); k = 2; }
+                if (!(f15 < TAN15)) {                        /* _L202FD */
+                    k++;
+                    float f14 = SQRT3 * f15;
+                    f7 = f14 - f7;
+                    f15 = SQRT3 + f15;
+                    f15 = sharc_fw_div_ex(f7, f15, &f7);
+                }
+                if (!(fabsf(f15) <= EPS)) {                  /* _L2030B */
+                    float g = f15 * f15;
+                    float num = g * P0; num = num + P1; num = num * g;
+                    float den = g + Q0; den = den * g; den = den + Q1;
+                    float r = sharc_fw_div(num, den);
+                    r = r * f15;
+                    f15 = r + f15;
+                }
+                if (k - 1 > 0) f15 = -f15;                   /* _L2031F */
+                f15 = f15 + OCTANT[k];
+            }
+            if (sharc_float_to_bits(f2) != 0) f15 = f2 - f15; /* _L20324 */
+        }
+    }
+    if (sharc_float_to_bits(f0) & 0x80000000u) f15 = -f15;   /* _L20326 */
+    return f15;
+}
+
+/* An angle the firmware hands back (_L202CA): radians times 0x4622F983
+ * (32768/pi), `fix`ed under MODE1 TRUNCATE (MODE1 = 0x18000, so floor), then
+ * the low 16 bits, zero-extended; callers read it with ldis. */
+static inline uint32_t sharc_angle_word(float rad) {
+    float scaled = rad * sharc_bits_to_float(0x4622F983u);
+    return (uint32_t)(int32_t)floorf(scaled) & 0xFFFFu;
+}
+static inline uint32_t sharc_fw_atan2_word(float y, float x) { return sharc_angle_word(sharc_fw_atan2(y, x)); }
 
 /* ---- Reply staging ------------------------------------------------------- */
 

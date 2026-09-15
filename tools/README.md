@@ -77,6 +77,7 @@ one you already have running with `--mcp`.
 | `grade-texram.mjs` | texture RAM. ~85% of the pages are compressed in ROM, so a sheet is a megabyte of output from a long run of the game's own code: a wrong bit anywhere in the i960 core, the bus or the decompressor lands in it |
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
 | `grade-cull.mjs` | which of the arena's sixteen ground chunks are drawn. It captures a fight, replays the coprocessor's matrix to the point `ground_disp` tests from, and runs the ROM's own `clip_point_check_yoko` + `area_clip` on it (lattice and corner tables read from ROM). The chunks drawn have to be exactly that selection, in that order, at the explorer's matrix. The explorer names the chunks: its ground layer has to be the record's 16 slots |
+| `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
 | `watch-var.mjs` | who writes this address, and what do they write? A bus watchpoint that reports the value and the IP behind it, so a variable whose owner is unknown can be traced back to its routine |
@@ -304,6 +305,69 @@ PASS  the chunks drawn are the ones area_clip selects   599 of 599 frames exact,
 Still not covered: `doom_cnt`'s backdrop segments and the `0x500288` camera mask
 that `cage_clip_m` and the stage objects draw from. Both are culls against the
 board's camera, and both could be graded the same way.
+
+## match_replay
+
+STF's first attract fight, Sonic against Bean on stage 1, is not the CPU
+playing. It is an input replay: `replay_bank_init_data` (ROM `0xDC9B0`, copied
+to `0x531000`) holds a byte of input per player per frame, and `key_play_disp`
+feeds them in. The fight is therefore the same on every board. When two
+emulators play it differently, the cause is in the simulation (an i960 flag, a
+coprocessor reply, a float rounded the other way), never in the input. That
+makes it the strongest whole-game check this toolkit has.
+
+Reaching it from power-on means about 2200 frames of intro movie, which is
+roughly 30 minutes of MAME under `-nodrc`. `match_replay` skips the movie. At
+the movie step (`_sub_mode` 5) it writes the movie state a natural boot has when
+the replay starts, then moves on to the replay step. The profile holds the
+addresses and the nine state words (`quirks.attract_replay` in
+`src/profiles/sfight.h`). The stage is left alone, because the poles and
+barriers take part in the fight. m2hle does this with `--match-replay` or the
+`match_replay` bridge command, and MAME does the same with
+`tools/mame/match-replay.lua`.
+
+```sh
+node tools/match-replay.mjs --mame --frames 1400   # MAME's reference, headless (~12 min)
+node tools/match-replay.mjs --frames 1400          # play it here and grade (~13 s)
+```
+
+Both sides sample at `variable_diff_calc` (the write tap on `0x50D000` in
+MAME, the frame hook here; `capture_dl`'s `blocks` here). Each sample holds both
+fighters' whole work structures (`0x3400` bytes each) plus the bufferram the
+coprocessor returns outside the FIFO: the TGP slots at `0x90E800` and the
+unit-overlap table at `0x90F600`. The comparison is aligned on the frame the
+stage loads. It checks, in order:
+
+- motion and energy on every frame (the fight as it reads on screen);
+- `+0..+0x1F8` bit for bit (state, position, angles, velocities, requests),
+  skipping the eye blink, which draws from `rand()` and so from the board timers;
+- the rig at `+0x1F8`;
+- the rest of the structure;
+- the bufferram ranges.
+
+It needs `$MAME_EXE` and a `$MAME_ROMPATH` that holds only `sfight.zip`,
+`schamp.zip` and `segabill.zip`, as `tools/mame/cop_capture.py` does.
+
+What it found first: Bean won the mutual grab that Sonic wins on the board. The
+i960's `concmpi` / `concmpo` tested the equal bit instead of the less bit, so
+`get_en_info`'s facing-range test built the wrong enemy-info flags from frame
++0. On the way there, the coprocessor handlers were brought to firmware
+arithmetic (Newton divide, square root and reciprocal root from the SHARC's seed
+tables, and the firmware's atan2 and operation order). Before that, a fight
+could drift by one bit a few hundred frames in. After both fixes:
+
+```
+PASS  the fight is the same fight (every motion and energy change on the same frame)  1399 frames
+```
+
+Still differing, with no effect on the fight so far:
+
+- `cvtri` ties: MAME rounds half away from zero, while this emulator uses IEEE
+  round-to-even (the i960's default mode), so from +321 `P1+0x18C` is `0x2AAB`
+  in MAME against `0x2AAA` here;
+- one bit of `P1+0x1114` from +321;
+- the rig from +382;
+- the sign of zero in TGP bufferram.
 
 ## The sound board
 

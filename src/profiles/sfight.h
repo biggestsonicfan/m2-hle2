@@ -369,6 +369,25 @@ static const game_profile_t sfight_profile = {
         .sound_queue_count_addr = 0x00504001,   /* byte_504001 */
         .sound_queue_state_addr = 0x00504014,   /* byte_504014 */
         .warning_skip_addr      = 0x00500410,   /* poke 1 → skip boot warning screen */
+        /* advertise_steps[_sub_mode]: 5 is ADV_MOVIE_DSP (the ~2200-frame intro
+         * movie), 6 ADV_REPLAY_PIC, which leads into the Sonic vs Bean replay on
+         * stage 1 (replay_bank_init_data, ROM 0xDC9B0). The movie controller
+         * (am_cntr .. 0x5004E7) keeps running through the replay, so it is set to
+         * the state a natural boot has at fc 2435, where MOVIE_DSP hands over:
+         * animation 3, frame 0x1A7. prep_adv_movie writes adv_movie_cont_ex
+         * (0x5004CC) in the frame the step becomes 5, which is what "ready" waits
+         * for. Captured off this emulator and checked bit for bit against the
+         * natural boot's fight (1097 frames, both fighters). */
+        .attract_replay = {
+            .step_addr   = 0x00500030,           /* _sub_mode */
+            .from_step   = 5,
+            .to_step     = 6,
+            .ready_addr  = 0x005004CC,           /* adv_movie_cont_ex */
+            .state_addr  = 0x005004C4,           /* am_cntr, am_num, dword_5004C8, ... */
+            .state_count = 9,
+            .state = { 0x000301A7, 0x00000028, 0x00055DDC, 0x000562D0, 0xC1200000,
+                       0x433A8000, 0x43810000, 0xC1200000, 0x43398000 },
+        },
     },
 };
 

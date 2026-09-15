@@ -40,6 +40,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--mcp-port N` | Use port N instead of 7172 |
 | `--rom <path>` | Auto-load this ROM zip on startup |
 | `--run` | Start executing immediately after ROM load |
+| `--match-replay` | Arm `match_replay` (below) from boot |
 
 ROM set: MAME `sfight.zip` (clone of `schamp.zip`). The emulator looks for `schamp.zip` in the same directory as `sfight.zip` for shared files.
 
@@ -60,6 +61,19 @@ clock, which is what a capture should pace on rather than wall time or steps/s.
 set's CRC32s while the ROM regions are still being assembled, so a tool that
 treats a resolved profile as "the data is there" can read a table of zeros.
 Anything that decodes out of the ROM must wait for `rom_loaded`.
+
+`match_replay` is `off`, `armed`, `done` or `unsupported`. `match_replay_frame` is
+the `frames` value at which the jump was made (0 before it).
+
+**`match_replay()`**
+Arm the jump from attract mode's intro movie straight to its preprogrammed replay
+fight. In STF that is Sonic against Bean on stage 1. The jump happens at the first
+frame edge where the attract step is the movie and the movie has started. It writes
+the movie state a natural boot has when the replay begins, then moves on, so the
+fight that follows is the natural boot's, bit for bit. It reads its addresses from
+the profile's `quirks.attract_replay`; a profile without one reports
+`unsupported`. Returns `match_replay` (`armed`, or `done` if it has already fired).
+`tools/match-replay.mjs` grades that fight against MAME.
 
 **`get_registers()`**
 Returns a full i960 CPU snapshot:
