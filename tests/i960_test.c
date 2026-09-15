@@ -194,6 +194,31 @@ int main(void) {
     i960_step(&cpu, &bus);
     CHECK(cpu.globals.g[0] == 0xA && cpu.globals.g[1] == 0xB, "movl r8, g0 copies r8:r9 into g0:g1");
 
+    /* ---- concmpi only compares when CC bit 2 (less) is clear ------------- */
+    /* The range test `cmpi x, lo; concmpi x, hi` is lo <= x <= hi. STF's
+     * get_en_info checks the angle to the opponent this way. */
+    i960_reset(&cpu);
+    cpu.locals.r[3] = (uint32_t)-0x2000;   /* x, below the range */
+    cpu.locals.r[15] = (uint32_t)-0x1554;  /* lo */
+    cpu.locals.r[4] = 0x1554;              /* hi */
+    cpu.sfr.ip = CODE;
+    put(CODE,     enc_reg(0x5a1, 0, L(15), 0, L(3), 0, 0));  /* cmpi r3, r15 */
+    put(CODE + 4, enc_reg(0x5a3, 0, L(4), 0, L(3), 0, 0));   /* concmpi r3, r4 */
+    i960_step(&cpu, &bus);
+    i960_step(&cpu, &bus);
+    CHECK(cc() == CC_L, "concmpi leaves CC_L alone: x below the range stays out of it");
+
+    i960_reset(&cpu);
+    cpu.locals.r[3] = 0;
+    cpu.locals.r[15] = (uint32_t)-0x1554;
+    cpu.locals.r[4] = 0x1554;
+    cpu.sfr.ip = CODE;
+    put(CODE,     enc_reg(0x5a1, 0, L(15), 0, L(3), 0, 0));
+    put(CODE + 4, enc_reg(0x5a3, 0, L(4), 0, L(3), 0, 0));
+    i960_step(&cpu, &bus);
+    i960_step(&cpu, &bus);
+    CHECK(cc() == CC_E, "cmpi + concmpi: x inside the range comes out CC_E");
+
     /* ---- watchpoint fires on the bus write ------------------------------ */
     wp_init();
     g_wp.hit = 0;

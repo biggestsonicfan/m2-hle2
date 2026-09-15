@@ -508,14 +508,17 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     else                                      set_cc(cpu, CC_G);
                     break;
                 case 0x5a2: // concmpo (conditional compare ordinal)
-                    // only updates CC if current CC is not equal
-                    if (!(get_cc(cpu) & CC_E)) {
+                    // Compares only when condition-code bit 2 (less, 0b100) is
+                    // clear, so `cmpi x, lo; concmpi x, hi` is lo <= x <= hi. It
+                    // used to test the equal bit, which let every x below lo
+                    // through as in range.
+                    if (!(get_cc(cpu) & CC_L)) {
                         if (src1 <= src2) set_cc(cpu, CC_E);
                         else              set_cc(cpu, CC_G);
                     }
                     break;
                 case 0x5a3: // concmpi (conditional compare integer)
-                    if (!(get_cc(cpu) & CC_E)) {
+                    if (!(get_cc(cpu) & CC_L)) {
                         if ((int32_t)src1 <= (int32_t)src2) set_cc(cpu, CC_E);
                         else                                 set_cc(cpu, CC_G);
                     }
