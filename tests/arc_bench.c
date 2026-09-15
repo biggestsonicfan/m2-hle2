@@ -324,6 +324,57 @@ __attribute__((noinline)) static void render_frame(void) {
     g_rs.stage_us[R_QUADS]  += t->tiles_us   - before.tiles_us;
 }
 
+/* ---- --tile-stats: what of the 2D state changes, frame to frame ------------
+ * At every game frame edge, tile RAM (by area), tile graphics and palette RAM
+ * are compared with the previous frame's copy. Counts frames in which an area
+ * changed and the words that did. */
+enum { TA_MAP0, TA_MAP1, TA_MAP2, TA_MAP3, TA_ROWSCR, TA_REGS, TA_MASK, TA_OTHER, TA_GFX, TA_PAL, TA_N };
+static const char *const ta_names[TA_N] = {
+    "cells 0", "cells 1", "cells 2", "cells 3", "row scroll", "scroll regs", "window masks", "other tile", "gfx", "palette"
+};
+static bool     g_tile_stats = false;
+static uint64_t g_ta_frames[TA_N], g_ta_words[TA_N], g_ta_any, g_ta_seen;
+
+static int tile_area(uint32_t word) {
+    if (word < 0x4000u) return TA_MAP0 + (int)(word >> 12);
+    if (word < 0x4800u) return TA_ROWSCR;
+    if (word >= 0x5000u && word < 0x5008u) return TA_REGS;
+    if (word >= 0x6000u && word < 0x7000u) return TA_MASK;
+    return TA_OTHER;
+}
+
+static void tile_stats_frame(void) {
+    static uint8_t prev_tile[TILE_SIZE], prev_gfx[TMAPGFX_SIZE], prev_pal[PALETTE_SIZE];
+    if (g_ta_seen++ == 0) {
+        memcpy(prev_tile, bus.tile, sizeof prev_tile);
+        memcpy(prev_gfx, bus.tmapgfx, sizeof prev_gfx);
+        memcpy(prev_pal, bus.palette, sizeof prev_pal);
+        return;
+    }
+    uint64_t words[TA_N] = {0};
+    for (uint32_t b = 0; b + 1 < TILE_SIZE; b += 2)
+        if (bus.tile[b] != prev_tile[b] || bus.tile[b + 1] != prev_tile[b + 1]) words[tile_area(b >> 1)]++;
+    for (uint32_t b = 0; b + 1 < TMAPGFX_SIZE; b += 2)
+        if (bus.tmapgfx[b] != prev_gfx[b] || bus.tmapgfx[b + 1] != prev_gfx[b + 1]) words[TA_GFX]++;
+    for (uint32_t b = 0; b + 1 < PALETTE_SIZE; b += 2)
+        if (bus.palette[b] != prev_pal[b] || bus.palette[b + 1] != prev_pal[b + 1]) words[TA_PAL]++;
+    bool any = false;
+    for (int a = 0; a < TA_N; a++)
+        if (words[a]) { g_ta_frames[a]++; g_ta_words[a] += words[a]; if (a != TA_GFX && a != TA_PAL) any = true; }
+    g_ta_any += any;
+    memcpy(prev_tile, bus.tile, sizeof prev_tile);
+    memcpy(prev_gfx, bus.tmapgfx, sizeof prev_gfx);
+    memcpy(prev_pal, bus.palette, sizeof prev_pal);
+}
+
+static void tile_stats_report(void) {
+    uint64_t n = g_ta_seen > 1 ? g_ta_seen - 1 : 1;
+    printf("tile-stats over %llu frames: tile RAM changed in %.1f%%\n", (unsigned long long)n, 100.0 * g_ta_any / n);
+    for (int a = 0; a < TA_N; a++)
+        printf("  %-13s changed in %5.1f%% of frames, %7.1f words when it did\n", ta_names[a],
+               100.0 * g_ta_frames[a] / n, g_ta_frames[a] ? (double)g_ta_words[a] / g_ta_frames[a] : 0.0);
+}
+
 /* ---- --verify-atlas: the incremental atlas against a whole decode ----------
  * After a render that saw texture RAM change, decode both banks in full the way
  * game_render_upload_atlas always did and compare with the atlas it keeps. The
@@ -449,6 +500,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) prof_path = argv[++i];
         else if (!strcmp(argv[i], "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
         else if (!strcmp(argv[i], "--verify-atlas")) g_verify_atlas = true;
+        else if (!strcmp(argv[i], "--tile-stats")) g_tile_stats = true;
         else if (!strcmp(argv[i], "--draw-digest") && i + 1 < argc) digest_path = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) max_frames = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--profile-from") && i + 1 < argc) g_prof_from = strtoull(argv[++i], NULL, 0);
@@ -505,7 +557,11 @@ int main(int argc, char **argv) {
 
     while (now_us() - start < (int64_t)(seconds * 1e6)) {
         int64_t a = now_us();
-        if (!threads) emu_slice();
+        if (!threads) {
+            uint64_t f0 = g_es.frames;
+            emu_slice();
+            if (g_tile_stats && g_es.frames != f0) tile_stats_frame();
+        }
         if (render) { render_frame(); if (g_verify_atlas && !threads) verify_atlas(); }
         else if (threads) emu_sleep_us(EMU_SLICE_US);
         if (do_pace && (render || !threads)) pace(&deadline, a, render_period_us);
@@ -542,6 +598,7 @@ int main(int argc, char **argv) {
     report(&first, &end, (end.wall - start) / 1e6);
     printf("mesh cache: %s, %llu builds, %llu hits, %u meshes held\n", g_geo3d_mesh_cache ? "on" : "off",
            (unsigned long long)g_geo3d_mesh_builds, (unsigned long long)g_geo3d_mesh_hits, g_geo3d_mesh_count);
+    if (g_tile_stats) tile_stats_report();
     if (g_verify_atlas)
         printf("verify-atlas: %llu texture changes checked, %llu differed\n",
                (unsigned long long)g_atlas_checks, (unsigned long long)g_atlas_bad);

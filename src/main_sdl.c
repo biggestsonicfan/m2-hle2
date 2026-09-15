@@ -287,6 +287,9 @@ static void save_png(const char *path, int w, int h) {
 static struct {
     uint64_t frames, bad_frames;
     uint8_t  bg[VIDEO_WIDTH * VIDEO_HEIGHT * 4], fg[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+    uint8_t  shown[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+    sg_image rt;
+    sg_view  rt_att;
 } g_vt;
 
 /* Read a layer target back. GL stores its bottom row first, and the compositor
@@ -304,12 +307,53 @@ static void read_layer(sg_image img, uint8_t *out) {
     sg_reset_state_cache();
 }
 
-/* Compare the GPU layers against a CPU compose of the same RAM. */
+/* Draw a pen layer the way the frame shows it (game_render_draw_indexed) into a
+ * scratch 496x384 target over black, and read it back in screen row order: the
+ * quad puts the layer's top row at the top of the viewport, which is the
+ * target's last row. */
+static void show_layer(sg_view pens, uint8_t *out) {
+    if (g_vt.rt.id == 0) {
+        g_vt.rt = sg_make_image(&(sg_image_desc){ .width = VIDEO_WIDTH, .height = VIDEO_HEIGHT,
+            .pixel_format = SG_PIXELFORMAT_RGBA8, .usage = { .color_attachment = true }, .label = "verify-shown" });
+        g_vt.rt_att = sg_make_view(&(sg_view_desc){ .color_attachment.image = g_vt.rt });
+    }
+    sg_begin_pass(&(sg_pass){
+        .action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0, 0, 0, 1 } },
+        .attachments.colors[0] = g_vt.rt_att,
+    });
+    game_render_draw_indexed(pens, state.video.pal_rgba_view, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+    sg_end_pass();
+    static uint8_t tmp[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+    read_layer(g_vt.rt, tmp);
+    for (int y = 0; y < VIDEO_HEIGHT; y++)
+        memcpy(out + (size_t)y * VIDEO_WIDTH * 4, tmp + (size_t)(VIDEO_HEIGHT - 1 - y) * VIDEO_WIDTH * 4, (size_t)VIDEO_WIDTH * 4);
+}
+
+/* Compare the GPU layers against a CPU compose of the same RAM: the pens the
+ * targets hold, turned into colours through the pen texture's texels, and the
+ * colours the indexed quads actually put on screen. */
 static void verify_gpu_tiles(void) {
     video_compose_cpu(&state.video, &state.bus);
     read_layer(state.video.bg_image, g_vt.bg);
     read_layer(state.video.fg_image, g_vt.fg);
-    int bad = 0, first = -1;
+    for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++)
+        for (int k = 0; k < 2; k++) {
+            uint8_t *px = k ? &g_vt.fg[i * 4] : &g_vt.bg[i * 4];
+            const uint8_t *c = &state.video.pal_texels[(px[0] | (px[1] << 8)) * 4];
+            px[0] = c[0]; px[1] = c[1]; px[2] = c[2];
+        }
+    int shown_bad = 0;
+    for (int k = 0; k < 2; k++) {
+        show_layer(k ? state.video.fg_view : state.video.bg_view, g_vt.shown);
+        for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++) {
+            const uint8_t *s = &g_vt.shown[i * 4];
+            const uint8_t *c = k ? &state.video.fg_pixels[i * 4] : &state.video.bg_pixels[i * 4];
+            if ((k == 0 || c[3]) && (s[0] != c[0] || s[1] != c[1] || s[2] != c[2])) shown_bad++;
+        }
+    }
+    if (shown_bad && g_vt.bad_frames < 5)
+        printf("verify-gpu-tiles: game frame %u, %d shown pixels differ from the CPU colours\n", g_emu_frames, shown_bad);
+    int bad = shown_bad, first = -1;
     const char *what = "";
     for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++) {
         const uint8_t *gb = &g_vt.bg[i * 4], *cb = &state.video.bg_pixels[i * 4];
@@ -542,7 +586,8 @@ int main(int argc, char **argv) {
 
     const Uint64 period_ns = opt.render_fps > 0.0 ? (Uint64)(1e9 / opt.render_fps) : 0;
     Uint64 deadline = SDL_GetTicksNS();
-    Uint64 stat_start = deadline, stat_cpu_ns = 0, stat_gpu_ns = 0, stat_swap_ns = 0;
+    Uint64 stat_start = deadline, stat_cpu_ns = 0, stat_gpu_ns = 0, stat_swap_ns = 0, stat_tile_gpu_ns = 0;
+    uint64_t stat_comp0 = 0, stat_uptile0 = 0, stat_upgfx0 = 0, stat_uppens0 = 0, stat_part0 = 0, stat_blk0 = 0;
     Uint64 next_temp_check = deadline;
     unsigned stat_renders = 0, stat_frames0 = g_emu_frames;
     int shots_done = 0;
@@ -597,15 +642,28 @@ int main(int argc, char **argv) {
             if (deadline + period_ns < now) deadline = now;   /* fell behind: don't burst */
         }
 
+        if (opt.gl_finish) glFinish();   /* the tile compose below starts on an idle GPU */
         Uint64 cpu_start = SDL_GetTicksNS();
         int fb_w, fb_h;
         SDL_GetWindowSizeInPixels(window, &fb_w, &fb_h);
-        if (opt.verify_gpu_tiles && state.video.gpu) {
-            /* Hold the emu thread so both composes see the same RAM. */
-            emu_mutex_lock(&state.emu.mutex);
+        if (opt.gl_finish) {
+            /* Only the tile compose puts GPU work in prepare: the wait after it is
+             * that pass's GPU time (uploads included), kept out of the CPU time. */
             uint64_t composes = state.video.gpu_composes;
             game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
-            if (state.video.gpu_composes != composes) verify_gpu_tiles();
+            if (state.video.gpu_composes != composes) {
+                Uint64 f0 = SDL_GetTicksNS();
+                glFinish();
+                Uint64 waited = SDL_GetTicksNS() - f0;
+                stat_tile_gpu_ns += waited;
+                cpu_start += waited;
+            }
+        } else if (opt.verify_gpu_tiles && state.video.gpu) {
+            /* Hold the emu thread so both composes see the same RAM. */
+            emu_mutex_lock(&state.emu.mutex);
+            uint64_t composes = state.video.gpu_composes + state.video.up_pens;
+            game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+            if (state.video.gpu_composes + state.video.up_pens != composes) verify_gpu_tiles();
             emu_mutex_unlock(&state.emu.mutex);
         } else {
             game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
@@ -686,7 +744,22 @@ int main(int argc, char **argv) {
                    stat_swap_ns / 1e6 / n,
                    read_milli("/sys/class/thermal/thermal_zone0/temp") / 1000.0,
                    read_milli("/sys/class/thermal/thermal_zone1/temp") / 1000.0);
+            const video_state_t *v = &state.video;
+            uint64_t comps = v->gpu_composes - stat_comp0;
+            printf("m2hle: tiles: %llu composes (%.0f%% of renders, %llu partial, %.0f%% of the screen drawn), "
+                   "uploads tile %llu gfx %llu pens %llu",
+                   (unsigned long long)comps, 100.0 * (double)comps / n,
+                   (unsigned long long)(v->partial_composes - stat_part0),
+                   comps ? 100.0 * (double)(v->composed_blocks - stat_blk0) / ((double)comps * VIDEO_BLK_W * VIDEO_BLK_H) : 0.0,
+                   (unsigned long long)(v->up_tile - stat_uptile0), (unsigned long long)(v->up_gfx - stat_upgfx0),
+                   (unsigned long long)(v->up_pens - stat_uppens0));
+            if (opt.gl_finish && comps)
+                printf(" | gpu %.2f ms per compose", stat_tile_gpu_ns / 1e6 / (double)comps);
+            printf("\n");
             fflush(stdout);
+            stat_comp0 = v->gpu_composes; stat_uptile0 = v->up_tile; stat_upgfx0 = v->up_gfx; stat_uppens0 = v->up_pens;
+            stat_part0 = v->partial_composes; stat_blk0 = v->composed_blocks;
+            stat_tile_gpu_ns = 0;
             stat_start = now; stat_cpu_ns = stat_gpu_ns = stat_swap_ns = 0;
             stat_renders = 0; stat_frames0 = g_emu_frames;
             memset(&g_game_frame_times, 0, sizeof g_game_frame_times);

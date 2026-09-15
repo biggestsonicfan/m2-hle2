@@ -56,6 +56,9 @@ typedef struct {
     sg_shader   tile_shader;
     sg_pipeline tile_pipeline;
     sg_sampler  tile_sampler;
+    /* The same quad for pen layers (GL backends): the colour is looked up. */
+    sg_shader   indexed_shader;
+    sg_pipeline indexed_pipeline;
 
     /* Render-target blit: the tile shader without blending (a finished frame's
      * alpha is whatever the last layer left), a quad oriented for the backend's
@@ -119,6 +122,21 @@ static const char *game_render_tile_fs_glsl =
     "in vec2 uv;\n"
     "out vec4 frag_color;\n"
     "void main() { frag_color = texture(tex_smp, uv); }\n";
+
+/* A layer the GPU tile compositor drew holds pens (low byte red, high byte
+ * green, alpha where it drew): look the colour up in the pen texture. Sampled
+ * like the colour layers, nearest, so each screen pixel takes the same texel. */
+static const char *game_render_indexed_fs_glsl =
+    "#version 410\n"
+    "uniform sampler2D tex_smp;\n"
+    "uniform sampler2D pal_smp;\n"
+    "in vec2 uv;\n"
+    "out vec4 frag_color;\n"
+    "void main() {\n"
+    "  vec4 t = texture(tex_smp, uv);\n"
+    "  int pen = int(t.r * 255.0 + 0.5) | (int(t.g * 255.0 + 0.5) << 8);\n"
+    "  frag_color = vec4(texelFetch(pal_smp, ivec2(pen & 255, pen >> 8), 0).rgb, t.a);\n"
+    "}\n";
 
 static const char *game_render_tile_vs_hlsl =
     "struct vs_in { float2 pos : POSITION; float2 uv : TEXCOORD0; };\n"
@@ -522,6 +540,32 @@ static inline void game_render_init(void) {
         p.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ZERO;
         p.label = "game-render-tile-pipeline";
         g_game_render.tile_pipeline = sg_make_pipeline(&p);
+
+        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+            sg_shader_desc d;
+            memset(&d, 0, sizeof d);
+            d.attrs[0].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+            d.attrs[1].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+            static const char *const names[2] = { "tex_smp", "pal_smp" };
+            for (int i = 0; i < 2; i++) {
+                d.views[i].texture.stage       = SG_SHADERSTAGE_FRAGMENT;
+                d.views[i].texture.image_type  = SG_IMAGETYPE_2D;
+                d.views[i].texture.sample_type = SG_IMAGESAMPLETYPE_FLOAT;
+                d.texture_sampler_pairs[i].stage        = SG_SHADERSTAGE_FRAGMENT;
+                d.texture_sampler_pairs[i].view_slot    = i;
+                d.texture_sampler_pairs[i].sampler_slot = 0;
+                d.texture_sampler_pairs[i].glsl_name    = names[i];
+            }
+            d.samplers[0].stage        = SG_SHADERSTAGE_FRAGMENT;
+            d.samplers[0].sampler_type = SG_SAMPLERTYPE_FILTERING;
+            d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, game_render_indexed_fs_glsl, 1);
+            d.label = "game-render-indexed-shader";
+            g_game_render.indexed_shader = sg_make_shader(&d);
+            p.shader = g_game_render.indexed_shader;
+            p.label  = "game-render-indexed-pipeline";
+            g_game_render.indexed_pipeline = sg_make_pipeline(&p);
+        }
     }
 
     g_game_render.tile_sampler = sg_make_sampler(&(sg_sampler_desc){
@@ -777,6 +821,8 @@ static inline void game_render_shutdown(void) {
     sg_destroy_sampler(g_game_render.tile_sampler);
     sg_destroy_pipeline(g_game_render.tile_pipeline);
     sg_destroy_shader(g_game_render.tile_shader);
+    sg_destroy_pipeline(g_game_render.indexed_pipeline);   /* invalid ids are ignored */
+    sg_destroy_shader(g_game_render.indexed_shader);
     sg_destroy_buffer(g_game_render.quad_vbuf);
     g_game_render.initialized = false;
 }
@@ -947,6 +993,24 @@ static inline void game_render_draw_game(sg_view tile_view,
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.quad_vbuf,
         .views[0]          = tile_view,
+        .samplers[0]       = g_game_render.tile_sampler,
+    });
+    sg_draw(0, 6, 1);
+}
+
+/* game_render_draw_game for a layer of pens (the GPU tile compositor's targets):
+ * each pixel's colour is pal_view's texel for its pen. GL backends only. */
+static inline void game_render_draw_indexed(sg_view pen_view, sg_view pal_view,
+                                             int ox, int oy, int w, int h) {
+    if (!g_game_render.initialized) return;
+    if (w <= 0 || h <= 0) return;
+
+    sg_apply_viewport(ox, oy, w, h, true);
+    sg_apply_pipeline(g_game_render.indexed_pipeline);
+    sg_apply_bindings(&(sg_bindings){
+        .vertex_buffers[0] = g_game_render.quad_vbuf,
+        .views[0]          = pen_view,
+        .views[1]          = pal_view,
         .samplers[0]       = g_game_render.tile_sampler,
     });
     sg_draw(0, 6, 1);

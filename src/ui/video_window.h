@@ -35,18 +35,24 @@
 #include "memory.h"
 #include "tile_renderer.h"
 
-/* Tile RAM bytes the compositor reads: the four tilemaps (words 0x0000-0x3FFF),
- * their per-line H scroll tables (0x4000 + 0x200*t, 384 lines) and both window
- * masks (0x6000 / 0x6800, four words a line). The scroll registers (0x5000-0x5007)
- * go in as uniforms. */
+/* Tile RAM words the compositor reads, one R16UI texel each: the four tilemaps
+ * (words 0x0000-0x3FFF), their per-line H scroll tables (0x4000 + 0x200*t, 384
+ * lines) and both window masks (0x6000 / 0x6800, four words a line). The scroll
+ * registers (0x5000-0x5007) go in as uniforms. */
 #define VIDEO_TILE_GPU_W 256
-#define VIDEO_TILE_GPU_H 224
+#define VIDEO_TILE_GPU_H 112
+#define VIDEO_TILE_WORDS (VIDEO_TILE_GPU_W * VIDEO_TILE_GPU_H)
 #define VIDEO_GFX_GPU_W  1024
 #define VIDEO_GFX_GPU_H  512
 #define VIDEO_PAL_GPU_W  256
 #define VIDEO_PAL_GPU_H  32
-_Static_assert(VIDEO_TILE_GPU_W * VIDEO_TILE_GPU_H >= (0x6800 + VIDEO_HEIGHT * 4) * 2, "tile texture covers the window masks");
-_Static_assert(VIDEO_TILE_GPU_W * VIDEO_TILE_GPU_H <= TILE_SIZE, "tile texture fits tile RAM");
+/* The GPU layers are recomposed in 8x8 screen blocks: only the blocks a tile RAM
+ * change can reach are drawn again (video__tile_dirty). */
+#define VIDEO_BLK_W      (VIDEO_WIDTH / 8)
+#define VIDEO_BLK_H      (VIDEO_HEIGHT / 8)
+_Static_assert(VIDEO_TILE_WORDS >= 0x6800 + VIDEO_HEIGHT * 4, "tile texture covers the window masks");
+_Static_assert(VIDEO_TILE_WORDS * 2 <= TILE_SIZE, "tile texture fits tile RAM");
+_Static_assert(VIDEO_BLK_W * 8 == VIDEO_WIDTH && VIDEO_BLK_H * 8 == VIDEO_HEIGHT, "screen is whole 8x8 blocks");
 _Static_assert(VIDEO_GFX_GPU_W * VIDEO_GFX_GPU_H == TMAPGFX_SIZE, "gfx texture is tile graphics RAM");
 _Static_assert(VIDEO_PAL_GPU_W * VIDEO_PAL_GPU_H * 2 == PALETTE_SIZE, "one texel per palette entry");
 
@@ -87,6 +93,14 @@ typedef struct {
     sg_pipeline   tile_pipeline;
     uint8_t       pal_texels[VIDEO_PAL_GPU_W * VIDEO_PAL_GPU_H * 4];
     uint64_t      gpu_composes;
+    /* What those composes uploaded: tile RAM, tile graphics, pen texture. */
+    uint64_t      up_tile, up_gfx, up_pens;
+    /* Incremental composes: tile_words is the snapshot the GPU was last given and
+     * the targets show; a later snapshot is compared with it to find the blocks to
+     * draw again. targets_valid: the targets hold a whole compose. */
+    uint16_t      tile_words[VIDEO_TILE_WORDS];
+    bool          targets_valid;
+    uint64_t      partial_composes, composed_blocks;
 } video_state_t;
 
 /* ---- GPU compositor shaders ------------------------------------------------ */
@@ -104,27 +118,22 @@ static const char *video_tile_vs_glsl =
  * split at line -vscroll (mode 1) or column hscroll (modes 2/3), otherwise the
  * window mask (four words a line, one bit per 8 pixels, inverted for the odd
  * tilemap), then s24_sample: the 64x64 tilemap wrapping at 512, palette bank
- * bits 14:7, category bit 15, the 4bpp texel with its 16-bit byteswap. The pen
- * texture holds tile_pen_lut of every palette entry, so pen p's screen colour is
- * texel p. y is the target row, which GL counts from the bottom, so the target's
- * row 0 holds screen row 0 as the CPU uploads do. h_scr / v_scr are words
- * 0x5000-0x5003 / 0x5004-0x5007.
+ * bits 14:7, category bit 15, the 4bpp texel with its 16-bit byteswap. The
+ * targets get the pen p (bank * 16 + colour index); the pen texture holds
+ * tile_pen_lut of every palette entry, so p's screen colour is texel p. y is the
+ * target row, which GL counts from the bottom, so the target's row 0 holds
+ * screen row 0 as the CPU uploads do. h_scr / v_scr are words 0x5000-0x5003 /
+ * 0x5004-0x5007.
  */
 static const char *video_tile_fs_glsl =
     "#version 410\n"
-    "uniform vec4 tile_params[2];\n"
+    "uniform vec4 tile_params[3];\n"
     "uniform usampler2D tile_smp;\n"
     "uniform usampler2D gfx_smp;\n"
-    "uniform sampler2D pal_smp;\n"
     "layout(location = 0) out vec4 bg_out;\n"
     "layout(location = 1) out vec4 fg_out;\n"
-    "int tw(int word) {\n"
-    "  int b = word * 2;\n"
-    "  return int(texelFetch(tile_smp, ivec2(b & 255, b >> 8), 0).r)\n"
-    "       | (int(texelFetch(tile_smp, ivec2((b + 1) & 255, (b + 1) >> 8), 0).r) << 8);\n"
-    "}\n"
+    "int tw(int word) { return int(texelFetch(tile_smp, ivec2(word & 255, word >> 8), 0).r); }\n"
     "int gb(int off) { return int(texelFetch(gfx_smp, ivec2(off & 1023, off >> 10), 0).r); }\n"
-    "vec3 pal(int pen) { return texelFetch(pal_smp, ivec2(pen & 255, pen >> 8), 0).rgb; }\n"
     "bool tm_px(int t, int x, int y, out int ci, out int cat, out int pen) {\n"
     "  ci = 0; cat = 0; pen = 0;\n"
     "  int hscr = int(tile_params[0][t]), vscr = int(tile_params[1][t]), ctrl = int(tile_params[1][t & 2]);\n"
@@ -155,20 +164,31 @@ static const char *video_tile_fs_glsl =
     "  pen = ((entry >> 7) & 0xFF) * 16 + ci;\n"
     "  return true;\n"
     "}\n"
+    /* The targets hold the pen, not its colour: low byte in red, high byte in
+     * green (pens are < 4096), alpha 1 where the layer drew. The layer quads look
+     * the colour up (game_render_draw_indexed), so a palette write only changes
+     * the pen texture and the layers need not be composed again. */
+    "vec4 pen_out(int pen, float a) { return vec4(float(pen & 255) / 255.0, float(pen >> 8) / 255.0, 0.0, a); }\n"
+    /* Layer order, as the CPU draws it: behind the 3D, the backdrop (pen 0), then
+     * tilemaps 3 and 2 opaque, then 1 and 0 where their tiles are category 0, each
+     * over the last; in front, tilemaps 3, 2, 1, 0 where category 1. So the first
+     * tilemap from 0 up that qualifies decides each layer, and the walk stops once
+     * both are decided. tile_params[2][t] is 0 when neither tilemap t nor its pair
+     * holds a category 1 tile anywhere: t cannot give the front layer, so once the
+     * back one is decided it is not sampled at all. */
     "void main() {\n"
     "  int x = int(gl_FragCoord.x), y = int(gl_FragCoord.y);\n"
-    "  bool d[4]; int ci[4], cat[4], pen[4];\n"
-    "  for (int t = 0; t < 4; t++) d[t] = tm_px(t, x, y, ci[t], cat[t], pen[t]);\n"
-    "  vec3 bg = pal(0);\n"                                   /* the backdrop, palette 0 */
-    "  if (d[3]) bg = pal(pen[3]);\n"                         /* tilemaps 3, 2 opaque */
-    "  if (d[2]) bg = pal(pen[2]);\n"
-    "  if (d[1] && ci[1] != 0 && cat[1] == 0) bg = pal(pen[1]);\n"   /* 1, 0: category 0 */
-    "  if (d[0] && ci[0] != 0 && cat[0] == 0) bg = pal(pen[0]);\n"
-    "  vec4 fg = vec4(0.0);\n"                                /* 3, 2, 1, 0: category 1 */
-    "  for (int t = 3; t >= 0; t--)\n"
-    "    if (d[t] && ci[t] != 0 && cat[t] == 1) fg = vec4(pal(pen[t]), 1.0);\n"
-    "  bg_out = vec4(bg, 1.0);\n"
-    "  fg_out = fg;\n"
+    "  int bg = -1, fg = -1;\n"
+    "  for (int t = 0; t < 4; t++) {\n"
+    "    bool want_fg = fg < 0 && tile_params[2][t] != 0.0;\n"
+    "    if (bg >= 0 && !want_fg) continue;\n"
+    "    int ci, cat, pen;\n"
+    "    if (!tm_px(t, x, y, ci, cat, pen)) continue;\n"
+    "    if (bg < 0 && (t >= 2 || (ci != 0 && cat == 0))) bg = pen;\n"
+    "    if (fg < 0 && ci != 0 && cat == 1) fg = pen;\n"
+    "  }\n"
+    "  bg_out = pen_out(bg < 0 ? 0 : bg, 1.0);\n"
+    "  fg_out = fg < 0 ? vec4(0.0) : pen_out(fg, 1.0);\n"
     "}\n";
 
 static inline sg_image video__make_img(const char *label) {
@@ -191,16 +211,15 @@ static inline void video__init_gpu(video_state_t *vid) {
     sg_shader_desc d;
     memset(&d, 0, sizeof d);
     d.uniform_blocks[0].stage = SG_SHADERSTAGE_FRAGMENT;
-    d.uniform_blocks[0].size  = 8 * sizeof(float);
+    d.uniform_blocks[0].size  = 12 * sizeof(float);
     d.uniform_blocks[0].glsl_uniforms[0].glsl_name   = "tile_params";
     d.uniform_blocks[0].glsl_uniforms[0].type        = SG_UNIFORMTYPE_FLOAT4;
-    d.uniform_blocks[0].glsl_uniforms[0].array_count = 2;
-    static const sg_image_sample_type types[3] = { SG_IMAGESAMPLETYPE_UINT, SG_IMAGESAMPLETYPE_UINT, SG_IMAGESAMPLETYPE_FLOAT };
-    static const char *const names[3] = { "tile_smp", "gfx_smp", "pal_smp" };
-    for (int i = 0; i < 3; i++) {
+    d.uniform_blocks[0].glsl_uniforms[0].array_count = 3;
+    static const char *const names[2] = { "tile_smp", "gfx_smp" };
+    for (int i = 0; i < 2; i++) {
         d.views[i].texture.stage       = SG_SHADERSTAGE_FRAGMENT;
         d.views[i].texture.image_type  = SG_IMAGETYPE_2D;
-        d.views[i].texture.sample_type = types[i];
+        d.views[i].texture.sample_type = SG_IMAGESAMPLETYPE_UINT;
         d.texture_sampler_pairs[i].stage        = SG_SHADERSTAGE_FRAGMENT;
         d.texture_sampler_pairs[i].view_slot    = i;
         d.texture_sampler_pairs[i].sampler_slot = 0;
@@ -232,7 +251,7 @@ static inline void video__init_gpu(video_state_t *vid) {
     vid->gpu = true;
 
     vid->tile_ram = sg_make_image(&(sg_image_desc){ .width = VIDEO_TILE_GPU_W, .height = VIDEO_TILE_GPU_H,
-        .pixel_format = SG_PIXELFORMAT_R8UI, .usage = { .dynamic_update = true }, .label = "tile-ram" });
+        .pixel_format = SG_PIXELFORMAT_R16UI, .usage = { .dynamic_update = true }, .label = "tile-ram" });
     vid->gfx_ram = sg_make_image(&(sg_image_desc){ .width = VIDEO_GFX_GPU_W, .height = VIDEO_GFX_GPU_H,
         .pixel_format = SG_PIXELFORMAT_R8UI, .usage = { .dynamic_update = true }, .label = "tile-gfx-ram" });
     vid->pal_rgba = sg_make_image(&(sg_image_desc){ .width = VIDEO_PAL_GPU_W, .height = VIDEO_PAL_GPU_H,
@@ -290,6 +309,7 @@ static inline void video_init(video_state_t *vid) {
 
     vid->composed = false;
     vid->gpu_composes = 0;
+    vid->targets_valid = false;
     video__init_gpu(vid);
     vid->initialized = true;
 }
@@ -368,17 +388,112 @@ static inline void video_compose_cpu(video_state_t *vid, memory_bus_t *bus) {
     }
 }
 
+/* ---- Incremental GPU compose ----------------------------------------------- */
+
+typedef struct {
+    uint8_t blk[VIDEO_BLK_H][VIDEO_BLK_W];   /* 1: the 8x8 block must be drawn again */
+    int     count;
+    bool    full;
+} video_dirty_t;
+
+/* Mark the blocks covering screen pixels [x0, x1) x [y0, y1), clipped. */
+static inline void video__mark(video_dirty_t *d, int x0, int x1, int y0, int y1) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
+    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x0 >= x1 || y0 >= y1) return;
+    for (int by = y0 >> 3; by <= (y1 - 1) >> 3; by++)
+        for (int bx = x0 >> 3; bx <= (x1 - 1) >> 3; bx++)
+            if (!d->blk[by][bx]) { d->blk[by][bx] = 1; d->count++; }
+}
+
+/* The screen pixels where tilemap cell (cx, cy) of tilemap l can show, marked.
+ * A pixel of drawing tilemap t samples tilemap l at ((x - h) & 511, (y + v) & 511)
+ * with t's own scroll: t == l, or under a split mode the even tilemap of the pair
+ * drawing the odd one. The coordinates wrap at 512, so a cell's 8 pixels can
+ * also sit 512 lower; with a per-line H scroll the cell's lines are marked whole. */
+static inline void video__mark_cell(video_dirty_t *d, const uint16_t *w, int l, int cx, int cy) {
+    for (int k = 0; k < 2; k++) {
+        int t = k ? (l & 2) : l;
+        if (k && t == l) break;
+        uint16_t hscr = w[0x5000 + t], vscr = w[0x5004 + t], ctrl = w[0x5004 + (t & 2)];
+        int mode = (ctrl & 0x6000) >> 13;
+        if (vscr & 0x8000) continue;             /* t disabled */
+        if (mode && (t & 1)) continue;           /* odd tilemap idle under a split */
+        if (k && !mode) continue;                /* no split: t draws only itself */
+        int y0 = (cy * 8 - (vscr & 0x1FF)) & 511;
+        for (int j = 0; j < 2; j++) {
+            int ys = y0 - 512 * j;
+            if (hscr & 0x8000) {
+                video__mark(d, 0, VIDEO_WIDTH, ys, ys + 8);
+            } else {
+                int x0 = (cx * 8 + (hscr & 0x1FF)) & 511;
+                video__mark(d, x0, x0 + 8, ys, ys + 8);
+                video__mark(d, x0 - 512, x0 - 504, ys, ys + 8);
+            }
+        }
+    }
+}
+
+/* Which blocks the change from `old` to `cur` tile RAM can alter on screen. A
+ * scroll or control register change moves everything: full. A row scroll word
+ * redraws its line, a window mask word its 128-pixel span of the line, a tilemap
+ * cell where it shows. Words the compositor never reads change nothing. */
+static inline void video__tile_dirty(video_dirty_t *d, const uint16_t *old, const uint16_t *cur) {
+    for (int i = 0; i < VIDEO_TILE_WORDS && !d->full; i += 64) {
+        int n = VIDEO_TILE_WORDS - i < 64 ? VIDEO_TILE_WORDS - i : 64;
+        if (!memcmp(old + i, cur + i, (size_t)n * sizeof *cur)) continue;
+        for (int wi = i; wi < i + n; wi++) {
+            if (old[wi] == cur[wi]) continue;
+            if (wi < 0x4000) {
+                video__mark_cell(d, cur, wi >> 12, wi & 63, (wi >> 6) & 63);
+            } else if (wi < 0x4800) {
+                int y = (wi - 0x4000) & 0x1FF;
+                video__mark(d, 0, VIDEO_WIDTH, y, y + 1);
+            } else if (wi >= 0x5000 && wi < 0x5008) {
+                d->full = true;
+                break;
+            } else if (wi >= 0x6000 && wi < 0x7000) {
+                int off = (wi - 0x6000) & 0x7FF;         /* 0x6000 and 0x6800 alike */
+                if (off < VIDEO_HEIGHT * 4) {
+                    int y = off / 4, x = (off % 4) * 128;
+                    video__mark(d, x, x + 128, y, y + 1);
+                }
+            }
+        }
+    }
+}
+
 /* Upload the RAM the GPU compositor reads (each part only if what it is made of
- * changed) and draw both layers in one pass. Call outside any other pass. */
+ * changed) and draw both layers in one pass: all of them when the targets are new
+ * or graphics or a scroll register changed, otherwise only the blocks the tile
+ * RAM change reaches, over the targets' previous contents. A palette or colour
+ * table change only uploads the pen texture: the targets hold pens. Tile RAM is
+ * snapshot first and everything (upload, registers, the comparison next time)
+ * uses the snapshot, so a write landing meanwhile is caught by the next compose.
+ * Call outside any other pass. */
 static inline void video__compose_gpu(video_state_t *vid, memory_bus_t *bus,
                                       bool tile_changed, bool gfx_changed, bool pens_changed) {
-    if (tile_changed)
+    static uint16_t snap[VIDEO_TILE_WORDS];
+    static video_dirty_t d;
+    memset(&d, 0, sizeof d);
+    d.full = !vid->targets_valid || gfx_changed;   /* pens: the targets hold pens, not colours */
+    if (tile_changed) {
+        memcpy(snap, bus->tile, sizeof snap);         /* little-endian words, as on the host */
+        if (!d.full) video__tile_dirty(&d, vid->tile_words, snap);
+        memcpy(vid->tile_words, snap, sizeof snap);
         sg_update_image(vid->tile_ram, &(sg_image_data){
-            .mip_levels[0] = { .ptr = bus->tile, .size = VIDEO_TILE_GPU_W * VIDEO_TILE_GPU_H } });
-    if (gfx_changed)
+            .mip_levels[0] = { .ptr = vid->tile_words, .size = sizeof vid->tile_words } });
+        vid->up_tile++;
+    }
+    if (gfx_changed) {
         sg_update_image(vid->gfx_ram, &(sg_image_data){
             .mip_levels[0] = { .ptr = bus->tmapgfx, .size = TMAPGFX_SIZE } });
+        vid->up_gfx++;
+    }
     if (pens_changed) {
+        vid->up_pens++;
         const uint8_t (*pc)[32] = vid->pen_chan;
         for (int i = 0; i < VIDEO_PAL_GPU_W * VIDEO_PAL_GPU_H; i++) {
             uint16_t c = pal_read16(bus, i);
@@ -388,30 +503,73 @@ static inline void video__compose_gpu(video_state_t *vid, memory_bus_t *bus,
         sg_update_image(vid->pal_rgba, &(sg_image_data){
             .mip_levels[0] = { .ptr = vid->pal_texels, .size = sizeof vid->pal_texels } });
     }
+    if (!d.full && d.count == 0) return;              /* pens only, or words nothing reads */
+    if (d.count > VIDEO_BLK_W * VIDEO_BLK_H * 3 / 4) d.full = true;
 
-    float params[8];
-    for (int t = 0; t < 4; t++) {
-        params[t]     = (float)tileram_word(bus, 0x5000u + (uint32_t)t);   /* H scroll */
-        params[4 + t] = (float)tileram_word(bus, 0x5004u + (uint32_t)t);   /* V scroll / control */
+    /* The dirty blocks as rectangles: runs along each block row, a run extended
+     * downwards while the next row has the same run. Too many: draw it all. */
+    enum { MAX_RECTS = 48 };
+    int rx[MAX_RECTS], ry[MAX_RECTS], rw[MAX_RECTS], rh[MAX_RECTS], nr = 0;
+    if (!d.full) {
+        for (int by = 0; by < VIDEO_BLK_H && !d.full; by++) {
+            for (int bx = 0; bx < VIDEO_BLK_W; ) {
+                if (!d.blk[by][bx]) { bx++; continue; }
+                int x0 = bx;
+                while (bx < VIDEO_BLK_W && d.blk[by][bx]) bx++;
+                int r = nr - 1;
+                while (r >= 0 && !(rx[r] == x0 && rw[r] == bx - x0 && ry[r] + rh[r] == by)) r--;
+                if (r >= 0) { rh[r]++; continue; }
+                if (nr == MAX_RECTS) { d.full = true; break; }
+                rx[nr] = x0; ry[nr] = by; rw[nr] = bx - x0; rh[nr] = 1; nr++;
+            }
+        }
     }
+
+    /* Which tilemaps hold any category 1 (in front of the 3D) tile. */
+    uint16_t cat1[4] = {0};
+    for (int l = 0; l < 4; l++) {
+        const uint16_t *cells = vid->tile_words + 0x1000 * l;
+        uint16_t any = 0;
+        for (int i = 0; i < 0x1000; i++) any |= cells[i];
+        cat1[l] = any & 0x8000;
+    }
+    float params[12];
+    for (int t = 0; t < 4; t++) {
+        params[t]     = (float)vid->tile_words[0x5000 + t];   /* H scroll */
+        params[4 + t] = (float)vid->tile_words[0x5004 + t];   /* V scroll / control */
+        params[8 + t] = (cat1[t] | cat1[t ^ 1]) ? 1.0f : 0.0f;  /* t draws itself or, split, its pair */
+    }
+    sg_load_action load = d.full ? SG_LOADACTION_DONTCARE : SG_LOADACTION_LOAD;
     sg_begin_pass(&(sg_pass){
-        .action.colors[0].load_action = SG_LOADACTION_DONTCARE,
-        .action.colors[1].load_action = SG_LOADACTION_DONTCARE,
+        .action.colors[0].load_action = load,
+        .action.colors[1].load_action = load,
         .attachments.colors[0] = vid->bg_att,
         .attachments.colors[1] = vid->fg_att,
         .label = "tile-compose",
     });
     sg_apply_pipeline(vid->tile_pipeline);
     sg_apply_bindings(&(sg_bindings){
-        .views[0] = vid->tile_ram_view, .views[1] = vid->gfx_ram_view, .views[2] = vid->pal_rgba_view,
+        .views[0] = vid->tile_ram_view, .views[1] = vid->gfx_ram_view,
         .samplers[0] = vid->fetch_sampler,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = params, .size = sizeof params });
-    sg_draw(0, 3, 1);
+    if (d.full) {
+        sg_draw(0, 3, 1);
+        vid->composed_blocks += (uint64_t)(VIDEO_BLK_W * VIDEO_BLK_H);
+    } else {
+        /* Target row y is screen row y (gl_FragCoord), so a bottom-left scissor
+         * takes the block rows as they are. */
+        for (int r = 0; r < nr; r++) {
+            sg_apply_scissor_rect(rx[r] * 8, ry[r] * 8, rw[r] * 8, rh[r] * 8, false);
+            sg_draw(0, 3, 1);
+        }
+        vid->composed_blocks += (uint64_t)d.count;
+        vid->partial_composes++;
+    }
     sg_end_pass();
+    vid->targets_valid = true;
     vid->gpu_composes++;
 }
-
 /*
  * Bring the back colour, BG and FG layer textures up to date with the bus.
  * Call once per frame before the swapchain pass.
