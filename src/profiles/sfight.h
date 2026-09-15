@@ -297,21 +297,13 @@ static int sfight_hook_cop_err_hang(i960_cpu_t *cpu, memory_bus_t *bus) {
  * the game's own read_sw, called from the VsyncScr vblank interrupt, reads them
  * and builds 0x500700/0x500704 itself. (Phase 12.) */
 
-/* hle_clip_point_check_yoko (0x28188) / hle_clip_point_check (0x28250):
- * point-in-frustum checks. Return 0 (visible) unconditionally so the 3D
- * pipeline never clips objects. */
-static int sfight_hook_clip_yoko(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->globals.g[0] = 0;
-    hle_ret(cpu);
-    return 0;
-}
-static int sfight_hook_clip_3d(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->globals.g[0] = 0;
-    hle_ret(cpu);
-    return 0;
-}
+/* NOTE: there is intentionally NO hook on clip_point_check_yoko (0x28188) or
+ * clip_point_check (0x28250). They return nothing in g0: they write one outcode
+ * byte per point to 0x50E000, and area_clip ANDs a chunk's four corners from
+ * there to decide whether to draw it. 0x50E000 is scratch that rob_spd_control
+ * and smooth_int also write floats to, so skipping the routine made the ground
+ * chunks follow the low bytes of fighter positions. tools/grade-cull.mjs holds
+ * the chunks drawn against the ROM's own rule. */
 
 /* ---- Profile object ----------------------------------------------------- */
 
@@ -322,7 +314,7 @@ static const game_profile_t sfight_profile = {
     .board            = BOARD_MODEL2B_CRX,
     .load_fn      = sfight_load,
     .install_fn   = sfight_install,
-    .hook_count   = 11,
+    .hook_count   = 9,
     .hooks = {
         { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       },
         { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           },
@@ -333,8 +325,6 @@ static const game_profile_t sfight_profile = {
         { 0x00007264, sfight_hook_700000_loop,        "_700000_loop"            },
         { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              },
         { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" },
-        { 0x00028188, sfight_hook_clip_yoko,          "clip_point_check_yoko"   },
-        { 0x00028250, sfight_hook_clip_3d,            "clip_point_check"        },
     },
     .input = {
         .held_addr       = 0x00500700,

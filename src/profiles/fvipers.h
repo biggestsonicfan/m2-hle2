@@ -34,8 +34,6 @@
 #define FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B_SPIN  0x000118DC
 #define FVIPERS_HOOK_ADDR_FRAME_PACE        0x00011C80
 #define FVIPERS_HOOK_ADDR_READ_SW           0x0000229C
-#define FVIPERS_HOOK_ADDR_CLIP_YOKO         0x000236BC
-#define FVIPERS_HOOK_ADDR_CLIP_3D           0x00023784
 
 /* TODO: find in IDA */
 #define FVIPERS_HOOK_ADDR_CHECK_TIMER_SPIN  0xFFFFFFFF  /* TODO: STF 0x0004A58C */
@@ -315,30 +313,19 @@ static int fvipers_hook_read_sw(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 1;
 }
 
-/* clip_point_check_yoko (0x236BC): horizontal frustum cull — return 0 (always visible). */
-static int fvipers_hook_clip_yoko(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->globals.g[0] = 0;
-    hle_ret(cpu);
-    return 0;
-}
-
-/* clip_point_check (0x23784): generic frustum cull — return 0 (always visible). */
-static int fvipers_hook_clip_3d(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->globals.g[0] = 0;
-    hle_ret(cpu);
-    return 0;
-}
+/* NOTE: no hook on clip_point_check_yoko (0x236BC) or clip_point_check
+ * (0x23784), for the reason given in sfight.h. They are the same routines as
+ * STF's, writing outcodes to the same 0x50E000 scratch for ground_upper_disp
+ * and sub_238E4 to AND, not returning a verdict in g0. */
 
 /* ---- Profile object ----------------------------------------------------- */
 
 /*
- * Active hooks: the 8 addresses confirmed above.
+ * Active hooks: the 7 addresses confirmed above.
  * Remaining TODOs (check_timer_4_spin, _idle, _700000_loop, cop_err_hang):
  * fill in FVIPERS_HOOK_ADDR_* above and add the entry here when found.
  */
-#define FVIPERS_HOOK_COUNT 9
+#define FVIPERS_HOOK_COUNT 7
 
 static const game_profile_t fvipers_profile = {
     .id               = "fvipers",
@@ -356,8 +343,6 @@ static const game_profile_t fvipers_profile = {
         { FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B_SPIN, fvipers_hook_interrupt_wait_b_spin, "interrupt_wait_b_spin" },
         { FVIPERS_HOOK_ADDR_FRAME_PACE,        fvipers_hook_frame_pace,       "frame_pace"           },
         { FVIPERS_HOOK_ADDR_READ_SW,           fvipers_hook_read_sw,          "read_sw"              },
-        { FVIPERS_HOOK_ADDR_CLIP_YOKO,         fvipers_hook_clip_yoko,        "clip_point_check_yoko"},
-        { FVIPERS_HOOK_ADDR_CLIP_3D,           fvipers_hook_clip_3d,          "clip_point_check"     },
     },
     .input = {
         /* TODO: find held/momentary/credits addresses in fvipers RAM.

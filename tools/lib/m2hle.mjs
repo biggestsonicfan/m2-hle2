@@ -127,12 +127,17 @@ export class M2Hle {
      * Launch an emulator and attach to it. `--run` starts it executing at once;
      * a driver that wants to set breakpoints first should pass run:false.
      */
+    /* Launched headless — no window, GPU or audio device — since nothing here
+     * looks at the screen. $M2_WINDOW=1 (or headless: false) brings the window
+     * back, to watch what a grader is doing. */
     static async launch({ rom, port = DEFAULT_PORT, run = true, exe = null,
-                          quiet = true, timeoutMs = 30000 } = {}) {
+                          quiet = true, timeoutMs = 30000,
+                          headless = !process.env.M2_WINDOW } = {}) {
         if (!rom) throw new Error('launch needs a rom path');
         const bin = exe ?? findExe();
         const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom)];
         if (run) args.push('--run');
+        if (headless) args.push('--headless');
         /* Run it beside the ROM: a split set needs schamp.zip found next to
          * sfight.zip, the same rule the explorer's loader states. */
         const child = spawn(bin, args, {
