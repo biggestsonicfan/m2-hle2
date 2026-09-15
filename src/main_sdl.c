@@ -10,7 +10,7 @@
  * --render-fps (default 30): every rendered frame shows the newest game frame,
  * so a lower render rate skips frames rather than slowing the game.
  *
- *   m2hle [--rom] <set.zip> [--render-fps N] [--window WxH] [--stats]
+ *   m2hle [--rom] <set.zip> [--render-fps N] [--window WxH] [--stats] [--osd]
  *         [--log FILE] [--pad-map LIST] [--shot FRAME:FILE]... [--exit-after N]
  *
  * --pad-map  comma-separated button=action pairs overriding the defaults, e.g.
@@ -20,6 +20,10 @@
  * --shot     save a PNG of the first rendered frame at or after game frame N.
  * --exit-after  quit after N game frames (for scripted checks).
  * --stats    print frame rates, per-stage host time and temperatures every 5 s.
+ * --osd      show a status line in the top-right corner, refreshed every second:
+ *            drawn/game frames per second, the hotter of the CPU and GPU
+ *            temperature, the local time and the battery level ("+" while
+ *            charging). Parts the host does not report are left out.
  * --gl-finish   wait for the GPU after each frame, so --stats can tell CPU
  *            submission time from GPU time (costs throughput; diagnosis only).
  * --max-temp C  quit once either thermal zone reaches C degrees.
@@ -27,6 +31,10 @@
  *            scale that to the screen (default 1); 0 draws at screen size.
  *            The fill shader's texture LOD is calibrated to 496x384, and the
  *            GPU shades 36% fewer pixels than at 620x480.
+ * --display-scale N  show the game at N x 496x384, centred, instead of as large
+ *            as the screen allows (0, the default). 1 is pixel for pixel: on a
+ *            640x480 screen, a 496x384 picture with a border. A size that does
+ *            not fit the screen falls back to 0.
  * --filter   nearest|linear scaling of the offscreen frame (default linear).
  * --cpu-tiles   compose the tile layers on the CPU instead of in a shader.
  * --no-mesh-cache  decode every display-list model in full every frame.
@@ -40,12 +48,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <SDL3/SDL.h>
 #include <GLES3/gl3.h>
 
 #include "sokol_gfx.h"
 #include "sokol_log.h"
+#include "sokol_debugtext.h"
 
 #include "constants.h"
 #include "log.h"
@@ -83,6 +93,7 @@ static struct {
     double      render_fps;
     int         win_w, win_h;       /* 0 = fullscreen */
     bool        stats;
+    bool        osd;
     const char *log_path;
     const char *pad_map;
     int         shot_count;
@@ -92,6 +103,7 @@ static struct {
     bool        gl_finish;
     double      max_temp;
     int         render_scale;       /* offscreen at N x 496x384; 0 = straight to the screen */
+    int         display_scale;      /* shown at N x 496x384, centred; 0 = fit the screen */
     bool        linear;
     bool        cpu_tiles;
     bool        verify_gpu_tiles;
@@ -329,11 +341,13 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--render-fps") && more) opt.render_fps = atof(argv[++i]);
         else if (!strcmp(a, "--window") && more)     { if (sscanf(argv[++i], "%dx%d", &opt.win_w, &opt.win_h) != 2) return false; }
         else if (!strcmp(a, "--stats"))              opt.stats = true;
+        else if (!strcmp(a, "--osd"))                opt.osd = true;
         else if (!strcmp(a, "--log") && more)        opt.log_path = argv[++i];
         else if (!strcmp(a, "--pad-map") && more)    opt.pad_map = argv[++i];
         else if (!strcmp(a, "--exit-after") && more) opt.exit_after = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--gl-finish"))          opt.gl_finish = true;
         else if (!strcmp(a, "--render-scale") && more) opt.render_scale = atoi(argv[++i]);
+        else if (!strcmp(a, "--display-scale") && more) opt.display_scale = atoi(argv[++i]);
         else if (!strcmp(a, "--cpu-tiles"))          opt.cpu_tiles = true;
         else if (!strcmp(a, "--no-mesh-cache"))      g_geo3d_mesh_cache = 0;
         else if (!strcmp(a, "--verify-gpu-tiles"))   opt.verify_gpu_tiles = true;
@@ -364,9 +378,76 @@ static int read_milli(const char *path) {
     return v;
 }
 
+/* ---- On-screen status line (--osd) ---------------------------------------- */
+
+#define OSD_BATTERY "/sys/class/power_supply/battery/"
+
+static struct {
+    Uint64   window_start;   /* 0 until the first sample */
+    unsigned renders, frames0;
+    char     text[64];
+} g_osd;
+
+/* Count one rendered frame; once a second, rebuild the text from the frame
+ * rates over that second and fresh sysfs readings. */
+static void osd_update(Uint64 now) {
+    g_osd.renders++;
+    if (g_osd.window_start && now - g_osd.window_start < 1000000000ull) return;
+
+    char fps[16] = "--/--fps";
+    if (g_osd.window_start) {
+        double secs = (double)(now - g_osd.window_start) / 1e9;
+        snprintf(fps, sizeof fps, "%d/%dfps", (int)(g_osd.renders / secs + 0.5),
+                 (int)((g_emu_frames - g_osd.frames0) / secs + 0.5));
+    }
+    g_osd.window_start = now;
+    g_osd.renders      = 0;
+    g_osd.frames0      = g_emu_frames;
+
+    size_t n = (size_t)snprintf(g_osd.text, sizeof g_osd.text, "%s", fps);
+    int cpu = read_milli("/sys/class/thermal/thermal_zone0/temp");
+    int gpu = read_milli("/sys/class/thermal/thermal_zone1/temp");
+    int hot = cpu > gpu ? cpu : gpu;
+    if (hot > 0 && n < sizeof g_osd.text)
+        n += (size_t)snprintf(g_osd.text + n, sizeof g_osd.text - n, " %dC", (hot + 500) / 1000);
+    time_t t = time(NULL);
+    struct tm lt;
+    if (localtime_r(&t, &lt) && n < sizeof g_osd.text)
+        n += (size_t)snprintf(g_osd.text + n, sizeof g_osd.text - n, " %02d:%02d", lt.tm_hour, lt.tm_min);
+    int bat = read_milli(OSD_BATTERY "capacity");
+    if (bat >= 0 && n < sizeof g_osd.text) {
+        char status[16] = "";
+        FILE *f = fopen(OSD_BATTERY "status", "r");
+        if (f) { if (!fgets(status, sizeof status, f)) status[0] = '\0'; fclose(f); }
+        snprintf(g_osd.text + n, sizeof g_osd.text - n, " %d%%%s", bat,
+                 strncmp(status, "Charging", 8) ? "" : "+");
+    }
+}
+
+/* Draw the text right-aligned in the top-right corner of the current pass,
+ * white on a one-pixel black shadow so it reads over any scene. */
+static void osd_draw(int fb_w, int fb_h) {
+    float scale = fb_h >= 720 ? 3.0f : 2.0f;    /* 8x8 font → 16 px cells at 480p */
+    float cols  = (float)fb_w / scale / 8.0f;
+    float x     = cols - (float)strlen(g_osd.text) - 0.25f;
+    /* sdtx draws through whatever viewport is in force: the game's picture
+     * left its own letterbox (and its scissor) set, not the whole screen. */
+    sg_apply_viewport(0, 0, fb_w, fb_h, true);
+    sg_apply_scissor_rect(0, 0, fb_w, fb_h, true);
+    sdtx_canvas((float)fb_w / scale, (float)fb_h / scale);
+    sdtx_origin(0.0f, 0.0f);
+    sdtx_pos(x + 0.125f, 0.25f + 0.125f);
+    sdtx_color3b(0, 0, 0);
+    sdtx_puts(g_osd.text);
+    sdtx_pos(x, 0.25f);
+    sdtx_color3b(255, 255, 255);
+    sdtx_puts(g_osd.text);
+    sdtx_draw();
+}
+
 int main(int argc, char **argv) {
     if (!parse_args(argc, argv)) {
-        fprintf(stderr, "usage: m2hle [--rom] <set.zip> [--render-fps N] [--window WxH] [--stats]\n"
+        fprintf(stderr, "usage: m2hle [--rom] <set.zip> [--render-fps N] [--window WxH] [--stats] [--osd]\n"
                         "             [--log FILE] [--pad-map LIST] [--shot FRAME:FILE] [--exit-after N]\n");
         return 2;
     }
@@ -426,6 +507,8 @@ int main(int argc, char **argv) {
         .logger.func = slog_func,
     });
     if (!sg_isvalid()) { fprintf(stderr, "m2hle: sokol_gfx setup failed\n"); return 1; }
+    if (opt.osd)
+        sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_cpc(), .logger.func = slog_func });
     g_video_force_cpu_tiles = opt.cpu_tiles;
     game_render_init();
     video_init(&state.video);
@@ -531,6 +614,13 @@ int main(int argc, char **argv) {
 
         int ox, oy, w, h;
         game_render_letterbox(fb_w, fb_h, VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
+        if (opt.display_scale > 0 && VIDEO_WIDTH * opt.display_scale <= fb_w
+                && VIDEO_HEIGHT * opt.display_scale <= fb_h) {
+            w  = VIDEO_WIDTH * opt.display_scale;
+            h  = VIDEO_HEIGHT * opt.display_scale;
+            ox = (fb_w - w) / 2;
+            oy = (fb_h - h) / 2;
+        }
         if (opt.render_scale > 0) {
             sg_begin_pass(&(sg_pass){
                 .action = pass_action,
@@ -551,6 +641,10 @@ int main(int argc, char **argv) {
             game_render_draw_target(rt_texture, opt.linear, ox, oy, w, h);
         else
             game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
+        if (opt.osd) {
+            osd_update(SDL_GetTicksNS());
+            osd_draw(fb_w, fb_h);
+        }
         sg_end_pass();
         sg_commit();
         Uint64 cpu_end = SDL_GetTicksNS();
@@ -610,6 +704,7 @@ int main(int argc, char **argv) {
         sg_destroy_image(rt_depth);
         sg_destroy_image(rt_color);
     }
+    if (opt.osd) sdtx_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     sg_shutdown();
