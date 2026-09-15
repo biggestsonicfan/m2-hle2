@@ -155,6 +155,8 @@ These addresses are STF-specific. The **patterns** repeat across the catalogue �
 - **`CoProcessorErr` at `0x74E4` (STF)** must be bypassed. Return via `locals.rip` (saved return address from the call frame), NOT normal IP advance. Without this, STF hangs at the Sega logo. Every Model 2 game will have an equivalent — find by symptom (hang on boot, COP self-test loop).
 - **Timer IRQ flag at `0x50008C` (STF)** — write `0x01` to unblock the polled wait loop.
 - **Frame pacing** is driven by `variable_diff_calc` (~`0x11A04` in STF) setting a volatile `g_frame_done`. The emu thread runs up to `EMU_STEPS_PER_SLICE` (500,000) instructions per slice — sized to always reach the frame boundary.
+- **Never hook `clip_point_check_yoko` / `clip_point_check`** (STF `0x28188` / `0x28250`, FV `0x236BC` / `0x23784`). They return nothing in `g0`. Each runs a point list through op `0x29` and writes one outcode byte per point to `0x50E000` (`0x90` behind the lens, `0x81`/`0x82` off the left/right edge). `area_clip` then draws a ground chunk only when the AND of its four corners' outcodes is zero, and finally draws the chunk the camera stands over.
+  - *Symptom that surfaced this in STF:* stage ground chunks popped in and out as the fighters moved. The hooks skipped the write, and `0x50E000` is scratch that `rob_spd_control` fills with fighter X/Y/Z floats, so the cull was ANDing position bytes. Measured by `tools/grade-cull.mjs`: 0 of 299 frames right and 998 chunk toggles with the hooks, against 17 for the ROM's rule; exact in 599 of 599 without them.
 
 ### Threading
 
@@ -194,9 +196,9 @@ cmake -S <repo> -B <repo>/build_vs22 -G "Visual Studio 17 2022" -A x64
 cmake --build <repo>/build_vs22 --config Release --target ALL_BUILD -j 16
 ```
 
-Output: `build_vs22\Release\m2hle.exe`. No automated tests — validation is interactive through the GUI. The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
+Output: `build_vs22\Release\m2hle.exe`. No automated tests — validation is interactive through the GUI. `--headless --mcp --rom <zip> --run` runs the emulator and its bridge with no window, GPU or audio device; the graders launch it that way (`$M2_WINDOW=1` shows the window). The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
 
-**Grading harness** — [tools/](tools/) measures this emulator against an independent implementation of the same ROM formats (the STF explorer, a submodule at `vendor/noclip`), with SHA-256 over a MAME capture as a third point so the two ports cannot simply agree with each other and be wrong together. `node tools/grade-models.mjs` is the one to run after touching `geo3d.h`, and `node tools/grade-pose.mjs` after touching the COP bone handlers in `sharc_exec.h` — the latter replays 328 frames of rig arguments captured off a real board, so it needs a sibling `stf-tools` checkout for `motion-pose.csv` and skips cleanly without one. See [tools/README.md](tools/README.md).
+**Grading harness** — [tools/](tools/) measures this emulator against an independent implementation of the same ROM formats (the STF explorer, a submodule at `vendor/noclip`), with SHA-256 over a MAME capture as a third point so the two ports cannot simply agree with each other and be wrong together. `node tools/grade-models.mjs` is the one to run after touching `geo3d.h`, and `node tools/grade-pose.mjs` after touching the COP bone handlers in `sharc_exec.h` — the latter replays 328 frames of rig arguments captured off a real board, so it needs a sibling `stf-tools` checkout for `motion-pose.csv` and skips cleanly without one. `node tools/grade-cull.mjs` checks which arena ground chunks get drawn against the ROM's own `area_clip` rule, on the camera the display list was drawn from. See [tools/README.md](tools/README.md).
 
 ---
 

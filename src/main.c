@@ -54,6 +54,7 @@ static int  g_autorun = 0;
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 static int  g_mcp_enable = 0;      /* --mcp: start the TCP debug server */
 static int  g_mcp_port   = 7172;   /* --mcp-port N */
+static int  g_headless   = 0;      /* --headless: no window, GPU or audio device */
 
 static struct {
     sg_pass_action   pass_action;
@@ -354,6 +355,34 @@ static void init(void) {
 #endif
 }
 
+/* --headless: the emulator and its MCP bridge and nothing else. The graders in
+ * tools/ drive the game over the bridge and read what they need out of memory
+ * and the display list, so a window, a GPU context and an audio device are only
+ * a window popping up and taking focus on every run. Sound still runs on the
+ * board (the graders capture it); with no device draining its output ring the
+ * board drops the samples. The display list is not scanned into 3D models, so
+ * get_geo_captures has nothing to report. Runs until the process is killed. */
+static int headless_main(void) {
+    log_init();
+    if (!g_rom_path[0]) { LOG_ERROR("--headless needs --rom"); return 2; }
+    mem_init(&state.bus, NULL, 0);
+    i960_reset(&state.cpu);
+    bp_init();
+    wp_init();
+    if (g_profile_count > 0) g_active_profile = g_profiles[0];
+    geo3d_init(&state.geo3d);
+    g_geo3d_state = &state.geo3d;
+    emu_ensure_started();
+    load_active_profile(g_rom_path);
+    if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
+    if (g_autorun) emu_run(&state.emu);
+    LOG_INFO("headless: running%s", g_mcp_enable ? " with the MCP bridge" : " (no --mcp: nothing can drive it)");
+    for (;;) {
+        emu_update_snapshots(&state.emu);
+        emu_sleep_ms(5);
+    }
+}
+
 static void frame(void) {
     simgui_new_frame(&(simgui_frame_desc_t){
         .width       = sapp_width(),
@@ -618,8 +647,11 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_mcp_enable = 1;                  /* start TCP debug server */
         } else if (strcmp(argv[i], "--mcp-port") == 0 && i + 1 < argc) {
             g_mcp_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--headless") == 0) {
+            g_headless = 1;
         }
     }
+    if (g_headless) exit(headless_main());
     return (sapp_desc){
         .init_cb     = init,
         .frame_cb    = frame,
