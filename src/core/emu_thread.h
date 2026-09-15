@@ -235,6 +235,11 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
                 if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
             }
+            /* The game's frame ended on the instruction the loop stopped at, so
+             * this is between two frames' display lists: mark it for a capture. */
+            if (g_frame_done || (board_vblank && g_vblank_acked))
+                dl_frame_edge(ctx->bus, g_emu_frames);
+
             /* Run the 68K sound CPU proportional to the i960 batch. */
             sound_step(M68K_STEPS_PER_SLICE);
 

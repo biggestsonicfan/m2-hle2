@@ -466,7 +466,7 @@ static void mcp_cmd_get_geo_captures(char *resp, int cap) {
                 "\"scale\":[%.3f,%.3f,%.3f],"
                 "\"up\":[%.2f,%.2f,%.2f],"
                 "\"clip\":%d,\"cx\":%d,\"cy\":%d,\"cw\":%d,\"ch\":%d,"
-                "\"bone\":%d}",
+                "\"bone\":%d,\"vs\":%d,\"win\":%d,\"vp\":[%d,%d,%d,%d],\"gp\":[%.1f,%.1f,%.1f,%.1f],\"tpa\":\"0x%X\",\"tha\":\"0x%X\",\"matptr\":\"0x%X\"}",
                 i ? "," : "",
                 i, cm->model_idx, cm->dbg_mesh_ptr,
                 cm->dbg_pos[0], cm->dbg_pos[1], cm->dbg_pos[2],
@@ -478,7 +478,10 @@ static void mcp_cmd_get_geo_captures(char *resp, int cap) {
                 cm->matrix[1], cm->matrix[5], cm->matrix[9],
                 cm->has_clip_win ? 1 : 0, cm->clip_win_x, cm->clip_win_y,
                 cm->clip_win_w, cm->clip_win_h,
-                cm->from_bone ? 1 : 0);
+                cm->from_bone ? 1 : 0, cm->view_space ? 1 : 0, cm->window,
+                cm->vp[0], cm->vp[1], cm->vp[2], cm->vp[3],
+                cm->gproj[0], cm->gproj[1], cm->gproj[2], cm->gproj[3],
+                cm->tpa, cm->tha, cm->material_ptr);
     }
     GAPPEND("]}");
 #undef GAPPEND
@@ -853,6 +856,44 @@ static void mcp_cmd_wait_for_stop(const char *req, char *resp, int cap) {
  * The read goes through mem_read8 rather than at the region's backing store so
  * a range that spans regions, or one behind an MMIO callback, dumps the same
  * bytes the i960 would see. */
+/* dump_geo_list — the GEO display list the renderer walks: the copy published
+ * when the game last set the read pointer. Writes <path> as u32 read pointer,
+ * u32 publish count, u16 H-sync, u16 V-sync, then bufferram's words. */
+/* set_geo_isolate: draw only captured object `index` (-1 for all), to find which
+ * object puts a given thing on screen. */
+static void mcp_cmd_set_geo_isolate(const char *req, char *resp, int cap) {
+    uint32_t idx = 0xFFFFFFFFu;
+    mcp_json_get_u32(req, "index", &idx);
+    if (!g_geo3d_state) { snprintf(resp, (size_t)cap, "{\"ok\":false}"); return; }
+    g_geo3d_state->isolate_index = (idx == 0xFFFFFFFFu) ? -1 : (int)idx;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"isolate\":%d}", g_geo3d_state->isolate_index);
+}
+
+static void mcp_cmd_dump_geo_list(const char *req, char *resp, int cap) {
+    char path[512] = {0};
+    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    if (!g_mcp.bus || !g_geodl_snap_ready) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no display list published yet\"}"); return;
+    }
+    static uint32_t words[BUFF_RAM_SIZE / 4];
+    uint32_t head[2]; uint16_t sync[2];
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    memcpy(words, g_geodl_snap, sizeof words);
+    head[0] = g_geodl_snap_rstart; head[1] = (uint32_t)g_geodl_snap_seq;
+    sync[0] = (uint16_t)mem_read16(g_mcp.bus, H_SYNC_BASE);
+    sync[1] = (uint16_t)mem_read16(g_mcp.bus, V_SYNC_BASE);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    FILE *f = fopen(path, "wb");
+    int ok = f && fwrite(head, 4, 2, f) == 2 && fwrite(sync, 2, 2, f) == 2
+               && fwrite(words, 4, BUFF_RAM_SIZE / 4, f) == BUFF_RAM_SIZE / 4;
+    if (f) fclose(f);
+    snprintf(resp, (size_t)cap, "{\"ok\":%s,\"read_start\":%u,\"seq\":%u,\"hsync\":%d,\"vsync\":%d}",
+             ok ? "true" : "false", head[0], head[1], (int16_t)sync[0], (int16_t)sync[1]);
+}
+
 static void mcp_cmd_dump_memory_file(const char *req, char *resp, int cap) {
     uint32_t addr = 0, size = 0;
     char path[512] = {0};
@@ -1032,6 +1073,168 @@ static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
              first, count, nonempty, total_tris);
 }
 
+/* Record the display list: every write to the geometry processor and the
+ * coprocessor for `frames` whole frames, in write order. See the display-list
+ * tap in memory.h for what is recorded and why.
+ *
+ * Request: frames, path, probes ("addr:size,addr:size,..." read at each frame
+ * edge, size 1/2/4), optional max_words and timeout_ms, and optional lo / hi
+ * to record only part of the window (the coprocessor FIFO alone is a fraction
+ * of the words, which is what makes a long capture of the rig affordable).
+ *
+ * Writes the explorer toolkit's MAME capture format, little-endian:
+ *   <path>.bin    (u32 address, u32 value) per write
+ *   <path>.json   {"words", "frames", "overflow", "probes", "marks"} where each
+ *                 mark is [frame, word index, probe values...] and a pair of
+ *                 consecutive marks brackets exactly one frame
+ * The tools lay the probes out in whichever order a given check reads them. */
+static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
+    uint32_t frames = 60, max_words = 8u * 1024u * 1024u, timeout_ms = 120000;
+    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_tgp = 0, want_slots = 0, want_unit = 0;
+    char path[512] = {0}, probes[2048] = {0};
+    mcp_json_get_u32(req, "tgp", &want_tgp);
+    mcp_json_get_u32(req, "slots", &want_slots);
+    mcp_json_get_u32(req, "unit", &want_unit);
+    mcp_json_get_u32(req, "lo", &lo);
+    mcp_json_get_u32(req, "hi", &hi);
+    if (lo < DL_TAP_LO) lo = DL_TAP_LO;
+    if (hi > DL_TAP_HI || hi <= lo) hi = DL_TAP_HI;
+    mcp_json_get_u32(req, "frames", &frames);
+    mcp_json_get_u32(req, "max_words", &max_words);
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    mcp_json_get_str(req, "probes", probes, sizeof(probes));
+    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    if (!g_mcp.bus || !g_mcp.emu) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emulator not ready\"}"); return;
+    }
+    if (frames == 0 || frames > 3600) frames = frames ? 3600 : 1;
+    if (max_words > 64u * 1024u * 1024u) max_words = 64u * 1024u * 1024u;
+
+    uint32_t paddr[DL_MAX_PROBES]; uint8_t psize[DL_MAX_PROBES]; int np = 0;
+    for (char *tok = strtok(probes, ","); tok && np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
+        char *colon = strchr(tok, ':');
+        paddr[np] = (uint32_t)strtoul(tok, NULL, 16);
+        uint32_t sz = colon ? (uint32_t)strtoul(colon + 1, NULL, 10) : 4;
+        psize[np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
+    }
+
+    dl_rec_t  *recs  = (dl_rec_t *)malloc((size_t)max_words * sizeof(dl_rec_t));
+    dl_mark_t *marks = (dl_mark_t *)calloc((size_t)frames + 2, sizeof(dl_mark_t));
+    const size_t tgp_per_mark = sizeof g_sharc.tgp_bone / sizeof(float);
+    float     *tgp   = want_tgp ? (float *)calloc(((size_t)frames + 2) * tgp_per_mark, sizeof(float)) : NULL;
+    uint32_t  *slots = want_slots ? (uint32_t *)calloc(((size_t)frames + 2) * DL_SLOT_WORDS, sizeof(uint32_t)) : NULL;
+    const size_t unit_per_mark = sizeof g_sharc.rot_cache / sizeof(float);
+    float     *unit  = want_unit ? (float *)calloc(((size_t)frames + 2) * unit_per_mark, sizeof(float)) : NULL;
+    if (!recs || !marks || (want_tgp && !tgp) || (want_slots && !slots) || (want_unit && !unit)) {
+        free(recs); free(marks); free(tgp); free(slots); free(unit);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
+    }
+
+    emu_mutex_lock(&g_mcp.emu->mutex);
+    memset(&g_dl, 0, sizeof g_dl);
+    g_dl.recs = recs;   g_dl.cap = max_words;
+    g_dl.marks = marks; g_dl.capmarks = (size_t)frames + 2;
+    g_dl.want = frames;
+    g_dl.lo = lo; g_dl.hi = hi;
+    g_dl.tgp = tgp;
+    g_dl.slots = slots;
+    g_dl.unit = unit;
+    g_dl.nprobes = np;
+    memcpy(g_dl.probe_addr, paddr, sizeof(uint32_t) * (size_t)np);
+    memcpy(g_dl.probe_size, psize, (size_t)np);
+    g_dl.armed = 1;
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+
+    /* Wait out the frames without holding the mutex, as wait_frames does. */
+    uint32_t elapsed = 0, idle_ms = 0;
+    while (!g_dl.done && elapsed < timeout_ms) {
+        if (!emu_is_running(g_mcp.emu)) {
+            idle_ms += 2;
+            if (idle_ms >= MCP_STOPPED_GRACE_MS) break;
+        } else {
+            idle_ms = 0;
+        }
+        emu_sleep_ms(2);
+        elapsed += 2;
+    }
+
+    emu_mutex_lock(&g_mcp.emu->mutex);
+    g_dl.armed = 0; g_dl.active = 0;
+    size_t n = g_dl.n, nmarks = g_dl.nmarks;
+    int overflow = g_dl.overflow, done = g_dl.done;
+    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.tgp = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+
+    char file[600];
+    snprintf(file, sizeof file, "%s.bin", path);
+    FILE *f = fopen(file, "wb");
+    int wrote_ok = f != NULL;
+    if (f) {
+        for (size_t i = 0; i < n; i++) {
+            uint32_t pair[2] = { recs[i].addr, recs[i].val };
+            if (fwrite(pair, 4, 2, f) != 2) { wrote_ok = 0; break; }
+        }
+        fclose(f);
+    }
+    snprintf(file, sizeof file, "%s.json", path);
+    f = wrote_ok ? fopen(file, "w") : NULL;
+    if (f) {
+        fprintf(f, "{\"words\":%zu,\"frames\":%zu,\"overflow\":%s,\"probes\":[",
+                n, nmarks ? nmarks - 1 : 0, overflow ? "true" : "false");
+        for (int i = 0; i < np; i++)
+            fprintf(f, "%s\"0x%06X:%u\"", i ? "," : "", paddr[i], psize[i]);
+        fprintf(f, "],\"marks\":[");
+        for (size_t m = 0; m < nmarks; m++) {
+            fprintf(f, "%s[%u,%u", m ? "," : "", marks[m].frame, marks[m].index);
+            for (int i = 0; i < np; i++) fprintf(f, ",%u", marks[m].probe[i]);
+            fprintf(f, "]");
+        }
+        fprintf(f, "]}\n");
+        fclose(f);
+    } else {
+        wrote_ok = 0;
+    }
+    if (tgp && wrote_ok) {
+        /* <path>.tgp.bin: one record per mark, 32 slots × 12 f32 in the HLE's
+         * tgp_bone order (P1 slots 0..15, then P2's). */
+        snprintf(file, sizeof file, "%s.tgp.bin", path);
+        f = fopen(file, "wb");
+        if (f) {
+            if (fwrite(tgp, sizeof(float) * tgp_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
+            fclose(f);
+        } else {
+            wrote_ok = 0;
+        }
+    }
+    /* <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
+     * TGP layout); <path>.unit.bin: the unit-matrix cache, 32 × 12 f32 per mark. */
+    if (slots && wrote_ok) {
+        snprintf(file, sizeof file, "%s.slots.bin", path);
+        f = fopen(file, "wb");
+        if (!f || fwrite(slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks, f) != nmarks) wrote_ok = 0;
+        if (f) fclose(f);
+    }
+    if (unit && wrote_ok) {
+        snprintf(file, sizeof file, "%s.unit.bin", path);
+        f = fopen(file, "wb");
+        if (!f || fwrite(unit, sizeof(float) * unit_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
+        if (f) fclose(f);
+    }
+    free(recs);
+    free(marks);
+    free(tgp);
+    free(slots);
+    free(unit);
+
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":%s,\"words\":%zu,\"frames\":%zu,\"complete\":%s,\"overflow\":%s%s}",
+             wrote_ok ? "true" : "false", n, nmarks ? nmarks - 1 : 0,
+             done ? "true" : "false", overflow ? "true" : "false",
+             wrote_ok ? "" : ",\"error\":\"cannot write capture\"");
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -1048,6 +1251,9 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "dump_memory_file") == 0) mcp_cmd_dump_memory_file(req, resp, cap);
     else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
     else if (strcmp(cmd, "dump_model")       == 0) mcp_cmd_dump_model(req, resp, cap);
+    else if (strcmp(cmd, "capture_dl")       == 0) mcp_cmd_capture_dl(req, resp, cap);
+    else if (strcmp(cmd, "dump_geo_list")    == 0) mcp_cmd_dump_geo_list(req, resp, cap);
+    else if (strcmp(cmd, "set_geo_isolate")  == 0) mcp_cmd_set_geo_isolate(req, resp, cap);
     else if (strcmp(cmd, "emu_run")          == 0) mcp_cmd_emu_run(resp, cap);
     else if (strcmp(cmd, "emu_stop")         == 0) mcp_cmd_emu_stop(resp, cap);
     else if (strcmp(cmd, "emu_step")         == 0) mcp_cmd_emu_step(req, resp, cap);

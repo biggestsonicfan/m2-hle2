@@ -47,11 +47,13 @@ These are facts reverse-engineered or debugged into the original implementation.
 
 ### Coprocessor (COP) — board-level math, every Model 2 game
 
+The SHARC firmware itself is the reference for every handler here: `C:\Users\bigge\source\repos\ai\stf-sharc` holds annotated, reassemblable sources with Sega's own handler labels. They reassemble bit-for-bit to the ROM images. `cpres1.asm` is the COP (transform/math engine, 136 commands) and `cpres2.asm` the GEO feed. A `cpres1 PM 0x2xxxx` citation in `sharc_exec.h` is an address in `cpres1.asm`.
+
 - **Rotation is accumulated by post-multiply**, not rebuilt from stored angles. `g_sharc.rot[3][3]` is column-major (SHARC convention): `rot[col][row]`. Each ang command post-multiplies the running matrix:
   - `ang_y` (0x04800909 → PM 0x201BF): `new_col0 = c·col0 + s·col2`, `new_col2 = −s·col0 + c·col2`
   - `ang_x` (0x04000808 → PM 0x201AA): `new_col1 = c·col1 − s·col2`, `new_col2 = s·col1 + c·col2`
   - `ang_z` (0x05000A0A → PM 0x201D4): `new_col0 = c·col0 − s·col1`, `new_col1 = s·col0 + c·col1`
-  - Verified by reading SHARC firmware dispatch table at DM[0x30000] in `C:\temp\sharc_bone.asm`.
+  - Verified by reading SHARC firmware dispatch table at DM[0x30000] (originally `C:\temp\sharc_bone.asm`; the firmware sources now live in `stf-sharc`, below).
   - **Previous versions of this doc had ang_x and ang_z PM addresses and formulas swapped — now corrected.**
   - The old "M = Ry_LH × Rx × Rz rebuild" was only correct for a single clean ang sequence from identity.
 - **Z-negation in matrix storage** (HLE convention): `matrix[r][2] = −rot[2][r]` for rows 0 and 1; `matrix[2][2] = rot[2][2]`. The 0x14802929/0x35006A6A handlers use `−iz` for rows 0/1 and `+iz` for row 2. This asymmetric negation together with the negated col2 storage produces output identical to the SHARC's raw column-major multiply.
@@ -66,6 +68,8 @@ These are facts reverse-engineered or debugged into the original implementation.
   - The pairing is pinned by a MAME capture of a real fight (`stf-tools/motion-pose.csv`), which holds `args[12]` against the character record's forearm and `args[13]` against its upper arm; the two differ (0.3932 against 0.3464 for a shin and thigh), so it is not a coin toss.
   - *Why this hides:* getting it backwards still lands the hand or foot exactly on the IK target and still bends the limb by the right angle, because the triangle's two edges add to the same point whichever order they are walked in. Only the joint between them moves, to the far corner of that parallelogram — the bones swap ends and the knee folds backwards. It was worth 0.385 world units, one arm bone, and it took `tools/grade-pose.mjs` rather than a screenshot to say so.
   - The rotations either side of it were already right: both turns come out of one post-multiply chain, the first giving the lower bone's frame and the second the upper's, so the lower's has to be kept before the second turn overwrites it.
+- **`0x19003232` (`Fn_fcurve_spl`, the motion Hermite) uses both tangents**: args are (span, t, v0, v1, m0, m1), with m0 the earlier key's out-tangent and m1 the later key's in-tangent. Both are scaled by span/30 (firmware constant `0x3D08882F`, cpres1 PM 0x210E9). Every spline channel of every motion goes through it: `get_fcurve_value_f` hands the coprocessor the segment and reads the value back.
+  - *Symptom that surfaced this in STF:* the handler dropped m1. Stance motion 278 came out 2–3 binary radians off the board (MAME `motion-pose.csv`), and a turn (motion 265) about 15° off. `tools/grade-motion.mjs` now holds both fighters' motion arguments exact across the attract intro and a fight.
 - **Command `0x2F005E5E` is scalar-then-vector**: arg0 = scalar, args 1–3 = vector → returns `(s*x, s*y, s*z)`.
 - *Note:* command opcodes documented here are the ones confirmed in STF. Other games may use additional opcodes — log unknown commands at WARN and extend the dispatch table.
 
