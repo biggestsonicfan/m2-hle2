@@ -147,6 +147,12 @@ typedef struct {
      * P1 = 0xFA00, P2 = 0x1FA00 (byte offset into sharc_dm_ext). */
     uint32_t coli_buf_base;
 
+    /* The firmware's own data memory, DM 0x30000..0x32FFF, one word each —
+     * what Fn_write_ram (0x49) fills and Fn_read_ram (0x48) reads, and the
+     * state the collision commands hand each other (sharc_dm_get/set; the
+     * unit-matrix cache at 0x30420..0x3059F is rot_cache, not this array). */
+    uint32_t dm[0x3000];
+
     /* Activity counters. */
     uint32_t unknown_cmds;
     uint32_t transform_count;
@@ -200,6 +206,40 @@ static inline uint32_t sharc_float_to_bits(float f) {
 static inline float sharc_angle_to_rad(int32_t fp) {
     int16_t a = (int16_t)(fp & 0xFFFF);
     return ((float)a / 65536.0f) * (2.0f * 3.14159265358979f);
+}
+
+/* COP data ROM, as the SHARC sees it at DM 0x1C00000 (one little-endian float
+ * a word). Set once by the game profile; lives outside g_sharc so cop_reset()
+ * leaves it alone. NULL on a board/profile that did not load one. */
+static const uint8_t *g_sharc_copro_rom      = NULL;
+static size_t         g_sharc_copro_rom_size = 0;
+
+/* sin/cos of a signed 16-bit angle the way the firmware takes them (_L202C1):
+ * straight out of the ROM, sin at DM 0x1C10000 + angle, cos 0x20000 further on.
+ * The tables are rounded to six decimals, so cos(0x4000) is exactly 0 and
+ * cos(-0x4000) is -1e-6 — values the i960 reads back, forwards and branches
+ * on, which cosf() (-4.37e-8) does not reproduce. Falls back to libm without
+ * a ROM. */
+static inline void sharc_sincos(int32_t angle, float *s, float *c) {
+    int32_t a = (int16_t)(angle & 0xFFFF);
+    if (g_sharc_copro_rom && g_sharc_copro_rom_size >= 0x38000u * 4u) {
+        memcpy(s, g_sharc_copro_rom + (size_t)(0x10000 + a) * 4u, 4);
+        memcpy(c, g_sharc_copro_rom + (size_t)(0x30000 + a) * 4u, 4);
+        return;
+    }
+    float r = sharc_angle_to_rad(angle);
+    *s = sinf(r);
+    *c = cosf(r);
+}
+
+/* An angle the firmware hands back (_L202CA): its atan2 answers in [0, 2pi),
+ * that times 0x4622F983 (32768/pi as a float), `fix`ed -- the COP runs with
+ * MODE1 TRUNCATE -- then the low 16 bits, zero-extended; callers read it with
+ * ldis. The wrap is what makes a hair below zero come back as 0xFFFF, not 0. */
+static inline uint32_t sharc_angle_word(float rad) {
+    if (rad < 0.0f) rad += 6.28318548f;
+    float scaled = rad * 10430.3779296875f;
+    return (uint32_t)(int32_t)scaled & 0xFFFFu;
 }
 
 /* ---- Reply staging ------------------------------------------------------- */

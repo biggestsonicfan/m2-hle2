@@ -43,6 +43,7 @@ typedef struct {
     float u, v;
     float tx, ty, tw, th;
     float lb, pl;               /* lumabase + poly_luma for the colorxlat luma ramp */
+    float fl;                   /* GEO3D_FACE_* flags */
 } game_render_tex_vertex_t;
 
 typedef struct {
@@ -172,21 +173,46 @@ static const char *game_render_fill_vs_glsl =
     "layout(location=1) in vec4 a_color;\n"
     "layout(location=2) in vec2 a_uv;\n"
     "layout(location=3) in vec4 a_tile;\n"
-    "layout(location=4) in vec2 a_lbpl;\n"
+    "layout(location=4) in vec3 a_lbpl;\n"
     "out vec4 color;\n"
     "out vec2 uv;\n"
-    "out vec4 tile;\n"
-    "out vec2 lbpl;\n"
+    "flat out vec4 tile;\n"
+    "flat out vec3 lbpl;\n"
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl;\n"
     "}\n";
 
-/* MAME luma ramp: texel(4-bit) → lumaram[2*lumabase + texel*16] (even-byte
- * layout) → luma6 = min(lram*poly_luma/256, 63) → colorxlat[ch][(c5<<8)+luma6]
- * → gamma max(c-64,0)*255/191.  lumaram=256x512, colorxlat=256x192 (3 ch @
- * byte 0/0x4000/0x8000).  lb<0 falls back to the old flat_color*luma path. */
+/*
+ * The fill — MAME's model2rd.ipp draw_scanline_tex, as the explorer ports it
+ * (vendor/noclip js/viewer.js FRAG_SHADER), whose texel path this follows line
+ * for line so the two can be held against each other.
+ *
+ *   texel     bilinear over the 4-bit sheet with the board's half-texel offset,
+ *             each tap wrapped within the tile the way the index mask wraps,
+ *             and mirrored in an odd copy when the face says so (u = ~u).
+ *   level     the mip chain send_lod_data_q box-filters into texture RAM: level
+ *             L of a tile sits at ((tx-2048)>>L)&2047, ((ty-1024)>>L)&1023 on
+ *             the sheet that alternates with L (fetch_bilinear_texel). Picked
+ *             from screen-space derivatives, since the board's texlod is
+ *             calibrated to 496x384 and this draws at the window's size.
+ *   holes     on the transparent renderer a texel of 15 carries no colour: it
+ *             borrows its pair's, and the four holes' weights blend into a
+ *             coverage that must reach half a texel for the pixel to survive.
+ *   checker   the half-transparency bit draws every other pixel.
+ *   ramp      lumaram[lumabase + (t >> 1)] with t the *filtered* texel in 8.4,
+ *             * poly_luma → luma6 → colorxlat[ch][(c5<<8)+luma6] → gamma
+ *             max(c-64,0)*255/191. Indexing by the nearest of the sixteen
+ *             texels instead quantises a blended pixel onto a neighbouring
+ *             palette slot, a different colour rather than a nearby shade.
+ *
+ * Atlas texels are nibble*17, so a hole reads back exactly 1.0. The lod is
+ * taken before any discard or branch: derivatives are undefined past either.
+ * An untextured face goes through the same colorxlat ramp with luma
+ * poly_luma >> 2 and no texel (model2rd.ipp draw_scanline_solid).
+ * lb < 0 falls back to the old flat_color*luma path.
+ */
 static const char *game_render_fill_fs_glsl =
     "#version 410\n"
     "uniform sampler2D atlas_smp;\n"
@@ -194,20 +220,66 @@ static const char *game_render_fill_fs_glsl =
     "uniform sampler2D cxlat_smp;\n"
     "in vec4 color;\n"
     "in vec2 uv;\n"
-    "in vec4 tile;\n"
-    "in vec2 lbpl;\n"
+    "flat in vec4 tile;\n"
+    "flat in vec3 lbpl;\n"
     "out vec4 frag_color;\n"
+    "bool has(int bit) { return (int(lbpl.z + 0.5) & bit) != 0; }\n"
+    "ivec4 level_tile(int L) {\n"
+    "  int sheet = has(4) ? 1 : 0;\n"
+    "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
+    "  uint y = (uint(int(tile.y) - sheet * 1024) - 1024u) >> uint(L);\n"
+    "  return ivec4(int(x & 2047u), int(y & 1023u) + ((sheet + L) & 1) * 1024,\n"
+    "               max(int(tile.z) >> L, 1), max(int(tile.w) >> L, 1));\n"
+    "}\n"
+    "float tile_texel(ivec4 t, ivec2 p) {\n"
+    "  ivec2 size = t.zw;\n"
+    "  ivec2 s = p + size * 8;\n"
+    "  ivec2 q = s % size;\n"
+    "  ivec2 copy = s / size;\n"
+    "  if (has(8) && (copy.x & 1) != 0) q.x = size.x - 1 - q.x;\n"
+    "  if (has(16) && (copy.y & 1) != 0) q.y = size.y - 1 - q.y;\n"
+    "  return texelFetch(atlas_smp, (t.xy + q) & 2047, 0).r;\n"
+    "}\n"
+    "vec2 sample_level(int L) {\n"
+    "  ivec4 t = level_tile(L);\n"
+    "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
+    "  ivec2 i0 = ivec2(floor(c));\n"
+    "  vec2 f = fract(c);\n"
+    "  float t00 = tile_texel(t, i0);\n"
+    "  float t10 = tile_texel(t, i0 + ivec2(1, 0));\n"
+    "  float t01 = tile_texel(t, i0 + ivec2(0, 1));\n"
+    "  float t11 = tile_texel(t, i0 + ivec2(1, 1));\n"
+    "  float a = 1.0;\n"
+    "  if (has(1)) {\n"
+    "    vec4 cover = 1.0 - step(1.0, vec4(t00, t10, t01, t11));\n"
+    "    a = mix(mix(cover.x, cover.y, f.x), mix(cover.z, cover.w, f.x), f.y);\n"
+    "    if (t00 == 1.0) t00 = t10;\n"
+    "    if (t10 == 1.0) t10 = t00;\n"
+    "    if (t01 == 1.0) t01 = t11;\n"
+    "    if (t11 == 1.0) t11 = t01;\n"
+    "  }\n"
+    "  float row0 = mix(t00, t10, f.x);\n"
+    "  float row1 = mix(t01, t11, f.x);\n"
+    "  if (has(1)) {\n"
+    "    if (row0 == 1.0) row0 = row1;\n"
+    "    if (row1 == 1.0) row1 = row0;\n"
+    "  }\n"
+    "  return vec2(mix(row0, row1, f.y), a);\n"
+    "}\n"
     "void main() {\n"
+    "  float lmax = max(log2(max(min(tile.z, tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
+    "  if (has(2) && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
     "  vec3 rgb = color.rgb;\n"
     "  if (tile.z > 0.0) {\n"
-    "    vec2 w = uv - tile.zw * floor(uv / tile.zw);\n"
-    "    vec2 auv = (tile.xy + w) / vec2(2048.0, 2048.0);\n"
-    "    float al = texture(atlas_smp, auv).r;\n"
+    "    int L0 = int(floor(lod));\n"
+    "    vec2 tx = mix(sample_level(L0), sample_level(L0 + 1), fract(lod));\n"
+    "    if (has(1) && tx.y < 0.5) discard;\n"
+    "    float al = tx.x;\n"
     "    if (lbpl.x < 0.0) {\n"
     "      if (al > 0.0) rgb = clamp(color.rgb * al * 2.0, 0.0, 1.0);\n"
     "    } else {\n"
-    "      int texel4 = int(al * 15.0 + 0.5);\n"
-    "      int lbyte = 2 * int(lbpl.x) + texel4 * 16;\n"
+    "      int lbyte = 2 * (int(lbpl.x) + int(al * 120.0));\n"
     "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
     "      float poly = clamp(lbpl.y, 0.0, 1.0) * 255.0;\n"
     "      int li = int(min(lram * poly / 256.0, 63.0) + 0.5);\n"
@@ -219,16 +291,24 @@ static const char *game_render_fill_fs_glsl =
     "      vec3 c = max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0);\n"
     "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
     "    }\n"
-    "  } else {\n"
+    "  } else if (lbpl.x < 0.0) {\n"
     "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
+    "  } else {\n"
+    "    int li = min(int(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5) >> 2, 63);\n"
+    "    int r5 = int(color.r*31.0+0.5), g5 = int(color.g*31.0+0.5), b5 = int(color.b*31.0+0.5);\n"
+    "    int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
+    "    float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
+    "    float cg = texelFetch(cxlat_smp, ivec2(bg & 255, bg >> 8), 0).r * 255.0;\n"
+    "    float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
+    "    rgb = clamp(max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
     "}\n";
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
-    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
+    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float3 lbpl : TEXCOORD2; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float3 lbpl : TEXCOORD2; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
@@ -241,18 +321,66 @@ static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> lumat : register(t1);\n"
     "Texture2D<float4> cxlat : register(t2);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float2 lbpl : TEXCOORD2; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float3 lbpl : TEXCOORD2; };\n"
+    "bool has(float fl, int bit) { return (((int)(fl + 0.5)) & bit) != 0; }\n"
+    "int4 level_tile(float4 tile, float fl, int L) {\n"
+    "  int sheet = has(fl, 4) ? 1 : 0;\n"
+    "  uint x = ((uint)(int)tile.x - 2048u) >> (uint)L;\n"
+    "  uint y = ((uint)((int)tile.y - sheet * 1024) - 1024u) >> (uint)L;\n"
+    "  return int4((int)(x & 2047u), (int)(y & 1023u) + ((sheet + L) & 1) * 1024,\n"
+    "              max(((int)tile.z) >> L, 1), max(((int)tile.w) >> L, 1));\n"
+    "}\n"
+    "float tile_texel(int4 t, float fl, int2 p) {\n"
+    "  int2 size = t.zw;\n"
+    "  int2 s = p + size * 8;\n"
+    "  int2 q = s % size;\n"
+    "  int2 copy = s / size;\n"
+    "  if (has(fl, 8) && (copy.x & 1) != 0) q.x = size.x - 1 - q.x;\n"
+    "  if (has(fl, 16) && (copy.y & 1) != 0) q.y = size.y - 1 - q.y;\n"
+    "  return atlas.Load(int3((t.xy + q) & 2047, 0)).r;\n"
+    "}\n"
+    "float2 sample_level(float2 uv, float4 tile, float fl, int L) {\n"
+    "  int4 t = level_tile(tile, fl, L);\n"
+    "  float2 c = uv / pow(2.0, (float)L) - 0.5;\n"
+    "  int2 i0 = (int2)floor(c);\n"
+    "  float2 f = frac(c);\n"
+    "  float t00 = tile_texel(t, fl, i0);\n"
+    "  float t10 = tile_texel(t, fl, i0 + int2(1, 0));\n"
+    "  float t01 = tile_texel(t, fl, i0 + int2(0, 1));\n"
+    "  float t11 = tile_texel(t, fl, i0 + int2(1, 1));\n"
+    "  float a = 1.0;\n"
+    "  if (has(fl, 1)) {\n"
+    "    float4 cover = 1.0 - step(1.0, float4(t00, t10, t01, t11));\n"
+    "    a = lerp(lerp(cover.x, cover.y, f.x), lerp(cover.z, cover.w, f.x), f.y);\n"
+    "    if (t00 == 1.0) t00 = t10;\n"
+    "    if (t10 == 1.0) t10 = t00;\n"
+    "    if (t01 == 1.0) t01 = t11;\n"
+    "    if (t11 == 1.0) t11 = t01;\n"
+    "  }\n"
+    "  float row0 = lerp(t00, t10, f.x);\n"
+    "  float row1 = lerp(t01, t11, f.x);\n"
+    "  if (has(fl, 1)) {\n"
+    "    if (row0 == 1.0) row0 = row1;\n"
+    "    if (row1 == 1.0) row1 = row0;\n"
+    "  }\n"
+    "  return float2(lerp(row0, row1, f.y), a);\n"
+    "}\n"
     "float4 main(fs_in inp) : SV_Target0 {\n"
+    "  float fl = inp.lbpl.z;\n"
+    "  float lmax = max(log2(max(min(inp.tile.z, inp.tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lod = clamp(log2(max(length(ddx(inp.uv)), length(ddy(inp.uv)))), 0.0, lmax);\n"
+    "  if (has(fl, 2) && ((((int)inp.pos.x) ^ ((int)inp.pos.y)) & 1) == 0) discard;\n"
     "  float3 rgb = inp.color.rgb;\n"
     "  if (inp.tile.z > 0.0) {\n"
-    "    float2 w = inp.uv - inp.tile.zw * floor(inp.uv / inp.tile.zw);\n"
-    "    float2 auv = (inp.tile.xy + w) / float2(2048.0, 2048.0);\n"
-    "    float al = atlas.Sample(smp, auv).r;\n"
+    "    int L0 = (int)floor(lod);\n"
+    "    float2 tx = lerp(sample_level(inp.uv, inp.tile, fl, L0),\n"
+    "                     sample_level(inp.uv, inp.tile, fl, L0 + 1), frac(lod));\n"
+    "    if (has(fl, 1) && tx.y < 0.5) discard;\n"
+    "    float al = tx.x;\n"
     "    if (inp.lbpl.x < 0.0) {\n"
     "      if (al > 0.0) rgb = clamp(inp.color.rgb * al * 2.0, 0.0, 1.0);\n"
     "    } else {\n"
-    "      int texel4 = (int)(al * 15.0 + 0.5);\n"
-    "      int lbyte = 2 * (int)inp.lbpl.x + texel4 * 16;\n"
+    "      int lbyte = 2 * ((int)inp.lbpl.x + (int)(al * 120.0));\n"
     "      float lram = lumat.Load(int3(lbyte & 255, lbyte >> 8, 0)).r * 255.0;\n"
     "      float poly = clamp(inp.lbpl.y, 0.0, 1.0) * 255.0;\n"
     "      int li = (int)(min(lram * poly / 256.0, 63.0) + 0.5);\n"
@@ -264,8 +392,16 @@ static const char *game_render_fill_fs_hlsl =
     "      float3 c = max(float3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0);\n"
     "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
     "    }\n"
-    "  } else {\n"
+    "  } else if (inp.lbpl.x < 0.0) {\n"
     "    rgb = inp.color.rgb * clamp(inp.lbpl.y, 0.0, 1.0);\n"
+    "  } else {\n"
+    "    int li = min(((int)(clamp(inp.lbpl.y, 0.0, 1.0) * 255.0 + 0.5)) >> 2, 63);\n"
+    "    int r5 = (int)(inp.color.r*31.0+0.5), g5 = (int)(inp.color.g*31.0+0.5), b5 = (int)(inp.color.b*31.0+0.5);\n"
+    "    int br = ((r5<<8)+li)*2, bg = 0x4000+((g5<<8)+li)*2, bb = 0x8000+((b5<<8)+li)*2;\n"
+    "    float cr = cxlat.Load(int3(br & 255, br >> 8, 0)).r * 255.0;\n"
+    "    float cg = cxlat.Load(int3(bg & 255, bg >> 8, 0)).r * 255.0;\n"
+    "    float cb = cxlat.Load(int3(bb & 255, bb >> 8, 0)).r * 255.0;\n"
+    "    rgb = clamp(max(float3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "  }\n"
     "  return float4(rgb, 1.0);\n"
     "}\n";
@@ -501,7 +637,7 @@ static inline void game_render_init(void) {
         p.layout.attrs[2].offset   = offsetof(game_render_tex_vertex_t, u);
         p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
         p.layout.attrs[3].offset   = offsetof(game_render_tex_vertex_t, tx);
-        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT2;
+        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT3;
         p.layout.attrs[4].offset   = offsetof(game_render_tex_vertex_t, lb);
         p.layout.buffers[0].stride = sizeof(game_render_tex_vertex_t);
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
@@ -720,6 +856,9 @@ static inline void game_render_draw_game(sg_view tile_view,
     sg_draw(0, 6, 1);
 }
 
+static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int vcount);
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int vcount);
+
 /*
  * Draw the 3D wireframe lines currently in g_geo3d_lines over the tile quad.
  * Call inside the same swapchain pass, after game_render_draw_game(), so the
@@ -762,7 +901,11 @@ static inline void game_render_draw_lines(float cam_x, float cam_y, float cam_z,
 
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
+    game_render_submit_lines(&vs_params, vcount);
+}
 
+static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int vcount) {
+    const game_render_vs_params_t vs_params = *vs;
     sg_apply_pipeline(g_game_render.line_pipeline);
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.line_vbuf,
@@ -793,7 +936,7 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
         float lb = g_luma_ramp ? T->lb : -1.0f;   /* -1 → old flat_color×luma path */
         for (int _k = 0; _k < 3; _k++) {
             v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
-            v[_k].lb=lb;    v[_k].pl=T->pl;
+            v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=T->fl;
         }
     }
     int vcount = n * 3;
@@ -813,7 +956,11 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
 
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
+    game_render_submit_fills(&vs_params, vcount);
+}
 
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int vcount) {
+    const game_render_vs_params_t vs_params = *vs;
     sg_apply_pipeline(g_backface_cull == 1 ? g_game_render.fill_pipeline_cw
                     : g_backface_cull == 2 ? g_game_render.fill_pipeline_ccw
                     :                        g_game_render.fill_pipeline);
@@ -826,6 +973,143 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });
     sg_draw(0, vcount, 1);
+}
+
+/* Pack the emitted geometry and draw it with a ready-made (row-major) MVP. */
+static inline void game_render_flush_mvp(const float *mvp, bool lines_only) {
+    float mvp_t[16];
+    gm_mat4_transpose(mvp_t, mvp);
+    game_render_vs_params_t vs;
+    memcpy(vs.mvp, mvp_t, sizeof mvp_t);
+
+    if (!lines_only && g_geo3d_tris.count > 0) {
+        int n = g_geo3d_tris.count > GEO3D_MAX_TRIS ? GEO3D_MAX_TRIS : g_geo3d_tris.count;
+        for (int i = 0; i < n; i++) {
+            const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
+            game_render_tex_vertex_t *v = &g_game_render.fill_verts[i * 3];
+            v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].u=T->u0; v[0].v=T->v0;
+            v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
+            v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].u=T->u2; v[2].v=T->v2;
+            float lb = g_luma_ramp ? T->lb : -1.0f;
+            for (int k = 0; k < 3; k++) {
+                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=1.0f;
+                v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
+                v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=T->fl;
+            }
+        }
+        sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
+            .ptr = g_game_render.fill_verts, .size = (size_t)n * 3 * sizeof(game_render_tex_vertex_t) });
+        game_render_submit_fills(&vs, n * 3);
+    }
+    if (g_geo_wireframe && g_geo3d_lines.count > 0) {
+        int n = g_geo3d_lines.count > GEO3D_MAX_LINES ? GEO3D_MAX_LINES : g_geo3d_lines.count;
+        for (int i = 0; i < n; i++) {
+            const geo3d_line_t *L = &g_geo3d_lines.lines[i];
+            game_render_line_vertex_t *v = &g_game_render.line_verts[i * 2];
+            v[0].x = L->x0; v[0].y = L->y0; v[0].z = L->z0; v[0].r = L->r; v[0].g = L->g; v[0].b = L->b; v[0].a = 1.0f;
+            v[1].x = L->x1; v[1].y = L->y1; v[1].z = L->z1; v[1].r = L->r; v[1].g = L->g; v[1].b = L->b; v[1].a = 1.0f;
+        }
+        sg_update_buffer(g_game_render.line_vbuf, &(sg_range){
+            .ptr = g_game_render.line_verts, .size = (size_t)n * 2 * sizeof(game_render_line_vertex_t) });
+        game_render_submit_lines(&vs, n * 2);
+    }
+}
+
+/*
+ * The board's projection for eye-space geometry from the GEO display list
+ * (geo3d_scan_geo_list): screen x = cx + fx*x/z, y = cy - fy*y/z over the
+ * 496x384 screen, host eye space being the board's with z negated. Depth is an
+ * ordinary perspective range squeezed into a slice per window, the last window
+ * nearest: the board's rasterizer fills each pixel once, walking the windows
+ * last to first and each window's polygons nearest first (model2_v.cpp
+ * model2_3d_frame_end, the fillmap test in model2rd.ipp), so a later window
+ * covers an earlier one while depth still sorts inside each window. Row-major. The slice is worked in a [0, 1] depth range and
+ * stretched to [-1, 1] on GL: D3D11 clips clip-space z to [0, w], so a slice
+ * placed below zero there is not drawn at all.
+ */
+static inline void gm_mat4_geo_projection(float *m, const float *gproj, int win, int windows) {
+    const float W = (float)VIDEO_WIDTH, H = (float)VIDEO_HEIGHT;
+    const float n = 0.05f, f = 20000.0f;
+    float nwin = (float)(windows > 0 ? windows : 1);
+    memset(m, 0, 64);
+    m[0]  = 2.0f * gproj[0] / W;
+    m[2]  = -(2.0f * gproj[2] / W - 1.0f);
+    m[5]  = 2.0f * gproj[1] / H;
+    m[6]  = -(1.0f - 2.0f * gproj[3] / H);
+    m[14] = -1.0f;
+    /* depth in [0, 1]: z = (f/(n-f))*zh + f*n/(n-f), w = -zh; then z/N + (win/N)*w */
+    float slice = (float)((windows > 0 ? windows : 1) - 1 - win);
+    float z10 = f / ((n - f) * nwin) - slice / nwin;
+    float z11 = f * n / ((n - f) * nwin);
+    sg_backend backend = sg_query_backend();
+    if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+        m[10] = 2.0f * z10 + 1.0f;      /* 2*z - w, w's z term being -1 */
+        m[11] = 2.0f * z11;
+    } else {
+        m[10] = z10;
+        m[11] = z11;
+    }
+}
+
+/*
+ * Draw the frame's GEO display list: runs of objects that share a projection
+ * and window are decoded together and drawn with that window's scissor.
+ */
+static inline void game_render_draw_geo_list(geo3d_state_t *geo,
+                                              const uint8_t *main_data, size_t main_data_size,
+                                              const uint8_t *polygons,  size_t polygons_size,
+                                              const uint8_t *materials, size_t materials_size,
+                                              uint32_t table_off, uint32_t table_count,
+                                              uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+                                              int ox, int oy, int w, int h) {
+    if (g_geo3d_dump_busy) return;
+    const int count = geo->captured_count;
+    float saved_light[3] = { g_light_dir[0], g_light_dir[1], g_light_dir[2] };
+    sg_apply_viewport(ox, oy, w, h, true);
+    for (int i = 0; i < count; ) {
+        const captured_model_t *c0 = &geo->captured[i];
+        int j = i;
+        geo3d_lines_reset();
+        geo3d_tris_reset();
+        for (; j < count; j++) {
+            const captured_model_t *cm = &geo->captured[j];
+            if (cm->window != c0->window || memcmp(cm->gproj, c0->gproj, sizeof cm->gproj) != 0
+                    || memcmp(cm->vp, c0->vp, sizeof cm->vp) != 0)
+                break;
+            if (geo->isolate_index >= 0 && j != geo->isolate_index) continue;
+            if (geo->filter_enabled && (j < geo->filter_min || j > geo->filter_max)) continue;
+            g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
+            g_geo3d_obj_tpa = cm->tpa;
+            g_geo3d_obj_tha = cm->tha;
+            g_geo3d_board_luma = 1;
+            if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
+                uint32_t w = cm->dbg_mesh_ptr & 0x7FFFu;
+                g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][w];
+                g_geo3d_obj_mesh_size = (0x8000u - w) * 4u;
+            }
+            geo3d_decode_model(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
+                               materials, materials_size, table_off, table_count,
+                               mesh_ptr_subtract, mesh_ptr_add,
+                               geo->use_matrix ? cm->matrix : NULL,
+                               cm->color[0], cm->color[1], cm->color[2]);
+            g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
+            g_geo3d_board_luma = 0;
+            g_geo3d_obj_mesh = NULL;
+        }
+        int x0 = c0->vp[0] < 0 ? 0 : c0->vp[0], y0 = c0->vp[1] < 0 ? 0 : c0->vp[1];
+        int x1 = c0->vp[2] > VIDEO_WIDTH ? VIDEO_WIDTH : c0->vp[2];
+        int y1 = c0->vp[3] > VIDEO_HEIGHT ? VIDEO_HEIGHT : c0->vp[3];
+        if (x1 > x0 && y1 > y0) {
+            sg_apply_scissor_rect(ox + x0 * w / VIDEO_WIDTH, oy + y0 * h / VIDEO_HEIGHT,
+                                  (x1 - x0) * w / VIDEO_WIDTH, (y1 - y0) * h / VIDEO_HEIGHT, true);
+            float mvp[16];
+            gm_mat4_geo_projection(mvp, c0->gproj, c0->window, geo->geo_windows);
+            game_render_flush_mvp(mvp, geo->lines_only);
+        }
+        i = j;
+    }
+    g_light_dir[0] = saved_light[0]; g_light_dir[1] = saved_light[1]; g_light_dir[2] = saved_light[2];
+    sg_apply_scissor_rect(ox, oy, w, h, true);
 }
 
 /*
@@ -849,6 +1133,13 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
                                                      float lerp_t) {
     if (!g_game_render.initialized) return;
     if (!geo->enabled) { geo3d_lines_reset(); return; }
+
+    if (geo->use_captures && geo->captured_count > 0 && geo->captured[0].view_space && !geo->test_triangle) {
+        game_render_draw_geo_list(geo, main_data, main_data_size, polygons, polygons_size,
+                                  materials, materials_size, table_off, table_count,
+                                  mesh_ptr_subtract, mesh_ptr_add, ox, oy, w, h);
+        return;
+    }
 
     /* Check whether any captured model carries a clip window. */
     bool any_clip = false;

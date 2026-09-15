@@ -67,6 +67,66 @@ export const STAGE_LOADED = 0x00504800;
 export const STAGE_TEX_A = 0x0c;
 export const STAGE_TEX_B = 0x0e;
 
+/* ---- the fighters --------------------------------------------------------- */
+
+/* Each fighter's work structure, named by the pointers fa_rob0 and fa_rob1.
+ * P1's is the one stf-tools/mame-motion-capture.lua reads; P2's is the same
+ * layout 0x3400 further on, confirmed on a running fight by its character
+ * parts and animation table pointers sitting at the offsets P1's do. */
+export const P1_ROB = 0x00510d00;
+export const P2_ROB = 0x00514100;
+/* Offsets inside one: the motion play_motion is running, its frame (from 1),
+ * the character index calc_rob_angle_cont poses with, and the skeleton type. */
+/* The fighter's state word. Bit 6 plays its motions mirrored: get_fcurve_value_f
+ * ends by calling set_mirror (0x30D0C), which swaps the sampled pose left for
+ * right and reflects it across the body's own plane. */
+export const ROB_STATE    = 0x000;
+export const ROB_STATE_MIRROR = 0x40;
+export const ROB_MOTION   = 0x1a8;
+export const ROB_COMA     = 0x1aa;
+export const ROB_CHAR     = 0x1b0;
+export const ROB_SKELETON = 0x84c;
+
+/* The motion-blend state smooth_int (0x2F2B0) sets up and get_frame_dat
+ * (0x304C0) runs every frame. A new motion eases in from the pose the fighter
+ * was in, and eases out toward the next one near its end; which of the two are
+ * armed, and over how many frames, is per motion change rather than a fixed
+ * window, so a grader reads it here instead of guessing.
+ *   SMOOTH_MODE   bit 0: easing in; bit 1: easing out (a byte)
+ *   SMOOTH_IN     frames the ease-in runs (4 or 8)
+ *   SMOOTH_OUT_AT the motion frame the ease-out starts after
+ *   SMOOTH_COUNT  the frame count the ease-in is measured by, when FLAGS
+ *                 carries 0x20010 — otherwise it is the motion frame itself */
+export const ROB_MOTION_LENGTH = 0x800;
+/* A per-motion time-warp table: (motion frame, sampled frame) byte pairs that
+ * get_frame_dat remaps the frame through, so a motion can be sampled between
+ * its keys. Zero when the motion plays at its own rate. */
+export const ROB_TIMEWARP     = 0x854;
+export const ROB_FLAGS        = 0x804;
+export const ROB_SMOOTH_MODE  = 0xbdd;
+export const ROB_SMOOTH_IN    = 0xbde;
+export const ROB_SMOOTH_OUT_AT = 0xbe0;
+export const ROB_SMOOTH_COUNT = 0xbe2;
+
+/* Two globals get_frame_dat reads before it samples a motion: with bit 17 of
+ * the first set and bit 0 of the second, a replay samples every motion half a
+ * frame on. */
+export const NOT_SCR_BG_MOVE  = 0x00500068;
+export const REPLAY_COUNTDOWN = 0x00500092;
+
+/* The coprocessor's TGP slot window per fighter: an ik_2bone names its output
+ * slots in it, which is how a command says whose limb it is. */
+export const TGP_WINDOW = [0x3a00, 0x3b00];
+
+/* ---- the stage clocks ------------------------------------------------------ */
+
+/* What verify-stage.mjs needs beside a display list to tie it to the game's own
+ * clocks: the Flying Carpet's three angles, and the backdrop's accumulator. */
+export const CARPET_ANG_X   = 0x0050a020;
+export const CARPET_HEADING = 0x0050a022;
+export const CARPET_ROLL    = 0x0050a024;
+export const SKY_ANGLE      = 0x00500464;
+
 /* ---- input bits (through the real 315-5649 I/O ports) -------------------- */
 
 export const IN = {

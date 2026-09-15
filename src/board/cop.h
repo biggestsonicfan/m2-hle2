@@ -170,6 +170,9 @@ static inline void cop_reset(void) {
     memset(&g_geo_win, 0, sizeof(g_geo_win));
     sharc_rot_identity();
     g_sharc.matrix_dirty = true;
+    /* firmware init (cpres1 PM 0x20080..): DM[0x30300..2] = 0, 1.0, 2.0 */
+    g_sharc.dm[0x301] = 0x3F800000u;
+    g_sharc.dm[0x302] = 0x40000000u;
 }
 
 #endif /* COP_H */

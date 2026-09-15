@@ -82,8 +82,8 @@ static inline void m68k_memview_draw(bool *p_open) {
     /* Selected byte info + edit */
     if (g_m68k_memview.selected_offset >= 0) {
         uint32_t addr = g_m68k_memview.base_addr + (uint32_t)g_m68k_memview.selected_offset;
-        uint8_t  b    = (uint8_t)sound_m68k_read(&g_sound, addr, 1);
-        uint32_t u32  = sound_m68k_read(&g_sound, addr & ~3u, 4);
+        uint8_t  b    = (uint8_t)sound_m68k_peek(&g_sound, addr, 1);
+        uint32_t u32  = sound_m68k_peek(&g_sound, addr & ~3u, 4);
 
         igText("Addr 0x%06X   byte 0x%02X (%3d)   u32 0x%08X", addr, b, b, u32);
         igSameLine();
@@ -129,7 +129,7 @@ static inline void m68k_memview_draw(bool *p_open) {
         for (int col = 0; col < M68K_MEMVIEW_COLS; col++) {
             int      offset = row * M68K_MEMVIEW_COLS + col;
             uint32_t addr   = g_m68k_memview.base_addr + (uint32_t)offset;
-            uint8_t  val    = (uint8_t)sound_m68k_read(&g_sound, addr, 1);
+            uint8_t  val    = (uint8_t)sound_m68k_peek(&g_sound, addr, 1);
             ascii[col] = (val >= 0x20 && val < 0x7F) ? (char)val : '.';
 
             igSameLine();

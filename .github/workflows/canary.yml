@@ -40,7 +40,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0        # git describe / commit count for the version stamp
-          submodules: false     # vendor/noclip feeds tools/, not the CMake build
+          submodules: false     # vendor/noclip is big and only feeds tools/
+
+      # Everything the CMake build needs, minus vendor/noclip.
+      - name: Fetch build submodules
+        run: >
+          git submodule update --init
+          vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog
+
+      # cimgui is generated from vendor/imgui by vendor/dear_bindings at build time.
+      - name: Install dear_bindings dependencies
+        run: python -m pip install ply==3.11
 
       - name: Install Linux deps
         if: runner.os == 'Linux'

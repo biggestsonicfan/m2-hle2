@@ -176,6 +176,24 @@ int main(void) {
     CHECK(mem_read32(&bus, RAM_BASE + 0x200) == 0xCAFEBABE, "st wrote to memory");
     CHECK(cpu.globals.g[4] == 0xCAFEBABE, "ld read it back into g4");
 
+    /* ---- movq with a literal fills every destination, not r0..r3 -------- */
+    i960_reset(&cpu);
+    cpu.locals.pfp = 0x11111111; cpu.locals.sp = 0x22222222;
+    cpu.locals.rip = 0x33333333; cpu.locals.r[3] = 0x44444444;
+    cpu.locals.r[4] = cpu.locals.r[5] = cpu.locals.r[6] = cpu.locals.r[7] = 0xFFFFFFFF;
+    cpu.sfr.ip = CODE;
+    put(CODE, enc_reg(0x5fc, L(4), 0, 0, 0, 1, 0));    /* movq lit#0, r4 */
+    i960_step(&cpu, &bus);
+    CHECK(cpu.locals.r[4] == 0 && cpu.locals.r[5] == 0 && cpu.locals.r[6] == 0 && cpu.locals.r[7] == 0,
+          "movq 0, r4 zeroes r4..r7 (literal, not pfp/sp/rip/r3)");
+
+    i960_reset(&cpu);
+    cpu.locals.r[8] = 0xA; cpu.locals.r[9] = 0xB;
+    cpu.sfr.ip = CODE;
+    put(CODE, enc_reg(0x5dc, G(0), 0, 0, L(8), 0, 0));  /* movl r8, g0 */
+    i960_step(&cpu, &bus);
+    CHECK(cpu.globals.g[0] == 0xA && cpu.globals.g[1] == 0xB, "movl r8, g0 copies r8:r9 into g0:g1");
+
     /* ---- watchpoint fires on the bus write ------------------------------ */
     wp_init();
     g_wp.hit = 0;

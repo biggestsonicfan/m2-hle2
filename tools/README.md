@@ -59,6 +59,7 @@ outside the checkout by default, and that is deliberate.
 
 ```sh
 node tools/grade-models.mjs        # the one to run after touching geo3d.h
+node tools/grade-pose.mjs          # ... and after touching the bone handlers
 node tools/grade-all.mjs           # capture a scene, then grade everything
 node tools/grade-all.mjs --no-capture
 ```
@@ -70,7 +71,8 @@ one you already have running with `--mcp`.
 
 | script | what it measures |
 |---|---|
-| `grade-models.mjs` | the index-array polygon decoder, over all 5103 model-table entries, against the explorer's. Geometry only — colour and UV depend on what the running game uploaded, and a decoder grade should not be measuring that. Needs no scene and no capture, which is what makes it the one to run after changing `geo3d.h` |
+| `grade-models.mjs` | the index-array polygon decoder, over all 5103 model-table entries, against the explorer's: triangle positions, then which tile each textured face names and which coordinate each corner carries. All of that is a function of the ROM; what is *in* a tile depends on what the running game uploaded, which is `grade-texram`'s business. Needs no scene and no capture, which is what makes it the one to run after changing `geo3d.h` |
+| `grade-pose.mjs` | the coprocessor's rig maths: op `0x62`, the body matrix, and op `0x6B`, the four two-bone IK chains that place twelve of a fighter's sixteen slots. Replays 328 frames of arguments captured off a real board (`stf-tools/motion-pose.csv`) through the coprocessor port and holds what comes back against the explorer's rig. Needs no scene and no capture either, which makes it the one to run after touching the bone handlers in `sharc_exec.h` |
 | `grade-texram.mjs` | texture RAM. ~85% of the pages are compressed in ROM, so a sheet is a megabyte of output from a long run of the game's own code: a wrong bit anywhere in the i960 core, the bus or the decompressor lands in it |
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
@@ -93,9 +95,13 @@ somewhere to go here, and each became a bridge command:
 | write megabytes out from inside the emulator | `dump_memory_file` — copies a bus range to a file under the emu mutex, so it is one consistent snapshot rather than a run of reads the i960 wrote through the middle of |
 | drive the front end | `set_input`, straight at the I/O port bitmask |
 
-Plus two the MAME side did not need: `dump_model`, which runs the emulator's own
-polygon decoder over a range of the model table and writes the triangles out,
-and `rom_loaded` on `get_status`.
+Plus four the MAME side did not need. `dump_model` runs the emulator's own
+polygon decoder over a range of the model table and writes the triangles out.
+`cop_exec` pushes raw words at the coprocessor port, exactly as the i960 does,
+and `dump_tgp` reads the whole 32-slot bone table back at full precision — which
+is what lets `grade-pose.mjs` replay a board capture's rig arguments without a
+running fight, and what makes an argument count that is wrong by one desync here
+the same way it would in a game. And `rom_loaded` on `get_status`.
 
 That last one is small and load-bearing. A profile resolves from the ROM's
 CRC32s while the regions are still being assembled, so "which game is this" and
@@ -141,11 +147,86 @@ FAIL  geometry is identical (Jaccard = 1)               J = 0.990154 over 601690
 
 Both decoders agree on which entries carry geometry and on how many triangles
 each produces — every one of 4404 — and disagree about vertex positions on 408
-of them. Counts agreeing while positions do not points at the connectivity rules
-rather than at the face loop: the same faces are being built from different
-vertex picks. The disagreement is clustered, worst at models 4154–4157
+of them. The disagreement is clustered, worst at models 4154–4157
 (J ≈ 0.63–0.72) and in a run at 4012–4018, with models 22, 658, 1146 and 2042
 all at exactly 0.8140, which is one mesh repeated.
+
+*Since closed, and it was not the connectivity rules.* Counts agreeing while
+positions did not looked like the same faces built from different vertex
+picks. It was the same *corners* cut into triangles along different diagonals.
+Grading against a copy of the explorer with its decal cut turned off gave
+J = 1.000000 on the unchanged emulator, so every one of the 408 was that rule.
+A decal is a surface's own faces emitted a second time with a cut-out texture.
+The explorer cuts a quad whose four corners it has already emitted along the
+same diagonal as before, so the two copies are the same triangles and a
+`LESS_EQUAL` depth test lands the decal on top. `geo3d.h` now does the same:
+
+```
+PASS  geometry is identical (Jaccard = 1)   J = 1.000000 over 598728 triangles;
+                                            4404 of 4404 models exact
+```
+
+**Texture addressing — 2.57% of corners, since closed.** Once the geometry
+matched, the same sweep could compare what each triangle's corners address:
+which tile a face names and which coordinate each corner carries. The tiles
+agreed. The coordinates did not: 46,089 of 1,795,005 corners exactly, 62%
+even modulo the tile. The two decoders assigned the UV stream to corners in
+different orders — here A,B,D,C with U and V flipped, which had been chosen by
+eye, and there B,A,C,D with no flips.
+
+The strips decide it without trusting either side. A vertex shared by two
+faces of a strip carries one UV in ROM, so the right order agrees with itself
+across shared corners: 96.5% for B,A,C,D, 75.5% for the old reading. After
+the switch:
+
+```
+PASS  the same faces are textured                  598335 textured in both, 0 only here, 0 only there
+PASS  textured faces name the same tile            598335 of 598335
+PASS  every textured corner carries the same coordinate   1795005 of 1795005 corners (100.00%)
+```
+
+On screen, attract mode's hangar "CAUTION" sign had been drawing upside down
+and back to front, and the bricks of the pyramid behind the Sonic-vs-Bean ring
+ran diagonally.
+
+**The rig — and one bone length of daylight, since closed.**
+
+`grade-pose.mjs` found a real bug on its first run, which is the argument for
+having built it. The two-bone IK op wrote its two output slots the wrong way
+round: the forearm's matrix went to the shoulder and the upper arm's to the
+elbow, and the elbow itself was stepped along the *forearm* by the forearm's own
+length rather than along the upper arm by the upper arm's.
+
+That is a mistake with a hiding place. The two edges of the triangle add to the
+same point whichever order they are walked in, so the limb still ended exactly
+on its IK target and still bent by the right angle — the hand and the foot
+landed where they belonged. Only the joint between them moved, to the far corner
+of the parallelogram, which draws a thigh from the knee down and folds the joint
+backwards. The measurement was unambiguous where a screenshot would have been
+arguable: 0.385 world units against the explorer, which is one arm bone.
+
+```
+before   op 0x6B — limb positions, trig held equal     3.85e-1 world units
+after    op 0x6B — limb positions, trig held equal     3.52e-6 world units
+```
+
+Everything else in the two ops already agreed. With the trig conventions held
+equal the body matrix comes out at 6.0e-8 and the limb rotations at 1.2e-5 over
+2624 transforms — and every one of the worst of those is a limb at reach 1.000,
+stretched dead straight at a target it can only just span, which is exactly
+where `sqrt(1 - c*c)` loses its leading digits and float32 parts company with
+the explorer's float64. A precision floor, not a rule.
+
+**The cosine table is not settled, and the grader says so rather than guessing.**
+The explorer quantises an angle to its top byte and reads a 256-entry table;
+this emulator calls `cosf` on all sixteen bits. On the board's own angles that
+is worth 3.0e-2 of rotation and 9.6e-3 of position, and nothing available here
+can say which is the hardware's — the check that would, `stf-tools/test-head-mame.mjs`,
+says of itself that it is incomplete. So the run is taken twice, once on the
+board's angles and once with every input angle snapped to the table's grid, and
+the difference between the two rows is the whole cost of the disagreement.
+Settling it needs the board's own matrices, which means the display-list work
+below.
 
 **Luma RAM — byte-exact, all three ways.** The emulator, the explorer and the
 MAME capture agree on all 131072 bytes. This is the one place the three-way
@@ -157,6 +238,57 @@ explorer, both sheets match exactly up to `0xC0000` and are entirely zero above
 it: the emulator fills 768 KB of each 1 MB sheet and leaves the last 256 KB
 untouched. The explorer's own build is byte-exact against the MAME digests, so
 the reference side is sound and the gap is this emulator's.
+
+*Since closed, and it was the CPU.* That quarter is where the mip chain lives,
+and the explorer's `pageDestinations` shows how its addresses are built: each
+level's coordinates are halved, then cleared to even. The i960 does the clearing
+with `notand g6, 1, g6` in `sub_4C444`, and this emulator's `notand` was a copy
+of `andnot`: it inverted the wrong operand. A watchpoint showed the mip pass
+running, and writing to odd addresses. With the op fixed (along with `ornot` and
+`notor`, which were swapped):
+
+```
+PASS  texram0: emulator vs explorer  1048576 bytes identical
+PASS  texram1: emulator vs explorer  1048576 bytes identical
+```
+
+Fixing it changed attract mode's timing, and that exposed a second CPU bug.
+Interrupts were delivered as plain calls, so returning from a handler did not
+restore the condition code. A timer interrupt between a compare and its branch
+in `unpack_lod_data` then desynced the decoder about 45 seconds in. It was
+found the same way these tools work: the explorer's `texture.js` is a bit-exact
+port of that routine, so the i960's per-row decoder state was diffed against
+it. Every row agreed up to the crash, which put the fault inside a row, and an
+instruction trace there showed the interrupt landing.
+
+## The sound board
+
+The explorer has no sound, so the sound board is graded straight against MAME,
+in three steps that keep the i960 out of it:
+
+```sh
+# 1. MAME, from power-on: every MIDI byte, SCSP write, changed SCSP read and
+#    interrupt, with 68000 clock-period timestamps, plus MAME's own WAV
+MAME_ROMPATH=<zips> claude_mame/mcp_server/.venv/Scripts/python.exe tools/mame/snd_capture.py cap/mame 5400
+# 2. MAME's MIDI stream, byte for byte at the same clock period, through board/sound.h
+build_vs22/Release/snd_replay.exe cap/mame cap/ours
+# 3. line them up on the music-start command and compare
+python tools/mame/snd_compare.py cap/mame cap/ours 70
+```
+
+`capture_snd` (bridge) takes the same capture off a running emulator, i960
+included. MAME runs about 1 frame a second once the 3D starts, so a 90-second
+capture is a 25-minute wait; the slot monitor (0x408) is left out on both sides
+because the driver polls it 50,000 times a second.
+
+First full run (70 s of attract music, after the sound board rebuild): the same
+3094 key-ons and 3080 key-offs as MAME; 91% of MAME's notes reproduced within
+30 ms with a median timing error of 0.8 ms; events identical in order, slot for
+slot, for the first 12.8 s (901 events), where a timer-A race first picks a
+different slot; audio envelope correlation 0.992 and loudness within 1% in every
+5-second window. Before the rebuild, the same comparison matched about half the
+notes of the first five seconds and held 25-32 voices keyed where MAME holds
+5-16.
 
 ## What is not here yet
 
@@ -183,7 +315,20 @@ end to end. It needs a raw capture of both FIFO ports in write order; m2-hle2's
 processor's `0x804000` writes are handled separately for clip windows. Adding a
 unified dual-port capture is the next piece of bridge work.
 
-**No motion, pose or osage graders.** The explorer has the rig, the IK chains and
-the sway chains, and its checks hold them against real captures. Grading this
-emulator's COP bone handlers against them is the natural next step and needs
-nothing new from the bridge beyond what `dump_bones` already gives.
+**Nothing above the waist, and no osage grader.** `grade-pose.mjs` covers the
+twelve slots the body matrix and the IK chains place. The other four — the
+waist's own slot, the chest, the head and the pelvis — are not arguments to
+anything: the board builds them by stacking translate, `0x3F` and angle ops on
+the body matrix and hands the result to op `0x67`, so grading them means
+replaying that stream rather than reading a capture's columns. The explorer's
+toolkit is at the same place and says why (`stf-tools/test-head-mame.mjs`: at
+least ops `0x29` and `0x39` carry angles and are not decoded yet, so a replay
+has already drifted before the head). The sway chains — `js/osage.js`, and
+`stf-tools/osage-*.json` beside it — are untouched here in either direction.
+
+**The head aim is unsettled on both sides.** The explorer aims the head at float
+object 14 and notes that the board's head block is followed by three angles that
+are zero in every capture taken so far — but every one of those captures is a
+stance held for the whole run, which is where head data is baked. Settling it
+needs a capture of a real exchange, with the fighters apart and off their idle
+motions. Worth knowing before trusting either port's head.

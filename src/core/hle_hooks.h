@@ -38,6 +38,11 @@ static inline void hle_ret(i960_cpu_t *cpu) {
         uint32_t ret_ip = cpu->locals.rip;
         cpu->frame_depth--;
         cpu->locals = cpu->frame_stack[cpu->frame_depth];
+        if (cpu->frame_irq[cpu->frame_depth]) {   /* interrupt return, as `ret` */
+            cpu->sfr.ac = cpu->frame_irq_ac[cpu->frame_depth];
+            cpu->sfr.pc = cpu->frame_irq_pc[cpu->frame_depth];
+            cpu->frame_irq[cpu->frame_depth] = 0;
+        }
         cpu->sfr.ip = ret_ip;
         cpu->globals.fp = cpu->locals.pfp;
     } else {
@@ -51,12 +56,37 @@ static inline void hle_ret(i960_cpu_t *cpu) {
 static inline void hle_call(i960_cpu_t *cpu, uint32_t target, uint32_t ret_ip) {
     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
+        cpu->frame_irq[cpu->frame_depth] = 0;
         cpu->locals.rip = ret_ip;
         cpu->frame_depth++;
     } else {
         LOG_WARN("hle_call: frame stack full at IP=0x%08X", cpu->sfr.ip);
     }
     cpu->sfr.ip = target;
+}
+
+/*
+ * Deliver an interrupt: vector to handler between two instructions and resume
+ * at the current IP when it returns.
+ *
+ * Not a call. The processor stores PC and AC in the interrupt frame and `ret`
+ * puts both back, so the interrupted code finds its condition code exactly as
+ * it left it. A call does not, and an interrupt landing between a compare and
+ * its branch then branches on the handler's last compare instead.
+ *
+ * That is how STF crashed in attract: a timer interrupt arrived between
+ * `cmpo r14, 0x10` and `bg` in unpack_lod_data's bit-buffer refill (0x4BAAC /
+ * 0x4BAB4), the refill branch went the wrong way, the Huffman decode lost sync, and its
+ * output ran off the end of the halfword buffer into the code tree.
+ */
+static inline void hle_interrupt(i960_cpu_t *cpu, uint32_t handler) {
+    int d = cpu->frame_depth;
+    hle_call(cpu, handler, cpu->sfr.ip);
+    if (cpu->frame_depth == d + 1) {
+        cpu->frame_irq[d]    = 1;
+        cpu->frame_irq_ac[d] = cpu->sfr.ac;
+        cpu->frame_irq_pc[d] = cpu->sfr.pc;
+    }
 }
 
 /* Dispatch: walk the active profile's hook table and call the first match. */

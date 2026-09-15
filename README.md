@@ -10,15 +10,57 @@ while the geometry coprocessor, parts of the frame loop, and the audio path are 
 and reimplemented in C rather than simulated gate-for-gate.
 
 ```
+git clone --recurse-submodules <this repo>       # or: git submodule update --init
+python -m pip install ply==3.11                  # dear_bindings generates the ImGui C bindings
 cmake -S . -B build
 cmake --build build --config Release -j
 build/Release/m2hle.exe --rom <romset>.zip --run
 ```
 
+Dependencies are git submodules under [vendor/](vendor/); `vendor/noclip` is only needed by
+[tools/](tools/), so `git submodule update --init vendor/imgui vendor/dear_bindings vendor/sokol
+vendor/miniz vendor/ImGuiFileDialog` is enough to build.
+
 No ROMs, ROM-derived data, or other copyrighted material is included in this repository, and
 none will be accepted into it. You must supply your own dumps.
 
 ---
+
+## Goal
+
+Booting a game is not the goal; understanding it is. Taken seriously, HLE forces the issue — you
+cannot intercept a subsystem until you know exactly what it does, so every hook is a standing
+claim about the game's engine, and the emulator is where that claim gets tested against hardware.
+The aim for each Model 2B ROM set is therefore a **map of its engine**: what subsystems exist,
+what state each one owns, how a frame is assembled out of them, and which parts of that are board
+behaviour shared with every other game on the same hardware.
+
+For *Sonic The Fighters* — the reference title, and where the bulk of the prior reverse
+engineering already lives — the aim is the complete version of that map: a fully fleshed-out
+account of how the game actually works, end to end.
+
+- **Frame loop and game state** — the attract / select / fight / result machine, what drives
+  pacing, and what each per-frame entry point is responsible for.
+- **Character records** — the layout of a fighter's state block: position, velocity, facing,
+  health, the move and state fields, and the transitions between them.
+- **Animation and the rig** — how motion data becomes a pose: the bone hierarchy and the COP
+  command sequences (`0x1A803535`, `0x33806767`, the `0x35806B6B` two-bone IK) that place each
+  joint.
+- **Camera** — how the fight camera is framed from the two fighters, and the arena-bounds /
+  ring-out classifier behind `0x38007070`.
+- **Collision and hit detection** — the volumes, the tests, and where the result is written back.
+- **Rendering** — the display list the game builds, object and material selection, texture and
+  palette setup, the clip windows.
+- **Sound** — the i960 → 68K command protocol, and what each request means to the driver.
+- **Input** — the port reads, the button-history buffer, and how a move command is recognised.
+
+The standard for anything entering that map is the same as everywhere else here: it is mapped when
+it has been *measured*, not when it is plausible. Pieces that are named but not yet understood stay
+labelled as such — [CLAUDE.md](CLAUDE.md) holds the confirmed invariants, and several of its
+entries exist precisely because an earlier confident guess turned out to be wrong.
+
+Anything general enough to be shared belongs in the board layer, so mapping one game's engine makes
+the next game cheaper instead of being spent on a single ROM set.
 
 ## What works
 
@@ -50,9 +92,11 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
 - [mcp_server/](mcp_server/) — Python MCP server that drives a running emulator over the bridge.
 - [tools/](tools/) — graders that measure this emulator against an independent implementation
   of the same ROM formats, with a MAME digest as the third point. See [tools/README.md](tools/README.md).
-- [vendor/](vendor/) — cimgui (dear_bindings), Sokol, ImGuiFileDialog, miniz, vendored in tree.
+- [vendor/](vendor/) — dependencies, all git submodules pinned to an exact upstream commit:
+  Dear ImGui, dear_bindings (generates the `ig*` C bindings into the build tree at build
+  time — nothing generated is committed), Sokol, ImGuiFileDialog, miniz, and noclip.
 
-Everything except `main.c`, `sokol_impl.c/.m`, and the vendored `.c` files is a header-only
+Everything except `main.c`, `sokol_impl.c/.m`, and the submodules' `.c` files is a header-only
 `.h` module. That is deliberate — see [CLAUDE.md](CLAUDE.md).
 
 ## Documents
@@ -166,5 +210,5 @@ against it.
 
 ## Licence
 
-The vendored dependencies under [vendor/](vendor/) keep their own licences. No licence has been
+The dependencies under [vendor/](vendor/) keep their own licences. No licence has been
 chosen for the first-party code yet.

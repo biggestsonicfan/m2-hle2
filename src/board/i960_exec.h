@@ -67,6 +67,21 @@ static inline double i960_int_reg_as_double(i960_cpu_t *cpu, int idx) {
     return (double)f;
 }
 
+// Real-to-integer rounding by the AC rounding-control bits (30-31):
+// 0 nearest (IEEE ties-to-even), 1 down, 2 up, 3 toward zero.
+static inline double i960_round_ac(i960_cpu_t *cpu, double v) {
+    switch ((cpu->sfr.ac >> 30) & 3) {
+    case 0: {
+        double r = floor(v + 0.5);
+        if (r - v == 0.5 && fmod(r, 2.0) != 0.0) r -= 1.0;
+        return r;
+    }
+    case 1:  return floor(v);
+    case 2:  return ceil(v);
+    default: return trunc(v);
+    }
+}
+
 //--- MEM format effective address calculation ---------------------------------
 
 static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t word1, uint32_t word2, int *len) {
@@ -174,6 +189,7 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     // Save current frame
                     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
+                        cpu->frame_irq[cpu->frame_depth] = 0;
                         cpu->frame_depth++;
                     } else {
                         LOG_ERROR("Frame stack overflow at 0x%08X", ip);
@@ -202,6 +218,11 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                         uint32_t return_ip = cpu->locals.rip;
                         cpu->frame_depth--;
                         cpu->locals = cpu->frame_stack[cpu->frame_depth];
+                        if (cpu->frame_irq[cpu->frame_depth]) {   /* interrupt return */
+                            cpu->sfr.ac = cpu->frame_irq_ac[cpu->frame_depth];
+                            cpu->sfr.pc = cpu->frame_irq_pc[cpu->frame_depth];
+                            cpu->frame_irq[cpu->frame_depth] = 0;
+                        }
                         cpu->sfr.ip = return_ip;
                         cpu->globals.fp = cpu->locals.pfp;
                         return 0;
@@ -574,8 +595,16 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                 case 0x583: // setbit
                     reg_write(cpu, dst_idx, src2 | (1 << (src1 & 31)));
                     break;
+                /* The four "not" logicals are not two pairs of synonyms: which
+                 * operand is inverted is the whole difference. andnot / ornot
+                 * invert src1, notand / notor invert src2 (MAME i960.cpp,
+                 * Intel's reference). notand used to be a copy of andnot, which
+                 * sent every STF mip level to an odd texram address —
+                 * sub_4C444 builds the chain's destinations with
+                 * `notand g6, 1, g6` to clear bit 0 — so the top quarter of
+                 * both sheets was never filled. */
                 case 0x584: // notand
-                    reg_write(cpu, dst_idx, (~src1) & src2);
+                    reg_write(cpu, dst_idx, src1 & (~src2));
                     break;
                 case 0x582: // andnot
                     reg_write(cpu, dst_idx, (~src1) & src2);
@@ -587,13 +616,13 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     reg_write(cpu, dst_idx, ~(src1 ^ src2));
                     break;
                 case 0x58b: // ornot
-                    reg_write(cpu, dst_idx, src1 | (~src2));
+                    reg_write(cpu, dst_idx, src2 | (~src1));
                     break;
                 case 0x58c: // clrbit
                     reg_write(cpu, dst_idx, src2 & ~(1 << (src1 & 31)));
                     break;
                 case 0x58d: // notor
-                    reg_write(cpu, dst_idx, (~src1) | src2);
+                    reg_write(cpu, dst_idx, src1 | (~src2));
                     break;
                 case 0x58e: // nand
                     reg_write(cpu, dst_idx, ~(src1 & src2));
@@ -666,21 +695,24 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                 case 0x5cc: // mov
                     reg_write(cpu, dst_idx, src1);
                     break;
+                /* movl / movt / movq take a literal source too, and a literal
+                 * fills every destination register (MAME i960.cpp). Reading
+                 * registers for `movq 0, r4` copied pfp/sp/rip/r3 instead of
+                 * zeros: STF's adv_set_action clears each fighter's damage and
+                 * crush-stage arrays that way, the garbage stages sent
+                 * damage_unit into the Fighting Vipers armour-break code, and it
+                 * wrote model numbers like 0x3000 over the forearms and shins
+                 * until set_obj stopped the game ("max poly / err poly"). */
                 case 0x5dc: // movl (move long, 2 regs)
-                    reg_write(cpu, dst_idx, reg_read(cpu, src1_idx));
-                    reg_write(cpu, dst_idx + 1, reg_read(cpu, src1_idx + 1));
-                    break;
                 case 0x5ec: // movt (move triple, 3 regs)
-                    reg_write(cpu, dst_idx, reg_read(cpu, src1_idx));
-                    reg_write(cpu, dst_idx + 1, reg_read(cpu, src1_idx + 1));
-                    reg_write(cpu, dst_idx + 2, reg_read(cpu, src1_idx + 2));
-                    break;
                 case 0x5fc: // movq (move quad, 4 regs)
-                    reg_write(cpu, dst_idx, reg_read(cpu, src1_idx));
-                    reg_write(cpu, dst_idx + 1, reg_read(cpu, src1_idx + 1));
-                    reg_write(cpu, dst_idx + 2, reg_read(cpu, src1_idx + 2));
-                    reg_write(cpu, dst_idx + 3, reg_read(cpu, src1_idx + 3));
+                {
+                    int nreg = opcode == 0x5dc ? 2 : opcode == 0x5ec ? 3 : 4;
+                    uint32_t v[4];
+                    for (int k = 0; k < nreg; k++) v[k] = m1 ? src1 : reg_read(cpu, src1_idx + k);
+                    for (int k = 0; k < nreg; k++) reg_write(cpu, dst_idx + k, v[k]);
                     break;
+                }
 
                 // Synchronized moves
                 // synmov encoding: src1 (bits 0-4) = dst addr reg, src2 (bits 14-18) = src addr reg
@@ -880,17 +912,21 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     break;
                 }
 
-                // Convert real to integer (source is FLOAT, dest is INTEGER)
+                // Convert real to integer (source is FLOAT, dest is INTEGER).
+                // cvtri/cvtril round by the AC rounding mode (bits 30-31; 0 at
+                // reset = nearest). Only the z forms truncate. Truncating here
+                // made every angle STF converts from radians come out one brad
+                // low against a MAME capture of the same frame.
                 case 0x6C0: // cvtri
                 {
                     double v = FP_SRC1;  // correctly bit-cast from int reg
-                    FP_DST_WRITE_INT((uint32_t)(int32_t)v);
+                    FP_DST_WRITE_INT((uint32_t)(int32_t)i960_round_ac(cpu, v));
                     break;
                 }
                 case 0x6C1: // cvtril
                 {
                     double v = FP_SRC1;
-                    FP_DST_WRITE_INT((uint32_t)(int32_t)v);
+                    FP_DST_WRITE_INT((uint32_t)(int32_t)i960_round_ac(cpu, v));
                     break;
                 }
                 case 0x6C2: // cvtzri (truncate toward zero)
@@ -1019,39 +1055,33 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                     g_last_store_ip = cpu->sfr.ip;
                     mem_write32(bus, ea, reg_read(cpu, dst_idx));
                     break;
+                // Multi-word loads/stores walk +4 a word only on burst devices;
+                // on MMIO every word hits the same address (see mem_burst_step).
                 case 0x98: // ldl (load long - 2 regs)
-                    reg_write(cpu, dst_idx, mem_read32(bus, ea));
-                    reg_write(cpu, dst_idx + 1, mem_read32(bus, ea + 4));
-                    break;
-                case 0x9a: // stl (store long - 2 regs)
-                    g_last_store_ip = cpu->sfr.ip;
-                    mem_write32(bus, ea, reg_read(cpu, dst_idx));
-                    mem_write32(bus, ea + 4, reg_read(cpu, dst_idx + 1));
-                    break;
                 case 0xA0: // ldt (load triple - 3 regs)
-                    reg_write(cpu, dst_idx, mem_read32(bus, ea));
-                    reg_write(cpu, dst_idx + 1, mem_read32(bus, ea + 4));
-                    reg_write(cpu, dst_idx + 2, mem_read32(bus, ea + 8));
-                    break;
-                case 0xA2: // stt (store triple - 3 regs)
-                    g_last_store_ip = cpu->sfr.ip;
-                    mem_write32(bus, ea, reg_read(cpu, dst_idx));
-                    mem_write32(bus, ea + 4, reg_read(cpu, dst_idx + 1));
-                    mem_write32(bus, ea + 8, reg_read(cpu, dst_idx + 2));
-                    break;
                 case 0xB0: // ldq (load quad - 4 regs)
-                    reg_write(cpu, dst_idx, mem_read32(bus, ea));
-                    reg_write(cpu, dst_idx + 1, mem_read32(bus, ea + 4));
-                    reg_write(cpu, dst_idx + 2, mem_read32(bus, ea + 8));
-                    reg_write(cpu, dst_idx + 3, mem_read32(bus, ea + 12));
+                {
+                    int n = opcode == 0x98 ? 2 : opcode == 0xA0 ? 3 : 4;
+                    uint32_t a = ea;
+                    for (int k = 0; k < n; k++) {
+                        reg_write(cpu, dst_idx + k, mem_read32(bus, a));
+                        a += mem_burst_step(bus, a);
+                    }
                     break;
+                }
+                case 0x9a: // stl (store long - 2 regs)
+                case 0xA2: // stt (store triple - 3 regs)
                 case 0xB2: // stq (store quad - 4 regs)
+                {
                     g_last_store_ip = cpu->sfr.ip;
-                    mem_write32(bus, ea, reg_read(cpu, dst_idx));
-                    mem_write32(bus, ea + 4, reg_read(cpu, dst_idx + 1));
-                    mem_write32(bus, ea + 8, reg_read(cpu, dst_idx + 2));
-                    mem_write32(bus, ea + 12, reg_read(cpu, dst_idx + 3));
+                    int n = opcode == 0x9a ? 2 : opcode == 0xA2 ? 3 : 4;
+                    uint32_t a = ea;
+                    for (int k = 0; k < n; k++) {
+                        mem_write32(bus, a, reg_read(cpu, dst_idx + k));
+                        a += mem_burst_step(bus, a);
+                    }
                     break;
+                }
                 case 0xC0: // ldib (load integer byte, sign extend)
                     reg_write(cpu, dst_idx, (uint32_t)(int32_t)(int8_t)mem_read8(bus, ea));
                     break;
@@ -1076,6 +1106,7 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
                 {
                     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
+                        cpu->frame_irq[cpu->frame_depth] = 0;
                         cpu->frame_depth++;
                     } else {
                         LOG_ERROR("Frame stack overflow at 0x%08X", ip);

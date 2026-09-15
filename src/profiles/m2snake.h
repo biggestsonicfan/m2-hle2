@@ -129,7 +129,7 @@ static const game_profile_t m2snake_profile = {
     },
     .quirks = {
         /* Bring up the 68K sound block even though the homebrew is silent: the
-         * emu thread sound_steps every slice regardless, so the 68K must be in a
+         * emu thread runs the sound board every slice regardless, so the 68K must be in a
          * valid reset state running a real driver. STF's sound 68K just idles
          * waiting for commands our i960 never sends — harmless, and avoids
          * stepping an uninitialised 68K. */
