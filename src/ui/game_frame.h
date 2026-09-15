@@ -135,10 +135,16 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
     int64_t t1 = emu_now_us();
     g_game_frame_times.upload_us += t1 - t0;
 
-    game_render_draw_game(video->back_view, ox, oy, w, h);
-    /* GPU-composed layers hold pens; the colours come from the pen texture. */
-    if (video->gpu) game_render_draw_indexed(video->bg_view, video->pal_rgba_view, ox, oy, w, h);
-    else            game_render_draw_game(video->bg_view, ox, oy, w, h);
+    /* GPU-composed layers hold pens; the colours come from the pen texture. The
+     * back layer there is opaque everywhere (the backdrop is its pen 0), so the
+     * back colour quad under it would be drawn over whole: it is left out, and
+     * the layer drawn without blending (alpha 1 blends to the source exactly). */
+    if (video->gpu) {
+        game_render_draw_indexed(video->bg_view, video->pal_rgba_view, true, ox, oy, w, h);
+    } else {
+        game_render_draw_game(video->back_view, ox, oy, w, h);
+        game_render_draw_game(video->bg_view, ox, oy, w, h);
+    }
     int64_t t2 = emu_now_us();
     if (geo3d->enabled && g_active_profile && rs->main_data && rs->polygons) {
         const game_quirks_t *q = &g_active_profile->quirks;
@@ -175,7 +181,7 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
         g_geo3d_palram = NULL;
     }
     int64_t t3 = emu_now_us();
-    if (video->gpu) game_render_draw_indexed(video->fg_view, video->pal_rgba_view, ox, oy, w, h);
+    if (video->gpu) game_render_draw_indexed(video->fg_view, video->pal_rgba_view, false, ox, oy, w, h);
     else            game_render_draw_game(video->fg_view, ox, oy, w, h);
     g_game_frame_times.draw3d_us += t3 - t2;
     g_game_frame_times.tiles_us  += (t2 - t1) + (emu_now_us() - t3);

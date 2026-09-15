@@ -56,9 +56,12 @@ typedef struct {
     sg_shader   tile_shader;
     sg_pipeline tile_pipeline;
     sg_sampler  tile_sampler;
-    /* The same quad for pen layers (GL backends): the colour is looked up. */
+    /* The same quad for pen layers (GL backends): the colour is looked up.
+     * indexed_opaque has no blending, for the layer behind the 3D: its alpha is
+     * 1 everywhere, where blending gives the source colour exactly, but a blended
+     * draw keeps the GPU from dropping the pixels the 3D then covers. */
     sg_shader   indexed_shader;
-    sg_pipeline indexed_pipeline;
+    sg_pipeline indexed_pipeline, indexed_opaque;
 
     /* Render-target blit: the tile shader without blending (a finished frame's
      * alpha is whatever the last layer left), a quad oriented for the backend's
@@ -79,6 +82,16 @@ typedef struct {
     sg_pipeline fill_pipeline;        /* no cull */
     sg_pipeline fill_pipeline_cw;     /* cull back, CW = front */
     sg_pipeline fill_pipeline_ccw;    /* cull back, CCW = front */
+    /* --verify-fill only: the reference fill shader, the same three variants. */
+    sg_shader   fill_shader_ref;
+    sg_pipeline fill_ref[3];
+    /* The fill shader with its discards taken out (GL backends), for faces that
+     * are neither transparent nor checkered and so never reach them: a shader
+     * that can discard keeps the GPU from rejecting hidden fragments before
+     * shading them (early depth test, Mali's forward pixel kill). Same three
+     * variants; id 0 where there is none. */
+    sg_shader   fill_shader_opaque;
+    sg_pipeline fill_opaque[3];
 
     /* Texture luma atlas (decoded from texram0): 2048×1024 R8 */
     sg_image    atlas_image;
@@ -103,6 +116,43 @@ typedef struct {
 } game_render_t;
 
 static game_render_t g_game_render = {0};
+
+/* --verify-fill: set before game_render_init to build the reference fill shader.
+ * While on, every fill draw of the frame is logged (viewport, scissor, matrix,
+ * cull variant, vertex range) so main_sdl can replay the frame's fills through
+ * each shader into scratch targets and compare them. A frame whose vertex buffer
+ * was uploaded more than once (a batch that overflowed) cannot be replayed:
+ * earlier draws' vertices are gone. */
+static int g_game_render_fill_verify = 0;
+/* Draw with the reference fill shader instead (timing comparisons). */
+static int g_game_render_fill_use_ref = 0;
+/* Draw faces that cannot discard with the discard-free fill shader (default);
+ * 0 draws every face with the one shader (timing comparisons). */
+static int g_game_render_fill_split = 1;
+
+/* src with every "discard;" turned into an empty statement, into buf. */
+static inline const char *game_render_strip_discard(const char *src, char *buf, size_t cap) {
+    size_t o = 0;
+    for (const char *p = src; *p && o + 1 < cap; ) {
+        if (!strncmp(p, "discard;", 8)) { buf[o++] = ';'; p += 8; }
+        else buf[o++] = *p++;
+    }
+    buf[o] = '\0';
+    return buf;
+}
+#define GAME_RENDER_FILL_LOG_MAX 4096
+typedef struct {
+    int   vx, vy, vw, vh;
+    int   sx, sy, sw, sh;
+    float mvp[16];
+    int   cull, first, count, can_discard;
+} game_render_fill_draw_t;
+static struct {
+    int                     n, uploads;
+    bool                    overflow;
+    int                     vx, vy, vw, vh;   /* the viewport in force */
+    game_render_fill_draw_t d[GAME_RENDER_FILL_LOG_MAX];
+} g_fill_log;
 
 /* ---- Shaders ------------------------------------------------------------- */
 
@@ -203,10 +253,23 @@ static const char *game_render_fill_vs_glsl =
     "out vec2 uv;\n"
     "flat out vec4 tile;\n"
     "flat out vec3 lbpl;\n"
+    /* Per-face integers the fill works out per pixel otherwise: the GEO3D_FACE_*
+     * flags (plus 64 when both tile sides are powers of two) and the colour's
+     * 5-bit channels. A face's three vertices carry the same values. */
+    "flat out ivec4 face;\n"
+    "flat out ivec2 tile_log2;\n"   /* log2 of the tile sides (GLSL ES 3.00 has no findMSB) */
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl;\n"
+    "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
+    "  if (tw > 0 && th > 0 && (tw & (tw - 1)) == 0 && (th & (th - 1)) == 0) fl |= 64;\n"
+    "  tile_log2 = ivec2(0);\n"
+    "  for (int i = 1; i < 16; i++) {\n"
+    "    if ((tw >> i) != 0) tile_log2.x = i;\n"
+    "    if ((th >> i) != 0) tile_log2.y = i;\n"
+    "  }\n"
+    "  face = ivec4(fl, int(a_color.r*31.0+0.5), int(a_color.g*31.0+0.5), int(a_color.b*31.0+0.5));\n"
     "}\n";
 
 /*
@@ -238,7 +301,7 @@ static const char *game_render_fill_vs_glsl =
  * poly_luma >> 2 and no texel (model2rd.ipp draw_scanline_solid).
  * lb < 0 falls back to the old flat_color*luma path.
  */
-static const char *game_render_fill_fs_glsl =
+static const char *game_render_fill_fs_ref_glsl =
     "#version 410\n"
     "uniform sampler2D atlas_smp;\n"
     "uniform sampler2D luma_smp;\n"
@@ -326,6 +389,110 @@ static const char *game_render_fill_fs_glsl =
     "    float cg = texelFetch(cxlat_smp, ivec2(bg & 255, bg >> 8), 0).r * 255.0;\n"
     "    float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
     "    rgb = clamp(max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
+    "  }\n"
+    "  frag_color = vec4(rgb, 1.0);\n"
+    "}\n";
+
+/*
+ * The fill as drawn on GL: game_render_fill_fs_ref_glsl above, pixel for pixel
+ * (main_sdl --verify-fill replays each frame's fills through both and compares
+ * the bytes), with the work per pixel cut where the result cannot change:
+ *   - the flags and colour channels come from the vertex stage as flat ints;
+ *   - a tile side is a power of two (32 << n, halved per level), so the wrap's
+ *     % and / are & and >> of values that are never negative there;
+ *   - the second mip level is fetched only when it has weight: mix(a, b, 0.0)
+ *     is a, so at lod 0 (every magnified texel) or a whole level, 4 fetches
+ *     instead of 8.
+ */
+static const char *game_render_fill_fs_glsl =
+    "#version 410\n"
+    "uniform sampler2D atlas_smp;\n"
+    "uniform sampler2D luma_smp;\n"
+    "uniform sampler2D cxlat_smp;\n"
+    "in vec4 color;\n"
+    "in vec2 uv;\n"
+    "flat in vec4 tile;\n"
+    "flat in vec3 lbpl;\n"
+    "flat in ivec4 face;\n"
+    "flat in ivec2 tile_log2;\n"
+    "out vec4 frag_color;\n"
+    "ivec4 level_tile(int L) {\n"
+    "  int sheet = (face.x & 4) != 0 ? 1 : 0;\n"
+    "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
+    "  uint y = (uint(int(tile.y) - sheet * 1024) - 1024u) >> uint(L);\n"
+    "  return ivec4(int(x & 2047u), int(y & 1023u) + ((sheet + L) & 1) * 1024,\n"
+    "               max(int(tile.z) >> L, 1), max(int(tile.w) >> L, 1));\n"
+    "}\n"
+    "float tile_texel(ivec4 t, ivec2 sh, ivec2 p) {\n"
+    "  ivec2 s = p + t.zw * 8;\n"
+    "  ivec2 q, copy;\n"
+    "  if ((face.x & 64) != 0) { q = s & (t.zw - 1); copy = s >> sh; }\n"
+    "  else                    { q = s % t.zw;       copy = s / t.zw; }\n"
+    "  if ((face.x & 8) != 0 && (copy.x & 1) != 0) q.x = t.z - 1 - q.x;\n"
+    "  if ((face.x & 16) != 0 && (copy.y & 1) != 0) q.y = t.w - 1 - q.y;\n"
+    "  return texelFetch(atlas_smp, (t.xy + q) & 2047, 0).r;\n"
+    "}\n"
+    "vec2 sample_level(int L) {\n"
+    "  ivec4 t = level_tile(L);\n"
+    "  ivec2 sh = max(tile_log2 - ivec2(L), ivec2(0));\n"   /* log2 of t.zw = max(side >> L, 1) */
+    "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
+    "  ivec2 i0 = ivec2(floor(c));\n"
+    "  vec2 f = fract(c);\n"
+    "  float t00 = tile_texel(t, sh, i0);\n"
+    "  float t10 = tile_texel(t, sh, i0 + ivec2(1, 0));\n"
+    "  float t01 = tile_texel(t, sh, i0 + ivec2(0, 1));\n"
+    "  float t11 = tile_texel(t, sh, i0 + ivec2(1, 1));\n"
+    "  float a = 1.0;\n"
+    "  if ((face.x & 1) != 0) {\n"
+    "    vec4 cover = 1.0 - step(1.0, vec4(t00, t10, t01, t11));\n"
+    "    a = mix(mix(cover.x, cover.y, f.x), mix(cover.z, cover.w, f.x), f.y);\n"
+    "    if (t00 == 1.0) t00 = t10;\n"
+    "    if (t10 == 1.0) t10 = t00;\n"
+    "    if (t01 == 1.0) t01 = t11;\n"
+    "    if (t11 == 1.0) t11 = t01;\n"
+    "  }\n"
+    "  float row0 = mix(t00, t10, f.x);\n"
+    "  float row1 = mix(t01, t11, f.x);\n"
+    "  if ((face.x & 1) != 0) {\n"
+    "    if (row0 == 1.0) row0 = row1;\n"
+    "    if (row1 == 1.0) row1 = row0;\n"
+    "  }\n"
+    "  return vec2(mix(row0, row1, f.y), a);\n"
+    "}\n"
+    "vec3 ramp(int li) {\n"
+    "  int br = ((face.y<<8)+li)*2, bg = 0x4000+((face.z<<8)+li)*2, bb = 0x8000+((face.w<<8)+li)*2;\n"
+    "  float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
+    "  float cg = texelFetch(cxlat_smp, ivec2(bg & 255, bg >> 8), 0).r * 255.0;\n"
+    "  float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
+    "  return vec3(cr, cg, cb);\n"
+    "}\n"
+    "void main() {\n"
+    "  float lmax = max(log2(max(min(tile.z, tile.w), 2.0)) - 1.0, 0.0);\n"
+    "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
+    "  if ((face.x & 2) != 0 && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
+    "  vec3 rgb = color.rgb;\n"
+    "  if (tile.z > 0.0) {\n"
+    "    int L0 = int(floor(lod));\n"
+    "    float lf = fract(lod);\n"
+    "    vec2 tx = sample_level(L0);\n"
+    "    if (lf != 0.0) tx = mix(tx, sample_level(L0 + 1), lf);\n"
+    "    if ((face.x & 1) != 0 && tx.y < 0.5) discard;\n"
+    "    float al = tx.x;\n"
+    "    if (lbpl.x < 0.0) {\n"
+    "      if (al > 0.0) rgb = clamp(color.rgb * al * 2.0, 0.0, 1.0);\n"
+    "    } else {\n"
+    "      int lbyte = 2 * (int(lbpl.x) + int(al * 120.0));\n"
+    "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
+    "      float poly = clamp(lbpl.y, 0.0, 1.0) * 255.0;\n"
+    "      int li = int(min(lram * poly / 256.0, 63.0) + 0.5);\n"
+    "      vec3 c = max(ramp(li) - 64.0, 0.0) * (255.0/191.0);\n"
+    "      rgb = clamp(c / 255.0, 0.0, 1.0);\n"
+    "    }\n"
+    "  } else if (lbpl.x < 0.0) {\n"
+    "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
+    "  } else {\n"
+    "    int li = min(int(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5) >> 2, 63);\n"
+    "    rgb = clamp(max(ramp(li) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
     "}\n";
@@ -565,6 +732,10 @@ static inline void game_render_init(void) {
             p.shader = g_game_render.indexed_shader;
             p.label  = "game-render-indexed-pipeline";
             g_game_render.indexed_pipeline = sg_make_pipeline(&p);
+            p.colors[0].blend.enabled = false;
+            p.label  = "game-render-indexed-opaque";
+            g_game_render.indexed_opaque = sg_make_pipeline(&p);
+            p.colors[0].blend.enabled = true;
         }
     }
 
@@ -724,7 +895,8 @@ static inline void game_render_init(void) {
         d.label = "game-render-fill-shader";
         if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
             d.vertex_func.source   = game_render_glsl(backend, game_render_fill_vs_glsl, 0);
-            d.fragment_func.source = game_render_glsl(backend, game_render_fill_fs_glsl, 1);
+            d.fragment_func.source = game_render_glsl(backend, g_game_render_fill_use_ref ? game_render_fill_fs_ref_glsl
+                                                                                           : game_render_fill_fs_glsl, 1);
         } else if (backend == SG_BACKEND_D3D11) {
             d.vertex_func.source         = game_render_fill_vs_hlsl;
             d.vertex_func.d3d11_target   = "vs_4_0";
@@ -732,6 +904,21 @@ static inline void game_render_init(void) {
             d.fragment_func.d3d11_target = "ps_4_0";
         }
         g_game_render.fill_shader = sg_make_shader(&d);
+        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+            static char opaque_src[8192];
+            d.vertex_func.source   = game_render_glsl(backend, game_render_fill_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend,
+                game_render_strip_discard(g_game_render_fill_use_ref ? game_render_fill_fs_ref_glsl : game_render_fill_fs_glsl,
+                                          opaque_src, sizeof opaque_src), 1);
+            d.label = "game-render-fill-shader-opaque";
+            g_game_render.fill_shader_opaque = sg_make_shader(&d);
+        }
+        if (g_game_render_fill_verify && (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3)) {
+            d.vertex_func.source   = game_render_glsl(backend, game_render_fill_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, game_render_fill_fs_ref_glsl, 1);
+            d.label = "game-render-fill-shader-ref";
+            g_game_render.fill_shader_ref = sg_make_shader(&d);
+        }
     }
     {
         sg_pipeline_desc p;
@@ -759,6 +946,24 @@ static inline void game_render_init(void) {
         g_game_render.fill_pipeline_cw = sg_make_pipeline(&p);
         p.face_winding = SG_FACEWINDING_CCW;  p.label = "fill-cull-ccw";
         g_game_render.fill_pipeline_ccw = sg_make_pipeline(&p);
+        if (g_game_render.fill_shader_opaque.id) {
+            p.shader = g_game_render.fill_shader_opaque;
+            p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-opaque";
+            g_game_render.fill_opaque[0] = sg_make_pipeline(&p);
+            p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-opaque-cw";
+            g_game_render.fill_opaque[1] = sg_make_pipeline(&p);
+            p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-opaque-ccw";
+            g_game_render.fill_opaque[2] = sg_make_pipeline(&p);
+        }
+        if (g_game_render.fill_shader_ref.id) {
+            p.shader = g_game_render.fill_shader_ref;
+            p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-ref";
+            g_game_render.fill_ref[0] = sg_make_pipeline(&p);
+            p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-ref-cw";
+            g_game_render.fill_ref[1] = sg_make_pipeline(&p);
+            p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-ref-ccw";
+            g_game_render.fill_ref[2] = sg_make_pipeline(&p);
+        }
     }
 
     /* ---- Texture luma atlas ---------------------------------------------- */
@@ -810,6 +1015,10 @@ static inline void game_render_shutdown(void) {
     sg_destroy_pipeline(g_game_render.fill_pipeline);
     sg_destroy_pipeline(g_game_render.fill_pipeline_cw);
     sg_destroy_pipeline(g_game_render.fill_pipeline_ccw);
+    for (int i = 0; i < 3; i++) sg_destroy_pipeline(g_game_render.fill_ref[i]);   /* invalid ids are ignored */
+    sg_destroy_shader(g_game_render.fill_shader_ref);
+    for (int i = 0; i < 3; i++) sg_destroy_pipeline(g_game_render.fill_opaque[i]);
+    sg_destroy_shader(g_game_render.fill_shader_opaque);
     sg_destroy_shader(g_game_render.fill_shader);
     sg_destroy_buffer(g_game_render.fill_vbuf);
     sg_destroy_pipeline(g_game_render.line_pipeline);
@@ -822,6 +1031,7 @@ static inline void game_render_shutdown(void) {
     sg_destroy_pipeline(g_game_render.tile_pipeline);
     sg_destroy_shader(g_game_render.tile_shader);
     sg_destroy_pipeline(g_game_render.indexed_pipeline);   /* invalid ids are ignored */
+    sg_destroy_pipeline(g_game_render.indexed_opaque);
     sg_destroy_shader(g_game_render.indexed_shader);
     sg_destroy_buffer(g_game_render.quad_vbuf);
     g_game_render.initialized = false;
@@ -1000,13 +1210,13 @@ static inline void game_render_draw_game(sg_view tile_view,
 
 /* game_render_draw_game for a layer of pens (the GPU tile compositor's targets):
  * each pixel's colour is pal_view's texel for its pen. GL backends only. */
-static inline void game_render_draw_indexed(sg_view pen_view, sg_view pal_view,
+static inline void game_render_draw_indexed(sg_view pen_view, sg_view pal_view, bool opaque,
                                              int ox, int oy, int w, int h) {
     if (!g_game_render.initialized) return;
     if (w <= 0 || h <= 0) return;
 
     sg_apply_viewport(ox, oy, w, h, true);
-    sg_apply_pipeline(g_game_render.indexed_pipeline);
+    sg_apply_pipeline(opaque ? g_game_render.indexed_opaque : g_game_render.indexed_pipeline);
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.quad_vbuf,
         .views[0]          = pen_view,
@@ -1038,6 +1248,7 @@ static inline void game_render_draw_target(sg_view target_view, bool linear,
 
 static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int first, int vcount);
 static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int vcount);
+static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int vcount, int can_discard);
 
 /*
  * Draw the 3D wireframe lines currently in g_geo3d_lines over the tile quad.
@@ -1139,11 +1350,21 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
     game_render_submit_fills(&vs_params, 0, vcount);
 }
 
+/* The fill pipeline for a cull setting (g_backface_cull 0/1/2) and whether the
+ * faces drawn can discard (0: none is transparent or checkered). */
+static inline sg_pipeline game_render_fill_pip(int cull, int can_discard) {
+    int v = cull == 1 ? 1 : cull == 2 ? 2 : 0;
+    if (!can_discard && g_game_render_fill_split && g_game_render.fill_opaque[v].id) return g_game_render.fill_opaque[v];
+    return v == 1 ? g_game_render.fill_pipeline_cw : v == 2 ? g_game_render.fill_pipeline_ccw : g_game_render.fill_pipeline;
+}
+
 static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int vcount) {
+    game_render_submit_fills_as(vs, first, vcount, 1);
+}
+
+static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int vcount, int can_discard) {
     const game_render_vs_params_t vs_params = *vs;
-    sg_apply_pipeline(g_backface_cull == 1 ? g_game_render.fill_pipeline_cw
-                    : g_backface_cull == 2 ? g_game_render.fill_pipeline_ccw
-                    :                        g_game_render.fill_pipeline);
+    sg_apply_pipeline(game_render_fill_pip(g_backface_cull, can_discard));
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.fill_vbuf,
         .views[0]          = g_game_render.atlas_view,
@@ -1153,6 +1374,38 @@ static inline void game_render_submit_fills(const game_render_vs_params_t *vs, i
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });
     sg_draw(first, vcount, 1);
+}
+
+/* Replay this frame's layer behind the 3D and its logged fill draws into the
+ * current pass, the reference way (ref: back colour quad, blended pen layer,
+ * the reference fill shader for every face) or the way the frame draws them
+ * (opaque pen layer, fills split by whether they can discard). Vertex buffer and
+ * textures are as the frame left them: nothing is uploaded. back_view: the back
+ * colour; bg_view / pal_view: the GPU compositor's back layer and pens. */
+static inline void game_render_replay_fills(bool ref, sg_view back_view, sg_view bg_view, sg_view pal_view) {
+    if (g_fill_log.n > 0) {
+        int x = g_fill_log.d[0].vx, y = g_fill_log.d[0].vy, w = g_fill_log.d[0].vw, h = g_fill_log.d[0].vh;
+        if (ref) game_render_draw_game(back_view, x, y, w, h);
+        game_render_draw_indexed(bg_view, pal_view, !ref, x, y, w, h);
+    }
+    for (int i = 0; i < g_fill_log.n; i++) {
+        const game_render_fill_draw_t *e = &g_fill_log.d[i];
+        sg_apply_viewport(e->vx, e->vy, e->vw, e->vh, true);
+        sg_apply_pipeline(ref ? g_game_render.fill_ref[e->cull == 1 ? 1 : e->cull == 2 ? 2 : 0]
+                              : game_render_fill_pip(e->cull, e->can_discard));
+        sg_apply_scissor_rect(e->sx, e->sy, e->sw, e->sh, true);
+        sg_apply_bindings(&(sg_bindings){
+            .vertex_buffers[0] = g_game_render.fill_vbuf,
+            .views[0]          = g_game_render.atlas_view,
+            .views[1]          = g_game_render.luma_view,
+            .views[2]          = g_game_render.cxlat_view,
+            .samplers[0]       = g_game_render.atlas_sampler,
+        });
+        game_render_vs_params_t vs;
+        memcpy(vs.mvp, e->mvp, sizeof vs.mvp);
+        sg_apply_uniforms(0, &(sg_range){ .ptr = &vs, .size = sizeof vs });
+        sg_draw(e->first, e->count, 1);
+    }
 }
 
 /*
@@ -1184,9 +1437,14 @@ static inline void game_render_batch_flush(bool lines_only) {
     bool fills = !lines_only && nt > 0;
     bool lines = g_geo_wireframe && nl > 0;
 
+    /* Per triangle: can its face discard (transparent or checkered)? Runs are
+     * drawn as consecutive stretches of alike triangles, in order, so the ones
+     * that cannot go through the discard-free shader. */
+    static uint8_t can_discard[GEO3D_MAX_TRIS];
     if (fills) {
         for (int i = 0; i < nt; i++) {
             const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
+            can_discard[i] = ((int)(T->fl + 0.5f) & (int)(GEO3D_FACE_TRANSPARENT | GEO3D_FACE_CHECKER)) != 0;
             game_render_tex_vertex_t *v = &g_game_render.fill_verts[i * 3];
             v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].u=T->u0; v[0].v=T->v0;
             v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
@@ -1200,6 +1458,7 @@ static inline void game_render_batch_flush(bool lines_only) {
         }
         sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
             .ptr = g_game_render.fill_verts, .size = (size_t)nt * 3 * sizeof(game_render_tex_vertex_t) });
+        g_fill_log.uploads++;
     }
     if (lines) {
         for (int i = 0; i < nl; i++) {
@@ -1218,8 +1477,24 @@ static inline void game_render_batch_flush(bool lines_only) {
         memcpy(vs.mvp, run->mvp_t, sizeof vs.mvp);
         sg_apply_scissor_rect(run->sx, run->sy, run->sw, run->sh, true);
         int tc = run->tri_first + run->tri_count > nt ? nt - run->tri_first : run->tri_count;
-        if (fills && tc > 0) {
-            game_render_submit_fills(&vs, run->tri_first * 3, tc * 3);
+        bool split = g_game_render_fill_split && g_game_render.fill_opaque[0].id != 0;
+        for (int s = run->tri_first, end = run->tri_first + (fills ? tc : 0); s < end; ) {
+            int k = can_discard[s], e0 = s;
+            if (split) while (e0 < end && can_discard[e0] == k) e0++;
+            else       { e0 = end; k = 1; }
+            game_render_submit_fills_as(&vs, s * 3, (e0 - s) * 3, k);
+            if (g_game_render_fill_verify) {
+                if (g_fill_log.n == GAME_RENDER_FILL_LOG_MAX) {
+                    g_fill_log.overflow = true;
+                } else {
+                    game_render_fill_draw_t *e = &g_fill_log.d[g_fill_log.n++];
+                    e->vx = g_fill_log.vx; e->vy = g_fill_log.vy; e->vw = g_fill_log.vw; e->vh = g_fill_log.vh;
+                    e->sx = run->sx; e->sy = run->sy; e->sw = run->sw; e->sh = run->sh;
+                    memcpy(e->mvp, vs.mvp, sizeof e->mvp);
+                    e->cull = g_backface_cull; e->first = s * 3; e->count = (e0 - s) * 3; e->can_discard = k;
+                }
+            }
+            s = e0;
         }
         int lc = run->line_first + run->line_count > nl ? nl - run->line_first : run->line_count;
         if (lines && lc > 0) {
@@ -1282,6 +1557,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
     const int count = geo->captured_count;
     float saved_light[3] = { g_light_dir[0], g_light_dir[1], g_light_dir[2] };
     sg_apply_viewport(ox, oy, w, h, true);
+    g_fill_log.vx = ox; g_fill_log.vy = oy; g_fill_log.vw = w; g_fill_log.vh = h;
     g_render_batch.count = 0;
     geo3d_lines_reset();
     geo3d_tris_reset();

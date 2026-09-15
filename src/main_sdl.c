@@ -38,6 +38,9 @@
  * --filter   nearest|linear scaling of the offscreen frame (default linear).
  * --cpu-tiles   compose the tile layers on the CPU instead of in a shader.
  * --no-mesh-cache  decode every display-list model in full every frame.
+ * --verify-fill  after every game pass, draw its 3D fills again through the
+ *            reference fill shader and the one in use, into two scratch targets,
+ *            and compare the bytes (needs --render-scale 1 or more).
  * --verify-gpu-tiles  on every frame the GPU composes the tile layers, pause
  *            the emu thread, compose the same RAM on the CPU as well and
  *            compare the two byte for byte (FG colour only where it shows).
@@ -107,6 +110,7 @@ static struct {
     bool        linear;
     bool        cpu_tiles;
     bool        verify_gpu_tiles;
+    bool        verify_fill;
 } opt = { .render_fps = 30.0, .render_scale = 1, .linear = true };
 
 /* ---- Gamepad ------------------------------------------------------------- */
@@ -321,7 +325,7 @@ static void show_layer(sg_view pens, uint8_t *out) {
         .action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0, 0, 0, 1 } },
         .attachments.colors[0] = g_vt.rt_att,
     });
-    game_render_draw_indexed(pens, state.video.pal_rgba_view, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
+    game_render_draw_indexed(pens, state.video.pal_rgba_view, false, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
     sg_end_pass();
     static uint8_t tmp[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
     read_layer(g_vt.rt, tmp);
@@ -375,6 +379,67 @@ static void verify_gpu_tiles(void) {
     }
 }
 
+/* ---- --verify-fill ------------------------------------------------------------ */
+
+static struct {
+    uint64_t frames, bad_frames, skipped;
+    int      w, h;
+    sg_image color[2], depth[2];
+    sg_view  color_att[2], depth_att[2];
+    uint8_t *px[2];
+} g_vf;
+
+/* Replay this frame's fills (game_render's log) through the reference and the
+ * normal fill shader into two scratch targets the game pass's size, and compare
+ * the bytes. Call after the game pass, before anything else uploads. */
+static void verify_fill(int w, int h) {
+    if (g_fill_log.n == 0) return;
+    if (g_fill_log.uploads != 1 || g_fill_log.overflow) { g_vf.skipped++; return; }
+    if (g_vf.w != w || g_vf.h != h) {
+        for (int k = 0; k < 2; k++) {
+            g_vf.color[k] = sg_make_image(&(sg_image_desc){ .width = w, .height = h,
+                .pixel_format = SG_PIXELFORMAT_RGBA8, .usage = { .color_attachment = true }, .label = "verify-fill" });
+            g_vf.depth[k] = sg_make_image(&(sg_image_desc){ .width = w, .height = h,
+                .pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL, .usage = { .depth_stencil_attachment = true }, .label = "verify-fill-depth" });
+            g_vf.color_att[k] = sg_make_view(&(sg_view_desc){ .color_attachment.image = g_vf.color[k] });
+            g_vf.depth_att[k] = sg_make_view(&(sg_view_desc){ .depth_stencil_attachment.image = g_vf.depth[k] });
+            g_vf.px[k] = malloc((size_t)w * (size_t)h * 4);
+        }
+        g_vf.w = w; g_vf.h = h;
+    }
+    for (int k = 0; k < 2; k++) {
+        sg_begin_pass(&(sg_pass){
+            .action = { .colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0, 0, 0, 0 } },
+                        .depth = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f } },
+            .attachments = { .colors[0] = g_vf.color_att[k], .depth_stencil = g_vf.depth_att[k] },
+        });
+        game_render_replay_fills(k == 0, state.video.back_view, state.video.bg_view, state.video.pal_rgba_view);
+        sg_end_pass();
+        sg_gl_image_info gi = sg_gl_query_image_info(g_vf.color[k]);
+        GLuint fbo;
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gi.tex[gi.active_slot], 0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, g_vf.px[k]);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fbo);
+        sg_reset_state_cache();
+    }
+    size_t n = (size_t)w * (size_t)h * 4, bad = 0, first = 0;
+    int maxd = 0;
+    for (size_t i = 0; i < n; i++) {
+        int dlt = abs((int)g_vf.px[0][i] - (int)g_vf.px[1][i]);
+        if (dlt) { if (!bad++) first = i; if (dlt > maxd) maxd = dlt; }
+    }
+    g_vf.frames++;
+    if (bad && g_vf.bad_frames++ < 5)
+        printf("verify-fill: game frame %u, %zu bytes differ (max %d), first at (%zu,%zu): ref %02x%02x%02x%02x new %02x%02x%02x%02x\n",
+               g_emu_frames, bad, maxd, (first / 4) % (size_t)w, (first / 4) / (size_t)w,
+               g_vf.px[0][first & ~3u], g_vf.px[0][(first & ~3u) + 1], g_vf.px[0][(first & ~3u) + 2], g_vf.px[0][(first & ~3u) + 3],
+               g_vf.px[1][first & ~3u], g_vf.px[1][(first & ~3u) + 1], g_vf.px[1][(first & ~3u) + 2], g_vf.px[1][(first & ~3u) + 3]);
+}
+
 /* ---- Main ------------------------------------------------------------------ */
 
 static bool parse_args(int argc, char **argv) {
@@ -395,6 +460,9 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--cpu-tiles"))          opt.cpu_tiles = true;
         else if (!strcmp(a, "--no-mesh-cache"))      g_geo3d_mesh_cache = 0;
         else if (!strcmp(a, "--verify-gpu-tiles"))   opt.verify_gpu_tiles = true;
+        else if (!strcmp(a, "--verify-fill"))        opt.verify_fill = true;
+        else if (!strcmp(a, "--fill-ref"))           g_game_render_fill_use_ref = 1;
+        else if (!strcmp(a, "--fill-no-split"))      g_game_render_fill_split = 0;
         else if (!strcmp(a, "--filter") && more) {
             const char *f = argv[++i];
             if (!strcmp(f, "linear")) opt.linear = true;
@@ -554,6 +622,11 @@ int main(int argc, char **argv) {
     if (opt.osd)
         sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_cpc(), .logger.func = slog_func });
     g_video_force_cpu_tiles = opt.cpu_tiles;
+    if (opt.verify_fill && opt.render_scale <= 0) {
+        fprintf(stderr, "m2hle: --verify-fill needs the offscreen game pass (--render-scale 1 or more)\n");
+        return 2;
+    }
+    g_game_render_fill_verify = opt.verify_fill;
     game_render_init();
     video_init(&state.video);
     printf("m2hle: tile layers composed on the %s\n", state.video.gpu ? "GPU" : "CPU");
@@ -587,6 +660,7 @@ int main(int argc, char **argv) {
     const Uint64 period_ns = opt.render_fps > 0.0 ? (Uint64)(1e9 / opt.render_fps) : 0;
     Uint64 deadline = SDL_GetTicksNS();
     Uint64 stat_start = deadline, stat_cpu_ns = 0, stat_gpu_ns = 0, stat_swap_ns = 0, stat_tile_gpu_ns = 0;
+    Uint64 stat_game_gpu_ns = 0;
     uint64_t stat_comp0 = 0, stat_uptile0 = 0, stat_upgfx0 = 0, stat_uppens0 = 0, stat_part0 = 0, stat_blk0 = 0;
     Uint64 next_temp_check = deadline;
     unsigned stat_renders = 0, stat_frames0 = g_emu_frames;
@@ -680,6 +754,7 @@ int main(int argc, char **argv) {
             oy = (fb_h - h) / 2;
         }
         if (opt.render_scale > 0) {
+            g_fill_log.n = 0; g_fill_log.uploads = 0; g_fill_log.overflow = false;
             sg_begin_pass(&(sg_pass){
                 .action = pass_action,
                 .attachments = { .colors[0] = rt_color_att, .depth_stencil = rt_depth_att },
@@ -687,6 +762,16 @@ int main(int argc, char **argv) {
             game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
                             0, 0, rt_w, rt_h, lerp_t);
             sg_end_pass();
+            if (opt.gl_finish) {
+                /* The game pass is the tile layer quads and the 3D fills: its GPU
+                 * time, kept out of the CPU time. */
+                Uint64 f0 = SDL_GetTicksNS();
+                glFinish();
+                Uint64 waited = SDL_GetTicksNS() - f0;
+                stat_game_gpu_ns += waited;
+                cpu_start += waited;
+            }
+            if (opt.verify_fill) verify_fill(rt_w, rt_h);
         }
         sg_begin_pass(&(sg_pass){
             .action = pass_action,
@@ -755,7 +840,10 @@ int main(int argc, char **argv) {
                    (unsigned long long)(v->up_pens - stat_uppens0));
             if (opt.gl_finish && comps)
                 printf(" | gpu %.2f ms per compose", stat_tile_gpu_ns / 1e6 / (double)comps);
+            if (opt.gl_finish && opt.render_scale > 0)
+                printf(" | game pass gpu %.2f ms per render", stat_game_gpu_ns / 1e6 / n);
             printf("\n");
+            stat_game_gpu_ns = 0;
             fflush(stdout);
             stat_comp0 = v->gpu_composes; stat_uptile0 = v->up_tile; stat_upgfx0 = v->up_gfx; stat_uppens0 = v->up_pens;
             stat_part0 = v->partial_composes; stat_blk0 = v->composed_blocks;
@@ -767,6 +855,9 @@ int main(int argc, char **argv) {
     }
 
     emu_thread_shutdown(&state.emu);
+    if (opt.verify_fill)
+        printf("verify-fill: %llu frames of fills checked, %llu differed, %llu skipped (vertex buffer uploaded twice)\n",
+               (unsigned long long)g_vf.frames, (unsigned long long)g_vf.bad_frames, (unsigned long long)g_vf.skipped);
     if (opt.verify_gpu_tiles)
         printf("verify-gpu-tiles: %llu composed frames checked, %llu differed\n",
                (unsigned long long)g_vt.frames, (unsigned long long)g_vt.bad_frames);
