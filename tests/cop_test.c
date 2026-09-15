@@ -43,13 +43,15 @@ int main(void) {
           "read_world_pos returns T via the reply FIFO (cop_read drain)");
     CHECK(cop_read() == 0, "reply FIFO empty after draining all replies");
 
-    /* ---- read 3x4 matrix (0x02800505): identity rot + translation column ---- */
+    /* ---- Fn_get_matrix (0x02800505): the slot's words as it holds them ---- */
+    /* col0, col1, col2, then T -- what a SHARC-side capture of the board shows. */
     cop_write(0x02800505);
     float m[12]; for (int i = 0; i < 12; i++) m[i] = b2f(cop_read());
-    int mat_ok = feq(m[0],1)&&feq(m[1],0)&&feq(m[2],0)&&feq(m[3],10)
-              && feq(m[4],0)&&feq(m[5],1)&&feq(m[6],0)&&feq(m[7],20)
-              && feq(m[8],0)&&feq(m[9],0)&&feq(m[10],1)&&feq(m[11],30);
-    CHECK(mat_ok, "read matrix = identity rot with T=(10,20,30)");
+    int mat_ok = feq(m[0],1)&&feq(m[1],0)&&feq(m[2],0)
+              && feq(m[3],0)&&feq(m[4],1)&&feq(m[5],0)
+              && feq(m[6],0)&&feq(m[7],0)&&feq(m[8],1)
+              && feq(m[9],10)&&feq(m[10],20)&&feq(m[11],30);
+    CHECK(mat_ok, "get_matrix = identity columns, then T=(10,20,30)");
 
     /* ---- column-major post-multiply Y-rotation (0x04800909, 90 deg) ---- */
     cop_reset();

@@ -72,11 +72,6 @@ static inline void sharc_dm_set(uint32_t a, uint32_t v) {
 static inline float sharc_dm_getf(uint32_t a)          { return sharc_bits_to_float(sharc_dm_get(a)); }
 static inline void  sharc_dm_setf(uint32_t a, float f) { sharc_dm_set(a, sharc_float_to_bits(f)); }
 
-/* _L202AE: square root (the firmware returns a zero input untouched) */
-static inline float sharc_fw_sqrt(float x) {
-    if (sharc_float_to_bits(x) == 0) return x;
-    return sqrtf(x);
-}
 
 /* _L20D98: a ball bitmask remapped to units, through player r1's ball->unit table */
 static inline uint32_t sharc_coli_remap_player(uint32_t mask, uint32_t player) {
@@ -129,7 +124,7 @@ static inline void sharc_coli_trans_mat(const float d0[3], const float d1[3]) {
 static inline void sharc_coli_trans_xz(float X, float Z, float ox, float oy, float oz) {
     float r2 = X * X;
     r2 = r2 + Z * Z;
-    float k = sharc_float_to_bits(r2) == 0 ? 0.0f : 1.0f / sqrtf(r2);   /* _L2029B */
+    float k = sharc_fw_rsqrt(r2);                                        /* _L2029B */
     float c = X * k, s = Z * k;
     static const uint32_t SRC[4] = { 0x1403E80u, 0x1403EE0u, 0x1407E80u, 0x1407EE0u };
     static const uint32_t DST[4] = { 0x1403F40u, 0x1403FA0u, 0x1407F40u, 0x1407FA0u };
@@ -253,7 +248,7 @@ static inline void sharc_coli_calc_flag(uint32_t mode, uint32_t am0, uint32_t am
                                 if (vv - ne <= 0.0f) {
                                     D2 = d[0] * d[0] + d[1] * d[1]; D2 = D2 + d[2] * d[2];
                                 } else {
-                                    float t = ne / vv;
+                                    float t = sharc_fw_div(ne, vv);        /* _L205D0 */
                                     float q0 = v[0] * t + dp[0], q1 = v[1] * t + dp[1], q2 = v[2] * t + dp[2];
                                     D2 = q0 * q0 + q1 * q1; D2 = D2 + q2 * q2;
                                 }
@@ -439,8 +434,9 @@ static inline void sharc_coli_parts_trace(uint32_t table, uint32_t rad, const fl
         float S = sharc_bits_to_float(Rb) + sharc_dm_getf(0x3031Bu);
         if (!(dist <= S)) continue;
         /* dist/S by RECIPS and three Newton steps — but f11 holds the sqrt's 3.0
-         * where 2.0 belongs, so this settles on 2·dist/S. That is the board. */
-        float f4 = 1.0f / S, f14 = f4 * S, f2 = dist * f4;
+         * where 2.0 belongs, so this settles near 2·dist/S, not on it. That is
+         * the board. */
+        float f4 = sharc_recips(S), f14 = f4 * S, f2 = dist * f4;
         f4 = f11 - f14;
         for (int it = 0; it < 2; it++) { f14 = f4 * f14; f2 = f2 * f4; f4 = f11 - f14; }
         float f0 = sharc_dm_getf(0x30301u) - f2 * f4;        /* 1.0 - ... */
