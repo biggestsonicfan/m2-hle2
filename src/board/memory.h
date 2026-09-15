@@ -618,10 +618,16 @@ static struct {
     uint32_t     block_addr[DL_MAX_BLOCKS], block_len[DL_MAX_BLOCKS];
     uint32_t     block_bytes;           /* sum of block_len */
     uint8_t     *blocks;                /* NULL, or capmarks × block_bytes */
+    /* cop: record the coprocessor conversation instead of FIFO writes — cop.h's
+     * g_cop_tap tags plus the i960's 32-bit bufferram writes, a MAME SHARC-side
+     * capture's format — with bufferram and SHARC DM 0x30000-0x30FFF as they
+     * stood when the capture began. */
+    int          cop;
+    uint8_t     *cop_bufram;            /* BUFF_RAM_SIZE bytes */
+    uint32_t    *cop_dm;                /* 0x1000 words */
 } g_dl;
 
-static inline void dl_tap(uint32_t addr, uint32_t val) {
-    if (!g_dl.active || addr - g_dl.lo >= g_dl.hi - g_dl.lo) return;
+static inline void dl_record(uint32_t addr, uint32_t val) {
     if (g_dl.n < g_dl.cap) {
         g_dl.recs[g_dl.n].addr = addr;
         g_dl.recs[g_dl.n].val  = val;
@@ -629,6 +635,15 @@ static inline void dl_tap(uint32_t addr, uint32_t val) {
     } else {
         g_dl.overflow = 1;
     }
+}
+
+static inline void dl_tap(uint32_t addr, uint32_t val) {
+    if (!g_dl.active || g_dl.cop || addr - g_dl.lo >= g_dl.hi - g_dl.lo) return;
+    dl_record(addr, val);
+}
+
+static void dl_cop_tap(uint32_t tag, uint32_t val) {
+    if (g_dl.active) dl_record(tag, val);
 }
 
 static inline void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
@@ -672,6 +687,7 @@ static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     g_mem_last_write_ip = bus->cpu_ip;
     if (g_wp.count) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
+    if (g_dl.active && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         bus->unmapped_writes++;
@@ -691,7 +707,12 @@ static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
 /* A frame edge: the run loop calls this, under the emu mutex, when the game's
  * frame has ended and before the next instruction runs. */
 static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
-    if (g_dl.armed && !g_dl.active && !g_dl.done) g_dl.active = 1;
+    if (g_dl.armed && !g_dl.active && !g_dl.done) {
+        g_dl.active = 1;
+        if (g_dl.cop_bufram) memcpy(g_dl.cop_bufram, bus->buff_ram, BUFF_RAM_SIZE);
+        if (g_dl.cop_dm)
+            for (uint32_t k = 0; k < 0x1000u; k++) g_dl.cop_dm[k] = sharc_dm_get(0x30000u + k);
+    }
     if (!g_dl.active) return;
     if (g_dl.nmarks < g_dl.capmarks) {
         dl_mark_t *m = &g_dl.marks[g_dl.nmarks++];

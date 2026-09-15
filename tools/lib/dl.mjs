@@ -20,7 +20,9 @@ import {
     ROB_STATE, ROB_STATE_MIRROR,
     ROB_FLAGS, ROB_SMOOTH_MODE, ROB_SMOOTH_IN, ROB_SMOOTH_OUT_AT, ROB_SMOOTH_COUNT,
     ROB_MOTION_LENGTH, ROB_TIMEWARP, NOT_SCR_BG_MOVE, REPLAY_COUNTDOWN,
-    CARPET_ANG_X, CARPET_HEADING, CARPET_ROLL, SKY_ANGLE,
+    CARPET_ANG_X, CARPET_HEADING, CARPET_ROLL, SKY_ANGLE, STAGE_POS,
+    FA_OBJECT0_RAM, OBJ_AGE, OBJ_SIZE, OBJ_ROUTINE, OBJ_DISP, ROUND_STAGE_PIN, COIN1, IN,
+    BUFF_RAM_BASE, CAGE_SHAKE_INDEX,
 } from './board.mjs';
 import { identifyScene } from './capture.mjs';
 
@@ -320,6 +322,106 @@ export async function captureWindow(emu, {
     const r = await captureDl(emu, prefix, frames, { range, tgp, scene, slots, unit });
     log(`captured frame_counter ${now}..${now + r.frames}: ${r.words} words -> ${prefix}`);
     return { prefix, words: r.words, frames: r.frames };
+}
+
+/**
+ * Play into a round on a chosen arena and capture it, for grade-stages.mjs.
+ *
+ * Attract mode only ever fights on the Flying Carpet, so this plays: coin,
+ * start and the attack buttons on a loop, as stf-tools/mame-dl-capture.lua
+ * mashes MAME. The arena is chosen the way that script's write tap chooses it —
+ * at the moment the game stores it: a breakpoint at ROUND_STAGE_PIN, where
+ * ROUND_INIT has put stage_num down and is about to hand it to change_scene.
+ * Pinning the byte at any other time does not take (see tools/README.md).
+ *
+ * Once both fighters are playing a motion, the loaded record is the one asked
+ * for and the frame carries model draws, the live stage objects are read off
+ * fa_object0_ram and each one's age becomes a probe beside SCENE_PROBES, and
+ * bufferram (where Fn_put_poly lays the display list) is snapshotted at every
+ * mark. Returns { prefix, stage, objects, probes, frames, words, reachedAt }.
+ */
+export async function captureStage(emu, stage, {
+    out = DEFAULT_DL_OUT, frames = 180, maxFrames = 12000, blocks = true, log = () => {}, prepare = null,
+} = {}) {
+    fs.mkdirSync(out, { recursive: true });
+    await emu.clearAllBreakpoints();
+    await emu.setBreakpoint(ROUND_STAGE_PIN, 'stage-pin');
+    let pins = 0, held = -1;
+    try {
+        for (let fc = 0; fc < maxFrames; fc += 2) {
+            let want = 0;
+            if (fc > 300) {
+                if (fc % 600 < 8) want |= COIN1;
+                const m = fc % 60;
+                if (m < 6) want |= IN.START1;
+                if (m >= 20 && m < 26) want |= IN.P1_B1;
+                if (m >= 40 && m < 46) want |= IN.P1_B2;
+            }
+            if (want !== held) { await emu.setInput(want); held = want; }
+            const w = await emu.waitFrames(2, 20000);
+            if (!w.reached) {
+                const st = await emu.status();
+                if (!st.running && Number(st.ip) === ROUND_STAGE_PIN) {
+                    await emu.writeMemory(STAGE_NUM, [stage]);
+                    if (!pins++) log(`stage_num pinned to ${stage} at ROUND_INIT (frame ~${fc})`);
+                    await emu.run();
+                    continue;
+                }
+                if (!st.running) throw new Error(`the emulator stopped at ${st.ip}, not at the stage pin`);
+            }
+            if (!pins || fc % 60) continue;
+            if ((await emu.readMemory(STAGE_NUM, 1))[0] !== stage) continue;
+            if (!u16(await emu.readMemory(P1_ROB + ROB_MOTION, 2), 0) || !u16(await emu.readMemory(P2_ROB + ROB_MOTION, 2), 0)) continue;
+            const scene = await identifyScene(emu);
+            if (scene.stage !== stage && !(scene.ambiguous ?? []).includes(stage)) continue;
+            const probe = path.join(out, 'probe');
+            await captureDl(emu, probe, 2);
+            if (!loadDl(probe).words.includes(DRAW)) continue;
+            await emu.setInput(0);
+            /* The round is loaded: from here the game changes scene on its own
+             * (the Death Egg's Eye hands over to slot 10), and a breakpoint left
+             * armed would stop the capture. */
+            await emu.clearAllBreakpoints();
+            /* Scene state the pin skipped past, set the way the game would have
+             * left it; the caller says what and why. */
+            const prepared = prepare ? await prepare(emu) : null;
+            if (prepared) { log(prepared); await emu.waitFrames(2, 20000); }
+
+            const objects = [];
+            for (let at = FA_OBJECT0_RAM, i = 0; i < 16; i++) {
+                const b = await emu.readMemory(at, 0x18);
+                const size = b.readUInt32LE(OBJ_SIZE);
+                if (!(b.readUInt32LE(0) >>> 31) || !size || size > 0x4000) break;
+                objects.push({ at, size, routine: b.readUInt32LE(OBJ_ROUTINE), disp: b.readUInt32LE(OBJ_DISP) });
+                at += size;
+            }
+            const probes = [...SCENE_PROBES,
+                ...objects.map((o, i) => [`obj${i}Age`, o.at + OBJ_AGE, 2]),
+                ['stageX', STAGE_POS[0], 4], ['stageY', STAGE_POS[1], 4], ['stageZ', STAGE_POS[2], 4],
+                ...[0, 1, 2, 3].map((w) => [`cageShake${w}`, CAGE_SHAKE_INDEX + 2 * w, 2])];
+            const prefix = path.join(out, 'fight');
+            const r = await emu.rpc('capture_dl', {
+                frames, path: path.resolve(prefix), probes: probeListSpec(probes),
+                ...(blocks ? { blocks: `${BUFF_RAM_BASE.toString(16)}:20000` } : {}),
+                max_words: Math.min(64 * 1024 * 1024, Math.max(8 * 1024 * 1024, frames * 8000)),
+                timeout_ms: Math.max(120000, frames * 400),
+            });
+            if (!r.complete) throw new Error(`capture_dl stopped after ${r.frames} of ${frames} frames`);
+            if (r.overflow) throw new Error('capture_dl ran out of room');
+            const meta = {
+                stage, loaded: scene.stage, ambiguous: scene.ambiguous, texWords: scene.texWords,
+                frames: r.frames, words: r.words, reachedAt: fc, objects, prepared,
+                probes: probes.map(([n, a, s]) => [n, a, s]), blocks: blocks ? [[BUFF_RAM_BASE, 0x20000]] : [],
+                taken: new Date().toISOString(),
+            };
+            fs.writeFileSync(path.join(out, 'fight-scene.json'), JSON.stringify(meta, null, 2));
+            log(`round on at frame ~${fc}; ${objects.length} stage objects; captured ${r.frames} frames, ${r.words} words`);
+            return { prefix, ...meta };
+        }
+        throw new Error(`no round was fought on stage ${stage} within ${maxFrames} frames`);
+    } finally {
+        await emu.clearAllBreakpoints().catch(() => {});
+    }
 }
 
 /* ---- the explorer toolkit's layouts --------------------------------------- */

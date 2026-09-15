@@ -126,6 +126,31 @@ export const CARPET_ANG_X   = 0x0050a020;
 export const CARPET_HEADING = 0x0050a022;
 export const CARPET_ROLL    = 0x0050a024;
 export const SKY_ANGLE      = 0x00500464;
+/* stage_xpos/ypos/zpos: where a moving stage (the carpet, the boat) has got to. */
+export const STAGE_POS      = [0x0050a014, 0x0050a018, 0x0050a01c];
+
+/* ---- stage objects ---------------------------------------------------------- */
+
+/* object_init lays the stage record's objects out from fa_object0_ram, each
+ * behind the last: +0 bit 31 alive, +6 the age object_cont steps after it calls
+ * the routine, +8 the object's size, +0xC the routine, +0x14 the draw. Some
+ * routines step +6 themselves as well (pinball's mover does), so an age can run
+ * at two a frame. */
+export const FA_OBJECT0_RAM = 0x00543100;
+export const OBJ_AGE = 0x06, OBJ_SIZE = 0x08, OBJ_ROUTINE = 0x0c, OBJ_DISP = 0x14;
+
+/* set_vs_cnt_and_stage_num_sel: both of its branches have stored stage_num by
+ * here, and the next thing it does is call change_scene. Rewriting stage_num
+ * at this instruction is how a capture picks the arena a round loads. */
+export const ROUND_STAGE_PIN = 0x0000afc8;
+
+/* The cage walls shake when a fighter is thrown into one. cage_display hands
+ * cage_clip_m word_50A1E8[wall] as an index into dword_903D0, a run of small Z
+ * offsets (0, 0.02, 0, 0.02 ... 0.08, 0, -0.03, 0, 0.01) cage_time_manager walks,
+ * and cage_clip_m opens the wall with that translate. */
+export const CAGE_SHAKE_INDEX = 0x0050a1e8;
+export const CAGE_SHAKE_TABLE = 0x000903d0;
+export const COIN1 = 0x00000001;
 
 /* ---- input bits (through the real 315-5649 I/O ports) -------------------- */
 
