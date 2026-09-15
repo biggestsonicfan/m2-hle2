@@ -77,6 +77,7 @@ one you already have running with `--mcp`.
 | `grade-texram.mjs` | texture RAM. ~85% of the pages are compressed in ROM, so a sheet is a megabyte of output from a long run of the game's own code: a wrong bit anywhere in the i960 core, the bus or the decompressor lands in it |
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
 | `grade-cull.mjs` | which of the arena's sixteen ground chunks are drawn. It captures a fight, replays the coprocessor's matrix to the point `ground_disp` tests from, and runs the ROM's own `clip_point_check_yoko` + `area_clip` on it (lattice and corner tables read from ROM). The chunks drawn have to be exactly that selection, in that order, at the explorer's matrix. The explorer names the chunks: its ground layer has to be the record's 16 slots |
+| `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
@@ -86,6 +87,8 @@ one you already have running with `--mcp`.
 | `lib/capture.mjs` | pinning a scene, verifying the game actually loaded it, waiting for the upload to settle |
 | `lib/noclip.mjs` | locates the explorer; `$M2_NOCLIP` overrides the submodule |
 | `lib/texref.mjs` | the board digests and the exact slices they are cut at |
+| `lib/cop-replay.mjs` | the coprocessor's current matrix replayed from the FIFO words, every matrix-writing command and the three matrix banks included, in the chip's float32 or in double; and a capture walked into per-frame draws |
+| `lib/matrix.mjs` | row-major 4x4s in the board's convention, and an explorer op list turned into one |
 
 ## Replacing MAME
 
@@ -231,6 +234,10 @@ board's angles and once with every input angle snapped to the table's grid, and
 the difference between the two rows is the whole cost of the disagreement.
 Settling it needs the board's own matrices, which means the display-list work
 below.
+
+*Since settled, by the explorer.* Its `pose.js` now reads sine and cosine out of
+the coprocessor ROM by the whole 16-bit angle, as `sharc_sincos` does, and the
+two rows agree to within 7.8e-8 of rotation and 1.8e-8 of position.
 
 **Luma RAM — byte-exact, all three ways.** The emulator, the explorer and the
 MAME capture agree on all 131072 bytes. This is the one place the three-way
@@ -422,6 +429,99 @@ Two things to know before trusting a row:
 - The `Fn_get_sm_ang_f` rows still differ: an angle comes out `0xFFFF` on the
   board and `0` here. This is unrelated to the chains.
 
+## Stages
+
+```sh
+node tools/grade-stages.mjs                                  # all fifteen, 180 frames each (~8 min)
+node tools/grade-stages.mjs --stages 4 --frames 2000 --no-blocks   # a whole canyon run
+node tools/grade-stages.mjs --no-capture --out <dir>         # grade captures already taken
+```
+
+Attract mode only ever fights on the Flying Carpet, so `lib/dl.mjs`
+`captureStage` plays a round: coin, start and the attack buttons on a loop, as
+the explorer toolkit's MAME driver does. It picks the arena where
+`set_vs_cnt_and_stage_num_sel` has stored `stage_num` and is about to call
+`change_scene` (`0xAFC8`), with a breakpoint that rewrites the byte. Once the
+round is drawing, the live stage objects are read off `fa_object0_ram`
+(`0x543100`). Each one's age (`+6`) becomes a probe beside the scene probes,
+and so does each cage wall's shake index. Bufferram is snapshotted at every
+mark.
+
+Each capture is checked four ways.
+
+- **Placement.** Every arena draw has to be C · M for some explorer part's M
+  and one view matrix C a frame. This is `stf-tools/verify-stage.mjs`'s check,
+  on a coprocessor replay that applies every command writing the matrix
+  (`lib/cop-replay.mjs`). The explorer runs every animation off one frame
+  number, and the board does not. So each part may take `frame_counter` or a
+  recorded object age, and has to keep one clock for the whole capture.
+- **The flight.** On the Flying Carpet, Canyon Cruise and Giant Wing, the
+  position, heading, pitch and roll the object wrote are checked against
+  `carpetAt`, `canyonAt` and `giantWingRoll` at that object's age.
+- **What the coprocessor draws.** `Fn_put_poly` copies the current matrix into
+  the display list the renderer walks. Placement grades the i960's commands and
+  never sees that copy. So the emulator's own words are read out of bufferram
+  and checked against a float32 replay with the chip's sine table.
+- **Texture animation.** The aurora's and the Death Egg floor's texture points
+  (`tpd_move`) and the sea's and river's lumabase (`transmap_change`) are found
+  in the geometry program memory writes. For the texture points, some object
+  also has to draw from the block that frame.
+  - The aurora curtain (model 1604) is not laid down by `Fn_put_poly`. It is
+    handed straight to the geometry processor as (tpa, tha, oba), and its tpa is
+    `0x805000`: command 4 uploaded the scrolled points to geometrizer texture RAM
+    there. So a hand-over is recognised by its mesh and header pointer, not by
+    the ROM texture pointer.
+  - Read back through the renderer's own decoder, the curtain's pv falls by 4 a
+    frame.
+
+What the first run found:
+
+- **`Fn_base_3x3` (0x08001010) was a no-op in the emulator.** The firmware
+  (cpres1 PM 0x20460) sets the current 3x3 to the identity and leaves T alone,
+  so what comes next faces the screen. The Flying Carpet's flames and the Death
+  Egg's Earth are drawn after it, and so are `kira_kira_disp`'s sparkles. Fixed
+  in `sharc_exec.h`. The bufferram check now holds 720 flame draws and 180 Earth
+  draws to the firmware.
+- **The clocks are the board's.** Casino Night's blimp, reels and cards run on
+  the pinball object's age at half its count: its mover steps `+6` a second
+  time. Dynamite Plant's swing and gears, Giant Wing's clouds and roll, and the
+  canyon flight run on their object's age. Everything else runs on
+  `frame_counter`. Over a 2000-frame canyon run, which includes the counter's
+  snap back at the end of the run, the flight stays within 1.2e-4.
+- **`verify-stage` itself was misreading the emulator's captures:**
+  - It applied the backdrop's drift correction on stages whose flag bit 0x1B
+    is clear; Aurora's sky stands still on both sides.
+  - Its arena-frame vote left the drift out of the sky segments, so the sky
+    could outvote the ground.
+  - A cut frame drawn at a zero matrix crashed it before its summary.
+  - Its replay ignores `0x03`, `0x04`, `0x10` and the inner bank. So it could
+    not follow `canyon_env_disp`, which draws from a matrix it loads, and it
+    only agreed with the explorer about Giant Wing's plane because it skipped
+    the load.
+- **What `display.js` leaves out.** Each of these is read off the listing, and
+  `grade-stages` reports when a part matches only with it:
+  - `pole_disp` resets the 3x3 before each flame.
+  - `draw_sphynx_head` and `giant_wing_disp` draw from inner slot 8, the arena
+    frame at 1.6. So the head is at 1.6, which is not the ROM bug the explorer
+    describes, and the plane's body, haze and clouds bank at 1.6.
+  - `slot6_obj0_init` starts the second gear at 0x800.
+  - Cage walls shake by `dword_903D0[word_50A1E8[wall]]` when a fighter hits
+    them.
+- `grade-cull.mjs`'s replay multiplied `Fn_mul_matrix` the wrong way round.
+  `_L201EA` post-multiplies, whatever the listing's comment says. Its grade is
+  unchanged: 299 of 299 frames.
+
+Two things a pinned round does not reach by itself:
+
+- **The Final Eggman Boss** is only ever entered from the Death Egg's Eye,
+  whose transition sets bit 31 of `0x500498`. `sub_2731C` draws the hangar iris
+  only with that bit set, so the capture sets it and says so.
+- **Canyon Cruise's** later scenery runs and the tunnel light take a whole run
+  to reach: `--frames 2000`.
+
+A part that animates but was never drawn is listed as not exercised rather
+than passed.
+
 ## The sound board
 
 The explorer has no sound, so the sound board is graded straight against MAME,
@@ -459,22 +559,12 @@ emulator yet (below), so every run so far has correctly skipped that row rather
 than producing a number. Until a capture of the right scene exists, the
 strongest available statement about texture RAM is emulator-vs-explorer.
 
-**Pinning a scene does not work on this emulator.** Holding `stage_num` at a
-value for 2700 frames never gets the requested arena loaded, and `watch-var.mjs`
-says why: **nothing in m2-hle2 reads or writes `0x500064` at all** during
-attract, over 25 seconds of watching, either direction. The MAME driver pins the
-same byte successfully, so this is a difference between this emulator and the
-board worth chasing on its own — it is not a limitation of the tooling. The
-capture path handles it correctly in the meantime: it reports the scene it
-actually got and grades against that.
-
-**No display-list grader.** The explorer's toolkit replays a captured display
-list into (model, matrix) draws and holds every arena draw against the stage it
-builds from the ROM tables — the check that would grade the COP matrix pipeline
-end to end. It needs a raw capture of both FIFO ports in write order; m2-hle2's
-`geo_capture` ring records the coprocessor port only, and the geometry
-processor's `0x804000` writes are handled separately for clip windows. Adding a
-unified dual-port capture is the next piece of bridge work.
+**Pinning a scene in attract mode does not work.** Holding `stage_num` for
+2700 frames never loads the arena, and `watch-var.mjs` shows nothing reads or
+writes `0x500064` during attract. Attract only fights its Flying Carpet replay.
+A played round does take a stage, if it is written where ROUND_INIT stores it
+(`captureStage`, above). `dump-board.mjs` and `grade-all.mjs` still pin during
+attract, so they grade whichever scene loaded, and say which.
 
 **Nothing above the waist.** `grade-pose.mjs` covers the
 twelve slots the body matrix and the IK chains place. The other four — the

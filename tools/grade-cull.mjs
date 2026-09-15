@@ -227,7 +227,10 @@ class Replay {
             case OP.POP: if (this.stack.length) m = this.stack.pop(); break;
             case 0x03: m = I4(); break;                                        /* Fn_base_matrix */
             case 0x04: m = colsM(a.map(f32)); break;                           /* Fn_load_matrix */
-            case 0x0b: m = mul(colsM(a.map(f32)), m); break;                   /* Fn_mul_matrix: M * current */
+            /* Fn_mul_matrix: _L201EA makes each new column rot * M's column and
+             * T' = rot * M_T + T, which is current * M here, whatever the
+             * listing's "M * current" suggests (lib/cop-replay.mjs). */
+            case 0x0b: m = mul(m, colsM(a.map(f32))); break;
             case 0x0c: m = affineInverse(m); break;                            /* Fn_inv_matrix */
             case 0x0d: m = m.slice(); m[3] = m[7] = m[11] = 0; break;          /* Fn_base_point */
             case 0x0e: m = m.slice(); [m[3], m[7], m[11]] = a.map(f32); break; /* Fn_load_point */
