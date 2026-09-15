@@ -148,12 +148,27 @@ static void mcp_cmd_get_status(char *resp, int cap) {
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"profile\":\"%s\","
-             "\"frames\":%u,\"rom_loaded\":%s}",
+             "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, profile_id,
              g_emu_frames,
-             (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false");
+             (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false",
+             g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
+             g_match_replay_frame);
+}
+
+/* match_replay: arm the jump from attract mode's intro movie straight to its
+ * preprogrammed replay fight (game_quirks_t.attract_replay). It happens at the
+ * next frame edge the profile's movie step is reached, so arm it before attract
+ * gets there -- --match-replay on the command line arms it from boot. */
+static void mcp_cmd_match_replay(char *resp, int cap) {
+    if (!g_active_profile || !g_active_profile->quirks.attract_replay.step_addr) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"this game profile has no attract replay\"}");
+        return;
+    }
+    if (g_match_replay != 2) g_match_replay = 1;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"match_replay\":\"%s\"}", g_match_replay == 2 ? "done" : "armed");
 }
 
 /* Drive game input: set the active-high held mask (0x500700 layout, same bits the
@@ -1077,7 +1092,8 @@ static void mcp_cmd_capture_snd(const char *req, char *resp, int cap) {
 static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     uint32_t frames = 60, max_words = 8u * 1024u * 1024u, timeout_ms = 120000;
     uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_tgp = 0, want_slots = 0, want_unit = 0;
-    char path[512] = {0}, probes[2048] = {0};
+    char path[512] = {0}, probes[2048] = {0}, blockspec[512] = {0};
+    mcp_json_get_str(req, "blocks", blockspec, sizeof(blockspec));
     mcp_json_get_u32(req, "tgp", &want_tgp);
     mcp_json_get_u32(req, "slots", &want_slots);
     mcp_json_get_u32(req, "unit", &want_unit);
@@ -1106,6 +1122,17 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
         psize[np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
     }
 
+    /* blocks: "hexaddr:hexlen,..." -- whole ranges copied at every mark into
+     * <path>.blocks.bin, capmarks x (sum of lengths) bytes. */
+    uint32_t baddr[DL_MAX_BLOCKS], blen[DL_MAX_BLOCKS], bbytes = 0; int nb = 0;
+    for (char *tok = strtok(blockspec, ","); tok && nb < DL_MAX_BLOCKS; tok = strtok(NULL, ",")) {
+        char *colon = strchr(tok, ':');
+        if (!colon) continue;
+        uint32_t len = (uint32_t)strtoul(colon + 1, NULL, 16);
+        if (!len || bbytes + len > DL_BLOCK_BYTES) continue;
+        baddr[nb] = (uint32_t)strtoul(tok, NULL, 16); blen[nb++] = len; bbytes += len;
+    }
+
     dl_rec_t  *recs  = (dl_rec_t *)malloc((size_t)max_words * sizeof(dl_rec_t));
     dl_mark_t *marks = (dl_mark_t *)calloc((size_t)frames + 2, sizeof(dl_mark_t));
     const size_t tgp_per_mark = sizeof g_sharc.tgp_bone / sizeof(float);
@@ -1113,8 +1140,9 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     uint32_t  *slots = want_slots ? (uint32_t *)calloc(((size_t)frames + 2) * DL_SLOT_WORDS, sizeof(uint32_t)) : NULL;
     const size_t unit_per_mark = sizeof g_sharc.rot_cache / sizeof(float);
     float     *unit  = want_unit ? (float *)calloc(((size_t)frames + 2) * unit_per_mark, sizeof(float)) : NULL;
-    if (!recs || !marks || (want_tgp && !tgp) || (want_slots && !slots) || (want_unit && !unit)) {
-        free(recs); free(marks); free(tgp); free(slots); free(unit);
+    uint8_t   *blocks = nb ? (uint8_t *)calloc(((size_t)frames + 2), bbytes) : NULL;
+    if (!recs || !marks || (want_tgp && !tgp) || (want_slots && !slots) || (want_unit && !unit) || (nb && !blocks)) {
+        free(recs); free(marks); free(tgp); free(slots); free(unit); free(blocks);
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
     }
 
@@ -1127,6 +1155,9 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     g_dl.tgp = tgp;
     g_dl.slots = slots;
     g_dl.unit = unit;
+    g_dl.nblocks = nb; g_dl.block_bytes = bbytes; g_dl.blocks = blocks;
+    memcpy(g_dl.block_addr, baddr, sizeof(uint32_t) * (size_t)nb);
+    memcpy(g_dl.block_len, blen, sizeof(uint32_t) * (size_t)nb);
     g_dl.nprobes = np;
     memcpy(g_dl.probe_addr, paddr, sizeof(uint32_t) * (size_t)np);
     memcpy(g_dl.probe_size, psize, (size_t)np);
@@ -1151,6 +1182,7 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     size_t n = g_dl.n, nmarks = g_dl.nmarks;
     int overflow = g_dl.overflow, done = g_dl.done;
     g_dl.recs = NULL; g_dl.marks = NULL; g_dl.tgp = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
+    g_dl.blocks = NULL; g_dl.nblocks = 0; g_dl.block_bytes = 0;
     emu_mutex_unlock(&g_mcp.emu->mutex);
 
     char file[600];
@@ -1208,11 +1240,18 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
         if (!f || fwrite(unit, sizeof(float) * unit_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
         if (f) fclose(f);
     }
+    if (blocks && wrote_ok) {
+        snprintf(file, sizeof file, "%s.blocks.bin", path);
+        f = fopen(file, "wb");
+        if (!f || fwrite(blocks, bbytes, nmarks, f) != nmarks) wrote_ok = 0;
+        if (f) fclose(f);
+    }
     free(recs);
     free(marks);
     free(tgp);
     free(slots);
     free(unit);
+    free(blocks);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":%s,\"words\":%zu,\"frames\":%zu,\"complete\":%s,\"overflow\":%s%s}",
@@ -1238,6 +1277,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
     else if (strcmp(cmd, "dump_model")       == 0) mcp_cmd_dump_model(req, resp, cap);
     else if (strcmp(cmd, "capture_dl")       == 0) mcp_cmd_capture_dl(req, resp, cap);
+    else if (strcmp(cmd, "match_replay")     == 0) mcp_cmd_match_replay(resp, cap);
     else if (strcmp(cmd, "capture_snd")      == 0) mcp_cmd_capture_snd(req, resp, cap);
     else if (strcmp(cmd, "capture_snd_finish") == 0) mcp_cmd_capture_snd_finish(req, resp, cap);
     else if (strcmp(cmd, "dump_geo_list")    == 0) mcp_cmd_dump_geo_list(req, resp, cap);

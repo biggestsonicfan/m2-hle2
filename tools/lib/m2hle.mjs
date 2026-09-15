@@ -132,10 +132,10 @@ export class M2Hle {
      * back, to watch what a grader is doing. */
     static async launch({ rom, port = DEFAULT_PORT, run = true, exe = null,
                           quiet = true, timeoutMs = 30000,
-                          headless = !process.env.M2_WINDOW } = {}) {
+                          headless = !process.env.M2_WINDOW, extraArgs = [] } = {}) {
         if (!rom) throw new Error('launch needs a rom path');
         const bin = exe ?? findExe();
-        const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom)];
+        const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom), ...extraArgs];
         if (run) args.push('--run');
         if (headless) args.push('--headless');
         /* Run it beside the ROM: a split set needs schamp.zip found next to

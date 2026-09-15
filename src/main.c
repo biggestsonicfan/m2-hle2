@@ -629,6 +629,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--camlog") == 0) {
             g_cam_log = 1;            /* dump cam_ours.csv per game frame */
+        } else if (strcmp(argv[i], "--match-replay") == 0) {
+            g_match_replay = 1;       /* attract mode straight to its replay fight */
         } else if (strcmp(argv[i], "--nowarnskip") == 0) {
             g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
         } else if (strcmp(argv[i], "--realirq") == 0) {

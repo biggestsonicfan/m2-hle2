@@ -573,6 +573,8 @@ static uint32_t g_mem_last_write_ip = 0;
 #define DL_TAP_LO        0x00800000u
 #define DL_TAP_HI        0x008D0000u
 #define DL_MAX_PROBES    96
+#define DL_MAX_BLOCKS    8
+#define DL_BLOCK_BYTES   0x20000u        /* per mark, all blocks together */
 #define DL_SLOT_WORDS    (2 * 16 * 12)   /* both fighters' TGP slots, bufferram words 0x3A00.. / 0x3B00.. */
 
 typedef struct { uint32_t addr, val; } dl_rec_t;
@@ -593,6 +595,10 @@ static struct {
     float       *tgp;                   /* NULL, or capmarks × 32 × 12 bone-slot floats */
     uint32_t    *slots;                 /* NULL, or capmarks × DL_SLOT_WORDS words out of bufferram */
     float       *unit;                  /* NULL, or capmarks × 32 × 12 unit-matrix cache floats */
+    int          nblocks;               /* whole RAM ranges copied at every mark */
+    uint32_t     block_addr[DL_MAX_BLOCKS], block_len[DL_MAX_BLOCKS];
+    uint32_t     block_bytes;           /* sum of block_len */
+    uint8_t     *blocks;                /* NULL, or capmarks × block_bytes */
 } g_dl;
 
 static inline void dl_tap(uint32_t addr, uint32_t val) {
@@ -693,6 +699,12 @@ static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
         if (g_dl.unit)
             memcpy(g_dl.unit + (g_dl.nmarks - 1) * sizeof g_sharc.rot_cache / sizeof(float),
                    g_sharc.rot_cache, sizeof g_sharc.rot_cache);
+        /* Whole RAM ranges, byte for byte, in the order they were asked for. */
+        if (g_dl.blocks) {
+            uint8_t *dst = g_dl.blocks + (g_dl.nmarks - 1) * (size_t)g_dl.block_bytes;
+            for (int b = 0; b < g_dl.nblocks; b++)
+                for (uint32_t k = 0; k < g_dl.block_len[b]; k++) *dst++ = mem_read8(bus, g_dl.block_addr[b] + k);
+        }
     }
     if (g_dl.nmarks > g_dl.want || g_dl.nmarks >= g_dl.capmarks || g_dl.overflow) {
         g_dl.active = 0;
