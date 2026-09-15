@@ -934,15 +934,14 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
         case 0x34006868:
             return;
 
-        /* 0x3B807777: sphere_coli_check — dispatch[0x77] PM 0x020B1F.
-         * IDA epc_oidasi: 4 args (x, y, z, flags); 9 outputs.
-         * Outputs[0..1] = world-space position correction deltas (scaled by 0x3E23D70A).
-         * Outputs[2..8] = read and discarded by i960 caller.
-         * HLE: return 9 zeros -> no sphere collision correction applied. */
-        case 0x3B807777: {
-            int _i; for (_i = 0; _i < 9; _i++) sharc_push_u(0);
+        /* 0x3B807777: Fn_parts_oidasi — dispatch[0x77] PM 0x020B1F (sharc_coli.h).
+         * 4 args (x, y, z, radius); 9 replies. Projectiles (sub_8AE48) take their
+         * hits from the unit masks; flying parts (epc_oidasi) the push-out. */
+        case 0x3B807777:
+            if (n >= 4) sharc_coli_parts_oidasi(sharc_bits_to_float(args[0]), sharc_bits_to_float(args[1]),
+                                                sharc_bits_to_float(args[2]), args[3]);
+            else { int _i; for (_i = 0; _i < 9; _i++) sharc_push_u(0); }
             return;
-        }
 
         /* 0x2D005A5A: dispatch[0x5A] — PM 0x0206F4. 2 args, 2 outputs.
          * IDA os_set_coli: args (col0.x, col0.y); 2 reads back into g4, g5.

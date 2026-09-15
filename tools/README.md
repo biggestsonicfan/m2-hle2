@@ -64,7 +64,8 @@ node tools/grade-all.mjs           # capture a scene, then grade everything
 node tools/grade-all.mjs --no-capture
 ```
 
-Each grader launches its own emulator and kills it afterwards. `--attach` uses
+Each grader launches its own emulator and kills it afterwards, headless (no
+window, GPU or audio device). `$M2_WINDOW=1` shows the window. `--attach` uses
 one you already have running with `--mcp`.
 
 ## What is here
@@ -75,6 +76,7 @@ one you already have running with `--mcp`.
 | `grade-pose.mjs` | the coprocessor's rig maths: op `0x62`, the body matrix, and op `0x6B`, the four two-bone IK chains that place twelve of a fighter's sixteen slots. Replays 328 frames of arguments captured off a real board (`stf-tools/motion-pose.csv`) through the coprocessor port and holds what comes back against the explorer's rig. Needs no scene and no capture either, which makes it the one to run after touching the bone handlers in `sharc_exec.h` |
 | `grade-texram.mjs` | texture RAM. ~85% of the pages are compressed in ROM, so a sheet is a megabyte of output from a long run of the game's own code: a wrong bit anywhere in the i960 core, the bus or the decompressor lands in it |
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
+| `grade-cull.mjs` | which of the arena's sixteen ground chunks are drawn. It captures a fight, replays the coprocessor's matrix to the point `ground_disp` tests from, and runs the ROM's own `clip_point_check_yoko` + `area_clip` on it (lattice and corner tables read from ROM). The chunks drawn have to be exactly that selection, in that order, at the explorer's matrix. The explorer names the chunks: its ground layer has to be the record's 16 slots |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
 | `watch-var.mjs` | who writes this address, and what do they write? A bus watchpoint that reports the value and the IP behind it, so a variable whose owner is unknown can be traced back to its routine |
@@ -260,6 +262,48 @@ found the same way these tools work: the explorer's `texture.js` is a bit-exact
 port of that routine, so the i960's per-row decoder state was diffed against
 it. Every row agreed up to the crash, which put the fault inside a row, and an
 instruction trace there showed the interrupt landing.
+
+**Ground culling — an HLE hook that was skipping the cull's own data.** The
+explorer draws every part of an arena and calls whatever the board left out
+"culled", so it cannot say on its own whether the board left out the right
+parts. For the ground chunks it can, with help: the cull is ROM arithmetic on ROM
+tables, and the only input it needs is the matrix `ground_disp` tested with.
+
+Getting that matrix took two corrections to a replay that `verify-stage.mjs` had
+never needed, because it only recovers the view *relative* to the draws:
+
+- a frame mark falls where the frame hook fires, not where `camera_init` starts,
+  so the replay has to carry the matrix stack across marks;
+- `Fn_base_matrix` (op 0x03) and the other ops that set the current matrix
+  outright have to be applied.
+
+Without both, the replay's camera was a half turn about Z off the coprocessor's.
+With both, it matches the emulator's own current matrix at `ground_disp` to 2e-4
+over 40 frames. Separately, the outcodes the i960 wrote agreed with the port run
+on that matrix in 40 of 40 frames. So the port reads the ROM the way the i960
+does, and the replay reproduces the coprocessor.
+
+The first run on a Flying Carpet fight:
+
+```
+FAIL  the chunks drawn are the ones area_clip selects   0 of 299 frames exact
+      chunks switching on/off between frames: emulator 998, board's rule 17
+```
+
+The profile hooked `clip_point_check_yoko` to "return 0, visible". It returns
+nothing: it writes one outcode byte per lattice point to `0x50E000`, which
+`area_clip` ANDs four at a time. That address is scratch that `rob_spd_control`
+fills with the fighters' positions every frame, so the stage chunks were being
+culled on the low bytes of fighter coordinates. With the hook gone:
+
+```
+PASS  the chunks drawn are the ones area_clip selects   599 of 599 frames exact, camera-cell fallback drew in 29
+      chunks switching on/off between frames: emulator 48, board's rule 48
+```
+
+Still not covered: `doom_cnt`'s backdrop segments and the `0x500288` camera mask
+that `cage_clip_m` and the stage objects draw from. Both are culls against the
+board's camera, and both could be graded the same way.
 
 ## The sound board
 

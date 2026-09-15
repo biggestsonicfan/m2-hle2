@@ -190,7 +190,7 @@ export function segment(words) {
         const args = [];
         let j = i + 1;
         while (j < words.length && !isCmd(words[j])) args.push(words[j++]);
-        out.push({ op, args });
+        out.push({ op, args, at: i });
         i = j - 1;
     }
     return out;
@@ -233,11 +233,12 @@ export function loadDl(prefix) {
  * words — and defaults to both, which placement needs.
  */
 export async function captureDl(emu, prefix, frames, {
-    range = null, tgp = false, scene = false, slots = false, unit = false,
+    range = null, tgp = false, scene = false, slots = false, unit = false, probes = null,
 } = {}) {
     fs.mkdirSync(path.dirname(path.resolve(prefix)), { recursive: true });
     const r = await emu.rpc('capture_dl', {
-        frames, path: path.resolve(prefix), probes: scene ? probeListSpec(SCENE_PROBES) : probeSpec(),
+        frames, path: path.resolve(prefix),
+        probes: probes ? probeListSpec(probes) : scene ? probeListSpec(SCENE_PROBES) : probeSpec(),
         ...(range ? { lo: range[0], hi: range[1] } : {}),
         ...(tgp ? { tgp: 1 } : {}),
         ...(slots ? { slots: 1 } : {}),
@@ -266,7 +267,7 @@ const u16 = (b, o) => b[o] | (b[o + 1] << 8);
  * taken there has the rig commands and not a single draw.
  */
 export async function captureFight(emu, {
-    out = DEFAULT_DL_OUT, frames = 120, maxFrames = 7200, every = 60, log = () => {},
+    out = DEFAULT_DL_OUT, frames = 120, maxFrames = 7200, every = 60, log = () => {}, probes = null,
 } = {}) {
     fs.mkdirSync(out, { recursive: true });
     const prefix = path.join(out, 'fight');
@@ -284,7 +285,7 @@ export async function captureFight(emu, {
         const scene = await identifyScene(emu);
         log(`a round is on after ${waited + every} frames: stage ${scene.stage}, ` +
             `P1 motion ${u16(p1, 0)}, P2 motion ${u16(p2, 0)}`);
-        const r = await captureDl(emu, prefix, frames);
+        const r = await captureDl(emu, prefix, frames, { probes });
         fs.writeFileSync(path.join(out, 'fight-scene.json'), JSON.stringify({
             stage: scene.stage, texWords: scene.texWords, words: r.words, frames: r.frames,
             taken: new Date().toISOString(),

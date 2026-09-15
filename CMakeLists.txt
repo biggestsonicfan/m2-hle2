@@ -297,4 +297,13 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
         endif()
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+    # The board headers call sqrtf/sincosf/floor..., which live in libm off
+    # Windows. m2hle, emu_test and input_test get it through sokol; the rest link
+    # nothing that carries it.
+    if(NOT WIN32)
+        foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
+                  input_test cop_replay snd_replay)
+            target_link_libraries(${t} PRIVATE m)
+        endforeach()
+    endif()
 endif()
