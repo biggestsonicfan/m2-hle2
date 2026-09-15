@@ -1231,9 +1231,16 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             return;
         }
 
-        /* 0x08001010: dispatch[0x10] — PM 0x020460. 0 args, 0 outputs.
-         * IDA kira_kira_disp: written with no args before ang_z; pure state op. */
+        /* 0x08001010: Fn_base_3x3 (cpres1 PM 0x20460). 0 args, 0 outputs.
+         * The current matrix's 3x3 becomes the identity and T is left alone, so
+         * whatever is drawn next faces the screen from the position reached. The
+         * Flying Carpet's flames, the Death Egg's Earth and kira_kira_disp's
+         * sparkles open their draws with it. */
         case 0x08001010:
+            sharc_rot_identity();
+            g_sharc.ang[0] = g_sharc.ang[1] = g_sharc.ang[2] = 0;
+            g_sharc.matrix_dirty = true;
+            g_sharc.bone_dirty   = true;
             return;
 
         /* 0x34006868: dispatch[0x68] — PM 0x0205A3. 1 arg, 0 outputs.
