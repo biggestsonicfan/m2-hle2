@@ -44,7 +44,7 @@
 
 /* ---- Limits -------------------------------------------------------------- */
 
-#define SHARC_REPLY_MAX       32
+#define SHARC_REPLY_MAX       1024  /* Fn_osage answers 13 words a sway segment in one command */
 #define SHARC_UNKNOWN_LOG_MAX 64
 
 /* ---- State --------------------------------------------------------------- */

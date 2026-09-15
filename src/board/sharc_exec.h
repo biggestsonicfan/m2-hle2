@@ -185,22 +185,28 @@ static inline void sharc_push_stack(void) {
  * (12 words, column-major 3x3 then T) — each new column is rot * B's column,
  * T = rot * B's T + T. In the firmware's order, which the rounding follows:
  * the three products summed left to right, and T added last. */
-static inline void sharc_compose(const float *B) {
+static inline void sharc_compose_words(const float *B, float *out) {
     float (*r)[3] = g_sharc.rot;
-    float nr[3][3], np[3];
     for (int j = 0; j < 3; j++)
         for (int i = 0; i < 3; i++) {
-            float s = 0.0f;
-            for (int k = 0; k < 3; k++) s += B[j*3+k] * r[k][i];
-            nr[j][i] = s;
+            float s = B[j*3] * r[0][i];
+            s = s + B[j*3+1] * r[1][i];
+            out[j*3+i] = s + B[j*3+2] * r[2][i];
         }
     for (int i = 0; i < 3; i++) {
-        float s = g_sharc.pos[i];
-        for (int k = 0; k < 3; k++) s += B[9+k] * r[k][i];
-        np[i] = s;
+        float s = B[9] * r[0][i];
+        s = s + B[10] * r[1][i];
+        s = s + B[11] * r[2][i];
+        out[9+i] = s + g_sharc.pos[i];
     }
-    memcpy(g_sharc.rot, nr, sizeof nr);
-    memcpy(g_sharc.pos, np, sizeof np);
+}
+
+static inline void sharc_compose(const float *B) {
+    float w[12];
+    sharc_compose_words(B, w);
+    for (int j = 0; j < 3; j++)
+        for (int i = 0; i < 3; i++) g_sharc.rot[j][i] = w[j*3+i];
+    memcpy(g_sharc.pos, w + 9, sizeof g_sharc.pos);
     g_sharc.matrix_dirty = true;
     g_sharc.bone_dirty   = true;
 }
@@ -507,6 +513,168 @@ static inline void sharc_kage_flag(uint32_t a0, uint32_t a1, float kx, float kz,
     }
     sharc_push_u(m_near);
     sharc_push_u(m_far);
+}
+
+/* ---- Fn_osage: the sway chains ------------------------------------------- */
+
+/* "if lt" straight after a float operation: negative, and not zero or
+ * underflowed (AN and not AZ). */
+static inline bool sharc_flt_lt0(float f) {
+    uint32_t b = sharc_float_to_bits(f);
+    return (b >> 31) && (b & 0x7FFFFFFFu) >= 0x00800000u;
+}
+
+/* _L20173: a point through the 12-word matrix at DM m, T first and the
+ * columns added on in turn */
+static inline void sharc_osage_xform(uint32_t m, uint32_t src, float *o) {
+    float x = sharc_dm_getf(src), y = sharc_dm_getf(src + 1), z = sharc_dm_getf(src + 2);
+    for (uint32_t i = 0; i < 3; i++) {
+        float s = sharc_dm_getf(m + 9 + i);
+        s = s + x * sharc_dm_getf(m + i);
+        s = s + y * sharc_dm_getf(m + 3 + i);
+        o[i] = s + z * sharc_dm_getf(m + 6 + i);
+    }
+}
+
+/* _L20873 / _L2088A: out of the sphere at DM c (centre, radius, radius squared) */
+static inline void sharc_osage_sphere(uint32_t c, float *x, float *y, float *z) {
+    float cx = sharc_dm_getf(c), cy = sharc_dm_getf(c + 1), cz = sharc_dm_getf(c + 2);
+    float ex = *x - cx, ey = *y - cy, ez = *z - cz;
+    float s = ez * ez + ey * ey;
+    s = s + ex * ex;
+    if (sharc_dm_getf(c + 4) < s) return;
+    float k = sharc_dm_getf(c + 3) * sharc_fw_rsqrt(s);
+    *x = cx + ex * k; *y = cy + ey * k; *z = cz + ez * k;
+}
+
+/* Type 5, one segment (PM 0x207BD). rec is the record after its type word:
+ * [0..2] the point it last reached, [3..5] its carry, [7] its length and
+ * [8..10] the bias os_set_osage leaves. */
+static inline void sharc_osage_segment(uint32_t rec) {
+    const uint32_t P = 0x30362u;                     /* the point the chain has reached */
+    sharc_dm_set(0x30341u, rec);
+    for (uint32_t k = 0; k < 3; k++) sharc_dm_set(0x3036Bu + k, sharc_dm_get(rec + 8 + k));
+    for (uint32_t k = 0; k < 3; k++) sharc_dm_set(0x30377u + k, sharc_dm_get(P + k));
+    float a[3], b[3];
+    sharc_osage_xform(0x3037Au, rec, a);
+    sharc_osage_xform(0x30386u, rec + 3, b);
+    for (uint32_t k = 0; k < 3; k++) { sharc_dm_setf(0x30365u + k, a[k]); sharc_dm_setf(0x30368u + k, b[k]); }
+    float x = a[0] + b[0], y = a[1] + b[1], z = a[2] + b[2];
+    x = x + sharc_dm_getf(0x3036Bu);
+    y = y + sharc_dm_getf(0x3036Cu);
+    z = z + sharc_dm_getf(0x3036Du);
+
+    /* _L2084B: the plane at 0x30342 pushes the aim back onto it; past the
+     * plane, unless 0x30360 is 1, the chain's limits (_L2085D) apply. */
+    float n0 = sharc_dm_getf(0x30342u), n1 = sharc_dm_getf(0x30343u), n2 = sharc_dm_getf(0x30344u);
+    float t = n0 * x + n1 * y;
+    t = t + n2 * z;
+    t = sharc_dm_getf(0x30345u) - t;
+    if (!sharc_flt_lt0(t)) {
+        x = x + n0 * t; y = y + n1 * t; z = z + n2 * t;
+    } else if (sharc_dm_get(0x30360u) != 1u) {
+        if (y < 0.0f) {
+            /* _L208A2: a 2D plane for each quadrant below */
+            uint32_t q = x < 0.0f ? (!(y <= sharc_dm_getf(0x30359u)) ? 0x30355u : 0x3035Du)
+                                  : (!(y <= sharc_dm_getf(0x30358u)) ? 0x30352u : 0x3035Au);
+            float m0 = sharc_dm_getf(q), m1 = sharc_dm_getf(q + 1);
+            float u = m0 * x + m1 * y;
+            u = sharc_dm_getf(q + 2) - u;
+            if (!sharc_flt_lt0(u)) { x = x + m0 * u; y = y + m1 * u; }
+        } else {
+            if (!(y <= sharc_dm_getf(0x30350u))) {
+                sharc_osage_sphere(0x30346u, &x, &y, &z);
+            } else {
+                float s = x * x + y * y;         /* the cylinder, radius 0x30350 */
+                if (!(sharc_dm_getf(0x30351u) < s)) {
+                    float k = sharc_dm_getf(0x30350u) * sharc_fw_rsqrt(s);
+                    x = x * k; y = y * k;
+                }
+            }
+            sharc_osage_sphere(0x3034Bu, &x, &y, &z);
+        }
+    }
+
+    /* _L207F6: the segment's frame. Its Y is the unit direction from P to the
+     * aim, its X that turned flat, and it hangs from P as it stood. */
+    float px = sharc_dm_getf(P), py = sharc_dm_getf(P + 1), pz = sharc_dm_getf(P + 2);
+    float vx = x - px, vy = y - py, vz = z - pz;
+    float s = vx * vx + vy * vy;
+    float inv = sharc_fw_rsqrt(s + vz * vz);
+    float ux = vx * inv, uy = vy * inv, uz = vz * inv;
+    sharc_dm_setf(0x30371u, ux); sharc_dm_setf(0x30372u, uy); sharc_dm_setf(0x30373u, uz);
+    float h2 = 1.0f - uz * uz;
+    float ih = sharc_fw_rsqrt(h2);
+    sharc_dm_setf(0x30376u, h2 * ih);
+    float w = ih * uy;
+    sharc_dm_setf(0x3036Eu, w);
+    w = w * uz; w = w * -1.0f;
+    sharc_dm_setf(0x30375u, w);
+    w = ih * ux; w = w * -1.0f;
+    sharc_dm_setf(0x3036Fu, w);
+    w = w * uz;
+    sharc_dm_setf(0x30374u, w);
+    sharc_dm_set(0x30370u, 0);
+
+    /* The current matrix composed with it (_L201EA into PM scratch, not back
+     * into the slot) goes to the i960: os_set_osage_after -> set_obj_fifo. */
+    float B[12], out[12];
+    for (uint32_t k = 0; k < 12; k++) B[k] = sharc_dm_getf(0x3036Eu + k);
+    sharc_compose_words(B, out);
+    for (int k = 0; k < 12; k++) sharc_push_f(out[k]);
+
+    /* One length on, written back into the record for the next frame. */
+    float len = sharc_dm_getf(rec + 7);
+    float nx = ux * len, ny = uy * len, nz = uz * len;
+    nx = nx + px; ny = ny + py; nz = nz + pz;
+    float damp = sharc_dm_getf(0x30361u);
+    sharc_dm_setf(rec,     nx);
+    sharc_dm_setf(rec + 1, ny);
+    sharc_dm_setf(rec + 2, nz);
+    sharc_dm_setf(rec + 3, (nx - a[0]) * damp);
+    sharc_dm_setf(rec + 4, (ny - a[1]) * damp);
+    sharc_dm_setf(rec + 5, (nz - a[2]) * damp);
+    sharc_dm_setf(P, nx); sharc_dm_setf(P + 1, ny); sharc_dm_setf(P + 2, nz);
+}
+
+/* 0x25004A4A Fn_osage (cpres1 PM 0x2076E): the sway chains ("osage": Honey's
+ * pigtails, Fang's tail, Bean's feathers) as one command over a stream of
+ * typed records in bufferram, which the argument names by word. Each type
+ * word is echoed to the i960 as it is read — osage_copro reads one a record —
+ * and then:
+ *   0  end
+ *   1  36 words: the current matrix, then two more (DM 0x3037A, 0x30386)
+ *   2  30 words: the chain's limit planes and spheres (DM 0x30342..)
+ *   3   2 words: DM 0x30360 (1 = no limits) and the carry factor 0x30361
+ *   4   3 words: where the chain starts (DM 0x30362)
+ *   5  11 words: a segment, which answers 12 more words (its draw matrix)
+ * The i960 hands a segment's matrix straight to set_obj_fifo and reads the
+ * point written back into the record (os_set_osage_after). With only the
+ * type words answered, every segment took its matrix off an empty FIFO. */
+static inline void sharc_osage(uint32_t arg) {
+    uint32_t p = 0x1400000u + arg;
+    for (int guard = 0; guard < 4096; guard++) {
+        uint32_t type = sharc_dm_get(p), rec = p + 1;
+        sharc_push_u(type);
+        switch (type) {
+            case 0: return;
+            case 1:
+                p += 0x25;
+                for (int c = 0; c < 3; c++)
+                    for (int r = 0; r < 3; r++) g_sharc.rot[c][r] = sharc_dm_getf(rec + (uint32_t)(c * 3 + r));
+                for (int i = 0; i < 3; i++) g_sharc.pos[i] = sharc_dm_getf(rec + 9u + (uint32_t)i);
+                for (uint32_t k = 0; k < 12; k++) sharc_dm_set(0x3037Au + k, sharc_dm_get(rec + 12 + k));
+                for (uint32_t k = 0; k < 12; k++) sharc_dm_set(0x30386u + k, sharc_dm_get(rec + 24 + k));
+                g_sharc.matrix_dirty = true;
+                g_sharc.bone_dirty   = true;
+                break;
+            case 2: p += 0x1F; for (uint32_t k = 0; k < 30; k++) sharc_dm_set(0x30342u + k, sharc_dm_get(rec + k)); break;
+            case 3: p += 3;    for (uint32_t k = 0; k < 2;  k++) sharc_dm_set(0x30360u + k, sharc_dm_get(rec + k)); break;
+            case 4: p += 4;    for (uint32_t k = 0; k < 3;  k++) sharc_dm_set(0x30362u + k, sharc_dm_get(rec + k)); break;
+            case 5: p += 0xC;  sharc_osage_segment(rec); break;
+            default: return;   /* the firmware's jump table ends at 5 */
+        }
+    }
 }
 
 /* ---- Command executor ---------------------------------------------------- */
@@ -1592,56 +1760,9 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             }
             return;
 
-        /* 0x25004A4A: read_anim_data — PM 0x02076E.
-         * arg0 = SHARC DM word offset into DM[0x01400000] (= i960 BUFF_RAM at 0x00900000).
-         * Firmware builds DM address = 0x01400000 + arg, then loops reading type-word blocks:
-         *   type 0 (1 word):  end of stream — RTS
-         *   type 1 (37 words): load 3×12-word col-major matrices; first 12 → current slot
-         *   type 2 (31 words): 30 words → DM[0x30342] (scratch, no HLE state)
-         *   type 3 ( 3 words):  2 words → DM[0x30360] (scratch)
-         *   type 4 ( 4 words):  3 words → DM[0x30362] (scratch)
-         *   type 5 (12 words): 11 words + CALL 0x020173 (bone normalize); stub: skip
-         * Each type word is pushed to the i960 FIFO before dispatch (firmware DM(M0,I1)=R0). */
-        case 0x25004A4A: {
-            if (n < 1 || !g_sharc.sharc_dm_ext) { sharc_push_u(0); return; }
-            uint32_t ptr = args[0];
-            uint32_t wsz = g_sharc.sharc_dm_ext_size / 4;
-            int _iter;
-            for (_iter = 0; _iter < 64; _iter++) {
-                uint32_t type;
-                if (ptr >= wsz) break;
-                memcpy(&type, g_sharc.sharc_dm_ext + ptr * 4, 4);
-                sharc_push_u(type);
-                ptr++;
-                if (type == 0) break;     /* end of stream */
-                if (type == 1) {
-                    /* Load 12-word col-major matrix into current rot[]/pos[]. */
-                    if (ptr + 36 > wsz) break;
-                    {   float (*_r)[3] = g_sharc.rot;
-                        int _c, _rw;
-                        for (_c = 0; _c < 3; _c++)
-                            for (_rw = 0; _rw < 3; _rw++) {
-                                uint32_t _b;
-                                memcpy(&_b, g_sharc.sharc_dm_ext + (ptr + _c*3+_rw)*4, 4);
-                                _r[_c][_rw] = sharc_bits_to_float(_b);
-                            }
-                        for (_c = 0; _c < 3; _c++) {
-                            uint32_t _b;
-                            memcpy(&_b, g_sharc.sharc_dm_ext + (ptr+9+_c)*4, 4);
-                            g_sharc.pos[_c] = sharc_bits_to_float(_b);
-                        }
-                    }
-                    g_sharc.matrix_dirty = true;
-                    g_sharc.bone_dirty   = true;
-                    ptr += 36;   /* 3 × 12 data words */
-                } else if (type == 2) { ptr += 30; }  /* → DM[0x30342] */
-                else if (type == 3) { ptr += 2;  }    /* → DM[0x30360] */
-                else if (type == 4) { ptr += 3;  }    /* → DM[0x30362] */
-                else if (type == 5) { ptr += 11; }    /* 12-word block; CALL 0x020173 stub */
-                else break;                            /* unknown type */
-            }
+        case 0x25004A4A:            /* Fn_osage: the sway chains (sharc_osage, above) */
+            if (n >= 1) sharc_osage(args[0]); else sharc_push_u(0);
             return;
-        }
 
         /* 0x33806767: store the current matrix into the TGP slot arg0 names.
          *
