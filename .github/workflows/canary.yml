@@ -49,14 +49,24 @@ jobs:
           vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog
 
       # cimgui is generated from vendor/imgui by vendor/dear_bindings at build time.
+      # One pinned interpreter for both pip and CMake: left to itself,
+      # find_package(Python3) picks whichever Python the runner image ships
+      # newest (python3.exe 3.14 on windows-latest), which is not the one
+      # `python -m pip` installed ply into, and configure fails.
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.12'
+
       - name: Install dear_bindings dependencies
-        run: python -m pip install ply==3.11
+        shell: bash
+        run: '"${{ steps.py.outputs.python-path }}" -m pip install ply==3.11'
 
       - name: Install Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libgl1-mesa-dev
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libgl1-mesa-dev libasound2-dev
 
       - name: Stamp version
         id: ver
@@ -68,6 +78,7 @@ jobs:
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DPython3_EXECUTABLE="${{ steps.py.outputs.python-path }}"
           -DM2HLE_VERSION="${{ steps.ver.outputs.version }}"
 
       - name: Build
