@@ -28,6 +28,11 @@
  *            The fill shader's texture LOD is calibrated to 496x384, and the
  *            GPU shades 36% fewer pixels than at 620x480.
  * --filter   nearest|linear scaling of the offscreen frame (default linear).
+ * --cpu-tiles   compose the tile layers on the CPU instead of in a shader.
+ * --no-mesh-cache  decode every display-list model in full every frame.
+ * --verify-gpu-tiles  on every frame the GPU composes the tile layers, pause
+ *            the emu thread, compose the same RAM on the CPU as well and
+ *            compare the two byte for byte (FG colour only where it shows).
  *
  * Audio is not wired up: the 68K sound board and SCSP stay off.
  */
@@ -88,6 +93,8 @@ static struct {
     double      max_temp;
     int         render_scale;       /* offscreen at N x 496x384; 0 = straight to the screen */
     bool        linear;
+    bool        cpu_tiles;
+    bool        verify_gpu_tiles;
 } opt = { .render_fps = 30.0, .render_scale = 1, .linear = true };
 
 /* ---- Gamepad ------------------------------------------------------------- */
@@ -263,6 +270,55 @@ static void save_png(const char *path, int w, int h) {
     free(px);
 }
 
+/* ---- --verify-gpu-tiles ----------------------------------------------------- */
+
+static struct {
+    uint64_t frames, bad_frames;
+    uint8_t  bg[VIDEO_WIDTH * VIDEO_HEIGHT * 4], fg[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+} g_vt;
+
+/* Read a layer target back. GL stores its bottom row first, and the compositor
+ * writes screen row y to target row y, so the rows line up with the CPU's. */
+static void read_layer(sg_image img, uint8_t *out) {
+    sg_gl_image_info gi = sg_gl_query_image_info(img);
+    GLuint fbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gi.tex[gi.active_slot], 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, out);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    sg_reset_state_cache();
+}
+
+/* Compare the GPU layers against a CPU compose of the same RAM. */
+static void verify_gpu_tiles(void) {
+    video_compose_cpu(&state.video, &state.bus);
+    read_layer(state.video.bg_image, g_vt.bg);
+    read_layer(state.video.fg_image, g_vt.fg);
+    int bad = 0, first = -1;
+    const char *what = "";
+    for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++) {
+        const uint8_t *gb = &g_vt.bg[i * 4], *cb = &state.video.bg_pixels[i * 4];
+        const uint8_t *gf = &g_vt.fg[i * 4], *cf = &state.video.fg_pixels[i * 4];
+        bool bg_ok = gb[0] == cb[0] && gb[1] == cb[1] && gb[2] == cb[2] && gb[3] == cb[3];
+        bool fg_ok = gf[3] == cf[3] && (cf[3] == 0 || (gf[0] == cf[0] && gf[1] == cf[1] && gf[2] == cf[2]));
+        if (!bg_ok || !fg_ok) {
+            if (first < 0) { first = i; what = bg_ok ? "fg" : "bg"; }
+            bad++;
+        }
+    }
+    g_vt.frames++;
+    if (bad && g_vt.bad_frames++ < 5) {
+        int x = first % VIDEO_WIDTH, y = first / VIDEO_WIDTH;
+        const uint8_t *g = strcmp(what, "bg") ? &g_vt.fg[first * 4] : &g_vt.bg[first * 4];
+        const uint8_t *c = strcmp(what, "bg") ? &state.video.fg_pixels[first * 4] : &state.video.bg_pixels[first * 4];
+        printf("verify-gpu-tiles: game frame %u, %d pixels differ; first %s at (%d,%d) gpu %02x%02x%02x%02x cpu %02x%02x%02x%02x\n",
+               g_emu_frames, bad, what, x, y, g[0], g[1], g[2], g[3], c[0], c[1], c[2], c[3]);
+    }
+}
+
 /* ---- Main ------------------------------------------------------------------ */
 
 static bool parse_args(int argc, char **argv) {
@@ -278,6 +334,9 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--exit-after") && more) opt.exit_after = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--gl-finish"))          opt.gl_finish = true;
         else if (!strcmp(a, "--render-scale") && more) opt.render_scale = atoi(argv[++i]);
+        else if (!strcmp(a, "--cpu-tiles"))          opt.cpu_tiles = true;
+        else if (!strcmp(a, "--no-mesh-cache"))      g_geo3d_mesh_cache = 0;
+        else if (!strcmp(a, "--verify-gpu-tiles"))   opt.verify_gpu_tiles = true;
         else if (!strcmp(a, "--filter") && more) {
             const char *f = argv[++i];
             if (!strcmp(f, "linear")) opt.linear = true;
@@ -367,8 +426,10 @@ int main(int argc, char **argv) {
         .logger.func = slog_func,
     });
     if (!sg_isvalid()) { fprintf(stderr, "m2hle: sokol_gfx setup failed\n"); return 1; }
-    video_init(&state.video);
+    g_video_force_cpu_tiles = opt.cpu_tiles;
     game_render_init();
+    video_init(&state.video);
+    printf("m2hle: tile layers composed on the %s\n", state.video.gpu ? "GPU" : "CPU");
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
 
@@ -456,7 +517,16 @@ int main(int argc, char **argv) {
         Uint64 cpu_start = SDL_GetTicksNS();
         int fb_w, fb_h;
         SDL_GetWindowSizeInPixels(window, &fb_w, &fb_h);
-        game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+        if (opt.verify_gpu_tiles && state.video.gpu) {
+            /* Hold the emu thread so both composes see the same RAM. */
+            emu_mutex_lock(&state.emu.mutex);
+            uint64_t composes = state.video.gpu_composes;
+            game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+            if (state.video.gpu_composes != composes) verify_gpu_tiles();
+            emu_mutex_unlock(&state.emu.mutex);
+        } else {
+            game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+        }
         float lerp_t = game_frame_lerp();
 
         int ox, oy, w, h;
@@ -530,6 +600,9 @@ int main(int argc, char **argv) {
     }
 
     emu_thread_shutdown(&state.emu);
+    if (opt.verify_gpu_tiles)
+        printf("verify-gpu-tiles: %llu composed frames checked, %llu differed\n",
+               (unsigned long long)g_vt.frames, (unsigned long long)g_vt.bad_frames);
     if (opt.render_scale > 0) {
         sg_destroy_view(rt_texture);
         sg_destroy_view(rt_depth_att);

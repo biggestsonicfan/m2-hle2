@@ -539,6 +539,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--render-fps") && i + 1 < argc) render_fps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) prof_path = argv[++i];
         else if (!strcmp(argv[i], "--verify-tiles")) g_verify_tiles = true;
+        else if (!strcmp(argv[i], "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
         else if (!strcmp(argv[i], "--draw-digest") && i + 1 < argc) digest_path = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) max_frames = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--profile-from") && i + 1 < argc) g_prof_from = strtoull(argv[++i], NULL, 0);
@@ -635,6 +636,8 @@ int main(int argc, char **argv) {
     mark_t end = mark_now();
     printf("--- total ---\n");
     report(&first, &end, (end.wall - start) / 1e6);
+    printf("mesh cache: %s, %llu builds, %llu hits, %u meshes held\n", g_geo3d_mesh_cache ? "on" : "off",
+           (unsigned long long)g_geo3d_mesh_builds, (unsigned long long)g_geo3d_mesh_hits, g_geo3d_mesh_count);
 
     if (g_verify_tiles)
         printf("verify-tiles: %llu rendered frames, %llu mismatched; both layers "

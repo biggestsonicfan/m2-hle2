@@ -424,7 +424,8 @@ static inline const char *game_render_glsl(sg_backend backend, const char *src, 
         "#version 300 es\n"
         "precision highp float;\n"
         "precision highp int;\n"
-        "precision highp sampler2D;\n";
+        "precision highp sampler2D;\n"
+        "precision highp usampler2D;\n";
     static char buf[2][8192];
     if (backend != SG_BACKEND_GLES3 || strncmp(src, head, sizeof head - 1) != 0) return src;
     size_t body = strlen(src) - (sizeof head - 1);
@@ -1218,11 +1219,11 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_obj_tpa = cm->tpa;
                 g_geo3d_obj_tha = cm->tha;
                 g_geo3d_board_luma = 1;
-                geo3d_decode_model(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
-                                   materials, materials_size, table_off, table_count,
-                                   mesh_ptr_subtract, mesh_ptr_add,
-                                   geo->use_matrix ? cm->matrix : NULL,
-                                   cm->color[0], cm->color[1], cm->color[2]);
+                geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
+                                          materials, materials_size, table_off, table_count,
+                                          mesh_ptr_subtract, mesh_ptr_add,
+                                          geo->use_matrix ? cm->matrix : NULL,
+                                          cm->color[0], cm->color[1], cm->color[2]);
                 g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
                 g_geo3d_board_luma = 0;
             }

@@ -66,8 +66,8 @@ typedef struct mem_region {
     int          shadowed;
     /* Change counter this region's writes feed (NULL: untracked). A write that
      * changes a byte bumps it, so a consumer that recorded the value can skip
-     * work nothing changed: tile compositing (bus->gen_2d), the texture atlas
-     * (gen_tex), the luma/colorxlat tables (gen_lut). */
+     * work nothing changed: tile compositing (bus->gen_tile, gen_gfx, gen_pal),
+     * the texture atlas (gen_tex), the luma/colorxlat tables (gen_lut). */
     volatile uint32_t *change_gen;
 } mem_region_t;
 
@@ -137,8 +137,8 @@ typedef struct memory_bus {
     mem_region_t *hit[2];
 
     /* Bumped by every write that changes a tracked region (see change_gen):
-     * tile RAM / tile graphics / palette, texture RAM, luma + colorxlat. */
-    volatile uint32_t gen_2d, gen_tex, gen_lut;
+     * tile RAM, tile graphics, palette, texture RAM, luma + colorxlat. */
+    volatile uint32_t gen_tile, gen_gfx, gen_pal, gen_tex, gen_lut;
 
     /* Bus stats */
     uint64_t    reads;
@@ -340,7 +340,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     /* Every (re)init is new 2D content: start past any generation a consumer
      * could have recorded from the previous bus. */
     static uint32_t s_init_count = 0;
-    bus->gen_2d = bus->gen_tex = bus->gen_lut = ++s_init_count << 20;
+    bus->gen_tile = bus->gen_gfx = bus->gen_pal = bus->gen_tex = bus->gen_lut = ++s_init_count << 20;
 
     /* IO idles HIGH on the Model 2 (hardware pull-ups). */
     memset(bus->io, IO_IDLE_FILL, sizeof(bus->io));
@@ -428,8 +428,12 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
             if (strcmp(bus->regions[i].name, no_burst[k]) == 0) bus->regions[i].no_burst = 1;
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
-        if (!strcmp(r->name, "TILE") || !strcmp(r->name, "TMAPGFX") || !strcmp(r->name, "PALETTE"))
-            r->change_gen = &bus->gen_2d;
+        if (!strcmp(r->name, "TILE"))
+            r->change_gen = &bus->gen_tile;
+        else if (!strcmp(r->name, "TMAPGFX"))
+            r->change_gen = &bus->gen_gfx;
+        else if (!strcmp(r->name, "PALETTE"))
+            r->change_gen = &bus->gen_pal;
         else if (!strncmp(r->name, "TEXRAM", 6))   /* both banks and all their aliases */
             r->change_gen = &bus->gen_tex;
         else if (!strcmp(r->name, "LUMA") || !strcmp(r->name, "COLORXLAT"))
