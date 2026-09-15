@@ -148,6 +148,28 @@ static int  s_irq_baseline_depth = 0;
  * comparing camera data by the game frame counter. */
 static volatile int g_warning_skip = 1;
 
+/* match_replay: 0 off, 1 armed, 2 done (the jump was made), -1 the profile has
+ * no attract replay. See game_quirks_t.attract_replay. */
+static volatile int      g_match_replay = 0;
+static volatile uint32_t g_match_replay_frame = 0;
+
+/* At a frame edge: if armed and attract mode is at the profile's movie step
+ * with the movie set up, write the movie state a natural boot has when the
+ * replay starts and move on to the replay step. */
+static inline void emu_match_replay_edge(emu_thread_ctx_t *ctx) {
+    if (g_match_replay != 1 || !g_active_profile) return;
+    const attract_replay_t *ar = &g_active_profile->quirks.attract_replay;
+    if (!ar->step_addr) { g_match_replay = -1; return; }
+    if (mem_read8(ctx->bus, ar->step_addr) != ar->from_step) return;
+    if (ar->ready_addr && mem_read32(ctx->bus, ar->ready_addr) == 0) return;
+    for (int i = 0; i < ar->state_count; i++)
+        mem_write32(ctx->bus, ar->state_addr + 4u * (uint32_t)i, ar->state[i]);
+    mem_write8(ctx->bus, ar->step_addr, ar->to_step);
+    g_match_replay = 2;
+    g_match_replay_frame = g_emu_frames;
+    LOG_INFO("match_replay: attract step %u -> %u at frame %u", ar->from_step, ar->to_step, g_emu_frames);
+}
+
 static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (!g_active_profile) return;
     i960_cpu_t          *cpu = ctx->cpu;
@@ -260,8 +282,10 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             }
             /* The game's frame ended on the instruction the loop stopped at, so
              * this is between two frames' display lists: mark it for a capture. */
-            if (g_frame_done || (board_vblank && g_vblank_acked))
+            if (g_frame_done || (board_vblank && g_vblank_acked)) {
                 dl_frame_edge(ctx->bus, g_emu_frames);
+                emu_match_replay_edge(ctx);
+            }
 
             /* The sound board runs on its own sample clock: a slice's worth of
              * 44.1 kHz samples, the 68000 in lockstep with the SCSP. */

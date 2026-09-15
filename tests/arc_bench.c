@@ -278,7 +278,7 @@ __attribute__((noinline)) static void emu_slice(void) {
         if (g_sharc.unknown_triggered) break;
     }
     bool frame = g_frame_done || (board_vblank && g_vblank_acked);
-    if (frame) dl_frame_edge(&bus, g_emu_frames);
+    if (frame) { dl_frame_edge(&bus, g_emu_frames); emu_match_replay_edge(&ctx); }
     if (g_with_68k) sound_run_slice(EMU_SLICES_PER_SEC);
     if (q->geo_displaylist) geodl_capture(&bus);
     ctx.cpu_prev_snapshot = ctx.cpu_snapshot;

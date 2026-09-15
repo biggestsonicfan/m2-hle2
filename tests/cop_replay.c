@@ -246,6 +246,8 @@ int main(int argc, char **argv) {
     int have = 0, nin = 0, nout = 0;
     uint64_t rec = 0, ncmd = 0, bufw = 0, bad_words = 0, snaps = 0;
     int resync = getenv("RESYNC") != NULL;
+    /* STATE_EXACT: a matrix left different in any bit is a bad state, not only one 1e-3 off. */
+    int state_exact = getenv("STATE_EXACT") != NULL;
     const char *draws_path = getenv("DRAWS");
     FILE *fd = draws_path ? fopen(draws_path, "w") : NULL;
     if (fd) fprintf(fd, "record,cmd,prev,depth,model,m0,m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,h0,h1,h2,h3,h4,h5,h6,h7,h8,h9,h10,h11\n");
@@ -330,7 +332,10 @@ int main(int argc, char **argv) {
                     t->n++;
                     if (rmax > t->rmax) t->rmax = rmax;
                     if (tmax > t->tmax) t->tmax = tmax;
-                    if (rmax > 1e-3 || tmax > 1e-3) {
+                    int differs = 0;
+                    for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) { uint32_t hb; memcpy(&hb, &h[c*3 + r], 4); differs |= hb != snap_words[c*3 + r]; }
+                    for (int r = 0; r < 3; r++) { uint32_t hb; memcpy(&hb, &h[9 + r], 4); differs |= hb != snap_words[9 + r]; }
+                    if (state_exact ? differs : (rmax > 1e-3 || tmax > 1e-3)) {
                         t->bad++;
                         if (t->examples < max_ex && (only < 0 || only == (int)prev)) {
                             t->examples++;

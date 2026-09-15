@@ -82,6 +82,16 @@ typedef struct {
 
 /* ---- Quirks -------------------------------------------------------------- */
 
+/* See game_quirks_t.attract_replay. */
+typedef struct {
+    uint32_t step_addr;
+    uint8_t  from_step, to_step;
+    uint32_t ready_addr;
+    uint32_t state_addr;
+    uint8_t  state_count;
+    uint32_t state[16];
+} attract_replay_t;
+
 typedef struct {
     uint16_t poly_connect_mask;     /* 0 = board default 0x45B4 (STF-tuned) */
     uint32_t mesh_ptr_subtract;     /* 0 = board default 0x02000010 */
@@ -109,6 +119,17 @@ typedef struct {
     /* Convenience: RAM flag poked to 1 each slice to auto-skip the boot warning
      * screen (0 = disabled).  STF: 0x500410. */
     uint32_t warning_skip_addr;
+
+    /* match_replay (--match-replay / the bridge command): take attract mode
+     * straight to its preprogrammed replay fight instead of playing the intro
+     * movie first. At the first frame edge where the attract step byte holds
+     * `from_step` and `ready_addr` is non-zero (the movie has been set up), the
+     * `state_count` words in `state` are written from `state_addr` -- the movie
+     * as a natural boot leaves it when the replay begins -- and the step becomes
+     * `to_step`. The fight that follows has to be the one a natural boot plays,
+     * bit for bit; tools/match-replay.mjs holds it against MAME doing the same.
+     * step_addr 0 = not supported. */
+    attract_replay_t attract_replay;
 
     /* Board-level vblank: when true, the emu thread raises the vblank pending
      * bit (intreq bit 0, 0xE80000) once per 60 Hz slice — exactly as the real
