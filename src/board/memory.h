@@ -430,6 +430,12 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
       if (r) { r->read_cb = irq_region_read; r->write_cb = irq_region_write; } }
     { mem_region_t *r = mem_add_region(bus, "TIMERS", TIMERS_BASE, TIMERS_SIZE, bus->timers, 0);
       if (r) { r->read_cb = timers_region_read; r->write_cb = timers_region_write; } }
+    /* Tile RAM is 64K and repeats at 0x01010000 (MAME: mirror 0x110000). Games
+     * lean on it: STF's NEXT MATCH places a nameplate one tile left with a
+     * zero-extended -2 byte offset (0xFFFE), so Knuckles' and Metal Sonic's
+     * plates are written at 0x0101xxxx. It shares TILE's buffer and must come
+     * before TILE, whose flat span also covers these addresses. */
+    mem_add_region(bus, "TILE_MIRROR",     TILE_BASE + 0x10000u, 0x10000u,             bus->tile,          0);
     mem_add_region(bus, "TILE",            TILE_BASE,            TILE_SIZE,            bus->tile,          0);
     mem_add_region(bus, "TMAPGFX",         TMAPGFX_BASE,         TMAPGFX_SIZE,         bus->tmapgfx,       0);
     mem_add_region(bus, "VID_EXT_RAM",     VID_EXT_RAM_BASE,     VID_EXT_RAM_SIZE,     bus->vid_ext_ram,   0);

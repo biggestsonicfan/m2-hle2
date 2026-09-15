@@ -116,6 +116,8 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
 
 - **Region table is linear-scanned in declaration order.** TILE (`0x01000000`) MUST appear before H_SYNC (`0x01040000`) or H_SYNC reads route to the TILE handler.
 - **IO region initializes to `0xFF`, not `0x00`** (hardware idle state).
+- **Tile RAM is 64K and mirrors at `0x01010000`** (MAME `mirror(0x110000)`); the `TILE_MIRROR` region shares TILE's buffer and must precede TILE in the table.
+  - *Symptom that surfaced this in STF:* the NEXT MATCH screen had no KNUCKLES nameplate. `rm_char_disp_int` shifts long names one tile left with a table offset of `0xFFFE` loaded by `ldos` (zero-extended), so the plate is written at `0x01011442` and only reaches tile RAM through the mirror. Metal Sonic's plate uses the same offset.
 - **`GEO_CAPTURE_SIZE` ≥ 32768.** Smaller sizes wrap mid-frame and produce partial 3D snapshots / flicker.
 
 ### Tile Renderer (board-level)
