@@ -242,7 +242,10 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
     uint32_t word1, word2;
     mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
     int instr_len = 4;
-    cpu->cycles += i960_cycle_cost(word1);
+    /* Only the live timers read this, and the lookup is worth 2-4% of the emu
+     * thread on the RK3566 — 6% through a game load — so it is charged only
+     * while they are on. */
+    if (g_irqt_live) cpu->cycles += i960_cycle_cost(word1);
 
     // Record in execution trace
     trace_record(ip, word1, cpu->frame_depth);
