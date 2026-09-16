@@ -535,6 +535,11 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
         } else if (strcmp(argv[i], "--realirq") == 0) {
             g_real_irq = 1;           /* tick board timers → real timer ISR delivery */
+        } else if (strcmp(argv[i], "--live-timers") == 0) {
+            g_irqt_live = 1;          /* board timers count i960 cycles, IRQs mid-slice */
+        } else if (strcmp(argv[i], "--steps-per-slice") == 0 && i + 1 < argc) {
+            int n = atoi(argv[++i]);  /* i960 steps a slice may run without a frame edge */
+            if (n >= 1000) g_emu_steps_per_slice = n;
         } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             g_browse_model = atoi(argv[++i]);  /* single-model browser on N */
         } else if (strcmp(argv[i], "--extract") == 0 && i + 1 < argc) {
