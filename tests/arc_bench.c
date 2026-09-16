@@ -17,7 +17,7 @@
  *   arc_bench <romset.zip> [--seconds N] [--threads] [--pace] [--sound]
  *             [--no-render] [--max-temp C] [--report S] [--frames N]
  *             [--draw-digest FILE] [--no-mesh-cache] [--profile FILE]
- *             [--verify-atlas]
+ *             [--verify-atlas] [--steps-per-slice N]
  *
  * Default: one thread, emu then render, flat out (throughput).
  * --pace     sleep each slice out to 1/60 s.
@@ -259,12 +259,12 @@ __attribute__((noinline)) static void emu_slice(void) {
         g_cop.geo_frame_start = g_cop.geo_frame_end;
         g_cop.geo_frame_end   = g_cop.geo_capture_head;
     }
-    if (g_real_irq) irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC);
+    emu_timers_slice_begin(&ctx);
     emu_service_irq(&ctx);
     int i;
     bool prof = g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to;
     for (i = 0;
-         i < EMU_STEPS_PER_SLICE && !g_frame_done
+         i < g_emu_steps_per_slice && !g_frame_done
          && !(board_vblank && g_vblank_acked) && !cpu.halted;
          i++)
     {
@@ -273,11 +273,13 @@ __attribute__((noinline)) static void emu_slice(void) {
         if (i960_step_hot(&cpu, &bus) != 0) break;
         ctx.total_steps++;
         if (s_irq_in_service && g_active_profile) emu_service_sound_again(&ctx);
+        if (g_irqt_live) emu_timers_after_step(&ctx);
         if (g_log.warn_triggered) break;
         if (g_wp.hit) break;
         if (g_sharc.unknown_triggered) break;
     }
     bool frame = g_frame_done || (board_vblank && g_vblank_acked);
+    s_slice_ended_frame = frame;
     if (frame) { dl_frame_edge(&bus, g_emu_frames); emu_match_replay_edge(&ctx); }
     if (g_with_68k) sound_run_slice(EMU_SLICES_PER_SEC);
     if (q->geo_displaylist) geodl_capture(&bus);
@@ -499,6 +501,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--render-fps") && i + 1 < argc) render_fps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) prof_path = argv[++i];
         else if (!strcmp(argv[i], "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
+        else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--live-timers")) g_irqt_live = 1;
         else if (!strcmp(argv[i], "--verify-atlas")) g_verify_atlas = true;
         else if (!strcmp(argv[i], "--tile-stats")) g_tile_stats = true;
         else if (!strcmp(argv[i], "--draw-digest") && i + 1 < argc) digest_path = argv[++i];

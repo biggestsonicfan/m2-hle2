@@ -119,6 +119,16 @@ typedef struct {
     bool        ramp_dirty;
     bool        cxlat_valid;
     uint8_t     cxlat_snap[COLORXLAT_SIZE];
+    /* Shade rows (GL backends, --fill-shade-rows) share that pool. A row holds
+     * the finished colour of all 121 texel steps for one (luma band, poly_luma,
+     * face colour): the whole per-pixel chain — lumaram, the poly multiply, the
+     * colorxlat ramp and the monitor curve — depends on nothing else, so a
+     * textured pixel fetches its colour once instead of a lumaram texel and then
+     * a ramp texel. The tables behind it move in ~2% of frames; a face's key
+     * recurs, so about six rows a frame are new. */
+    bool        shade_enabled;
+    bool        luma_valid;
+    uint8_t     luma_snap[LUMA_SIZE];
 
     /* CPU scratch for line uploads — 2 verts per geo3d_line_t */
     game_render_line_vertex_t line_verts[GEO3D_MAX_LINES * 2];
@@ -134,10 +144,19 @@ static game_render_t g_game_render = {0};
 /* Colour ramp rows (see game_render_t ramp_*): which row a colour key has, the
  * key of each row, the texels, and whether they went up this frame. */
 #define GAME_RENDER_RAMP_ROWS 1024
+#define GAME_RENDER_RAMP_W    128   /* 64 luma steps of a colour ramp, 121 texel steps of a shade row */
 static uint16_t g_ramp_row_of[0x8000];                     /* key -> row + 1; 0: none */
 static uint16_t g_ramp_key[GAME_RENDER_RAMP_ROWS];
-static uint8_t  g_ramp_px[GAME_RENDER_RAMP_ROWS * 64 * 4];
+static uint8_t  g_ramp_px[GAME_RENDER_RAMP_ROWS * GAME_RENDER_RAMP_W * 4];
 static bool     g_ramp_uploaded;                           /* this frame; cleared at commit */
+
+/* Shade rows: (luma band, poly_luma, colour) -> row, open addressing. A row's
+ * key is kept so the rows can be rebuilt when lumaram or colorxlat change. */
+#define GAME_RENDER_SHADE_SLOTS 4096
+typedef struct { uint32_t lb; uint16_t poly, col; } game_render_shade_key_t;
+static game_render_shade_key_t g_shade_key[GAME_RENDER_RAMP_ROWS];
+static uint16_t g_shade_slot_row[GAME_RENDER_SHADE_SLOTS];  /* row + 1; 0: free */
+static uint8_t  g_shade_is_row[GAME_RENDER_RAMP_ROWS];      /* this pool row is a shade row */
 
 static void game_render__ramp_commit(void *user) { (void)user; g_ramp_uploaded = false; }
 
@@ -153,6 +172,13 @@ static int g_game_render_fill_use_ref = 0;
 /* Draw faces that cannot discard with the discard-free fill shader (default);
  * 0 draws every face with the one shader (timing comparisons). */
 static int g_game_render_fill_split = 1;
+/* Give textured faces shade rows: one fetch for the lumaram step, poly_luma and
+ * colour ramp together. Off by default. Set before game_render_init. */
+static int g_game_render_fill_shade = 0;
+/* Read the bilinear 2x2 with textureGather where the taps are the atlas's own
+ * (one texture operation instead of four). Needs an ES 3.1 context on GLES.
+ * Off by default. Set before game_render_init. */
+static int g_game_render_fill_gather = 0;
 /* Give faces colour ramp rows (default); 0 keeps the shader's colorxlat lookup
  * for all of them (timing comparisons). Set before game_render_init. */
 static int g_game_render_fill_ramp = 1;
@@ -515,10 +541,32 @@ static const char *game_render_fill_fs_glsl =
     "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
     "  ivec2 i0 = ivec2(floor(c));\n"
     "  vec2 f = fract(c);\n"
-    "  float t00 = tile_texel(t, sh, i0);\n"
-    "  float t10 = tile_texel(t, sh, i0 + ivec2(1, 0));\n"
-    "  float t01 = tile_texel(t, sh, i0 + ivec2(0, 1));\n"
-    "  float t11 = tile_texel(t, sh, i0 + ivec2(1, 1));\n"
+    "  float t00, t10, t01, t11;\n"
+    /* USE_GATHER: where the four taps are the atlas's own 2x2 — the tile does
+     * not wrap or mirror between them and they do not cross the 2048 fold —
+     * textureGather returns all four in one texture operation. Raw texels, no
+     * filtering, so they are the texelFetch values exactly; P sits on their
+     * shared corner, (i0 + 1) / 2048, which is exact in binary32. Anything else
+     * keeps the four fetches. */
+    "#ifdef USE_GATHER\n"
+    "  ivec2 s0 = i0 + t.zw * 8;\n"
+    "  ivec2 q0 = (face.x & 64) != 0 ? (s0 & (t.zw - 1)) : (s0 % t.zw);\n"
+    "  ivec2 a0 = t.xy + q0;\n"
+    "  if ((face.x & 24) == 0 && q0.x + 1 < t.z && q0.y + 1 < t.w && a0.x + 1 < 2048 && a0.y + 1 < 2048) {\n"
+    "    vec4 g = textureGather(atlas_smp, (vec2(a0) + 1.0) / 2048.0, 0);\n"
+    "    t00 = g.w; t10 = g.z; t01 = g.x; t11 = g.y;\n"
+    "  } else {\n"
+    "    t00 = tile_texel(t, sh, i0);\n"
+    "    t10 = tile_texel(t, sh, i0 + ivec2(1, 0));\n"
+    "    t01 = tile_texel(t, sh, i0 + ivec2(0, 1));\n"
+    "    t11 = tile_texel(t, sh, i0 + ivec2(1, 1));\n"
+    "  }\n"
+    "#else\n"
+    "  t00 = tile_texel(t, sh, i0);\n"
+    "  t10 = tile_texel(t, sh, i0 + ivec2(1, 0));\n"
+    "  t01 = tile_texel(t, sh, i0 + ivec2(0, 1));\n"
+    "  t11 = tile_texel(t, sh, i0 + ivec2(1, 1));\n"
+    "#endif\n"
     "  float a = 1.0;\n"
     "  if ((face.x & 1) != 0) {\n"
     "    vec4 cover = 1.0 - step(1.0, vec4(t00, t10, t01, t11));\n"
@@ -569,6 +617,10 @@ static const char *game_render_fill_fs_glsl =
     "    float al = tx.x;\n"
     "    if (lbpl.x < 0.0) {\n"
     "      if (al > 0.0) rgb = clamp(color.rgb * al * 2.0, 0.0, 1.0);\n"
+    /* Flag 128: colour alpha names a shade row, which already holds this face's
+     * lumaram step, poly_luma and colour ramp — one fetch for the two below. */
+    "    } else if ((face.x & 128) != 0) {\n"
+    "      rgb = texelFetch(ramp_smp, ivec2(int(al * 120.0), ramp_row), 0).rgb;\n"
     "    } else {\n"
     "      int lbyte = 2 * (int(lbpl.x) + int(al * 120.0));\n"
     "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
@@ -709,21 +761,41 @@ static const char *game_render_fill_fs_hlsl =
  * so one buffer per stage only has to outlive that call. */
 static inline const char *game_render_glsl(sg_backend backend, const char *src, int stage) {
     static const char head[] = "#version 410\n";
-    static const char es_head[] =
-        "#version 300 es\n"
+    /* textureGather needs ES 3.10 (it is core in GL 4.0), so the fills take that
+     * header when the gather path is compiled in. */
+    static const char es_head_300[] = "#version 300 es\n";
+    static const char es_head_310[] = "#version 310 es\n";
+    static const char es_prec[] =
         "precision highp float;\n"
         "precision highp int;\n"
         "precision highp sampler2D;\n"
         "precision highp usampler2D;\n";
+    static const char gather_def[] = "#define USE_GATHER 1\n";
     static char buf[2][8192];
-    if (backend != SG_BACKEND_GLES3 || strncmp(src, head, sizeof head - 1) != 0) return src;
-    size_t body = strlen(src) - (sizeof head - 1);
-    if (sizeof es_head - 1 + body + 1 > sizeof buf[0]) {
-        LOG_ERROR("game_render_glsl: shader too long for the ES buffer");
-        return src;
+    if (strncmp(src, head, sizeof head - 1) != 0) return src;
+    /* The whole program shares one version, so with the gather path compiled in
+     * every ES shader takes the 3.10 header (3.00 sources are valid there); the
+     * define goes only to the fill shader, which is the one that reads it. */
+    bool gather = g_game_render_fill_gather != 0;
+    bool define = gather && strstr(src, "USE_GATHER") != NULL;
+    if (backend != SG_BACKEND_GLES3 && !define) return src;
+    const char *body = src + sizeof head - 1;
+    char *out = buf[stage], *end = out + sizeof buf[0];
+    #define GAME_RENDER_GLSL_PUT(text) do { \
+        size_t n_ = strlen(text); \
+        if (out + n_ + 1 > end) { LOG_ERROR("game_render_glsl: shader too long"); return src; } \
+        memcpy(out, (text), n_); out += n_; \
+    } while (0)
+    if (backend == SG_BACKEND_GLES3) {
+        GAME_RENDER_GLSL_PUT(gather ? es_head_310 : es_head_300);
+        GAME_RENDER_GLSL_PUT(es_prec);
+    } else {
+        GAME_RENDER_GLSL_PUT(head);
     }
-    memcpy(buf[stage], es_head, sizeof es_head - 1);
-    memcpy(buf[stage] + sizeof es_head - 1, src + sizeof head - 1, body + 1);
+    if (define) GAME_RENDER_GLSL_PUT(gather_def);
+    GAME_RENDER_GLSL_PUT(body);
+    #undef GAME_RENDER_GLSL_PUT
+    *out = '\0';
     return buf[stage];
 }
 
@@ -1116,11 +1188,14 @@ static inline void game_render_init(void) {
     /* Colour ramps: the image exists on every backend (the fill shaders all
      * declare it); rows are only handed out where the GL fill shader reads them. */
     g_game_render.ramp_image = sg_make_image(&(sg_image_desc){
-        .width = 64, .height = GAME_RENDER_RAMP_ROWS, .pixel_format = SG_PIXELFORMAT_RGBA8,
+        .width = GAME_RENDER_RAMP_W, .height = GAME_RENDER_RAMP_ROWS, .pixel_format = SG_PIXELFORMAT_RGBA8,
         .usage = { .dynamic_update = true }, .label = "geo3d-colour-ramps" });
     g_game_render.ramp_view = sg_make_view(&(sg_view_desc){
         .texture.image = g_game_render.ramp_image, .label = "geo3d-colour-ramps-view" });
     g_game_render.ramp_enabled = g_game_render_fill_ramp && (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3);
+    g_game_render.shade_enabled = g_game_render_fill_shade && g_game_render.ramp_enabled;
+    memset(g_shade_slot_row, 0, sizeof g_shade_slot_row);
+    memset(g_shade_is_row, 0, sizeof g_shade_is_row);
     g_game_render.ramp_count = 0;
     memset(g_ramp_row_of, 0, sizeof g_ramp_row_of);
     sg_add_commit_listener((sg_commit_listener){ .func = game_render__ramp_commit });
@@ -1305,27 +1380,81 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
  * colorxlat[ch][(c5 << 8) + li] then max(c - 64, 0) * 255 / 191, as the 8-bit
  * value the target stores. (c - 64) * 255 / 191 is never k + 0.5, so rounding
  * it here gives the byte the shader's float result is written as. */
-static inline void game_render__ramp_fill(int r) {
-    uint16_t key = g_ramp_key[r];
-    int c5[3] = { (key >> 10) & 31, (key >> 5) & 31, key & 31 };
-    for (int li = 0; li < 64; li++) {
-        uint8_t *px = &g_ramp_px[(r * 64 + li) * 4];
-        for (int ch = 0; ch < 3; ch++) {
-            int v = g_game_render.cxlat_snap[ch * 0x4000 + ((c5[ch] << 8) + li) * 2];
-            double x = v > 64 ? (double)(v - 64) * 255.0 / 191.0 : 0.0;
-            px[ch] = (uint8_t)(x >= 255.0 ? 255 : (int)(x + 0.5));
-        }
-        px[3] = 255;
+/* The screen colour of face colour c5 at luma index li, as the shader's float
+ * result is written: colorxlat then max(c - 64, 0) * 255 / 191. */
+static inline void game_render__shade_px(const int c5[3], int li, uint8_t *px) {
+    for (int ch = 0; ch < 3; ch++) {
+        int v = g_game_render.cxlat_snap[ch * 0x4000 + ((c5[ch] << 8) + li) * 2];
+        double x = v > 64 ? (double)(v - 64) * 255.0 / 191.0 : 0.0;
+        px[ch] = (uint8_t)(x >= 255.0 ? 255 : (int)(x + 0.5));
+    }
+    px[3] = 255;
+}
+
+/* A shade row: the colour of every texel step 0..120, the way the fill shader
+ * works it out — lumaram[2 * (band + step)], times poly_luma over 256 and capped
+ * at 63, then that colour's ramp entry. */
+static inline void game_render__shade_fill(int r) {
+    const game_render_shade_key_t *k = &g_shade_key[r];
+    int c5[3] = { (k->col >> 10) & 31, (k->col >> 5) & 31, k->col & 31 };
+    for (int ai = 0; ai <= 120; ai++) {
+        uint32_t lbyte = 2u * (k->lb + (uint32_t)ai);
+        int lram = lbyte < LUMA_SIZE ? g_game_render.luma_snap[lbyte] : 0;
+        int li = (lram * (int)k->poly) >> 8;
+        if (li > 63) li = 63;
+        game_render__shade_px(c5, li, &g_ramp_px[(r * GAME_RENDER_RAMP_W + ai) * 4]);
     }
 }
 
-/* Start a batch: once the ramps are mostly used and none has gone up this frame,
- * forget them all, so rows follow the colours on screen. */
+static inline void game_render__ramp_fill(int r) {
+    if (g_shade_is_row[r]) { game_render__shade_fill(r); return; }
+    uint16_t key = g_ramp_key[r];
+    int c5[3] = { (key >> 10) & 31, (key >> 5) & 31, key & 31 };
+    for (int li = 0; li < 64; li++)
+        game_render__shade_px(c5, li, &g_ramp_px[(r * GAME_RENDER_RAMP_W + li) * 4]);
+}
+
+/* Start a batch: once the rows are mostly used and none has gone up this frame,
+ * forget them all, so rows follow what is on screen. */
 static inline void game_render__ramp_begin(void) {
     if (!g_game_render.ramp_enabled || g_ramp_uploaded) return;
     if (g_game_render.ramp_count <= GAME_RENDER_RAMP_ROWS * 3 / 4) return;
-    for (int r = 0; r < g_game_render.ramp_count; r++) g_ramp_row_of[g_ramp_key[r]] = 0;
+    for (int r = 0; r < g_game_render.ramp_count; r++)
+        if (!g_shade_is_row[r]) g_ramp_row_of[g_ramp_key[r]] = 0;
+    memset(g_shade_slot_row, 0, sizeof g_shade_slot_row);
+    memset(g_shade_is_row, 0, sizeof g_shade_is_row);
     g_game_render.ramp_count = 0;
+}
+
+/* The shade row for a face's (luma band, poly_luma, colour), made if new; -1
+ * when the face keeps the shader's lumaram + ramp lookups. */
+static inline int game_render__shade_row(float lb, float pl, float r, float g, float b) {
+    if (!g_game_render.shade_enabled || !g_game_render.cxlat_valid || !g_game_render.luma_valid) return -1;
+    if (!(lb >= 0.0f)) return -1;
+    int r5 = (int)(r * 31.0f + 0.5f), g5 = (int)(g * 31.0f + 0.5f), b5 = (int)(b * 31.0f + 0.5f);
+    if ((unsigned)r5 > 31u || (unsigned)g5 > 31u || (unsigned)b5 > 31u) return -1;
+    float plc = pl < 0.0f ? 0.0f : (pl > 1.0f ? 1.0f : pl);
+    game_render_shade_key_t k = { (uint32_t)lb, (uint16_t)(plc * 255.0f + 0.5f),
+                                  (uint16_t)((r5 << 10) | (g5 << 5) | b5) };
+    uint32_t h = (k.lb * 2654435761u) ^ ((uint32_t)k.poly * 40503u) ^ ((uint32_t)k.col * 2246822519u);
+    for (uint32_t probe = 0; probe < 64u; probe++) {
+        uint32_t s = (h + probe) & (GAME_RENDER_SHADE_SLOTS - 1u);
+        uint16_t held = g_shade_slot_row[s];
+        if (held) {
+            const game_render_shade_key_t *e = &g_shade_key[held - 1];
+            if (e->lb == k.lb && e->poly == k.poly && e->col == k.col) return held - 1;
+            continue;
+        }
+        if (g_ramp_uploaded || g_game_render.ramp_count == GAME_RENDER_RAMP_ROWS) return -1;
+        int row = g_game_render.ramp_count++;
+        g_shade_key[row]     = k;
+        g_shade_is_row[row]  = 1;
+        g_shade_slot_row[s]  = (uint16_t)(row + 1);
+        game_render__shade_fill(row);
+        g_game_render.ramp_dirty = true;
+        return row;
+    }
+    return -1;
 }
 
 /* The ramp row for a fill colour (as the shader rounds it to 5 bits a channel),
@@ -1363,16 +1492,28 @@ static inline void game_render__ramp_upload(void) {
  * the table always agree. */
 static inline void game_render_upload_luts(const uint8_t *luma, const uint8_t *colorxlat) {
     if (!g_game_render.initialized) return;
-    if (luma)
+    bool rebuild = false;
+    if (luma) {
+        /* Shade rows are built from lumaram, so they go up from a snapshot too:
+         * both views of the table always agree, as colorxlat's do. */
+        if (memcmp(g_game_render.luma_snap, luma, LUMA_SIZE) != 0) {
+            memcpy(g_game_render.luma_snap, luma, LUMA_SIZE);
+            rebuild = true;
+        }
+        g_game_render.luma_valid = true;
         sg_update_image(g_game_render.luma_image, &(sg_image_data){
-            .mip_levels[0] = { .ptr = luma, .size = LUMA_SIZE } });
+            .mip_levels[0] = { .ptr = g_game_render.luma_snap, .size = LUMA_SIZE } });
+    }
     if (colorxlat) {
         memcpy(g_game_render.cxlat_snap, colorxlat, COLORXLAT_SIZE);
         sg_update_image(g_game_render.cxlat_image, &(sg_image_data){
             .mip_levels[0] = { .ptr = g_game_render.cxlat_snap, .size = COLORXLAT_SIZE } });
         g_game_render.cxlat_valid = true;
+        rebuild = true;
+    }
+    if (rebuild && g_game_render.ramp_count) {
         for (int r = 0; r < g_game_render.ramp_count; r++) game_render__ramp_fill(r);
-        if (g_game_render.ramp_count) g_game_render.ramp_dirty = true;
+        g_game_render.ramp_dirty = true;
     }
 }
 
@@ -1647,16 +1788,24 @@ static inline void game_render_batch_flush(bool lines_only) {
             v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
             v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].u=T->u2; v[2].v=T->v2;
             float lb = g_luma_ramp ? T->lb : -1.0f;
-            /* colour alpha: the face's ramp row + 2 (1.0, as before, without one) */
-            float ramp = 1.0f;
-            if (g_game_render.ramp_enabled) {
-                int row = game_render__ramp_row(T->r, T->g, T->b);
-                if (row >= 0) ramp = (float)(row + 2);
+            /* colour alpha: the face's row + 2 (1.0, as before, without one). A
+             * textured face with a luma band takes a shade row where there is
+             * one — the whole colour chain in a single fetch, flagged 128 — and
+             * a colour ramp row otherwise. */
+            float ramp = 1.0f, fl = T->fl;
+            int row = -1;
+            if (g_game_render.shade_enabled && T->tw > 0.0f)
+                row = game_render__shade_row(lb, T->pl, T->r, T->g, T->b);
+            if (row >= 0) {
+                fl += 128.0f;
+            } else if (g_game_render.ramp_enabled) {
+                row = game_render__ramp_row(T->r, T->g, T->b);
             }
+            if (row >= 0) ramp = (float)(row + 2);
             for (int k = 0; k < 3; k++) {
                 v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=ramp;
                 v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
-                v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=T->fl; v[k].texlod=T->texlod;
+                v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=fl;    v[k].texlod=T->texlod;
             }
         }
         sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){

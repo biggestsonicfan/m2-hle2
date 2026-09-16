@@ -41,6 +41,8 @@
 /* ---- Region descriptor --------------------------------------------------- */
 
 #define MEM_REGIONS_MAX 64
+#define MEM_PAGE_NONE   0x00u
+#define MEM_PAGE_MIXED  0xFFu
 
 struct mem_region;
 typedef uint32_t (*mem_read_cb)(struct mem_region *r, uint32_t addr, int size);
@@ -139,6 +141,12 @@ typedef struct memory_bus {
     /* Region table — linear-scanned in declaration order. */
     mem_region_t regions[MEM_REGIONS_MAX];
     int          region_count;
+    /* One byte per 64 KB of address space: 1 + the index of the region the scan
+     * would return for every address in that page, MEM_PAGE_NONE when no region
+     * touches it, MEM_PAGE_MIXED when the answer depends on the address. Built on
+     * the first lookup after a region is added (page_ok). */
+    uint8_t      page[1u << 16];
+    int          page_ok;
     /* The two most recent unshadowed hits: code fetches and data accesses
      * alternate between two regions, and each lookup would otherwise scan. */
     mem_region_t *hit[2];
@@ -195,6 +203,7 @@ static inline mem_region_t *mem_add_region(memory_bus_t *bus,
     }
     bus->hit[0] = bus->hit[1] = NULL;
     bus->fetch = NULL;
+    bus->page_ok = 0;
     return r;
 }
 
@@ -562,8 +571,31 @@ static inline void mem_shutdown(memory_bus_t *bus) {
 
 /* ---- Lookup -------------------------------------------------------------- */
 
+/* The scan returns the earliest region containing an address. Walking the table
+ * backwards and letting each region overwrite the pages it reaches leaves every
+ * page with its earliest region: that region's if it covers the whole page,
+ * MIXED if it covers only part (the rest belongs to a later region or to none). */
+static inline void mem_build_pages(memory_bus_t *bus) {
+    memset(bus->page, MEM_PAGE_NONE, sizeof bus->page);
+    for (int i = bus->region_count - 1; i >= 0; i--) {
+        const mem_region_t *r = &bus->regions[i];
+        if (!r->size) continue;
+        uint64_t lo = r->base, hi = (uint64_t)r->base + r->size;   /* [lo, hi) */
+        if (hi > 0x100000000ull) hi = 0x100000000ull;
+        for (uint64_t p = lo >> 16; p < (hi + 0xFFFFu) >> 16; p++) {
+            bool whole = lo <= p << 16 && hi >= (p + 1) << 16;
+            bus->page[p] = whole ? (uint8_t)(i + 1) : MEM_PAGE_MIXED;
+        }
+    }
+    bus->page_ok = 1;
+}
+
 static inline mem_region_t *mem_find_region(memory_bus_t *bus, uint32_t addr) {
-    /* A cached region is never shadowed, so no earlier region can contain addr:
+    if (!bus->page_ok) mem_build_pages(bus);
+    uint32_t e = bus->page[addr >> 16];
+    if (e != MEM_PAGE_MIXED) return e ? &bus->regions[e - 1u] : NULL;
+    /* A page shared by several regions (the small MMIO blocks, a region edge).
+     * A cached region is never shadowed, so no earlier region can contain addr:
      * it is exactly what the scan below would return. */
     mem_region_t *c = bus->hit[0];
     if (c && (addr - c->base) < c->size) return c;

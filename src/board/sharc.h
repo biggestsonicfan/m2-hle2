@@ -419,12 +419,20 @@ static inline float sharc_fw_atan2(float y, float x) {
     return f15;
 }
 
+/* An integral-valued float as the 32-bit integer `fix` produces. Out of range,
+ * or NaN, is 0x80000000 on every host: a C cast leaves that undefined, x86 gives
+ * 0x80000000 (as MAME's `compute_fix` does on x86) and AArch64 saturates. */
+static inline uint32_t sharc_float_to_int32(float v) {
+    if (!(v > -2147483649.0f && v < 2147483648.0f)) return 0x80000000u;
+    return (uint32_t)(int32_t)v;
+}
+
 /* An angle the firmware hands back (_L202CA): radians times 0x4622F983
  * (32768/pi), `fix`ed under MODE1 TRUNCATE (MODE1 = 0x18000, so floor), then
  * the low 16 bits, zero-extended; callers read it with ldis. */
 static inline uint32_t sharc_angle_word(float rad) {
     float scaled = rad * sharc_bits_to_float(0x4622F983u);
-    return (uint32_t)(int32_t)floorf(scaled) & 0xFFFFu;
+    return sharc_float_to_int32(floorf(scaled)) & 0xFFFFu;
 }
 static inline uint32_t sharc_fw_atan2_word(float y, float x) { return sharc_angle_word(sharc_fw_atan2(y, x)); }
 
