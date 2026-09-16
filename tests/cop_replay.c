@@ -197,6 +197,38 @@ static int word_close(uint32_t a, uint32_t b) {
     return isfinite(fa) && isfinite(fb) && fabsf(fa - fb) <= 1e-5f * fmaxf(1.0f, fabsf(fa));
 }
 
+/* One Fn_osage call: the typed records from bufferram word `arg` (sharc_osage's
+ * layout), one line each, then each segment's 12 answered words. Type 3's first
+ * word and a segment's word 6 are integers; everything else is a float. */
+static void dump_osage(FILE *fo, uint64_t ncmd, uint32_t arg, const uint32_t *outs, int nout) {
+    static const int len[6] = { 0, 36, 30, 2, 3, 11 };
+    uint32_t p = arg;
+    int o = 0;
+    fprintf(fo, "call %llu arg %05X\n", (unsigned long long)ncmd, arg);
+    for (int guard = 0; guard < 256; guard++) {
+        uint32_t type;
+        if ((uint64_t)p * 4u + 4u > BUFF_RAM_SIZE) break;
+        memcpy(&type, g_bufram + p * 4u, 4);
+        o++;                                                  /* the echoed type word */
+        if (type > 5) { fprintf(fo, "  type %u?\n", type); break; }
+        if (type == 0) break;
+        fprintf(fo, "  %u:", type);
+        for (int k = 0; k < len[type]; k++) {
+            uint32_t w;
+            memcpy(&w, g_bufram + (p + 1u + (uint32_t)k) * 4u, 4);
+            if ((type == 3 && k == 0) || (type == 5 && k == 6)) fprintf(fo, " #%X", w);
+            else fprintf(fo, " %.6g", b2f(w));
+        }
+        fprintf(fo, "\n");
+        if (type == 5) {
+            fprintf(fo, "   ->");
+            for (int k = 0; k < 12; k++, o++) fprintf(fo, " %.6g", o < nout ? b2f(outs[o]) : NAN);
+            fprintf(fo, "\n");
+        }
+        p += 1u + (uint32_t)len[type];
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: cop_replay <prefix> [examples] [op]\n"); return 2; }
     int max_ex = argc > 2 ? atoi(argv[2]) : 3;
@@ -248,10 +280,20 @@ int main(int argc, char **argv) {
     int resync = getenv("RESYNC") != NULL;
     /* STATE_EXACT: a matrix left different in any bit is a bad state, not only one 1e-3 off. */
     int state_exact = getenv("STATE_EXACT") != NULL;
+    /* OSAGE=<file>: every Fn_osage call's record stream as the firmware found it
+     * in bufferram, and what the board answered for it (dump_osage). */
+    const char *osage_path = getenv("OSAGE");
+    FILE *fo = osage_path ? fopen(osage_path, "w") : NULL;
     const char *draws_path = getenv("DRAWS");
     FILE *fd = draws_path ? fopen(draws_path, "w") : NULL;
     if (fd) fprintf(fd, "record,cmd,prev,depth,model,m0,m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,h0,h1,h2,h3,h4,h5,h6,h7,h8,h9,h10,h11\n");
     uint32_t snap_tag = 0, snap_ptr = 0, snap_words[12]; int snap_n = -1;
+    /* Bufferram writes the i960 made once the running command had begun to
+     * answer: not inputs to it (it read its records before answering), so they
+     * wait until it has run. The replay runs a command only when the next one
+     * arrives; applied at once, Fn_osage would see the carries os_set_osage_after
+     * zeroes after reading each segment's matrix before writing them back. */
+    static uint32_t late[1 << 16][2]; int nlate = 0;
     float hsnap[12]; int draw_pending = 0; uint64_t draw_rec = 0; uint32_t draw_tag = 0, draw_ptr = 0, draw_words[12];
 
     #define MINMAX(lo, hi, v) do { if ((v) < (lo)) (lo) = (v); if ((v) > (hi)) (hi) = (v); } while (0)
@@ -263,6 +305,7 @@ int main(int argc, char **argv) {
         MINMAX(s->in_min, s->in_max, nin);                                              \
         MINMAX(s->out_min, s->out_max, nout);                                           \
         if (sharc_args_for_cmd(cmd) != nin) s->argcount_bad++;                          \
+        if (fo && (cmd & 0xFF) == 0x4A && nin >= 1) dump_osage(fo, ncmd, args[0], outs, nout); \
         sharc_exec(cmd, args, nin < COP_ARGS_MAX ? nin : COP_ARGS_MAX);                 \
         int hn = g_sharc.reply_count;                                                   \
         MINMAX(s->hle_out_min, s->hle_out_max, hn);                                     \
@@ -298,7 +341,7 @@ int main(int argc, char **argv) {
             for (int k = 0; k < hn && k < 24; k++) printf(" %08X(%g)", g_sharc.reply[k], b2f(g_sharc.reply[k])); \
             printf("\n");                                                               \
         }                                                                               \
-        have = 0; } } while (0)
+        have = 0;                                                                               for (int q = 0; q < nlate; q++) memcpy(g_bufram + late[q][0], &late[q][1], 4);          nlate = 0; } } while (0)
 
     uint32_t buf[2 * 8192];
     size_t got;
@@ -358,8 +401,9 @@ int main(int argc, char **argv) {
                 }
             } else if (tag >= 0x900000u && tag < 0x980000u) {
                 bufw++;
-                uint32_t off = (tag - 0x900000u) & (BUFF_RAM_SIZE - 1);
-                memcpy(g_bufram + (off & ~3u), &val, 4);
+                uint32_t off = (tag - 0x900000u) & (BUFF_RAM_SIZE - 1) & ~3u;
+                if (have && nout > 0 && nlate < (int)(sizeof late / sizeof late[0])) { late[nlate][0] = off; late[nlate][1] = val; nlate++; }
+                else memcpy(g_bufram + off, &val, 4);
             }
         }
     }
@@ -367,6 +411,7 @@ int main(int argc, char **argv) {
     fclose(f);
 
     if (fd) fclose(fd);
+    if (fo) fclose(fo);
     printf("\nrecords %llu: %llu commands, %llu bufferram writes, %llu malformed command words, %llu matrix snapshots%s\n\n",
            (unsigned long long)rec, (unsigned long long)ncmd, (unsigned long long)bufw, (unsigned long long)bad_words,
            (unsigned long long)snaps, resync ? " (HLE matrix reset to the board's at each)" : "");

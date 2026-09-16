@@ -120,6 +120,17 @@ static inline void geo_win_push(uint32_t val) {
 
 /* ---- Public interface ---------------------------------------------------- */
 
+/* A capture of the conversation as the firmware's side of the FIFOs sees it,
+ * in the tags of a MAME SHARC-side capture (tools/mame/cop-capture.lua), so
+ * tests/cop_replay reads either: 0x21000000 a command word, 0x20000000 an
+ * argument, 0x30000000 a word the command answered. NULL when not capturing. */
+static void (*g_cop_tap)(uint32_t tag, uint32_t val) = NULL;
+
+static inline void cop_tap_replies(void) {
+    if (!g_cop_tap) return;
+    for (int k = 0; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
+}
+
 /* Called for every 32-bit write to the COPROGRAM region. */
 static inline void cop_write(uint32_t val) {
     g_cop.writes++;
@@ -130,21 +141,25 @@ static inline void cop_write(uint32_t val) {
         g_cop.geo_capture_count++;
 
     if (g_cop.args_needed > 0) {
+        if (g_cop_tap) g_cop_tap(0x20000000u, val);
         if (g_cop.args_received < COP_ARGS_MAX)
             g_cop.args[g_cop.args_received++] = val;
         if (--g_cop.args_needed == 0) {
             sharc_exec(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
+            cop_tap_replies();
             g_cop.cur_cmd       = 0;
             g_cop.args_received = 0;
         }
         return;
     }
 
+    if (g_cop_tap) g_cop_tap(0x21000000u, val);
     g_cop.cur_cmd       = val;
     g_cop.args_needed   = sharc_args_for_cmd(val);
     g_cop.args_received = 0;
     if (g_cop.args_needed == 0) {
         sharc_exec(val, NULL, 0);
+        cop_tap_replies();
         g_cop.cur_cmd = 0;
     }
 }
