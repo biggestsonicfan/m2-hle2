@@ -91,7 +91,7 @@ STF is **2B-CRX**. Plan the geometry/texture path for 2B first, but keep the eng
 
 ### Phase 2 — Memory bus (board-level) ✅
 - [x] `src/board/memory.h` — `memory_bus_t` with 31 named regions, `mem_read8/16/32` / `mem_write8/16/32` dispatch, MMIO callbacks, `mem_init` idempotent (frees heap before reset), NULL data guard on reads; IO region initialised to `0xFF`
-- [x] `src/ui/memview.h` — 16×16 hex/ASCII inspector, byte/u32/f32 edit, region-label display
+- [x] `src/ui/memview.h` — region browser around imgui_club's `MemoryEditor` (`src/ui/mem_edit.{h,cpp}`): scrolling hex/ASCII grid with in-place editing and a typed data preview, plus a region picker, a jump box that takes any address in the space, and u32/f32 pokes
 
 ### Phase 3 — i960 CPU (board-level, fully shared) ✅
 - [x] `src/board/i960.h` — `i960_cpu_t`: 16 global + 16 local regs (union with named aliases `pfp`/`sp`/`rip`), SFRs, FP regs, register-window frame stack (`FRAME_STACK_DEPTH`), `halted` flag, AC
