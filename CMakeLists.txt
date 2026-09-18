@@ -28,9 +28,13 @@ set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/
 foreach(probe imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp
               imgui_club/imgui_memory_editor/imgui_memory_editor.h)
     if(NOT EXISTS ${VENDOR}/${probe})
+        # Joined with spaces: interpolating the list directly renders it
+        # semicolon-separated, so the command the message told you to run was one
+        # a shell splits into six broken commands.
+        string(JOIN " " M2HLE_SUBMODULE_LIST ${M2HLE_SUBMODULE_PATHS})
         message(FATAL_ERROR
             "vendor/${probe} is missing. The vendored dependencies are git submodules:\n"
-            "  git submodule update --init ${M2HLE_SUBMODULE_PATHS}")
+            "  git submodule update --init ${M2HLE_SUBMODULE_LIST}")
     endif()
 endforeach()
 
