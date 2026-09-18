@@ -95,6 +95,7 @@ static struct {
     bool             show_m68k_mem;
     bool             show_debug;
     bool             show_netplay;
+    bool             always_show_menu;  /* Debug -> Always show menu bar */
     m68k_state_t     m68k_snapshot;   /* prev-frame 68K state for change highlights */
 } state;
 
@@ -326,7 +327,51 @@ static void draw_bus_stats_window(void) {
     igEnd();
 }
 
+/*
+ * Whether the main menu bar is on screen this frame.
+ *
+ * The bar is opaque and sits over the top of the game, which is why the viewport
+ * below reserves a strip for it - so while a game is actually running it gets out
+ * of the way, and the emulator fills the window. Reaching the top edge with the
+ * pointer brings it back.
+ *
+ * It is NOT hidden when there is nothing to play or when the board is paused.
+ * Losing the menu on a paused emulator would mean losing Run, Load ROMs and this
+ * very option at the moment someone is most likely looking for them, and the
+ * screen is not doing anything worth the room.
+ *
+ * Decided once per frame and cached, because the game viewport has to reserve
+ * exactly the strip the bar will occupy: computing it twice lets the two answers
+ * differ on the frame the pointer crosses the edge, which shows up as a one-frame
+ * jump in the picture.
+ */
+static bool s_menu_bar_visible = true;
+
+static bool menu_bar_should_show(void) {
+    if (state.always_show_menu) return true;
+    if (!state.romset.loaded || !state.emu_started) return true;
+    if (!emu_is_running(&state.emu)) return true;
+
+    /* A dropdown is open. Without this the bar vanishes the moment the pointer
+     * moves down onto the menu it just opened, taking the menu with it. */
+    if (igIsPopupOpen(NULL, ImGuiPopupFlags_AnyPopup)) return true;
+
+    /* The pointer is in the strip the bar occupies. ImGui reports (-FLT_MAX,
+     * -FLT_MAX) when the pointer is outside the window, which compares as "above
+     * the top edge" and would pin the bar on whenever the mouse left.
+     *
+     * The strip is deliberately TALLER than the bar. Throwing the pointer at the
+     * top of the screen is how everyone reaches for a hidden menu, and in a
+     * window that lands on the title bar - outside the client area, where ImGui
+     * sees nothing at all. A few pixels of slack mean the flick that overshoots
+     * and comes back still catches it, and costs nothing: the strip is only
+     * consulted while a game is running and the bar is already hidden. */
+    if (!igIsMousePosValid(NULL)) return false;
+    return igGetIO()->MousePos.y <= igGetFrameHeight() + 8.0f;
+}
+
 static void draw_menu_bar(void) {
+    if (!s_menu_bar_visible) return;
     if (!igBeginMainMenuBar()) return;
     if (igBeginMenu("File")) {
         if (igMenuItem("Load ROMs...")) open_rom_dialog();
@@ -373,6 +418,8 @@ static void draw_menu_bar(void) {
         igMenuItemBoolPtr("Log sound writes", NULL, &g_sound.log_writes,     true);
         { bool ws = g_warning_skip != 0;  if (igMenuItemBoolPtr("Warning-screen skip", NULL, &ws, true)) g_warning_skip = ws; }
         { bool cl = g_cam_log != 0;        if (igMenuItemBoolPtr("Log camera CSV",      NULL, &cl, true)) g_cam_log = cl; }
+        igSeparator();
+        igMenuItemBoolPtr("Always show menu bar", NULL, &state.always_show_menu, true);
         igSeparator();
         igMenuItemBoolPtr("CPU opcode tests", NULL, &state.show_debug, true);
         igMenuItemBoolPtr("ImGui demo window", NULL, &state.show_demo, true);
@@ -612,6 +659,10 @@ static void frame(void) {
 
     netplay_cli_pump();
 
+    /* Before anything draws: draw_menu_bar() and the game viewport below must
+     * agree on the same answer for this frame. */
+    s_menu_bar_visible = menu_bar_should_show();
+
     draw_menu_bar();
     draw_file_dialog();
 
@@ -648,8 +699,9 @@ static void frame(void) {
     {
         int ox, oy, w, h;
         /* Reserve the top main-menu-bar strip so the game (and its row-0 HUD) isn't
-         * occluded by the opaque ImGui bar drawn on top. */
-        int menu_h = (int)(igGetFrameHeight() * sapp_dpi_scale());
+         * occluded by the opaque ImGui bar drawn on top - and reserve nothing when
+         * the bar is hidden, which is what gives the game the whole window. */
+        int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
         int avail_h = sapp_height() - menu_h;
         if (avail_h < 1) avail_h = 1;
         game_render_letterbox(sapp_width(), avail_h,
