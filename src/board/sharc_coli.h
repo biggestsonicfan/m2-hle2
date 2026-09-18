@@ -197,11 +197,51 @@ static inline void sharc_coli_area_table_gen(uint32_t m0, uint32_t m1, uint32_t 
     for (uint32_t k = 0; k < 16u; k++) sharc_dm_set(0x1403D80u + k, 0);
 }
 
+/* ---- observability mirror (NOT board behaviour) -----------------------------
+ *
+ * The narrow phase is handed the two masks that say what each collision ball
+ * currently *is*: am0/am1, the balls attacking this frame, and en0/en1, the
+ * balls switched on at all. Together they are the hitbox/hurtbox distinction,
+ * and the real board keeps them entirely inside the coprocessor — they arrive
+ * as FIFO arguments, only the enables are kept (DM 0x30417/0x30418, which is
+ * `g_sharc.dm` and not on the i960 bus), and nothing outside the SHARC sees
+ * either one.
+ *
+ * That makes them invisible to anything driving the emulator from outside: a
+ * grader, the MCP bridge, an agent reading RAM. This mirrors all four into
+ * BUFF_RAM so they can be read like any other word of the chain.
+ *
+ * Where, and why there. BUFF_RAM is shared with the i960, so this has to land
+ * somewhere the game never touches and no grader watches:
+ *
+ *   - DM 0x1403E40..0x1403E7F (i960 0x90F900) is the 64-word gap the firmware
+ *     leaves between the per-ball candidate masks (which end at 0x1403E3F) and
+ *     the world ball table (which starts at 0x1403E80).
+ *   - Measured dead: not one byte of it was ever non-zero across 110 samples
+ *     of a live fight spanning 90 unit contacts.
+ *   - Outside `tools/match-replay.mjs`'s graded window, which is 0x90F600 for
+ *     0x100 bytes. So this does not make the emulator diverge from the MAME
+ *     capture that grader holds it against. Keep it that way if you move it.
+ *
+ * MAGIC lets a reader tell a live mirror from stale bytes or an older build.
+ * Nothing in the emulator reads any of this back; it is write-only. */
+#define SHARC_COLI_MIRROR       0x1403E40u
+#define SHARC_COLI_MIRROR_MAGIC 0x494C4F43u   /* "COLI" */
+
 /* ---- Fn_calc_coli_flag (0x3B, PM 0x20ED5): the narrow phase ------------------ */
 static inline void sharc_coli_calc_flag(uint32_t mode, uint32_t am0, uint32_t am1, uint32_t nz0,
                                         uint32_t nz1, uint32_t en0, uint32_t en1) {
     sharc_dm_set(0x30417u, en0);
     sharc_dm_set(0x30418u, en1);
+
+    sharc_dm_set(SHARC_COLI_MIRROR + 0u, SHARC_COLI_MIRROR_MAGIC);
+    sharc_dm_set(SHARC_COLI_MIRROR + 1u, am0);   /* P1 balls attacking */
+    sharc_dm_set(SHARC_COLI_MIRROR + 2u, am1);   /* P2 balls attacking */
+    sharc_dm_set(SHARC_COLI_MIRROR + 3u, en0);   /* P1 balls enabled   */
+    sharc_dm_set(SHARC_COLI_MIRROR + 4u, en1);   /* P2 balls enabled   */
+    sharc_dm_set(SHARC_COLI_MIRROR + 5u, mode);
+    sharc_dm_set(SHARC_COLI_MIRROR + 6u, nz0);
+    sharc_dm_set(SHARC_COLI_MIRROR + 7u, nz1);
     uint32_t tested = 0, hits = 0;
     float pen = 0.0f, lift = 0.0f;
     for (uint32_t k = 0; k < 0x60u; k++) {

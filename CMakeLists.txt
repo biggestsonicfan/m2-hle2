@@ -24,8 +24,9 @@ add_compile_definitions(M2HLE_VERSION="${M2HLE_VERSION}")
 # Vendored dependencies are git submodules. Fail early and usefully if the
 # tree was cloned without them.
 # ---------------------------------------------------------------------------
-set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog)
-foreach(probe imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp)
+set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club)
+foreach(probe imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp
+              imgui_club/imgui_memory_editor/imgui_memory_editor.h)
     if(NOT EXISTS ${VENDOR}/${probe})
         message(FATAL_ERROR
             "vendor/${probe} is missing. The vendored dependencies are git submodules:\n"
@@ -114,6 +115,13 @@ target_include_directories(imguifiledialog PUBLIC ${VENDOR}/ImGuiFileDialog)
 target_link_libraries(imguifiledialog PUBLIC cimgui)
 
 # ---------------------------------------------------------------------------
+# imgui_club — the hex editor behind src/ui/memview.h. Header-only C++ against
+# the ImGui C++ API, so src/ui/mem_edit.cpp is the one translation unit that
+# includes it and hands the rest of src/ a C handle.
+# ---------------------------------------------------------------------------
+set(IMGUI_CLUB_MEMEDIT_DIR ${VENDOR}/imgui_club/imgui_memory_editor)
+
+# ---------------------------------------------------------------------------
 # miniz (C)
 # miniz's normal CMake build generates miniz_export.h via
 # GenerateExportHeader. We build it as a plain static lib instead, so
@@ -167,9 +175,9 @@ target_link_libraries(sokol PUBLIC cimgui)
 # m2hle executable
 # ---------------------------------------------------------------------------
 if(WIN32)
-    add_executable(m2hle WIN32 ${SRC}/main.c)
+    add_executable(m2hle WIN32 ${SRC}/main.c ${SRC}/ui/mem_edit.cpp)
 else()
-    add_executable(m2hle ${SRC}/main.c)
+    add_executable(m2hle ${SRC}/main.c ${SRC}/ui/mem_edit.cpp)
 endif()
 target_link_libraries(m2hle PRIVATE sokol miniz imguifiledialog)
 target_include_directories(m2hle PRIVATE
@@ -178,6 +186,7 @@ target_include_directories(m2hle PRIVATE
     ${SRC}/core
     ${SRC}/ui
     ${SRC}/profiles
+    ${IMGUI_CLUB_MEMEDIT_DIR}
 )
 set_target_properties(m2hle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_BINARY_DIR}/Debug

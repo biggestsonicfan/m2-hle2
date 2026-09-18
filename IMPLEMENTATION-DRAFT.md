@@ -249,6 +249,7 @@ src/
     cpu_window.h             i960 reg/SFR/frame-stack view, changed-cell highlight
     m68k_window.h            68K reg view
     memview.h / m68k_memview.h  hex/ASCII inspectors (i960 / 68K)
+    mem_edit.h / mem_edit.cpp    C facade over vendor/imgui_club's MemoryEditor
     cop_window.h             COP/SHARC state + reply FIFO
     geo3d_window.h           3D viewer toggles, capture filters, camera sliders
     video_window.h           tile composite → sg_image (drawn into swapchain, no ImGui win)
@@ -290,7 +291,7 @@ deps compile and the prior checkpoint passes.
 ### Phase 2 — Memory bus
 - `memory.h`: ~31 named regions, declaration-order linear scan (TILE before H_SYNC!),
   MMIO R/W callbacks, IO inits to `0xFF`, idempotent `mem_init`, NULL-data read guard.
-- `memview.h` hex inspector. **Checkpoint: write/read round-trips per region in the UI.**
+- `memview.h` hex inspector (imgui_club's `MemoryEditor` via `mem_edit.h`). **Checkpoint: write/read round-trips per region in the UI.**
 
 ### Phase 3 — i960 core
 - `i960.h` state (16 global + 16 local regs with pfp/sp/rip aliases, SFRs, FP, frame stack),
