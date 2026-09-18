@@ -43,10 +43,17 @@ jobs:
           submodules: false     # vendor/noclip is big and only feeds tools/
 
       # Everything the CMake build needs, minus vendor/noclip.
+      #
+      # This list has to track CMakeLists.txt's M2HLE_SUBMODULE_PATHS, and it did
+      # not when vendor/imgui_club arrived with the memory editor. Nothing caught
+      # it because this workflow only runs on a push to master: a submodule added
+      # in a PR is first exercised by the build that follows its own merge, so the
+      # break lands on master rather than on the branch that caused it.
       - name: Fetch build submodules
         run: >
           git submodule update --init
           vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog
+          vendor/imgui_club
 
       # cimgui is generated from vendor/imgui by vendor/dear_bindings at build time.
       # One pinned interpreter for both pip and CMake: left to itself,
