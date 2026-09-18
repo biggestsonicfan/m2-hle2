@@ -11,6 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* net/ FIRST, before anything that might pull in <windows.h>: net_socket.h owns
+ * the winsock include order and <winsock2.h> has to precede it. See the note at
+ * the top of that header. */
+#include "net/netplay.h"
+
 #include "sokol_app.h"
 #include "sokol_gfx.h"
 #include "sokol_glue.h"
@@ -44,6 +49,7 @@
 #include "input.h"
 #include "debug_window.h"
 #include "mcp_bridge.h"    /* --mcp TCP debug server (ported from m2-hle) */
+#include "netplay_window.h"  /* the RPCN netplay front-end */
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
  * g_active_profile and pulls in every per-game profile header. */
@@ -55,6 +61,18 @@ static int  g_browse_model = -1;   /* --model N: open single-model browser on N 
 static int  g_mcp_enable = 0;      /* --mcp: start the TCP debug server */
 static int  g_mcp_port   = 7172;   /* --mcp-port N */
 static int  g_headless   = 0;      /* --headless: no window, GPU or audio device */
+static int  g_net_window = 0;      /* --netplay: open the netplay window at startup */
+
+/*
+ * Headless netplay (--net-*). The GUI is the normal way in, but a session that
+ * can only be started by clicking cannot be scripted, and netplay is precisely
+ * the feature where "does it work" means running two of them against a server.
+ * These fill the same config the window edits and post the same commands.
+ */
+static netplay_config_t g_net_cli = { .port = RPCN_DEFAULT_PORT, .frame_delay = 2 };
+static int g_net_auto   = 0;      /* 0 none, 1 host, 2 join */
+static int g_net_start  = 0;      /* --net-start: begin the session once linked */
+static int g_net_twitch = 0;      /* --net-twitch: run the Twitch device flow at boot */
 
 static struct {
     sg_pass_action   pass_action;
@@ -76,6 +94,7 @@ static struct {
     bool             show_m68k_cpu;
     bool             show_m68k_mem;
     bool             show_debug;
+    bool             show_netplay;
     m68k_state_t     m68k_snapshot;   /* prev-frame 68K state for change highlights */
 } state;
 
@@ -172,6 +191,102 @@ static void load_active_profile(const char *primary_zip) {
     }
 }
 
+/*
+ * The board reset netplay performs at the barrier.
+ *
+ * A netplay session starts from a COLD BOOT on both machines, because that is
+ * the only state two emulators can be certain to share without savestates (see
+ * net/netplay.h). This is that reset: everything load_active_profile does after
+ * the ROM files are read, and nothing that touches the emu thread — it is CALLED
+ * BY the emu thread, with the emu mutex held.
+ *
+ * install_fn re-runs mem_init, which reallocates and zeroes every region and
+ * calls cop_reset() for the COP/SHARC state. The rest is what mem_init does not
+ * reach: the interrupt controller, the sound board, the input latch and the run
+ * loop's own per-boot flags.
+ */
+static void netplay_reset_board_cb(void *ctx) {
+    (void)ctx;
+    if (!g_active_profile || !state.romset.loaded) return;
+
+    g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
+    irqt_reset();
+
+    if (g_active_profile->quirks.enable_68k_sound) {
+        sound_reset();
+        sound_attach(&state.bus);
+        if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
+            sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
+        if (state.romset.samples && state.romset.samples_size > 0)
+            sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+    }
+
+    input_reset();
+    input_attach(&state.bus);
+    emu_board_reset_state();
+}
+
+/*
+ * Drives the --net-* flags. Called every frame from both the windowed and the
+ * headless loop; posts exactly the commands the netplay window's buttons post,
+ * as the session reaches each stage. Inert unless --net-server was given.
+ */
+static void netplay_cli_pump(void) {
+    if (!g_net_cli.server[0]) return;
+
+    static int      connected = 0;
+    static int      acted     = 0;
+    static int      started   = 0;
+    static netplay_state_t last = (netplay_state_t)-1;
+
+    if (!connected) {
+        if (!state.romset.loaded) return;   /* the profile decides the lobby space */
+        connected = 1;
+        /* Twitch signs in and then connects itself, so it replaces the connect
+         * rather than preceding it. */
+        netplay_post(g_net_twitch ? NETPLAY_CMD_TWITCH_START : NETPLAY_CMD_CONNECT, &g_net_cli);
+        return;
+    }
+
+    netplay_status_t st;
+    netplay_get_status(&st);
+
+    if (g_net_twitch) {
+        static rpcn_twitch_state_t tw_last = (rpcn_twitch_state_t)-1;
+        if (st.twitch_state != tw_last) {
+            tw_last = st.twitch_state;
+            if (st.twitch_state == RPCN_TWITCH_WAITING)
+                LOG_INFO("netplay: Twitch code %s -- approve it at %s",
+                         st.twitch_user_code, st.twitch_uri);
+            else if (st.twitch_state == RPCN_TWITCH_DONE)
+                LOG_INFO("netplay: Twitch signed in as %s", st.twitch_npid);
+            else if (st.twitch_state == RPCN_TWITCH_FAILED)
+                LOG_INFO("netplay: Twitch failed: %s", st.twitch_error);
+        }
+    }
+
+    if (st.state != last) {
+        last = st.state;
+        LOG_INFO("netplay: state = %s", netplay_state_text(st.state));
+        if (st.state == NETPLAY_IN_ROOM)
+            LOG_INFO("netplay: room %llu — a peer joins it with --net-join %llu",
+                     (unsigned long long)st.room_id, (unsigned long long)st.room_id);
+    }
+
+    if (!acted && st.state == NETPLAY_ONLINE) {
+        if (g_net_auto == 1)      { acted = 1; netplay_post(NETPLAY_CMD_HOST, &g_net_cli); }
+        else if (g_net_auto == 2) { acted = 1; netplay_post(NETPLAY_CMD_JOIN, &g_net_cli); }
+        else                      { acted = 1; netplay_post(NETPLAY_CMD_SEARCH, &g_net_cli); }
+    }
+
+    /* Start only once both ends can actually reach each other: announcing into a
+     * void just logs "still waiting" every five seconds. */
+    if (g_net_start && !started && st.state == NETPLAY_IN_ROOM && st.peer_heard) {
+        started = 1;
+        netplay_post(NETPLAY_CMD_START, &g_net_cli);
+    }
+}
+
 static void open_rom_dialog(void) {
     struct IGFD_FileDialog_Config cfg = IGFD_FileDialog_Config_Get();
     cfg.path = ".";
@@ -264,6 +379,32 @@ static void draw_menu_bar(void) {
         igEndMenu();
     }
 
+    /* Netplay gets a menu of its own rather than a line in Debug: it is the one
+     * feature here a player rather than a developer reaches for, and the status
+     * line is worth being able to read without opening the window — whether the
+     * peer is reachable is the question people actually have. */
+    if (igBeginMenu("Netplay")) {
+        igMenuItemBoolPtr("Netplay window", NULL, &state.show_netplay, true);
+        igSeparator();
+        {
+            netplay_status_t st;
+            netplay_get_status(&st);
+            igTextDisabled("%s", netplay_state_text(st.state));
+            if (st.room_id)
+                igTextDisabled("room %llu (%s)", (unsigned long long)st.room_id,
+                               st.is_host ? "hosting" : "guest");
+            if (st.peer_npid[0])
+                igTextDisabled("peer %s %s", st.peer_npid,
+                               st.peer_heard ? "[reachable]"
+                                             : st.peer_known ? "[punching]" : "[no address]");
+            if (st.state == NETPLAY_PLAYING)
+                igTextDisabled("frame %u, %u stall%s", st.frame, st.stalls,
+                               st.stalls == 1 ? "" : "s");
+            if (st.error[0]) igTextDisabled("%s", st.error);
+        }
+        igEndMenu();
+    }
+
     /* Right-side status display (reads the UI snapshot, not the live CPU). */
     if (g_active_profile) {
         igSeparator();
@@ -311,6 +452,12 @@ static void init(void) {
 
     /* Host audio output, drained from the sound board's sample ring. */
     audio_out_init();
+
+    /* Netplay is inert until a session is asked for, but the emu thread polls it
+     * every slice, so it has to exist before the thread starts. */
+    netplay_init();
+    netplay_set_reset_hook(netplay_reset_board_cb, NULL);
+    state.show_netplay = g_net_window != 0;
 
     /* Start the (initially STOPPED) emu thread up front so Run/Step work even
      * before a ROM is chosen via the menu. */
@@ -372,6 +519,9 @@ static int headless_main(void) {
     if (g_profile_count > 0) g_active_profile = g_profiles[0];
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
+    netplay_init();
+    netplay_set_reset_hook(netplay_reset_board_cb, NULL);
+    netplay_set_open_browser(false);   /* no desktop here - the log carries the URL */
     emu_ensure_started();
     load_active_profile(g_rom_path);
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
@@ -379,6 +529,7 @@ static int headless_main(void) {
     LOG_INFO("headless: running%s", g_mcp_enable ? " with the MCP bridge" : " (no --mcp: nothing can drive it)");
     for (;;) {
         emu_update_snapshots(&state.emu);
+        netplay_cli_pump();
         emu_sleep_ms(5);
     }
 }
@@ -459,6 +610,8 @@ static void frame(void) {
         geo3d_lines_reset();
     }
 
+    netplay_cli_pump();
+
     draw_menu_bar();
     draw_file_dialog();
 
@@ -482,6 +635,7 @@ static void frame(void) {
     }
     if (state.show_m68k_mem)    m68k_memview_draw(&state.show_m68k_mem);
     if (state.show_debug)       debug_window_draw(&state.show_debug);
+    if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
     if (state.show_demo)        igShowDemoWindow(&state.show_demo);
 
     sg_begin_pass(&(sg_pass){
@@ -580,6 +734,7 @@ static void frame(void) {
 
 static void cleanup(void) {
     if (state.emu_started) emu_thread_shutdown(&state.emu);
+    netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
     romset_free(&state.romset);
@@ -651,6 +806,46 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_mcp_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+        } else if (strcmp(argv[i], "--netplay") == 0) {
+            g_net_window = 1;                  /* open the netplay window at startup */
+        } else if (strcmp(argv[i], "--net-server") == 0 && i + 1 < argc) {
+            snprintf(g_net_cli.server, sizeof(g_net_cli.server), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--net-port") == 0 && i + 1 < argc) {
+            g_net_cli.port = (uint16_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--net-user") == 0 && i + 1 < argc) {
+            snprintf(g_net_cli.npid, sizeof(g_net_cli.npid), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--net-pass") == 0 && i + 1 < argc) {
+            snprintf(g_net_cli.password, sizeof(g_net_cli.password), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--net-token") == 0 && i + 1 < argc) {
+            snprintf(g_net_cli.token, sizeof(g_net_cli.token), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--net-fingerprint") == 0 && i + 1 < argc) {
+            snprintf(g_net_cli.fingerprint, sizeof(g_net_cli.fingerprint), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--net-room-pass") == 0 && i + 1 < argc) {
+            snprintf(g_net_cli.room_password, sizeof(g_net_cli.room_password), "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--net-delay") == 0 && i + 1 < argc) {
+            g_net_cli.frame_delay = (uint32_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--net-p2p-port") == 0 && i + 1 < argc) {
+            /* Two peers in one machine's network namespace cannot both bind 3658.
+             * Only useful for a loopback test — RPCN hands out a peer's LOCAL
+             * address with 3658 hardcoded, so a non-default port is not usable
+             * for same-NAT play between two real machines. */
+            g_net_cli.local_p2p_port = (uint16_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--net-host") == 0) {
+            g_net_auto = 1;
+        } else if (strcmp(argv[i], "--net-join") == 0 && i + 1 < argc) {
+            g_net_auto = 2;
+#ifdef _WIN32
+            g_net_cli.room_id = _strtoui64(argv[++i], NULL, 10);
+#else
+            g_net_cli.room_id = strtoull(argv[++i], NULL, 10);
+#endif
+        } else if (strcmp(argv[i], "--net-start") == 0) {
+            g_net_start = 1;
+        } else if (strcmp(argv[i], "--net-twitch") == 0) {
+            /* Sign in through Twitch instead of --net-user/--net-pass. The code
+             * and the twitch.tv address go to the log, and a browser is opened
+             * if there is a desktop to open one on. */
+            g_net_twitch = 1;
         }
     }
     if (g_headless) exit(headless_main());

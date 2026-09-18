@@ -75,6 +75,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | SCSP audio | HLE PCM mixer, BGM playback via sokol_audio |
 | Input | Interrupt-driven, through the real 315-5649 I/O ports |
 | Debug UI | CPU / memory / COP / GEO / 68K / trace / breakpoint / video windows |
+| Netplay | RPCN matchmaking + direct peer-to-peer delay lockstep (`--netplay`) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 
 Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2snake`.
@@ -85,6 +86,8 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
   tile and 3D renderers, 68K, SCSP, IRQ/timers.
 - [src/core/](src/core/) — ROM loading, profile resolution, HLE hook dispatch, emu thread,
   breakpoints/watchpoints, logging.
+- [src/net/](src/net/) — netplay: the RPCN client (TLS, protocol, rooms, signaling), the
+  lockstep engine, and the glue that gates the emulator's frame loop on it.
 - [src/ui/](src/ui/) — ImGui debug windows, game render target, MCP bridge.
 - [src/profiles/](src/profiles/) — one `game_profile_t` per ROM set (hook addresses, input map,
   ROM list + CRC32s, quirks).
@@ -99,6 +102,62 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
 
 Everything except `main.c`, `sokol_impl.c/.m`, `ui/mem_edit.cpp`, and the submodules' `.c` files
 is a header-only `.h` module. That is deliberate — see [CLAUDE.md](CLAUDE.md).
+
+## Netplay
+
+Two people can play the same cabinet over the internet. Matchmaking runs over
+[**RPCN**](https://github.com/RipleyTom/rpcn), the community server for PlayStation Network
+emulation — a TLS session for login and the room list, a UDP exchange to learn each other's
+address, and then **direct peer-to-peer traffic that never passes through the server**.
+
+Open the **Netplay** menu → *Netplay window*, or start with `--netplay`. The server box is
+prefilled with `rpcn.sonicthefighte.rs`; any RPCN server works, so change it if you run your own.
+
+**Sign in with Twitch** is the short way in: approve a code once in a browser and the server hands
+back a login token that stands in for a password from then on, so it is stored and never asked for
+again. Your Twitch login becomes your account name. A server without Twitch configured says so
+plainly, and the account name / password fields below are the ordinary path — the window will
+register an account for you if you have none, and can re-send the verification e-mail if the
+server uses them.
+
+Settings live in `m2hle_netplay.cfg` in the working directory, written once a login is known to
+work. The Twitch login token is stored there, because the device flow exists precisely so it only
+happens once; a typed password never is.
+
+**A session is a cold boot, not a savestate.** When both players are ready, *both machines reset
+the board* and every frame from power-on is played in lockstep. This emulator has no savestates,
+and the only state two copies can be certain to share is the one a board is in a microsecond
+after the power comes on — so that is where a match starts, exactly as two arcade cabinets
+would. You watch the SEGA logo together, and from there the two boards are the same machine.
+
+What makes that sound is the same property [tools/](tools/) already measures: identical inputs
+from a reset produce identical state, frame for frame. Every packet also carries a hash of the
+board's state at a frame boundary, so if the two ever *do* diverge, the window says so and names
+the frame rather than letting the match quietly become two different games.
+
+Inputs are delay-based lockstep modelled on the Sonic the Fighters PS3 netcode: each frame's
+input is keyed by absolute frame number, every packet re-carries the last ten frames so a lost
+datagram repairs itself, and the frame delay (default 2) buys that much network latency before
+either side has to stall. Whichever key set you press locally drives *your* side of the cabinet,
+so the guest plays on P2 without rebinding anything.
+
+**Lobbies are per-game.** RPCN partitions everything by Communication ID, so each ROM set gets
+one of its own (`M2HSNCFTR_00` for Sonic The Fighters) rather than every Model 2 game sharing a
+list. The browser also shows YAMP's rooms for the same arcade game, greyed out and unjoinable:
+YAMP plays the console port, so a cross-emulator match could never stay in sync, but an empty
+lobby with people next door is worth telling apart from an empty one.
+
+Scriptable without the GUI, which is how it gets tested:
+
+```
+m2hle --rom sfight.zip --run --netplay       --net-server <host> --net-user <name> --net-pass <password> --net-host --net-start
+m2hle --rom sfight.zip --run --netplay       --net-server <host> --net-user <other> --net-pass <password> --net-join <room id> --net-start
+```
+
+TLS is Schannel, so netplay currently connects only on Windows; [src/net/tls.h](src/net/tls.h)
+is the one file a POSIX backend would go in. The design follows
+[yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
+worked the RPCN protocol out first.
 
 ## Documents
 

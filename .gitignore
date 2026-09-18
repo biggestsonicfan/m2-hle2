@@ -95,3 +95,6 @@ lumaram.bin
 colorxlat.bin
 palram.bin
 build_vs22_*.log
+
+# Netplay settings, written at runtime. Holds the Twitch login token.
+m2hle_netplay.cfg

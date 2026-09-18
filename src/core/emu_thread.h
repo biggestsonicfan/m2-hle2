@@ -36,31 +36,14 @@
 #include "hle_hooks.h"   /* g_frame_done, hle_call, g_active_profile */
 #include "irq_timer.h"   /* board IRQ controller + timers */
 #include "../board/sound.h"  /* sound_run_slice: the 68000 + SCSP */
+#include "../net/netplay.h"  /* the lockstep frame gate (inert unless a session is up) */
 
 /* 68K at ~11.3 MHz vs i960 at 25 MHz — run 45% as many steps per slice. */
 
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <windows.h>
-   typedef HANDLE           emu_thread_t;
-   typedef CRITICAL_SECTION emu_mutex_t;
-#  define emu_mutex_init(m)     InitializeCriticalSection(m)
-#  define emu_mutex_destroy(m)  DeleteCriticalSection(m)
-#  define emu_mutex_lock(m)     EnterCriticalSection(m)
-#  define emu_mutex_unlock(m)   LeaveCriticalSection(m)
-#  define emu_sleep_ms(ms)      Sleep((DWORD)(ms))
-#else
-#  include <pthread.h>
-#  include <unistd.h>
-#  include <time.h>
-   typedef pthread_t       emu_thread_t;
-   typedef pthread_mutex_t emu_mutex_t;
-#  define emu_mutex_init(m)     pthread_mutex_init(m, NULL)
-#  define emu_mutex_destroy(m)  pthread_mutex_destroy(m)
-#  define emu_mutex_lock(m)     pthread_mutex_lock(m)
-#  define emu_mutex_unlock(m)   pthread_mutex_unlock(m)
-#  define emu_sleep_ms(ms)      usleep((useconds_t)((ms) * 1000))
-#endif
+/* The mutex/thread types and the millisecond sleep live in thread_mutex.h, so
+ * net/netplay.h can use the same mutex without including this header (the run
+ * loop below calls into netplay, which would otherwise be a cycle). */
+#include "thread_mutex.h"
 
 /* ---- Tuning -------------------------------------------------------------- */
 
@@ -170,6 +153,18 @@ static inline void emu_match_replay_edge(emu_thread_ctx_t *ctx) {
     LOG_INFO("match_replay: attract step %u -> %u at frame %u", ar->from_step, ar->to_step, g_emu_frames);
 }
 
+/* Clear the run loop's own per-boot latches. Part of a board reset, and separate
+ * from install_fn because these live here: a handler left "in service" across a
+ * reset would swallow the first interrupt of the new boot, which on two
+ * netplayed machines is a divergence on frame 1. */
+static inline void emu_board_reset_state(void) {
+    s_irq_in_service     = false;
+    s_irq_baseline_depth = 0;
+    g_frame_done         = 0;
+    g_vblank_acked       = 0;
+    g_emu_frames         = 0;
+}
+
 static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (!g_active_profile) return;
     i960_cpu_t          *cpu = ctx->cpu;
@@ -227,6 +222,27 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
 
 /* ---- Run loop ------------------------------------------------------------ */
 
+/* Pump netplay and hand back what this slice may do.
+ *
+ * OUTSIDE the emu mutex on purpose: a TLS connect blocks for seconds, and
+ * holding the mutex across it freezes the UI. A RESET is performed here, under
+ * the mutex, because it rewrites the whole board.
+ *
+ * Called from the STOPPED branch as well as the RUNNING one — a player connects
+ * and takes a room before pressing Run, and a netplay session that is only
+ * pumped while the board is running would sit there never logging in. */
+static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
+    netplay_step_t step = netplay_begin_frame();
+    if (step == NETPLAY_STEP_RESET) {
+        emu_mutex_lock(&ctx->mutex);
+        netplay_do_reset();
+        ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+        ctx->cpu_snapshot      = *ctx->cpu;
+        emu_mutex_unlock(&ctx->mutex);
+    }
+    return step;
+}
+
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
     uint64_t sps_steps_start = ctx->total_steps;
     int64_t  last_sps_time   = emu_now_us();
@@ -236,6 +252,18 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
 
         if (s == EMU_RUNNING) {
             int64_t slice_start = emu_now_us();
+
+            /* Netplay decides what this slice may do. STEP_OFF — one predictable
+             * branch — whenever no session is running. */
+            netplay_step_t np_step = emu_netplay_pump(ctx);
+            if (np_step == NETPLAY_STEP_WAIT) {
+                /* Stalled waiting for the peer's input, or waiting at the barrier:
+                 * the board must not advance. Sleep a tick so the UI and the
+                 * network both get the host CPU, and come back to re-poll. */
+                emu_sleep_ms(1);
+                continue;
+            }
+            if (np_step == NETPLAY_STEP_RESET) continue;   /* done above; re-enter */
 
             emu_mutex_lock(&ctx->mutex);
             g_frame_done = 0;
@@ -329,6 +357,10 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 }
             } else if (g_frame_done || (board_vblank && g_vblank_acked)) {
                 g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
+                /* The netplay frame clock and this frame's state check. Fed the
+                 * snapshot rather than the live CPU: it was taken under the mutex
+                 * a few lines up and is the same state, without racing the UI. */
+                netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps);
                 if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
                 /* Frame boundary (HLE hook, or the homebrew's vsync-ACK) — pace to
                  * the next 16.67ms tick. For board_vblank this also ends the i960's
@@ -378,6 +410,9 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             emu_mutex_unlock(&ctx->mutex);
         }
         else {
+            /* STOPPED. Netplay still has to breathe: the login, the room and the
+             * peer handshake all happen before anybody presses Run. */
+            emu_netplay_pump(ctx);
             emu_sleep_ms(1);
         }
 
