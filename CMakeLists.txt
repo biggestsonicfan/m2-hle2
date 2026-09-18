@@ -184,10 +184,24 @@ target_include_directories(m2hle PRIVATE
     ${SRC}
     ${SRC}/board
     ${SRC}/core
+    ${SRC}/net
     ${SRC}/ui
     ${SRC}/profiles
     ${IMGUI_CLUB_MEMEDIT_DIR}
 )
+
+# ---------------------------------------------------------------------------
+# Netplay (src/net) — RPCN matchmaking + peer-to-peer lockstep.
+#
+# No new dependency: the sockets and the TLS client are the platform's own.
+# ws2_32 is the transport; secur32/crypt32/bcrypt are Schannel, which is the
+# only TLS backend implemented (src/net/tls.h explains the seam and what a
+# POSIX build does instead — netplay compiles there and reports that it has no
+# backend rather than failing to link).
+# ---------------------------------------------------------------------------
+if(WIN32)
+    target_link_libraries(m2hle PRIVATE ws2_32 secur32 crypt32 bcrypt)
+endif()
 set_target_properties(m2hle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_BINARY_DIR}/Debug
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/Release
@@ -221,7 +235,7 @@ option(M2HLE_BUILD_TESTS "Build the standalone unit tests" ON)
 # paths) — not meaningful for the Emscripten/web build, so skip them there.
 if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     enable_testing()
-    set(TEST_INCLUDES ${SRC} ${SRC}/board ${SRC}/core ${SRC}/ui ${SRC}/profiles)
+    set(TEST_INCLUDES ${SRC} ${SRC}/board ${SRC}/core ${SRC}/net ${SRC}/ui ${SRC}/profiles)
 
     add_executable(mem_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/mem_test.c)
     add_executable(i960_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/i960_test.c)
@@ -232,6 +246,9 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(geo_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/geo_test.c)
     add_executable(m68k_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/m68k_opcode_test.c)
     add_executable(input_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/input_test.c)
+    # Netplay: the lockstep engine, the protobuf codec and the ComId standard.
+    # No sockets and no server — see the header of tests/net_test.c.
+    add_executable(net_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/net_test.c)
     # Not a ctest: replays a MAME capture of the COP conversation (needs a capture file).
     add_executable(cop_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/cop_replay.c)
     target_include_directories(cop_replay PRIVATE ${TEST_INCLUDES})
@@ -253,7 +270,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(emu_test   PRIVATE sokol)
     target_link_libraries(input_test PRIVATE miniz sokol)
 
-    foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test)
+    foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -265,7 +282,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     # nothing that carries it.
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
-                  input_test cop_replay snd_replay)
+                  input_test net_test cop_replay snd_replay)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

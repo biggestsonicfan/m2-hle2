@@ -34,12 +34,24 @@
 #include "memory.h"
 
 typedef struct {
-    volatile uint32_t held;   /* active-high, 0x500700 bit layout; read by the IO cb */
+    volatile uint32_t held;   /* active-high, 0x500700 bit layout; the host keyboard */
+
+    /* Netplay override. During a lockstepped session the board must see the mask
+     * COMPOSED from the two peers' transmitted input words and nothing else — the
+     * local keyboard is sampled into a word and then forgotten. Keeping that in a
+     * second field rather than writing it over `held` matters: key events arrive
+     * on the UI thread at arbitrary moments, so a composed mask left in `held`
+     * would be half-overwritten by whatever the player is pressing partway
+     * through the emulated frame, on one machine and not the other.
+     * net/netplay.h sets these; the read callback below prefers them when
+     * `use_net` is set, and hands the board back to the keyboard when it is not. */
+    volatile uint32_t net_held;
+    volatile int      use_net;
 } input_state_t;
 
 static input_state_t g_input = {0};
 
-static inline void input_reset(void) { g_input.held = 0; }
+static inline void input_reset(void) { g_input.held = 0; g_input.net_held = 0; }
 
 /* Translate a sokol key code into the abstract action enum, or -1. */
 static inline int input_keycode_to_action(int kc) {
@@ -96,7 +108,7 @@ static inline void input_key_up(int kc) {
 static uint32_t input_io_read_cb(mem_region_t *r, uint32_t addr, int size) {
     (void)size;
     uint32_t off  = addr - r->base;
-    uint32_t held = g_input.held;
+    uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
     switch (off) {
         case 0x02: return (uint8_t)~(held         & 0xFFu);  /* IN0 system */
         case 0x04: return (uint8_t)~((held >> 8)  & 0xFFu);  /* IN1 P1     */

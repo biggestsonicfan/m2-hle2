@@ -183,6 +183,73 @@ These addresses are STF-specific. The **patterns** repeat across the catalogue �
 - **Unlock the emu mutex BEFORE sleeping.** Sleeping inside the critical section freezes the UI.
 - **Double-buffered CPU snapshot** (`cpu_snapshot` + `cpu_prev_snapshot`); UI always reads the current snapshot.
 - **Sleep granularity**: Windows `Sleep()` ≈ 1 ms; POSIX `usleep()` ≈ 1 µs.
+- **The netplay pump runs outside the mutex** (`emu_netplay_pump`, `emu_thread.h`) and runs in the
+  STOPPED branch too. A TLS connect blocks for seconds, so pumping it under the mutex freezes the
+  UI; pumping it only while RUNNING means a player who connects before pressing Run never logs in.
+
+### Netplay / RPCN (`src/net/`, board-independent)
+
+Matchmaking is [RPCN](https://github.com/RipleyTom/rpcn); the design follows `yampnet`
+(a sibling checkout, `ai/yampnet`), which worked the protocol out first. These are the parts that
+are **silently wrong** rather than loudly wrong when you get them half right.
+
+- **A session is a COLD BOOT on both machines, not a savestate.** The barrier releases, both peers
+  reset the board, and every frame from power-on is lockstepped. There are no savestates here, so
+  this is the only state two copies are certain to share; it is also stronger than the PS3 port's
+  shared RNG seed, because no window exists in which the two were allowed to differ. The reset has
+  to clear the run loop's own latches too (`emu_board_reset_state`) — an interrupt left in service
+  across it swallows the first interrupt of the new boot, which is a divergence on frame 1.
+- **The board must read a COMPOSED input mask, not the keyboard's.** `input_state_t` carries
+  `net_held` / `use_net` for that. Writing the composed mask over `g_input.held` looks equivalent
+  and is not: key events land on the UI thread at arbitrary moments, so the composed value gets
+  half-overwritten partway through an emulated frame on one machine and not the other.
+- **np2_structs.proto types `uint8` and `uint16` as MESSAGES** (`{ uint32 value = 1 }`, kept from
+  the flatbuffers port). A field declared `uint16 serverId = 1` is a length-delimited submessage
+  containing a varint, not a bare varint. `flagAttr` and `roomId` *are* bare varints. Reading one
+  as the other yields an empty message, not an error.
+- **Three room fields are mandatory despite proto3**, all read with `get_verified()`: `teamId` on
+  CreateRoom (field 16) and JoinRoom (field 6), and all three fields of `sigOptParam` (17). Omitting
+  any is `Malformed`, not a default.
+- **`sigOptParam` is what makes peers reachable at all.** Without it `need_signaling` is false in
+  `room_manager.rs`, the join reply carries no `signaling_data`, and the host's `UserJoinedRoom`
+  notification carries no address — so the host has nobody to punch towards and stays silent.
+- **A room password is a FIXED 8 BYTES and needs `passwordSlotMask`.** The server takes the
+  password only `if len == 8` and otherwise logs "Invalid password length" and leaves the room
+  *open*; the mask (MSB-first, slot i = bit 63-i) is what actually gates the slots. Get either
+  wrong and the room looks protected here and is public there.
+- **SearchRoom needs `option` bit 0** or every row comes back with no owner name, and its range
+  filter is **1-based and capped at 20**.
+- **The world count is a u32 while the server count is a u16** (`cmd_server.rs`). Reading the world
+  list as u16 shifts every entry two bytes and yields plausible-but-wrong world ids.
+- **Every room REPLY is `[u32 LE length][protobuf]`** (`Client::add_data_packet`). Strip it, or the
+  length parses as a tag and the message reads as empty.
+- **Login's third string is the e-mail verification token, not a second password**, and the server
+  compares it only when it has e-mail validation on (off by default). Empty is the normal value.
+- **When two peers share a public IPv4, RPCN hands out the peer's LOCAL address with port 3658
+  HARDCODED** (`room_manager.rs` and `cmd_misc.rs` both). Two clients on one machine are therefore
+  told to punch at their own socket, so `rpcn_session_recv` drops datagrams whose source is our own
+  `local_ip:local_port` — without it `peer_heard` latches onto our own port and every real datagram
+  from the peer is then discarded as a stray.
+- **Hole punching needs BOTH ends transmitting.** The guest's first packet opens a mapping through
+  the *guest's* NAT only; a host that waits to hear something first never opens its own, and two
+  peers on different networks sit at the barrier forever.
+- **Twitch sign-in is a PASSWORD, not a parallel login path.** RPCN's device flow (commands 63/64,
+  unauthenticated) runs once and returns a long-lived login token that the ordinary `Login` accepts
+  in place of the password, so everything below `netplay.h` is unchanged by it. Three things bite:
+  `TwitchAuthPending` (35) and `TwitchAuthSlowDown` (36) are *not* errors and must not end the flow -
+  pending is the answer for most of its life, and slow-down means back off by another interval; the
+  whole flow must stay on ONE connection, because the server relaxes that connection's
+  unauthenticated read timeout from 10 s to 120 s only after the start succeeds; and an older RPCN
+  does not know command 63 at all, so it answers `Malformed` and HANGS UP - a disconnect before the
+  start reply means "no Twitch here", not "the network broke".
+- **Never hand a server-supplied URL to `ShellExecute`.** The activation URI comes from the RPCN
+  server, and `open` will run a local executable or a registered protocol handler just as happily as
+  it opens a web page. `netplay_open_url` requires a literal `https://` prefix first, and is off
+  entirely for a headless run.
+- **One ComId per ROM set** (`com_id.h`, `M2H` namespace). RPCN partitions everything by it, so a
+  single hardcoded id puts every Model 2 game in one room list where the mismatch is found by the
+  netcode instead of the browser. Unlisted games get a deterministic base32 hash of the game key;
+  `CreateMissing=true` registers a new id on first use, so no `servers.cfg` edit is needed.
 
 ---
 
