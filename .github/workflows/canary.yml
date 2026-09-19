@@ -37,7 +37,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental || false }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0        # git describe / commit count for the version stamp
           submodules: false     # vendor/noclip is big and only feeds tools/
@@ -60,7 +60,7 @@ jobs:
       # find_package(Python3) picks whichever Python the runner image ships
       # newest (python3.exe 3.14 on windows-latest), which is not the one
       # `python -m pip` installed ply into, and configure fails.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         id: py
         with:
           python-version: '3.12'
@@ -112,7 +112,7 @@ jobs:
             zip -r ../m2hle-${{ matrix.name }}.zip ./*
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: m2hle-${{ matrix.name }}
           path: dist/*.zip
@@ -123,10 +123,10 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0, submodules: false }
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dl
           pattern: m2hle-*
