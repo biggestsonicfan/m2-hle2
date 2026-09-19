@@ -198,6 +198,10 @@ typedef struct {
     uint32_t        desync_frame;      /* LOCKSTEP_NO_CHECK while in agreement */
     uint32_t        generation;
     uint32_t        seed;
+    /* The peer has announced a session we have not begun -- i.e. THEY pressed
+     * start and we have not. See `peer_ready_gen` in netplay_t. */
+    bool            peer_ready;
+    uint32_t        peer_ready_gen;
 
     rpcn_room_listing_t rooms[RPCN_MAX_ROOMS];
     uint32_t            room_count;
@@ -253,6 +257,22 @@ typedef struct {
     /* Input ownership, derived from the active profile's input map. */
     uint32_t          p1_mask, p2_mask, sys_mask;
     uint32_t          bit_p1[12], bit_p2[12];   /* canonical bit -> profile mask */
+
+    /*
+     * The last generation the peer announced, and when. Latched from EVERY
+     * announce, including the ones `lockstep_on_peer_announce` throws away --
+     * it drops anything that is not the round we are already in, which is
+     * exactly the case that matters here: a peer who has pressed start while
+     * we are still idling in the room announces a generation we have not begun,
+     * so the barrier mask never sees it and nothing else in this file knows the
+     * challenge happened.
+     *
+     * Freshness rather than a sticky flag, because a peer in SYNCING announces
+     * once per slice and a peer who gave up stops. A latched bool would say
+     * "somebody is waiting for you" for the rest of the room's life.
+     */
+    uint32_t          peer_ready_gen;
+    uint64_t          peer_ready_ms;
 
     uint64_t          last_seed_ms;
     uint64_t          last_wait_report_ms;
@@ -487,6 +507,50 @@ static inline void netplay_fill_header(lockstep_header_t *h, uint8_t type) {
 
 static inline bool netplay_is_host(void) { return g_netplay.local_player == 0; }
 
+/*
+ * How long an announce counts for. A peer sitting at the barrier sends one per
+ * slice -- sixty a second -- so anything above a few hundred milliseconds is
+ * generous, and the window is what makes the answer clear itself when they give
+ * up and walk away instead of leaving a challenge on screen forever.
+ */
+#define NETPLAY_READY_WINDOW_MS 2000u
+
+/*
+ * Is somebody waiting for us to accept? True only while we are idling in a room
+ * we have not started a session from: once WE have started, the barrier owns the
+ * question and `lockstep_barrier_released` is the one to ask.
+ */
+static inline bool netplay_peer_ready(void) {
+    if (g_netplay.state != NETPLAY_IN_ROOM) return false;
+    /* No peer in the room, no challenge. The npid is cleared by the room's
+     * own leave notification, so this is also what retracts a challenge from
+     * somebody who announced and then closed their emulator. */
+    if (!g_netplay.session.peer_npid[0]) return false;
+    if (!g_netplay.peer_ready_ms) return false;
+    return net_now_ms() - g_netplay.peer_ready_ms <= NETPLAY_READY_WINDOW_MS;
+}
+
+/* Forget any standing challenge. Called wherever the answer has been given,
+ * so an announce heard during the barrier cannot re-arm the moment a session
+ * ends and start the next one without anybody asking for it. */
+static inline void netplay_clear_ready(void) {
+    g_netplay.peer_ready_ms  = 0;
+    g_netplay.peer_ready_gen = 0;
+}
+
+static inline const char *netplay_state_text(netplay_state_t s) {
+    switch (s) {
+        case NETPLAY_OFF:        return "off";
+        case NETPLAY_CONNECTING: return "connecting";
+        case NETPLAY_ONLINE:     return "online";
+        case NETPLAY_IN_ROOM:    return "in a room";
+        case NETPLAY_SYNCING:    return "waiting at the barrier";
+        case NETPLAY_PLAYING:    return "playing";
+        case NETPLAY_FAILED:     return "failed";
+        default:                 return "?";
+    }
+}
+
 static inline void netplay_send_announce(void) {
     lockstep_announce_packet_t pkt;
     memset(&pkt, 0, sizeof(pkt));
@@ -580,6 +644,15 @@ static inline void netplay_drain_socket(void) {
                 && hdr->generation != (uint8_t)(g_netplay.generation & 0x1F)) {
                 netplay_log("adopting the host's session %u", hdr->generation);
                 netplay_begin_generation(hdr->generation);
+            }
+
+            /* Before the barrier gets a say: `lockstep_on_peer_announce` keeps
+             * only announces for the round we are already in, and a challenge
+             * arrives as an announce for a round we are NOT in. Latch it here,
+             * where every announce still exists. */
+            if ((int32_t)hdr->player != g_netplay.local_player) {
+                g_netplay.peer_ready_gen = hdr->generation;
+                g_netplay.peer_ready_ms  = net_now_ms();
             }
 
             lockstep_on_peer_announce(&g_netplay.lockstep, hdr->player, hdr->generation);
@@ -779,6 +852,8 @@ static inline void netplay_publish_status(void) {
     st->desync_frame = g_netplay.desync_frame;
     st->generation   = g_netplay.generation;
     st->seed         = g_netplay.seed;
+    st->peer_ready     = netplay_peer_ready();
+    st->peer_ready_gen = g_netplay.peer_ready_gen;
 
     st->room_count = g_netplay.session.room_count;
     memcpy(st->rooms, g_netplay.session.rooms, sizeof(st->rooms));
@@ -872,6 +947,7 @@ static inline void netplay_do_disconnect(void) {
     g_netplay.local_player = -1;
     g_netplay.frame        = 0;
     netplay_check_clear();
+    netplay_clear_ready();
     netplay_release_inputs();
     netplay_log("disconnected");
 }
@@ -925,6 +1001,7 @@ static inline void netplay_do_start(void) {
     /* The host picks the generation; a guest pressing start announces its own and
      * adopts the host's the moment one arrives (see netplay_drain_socket). */
     uint32_t gen = (g_netplay.generation + 1) & 0x1F;
+    netplay_clear_ready();
     netplay_begin_generation(gen);
     netplay_log("session %u: waiting for both boards at the barrier", gen);
 }
@@ -933,6 +1010,7 @@ static inline void netplay_do_stop(void) {
     if (g_netplay.state == NETPLAY_PLAYING || g_netplay.state == NETPLAY_SYNCING)
         g_netplay.state = NETPLAY_IN_ROOM;
     g_netplay.reset_pending = false;
+    netplay_clear_ready();
     netplay_release_inputs();
     netplay_log("session stopped");
 }

@@ -48,18 +48,8 @@ static char     g_np_ui_join_id[24] = "";
 static bool     g_np_ui_show_signup = false;
 static uint64_t g_np_ui_selected    = 0;
 
-static inline const char *netplay_state_text(netplay_state_t s) {
-    switch (s) {
-        case NETPLAY_OFF:        return "off";
-        case NETPLAY_CONNECTING: return "connecting";
-        case NETPLAY_ONLINE:     return "online";
-        case NETPLAY_IN_ROOM:    return "in a room";
-        case NETPLAY_SYNCING:    return "waiting at the barrier";
-        case NETPLAY_PLAYING:    return "playing";
-        case NETPLAY_FAILED:     return "failed";
-        default:                 return "?";
-    }
-}
+/* netplay_state_text lives in net/netplay.h: the MCP bridge names these
+ * states too, and it is included before this window is. */
 
 static inline void netplay_window_draw(bool *p_open) {
     igSetNextWindowSize((ImVec2){620, 640}, ImGuiCond_FirstUseEver);
@@ -95,6 +85,13 @@ static inline void netplay_window_draw(bool *p_open) {
                st.peer_addr, st.peer_heard ? "[reachable]"
                             : st.peer_known ? "[punching - nothing heard back yet]"
                                             : "[address unknown]");
+        /* Somebody has pressed start and is sitting at the barrier waiting for
+         * this end to do the same. Worth saying outright: from here it is
+         * otherwise indistinguishable from a peer who has merely joined. */
+        if (st.peer_ready)
+            igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f},
+                          "%s is ready and waiting - press Start to accept",
+                          st.peer_npid[0] ? st.peer_npid : "the peer");
     }
     if (st.state == NETPLAY_PLAYING) {
         igText("frame %u   stalls %u   session %u   seed 0x%08X",

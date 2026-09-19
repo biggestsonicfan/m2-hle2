@@ -246,6 +246,18 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   server, and `open` will run a local executable or a registered protocol handler just as happily as
   it opens a web page. `netplay_open_url` requires a literal `https://` prefix first, and is off
   entirely for a headless run.
+- **A challenge is an announce for a round this end has not begun.** There is no ready message in
+  the protocol; the barrier releases when both peers announce the same generation, which is what
+  pressing Start does. `lockstep_on_peer_announce` drops every announce that is not the round we
+  are already in -- and that is precisely the case a host needs to see, so `netplay.h` latches it
+  separately (`peer_ready_gen`, `netplay_peer_ready`). It is a freshness window and not a flag:
+  a peer at the barrier announces once per slice, so a challenger who walks away retracts their
+  own challenge, where a sticky bool would leave one standing forever.
+- **A scripted session must not write memory or halt the board.** Both are invisible locally and
+  fatal jointly: `write_memory` changes one board and not the other, which is what the frame
+  check exists to catch, and halting to think is a stall the peer sees -- m2-hle2 drops a session
+  that stalls for fifteen seconds. Inputs need no special path, because `set_input` writes
+  `g_input.held` and that is exactly what `netplay_sample_local` transmits.
 - **One ComId per ROM set** (`com_id.h`, `M2H` namespace). RPCN partitions everything by it, so a
   single hardcoded id puts every Model 2 game in one room list where the mismatch is found by the
   netcode instead of the browser. Unlisted games get a deterministic base32 hash of the game key;

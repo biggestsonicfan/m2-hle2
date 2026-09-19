@@ -172,6 +172,102 @@ Remove every breakpoint.
 **`list_breakpoints()`**
 Returns an array of `{addr, label, enabled}` for all active breakpoints.
 
+### Netplay (RPCN)
+
+The netplay window's buttons, as bridge commands — enough to hold a lobby open,
+notice a challenger and accept a match without anybody at the keyboard. All of
+them post onto the same mutex-guarded queue the UI uses, so the bridge thread is
+one more UI thread as far as `src/net/` is concerned; none of them touch the emu
+mutex or a socket.
+
+Sign in **once**, by hand, before scripting anything: the Twitch device flow is
+a browser dance that happens once ever, and the login token it yields is stored
+in `m2hle_netplay.cfg` beside the executable. Every later `netplay_connect` then
+needs no arguments at all.
+
+```
+m2hle --rom sfight.zip --run --netplay --net-server rpcn.sonicthefighte.rs --net-twitch
+```
+
+**`netplay_status(log: int = 12, rooms: int = 0)`**
+Everything the published snapshot holds. `state` is the text
+(`off` / `connecting` / `online` / `in a room` / `waiting at the barrier` /
+`playing` / `failed`) with `state_num` beside it, plus `room_id` (a **string** —
+it is 64-bit), `com_id`, `frame`, `stalls`, `generation`, `seed`,
+`desync_frame` (null while the two boards agree), `error`, and a `twitch`
+object. `rooms: 1` adds the last search's results; `log` is how many lines of
+the emulator's own netplay log to return, with `log_count` beside it so a
+poller can tell "nothing happened" from "I missed some".
+
+`peer` is the interesting one:
+
+| field | means |
+|---|---|
+| `npid` | the challenger's RPCN account name, empty for an empty room |
+| `known` | the server has told us their address |
+| `heard` | a datagram has actually arrived from them |
+| **`ready`** | **they have joined AND pressed Start — this is a challenge** |
+| `ready_gen` | the session generation they announced |
+
+`ready` is the whole reason these commands exist. RPCN has no "ready" message;
+the barrier releases when both peers announce the same generation, which is what
+pressing Start does. A peer who has pressed it while this end has not is
+announcing a session we are not in — `lockstep_on_peer_announce` drops exactly
+those, so `netplay.h` latches them separately. It is a **freshness window**, not
+a flag: a challenger who gives up stops announcing and `ready` goes false about
+two seconds later, rather than leaving a challenge standing that nobody is at.
+
+**`netplay_connect(server, port, user, pass, token, fingerprint, twitch, delay, browse_yamp, p2p_port)`**
+Sign in. Every field is optional and defaults to whatever is stored, so
+`{"cmd":"netplay_connect"}` means "as whoever signed in last". `twitch: 1` runs
+the device flow instead — which signs in *and connects itself*, so it replaces
+the connect rather than preceding it. Passing `pass` means the password and
+clears any stored Twitch token for this attempt.
+
+**`netplay_host(delay, room_pass)`** — take a room. 2 slots; host is always P1.
+**`netplay_join(room_id, room_pass)`** — join one. `room_id` is a string.
+**`netplay_search(browse_yamp)`** — fill `rooms` in the status.
+**`netplay_stop()`** — leave the match, keep the room, so the next challenger
+has one to join.
+**`netplay_disconnect()`** — give the room back and drop the session.
+
+**`netplay_start()`** — **accept.** Begin (or restart) a lockstepped session.
+
+Two things it is important to have read before calling it:
+
+* **The board is about to cold-boot.** A session starts from power-on on both
+  machines, because with no savestates that is the only state two copies are
+  certain to share. Anything the bridge had set up — a fight in progress, a
+  character written into a fighter record, credits poked into RAM — is gone the
+  moment the barrier releases. Getting back to a round is `set_input`'s job:
+  coin, START, the select cursor, confirm.
+
+* **`write_memory` is a desync.** While a session is playing, a write changes
+  one of the two boards and not the other, which is precisely what the frame
+  check exists to catch. Reads are free and unaffected. Inputs are fine and
+  need no new command — `set_input` writes `g_input.held`, which is exactly what
+  `netplay_sample_local` reads and transmits, so what the bridge presses goes
+  out on the wire and comes back applied to both boards.
+
+Halting the board is also a stall on the other machine, and m2-hle2 drops a
+session that stalls for fifteen seconds — so no `emu_stop` between frames while
+a session is running.
+
+A lobby that holds itself open, in full:
+
+```jsonc
+{"cmd":"netplay_connect"}                  // the stored login
+{"cmd":"netplay_status"}                   // poll until state == "online"
+{"cmd":"netplay_host","delay":2}           // poll until state == "in a room"
+{"cmd":"netplay_status"}                   // poll peer.ready
+{"cmd":"netplay_start"}                    // when it is true: accept
+                                           // both boards reset; play with set_input
+{"cmd":"netplay_stop"}                     // match over — the room stays open
+```
+
+`flystf/rpcn.py` in the [stf-fly](../stf-fly) sibling is that loop with a fruit
+fly behind it.
+
 ---
 
 ## STF memory map (key addresses)
