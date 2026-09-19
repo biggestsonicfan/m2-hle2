@@ -80,6 +80,7 @@ one you already have running with `--mcp`.
 | `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
+| `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
 | `watch-var.mjs` | who writes this address, and what do they write? A bus watchpoint that reports the value and the IP behind it, so a variable whose owner is unknown can be traced back to its routine |
@@ -550,6 +551,37 @@ different slot; audio envelope correlation 0.992 and loudness within 1% in every
 5-second window. Before the rebuild, the same comparison matched about half the
 notes of the first five seconds and held 25-32 voices keyed where MAME holds
 5-16.
+
+## The netplay reset
+
+A netplay session is a cold boot on both machines, so the reset at the barrier
+has one job: leave nothing behind. Anything that survives it is state one player
+has and the other does not, because no two players did the same thing before
+they pressed Start — and the frame check would not see it, since it hashes the
+i960's registers and the step count, not RAM.
+
+`grade-reset.mjs` measures that without a session and without a second machine:
+
+    node tools/grade-reset.mjs
+    node tools/grade-reset.mjs --pre 1500,5300,9000 --frames 300
+
+It boots and takes the board at the 120th frame boundary (a breakpoint on the
+frame hook counts them; polling stops a few frames late and nothing would
+match). Then it runs 1500 frames on into the attract movie, asks the bridge for
+`board_reset` — `netplay_reset_board_cb`, the code the barrier runs — takes the
+board at the 120th frame again, and does the same from 5300 frames further on,
+inside the replay fight, on top of the first reset. Each take has to be the
+first boot's, byte for byte: the registers, RAM2, RAM, bufferram, tile RAM, tile
+graphics, palette, colorxlat and both texture sheets. A region that differs is
+reported with its first differing address, which is usually enough to name the
+owner.
+
+Measured 2026-09-19 on master: exact, 22 of 22. It was written to rule the reset
+out as the cause of a remote player's board stopping 45 frames into a session,
+and it did; it stays as the check to run after adding any state a reset has to
+clear. What it cannot see is anything that differs between two *machines* rather
+than two boots on one, the GEO's private RAM, and the sound board, which has its
+own grader.
 
 ## What is not here yet
 

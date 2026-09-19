@@ -1700,6 +1700,20 @@ static inline void netplay_do_reset(void) {
     }
 }
 
+/*
+ * The same reset with no session behind it, for whoever wants to know what the
+ * barrier's reset does to a board that has been running: the MCP bridge's
+ * `board_reset`, which tools/grade-reset.mjs holds against a first boot. Emu
+ * thread, emu mutex held, like netplay_do_reset. False without a hook.
+ */
+static inline bool netplay_reset_board_now(void) {
+    if (!g_netplay.reset_board) return false;
+    g_netplay.reset_board(g_netplay.reset_ctx);
+    input_reset();
+    netplay_log("board reset on request (no session)");
+    return true;
+}
+
 static inline bool netplay_active(void) {
     return g_netplay.enabled && g_netplay.state == NETPLAY_PLAYING;
 }
