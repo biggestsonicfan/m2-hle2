@@ -67,6 +67,10 @@ typedef struct {
     int16_t          out[SOUND_OUT_FRAMES * 2];
     volatile uint32_t out_w, out_r;
     uint64_t         out_dropped;
+    /* Every sample the board has ever produced, whether the ring took it or
+     * not. The one clock a consumer outside the ring can trust, and monotonic
+     * across a board reset — sound_reset() leaves it, and the ring, alone. */
+    uint64_t         out_total;
     uint64_t         midi_drains;      /* times the MIDI ring was drained mid-burst */
 
     /* i960 side */
@@ -368,7 +372,29 @@ static inline void sound_attach(memory_bus_t *bus) {
 
 /* ---- the sample clock ------------------------------------------------------------- */
 
+/* ---- the producer tap ----------------------------------------------------
+ *
+ * sound_out_push below is the ONLY producer of board audio, and the ring it
+ * feeds has a single reader (core/audio_out.h). A host with no audio device
+ * drains nothing, so a second reader of that ring would only ever see samples
+ * the first one had already counted into out_dropped: anything wanting its own
+ * copy of the board's output — the A/V stream, a capture — has to take it
+ * HERE, ahead of the ring. The tap is handed the sample's absolute index, so
+ * what it keeps carries the same clock as g_sound.out_total.
+ *
+ * Called on the emu thread, once per 44.1 kHz sample, with the emu mutex held.
+ * Keep it to a ring write. */
+static void (*g_sound_tap)(int16_t l, int16_t r, uint64_t index, void *ud);
+static void  *g_sound_tap_ud;
+
+static inline void sound_set_tap(void (*fn)(int16_t, int16_t, uint64_t, void *), void *ud) {
+    g_sound_tap_ud = ud;
+    g_sound_tap    = fn;      /* last: ud has to be in place before the first call */
+}
+
 static inline void sound_out_push(int16_t l, int16_t r) {
+    uint64_t index = g_sound.out_total++;
+    if (g_sound_tap) g_sound_tap(l, r, index, g_sound_tap_ud);
     uint32_t w = g_sound.out_w;
     if (((w + 1) & (SOUND_OUT_FRAMES - 1)) == g_sound.out_r) { g_sound.out_dropped++; return; }
     g_sound.out[w * 2] = l;

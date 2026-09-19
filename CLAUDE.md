@@ -190,10 +190,46 @@ These addresses are STF-specific. The **patterns** repeat across the catalogue �
 
 - **Unlock the emu mutex BEFORE sleeping.** Sleeping inside the critical section freezes the UI.
 - **Double-buffered CPU snapshot** (`cpu_snapshot` + `cpu_prev_snapshot`); UI always reads the current snapshot.
-- **Sleep granularity**: Windows `Sleep()` ≈ 1 ms; POSIX `usleep()` ≈ 1 µs.
+- **Sleep granularity**: POSIX `usleep()` ≈ 1 µs, but Windows `Sleep()` is **~15.6 ms**, not 1 ms,
+  unless something in the process has asked for a finer timer. A window or an audio device
+  usually has; a `--headless` run has not, and a 1 ms poll there really waits 15.6 ms (measured
+  — see the A/V section below, where it cost a third of the frames).
 - **The netplay pump runs outside the mutex** (`emu_netplay_pump`, `emu_thread.h`) and runs in the
   STOPPED branch too. A TLS connect blocks for seconds, so pumping it under the mutex freezes the
   UI; pumping it only while RUNNING means a player who connects before pressing Run never logs in.
+
+### Raw A/V out (`--av-port`, host-side — `core/av_stream.h`, `ui/av_capture.h`)
+
+One local client gets BGRA frames and 16-bit stereo samples on one socket, every packet stamped
+with the board's own 44.1 kHz counter (`g_sound.out_total`, latched per game frame in
+`g_frame_clock`). Four of these were measured, not reasoned out, and three of them fail quietly.
+
+- **The audio has to be tapped at the producer, in `sound_out_push`.** The host ring below it
+  has exactly one reader (`audio_out.h`), and a host with no audio device drains nothing — so a
+  second reader of that ring only ever sees what the first already counted into `out_dropped`.
+  `sound_set_tap` is that tap and `out_total` is the clock that goes with it; `sound_reset`
+  leaves both alone, so a board reset does not move an A/V client's clock backwards.
+- **A headless D3D11 device never Presents, so nothing submits the command buffer, and a
+  staging `CopyResource` is still unfinished when the non-blocking `Map` reaches it two frames
+  later.** `av__cap_issue` calls `ID3D11DeviceContext_Flush` after the copy for that reason
+  (`Flush` does not wait). *Measured:* 30% of frames survived the map without it and 100% with
+  it — 16 fps became 55. A windowed run gets the same flush free from Present, which is exactly
+  why this does not show up until there is no window.
+- **`Sleep(1)` is ~15.6 ms in a process that has neither a window nor an audio device**, because
+  nothing in it has asked Windows for a finer timer. Polling the frame clock at 15.6 ms against
+  a 16.7 ms frame caught 37 of 60. The headless loop uses a
+  `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` waitable timer instead — a real millisecond, no
+  `timeBeginPeriod`, nothing past kernel32.
+- **Copies still in flight when a client goes must not reach the next one.** The first video
+  packet of a session is what sets where the audio starts, so one leaked frame tagged with an
+  old board frame drags the audio read head back by however long the emulator sat between
+  clients — and the whole next session is then spent lapping through stale audio. `av_capture`
+  drops its in-flight copies when `av_stream_session()` changes, and `av__serve` clamps the
+  origin to what the ring still holds. *Symptom:* a second client got 0.6 fps and a lapped
+  audio ring where the first had got 13.
+- **The rings are allocated once and never freed** (`av_stream_shutdown` says so). The tap runs
+  on the emu thread and clearing the function pointer does not retire a call already inside it.
+  Same shape as the texram crash under "Memory Bus", same answer.
 
 ### Netplay / RPCN (`src/net/`, board-independent)
 

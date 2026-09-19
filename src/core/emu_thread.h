@@ -168,6 +168,23 @@ static inline void emu_match_replay_edge(emu_thread_ctx_t *ctx) {
     LOG_INFO("match_replay: attract step %u -> %u at frame %u", ar->from_step, ar->to_step, g_emu_frames);
 }
 
+/* ---- The frame clock ------------------------------------------------------
+ *
+ * The board's audio sample count at each game-frame boundary. Written here, on
+ * the emu thread; read by whatever renders the frame, so a picture can be
+ * stamped on the same timebase as the samples that go with it — which is what
+ * lets an A/V consumer put the two back together without assuming 735 samples
+ * a frame or an exact 60 Hz (src/core/av_stream.h).
+ *
+ * `sample` is published BEFORE `frame`, and a reader re-reads `frame` after
+ * taking both: the pair is not written atomically, and the frame number is
+ * what says the sample beside it is the matching one.
+ */
+static struct {
+    volatile uint64_t sample;   /* g_sound.out_total when `frame` ended */
+    volatile uint64_t frame;    /* the g_emu_frames value get_status reports */
+} g_frame_clock;
+
 /* Clear the run loop's own per-boot latches. Part of a board reset, and separate
  * from install_fn because these live here: a handler left "in service" across a
  * reset would swallow the first interrupt of the new boot, which on two
@@ -178,6 +195,10 @@ static inline void emu_board_reset_state(void) {
     g_frame_done         = 0;
     g_vblank_acked       = 0;
     g_emu_frames         = 0;
+    /* The frame number restarts with the board; the sample clock does not —
+     * g_sound.out_total survives a reset, and an A/V client mid-stream would
+     * hear the seam as a jump backwards in time. */
+    g_frame_clock.frame  = 0;
 }
 
 static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
@@ -448,6 +469,11 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
     }
     if (g_frame_done || (board_vblank && g_vblank_acked)) {
         g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
+        /* Stamp the frame with the board audio produced up to its end: the
+         * slice's own samples are already in, sound_run_slice ran in the body
+         * above. sample first, frame second (see g_frame_clock). */
+        g_frame_clock.sample = g_sound.out_total;
+        g_frame_clock.frame  = g_emu_frames;
         /* The netplay frame clock and this frame's state check. Fed the
          * snapshot rather than the live CPU: it was taken under the mutex
          * a few lines up and is the same state, without racing the UI. */
