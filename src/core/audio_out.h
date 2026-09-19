@@ -21,12 +21,15 @@
 #include "log.h"
 #include "../board/sound.h"
 
-#define AUDIO_TARGET 4096.0     /* frames of 44.1 kHz audio kept queued (~93 ms) */
+#define AUDIO_TARGET 8192.0     /* frames of 44.1 kHz audio kept queued (~186 ms) */
+#define AUDIO_RESUME 256        /* frames faded back in after an underrun (~5 ms) */
 
 typedef struct {
     bool     ready;
     double   pos;               /* fractional read position ahead of out_r */
     float    last_l, last_r;
+    float    hold_l, hold_r;                /* level held through an underrun */
+    uint32_t resume;                        /* frames left of the fade back in */
     float    dc_xl, dc_xr, dc_yl, dc_yr;    /* DC blocker state */
     uint32_t rate;
     uint64_t underruns;
@@ -43,7 +46,11 @@ static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
         uint32_t fill = (w - r) & mask;
         float l, rr;
         if (fill < 2) {
-            /* hold the last level (the DC blocker then fades it out without a click) */
+            /* Hold the last level (the DC blocker then fades it out without a
+             * click) and arm a fade back in: coming off a hold straight onto a
+             * live sample is a step, and a step is the click you hear. */
+            a->hold_l = a->last_l; a->hold_r = a->last_r;
+            a->resume = AUDIO_RESUME;
             l = a->last_l; rr = a->last_r;
             a->underruns++;
         } else {
@@ -51,10 +58,16 @@ static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
             const int16_t *p0 = g_sound.out + r * 2, *p1 = g_sound.out + ((r + 1) & mask) * 2;
             l  = ((float)p0[0] + ((float)p1[0] - (float)p0[0]) * f) / 32768.0f;
             rr = ((float)p0[1] + ((float)p1[1] - (float)p0[1]) * f) / 32768.0f;
+            if (a->resume) {
+                float g = 1.0f - (float)a->resume / (float)AUDIO_RESUME;
+                l  = a->hold_l + (l  - a->hold_l) * g;
+                rr = a->hold_r + (rr - a->hold_r) * g;
+                a->resume--;
+            }
             a->last_l = l; a->last_r = rr;
             double adj = ((double)fill - AUDIO_TARGET) / AUDIO_TARGET;
             adj = adj < -1.0 ? -1.0 : adj > 1.0 ? 1.0 : adj;
-            a->pos += (double)SOUND_RATE / (double)a->rate * (1.0 + 0.005 * adj);
+            a->pos += (double)SOUND_RATE / (double)a->rate * (1.0 + 0.010 * adj);
             uint32_t adv = (uint32_t)a->pos;
             if (adv > fill - 1) adv = fill - 1;
             a->pos -= adv;

@@ -86,6 +86,8 @@ typedef struct {
     int16_t     sous[128];       /* sound stack; slots write [ptr & 63] in turn */
     uint8_t     sous_ptr;
     uint8_t     mi[32], mi_r, mi_w;
+    uint32_t    mi_drops;        /* MIDI bytes lost to a full input ring (see scsp_midi_in) */
+    uint8_t     mi_hi;           /* high-water fill of that ring, to see how close it gets */
     uint8_t     mo[32], mo_r, mo_w;
     uint16_t    tim_cnt[3];      /* MAME: 0xFFFF once expired, reload << 8 after a write */
     uint64_t    tim_due[3];      /* expiry, in clock periods of *clock; 0 = not running */
@@ -791,9 +793,25 @@ static inline void scsp_write(scsp_t *s, uint32_t off, uint32_t val, int sz) {
 }
 
 static inline void scsp_midi_in(scsp_t *s, uint8_t b) {
+    /* A full ring must not advance past the read pointer. The fill is read as
+     * (mi_w - mi_r) & 31, so lapping mi_r makes 32 pending bytes look like none,
+     * and scsp_check_irq then drops the MIDI line with a command half delivered
+     * -- the driver loses the stream and never resyncs, which is silence for the
+     * rest of the run. The i960 side bursts (emu_service_sound_again re-runs the
+     * sound handler within a slice, and the 68000 only drains in sound_run_slice
+     * afterwards), so this is reachable here in a way it is not on the board,
+     * where the UART paces the bytes out. Drop the byte and count it instead;
+     * emu_service_sound_again backs off before it gets here. */
+    if ((uint8_t)((s->mi_w + 1) & 31) == s->mi_r) { s->mi_drops++; return; }
     s->mi[s->mi_w] = b;
     s->mi_w = (uint8_t)((s->mi_w + 1) & 31);
+    { uint8_t fill = (uint8_t)((s->mi_w - s->mi_r) & 31); if (fill > s->mi_hi) s->mi_hi = fill; }
     scsp_check_irq(s);
+}
+
+/* free space in the MIDI input ring, for the i960 side's backpressure */
+static inline uint32_t scsp_midi_room(const scsp_t *s) {
+    return 31u - (uint32_t)((s->mi_w - s->mi_r) & 31);
 }
 
 /* ---- lifecycle and the sample clock --------------------------------------------------- */
