@@ -150,8 +150,10 @@ typedef struct {
     /* The firmware's own data memory, DM 0x30000..0x32FFF, one word each —
      * what Fn_write_ram (0x49) fills and Fn_read_ram (0x48) reads, and the
      * state the collision commands hand each other (sharc_dm_get/set; the
-     * unit-matrix cache at 0x30420..0x3059F is rot_cache, not this array). */
-    uint32_t dm[0x3000];
+     * unit-matrix cache at 0x30420..0x3059F is rot_cache, not this array).
+     * DM 0x30000..0x377FF: Fn_zanzou_init clears 0x5480 words from 0x32180,
+     * and the afterimage ring reaches 0x332FF, so 0x3000 words is not enough. */
+    uint32_t dm[0x7800];
 
     /* Activity counters. */
     uint32_t unknown_cmds;

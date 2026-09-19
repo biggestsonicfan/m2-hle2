@@ -46,8 +46,14 @@
 
 #include "sharc.h"
 #include "sharc_coli.h"
+#include "sharc_zanzou.h"
 
 /* ---- Argument count table ------------------------------------------------ */
+
+/* A command whose length only its own state machine knows: cop.h hands it one
+ * word at a time until the handler says it is done.  Fn_zanzou_reserve is the
+ * only one in the COP's table. */
+#define COP_ARGS_STREAM (-1)
 
 static inline int sharc_args_for_cmd(uint32_t cmd) {
     switch (cmd) {
@@ -69,9 +75,13 @@ static inline int sharc_args_for_cmd(uint32_t cmd) {
         case 0x13002626: return 1;
         /* Animation curve interpolation: 6-in / 1-out */
         case 0x19003232: return 6;
-        /* Afterimage/zanzou slot reads */
+        /* Afterimage (zanzou) — cpres1 PM 0x208E1..0x20A8E, sharc_zanzou.h.
+         * 0x80 is variable-length; cop.h streams it (COP_ARGS_STREAM). */
+        case 0x40008080: return COP_ARGS_STREAM;
         case 0x42808585: return 1;
         case 0x42008484: return 1;
+        case 0x41808383: return 1;
+        case 0x43808787: return 1;
         /* Shadow slot / matrix commands */
         case 0x39807373: return 2;
         case 0x3A807575: return 6;
@@ -1115,12 +1125,61 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             }
             return;
 
-        /* ---- Afterimage/zanzou slot reads ---- */
-        case 0x42808585:
-            sharc_push_u(0); sharc_push_u(0); sharc_push_u(0);
-            sharc_push_u(0); sharc_push_u(0);
+        /* ---- Afterimage (zanzou) — sharc_zanzou.h ---- */
+
+        /* 0x42808585 Fn_zanzou_get_info (PM 0x208E6): one ring slot, 5 words.
+         * zanzou_disp reads all 128 slots a frame and draws the ones still
+         * alive, so five zeros meant no afterimage was ever drawn. */
+        case 0x42808585: {
+            uint32_t info[5] = { 0, 0, 0, 0, 0 };
+            if (n >= 1) sharc_zanzou_get_info(args[0], info);
+            for (int k = 0; k < 5; k++) sharc_push_u(info[k]);
             return;
+        }
+
+        /* 0x42008484 Fn_zanzou_mul_matrix_inner (PM 0x20926): current matrix
+         * composed with the slot's own, through _L201EA. */
         case 0x42008484:
+            if (n >= 1) {
+                float B[12];
+                uint32_t m = ZZ_RING + (args[0] & 0x7Fu) * ZZ_SLOT_WORDS + ZZ_MAT;
+                for (int k = 0; k < 12; k++) B[k] = sharc_dm_getf(m + (uint32_t)k);
+                sharc_compose(B);
+            }
+            return;
+
+        /* 0x41808383 Fn_zanzou_load_matrix_inner (PM 0x20937): the slot's 12
+         * words straight into the current matrix, col0 col1 col2 T. */
+        case 0x41808383:
+            if (n >= 1) {
+                uint32_t m = ZZ_RING + (args[0] & 0x7Fu) * ZZ_SLOT_WORDS + ZZ_MAT;
+                for (int col = 0; col < 3; col++)
+                    for (int row = 0; row < 3; row++)
+                        g_sharc.rot[col][row] = sharc_dm_getf(m + (uint32_t)(col * 3 + row));
+                for (int k = 0; k < 3; k++) g_sharc.pos[k] = sharc_dm_getf(m + 9u + (uint32_t)k);
+                g_sharc.matrix_dirty = true;
+                g_sharc.bone_dirty   = true;
+            }
+            return;
+
+        /* 0x43808787 Fn_zanzou_get_matrix_inner (PM 0x20946): the mirror. */
+        case 0x43808787:
+            if (n >= 1) {
+                uint32_t m = ZZ_RING + (args[0] & 0x7Fu) * ZZ_SLOT_WORDS + ZZ_MAT;
+                for (int col = 0; col < 3; col++)
+                    for (int row = 0; row < 3; row++)
+                        sharc_dm_setf(m + (uint32_t)(col * 3 + row), g_sharc.rot[col][row]);
+                for (int k = 0; k < 3; k++) sharc_dm_setf(m + 9u + (uint32_t)k, g_sharc.pos[k]);
+            }
+            return;
+
+        /* 0x40008080 Fn_zanzou_reserve (PM 0x20961): variable length. cop.h
+         * streams it word by word; this path is for a captured argument list
+         * (tests/cop_replay), which holds the whole conversation at once. */
+        case 0x40008080:
+            sharc_zanzou_begin();
+            for (int k = 0; k < n; k++)
+                if (sharc_zanzou_feed(args[k])) break;
             return;
 
         /* ---- Bone matrix cache (SHARC DM[0x30420..0x305A0]) ---- */
@@ -1201,8 +1260,13 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
 
         /* 0x40808181: COP internal — PM 0x0208E1. 0 args, no output. */
         case 0x40808181:
-        /* 0x43008686: COP internal — PM 0x020955. 1 arg, no output. */
+            sharc_zanzou_init();
+            return;
+
+        /* 0x43008686 Fn_zanzou_kill_timer_buffer — PM 0x020955. 1 arg, the
+         * player; clears that fighter's 16 per-part age counters. */
         case 0x43008686:
+            if (n >= 1) sharc_zanzou_kill_timers(args[0]);
             return;
 
         /* 0x22004444: Fn_load_matrix_inner (PM 0x2054C) — inner bank
@@ -1445,8 +1509,10 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             }
             return;
 
+        /* 0x41008282 Fn_zanzou_inc — PM 0x020911. Ages every ring slot and
+         * answers how many are still alive (the i960 keeps it in zanzou_num). */
         case 0x41008282:
-            sharc_push_u(0);
+            sharc_push_u(sharc_zanzou_inc());
             return;
 
         case 0x18003030:
