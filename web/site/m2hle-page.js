@@ -49,6 +49,17 @@ function loadZip(bytes) {
   show('step-busy');
   /* Let the "reading" text paint before the (synchronous) extraction runs. */
   requestAnimationFrame(() => setTimeout(() => {
+    /* ?script= and ?pause= : a run whose inputs are keyed to game frames, so it is
+     * the same run every time (main_web.c, "A scripted run"). For tests. */
+    if (params.get('script')) {
+      const text = params.get('script');
+      const n = Module.lengthBytesUTF8(text) + 1, sp = Module._malloc(n);
+      Module.stringToUTF8(text, sp, n);
+      Module._web_script(sp);
+      Module._free(sp);
+    }
+    if (params.get('pause')) Module._web_pause_at(Number(params.get('pause')) >>> 0);
+
     const ptr = Module._malloc(bytes.length);
     if (!ptr) { romError('Not enough memory to read that file.'); return; }
     Module.HEAPU8.set(bytes, ptr);           /* HEAPU8 read AFTER malloc: growth replaces the view */
@@ -217,6 +228,15 @@ function debugStart() {
       /* The worklet counts dropouts; the fallback's callback counts samples it had to hold. */
       lines.push((a.mode === 'fallback' ? 'held samples ' : 'dropouts ') + a.underruns + '   resyncs ' + a.resyncs);
     }
+    /* The sound BOARD: voices sounding, and whether the game's command bytes all
+     * arrived. If the music is missing, this line is the evidence. */
+    if (Module._web_sound_status) {
+      const b = JSON.parse(Module.UTF8ToString(Module._web_sound_status()));
+      let voices = 0;
+      for (let v = b.active >>> 0; v; v &= v - 1) voices++;
+      lines.push('board    ' + voices + ' voices   midi ' + b.midi_writes + ' sent, ' + b.midi_drops +
+                 ' lost, peak ' + b.midi_hi + '/31, ' + b.midi_drains + ' drains');
+    }
     box.textContent = lines.join('\n');
   }, 500);
 }
@@ -225,6 +245,9 @@ function debugStart() {
 
 var Module = {
   canvas: $('canvas'),
+  /* ?args=--fill-ref,--no-mesh-cache reaches main_web.c as argv: the switches that
+   * turn one render optimisation off each, for finding which one drew it wrong. */
+  arguments: (params.get('args') || '').split(',').filter((a) => /^--[a-z-]+$/.test(a)),
   locateFile: (path) => versioned(path),      /* m2hle.wasm */
   print: (t) => console.log(t),
   printErr: (t) => console.warn(t),

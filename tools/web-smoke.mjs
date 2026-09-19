@@ -5,7 +5,7 @@
  *   node tools/web-smoke.mjs --url http://localhost:8080/?rom=/dev-rom.zip
  *        [--seconds 30] [--shot out.png] [--shot-at 10,20] [--browser path/to/chrome-or-edge]
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
- *        [--expect-log TEXT] [--fail-on-log REGEX]
+ *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -162,7 +162,8 @@ try {
     await sleep(1000);
     const st = await evaluate(
       "(typeof Module !== 'undefined' && Module._web_state) ? [Module._web_state(), Module._web_frames(), " +
-      "Module.m2hleAudioStats ? Module.m2hleAudioStats() : null] : null");
+      "Module.m2hleAudioStats ? Module.m2hleAudioStats() : null, " +
+      "Module._web_sound_status ? JSON.parse(Module.UTF8ToString(Module._web_sound_status())) : null] : null");
     if (st) {
       frames = st[1];
       /* The queue is sampled at an arbitrary phase of its sawtooth (up a chunk, down
@@ -171,7 +172,14 @@ try {
       const audio = !a ? '' : !a.rate ? `  audio ${a.mode}`
         : `  audio ${a.mode}/${a.state} queue=${a.queueMs.toFixed(0)}ms (target ${a.targetMs.toFixed(0)})` +
           `${a.buffering ? ' BUFFERING' : ''} ${a.mode === 'fallback' ? 'held-samples' : 'dropouts'}=${a.underruns} resyncs=${a.resyncs}`;
-      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${audio}`);
+      /* --sound: the sound BOARD, not the host audio path -- voices sounding and
+       * whether the i960's command bytes all arrived. */
+      const b = st[3];
+      const bits = (m) => { let n = 0; for (let v = m >>> 0; v; v &= v - 1) n++; return n; };
+      const board = b && args.includes('--sound')
+        ? `  snd voices=${bits(b.active)} midi w=${b.midi_writes} drops=${b.midi_drops} hi=${b.midi_hi} drains=${b.midi_drains} pc=${b.m68k_pc}`
+        : '';
+      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${args.includes('--sound') ? '' : audio}${board}`);
       lastFrames = frames;
     }
     for (const k of keys) if (!k.done && s >= k.at) { k.done = true; await press(k.key); }

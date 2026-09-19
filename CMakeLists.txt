@@ -149,7 +149,7 @@ if(M2HLE_WEB)
         "-sALLOW_MEMORY_GROWTH=1"
         "-sSTACK_SIZE=8388608"
         "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
-        "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,UTF8ToString"
+        "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,UTF8ToString,stringToUTF8,lengthBytesUTF8"
     )
     # The page: copied and version-stamped on every build. A target of its own and
     # not a POST_BUILD step of m2hle, which only runs when m2hle relinks -- so an

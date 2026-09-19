@@ -287,6 +287,13 @@ static const char *game_render_fill_vs_glsl =
     "flat out ivec4 face;\n"
     "flat out ivec2 tile_log2;\n"   /* log2 of the tile sides (GLSL ES 3.00 has no findMSB) */
     "flat out int ramp_row;\n"      /* colour alpha - 2: the face's colour ramp row, or -1 */
+    /* A decal is its surface's own faces drawn again, exactly on top, and passes on
+     * a depth TIE (LESS_EQUAL). Since the fill was split, the surface can go through
+     * the discard-free program and its decal through the discarding one, and two
+     * programs are only promised the same gl_Position for the same inputs if it is
+     * declared invariant. Without this a driver may let them differ in the last
+     * bit, and a mouth or an eye z-fights with the face it is painted on. */
+    "invariant gl_Position;\n"
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"

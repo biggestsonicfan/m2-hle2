@@ -117,6 +117,63 @@ static void web_netplay_reset_cb(void *ctx) {
     web_install_board();
 }
 
+/* ---- A scripted run ---------------------------------------------------------
+ *
+ * Inputs keyed to GAME FRAMES, and a frame to stop at. A key pressed by wall
+ * clock lands on a different frame every run; with this, two runs of the same
+ * script are the same run, so one frame can be drawn with and without a render
+ * optimisation (?args=) and the two pictures compared. It is also the shape a
+ * netplay determinism test needs. Off unless the page is given ?script=.
+ *
+ *   web_script("449:c,460:,517:s,530:,700:l,712:")   at frame N, hold exactly these
+ *   web_pause_at(1000)                               stop stepping at frame 1000
+ *
+ * Keys, all player 1: u d l r, 1-4 the buttons, s start, c coin.
+ */
+#define WEB_SCRIPT_MAX 128
+static struct { uint32_t frame, held; } g_web_script[WEB_SCRIPT_MAX];
+static int      g_web_script_n, g_web_script_at;
+static uint32_t g_web_pause_frame;
+
+static uint32_t web_script_mask(const char *keys, const char *end) {
+    uint32_t held = 0;
+    const game_input_map_t *in = &g_active_profile->input;
+    for (const char *p = keys; p < end; p++) {
+        switch (*p) {
+            case 'u': held |= in->bits[GAME_INPUT_P1_UP];    break;
+            case 'd': held |= in->bits[GAME_INPUT_P1_DOWN];  break;
+            case 'l': held |= in->bits[GAME_INPUT_P1_LEFT];  break;
+            case 'r': held |= in->bits[GAME_INPUT_P1_RIGHT]; break;
+            case '1': held |= in->bits[GAME_INPUT_P1_B1];    break;
+            case '2': held |= in->bits[GAME_INPUT_P1_B2];    break;
+            case '3': held |= in->bits[GAME_INPUT_P1_B3];    break;
+            case '4': held |= in->bits[GAME_INPUT_P1_B4];    break;
+            case 's': held |= in->bits[GAME_INPUT_P1_START]; break;
+            case 'c': held |= in->bits[GAME_INPUT_P1_COIN];  break;
+            default: break;
+        }
+    }
+    return held;
+}
+
+EMSCRIPTEN_KEEPALIVE void web_script(const char *text) {
+    g_web_script_n = g_web_script_at = 0;
+    if (!text || !g_active_profile) return;
+    for (const char *p = text; *p && g_web_script_n < WEB_SCRIPT_MAX; ) {
+        char *colon = NULL;
+        unsigned long frame = strtoul(p, &colon, 10);
+        if (!colon || *colon != ':') break;
+        const char *end = strchr(colon, ',');
+        if (!end) end = colon + strlen(colon);
+        g_web_script[g_web_script_n].frame = (uint32_t)frame;
+        g_web_script[g_web_script_n].held  = web_script_mask(colon + 1, end);
+        g_web_script_n++;
+        p = *end ? end + 1 : end;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE void web_pause_at(unsigned frame) { g_web_pause_frame = frame; }
+
 /* One slice, if netplay allows it. Returns false when the board did not advance
  * (stalled on the peer, or the slice went to the barrier's reset), so the caller
  * keeps the time it owes instead of spending it. */
@@ -124,6 +181,12 @@ static bool web_slice(void) {
     netplay_step_t np = emu_netplay_pump(&state.emu);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
     if (state.emu.run_state != EMU_RUNNING) return false;
+    while (g_web_script_at < g_web_script_n && g_web_script[g_web_script_at].frame <= g_emu_frames)
+        g_input.held = g_web_script[g_web_script_at++].held;
+    if (g_web_pause_frame && g_emu_frames >= g_web_pause_frame) {
+        state.emu.run_state = EMU_STOPPED;
+        return false;
+    }
     emu_slice_body(&state.emu);
     emu_slice_finish(&state.emu);
     return true;
@@ -276,7 +339,19 @@ static void event(const sapp_event *ev) {
 }
 
 sapp_desc sokol_main(int argc, char *argv[]) {
-    (void)argc; (void)argv;
+    /* The page passes ?args=a,b,c through as argv (web/site/m2hle-page.js). These
+     * are main_sdl.c's switches for the render work that came from arc-s, each of
+     * which turns one optimisation off and leaves the picture the same -- so when
+     * the picture is NOT the same, they say which one to look at. All are read by
+     * game_render_init / video_init, which run after this. */
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if      (!strcmp(a, "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
+        else if (!strcmp(a, "--fill-ref"))      g_game_render_fill_use_ref = 1;
+        else if (!strcmp(a, "--fill-no-split")) g_game_render_fill_split = 0;
+        else if (!strcmp(a, "--fill-no-ramp"))  g_game_render_fill_ramp = 0;
+        else if (!strcmp(a, "--cpu-tiles"))     g_video_force_cpu_tiles = 1;
+    }
     return (sapp_desc){
         .init_cb      = init,
         .frame_cb     = frame,
@@ -337,6 +412,31 @@ EMSCRIPTEN_KEEPALIVE int web_state(void) {
 /* Game frames since the last board reset. */
 EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {
     return (unsigned)g_emu_frames;
+}
+
+/* The sound board at a glance, as JSON: the same figures the desktop build's
+ * sound_status bridge command reports, so a web run and a native run of the same
+ * scenario can be held against each other. `active` is the mask of SCSP slots
+ * sounding -- music holds several for as long as it plays, effects come and go --
+ * and the midi_* counters say whether the i960's command bytes all arrived. */
+EMSCRIPTEN_KEEPALIVE const char *web_sound_status(void) {
+    static char out[512];
+    const scsp_t *sc = &g_sound.scsp;
+    uint32_t keyed = 0, active = 0;
+    for (int i = 0; i < 32; i++) {
+        if (sc->slot[i].r[0] & 0x0800) keyed  |= 1u << i;
+        if (sc->slot[i].active)        active |= 1u << i;
+    }
+    snprintf(out, sizeof out,
+             "{\"frames\":%u,\"m68k_pc\":\"0x%06X\",\"midi_writes\":%llu,\"midi_fifo\":%u,"
+             "\"midi_drops\":%u,\"midi_hi\":%u,\"midi_drains\":%llu,\"keyed\":%u,\"active\":%u,"
+             "\"irqs\":[%llu,%llu,%llu],\"out_dropped\":%llu}",
+             (unsigned)g_emu_frames, g_sound.m68k.cpu.pc,
+             (unsigned long long)g_sound.write_count, (unsigned)((sc->mi_w - sc->mi_r) & 31),
+             sc->mi_drops, sc->mi_hi, (unsigned long long)g_sound.midi_drains, keyed, active,
+             (unsigned long long)g_sound.irqs[1], (unsigned long long)g_sound.irqs[2],
+             (unsigned long long)g_sound.irqs[3], (unsigned long long)g_sound.out_dropped);
+    return out;
 }
 
 /* The FALLBACK path's queue, for the page's audioStats(): frames of board audio
