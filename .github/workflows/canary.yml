@@ -101,11 +101,13 @@ jobs:
         run: cmake --build build --config Release -j 4
 
       # rom_test / boot_test / geo_test / input_test hardcode a dev-machine ROM
-      # path and cannot run here. The rest are self-contained.
+      # path and cannot run here. The rest are self-contained, and every one of
+      # them belongs in this list - a test the canary does not run is a test
+      # nobody runs until someone happens to build locally.
       - name: Test
         run: >
           ctest --test-dir build -C Release --output-on-failure
-          -R "^(mem_test|i960_test|cop_test|m68k_test|emu_test)$"
+          -R "^(mem_test|i960_test|cop_test|m68k_test|emu_test|net_test)$"
 
       - name: Package
         shell: bash
