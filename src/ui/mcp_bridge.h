@@ -27,6 +27,11 @@
 #include "game_profile.h"
 #include "rom_loader.h"   /* romset_t — the regions the model decoder reads */
 #include "input.h"     /* g_input.held — drive the game's I/O ports over the bridge */
+/* Before this header's own winsock block, and before anything else that could
+ * reach <windows.h>: net_socket.h owns the include order and <winsock2.h> has
+ * to precede it. main.c already includes this first, so here it is a no-op --
+ * it is stated so the dependency is visible from the file that has it. */
+#include "net/netplay.h"   /* the lobby, over the bridge — see the netplay section */
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -1281,6 +1286,301 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
              wrote_ok ? "" : ",\"error\":\"cannot write capture\"");
 }
 
+/* ---- Netplay -------------------------------------------------------------
+ *
+ * The netplay window's buttons, as bridge commands. The reason they exist is
+ * that a lobby somebody has to sit and watch is not a lobby a program can keep
+ * open: stf-fly's broadcast wants to host a public room, notice that a
+ * challenger has gone ready, accept, and play the session -- and none of that
+ * is reachable from a process outside the emulator otherwise.
+ *
+ * THREADING. Every one of these is `netplay_post` or `netplay_get_status`, both
+ * of which take the netplay mutex and nothing else. That is the same path the
+ * UI thread uses and the reason that mutex exists; the bridge thread is one
+ * more UI thread as far as netplay is concerned. Nothing here touches the emu
+ * mutex, the session, or any socket -- the emu thread owns all three and pumps
+ * them once a slice.
+ *
+ * A note on inputs. There is no netplay command for them and there does not
+ * need to be: `set_input` already writes `g_input.held`, which is exactly what
+ * `netplay_sample_local` reads and transmits. A session drives the board from
+ * the composed mask in `net_held`, so what the bridge presses goes out on the
+ * wire and comes back applied to both boards. What the bridge must NOT do
+ * during a session is write memory -- see the warning on netplay_start.
+ */
+
+/* JSON string escaping, for the few fields here that carry text this process
+ * did not write: account names, the server's error strings and the log. A stray
+ * quote in one of those turns the whole reply into a parse error at the other
+ * end, which is a bad way to find out that a server said something unexpected. */
+static int mcp_json_escape(char *out, int cap, const char *in) {
+    int n = 0;
+    if (cap <= 0) return 0;
+    for (const unsigned char *p = (const unsigned char *)(in ? in : ""); *p; p++) {
+        char esc[8];
+        int len;
+        switch (*p) {
+            case '"':  esc[0] = '\\'; esc[1] = '"';  len = 2; break;
+            case '\\': esc[0] = '\\'; esc[1] = '\\'; len = 2; break;
+            case '\n': esc[0] = '\\'; esc[1] = 'n';  len = 2; break;
+            case '\r': esc[0] = '\\'; esc[1] = 'r';  len = 2; break;
+            case '\t': esc[0] = '\\'; esc[1] = 't';  len = 2; break;
+            default:
+                if (*p < 0x20) len = snprintf(esc, sizeof(esc), "\\u%04X", *p);
+                else         { esc[0] = (char)*p; len = 1; }
+                break;
+        }
+        if (n + len >= cap) break;
+        memcpy(out + n, esc, (size_t)len);
+        n += len;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/*
+ * The config a netplay command runs with: whatever is already stored (which is
+ * mostly the Twitch login token, the whole point of storing anything) with the
+ * request's own fields laid over it. So {"cmd":"netplay_connect"} with no
+ * arguments at all means "sign in as whoever signed in last", which is what a
+ * scripted lobby wants -- the browser dance happens once, ever, by hand.
+ */
+static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
+    uint32_t v = 0;
+    char s[256];
+
+    memset(cfg, 0, sizeof(*cfg));
+    if (!netplay_stored_settings(cfg)) {
+        cfg->port        = RPCN_DEFAULT_PORT;
+        cfg->frame_delay = 2;
+    }
+    if (!cfg->frame_delay) cfg->frame_delay = 2;
+
+    if (mcp_json_get_str(req, "server", s, sizeof(s)))
+        snprintf(cfg->server, sizeof(cfg->server), "%s", s);
+    if (mcp_json_get_str(req, "user", s, sizeof(s)))
+        snprintf(cfg->npid, sizeof(cfg->npid), "%s", s);
+    if (mcp_json_get_str(req, "pass", s, sizeof(s))) {
+        snprintf(cfg->password, sizeof(cfg->password), "%s", s);
+        /* A typed password and a stored Twitch token are two different logins,
+         * and the token wins wherever both are present (netplay_do_connect).
+         * Somebody passing a password here means the password. */
+        cfg->twitch_token[0] = '\0';
+    }
+    if (mcp_json_get_str(req, "token", s, sizeof(s)))
+        snprintf(cfg->token, sizeof(cfg->token), "%s", s);
+    if (mcp_json_get_str(req, "fingerprint", s, sizeof(s)))
+        snprintf(cfg->fingerprint, sizeof(cfg->fingerprint), "%s", s);
+    if (mcp_json_get_str(req, "room_pass", s, sizeof(s)))
+        snprintf(cfg->room_password, sizeof(cfg->room_password), "%s", s);
+    if (mcp_json_get_u32(req, "port", &v) && v)   cfg->port = (uint16_t)v;
+    if (mcp_json_get_u32(req, "delay", &v))       cfg->frame_delay = v;
+    if (mcp_json_get_u32(req, "p2p_port", &v))    cfg->local_p2p_port = (uint16_t)v;
+    if (mcp_json_get_u32(req, "browse_yamp", &v)) cfg->browse_yamp = v != 0;
+    /* A room id is 64 bits and mcp_json_get_u32 is not, so it travels as a
+     * string. Quoted or not: mcp_json_get_str finds the quoted form, and the
+     * unquoted one is read straight out of the request. */
+    if (mcp_json_get_str(req, "room_id", s, sizeof(s))) {
+        cfg->room_id = strtoull(s, NULL, 0);
+    } else {
+        const char *q = strstr(req, "\"room_id\":");
+        if (q) cfg->room_id = strtoull(q + 10, NULL, 0);
+    }
+}
+
+static void mcp_netplay_reply(char *resp, int cap, const char *verb) {
+    netplay_status_t st;
+    netplay_get_status(&st);
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"queued\":\"%s\",\"state\":\"%s\"}",
+             verb, netplay_state_text(st.state));
+}
+
+static void mcp_cmd_netplay_connect(const char *req, char *resp, int cap) {
+    netplay_config_t cfg;
+    uint32_t twitch = 0;
+    mcp_netplay_cfg(req, &cfg);
+    mcp_json_get_u32(req, "twitch", &twitch);
+
+    if (!cfg.server[0]) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"no server: pass a server, or sign "
+                 "in once in the netplay window so one is stored\"}");
+        return;
+    }
+    if (!twitch && !cfg.npid[0]) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"no account: pass user and pass, or "
+                 "twitch:1 to run the device flow\"}");
+        return;
+    }
+    /* The device flow signs in and then connects itself, so it REPLACES the
+     * connect rather than preceding it (netplay_pump_twitch). Asking for both
+     * would log in twice. */
+    netplay_post(twitch ? NETPLAY_CMD_TWITCH_START : NETPLAY_CMD_CONNECT, &cfg);
+    mcp_netplay_reply(resp, cap, twitch ? "twitch" : "connect");
+}
+
+static void mcp_cmd_netplay_host(const char *req, char *resp, int cap) {
+    netplay_config_t cfg;
+    mcp_netplay_cfg(req, &cfg);
+    netplay_post(NETPLAY_CMD_HOST, &cfg);
+    mcp_netplay_reply(resp, cap, "host");
+}
+
+static void mcp_cmd_netplay_join(const char *req, char *resp, int cap) {
+    netplay_config_t cfg;
+    mcp_netplay_cfg(req, &cfg);
+    if (!cfg.room_id) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"netplay_join needs a room_id\"}");
+        return;
+    }
+    netplay_post(NETPLAY_CMD_JOIN, &cfg);
+    mcp_netplay_reply(resp, cap, "join");
+}
+
+static void mcp_cmd_netplay_search(const char *req, char *resp, int cap) {
+    netplay_config_t cfg;
+    mcp_netplay_cfg(req, &cfg);
+    netplay_post(NETPLAY_CMD_SEARCH, &cfg);
+    mcp_netplay_reply(resp, cap, "search");
+}
+
+/*
+ * Accept: begin (or restart) a lockstepped session.
+ *
+ * THE BOARD IS ABOUT TO COLD-BOOT. A session starts from power-on on both
+ * machines, because that is the only state two copies with no savestates can be
+ * certain to share. Anything the bridge had set up -- a fight in progress, a
+ * character written into a fighter record, credits poked into RAM -- is gone
+ * the moment the barrier releases.
+ *
+ * AND MEMORY WRITES ARE DESYNCS. While a session is playing, write_memory
+ * changes one of the two boards and not the other, which is precisely what the
+ * frame check exists to catch. Everything a client does during a session has to
+ * go through set_input: coins, START and the select screen's cursor included.
+ * Reads are free.
+ */
+static void mcp_cmd_netplay_start(char *resp, int cap) {
+    netplay_status_t st;
+    netplay_get_status(&st);
+    if (st.state < NETPLAY_IN_ROOM || st.state == NETPLAY_FAILED) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"take a room first (state: %s)\"}",
+                 netplay_state_text(st.state));
+        return;
+    }
+    netplay_post(NETPLAY_CMD_START, NULL);
+    mcp_netplay_reply(resp, cap, "start");
+}
+
+static void mcp_cmd_netplay_stop(char *resp, int cap) {
+    netplay_post(NETPLAY_CMD_STOP, NULL);
+    mcp_netplay_reply(resp, cap, "stop");
+}
+
+static void mcp_cmd_netplay_disconnect(char *resp, int cap) {
+    netplay_post(NETPLAY_CMD_DISCONNECT, NULL);
+    mcp_netplay_reply(resp, cap, "disconnect");
+}
+
+/*
+ * Everything the published snapshot holds, which is everything a client needs
+ * to drive a lobby without a window.
+ *
+ * peer.ready is the one worth naming: it says somebody has joined this room AND
+ * pressed start, and is sitting at the barrier waiting for this end to do the
+ * same. That is a challenge, and answering it is netplay_start.
+ *
+ * rooms is only filled by netplay_search, and log carries the tail of the
+ * emulator's own netplay log with a total count beside it, so a poller can tell
+ * "nothing happened" from "I missed some lines".
+ */
+static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
+    netplay_status_t st;
+    uint32_t want_log = 12, want_rooms = 0;
+    char esc[512];
+    char *p = resp;
+    int left = cap, n;
+
+    mcp_json_get_u32(req, "log", &want_log);
+    mcp_json_get_u32(req, "rooms", &want_rooms);
+    if (want_log > NETPLAY_LOG_LINES) want_log = NETPLAY_LOG_LINES;
+    netplay_get_status(&st);
+
+#define NP_APPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__);      \
+                            if (n < 0 || n >= left) n = left > 0 ? left - 1 : 0; \
+                            p += n; left -= n; } while (0)
+
+    NP_APPEND("{\"ok\":true,\"state\":\"%s\",\"state_num\":%d,\"stage\":%d,"
+              "\"is_host\":%s,\"player\":%d,\"room_id\":\"%llu\","
+              "\"room_flags\":\"0x%08X\"",
+              netplay_state_text(st.state), (int)st.state, (int)st.stage,
+              st.is_host ? "true" : "false", st.local_player,
+              (unsigned long long)st.room_id, st.room_flags);
+
+    mcp_json_escape(esc, sizeof(esc), st.com_id);
+    NP_APPEND(",\"com_id\":\"%s\"", esc);
+
+    mcp_json_escape(esc, sizeof(esc), st.peer_npid);
+    NP_APPEND(",\"peer\":{\"npid\":\"%s\",\"known\":%s,\"heard\":%s,"
+              "\"ready\":%s,\"ready_gen\":%u,\"addr\":\"",
+              esc, st.peer_known ? "true" : "false",
+              st.peer_heard ? "true" : "false",
+              st.peer_ready ? "true" : "false", st.peer_ready_gen);
+    mcp_json_escape(esc, sizeof(esc), st.peer_addr);
+    NP_APPEND("%s\"}", esc);
+
+    NP_APPEND(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
+              st.frame, st.stalls, st.generation, st.seed);
+    /* LOCKSTEP_NO_CHECK means the two boards have never disagreed. Reporting it
+     * as a frame number would be a desync at frame 4294967295. */
+    if (st.desync_frame != LOCKSTEP_NO_CHECK) NP_APPEND(",\"desync_frame\":%u", st.desync_frame);
+    else                                      NP_APPEND(",\"desync_frame\":null");
+
+    mcp_json_escape(esc, sizeof(esc), st.error);
+    NP_APPEND(",\"error\":\"%s\"", esc);
+
+    mcp_json_escape(esc, sizeof(esc), st.twitch_npid);
+    NP_APPEND(",\"twitch\":{\"state\":%d,\"signed_in\":%s,\"npid\":\"%s\"",
+              (int)st.twitch_state, st.twitch_signed_in ? "true" : "false", esc);
+    mcp_json_escape(esc, sizeof(esc), st.twitch_user_code);
+    NP_APPEND(",\"user_code\":\"%s\"", esc);
+    mcp_json_escape(esc, sizeof(esc), st.twitch_uri);
+    NP_APPEND(",\"uri\":\"%s\"", esc);
+    mcp_json_escape(esc, sizeof(esc), st.twitch_error);
+    NP_APPEND(",\"error\":\"%s\"}", esc);
+
+    if (want_rooms) {
+        NP_APPEND(",\"search_pending\":%s,\"rooms\":[",
+                  st.search_pending ? "true" : "false");
+        for (uint32_t i = 0; i < st.room_count && left > 128; i++) {
+            mcp_json_escape(esc, sizeof(esc), st.rooms[i].owner);
+            NP_APPEND("%s{\"room_id\":\"%llu\",\"owner\":\"%s\",\"members\":%u,"
+                      "\"max\":%u,\"password\":%s,\"flags\":\"0x%08X\"}",
+                      i ? "," : "", (unsigned long long)st.rooms[i].room_id, esc,
+                      st.rooms[i].cur_members, st.rooms[i].max_slots,
+                      st.rooms[i].has_password ? "true" : "false",
+                      st.rooms[i].flag_attr);
+        }
+        NP_APPEND("]");
+    }
+
+    NP_APPEND(",\"log_count\":%u,\"log\":[", st.log_count);
+    if (want_log) {
+        uint32_t have  = st.log_count < NETPLAY_LOG_LINES ? st.log_count : NETPLAY_LOG_LINES;
+        uint32_t take  = want_log < have ? want_log : have;
+        uint32_t first = st.log_count - take;
+        for (uint32_t i = 0; i < take && left > 64; i++) {
+            mcp_json_escape(esc, sizeof(esc), st.log[(first + i) % NETPLAY_LOG_LINES]);
+            NP_APPEND("%s\"%s\"", i ? "," : "", esc);
+        }
+    }
+    NP_APPEND("]}");
+#undef NP_APPEND
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -1369,6 +1669,14 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
         }
         snprintf(p, (size_t)left, "]}");
     }
+    else if (strcmp(cmd, "netplay_status")           == 0) mcp_cmd_netplay_status(req, resp, cap);
+    else if (strcmp(cmd, "netplay_connect")          == 0) mcp_cmd_netplay_connect(req, resp, cap);
+    else if (strcmp(cmd, "netplay_host")             == 0) mcp_cmd_netplay_host(req, resp, cap);
+    else if (strcmp(cmd, "netplay_join")             == 0) mcp_cmd_netplay_join(req, resp, cap);
+    else if (strcmp(cmd, "netplay_search")           == 0) mcp_cmd_netplay_search(req, resp, cap);
+    else if (strcmp(cmd, "netplay_start")            == 0) mcp_cmd_netplay_start(resp, cap);
+    else if (strcmp(cmd, "netplay_stop")             == 0) mcp_cmd_netplay_stop(resp, cap);
+    else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
     else if (strcmp(cmd, "dump_tex_stats")            == 0) {
         snprintf(resp, (size_t)cap,
             "{\"ok\":true,\"models\":%ld,\"models_uv\":%ld,\"models_mat\":%ld,"

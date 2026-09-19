@@ -154,6 +154,16 @@ m2hle --rom sfight.zip --run --netplay       --net-server <host> --net-user <nam
 m2hle --rom sfight.zip --run --netplay       --net-server <host> --net-user <other> --net-pass <password> --net-join <room id> --net-start
 ```
 
+**Or without a person at the keyboard.** The same buttons are on the MCP bridge
+(`netplay_status`, `netplay_connect`, `netplay_host`, `netplay_start`, ...), which is enough to
+hold a lobby open, notice that somebody has joined and pressed Start, and accept the match. The
+status reports that as `peer.ready` -- RPCN has no "ready" message, so what it really means is
+"a peer is announcing a session this end has not begun", which is exactly what pressing Start
+does. Two rules a scripted session has to respect: the board **cold-boots** when the barrier
+releases, so getting back to a fight is coin-and-START like anybody else; and `write_memory` is a
+**desync**, so everything during a session goes through `set_input`. See
+[MCP_GUIDE.md](MCP_GUIDE.md#netplay-rpcn).
+
 TLS is Schannel, so netplay currently connects only on Windows; [src/net/tls.h](src/net/tls.h)
 is the one file a POSIX backend would go in. The design follows
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
