@@ -9,8 +9,13 @@ name: pages
 # One-time setup, in the repository's settings (a workflow's own token cannot do
 # any of these):
 #   Settings > Pages > Build and deployment > Source: "GitHub Actions"
-#   Settings > Environments > github-pages > Deployment branches: allow `wasm`
-#     (the environment is created restricted to the default branch)
+#     -- NOT "Deploy from a branch". A branch source publishes the repository
+#     through Jekyll instead of running this workflow, which is how the site came
+#     to be a rendered README once `wasm` merged into master. The emulator is the
+#     site; there is no landing page in front of it.
+#   Settings > Environments > github-pages > Deployment branches: allow `master`
+#     (the environment is created restricted to the default branch, and it was
+#     set to `wasm` while the web frontend lived on that branch)
 #   Settings > Pages > Custom domain: play.sonicthefighte.rs, then Enforce HTTPS
 #   DNS: CNAME  play -> biggestsonicfan.github.io   (DNS only, not proxied, at
 #     least until GitHub has issued the certificate)
@@ -18,12 +23,12 @@ name: pages
 # custom domain lives in the settings.
 on:
   push:
-    # `wasm` is where the web frontend lives. Add master here when it merges --
-    # master cannot build -DM2HLE_FRONTEND=web before then.
-    branches: [wasm]
+    # The web frontend lived on `wasm` until PR #20; `wasm` is now an ancestor of
+    # master, so this is the one branch that deploys.
+    branches: [master]
     paths-ignore: ['**.md']
   pull_request:
-    branches: [wasm]
+    branches: [master]
     paths-ignore: ['**.md']
   workflow_dispatch:
 
