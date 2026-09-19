@@ -77,6 +77,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | Debug UI | CPU / memory / COP / GEO / 68K / trace / breakpoint / video windows |
 | Netplay | RPCN matchmaking + direct peer-to-peer delay lockstep (`--netplay`) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
+| Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 
 Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2snake`.
 
@@ -158,6 +159,33 @@ TLS is Schannel, so netplay currently connects only on Windows; [src/net/tls.h](
 is the one file a POSIX backend would go in. The design follows
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
 worked the RPCN protocol out first.
+
+## Recording (capture mode)
+
+`--kiosk` is for putting the game on a stream or in a video. The emulator keeps a real window —
+OBS's Game Capture hooks a process's swapchain, so `--headless` (no window, no GPU context at
+all) can be scripted but never recorded — but the window has no title bar, no close box and no
+minimise box, is fixed at the capture resolution, and parks itself just outside the desktop
+where nothing can land on it. All that appears is a tray icon.
+
+```
+m2hle --rom sfight.zip --kiosk                     # hidden, 1920x1080, running
+m2hle --rom sfight.zip --kiosk --kiosk-size 1280x960   # some other capture size
+m2hle --rom sfight.zip --kiosk --kiosk-show        # same, but on screen at 0,0
+```
+
+In OBS: **Game Capture → Mode: Capture specific window → `[m2hle.exe]: m2-hle`**, with the
+window mode set to match by executable. The source arrives at exactly the capture size whatever
+the desktop resolution is. ("Capture any fullscreen application" only fires for a window that
+covers a whole monitor, so it will not pick this one up unless the capture size happens to be
+the monitor's.) The game is letterboxed inside the frame — Model 2 output is 496x384, so at
+1920x1080 there are pillarbox bars; crop them in OBS, or pick a capture size of the same shape.
+
+The tray icon's menu is the only way in or out: show or park the window, run or pause the
+emulator, leave capture mode (which hands back the normal window and its menus), or exit. The
+tooltip carries the presented frame rate, which is the quick answer to "is OBS still getting
+frames". `File → Capture mode (OBS)` enters the same mode from a normally-launched session.
+Windows only for now — see [src/ui/kiosk.h](src/ui/kiosk.h).
 
 ## Documents
 

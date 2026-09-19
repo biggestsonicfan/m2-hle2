@@ -50,6 +50,7 @@
 #include "debug_window.h"
 #include "mcp_bridge.h"    /* --mcp TCP debug server (ported from m2-hle) */
 #include "netplay_window.h"  /* the RPCN netplay front-end */
+#include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
  * g_active_profile and pulls in every per-game profile header. */
@@ -62,6 +63,10 @@ static int  g_mcp_enable = 0;      /* --mcp: start the TCP debug server */
 static int  g_mcp_port   = 7172;   /* --mcp-port N */
 static int  g_headless   = 0;      /* --headless: no window, GPU or audio device */
 static int  g_net_window = 0;      /* --netplay: open the netplay window at startup */
+static int  g_kiosk_on   = 0;      /* --kiosk: capture mode from startup */
+static int  g_kiosk_w    = KIOSK_DEFAULT_WIDTH;
+static int  g_kiosk_h    = KIOSK_DEFAULT_HEIGHT;
+static int  g_kiosk_show = 0;      /* --kiosk-show: start it on screen, not parked */
 
 /*
  * Headless netplay (--net-*). The GUI is the normal way in, but a session that
@@ -186,6 +191,7 @@ static void load_active_profile(const char *primary_zip) {
         }
         emu_ensure_started();
         emu_update_snapshots(&state.emu);
+        kiosk_set_label(g_active_profile->display_name);
         LOG_INFO("profile '%s' loaded; reset IP = 0x%08X",
                  g_active_profile->id, state.cpu.sfr.ip);
     }
@@ -331,6 +337,11 @@ static void draw_menu_bar(void) {
     if (igBeginMenu("File")) {
         if (igMenuItem("Load ROMs...")) open_rom_dialog();
         igSeparator();
+        /* Capture mode: the window loses its chrome, goes to the capture size
+         * and parks off the desktop, and a tray icon becomes the way back. */
+        if (igMenuItemEx("Capture mode (OBS)", NULL, false, true))
+            kiosk_enter(g_kiosk_w, g_kiosk_h, false);
+        igSeparator();
         if (igMenuItemEx("Quit", "Esc", false, true)) sapp_request_quit();
         igEndMenu();
     }
@@ -420,10 +431,45 @@ static void draw_menu_bar(void) {
     igEndMainMenuBar();
 }
 
+/* The tray menu's Run item drives the emu thread through these. */
+static bool kiosk_is_running_cb(void *ud) {
+    (void)ud;
+    return state.emu_started && emu_is_running(&state.emu);
+}
+static void kiosk_set_running_cb(void *ud, bool run) {
+    (void)ud;
+    if (!state.emu_started || !state.romset.loaded) return;
+    if (run) { if (!emu_is_running(&state.emu) && !state.cpu.halted) emu_run(&state.emu); }
+    else if (emu_is_running(&state.emu)) emu_stop(&state.emu);
+}
+
+/* Tray item: reboot the 68000 + SCSP, leaving the rest of the board running.
+ * The driver can lose its command stream and go permanently silent; this gets
+ * the music back without dropping the session. It returns silent until the
+ * game's next music cue. */
+static void kiosk_restart_sound_cb(void *ud) {
+    (void)ud;
+    if (!state.emu_started) return;
+    emu_sound_restart(&state.emu);
+}
+
 static void init(void) {
     log_init();
     LOG_INFO("m2-hle starting (Phase 4: ROM load + profile resolution; %zu profile(s))",
              g_profile_count);
+
+    /* Before anything slow: sokol has already created AND SHOWN the window, so
+     * capture mode has to claim it now — parking it after the ROM load would
+     * flash a blank 1080p window across the desktop for as long as that takes.
+     * kiosk_window_ready subclasses the window (the tray callback, and
+     * swallowing close/minimise) and gives it the app's own icon. */
+    kiosk_set_hooks(&(kiosk_hooks_t){
+        .is_running    = kiosk_is_running_cb,
+        .set_running   = kiosk_set_running_cb,
+        .restart_sound = kiosk_restart_sound_cb,
+    });
+    kiosk_window_ready();
+    if (g_kiosk_on) kiosk_enter(g_kiosk_w, g_kiosk_h, g_kiosk_show != 0);
 
     mem_init(&state.bus, NULL, 0);
     i960_reset(&state.cpu);
@@ -484,8 +530,10 @@ static void init(void) {
     /* Grab keyboard focus on launch so the user doesn't have to click the window
      * before input works. SetForegroundWindow on its own is usually blocked by
      * Windows' focus-stealing guard, so briefly attach our input queue to the
-     * current foreground thread's to be granted the foreground. */
-    {
+     * current foreground thread's to be granted the foreground. Capture mode
+     * does its own placement, and a parked window has no business taking the
+     * foreground, so this is skipped there. */
+    if (!g_kiosk_on) {
         HWND hwnd = (HWND)sapp_win32_get_hwnd();
         if (hwnd) {
             HWND  fg     = GetForegroundWindow();
@@ -512,6 +560,9 @@ static void init(void) {
 static int headless_main(void) {
     log_init();
     if (!g_rom_path[0]) { LOG_ERROR("--headless needs --rom"); return 2; }
+    if (g_kiosk_on)
+        LOG_WARN("--kiosk ignored: --headless has no window to capture. Drop --headless "
+                 "to record; OBS hooks a swapchain, so it needs a real window.");
     mem_init(&state.bus, NULL, 0);
     i960_reset(&state.cpu);
     bp_init();
@@ -612,31 +663,37 @@ static void frame(void) {
 
     netplay_cli_pump();
 
-    draw_menu_bar();
-    draw_file_dialog();
+    /* Capture mode draws the game and nothing else: no menu bar, no debug
+     * windows, nothing for a recording to pick up. */
+    const bool draw_ui = !kiosk_active();
 
-    if (state.show_cpu)
-        cpu_window_draw(&state.emu.cpu_snapshot, &state.emu.cpu_prev_snapshot, &state.show_cpu);
-    if (state.show_memview)     memview_draw(&state.bus, &state.show_memview);
-    if (state.show_breakpoints) bp_window_draw(&state.show_breakpoints);
-    if (state.show_cop)         cop_window_draw(&state.show_cop);
-    if (state.show_geo3d) {
-        const game_quirks_t *gq = g_active_profile ? &g_active_profile->quirks : NULL;
-        geo3d_window_draw(&state.geo3d, &state.show_geo3d,
-                          state.romset.main_data, state.romset.main_data_size,
-                          gq ? gq->model_table_offset : 0,
-                          gq ? gq->model_table_count  : 0,
-                          gq ? gq->mesh_ptr_subtract  : 0);
+    if (draw_ui) {
+        draw_menu_bar();
+        draw_file_dialog();
+
+        if (state.show_cpu)
+            cpu_window_draw(&state.emu.cpu_snapshot, &state.emu.cpu_prev_snapshot, &state.show_cpu);
+        if (state.show_memview)     memview_draw(&state.bus, &state.show_memview);
+        if (state.show_breakpoints) bp_window_draw(&state.show_breakpoints);
+        if (state.show_cop)         cop_window_draw(&state.show_cop);
+        if (state.show_geo3d) {
+            const game_quirks_t *gq = g_active_profile ? &g_active_profile->quirks : NULL;
+            geo3d_window_draw(&state.geo3d, &state.show_geo3d,
+                              state.romset.main_data, state.romset.main_data_size,
+                              gq ? gq->model_table_offset : 0,
+                              gq ? gq->model_table_count  : 0,
+                              gq ? gq->mesh_ptr_subtract  : 0);
+        }
+        if (state.show_bus_stats)   draw_bus_stats_window();
+        if (state.show_m68k_cpu) {
+            m68k_window_draw(&g_sound.m68k, &state.m68k_snapshot, &state.show_m68k_cpu);
+            state.m68k_snapshot = g_sound.m68k;
+        }
+        if (state.show_m68k_mem)    m68k_memview_draw(&state.show_m68k_mem);
+        if (state.show_debug)       debug_window_draw(&state.show_debug);
+        if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
+        if (state.show_demo)        igShowDemoWindow(&state.show_demo);
     }
-    if (state.show_bus_stats)   draw_bus_stats_window();
-    if (state.show_m68k_cpu) {
-        m68k_window_draw(&g_sound.m68k, &state.m68k_snapshot, &state.show_m68k_cpu);
-        state.m68k_snapshot = g_sound.m68k;
-    }
-    if (state.show_m68k_mem)    m68k_memview_draw(&state.show_m68k_mem);
-    if (state.show_debug)       debug_window_draw(&state.show_debug);
-    if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
-    if (state.show_demo)        igShowDemoWindow(&state.show_demo);
 
     sg_begin_pass(&(sg_pass){
         .action    = state.pass_action,
@@ -649,7 +706,7 @@ static void frame(void) {
         int ox, oy, w, h;
         /* Reserve the top main-menu-bar strip so the game (and its row-0 HUD) isn't
          * occluded by the opaque ImGui bar drawn on top. */
-        int menu_h = (int)(igGetFrameHeight() * sapp_dpi_scale());
+        int menu_h = draw_ui ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
         int avail_h = sapp_height() - menu_h;
         if (avail_h < 1) avail_h = 1;
         game_render_letterbox(sapp_width(), avail_h,
@@ -730,9 +787,14 @@ static void frame(void) {
     simgui_render();
     sg_end_pass();
     sg_commit();
+
+    /* Capture mode's sign of life: the presented frame rate, in the tray
+     * tooltip and periodically in the log. Inert otherwise. */
+    kiosk_frame_tick((float)sapp_frame_duration());
 }
 
 static void cleanup(void) {
+    kiosk_shutdown();      /* take the tray icon down before the window goes */
     if (state.emu_started) emu_thread_shutdown(&state.emu);
     netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
@@ -749,6 +811,14 @@ static void cleanup(void) {
 static void event(const sapp_event* ev) {
     simgui_handle_event(ev);
 
+    /* Alt+F4 and the taskbar's Close reach sokol as a quit request. In capture
+     * mode only the tray's Exit item is allowed to end the run — the point of
+     * the mode is that nothing on the desktop can stop the recording. */
+    if (ev->type == SAPP_EVENTTYPE_QUIT_REQUESTED && !kiosk_quit_allowed()) {
+        sapp_cancel_quit();
+        return;
+    }
+
     /* Game input flows through the emulated I/O ports (read by the game's vblank
      * interrupt) — set/clear the host held mask here. Routed regardless of ImGui
      * focus so arcade muscle-memory isn't eaten by a debug window. */
@@ -757,7 +827,7 @@ static void event(const sapp_event* ev) {
 
     if (ev->type != SAPP_EVENTTYPE_KEY_DOWN) return;
     switch (ev->key_code) {
-        case SAPP_KEYCODE_ESCAPE: sapp_request_quit(); break;
+        case SAPP_KEYCODE_ESCAPE: if (!kiosk_active()) sapp_request_quit(); break;
         case SAPP_KEYCODE_F9:
             if (emu_is_running(&state.emu)) emu_stop(&state.emu);
             else if (state.emu_started && state.romset.loaded && !state.cpu.halted)
@@ -768,6 +838,11 @@ static void event(const sapp_event* ev) {
             break;
         case SAPP_KEYCODE_F6:
             if (!emu_is_running(&state.emu) && state.romset.loaded) emu_step(&state.emu, 10);
+            break;
+        case SAPP_KEYCODE_F8:
+            /* Reboot the sound board. The driver can lose its command stream and
+             * go permanently silent; this recovers it without dropping the run. */
+            emu_sound_restart(&state.emu);
             break;
         case SAPP_KEYCODE_F7:
             if (!emu_is_running(&state.emu) && state.romset.loaded) emu_step(&state.emu, 100);
@@ -806,6 +881,22 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_mcp_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+        } else if (strcmp(argv[i], "--kiosk") == 0) {
+            /* Capture mode: a chrome-free window at the capture resolution,
+             * parked off the desktop, with a tray icon as the only handle on
+             * it. For recording — OBS hooks a swapchain, so unlike --headless
+             * there has to be a real window; see src/ui/kiosk.h. */
+            g_kiosk_on = 1;
+        } else if (strcmp(argv[i], "--kiosk-size") == 0 && i + 1 < argc) {
+            int kw = 0, kh = 0;
+            if (sscanf(argv[++i], "%dx%d", &kw, &kh) == 2 && kw > 0 && kh > 0) {
+                g_kiosk_w = kw; g_kiosk_h = kh;
+            } else {
+                LOG_WARN("--kiosk-size wants WxH (e.g. 1920x1080); keeping %dx%d",
+                         g_kiosk_w, g_kiosk_h);
+            }
+        } else if (strcmp(argv[i], "--kiosk-show") == 0) {
+            g_kiosk_show = 1;                  /* start on screen, not parked */
         } else if (strcmp(argv[i], "--netplay") == 0) {
             g_net_window = 1;                  /* open the netplay window at startup */
         } else if (strcmp(argv[i], "--net-server") == 0 && i + 1 < argc) {
@@ -849,15 +940,36 @@ sapp_desc sokol_main(int argc, char* argv[]) {
         }
     }
     if (g_headless) exit(headless_main());
+    /* Capture mode wants the game moving, not a first frame held on pause. */
+    if (g_kiosk_on) g_autorun = 1;
+
+    /* The window's own icon, from the same art as the tray icon (app_icon.h),
+     * rendered at each size rather than downscaled from one bitmap. */
+    static uint8_t icon16[16 * 16 * 4], icon32[32 * 32 * 4], icon64[64 * 64 * 4];
+    app_icon_render(16, icon16);
+    app_icon_render(32, icon32);
+    app_icon_render(64, icon64);
+
     return (sapp_desc){
         .init_cb     = init,
         .frame_cb    = frame,
         .cleanup_cb  = cleanup,
         .event_cb    = event,
-        .width       = 1280,
-        .height      = 720,
+        .width       = g_kiosk_on ? g_kiosk_w : 1280,
+        .height      = g_kiosk_on ? g_kiosk_h : 720,
+        /* Capture mode needs the framebuffer to BE the capture resolution. With
+         * high_dpi off sokol divides the client rect by the display scale, so a
+         * 1920x1080 window on a 125% desktop would present a 1536x864
+         * swapchain — which is what OBS would then record. */
+        .high_dpi    = g_kiosk_on ? true : false,
         .window_title = "m2-hle",
         .logger.func = slog_func,
-        .icon.sokol_default = true,
+        .icon = {
+            .images = {
+                { .width = 16, .height = 16, .pixels = SAPP_RANGE(icon16) },
+                { .width = 32, .height = 32, .pixels = SAPP_RANGE(icon32) },
+                { .width = 64, .height = 64, .pixels = SAPP_RANGE(icon64) },
+            },
+        },
     };
 }
