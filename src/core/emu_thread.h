@@ -208,6 +208,11 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
     s_irq_in_service = false;
     const game_quirks_t *q = &g_active_profile->quirks;
     if (!q->sound_queue_count_addr || !q->irq_handler[3]) return;
+    /* The 68000 does not run until sound_run_slice, later in this slice, so
+     * every re-service here piles onto an undrained 32-byte MIDI ring. Stop
+     * while a whole command still fits and let the rest go next slice: the
+     * board's UART paces the bytes the same way, by reporting not-ready. */
+    if (scsp_midi_room(&g_sound.scsp) < 4) { s_irq_in_service = true; return; }
     uint32_t cnt   = mem_read8(ctx->bus, q->sound_queue_count_addr);
     uint32_t state = q->sound_queue_state_addr ? mem_read8(ctx->bus, q->sound_queue_state_addr) : 0xFFu;
     if (cnt == 0 && state == 0xFFu) return;
@@ -477,6 +482,46 @@ static inline void emu_run(emu_thread_ctx_t *ctx) {
                             * the run loop doesn't bail out of the first slice */
     ctx->run_state = EMU_RUNNING;
 }
+/* ---- Sound board backdoor -------------------------------------------------
+ *
+ * Reboot the 68000 + SCSP without touching the rest of the board, so a driver
+ * that has lost its command stream can be recovered mid-session instead of
+ * restarting the emulator. sound_reset() rewrites the 68000, the SCSP and all
+ * of sound RAM, and the run loop is inside those for most of a slice, so this
+ * waits for the slice boundary the way cop_exec does.
+ *
+ * The host output ring is deliberately left alone: the audio device is draining
+ * it on another thread and emptying it here would click. The MIDI-ring
+ * diagnostics are carried across, so a restart does not erase the evidence of
+ * why it was needed.
+ *
+ * Note the driver comes back silent: it boots fresh, but the i960 does not
+ * re-send the track that was playing, so music returns at the next cue the game
+ * sends (usually the next round). Pass bytes to emu_sound_midi to kick one. */
+static inline void emu_sound_restart(emu_thread_ctx_t *ctx) {
+    int locked = ctx && ctx->thread_alive;
+    if (locked) emu_mutex_lock(&ctx->mutex);
+    uint32_t drops = g_sound.scsp.mi_drops;
+    uint8_t  hi    = g_sound.scsp.mi_hi;
+    uint64_t drains = g_sound.midi_drains;
+    sound_reset();
+    g_sound.scsp.mi_drops = drops;
+    g_sound.scsp.mi_hi    = hi;
+    g_sound.midi_drains   = drains;
+    if (locked) emu_mutex_unlock(&ctx->mutex);
+    LOG_INFO("sound: board restarted (carried over: midi drops=%u hi=%u drains=%llu)",
+             drops, (unsigned)hi, (unsigned long long)drains);
+}
+
+/* Push bytes straight into the SCSP's MIDI input, as the i960's UART would. */
+static inline int emu_sound_midi(emu_thread_ctx_t *ctx, const uint8_t *b, int n) {
+    int locked = ctx && ctx->thread_alive;
+    if (locked) emu_mutex_lock(&ctx->mutex);
+    for (int i = 0; i < n; i++) scsp_midi_in(&g_sound.scsp, b[i]);
+    if (locked) emu_mutex_unlock(&ctx->mutex);
+    return n;
+}
+
 static inline void emu_stop(emu_thread_ctx_t *ctx)  { ctx->request_stop = 1; }
 static inline int  emu_is_running(emu_thread_ctx_t *ctx) { return ctx->run_state == EMU_RUNNING; }
 

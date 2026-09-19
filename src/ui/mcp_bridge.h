@@ -525,7 +525,7 @@ static void mcp_cmd_sound_status(char *resp, int cap) {
              "\"cycles\":%llu,\"samples\":%llu,\"irqs\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu],"
              "\"midi_writes\":%llu,\"midi_fifo\":%u,\"scieb\":\"0x%03X\",\"scipd\":\"0x%03X\",\"lines\":\"0x%02X\","
              "\"levels\":[%u,%u,%u],\"timers\":[\"0x%04X\",\"0x%04X\",\"0x%04X\"],\"keyed\":\"0x%08X\",\"active\":\"0x%08X\","
-             "\"dsp_steps\":%d,\"out_fill\":%u,\"out_dropped\":%llu}",
+             "\"dsp_steps\":%d,\"out_fill\":%u,\"out_dropped\":%llu,\"midi_drops\":%u,\"midi_hi\":%u,\"midi_drains\":%llu}",
              g_sound.rom_loaded ? "true" : "false", g_sound.samples_size,
              g_sound.m68k.cpu.pc, (unsigned)g_sound.m68k.cpu.sr,
              (unsigned long long)g_sound.m68k.cpu.cycles, (unsigned long long)sc->samples,
@@ -535,7 +535,54 @@ static void mcp_cmd_sound_status(char *resp, int cap) {
              (unsigned long long)g_sound.write_count, (unsigned)((sc->mi_w - sc->mi_r) & 31),
              sc->c[0x0F], sc->c[0x10], sc->lines, sc->lvl_ta, sc->lvl_tbc, sc->lvl_midi,
              sc->c[0x0C], sc->c[0x0D], sc->c[0x0E], keyed, active,
-             sc->dsp.stopped ? -1 : sc->dsp.last_step, fill, (unsigned long long)g_sound.out_dropped);
+             sc->dsp.stopped ? -1 : sc->dsp.last_step, fill, (unsigned long long)g_sound.out_dropped,
+             sc->mi_drops, sc->mi_hi, (unsigned long long)g_sound.midi_drains);
+}
+
+/* reset_sound: reboot the sound board, and/or push raw bytes at its MIDI input.
+ *
+ *   {"cmd":"reset_sound"}                      reboot the 68000 + SCSP
+ *   {"cmd":"reset_sound","restart":0,"midi":"8A0102"}   just send the bytes
+ *   {"cmd":"reset_sound","midi":"8A0102"}      reboot, then send them
+ *
+ * The recovery path for a driver that has lost its command stream: the music
+ * dies and stays dead, and this brings it back without dropping the session.
+ * After a reboot the driver is silent until the game's next music cue, so
+ * `midi` is there to kick a track by hand. */
+static void mcp_cmd_reset_sound(const char *req, char *resp, int cap) {
+    char midi[512] = {0};
+    uint32_t restart = 1;
+    mcp_json_get_u32(req, "restart", &restart);
+    if (restart) emu_sound_restart(g_mcp.emu);
+
+    int n = 0;
+    if (mcp_json_get_str(req, "midi", midi, (int)sizeof midi)) {
+        size_t len = strlen(midi);
+        if (len == 0 || (len % 2u) != 0u) {
+            snprintf(resp, (size_t)cap,
+                     "{\"ok\":false,\"error\":\"midi is %u hex chars; want 2 per byte\"}",
+                     (unsigned)len);
+            return;
+        }
+        uint8_t bytes[256];
+        for (size_t i = 0; i + 2u <= len && n < (int)sizeof bytes; i += 2u) {
+            char h[3] = { midi[i], midi[i + 1], 0 };
+            char *end = NULL;
+            unsigned long v = strtoul(h, &end, 16);
+            if (end != h + 2) {
+                snprintf(resp, (size_t)cap,
+                         "{\"ok\":false,\"error\":\"midi has a non-hex byte at %u\"}", (unsigned)i);
+                return;
+            }
+            bytes[n++] = (uint8_t)v;
+        }
+        emu_sound_midi(g_mcp.emu, bytes, n);
+    }
+    const scsp_t *sc = &g_sound.scsp;
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"restarted\":%s,\"midi_bytes\":%d,\"m68k_pc\":\"0x%06X\","
+             "\"midi_drops\":%u,\"midi_hi\":%u}",
+             restart ? "true" : "false", n, g_sound.m68k.cpu.pc, sc->mi_drops, sc->mi_hi);
 }
 
 static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
@@ -1624,6 +1671,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "dump_tgp")                 == 0) mcp_cmd_dump_tgp(resp, cap);
     else if (strcmp(cmd, "cop_exec")                 == 0) mcp_cmd_cop_exec(req, resp, cap);
     else if (strcmp(cmd, "sound_status")             == 0) mcp_cmd_sound_status(resp, cap);
+    else if (strcmp(cmd, "reset_sound")              == 0) mcp_cmd_reset_sound(req, resp, cap);
     else if (strcmp(cmd, "dump_midi_log")            == 0) mcp_cmd_dump_midi_log(resp, cap);
     else if (strcmp(cmd, "read_wave")                == 0) {   /* sound RAM bytes */
         uint32_t addr=0,len=0; mcp_json_get_u32(req,"addr",&addr); mcp_json_get_u32(req,"len",&len);

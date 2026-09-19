@@ -67,6 +67,7 @@ typedef struct {
     int16_t          out[SOUND_OUT_FRAMES * 2];
     volatile uint32_t out_w, out_r;
     uint64_t         out_dropped;
+    uint64_t         midi_drains;      /* times the MIDI ring was drained mid-burst */
 
     /* i960 side */
     uint64_t write_count, read_count;
@@ -255,6 +256,8 @@ static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     return (addr - MIDI_BASE) == 4 ? 0x05u : 0u;
 }
 
+static void sound_run(uint32_t n);   /* below; the drain valve in the write callback needs it */
+
 static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     (void)r; (void)size;
     if (g_sndcap.active) sndcap_put(1, addr, (val & 0xFFu) | 0xFF0000u, 0);
@@ -266,6 +269,24 @@ static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, in
         g_sound.midi_log_n++;
     }
     if (g_sound.log_writes) LOG_INFO("SOUND write @ 0x%08X sz=%d val=0x%08X", addr, size, val);
+    /* The 68000 only drains this ring in sound_run_slice, at the end of the
+     * slice, so one long run of the i960's sound handler can fill all 31 bytes
+     * on its own -- emu_service_sound_again's backoff cannot see inside a single
+     * invocation. Rather than lose the byte (scsp_midi_in would drop it, and a
+     * half-delivered command costs the driver the stream for the rest of the
+     * run), let the 68000 run now and take what is already queued. Inert in
+     * normal play: the ring peaks around 12 of 31 through a match, so this only
+     * opens under a burst the board itself would have paced out over the UART. */
+    /* Keep running the 68000 until it has taken enough to fit a whole command.
+     * One pass is not enough under a real burst: measured on a live session the
+     * ring still reached 31 of 31 and lost 11 bytes with a single sound_run(64),
+     * because the driver is not always in a position to read MIDI the moment we
+     * ask. Bounded so a wedged driver cannot hang the emu thread -- if it truly
+     * will not drain, scsp_midi_in drops the byte and counts it, as before. */
+    for (int spin = 0; spin < 32 && scsp_midi_room(&g_sound.scsp) < 4; spin++) {
+        g_sound.midi_drains++;
+        sound_run(64);                  /* ~1.5 ms of 68000 time per pass */
+    }
     scsp_midi_in(&g_sound.scsp, (uint8_t)val);
 }
 
