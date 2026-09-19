@@ -125,5 +125,15 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # The action's own bundled dependencies load Node's built-in `punycode`, which
+      # Node has deprecated at runtime since v21, so every deploy printed
+      #   [DEP0040] DeprecationWarning: The `punycode` module is deprecated.
+      # It is not ours to fix -- nothing in this repository runs in that process,
+      # and tools/*.mjs are clean under --trace-deprecation -- and it is not a
+      # problem, but a warning nobody can act on teaches people to skip warnings.
+      # This silences that one code and no other. Drop it when the action stops
+      # needing it.
       - id: deployment
         uses: actions/deploy-pages@v5
+        env:
+          NODE_OPTIONS: --disable-warning=DEP0040
