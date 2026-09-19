@@ -70,6 +70,21 @@ int main(void) {
     (void)mem_read32(&bus, 0xFFFFFFF0);
     CHECK(bus.unmapped_reads == um_before + 1, "unmapped read tracked");
 
+    /* A re-init must not MOVE the heap regions. A netplay session re-runs
+     * mem_init on the emu thread while the frame callback is decoding texture
+     * RAM through a pointer it loaded earlier; a block that moved is a block
+     * that was freed under it. Cleared in place is the whole contract. */
+    uint8_t *before[6] = { bus.main_data, bus.xtra_data, bus.vid_ext_ram,
+                           bus.texram0,   bus.texram1,   bus.framebuffer };
+    ok = mem_init(&bus, NULL, 0);
+    uint8_t *after[6]  = { bus.main_data, bus.xtra_data, bus.vid_ext_ram,
+                           bus.texram0,   bus.texram1,   bus.framebuffer };
+    CHECK(ok, "mem_init succeeds a second time");
+    CHECK(memcmp(before, after, sizeof(before)) == 0, "re-init keeps all six heap regions where they were");
+    CHECK(mem_read32(&bus, TEXRAM0_BASE + 0x100) == 0, "re-init clears TEXRAM0");
+    CHECK(mem_read32(&bus, MAIN_DATA_BASE + 0x4000) == 0, "re-init clears MAIN_DATA");
+    CHECK(mem_read8(&bus, IO_BASE) == 0xFF, "IO region is 0xFF again after re-init");
+
     mem_shutdown(&bus);
 
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);
