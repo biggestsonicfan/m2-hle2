@@ -166,6 +166,65 @@ static inline void audio_out_init_ex(const audio_out_config_t *cfg) {
 
 static inline void audio_out_init(void) { audio_out_init_ex(NULL); }
 
+/* ---- The push model ---------------------------------------------------------
+ *
+ * Everything above is PULL: a device callback asks for frames and the queue
+ * lives in the board's ring. A host whose audio runs where this code cannot be
+ * called from has to PUSH instead. The web build is that host: an AudioWorklet
+ * runs on the browser's audio thread, which without SharedArrayBuffer shares no
+ * memory with the wasm heap, so the page posts it chunks and the worklet keeps
+ * the queue (web/site/m2hle-audio-worklet.js).
+ *
+ * It is worth the second model. The pull path in a browser is a
+ * ScriptProcessorNode, which runs on the main thread and double-buffers: a
+ * 1024-frame node costs ~46 ms before the device is reached, on top of a queue
+ * that has to cover a whole callback. The worklet takes 128 frames at a time,
+ * so the only latency left to choose is the jitter cushion.
+ *
+ * audio_out_drain renders everything the board has produced since the last call
+ * -- same interpolation, same DC blocker -- and returns the frames written
+ * (interleaved stereo). `nudge` is the rate correction, the same sign as the
+ * pull model's: positive when the far queue runs long, so each output frame
+ * covers a little more of the source and fewer are produced. The caller gets it
+ * from whoever holds the queue.
+ */
+static inline void audio_out_push_begin(uint32_t device_rate) {
+    audio_out_t *a = &g_audio_out;
+    a->rate = device_rate ? device_rate : SOUND_RATE;
+    a->pos  = 0.0;
+    a->dc_xl = a->dc_xr = a->dc_yl = a->dc_yr = 0.0f;
+    /* Whatever the board produced before there was anywhere to send it is old. */
+    g_sound.out_r = g_sound.out_w;
+}
+
+static inline int audio_out_drain(float *buf, int cap_frames, double nudge) {
+    audio_out_t *a = &g_audio_out;
+    const uint32_t mask = SOUND_OUT_FRAMES - 1;
+    const double step = (double)SOUND_RATE / (double)a->rate * (1.0 + nudge);
+    int n = 0;
+    while (n < cap_frames) {
+        uint32_t r = g_sound.out_r, fill = (g_sound.out_w - r) & mask;
+        if (fill < 2) break;                /* one frame stays behind to interpolate from */
+        float f = (float)a->pos;
+        const int16_t *p0 = g_sound.out + r * 2, *p1 = g_sound.out + ((r + 1) & mask) * 2;
+        float l  = ((float)p0[0] + ((float)p1[0] - (float)p0[0]) * f) / 32768.0f;
+        float rr = ((float)p0[1] + ((float)p1[1] - (float)p0[1]) * f) / 32768.0f;
+        a->pos += step;
+        uint32_t adv = (uint32_t)a->pos;
+        if (adv > fill - 1) adv = fill - 1;
+        a->pos -= adv;
+        g_sound.out_r = (r + adv) & mask;
+
+        const float R = 0.9993f;
+        float yl = l - a->dc_xl + R * a->dc_yl, yr = rr - a->dc_xr + R * a->dc_yr;
+        a->dc_xl = l; a->dc_xr = rr; a->dc_yl = yl; a->dc_yr = yr;
+        buf[n * 2]     = yl;
+        buf[n * 2 + 1] = yr;
+        n++;
+    }
+    return n;
+}
+
 /* Frames of board audio waiting to be played, for a host that reports it. */
 static inline uint32_t audio_out_queued(void) {
     return (g_sound.out_w - g_sound.out_r) & (SOUND_OUT_FRAMES - 1);

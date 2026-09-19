@@ -79,6 +79,17 @@ static struct {
     bool             gfx_ready;
 } state;
 
+/* Who plays the sound. The page decides (web/site/m2hle-page.js, "Sound") and
+ * says so through web_audio_use_worklet / web_audio_use_fallback, because finding
+ * out whether a worklet can be had is asynchronous. Until it answers the board's
+ * output goes nowhere, and audio_out_push_begin throws that backlog away. */
+typedef enum { WEB_AUDIO_PENDING, WEB_AUDIO_WORKLET, WEB_AUDIO_FALLBACK } web_audio_mode_t;
+static web_audio_mode_t g_web_audio = WEB_AUDIO_PENDING;
+static double           g_web_audio_nudge = 0.0;
+/* Three slices at 48 kHz is 2400 frames; one callback never renders more. */
+#define WEB_AUDIO_CHUNK_FRAMES 4096
+static float g_web_audio_chunk[WEB_AUDIO_CHUNK_FRAMES * 2];
+
 /* ---- The board ------------------------------------------------------------ */
 
 /* What load_active_profile does in main.c once the ROM files are read, and what
@@ -139,6 +150,37 @@ static void web_run_owed_slices(void) {
     }
 }
 
+/* ---- Sound ---------------------------------------------------------------- */
+
+/* The worklet is up: render for its sample rate and push a chunk per frame. */
+EMSCRIPTEN_KEEPALIVE void web_audio_use_worklet(int device_rate) {
+    audio_out_push_begin((uint32_t)device_rate);
+    g_web_audio_nudge = 0.0;
+    g_web_audio = WEB_AUDIO_WORKLET;
+    LOG_INFO("audio: worklet, %d Hz", device_rate);
+}
+
+/* No worklet (an old browser, an insecure context): the emulator's own callback,
+ * which in a browser is a ScriptProcessorNode on the main thread. It
+ * double-buffers, so 512 frames is ~23 ms before the device; the queue has to
+ * cover a callback plus a late slice or two. Later than the worklet by design --
+ * see "The push model" in audio_out.h. */
+EMSCRIPTEN_KEEPALIVE void web_audio_use_fallback(void) {
+    if (g_web_audio == WEB_AUDIO_FALLBACK) return;
+    g_web_audio = WEB_AUDIO_FALLBACK;
+    audio_out_init_ex(&(audio_out_config_t){
+        .buffer_frames = 512,
+        .target        = 2048.0,
+        .smooth_fill   = true,
+    });
+}
+
+/* The rate correction, from whoever holds the queue (the page, averaging the
+ * worklet's reports). Clamped here too: it goes straight into the resampler. */
+EMSCRIPTEN_KEEPALIVE void web_audio_set_nudge(double nudge) {
+    g_web_audio_nudge = nudge < -0.01 ? -0.01 : nudge > 0.01 ? 0.01 : nudge;
+}
+
 /* ---- sokol_app callbacks -------------------------------------------------- */
 
 static void init(void) {
@@ -162,14 +204,14 @@ static void init(void) {
     state.gfx_ready = true;
     LOG_INFO("web: tile layers composed on the %s", state.video.gpu ? "GPU" : "CPU");
 
-    /* A short queue: see audio_out.h. 3072 frames (~70 ms) covers one 1024-frame
-     * callback plus two late slices, which is what a display throttled to 30 Hz
-     * delivers at a time. */
-    audio_out_init_ex(&(audio_out_config_t){
-        .buffer_frames = 1024,
-        .target        = 3072.0,
-        .smooth_fill   = true,
-    });
+    /* Sound: ask the page for a worklet. It answers later, with one of the two
+     * web_audio_use_* exports; a page without the hook gets the fallback now. */
+    if (!EM_ASM_INT({
+            if (!Module.m2hleAudioStart) return 0;
+            Module.m2hleAudioStart();
+            return 1;
+        }))
+        web_audio_use_fallback();
 
     netplay_init();
     netplay_set_reset_hook(web_netplay_reset_cb, NULL);
@@ -188,6 +230,13 @@ static void init(void) {
 
 static void frame(void) {
     web_run_owed_slices();
+
+    /* What the board produced this frame goes to the worklet in one chunk. */
+    if (g_web_audio == WEB_AUDIO_WORKLET) {
+        int frames = audio_out_drain(g_web_audio_chunk, WEB_AUDIO_CHUNK_FRAMES, g_web_audio_nudge);
+        if (frames > 0)
+            EM_ASM({ Module.m2hleAudioPush($0, $1); }, g_web_audio_chunk, frames);
+    }
 
     const bool have_game = state.romset.loaded;
     float lerp_t = 1.0f;
@@ -290,9 +339,9 @@ EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {
     return (unsigned)g_emu_frames;
 }
 
-/* The audio queue, for tools/web-smoke.mjs: frames of board audio waiting to be
- * played (44.1 kHz), and how often the queue ran dry or was found stale. Queue
- * depth is most of the distance between a hit on screen and its sound. */
+/* The FALLBACK path's queue, for the page's audioStats(): frames of board audio
+ * waiting to be played (44.1 kHz), and how often the queue ran dry or was found
+ * stale. On the worklet path the queue is the worklet's and the page has it. */
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_queued(void)    { return audio_out_queued(); }
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_underruns(void) { return (unsigned)g_audio_out.underruns; }
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_resyncs(void)   { return (unsigned)g_audio_out.resyncs; }

@@ -149,18 +149,15 @@ try {
     await sleep(1000);
     const st = await evaluate(
       "(typeof Module !== 'undefined' && Module._web_state) ? [Module._web_state(), Module._web_frames(), " +
-      "Module._web_audio_queued ? Module._web_audio_queued() : -1, " +
-      "Module._web_audio_underruns ? Module._web_audio_underruns() : -1, " +
-      "Module._web_audio_resyncs ? Module._web_audio_resyncs() : -1, " +
-      "Module._saudio_context ? Module._saudio_context.state : 'none'] : null");
+      "Module.m2hleAudioStats ? Module.m2hleAudioStats() : null] : null");
     if (st) {
       frames = st[1];
-      /* The queue is sampled once a second at an arbitrary phase of its sawtooth,
-       * so read the column as a level, not a number to the frame. Underruns count
-       * output samples held, not events. */
-      const audio = st[2] >= 0
-        ? `  audio ${st[5]} queue=${st[2]}fr (${(st[2] / 44.1).toFixed(0)}ms) underrun-samples=${st[3]} resyncs=${st[4]}`
-        : '';
+      /* The queue is sampled at an arbitrary phase of its sawtooth (up a chunk, down
+       * a callback), so read the column as a level, not a number to the frame. */
+      const a = st[2];
+      const audio = !a ? '' : !a.rate ? `  audio ${a.mode}`
+        : `  audio ${a.mode}/${a.state} queue=${a.queueMs.toFixed(0)}ms (target ${a.targetMs.toFixed(0)})` +
+          `${a.buffering ? ' BUFFERING' : ''} ${a.mode === 'fallback' ? 'held-samples' : 'dropouts'}=${a.underruns} resyncs=${a.resyncs}`;
       console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${audio}`);
       lastFrames = frames;
     }

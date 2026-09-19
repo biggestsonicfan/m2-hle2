@@ -149,7 +149,7 @@ if(M2HLE_WEB)
         "-sALLOW_MEMORY_GROWTH=1"
         "-sSTACK_SIZE=8388608"
         "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
-        "-sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString"
+        "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,UTF8ToString"
     )
     # The page. Copied on every build, so editing web/ needs no reconfigure.
     add_custom_command(TARGET m2hle POST_BUILD

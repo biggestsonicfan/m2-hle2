@@ -125,3 +125,18 @@ kbd {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/* ?debug */
+.debug {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.5rem;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: rgba(5, 7, 13, 0.85);
+  color: var(--text);
+  font: 12px/1.45 ui-monospace, Consolas, monospace;
+  pointer-events: none;
+}
