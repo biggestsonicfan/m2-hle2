@@ -271,7 +271,11 @@ static SDL_AudioStream *sound_start(void) {
     sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
     if (state.romset.samples && state.romset.samples_size > 0)
         sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
-    g_audio_out.rate  = SOUND_RATE;
+    /* The stream is opened at the board's rate, so the drain works in 44.1 kHz
+     * frames and SDL does the conversion. Half the desktop's queue: 93 ms is
+     * what this frontend has always held, and a handheld would rather have the
+     * latency than the cushion. */
+    audio_out_configure(&(audio_out_config_t){ .target = 4096.0 }, SOUND_RATE);
     g_audio_out.ready = true;
     SDL_ResumeAudioStreamDevice(stream);
     printf("m2hle: sound board on\n");

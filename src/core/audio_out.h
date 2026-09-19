@@ -136,7 +136,12 @@ static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
     }
 }
 
-static inline void audio_out_init_ex(const audio_out_config_t *cfg) {
+/* The drain's own settings, apart from opening a device: a host that opens its
+ * own (main_sdl.c's SDL stream) still has to come through here. Leaving the
+ * fields zero is not "the default" -- target 0 divides by zero in the rate
+ * steering and resync_above 0 calls every callback stale, which drains the ring
+ * and underruns on every one. */
+static inline void audio_out_configure(const audio_out_config_t *cfg, uint32_t rate) {
     audio_out_t *a = &g_audio_out;
     a->target      = (cfg && cfg->target > 0.0) ? cfg->target : AUDIO_TARGET;
     a->smooth_fill = cfg && cfg->smooth_fill;
@@ -146,6 +151,13 @@ static inline void audio_out_init_ex(const audio_out_config_t *cfg) {
      * applies, and it sits where the ring was already about to drop samples. */
     uint32_t stale = (uint32_t)(a->target * 3.0), cap = SOUND_OUT_FRAMES / 8u * 7u;
     a->resync_above = stale < cap ? stale : cap;
+    a->rate        = rate;
+    a->fill_k      = 1.0 / (0.25 * (double)rate);
+}
+
+static inline void audio_out_init_ex(const audio_out_config_t *cfg) {
+    audio_out_t *a = &g_audio_out;
+    audio_out_configure(cfg, SOUND_RATE);   /* the device's real rate, below */
 
     saudio_setup(&(saudio_desc){
         .num_channels       = 2,
