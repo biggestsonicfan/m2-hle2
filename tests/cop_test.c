@@ -78,6 +78,55 @@ int main(void) {
     CHECK(g_cop.geo_capture_count > 0, "geo-capture ring recorded the COP write stream");
     CHECK(g_cop.writes > 0, "cop write counter advanced");
 
+    /* ---- Fn_zanzou_reserve (0x40008080): the one variable-length command ----
+     *
+     * The i960's zanzou_control sends 4 header words, then a 4-word record per
+     * trailing part with one word read back after each, then -1, the turn angle
+     * and a last word read back.  Drive that conversation through the FIFO and
+     * check the trail it lays: a part that moved 1.0 units with the spacing at
+     * 0.1 gets ten copies, walking from last frame's matrix to this frame's. */
+    cop_reset();
+    /* what the i960 uploads at boot: spacing 0.1, first life 3 */
+    cop_write(0x24804949); cop_write(0x32181); cop_write(f2b(0.1f));
+    cop_write(0x24804949); cop_write(0x32182); cop_write(3);
+    /* part 0's matrix, last frame at the origin and this frame 1.0 along X */
+    for (int k = 0; k < 12; k++) {
+        sharc_dm_setf(0x32000u + (uint32_t)k, k == 0 || k == 4 || k == 8 ? 1.0f : 0.0f);
+        sharc_dm_setf(0x30420u + (uint32_t)k, k == 0 || k == 4 || k == 8 ? 1.0f : 0.0f);
+    }
+    sharc_dm_setf(0x30420u + 9u, 1.0f);                  /* this frame's T.x = 1 */
+
+    cop_write(0x40008080);
+    cop_write(0);            /* player  */
+    cop_write(1);            /* part mask: part 0 only */
+    cop_write((uint32_t)-4); /* life step */
+    cop_write(f2b(0.0f));    /* bone length */
+    cop_write(0);            /* record: part 0 */
+    cop_write(0x1111); cop_write(0x2222); cop_write(0x3333);
+    uint32_t rec_reply = cop_read();
+    cop_write(0xFFFFFFFFu);  /* terminator */
+    cop_write(0);            /* turn angle */
+    uint32_t end_reply = cop_read();
+    CHECK(rec_reply == 0x20, "zanzou_reserve answers index+0x20 after each record");
+    CHECK(end_reply == f2b(1.0f), "zanzou_reserve's last word is cos of the turn angle");
+    CHECK(sharc_dm_get(0x32180u) == 10, "a 1.0-unit move at 0.1 spacing lays ten copies");
+    CHECK(sharc_dm_get(0x32300u + 0u) == 0 && sharc_dm_get(0x32300u + 3u) == (uint32_t)-4
+          && sharc_dm_get(0x32300u + 4u) == 0x1111,
+          "each ring slot carries its part, life step and object numbers");
+    CHECK(feq(b2f(sharc_dm_get(0x32300u + 0x1Du)), 0.0f)
+          && feq(b2f(sharc_dm_get(0x32300u + 5u * 0x20u + 0x1Du)), 0.5f),
+          "the copies walk from last frame's matrix to this frame's");
+
+    /* zanzou_disp's side: the slot is alive and reports what it was given. */
+    cop_write(0x42808585); cop_write(0);
+    uint32_t info[5]; for (int k = 0; k < 5; k++) info[k] = cop_read();
+    CHECK(info[0] == 0 && info[2] == 3 && info[3] == (uint32_t)-4,
+          "zanzou_get_info answers the slot's part, life and step");
+    CHECK(info[4] == 0x3333, "a young copy takes the third object number");
+    /* Life runs 3..12 up the trail; -4 a frame kills the youngest outright. */
+    cop_write(0x41008282);
+    CHECK(cop_read() == 9, "zanzou_inc counts the live slots");
+
     /* ---- unknown command accounting ---- */
     uint32_t unk0 = g_sharc.unknown_cmds;
     cop_write(0xDEADBEEF);   /* not in dispatch table -> default/unknown path */

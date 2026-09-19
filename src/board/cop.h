@@ -28,7 +28,10 @@
 
 /* ---- Limits -------------------------------------------------------------- */
 
-#define COP_ARGS_MAX  20
+/* Fn_zanzou_reserve streams up to 4 + 16*4 + 2 words; every other command is
+ * under 20.  tests/cop_replay replays a whole captured argument list at once,
+ * so this has to hold the longest of them. */
+#define COP_ARGS_MAX  80
 
 /* Synthetic sentinel emitted into geo_capture when a set_window call is
  * intercepted by the GEO_PROGRAM write callback in memory.h.
@@ -140,6 +143,19 @@ static inline void cop_write(uint32_t val) {
     if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
         g_cop.geo_capture_count++;
 
+    /* A variable-length command: the handler consumes words until it says it
+     * is done, pushing its answers as it goes so the i960's loop finds each
+     * one waiting where the board would have left it. */
+    if (g_cop.args_needed == COP_ARGS_STREAM) {
+        if (g_cop_tap) g_cop_tap(0x20000000u, val);
+        int before = g_sharc.reply_count;
+        bool done  = sharc_zanzou_feed(val);
+        for (int k = before; k < g_sharc.reply_count; k++)
+            if (g_cop_tap) g_cop_tap(0x30000000u, g_sharc.reply[k]);
+        if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
+        return;
+    }
+
     if (g_cop.args_needed > 0) {
         if (g_cop_tap) g_cop_tap(0x20000000u, val);
         if (g_cop.args_received < COP_ARGS_MAX)
@@ -157,6 +173,12 @@ static inline void cop_write(uint32_t val) {
     g_cop.cur_cmd       = val;
     g_cop.args_needed   = sharc_args_for_cmd(val);
     g_cop.args_received = 0;
+    if (g_cop.args_needed == COP_ARGS_STREAM) {
+        g_sharc.reply_count = 0;
+        g_sharc.reply_idx   = 0;
+        sharc_zanzou_begin();
+        return;
+    }
     if (g_cop.args_needed == 0) {
         sharc_exec(val, NULL, 0);
         cop_tap_replies();
@@ -181,6 +203,7 @@ static inline uint32_t cop_read(void) {
 /* Reset all COP/SHARC state. Call when a new ROM is installed. */
 static inline void cop_reset(void) {
     memset(&g_cop, 0, sizeof(g_cop));
+    g_zz.phase = 4;                       /* no stream in flight */
     memset(&g_sharc, 0, sizeof(g_sharc));
     memset(&g_geo_win, 0, sizeof(g_geo_win));
     sharc_rot_identity();

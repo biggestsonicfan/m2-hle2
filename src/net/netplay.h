@@ -288,6 +288,22 @@ typedef struct {
     uint64_t          stall_since_ms;
     uint32_t          stall_timeout_ms;
 
+    /* Pacing for the two things that are sent from a loop that spins every
+     * millisecond (see NETPLAY_ANNOUNCE_MS), and when the peer's input last
+     * arrived -- which is what tells a peer that has gone quiet from one that is
+     * still talking and not advancing. */
+    uint64_t          last_announce_ms;
+    uint64_t          last_resend_ms;
+    uint64_t          last_peer_input_ms;
+
+    /* The frame this board was last cleared to run, and since when. Both
+     * players' inputs being in is permission to run the frame, not proof that it
+     * ran: see netplay_watch_own_board. */
+    uint32_t          ready_frame;
+    uint64_t          ready_since_ms;
+    bool              ready_reported;
+    uint32_t          stopped_noted_frame;
+
     /*
      * The login in flight, as far as the stored Twitch login is concerned.
      *
@@ -534,12 +550,33 @@ static inline void netplay_fill_header(lockstep_header_t *h, uint8_t type) {
 static inline bool netplay_is_host(void) { return g_netplay.local_player == 0; }
 
 /*
- * How long an announce counts for. A peer sitting at the barrier sends one per
- * slice -- sixty a second -- so anything above a few hundred milliseconds is
- * generous, and the window is what makes the answer clear itself when they give
- * up and walk away instead of leaving a challenge on screen forever.
+ * How long an announce counts for. A peer sitting at the barrier sends one every
+ * NETPLAY_ANNOUNCE_MS, so anything above a few hundred milliseconds is generous,
+ * and the window is what makes the answer clear itself when they give up and
+ * walk away instead of leaving a challenge on screen forever.
  */
 #define NETPLAY_READY_WINDOW_MS 2000u
+
+/*
+ * How often a machine that is WAITING repeats itself: the announce at the
+ * barrier, and its newest inputs while stalled.
+ *
+ * Both are sent from netplay_begin_frame, and a waiting emu thread calls that
+ * every millisecond. Unpaced, that is a thousand datagrams a second at one
+ * address for as long as somebody sits at the barrier -- a minute, if the other
+ * player is reading the screen -- and that is what a consumer gateway's UDP flood
+ * detection is looking for. Twenty a second is still forty inside the ready
+ * window, and releases the barrier within a frame or three of the old rate.
+ */
+#define NETPLAY_ANNOUNCE_MS 50u
+#define NETPLAY_RESEND_MS   50u
+
+/* A board cleared to run a frame and still on it this long later gets a line in
+ * the log. No frame of any game is near it: the longest, a scene load, is a few
+ * slices. It leaves the session at stall_timeout_ms, like any other stall. */
+#define NETPLAY_OWN_BOARD_REPORT_MS 3000u
+/* ...and this long on one frame is already not a frame: start repeating ourselves. */
+#define NETPLAY_OWN_BOARD_QUIET_MS  250u
 
 /*
  * Is somebody waiting for us to accept? True only while we are idling in a room
@@ -583,6 +620,7 @@ static inline void netplay_send_announce(void) {
     netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_ANNOUNCE);
     pkt.seed = netplay_is_host() ? g_netplay.seed : 0;   /* only the host's is authoritative */
     rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
+    g_netplay.last_announce_ms = net_now_ms();
 }
 
 /*
@@ -612,6 +650,12 @@ static inline void netplay_begin_generation(uint32_t generation) {
     g_netplay.delay_seeded  = false;
     g_netplay.reset_pending = false;
     g_netplay.stall_since_ms = 0;
+    g_netplay.last_resend_ms      = 0;
+    g_netplay.last_peer_input_ms  = 0;
+    g_netplay.ready_frame         = LOCKSTEP_INVALID_FRAME;
+    g_netplay.ready_since_ms      = 0;
+    g_netplay.ready_reported      = false;
+    g_netplay.stopped_noted_frame = LOCKSTEP_INVALID_FRAME;
     g_netplay.state = NETPLAY_SYNCING;
     g_netplay.last_wait_report_ms = net_now_ms();
     netplay_send_announce();
@@ -652,6 +696,9 @@ static inline void netplay_drain_socket(void) {
         if (hdr->type == LOCKSTEP_PACKET_INPUT && got >= (int)sizeof(lockstep_input_packet_t)) {
             const lockstep_input_packet_t *pkt = (const lockstep_input_packet_t *)buf;
             lockstep_on_record(&g_netplay.lockstep, &pkt->record);
+            if ((int32_t)hdr->player != g_netplay.local_player
+                && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F))
+                g_netplay.last_peer_input_ms = net_now_ms();
             if (pkt->check_frame != LOCKSTEP_NO_CHECK) {
                 uint32_t idx = pkt->check_frame & LOCKSTEP_RING_MASK;
                 g_netplay.peer_check_frame[idx] = pkt->check_frame;
@@ -968,6 +1015,13 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     if (!g_active_profile) { netplay_log("load a ROM set before connecting"); return; }
     if (!g_netplay.reset_board) {
         netplay_log("no board-reset hook installed - netplay cannot start a session");
+        return;
+    }
+    /* RPCN reads a login with no name as Malformed and says only that, which
+     * reads as a broken client. It is what Connect sends after a Twitch sign-in
+     * that did not complete: the account boxes are still empty. */
+    if (!cfg->npid[0]) {
+        netplay_log("no account name - type one, or sign in with Twitch first");
         return;
     }
 
@@ -1403,6 +1457,102 @@ static inline void netplay_pump_twitch(void) {
 }
 
 /*
+ * A stalled machine says again what it last said.
+ *
+ * Inputs go out once, when a new local frame is sampled, and a machine waiting
+ * for the peer samples nothing. With both peers waiting nobody transmits, so a
+ * burst of loss longer than the frames in flight is never repaired and the two
+ * sit there until the stall timer ends the session. See lockstep_resend_floor
+ * for the range, and why the newest record alone is not enough.
+ */
+static inline void netplay_resend_inputs(void) {
+    const lockstep_t *l = &g_netplay.lockstep;
+    if (l->last_local_frame == LOCKSTEP_INVALID_FRAME) return;
+
+    uint64_t now = net_now_ms();
+    if (now - g_netplay.last_resend_ms < NETPLAY_RESEND_MS) return;
+    g_netplay.last_resend_ms = now;
+
+    uint32_t floor = lockstep_resend_floor(l);
+    uint32_t top   = l->last_local_frame;
+    /* Newest first: it is the one most likely to be the only thing missing.
+     * Four records is 40 frames, well past what the largest delay can need. */
+    for (int sent = 0; sent < 4; sent++) {
+        lockstep_input_packet_t pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_INPUT);
+        pkt.check_frame = g_netplay.last_check_frame;
+        pkt.check_value = g_netplay.last_check_value;
+        lockstep_fill_record(l, top, &pkt.record);
+        rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
+        if (top < floor + LOCKSTEP_REDUNDANCY) break;   /* this record reached the floor */
+        top -= LOCKSTEP_REDUNDANCY;
+    }
+}
+
+static inline void netplay_leave_session(void) {
+    g_netplay.state          = NETPLAY_IN_ROOM;
+    g_netplay.stall_since_ms = 0;
+    netplay_release_inputs();
+}
+
+/*
+ * Watches THIS board, which nothing used to.
+ *
+ * Both players' inputs being in is permission to run a frame, not proof that it
+ * ran. An emulator that is paused, halted, or running without ever reaching the
+ * end of the frame is cleared for the same frame on every slice, so it never
+ * counts as stalled: it shows "playing" with a frame number that does not move,
+ * sends nothing because it samples nothing, and the only evidence anywhere is the
+ * OTHER machine's stall timer, fifteen seconds later, blaming the network.
+ *   How it surfaced: the first session with a player on another network. Their
+ *   board stopped finishing frames 45 frames after the reset, twice, with a
+ *   corrupted screen; the host logged a stall at frame 48 and nothing on either
+ *   side said which machine had stopped.
+ * Returns true when it has ended the session.
+ */
+static inline bool netplay_watch_own_board(uint32_t frame) {
+    uint64_t now = net_now_ms();
+    if (g_netplay.ready_frame != frame) {
+        g_netplay.ready_frame    = frame;
+        g_netplay.ready_since_ms = now;
+        g_netplay.ready_reported = false;
+        return false;
+    }
+    uint64_t held = now - g_netplay.ready_since_ms;
+    /* Keep talking while we are the one holding things up. We sample nothing, so
+     * we would otherwise go silent, and the peer could not tell a board that
+     * stopped from a cable that was pulled: its stall message reports how long
+     * ago our last input arrived. */
+    if (held > NETPLAY_OWN_BOARD_QUIET_MS) netplay_resend_inputs();
+    if (!g_netplay.ready_reported && held > NETPLAY_OWN_BOARD_REPORT_MS) {
+        g_netplay.ready_reported = true;
+        /* Under NETPLAY_LOG_LEN with both numbers at their widest. */
+        netplay_log("both inputs for frame %u have been in for %u ms and this board has not "
+                    "finished it - paused, halted, or stuck inside the frame",
+                    frame, (unsigned)held);
+    }
+    if (g_netplay.stall_timeout_ms && held > g_netplay.stall_timeout_ms) {
+        netplay_log("this board did not finish frame %u in %u ms - leaving the session",
+                    frame, g_netplay.stall_timeout_ms);
+        netplay_leave_session();
+        return true;
+    }
+    return false;
+}
+
+/* The run loop's half of the same report: it knows WHY the board is not running.
+ * Called from the emu thread whenever it finds itself stopped; once per frame. */
+static inline void netplay_board_stopped(uint32_t ip, bool halted) {
+    if (!g_netplay.enabled || g_netplay.state != NETPLAY_PLAYING || g_netplay.reset_pending) return;
+    if (g_netplay.stopped_noted_frame == g_netplay.frame) return;
+    g_netplay.stopped_noted_frame = g_netplay.frame;
+    netplay_log(halted ? "the emulated CPU HALTED at IP=0x%08X on frame %u - this session cannot continue"
+                       : "the emulator is paused at IP=0x%08X on frame %u - the peer is waiting (F9 resumes)",
+                (unsigned)ip, g_netplay.frame);
+}
+
+/*
  * Called once per slice from the emu thread, OUTSIDE the emu mutex. Pumps the
  * network, then answers what this slice may do.
  */
@@ -1429,8 +1579,10 @@ static inline netplay_step_t netplay_begin_frame(void) {
     if (g_netplay.state == NETPLAY_SYNCING) {
         /* Keep announcing until the barrier releases: the announce is a plain
          * datagram and may be lost, and it is also how the host's generation and
-         * seed reach a guest that pressed start first. */
-        netplay_send_announce();
+         * seed reach a guest that pressed start first. Paced, because this runs
+         * every millisecond while we wait: see NETPLAY_ANNOUNCE_MS. */
+        if (net_now_ms() - g_netplay.last_announce_ms >= NETPLAY_ANNOUNCE_MS)
+            netplay_send_announce();
         netplay_report_wait();
 
         if (lockstep_barrier_released(&g_netplay.lockstep)) {
@@ -1478,16 +1630,35 @@ static inline netplay_step_t netplay_begin_frame(void) {
             g_netplay.lockstep.stalls++;
         } else if (g_netplay.stall_timeout_ms
                    && now - g_netplay.stall_since_ms > g_netplay.stall_timeout_ms) {
-            netplay_log("stalled for more than %u ms at frame %u - leaving the session",
-                        g_netplay.stall_timeout_ms, frame);
-            g_netplay.state = NETPLAY_IN_ROOM;
-            g_netplay.stall_since_ms = 0;
-            netplay_release_inputs();
+            /* Which of the two it was. With the resend below, a peer that is
+             * alive keeps talking even when it cannot advance, so silence means
+             * the network or the process went away, and recent input means the
+             * other board is the one that stopped. */
+            if (g_netplay.last_peer_input_ms)
+                netplay_log("stalled for more than %u ms at frame %u (the peer's last input "
+                            "arrived %u ms ago) - leaving the session",
+                            g_netplay.stall_timeout_ms, frame,
+                            (unsigned)(now - g_netplay.last_peer_input_ms));
+            else
+                netplay_log("stalled for more than %u ms at frame %u (no input ever arrived "
+                            "from the peer) - leaving the session",
+                            g_netplay.stall_timeout_ms, frame);
+            netplay_leave_session();
+            netplay_publish_status();
+            return NETPLAY_STEP_WAIT;
         }
+        netplay_resend_inputs();
+        /* Not ours to answer for while we wait on the peer. */
+        g_netplay.ready_frame = LOCKSTEP_INVALID_FRAME;
         netplay_publish_status();
         return NETPLAY_STEP_WAIT;
     }
     g_netplay.stall_since_ms = 0;
+
+    if (netplay_watch_own_board(frame)) {
+        netplay_publish_status();
+        return NETPLAY_STEP_WAIT;
+    }
 
     netplay_apply_inputs(lockstep_input_for(&g_netplay.lockstep, 0, frame),
                          lockstep_input_for(&g_netplay.lockstep, 1, frame));
@@ -1527,6 +1698,20 @@ static inline void netplay_do_reset(void) {
     } else {
         netplay_log("no board-reset hook - the two boards will not start from the same state");
     }
+}
+
+/*
+ * The same reset with no session behind it, for whoever wants to know what the
+ * barrier's reset does to a board that has been running: the MCP bridge's
+ * `board_reset`, which tools/grade-reset.mjs holds against a first boot. Emu
+ * thread, emu mutex held, like netplay_do_reset. False without a hook.
+ */
+static inline bool netplay_reset_board_now(void) {
+    if (!g_netplay.reset_board) return false;
+    g_netplay.reset_board(g_netplay.reset_ctx);
+    input_reset();
+    netplay_log("board reset on request (no session)");
+    return true;
 }
 
 static inline bool netplay_active(void) {

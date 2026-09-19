@@ -162,14 +162,14 @@ static const fw_op_t FW[256] = {
     [0x7d] = { "Fn_store_inner_3x3", -1, -1 },
     [0x7e] = { "Fn_mul_matrix_inner3", 2, 0 },
     [0x7f] = { "Fn_coli_copy_unit_matrix", 1, 0 },
-    [0x80] = { "Fn_zanzou_reserve", -1, -1 },
+    [0x80] = { "Fn_zanzou_reserve", -1, -1 },   /* variable: 4 + 4n + 2 in, n + 1 out */
     [0x81] = { "Fn_zanzou_init", 0, 0 },
     [0x82] = { "Fn_zanzou_inc", 0, 1 },
-    [0x83] = { "Fn_zanzou_load_matrix_inner", -1, -1 },
+    [0x83] = { "Fn_zanzou_load_matrix_inner", 1, 0 },
     [0x84] = { "Fn_zanzou_mul_matrix_inner", 1, 0 },
-    [0x85] = { "Fn_zanzou_get_info", 1, 0 },
+    [0x85] = { "Fn_zanzou_get_info", 1, 5 },
     [0x86] = { "Fn_zanzou_kill_timer_buffer", 1, 0 },
-    [0x87] = { "Fn_zanzou_get_matrix_inner", -1, -1 },
+    [0x87] = { "Fn_zanzou_get_matrix_inner", 1, 0 },
 };
 
 #define MAX_IO 256
@@ -304,7 +304,7 @@ int main(int argc, char **argv) {
         s->count++;                                                                     \
         MINMAX(s->in_min, s->in_max, nin);                                              \
         MINMAX(s->out_min, s->out_max, nout);                                           \
-        if (sharc_args_for_cmd(cmd) != nin) s->argcount_bad++;                          \
+        int want = sharc_args_for_cmd(cmd);                                                     if (want != COP_ARGS_STREAM && want != nin) s->argcount_bad++;                  \
         if (fo && (cmd & 0xFF) == 0x4A && nin >= 1) dump_osage(fo, ncmd, args[0], outs, nout); \
         sharc_exec(cmd, args, nin < COP_ARGS_MAX ? nin : COP_ARGS_MAX);                 \
         int hn = g_sharc.reply_count;                                                   \
