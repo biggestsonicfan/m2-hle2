@@ -601,8 +601,10 @@ nine regions the i960 can write.
 Measured 2026-09-19: `wasm` against master `089a36f`, identical at 600, 1800 and
 3600, with and without `--no-mesh-cache --cpu-tiles`, at +98% headless
 throughput; and the arc-s merge (the handheld's sound, the load-spike work and
-the ARM parity fixes) against master `3d2ca3e`, identical at 600 and 1800 —
-which is what says the hand-resolved conflict in the run loop
+the ARM parity fixes) against master `3d2ca3e`, identical at 600, 1800, 3600
+and 6000 — the last two inside attract's replay fight, which is where a
+one-bit difference in the board would already have grown into a different
+fight. That is what says the hand-resolved conflict in the run loop
 (`emu_slice_body`) resolved to the same board.
 
 ## What is not here yet
