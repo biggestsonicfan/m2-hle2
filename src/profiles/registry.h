@@ -11,14 +11,21 @@
 
 #include "game_profile.h"
 #include "sfight.h"
+/* The web build (M2HLE_WEB) registers Sonic the Fighters and nothing else: it
+ * exists to play that game over RPCN, and a set that cannot be played online
+ * there is only download size. Left out, not hidden. See WEB-PORT.md. */
+#ifndef M2HLE_WEB
 #include "fvipers.h"
 #include "m2snake.h"
+#endif
 /* Future: vf2.h, daytona.h, vcop.h, ... */
 
 const game_profile_t *const g_profiles[] = {
     &sfight_profile,
+#ifndef M2HLE_WEB
     &fvipers_profile,
     &m2snake_profile,
+#endif
 };
 
 const size_t g_profile_count = sizeof(g_profiles) / sizeof(g_profiles[0]);

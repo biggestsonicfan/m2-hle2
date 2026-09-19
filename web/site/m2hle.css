@@ -1,0 +1,127 @@
+/* The page around the game canvas. The canvas fills the window and the game is
+ * letterboxed inside it by the emulator; the panel sits over it until a game is
+ * running. */
+:root {
+  color-scheme: dark;
+  --bg: #05070d;
+  --panel: #10141f;
+  --edge: #273049;
+  --text: #e8ecf6;
+  --dim: #97a1ba;
+  --accent: #4da3ff;
+  --bad: #ff8a7a;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+}
+
+/* A column: the canvas takes what the key legend leaves. The legend gets a row
+ * of its own rather than floating over the canvas, because the game draws its
+ * own text (CREDIT, the timer) right up to the bottom edge of the picture. */
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: block;
+  outline: none;
+  background: #000;
+}
+
+.panel {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(30rem, calc(100vw - 2rem));
+  padding: 1.75rem 1.75rem 1.5rem;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.panel[hidden], section[hidden], .keys[hidden], p[hidden] { display: none; }
+
+h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.5rem;
+  letter-spacing: 0.01em;
+}
+
+.lead { margin: 0 0 1.25rem; color: var(--dim); }
+
+.drop {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 1.6rem 1rem;
+  border: 2px dashed var(--edge);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.drop strong { font-size: 1.1rem; color: var(--accent); }
+.drop span { color: var(--dim); }
+.drop .hint { margin-top: 0.5rem; font-size: 0.875rem; }
+.drop:hover, .drop.over, #file:focus-visible + .drop {
+  border-color: var(--accent);
+  background: rgba(77, 163, 255, 0.08);
+}
+
+code {
+  padding: 0.05rem 0.35rem;
+  border-radius: 5px;
+  background: #1a2133;
+  font-size: 0.9em;
+}
+
+.error { margin: 1rem 0 0; color: var(--bad); text-align: left; }
+.fine { margin: 1.1rem 0 0; font-size: 0.8125rem; color: var(--dim); }
+
+.keys {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem 1.1rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.8125rem;
+  color: var(--dim);
+  background: #000;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.5em;
+  margin-right: 0.15rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  background: #161c2b;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

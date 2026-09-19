@@ -24,21 +24,30 @@ add_compile_definitions(M2HLE_VERSION="${M2HLE_VERSION}")
 #   sokol  the ImGui debugger (sokol_app window, D3D11 / GL core / Metal)
 #   sdl3   the fullscreen handheld frontend (src/main_sdl.c): SDL3 window and
 #          input, sokol_gfx on GLES 3, no ImGui — and so no Python either
-set(M2HLE_FRONTEND "sokol" CACHE STRING "Host frontend: sokol (ImGui debugger) or sdl3 (fullscreen, GLES 3)")
-set_property(CACHE M2HLE_FRONTEND PROPERTY STRINGS sokol sdl3)
+#   web    the browser build (src/main_web.c, Emscripten only): sokol_app on a
+#          canvas, sokol_gfx on WebGL2, no ImGui; the page in web/ is its UI.
+#          See WEB-PORT.md. Configure with emcmake.
+set(M2HLE_FRONTEND "sokol" CACHE STRING "Host frontend: sokol (ImGui debugger), sdl3 (fullscreen, GLES 3) or web (Emscripten)")
+set_property(CACHE M2HLE_FRONTEND PROPERTY STRINGS sokol sdl3 web)
+set(M2HLE_SDL3 OFF)
+set(M2HLE_WEB  OFF)
 if(M2HLE_FRONTEND STREQUAL "sdl3")
     set(M2HLE_SDL3 ON)
-elseif(M2HLE_FRONTEND STREQUAL "sokol")
-    set(M2HLE_SDL3 OFF)
-else()
-    message(FATAL_ERROR "M2HLE_FRONTEND must be sokol or sdl3, not '${M2HLE_FRONTEND}'")
+elseif(M2HLE_FRONTEND STREQUAL "web")
+    set(M2HLE_WEB ON)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR "M2HLE_FRONTEND=web is the Emscripten build. Configure it with emcmake:\n"
+                            "  emcmake cmake -S . -B build_web -DM2HLE_FRONTEND=web")
+    endif()
+elseif(NOT M2HLE_FRONTEND STREQUAL "sokol")
+    message(FATAL_ERROR "M2HLE_FRONTEND must be sokol, sdl3 or web, not '${M2HLE_FRONTEND}'")
 endif()
 
 # ---------------------------------------------------------------------------
 # Vendored dependencies are git submodules. Fail early and usefully if the
 # tree was cloned without them.
 # ---------------------------------------------------------------------------
-if(M2HLE_SDL3)
+if(M2HLE_SDL3 OR M2HLE_WEB)
     set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz)
     set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c)
 else()
@@ -99,6 +108,54 @@ if(M2HLE_SDL3)
         ${SRC}/profiles
     )
     install(TARGETS m2hle RUNTIME DESTINATION bin)
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
+# web frontend: build_web/site/ is the whole website — m2hle.js + m2hle.wasm from
+# src/main_web.c, beside the page from web/. Then stop: nothing below (ImGui,
+# the desktop sokol TU, the unit tests) is part of this build.
+#
+# One thread, on purpose: GitHub Pages cannot send the COOP/COEP headers that
+# SharedArrayBuffer (and so -pthread) needs. WEB-PORT.md, "Threading".
+# ---------------------------------------------------------------------------
+if(M2HLE_WEB)
+    add_library(sokol STATIC ${SRC}/sokol_web_impl.c)
+    target_compile_definitions(sokol PUBLIC SOKOL_GLES3)
+    target_include_directories(sokol PUBLIC ${VENDOR}/sokol ${VENDOR}/sokol/util)
+
+    add_executable(m2hle ${SRC}/main_web.c)
+    target_compile_definitions(m2hle PRIVATE M2HLE_WEB)
+    target_link_libraries(m2hle PRIVATE sokol miniz)
+    target_include_directories(m2hle PRIVATE
+        ${SRC}
+        ${SRC}/board
+        ${SRC}/core
+        ${SRC}/net
+        ${SRC}/ui
+        ${SRC}/profiles
+    )
+    set(M2HLE_SITE_DIR ${CMAKE_BINARY_DIR}/site)
+    set_target_properties(m2hle PROPERTIES
+        SUFFIX ".js"
+        RUNTIME_OUTPUT_DIRECTORY ${M2HLE_SITE_DIR}
+    )
+    target_link_options(m2hle PRIVATE
+        "-sMIN_WEBGL_VERSION=2"
+        "-sMAX_WEBGL_VERSION=2"
+        # The ROM regions alone are 82.5 MB and the bus copies 48 MB of them again;
+        # the player's zip (18 MB) is alive only while it is being extracted.
+        "-sINITIAL_MEMORY=268435456"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "-sSTACK_SIZE=8388608"
+        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
+        "-sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString"
+    )
+    # The page. Copied on every build, so editing web/ needs no reconfigure.
+    add_custom_command(TARGET m2hle POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/web/site ${M2HLE_SITE_DIR}
+        COMMENT "web: page -> ${M2HLE_SITE_DIR}"
+        VERBATIM)
     return()
 endif()
 
