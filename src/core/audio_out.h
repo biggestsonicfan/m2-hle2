@@ -5,8 +5,26 @@
  * (board/sound.h); sokol_audio's callback drains it at the device's rate. The
  * two clocks never quite agree, so the callback resamples with a ratio nudged
  * by how full the ring is: it plays a touch faster when the ring runs long and
- * slower when it runs short, holding about AUDIO_TARGET frames of latency
- * without clicks. An empty ring (emulator stopped or behind) fades to silence.
+ * slower when it runs short, holding about `target` frames of latency without
+ * clicks. An empty ring (emulator stopped or behind) fades to silence.
+ *
+ * HOW MUCH IS QUEUED IS THE HOST'S CHOICE (audio_out_config_t), because it is a
+ * trade between latency and underruns and the hosts differ:
+ *   - The desktop build keeps AUDIO_TARGET (~186 ms). Its emu thread delivers a
+ *     slice at a time and can run long (STF's texture loads), and an underrun on
+ *     a live stream is worse than latency nobody is measuring.
+ *   - The web build steps the board from the same thread that feeds the audio
+ *     callback, a slice per display frame, so the queue only has to cover one
+ *     callback plus a late frame or two: ~70 ms, with a 1024-frame callback.
+ *     At the desktop figure a punch was heard a quarter of a second after it
+ *     landed.
+ *
+ * A RING FAR OVER ITS TARGET IS STALE, NOT EARLY. The rate nudge is 1% at most,
+ * so it takes ~19 s to work off a full ring, and a full ring is what a browser
+ * produces every time: WebAudio stays suspended until the first click or key, and
+ * the board has been filling the ring since it booted. Past `resync_above` the
+ * reader jumps forward to the target instead -- one skip, faded like an underrun,
+ * rather than seconds of sound running behind the picture.
  *
  * The board's output sits on a DC offset (about 5000 of 32768 in STF — the DSP
  * path; MAME's WAV has the same one). A real cabinet's amplifier is AC-coupled,
@@ -24,8 +42,21 @@
 #define AUDIO_TARGET 8192.0     /* frames of 44.1 kHz audio kept queued (~186 ms) */
 #define AUDIO_RESUME 256        /* frames faded back in after an underrun (~5 ms) */
 
+/* What a host asks for. Zero in any field means the desktop default. */
+typedef struct {
+    int    buffer_frames;       /* the device callback's size; 0 = sokol_audio's 2048 */
+    double target;              /* 44.1 kHz frames kept queued; 0 = AUDIO_TARGET */
+    bool   smooth_fill;         /* steer the rate by a low-passed fill, not the instantaneous one */
+} audio_out_config_t;
+
 typedef struct {
     bool     ready;
+    double   target;            /* frames of 44.1 kHz audio kept queued */
+    uint32_t resync_above;      /* a fill past this is stale: jump to the target */
+    bool     smooth_fill;
+    double   fill_lp;           /* low-passed fill, when smooth_fill */
+    double   fill_k;            /* its per-output-sample coefficient (~0.25 s) */
+    uint64_t resyncs;
     double   pos;               /* fractional read position ahead of out_r */
     float    last_l, last_r;
     float    hold_l, hold_r;                /* level held through an underrun */
@@ -45,6 +76,19 @@ static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
         uint32_t r = g_sound.out_r, w = g_sound.out_w;
         uint32_t fill = (w - r) & mask;
         float l, rr;
+        if (fill > a->resync_above) {
+            /* Stale: drop the oldest audio down to the target, and come back in
+             * through the same fade an underrun uses, so the skip is not a click. */
+            uint32_t skip = fill - (uint32_t)a->target;
+            r = (r + skip) & mask;
+            g_sound.out_r = r;
+            fill -= skip;
+            a->pos = 0.0;
+            a->fill_lp = (double)fill;
+            a->hold_l = a->last_l; a->hold_r = a->last_r;
+            a->resume = AUDIO_RESUME;
+            a->resyncs++;
+        }
         if (fill < 2) {
             /* Hold the last level (the DC blocker then fades it out without a
              * click) and arm a fade back in: coming off a hold straight onto a
@@ -65,7 +109,18 @@ static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
                 a->resume--;
             }
             a->last_l = l; a->last_r = rr;
-            double adj = ((double)fill - AUDIO_TARGET) / AUDIO_TARGET;
+            /* The instantaneous fill saws up a slice at a time and down a callback
+             * at a time. Against a small target that swing is a large part of the
+             * error, and steering by it wobbles the pitch at the callback rate; a
+             * host with a small target steers by the average instead. The loop's
+             * own time constant (target / 1% of the rate: seconds) is far longer
+             * than the filter's, so it stays well damped. */
+            double level = (double)fill;
+            if (a->smooth_fill) {
+                a->fill_lp += (level - a->fill_lp) * a->fill_k;
+                level = a->fill_lp;
+            }
+            double adj = (level - a->target) / a->target;
             adj = adj < -1.0 ? -1.0 : adj > 1.0 ? 1.0 : adj;
             a->pos += (double)SOUND_RATE / (double)a->rate * (1.0 + 0.010 * adj);
             uint32_t adv = (uint32_t)a->pos;
@@ -81,9 +136,20 @@ static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
     }
 }
 
-static inline void audio_out_init(void) {
+static inline void audio_out_init_ex(const audio_out_config_t *cfg) {
+    audio_out_t *a = &g_audio_out;
+    a->target      = (cfg && cfg->target > 0.0) ? cfg->target : AUDIO_TARGET;
+    a->smooth_fill = cfg && cfg->smooth_fill;
+    a->fill_lp     = a->target;
+    /* Stale is three times the target, but never so close to the top of the ring
+     * that an ordinary swing reaches it: with the desktop target that cap is what
+     * applies, and it sits where the ring was already about to drop samples. */
+    uint32_t stale = (uint32_t)(a->target * 3.0), cap = SOUND_OUT_FRAMES / 8u * 7u;
+    a->resync_above = stale < cap ? stale : cap;
+
     saudio_setup(&(saudio_desc){
         .num_channels       = 2,
+        .buffer_frames      = cfg ? cfg->buffer_frames : 0,
         .stream_userdata_cb = audio_out_cb,
         .logger.func        = slog_func,
     });
@@ -91,9 +157,18 @@ static inline void audio_out_init(void) {
         LOG_WARN("audio: no output device — sound disabled");
         return;
     }
-    g_audio_out.rate  = (uint32_t)saudio_sample_rate();
-    g_audio_out.ready = true;
-    LOG_INFO("audio: %u Hz output, resampled from the board's 44100 Hz", g_audio_out.rate);
+    a->rate   = (uint32_t)saudio_sample_rate();
+    a->fill_k = 1.0 / (0.25 * (double)a->rate);
+    a->ready  = true;
+    LOG_INFO("audio: %u Hz output, resampled from the board's 44100 Hz; %d-frame callback, %.0f frames (%.0f ms) queued",
+             a->rate, saudio_buffer_frames(), a->target, a->target * 1000.0 / (double)SOUND_RATE);
+}
+
+static inline void audio_out_init(void) { audio_out_init_ex(NULL); }
+
+/* Frames of board audio waiting to be played, for a host that reports it. */
+static inline uint32_t audio_out_queued(void) {
+    return (g_sound.out_w - g_sound.out_r) & (SOUND_OUT_FRAMES - 1);
 }
 
 static inline void audio_out_shutdown(void) {

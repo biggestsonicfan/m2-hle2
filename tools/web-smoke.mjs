@@ -4,7 +4,7 @@
  *
  *   node tools/web-smoke.mjs --url http://localhost:8080/?rom=/dev-rom.zip
  *        [--seconds 30] [--shot out.png] [--shot-at 10,20] [--browser path/to/chrome-or-edge]
- *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"]
+ *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -16,6 +16,11 @@
  * times asked for and at the end.
  *
  * --keys presses keys at given seconds: "5@12" is key '5' (coin) at t=12 s.
+ *
+ * --gesture-audio leaves the browser's autoplay policy alone, so WebAudio stays
+ * suspended until the first --keys press, as it does for a real visitor. By then
+ * the board has filled its output ring with old audio; the run shows whether the
+ * queue comes straight back to its target (a resync) or plays out stale.
  *
  * Without a ROM the page stops at "add your game", which is still a test worth
  * having: WebGL2 came up, every shader compiled, and nothing threw. With
@@ -71,7 +76,7 @@ const child = spawn(browser, [
   /* A machine with no usable GPU (CI, a remote session) still gets WebGL2. */
   '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist',
   /* The AudioContext starts suspended until a gesture; nobody is here to click. */
-  '--autoplay-policy=no-user-gesture-required',
+  ...(args.includes('--gesture-audio') ? [] : ['--autoplay-policy=no-user-gesture-required']),
   'about:blank',
 ], { stdio: 'ignore' });
 
@@ -143,10 +148,20 @@ try {
   for (let s = 1; s <= seconds; s++) {
     await sleep(1000);
     const st = await evaluate(
-      "(typeof Module !== 'undefined' && Module._web_state) ? [Module._web_state(), Module._web_frames()] : null");
+      "(typeof Module !== 'undefined' && Module._web_state) ? [Module._web_state(), Module._web_frames(), " +
+      "Module._web_audio_queued ? Module._web_audio_queued() : -1, " +
+      "Module._web_audio_underruns ? Module._web_audio_underruns() : -1, " +
+      "Module._web_audio_resyncs ? Module._web_audio_resyncs() : -1, " +
+      "Module._saudio_context ? Module._saudio_context.state : 'none'] : null");
     if (st) {
       frames = st[1];
-      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)`);
+      /* The queue is sampled once a second at an arbitrary phase of its sawtooth,
+       * so read the column as a level, not a number to the frame. Underruns count
+       * output samples held, not events. */
+      const audio = st[2] >= 0
+        ? `  audio ${st[5]} queue=${st[2]}fr (${(st[2] / 44.1).toFixed(0)}ms) underrun-samples=${st[3]} resyncs=${st[4]}`
+        : '';
+      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${audio}`);
       lastFrames = frames;
     }
     for (const k of keys) if (!k.done && s >= k.at) { k.done = true; await press(k.key); }

@@ -4,7 +4,7 @@
  *
  * One ROM set (Sonic the Fighters), no ImGui, no debugger, no MCP bridge, no
  * file system. sokol_app owns the canvas, the WebGL2 context, the keyboard and
- * the frame callback; the page around the canvas (web/shell.html) owns
+ * the frame callback; the page around the canvas (web/site/) owns
  * everything a player reads or clicks, and reaches in through the functions
  * exported at the bottom of this file.
  *
@@ -162,7 +162,14 @@ static void init(void) {
     state.gfx_ready = true;
     LOG_INFO("web: tile layers composed on the %s", state.video.gpu ? "GPU" : "CPU");
 
-    audio_out_init();
+    /* A short queue: see audio_out.h. 3072 frames (~70 ms) covers one 1024-frame
+     * callback plus two late slices, which is what a display throttled to 30 Hz
+     * delivers at a time. */
+    audio_out_init_ex(&(audio_out_config_t){
+        .buffer_frames = 1024,
+        .target        = 3072.0,
+        .smooth_fill   = true,
+    });
 
     netplay_init();
     netplay_set_reset_hook(web_netplay_reset_cb, NULL);
@@ -282,3 +289,10 @@ EMSCRIPTEN_KEEPALIVE int web_state(void) {
 EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {
     return (unsigned)g_emu_frames;
 }
+
+/* The audio queue, for tools/web-smoke.mjs: frames of board audio waiting to be
+ * played (44.1 kHz), and how often the queue ran dry or was found stale. Queue
+ * depth is most of the distance between a hit on screen and its sound. */
+EMSCRIPTEN_KEEPALIVE unsigned web_audio_queued(void)    { return audio_out_queued(); }
+EMSCRIPTEN_KEEPALIVE unsigned web_audio_underruns(void) { return (unsigned)g_audio_out.underruns; }
+EMSCRIPTEN_KEEPALIVE unsigned web_audio_resyncs(void)   { return (unsigned)g_audio_out.resyncs; }
