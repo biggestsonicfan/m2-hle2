@@ -168,18 +168,27 @@ Rooms whose `flagAttr` fails `netplay_room_reject_reason` are shown greyed with 
 
 ## 6. Deploy
 
-`.github/workflows/pages.yml`, separate from `canary.yml`:
+`.github/workflows/pages.yml`, separate from `canary.yml`. **It exists and runs on every push to `wasm`.**
 
-- **Build job** on push to `master` and `wasm`, and on PRs: `mymindstorm/setup-emsdk` pinned to an exact version (a toolchain bump can change float codegen — see M2's gate), submodules `vendor/sokol vendor/miniz` only (no Python step — nothing generates cimgui), `emcmake cmake -DM2HLE_FRONTEND=web`, assemble `site/` = `index.html` + JS/CSS + `m2hle.js` + `m2hle.wasm` + `CNAME`.
-- **Deploy job** on `master` only (plus `workflow_dispatch`): `actions/upload-pages-artifact` → `actions/deploy-pages`. No `gh-pages` branch.
-- The workflow is **not added until M2 produces something that builds.** A pipeline that fails on every push teaches everyone to ignore it.
+- **Build job:** `mymindstorm/setup-emsdk` pinned to **6.0.9** (a toolchain bump can change float codegen; bump it deliberately), submodules `vendor/sokol vendor/miniz` only (no Python step, nothing generates cimgui), `emcmake cmake -DM2HLE_FRONTEND=web -DM2HLE_VERSION=rNNN-sha`, then `build_web/site/` is the whole website.
+- **Gates before anything is published:** a tripwire that fails the run if a ROM-like file is in the site directory, and `tools/web-smoke.mjs` in headless Chrome with `--expect-log "game_render_init: complete"`. With no ROM the page stops at "add your game", which still proves WebGL2 came up, every shader compiled for GLSL ES 3.00, the audio path was chosen and nothing threw — the things that have actually broken.
+- **Deploy job:** `actions/upload-pages-artifact` → `actions/deploy-pages`, on pushes and `workflow_dispatch`, never on pull requests. No `gh-pages` branch. A `CNAME` file would be ignored: with an Actions deployment the custom domain lives in the repository settings.
+- **Branches:** `wasm` only, because master cannot build `-DM2HLE_FRONTEND=web` until this branch merges. Add master to the trigger in that merge.
+
+**Caching is why the page is version-stamped.** GitHub Pages serves everything `max-age=600` and that cannot be changed, and Cloudflare sits in front with the same TTL. `m2hle.js` and `m2hle.wasm` are built as a pair, so a visitor arriving just after a deploy must not get one new and one old. `web/stamp-site.cmake` writes the build's version into `index.html`, which names every file with `?v=<version>`; the page script does the same for the two files it loads itself (`locateFile` for the `.wasm`, and the audio worklet). One `index.html` always asks for one consistent set; the worst case is ten minutes on the previous build, whole.
+
+**DNS: copy `noclip.`** `noclip.sonicthefighte.rs` is already a GitHub Pages site of the same account, a **Cloudflare-proxied** CNAME to `biggestsonicfan.github.io` (it resolves to Cloudflare, answers `Server: cloudflare` with GitHub's request id behind it, and HTTPS works). Two subdomains pointing at the same `github.io` host is normal: Pages routes by host name, each repository declares its own custom domain, and a domain can belong to only one repository.
 
 Only the repository owner can do these, and the site does not exist until they are done:
 
-- Repo **Settings → Pages → Source: GitHub Actions**; custom domain `play.sonicthefighte.rs`; Enforce HTTPS. (Pages on a private repository needs a paid plan — `gh` is not installed on the dev machine, so visibility was not checked.)
-- **DNS:** `play.sonicthefighte.rs` does not resolve today (NXDOMAIN). Add `CNAME play → biggestsonicfan.github.io` at Cloudflare, **DNS-only (grey cloud)** at least until GitHub has issued its certificate.
-- To preview from `wasm` before merging, the `github-pages` environment's deployment-branch rule has to allow that branch.
-- The gateway host, its firewall range, and its certificate (§4).
+1. **Settings → Pages → Build and deployment → Source: "GitHub Actions".** Until then the deploy job fails with a 404 from the Pages API (the build job still goes green).
+2. **Settings → Environments → `github-pages` → Deployment branches: allow `wasm`.** The environment is created restricted to the default branch; without this the deploy is rejected by "environment protection rules".
+3. **DNS:** `CNAME play → biggestsonicfan.github.io`, set up the way `noclip` is.
+4. **Settings → Pages → Custom domain: `play.sonicthefighte.rs`**, then Enforce HTTPS once it is offered. Before step 4 the site is at `https://biggestsonicfan.github.io/m2-hle2/`, and it works there too: every URL in the page is relative.
+
+**Because Cloudflare is in front, "Pages cannot send headers" has a way out.** A Cloudflare Transform Rule can add `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy` to `play.`'s responses, which is what `SharedArrayBuffer` and so `-pthread` need. Nothing needs it today — one thread carries the game with room to spare (section 8) — but it means threads, if a slow device ever asks for them, would not need the `coi-serviceworker` trick. The cost to remember: under COEP every cross-origin subresource has to opt in, and the WebSocket to the gateway is unaffected.
+
+The gateway host, its firewall range and its certificate are separate (section 4); Pages cannot run it.
 
 ---
 
@@ -192,7 +201,7 @@ Each ends on something measured. Native builds for verification go in a **fresh 
 - **M2 — boots; gates partly open.** Done: `M2HLE_FRONTEND=web`, `emu_slice_body` / `emu_slice_finish` shared with the native thread (native re-checked: 59.9 fps headless, `ctest` 6/6), `main_web.c`, the in-memory CRC-matched loader, audio init, keyboard, and step 1 of the page. Open: Chrome/Firefox/Safari on real GPUs (headless Edge on SwiftShader, plus one person's browser — which is where the audio lag was found and fixed, section 8), a frame-time number from a modest laptop, and the determinism gate below — see section 8 for where it stands. *Original scope:* emsdk pinned; `M2HLE_FRONTEND=web`; `emu_run_slice` extracted (native histogram unchanged); `main_web.c`; in-memory CRC-matched ROM load; audio; keyboard. *Gates:* attract runs in Chrome, Firefox and Safari; frame-time budget logged on a modest laptop; and **the determinism gate: the wasm build's per-frame check values (`netplay_frame_check`) equal the native build's over the attract replay fight.** This is what cross-play with native clients rests on. The reasons to expect a pass were checked: sin/cos come from the COP data ROM tables, √ / ÷ / atan2 are the firmware ports, wasm has no FMA contraction, and the float→int `0x80000000` case was made explicit for the ARM build. The reasons to measure anyway: musl's libm is not MSVC's, and wasm does not define NaN payload bits.
 - **M3 — it reaches RPCN.** Web backends for `tls.h` / `net_socket.h`; the gateway; settings in `localStorage`. *Gate:* a web client and a native client, two accounts, play a session to the end with `desync_frame` clear (the two-client method is already worked out; one side becomes a browser tab). Then web-vs-web through the virtual pool.
 - **M4 — wizard and lobby.** §5, against the exported API. *Gate:* someone who has never seen RPCN gets from a blank tab to a match without being told anything.
-- **M5 — deploy.** §6.
+- **M5 — deploy: the pipeline is in, brought forward** (it is worth having every later milestone land on a live URL). What remains is the four owner-only steps in §6.
 - **M6 — after it works.** Gamepad; OPFS cache; hidden-tab timer; touch controls; the footprint pass with numbers (wasm size, heap peak); WebTransport/WebRTC if WebSocket latency proves to be the complaint; threads only if M2's budget says so.
 
 ---

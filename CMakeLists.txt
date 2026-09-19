@@ -151,10 +151,15 @@ if(M2HLE_WEB)
         "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
         "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,UTF8ToString"
     )
-    # The page. Copied on every build, so editing web/ needs no reconfigure.
-    add_custom_command(TARGET m2hle POST_BUILD
+    # The page: copied and version-stamped on every build. A target of its own and
+    # not a POST_BUILD step of m2hle, which only runs when m2hle relinks -- so an
+    # edit to web/site alone left the old page in the site directory.
+    add_custom_target(m2hle_site ALL
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/web/site ${M2HLE_SITE_DIR}
-        COMMENT "web: page -> ${M2HLE_SITE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -DSITE=${M2HLE_SITE_DIR} -DVERSION=${M2HLE_VERSION}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/web/stamp-site.cmake
+        DEPENDS m2hle
+        COMMENT "web: page -> ${M2HLE_SITE_DIR} (${M2HLE_VERSION})"
         VERBATIM)
     return()
 endif()

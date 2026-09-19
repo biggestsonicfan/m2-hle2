@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-version="@M2HLE_VERSION@">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sonic the Fighters</title>
 <meta name="description" content="Play Sonic the Fighters in your browser, online, with your own copy of the game.">
-<link rel="stylesheet" href="m2hle.css">
+<link rel="stylesheet" href="m2hle.css?v=@M2HLE_VERSION@">
 </head>
 <body>
 
@@ -29,6 +29,7 @@
     <input id="file" type="file" accept=".zip,application/zip" class="visually-hidden">
     <p id="rom-error" class="error" hidden></p>
     <p class="fine">Your file stays on this computer. It is read by this page and is never uploaded.</p>
+    <p class="fine build" id="build"></p>
   </section>
 
   <section id="step-busy" hidden>
@@ -50,7 +51,8 @@
   <span><kbd>1</kbd> start</span>
 </footer>
 
-<script src="m2hle-page.js"></script>
-<script async src="m2hle.js"></script>
+<!-- ?v= is the build: see web/stamp-site.cmake. -->
+<script src="m2hle-page.js?v=@M2HLE_VERSION@"></script>
+<script async src="m2hle.js?v=@M2HLE_VERSION@"></script>
 </body>
 </html>

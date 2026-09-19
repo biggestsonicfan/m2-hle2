@@ -5,6 +5,7 @@
  *   node tools/web-smoke.mjs --url http://localhost:8080/?rom=/dev-rom.zip
  *        [--seconds 30] [--shot out.png] [--shot-at 10,20] [--browser path/to/chrome-or-edge]
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
+ *        [--expect-log TEXT] [--fail-on-log REGEX]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -23,8 +24,12 @@
  * queue comes straight back to its target (a resync) or plays out stale.
  *
  * Without a ROM the page stops at "add your game", which is still a test worth
- * having: WebGL2 came up, every shader compiled, and nothing threw. With
- * --expect-frames the exit code says whether the game got that far.
+ * having: WebGL2 came up, every shader compiled, and nothing threw. That is the
+ * run CI does before it deploys (.github/workflows/pages.yml), with
+ *   --expect-log TEXT     fail unless some console line contains TEXT
+ *   --fail-on-log REGEX   fail if any console line matches (default: sokol_gfx
+ *                         errors and the emulator's own [ERR ] lines)
+ * With --expect-frames the exit code says whether the game got that far.
  *
  * No dependencies: Node 22+ has WebSocket and fetch built in.
  */
@@ -44,6 +49,9 @@ const shot = opt('--shot', null);
 const shotAt = (opt('--shot-at', '') || '').split(',').filter(Boolean).map(Number);
 const [width, height] = opt('--size', '992x768').split('x').map(Number);
 const expectFrames = Number(opt('--expect-frames', '0'));
+const expectLog = opt('--expect-log', null);
+const failOnLog = new RegExp(opt('--fail-on-log', String.raw`\[sg\]\[(error|panic)\]|\[ERR \]`));
+let sawExpected = false;
 const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((k) => {
   const [key, at] = k.split('@');
   return { key, at: Number(at), done: false };
@@ -75,6 +83,9 @@ const child = spawn(browser, [
   `--window-size=${width},${height}`,
   /* A machine with no usable GPU (CI, a remote session) still gets WebGL2. */
   '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist',
+  /* CI runners do not allow the unprivileged user namespaces Chrome's sandbox
+   * wants. The only page this browser ever opens is our own build. */
+  ...(process.env.CI ? ['--no-sandbox'] : []),
   /* The AudioContext starts suspended until a gesture; nobody is here to click. */
   ...(args.includes('--gesture-audio') ? [] : ['--autoplay-policy=no-user-gesture-required']),
   'about:blank',
@@ -115,6 +126,8 @@ try {
     if (msg.method === 'Runtime.consoleAPICalled') {
       const text = msg.params.args.map((a) => a.value ?? a.description ?? '').join(' ');
       console.log(`${stamp()}s  console.${msg.params.type}: ${text}`);
+      if (expectLog && text.includes(expectLog)) sawExpected = true;
+      if (failOnLog.test(text)) { failed = true; console.log(`${stamp()}s  ^ FAIL: matches --fail-on-log`); }
     } else if (msg.method === 'Runtime.exceptionThrown') {
       failed = true;
       const d = msg.params.exceptionDetails;
@@ -166,6 +179,10 @@ try {
   }
   if (shot) await screenshot(shot);
 
+  if (expectLog && !sawExpected) {
+    console.log(`FAIL: no console line contained "${expectLog}"`);
+    failed = true;
+  }
   if (expectFrames && frames < expectFrames) {
     console.log(`FAIL: ${frames} game frames, expected at least ${expectFrames}`);
     failed = true;

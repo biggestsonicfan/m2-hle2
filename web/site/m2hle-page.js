@@ -9,6 +9,12 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+
+/* The build this page belongs to, stamped into index.html (web/stamp-site.cmake).
+ * Every file the page loads by itself is asked for under it, so a cached copy from
+ * a previous deploy is never paired with this one. */
+const VERSION = document.documentElement.dataset.version || 'dev';
+const versioned = (path) => path + '?v=' + encodeURIComponent(VERSION);
 const steps = ['step-loading', 'step-rom', 'step-busy', 'step-fatal'];
 
 function show(step) {
@@ -123,7 +129,7 @@ function audioStart() {
   for (const type of ['pointerdown', 'keydown', 'touchend']) document.addEventListener(type, resume, true);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resume(); });
 
-  ctx.audioWorklet.addModule('m2hle-audio-worklet.js').then(() => {
+  ctx.audioWorklet.addModule(versioned('m2hle-audio-worklet.js')).then(() => {
     /* audio.target is in board frames (44.1 kHz); the worklet counts the context's. */
     const target = Math.round(audio.target * ctx.sampleRate / 44100);
     audio.node = new AudioWorkletNode(ctx, 'm2hle-out', {
@@ -219,6 +225,7 @@ function debugStart() {
 
 var Module = {
   canvas: $('canvas'),
+  locateFile: (path) => versioned(path),      /* m2hle.wasm */
   print: (t) => console.log(t),
   printErr: (t) => console.warn(t),
   onAbort: (what) => fatal(String(what)),
@@ -231,6 +238,7 @@ var Module = {
   /* Called from main_web.c's init(), once the exports can be used. */
   onM2hleReady() {
     show('step-rom');
+    $('build').textContent = 'Build ' + VERSION;
     debugStart();
     /* Development only: ?rom=<path> loads a zip from THIS site, so a headless
      * browser can boot the game with no file dialog. A production site hosts no

@@ -91,6 +91,7 @@ code {
 
 .error { margin: 1rem 0 0; color: var(--bad); text-align: left; }
 .fine { margin: 1.1rem 0 0; font-size: 0.8125rem; color: var(--dim); }
+.fine.build { margin-top: 0.4rem; opacity: 0.6; }
 
 .keys {
   flex: 0 0 auto;
