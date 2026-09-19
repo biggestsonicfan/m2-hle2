@@ -167,6 +167,15 @@ typedef struct {
      * what gets sent as the password.
      */
     char     twitch_token[80];
+    /*
+     * WHOSE token that is. A machine has one settings file and more than one
+     * account can pass through it, so a token with no owner gets offered as
+     * the password for whatever npid happens to be stored beside it -- which
+     * RPCN answers with "wrong password for that account". Empty means a file
+     * written before this existed; `netplay_settings_load` adopts the stored
+     * npid in that case, which is what such a file always meant.
+     */
+    char     twitch_npid[20];
     char     room_password[16];
     uint64_t room_id;           /* join target */
     uint32_t frame_delay;
@@ -278,6 +287,23 @@ typedef struct {
     uint64_t          last_wait_report_ms;
     uint64_t          stall_since_ms;
     uint32_t          stall_timeout_ms;
+
+    /*
+     * The login in flight, as far as the stored Twitch login is concerned.
+     *
+     * `sent_twitch_token`: the password that went out WAS the token, so the
+     * answer is the server's verdict on the token and on whose it is.
+     * `twitch_wanted`: the caller asked to sign in with Twitch rather than as a
+     * named account, so a token the server refuses falls through to the device
+     * flow instead of ending in "wrong password". One-shot.
+     * `twitch_tried_owner`: the token was refused under the name the caller gave
+     * and has been offered once more under the name it is labelled with. Bounds
+     * the whole thing at two rejections, because asking again is how an account
+     * gets locked.
+     */
+    bool              sent_twitch_token;
+    bool              twitch_wanted;
+    bool              twitch_tried_owner;
 
     /* UI <-> emu thread */
     emu_mutex_t       mutex;
@@ -738,6 +764,17 @@ static inline bool netplay_open_url(const char *url) {
  */
 #define NETPLAY_CFG_PATH "m2hle_netplay.cfg"
 
+/* Is the stored Twitch token this account's? A token with no recorded owner
+ * predates `twitch_npid` and belonged to whoever was stored beside it, which
+ * `netplay_settings_load` has already filled in -- so an empty owner here
+ * means there is no token at all. */
+static inline bool netplay_twitch_is_for(const netplay_config_t *cfg,
+                                         const char *npid) {
+    if (!cfg->twitch_token[0] || !npid || !npid[0]) return false;
+    if (!cfg->twitch_npid[0]) return true;      /* pre-owner file, already adopted */
+    return strcmp(cfg->twitch_npid, npid) == 0;
+}
+
 static inline void netplay_settings_save(void) {
     FILE *f = fopen(NETPLAY_CFG_PATH, "w");
     if (!f) return;
@@ -761,6 +798,10 @@ static inline void netplay_settings_save(void) {
     if (g_netplay.cfg.token[0])
         fprintf(f, "token=%s\n",    g_netplay.cfg.token);
     fprintf(f, "twitch_token=%s\n", g_netplay.cfg.twitch_token);
+    /* Saved beside the token and never without it: a token whose owner was
+     * forgotten is the thing this field exists to prevent. */
+    if (g_netplay.cfg.twitch_token[0])
+        fprintf(f, "twitch_npid=%s\n", g_netplay.cfg.twitch_npid);
     fclose(f);
 }
 
@@ -786,8 +827,14 @@ static inline void netplay_settings_load(netplay_config_t *cfg) {
         else if (!strcmp(key, "password"))     snprintf(cfg->password, sizeof(cfg->password), "%s", val);
         else if (!strcmp(key, "token"))        snprintf(cfg->token, sizeof(cfg->token), "%s", val);
         else if (!strcmp(key, "twitch_token")) snprintf(cfg->twitch_token, sizeof(cfg->twitch_token), "%s", val);
+        else if (!strcmp(key, "twitch_npid"))  snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", val);
     }
     fclose(f);
+
+    /* A file written before tokens had owners: the token was whoever's name
+     * was stored with it, because there was only ever one account in it. */
+    if (cfg->twitch_token[0] && !cfg->twitch_npid[0])
+        snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", cfg->npid);
 }
 
 /* ---- Command queue (UI thread -> emu thread) ----------------------------- */
@@ -893,7 +940,11 @@ static inline void netplay_publish_status(void) {
     st->twitch_signed_in = g_netplay.cfg.twitch_token[0] != '\0';
     snprintf(st->twitch_user_code, sizeof(st->twitch_user_code), "%s", g_netplay.twitch.user_code);
     snprintf(st->twitch_uri, sizeof(st->twitch_uri), "%s", g_netplay.twitch.verification_uri);
-    snprintf(st->twitch_npid, sizeof(st->twitch_npid), "%s", g_netplay.cfg.npid);
+    /* The token's owner, not whoever is in the account box: the window prints
+     * this as "Signed in with Twitch as ...", and with two accounts on one
+     * machine those are no longer the same name. */
+    snprintf(st->twitch_npid, sizeof(st->twitch_npid), "%s",
+             g_netplay.cfg.twitch_npid[0] ? g_netplay.cfg.twitch_npid : g_netplay.cfg.npid);
     snprintf(st->twitch_error, sizeof(st->twitch_error), "%s", g_netplay.twitch.error);
 
     snprintf(st->error, sizeof(st->error), "%s",
@@ -920,7 +971,21 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
         return;
     }
 
+    /* THE STORED TWITCH LOGIN IS NOT THE CALLER'S TO OVERWRITE. Every other field
+     * here is something a caller typed or passed; the token and its owner are
+     * not, there is no box for them, and the config a caller posts is a COPY
+     * that goes stale in both directions. The netplay window adopts the stored
+     * settings once, at its first draw: a token the device flow lands after that
+     * is not in its copy, so Connect wiped it and sent the player back to
+     * twitch.tv; and a token that "Sign out" forgot was still in its copy, so
+     * the next Connect signed them back in. */
+    char twitch_token[sizeof(g_netplay.cfg.twitch_token)];
+    char twitch_npid[sizeof(g_netplay.cfg.twitch_npid)];
+    memcpy(twitch_token, g_netplay.cfg.twitch_token, sizeof(twitch_token));
+    memcpy(twitch_npid,  g_netplay.cfg.twitch_npid,  sizeof(twitch_npid));
     g_netplay.cfg = *cfg;
+    memcpy(g_netplay.cfg.twitch_token, twitch_token, sizeof(twitch_token));
+    memcpy(g_netplay.cfg.twitch_npid,  twitch_npid,  sizeof(twitch_npid));
     netplay_build_masks(g_active_profile);
 
     char com_id[COMID_BUFFER_SIZE];
@@ -942,9 +1007,25 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     sc.npid            = g_netplay.cfg.npid;
     /* A Twitch login token IS the password as far as RPCN is concerned, and it
      * wins when present: someone who signed in with Twitch has no password to
-     * type, and their account's real one is random and never disclosed. */
-    sc.password        = g_netplay.cfg.twitch_token[0] ? g_netplay.cfg.twitch_token
-                                                       : g_netplay.cfg.password;
+     * type, and their account's real one is random and never disclosed.
+     *
+     * BUT ONLY FOR THE ACCOUNT IT BELONGS TO. One machine, one settings file,
+     * and a household or a bot can easily have two accounts; offering account
+     * A's token as account B's password is a guaranteed rejection, and the
+     * message it comes back with -- "wrong password for that account" -- sends
+     * you looking at the password, which is fine.
+     *
+     * Unless there is no password at all. An empty one is a guaranteed rejection
+     * too, so a token is offered in its place whatever its label says: the label
+     * can be wrong (the owner adopted at load is a guess -- the npid stored
+     * beside a token is the last account that logged in, not necessarily the one
+     * that signed in with Twitch), and the server is the only authority on whose
+     * token it is. `netplay_mirror_stage` writes down what it answers. */
+    g_netplay.sent_twitch_token =
+        netplay_twitch_is_for(&g_netplay.cfg, g_netplay.cfg.npid)
+        || (g_netplay.cfg.twitch_token[0] && !g_netplay.cfg.password[0]);
+    sc.password        = g_netplay.sent_twitch_token ? g_netplay.cfg.twitch_token
+                                                     : g_netplay.cfg.password;
     sc.token           = g_netplay.cfg.token;
     sc.com_id          = com_id;
     sc.com_id_foreign  = have_foreign ? com_id_foreign : NULL;
@@ -961,6 +1042,92 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     if (!rpcn_session_start(&g_netplay.session, &sc)) {
         g_netplay.state = NETPLAY_FAILED;
         netplay_log("%s", rpcn_session_error(&g_netplay.session));
+    }
+}
+
+/*
+ * "Sign in with Twitch" on a machine that already has.
+ *
+ * SIGNING IN WITH TWITCH IS NOT THE SAME THING AS RUNNING THE DEVICE FLOW. The
+ * flow exists to GET a login token; once there is one, signing in is an
+ * ordinary Login with the token for a password, and nobody needs a browser.
+ * NETPLAY_CMD_TWITCH_START used to begin the flow unconditionally, so every
+ * caller that says "with Twitch" -- {"cmd":"netplay_connect","twitch":1},
+ * --net-twitch, the window's button -- sent somebody to twitch.tv to approve a
+ * code on every single launch, with a perfectly good token sitting in the
+ * settings file the whole time.
+ *
+ * Returns false when there is nothing to reuse and the flow really is needed.
+ */
+static inline bool netplay_twitch_reuse(const netplay_config_t *asked) {
+    if (!g_netplay.cfg.twitch_token[0]) return false;
+
+    /* A token is only good on the server that issued it. */
+    uint16_t asked_port  = asked->port ? asked->port : RPCN_DEFAULT_PORT;
+    uint16_t stored_port = g_netplay.cfg.port ? g_netplay.cfg.port : RPCN_DEFAULT_PORT;
+    if (strcmp(asked->server, g_netplay.cfg.server) != 0 || asked_port != stored_port)
+        return false;
+
+    netplay_config_t c = *asked;
+    c.password[0] = '\0';   /* the token is the credential: see netplay_do_connect */
+    c.token[0]    = '\0';   /* Twitch vouched; no e-mail token is checked */
+    if (!c.npid[0]) snprintf(c.npid, sizeof(c.npid), "%s", g_netplay.cfg.twitch_npid);
+    if (!c.npid[0]) return false;
+
+    g_netplay.twitch_wanted      = true;
+    g_netplay.twitch_tried_owner = false;
+    netplay_log("signing in with the stored Twitch login");
+    netplay_do_connect(&c);
+    return true;
+}
+
+/*
+ * The server refused a login that offered the stored Twitch token. Called once,
+ * on the way into NETPLAY_FAILED.
+ *
+ * Two different things produce that answer and they want opposite handling. The
+ * token may be fine and the NAME wrong, because it was offered for an account it
+ * does not belong to; or the token may be dead, because the server issued a
+ * newer one to some other client (YAMP signs in with Twitch as well) or the
+ * account was reset. A token refused under its own owner's name is dead and is
+ * forgotten, since keeping it costs every later sign-in a rejection before it
+ * can do anything useful.
+ *
+ * AT MOST TWO REJECTIONS, EVER, and then a browser or a stop. Retrying a refused
+ * credential is how an account gets locked.
+ */
+static inline void netplay_twitch_refused(void) {
+    if (!g_netplay.sent_twitch_token || !g_netplay.session.credential_refused) return;
+
+    const char *owner = g_netplay.cfg.twitch_npid;
+    bool under_own_name = !owner[0] || strcmp(owner, g_netplay.cfg.npid) == 0;
+
+    /* Only for a caller who asked for "the Twitch login", whoever that is. One
+     * who named an account and got refused wanted THAT account, and quietly
+     * putting them online as somebody else is worse than failing. */
+    if (!under_own_name && g_netplay.twitch_wanted && !g_netplay.twitch_tried_owner) {
+        g_netplay.twitch_tried_owner = true;
+        netplay_log("the stored Twitch login is not %s's - trying it as %s",
+                    g_netplay.cfg.npid, owner);
+        snprintf(g_netplay.cfg.npid, sizeof(g_netplay.cfg.npid), "%s", owner);
+        netplay_do_connect(&g_netplay.cfg);
+        return;
+    }
+
+    if (under_own_name) {
+        g_netplay.cfg.twitch_token[0] = '\0';
+        g_netplay.cfg.twitch_npid[0]  = '\0';
+        netplay_settings_save();
+        netplay_log("the server no longer accepts the stored Twitch login - forgotten");
+    }
+
+    if (g_netplay.twitch_wanted) {
+        g_netplay.twitch_wanted = false;
+        if (rpcn_twitch_begin(&g_netplay.twitch, g_netplay.cfg.server, g_netplay.cfg.port,
+                              g_netplay.cfg.fingerprint))
+            netplay_log("Twitch: asking %s for a device code", g_netplay.cfg.server);
+        else
+            netplay_log("Twitch: %s", g_netplay.twitch.error);
     }
 }
 
@@ -1043,7 +1210,13 @@ static inline void netplay_pump_commands(void) {
     netplay_cmd_t cmd;
     while (netplay_take_cmd(&cmd)) {
         switch (cmd.kind) {
-            case NETPLAY_CMD_CONNECT:    netplay_do_connect(&cmd.cfg); break;
+            case NETPLAY_CMD_CONNECT:
+                /* A named account: a refusal is an answer, not a cue to open a
+                 * browser. */
+                g_netplay.twitch_wanted      = false;
+                g_netplay.twitch_tried_owner = false;
+                netplay_do_connect(&cmd.cfg);
+                break;
             case NETPLAY_CMD_DISCONNECT: netplay_do_disconnect(); break;
             case NETPLAY_CMD_HOST:       netplay_do_host(&cmd.cfg); break;
             case NETPLAY_CMD_JOIN:       netplay_do_join(&cmd.cfg); break;
@@ -1062,6 +1235,10 @@ static inline void netplay_pump_commands(void) {
                                     cmd.cfg.fingerprint, cmd.cfg.npid, cmd.cfg.password);
                 break;
             case NETPLAY_CMD_TWITCH_START:
+                /* Already signed in? Then this is a login, not a trip to
+                 * twitch.tv. Before the server below is overwritten: the stored
+                 * one is what the token is compared against. */
+                if (netplay_twitch_reuse(&cmd.cfg)) break;
                 /* Remember the server the flow is being run against: the token it
                  * yields is only good on that one. */
                 snprintf(g_netplay.cfg.server, sizeof(g_netplay.cfg.server), "%s", cmd.cfg.server);
@@ -1080,6 +1257,7 @@ static inline void netplay_pump_commands(void) {
                 break;
             case NETPLAY_CMD_TWITCH_FORGET:
                 g_netplay.cfg.twitch_token[0] = '\0';
+                g_netplay.cfg.twitch_npid[0]  = '\0';
                 rpcn_twitch_reset(&g_netplay.twitch);
                 netplay_settings_save();
                 netplay_log("forgot the stored Twitch login");
@@ -1100,7 +1278,17 @@ static inline void netplay_mirror_stage(void) {
         case RPCN_STAGE_ONLINE:
             /* Remember the server and account only once they are known to WORK —
              * storing what was typed would just as happily store a typo. */
-            if (g_netplay.state != NETPLAY_ONLINE) netplay_settings_save();
+            if (g_netplay.state != NETPLAY_ONLINE) {
+                /* And the same goes for WHOSE the Twitch token is. The owner
+                 * adopted at load is a guess; a login that went out with the
+                 * token and came back accepted is the server saying so. */
+                if (g_netplay.sent_twitch_token)
+                    snprintf(g_netplay.cfg.twitch_npid, sizeof(g_netplay.cfg.twitch_npid),
+                             "%s", g_netplay.cfg.npid);
+                g_netplay.twitch_wanted      = false;
+                g_netplay.twitch_tried_owner = false;
+                netplay_settings_save();
+            }
             g_netplay.state = NETPLAY_ONLINE;
             break;
         case RPCN_STAGE_HOSTING:
@@ -1134,7 +1322,14 @@ static inline void netplay_mirror_stage(void) {
             }
             g_netplay.state = NETPLAY_IN_ROOM;
             break;
-        case RPCN_STAGE_FAILED:     g_netplay.state = NETPLAY_FAILED; break;
+        case RPCN_STAGE_FAILED:
+            /* On the edge only: the stage stays FAILED on every pump after it,
+             * and the handler below may start a fresh login. */
+            if (g_netplay.state != NETPLAY_FAILED) {
+                g_netplay.state = NETPLAY_FAILED;
+                netplay_twitch_refused();
+            }
+            break;
         default: break;
     }
 }
@@ -1193,6 +1388,8 @@ static inline void netplay_pump_twitch(void) {
         snprintf(g_netplay.cfg.npid, sizeof(g_netplay.cfg.npid), "%s", g_netplay.twitch.npid);
         snprintf(g_netplay.cfg.twitch_token, sizeof(g_netplay.cfg.twitch_token), "%s",
                  g_netplay.twitch.login_token);
+        snprintf(g_netplay.cfg.twitch_npid, sizeof(g_netplay.cfg.twitch_npid), "%s",
+                 g_netplay.twitch.npid);
         g_netplay.cfg.password[0] = '\0';   /* the token stands in for it */
         g_netplay.cfg.token[0]    = '\0';   /* Twitch vouched; no e-mail token is checked */
         netplay_settings_save();

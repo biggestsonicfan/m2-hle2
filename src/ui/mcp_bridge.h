@@ -1426,10 +1426,13 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
         snprintf(cfg->npid, sizeof(cfg->npid), "%s", s);
     if (mcp_json_get_str(req, "pass", s, sizeof(s))) {
         snprintf(cfg->password, sizeof(cfg->password), "%s", s);
-        /* A typed password and a stored Twitch token are two different logins,
-         * and the token wins wherever both are present (netplay_do_connect).
-         * Somebody passing a password here means the password. */
-        cfg->twitch_token[0] = '\0';
+        /* The token is NOT dropped here any more. It used to be, so that a
+         * password login did not go out carrying somebody's Twitch token --
+         * but this cfg is copied wholesale over `g_netplay.cfg` and then
+         * written to disk on the next successful login, so clearing it here
+         * signed the Twitch account out of the machine every time an agent
+         * logged in with a password. `netplay_twitch_is_for` now decides
+         * which credential a given npid gets, and the token is simply kept. */
     }
     if (mcp_json_get_str(req, "token", s, sizeof(s)))
         snprintf(cfg->token, sizeof(cfg->token), "%s", s);

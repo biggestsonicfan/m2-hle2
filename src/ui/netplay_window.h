@@ -187,7 +187,20 @@ static inline void netplay_window_draw(bool *p_open) {
 
         bool connected = (st.state != NETPLAY_OFF && st.state != NETPLAY_FAILED);
         if (!connected) {
-            if (igButton("Connect")) netplay_post(NETPLAY_CMD_CONNECT, &g_np_ui);
+            if (igButton("Connect")) {
+                if (st.twitch_signed_in) {
+                    /* The account boxes above are greyed out, so what is in them
+                     * is left over from before and is nobody's input. Signed in
+                     * with Twitch, Connect means "as that login" - which
+                     * TWITCH_START now is, without a browser, while the token
+                     * holds (netplay_twitch_reuse). */
+                    netplay_config_t as_twitch = g_np_ui;
+                    as_twitch.npid[0] = '\0';
+                    netplay_post(NETPLAY_CMD_TWITCH_START, &as_twitch);
+                } else {
+                    netplay_post(NETPLAY_CMD_CONNECT, &g_np_ui);
+                }
+            }
         } else {
             if (igButton("Disconnect")) netplay_post(NETPLAY_CMD_DISCONNECT, &g_np_ui);
         }

@@ -1,6 +1,8 @@
-# Build output
+# Build output. CLAUDE.md says to configure a fresh directory rather than reuse
+# one set up for another generator, so these multiply (build_vs22, build_test,
+# ...); the pattern covers the MSBuild .tlog / .vcxproj litter in all of them.
 build/
-build_vs22/
+build_*/
 out/
 bin/
 *.exe

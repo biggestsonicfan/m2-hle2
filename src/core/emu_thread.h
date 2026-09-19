@@ -241,6 +241,15 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
     if (step == NETPLAY_STEP_RESET) {
         emu_mutex_lock(&ctx->mutex);
         netplay_do_reset();
+        /* THE STEP COUNT IS PART OF THE BOARD, because the frame check hashes
+         * it -- `netplay_frame_check` calls it "the instruction count since
+         * reset" and it has to actually be one. Left running, it carries the
+         * whole life of the process into the first session: an emulator that
+         * has been playing the CPU for ten minutes and one that just launched
+         * cold-boot to identical architectural state and still hash
+         * differently, so the peers report DESYNC at frame 0 every time,
+         * however correct the reset was. */
+        ctx->total_steps       = 0;
         ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
         ctx->cpu_snapshot      = *ctx->cpu;
         emu_mutex_unlock(&ctx->mutex);
@@ -423,8 +432,14 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
 
         int64_t now = emu_now_us();
         if (now - last_sps_time >= 1000000) {
-            ctx->steps_per_second = (uint32_t)(ctx->total_steps - sps_steps_start);
-            sps_steps_start = ctx->total_steps;
+            /* A netplay reset puts the step count back to zero under us, so
+             * the mark from a second ago can be ahead of it. Unsigned, that
+             * subtraction is a billions-per-second reading for one sample. */
+            uint64_t steps = ctx->total_steps;
+            ctx->steps_per_second = (uint32_t)(steps >= sps_steps_start
+                                               ? steps - sps_steps_start
+                                               : steps);
+            sps_steps_start = steps;
             last_sps_time   = now;
         }
     }

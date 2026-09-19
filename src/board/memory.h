@@ -382,16 +382,52 @@ static void timers_region_write(mem_region_t *r, uint32_t addr, uint32_t val, in
 
 /* ---- Init / shutdown ----------------------------------------------------- */
 
+/* A heap region for this boot: the block the bus already has, cleared, or a new
+ * one on the first init. See mem_init for why a re-init must not move them. */
+static inline uint8_t *mem_region_fresh(uint8_t *have, size_t size) {
+    if (!have) return (uint8_t *)calloc(1, size);
+    memset(have, 0, size);
+    return have;
+}
+
 static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
-    /* Re-init is safe — free any previously-allocated heap regions first. */
-    free(bus->main_data);
-    free(bus->xtra_data);
-    free(bus->vid_ext_ram);
-    free(bus->texram0);
-    free(bus->texram1);
-    free(bus->framebuffer);
+    /* Re-init KEEPS the heap regions and clears them in place. It never frees
+     * them, because a netplay session re-runs this on the emu thread while the
+     * process is live (the board reset at the barrier) and other threads hold
+     * these pointers across it: the frame callback loads texram0 / texram1 once
+     * and then decodes two million texels through them
+     * (game_render_upload_atlas), the MCP bridge reads the bus, a memory viewer
+     * may be open. Free a block one of them is walking and the read faults at
+     * once — a block this size is its own mapping, and free() hands the pages
+     * straight back to the OS rather than leaving stale bytes to read.
+     *
+     * The sizes are compile-time constants, so the old block always fits, and a
+     * cleared block is byte for byte what calloc returned, which is what two
+     * netplayed boards have to agree on. A reader caught mid-reset now sees a
+     * half-cleared sheet for one frame of a cold boot, not freed memory.
+     *   Symptom that surfaced this in STF: accepting a netplay challenge killed
+     *   any client that had a window, every time, between "barrier released ...
+     *   resetting the board" and the first frame. Access violation in the atlas
+     *   decode, 350,000 texels into a texram0 the bus no longer owned. Headless
+     *   clients have no frame callback and never saw it. 1c62bf0 put the MCP
+     *   bridge's reads under the emu mutex for the same reason; this removes the
+     *   reason, for every reader at once. */
+    uint8_t *main_data   = bus->main_data;
+    uint8_t *xtra_data   = bus->xtra_data;
+    uint8_t *vid_ext_ram = bus->vid_ext_ram;
+    uint8_t *texram0     = bus->texram0;
+    uint8_t *texram1     = bus->texram1;
+    uint8_t *framebuffer = bus->framebuffer;
 
     memset(bus, 0, sizeof(*bus));
+    /* Straight back, before anything else: the memset above is the only moment
+     * these read as NULL, which the atlas upload already treats as "no sheet". */
+    bus->main_data   = main_data;
+    bus->xtra_data   = xtra_data;
+    bus->vid_ext_ram = vid_ext_ram;
+    bus->texram0     = texram0;
+    bus->texram1     = texram1;
+    bus->framebuffer = framebuffer;
     bus->rom = rom_data;
     bus->rom_size = rom_size;
 
@@ -400,12 +436,12 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
 
     cop_reset();   /* clears g_cop / g_sharc and resets rot[] to identity */
 
-    bus->main_data   = (uint8_t *)calloc(1, MAIN_DATA_SIZE);
-    bus->xtra_data   = (uint8_t *)calloc(1, XTRA_DATA_SIZE);
-    bus->vid_ext_ram = (uint8_t *)calloc(1, VID_EXT_RAM_SIZE);
-    bus->texram0     = (uint8_t *)calloc(1, TEXRAM0_SIZE);
-    bus->texram1     = (uint8_t *)calloc(1, TEXRAM1_SIZE);
-    bus->framebuffer = (uint8_t *)calloc(1, FRAMEBUFFER_SIZE);
+    bus->main_data   = mem_region_fresh(bus->main_data,   MAIN_DATA_SIZE);
+    bus->xtra_data   = mem_region_fresh(bus->xtra_data,   XTRA_DATA_SIZE);
+    bus->vid_ext_ram = mem_region_fresh(bus->vid_ext_ram, VID_EXT_RAM_SIZE);
+    bus->texram0     = mem_region_fresh(bus->texram0,     TEXRAM0_SIZE);
+    bus->texram1     = mem_region_fresh(bus->texram1,     TEXRAM1_SIZE);
+    bus->framebuffer = mem_region_fresh(bus->framebuffer, FRAMEBUFFER_SIZE);
     if (!bus->main_data || !bus->xtra_data || !bus->vid_ext_ram || !bus->texram0 || !bus->texram1 || !bus->framebuffer) {
         LOG_ERROR("mem: heap allocation failed");
         return 0;
