@@ -23,6 +23,7 @@ function show(step) {
 }
 
 function fatal(text) {
+  m2hleTools.add('fatal: ' + text, 'error');
   $('fatal-text').textContent = text;
   show('step-fatal');
 }
@@ -75,6 +76,7 @@ function loadZip(bytes) {
 }
 
 function romError(text) {
+  m2hleTools.add('game file refused: ' + text, 'warning');
   $('rom-error').textContent = text;
   $('rom-error').hidden = false;
   show('step-rom');
@@ -115,7 +117,7 @@ const audio = {
 };
 
 function audioFallback(why) {
-  console.warn('audio: no worklet (' + why + '); using the ScriptProcessor path');
+  m2hleTools.printErr('[WARN] audio: no worklet (' + why + '); using the ScriptProcessor path');
   if (audio.ctx) { audio.ctx.close().catch(() => {}); audio.ctx = null; }
   audio.mode = 'fallback';
   Module._web_audio_use_fallback();
@@ -167,8 +169,8 @@ function audioStart() {
     audio.node.connect(ctx.destination);
     audio.mode = 'worklet';
     Module._web_audio_use_worklet(ctx.sampleRate);
-    console.log('audio: worklet, ' + ctx.sampleRate + ' Hz, queue ' + (audio.target / 44.1).toFixed(0) +
-                ' ms, base latency ' + (ctx.baseLatency * 1000).toFixed(0) + ' ms');
+    m2hleTools.print('audio: worklet, ' + ctx.sampleRate + ' Hz, queue ' + (audio.target / 44.1).toFixed(0) +
+                     ' ms, base latency ' + (ctx.baseLatency * 1000).toFixed(0) + ' ms');
   }).catch((e) => audioFallback(String(e)));
 }
 
@@ -249,8 +251,12 @@ var Module = {
    * turn one render optimisation off each, for finding which one drew it wrong. */
   arguments: (params.get('args') || '').split(',').filter((a) => /^--[a-z-]+$/.test(a)),
   locateFile: (path) => versioned(path),      /* m2hle.wasm */
-  print: (t) => console.log(t),
-  printErr: (t) => console.warn(t),
+  /* Everything the emulator prints, into the Console (and on to devtools). */
+  print: m2hleTools.print,
+  printErr: m2hleTools.printErr,
+  /* A GPU timer query around a frame's GL work, while a lag check is measuring. */
+  m2hleFrameBegin: m2hleTools.frameBegin,
+  m2hleFrameEnd: m2hleTools.frameEnd,
   onAbort: (what) => fatal(String(what)),
 
   /* The emulator's side of "Sound", above. */
@@ -262,6 +268,7 @@ var Module = {
   onM2hleReady() {
     show('step-rom');
     $('build').textContent = 'Build ' + VERSION;
+    m2hleTools.onReady();
     debugStart();
     /* Development only: ?rom=<path> loads a zip from THIS site, so a headless
      * browser can boot the game with no file dialog. A production site hosts no

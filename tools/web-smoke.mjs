@@ -5,7 +5,8 @@
  *   node tools/web-smoke.mjs --url http://localhost:8080/?rom=/dev-rom.zip
  *        [--seconds 30] [--shot out.png] [--shot-at 10,20] [--browser path/to/chrome-or-edge]
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
- *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound]
+ *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console]
+ *        [--cpu-throttle N] [--eval JS]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -30,6 +31,15 @@
  *   --fail-on-log REGEX   fail if any console line matches (default: sokol_gfx
  *                         errors and the emulator's own [ERR ] lines)
  * With --expect-frames the exit code says whether the game got that far.
+ *
+ * --diagnose runs the page's own lag check (web/site/m2hle-tools.js) at the end
+ * and prints its report, which is how its reasoning gets exercised at all. (A
+ * headless browser uses the machine's real GPU when it has one; the software
+ * renderer is only the fallback.)
+ * --drawer opens the tools drawer on that tab before the final screenshot.
+ * --cpu-throttle N slows the page's main thread N times (DevTools' own CPU
+ * throttling), which is the only way to see what the lag check says about a slow
+ * machine from a fast one. --eval runs a line of JS in the page before --diagnose.
  *
  * No dependencies: Node 22+ has WebSocket and fetch built in.
  */
@@ -138,9 +148,11 @@ try {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Page.navigate', { url });
+  const throttle = Number(opt('--cpu-throttle', '0'));
 
-  const evaluate = async (expression) => {
-    const r = await send('Runtime.evaluate', { expression, returnByValue: true });
+  const evaluate = async (expression, awaitPromise = false) => {
+    const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise });
+    if (r?.exceptionDetails) { failed = true; console.log(`${stamp()}s  EVALUATE FAILED: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`); }
     return r?.result?.value;
   };
   const screenshot = async (file) => {
@@ -185,6 +197,15 @@ try {
     for (const k of keys) if (!k.done && s >= k.at) { k.done = true; await press(k.key); }
     if (shot && shotAt.includes(s)) await screenshot(shot.replace(/\.png$/, `-${s}s.png`));
   }
+  if (throttle > 1) { await send('Emulation.setCPUThrottlingRate', { rate: throttle }); console.log(`${stamp()}s  CPU throttled x${throttle}`); await sleep(1500); }
+  if (opt('--eval', null)) { console.log(`${stamp()}s  eval -> ${JSON.stringify(await evaluate(opt('--eval', null)))}`); await sleep(800); }
+  if (args.includes('--diagnose')) {
+    await evaluate("m2hleTools.openDrawer('lag')");
+    const report = await evaluate("m2hleTools.diagnose(5).then((r) => r ? r.text : 'the lag check had nothing to measure')", true);
+    console.log(`\n${report}\n`);
+  }
+  const drawer = opt('--drawer', null);
+  if (drawer) { await evaluate(`m2hleTools.openDrawer('${drawer === 'console' ? 'console' : 'lag'}')`); await sleep(400); }
   if (shot) await screenshot(shot);
 
   if (expectLog && !sawExpected) {

@@ -79,6 +79,72 @@ static struct {
     bool             gfx_ready;
 } state;
 
+/* ---- Where a frame's time goes ------------------------------------------------
+ *
+ * Running totals, cheap enough to keep always. The page's "Feels laggy?" check
+ * (web/site/m2hle-tools.js) reads them twice a few seconds apart and reasons from
+ * the difference, because "lag" has causes that look alike from the chair and
+ * need opposite advice: the emulator not keeping up (CPU), the browser drawing
+ * too few frames (GPU, or a throttled or 30 Hz display), single long frames
+ * (stutter), sound dropping out, or the other player's connection.
+ *
+ * The clock is performance.now(), which browsers coarsen on purpose (0.1 ms in
+ * Chrome, 1 ms in Firefox). A single slice is not measured well by it; a few
+ * hundred of them are. The maxima are since the last read, which resets them.
+ */
+static struct {
+    uint64_t callbacks;         /* frame() calls: what the browser let us draw */
+    uint64_t slices;            /* board slices run */
+    uint64_t slice_us;          /* time inside them */
+    uint64_t render_us;         /* time building and submitting the picture (CPU side) */
+    uint64_t long_callbacks;    /* callbacks that arrived more than 25 ms after the last */
+    uint64_t forgiven_us;       /* board time dropped because a callback owed too much */
+    uint32_t slice_us_max, render_us_max, gap_us_max;
+    int64_t  last_cb_us;
+    int      gpu_timing;        /* the page wants m2hleFrameBegin/End around the GL work */
+} g_web_perf;
+
+/* ---- Render scale -------------------------------------------------------------
+ *
+ * 0 draws the game straight into the canvas, at the canvas's resolution: the
+ * sharpest picture, and on a 4K or high-DPI display around eight million pixels a
+ * frame through a fill shader that makes ~10 texture fetches each. An integrated
+ * GPU cannot do that at 60 Hz. N >= 1 draws it offscreen at N times the board's
+ * own 496x384 and scales that up, which is what arc-s's frontend does for its
+ * handheld: at 2 it is a tenth of the pixels of a 4K canvas. The lag check offers
+ * it when the evidence points at the GPU. Changeable while running.
+ */
+static struct {
+    int      scale;             /* in force */
+    int      want;              /* asked for; applied at the top of the next frame */
+    sg_image color, depth;
+    sg_view  color_att, depth_att, texture;
+} g_web_rt;
+
+static void web_rt_apply(void) {
+    if (g_web_rt.want == g_web_rt.scale) return;
+    if (g_web_rt.scale > 0) {
+        sg_destroy_view(g_web_rt.texture);
+        sg_destroy_view(g_web_rt.depth_att);
+        sg_destroy_view(g_web_rt.color_att);
+        sg_destroy_image(g_web_rt.depth);
+        sg_destroy_image(g_web_rt.color);
+    }
+    g_web_rt.scale = g_web_rt.want;
+    if (g_web_rt.scale <= 0) return;
+    const int w = VIDEO_WIDTH * g_web_rt.scale, h = VIDEO_HEIGHT * g_web_rt.scale;
+    g_web_rt.color = sg_make_image(&(sg_image_desc){
+        .usage = { .color_attachment = true }, .width = w, .height = h,
+        .pixel_format = SG_PIXELFORMAT_RGBA8, .sample_count = 1, .label = "web-game-target" });
+    g_web_rt.depth = sg_make_image(&(sg_image_desc){
+        .usage = { .depth_stencil_attachment = true }, .width = w, .height = h,
+        .pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL, .sample_count = 1, .label = "web-game-target-depth" });
+    g_web_rt.color_att = sg_make_view(&(sg_view_desc){ .color_attachment.image = g_web_rt.color });
+    g_web_rt.depth_att = sg_make_view(&(sg_view_desc){ .depth_stencil_attachment.image = g_web_rt.depth });
+    g_web_rt.texture   = sg_make_view(&(sg_view_desc){ .texture.image = g_web_rt.color });
+    LOG_INFO("web: drawing the game at %dx%d (render scale %d)", w, h, g_web_rt.scale);
+}
+
 /* Who plays the sound. The page decides (web/site/m2hle-page.js, "Sound") and
  * says so through web_audio_use_worklet / web_audio_use_fallback, because finding
  * out whether a worklet can be had is asynchronous. Until it answers the board's
@@ -187,8 +253,13 @@ static bool web_slice(void) {
         state.emu.run_state = EMU_STOPPED;
         return false;
     }
+    int64_t t0 = emu_now_us();
     emu_slice_body(&state.emu);
     emu_slice_finish(&state.emu);
+    uint32_t took = (uint32_t)(emu_now_us() - t0);
+    g_web_perf.slices++;
+    g_web_perf.slice_us += took;
+    if (took > g_web_perf.slice_us_max) g_web_perf.slice_us_max = took;
     return true;
 }
 
@@ -198,7 +269,11 @@ static void web_run_owed_slices(void) {
     state.owed_us += now - state.last_us;
     state.last_us  = now;
     const int64_t cap = (int64_t)EMU_SLICE_US * WEB_MAX_SLICES_PER_FRAME;
-    if (state.owed_us > cap) state.owed_us = cap;
+    if (state.owed_us > cap) {
+        /* Board time that will never be run: the game fell behind the wall clock. */
+        if (state.emu.run_state == EMU_RUNNING) g_web_perf.forgiven_us += (uint64_t)(state.owed_us - cap);
+        state.owed_us = cap;
+    }
 
     if (state.emu.run_state != EMU_RUNNING) {
         /* Not running yet, and netplay still has to breathe: the login and the
@@ -292,6 +367,15 @@ static void init(void) {
 }
 
 static void frame(void) {
+    int64_t cb_us = emu_now_us();
+    if (g_web_perf.last_cb_us) {
+        uint32_t gap = (uint32_t)(cb_us - g_web_perf.last_cb_us);
+        if (gap > 25000) g_web_perf.long_callbacks++;
+        if (gap > g_web_perf.gap_us_max) g_web_perf.gap_us_max = gap;
+    }
+    g_web_perf.last_cb_us = cb_us;
+    g_web_perf.callbacks++;
+
     web_run_owed_slices();
 
     /* What the board produced this frame goes to the worklet in one chunk. */
@@ -301,6 +385,10 @@ static void frame(void) {
             EM_ASM({ Module.m2hleAudioPush($0, $1); }, g_web_audio_chunk, frames);
     }
 
+    const int64_t render_t0 = emu_now_us();
+    if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameBegin(); });
+    web_rt_apply();
+
     const bool have_game = state.romset.loaded;
     float lerp_t = 1.0f;
     if (have_game) {
@@ -308,14 +396,32 @@ static void frame(void) {
         lerp_t = game_frame_lerp();
     }
 
+    /* Offscreen first, when there is a render scale: the game at N x 496x384. */
+    const bool offscreen = have_game && g_web_rt.scale > 0;
+    if (offscreen) {
+        sg_begin_pass(&(sg_pass){
+            .action = state.pass_action,
+            .attachments = { .colors[0] = g_web_rt.color_att, .depth_stencil = g_web_rt.depth_att },
+        });
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                        0, 0, VIDEO_WIDTH * g_web_rt.scale, VIDEO_HEIGHT * g_web_rt.scale, lerp_t);
+        sg_end_pass();
+    }
+
     sg_begin_pass(&(sg_pass){ .action = state.pass_action, .swapchain = sglue_swapchain() });
     if (have_game) {
         int ox, oy, w, h;
         game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
+        if (offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
+        else           game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
     }
     sg_end_pass();
     sg_commit();
+
+    if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameEnd(); });
+    uint32_t render_us = (uint32_t)(emu_now_us() - render_t0);
+    g_web_perf.render_us += render_us;
+    if (render_us > g_web_perf.render_us_max) g_web_perf.render_us_max = render_us;
 }
 
 static void cleanup(void) {
@@ -409,10 +515,50 @@ EMSCRIPTEN_KEEPALIVE int web_state(void) {
     return state.emu.run_state == EMU_RUNNING ? 1 : 2;
 }
 
+/* Let go of every held input. The page calls this when focus moves into its
+ * tools drawer: from then on key-ups land there and never reach the game, and a
+ * direction held at that moment would stay held. */
+/* Only the local keyboard's mask: under netplay the board reads the composed mask,
+ * which belongs to the lockstep and is rebuilt from both players' words each frame. */
+EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { g_input.held = 0; }
+
 /* Game frames since the last board reset. */
 EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {
     return (unsigned)g_emu_frames;
 }
+
+/* The running totals above, as JSON, plus what else the lag check reasons from.
+ * `reset` clears the maxima, so each reading's worst case is its own. */
+EMSCRIPTEN_KEEPALIVE const char *web_perf(int reset) {
+    static char out[640];
+    netplay_status_t np;
+    netplay_get_status(&np);
+    snprintf(out, sizeof out,
+             "{\"now_us\":%.0f,\"callbacks\":%llu,\"slices\":%llu,\"frames\":%u,"
+             "\"slice_us\":%llu,\"render_us\":%llu,\"long_callbacks\":%llu,\"forgiven_us\":%llu,"
+             "\"slice_us_max\":%u,\"render_us_max\":%u,\"gap_us_max\":%u,"
+             "\"render_scale\":%d,\"canvas_w\":%d,\"canvas_h\":%d,\"gpu_tiles\":%s,"
+             "\"netplay\":\"%s\",\"netplay_stalls\":%u,\"netplay_delay\":%u}",
+             (double)emu_now_us(),
+             (unsigned long long)g_web_perf.callbacks, (unsigned long long)g_web_perf.slices, (unsigned)g_emu_frames,
+             (unsigned long long)g_web_perf.slice_us, (unsigned long long)g_web_perf.render_us,
+             (unsigned long long)g_web_perf.long_callbacks, (unsigned long long)g_web_perf.forgiven_us,
+             g_web_perf.slice_us_max, g_web_perf.render_us_max, g_web_perf.gap_us_max,
+             g_web_rt.scale, sapp_width(), sapp_height(), state.video.gpu ? "true" : "false",
+             netplay_state_text(np.state), np.stalls, (unsigned)g_netplay.cfg.frame_delay);
+    if (reset) g_web_perf.slice_us_max = g_web_perf.render_us_max = g_web_perf.gap_us_max = 0;
+    return out;
+}
+
+/* Ask for m2hleFrameBegin/End around each frame's GL work (a GPU timer query on
+ * the page's side). Off outside a measurement: it is two calls into JS a frame. */
+EMSCRIPTEN_KEEPALIVE void web_perf_gpu_timing(int on) { g_web_perf.gpu_timing = on != 0; }
+
+/* 0 = draw at the canvas's resolution; N = draw at N x 496x384 and scale up. */
+EMSCRIPTEN_KEEPALIVE void web_set_render_scale(int scale) {
+    g_web_rt.want = scale < 0 ? 0 : scale > 4 ? 4 : scale;
+}
+EMSCRIPTEN_KEEPALIVE int web_render_scale(void) { return g_web_rt.want; }
 
 /* The sound board at a glance, as JSON: the same figures the desktop build's
  * sound_status bridge command reports, so a web run and a native run of the same

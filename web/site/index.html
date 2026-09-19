@@ -42,16 +42,64 @@
   </section>
 </main>
 
-<footer id="keys" class="keys" hidden>
-  <span><kbd>&larr;</kbd><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&rarr;</kbd> move</span>
-  <span><kbd>Z</kbd> punch</span>
-  <span><kbd>X</kbd> kick</span>
-  <span><kbd>C</kbd> barrier</span>
-  <span><kbd>5</kbd> coin</span>
-  <span><kbd>1</kbd> start</span>
+<!-- The tools drawer: a lag check and the emulator's log (m2hle-tools.js). It sits
+     in the page's column, so opening it makes the game smaller, not covered. -->
+<section id="drawer" class="drawer" hidden aria-label="Tools">
+  <div class="drawer-head" role="tablist">
+    <button id="tab-lag" class="tab" role="tab" aria-controls="pane-lag">Lag check</button>
+    <button id="tab-console" class="tab" role="tab" aria-controls="pane-console">Console</button>
+    <span class="spacer"></span>
+    <button id="drawer-close" class="tool" aria-label="Close tools">Close</button>
+  </div>
+
+  <div id="pane-lag" class="pane" role="tabpanel">
+    <div class="pane-bar">
+      <button id="lag-start" class="tool primary">Check for lag (5 seconds)</button>
+      <button id="lag-copy" class="tool" hidden>Copy report</button>
+      <span id="lag-status" class="status" role="status">Play as usual while it measures: it times the game, the picture and the sound.</span>
+      <span class="spacer"></span>
+      <label class="status" for="render-scale">Picture</label>
+      <select id="render-scale" class="tool">
+        <option value="0">Full resolution</option>
+        <option value="3">Medium (1488&times;1152)</option>
+        <option value="2">Low (992&times;768)</option>
+        <option value="1">Arcade (496&times;384)</option>
+      </select>
+    </div>
+    <div id="lag-findings" class="findings" aria-live="polite"></div>
+  </div>
+
+  <div id="pane-console" class="pane" role="tabpanel" hidden>
+    <div class="pane-bar">
+      <button id="filter-general" class="tool filter" aria-pressed="true">General <span id="count-general" class="count">0</span></button>
+      <button id="filter-warning" class="tool filter filter-warning" aria-pressed="true">Warnings <span id="count-warning" class="count">0</span></button>
+      <button id="filter-error" class="tool filter filter-error" aria-pressed="true">Errors <span id="count-error" class="count">0</span></button>
+      <span class="spacer"></span>
+      <button id="log-copy" class="tool primary">Copy</button>
+      <button id="log-clear" class="tool">Clear</button>
+    </div>
+    <div id="log" class="log" role="log" tabindex="0" aria-label="Emulator log"></div>
+    <p id="log-empty" class="status log-empty">Nothing to show with these filters.</p>
+  </div>
+</section>
+
+<footer class="bar">
+  <div id="keys" class="keys" hidden>
+    <span><kbd>&larr;</kbd><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&rarr;</kbd> move</span>
+    <span><kbd>Z</kbd> punch</span>
+    <span><kbd>X</kbd> kick</span>
+    <span><kbd>C</kbd> barrier</span>
+    <span><kbd>5</kbd> coin</span>
+    <span><kbd>1</kbd> start</span>
+  </div>
+  <div class="bar-tools">
+    <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>
+    <button id="btn-console" class="tool" aria-expanded="false" aria-controls="drawer">Console <span id="console-badge" class="badge" hidden></span></button>
+  </div>
 </footer>
 
 <!-- ?v= is the build: see web/stamp-site.cmake. -->
+<script src="m2hle-tools.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-page.js?v=@M2HLE_VERSION@"></script>
 <script async src="m2hle.js?v=@M2HLE_VERSION@"></script>
 </body>
