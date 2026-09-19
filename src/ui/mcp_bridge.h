@@ -249,11 +249,23 @@ static void mcp_cmd_get_registers(char *resp, int cap) {
 
 static void mcp_cmd_read_memory(const char *req, char *resp, int cap) {
     uint32_t addr = 0, size = 0;
+    uint8_t buf[4096];
     if (!mcp_json_get_u32(req, "addr", &addr) || !mcp_json_get_u32(req, "size", &size)) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing addr or size\"}"); return;
     }
-    if (size > 4096) size = 4096;  /* cap to avoid huge responses */
+    if (size > sizeof(buf)) size = (uint32_t)sizeof(buf);  /* cap to avoid huge responses */
     if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
+
+    /* UNDER THE EMU MUTEX, and not only for a consistent read: a netplay cold
+     * boot re-runs mem_init on the emu thread, which frees and reallocates
+     * every region. Touching the bus from this thread while that happens is a
+     * use-after-free, and it killed the emulator the moment a challenger was
+     * accepted. Copy under the lock and format outside it, so the critical
+     * section is no longer than the read itself. */
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    for (uint32_t i = 0; i < size; i++) buf[i] = mem_read8(g_mcp.bus, addr + i);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 
     char *p = resp;
     int left = cap;
@@ -261,8 +273,7 @@ static void mcp_cmd_read_memory(const char *req, char *resp, int cap) {
     n = snprintf(p, (size_t)left, "{\"ok\":true,\"addr\":\"0x%08X\",\"data\":\"", addr);
     p += n; left -= n;
     for (uint32_t i = 0; i < size && left > 4; i++) {
-        uint8_t b = mem_read8(g_mcp.bus, addr + i);
-        n = snprintf(p, (size_t)left, "%02X", b);
+        n = snprintf(p, (size_t)left, "%02X", buf[i]);
         p += n; left -= n;
     }
     snprintf(p, (size_t)left, "\"}");
@@ -277,13 +288,19 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
     }
     if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
 
+    /* Same mutex as the read, for the same reason -- see mcp_cmd_read_memory.
+     * A write also has to land as one piece: the i960 must not run between the
+     * first byte and the last. */
     int count = 0;
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     for (int i = 0; hexdata[i*2] && hexdata[i*2+1]; i++) {
         char byte_str[3] = { hexdata[i*2], hexdata[i*2+1], 0 };
         uint8_t b = (uint8_t)strtoul(byte_str, NULL, 16);
         mem_write8(g_mcp.bus, addr + (uint32_t)i, b);
         count++;
     }
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"bytes_written\":%d}", count);
 }
 

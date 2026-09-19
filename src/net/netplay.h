@@ -720,10 +720,21 @@ static inline bool netplay_open_url(const char *url) {
  * forgot the token it was given would send the player back to a browser at every
  * launch, which is the exact outcome the token exists to prevent.
  *
- * A TYPED PASSWORD IS NEVER WRITTEN HERE. The Twitch token is a credential the
- * server issues for storage and can invalidate by reissuing; someone's password
- * is neither, and quietly putting it in a plain file next to the executable is
- * not a decision to make on their behalf.
+ * THE PASSWORD IS STORED TOO, IN CLEAR TEXT, and that was asked for rather
+ * than assumed. This file used to hold the Twitch token and refuse the
+ * password, on the reasoning that a token is a credential the server issues
+ * for storage and can invalidate by reissuing while a password is neither --
+ * so writing one beside the executable was not a decision to make on the
+ * player's behalf. It is still not; it is now theirs, made deliberately, so
+ * that an unattended host (a stream that relaunches its own emulator) can
+ * sign a password account back in without anybody at the keyboard. Anyone who
+ * would rather it were not kept should leave the field empty and let the
+ * Twitch flow issue a token instead -- that path clears the password (see
+ * NETPLAY_CMD_TWITCH_POLL) and nothing is written.
+ *
+ * The file is plain text with no permissions of its own, so it is exactly as
+ * private as the directory holding it. The header line below says so, for
+ * whoever opens it next.
  */
 #define NETPLAY_CFG_PATH "m2hle_netplay.cfg"
 
@@ -731,13 +742,24 @@ static inline void netplay_settings_save(void) {
     FILE *f = fopen(NETPLAY_CFG_PATH, "w");
     if (!f) return;
     fprintf(f, "# m2-hle2 netplay settings. Delete this file to forget them.\n");
+    if (g_netplay.cfg.password[0])
+        fprintf(f, "# This file holds a password in clear text.\n");
     fprintf(f, "server=%s\n",       g_netplay.cfg.server);
     fprintf(f, "port=%u\n",         (unsigned)g_netplay.cfg.port);
     fprintf(f, "npid=%s\n",         g_netplay.cfg.npid);
     fprintf(f, "fingerprint=%s\n",  g_netplay.cfg.fingerprint);
     fprintf(f, "frame_delay=%u\n",  g_netplay.cfg.frame_delay);
     fprintf(f, "browse_yamp=%d\n",  g_netplay.cfg.browse_yamp ? 1 : 0);
-    /* The Twitch login token, and nothing else that authenticates. */
+    /* Only when there is one: an empty `password=` in the file would claim a
+     * stored credential that does not exist, and a Twitch login clears the
+     * field precisely so that nothing is kept. The same for the e-mail token,
+     * which is the netplay window's "Token" box -- RPCN checks it at Login
+     * for a password account, so a host that forgot it could not sign back in
+     * unattended however well it remembered the password. */
+    if (g_netplay.cfg.password[0])
+        fprintf(f, "password=%s\n", g_netplay.cfg.password);
+    if (g_netplay.cfg.token[0])
+        fprintf(f, "token=%s\n",    g_netplay.cfg.token);
     fprintf(f, "twitch_token=%s\n", g_netplay.cfg.twitch_token);
     fclose(f);
 }
@@ -761,6 +783,8 @@ static inline void netplay_settings_load(netplay_config_t *cfg) {
         else if (!strcmp(key, "fingerprint"))  snprintf(cfg->fingerprint, sizeof(cfg->fingerprint), "%s", val);
         else if (!strcmp(key, "frame_delay"))  cfg->frame_delay = (uint32_t)atoi(val);
         else if (!strcmp(key, "browse_yamp"))  cfg->browse_yamp = atoi(val) != 0;
+        else if (!strcmp(key, "password"))     snprintf(cfg->password, sizeof(cfg->password), "%s", val);
+        else if (!strcmp(key, "token"))        snprintf(cfg->token, sizeof(cfg->token), "%s", val);
         else if (!strcmp(key, "twitch_token")) snprintf(cfg->twitch_token, sizeof(cfg->twitch_token), "%s", val);
     }
     fclose(f);
