@@ -765,6 +765,19 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
         } else if (strcmp(argv[i], "--realirq") == 0) {
             g_real_irq = 1;           /* tick board timers → real timer ISR delivery */
+        } else if (strcmp(argv[i], "--no-mesh-cache") == 0) {
+            /* Decode every model in full every frame, as the renderer did
+             * before the mesh cache. The cache is meant to be invisible — it
+             * replays the same faces, in the same order, with the same
+             * arithmetic — so this is the switch to reach for when something
+             * draws wrong: if the picture changes, the cache changed it. */
+            g_geo3d_mesh_cache = 0;
+        } else if (strcmp(argv[i], "--cpu-tiles") == 0) {
+            /* Compose the tile layers on the CPU instead of in a shader. The
+             * GPU compositor is built only on the GL backends, so this changes
+             * nothing on D3D11 or Metal; on a GL desktop it is the same picture
+             * by the older and slower route. */
+            g_video_force_cpu_tiles = 1;
         } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             g_browse_model = atoi(argv[++i]);  /* single-model browser on N */
         } else if (strcmp(argv[i], "--extract") == 0 && i + 1 < argc) {
