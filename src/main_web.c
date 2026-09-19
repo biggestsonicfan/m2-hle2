@@ -52,6 +52,7 @@
 #include "sound.h"
 #include "audio_out.h"
 #include "input.h"
+#include "objview_cmd.h"  /* the debug object viewer, driven from the page */
 
 /* The single TU that defines g_profiles[] / g_active_profile. Under M2HLE_WEB it
  * registers sfight alone. */
@@ -65,6 +66,11 @@
  * 60 Hz display, whose callbacks land a hair early or late around 16.67 ms, gets
  * exactly one slice per callback instead of a 0-then-2 stutter. */
 #define WEB_SLICE_DUE_US ((int64_t)EMU_SLICE_US * 85 / 100)
+
+/* The page is showing the object viewer in place of the game (see the
+ * web_objview_* exports at the end of this file). Declared here because
+ * frame() reads it. */
+static int g_web_objview_show;
 
 static struct {
     sg_pass_action   pass_action;
@@ -339,6 +345,7 @@ static void init(void) {
     video_init(&state.video);
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
+    objview_init();
     state.gfx_ready = true;
     LOG_INFO("web: tile layers composed on the %s", state.video.gpu ? "GPU" : "CPU");
 
@@ -408,8 +415,21 @@ static void frame(void) {
         sg_end_pass();
     }
 
+    /* The object viewer draws passes of its own, so it runs before the
+     * swapchain pass opens -- sokol does not nest them. It costs nothing
+     * unless something asked for it: a shot is pending, a setting changed,
+     * or the page is showing the viewer instead of the game. */
+    if (g_web_objview_show) g_objview.refresh = 1;
+    objview_service(&state.romset, &state.bus);
+    const bool show_objview = g_web_objview_show && g_objview.color_tex.id && g_objview.rt_w > 0;
+
     sg_begin_pass(&(sg_pass){ .action = state.pass_action, .swapchain = sglue_swapchain() });
-    if (have_game) {
+    if (show_objview) {
+        /* In place of the game, letterboxed to the viewer target's own shape. */
+        int ox, oy, w, h;
+        game_render_letterbox(sapp_width(), sapp_height(), g_objview.rt_w, g_objview.rt_h, &ox, &oy, &w, &h);
+        game_render_draw_target(g_objview.color_tex, true, ox, oy, w, h);
+    } else if (have_game) {
         int ox, oy, w, h;
         game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
         if (offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
@@ -588,6 +608,108 @@ EMSCRIPTEN_KEEPALIVE const char *web_sound_status(void) {
 /* The FALLBACK path's queue, for the page's audioStats(): frames of board audio
  * waiting to be played (44.1 kHz), and how often the queue ran dry or was found
  * stale. On the worklet path the queue is the worklet's and the page has it. */
+
+/* ---- The debug object viewer ---------------------------------------------
+ *
+ * One model on its own, drawn offscreen from a camera the caller places, read
+ * back and encoded as a PNG. The command vocabulary is objview_cmd.h's — the
+ * same one the desktop build's TCP bridge carries — so a request written
+ * against one works against the other.
+ *
+ * What differs here is the waiting. The desktop bridge has a thread and blocks
+ * on the render thread; the browser has one thread, which is also the one
+ * drawing, so nothing may block. A request is ARMED by web_objview() and served
+ * by the next frame callback, and the caller comes back for the answer:
+ *
+ *   web_objview('{"cmd":"objview_set","model":3544}')   -> state, serial S
+ *   ... await a frame ... state.serial > S means the pass ran
+ *   web_objview('{"cmd":"objview_shot","count":8}')     -> {"pending":true}
+ *   web_objview_poll()                                   -> {"pending":true} | the batch
+ *   web_objview_png(i) / web_objview_png_len(i)          -> the bytes to Blob
+ *
+ * There is no filesystem here, so a shot writes nothing: each PNG stays in the
+ * heap until the next batch replaces it, and JavaScript copies it out.
+ */
+
+/* Big enough for a 64-shot batch's records plus the state block. */
+static char g_web_objview_out[24576];
+
+EMSCRIPTEN_KEEPALIVE const char *web_objview(const char *json) {
+    char cmd[48];
+    cmd[0] = '\0';
+    if (json) json_get_str(json, "cmd", cmd, sizeof cmd);
+
+    if (!strcmp(cmd, "objview_list")) {
+        objview_cmd_list(json, &state.romset, g_web_objview_out, (int)sizeof g_web_objview_out);
+    } else if (!strcmp(cmd, "objview_shot")) {
+        char err[192];
+        if (!objview_cmd_arm_shot(json, err, sizeof err)) {
+            objview_cmd_reply(&state.romset, &state.bus,
+                              g_web_objview_out, (int)sizeof g_web_objview_out, 0, err);
+        } else {
+            /* Armed. The next frame callback serves it; web_objview_poll has it. */
+            char *p = g_web_objview_out;
+            int   left = (int)sizeof g_web_objview_out;
+            int   n = snprintf(p, (size_t)left, "{\"ok\":true,\"pending\":true,");
+            p += n; left -= n;
+            n = objview_cmd_state(&state.romset, &state.bus, p, left);
+            p += n; left -= n;
+            snprintf(p, (size_t)left, "}");
+        }
+    } else {
+        /* objview_set and objview_status are the same reply; a set also asks for
+         * one service pass, and the caller watches `serial` to know it ran. */
+        if (!strcmp(cmd, "objview_set")) {
+            objview_cmd_apply(json);
+            g_objview.refresh = 1;
+        }
+        objview_cmd_reply(&state.romset, &state.bus,
+                          g_web_objview_out, (int)sizeof g_web_objview_out,
+                          1, NULL);
+    }
+    return g_web_objview_out;
+}
+
+/* The armed batch's result, or {"pending":true} while the frame callback has
+ * not reached it yet. */
+EMSCRIPTEN_KEEPALIVE const char *web_objview_poll(void) {
+    const objview_req_t *rq = &g_objview.req;
+    if (rq->pending || !rq->done) {
+        snprintf(g_web_objview_out, sizeof g_web_objview_out,
+                 "{\"ok\":true,\"pending\":true,\"shots\":[]}");
+        return g_web_objview_out;
+    }
+    objview_cmd_shot_reply(&state.romset, &state.bus,
+                           g_web_objview_out, (int)sizeof g_web_objview_out, 0);
+    return g_web_objview_out;
+}
+
+/* Shot i's encoded PNG, in the heap. Valid until the next batch is taken. */
+EMSCRIPTEN_KEEPALIVE const uint8_t *web_objview_png(int i) {
+    if (i < 0 || i >= g_objview.req.shots) return NULL;
+    return (const uint8_t *)g_objview.req.shot[i].png;
+}
+EMSCRIPTEN_KEEPALIVE int web_objview_png_len(int i) {
+    if (i < 0 || i >= g_objview.req.shots) return 0;
+    return g_objview.req.shot[i].png ? (int)g_objview.req.shot[i].bytes : 0;
+}
+
+/*
+ * Show the viewer on the canvas instead of the game.
+ *
+ * The desktop build puts its preview in an ImGui window; there is no ImGui
+ * here, so the canvas is the only surface there is. While this is on the frame
+ * callback keeps the viewer's target up to date and draws that, letterboxed,
+ * in place of the game — the board carries on running behind it, so turning it
+ * off returns to a game that never stopped.
+ */
+
+EMSCRIPTEN_KEEPALIVE void web_objview_show(int on) {
+    g_web_objview_show = on ? 1 : 0;
+    if (g_web_objview_show) g_objview.v.active = 1;
+}
+EMSCRIPTEN_KEEPALIVE int web_objview_showing(void) { return g_web_objview_show; }
+
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_queued(void)    { return audio_out_queued(); }
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_underruns(void) { return (unsigned)g_audio_out.underruns; }
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_resyncs(void)   { return (unsigned)g_audio_out.resyncs; }
