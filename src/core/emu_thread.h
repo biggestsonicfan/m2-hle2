@@ -257,6 +257,132 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
     return step;
 }
 
+/* ---- One slice ---------------------------------------------------------------
+ *
+ * The RUNNING branch of the run loop, in two halves, so every host runs the
+ * same slice: the native emu thread below, and a host with no second thread (the
+ * web build steps the board from its frame callback). Neither half sleeps, and
+ * neither touches the mutex or netplay's frame gate -- those stay with the
+ * caller, which is what differs between hosts.
+ *
+ *   emu_slice_body    one slice of the board: interrupts, the i960 to the frame
+ *                     hook, the sound board, the snapshots. Call with the emu
+ *                     mutex held where there is one.
+ *   emu_slice_finish  what the slice ended on: a stop (breakpoint, watchpoint,
+ *                     halt, ...), a game frame boundary -- counted, and handed to
+ *                     netplay -- or neither. The caller paces on the answer. */
+typedef enum {
+    EMU_SLICE_STOPPED,   /* the run state is STOPPED now */
+    EMU_SLICE_FRAME,     /* a game frame ended: pace to the next 60 Hz tick */
+    EMU_SLICE_NO_FRAME,  /* the slice ran out without reaching the frame hook */
+} emu_slice_result_t;
+
+static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
+    g_frame_done = 0;
+    /* Board-level vblank (opt-in per profile): raise the vsync pending
+     * bit once per 60 Hz slice, like the real board / MAME at scanline
+     * 384. A self-pacing homebrew that polls + ACKs intreq bit0 then
+     * advances one frame per slice (fallback timing paces the slice) —
+     * no HLE hook or hardcoded address needed. Inert unless polled. */
+    bool board_vblank = g_active_profile && g_active_profile->quirks.board_vblank;
+    if (board_vblank) {
+        irqt_raise(0x1u);
+        g_vblank_acked = 0;     /* the homebrew's vsync-ACK ends this slice */
+        /* Mark the geo capture frame boundary, exactly as sfight/fvipers
+         * do in their HLE frame hook. Without it geo3d falls back to
+         * scanning the WHOLE capture ring (the 24K-word COP boot firmware
+         * + every accumulated frame) instead of just this frame's draws,
+         * so a homebrew object draw never isolates / renders. */
+        g_cop.geo_frame_start = g_cop.geo_frame_end;
+        g_cop.geo_frame_end   = g_cop.geo_capture_head;
+    }
+    /* Additive: advance the board timers one frame of cycles so the
+     * enabled timer IRQ (bit5) expires and vectors its ISR. */
+    if (g_real_irq) irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC);
+    emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
+    for (int i = 0;
+         i < EMU_STEPS_PER_SLICE
+         && !g_frame_done
+         && !(board_vblank && g_vblank_acked)   /* stop at the frame's vsync-ACK */
+         && !ctx->request_stop
+         && !ctx->cpu->halted;
+         i++)
+    {
+        if (ctx->step_over_bp) {
+            ctx->step_over_bp = 0;
+        } else if (bp_check(ctx->cpu->sfr.ip)) {
+            break;
+        }
+        if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
+        ctx->total_steps++;
+        if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
+        if (g_log.warn_triggered) break;
+        if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
+        if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
+    }
+    /* The game's frame ended on the instruction the loop stopped at, so
+     * this is between two frames' display lists: mark it for a capture. */
+    if (g_frame_done || (board_vblank && g_vblank_acked)) {
+        dl_frame_edge(ctx->bus, g_emu_frames);
+        emu_match_replay_edge(ctx);
+    }
+
+    /* The sound board runs on its own sample clock: a slice's worth of
+     * 44.1 kHz samples, the 68000 in lockstep with the SCSP. */
+    sound_run_slice(EMU_SLICES_PER_SEC);
+
+    /* Snapshot the GEO display list while the i960 is idle (mutex held) — the
+     * homebrew is vblank-waiting just past geo_flush, so bufferram holds the
+     * intact list before the next frame's SHARC math clobbers it. */
+    if (g_active_profile && g_active_profile->quirks.geo_displaylist)
+        geodl_capture(ctx->bus);
+
+    ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+    ctx->cpu_snapshot      = *ctx->cpu;
+}
+
+static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
+    bool board_vblank = g_active_profile && g_active_profile->quirks.board_vblank;
+    if (g_bp.hit || g_wp.hit || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
+        if (g_bp.hit) {
+            LOG_INFO("emu: breakpoint hit @ 0x%08X", g_bp.hit_addr);
+            g_bp.hit = 0;
+        }
+        if (g_wp.hit) {
+            LOG_INFO("emu: watchpoint %s @ 0x%08X = 0x%08X (IP=0x%08X)",
+                     g_wp.hit_write ? "write" : "read",
+                     g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip);
+            /* leave g_wp.hit set so a poller can report it; cleared on next run */
+        }
+        if (g_log.warn_triggered) {
+            g_log.warn_triggered = 0;
+            LOG_INFO("emu: break-on-warn @ IP=0x%08X", ctx->cpu->sfr.ip);
+        }
+        if (g_sharc.unknown_triggered) {
+            LOG_INFO("emu: unknown COP cmd 0x%08X @ IP=0x%08X",
+                     g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip);
+            g_sharc.unknown_triggered = 0;
+        }
+        ctx->request_stop = 0;
+        ctx->run_state = EMU_STOPPED;
+        if (ctx->cpu->halted) {
+            LOG_WARN("emu: CPU halted @ IP=0x%08X (steps=%llu)",
+                     ctx->cpu->sfr.ip, (unsigned long long)ctx->total_steps);
+        }
+        return EMU_SLICE_STOPPED;
+    }
+    if (g_frame_done || (board_vblank && g_vblank_acked)) {
+        g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
+        /* The netplay frame clock and this frame's state check. Fed the
+         * snapshot rather than the live CPU: it was taken under the mutex
+         * a few lines up and is the same state, without racing the UI. */
+        netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps);
+        if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+        return EMU_SLICE_FRAME;
+    }
+    return EMU_SLICE_NO_FRAME;
+}
+
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
     uint64_t sps_steps_start = ctx->total_steps;
     int64_t  last_sps_time   = emu_now_us();
@@ -280,102 +406,13 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             if (np_step == NETPLAY_STEP_RESET) continue;   /* done above; re-enter */
 
             emu_mutex_lock(&ctx->mutex);
-            g_frame_done = 0;
-            /* Board-level vblank (opt-in per profile): raise the vsync pending
-             * bit once per 60 Hz slice, like the real board / MAME at scanline
-             * 384. A self-pacing homebrew that polls + ACKs intreq bit0 then
-             * advances one frame per slice (fallback timing paces the slice) —
-             * no HLE hook or hardcoded address needed. Inert unless polled. */
-            bool board_vblank = g_active_profile && g_active_profile->quirks.board_vblank;
-            if (board_vblank) {
-                irqt_raise(0x1u);
-                g_vblank_acked = 0;     /* the homebrew's vsync-ACK ends this slice */
-                /* Mark the geo capture frame boundary, exactly as sfight/fvipers
-                 * do in their HLE frame hook. Without it geo3d falls back to
-                 * scanning the WHOLE capture ring (the 24K-word COP boot firmware
-                 * + every accumulated frame) instead of just this frame's draws,
-                 * so a homebrew object draw never isolates / renders. */
-                g_cop.geo_frame_start = g_cop.geo_frame_end;
-                g_cop.geo_frame_end   = g_cop.geo_capture_head;
-            }
-            /* Additive: advance the board timers one frame of cycles so the
-             * enabled timer IRQ (bit5) expires and vectors its ISR. */
-            if (g_real_irq) irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC);
-            emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
-            for (int i = 0;
-                 i < EMU_STEPS_PER_SLICE
-                 && !g_frame_done
-                 && !(board_vblank && g_vblank_acked)   /* stop at the frame's vsync-ACK */
-                 && !ctx->request_stop
-                 && !ctx->cpu->halted;
-                 i++)
-            {
-                if (ctx->step_over_bp) {
-                    ctx->step_over_bp = 0;
-                } else if (bp_check(ctx->cpu->sfr.ip)) {
-                    break;
-                }
-                if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
-                ctx->total_steps++;
-                if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
-                if (g_log.warn_triggered) break;
-                if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
-                if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
-            }
-            /* The game's frame ended on the instruction the loop stopped at, so
-             * this is between two frames' display lists: mark it for a capture. */
-            if (g_frame_done || (board_vblank && g_vblank_acked)) {
-                dl_frame_edge(ctx->bus, g_emu_frames);
-                emu_match_replay_edge(ctx);
-            }
-
-            /* The sound board runs on its own sample clock: a slice's worth of
-             * 44.1 kHz samples, the 68000 in lockstep with the SCSP. */
-            sound_run_slice(EMU_SLICES_PER_SEC);
-
-            /* Snapshot the GEO display list while the i960 is idle (mutex held) — the
-             * homebrew is vblank-waiting just past geo_flush, so bufferram holds the
-             * intact list before the next frame's SHARC math clobbers it. */
-            if (g_active_profile && g_active_profile->quirks.geo_displaylist)
-                geodl_capture(ctx->bus);
-
-            ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
-            ctx->cpu_snapshot      = *ctx->cpu;
+            emu_slice_body(ctx);
             emu_mutex_unlock(&ctx->mutex);
 
-            if (g_bp.hit || g_wp.hit || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
-                if (g_bp.hit) {
-                    LOG_INFO("emu: breakpoint hit @ 0x%08X", g_bp.hit_addr);
-                    g_bp.hit = 0;
-                }
-                if (g_wp.hit) {
-                    LOG_INFO("emu: watchpoint %s @ 0x%08X = 0x%08X (IP=0x%08X)",
-                             g_wp.hit_write ? "write" : "read",
-                             g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip);
-                    /* leave g_wp.hit set so a poller can report it; cleared on next run */
-                }
-                if (g_log.warn_triggered) {
-                    g_log.warn_triggered = 0;
-                    LOG_INFO("emu: break-on-warn @ IP=0x%08X", ctx->cpu->sfr.ip);
-                }
-                if (g_sharc.unknown_triggered) {
-                    LOG_INFO("emu: unknown COP cmd 0x%08X @ IP=0x%08X",
-                             g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip);
-                    g_sharc.unknown_triggered = 0;
-                }
-                ctx->request_stop = 0;
-                ctx->run_state = EMU_STOPPED;
-                if (ctx->cpu->halted) {
-                    LOG_WARN("emu: CPU halted @ IP=0x%08X (steps=%llu)",
-                             ctx->cpu->sfr.ip, (unsigned long long)ctx->total_steps);
-                }
-            } else if (g_frame_done || (board_vblank && g_vblank_acked)) {
-                g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
-                /* The netplay frame clock and this frame's state check. Fed the
-                 * snapshot rather than the live CPU: it was taken under the mutex
-                 * a few lines up and is the same state, without racing the UI. */
-                netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps);
-                if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+            emu_slice_result_t slice = emu_slice_finish(ctx);
+            if (slice == EMU_SLICE_STOPPED) {
+                /* nothing to pace: the run state is STOPPED now */
+            } else if (slice == EMU_SLICE_FRAME) {
                 /* Frame boundary (HLE hook, or the homebrew's vsync-ACK) — pace to
                  * the next 16.67ms tick. For board_vblank this also ends the i960's
                  * vsync busy-spin, throttling it to 60 Hz and freeing the host CPU. */
@@ -459,15 +496,23 @@ static void *emu_thread_proc(void *p) {
 
 /* ---- Public API ---------------------------------------------------------- */
 
-static inline void emu_thread_init(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, memory_bus_t *bus) {
+/* The context without a thread behind it: for a host that steps the board itself
+ * with emu_slice_body / emu_slice_finish (the web build, which has one thread).
+ * thread_alive stays 0, which is also what tells emu_sound_restart and
+ * emu_sound_midi there is no run loop to lock out. */
+static inline void emu_ctx_init(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, memory_bus_t *bus) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->cpu = cpu;
     ctx->bus = bus;
     ctx->run_state = EMU_STOPPED;
-    ctx->thread_alive = 1;
     ctx->cpu_snapshot = *cpu;
     ctx->cpu_prev_snapshot = *cpu;
     emu_mutex_init(&ctx->mutex);
+}
+
+static inline void emu_thread_init(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, memory_bus_t *bus) {
+    emu_ctx_init(ctx, cpu, bus);
+    ctx->thread_alive = 1;
 
 #ifdef _WIN32
     ctx->thread = CreateThread(NULL, 0, emu_thread_proc, ctx, 0, NULL);
