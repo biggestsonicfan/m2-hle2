@@ -1648,6 +1648,40 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
 #undef NP_APPEND
 }
 
+/*
+ * {"cmd":"board_reset"} -- the cold boot a netplay session performs at the
+ * barrier, with no session: re-install the ROM set, reset both CPUs, the sound
+ * board, the interrupt controller, the input latch and the run loop's own
+ * per-boot state. The run state is left alone (a stopped board stays stopped, at
+ * the reset vector). The emu thread does it, so this waits for it to.
+ *
+ * It exists so the reset can be measured -- tools/grade-reset.mjs holds the boot
+ * that follows against a first boot, byte for byte -- and is refused while a
+ * session is at the barrier or playing, where it would reset one board of two.
+ */
+static void mcp_cmd_board_reset(char *resp, int cap) {
+    if (!g_mcp.emu || !g_mcp.romset || !g_mcp.romset->loaded) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no ROM set loaded\"}");
+        return;
+    }
+    netplay_status_t st;
+    netplay_get_status(&st);
+    if (st.state == NETPLAY_SYNCING || st.state == NETPLAY_PLAYING) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"a netplay session owns the board\"}");
+        return;
+    }
+    uint32_t before = g_mcp.emu->reset_count;
+    g_mcp.emu->request_reset = 1;
+    for (int i = 0; i < 1000 && g_mcp.emu->reset_count == before; i++) emu_sleep_ms(10);
+    if (g_mcp.emu->reset_count == before) {
+        g_mcp.emu->request_reset = 0;
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"the board was not reset "
+                 "(no reset hook, or a session began first)\"}");
+        return;
+    }
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"resets\":%u}", (unsigned)g_mcp.emu->reset_count);
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -1745,6 +1779,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "netplay_start")            == 0) mcp_cmd_netplay_start(resp, cap);
     else if (strcmp(cmd, "netplay_stop")             == 0) mcp_cmd_netplay_stop(resp, cap);
     else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
+    else if (strcmp(cmd, "board_reset")              == 0) mcp_cmd_board_reset(resp, cap);
     else if (strcmp(cmd, "dump_tex_stats")            == 0) {
         snprintf(resp, (size_t)cap,
             "{\"ok\":true,\"models\":%ld,\"models_uv\":%ld,\"models_mat\":%ld,"

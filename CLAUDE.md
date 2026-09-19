@@ -261,6 +261,28 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   separately (`peer_ready_gen`, `netplay_peer_ready`). It is a freshness window and not a flag:
   a peer at the barrier announces once per slice, so a challenger who walks away retracts their
   own challenge, where a sticky bool would leave one standing forever.
+- **A machine that is WAITING has to keep talking.** Inputs go out once, when a new local frame
+  is sampled, and the redundancy in a record rides on the *next* record. A stalled machine samples
+  nothing, so when both peers are stalled nobody transmits and a burst of loss is permanent: with a
+  delay of 2, five datagrams dropped one way. `netplay_resend_inputs` re-sends
+  `[lockstep_resend_floor, last_local_frame]` every 50 ms while stalled. The newest record alone is
+  not enough: the lost frame is `2*delay + 1` behind it, past one record's reach above a delay of 4
+  (`tests/net_test.c` runs the deadlock at every delay). The same loop paces the barrier announce,
+  which used to go out every millisecond -- a thousand datagrams a second at one address is what a
+  consumer gateway's flood detection looks for.
+- **Both inputs being in is permission to run a frame, not proof that it ran.** An emulator that is
+  paused, halted, or never reaching the frame hook is cleared for the same frame on every slice,
+  so it never counts as stalled: it shows "playing", sends nothing, and the only evidence is the
+  *other* machine's stall timer blaming the network. `netplay_watch_own_board` reports it after 3 s
+  and leaves at the stall timeout, the run loop adds whether it was a pause or a halt
+  (`netplay_board_stopped`), and a machine in that state keeps re-sending so the peer's stall line
+  ("the peer's last input arrived N ms ago") can tell a stopped board from a dead link.
+  - *How it surfaced:* the first session with a player on another network. Their board stopped
+    finishing frames 45 frames after the reset, twice, over a corrupted screen; the host logged a
+    stall at frame 48 and neither side said which machine had stopped. **What stopped that board was
+    still open when this was written** -- it does not reproduce here (`tools/grade-reset.mjs` is
+    exact, and the CI build boots byte-identical to a local one), so the next report needs that
+    machine's `m2hle.log`.
 - **A scripted session must not write memory or halt the board.** Both are invisible locally and
   fatal jointly: `write_memory` changes one board and not the other, which is what the frame
   check exists to catch, and halting to think is a stall the peer sees -- m2-hle2 drops a session
@@ -305,7 +327,7 @@ cmake --build <repo>/build_vs22 --config Release --target ALL_BUILD -j 16
 
 Output: `build_vs22\Release\m2hle.exe`. No automated tests — validation is interactive through the GUI. `--headless --mcp --rom <zip> --run` runs the emulator and its bridge with no window, GPU or audio device; the graders launch it that way (`$M2_WINDOW=1` shows the window). The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
 
-**Grading harness** — [tools/](tools/) measures this emulator against an independent implementation of the same ROM formats (the STF explorer, a submodule at `vendor/noclip`), with SHA-256 over a MAME capture as a third point so the two ports cannot simply agree with each other and be wrong together. `node tools/grade-models.mjs` is the one to run after touching `geo3d.h`, and `node tools/grade-pose.mjs` after touching the COP bone handlers in `sharc_exec.h` — the latter replays 328 frames of rig arguments captured off a real board, so it needs a sibling `stf-tools` checkout for `motion-pose.csv` and skips cleanly without one. `node tools/grade-cull.mjs` checks which arena ground chunks get drawn against the ROM's own `area_clip` rule, on the camera the display list was drawn from. `node tools/grade-stages.mjs` plays a round on each of the fifteen stages (picked at ROUND_INIT, `0xAFC8`). It checks every arena part on the stage object clocks, the moving stages' flights, the matrices the COP lays into the display list and the texture scrolls, all against the explorer. Run it after touching the COP matrix handlers or anything a stage routine calls. `node tools/match-replay.mjs` plays attract's preprogrammed Sonic vs Bean replay fight (`--match-replay` skips the intro movie) and holds both fighters frame by frame against a MAME reference taken with `--mame`. The fight is an input replay, so any divergence is a simulation bug; run it after touching the i960 core or any COP handler the fight uses. See [tools/README.md](tools/README.md).
+**Grading harness** — [tools/](tools/) measures this emulator against an independent implementation of the same ROM formats (the STF explorer, a submodule at `vendor/noclip`), with SHA-256 over a MAME capture as a third point so the two ports cannot simply agree with each other and be wrong together. `node tools/grade-models.mjs` is the one to run after touching `geo3d.h`, and `node tools/grade-pose.mjs` after touching the COP bone handlers in `sharc_exec.h` — the latter replays 328 frames of rig arguments captured off a real board, so it needs a sibling `stf-tools` checkout for `motion-pose.csv` and skips cleanly without one. `node tools/grade-cull.mjs` checks which arena ground chunks get drawn against the ROM's own `area_clip` rule, on the camera the display list was drawn from. `node tools/grade-stages.mjs` plays a round on each of the fifteen stages (picked at ROUND_INIT, `0xAFC8`). It checks every arena part on the stage object clocks, the moving stages' flights, the matrices the COP lays into the display list and the texture scrolls, all against the explorer. Run it after touching the COP matrix handlers or anything a stage routine calls. `node tools/match-replay.mjs` plays attract's preprogrammed Sonic vs Bean replay fight (`--match-replay` skips the intro movie) and holds both fighters frame by frame against a MAME reference taken with `--mame`. The fight is an input replay, so any divergence is a simulation bug; run it after touching the i960 core or any COP handler the fight uses. `node tools/grade-reset.mjs` needs no oracle at all: it boots, plays into attract, performs the netplay barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first one, byte for byte, twice. Run it after adding any state a board reset has to clear -- a static in a hook, a latch in the run loop, a region in `mem_init`. See [tools/README.md](tools/README.md).
 
 ---
 

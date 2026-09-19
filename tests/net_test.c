@@ -144,6 +144,67 @@ int main(void) {
               "…and each player's word is kept under its own index");
     }
 
+    /* ---- (B3) two stalled peers repair a burst of loss ------------------- */
+    /*
+     * The session as netplay.h runs it: at frame f a machine samples f + delay
+     * and sends it, then may run f only if it holds the other player's f. One
+     * direction goes dark. The machine that can still hear runs out of the
+     * other's inputs and stops sending too, because a stalled machine samples
+     * nothing -- and then nobody is transmitting, so the loss is permanent
+     * however briefly the link was down. What gets them out is each machine
+     * re-sending [lockstep_resend_floor, last_local_frame] while it waits.
+     * Run for every delay the room word can carry: above 4 the frame that was
+     * lost is further behind the newest than one record reaches.
+     */
+    for (uint32_t delay = 0; delay <= 10; delay++) {
+        pair_t p;
+        pair_begin(&p, 1, delay);
+        uint32_t fa = 0, fb = 0;
+        lockstep_record_t rec;
+        for (uint32_t f = 0; f < delay; f++) {           /* netplay_seed_delay_frames */
+            lockstep_submit_local(&p.a, f, 0, &rec); lockstep_on_record(&p.b, &rec);
+            lockstep_submit_local(&p.b, f, 0, &rec); lockstep_on_record(&p.a, &rec);
+        }
+
+        bool a_to_b_up = true;
+        for (int tick = 0; tick < 200; tick++) {
+            if (tick == 30) a_to_b_up = false;           /* the burst starts ... */
+            if (p.a.last_local_frame == LOCKSTEP_INVALID_FRAME || fa + delay > p.a.last_local_frame) {
+                lockstep_submit_local(&p.a, fa + delay, 0xA000u | (fa + delay), &rec);
+                if (a_to_b_up) lockstep_on_record(&p.b, &rec);
+            }
+            if (p.b.last_local_frame == LOCKSTEP_INVALID_FRAME || fb + delay > p.b.last_local_frame) {
+                lockstep_submit_local(&p.b, fb + delay, 0xB000u | (fb + delay), &rec);
+                lockstep_on_record(&p.a, &rec);
+            }
+            if (lockstep_ready(&p.a, fa)) fa++;
+            if (lockstep_ready(&p.b, fb)) fb++;
+        }
+        /* ... and is over. Both are stalled, so neither has anything new to say. */
+        bool deadlocked = !lockstep_ready(&p.a, fa) && !lockstep_ready(&p.b, fb);
+
+        /* One resend from each, exactly as netplay_resend_inputs walks it. */
+        for (int side = 0; side < 2; side++) {
+            lockstep_t *from = side ? &p.b : &p.a, *to = side ? &p.a : &p.b;
+            uint32_t floor = lockstep_resend_floor(from), top = from->last_local_frame;
+            for (int sent = 0; sent < 4; sent++) {
+                lockstep_fill_record(from, top, &rec);
+                lockstep_on_record(to, &rec);
+                if (top < floor + LOCKSTEP_REDUNDANCY) break;
+                top -= LOCKSTEP_REDUNDANCY;
+            }
+        }
+        bool repaired = lockstep_ready(&p.a, fa) || lockstep_ready(&p.b, fb);
+        bool intact = true;
+        for (uint32_t f = delay; f < fb + delay; f++)
+            if (lockstep_input_for(&p.b, 0, f) != (0xA000u | f)) intact = false;
+
+        char msg[96];
+        snprintf(msg, sizeof(msg), "delay %2u: a burst of loss deadlocks both peers, and a resend frees them",
+                 (unsigned)delay);
+        CHECK(deadlocked && repaired && intact, msg);
+    }
+
     /* ---- (C) protobuf ---------------------------------------------------- */
     {
         uint8_t buf[256];
