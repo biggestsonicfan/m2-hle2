@@ -963,6 +963,14 @@ sapp_desc sokol_main(int argc, char* argv[]) {
          * swapchain — which is what OBS would then record. */
         .high_dpi    = g_kiosk_on ? true : false,
         .window_title = "m2-hle",
+        /* Ctrl-C and Ctrl-V inside an ImGui field. sokol_imgui already points
+         * Dear ImGui's clipboard callbacks at sapp_{get,set}_clipboard_string,
+         * but those are inert unless this is asked for -- it defaults to off --
+         * so every input box silently refused a paste. The netplay window is
+         * the one that needs it: an RPCN e-mail token is 64 characters of
+         * random text that arrives in a mail client, and retyping it by hand
+         * is how it gets entered wrong. */
+        .enable_clipboard = true,
         .logger.func = slog_func,
         .icon = {
             .images = {
