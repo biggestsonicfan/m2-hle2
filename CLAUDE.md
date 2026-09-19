@@ -261,6 +261,28 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   separately (`peer_ready_gen`, `netplay_peer_ready`). It is a freshness window and not a flag:
   a peer at the barrier announces once per slice, so a challenger who walks away retracts their
   own challenge, where a sticky bool would leave one standing forever.
+- **A machine that is WAITING has to keep talking.** Inputs go out once, when a new local frame
+  is sampled, and the redundancy in a record rides on the *next* record. A stalled machine samples
+  nothing, so when both peers are stalled nobody transmits and a burst of loss is permanent: with a
+  delay of 2, five datagrams dropped one way. `netplay_resend_inputs` re-sends
+  `[lockstep_resend_floor, last_local_frame]` every 50 ms while stalled. The newest record alone is
+  not enough: the lost frame is `2*delay + 1` behind it, past one record's reach above a delay of 4
+  (`tests/net_test.c` runs the deadlock at every delay). The same loop paces the barrier announce,
+  which used to go out every millisecond -- a thousand datagrams a second at one address is what a
+  consumer gateway's flood detection looks for.
+- **Both inputs being in is permission to run a frame, not proof that it ran.** An emulator that is
+  paused, halted, or never reaching the frame hook is cleared for the same frame on every slice,
+  so it never counts as stalled: it shows "playing", sends nothing, and the only evidence is the
+  *other* machine's stall timer blaming the network. `netplay_watch_own_board` reports it after 3 s
+  and leaves at the stall timeout, the run loop adds whether it was a pause or a halt
+  (`netplay_board_stopped`), and a machine in that state keeps re-sending so the peer's stall line
+  ("the peer's last input arrived N ms ago") can tell a stopped board from a dead link.
+  - *How it surfaced:* the first session with a player on another network. Their board stopped
+    finishing frames 45 frames after the reset, twice, over a corrupted screen; the host logged a
+    stall at frame 48 and neither side said which machine had stopped. **What stopped that board was
+    still open when this was written** -- it does not reproduce here (`tools/grade-reset.mjs` is
+    exact, and the CI build boots byte-identical to a local one), so the next report needs that
+    machine's `m2hle.log`.
 - **A scripted session must not write memory or halt the board.** Both are invisible locally and
   fatal jointly: `write_memory` changes one board and not the other, which is what the frame
   check exists to catch, and halting to think is a stall the peer sees -- m2-hle2 drops a session

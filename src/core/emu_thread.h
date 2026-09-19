@@ -427,6 +427,10 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             /* STOPPED. Netplay still has to breathe: the login, the room and the
              * peer handshake all happen before anybody presses Run. */
             emu_netplay_pump(ctx);
+            /* ...and a session that is PLAYING cannot, from here: the pump keeps
+             * answering "run the frame" and nothing runs it. Say so where the
+             * player is looking, and say whether it was a pause or a halt. */
+            if (netplay_active()) netplay_board_stopped(ctx->cpu->sfr.ip, ctx->cpu->halted != 0);
             emu_sleep_ms(1);
         }
 
