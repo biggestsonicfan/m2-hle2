@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en" data-version="@M2HLE_VERSION@">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonic the Fighters</title>
+<meta name="description" content="Play Sonic the Fighters in your browser, online, with your own copy of the game.">
+<link rel="stylesheet" href="m2hle.css?v=@M2HLE_VERSION@">
+</head>
+<body>
+
+<canvas id="canvas" tabindex="0" aria-label="The game screen"></canvas>
+
+<!-- Step 1 of the wizard (WEB-PORT.md section 5). Sign-in and the lobby follow in M4. -->
+<main id="panel" class="panel" aria-live="polite">
+  <h1>Sonic the Fighters</h1>
+
+  <section id="step-loading">
+    <p class="lead">Starting up&hellip;</p>
+  </section>
+
+  <section id="step-rom" hidden>
+    <p class="lead">Add your copy of the game to begin.</p>
+    <label id="drop" class="drop" for="file">
+      <strong>Choose your game file</strong>
+      <span>or drop it here</span>
+      <span class="hint">A merged <code>sfight.zip</code> or <code>schamp.zip</code></span>
+    </label>
+    <input id="file" type="file" accept=".zip,application/zip" class="visually-hidden">
+    <p id="rom-error" class="error" hidden></p>
+    <p class="fine">Your file stays on this computer. It is read by this page and is never uploaded.</p>
+    <p class="fine build" id="build"></p>
+  </section>
+
+  <section id="step-busy" hidden>
+    <p class="lead">Reading your game file&hellip;</p>
+  </section>
+
+  <section id="step-fatal" hidden>
+    <p class="lead">This browser could not start the game.</p>
+    <p id="fatal-text" class="error"></p>
+  </section>
+</main>
+
+<!-- The tools drawer: a lag check and the emulator's log (m2hle-tools.js). It sits
+     in the page's column, so opening it makes the game smaller, not covered. -->
+<section id="drawer" class="drawer" hidden aria-label="Tools">
+  <div class="drawer-head" role="tablist">
+    <button id="tab-lag" class="tab" role="tab" aria-controls="pane-lag">Lag check</button>
+    <button id="tab-console" class="tab" role="tab" aria-controls="pane-console">Console</button>
+    <span class="spacer"></span>
+    <button id="drawer-close" class="tool" aria-label="Close tools">Close</button>
+  </div>
+
+  <div id="pane-lag" class="pane" role="tabpanel">
+    <div class="pane-bar">
+      <button id="lag-start" class="tool primary">Check for lag (5 seconds)</button>
+      <button id="lag-copy" class="tool" hidden>Copy report</button>
+      <span id="lag-status" class="status" role="status">Play as usual while it measures: it times the game, the picture and the sound.</span>
+      <span class="spacer"></span>
+      <label class="status" for="render-scale">Picture</label>
+      <select id="render-scale" class="tool">
+        <option value="0">Full resolution</option>
+        <option value="3">Medium (1488&times;1152)</option>
+        <option value="2">Low (992&times;768)</option>
+        <option value="1">Arcade (496&times;384)</option>
+      </select>
+    </div>
+    <div id="lag-findings" class="findings" aria-live="polite"></div>
+  </div>
+
+  <div id="pane-console" class="pane" role="tabpanel" hidden>
+    <div class="pane-bar">
+      <button id="filter-general" class="tool filter" aria-pressed="true">General <span id="count-general" class="count">0</span></button>
+      <button id="filter-warning" class="tool filter filter-warning" aria-pressed="true">Warnings <span id="count-warning" class="count">0</span></button>
+      <button id="filter-error" class="tool filter filter-error" aria-pressed="true">Errors <span id="count-error" class="count">0</span></button>
+      <span class="spacer"></span>
+      <button id="log-copy" class="tool primary">Copy</button>
+      <button id="log-clear" class="tool">Clear</button>
+    </div>
+    <div id="log" class="log" role="log" tabindex="0" aria-label="Emulator log"></div>
+    <p id="log-empty" class="status log-empty">Nothing to show with these filters.</p>
+  </div>
+</section>
+
+<footer class="bar">
+  <div id="keys" class="keys" hidden>
+    <span><kbd>&larr;</kbd><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&rarr;</kbd> move</span>
+    <span><kbd>Z</kbd> punch</span>
+    <span><kbd>X</kbd> kick</span>
+    <span><kbd>C</kbd> barrier</span>
+    <span><kbd>5</kbd> coin</span>
+    <span><kbd>1</kbd> start</span>
+  </div>
+  <div class="bar-tools">
+    <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>
+    <button id="btn-console" class="tool" aria-expanded="false" aria-controls="drawer">Console <span id="console-badge" class="badge" hidden></span></button>
+  </div>
+</footer>
+
+<!-- ?v= is the build: see web/stamp-site.cmake. -->
+<script src="m2hle-tools.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-page.js?v=@M2HLE_VERSION@"></script>
+<script async src="m2hle.js?v=@M2HLE_VERSION@"></script>
+</body>
+</html>

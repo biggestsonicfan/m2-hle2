@@ -39,15 +39,22 @@
 
 //--- Register read helpers (handle literal mode) ------------------------------
 
+/* Register index 0..15 is r0..r15 (locals), 16..31 is g0..g15 (globals). The
+ * CPU struct holds globals then locals, 16 words each, so (idx + 16) & 31 is
+ * the word's place counted from globals: one indexed load, no branch on which
+ * bank. An index past 31 (movq's dst + 3 can reach 34) reads 0 and writes
+ * nothing, as before. */
+_Static_assert(offsetof(i960_cpu_t, locals) == offsetof(i960_cpu_t, globals) + 16 * sizeof(uint32_t),
+               "reg_read/reg_write need locals to follow globals");
+
 static inline uint32_t reg_read(i960_cpu_t *cpu, int idx) {
-    if (idx < 16) return cpu->locals.r[idx];
-    if (idx < 32) return cpu->globals.g[idx - 16];
-    return 0;
+    if ((unsigned)idx >= 32u) return 0;
+    return ((uint32_t *)&cpu->globals)[(idx + 16) & 31];
 }
 
 static inline void reg_write(i960_cpu_t *cpu, int idx, uint32_t val) {
-    if (idx < 16) { cpu->locals.r[idx] = val; return; }
-    if (idx < 32) { cpu->globals.g[idx - 16] = val; return; }
+    if ((unsigned)idx >= 32u) return;
+    ((uint32_t *)&cpu->globals)[(idx + 16) & 31] = val;
 }
 
 // REG format: operand value, respecting literal mode bit
@@ -148,7 +155,19 @@ static inline uint32_t get_cc(i960_cpu_t *cpu) {
 
 //--- Execute one instruction --------------------------------------------------
 
-static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
+/* i960_step_hot is forced inline into the loops that run the game (the emu
+ * thread's slice, the bench): as a call, the switch's callee-saved register
+ * saves and restores around every instruction were ~7% of the emu thread on
+ * the RK3566. Everything else calls i960_step, one out-of-line copy. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define I960_HOT_INLINE inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#  define I960_HOT_INLINE __forceinline
+#else
+#  define I960_HOT_INLINE inline
+#endif
+
+static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
     // Check HLE hooks before executing
     if (hle_check(cpu, bus) == 0) {
         return 0;  // hook handled it, IP already updated
@@ -156,8 +175,8 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
 
     uint32_t ip = cpu->sfr.ip;
     bus->cpu_ip = ip;
-    uint32_t word1 = mem_read32(bus, ip);
-    uint32_t word2 = mem_read32(bus, ip + 4);  // read speculatively
+    uint32_t word1, word2;
+    mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
     int instr_len = 4;
 
     // Record in execution trace
@@ -1142,6 +1161,10 @@ static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
 
     cpu->sfr.ip = ip + instr_len;
     return 0;
+}
+
+static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return i960_step_hot(cpu, bus);
 }
 
 #endif // I960_EXEC_H

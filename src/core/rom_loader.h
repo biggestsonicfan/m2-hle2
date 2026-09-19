@@ -66,6 +66,71 @@ static inline uint8_t *file_load(const char *path, size_t *out_size) {
     return data;
 }
 
+/*
+ * A ROM set held in memory instead of on disk: the web build is handed the bytes
+ * of the one zip the player picked and has no file system to put them in. While
+ * g_rl_mem_zip is set, zip_extract_from_set ignores its zip paths and reads here.
+ *
+ * Entries are found BY CRC32, out of the zip's central directory, which costs no
+ * decompression. A merged MAME set is one zip holding a parent and its clones,
+ * the clones' files usually in a subfolder, under whatever name the ROM manager
+ * gave the zip -- so neither the zip's name nor an entry's path says what a file
+ * is, and looking one up by base name returns whichever same-named entry comes
+ * first. The CRC is the identity the profile already states for every file.
+ *
+ * `strict`: a file whose CRC is not in the zip fails the load rather than falling
+ * back to its name with a warning. On disk a mismatch is a use case (hacked
+ * sets); over netplay one different byte is a desync, so the web build is strict.
+ */
+static struct {
+    const uint8_t *data;
+    size_t         size;
+    bool           strict;
+    int            missing;                 /* files the last load did not find */
+    char           missing_names[512];      /* their names, space separated, for the UI */
+} g_rl_mem_zip;
+
+static inline void rl_mem_zip_set(const uint8_t *data, size_t size, bool strict) {
+    memset(&g_rl_mem_zip, 0, sizeof(g_rl_mem_zip));
+    g_rl_mem_zip.data   = data;
+    g_rl_mem_zip.size   = size;
+    g_rl_mem_zip.strict = strict;
+}
+
+static inline void rl_mem_zip_clear(void) {
+    g_rl_mem_zip.data = NULL;
+    g_rl_mem_zip.size = 0;
+}
+
+static inline void rl_mem_zip_note_missing(const char *filename) {
+    g_rl_mem_zip.missing++;
+    size_t used = strlen(g_rl_mem_zip.missing_names);
+    size_t need = strlen(filename) + 2;
+    if (used + need < sizeof(g_rl_mem_zip.missing_names)) {
+        if (used) g_rl_mem_zip.missing_names[used++] = ' ';
+        strcpy(g_rl_mem_zip.missing_names + used, filename);
+    }
+}
+
+static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, uint32_t expected_crc) {
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_mem(&zip, g_rl_mem_zip.data, g_rl_mem_zip.size, 0)) return NULL;
+
+    void *data = NULL;
+    mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count && !data; i++) {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st) || st.m_is_directory) continue;
+        if ((uint32_t)st.m_crc32 != expected_crc) continue;
+        data = mz_zip_reader_extract_to_heap(&zip, i, out_size, 0);
+    }
+    if (!data && !g_rl_mem_zip.strict)
+        data = mz_zip_reader_extract_file_to_heap(&zip, filename, out_size, MZ_ZIP_FLAG_IGNORE_PATH);
+    mz_zip_reader_end(&zip);
+    return (uint8_t *)data;
+}
+
 static inline uint8_t *zip_extract(const char *zippath, const char *filename, size_t *out_size) {
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
@@ -83,6 +148,14 @@ static inline uint8_t *zip_extract(const char *zippath, const char *filename, si
 static inline uint8_t *zip_extract_from_set(const char *child_zip, const char *parent_zip,
                                             const char *filename, size_t *out_size,
                                             uint32_t expected_crc) {
+    if (g_rl_mem_zip.data) {
+        uint8_t *mem = zip_extract_mem(filename, out_size, expected_crc);
+        if (!mem) {
+            rl_mem_zip_note_missing(filename);
+            LOG_ERROR("ROM not in the zip: %s (CRC %08X)", filename, expected_crc);
+        }
+        return mem;
+    }
     uint8_t *data = NULL;
     if (child_zip)  data = zip_extract(child_zip,  filename, out_size);
     if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size);

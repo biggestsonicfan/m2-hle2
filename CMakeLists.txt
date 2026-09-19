@@ -20,13 +20,42 @@ set(SRC    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(M2HLE_VERSION "dev" CACHE STRING "Version string baked into the binary")
 add_compile_definitions(M2HLE_VERSION="${M2HLE_VERSION}")
 
+# Which host to build:
+#   sokol  the ImGui debugger (sokol_app window, D3D11 / GL core / Metal)
+#   sdl3   the fullscreen handheld frontend (src/main_sdl.c): SDL3 window and
+#          input, sokol_gfx on GLES 3, no ImGui — and so no Python either
+#   web    the browser build (src/main_web.c, Emscripten only): sokol_app on a
+#          canvas, sokol_gfx on WebGL2, no ImGui; the page in web/ is its UI.
+#          See WEB-PORT.md. Configure with emcmake.
+set(M2HLE_FRONTEND "sokol" CACHE STRING "Host frontend: sokol (ImGui debugger), sdl3 (fullscreen, GLES 3) or web (Emscripten)")
+set_property(CACHE M2HLE_FRONTEND PROPERTY STRINGS sokol sdl3 web)
+set(M2HLE_SDL3 OFF)
+set(M2HLE_WEB  OFF)
+if(M2HLE_FRONTEND STREQUAL "sdl3")
+    set(M2HLE_SDL3 ON)
+elseif(M2HLE_FRONTEND STREQUAL "web")
+    set(M2HLE_WEB ON)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR "M2HLE_FRONTEND=web is the Emscripten build. Configure it with emcmake:\n"
+                            "  emcmake cmake -S . -B build_web -DM2HLE_FRONTEND=web")
+    endif()
+elseif(NOT M2HLE_FRONTEND STREQUAL "sokol")
+    message(FATAL_ERROR "M2HLE_FRONTEND must be sokol, sdl3 or web, not '${M2HLE_FRONTEND}'")
+endif()
+
 # ---------------------------------------------------------------------------
 # Vendored dependencies are git submodules. Fail early and usefully if the
 # tree was cloned without them.
 # ---------------------------------------------------------------------------
-set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club)
-foreach(probe imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp
-              imgui_club/imgui_memory_editor/imgui_memory_editor.h)
+if(M2HLE_SDL3 OR M2HLE_WEB)
+    set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz)
+    set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c)
+else()
+    set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club)
+    set(M2HLE_SUBMODULE_PROBES imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp
+                               imgui_club/imgui_memory_editor/imgui_memory_editor.h)
+endif()
+foreach(probe ${M2HLE_SUBMODULE_PROBES})
     if(NOT EXISTS ${VENDOR}/${probe})
         # Joined with spaces: interpolating the list directly renders it
         # semicolon-separated, so the command the message told you to run was one
@@ -37,6 +66,103 @@ foreach(probe imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h min
             "  git submodule update --init ${M2HLE_SUBMODULE_LIST}")
     endif()
 endforeach()
+
+# ---------------------------------------------------------------------------
+# miniz (C)
+# miniz's normal CMake build generates miniz_export.h via
+# GenerateExportHeader. We build it as a plain static lib instead, so
+# stub the export macros in our binary dir and put it on the include path.
+# ---------------------------------------------------------------------------
+set(MINIZ_GEN_DIR ${CMAKE_BINARY_DIR}/miniz-gen)
+file(WRITE ${MINIZ_GEN_DIR}/miniz_export.h
+"#ifndef MINIZ_EXPORT_H\n#define MINIZ_EXPORT_H\n#define MINIZ_EXPORT\n#define MINIZ_NO_EXPORT\n#endif\n")
+add_library(miniz STATIC
+    ${VENDOR}/miniz/miniz.c
+    ${VENDOR}/miniz/miniz_tdef.c
+    ${VENDOR}/miniz/miniz_tinfl.c
+    ${VENDOR}/miniz/miniz_zip.c
+)
+target_include_directories(miniz PUBLIC ${VENDOR}/miniz ${MINIZ_GEN_DIR})
+
+# ---------------------------------------------------------------------------
+# sdl3 frontend: m2hle from src/main_sdl.c, then stop — nothing below (ImGui,
+# sokol_app, the unit tests) is part of this build.
+# ---------------------------------------------------------------------------
+if(M2HLE_SDL3)
+    find_package(SDL3 REQUIRED CONFIG)
+    find_library(M2HLE_GLESV2 GLESv2 REQUIRED)
+    find_package(Threads REQUIRED)
+
+    add_library(sokol_gfx STATIC ${SRC}/sokol_gfx_impl.c)
+    target_compile_definitions(sokol_gfx PUBLIC SOKOL_GLES3)
+    target_include_directories(sokol_gfx PUBLIC ${VENDOR}/sokol ${VENDOR}/sokol/util)
+    target_link_libraries(sokol_gfx PUBLIC ${M2HLE_GLESV2})
+
+    add_executable(m2hle ${SRC}/main_sdl.c)
+    target_link_libraries(m2hle PRIVATE sokol_gfx miniz SDL3::SDL3 Threads::Threads m)
+    target_include_directories(m2hle PRIVATE
+        ${SRC}
+        ${SRC}/board
+        ${SRC}/core
+        ${SRC}/ui
+        ${SRC}/profiles
+    )
+    install(TARGETS m2hle RUNTIME DESTINATION bin)
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
+# web frontend: build_web/site/ is the whole website — m2hle.js + m2hle.wasm from
+# src/main_web.c, beside the page from web/. Then stop: nothing below (ImGui,
+# the desktop sokol TU, the unit tests) is part of this build.
+#
+# One thread, on purpose: GitHub Pages cannot send the COOP/COEP headers that
+# SharedArrayBuffer (and so -pthread) needs. WEB-PORT.md, "Threading".
+# ---------------------------------------------------------------------------
+if(M2HLE_WEB)
+    add_library(sokol STATIC ${SRC}/sokol_web_impl.c)
+    target_compile_definitions(sokol PUBLIC SOKOL_GLES3)
+    target_include_directories(sokol PUBLIC ${VENDOR}/sokol ${VENDOR}/sokol/util)
+
+    add_executable(m2hle ${SRC}/main_web.c)
+    target_compile_definitions(m2hle PRIVATE M2HLE_WEB)
+    target_link_libraries(m2hle PRIVATE sokol miniz)
+    target_include_directories(m2hle PRIVATE
+        ${SRC}
+        ${SRC}/board
+        ${SRC}/core
+        ${SRC}/net
+        ${SRC}/ui
+        ${SRC}/profiles
+    )
+    set(M2HLE_SITE_DIR ${CMAKE_BINARY_DIR}/site)
+    set_target_properties(m2hle PROPERTIES
+        SUFFIX ".js"
+        RUNTIME_OUTPUT_DIRECTORY ${M2HLE_SITE_DIR}
+    )
+    target_link_options(m2hle PRIVATE
+        "-sMIN_WEBGL_VERSION=2"
+        "-sMAX_WEBGL_VERSION=2"
+        # The ROM regions alone are 82.5 MB and the bus copies 48 MB of them again;
+        # the player's zip (18 MB) is alive only while it is being extracted.
+        "-sINITIAL_MEMORY=268435456"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "-sSTACK_SIZE=8388608"
+        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
+        "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,UTF8ToString,stringToUTF8,lengthBytesUTF8"
+    )
+    # The page: copied and version-stamped on every build. A target of its own and
+    # not a POST_BUILD step of m2hle, which only runs when m2hle relinks -- so an
+    # edit to web/site alone left the old page in the site directory.
+    add_custom_target(m2hle_site ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/web/site ${M2HLE_SITE_DIR}
+        COMMAND ${CMAKE_COMMAND} -DSITE=${M2HLE_SITE_DIR} -DVERSION=${M2HLE_VERSION}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/web/stamp-site.cmake
+        DEPENDS m2hle
+        COMMENT "web: page -> ${M2HLE_SITE_DIR} (${M2HLE_VERSION})"
+        VERBATIM)
+    return()
+endif()
 
 # ---------------------------------------------------------------------------
 # cimgui + imgui (single static lib)
@@ -124,23 +250,6 @@ target_link_libraries(imguifiledialog PUBLIC cimgui)
 # includes it and hands the rest of src/ a C handle.
 # ---------------------------------------------------------------------------
 set(IMGUI_CLUB_MEMEDIT_DIR ${VENDOR}/imgui_club/imgui_memory_editor)
-
-# ---------------------------------------------------------------------------
-# miniz (C)
-# miniz's normal CMake build generates miniz_export.h via
-# GenerateExportHeader. We build it as a plain static lib instead, so
-# stub the export macros in our binary dir and put it on the include path.
-# ---------------------------------------------------------------------------
-set(MINIZ_GEN_DIR ${CMAKE_BINARY_DIR}/miniz-gen)
-file(WRITE ${MINIZ_GEN_DIR}/miniz_export.h
-"#ifndef MINIZ_EXPORT_H\n#define MINIZ_EXPORT_H\n#define MINIZ_EXPORT\n#define MINIZ_NO_EXPORT\n#endif\n")
-add_library(miniz STATIC
-    ${VENDOR}/miniz/miniz.c
-    ${VENDOR}/miniz/miniz_tdef.c
-    ${VENDOR}/miniz/miniz_tinfl.c
-    ${VENDOR}/miniz/miniz_zip.c
-)
-target_include_directories(miniz PUBLIC ${VENDOR}/miniz ${MINIZ_GEN_DIR})
 
 # ---------------------------------------------------------------------------
 # sokol implementation TU

@@ -1,0 +1,145 @@
+name: pages
+
+# The web build (WEB-PORT.md) -> GitHub Pages -> https://play.sonicthefighte.rs
+#
+# Every push builds the Emscripten frontend, runs it in headless Chrome, and only
+# then publishes build_web/site/ as the whole website. There is no gh-pages
+# branch: the site is an artifact handed to actions/deploy-pages.
+#
+# One-time setup, in the repository's settings (a workflow's own token cannot do
+# any of these):
+#   Settings > Pages > Build and deployment > Source: "GitHub Actions"
+#   Settings > Environments > github-pages > Deployment branches: allow `wasm`
+#     (the environment is created restricted to the default branch)
+#   Settings > Pages > Custom domain: play.sonicthefighte.rs, then Enforce HTTPS
+#   DNS: CNAME  play -> biggestsonicfan.github.io   (DNS only, not proxied, at
+#     least until GitHub has issued the certificate)
+# A CNAME file in the site would be ignored: with an Actions deployment the
+# custom domain lives in the settings.
+on:
+  push:
+    # `wasm` is where the web frontend lives. Add master here when it merges --
+    # master cannot build -DM2HLE_FRONTEND=web before then.
+    branches: [wasm]
+    paths-ignore: ['**.md']
+  pull_request:
+    branches: [wasm]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+# A newer push supersedes a build in flight; a deploy is atomic, so cancelling
+# one mid-way leaves the previous site up.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0        # commit count for the version stamp
+          submodules: false
+
+      # The web frontend has no ImGui, so it needs two submodules and no Python.
+      # Tracks M2HLE_SUBMODULE_PATHS for M2HLE_WEB in CMakeLists.txt.
+      - name: Fetch build submodules
+        run: git submodule update --init vendor/sokol vendor/miniz
+
+      # Pinned on purpose. A toolchain bump can change float code generation, and
+      # netplay needs two players' builds to compute the same frames
+      # (WEB-PORT.md, "Determinism"). Bump it deliberately, with the smoke test
+      # and a digest comparison, not by accident.
+      #
+      # The pin is `version`, not the action's tag: with `emsdk-version` unset the
+      # action fetches emsdk at that same tag and activates it. The action moved
+      # from mymindstorm/ to emscripten-core/ at v16; the old name is a redirect.
+      - uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 6.0.9
+          actions-cache-folder: emsdk-cache
+
+      # tools/web-smoke.mjs wants Node 22+ (built-in WebSocket).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Stamp version
+        id: ver
+        run: echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        run: >
+          emcmake cmake -S . -B build_web
+          -DM2HLE_FRONTEND=web
+          -DCMAKE_BUILD_TYPE=Release
+          -DM2HLE_VERSION="${{ steps.ver.outputs.version }}"
+
+      - name: Build
+        run: cmake --build build_web -j 4
+
+      # The site hosts the emulator and nothing else. This is a tripwire, not a
+      # filter: if a ROM ever reaches the site directory the deploy stops.
+      - name: No ROMs in the site
+        run: |
+          if find build_web/site -type f \( -iname '*.zip' -o -iname '*.bin' -o -iname 'epr-*' -o -iname 'mpr-*' \) | grep .; then
+            echo "::error::a ROM-like file is in the site directory"; exit 1
+          fi
+          ls -la build_web/site
+
+      # No ROM here, so the page stops at "add your game" -- which still proves
+      # WebGL2 came up, every shader compiled for GLSL ES 3.00, the audio path
+      # was chosen and nothing threw. That is what has actually broken so far.
+      - name: Smoke test (headless Chrome)
+        run: |
+          node tools/web-serve.mjs --site build_web/site --port 8080 &
+          sleep 2
+          node tools/web-smoke.mjs --url http://localhost:8080/ --seconds 8 \
+            --expect-log "game_render_init: complete" --shot smoke.png
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-screenshot
+          path: smoke*.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
+        with:
+          path: build_web/site
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # Every deploy printed
+      #   [DEP0040] DeprecationWarning: The `punycode` module is deprecated.
+      # "Use a userland alternative" is advice to whoever wrote the require(), and
+      # that is not us: it is in this action's own bundle (dist/index.js has
+      # `module.exports = require("punycode")`, pulled in through tr46), in v5.0.1
+      # and on its main branch alike. Nothing of ours runs in that process, and
+      # tools/*.mjs are clean under --trace-deprecation.
+      #
+      # Upstream: actions/deploy-pages issue #434, fix in PR #433 ("Upgrade artifact
+      # client to remove punycode deprecation"), open as of 2026-09-19.
+      # WHEN #433 SHIPS: bump the action to that release and DELETE this env block.
+      # Until then this silences that one code and no other -- a warning nobody here
+      # can act on teaches people to skip warnings. It hides a message, never a
+      # failure: if a future Node drops `punycode`, the step fails loudly either way.
+      - id: deployment
+        uses: actions/deploy-pages@v5
+        env:
+          NODE_OPTIONS: --disable-warning=DEP0040

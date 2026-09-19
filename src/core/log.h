@@ -47,6 +47,12 @@ static log_state_t g_log = {0};
 static inline void log_file_ensure_open(void) {
     if (g_log.file || g_log.file_open_attempted) return;
     g_log.file_open_attempted = 1;
+#ifdef __EMSCRIPTEN__
+    /* No session log in a browser. The only file system there is MEMFS, which is
+     * memory: a log written to it grows by a line at a time for as long as the
+     * tab stays open. The browser console is the log (see log_msg). */
+    return;
+#endif
     g_log.file = fopen(LOG_FILE_PATH, "w"); /* truncate per session */
     if (g_log.file) {
         fprintf(g_log.file, "=== m2-hle session log ===\n");
@@ -105,7 +111,9 @@ static inline void log_msg(log_level_t level, const char *fmt, ...) {
         g_log.warn_triggered = 1;
     }
 
-#ifndef NDEBUG
+    /* A release build is silent on a desktop, where m2hle.log is the record. In a
+     * browser there is no file, so the lines go to the console in every build. */
+#if !defined(NDEBUG) || defined(__EMSCRIPTEN__)
     if (level != LOG_LVL_HLE || g_log.show_hle_console) {
         fprintf(stderr, "%s %s\n", prefixes[level], buf);
         fflush(stderr);
