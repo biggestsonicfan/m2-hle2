@@ -29,6 +29,7 @@
 #include "rom_loader.h"   /* romset_t — the regions the model decoder reads */
 #include "input.h"     /* g_input.held — drive the game's I/O ports over the bridge */
 #include "objview_cmd.h"  /* the object viewer's commands, shared with the web build */
+#include "av_stream.h"    /* the --av-port server, for the "av" block of get_status */
 /* Before this header's own winsock block, and before anything else that could
  * reach <windows.h>: net_socket.h owns the include order and <winsock2.h> has
  * to precede it. main.c already includes this first, so here it is a no-op --
@@ -125,17 +126,21 @@ static void mcp_cmd_get_status(char *resp, int cap) {
     }
     if (g_active_profile) profile_id = g_active_profile->id;
 
+    char av[320];
+    av_stream_status_json(av, (int)sizeof av);
+
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"profile\":\"%s\","
-             "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u}",
+             "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
+             "\"av\":%s}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, profile_id,
              g_emu_frames,
              (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame);
+             g_match_replay_frame, av);
 }
 
 /* match_replay: arm the jump from attract mode's intro movie straight to its

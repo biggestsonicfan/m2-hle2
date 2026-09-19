@@ -51,6 +51,8 @@
 #include "m68k_memview.h"
 #include "input.h"
 #include "debug_window.h"
+#include "av_stream.h"     /* --av-port raw A/V server (transport + the audio tap) */
+#include "av_capture.h"    /* ...and its offscreen target + async GPU readback */
 #include "mcp_bridge.h"    /* --mcp TCP debug server (ported from m2-hle) */
 #include "netplay_window.h"  /* the RPCN netplay front-end */
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
@@ -72,6 +74,10 @@ static int  g_kiosk_on   = 0;      /* --kiosk: capture mode from startup */
 static int  g_kiosk_w    = KIOSK_DEFAULT_WIDTH;
 static int  g_kiosk_h    = KIOSK_DEFAULT_HEIGHT;
 static int  g_kiosk_show = 0;      /* --kiosk-show: start it on screen, not parked */
+static int  g_av_port    = 0;      /* --av-port N: raw A/V server, 0 = off */
+static int  g_av_w       = AV_DEFAULT_WIDTH;
+static int  g_av_h       = AV_DEFAULT_HEIGHT;
+static int  g_av_mute    = 0;      /* --av-mute: stream the sound, do not play it */
 
 /*
  * Headless netplay (--net-*). The GUI is the normal way in, but a session that
@@ -556,8 +562,25 @@ static void init(void) {
         g_dump_model_tex         = g_browse_model;
     }
 
-    /* Host audio output, drained from the sound board's sample ring. */
-    audio_out_init();
+    /* Host audio output, drained from the sound board's sample ring. --av-mute
+     * leaves the device unopened: a machine that is streaming does not need to
+     * play through its own speakers, and the A/V tap sits at the producer, so
+     * the stream is unaffected by there being no drain. */
+    if (g_av_mute) LOG_INFO("audio: --av-mute, no output device opened");
+    else           audio_out_init();
+
+    /* The raw A/V server, and the offscreen target it captures from. The
+     * target is made here, with the renderer, so the first board frame after a
+     * client connects already has somewhere to be drawn. */
+    if (g_av_port > 0) {
+        if (av_stream_start(g_av_port, g_av_w, g_av_h)) {
+            if (!av_capture_init(av_stream_width(), av_stream_height())) {
+                LOG_ERROR("av: no video path — stopping the server rather than "
+                          "streaming sound against a still picture");
+                av_stream_shutdown();
+            }
+        }
+    }
 
     /* Netplay is inert until a session is asked for, but the emu thread polls it
      * every slice, so it has to exist before the thread starts. */
@@ -610,13 +633,115 @@ static void init(void) {
 #endif
 }
 
+/* ---- Headless GPU, for --headless --av-port -------------------------------
+ *
+ * A server has no desktop session, so the A/V stream's ideal shape is no
+ * window and no swapchain at all: a graphics device on its own, rendering into
+ * the capture target and nowhere else. sokol_gfx will adopt a device somebody
+ * else made (sg_environment.d3d11), so all this has to do is make one — and a
+ * D3D11 device without a swapchain is just D3D11CreateDevice with no DXGI.
+ *
+ * The defaults handed to sg_setup are what every pipeline in game_render.h is
+ * built against and what ui/av_capture.h then matches its target to. BGRA8 is
+ * the format the wire wants, so choosing it here is also what makes the
+ * readback a straight memcpy.
+ *
+ * Only the D3D11 backend. A GL build would need a surfaceless EGL context,
+ * which is a different piece of work and not one this machine needs; --kiosk
+ * covers the windowed case there.
+ */
+#if defined(SOKOL_D3D11)
+static ID3D11Device        *g_hl_dev;
+static ID3D11DeviceContext *g_hl_ctx;
+
+/*
+ * Sleep(1) is 15.6 ms unless something in the process has asked Windows for a
+ * finer timer, and a headless run has asked for nothing: no window, no audio
+ * device. Polling the board's frame clock every 15.6 ms against a 16.7 ms
+ * frame catches barely half of them — measured, 37 of 60. A high-resolution
+ * waitable timer gives a real millisecond without changing the timer
+ * resolution for the whole machine, and needs nothing past kernel32. Where it
+ * cannot be made (pre-1803), Sleep is still there and the stream still runs,
+ * just with more gaps.
+ */
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#  define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+static HANDLE g_hl_timer;
+
+static void headless_sleep_ms(int ms) {
+    if (g_hl_timer) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)ms * 10000;    /* relative, 100 ns units */
+        if (SetWaitableTimer(g_hl_timer, &due, 0, NULL, NULL, FALSE)) {
+            WaitForSingleObject(g_hl_timer, (DWORD)ms + 10);
+            return;
+        }
+    }
+    Sleep((DWORD)ms);
+}
+
+static bool headless_gpu_init(void) {
+    D3D_FEATURE_LEVEL got = 0;
+    g_hl_timer = CreateWaitableTimerExW(NULL, NULL,
+                                        CREATE_WAITABLE_TIMER_MANUAL_RESET |
+                                        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                        TIMER_ALL_ACCESS);
+    if (!g_hl_timer)
+        LOG_WARN("av: no high-resolution timer here - the frame poll falls back to "
+                 "Sleep(1), which this machine rounds up to ~15.6 ms");
+    UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED;   /* one thread renders */
+    HRESULT hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, flags,
+                                   NULL, 0, D3D11_SDK_VERSION,
+                                   &g_hl_dev, &got, &g_hl_ctx);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, flags,
+                               NULL, 0, D3D11_SDK_VERSION,
+                               &g_hl_dev, &got, &g_hl_ctx);
+        if (SUCCEEDED(hr))
+            LOG_WARN("av: no hardware D3D11 device (no session?) - using WARP, which is software");
+    }
+    if (FAILED(hr) || !g_hl_dev || !g_hl_ctx) {
+        LOG_ERROR("av: D3D11CreateDevice failed (0x%08lX)", (unsigned long)hr);
+        return false;
+    }
+    sg_setup(&(sg_desc){
+        .environment = {
+            .defaults = { .color_format = SG_PIXELFORMAT_BGRA8,
+                          .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
+                          .sample_count = 1 },
+            .d3d11    = { .device = g_hl_dev, .device_context = g_hl_ctx },
+        },
+        .logger.func = slog_func,
+    });
+    if (!sg_isvalid()) { LOG_ERROR("av: sokol_gfx setup failed on the headless device"); return false; }
+    game_render_init();
+    video_init(&state.video);
+    LOG_INFO("av: headless graphics up (no window, no swapchain); tiles on the %s",
+             state.video.gpu ? "GPU" : "CPU");
+    return true;
+}
+#else
+static void headless_sleep_ms(int ms) { emu_sleep_ms(ms); }
+static bool headless_gpu_init(void) {
+    LOG_ERROR("av: --headless --av-port needs the D3D11 backend; use --kiosk on this one");
+    return false;
+}
+#endif
+
 /* --headless: the emulator and its MCP bridge and nothing else. The graders in
  * tools/ drive the game over the bridge and read what they need out of memory
  * and the display list, so a window, a GPU context and an audio device are only
  * a window popping up and taking focus on every run. Sound still runs on the
  * board (the graders capture it); with no device draining its output ring the
  * board drops the samples. The display list is not scanned into 3D models, so
- * get_geo_captures has nothing to report. Runs until the process is killed. */
+ * get_geo_captures has nothing to report. Runs until the process is killed.
+ *
+ * --av-port changes that: it brings up a GPU device with no window and no
+ * swapchain (headless_gpu_init above) and renders one frame per board frame
+ * into the capture target, so a machine with no desktop session can stream.
+ * The A/V tap sits at the sound producer, so the samples come through with or
+ * without an audio device. */
 static int headless_main(void) {
     log_init();
     if (!g_rom_path[0]) { LOG_ERROR("--headless needs --rom"); return 2; }
@@ -634,15 +759,53 @@ static int headless_main(void) {
     netplay_init();
     netplay_set_reset_hook(netplay_reset_board_cb, NULL);
     netplay_set_open_browser(false);   /* no desktop here - the log carries the URL */
+
+    bool av_on = false;
+    if (g_av_port > 0) {
+        if (!headless_gpu_init()) return 3;
+        if (!av_stream_start(g_av_port, g_av_w, g_av_h)) return 3;
+        if (!av_capture_init(av_stream_width(), av_stream_height())) {
+            av_stream_shutdown();
+            return 3;
+        }
+        av_on = true;
+    }
+
     emu_ensure_started();
     load_active_profile(g_rom_path);
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
     if (g_autorun) emu_run(&state.emu);
-    LOG_INFO("headless: running%s", g_mcp_enable ? " with the MCP bridge" : " (no --mcp: nothing can drive it)");
+    LOG_INFO("headless: running%s%s", g_mcp_enable ? " with the MCP bridge" : "",
+             av_on ? " with the A/V server"
+                   : (g_mcp_enable ? "" : " (no --mcp: nothing can drive it)"));
+    if (av_on && !g_autorun && !g_mcp_enable)
+        LOG_WARN("av: the board is stopped and nothing can start it - a client will "
+                 "get the stream header and then silence. Add --run.");
     for (;;) {
         emu_update_snapshots(&state.emu);
         netplay_cli_pump();
-        emu_sleep_ms(5);
+        if (av_on) {
+            /* One render per board frame, and only while somebody is reading:
+             * with no client this is a poll loop and nothing else. */
+            uint64_t av_frame = 0, av_sample = 0;
+            if (av_capture_due(&av_frame, &av_sample) && av_stream_active()) {
+                game_frame_prepare(&state.video, &state.geo3d, &state.bus,
+                                   &state.romset, true);
+                sg_begin_pass(&(sg_pass){
+                    .action      = av_capture_action(),
+                    .attachments = { .colors[0]     = av_capture_color_att(),
+                                     .depth_stencil = av_capture_depth_att() },
+                });
+                game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                                0, 0, av_stream_width(), av_stream_height(), 1.0f);
+                sg_end_pass();
+                av_capture_submit(av_frame, av_sample);
+                sg_commit();
+            }
+            headless_sleep_ms(1);
+        } else {
+            emu_sleep_ms(5);
+        }
     }
 }
 
@@ -712,6 +875,35 @@ static void frame(void) {
         if (state.show_demo)        igShowDemoWindow(&state.show_demo);
     }
 
+    /*
+     * The A/V stream's own pass, before the swapchain's: sokol does not nest
+     * passes, and the board — not the display — is what paces this one. It
+     * runs exactly once per game frame, at the stream's own resolution, with
+     * lerp_t 1 (there is one picture per board frame, so there is nothing to
+     * interpolate towards).
+     *
+     * The window then MIRRORS that target instead of drawing the game a second
+     * time. Drawing it twice would double the 3D decode and the fill work for
+     * a picture nobody compares; this way the stream and the window are the
+     * same frame, and the only thing the window adds is ImGui on top.
+     */
+    static bool s_av_mirror = false;
+    uint64_t av_frame = 0, av_sample = 0;
+    if (av_stream_enabled() && av_capture_due(&av_frame, &av_sample) &&
+            av_capture_ready() && av_stream_active()) {
+        sg_begin_pass(&(sg_pass){
+            .action      = av_capture_action(),
+            .attachments = { .colors[0]     = av_capture_color_att(),
+                             .depth_stencil = av_capture_depth_att() },
+        });
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                        0, 0, av_stream_width(), av_stream_height(), 1.0f);
+        sg_end_pass();
+        av_capture_submit(av_frame, av_sample);
+        s_av_mirror = true;
+    }
+    if (!av_stream_active()) s_av_mirror = false;
+
     sg_begin_pass(&(sg_pass){
         .action    = state.pass_action,
         .swapchain = sglue_swapchain(),
@@ -729,8 +921,11 @@ static void frame(void) {
         int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
         int avail_h = sapp_height() - menu_h;
         if (avail_h < 1) avail_h = 1;
-        game_render_letterbox(sapp_width(), avail_h,
-                              VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
+        /* Letterbox against whatever is actually being shown: the stream's
+         * target has its own aspect, chosen by --av-size. */
+        int src_w = s_av_mirror ? av_stream_width()  : VIDEO_WIDTH;
+        int src_h = s_av_mirror ? av_stream_height() : VIDEO_HEIGHT;
+        game_render_letterbox(sapp_width(), avail_h, src_w, src_h, &ox, &oy, &w, &h);
         oy += menu_h;
         { static int _cs=0; if ((++_cs % 30)==0) {
             for (int i=0;i<state.geo3d.captured_count;i++){ const captured_model_t *cm=&state.geo3d.captured[i];
@@ -741,9 +936,14 @@ static void frame(void) {
                         cm->matrix[0],cm->matrix[1],cm->matrix[2],
                         cm->matrix[4],cm->matrix[5],cm->matrix[6],
                         cm->matrix[8],cm->matrix[9],cm->matrix[10]); } } }
-        /* Back colour → background tiles → 3D scene → foreground/HUD. */
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                        ox, oy, w, h, lerp_t);
+        /* Back colour → background tiles → 3D scene → foreground/HUD — unless
+         * the A/V pass above has already drawn this frame, in which case the
+         * window shows that target rather than redrawing it. */
+        if (s_av_mirror)
+            game_render_draw_target(av_capture_color_tex(), true, ox, oy, w, h);
+        else
+            game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                            ox, oy, w, h, lerp_t);
 
         /* Programmatic per-model texture extractor (--extract N). Re-runs ~once/
          * sec while set, so you can navigate to a scene where the model's texels
@@ -782,12 +982,19 @@ static void frame(void) {
 
 static void cleanup(void) {
     kiosk_shutdown();      /* take the tray icon down before the window goes */
+    /* First: the writer thread is still sending out of slots the renderer owns
+     * and the target below is about to go. It keeps both rings — the audio tap
+     * runs on the emu thread, which is still going at this point, and that is
+     * exactly the free this must not do (see av_stream_shutdown). The capture
+     * target goes with the rest of the GPU resources further down. */
+    av_stream_shutdown();
     if (state.emu_started) emu_thread_shutdown(&state.emu);
     netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
     romset_free(&state.romset);
     objview_shutdown();
+    av_capture_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     simgui_shutdown();
@@ -912,6 +1119,23 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             }
         } else if (strcmp(argv[i], "--kiosk-show") == 0) {
             g_kiosk_show = 1;                  /* start on screen, not parked */
+        } else if (strcmp(argv[i], "--av-port") == 0 && i + 1 < argc) {
+            /* Raw A/V server: one local client gets BGRA frames and 16-bit
+             * stereo samples on one socket, stamped with the board's own
+             * sample clock. No encoding, no resampling — see core/av_stream.h.
+             * Unlike --kiosk this needs no window to be visible (and with
+             * --headless, no window at all). */
+            g_av_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--av-size") == 0 && i + 1 < argc) {
+            int aw = 0, ah = 0;
+            if (sscanf(argv[++i], "%dx%d", &aw, &ah) == 2 && aw > 0 && ah > 0) {
+                g_av_w = aw; g_av_h = ah;
+            } else {
+                LOG_WARN("--av-size wants WxH (e.g. 1396x1080); keeping %dx%d",
+                         g_av_w, g_av_h);
+            }
+        } else if (strcmp(argv[i], "--av-mute") == 0) {
+            g_av_mute = 1;                     /* stream the sound, do not play it */
         } else if (strcmp(argv[i], "--netplay") == 0) {
             g_net_window = 1;                  /* open the netplay window at startup */
         } else if (strcmp(argv[i], "--net-server") == 0 && i + 1 < argc) {

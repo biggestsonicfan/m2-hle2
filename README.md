@@ -205,6 +205,86 @@ tooltip carries the presented frame rate, which is the quick answer to "is OBS s
 frames". `File → Capture mode (OBS)` enters the same mode from a normally-launched session.
 Windows only for now — see [src/ui/kiosk.h](src/ui/kiosk.h).
 
+## Raw A/V out (`--av-port`)
+
+`--kiosk` hands the picture to a screen capture, which leaves the sound somewhere else: the
+display's clock and the audio device's clock are two unrelated clocks, neither of them the
+board's, so the two drift and have to be lined up by ear. `--av-port` hands both to one client
+on one socket, stamped with the board's own 44.1 kHz sample counter, so they are in sync by
+construction — and the picture comes off an offscreen target at whatever size is asked for,
+rendered natively rather than upscaled from the window.
+
+```
+m2hle --rom sfight.zip --kiosk --av-port 7180 --av-size 1396x1080
+m2hle --rom sfight.zip --run --headless --av-port 7180 --av-mute   # no window at all
+```
+
+- **`--av-port N`** — listen on `127.0.0.1:N`, one client at a time, like the MCP bridge.
+- **`--av-size WxH`** — the stream's resolution (default 1396x1080). The game is drawn across
+  the whole target with no letterbox bars, so pick the board's 496:384 shape and nothing is
+  rescaled anywhere; 1396x1080 is that shape to the nearest even pixel.
+- **`--av-mute`** — do not open a host audio device. The stream is unaffected: the tap sits at
+  the sound board's producer, ahead of the ring the device would drain.
+
+There is no encoding, resampling, PNG or libav anywhere in the emulator — it hands over raw
+frames and raw samples and nothing else. `tools/av-record.py` is a reference client that turns
+them into an mp4 with ffmpeg; it is about a hundred lines, and reading it is the fastest way to
+see the protocol.
+
+**With `--headless`** the emulator brings up a graphics device with no window and no swapchain,
+so no desktop session is needed — a server can stream. That path is D3D11 only for now; on a GL
+build use `--kiosk`, which streams just as well from a parked window.
+
+**The window mirrors the stream.** With a client connected, the game is rendered once, into the
+capture target, and the window shows that target rather than drawing the frame a second time.
+The stream itself never contains ImGui, the menu bar, letterbox bars or the cursor.
+
+### The wire format
+
+A 32-byte header once on connect, then packets. Everything is little-endian.
+
+```
+char magic[4] = "M2AV";  u16 version = 1;  u16 header_size = 32;
+u16 width, height;       u32 pixfmt;      // the bytes 'B','G','R','A'
+u32 fps_num, fps_den;                     // nominal board rate, informational
+u32 audio_rate = 44100;  u8 channels = 2;  u8 bits = 16;  u16 reserved;
+
+u8 type ('V'|'A');  u8 flags;  u16 reserved;
+u32 size;  u64 frame;   // the counter get_status reports as "frames"
+u64 sample;             // A: index of the first sample in this packet
+                        // V: samples produced when the pictured frame ended
+```
+
+`sample` is the shared clock: a video frame's pts is `sample / 44100`. Nothing assumes 735
+samples a frame or an exact 60 Hz — a game frame that takes two emulator slices really does
+carry two slices of audio, and the stamps say so. `flags` bit 0 means something of *that*
+stream was dropped before this packet. A video payload is `width*height*4` bytes of BGRA,
+packed, top row first; an audio payload is `size/4` interleaved L,R `int16` frames, raw board
+samples including the board's DC offset (about 5000 of 32768 — a real cabinet's amplifier is
+AC-coupled, so take it out downstream with `highpass=f=5`).
+
+Video may be dropped and the timestamps make that harmless. Audio may not: the ring holds about
+six seconds, and only a client that has stopped reading for that long loses any.
+
+`get_status` over the MCP bridge carries an `av` block — connected, frames and samples sent,
+and *why* frames went missing, which is the number that says what to fix:
+
+```json
+"av": { "enabled": true, "port": 7180, "width": 1396, "height": 1080, "connected": true,
+        "video_sent": 565, "video_dropped": 29,
+        "dropped_queue": 0, "dropped_readback": 1, "dropped_missed": 28,
+        "audio_sent": 438795, "audio_dropped": 0 }
+```
+
+`dropped_queue` is the client not keeping up, `dropped_readback` the GPU not finished with a
+copy in time, `dropped_missed` the renderer never reaching that board frame. Measured here at
+1396x1080: 95% of board frames delivered headless, 93% under `--kiosk` (where the display's
+60 Hz beats against the board's), ~340 MB/s, and no audio dropped at all.
+
+See [src/core/av_stream.h](src/core/av_stream.h) for the transport and the audio tap, and
+[src/ui/av_capture.h](src/ui/av_capture.h) for the offscreen target and the asynchronous
+readback ring.
+
 ## Documents
 
 - [CLAUDE.md](CLAUDE.md) — the load-bearing invariants: facts that were reverse-engineered or
