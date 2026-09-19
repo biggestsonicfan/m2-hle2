@@ -81,6 +81,7 @@ one you already have running with `--mcp`.
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
+| `ab-builds.mjs` | whether two *builds* emulate the same board. Counts frames with a breakpoint on the frame hook so both stop on the same instruction, then hashes the registers and the same nine regions `grade-reset` uses. No oracle: it answers "is this optimisation, this merge, this other compiler free?" in about ten minutes, where reasoning about it does not. What it cannot see: pixels (headless has no GPU), the GEO's and the 68000's private RAM, and anything that differs between two machines rather than two builds |
 | `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
 | `watch-var.mjs` | who writes this address, and what do they write? A bus watchpoint that reports the value and the IP behind it, so a variable whose owner is unknown can be traced back to its routine |
@@ -582,6 +583,27 @@ and it did; it stays as the check to run after adding any state a reset has to
 clear. What it cannot see is anything that differs between two *machines* rather
 than two boots on one, the GEO's private RAM, and the sound board, which has its
 own grader.
+
+## Two builds, one board
+
+Any "does this change the emulation?" question — an optimisation, a long-lived
+branch coming back, a different compiler or architecture — is measurable, and
+cheaper to measure than to argue about:
+
+    node tools/ab-builds.mjs buildA/m2hle.exe buildB/m2hle.exe --marks 600,1800
+
+Both builds boot the same ROM in their own directory (so neither shares
+`m2hle.log` with the other or with a running instance), and **frames are counted
+with a breakpoint on the frame hook**, not `wait_frames`: a poll stops wherever
+it landed and nothing would match. At each mark it hashes the registers and the
+nine regions the i960 can write.
+
+Measured 2026-09-19: `wasm` against master `089a36f`, identical at 600, 1800 and
+3600, with and without `--no-mesh-cache --cpu-tiles`, at +98% headless
+throughput; and the arc-s merge (the handheld's sound, the load-spike work and
+the ARM parity fixes) against master `3d2ca3e`, identical at 600, 1800, 3600 and
+6000 — which is what says the hand-resolved conflict in the run loop
+(`emu_slice_body`) resolved to the same board.
 
 ## What is not here yet
 
