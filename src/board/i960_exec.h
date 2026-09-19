@@ -74,6 +74,18 @@ static inline double i960_int_reg_as_double(i960_cpu_t *cpu, int idx) {
     return (double)f;
 }
 
+/* A real converted to a 32-bit integer. One outside the integer range, or a
+ * NaN, gives 0x80000000 (the integer indefinite). A C cast leaves that case
+ * undefined, and hosts differ: x86 produces 0x80000000 — so MAME does, and so
+ * this emulator did on every grader — while AArch64 saturates to 0x7FFFFFFF.
+ * `get_kamae_value` (0x2FEF0) runs `cvtri` over stance values some of which are
+ * out of range and stores the low half with `stis`: the ARM build kept 0xFFFF
+ * where x86 kept 0, and its fights drifted from there. */
+static inline uint32_t i960_real_to_int32(double v) {
+    if (!(v > -2147483649.0 && v < 2147483648.0)) return 0x80000000u;
+    return (uint32_t)(int32_t)v;
+}
+
 // Real-to-integer rounding by the AC rounding-control bits (30-31):
 // 0 nearest (IEEE ties-to-even), 1 down, 2 up, 3 toward zero.
 static inline double i960_round_ac(i960_cpu_t *cpu, double v) {
@@ -153,6 +165,58 @@ static inline uint32_t get_cc(i960_cpu_t *cpu) {
     return cpu->sfr.ac & AC_CC_MASK;
 }
 
+//--- Instruction cost in clock cycles -------------------------------------------
+
+/* What an instruction costs at the i960KB's 25 MHz, as MAME's i960.cpp charges
+ * it (its own estimates — "exact timing unknown" — but the numbers the board
+ * timers are measured against when MAME is the oracle): 1 for most register and
+ * branch ops, 2 for stores, 4 for loads and compare-and-branch, 9 for a call, 7
+ * for ret, up to 441 for the transcendental FP ops. Indexed by opcode byte;
+ * REG majors 0x58..0x7F by (major, the 4-bit function in bits 7..10). Anything
+ * MAME does not name costs 1. */
+static uint16_t g_i960_cyc[256];
+static uint16_t g_i960_cyc_reg[40 * 16];
+
+static inline void i960_cycle_table_init(void) {
+    if (g_i960_cyc[0]) return;
+    for (int i = 0; i < 256; i++) g_i960_cyc[i] = 1;
+    for (int i = 0; i < 40 * 16; i++) g_i960_cyc_reg[i] = 1;
+    static const struct { uint8_t op; uint16_t c; } ops[] = {
+        {0x09, 9}, {0x0A, 7}, {0x0B, 5},
+        {0x30, 4}, {0x31, 4}, {0x32, 4}, {0x33, 4}, {0x34, 4}, {0x35, 4}, {0x36, 4}, {0x37, 4},
+        {0x39, 4}, {0x3A, 4}, {0x3B, 4}, {0x3C, 4}, {0x3D, 4}, {0x3E, 4},
+        {0x80, 4}, {0x82, 2}, {0x84, 3}, {0x85, 5}, {0x86, 9}, {0x88, 4}, {0x8A, 2}, {0x8C, 1},
+        {0x90, 4}, {0x92, 2}, {0x98, 5}, {0x9A, 3}, {0xA0, 6}, {0xA2, 4}, {0xB0, 7}, {0xB2, 5},
+        {0xC0, 4}, {0xC2, 2}, {0xC8, 4}, {0xCA, 2},
+    };
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++) g_i960_cyc[ops[i].op] = ops[i].c;
+    static const struct { uint8_t op, fn; uint16_t c; } reg[] = {
+        {0x58,0x0,2}, {0x58,0x3,2}, {0x58,0xC,2}, {0x58,0xE,2}, {0x58,0xF,2},
+        {0x5A,0x4,2}, {0x5A,0x5,2}, {0x5A,0x6,2}, {0x5A,0x7,2}, {0x5A,0xC,2}, {0x5A,0xE,2},
+        {0x5B,0x0,2}, {0x5B,0x2,2}, {0x5C,0xC,2}, {0x5D,0xC,2}, {0x5E,0xC,3}, {0x5F,0xC,4},
+        {0x60,0x0,6}, {0x60,0x2,12}, {0x61,0x0,10}, {0x61,0x1,10},
+        {0x64,0x0,10}, {0x64,0x1,10}, {0x64,0x4,7}, {0x64,0x5,10}, {0x65,0x5,10}, {0x66,0x0,9},
+        {0x67,0x0,37}, {0x67,0x1,37}, {0x67,0x4,30}, {0x67,0x5,30}, {0x67,0x6,30}, {0x67,0x7,30},
+        {0x68,0x0,267}, {0x68,0x1,400}, {0x68,0x2,438}, {0x68,0x3,67}, {0x68,0x5,10}, {0x68,0x8,104},
+        {0x68,0x9,334}, {0x68,0xA,37}, {0x68,0xB,69}, {0x68,0xC,406}, {0x68,0xD,406}, {0x68,0xE,293},
+        {0x69,0x0,350}, {0x69,0x2,438}, {0x69,0x5,12}, {0x69,0x8,104}, {0x69,0x9,334}, {0x69,0xA,37},
+        {0x69,0xB,70}, {0x69,0xC,441}, {0x69,0xD,441}, {0x69,0xE,323},
+        {0x6C,0x0,33}, {0x6C,0x1,35}, {0x6C,0x2,43}, {0x6C,0x3,44}, {0x6C,0x9,5}, {0x6D,0x9,6},
+        {0x6E,0x1,8}, {0x6E,0x2,8}, {0x70,0x1,18}, {0x70,0x8,37}, {0x70,0xB,37},
+        {0x74,0x1,18}, {0x74,0x8,37}, {0x74,0x9,37}, {0x74,0xB,37},
+        {0x78,0xB,35}, {0x78,0xC,18}, {0x78,0xD,10}, {0x78,0xF,10},
+        {0x79,0xB,77}, {0x79,0xC,36}, {0x79,0xD,13}, {0x79,0xF,13},
+    };
+    for (size_t i = 0; i < sizeof reg / sizeof reg[0]; i++)
+        g_i960_cyc_reg[((reg[i].op - 0x58) << 4) | reg[i].fn] = reg[i].c;
+}
+
+static inline unsigned i960_cycle_cost(uint32_t word1) {
+    uint32_t op = word1 >> 24;
+    if (op - 0x58u < 0x28u) return g_i960_cyc_reg[((op - 0x58u) << 4) | ((word1 >> 7) & 0xFu)];
+    return g_i960_cyc[op];
+}
+
 //--- Execute one instruction --------------------------------------------------
 
 /* i960_step_hot is forced inline into the loops that run the game (the emu
@@ -178,6 +242,10 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
     uint32_t word1, word2;
     mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
     int instr_len = 4;
+    /* Only the live timers read this, and the lookup is worth 2-4% of the emu
+     * thread on the RK3566 — 6% through a game load — so it is charged only
+     * while they are on. */
+    if (g_irqt_live) cpu->cycles += i960_cycle_cost(word1);
 
     // Record in execution trace
     trace_record(ip, word1, cpu->frame_depth);
@@ -919,7 +987,7 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                        type. For integer regs, this is just the raw bits. For
                        FP regs (m1=1), reading them as int doesn't really make
                        sense, but we honor the m1 bit anyway. */
-                    int32_t i = m1 ? (int32_t)cpu->fp_regs[src1_idx & 3]
+                    int32_t i = m1 ? (int32_t)i960_real_to_int32(cpu->fp_regs[src1_idx & 3])
                                    : (int32_t)reg_read(cpu, src1_idx);
                     double v = (double)i;
                     FP_DST_WRITE(v);
@@ -927,7 +995,7 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                 }
                 case 0x675: // cvtilr
                 {
-                    int32_t i = m1 ? (int32_t)cpu->fp_regs[src1_idx & 3]
+                    int32_t i = m1 ? (int32_t)i960_real_to_int32(cpu->fp_regs[src1_idx & 3])
                                    : (int32_t)reg_read(cpu, src1_idx);
                     double v = (double)i;
                     FP_DST_WRITE(v);
@@ -942,25 +1010,25 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                 case 0x6C0: // cvtri
                 {
                     double v = FP_SRC1;  // correctly bit-cast from int reg
-                    FP_DST_WRITE_INT((uint32_t)(int32_t)i960_round_ac(cpu, v));
+                    FP_DST_WRITE_INT(i960_real_to_int32(i960_round_ac(cpu, v)));
                     break;
                 }
                 case 0x6C1: // cvtril
                 {
                     double v = FP_SRC1;
-                    FP_DST_WRITE_INT((uint32_t)(int32_t)i960_round_ac(cpu, v));
+                    FP_DST_WRITE_INT(i960_real_to_int32(i960_round_ac(cpu, v)));
                     break;
                 }
                 case 0x6C2: // cvtzri (truncate toward zero)
                 {
                     double v = FP_SRC1;
-                    FP_DST_WRITE_INT((uint32_t)(int32_t)v);
+                    FP_DST_WRITE_INT(i960_real_to_int32(v));
                     break;
                 }
                 case 0x6C3: // cvtzril
                 {
                     double v = FP_SRC1;
-                    FP_DST_WRITE_INT((uint32_t)(int32_t)v);
+                    FP_DST_WRITE_INT(i960_real_to_int32(v));
                     break;
                 }
 

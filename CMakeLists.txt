@@ -12,6 +12,15 @@ endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# The board's arithmetic has to come out the same on every host: the COP's
+# low bits feed back into the next frame (sharc.h). GCC and Clang fuse a*b+c
+# into one FMA instruction wherever the target has it — AArch64 always does,
+# x86-64 only with -march — and a fused result differs in the last bit, so an
+# ARM build's RAM left an x86 build's two frames after boot.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-ffp-contract=off)
+endif()
+
 set(VENDOR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set(SRC    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 

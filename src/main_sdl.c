@@ -38,14 +38,30 @@
  * --filter   nearest|linear scaling of the offscreen frame (default linear).
  * --cpu-tiles   compose the tile layers on the CPU instead of in a shader.
  * --no-mesh-cache  decode every display-list model in full every frame.
+ * --steps-per-slice N  i960 steps a 60 Hz slice may run without reaching a
+ *            frame edge (default 500000). Lower keeps game loads, which run
+ *            ~1M steps a frame, inside the slice on a slow CPU.
+ * --live-timers  count the board timers down by each i960 instruction's cycles
+ *            and take their interrupts mid-slice (irq_timer.h g_irqt_live), so
+ *            a game's own time budget can end its work: STF's texture loads
+ *            then yield where the board's do.
+ * --fill-shade-rows  give a textured face one row of finished colours (its luma
+ *            band, poly_luma and colour together), so a pixel fetches its colour
+ *            once instead of a lumaram texel and then a ramp texel.
+ * --fill-gather  read the bilinear 2x2 with one textureGather where the taps are
+ *            the atlas's own (needs a GLES 3.1 context; falls back if there is
+ *            none). The same texels, a quarter of the texture operations.
  * --verify-fill  after every game pass, draw its 3D fills again through the
  *            reference fill shader and the one in use, into two scratch targets,
  *            and compare the bytes (needs --render-scale 1 or more).
  * --verify-gpu-tiles  on every frame the GPU composes the tile layers, pause
  *            the emu thread, compose the same RAM on the CPU as well and
  *            compare the two byte for byte (FG colour only where it shows).
- *
- * Audio is not wired up: the 68K sound board and SCSP stay off.
+ * --sound    run the sound board (68000 + SCSP, in lockstep with the emu thread)
+ *            and play it through SDL. Without it the board is not attached at
+ *            all: silent, and the emu thread does no sound work, which is cooler
+ *            and cheaper on a handheld. No audio device: a warning, and the game
+ *            runs as without --sound.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -74,6 +90,7 @@
 #include "video_window.h"
 #include "game_frame.h"
 #include "input.h"
+#include "audio_out.h"   /* audio_out_cb: drains g_sound's ring (only its callback is used here) */
 #include "miniz.h"
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
@@ -97,6 +114,7 @@ static struct {
     int         win_w, win_h;       /* 0 = fullscreen */
     bool        stats;
     bool        osd;
+    bool        sound;
     const char *log_path;
     const char *pad_map;
     int         shot_count;
@@ -212,7 +230,55 @@ static int key_to_action(SDL_Scancode sc) {
     }
 }
 
-/* ---- ROM loading (main.c load_active_profile, without the sound board) --- */
+/* ---- Sound ----------------------------------------------------------------- */
+
+/* SDL asks for more audio: hand it the board's output through audio_out_cb, the
+ * debugger's drain (ring-fill-nudged resampling, DC blocker). The stream is
+ * opened at the board's own 44.1 kHz, so SDL converts to the device's rate and
+ * audio_out_cb only corrects the two clocks' drift. */
+static void sdl_audio_cb(void *ud, SDL_AudioStream *stream, int additional, int total) {
+    (void)ud; (void)total;
+    float buf[1024 * 2];
+    for (int frames = additional / (int)(2 * sizeof(float)); frames > 0; ) {
+        int n = frames < 1024 ? frames : 1024;
+        audio_out_cb(buf, n, 2, NULL);
+        SDL_PutAudioStreamData(stream, buf, n * 2 * (int)sizeof(float));
+        frames -= n;
+    }
+}
+
+/* Open the audio device, then attach the sound board and load its program and
+ * sample ROMs (main.c load_active_profile's sound block). Call after load_rom,
+ * before the emu thread starts. On any failure the board stays detached and the
+ * game runs silent. Returns the stream, or NULL. */
+static SDL_AudioStream *sound_start(void) {
+    if (!g_active_profile->quirks.enable_68k_sound || !state.romset.audiocpu || state.romset.audiocpu_size == 0) {
+        fprintf(stderr, "m2hle: %s has no sound board ROMs; running silent\n", g_active_profile->display_name);
+        return NULL;
+    }
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        fprintf(stderr, "m2hle: no audio (%s); running silent\n", SDL_GetError());
+        return NULL;
+    }
+    SDL_AudioSpec spec = { .format = SDL_AUDIO_F32, .channels = 2, .freq = (int)SOUND_RATE };
+    SDL_AudioStream *stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, sdl_audio_cb, NULL);
+    if (!stream) {
+        fprintf(stderr, "m2hle: could not open audio (%s); running silent\n", SDL_GetError());
+        return NULL;
+    }
+    sound_reset();
+    sound_attach(&state.bus);
+    sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
+    if (state.romset.samples && state.romset.samples_size > 0)
+        sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+    g_audio_out.rate  = SOUND_RATE;
+    g_audio_out.ready = true;
+    SDL_ResumeAudioStreamDevice(stream);
+    printf("m2hle: sound board on\n");
+    return stream;
+}
+
+/* ---- ROM loading (main.c load_active_profile; the sound board: sound_start) */
 
 static bool load_rom(const char *zip) {
     const char *sep = strrchr(zip, '/');
@@ -448,8 +514,15 @@ static bool parse_args(int argc, char **argv) {
         bool more = i + 1 < argc;
         if      (!strcmp(a, "--rom") && more)        opt.rom = argv[++i];
         else if (!strcmp(a, "--render-fps") && more) opt.render_fps = atof(argv[++i]);
+        else if (!strcmp(a, "--steps-per-slice") && more) {
+            int n = atoi(argv[++i]);
+            if (n < 1000) return false;
+            g_emu_steps_per_slice = n;
+        }
+        else if (!strcmp(a, "--live-timers"))        g_irqt_live = 1;
         else if (!strcmp(a, "--window") && more)     { if (sscanf(argv[++i], "%dx%d", &opt.win_w, &opt.win_h) != 2) return false; }
         else if (!strcmp(a, "--stats"))              opt.stats = true;
+        else if (!strcmp(a, "--sound"))              opt.sound = true;
         else if (!strcmp(a, "--osd"))                opt.osd = true;
         else if (!strcmp(a, "--log") && more)        opt.log_path = argv[++i];
         else if (!strcmp(a, "--pad-map") && more)    opt.pad_map = argv[++i];
@@ -464,6 +537,8 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--fill-ref"))           g_game_render_fill_use_ref = 1;
         else if (!strcmp(a, "--fill-no-split"))      g_game_render_fill_split = 0;
         else if (!strcmp(a, "--fill-no-ramp"))       g_game_render_fill_ramp = 0;
+        else if (!strcmp(a, "--fill-shade-rows"))    g_game_render_fill_shade = 1;
+        else if (!strcmp(a, "--fill-gather"))        g_game_render_fill_gather = 1;
         else if (!strcmp(a, "--match-replay"))       g_match_replay = 1;   /* attract straight to its replay fight */
         else if (!strcmp(a, "--filter") && more) {
             const char *f = argv[++i];
@@ -586,9 +661,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "m2hle: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    SDL_AudioStream *audio = opt.sound ? sound_start() : NULL;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    /* textureGather is ES 3.1; everything else the frontend draws is 3.0. */
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, g_game_render_fill_gather ? 1 : 0);
     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
@@ -602,6 +679,16 @@ int main(int argc, char **argv) {
     SDL_Window *window = SDL_CreateWindow("m2hle", fullscreen ? 640 : opt.win_w, fullscreen ? 480 : opt.win_h,
                                           SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
     SDL_GLContext gl = window ? SDL_GL_CreateContext(window) : NULL;
+    if (!gl && g_game_render_fill_gather) {
+        /* No ES 3.1 here: fall back to 3.0 and the four fetches. */
+        fprintf(stderr, "m2hle: no GLES 3.1 context (%s); --fill-gather off\n", SDL_GetError());
+        g_game_render_fill_gather = 0;
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        if (window) SDL_DestroyWindow(window);
+        window = SDL_CreateWindow("m2hle", fullscreen ? 640 : opt.win_w, fullscreen ? 480 : opt.win_h,
+                                  SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+        gl = window ? SDL_GL_CreateContext(window) : NULL;
+    }
     if (!gl) {
         fprintf(stderr, "m2hle: GLES 3 window: %s\n", SDL_GetError());
         SDL_Quit();
@@ -844,6 +931,9 @@ int main(int argc, char **argv) {
                 printf(" | gpu %.2f ms per compose", stat_tile_gpu_ns / 1e6 / (double)comps);
             if (opt.gl_finish && opt.render_scale > 0)
                 printf(" | game pass gpu %.2f ms per render", stat_game_gpu_ns / 1e6 / n);
+            if (audio)
+                printf(" | sound: %llu underrun frames, %llu dropped total",
+                       (unsigned long long)g_audio_out.underruns, (unsigned long long)g_sound.out_dropped);
             printf("\n");
             stat_game_gpu_ns = 0;
             fflush(stdout);
@@ -857,6 +947,7 @@ int main(int argc, char **argv) {
     }
 
     emu_thread_shutdown(&state.emu);
+    if (audio) SDL_DestroyAudioStream(audio);   /* after the emu thread: no more ring writes */
     if (opt.verify_fill)
         printf("verify-fill: %llu frames of fills checked, %llu differed, %llu skipped (vertex buffer uploaded twice)\n",
                (unsigned long long)g_vf.frames, (unsigned long long)g_vf.bad_frames, (unsigned long long)g_vf.skipped);

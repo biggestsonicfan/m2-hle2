@@ -135,7 +135,11 @@ export class M2Hle {
                           headless = !process.env.M2_WINDOW, extraArgs = [] } = {}) {
         if (!rom) throw new Error('launch needs a rom path');
         const bin = exe ?? findExe();
-        const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom), ...extraArgs];
+        /* $M2HLE_EXTRA_ARGS goes to every emulator a grader starts, so a run can
+         * be graded with an option the grader itself knows nothing about (the
+         * handheld's --live-timers, say). */
+        const envArgs = (process.env.M2HLE_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean);
+        const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom), ...extraArgs, ...envArgs];
         if (run) args.push('--run');
         if (headless) args.push('--headless');
         /* Run it beside the ROM: a split set needs schamp.zip found next to

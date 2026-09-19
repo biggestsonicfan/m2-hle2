@@ -1017,7 +1017,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
         case 0x0C001818:
             /* Fn_cvtsw (PM 0x205DE): `fix` -- float to int, truncated (MODE1 TRUNCATE).
              * Echoing the float's bits sent the i960 4000.0 where it wanted 0xFA0. */
-            if (n >= 1) sharc_push_u((uint32_t)(int32_t)sharc_bits_to_float(args[0]));
+            if (n >= 1) sharc_push_u(sharc_float_to_int32(truncf(sharc_bits_to_float(args[0]))));
             else        sharc_push_u(0);
             return;
 

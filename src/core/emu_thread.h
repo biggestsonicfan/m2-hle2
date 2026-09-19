@@ -53,6 +53,15 @@
 /* EMU_STEPS_PER_SLICE is in constants.h (500,000), sized to always reach
  * the per-game frame-boundary hook within one batch. */
 
+/* The i960 steps one slice may run before it ends without a frame edge.
+ * Ordinary frames need well under 100k (STF attract p99 ~53k); only loads
+ * reach the default — texture decompression runs ~1M steps a game frame. A
+ * host too slow for 500k steps in 16.7 ms sets it lower, so a load spreads
+ * over more slices that each fit (the sound board and the renderer keep time)
+ * instead of fewer that do not. Where interrupts land during a load moves
+ * with it, so tools that compare against MAME keep the default. */
+static volatile int g_emu_steps_per_slice = EMU_STEPS_PER_SLICE;
+
 /* ---- Run state ----------------------------------------------------------- */
 
 typedef enum {
@@ -231,6 +240,52 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
     g_irqt.deliver_by_pin[3]++;
 }
 
+/* ---- Board timers against the i960's clock (irq_timer.h g_irqt_live) ------ */
+
+static uint64_t s_timer_cycles_seen = 0;   /* cpu->cycles the timers have been given */
+static uint64_t s_slice_cycles0     = 0;   /* cpu->cycles when this game frame began */
+
+/* Slice start. Frozen timers: a whole slice of cycles. Live: only the cycles run
+ * since the timers were last brought up to date — the frame's idle share is
+ * charged at the frame edge that ends it (emu_timers_frame_edge), before the
+ * game re-arms its frame timer in the vsync handler. Charging it here instead
+ * put the wait ahead of the new frame's budget, and STF then skipped half its
+ * sway chains at character select, where the board runs them all. */
+static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
+    if (!g_real_irq) return;
+    if (!g_irqt_live) { irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC); return; }
+    i960_cycle_table_init();
+    i960_cpu_t *cpu = ctx->cpu;
+    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    s_timer_cycles_seen = cpu->cycles;
+    irqt_flush();
+}
+
+/* The game's frame has ended: the board would spin here until vsync, so give the
+ * timers the rest of this 1/60 s before the frame that follows starts to count. */
+static inline void emu_timers_frame_edge(emu_thread_ctx_t *ctx) {
+    if (!g_real_irq || !g_irqt_live) return;
+    i960_cpu_t *cpu = ctx->cpu;
+    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    s_timer_cycles_seen = cpu->cycles;
+    irqt_flush();
+    int64_t idle = EMU_CPU_HZ / EMU_SLICES_PER_SEC - (int64_t)(cpu->cycles - s_slice_cycles0);
+    if (idle > 0) irqt_tick(idle);
+    s_slice_cycles0 = cpu->cycles;
+}
+
+/* After each instruction, live timers only: count its cycles, and take a timer
+ * interrupt as soon as one is pending and none is in service. */
+static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
+    i960_cpu_t *cpu = ctx->cpu;
+    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    s_timer_cycles_seen = cpu->cycles;
+    if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
+    if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FCu) &&
+            g_active_profile && g_active_profile->quirks.irq_handler[2])
+        emu_service_irq(ctx);
+}
+
 /* ---- Run loop ------------------------------------------------------------ */
 
 /* Pump netplay and hand back what this slice may do.
@@ -315,10 +370,11 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     }
     /* Additive: advance the board timers one frame of cycles so the
      * enabled timer IRQ (bit5) expires and vectors its ISR. */
-    if (g_real_irq) irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC);
+    emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
+    int max_steps = g_emu_steps_per_slice;
     for (int i = 0;
-         i < EMU_STEPS_PER_SLICE
+         i < max_steps
          && !g_frame_done
          && !(board_vblank && g_vblank_acked)   /* stop at the frame's vsync-ACK */
          && !ctx->request_stop
@@ -333,6 +389,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
         ctx->total_steps++;
         if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
+        if (g_irqt_live) emu_timers_after_step(ctx);
         if (g_log.warn_triggered) break;
         if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
         if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
@@ -340,6 +397,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     /* The game's frame ended on the instruction the loop stopped at, so
      * this is between two frames' display lists: mark it for a capture. */
     if (g_frame_done || (board_vblank && g_vblank_acked)) {
+        emu_timers_frame_edge(ctx);
         dl_frame_edge(ctx->bus, g_emu_frames);
         emu_match_replay_edge(ctx);
     }
