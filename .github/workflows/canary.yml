@@ -7,16 +7,23 @@ on:
   push:
     branches: [master]
     # tools/ is the Node grading harness — it never changes the binary.
-    # tools/ is the Node grading harness -- it never changes the binary.
-    # packaging/rocknix/*.md is in the ARC-S zip, so it is not ignored there.
+    # '*.md' and not '**.md': packaging/rocknix/README.md is inside the ARC-S
+    # zip, so a change to it is a change to the download.
+    paths-ignore: ['*.md', 'tools/**']
+  # A PR to master builds and tests without publishing anything (the publish job
+  # skips itself). Without this the first run of a build change is the one that
+  # lands on master — which is how vendor/imgui_club broke the canary.
+  pull_request:
+    branches: [master]
     paths-ignore: ['*.md', 'tools/**']
   workflow_dispatch:
   # schedule:
   #   - cron: '0 7 * * *'   # uncomment for a nightly build even without pushes
 
-# One canary at a time; a newer push supersedes an in-flight build.
+# One canary at a time; a newer push supersedes an in-flight build. Keyed by ref
+# so a PR run does not cancel master's.
 concurrency:
-  group: canary
+  group: canary-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
