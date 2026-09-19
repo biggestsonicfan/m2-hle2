@@ -606,6 +606,29 @@ and 6000 — the last two inside attract's replay fight, which is where a
 one-bit difference in the board would already have grown into a different
 fight. That is what says the hand-resolved conflict in the run loop
 (`emu_slice_body`) resolved to the same board.
+## The object viewer, in a browser
+
+`web-objview.mjs` is the wasm build's answer to the desktop's MCP object viewer. The desktop
+emulator has a TCP bridge an MCP server talks to; a browser has no such thing, so this drives
+Chrome or Edge over the DevTools protocol, calls the page's own `window.m2hleObjview`, and
+writes the PNGs it hands back -- there is no filesystem in there to write them itself.
+
+```
+node tools/web-serve.mjs --rom <merged.zip>
+node tools/web-objview.mjs --url "http://localhost:8080/?rom=/dev-rom.zip"      --out shots --model 3544 --six --at-frame 1800
+```
+
+`--list FIRST:COUNT` lists triangle counts instead; `--opts '{...}'` takes any field the
+viewer understands; `--show` screenshots the page with the viewer on the canvas. Full
+reference, and the same commands on the desktop, in MCP_GUIDE.md.
+
+Two things it waits for, and they are different questions. `waitReady` waits for the board to
+have *drawn* 3D, which is when the texture sheets and the palette are up. `--at-frame N`
+waits for a frame number, which is how you get past the other half: face colours come out of
+palette RAM and the game fills that per scene, so a model whose scene attract has not reached
+draws correctly shaped, correctly textured and black-faced. It is not a web-only trap, but it
+bites there first -- the page starts the board the moment the ROM loads, and a script can be
+asking two seconds later.
 
 ## What is not here yet
 
