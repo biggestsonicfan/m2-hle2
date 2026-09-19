@@ -7,14 +7,23 @@ on:
   push:
     branches: [master]
     # tools/ is the Node grading harness — it never changes the binary.
-    paths-ignore: ['**.md', 'tools/**']
+    # '*.md' and not '**.md': packaging/rocknix/README.md is inside the ARC-S
+    # zip, so a change to it is a change to the download.
+    paths-ignore: ['*.md', 'tools/**']
+  # A PR to master builds and tests without publishing anything (the publish job
+  # skips itself). Without this the first run of a build change is the one that
+  # lands on master — which is how vendor/imgui_club broke the canary.
+  pull_request:
+    branches: [master]
+    paths-ignore: ['*.md', 'tools/**']
   workflow_dispatch:
   # schedule:
   #   - cron: '0 7 * * *'   # uncomment for a nightly build even without pushes
 
-# One canary at a time; a newer push supersedes an in-flight build.
+# One canary at a time; a newer push supersedes an in-flight build. Keyed by ref
+# so a PR run does not cancel master's.
 concurrency:
-  group: canary
+  group: canary-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -118,9 +127,94 @@ jobs:
           path: dist/*.zip
           retention-days: 14   # per-commit history, independent of the rolling release
 
+
+  # The handheld build: the sdl3 frontend (src/main_sdl.c) cross-compiled for the
+  # RK3566, for ROCKNIX on the Anbernic RG ARC-S. packaging/rocknix/README.md is
+  # the install side; this job is why there is a download to install.
+  #
+  # debian:trixie, not the runner's Ubuntu, because trixie is the distribution
+  # that has libsdl3-dev for arm64 AND a glibc (2.41) that matches ROCKNIX's, so
+  # the binary links against the device's own libSDL3 / libGLESv2 / libc and
+  # carries none of them. Cross-compiled rather than built on an arm64 runner for
+  # the same reason: what matters is the sysroot, not the machine.
+  rocknix:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Install the cross toolchain and the arm64 sysroot
+        run: |
+          dpkg --add-architecture arm64
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            crossbuild-essential-arm64 cmake ninja-build git ca-certificates file zip \
+            libsdl3-dev:arm64 libgles-dev:arm64 libegl-dev:arm64
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      # The sdl3 frontend's whole submodule list (CMakeLists.txt
+      # M2HLE_SUBMODULE_PATHS on the M2HLE_SDL3 path): no ImGui, so no
+      # dear_bindings and no Python.
+      - name: Fetch build submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule update --init vendor/sokol vendor/miniz
+
+      - name: Stamp version
+        id: ver
+        run: echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # CMAKE_TOOLCHAIN_FILE must be absolute: a relative one is looked for
+      # from the BUILD directory, so "packaging/rocknix/aarch64.cmake" is not
+      # found and the configure silently falls back to the host compiler.
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DM2HLE_FRONTEND=sdl3
+          -DM2HLE_VERSION="${{ steps.ver.outputs.version }}"
+          -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/packaging/rocknix/aarch64.cmake"
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      # A cross build cannot be run here, so check what can be checked without
+      # running it: that it is an aarch64 ELF, and that it asks for exactly the
+      # four libraries ROCKNIX has. A fifth NEEDED entry is a dependency the
+      # device may not carry, and is worth failing the build over.
+      - name: Check the binary
+        run: |
+          aarch64-linux-gnu-strip build/m2hle
+          file build/m2hle | grep -q 'ELF 64-bit LSB .*ARM aarch64' || { file build/m2hle; exit 1; }
+          aarch64-linux-gnu-objdump -p build/m2hle | awk '/NEEDED/ { print $2 }' | sort > /tmp/needed
+          cat /tmp/needed
+          for so in libGLESv2.so.2 libSDL3.so.0 libc.so.6 libm.so.6; do echo "$so"; done > /tmp/want
+          diff /tmp/want /tmp/needed
+
+      - name: Package
+        run: |
+          mkdir -p dist/stage
+          cp build/m2hle dist/stage/
+          cp packaging/rocknix/start_m2hle.sh packaging/rocknix/install-es.sh dist/stage/
+          cp packaging/rocknix/README.md dist/stage/
+          chmod +x dist/stage/m2hle dist/stage/*.sh
+          echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
+          cd dist/stage && zip -r ../m2hle-rocknix-arm64.zip ./*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m2hle-rocknix-arm64
+          path: dist/*.zip
+          retention-days: 14
+
   publish:
-    needs: build
-    if: github.event_name != 'pull_request'
+    needs: [build, rocknix]
+    # A handheld build that fails must not hold back the Windows canary.
+    # It does leave the previous m2hle-rocknix-arm64.zip on the release, so
+    # the notes below say which archives this run actually produced.
+    if: always() && github.event_name != 'pull_request' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -148,7 +242,10 @@ jobs:
 
           $(git log -5 --pretty='- %s (%h)')
 
-          Unsigned development build. No ROMs are included — supply your own."
+          Unsigned development build. No ROMs are included — supply your own.
+
+          Built this run:
+          $(cd dl && ls -1 *.zip | sed 's/^/- /')"
           if gh release view canary >/dev/null 2>&1; then
             gh release edit canary --notes "$NOTES" --prerelease --latest=false
           else

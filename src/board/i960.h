@@ -87,6 +87,10 @@ typedef struct i960_cpu {
 
     // Running state
     int            halted;
+
+    /* Clock cycles the instructions run so far cost, at MAME's per-opcode
+     * estimates (i960_cycle_cost). Only live board timers read it. */
+    uint64_t       cycles;
 } i960_cpu_t;
 
 static inline void i960_reset(i960_cpu_t *cpu) {

@@ -35,6 +35,12 @@ typedef struct {
     uint32_t timer_reload[IRQT_TIMERS];  /* last programmed reload (20-bit)  */
     bool     timer_run[IRQT_TIMERS];     /* one-shot armed flag              */
 
+    /* Live timers (g_irqt_live): cycles the i960 has run that the counts do not
+     * reflect yet, and the smallest running count — once pending reaches it a
+     * timer expires, so the run loop brings the counts up to date then. */
+    int64_t  pending;
+    int64_t  horizon;
+
     /* diagnostics */
     uint64_t deliver_count;          /* interrupts vectored to a handler    */
     uint32_t deliver_by_pin[4];
@@ -68,19 +74,28 @@ static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
  * it).  Toggle off via --realirq=0 path / UI if needed. */
 static int g_real_irq = 1;
 
-/* ---- Board timer register access (0xF00000 + off), 4 bytes per timer ---- */
+/* Live board timers. Off (the default): the run loop takes a whole slice's
+ * cycles off the timers when the slice starts, so a timer the i960 reads during
+ * the slice has not moved, and one cannot expire before the next slice. On: the
+ * timers count down by what each instruction costs as it runs (i960.cycles), a
+ * timer interrupt is taken between the instructions where it expires, and a
+ * slice that ended at a frame edge adds the rest of its 1/60 s at the next start
+ * (the board idling until vsync).
+ *
+ * Games budget work against these timers. STF's texture loader
+ * (unp_send_tex_para_sub) arms timer 4 for what is left of a 500,000-cycle
+ * budget since the frame began (check_timer_4_result, off_550008 = 20000 x 25)
+ * and yields when its interrupt sets byte_50008C; with the timers frozen for the
+ * slice it never yields and decodes to the step limit, ~1M instructions a frame.
+ * Where interrupts land moves with this, so it stays off where results are held
+ * against a capture until they have been graded with it on. */
+static int g_irqt_live = 0;
 
-static inline void irqt_timer_write(uint32_t off, uint32_t val) {
-    int t = (int)((off >> 2) & 3u);
-    g_irqt.timer_reload[t] = val & 0xFFFFFu;
-    g_irqt.timer_count[t]  = (int64_t)(val & 0xFFFFFu);
-    g_irqt.timer_run[t]    = true;
-}
-
-static inline uint32_t irqt_timer_read(uint32_t off) {
-    int t = (int)((off >> 2) & 3u);
-    int64_t c = g_irqt.timer_count[t];
-    return (uint32_t)(c < 0 ? 0 : c) & 0xFFFFFu;
+static inline void irqt__horizon(void) {
+    int64_t h = INT64_MAX;
+    for (int t = 0; t < IRQT_TIMERS; t++)
+        if (g_irqt.timer_run[t] && g_irqt.timer_count[t] < h) h = g_irqt.timer_count[t];
+    g_irqt.horizon = h;
 }
 
 /* ---- Timing: advance one-shot timers by `cycles` i960 cycles ------------- */
@@ -95,6 +110,34 @@ static inline void irqt_tick(int64_t cycles) {
             g_irqt.timer_run[t] = false;     /* one-shot; handler re-arms */
         }
     }
+    irqt__horizon();
+}
+
+/* Bring the counts up to the cycles run so far (live timers). */
+static inline void irqt_flush(void) {
+    if (g_irqt.pending) {
+        int64_t c = g_irqt.pending;
+        g_irqt.pending = 0;
+        irqt_tick(c);
+    }
+}
+
+/* ---- Board timer register access (0xF00000 + off), 4 bytes per timer ---- */
+
+static inline void irqt_timer_write(uint32_t off, uint32_t val) {
+    int t = (int)((off >> 2) & 3u);
+    irqt_flush();
+    g_irqt.timer_reload[t] = val & 0xFFFFFu;
+    g_irqt.timer_count[t]  = (int64_t)(val & 0xFFFFFu);
+    g_irqt.timer_run[t]    = true;
+    irqt__horizon();
+}
+
+static inline uint32_t irqt_timer_read(uint32_t off) {
+    int t = (int)((off >> 2) & 3u);
+    irqt_flush();
+    int64_t c = g_irqt.timer_count[t];
+    return (uint32_t)(c < 0 ? 0 : c) & 0xFFFFFu;
 }
 
 /* ---- Delivery helper: which i960 IRQ pin is pending & enabled? ----------
@@ -121,6 +164,8 @@ static inline void irqt_reset(void) {
     }
     g_irqt.intreq = 0;
     g_irqt.intena = 0;
+    g_irqt.pending = 0;
+    g_irqt.horizon = INT64_MAX;
     g_irqt.deliver_count = 0;
     g_irqt.deliver_by_pin[0]=g_irqt.deliver_by_pin[1]=
     g_irqt.deliver_by_pin[2]=g_irqt.deliver_by_pin[3]=0;
