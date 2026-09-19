@@ -110,6 +110,11 @@ typedef struct {
      * the fix is correcting the token or supplying one at all. The token itself
      * is used once and deliberately not retained. */
     bool     sent_token;
+    /* The server refused the account name or the password themselves, as opposed
+     * to failing some other way. netplay.h needs the distinction to tell a dead
+     * Twitch login token from a server that merely went away, and the error text
+     * is for people, not for strcmp. */
+    bool     credential_refused;
     char     peer_npid[20];
 
     uint16_t server_id;
@@ -251,6 +256,7 @@ static inline void rpcn_session_stop(rpcn_session_t *s) {
     s->peer_heard = false;
     s->peer_npid[0] = '\0';
     s->sent_token = false;
+    s->credential_refused = false;
     s->pending_serverlist = s->pending_worldlist = s->pending_room = 0;
     s->pending_signaling  = s->pending_search = 0;
     s->pending_foreign_serverlist = s->pending_foreign_worldlist = s->pending_foreign_search = 0;
@@ -449,6 +455,8 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
 
         if ((rpcn_command_t)pkt.command == RPCN_CMD_LOGIN) {
             if (pkt.error != RPCN_OK) {
+                s->credential_refused = pkt.error == RPCN_ERR_LOGIN_BAD_USERNAME
+                                     || pkt.error == RPCN_ERR_LOGIN_BAD_PASSWORD;
                 rpcn_session_fail(s, "login rejected: %s (ErrorType=%u)",
                                   rpcn_login_error_text(pkt.error, s->sent_token),
                                   (unsigned)pkt.error);
