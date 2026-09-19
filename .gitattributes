@@ -1,0 +1,4 @@
+# The device-side scripts are run by ROCKNIX. A CRLF shebang is "bad
+# interpreter: /bin/bash^M" there, and this tree is checked out with
+# core.autocrlf=true on Windows, so pin them.
+packaging/rocknix/*.sh text eol=lf
