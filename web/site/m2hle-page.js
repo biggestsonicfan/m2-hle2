@@ -269,6 +269,7 @@ var Module = {
     show('step-rom');
     $('build').textContent = 'Build ' + VERSION;
     m2hleTools.onReady();
+    m2hleObjview.onReady();
     debugStart();
     /* Development only: ?rom=<path> loads a zip from THIS site, so a headless
      * browser can boot the game with no file dialog. A production site hosts no
