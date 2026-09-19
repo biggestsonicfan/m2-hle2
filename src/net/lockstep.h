@@ -219,16 +219,12 @@ static inline bool lockstep_barrier_released(const lockstep_t *l) {
     return (l->announce_mask & expected) == expected;
 }
 
-/* Record this machine's input for `frame` and fill `out` with the record to
- * transmit: this frame plus the previous LOCKSTEP_REDUNDANCY-1 from our ring. */
-static inline void lockstep_submit_local(lockstep_t *l, uint32_t frame, uint32_t input,
-                                         lockstep_record_t *out) {
-    lockstep_ring_t *mine = &l->rings[l->local_player];
-    lockstep_ring_insert(mine, frame, input);
-    if (l->last_local_frame == LOCKSTEP_INVALID_FRAME || frame > l->last_local_frame)
-        l->last_local_frame = frame;
-
-    if (!out) return;
+/* The record whose newest frame is `frame`, read back out of our own ring: that
+ * frame plus the previous LOCKSTEP_REDUNDANCY-1. Sending one is idempotent at the
+ * other end (newest-wins), which is what lets a record be built and sent again
+ * at any time. */
+static inline void lockstep_fill_record(const lockstep_t *l, uint32_t frame, lockstep_record_t *out) {
+    const lockstep_ring_t *mine = &l->rings[l->local_player];
     memset(out, 0, sizeof(*out));
     out->frame  = frame;
     out->packed = lockstep_pack(l->local_player, l->generation);
@@ -240,6 +236,47 @@ static inline void lockstep_submit_local(lockstep_t *l, uint32_t frame, uint32_t
         uint32_t f = frame - i;
         if (lockstep_ring_has(mine, f)) out->inputs[i] = lockstep_ring_get(mine, f);
     }
+}
+
+/* Record this machine's input for `frame` and fill `out` with the record to
+ * transmit: this frame plus the previous LOCKSTEP_REDUNDANCY-1 from our ring. */
+static inline void lockstep_submit_local(lockstep_t *l, uint32_t frame, uint32_t input,
+                                         lockstep_record_t *out) {
+    lockstep_ring_t *mine = &l->rings[l->local_player];
+    lockstep_ring_insert(mine, frame, input);
+    if (l->last_local_frame == LOCKSTEP_INVALID_FRAME || frame > l->last_local_frame)
+        l->last_local_frame = frame;
+
+    if (out) lockstep_fill_record(l, frame, out);
+}
+
+/*
+ * The oldest frame of OURS that a peer can still be waiting for.
+ *
+ * A peer whose newest input reached us is for frame N was itself at frame
+ * N - delay when it sampled it, and it cannot have needed anything of ours from
+ * before that. Nothing heard yet means nothing can be ruled out, so: frame 0.
+ *
+ * This is the range a STALLED machine has to keep re-sending. Inputs otherwise
+ * go out once, when a new local frame is sampled, and the redundancy in each
+ * record is carried by the NEXT record -- which a stalled machine never sends.
+ * So when both peers are stalled nobody is transmitting at all, and whatever was
+ * lost stays lost: with a delay of 2, five consecutive datagrams dropped in one
+ * direction (80 ms of bad Wi-Fi) is a session that waits forever. And the newest
+ * record alone does not repair it once the delay is large: the frame the peer is
+ * missing is 2 * delay + 1 behind our newest, which is past one record's reach
+ * for any delay above 4.
+ */
+static inline uint32_t lockstep_resend_floor(const lockstep_t *l) {
+    uint32_t floor = LOCKSTEP_INVALID_FRAME;
+    for (uint32_t p = 0; p < l->player_count; p++) {
+        if (p == l->local_player) continue;
+        uint32_t newest = l->rings[p].newest;
+        uint32_t f = (newest == LOCKSTEP_INVALID_FRAME || newest < l->frame_delay)
+                   ? 0u : newest - l->frame_delay;
+        if (f < floor) floor = f;
+    }
+    return floor == LOCKSTEP_INVALID_FRAME ? 0u : floor;
 }
 
 /* Ingest a received record. Silently drops records from the wrong generation or

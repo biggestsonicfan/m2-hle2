@@ -152,6 +152,14 @@ Block until the emulator stops (breakpoint hit, CPU halt, or manual pause). Retu
 
 Typical pattern: `emu_run()` → `wait_for_stop()` → `get_registers()`.
 
+**`board_reset()`** — the cold boot a netplay session performs at the barrier,
+with no session: re-installs the ROM set and resets both CPUs, the sound board,
+the interrupt controller, the input latch, the frame clock and the step count.
+The run state is left alone, so a stopped board stays stopped, at the reset
+vector. Returns `resets`, the number performed so far. Refused with no ROM set
+loaded, and while a netplay session is at the barrier or playing -- there it
+would reset one board of two. `tools/grade-reset.mjs` is built on it.
+
 ### Breakpoints
 
 **`set_breakpoint(addr: str, label: str = "")`**

@@ -90,6 +90,12 @@ typedef struct {
      * the IP hasn't advanced. */
     volatile int step_over_bp;
 
+    /* A board reset asked for from outside a netplay session (the MCP bridge's
+     * `board_reset`). Serviced where the barrier's reset is, by the same code;
+     * reset_count is how the asker learns it happened. */
+    volatile int      request_reset;
+    volatile uint32_t reset_count;
+
     emu_thread_t thread;
 } emu_thread_ctx_t;
 
@@ -238,9 +244,19 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
  * pumped while the board is running would sit there never logging in. */
 static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
     netplay_step_t step = netplay_begin_frame();
-    if (step == NETPLAY_STEP_RESET) {
+
+    /* A reset on request is the barrier's reset without the barrier. Only while
+     * no session owns the board: inside one it would be a reset on this machine
+     * and not the other, which is a desync by definition. A request that arrives
+     * then is dropped, and the asker times out. */
+    bool asked = ctx->request_reset != 0;
+    if (asked) ctx->request_reset = 0;
+    if (asked && step != NETPLAY_STEP_OFF) asked = false;
+
+    if (step == NETPLAY_STEP_RESET || asked) {
         emu_mutex_lock(&ctx->mutex);
-        netplay_do_reset();
+        if (asked) asked = netplay_reset_board_now();
+        else       netplay_do_reset();
         /* THE STEP COUNT IS PART OF THE BOARD, because the frame check hashes
          * it -- `netplay_frame_check` calls it "the instruction count since
          * reset" and it has to actually be one. Left running, it carries the
@@ -253,6 +269,7 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
         ctx->cpu_snapshot      = *ctx->cpu;
         emu_mutex_unlock(&ctx->mutex);
+        if (asked) ctx->reset_count++;
     }
     return step;
 }
@@ -464,6 +481,10 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             /* STOPPED. Netplay still has to breathe: the login, the room and the
              * peer handshake all happen before anybody presses Run. */
             emu_netplay_pump(ctx);
+            /* ...and a session that is PLAYING cannot, from here: the pump keeps
+             * answering "run the frame" and nothing runs it. Say so where the
+             * player is looking, and say whether it was a pause or a halt. */
+            if (netplay_active()) netplay_board_stopped(ctx->cpu->sfr.ip, ctx->cpu->halted != 0);
             emu_sleep_ms(1);
         }
 
