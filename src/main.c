@@ -9,6 +9,7 @@
  */
 #include <stdbool.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 
 /* net/ FIRST, before anything that might pull in <windows.h>: net_socket.h owns
@@ -43,6 +44,7 @@
 #include "game_render.h"
 #include "game_frame.h"
 #include "geo3d_window.h"
+#include "objview_window.h"  /* the debug object viewer, driven by hand or over MCP */
 #include "sound.h"
 #include "audio_out.h"
 #include "m68k_window.h"
@@ -60,6 +62,8 @@
 static char g_rom_path[512] = {0};
 static int  g_autorun = 0;
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
+static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
+static int  g_objview_model = -1;  /* --objview N: and select model N */
 static int  g_mcp_enable = 0;      /* --mcp: start the TCP debug server */
 static int  g_mcp_port   = 7172;   /* --mcp-port N */
 static int  g_headless   = 0;      /* --headless: no window, GPU or audio device */
@@ -97,6 +101,7 @@ static struct {
     video_state_t    video;
     geo3d_state_t    geo3d;
     bool             show_geo3d;
+    bool             show_objview;
     bool             show_m68k_cpu;
     bool             show_m68k_mem;
     bool             show_debug;
@@ -378,6 +383,7 @@ static void draw_menu_bar(void) {
         igMenuItemBoolPtr("COP diagnostics",  NULL, &state.show_cop,         true);
         igMenuItemBoolPtr("Break on unknown COP cmd", NULL, (bool*)&g_sharc.break_on_unknown, true);
         igMenuItemBoolPtr("3D viewer",        NULL, &state.show_geo3d,       true);
+        igMenuItemBoolPtr("Object viewer",    NULL, &state.show_objview,     true);
         if (igMenuItem("Dump 3D captures")) geo3d_log_captures(&state.geo3d);
         if (igMenuItem("Dump COP stream"))  geo3d_dump_capture_stream();
         igMenuItemBoolPtr("68K sound CPU",    NULL, &state.show_m68k_cpu,    true);
@@ -491,6 +497,12 @@ static void init(void) {
     game_render_init();
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
+    objview_init();
+    if (g_objview_on) {
+        state.show_objview = true;
+        g_objview.v.active = 1;
+        if (g_objview_model >= 0) g_objview.v.model = g_objview_model;
+    }
     if (g_browse_model >= 0) {            /* --model N: browse + dump its texture tiles */
         state.geo3d.use_captures = false;
         state.geo3d.model_index  = g_browse_model;
@@ -571,6 +583,7 @@ static int headless_main(void) {
     if (g_profile_count > 0) g_active_profile = g_profiles[0];
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
+    objview_init();
     netplay_init();
     netplay_set_reset_hook(netplay_reset_board_cb, NULL);
     netplay_set_open_browser(false);   /* no desktop here - the log carries the URL */
@@ -609,6 +622,13 @@ static void frame(void) {
      * windows, nothing for a recording to pick up. */
     const bool draw_ui = !kiosk_active();
 
+    /* A bridge caller may ask for the object viewer's window: it owns the
+     * viewer's settings but not this flag, which is the frontend's. */
+    if (g_objview.window_request >= 0) {
+        state.show_objview       = (g_objview.window_request != 0);
+        g_objview.window_request = -1;
+    }
+
     if (draw_ui) {
         draw_menu_bar();
         draw_file_dialog();
@@ -626,6 +646,7 @@ static void frame(void) {
                               gq ? gq->model_table_count  : 0,
                               gq ? gq->mesh_ptr_subtract  : 0);
         }
+        objview_window_draw(&state.show_objview, &state.romset, &state.bus);
         if (state.show_bus_stats)   draw_bus_stats_window();
         if (state.show_m68k_cpu) {
             m68k_window_draw(&g_sound.m68k, &state.m68k_snapshot, &state.show_m68k_cpu);
@@ -686,6 +707,15 @@ static void frame(void) {
 
     simgui_render();
     sg_end_pass();
+
+    /* The object viewer opens offscreen passes of its own, so it runs between
+     * the swapchain pass and the commit: sokol does not nest passes, and the
+     * decode takes the shared wireframe buffer that game_frame_draw has just
+     * finished with. It does nothing at all unless its window is open or an
+     * MCP request is waiting. */
+    if (!draw_ui) g_objview.preview_open = 0;   /* capture mode shows no windows */
+    objview_service(&state.romset, &state.bus);
+
     sg_commit();
 
     /* Capture mode's sign of life: the presented frame rate, in the tray
@@ -700,6 +730,7 @@ static void cleanup(void) {
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
     romset_free(&state.romset);
+    objview_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     simgui_shutdown();
@@ -785,6 +816,13 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             int n = atoi(argv[++i]);  /* i960 steps a slice may run without a frame edge */
             if (n >= 1000) g_emu_steps_per_slice = n;
             LOG_INFO("emu: %d i960 steps a slice", g_emu_steps_per_slice);
+        } else if (strcmp(argv[i], "--objview") == 0) {
+            /* Open the object viewer at boot. A number may follow to select a
+             * model; without one the viewer opens on whatever it defaults to and
+             * waits for the window or the MCP bridge to say what to look at. */
+            g_objview_on = 1;
+            if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0]))
+                g_objview_model = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             g_browse_model = atoi(argv[++i]);  /* single-model browser on N */
         } else if (strcmp(argv[i], "--extract") == 0 && i + 1 < argc) {
