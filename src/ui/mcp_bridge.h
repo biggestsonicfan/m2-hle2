@@ -21,12 +21,14 @@
 
 #include "memory.h"
 #include "i960.h"
+#include "json_min.h"
 #include "emu_thread.h"
 #include "breakpoint.h"
 #include "log.h"
 #include "game_profile.h"
 #include "rom_loader.h"   /* romset_t — the regions the model decoder reads */
 #include "input.h"     /* g_input.held — drive the game's I/O ports over the bridge */
+#include "objview_cmd.h"  /* the object viewer's commands, shared with the web build */
 /* Before this header's own winsock block, and before anything else that could
  * reach <windows.h>: net_socket.h owns the include order and <winsock2.h> has
  * to precede it. main.c already includes this first, so here it is a no-op --
@@ -89,46 +91,19 @@ typedef struct {
 
 static mcp_bridge_t g_mcp = {0};
 
-/* ---- Tiny JSON helpers --------------------------------------------------- */
+/* ---- Tiny JSON helpers ---------------------------------------------------
+ *
+ * The readers themselves live in core/json_min.h, shared with the browser
+ * build's entry points so a command spelled one way works both ways. These are
+ * the names the ~140 call sites below already use.
+ */
 
-/* Write a hex uint32 JSON field.  buf must be large enough. */
-static inline int mcp_json_u32hex(char *buf, int cap, const char *key, uint32_t v) {
-    return snprintf(buf, (size_t)cap, "\"%s\":\"0x%08X\"", key, v);
-}
-
-/* Extract string value from `"key":"value"` — returns 1 on success. */
-static int mcp_json_get_str(const char *json, const char *key, char *out, int out_cap) {
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    const char *p = strstr(json, needle);
-    if (!p) return 0;
-    p += strlen(needle);
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') return 0;
-    p++;
-    int i = 0;
-    while (*p && *p != '"' && i < out_cap - 1) out[i++] = *p++;
-    out[i] = '\0';
-    return 1;
-}
-
-/* Extract uint32 (decimal or 0x hex) from `"key":value`. */
-static int mcp_json_get_u32(const char *json, const char *key, uint32_t *out) {
-    char vstr[32];
-    /* Try quoted hex first, then unquoted. */
-    if (mcp_json_get_str(json, key, vstr, sizeof(vstr))) {
-        *out = (uint32_t)strtoul(vstr, NULL, 0);
-        return 1;
-    }
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    const char *p = strstr(json, needle);
-    if (!p) return 0;
-    p += strlen(needle);
-    while (*p == ' ' || *p == '\t') p++;
-    *out = (uint32_t)strtoul(p, NULL, 0);
-    return 1;
-}
+#define mcp_json_u32hex   json_u32hex
+#define mcp_json_get_str  json_get_str
+#define mcp_json_get_u32  json_get_u32
+#define mcp_json_get_f32  json_get_f32
+#define mcp_json_get_int  json_get_int
+#define mcp_json_escape   json_escape
 
 /* ---- Command handlers ---------------------------------------------------- */
 
@@ -1377,30 +1352,6 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
  * did not write: account names, the server's error strings and the log. A stray
  * quote in one of those turns the whole reply into a parse error at the other
  * end, which is a bad way to find out that a server said something unexpected. */
-static int mcp_json_escape(char *out, int cap, const char *in) {
-    int n = 0;
-    if (cap <= 0) return 0;
-    for (const unsigned char *p = (const unsigned char *)(in ? in : ""); *p; p++) {
-        char esc[8];
-        int len;
-        switch (*p) {
-            case '"':  esc[0] = '\\'; esc[1] = '"';  len = 2; break;
-            case '\\': esc[0] = '\\'; esc[1] = '\\'; len = 2; break;
-            case '\n': esc[0] = '\\'; esc[1] = 'n';  len = 2; break;
-            case '\r': esc[0] = '\\'; esc[1] = 'r';  len = 2; break;
-            case '\t': esc[0] = '\\'; esc[1] = 't';  len = 2; break;
-            default:
-                if (*p < 0x20) len = snprintf(esc, sizeof(esc), "\\u%04X", *p);
-                else         { esc[0] = (char)*p; len = 1; }
-                break;
-        }
-        if (n + len >= cap) break;
-        memcpy(out + n, esc, (size_t)len);
-        n += len;
-    }
-    out[n] = '\0';
-    return n;
-}
 
 /*
  * The config a netplay command runs with: whatever is already stored (which is
@@ -1682,6 +1633,106 @@ static void mcp_cmd_board_reset(char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"resets\":%u}", (unsigned)g_mcp.emu->reset_count);
 }
 
+/* ---- The debug object viewer (objview_cmd.h) -----------------------------
+ *
+ * The commands themselves are in objview_cmd.h, shared with the browser build.
+ * What is here is the waiting, which is all this transport adds: it has a
+ * thread of its own, so it can block on the render thread and answer once.
+ *
+ * Two consequences worth knowing before debugging a timeout: a run with no
+ * window (--headless) has no renderer at all and these commands say so rather
+ * than hanging, and a minimised window may not be asked for frames by the OS,
+ * which looks exactly like a stall.
+ */
+
+/* Wait for the render thread to run one service pass, so that what we report is
+ * this request's result and not the previous one's. */
+static int mcp_ov_settle(uint32_t timeout_ms) {
+    unsigned before  = g_objview.serial;
+    uint32_t elapsed = 0;
+    g_objview.refresh = 1;
+    while (g_objview.serial == before && elapsed < timeout_ms) {
+        emu_sleep_ms(2);
+        elapsed += 2;
+    }
+    return g_objview.serial != before;
+}
+
+static void mcp_cmd_objview_status(char *resp, int cap) {
+    objview_cmd_reply(g_mcp.romset, g_mcp.bus, resp, cap, 1, NULL);
+}
+
+static void mcp_cmd_objview_set(const char *req, char *resp, int cap) {
+    objview_cmd_apply(req);
+    uint32_t settle_ms = 1500;
+    mcp_json_get_u32(req, "settle_ms", &settle_ms);
+    if (settle_ms > 60000) settle_ms = 60000;
+    /* Render one pass, so the reply carries this object's triangle count, its
+     * bounds and its auto-fit distance rather than the previous object's. */
+    if (settle_ms && !mcp_ov_settle(settle_ms)) {
+        objview_cmd_reply(g_mcp.romset, g_mcp.bus, resp, cap, 0,
+                          "no render pass within settle_ms (no window, or minimised)");
+        return;
+    }
+    /* The pass ran, which is not the same as the object having drawn: a model
+     * past the table, an empty table entry and a ROM that is not loaded all
+     * settle and then fail. Report what the renderer found, not that it looked. */
+    objview_cmd_reply(g_mcp.romset, g_mcp.bus, resp, cap,
+                      g_objview.last_ok, g_objview.last_err);
+}
+
+static void mcp_cmd_objview_shot(const char *req, char *resp, int cap) {
+    char err[192];
+    if (!objview_cmd_arm_shot(req, err, sizeof err)) {
+        objview_cmd_reply(g_mcp.romset, g_mcp.bus, resp, cap, 0, err);
+        return;
+    }
+    uint32_t timeout_ms = 30000;
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    if (timeout_ms > 300000) timeout_ms = 300000;
+
+    objview_req_t *rq = &g_objview.req;
+    uint32_t elapsed = 0;
+    while (!rq->done && elapsed < timeout_ms) { emu_sleep_ms(2); elapsed += 2; }
+    if (!rq->done) {
+        rq->pending = 0;
+        objview_cmd_reply(g_mcp.romset, g_mcp.bus, resp, cap, 0,
+                          "the render thread did not take the shot in time "
+                          "(--headless has no renderer; a minimised window gets no frames)");
+        return;
+    }
+    objview_cmd_shot_reply(g_mcp.romset, g_mcp.bus, resp, cap, elapsed);
+}
+
+/* Block until the game has built the 3D state the viewer needs - objview_probe
+ * says what "built" means and why counting frames will not do. */
+static void mcp_cmd_objview_wait_ready(const char *req, char *resp, int cap) {
+    uint32_t timeout_ms = 60000;
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    if (timeout_ms > 600000) timeout_ms = 600000;
+
+    objview_ready_t rdy;
+    uint32_t elapsed = 0;
+    for (;;) {
+        objview_probe(g_mcp.romset, g_mcp.bus, &rdy);
+        if (rdy.ready || elapsed >= timeout_ms) break;
+        emu_sleep_ms(20);
+        elapsed += 20;
+    }
+    char *p = resp;
+    int   left = cap, n;
+    n = snprintf(p, (size_t)left, "{\"ok\":%s,\"elapsed_ms\":%u,",
+                 rdy.ready ? "true" : "false", elapsed);
+    p += n; left -= n;
+    n = objview_cmd_state(g_mcp.romset, g_mcp.bus, p, left);
+    p += n; left -= n;
+    snprintf(p, (size_t)left, "}");
+}
+
+static void mcp_cmd_objview_list(const char *req, char *resp, int cap) {
+    objview_cmd_list(req, g_mcp.romset, resp, cap);
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -1721,6 +1772,11 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "set_break_on_unknown_cop") == 0) mcp_cmd_set_break_on_unknown_cop(req, resp, cap);
     else if (strcmp(cmd, "get_cop_diagnostics")      == 0) mcp_cmd_get_cop_diagnostics(resp, cap);
     else if (strcmp(cmd, "get_geo_captures")         == 0) mcp_cmd_get_geo_captures(resp, cap);
+    else if (strcmp(cmd, "objview_status")           == 0) mcp_cmd_objview_status(resp, cap);
+    else if (strcmp(cmd, "objview_set")              == 0) mcp_cmd_objview_set(req, resp, cap);
+    else if (strcmp(cmd, "objview_shot")             == 0) mcp_cmd_objview_shot(req, resp, cap);
+    else if (strcmp(cmd, "objview_wait_ready")       == 0) mcp_cmd_objview_wait_ready(req, resp, cap);
+    else if (strcmp(cmd, "objview_list")             == 0) mcp_cmd_objview_list(req, resp, cap);
     else if (strcmp(cmd, "dump_bones")               == 0) mcp_cmd_dump_bones(resp, cap);
     else if (strcmp(cmd, "dump_tgp")                 == 0) mcp_cmd_dump_tgp(resp, cap);
     else if (strcmp(cmd, "cop_exec")                 == 0) mcp_cmd_cop_exec(req, resp, cap);

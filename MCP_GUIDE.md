@@ -41,6 +41,8 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--rom <path>` | Auto-load this ROM zip on startup |
 | `--run` | Start executing immediately after ROM load |
 | `--match-replay` | Arm `match_replay` (below) from boot |
+| `--objview [N]` | Open the object viewer at boot, optionally on model N |
+| `--headless` | No window, GPU or audio device. The object-viewer tools do not work here |
 
 ROM set: MAME `sfight.zip` (clone of `schamp.zip`). The emulator looks for `schamp.zip` in the same directory as `sfight.zip` for shared files.
 
@@ -179,6 +181,200 @@ Remove every breakpoint.
 
 **`list_breakpoints()`**
 Returns an array of `{addr, label, enabled}` for all active breakpoints.
+
+### Object viewer (screenshots of one model, from any angle)
+
+Chasing a visual artifact through the running game means steering the emulator into the scene
+that draws the object and then fighting the game for the camera. The object viewer draws one
+model **by itself**, offscreen, against a flat background, from wherever you put the camera —
+and takes several angles inside a single host frame, so a sweep around an object is one call.
+
+What it draws is the emulator's own decoder and the emulator's own fill shader, the same ones
+the frame uses. An artifact that shows here is an artifact the frame has.
+
+**It needs a windowed emulator.** `--headless` has no renderer and these tools say so rather
+than hanging. A minimised window may get no frames from the OS, which looks the same as a
+stall; the timeout message names both causes.
+
+**Paths are resolved by the emulator process**, whose working directory is not the caller's.
+Pass an absolute path to `objview_shot` or the write fails with `cannot open ... for writing`.
+
+---
+
+**`objview_wait_ready(timeout_ms=60000)`**
+
+Block until the game has built the 3D state the viewer needs. The model table is ROM and
+readable the moment a set loads, but what the object is *made of* is not: the texture sheets
+are filled by the game's own decompressor and the face palette by its colour setup, both
+during boot. A model decoded before then has the right shape with no texels and no colours —
+which reads as an artifact, and is not one. In STF that lands as attract mode starts.
+
+This measures the state rather than counting frames, so it holds for other games too. The
+decisive field is `saw_3d` -- the board having *drawn* 3D at least once, latched, because by
+the time it submits its first object everything a model is made of is up. A weaker "texture
+RAM is not all zero" test is not enough: five frames into an STF boot it is 8% full, and a
+model decoded there comes back correctly shaped and entirely black. The reply also carries
+`tex_pct` and `pal_pct` if you want to watch boot progress.
+
+One thing readiness does **not** cover: face colours come out of palette RAM, which the game
+fills per scene. A model whose scene attract has not reached yet draws with the right shape,
+the right texels and black faces. If that is what you are looking at, run the game on
+(`wait_frames`) rather than hunting a bug -- in STF's attract, Sonic's palette is in by frame
+~1800.
+
+Call `emu_run()` first. `ok=False` means the timeout ran out.
+
+**`objview_list(first=0, count=64, nonempty_only=True)`**
+
+How many triangles each model-table entry decodes to. Most of the table is empty in any given
+game, and an empty entry looks exactly like a broken one from a screenshot. `count` is capped
+at 4096 per call; `table_count` in the reply is the whole table's size.
+
+**`objview_status()`**
+
+The viewer's whole state, the readiness probe and the last decode's result. Every other
+objview tool answers with these same fields, so you rarely need to call it on its own.
+
+**`objview_set(...)`** — select the object, place it, aim the camera
+
+Every argument is optional; an omitted one keeps its value, so you can nudge one angle at a
+time. The call waits up to `settle_ms` (default 1500) for one render pass, so the reply
+carries *this* object's triangle count, bounds and auto-fit distance rather than the previous
+object's. `ok=False` means the object did not draw, and `last_error` says why.
+
+| Group | Arguments |
+|-------|-----------|
+| Object | `model` (model-table index) **or** `capture` (an index from `get_geo_captures`), `use_capture_matrix` |
+| Placement | `pos_x/y/z` world units, `rot_x/y/z` degrees (Rz·Ry·Rx), `scale` |
+| Camera | `yaw`, `pitch`, `dist`, `fov` (vertical degrees), `autofit`, `fit_margin`, `target_x/y/z` |
+| Image | `width`, `height` (32–2048), `bg_r/g/b` (0–1), `wireframe`, `textured`, `cull` (0 none / 1 CW / 2 CCW) |
+| UI | `active` (render at all), `window` (open the viewer's panel in the emulator's window) |
+
+- The camera is an **orbit about a target**. At yaw 0 / pitch 0 it stands on +Z looking down
+  −Z. A model's own facing is whatever the ROM gave it — in STF a head faces along its X — so
+  the angles name where the camera is, not which side of the object you get.
+- `autofit` is on by default: it centres the orbit on the model and pulls back far enough to
+  hold its bounding sphere, with `fit_margin` loosening (>1) or tightening (<1) the framing.
+  Naming `dist` or any `target_*` turns autofit off, because leaving it on would overwrite
+  what you just set on the very next pass — which would read as the setting being ignored.
+- `use_capture_matrix` places the model exactly as the board did this frame. It **replaces**
+  the placement, so `pos`/`rot`/`scale` are not applied while it is on.
+- `textured=False` draws flat face colour only, which separates a texturing artifact from a
+  geometry one. `wireframe=True` overlays the decoder's edges, which is how you see seams and
+  degenerate faces.
+
+**`objview_shot(path, ...)`** — render and write PNGs
+
+`path` must be absolute. A single shot writes exactly that file; for several it is the stem
+and the shots land at `<stem>-000.png`, `<stem>-001.png` and so on. Angles come from one of
+three spellings, checked in this order:
+
+| Spelling | Angles |
+|----------|--------|
+| `six=True` | the six camera stations: +Z, +X, −Z, −X, +Y (looking down), −Y (looking up) |
+| `count=N` | a turntable from `yaw0` in steps of `yaw_step`; with no step named, the shots spread evenly over a full turn |
+| neither | one shot at the viewer's current yaw and pitch |
+
+`N` is capped at 64, and a whole batch renders inside one host frame — six 384×384 angles of a
+3400-triangle model take about 5 ms.
+
+Any setting `objview_set` takes may be passed here too, so one call can select the object,
+place it and shoot it.
+
+Each shot reports `coverage` (the fraction of the image that is not the background) and `box`
+(the pixel rectangle the object drew into). That is enough to tell an off-screen or hair-thin
+result from a well-framed one **without opening the file** — worth reading first, because an
+image that is all background costs a round trip to discover by eye. Coverage 0 with autofit on
+usually means the model decoded to nothing; check `tris` in the same reply.
+
+---
+
+**Workflow — an artifact you can see on screen**
+
+```python
+emu_run()
+objview_wait_ready()                       # attract has started; textures are in
+
+caps = get_geo_captures()                  # what the board drew this frame
+# pick the idx whose model/pos matches the thing that looks wrong
+
+objview_set(window=True, capture=7, use_capture_matrix=True)
+# reply carries drawn_model, tris, bmin/bmax — confirm it is the right object
+
+objview_shot(path=r"C:\tmp\susp.png", six=True, width=512, height=512)
+# then read the six PNGs; coverage in the reply says which are worth opening
+```
+
+**Workflow — sweeping a model from the table**
+
+```python
+objview_list(first=3500, count=64)         # find the non-empty entries
+objview_shot(path=r"C:\tmp\turn.png", model=3545, count=8,
+             pitch0=15, width=384, height=384)   # 8 angles, one full turn
+objview_shot(path=r"C:\tmp\wire.png", model=3545, wireframe=True, textured=False)
+```
+
+The viewer's panel is also in the emulator's **Debug → Object viewer** menu, with the same
+controls and a live preview of the very render target the shots are read out of; `--objview`
+(optionally `--objview N`) opens it at boot. Both drive the same state, so an object found by
+eye can be handed to a sweep without retyping the numbers.
+
+#### In the browser
+
+The same viewer, the same commands, the same PNGs — in the wasm build. What changes is how
+you reach it, because a browser has no TCP bridge to connect an MCP server to and no
+filesystem to write a file into.
+
+There are two ways in.
+
+**From a shell, like the desktop bridge.** `tools/web-objview.mjs` drives Chrome or Edge over
+the DevTools protocol and writes the PNGs to disk:
+
+```
+node tools/web-serve.mjs --rom <merged.zip>            # in one shell
+node tools/web-objview.mjs --url "http://localhost:8080/?rom=/dev-rom.zip" \
+     --out shots --model 3544 --six --at-frame 1800
+```
+
+`--list FIRST:COUNT` lists triangle counts instead of shooting; `--opts '{...}'` passes any
+field `objview_set` takes, so nothing needs a flag of its own; `--show` leaves the viewer on
+the canvas and screenshots the page; `--headful` runs with a window so you can watch.
+
+**From the page itself**, which is what that script is driving: `window.m2hleObjview`, in the
+browser console or over any automation that can evaluate JavaScript.
+
+```js
+await m2hleObjview.waitReady();
+const r = await m2hleObjview.shot({ model: 3544, six: true, width: 512 });
+r.shots[0].url        // a blob: URL to open, or .bytes for the raw PNG
+await m2hleObjview.set({ model: 3545, yaw: 200, pitch: 12 });
+m2hleObjview.show(true);   // the viewer on the canvas, in place of the game
+```
+
+`?objview=3545` in the address bar does the last two: it waits for the game, selects the
+model and shows it on the canvas. Drag to orbit, wheel to zoom, Escape to go back to the
+game — which never stopped running behind it.
+
+**Three differences worth knowing:**
+
+- **Every call is async.** The thread asking is the thread drawing, so nothing may block: a
+  request is armed and the answer collected on a later animation frame. A whole shot batch
+  still renders inside one emulator frame, so `await shot({count: 8})` costs a frame or two
+  of wall time, not eight.
+- **Nothing is written.** There is no filesystem, so each PNG stays in the emulator's heap
+  until the next batch replaces it and JavaScript copies it out. `path` is ignored;
+  `web-objview.mjs` is what turns the bytes into files.
+- **Readiness and frame numbers are not the same question.** `waitReady` returns once the
+  board has *drawn* 3D, which is when the texture sheets and the palette are up. But face
+  colours come out of palette RAM, which the game fills **per scene**: a model whose scene
+  attract has not reached yet draws with the right shape, the right texels and black faces.
+  That is why `--at-frame` exists. It is not a web-only trap — the desktop's `wait_frames`
+  is the same knob — but it bites here first, because the page starts the board the moment
+  the ROM loads and a script can be asking within two seconds. For STF's attract, Sonic's
+  palette is in by frame ~1800.
+
+The geometry path is bit-identical to the desktop's: the same six angles of model 3544 came
+back with the same coverage and the same pixel boxes on D3D11 and on WebGL2.
 
 ### Netplay (RPCN)
 

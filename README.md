@@ -283,6 +283,12 @@ What made that work is that the model was given **instruments, not just a prompt
   run/stop/step, breakpoints, COP diagnostics, the GEO capture list, raw command-stream dumps.
   The model drives and inspects the live emulator directly instead of guessing from source.
   Protocol in [MCP_GUIDE.md](MCP_GUIDE.md).
+- **An object viewer on the same bridge.** `--objview`, or Debug -> Object viewer, draws one
+  model by itself offscreen, from a camera the caller places, and writes a PNG per angle --
+  a turntable or the six axis views in one call. Chasing a visual artifact no longer means
+  steering the game into the scene that draws it and then fighting the game for the camera,
+  and each shot reports how much of the frame the object covered so a miss costs no round
+  trip. See [MCP_GUIDE.md](MCP_GUIDE.md#object-viewer-screenshots-of-one-model-from-any-angle).
 - **A MAME ground-truth oracle.** A separate harness (not in this repo) runs a Lua bridge inside a
   symbols build of MAME's `model2.cpp` driver and exposes its debugger over MCP. Any disagreement
   between this emulator and real hardware behaviour becomes a diffable trace: set a watchpoint,
