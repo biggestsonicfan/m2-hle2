@@ -125,14 +125,20 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      # The action's own bundled dependencies load Node's built-in `punycode`, which
-      # Node has deprecated at runtime since v21, so every deploy printed
+      # Every deploy printed
       #   [DEP0040] DeprecationWarning: The `punycode` module is deprecated.
-      # It is not ours to fix -- nothing in this repository runs in that process,
-      # and tools/*.mjs are clean under --trace-deprecation -- and it is not a
-      # problem, but a warning nobody can act on teaches people to skip warnings.
-      # This silences that one code and no other. Drop it when the action stops
-      # needing it.
+      # "Use a userland alternative" is advice to whoever wrote the require(), and
+      # that is not us: it is in this action's own bundle (dist/index.js has
+      # `module.exports = require("punycode")`, pulled in through tr46), in v5.0.1
+      # and on its main branch alike. Nothing of ours runs in that process, and
+      # tools/*.mjs are clean under --trace-deprecation.
+      #
+      # Upstream: actions/deploy-pages issue #434, fix in PR #433 ("Upgrade artifact
+      # client to remove punycode deprecation"), open as of 2026-09-19.
+      # WHEN #433 SHIPS: bump the action to that release and DELETE this env block.
+      # Until then this silences that one code and no other -- a warning nobody here
+      # can act on teaches people to skip warnings. It hides a message, never a
+      # failure: if a future Node drops `punycode`, the step fails loudly either way.
       - id: deployment
         uses: actions/deploy-pages@v5
         env:
