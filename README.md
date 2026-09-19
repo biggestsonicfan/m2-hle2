@@ -104,6 +104,14 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
 Everything except `main.c`, `sokol_impl.c/.m`, `ui/mem_edit.cpp`, and the submodules' `.c` files
 is a header-only `.h` module. That is deliberate — see [CLAUDE.md](CLAUDE.md).
 
+## The menu bar
+
+While a game is running the main menu bar gets out of the way and the emulator
+fills the window; touching the top edge brings it back. It stays put whenever
+there is nothing to play or the board is paused — losing Run and Load ROMs on a
+paused emulator would take them away exactly when you are reaching for them.
+**Debug → Always show menu bar** pins it open for a session.
+
 ## Netplay
 
 Two people can play the same cabinet over the internet. Matchmaking runs over
