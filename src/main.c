@@ -41,6 +41,7 @@
 #include "video_window.h"
 #include "geo3d.h"
 #include "game_render.h"
+#include "game_frame.h"
 #include "geo3d_window.h"
 #include "sound.h"
 #include "audio_out.h"
@@ -597,69 +598,10 @@ static void frame(void) {
      * highlights track live state without tearing. */
     if (state.emu_started) emu_update_snapshots(&state.emu);
 
-    /* Composite the tile layers from VRAM into GPU textures for this frame. */
-    video_update(&state.video, &state.bus);
-
-    /* Optionally drive the 3D camera from the game's camera struct. */
-    if (state.geo3d.use_game_view && g_active_profile &&
-            g_active_profile->quirks.camera_struct_addr && state.emu_started) {
-        geo3d_read_game_view(&state.geo3d, &state.bus,
-                             g_active_profile->quirks.camera_struct_addr,
-                             g_active_profile->quirks.camera_angle_addr);
-    }
-
-    /* Sub-frame interpolation factor: time since the last game frame ended,
-     * normalised over one frame period. Resets when a new frame boundary lands. */
-    static int     s_last_geo_frame_end = 0;
-    static int64_t s_frame_end_us       = 0;
-    float lerp_t = 1.0f;
-    if (state.emu_started) {
-        int cur_frame_end = g_cop.geo_frame_end;
-        int64_t now_us    = emu_now_us();
-        if (cur_frame_end != s_last_geo_frame_end) {
-            s_last_geo_frame_end = cur_frame_end;
-            s_frame_end_us       = now_us;
-            lerp_t = 1.0f;
-        } else if (s_frame_end_us > 0) {
-            lerp_t = (float)(now_us - s_frame_end_us) / (float)EMU_SLICE_US;
-            if (lerp_t < 0.0f) lerp_t = 0.0f;
-            if (lerp_t > 1.0f) lerp_t = 1.0f;
-        }
-    }
-
-    /* Scan this frame's slice of the COP geo-capture ring into the model list. */
-    if (state.geo3d.enabled && g_active_profile &&
-            state.romset.main_data && state.romset.polygons) {
-        const game_quirks_t *q = &g_active_profile->quirks;
-        if (q->geo_displaylist) {
-            /* Authentic hardware path: decode the GEO display list the i960 built
-             * in bufferram. Scan the snapshot captured at geo_flush (g_geodl_snap),
-             * not live bufferram — the SHARC HLE aliases bufferram and clobbers the
-             * list between flushes. Every m2-snake homebrew uses read_start 0x10000. */
-            if (g_geodl_snap_ready)
-                geo3d_scan_displaylist(&state.geo3d,
-                                       g_geodl_snap, BUFF_RAM_SIZE / 4, 0x10000,
-                                       state.romset.main_data, state.romset.main_data_size,
-                                       q->model_table_offset, q->model_table_count,
-                                       state.bus.palette, PALETTE_SIZE);
-        } else if (!(g_geo_use_list && g_geodl_snap_ready &&
-                     geo3d_scan_geo_list(&state.geo3d, g_geodl_snap, BUFF_RAM_SIZE / 4,
-                                         g_geodl_snap_rstart,
-                                         (int16_t)mem_read16(&state.bus, H_SYNC_BASE),
-                                         (int16_t)mem_read16(&state.bus, V_SYNC_BASE),
-                                         state.romset.main_data, state.romset.main_data_size,
-                                         q->model_table_offset, q->model_table_count))) {
-            /* No display list yet (or it did not reach END): rebuild the frame
-             * from the COP command stream the old way. */
-            geo3d_scan_captures(&state.geo3d,
-                                state.romset.main_data, state.romset.main_data_size,
-                                state.romset.polygons_size,
-                                q->model_table_offset, q->model_table_count,
-                                q->mesh_ptr_subtract, q->mesh_ptr_add);
-        }
-    } else {
-        geo3d_lines_reset();
-    }
+    /* Compose the tile layers and scan this frame's 3D (shared with main_sdl.c). */
+    game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset,
+                       state.emu_started);
+    float lerp_t = state.emu_started ? game_frame_lerp() : 1.0f;
 
     netplay_cli_pump();
 
@@ -712,9 +654,6 @@ static void frame(void) {
         game_render_letterbox(sapp_width(), avail_h,
                               VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
         oy += menu_h;
-        /* Decode both 4-bit luma texture banks → GPU atlas for textured fills. */
-        game_render_upload_atlas(state.bus.texram0, state.bus.texram1, TEXRAM0_SIZE);
-        game_render_upload_luts(state.bus.luma, state.bus.colorxlat);
         { static int _cs=0; if ((++_cs % 30)==0) {
             for (int i=0;i<state.geo3d.captured_count;i++){ const captured_model_t *cm=&state.geo3d.captured[i];
                 if (cm->model_idx==519 || cm->model_idx==2833)
@@ -724,48 +663,9 @@ static void frame(void) {
                         cm->matrix[0],cm->matrix[1],cm->matrix[2],
                         cm->matrix[4],cm->matrix[5],cm->matrix[6],
                         cm->matrix[8],cm->matrix[9],cm->matrix[10]); } } }
-        /* Layer order: back colour → background tiles → 3D scene → foreground/HUD. */
-        game_render_draw_game(state.video.back_view, ox, oy, w, h);
-        game_render_draw_game(state.video.bg_view,   ox, oy, w, h);
-        if (state.geo3d.enabled && g_active_profile &&
-                state.romset.main_data && state.romset.polygons) {
-            const game_quirks_t *q = &g_active_profile->quirks;
-            /* The geo_displaylist path emits geometry already in camera space (the
-             * homebrew's own view() did the camera transform; the GEO projects with
-             * focal). Render it as wireframe with the geo3d camera (live-tunable via
-             * the set_camera bridge cmd; defaults set on profile load). */
-            /* Homebrew renders SOLID: the tube walls are filled quads (geo_obj_quad)
-             * and even its "lines" are thin filled quads — so draw fills, not pure
-             * wireframe. Keep the bright wireframe overlay on for the rim/divider
-             * cores, and force flat per-object colour (model 456's ROM material is a
-             * meaningless placeholder). The homebrew does its own software backface
-             * cull, so render double-sided (cull none). */
-            state.geo3d.lines_only = false;
-            if (q->geo_displaylist) {
-                g_geo_wireframe  = 0;   /* dividers/rims are filled thin-quads, not wireframe */
-                g_geo_flat_color = 1;
-                g_backface_cull  = 0;
-            }
-            /* The homebrew's display-list object order changes every frame (stars
-             * move, enemies spawn/die), so captured_prev[i] is a DIFFERENT object —
-             * sub-frame interpolation would smear the geometry. Disable it (lerp=1). */
-            float dl_lerp = q->geo_displaylist ? 1.0f : lerp_t;
-            /* Faces take their colour from palette RAM, as the rasterizer does. */
-            g_geo3d_palram      = state.bus.palette;
-            g_geo3d_palram_size = PALETTE_SIZE;
-            game_render_draw_captured_models(&state.geo3d,
-                                             state.romset.main_data, state.romset.main_data_size,
-                                             state.romset.polygons,  state.romset.polygons_size,
-                                             state.romset.textures,  state.romset.textures_size,
-                                             q->model_table_offset, q->model_table_count,
-                                             q->mesh_ptr_subtract, q->mesh_ptr_add,
-                                             ox, oy, w, h,
-                                             state.geo3d.cam_x, state.geo3d.cam_y, state.geo3d.cam_z,
-                                             state.geo3d.rot_y, state.geo3d.rot_x, state.geo3d.fov_deg,
-                                             dl_lerp);
-            g_geo3d_palram = NULL;
-        }
-        game_render_draw_game(state.video.fg_view,   ox, oy, w, h);
+        /* Back colour → background tiles → 3D scene → foreground/HUD. */
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                        ox, oy, w, h, lerp_t);
 
         /* Programmatic per-model texture extractor (--extract N). Re-runs ~once/
          * sec while set, so you can navigate to a scene where the model's texels

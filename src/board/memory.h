@@ -26,6 +26,7 @@
 #ifndef MEMORY_H
 #define MEMORY_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -61,6 +62,20 @@ typedef struct mem_region {
      * (osage's frame-time budget); walking +4 read timer 3 instead and killed
      * the hair/cape physics two frames in three. */
     int          no_burst;
+    /* An earlier region overlaps this one, so a lookup must not trust a cached
+     * hit on it — the linear scan's first-match order decides (TILE_MIRROR
+     * before TILE, TILE before H_SYNC). */
+    int          shadowed;
+    /* Change counter this region's writes feed (NULL: untracked). A write that
+     * changes a byte bumps it, so a consumer that recorded the value can skip
+     * work nothing changed: tile compositing (bus->gen_tile, gen_gfx, gen_pal),
+     * the texture atlas (gen_tex), the luma/colorxlat tables (gen_lut). */
+    volatile uint32_t *change_gen;
+    /* One flag per KB of the region (NULL: untracked), set by a write that
+     * changes a byte in that KB, after the bytes are stored; the consumer clears
+     * a flag and then reads the KB, so no change is lost. Texture RAM, for the
+     * atlas (game_render_upload_atlas). */
+    volatile uint8_t  *dirty_kb;
 } mem_region_t;
 
 /* ---- Bus ----------------------------------------------------------------- */
@@ -124,6 +139,21 @@ typedef struct memory_bus {
     /* Region table — linear-scanned in declaration order. */
     mem_region_t regions[MEM_REGIONS_MAX];
     int          region_count;
+    /* The two most recent unshadowed hits: code fetches and data accesses
+     * alternate between two regions, and each lookup would otherwise scan. */
+    mem_region_t *hit[2];
+    /* The plain memory region the CPU last fetched an instruction from
+     * (mem_fetch2): reading the two words at IP straight out of it skips two
+     * whole bus reads on every instruction. */
+    mem_region_t *fetch;
+
+    /* Bumped by every write that changes a tracked region (see change_gen):
+     * tile RAM, tile graphics, palette, texture RAM, luma + colorxlat. */
+    volatile uint32_t gen_tile, gen_gfx, gen_pal, gen_tex, gen_lut;
+    /* Per-KB change flags of texture RAM bank 0 and 1, aliases included (see
+     * dirty_kb). All set at init: nothing decoded matches the new bus yet. One
+     * spare entry takes a multi-byte write that starts in the last byte. */
+    volatile uint8_t  tex_dirty[2][(TEXRAM0_SIZE >> 10) + 1];
 
     /* Bus stats */
     uint64_t    reads;
@@ -155,6 +185,16 @@ static inline mem_region_t *mem_add_region(memory_bus_t *bus,
     r->write_cb = NULL;
     r->user = NULL;
     r->no_burst = 0;
+    r->shadowed = 0;
+    r->change_gen = NULL;
+    r->dirty_kb = NULL;
+    for (int i = 0; i < bus->region_count - 1; i++) {
+        const mem_region_t *e = &bus->regions[i];
+        if ((uint64_t)e->base < (uint64_t)base + size && (uint64_t)base < (uint64_t)e->base + e->size)
+            r->shadowed = 1;
+    }
+    bus->hit[0] = bus->hit[1] = NULL;
+    bus->fetch = NULL;
     return r;
 }
 
@@ -430,6 +470,10 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     bus->framebuffer = framebuffer;
     bus->rom = rom_data;
     bus->rom_size = rom_size;
+    /* Every (re)init is new content: start past any generation a consumer
+     * could have recorded from the previous bus. */
+    static uint32_t s_init_count = 0;
+    bus->gen_tile = bus->gen_gfx = bus->gen_pal = bus->gen_tex = bus->gen_lut = ++s_init_count << 20;
 
     /* IO idles HIGH on the Model 2 (hardware pull-ups). */
     memset(bus->io, IO_IDLE_FILL, sizeof(bus->io));
@@ -521,6 +565,23 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     for (int i = 0; i < bus->region_count; i++)
         for (size_t k = 0; k < sizeof no_burst / sizeof no_burst[0]; k++)
             if (strcmp(bus->regions[i].name, no_burst[k]) == 0) bus->regions[i].no_burst = 1;
+    for (int i = 0; i < bus->region_count; i++) {
+        mem_region_t *r = &bus->regions[i];
+        if (!strcmp(r->name, "TILE") || !strcmp(r->name, "TILE_MIRROR"))   /* one buffer */
+            r->change_gen = &bus->gen_tile;
+        else if (!strcmp(r->name, "TMAPGFX"))
+            r->change_gen = &bus->gen_gfx;
+        else if (!strcmp(r->name, "PALETTE"))
+            r->change_gen = &bus->gen_pal;
+        else if (!strncmp(r->name, "TEXRAM", 6)) { /* both banks and all their aliases */
+            r->change_gen = &bus->gen_tex;
+            r->dirty_kb   = bus->tex_dirty[r->data == bus->texram1 ? 1 : 0];
+        }
+        else if (!strcmp(r->name, "LUMA") || !strcmp(r->name, "COLORXLAT"))
+            r->change_gen = &bus->gen_lut;
+    }
+
+    memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
 
     LOG_INFO("mem: bus initialized with %d regions, ROM=%zu bytes", bus->region_count, rom_size);
     return 1;
@@ -538,9 +599,23 @@ static inline void mem_shutdown(memory_bus_t *bus) {
 /* ---- Lookup -------------------------------------------------------------- */
 
 static inline mem_region_t *mem_find_region(memory_bus_t *bus, uint32_t addr) {
+    /* A cached region is never shadowed, so no earlier region can contain addr:
+     * it is exactly what the scan below would return. */
+    mem_region_t *c = bus->hit[0];
+    if (c && (addr - c->base) < c->size) return c;
+    c = bus->hit[1];
+    if (c && (addr - c->base) < c->size) {
+        bus->hit[1] = bus->hit[0];
+        bus->hit[0] = c;
+        return c;
+    }
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
         if (addr >= r->base && (addr - r->base) < r->size) {
+            if (!r->shadowed) {
+                bus->hit[1] = bus->hit[0];
+                bus->hit[0] = r;
+            }
             return r;
         }
     }
@@ -605,6 +680,31 @@ static inline uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
          | ((uint32_t)r->data[off + 1] << 8)
          | ((uint32_t)r->data[off + 2] << 16)
          | ((uint32_t)r->data[off + 3] << 24);
+}
+
+/* The two words at addr, as mem_read32(addr) and mem_read32(addr + 4) return
+ * them: the CPU's instruction fetch. When both lie in the region the last fetch
+ * came from and that region is plain memory (unshadowed, no read callback, with
+ * backing), they are read from it directly; otherwise through the bus, and the
+ * region is remembered if it qualifies. The callback is checked on every fetch
+ * because a region can be given one after it is added. */
+static inline void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32_t *w1, uint32_t *w2) {
+    mem_region_t *r = bus->fetch;
+    if (r) {
+        uint32_t off = addr - r->base;
+        if ((uint64_t)off + 8u <= r->size && !r->read_cb) {
+            const uint8_t *p = r->data + off;
+            bus->reads += 2;
+            *w1 = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+            *w2 = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+            return;
+        }
+    }
+    *w1 = mem_read32(bus, addr);
+    *w2 = mem_read32(bus, addr + 4);
+    r = mem_find_region(bus, addr);
+    if (r && !r->shadowed && !r->read_cb && r->data && (uint64_t)(addr - r->base) + 8u <= r->size)
+        bus->fetch = r;
 }
 
 /* Set on every bus write to the issuing CPU's IP, so region write_cb handlers
@@ -682,6 +782,16 @@ static void dl_cop_tap(uint32_t tag, uint32_t val) {
     if (g_dl.active) dl_record(tag, val);
 }
 
+/* A plain write changed bytes off..off+len-1 of r, already stored: bump the
+ * region's change counter, then flag the KBs it touched. */
+static inline void mem__note_change(mem_region_t *r, uint32_t off, uint32_t len) {
+    (*r->change_gen)++;
+    if (r->dirty_kb) {
+        r->dirty_kb[off >> 10] = 1;
+        r->dirty_kb[(off + len - 1u) >> 10] = 1;
+    }
+}
+
 static inline void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
@@ -696,7 +806,10 @@ static inline void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     if (r->write_cb) { r->write_cb(r, addr, val, 1); return; }
     if (r->readonly) { LOG_WARN("mem: write8 to RO %s @ 0x%08X", r->name, addr); return; }
     if (!r->data)    return;
-    r->data[addr - r->base] = (uint8_t)val;
+    uint32_t off = addr - r->base;
+    bool changed = r->change_gen && r->data[off] != (uint8_t)val;
+    r->data[off] = (uint8_t)val;
+    if (changed) mem__note_change(r, off, 1);
 }
 
 static inline void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
@@ -714,8 +827,10 @@ static inline void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     if (r->readonly) { LOG_WARN("mem: write16 to RO %s @ 0x%08X", r->name, addr); return; }
     if (!r->data)    return;
     uint32_t off = addr - r->base;
+    bool changed = r->change_gen && (r->data[off] | (r->data[off + 1] << 8)) != (val & 0xFFFF);
     r->data[off]     = (uint8_t)(val & 0xFF);
     r->data[off + 1] = (uint8_t)((val >> 8) & 0xFF);
+    if (changed) mem__note_change(r, off, 2);
 }
 
 static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
@@ -734,10 +849,13 @@ static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     if (r->readonly) { LOG_WARN("mem: write32 to RO %s @ 0x%08X", r->name, addr); return; }
     if (!r->data)    return;
     uint32_t off = addr - r->base;
+    bool changed = r->change_gen && ((uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8)
+                                     | ((uint32_t)r->data[off + 2] << 16) | ((uint32_t)r->data[off + 3] << 24)) != val;
     r->data[off]     = (uint8_t)(val & 0xFF);
     r->data[off + 1] = (uint8_t)((val >> 8) & 0xFF);
     r->data[off + 2] = (uint8_t)((val >> 16) & 0xFF);
     r->data[off + 3] = (uint8_t)((val >> 24) & 0xFF);
+    if (changed) mem__note_change(r, off, 4);
 }
 
 /* A frame edge: the run loop calls this, under the emu mutex, when the game's

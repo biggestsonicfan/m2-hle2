@@ -57,6 +57,19 @@ typedef struct {
     sg_shader   tile_shader;
     sg_pipeline tile_pipeline;
     sg_sampler  tile_sampler;
+    /* The same quad for pen layers (GL backends): the colour is looked up.
+     * indexed_opaque has no blending, for the layer behind the 3D: its alpha is
+     * 1 everywhere, where blending gives the source colour exactly, but a blended
+     * draw keeps the GPU from dropping the pixels the 3D then covers. */
+    sg_shader   indexed_shader;
+    sg_pipeline indexed_pipeline, indexed_opaque;
+
+    /* Render-target blit: the tile shader without blending (a finished frame's
+     * alpha is whatever the last layer left), a quad oriented for the backend's
+     * render-target rows, and a bilinear sampler for scaling. */
+    sg_buffer   target_vbuf;
+    sg_pipeline target_pipeline;
+    sg_sampler  target_sampler_linear;
 
     /* Line (3D wireframe) pipeline */
     sg_buffer   line_vbuf;
@@ -70,6 +83,16 @@ typedef struct {
     sg_pipeline fill_pipeline;        /* no cull */
     sg_pipeline fill_pipeline_cw;     /* cull back, CW = front */
     sg_pipeline fill_pipeline_ccw;    /* cull back, CCW = front */
+    /* --verify-fill only: the reference fill shader, the same three variants. */
+    sg_shader   fill_shader_ref;
+    sg_pipeline fill_ref[3];
+    /* The fill shader with its discards taken out (GL backends), for faces that
+     * are neither transparent nor checkered and so never reach them: a shader
+     * that can discard keeps the GPU from rejecting hidden fragments before
+     * shading them (early depth test, Mali's forward pixel kill). Same three
+     * variants; id 0 where there is none. */
+    sg_shader   fill_shader_opaque;
+    sg_pipeline fill_opaque[3];
 
     /* Texture luma atlas (decoded from texram0): 2048×1024 R8 */
     sg_image    atlas_image;
@@ -84,6 +107,19 @@ typedef struct {
     sg_view     cxlat_view;
     sg_sampler  lut_sampler;
 
+    /* Colour ramps (GL backends): row r holds, for luma index 0..63, the screen
+     * colour of the face colour ramp_key[r] (r5 << 10 | g5 << 5 | b5) through the
+     * colorxlat snapshot and the monitor curve, as 8-bit RGB. A fill vertex names
+     * its row in colour alpha (row + 2; below 1.5 means none), so the shader
+     * fetches the finished colour once instead of three colorxlat texels. */
+    bool        ramp_enabled;
+    sg_image    ramp_image;
+    sg_view     ramp_view;
+    int         ramp_count;
+    bool        ramp_dirty;
+    bool        cxlat_valid;
+    uint8_t     cxlat_snap[COLORXLAT_SIZE];
+
     /* CPU scratch for line uploads — 2 verts per geo3d_line_t */
     game_render_line_vertex_t line_verts[GEO3D_MAX_LINES * 2];
 
@@ -94,6 +130,56 @@ typedef struct {
 } game_render_t;
 
 static game_render_t g_game_render = {0};
+
+/* Colour ramp rows (see game_render_t ramp_*): which row a colour key has, the
+ * key of each row, the texels, and whether they went up this frame. */
+#define GAME_RENDER_RAMP_ROWS 1024
+static uint16_t g_ramp_row_of[0x8000];                     /* key -> row + 1; 0: none */
+static uint16_t g_ramp_key[GAME_RENDER_RAMP_ROWS];
+static uint8_t  g_ramp_px[GAME_RENDER_RAMP_ROWS * 64 * 4];
+static bool     g_ramp_uploaded;                           /* this frame; cleared at commit */
+
+static void game_render__ramp_commit(void *user) { (void)user; g_ramp_uploaded = false; }
+
+/* --verify-fill: set before game_render_init to build the reference fill shader.
+ * While on, every fill draw of the frame is logged (viewport, scissor, matrix,
+ * cull variant, vertex range) so main_sdl can replay the frame's fills through
+ * each shader into scratch targets and compare them. A frame whose vertex buffer
+ * was uploaded more than once (a batch that overflowed) cannot be replayed:
+ * earlier draws' vertices are gone. */
+static int g_game_render_fill_verify = 0;
+/* Draw with the reference fill shader instead (timing comparisons). */
+static int g_game_render_fill_use_ref = 0;
+/* Draw faces that cannot discard with the discard-free fill shader (default);
+ * 0 draws every face with the one shader (timing comparisons). */
+static int g_game_render_fill_split = 1;
+/* Give faces colour ramp rows (default); 0 keeps the shader's colorxlat lookup
+ * for all of them (timing comparisons). Set before game_render_init. */
+static int g_game_render_fill_ramp = 1;
+
+/* src with every "discard;" turned into an empty statement, into buf. */
+static inline const char *game_render_strip_discard(const char *src, char *buf, size_t cap) {
+    size_t o = 0;
+    for (const char *p = src; *p && o + 1 < cap; ) {
+        if (!strncmp(p, "discard;", 8)) { buf[o++] = ';'; p += 8; }
+        else buf[o++] = *p++;
+    }
+    buf[o] = '\0';
+    return buf;
+}
+#define GAME_RENDER_FILL_LOG_MAX 4096
+typedef struct {
+    int   vx, vy, vw, vh;
+    int   sx, sy, sw, sh;
+    float mvp[16];
+    int   cull, first, count, can_discard;
+} game_render_fill_draw_t;
+static struct {
+    int                     n, uploads;
+    bool                    overflow;
+    int                     vx, vy, vw, vh;   /* the viewport in force */
+    game_render_fill_draw_t d[GAME_RENDER_FILL_LOG_MAX];
+} g_fill_log;
 
 /* ---- Shaders ------------------------------------------------------------- */
 
@@ -113,6 +199,21 @@ static const char *game_render_tile_fs_glsl =
     "in vec2 uv;\n"
     "out vec4 frag_color;\n"
     "void main() { frag_color = texture(tex_smp, uv); }\n";
+
+/* A layer the GPU tile compositor drew holds pens (low byte red, high byte
+ * green, alpha where it drew): look the colour up in the pen texture. Sampled
+ * like the colour layers, nearest, so each screen pixel takes the same texel. */
+static const char *game_render_indexed_fs_glsl =
+    "#version 410\n"
+    "uniform sampler2D tex_smp;\n"
+    "uniform sampler2D pal_smp;\n"
+    "in vec2 uv;\n"
+    "out vec4 frag_color;\n"
+    "void main() {\n"
+    "  vec4 t = texture(tex_smp, uv);\n"
+    "  int pen = int(t.r * 255.0 + 0.5) | (int(t.g * 255.0 + 0.5) << 8);\n"
+    "  frag_color = vec4(texelFetch(pal_smp, ivec2(pen & 255, pen >> 8), 0).rgb, t.a);\n"
+    "}\n";
 
 static const char *game_render_tile_vs_hlsl =
     "struct vs_in { float2 pos : POSITION; float2 uv : TEXCOORD0; };\n"
@@ -180,10 +281,25 @@ static const char *game_render_fill_vs_glsl =
     "out float ez;\n"
     "flat out vec4 tile;\n"
     "flat out vec4 lbpl;\n"
+    /* Per-face integers the fill works out per pixel otherwise: the GEO3D_FACE_*
+     * flags (plus 64 when both tile sides are powers of two) and the colour's
+     * 5-bit channels. A face's three vertices carry the same values. */
+    "flat out ivec4 face;\n"
+    "flat out ivec2 tile_log2;\n"   /* log2 of the tile sides (GLSL ES 3.00 has no findMSB) */
+    "flat out int ramp_row;\n"      /* colour alpha - 2: the face's colour ramp row, or -1 */
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl; ez = -a_pos.z;\n"
+    "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
+    "  if (tw > 0 && th > 0 && (tw & (tw - 1)) == 0 && (th & (th - 1)) == 0) fl |= 64;\n"
+    "  ramp_row = int(a_color.a + 0.5) - 2;\n"
+    "  tile_log2 = ivec2(0);\n"
+    "  for (int i = 1; i < 16; i++) {\n"
+    "    if ((tw >> i) != 0) tile_log2.x = i;\n"
+    "    if ((th >> i) != 0) tile_log2.y = i;\n"
+    "  }\n"
+    "  face = ivec4(fl, int(a_color.r*31.0+0.5), int(a_color.g*31.0+0.5), int(a_color.b*31.0+0.5));\n"
     "}\n";
 
 /* model2rd.ipp fast_log2's fraction table: floor(256 * log2(1 + i/128)). */
@@ -192,6 +308,19 @@ static const char *game_render_fill_vs_glsl =
     "82,84,87,89,91,93,96,98,100,102,104,106,109,111,113,115,117,119,121,123,125,127,129,132,134,136,138,140,141,143,145,147," \
     "149,151,153,155,157,159,161,162,164,166,168,170,172,173,175,177,179,181,182,184,186,188,189,191,193,194,196,198,200,201,203,205," \
     "206,208,209,211,213,214,216,218,219,221,222,224,225,227,229,230,232,233,235,236,238,239,241,242,244,245,247,248,250,251,253,254"
+
+/* fast_log2 for the GLSL fills: the float's own exponent and the top seven bits
+ * of its mantissa, which is what model2rd.ipp reads out of f2u(z). The same
+ * value as floor(log2(z)) and z / 2^e for every normal z > 0, exact by
+ * construction, and GLSL ES 3.00 (GLES 3, WebGL2) can compile it: that dialect
+ * has floatBitsToInt and no ldexp. */
+#define GAME_RENDER_FAST_LOG2_GLSL \
+    "const int LOG2[128] = int[128](" GAME_RENDER_LOG2_TABLE ");\n" \
+    "int fast_log2(float z) {\n" \
+    "  if (z <= 0.0) return 0;\n" \
+    "  int b = floatBitsToInt(z);\n" \
+    "  return (((b >> 23) & 255) - 127) * 256 + LOG2[(b >> 16) & 127];\n" \
+    "}\n"
 
 /*
  * The fill — MAME's model2rd.ipp draw_scanline_tex, as the explorer ports it
@@ -229,7 +358,7 @@ static const char *game_render_fill_vs_glsl =
  * poly_luma >> 2 and no texel (model2rd.ipp draw_scanline_solid).
  * lb < 0 falls back to the old flat_color*luma path.
  */
-static const char *game_render_fill_fs_glsl =
+static const char *game_render_fill_fs_ref_glsl =
     "#version 410\n"
     "uniform sampler2D atlas_smp;\n"
     "uniform sampler2D luma_smp;\n"
@@ -240,16 +369,8 @@ static const char *game_render_fill_fs_glsl =
     "flat in vec4 tile;\n"
     "flat in vec4 lbpl;\n"
     "out vec4 frag_color;\n"
-    "const int LOG2[128] = int[128](" GAME_RENDER_LOG2_TABLE ");\n"
+    GAME_RENDER_FAST_LOG2_GLSL
     "bool has(int bit) { return (int(lbpl.z + 0.5) & bit) != 0; }\n"
-    "int fast_log2(float z) {\n"
-    "  if (z <= 0.0) return 0;\n"
-    "  float e = floor(log2(z));\n"
-    "  float m = z / ldexp(1.0, int(e));\n"
-    "  if (m >= 2.0) { e += 1.0; m *= 0.5; }\n"
-    "  if (m < 1.0) { e -= 1.0; m *= 2.0; }\n"
-    "  return int(e) * 256 + LOG2[min(int((m - 1.0) * 128.0), 127)];\n"
-    "}\n"
     "ivec4 level_tile(int L) {\n"
     "  int sheet = has(4) ? 1 : 0;\n"
     "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
@@ -334,6 +455,125 @@ static const char *game_render_fill_fs_glsl =
     "    float cg = texelFetch(cxlat_smp, ivec2(bg & 255, bg >> 8), 0).r * 255.0;\n"
     "    float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
     "    rgb = clamp(max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
+    "  }\n"
+    "  frag_color = vec4(rgb, 1.0);\n"
+    "}\n";
+
+/*
+ * The fill as drawn on GL: game_render_fill_fs_ref_glsl above, pixel for pixel
+ * (main_sdl --verify-fill replays each frame's fills through both and compares
+ * the bytes), with the work per pixel cut where the result cannot change:
+ *   - the flags and colour channels come from the vertex stage as flat ints;
+ *   - a tile side is a power of two (32 << n, halved per level), so the wrap's
+ *     % and / are & and >> of values that are never negative there;
+ *   - the second mip level is fetched only when it has weight: mix(a, b, 0.0)
+ *     is a, so at lod 0 (every magnified texel) or a whole level, 4 fetches
+ *     instead of 8.
+ */
+static const char *game_render_fill_fs_glsl =
+    "#version 410\n"
+    "uniform sampler2D atlas_smp;\n"
+    "uniform sampler2D luma_smp;\n"
+    "uniform sampler2D cxlat_smp;\n"
+    "in vec4 color;\n"
+    "in vec2 uv;\n"
+    "in float ez;\n"
+    "flat in vec4 tile;\n"
+    "flat in vec4 lbpl;\n"
+    "uniform sampler2D ramp_smp;\n"
+    "flat in ivec4 face;\n"
+    "flat in ivec2 tile_log2;\n"
+    "flat in int ramp_row;\n"
+    "out vec4 frag_color;\n"
+    GAME_RENDER_FAST_LOG2_GLSL
+    "ivec4 level_tile(int L) {\n"
+    "  int sheet = (face.x & 4) != 0 ? 1 : 0;\n"
+    "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
+    "  uint y = (uint(int(tile.y) - sheet * 1024) - 1024u) >> uint(L);\n"
+    "  return ivec4(int(x & 2047u), int(y & 1023u) + ((sheet + L) & 1) * 1024,\n"
+    "               max(int(tile.z) >> L, 1), max(int(tile.w) >> L, 1));\n"
+    "}\n"
+    "float tile_texel(ivec4 t, ivec2 sh, ivec2 p) {\n"
+    "  ivec2 s = p + t.zw * 8;\n"
+    "  ivec2 q, copy;\n"
+    "  if ((face.x & 64) != 0) { q = s & (t.zw - 1); copy = s >> sh; }\n"
+    "  else                    { q = s % t.zw;       copy = s / t.zw; }\n"
+    "  if ((face.x & 8) != 0 && (copy.x & 1) != 0) q.x = t.z - 1 - q.x;\n"
+    "  if ((face.x & 16) != 0 && (copy.y & 1) != 0) q.y = t.w - 1 - q.y;\n"
+    "  return texelFetch(atlas_smp, (t.xy + q) & 2047, 0).r;\n"
+    "}\n"
+    "vec2 sample_level(int L) {\n"
+    "  ivec4 t = level_tile(L);\n"
+    "  ivec2 sh = max(tile_log2 - ivec2(L), ivec2(0));\n"   /* log2 of t.zw = max(side >> L, 1) */
+    "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
+    "  ivec2 i0 = ivec2(floor(c));\n"
+    "  vec2 f = fract(c);\n"
+    "  float t00 = tile_texel(t, sh, i0);\n"
+    "  float t10 = tile_texel(t, sh, i0 + ivec2(1, 0));\n"
+    "  float t01 = tile_texel(t, sh, i0 + ivec2(0, 1));\n"
+    "  float t11 = tile_texel(t, sh, i0 + ivec2(1, 1));\n"
+    "  float a = 1.0;\n"
+    "  if ((face.x & 1) != 0) {\n"
+    "    vec4 cover = 1.0 - step(1.0, vec4(t00, t10, t01, t11));\n"
+    "    a = mix(mix(cover.x, cover.y, f.x), mix(cover.z, cover.w, f.x), f.y);\n"
+    "    if (t00 == 1.0) t00 = t10;\n"
+    "    if (t10 == 1.0) t10 = t00;\n"
+    "    if (t01 == 1.0) t01 = t11;\n"
+    "    if (t11 == 1.0) t11 = t01;\n"
+    "  }\n"
+    "  float row0 = mix(t00, t10, f.x);\n"
+    "  float row1 = mix(t01, t11, f.x);\n"
+    "  if ((face.x & 1) != 0) {\n"
+    "    if (row0 == 1.0) row0 = row1;\n"
+    "    if (row1 == 1.0) row1 = row0;\n"
+    "  }\n"
+    "  return vec2(mix(row0, row1, f.y), a);\n"
+    "}\n"
+    "vec3 ramp(int li) {\n"
+    "  int br = ((face.y<<8)+li)*2, bg = 0x4000+((face.z<<8)+li)*2, bb = 0x8000+((face.w<<8)+li)*2;\n"
+    "  float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
+    "  float cg = texelFetch(cxlat_smp, ivec2(bg & 255, bg >> 8), 0).r * 255.0;\n"
+    "  float cb = texelFetch(cxlat_smp, ivec2(bb & 255, bb >> 8), 0).r * 255.0;\n"
+    "  return vec3(cr, cg, cb);\n"
+    "}\n"
+    /* The screen colour at luma index li: the face's colour ramp row when it has
+     * one (the same bytes, worked out on the CPU), else the colorxlat texels. */
+    "vec3 shade(int li) {\n"
+    "  if (ramp_row >= 0) return texelFetch(ramp_smp, ivec2(li, ramp_row), 0).rgb;\n"
+    "  return clamp(max(ramp(li) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
+    "}\n"
+    "void main() {\n"
+    "  float lmax = floor(log2(max(min(tile.z, tile.w), 2.0)) + 0.5) - 1.0;\n"
+    "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
+    "  if ((face.x & 2) != 0 && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
+    "  vec3 rgb = color.rgb;\n"
+    "  if (tile.z > 0.0) {\n"
+    "    int L0 = int(floor(lod));\n"
+    "    float lf = fract(lod);\n"
+    "    if (lbpl.w < 100000.0) {\n"
+    "      int mml = fast_log2(ez) - int(lbpl.w);\n"
+    "      int maxl = int(lmax);\n"
+    "      L0 = clamp(mml >= 0 ? mml / 128 : -((127 - mml) / 128), 0, maxl);\n"
+    "      lf = (mml > 0 && L0 < maxl) ? float((mml % 128) * 2) / 256.0 : 0.0;\n"
+    "    }\n"
+    "    vec2 tx = sample_level(L0);\n"
+    "    if (lf != 0.0) tx = mix(tx, sample_level(L0 + 1), lf);\n"
+    "    if ((face.x & 1) != 0 && tx.y < 0.5) discard;\n"
+    "    float al = tx.x;\n"
+    "    if (lbpl.x < 0.0) {\n"
+    "      if (al > 0.0) rgb = clamp(color.rgb * al * 2.0, 0.0, 1.0);\n"
+    "    } else {\n"
+    "      int lbyte = 2 * (int(lbpl.x) + int(al * 120.0));\n"
+    "      float lram = texelFetch(luma_smp, ivec2(lbyte & 255, lbyte >> 8), 0).r * 255.0;\n"
+    "      float poly = floor(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5);\n"
+    "      int li = int(min(floor(lram * poly / 256.0), 63.0));\n"
+    "      rgb = shade(li);\n"
+    "    }\n"
+    "  } else if (lbpl.x < 0.0) {\n"
+    "    rgb = color.rgb * clamp(lbpl.y, 0.0, 1.0);\n"
+    "  } else {\n"
+    "    int li = min(int(floor(clamp(lbpl.y, 0.0, 1.0) * 255.0 + 0.5)) >> 2, 63);\n"
+    "    rgb = shade(li);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
     "}\n";
@@ -455,6 +695,31 @@ static const char *game_render_fill_fs_hlsl =
     "  return float4(rgb, 1.0);\n"
     "}\n";
 
+/* GLES 3 compiles the same GLSL once "#version 410" becomes "#version 300 es"
+ * with explicit default precisions: the fill shader's texel indices, luma ramp
+ * and colorxlat offsets need highp, and ES would default float to mediump in the
+ * fragment stage and sampler2D to lowp. sg_make_shader compiles synchronously,
+ * so one buffer per stage only has to outlive that call. */
+static inline const char *game_render_glsl(sg_backend backend, const char *src, int stage) {
+    static const char head[] = "#version 410\n";
+    static const char es_head[] =
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+        "precision highp sampler2D;\n"
+        "precision highp usampler2D;\n";
+    static char buf[2][16384];
+    if (backend != SG_BACKEND_GLES3 || strncmp(src, head, sizeof head - 1) != 0) return src;
+    size_t body = strlen(src) - (sizeof head - 1);
+    if (sizeof es_head - 1 + body + 1 > sizeof buf[0]) {
+        LOG_ERROR("game_render_glsl: shader too long for the ES buffer");
+        return src;
+    }
+    memcpy(buf[stage], es_head, sizeof es_head - 1);
+    memcpy(buf[stage] + sizeof es_head - 1, src + sizeof head - 1, body + 1);
+    return buf[stage];
+}
+
 /* ---- Init ---------------------------------------------------------------- */
 
 static inline void game_render_init(void) {
@@ -509,8 +774,8 @@ static inline void game_render_init(void) {
 
         d.label = "game-render-tile-shader";
         if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
-            d.vertex_func.source   = game_render_tile_vs_glsl;
-            d.fragment_func.source = game_render_tile_fs_glsl;
+            d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, game_render_tile_fs_glsl, 1);
         } else if (backend == SG_BACKEND_D3D11) {
             d.vertex_func.source       = game_render_tile_vs_hlsl;
             d.vertex_func.d3d11_target = "vs_4_0";
@@ -539,6 +804,36 @@ static inline void game_render_init(void) {
         p.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ZERO;
         p.label = "game-render-tile-pipeline";
         g_game_render.tile_pipeline = sg_make_pipeline(&p);
+
+        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+            sg_shader_desc d;
+            memset(&d, 0, sizeof d);
+            d.attrs[0].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+            d.attrs[1].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+            static const char *const names[2] = { "tex_smp", "pal_smp" };
+            for (int i = 0; i < 2; i++) {
+                d.views[i].texture.stage       = SG_SHADERSTAGE_FRAGMENT;
+                d.views[i].texture.image_type  = SG_IMAGETYPE_2D;
+                d.views[i].texture.sample_type = SG_IMAGESAMPLETYPE_FLOAT;
+                d.texture_sampler_pairs[i].stage        = SG_SHADERSTAGE_FRAGMENT;
+                d.texture_sampler_pairs[i].view_slot    = i;
+                d.texture_sampler_pairs[i].sampler_slot = 0;
+                d.texture_sampler_pairs[i].glsl_name    = names[i];
+            }
+            d.samplers[0].stage        = SG_SHADERSTAGE_FRAGMENT;
+            d.samplers[0].sampler_type = SG_SAMPLERTYPE_FILTERING;
+            d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, game_render_indexed_fs_glsl, 1);
+            d.label = "game-render-indexed-shader";
+            g_game_render.indexed_shader = sg_make_shader(&d);
+            p.shader = g_game_render.indexed_shader;
+            p.label  = "game-render-indexed-pipeline";
+            g_game_render.indexed_pipeline = sg_make_pipeline(&p);
+            p.colors[0].blend.enabled = false;
+            p.label  = "game-render-indexed-opaque";
+            g_game_render.indexed_opaque = sg_make_pipeline(&p);
+            p.colors[0].blend.enabled = true;
+        }
     }
 
     g_game_render.tile_sampler = sg_make_sampler(&(sg_sampler_desc){
@@ -548,6 +843,39 @@ static inline void game_render_init(void) {
         .wrap_v     = SG_WRAP_CLAMP_TO_EDGE,
         .label      = "game-render-tile-sampler",
     });
+
+    /* ---- Render-target blit ----------------------------------------------- */
+    {
+        /* GL render targets store their bottom row first, so the blit quad
+         * samples v=0 at the bottom; D3D's top row first, like the tile quads. */
+        bool gl = backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3;
+        game_render_quad_vertex_t tq[6];
+        memcpy(tq, quad, sizeof tq);
+        if (gl) for (int i = 0; i < 6; i++) tq[i].v = 1.0f - tq[i].v;
+        g_game_render.target_vbuf = sg_make_buffer(&(sg_buffer_desc){
+            .usage = { .vertex_buffer = true, .immutable = true },
+            .data  = SG_RANGE(tq),
+            .label = "game-render-target-vbuf",
+        });
+        sg_pipeline_desc p;
+        memset(&p, 0, sizeof(p));
+        p.shader                   = g_game_render.tile_shader;
+        p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
+        p.layout.attrs[0].format   = SG_VERTEXFORMAT_FLOAT2;
+        p.layout.attrs[0].offset   = offsetof(game_render_quad_vertex_t, x);
+        p.layout.attrs[1].format   = SG_VERTEXFORMAT_FLOAT2;
+        p.layout.attrs[1].offset   = offsetof(game_render_quad_vertex_t, u);
+        p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
+        p.label = "game-render-target-pipeline";
+        g_game_render.target_pipeline = sg_make_pipeline(&p);
+        g_game_render.target_sampler_linear = sg_make_sampler(&(sg_sampler_desc){
+            .min_filter = SG_FILTER_LINEAR,
+            .mag_filter = SG_FILTER_LINEAR,
+            .wrap_u     = SG_WRAP_CLAMP_TO_EDGE,
+            .wrap_v     = SG_WRAP_CLAMP_TO_EDGE,
+            .label      = "game-render-target-sampler",
+        });
+    }
 
     /* ---- Line pipeline ---------------------------------------------------- */
 
@@ -578,8 +906,8 @@ static inline void game_render_init(void) {
 
         d.label = "game-render-line-shader";
         if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
-            d.vertex_func.source   = game_render_line_vs_glsl;
-            d.fragment_func.source = game_render_line_fs_glsl;
+            d.vertex_func.source   = game_render_glsl(backend, game_render_line_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, game_render_line_fs_glsl, 1);
         } else if (backend == SG_BACKEND_D3D11) {
             d.vertex_func.source         = game_render_line_vs_hlsl;
             d.vertex_func.d3d11_target   = "vs_4_0";
@@ -661,10 +989,22 @@ static inline void game_render_init(void) {
         d.texture_sampler_pairs[2].view_slot    = 2;
         d.texture_sampler_pairs[2].sampler_slot = 0;
         d.texture_sampler_pairs[2].glsl_name    = "cxlat_smp";
+        /* Colour ramps (t3): read by the GL fill shader only. */
+        d.views[3].texture.stage              = SG_SHADERSTAGE_FRAGMENT;
+        d.views[3].texture.image_type         = SG_IMAGETYPE_2D;
+        d.views[3].texture.sample_type        = SG_IMAGESAMPLETYPE_FLOAT;
+        d.views[3].texture.hlsl_register_t_n  = 3;
+        d.views[3].texture.msl_texture_n      = 3;
+        d.views[3].texture.wgsl_group1_binding_n = 4;
+        d.texture_sampler_pairs[3].stage        = SG_SHADERSTAGE_FRAGMENT;
+        d.texture_sampler_pairs[3].view_slot    = 3;
+        d.texture_sampler_pairs[3].sampler_slot = 0;
+        d.texture_sampler_pairs[3].glsl_name    = "ramp_smp";
         d.label = "game-render-fill-shader";
         if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
-            d.vertex_func.source   = game_render_fill_vs_glsl;
-            d.fragment_func.source = game_render_fill_fs_glsl;
+            d.vertex_func.source   = game_render_glsl(backend, game_render_fill_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, g_game_render_fill_use_ref ? game_render_fill_fs_ref_glsl
+                                                                                           : game_render_fill_fs_glsl, 1);
         } else if (backend == SG_BACKEND_D3D11) {
             d.vertex_func.source         = game_render_fill_vs_hlsl;
             d.vertex_func.d3d11_target   = "vs_4_0";
@@ -672,6 +1012,21 @@ static inline void game_render_init(void) {
             d.fragment_func.d3d11_target = "ps_4_0";
         }
         g_game_render.fill_shader = sg_make_shader(&d);
+        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+            static char opaque_src[16384];
+            d.vertex_func.source   = game_render_glsl(backend, game_render_fill_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend,
+                game_render_strip_discard(g_game_render_fill_use_ref ? game_render_fill_fs_ref_glsl : game_render_fill_fs_glsl,
+                                          opaque_src, sizeof opaque_src), 1);
+            d.label = "game-render-fill-shader-opaque";
+            g_game_render.fill_shader_opaque = sg_make_shader(&d);
+        }
+        if (g_game_render_fill_verify && (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3)) {
+            d.vertex_func.source   = game_render_glsl(backend, game_render_fill_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, game_render_fill_fs_ref_glsl, 1);
+            d.label = "game-render-fill-shader-ref";
+            g_game_render.fill_shader_ref = sg_make_shader(&d);
+        }
     }
     {
         sg_pipeline_desc p;
@@ -699,6 +1054,24 @@ static inline void game_render_init(void) {
         g_game_render.fill_pipeline_cw = sg_make_pipeline(&p);
         p.face_winding = SG_FACEWINDING_CCW;  p.label = "fill-cull-ccw";
         g_game_render.fill_pipeline_ccw = sg_make_pipeline(&p);
+        if (g_game_render.fill_shader_opaque.id) {
+            p.shader = g_game_render.fill_shader_opaque;
+            p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-opaque";
+            g_game_render.fill_opaque[0] = sg_make_pipeline(&p);
+            p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-opaque-cw";
+            g_game_render.fill_opaque[1] = sg_make_pipeline(&p);
+            p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-opaque-ccw";
+            g_game_render.fill_opaque[2] = sg_make_pipeline(&p);
+        }
+        if (g_game_render.fill_shader_ref.id) {
+            p.shader = g_game_render.fill_shader_ref;
+            p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-ref";
+            g_game_render.fill_ref[0] = sg_make_pipeline(&p);
+            p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-ref-cw";
+            g_game_render.fill_ref[1] = sg_make_pipeline(&p);
+            p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-ref-ccw";
+            g_game_render.fill_ref[2] = sg_make_pipeline(&p);
+        }
     }
 
     /* ---- Texture luma atlas ---------------------------------------------- */
@@ -733,6 +1106,18 @@ static inline void game_render_init(void) {
         .wrap_u = SG_WRAP_CLAMP_TO_EDGE, .wrap_v = SG_WRAP_CLAMP_TO_EDGE,
         .label = "geo3d-lut-sampler" });
 
+    /* Colour ramps: the image exists on every backend (the fill shaders all
+     * declare it); rows are only handed out where the GL fill shader reads them. */
+    g_game_render.ramp_image = sg_make_image(&(sg_image_desc){
+        .width = 64, .height = GAME_RENDER_RAMP_ROWS, .pixel_format = SG_PIXELFORMAT_RGBA8,
+        .usage = { .dynamic_update = true }, .label = "geo3d-colour-ramps" });
+    g_game_render.ramp_view = sg_make_view(&(sg_view_desc){
+        .texture.image = g_game_render.ramp_image, .label = "geo3d-colour-ramps-view" });
+    g_game_render.ramp_enabled = g_game_render_fill_ramp && (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3);
+    g_game_render.ramp_count = 0;
+    memset(g_ramp_row_of, 0, sizeof g_ramp_row_of);
+    sg_add_commit_listener((sg_commit_listener){ .func = game_render__ramp_commit });
+
     g_game_render.initialized = true;
     LOG_INFO("game_render_init: complete");
 }
@@ -747,17 +1132,30 @@ static inline void game_render_shutdown(void) {
     sg_destroy_image(g_game_render.luma_image);
     sg_destroy_view(g_game_render.cxlat_view);
     sg_destroy_image(g_game_render.cxlat_image);
+    sg_destroy_view(g_game_render.ramp_view);
+    sg_destroy_image(g_game_render.ramp_image);
+    sg_remove_commit_listener((sg_commit_listener){ .func = game_render__ramp_commit });
     sg_destroy_pipeline(g_game_render.fill_pipeline);
     sg_destroy_pipeline(g_game_render.fill_pipeline_cw);
     sg_destroy_pipeline(g_game_render.fill_pipeline_ccw);
+    for (int i = 0; i < 3; i++) sg_destroy_pipeline(g_game_render.fill_ref[i]);   /* invalid ids are ignored */
+    sg_destroy_shader(g_game_render.fill_shader_ref);
+    for (int i = 0; i < 3; i++) sg_destroy_pipeline(g_game_render.fill_opaque[i]);
+    sg_destroy_shader(g_game_render.fill_shader_opaque);
     sg_destroy_shader(g_game_render.fill_shader);
     sg_destroy_buffer(g_game_render.fill_vbuf);
     sg_destroy_pipeline(g_game_render.line_pipeline);
     sg_destroy_shader(g_game_render.line_shader);
     sg_destroy_buffer(g_game_render.line_vbuf);
+    sg_destroy_sampler(g_game_render.target_sampler_linear);
+    sg_destroy_pipeline(g_game_render.target_pipeline);
+    sg_destroy_buffer(g_game_render.target_vbuf);
     sg_destroy_sampler(g_game_render.tile_sampler);
     sg_destroy_pipeline(g_game_render.tile_pipeline);
     sg_destroy_shader(g_game_render.tile_shader);
+    sg_destroy_pipeline(g_game_render.indexed_pipeline);   /* invalid ids are ignored */
+    sg_destroy_pipeline(g_game_render.indexed_opaque);
+    sg_destroy_shader(g_game_render.indexed_shader);
     sg_destroy_buffer(g_game_render.quad_vbuf);
     g_game_render.initialized = false;
 }
@@ -821,19 +1219,34 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
 
 /* ---- Texture atlas upload ------------------------------------------------ */
 
+/* The decoded atlas as last uploaded: 2048×2048 R8, sheet 0 over sheet 1. */
+static uint8_t g_game_render_atlas_px[GEO3D_ATLAS_W * GEO3D_ATLAS_H];
+
 /*
  * Decode the 4-bit luma texture sheet (texram0) into the R8 atlas and upload.
  * Logical layout 2048×1024 (per MAME model2rd.ipp get_texel): the sheet is
  * stored 1024×2048, so x>=1024 wraps to the other half via y^=1024.  Each
  * 32-bit word holds a 2×2 block of nibbles selected by (x&1,y&1).
  * Call once per frame (cheap; 2M texels) before drawing fills.
+ *
+ * Incremental: dirty0/dirty1 hold one flag per KB of each bank (memory.h
+ * dirty_kb; NULL decodes that bank whole). A KB is one row of 256 words, and
+ * word row q feeds exactly two atlas rows of the sheet, 2(q & 511) and the one
+ * below, over x 0..1023 for q < 512 and x 1024..2047 above. Only flagged rows
+ * are decoded again, into an atlas that persists between calls, so a texture
+ * load that touches a few KB a frame no longer re-decodes all 4 million texels.
+ * Each flag is cleared before its KB is read, so a write landing meanwhile
+ * flags it again for the next call.
  */
 static inline void game_render_upload_atlas(const uint8_t *texram0,
                                             const uint8_t *texram1,
-                                            size_t sheet_size) {
+                                            size_t sheet_size,
+                                            volatile uint8_t *dirty0,
+                                            volatile uint8_t *dirty1) {
     if (!g_game_render.initialized || !texram0) return;
     /* Skip the multi-megatexel decode while both texture banks are empty (early
-     * boot, before the i960 uploads textures) — fills fall back to flat color. */
+     * boot, before the i960 uploads textures) — fills fall back to flat color.
+     * The flags stay set, so the first decode covers everything written. */
     {
         size_t probe = 0;
         for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram0[k] ? 1 : 0;
@@ -841,42 +1254,119 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
             for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram1[k] ? 1 : 0;
         if (probe == 0) return;
     }
-    static uint8_t atlas[GEO3D_ATLAS_W * GEO3D_ATLAS_H];   /* 2048×2048 (two sheets) */
+    uint8_t *atlas = g_game_render_atlas_px;
     const uint32_t *sheets[2] = { (const uint32_t *)texram0, (const uint32_t *)texram1 };
+    volatile uint8_t *dirty[2] = { dirty0, dirty1 };
     size_t nwords = sheet_size / 4;
+    uint32_t rows = (uint32_t)(sheet_size >> 10);          /* word rows (KB) per bank */
+    bool any = false;
     for (int s = 0; s < 2; s++) {
         const uint32_t *sheet = sheets[s];
         if (!sheet) continue;
-        for (int y = 0; y < GEO3D_SHEET_H; y++) {
-            for (int x = 0; x < GEO3D_ATLAS_W; x++) {
-                int x2 = x, y2 = y;
-                if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
-                uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
-                uint32_t word = ((off >> 1) < nwords) ? sheet[off >> 1] : 0;
-                if (off & 1) word >>= 16;
-                if ((y & 1) == 0) word >>= 8;
-                if ((x & 1) == 0) word >>= 4;
-                atlas[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] =
-                    (uint8_t)((word & 0xf) * 17u);          /* 0..15 → 0..255 */
+        for (uint32_t q = 0; q < rows && q < 1024u; q++) {
+            if (dirty[s]) {
+                if (!dirty[s][q]) continue;
+                dirty[s][q] = 0;
+            }
+            any = true;
+            int y0 = (int)((q & 511u) * 2u);
+            int x0 = q < 512u ? 0 : 1024;
+            for (int y = y0; y < y0 + 2; y++) {
+                for (int x = x0; x < x0 + 1024; x++) {
+                    int x2 = x, y2 = y;
+                    if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
+                    uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
+                    uint32_t word = ((off >> 1) < nwords) ? sheet[off >> 1] : 0;
+                    if (off & 1) word >>= 16;
+                    if ((y & 1) == 0) word >>= 8;
+                    if ((x & 1) == 0) word >>= 4;
+                    atlas[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] =
+                        (uint8_t)((word & 0xf) * 17u);          /* 0..15 → 0..255 */
+                }
             }
         }
     }
+    if (!any) return;
     sg_update_image(g_game_render.atlas_image, &(sg_image_data){
-        .mip_levels[0] = { .ptr = atlas, .size = sizeof(atlas) },
+        .mip_levels[0] = { .ptr = atlas, .size = sizeof g_game_render_atlas_px },
     });
+}
+
+/* ---- Colour ramps ---------------------------------------------------------- */
+
+/* Row r's 64 colours from the colorxlat snapshot: the fill shader's ramp step,
+ * colorxlat[ch][(c5 << 8) + li] then max(c - 64, 0) * 255 / 191, as the 8-bit
+ * value the target stores. (c - 64) * 255 / 191 is never k + 0.5, so rounding
+ * it here gives the byte the shader's float result is written as. */
+static inline void game_render__ramp_fill(int r) {
+    uint16_t key = g_ramp_key[r];
+    int c5[3] = { (key >> 10) & 31, (key >> 5) & 31, key & 31 };
+    for (int li = 0; li < 64; li++) {
+        uint8_t *px = &g_ramp_px[(r * 64 + li) * 4];
+        for (int ch = 0; ch < 3; ch++) {
+            int v = g_game_render.cxlat_snap[ch * 0x4000 + ((c5[ch] << 8) + li) * 2];
+            double x = v > 64 ? (double)(v - 64) * 255.0 / 191.0 : 0.0;
+            px[ch] = (uint8_t)(x >= 255.0 ? 255 : (int)(x + 0.5));
+        }
+        px[3] = 255;
+    }
+}
+
+/* Start a batch: once the ramps are mostly used and none has gone up this frame,
+ * forget them all, so rows follow the colours on screen. */
+static inline void game_render__ramp_begin(void) {
+    if (!g_game_render.ramp_enabled || g_ramp_uploaded) return;
+    if (g_game_render.ramp_count <= GAME_RENDER_RAMP_ROWS * 3 / 4) return;
+    for (int r = 0; r < g_game_render.ramp_count; r++) g_ramp_row_of[g_ramp_key[r]] = 0;
+    g_game_render.ramp_count = 0;
+}
+
+/* The ramp row for a fill colour (as the shader rounds it to 5 bits a channel),
+ * made if new; -1 when the face keeps the shader's own lookup: no ramps on this
+ * backend or no tables yet, a channel out of range, all rows taken, or a new
+ * colour after this frame's ramps went up. */
+static inline int game_render__ramp_row(float r, float g, float b) {
+    if (!g_game_render.ramp_enabled || !g_game_render.cxlat_valid) return -1;
+    int r5 = (int)(r * 31.0f + 0.5f), g5 = (int)(g * 31.0f + 0.5f), b5 = (int)(b * 31.0f + 0.5f);
+    if ((unsigned)r5 > 31u || (unsigned)g5 > 31u || (unsigned)b5 > 31u) return -1;
+    int key = (r5 << 10) | (g5 << 5) | b5;
+    if (g_ramp_row_of[key]) return g_ramp_row_of[key] - 1;
+    if (g_ramp_uploaded || g_game_render.ramp_count == GAME_RENDER_RAMP_ROWS) return -1;
+    int row = g_game_render.ramp_count++;
+    g_ramp_row_of[key] = (uint16_t)(row + 1);
+    g_ramp_key[row] = (uint16_t)key;
+    game_render__ramp_fill(row);
+    g_game_render.ramp_dirty = true;
+    return row;
+}
+
+/* Upload the ramps if any row changed, at most once a frame. */
+static inline void game_render__ramp_upload(void) {
+    if (!g_game_render.ramp_enabled || !g_game_render.ramp_dirty || g_ramp_uploaded) return;
+    sg_update_image(g_game_render.ramp_image, &(sg_image_data){
+        .mip_levels[0] = { .ptr = g_ramp_px, .size = sizeof g_ramp_px } });
+    g_ramp_uploaded = true;
+    g_game_render.ramp_dirty = false;
 }
 
 /* Upload the live lumaram + colorxlat tables (raw bus bytes) to the LUT
  * textures the fill shader integer-fetches for the MAME luma ramp.  Cheap
- * (~180 KB/frame); call once per frame before drawing fills. */
+ * (~180 KB/frame); call once per frame before drawing fills. colorxlat goes up
+ * from a snapshot, which the colour ramps are rebuilt from, so both views of
+ * the table always agree. */
 static inline void game_render_upload_luts(const uint8_t *luma, const uint8_t *colorxlat) {
     if (!g_game_render.initialized) return;
     if (luma)
         sg_update_image(g_game_render.luma_image, &(sg_image_data){
             .mip_levels[0] = { .ptr = luma, .size = LUMA_SIZE } });
-    if (colorxlat)
+    if (colorxlat) {
+        memcpy(g_game_render.cxlat_snap, colorxlat, COLORXLAT_SIZE);
         sg_update_image(g_game_render.cxlat_image, &(sg_image_data){
-            .mip_levels[0] = { .ptr = colorxlat, .size = COLORXLAT_SIZE } });
+            .mip_levels[0] = { .ptr = g_game_render.cxlat_snap, .size = COLORXLAT_SIZE } });
+        g_game_render.cxlat_valid = true;
+        for (int r = 0; r < g_game_render.ramp_count; r++) game_render__ramp_fill(r);
+        if (g_game_render.ramp_count) g_game_render.ramp_dirty = true;
+    }
 }
 
 /* ---- Per-frame draw ------------------------------------------------------ */
@@ -905,8 +1395,47 @@ static inline void game_render_draw_game(sg_view tile_view,
     sg_draw(0, 6, 1);
 }
 
-static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int vcount);
-static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int vcount);
+/* game_render_draw_game for a layer of pens (the GPU tile compositor's targets):
+ * each pixel's colour is pal_view's texel for its pen. GL backends only. */
+static inline void game_render_draw_indexed(sg_view pen_view, sg_view pal_view, bool opaque,
+                                             int ox, int oy, int w, int h) {
+    if (!g_game_render.initialized) return;
+    if (w <= 0 || h <= 0) return;
+
+    sg_apply_viewport(ox, oy, w, h, true);
+    sg_apply_pipeline(opaque ? g_game_render.indexed_opaque : g_game_render.indexed_pipeline);
+    sg_apply_bindings(&(sg_bindings){
+        .vertex_buffers[0] = g_game_render.quad_vbuf,
+        .views[0]          = pen_view,
+        .views[1]          = pal_view,
+        .samplers[0]       = g_game_render.tile_sampler,
+    });
+    sg_draw(0, 6, 1);
+}
+
+/*
+ * Draw a finished render target (a frame drawn offscreen at the board's own
+ * resolution) into the current pass's viewport (ox, oy, w, h), opaque, with
+ * nearest or bilinear filtering.
+ */
+static inline void game_render_draw_target(sg_view target_view, bool linear,
+                                            int ox, int oy, int w, int h) {
+    if (!g_game_render.initialized) return;
+    if (w <= 0 || h <= 0) return;
+
+    sg_apply_viewport(ox, oy, w, h, true);
+    sg_apply_pipeline(g_game_render.target_pipeline);
+    sg_apply_bindings(&(sg_bindings){
+        .vertex_buffers[0] = g_game_render.target_vbuf,
+        .views[0]          = target_view,
+        .samplers[0]       = linear ? g_game_render.target_sampler_linear : g_game_render.tile_sampler,
+    });
+    sg_draw(0, 6, 1);
+}
+
+static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int first, int vcount);
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int vcount);
+static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int vcount, int can_discard);
 
 /*
  * Draw the 3D wireframe lines currently in g_geo3d_lines over the tile quad.
@@ -950,17 +1479,17 @@ static inline void game_render_draw_lines(float cam_x, float cam_y, float cam_z,
 
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
-    game_render_submit_lines(&vs_params, vcount);
+    game_render_submit_lines(&vs_params, 0, vcount);
 }
 
-static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int vcount) {
+static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int first, int vcount) {
     const game_render_vs_params_t vs_params = *vs;
     sg_apply_pipeline(g_game_render.line_pipeline);
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.line_vbuf,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });
-    sg_draw(0, vcount, 1);
+    sg_draw(first, vcount, 1);
 }
 
 /*
@@ -1005,63 +1534,173 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
 
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
-    game_render_submit_fills(&vs_params, vcount);
+    game_render_submit_fills(&vs_params, 0, vcount);
 }
 
-static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int vcount) {
+/* The fill pipeline for a cull setting (g_backface_cull 0/1/2) and whether the
+ * faces drawn can discard (0: none is transparent or checkered). */
+static inline sg_pipeline game_render_fill_pip(int cull, int can_discard) {
+    int v = cull == 1 ? 1 : cull == 2 ? 2 : 0;
+    if (!can_discard && g_game_render_fill_split && g_game_render.fill_opaque[v].id) return g_game_render.fill_opaque[v];
+    return v == 1 ? g_game_render.fill_pipeline_cw : v == 2 ? g_game_render.fill_pipeline_ccw : g_game_render.fill_pipeline;
+}
+
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int vcount) {
+    game_render_submit_fills_as(vs, first, vcount, 1);
+}
+
+static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int vcount, int can_discard) {
     const game_render_vs_params_t vs_params = *vs;
-    sg_apply_pipeline(g_backface_cull == 1 ? g_game_render.fill_pipeline_cw
-                    : g_backface_cull == 2 ? g_game_render.fill_pipeline_ccw
-                    :                        g_game_render.fill_pipeline);
+    sg_apply_pipeline(game_render_fill_pip(g_backface_cull, can_discard));
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.fill_vbuf,
         .views[0]          = g_game_render.atlas_view,
         .views[1]          = g_game_render.luma_view,
         .views[2]          = g_game_render.cxlat_view,
+        .views[3]          = g_game_render.ramp_view,
         .samplers[0]       = g_game_render.atlas_sampler,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });
-    sg_draw(0, vcount, 1);
+    sg_draw(first, vcount, 1);
 }
 
-/* Pack the emitted geometry and draw it with a ready-made (row-major) MVP. */
-static inline void game_render_flush_mvp(const float *mvp, bool lines_only) {
-    float mvp_t[16];
-    gm_mat4_transpose(mvp_t, mvp);
-    game_render_vs_params_t vs;
-    memcpy(vs.mvp, mvp_t, sizeof mvp_t);
+/* Replay this frame's layer behind the 3D and its logged fill draws into the
+ * current pass, the reference way (ref: back colour quad, blended pen layer,
+ * the reference fill shader for every face) or the way the frame draws them
+ * (opaque pen layer, fills split by whether they can discard). Vertex buffer and
+ * textures are as the frame left them: nothing is uploaded. back_view: the back
+ * colour; bg_view / pal_view: the GPU compositor's back layer and pens. */
+static inline void game_render_replay_fills(bool ref, sg_view back_view, sg_view bg_view, sg_view pal_view) {
+    if (g_fill_log.n > 0) {
+        int x = g_fill_log.d[0].vx, y = g_fill_log.d[0].vy, w = g_fill_log.d[0].vw, h = g_fill_log.d[0].vh;
+        if (ref) game_render_draw_game(back_view, x, y, w, h);
+        game_render_draw_indexed(bg_view, pal_view, !ref, x, y, w, h);
+    }
+    for (int i = 0; i < g_fill_log.n; i++) {
+        const game_render_fill_draw_t *e = &g_fill_log.d[i];
+        sg_apply_viewport(e->vx, e->vy, e->vw, e->vh, true);
+        sg_apply_pipeline(ref ? g_game_render.fill_ref[e->cull == 1 ? 1 : e->cull == 2 ? 2 : 0]
+                              : game_render_fill_pip(e->cull, e->can_discard));
+        sg_apply_scissor_rect(e->sx, e->sy, e->sw, e->sh, true);
+        sg_apply_bindings(&(sg_bindings){
+            .vertex_buffers[0] = g_game_render.fill_vbuf,
+            .views[0]          = g_game_render.atlas_view,
+            .views[1]          = g_game_render.luma_view,
+            .views[2]          = g_game_render.cxlat_view,
+            .views[3]          = g_game_render.ramp_view,
+            .samplers[0]       = g_game_render.atlas_sampler,
+        });
+        game_render_vs_params_t vs;
+        memcpy(vs.mvp, e->mvp, sizeof vs.mvp);
+        sg_apply_uniforms(0, &(sg_range){ .ptr = &vs, .size = sizeof vs });
+        sg_draw(e->first, e->count, 1);
+    }
+}
 
-    if (!lines_only && g_geo3d_tris.count > 0) {
-        int n = g_geo3d_tris.count > GEO3D_MAX_TRIS ? GEO3D_MAX_TRIS : g_geo3d_tris.count;
-        for (int i = 0; i < n; i++) {
+/*
+ * Batched submission for the GEO display list. Every run of objects sharing a
+ * projection and window decodes into the one tri/line buffer and records its
+ * slice, matrix and scissor; the batch then uploads each vertex buffer ONCE and
+ * issues the runs' draws in order. Updating a buffer between draws that still
+ * reference it forces a GPU sync on some drivers (Mesa's panfrost took 60-260 ms
+ * a frame doing that) and costs every driver a full buffer write per run.
+ */
+#define GAME_RENDER_MAX_RUNS 1024
+
+typedef struct {
+    int   tri_first, tri_count;
+    int   line_first, line_count;
+    float mvp_t[16];           /* column-major, as the shaders take it */
+    int   sx, sy, sw, sh;      /* scissor, framebuffer pixels */
+} game_render_run_t;
+
+static struct {
+    game_render_run_t runs[GAME_RENDER_MAX_RUNS];
+    int               count;
+} g_render_batch;
+
+/* Upload the batch's geometry once and draw its runs in order, then empty it. */
+static inline void game_render_batch_flush(bool lines_only) {
+    const int nt = g_geo3d_tris.count  > GEO3D_MAX_TRIS  ? GEO3D_MAX_TRIS  : g_geo3d_tris.count;
+    const int nl = g_geo3d_lines.count > GEO3D_MAX_LINES ? GEO3D_MAX_LINES : g_geo3d_lines.count;
+    bool fills = !lines_only && nt > 0;
+    bool lines = g_geo_wireframe && nl > 0;
+
+    /* Per triangle: can its face discard (transparent or checkered)? Runs are
+     * drawn as consecutive stretches of alike triangles, in order, so the ones
+     * that cannot go through the discard-free shader. */
+    static uint8_t can_discard[GEO3D_MAX_TRIS];
+    if (fills) {
+        game_render__ramp_begin();
+        for (int i = 0; i < nt; i++) {
             const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
+            can_discard[i] = ((int)(T->fl + 0.5f) & (int)(GEO3D_FACE_TRANSPARENT | GEO3D_FACE_CHECKER)) != 0;
             game_render_tex_vertex_t *v = &g_game_render.fill_verts[i * 3];
             v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].u=T->u0; v[0].v=T->v0;
             v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
             v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].u=T->u2; v[2].v=T->v2;
             float lb = g_luma_ramp ? T->lb : -1.0f;
+            /* colour alpha: the face's ramp row + 2 (1.0, as before, without one) */
+            float ramp = 1.0f;
+            if (g_game_render.ramp_enabled) {
+                int row = game_render__ramp_row(T->r, T->g, T->b);
+                if (row >= 0) ramp = (float)(row + 2);
+            }
             for (int k = 0; k < 3; k++) {
-                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=1.0f;
+                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=ramp;
                 v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
                 v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=T->fl; v[k].texlod=T->texlod;
             }
         }
         sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
-            .ptr = g_game_render.fill_verts, .size = (size_t)n * 3 * sizeof(game_render_tex_vertex_t) });
-        game_render_submit_fills(&vs, n * 3);
+            .ptr = g_game_render.fill_verts, .size = (size_t)nt * 3 * sizeof(game_render_tex_vertex_t) });
+        game_render__ramp_upload();
+        g_fill_log.uploads++;
     }
-    if (g_geo_wireframe && g_geo3d_lines.count > 0) {
-        int n = g_geo3d_lines.count > GEO3D_MAX_LINES ? GEO3D_MAX_LINES : g_geo3d_lines.count;
-        for (int i = 0; i < n; i++) {
+    if (lines) {
+        for (int i = 0; i < nl; i++) {
             const geo3d_line_t *L = &g_geo3d_lines.lines[i];
             game_render_line_vertex_t *v = &g_game_render.line_verts[i * 2];
             v[0].x = L->x0; v[0].y = L->y0; v[0].z = L->z0; v[0].r = L->r; v[0].g = L->g; v[0].b = L->b; v[0].a = 1.0f;
             v[1].x = L->x1; v[1].y = L->y1; v[1].z = L->z1; v[1].r = L->r; v[1].g = L->g; v[1].b = L->b; v[1].a = 1.0f;
         }
         sg_update_buffer(g_game_render.line_vbuf, &(sg_range){
-            .ptr = g_game_render.line_verts, .size = (size_t)n * 2 * sizeof(game_render_line_vertex_t) });
-        game_render_submit_lines(&vs, n * 2);
+            .ptr = g_game_render.line_verts, .size = (size_t)nl * 2 * sizeof(game_render_line_vertex_t) });
     }
+
+    for (int r = 0; r < g_render_batch.count; r++) {
+        const game_render_run_t *run = &g_render_batch.runs[r];
+        game_render_vs_params_t vs;
+        memcpy(vs.mvp, run->mvp_t, sizeof vs.mvp);
+        sg_apply_scissor_rect(run->sx, run->sy, run->sw, run->sh, true);
+        int tc = run->tri_first + run->tri_count > nt ? nt - run->tri_first : run->tri_count;
+        bool split = g_game_render_fill_split && g_game_render.fill_opaque[0].id != 0;
+        for (int s = run->tri_first, end = run->tri_first + (fills ? tc : 0); s < end; ) {
+            int k = can_discard[s], e0 = s;
+            if (split) while (e0 < end && can_discard[e0] == k) e0++;
+            else       { e0 = end; k = 1; }
+            game_render_submit_fills_as(&vs, s * 3, (e0 - s) * 3, k);
+            if (g_game_render_fill_verify) {
+                if (g_fill_log.n == GAME_RENDER_FILL_LOG_MAX) {
+                    g_fill_log.overflow = true;
+                } else {
+                    game_render_fill_draw_t *e = &g_fill_log.d[g_fill_log.n++];
+                    e->vx = g_fill_log.vx; e->vy = g_fill_log.vy; e->vw = g_fill_log.vw; e->vh = g_fill_log.vh;
+                    e->sx = run->sx; e->sy = run->sy; e->sw = run->sw; e->sh = run->sh;
+                    memcpy(e->mvp, vs.mvp, sizeof e->mvp);
+                    e->cull = g_backface_cull; e->first = s * 3; e->count = (e0 - s) * 3; e->can_discard = k;
+                }
+            }
+            s = e0;
+        }
+        int lc = run->line_first + run->line_count > nl ? nl - run->line_first : run->line_count;
+        if (lines && lc > 0) {
+            game_render_submit_lines(&vs, run->line_first * 2, lc * 2);
+        }
+    }
+    g_render_batch.count = 0;
+    geo3d_tris_reset();
+    geo3d_lines_reset();
 }
 
 /*
@@ -1115,50 +1754,80 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
     const int count = geo->captured_count;
     float saved_light[3] = { g_light_dir[0], g_light_dir[1], g_light_dir[2] };
     sg_apply_viewport(ox, oy, w, h, true);
+    g_fill_log.vx = ox; g_fill_log.vy = oy; g_fill_log.vw = w; g_fill_log.vh = h;
+    g_render_batch.count = 0;
+    geo3d_lines_reset();
+    geo3d_tris_reset();
     for (int i = 0; i < count; ) {
         const captured_model_t *c0 = &geo->captured[i];
         int j = i;
-        geo3d_lines_reset();
-        geo3d_tris_reset();
-        for (; j < count; j++) {
+        while (j < count) {
             const captured_model_t *cm = &geo->captured[j];
             if (cm->window != c0->window || memcmp(cm->gproj, c0->gproj, sizeof cm->gproj) != 0
                     || memcmp(cm->vp, c0->vp, sizeof cm->vp) != 0)
                 break;
-            if (geo->isolate_index >= 0 && j != geo->isolate_index) continue;
-            if (geo->filter_enabled && (j < geo->filter_min || j > geo->filter_max)) continue;
-            g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
-            g_geo3d_obj_tpa = cm->tpa;
-            g_geo3d_obj_tha = cm->tha;
-            g_geo3d_board_luma = 1;
-            g_geo3d_mode = cm->geo_mode;
-            g_geo3d_lod  = cm->geo_lod;
-            if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
-                uint32_t w = cm->dbg_mesh_ptr & 0x7FFFu;
-                g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][w];
-                g_geo3d_obj_mesh_size = (0x8000u - w) * 4u;
-            }
-            geo3d_decode_model(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
-                               materials, materials_size, table_off, table_count,
-                               mesh_ptr_subtract, mesh_ptr_add,
-                               geo->use_matrix ? cm->matrix : NULL,
-                               cm->color[0], cm->color[1], cm->color[2]);
-            g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
-            g_geo3d_board_luma = 0;
-            g_geo3d_obj_mesh = NULL;
+            j++;
         }
         int x0 = c0->vp[0] < 0 ? 0 : c0->vp[0], y0 = c0->vp[1] < 0 ? 0 : c0->vp[1];
         int x1 = c0->vp[2] > VIDEO_WIDTH ? VIDEO_WIDTH : c0->vp[2];
         int y1 = c0->vp[3] > VIDEO_HEIGHT ? VIDEO_HEIGHT : c0->vp[3];
-        if (x1 > x0 && y1 > y0) {
-            sg_apply_scissor_rect(ox + x0 * w / VIDEO_WIDTH, oy + y0 * h / VIDEO_HEIGHT,
-                                  (x1 - x0) * w / VIDEO_WIDTH, (y1 - y0) * h / VIDEO_HEIGHT, true);
-            float mvp[16];
-            gm_mat4_geo_projection(mvp, c0->gproj, c0->window, geo->geo_windows);
-            game_render_flush_mvp(mvp, geo->lines_only);
+        if (!(x1 > x0 && y1 > y0)) { i = j; continue; }   /* off-screen window: nothing drawn */
+
+        if (g_render_batch.count == GAME_RENDER_MAX_RUNS) game_render_batch_flush(geo->lines_only);
+        for (int attempt = 0; ; attempt++) {
+            const int tri_first = g_geo3d_tris.count, line_first = g_geo3d_lines.count;
+            for (int k = i; k < j; k++) {
+                const captured_model_t *cm = &geo->captured[k];
+                if (geo->isolate_index >= 0 && k != geo->isolate_index) continue;
+                if (geo->filter_enabled && (k < geo->filter_min || k > geo->filter_max)) continue;
+                g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
+                g_geo3d_obj_tpa = cm->tpa;
+                g_geo3d_obj_tha = cm->tha;
+                g_geo3d_board_luma = 1;
+                g_geo3d_mode = cm->geo_mode;
+                g_geo3d_lod  = cm->geo_lod;
+                if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
+                    uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
+                    g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
+                    g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
+                }
+                geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
+                                          materials, materials_size, table_off, table_count,
+                                          mesh_ptr_subtract, mesh_ptr_add,
+                                          geo->use_matrix ? cm->matrix : NULL,
+                                          cm->color[0], cm->color[1], cm->color[2]);
+                g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
+                g_geo3d_board_luma = 0;
+                g_geo3d_obj_mesh = NULL;
+            }
+            /* The run filled the shared buffer after earlier runs: draw those and
+             * decode it again into an empty buffer, where it gets the whole
+             * capacity — exactly what drawing each run on its own gave it. */
+            bool full = g_geo3d_tris.count >= GEO3D_MAX_TRIS || g_geo3d_lines.count >= GEO3D_MAX_LINES;
+            if (full && attempt == 0 && (tri_first > 0 || line_first > 0)) {
+                g_geo3d_tris.count  = tri_first;
+                g_geo3d_lines.count = line_first;
+                game_render_batch_flush(geo->lines_only);
+                continue;
+            }
+            game_render_run_t *run = &g_render_batch.runs[g_render_batch.count++];
+            run->tri_first  = tri_first;
+            run->tri_count  = g_geo3d_tris.count - tri_first;
+            run->line_first = line_first;
+            run->line_count = g_geo3d_lines.count - line_first;
+            break;
         }
+        game_render_run_t *run = &g_render_batch.runs[g_render_batch.count - 1];
+        run->sx = ox + x0 * w / VIDEO_WIDTH;
+        run->sy = oy + y0 * h / VIDEO_HEIGHT;
+        run->sw = (x1 - x0) * w / VIDEO_WIDTH;
+        run->sh = (y1 - y0) * h / VIDEO_HEIGHT;
+        float mvp[16];
+        gm_mat4_geo_projection(mvp, c0->gproj, c0->window, geo->geo_windows);
+        gm_mat4_transpose(run->mvp_t, mvp);
         i = j;
     }
+    game_render_batch_flush(geo->lines_only);
     g_light_dir[0] = saved_light[0]; g_light_dir[1] = saved_light[1]; g_light_dir[2] = saved_light[2];
     sg_apply_scissor_rect(ox, oy, w, h, true);
 }

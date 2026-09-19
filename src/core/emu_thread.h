@@ -315,7 +315,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 } else if (bp_check(ctx->cpu->sfr.ip)) {
                     break;
                 }
-                if (i960_step(ctx->cpu, ctx->bus) != 0) break;
+                if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
                 ctx->total_steps++;
                 if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
                 if (g_log.warn_triggered) break;
