@@ -280,6 +280,7 @@ typedef struct {
     float lb, pl;                /* lumabase (lumaram band) + poly_luma (0..1 lighting) */
     float fl;                    /* GEO3D_FACE_* bits, carried as a float to the shader */
     float texlod;                /* the board's per-polygon texlod, or GEO3D_TEXLOD_NONE */
+    float zs0, zs1, zs2;         /* the substituted depth per corner, or NONE */
 } geo3d_tri_t;
 
 /* A polygon's texture LOD as the rasterizer takes it (model2_v.cpp, raster
@@ -290,6 +291,110 @@ typedef struct {
  * derivatives for them. */
 #define GEO3D_TEXLOD_NONE 1.0e6f
 static float g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
+
+/*
+ * The board's polygon z-sort, which this renderer's depth buffer has to be told
+ * about (model2_v.cpp model2_3d_process_polygon; the explorer's port is
+ * vendor/noclip js/viewer.js VERT_SHADER, and js/model.js carries the corners).
+ *
+ * The board has no depth buffer. It gives a WHOLE POLYGON one z — the nearest
+ * or the farthest of its corners, whichever bits 10..11 of the attribute word
+ * name — sorts on that into 65536 buckets drawn near-first, and the fill writes
+ * a pixel only where nothing has. So a polygon wins a pixel outright, whatever
+ * the geometry does between it and the next, and the artists used that: a big
+ * backing plane asks to be sorted by its far corner and stands out of the way
+ * of the small faces painted on it.
+ *
+ * Mode 0 is not a mode. It means "keep the previous polygon's corners", which
+ * lands the face in that polygon's bucket — the board's own way of declaring a
+ * decal — so the corners and the last real mode are carried forward across the
+ * face loop exactly as the ROM emits them.
+ *
+ *   1  the nearest corner (min_z)      2  the farthest (max_z)
+ *   3  the board's error case: infinitely far
+ *
+ * *Symptom that surfaced this in STF:* the Flying Carpet's pyramid shadows.
+ * Model 580's sand is 262 triangles at mode 2 and the shadows painted on it are
+ * 32 at mode 1, flat in the same y = -3.0 plane and carrying the checker bit.
+ * Ignoring both instructions leaves the two at identical depth and the GPU's
+ * tie-break decides per pixel. South Island's 507 is the same fault one step
+ * worse: its plate is modelled 0.01 from the plane under it, which no depth
+ * buffer resolves at that range, and it speckled.
+ *
+ * Only half of the rule is taken, and the half is the point (the explorer
+ * reasons this out at length; its answer is reproduced here). A polygon may
+ * take the sorted depth when that pushes it BACK, never when it pulls it
+ * forward. Pushing back is what the artists used it for. Pulling forward is the
+ * same instruction read the other way — a surface claiming every pixel it
+ * covers at its nearest corner — which the board can afford because it has no
+ * depth buffer to contradict and this renderer cannot. So the shader clamps the
+ * substitute into [own z - GEO3D_ZSORT_RECEDE, own z]: a vertex may recede, by
+ * its own polygon's depth and no further.
+ *
+ * And the bound alone is not enough, because what it bounds is still a sink: a
+ * ground plane pushed back twelve units passes below anything modelled under it
+ * within them. So whether to recede at all is decided by the polygon's own
+ * depth — how far its near corner stands in front of its far one along the
+ * view. Two faces lying flat against each other are shallow together, so the
+ * backing one recedes in full and the decal keeps the pixel, which is the whole
+ * of what the rule was for. A face raked along the view is deep, and stepping
+ * it back sinks its near end through whatever stands under it, so it keeps the
+ * depth the projection gave it.
+ *
+ * *Symptom that surfaced the bound in STF:* Aurora Icefield. Its ground is four
+ * wedges hundreds of units deep at a grazing angle, and receding them in full
+ * put the ice behind the walruses' reflection and the lower half of the cage,
+ * both of which hang under it — half the rink went black.
+ *
+ * Faces that never went through the geometry decoder (the homebrew HUD, the
+ * wireframe, the object viewer's free camera) carry NONE and keep the depth the
+ * projection gives them.
+ */
+#define GEO3D_ZSORT_NONE   1.0e30f
+static float g_geo3d_emit_zs        = GEO3D_ZSORT_NONE;
+static int   g_geo3d_zsort          = 1;      /* 0: every face keeps its own depth */
+static float g_geo3d_zsort_recede   = 12.0f;  /* how far back a vertex may be taken */
+
+/* The sort z of one polygon, from the four corners it is sorted by, or NONE for
+ * a polygon too deep to recede. Camera z runs negative into the screen, so the
+ * board's min_z is the greatest of the four and its max_z the least. */
+static inline float geo3d_sort_z(const vec3_t *sv, const int *zsrc, uint32_t zmode) {
+    if (!g_geo3d_zsort) return GEO3D_ZSORT_NONE;
+    if (zmode == 3u) return -1.0e10f;            /* the board's error case */
+    float near_ = sv[zsrc[0]].z, far_ = near_;
+    for (int i = 1; i < 4; i++) {
+        float c = sv[zsrc[i]].z;
+        if (c > near_) near_ = c;
+        if (c < far_)  far_  = c;
+    }
+    if (near_ - far_ > g_geo3d_zsort_recede) return GEO3D_ZSORT_NONE;
+    return zmode == 2u ? far_ : near_;
+}
+
+/* The bound, applied per vertex so the slope of a polygon lying along the view
+ * survives: the vertex may recede to its polygon's sorted depth, no further
+ * than the bound, and is never pulled forward. Done here rather than in the
+ * shader so the bound stays an ordinary variable. */
+static inline float geo3d_zs_vertex(float zb, float z) {
+    if (zb > 1.0e29f) return GEO3D_ZSORT_NONE;
+    float lo = z - g_geo3d_zsort_recede;
+    return zb < lo ? lo : (zb > z ? z : zb);
+}
+
+/* Carry the z-sort state across one face of the index-array walk, the way
+ * model.js does: a face naming a mode replaces both the mode and the corners,
+ * and a face naming none keeps what stands. */
+static inline void geo3d_zsort_step(uint32_t at, bool is_tri, bool has_C,
+                                    int ai, int bi, int ci, int di,
+                                    int *zsrc, uint32_t *zmode, bool *zset) {
+    uint32_t zm = (at >> 10) & 3u;
+    if (zm == 0u && *zset) return;
+    if (zm != 0u) *zmode = zm;
+    *zset = true;
+    zsrc[0] = ai; zsrc[1] = bi;
+    if (is_tri) { zsrc[2] = has_C ? ci : ai; zsrc[3] = zsrc[2]; }
+    else        { zsrc[2] = di;              zsrc[3] = ci; }
+}
 
 /* Per-face fill flags out of the texture header — the same bits, in the same
  * places, as the explorer's face flags (vendor/noclip js/model.js), so
@@ -385,6 +490,9 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
     T->tx=tx; T->ty=ty; T->tw=tw; T->th=th;
     T->lb=lb; T->pl=pl; T->fl=fl;
     T->texlod = g_geo3d_emit_texlod;
+    T->zs0 = geo3d_zs_vertex(g_geo3d_emit_zs, z0);
+    T->zs1 = geo3d_zs_vertex(g_geo3d_emit_zs, z1);
+    T->zs2 = geo3d_zs_vertex(g_geo3d_emit_zs, z2);
 }
 
 /* Backward-compatible: untextured triangle (tw=0 → shader uses flat color). */
@@ -1711,6 +1819,8 @@ static inline void geo3d_decode_model(int model_idx,
      * and the UV stream advances 8 words every iteration. Verified on model 3351:
      * 13 iterations, 3 sentinels → 10 material records, 104-word UV stream. */
     int efi = 0;
+    /* The board's z-sort, carried across the walk (see geo3d_sort_z). */
+    int zsrc[4] = {0,0,0,0}; uint32_t zmode = 0u; bool zset = false;
     geo3d_split_reset();
     for (int i = 0; i < n_idx - 8; i += 4) {
         int fi = i / 4;
@@ -1881,6 +1991,10 @@ static inline void geo3d_decode_model(int model_idx,
 
         bool is_tri = tri_cnt || !has_C || !has_D;
 
+        geo3d_zsort_step((fi < n_qt) ? qa[fi] : 0u, is_tri, has_C, ai, bi, ci, di,
+                         zsrc, &zmode, &zset);
+        g_geo3d_emit_zs = geo3d_sort_z(sv, zsrc, zmode);
+
         /* Per-face luminance (poly_luma) = |normal·light|*diffuse + ambient,
          * approximating MAME's per-polygon lighting (model2_v.cpp geo_parse).
          * NOT folded into the color — it's passed through so the colorxlat luma
@@ -2003,6 +2117,7 @@ static inline void geo3d_decode_model(int model_idx,
         efi++;   /* this face was emitted → consumes one material record */
     }
     g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
+    g_geo3d_emit_zs     = GEO3D_ZSORT_NONE;
 }
 
 /* ---- Mesh cache -------------------------------------------------------------
@@ -2028,6 +2143,8 @@ typedef struct {
     int32_t  ai, bi, ci, di;
     uint8_t  is_tri, has_c, has_qn, mat_ok;
     uint32_t qa;                 /* attribute word: texparam slot in bits 18..22 */
+    int32_t  zsrc[4];            /* the corners the board sorts this polygon by */
+    uint32_t zmode;              /* attribute bits 10..11, carried (geo3d_sort_z) */
     uint32_t split_quad, split_cut;
     uint32_t matidx;             /* colorbase, when mat_ok */
     vec3_t   qn;                 /* the record's normal, Z negated */
@@ -2119,6 +2236,7 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
 
     uint32_t mat_word = m->mat_ptr, uv_word = m->uv_ptr;
     int n_faces = 0, efi = 0;
+    int zsrc[4] = {0,0,0,0}; uint32_t zmode = 0u; bool zset = false;
     for (int i = 0; i < n_idx - 8; i += 4) {
         int fi = i / 4;
         int ai = idx[i], bi = idx[i + 1], ci = idx[i + 2], di = idx[i + 3];
@@ -2171,6 +2289,10 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         if (ai < 0 || ai >= n_sv) continue;
         if (bi < 0 || bi >= n_sv) continue;
         bool has_c = (ci >= 0 && ci < n_sv), has_d = (di >= 0 && di < n_sv);
+        /* Before the skip below, not after: the z-sort state is carried across
+         * every face of the walk, including the ones nothing is drawn for. */
+        geo3d_zsort_step((fi < n_qt) ? qa[fi] : 0u, tri_cnt || !has_c || !has_d, has_c,
+                         ai, bi, ci, di, zsrc, &zmode, &zset);
         if (untex_trans) { efi++; continue; }   /* the board draws nothing for it */
 
         geo3d_cface_t *f = &faces[n_faces++];
@@ -2181,6 +2303,8 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         f->has_qn = fi < n_qt;
         f->qn     = f->has_qn ? qn[fi] : (vec3_t){0, 0, 0};
         f->qa     = f->has_qn ? qa[fi] : 0;
+        f->zmode  = zmode;
+        for (int z = 0; z < 4; z++) f->zsrc[z] = zsrc[z];
         f->mat_ok = mat_ok;
         f->matidx = matidx;
         if (!f->is_tri) { f->split_quad = svk[ai] ^ svk[bi] ^ svk[ci] ^ svk[di]; f->split_cut = svk[ai] ^ svk[di]; }
@@ -2293,6 +2417,8 @@ static inline void geo3d_decode_model_cached(int model_idx,
         vec3_t C = f->has_c ? tv[f->ci] : (vec3_t){0, 0, 0};
         vec3_t D = f->is_tri ? (vec3_t){0, 0, 0} : tv[f->di];
 
+        g_geo3d_emit_zs = geo3d_sort_z(tv, f->zsrc, f->zmode);
+
         float fr = cr, fg = cg, fb = cb;
         if (f->mat_ok) {
             uint32_t pal = GEO3D_PALETTE_OFF + f->matidx * 2u;
@@ -2379,6 +2505,7 @@ static inline void geo3d_decode_model_cached(int model_idx,
         }
     }
     g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
+    g_geo3d_emit_zs     = GEO3D_ZSORT_NONE;
 }
 
 /* ---- Programmatic per-model texture extractor -------------------------------
