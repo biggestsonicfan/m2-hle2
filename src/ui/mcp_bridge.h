@@ -180,6 +180,11 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"fov",  v,sizeof v)) g_geo3d_state->fov_deg = (float)atof(v);
     if (mcp_json_get_str(req,"test", v,sizeof v)) g_geo3d_state->test_triangle = (atoi(v) != 0);
     if (mcp_json_get_str(req,"lines_only",v,sizeof v)) g_geo3d_state->lines_only = (atoi(v) != 0);
+    /* The board's polygon z-sort (geo3d.h geo3d_sort_z) — 0 leaves every face
+     * at the depth the projection gives it, which is what a before/after on a
+     * co-planar decal wants. */
+    if (mcp_json_get_str(req,"zsort",    v,sizeof v)) g_geo3d_zsort = (atoi(v) != 0);
+    if (mcp_json_get_str(req,"zrecede",  v,sizeof v)) g_geo3d_zsort_recede = (float)atof(v);
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
              "\"lines\":%d,\"tris\":%d,\"test\":%d}",
