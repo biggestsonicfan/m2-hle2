@@ -95,6 +95,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 /*
  * The peer-to-peer protocol revision, published in the room attribute word and
@@ -394,9 +395,75 @@ typedef struct {
      * mutex held. Netplay refuses to start without one. */
     void            (*reset_board)(void *ctx);
     void             *reset_ctx;
+
+    /* The session's input log (netplay_inputlog_*): both players' words and the
+     * check, one line per frame, so a desync can be replayed through
+     * tests/det_digest.c --inputs and the frame it split on found. */
+    FILE             *inlog;
+    uint32_t          inlog_w0, inlog_w1;   /* this frame's words, from begin_frame */
 } netplay_t;
 
 static netplay_t g_netplay;
+
+/* ---- The session input log ------------------------------------------------
+ *
+ * Lockstep sends inputs, not state, so the inputs ARE the session: replayed
+ * from a cold boot they give back every frame either board computed. Each
+ * session writes them next to the settings file (netplay_cfg_path's directory:
+ * %APPDATA%\m2hle2, ~/.config/m2hle2, or wherever --net-config points -- the
+ * libretro core points it at RetroArch's saves), as
+ *
+ *   netplay-<YYYYmmdd-HHMMSS>-s<session>-p<player>.inputs
+ *
+ * with '#' header lines (version, game, session, seed, player, delay, peer)
+ * and then "frame w0 w1 check" in hex, one per frame. When two players saw
+ * different games, both logs replay through the same build; the frame where a
+ * log's own check stops matching the replay is where that board went its own
+ * way, and the two logs' inputs say whether the boards were ever even fed the
+ * same thing. Flushed every 60 frames, so a crash loses a second at most.
+ * Not in the web build (no file system). */
+#ifndef __EMSCRIPTEN__
+static inline const char *netplay_cfg_path(void);
+#endif
+
+static inline void netplay_inputlog_close(void) {
+    if (!g_netplay.inlog) return;
+    fclose(g_netplay.inlog);
+    g_netplay.inlog = NULL;
+}
+
+static inline void netplay_inputlog_open(void) {
+    netplay_inputlog_close();
+#ifndef __EMSCRIPTEN__
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s", netplay_cfg_path());
+    char *slash = strrchr(dir, '/'), *bslash = strrchr(dir, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    if (slash) slash[1] = '\0'; else dir[0] = '\0';
+    time_t now = time(NULL);
+    struct tm tm_now;
+#ifdef _WIN32
+    localtime_s(&tm_now, &now);
+#else
+    localtime_r(&now, &tm_now);
+#endif
+    char path[640];
+    snprintf(path, sizeof path, "%snetplay-%04d%02d%02d-%02d%02d%02d-s%u-p%d.inputs", dir,
+             tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
+             tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec,
+             (unsigned)g_netplay.generation, (int)g_netplay.local_player + 1);
+    g_netplay.inlog = fopen(path, "w");
+    if (!g_netplay.inlog) return;
+    fprintf(g_netplay.inlog, "# m2-hle netplay input log\n");
+    fprintf(g_netplay.inlog, "# version %s\n", M2HLE_VERSION);
+    fprintf(g_netplay.inlog, "# game %s\n", g_active_profile && g_active_profile->id ? g_active_profile->id : "?");
+    fprintf(g_netplay.inlog, "# session %u seed 0x%08X\n", (unsigned)g_netplay.generation, (unsigned)g_netplay.seed);
+    fprintf(g_netplay.inlog, "# player %d delay %u peer %s\n", (int)g_netplay.local_player + 1,
+            (unsigned)g_netplay.lockstep.frame_delay,
+            g_netplay.session.peer_npid[0] ? g_netplay.session.peer_npid : "?");
+    fprintf(g_netplay.inlog, "# frame w0 w1 check (hex)\n");
+#endif
+}
 
 /* ---- Logging ------------------------------------------------------------- */
 
@@ -743,6 +810,8 @@ static inline void netplay_seed_delay_frames(void) {
     g_netplay.delay_seeded = true;
 }
 
+static inline void netplay_leave_session(void);   /* below; a BYE ends the session */
+
 static inline void netplay_drain_socket(void) {
     uint8_t buf[sizeof(lockstep_input_packet_t) + 64];
     for (;;) {
@@ -796,6 +865,19 @@ static inline void netplay_drain_socket(void) {
 
             lockstep_on_peer_announce(&g_netplay.lockstep, hdr->player, hdr->generation);
             if (!netplay_is_host() && hdr->player == 0) g_netplay.seed = ann->seed;
+        } else if (hdr->type == LOCKSTEP_PACKET_BYE
+                   && got >= (int)sizeof(lockstep_announce_packet_t)) {
+            /* The peer left THIS session: end it now rather than freeze until the
+             * stall timeout. A bye for another round is a late copy; ignored. */
+            const lockstep_announce_packet_t *bye = (const lockstep_announce_packet_t *)buf;
+            if ((int32_t)hdr->player != g_netplay.local_player
+                && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)
+                && (g_netplay.state == NETPLAY_PLAYING || g_netplay.state == NETPLAY_SYNCING)) {
+                netplay_log("the other player ended the session (their frame %u, ours %u)",
+                            (unsigned)bye->seed, (unsigned)g_netplay.frame);
+                netplay_leave_session();
+                netplay_clear_ready();
+            }
         } else if (hdr->type == LOCKSTEP_PACKET_SEED
                    && got >= (int)sizeof(lockstep_announce_packet_t)) {
             /* Seed only. Pointedly does NOT feed the barrier: this arrives while
@@ -1496,7 +1578,10 @@ static inline void netplay_twitch_refused(void) {
     }
 }
 
+static inline void netplay_send_bye(void);   /* below, beside netplay_do_stop */
+
 static inline void netplay_do_disconnect(void) {
+    netplay_send_bye();
     rpcn_session_stop(&g_netplay.session);
     g_netplay.enabled      = false;
     g_netplay.state        = NETPLAY_OFF;
@@ -1562,7 +1647,20 @@ static inline void netplay_do_start(void) {
     netplay_log("session %u: waiting for both boards at the barrier", gen);
 }
 
+/* Tell the peer this session is over (LOCKSTEP_PACKET_BYE). Three copies: it is
+ * one datagram with nothing after it to repair a loss, and a lost one costs the
+ * peer the whole stall timeout. Only from inside a session. */
+static inline void netplay_send_bye(void) {
+    if (g_netplay.state != NETPLAY_PLAYING && g_netplay.state != NETPLAY_SYNCING) return;
+    lockstep_announce_packet_t pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_BYE);
+    pkt.seed = g_netplay.frame;
+    for (int i = 0; i < 3; i++) rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
+}
+
 static inline void netplay_do_stop(void) {
+    netplay_send_bye();
     if (g_netplay.state == NETPLAY_PLAYING || g_netplay.state == NETPLAY_SYNCING)
         g_netplay.state = NETPLAY_IN_ROOM;
     g_netplay.reset_pending = false;
@@ -1915,6 +2013,7 @@ static inline void netplay_board_stopped(uint32_t ip, bool halted) {
  */
 static inline netplay_step_t netplay_begin_frame(void) {
     if (!g_netplay.mutex_ready) return NETPLAY_STEP_OFF;
+    if (g_netplay.inlog && g_netplay.state != NETPLAY_PLAYING) netplay_inputlog_close();
 
     netplay_pump_commands();
     rpcn_account_update(&g_netplay.account);
@@ -2018,8 +2117,9 @@ static inline netplay_step_t netplay_begin_frame(void) {
         return NETPLAY_STEP_WAIT;
     }
 
-    netplay_apply_inputs(lockstep_input_for(&g_netplay.lockstep, 0, frame),
-                         lockstep_input_for(&g_netplay.lockstep, 1, frame));
+    g_netplay.inlog_w0 = lockstep_input_for(&g_netplay.lockstep, 0, frame);
+    g_netplay.inlog_w1 = lockstep_input_for(&g_netplay.lockstep, 1, frame);
+    netplay_apply_inputs(g_netplay.inlog_w0, g_netplay.inlog_w1);
     netplay_publish_status();
     return NETPLAY_STEP_READY;
 }
@@ -2040,6 +2140,12 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
     g_netplay.last_check_frame = frame;
     g_netplay.last_check_value = check;
     netplay_check_compare(frame);
+
+    if (frame == 0) netplay_inputlog_open();
+    if (g_netplay.inlog) {
+        fprintf(g_netplay.inlog, "%u %03X %03X %08X\n", frame, g_netplay.inlog_w0, g_netplay.inlog_w1, check);
+        if (frame % 60 == 59) fflush(g_netplay.inlog);
+    }
 
     g_netplay.frame = frame + 1;
 }
@@ -2078,6 +2184,7 @@ static inline bool netplay_active(void) {
 
 static inline void netplay_shutdown(void) {
     if (!g_netplay.mutex_ready) return;
+    netplay_inputlog_close();
     rpcn_session_stop(&g_netplay.session);
     rpcn_account_reset(&g_netplay.account);
     netplay_release_inputs();

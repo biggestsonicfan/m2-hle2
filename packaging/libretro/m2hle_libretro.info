@@ -1,0 +1,34 @@
+# Software Information
+display_name = "Sega - Model 2 (m2-hle)"
+authors = "biggestsonicfan"
+supported_extensions = "zip"
+corename = "m2-hle"
+license = "Non-commercial"
+permissions = ""
+display_version = "dev"
+categories = "Emulator"
+
+# Hardware Information
+manufacturer = "Sega"
+systemname = "Model 2"
+systemid = "sega_model_2"
+
+# Libretro Features
+database = "Sega - Model 2"
+supports_no_game = "false"
+savestate = "false"
+# Not cheats: the code field is how an RPCN account is entered (rpcn:NAME:PASSWORD:TOKEN).
+cheats = "true"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "false"
+core_options = "true"
+core_options_version = "2.0"
+load_subsystem = "false"
+hw_render = "true"
+required_hw_api = "OpenGL Core >= 4.1 | OpenGL ES >= 3.0"
+needs_fullpath = "true"
+disk_control = "false"
+is_experimental = "true"
+
+description = "A high-level emulator of the Sega Model 2 arcade board, starting with Sonic The Fighters. Netplay runs as lockstep from a cold boot on both machines, either through RetroArch's own Netplay menu and lobby or through RPCN rooms shared with the desktop and web builds (core option \"Online play\"). No savestates, so no rewind, run-ahead or rollback netplay."
