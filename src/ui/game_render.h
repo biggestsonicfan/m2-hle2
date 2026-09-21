@@ -72,6 +72,12 @@ typedef struct {
     sg_pipeline target_pipeline;
     sg_sampler  target_sampler_linear;
 
+    /* Overlay layers a plugin painted (ui/overlay_plugin.h): the same quad as
+     * the tiles, premultiplied-alpha blended, with the plugin's BGRA swizzled
+     * in the shader so the layer format is one thing on every backend. */
+    sg_shader   overlay_shader;
+    sg_pipeline overlay_pipeline;
+
     /* Line (3D wireframe) pipeline */
     sg_buffer   line_vbuf;
     sg_shader   line_shader;
@@ -257,6 +263,22 @@ static const char *game_render_tile_fs_hlsl =
     "SamplerState smp : register(s0);\n"
     "struct fs_in { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
     "float4 main(fs_in inp) : SV_Target0 { return tex.Sample(smp, inp.uv); }\n";
+
+/* Overlay layer: the plugin hands out PREMULTIPLIED BGRA8 and the image is an
+ * ordinary RGBA8 texture, so the swizzle happens here rather than in a second
+ * copy on the CPU. One shader, every backend, no pixel-format negotiation. */
+static const char *game_render_overlay_fs_glsl =
+    "#version 410\n"
+    "uniform sampler2D tex_smp;\n"
+    "in vec2 uv;\n"
+    "out vec4 frag_color;\n"
+    "void main() { frag_color = texture(tex_smp, uv).bgra; }\n";
+
+static const char *game_render_overlay_fs_hlsl =
+    "Texture2D<float4> tex : register(t0);\n"
+    "SamplerState smp : register(s0);\n"
+    "struct fs_in { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "float4 main(fs_in inp) : SV_Target0 { return tex.Sample(smp, inp.uv).bgra; }\n";
 
 /* Line shaders */
 static const char *game_render_line_vs_glsl =
@@ -976,6 +998,62 @@ static inline void game_render_init(void) {
         });
     }
 
+    /* ---- Overlay layer blit ----------------------------------------------- */
+    {
+        sg_shader_desc d;
+        memset(&d, 0, sizeof(d));
+        d.attrs[0].hlsl_sem_name  = "POSITION";
+        d.attrs[0].hlsl_sem_index = 0;
+        d.attrs[0].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
+        d.attrs[1].hlsl_sem_name  = "TEXCOORD";
+        d.attrs[1].hlsl_sem_index = 0;
+        d.attrs[1].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
+        d.views[0].texture.stage                 = SG_SHADERSTAGE_FRAGMENT;
+        d.views[0].texture.image_type            = SG_IMAGETYPE_2D;
+        d.views[0].texture.sample_type           = SG_IMAGESAMPLETYPE_FLOAT;
+        d.views[0].texture.hlsl_register_t_n     = 0;
+        d.views[0].texture.msl_texture_n         = 0;
+        d.views[0].texture.wgsl_group1_binding_n = 0;
+        d.samplers[0].stage                 = SG_SHADERSTAGE_FRAGMENT;
+        d.samplers[0].sampler_type          = SG_SAMPLERTYPE_FILTERING;
+        d.samplers[0].hlsl_register_s_n     = 0;
+        d.samplers[0].msl_sampler_n         = 0;
+        d.samplers[0].wgsl_group1_binding_n = 0;
+        d.texture_sampler_pairs[0].stage        = SG_SHADERSTAGE_FRAGMENT;
+        d.texture_sampler_pairs[0].view_slot    = 0;
+        d.texture_sampler_pairs[0].sampler_slot = 0;
+        d.texture_sampler_pairs[0].glsl_name    = "tex_smp";
+        d.label = "game-render-overlay-shader";
+        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+            d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
+            d.fragment_func.source = game_render_glsl(backend, game_render_overlay_fs_glsl, 1);
+        } else if (backend == SG_BACKEND_D3D11) {
+            d.vertex_func.source         = game_render_tile_vs_hlsl;
+            d.vertex_func.d3d11_target   = "vs_4_0";
+            d.fragment_func.source       = game_render_overlay_fs_hlsl;
+            d.fragment_func.d3d11_target = "ps_4_0";
+        }
+        g_game_render.overlay_shader = sg_make_shader(&d);
+
+        sg_pipeline_desc p;
+        memset(&p, 0, sizeof(p));
+        p.shader                   = g_game_render.overlay_shader;
+        p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
+        p.layout.attrs[0].format   = SG_VERTEXFORMAT_FLOAT2;
+        p.layout.attrs[0].offset   = offsetof(game_render_quad_vertex_t, x);
+        p.layout.attrs[1].format   = SG_VERTEXFORMAT_FLOAT2;
+        p.layout.attrs[1].offset   = offsetof(game_render_quad_vertex_t, u);
+        p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
+        /* Premultiplied source-over: ONE / ONE_MINUS_SRC_ALPHA on both. */
+        p.colors[0].blend.enabled          = true;
+        p.colors[0].blend.src_factor_rgb   = SG_BLENDFACTOR_ONE;
+        p.colors[0].blend.dst_factor_rgb   = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        p.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
+        p.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        p.label = "game-render-overlay-pipeline";
+        g_game_render.overlay_pipeline = sg_make_pipeline(&p);
+    }
+
     /* ---- Line pipeline ---------------------------------------------------- */
 
     g_game_render.line_vbuf = sg_make_buffer(&(sg_buffer_desc){
@@ -1249,6 +1327,8 @@ static inline void game_render_shutdown(void) {
     sg_destroy_shader(g_game_render.fill_shader_opaque);
     sg_destroy_shader(g_game_render.fill_shader);
     sg_destroy_buffer(g_game_render.fill_vbuf);
+    sg_destroy_pipeline(g_game_render.overlay_pipeline);
+    sg_destroy_shader(g_game_render.overlay_shader);
     sg_destroy_pipeline(g_game_render.line_pipeline);
     sg_destroy_shader(g_game_render.line_shader);
     sg_destroy_buffer(g_game_render.line_vbuf);
@@ -1600,6 +1680,37 @@ static inline void game_render_draw_target(sg_view target_view, bool linear,
         .vertex_buffers[0] = g_game_render.target_vbuf,
         .views[0]          = target_view,
         .samplers[0]       = linear ? g_game_render.target_sampler_linear : g_game_render.tile_sampler,
+    });
+    sg_draw(0, 6, 1);
+}
+
+/*
+ * Composite one overlay layer (ui/overlay_plugin.h) over what the pass has
+ * already drawn. The view is an ordinary RGBA8 texture holding the plugin's
+ * premultiplied BGRA bytes; the shader swaps the channels and the blend state
+ * is premultiplied source-over, so a layer that is transparent everywhere
+ * costs a quad and changes nothing.
+ *
+ * ox/oy/w/h is the layer's own rect in the composed frame, not a letterbox:
+ * the image is 1:1 with it, so the nearest sampler never interpolates.
+ */
+static inline void game_render_draw_overlay(sg_view layer_view,
+                                             int ox, int oy, int w, int h) {
+    if (!g_game_render.initialized) return;
+    if (w <= 0 || h <= 0) return;
+
+    sg_apply_viewport(ox, oy, w, h, true);
+    /* ...and the scissor with it. The 3D draw leaves the board's clip window
+     * set (game_render_set_clip, and the per-run windows in the fill path), so
+     * a layer that only set the viewport would be drawn into the columns and
+     * then scissored away by the rect the last polygon happened to leave
+     * behind. That is a black column and no error anywhere. */
+    sg_apply_scissor_rect(ox, oy, w, h, true);
+    sg_apply_pipeline(g_game_render.overlay_pipeline);
+    sg_apply_bindings(&(sg_bindings){
+        .vertex_buffers[0] = g_game_render.quad_vbuf,
+        .views[0]          = layer_view,
+        .samplers[0]       = g_game_render.tile_sampler,
     });
     sg_draw(0, 6, 1);
 }

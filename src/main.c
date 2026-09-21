@@ -56,6 +56,7 @@
 #include "mcp_bridge.h"    /* --mcp TCP debug server (ported from m2-hle) */
 #include "netplay_window.h"  /* the RPCN netplay front-end */
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
+#include "overlay_host.h"    /* --overlay: a plugin paints layers over the picture */
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
  * g_active_profile and pulls in every per-game profile header. */
@@ -71,6 +72,7 @@ static int  g_mcp_port   = 7172;   /* --mcp-port N */
 static int  g_headless   = 0;      /* --headless: no window, GPU or audio device */
 static int  g_net_window = 0;      /* --netplay: open the netplay window at startup */
 static int  g_kiosk_on   = 0;      /* --kiosk: capture mode from startup */
+static int  g_no_tray    = 0;      /* --no-tray: --headless without its icon */
 static int  g_kiosk_w    = KIOSK_DEFAULT_WIDTH;
 static int  g_kiosk_h    = KIOSK_DEFAULT_HEIGHT;
 static int  g_kiosk_show = 0;      /* --kiosk-show: start it on screen, not parked */
@@ -582,6 +584,11 @@ static void init(void) {
         }
     }
 
+    /* The overlay plugin, if one was asked for. After game_render_init because
+     * its layers are GPU images, and before the emu thread because a plugin
+     * that wants a feed should be connecting while the ROM loads. */
+    overlay_host_init();
+
     /* Netplay is inert until a session is asked for, but the emu thread polls it
      * every slice, so it has to exist before the thread starts. */
     netplay_init();
@@ -768,6 +775,7 @@ static int headless_main(void) {
             av_stream_shutdown();
             return 3;
         }
+        overlay_host_init();
         av_on = true;
     }
 
@@ -775,15 +783,44 @@ static int headless_main(void) {
     load_active_profile(g_rom_path);
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
     if (g_autorun) emu_run(&state.emu);
+
+    /*
+     * The notification-area icon. A headless run has no window and no console
+     * once whatever started it goes away, so without this the only way to stop
+     * one is Task Manager -- and an orphan sits there holding its ports, its
+     * ROM and its A/V socket. The same two items capture mode has: Exit, and
+     * Restart sound board.
+     *
+     * The hooks are the kiosk's; they are about the emu thread, not about a
+     * window, and the tray menu is the only thing that drives either.
+     */
+    if (!g_no_tray) {
+        kiosk_set_hooks(&(kiosk_hooks_t){
+            .is_running    = kiosk_is_running_cb,
+            .set_running   = kiosk_set_running_cb,
+            .restart_sound = kiosk_restart_sound_cb,
+        });
+        char note[128];
+        int  o = 0;
+        if (g_mcp_enable) o += snprintf(note + o, sizeof note - (size_t)o,
+                                        "--mcp %d", g_mcp_port);
+        if (g_av_port > 0) snprintf(note + o, sizeof note - (size_t)o,
+                                    "%s--av-port %d", o ? ", " : "", g_av_port);
+        tray_headless_start(note);
+        if (g_active_profile && g_active_profile->display_name)
+            kiosk_set_label(g_active_profile->display_name);
+    }
     LOG_INFO("headless: running%s%s", g_mcp_enable ? " with the MCP bridge" : "",
              av_on ? " with the A/V server"
                    : (g_mcp_enable ? "" : " (no --mcp: nothing can drive it)"));
     if (av_on && !g_autorun && !g_mcp_enable)
         LOG_WARN("av: the board is stopped and nothing can start it - a client will "
                  "get the stream header and then silence. Add --run.");
-    for (;;) {
+    while (!tray_exit_requested() && !mcp_quit_requested()) {
         emu_update_snapshots(&state.emu);
         netplay_cli_pump();
+        tray_headless_pump();
+        tray_headless_tick(g_emu_frames);
         if (av_on) {
             /* One render per board frame, and only while somebody is reading:
              * with no client this is a poll loop and nothing else. */
@@ -791,13 +828,25 @@ static int headless_main(void) {
             if (av_capture_due(&av_frame, &av_sample) && av_stream_active()) {
                 game_frame_prepare(&state.video, &state.geo3d, &state.bus,
                                    &state.romset, true);
+                /* With an overlay loaded the board is letterboxed into the
+                 * target so the plugin has margin to live in; with none it is
+                 * drawn across the whole target exactly as before. The pass
+                 * action clears to black, so the columns have the right
+                 * background before the plugin paints a thing. */
+                int ox = 0, oy = 0, gw = av_stream_width(), gh = av_stream_height();
+                overlay_host_game_rect(av_stream_width(), av_stream_height(), 0,
+                                       &ox, &oy, &gw, &gh);
+                /* Outside the pass: sg_update_image cannot run inside one. */
+                overlay_host_paint(av_stream_width(), av_stream_height(),
+                                   ox, oy, gw, gh, 0, g_emu_frames);
                 sg_begin_pass(&(sg_pass){
                     .action      = av_capture_action(),
                     .attachments = { .colors[0]     = av_capture_color_att(),
                                      .depth_stencil = av_capture_depth_att() },
                 });
                 game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                                0, 0, av_stream_width(), av_stream_height(), 1.0f);
+                                ox, oy, gw, gh, 1.0f);
+                overlay_host_draw();
                 sg_end_pass();
                 av_capture_submit(av_frame, av_sample);
                 sg_commit();
@@ -807,9 +856,29 @@ static int headless_main(void) {
             emu_sleep_ms(5);
         }
     }
+
+    /*
+     * Exit from the tray. Everything comes down in the same order cleanup()
+     * uses for a windowed run, and for the same reasons: the A/V writer thread
+     * is still sending out of buffers the renderer owns, and the audio tap
+     * runs on the emu thread, which is still going at this point.
+     */
+    LOG_INFO("headless: shutting down");
+    av_stream_shutdown();
+    if (state.emu_started) emu_thread_shutdown(&state.emu);
+    netplay_shutdown();
+    overlay_host_shutdown();
+    av_capture_shutdown();
+    romset_free(&state.romset);
+    tray_headless_stop();
+    return 0;
 }
 
 static void frame(void) {
+    /* `quit` over the bridge. Capture mode would otherwise swallow the close,
+     * which is the point of capture mode -- so say we mean it. */
+    if (mcp_quit_requested()) { kiosk_allow_quit(); sapp_request_quit(); }
+
     simgui_new_frame(&(simgui_frame_desc_t){
         .width       = sapp_width(),
         .height      = sapp_height(),
@@ -889,20 +958,45 @@ static void frame(void) {
      */
     static bool s_av_mirror = false;
     uint64_t av_frame = 0, av_sample = 0;
-    if (av_stream_enabled() && av_capture_due(&av_frame, &av_sample) &&
-            av_capture_ready() && av_stream_active()) {
+    /* Decided before the pass opens, because the overlay plugin has to run
+     * (and upload) outside one and av_capture_due() latches: it may be asked
+     * exactly once a frame. The short-circuit order is the one it always had. */
+    const bool av_due = av_stream_enabled() && av_capture_due(&av_frame, &av_sample) &&
+                        av_capture_ready() && av_stream_active();
+    if (av_due) {
+        int ox = 0, oy = 0, gw = av_stream_width(), gh = av_stream_height();
+        overlay_host_game_rect(av_stream_width(), av_stream_height(), 0,
+                               &ox, &oy, &gw, &gh);
+        overlay_host_paint(av_stream_width(), av_stream_height(),
+                           ox, oy, gw, gh, 0, g_emu_frames);
         sg_begin_pass(&(sg_pass){
             .action      = av_capture_action(),
             .attachments = { .colors[0]     = av_capture_color_att(),
                              .depth_stencil = av_capture_depth_att() },
         });
         game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                        0, 0, av_stream_width(), av_stream_height(), 1.0f);
+                        ox, oy, gw, gh, 1.0f);
+        overlay_host_draw();
         sg_end_pass();
         av_capture_submit(av_frame, av_sample);
         s_av_mirror = true;
     }
     if (!av_stream_active()) s_av_mirror = false;
+
+    /* The window's own composition, when it is not mirroring the tap. Painted
+     * here, before the swapchain pass opens, for the same reason as above; the
+     * draw goes in below, after the board. When s_av_mirror is true there is
+     * nothing to do — the target already has the overlay baked into it. */
+    int win_ox = 0, win_oy = 0, win_gw = 0, win_gh = 0;
+    bool win_overlay = false;
+    if (!s_av_mirror && overlay_host_loaded()) {
+        int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
+        win_overlay = overlay_host_game_rect(sapp_width(), sapp_height(), menu_h,
+                                             &win_ox, &win_oy, &win_gw, &win_gh);
+        if (win_overlay)
+            overlay_host_paint(sapp_width(), sapp_height(),
+                               win_ox, win_oy, win_gw, win_gh, menu_h, g_emu_frames);
+    }
 
     sg_begin_pass(&(sg_pass){
         .action    = state.pass_action,
@@ -927,6 +1021,10 @@ static void frame(void) {
         int src_h = s_av_mirror ? av_stream_height() : VIDEO_HEIGHT;
         game_render_letterbox(sapp_width(), avail_h, src_w, src_h, &ox, &oy, &w, &h);
         oy += menu_h;
+        /* An overlay owns the whole window: the board goes where the plugin
+         * was told it would be, so the window and the stream show the identical
+         * composition rather than two letterboxes of the same picture. */
+        if (win_overlay) { ox = win_ox; oy = win_oy; w = win_gw; h = win_gh; }
         { static int _cs=0; if ((++_cs % 30)==0) {
             for (int i=0;i<state.geo3d.captured_count;i++){ const captured_model_t *cm=&state.geo3d.captured[i];
                 if (cm->model_idx==519 || cm->model_idx==2833)
@@ -944,6 +1042,11 @@ static void frame(void) {
         else
             game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
                             ox, oy, w, h, lerp_t);
+
+        /* The overlay goes UNDER any debug window that is open, which is right:
+         * those are for the person at the keyboard and the overlay is for the
+         * stream. simgui_render() is below, outside this block. */
+        if (win_overlay) overlay_host_draw();
 
         /* Programmatic per-model texture extractor (--extract N). Re-runs ~once/
          * sec while set, so you can navigate to a scene where the model's texels
@@ -994,6 +1097,7 @@ static void cleanup(void) {
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
     romset_free(&state.romset);
     objview_shutdown();
+    overlay_host_shutdown();   /* before game_render_shutdown: it owns sg images */
     av_capture_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
@@ -1103,6 +1207,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_mcp_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+        } else if (strcmp(argv[i], "--no-tray") == 0) {
+            /* For a service or a Session 0 run, where there is no shell to put
+             * an icon in and the process is stopped some other way. */
+            g_no_tray = 1;
         } else if (strcmp(argv[i], "--kiosk") == 0) {
             /* Capture mode: a chrome-free window at the capture resolution,
              * parked off the desktop, with a tray icon as the only handle on
@@ -1134,6 +1242,18 @@ sapp_desc sokol_main(int argc, char* argv[]) {
                 LOG_WARN("--av-size wants WxH (e.g. 1396x1080); keeping %dx%d",
                          g_av_w, g_av_h);
             }
+        } else if (strcmp(argv[i], "--overlay") == 0 && i + 1 < argc) {
+            /* Load a plugin that paints layers over the finished picture
+             * (ui/overlay_plugin.h). Without this nothing changes anywhere. */
+            overlay_host_set_path(argv[++i]);
+        } else if (strcmp(argv[i], "--overlay-args") == 0 && i + 1 < argc) {
+            overlay_host_set_args(argv[++i]);
+        } else if (strcmp(argv[i], "--overlay-game") == 0 && i + 1 < argc) {
+            if (!overlay_host_set_game_rect(argv[++i]))
+                LOG_WARN("--overlay-game wants WxH+X+Y (e.g. 1396x1080+262+0); "
+                         "keeping the board's own letterbox");
+        } else if (strcmp(argv[i], "--overlay-reload") == 0) {
+            overlay_host_set_watch(true);
         } else if (strcmp(argv[i], "--av-mute") == 0) {
             g_av_mute = 1;                     /* stream the sound, do not play it */
         } else if (strcmp(argv[i], "--netplay") == 0) {

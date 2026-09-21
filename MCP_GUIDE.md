@@ -43,6 +43,11 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--match-replay` | Arm `match_replay` (below) from boot |
 | `--objview [N]` | Open the object viewer at boot, optionally on model N |
 | `--headless` | No window, GPU or audio device. The object-viewer tools do not work here |
+| `--no-tray` | `--headless` without its notification-area icon (a service, or a Session 0 run) |
+| `--overlay <path>` | Load a plugin that paints layers over the picture (`src/ui/overlay_plugin.h`) |
+| `--overlay-args <s>` | Handed to that plugin verbatim; the host does not parse it |
+| `--overlay-game WxH+X+Y` | Where the board sits inside the composed frame |
+| `--overlay-reload` | Reload the plugin when it changes on disk |
 
 ROM set: MAME `sfight.zip` (clone of `schamp.zip`). The emulator looks for `schamp.zip` in the same directory as `sfight.zip` for shared files.
 
@@ -130,6 +135,12 @@ Returns `first`, `count`, `nonempty`, `tris`.
 **`emu_run()`** — Start free-running execution (equivalent to F9 / Resume).
 
 **`emu_stop()`** — Pause execution.
+
+**`quit()`** — Ask the process to shut down. Not `exit()`: it raises a flag the run loop
+reads, so the board, the A/V server and the netplay session come down in the same order any
+other exit uses. The reply arrives first and then the socket closes because the process went
+away. A `--headless --no-tray` run has no other way out, which is what this is for; a windowed
+run in capture mode is allowed through the close it would otherwise swallow.
 
 **`emu_step(count: int = 1)`** — Step `count` instructions. Emulator must be stopped. Count range: 1–1 000 000.
 

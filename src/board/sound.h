@@ -92,7 +92,14 @@ static sound_state_t g_sound;
  * (offset = level) — and per frame a mark, sound RAM 0x1000-0x4FFF and the
  * SCSP register block as little-endian words. t is the 68000's clock-period
  * count, the unit MAME's capture uses. The slot monitor (0x408) is left out on
- * both sides: the driver polls it ~50,000 times a second. */
+ * both sides: the driver polls it ~50,000 times a second.
+ *
+ * t is 32 bits, and at 11.2896 MHz that wraps after 380.4 seconds. A capture
+ * longer than that silently folds back on itself -- every consumer here and in
+ * tools/ reads t as monotonic -- so a session to be graded whole has to stay
+ * under it, which is the shorter of the two limits on how long a run these tools
+ * can hold against MAME. Widening it means widening the record, on both sides at
+ * once. */
 typedef struct {
     FILE    *f, *ramf, *regsf;
     int      active, done;
@@ -172,6 +179,154 @@ static inline void sndcap_frame(uint32_t frame, uint32_t frame_counter) {
     if (c->nmarks > c->want) sndcap_stop();
 }
 
+/* ---- the streaming watchdog ------------------------------------------------
+ *
+ * The driver does not hand the SCSP a sample and let it play: it gives every
+ * voice a window in sound RAM, loops the slot inside it, and keeps refilling the
+ * 4 KB chunk the chip is NOT playing out of the sample ROMs. Which chunk that is
+ * it learns from the slot monitor CA field, 4096 samples per step -- STF drives
+ * it by writing the slot number to MSLC (0x408), waiting out ten ror.l, and
+ * testing CA bit 0 with btst.b #7,0x409(a5) (sound ROM 0x604224, 0x60452C,
+ * 0x604544). In STF all 32 slots stream this way, each out of its own 8 KB
+ * window from 0x010000 up: two 4 KB chunks, double-buffered.
+ *
+ * That refill is a hard real-time race, and losing it is audible. A copy into a
+ * chunk that only STARTS after the chip has already entered it leaves everything
+ * from the chunk boundary up to the play position holding the bytes of the
+ * previous lap, which are played before the new ones -- a fragment of stale
+ * audio, and for a voice that stays late, one every lap until the game restarts
+ * the track.
+ *
+ * READ late_chunk_up, NOT late. A pass that begins at offset 0 with the chip
+ * already somewhere in chunk 0 is almost always not a late refill at all but the
+ * driver giving the slot a DIFFERENT sample: the window address is fixed per
+ * slot, so switching samples means copying the new one over the window from
+ * offset 0, and the old sample is still releasing while that happens. There is
+ * no register change to spot it by -- SA, LSA and LEA all stay as they were.
+ * What separates the two is which chunk the pass was filling. A driver losing
+ * the race loses it in both directions, so chunk 1 would be hit too; a reload
+ * only ever starts at 0. Measured over 330 s of fights, all 587 flagged passes
+ * were chunk 0 at offset 0, with the lateness spread evenly across the 4096
+ * samples instead of clustered just past the boundary -- so on this board the
+ * race is not being lost, and late_chunk_up is the number to watch for a
+ * regression.
+ *
+ * Nothing in the capture harness can see this. tools/mame/snd-capture.lua leaves
+ * the monitor register out of both sides on purpose (the driver polls it around
+ * 50,000 times a second, which would slow MAME to a crawl), so the one register
+ * the streaming is paced by is the one register never compared. So it is
+ * measured here instead, against the play position the chip actually has.
+ *
+ * A page can belong to several slots at once -- the driver plays one loaded
+ * sample from more than one voice -- so the map is a slot MASK per page, not a
+ * slot. Getting that wrong attributes a write to whichever slot was stored last,
+ * and with 32 voices sharing buffers that is most of them.
+ *
+ * Off by default and armed over the bridge (snd_watch): it costs a page map
+ * rebuild per output sample and a lookup per sound-RAM write. */
+#define SND_WATCH_PAGES  (SOUND_RAM_SIZE >> 12)
+#define SND_WATCH_EVENTS 128
+
+typedef struct {
+    int      on;
+    uint32_t page_mask[SND_WATCH_PAGES];   /* 4 KB page -> bit per slot playing through it */
+    uint8_t  active[32];
+    uint64_t on_sample[32];                /* out_total when this sample started in the slot */
+    int32_t  last_chunk[32];               /* chunk the last write to this slot hit, -1 none */
+    uint64_t refills[32], late[32];        /* refill passes seen, and those that started late */
+    uint32_t worst[32];                    /* largest lateness, in samples into the chunk */
+    uint64_t total_writes, total_refills, total_late;
+    uint64_t late_chunk0, late_chunk_up;   /* see the note above: only the second is a defect */
+    uint32_t nev;
+    struct {
+        uint64_t sample;                   /* board sample the refill started on */
+        uint32_t addr, pc, play, off, lateness;
+        uint8_t  slot, chunk;
+    } ev[SND_WATCH_EVENTS];
+} snd_watch_t;
+static snd_watch_t g_snd_watch;
+
+/* The byte of its window a slot is playing, addressed the way scsp_slot_sample
+ * addresses the sample data: a PCM8B slot steps one byte per sample, a 16-bit
+ * one two. */
+static inline uint32_t snd_watch_play_byte(const scsp_slot_t *sl) {
+    return SCSP_PCM8B(sl) ? (sl->cur >> SCSP_SHIFT)
+                          : ((sl->cur >> (SCSP_SHIFT - 1)) & ~1u);
+}
+
+/* Rebuild the page map and notice slots that have just started. Once per output
+ * sample, which is 4096 times finer than a chunk. */
+static inline void snd_watch_sample(void) {
+    snd_watch_t *w = &g_snd_watch;
+    scsp_t *sc = &g_sound.scsp;
+    memset(w->page_mask, 0, sizeof w->page_mask);
+    for (int i = 0; i < 32; i++) {
+        scsp_slot_t *sl = &sc->slot[i];
+        if (sl->active && !w->active[i]) {
+            w->on_sample[i]  = g_sound.out_total;
+            w->last_chunk[i] = -1;
+        }
+        w->active[i] = sl->active;
+        if (!sl->active) continue;
+        uint32_t sa = SCSP_SA(sl), end = sa + SCSP_LEA(sl);
+        if (sa >= SOUND_RAM_SIZE) continue;
+        if (end >= SOUND_RAM_SIZE) end = SOUND_RAM_SIZE - 1;
+        for (uint32_t pg = sa >> 12; pg <= (end >> 12); pg++) w->page_mask[pg] |= 1u << i;
+    }
+}
+
+static inline void snd_watch_write(uint32_t addr, int sz) {
+    snd_watch_t *w = &g_snd_watch;
+    scsp_t *sc = &g_sound.scsp;
+    for (int k = 0; k < sz; k++) {
+        uint32_t a = addr + (uint32_t)k;
+        if (a >= SOUND_RAM_SIZE) break;
+        for (uint32_t m = w->page_mask[a >> 12]; m; m &= m - 1) {
+            int i = 0;
+            for (uint32_t b = m & (~m + 1u); b > 1u; b >>= 1) i++;
+            scsp_slot_t *sl = &sc->slot[i];
+            uint32_t sa = SCSP_SA(sl);
+            if (a < sa) continue;
+            uint32_t off = a - sa;
+            if (off > SCSP_LEA(sl)) continue;
+            w->total_writes++;
+            int32_t chunk = (int32_t)(off >> 12);
+            if (chunk == w->last_chunk[i]) continue;   /* still inside the same pass */
+            w->last_chunk[i] = chunk;
+            /* The fill right after a key-on legitimately covers the whole window,
+             * playback included, so a voice is only held to the rule once it has
+             * been running for a chunk. */
+            if (g_sound.out_total - w->on_sample[i] < 4096) continue;
+            w->refills[i]++;
+            w->total_refills++;
+            uint32_t play = snd_watch_play_byte(sl);
+            if ((int32_t)(play >> 12) != chunk) continue;   /* the chip is elsewhere: in time */
+            uint32_t lateness = play & 0xFFFu;
+            w->late[i]++;
+            w->total_late++;
+            if (chunk) w->late_chunk_up++; else w->late_chunk0++;
+            if (lateness > w->worst[i]) w->worst[i] = lateness;
+            if (w->nev < SND_WATCH_EVENTS) {
+                uint32_t e = w->nev++;
+                w->ev[e].sample   = g_sound.out_total;
+                w->ev[e].addr     = a;
+                w->ev[e].pc       = g_sound.m68k.cpu.pc;
+                w->ev[e].play     = play;
+                w->ev[e].off      = off;
+                w->ev[e].lateness = lateness;
+                w->ev[e].slot     = (uint8_t)i;
+                w->ev[e].chunk    = (uint8_t)chunk;
+            }
+        }
+    }
+}
+
+static inline void snd_watch_arm(int on) {
+    memset(&g_snd_watch, 0, sizeof g_snd_watch);
+    for (int i = 0; i < 32; i++) g_snd_watch.last_chunk[i] = -1;
+    g_snd_watch.on = on;
+}
+
 /* ---- 68000 bus ------------------------------------------------------------- */
 
 static inline uint8_t sound_rom_byte(const sound_state_t *ss, uint32_t a) {
@@ -231,6 +386,7 @@ static void sound_m68k_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
     sound_state_t *ss = (sound_state_t *)ctx;
     addr &= 0xFFFFFFu;
     if (addr + (uint32_t)sz <= 0x080000u) {
+        if (g_snd_watch.on) snd_watch_write(addr, sz);
         uint8_t *p = ss->ram + addr;
         if (sz == 1) { p[0] = (uint8_t)val; return; }
         if (sz == 2) { p[0] = (uint8_t)(val >> 8); p[1] = (uint8_t)val; return; }
@@ -407,6 +563,7 @@ static void sound_run(uint32_t n) {
     if (!g_sound.rom_loaded) return;
     m68k_state_t *m = &g_sound.m68k;
     for (uint32_t i = 0; i < n; i++) {
+        if (g_snd_watch.on) snd_watch_sample();
         g_sound.budget += SOUND_CYCLES_PER_SAMPLE;
         while (g_sound.budget > 0) {
             if (m->cpu.halted) { g_sound.budget = 0; break; }

@@ -30,6 +30,7 @@
 #include "input.h"     /* g_input.held — drive the game's I/O ports over the bridge */
 #include "objview_cmd.h"  /* the object viewer's commands, shared with the web build */
 #include "av_stream.h"    /* the --av-port server, for the "av" block of get_status */
+#include "overlay_host.h" /* ...and the "overlay" block: is the plugin actually running */
 /* Before this header's own winsock block, and before anything else that could
  * reach <windows.h>: net_socket.h owns the include order and <winsock2.h> has
  * to precede it. main.c already includes this first, so here it is a no-op --
@@ -128,19 +129,25 @@ static void mcp_cmd_get_status(char *resp, int cap) {
 
     char av[320];
     av_stream_status_json(av, (int)sizeof av);
+    /* Whether an overlay plugin is loaded, and what it costs. A stream front
+     * end cannot switch one on after the fact -- it is a command-line flag,
+     * like --mcp -- so being able to SEE that it is missing is the difference
+     * between a puzzled look at a blank column and a one-line message. */
+    char ov[256];
+    overlay_host_status_json(ov, (int)sizeof ov);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
-             "\"av\":%s}",
+             "\"av\":%s,\"overlay\":%s}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, profile_id,
              g_emu_frames,
              (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame, av);
+             g_match_replay_frame, av, ov);
 }
 
 /* match_replay: arm the jump from attract mode's intro movie straight to its
@@ -539,6 +546,75 @@ static void mcp_cmd_sound_status(char *resp, int cap) {
              sc->c[0x0C], sc->c[0x0D], sc->c[0x0E], keyed, active,
              sc->dsp.stopped ? -1 : sc->dsp.last_step, fill, (unsigned long long)g_sound.out_dropped,
              sc->mi_drops, sc->mi_hi, (unsigned long long)g_sound.midi_drains);
+}
+
+/* quit: ask the process to come down.
+ *
+ * Not exit(): it raises a flag the run loop reads, so the board, the A/V
+ * server and the netplay session are taken down in the order any other exit
+ * uses -- the same reason the tray's Exit does not call exit() either (see
+ * ui/kiosk.h). Answering before that happens is deliberate: the caller gets
+ * its reply, and the socket closes because the process went away.
+ *
+ * A headless run needs this. Its only other way out is the tray icon, and
+ * --no-tray takes that away -- which is exactly the case a script or a service
+ * is in, so without this there would be no way to stop one at all short of
+ * killing it out from under the A/V writer thread. */
+static volatile int g_mcp_quit;
+static inline bool mcp_quit_requested(void) { return g_mcp_quit != 0; }
+
+static void mcp_cmd_quit(char *resp, int cap) {
+    LOG_INFO("quit: asked over the bridge");
+    g_mcp_quit = 1;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"quitting\":true}");
+}
+
+/* snd_watch: arm or read the streaming watchdog (board/sound.h).
+ *
+ *   {"cmd":"snd_watch","on":1}   arm it, clearing the counters
+ *   {"cmd":"snd_watch"}          read it
+ *   {"cmd":"snd_watch","on":0}   disarm
+ *
+ * `late_up` of `refills` is the headline, NOT `late`: a refill pass the driver
+ * began after the chip had already entered the chunk it was filling, counting
+ * only the chunks a sample reload cannot explain (board/sound.h says why -- a
+ * reload copies the new sample over a fixed window from offset 0 and is
+ * indistinguishable from a late refill of chunk 0). `worst` is the furthest into
+ * a chunk, in samples of 4096, the chip had got per slot, and `events` the first
+ * few, with the board sample, the slot, and the 68000 PC that wrote the byte --
+ * enough to disassemble the copy that lost the race. */
+static void mcp_cmd_snd_watch(const char *req, char *resp, int cap) {
+    uint32_t on = 2;                       /* 2 = not given: read without changing */
+    mcp_json_get_u32(req, "on", &on);
+    if (on != 2) snd_watch_arm((int)on);
+    const snd_watch_t *w = &g_snd_watch;
+    char *p = resp; int left = cap, n;
+    n = snprintf(p, (size_t)left,
+                 "{\"ok\":true,\"on\":%s,\"board_samples\":%llu,\"writes\":%llu,"
+                 "\"refills\":%llu,\"late\":%llu,\"late_chunk0\":%llu,\"late_up\":%llu,"
+                 "\"by_slot\":[",
+                 w->on ? "true" : "false", (unsigned long long)g_sound.out_total,
+                 (unsigned long long)w->total_writes, (unsigned long long)w->total_refills,
+                 (unsigned long long)w->total_late, (unsigned long long)w->late_chunk0,
+                 (unsigned long long)w->late_chunk_up);
+    p += n; left -= n;
+    for (int i = 0; i < 32 && left > 60; i++) {
+        n = snprintf(p, (size_t)left, "%s[%llu,%llu,%u]", i ? "," : "",
+                     (unsigned long long)w->refills[i], (unsigned long long)w->late[i],
+                     w->worst[i]);
+        p += n; left -= n;
+    }
+    n = snprintf(p, (size_t)left, "],\"events\":["); p += n; left -= n;
+    for (uint32_t i = 0; i < w->nev && left > 160; i++) {
+        n = snprintf(p, (size_t)left,
+                     "%s{\"sample\":%llu,\"slot\":%u,\"chunk\":%u,\"addr\":\"0x%05X\","
+                     "\"off\":\"0x%04X\",\"play\":\"0x%04X\",\"late\":%u,\"pc\":\"0x%06X\"}",
+                     i ? "," : "", (unsigned long long)w->ev[i].sample, w->ev[i].slot,
+                     w->ev[i].chunk, w->ev[i].addr, w->ev[i].off, w->ev[i].play,
+                     w->ev[i].lateness, w->ev[i].pc);
+        p += n; left -= n;
+    }
+    snprintf(p, (size_t)left, "]}");
 }
 
 /* reset_sound: reboot the sound board, and/or push raw bytes at its MIDI input.
@@ -1791,6 +1867,8 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "dump_tgp")                 == 0) mcp_cmd_dump_tgp(resp, cap);
     else if (strcmp(cmd, "cop_exec")                 == 0) mcp_cmd_cop_exec(req, resp, cap);
     else if (strcmp(cmd, "sound_status")             == 0) mcp_cmd_sound_status(resp, cap);
+    else if (strcmp(cmd, "snd_watch")                == 0) mcp_cmd_snd_watch(req, resp, cap);
+    else if (strcmp(cmd, "quit")                     == 0) mcp_cmd_quit(resp, cap);
     else if (strcmp(cmd, "reset_sound")              == 0) mcp_cmd_reset_sound(req, resp, cap);
     else if (strcmp(cmd, "dump_midi_log")            == 0) mcp_cmd_dump_midi_log(resp, cap);
     else if (strcmp(cmd, "read_wave")                == 0) {   /* sound RAM bytes */

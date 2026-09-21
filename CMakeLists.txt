@@ -29,6 +29,17 @@ set(SRC    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(M2HLE_VERSION "dev" CACHE STRING "Version string baked into the binary")
 add_compile_definitions(M2HLE_VERSION="${M2HLE_VERSION}")
 
+# How many 68000 clock periods before the end of an instruction the sound
+# board samples the SCSP interrupt lines (board/sound.h, SOUND_IPL_LEAD). It is
+# a fitted constant standing in for the real chip sampling IPL at the microcode
+# step that loads the instruction register, which falls a different number of
+# cycles before the end of each instruction -- so it is settable here in order
+# to be swept against MAME rather than left as a literal nobody can grade.
+set(M2HLE_SOUND_IPL_LEAD "" CACHE STRING "68000 IPL sampling lead, in clock periods (blank = the default in sound.h)")
+if(M2HLE_SOUND_IPL_LEAD)
+    add_compile_definitions(SOUND_IPL_LEAD=${M2HLE_SOUND_IPL_LEAD})
+endif()
+
 # Which host to build:
 #   sokol  the ImGui debugger (sokol_app window, D3D11 / GL core / Metal)
 #   sdl3   the fullscreen handheld frontend (src/main_sdl.c): SDL3 window and

@@ -554,6 +554,75 @@ different slot; audio envelope correlation 0.992 and loudness within 1% in every
 notes of the first five seconds and held 25-32 voices keyed where MAME holds
 5-16.
 
+### Over a long session it drifts, and 70 seconds does not show it
+
+The 70-second run above is the whole of what had ever been graded, and the board
+looks excellent over it. Taken out to 231 seconds -- MAME at about 1.7 frames a
+second, so a two-hour capture -- three things appear that the short run cannot
+show. Attract sends an identical command stream on every cycle (the loop is
+124.3 s; `A0 00 01 AE 10 10` restarts the music), so the second pass over the
+same music is a controlled repeat of the first, and it grades worse.
+
+- **The board runs fast, and it accumulates.** Matched note-ons drift from within
+  0.5 ms for the first 120 s to 7.5 ms early by 200 s. It is one timer: the
+  driver reloads its timers inside its own handler, so consecutive writes to
+  0x418 / 0x41A measure a period fire-to-fire, and timer A comes out 505.2467
+  samples against MAME's 505.2783 -- 8.1 clock periods, 62 ppm short, every
+  period, 20,000 times in 231 s. Timer B matches to 8 ppm.
+- **The programmed periods are identical**, 504 and 49 samples on both sides; the
+  8 clocks are interrupt latency. Timer A is level 1, the lowest, so it waits out
+  the level-2 timer B/C handlers, and what it waits on is `SOUND_IPL_LEAD` --
+  a fitted constant standing in for the real chip sampling IPL at the microcode
+  step that loads the instruction register, a different number of cycles before
+  the end of every instruction. MAME models that step (`M68000` is the
+  microcode-level core in m68000.cpp, not Musashi), so there is a right answer
+  and a constant is not it: sweeping it with `-DM2HLE_SOUND_IPL_LEAD=N` gives
+  timer A -15.2 / -8.0 / -8.1 / +9.6 / +12.4 clocks at N = 2 / 6 / 10 / 14 / 18
+  and timer B -7.3 / -3.6 / +0.1 / +4.7 / +8.3. Nothing matches both, and the
+  present 10 is the best of them end to end -- 12 and 14 fix timer A and make the
+  note drift three to five times worse, because timer B fires ten times as often.
+- **Voice allocation diverges for good.** The two boards put every note on the
+  same slot for the first 60 s; then 59% of them, 7% by 90 s, and none at all
+  from 120 s on, off one timer race at 12.8 s (which is where
+  `snd_compare.py`'s event horizon has always stopped). Slot choice carries pan,
+  DSP send and which 8 KB
+  streaming window the voice plays out of, so the mix genuinely differs after
+  that: envelope correlation at 5 ms resolution, with the drift taken out
+  per window, holds 0.87-0.94 to 140 s and falls to 0.65-0.75 beyond 160 s.
+
+Two things about the harness itself came out of that run. `snd_replay` had a
+4096-byte cap on the MIDI stream it would replay, which a long capture passes in
+silence rather than failing; and the record's timestamp is 32 bits of 11.2896 MHz
+clock, so **no capture can exceed 380.4 seconds** without folding back on itself
+(board/sound.h says so where the format is defined).
+
+`snd_compare.py`'s note figure is also not what it reads as. It keys a note on
+its sample address, and in this driver the sample address is the slot's own 8 KB
+window -- so a note the board played on a different slot counts as a note missed,
+and widening the tolerance from 30 ms to a full second moves the count by four
+points. The 91% above is largely a measure of slot agreement; match on pitch and
+level alone to see timing.
+
+### The streaming refill is not the problem (`snd_watch`)
+
+The driver gives every one of the 32 slots an 8 KB window from 0x010000 up, loops
+it, and refills the 4 KB half the chip is not playing -- it finds out which by
+writing the slot to MSLC and testing CA bit 0 (`btst.b #7,0x409(a5)`, sound ROM
+0x604224 / 0x60452C / 0x604544, after ten `ror.l` of settling delay). That is a
+hard real-time race and losing it would sound exactly like a track that distorts
+and cuts out until the game restarts it -- and it is the one register the capture
+leaves out on both sides, because the driver polls it 50,000 times a second.
+
+`{"cmd":"snd_watch","on":1}` measures it instead, against the play position the
+chip actually has: every refill pass that began after the chip had already entered
+the chunk being filled. Over 330 s of driven fights the answer is that the race is
+never lost. Read `late_up` and not `late`: all 587 flagged passes were chunk 0 at
+offset 0, with the lateness spread evenly over the 4096 samples instead of
+clustered past the boundary, which is the driver giving a slot a different sample
+rather than a late refill -- the window address is fixed per slot, so a reload
+copies over it from offset 0 with the old sample still releasing, and no register
+changes to mark it.
+
 ## The netplay reset
 
 A netplay session is a cold boot on both machines, so the reset at the barrier

@@ -24,6 +24,14 @@
  *    SIZE_MINIMIZED is undone as well as blocked.
  *  - Quit is gated on the tray's own Exit item: WM_CLOSE from Alt+F4 or the
  *    taskbar is swallowed while capture mode is on, which is the point.
+ *
+ * THE HEADLESS TRAY (the second half of this file) is the same notification
+ * area icon for a run that has no window at all. --headless was a process with
+ * no window, no console of its own once its launcher goes, and nothing on the
+ * desktop that says it exists -- so the only way to stop one was Task Manager,
+ * and an orphan would sit there holding its ports and its ROM. It gets the
+ * same icon, and the two menu items that matter without a keyboard: Restart
+ * sound board, and Exit. NOT pause -- see tray__menu for why.
  */
 #ifndef KIOSK_H
 #define KIOSK_H
@@ -67,6 +75,10 @@ static struct {
 
 static inline bool kiosk_active(void)       { return g_kiosk.on; }
 static inline bool kiosk_quit_allowed(void) { return !g_kiosk.on || g_kiosk.quit_ok; }
+/* Capture mode swallows WM_CLOSE so a stray Alt+F4 cannot take a stream down;
+ * this is how something that really does mean it says so. The tray's Exit sets
+ * the same flag. */
+static inline void kiosk_allow_quit(void) { g_kiosk.quit_ok = true; }
 static inline void kiosk_set_hooks(const kiosk_hooks_t *h) { if (h) g_kiosk.hooks = *h; }
 
 #if defined(_WIN32)
@@ -156,29 +168,99 @@ static inline HICON kiosk__make_icon(int size) {
     return icon;
 }
 
-static inline void kiosk__tray_fill(NOTIFYICONDATAW *nid) {
+/* ---- the notification-area icon itself ------------------------------------
+ *
+ * Capture mode hangs an icon on the sokol window; a headless run hangs one on a
+ * hidden window of its own (the second half of this file). What differs between
+ * them is the window, the menu and where the frame rate comes from -- but the
+ * Shell_NotifyIcon conversation is the same one twice, so it is written once
+ * here and each side keeps only its own tooltip text, which is the part worth
+ * saying differently. Both were separate copies to begin with and they had
+ * already drifted, which is the argument.
+ *
+ * The `added` flag stays with the caller rather than being hidden in here: each
+ * tray already has one, and the wndprocs clear it directly when Explorer
+ * restarts. */
+static inline void kiosk__icon_desc(HWND hwnd, HICON icon, UINT cb_msg,
+                                    const char *tip, NOTIFYICONDATAW *nid) {
     memset(nid, 0, sizeof(*nid));
     nid->cbSize           = sizeof(*nid);
-    nid->hWnd             = g_kioskw.hwnd;
+    nid->hWnd             = hwnd;
     nid->uID              = 1;
     nid->uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
-    nid->uCallbackMessage = KIOSK_WM_TRAY;
-    nid->hIcon            = g_kioskw.icon_small;
-    char tip[160];
+    nid->uCallbackMessage = cb_msg;
+    nid->hIcon            = icon;
+    kiosk__wide(tip ? tip : "m2-hle", nid->szTip,
+                (int)(sizeof(nid->szTip) / sizeof(wchar_t)));
+}
+
+/* NIM_ADD, then NOTIFYICON_VERSION_4 so the callback carries the cursor
+ * position. Answers whether the shell took it; `whynot` is the caller's own
+ * warning for when it did not -- a service, a Session 0 run, or a machine with
+ * no shell -- because looking for an icon that is never coming is worse than
+ * being told it is not. */
+static inline bool kiosk__icon_put(HWND hwnd, HICON icon, UINT cb_msg,
+                                   const char *tip, const char *whynot) {
+    if (!hwnd) return false;
+    NOTIFYICONDATAW nid;
+    kiosk__icon_desc(hwnd, icon, cb_msg, tip, &nid);
+    if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+        if (whynot) LOG_WARN("%s", whynot);
+        return false;
+    }
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &nid);
+    return true;
+}
+
+static inline void kiosk__icon_retip(HWND hwnd, HICON icon, UINT cb_msg,
+                                     const char *tip) {
+    NOTIFYICONDATAW nid;
+    kiosk__icon_desc(hwnd, icon, cb_msg, tip, &nid);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+static inline void kiosk__icon_drop(HWND hwnd) {
+    NOTIFYICONDATAW nid;
+    memset(&nid, 0, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd   = hwnd;
+    nid.uID    = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+/* A one-off balloon, on an icon that is already up. */
+static inline void kiosk__icon_balloon(HWND hwnd, const char *title, const char *body) {
+    NOTIFYICONDATAW nid;
+    memset(&nid, 0, sizeof(nid));
+    nid.cbSize      = sizeof(nid);
+    nid.hWnd        = hwnd;
+    nid.uID         = 1;
+    nid.uFlags      = NIF_INFO;
+    nid.dwInfoFlags = NIIF_NONE | NIIF_NOSOUND;
+    kiosk__wide(title, nid.szInfoTitle,
+                (int)(sizeof(nid.szInfoTitle) / sizeof(wchar_t)));
+    kiosk__wide(body, nid.szInfo, (int)(sizeof(nid.szInfo) / sizeof(wchar_t)));
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/* ---- capture mode's tray ---------------------------------------------------- */
+
+/* What the tooltip and the menu header say about the capture window. */
+static inline void kiosk__tray_tip(char *out, int cap) {
     const bool running = g_kiosk.hooks.is_running ? g_kiosk.hooks.is_running(g_kiosk.hooks.ud)
                                                   : false;
-    snprintf(tip, sizeof(tip), "m2-hle%s%s - capture %dx%d, %s, %.0f fps",
+    snprintf(out, (size_t)cap, "m2-hle%s%s - capture %dx%d, %s, %.0f fps",
              g_kiosk.label[0] ? " - " : "", g_kiosk.label,
              g_kiosk.width, g_kiosk.height,
              running ? "running" : "paused", (double)g_kiosk.fps);
-    kiosk__wide(tip, nid->szTip, (int)(sizeof(nid->szTip) / sizeof(wchar_t)));
 }
 
 static inline void kiosk__tray_update(void) {
     if (!g_kioskw.tray_added) return;
-    NOTIFYICONDATAW nid;
-    kiosk__tray_fill(&nid);
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
+    char tip[160];
+    kiosk__tray_tip(tip, (int)sizeof tip);
+    kiosk__icon_retip(g_kioskw.hwnd, g_kioskw.icon_small, KIOSK_WM_TRAY, tip);
 }
 
 /*
@@ -213,14 +295,11 @@ static inline void kiosk__tray_add(void) {
         int sm = GetSystemMetrics(SM_CXSMICON); if (sm < 8) sm = 16;
         g_kioskw.icon_small = kiosk__make_icon(sm);
     }
-    NOTIFYICONDATAW nid;
-    kiosk__tray_fill(&nid);
-    if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
-        LOG_WARN("capture mode: the tray icon could not be added (Shell_NotifyIcon failed)");
+    char tip[160];
+    kiosk__tray_tip(tip, (int)sizeof tip);
+    if (!kiosk__icon_put(g_kioskw.hwnd, g_kioskw.icon_small, KIOSK_WM_TRAY, tip,
+                         "capture mode: the tray icon could not be added (Shell_NotifyIcon failed)"))
         return;
-    }
-    nid.uVersion = NOTIFYICON_VERSION_4;   /* the callback carries the cursor position */
-    Shell_NotifyIconW(NIM_SETVERSION, &nid);
     g_kioskw.tray_added = true;
 
     if (!g_kioskw.ballooned) {
@@ -230,23 +309,13 @@ static inline void kiosk__tray_add(void) {
                  "Running hidden at %dx%d. Capture m2hle.exe in OBS. "
                  "Right-click this icon to show the window or exit.",
                  g_kiosk.width, g_kiosk.height);
-        nid.uFlags      = NIF_INFO;
-        nid.dwInfoFlags = NIIF_NONE | NIIF_NOSOUND;
-        kiosk__wide("m2-hle capture mode", nid.szInfoTitle,
-                    (int)(sizeof(nid.szInfoTitle) / sizeof(wchar_t)));
-        kiosk__wide(body, nid.szInfo, (int)(sizeof(nid.szInfo) / sizeof(wchar_t)));
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
+        kiosk__icon_balloon(g_kioskw.hwnd, "m2-hle capture mode", body);
     }
 }
 
 static inline void kiosk__tray_remove(void) {
     if (!g_kioskw.tray_added) return;
-    NOTIFYICONDATAW nid;
-    memset(&nid, 0, sizeof(nid));
-    nid.cbSize = sizeof(nid);
-    nid.hWnd   = g_kioskw.hwnd;
-    nid.uID    = 1;
-    Shell_NotifyIconW(NIM_DELETE, &nid);
+    kiosk__icon_drop(g_kioskw.hwnd);
     g_kioskw.tray_added = false;
 }
 
@@ -279,9 +348,14 @@ static inline void kiosk__apply(void) {
     SetWindowLongPtrW(g_kioskw.hwnd, GWL_STYLE, style);
     kiosk__place(g_kiosk.shown);
     kiosk__tray_add();
-    LOG_INFO("capture mode: %dx%d, window %s, tray icon up",
+    /* Only claim the icon when the shell actually took it -- kiosk__tray_add
+     * warns when it did not, and a line saying it is up next to a warning that
+     * it is not is worse than either. The headless tray gates its own the same
+     * way. */
+    LOG_INFO("capture mode: %dx%d, window %s, tray icon %s",
              g_kiosk.width, g_kiosk.height,
-             g_kiosk.shown ? "on screen" : "parked off the desktop");
+             g_kiosk.shown ? "on screen" : "parked off the desktop",
+             g_kioskw.tray_added ? "up" : "UNAVAILABLE");
 }
 
 static inline void kiosk__restore_window(void) {
@@ -461,7 +535,244 @@ static inline void kiosk_shutdown(void) {
     if (g_kioskw.icon_big)   { DestroyIcon(g_kioskw.icon_big);   g_kioskw.icon_big   = NULL; }
 }
 
+/* ======================================================================== *
+ *  The headless tray
+ *
+ *  A --headless run has no window, so it needs one of its own to hang the
+ *  icon on. Two details decide the shape of it:
+ *
+ *   - It is a HIDDEN TOP-LEVEL window, not a message-only (HWND_MESSAGE) one.
+ *     Explorer announces its restart with a BROADCAST, and broadcasts are not
+ *     delivered to message-only windows -- so an icon on one would vanish for
+ *     good the first time Explorer restarted, which is exactly the situation
+ *     where you want a way to stop the process. WS_EX_TOOLWINDOW keeps it off
+ *     the taskbar and Alt+Tab, and it is never shown.
+ *
+ *   - Exit does NOT call exit(). It raises a flag the headless loop reads, so
+ *     the board, the A/V server and the netplay session are taken down in the
+ *     same order they are on any other exit. Killing the process from a tray
+ *     callback would leave the A/V writer thread sending out of buffers being
+ *     freed under it.
+ * ======================================================================== */
+
+#define TRAY_WM_ICON    (WM_APP + 0x41)
+#define TRAY_ID_SNDRST  2
+#define TRAY_ID_EXIT    3
+
+static struct {
+    HWND     hwnd;
+    HICON    icon;
+    bool     started;
+    bool     tray_added;
+    bool     exit_requested;
+    UINT     taskbar_created;
+    char     note[128];       /* "--mcp 7172, --av-port 7180", for the tooltip */
+    float    fps;             /* board frames per second                       */
+} g_trayhl;
+
+static inline bool tray_exit_requested(void) { return g_trayhl.exit_requested; }
+
+/* Which ports this process is answering on goes in the tooltip, so the icon
+ * says WHICH emulator it belongs to when several are running. */
+static inline void tray__tip(char *out, int cap) {
+    const bool running = g_kiosk.hooks.is_running ? g_kiosk.hooks.is_running(g_kiosk.hooks.ud)
+                                                  : false;
+    snprintf(out, (size_t)cap, "m2-hle headless%s%s - %s, %.0f fps%s%s",
+             g_kiosk.label[0] ? " - " : "", g_kiosk.label,
+             running ? "running" : "paused", (double)g_trayhl.fps,
+             g_trayhl.note[0] ? " - " : "", g_trayhl.note);
+}
+
+static inline void tray__update(void) {
+    if (!g_trayhl.tray_added) return;
+    char tip[160];
+    tray__tip(tip, (int)sizeof tip);
+    kiosk__icon_retip(g_trayhl.hwnd, g_trayhl.icon, TRAY_WM_ICON, tip);
+}
+
+static inline void tray__add(void) {
+    if (g_trayhl.tray_added || !g_trayhl.hwnd) return;
+    char tip[160];
+    tray__tip(tip, (int)sizeof tip);
+    /* No icon is not fatal: the emulator is perfectly usable over the bridge,
+     * it just has nothing on the desktop. */
+    if (!kiosk__icon_put(g_trayhl.hwnd, g_trayhl.icon, TRAY_WM_ICON, tip,
+                         "headless: no tray icon (Shell_NotifyIcon failed) - this process can only be stopped from its console or Task Manager"))
+        return;
+    g_trayhl.tray_added = true;
+}
+
+static inline void tray__remove(void) {
+    if (!g_trayhl.tray_added) return;
+    kiosk__icon_drop(g_trayhl.hwnd);
+    g_trayhl.tray_added = false;
+}
+
+static inline void tray__menu(int x, int y) {
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+    char    line[192];
+    wchar_t wide[192];
+
+    const bool running = g_kiosk.hooks.is_running ? g_kiosk.hooks.is_running(g_kiosk.hooks.ud)
+                                                  : false;
+    snprintf(line, sizeof(line), "m2-hle headless - %s - %s",
+             g_kiosk.label[0] ? g_kiosk.label : "no ROM",
+             running ? "running" : "paused");
+    kiosk__wide(line, wide, 192);
+    AppendMenuW(m, MF_STRING | MF_GRAYED | MF_DISABLED, 0, wide);
+    if (g_trayhl.note[0]) {
+        kiosk__wide(g_trayhl.note, wide, 192);
+        AppendMenuW(m, MF_STRING | MF_GRAYED | MF_DISABLED, 0, wide);
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+
+    /*
+     * NO PAUSE ITEM, and that is deliberate. A headless run is one somebody
+     * else is watching -- a stream, a capture, a training loop -- and the
+     * reason to open this menu at all is almost always "Restart sound board",
+     * because the driver has gone quiet. A one-click pause sitting next to it
+     * means the price of a mis-click is a stutter in something live. Whether
+     * the board is running is still worth KNOWING, so it stays in the header
+     * line and the tooltip; it is just not a button. Pause is still on the MCP
+     * bridge, where it is asked for on purpose, and capture mode keeps its own
+     * Run item -- that has a window, so the stutter is in front of whoever
+     * caused it.
+     */
+    AppendMenuW(m, MF_STRING | (g_kiosk.hooks.restart_sound ? 0 : (MF_GRAYED | MF_DISABLED)),
+                TRAY_ID_SNDRST, L"Restart sound board");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, TRAY_ID_EXIT, L"Exit");
+
+    SetForegroundWindow(g_trayhl.hwnd);
+    const UINT cmd = (UINT)TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                                          x, y, 0, g_trayhl.hwnd, NULL);
+    DestroyMenu(m);
+    PostMessageW(g_trayhl.hwnd, WM_NULL, 0, 0);
+
+    switch (cmd) {
+        case TRAY_ID_SNDRST:
+            if (g_kiosk.hooks.restart_sound) g_kiosk.hooks.restart_sound(g_kiosk.hooks.ud);
+            break;
+        case TRAY_ID_EXIT:
+            LOG_INFO("headless: Exit chosen from the tray");
+            g_trayhl.exit_requested = true;
+            break;
+        default: break;
+    }
+}
+
+static inline LRESULT CALLBACK tray__wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (g_trayhl.taskbar_created && msg == g_trayhl.taskbar_created) {
+        g_trayhl.tray_added = false;      /* Explorer restarted; put it back */
+        tray__add();
+        return 0;
+    }
+    switch (msg) {
+        case TRAY_WM_ICON: {
+            const UINT ev = LOWORD(lp);
+            if (ev == WM_CONTEXTMENU || ev == WM_RBUTTONUP ||
+                ev == NIN_SELECT || ev == NIN_KEYSELECT || ev == WM_LBUTTONUP)
+                tray__menu(GET_X_LPARAM(wp), GET_Y_LPARAM(wp));
+            return 0;
+        }
+        /* The desktop asking us to go: logging off, shutting down, or somebody
+         * closing the console this was started from. Treat it as Exit rather
+         * than being killed halfway through a frame. */
+        case WM_CLOSE:
+        case WM_ENDSESSION:
+        case WM_QUERYENDSESSION:
+            g_trayhl.exit_requested = true;
+            return msg == WM_QUERYENDSESSION ? TRUE : 0;
+        default: break;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+/* Put the icon up. `note` is a line for the tooltip and the menu header --
+ * which ports this process is answering on, so the icon identifies WHICH
+ * emulator it belongs to when several are running. */
+static inline bool tray_headless_start(const char *note) {
+    if (g_trayhl.started) return true;
+    snprintf(g_trayhl.note, sizeof(g_trayhl.note), "%s", note ? note : "");
+
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    WNDCLASSEXW wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = tray__wndproc;
+    wc.hInstance     = inst;
+    wc.lpszClassName = L"m2hle_headless_tray";
+    RegisterClassExW(&wc);                 /* a second call is harmless */
+
+    /* Top-level and never shown: see the note above about broadcasts. */
+    g_trayhl.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName,
+                                    L"m2-hle", WS_OVERLAPPED,
+                                    0, 0, 0, 0, NULL, NULL, inst, NULL);
+    if (!g_trayhl.hwnd) {
+        LOG_WARN("headless: could not make the tray's window (%lu)",
+                 (unsigned long)GetLastError());
+        return false;
+    }
+    g_trayhl.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+    if (!g_trayhl.icon) {
+        int sm = GetSystemMetrics(SM_CXSMICON); if (sm < 8) sm = 16;
+        g_trayhl.icon = kiosk__make_icon(sm);
+    }
+    tray__add();
+    g_trayhl.started = true;
+    if (g_trayhl.tray_added)
+        LOG_INFO("headless: tray icon up - right-click it to restart the sound "
+                 "board or exit");
+    return true;
+}
+
+/* Drain the window's messages. Called every turn of the headless loop; it does
+ * nothing at all when there is no icon. */
+static inline void tray_headless_pump(void) {
+    if (!g_trayhl.hwnd) return;
+    MSG msg;
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+/* The board's own frame rate, for the tooltip: without a window it is the only
+ * sign of life this process has on the desktop. */
+static inline void tray_headless_tick(uint64_t board_frames) {
+    static uint64_t last_frames;
+    static double   last_t;
+    if (!g_trayhl.tray_added) return;
+    LARGE_INTEGER f, t;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t);
+    double now = (double)t.QuadPart / (double)f.QuadPart;
+    if (last_t == 0.0) { last_t = now; last_frames = board_frames; return; }
+    if (now - last_t < 1.0) return;
+    g_trayhl.fps = (float)((double)(board_frames - last_frames) / (now - last_t));
+    last_frames  = board_frames;
+    last_t       = now;
+    tray__update();
+}
+
+static inline void tray_headless_stop(void) {
+    tray__remove();
+    if (g_trayhl.icon) { DestroyIcon(g_trayhl.icon); g_trayhl.icon = NULL; }
+    if (g_trayhl.hwnd) { DestroyWindow(g_trayhl.hwnd); g_trayhl.hwnd = NULL; }
+    g_trayhl.started = false;
+}
+
 #else  /* not Windows: the tray and the window taming are Win32-specific. */
+
+/* The headless tray, where there is no notification area. A POSIX run is
+ * stopped with a signal, which is what it always was. */
+static inline bool tray_headless_start(const char *note) { (void)note; return false; }
+static inline void tray_headless_pump(void) { }
+static inline void tray_headless_tick(uint64_t f) { (void)f; }
+static inline void tray_headless_stop(void) { }
+static inline bool tray_exit_requested(void) { return false; }
+
 
 static inline void kiosk_window_ready(void) { g_kiosk.have_window = true; }
 static inline void kiosk_show_window(bool show) { g_kiosk.shown = show; }
