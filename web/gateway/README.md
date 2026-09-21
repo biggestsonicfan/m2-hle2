@@ -17,7 +17,45 @@ section 4. Nothing in RPCN changes, and the desktop build needs no change.
 **It never logs payload bytes.** It sees the RPCN protocol in the clear, login
 tokens included, which is why it runs on the RPCN host and nowhere else.
 
-## Deploying on the RPCN droplet
+## As deployed (2026-09-21)
+
+The droplet runs everything in Docker, so the gateway does too:
+
+- `/root/m2hle-gateway/`: `gateway.mjs`, `rules.mjs`, `package*.json`, `node_modules`
+  (from `docker run --rm -v $PWD:/app -w /app node:22-alpine npm ci --omit=dev`),
+  `config.json` and [docker-compose.yml](docker-compose.yml). Start it with
+  `docker compose up -d`; logs are in `docker logs m2hle-gateway`.
+- It uses **host networking**, for the UDP range on the public address and RPCN on
+  `127.0.0.1`. It listens **only on 172.18.0.1:8787**, the `forgejo_forgejo` bridge,
+  where the existing `caddy` container reaches it. `trustProxy` is that bridge's
+  subnet, so client addresses come from Caddy's `X-Forwarded-For`.
+- RPCN's certificate is Let's Encrypt, so the config verifies it by name
+  (`"servername": "rpcn.sonicthefighte.rs"`) rather than pinning a fingerprint that
+  would change at every renewal.
+- `/root/forgejo/Caddyfile` routes `handle /gw/*` in the `rpcn.sonicthefighte.rs`
+  block to `172.18.0.1:8787`. It is a single-file bind mount: edit it in place
+  (`cat new > Caddyfile`), not by replacing the file, or the container keeps the old one.
+  Then `docker exec caddy caddy reload --adapter caddyfile --config /etc/caddy/Caddyfile`.
+  The copy from before this change is `Caddyfile.bak-20260921-webgw`.
+- ufw: `40000:40999/udp` from anywhere, and `8787/tcp` only in on `br-7da2cac187b6`
+  (the bridge) to `172.18.0.1`.
+- `node test/probe-live.mjs` checks it from outside without signing in: health, the
+  origin check, the stream reaching RPCN, the echo, and the address RPCN's helper
+  sees (it must be `143.198.49.181:4xxxx`).
+
+**Open at the time of writing: the certificate on `rpcn.sonicthefighte.rs:443`.**
+The `noclip` block loads a `*.sonicthefighte.rs` Cloudflare Origin certificate, so
+since 2026-08-31 Caddy has served that for `rpcn.` too ("skipping automatic
+certificate management because one or more matching certificates are already
+loaded") and stopped renewing rpcn's own Let's Encrypt certificate (expires
+2026-10-30). `rpcn.` is not proxied by Cloudflare, so browsers refuse the Origin
+certificate and the WebSocket cannot open. The fix is `tls { issuer acme }` in the
+`rpcn.sonicthefighte.rs` block, so Caddy manages that exact name again.
+
+RPCN on 31313 uses a copy of the same Let's Encrypt certificate (in the
+`rpcnstorage` volume, copied 2026-08-01), and nothing renews that copy either.
+
+## Deploying on another host
 
 Everything here is the owner's to do. Order matters only for step 1.
 

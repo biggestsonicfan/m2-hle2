@@ -68,10 +68,12 @@
       <form id="np-form-signin" class="np-form" autocomplete="on">
         <label>Name <input id="np-signin-name" name="username" autocomplete="username" required maxlength="16"></label>
         <label>Password <input id="np-signin-password" name="password" type="password" autocomplete="current-password" required maxlength="63"></label>
-        <details>
+        <details id="np-code-box">
           <summary>The server e-mailed me a code</summary>
           <label>Code from the e-mail <input id="np-signin-token" autocomplete="one-time-code" maxlength="63"></label>
+          <p class="fine left">No e-mail? <button id="np-resend" class="linkish" type="button">Send it again</button></p>
         </details>
+        <p id="np-signin-note" class="status" role="status" hidden></p>
         <button class="tool primary" type="submit">Sign in</button>
       </form>
       <form id="np-form-create" class="np-form" autocomplete="on" hidden>

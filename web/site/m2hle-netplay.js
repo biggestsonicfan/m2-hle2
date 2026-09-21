@@ -25,6 +25,7 @@ const m2hleNetplay = (() => {
   let lastSearch = 0;
   let pendingCreate = null;     /* the account being created, to sign in with after */
   let delayChoice = 'auto';
+  let resending = false;
   let dismissedFailure = '';
 
   /* ---- Calling into the emulator ----------------------------------------------- */
@@ -147,7 +148,7 @@ const m2hleNetplay = (() => {
       const why = st.error || 'The connection failed.';
       if (dismissedFailure !== why) {
         show('np-failed');
-        setText('np-failed-text', why);
+        setText('np-failed-text', friendly(why));
         return;
       }
     }
@@ -168,26 +169,66 @@ const m2hleNetplay = (() => {
     renderSignin();
   }
 
+  /* The netcode's messages are written for the desktop's netplay window, which
+   * calls the e-mail code a "token". Say it the way this page does. */
+  function friendly(why) {
+    if (/verifies accounts by e-mail and no token/.test(why)) {
+      return 'This server checks new accounts by e-mail. It has sent a code to the address you signed up with: ' +
+             'go Back, enter it under "The server e-mailed me a code", and sign in again.';
+    }
+    if (/verification token was refused/.test(why)) {
+      return 'That code was not accepted. Check it against the e-mail, or go Back and have it sent again.';
+    }
+    return why;
+  }
+
+  function selectTab(t) {
+    for (const u of ['signin', 'create']) {
+      $('np-tab-' + u).setAttribute('aria-selected', String(u === t));
+      $('np-form-' + u).hidden = u !== t;
+    }
+  }
+
   function renderSignin() {
     const tw = st.twitch || {};
     const acct = st.account || {};
-    const returning = (tw.signed_in && tw.npid) || (st.npid && st.has_password);
+    const returning = ((tw.signed_in && tw.npid) || (st.npid && st.has_password)) && !/token/.test(dismissedFailure);
     $('np-returning').hidden = !returning;
     $('np-fresh').hidden = !!returning;
     if (returning) setText('np-returning-name', tw.signed_in && tw.npid ? tw.npid : st.npid);
     errorText('np-twitch-error', tw.state === 4 /* failed */ ? 'Twitch sign-in did not finish: ' + tw.error : '');
 
+    /* A resend is only answered once it has been seen running: until the queued
+     * command reaches the emulator, the state is still the sign-up's DONE. */
+    if (resending === 1 && acct.state === ACCOUNT_WORKING) resending = 2;
     if (acct.state === ACCOUNT_WORKING) {
       setText('np-create-status', 'Creating your account…');
     } else if (acct.state === ACCOUNT_FAILED) {
       setText('np-create-status', '');
       errorText('np-create-error', acct.error);
     } else if (acct.state === ACCOUNT_DONE && pendingCreate) {
-      /* Made: sign straight in with it. */
+      /* Made. Move to the sign-in form with the details filled in and the code
+       * box open, and try signing in: a server that verifies by e-mail refuses
+       * that first try and has mailed a code, one that does not lets it
+       * through. Either way the next step is already on screen. */
       const c = pendingCreate;
       pendingCreate = null;
-      setText('np-create-status', 'Account created. Signing you in…');
+      setText('np-create-status', '');
+      $('np-signin-name').value = c.npid;
+      $('np-signin-password').value = c.password;
+      $('np-code-box').open = true;
+      selectTab('signin');
+      setText('np-signin-note', 'Account created. If an e-mail with a code arrives, enter the code below.');
+      $('np-signin-note').hidden = false;
       post('connect', { npid: c.npid, password: c.password });
+    } else if (acct.state === ACCOUNT_DONE && resending === 2) {
+      resending = false;
+      setText('np-signin-note', 'Sent. Check your e-mail (and its spam folder) for the code.');
+      $('np-signin-note').hidden = false;
+    } else if (acct.state === ACCOUNT_FAILED && resending === 2) {
+      resending = false;
+      setText('np-signin-note', acct.error);
+      $('np-signin-note').hidden = false;
     }
   }
 
@@ -297,14 +338,20 @@ const m2hleNetplay = (() => {
     });
     $('np-not-me').addEventListener('click', signOut);
 
-    for (const t of ['signin', 'create']) {
-      $('np-tab-' + t).addEventListener('click', () => {
-        for (const u of ['signin', 'create']) {
-          $('np-tab-' + u).setAttribute('aria-selected', String(u === t));
-          $('np-form-' + u).hidden = u !== t;
-        }
-      });
-    }
+    for (const t of ['signin', 'create']) $('np-tab-' + t).addEventListener('click', () => selectTab(t));
+
+    $('np-resend').addEventListener('click', () => {
+      const npid = $('np-signin-name').value.trim(), password = $('np-signin-password').value;
+      if (!npid || !password) {
+        setText('np-signin-note', 'Fill in your name and password first.');
+        $('np-signin-note').hidden = false;
+        return;
+      }
+      resending = 1;
+      setText('np-signin-note', 'Asking the server to send the e-mail again…');
+      $('np-signin-note').hidden = false;
+      post('resend_token', { npid, password });
+    });
 
     $('np-form-signin').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -343,7 +390,18 @@ const m2hleNetplay = (() => {
     $('np-leave').addEventListener('click', () => { post('disconnect'); post('connect'); });
 
     $('np-failed-back').addEventListener('click', () => {
-      dismissedFailure = st ? (st.error || 'The connection failed.') : '';
+      const why = st ? (st.error || 'The connection failed.') : '';
+      dismissedFailure = why;
+      if (/token/.test(why)) {
+        /* Back to where the code goes: the sign-in form, box open, cursor in it. */
+        $('np-returning').hidden = true;
+        $('np-fresh').hidden = false;
+        selectTab('signin');
+        $('np-code-box').open = true;
+        render();
+        $('np-signin-token').focus();
+        return;
+      }
       render();
     });
   }

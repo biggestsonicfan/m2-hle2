@@ -38,16 +38,20 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 import {
   AddressPool, Bucket, P2P_PORT, SIGNALING_PORT, SIGNALING_TAG,
-  ipv4, ipv4Text, normalizeFingerprint, parseCidr, rewriteSignaling, route,
+  inCidr, ipv4, ipv4Text, normalizeFingerprint, parseCidr, rewriteSignaling, route,
 } from './rules.mjs';
 
 export const DEFAULTS = {
   listen: { host: '127.0.0.1', port: 8787 },
   /* Take the client address from X-Forwarded-For when the connection comes from
-   * loopback, i.e. from the Caddy in front. */
+   * the Caddy in front: true means loopback; a list names the proxy's addresses
+   * or CIDR blocks (a Caddy in a Docker network reaches us from its bridge). */
   trustProxy: true,
   origins: ['https://play.sonicthefighte.rs', 'https://biggestsonicfan.github.io'],
-  rpcn: { host: '127.0.0.1', port: 31313, tls: true, fingerprint: '' },
+  /* How RPCN's certificate is checked: `fingerprint` pins a self-signed one
+   * (what `rpcn --cert-gen` makes); `servername` validates a CA-issued one by
+   * chain and name instead, which survives renewal where a pin would not. */
+  rpcn: { host: '127.0.0.1', port: 31313, tls: true, fingerprint: '', servername: '' },
   signaling: { host: '127.0.0.1', port: SIGNALING_PORT },
   udp: { bind: '0.0.0.0', portMin: 40000, portMax: 40999 },
   pool: '100.64.0.0/16',
@@ -87,7 +91,17 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
   const udpBind = cfg.udp.bind;
   const selfIp = udpBind && udpBind !== '0.0.0.0' ? ipv4(udpBind) : undefined;
   const pin = normalizeFingerprint(cfg.rpcn.fingerprint);
-  if (cfg.rpcn.tls && !pin) log('WARNING: rpcn.fingerprint is not set; the RPCN certificate is not checked');
+  const verifyName = !pin && cfg.rpcn.servername ? cfg.rpcn.servername : '';
+  if (cfg.rpcn.tls && !pin && !verifyName)
+    log('WARNING: neither rpcn.fingerprint nor rpcn.servername is set; the RPCN certificate is not checked');
+  const proxies = cfg.trustProxy === true ? ['127.0.0.1/32']
+                : Array.isArray(cfg.trustProxy) ? cfg.trustProxy.map((c) => (c.includes('/') ? c : c + '/32'))
+                : [];
+  const proxyBlocks = proxies.map((c) => {
+    const [addr, bits] = c.split('/');
+    const mask = Number(bits) === 32 ? 0xFFFFFFFF : (0xFFFFFFFF << (32 - Number(bits))) >>> 0;
+    return { base: (ipv4(addr) & mask) >>> 0, mask };
+  });
 
   const streams = new Set();
   const dgrams = new Map();          /* vip -> session */
@@ -110,7 +124,9 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
 
   function clientIp(req) {
     const peer = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-    if (cfg.trustProxy && (peer === '127.0.0.1' || peer === '::1')) {
+    const fromProxy = peer === '::1' ? cfg.trustProxy === true
+                    : net.isIPv4(peer) && proxyBlocks.some((b) => inCidr(ipv4(peer), b));
+    if (fromProxy) {
       const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
       if (fwd) return fwd.replace(/^::ffff:/, '');
     }
@@ -150,7 +166,11 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
       s.pendingBytes = 0;
     };
     if (cfg.rpcn.tls) {
-      s.up = tls.connect({ host: cfg.rpcn.host, port: cfg.rpcn.port, rejectUnauthorized: false, servername: undefined });
+      s.up = tls.connect({
+        host: cfg.rpcn.host, port: cfg.rpcn.port,
+        servername: verifyName || undefined,
+        rejectUnauthorized: !!verifyName,   /* a pin is checked by hand, below */
+      });
       s.up.on('secureConnect', () => {
         const got = normalizeFingerprint(s.up.getPeerCertificate().fingerprint256);
         if (pin && got !== pin) { finish(1011, 'RPCN presented an unexpected certificate'); return; }
@@ -169,7 +189,10 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
        * whole output. Pause the upstream until the socket drains. */
       if (ws.bufferedAmount > 1 << 20) s.up.pause();
     });
-    s.up.on('error', (e) => finish(1011, s.open ? 'the RPCN connection failed' : 'the RPCN server could not be reached'));
+    s.up.on('error', (e) => {
+      if (!s.open) log(`stream ${id}: upstream: ${e.code || e.message}`);   /* never payload */
+      finish(1011, s.open ? 'the RPCN connection failed' : 'the RPCN server could not be reached');
+    });
     s.up.on('close', () => finish(1000, 'RPCN closed the connection'));
 
     ws.on('message', (data, isBinary) => {
@@ -351,7 +374,7 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
   await new Promise((resolve) => server.listen(cfg.listen.port, cfg.listen.host, resolve));
   const port = server.address().port;
   log(`gateway on ${cfg.listen.host}:${port} -> RPCN ${cfg.rpcn.host}:${cfg.rpcn.port}` +
-      `${cfg.rpcn.tls ? '' : ' (plain TCP)'}, signaling ${signalingAddr}:${cfg.signaling.port}, ` +
+      `${!cfg.rpcn.tls ? ' (plain TCP)' : pin ? ' (pinned)' : verifyName ? ` (verified as ${verifyName})` : ' (UNCHECKED)'}, signaling ${signalingAddr}:${cfg.signaling.port}, ` +
       `udp ${udpBind}:${cfg.udp.portMin}-${cfg.udp.portMax}, pool ${cfg.pool}`);
 
   return {
