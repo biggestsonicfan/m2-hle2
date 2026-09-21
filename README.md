@@ -78,6 +78,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | Netplay | RPCN matchmaking + direct peer-to-peer delay lockstep (`--netplay`) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
+| Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
 
 Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2snake`.
 
@@ -235,6 +236,16 @@ see the protocol.
 so no desktop session is needed — a server can stream. That path is D3D11 only for now; on a GL
 build use `--kiosk`, which streams just as well from a parked window.
 
+A headless run still gets a **tray icon**, because it has no window and no console of its own
+once whatever launched it goes away — without one the only way to stop it is Task Manager, and
+an orphan sits there holding its ports, its ROM and its A/V socket. The menu has the two items
+that matter without a keyboard: restart the sound board, and exit. Exit does not kill the
+process; it asks the loop to come down in the same order any other exit does, because the A/V
+writer thread is still sending out of buffers the renderer owns. The tooltip carries the board's
+frame rate and which ports this process answers on, so the icon says *which* emulator it belongs
+to when several are running. `--no-tray` leaves it out, for a service or a Session 0 run where
+there is no shell to put an icon in.
+
 **The window mirrors the stream.** With a client connected, the game is rendered once, into the
 capture target, and the window shows that target rather than drawing the frame a second time.
 The stream itself never contains ImGui, the menu bar, letterbox bars or the cursor.
@@ -284,6 +295,51 @@ copy in time, `dropped_missed` the renderer never reaching that board frame. Mea
 See [src/core/av_stream.h](src/core/av_stream.h) for the transport and the audio tap, and
 [src/ui/av_capture.h](src/ui/av_capture.h) for the offscreen target and the asynchronous
 readback ring.
+
+## Overlays (`--overlay`)
+
+Model 2 output is 496x384, so a 16:9 stream has 262 px of empty pillarbox either side at
+1920x1080. `--overlay` loads a shared library that paints into them — a round counter, a ping
+meter, a tournament lower-third, whatever the stream wants — and the emulator composites it over
+the finished picture. Without the flag nothing anywhere behaves differently.
+
+```
+m2hle --rom sfight.zip --kiosk --av-port 7180 --overlay flyoverlay.dll
+m2hle --rom sfight.zip --run --headless --av-port 7180 --overlay flyoverlay.dll --overlay-reload
+```
+
+- **`--overlay <path>`** — the library to load. It must export one symbol,
+  `m2_overlay_query`, and nothing else.
+- **`--overlay-args <string>`** — handed to the plugin verbatim, every frame. The host never
+  parses it.
+- **`--overlay-game WxH+X+Y`** — where the board goes inside the composed frame, when the
+  default 496:384 letterbox is not what the scene wants.
+- **`--overlay-reload`** — reload the library when it changes on disk, so a plugin can be
+  rebuilt without restarting a live stream. The pixel buffers are host-owned and outlive the
+  library, so the columns keep their last content across the swap and nothing blinks.
+
+**The ABI is pixels, not draw calls.** The plugin is handed a set of premultiplied-BGRA buffers
+the host owns and fills them; it never touches the GPU. Exporting sokol's `sg_*` state would weld
+the plugin to the same sokol commit as the emulator, so a backend change here would silently
+break a plugin built last month, and a command list to replay is a retained-mode 2D API to
+invent, specify and version. Pixels cannot drift. Premultiplied, because straight alpha is what
+puts a dark halo around every piece of white text sitting over the board.
+
+Layers are separate so a repaint costs what it changed: one 262x1080 column is 1.1 MB, where the
+whole 8.3 MB canvas would go up every frame — sokol has no partial image update. A plugin marks
+a layer dirty when it repainted it, and an untouched layer costs a quad.
+
+Nothing in the host knows what a layer contains, which is the point: an overlay that knows about
+hyper meters belongs in a DLL that ships with whatever is drawing it, not in a board emulator.
+A plugin that faults, misbehaves or returns a negative count disables itself with a warning and
+the board carries on being presented — a live stream is not the place to find out. `get_status`
+carries an `overlay` block saying whether it is loaded, how long its last paint took and how
+many times it has reloaded.
+
+The contract is [src/ui/overlay_plugin.h](src/ui/overlay_plugin.h), about forty lines, and it is
+meant to be *copied* into a plugin's tree rather than shared through a submodule; check
+`M2_OVERLAY_ABI` with a `_Static_assert` so a skew is a build error and not a blank overlay. The
+host side is [src/ui/overlay_host.h](src/ui/overlay_host.h).
 
 ## Documents
 
