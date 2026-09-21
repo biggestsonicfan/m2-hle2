@@ -104,7 +104,8 @@
 #define AV_AUDIO_CHUNK        512u     /* frames before a packet goes out (~11.6 ms) */
 #define AV_AUDIO_MAX_CHUNK    8192u    /* ...and the most any one packet carries */
 #define AV_AUDIO_FLUSH_MS     20       /* a short tail goes out after this long */
-#define AV_AUDIO_MAX_BURST    16       /* audio packets per pass, so video still moves */
+#define AV_AUDIO_MAX_BURST    16       /* audio packets per pass (and one video frame),
+                                          so neither stream holds up the other */
 
 /* The socket send buffer. The default 64 KB means net_tcp_send_all goes round
  * its select-then-send loop ~90 times for one 1396x1080 frame, and each turn
@@ -371,8 +372,15 @@ static void av__serve(net_sock_t c) {
             did = true;
         }
 
-        /* Then whatever frames are queued. */
-        while (ok && g_av.v_r != g_av.v_w) {
+        /* Then ONE queued frame, and back round for the audio. Draining the
+         * whole queue here starved the sound whenever the client took about as
+         * long to read a frame as the renderer took to make one: at 1920x1080
+         * that is ~23 ms against ~21, the queue never emptied, and measured
+         * off a live tap the audio stopped for up to 1.7 s at a time while 65
+         * frames went out back to back -- then arrived as nine 8192-frame
+         * packets at once. A player that holds a fixed cushion of sound
+         * cannot absorb that: it runs dry, then overflows and skips. */
+        if (ok && g_av.v_r != g_av.v_w) {
             av_vslot_t *s = &g_av.vq[g_av.v_r % AV_VIDEO_SLOTS];
             av__pkt_header(ph, 'V', s->flags, g_av.vbytes, s->frame, s->sample);
             ok = av__send(c, ph, AV_PKT_HEADER_SIZE) && av__send(c, s->px, g_av.vbytes);
