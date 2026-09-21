@@ -7,11 +7,12 @@
  *
  * BACKENDS. Windows uses Schannel (SSPI), which ships with the OS — so netplay
  * adds no vendored crypto library and no submodule to a tree that deliberately
- * has neither, and links only secur32/crypt32/bcrypt. Everywhere else this
- * compiles to a stub that fails the connect with a message saying so, which
- * keeps the rest of net/ building and running on POSIX (the lockstep engine, the
- * packet formats and the LAN/direct path are all platform-agnostic) while
- * leaving exactly one file to write for an OpenSSL backend later. The web build
+ * has neither, and links only secur32/crypt32/bcrypt. Linux uses the system's
+ * OpenSSL, opened with dlopen at the first connect so that it is not a link-time
+ * dependency (that section says why). Everywhere else (macOS) this compiles to
+ * a stub that fails the connect with a message saying so, which keeps the rest
+ * of net/ building and running (the lockstep engine, the packet formats and the
+ * LAN/direct path are all platform-agnostic). The web build
  * (Emscripten) has a third backend that is not TLS at all: a WebSocket to the
  * gateway, which holds the TLS session to RPCN (see that section below). The seam is
  * the tls_client_t API below and nothing else: no other module knows Schannel
@@ -628,6 +629,300 @@ static inline int tls_recv(tls_client_t *t, void *buf, uint32_t cap) {
 }
 
 /* ======================================================================== */
+#elif defined(__linux__) && !defined(__ANDROID__)
+/* ======================================================================== */
+/*
+ * Linux: the system's OpenSSL, opened with dlopen at the first connect rather
+ * than linked. The handheld build (ROCKNIX) is linked against exactly the
+ * device's SDL3, GLES, libm and libc and nothing else, so that a binary built on
+ * debian:trixie runs there as it is; a link-time libssl would be a fifth
+ * dependency to get right, and a machine without one would not start the
+ * emulator at all instead of only losing netplay. dlopen keeps it to the latter:
+ * no libssl, and the connect fails with a sentence saying so.
+ *
+ * The ABI is OpenSSL 1.1 / 3.x, declared here rather than taken from the
+ * headers, which the cross sysroot need not have. Only functions are used (no
+ * macros, no struct layouts), and each has kept its signature since 1.1.
+ *
+ * The trust rules are the Schannel backend's. Verification is judged after the
+ * handshake by this file, not by OpenSSL's callback, so a failure can say which
+ * mode was in force: VALIDATED is OpenSSL's own chain check against the system
+ * store (SSL_CTX_set_default_verify_paths, the OPENSSLDIR the device's libssl
+ * was built with) plus SSL_set1_host; PINNED compares the leaf certificate's
+ * SHA-256 and ignores the chain.
+ *
+ * The socket stays non-blocking after net_tcp_connect, as on Windows. The
+ * handshake and sends wait in poll() with a deadline; tls_recv never waits,
+ * because it is called every frame from the emu thread.
+ */
+
+#include <dlfcn.h>
+#include <poll.h>
+
+typedef struct {
+    bool  tried, ok;
+    char  why[160];
+    int          (*init_ssl)(uint64_t opts, const void *settings);
+    const void  *(*client_method)(void);
+    void        *(*ctx_new)(const void *method);
+    void         (*ctx_free)(void *ctx);
+    int          (*ctx_default_paths)(void *ctx);
+    void         (*ctx_set_verify)(void *ctx, int mode, void *cb);
+    void        *(*ssl_new)(void *ctx);
+    void         (*ssl_free)(void *ssl);
+    int          (*set_fd)(void *ssl, int fd);
+    long         (*ctrl)(void *ssl, int cmd, long larg, void *parg);
+    int          (*set1_host)(void *ssl, const char *host);
+    void        *(*get0_param)(void *ssl);
+    int          (*param_ip_asc)(void *param, const char *ip);
+    int          (*do_connect)(void *ssl);
+    int          (*do_read)(void *ssl, void *buf, int num);
+    int          (*do_write)(void *ssl, const void *buf, int num);
+    int          (*get_error)(const void *ssl, int ret);
+    int          (*do_shutdown)(void *ssl);
+    long         (*verify_result)(const void *ssl);
+    void        *(*peer_cert)(const void *ssl);
+    void         (*x509_free)(void *x509);
+    int          (*x509_digest)(const void *x509, const void *md, unsigned char *out, unsigned *len);
+    const void  *(*sha256)(void);
+    const char  *(*verify_text)(long err);
+    unsigned long (*err_get)(void);
+    void         (*err_clear)(void);
+    void         (*err_text)(unsigned long e, char *buf, size_t len);
+} tls_ossl_t;
+
+static tls_ossl_t g_tls_ossl;
+
+#define TLS_OSSL_ERROR_WANT_READ   2
+#define TLS_OSSL_ERROR_WANT_WRITE  3
+#define TLS_OSSL_ERROR_ZERO_RETURN 6
+#define TLS_OSSL_CTRL_SET_SNI      55   /* SSL_CTRL_SET_TLSEXT_HOSTNAME */
+#define TLS_OSSL_TIMEOUT_MS        5000
+
+/* Loads libssl once. False, with g_tls_ossl.why set, if there is none. */
+static inline bool tls_ossl_load(void) {
+    tls_ossl_t *o = &g_tls_ossl;
+    if (o->tried) return o->ok;
+    o->tried = true;
+
+    static const char *const ssl_names[]    = { "libssl.so.3", "libssl.so.1.1", "libssl.so" };
+    static const char *const crypto_names[] = { "libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so" };
+    void *ssl = NULL, *crypto = NULL;
+    for (int i = 0; i < 3 && !ssl; i++) {
+        ssl = dlopen(ssl_names[i], RTLD_NOW | RTLD_LOCAL);
+        /* The libcrypto of the same version: X509, EVP and ERR live there. */
+        if (ssl) crypto = dlopen(crypto_names[i], RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!ssl) {
+        snprintf(o->why, sizeof(o->why), "no OpenSSL on this system (libssl.so.3 not found); "
+                 "netplay needs it for RPCN's TLS session");
+        return false;
+    }
+    void *cr = crypto ? crypto : ssl;
+
+    const char *missing = NULL;
+#define TLS_OSSL_SYM(lib, field, name) do {                                   \
+        *(void **)&o->field = dlsym((lib), (name));                           \
+        if (!o->field && !missing) missing = (name);                          \
+    } while (0)
+    TLS_OSSL_SYM(ssl, init_ssl,          "OPENSSL_init_ssl");
+    TLS_OSSL_SYM(ssl, client_method,     "TLS_client_method");
+    TLS_OSSL_SYM(ssl, ctx_new,           "SSL_CTX_new");
+    TLS_OSSL_SYM(ssl, ctx_free,          "SSL_CTX_free");
+    TLS_OSSL_SYM(ssl, ctx_default_paths, "SSL_CTX_set_default_verify_paths");
+    TLS_OSSL_SYM(ssl, ctx_set_verify,    "SSL_CTX_set_verify");
+    TLS_OSSL_SYM(ssl, ssl_new,           "SSL_new");
+    TLS_OSSL_SYM(ssl, ssl_free,          "SSL_free");
+    TLS_OSSL_SYM(ssl, set_fd,            "SSL_set_fd");
+    TLS_OSSL_SYM(ssl, ctrl,              "SSL_ctrl");
+    TLS_OSSL_SYM(ssl, set1_host,         "SSL_set1_host");
+    TLS_OSSL_SYM(ssl, get0_param,        "SSL_get0_param");
+    TLS_OSSL_SYM(ssl, do_connect,        "SSL_connect");
+    TLS_OSSL_SYM(ssl, do_read,           "SSL_read");
+    TLS_OSSL_SYM(ssl, do_write,          "SSL_write");
+    TLS_OSSL_SYM(ssl, get_error,         "SSL_get_error");
+    TLS_OSSL_SYM(ssl, do_shutdown,       "SSL_shutdown");
+    TLS_OSSL_SYM(ssl, verify_result,     "SSL_get_verify_result");
+    TLS_OSSL_SYM(cr,  param_ip_asc,      "X509_VERIFY_PARAM_set1_ip_asc");
+    TLS_OSSL_SYM(cr,  x509_free,         "X509_free");
+    TLS_OSSL_SYM(cr,  x509_digest,       "X509_digest");
+    TLS_OSSL_SYM(cr,  sha256,            "EVP_sha256");
+    TLS_OSSL_SYM(cr,  verify_text,       "X509_verify_cert_error_string");
+    TLS_OSSL_SYM(cr,  err_get,           "ERR_get_error");
+    TLS_OSSL_SYM(cr,  err_clear,         "ERR_clear_error");
+    TLS_OSSL_SYM(cr,  err_text,          "ERR_error_string_n");
+    /* Renamed in 3.0; 1.1 has only the old name, which 3.x keeps as a macro. */
+    *(void **)&o->peer_cert = dlsym(ssl, "SSL_get1_peer_certificate");
+    if (!o->peer_cert) TLS_OSSL_SYM(ssl, peer_cert, "SSL_get_peer_certificate");
+#undef TLS_OSSL_SYM
+    if (missing) {
+        snprintf(o->why, sizeof(o->why), "the system's OpenSSL is not usable for netplay "
+                 "(no %s; 1.1 or later is needed)", missing);
+        return false;
+    }
+    o->init_ssl(0, NULL);
+    o->ok = true;
+    return true;
+}
+
+/* `what`, and OpenSSL's own reason when it queued one. */
+static inline void tls_ossl_fail(tls_client_t *t, const char *what) {
+    char detail[160] = "";
+    unsigned long e = g_tls_ossl.err_get();
+    if (e) g_tls_ossl.err_text(e, detail, sizeof(detail));
+    if (detail[0]) tls_fail(t, "%s: %s", what, detail);
+    else           tls_fail(t, "%s", what);
+}
+
+/* Waits until the socket can do what OpenSSL asked for. False on timeout. */
+static inline bool tls_ossl_wait(tls_client_t *t, int ssl_error, uint64_t deadline) {
+    uint64_t now = net_now_ms();
+    if (now >= deadline) return false;
+    struct pollfd p;
+    memset(&p, 0, sizeof(p));
+    p.fd     = t->sock;
+    p.events = (short)(ssl_error == TLS_OSSL_ERROR_WANT_WRITE ? POLLOUT : POLLIN);
+    return poll(&p, 1, (int)(deadline - now)) > 0;
+}
+
+static inline void tls_close(tls_client_t *t) {
+    /* `ctx` is the SSL, `cred` the SSL_CTX; neither exists unless the library loaded. */
+    if (t->ctx) {
+        /* close_notify, best effort: the socket is non-blocking, so it never waits. */
+        if (t->connected) g_tls_ossl.do_shutdown(t->ctx);
+        g_tls_ossl.ssl_free(t->ctx);
+        t->ctx = NULL;
+    }
+    if (t->cred) { g_tls_ossl.ctx_free(t->cred); t->cred = NULL; }
+    net_close(&t->sock);
+    if (t->lib_held) { net_shutdown_lib(); t->lib_held = false; }
+    t->connected   = false;
+    t->peer_closed = false;
+}
+
+static inline bool tls_ossl_is_ip(const char *host) {
+    struct in6_addr a6;
+    struct in_addr  a4;
+    return inet_pton(AF_INET, host, &a4) == 1 || inet_pton(AF_INET6, host, &a6) == 1;
+}
+
+static inline bool tls_ossl_verify(tls_client_t *t, const cert_fingerprint_t *pinned) {
+    tls_ossl_t *o = &g_tls_ossl;
+    void *cert = o->peer_cert(t->ctx);
+    if (!cert) { tls_fail(t, "the server presented no certificate"); return false; }
+    unsigned len = (unsigned)sizeof(t->server_fp.bytes);
+    int hashed = o->x509_digest(cert, o->sha256(), t->server_fp.bytes, &len);
+    o->x509_free(cert);
+    if (!hashed || len != sizeof(t->server_fp.bytes)) {
+        tls_fail(t, "could not hash the server certificate");
+        return false;
+    }
+    t->server_fp.is_set = true;
+
+    char got[80];
+    cert_fp_to_hex(&t->server_fp, got, sizeof(got));
+    if (pinned && pinned->is_set) {
+        if (memcmp(pinned->bytes, t->server_fp.bytes, sizeof(pinned->bytes)) == 0) return true;
+        tls_fail(t, "certificate fingerprint mismatch (the server presented %s)", got);
+        return false;
+    }
+    long v = o->verify_result(t->ctx);
+    if (v == 0) return true;   /* X509_V_OK: the chain and the host name both passed */
+    tls_fail(t, "the server certificate did not validate (%s); for a self-signed server, "
+                "pin its fingerprint instead: %s", o->verify_text(v), got);
+    return false;
+}
+
+static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
+                               const cert_fingerprint_t *pinned) {
+    memset(t, 0, sizeof(*t));
+    t->sock = NET_SOCK_INVALID;
+
+    if (!host || !*host) { tls_fail(t, "no server given"); return false; }
+    if (!tls_ossl_load()) { tls_fail(t, "%s", g_tls_ossl.why); return false; }
+    tls_ossl_t *o = &g_tls_ossl;
+    net_startup();
+    t->lib_held = true;
+    const bool pin = pinned && pinned->is_set;
+
+    if (!net_tcp_connect(&t->sock, host, port, TLS_OSSL_TIMEOUT_MS)) {
+        tls_fail(t, "could not connect to %s:%u", host, port);
+        tls_close(t);
+        return false;
+    }
+
+    o->err_clear();
+    t->cred = o->ctx_new(o->client_method());
+    if (!t->cred) { tls_ossl_fail(t, "SSL_CTX_new failed"); tls_close(t); return false; }
+    o->ctx_set_verify(t->cred, 0 /* SSL_VERIFY_NONE: judged after the handshake */, NULL);
+    if (!pin) o->ctx_default_paths(t->cred);
+
+    t->ctx = o->ssl_new(t->cred);
+    if (!t->ctx || !o->set_fd(t->ctx, (int)t->sock)) {
+        tls_ossl_fail(t, "SSL_new failed");
+        tls_close(t);
+        return false;
+    }
+    if (tls_ossl_is_ip(host)) {
+        if (!pin) o->param_ip_asc(o->get0_param(t->ctx), host);
+    } else {
+        o->ctrl(t->ctx, TLS_OSSL_CTRL_SET_SNI, 0 /* TLSEXT_NAMETYPE_host_name */, (void *)host);
+        if (!pin) o->set1_host(t->ctx, host);
+    }
+
+    uint64_t deadline = net_now_ms() + TLS_OSSL_TIMEOUT_MS;
+    for (;;) {
+        int rc = o->do_connect(t->ctx);
+        if (rc == 1) break;
+        int err = o->get_error(t->ctx, rc);
+        bool again = err == TLS_OSSL_ERROR_WANT_READ || err == TLS_OSSL_ERROR_WANT_WRITE;
+        if (again && tls_ossl_wait(t, err, deadline)) continue;
+        if (again) tls_fail(t, "TLS handshake with %s:%u timed out", host, port);
+        else       tls_ossl_fail(t, "TLS handshake failed");
+        tls_close(t);
+        return false;
+    }
+    if (!tls_ossl_verify(t, pinned)) { tls_close(t); return false; }
+
+    t->connected = true;
+    return true;
+}
+
+static inline bool tls_send_all(tls_client_t *t, const void *data, uint32_t len) {
+    if (!t->connected) return false;
+    const uint8_t *src = (const uint8_t *)data;
+    uint64_t deadline = net_now_ms() + TLS_OSSL_TIMEOUT_MS;
+    while (len) {
+        /* A retried SSL_write is given the same buffer and length, as it must be. */
+        int n = g_tls_ossl.do_write(t->ctx, src, (int)len);
+        if (n > 0) { src += n; len -= (uint32_t)n; continue; }
+        int err = g_tls_ossl.get_error(t->ctx, n);
+        if ((err == TLS_OSSL_ERROR_WANT_READ || err == TLS_OSSL_ERROR_WANT_WRITE)
+            && tls_ossl_wait(t, err, deadline))
+            continue;
+        tls_ossl_fail(t, "send failed");
+        return false;
+    }
+    return true;
+}
+
+/* Up to `cap` bytes. 0 = nothing available yet (not an error), -1 = closed. */
+static inline int tls_recv(tls_client_t *t, void *buf, uint32_t cap) {
+    if (!t->connected) return -1;
+    g_tls_ossl.err_clear();
+    int n = g_tls_ossl.do_read(t->ctx, buf, (int)cap);
+    if (n > 0) return n;
+    int err = g_tls_ossl.get_error(t->ctx, n);
+    if (err == TLS_OSSL_ERROR_WANT_READ || err == TLS_OSSL_ERROR_WANT_WRITE) return 0;
+    /* SSL_read hands out every decrypted byte before it reports the close, so a
+     * reply the server sent just before hanging up has already been delivered. */
+    if (err == TLS_OSSL_ERROR_ZERO_RETURN) tls_fail(t, "the server closed the connection");
+    else                                   tls_ossl_fail(t, "the connection to the server was lost");
+    t->connected = false;
+    return -1;
+}
+
+/* ======================================================================== */
 #else  /* no TLS backend on this platform */
 /* ======================================================================== */
 
@@ -643,7 +938,7 @@ static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
     memset(t, 0, sizeof(*t));
     t->sock = NET_SOCK_INVALID;
     tls_fail(t, "this build has no TLS backend: RPCN's session is TLS-only, and only the "
-                "Windows (Schannel) backend is implemented - see src/net/tls.h");
+                "Windows (Schannel) and Linux (OpenSSL) backends are implemented - see src/net/tls.h");
     return false;
 }
 
@@ -657,6 +952,6 @@ static inline int tls_recv(tls_client_t *t, void *buf, uint32_t cap) {
     return -1;
 }
 
-#endif /* _WIN32 / __EMSCRIPTEN__ */
+#endif /* _WIN32 / __EMSCRIPTEN__ / __linux__ */
 
 #endif /* TLS_H */
