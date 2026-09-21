@@ -67,6 +67,7 @@ export const DEFAULTS = {
     maxPayload: 1200,
     streamIdleSec: 900,
     preConnectBytes: 65536,   /* queued while the upstream connects */
+    heartbeatSec: 30,         /* ping each socket; no pong by the next ping ends it */
   },
 };
 
@@ -204,7 +205,7 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
       if (s.pendingBytes > cfg.limits.preConnectBytes) { finish(1009, 'too much sent before RPCN answered'); return; }
       s.pending.push(Buffer.from(data));
     });
-    ws.on('close', () => finish(1000, 'the browser closed the connection'));
+    ws.on('close', () => finish(1000, ws.deadReason || 'the browser closed the connection'));
     ws.on('error', () => finish(1011, 'websocket error'));
 
     s.timer = setInterval(() => {
@@ -322,7 +323,7 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
           totals.refused++;
       }
     });
-    ws.on('close', () => finish(1000, 'the browser closed the connection'));
+    ws.on('close', () => finish(1000, ws.deadReason || 'the browser closed the connection'));
     ws.on('error', () => finish(1011, 'websocket error'));
   }
 
@@ -356,20 +357,31 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
     if ((perIp[kind].get(ip) || 0) >= limit) { refuse('429 Too Many Requests', 'per-address limit'); return; }
     count(perIp[kind], ip, +1);
     wss.handleUpgrade(req, socket, head, (ws) => {
+      /* The heartbeat's bookkeeping belongs HERE, not on wss 'connection':
+       * handleUpgrade does not emit that event, so a pong handler registered
+       * there is never attached, every socket looks dead at its second ping,
+       * and every session ended 30-60 s after it began. */
+      ws.isAlive = true;
+      ws.on('pong', () => { ws.isAlive = true; });
       if (kind === 'stream') openStream(ws, ip);
       else openDgram(ws, ip);
     });
   });
 
-  /* Dead browsers (a laptop lid closed) do not close their sockets. */
+  /* Dead browsers (a laptop lid closed) do not close their sockets. A browser
+   * answers pings by itself, whatever the page is doing, so a missed pong means
+   * the machine or the network has gone. */
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
-      if (ws.isAlive === false) { ws.terminate(); continue; }
+      if (ws.isAlive === false) {
+        ws.deadReason = 'no answer to the heartbeat';
+        ws.terminate();
+        continue;
+      }
       ws.isAlive = false;
       ws.ping();
     }
-  }, 30000);
-  wss.on('connection', (ws) => { ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; }); });
+  }, cfg.limits.heartbeatSec * 1000);
 
   await new Promise((resolve) => server.listen(cfg.listen.port, cfg.listen.host, resolve));
   const port = server.address().port;
