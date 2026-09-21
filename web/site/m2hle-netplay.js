@@ -27,6 +27,7 @@ const m2hleNetplay = (() => {
   let delayChoice = 'auto';
   let resending = false;
   let dismissedFailure = '';
+  let lastState = '';           /* the state at the previous poll */
 
   /* ---- Calling into the emulator ----------------------------------------------- */
 
@@ -437,9 +438,12 @@ const m2hleNetplay = (() => {
       M._web_netplay_begin();
       withString('search', (cp) => M._web_netplay_post(cp));
     }
-    /* Fold the panel away when the match actually starts, so it does not cover
-     * the game; the bar still says who you are playing. */
-    if (st.state === 'playing' && open && !$('online').dataset.keepOpen) toggle(false);
+    /* Fold the panel away when the match starts, so it does not cover the game;
+     * the bar still says who you are playing. Once, on the way INTO playing:
+     * doing it on every poll while playing shut the panel again a quarter of a
+     * second after the player opened it to end the match or leave. */
+    if (st.state === 'playing' && lastState !== 'playing' && open) toggle(false);
+    lastState = st.state;
     render();
   }
 

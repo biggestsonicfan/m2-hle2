@@ -38,7 +38,7 @@ before(async () => {
     signaling: { host: '127.0.0.1', port: sigPort },
     udp: { bind: '127.0.0.1', portMin: 41000, portMax: 41010 },
     allowPrivateDestinations: true,
-    limits: { dgramsPerIp: 3 },
+    limits: { dgramsPerIp: 3, heartbeatSec: 0.2 },
   }, () => {});
 });
 
@@ -160,6 +160,18 @@ test('dgram: a desktop peer is reached over real UDP and answers back', async ()
   assert.deepEqual([ipv4Text(r.ip), r.port, r.payload.toString()], ['127.0.0.1', peer.address().port, 'from-native']);
   ws.close();
   peer.close();
+});
+
+test('a live connection survives the heartbeat (it used to be dropped at the second ping)', async () => {
+  const s = await connect('/gw/stream');
+  const d = await connect('/gw/dgram');
+  await new Promise((r) => setTimeout(r, 1200));   /* six heartbeats */
+  assert.equal(s.readyState, WebSocket.OPEN, 'stream still open');
+  assert.equal(d.readyState, WebSocket.OPEN, 'dgram still open');
+  s.send(Buffer.from('still here'));
+  assert.equal((await next(s)).toString(), 'echo:still here');
+  s.close();
+  d.close();
 });
 
 test('dgram: per-address limit', async () => {
