@@ -21,6 +21,13 @@ Dependencies are git submodules under [vendor/](vendor/); `vendor/noclip` is onl
 [tools/](tools/), so `git submodule update --init vendor/imgui vendor/dear_bindings vendor/sokol
 vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club` is enough to build.
 
+That is the default frontend, the ImGui debugger (D3D11 on Windows, GL core on Linux, Metal on
+macOS). `-DM2HLE_FRONTEND=sdl3` builds a fullscreen SDL3 / GLES 3 host with no ImGui for
+handhelds (see [packaging/rocknix/](packaging/rocknix/)), and `-DM2HLE_FRONTEND=web` the
+Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, gamepads and
+touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)); both need
+only `vendor/sokol` and `vendor/miniz`.
+
 No ROMs, ROM-derived data, or other copyrighted material is included in this repository, and
 none will be accepted into it. You must supply your own dumps.
 
@@ -67,20 +74,21 @@ the next game cheaper instead of being spent on a single ROM set.
 | Subsystem | State |
 |---|---|
 | Intel i960 KB CPU core | Interpreted, boots STF and FV to gameplay |
-| Memory bus | 31 regions, MMIO callbacks, board + game address maps |
-| COP / ADSP-21060 SHARC | HLE math engine, ~60 commands, column-major post-multiply matrices |
+| Memory bus | 36 regions, MMIO callbacks, board + game address maps |
+| COP / ADSP-21060 SHARC | HLE math engine, ~90 commands, column-major post-multiply matrices |
 | 2D tiles | System 24 tile compositor, palettes, per-tile priority against the 3D layer |
 | 3D pipeline | Index-array polygon decoder (J = 1.0 vs. reference meshes), textures, flat + luma shading, backface cull, shadows |
-| MC68000 sound CPU | Full opcode core with unit tests |
-| SCSP audio | HLE PCM mixer, BGM playback via sokol_audio |
+| MC68000 sound CPU | Full opcode core with Motorola cycle timing, unit tests |
+| SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
 | Input | Interrupt-driven, through the real 315-5649 I/O ports |
-| Debug UI | CPU / memory / COP / GEO / 68K / trace / breakpoint / video windows |
+| Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
 | Netplay | RPCN matchmaking + direct peer-to-peer delay lockstep (`--netplay`) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
 
-Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2snake`.
+Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2snake` (the web
+build carries `sfight` only).
 
 ## Layout
 
@@ -93,7 +101,8 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
 - [src/ui/](src/ui/) — ImGui debug windows, game render target, MCP bridge.
 - [src/profiles/](src/profiles/) — one `game_profile_t` per ROM set (hook addresses, input map,
   ROM list + CRC32s, quirks).
-- [tests/](tests/) — nine standalone CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input).
+- [tests/](tests/) — ten standalone CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input,
+  netplay), plus the `cop_replay` and `snd_replay` capture replays the graders drive.
 - [mcp_server/](mcp_server/) — Python MCP server that drives a running emulator over the bridge.
 - [tools/](tools/) — graders that measure this emulator against an independent implementation
   of the same ROM formats, with a MAME digest as the third point. See [tools/README.md](tools/README.md).
@@ -102,7 +111,7 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2sn
   time — nothing generated is committed), Sokol, ImGuiFileDialog, imgui_club (the hex editor
   behind the memory viewers), miniz, and noclip.
 
-Everything except `main.c`, `sokol_impl.c/.m`, `ui/mem_edit.cpp`, and the submodules' `.c` files
+Everything except the frontends' `main*.c` and `sokol_*impl.c/.m`, `ui/mem_edit.cpp`, and the submodules' `.c` files
 is a header-only `.h` module. That is deliberate — see [CLAUDE.md](CLAUDE.md).
 
 ## The menu bar
@@ -155,7 +164,9 @@ so the guest plays on P2 without rebinding anything.
 one of its own (`M2HSNCFTR_00` for Sonic The Fighters) rather than every Model 2 game sharing a
 list. The browser also shows YAMP's rooms for the same arcade game, greyed out and unjoinable:
 YAMP plays the console port, so a cross-emulator match could never stay in sync, but an empty
-lobby with people next door is worth telling apart from an empty one.
+lobby with people next door is worth telling apart from an empty one. Rooms made by the browser
+build are shown the same way, with the reason: web and desktop builds do not play each other
+until they are shown to compute the same frames ([WEB-NETPLAY.md](WEB-NETPLAY.md), "Cross-play").
 
 Scriptable without the GUI, which is how it gets tested:
 
@@ -175,7 +186,8 @@ releases, so getting back to a fight is coin-and-START like anybody else; and `w
 [MCP_GUIDE.md](MCP_GUIDE.md#netplay-rpcn).
 
 TLS is Schannel, so netplay currently connects only on Windows; [src/net/tls.h](src/net/tls.h)
-is the one file a POSIX backend would go in. The design follows
+is the one file a POSIX backend would go in. The browser build has no sockets at all: it reaches
+RPCN through a WebSocket gateway on the RPCN host ([web/gateway/](web/gateway/)). The design follows
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
 worked the RPCN protocol out first.
 
@@ -336,7 +348,7 @@ the board carries on being presented — a live stream is not the place to find 
 carries an `overlay` block saying whether it is loaded, how long its last paint took and how
 many times it has reloaded.
 
-The contract is [src/ui/overlay_plugin.h](src/ui/overlay_plugin.h), about forty lines, and it is
+The contract is [src/ui/overlay_plugin.h](src/ui/overlay_plugin.h), about a hundred lines, and it is
 meant to be *copied* into a plugin's tree rather than shared through a submodule; check
 `M2_OVERLAY_ABI` with a `_Static_assert` so a skew is a build error and not a blank overlay. The
 host side is [src/ui/overlay_host.h](src/ui/overlay_host.h).
@@ -386,7 +398,7 @@ Model 2 board bugs shared by the whole catalogue. That bet paid off repeatedly. 
   tests (`JMP` decoded as `JSR`, `SWAP` as `PEA` — each silently corrupting the stack) and
   live BGM playback.
 
-**3. `m2-hle2` — this repository (2026-06-06 → present, 35 commits).** A clean from-scratch
+**3. `m2-hle2` — this repository (2026-06-06 → present, 156 commits).** A clean from-scratch
 rebuild following IMPLEMENTATION-DRAFT.md's phase order, carrying the known-good invariants
 forward and leaving the dead ends behind. It opened at feature parity — STF and FV booting with
 3D, tiles, and audio — and the commits since are the hard remainder:
@@ -416,9 +428,9 @@ testing every single time.
 This project was built almost entirely as a human–AI pair. Direction, hardware knowledge, ROM
 dumps, prior reverse-engineering, and every acceptance decision are the author's; the
 implementation, the debugging loops, and the documentation were driven with
-[Claude Code](https://claude.com/claude-code). Nearly all 113 commits across `m2-hle` and
-`m2-hle2` carry a `Co-Authored-By: Claude` trailer (Sonnet 4.6, then Opus 4.7 / 4.8 / 5 as they
-shipped).
+[Claude Code](https://claude.com/claude-code). Nearly all 234 commits across `m2-hle` and
+`m2-hle2` carry a `Co-Authored-By: Claude` trailer (Sonnet 4.6, then Opus 4.7 / 4.8 / 5 and
+Fable 5.1 as they shipped).
 
 What made that work is that the model was given **instruments, not just a prompt**:
 

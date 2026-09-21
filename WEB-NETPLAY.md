@@ -4,7 +4,7 @@ Netplay on **play.sonicthefighte.rs**: the WebAssembly build of *Sonic the Fight
 
 This expands [WEB-PORT.md](WEB-PORT.md) sections 3.4, 4, 5 and milestones M3–M4, and replaces them where the two disagree.
 
-**Status (2026-09-21): built and tested end to end locally, not deployed.** Two browsers, each with a new account, went through the page's own screens: sign-up, lobby, host, join, start and accept. They then played a 40-second match: about 2,400 frames each, random inputs on both sides, zero stalls, no desync. The gateway runs on this machine against a local RPCN. What remains is owner work on the droplet ([web/gateway/README.md](web/gateway/README.md)), and the cross-play decision (section 3).
+**Status (2026-09-21): built, tested end to end locally, and deployed.** Two browsers, each with a new account, went through the page's own screens: sign-up, lobby, host, join, start and accept. They then played a 40-second match: about 2,400 frames each, random inputs on both sides, zero stalls, no desync. That run used a gateway on this machine against a local RPCN. The gateway now also runs on the RPCN droplet, in Docker behind the existing Caddy ([web/gateway/README.md](web/gateway/README.md), "As deployed"). What remains is in section 8, and the cross-play decision (section 3).
 
 ---
 
@@ -62,7 +62,7 @@ Once they are identical, set `NETPLAY_CROSS_PLAY 1` (netplay.h) and ship both bu
 Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `pages.yml`.
 
 - **`/gw/stream`** relays one TLS connection to RPCN.
-  - The upstream is fixed in config, and pinned by the SHA-256 fingerprint of RPCN's self-signed certificate.
+  - The upstream is fixed in config. Its certificate is either pinned by SHA-256 fingerprint (`rpcn.fingerprint`, for a self-signed one) or validated by chain and name (`rpcn.servername`, for a CA-issued one, which survives renewal). The droplet's is Let's Encrypt, so it uses the name.
   - One WebSocket is one upstream for its whole life, never pooled or reconnected, because the Twitch device flow must stay on one connection.
 - **`/gw/dgram`** gives each player a UDP socket on the public address (from a fixed port range) and a **virtual address** from `100.64.0.0/16`. Each outgoing datagram, framed `[ip: 4][port: u16 BE][payload]`, is routed one of four ways:
   1. To the **signaling tag** `100.127.255.254:3657`: the gateway writes the player's virtual address into the keepalive's `local_addr` field and sends it to RPCN's helper. Replies come back labelled with the tag.
@@ -75,9 +75,10 @@ Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `page
   - The `Origin` must be the site.
   - 6 streams and 4 datagram channels per client IP.
   - 240 datagrams/s and 64 KB/s per player, 1,200-byte payloads.
-  - Idle streams are closed after 15 minutes, and dead browsers are found by WebSocket ping.
+  - Idle streams are closed after 15 minutes, and dead browsers are found by WebSocket ping (every 30 s; no pong by the next ping ends the socket).
+  - *The heartbeat's pong handler has to be attached in the `handleUpgrade` callback,* not on the server's `connection` event, which `handleUpgrade` never emits. Registered there, no pong was ever recorded and the live gateway dropped every signed-in session 30-60 s after it opened ("the connection to the gateway closed"). A test now holds a connection through six heartbeats.
 - **It never logs a payload byte.** It sees RPCN's protocol in the clear, login tokens included.
-- `npm test`: the routing rules, plus an end-to-end run against a stand-in RPCN, signaling helper and desktop peer (14 tests). CI runs them before every deploy.
+- `npm test`: the routing rules, plus an end-to-end run against a stand-in RPCN, signaling helper and desktop peer (15 tests). CI runs them before every deploy.
 
 ---
 
@@ -127,10 +128,10 @@ A hidden tab gets no animation frames. While a match is on, a small Worker posts
 
 The **Play online** button in the bar appears once the game is loaded.
 
-- **Signed out:** **Sign in with Twitch**, or an RPCN account with two tabs, *Sign in* and *Create an account*. Sign-in has "the server e-mailed me a code" for servers that validate by e-mail. A returning player sees "Welcome back, *name*" and **Continue**.
+- **Signed out:** **Sign in with Twitch**, or an RPCN account with two tabs, *Sign in* and *Create an account*. Sign-in has "the server e-mailed me a code" for servers that validate by e-mail, as the live one does: after a sign-up there the panel moves to sign-in with the details filled in and the code box open, and offers to send the e-mail again. A returning player sees "Welcome back, *name*" and **Continue**.
 - **Twitch:** the code, large, with **Copy code** and a real **Open Twitch** link. It is an `<a>`, so no popup blocker applies, and the URL must start with `https://`.
 - **Lobby:** **Create a match**; open matches with **Play**; rooms that cannot be joined shown greyed with the reason; a connection-quality line from the gateway round trip. Under *Advanced*: input delay (automatic from the round trip, or 2–6) and a private-match password.
-- **Room:** "Waiting for an opponent…" → "*name* joined" / **Start match** → "*name* is ready" / **Accept**, and "Both games restart together when the match begins". A desync is shown in words. The panel folds away when the match starts, and the bar says who you are playing.
+- **Room:** "Waiting for an opponent…" → "*name* joined" / **Start match** → "*name* is ready" / **Accept**, and "Both games restart together when the match begins". A desync is shown in words. The panel folds away once, when the match starts, and the bar says who you are playing; opened again mid-match it stays open, with **End match** and **Leave**.
 - Keys typed into the panel never reach the game.
 - The page loads no script from another site: the sign-in lives in this origin's `localStorage`, and CI now fails the deploy if a `<script src>` names another host.
 
@@ -155,9 +156,7 @@ The datagram seam in `net_socket.h` is narrow enough that either can replace the
 
 ## 8. What is not done
 
-- **Deploy** (owner steps, [web/gateway/README.md](web/gateway/README.md)):
-  - Put the RPCN fork's `pick_free_npid` fix live first.
-  - Then Node, config, firewall UDP 40000–40999, Caddy and systemd.
+- **Deploy:** the gateway is up on the droplet ([web/gateway/README.md](web/gateway/README.md), "As deployed", which also lists what was still open there: the certificate Caddy serves for `rpcn.`). Not recorded as done: the RPCN fork's `pick_free_npid` fix, without which a Twitch sign-up whose lowercase name collides with an existing account fails.
 - **Twitch's success path** (the code and link screen) has not run: the local RPCN has no Twitch client ID. The failure path has run.
 - **A desktop client against a web room** has not been run. The refusal logic is in code, and the room word it depends on was checked (`0x41` low byte), but nothing has been held against a real desktop client.
 - **Firefox and Safari**, the hidden-tab worker there, and real distances for the automatic input delay.
@@ -169,7 +168,7 @@ The datagram seam in `net_socket.h` is narrow enough that either can replace the
 
 Details are in [web/gateway/README.md](web/gateway/README.md), "Testing locally".
 
-- `cd web/gateway && npm test`: the gateway alone.
+- `cd web/gateway && npm test`: the gateway alone. `node web/gateway/test/probe-live.mjs`: the deployed one, from outside.
 - `node tools/web-netplay.mjs --seconds 40`: two headless browsers play a match through the real page, a local gateway and a local RPCN.
   - `--hide-a 10` hides one tab mid-match.
   - `--ui-shots DIR` saves the panel at each step.

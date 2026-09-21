@@ -24,7 +24,7 @@
  *     const m2_overlay_api_t *m2_overlay_query(void);
  *
  * This file is COPIED into a plugin's own tree rather than shared across
- * repositories — it is forty lines and it is versioned, and a submodule for it
+ * repositories — it is about a hundred lines and it is versioned, and a submodule for it
  * would be worse than the copy. Check M2_OVERLAY_ABI with a _Static_assert on
  * the plugin side so a skew is a build error rather than a blank overlay.
  */

@@ -2,9 +2,9 @@
 
 The plan for **play.sonicthefighte.rs**: a UI-stripped WebAssembly build of this emulator that plays *Sonic the Fighters* over RPCN, deployed to GitHub Pages from this repository on every push to master.
 
-Pair with [CLAUDE.md](CLAUDE.md) (invariants) and [PROPOSAL.md](PROPOSAL.md) (architecture). This file is the web target's equivalent of both: what was found, what was decided and why, and the order to build it in. Work happens on the `wasm` branch.
+Pair with [CLAUDE.md](CLAUDE.md) (invariants) and [PROPOSAL.md](PROPOSAL.md) (architecture). This file is the web target's equivalent of both: what was found, what was decided and why, and the order to build it in. Work happened on the `wasm` branch until PR #20 (`3d2ca3e`) merged it into master; master is now where the web frontend lives and what deploys.
 
-Status: **M1 done, M2 boots.** `arc-s` is merged (`dd6f3cb`) and the web frontend runs: a full Sonic-vs-Knuckles fight at 60 game fps in headless Edge, from a merged zip loaded by CRC, with keyboard input and sound in sync (confirmed by ear), on one thread. Not done: any network path (M3), the wizard past its first step (M4), the deploy (M5). Section 8 is what has been *measured*; everything else about browser behaviour is still a claim to be checked at the milestone that names it.
+Status: **M1 done, M2 boots.** `arc-s` is merged (`dd6f3cb`) and the web frontend runs: a full Sonic-vs-Knuckles fight at 60 game fps in headless Edge, from a merged zip loaded by CRC, with keyboard input and sound in sync (confirmed by ear), on one thread. The deploy pipeline (M5) is in and publishes from master. Netplay is in too (PR #31): web backends for `tls.h` / `net_socket.h` (`src/net/web_socket.h`), the gateway (`web/gateway/`, running on the RPCN droplet), and the sign-in / lobby / room panel (`web/site/m2hle-netplay.js`). Two browsers have played a whole match through it; web-vs-native has not been run, and the build-family bits keep the two apart until the determinism gate passes. **[WEB-NETPLAY.md](WEB-NETPLAY.md) is the netplay design as built, and replaces sections 3.2, 3.4, 4 and 5 here where they disagree.** Gamepads (with a Controls panel) and touch buttons are in as well (M6). Section 8 is what has been *measured*; everything else about browser behaviour is still a claim to be checked at the milestone that names it.
 
 ---
 
@@ -65,7 +65,7 @@ What the port has to get right:
 
 ### 3.1 A third frontend: `M2HLE_FRONTEND=web`
 
-`src/main_web.c`, built only under Emscripten. `sokol_app` (canvas, WebGL2 context, keyboard, `requestAnimationFrame`) + `sokol_gfx` (GLES3) + `sokol_audio`, plus `game_frame.h`, `audio_out.h`, `input.h`, `netplay.h`. **No ImGui, no ImGuiFileDialog, no `mem_edit.cpp`, no MCP bridge, no kiosk, no SDL.** `sokol_app` over SDL3 because it is already in the tree and its Emscripten backend is a fraction of the size of SDL3's port (to be confirmed with a size report at M2); the one thing SDL3 would have given for free is gamepads, which is ~40 lines of `navigator.getGamepads()` polled per frame into `g_input.held` (M6).
+`src/main_web.c`, built only under Emscripten. `sokol_app` (canvas, WebGL2 context, keyboard, `requestAnimationFrame`) + `sokol_gfx` (GLES3) + `sokol_audio`, plus `game_frame.h`, `audio_out.h`, `input.h`, `netplay.h`. **No ImGui, no ImGuiFileDialog, no `mem_edit.cpp`, no MCP bridge, no kiosk, no SDL.** `sokol_app` over SDL3 because it is already in the tree and its Emscripten backend is a fraction of the size of SDL3's port (to be confirmed with a size report at M2); the one thing SDL3 would have given for free is gamepads. They are done in the page instead: `web/site/m2hle-pad.js` polls `navigator.getGamepads()` once per display frame and hands the emulator one bit per action (`web_pad_set`, which presses and releases only what changed, so a pad and the keyboard can hold the same direction), with the mapping edited in a Controls panel. The touch buttons (`web/site/m2hle-touch.js`) merge into the same mask.
 
 Only the `sfight` profile is registered in this build. `fvipers` and `m2snake` are left out, not hidden: a smaller binary, and no way to load a set that cannot be played online.
 
@@ -77,16 +77,20 @@ The page draws the wizard and the lobby as DOM over the canvas and talks to the 
 - Text entry, copy/paste of the device code, screen readers, password managers and phone keyboards all work in DOM and none work in an ImGui canvas.
 - It removes ImGui + cimgui + the Python codegen from the web build outright — the single largest footprint cut available.
 
-The API already has the right shape, because `netplay_window.h` was written to it: *"Draws entirely from a snapshot and never touches netplay state directly: every button posts a command."* The web build exports exactly that:
+The API already has the right shape, because `netplay_window.h` was written to it: *"Draws entirely from a snapshot and never touches netplay state directly: every button posts a command."* The web build exports exactly that (`main_web.c`, as built):
 
 ```c
-int         web_netplay_post(int cmd, const char *json_cfg);   /* -> netplay_post   */
-const char *web_netplay_status_json(void);                     /* <- netplay_get_status */
-int         web_rom_load(const uint8_t *zip, size_t len);      /* -> §3.5           */
-const char *web_rom_report_json(void);                         /* which files, which missing */
+void        web_netplay_begin(void);                            /* stage a command from the stored settings */
+int         web_netplay_set(const char *key, const char *value);/* ... one field at a time */
+int         web_netplay_post(const char *cmd);                  /* -> netplay_post, by name ("connect", "host", ...) */
+const char *web_netplay_status(unsigned log_from);              /* <- netplay_get_status, as JSON */
+void        web_netplay_signout(void);                          /* leave, forget the token and password */
+void        web_netplay_set_gateway(const char *url);           /* ?gw=, before connecting */
+int         web_rom_load(uint8_t *zip, int len);                /* -> §3.5 */
+const char *web_rom_missing(void);                              /* the files not found, space separated */
 ```
 
-`netplay_status_t` is large (two room tables and a 64×160 log ring), so the JSON is built from it on demand, a few times a second, not per frame.
+A command is staged a field at a time rather than posted as one JSON string because a password can hold any character and `json_min.h` reads a quote as the end of a value. `netplay_status_t` is large (two room tables and a 64×160 log ring), so the JSON is built from it on demand, four times a second, not per frame, and carries only the log lines after `log_from`.
 
 ### 3.3 Threading: one slice function, single-threaded first
 
@@ -98,7 +102,7 @@ Why single-threaded first:
 - **The budget is there.** See §2: the RK3566 holds 60 fps.
 - The emu mutex disappears on the web (no second thread), which also removes the main-thread spin-wait Emscripten turns `pthread_mutex_lock` into.
 
-The cost, stated plainly: **`requestAnimationFrame` stops in a hidden tab**, so a player who tabs away stalls their opponent, and m2-hle2 drops a session that stalls for 15 s. Mitigation: on `visibilitychange`, drive slices from a timer instead (tabs playing audio — this one is — are exempt from Chrome's background timer throttling). If measurement at M2 says one thread is not enough, `emu_run_slice` is already the seam: `-pthread` + `coi-serviceworker` is a build flag and a file, not a redesign.
+The cost, stated plainly: **`requestAnimationFrame` stops in a hidden tab**, so a player who tabs away stalls their opponent, and m2-hle2 drops a session that stalls for 15 s. Mitigation: on `visibilitychange`, drive slices from a timer instead (tabs playing audio — this one is — are exempt from Chrome's background timer throttling). *As built,* it is a Worker's 16 ms timer, only while a match is on: `web_background_tick` runs the owed slices and the sound with no picture (WEB-NETPLAY.md 5.3). If measurement at M2 says one thread is not enough, `emu_run_slice` is already the seam: `-pthread` + `coi-serviceworker` is a build flag and a file, not a redesign.
 
 ### 3.4 Network seams
 
@@ -106,12 +110,12 @@ The cost, stated plainly: **`requestAnimationFrame` stops in a hidden tab**, so 
 |---|---|---|
 | `tls.h` | Schannel over TCP | **A `wss://` byte stream to the gateway.** The browser does the TLS and validates the gateway's certificate against the public CA set — this *is* `tls.h`'s VALIDATED mode. No crypto library in the wasm. Certificate pinning does not exist here (the browser gives no access to the peer certificate); the fingerprint field is ignored and hidden. |
 | `net_socket.h` UDP | `sendto` / `recvfrom` | **Framed datagrams on a second WebSocket**: `[ip:4][port:2][payload]` each way. `net_udp_open` opens it; `net_udp_recv` pops a ring the `onmessage` handler fills. |
-| `net_resolve_ipv4`, `net_local_ipv4_towards` | `getaddrinfo`, routing table | Answered by the gateway in its hello: the signaling address to target, and **this session's virtual local address** (§4.2). |
-| `net_now_ms` | `GetTickCount64` | `emscripten_get_now()`. |
-| `netplay_open_url` | `ShellExecute` | No-op returning false; the page shows the link (§3.2). |
-| `netplay_settings_load/save` | `m2hle_netplay.cfg` | `localStorage`, same keys. |
+| `net_resolve_ipv4`, `net_local_ipv4_towards` | `getaddrinfo`, routing table | No hello message. `net_resolve_ipv4` answers a fixed **signaling tag**, `100.127.255.254`, which the gateway maps to the real helper; `net_local_ipv4_towards` answers 0, and the gateway writes **this session's virtual local address** into each signaling keepalive instead (§4.2). |
+| `net_now_ms` | `GetTickCount64` | Unchanged: the POSIX `clock_gettime(CLOCK_MONOTONIC)` path, which Emscripten provides. |
+| `netplay_open_url` | `ShellExecute` | Never reached: `main_web.c` turns it off (`netplay_set_open_browser(false)`), and the page shows the link (§3.2). |
+| `netplay_settings_load/save` | `m2hle_netplay.cfg` | `localStorage`: the same text, under the file's name as the key. |
 
-WebSocket is TCP, so a lost packet stalls everything behind it (head-of-line blocking) where UDP would simply have lost one datagram the lockstep's redundant re-sends already cover. That is the known price of v1. The seam is the datagram API, so WebTransport datagrams (no HOL blocking, but no Safari at the time of writing — check again at M3) or a WebRTC data channel can replace the transport later without touching `lockstep.h`.
+WebSocket is TCP, so a lost packet stalls everything behind it (head-of-line blocking) where UDP would simply have lost one datagram the lockstep's redundant re-sends already cover. That is the known price of v1. The seam is the datagram API, so WebTransport datagrams (no HOL blocking, but no Safari at the time of writing) or a WebRTC data channel can replace the transport later without touching `lockstep.h`.
 
 ### 3.5 ROMs: one zip, matched by CRC, never on our server
 
@@ -135,22 +139,22 @@ The site ships the emulator and nothing else. The player picks (or drops) **one 
 
 ## 4. The gateway
 
-One small daemon on the RPCN host (`rpcn.sonicthefighte.rs`, `143.198.49.181`). It lives in this repo under `web/gateway/` but is **not** deployed by the Pages workflow — GitHub Pages cannot run it, and it needs a real certificate for `wss://` (Caddy or nginx + Let's Encrypt in front is the simple way). Node is the default choice because `tools/` is already Node; nothing about the design depends on it.
+One small daemon on the RPCN host (`rpcn.sonicthefighte.rs`, `143.198.49.181`). It lives in this repo under `web/gateway/` but is **not** deployed by the Pages workflow — GitHub Pages cannot run it, and it needs a real certificate for `wss://` (Caddy or nginx + Let's Encrypt in front is the simple way). Node is the default choice because `tools/` is already Node; nothing about the design depends on it. *As built* it is Node + `ws` (`gateway.mjs`, routing rules in `rules.mjs`), running in Docker behind the droplet's existing Caddy; [web/gateway/README.md](web/gateway/README.md) has the deployment and WEB-NETPLAY.md section 4 the rules.
 
 ### 4.1 Two channels per player
 
-- **Stream:** `wss://…/rpcn` → one TLS connection to RPCN `:31313`. Bytes in, bytes out. The upstream is **fixed in the gateway's config**; the client cannot name a host. An open WebSocket-to-TCP proxy is an abuse vector within hours of being found.
-- **Datagram:** `wss://…/udp` → one UDP socket per session, from a fixed, firewalled port range. Frames are `[ip:4][port:2][payload]`.
+- **Stream:** `wss://…/gw/stream` → one TLS connection to RPCN `:31313`. Bytes in, bytes out. The upstream is **fixed in the gateway's config**; the client cannot name a host. An open WebSocket-to-TCP proxy is an abuse vector within hours of being found.
+- **Datagram:** `wss://…/gw/dgram` → one UDP socket per session, from a fixed, firewalled port range. Frames are `[ip:4][port:2][payload]`.
 
 Because the gateway terminates the browser's TLS, it sees the login token in the clear. The gateway operator is the RPCN operator, so no new party learns anything — but it is why the gateway must run on a host we own and never on a third-party tunnel.
 
 ### 4.2 Three things that are silently wrong if done the obvious way
 
-- **The gateway must reach RPCN by its public address, never `localhost`.** RPCN records a player's address from what it sees. Over loopback every browser player is `127.0.0.1`, and a native opponent is told to punch at `127.0.0.1`. *(RPCN's exact rule — TCP peer address vs UDP source — was not verified from its source here; verify at M3 against the real server before trusting this paragraph.)*
+- **The gateway's UDP must leave from its public address, never `localhost`.** RPCN records a player's address from what it sees. Over loopback every browser player is `127.0.0.1`, and a native opponent is told to punch at `127.0.0.1`. *Since verified in RPCN's source (WEB-NETPLAY.md section 2):* the address is the source of the UDP signaling keepalive and nothing else, so the TCP stream may use loopback; `signaling.host` and `udp.bind` must be the public address.
 - **Two browser players share the gateway's public IPv4, which is the case CLAUDE.md already documents:** RPCN hands each the other's *local* address with port 3658 hardcoded. So the gateway gives every session a **virtual local address** from a private pool, reports it as `local_ip` in the signaling keepalive, and routes any datagram addressed to `pool-address:3658` internally, session to session, with no UDP involved. Browser-vs-browser then never leaves the gateway; browser-vs-native goes out the session's real UDP socket, and the native client needs no change at all.
 - **A relay that forwards to any address is a reflector and an SSRF hole.** Allow: the RPCN signaling address, the virtual pool, and public unicast. Refuse: loopback, RFC 1918, link-local, multicast, ports below 1024. Cap datagrams per second and sessions per source IP. Check `Origin: https://play.sonicthefighte.rs` on upgrade.
 
-Also: every browser player reaches RPCN from one IP, so any per-IP limit RPCN applies (sign-up rate, bans) applies to all of them at once.
+Also: every browser player reaches RPCN from one IP, so any per-IP limit RPCN applies (sign-up rate, bans) would apply to all of them at once. RPCN's source shows none (WEB-NETPLAY.md section 2).
 
 ---
 
@@ -168,12 +172,12 @@ Rooms whose `flagAttr` fails `netplay_room_reject_reason` are shown greyed with 
 
 ## 6. Deploy
 
-`.github/workflows/pages.yml`, separate from `canary.yml`. **It exists and runs on every push to `wasm`.**
+`.github/workflows/pages.yml`, separate from `canary.yml`. **It exists and runs on every push to master** (and builds, without deploying, on pull requests to master).
 
-- **Build job:** `mymindstorm/setup-emsdk` pinned to **6.0.9** (a toolchain bump can change float codegen; bump it deliberately), submodules `vendor/sokol vendor/miniz` only (no Python step, nothing generates cimgui), `emcmake cmake -DM2HLE_FRONTEND=web -DM2HLE_VERSION=rNNN-sha`, then `build_web/site/` is the whole website.
+- **Build job:** `emscripten-core/setup-emsdk@v16` (the action's new home; `mymindstorm/` redirects) with `version` pinned to **6.0.9** (a toolchain bump can change float codegen; bump it deliberately), submodules `vendor/sokol vendor/miniz` only (no Python step, nothing generates cimgui), `emcmake cmake -DM2HLE_FRONTEND=web -DM2HLE_VERSION=rNNN-sha`, then `build_web/site/` is the whole website.
 - **Gates before anything is published:** a tripwire that fails the run if a ROM-like file is in the site directory, and `tools/web-smoke.mjs` in headless Chrome with `--expect-log "game_render_init: complete"`. With no ROM the page stops at "add your game", which still proves WebGL2 came up, every shader compiled for GLSL ES 3.00, the audio path was chosen and nothing threw — the things that have actually broken.
 - **Deploy job:** `actions/upload-pages-artifact` → `actions/deploy-pages`, on pushes and `workflow_dispatch`, never on pull requests. No `gh-pages` branch. A `CNAME` file would be ignored: with an Actions deployment the custom domain lives in the repository settings.
-- **Branches:** `wasm` only, because master cannot build `-DM2HLE_FRONTEND=web` until this branch merges. Add master to the trigger in that merge.
+- **Branches:** master only. It was `wasm` only while master could not build `-DM2HLE_FRONTEND=web`; after PR #20 `wasm` became an ancestor of master and nothing deployed until the trigger moved (`ea7e806`).
 
 **Caching is why the page is version-stamped.** GitHub Pages serves everything `max-age=600` and that cannot be changed, and Cloudflare sits in front with the same TTL. `m2hle.js` and `m2hle.wasm` are built as a pair, so a visitor arriving just after a deploy must not get one new and one old. `web/stamp-site.cmake` writes the build's version into `index.html`, which names every file with `?v=<version>`; the page script does the same for the two files it loads itself (`locateFile` for the `.wasm`, and the audio worklet). One `index.html` always asks for one consistent set; the worst case is ten minutes on the previous build, whole.
 
@@ -181,8 +185,8 @@ Rooms whose `flagAttr` fails `netplay_room_reject_reason` are shown greyed with 
 
 Only the repository owner can do these, and the site does not exist until they are done:
 
-1. **Settings → Pages → Build and deployment → Source: "GitHub Actions".** Until then the deploy job fails with a 404 from the Pages API (the build job still goes green).
-2. **Settings → Environments → `github-pages` → Deployment branches: allow `wasm`.** The environment is created restricted to the default branch; without this the deploy is rejected by "environment protection rules".
+1. **Settings → Pages → Build and deployment → Source: "GitHub Actions".** Until then the deploy job fails with a 404 from the Pages API (the build job still goes green). Not "Deploy from a branch": that publishes the repository through Jekyll instead of running the workflow, which is how the site became a rendered README right after the merge to master.
+2. **Settings → Environments → `github-pages` → Deployment branches: allow `master`** (it was `wasm` while the web frontend lived there). The environment is created restricted to the default branch; without this the deploy is rejected by "environment protection rules".
 3. **DNS:** `CNAME play → biggestsonicfan.github.io`, set up the way `noclip` is.
 4. **Settings → Pages → Custom domain: `play.sonicthefighte.rs`**, then Enforce HTTPS once it is offered. Before step 4 the site is at `https://biggestsonicfan.github.io/m2-hle2/`, and it works there too: every URL in the page is relative.
 
@@ -199,16 +203,16 @@ Each ends on something measured. Native builds for verification go in a **fresh 
 - **M0 — done.** Branch, analysis, this document.
 - **M1 — done (`dd6f3cb`).** Gate as run: MSVC build of every target, `ctest` 6/6, D3D11 launched (HLSL compiles, runs), and `arc_bench --draw-digest` identical with and without the mesh cache over 4,531 frames / 324,749 cache hits. Not run: `--verify-atlas`, `grade-models`, `match-replay` (they need the MCP bridge on a machine whose default port is not in use), and the GL shaders on a native GPU. *Original scope:* Resolve §2's five hunks; port `8391e6b` into the cached decoder and every fill-shader variant, GLSL and HLSL. *Gate:* MSVC build + `ctest`; `arc_bench --draw-digest` identical with and without the mesh cache; `--verify-atlas`; `node tools/grade-models.mjs`; `node tools/match-replay.mjs`.
 - **M2 — boots; gates partly open.** Done: `M2HLE_FRONTEND=web`, `emu_slice_body` / `emu_slice_finish` shared with the native thread (native re-checked: 59.9 fps headless, `ctest` 6/6), `main_web.c`, the in-memory CRC-matched loader, audio init, keyboard, and step 1 of the page. Open: Chrome/Firefox/Safari on real GPUs (headless Edge, which turned out to be using this machine's real GPU through ANGLE/D3D11 and not the software fallback, plus one person's browser — which is where the audio lag was found and fixed, section 8), a frame-time number from a modest laptop, and the determinism gate below — see section 8 for where it stands. *Original scope:* emsdk pinned; `M2HLE_FRONTEND=web`; `emu_run_slice` extracted (native histogram unchanged); `main_web.c`; in-memory CRC-matched ROM load; audio; keyboard. *Gates:* attract runs in Chrome, Firefox and Safari; frame-time budget logged on a modest laptop; and **the determinism gate: the wasm build's per-frame check values (`netplay_frame_check`) equal the native build's over the attract replay fight.** This is what cross-play with native clients rests on. The reasons to expect a pass were checked: sin/cos come from the COP data ROM tables, √ / ÷ / atan2 are the firmware ports, wasm has no FMA contraction, and the float→int `0x80000000` case was made explicit for the ARM build. The reasons to measure anyway: musl's libm is not MSVC's, and wasm does not define NaN payload bits.
-- **M3 — it reaches RPCN.** Web backends for `tls.h` / `net_socket.h`; the gateway; settings in `localStorage`. *Gate:* a web client and a native client, two accounts, play a session to the end with `desync_frame` clear (the two-client method is already worked out; one side becomes a browser tab). Then web-vs-web through the virtual pool.
-- **M4 — wizard and lobby.** §5, against the exported API. *Gate:* someone who has never seen RPCN gets from a blank tab to a match without being told anything.
-- **M5 — deploy: the pipeline is in, brought forward** (it is worth having every later milestone land on a live URL). What remains is the four owner-only steps in §6.
-- **M6 — after it works.** Gamepad; OPFS cache; hidden-tab timer; touch controls; the footprint pass with numbers (wasm size, heap peak); WebTransport/WebRTC if WebSocket latency proves to be the complaint; threads only if M2's budget says so.
+- **M3 — it reaches RPCN; web-vs-web done, web-vs-native not run.** Done (PR #31): `web_socket.h` under `tls.h` / `net_socket.h`, the gateway, settings in `localStorage`, and web-vs-web through the virtual pool — two headless browsers, new accounts, a 40-second match, zero stalls, no desync (`tools/web-netplay.mjs`, against a local gateway and RPCN). Open: the web-vs-native gate below, which waits on the determinism gate (web and desktop rooms refuse each other until `NETPLAY_CROSS_PLAY` is set; WEB-NETPLAY.md section 3). *Original scope:* Web backends for `tls.h` / `net_socket.h`; the gateway; settings in `localStorage`. *Gate:* a web client and a native client, two accounts, play a session to the end with `desync_frame` clear (the two-client method is already worked out; one side becomes a browser tab). Then web-vs-web through the virtual pool.
+- **M4 — wizard and lobby: built, gate not run.** The **Play online** panel (`web/site/m2hle-netplay.js`, WEB-NETPLAY.md 5.4) has Twitch and RPCN-account sign-in, sign-up with the e-mail code, the lobby and the room, and was driven end to end by `web-netplay.mjs`. Open: Twitch's success path (the local RPCN has no Twitch client id) and the gate itself. *Original scope:* §5, against the exported API. *Gate:* someone who has never seen RPCN gets from a blank tab to a match without being told anything.
+- **M5 — deploy: the pipeline is in, brought forward** (it is worth having every later milestone land on a live URL), and deploys from master since `ea7e806`. What remains is the four owner-only steps in §6, with step 1 and step 2 pointed at master.
+- **M6 — after it works.** Done: gamepads with a Controls panel (`m2hle-pad.js`, kept in `localStorage` `m2hle.pad`; a second pad plays P2); touch buttons for phones, with a size / placement editor and a fullscreen button (`m2hle-touch.js`, `web-smoke.mjs --mobile --taps`); the hidden-tab timer, during a match only (a Worker's 16 ms tick into `web_background_tick`; measured in headless Chrome only). Open: OPFS cache; the footprint pass with numbers (wasm size, heap peak); WebTransport/WebRTC if WebSocket latency proves to be the complaint; threads only if M2's budget says so.
 
 ---
 
 ## 8. Measured so far
 
-Toolchain: Emscripten **6.0.9**, installed beside the repo (`../emsdk`, not on `PATH`). Pin this exact version in `pages.yml`.
+Toolchain: Emscripten **6.0.9**, installed beside the repo (`../emsdk`, not on `PATH`). `pages.yml` pins this exact version.
 
 **Build.** `emcmake` finds no generator on a stock Windows box; Visual Studio ships a Ninja that works:
 
@@ -245,7 +249,7 @@ Measured in headless Edge: **queue 27-50 ms around a 40 ms target, 0 dropouts, 0
 Two things the first run showed, neither of which was what it was built to find:
 
 - **The headless browser has been using this machine's real GPU all along** (`ANGLE (NVIDIA GeForce RTX 3070, Direct3D11)`), not SwiftShader: `--enable-unsafe-swiftshader` is a fallback, not a choice. Every "software GL" in this project's earlier notes about the web build was an assumption and is wrong. The render tests were on real hardware, which is better news for them.
-- **COP op `0x80` is not implemented, and it is called 67 times in the first 45 s of a Sonic v Knuckles round** (`SHARC: unknown cmd 0x40008080 @ IP=0x0008AC30`, followed by its own arguments reported as commands: CLAUDE.md's "a command the HLE does not know desynchronises everything after it"). It is `Fn_zanzou_reserve` (cpres1 PM 0x20961): the firmware's afterimage system, ops 0x80-0x87, variable-length arguments with a reply per entry. `sharc_exec.h` stubs 0x81/0x82/0x84/0x85/0x86 and has nothing for 0x80, 0x83 or 0x87. **Board-level, so the desktop build has it too.** It is the best lead so far for fighter parts drawn wrong during a fight; it is its own porting job, like `sharc_coli.h` was.
+- **COP op `0x80` is not implemented, and it is called 67 times in the first 45 s of a Sonic v Knuckles round** (`SHARC: unknown cmd 0x40008080 @ IP=0x0008AC30`, followed by its own arguments reported as commands: CLAUDE.md's "a command the HLE does not know desynchronises everything after it"). It is `Fn_zanzou_reserve` (cpres1 PM 0x20961): the firmware's afterimage system, ops 0x80-0x87, variable-length arguments with a reply per entry. `sharc_exec.h` stubbed 0x81/0x82/0x84/0x85/0x86 and had nothing for 0x80, 0x83 or 0x87. **Board-level, so the desktop build had it too.** *Since ported* (`089a36f`): `sharc_zanzou.h`, with `cop.h` feeding 0x80 a word at a time (`COP_ARGS_STREAM`); see CLAUDE.md's `0x40008080` entry.
 
 **It compiles unchanged.** The whole board layer, the renderer's CPU side and `src/net/` built for wasm with no source changes — `tests/arc_bench.c` to wasm was the first thing tried and it ran. Everything web-specific is in the new files plus four small seams: `emu_ctx_init`, the memory zip source in `rom_loader.h`, no log file under Emscripten, one profile under `M2HLE_WEB`.
 

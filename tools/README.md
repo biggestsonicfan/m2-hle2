@@ -47,8 +47,8 @@ No `npm install`: nothing here has a dependency. Node 18 or newer, because the
 explorer's zip reader goes through `DecompressionStream`.
 
 You supply the ROM set. Nothing here carries one and `.gitignore` refuses
-`*.zip`. Drop `sfight.zip` in the repository root (add `schamp.zip` beside it
-for a split set), or point `$STF_ROM` at one; sibling `../stf-tools` and
+`*.zip`. Drop `sfight.zip` in the repository root or in `roms/` (add
+`schamp.zip` beside it for a split set), or point `$STF_ROM` at one; sibling `../stf-tools` and
 `../noclip` checkouts are searched too. Both sides of every comparison read that
 same file, so a grade can never be measuring two different games.
 
@@ -60,33 +60,50 @@ outside the checkout by default, and that is deliberate.
 ```sh
 node tools/grade-models.mjs        # the one to run after touching geo3d.h
 node tools/grade-pose.mjs          # ... and after touching the bone handlers
-node tools/grade-all.mjs           # capture a scene, then grade everything
+node tools/grade-all.mjs           # capture a scene, then grade models, texram and colours
 node tools/grade-all.mjs --no-capture
 ```
 
 Each grader launches its own emulator and kills it afterwards, headless (no
 window, GPU or audio device). `$M2_WINDOW=1` shows the window. `--attach` uses
-one you already have running with `--mcp`.
+one you already have running with `--mcp` (`grade-models`, `grade-pose`,
+`grade-texram`, `grade-colors`, `grade-all`, `dump-board` and `watch-var` take
+it). The most recently built `m2hle` under `build_vs22/` or `build/` is
+launched unless `$M2_EXE` names one, and `$M2HLE_EXTRA_ARGS` is appended to
+every emulator a grader starts, so a run can be graded with an option the grader
+knows nothing about. The browser tools (`web-*.mjs`) need Node 22 or newer, for
+its built-in `WebSocket`.
 
 ## What is here
 
 | script | what it measures |
 |---|---|
 | `grade-models.mjs` | the index-array polygon decoder, over all 5103 model-table entries, against the explorer's: triangle positions, then which tile each textured face names and which coordinate each corner carries. All of that is a function of the ROM; what is *in* a tile depends on what the running game uploaded, which is `grade-texram`'s business. Needs no scene and no capture, which is what makes it the one to run after changing `geo3d.h` |
-| `grade-pose.mjs` | the coprocessor's rig maths: op `0x62`, the body matrix, and op `0x6B`, the four two-bone IK chains that place twelve of a fighter's sixteen slots. Replays 328 frames of arguments captured off a real board (`stf-tools/motion-pose.csv`) through the coprocessor port and holds what comes back against the explorer's rig. Needs no scene and no capture either, which makes it the one to run after touching the bone handlers in `sharc_exec.h` |
+| `grade-pose.mjs` | the coprocessor's rig maths: op `0x62`, the body matrix, and op `0x6B`, the four two-bone IK chains that place twelve of a fighter's sixteen slots. Replays 328 frames of arguments captured off a real board (`stf-tools/motion-pose.csv`) through the coprocessor port and holds what comes back against the explorer's rig. Needs no scene and no capture either, which makes it the one to run after touching the bone handlers in `sharc_exec.h`. The CSV is looked for in a sibling `stf-tools` checkout (`$M2_STF_TOOLS` or `--csv <file>` override), and the grader skips cleanly without one |
+| `grade-motion.mjs` | the half in front of `grade-pose`: the arguments this emulator's i960 itself sends the rig (one op `0x62` and four op `0x6B` a fighter a frame), for both fighters, against the explorer's motion decoder at the motion and motion frame the work structure names. Frames the game blends between motions are reported, not asserted on. `stf-tools/test-motion-mame.mjs` pointed at this emulator. `--capture <prefix>` grades one already taken; `--from 240 --frames 2200` is the attract intro |
 | `grade-texram.mjs` | texture RAM. ~85% of the pages are compressed in ROM, so a sheet is a megabyte of output from a long run of the game's own code: a wrong bit anywhere in the i960 core, the bus or the decompressor lands in it |
 | `grade-colors.mjs` | colorxlat, row group by row group, because the rows are written by four different routines at four different times. The two rows the game rotates are matched at every rotation instead, and one `frame_counter` has to explain them all at once |
 | `grade-cull.mjs` | which of the arena's sixteen ground chunks are drawn. It captures a fight, replays the coprocessor's matrix to the point `ground_disp` tests from, and runs the ROM's own `clip_point_check_yoko` + `area_clip` on it (lattice and corner tables read from ROM). The chunks drawn have to be exactly that selection, in that order, at the explorer's matrix. The explorer names the chunks: its ground layer has to be the record's 16 slots |
+| `grade-stage.mjs` | arena placement only, by running the explorer toolkit's own `stf-tools/verify-stage.mjs` unchanged on a `capture_dl` capture of a fight here. Needs a sibling `stf-tools` checkout (`$M2_STF_TOOLS` overrides) and skips cleanly without one. `grade-stages` is the fuller check |
 | `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `ab-builds.mjs` | whether two *builds* emulate the same board. Counts frames with a breakpoint on the frame hook so both stop on the same instruction, then hashes the registers and the same nine regions `grade-reset` uses. No oracle: it answers "is this optimisation, this merge, this other compiler free?" in about ten minutes, where reasoning about it does not. What it cannot see: pixels (headless has no GPU), the GEO's and the 68000's private RAM, and anything that differs between two machines rather than two builds |
-| `grade-all.mjs` | all of the above off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
+| `grade-all.mjs` | `grade-models`, `grade-texram` and `grade-colors` off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
 | `av-record.py` | not a grader: the reference client for `--av-port`, the emulator's raw A/V server. Reads the BGRA frames and the 16-bit samples off the socket, lays the irregular video cadence onto a constant 60 fps grid using each frame's board-sample stamp, and hands both to ffmpeg. About a hundred lines against a documented format (README.md, "Raw A/V out"); reading it is the fastest way to see how the format goes back together |
 | `watch-var.mjs` | who writes this address, and what do they write? A bus watchpoint that reports the value and the IP behind it, so a variable whose owner is unknown can be traced back to its routine |
+| `web-serve.mjs` | not a grader: a localhost static server for the web build (`build_web/site` by default), with the MIME types a browser insists on. `--rom <zip>` exposes one local zip at `/dev-rom.zip` without copying it into the site |
+| `web-smoke.mjs` | the web build in a real headless Chrome or Edge, in real time: every console line, any exception, and the board's frame count once a second, with screenshots and timed key presses. With no ROM it is the check CI runs before deploying (`--expect-log`, `--fail-on-log`); `--expect-frames N` fails a run that did not get that far. `--mobile` emulates a touch phone at `--size` and `--taps "coin@12,b1@20:300,dpad-up-left@24"` presses the touch buttons by name, failing a tap that held nothing. A browser gets 30 s to open its debugging port; one that exits or never opens it is reported with the tail of its stderr |
+| `web-netplay.mjs` | two headless browsers, each with its own profile, playing a match through the page's own online panel: sign-up (or `--a` / `--b name:password`), host, join, start, accept, then `--seconds` of inputs. Passes when both boards reach "playing", keep advancing and never latch a desync. `--hide-a N` hides one tab mid-match (the background worker's case), `--ui-shots DIR` saves the panel at each step. Needs a local gateway and RPCN: see [web/gateway/README.md](../web/gateway/README.md), "Testing locally" |
+| `web-objview.mjs` | the object viewer against the web build. See "The object viewer, in a browser" below |
 | `lib/m2hle.mjs` | the MCP bridge client — the half of the toolkit that replaces MAME |
+| `lib/args.mjs` | the flag parsing every tool shares; a flag that takes a value has to be declared, so a positional is never swallowed |
+| `lib/board.mjs` | every board region and STF variable address the graders read, in one place |
+| `lib/rom.mjs` | finds the ROM set (the search order under Setup) and decodes it the way the explorer does |
+| `lib/report.mjs` | the PASS / FAIL / SKIP report and exit code every grader ends with; a skip is not a pass |
+| `lib/dl.mjs` | the display list off a running emulator (`capture_dl`), in the layouts the explorer toolkit's checks expect: the fight a capture is taken in, `captureStage`, and the probes |
 | `lib/capture.mjs` | pinning a scene, verifying the game actually loaded it, waiting for the upload to settle |
 | `lib/noclip.mjs` | locates the explorer; `$M2_NOCLIP` overrides the submodule |
 | `lib/texref.mjs` | the board digests and the exact slices they are cut at |
@@ -356,8 +373,11 @@ stage loads. It checks, in order:
 - the rest of the structure;
 - the bufferram ranges.
 
-It needs `$MAME_EXE` and a `$MAME_ROMPATH` that holds only `sfight.zip`,
-`schamp.zip` and `segabill.zip`, as `tools/mame/cop_capture.py` does.
+It needs `$MAME_EXE` (default `../claude_mame/mame/mame.exe`) and a
+`$MAME_ROMPATH` that holds only `sfight.zip`, `schamp.zip` and `segabill.zip`
+(default `tools/mame/mameroms`), as `tools/mame/cop_capture.py` does.
+`--ref <file>` grades against another MAME reference and `--show N` prints the differing
+words of N frames from each check's first difference (default 6).
 
 What it found first: Bean won the mutual grab that Sonic wins on the board. The
 i960's `concmpi` / `concmpo` tested the equal bit instead of the less bit, so
@@ -406,6 +426,10 @@ in its inputs, and the grader checks each:
   it. Then m2hle captures the same scene (`capture_dl` with `cop: 1`, which
   writes the MAME capture's format), and the matrix each chain hangs from has
   to be as orthonormal as the board's.
+
+`--chars 4,10` picks the fighters (4 Fang, 5 Bark, 7 Espio, 10 Bean) and
+`--frames` the length of each capture; `$COP_REPLAY` names the `cop_replay`
+binary if it is not the build's.
 
 The m2hle capture boots once per fighter: after one capture the select cursor
 stops answering the stick. `OSAGE=<file>` on `cop_replay` dumps every call's
@@ -662,7 +686,8 @@ cheaper to measure than to argue about:
 
     node tools/ab-builds.mjs buildA/m2hle.exe buildB/m2hle.exe --marks 600,1800
 
-Both builds boot the same ROM in their own directory (so neither shares
+Both builds boot the same ROM (`--rom <zip>`; the default is a path on the
+development machine, so pass it anywhere else) in their own directory (so neither shares
 `m2hle.log` with the other or with a running instance), and **frames are counted
 with a breakpoint on the frame hook**, not `wait_frames`: a poll stops wherever
 it landed and nothing would match. At each mark it hashes the registers and the
@@ -699,6 +724,29 @@ palette RAM and the game fills that per scene, so a model whose scene attract ha
 draws correctly shaped, correctly textured and black-faced. It is not a web-only trap, but it
 bites there first -- the page starts the board the moment the ROM loads, and a script can be
 asking two seconds later.
+
+## `tools/mame` and `tests/`
+
+The MAME side runs under the sibling `claude_mame` checkout (its
+`mcp_server/.venv` Python and `mame.exe`), with `$MAME_ROMPATH` a directory
+holding only `sfight.zip`, `schamp.zip` and `segabill.zip`, and `-nodrc`:
+this MAME's SHARC recompiler fails the COP self-test.
+
+| file | what it does |
+|---|---|
+| `mame/cop-capture.lua` | taps the SHARC's own side of the coprocessor FIFOs: command words (told apart by the PC that read them), argument and reply words, the i960's bufferram writes and the current matrix before each command, plus per-frame probes, both fighters' TGP slots and bufferram / DM snapshots at the start. `tests/cop_replay` reads it |
+| `mame/cop_capture.py` | runs attract under MAME with that tap: `cop_capture.py <outprefix> <from> <frames> <probes>` |
+| `mame/match-replay.lua`, `mame/osage-select.lua` | the autoboot scripts behind `match-replay.mjs --mame` and `grade-osage.mjs --mame` (above) |
+| `mame/snd-capture.lua`, `mame/snd_capture.py`, `mame/snd_compare.py` | the sound board's capture and comparison (see "The sound board") |
+| `tests/cop_replay.c` | replays a coprocessor capture through `sharc_exec()`, command by command with the arguments the firmware read, and checks every word it answers: `cop_replay <prefix> [examples-per-op] [only-op-hex]`. `$COPRO_ROM` names the COP data ROM; `OSAGE=<file>` dumps every `Fn_osage` call and `DRAWS=<file>` the draws as CSV, and `RESYNC` / `STATE_EXACT` tune the matrix-state check (`STATE_EXACT`: any differing bit is a bad state, not only 1e-3) |
+| `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips |
+| `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
+
+The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
+`boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`) are
+ctest unit tests, built with the emulator and run by `ctest -C Release` in the
+build directory (or `run_tests.ps1`). Several load the ROM set from a fixed path
+under the sibling `claude_mame` checkout.
 
 ## What is not here yet
 
