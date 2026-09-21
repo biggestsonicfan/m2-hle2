@@ -244,6 +244,20 @@ function debugStart() {
   }, 500);
 }
 
+/* "Build r123-abc1234": a deployed build names its commit, so it links to it. */
+function buildLine() {
+  const el = $('build');
+  const sha = /-([0-9a-f]{7,40})$/.exec(VERSION);
+  if (!sha) { el.textContent = 'Build ' + VERSION; return; }
+  el.textContent = 'Build ';
+  const a = document.createElement('a');
+  a.href = 'https://github.com/biggestsonicfan/m2-hle2/commit/' + sha[1];
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.textContent = VERSION;
+  el.appendChild(a);
+}
+
 /* ---- Emscripten ------------------------------------------------------------ */
 
 var Module = {
@@ -268,10 +282,11 @@ var Module = {
   /* Called from main_web.c's init(), once the exports can be used. */
   onM2hleReady() {
     show('step-rom');
-    $('build').textContent = 'Build ' + VERSION;
+    buildLine();
     m2hleTools.onReady();
     m2hleObjview.onReady();
     m2hleNetplay.onReady(Module);
+    m2hlePad.onReady();
     debugStart();
     /* Development only: ?rom=<path> loads a zip from THIS site, so a headless
      * browser can boot the game with no file dialog. A production site hosts no

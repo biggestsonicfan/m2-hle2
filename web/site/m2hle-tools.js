@@ -34,7 +34,7 @@ const m2hleTools = (() => {
    * m2hle.js), so it runs first, and can keep the event from sokol entirely. */
   for (const type of ['keydown', 'keyup', 'keypress']) {
     window.addEventListener(type, (e) => {
-      if (e.target instanceof Element && e.target.closest('#drawer, #online, input, textarea, select')) {
+      if (e.target instanceof Element && e.target.closest('#drawer, #online, #controls, input, textarea, select')) {
         e.stopImmediatePropagation();
       }
     }, true);
