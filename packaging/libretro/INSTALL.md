@@ -34,7 +34,12 @@ Take the zip for your platform from the canary release:
 | `m2hle-libretro-linux-arm64.zip` | ARM Linux handhelds: ROCKNIX, Knulli, muOS, ArkOS and others |
 
 Each zip holds the core, `m2hle_libretro.info` (so RetroArch knows the core's name and what it
-needs), the README and this guide. The ARM Linux zip also has `install-rocknix.sh`.
+needs), the README, this guide and `VERSION.txt` (the build's number and commit). The ARM Linux
+zip also has `install-rocknix.sh` and the ROCKNIX updater, `m2hle-update.sh` with its
+`tool-update-m2hle.sh`.
+
+The canary release is rebuilt from every change to the code, so the zips there are always the
+newest build.
 
 ---
 
@@ -59,6 +64,18 @@ needs), the README and this guide. The ARM Linux zip also has `install-rocknix.s
 
 1. Copy `m2hle_libretro_android.so` somewhere on the device, for example `Download`.
 2. In RetroArch: **Load Core > Install or Restore a Core**, then pick the file.
+
+### Updating
+
+RetroArch's **Online Updater** only knows the cores on libretro's own servers, so it doesn't
+update this one. To update, download the zip again and copy the core and
+`m2hle_libretro.info` over the old ones, as in the install steps (on Android, **Install or
+Restore a Core** again). To see which build you have, compare **Information > Core
+Information** with the zip's `VERSION.txt`: both show a version like `r199-c896708`.
+
+For netplay, both players update together: the two games must be the same build.
+
+On ROCKNIX the core updates itself; see [Part 2](#updating-1).
 
 ### Set the video driver
 
@@ -179,8 +196,8 @@ bash install-rocknix.sh --make-default
 ```
 
 - **Leave off `--make-default`** to only add the entry; then pick it per game (see below).
-- **Updating later:** unpack the new zip and run the script again. The core is replaced (the
-  previous one is kept as a backup) and nothing else changes.
+- **Updating later:** the installer adds **Tools > Update m2hle** to EmulationStation, so there is
+  nothing to copy again. See [Updating](#updating-1).
 - **After installing without `--make-default`:** restart EmulationStation (**Quit > Restart
   EmulationStation**, or reboot) so it reads its new settings. With `--make-default` the script
   restarts it for you.
@@ -202,6 +219,20 @@ install -m 644 m2hle_libretro.info /tmp/cores/
 `/tmp/cores` is where ROCKNIX's RetroArch looks for cores. It's an overlay: whatever you add is
 really stored in `/storage/cores`, so it survives reboots and ROCKNIX updates. Don't write into
 `/usr/lib/libretro`, which is read-only.
+
+**1b. Install the updater.** Copy the updater, and the Tools entry that runs it, and record which
+build this is:
+
+```
+install -m 755 m2hle-update.sh /storage/.local/bin/
+install -m 755 tool-update-m2hle.sh "/storage/.config/modules/Update m2hle.sh"
+mkdir -p /storage/.local/share/m2hle/libretro
+install -m 644 VERSION.txt /storage/.local/share/m2hle/libretro/
+mv /storage/cores/core_info.cache /storage/cores/core_info.cache.old
+```
+
+A script in `/storage/.config/modules` shows up in EmulationStation's **Tools** under its file
+name. The last line makes RetroArch read the new `.info`, so it shows the new version.
 
 **2. Add the emulator entry.** In `/storage/.emulationstation/es_systems.cfg`, find the system
 whose `<name>` is `segamodel2`, and add this block right after its `<emulators>` line:
@@ -259,6 +290,48 @@ systemctl start essway
 ```
 
 The same thing is available from EmulationStation's menus, which avoid both catches. See below.
+
+### Updating
+
+**Tools > Update m2hle** in EmulationStation checks the canary release and installs a newer core
+if there is one. It needs Wi-Fi. It shows "up to date", "updated", or what went wrong, and
+restarts EmulationStation if its settings changed. Over ssh, run `m2hle-update.sh` instead.
+
+What it does:
+
+1. **Finds the zip for this device.** It asks the device's system and processor (`uname`) and
+   looks through the release for the matching zip: `m2hle-libretro-linux-arm64.zip` on an ARM
+   handheld, `m2hle-libretro-linux-x64.zip` on an x86 PC. If the release has none for this
+   device, it says which names it looked for.
+2. **Decides whether it's newer** by the zip's sha256, which GitHub publishes with each file, not
+   by the release notes. When a build fails, the release notes name the new version but the old
+   zip stays up, so the notes can't be trusted for this.
+3. **Downloads it and checks it.** The download must match GitHub's sha256. The core must be built
+   for this processor, find every library it needs on the device, and be a libretro core. If any
+   check fails, nothing is changed.
+4. **Installs it** by running the new zip's own `install-rocknix.sh`, which keeps the old core as
+   a backup and also updates the updater. It won't replace the core while RetroArch is running.
+
+If the standalone m2-hle emulator (the `m2hle-rocknix-arm64.zip` build) is installed too, the
+same entry updates that as well. Each one is checked and installed separately.
+
+Over ssh:
+
+| Command | What it does |
+|---|---|
+| `m2hle-update.sh` | install whatever is newer |
+| `m2hle-update.sh --check` | only check. Exit code 0: an update is waiting, 1: up to date, 2: couldn't check |
+| `m2hle-update.sh --force` | install the canary again even if it's current |
+| `m2hle-update.sh --component core` | only the core (`sa`: only the standalone emulator; either one is installed if it's missing) |
+
+**Going back a version** needs no network. Copy a backup over the core, through `/tmp/cores`:
+
+```
+ls /storage/cores/m2hle_libretro.so.bak-*
+cp /storage/cores/m2hle_libretro.so.bak-<date> /tmp/cores/m2hle_libretro.so
+```
+
+The next update brings it forward again.
 
 ### Choosing the emulator in EmulationStation
 
@@ -319,6 +392,12 @@ there as well as `m2-hle.opt` beside it.
 | **RetroArch / m2hle** isn't in the emulator list | Check step 2, then restart EmulationStation. |
 | "Could not load" or the core is missing | Check that `/storage/cores/m2hle_libretro.so` exists, and that you installed the ARM Linux zip, not Android's. |
 | The device gets very hot | Keep Heat guard on, set Draw rate to 30, or turn the sound board off. |
+| Update m2hle says it couldn't reach GitHub | Turn Wi-Fi on. It needs to reach `api.github.com` and `github.com`. |
+| Update m2hle says RetroArch is running | Quit the game, then run it again. |
+| Update m2hle says the release has no core for this device | The release has no zip for this processor. `uname -m` shows which one the device has. |
+| Update m2hle says the new core isn't built for this processor, or needs a missing library | The canary build doesn't run on this device. Nothing was changed. Keep the core you have and report the message. |
+| The new core is installed but RetroArch shows the old version | Delete `/storage/cores/core_info.cache` and restart RetroArch. |
+| Update m2hle isn't in Tools | The core was installed before the updater existed. Unpack the newest zip and run `install-rocknix.sh` once. |
 | Something else | `/var/log/exec.log` holds the log of the last game launched. It's cleared on reboot, so copy it off before restarting. |
 
 ### Going back
@@ -332,6 +411,8 @@ To return Model 2 to its previous emulator:
 To remove the core completely, also:
 
 1. Delete `/storage/cores/m2hle_libretro.so` and `/storage/cores/m2hle_libretro.info`.
+   If the standalone emulator isn't installed either, also delete
+   `/storage/.local/bin/m2hle-update.sh` and `/storage/.config/modules/Update m2hle.sh`.
 2. Remove the two entries from steps 2 and 3, or restore the `.bak-` copies the installer made.
 3. Restart EmulationStation.
 
@@ -341,6 +422,12 @@ To remove the core completely, also:
 |---|---|
 | `/storage/cores/m2hle_libretro.so` | the core (installed through `/tmp/cores`) |
 | `/storage/cores/m2hle_libretro.info` | the core's description for RetroArch |
+| `/storage/cores/m2hle_libretro.so.bak-<date>` | the core an install or update replaced |
+| `/storage/.local/bin/m2hle-update.sh` | the updater (step 1b) |
+| `/storage/.config/modules/Update m2hle.sh` | EmulationStation's **Tools > Update m2hle** |
+| `/storage/.local/share/m2hle/libretro/VERSION.txt` | the build installed |
+| `/storage/.local/share/m2hle/libretro/INSTALLED_SHA256` | the sha256 of the zip the updater installed last |
+| `/storage/.local/share/m2hle/update/` | the updater's downloads and last-check time |
 | `/storage/.emulationstation/es_systems.cfg` | holds the Sega Model 2 emulator entry (step 2) |
 | `/storage/.emulationstation/es_features.cfg` | lets ES offer netplay for the core (step 3) |
 | `/storage/.config/system/configs/system.cfg` | EmulationStation's per-system settings (step 5) |
