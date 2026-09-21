@@ -80,17 +80,23 @@ async function launch(who) {
     '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required',
     ...(process.env.CI ? ['--no-sandbox'] : []),
     'about:blank',
-  ], { stdio: 'ignore' });
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let err = '', exited = null;
+  child.stderr.on('data', (d) => { err = (err + d).slice(-4000); });
+  child.on('exit', (code, signal) => { exited = signal || code; });
 
   let target = null;
-  for (let i = 0; i < 100 && !target; i++) {
+  for (let i = 0; i < 300 && !target && exited === null; i++) {
     try {
       const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
       target = list.find((t) => t.type === 'page');
     } catch { /* not up yet */ }
     if (!target) await sleep(100);
   }
-  if (!target) throw new Error(`${who}: the browser never opened its debugging port`);
+  if (!target) {
+    throw new Error(`${who}: ${exited !== null ? `the browser exited (${exited})` : 'the browser never opened its debugging port (30 s)'}` +
+                    (err.trim() ? `\n${err.trim().split('\n').slice(-15).join('\n')}` : ''));
+  }
 
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });

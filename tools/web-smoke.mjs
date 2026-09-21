@@ -99,12 +99,24 @@ const child = spawn(browser, [
   /* The AudioContext starts suspended until a gesture; nobody is here to click. */
   ...(args.includes('--gesture-audio') ? [] : ['--autoplay-policy=no-user-gesture-required']),
   'about:blank',
-], { stdio: 'ignore' });
+], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+/* What the browser says about itself, kept only to explain a failed start: a
+ * browser that never opens its debugging port has usually said why on stderr,
+ * and a CI log that shows nothing but "never opened" cannot be told apart from
+ * a slow cold start. */
+let browserErr = '';
+let browserExit = null;
+child.stderr.on('data', (d) => { browserErr = (browserErr + d).slice(-4000); });
+child.on('exit', (code, signal) => { browserExit = signal || code; });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* 30 s: a cold GitHub runner has been seen to need more than the 10 s this
+ * used to allow (PR #32, same runner image as a run that passed minutes before). */
 async function pageSocketUrl() {
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 300; i++) {
+    if (browserExit !== null) break;
     try {
       const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
       const page = list.find((t) => t.type === 'page');
@@ -112,7 +124,10 @@ async function pageSocketUrl() {
     } catch { /* not up yet */ }
     await sleep(100);
   }
-  throw new Error('the browser never opened its debugging port');
+  const why = browserExit !== null ? `the browser exited (${browserExit}) before opening its debugging port`
+                                   : 'the browser never opened its debugging port (waited 30 s)';
+  const tail = browserErr.trim().split('\n').slice(-15).join('\n');
+  throw new Error(`${why} [${browser}]${tail ? '\n--- browser stderr (last lines) ---\n' + tail : ''}`);
 }
 
 let failed = false;
