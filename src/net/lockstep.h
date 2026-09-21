@@ -67,6 +67,12 @@ typedef enum {
      * payload as an announce and is deliberately NOT the same packet: an announce
      * feeds the barrier, and a seed heartbeat must never be able to release one. */
     LOCKSTEP_PACKET_SEED     = 2,
+    /* "I have left this session": the sender stopped or disconnected. Same
+     * payload as an announce, the field holding the frame it stopped on. Without
+     * it the other board only learns from silence -- it freezes waiting for the
+     * next input and leaves at the stall timeout, fifteen seconds later. A build
+     * that predates it drops the unknown type, so it is safe to send to anyone. */
+    LOCKSTEP_PACKET_BYE      = 3,
 } lockstep_packet_type_t;
 
 #pragma pack(push, 1)
