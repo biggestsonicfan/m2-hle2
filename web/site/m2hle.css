@@ -21,6 +21,12 @@ html, body {
   color: var(--text);
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   overflow: hidden;
+  /* No double-tap zoom, and no 300 ms wait for one before a tap counts. */
+  touch-action: manipulation;
+}
+/* A phone's browser bar comes and goes: the dynamic height keeps the bottom row on screen. */
+@supports (height: 100dvh) {
+  html, body { height: 100dvh; }
 }
 
 /* A column: the canvas takes what the key legend leaves. The legend gets a row
@@ -38,6 +44,7 @@ body {
   display: block;
   outline: none;
   background: #000;
+  touch-action: none;
 }
 
 .panel {
@@ -351,3 +358,89 @@ a.tool.github { display: inline-flex; align-items: center; gap: 0.35rem; color: 
 .pad-add { flex: 0 0 auto; font-size: 0.8125rem; }
 .pad-add[aria-pressed="true"] { border-color: var(--accent); background: #17345c; }
 .pad-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; color: var(--dim); }
+
+.ctl-section h3 { margin: 1rem 0 0.4rem; font-size: 1rem; }
+.ctl-section:first-of-type h3 { margin-top: 0.25rem; }
+.ctl-select { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin: 0.4rem 0; font-size: 0.875rem; color: var(--dim); }
+
+/* ---- Touch buttons (m2hle-touch.js) ----
+ * The layer covers the canvas and lets everything but the buttons through. */
+.touch {
+  position: fixed;
+  z-index: 3;
+  pointer-events: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.touch[hidden], .tb[hidden], .touch-edit[hidden] { display: none; }
+.tb {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  opacity: var(--touch-opacity, 0.5);
+  pointer-events: auto;
+  touch-action: none;
+}
+.touch.outline .tb { border-color: rgba(255, 255, 255, 0.8); }
+.tb.down { background: rgba(77, 163, 255, 0.6); }
+.tb.dpad { background: rgba(255, 255, 255, 0.1); }
+.arr {
+  position: absolute;
+  width: 26%;
+  height: 26%;
+  background: rgba(255, 255, 255, 0.85);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.arr-up    { left: 37%; top: 6%; }
+.arr-down  { left: 37%; bottom: 6%; transform: rotate(180deg); }
+.arr-left  { left: 6%; top: 37%; transform: rotate(-90deg); }
+.arr-right { right: 6%; top: 37%; transform: rotate(90deg); }
+.arr.down { background: var(--accent); }
+
+/* Customizing: every control is shown, a hidden one faintly; the selected one is ringed. */
+.touch.editing { background: rgba(0, 0, 0, 0.35); }
+.touch.editing .tb { cursor: grab; }
+.touch.editing .tb.off { opacity: 0.25; border: 2px dashed rgba(255, 255, 255, 0.8); }
+.touch.editing .tb.sel { box-shadow: 0 0 0 3px var(--accent); }
+.touch-edit {
+  position: fixed;
+  top: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  width: min(34rem, calc(100vw - 1rem));
+  padding: 0.6rem 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  font-size: 0.875rem;
+}
+.touch-edit.bottom { top: auto; bottom: 3rem; }
+.te-hint { margin: 0 0 0.4rem; color: var(--dim); }
+.te-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem 0.8rem; margin-top: 0.35rem; }
+.te-row label { display: flex; align-items: center; gap: 0.35rem; color: var(--dim); }
+.te-row input[type="range"] { width: 6.5rem; }
+.te-what { flex: 0 0 6rem; font-weight: 600; }
+
+/* A phone: the key legend is no use without keys, and the tools have to fit. */
+body.touch-on .keys { display: none; }
+body.touch-on .bar-tools { margin-left: auto; }
+@media (max-width: 640px) {
+  .bar { gap: 0.5rem; padding: 0.3rem 0.5rem; }
+  .bar-tools { flex-wrap: wrap; justify-content: flex-end; }
+  a.tool.github span { display: none; }
+  .te-what { flex-basis: 100%; }
+}

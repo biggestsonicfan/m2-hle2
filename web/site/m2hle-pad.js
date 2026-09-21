@@ -62,6 +62,8 @@ const m2hlePad = (() => {
   let secondIsP2 = true;
   let ready = false;          /* the emulator's exports exist */
   let listening = null;       /* {id, rest: {buttons, axes} per pad index} while capturing */
+  let padMask = 0;            /* what the pads held at the last poll */
+  let touchMask = 0;          /* what the touch buttons hold (m2hle-touch.js, setTouch) */
 
   function load() {
     try {
@@ -139,10 +141,23 @@ const m2hlePad = (() => {
       if (i === 0) showHeld(m);
     });
     if (list.length === 0) showHeld(0);
+    padMask = mask;
     /* Every frame, not only on a change: the emulator forgets what the pad held
      * whenever it lets go of the keyboard (focus lost, the drawer opened), and a
      * direction still held should come straight back. */
-    if (ready) Module._web_pad_set(mask >>> 0);
+    send();
+  }
+
+  /* The touch buttons share this one channel to the emulator: web_pad_set takes the
+   * whole mask, so two callers would let go of each other's presses. */
+  function send() {
+    if (ready && !listening) Module._web_pad_set((padMask | touchMask) >>> 0);
+  }
+
+  /* A touch press goes out now rather than at the next poll: a tap is short. */
+  function setTouch(m) {
+    touchMask = m >>> 0;
+    send();
   }
 
   /* ---- The panel -------------------------------------------------------------- */
@@ -310,5 +325,5 @@ const m2hlePad = (() => {
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { onReady, toggle, get binds() { return clone(binds); } };
+  return { onReady, toggle, setTouch, get binds() { return clone(binds); } };
 })();

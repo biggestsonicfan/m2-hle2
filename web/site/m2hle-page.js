@@ -72,6 +72,7 @@ function loadZip(bytes) {
     $('panel').hidden = true;
     $('keys').hidden = false;
     m2hleNetplay.onGame();
+    m2hleTouch.onGame();
     $('canvas').focus();
   }, 0));
 }
@@ -322,3 +323,26 @@ window.addEventListener('drop', (e) => {
   if ($('step-rom').hidden) return;
   readFile(e.dataTransfer && e.dataTransfer.files[0]);
 });
+
+/* ---- Fullscreen --------------------------------------------------------------
+ *
+ * The whole page, not the canvas alone: the touch buttons, the Controls panel and
+ * this bar are all outside the canvas and have to come along. iPhone Safari only
+ * fullscreens video, so there the button is never shown. */
+const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement;
+const fsRequest = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+const fsExit = document.exitFullscreen || document.webkitExitFullscreen;
+if (fsRequest && (document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+  const btn = $('btn-fullscreen');
+  btn.hidden = false;
+  btn.addEventListener('click', () => {
+    const p = fsElement() ? fsExit.call(document) : fsRequest.call(document.documentElement, { navigationUI: 'hide' });
+    if (p && p.catch) p.catch((e) => m2hleTools.add('fullscreen refused: ' + e.message, 'warning'));
+  });
+  const label = () => {
+    btn.textContent = fsElement() ? 'Exit fullscreen' : 'Fullscreen';
+    btn.setAttribute('aria-pressed', String(!!fsElement()));
+  };
+  document.addEventListener('fullscreenchange', label);
+  document.addEventListener('webkitfullscreenchange', label);
+}
