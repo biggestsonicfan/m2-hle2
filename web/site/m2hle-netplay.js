@@ -447,27 +447,8 @@ const m2hleNetplay = (() => {
     render();
   }
 
-  /* ---- A tab in the background ---------------------------------------------------
-   * A hidden tab gets no animation frames, so the board would stop and the other
-   * player would wait until the session timed out. While a match is on, a
-   * worker's timer drives the board instead -- worker timers are not throttled
-   * the way a hidden page's are (to be measured per browser: WEB-NETPLAY.md). */
-  let worker = null;
-
-  function background() {
-    const want = document.hidden && M && M._web_netplay_active();
-    if (want && !worker) {
-      const src = 'let t=null;onmessage=(e)=>{clearInterval(t);if(e.data)t=setInterval(()=>postMessage(0),16);};';
-      worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
-      worker.onmessage = () => { if (M) M._web_background_tick(); };
-      worker.postMessage(1);
-      m2hleTools.print('netplay: tab hidden during a match; keeping the game running in the background');
-    } else if (!want && worker) {
-      worker.postMessage(0);
-      worker.terminate();
-      worker = null;
-    }
-  }
+  /* A tab in the background keeps its board running for every game, a match
+   * included: keepRunning in m2hle-page.js. */
 
   function onReady(module) {
     M = module;
@@ -476,8 +457,6 @@ const m2hleNetplay = (() => {
     wire();
     setInterval(poll, 250);
     setInterval(ping, 2000);
-    setInterval(background, 500);
-    document.addEventListener('visibilitychange', background);
     poll();
   }
 

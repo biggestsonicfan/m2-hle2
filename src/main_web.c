@@ -3,8 +3,8 @@
  * is the plan this follows.
  *
  * One ROM set (Sonic the Fighters), no ImGui, no debugger, no MCP bridge, no
- * file system. sokol_app owns the canvas, the WebGL2 context, the keyboard and
- * the frame callback; the page around the canvas (web/site/) owns
+ * file system. sokol_app owns the canvas, the WebGL2 context and the frame
+ * callback; the page around the canvas (web/site/) owns the keyboard and
  * everything a player reads or clicks, and reaches in through the functions
  * exported at the bottom of this file.
  *
@@ -106,6 +106,7 @@ static struct {
     uint64_t render_us;         /* time building and submitting the picture (CPU side) */
     uint64_t long_callbacks;    /* callbacks that arrived more than 25 ms after the last */
     uint64_t forgiven_us;       /* board time dropped because a callback owed too much */
+    uint64_t background_ticks;  /* worker ticks that ran the board with no frame (web_background_tick) */
     uint32_t slice_us_max, render_us_max, gap_us_max;
     int64_t  last_cb_us;
     int      gpu_timing;        /* the page wants m2hleFrameBegin/End around the GL work */
@@ -472,14 +473,13 @@ static void cleanup(void) {
     mem_shutdown(&state.bus);
 }
 
-static uint32_t g_web_pad;   /* the actions the page's gamepads hold: web_pad_set */
+static uint32_t g_web_pad;   /* the actions the page holds (gamepads, touch buttons, keyboard): web_pad_set */
 
 static void event(const sapp_event *ev) {
-    /* Inputs reach the game through the emulated I/O ports (input.h); under
-     * netplay the board reads the composed mask instead, and this is what
-     * netplay_sample_local transmits. */
-    if (ev->type == SAPP_EVENTTYPE_KEY_DOWN && !ev->key_repeat) input_key_down((int)ev->key_code);
-    if (ev->type == SAPP_EVENTTYPE_KEY_UP)                      input_key_up((int)ev->key_code);
+    /* No keys here: the page reads the keyboard through the player's own
+     * bindings (web/site/m2hle-keys.js) and sends it with the gamepads and the
+     * touch buttons through web_pad_set. Mapping sokol's key codes as well would
+     * press the default keys on top of the remapped ones. */
     /* A tab that loses focus never sees the key-up: let go of everything. */
     if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) { input_reset(); g_web_pad = 0; }
 }
@@ -556,16 +556,16 @@ EMSCRIPTEN_KEEPALIVE int web_state(void) {
 }
 
 /* Let go of every held input. The page calls this when focus moves into its
- * tools drawer: from then on key-ups land there and never reach the game, and a
- * direction held at that moment would stay held. */
+ * tools drawer. Whatever the page still holds (a pad, a key whose key-up has not
+ * come yet) is pressed again by its next web_pad_set. */
 /* Only the local keyboard's mask: under netplay the board reads the composed mask,
  * which belongs to the lockstep and is rebuilt from both players' words each frame. */
 EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { g_input.held = 0; g_web_pad = 0; }
 
-/* The page's gamepads (web/site/m2hle-pad.js), as one bit per GAME_INPUT_*
- * action, sent whole on every poll. Only the changes are pressed or released, so
- * a pad and the keyboard holding the same direction do not let go of each
- * other's press every frame -- the same rule as main_sdl.c's pad_refresh. When
+/* The page's gamepads, touch buttons and keyboard (web/site/m2hle-pad.js,
+ * m2hle-touch.js, m2hle-keys.js), as one bit per GAME_INPUT_* action, sent whole
+ * on every poll and on every key or touch. Only the changes are pressed or
+ * released, so a scripted press (?script=) is not let go of every frame -- the same rule as main_sdl.c's pad_refresh. When
  * something clears g_input.held (focus lost, the drawer opened), g_web_pad is
  * cleared with it, and whatever the pad still holds is pressed again on the
  * next poll. */
@@ -593,14 +593,14 @@ EMSCRIPTEN_KEEPALIVE const char *web_perf(int reset) {
     snprintf(out, sizeof out,
              "{\"now_us\":%.0f,\"callbacks\":%llu,\"slices\":%llu,\"frames\":%u,"
              "\"slice_us\":%llu,\"render_us\":%llu,\"long_callbacks\":%llu,\"forgiven_us\":%llu,"
-             "\"slice_us_max\":%u,\"render_us_max\":%u,\"gap_us_max\":%u,"
+             "\"background_ticks\":%llu,\"slice_us_max\":%u,\"render_us_max\":%u,\"gap_us_max\":%u,"
              "\"render_scale\":%d,\"canvas_w\":%d,\"canvas_h\":%d,\"gpu_tiles\":%s,"
              "\"netplay\":\"%s\",\"netplay_stalls\":%u,\"netplay_delay\":%u}",
              (double)emu_now_us(),
              (unsigned long long)g_web_perf.callbacks, (unsigned long long)g_web_perf.slices, (unsigned)g_emu_frames,
              (unsigned long long)g_web_perf.slice_us, (unsigned long long)g_web_perf.render_us,
              (unsigned long long)g_web_perf.long_callbacks, (unsigned long long)g_web_perf.forgiven_us,
-             g_web_perf.slice_us_max, g_web_perf.render_us_max, g_web_perf.gap_us_max,
+             (unsigned long long)g_web_perf.background_ticks, g_web_perf.slice_us_max, g_web_perf.render_us_max, g_web_perf.gap_us_max,
              g_web_rt.scale, sapp_width(), sapp_height(), state.video.gpu ? "true" : "false",
              netplay_state_text(np.state), np.stalls, (unsigned)g_netplay.cfg.frame_delay);
     if (reset) g_web_perf.slice_us_max = g_web_perf.render_us_max = g_web_perf.gap_us_max = 0;
@@ -932,10 +932,23 @@ full:
 #undef PUTS
 }
 
-/* A hidden tab gets no animation frames, so nothing would step the board and
- * the opponent would stall. While a match is on, the page drives this from a
- * worker's timer instead: the same slices and sound, no picture. */
+/* The board runs on the wall clock, not on animation frames. A hidden tab gets
+ * none, and a throttled one (an occluded window, a power saver) gets them late,
+ * so on frames alone the game pauses or stutters and an opponent stalls. The
+ * page therefore also calls this from a worker's timer, several times a frame,
+ * for as long as the game is loaded (web/site/m2hle-page.js). While frame() is
+ * being called it does nothing: the slices are frame()'s, where they line up
+ * with the picture. Once frames go quiet it runs the board itself, with no
+ * picture. Both share one accumulator, so the hand-over either way neither skips
+ * nor repeats board time.
+ *
+ * Sound is still computed and drained -- the board has to compute it to stay the
+ * same board -- but the page suspends its AudioContext while hidden, and
+ * m2hleAudioPush drops what arrives then. */
+#define WEB_RAF_QUIET_US 50000
 EMSCRIPTEN_KEEPALIVE void web_background_tick(void) {
+    if (g_web_perf.last_cb_us && emu_now_us() - g_web_perf.last_cb_us < WEB_RAF_QUIET_US) return;
+    g_web_perf.background_ticks++;
     web_run_owed_slices();
     web_push_audio();
 }

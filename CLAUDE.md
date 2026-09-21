@@ -290,10 +290,22 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   Found by `tools/web-netplay.mjs`, which hosts 0.2 s after signing in; a person rarely beats the
   keepalive, a script always does.
 - **The build family rides in bits 6-7 of the room's revision byte, not bits 28-31** (those are
-  the server's: it owns `ROOM_FLAG_ATTR_FULL` there). Lockstep needs bit-identical floats, so
-  native and wasm rooms refuse each other with a sentence until `NETPLAY_CROSS_PLAY` is set. A web
-  room's byte reads `0x41`, which desktop builds from before the field refuse as "a different
-  netplay protocol" — the separation cost no desktop release.
+  the server's: it owns `ROOM_FLAG_ATTR_FULL` there). Lockstep needs bit-identical floats, so a
+  lobby refuses a room of an incompatible family with a sentence; `NETPLAY_CROSS_PLAY` (on) makes
+  native and wasm one. A web room's byte reads `0x41`, which desktop builds from before the field
+  refuse as "a different netplay protocol", so only a desktop build from after cross-play can join one.
+- **The wasm and MSVC builds compute the same frames only because of two things C leaves open.**
+  Break either and web-vs-desktop matches desync; `tests/det_digest.c` (built in both trees) is the
+  check, and it split at frame 2948 of attract on each.
+  - *A NaN's sign and payload.* Every COP float that becomes a word goes through
+    `sharc_float_to_bits`, which writes NaN as all ones, as the SHARC does. The i960's FP
+    instructions go through `i960_nan_result` / `i960_single_to_double` / `i960_double_to_single`.
+    Do not memcpy a float to a word in board code, or return a raw `a op b` from an FP instruction.
+    LLVM moves negations across multiplies, which flips a NaN's sign, and `Fn_area_coli` branches
+    on the sign bit of a NaN ball position.
+  - *Strict aliasing.* GCC and Clang build with `-fno-strict-aliasing` (CMakeLists.txt), as MSVC
+    always behaves. Without it the wasm build split from MSVC, and a trace compiled into the step
+    loop hid the split. That is undefined behaviour at work; the offending access has not been found.
 - **Hole punching needs BOTH ends transmitting.** The guest's first packet opens a mapping through
   the *guest's* NAT only; a host that waits to hear something first never opens its own, and two
   peers on different networks sit at the barrier forever.

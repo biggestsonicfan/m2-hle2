@@ -63,15 +63,57 @@ static inline uint32_t reg_src(i960_cpu_t *cpu, int idx, int mode) {
     return reg_read(cpu, idx);
 }
 
+/* ---- NaNs, spelled out ------------------------------------------------------
+ * IEEE leaves a NaN's sign and payload to the implementation, and the two build
+ * families take it: the desktop (MSVC, x86) and the browser (clang, wasm) came
+ * out with NaNs of different sign from the same instruction, and a NaN a game
+ * stores is a word it can test. Lockstep netplay needs the two to agree to the
+ * bit (tests/det_digest.c), so the FP instructions fix the rule x86 applies,
+ * which is what MSVC builds and MAME have always produced:
+ *   - a NaN operand is the result, quieted (the first operand of the C
+ *     expression when both are NaN);
+ *   - otherwise an invalid operation gives the real indefinite (sign set, quiet).
+ * Widening a single to double and narrowing back keep the payload's top bits
+ * and set the quiet bit, as cvtss2sd / cvtsd2ss do. */
+#define I960_QNAN_BIT      0x0008000000000000ull
+#define I960_REAL_INDEF    0xFFF8000000000000ull
+
+static inline double i960_bits_to_double(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
+static inline uint64_t i960_double_to_bits(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+
+static inline double i960_nan_result(double r, double a, double b) {
+    if (r == r) return r;
+    if (a != a) return i960_bits_to_double(i960_double_to_bits(a) | I960_QNAN_BIT);
+    if (b != b) return i960_bits_to_double(i960_double_to_bits(b) | I960_QNAN_BIT);
+    return i960_bits_to_double(I960_REAL_INDEF);
+}
+
+static inline double i960_single_to_double(uint32_t u) {
+    if ((u & 0x7F800000u) == 0x7F800000u && (u & 0x007FFFFFu))
+        return i960_bits_to_double(((uint64_t)(u >> 31) << 63) | 0x7FF0000000000000ull | I960_QNAN_BIT
+                                   | ((uint64_t)(u & 0x007FFFFFu) << 29));
+    float f;
+    memcpy(&f, &u, 4);
+    return (double)f;
+}
+
+static inline uint32_t i960_double_to_single(double d) {
+    if (d != d) {
+        uint64_t u = i960_double_to_bits(d);
+        return (uint32_t)(u >> 63) << 31 | 0x7FC00000u | (uint32_t)((u >> 29) & 0x003FFFFFu);
+    }
+    float f = (float)d;
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return u;
+}
+
 // Read an integer register's contents as a double, treating the 32 bits as
 // the IEEE-754 binary32 (float) bit pattern. Used by FP instructions whose
 // source operand is in a general-purpose register — such operations interpret
 // those bits as a float, NOT as an integer count to be converted.
 static inline double i960_int_reg_as_double(i960_cpu_t *cpu, int idx) {
-    uint32_t u = reg_read(cpu, idx);
-    float f;
-    memcpy(&f, &u, 4);
-    return (double)f;
+    return i960_single_to_double(reg_read(cpu, idx));
 }
 
 /* A real converted to a 32-bit integer. One outside the integer range, or a
@@ -959,11 +1001,8 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                 // Uses memcpy for strict-aliasing safety. Modern compilers
                 // optimize memcpy of small fixed-size buffers to a register move.
                 #define INT_REG_AS_DOUBLE(idx) i960_int_reg_as_double(cpu, (idx))
-                #define WRITE_FLOAT_TO_INT_REG(idx, dval) do { \
-                    uint32_t _u_; float _f_ = (float)(dval); \
-                    memcpy(&_u_, &_f_, 4); \
-                    reg_write(cpu, (idx), _u_); \
-                } while(0)
+                #define WRITE_FLOAT_TO_INT_REG(idx, dval) \
+                    reg_write(cpu, (idx), i960_double_to_single(dval))
 
                 // In FP-register mode (m=1) the 5-bit operand also encodes the
                 // i960 floating-point LITERALS: 16 (0b10000) = +0.0, 22 (0b10110)
@@ -1045,21 +1084,21 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                 {
                     double a = FP_SRC1;
                     double b = FP_SRC2;
-                    FP_DST_WRITE(a + b);
+                    FP_DST_WRITE(i960_nan_result(a + b, a, b));
                     break;
                 }
                 case 0x78D: // fsubr
                 {
                     double a = FP_SRC1;
                     double b = FP_SRC2;
-                    FP_DST_WRITE(b - a);
+                    FP_DST_WRITE(i960_nan_result(b - a, b, a));
                     break;
                 }
                 case 0x78C: // fmulr
                 {
                     double a = FP_SRC1;
                     double b = FP_SRC2;
-                    FP_DST_WRITE(a * b);
+                    FP_DST_WRITE(i960_nan_result(a * b, a, b));
                     break;
                 }
                 case 0x78B: // fdivr
@@ -1067,7 +1106,7 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                     double a = FP_SRC1;
                     double b = FP_SRC2;
                     if (a != 0.0) {
-                        FP_DST_WRITE(b / a);
+                        FP_DST_WRITE(i960_nan_result(b / a, b, a));
                     } else {
                         // Divide by zero — produce 0.0 silently, happens often with uninitialized geometry
                         FP_DST_WRITE(0.0);

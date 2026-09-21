@@ -200,7 +200,18 @@ static sharc_state_t g_sharc = {0};
 static inline float sharc_bits_to_float(uint32_t u) {
     float f; memcpy(&f, &u, 4); return f;
 }
+/* A NaN leaves the chip as all ones: the ADSP-2106x does not propagate NaN
+ * payloads, and writes any float result that is NaN as 0xFFFFFFFF. The HLE has
+ * to do the same wherever a COP float becomes a word -- a reply, a DM or
+ * bufferram store, a sign test -- because IEEE leaves a NaN's sign and payload
+ * to the implementation and compilers use that: LLVM moves negations across
+ * multiplies, which is exact for numbers and flips a NaN's sign. In the attract
+ * fight a fighter's translation went NaN, came back 0xFFFFFFFF from the MSVC
+ * build and 0x7FFFFFFF from the wasm one, and Fn_area_coli, which reads the ball
+ * positions' sign bits, took different walls; the boards split at frame 2948
+ * (tests/det_digest.c). */
 static inline uint32_t sharc_float_to_bits(float f) {
+    if (f != f) return 0xFFFFFFFFu;
     uint32_t u; memcpy(&u, &f, 4); return u;
 }
 

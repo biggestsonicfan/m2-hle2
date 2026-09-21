@@ -24,7 +24,7 @@ vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club` is enough to build.
 That is the default frontend, the ImGui debugger (D3D11 on Windows, GL core on Linux, Metal on
 macOS). `-DM2HLE_FRONTEND=sdl3` builds a fullscreen SDL3 / GLES 3 host with no ImGui for
 handhelds (see [packaging/rocknix/](packaging/rocknix/)), and `-DM2HLE_FRONTEND=web` the
-Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, gamepads and
+Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, remappable keys, gamepads and
 touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)); both need
 only `vendor/sokol` and `vendor/miniz`.
 
@@ -165,8 +165,9 @@ one of its own (`M2HSNCFTR_00` for Sonic The Fighters) rather than every Model 2
 list. The browser also shows YAMP's rooms for the same arcade game, greyed out and unjoinable:
 YAMP plays the console port, so a cross-emulator match could never stay in sync, but an empty
 lobby with people next door is worth telling apart from an empty one. Rooms made by the browser
-build are shown the same way, with the reason: web and desktop builds do not play each other
-until they are shown to compute the same frames ([WEB-NETPLAY.md](WEB-NETPLAY.md), "Cross-play").
+build can be joined too: the web and desktop builds compute the same frames
+([WEB-NETPLAY.md](WEB-NETPLAY.md), "Cross-play"), though joining a web room needs a desktop build
+from after that.
 
 Scriptable without the GUI, which is how it gets tested:
 

@@ -71,10 +71,34 @@ function loadZip(bytes) {
     }
     $('panel').hidden = true;
     $('keys').hidden = false;
+    keepRunning();
     m2hleNetplay.onGame();
     m2hleTouch.onGame();
     $('canvas').focus();
   }, 0));
+}
+
+/* The board runs on the wall clock, whether or not the browser is drawing. A
+ * hidden tab gets no animation frames and a throttled window gets them late, so
+ * a worker's timer -- which browsers do not throttle the way they throttle a
+ * hidden page's own timers -- ticks several times a frame, and the emulator runs
+ * the board from it whenever frames have gone quiet (web_background_tick, which
+ * does nothing while they arrive). The GPU work stops with the frames, the sound
+ * with the AudioContext (audioStart). Measure per browser: WEB-NETPLAY.md 5.3. */
+let runWorker = null;
+
+function keepRunning() {
+  if (runWorker) return;
+  const src = 'setInterval(() => postMessage(0), 8);';
+  runWorker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+  runWorker.onmessage = () => Module._web_background_tick();
+  let wasHidden = false;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden === wasHidden) return;
+    wasHidden = document.hidden;
+    m2hleTools.print(wasHidden ? 'page hidden: the game keeps running, without picture or sound'
+                               : 'page visible again');
+  });
 }
 
 function romError(text) {
@@ -142,7 +166,13 @@ function audioStart() {
    * another tab taking the device), and these are cheap. */
   const resume = () => { if (audio.ctx && audio.ctx.state !== 'running') audio.ctx.resume().catch(() => {}); };
   for (const type of ['pointerdown', 'keydown', 'touchend']) document.addEventListener(type, resume, true);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) resume(); });
+  /* Hidden, the board keeps running (keepRunning below) but nobody is listening:
+   * the sound stops with the picture, and audioPush drops what the board makes
+   * meanwhile, so it comes back with what is happening now. */
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) resume();
+    else if (audio.ctx && audio.ctx.state === 'running') audio.ctx.suspend().catch(() => {});
+  });
 
   ctx.audioWorklet.addModule(versioned('m2hle-audio-worklet.js')).then(() => {
     /* audio.target is in board frames (44.1 kHz); the worklet counts the context's. */

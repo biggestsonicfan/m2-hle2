@@ -17,8 +17,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # into one FMA instruction wherever the target has it — AArch64 always does,
 # x86-64 only with -march — and a fused result differs in the last bit, so an
 # ARM build's RAM left an x86 build's two frames after boot.
+#
+# -fno-strict-aliasing for the same reason. Somewhere the board reads memory
+# through a pointer of another type, which C leaves undefined; MSVC never
+# optimises on that rule and Clang does. The wasm build (Clang) left the
+# desktop build (MSVC) at frame 2948 of attract, and computed the same frames
+# again with this flag and no other change (tests/det_digest.c, WEB-NETPLAY.md
+# "Cross-play"). It costs nothing measurable there.
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-ffp-contract=off)
+    add_compile_options(-ffp-contract=off -fno-strict-aliasing)
 endif()
 
 set(VENDOR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
@@ -181,6 +188,16 @@ if(M2HLE_WEB)
         DEPENDS m2hle
         COMMENT "web: page -> ${M2HLE_SITE_DIR} (${M2HLE_VERSION})"
         VERBATIM)
+    # The board as the page runs it, under Node, one digest line per frame: the
+    # wasm half of the cross-play check (tests/det_digest.c). Built only when
+    # asked for (--target det_digest), with every flag the page's build has.
+    add_executable(det_digest EXCLUDE_FROM_ALL ${CMAKE_CURRENT_SOURCE_DIR}/tests/det_digest.c)
+    target_compile_definitions(det_digest PRIVATE M2HLE_WEB)
+    target_link_libraries(det_digest PRIVATE sokol miniz)
+    target_include_directories(det_digest PRIVATE
+        ${SRC} ${SRC}/board ${SRC}/core ${SRC}/net ${SRC}/ui ${SRC}/profiles)
+    target_link_options(det_digest PRIVATE
+        "-sNODERAWFS=1" "-sINITIAL_MEMORY=536870912" "-sALLOW_MEMORY_GROWTH=1" "-sSTACK_SIZE=8388608")
     return()
 endif()
 
@@ -394,6 +411,14 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(snd_replay PRIVATE miniz)
     if(MSVC)
         target_compile_definitions(snd_replay PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    # Not a ctest: a per-frame digest of the board for holding two builds against
+    # each other (the wasm-vs-desktop cross-play gate). Needs a merged ROM zip.
+    add_executable(det_digest ${CMAKE_CURRENT_SOURCE_DIR}/tests/det_digest.c)
+    target_include_directories(det_digest PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(det_digest PRIVATE miniz sokol)
+    if(MSVC)
+        target_compile_definitions(det_digest PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
     target_link_libraries(rom_test   PRIVATE miniz)
     target_link_libraries(boot_test  PRIVATE miniz)
