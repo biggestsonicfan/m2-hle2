@@ -28,10 +28,36 @@ something costs one `cp` to undo. What it does:
 | `/storage/.local/bin/start_m2hle.sh` | the launcher ES calls |
 | `/storage/.emulationstation/es_systems.cfg` | adds `m2hle` / `m2hle-sa` beside `sm2-emu` under `segamodel2` |
 | `/storage/.emulationstation/es_features.cfg` | the per-game options below |
+| `/storage/.local/bin/m2hle-update.sh` | the updater (below) |
+| `/storage/.config/modules/Update m2hle.sh` | its entry in ES's **Tools** |
+| `/storage/.local/share/m2hle/VERSION.txt` | which canary is installed |
 
 Then put the ROM zip in `/storage/roms/segamodel2/` and pick **m2hle** as the
 emulator for it (ES game options → Emulator). Restart ES for the config to be
 re-read.
+
+## Updates
+
+Once installed, the device updates itself from this release; the `scp` above
+is only needed the first time.
+
+- **Tools → Update m2hle** checks the canary and, if it is newer, downloads it,
+  checks it against the sha256 GitHub publishes for it, runs the new binary once
+  to be sure it starts on this device, and then runs the new zip's own
+  `install-es.sh`, which also updates the updater. The result is shown on screen.
+  If the ES config gained an option, ES is restarted.
+- **When a game starts**, the launcher checks in the background, at most every
+  6 hours and never delaying the game. If an update is waiting, a notice appears
+  after the game exits. Turn it off per game with the "update check" option.
+
+"Newer" means that the zip's sha256 on the release differs from the zip that was
+installed, not that the release notes name a new commit: when the handheld CI job
+fails, the release keeps the old zip under new notes.
+
+From a shell: `m2hle-update.sh` (update if newer), `--force` (reinstall),
+`--check` (exit 0 = update waiting, 1 = current, 2 = could not tell).
+Stepping back needs no network: `cp /storage/.local/share/m2hle/m2hle.bak-<stamp>
+/storage/.local/share/m2hle/m2hle`.
 
 ## Options
 
@@ -46,6 +72,7 @@ Per game, through ES's options screen; `start_m2hle.sh` turns them into flags.
 | audio | on / off (cooler) | `--sound` — the 68000 + SCSP sound board, in lockstep with the emu thread |
 | button macros | off / on | the top row presses combos: X = Punch+Kick, Y = Kick+Barrier, Z = all three |
 | online play | off / on | `--netplay` — sign in to RPCN and open the lobby; see below |
+| update check | on / off | the launcher's background update check (see Updates) |
 
 Buttons are fixed in the launcher: the RG ARC-S's A/B/C become Punch / Kick /
 Barrier (`--pad-map south=b1,east=b2,r3=b3,west=none`). `--pad-map` also takes
