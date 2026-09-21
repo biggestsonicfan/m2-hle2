@@ -26,6 +26,15 @@
  * frames (g_cop_tap: command/argument words in, replies out), one per line with
  * its frame, so the first differing reply names the command that split.
  *
+ * --inputs FILE replays a netplay session's input log (netplay.h, "The session
+ * input log"): each frame gets the two players' words the session ran on, and
+ * the check the session logged for it is held against the replay's. Frame 0 of
+ * a session is the first frame after the barrier's cold boot, which is this
+ * program's first frame. The first frame whose check differs is where the board
+ * that wrote the log stopped computing what the inputs say; replay the other
+ * player's log too, and compare the two logs' words, to know which board it was
+ * and whether they were ever fed the same inputs. --frames defaults to the log.
+ *
  * --trace F:FILE writes one line per i960 instruction of game frame F: IP and a
  * hash of the registers (globals, locals, AC, the FP registers). The first line
  * that differs is the instruction that computed something different. The traced
@@ -157,6 +166,52 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
     ctx->cpu_snapshot      = *ctx->cpu;
 }
 
+/* --inputs: a session's words and checks, indexed by session frame. */
+static uint32_t *in_w0, *in_w1, *in_check;
+static uint32_t  in_n;
+
+static bool load_inputs(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    uint32_t cap = 0;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        unsigned frame, w0, w1, check;
+        if (line[0] == '#' || sscanf(line, "%u %x %x %x", &frame, &w0, &w1, &check) != 4) continue;
+        if (frame >= cap) {
+            uint32_t n = cap ? cap * 2 : 65536;
+            while (n <= frame) n *= 2;
+            in_w0 = realloc(in_w0, n * sizeof *in_w0);
+            in_w1 = realloc(in_w1, n * sizeof *in_w1);
+            in_check = realloc(in_check, n * sizeof *in_check);
+            if (!in_w0 || !in_w1 || !in_check) { fclose(f); return false; }
+            cap = n;
+        }
+        in_w0[frame] = w0; in_w1[frame] = w1; in_check[frame] = check;
+        if (frame + 1 > in_n) in_n = frame + 1;
+    }
+    fclose(f);
+    return in_n > 0;
+}
+
+/* Both words into the board's held mask: netplay_apply_inputs, whose bit tables
+ * only exist inside a session. */
+static uint32_t words_mask(uint32_t w0, uint32_t w1) {
+    static const int p1[10] = { GAME_INPUT_P1_UP, GAME_INPUT_P1_DOWN, GAME_INPUT_P1_LEFT, GAME_INPUT_P1_RIGHT,
+        GAME_INPUT_P1_B1, GAME_INPUT_P1_B2, GAME_INPUT_P1_B3, GAME_INPUT_P1_B4, GAME_INPUT_P1_START, GAME_INPUT_P1_COIN };
+    static const int p2[10] = { GAME_INPUT_P2_UP, GAME_INPUT_P2_DOWN, GAME_INPUT_P2_LEFT, GAME_INPUT_P2_RIGHT,
+        GAME_INPUT_P2_B1, GAME_INPUT_P2_B2, GAME_INPUT_P2_B3, GAME_INPUT_P2_B4, GAME_INPUT_P2_START, GAME_INPUT_P2_COIN };
+    const game_input_map_t *in = &g_active_profile->input;
+    uint32_t held = 0;
+    for (int i = 0; i < 10; i++) {
+        if (w0 & (1u << i)) held |= in->bits[p1[i]];
+        if (w1 & (1u << i)) held |= in->bits[p2[i]];
+    }
+    if (w0 & (1u << NP_BIT_SERVICE)) held |= in->bits[GAME_INPUT_SERVICE];
+    if (w0 & (1u << NP_BIT_TEST))    held |= in->bits[GAME_INPUT_TEST];
+    return held;
+}
+
 static void parse_script(const char *s) {
     while (*s && script_n < SCRIPT_MAX) {
         const char *comma = strchr(s, ',');
@@ -177,9 +232,11 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint32_t frames = 3600, from = 0;
-    const char *out_path = NULL, *script_text = NULL;
+    bool frames_given = false;
+    const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL;
     for (int i = 2; i < argc; i++) {
-        if      (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = (uint32_t)strtoul(argv[++i], NULL, 10);
+        if      (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = (uint32_t)strtoul(argv[++i], NULL, 10); frames_given = true; }
+        else if (!strcmp(argv[i], "--inputs") && i + 1 < argc) inputs_path = argv[++i];
         else if (!strcmp(argv[i], "--from")   && i + 1 < argc) from   = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) script_text = argv[++i];
         else if (!strcmp(argv[i], "--out")    && i + 1 < argc) out_path = argv[++i];
@@ -209,6 +266,11 @@ int main(int argc, char **argv) {
         if (!strcmp(g_profiles[i]->id, "sfight")) g_active_profile = g_profiles[i];
     if (!g_active_profile) { fprintf(stderr, "no sfight profile\n"); return 2; }
     if (script_text) parse_script(script_text);
+    if (inputs_path) {
+        if (!load_inputs(inputs_path)) { fprintf(stderr, "cannot read an input log from %s\n", inputs_path); return 2; }
+        if (!frames_given || frames > in_n) frames = in_n;
+        fprintf(stderr, "replaying %u session frames from %s\n", (unsigned)in_n, inputs_path);
+    }
 
     /* The web build's load: one zip, read whole, strict by CRC. */
     FILE *f = fopen(argv[1], "rb");
@@ -245,9 +307,11 @@ int main(int argc, char **argv) {
 
     int at = 0;
     uint64_t slices = 0;
+    uint32_t mismatches = 0, first_mismatch = UINT32_MAX;
     while (g_emu_frames < frames) {
         /* Inputs change only on a frame boundary, as the lockstep's do. */
         while (at < script_n && script[at].frame <= g_emu_frames) g_input.held = script[at++].held;
+        if (in_n && g_emu_frames < in_n) g_input.held = words_mask(in_w0[g_emu_frames], in_w1[g_emu_frames]);
         if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
         else                                              emu_slice_body(&emu);
         emu_slice_result_t r = emu_slice_finish(&emu);
@@ -255,6 +319,17 @@ int main(int argc, char **argv) {
         if (r == EMU_SLICE_STOPPED) {
             fprintf(stderr, "board stopped at frame %u, IP 0x%08X\n", (unsigned)g_emu_frames, cpu.sfr.ip);
             break;
+        }
+        if (r == EMU_SLICE_FRAME && in_n && g_emu_frames - 1 < in_n) {
+            uint32_t f = g_emu_frames - 1, c = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
+            if (c != in_check[f]) {
+                if (!mismatches) {
+                    first_mismatch = f;
+                    fprintf(stderr, "first mismatch at session frame %u: the log says %08X, the replay %08X\n",
+                            (unsigned)f, in_check[f], c);
+                }
+                mismatches++;
+            }
         }
         if (r != EMU_SLICE_FRAME || g_emu_frames < from) continue;
         uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
@@ -270,5 +345,11 @@ int main(int argc, char **argv) {
     if (trace_out) fclose(trace_out);
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
             (unsigned long long)slices, (unsigned long long)emu.total_steps);
+    if (in_n) {
+        if (mismatches) fprintf(stderr, "input log: %u of %u frames' checks differ, the first at session frame %u\n",
+                                (unsigned)mismatches, (unsigned)g_emu_frames, (unsigned)first_mismatch);
+        else            fprintf(stderr, "input log: every check matches (%u frames)\n", (unsigned)g_emu_frames);
+        return mismatches ? 1 : 0;
+    }
     return 0;
 }

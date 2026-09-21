@@ -1,0 +1,107 @@
+#!/bin/bash
+# Installs the m2-hle libretro core into ROCKNIX's RetroArch and lists it as a
+# Sega Model 2 emulator in EmulationStation. Run it as root from the unpacked
+# m2hle-libretro-linux-arm64.zip, over ssh:
+#
+#   ./install-rocknix.sh                  install; pick it per game in ES
+#   ./install-rocknix.sh --make-default   ...and make it Model 2's emulator
+#
+# Idempotent: running it again only refreshes the core and its info file.
+set -euo pipefail
+STAMP=$(date +%Y%m%d-%H%M%S)
+HERE=$(cd "$(dirname "$0")" && pwd)
+ES=/storage/.emulationstation
+SYSCFG=/storage/.config/system/configs/system.cfg
+RA_CFG=/storage/.config/retroarch/config/m2-hle
+
+MAKE_DEFAULT=0
+for arg in "$@"; do
+  case "$arg" in
+    --make-default) MAKE_DEFAULT=1 ;;
+    *) echo "usage: $0 [--make-default]" >&2; exit 2 ;;
+  esac
+done
+for f in m2hle_libretro.so m2hle_libretro.info; do
+  [ -f "$HERE/$f" ] || { echo "no $f beside this script" >&2; exit 1; }
+done
+
+# 1. The core. /tmp/cores is an overlay whose writable layer is /storage/cores,
+#    so what is installed through it survives a reboot and an update.
+if [ -f /tmp/cores/m2hle_libretro.so ] && ! cmp -s "$HERE/m2hle_libretro.so" /tmp/cores/m2hle_libretro.so; then
+  cp -a /tmp/cores/m2hle_libretro.so "/storage/cores/m2hle_libretro.so.bak-$STAMP"
+  echo "kept the previous core as /storage/cores/m2hle_libretro.so.bak-$STAMP"
+fi
+install -m 755 "$HERE/m2hle_libretro.so" /tmp/cores/m2hle_libretro.so
+install -m 644 "$HERE/m2hle_libretro.info" /tmp/cores/m2hle_libretro.info
+echo "installed the core -> /storage/cores/m2hle_libretro.so"
+
+# 2. An emulator entry under segamodel2, beside whatever is there already.
+if awk '/<name>segamodel2<\/name>/ { s = 1 } s && /<\/system>/ { exit } s && /<core[^>]*>m2hle<\/core>/ { f = 1; exit } END { exit !f }' "$ES/es_systems.cfg"; then
+  echo "es_systems.cfg: RetroArch / m2hle already listed"
+else
+  cp "$ES/es_systems.cfg" "$ES/es_systems.cfg.bak-$STAMP"
+  awk '
+    /<name>segamodel2<\/name>/ { s = 1 }
+    { print }
+    s && /<emulators>/ {
+      print "\t\t\t<emulator name=\"retroarch\">"
+      print "\t\t\t\t<cores>"
+      print "\t\t\t\t\t<core>m2hle</core>"
+      print "\t\t\t\t</cores>"
+      print "\t\t\t</emulator>"
+      s = 0; done = 1
+    }
+    END { if (!done) exit 1 }
+  ' "$ES/es_systems.cfg.bak-$STAMP" > "$ES/es_systems.cfg.new"
+  mv "$ES/es_systems.cfg.new" "$ES/es_systems.cfg"
+  echo "es_systems.cfg: added RetroArch / m2hle (backup es_systems.cfg.bak-$STAMP)"
+fi
+
+# 2b. The core in ES's feature list, so the game's options offer RetroArch's
+#     netplay for it. Only netplay: rewind and autosave need savestates, which
+#     this core does not have.
+if grep -q '<core name="m2hle"' "$ES/es_features.cfg"; then
+  echo "es_features.cfg: m2hle already listed"
+else
+  cp "$ES/es_features.cfg" "$ES/es_features.cfg.bak-$STAMP"
+  awk '
+    /<emulator name="retroarch"/ { ra = 1 }
+    { print }
+    ra && /<cores>/ { print "      <core name=\"m2hle\" features=\"netplay\" />"; ra = 0; done = 1 }
+    END { if (!done) exit 1 }
+  ' "$ES/es_features.cfg.bak-$STAMP" > "$ES/es_features.cfg.new"
+  mv "$ES/es_features.cfg.new" "$ES/es_features.cfg"
+  echo "es_features.cfg: added m2hle to the RetroArch cores (backup es_features.cfg.bak-$STAMP)"
+fi
+
+# 3. ROCKNIX's RetroArch keeps saves in the ROM folder, which is usually
+#    shared on the network. The core keeps its RPCN login with its saves, so
+#    for this core only, saves go to RetroArch's own (private) saves folder.
+mkdir -p "$RA_CFG"
+if [ ! -f "$RA_CFG/m2-hle.cfg" ]; then
+  printf 'savefiles_in_content_dir = "false"\n' > "$RA_CFG/m2-hle.cfg"
+  chmod 600 "$RA_CFG/m2-hle.cfg"
+  echo "RetroArch: this core's saves go to /storage/.config/retroarch/saves"
+fi
+
+# 4. Optionally, the default for Model 2. EmulationStation writes system.cfg
+#    back when it exits, so it is stopped around the edit; and ROCKNIX restores
+#    system.cfg from system.cfg.backup after an unclean shutdown, so the backup
+#    is refreshed too, or the first crash quietly puts the old emulator back.
+if [ "$MAKE_DEFAULT" = 1 ]; then
+  es_was_up=0
+  if systemctl is-active --quiet essway.service; then es_was_up=1; systemctl stop essway.service; sleep 2; fi
+  cp -a "$SYSCFG" "$SYSCFG.bak-$STAMP"
+  for kv in "segamodel2.emulator=retroarch" "segamodel2.core=m2hle"; do
+    k=${kv%%=*}
+    if grep -q "^${k//./\\.}=" "$SYSCFG"; then sed -i "s|^${k//./\\.}=.*|$kv|" "$SYSCFG"; else echo "$kv" >> "$SYSCFG"; fi
+  done
+  /usr/bin/chksysconfig backup
+  sync
+  echo "system.cfg: Model 2 now uses RetroArch / m2hle (backup system.cfg.bak-$STAMP)"
+  [ "$es_was_up" = 1 ] && systemctl start essway.service
+else
+  sync
+  echo "Pick it per game in EmulationStation (the game's options > emulator), or"
+  echo "run again with --make-default. Restart EmulationStation to see the new entry."
+fi

@@ -258,6 +258,7 @@ static bool web_slice(void) {
     g_web_waited = (np == NETPLAY_STEP_WAIT);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
     if (state.emu.run_state != EMU_RUNNING) return false;
+    if (emu_slice_should_stop(&state.emu)) return false;
     while (g_web_script_at < g_web_script_n && g_web_script[g_web_script_at].frame <= g_emu_frames)
         g_input.held = g_web_script[g_web_script_at++].held;
     if (g_web_pause_frame && g_emu_frames >= g_web_pause_frame) {

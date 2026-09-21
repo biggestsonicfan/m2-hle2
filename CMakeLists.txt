@@ -54,12 +54,18 @@ endif()
 #   web    the browser build (src/main_web.c, Emscripten only): sokol_app on a
 #          canvas, sokol_gfx on WebGL2, no ImGui; the page in web/ is its UI.
 #          See WEB-PORT.md. Configure with emcmake.
-set(M2HLE_FRONTEND "sokol" CACHE STRING "Host frontend: sokol (ImGui debugger), sdl3 (fullscreen, GLES 3) or web (Emscripten)")
-set_property(CACHE M2HLE_FRONTEND PROPERTY STRINGS sokol sdl3 web)
+#   libretro  a libretro core (src/main_libretro.c): m2hle_libretro.dll/.so for
+#          RetroArch, which owns the window, input, audio and netplay lobby.
+#          GL 4.1 core; -DM2HLE_LIBRETRO_GLES=ON for GLES 3 (the handheld).
+set(M2HLE_FRONTEND "sokol" CACHE STRING "Host frontend: sokol (ImGui debugger), sdl3 (fullscreen, GLES 3), web (Emscripten) or libretro (core)")
+set_property(CACHE M2HLE_FRONTEND PROPERTY STRINGS sokol sdl3 web libretro)
 set(M2HLE_SDL3 OFF)
 set(M2HLE_WEB  OFF)
+set(M2HLE_LIBRETRO OFF)
 if(M2HLE_FRONTEND STREQUAL "sdl3")
     set(M2HLE_SDL3 ON)
+elseif(M2HLE_FRONTEND STREQUAL "libretro")
+    set(M2HLE_LIBRETRO ON)
 elseif(M2HLE_FRONTEND STREQUAL "web")
     set(M2HLE_WEB ON)
     if(NOT EMSCRIPTEN)
@@ -67,14 +73,14 @@ elseif(M2HLE_FRONTEND STREQUAL "web")
                             "  emcmake cmake -S . -B build_web -DM2HLE_FRONTEND=web")
     endif()
 elseif(NOT M2HLE_FRONTEND STREQUAL "sokol")
-    message(FATAL_ERROR "M2HLE_FRONTEND must be sokol, sdl3 or web, not '${M2HLE_FRONTEND}'")
+    message(FATAL_ERROR "M2HLE_FRONTEND must be sokol, sdl3, web or libretro, not '${M2HLE_FRONTEND}'")
 endif()
 
 # ---------------------------------------------------------------------------
 # Vendored dependencies are git submodules. Fail early and usefully if the
 # tree was cloned without them.
 # ---------------------------------------------------------------------------
-if(M2HLE_SDL3 OR M2HLE_WEB)
+if(M2HLE_SDL3 OR M2HLE_WEB OR M2HLE_LIBRETRO)
     set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz)
     set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c)
 else()
@@ -149,6 +155,84 @@ if(M2HLE_SDL3)
         ${SRC}/profiles
     )
     install(TARGETS m2hle RUNTIME DESTINATION bin)
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
+# libretro core: m2hle_libretro from src/main_libretro.c, then stop. A shared
+# library RetroArch loads; everything static inside it, so position-independent.
+# ---------------------------------------------------------------------------
+if(M2HLE_LIBRETRO)
+    option(M2HLE_LIBRETRO_GLES "Build the core for GLES 3 (ARM handhelds) instead of GL 4.1 core" OFF)
+    # Android's RetroArch only has GLES.
+    if(ANDROID)
+        set(M2HLE_LIBRETRO_GLES ON CACHE BOOL "" FORCE)
+    endif()
+    # Only the retro_* API leaves the library (libretro.h marks it default).
+    set_target_properties(miniz PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+
+    add_library(sokol_gfx STATIC ${SRC}/sokol_gfx_impl.c)
+    set_target_properties(sokol_gfx PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+    target_include_directories(sokol_gfx PUBLIC ${VENDOR}/sokol ${VENDOR}/sokol/util)
+    if(M2HLE_LIBRETRO_GLES)
+        # Android keeps the GLES 3 entry points in libGLESv3; everywhere else
+        # (Mesa, libglvnd, the Mali blobs) libGLESv2 carries them all.
+        if(ANDROID)
+            find_library(M2HLE_GLES GLESv3 REQUIRED)
+        else()
+            find_library(M2HLE_GLES GLESv2 REQUIRED)
+        endif()
+        target_compile_definitions(sokol_gfx PUBLIC SOKOL_GLES3 M2HLE_LIBRETRO_GLES)
+        target_link_libraries(sokol_gfx PUBLIC ${M2HLE_GLES})
+        if(ANDROID)
+            target_link_libraries(sokol_gfx PUBLIC log)   # sokol_log writes to logcat
+        endif()
+    else()
+        # Windows: sokol loads the GL entry points itself from the current
+        # context (opengl32 + wglGetProcAddress), so there is nothing to link.
+        target_compile_definitions(sokol_gfx PUBLIC SOKOL_GLCORE)
+        if(APPLE)
+            target_compile_definitions(sokol_gfx PUBLIC GL_SILENCE_DEPRECATION)
+        endif()
+        if(NOT WIN32)
+            find_package(OpenGL REQUIRED)
+            target_link_libraries(sokol_gfx PUBLIC OpenGL::GL)
+        endif()
+    endif()
+
+    add_library(m2hle_libretro SHARED ${SRC}/main_libretro.c)
+    set_target_properties(m2hle_libretro PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden)
+    # RetroArch's names: m2hle_libretro.dll / .so / .dylib, and on Android
+    # m2hle_libretro_android.so.
+    if(ANDROID)
+        set_target_properties(m2hle_libretro PROPERTIES OUTPUT_NAME m2hle_libretro_android)
+    endif()
+    # A shared library may leave symbols undefined, so a missing piece (a
+    # renderer that did not compile, a library not linked) only shows when
+    # RetroArch loads it. Make it a link error instead, where the linker can.
+    if(NOT WIN32 AND NOT APPLE)
+        target_link_options(m2hle_libretro PRIVATE -Wl,-z,defs)
+    endif()
+    target_link_libraries(m2hle_libretro PRIVATE sokol_gfx miniz)
+    target_include_directories(m2hle_libretro PRIVATE
+        ${SRC}
+        ${SRC}/board
+        ${SRC}/core
+        ${SRC}/net
+        ${SRC}/ui
+        ${SRC}/profiles
+    )
+    if(WIN32)
+        # RPCN netplay (src/net): the transport and Schannel, as for m2hle.exe.
+        target_link_libraries(m2hle_libretro PRIVATE ws2_32 secur32 crypt32 bcrypt winmm)
+        # wglGetCurrentDC: the window's size, for "Full screen" (main_libretro.c).
+        target_link_libraries(m2hle_libretro PRIVATE opengl32)
+        target_compile_definitions(m2hle_libretro PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(m2hle_libretro PRIVATE Threads::Threads m)
+    endif()
+    install(TARGETS m2hle_libretro LIBRARY DESTINATION lib/libretro RUNTIME DESTINATION lib/libretro)
     return()
 endif()
 
