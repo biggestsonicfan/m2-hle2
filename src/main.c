@@ -1291,6 +1291,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
 #endif
         } else if (strcmp(argv[i], "--net-start") == 0) {
             g_net_start = 1;
+        } else if (strcmp(argv[i], "--net-config") == 0 && i + 1 < argc) {
+            /* A settings file other than the per-user one every copy shares
+             * (netplay.h, "Stored settings"): a second account on one machine. */
+            netplay_set_config_path(argv[++i]);
         } else if (strcmp(argv[i], "--net-twitch") == 0) {
             /* Sign in through Twitch instead of --net-user/--net-pass. The code
              * and the twitch.tv address go to the log, and a browser is opened

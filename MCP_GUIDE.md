@@ -443,8 +443,10 @@ mutex or a socket.
 
 Sign in **once**, by hand, before scripting anything: the Twitch device flow is
 a browser dance that happens once ever, and the login token it yields is stored
-in `m2hle_netplay.cfg` in the emulator's working directory. Every later `netplay_connect` then
-needs no arguments at all.
+in the per-user settings file (`%APPDATA%\m2hle2\netplay.cfg`; `--net-config` names another).
+Every copy of the emulator on the machine reads that one file, so every later `netplay_connect`,
+from any of them, needs no arguments at all. Do not run the device flow again from another copy:
+the server keeps one token per account, and a new one retires the old.
 
 ```
 m2hle --rom sfight.zip --run --netplay --net-server rpcn.sonicthefighte.rs --net-twitch

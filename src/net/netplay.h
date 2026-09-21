@@ -85,6 +85,9 @@
 #ifdef _WIN32
 #  include <shellapi.h>   /* ShellExecuteA, for opening the Twitch activation page */
 #  pragma comment(lib, "shell32.lib")
+#elif !defined(__EMSCRIPTEN__)
+#  include <sys/stat.h>   /* mkdir, for the per-user settings directory */
+#  include <unistd.h>     /* getpid */
 #endif
 
 #include <stdarg.h>
@@ -848,10 +851,23 @@ static inline bool netplay_open_url(const char *url) {
 
 /* ---- Stored settings ----------------------------------------------------- */
 /*
- * Beside the log, in the working directory. The point of it is the Twitch login
- * token: the device flow is deliberately a once-ever thing, and a client that
- * forgot the token it was given would send the player back to a browser at every
- * launch, which is the exact outcome the token exists to prevent.
+ * One file per user, not per copy of the executable. The point of it is the
+ * Twitch login token: the device flow is deliberately a once-ever thing, and a
+ * client that forgot the token it was given would send the player back to a
+ * browser at every launch, which is the exact outcome the token exists to prevent.
+ *
+ * IT USED TO LIVE IN THE WORKING DIRECTORY, AND RPCN KEEPS ONE TOKEN PER ACCOUNT.
+ * Every device flow replaces the account's token (`set_twitch_login`), so with a
+ * file per folder, signing in from one copy of the emulator quietly signed every
+ * other copy out: their stored token was refused, forgotten as dead, and a
+ * headless copy has nobody to approve a new code. That is how the fly lost its
+ * login -- its stream kit, the canary download and a build tree each held a
+ * settings file, and signing in on the desktop from one of them killed the
+ * token in the kit. All copies on a machine now share one file, so one sign-in
+ * serves them all. `--net-config` names another file, which is how two accounts
+ * run side by side on one machine. A file left in a working directory by an
+ * older build is read once, when the per-user one does not exist yet, and
+ * written through to it.
  *
  * THE PASSWORD IS STORED TOO, IN CLEAR TEXT, and that was asked for rather
  * than assumed. This file used to hold the Twitch token and refuse the
@@ -870,6 +886,55 @@ static inline bool netplay_open_url(const char *url) {
  * whoever opens it next.
  */
 #define NETPLAY_CFG_PATH "m2hle_netplay.cfg"
+
+#ifndef __EMSCRIPTEN__
+/* Outside g_netplay on purpose: netplay_init clears that, and --net-config is
+ * parsed before it runs. */
+static char g_netplay_cfg_path[512];
+static bool g_netplay_cfg_named;    /* --net-config: never adopt a legacy file into it */
+
+/* --net-config: use this file instead of the per-user one. Call before
+ * netplay_init. */
+static inline void netplay_set_config_path(const char *path) {
+    snprintf(g_netplay_cfg_path, sizeof(g_netplay_cfg_path), "%s", path ? path : "");
+    g_netplay_cfg_named = g_netplay_cfg_path[0] != '\0';
+}
+
+/* %APPDATA%\m2hle2\netplay.cfg, or $XDG_CONFIG_HOME (~/.config)/m2hle2/netplay.cfg.
+ * The directory is created here. Falls back to the working directory when there
+ * is no per-user location to use at all. */
+static inline const char *netplay_cfg_path(void) {
+    if (g_netplay_cfg_path[0]) return g_netplay_cfg_path;
+    char dir[480] = "";
+#ifdef _WIN32
+    const char *appdata = getenv("APPDATA");
+    if (appdata && appdata[0]) {
+        snprintf(dir, sizeof(dir), "%s\\m2hle2", appdata);
+        CreateDirectoryA(dir, NULL);   /* fails harmlessly when it exists */
+    }
+#else
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    if (xdg && xdg[0]) {
+        snprintf(dir, sizeof(dir), "%s", xdg);
+    } else if (home && home[0]) {
+        snprintf(dir, sizeof(dir), "%s/.config", home);
+    }
+    if (dir[0]) {
+        mkdir(dir, 0700);
+        size_t n = strlen(dir);
+        snprintf(dir + n, sizeof(dir) - n, "/m2hle2");
+        mkdir(dir, 0700);
+    }
+#endif
+    if (!dir[0]) snprintf(g_netplay_cfg_path, sizeof(g_netplay_cfg_path), "%s", NETPLAY_CFG_PATH);
+#ifdef _WIN32
+    else snprintf(g_netplay_cfg_path, sizeof(g_netplay_cfg_path), "%s\\netplay.cfg", dir);
+#else
+    else snprintf(g_netplay_cfg_path, sizeof(g_netplay_cfg_path), "%s/netplay.cfg", dir);
+#endif
+    return g_netplay_cfg_path;
+}
+#endif
 
 /* Is the stored Twitch token this account's? A token with no recorded owner
  * predates `twitch_npid` and belonged to whoever was stored beside it, which
@@ -946,10 +1011,32 @@ static inline void netplay_settings_save(void) {
 #ifdef __EMSCRIPTEN__
     netplay_web_store(NETPLAY_CFG_PATH, text);
 #else
-    FILE *f = fopen(NETPLAY_CFG_PATH, "w");
-    if (!f) return;
-    fputs(text, f);
-    fclose(f);
+    /* Written whole and renamed into place: every copy of the emulator on the
+     * machine shares this file, and a stream and its training runs can sign in
+     * at the same moment. A reader must never see half of one. */
+    const char *path = netplay_cfg_path();
+    char tmp[sizeof(g_netplay_cfg_path) + 24];
+#ifdef _WIN32
+    snprintf(tmp, sizeof(tmp), "%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
+#else
+    snprintf(tmp, sizeof(tmp), "%s.%ld.tmp", path, (long)getpid());
+#endif
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        netplay_log("could not save the netplay settings to %s", path);
+        return;
+    }
+    bool ok = fputs(text, f) >= 0;
+    ok = fclose(f) == 0 && ok;
+#ifdef _WIN32
+    ok = ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+#else
+    ok = ok && rename(tmp, path) == 0;
+#endif
+    if (!ok) {
+        remove(tmp);
+        netplay_log("could not save the netplay settings to %s", path);
+    }
 #endif
 }
 
@@ -974,10 +1061,13 @@ static inline void netplay_settings_parse_line(netplay_config_t *cfg, char *line
     else if (!strcmp(key, "twitch_npid"))  snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", val);
 }
 
-static inline void netplay_settings_load(netplay_config_t *cfg) {
+/* Returns true when the settings came from an older build's file in the working
+ * directory, which the caller then writes through to the per-user one. */
+static inline bool netplay_settings_load(netplay_config_t *cfg) {
+    bool legacy = false;
 #ifdef __EMSCRIPTEN__
     char text[2048];
-    if (!netplay_web_fetch(NETPLAY_CFG_PATH, text, (int)sizeof(text))) return;
+    if (!netplay_web_fetch(NETPLAY_CFG_PATH, text, (int)sizeof(text))) return false;
     for (char *line = text; line && *line; ) {
         char *end = strchr(line, '\n');
         if (end) *end = '\0';
@@ -985,8 +1075,13 @@ static inline void netplay_settings_load(netplay_config_t *cfg) {
         line = end ? end + 1 : NULL;
     }
 #else
-    FILE *f = fopen(NETPLAY_CFG_PATH, "r");
-    if (!f) return;
+    const char *path = netplay_cfg_path();
+    FILE *f = fopen(path, "r");
+    if (!f && !g_netplay_cfg_named && strcmp(path, NETPLAY_CFG_PATH) != 0) {
+        f = fopen(NETPLAY_CFG_PATH, "r");
+        legacy = f != NULL;
+    }
+    if (!f) return false;
     char line[512];
     while (fgets(line, sizeof(line), f)) netplay_settings_parse_line(cfg, line);
     fclose(f);
@@ -996,6 +1091,7 @@ static inline void netplay_settings_load(netplay_config_t *cfg) {
      * was stored with it, because there was only ever one account in it. */
     if (cfg->twitch_token[0] && !cfg->twitch_npid[0])
         snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", cfg->npid);
+    return legacy;
 }
 
 /* ---- Command queue (UI thread -> emu thread) ----------------------------- */
@@ -1019,7 +1115,15 @@ static inline void netplay_init(void) {
     netplay_check_clear();
 
     /* Whatever was stored last time, which is mostly the Twitch login token. */
-    netplay_settings_load(&g_netplay.cfg);
+    if (netplay_settings_load(&g_netplay.cfg)) {
+        /* Now, not at the next login: until the per-user file exists, every
+         * copy launched would adopt whatever its own folder happened to hold. */
+        netplay_settings_save();
+        netplay_log("copied %s into the per-user settings file", NETPLAY_CFG_PATH);
+    }
+#ifndef __EMSCRIPTEN__
+    LOG_INFO("netplay: settings file %s", netplay_cfg_path());
+#endif
     if (g_netplay.cfg.twitch_token[0])
         netplay_log("signed in with Twitch as %s (stored login)", g_netplay.cfg.npid);
 }
