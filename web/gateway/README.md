@@ -74,6 +74,8 @@ Everything here is the owner's to do. Order matters only for step 1.
    ```
    openssl x509 -in /path/to/rpcn/cert.pem -noout -fingerprint -sha256
    ```
+   If RPCN's certificate is CA-issued (as on the droplet), leave `fingerprint` out and
+   set `"servername"` to its name instead: a pin would break at every renewal.
    `udp.bind` and `signaling.host` must be the droplet's **public** address,
    `143.198.49.181`, never `127.0.0.1`. RPCN records a player's address from the
    source of their UDP keepalive, and a loopback source would hand every desktop

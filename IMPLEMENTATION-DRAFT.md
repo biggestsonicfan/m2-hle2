@@ -54,6 +54,12 @@ The current tree has reached roughly M1–M3 with ongoing 3D and audio accuracy 
 (see the `project_*` auto-memories: rocket-metal z-index, IK rotation bug, egg-disp head
 window, ghosting fix).
 
+*Status (2026-09):* all four are reached. M2: `tools/grade-models.mjs` holds the decoder at
+J = 1.000000 over 598,728 triangles against the explorer. M3 was reached, then rebuilt: the
+key-on mixer is gone, and the SCSP now runs per sample in lockstep with the 68000 (`scsp.h`,
+`sound.h`; see §3.6 / Phase 11). M4: Fighting Vipers boots on the board layer with profile
+data only (`src/profiles/fvipers.h`); a homebrew profile (`m2snake.h`) also exists.
+
 ---
 
 ## 2. Tech stack & the traps inside it
@@ -61,17 +67,21 @@ window, ghosting fix).
 | Concern | Choice | Trap |
 |---|---|---|
 | Language | C11, single TU | — |
-| UI | Dear ImGui via **dear_bindings flat drop** (imgui 1.92.6) | **Do NOT use the `cimgui/cimgui` submodule.** Its generated C header had an `ImGuiIO` ABI mismatch: `MousePos` updated but `MouseDown` stayed 0 → UI looks alive but ignores clicks. Use a dear_bindings flat drop where `cimgui.cpp` is compiled alongside the imgui `.cpp` it binds. |
+| UI | Dear ImGui via **dear_bindings flat drop** (imgui 1.92.6) | **Do NOT use the `cimgui/cimgui` submodule.** Its generated C header had an `ImGuiIO` ABI mismatch: `MousePos` updated but `MouseDown` stayed 0 → UI looks alive but ignores clicks. Use a dear_bindings flat drop where `cimgui.cpp` is compiled alongside the imgui `.cpp` it binds. *(now: no committed drop — `vendor/imgui` and `vendor/dear_bindings` are submodules and CMake generates `cimgui.{h,cpp}` into `<build>/cimgui-gen/` at build time; needs Python 3 with `ply`.)* |
 | Graphics/windowing | **Sokol** (app/gfx/imgui/glue/audio) | One TU defines `SOKOL_IMPL`. macOS build must compile it as Obj-C (`sokol_impl.m`, `-x objective-c -fobjc-arc`). Backend per platform: D3D11 (Win), GLCORE (Linux), Metal (mac), GLES3 (Emscripten). |
 | Audio | **sokol_audio** | Callback runs on a **separate audio thread**. All cross-thread comms via SPSC ring (§9). |
 | File dialogs | ImGuiFileDialog | — |
 | ROM zip | miniz | Build as plain static lib; stub `miniz_export.h` in the binary dir (GenerateExportHeader is bypassed). |
-| Build | **VS 2026 MSBuild via `build.ps1`** | `cmake.exe` is NOT on PATH; use the VS-bundled one to *generate*, then build through `build.ps1` (MSBuild on `build/m2hle.vcxproj`, Release/x64, `/m:16`). Direct `cmake --build` / bare `msbuild` are unreliable here. |
-| Web | Emscripten + WebGL2 | `-sUSE_WEBGL2=1 -sALLOW_MEMORY_GROWTH=1`, no filesystem. |
+| Build | **VS 2026 MSBuild via `build.ps1`** | `cmake.exe` is NOT on PATH; use the VS-bundled one to *generate*, then build through `build.ps1` (MSBuild on `build/m2hle.vcxproj`, Release/x64, `/m:16`). Direct `cmake --build` / bare `msbuild` are unreliable here. *(now: stale — VS 2026 is no longer installed, so `build.ps1`'s MSBuild path does not exist. `cmake` is on PATH; configure `build_vs22` with `-G "Visual Studio 17 2022" -A x64` and `cmake --build build_vs22 --config Release`, per CLAUDE.md "Build".)* |
+| Web | Emscripten + WebGL2 | `-sUSE_WEBGL2=1 -sALLOW_MEMORY_GROWTH=1`, no filesystem. *(now: `-sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 -sALLOW_MEMORY_GROWTH=1`, frontend `main_web.c`; see WEB-PORT.md.)* |
 
 CMake structure: four static libs (`cimgui`, `imguifiledialog`, `miniz`, `sokol`) + the
 `m2hle` executable (`WIN32` subsystem on Windows so there's no console). Include paths span
 `src/`, `src/board`, `src/core`, `src/ui`, `src/profiles`. Link `winmm` on Windows (timers).
+*(now also `src/net`, plus `ws2_32 secur32 crypt32 bcrypt` on Windows for netplay; `main.c`
+adds `src/ui/mem_edit.cpp`, the one C++ TU. Two further frontends replace `main.c` + the
+ImGui libs: `-DM2HLE_FRONTEND=sdl3` builds `main_sdl.c` + `sokol_gfx_impl.c` (handheld), and
+the Emscripten build uses `main_web.c` + `sokol_web_impl.c`.)*
 
 ---
 
@@ -94,6 +104,9 @@ rotation model here is the corrected one; ignore PROPOSAL.md §8's "Ry×Rx×Rz r
 - `call`/`ret`: align SP to 64 bytes `(sp+63)&~63`, zero new locals, save pfp/sp/rip,
   sync g15 (frame pointer) every call; `ret` restores all locals.
 - Register-pair (`reg_quad`) ops are **big-endian** though the CPU is little-endian overall.
+- *(now: CLAUDE.md "i960 CPU" adds four more, each found the hard way — the `andnot`/`notand`/
+  `ornot`/`notor` operand order, `movl`/`movt`/`movq` literal fill, interrupts restoring AC via
+  `hle_interrupt` not `hle_call`, and `concmpo`/`concmpi` testing CC bit 2.)*
 
 ### 3.2 SHARC ADSP-21060 geometry coprocessor (board-level)
 
@@ -107,7 +120,8 @@ own the internal math, mirroring the `i960.h`/`i960_exec.h` split.
   - `ang_y` (`0x04800909` → PM `0x201BF`): `col0' = c·col0 + s·col2`, `col2' = −s·col0 + c·col2`
   - `ang_x` (`0x04000808` → PM `0x201AA`): `col1' = c·col1 − s·col2`, `col2' = s·col1 + c·col2`
   - `ang_z` (`0x05000A0A` → PM `0x201D4`): `col0' = c·col0 − s·col1`, `col1' = s·col0 + c·col1`
-  - Verified from the SHARC firmware dispatch table at DM[0x30000] (`C:\temp\sharc_bone.asm`).
+  - Verified from the SHARC firmware dispatch table at DM[0x30000] (`C:\temp\sharc_bone.asm`;
+    now gone — the firmware sources live in `ai\stf-sharc`, `cpres1.asm` = COP, `cpres2.asm` = GEO).
   - **PROPOSAL.md had ang_x/ang_z PM addresses and formulas swapped.** Fixed here.
 - Angles are signed 16-bit fixed-point, `0x10000 = 360°`; only low 16 bits meaningful.
   Mask with `(int16_t)(aw & 0xFFFF)` before `cosf/sinf` or large spins overflow and tumble
@@ -130,6 +144,9 @@ own the internal math, mirroring the `i960.h`/`i960_exec.h` split.
 - Bone scratch is column-major `[col0|col1|col2|T]`, evolves across successive `0x35806B6B`
   calls, reset-to-dirty when the main matrix changes.
 - Log unknown opcodes at WARN; other games will need more dispatch entries.
+- *(now: the COP catalogue in CLAUDE.md is much longer — the collision chain (`sharc_coli.h`),
+  afterimages (`sharc_zanzou.h`, the one variable-length command), `Fn_osage`, the motion
+  Hermite, firmware √/÷/atan2 — and supersedes this list where they differ.)*
 
 ### 3.3 3D polygon decoder (board-level — cross-validated on two games)
 
@@ -155,6 +172,7 @@ what proves it's the board's format, not an STF quirk.
   TILE (`0x01000000`) MUST precede H_SYNC (`0x01040000`).
 - IO region initializes to `0xFF` (hardware idle), not `0x00`.
 - `GEO_CAPTURE_SIZE` ≥ 32768 — smaller wraps mid-frame → partial 3D snapshots / flicker.
+  *(now 262144, `constants.h`: a fight frame exceeds 32768 words.)*
 
 ### 3.5 Tile renderer (board-level) — palette format corrected
 
@@ -170,6 +188,9 @@ what proves it's the board's format, not an STF quirk.
 - Sega System 24 tile path (FV adv_name, STF adv_movie/logo): two layer pairs
   (A=fg regs 0x5000/0x5004, B=bg regs 0x5002/0x5006); hscr bit15=per-row, vscr/ctrl bit15
   =disable + bits[14:13]=window. `render_sys24_pair` handles both.
+  *(now: no `render_sys24_pair` — `tile_renderer.h` draws all four tilemaps with
+  `s24_draw_tilemap`, each with its own scroll and a window mask per pair; see CLAUDE.md
+  "Tile Renderer".)*
 
 ### 3.6 Sound (board-level blocks, per-game 68K code)
 
@@ -185,12 +206,19 @@ what proves it's the board's format, not an STF quirk.
   i960 IRQ controller at `0xE80000/0xE80004`, 4 board timers at `0xF00000` (25 MHz), with a
   pin→handler map; vblank + sound-UART IRQs; SCSP 68K timer formula. Implement real timers
   rather than a single faked flag once you're past first boot.
+- *(now: the SCSP is emulated at its register interface one sample at a time in lockstep
+  with the 68000 — 256 clock periods per 44.1 kHz sample — and the host callback
+  (`core/audio_out.h`) only drains a ring. The 68000 sees all 8 MB of sample ROM at
+  0x800000/0xA00000/0xE00000. See `sound.h`, `scsp.h` and CLAUDE.md "Sound board".)*
 
 ### 3.7 HLE hooks (game-specific addresses, board-level patterns)
 
 - `CoProcessorErr` (STF `0x74E4`) bypass is mandatory — boot self-test compares COP buffers
   and always fails under HLE. Return via `locals.rip` (saved frame return address), NOT a
   normal IP advance. Every Model 2 game has an equivalent; find by symptom (hang at logo).
+  *(now: `sfight.h` has no 0x74E4 bypass — the COP is emulated well enough to pass the
+  self-test. It hooks the failure hang instead, `co_processor_error_hang` at 0x77F8, which
+  logs g4's error code and halts.)*
 - Timer IRQ flag (STF `0x50008C`): write `0x01` to unblock the polled wait.
 - Frame pacing: STF's `variable_diff_calc` (~`0x11A04`) sets volatile `g_frame_done`.
 - `hle_ret()` must restore the i960 register window exactly like the `ret` instruction —
@@ -206,6 +234,9 @@ what proves it's the board's format, not an STF quirk.
 - Double-buffered CPU snapshot (`cpu_snapshot` + `cpu_prev_snapshot`); UI reads current.
 - `EMU_STEPS_PER_SLICE = 500000` instructions/slice — sized to always reach a frame boundary.
 - Sleep granularity: Windows `Sleep()` ≈ 1ms; POSIX `usleep()` ≈ 1µs.
+  *(corrected: Windows `Sleep()` is ~15.6 ms unless something in the process has asked for a
+  finer timer; a `--headless` run has not, so its loop uses a
+  `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` waitable timer — `main.c`.)*
 
 ---
 
@@ -230,9 +261,12 @@ src/
     m68k.h                   MC68000 sound-CPU state
     m68k_exec.h              MC68000 decode/execute
     scsp_hle.h               SCSP HLE PCM mixer + SPSC event ring + audio callback
+                             (now: gone — scsp.h, the SCSP per sample in lockstep with the 68000)
     sound.h                  sound block: 68K bus, SCSP register window, BGM driver glue
     irq_timer.h              i960 IRQ controller + 4 board timers (real hardware model)
     input.h                  keycode→action map, held/momentary bitmasks, coin, flush
+                             (now: serves the active-low IN0/IN1/IN2 I/O ports; no flush)
+    (now also: sharc_coli.h collision chain, sharc_zanzou.h afterimages, m68k_timing.h)
   core/
     log.h                    ring logger + on-disk session log + break-on-warn
     game_profile.h           game_profile_t: variant, load/install fns, hooks[256], input map, quirks
@@ -241,10 +275,14 @@ src/
     emu_thread.h             threading, run loop, double-buffered snapshot, frame pacing
     breakpoint.h             64-slot breakpoint table
     watchpoint.h             memory watchpoints
+    (now also: audio_out.h host audio drain, av_stream.h raw A/V out, json_min.h,
+     thread_mutex.h)
+  net/                       (now: RPCN netplay + lockstep — netplay.h, lockstep.h, rpcn_*.h, tls.h, …)
   profiles/
     registry.h               g_profiles[], g_active_profile, CRC32 resolution
     sfight.h                 STF: ROM load, install, hook table, input map, quirks
     fvipers.h                Fighting Vipers: second 2B-CRX profile
+    m2snake.h                (now) homebrew Snake on STF's data ROMs
   ui/
     cpu_window.h             i960 reg/SFR/frame-stack view, changed-cell highlight
     m68k_window.h            68K reg view
@@ -255,8 +293,11 @@ src/
     video_window.h           tile composite → sg_image (drawn into swapchain, no ImGui win)
     game_render.h            textured-quad + line GPU pipelines (GLSL+HLSL), letterbox
     debug_window.h           aggregate debug panel
-    breakpoint_window.h / trace_window.h / log_window.h
+    breakpoint_window.h / trace_window.h / log_window.h   (now: no log_window.h)
     mcp_bridge.h             in-emulator side of the MAME verification harness
+                             (now: the emulator's own TCP JSON bridge for mcp_server/, --mcp;
+                              not a MAME link — see MCP_GUIDE.md)
+    (now also: objview*.h, netplay_window.h, av_capture.h, kiosk.h, overlay_host.h, …)
 ```
 
 External tooling (not in the build, but essential):
@@ -265,6 +306,13 @@ External tooling (not in the build, but essential):
 mcp_server/                  Python MCP server + MAME bridge clients + per-opcode verifiers
 disassembly/                 SHARC firmware annotation + label-verification scripts
 ```
+
+*(now: `mcp_server/` here is the MCP server for **this** emulator (`server.py`,
+`m2hle_client.py`); the MAME harness is the sibling `ai\claude_mame`, and no
+`verify_*_mame.py` verifiers are in this repo. There is no `disassembly/` — the SHARC firmware
+sources are `ai\stf-sharc`. The graders live in `tools/` (`grade-*.mjs`, `match-replay.mjs`,
+MAME capture scripts under `tools/mame/`), and C test/replay harnesses in `tests/`
+(`cop_replay.c`, `snd_replay.c`, …); see tools/README.md.)*
 
 ---
 
@@ -276,7 +324,9 @@ deps compile and the prior checkpoint passes.
 ### Phase 0 — Skeleton + the cimgui trap
 - `git init`, `.gitignore`, vendor submodules (`sokol`, `ImGuiFileDialog`, `miniz`) +
   **dear_bindings flat cimgui drop** (not the submodule — §2).
-- `CMakeLists.txt` (four libs + exe), `build.ps1` (MSBuild VS2026).
+- `CMakeLists.txt` (four libs + exe), `build.ps1` (MSBuild VS2026). *(now: all of `vendor/`
+  is submodules and cimgui is generated at build time; build per CLAUDE.md with VS 2022 —
+  `build.ps1` points at a VS 2026 that is no longer installed.)*
 - `main.c`: `sokol_main`, ImGui init, one empty window. **Checkpoint: mouse clicks register.**
   If buttons don't respond, you have the ABI mismatch — fix the cimgui drop now.
 
@@ -291,6 +341,8 @@ deps compile and the prior checkpoint passes.
 ### Phase 2 — Memory bus
 - `memory.h`: ~31 named regions, declaration-order linear scan (TILE before H_SYNC!),
   MMIO R/W callbacks, IO inits to `0xFF`, idempotent `mem_init`, NULL-data read guard.
+  *(now ~36 regions incl. `TILE_MIRROR` before TILE; a re-init clears the heap regions in
+  place and never frees them — `mem_region_fresh`, netplay depends on it.)*
 - `memview.h` hex inspector (imgui_club's `MemoryEditor` via `mem_edit.h`). **Checkpoint: write/read round-trips per region in the UI.**
 
 ### Phase 3 — i960 core
@@ -318,16 +370,24 @@ deps compile and the prior checkpoint passes.
 - STF boot-critical hooks in `sfight.h`: `CoProcessorErr` (0x74E4) bypass via `locals.rip`,
   timer-4 skip + flag write (0x50008C), interrupt_wait/idle nudges, 700000-loop skip,
   `variable_diff_calc` (0x11A04) frame flag.
+  *(now: the table is 9 hooks — `cop_initialize_l1` 0x0F3C, `check_timer_4`/`_spin`,
+  `interrupt_wait`/`_b`, `_idle`, `_700000_loop`, `frame_pace` 0x11A04 and
+  `co_processor_error_hang` 0x77F8; no 0x74E4 bypass, see §3.7. Interrupts are delivered to
+  the ROM's own handlers through `hle_interrupt`, not `hle_call`.)*
 - **Checkpoint (M1 begins): STF passes the Sega-logo hang and runs its main loop.**
 
 ### Phase 7 — COP + SHARC
-- `cop.h`: arg accumulator, 32-slot reply FIFO, geo-capture ring (≥32768), MMIO bridge in
+- `cop.h`: arg accumulator, 32-slot reply FIFO (now `SHARC_REPLY_MAX` = 1024 in `sharc.h`,
+  since `Fn_osage` answers a whole chain set), geo-capture ring (≥32768), MMIO bridge in
   `memory.h` routing COPROGRAM writes→`cop_write`, reads→`cop_read`.
 - `sharc.h`/`sharc_exec.h`: column-major post-multiply rotation (§3.2), additive set_pos,
   all confirmed STF opcodes, unknown-opcode WARN log.
 - `cop_window.h`. **Verify each opcode with its `verify_*_mame.py` against MAME** before
   trusting it. This is non-negotiable — cpres1 firmware alone diverges from STF's revision
   (`feedback_cpres1_diverges_from_stf.md`); use IDA i960 usage + MAME, not firmware alone.
+  *(now: the handlers are checked against the firmware sources in `ai\stf-sharc`, which
+  reassemble bit-for-bit to STF's own COP ROMs, and against a SHARC-side MAME capture via
+  `tests/cop_replay.c`; no `verify_*_mame.py` scripts are in this repo.)*
 
 ### Phase 8 — 2D tiles + render path
 - `tile_renderer.h` (§3.5, including System 24 path), `video_window.h` (CPU buffer →
@@ -341,10 +401,11 @@ deps compile and the prior checkpoint passes.
   builder with ring scoping (`geo_frame_start/end`) and translation lerp by frame counter
   at `0x500020` (the ghosting fix), `geo3d_log_captures`.
 - Game knobs in `game_quirks_t`: `model_table_offset/count`, `mesh_ptr_subtract/add`
-  (STF: 0xE0004 / 4373 / 0x02000010 / 0x10).
+  (STF: 0xE0004 / 4373 / 0x02000010 / 0x10). *(now: `model_table_count` = 5103 in `sfight.h`.)*
 - Line pipeline in `game_render.h` (`game_render_draw_lines(cam,rot,fov)`), `geo3d_window.h`.
 - **Checkpoint (M2): models 4402 & 4405 at Jaccard 1.0 vs `stf-poly`.** Compute Jaccard
-  offline on demand, not in the run loop.
+  offline on demand, not in the run loop. *(now: filled, textured and z-sorted, not just
+  wireframe; `node tools/grade-models.mjs` is the offline check, J = 1.000000.)*
 
 ### Phase 10 — 68K sound CPU
 - `m68k.h`/`m68k_exec.h`: full MC68000 core. (Watch the SWAP-vs-PEA decode bug — SWAP was
@@ -362,6 +423,11 @@ deps compile and the prior checkpoint passes.
 - `scsp_hle.h`: SPSC event ring (emu→audio thread), key-on/off → PCM voice mixer, pitch from
   OCT/FNS, pan from DIPAN, loop LEA→LSA, output float stereo in the sokol_audio callback.
 - **Checkpoint (M3): BGM audible, correct pitch/volume, global key-on/off.**
+- *(now: `scsp_hle.h` was replaced by `scsp.h` — the key-on mixer on the audio thread kept
+  25–32 voices keyed where MAME holds 5–16, because the driver reads the chip back. The SCSP
+  now runs per sample in lockstep with the 68000 on the emu thread; `core/audio_out.h` drains
+  the ring. Graded with `tools/mame/snd_capture.py` → `tests/snd_replay.c` →
+  `tools/mame/snd_compare.py`.)*
 
 ### Phase 12 — Input
 - `input.h`: sokol keycode→abstract action (arrows + Z/X/C/V/1/5 P1; I/J/K/L + nav + 2/6 P2;
@@ -370,15 +436,23 @@ deps compile and the prior checkpoint passes.
   authoritative. STF/FV input RAM: held=0x500700, momentary=0x500704
   (`project_fvipers_input_ram.md`).
 - `main.c`: route KEY_DOWN/UP (gated on key_repeat only), `input_flush` once per UI tick.
+- *(now: no `read_sw` hook, `input_flush` or `input_coin`. `input.h` serves the active-low
+  IN0/IN1/IN2 I/O ports, and the game's own interrupt-driven `read_sw` builds 0x500700/0x500704
+  itself. P2 buttons are Delete/End/PgDn/Home. Netplay reads a composed mask
+  (`net_held`/`use_net`), not the keyboard's.)*
 
 ### Phase 13 — UI consolidation + cross-platform
 - `debug_window.h` aggregate panel; finish menus.
 - Linux (`X11 Xi Xcursor GL dl m` + pthreads), macOS (Obj-C, Quartz/Cocoa/Metal/AudioToolbox),
   Emscripten (WebGL2, no FS). Clang `-Wl,-dead_strip` on Apple.
+  *(now also the SDL3/GLES 3 handheld build, `-DM2HLE_FRONTEND=sdl3`, cross-built in CI for
+  ROCKNIX — `packaging/rocknix/`.)*
 
 ### Phase 14 — Second-game shakeout
 - Boot Fighting Vipers (`fvipers.h` exists) and ideally Daytona/VF2. Triage divergences:
   pure i960 → core; pure COP/SHARC → those modules; genuinely game-specific → profile quirks.
+- *Status: done for FV — it boots with profile data only and 0 unknown COP commands; its
+  textures and sound quirks are still open.*
 
 ---
 
@@ -400,6 +474,12 @@ Three external bridges, all reachable from Python in `mcp_server/`:
    `verify_labels.py` computes the PM address per line (anchor `_L20080=0x20080`,
    1 statement = 1 word); handler entry = first `if flag0_in jump`. This is how the ang_x/y/z
    PM addresses and post-multiply formulas were recovered.
+   *(now: no `disassembly/` here; the annotated, reassemblable firmware is `ai\stf-sharc`
+   with Sega's own handler labels.)*
+
+*(now, in this repo: the MAME side is Lua + Python capture scripts in `tools/mame/`, and the
+graders in `tools/` run this emulator `--headless --mcp` against MAME, the STF explorer
+(`vendor/noclip`) or itself — see tools/README.md.)*
 
 Lockstep methodology (used for both i960 and m68k): run MAME and ours in step, compare
 register/memory state after each instruction, stop at the first divergence. It proved the
@@ -425,6 +505,14 @@ These are live debugging threads at the time of writing — a rebuild should exp
 - **STF cage + pole rendering** (`reference_stf_cage_pole.md`): animated cage net + poles,
   camera-culled via `cage_clip_m` (0x14802929 + focus_dist=280); stretched-net symptom on
   stage 1; i960 math verified correct, so the bug is downstream.
+
+*Status (2026-09):* the ghosting fix is in — `frame_pace` (0x11A04) snapshots
+`geo_frame_start`/`geo_frame_end` and `geo3d.h` interpolates translation with the previous
+frame. The IK limb swap was `0x35806B6B` walking the bones in the wrong order (`args[12]` is
+the lower bone; CLAUDE.md), now held by `tools/grade-pose.mjs`. The cage/pole drift is largely
+superseded: the Flying Carpet posts turn with the camera by design, the flames were
+`Fn_base_3x3` being a no-op, and `tools/grade-stages.mjs` holds every stage's arena draws.
+Rocket Metal and the egg-disp head window were not re-triaged in this tree.
 
 ---
 
@@ -460,7 +548,10 @@ These are live debugging threads at the time of writing — a rebuild should exp
   WARN** so new-game support surfaces automatically.
 - **Never `rm -rf`** (`feedback_no_rm_rf.md`) — the user deletes folders manually.
 - **Build with `build.ps1`** (`feedback_build_script.md`) — VS 2026 MSBuild; direct
-  cmake/msbuild invocations fail on this machine.
+  cmake/msbuild invocations fail on this machine. *(now stale: VS 2022 via `cmake` on PATH into
+  `build_vs22`, per CLAUDE.md "Build"; output `build_vs22\Release\m2hle.exe`.)*
+- *(now also: the one C++ TU is `src/ui/mem_edit.cpp`, the facade over imgui_club's
+  `MemoryEditor`; keep C++ from spreading past it.)*
 
 ---
 
@@ -471,9 +562,10 @@ These are live debugging threads at the time of writing — a rebuild should exp
   CRC32 `72E66A1D`, MD5 `2A3E32834FC727391C0AFCB18121245E`.
   `stfbin2rom.py --ctools` strips the 44-byte (0x2C) b.out header gcc960 prepends.
 - STF 3D reference: `C:\m2\3d\new\stf-poly` (4405 OBJs, 5-digit zero-padded).
-- SHARC firmware: `C:\temp\sharc_bone.asm`; annotation in `disassembly/`.
+- SHARC firmware: `C:\temp\sharc_bone.asm`; annotation in `disassembly/`. *(now:
+  `C:\Users\bigge\source\repos\ai\stf-sharc` — `cpres1.asm` COP, `cpres2.asm` GEO.)*
 - MAME Model 2 driver: `src/mame/sega/model2.cpp` (memory map, COP opcodes, ROM regions —
   cross-check addresses, don't copy code).
 - Prior STF-only project: `C:\Users\bigge\source\repos\stf-hle\` — working reference for
   register-window logic, COP math, polygon decoder, HLE patterns, memory-region table.
-```
+  *(now: the prior project to read from is `ai\m2-hle`, not `stf-hle`.)*

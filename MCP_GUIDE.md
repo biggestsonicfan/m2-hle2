@@ -6,9 +6,11 @@ A new Claude instance reading this can fully operate the m2-hle Sega Model 2 emu
 
 ## What this is
 
-**m2-hle** is a Sega Model 2 arcade board emulator written in C11 with an ImGui debug UI. The first (and currently only) game profile is *Sonic The Fighters* (STF). The emulator runs an Intel i960KB CPU at 25 MHz with HLE (high-level emulation) hooks for timing and hardware stubs.
+**m2-hle** is a Sega Model 2 arcade board emulator written in C11 with an ImGui debug UI. The first game profile is *Sonic The Fighters* (STF); *Fighting Vipers* and the m2snake homebrew have profiles too (`src/profiles/`). The emulator runs an Intel i960KB CPU at 25 MHz with HLE (high-level emulation) hooks for timing and hardware stubs.
 
-The **MCP bridge** is a local TCP JSON server built into the emulator. When launched with `--mcp`, the emulator listens on `127.0.0.1:7172`. The Python MCP server (`mcp_server/server.py`) connects to that port and exposes each command as an MCP tool.
+The **MCP bridge** is a local TCP JSON server built into the emulator (`src/ui/mcp_bridge.h`). When launched with `--mcp`, the emulator listens on `127.0.0.1:7172`. The protocol is newline-delimited JSON: one `{"cmd":"...", ...}` object per line in, one reply object per line out, always carrying `ok` (and `error` when it is false). It serves **one client at a time**, one request at a time; a request line is capped at 8 kB and a reply at 128 kB.
+
+The Python MCP server (`mcp_server/server.py`) connects to that port and exposes a subset of the commands as MCP tools: `get_status`, `get_registers`, `read_memory`, `write_memory`, `emu_run`, `emu_stop`, `emu_step`, the six breakpoint tools, `set_break_on_unknown_cop`, `get_cop_diagnostics`, `wait_for_stop`, the five `objview_*` tools, `get_geo_captures`, `wait_frames` and `set_input`. Every other command in this guide is reached by sending its JSON line to the bridge directly (the graders under `tools/` and the netplay examples below do exactly that).
 
 ---
 
@@ -22,7 +24,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py \
     --rom C:\path\to\sfight.zip \
     --run
 ```
-The server launches `m2hle.exe --mcp --rom <path> --run`, waits up to 10 s for the bridge port to open, then starts serving tools.
+The server launches `m2hle.exe --mcp --mcp-port <port> --rom <path> --run` (`--port N` on the server picks the port, default 7172), waits up to 10 s for the bridge port to open, then starts serving tools.
 
 **Option B — Launch emulator manually:**
 ```
@@ -59,7 +61,9 @@ ROM set: MAME `sfight.zip` (clone of `schamp.zip`). The emulator looks for `scha
 
 **`get_status()`**
 Returns: `running` (bool), `halted` (bool), `ip` (hex string), `steps_per_second` (int),
-`profile` (string), `frames` (int), `rom_loaded` (bool).
+`profile` (string), `frames` (int), `rom_loaded` (bool), `match_replay`,
+`match_replay_frame`, and two objects: `av` (the `--av-port` server's state) and
+`overlay` (whether an `--overlay` plugin is loaded and running).
 
 `frames` is a monotonic count of completed game frames — the emulator's own frame
 clock, which is what a capture should pace on rather than wall time or steps/s.
@@ -78,33 +82,36 @@ fight. In STF that is Sonic against Bean on stage 1. The jump happens at the fir
 frame edge where the attract step is the movie and the movie has started. It writes
 the movie state a natural boot has when the replay begins, then moves on, so the
 fight that follows is the natural boot's, bit for bit. It reads its addresses from
-the profile's `quirks.attract_replay`; a profile without one reports
-`unsupported`. Returns `match_replay` (`armed`, or `done` if it has already fired).
+the profile's `quirks.attract_replay`; on a profile without one the command
+fails (`ok: false`, "this game profile has no attract replay"). Returns
+`match_replay` (`armed`, or `done` if it has already fired).
 `tools/match-replay.mjs` grades that fight against MAME.
 
 **`get_registers()`**
 Returns a full i960 CPU snapshot:
-- `globals`: `g0`–`g14`, `fp` (g15, the frame pointer) — 32-bit hex strings
+- `globals`: `g0`–`g15` (`g15` is the frame pointer, `fp`) — 32-bit hex strings
 - `locals`: `pfp` (r0), `sp` (r1), `rip` (r2, saved return address), `r3`–`r15` — 32-bit hex strings
 - `sfr`: `ip` (instruction pointer), `ac` (arithmetic controls / condition codes), `pc` (process controls), `tc` (trace controls)
 - `fp_regs`: `[fp0, fp1, fp2, fp3]` as floats
 - `halted`: bool
-- `frame_depth`: int (call stack depth, max 16)
+- `frame_depth`: int (call stack depth, max 64 — `FRAME_STACK_DEPTH`)
 
 The **condition code** is in `ac` bits `[2:0]`:
-- `0x0` = no condition (CC_NO) — used by `chkbit` when bit is 0
+- `0x0` = unordered / none (`CC_NO`) — also what `chkbit` sets when the bit is 0
 - `0x1` = greater than
 - `0x2` = equal
 - `0x4` = less than
-- `0x7` = unordered
+
+(`0x7`, `CC_O` in `constants.h`, is a branch mask — "ordered" — not a code the CPU sets.)
 
 ### Memory
 
 **`read_memory(addr: str, size: int)`**
-Read up to 4096 bytes from the bus. `addr` is a hex string (`"0x00500700"`). Returns `data` as a hex string (`"DEADBEEF..."`). Decoding: every 2 hex chars = 1 byte, little-endian within each 32-bit word.
+Read up to 4096 bytes from the bus (a larger `size` is clamped). `addr` is a hex string (`"0x00500700"`). Returns `addr` and `data` as a hex string (`"DEADBEEF..."`). Decoding: every 2 hex chars = 1 byte, little-endian within each 32-bit word.
 
 **`write_memory(addr: str, data: str)`**
 Write bytes to the bus. `data` is a hex string with no spaces. Returns `bytes_written`.
+Both are done under the emu mutex, so a write lands in one piece.
 
 **`dump_memory_file(addr: str, size: int, path: str)`**
 Copy a bus range straight to a file, up to 32 MB in one call. `read_memory` caps
@@ -114,7 +121,7 @@ wire; this is one request. The copy is made under the emu mutex, so the range is
 one consistent snapshot rather than a run of reads the i960 wrote through the
 middle of — which matters for anything the game is still filling.
 
-Returns `bytes`, `nonzero` (how many of them are not zero, useful for telling a
+Returns `addr`, `bytes`, `nonzero` (how many of them are not zero, useful for telling a
 filled region from an empty one without moving it) and `frames`.
 
 **`dump_model(model: int, count: int, path: str)`**
@@ -123,12 +130,15 @@ table and write the triangles out. No matrix is applied and the emulator need
 not be running — this decodes out of the ROM regions, not out of the running
 machine — but `rom_loaded` must be true.
 
-Geometry only: colour, texture tile and UV all depend on what the running game
-has uploaded, and a decoder comparison should not be measuring that.
+Positions, the UV each corner carries, the texture tile rectangle and the face's
+fill flags — all a pure function of the ROM. Which *texels* sit in that tile
+depends on what the running game has uploaded, and none of that is written.
 
-File format, little-endian: `"M2MD"`, u32 version=1, u32 first, u32 count, then
-per model a u32 index, a u32 triangle count and that many `9 * f32` triples.
-Returns `first`, `count`, `nonempty`, `tris`.
+File format, little-endian: `"M2MD"`, u32 version=2, u32 first, u32 count, then
+per model a u32 index, a u32 triangle count and that many `20 * f32` records:
+`(x,y,z)*3`, `(u,v)*3`, tile `x,y,w,h` (`w = 0` untextured), `GEO3D_FACE_*` flags.
+`model` (default 0) is the first entry and `count` (default 1) is clamped to the
+table. Returns `first`, `count`, `nonempty`, `tris`.
 
 ### Execution control
 
@@ -142,9 +152,11 @@ other exit uses. The reply arrives first and then the socket closes because the 
 away. A `--headless --no-tray` run has no other way out, which is what this is for; a windowed
 run in capture mode is allowed through the close it would otherwise swallow.
 
-**`emu_step(count: int = 1)`** — Step `count` instructions. Emulator must be stopped. Count range: 1–1 000 000.
+**`emu_step(count: int = 1)`** — Step `count` instructions. Emulator must be stopped. Count range: 1–1 000 000. Returns `steps`.
 
 **`wait_frames(count: int = 1, timeout_ms: int = 30000)`**
+(The bridge's default is 30000 and its cap 300000; the Python tool passes 10000
+unless told otherwise.)
 Block until the game has advanced `count` frames. Returns `frames` (the clock),
 `advanced`, `reached` (bool) and `elapsed_ms`. `reached` is false if the game
 stalled or stopped instead, so a driver can tell "slow" from "stopped" rather
@@ -157,11 +169,13 @@ immediately there would hand every caller `reached: false` the moment it
 connected.
 
 **`wait_for_stop(timeout_ms: int = 30000)`**
-Block until the emulator stops (breakpoint hit, CPU halt, or manual pause). Returns:
+Block until the emulator stops (breakpoint hit, watchpoint hit, CPU halt, unknown COP command, or manual pause); `timeout_ms` is capped at 300000. Returns:
 - `stopped`: bool
-- `reason`: `"breakpoint"` | `"halted"` | `"stopped"` | `"timeout"`
+- `reason`: `"timeout"` | `"halted"` | `"watchpoint"` | `"breakpoint"` | `"cop_unknown"` | `"stopped"` (checked in that order)
 - `ip`: hex string of the IP at stop
 - `elapsed_ms`: how long it waited
+- `cop_cmd`, `cop_ip`: the unknown COP command and where it was sent (see `set_break_on_unknown_cop`)
+- `wp_addr`, `wp_val`, `wp_ip`, `wp_write`: the last watchpoint hit
 
 Typical pattern: `emu_run()` → `wait_for_stop()` → `get_registers()`.
 
@@ -173,25 +187,57 @@ vector. Returns `resets`, the number performed so far. Refused with no ROM set
 loaded, and while a netplay session is at the barrier or playing -- there it
 would reset one board of two. `tools/grade-reset.mjs` is built on it.
 
+### Input
+
+**`set_input(held: str = "0x0")`**
+Set the active-high held mask the game's input read is served, in the
+`0x500700` bit layout (see the table under "STF memory map"). `"0x1000"` holds
+P1 Down, `"0x0"` releases everything. It replaces the whole mask
+(`g_input.held`, the same one the window's keyboard drives). Returns `held`. This is the only safe way to drive a
+netplay session (see below).
+
 ### Breakpoints
 
 **`set_breakpoint(addr: str, label: str = "")`**
-Add a breakpoint. The emulator stops when IP reaches this address. `label` is optional and shown in the debug UI.
+Add a breakpoint. The emulator stops when IP reaches this address. `label` is optional and shown in the debug UI. Returns `addr`.
 
 **`clear_breakpoint(addr: str)`**
-Remove all breakpoints at `addr`.
+Remove all breakpoints at `addr`. Returns `removed`.
 
 **`enable_breakpoint(addr: str)`**
-Re-enable a disabled breakpoint without removing it.
+Re-enable a disabled breakpoint without removing it. Returns `updated`.
 
 **`disable_breakpoint(addr: str)`**
-Mute a breakpoint (keeps it in the list, won't trigger).
+Mute a breakpoint (keeps it in the list, won't trigger). Returns `updated`.
 
 **`clear_all_breakpoints()`**
-Remove every breakpoint.
+Remove every breakpoint. Returns `removed`.
 
 **`list_breakpoints()`**
-Returns an array of `{addr, label, enabled}` for all active breakpoints.
+Returns `breakpoints`, an array of `{addr, label, enabled}` for all active breakpoints.
+
+**`set_watchpoint(addr, size = 1, type = "w", label = "")`** *(bridge only)*
+Stop when the i960 touches `[addr, addr+size)`. `type` is `"w"`, `"r"` or `"rw"`.
+Returns `addr`, `size`, `slot` (`ok: false` and `slot: -1` when the table is full).
+`wait_for_stop` reports the hit as `reason: "watchpoint"` with `wp_addr`, `wp_val`,
+`wp_ip` and `wp_write`.
+
+**`clear_watchpoint(addr)`** *(bridge only)* — returns `removed`.
+**`clear_all_watchpoints()`** *(bridge only)*.
+**`list_watchpoints()`** *(bridge only)* — returns `watchpoints`, an array of
+`{lo, hi, w, r, label}`.
+
+**`set_break_on_unknown_cop(enable: bool = True)`**
+Stop on the first COP command that has no handler. Clears the previous trigger.
+Returns `break_on_unknown_cop`. After `emu_run()`, `wait_for_stop()` reports
+`reason: "cop_unknown"` with `cop_cmd` and `cop_ip`.
+
+**`get_cop_diagnostics()`**
+COP counters and the unknown-command log: `writes`, `reads`, `transforms`,
+`matrix_reads`, `unknown_cmds`, `unknown_unique`, `break_on_unknown`,
+`unknown_triggered`, `trigger_cmd`, `trigger_ip`, `cmd_ips` (the last IP to send
+each of a handful of common commands) and `unknown_log`, an array of
+`{cmd, first_ip, count}` per distinct unknown opcode.
 
 ### Object viewer (screenshots of one model, from any angle)
 
@@ -397,7 +443,7 @@ mutex or a socket.
 
 Sign in **once**, by hand, before scripting anything: the Twitch device flow is
 a browser dance that happens once ever, and the login token it yields is stored
-in `m2hle_netplay.cfg` beside the executable. Every later `netplay_connect` then
+in `m2hle_netplay.cfg` in the emulator's working directory. Every later `netplay_connect` then
 needs no arguments at all.
 
 ```
@@ -409,8 +455,12 @@ Everything the published snapshot holds. `state` is the text
 (`off` / `connecting` / `online` / `in a room` / `waiting at the barrier` /
 `playing` / `failed`) with `state_num` beside it, plus `room_id` (a **string** —
 it is 64-bit), `com_id`, `frame`, `stalls`, `generation`, `seed`,
-`desync_frame` (null while the two boards agree), `error`, and a `twitch`
-object. `rooms: 1` adds the last search's results; `log` is how many lines of
+`desync_frame` (null while the two boards agree), `error`, `stage`, `is_host`,
+`player`, `room_flags`, and a `twitch` object (`state`, `signed_in`, `npid`,
+`user_code`, `uri`, `error`). `rooms: 1` adds `search_pending` and `rooms`, the
+last search's results as `{room_id, owner, members, max, password, flags}`
+(`flags` bits 6-7 are the build family: 1 is a browser-build room, which this
+build refuses); `log` is how many lines of
 the emulator's own netplay log to return, with `log_count` beside it so a
 poller can tell "nothing happened" from "I missed some".
 
@@ -423,6 +473,7 @@ poller can tell "nothing happened" from "I missed some".
 | `heard` | a datagram has actually arrived from them |
 | **`ready`** | **they have joined AND pressed Start — this is a challenge** |
 | `ready_gen` | the session generation they announced |
+| `addr` | the address the server gave for them |
 
 `ready` is the whole reason these commands exist. RPCN has no "ready" message;
 the barrier releases when both peers announce the same generation, which is what
@@ -434,19 +485,31 @@ two seconds later, rather than leaving a challenge standing that nobody is at.
 
 **`netplay_connect(server, port, user, pass, token, fingerprint, twitch, delay, browse_yamp, p2p_port)`**
 Sign in. Every field is optional and defaults to whatever is stored, so
-`{"cmd":"netplay_connect"}` means "as whoever signed in last". `twitch: 1` runs
-the device flow instead — which signs in *and connects itself*, so it replaces
-the connect rather than preceding it. Passing `pass` means the password and
-clears any stored Twitch token for this attempt.
+`{"cmd":"netplay_connect"}` means "as whoever signed in last". It fails with no
+server (none passed or stored) or, without `twitch`, with no account. `twitch: 1`
+signs in with Twitch instead: with a good token already stored that is an
+ordinary login with the token, and only without one does it run the device
+flow — which signs in *and connects itself*, so it replaces the connect rather
+than preceding it. Passing `pass` logs in with the password; the stored Twitch
+token is kept, not cleared.
+
+Every command from here down answers at once with `queued` (the verb) and the
+current `state`; poll `netplay_status` for the result.
 
 **`netplay_host(delay, room_pass)`** — take a room. 2 slots; host is always P1.
 **`netplay_join(room_id, room_pass)`** — join one. `room_id` is a string.
+Straight after sign-in, both wait until RPCN's signaling helper has answered
+(at most 4 s; the log says "waiting for the server to learn this machine's
+address"), because a room copies its members' addresses once, when it is
+taken. A script that hosts the moment `state` reads `online` is expected to see
+that line.
 **`netplay_search(browse_yamp)`** — fill `rooms` in the status.
 **`netplay_stop()`** — leave the match, keep the room, so the next challenger
 has one to join.
 **`netplay_disconnect()`** — give the room back and drop the session.
 
 **`netplay_start()`** — **accept.** Begin (or restart) a lockstepped session.
+Refused until this end is in a room.
 
 Two things it is important to have read before calling it:
 
@@ -483,15 +546,101 @@ A lobby that holds itself open, in full:
 `flystf/rpcn.py` in the [stf-fly](../stf-fly) sibling is that loop with a fruit
 fly behind it.
 
+### Captures and diagnostics
+
+`get_geo_captures` is an MCP tool; the rest are bridge-only JSON commands, used
+mostly by the graders under `tools/`. Paths are resolved by the emulator
+process, so pass absolute ones.
+
+**`get_geo_captures()`**
+The models the board drew in the last frame: `count` and `captures`, each with
+`idx` (what `objview_set`'s `capture` takes), `model`, `mesh`, `pos`, `ang`,
+`xyz`, per-column `scale`, `up`, the clip window (`clip`, `cx`, `cy`, `cw`, `ch`),
+`bone`, `vs`, `win`, `vp`, `gp`, `tpa`, `tha`, `matptr` and `m`, the 12-word matrix.
+
+**`capture_dl(path, frames = 60, probes, max_words, timeout_ms = 120000, lo, hi, tgp, slots, unit, blocks, cop)`**
+Record every write to the geometry processor and the coprocessor for `frames`
+whole frames (capped at 3600), in the explorer toolkit's MAME capture format:
+`<path>.bin` (u32 address, u32 value per write) and `<path>.json` (`words`,
+`frames`, `overflow`, `probes`, `marks`). `probes` is `"hexaddr:size,..."` read at
+each frame edge; `lo`/`hi` narrow the recorded window; `tgp:1`, `slots:1`,
+`unit:1` and `blocks:"hexaddr:hexlen,..."` add `<path>.tgp.bin`, `.slots.bin`,
+`.unit.bin` and `.blocks.bin` per mark; `cop:1` records the coprocessor
+conversation in a MAME SHARC-side capture's format with `.bufram.bin` and
+`.dm.bin` beside it (`tests/cop_replay`). Blocks until done. Returns `words`,
+`frames`, `complete`, `overflow`.
+
+**`capture_snd(path, frames = 600, async = 0, timeout_ms = 600000)`**
+The sound board's side of the next `frames` game frames in
+`tools/mame/snd-capture.lua`'s format: `<path>.bin`, `.ram.bin`, `.regs.bin` and
+the `.json` index. With `async: 1` it only arms (returns `armed`), so a driver
+can arm before `emu_run` and catch power-on; **`capture_snd_finish(timeout_ms)`**
+then waits for it and writes the index. Returns `records`, `frames`.
+
+**`dump_geo_list(path)`** — the GEO display list the renderer walks, as last
+published: u32 read pointer, u32 publish count, u16 H-sync, u16 V-sync, then
+bufferram's words. Returns `read_start`, `seq`, `hsync`, `vsync`.
+
+**`dump_geo_stream()`** — this frame's captured COP command stream inline:
+`total` and `cmds`, each `{c, a}` (command word and up to 8 arguments).
+
+**`set_geo_isolate(index = -1, from, to, dump_tex)`** — draw only captured
+object `index` (-1 for all), or only captures in `[from, to]` (`to < from` turns
+the range off). Returns `isolate`.
+
+**`set_camera(cam_x, cam_y, cam_z, rot_x, rot_y, fov, test, lines_only, zsort, zrecede)`**
+Live-tune the 3D renderer's camera and switches; values travel as strings and
+an omitted one keeps its value. `zsort: 0` turns off the board's polygon z-sort.
+Returns `cam`, `rot`, `fov`, `lines`, `tris`, `test`.
+
+**`set_shadow_floor(y)`** — the shadow floor height. Returns `shadow_floor_y`.
+
+**`dump_bones()`** — the current position and a four-slot summary of P1's bone
+slots (`rot_cache_T`, `tgp_bone_T`, `rot_cache_R`), at three decimals.
+
+**`dump_tgp()`** — the whole 32-slot bone table (`tgp`, P1 on 0..15, P2 on
+16..31, each a column-major 3x4) with the current `pos` and `rot`, at full
+precision for differencing.
+
+**`cop_exec(words, reset = 0)`** — hand the coprocessor a stream of 32-bit
+words (`words`: 8 hex chars each, no spaces) through the i960's own MMIO path,
+argument counting and all; `reset: 1` clears COP and SHARC state first. Read the
+result back with `dump_tgp`. Returns `words` (how many went in).
+
+**`dump_face_uv()`** / **`dump_tex_stats()`** — texture-decode debug counters
+from the renderer.
+
+**`sound_status()`** — the sound board at a glance: the 68000's `m68k_pc` /
+`m68k_sr` / `cycles`, `samples`, `irqs`, the SCSP interrupt state (`scieb`,
+`scipd`, `lines`, `levels`, `timers`), the `keyed` and `active` slot masks,
+`dsp_steps`, the host ring (`out_fill`, `out_dropped`) and the MIDI input
+(`midi_writes`, `midi_fifo`, `midi_drops`, `midi_hi`, `midi_drains`).
+
+**`snd_watch(on)`** — the streaming watchdog: `on: 1` arms it and clears the
+counters, `on: 0` disarms, no `on` reads it. `late_up` of `refills` is the
+headline; `by_slot` is `[refills, late, worst]` per slot and `events` the first
+few late refills with the 68000 PC that wrote them.
+
+**`reset_sound(restart = 1, midi)`** — reboot the 68000 and SCSP, and/or push
+`midi` (hex, 2 chars a byte) at the MIDI input; `restart: 0` just sends the
+bytes. The recovery path for a driver that has gone silent. Returns `restarted`,
+`midi_bytes`, `m68k_pc`, `midi_drops`, `midi_hi`.
+
+**`dump_midi_log()`** — the bytes the i960 sent the sound board: `count` and
+`bytes`, each `{v, ip}`.
+
+**`read_wave(addr, len)`** / **`read_comm(addr, len)`** — up to 256 bytes of
+sound RAM, or of the SCSP registers (no read side effects), as a decimal array `b`.
+
 ---
 
 ## STF memory map (key addresses)
 
-### Input (written by the UI thread each frame)
+### Input (built by the game's own `read_sw` from the I/O ports at `0x01C00000`)
 | Address | Description |
 |---------|-------------|
-| `0x00500700` | P1+P2 held buttons bitmask (written every frame) |
-| `0x00500704` | P1+P2 momentary buttons (one-shot, OR'd in, cleared after read) |
+| `0x00500700` | P1+P2 held buttons bitmask (rebuilt every vblank) |
+| `0x00500704` | P1+P2 momentary buttons |
 | `0x0059C388` | P1 credits byte |
 | `0x0059C38C` | P2 credits byte |
 
@@ -506,33 +655,41 @@ fly behind it.
 | `0x00000200` | P1 B2 (X) | `0x00020000` | P2 B2 |
 | `0x00000400` | P1 B3 (C) | `0x00040000` | P2 B3 |
 | `0x00000010` | P1 Start | `0x00000020` | P2 Start |
+| `0x00000001` | P1 Coin | `0x00000002` | P2 Coin |
 | `0x00000004` | Service | | |
 
 ### HLE hook addresses (all STF-specific)
 | Address | Function | What the hook does |
 |---------|----------|--------------------|
 | `0x00000F3C` | `cop_initialize_l1` | Sets COP-ready bit to unblock boot |
-| `0x000074E4` | `CoProcessorErr` | Simulates `ret` to bypass COP self-test hang |
-| `0x0004A55C` | `check_timer_4` | Skips timer spin loop |
+| `0x0004A55C` | `check_timer_4` | Skips timer spin loop (returns 0) |
 | `0x0004A58C` | `check_timer_4_spin` | Writes `0x01` to `0x50008C` to unblock |
-| `0x00001768` | `interrupt_wait` | Writes to `RAM_BASE` to unblock |
-| `0x00011580` | `interrupt_wait_b` | Increments `RAM_BASE` |
-| `0x00011610` | `_idle` | Increments `RAM_BASE` |
+| `0x00001768` | `interrupt_wait` | Runs `VsyncScr` (`0x0C40`), then skips the spin loop |
+| `0x00011580` | `interrupt_wait_b` | Clears `RAM_BASE` so `_idle`'s hook is reached |
+| `0x00011610` | `_idle` | Runs `VsyncScr` on first entry, then lets the loop exit |
 | `0x00007264` | `_700000_loop` | Zeroes r3 to exit sound-init delay |
 | `0x00011A04` | `frame_pace` | Sets `g_frame_done` for 60 Hz pacing |
-| `0x000017CC` | `read_sw` | Zeroes held buffer before real input read |
+| `0x000077F8` | `co_processor_error_hang` | Halts the CPU and logs the COP self-test error code |
+
+There is deliberately no `read_sw` (`0x17CC`) hook: inputs reach the game through
+its I/O ports. The table is `src/profiles/sfight.h`.
 
 ### Memory bus regions (board-level, all Model 2 games)
 | Base address | Size | Region |
 |-------------|------|--------|
-| `0x00000000` | 2 MB | ROM (maincpu) |
-| `0x00200000` | 8 MB | RAM |
-| `0x00500000` | 4 MB | IO / registers |
-| `0x01000000` | 4 MB | TILE VRAM |
+| `0x00000000` | loaded size (STF 2 MB) | ROM (maincpu) |
+| `0x00200000` | ~830 KB | RAM2 |
+| `0x00500000` | 1 MB | RAM (work RAM; the input words above live here) |
+| `0x00880000` | 128 KB | COPROGRAM (the COP FIFO) |
+| `0x00900000` | 128 KB | BUFF_RAM (bufferram, the GEO display list) |
+| `0x01000000` | 512 KB | TILE (64 KB tile RAM, mirrored at `0x01010000`) |
+| `0x01800000` | 16 KB | PALETTE |
+| `0x01C00000` | 0x44 bytes | IO (input ports) |
 | `0x02000000` | 32 MB | MAIN_DATA |
-| `0x04000000` | 8 MB | COPRO data |
-| `0x05000000` | 8 MB | GEO capture buffer |
 | `0x06000000` | 16 MB | XTRA_DATA (STF: mirror of main_data+0x1000000) |
+| `0x11000000` / `0x11200000` | 1 MB each | TEXRAM0 / TEXRAM1 |
+
+The full, ordered table is `mem_init` in `src/board/memory.h`.
 
 ---
 
@@ -540,7 +697,7 @@ fly behind it.
 
 ### Inspect state at a known function
 ```python
-set_breakpoint("0x000074E4", "CoProcessorErr")
+set_breakpoint("0x00011A04", "variable_diff_calc")   # STF: runs once per game frame
 emu_run()
 r = wait_for_stop(timeout_ms=15000)
 # r["reason"] should be "breakpoint"
@@ -594,7 +751,7 @@ if r["reason"] == "halted":
 - `rip` (`r2`) — return instruction pointer (where `ret` will jump)
 - `r3`–`r15` — local scratch within the current frame
 
-**Call/ret**: `call` aligns SP to 64 bytes, zeros new locals, saves pfp/sp/rip. `ret` restores all locals from the frame stack. The emulator maintains `frame_depth` (max 16 deep).
+**Call/ret**: `call` aligns SP to 64 bytes, zeros new locals, saves pfp/sp/rip. `ret` restores all locals from the frame stack. The emulator maintains `frame_depth` (max 64 deep).
 
 ---
 

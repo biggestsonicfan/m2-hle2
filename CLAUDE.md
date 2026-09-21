@@ -10,7 +10,7 @@ Pair with [PROPOSAL.md](PROPOSAL.md) §8 for the full subsystem gotcha catalogue
 
 A general **Sega Model 2 arcade emulator**, written in C11 with Dear ImGui (via cimgui) and Sokol for cross-platform graphics. The first target is *Sonic The Fighters* (STF), because the bulk of the prior reverse-engineering work happened there — but the architecture is built for the **full Model 2 catalogue** from day one. Generalising across games strengthens every subsystem: most "STF bugs" turn out to be board-level i960 / COP / tile bugs that affect every Model 2 game equally.
 
-**Reference prior project** — the original STF-only implementation lives at `c:\Users\bigge\source\repos\stf-hle\` (the directory containing this file). It is **not deleted**: treat it as a working reference for register-window logic, COP math, the polygon decoder, HLE hook patterns, and the memory-region table. Read freely from it; do not import code wholesale — the new project's layering (board vs game profile, §3 below) means files will need restructuring as they're brought over.
+**Reference prior project** — the previous full implementation lives at `c:\Users\bigge\source\repos\ai\m2-hle\` (same `src/{board,core,ui,profiles}` layering, corrected COP math, 68K + SCSP, MCP harness). Treat it as a working reference for register-window logic, COP math, the polygon decoder, HLE hook patterns, and the memory-region table. The older STF-only `c:\Users\bigge\source\repos\stf-hle\` still exists but is badly outdated — consult it only when asked. Read freely from m2-hle; do not import code wholesale — the new project's layering (board vs game profile, §3 below) means files will need restructuring as they're brought over.
 
 See [PROPOSAL.md](PROPOSAL.md) for the architecture, module map, build commands, and bootstrap checklist.
 
@@ -151,7 +151,7 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
 ### Tile Renderer (board-level)
 
 - **16-bit byteswap on pixel bytes**: indices `[0,1,2,3]` are read as `[1,0,3,2]` (XOR low bit of byte index). Within each swapped word, high nibble = left pixel, low nibble = right.
-- **Tilemap entry (7-bit fields)**: bit15=priority, bit14=h_flip, bits[13:7]=pal_bank (7-bit, 0–127), bits[6:0]=char (7-bit). Full tile index = `entry & 0x3FFF` (= `(pal_bank<<7)|char`). Palette LUT index = `pal_bank * 16 + color_idx` (stride=16 entries = 32 bytes per bank). Verified: CG87 palette written to pal+0x660 = bank 51×32; tile entry pal_bank=(0x9980>>7)&0x7F=51; pal+51×32=0x660 ✓.
+- **Tilemap entry** (MAME `segaic24` tile_info): bit15=priority, bits[14:7]=pal_bank (**8-bit**, `(entry >> 7) & 0xFF` — bit 14 is a palette bit, *not* h_flip; `change_bg_color` uses it), char = low bits. Full tile index = `entry & 0x3FFF`. Palette LUT index = `pal_bank * 16 + color_idx` (stride=16 entries = 32 bytes per bank). Verified: CG87 palette written to pal+0x660 = bank 51×32; tile entry pal_bank=(0x9980>>7)&0x7F=51; pal+51×32=0x660 ✓.
 - **Color index 0 is transparent on foreground layers only**; background layers fully opaque (pass `NULL` for `alpha_out`).
 - **Four tilemaps, each with its own scroll, and a window mask per pair** (MAME `segaic24` draw_common, `model2_v.cpp` screen_update). Tilemap t sits at tile RAM word `0x1000*t`, H scroll `0x5000+t`, V scroll `0x5004+t` (bit 15 disables), and samples at `(x − hscroll, y + vscroll)`. Pairs 0/1 and 2/3 share a control word (`0x5004` / `0x5006`, bits 14:13) and a mask (`0x6000` / `0x6800`, four words a line, one bit per 8 px):
   - control 0: the even tilemap draws where the mask bit is 0, the odd one where it is 1;
@@ -181,6 +181,7 @@ The 68000 runs the game's own sound driver (per-game code: three Hiro driver ver
 These addresses are STF-specific. The **patterns** repeat across the catalogue — every Model 2 game ships some form of COP self-test and frame-loop entry; the addresses change per ROMset.
 
 - **`CoProcessorErr` at `0x74E4` (STF)** must be bypassed. Return via `locals.rip` (saved return address from the call frame), NOT normal IP advance. Without this, STF hangs at the Sega logo. Every Model 2 game will have an equivalent — find by symptom (hang on boot, COP self-test loop).
+  - *In this project* the COP answers the self-test itself, so no profile carries a bypass at `0x74E4`. What STF hooks instead is the failure hang, `co_processor_error_hang` at `0x77F8` (`sfight_hook_cop_err_hang`, FV has its own): it halts the CPU and logs g4's error code so the UI stays live. The `locals.rip` return is `hle_ret` (`hle_hooks.h`), which hooks that skip a whole function (`check_timer_4`) still use.
 - **Timer IRQ flag at `0x50008C` (STF)** — write `0x01` to unblock the polled wait loop.
 - **Frame pacing** is driven by `variable_diff_calc` (~`0x11A04` in STF) setting a volatile `g_frame_done`. The emu thread runs up to `EMU_STEPS_PER_SLICE` (500,000) instructions per slice — sized to always reach the frame boundary.
 - **Never hook `clip_point_check_yoko` / `clip_point_check`** (STF `0x28188` / `0x28250`, FV `0x236BC` / `0x23784`). They return nothing in `g0`. Each runs a point list through op `0x29` and writes one outcode byte per point to `0x50E000` (`0x90` behind the lens, `0x81`/`0x82` off the left/right edge). `area_clip` then draws a ground chunk only when the AND of its four corners' outcodes is zero, and finally draws the chunk the camera stands over.
@@ -193,7 +194,12 @@ These addresses are STF-specific. The **patterns** repeat across the catalogue �
 - **Sleep granularity**: POSIX `usleep()` ≈ 1 µs, but Windows `Sleep()` is **~15.6 ms**, not 1 ms,
   unless something in the process has asked for a finer timer. A window or an audio device
   usually has; a `--headless` run has not, and a 1 ms poll there really waits 15.6 ms (measured
-  — see the A/V section below, where it cost a third of the frames).
+  — see the A/V section below, where it cost a third of the frames). Since Windows 10 2004 another
+  program raising the system timer no longer lends it to a process that did not ask, so the 60 Hz
+  throttle (`emu_sleep_us`) waits on a per-thread `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer too,
+  falling back to `Sleep` only where one cannot be made. *Measured with `Sleep`:* `Sleep(14)` took
+  15.5 ms, the catch-up clamp threw the deadline away, and a headless stream ran at ~52 board fps
+  with a gap every few frames.
 - **The netplay pump runs outside the mutex** (`emu_netplay_pump`, `emu_thread.h`) and runs in the
   STOPPED branch too. A TLS connect blocks for seconds, so pumping it under the mutex freezes the
   UI; pumping it only while RUNNING means a player who connects before pressing Run never logs in.
@@ -274,6 +280,20 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   told to punch at their own socket, so `rpcn_session_recv` drops datagrams whose source is our own
   `local_ip:local_port` — without it `peer_heard` latches onto our own port and every real datagram
   from the peer is then discarded as a stray.
+- **A room copies each member's address when it is created or joined, and never refreshes it.**
+  The address reaches RPCN only with the first UDP keepalive after login, so a Host or Join sent
+  straight after sign-in snapshots nothing — for the life of the room — and two players on one
+  public address are then told *different kinds* of address for each other and drop each other's
+  datagrams as strays. So Host and Join wait for the signaling helper's reply
+  (`netplay_room_or_defer`, at most `NETPLAY_ROOM_WAIT_MS`), and an address the peer has actually
+  been heard from is never replaced by one the server reports later (`rpcn_session_set_peer`).
+  Found by `tools/web-netplay.mjs`, which hosts 0.2 s after signing in; a person rarely beats the
+  keepalive, a script always does.
+- **The build family rides in bits 6-7 of the room's revision byte, not bits 28-31** (those are
+  the server's: it owns `ROOM_FLAG_ATTR_FULL` there). Lockstep needs bit-identical floats, so
+  native and wasm rooms refuse each other with a sentence until `NETPLAY_CROSS_PLAY` is set. A web
+  room's byte reads `0x41`, which desktop builds from before the field refuse as "a different
+  netplay protocol" — the separation cost no desktop release.
 - **Hole punching needs BOTH ends transmitting.** The guest's first packet opens a mapping through
   the *guest's* NAT only; a host that waits to hear something first never opens its own, and two
   peers on different networks sit at the barrier forever.
@@ -302,6 +322,12 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   separately (`peer_ready_gen`, `netplay_peer_ready`). It is a freshness window and not a flag:
   a peer at the barrier announces once per slice, so a challenger who walks away retracts their
   own challenge, where a sticky bool would leave one standing forever.
+- **A peer's input record for this round is also its announce** (`lockstep_on_record`). A peer
+  sends inputs only once its own barrier has released, and it stops announcing the moment it does.
+  When the host releases on the guest's *first* announce, every announce the host sent before that
+  reached a guest not yet in the round and was dropped, so without this the guest waits for an
+  announce that never comes and the host stalls at frame 0. Over the internet one is usually still
+  in flight; over loopback, and through the web gateway on one machine, the race was lost every time.
 - **A machine that is WAITING has to keep talking.** Inputs go out once, when a new local frame
   is sampled, and the redundancy in a record rides on the *next* record. A stalled machine samples
   nothing, so when both peers are stalled nobody transmits and a burst of loss is permanent: with a
@@ -366,7 +392,7 @@ cmake -S <repo> -B <repo>/build_vs22 -G "Visual Studio 17 2022" -A x64
 cmake --build <repo>/build_vs22 --config Release --target ALL_BUILD -j 16
 ```
 
-Output: `build_vs22\Release\m2hle.exe`. No automated tests — validation is interactive through the GUI. `--headless --mcp --rom <zip> --run` runs the emulator and its bridge with no window, GPU or audio device; the graders launch it that way (`$M2_WINDOW=1` shows the window). The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
+Output: `build_vs22\Release\m2hle.exe`. The unit tests in `tests/` build alongside it (`M2HLE_BUILD_TESTS`, on by default) and run under `ctest` or `run_tests.ps1`; CI (`.github/workflows/canary.yml`) runs the self-contained ones — `mem_test`, `i960_test`, `cop_test`, `m68k_test`, `emu_test`, `net_test` — since `rom_test`, `boot_test`, `geo_test` and `input_test` load a ROM from a dev-machine path. `cop_replay` and `snd_replay` are built but are not ctests: they replay MAME captures. Everything beyond that is graded by `tools/` or checked interactively. `--headless --mcp --rom <zip> --run` runs the emulator and its bridge with no window, GPU or audio device; the graders launch it that way (`$M2_WINDOW=1` shows the window). The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
 
 **The handheld build** (`-DM2HLE_FRONTEND=sdl3`) is the same board with a fullscreen SDL3/GLES 3 host and no ImGui — it runs on the Anbernic RG ARC-S (RK3566, ROCKNIX) at 58-60 game fps. CI cross-compiles it on every push to master and attaches `m2hle-rocknix-arm64.zip` to the `canary` release; [packaging/rocknix/](packaging/rocknix/) holds the launcher EmulationStation calls, the installer, the toolchain file and the notes. Two things there are load-bearing: the container is **debian:trixie**, the one distribution with `libsdl3-dev` for arm64 and ROCKNIX's own glibc 2.41, so the binary carries no libraries of its own; and `CMAKE_TOOLCHAIN_FILE` must be **absolute**, since a relative one is looked for from the build directory and CMake then quietly configures for the host.
 
@@ -376,9 +402,9 @@ Output: `build_vs22\Release\m2hle.exe`. No automated tests — validation is int
 
 ## Conventions
 
-- All modules except `demo.c` and `miniz.c` are **header-only `.h` files**. This is intentional — do not split into `.c`/`.h` pairs.
+- All modules except the entry points (`main.c`, `main_sdl.c`, `main_web.c`), the sokol implementation units (`sokol_*impl.c`) and the vendored `miniz.c` are **header-only `.h` files**. This is intentional — do not split into `.c`/`.h` pairs.
   - The one deliberate exception is `src/ui/mem_edit.cpp`, the single C++ translation unit: `vendor/imgui_club`'s `MemoryEditor` is a C++ struct against the ImGui C++ API, and C11 sources cannot include it. It hands out the C handle declared in `mem_edit.h`; keep C++ from spreading past that file.
 - Default new code to the **board layer**; only move to a `game_profile_t` quirk when there's positive evidence of game-specific behaviour.
 - Memory addresses and sizes use `uint32_t`. Sign-extension is handled per-instruction.
-- Platform threading is abstracted in `emu_thread.h`: `emu_lock()` / `emu_unlock()` wrap `CRITICAL_SECTION` on Windows and `pthread_mutex_t` on POSIX.
-- Logging: `log_msg(severity, fmt, ...)` from `log.h` — `LOG_INFO`, `LOG_WARN`, `LOG_ERROR`. **Log unknown COP commands and unhandled MMIO at WARN** so new-game support work surfaces them automatically.
+- Platform threading is abstracted in `thread_mutex.h` (pulled in by `emu_thread.h`): `emu_mutex_lock()` / `emu_mutex_unlock()` wrap `CRITICAL_SECTION` on Windows and `pthread_mutex_t` on POSIX.
+- Logging: `log_msg(severity, fmt, ...)` from `log.h` (levels `LOG_LVL_*`), or the `LOG_INFO` / `LOG_WARN` / `LOG_ERROR` macros that wrap it. **Log unknown COP commands and unhandled MMIO at WARN** so new-game support work surfaces them automatically.

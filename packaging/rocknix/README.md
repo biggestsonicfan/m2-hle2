@@ -40,7 +40,7 @@ Per game, through ES's options screen; `start_m2hle.sh` turns them into flags.
 | Feature | Values | Flag |
 |---|---|---|
 | render fps | 30 (cooler) / 45 / 60 | `--render-fps` — the game always runs at 60, this is how often a frame is drawn |
-| render scale | 1x (496x384) / 2x | `--render-scale` |
+| render scale | 1x (496x384) / 2x (992x768) | `--render-scale` |
 | screen size | fit screen / 1x | `--display-scale 1` shows the board's pixels one for one, centred |
 | status overlay | on / off | `--osd` — fps, temperature, clock, battery, top right |
 | audio | on / off (cooler) | `--sound` — the 68000 + SCSP sound board, in lockstep with the emu thread |
@@ -64,5 +64,5 @@ The same recipe CI runs, in a container:
 
 Debian trixie because it is the one distribution with `libsdl3-dev` for arm64
 and a glibc (2.41) that matches ROCKNIX's, so the binary links against the
-device's own `libSDL3.so.0`, `libGLESv2.so.2` and `libc.so.6` and carries none
-of them. Building against an older glibc would also work; a newer one would not.
+device's own `libSDL3.so.0`, `libGLESv2.so.2`, `libc.so.6` and `libm.so.6` and
+carries none of them (CI fails the build if it asks for any other library). Building against an older glibc would also work; a newer one would not.

@@ -10,7 +10,7 @@
  *     return address and leaked the stack.
  * Both have dedicated regression tests below.
  *
- * Build/run:  tests\build_m68k_test.ps1   (or see that script for the cl cmd)
+ * Build/run:  CMake target m68k_test (ctest -C Release -R m68k_test)
  */
 #include <stdio.h>
 #include <stdint.h>

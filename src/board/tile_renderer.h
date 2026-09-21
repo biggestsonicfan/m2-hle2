@@ -12,10 +12,9 @@
  *
  * Tilemap entry (16-bit, little-endian):
  *   bit 15     priority / enable
- *   bit 14     H-flip
- *   bits 13-7  palette bank (7-bit, 0–127 → 128 × 16-color palettes)
- *   bits 6-0   tile character index (7-bit)
- *   full tile index  = entry & 0x3FFF  (same as (pal_bank<<7)|char)
+ *   bits 14-7  palette bank (8-bit; bit 14 is a palette bit, not H-flip —
+ *              see tile_pixel below)
+ *   full tile index  = entry & 0x3FFF
  *   palette LUT idx  = pal_bank * 16 + color_idx  (stride=16, 32 bytes/bank)
  *
  * Pixel format invariants (per CLAUDE.md — do NOT re-derive):
