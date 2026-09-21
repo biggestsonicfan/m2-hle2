@@ -16,7 +16,8 @@
  * --pad-map  comma-separated button=action pairs overriding the defaults, e.g.
  *            "south=b1,east=b2,west=b3". Buttons: south east west north start
  *            back l1 r1 l3 r3 guide; actions: b1 b2 b3 b4 start coin service
- *            test none.
+ *            test none, or a combo that holds several at once (a "macro"),
+ *            e.g. "north=b1+b2,l3=b1+b2+b3".
  * --shot     save a PNG of the first rendered frame at or after game frame N.
  * --exit-after  quit after N game frames (for scripted checks).
  * --stats    print frame rates, per-stage host time and temperatures every 5 s.
@@ -134,32 +135,32 @@ static struct {
 /* ---- Gamepad ------------------------------------------------------------- */
 
 /* Button → action. Directions always come from the d-pad and the left stick. */
-typedef struct { const char *name; SDL_GamepadButton button; int action; } pad_bind_t;
+typedef struct { const char *name; SDL_GamepadButton button; uint32_t acts; } pad_bind_t;
 
+/* acts is one bit per GAME_INPUT_* action; more than one is a combo. */
+#define ACT(a) (1u << (a))
 static pad_bind_t g_pad_binds[] = {
-    { "south", SDL_GAMEPAD_BUTTON_SOUTH,          GAME_INPUT_P1_B1    },
-    { "east",  SDL_GAMEPAD_BUTTON_EAST,           GAME_INPUT_P1_B2    },
-    { "west",  SDL_GAMEPAD_BUTTON_WEST,           GAME_INPUT_P1_B3    },
-    { "north", SDL_GAMEPAD_BUTTON_NORTH,          GAME_INPUT_P1_B4    },
-    { "start", SDL_GAMEPAD_BUTTON_START,          GAME_INPUT_P1_START },
-    { "back",  SDL_GAMEPAD_BUTTON_BACK,           GAME_INPUT_P1_COIN  },
-    { "l1",    SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,  -1 },
-    { "r1",    SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, -1 },
-    { "l3",    SDL_GAMEPAD_BUTTON_LEFT_STICK,     -1 },
-    { "r3",    SDL_GAMEPAD_BUTTON_RIGHT_STICK,    -1 },
-    { "guide", SDL_GAMEPAD_BUTTON_GUIDE,          -1 },
+    { "south", SDL_GAMEPAD_BUTTON_SOUTH,          ACT(GAME_INPUT_P1_B1)    },
+    { "east",  SDL_GAMEPAD_BUTTON_EAST,           ACT(GAME_INPUT_P1_B2)    },
+    { "west",  SDL_GAMEPAD_BUTTON_WEST,           ACT(GAME_INPUT_P1_B3)    },
+    { "north", SDL_GAMEPAD_BUTTON_NORTH,          ACT(GAME_INPUT_P1_B4)    },
+    { "start", SDL_GAMEPAD_BUTTON_START,          ACT(GAME_INPUT_P1_START) },
+    { "back",  SDL_GAMEPAD_BUTTON_BACK,           ACT(GAME_INPUT_P1_COIN)  },
+    { "l1",    SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,  0 },
+    { "r1",    SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0 },
+    { "l3",    SDL_GAMEPAD_BUTTON_LEFT_STICK,     0 },
+    { "r3",    SDL_GAMEPAD_BUTTON_RIGHT_STICK,    0 },
+    { "guide", SDL_GAMEPAD_BUTTON_GUIDE,          0 },
 };
 #define PAD_BIND_COUNT (int)(sizeof g_pad_binds / sizeof g_pad_binds[0])
 
-static int action_by_name(const char *s) {
-    static const struct { const char *name; int action; } names[] = {
-        { "b1", GAME_INPUT_P1_B1 }, { "b2", GAME_INPUT_P1_B2 }, { "b3", GAME_INPUT_P1_B3 },
-        { "b4", GAME_INPUT_P1_B4 }, { "start", GAME_INPUT_P1_START }, { "coin", GAME_INPUT_P1_COIN },
-        { "service", GAME_INPUT_SERVICE }, { "test", GAME_INPUT_TEST }, { "none", -1 },
-    };
-    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
-        if (!strcmp(s, names[i].name)) return names[i].action;
-    return -2;
+/* An action, or a combo of player-1 actions ("b1+b2"); false if neither. */
+static bool actions_by_name(const char *s, uint32_t *acts) {
+    if (!strcmp(s, "none"))    { *acts = 0; return true; }
+    if (!strcmp(s, "service")) { *acts = ACT(GAME_INPUT_SERVICE); return true; }
+    if (!strcmp(s, "test"))    { *acts = ACT(GAME_INPUT_TEST); return true; }
+    *acts = input_combo_parse(s);
+    return *acts && !(*acts >> GAME_INPUT_P2_UP);   /* the pad plays player 1 */
 }
 
 static bool apply_pad_map(const char *list) {
@@ -169,14 +170,15 @@ static bool apply_pad_map(const char *list) {
         char *eq = strchr(tok, '=');
         if (!eq) { fprintf(stderr, "--pad-map: '%s' is not button=action\n", tok); return false; }
         *eq = '\0';
-        int act = action_by_name(eq + 1);
+        uint32_t acts;
+        bool ok = actions_by_name(eq + 1, &acts);
         int b;
         for (b = 0; b < PAD_BIND_COUNT && strcmp(g_pad_binds[b].name, tok); b++) {}
-        if (b == PAD_BIND_COUNT || act == -2) {
+        if (b == PAD_BIND_COUNT || !ok) {
             fprintf(stderr, "--pad-map: unknown button or action in '%s=%s'\n", tok, eq + 1);
             return false;
         }
-        g_pad_binds[b].action = act;
+        g_pad_binds[b].acts = acts;
     }
     return true;
 }
@@ -199,9 +201,11 @@ static void pad_refresh(void) {
         now[GAME_INPUT_P1_DOWN]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)  || ay >  dead;
         now[GAME_INPUT_P1_LEFT]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)  || ax < -dead;
         now[GAME_INPUT_P1_RIGHT] |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || ax >  dead;
-        for (int b = 0; b < PAD_BIND_COUNT; b++)
-            if (g_pad_binds[b].action >= 0 && SDL_GetGamepadButton(pad, g_pad_binds[b].button))
-                now[g_pad_binds[b].action] = true;
+        for (int b = 0; b < PAD_BIND_COUNT; b++) {
+            if (!g_pad_binds[b].acts || !SDL_GetGamepadButton(pad, g_pad_binds[b].button)) continue;
+            for (int a = 0; a < GAME_INPUT_COUNT; a++)
+                if (g_pad_binds[b].acts & ACT(a)) now[a] = true;
+        }
     }
     SDL_free(ids);
     for (int a = 0; a < GAME_INPUT_COUNT; a++) {

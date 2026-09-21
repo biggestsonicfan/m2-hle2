@@ -1295,6 +1295,24 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             /* A settings file other than the per-user one every copy shares
              * (netplay.h, "Stored settings"): a second account on one machine. */
             netplay_set_config_path(argv[++i]);
+        } else if (strcmp(argv[i], "--macro") == 0 && i + 1 < argc) {
+            /* One key that presses several buttons at once: --macro a=b1+b2,
+             * --macro kp1=p2:b1+b2+b3. Repeatable; see input_combo_parse. */
+            char spec[64];
+            snprintf(spec, sizeof spec, "%s", argv[++i]);
+            char *eq = strchr(spec, '=');
+            int kc = -1;
+            uint32_t acts = 0;
+            if (eq) { *eq = '\0'; kc = input_keycode_by_name(spec); acts = input_combo_parse(eq + 1); }
+            if (kc < 0 || !acts || !input_combo_bind(kc, acts))
+                LOG_WARN("--macro wants KEY=COMBO (e.g. a=b1+b2, kp1=p2:b1+b2+b3); ignoring '%s'", argv[i]);
+        } else if (strcmp(argv[i], "--macros") == 0) {
+            /* The usual fighting-game set on the keys beside Z X C V: A = B1+B2,
+             * S = B1+B3, D = B2+B3, F = B1+B2+B3 (in STF, P+K, P+B, K+B, P+K+B). */
+            input_combo_bind(SAPP_KEYCODE_A, input_combo_parse("b1+b2"));
+            input_combo_bind(SAPP_KEYCODE_S, input_combo_parse("b1+b3"));
+            input_combo_bind(SAPP_KEYCODE_D, input_combo_parse("b2+b3"));
+            input_combo_bind(SAPP_KEYCODE_F, input_combo_parse("b1+b2+b3"));
         } else if (strcmp(argv[i], "--net-twitch") == 0) {
             /* Sign in through Twitch instead of --net-user/--net-pass. The code
              * and the twitch.tv address go to the log, and a browser is opened

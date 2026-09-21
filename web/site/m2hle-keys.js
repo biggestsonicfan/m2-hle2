@@ -27,8 +27,8 @@ const m2hleKeys = (() => {
   const STORE = 'm2hle.keys';
   const MAX_BINDS = 3;
 
-  /* The rows of the panel; `act` is the player-1 GAME_INPUT_* index, player 2's
-   * is 10 further on (src/core/game_profile.h, as in m2hle-pad.js). */
+  /* The rows of the panel; `act` is the player-1 GAME_INPUT_* index (`acts` for a
+   * macro), player 2's is 10 further on (src/core/game_profile.h, as in m2hle-pad.js). */
   const ACTIONS = [
     { id: 'up',    label: 'Up',       act: 0 },
     { id: 'down',  label: 'Down',     act: 1 },
@@ -40,15 +40,24 @@ const m2hleKeys = (() => {
     { id: 'b4',    label: 'Button 4', act: 7 },
     { id: 'start', label: 'Start',    act: 8 },
     { id: 'coin',  label: 'Coin',     act: 9 },
+    /* Macros: one binding that holds several buttons at once, as the Gems
+     * Collection and HD ports offer. Unbound until the player binds them. */
+    { id: 'pk',    label: 'P + K',     acts: [4, 5],    macro: true },
+    { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
+    { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
+    { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
   ];
+  for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   const P2_OFFSET = 10;
 
   /* The desktop build's keys (src/board/input.h), which are MAME's. */
   const DEFAULTS = {
     p1: { up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'],
-          b1: ['KeyZ'], b2: ['KeyX'], b3: ['KeyC'], b4: ['KeyV'], start: ['Digit1'], coin: ['Digit5'] },
+          b1: ['KeyZ'], b2: ['KeyX'], b3: ['KeyC'], b4: ['KeyV'], start: ['Digit1'], coin: ['Digit5'],
+          pk: [], pb: [], kb: [], pkb: [] },
     p2: { up: ['KeyI'], down: ['KeyK'], left: ['KeyJ'], right: ['KeyL'],
-          b1: ['Delete'], b2: ['End'], b3: ['PageDown'], b4: ['Home'], start: ['Digit2'], coin: ['Digit6'] },
+          b1: ['Delete'], b2: ['End'], b3: ['PageDown'], b4: ['Home'], start: ['Digit2'], coin: ['Digit6'],
+          pk: [], pb: [], kb: [], pkb: [] },
   };
 
   const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -98,7 +107,7 @@ const m2hleKeys = (() => {
     let m = 0;
     for (const p of ['p1', 'p2']) {
       const shift = p === 'p2' ? P2_OFFSET : 0;
-      for (const a of ACTIONS) if (binds[p][a.id].includes(code)) m |= 1 << (a.act + shift);
+      for (const a of ACTIONS) if (binds[p][a.id].includes(code)) m |= a.mask << shift;
     }
     return m >>> 0;
   }
@@ -178,6 +187,12 @@ const m2hleKeys = (() => {
     }
     rows.textContent = '';
     for (const a of ACTIONS) {
+      if (a.macro && a === ACTIONS.find((x) => x.macro)) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = 'Macros: one press holds several buttons';
+        rows.appendChild(sub);
+      }
       const tr = document.createElement('li');
       tr.className = 'pad-row';
       tr.id = 'key-row-' + a.id;

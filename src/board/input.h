@@ -25,6 +25,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "sokol_app.h"
 
@@ -51,7 +53,29 @@ typedef struct {
 
 static input_state_t g_input = {0};
 
-static inline void input_reset(void) { g_input.held = 0; g_input.net_held = 0; }
+/* How many host sources hold each action: a key, a pad button, and a combo
+ * (below) can all hold Punch at once, and letting go of one must not release
+ * the others. Only the host's input thread touches this. */
+static uint8_t g_input_holds[GAME_INPUT_COUNT];
+
+/* Combos ("macros", as the Gems Collection and HD ports call them): one host key
+ * that holds several actions at once, e.g. B1+B2. Host-side only -- the board
+ * sees the same held mask it would if the buttons were pressed together, so
+ * netplay transmits it like any other press. `key` is the frontend's own key
+ * code (sokol's in main.c); main_sdl.c binds pad buttons its own way and the web
+ * page composes combos itself (web/site/m2hle-keys.js, m2hle-pad.js). */
+#define INPUT_COMBO_MAX 16
+typedef struct { int key; uint32_t acts; } input_combo_t;   /* acts: 1 << GAME_INPUT_* */
+static input_combo_t g_input_combos[INPUT_COMBO_MAX];
+static int           g_input_combo_count;
+
+/* Let go of everything the host holds; the netplay override is left alone. */
+static inline void input_release_all(void) {
+    g_input.held = 0;
+    for (int a = 0; a < GAME_INPUT_COUNT; a++) g_input_holds[a] = 0;
+}
+
+static inline void input_reset(void) { input_release_all(); g_input.net_held = 0; }
 
 /* Translate a sokol key code into the abstract action enum, or -1. */
 static inline int input_keycode_to_action(int kc) {
@@ -85,22 +109,115 @@ static inline int input_keycode_to_action(int kc) {
     }
 }
 
+/* A sokol key code by name, for --macro: a-z, 0-9, f1-f12, kp0-kp9, space,
+ * tab, insert, pageup, pagedown, home, end, delete. -1 if unknown. */
+static inline int input_keycode_by_name(const char *s) {
+    char n[16];
+    size_t len = 0;
+    for (; s[len] && len < sizeof n - 1; len++) n[len] = (char)(s[len] | 0x20);
+    n[len] = '\0';
+    if (s[len]) return -1;
+    if (len == 1 && n[0] >= 'a' && n[0] <= 'z') return SAPP_KEYCODE_A + (n[0] - 'a');
+    if (len == 1 && n[0] >= '0' && n[0] <= '9') return SAPP_KEYCODE_0 + (n[0] - '0');
+    if (n[0] == 'f' && len >= 2 && len <= 3) {
+        int f = atoi(n + 1);
+        if (f >= 1 && f <= 12) return SAPP_KEYCODE_F1 + (f - 1);
+    }
+    if (len == 3 && n[0] == 'k' && n[1] == 'p' && n[2] >= '0' && n[2] <= '9') return SAPP_KEYCODE_KP_0 + (n[2] - '0');
+    static const struct { const char *name; int kc; } named[] = {
+        { "space", SAPP_KEYCODE_SPACE }, { "tab", SAPP_KEYCODE_TAB }, { "insert", SAPP_KEYCODE_INSERT },
+        { "pageup", SAPP_KEYCODE_PAGE_UP }, { "pagedown", SAPP_KEYCODE_PAGE_DOWN }, { "home", SAPP_KEYCODE_HOME },
+        { "end", SAPP_KEYCODE_END }, { "delete", SAPP_KEYCODE_DELETE },
+    };
+    for (size_t i = 0; i < sizeof named / sizeof named[0]; i++)
+        if (!strcmp(n, named[i].name)) return named[i].kc;
+    return -1;
+}
+
 /* Press / release an abstract action (GAME_INPUT_*) — the entry point for any
  * host device: the keyboard below, a gamepad in main_sdl.c. */
 static inline void input_action_down(int act) {
     if (act < 0 || act >= GAME_INPUT_COUNT || !g_active_profile) return;
     uint32_t bit = g_active_profile->input.bits[act];
+    if (g_input_holds[act] < 255) g_input_holds[act]++;
     if (bit) g_input.held |= bit;
 }
 
+/* Released when the last source holding it lets go. An up with no down counted
+ * (a key pressed before the window had focus, a bit set over MCP) still clears. */
 static inline void input_action_up(int act) {
     if (act < 0 || act >= GAME_INPUT_COUNT || !g_active_profile) return;
     uint32_t bit = g_active_profile->input.bits[act];
+    if (g_input_holds[act] > 0 && --g_input_holds[act] > 0) return;
     if (bit) g_input.held &= ~bit;
 }
 
-static inline void input_key_down(int kc) { input_action_down(input_keycode_to_action(kc)); }
-static inline void input_key_up(int kc)   { input_action_up(input_keycode_to_action(kc)); }
+/* ---- Combos ---------------------------------------------------------------- */
+
+/* Parse a combo: '+'-separated b1 b2 b3 b4 up down left right start coin,
+ * optionally after "p2:" for player 2 -- "b1+b2", "p2:b1+b2+b3". Returns the
+ * action mask, or 0 if the text is not one. */
+static inline uint32_t input_combo_parse(const char *s) {
+    static const char *const names[] = { "up", "down", "left", "right", "b1", "b2", "b3", "b4", "start", "coin" };
+    const int per_player = GAME_INPUT_P2_UP - GAME_INPUT_P1_UP;
+    int base = GAME_INPUT_P1_UP;
+    if ((s[0] == 'p' || s[0] == 'P') && (s[1] == '1' || s[1] == '2') && s[2] == ':') {
+        if (s[1] == '2') base = GAME_INPUT_P2_UP;
+        s += 3;
+    }
+    uint32_t acts = 0;
+    while (*s) {
+        size_t n = 0;
+        while (s[n] && s[n] != '+') n++;
+        int found = -1;
+        for (int i = 0; i < per_player; i++) {
+            size_t len = 0;
+            while (names[i][len]) len++;
+            bool eq = len == n;
+            for (size_t c = 0; eq && c < n; c++) eq = (s[c] | 0x20) == names[i][c];
+            if (eq) { found = i; break; }
+        }
+        if (found < 0) return 0;
+        acts |= 1u << (base + found);
+        s += n;
+        if (*s == '+') s++;
+    }
+    return acts;
+}
+
+/* Bind `key` to a combo; binding the same key again replaces it. */
+static inline bool input_combo_bind(int key, uint32_t acts) {
+    for (int i = 0; i < g_input_combo_count; i++)
+        if (g_input_combos[i].key == key) { g_input_combos[i].acts = acts; return true; }
+    if (g_input_combo_count >= INPUT_COMBO_MAX) return false;
+    g_input_combos[g_input_combo_count++] = (input_combo_t){ key, acts };
+    return true;
+}
+
+static inline void input_actions_down(uint32_t acts) {
+    for (int a = 0; a < GAME_INPUT_COUNT; a++) if (acts & (1u << a)) input_action_down(a);
+}
+
+static inline void input_actions_up(uint32_t acts) {
+    for (int a = 0; a < GAME_INPUT_COUNT; a++) if (acts & (1u << a)) input_action_up(a);
+}
+
+/* The combo `key` is bound to, or 0. */
+static inline uint32_t input_combo_for_key(int key) {
+    for (int i = 0; i < g_input_combo_count; i++)
+        if (g_input_combos[i].key == key) return g_input_combos[i].acts;
+    return 0;
+}
+
+static inline void input_key_down(int kc) {
+    input_action_down(input_keycode_to_action(kc));
+    input_actions_down(input_combo_for_key(kc));
+}
+
+static inline void input_key_up(int kc) {
+    input_action_up(input_keycode_to_action(kc));
+    input_actions_up(input_combo_for_key(kc));
+}
 
 /* ---- I/O port serving ---------------------------------------------------- */
 

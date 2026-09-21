@@ -80,7 +80,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | 3D pipeline | Index-array polygon decoder (J = 1.0 vs. reference meshes), textures, flat + luma shading, backface cull, shadows |
 | MC68000 sound CPU | Full opcode core with Motorola cycle timing, unit tests |
 | SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
-| Input | Interrupt-driven, through the real 315-5649 I/O ports |
+| Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
 | Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
 | Netplay | RPCN matchmaking + direct peer-to-peer delay lockstep (`--netplay`) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |

@@ -44,9 +44,11 @@ Per game, through ES's options screen; `start_m2hle.sh` turns them into flags.
 | screen size | fit screen / 1x | `--display-scale 1` shows the board's pixels one for one, centred |
 | status overlay | on / off | `--osd` — fps, temperature, clock, battery, top right |
 | audio | on / off (cooler) | `--sound` — the 68000 + SCSP sound board, in lockstep with the emu thread |
+| button macros | off / on | the top row presses combos: X = Punch+Kick, Y = Kick+Barrier, Z = all three |
 
 Buttons are fixed in the launcher: the RG ARC-S's A/B/C become Punch / Kick /
-Barrier (`--pad-map south=b1,east=b2,r3=b3,west=none`). `--max-temp 90` quits
+Barrier (`--pad-map south=b1,east=b2,r3=b3,west=none`). `--pad-map` also takes
+combos (`north=b1+b2`), which is what "button macros" uses. `--max-temp 90` quits
 before the RK3566's ~95 °C trip powers the unit off.
 
 ## Building it yourself

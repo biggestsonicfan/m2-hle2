@@ -48,6 +48,37 @@ int main(void) {
           "P1 COIN pulls IN0 (IO+0x02) bit0 low");
     g_input.held = 0;
 
+    /* ---- (A2) combos ("macros") and counted presses ---- */
+    const uint32_t *bits = sfight_profile.input.bits;
+    CHECK(input_combo_parse("b1+b2") == ((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P1_B2)) &&
+          input_combo_parse("p2:B1+b3") == ((1u << GAME_INPUT_P2_B1) | (1u << GAME_INPUT_P2_B3)) &&
+          input_combo_parse("b1+b5") == 0 && input_combo_parse("") == 0,
+          "combo text parses to action masks, and junk to 0");
+    CHECK(input_keycode_by_name("A") == SAPP_KEYCODE_A && input_keycode_by_name("kp1") == SAPP_KEYCODE_KP_1 &&
+          input_keycode_by_name("f12") == SAPP_KEYCODE_F12 && input_keycode_by_name("pageup") == SAPP_KEYCODE_PAGE_UP &&
+          input_keycode_by_name("nope") == -1,
+          "--macro key names resolve to sokol key codes");
+
+    input_reset();
+    input_combo_bind(SAPP_KEYCODE_A, input_combo_parse("b1+b2"));
+    input_key_down(SAPP_KEYCODE_A);
+    CHECK((g_input.held & (bits[GAME_INPUT_P1_B1] | bits[GAME_INPUT_P1_B2])) ==
+          (bits[GAME_INPUT_P1_B1] | bits[GAME_INPUT_P1_B2]),
+          "a combo key holds both of its buttons");
+    input_key_down(SAPP_KEYCODE_Z);   /* B1 on its own key as well */
+    input_key_up(SAPP_KEYCODE_A);
+    CHECK((g_input.held & bits[GAME_INPUT_P1_B1]) && !(g_input.held & bits[GAME_INPUT_P1_B2]),
+          "letting go of the combo keeps B1, which Z still holds");
+    input_key_up(SAPP_KEYCODE_Z);
+    CHECK(g_input.held == 0, "letting go of Z releases B1");
+    input_key_down(SAPP_KEYCODE_A);
+    input_release_all();
+    input_key_down(SAPP_KEYCODE_Z);
+    input_key_up(SAPP_KEYCODE_Z);
+    CHECK(g_input.held == 0, "a release-all forgets the counts, so a later press and release clears");
+    input_reset();
+    g_input_combo_count = 0;
+
     /* ---- (B) end-to-end through the game's read_sw interrupt ---- */
     static romset_t rs; static memory_bus_t bus; static i960_cpu_t cpu; static emu_thread_ctx_t ctx;
     if (sfight_load(&rs, ROMDIR "sfight.zip", ROMDIR "schamp.zip") != 0) {
