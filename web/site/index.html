@@ -150,19 +150,59 @@
   </section>
 </aside>
 
-<!-- Controller mapping (m2hle-pad.js). Kept in this browser's localStorage. -->
+<!-- Controller mapping (m2hle-pad.js) and the touch buttons (m2hle-touch.js). Kept in
+     this browser's localStorage. On a touch screen the touch section is moved first. -->
 <aside id="controls" class="online controls" hidden aria-label="Controls">
   <div class="online-head">
     <h2>Controls</h2>
     <button id="pad-close" class="tool" aria-label="Close">Close</button>
   </div>
+  <section id="touch-section" class="ctl-section">
+    <h3>Touch buttons</h3>
+    <label class="ctl-select">Show them
+      <select id="touch-show" class="tool">
+        <option value="auto">On touch screens</option>
+        <option value="on">Always</option>
+        <option value="off">Never</option>
+      </select>
+    </label>
+    <label id="touch-vibrate-row" class="pad-check" hidden><input id="touch-vibrate" type="checkbox"> Vibrate on each press</label>
+    <p class="np-row"><button id="touch-customize" class="tool primary">Change size, look and placement</button></p>
+  </section>
+  <section id="pad-section" class="ctl-section">
+  <h3>Controller</h3>
   <p id="pad-status" class="status" role="status"></p>
   <p class="fine left">Pick <strong>Add</strong>, then press the button or push the stick you want. Click a button's name to remove it. Rows light up while you hold them.</p>
   <ul id="pad-rows" class="pad-rows"></ul>
   <label class="pad-check"><input id="pad-p2" type="checkbox" checked> A second controller plays player 2</label>
   <p class="np-row"><button id="pad-reset" class="tool">Reset to defaults</button></p>
   <p class="fine left">These settings are remembered in this browser and apply to every controller.</p>
+  </section>
 </aside>
+
+<!-- The touch buttons (m2hle-touch.js): laid over the game canvas, one layout for
+     holding the phone upright and one for holding it sideways. -->
+<div id="touch" class="touch" hidden aria-hidden="true"></div>
+<div id="touch-edit" class="touch-edit" hidden role="dialog" aria-label="Customize touch buttons">
+  <p class="te-hint">Drag a button to move it. Tap one to size or hide it. <span id="te-orient"></span></p>
+  <div class="te-row">
+    <span class="te-what">All buttons</span>
+    <label>Size <input id="te-size" type="range" min="50" max="200" step="5"></label>
+    <label>Opacity <input id="te-opacity" type="range" min="10" max="100" step="5"></label>
+    <label class="te-check"><input id="te-outline" type="checkbox"> Outline</label>
+  </div>
+  <div class="te-row">
+    <span id="te-sel" class="te-what">Tap a button</span>
+    <label>Size <input id="te-one" type="range" min="50" max="200" step="5" disabled></label>
+    <button id="te-hide" class="tool" disabled>Hide</button>
+  </div>
+  <div class="te-row">
+    <button id="te-move" class="tool">Move this bar</button>
+    <button id="te-reset" class="tool">Reset this layout</button>
+    <span class="spacer"></span>
+    <button id="te-done" class="tool primary">Done</button>
+  </div>
+</div>
 
 <!-- The tools drawer: a lag check and the emulator's log (m2hle-tools.js). It sits
      in the page's column, so opening it makes the game smaller, not covered. -->
@@ -216,6 +256,7 @@
   </div>
   <div class="bar-tools">
     <button id="btn-online" class="tool online-btn" aria-expanded="false" aria-controls="online" hidden><span id="btn-online-label">Play online</span></button>
+    <button id="btn-fullscreen" class="tool" hidden>Fullscreen</button>
     <button id="btn-controls" class="tool" aria-expanded="false" aria-controls="controls">Controls</button>
     <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>
     <button id="btn-console" class="tool" aria-expanded="false" aria-controls="drawer">Console <span id="console-badge" class="badge" hidden></span></button>
@@ -231,6 +272,7 @@
 <script src="m2hle-objview.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-netplay.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-pad.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-touch.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-page.js?v=@M2HLE_VERSION@"></script>
 <script async src="m2hle.js?v=@M2HLE_VERSION@"></script>
 </body>

@@ -6,7 +6,7 @@
  *        [--seconds 30] [--shot out.png] [--shot-at 10,20] [--browser path/to/chrome-or-edge]
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
  *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console]
- *        [--cpu-throttle N] [--eval JS]
+ *        [--cpu-throttle N] [--eval JS] [--mobile] [--taps "coin@12,b1@20:300,dpad-right@22:500"]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -41,6 +41,15 @@
  * throttling), which is the only way to see what the lag check says about a slow
  * machine from a fast one. --eval runs a line of JS in the page before --diagnose.
  *
+ * --mobile makes the page a touch phone of --size (DevTools' device emulation:
+ * a mobile viewport, touch events, a coarse pointer), which is what shows the
+ * touch buttons (web/site/m2hle-touch.js). --taps then presses them by name at
+ * given seconds, with real touch events on the page: "b1@20:300" holds Punch
+ * for 300 ms at t=20 s (120 ms if no hold is given). The names are the controls'
+ * ids -- dpad, b1..b4, start, coin -- and dpad-up/-down/-left/-right/-up-left/...
+ * press the d-pad two thirds of the way out that way. Each tap prints the mask
+ * the touch layer held, so a tap that missed says so.
+ *
  * No dependencies: Node 22+ has WebSocket and fetch built in.
  */
 import { spawn } from 'node:child_process';
@@ -65,6 +74,13 @@ let sawExpected = false;
 const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((k) => {
   const [key, at] = k.split('@');
   return { key, at: Number(at), done: false };
+});
+
+const mobile = args.includes('--mobile');
+const taps = (opt('--taps', '') || '').split(',').filter(Boolean).map((t) => {
+  const m = /^([a-z0-9-]+)@([\d.]+)(?::(\d+))?$/.exec(t);
+  if (!m) { console.error(`--taps: cannot read "${t}"`); process.exit(2); }
+  return { id: m[1], at: Number(m[2]), hold: Number(m[3] || 120), done: false };
 });
 
 const CANDIDATES = [
@@ -162,6 +178,10 @@ try {
 
   await send('Runtime.enable');
   await send('Page.enable');
+  if (mobile) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: true });
+    await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  }
   await send('Page.navigate', { url });
   const throttle = Number(opt('--cpu-throttle', '0'));
 
@@ -182,6 +202,25 @@ try {
     await sleep(120);
     await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
     console.log(`${stamp()}s  key ${key}`);
+  };
+
+  /* A touch on one of the page's touch buttons, where the page itself says it is. */
+  const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+  const tap = async (t) => {
+    const [id, ...dir] = t.id.split('-');
+    const at = await evaluate(`typeof m2hleTouch === 'object' ? m2hleTouch.where(${JSON.stringify(id)}) : null`);
+    if (!at) { failed = true; console.log(`${stamp()}s  tap ${t.id}: FAIL, that control is not on screen`); return; }
+    let dx = 0, dy = 0;
+    for (const d of dir) { if (!DIRS[d]) continue; dx += DIRS[d][0]; dy += DIRS[d][1]; }
+    const len = Math.hypot(dx, dy) || 1;
+    const point = { x: at.x + (dx / len) * at.r * 0.66, y: at.y + (dy / len) * at.r * 0.66, id: 1 };
+    await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+    await sleep(Math.min(60, t.hold));
+    const held = await evaluate('m2hleTouch.mask');
+    await sleep(Math.max(0, t.hold - 60));
+    await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    console.log(`${stamp()}s  tap ${t.id} at ${point.x.toFixed(0)},${point.y.toFixed(0)} for ${t.hold} ms: held mask 0x${(held >>> 0).toString(16)}`);
+    if (!held) failed = true;
   };
 
   let lastFrames = 0, frames = 0;
@@ -210,6 +249,7 @@ try {
       lastFrames = frames;
     }
     for (const k of keys) if (!k.done && s >= k.at) { k.done = true; await press(k.key); }
+    for (const t of taps) if (!t.done && s >= t.at) { t.done = true; await tap(t); }
     if (shot && shotAt.includes(s)) await screenshot(shot.replace(/\.png$/, `-${s}s.png`));
   }
   if (throttle > 1) { await send('Emulation.setCPUThrottlingRate', { rate: throttle }); console.log(`${stamp()}s  CPU throttled x${throttle}`); await sleep(1500); }
