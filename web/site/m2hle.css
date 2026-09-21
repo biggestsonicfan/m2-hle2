@@ -318,3 +318,36 @@ a.tool { display: inline-block; text-decoration: none; }
 .online-btn.live { border-color: #3c8f5a; background: #123322; }
 .online .error { text-align: left; }
 .online [hidden] { display: none !important; }
+
+/* The GitHub link in the bar, and the one on the start panel. */
+a.tool.github { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text); }
+.panel a { color: var(--accent); }
+
+/* ---- Controls (m2hle-pad.js): the same side panel as Play online ---- */
+.pad-rows { list-style: none; margin: 0.75rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.pad-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: #0c101a;
+  transition: background 0.06s, border-color 0.06s;
+}
+.pad-row.pad-held { border-color: var(--accent); background: rgba(77, 163, 255, 0.14); }
+.pad-name { flex: 0 0 5.5rem; font-weight: 600; }
+.pad-chips { flex: 1; display: flex; flex-wrap: wrap; gap: 0.25rem; font-size: 0.8125rem; }
+.pad-chip {
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  background: #161c2b;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.pad-chip:hover { border-color: var(--bad); color: var(--bad); }
+.pad-add { flex: 0 0 auto; font-size: 0.8125rem; }
+.pad-add[aria-pressed="true"] { border-color: var(--accent); background: #17345c; }
+.pad-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; color: var(--dim); }

@@ -472,6 +472,8 @@ static void cleanup(void) {
     mem_shutdown(&state.bus);
 }
 
+static uint32_t g_web_pad;   /* the actions the page's gamepads hold: web_pad_set */
+
 static void event(const sapp_event *ev) {
     /* Inputs reach the game through the emulated I/O ports (input.h); under
      * netplay the board reads the composed mask instead, and this is what
@@ -479,7 +481,7 @@ static void event(const sapp_event *ev) {
     if (ev->type == SAPP_EVENTTYPE_KEY_DOWN && !ev->key_repeat) input_key_down((int)ev->key_code);
     if (ev->type == SAPP_EVENTTYPE_KEY_UP)                      input_key_up((int)ev->key_code);
     /* A tab that loses focus never sees the key-up: let go of everything. */
-    if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) input_reset();
+    if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) { input_reset(); g_web_pad = 0; }
 }
 
 sapp_desc sokol_main(int argc, char *argv[]) {
@@ -558,7 +560,24 @@ EMSCRIPTEN_KEEPALIVE int web_state(void) {
  * direction held at that moment would stay held. */
 /* Only the local keyboard's mask: under netplay the board reads the composed mask,
  * which belongs to the lockstep and is rebuilt from both players' words each frame. */
-EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { g_input.held = 0; }
+EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { g_input.held = 0; g_web_pad = 0; }
+
+/* The page's gamepads (web/site/m2hle-pad.js), as one bit per GAME_INPUT_*
+ * action, sent whole on every poll. Only the changes are pressed or released, so
+ * a pad and the keyboard holding the same direction do not let go of each
+ * other's press every frame -- the same rule as main_sdl.c's pad_refresh. When
+ * something clears g_input.held (focus lost, the drawer opened), g_web_pad is
+ * cleared with it, and whatever the pad still holds is pressed again on the
+ * next poll. */
+EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
+    uint32_t changed = actions ^ g_web_pad;
+    for (int a = 0; a < GAME_INPUT_COUNT; a++) {
+        if (!(changed & (1u << a))) continue;
+        if (actions & (1u << a)) input_action_down(a);
+        else                     input_action_up(a);
+    }
+    g_web_pad = actions;
+}
 
 /* Game frames since the last board reset. */
 EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {
