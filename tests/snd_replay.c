@@ -54,13 +54,16 @@ int main(int argc, char **argv) {
     if (!rec || fread(rec, 16, nrec, f) != nrec) { fprintf(stderr, "short read\n"); return 1; }
     fclose(f);
 
-    midi_t *midi = malloc(sizeof *midi * 4096);
+    /* One slot per record is always enough, and a fixed cap is not: a long
+     * capture silently loses every MIDI byte past it, which reads as the board
+     * going quiet rather than as a truncated input. */
+    midi_t *midi = malloc(sizeof *midi * (nrec ? nrec : 1));
     size_t nmidi = 0;
     uint64_t t_last = 0;
     for (size_t i = 0; i < nrec; i++) {
         uint32_t *r = rec + i * 4;
         if (r[2] > t_last) t_last = r[2];
-        if ((r[0] >> 24) == 1 && (r[0] & 0xFFFFFF) == 0x9C0000 && nmidi < 4096) {
+        if ((r[0] >> 24) == 1 && (r[0] & 0xFFFFFF) == 0x9C0000) {
             midi[nmidi].t = r[2];
             midi[nmidi].b = (uint8_t)r[1];
             nmidi++;
