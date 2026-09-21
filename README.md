@@ -24,7 +24,7 @@ vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club` is enough to build.
 That is the default frontend, the ImGui debugger (D3D11 on Windows, GL core on Linux, Metal on
 macOS). `-DM2HLE_FRONTEND=sdl3` builds a fullscreen SDL3 / GLES 3 host with no ImGui for
 handhelds (see [packaging/rocknix/](packaging/rocknix/)), and `-DM2HLE_FRONTEND=web` the
-Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, gamepads and
+Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, remappable keys, gamepads and
 touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)); both need
 only `vendor/sokol` and `vendor/miniz`.
 

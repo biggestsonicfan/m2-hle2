@@ -3,8 +3,8 @@
  * is the plan this follows.
  *
  * One ROM set (Sonic the Fighters), no ImGui, no debugger, no MCP bridge, no
- * file system. sokol_app owns the canvas, the WebGL2 context, the keyboard and
- * the frame callback; the page around the canvas (web/site/) owns
+ * file system. sokol_app owns the canvas, the WebGL2 context and the frame
+ * callback; the page around the canvas (web/site/) owns the keyboard and
  * everything a player reads or clicks, and reaches in through the functions
  * exported at the bottom of this file.
  *
@@ -473,14 +473,13 @@ static void cleanup(void) {
     mem_shutdown(&state.bus);
 }
 
-static uint32_t g_web_pad;   /* the actions the page's gamepads hold: web_pad_set */
+static uint32_t g_web_pad;   /* the actions the page holds (gamepads, touch buttons, keyboard): web_pad_set */
 
 static void event(const sapp_event *ev) {
-    /* Inputs reach the game through the emulated I/O ports (input.h); under
-     * netplay the board reads the composed mask instead, and this is what
-     * netplay_sample_local transmits. */
-    if (ev->type == SAPP_EVENTTYPE_KEY_DOWN && !ev->key_repeat) input_key_down((int)ev->key_code);
-    if (ev->type == SAPP_EVENTTYPE_KEY_UP)                      input_key_up((int)ev->key_code);
+    /* No keys here: the page reads the keyboard through the player's own
+     * bindings (web/site/m2hle-keys.js) and sends it with the gamepads and the
+     * touch buttons through web_pad_set. Mapping sokol's key codes as well would
+     * press the default keys on top of the remapped ones. */
     /* A tab that loses focus never sees the key-up: let go of everything. */
     if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) { input_reset(); g_web_pad = 0; }
 }
@@ -557,16 +556,16 @@ EMSCRIPTEN_KEEPALIVE int web_state(void) {
 }
 
 /* Let go of every held input. The page calls this when focus moves into its
- * tools drawer: from then on key-ups land there and never reach the game, and a
- * direction held at that moment would stay held. */
+ * tools drawer. Whatever the page still holds (a pad, a key whose key-up has not
+ * come yet) is pressed again by its next web_pad_set. */
 /* Only the local keyboard's mask: under netplay the board reads the composed mask,
  * which belongs to the lockstep and is rebuilt from both players' words each frame. */
 EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { g_input.held = 0; g_web_pad = 0; }
 
-/* The page's gamepads (web/site/m2hle-pad.js), as one bit per GAME_INPUT_*
- * action, sent whole on every poll. Only the changes are pressed or released, so
- * a pad and the keyboard holding the same direction do not let go of each
- * other's press every frame -- the same rule as main_sdl.c's pad_refresh. When
+/* The page's gamepads, touch buttons and keyboard (web/site/m2hle-pad.js,
+ * m2hle-touch.js, m2hle-keys.js), as one bit per GAME_INPUT_* action, sent whole
+ * on every poll and on every key or touch. Only the changes are pressed or
+ * released, so a scripted press (?script=) is not let go of every frame -- the same rule as main_sdl.c's pad_refresh. When
  * something clears g_input.held (focus lost, the drawer opened), g_web_pad is
  * cleared with it, and whatever the pad still holds is pressed again on the
  * next poll. */

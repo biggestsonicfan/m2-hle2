@@ -64,6 +64,7 @@ const m2hlePad = (() => {
   let listening = null;       /* {id, rest: {buttons, axes} per pad index} while capturing */
   let padMask = 0;            /* what the pads held at the last poll */
   let touchMask = 0;          /* what the touch buttons hold (m2hle-touch.js, setTouch) */
+  let keyMask = 0;            /* what the keyboard holds (m2hle-keys.js, setKeys) */
 
   function load() {
     try {
@@ -148,10 +149,17 @@ const m2hlePad = (() => {
     send();
   }
 
-  /* The touch buttons share this one channel to the emulator: web_pad_set takes the
-   * whole mask, so two callers would let go of each other's presses. */
+  /* The touch buttons and the keyboard share this one channel to the emulator:
+   * web_pad_set takes the whole mask, so two callers would let go of each other's
+   * presses. */
   function send() {
-    if (ready && !listening) Module._web_pad_set((padMask | touchMask) >>> 0);
+    if (ready && !listening) Module._web_pad_set((padMask | touchMask | keyMask) >>> 0);
+  }
+
+  /* A key goes out now rather than at the next poll, for the same reason. */
+  function setKeys(m) {
+    keyMask = m >>> 0;
+    send();
   }
 
   /* A touch press goes out now rather than at the next poll: a tap is short. */
@@ -325,5 +333,5 @@ const m2hlePad = (() => {
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { onReady, toggle, setTouch, get binds() { return clone(binds); } };
+  return { onReady, toggle, setTouch, setKeys, get binds() { return clone(binds); } };
 })();
