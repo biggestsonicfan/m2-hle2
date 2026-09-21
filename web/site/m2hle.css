@@ -344,6 +344,7 @@ a.tool.github { display: inline-flex; align-items: center; gap: 0.35rem; color: 
 }
 .pad-row.pad-held { border-color: var(--accent); background: rgba(77, 163, 255, 0.14); }
 .pad-name { flex: 0 0 5.5rem; font-weight: 600; }
+.pad-sub { margin: 0.5rem 0 0.1rem; font-size: 0.8125rem; font-weight: 600; opacity: 0.8; }
 .pad-chips { flex: 1; display: flex; flex-wrap: wrap; gap: 0.25rem; font-size: 0.8125rem; }
 .pad-chip {
   padding: 0.05rem 0.45rem;

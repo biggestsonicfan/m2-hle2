@@ -560,7 +560,7 @@ EMSCRIPTEN_KEEPALIVE int web_state(void) {
  * come yet) is pressed again by its next web_pad_set. */
 /* Only the local keyboard's mask: under netplay the board reads the composed mask,
  * which belongs to the lockstep and is rebuilt from both players' words each frame. */
-EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { g_input.held = 0; g_web_pad = 0; }
+EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { input_release_all(); g_web_pad = 0; }
 
 /* The page's gamepads, touch buttons and keyboard (web/site/m2hle-pad.js,
  * m2hle-touch.js, m2hle-keys.js), as one bit per GAME_INPUT_* action, sent whole

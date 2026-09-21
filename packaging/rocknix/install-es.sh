@@ -112,5 +112,6 @@ add_feature() {
 add_feature "status overlay" "on=on" "off=off"
 add_feature "screen size" "fit screen=fit" "1x (496x384)=1"
 add_feature "audio" "on=on" "off (cooler)=off"
+add_feature "button macros" "off=off" "on (X Y Z)=on"
 
 grep -n -A12 '<name>segamodel2</name>' "$ES/es_systems.cfg" | grep -E 'emulator|core'

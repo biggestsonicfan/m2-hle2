@@ -22,7 +22,7 @@ const m2hlePad = (() => {
   const STORE = 'm2hle.pad';
 
   /* The rows of the panel. `act` is the GAME_INPUT_* index for player 1
-   * (src/core/game_profile.h); player 2's is 10 further on. */
+   * (src/core/game_profile.h), `acts` a macro's; player 2's is 10 further on. */
   const ACTIONS = [
     { id: 'up',    label: 'Up',       act: 0 },
     { id: 'down',  label: 'Down',     act: 1 },
@@ -34,7 +34,14 @@ const m2hlePad = (() => {
     { id: 'b4',    label: 'Button 4', act: 7 },
     { id: 'start', label: 'Start',    act: 8 },
     { id: 'coin',  label: 'Coin',     act: 9 },
+    /* Macros: one binding that holds several buttons at once, as the Gems
+     * Collection and HD ports offer. Unbound until the player binds them. */
+    { id: 'pk',    label: 'P + K',     acts: [4, 5],    macro: true },
+    { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
+    { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
+    { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
   ];
+  for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   const P2_OFFSET = 10;
 
   /* A binding is a button ({b: index}) or one direction of an axis ({a: index, d: ±1}).
@@ -51,6 +58,7 @@ const m2hlePad = (() => {
     b4:    [{ b: 3 }],
     start: [{ b: 9 }],
     coin:  [{ b: 8 }],
+    pk: [], pb: [], kb: [], pkb: [],
   };
   const MAX_BINDS = 4;
   const PRESS = 0.5;          /* a button counts as held past this (analogue triggers) */
@@ -121,12 +129,17 @@ const m2hlePad = (() => {
     return v !== undefined && v * x.d > DEAD;
   }
 
-  /* One bit per player-1 action (0..9) this pad holds. */
-  function padActions(pad) {
+  /* The rows this pad holds, one bit per ACTIONS index. */
+  function padRows(pad) {
+    let r = 0;
+    ACTIONS.forEach((a, i) => { if (binds[a.id].some((x) => held(pad, x))) r |= 1 << i; });
+    return r;
+  }
+
+  /* One bit per player-1 action (0..9) those rows hold. */
+  function rowActions(r) {
     let m = 0;
-    for (const a of ACTIONS) {
-      for (const x of binds[a.id]) if (held(pad, x)) { m |= 1 << a.act; break; }
-    }
+    ACTIONS.forEach((a, i) => { if (r & (1 << i)) m |= a.mask; });
     return m;
   }
 
@@ -137,9 +150,9 @@ const m2hlePad = (() => {
 
     let mask = 0;
     list.forEach((pad, i) => {
-      const m = padActions(pad);
+      const r = padRows(pad), m = rowActions(r);
       mask |= (i === 1 && secondIsP2) ? m << P2_OFFSET : m;
-      if (i === 0) showHeld(m);
+      if (i === 0) showHeld(r);
     });
     if (list.length === 0) showHeld(0);
     padMask = mask;
@@ -229,6 +242,12 @@ const m2hlePad = (() => {
     const standard = list.length === 0 || list[0].mapping === 'standard';
     rows.textContent = '';
     for (const a of ACTIONS) {
+      if (a.macro && a === ACTIONS.find((x) => x.macro)) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = 'Macros: one press holds several buttons';
+        rows.appendChild(sub);
+      }
       const tr = document.createElement('li');
       tr.className = 'pad-row';
       tr.id = 'pad-row-' + a.id;
@@ -285,13 +304,13 @@ const m2hlePad = (() => {
 
   /* The rows light up while the first pad holds them: the quickest way to check a mapping. */
   let shownHeld = -1;
-  function showHeld(m) {
-    if (m === shownHeld || $('controls').hidden) return;
-    shownHeld = m;
-    for (const a of ACTIONS) {
+  function showHeld(r) {
+    if (r === shownHeld || $('controls').hidden) return;
+    shownHeld = r;
+    ACTIONS.forEach((a, i) => {
       const row = $('pad-row-' + a.id);
-      if (row) row.classList.toggle('pad-held', !!(m & (1 << a.act)));
-    }
+      if (row) row.classList.toggle('pad-held', !!(r & (1 << i)));
+    });
   }
 
   function toggle(open) {

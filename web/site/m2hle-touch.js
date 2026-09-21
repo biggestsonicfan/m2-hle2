@@ -27,7 +27,8 @@ const m2hleTouch = (() => {
   const STORE = 'm2hle.touch';
 
   /* `act` is the GAME_INPUT_* index for player 1 (src/core/game_profile.h, and
-   * m2hle-pad.js's ACTIONS). `base` is the diameter in CSS pixels at 100%. */
+   * m2hle-pad.js's ACTIONS), `acts` a macro's: one button that holds several.
+   * `base` is the diameter in CSS pixels at 100%. */
   const CONTROLS = [
     { id: 'dpad',  label: 'D-pad',    base: 150 },
     { id: 'b1',    label: 'Punch',    act: 4, base: 68 },
@@ -36,7 +37,12 @@ const m2hleTouch = (() => {
     { id: 'b4',    label: 'Button 4', act: 7, base: 68, text: '4' },
     { id: 'start', label: 'Start',    act: 8, base: 50 },
     { id: 'coin',  label: 'Coin',     act: 9, base: 50 },
+    { id: 'pk',    label: 'P + K',     acts: [4, 5],    base: 56, text: 'P+K' },
+    { id: 'pb',    label: 'P + B',     acts: [4, 6],    base: 56, text: 'P+B' },
+    { id: 'kb',    label: 'K + B',     acts: [5, 6],    base: 56, text: 'K+B' },
+    { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], base: 56, text: 'PKB' },
   ];
+  for (const c of CONTROLS) c.mask = (c.acts || (c.act === undefined ? [] : [c.act])).reduce((m, i) => m | (1 << i), 0);
   const UP = 1 << 0, DOWN = 1 << 1, LEFT = 1 << 2, RIGHT = 1 << 3;
   /* 45-degree sectors from atan2 with y pointing down: right, down-right, down, ... */
   const SECTORS = [RIGHT, DOWN | RIGHT, DOWN, DOWN | LEFT, LEFT, UP | LEFT, UP, UP | RIGHT];
@@ -46,7 +52,9 @@ const m2hleTouch = (() => {
   /* Where each control sits: its centre as a fraction of the canvas, a size of its
    * own (1 = the global size) and whether it is shown. Sideways, the picture fills
    * the height and leaves bars at the sides; upright, it sits in the middle with
-   * room below. STF plays on three buttons, so Button 4 starts hidden. */
+   * room below. STF plays on three buttons, so Button 4 starts hidden, and so
+   * do the macros: the editor shows hidden buttons, and "Show" puts one back.
+   * P+K takes Button 4's place, which STF does not use. */
   const DEFAULTS = {
     landscape: {
       dpad:  { x: 0.13, y: 0.66, s: 1, on: true },
@@ -56,6 +64,10 @@ const m2hleTouch = (() => {
       b4:    { x: 0.93, y: 0.32, s: 1, on: false },
       start: { x: 0.94, y: 0.10, s: 1, on: true },
       coin:  { x: 0.06, y: 0.10, s: 1, on: true },
+      pk:    { x: 0.93, y: 0.32, s: 1, on: false },
+      pb:    { x: 0.71, y: 0.80, s: 1, on: false },
+      kb:    { x: 0.71, y: 0.60, s: 1, on: false },
+      pkb:   { x: 0.82, y: 0.16, s: 1, on: false },
     },
     portrait: {
       dpad:  { x: 0.25, y: 0.86, s: 1, on: true },
@@ -65,6 +77,10 @@ const m2hleTouch = (() => {
       b4:    { x: 0.86, y: 0.745, s: 1, on: false },
       start: { x: 0.85, y: 0.12, s: 1, on: true },
       coin:  { x: 0.15, y: 0.12, s: 1, on: true },
+      pk:    { x: 0.86, y: 0.745, s: 1, on: false },
+      pb:    { x: 0.49, y: 0.93, s: 1, on: false },
+      kb:    { x: 0.49, y: 0.78, s: 1, on: false },
+      pkb:   { x: 0.86, y: 0.64, s: 1, on: false },
     },
   };
   const APPEARANCE = { size: 1, opacity: 0.5, outline: true };
@@ -204,7 +220,7 @@ const m2hleTouch = (() => {
     for (const c of CONTROLS) {
       if (c.id === 'dpad' || !layout()[c.id].on) continue;
       const { x, y, r } = centre(c);
-      if (Math.hypot(pt.x - x, pt.y - y) <= r * SLOP) m |= 1 << c.act;
+      if (Math.hypot(pt.x - x, pt.y - y) <= r * SLOP) m |= c.mask;
     }
     return m;
   }
@@ -219,7 +235,7 @@ const m2hleTouch = (() => {
      * the only way to feel a press on glass. */
     if (pressed && cfg.vibrate && navigator.vibrate) navigator.vibrate(10);
     for (const c of CONTROLS) {
-      if (c.id !== 'dpad') els[c.id].classList.toggle('down', !!(m & (1 << c.act)));
+      if (c.id !== 'dpad') els[c.id].classList.toggle('down', (m & c.mask) === c.mask);
     }
     const arr = els.dpad.children;
     arr[0].classList.toggle('down', !!(m & UP));

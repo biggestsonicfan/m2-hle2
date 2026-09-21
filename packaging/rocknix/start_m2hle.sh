@@ -40,7 +40,14 @@ SCREEN_SIZE=$(get_setting screen_size "${PLATFORM}" "${GAME}")
 # C = rightstick (r3), X = y (north), Y = x (west), Z = leftstick (l3).
 # Sonic the Fighters: button 1 Punch, 2 Kick, 3 Barrier (MAME schamp inputs).
 #   A = Punch, B = Kick, C = Block; Y, which m2hle's default gives button 3, is free.
-OPTIONS+=(--pad-map "south=b1,east=b2,r3=b3,west=none")
+# "button macros" on puts combos on the top row, each above the button it starts
+# from, as the Gems Collection and HD ports allow: X = P+K, Y = K+B, Z = P+K+B.
+MACROS=$(get_setting button_macros "${PLATFORM}" "${GAME}")
+if [ "${MACROS}" = "on" ]; then
+  OPTIONS+=(--pad-map "south=b1,east=b2,r3=b3,north=b1+b2,west=b2+b3,l3=b1+b2+b3")
+else
+  OPTIONS+=(--pad-map "south=b1,east=b2,r3=b3,west=none")
+fi
 
 # Audio: the sound board (68000 + SCSP) runs and plays unless turned off; off is
 # silent and leaves the emu thread less to do (cooler). Its own key: sm2-emu's
