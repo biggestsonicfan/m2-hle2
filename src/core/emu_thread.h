@@ -118,8 +118,41 @@ static inline int64_t emu_now_us(void) {
     QueryPerformanceCounter(&now);
     return (int64_t)(now.QuadPart * 1000000 / freq.QuadPart);
 }
+/*
+ * The 60 Hz throttle sleeps here, and Sleep() is only as fine as the timer
+ * resolution THIS process asked for. Since Windows 10 2004 another program
+ * raising the system timer no longer lends it to a process that did not ask,
+ * so an m2hle with no window and no audio device (--headless) got 15.6 ms
+ * ticks: Sleep(14) measured 15.5 ms, a frame ran long, the catch-up clamp
+ * threw the deadline away, and a stream showed ~52 board fps and a gap every
+ * few frames. A high-resolution waitable timer is a real millisecond without
+ * touching the machine-wide resolution -- the same fix headless_sleep_ms made
+ * for the render poll. One per thread, because a waitable timer is a single
+ * deadline. Where it cannot be made (pre-1803), Sleep is still there.
+ */
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#  define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 static inline void emu_sleep_us(int64_t us) {
-    if (us > 1000) Sleep((DWORD)(us / 1000));
+    if (us <= 1000) return;
+    static __declspec(thread) HANDLE timer;
+    static __declspec(thread) int tried;
+    if (!tried) {
+        tried = 1;
+        timer = CreateWaitableTimerExW(NULL, NULL,
+                                       CREATE_WAITABLE_TIMER_MANUAL_RESET |
+                                       CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                       TIMER_ALL_ACCESS);
+    }
+    if (timer) {
+        LARGE_INTEGER due;
+        due.QuadPart = -us * 10;                 /* relative, 100 ns units */
+        if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) {
+            WaitForSingleObject(timer, (DWORD)(us / 1000) + 10);
+            return;
+        }
+    }
+    Sleep((DWORD)(us / 1000));
 }
 #else
 static inline int64_t emu_now_us(void) {
