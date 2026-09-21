@@ -45,11 +45,47 @@ Per game, through ES's options screen; `start_m2hle.sh` turns them into flags.
 | status overlay | on / off | `--osd` — fps, temperature, clock, battery, top right |
 | audio | on / off (cooler) | `--sound` — the 68000 + SCSP sound board, in lockstep with the emu thread |
 | button macros | off / on | the top row presses combos: X = Punch+Kick, Y = Kick+Barrier, Z = all three |
+| online play | off / on | `--netplay` — sign in to RPCN and open the lobby; see below |
 
 Buttons are fixed in the launcher: the RG ARC-S's A/B/C become Punch / Kick /
 Barrier (`--pad-map south=b1,east=b2,r3=b3,west=none`). `--pad-map` also takes
 combos (`north=b1+b2`), which is what "button macros" uses. `--max-temp 90` quits
 before the RK3566's ~95 °C trip powers the unit off.
+
+## Online play
+
+The handheld plays the same RPCN netplay as the desktop and web builds (it is
+the same native build family, so it can join either). It has no keyboard, so it
+does not sign in by itself: it uses the desktop's netplay settings file, which
+holds the account and, after a Twitch sign-in, the login token that stands in
+for a password. Copy it across from the PC once:
+
+    ssh rocknix 'mkdir -p /storage/.config/m2hle2 && chmod 700 /storage/.config/m2hle2'
+    scp "%APPDATA%\m2hle2\netplay.cfg" rocknix:/storage/.config/m2hle2/netplay.cfg
+    ssh rocknix 'chmod 600 /storage/.config/m2hle2/netplay.cfg'
+
+or put `netplay.cfg` beside `install-es.sh` before running it, which does the
+same. Then turn **online play** on in the game's options.
+
+With it on, the game signs in at launch and opens the lobby over it: host a
+room, or join one from the list, then **Start the match** — both boards reset
+and play from power-on in lockstep. **L1+R1** opens the lobby again at any time
+(during a match: leave it); **A** picks, **B** closes. With no settings file, the
+lobby offers a Twitch sign-in and shows the code to approve from a phone.
+
+Two things to know:
+
+- **RPCN allows one session per account.** While the PC's emulator (or anything
+  else) is signed in as that account, the handheld's sign-in is refused with
+  "that account is already logged in". Use a second account for the handheld to
+  play against the PC.
+- **RPCN keeps one Twitch token per account.** Copying the file shares the
+  token, which is fine; running the Twitch sign-in *on the handheld* issues a
+  new one and signs every other copy of that account out of Twitch.
+
+TLS comes from the device's own OpenSSL (`libssl.so.3`), opened at the first
+connect rather than linked, so the binary still needs only the four libraries
+below; without it, netplay says so and the game runs as usual.
 
 ## Building it yourself
 

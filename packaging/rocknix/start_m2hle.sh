@@ -59,6 +59,12 @@ AUDIO=$(get_setting audio "${PLATFORM}" "${GAME}")
 OSD=$(get_setting status_overlay "${PLATFORM}" "${GAME}")
 [ "${OSD}" = "off" ] || OPTIONS+=(--osd)
 
+# Online play: sign in to RPCN with the stored netplay settings and open the
+# lobby (L1+R1 brings it back during a game). The settings are the PC's
+# %APPDATA%\m2hle2\netplay.cfg copied to the path below; README.md says how.
+ONLINE=$(get_setting online_play "${PLATFORM}" "${GAME}")
+[ "${ONLINE}" = "on" ] && OPTIONS+=(--netplay --net-config /storage/.config/m2hle2/netplay.cfg)
+
 # The RK3566's critical trip powers the unit off at ~95 C: quit first.
 OPTIONS+=(--max-temp 90)
 

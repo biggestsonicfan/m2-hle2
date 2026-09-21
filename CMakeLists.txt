@@ -95,6 +95,20 @@ foreach(probe ${M2HLE_SUBMODULE_PROBES})
 endforeach()
 
 # ---------------------------------------------------------------------------
+# net/tls.h opens the system's OpenSSL with dlopen on Linux rather than linking
+# it (the comment there says why). glibc has had dlopen in libc itself since
+# 2.34, so libdl is linked only where it is still separate: an unconditional
+# -ldl would add a NEEDED entry the ROCKNIX binary is not meant to carry.
+# ---------------------------------------------------------------------------
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+    include(CheckSymbolExists)
+    check_symbol_exists(dlopen "dlfcn.h" M2HLE_DLOPEN_IN_LIBC)
+    if(NOT M2HLE_DLOPEN_IN_LIBC)
+        link_libraries(${CMAKE_DL_LIBS})
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # miniz (C)
 # miniz's normal CMake build generates miniz_export.h via
 # GenerateExportHeader. We build it as a plain static lib instead, so

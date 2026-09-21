@@ -113,5 +113,19 @@ add_feature "status overlay" "on=on" "off=off"
 add_feature "screen size" "fit screen=fit" "1x (496x384)=1"
 add_feature "audio" "on=on" "off (cooler)=off"
 add_feature "button macros" "off=off" "on (X Y Z)=on"
+add_feature "online play" "off=off" "on=on"
+
+# Netplay settings copied from a PC: a netplay.cfg beside this script goes where
+# the launcher's --net-config points. Private, since it holds a login. The one
+# it replaces is kept, like the binary.
+NETCFG_DIR=/storage/.config/m2hle2
+if [ -f "$HERE/netplay.cfg" ]; then
+  mkdir -p "$NETCFG_DIR" && chmod 700 "$NETCFG_DIR"
+  if [ -f "$NETCFG_DIR/netplay.cfg" ] && ! cmp -s "$HERE/netplay.cfg" "$NETCFG_DIR/netplay.cfg"; then
+    cp -a "$NETCFG_DIR/netplay.cfg" "$NETCFG_DIR/netplay.cfg.bak-$STAMP"
+  fi
+  install -m 600 "$HERE/netplay.cfg" "$NETCFG_DIR/netplay.cfg"
+  echo "installed netplay.cfg -> $NETCFG_DIR/netplay.cfg"
+fi
 
 grep -n -A12 '<name>segamodel2</name>' "$ES/es_systems.cfg" | grep -E 'emulator|core'
