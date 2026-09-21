@@ -41,11 +41,19 @@ re-read.
 Once installed, the device updates itself from this release; the `scp` above
 is only needed the first time.
 
-- **Tools → Update m2hle** checks the canary and, if it is newer, downloads it,
-  checks it against the sha256 GitHub publishes for it, runs the new binary once
-  to be sure it starts on this device, and then runs the new zip's own
-  `install-es.sh`, which also updates the updater. The result is shown on screen.
-  If the ES config gained an option, ES is restarted.
+- **Tools → Update m2hle** updates whichever of the two m2hle builds is on the
+  device: this standalone emulator and the RetroArch core
+  (`packaging/libretro`). It finds the zip for this device on the canary release
+  by the platform and CPU `uname` reports (`m2hle-rocknix-arm64.zip` and
+  `m2hle-libretro-linux-arm64.zip` on an arm64 handheld, the `x64` zips on an
+  x86_64 one), and says so if the release has none. For each one that is newer,
+  it downloads it, checks it against the sha256 GitHub publishes for it, and
+  checks it will run here: the standalone binary is started once; the core,
+  which can't be run on its own, must be built for this CPU, find every library
+  it links, and export `retro_run`. Then it runs the new zip's own installer
+  (`install-es.sh` / `install-rocknix.sh`), which also updates the updater. The
+  result is shown on screen. If the ES config gained an option, ES is
+  restarted. The core is not replaced while RetroArch is running.
 - **When a game starts**, the launcher checks in the background, at most every
   6 hours and never delaying the game. If an update is waiting, a notice appears
   after the game exits. Turn it off per game with the "update check" option.
@@ -55,9 +63,13 @@ installed, not that the release notes name a new commit: when the handheld CI jo
 fails, the release keeps the old zip under new notes.
 
 From a shell: `m2hle-update.sh` (update if newer), `--force` (reinstall),
-`--check` (exit 0 = update waiting, 1 = current, 2 = could not tell).
+`--check` (exit 0 = update waiting, 1 = current, 2 = could not tell), and
+`--component sa|core` to do only one of the two, or to install the one that isn't
+on the device yet. Each keeps the digest and `VERSION.txt` of the zip it came from:
+the emulator in `/storage/.local/share/m2hle/`, the core in `.../m2hle/libretro/`.
 Stepping back needs no network: `cp /storage/.local/share/m2hle/m2hle.bak-<stamp>
-/storage/.local/share/m2hle/m2hle`.
+/storage/.local/share/m2hle/m2hle`, or for the core
+`cp /storage/cores/m2hle_libretro.so.bak-<stamp> /tmp/cores/m2hle_libretro.so`.
 
 ## Options
 

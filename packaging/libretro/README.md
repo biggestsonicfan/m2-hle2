@@ -32,6 +32,9 @@ itself; if it doesn't, pick `glcore` or `gl` in **Settings > Drivers**.
   installs the core, adds **RetroArch / m2hle** to Sega Model 2's emulator list in
   EmulationStation, and keeps the core's files out of the ROM folder. Restart EmulationStation
   afterwards. `bash install-rocknix.sh --make-default` also makes it Model 2's default emulator.
+  It also installs **Tools > Update m2hle**, which updates the core (and the standalone m2hle,
+  if that is installed too) from the canary release, picking the zip for the device's CPU.
+  See `packaging/rocknix/README.md`, "Updates".
   Other handheld distributions: copy the two files by hand as above.
 
 ## Content

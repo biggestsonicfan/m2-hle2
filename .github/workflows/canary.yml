@@ -405,7 +405,8 @@ jobs:
           sed 's/^display_version = .*/display_version = "${{ steps.ver.outputs.version }}"/' \
             packaging/libretro/m2hle_libretro.info > dist/stage/m2hle_libretro.info
           cp packaging/libretro/README.md packaging/libretro/INSTALL.md packaging/libretro/install-rocknix.sh dist/stage/
-          chmod +x dist/stage/install-rocknix.sh
+          cp packaging/rocknix/m2hle-update.sh packaging/rocknix/tool-update-m2hle.sh dist/stage/
+          chmod +x dist/stage/*.sh
           echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
           cd dist/stage && zip -r ../m2hle-libretro-linux-arm64.zip ./*
 

@@ -34,6 +34,26 @@ fi
 install -m 755 "$HERE/m2hle_libretro.so" /tmp/cores/m2hle_libretro.so
 install -m 644 "$HERE/m2hle_libretro.info" /tmp/cores/m2hle_libretro.info
 echo "installed the core -> /storage/cores/m2hle_libretro.so"
+# RetroArch lists a core's name and version from its cache of the .info files.
+[ -f /storage/cores/core_info.cache ] && mv -f /storage/cores/core_info.cache /storage/cores/core_info.cache.old
+
+# 1b. Which canary this is, the updater (it updates this core and the
+#     standalone m2hle from the canary release) and its ES Tools entry.
+STATE=/storage/.local/share/m2hle/libretro
+mkdir -p "$STATE"
+if [ -f "$HERE/VERSION.txt" ]; then
+  install -m 644 "$HERE/VERSION.txt" "$STATE/VERSION.txt"
+  echo "version: $(cat "$HERE/VERSION.txt")"
+fi
+if [ -f "$HERE/m2hle-update.sh" ]; then
+  mkdir -p /storage/.local/bin
+  install -m 755 "$HERE/m2hle-update.sh" /storage/.local/bin/m2hle-update.sh
+fi
+if [ -f "$HERE/tool-update-m2hle.sh" ]; then
+  mkdir -p /storage/.config/modules
+  install -m 755 "$HERE/tool-update-m2hle.sh" "/storage/.config/modules/Update m2hle.sh"
+  echo "ES Tools: Update m2hle"
+fi
 
 # 2. An emulator entry under segamodel2, beside whatever is there already.
 if awk '/<name>segamodel2<\/name>/ { s = 1 } s && /<\/system>/ { exit } s && /<core[^>]*>m2hle<\/core>/ { f = 1; exit } END { exit !f }' "$ES/es_systems.cfg"; then
