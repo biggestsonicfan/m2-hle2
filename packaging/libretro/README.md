@@ -8,8 +8,8 @@ The first supported game is Sonic The Fighters.
 
 Step by step, for RetroArch and for ROCKNIX, with every setting and file: **INSTALL.md**.
 
-Every zip holds the core, `m2hle_libretro.info` (so RetroArch lists the core by name) and this
-file. Put the core in RetroArch's cores folder and the `.info` in its info folder. **Settings >
+Every zip holds the core, `m2hle_libretro.info` (so RetroArch lists the core by name),
+`VERSION.txt` and this file. Put the core in RetroArch's cores folder and the `.info` in its info folder. **Settings >
 Directory** in RetroArch shows where both are on your system.
 
 | Zip | For | Video driver |
@@ -34,8 +34,20 @@ itself; if it doesn't, pick `glcore` or `gl` in **Settings > Drivers**.
   afterwards. `bash install-rocknix.sh --make-default` also makes it Model 2's default emulator.
   It also installs **Tools > Update m2hle**, which updates the core (and the standalone m2hle,
   if that is installed too) from the canary release, picking the zip for the device's CPU.
-  See `packaging/rocknix/README.md`, "Updates".
+  See INSTALL.md, "Updating".
   Other handheld distributions: copy the two files by hand as above.
+
+## Updating
+
+The canary release is rebuilt from every change, so it always has the newest core. RetroArch's
+Online Updater doesn't know this core: on Windows, Linux, macOS and Android, download the zip
+again and replace the two files. **Information > Core Information** shows the installed
+build's version (`r<count>-<commit>`), the same as the zip's `VERSION.txt`.
+
+On ROCKNIX, **Tools > Update m2hle** (or `m2hle-update.sh` over ssh) does it. It finds the zip
+for the device's CPU on the release, checks the download against GitHub's sha256 and that the
+core will load on the device, and installs it with the new zip's `install-rocknix.sh`. The
+script is `packaging/rocknix/m2hle-update.sh`.
 
 ## Content
 

@@ -7,6 +7,11 @@
 #   ./install-rocknix.sh --make-default   ...and make it Model 2's emulator
 #
 # Idempotent: running it again only refreshes the core and its info file.
+#
+# It also installs m2hle-update.sh and ES's Tools > "Update m2hle", which keep
+# the core current from the canary release from then on (m2hle-update.sh runs
+# this script from each new zip). /storage/.local/share/m2hle/libretro/ holds
+# the VERSION.txt of the zip installed last.
 set -euo pipefail
 STAMP=$(date +%Y%m%d-%H%M%S)
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -125,3 +130,5 @@ else
   echo "Pick it per game in EmulationStation (the game's options > emulator), or"
   echo "run again with --make-default. Restart EmulationStation to see the new entry."
 fi
+[ -x /storage/.local/bin/m2hle-update.sh ] && echo "Updates: EmulationStation > Tools > Update m2hle, or m2hle-update.sh over ssh."
+exit 0
