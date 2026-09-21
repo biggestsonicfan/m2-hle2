@@ -362,14 +362,17 @@ typedef struct {
      * `twitch_wanted`: the caller asked to sign in with Twitch rather than as a
      * named account, so a token the server refuses falls through to the device
      * flow instead of ending in "wrong password". One-shot.
-     * `twitch_tried_owner`: the token was refused under the name the caller gave
-     * and has been offered once more under the name it is labelled with. Bounds
-     * the whole thing at two rejections, because asking again is how an account
-     * gets locked.
+     * `twitch_tried_owner`: the token was refused and a second login has been
+     * made -- under the name the token is labelled with, or with a newer token
+     * another program left in the settings file. Bounds the whole thing at two
+     * rejections, because asking again is how an account gets locked.
+     * `twitch_synced`: the token as this process last read or wrote the file.
+     * A file token that differs from it was put there by someone else.
      */
     bool              sent_twitch_token;
     bool              twitch_wanted;
     bool              twitch_tried_owner;
+    char              twitch_synced[sizeof(((netplay_config_t *)0)->twitch_token)];
 
     /* A Host or Join held back until the server has our address (see
      * netplay_take_room). */
@@ -979,7 +982,10 @@ static inline void netplay_text_add(netplay_text_t *t, const char *fmt, ...) {
     t->left -= used;
 }
 
+static inline void netplay_twitch_merge_disk(void);
+
 static inline void netplay_settings_save(void) {
+    netplay_twitch_merge_disk();
     char text[2048];
     netplay_text_t t = { text, sizeof(text) };
     text[0] = '\0';
@@ -1008,6 +1014,7 @@ static inline void netplay_settings_save(void) {
     if (g_netplay.cfg.twitch_token[0])
         netplay_text_add(&t, "twitch_npid=%s\n", g_netplay.cfg.twitch_npid);
 
+    memcpy(g_netplay.twitch_synced, g_netplay.cfg.twitch_token, sizeof(g_netplay.twitch_synced));
 #ifdef __EMSCRIPTEN__
     netplay_web_store(NETPLAY_CFG_PATH, text);
 #else
@@ -1029,7 +1036,14 @@ static inline void netplay_settings_save(void) {
     bool ok = fputs(text, f) >= 0;
     ok = fclose(f) == 0 && ok;
 #ifdef _WIN32
-    ok = ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+    /* Windows will not replace a file another process has open, and every copy
+     * of the emulator (and YAMP) reads this one. A read is over in a moment. */
+    bool moved = false;
+    for (int tries = 0; ok && !moved && tries < 20; tries++) {
+        moved = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
+        if (!moved) Sleep(10);
+    }
+    ok = ok && moved;
 #else
     ok = ok && rename(tmp, path) == 0;
 #endif
@@ -1094,6 +1108,61 @@ static inline bool netplay_settings_load(netplay_config_t *cfg) {
     return legacy;
 }
 
+/* The per-user file as it is on disk right now, with no legacy fallback. */
+static inline bool netplay_settings_read_current(netplay_config_t *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+#ifdef __EMSCRIPTEN__
+    netplay_settings_load(cfg);
+    return cfg->server[0] || cfg->npid[0] || cfg->twitch_token[0];
+#else
+    FILE *f = fopen(netplay_cfg_path(), "r");
+    if (!f) return false;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) netplay_settings_parse_line(cfg, line);
+    fclose(f);
+    if (cfg->twitch_token[0] && !cfg->twitch_npid[0])
+        snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", cfg->npid);
+    return true;
+#endif
+}
+
+/* RPCN account names compare without case. */
+static inline bool netplay_same_name(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return false;
+    }
+    return *a == *b;
+}
+
+static inline bool netplay_same_server(const netplay_config_t *a, const netplay_config_t *b) {
+    uint16_t pa = a->port ? a->port : RPCN_DEFAULT_PORT;
+    uint16_t pb = b->port ? b->port : RPCN_DEFAULT_PORT;
+    return netplay_same_name(a->server, b->server) && pa == pb;
+}
+
+/*
+ * ANOTHER PROGRAM MAY HAVE SIGNED IN SINCE WE READ THE FILE. Every copy of the
+ * emulator shares it, and so does YAMP (its SharedLogin.cpp), and RPCN keeps
+ * one Twitch token per account: a device flow anywhere on the machine writes
+ * the only token that still works. A process that saved its own copy over it --
+ * which every login used to do -- would put the dead one back and sign
+ * everybody out again. So a token this process has not changed since it last
+ * synced gives way to whatever the file now holds for the same server.
+ */
+static inline void netplay_twitch_merge_disk(void) {
+    if (strcmp(g_netplay.cfg.twitch_token, g_netplay.twitch_synced) != 0) return;  /* ours is newer */
+    netplay_config_t disk;
+    if (!netplay_settings_read_current(&disk)) return;
+    if (strcmp(disk.twitch_token, g_netplay.twitch_synced) == 0) return;          /* nobody else */
+    if (disk.twitch_token[0] && !netplay_same_server(&disk, &g_netplay.cfg)) return;
+    memcpy(g_netplay.cfg.twitch_token, disk.twitch_token, sizeof(disk.twitch_token));
+    memcpy(g_netplay.cfg.twitch_npid,  disk.twitch_npid,  sizeof(disk.twitch_npid));
+    memcpy(g_netplay.twitch_synced,    disk.twitch_token, sizeof(disk.twitch_token));
+}
+
 /* ---- Command queue (UI thread -> emu thread) ----------------------------- */
 
 static inline void netplay_init(void) {
@@ -1115,7 +1184,9 @@ static inline void netplay_init(void) {
     netplay_check_clear();
 
     /* Whatever was stored last time, which is mostly the Twitch login token. */
-    if (netplay_settings_load(&g_netplay.cfg)) {
+    bool legacy = netplay_settings_load(&g_netplay.cfg);
+    memcpy(g_netplay.twitch_synced, g_netplay.cfg.twitch_token, sizeof(g_netplay.twitch_synced));
+    if (legacy) {
         /* Now, not at the next login: until the per-user file exists, every
          * copy launched would adopt whatever its own folder happened to hold. */
         netplay_settings_save();
@@ -1370,6 +1441,28 @@ static inline bool netplay_twitch_reuse(const netplay_config_t *asked) {
  */
 static inline void netplay_twitch_refused(void) {
     if (!g_netplay.sent_twitch_token || !g_netplay.session.credential_refused) return;
+
+    /* A token that went dead because someone else on this machine signed in
+     * with Twitch (another copy of the emulator, or YAMP) left its replacement
+     * in the settings file. Offer that before forgetting anything -- forgetting
+     * would save an empty token over the one that works. */
+    if (!g_netplay.twitch_tried_owner) {
+        netplay_config_t disk;
+        if (netplay_settings_read_current(&disk) && disk.twitch_token[0]
+            && strcmp(disk.twitch_token, g_netplay.cfg.twitch_token) != 0
+            && netplay_same_server(&disk, &g_netplay.cfg)
+            && (g_netplay.twitch_wanted || netplay_same_name(disk.twitch_npid, g_netplay.cfg.npid))) {
+            g_netplay.twitch_tried_owner = true;
+            memcpy(g_netplay.cfg.twitch_token, disk.twitch_token, sizeof(disk.twitch_token));
+            memcpy(g_netplay.cfg.twitch_npid,  disk.twitch_npid,  sizeof(disk.twitch_npid));
+            memcpy(g_netplay.twitch_synced,    disk.twitch_token, sizeof(disk.twitch_token));
+            snprintf(g_netplay.cfg.npid, sizeof(g_netplay.cfg.npid), "%s", disk.twitch_npid);
+            netplay_log("the stored Twitch login was replaced on this machine - signing in with "
+                        "the new one as %s", g_netplay.cfg.npid);
+            netplay_do_connect(&g_netplay.cfg);
+            return;
+        }
+    }
 
     const char *owner = g_netplay.cfg.twitch_npid;
     bool under_own_name = !owner[0] || strcmp(owner, g_netplay.cfg.npid) == 0;
