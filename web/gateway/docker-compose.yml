@@ -1,0 +1,19 @@
+# The web gateway for play.sonicthefighte.rs (m2-hle2 web/gateway, WEB-NETPLAY.md).
+# Host networking: it needs the UDP range on the public address and RPCN on
+# 127.0.0.1. It listens only on the forgejo_forgejo bridge (172.18.0.1), where
+# the caddy container reaches it; /root/forgejo/Caddyfile routes /gw/* here.
+services:
+  gateway:
+    image: node:22-alpine
+    container_name: m2hle-gateway
+    network_mode: host
+    working_dir: /app
+    volumes:
+      - ./:/app:ro
+    command: ["node", "gateway.mjs", "--config", "config.json"]
+    user: node
+    restart: unless-stopped
+    mem_limit: 160m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

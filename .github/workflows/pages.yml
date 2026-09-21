@@ -96,6 +96,21 @@ jobs:
           fi
           ls -la build_web/site
 
+      # The netplay sign-in is kept in this origin's localStorage, where any script
+      # the page runs could read it. So the page runs only its own scripts: a
+      # <script src> naming another site stops the deploy.
+      - name: No scripts from other sites
+        run: |
+          if grep -nE '<script[^>]+src="(https?:)?//' build_web/site/*.html; then
+            echo "::error::the page loads a script from another site"; exit 1
+          fi
+
+      # The gateway on the RPCN host (web/gateway, deployed by hand, not by this
+      # workflow): its routing rules and an end-to-end run against stand-ins.
+      - name: Gateway tests
+        working-directory: web/gateway
+        run: npm ci && npm test
+
       # No ROM here, so the page stops at "add your game" -- which still proves
       # WebGL2 came up, every shader compiled for GLSL ES 3.00, the audio path
       # was chosen and nothing threw. That is what has actually broken so far.

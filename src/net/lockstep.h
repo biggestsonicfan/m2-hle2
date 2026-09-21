@@ -280,7 +280,19 @@ static inline uint32_t lockstep_resend_floor(const lockstep_t *l) {
 }
 
 /* Ingest a received record. Silently drops records from the wrong generation or
- * an out-of-range player — both are normal on a round boundary, not errors. */
+ * an out-of-range player — both are normal on a round boundary, not errors.
+ *
+ * A RECORD FOR THIS ROUND IS ALSO THE PEER'S ANNOUNCE OF IT. A peer sends inputs
+ * only once its own barrier has released, which it cannot do without having
+ * heard us announce this round -- so it is in this round, whatever became of its
+ * announces. And its announces stop the moment its barrier releases. When one
+ * side releases on the other's FIRST announce (the host who pressed Start hears
+ * the guest accept), every announce it sent before that went to a peer that was
+ * not yet in the round and dropped them. Without this the guest waits at the
+ * barrier for an announce that is never sent again, and the host stalls at frame
+ * 0 until its stall timer ends the session. Over the internet an announce is
+ * usually still in flight and the race is rarely lost; over loopback, and through
+ * the web build's gateway on one machine, it was lost every time. */
 static inline void lockstep_on_record(lockstep_t *l, const lockstep_record_t *rec) {
     uint32_t player = lockstep_unpack_player(rec->packed);
     uint32_t gen    = lockstep_unpack_generation(rec->packed);
@@ -290,6 +302,7 @@ static inline void lockstep_on_record(lockstep_t *l, const lockstep_record_t *re
      * authoritative locally, and honouring an echo would let the network rewrite
      * local history. */
     if (player == l->local_player) return;
+    l->announce_mask |= (1u << player);
 
     lockstep_ring_t *ring = &l->rings[player];
     for (uint32_t i = 0; i < LOCKSTEP_REDUNDANCY; i++) {

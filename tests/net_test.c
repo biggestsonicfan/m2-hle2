@@ -112,6 +112,24 @@ int main(void) {
         lockstep_on_peer_announce(&l, 1, 1);
         CHECK(lockstep_barrier_released(&l), "the matching announce releases it");
 
+        /* The peer released first and stopped announcing; its first input for
+         * this round is all that reaches us, and it must release us too. */
+        lockstep_t g;
+        lockstep_configure(&g, 1, 2, 2);
+        lockstep_begin_round(&g, 3);
+        lockstep_record_t first;
+        memset(&first, 0, sizeof(first));
+        first.frame  = 0;
+        first.packed = lockstep_pack(0, 3);
+        lockstep_on_record(&g, &first);
+        CHECK(lockstep_barrier_released(&g), "a record for this round releases the barrier like an announce");
+        lockstep_t h;
+        lockstep_configure(&h, 1, 2, 2);
+        lockstep_begin_round(&h, 3);
+        first.packed = lockstep_pack(0, 2);
+        lockstep_on_record(&h, &first);
+        CHECK(!lockstep_barrier_released(&h), "a record for another round does not");
+
         /* A late record from the round that just ended must not reach the new
          * round's rings — that is exactly what the generation is for. */
         lockstep_record_t stale;

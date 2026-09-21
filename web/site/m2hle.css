@@ -250,3 +250,71 @@ kbd {
   font: 12px/1.45 ui-monospace, Consolas, monospace;
   pointer-events: none;
 }
+
+/* ---- Playing online (m2hle-netplay.js) ---- */
+.online {
+  position: fixed;
+  top: 0.75rem;
+  right: 0.75rem;
+  bottom: 3rem;
+  width: min(24rem, calc(100vw - 1.5rem));
+  overflow: auto;
+  padding: 1rem 1.25rem 1.25rem;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  z-index: 5;
+}
+.online[hidden], .online section[hidden], .online div[hidden], .online form[hidden] { display: none; }
+.online-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
+.online h2 { margin: 0; font-size: 1.25rem; }
+.online h3 { margin: 1.25rem 0 0.4rem; font-size: 1rem; }
+.online .lead { margin-bottom: 1rem; }
+.tool.big { display: block; width: 100%; padding: 0.6rem 1rem; font-size: 1.05rem; }
+a.tool { display: inline-block; text-decoration: none; }
+.linkish { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
+.np-or { display: flex; align-items: center; gap: 0.6rem; margin: 1.25rem 0 0.5rem; color: var(--dim); font-size: 0.875rem; }
+.np-or::before, .np-or::after { content: ""; flex: 1; border-top: 1px solid var(--edge); }
+.np-tabs { display: flex; border-bottom: 1px solid var(--edge); margin-bottom: 0.75rem; }
+.np-form { display: flex; flex-direction: column; gap: 0.6rem; }
+.np-form label, .np-advanced label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.875rem; color: var(--dim); }
+.np-form input, .np-advanced input {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  background: #0b0f19;
+  color: var(--text);
+  font: inherit;
+}
+.np-form input:focus-visible, .np-advanced input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.np-form details, .np-advanced { font-size: 0.875rem; color: var(--dim); }
+.np-form summary, .np-advanced summary { cursor: pointer; }
+.np-advanced { margin-top: 1rem; }
+.np-advanced label { margin-top: 0.6rem; }
+.fine.left { text-align: left; margin-top: 0; }
+.np-code {
+  margin: 0.25rem 0 0.75rem;
+  font: 600 2rem/1.2 ui-monospace, Consolas, monospace;
+  letter-spacing: 0.15em;
+  text-align: center;
+  user-select: all;
+}
+.np-row { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin: 0.75rem 0; }
+.np-me { margin: 0 0 0.75rem; color: var(--dim); }
+.np-rooms { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.np-room {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: #0c101a;
+}
+.np-who { font-weight: 600; }
+.np-what { flex: 1; color: var(--dim); font-size: 0.875rem; }
+.np-room-off { opacity: 0.6; }
+.online-btn.live { border-color: #3c8f5a; background: #123322; }
+.online .error { text-align: left; }
+.online [hidden] { display: none !important; }
