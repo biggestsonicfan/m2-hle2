@@ -7,13 +7,16 @@
  * are pure functions of their inputs, and they are also where a quiet mistake
  * costs a desync rather than an error message. So they get a test.
  *
- * Four parts:
+ * Six parts:
  *  (A) The input rings: newest-wins ingest, redundancy repair, ring aliasing.
  *  (B) The barrier and the generation fence.
  *  (C) protobuf round trips, including the uint8/uint16 WRAPPER trap that
  *      np2_structs.proto sets for anyone who reads those fields as bare varints.
  *  (D) ComId derivation: stable, case- and punctuation-insensitive, well formed
  *      by RPCN's own rule, and never colliding between two different games.
+ *  (E) Rooms of more than two (room.h): the PS3 port's rules for who fights and
+ *      how the line moves after a result.
+ *  (F) Watchers: never gating, and still getting every frame.
  */
 #define NDEBUG 1
 #include <stdio.h>
@@ -22,6 +25,7 @@
 #include "com_id.h"
 #include "lockstep.h"
 #include "protobuf.h"
+#include "room.h"
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
@@ -346,6 +350,160 @@ int main(void) {
          * space nobody else computes. */
         CHECK(!comid_looks_like_id("VIRTUALON"),
               "a nine-letter game name is not mistaken for a communication id");
+    }
+
+    /* ---- (E) rooms of more than two (room.h) ----------------------------- */
+    {
+        /* Both attributes survive a round trip, and a stranger's bytes are not
+         * mistaken for ours. */
+        room_state_t s, back;
+        memset(&s, 0, sizeof(s));
+        s.phase = ROOM_PHASE_MATCH; s.flags = ROOM_FLAG_AUTO; s.frame_delay = 3; s.last_result = 1;
+        s.match = 513; s.fighter[0] = 0x21; s.fighter[1] = 0x32; s.seed = 0xCAFEF00Du;
+        s.line_count = 3; s.line[0] = 0x32; s.line[1] = 0x41; s.line[2] = 0x21;
+        uint8_t bin[ROOM_STATE_SIZE];
+        uint32_t len = room_state_encode(&s, bin);
+        CHECK(room_state_decode(bin, len, &back) && back.match == 513 && back.fighter[1] == 0x32
+              && back.seed == 0xCAFEF00Du && back.line_count == 3 && back.line[1] == 0x41
+              && back.frame_delay == 3 && back.last_result == 1 && back.flags == ROOM_FLAG_AUTO,
+              "the room state round-trips");
+        bin[0] ^= 1;
+        CHECK(!room_state_decode(bin, len, &back), "bytes without our magic are not a room state");
+
+        room_member_data_t md, mback;
+        memset(&md, 0, sizeof(md));
+        md.flags = ROOM_MEMBER_READY; md.entry = ROOM_ENTRY_2P; md.playing = 7;
+        md.result_match = 6; md.result = 0; md.games = 9; md.wins = 4; md.points = 21;
+        uint8_t mbin[ROOM_MEMBER_SIZE];
+        CHECK(room_member_decode(mbin, room_member_encode(&md, mbin), &mback)
+              && mback.entry == ROOM_ENTRY_2P && mback.playing == 7 && mback.result_match == 6
+              && mback.result == 0 && mback.points == 21 && mback.wins == 4,
+              "a member's attribute round-trips");
+    }
+    {
+        /* The line follows the room: leavers out, newcomers on the end in id order. */
+        room_state_t s;
+        memset(&s, 0, sizeof(s));
+        room_member_t m[4];
+        memset(m, 0, sizeof(m));
+        m[0].id = 0x10; m[1].id = 0x31; m[2].id = 0x22;
+        for (int i = 0; i < 3; i++) m[i].known = true;
+        CHECK(room_line_sync(&s, m, 3) && s.line_count == 3 && s.line[0] == 0x10
+              && s.line[1] == 0x22 && s.line[2] == 0x31,
+              "newcomers join the back of the line, oldest member id first");
+        m[0] = m[2];   /* 0x10 leaves; 0x22 and 0x31 stay */
+        CHECK(room_line_sync(&s, m, 2) && s.line_count == 2 && s.line[0] == 0x22 && s.line[1] == 0x31,
+              "a member who leaves is taken out of the line and the rest close up");
+        CHECK(!room_line_sync(&s, m, 2), "an unchanged room leaves the line alone");
+    }
+    {
+        /* build_fight_entries: who fights, and on which side. */
+        room_state_t s;
+        memset(&s, 0, sizeof(s));
+        s.line_count = 4; s.line[0] = 1; s.line[1] = 2; s.line[2] = 3; s.line[3] = 4;
+        room_member_t m[4];
+        memset(m, 0, sizeof(m));
+        for (int i = 0; i < 4; i++) { m[i].id = (uint16_t)(i + 1); m[i].known = true; }
+        uint16_t f[2];
+
+        CHECK(room_pick_fighters(&s, m, 4, f) && f[0] == 1 && f[1] == 2,
+              "nobody asking for a side: the front two, in line order");
+
+        m[3].data.entry = ROOM_ENTRY_2P;
+        CHECK(room_pick_fighters(&s, m, 4, f) && f[0] == 1 && f[1] == 4,
+              "a 2P Entry jumps the line for 2P, and the front of the line fills 1P");
+
+        m[3].data.entry = ROOM_ENTRY_1P;
+        CHECK(room_pick_fighters(&s, m, 4, f) && f[0] == 4 && f[1] == 1,
+              "a 1P Entry jumps the line for 1P, and the front of the line fills 2P");
+
+        m[2].data.entry = ROOM_ENTRY_1P;
+        CHECK(room_pick_fighters(&s, m, 4, f) && f[0] == 3 && f[1] == 4,
+              "two asking for 1P: the one further forward gets it, the other beats non-entrants to 2P");
+
+        m[2].data.entry = ROOM_ENTRY_NONE; m[3].data.entry = ROOM_ENTRY_NONE;
+        m[0].data.flags = ROOM_MEMBER_WATCH;
+        CHECK(room_pick_fighters(&s, m, 4, f) && f[0] == 2 && f[1] == 3,
+              "a member sitting out is never picked");
+        m[1].data.flags = m[2].data.flags = ROOM_MEMBER_WATCH;
+        CHECK(!room_pick_fighters(&s, m, 4, f), "one player is not a match");
+    }
+    {
+        /* rotate_queue_after_match, and what each member does with the result:
+         * winner to the front and staying on their side, loser to the back. */
+        room_state_t s;
+        memset(&s, 0, sizeof(s));
+        s.phase = ROOM_PHASE_MATCH; s.match = 5; s.fighter[0] = 1; s.fighter[1] = 2;
+        s.line_count = 4; s.line[0] = 1; s.line[1] = 2; s.line[2] = 3; s.line[3] = 4;
+        CHECK(room_rotate_line(&s, 1) == 1 && s.line[0] == 2 && s.line[1] == 3
+              && s.line[2] == 4 && s.line[3] == 1,
+              "2P wins: the winner goes to the front, the waiting keep their order, the loser goes last");
+
+        room_member_data_t win, lose, watch;
+        memset(&win, 0, sizeof(win)); memset(&lose, 0, sizeof(lose)); memset(&watch, 0, sizeof(watch));
+        lose.entry = ROOM_ENTRY_1P;
+        CHECK(room_after_result(&win, 2, &s, 5, 1) && win.games == 1 && win.wins == 1
+              && win.points == 4 && win.entry == ROOM_ENTRY_2P,
+              "the winner gets a game, a win, 4 points, and asks to stay on the side they won on");
+        CHECK(room_after_result(&lose, 1, &s, 5, 1) && lose.games == 1 && lose.wins == 0
+              && lose.points == 1 && lose.entry == ROOM_ENTRY_NONE,
+              "the loser gets a game, 1 point, and loses their side");
+        CHECK(room_after_result(&watch, 3, &s, 5, 1) && watch.games == 0 && watch.result_match == 5,
+              "a watcher records the result and nothing else");
+        CHECK(!room_after_result(&win, 2, &s, 5, 1) && win.wins == 1,
+              "the same result is never counted twice");
+
+        /* The next pick after that result: the winner holds 2P, the next in line
+         * takes the 1P side the loser left. Arcade rules. */
+        room_member_t m[4];
+        memset(m, 0, sizeof(m));
+        m[0].id = 1; m[0].data = lose;
+        m[1].id = 2; m[1].data = win;
+        m[2].id = 3; m[3].id = 4;
+        for (int i = 0; i < 4; i++) m[i].known = true;
+        uint16_t f[2];
+        CHECK(room_pick_fighters(&s, m, 4, f) && f[0] == 3 && f[1] == 2,
+              "the next match is the next in line on 1P against the winner on 2P");
+        CHECK(room_reported_result(m, 4, 5) == 1 && room_reported_result(m, 4, 6) == -1,
+              "a result is found in whichever member's attribute reports it");
+    }
+
+    /* ---- (F) watchers ---------------------------------------------------- */
+    {
+        /* Two fighters and a watcher who gets only every third record. The
+         * watcher never gates anybody, and still ends up with every frame of both
+         * sides, because each record carries the last ten. */
+        lockstep_t a, b, w;
+        lockstep_configure(&a, 0, 2, 2);
+        lockstep_configure(&b, 1, 2, 2);
+        lockstep_configure(&w, LOCKSTEP_WATCHER, 2, 2);
+        lockstep_begin_round(&a, 4);
+        lockstep_begin_round(&b, 4);
+        lockstep_begin_round(&w, 4);
+        CHECK(lockstep_is_watcher(&w) && w.announce_mask == 0, "a watcher announces nothing");
+        lockstep_on_peer_announce(&a, 1, 4);
+        lockstep_on_peer_announce(&b, 0, 4);
+        CHECK(lockstep_barrier_released(&a) && lockstep_barrier_released(&b),
+              "the fighters' barrier releases without the watcher");
+
+        lockstep_record_t ra, rb;
+        for (uint32_t f = 0; f < 60; f++) {
+            lockstep_submit_local(&a, f, 0xA00u + f, &ra);
+            lockstep_submit_local(&b, f, 0xB00u + f, &rb);
+            lockstep_on_record(&a, &rb);
+            lockstep_on_record(&b, &ra);
+            if (f % 3 == 2) { lockstep_on_record(&w, &ra); lockstep_on_record(&w, &rb); }
+        }
+        bool all = true;
+        for (uint32_t f = 0; f < 60; f++)
+            if (!lockstep_ready(&w, f) || lockstep_input_for(&w, 0, f) != 0xA00u + f
+                || lockstep_input_for(&w, 1, f) != 0xB00u + f) all = false;
+        CHECK(all, "a watcher fed every third record has every frame of both sides");
+
+        lockstep_record_t mine;
+        lockstep_submit_local(&w, 3, 0x777, &mine);
+        CHECK(mine.inputs[0] == 0 && lockstep_input_for(&w, 0, 3) == 0xA03u,
+              "a watcher has no input of its own and cannot write a side");
     }
 
     printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail, g_fail == 1 ? "" : "s");

@@ -131,8 +131,29 @@ typedef enum {
     RPCN_NOTIF_USER_JOINED_ROOM = 0,
     RPCN_NOTIF_USER_LEFT_ROOM   = 1,
     RPCN_NOTIF_ROOM_DESTROYED   = 2,
+    /* A room's or a member's internal binary attribute changed. These carry the
+     * room's shared state (room.h), and the server sends them to the member who
+     * made the change as well (`self_notification` in cmd_room.rs), so every
+     * member applies an update at the same point in the stream. */
+    RPCN_NOTIF_UPDATED_ROOM_DATA_INTERNAL        = 3,
+    RPCN_NOTIF_UPDATED_ROOM_MEMBER_DATA_INTERNAL = 4,
     RPCN_NOTIF_SIGNALING_HELPER = 12,
 } rpcn_notification_t;
+
+/*
+ * The binary attributes a room carries, by the ids RPCN accepts (room_manager.rs).
+ * Room internal attribute 1 is the room's shared state and member internal
+ * attribute 1 each member's own, exactly the slots the PS3 port used for the
+ * same two things (0x57 and 0x59, np_session_create_join_room). The server
+ * holds up to 256 and 128 bytes; room.h uses far less.
+ */
+#define RPCN_ROOM_BIN_ATTR_ID        0x57u
+#define RPCN_MEMBER_BIN_ATTR_ID      0x59u
+#define RPCN_ROOM_BIN_MAX            64u
+#define RPCN_MEMBER_BIN_MAX          32u
+#define RPCN_ROOM_MAX_MEMBERS        8u
+/* SCE_NP_MATCHING2_ROOMMEMBER_FLAG_ATTR_OWNER, in a member's flagAttr. */
+#define RPCN_MEMBER_FLAG_OWNER       0x80000000u
 
 /* What RPCN mails: 8 random bytes formatted "{:02X}", so 16 uppercase hex. */
 #define RPCN_TOKEN_LENGTH 16
@@ -157,6 +178,28 @@ typedef struct {
     char     owner[20];
     uint32_t flag_attr;          /* as published by CreateRoom */
 } rpcn_room_listing_t;
+
+/* One RoomMemberDataInternal: who, where in the room, and their own attribute. */
+typedef struct {
+    uint16_t member_id;
+    uint8_t  team_id;
+    uint32_t flag_attr;          /* RPCN_MEMBER_FLAG_OWNER marks the owner */
+    char     npid[20];
+    uint8_t  bin[RPCN_MEMBER_BIN_MAX];
+    uint32_t bin_len;            /* 0 = the member has published nothing */
+} rpcn_member_info_t;
+
+/* One RoomDataInternal: the whole room as the server holds it. */
+typedef struct {
+    uint64_t           room_id;
+    uint32_t           max_slot;
+    uint16_t           owner_id;
+    uint32_t           flag_attr;
+    uint8_t            bin[RPCN_ROOM_BIN_MAX];
+    uint32_t           bin_len;  /* 0 = nobody has set it */
+    rpcn_member_info_t members[RPCN_ROOM_MAX_MEMBERS];
+    uint32_t           member_count;
+} rpcn_room_info_t;
 
 typedef struct {
     tls_client_t tls;
@@ -531,10 +574,27 @@ static inline uint32_t rpcn_parse_world_list(const uint8_t *p, uint32_t size,
  * signaling_data and the host's UserJoinedRoom notification carries no address —
  * which leaves the host with nobody to punch towards.
  */
+/* BinAttr { uint16 id = 1; bytes data = 2; } as field `field`. The id is a
+ * WRAPPER, read with get_verified(): a bare varint there is Malformed. */
+static inline void rpcn_pb_bin_attr(pb_writer_t *w, uint32_t field, uint16_t id,
+                                    const void *data, uint32_t len) {
+    uint32_t tok = pb_begin_sub(w, field);
+    pb_wrapped(w, 1, id);
+    pb_bytes(w, 2, data, len);
+    pb_end_sub(w, tok);
+}
+
+/*
+ * `room_bin` / `member_bin` seed the room's shared state and the creator's own
+ * attribute (room.h), so the room is never seen without them. Either may be
+ * null, which leaves the attribute empty.
+ */
 static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
                                         uint32_t max_slot, const char *password,
-                                        uint32_t flag_attr) {
-    uint8_t pb[256];
+                                        uint32_t flag_attr,
+                                        const uint8_t *room_bin, uint32_t room_len,
+                                        const uint8_t *member_bin, uint32_t member_len) {
+    uint8_t pb[512];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
     pb_varint(&w, 1, world_id);                 /* worldId */
@@ -544,6 +604,8 @@ static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, ui
          * proto types it uint32, so it is not one of the flatbuffers-era wrappers. */
         pb_varint(&w, 4, flag_attr);
     }
+    if (room_bin && room_len)                   /* roomBinAttrInternal */
+        rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, room_bin, room_len);
     if (password && *password) {
         /* TWO RULES, BOTH ENFORCED SILENTLY BY THE SERVER — get either wrong and
          * the room ends up with NO password while still looking protected here.
@@ -569,6 +631,8 @@ static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, ui
         for (uint32_t i = 0; i < max_slot && i < 64; i++) slot_mask |= (1ull << (63 - i));
         pb_varint(&w, 11, slot_mask);                                /* passwordSlotMask */
     }
+    if (member_bin && member_len)               /* roomMemberBinAttrInternal */
+        rpcn_pb_bin_attr(&w, 15, RPCN_MEMBER_BIN_ATTR_ID, member_bin, member_len);
     /* teamId is NOT optional despite proto3: room_manager.rs does
      * `pb.team_id.get_verified()?` and Option<Uint8>::get_verified() returns
      * Malformed when the field is absent. It is a uint8 WRAPPER submessage, so it
@@ -589,14 +653,15 @@ static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, ui
 
     if (!w.ok) { rpcn_fail(c, "CreateRoom: protobuf overflow"); return 0; }
 
-    uint8_t payload[512];
+    uint8_t payload[640];
     uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
     if (!n) { rpcn_fail(c, "CreateRoom: bad ComId '%s'", com_id ? com_id : "(null)"); return 0; }
     return rpcn_request(c, RPCN_CMD_CREATE_ROOM, payload, n);
 }
 
 static inline uint64_t rpcn_join_room(rpcn_client_t *c, const char *com_id, uint64_t room_id,
-                                      const char *password) {
+                                      const char *password,
+                                      const uint8_t *member_bin, uint32_t member_len) {
     uint8_t pb[256];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
@@ -610,6 +675,8 @@ static inline uint64_t rpcn_join_room(rpcn_client_t *c, const char *com_id, uint
         memcpy(fixed, password, given < sizeof(fixed) ? given : sizeof(fixed));
         pb_bytes(&w, 2, fixed, sizeof(fixed));                       /* roomPassword */
     }
+    if (member_bin && member_len)               /* roomMemberBinAttrInternal */
+        rpcn_pb_bin_attr(&w, 4, RPCN_MEMBER_BIN_ATTR_ID, member_bin, member_len);
     pb_wrapped(&w, 6, 0);                       /* teamId — mandatory here too */
     if (!w.ok) { rpcn_fail(c, "JoinRoom: protobuf overflow"); return 0; }
 
@@ -617,6 +684,85 @@ static inline uint64_t rpcn_join_room(rpcn_client_t *c, const char *com_id, uint
     uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
     if (!n) { rpcn_fail(c, "JoinRoom: bad ComId"); return 0; }
     return rpcn_request(c, RPCN_CMD_JOIN_ROOM, payload, n);
+}
+
+static inline uint64_t rpcn_leave_room(rpcn_client_t *c, const char *com_id, uint64_t room_id) {
+    uint8_t pb[32];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);                  /* roomId */
+    if (!w.ok) { rpcn_fail(c, "LeaveRoom: protobuf overflow"); return 0; }
+    uint8_t payload[64];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "LeaveRoom: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_LEAVE_ROOM, payload, n);
+}
+
+/*
+ * SetRoomDataInternal { roomId = 1; flagFilter = 2; flagAttr = 3;
+ * repeated BinAttr roomBinAttrInternal = 4; ... }. The room's shared state.
+ *
+ * ANY MEMBER MAY WRITE IT: set_roomdata_internal checks ownership only for the
+ * flag and password fields, and stores a bin attr from whoever sent it. So the
+ * rule that only the owner writes the room state is ours (room.h), not the
+ * server's. A flagFilter of 0 leaves the room's flags as they are.
+ */
+static inline uint64_t rpcn_set_room_data_internal(rpcn_client_t *c, const char *com_id,
+                                                   uint64_t room_id,
+                                                   const uint8_t *bin, uint32_t len) {
+    uint8_t pb[256];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);
+    rpcn_pb_bin_attr(&w, 4, RPCN_ROOM_BIN_ATTR_ID, bin, len);
+    if (!w.ok) { rpcn_fail(c, "SetRoomDataInternal: protobuf overflow"); return 0; }
+    uint8_t payload[320];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "SetRoomDataInternal: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_SET_ROOM_DATA_INTERNAL, payload, n);
+}
+
+/*
+ * SetRoomMemberDataInternal { roomId = 1; uint16 memberId = 2; uint8 teamId = 3;
+ * repeated BinAttr roomMemberBinAttrInternal = 4; }. Our own attribute.
+ * memberId 0 means "me", and teamId 0 means "leave it": both are wrappers
+ * read with get_verified(), so both must be present even at 0.
+ */
+static inline uint64_t rpcn_set_member_data_internal(rpcn_client_t *c, const char *com_id,
+                                                     uint64_t room_id,
+                                                     const uint8_t *bin, uint32_t len) {
+    uint8_t pb[160];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);
+    pb_wrapped(&w, 2, 0);                       /* memberId: self */
+    pb_wrapped(&w, 3, 0);                       /* teamId: unchanged */
+    rpcn_pb_bin_attr(&w, 4, RPCN_MEMBER_BIN_ATTR_ID, bin, len);
+    if (!w.ok) { rpcn_fail(c, "SetRoomMemberDataInternal: protobuf overflow"); return 0; }
+    uint8_t payload[224];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "SetRoomMemberDataInternal: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_SET_ROOM_MEMBER_DATA, payload, n);
+}
+
+/*
+ * GetRoomDataInternal { roomId = 1; repeated uint16 attrId = 2; }. The whole room
+ * again. Needed because RPCN says nothing when ownership moves: a departing
+ * owner's successor is picked in room_manager.rs `leave_room` and the other
+ * members get only a UserLeftRoom about the one who went. The server returns
+ * every bin attr whatever attrId asks for.
+ */
+static inline uint64_t rpcn_get_room_data_internal(rpcn_client_t *c, const char *com_id,
+                                                   uint64_t room_id) {
+    uint8_t pb[32];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);
+    if (!w.ok) { rpcn_fail(c, "GetRoomDataInternal: protobuf overflow"); return 0; }
+    uint8_t payload[64];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "GetRoomDataInternal: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_GET_ROOM_DATA_INTERNAL, payload, n);
 }
 
 static inline uint64_t rpcn_search_room(rpcn_client_t *c, const char *com_id, uint32_t world_id) {
@@ -880,6 +1026,201 @@ static inline bool rpcn_parse_signaling_helper(const uint8_t *payload, uint32_t 
         }
     }
     return got_addr;
+}
+
+/* ---- Whole rooms and members ---------------------------------------------- */
+
+/* BinAttr { uint16 id = 1 (wrapper); bytes data = 2; }. False unless it is `want`. */
+static inline bool rpcn_read_bin_attr(pb_reader_t r, uint32_t want,
+                                      uint8_t *out, uint32_t cap, uint32_t *out_len) {
+    uint32_t id = 0;
+    const uint8_t *data = NULL;
+    uint32_t len = 0;
+    while (pb_next(&r)) {
+        if (r.field == 1 && r.wire == PB_WIRE_LEN) id = pb_as_wrapped(&r);
+        else if (r.field == 2 && r.wire == PB_WIRE_LEN) { data = r.bytes; len = r.bytes_len; }
+    }
+    if (id != want) return false;
+    if (len > cap) len = cap;
+    if (len && data) memcpy(out, data, len);
+    *out_len = len;
+    return true;
+}
+
+/*
+ * RoomMemberDataInternal { UserInfo userInfo = 1; uint64 joinDate = 2;
+ * uint32 memberId = 3 (BARE); uint8 teamId = 4 (wrapper); RoomGroup = 5;
+ * uint8 natType = 6; uint32 flagAttr = 7 (bare);
+ * repeated RoomMemberBinAttrInternal { updateDate = 1; BinAttr data = 2; } = 8 }.
+ */
+static inline void rpcn_read_member_internal(pb_reader_t r, rpcn_member_info_t *m) {
+    memset(m, 0, sizeof(*m));
+    while (pb_next(&r)) {
+        switch (r.field) {
+            case 1: {
+                pb_reader_t ui = pb_sub(&r);
+                while (pb_next(&ui))
+                    if (ui.field == 1 && ui.wire == PB_WIRE_LEN) pb_copy_string(&ui, m->npid, sizeof(m->npid));
+                break;
+            }
+            case 3: if (r.wire == PB_WIRE_VARINT) m->member_id = (uint16_t)r.varint; break;
+            case 4: m->team_id = (uint8_t)pb_as_wrapped(&r); break;
+            case 7: if (r.wire == PB_WIRE_VARINT) m->flag_attr = (uint32_t)r.varint; break;
+            case 8: {
+                pb_reader_t attr = pb_sub(&r);
+                while (pb_next(&attr)) {
+                    if (attr.field != 2 || attr.wire != PB_WIRE_LEN) continue;
+                    rpcn_read_bin_attr(pb_sub(&attr), RPCN_MEMBER_BIN_ATTR_ID,
+                                       m->bin, sizeof(m->bin), &m->bin_len);
+                }
+                break;
+            }
+            default: break;
+        }
+    }
+}
+
+/*
+ * RoomDataInternal { serverId = 1; worldId = 2; lobbyId = 3; uint64 roomId = 4;
+ * passwordSlotMask = 5; uint32 maxSlot = 6 (bare); repeated
+ * RoomMemberDataInternal memberList = 7; uint16 ownerId = 8 (wrapper);
+ * roomGroup = 9; uint32 flagAttr = 10 (bare); repeated BinAttrInternal
+ * { updateDate = 1; updateMemberId = 2; BinAttr data = 3 } roomBinAttrInternal = 11 }.
+ */
+static inline void rpcn_read_room_internal(pb_reader_t r, rpcn_room_info_t *room) {
+    memset(room, 0, sizeof(*room));
+    while (pb_next(&r)) {
+        switch (r.field) {
+            case 4:  if (r.wire == PB_WIRE_VARINT) room->room_id = r.varint; break;
+            case 6:  if (r.wire == PB_WIRE_VARINT) room->max_slot = (uint32_t)r.varint; break;
+            case 7:
+                if (r.wire == PB_WIRE_LEN && room->member_count < RPCN_ROOM_MAX_MEMBERS)
+                    rpcn_read_member_internal(pb_sub(&r), &room->members[room->member_count++]);
+                break;
+            case 8:  room->owner_id = (uint16_t)pb_as_wrapped(&r); break;
+            case 10: if (r.wire == PB_WIRE_VARINT) room->flag_attr = (uint32_t)r.varint; break;
+            case 11: {
+                pb_reader_t attr = pb_sub(&r);
+                while (pb_next(&attr)) {
+                    if (attr.field != 3 || attr.wire != PB_WIRE_LEN) continue;
+                    rpcn_read_bin_attr(pb_sub(&attr), RPCN_ROOM_BIN_ATTR_ID,
+                                       room->bin, sizeof(room->bin), &room->bin_len);
+                }
+                break;
+            }
+            default: break;
+        }
+    }
+}
+
+/* CreateRoomResponse { internal = 1 } and JoinRoomResponse { room_data = 1 }:
+ * [u32 len][protobuf], with the room at field 1 of both. */
+static inline bool rpcn_parse_room_reply(const uint8_t *payload, uint32_t size, rpcn_room_info_t *out) {
+    if (!rpcn_strip_data_packet(&payload, &size)) return false;
+    pb_reader_t top = pb_reader(payload, size);
+    while (pb_next(&top)) {
+        if (top.field == 1 && top.wire == PB_WIRE_LEN) {
+            rpcn_read_room_internal(pb_sub(&top), out);
+            return out->room_id != 0;
+        }
+    }
+    return false;
+}
+
+/* A GetRoomDataInternal reply: [u32 len][RoomDataInternal], NOT wrapped. */
+static inline bool rpcn_parse_room_data_internal(const uint8_t *payload, uint32_t size,
+                                                 rpcn_room_info_t *out) {
+    if (!rpcn_strip_data_packet(&payload, &size)) return false;
+    rpcn_read_room_internal(pb_reader(payload, size), out);
+    return out->room_id != 0;
+}
+
+/*
+ * The JoinRoomResponse's signaling_data: repeated Matching2SignalingInfo
+ * { uint16 member_id = 1 (wrapper); SignalingAddr addr = 2; } -- one per member
+ * already in the room, so a joiner can start punching every one of them at once.
+ */
+static inline uint32_t rpcn_parse_join_signaling_list(const uint8_t *payload, uint32_t size,
+                                                      uint16_t *ids, uint32_t *ips_be,
+                                                      uint16_t *ports, uint32_t max) {
+    if (!rpcn_strip_data_packet(&payload, &size)) return 0;
+    uint32_t n = 0;
+    pb_reader_t top = pb_reader(payload, size);
+    while (n < max && pb_next(&top)) {
+        if (top.field != 2 || top.wire != PB_WIRE_LEN) continue;
+        uint16_t id = 0; uint32_t ip = 0; uint16_t port = 0; bool got = false;
+        pb_reader_t info = pb_sub(&top);
+        while (pb_next(&info)) {
+            if (info.field == 1 && info.wire == PB_WIRE_LEN) id = (uint16_t)pb_as_wrapped(&info);
+            else if (info.field == 2 && info.wire == PB_WIRE_LEN)
+                got = rpcn_read_signaling_addr(pb_sub(&info), &ip, &port);
+        }
+        if (id && got) { ids[n] = id; ips_be[n] = ip; ports[n] = port; n++; }
+    }
+    return n;
+}
+
+/*
+ * The notifications that name a room first: UpdatedRoomDataInternal,
+ * UpdatedRoomMemberDataInternal, UserLeftRoom and RoomDestroyed are all
+ * [u64 room_id][u32 len][protobuf] (cmd_room.rs builds each the same way).
+ * UserJoinedRoom is the odd one out -- its room id is inside the protobuf.
+ */
+static inline bool rpcn_strip_room_notification(const uint8_t **p, uint32_t *size, uint64_t *room_id) {
+    if (*size < 8) return false;
+    if (room_id) *room_id = rpcn_get_u64(*p);
+    *p += 8;
+    *size -= 8;
+    return rpcn_strip_data_packet(p, size);
+}
+
+/* RoomDataInternalUpdateInfo { RoomDataInternal newRoomDataInternal = 1; ... } */
+static inline bool rpcn_parse_room_update(const uint8_t *payload, uint32_t size, rpcn_room_info_t *out) {
+    uint64_t room_id = 0;
+    if (!rpcn_strip_room_notification(&payload, &size, &room_id)) return false;
+    pb_reader_t top = pb_reader(payload, size);
+    while (pb_next(&top)) {
+        if (top.field == 1 && top.wire == PB_WIRE_LEN) {
+            rpcn_read_room_internal(pb_sub(&top), out);
+            if (!out->room_id) out->room_id = room_id;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* RoomMemberDataInternalUpdateInfo { RoomMemberDataInternal = 1; ... } and
+ * RoomMemberUpdateInfo { RoomMemberDataInternal = 1; eventCause = 2; ... }
+ * (UserLeftRoom): the member is field 1 of both. */
+static inline bool rpcn_parse_member_notification(const uint8_t *payload, uint32_t size,
+                                                  uint64_t *room_id, rpcn_member_info_t *out) {
+    if (!rpcn_strip_room_notification(&payload, &size, room_id)) return false;
+    pb_reader_t top = pb_reader(payload, size);
+    while (pb_next(&top)) {
+        if (top.field == 1 && top.wire == PB_WIRE_LEN) {
+            rpcn_read_member_internal(pb_sub(&top), out);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* NotificationUserJoinedRoom's member: update_info = 2 -> roomMemberDataInternal = 1. */
+static inline bool rpcn_parse_joined_member(const uint8_t *payload, uint32_t size,
+                                            rpcn_member_info_t *out) {
+    if (!rpcn_strip_data_packet(&payload, &size)) return false;
+    pb_reader_t top = pb_reader(payload, size);
+    while (pb_next(&top)) {
+        if (top.field != 2 || top.wire != PB_WIRE_LEN) continue;
+        pb_reader_t update = pb_sub(&top);
+        while (pb_next(&update)) {
+            if (update.field == 1 && update.wire == PB_WIRE_LEN) {
+                rpcn_read_member_internal(pb_sub(&update), out);
+                return out->member_id != 0;
+            }
+        }
+    }
+    return false;
 }
 
 /* ---- Twitch device flow --------------------------------------------------- */

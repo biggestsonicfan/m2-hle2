@@ -292,6 +292,27 @@ static int sfight_hook_cop_err_hang(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 0;
 }
 
+/*
+ * versus_result (0xDC3C, in ROUND_DSP): a two-player match has been decided.
+ * OBSERVE ONLY -- it records the result and lets the instruction run.
+ *
+ * 0xDC3C is `stib r15, _sub_mode`, the step past the arcade's win-streak
+ * bookkeeping (byte_500066 / word_5000A2) that runs once per decided match.
+ * The PS3 port hooks the same instruction for the same reason
+ * (i960hook_DC3C_JUDGE_postResult, which posts its OnMatchResult event), and
+ * gates it on the same two facts the arcade's own streak code tests just before:
+ * not_scr_bg_move (0x500068) bit 1, the versus flag, and gameprogram (0x50004C)
+ * == 2, both players. The winning side is `winner` (0x500065): 0 = 1P.
+ */
+static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if ((mem_read8(bus, 0x00500068) & 2u) && mem_read8(bus, 0x0050004C) == 2u) {
+        g_versus_result = mem_read8(bus, 0x00500065) ? 2 : 1;
+        LOG_INFO("versus match decided: %s won", g_versus_result == 1 ? "1P" : "2P");
+    }
+    return 1;
+}
+
 /* NOTE: there is intentionally NO read_sw (0x17CC) hook. Inputs are delivered
  * the authentic way — input.h serves the active-low I/O ports (0x1C00000) and
  * the game's own read_sw, called from the VsyncScr vblank interrupt, reads them
@@ -314,7 +335,7 @@ static const game_profile_t sfight_profile = {
     .board            = BOARD_MODEL2B_CRX,
     .load_fn      = sfight_load,
     .install_fn   = sfight_install,
-    .hook_count   = 9,
+    .hook_count   = 10,
     .hooks = {
         { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       },
         { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           },
@@ -325,6 +346,7 @@ static const game_profile_t sfight_profile = {
         { 0x00007264, sfight_hook_700000_loop,        "_700000_loop"            },
         { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              },
         { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" },
+        { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           },
     },
     .input = {
         .held_addr       = 0x00500700,

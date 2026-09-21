@@ -464,13 +464,13 @@ static void draw_menu_bar(void) {
             netplay_get_status(&st);
             igTextDisabled("%s", netplay_state_text(st.state));
             if (st.room_id)
-                igTextDisabled("room %llu (%s)", (unsigned long long)st.room_id,
-                               st.is_host ? "hosting" : "guest");
+                igTextDisabled("room %llu (%u of %u%s)", (unsigned long long)st.room_id,
+                               st.member_count, st.max_slot, st.is_host ? ", yours" : "");
             if (st.peer_npid[0])
                 igTextDisabled("peer %s %s", st.peer_npid,
                                st.peer_heard ? "[reachable]"
                                              : st.peer_known ? "[punching]" : "[no address]");
-            if (st.state == NETPLAY_PLAYING)
+            if (netplay_state_running(st.state))
                 igTextDisabled("frame %u, %u stall%s", st.frame, st.stalls,
                                st.stalls == 1 ? "" : "s");
             if (st.error[0]) igTextDisabled("%s", st.error);

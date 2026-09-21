@@ -808,6 +808,9 @@ EMSCRIPTEN_KEEPALIVE int web_netplay_set(const char *key, const char *value) {
 #undef WEB_NP_STR
     if (!strcmp(key, "room_id"))     { c->room_id = strtoull(value, NULL, 10); return 0; }
     if (!strcmp(key, "frame_delay")) { c->frame_delay = (uint32_t)strtoul(value, NULL, 10); return 0; }
+    if (!strcmp(key, "max_players")) { c->max_players = (uint32_t)strtoul(value, NULL, 10); return 0; }
+    if (!strcmp(key, "entry"))       { c->entry = (uint8_t)strtoul(value, NULL, 10); return 0; }
+    if (!strcmp(key, "watch"))       { c->watch_only = strtoul(value, NULL, 10) != 0; return 0; }
     return -1;
 }
 
@@ -820,6 +823,10 @@ EMSCRIPTEN_KEEPALIVE int web_netplay_post(const char *cmd) {
         { "search",         NETPLAY_CMD_SEARCH },
         { "start",          NETPLAY_CMD_START },
         { "stop",           NETPLAY_CMD_STOP },
+        { "entry",          NETPLAY_CMD_ENTRY },
+        { "watch",          NETPLAY_CMD_WATCH },
+        { "force_start",    NETPLAY_CMD_FORCE_START },
+        { "leave",          NETPLAY_CMD_LEAVE_ROOM },
         { "create_account", NETPLAY_CMD_CREATE_ACCOUNT },
         { "resend_token",   NETPLAY_CMD_RESEND_TOKEN },
         { "twitch_start",   NETPLAY_CMD_TWITCH_START },
@@ -891,8 +898,25 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
     PUT(",\"room\":{\"id\":\"%llu\",\"host\":%s,\"player\":%d,\"flags\":%u",
         (unsigned long long)st.room_id, st.is_host ? "true" : "false", (int)st.local_player, st.room_flags);
     PUTS("peer", st.peer_npid, true);
-    PUT(",\"peer_known\":%s,\"peer_heard\":%s,\"peer_ready\":%s}",
+    PUT(",\"peer_known\":%s,\"peer_heard\":%s,\"peer_ready\":%s",
         st.peer_known ? "true" : "false", st.peer_heard ? "true" : "false", st.peer_ready ? "true" : "false");
+    /* The room of up to eight (net/room.h): phase, match, and the line. */
+    PUT(",\"max\":%u,\"phase\":\"%s\",\"match\":%u,\"auto_start_s\":%u,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"members\":[",
+        st.max_slot, st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby", st.room.match, st.auto_start_s,
+        (st.me.flags & ROOM_MEMBER_READY) ? "true" : "false",
+        (st.me.flags & ROOM_MEMBER_WATCH) ? "true" : "false", st.me.entry);
+    for (uint32_t i = 0; i < st.member_count; i++) {
+        const netplay_member_status_t *m = &st.members[i];
+        PUT("%s{\"line\":%d,\"side\":%d,\"me\":%s,\"owner\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,"
+            "\"wins\":%u,\"games\":%u,\"points\":%u,\"heard\":%s",
+            i ? "," : "", m->line_pos, m->side, m->is_me ? "true" : "false", m->is_owner ? "true" : "false",
+            (m->data.flags & ROOM_MEMBER_READY) ? "true" : "false",
+            (m->data.flags & ROOM_MEMBER_WATCH) ? "true" : "false", m->data.entry,
+            m->data.wins, m->data.games, m->data.points, (m->is_me || m->heard) ? "true" : "false");
+        PUTS("npid", m->npid, true);
+        PUT("}");
+    }
+    PUT("]}");
 
     PUT(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"delay\":%u",
         st.frame, st.stalls, st.generation, (unsigned)g_netplay.cfg.frame_delay);

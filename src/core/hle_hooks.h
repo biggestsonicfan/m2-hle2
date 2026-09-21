@@ -25,6 +25,13 @@
  * cut short and the thread sleeps until the next 16.67 ms tick. */
 static volatile int g_frame_done = 0;
 
+/* A versus match was just decided: 1 = the 1P side won, 2 = the 2P side, 0 =
+ * nothing. Set by the profile's versus hook -- an observe-only hook on the
+ * arcade's own "match over" path -- and taken by the emu thread at the end of
+ * the frame (netplay_end_frame), so every board in a netplay room sees a result
+ * on the same frame. Part of a board reset (emu_board_reset_state). */
+static volatile int g_versus_result = 0;
+
 /* Monotonic count of completed game frames. The emu thread bumps it at every
  * frame boundary (HLE pace hook or board vblank ACK). Tooling outside the
  * emulator needs a frame clock to pace a capture by — MAME's drivers use the

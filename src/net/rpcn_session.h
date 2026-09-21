@@ -1,31 +1,44 @@
 /*
- * rpcn_session.h — an RPCN session: login, discovery, rooms, peer address
- * exchange, NAT punching, and then direct peer-to-peer datagrams.
+ * rpcn_session.h — an RPCN session: login, discovery, rooms, the members of the
+ * room we are in and their addresses, NAT punching, and then direct
+ * peer-to-peer datagrams to any of them.
  *
- * Everything above this (lockstep.h, netplay.h) only ever asks it to send and
- * receive bytes to "the peer"; nothing up there knows what a room is.
+ * Everything above this (room.h, lockstep.h, netplay.h) asks it to send bytes
+ * to a MEMBER and hands it back bytes FROM one; nothing up there knows an
+ * address.
  *
  * CONNECTION MODEL — SYMMETRIC, AND IT HAS TO BE.
- *   BOTH ends learn the other's address from the server, and BOTH start sending
- *   immediately. The guest gets the host's address in its JoinRoom reply
- *   (signaling_data); the host gets the guest's in the UserJoinedRoom
- *   notification the server pushes when someone joins. Both are populated only
- *   because rpcn_create_room asks for signaling (sigOptParam).
+ *   Every member learns every other member's address from the server, and every
+ *   one of them starts sending immediately. A joiner gets the addresses of all
+ *   the members already there in its JoinRoom reply (signaling_data); those
+ *   members get the joiner's in the UserJoinedRoom notification the server
+ *   pushes. Both are populated only because rpcn_create_room asks for signaling
+ *   (sigOptParam, MESH -- everyone to everyone, which is what a room of eight
+ *   needs and also what the PS3 port asked for).
  *
- *   The tempting model — guest transmits first, host stays silent until it hears
- *   something, on the theory that the guest's packet "opens the return path" —
- *   does not work. It opens the path through the GUEST's NAT. The host's NAT has
- *   no mapping for the guest at all, so it drops that first packet on the floor,
- *   and a silent host never creates one: two peers on different networks sit at
- *   the barrier forever. Hole punching only works if both sides transmit, so the
- *   punch starts as soon as an address is known and keeps a small datagram
- *   flowing whether or not anything has come back.
+ *   The tempting model — the newcomer transmits first, the others stay silent
+ *   until they hear something, on the theory that the first packet "opens the
+ *   return path" — does not work. It opens the path through the SENDER's NAT.
+ *   The receiver's NAT has no mapping for the sender at all, so it drops that
+ *   first packet on the floor, and a silent receiver never creates one: two
+ *   members on different networks sit at the barrier forever. Hole punching only
+ *   works if both sides transmit, so the punch starts as soon as an address is
+ *   known and keeps a small datagram flowing whether or not anything has come
+ *   back.
  *
  * WHAT THIS STILL CANNOT DO: if either side is behind a symmetric NAT, the
- * mapping it opens towards the peer differs from the one the server advertised,
+ * mapping it opens towards a peer differs from the one the server advertised,
  * and no amount of punching helps — RPCN has no relay to fall back on. The recv
  * path absorbs the milder case (a peer whose port differs from the advertised
- * one) by re-pointing at the source it actually hears from.
+ * one) by re-pointing at the source it actually hears from; the punch carries
+ * the sender's member id so that works with more than one peer on an address.
+ *
+ * THE ROOM'S STATE LIVES ON THE SERVER. The room internal binary attribute and
+ * each member's member attribute (room.h says what is in them) are read from
+ * every reply and notification that carries them and kept here, and a change
+ * bumps `room_rev` for the layer above to notice. RPCN does not announce a new
+ * OWNER -- when one leaves it picks a successor quietly (room_manager.rs
+ * `leave_room`) -- so every departure is followed by a GetRoomDataInternal.
  *
  * BROWSING THE OTHER EMULATOR'S ROOMS. Rooms are created in the m2-hle2 lobby
  * space, but the browser can also search YAMP's space for the same arcade game
@@ -61,18 +74,23 @@
 
 #define RPCN_MAX_ROOMS 32
 
+/* Everybody in the room but us. */
+#define RPCN_MAX_PEERS (RPCN_ROOM_MAX_MEMBERS - 1u)
+
 /* Not a game packet: shorter than any header the lockstep layer accepts, so it
- * is discarded up there even if one leaks through. Its only job is to make our
- * NAT create a mapping towards the peer. */
-static const uint8_t g_rpcn_punch[4] = { 'M', '2', 'N', '!' };
+ * is discarded up there even if one leaks through. Its job is to make our NAT
+ * create a mapping towards the peer -- and, by carrying the sender's member id
+ * after the tag, to let the peer put a name to an address it was never told. */
+static const uint8_t g_rpcn_punch_tag[4] = { 'M', '2', 'N', '!' };
+#define RPCN_PUNCH_SIZE 6u
 
 typedef enum {
     RPCN_STAGE_IDLE,
     RPCN_STAGE_LOGGING_IN,
     RPCN_STAGE_ONLINE,      /* logged in, discovery done */
-    RPCN_STAGE_HOSTING,     /* room created, nobody has joined yet */
-    RPCN_STAGE_JOINING,     /* room joined, resolving the host */
-    RPCN_STAGE_LINKED,      /* peer address known — datagrams can flow */
+    RPCN_STAGE_HOSTING,     /* in a room we created */
+    RPCN_STAGE_JOINING,     /* in a room we joined */
+    RPCN_STAGE_LINKED,      /* in a room, and at least one member has been heard from */
     RPCN_STAGE_FAILED,
 } rpcn_stage_t;
 
@@ -99,6 +117,23 @@ typedef struct {
     void (*log)(void *ctx, const char *msg);
 } rpcn_session_config_t;
 
+/* Another member of the room, and how to reach them. */
+typedef struct {
+    bool     used;
+    uint16_t member_id;
+    char     npid[20];
+    uint32_t flag_attr;
+    uint8_t  bin[RPCN_MEMBER_BIN_MAX];   /* their member attribute (room.h) */
+    uint32_t bin_len;
+
+    uint32_t ip;             /* network byte order; 0 = not known yet */
+    uint16_t port;
+    bool     heard;          /* a datagram has actually arrived from them */
+    uint64_t last_punch_ms;
+    uint64_t signaling_retry_ms;
+    uint64_t pending_signaling;
+} rpcn_peer_t;
+
 typedef struct {
     rpcn_client_t client;
     rpcn_stage_t  stage;
@@ -115,17 +150,25 @@ typedef struct {
      * Twitch login token from a server that merely went away, and the error text
      * is for people, not for strcmp. */
     bool     credential_refused;
-    char     peer_npid[20];
 
     uint16_t server_id;
     uint32_t world_id;
     uint64_t room_id;
     uint32_t room_flags;
-    bool     is_host;
+    bool     is_host;        /* we created this room (the owner may since have moved) */
 
-    uint32_t peer_ip;        /* network byte order */
-    uint16_t peer_port;
-    bool     peer_heard;     /* a datagram has actually arrived from the peer */
+    /* The room we are in. */
+    uint16_t    my_member_id;
+    uint16_t    owner_id;
+    uint32_t    max_slot;
+    uint8_t     room_bin[RPCN_ROOM_BIN_MAX];   /* the room's shared state (room.h) */
+    uint32_t    room_bin_len;
+    uint8_t     my_bin[RPCN_MEMBER_BIN_MAX];   /* our attribute as the server holds it */
+    uint32_t    my_bin_len;
+    rpcn_peer_t peers[RPCN_MAX_PEERS];
+    /* Bumped whenever anything above changes, so netplay.h can tell "the room
+     * moved" from "nothing happened" without comparing the lot. */
+    uint32_t    room_rev;
 
     /* The signaling helper has answered a keepalive, so the server has our
      * address on file. Taking a room before that is a mistake: RPCN copies a
@@ -139,7 +182,7 @@ typedef struct {
     uint64_t pending_worldlist;
     uint64_t pending_room;
     uint64_t pending_search;
-    uint64_t pending_signaling;
+    uint64_t pending_room_data;
 
     /* The read-only cross-emulator browse: its own discovery, its own search. */
     bool     foreign_ready;
@@ -155,11 +198,6 @@ typedef struct {
     uint32_t            foreign_room_count;
 
     uint64_t last_keepalive_ms;
-    uint64_t last_punch_ms;
-    /* A signaling lookup is retried rather than fatal: a guest can easily join
-     * before the host has been registered by the UDP helper, and that used to
-     * kill the whole session. */
-    uint64_t signaling_retry_ms;
 
     void *log_ctx;
     void (*log)(void *ctx, const char *msg);
@@ -192,14 +230,54 @@ static inline const char *rpcn_session_error(const rpcn_session_t *s) {
     return s->error[0] ? s->error : rpcn_last_error(&s->client);
 }
 
-static inline bool rpcn_session_peer_known(const rpcn_session_t *s) {
-    return s->peer_ip != 0 && s->peer_port != 0;
+static inline bool rpcn_session_in_room(const rpcn_session_t *s) {
+    return s->room_id != 0 && (s->stage == RPCN_STAGE_HOSTING || s->stage == RPCN_STAGE_JOINING
+                               || s->stage == RPCN_STAGE_LINKED);
 }
 
-static inline const char *rpcn_session_peer_text(const rpcn_session_t *s) {
+static inline bool rpcn_session_is_owner(const rpcn_session_t *s) {
+    return rpcn_session_in_room(s) && s->my_member_id && s->my_member_id == s->owner_id;
+}
+
+/* RPCN account names compare without case (the table is UNIQUE ... NOCASE). */
+static inline bool rpcn_same_npid(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return false;
+    }
+    return *a == *b;
+}
+
+static inline rpcn_peer_t *rpcn_session_peer(rpcn_session_t *s, uint16_t member_id) {
+    if (!member_id) return NULL;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++)
+        if (s->peers[i].used && s->peers[i].member_id == member_id) return &s->peers[i];
+    return NULL;
+}
+
+static inline rpcn_peer_t *rpcn_session_peer_by_npid(rpcn_session_t *s, const char *npid) {
+    if (!npid || !npid[0]) return NULL;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++)
+        if (s->peers[i].used && rpcn_same_npid(s->peers[i].npid, npid)) return &s->peers[i];
+    return NULL;
+}
+
+static inline uint32_t rpcn_session_peer_count(const rpcn_session_t *s) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) if (s->peers[i].used) n++;
+    return n;
+}
+
+static inline const char *rpcn_peer_addr_text(const rpcn_peer_t *p) {
     static char text[32];
-    if (!rpcn_session_peer_known(s)) return "unknown";
-    return net_addr_text(text, sizeof(text), s->peer_ip, s->peer_port);
+    if (!p || !p->ip || !p->port) return "unknown";
+    return net_addr_text(text, sizeof(text), p->ip, p->port);
+}
+
+static inline const char *rpcn_peer_name(const rpcn_peer_t *p) {
+    return (p && p->npid[0]) ? p->npid : "a member";
 }
 
 /* What a rejected login means for the PLAYER. RPCN says which of the three
@@ -231,35 +309,135 @@ static inline const char *rpcn_login_error_text(rpcn_error_t error, bool sent_to
     }
 }
 
-/* Adopt a peer address, whatever told us about it. `source` names that for the log. */
-static inline void rpcn_session_set_peer(rpcn_session_t *s, uint32_t ip, uint16_t port,
-                                         const char *source) {
-    if (!ip || !port) return;
-    bool changed = (ip != s->peer_ip || port != s->peer_port);
-    /* An address the peer has actually been HEARD from beats anything the server
-     * says afterwards. The two can disagree -- a room whose copy of an address was
-     * taken before the helper had it, or two players the server sees on one
-     * public address handed each other's local one -- and replacing a working
-     * address with a told one turns every datagram from the peer into a stray. */
-    if (changed && s->peer_heard) {
+/* Adopt an address for a member, whatever told us about it. `source` names that
+ * for the log. */
+static inline void rpcn_session_set_peer_addr(rpcn_session_t *s, rpcn_peer_t *p,
+                                              uint32_t ip, uint16_t port, const char *source) {
+    if (!p || !ip || !port) return;
+    bool changed = (ip != p->ip || port != p->port);
+    /* An address the member has actually been HEARD from beats anything the
+     * server says afterwards. The two can disagree -- a room whose copy of an
+     * address was taken before the helper had it, or two players the server sees
+     * on one public address handed each other's local one -- and replacing a
+     * working address with a told one turns every datagram from them into a
+     * stray. */
+    if (changed && p->heard) {
         char told[32];
-        rpcn_session_note(s, "the server says the peer is at %s (via %s); keeping %s, which is "
-                             "where it is actually heard from",
-                          net_addr_text(told, sizeof(told), ip, port), source, rpcn_session_peer_text(s));
+        rpcn_session_note(s, "the server says %s is at %s (via %s); keeping %s, which is "
+                             "where they are actually heard from", rpcn_peer_name(p),
+                          net_addr_text(told, sizeof(told), ip, port), source, rpcn_peer_addr_text(p));
         return;
     }
-    s->peer_ip   = ip;
-    s->peer_port = port;
-    s->signaling_retry_ms = 0;
-    if (s->stage == RPCN_STAGE_HOSTING || s->stage == RPCN_STAGE_JOINING)
-        s->stage = RPCN_STAGE_LINKED;
+    p->ip   = ip;
+    p->port = port;
+    p->signaling_retry_ms = 0;
     if (changed) {
         /* Punch immediately rather than waiting out the interval — this is the
-         * moment the hole has to be opened, and the peer may already be sending. */
-        s->last_punch_ms = 0;
-        rpcn_session_note(s, "peer %s at %s (via %s)",
-                          s->peer_npid[0] ? s->peer_npid : "?", rpcn_session_peer_text(s), source);
+         * moment the hole has to be opened, and they may already be sending. */
+        p->last_punch_ms = 0;
+        rpcn_session_note(s, "%s at %s (via %s)", rpcn_peer_name(p), rpcn_peer_addr_text(p), source);
     }
+}
+
+/* A datagram came from `ip:port` and says it is from `p`. The same rule a first
+ * contact always had -- only the PORT may differ from what we were told (a NAT
+ * picked another), never the address -- applied per member. */
+static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port) {
+    if (!p) return false;
+    if (p->heard) return p->ip == ip && p->port == port;
+    if (p->ip && p->ip != ip) return false;
+    bool moved = (port != p->port || ip != p->ip);
+    p->heard = true;
+    p->ip    = ip;
+    p->port  = port;
+    if (s->stage == RPCN_STAGE_HOSTING || s->stage == RPCN_STAGE_JOINING) s->stage = RPCN_STAGE_LINKED;
+    rpcn_session_note(s, moved ? "%s reached us from %s (not the advertised port); using that"
+                               : "link established with %s at %s",
+                      rpcn_peer_name(p), rpcn_peer_addr_text(p));
+    return true;
+}
+
+/* ---- The member list ----------------------------------------------------- */
+
+static inline void rpcn_session_clear_room(rpcn_session_t *s) {
+    s->room_id      = 0;
+    s->room_flags   = 0;
+    s->is_host      = false;
+    s->my_member_id = 0;
+    s->owner_id     = 0;
+    s->max_slot     = 0;
+    s->room_bin_len = 0;
+    s->my_bin_len   = 0;
+    s->pending_room_data = 0;
+    memset(s->peers, 0, sizeof(s->peers));
+    s->room_rev++;
+}
+
+/* Add a member or refresh what we know of one. Its address is kept: the server's
+ * member data carries none. */
+static inline rpcn_peer_t *rpcn_session_upsert_member(rpcn_session_t *s, const rpcn_member_info_t *m) {
+    if (!m->member_id) return NULL;
+    if (m->member_id == s->my_member_id || (!s->my_member_id && rpcn_same_npid(m->npid, s->npid))) {
+        s->my_member_id = m->member_id;
+        memcpy(s->my_bin, m->bin, m->bin_len);
+        s->my_bin_len = m->bin_len;
+        if (m->flag_attr & RPCN_MEMBER_FLAG_OWNER) s->owner_id = m->member_id;
+        s->room_rev++;
+        return NULL;
+    }
+    rpcn_peer_t *p = rpcn_session_peer(s, m->member_id);
+    bool fresh = false;
+    if (!p) {
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS && !p; i++)
+            if (!s->peers[i].used) p = &s->peers[i];
+        if (!p) return NULL;   /* more members than a room can hold: ignore */
+        memset(p, 0, sizeof(*p));
+        p->used      = true;
+        p->member_id = m->member_id;
+        fresh = true;
+    }
+    if (m->npid[0]) snprintf(p->npid, sizeof(p->npid), "%s", m->npid);
+    p->flag_attr = m->flag_attr;
+    if (m->bin_len) {
+        memcpy(p->bin, m->bin, m->bin_len);
+        p->bin_len = m->bin_len;
+    }
+    if (m->flag_attr & RPCN_MEMBER_FLAG_OWNER) s->owner_id = m->member_id;
+    if (fresh && s->log) rpcn_session_note(s, "%s is in the room (member %u)", rpcn_peer_name(p), m->member_id);
+    s->room_rev++;
+    return p;
+}
+
+static inline void rpcn_session_remove_member(rpcn_session_t *s, uint16_t member_id) {
+    rpcn_peer_t *p = rpcn_session_peer(s, member_id);
+    if (!p) return;
+    rpcn_session_note(s, "%s left the room", rpcn_peer_name(p));
+    memset(p, 0, sizeof(*p));
+    s->room_rev++;
+}
+
+/* Take the whole room as the server holds it: a create or join reply, or a
+ * GetRoomDataInternal. Members who are gone are dropped; the ones who stay keep
+ * the addresses we have for them. */
+static inline void rpcn_session_apply_room(rpcn_session_t *s, const rpcn_room_info_t *room) {
+    if (room->room_id && s->room_id && room->room_id != s->room_id) return;   /* some other room */
+    if (room->max_slot) s->max_slot = room->max_slot;
+    if (room->owner_id) s->owner_id = room->owner_id;
+    if (room->bin_len) {
+        memcpy(s->room_bin, room->bin, room->bin_len);
+        s->room_bin_len = room->bin_len;
+    }
+    if (room->member_count) {
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+            if (!s->peers[i].used) continue;
+            bool present = false;
+            for (uint32_t k = 0; k < room->member_count; k++)
+                if (room->members[k].member_id == s->peers[i].member_id) present = true;
+            if (!present) rpcn_session_remove_member(s, s->peers[i].member_id);
+        }
+        for (uint32_t k = 0; k < room->member_count; k++) rpcn_session_upsert_member(s, &room->members[k]);
+    }
+    s->room_rev++;
 }
 
 /* ---- Lifetime ------------------------------------------------------------ */
@@ -267,22 +445,14 @@ static inline void rpcn_session_set_peer(rpcn_session_t *s, uint32_t ip, uint16_
 static inline void rpcn_session_stop(rpcn_session_t *s) {
     rpcn_disconnect(&s->client);
     s->stage      = RPCN_STAGE_IDLE;
-    s->room_id    = 0;
-    s->room_flags = 0;
-    s->is_host    = false;
-    s->peer_ip    = 0;
-    s->peer_port  = 0;
-    s->peer_heard = false;
+    rpcn_session_clear_room(s);
     s->signaling_seen = false;
-    s->peer_npid[0] = '\0';
     s->sent_token = false;
     s->credential_refused = false;
     s->pending_serverlist = s->pending_worldlist = s->pending_room = 0;
-    s->pending_signaling  = s->pending_search = 0;
+    s->pending_search = 0;
     s->pending_foreign_serverlist = s->pending_foreign_worldlist = s->pending_foreign_search = 0;
     s->foreign_ready = false;
-    s->signaling_retry_ms = 0;
-    s->last_punch_ms = 0;
     s->room_count = 0;
     s->foreign_room_count = 0;
     s->error[0] = '\0';
@@ -374,64 +544,101 @@ static inline void rpcn_session_pump_keepalive(rpcn_session_t *s) {
 }
 
 static inline void rpcn_session_pump_punch(rpcn_session_t *s) {
-    if (!rpcn_session_peer_known(s)) return;
+    uint8_t punch[RPCN_PUNCH_SIZE];
+    memcpy(punch, g_rpcn_punch_tag, sizeof(g_rpcn_punch_tag));
+    rpcn_put_u16(punch + 4, s->my_member_id);
     uint64_t now = net_now_ms();
-    uint64_t interval = s->peer_heard ? RPCN_PUNCH_IDLE_MS : RPCN_PUNCH_MS;
-    if (s->last_punch_ms != 0 && now - s->last_punch_ms < interval) return;
-    s->last_punch_ms = now;
-    rpcn_send_to(&s->client, s->peer_ip, s->peer_port, g_rpcn_punch, sizeof(g_rpcn_punch));
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        rpcn_peer_t *p = &s->peers[i];
+        if (!p->used || !p->ip || !p->port) continue;
+        uint64_t interval = p->heard ? RPCN_PUNCH_IDLE_MS : RPCN_PUNCH_MS;
+        if (p->last_punch_ms != 0 && now - p->last_punch_ms < interval) continue;
+        p->last_punch_ms = now;
+        rpcn_send_to(&s->client, p->ip, p->port, punch, sizeof(punch));
+    }
 }
 
-/* Only when we know WHO the peer is but not WHERE. The usual cause is a peer the
+/* Members we know of but have no address for. The usual cause is one the
  * server's UDP helper has not seen yet, which resolves itself within a keepalive
- * or two — so this retries quietly instead of failing the session. */
-static inline void rpcn_session_pump_signaling_retry(rpcn_session_t *s) {
-    if (s->signaling_retry_ms == 0 || rpcn_session_peer_known(s)
-        || s->pending_signaling != 0 || !s->peer_npid[0]) return;
-    if (net_now_ms() < s->signaling_retry_ms) return;
-    s->signaling_retry_ms = 0;
-    s->pending_signaling  = rpcn_request_signaling_infos(&s->client, s->peer_npid);
+ * or two — so this retries quietly instead of failing the session. Asking also
+ * makes the server tell THEM about us (the SignalingHelper notification). */
+static inline void rpcn_session_pump_signaling(rpcn_session_t *s) {
+    uint64_t now = net_now_ms();
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        rpcn_peer_t *p = &s->peers[i];
+        if (!p->used || p->ip || p->pending_signaling || !p->npid[0]) continue;
+        if (p->signaling_retry_ms && now < p->signaling_retry_ms) continue;
+        p->pending_signaling  = rpcn_request_signaling_infos(&s->client, p->npid);
+        p->signaling_retry_ms = now + RPCN_SIGNALING_RETRY_MS;
+    }
+}
+
+static inline void rpcn_session_refresh_room(rpcn_session_t *s) {
+    if (!s->room_id || s->pending_room_data) return;
+    s->pending_room_data = rpcn_get_room_data_internal(&s->client, s->com_id, s->room_id);
 }
 
 static inline void rpcn_session_on_notification(rpcn_session_t *s, const rpcn_packet_t *pkt) {
     switch ((rpcn_notification_t)pkt->command) {
         case RPCN_NOTIF_USER_JOINED_ROOM: {
-            /* The host's cue that it has a peer at all. Everything it needs to
-             * start punching is in here, provided the room asked for signaling. */
+            /* Everything we need to start punching a newcomer is in here, provided
+             * the room asked for signaling. */
+            rpcn_member_info_t m;
             char npid[20];
             uint32_t ip = 0;
             uint16_t port = 0;
             bool has_addr = false;
             memset(npid, 0, sizeof(npid));
+            if (!rpcn_session_in_room(s)) break;
             if (!rpcn_parse_joined_notification(pkt->payload, pkt->payload_size, npid, sizeof(npid),
                                                 &ip, &port, &has_addr)) break;
-            if (npid[0] && strcmp(npid, s->npid) == 0) break;   /* our own join echoed back */
-            if (npid[0]) snprintf(s->peer_npid, sizeof(s->peer_npid), "%s", npid);
+            if (!rpcn_parse_joined_member(pkt->payload, pkt->payload_size, &m)) break;
+            if (rpcn_same_npid(m.npid, s->npid)) break;   /* our own join echoed back */
+            rpcn_peer_t *p = rpcn_session_upsert_member(s, &m);
+            if (p && has_addr && ip && port) rpcn_session_set_peer_addr(s, p, ip, port, "join notification");
+            /* No address: an older room, or one the server decided needed no
+             * signaling. rpcn_session_pump_signaling asks. */
+            break;
+        }
 
-            rpcn_session_note(s, "%s joined the room", s->peer_npid[0] ? s->peer_npid : "a peer");
-
-            if (has_addr && ip && port) {
-                rpcn_session_set_peer(s, ip, port, "join notification");
-            } else if (s->peer_npid[0] && !rpcn_session_peer_known(s) && s->pending_signaling == 0) {
-                /* No address in the notification: an older room, or one the server
-                 * decided needed no signaling. Ask directly — which also makes the
-                 * server tell the PEER about us. */
-                s->pending_signaling = rpcn_request_signaling_infos(&s->client, s->peer_npid);
+        case RPCN_NOTIF_USER_LEFT_ROOM: {
+            rpcn_member_info_t m;
+            uint64_t room_id = 0;
+            if (!rpcn_parse_member_notification(pkt->payload, pkt->payload_size, &room_id, &m)) break;
+            if (room_id != s->room_id) break;
+            rpcn_session_remove_member(s, m.member_id);
+            /* The owner may be who left, and nobody will say who took over. */
+            rpcn_session_refresh_room(s);
+            if (s->stage == RPCN_STAGE_LINKED) {
+                bool any = false;
+                for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) if (s->peers[i].used && s->peers[i].heard) any = true;
+                if (!any) s->stage = s->is_host ? RPCN_STAGE_HOSTING : RPCN_STAGE_JOINING;
             }
             break;
         }
 
-        case RPCN_NOTIF_USER_LEFT_ROOM:
         case RPCN_NOTIF_ROOM_DESTROYED: {
-            if (!rpcn_session_peer_known(s) && !s->peer_npid[0]) break;
-            rpcn_session_note(s, "the peer left the room");
-            s->peer_ip    = 0;
-            s->peer_port  = 0;
-            s->peer_heard = false;
-            s->peer_npid[0] = '\0';
-            s->signaling_retry_ms = 0;
-            if (s->stage == RPCN_STAGE_LINKED)
-                s->stage = s->is_host ? RPCN_STAGE_HOSTING : RPCN_STAGE_JOINING;
+            if (pkt->payload_size < 8 || rpcn_get_u64(pkt->payload) != s->room_id) break;
+            rpcn_session_note(s, "the room was closed");
+            rpcn_session_clear_room(s);
+            s->stage = RPCN_STAGE_ONLINE;
+            break;
+        }
+
+        case RPCN_NOTIF_UPDATED_ROOM_DATA_INTERNAL: {
+            rpcn_room_info_t room;
+            if (!rpcn_parse_room_update(pkt->payload, pkt->payload_size, &room)) break;
+            if (room.room_id != s->room_id) break;
+            rpcn_session_apply_room(s, &room);
+            break;
+        }
+
+        case RPCN_NOTIF_UPDATED_ROOM_MEMBER_DATA_INTERNAL: {
+            rpcn_member_info_t m;
+            uint64_t room_id = 0;
+            if (!rpcn_parse_member_notification(pkt->payload, pkt->payload_size, &room_id, &m)) break;
+            if (room_id != s->room_id) break;
+            rpcn_session_upsert_member(s, &m);
             break;
         }
 
@@ -445,11 +652,10 @@ static inline void rpcn_session_on_notification(rpcn_session_t *s, const rpcn_pa
             memset(npid, 0, sizeof(npid));
             if (!rpcn_parse_signaling_helper(pkt->payload, pkt->payload_size, npid, sizeof(npid),
                                              &ip, &port)) break;
-            if (npid[0] && strcmp(npid, s->npid) == 0) break;
-            if (s->peer_npid[0] && npid[0] && strcmp(npid, s->peer_npid) != 0)
-                break;   /* somebody else entirely — not the peer we are in a room with */
-            if (npid[0]) snprintf(s->peer_npid, sizeof(s->peer_npid), "%s", npid);
-            rpcn_session_set_peer(s, ip, port, "signaling helper");
+            if (npid[0] && rpcn_same_npid(npid, s->npid)) break;
+            /* Somebody not in our room is none of our business. */
+            rpcn_peer_t *p = rpcn_session_peer_by_npid(s, npid);
+            if (p) rpcn_session_set_peer_addr(s, p, ip, port, "signaling helper");
             break;
         }
 
@@ -486,6 +692,17 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
             s->pending_serverlist = rpcn_get_server_list(&s->client, s->com_id);
             continue;
         }
+
+        /* The room-state writes answer nothing worth keeping: the server echoes
+         * the change back as a notification, which is where it is applied. A
+         * refusal is worth a line, since it means the room did not move. */
+        if ((rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_DATA_INTERNAL
+            || (rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_MEMBER_DATA) {
+            if (pkt.error != RPCN_OK)
+                rpcn_session_note(s, "the server refused a room update (ErrorType=%u)", (unsigned)pkt.error);
+            continue;
+        }
+        if ((rpcn_command_t)pkt.command == RPCN_CMD_LEAVE_ROOM) continue;
 
         if (pkt.packet_id == s->pending_serverlist) {
             s->pending_serverlist = 0;
@@ -568,6 +785,14 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
             continue;
         }
 
+        if (pkt.packet_id == s->pending_room_data) {
+            s->pending_room_data = 0;
+            rpcn_room_info_t room;
+            if (pkt.error == RPCN_OK && rpcn_parse_room_data_internal(pkt.payload, pkt.payload_size, &room))
+                rpcn_session_apply_room(s, &room);
+            continue;
+        }
+
         if (pkt.packet_id == s->pending_room) {
             s->pending_room = 0;
             if (pkt.error != RPCN_OK) {
@@ -580,66 +805,63 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
                 return false;
             }
 
-            s->room_id = rpcn_parse_room_id(pkt.payload, pkt.payload_size);
-            if (!s->room_id) { rpcn_session_fail(s, "the room reply carried no room id"); return false; }
+            rpcn_room_info_t room;
+            if (!rpcn_parse_room_reply(pkt.payload, pkt.payload_size, &room)) {
+                rpcn_session_fail(s, "the room reply carried no room id");
+                return false;
+            }
+            s->room_id = room.room_id;
+            /* Read back rather than assumed, on BOTH sides. For a joiner this is
+             * the only place the host's settings arrive; for a host it is the
+             * server confirming what it actually stored (it clears the FULL bit
+             * it owns), so every member reads the same word from the same source. */
+            s->room_flags = room.flag_attr;
+            s->stage = s->is_host ? RPCN_STAGE_HOSTING : RPCN_STAGE_JOINING;
+            rpcn_session_apply_room(s, &room);
+            if (!s->my_member_id) {
+                rpcn_session_fail(s, "the room reply did not list us as a member");
+                return false;
+            }
 
-            /* Read back rather than assumed, on BOTH sides. For a guest this is the
-             * only place the host's settings arrive; for a host it is the server
-             * confirming what it actually stored (it clears the FULL bit it owns),
-             * so both peers end up reading the same word from the same source. */
-            s->room_flags = rpcn_parse_room_flag_attr(pkt.payload, pkt.payload_size);
-
-            if (s->is_host) {
-                /* Wait for a UserJoinedRoom notification, which tells us both that
-                 * a guest exists and where it is. */
-                s->stage = RPCN_STAGE_HOSTING;
-            } else {
-                char members[8][20];
-                uint32_t n = rpcn_parse_room_members(pkt.payload, pkt.payload_size, members, 8);
-                s->peer_npid[0] = '\0';
-                for (uint32_t i = 0; i < n; i++) {
-                    if (strcmp(members[i], s->npid) != 0) {
-                        snprintf(s->peer_npid, sizeof(s->peer_npid), "%s", members[i]);
-                        break;
-                    }
-                }
-                if (!s->peer_npid[0]) {
+            /* Every member already there, and where: in the join reply when the
+             * room has signaling on, so the common case needs no extra round
+             * trip. Anyone without one is asked about by the signaling pump. */
+            if (!s->is_host) {
+                uint16_t ids[RPCN_ROOM_MAX_MEMBERS];
+                uint32_t ips[RPCN_ROOM_MAX_MEMBERS];
+                uint16_t ports[RPCN_ROOM_MAX_MEMBERS];
+                uint32_t n = rpcn_parse_join_signaling_list(pkt.payload, pkt.payload_size,
+                                                            ids, ips, ports, RPCN_ROOM_MAX_MEMBERS);
+                for (uint32_t i = 0; i < n; i++)
+                    rpcn_session_set_peer_addr(s, rpcn_session_peer(s, ids[i]), ips[i], ports[i], "join reply");
+                if (!rpcn_session_peer_count(s)) {
                     rpcn_session_fail(s, "joined a room with no other member in it");
                     return false;
-                }
-
-                s->stage = RPCN_STAGE_JOINING;
-
-                /* The host's address is already in this reply when the room has
-                 * signaling on, so the common case needs no extra round trip. */
-                uint32_t ip = 0;
-                uint16_t port = 0;
-                if (rpcn_parse_join_signaling_addr(pkt.payload, pkt.payload_size, &ip, &port)
-                    && ip && port) {
-                    rpcn_session_set_peer(s, ip, port, "join reply");
-                } else {
-                    s->pending_signaling = rpcn_request_signaling_infos(&s->client, s->peer_npid);
                 }
             }
             continue;
         }
 
-        if (pkt.packet_id == s->pending_signaling) {
-            s->pending_signaling = 0;
+        /* A signaling lookup answers whichever member it was asked about. */
+        rpcn_peer_t *asked = NULL;
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS && !asked; i++)
+            if (s->peers[i].used && s->peers[i].pending_signaling == pkt.packet_id) asked = &s->peers[i];
+        if (asked) {
+            asked->pending_signaling = 0;
             uint32_t ip = 0;
             uint16_t port = 0;
             if (pkt.error != RPCN_OK
                 || !rpcn_parse_signaling_addr(pkt.payload, pkt.payload_size, &ip, &port)
                 || !ip || !port) {
-                /* NOT fatal. A peer the UDP helper has not seen yet answers
+                /* NOT fatal. A member the UDP helper has not seen yet answers
                  * NotFound, which is a timing accident rather than a broken
                  * session — it fixes itself within a keepalive or two. */
                 rpcn_session_note(s, "no address for '%s' yet (ErrorType=%u); retrying",
-                                  s->peer_npid, (unsigned)pkt.error);
-                s->signaling_retry_ms = net_now_ms() + RPCN_SIGNALING_RETRY_MS;
+                                  asked->npid, (unsigned)pkt.error);
+                asked->signaling_retry_ms = net_now_ms() + RPCN_SIGNALING_RETRY_MS;
                 continue;
             }
-            rpcn_session_set_peer(s, ip, port, "signaling lookup");
+            rpcn_session_set_peer_addr(s, asked, ip, port, "signaling lookup");
             continue;
         }
     }
@@ -657,44 +879,67 @@ static inline void rpcn_session_update(rpcn_session_t *s) {
 
     rpcn_session_pump_replies(s);
     rpcn_session_pump_keepalive(s);
-    rpcn_session_pump_signaling_retry(s);
-    rpcn_session_pump_punch(s);
+    if (rpcn_session_in_room(s)) {
+        rpcn_session_pump_signaling(s);
+        rpcn_session_pump_punch(s);
+    }
 }
 
 /* ---- Rooms --------------------------------------------------------------- */
 
+/* `room_bin` and `member_bin` are the room's first shared state and our own
+ * attribute (room.h), so nobody ever sees the room without them. */
 static inline bool rpcn_session_host(rpcn_session_t *s, uint32_t max_slot, const char *password,
-                                     uint32_t flag_attr) {
+                                     uint32_t flag_attr,
+                                     const uint8_t *room_bin, uint32_t room_len,
+                                     const uint8_t *member_bin, uint32_t member_len) {
     if (s->stage != RPCN_STAGE_ONLINE) {
         rpcn_session_fail(s, "cannot host before discovery has finished");
         return false;
     }
-    s->is_host    = true;
-    s->room_flags = 0;   /* adopted from the server's reply, like the room id */
-    s->peer_ip    = 0;
-    s->peer_port  = 0;
-    s->peer_heard = false;
-    s->peer_npid[0] = '\0';
-    s->pending_room = rpcn_create_room(&s->client, s->com_id, s->world_id,
-                                       max_slot ? max_slot : 2, password, flag_attr);
+    rpcn_session_clear_room(s);
+    s->is_host = true;
+    if (max_slot < 2) max_slot = 2;
+    if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
+    s->pending_room = rpcn_create_room(&s->client, s->com_id, s->world_id, max_slot, password,
+                                       flag_attr, room_bin, room_len, member_bin, member_len);
     if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
     return true;
 }
 
-static inline bool rpcn_session_join(rpcn_session_t *s, uint64_t room_id, const char *password) {
+static inline bool rpcn_session_join(rpcn_session_t *s, uint64_t room_id, const char *password,
+                                     const uint8_t *member_bin, uint32_t member_len) {
     if (s->stage != RPCN_STAGE_ONLINE) {
         rpcn_session_fail(s, "cannot join before discovery has finished");
         return false;
     }
-    s->is_host    = false;
-    s->room_flags = 0;
-    s->peer_ip    = 0;
-    s->peer_port  = 0;
-    s->peer_heard = false;
-    s->peer_npid[0] = '\0';
-    s->pending_room = rpcn_join_room(&s->client, s->com_id, room_id, password);
+    rpcn_session_clear_room(s);
+    s->is_host = false;
+    s->pending_room = rpcn_join_room(&s->client, s->com_id, room_id, password, member_bin, member_len);
     if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
     return true;
+}
+
+/* Leave the room and stay signed in. */
+static inline void rpcn_session_leave(rpcn_session_t *s) {
+    if (!s->room_id) return;
+    rpcn_leave_room(&s->client, s->com_id, s->room_id);
+    rpcn_session_note(s, "left room %llu", (unsigned long long)s->room_id);
+    rpcn_session_clear_room(s);
+    if (s->stage == RPCN_STAGE_HOSTING || s->stage == RPCN_STAGE_JOINING || s->stage == RPCN_STAGE_LINKED)
+        s->stage = RPCN_STAGE_ONLINE;
+}
+
+/* Publish the room's shared state. room.h's rule is that only the owner does. */
+static inline bool rpcn_session_set_room_state(rpcn_session_t *s, const uint8_t *bin, uint32_t len) {
+    if (!rpcn_session_in_room(s)) return false;
+    return rpcn_set_room_data_internal(&s->client, s->com_id, s->room_id, bin, len) != 0;
+}
+
+/* Publish our own member attribute. */
+static inline bool rpcn_session_set_member_state(rpcn_session_t *s, const uint8_t *bin, uint32_t len) {
+    if (!rpcn_session_in_room(s)) return false;
+    return rpcn_set_member_data_internal(&s->client, s->com_id, s->room_id, bin, len) != 0;
 }
 
 /* Ask the server for the rooms in our world, and optionally for YAMP's too. The
@@ -723,19 +968,30 @@ static inline bool rpcn_session_search_pending(const rpcn_session_t *s) {
 
 /* ---- Datagrams ----------------------------------------------------------- */
 
-static inline bool rpcn_session_send(rpcn_session_t *s, const void *data, uint32_t len) {
-    if (!s->peer_ip || !s->peer_port) return false;
-    return rpcn_send_to(&s->client, s->peer_ip, s->peer_port, data, len);
+static inline bool rpcn_session_send_to(rpcn_session_t *s, uint16_t member_id,
+                                        const void *data, uint32_t len) {
+    rpcn_peer_t *p = rpcn_session_peer(s, member_id);
+    if (!p || !p->ip || !p->port) return false;
+    return rpcn_send_to(&s->client, p->ip, p->port, data, len);
 }
 
-/* Bytes received from the peer, or 0. Signaling replies and punches are absorbed
- * here so nothing above ever sees them. */
-static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap) {
+/*
+ * Bytes received from a room member, or 0. `*from` is the member it came from,
+ * or 0 when the source is an address nobody has claimed yet -- the caller may
+ * then put a name to it with rpcn_session_claim, from what the datagram says
+ * about its sender. Signaling replies and punches are absorbed here so nothing
+ * above ever sees them.
+ */
+static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap,
+                                    uint16_t *from, uint32_t *from_ip, uint16_t *from_port) {
     for (;;) {
         uint32_t ip = 0;
         uint16_t port = 0;
         int got = rpcn_recv_from(&s->client, buf, cap, &ip, &port);
         if (got <= 0) return 0;
+        *from = 0;
+        if (from_ip)   *from_ip   = ip;
+        if (from_port) *from_port = port;
 
         /* Signaling replies share this socket; route them by SOURCE rather than
          * by content, since a signaling reply's leading bytes can look exactly
@@ -747,39 +1003,30 @@ static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap) 
          * 3658 HARDCODED (room_manager.rs and cmd_misc.rs both do it), so two
          * clients on one machine — or one whose peer has not yet been registered
          * — are told to punch at an address that is their own socket. Without
-         * this the punch comes straight back, `peer_heard` latches onto our own
-         * port, and every real datagram from the peer is then discarded as a
-         * stray. */
+         * this the punch comes straight back, a member latches onto our own port,
+         * and every real datagram from them is then discarded as a stray. */
         if (ip == s->client.local_ip && port == s->client.local_port) continue;
 
-        if (!s->peer_heard) {
-            /* First contact. Prefer the source we actually hear from over the one
-             * we were told about: a peer behind a symmetric NAT reaches us from a
-             * different port than the server observed, and that address is the
-             * only one that can work. Only the PORT may differ though — a datagram
-             * from an unrelated IP is not our peer. */
-            bool plausible = (!s->peer_ip || ip == s->peer_ip);
-            if (!plausible) continue;
+        if (!rpcn_session_in_room(s)) continue;
 
-            s->peer_heard = true;
-            bool moved = (port != s->peer_port || ip != s->peer_ip);
-            s->peer_ip   = ip;
-            s->peer_port = port;
-            if (s->stage == RPCN_STAGE_HOSTING || s->stage == RPCN_STAGE_JOINING)
-                s->stage = RPCN_STAGE_LINKED;
-            rpcn_session_note(s, moved
-                ? "the peer reached us from %s (not the advertised port); using that"
-                : "peer link established with %s", rpcn_session_peer_text(s));
-        } else if (ip != s->peer_ip || port != s->peer_port) {
-            continue;   /* stray datagram from somewhere else */
+        /* A punch names its sender, so it can introduce an address nobody told us. */
+        if (got == (int)RPCN_PUNCH_SIZE && memcmp(buf, g_rpcn_punch_tag, sizeof(g_rpcn_punch_tag)) == 0) {
+            rpcn_session_hear(s, rpcn_session_peer(s, rpcn_get_u16((const uint8_t *)buf + 4)), ip, port);
+            continue;
         }
 
-        /* A punch is not game traffic; it exists only to open the NAT. */
-        if (got == (int)sizeof(g_rpcn_punch) && memcmp(buf, g_rpcn_punch, sizeof(g_rpcn_punch)) == 0)
-            continue;
-
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+            rpcn_peer_t *p = &s->peers[i];
+            if (p->used && p->heard && p->ip == ip && p->port == port) { *from = p->member_id; break; }
+        }
         return got;
     }
+}
+
+/* A datagram from an address nobody has claimed says it is from `member_id`:
+ * adopt the address if that is plausible. True if it now belongs to them. */
+static inline bool rpcn_session_claim(rpcn_session_t *s, uint16_t member_id, uint32_t ip, uint16_t port) {
+    return rpcn_session_hear(s, rpcn_session_peer(s, member_id), ip, port);
 }
 
 /* ======================================================================== */

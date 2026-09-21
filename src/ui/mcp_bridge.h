@@ -1481,6 +1481,9 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
     if (mcp_json_get_u32(req, "delay", &v))       cfg->frame_delay = v;
     if (mcp_json_get_u32(req, "p2p_port", &v))    cfg->local_p2p_port = (uint16_t)v;
     if (mcp_json_get_u32(req, "browse_yamp", &v)) cfg->browse_yamp = v != 0;
+    if (mcp_json_get_u32(req, "max_players", &v)) cfg->max_players = v;
+    if (mcp_json_get_u32(req, "entry", &v))       cfg->entry = (uint8_t)v;
+    if (mcp_json_get_u32(req, "watch", &v))       cfg->watch_only = v != 0;
     /* A room id is 64 bits and mcp_json_get_u32 is not, so it travels as a
      * string. Quoted or not: mcp_json_get_str finds the quoted form, and the
      * unquoted one is read straight out of the request. */
@@ -1552,13 +1555,15 @@ static void mcp_cmd_netplay_search(const char *req, char *resp, int cap) {
 }
 
 /*
- * Accept: begin (or restart) a lockstepped session.
+ * Ready: this player wants to play. The room's owner starts the first match once
+ * every player in the room is ready (net/room.h); after that the room rolls on
+ * by itself, and this only matters again after netplay_stop.
  *
- * THE BOARD IS ABOUT TO COLD-BOOT. A session starts from power-on on both
- * machines, because that is the only state two copies with no savestates can be
- * certain to share. Anything the bridge had set up -- a fight in progress, a
- * character written into a fighter record, credits poked into RAM -- is gone
- * the moment the barrier releases.
+ * THE BOARD IS ABOUT TO COLD-BOOT. Every match starts from power-on on every
+ * machine in the room -- both fighters and every watcher -- because that is the
+ * only state copies with no savestates can be certain to share. Anything the
+ * bridge had set up -- a fight in progress, a character written into a fighter
+ * record, credits poked into RAM -- is gone the moment a match starts.
  *
  * AND MEMORY WRITES ARE DESYNCS. While a session is playing, write_memory
  * changes one of the two boards and not the other, which is precisely what the
@@ -1579,9 +1584,39 @@ static void mcp_cmd_netplay_start(char *resp, int cap) {
     mcp_netplay_reply(resp, cap, "start");
 }
 
+/* Not ready; and out of the match this board is running, if any. */
 static void mcp_cmd_netplay_stop(char *resp, int cap) {
     netplay_post(NETPLAY_CMD_STOP, NULL);
     mcp_netplay_reply(resp, cap, "stop");
+}
+
+/* {"cmd":"netplay_entry","entry":0|1|2} -- ask for no side, 1P or 2P: the PS3
+ * port's "1P Entry" / "2P Entry", which jumps the line for that side. */
+static void mcp_cmd_netplay_entry(const char *req, char *resp, int cap) {
+    netplay_config_t cfg;
+    mcp_netplay_cfg(req, &cfg);
+    netplay_post(NETPLAY_CMD_ENTRY, &cfg);
+    mcp_netplay_reply(resp, cap, "entry");
+}
+
+/* {"cmd":"netplay_watch","watch":1|0} -- sit out (never picked to fight), or not. */
+static void mcp_cmd_netplay_watch(const char *req, char *resp, int cap) {
+    netplay_config_t cfg;
+    mcp_netplay_cfg(req, &cfg);
+    netplay_post(NETPLAY_CMD_WATCH, &cfg);
+    mcp_netplay_reply(resp, cap, "watch");
+}
+
+/* The owner only: start the next match now, ready or not. */
+static void mcp_cmd_netplay_force_start(char *resp, int cap) {
+    netplay_post(NETPLAY_CMD_FORCE_START, NULL);
+    mcp_netplay_reply(resp, cap, "force_start");
+}
+
+/* Leave the room, stay signed in. */
+static void mcp_cmd_netplay_leave(char *resp, int cap) {
+    netplay_post(NETPLAY_CMD_LEAVE_ROOM, NULL);
+    mcp_netplay_reply(resp, cap, "leave");
 }
 
 static void mcp_cmd_netplay_disconnect(char *resp, int cap) {
@@ -1635,6 +1670,33 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
               st.peer_ready ? "true" : "false", st.peer_ready_gen);
     mcp_json_escape(esc, sizeof(esc), st.peer_addr);
     NP_APPEND("%s\"}", esc);
+
+    /* The room (net/room.h): its phase, the match, and every member in line
+     * order with the side they are on and what they have published. */
+    NP_APPEND(",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"fighters\":[%u,%u],"
+              "\"last_result\":%d,\"auto_start_s\":%u,\"max\":%u,\"me\":%u,\"members\":[",
+              st.room_known ? "true" : "false",
+              st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby",
+              st.room.match, st.room.fighter[0], st.room.fighter[1],
+              st.room.last_result <= 1 ? (int)st.room.last_result : -1,
+              st.auto_start_s, st.max_slot, st.my_member_id);
+    for (uint32_t i = 0; i < st.member_count && left > 256; i++) {
+        const netplay_member_status_t *m = &st.members[i];
+        mcp_json_escape(esc, sizeof(esc), m->npid);
+        NP_APPEND("%s{\"id\":%u,\"npid\":\"%s\",\"me\":%s,\"owner\":%s,\"line\":%d,\"side\":%d,"
+                  "\"known\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"playing\":%u,"
+                  "\"result_match\":%u,\"games\":%u,\"wins\":%u,\"points\":%u,"
+                  "\"addr_known\":%s,\"heard\":%s}",
+                  i ? "," : "", m->member_id, esc, m->is_me ? "true" : "false",
+                  m->is_owner ? "true" : "false", m->line_pos, m->side,
+                  m->known ? "true" : "false",
+                  (m->data.flags & ROOM_MEMBER_READY) ? "true" : "false",
+                  (m->data.flags & ROOM_MEMBER_WATCH) ? "true" : "false",
+                  m->data.entry, m->data.playing, m->data.result_match,
+                  m->data.games, m->data.wins, m->data.points,
+                  m->addr_known ? "true" : "false", m->heard ? "true" : "false");
+    }
+    NP_APPEND("]}");
 
     NP_APPEND(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
               st.frame, st.stalls, st.generation, st.seed);
@@ -1703,7 +1765,7 @@ static void mcp_cmd_board_reset(char *resp, int cap) {
     }
     netplay_status_t st;
     netplay_get_status(&st);
-    if (st.state == NETPLAY_SYNCING || st.state == NETPLAY_PLAYING) {
+    if (st.state == NETPLAY_SYNCING || st.state == NETPLAY_PLAYING || st.state == NETPLAY_WATCHING) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"a netplay session owns the board\"}");
         return;
     }
@@ -1922,6 +1984,10 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "netplay_search")           == 0) mcp_cmd_netplay_search(req, resp, cap);
     else if (strcmp(cmd, "netplay_start")            == 0) mcp_cmd_netplay_start(resp, cap);
     else if (strcmp(cmd, "netplay_stop")             == 0) mcp_cmd_netplay_stop(resp, cap);
+    else if (strcmp(cmd, "netplay_entry")            == 0) mcp_cmd_netplay_entry(req, resp, cap);
+    else if (strcmp(cmd, "netplay_watch")            == 0) mcp_cmd_netplay_watch(req, resp, cap);
+    else if (strcmp(cmd, "netplay_force_start")      == 0) mcp_cmd_netplay_force_start(resp, cap);
+    else if (strcmp(cmd, "netplay_leave")            == 0) mcp_cmd_netplay_leave(resp, cap);
     else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
     else if (strcmp(cmd, "board_reset")              == 0) mcp_cmd_board_reset(resp, cap);
     else if (strcmp(cmd, "dump_tex_stats")            == 0) {

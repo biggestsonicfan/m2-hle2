@@ -132,6 +132,15 @@
           <option value="6">6 frames</option>
         </select>
       </label>
+      <label>Players in the room
+        <select id="np-size" class="tool">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+      </label>
       <label>Private match password <input id="np-private" maxlength="8" autocomplete="off" placeholder="none"></label>
       <p class="fine left">The web version plays other people on the web version.</p>
     </details>
@@ -139,8 +148,10 @@
 
   <section id="np-room" hidden>
     <p id="np-room-lead" class="lead"></p>
-    <button id="np-start" class="tool primary big" hidden>Start match</button>
-    <p id="np-room-hint" class="fine">Both games restart together when the match begins.</p>
+    <ul id="np-members" class="np-rooms"></ul>
+    <button id="np-start" class="tool primary big" hidden>Ready</button>
+    <p id="np-room-hint" class="fine">Every game in the room restarts together when a match begins. Two play;
+      the winner stays on and the loser goes to the back of the line.</p>
     <p id="np-room-status" class="status"></p>
     <p id="np-desync" class="error" hidden></p>
     <p class="np-row">
