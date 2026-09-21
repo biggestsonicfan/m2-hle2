@@ -6,6 +6,8 @@ The first supported game is Sonic The Fighters.
 
 ## Install
 
+Step by step, for RetroArch and for ROCKNIX, with every setting and file: **INSTALL.md**.
+
 Every zip holds the core, `m2hle_libretro.info` (so RetroArch lists the core by name) and this
 file. Put the core in RetroArch's cores folder and the `.info` in its info folder. **Settings >
 Directory** in RetroArch shows where both are on your system.
@@ -26,10 +28,10 @@ itself; if it doesn't, pick `glcore` or `gl` in **Settings > Drivers**.
   `m2hle_libretro_android.so`.
 - **macOS:** the core is unsigned. If macOS blocks it, allow it in **System Settings > Privacy &
   Security**.
-- **ROCKNIX:** unpack the zip on the device and run `./install-rocknix.sh` as root, over ssh. It
+- **ROCKNIX:** unpack the zip on the device and run `bash install-rocknix.sh` as root, over ssh. It
   installs the core, adds **RetroArch / m2hle** to Sega Model 2's emulator list in
   EmulationStation, and keeps the core's files out of the ROM folder. Restart EmulationStation
-  afterwards. `./install-rocknix.sh --make-default` also makes it Model 2's default emulator.
+  afterwards. `bash install-rocknix.sh --make-default` also makes it Model 2's default emulator.
   Other handheld distributions: copy the two files by hand as above.
 
 ## Content

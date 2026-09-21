@@ -57,6 +57,23 @@ else
   echo "es_systems.cfg: added RetroArch / m2hle (backup es_systems.cfg.bak-$STAMP)"
 fi
 
+# 2b. The core in ES's feature list, so the game's options offer RetroArch's
+#     netplay for it. Only netplay: rewind and autosave need savestates, which
+#     this core does not have.
+if grep -q '<core name="m2hle"' "$ES/es_features.cfg"; then
+  echo "es_features.cfg: m2hle already listed"
+else
+  cp "$ES/es_features.cfg" "$ES/es_features.cfg.bak-$STAMP"
+  awk '
+    /<emulator name="retroarch"/ { ra = 1 }
+    { print }
+    ra && /<cores>/ { print "      <core name=\"m2hle\" features=\"netplay\" />"; ra = 0; done = 1 }
+    END { if (!done) exit 1 }
+  ' "$ES/es_features.cfg.bak-$STAMP" > "$ES/es_features.cfg.new"
+  mv "$ES/es_features.cfg.new" "$ES/es_features.cfg"
+  echo "es_features.cfg: added m2hle to the RetroArch cores (backup es_features.cfg.bak-$STAMP)"
+fi
+
 # 3. ROCKNIX's RetroArch keeps saves in the ROM folder, which is usually
 #    shared on the network. The core keeps its RPCN login with its saves, so
 #    for this core only, saves go to RetroArch's own (private) saves folder.
