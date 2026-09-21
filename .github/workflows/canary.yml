@@ -211,11 +211,201 @@ jobs:
           path: dist/*.zip
           retention-days: 14
 
+  # The libretro core (src/main_libretro.c, -DM2HLE_FRONTEND=libretro) for every
+  # RetroArch there is: desktop GL 4.1 core on Windows, Linux and macOS, GLES 3 on
+  # Android. The ARM Linux handhelds are the next job, which needs a container.
+  # Each zip is the core, its .info (RetroArch lists a core by it) and the notes.
+  #
+  # No platform here can hold back the desktop canary: publish only needs `build`.
+  libretro:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            core: build/Release/m2hle_libretro.dll
+          # 22.04, not latest: a core built against a newer glibc will not load
+          # on an older distribution, and 22.04's (2.35) is old enough for most.
+          - os: ubuntu-22.04
+            name: linux-x64
+            core: build/m2hle_libretro.so
+          - os: macos-latest
+            name: macos-universal
+            core: build/m2hle_libretro.dylib
+          - os: ubuntu-latest
+            name: android-arm64
+            core: build/m2hle_libretro_android.so
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      # The libretro frontend's submodule list: no ImGui, so no dear_bindings
+      # and no Python.
+      - name: Fetch build submodules
+        run: git submodule update --init vendor/sokol vendor/miniz
+
+      - name: Install Linux deps
+        if: matrix.name == 'linux-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev ninja-build
+
+      - name: Stamp version
+        id: ver
+        shell: bash
+        run: echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        shell: bash
+        run: |
+          args=(-S . -B build -DM2HLE_FRONTEND=libretro -DM2HLE_VERSION="${{ steps.ver.outputs.version }}")
+          case "${{ matrix.name }}" in
+            windows-x64)     args+=(-A x64) ;;
+            linux-x64)       args+=(-G Ninja -DCMAKE_BUILD_TYPE=Release) ;;
+            macos-universal) args+=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+                                    -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0) ;;
+            # The runner image carries an NDK; android-24 is the floor the
+            # netplay code needs (getifaddrs).
+            android-arm64)   args+=(-G Ninja -DCMAKE_BUILD_TYPE=Release
+                                    -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake"
+                                    -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24) ;;
+          esac
+          cmake "${args[@]}"
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      # What can be checked without RetroArch: that only the retro_* API is
+      # exported (everything else is the board's business), and which libraries
+      # the core asks the system for.
+      - name: Check the core
+        if: matrix.name == 'linux-x64' || matrix.name == 'android-arm64'
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = android-arm64 ]; then
+            BIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            NM="$BIN/llvm-nm"; READELF="$BIN/llvm-readelf"; STRIP="$BIN/llvm-strip"
+          else
+            NM=nm; READELF=readelf; STRIP=strip
+          fi
+          "$STRIP" "${{ matrix.core }}"
+          "$READELF" -d "${{ matrix.core }}" | grep NEEDED
+          other=$("$NM" -D --defined-only "${{ matrix.core }}" | awk '$2 == "T" && $3 !~ /^retro_/' | wc -l)
+          echo "exported retro_* functions: $("$NM" -D --defined-only "${{ matrix.core }}" | awk '$2 == "T" && $3 ~ /^retro_/' | wc -l)"
+          [ "$other" -eq 0 ] || { echo "exports besides retro_*:"; "$NM" -D --defined-only "${{ matrix.core }}" | awk '$2 == "T" && $3 !~ /^retro_/'; exit 1; }
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/stage
+          cp "${{ matrix.core }}" dist/stage/
+          sed 's/^display_version = .*/display_version = "${{ steps.ver.outputs.version }}"/' \
+            packaging/libretro/m2hle_libretro.info > dist/stage/m2hle_libretro.info
+          cp packaging/libretro/README.md dist/stage/
+          echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
+          cd dist/stage
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a ../m2hle-libretro-${{ matrix.name }}.zip ./*
+          else
+            zip -r ../m2hle-libretro-${{ matrix.name }}.zip ./*
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m2hle-libretro-${{ matrix.name }}
+          path: dist/*.zip
+          retention-days: 14
+
+  # The libretro core for 64-bit ARM Linux handhelds: ROCKNIX, Knulli, muOS,
+  # ArkOS and the rest, GLES 3.
+  #
+  # debian:bullseye, for its glibc (2.31): a core asks for the newest glibc it
+  # was built against, and the handheld distributions ship anything from 2.31
+  # up, where the sdl3 job's trixie (2.41) would only load on the newest. CMake
+  # comes from pip because bullseye's (3.18) predates CMakeLists.txt's 3.20.
+  # packaging/libretro/aarch64-generic.cmake targets plain ARMv8-A, so the
+  # Cortex-A53 / A35 handhelds run it too.
+  libretro-linux-arm64:
+    runs-on: ubuntu-latest
+    container: debian:bullseye
+    steps:
+      - name: Install the cross toolchain and the arm64 sysroot
+        run: |
+          dpkg --add-architecture arm64
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            crossbuild-essential-arm64 ninja-build git ca-certificates file zip python3-pip \
+            libgles-dev:arm64
+          pip3 install --no-cache-dir 'cmake>=3.20,<4'
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Fetch build submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule update --init vendor/sokol vendor/miniz
+
+      - name: Stamp version
+        id: ver
+        run: echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # CMAKE_TOOLCHAIN_FILE absolute, for the reason the rocknix job gives.
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DM2HLE_FRONTEND=libretro
+          -DM2HLE_LIBRETRO_GLES=ON
+          -DM2HLE_VERSION="${{ steps.ver.outputs.version }}"
+          -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/packaging/libretro/aarch64-generic.cmake"
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      # An aarch64 ELF, only the retro_* API exported, and no glibc symbol newer
+      # than bullseye's -- the last is the whole point of building here.
+      - name: Check the core
+        run: |
+          CORE=build/m2hle_libretro.so
+          aarch64-linux-gnu-strip "$CORE"
+          file "$CORE" | grep -q 'ELF 64-bit LSB .*ARM aarch64' || { file "$CORE"; exit 1; }
+          aarch64-linux-gnu-objdump -p "$CORE" | awk '/NEEDED/ { print $2 }'
+          newest=$(aarch64-linux-gnu-objdump -T "$CORE" | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n | tail -1)
+          echo "newest glibc symbol: $newest"
+          [ "${newest#GLIBC_2.}" -le 31 ] || { echo "needs a glibc newer than 2.31"; exit 1; }
+          other=$(aarch64-linux-gnu-nm -D --defined-only "$CORE" | awk '$2 == "T" && $3 !~ /^retro_/' | wc -l)
+          [ "$other" -eq 0 ] || { aarch64-linux-gnu-nm -D --defined-only "$CORE" | awk '$2 == "T" && $3 !~ /^retro_/'; exit 1; }
+
+      - name: Package
+        run: |
+          mkdir -p dist/stage
+          cp build/m2hle_libretro.so dist/stage/
+          sed 's/^display_version = .*/display_version = "${{ steps.ver.outputs.version }}"/' \
+            packaging/libretro/m2hle_libretro.info > dist/stage/m2hle_libretro.info
+          cp packaging/libretro/README.md packaging/libretro/install-rocknix.sh dist/stage/
+          chmod +x dist/stage/install-rocknix.sh
+          echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
+          cd dist/stage && zip -r ../m2hle-libretro-linux-arm64.zip ./*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m2hle-libretro-linux-arm64
+          path: dist/*.zip
+          retention-days: 14
+
   publish:
-    needs: [build, rocknix]
+    needs: [build, rocknix, libretro, libretro-linux-arm64]
     # A handheld build that fails must not hold back the Windows canary.
     # It does leave the previous m2hle-rocknix-arm64.zip on the release, so
-    # the notes below say which archives this run actually produced.
+    # the notes below say which archives this run actually produced. The same
+    # goes for every libretro zip.
     if: always() && github.event_name != 'pull_request' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
