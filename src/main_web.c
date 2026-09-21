@@ -53,6 +53,7 @@
 #include "audio_out.h"
 #include "input.h"
 #include "objview_cmd.h"  /* the debug object viewer, driven from the page */
+#include "json_min.h"
 
 /* The single TU that defines g_profiles[] / g_active_profile. Under M2HLE_WEB it
  * registers sfight alone. */
@@ -246,11 +247,14 @@ EMSCRIPTEN_KEEPALIVE void web_script(const char *text) {
 
 EMSCRIPTEN_KEEPALIVE void web_pause_at(unsigned frame) { g_web_pause_frame = frame; }
 
+/* The last slice waited on the other player rather than running. */
+static bool g_web_waited;
+
 /* One slice, if netplay allows it. Returns false when the board did not advance
- * (stalled on the peer, or the slice went to the barrier's reset), so the caller
- * keeps the time it owes instead of spending it. */
+ * (stalled on the peer, or the slice went to the barrier's reset). */
 static bool web_slice(void) {
     netplay_step_t np = emu_netplay_pump(&state.emu);
+    g_web_waited = (np == NETPLAY_STEP_WAIT);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
     if (state.emu.run_state != EMU_RUNNING) return false;
     while (g_web_script_at < g_web_script_n && g_web_script[g_web_script_at].frame <= g_emu_frames)
@@ -289,7 +293,19 @@ static void web_run_owed_slices(void) {
         return;
     }
     for (int n = 0; n < WEB_MAX_SLICES_PER_FRAME && state.owed_us >= WEB_SLICE_DUE_US; n++) {
-        if (!web_slice()) break;
+        if (!web_slice()) {
+            /* Waiting on the other player: let the time go rather than owe it.
+             * Owed, it is repaid with an extra slice on the next callback, which
+             * puts this board straight back a fraction of a frame ahead of the
+             * other one -- and it waits again, every frame, for as long as the
+             * two clocks keep that phase. Measured after a hidden tab came back
+             * (tools/web-netplay.mjs --hide-a): ~40 waits a second, indefinitely.
+             * Dropped, the board that was ahead settles in just behind and stops
+             * waiting. Both still run at the board's rate: lockstep holds either
+             * one to the other's pace whatever this does. */
+            if (g_web_waited) state.owed_us = 0;
+            break;
+        }
         state.owed_us -= EMU_SLICE_US;
     }
 }
@@ -323,6 +339,14 @@ EMSCRIPTEN_KEEPALIVE void web_audio_use_fallback(void) {
  * worklet's reports). Clamped here too: it goes straight into the resampler. */
 EMSCRIPTEN_KEEPALIVE void web_audio_set_nudge(double nudge) {
     g_web_audio_nudge = nudge < -0.01 ? -0.01 : nudge > 0.01 ? 0.01 : nudge;
+}
+
+/* What the board produced since the last call goes to the worklet in one chunk. */
+static void web_push_audio(void) {
+    if (g_web_audio != WEB_AUDIO_WORKLET) return;
+    int frames = audio_out_drain(g_web_audio_chunk, WEB_AUDIO_CHUNK_FRAMES, g_web_audio_nudge);
+    if (frames > 0)
+        EM_ASM({ Module.m2hleAudioPush($0, $1); }, g_web_audio_chunk, frames);
 }
 
 /* ---- sokol_app callbacks -------------------------------------------------- */
@@ -384,13 +408,7 @@ static void frame(void) {
     g_web_perf.callbacks++;
 
     web_run_owed_slices();
-
-    /* What the board produced this frame goes to the worklet in one chunk. */
-    if (g_web_audio == WEB_AUDIO_WORKLET) {
-        int frames = audio_out_drain(g_web_audio_chunk, WEB_AUDIO_CHUNK_FRAMES, g_web_audio_nudge);
-        if (frames > 0)
-            EM_ASM({ Module.m2hleAudioPush($0, $1); }, g_web_audio_chunk, frames);
-    }
+    web_push_audio();
 
     const int64_t render_t0 = emu_now_us();
     if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameBegin(); });
@@ -713,3 +731,194 @@ EMSCRIPTEN_KEEPALIVE int web_objview_showing(void) { return g_web_objview_show; 
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_queued(void)    { return audio_out_queued(); }
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_underruns(void) { return (unsigned)g_audio_out.underruns; }
 EMSCRIPTEN_KEEPALIVE unsigned web_audio_resyncs(void)   { return (unsigned)g_audio_out.resyncs; }
+
+/* ---- Netplay ---------------------------------------------------------------
+ *
+ * The page's sign-in, lobby and room screens (web/site/m2hle-netplay.js) drive
+ * netplay.h through these, the way the desktop's netplay window does: they read
+ * a snapshot and post commands, and never touch netplay state directly.
+ *
+ * A command is staged a field at a time and then posted by name:
+ *
+ *   web_netplay_begin()                      start from what is stored
+ *   web_netplay_set("npid", "sonic")         ... any fields
+ *   web_netplay_post("connect")              queue it
+ *
+ * rather than as one JSON string, because a password can hold any character and
+ * json_min.h reads a quote as the end of the value.
+ *
+ * The server is fixed. The gateway decides where the stream really goes (tls.h,
+ * web backend); the name still matters because a Twitch login token is only
+ * offered to the server that issued it (netplay_twitch_reuse), and that is this
+ * one.
+ */
+#define WEB_NETPLAY_SERVER "rpcn.sonicthefighte.rs"
+
+static netplay_config_t g_web_np;
+
+static void web_netplay_defaults(netplay_config_t *c) {
+    snprintf(c->server, sizeof(c->server), "%s", WEB_NETPLAY_SERVER);
+    c->port = RPCN_DEFAULT_PORT;
+    c->fingerprint[0] = '\0';
+    c->browse_yamp = false;
+    c->local_p2p_port = 0;
+}
+
+/* Where the gateway is: wss://rpcn.sonicthefighte.rs/gw unless the page says
+ * otherwise (?gw=, a local gateway for testing). Only before connecting. */
+EMSCRIPTEN_KEEPALIVE void web_netplay_set_gateway(const char *url) {
+    if (url && (!strncmp(url, "wss://", 6) || !strncmp(url, "ws://", 5)))
+        snprintf(g_web_gateway_url, sizeof(g_web_gateway_url), "%s", url);
+}
+
+EMSCRIPTEN_KEEPALIVE void web_netplay_begin(void) {
+    memset(&g_web_np, 0, sizeof(g_web_np));
+    netplay_stored_settings(&g_web_np);
+    web_netplay_defaults(&g_web_np);
+}
+
+EMSCRIPTEN_KEEPALIVE int web_netplay_set(const char *key, const char *value) {
+    if (!key || !value) return -1;
+    netplay_config_t *c = &g_web_np;
+#define WEB_NP_STR(name) if (!strcmp(key, #name)) { snprintf(c->name, sizeof(c->name), "%s", value); return 0; }
+    WEB_NP_STR(npid)
+    WEB_NP_STR(password)
+    WEB_NP_STR(token)
+    WEB_NP_STR(email)
+    WEB_NP_STR(room_password)
+#undef WEB_NP_STR
+    if (!strcmp(key, "room_id"))     { c->room_id = strtoull(value, NULL, 10); return 0; }
+    if (!strcmp(key, "frame_delay")) { c->frame_delay = (uint32_t)strtoul(value, NULL, 10); return 0; }
+    return -1;
+}
+
+EMSCRIPTEN_KEEPALIVE int web_netplay_post(const char *cmd) {
+    static const struct { const char *name; netplay_cmd_kind_t kind; } k[] = {
+        { "connect",        NETPLAY_CMD_CONNECT },
+        { "disconnect",     NETPLAY_CMD_DISCONNECT },
+        { "host",           NETPLAY_CMD_HOST },
+        { "join",           NETPLAY_CMD_JOIN },
+        { "search",         NETPLAY_CMD_SEARCH },
+        { "start",          NETPLAY_CMD_START },
+        { "stop",           NETPLAY_CMD_STOP },
+        { "create_account", NETPLAY_CMD_CREATE_ACCOUNT },
+        { "resend_token",   NETPLAY_CMD_RESEND_TOKEN },
+        { "twitch_start",   NETPLAY_CMD_TWITCH_START },
+        { "twitch_cancel",  NETPLAY_CMD_TWITCH_CANCEL },
+        { "twitch_forget",  NETPLAY_CMD_TWITCH_FORGET },
+    };
+    if (!cmd) return -1;
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        if (strcmp(cmd, k[i].name)) continue;
+        web_netplay_defaults(&g_web_np);
+        netplay_post(k[i].kind, &g_web_np);
+        return 0;
+    }
+    return -1;
+}
+
+/* Sign out: leave, and forget every credential this browser holds -- the Twitch
+ * login token and a remembered password alike. */
+EMSCRIPTEN_KEEPALIVE void web_netplay_signout(void) {
+    netplay_post(NETPLAY_CMD_DISCONNECT, NULL);
+    netplay_post(NETPLAY_CMD_TWITCH_FORGET, NULL);
+    g_netplay.cfg.password[0] = '\0';
+    g_netplay.cfg.token[0]    = '\0';
+    netplay_settings_save();
+}
+
+static int web_json_str(char *out, int cap, const char *key, const char *value, bool comma) {
+    char esc[640];
+    json_escape(esc, (int)sizeof esc, value);
+    return snprintf(out, (size_t)cap, "%s\"%s\":\"%s\"", comma ? "," : "", key, esc);
+}
+
+/*
+ * Everything the page draws, as JSON. `log_from` is the log_count the page last
+ * saw: only lines after it are included (all that are still in the ring).
+ */
+EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
+    static char out[48 * 1024];
+    static netplay_status_t st;
+    netplay_get_status(&st);
+    char *p = out;
+    int left = (int)sizeof out, n;
+#define PUT(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); if (n < 0 || n >= left) goto full; p += n; left -= n; } while (0)
+#define PUTS(key, val, comma) do { n = web_json_str(p, left, key, val, comma); if (n < 0 || n >= left) goto full; p += n; left -= n; } while (0)
+
+    PUT("{");
+    PUTS("state", netplay_state_text(st.state), false);
+    PUT(",\"stage\":%d", (int)st.stage);
+    PUTS("error", st.error, true);
+    PUTS("npid", g_netplay.cfg.npid, true);
+    PUT(",\"has_password\":%s", g_netplay.cfg.password[0] ? "true" : "false");
+    PUT(",\"family\":\"%s\",\"cross_play\":%s",
+        NETPLAY_BUILD_FAMILY == NETPLAY_FAMILY_WASM ? "web" : "desktop", NETPLAY_CROSS_PLAY ? "true" : "false");
+
+    /* The activation address is shown to the player as a link, so it gets the
+     * same test netplay_open_url applies before a desktop opens one. */
+    const char *uri = !strncmp(st.twitch_uri, "https://", 8) ? st.twitch_uri : "";
+    PUT(",\"twitch\":{\"state\":%d,\"signed_in\":%s", (int)st.twitch_state, st.twitch_signed_in ? "true" : "false");
+    PUTS("code", st.twitch_user_code, true);
+    PUTS("uri", uri, true);
+    PUTS("npid", st.twitch_npid, true);
+    PUTS("error", st.twitch_error, true);
+    PUT("}");
+
+    PUT(",\"account\":{\"state\":%d,\"job\":%d", (int)st.account_state, (int)st.account_job);
+    PUTS("error", st.account_error, true);
+    PUT("}");
+
+    PUT(",\"room\":{\"id\":\"%llu\",\"host\":%s,\"player\":%d,\"flags\":%u",
+        (unsigned long long)st.room_id, st.is_host ? "true" : "false", (int)st.local_player, st.room_flags);
+    PUTS("peer", st.peer_npid, true);
+    PUT(",\"peer_known\":%s,\"peer_heard\":%s,\"peer_ready\":%s}",
+        st.peer_known ? "true" : "false", st.peer_heard ? "true" : "false", st.peer_ready ? "true" : "false");
+
+    PUT(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"delay\":%u",
+        st.frame, st.stalls, st.generation, (unsigned)g_netplay.cfg.frame_delay);
+    if (st.desync_frame != LOCKSTEP_NO_CHECK) PUT(",\"desync\":%u", st.desync_frame);
+    else                                      PUT(",\"desync\":null");
+
+    PUT(",\"search_pending\":%s,\"rooms\":[", st.search_pending ? "true" : "false");
+    for (uint32_t i = 0; i < st.room_count && i < RPCN_MAX_ROOMS; i++) {
+        const rpcn_room_listing_t *r = &st.rooms[i];
+        const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
+        uint32_t family = (r->flag_attr >> NETPLAY_ROOM_FAMILY_SHIFT) & NETPLAY_ROOM_FAMILY_MASK;
+        PUT("%s{\"id\":\"%llu\",\"members\":%u,\"slots\":%u,\"password\":%s,\"delay\":%u,\"web\":%s",
+            i ? "," : "", (unsigned long long)r->room_id, r->cur_members, r->max_slots,
+            r->has_password ? "true" : "false",
+            (r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK,
+            family == NETPLAY_FAMILY_WASM ? "true" : "false");
+        PUTS("owner", r->owner, true);
+        PUTS("why", why ? why : "", true);
+        PUT("}");
+    }
+    PUT("]");
+
+    PUT(",\"log_count\":%u,\"log\":[", st.log_count);
+    uint32_t first = st.log_count > NETPLAY_LOG_LINES ? st.log_count - NETPLAY_LOG_LINES : 0;
+    if (log_from > first) first = log_from;
+    for (uint32_t i = first; i < st.log_count; i++) {
+        char esc[NETPLAY_LOG_LEN * 2];
+        json_escape(esc, (int)sizeof esc, st.log[i % NETPLAY_LOG_LINES]);
+        PUT("%s\"%s\"", i > first ? "," : "", esc);
+    }
+    PUT("]}");
+    return out;
+full:
+    snprintf(out, sizeof out, "{\"state\":\"%s\",\"error\":\"status too large\"}", netplay_state_text(st.state));
+    return out;
+#undef PUT
+#undef PUTS
+}
+
+/* A hidden tab gets no animation frames, so nothing would step the board and
+ * the opponent would stall. While a match is on, the page drives this from a
+ * worker's timer instead: the same slices and sound, no picture. */
+EMSCRIPTEN_KEEPALIVE void web_background_tick(void) {
+    web_run_owed_slices();
+    web_push_audio();
+}
+
+EMSCRIPTEN_KEEPALIVE int web_netplay_active(void) { return netplay_active() ? 1 : 0; }

@@ -42,6 +42,112 @@
   </section>
 </main>
 
+<!-- Playing online (m2hle-netplay.js, WEB-NETPLAY.md section 5). A side panel over
+     the game, opened from the bar once a game is loaded. -->
+<aside id="online" class="online" hidden aria-label="Play online">
+  <div class="online-head">
+    <h2>Play online</h2>
+    <button id="np-close" class="tool" aria-label="Close">Close</button>
+  </div>
+
+  <section id="np-signin">
+    <div id="np-returning" hidden>
+      <p class="lead">Welcome back, <strong id="np-returning-name"></strong>.</p>
+      <button id="np-continue" class="tool primary big">Continue</button>
+      <p class="fine"><button id="np-not-me" class="linkish">Not you? Sign out</button></p>
+    </div>
+    <div id="np-fresh">
+      <p class="lead">Sign in to find someone to play.</p>
+      <button id="np-twitch-start" class="tool primary big">Sign in with Twitch</button>
+      <p id="np-twitch-error" class="error" hidden></p>
+      <p class="np-or"><span>or use an RPCN account</span></p>
+      <div class="np-tabs" role="tablist">
+        <button id="np-tab-signin" class="tab" role="tab" aria-selected="true" aria-controls="np-form-signin">Sign in</button>
+        <button id="np-tab-create" class="tab" role="tab" aria-selected="false" aria-controls="np-form-create">Create an account</button>
+      </div>
+      <form id="np-form-signin" class="np-form" autocomplete="on">
+        <label>Name <input id="np-signin-name" name="username" autocomplete="username" required maxlength="16"></label>
+        <label>Password <input id="np-signin-password" name="password" type="password" autocomplete="current-password" required maxlength="63"></label>
+        <details>
+          <summary>The server e-mailed me a code</summary>
+          <label>Code from the e-mail <input id="np-signin-token" autocomplete="one-time-code" maxlength="63"></label>
+        </details>
+        <button class="tool primary" type="submit">Sign in</button>
+      </form>
+      <form id="np-form-create" class="np-form" autocomplete="on" hidden>
+        <label>Name <input id="np-create-name" name="username" autocomplete="username" required maxlength="16"
+               pattern="[A-Za-z0-9_\-]{3,16}" title="3 to 16 letters, digits, - or _"></label>
+        <label>Password <input id="np-create-password" name="new-password" type="password" autocomplete="new-password" required maxlength="63"></label>
+        <label>E-mail <input id="np-create-email" type="email" autocomplete="email" required maxlength="127"></label>
+        <p class="fine left">Your e-mail is kept by the server for your account and is not shown to anyone.</p>
+        <button class="tool primary" type="submit">Create account</button>
+        <p id="np-create-status" class="status" role="status"></p>
+        <p id="np-create-error" class="error" hidden></p>
+      </form>
+      <p class="fine">Your sign-in is remembered in this browser until you sign out.</p>
+    </div>
+  </section>
+
+  <section id="np-twitch" hidden>
+    <p id="np-twitch-lead" class="lead"></p>
+    <div id="np-twitch-code-box" hidden>
+      <p id="np-twitch-code" class="np-code" aria-label="Your sign-in code"></p>
+      <p class="np-row">
+        <button id="np-twitch-copy" class="tool">Copy code</button>
+        <a id="np-twitch-link" class="tool primary" target="_blank" rel="noopener noreferrer" hidden>Open Twitch</a>
+      </p>
+      <p class="status">Waiting for Twitch…</p>
+    </div>
+    <button class="tool np-cancel">Cancel</button>
+  </section>
+
+  <section id="np-busy" hidden>
+    <p id="np-busy-text" class="lead">Signing in…</p>
+  </section>
+
+  <section id="np-failed" hidden>
+    <p class="lead">That didn't work.</p>
+    <p id="np-failed-text" class="error"></p>
+    <button id="np-failed-back" class="tool primary">Back</button>
+  </section>
+
+  <section id="np-lobby" hidden>
+    <p class="np-me">Signed in as <strong id="np-me"></strong> · <button id="np-signout" class="linkish">Sign out</button></p>
+    <button id="np-create-match" class="tool primary big">Create a match</button>
+    <h3>Open matches <span id="np-rooms-count" class="status"></span></h3>
+    <ul id="np-rooms" class="np-rooms"></ul>
+    <p id="np-rooms-empty" class="status"><span id="np-rooms-empty-text"></span></p>
+    <p id="np-quality" class="status"></p>
+    <details class="np-advanced">
+      <summary>Advanced</summary>
+      <label>Input delay
+        <select id="np-delay" class="tool">
+          <option value="auto" id="np-delay-auto">Automatic</option>
+          <option value="2">2 frames</option>
+          <option value="3">3 frames</option>
+          <option value="4">4 frames</option>
+          <option value="5">5 frames</option>
+          <option value="6">6 frames</option>
+        </select>
+      </label>
+      <label>Private match password <input id="np-private" maxlength="8" autocomplete="off" placeholder="none"></label>
+      <p class="fine left">The web version plays other people on the web version.</p>
+    </details>
+  </section>
+
+  <section id="np-room" hidden>
+    <p id="np-room-lead" class="lead"></p>
+    <button id="np-start" class="tool primary big" hidden>Start match</button>
+    <p id="np-room-hint" class="fine">Both games restart together when the match begins.</p>
+    <p id="np-room-status" class="status"></p>
+    <p id="np-desync" class="error" hidden></p>
+    <p class="np-row">
+      <button id="np-stop" class="tool" hidden>End match</button>
+      <button id="np-leave" class="tool">Leave</button>
+    </p>
+  </section>
+</aside>
+
 <!-- The tools drawer: a lag check and the emulator's log (m2hle-tools.js). It sits
      in the page's column, so opening it makes the game smaller, not covered. -->
 <section id="drawer" class="drawer" hidden aria-label="Tools">
@@ -93,14 +199,18 @@
     <span><kbd>1</kbd> start</span>
   </div>
   <div class="bar-tools">
+    <button id="btn-online" class="tool online-btn" aria-expanded="false" aria-controls="online" hidden><span id="btn-online-label">Play online</span></button>
     <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>
     <button id="btn-console" class="tool" aria-expanded="false" aria-controls="drawer">Console <span id="console-badge" class="badge" hidden></span></button>
   </div>
 </footer>
 
-<!-- ?v= is the build: see web/stamp-site.cmake. -->
+<!-- ?v= is the build: see web/stamp-site.cmake. Every script is this site's own and
+     none comes from anywhere else: the netplay sign-in is remembered in this origin's
+     localStorage, which any script on the page could read. Keep it that way (CI checks). -->
 <script src="m2hle-tools.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-objview.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-netplay.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-page.js?v=@M2HLE_VERSION@"></script>
 <script async src="m2hle.js?v=@M2HLE_VERSION@"></script>
 </body>

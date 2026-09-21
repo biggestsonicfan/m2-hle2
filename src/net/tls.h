@@ -11,7 +11,9 @@
  * compiles to a stub that fails the connect with a message saying so, which
  * keeps the rest of net/ building and running on POSIX (the lockstep engine, the
  * packet formats and the LAN/direct path are all platform-agnostic) while
- * leaving exactly one file to write for an OpenSSL backend later. The seam is
+ * leaving exactly one file to write for an OpenSSL backend later. The web build
+ * (Emscripten) has a third backend that is not TLS at all: a WebSocket to the
+ * gateway, which holds the TLS session to RPCN (see that section below). The seam is
  * the tls_client_t API below and nothing else: no other module knows Schannel
  * exists.
  *
@@ -567,6 +569,65 @@ static inline int tls_recv(tls_client_t *t, void *buf, uint32_t cap) {
 }
 
 /* ======================================================================== */
+#elif defined(__EMSCRIPTEN__)
+/* ======================================================================== */
+/*
+ * The web build: no TLS here at all. The session is a WebSocket to the gateway
+ * (web_socket.h), which the BROWSER encrypts and whose certificate the browser
+ * checks against the public CA set -- VALIDATED mode, in effect -- and the
+ * gateway holds the TLS session to RPCN, pinned by its own config. So `host`,
+ * `port` and `pinned` are not ours to use: the gateway's upstream is fixed on
+ * purpose, and a page that could name one would make it an open proxy.
+ *
+ * The connect never blocks. It returns true at once; sends queue until the
+ * socket opens; a gateway that cannot be reached, or that cannot reach RPCN,
+ * shows up as the stream closing, with the gateway's reason, on the next read.
+ */
+
+static inline void tls_close(tls_client_t *t) {
+    net_close(&t->sock);
+    t->connected   = false;
+    t->peer_closed = false;
+}
+
+static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
+                               const cert_fingerprint_t *pinned) {
+    (void)host; (void)port; (void)pinned;
+    memset(t, 0, sizeof(*t));
+    char url[300];
+    m2ws_url(url, sizeof(url), "stream");
+    t->sock = m2ws_open(url, 0);
+    if (m2ws_state(t->sock) == M2WS_CLOSED) {
+        m2ws_error(t->sock, t->error, (int)sizeof(t->error));
+        net_close(&t->sock);
+        return false;
+    }
+    t->connected = true;
+    return true;
+}
+
+static inline bool tls_send_all(tls_client_t *t, const void *data, uint32_t len) {
+    if (!t->connected) { tls_fail(t, "not connected"); return false; }
+    if (!m2ws_send(t->sock, data, (int)len)) {
+        m2ws_error(t->sock, t->error, (int)sizeof(t->error));
+        if (!t->error[0]) tls_fail(t, "the connection to the gateway is not open");
+        return false;
+    }
+    return true;
+}
+
+static inline int tls_recv(tls_client_t *t, void *buf, uint32_t cap) {
+    if (!t->connected) return -1;
+    int got = m2ws_recv_stream(t->sock, buf, (int)cap);
+    if (got < 0) {
+        m2ws_error(t->sock, t->error, (int)sizeof(t->error));
+        t->connected = false;
+        return -1;
+    }
+    return got;
+}
+
+/* ======================================================================== */
 #else  /* no TLS backend on this platform */
 /* ======================================================================== */
 
@@ -596,6 +657,6 @@ static inline int tls_recv(tls_client_t *t, void *buf, uint32_t cap) {
     return -1;
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 / __EMSCRIPTEN__ */
 
 #endif /* TLS_H */

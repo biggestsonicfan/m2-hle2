@@ -1,0 +1,27 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8787 },
+  "trustProxy": true,
+  "origins": ["https://play.sonicthefighte.rs", "https://biggestsonicfan.github.io"],
+
+  "rpcn": {
+    "host": "127.0.0.1",
+    "port": 31313,
+    "tls": true,
+    "fingerprint": "PASTE THE SHA-256 OF RPCN'S cert.pem HERE"
+  },
+
+  "signaling": { "host": "143.198.49.181", "port": 3657 },
+  "udp": { "bind": "143.198.49.181", "portMin": 40000, "portMax": 40999 },
+  "pool": "100.64.0.0/16",
+  "allowPrivateDestinations": false,
+
+  "limits": {
+    "streamsPerIp": 6,
+    "dgramsPerIp": 4,
+    "maxSessions": 2000,
+    "datagramsPerSec": 240,
+    "bytesPerSec": 65536,
+    "maxPayload": 1200,
+    "streamIdleSec": 900
+  }
+}

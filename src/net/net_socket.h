@@ -20,6 +20,12 @@
  * session is opened and closed repeatedly (connect, fail, reconnect, host, join)
  * and a WSACleanup under a live socket breaks the next connect for no visible
  * reason. One counter for the whole program.
+ *
+ * THE WEB BUILD (Emscripten) has no sockets at all. There, the address and UDP
+ * functions below are replaced by ones that speak to the gateway over a
+ * WebSocket (web_socket.h), and a net_sock_t is a WebSocket id rather than a
+ * file descriptor. The TCP helpers are left compiled and never called: tls.h's
+ * web backend does not use them.
  */
 #ifndef NET_SOCKET_H
 #define NET_SOCKET_H
@@ -51,6 +57,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#ifdef __EMSCRIPTEN__
+#  include "web_socket.h"
+#endif
 
 /* ---- Handle -------------------------------------------------------------- */
 
@@ -113,6 +123,8 @@ static inline void net_close(net_sock_t *s) {
     if (!s || !net_sock_valid(*s)) return;
 #ifdef _WIN32
     closesocket(*s);
+#elif defined(__EMSCRIPTEN__)
+    m2ws_close(*s);   /* the only sockets the web build ever opens */
 #else
     close(*s);
 #endif
@@ -146,6 +158,15 @@ static inline bool net_pending(net_sock_t s, uint32_t *out) {
 
 /* ---- Addresses ----------------------------------------------------------- */
 
+/* "a.b.c.d:port" into `buf`. `ip` is network byte order. */
+static inline const char *net_addr_text(char *buf, size_t cap, uint32_t ip, uint16_t port) {
+    const uint8_t *o = (const uint8_t *)&ip;
+    snprintf(buf, cap, "%u.%u.%u.%u:%u", o[0], o[1], o[2], o[3], port);
+    return buf;
+}
+
+#ifndef __EMSCRIPTEN__
+
 /* First IPv4 address for `host`, in network byte order. 0 on failure. */
 static inline uint32_t net_resolve_ipv4(const char *host) {
     if (!host || !*host) return 0;
@@ -160,13 +181,6 @@ static inline uint32_t net_resolve_ipv4(const char *host) {
     }
     if (res) freeaddrinfo(res);
     return out;
-}
-
-/* "a.b.c.d:port" into `buf`. `ip` is network byte order. */
-static inline const char *net_addr_text(char *buf, size_t cap, uint32_t ip, uint16_t port) {
-    const uint8_t *o = (const uint8_t *)&ip;
-    snprintf(buf, cap, "%u.%u.%u.%u:%u", o[0], o[1], o[2], o[3], port);
-    return buf;
 }
 
 /*
@@ -253,6 +267,74 @@ static inline int net_udp_recv(net_sock_t s, void *buf, uint32_t cap,
     if (out_port)  *out_port  = ntohs(from.sin_port);
     return got;
 }
+
+#else /* __EMSCRIPTEN__ */
+
+/*
+ * The web build's versions (see the top of this file). The netcode's view is
+ * unchanged: a UDP socket that sends to and receives from IPv4 addresses. What
+ * it cannot know is that every datagram crosses the gateway, which is why two
+ * of these answer for the gateway rather than for this machine.
+ */
+
+/* The signaling helper is the only thing ever resolved (rpcn_connect), and a
+ * browser cannot resolve names: answer with the tag the gateway maps to the
+ * real helper, whatever the name. */
+static inline uint32_t net_resolve_ipv4(const char *host) {
+    (void)host;
+    static const uint8_t tag[4] = WEB_SIGNALING_TAG_BYTES;
+    uint32_t out;
+    memcpy(&out, tag, 4);
+    return out;
+}
+
+/* This tab has no address of its own that anyone could use. The gateway writes
+ * the session's virtual address into each signaling keepalive instead, which is
+ * the field this feeds (rpcn_send_signaling_ping). */
+static inline uint32_t net_local_ipv4_towards(uint32_t dest_be) {
+    (void)dest_be;
+    return 0;
+}
+
+/* `port` means nothing here: the gateway picks the public port. */
+static inline bool net_udp_open(net_sock_t *out, uint16_t port) {
+    (void)port;
+    char url[300];
+    m2ws_url(url, sizeof(url), "dgram");
+    int id = m2ws_open(url, 1);
+    if (m2ws_state(id) == M2WS_CLOSED) { m2ws_close(id); return false; }
+    *out = id;
+    return true;
+}
+
+#define NET_WEB_DGRAM_MAX 1400
+
+static inline bool net_udp_send(net_sock_t s, uint32_t ip_be, uint16_t port,
+                                const void *data, uint32_t len) {
+    if (!net_sock_valid(s) || !ip_be || !port || len > NET_WEB_DGRAM_MAX) return false;
+    uint8_t frame[6 + NET_WEB_DGRAM_MAX];
+    memcpy(frame, &ip_be, 4);                 /* already network order */
+    frame[4] = (uint8_t)(port >> 8);
+    frame[5] = (uint8_t)port;
+    memcpy(frame + 6, data, len);
+    return m2ws_send(s, frame, (int)(6 + len)) != 0;
+}
+
+static inline int net_udp_recv(net_sock_t s, void *buf, uint32_t cap,
+                               uint32_t *out_ip_be, uint16_t *out_port) {
+    if (!net_sock_valid(s)) return 0;
+    uint8_t frame[6 + NET_WEB_DGRAM_MAX];
+    int got = m2ws_recv_msg(s, frame, (int)sizeof(frame));
+    if (got < 6) return 0;
+    uint32_t n = (uint32_t)got - 6;
+    if (n > cap) return 0;
+    if (out_ip_be) memcpy(out_ip_be, frame, 4);
+    if (out_port)  *out_port = (uint16_t)((frame[4] << 8) | frame[5]);
+    memcpy(buf, frame + 6, n);
+    return (int)n;
+}
+
+#endif /* __EMSCRIPTEN__ */
 
 /* ---- TCP ----------------------------------------------------------------- */
 

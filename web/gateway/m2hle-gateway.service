@@ -1,0 +1,30 @@
+# /etc/systemd/system/m2hle-gateway.service
+#
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin m2hle-gateway
+#   sudo systemctl daemon-reload && sudo systemctl enable --now m2hle-gateway
+#   journalctl -u m2hle-gateway -f
+[Unit]
+Description=m2-hle web gateway (play.sonicthefighte.rs <-> RPCN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=m2hle-gateway
+WorkingDirectory=/opt/m2hle-gateway
+ExecStart=/usr/bin/node /opt/m2hle-gateway/gateway.mjs --config /etc/m2hle-gateway.json
+Restart=always
+RestartSec=2
+# It relays bytes and datagrams and needs nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

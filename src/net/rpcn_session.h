@@ -127,6 +127,13 @@ typedef struct {
     uint16_t peer_port;
     bool     peer_heard;     /* a datagram has actually arrived from the peer */
 
+    /* The signaling helper has answered a keepalive, so the server has our
+     * address on file. Taking a room before that is a mistake: RPCN copies a
+     * member's address into the room when it CREATES or JOINS it and never
+     * refreshes that copy, so a room taken too soon advertises no address for
+     * its owner -- for the life of the room. See netplay.h, "taking a room". */
+    bool     signaling_seen;
+
     /* Outstanding request ids, so replies route without blocking. */
     uint64_t pending_serverlist;
     uint64_t pending_worldlist;
@@ -229,6 +236,18 @@ static inline void rpcn_session_set_peer(rpcn_session_t *s, uint32_t ip, uint16_
                                          const char *source) {
     if (!ip || !port) return;
     bool changed = (ip != s->peer_ip || port != s->peer_port);
+    /* An address the peer has actually been HEARD from beats anything the server
+     * says afterwards. The two can disagree -- a room whose copy of an address was
+     * taken before the helper had it, or two players the server sees on one
+     * public address handed each other's local one -- and replacing a working
+     * address with a told one turns every datagram from the peer into a stray. */
+    if (changed && s->peer_heard) {
+        char told[32];
+        rpcn_session_note(s, "the server says the peer is at %s (via %s); keeping %s, which is "
+                             "where it is actually heard from",
+                          net_addr_text(told, sizeof(told), ip, port), source, rpcn_session_peer_text(s));
+        return;
+    }
     s->peer_ip   = ip;
     s->peer_port = port;
     s->signaling_retry_ms = 0;
@@ -254,6 +273,7 @@ static inline void rpcn_session_stop(rpcn_session_t *s) {
     s->peer_ip    = 0;
     s->peer_port  = 0;
     s->peer_heard = false;
+    s->signaling_seen = false;
     s->peer_npid[0] = '\0';
     s->sent_token = false;
     s->credential_refused = false;
@@ -720,7 +740,7 @@ static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap) 
         /* Signaling replies share this socket; route them by SOURCE rather than
          * by content, since a signaling reply's leading bytes can look exactly
          * like a game packet header. */
-        if (rpcn_is_signaling_source(&s->client, ip, port)) continue;
+        if (rpcn_is_signaling_source(&s->client, ip, port)) { s->signaling_seen = true; continue; }
 
         /* A datagram from OURSELVES. This is not paranoia: when two peers share a
          * public IPv4 the server hands each the other's LOCAL address with port

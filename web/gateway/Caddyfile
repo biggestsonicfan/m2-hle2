@@ -1,0 +1,17 @@
+# /etc/caddy/Caddyfile on the RPCN droplet.
+#
+# Caddy gets and renews the Let's Encrypt certificate for rpcn.sonicthefighte.rs
+# by itself (it needs TCP 80 and 443 open), and passes the gateway's two paths
+# through. RPCN itself stays on 31313 with its own certificate, untouched.
+#
+# rpcn. is a direct A record (not proxied by Cloudflare): every input packet of a
+# web match crosses this host, and a proxy would add a hop to each one.
+
+rpcn.sonicthefighte.rs {
+	handle /gw/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle {
+		respond "RPCN lives on port 31313. The web gateway is under /gw/." 404
+	}
+}

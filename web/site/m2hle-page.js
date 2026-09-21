@@ -71,6 +71,7 @@ function loadZip(bytes) {
     }
     $('panel').hidden = true;
     $('keys').hidden = false;
+    m2hleNetplay.onGame();
     $('canvas').focus();
   }, 0));
 }
@@ -270,6 +271,7 @@ var Module = {
     $('build').textContent = 'Build ' + VERSION;
     m2hleTools.onReady();
     m2hleObjview.onReady();
+    m2hleNetplay.onReady(Module);
     debugStart();
     /* Development only: ?rom=<path> loads a zip from THIS site, so a headless
      * browser can boot the game with no file dialog. A production site hosts no

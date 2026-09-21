@@ -103,13 +103,55 @@
 #define NETPLAY_PROTO_REV 1
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
- * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it. */
+ * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
+ *
+ * The low byte was the protocol revision alone; its top two bits now carry the
+ * BUILD FAMILY (see below). Native rooms keep family 0, so their byte is the
+ * bare revision exactly as before and every existing build reads them as it
+ * always has. A web room's byte is 0x41, which a build from before this reads
+ * as "a different netplay protocol" and refuses, with a sentence, before the
+ * join. That refusal is the one wanted, and it costs no native release. */
 #define NETPLAY_ROOM_REV_SHIFT    0
-#define NETPLAY_ROOM_REV_MASK     0xFFu
+#define NETPLAY_ROOM_REV_MASK     0x3Fu
+#define NETPLAY_ROOM_FAMILY_SHIFT 6
+#define NETPLAY_ROOM_FAMILY_MASK  0x3u
 #define NETPLAY_ROOM_DELAY_SHIFT  8
 #define NETPLAY_ROOM_DELAY_MASK   0xFu
 #define NETPLAY_ROOM_GAME_SHIFT   12
 #define NETPLAY_ROOM_GAME_MASK    0xFFFFu
+
+/*
+ * Which builds compute the same frames. Lockstep sends inputs, not state, so two
+ * boards stay together only if they compute bit-identical results, and
+ * "bit-identical" is a property of the compiler and the float code it emits as
+ * much as of the source. Native x86-64 (MSVC, gcc) and aarch64 built with
+ * -ffp-contract=off are one family (tools/ab-builds.mjs, and the ARM parity
+ * work). WebAssembly is its own until measured otherwise: WEB-PORT.md section
+ * 8 found it 31 instructions in 134 million away from gcc x86-64, and it has
+ * never been held against MSVC, which is what desktop players actually run.
+ *
+ * Matchmaking refuses a room of another family with a sentence rather than
+ * letting two boards diverge mid-match. When the web build is shown to match,
+ * NETPLAY_CROSS_PLAY turns this into a yes and nothing else changes
+ * (WEB-NETPLAY.md, "Cross-play").
+ */
+#define NETPLAY_FAMILY_NATIVE 0u
+#define NETPLAY_FAMILY_WASM   1u
+#ifdef __EMSCRIPTEN__
+#  define NETPLAY_BUILD_FAMILY NETPLAY_FAMILY_WASM
+#else
+#  define NETPLAY_BUILD_FAMILY NETPLAY_FAMILY_NATIVE
+#endif
+#ifndef NETPLAY_CROSS_PLAY
+#  define NETPLAY_CROSS_PLAY 0
+#endif
+
+static inline bool netplay_families_compatible(uint32_t a, uint32_t b) {
+    if (a == b) return true;
+    return NETPLAY_CROSS_PLAY
+        && ((a == NETPLAY_FAMILY_NATIVE && b == NETPLAY_FAMILY_WASM)
+         || (a == NETPLAY_FAMILY_WASM   && b == NETPLAY_FAMILY_NATIVE));
+}
 
 #define NETPLAY_LOG_LINES 64
 #define NETPLAY_LOG_LEN   160
@@ -321,6 +363,12 @@ typedef struct {
     bool              twitch_wanted;
     bool              twitch_tried_owner;
 
+    /* A Host or Join held back until the server has our address (see
+     * netplay_take_room). */
+    bool              room_deferred;
+    netplay_cmd_t     room_cmd;
+    uint64_t          room_deferred_ms;
+
     /* UI <-> emu thread */
     emu_mutex_t       mutex;
     bool              mutex_ready;
@@ -508,6 +556,7 @@ static inline uint32_t netplay_game_tag(const game_profile_t *p) {
 static inline uint32_t netplay_room_flags(const game_profile_t *p, uint32_t frame_delay) {
     uint32_t f = 0;
     f |= (NETPLAY_PROTO_REV & NETPLAY_ROOM_REV_MASK) << NETPLAY_ROOM_REV_SHIFT;
+    f |= (NETPLAY_BUILD_FAMILY & NETPLAY_ROOM_FAMILY_MASK) << NETPLAY_ROOM_FAMILY_SHIFT;
     f |= (frame_delay & NETPLAY_ROOM_DELAY_MASK)     << NETPLAY_ROOM_DELAY_SHIFT;
     f |= (netplay_game_tag(p) & NETPLAY_ROOM_GAME_MASK) << NETPLAY_ROOM_GAME_SHIFT;
     return f;
@@ -527,6 +576,12 @@ static inline const char *netplay_room_reject_reason(uint32_t flags, const game_
     uint32_t rev = (flags >> NETPLAY_ROOM_REV_SHIFT) & NETPLAY_ROOM_REV_MASK;
     if (rev != NETPLAY_PROTO_REV)
         return "that room was made by a build with a different netplay protocol";
+    uint32_t family = (flags >> NETPLAY_ROOM_FAMILY_SHIFT) & NETPLAY_ROOM_FAMILY_MASK;
+    if (!netplay_families_compatible(family, NETPLAY_BUILD_FAMILY)) {
+        return family == NETPLAY_FAMILY_WASM
+            ? "that match is on the web version, and the web and desktop versions cannot play each other yet"
+            : "that match is on the desktop version, and the web and desktop versions cannot play each other yet";
+    }
     uint32_t tag = (flags >> NETPLAY_ROOM_GAME_SHIFT) & NETPLAY_ROOM_GAME_MASK;
     if (tag != netplay_game_tag(p))
         return "that room is for a different game than the one loaded here";
@@ -822,18 +877,51 @@ static inline bool netplay_twitch_is_for(const netplay_config_t *cfg,
     return strcmp(cfg->twitch_npid, npid) == 0;
 }
 
+/*
+ * The web build has no file system: the same text goes to localStorage under the
+ * file's name instead. It is exactly as private as the origin -- any script the
+ * page runs can read it -- which is why the page loads no script from anywhere
+ * else (web/site/index.html says so, and CI checks).
+ */
+#ifdef __EMSCRIPTEN__
+EM_JS(void, netplay_web_store, (const char *key, const char *text), {
+    try { localStorage.setItem(UTF8ToString(key), UTF8ToString(text)); } catch (e) {}
+});
+EM_JS(int, netplay_web_fetch, (const char *key, char *out, int cap), {
+    let v = null;
+    try { v = localStorage.getItem(UTF8ToString(key)); } catch (e) {}
+    if (v === null) return 0;
+    stringToUTF8(v, out, cap);
+    return 1;
+});
+#endif
+
+typedef struct { char *p; size_t left; } netplay_text_t;
+
+static inline void netplay_text_add(netplay_text_t *t, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(t->p, t->left, fmt, args);
+    va_end(args);
+    if (n < 0) return;
+    size_t used = (size_t)n < t->left ? (size_t)n : (t->left ? t->left - 1 : 0);
+    t->p += used;
+    t->left -= used;
+}
+
 static inline void netplay_settings_save(void) {
-    FILE *f = fopen(NETPLAY_CFG_PATH, "w");
-    if (!f) return;
-    fprintf(f, "# m2-hle2 netplay settings. Delete this file to forget them.\n");
+    char text[2048];
+    netplay_text_t t = { text, sizeof(text) };
+    text[0] = '\0';
+    netplay_text_add(&t, "# m2-hle2 netplay settings. Delete this file to forget them.\n");
     if (g_netplay.cfg.password[0])
-        fprintf(f, "# This file holds a password in clear text.\n");
-    fprintf(f, "server=%s\n",       g_netplay.cfg.server);
-    fprintf(f, "port=%u\n",         (unsigned)g_netplay.cfg.port);
-    fprintf(f, "npid=%s\n",         g_netplay.cfg.npid);
-    fprintf(f, "fingerprint=%s\n",  g_netplay.cfg.fingerprint);
-    fprintf(f, "frame_delay=%u\n",  g_netplay.cfg.frame_delay);
-    fprintf(f, "browse_yamp=%d\n",  g_netplay.cfg.browse_yamp ? 1 : 0);
+        netplay_text_add(&t, "# This file holds a password in clear text.\n");
+    netplay_text_add(&t, "server=%s\n",       g_netplay.cfg.server);
+    netplay_text_add(&t, "port=%u\n",         (unsigned)g_netplay.cfg.port);
+    netplay_text_add(&t, "npid=%s\n",         g_netplay.cfg.npid);
+    netplay_text_add(&t, "fingerprint=%s\n",  g_netplay.cfg.fingerprint);
+    netplay_text_add(&t, "frame_delay=%u\n",  g_netplay.cfg.frame_delay);
+    netplay_text_add(&t, "browse_yamp=%d\n",  g_netplay.cfg.browse_yamp ? 1 : 0);
     /* Only when there is one: an empty `password=` in the file would claim a
      * stored credential that does not exist, and a Twitch login clears the
      * field precisely so that nothing is kept. The same for the e-mail token,
@@ -841,42 +929,63 @@ static inline void netplay_settings_save(void) {
      * for a password account, so a host that forgot it could not sign back in
      * unattended however well it remembered the password. */
     if (g_netplay.cfg.password[0])
-        fprintf(f, "password=%s\n", g_netplay.cfg.password);
+        netplay_text_add(&t, "password=%s\n", g_netplay.cfg.password);
     if (g_netplay.cfg.token[0])
-        fprintf(f, "token=%s\n",    g_netplay.cfg.token);
-    fprintf(f, "twitch_token=%s\n", g_netplay.cfg.twitch_token);
+        netplay_text_add(&t, "token=%s\n",    g_netplay.cfg.token);
+    netplay_text_add(&t, "twitch_token=%s\n", g_netplay.cfg.twitch_token);
     /* Saved beside the token and never without it: a token whose owner was
      * forgotten is the thing this field exists to prevent. */
     if (g_netplay.cfg.twitch_token[0])
-        fprintf(f, "twitch_npid=%s\n", g_netplay.cfg.twitch_npid);
+        netplay_text_add(&t, "twitch_npid=%s\n", g_netplay.cfg.twitch_npid);
+
+#ifdef __EMSCRIPTEN__
+    netplay_web_store(NETPLAY_CFG_PATH, text);
+#else
+    FILE *f = fopen(NETPLAY_CFG_PATH, "w");
+    if (!f) return;
+    fputs(text, f);
     fclose(f);
+#endif
+}
+
+static inline void netplay_settings_parse_line(netplay_config_t *cfg, char *line) {
+    if (line[0] == '#') return;
+    char *eq = strchr(line, '=');
+    if (!eq) return;
+    *eq = '\0';
+    char *key = line, *val = eq + 1;
+    size_t n = strlen(val);
+    while (n && (val[n - 1] == '\n' || val[n - 1] == '\r')) val[--n] = '\0';
+
+    if      (!strcmp(key, "server"))       snprintf(cfg->server, sizeof(cfg->server), "%s", val);
+    else if (!strcmp(key, "port"))         cfg->port = (uint16_t)atoi(val);
+    else if (!strcmp(key, "npid"))         snprintf(cfg->npid, sizeof(cfg->npid), "%s", val);
+    else if (!strcmp(key, "fingerprint"))  snprintf(cfg->fingerprint, sizeof(cfg->fingerprint), "%s", val);
+    else if (!strcmp(key, "frame_delay"))  cfg->frame_delay = (uint32_t)atoi(val);
+    else if (!strcmp(key, "browse_yamp"))  cfg->browse_yamp = atoi(val) != 0;
+    else if (!strcmp(key, "password"))     snprintf(cfg->password, sizeof(cfg->password), "%s", val);
+    else if (!strcmp(key, "token"))        snprintf(cfg->token, sizeof(cfg->token), "%s", val);
+    else if (!strcmp(key, "twitch_token")) snprintf(cfg->twitch_token, sizeof(cfg->twitch_token), "%s", val);
+    else if (!strcmp(key, "twitch_npid"))  snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", val);
 }
 
 static inline void netplay_settings_load(netplay_config_t *cfg) {
+#ifdef __EMSCRIPTEN__
+    char text[2048];
+    if (!netplay_web_fetch(NETPLAY_CFG_PATH, text, (int)sizeof(text))) return;
+    for (char *line = text; line && *line; ) {
+        char *end = strchr(line, '\n');
+        if (end) *end = '\0';
+        netplay_settings_parse_line(cfg, line);
+        line = end ? end + 1 : NULL;
+    }
+#else
     FILE *f = fopen(NETPLAY_CFG_PATH, "r");
     if (!f) return;
     char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#') continue;
-        char *eq = strchr(line, '=');
-        if (!eq) continue;
-        *eq = '\0';
-        char *key = line, *val = eq + 1;
-        size_t n = strlen(val);
-        while (n && (val[n - 1] == '\n' || val[n - 1] == '\r')) val[--n] = '\0';
-
-        if      (!strcmp(key, "server"))       snprintf(cfg->server, sizeof(cfg->server), "%s", val);
-        else if (!strcmp(key, "port"))         cfg->port = (uint16_t)atoi(val);
-        else if (!strcmp(key, "npid"))         snprintf(cfg->npid, sizeof(cfg->npid), "%s", val);
-        else if (!strcmp(key, "fingerprint"))  snprintf(cfg->fingerprint, sizeof(cfg->fingerprint), "%s", val);
-        else if (!strcmp(key, "frame_delay"))  cfg->frame_delay = (uint32_t)atoi(val);
-        else if (!strcmp(key, "browse_yamp"))  cfg->browse_yamp = atoi(val) != 0;
-        else if (!strcmp(key, "password"))     snprintf(cfg->password, sizeof(cfg->password), "%s", val);
-        else if (!strcmp(key, "token"))        snprintf(cfg->token, sizeof(cfg->token), "%s", val);
-        else if (!strcmp(key, "twitch_token")) snprintf(cfg->twitch_token, sizeof(cfg->twitch_token), "%s", val);
-        else if (!strcmp(key, "twitch_npid"))  snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", val);
-    }
+    while (fgets(line, sizeof(line), f)) netplay_settings_parse_line(cfg, line);
     fclose(f);
+#endif
 
     /* A file written before tokens had owners: the token was whoever's name
      * was stored with it, because there was only ever one account in it. */
@@ -1260,6 +1369,52 @@ static inline void netplay_do_stop(void) {
     netplay_log("session stopped");
 }
 
+/*
+ * TAKING A ROOM waits until the signaling helper has answered us.
+ *
+ * RPCN copies each member's address into the room when the room is created or
+ * joined, and never refreshes the copy. The address itself only reaches the
+ * server with the first UDP keepalive after login, so a Host or Join sent in the
+ * first moments of a session can snapshot nothing at all. Then the room tells a
+ * joiner there is no address for its owner (the joiner falls back to asking), and,
+ * worse, it tells two players who share a public address -- which every web player
+ * does, through the gateway -- DIFFERENT kinds of address for each other: one gets
+ * the other's public address from the room, the other the local one from a
+ * lookup, and each then discards the other's datagrams as strays. Found by
+ * tools/web-netplay.mjs, which hosts 0.2 s after signing in; a person clicking
+ * rarely beats the keepalive, a script always does.
+ *
+ * So Host and Join wait for the helper's reply, which proves the server has the
+ * address, for at most NETPLAY_ROOM_WAIT_MS. After that they go ahead anyway:
+ * a server with no UDP helper at all must still be usable for everything else.
+ */
+#define NETPLAY_ROOM_WAIT_MS 4000u
+
+static inline void netplay_take_room(const netplay_cmd_t *cmd) {
+    if (cmd->kind == NETPLAY_CMD_HOST) netplay_do_host(&cmd->cfg);
+    else                               netplay_do_join(&cmd->cfg);
+}
+
+static inline void netplay_room_or_defer(const netplay_cmd_t *cmd) {
+    if (g_netplay.session.signaling_seen) { netplay_take_room(cmd); return; }
+    if (!g_netplay.room_deferred)
+        netplay_log("waiting for the server to learn this machine's address before taking a room");
+    g_netplay.room_cmd         = *cmd;
+    g_netplay.room_deferred    = true;
+    g_netplay.room_deferred_ms = net_now_ms();
+}
+
+static inline void netplay_pump_deferred_room(void) {
+    if (!g_netplay.room_deferred) return;
+    if (g_netplay.state != NETPLAY_ONLINE) { g_netplay.room_deferred = false; return; }
+    bool timed_out = net_now_ms() - g_netplay.room_deferred_ms > NETPLAY_ROOM_WAIT_MS;
+    if (!g_netplay.session.signaling_seen && !timed_out) return;
+    if (!g_netplay.session.signaling_seen)
+        netplay_log("the server's UDP helper has not answered; taking the room anyway");
+    g_netplay.room_deferred = false;
+    netplay_take_room(&g_netplay.room_cmd);
+}
+
 static inline void netplay_pump_commands(void) {
     netplay_cmd_t cmd;
     while (netplay_take_cmd(&cmd)) {
@@ -1272,8 +1427,8 @@ static inline void netplay_pump_commands(void) {
                 netplay_do_connect(&cmd.cfg);
                 break;
             case NETPLAY_CMD_DISCONNECT: netplay_do_disconnect(); break;
-            case NETPLAY_CMD_HOST:       netplay_do_host(&cmd.cfg); break;
-            case NETPLAY_CMD_JOIN:       netplay_do_join(&cmd.cfg); break;
+            case NETPLAY_CMD_HOST:
+            case NETPLAY_CMD_JOIN:       netplay_room_or_defer(&cmd); break;
             case NETPLAY_CMD_SEARCH:
                 rpcn_session_search(&g_netplay.session, cmd.cfg.browse_yamp);
                 break;
@@ -1568,6 +1723,7 @@ static inline netplay_step_t netplay_begin_frame(void) {
     rpcn_session_update(&g_netplay.session);
     netplay_mirror_stage();
     netplay_drain_socket();
+    netplay_pump_deferred_room();
 
     /* The host republishes the seed while idling in a room, so a guest holds it
      * long before anyone presses start. */
