@@ -333,18 +333,23 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:bullseye
     steps:
-      # Bullseye's support has ended: its security suite on deb.debian.org lists
-      # packages that are already gone (404s), and archive.debian.org has no
-      # security suite for it. A build container needs neither, so: the frozen
-      # release and its updates from the archive, which keeps them for good.
+      # Bullseye's support has ended. Its security suite on deb.debian.org lists
+      # packages that are already gone (404s), archive.debian.org has no security
+      # suite for it, and without one the image's own libc6 (a security update)
+      # has no arm64 twin of the same version, which multiarch requires. So all
+      # three suites come from one moment on snapshot.debian.org, before the
+      # removal: every version the image has installed exists there for arm64.
       - name: Install the cross toolchain and the arm64 sysroot
         run: |
+          SNAP=20260825T000000Z
           printf '%s\n' \
-            'deb http://archive.debian.org/debian bullseye main' \
-            'deb http://archive.debian.org/debian bullseye-updates main' \
+            "deb http://snapshot.debian.org/archive/debian/$SNAP bullseye main" \
+            "deb http://snapshot.debian.org/archive/debian/$SNAP bullseye-updates main" \
+            "deb http://snapshot.debian.org/archive/debian-security/$SNAP bullseye-security main" \
             > /etc/apt/sources.list
           rm -f /etc/apt/sources.list.d/*
           dpkg --add-architecture arm64
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
           apt-get -o Acquire::Check-Valid-Until=false update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             crossbuild-essential-arm64 ninja-build git ca-certificates file zip python3-pip \
