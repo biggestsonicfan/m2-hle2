@@ -396,12 +396,25 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
  *                     mutex held where there is one.
  *   emu_slice_finish  what the slice ended on: a stop (breakpoint, watchpoint,
  *                     halt, ...), a game frame boundary -- counted, and handed to
- *                     netplay -- or neither. The caller paces on the answer. */
+ *                     netplay -- or neither. The caller paces on the answer. A
+ *                     frame that ended as a stop arrived is still a FRAME (and
+ *                     the run state is STOPPED as well): it ran, so it is
+ *                     counted and paced like any other. */
 typedef enum {
-    EMU_SLICE_STOPPED,   /* the run state is STOPPED now */
+    EMU_SLICE_STOPPED,   /* the run state is STOPPED now, mid-frame */
     EMU_SLICE_FRAME,     /* a game frame ended: pace to the next 60 Hz tick */
     EMU_SLICE_NO_FRAME,  /* the slice ran out without reaching the frame hook */
 } emu_slice_result_t;
+
+/* A pending stop, honoured BEFORE a slice rather than inside one: a slice that
+ * has begun runs its frame to the end (see the i960 loop in emu_slice_body).
+ * True when the run state is STOPPED now and no slice should run. */
+static inline bool emu_slice_should_stop(emu_thread_ctx_t *ctx) {
+    if (!ctx->request_stop) return false;
+    ctx->request_stop = 0;
+    ctx->run_state = EMU_STOPPED;
+    return true;
+}
 
 static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     g_frame_done = 0;
@@ -427,11 +440,17 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
     int max_steps = g_emu_steps_per_slice;
+    /* NOT `!ctx->request_stop`. A slice charges a whole frame to the timers
+     * above and to the sound board below whatever the i960 does in between,
+     * so a stop that cut the i960 short left that frame to be run again on
+     * resume -- and paid for twice: a bare stop/run 30 times a second cost
+     * the board 52 fps and put 762 samples to the frame instead of 735. A
+     * stop now takes effect between slices (emu_slice_should_stop), and a
+     * slice that has begun runs its frame to the end. */
     for (int i = 0;
          i < max_steps
          && !g_frame_done
          && !(board_vblank && g_vblank_acked)   /* stop at the frame's vsync-ACK */
-         && !ctx->request_stop
          && !ctx->cpu->halted;
          i++)
     {
@@ -472,6 +491,27 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
 
 static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
     bool board_vblank = g_active_profile && g_active_profile->quirks.board_vblank;
+    /* The frame first, the stop second. The other way round, a stop that
+     * landed as a frame ended threw the frame's bookkeeping away: it went
+     * uncounted, netplay never heard of it, and -- the part that showed -- it
+     * was never paced, so every such stop handed the board a free frame. A
+     * bridge client pausing around its reads (flystf) ran the board ~5% fast:
+     * 770 samples to the counted frame instead of 735, and a stream whose
+     * playout overflowed and jumped every few seconds. */
+    bool frame = g_frame_done || (board_vblank && g_vblank_acked);
+    if (frame) {
+        g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
+        /* Stamp the frame with the board audio produced up to its end: the
+         * slice's own samples are already in, sound_run_slice ran in the body
+         * above. sample first, frame second (see g_frame_clock). */
+        g_frame_clock.sample = g_sound.out_total;
+        g_frame_clock.frame  = g_emu_frames;
+        /* The netplay frame clock and this frame's state check. Fed the
+         * snapshot rather than the live CPU: it was taken under the mutex
+         * a few lines up and is the same state, without racing the UI. */
+        netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps);
+        if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+    }
     if (g_bp.hit || g_wp.hit || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
         if (g_bp.hit) {
             LOG_INFO("emu: breakpoint hit @ 0x%08X", g_bp.hit_addr);
@@ -498,23 +538,9 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
             LOG_WARN("emu: CPU halted @ IP=0x%08X (steps=%llu)",
                      ctx->cpu->sfr.ip, (unsigned long long)ctx->total_steps);
         }
-        return EMU_SLICE_STOPPED;
+        return frame ? EMU_SLICE_FRAME : EMU_SLICE_STOPPED;
     }
-    if (g_frame_done || (board_vblank && g_vblank_acked)) {
-        g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
-        /* Stamp the frame with the board audio produced up to its end: the
-         * slice's own samples are already in, sound_run_slice ran in the body
-         * above. sample first, frame second (see g_frame_clock). */
-        g_frame_clock.sample = g_sound.out_total;
-        g_frame_clock.frame  = g_emu_frames;
-        /* The netplay frame clock and this frame's state check. Fed the
-         * snapshot rather than the live CPU: it was taken under the mutex
-         * a few lines up and is the same state, without racing the UI. */
-        netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps);
-        if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
-        return EMU_SLICE_FRAME;
-    }
-    return EMU_SLICE_NO_FRAME;
+    return frame ? EMU_SLICE_FRAME : EMU_SLICE_NO_FRAME;
 }
 
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
@@ -525,6 +551,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
         emu_run_state_t s = ctx->run_state;
 
         if (s == EMU_RUNNING) {
+            if (emu_slice_should_stop(ctx)) continue;
             int64_t slice_start = emu_now_us();
 
             /* Netplay decides what this slice may do. STEP_OFF — one predictable
