@@ -7,6 +7,7 @@
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
  *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console]
  *        [--cpu-throttle N] [--eval JS] [--mobile] [--taps "coin@12,b1@20:300,dpad-right@22:500"]
+ *        [--hide 20:10]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -50,6 +51,12 @@
  * press the d-pad two thirds of the way out that way. Each tap prints the mask
  * the touch layer held, so a tap that missed says so.
  *
+ * --hide T:N covers the game with a new foreground tab at t=T s for N s, which
+ * makes the page hidden: no animation frames reach it. The game must keep
+ * running (web_background_tick, from m2hle-page.js's worker), so the per-second
+ * line should keep counting ~60 frames a second; it adds `hidden` and how many
+ * worker ticks ran the board.
+ *
  * No dependencies: Node 22+ has WebSocket and fetch built in.
  */
 import { spawn } from 'node:child_process';
@@ -76,6 +83,7 @@ const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((k) => {
   return { key, at: Number(at), done: false };
 });
 
+const [hideAt, hideFor] = (opt('--hide', '0:0')).split(':').map(Number);
 const mobile = args.includes('--mobile');
 const taps = (opt('--taps', '') || '').split(',').filter(Boolean).map((t) => {
   const m = /^([a-z0-9-]+)@([\d.]+)(?::(\d+))?$/.exec(t);
@@ -223,9 +231,20 @@ try {
     if (!held) failed = true;
   };
 
-  let lastFrames = 0, frames = 0;
+  let lastFrames = 0, frames = 0, cover = null;
   for (let s = 1; s <= seconds; s++) {
     await sleep(1000);
+    if (hideFor && s === hideAt) {
+      cover = await send('Target.createTarget', { url: 'about:blank', background: false });
+      console.log(`${stamp()}s  game tab covered for ${hideFor} s`);
+    }
+    if (cover && s === hideAt + hideFor) {
+      await send('Target.closeTarget', { targetId: cover.targetId });
+      cover = null;
+      console.log(`${stamp()}s  game tab uncovered`);
+    }
+    const bg = hideFor ? await evaluate("typeof Module !== 'undefined' && Module._web_perf ? " +
+      "[document.hidden, JSON.parse(Module.UTF8ToString(Module._web_perf(0))).background_ticks] : null") : null;
     const st = await evaluate(
       "(typeof Module !== 'undefined' && Module._web_state) ? [Module._web_state(), Module._web_frames(), " +
       "Module.m2hleAudioStats ? Module.m2hleAudioStats() : null, " +
@@ -245,7 +264,8 @@ try {
       const board = b && args.includes('--sound')
         ? `  snd voices=${bits(b.active)} midi w=${b.midi_writes} drops=${b.midi_drops} hi=${b.midi_hi} drains=${b.midi_drains} pc=${b.m68k_pc}`
         : '';
-      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${args.includes('--sound') ? '' : audio}${board}`);
+      const hid = bg ? `  hidden=${bg[0]} bg_ticks=${bg[1]}` : '';
+      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${args.includes('--sound') ? '' : audio}${board}${hid}`);
       lastFrames = frames;
     }
     for (const k of keys) if (!k.done && s >= k.at) { k.done = true; await press(k.key); }

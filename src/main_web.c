@@ -106,6 +106,7 @@ static struct {
     uint64_t render_us;         /* time building and submitting the picture (CPU side) */
     uint64_t long_callbacks;    /* callbacks that arrived more than 25 ms after the last */
     uint64_t forgiven_us;       /* board time dropped because a callback owed too much */
+    uint64_t background_ticks;  /* worker ticks that ran the board with no frame (web_background_tick) */
     uint32_t slice_us_max, render_us_max, gap_us_max;
     int64_t  last_cb_us;
     int      gpu_timing;        /* the page wants m2hleFrameBegin/End around the GL work */
@@ -593,14 +594,14 @@ EMSCRIPTEN_KEEPALIVE const char *web_perf(int reset) {
     snprintf(out, sizeof out,
              "{\"now_us\":%.0f,\"callbacks\":%llu,\"slices\":%llu,\"frames\":%u,"
              "\"slice_us\":%llu,\"render_us\":%llu,\"long_callbacks\":%llu,\"forgiven_us\":%llu,"
-             "\"slice_us_max\":%u,\"render_us_max\":%u,\"gap_us_max\":%u,"
+             "\"background_ticks\":%llu,\"slice_us_max\":%u,\"render_us_max\":%u,\"gap_us_max\":%u,"
              "\"render_scale\":%d,\"canvas_w\":%d,\"canvas_h\":%d,\"gpu_tiles\":%s,"
              "\"netplay\":\"%s\",\"netplay_stalls\":%u,\"netplay_delay\":%u}",
              (double)emu_now_us(),
              (unsigned long long)g_web_perf.callbacks, (unsigned long long)g_web_perf.slices, (unsigned)g_emu_frames,
              (unsigned long long)g_web_perf.slice_us, (unsigned long long)g_web_perf.render_us,
              (unsigned long long)g_web_perf.long_callbacks, (unsigned long long)g_web_perf.forgiven_us,
-             g_web_perf.slice_us_max, g_web_perf.render_us_max, g_web_perf.gap_us_max,
+             (unsigned long long)g_web_perf.background_ticks, g_web_perf.slice_us_max, g_web_perf.render_us_max, g_web_perf.gap_us_max,
              g_web_rt.scale, sapp_width(), sapp_height(), state.video.gpu ? "true" : "false",
              netplay_state_text(np.state), np.stalls, (unsigned)g_netplay.cfg.frame_delay);
     if (reset) g_web_perf.slice_us_max = g_web_perf.render_us_max = g_web_perf.gap_us_max = 0;
@@ -932,10 +933,23 @@ full:
 #undef PUTS
 }
 
-/* A hidden tab gets no animation frames, so nothing would step the board and
- * the opponent would stall. While a match is on, the page drives this from a
- * worker's timer instead: the same slices and sound, no picture. */
+/* The board runs on the wall clock, not on animation frames. A hidden tab gets
+ * none, and a throttled one (an occluded window, a power saver) gets them late,
+ * so on frames alone the game pauses or stutters and an opponent stalls. The
+ * page therefore also calls this from a worker's timer, several times a frame,
+ * for as long as the game is loaded (web/site/m2hle-page.js). While frame() is
+ * being called it does nothing: the slices are frame()'s, where they line up
+ * with the picture. Once frames go quiet it runs the board itself, with no
+ * picture. Both share one accumulator, so the hand-over either way neither skips
+ * nor repeats board time.
+ *
+ * Sound is still computed and drained -- the board has to compute it to stay the
+ * same board -- but the page suspends its AudioContext while hidden, and
+ * m2hleAudioPush drops what arrives then. */
+#define WEB_RAF_QUIET_US 50000
 EMSCRIPTEN_KEEPALIVE void web_background_tick(void) {
+    if (g_web_perf.last_cb_us && emu_now_us() - g_web_perf.last_cb_us < WEB_RAF_QUIET_US) return;
+    g_web_perf.background_ticks++;
     web_run_owed_slices();
     web_push_audio();
 }

@@ -119,9 +119,9 @@ A third fix is web-only (`main_web.c`). When a slice waits on the other player, 
 
 ### 5.3 A hidden tab
 
-A hidden tab gets no animation frames. While a match is on, a small Worker posts a tick every 16 ms and the page runs the board and sound from it, with no picture.
+A hidden tab gets no animation frames, and a throttled window gets them late. From the moment a game loads, a small Worker posts a tick every 8 ms (`keepRunning`, `m2hle-page.js`). `web_background_tick` does nothing while frames arrive, and runs the board from the tick once they have been quiet for 50 ms: no picture, and the AudioContext suspended while hidden. It is not specific to a match. A game on its own keeps running too.
 
-- *Measured in headless Chrome:* the hidden board kept ~57 fps, and the opponent never stalled out.
+- *Measured in headless Chrome:* the hidden board kept ~57 fps, and the opponent never stalled out. Without a match (`tools/web-smoke.mjs --hide 12:12`, headless Edge): 60-61 fps for the 12 s hidden, sound back on return.
 - Not yet measured in Firefox or Safari.
 
 ### 5.4 The panel ([web/site/m2hle-netplay.js](web/site/m2hle-netplay.js))
