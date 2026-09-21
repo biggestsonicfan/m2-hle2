@@ -139,9 +139,15 @@ plainly, and the account name / password fields below are the ordinary path — 
 register an account for you if you have none, and can re-send the verification e-mail if the
 server uses them.
 
-Settings live in `m2hle_netplay.cfg` in the working directory, written once a login is known to
-work. The Twitch login token is stored there, because the device flow exists precisely so it only
-happens once; a typed password never is.
+Settings live in one file per user — `%APPDATA%\m2hle2\netplay.cfg` on Windows,
+`~/.config/m2hle2/netplay.cfg` elsewhere — written once a login is known to work, and shared by
+every copy of the emulator on the machine. The Twitch login token is stored there, because the
+device flow exists precisely so it only happens once. A password you type is stored too, in clear
+text, so an unattended host can sign itself back in. The server keeps one Twitch token per account,
+so signing in again anywhere retires the old one; a file shared by all copies is what keeps one
+sign-in from logging the others out. `--net-config <file>` uses another file, for a second account
+on the same machine. An `m2hle_netplay.cfg` left in the working directory by an older build is
+copied over the first time.
 
 **A session is a cold boot, not a savestate.** When both players are ready, *both machines reset
 the board* and every frame from power-on is played in lockstep. This emulator has no savestates,
