@@ -239,6 +239,19 @@ try {
       await b.key(k, true);
       setTimeout(() => b.key(k, false), 150);
     }
+    if (s === 3) {
+      /* The panel folds away when the match starts; opening it again mid-match
+       * (to end the match or leave) must keep it open. It used to shut itself
+       * a quarter of a second later, on every status poll. */
+      await click(B, 'btn-online');
+      await sleep(1000);
+      const panel = await B.eval("({ open: !document.getElementById('online').hidden, " +
+        "stop: !document.getElementById('np-stop').hidden, leave: !document.getElementById('np-leave').hidden })");
+      log('B', `panel opened mid-match: open=${panel.open} end-match=${panel.stop} leave=${panel.leave}`);
+      if (!panel.open || !panel.stop || !panel.leave) { failed = true; log('B', 'FAIL: the panel did not stay open with its controls'); }
+      await uiShot(B, '7-room-playing');
+      await click(B, 'np-close');
+    }
     if (hideA && s === 5) {
       hidden = await A.send('Target.createTarget', { url: 'about:blank', background: false });
       log('A', `game tab hidden for ${hideA} s:`, await A.eval('document.hidden').catch(() => '?'));
