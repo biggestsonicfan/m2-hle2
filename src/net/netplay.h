@@ -126,14 +126,19 @@
  * "bit-identical" is a property of the compiler and the float code it emits as
  * much as of the source. Native x86-64 (MSVC, gcc) and aarch64 built with
  * -ffp-contract=off are one family (tools/ab-builds.mjs, and the ARM parity
- * work). WebAssembly is its own until measured otherwise: WEB-PORT.md section
- * 8 found it 31 instructions in 134 million away from gcc x86-64, and it has
- * never been held against MSVC, which is what desktop players actually run.
+ * work). WebAssembly is the other. It left MSVC at frame 2948 of attract, on
+ * two things C leaves open: a NaN's sign, and memory read through a pointer of
+ * another type. Clang used both and MSVC used neither. With NaNs written the
+ * SHARC's way (sharc_float_to_bits) and the i960's (i960_nan_result), and with
+ * -fno-strict-aliasing, tests/det_digest.c holds the two identical over 12,000
+ * frames of attract and 10,000 of a two-player match (WEB-NETPLAY.md,
+ * "Cross-play").
  *
- * Matchmaking refuses a room of another family with a sentence rather than
- * letting two boards diverge mid-match. When the web build is shown to match,
- * NETPLAY_CROSS_PLAY turns this into a yes and nothing else changes
- * (WEB-NETPLAY.md, "Cross-play").
+ * The family stays in the room word, so a lobby can still tell the two apart
+ * and turn cross-play off again with this one define. An old desktop build
+ * still refuses a web room (its revision byte), so a desktop player needs a
+ * build with this to JOIN a web room; a web player can join a desktop room
+ * hosted by any desktop build that shares this board code.
  */
 #define NETPLAY_FAMILY_NATIVE 0u
 #define NETPLAY_FAMILY_WASM   1u
@@ -143,7 +148,7 @@
 #  define NETPLAY_BUILD_FAMILY NETPLAY_FAMILY_NATIVE
 #endif
 #ifndef NETPLAY_CROSS_PLAY
-#  define NETPLAY_CROSS_PLAY 0
+#  define NETPLAY_CROSS_PLAY 1
 #endif
 
 static inline bool netplay_families_compatible(uint32_t a, uint32_t b) {

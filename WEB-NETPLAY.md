@@ -15,7 +15,7 @@ This expands [WEB-PORT.md](WEB-PORT.md) sections 3.4, 4, 5 and milestones M3–M
 | Where the gateway lives | `wss://rpcn.sonicthefighte.rs/gw/…`, Caddy in front on 443 | `rpcn.` is already a direct A record, so no new DNS. It is not proxied by Cloudflare, because a proxy would add a hop to every input packet. |
 | Region | The existing San Francisco droplet | All web traffic crosses it (section 6), so the round trip is you → SF → your opponent. |
 | Accounts | **Both** Twitch and plain RPCN accounts, including sign-up without Twitch | Name, password and e-mail. RPCN requires an e-mail and keeps it unique; it is never shown to anyone. |
-| Cross-play at launch | **Web plays web** until measured (section 3) | Switched by one define, `NETPLAY_CROSS_PLAY`. |
+| Cross-play | **On** since 2026-09-21, when the determinism gate passed (section 3) | Switched by one define, `NETPLAY_CROSS_PLAY`. |
 | Transport | Two WebSockets per player | WebTransport / WebRTC are later options (section 7). |
 
 ---
@@ -33,27 +33,32 @@ These were checked in `RipleyTom\rpcn`, not assumed.
 
 ---
 
-## 3. Cross-play: what it is and why web plays web for now
+## 3. Cross-play: what it is, and the gate it passed
 
 Lockstep netplay sends **inputs, not game state**. Each machine runs the whole game itself, and the two stay in agreement only if, given the same inputs, they compute *bit-identical* results frame after frame. One float rounded differently one frame, and the boards drift apart. They then show different fights, and nothing brings them back. Both boards hash their state and exchange the hash, so a split is caught (`desync_frame`). But once it is caught, all that can be done is tell the players.
 
 "Bit-identical" depends on the **compiler** as much as the source code: how it orders float operations, whether it fuses multiply-adds, how it handles edge cases. Today there are two build families:
 
 - **Desktop (native).** Windows builds with MSVC, and Linux and the handheld with gcc (with `-ffp-contract=off` on ARM). These have been measured to agree with each other (`tools/ab-builds.mjs`, and the ARM parity work).
-- **Web (WebAssembly).** Built with clang for wasm, and deterministic against itself: two wasm runs are identical, and wasm floats are specified bit-for-bit on every machine. So **web vs web is as safe as desktop vs desktop.** But it was measured **31 instructions in 134 million** away from the gcc x86-64 build over an attract sequence (WEB-PORT.md section 8). It has never been compared with MSVC, which is what desktop players actually run.
+- **Web (WebAssembly).** Built with clang for wasm, and deterministic against itself: two wasm runs are identical, and wasm floats are specified bit-for-bit on every machine. So **web vs web is as safe as desktop vs desktop.** Against MSVC, which is what desktop players run, it split at frame 2948 of attract until the two fixes below.
 
-That gap is small, but netplay has no tolerance for small. If web and desktop players were matched today, some matches would end with "the two games stopped matching" partway through. Two players who never see each other's lobby are a better experience than a match that falls apart.
+**The gate (2026-09-21).** `tests/det_digest.c` runs the slice both frontends run, from the one-zip load the page uses, with inputs keyed to game frames, and prints one line per frame: the netplay frame check, and hashes of work RAM, buffer RAM and the COP's memory. It is built from each configuration (`--target det_digest` in a desktop tree and in the web tree), so each side has its own frontend's exact flags. The first run matched through frame 2947 and split at 2948, in the replay fight. Two things C leaves to the compiler were the cause, and both were needed:
 
-**What happens now.** A room carries its build family in its attribute word. The web version shows desktop rooms greyed out with the reason ("that match is on the desktop version, and the web and desktop versions cannot play each other yet"), and the desktop does the same for web rooms. They are shown, not hidden, so "nobody online" and "someone online on the other version" read differently.
+1. **A NaN's sign.** A fighter's translation goes NaN in that fight. `0x07800F0F` read it back as `0xFFFFFFFF` on MSVC and `0x7FFFFFFF` on wasm, and `Fn_area_coli` branches on the sign bit of the ball positions. The SHARC writes every NaN as all ones, so `sharc_float_to_bits` now does too. The i960's FP instructions spell out the rule x86 applies (`i960_nan_result`: a NaN operand comes through quieted, an invalid operation gives the real indefinite). Neither changes a bit of the MSVC build's output over 6,000 frames.
+2. **Strict aliasing.** With the NaNs fixed, wasm still split at 2948. It stopped splitting as soon as a per-instruction trace was compiled into the loop, and that is the mark of undefined behaviour the optimiser acts on. Somewhere the board reads memory through a pointer of another type. Clang optimises on that rule and MSVC never does. `-fno-strict-aliasing` (CMakeLists.txt, GCC and Clang) makes the wasm build compute MSVC's frames, at no measurable cost. The access itself has not been found.
+
+After both: identical over **12,000 frames of attract** and **a 10,000-frame scripted match** with both players' inputs (coin, start, a challenger joining, then random presses from both sides).
+
+**What happens now.** `NETPLAY_CROSS_PLAY` is 1. A room still carries its build family, so the lobby can tell the two apart and one define turns cross-play off again.
+
+- **Web joining a desktop room:** works with any desktop build that shares this board code. The fixes left MSVC's output unchanged, so a desktop build from before them computes the same frames, as long as it is recent enough for the rest of the board code to match. A mismatch shows up as a desync, reported in words.
+- **Desktop joining a web room:** needs a new desktop build. Older ones refuse the web room's revision byte, `0x41`.
+
+Not yet run: a real match between the two over the gateway.
 
 The field sits in the top two bits of the protocol-revision byte. Bits 28–31, which the proposal first chose, belong to the RPCN server. A web room's revision byte therefore reads `0x41`, which **desktop builds already released** read as "a different netplay protocol" and refuse with a sentence. No desktop release is needed to keep the two apart.
 
-**Turning it on.** This is the determinism gate, WEB-PORT.md milestone M2:
-1. Run the attract replay fight (and a fight that uses the afterimage op `0x80`, ported since the last measurement) on wasm and on MSVC.
-2. Compare the per-frame check values.
-3. If they differ, find the first frame that differs and diff that frame's COP conversation.
-
-Once they are identical, set `NETPLAY_CROSS_PLAY 1` (netplay.h) and ship both builds. Old desktop builds will still refuse web rooms, because of the revision byte, so cross-play needs the new desktop build on the desktop side. If the gap turns out to be real and small, it is a board-level fix like the FMA and float→int fixes before it, and it benefits everyone.
+**Keeping it.** After touching board code, run `det_digest` from both trees over attract and a scripted match, and diff the outputs (tools/README.md, "Two builds, one board"). When they split, `--cop FROM:TO:FILE` logs the COP conversation and `--trace F:FILE` logs every i960 instruction of one frame; the first differing line names the cause. Not covered yet: a match that uses the afterimage op `0x80`.
 
 ---
 
@@ -160,7 +165,7 @@ The datagram seam in `net_socket.h` is narrow enough that either can replace the
 - **Twitch's success path** (the code and link screen) has not run: the local RPCN has no Twitch client ID. The failure path has run.
 - **A desktop client against a web room** has not been run. The refusal logic is in code, and the room word it depends on was checked (`0x41` low byte), but nothing has been held against a real desktop client.
 - **Firefox and Safari**, the hidden-tab worker there, and real distances for the automatic input delay.
-- **The determinism gate** (section 3).
+- **A web-vs-desktop match, end to end.** The determinism gate passed (section 3), but no real session has run between a browser and a desktop build.
 
 ---
 

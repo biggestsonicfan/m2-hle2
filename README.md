@@ -165,8 +165,9 @@ one of its own (`M2HSNCFTR_00` for Sonic The Fighters) rather than every Model 2
 list. The browser also shows YAMP's rooms for the same arcade game, greyed out and unjoinable:
 YAMP plays the console port, so a cross-emulator match could never stay in sync, but an empty
 lobby with people next door is worth telling apart from an empty one. Rooms made by the browser
-build are shown the same way, with the reason: web and desktop builds do not play each other
-until they are shown to compute the same frames ([WEB-NETPLAY.md](WEB-NETPLAY.md), "Cross-play").
+build can be joined too: the web and desktop builds compute the same frames
+([WEB-NETPLAY.md](WEB-NETPLAY.md), "Cross-play"), though joining a web room needs a desktop build
+from after that.
 
 Scriptable without the GUI, which is how it gets tested:
 

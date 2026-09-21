@@ -460,7 +460,7 @@ it is 64-bit), `com_id`, `frame`, `stalls`, `generation`, `seed`,
 `user_code`, `uri`, `error`). `rooms: 1` adds `search_pending` and `rooms`, the
 last search's results as `{room_id, owner, members, max, password, flags}`
 (`flags` bits 6-7 are the build family: 1 is a browser-build room, which this
-build refuses); `log` is how many lines of
+build can join now that cross-play is on); `log` is how many lines of
 the emulator's own netplay log to return, with `log_count` beside it so a
 poller can tell "nothing happened" from "I missed some".
 

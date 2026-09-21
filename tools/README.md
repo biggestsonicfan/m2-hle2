@@ -701,6 +701,31 @@ and 6000 — the last two inside attract's replay fight, which is where a
 one-bit difference in the board would already have grown into a different
 fight. That is what says the hand-resolved conflict in the run loop
 (`emu_slice_body`) resolved to the same board.
+
+### Cross-play: the web build against the desktop build
+
+`ab-builds` drives two `m2hle.exe` over the bridge, and the web build has none.
+`tests/det_digest.c` is the board without a frontend. It runs the slice both
+hosts run, from the one-zip load the page uses, with inputs keyed to game
+frames, and writes one line per frame: the netplay frame check, and hashes of
+work RAM, buffer RAM and the COP's memory. Build it in each tree so each side
+has its own frontend's exact flags, then diff:
+
+    cmake --build build_test --config Release --target det_digest
+    cmake --build build_web --target det_digest          # emsdk on PATH
+    build_test/Release/det_digest.exe merged.zip --frames 12000 --out msvc.txt
+    node build_web/det_digest.js      merged.zip --frames 12000 --out wasm.txt
+
+`--script "450:c,462:,520:s,..."` holds inputs from a frame on (the web page's
+`?script=` keys; uppercase letters and `!@#$` are player 2). When the two
+split, `--cop FROM:TO:FILE` logs the COP conversation of those frames and
+`--trace F:FILE` every i960 instruction of one frame, with a hash of the
+registers. The first differing line names the cause.
+
+Measured 2026-09-21: identical over 12,000 frames of attract and a 10,000-frame
+two-player scripted match, after two fixes. Before them the builds split at
+frame 2948, on a NaN's sign and on strict aliasing (WEB-NETPLAY.md,
+"Cross-play").
 ## The object viewer, in a browser
 
 `web-objview.mjs` is the wasm build's answer to the desktop's MCP object viewer. The desktop
