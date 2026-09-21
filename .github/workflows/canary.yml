@@ -333,14 +333,15 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:bullseye
     steps:
-      # Bullseye's support has ended and deb.debian.org no longer carries its
-      # security updates (404s); archive.debian.org keeps the release for good.
+      # Bullseye's support has ended: its security suite on deb.debian.org lists
+      # packages that are already gone (404s), and archive.debian.org has no
+      # security suite for it. A build container needs neither, so: the frozen
+      # release and its updates from the archive, which keeps them for good.
       - name: Install the cross toolchain and the arm64 sysroot
         run: |
           printf '%s\n' \
             'deb http://archive.debian.org/debian bullseye main' \
             'deb http://archive.debian.org/debian bullseye-updates main' \
-            'deb http://archive.debian.org/debian-security bullseye-security main' \
             > /etc/apt/sources.list
           rm -f /etc/apt/sources.list.d/*
           dpkg --add-architecture arm64
