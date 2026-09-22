@@ -231,6 +231,65 @@ static inline void emu_board_reset_state(void) {
     g_frame_clock.frame  = 0;
 }
 
+/* ---- The sound UART ---------------------------------------------------------
+ *
+ * The game's sound handler (STF send_sound_code) sends ONE byte of a queued
+ * command per interrupt, and TxRDY is up again once that byte is out -- about a
+ * third of a millisecond on the board. So the whole of a command, and the whole
+ * of the queue behind it, is gone within a millisecond or two of being queued.
+ *
+ * That promptness is load-bearing in STF, because of a bug in the ROM: its
+ * command queue AUDIO_2 (0x504020) is 32 entries by the index mask and the
+ * count cap, but only 18 longs are reserved for it. Entries 18-31 overlap
+ * byte_50406A, sd_nowait_timer, sd_wait_timer, the check_same_sound list at
+ * 0x504078 and the sd_flag pointer, and the game writes those every frame
+ * (0xB618, 0x39000, 0x3F53C-0x3F5A0, 0x3F440). A command still waiting in one
+ * of those slots when they are written goes out as zeros or a pointer -- the
+ * lone data bytes `00 00 00` or `0D B1 A8` in sound_codes -- and the driver
+ * reads them under MIDI running status as a command of the last status byte.
+ * Which slot the stage's BGM command lands in depends on how many sounds have
+ * gone before, so the symptom is some stages, some of the time, with the wrong
+ * music or none.
+ *
+ * Offered once a slice, as it used to be, a queued command waited a whole frame
+ * for its interrupt, and the per-frame writers got to it first. Now the pin is
+ * offered where the board would take it: when the game enables the line after
+ * queueing (irqt_enable_write's kick), and when any handler returns (the
+ * chain in emu_service_sound_again). A byte is only handed over when the SCSP's
+ * MIDI buffer can take it (sound_make_midi_room), which is the UART's own
+ * backpressure; a byte that does not fit waits in the game's queue for the
+ * next slice, as it would wait on the UART. */
+
+/* Is there a byte to send? Raises TxRDY (bit 10) if so. */
+static inline bool emu_sound_pending(emu_thread_ctx_t *ctx, const game_quirks_t *q) {
+    if (!q->sound_queue_count_addr) return false;
+    uint32_t cnt   = mem_read8(ctx->bus, q->sound_queue_count_addr);
+    uint32_t state = q->sound_queue_state_addr ? mem_read8(ctx->bus, q->sound_queue_state_addr) : 0xFFu;
+    if (cnt > g_sound.queue_hi) g_sound.queue_hi = cnt;
+    if (cnt == 0 && state == 0xFFu) return false;
+    irqt_raise(0x400u);                      /* bit 10 = sound */
+    return true;
+}
+
+/* Can the UART take a byte now? Makes room in the MIDI buffer if it can. */
+static inline bool emu_sound_ready(void) {
+    if (sound_make_midi_room(1)) return true;
+    g_sound.midi_holds++;
+    return false;
+}
+
+/* Take the sound interrupt now, if it is the one to take. Call with no handler
+ * in service. */
+static inline void emu_offer_sound(emu_thread_ctx_t *ctx) {
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (!q->irq_handler[3] || !(g_irqt.intena & 0x0C00u)) return;
+    if (!emu_sound_pending(ctx, q)) return;
+    if (irqt_pending_pin() != 3 || !emu_sound_ready()) return;
+    s_irq_baseline_depth = ctx->cpu->frame_depth;
+    hle_interrupt(ctx->cpu, q->irq_handler[3]);
+    s_irq_in_service = true;
+}
+
 static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (!g_active_profile) return;
     i960_cpu_t          *cpu = ctx->cpu;
@@ -244,47 +303,28 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
         s_irq_in_service = false;
 
     /* Sound UART TxRDY: keep bit 10 asserted while the i960 has bytes to send. */
-    if (q->sound_queue_count_addr) {
-        uint32_t cnt   = mem_read8(ctx->bus, q->sound_queue_count_addr);
-        uint32_t state = q->sound_queue_state_addr
-                       ? mem_read8(ctx->bus, q->sound_queue_state_addr) : 0xFFu;
-        if (cnt > 0 || state != 0xFFu) irqt_raise(0x400u);   /* bit 10 = sound */
-    }
+    emu_sound_pending(ctx, q);
 
     if (s_irq_in_service) return;
     int pin = irqt_pending_pin();            /* gated by (intreq & intena) */
     if (pin < 0) return;
     uint32_t h = q->irq_handler[pin];
     if (!h) return;                          /* pin not yet delivered (still HLE) */
+    if (pin == 3 && !emu_sound_ready()) return;
 
     s_irq_baseline_depth = cpu->frame_depth;
     hle_interrupt(cpu, h);                   /* vector to handler; ret resumes, AC/PC restored */
     s_irq_in_service = true;
 }
 
-/* The sound UART is ready for its next byte the moment the last one is out
- * (MAME: all three bytes of a command land in the SCSP together), so when the
- * sound handler returns and the i960 still has bytes queued, run it again in
- * this slice instead of the next — one byte per frame put every sound command
- * ~50 ms late. Only the sound pin: the frame-paced pins keep their cadence. */
+/* When a handler returns -- the sound handler after its byte, or any other --
+ * and the i960 still has bytes queued, take the sound pin again now rather
+ * than at the next slice (see "The sound UART" above). Only the sound pin: the
+ * frame-paced pins keep their cadence. */
 static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
     if (!s_irq_in_service || ctx->cpu->frame_depth > s_irq_baseline_depth) return;
     s_irq_in_service = false;
-    const game_quirks_t *q = &g_active_profile->quirks;
-    if (!q->sound_queue_count_addr || !q->irq_handler[3]) return;
-    /* The 68000 does not run until sound_run_slice, later in this slice, so
-     * every re-service here piles onto an undrained 32-byte MIDI ring. Stop
-     * while a whole command still fits and let the rest go next slice: the
-     * board's UART paces the bytes the same way, by reporting not-ready. */
-    if (scsp_midi_room(&g_sound.scsp) < 4) { s_irq_in_service = true; return; }
-    uint32_t cnt   = mem_read8(ctx->bus, q->sound_queue_count_addr);
-    uint32_t state = q->sound_queue_state_addr ? mem_read8(ctx->bus, q->sound_queue_state_addr) : 0xFFu;
-    if (cnt == 0 && state == 0xFFu) return;
-    irqt_raise(0x400u);
-    if (irqt_pending_pin() != 3) return;
-    s_irq_baseline_depth = ctx->cpu->frame_depth;
-    hle_interrupt(ctx->cpu, q->irq_handler[3]);
-    s_irq_in_service = true;
+    emu_offer_sound(ctx);
 }
 
 /* ---- Board timers against the i960's clock (irq_timer.h g_irqt_live) ------ */
@@ -452,7 +492,10 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         }
         if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
         ctx->total_steps++;
-        if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
+        if (g_active_profile) {
+            if (s_irq_in_service) emu_service_sound_again(ctx);
+            else if (g_irqt_sound_kick) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+        }
         if (g_irqt_live) emu_timers_after_step(ctx);
         if (g_log.warn_triggered) break;
         if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */

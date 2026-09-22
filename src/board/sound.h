@@ -49,6 +49,9 @@
 #define SOUND_IPL_LEAD            10        /* see sound_run */
 #endif
 #define SOUND_OUT_FRAMES          16384u   /* host output ring, stereo frames (power of 2) */
+#define SOUND_CODE_LOG            512u     /* i960 commands kept (power of 2) */
+#define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_make_midi_room) */
+#define SOUND_AHEAD_MAX           735      /* at most a slice of samples run ahead of it (44100 / 60) */
 
 typedef struct {
     m68k_state_t   m68k;
@@ -62,6 +65,8 @@ typedef struct {
     uint32_t       bank4, bank5;        /* offsets into samples for 0xA00000 / 0xE00000 */
     int32_t        budget;              /* 68000 clock periods owed to the current sample */
     int            mask_seen;           /* the interrupt mask the last instruction ran under */
+    uint32_t       slice_frac;          /* sound_run_slice's remainder: part of the board, reset with it */
+    int32_t        ahead;               /* samples run inside the slice, owed back by sound_run_slice */
     uint64_t       irqs[8];             /* interrupts taken, by level */
 
     /* host output: emu thread writes, audio thread reads */
@@ -72,7 +77,8 @@ typedef struct {
      * not. The one clock a consumer outside the ring can trust, and monotonic
      * across a board reset — sound_reset() leaves it, and the ring, alone. */
     uint64_t         out_total;
-    uint64_t         midi_drains;      /* times the MIDI ring was drained mid-burst */
+    uint64_t         midi_drains;      /* catch-up steps run to make room in the MIDI ring */
+    uint64_t         midi_holds;       /* times a byte had to wait for the next slice */
 
     /* i960 side */
     uint64_t write_count, read_count;
@@ -80,6 +86,17 @@ typedef struct {
     uint8_t  midi_log[64];
     uint32_t midi_log_ip[64];
     uint32_t midi_log_n;
+
+    /* Every command the i960 has sent, framed the way the driver frames them:
+     * the codes are MIDI messages (0xAE1004 = status 0xAE, data 0x10 0x04), so
+     * a byte with bit 7 set opens one and two data bytes close it. A command
+     * cut short by another status byte is logged with bit 31 set. Stamped with
+     * out_total, the board's sample clock. Across a sound_reset. */
+    struct { uint32_t code; uint64_t sample; } code_log[SOUND_CODE_LOG];
+    uint32_t code_n;                   /* commands ever logged; the ring holds the last SOUND_CODE_LOG */
+    uint32_t code_acc;
+    int      code_have;                /* bytes of the open command, 0 = none open */
+    uint32_t queue_hi;                 /* deepest the game's own command queue has been (32 = full: it drops) */
 } sound_state_t;
 
 static sound_state_t g_sound;
@@ -409,6 +426,24 @@ static void sound_m68k_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
 
 /* ---- i960 side: the sound UART ---------------------------------------------- */
 
+static inline void sound_code_put(uint32_t code) {
+    uint32_t i = g_sound.code_n++ & (SOUND_CODE_LOG - 1);
+    g_sound.code_log[i].code   = code;
+    g_sound.code_log[i].sample = g_sound.out_total;
+}
+
+static inline void sound_code_byte(uint8_t b) {
+    if (b & 0x80u) {
+        if (g_sound.code_have) sound_code_put(g_sound.code_acc | 0x80000000u);
+        g_sound.code_acc  = b;
+        g_sound.code_have = 1;
+        return;
+    }
+    if (!g_sound.code_have) { sound_code_put(0x80000000u | b); return; }   /* a stray data byte */
+    g_sound.code_acc = (g_sound.code_acc << 8) | b;
+    if (++g_sound.code_have == 3) { sound_code_put(g_sound.code_acc); g_sound.code_have = 0; }
+}
+
 static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     (void)r; (void)size;
     g_sound.read_count++;
@@ -417,7 +452,8 @@ static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     return (addr - MIDI_BASE) == 4 ? 0x05u : 0u;
 }
 
-static void sound_run(uint32_t n);   /* below; the drain valve in the write callback needs it */
+static void sound_run(uint32_t n);                      /* below */
+static inline bool sound_make_midi_room(uint32_t need);  /* below; the write callback needs it */
 
 static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     (void)r; (void)size;
@@ -430,24 +466,12 @@ static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, in
         g_sound.midi_log_n++;
     }
     if (g_sound.log_writes) LOG_INFO("SOUND write @ 0x%08X sz=%d val=0x%08X", addr, size, val);
-    /* The 68000 only drains this ring in sound_run_slice, at the end of the
-     * slice, so one long run of the i960's sound handler can fill all 31 bytes
-     * on its own -- emu_service_sound_again's backoff cannot see inside a single
-     * invocation. Rather than lose the byte (scsp_midi_in would drop it, and a
-     * half-delivered command costs the driver the stream for the rest of the
-     * run), let the 68000 run now and take what is already queued. Inert in
-     * normal play: the ring peaks around 12 of 31 through a match, so this only
-     * opens under a burst the board itself would have paced out over the UART. */
-    /* Keep running the 68000 until it has taken enough to fit a whole command.
-     * One pass is not enough under a real burst: measured on a live session the
-     * ring still reached 31 of 31 and lost 11 bytes with a single sound_run(64),
-     * because the driver is not always in a position to read MIDI the moment we
-     * ask. Bounded so a wedged driver cannot hang the emu thread -- if it truly
-     * will not drain, scsp_midi_in drops the byte and counts it, as before. */
-    for (int spin = 0; spin < 32 && scsp_midi_room(&g_sound.scsp) < 4; spin++) {
-        g_sound.midi_drains++;
-        sound_run(64);                  /* ~1.5 ms of 68000 time per pass */
-    }
+    sound_code_byte((uint8_t)val);
+    /* The run loop only hands the i960 a TxRDY interrupt when the ring has room
+     * (emu_sound_ready), so a byte the game sends always fits. This is for any
+     * other writer: make room the same accounted way, and if the driver truly
+     * will not take it, scsp_midi_in drops the byte and counts it. */
+    sound_make_midi_room(1);
     scsp_midi_in(&g_sound.scsp, (uint8_t)val);
 }
 
@@ -477,6 +501,8 @@ static inline void sound_reset(void) {
     scsp_reset(&g_sound.scsp, g_sound.ram, SOUND_RAM_SIZE, &g_sound.m68k.cpu.cycles);
     g_sound.budget = 0;
     g_sound.mask_seen = 7;
+    g_sound.slice_frac = 0;
+    g_sound.ahead = 0;
     memset(g_sound.irqs, 0, sizeof g_sound.irqs);
     g_sound.write_count = g_sound.read_count = 0;
     g_sound.midi_log_n = 0;
@@ -625,13 +651,44 @@ static void sound_run(uint32_t n) {
     }
 }
 
-/* One emu slice (1/60 s) of sound. */
+/* ---- the UART's backpressure ----------------------------------------------------
+ *
+ * The board runs a slice of the i960 and then a slice of sound, so the 68000
+ * cannot take a MIDI byte while the i960 is sending it. On the board it would: the
+ * UART sends a byte in a third of a millisecond (MAME's capture: 0.33 ms apart),
+ * the driver takes it straight out of the SCSP's buffer, and the i960 queues
+ * nothing it cannot send. Here a burst meets a buffer nobody is emptying.
+ *
+ * So when the buffer has no room for what is about to be sent, the sound board
+ * runs on now, SOUND_AHEAD_STEP samples at a time, until the driver has taken
+ * enough. Those samples are the slice's own, run early: `ahead` counts them and
+ * sound_run_slice owes them back, so the board's clock -- and the host's audio --
+ * never gain a sample. At most SOUND_AHEAD_MAX may be run early; past that the
+ * byte waits for the next slice, as it would wait on the UART.
+ *
+ * The old drain valve ran the 68000 without owing the samples back, and gave up
+ * after 32 passes and dropped the byte. Returns whether `need` bytes now fit. */
+static inline bool sound_make_midi_room(uint32_t need) {
+    while (scsp_midi_room(&g_sound.scsp) < need) {
+        if (!g_sound.rom_loaded || g_sound.detached ||
+            g_sound.ahead + SOUND_AHEAD_STEP > SOUND_AHEAD_MAX) return false;
+        g_sound.midi_drains++;
+        sound_run(SOUND_AHEAD_STEP);
+        g_sound.ahead += SOUND_AHEAD_STEP;
+    }
+    return true;
+}
+
+/* One emu slice (1/60 s) of sound, less what was run early inside it. The
+ * remainder carries from slice to slice and is reset with the board: two
+ * boards cold-booted together have to put the same samples in every slice. */
 static inline void sound_run_slice(uint32_t slices_per_sec) {
-    static uint32_t frac;
-    frac += SOUND_RATE;
-    uint32_t n = frac / slices_per_sec;
-    frac -= n * slices_per_sec;
-    sound_run(n);
+    g_sound.slice_frac += SOUND_RATE;
+    uint32_t n = g_sound.slice_frac / slices_per_sec;
+    g_sound.slice_frac -= n * slices_per_sec;
+    uint32_t early = (uint32_t)g_sound.ahead < n ? (uint32_t)g_sound.ahead : n;
+    g_sound.ahead -= (int32_t)early;
+    sound_run(n - early);
 }
 
 #endif /* SOUND_H */
