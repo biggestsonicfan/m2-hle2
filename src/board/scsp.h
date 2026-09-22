@@ -67,15 +67,39 @@ typedef struct {
     scsp_lfo_t plfo, alfo;
 } scsp_slot_t;
 
-/* One MPRO step with its 25 fields unpacked. The program runs last_step of
- * these every sample, and unpacking them from the four microcode words each
- * time was a quarter of the whole emulator thread; they are a pure function
- * of mpro[], so they are unpacked once per program change instead
- * (scsp_dsp_decode) and the step computes exactly what it did. */
+/* One MPRO step, decoded into what scsp_dsp_step does with it. The program
+ * runs last_step of these every sample, and unpacking them from the four
+ * microcode words each time was a quarter of the whole emulator thread; they
+ * are a pure function of mpro[] and the step's parity, so they are decoded once
+ * per program change instead (scsp_dsp_decode).
+ *
+ * The fields are the choices the step makes, not the microcode's bits. On an
+ * in-order core (the handhelds' Cortex-A55) a branch or a byte load per field
+ * was most of the DSP's time, so the yes/no choices sit in one word, f, and the
+ * step selects between values it has already computed (SCSP_SEL). Writes a
+ * step does not make go to a slot nobody reads. */
+enum {
+    SCSP_DF_IW_SELF,             /* INPUTS becomes MEMVAL (IWT with IRA == IWA) */
+    SCSP_DF_TWT, SCSP_DF_XSEL, SCSP_DF_BSEL, SCSP_DF_ZERO, SCSP_DF_NEGB, SCSP_DF_YRL,
+    SCSP_DF_Y_COEF, SCSP_DF_Y_YREG,     /* Y from COEF / from YREG; FRC otherwise */
+    SCSP_DF_SAT,                 /* the shifter saturates (SHIFT 0, 1) rather than wraps */
+    SCSP_DF_FRCL, SCSP_DF_ADRL,
+    SCSP_DF_ADRL_SH,             /* ADRS from SHIFTED (SHIFT 3) rather than from INPUTS */
+    SCSP_DF_TABLE, SCSP_DF_ADREB
+};
+#define SCSP_DM(f, bit) ((int32_t)((uint32_t)(f) << (31 - (bit))) >> 31)   /* flag -> 0 / ~0 */
+
 typedef struct {
-    uint8_t tra, twt, twa, xsel, ysel, ira, iwt, iwa;
-    uint8_t table, mwt, mrd, ewt, ewa, adrl, frcl, sh, yrl, negb, zero, bsel;
-    uint8_t nofl, coef, masa, adreb, nxadr;
+    uint32_t f;                  /* SCSP_DF_* */
+    uint8_t  ira;                /* index into the step's input bank: MEMS, MIXS, EXTS */
+    uint8_t  tra, twa, coef, masa;
+    uint8_t  iwa;                /* 0x3F (a bank slot nothing reads) when the step writes no MEMS */
+    uint8_t  ewa;                /* 16 (a spare slot) when the step writes no EFREG */
+    uint8_t  dbl;                /* the shifter doubles ACC (SHIFT 1, 2) */
+    uint8_t  ysh, frc_sh;        /* Y = sext13((src >> ysh) & ymask); FRC = (SHIFTED >> frc_sh) & frc_mask */
+    uint16_t ymask, frc_mask;
+    uint8_t  mem, mrd, mwt;      /* delay memory this step: only odd steps touch it (MAME) */
+    uint8_t  nofl, nxadr;
 } scsp_dsp_op_t;
 
 typedef struct {
@@ -91,6 +115,8 @@ typedef struct {
     int      stopped, last_step;
     scsp_dsp_op_t ops[128];      /* mpro[] decoded; valid while ops_ok */
     int      ops_ok;             /* cleared by every mpro write and by reset */
+    int      ops_last;           /* the last_step ops_run was worked out for */
+    int      ops_run;            /* steps before one whose IRA reads nothing (the program ends there) */
 } scsp_dsp_t;
 
 typedef struct {
@@ -461,15 +487,15 @@ static inline int32_t scsp_sext(int32_t v, int bits) { return (int32_t)((uint32_
 
 static uint16_t scsp_dsp_pack(int32_t val) {
     int sign = (val >> 23) & 1;
-    uint32_t temp = (uint32_t)(val ^ (val << 1)) & 0xFFFFFFu;
+    uint32_t temp = ((uint32_t)val ^ ((uint32_t)val << 1)) & 0xFFFFFFu;
     int exponent = 0;
     for (int k = 0; k < 12; k++) {
         if (temp & 0x800000u) break;
         temp <<= 1;
         exponent++;
     }
-    if (exponent < 12) val = (val << exponent) & 0x3FFFFF;
-    else               val <<= 11;
+    if (exponent < 12) val = (int32_t)(((uint32_t)val << exponent) & 0x3FFFFF);
+    else               val = (int32_t)((uint32_t)val << 11);
     val >>= 11;
     val &= 0x7FF;
     val |= sign << 15;
@@ -499,83 +525,145 @@ static void scsp_dsp_start(scsp_dsp_t *d) {
 }
 
 static void scsp_dsp_decode(scsp_dsp_t *d) {
+    d->ops_run = d->last_step;
     for (int st = 0; st < 128; st++) {
         const uint16_t *p = d->mpro + st * 4;
         scsp_dsp_op_t  *o = &d->ops[st];
-        o->tra   = (p[0] >> 8) & 0x7F;  o->twt  = (p[0] >> 7) & 1;   o->twa   = p[0] & 0x7F;
-        o->xsel  = (p[1] >> 15) & 1;    o->ysel = (p[1] >> 13) & 3;  o->ira   = (p[1] >> 6) & 0x3F;
-        o->iwt   = (p[1] >> 5) & 1;     o->iwa  = p[1] & 0x1F;
-        o->table = (p[2] >> 15) & 1;    o->mwt  = (p[2] >> 14) & 1;  o->mrd   = (p[2] >> 13) & 1;
-        o->ewt   = (p[2] >> 12) & 1;    o->ewa  = (p[2] >> 8) & 0xF; o->adrl  = (p[2] >> 7) & 1;
-        o->frcl  = (p[2] >> 6) & 1;     o->sh   = (p[2] >> 4) & 3;   o->yrl   = (p[2] >> 3) & 1;
-        o->negb  = (p[2] >> 2) & 1;     o->zero = (p[2] >> 1) & 1;   o->bsel  = p[2] & 1;
-        o->nofl  = (p[3] >> 15) & 1;    o->coef = (p[3] >> 9) & 0x3F;
-        o->masa  = (p[3] >> 2) & 0x1F;  o->adreb = (p[3] >> 1) & 1;  o->nxadr = p[3] & 1;
+        int ysel = (p[1] >> 13) & 3, sh = (p[2] >> 4) & 3;
+        int iwt  = (p[1] >> 5) & 1,  iwa = p[1] & 0x1F;
+        int mwt  = (p[2] >> 14) & 1, mrd = (p[2] >> 13) & 1;
+        o->ira   = (p[1] >> 6) & 0x3F;
+        o->tra   = (p[0] >> 8) & 0x7F;
+        o->twa   = p[0] & 0x7F;
+        o->coef  = (p[3] >> 9) & 0x3F;
+        o->masa  = (p[3] >> 2) & 0x1F;
+        o->iwa   = (uint8_t)(iwt ? iwa : 0x3F);
+        o->ewa   = (uint8_t)((p[2] >> 12) & 1 ? (p[2] >> 8) & 0xF : 16);
+        o->dbl   = sh == 1 || sh == 2;
+        /* Y: FRC, COEF >> 3, YREG[23:11] or YREG[15:4], all read as 13-bit signed */
+        o->ysh   = (uint8_t)(ysel == 0 ? 0 : ysel == 1 ? 3 : ysel == 2 ? 11 : 4);
+        o->ymask = (uint16_t)(ysel == 3 ? 0x0FFF : 0x1FFF);
+        o->frc_sh   = (uint8_t)(sh == 3 ? 0 : 11);
+        o->frc_mask = (uint16_t)(sh == 3 ? 0x0FFF : 0x1FFF);
+        /* MAME: the delay memory is only touched on odd steps */
+        o->mrd   = mrd && (st & 1);
+        o->mwt   = mwt && (st & 1);
+        o->mem   = o->mrd || o->mwt;
+        o->nofl  = (p[3] >> 15) & 1;
+        o->nxadr = p[3] & 1;
+        uint32_t f = 0;
+        f |= (uint32_t)(iwt && o->ira == iwa) << SCSP_DF_IW_SELF;
+        f |= (uint32_t)((p[0] >> 7) & 1)  << SCSP_DF_TWT;
+        f |= (uint32_t)((p[1] >> 15) & 1) << SCSP_DF_XSEL;
+        f |= (uint32_t)(p[2] & 1)         << SCSP_DF_BSEL;
+        f |= (uint32_t)((p[2] >> 1) & 1)  << SCSP_DF_ZERO;
+        f |= (uint32_t)((p[2] >> 2) & 1)  << SCSP_DF_NEGB;
+        f |= (uint32_t)((p[2] >> 3) & 1)  << SCSP_DF_YRL;
+        f |= (uint32_t)(ysel == 1)        << SCSP_DF_Y_COEF;
+        f |= (uint32_t)(ysel >= 2)        << SCSP_DF_Y_YREG;
+        f |= (uint32_t)(sh <= 1)          << SCSP_DF_SAT;
+        f |= (uint32_t)((p[2] >> 6) & 1)  << SCSP_DF_FRCL;
+        f |= (uint32_t)((p[2] >> 7) & 1)  << SCSP_DF_ADRL;
+        f |= (uint32_t)(sh == 3)          << SCSP_DF_ADRL_SH;
+        f |= (uint32_t)((p[2] >> 15) & 1) << SCSP_DF_TABLE;
+        f |= (uint32_t)((p[3] >> 1) & 1)  << SCSP_DF_ADREB;
+        o->f = f;
+        /* An IRA past EXTS ends the program on that step, before it does anything. */
+        if (o->ira > 0x31 && st < d->ops_run) d->ops_run = st;
     }
     d->ops_ok = 1;
+    d->ops_last = d->last_step;
 }
+
+/* SCSP_SEL(f, bit, a, b): a when the step's flag is set, else b. How that is
+ * best spelled depends on the core, and the two spellings compute the same
+ * bits (tests/scsp_dsp_test.c builds both):
+ *   - masks, for 64-bit ARM. The handhelds are in-order Cortex-A55/A53/A35,
+ *     where GCC's branches for these mispredicted about once a step: the DSP
+ *     ran 25% faster on the ARC-S with masks than with the ternary.
+ *   - a ternary everywhere else. On x86 the masks are five dependent ALU ops a
+ *     select where a well-predicted branch or cmov is one; the DSP ran 1.7x
+ *     slower with masks under MSVC.
+ * SCSP_DSP_MASKS set to 0 or 1 overrides the choice. */
+#ifndef SCSP_DSP_MASKS
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define SCSP_DSP_MASKS 1
+#else
+#define SCSP_DSP_MASKS 0
+#endif
+#endif
+#if SCSP_DSP_MASKS
+static inline int32_t scsp_sel(int32_t m, int32_t a, int32_t b) { return (a & m) | (b & ~m); }
+#define SCSP_SEL(f, bit, a, b) scsp_sel(SCSP_DM(f, bit), (a), (b))
+#else
+#define SCSP_SEL(f, bit, a, b) (((f) & (1u << (bit))) ? (a) : (b))
+#endif
 
 static void scsp_dsp_step(scsp_t *s) {
     scsp_dsp_t *d = &s->dsp;
     if (d->stopped) return;
-    if (!d->ops_ok) scsp_dsp_decode(d);
-    memset(d->efreg, 0, sizeof d->efreg);
+    if (!d->ops_ok || d->ops_last != d->last_step) scsp_dsp_decode(d);
+    int16_t efreg[17] = {0};     /* [16] takes the steps that write no EFREG */
+
+    /* The input bank IRA indexes: MEMS, then MIXS << 4, then EXTS << 8. MEMS
+     * is written back below, and only the step writes it. */
+    int32_t in[0x40];
+    memcpy(in, d->mems, sizeof d->mems);
+    for (int i = 0; i < 16; i++) in[0x20 + i] = (int32_t)((uint32_t)d->mixs[i] << 4);
+    in[0x30] = d->exts[0] * 256;
+    in[0x31] = d->exts[1] * 256;
+
+    int32_t *temp = d->temp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
     int32_t  acc = 0, memval = 0, frc = 0, yreg = 0;
     uint32_t adrs = 0;
-    for (int st = 0; st < d->last_step; st++) {
+    const int run = d->ops_run;
+    for (int st = 0; st < run; st++) {
         const scsp_dsp_op_t *o = &d->ops[st];
+        const uint32_t f = o->f;
 
-        int32_t inputs;
-        if (o->ira <= 0x1F)      inputs = d->mems[o->ira];
-        else if (o->ira <= 0x2F) inputs = d->mixs[o->ira - 0x20] * 16;
-        else if (o->ira <= 0x31) inputs = d->exts[o->ira - 0x30] * 256;
-        else return;
-        inputs = scsp_sext(inputs, 24);
-        if (o->iwt) {
-            d->mems[o->iwa] = memval;
-            if (o->ira == o->iwa) inputs = memval;
-        }
+        int32_t inputs = scsp_sext(in[o->ira], 24);
+        inputs = SCSP_SEL(f, SCSP_DF_IW_SELF, memval, inputs);
+        in[o->iwa] = memval;
 
-        int32_t b = 0;
-        if (!o->zero) {
-            b = o->bsel ? acc : scsp_sext(d->temp[(o->tra + d->dec) & 0x7F], 24);
-            if (o->negb) b = -b;
-        }
-        int32_t x = o->xsel ? inputs : scsp_sext(d->temp[(o->tra + d->dec) & 0x7F], 24);
-        int32_t y = 0;
-        if (o->ysel == 0)      y = frc;
-        else if (o->ysel == 1) y = d->coef[o->coef] >> 3;
-        else if (o->ysel == 2) y = (yreg >> 11) & 0x1FFF;
-        else                   y = (yreg >> 4) & 0x0FFF;
-        if (o->yrl) yreg = inputs;
+        int32_t tr = scsp_sext(temp[(o->tra + dec) & 0x7F], 24);
+        int32_t b  = SCSP_SEL(f, SCSP_DF_BSEL, acc, tr);
+        b = SCSP_SEL(f, SCSP_DF_NEGB, (int32_t)(0u - (uint32_t)b), b);
+        b = SCSP_SEL(f, SCSP_DF_ZERO, 0, b);
+        int32_t x  = SCSP_SEL(f, SCSP_DF_XSEL, inputs, tr);
 
-        int32_t shifted;
-        if (o->sh == 0)      shifted = acc < -0x800000 ? -0x800000 : acc > 0x7FFFFF ? 0x7FFFFF : acc;
-        else if (o->sh == 1) { int64_t v2 = (int64_t)acc * 2; shifted = v2 < -0x800000 ? -0x800000 : v2 > 0x7FFFFF ? 0x7FFFFF : (int32_t)v2; }
-        else if (o->sh == 2) shifted = scsp_sext((int32_t)((uint32_t)acc * 2u), 24);
-        else                 shifted = scsp_sext(acc, 24);
+        int32_t ys = SCSP_SEL(f, SCSP_DF_Y_COEF, d->coef[o->coef], frc);
+        ys = SCSP_SEL(f, SCSP_DF_Y_YREG, yreg, ys);
+        int32_t y  = scsp_sext((ys >> o->ysh) & o->ymask, 13);
+        yreg = SCSP_SEL(f, SCSP_DF_YRL, inputs, yreg);
 
-        y = scsp_sext(y, 13);
+        int64_t v = (int64_t)((uint64_t)(int64_t)acc << o->dbl);
+        int64_t c = v > 0x7FFFFF ? 0x7FFFFF : v;
+        c = c < -0x800000 ? -0x800000 : c;
+        int32_t shifted = SCSP_SEL(f, SCSP_DF_SAT, (int32_t)c, scsp_sext((int32_t)(uint32_t)v, 24));
+
         acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
 
-        if (o->twt) d->temp[(o->twa + d->dec) & 0x7F] = shifted;
-        if (o->frcl) frc = o->sh == 3 ? (shifted & 0x0FFF) : ((shifted >> 11) & 0x1FFF);
+        int32_t *tw = &temp[(o->twa + dec) & 0x7F];
+        *tw = SCSP_SEL(f, SCSP_DF_TWT, shifted, *tw);
+        frc = SCSP_SEL(f, SCSP_DF_FRCL, (shifted >> o->frc_sh) & o->frc_mask, frc);
 
-        if (o->mrd || o->mwt) {
-            uint32_t addr = d->madrs[o->masa];
-            if (!o->table) addr += d->dec;
-            if (o->adreb)  addr += adrs & 0x0FFF;
-            if (o->nxadr)  addr++;
-            addr &= o->table ? 0xFFFFu : d->rbl - 1;
-            addr += d->rbp << 12;
-            addr <<= 1;
-            /* MAME: the delay memory is only touched on odd steps */
-            if (o->mrd && (st & 1)) memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
-            if (o->mwt && (st & 1)) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : scsp_dsp_pack(shifted));
+        if (o->mem) {
+            uint32_t table = (uint32_t)SCSP_DM(f, SCSP_DF_TABLE);
+            uint32_t addr = d->madrs[o->masa] + (dec & ~table)
+                          + (adrs & 0x0FFF & (uint32_t)SCSP_DM(f, SCSP_DF_ADREB)) + o->nxadr;
+            addr &= (0xFFFFu & table) | (rbl_mask & ~table);
+            addr = (addr + rbp) << 1;
+            if (o->mrd) memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
+            if (o->mwt) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : scsp_dsp_pack(shifted));
         }
-        if (o->adrl) adrs = o->sh == 3 ? (uint32_t)((shifted >> 12) & 0xFFF) : (uint32_t)(inputs >> 16);
-        if (o->ewt) d->efreg[o->ewa] = (int16_t)(d->efreg[o->ewa] + (shifted >> 8));
+        int32_t na = SCSP_SEL(f, SCSP_DF_ADRL_SH, (shifted >> 12) & 0xFFF, inputs >> 16);
+        adrs = (uint32_t)SCSP_SEL(f, SCSP_DF_ADRL, na, (int32_t)adrs);
+        efreg[o->ewa] = (int16_t)(efreg[o->ewa] + (shifted >> 8));
     }
+    memcpy(d->mems, in, sizeof d->mems);
+    memcpy(d->efreg, efreg, sizeof d->efreg);
+    if (run < d->last_step) return;   /* the program ended on a bad IRA: no DEC, MIXS kept */
     d->dec--;
     memset(d->mixs, 0, sizeof d->mixs);
 }
