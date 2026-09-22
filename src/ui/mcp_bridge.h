@@ -1798,6 +1798,9 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
 
     NP_APPEND(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
               st.frame, st.stalls, st.generation, st.seed);
+    /* The room emptied with the board still in its VS mode: any input restarts
+     * the game (netplay_empty_room_pump). */
+    NP_APPEND(",\"empty_room\":%s", st.empty_room ? "true" : "false");
     /* LOCKSTEP_NO_CHECK means the two boards have never disagreed. Reporting it
      * as a frame number would be a desync at frame 4294967295. */
     if (st.desync_frame != LOCKSTEP_NO_CHECK) NP_APPEND(",\"desync_frame\":%u", st.desync_frame);

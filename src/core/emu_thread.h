@@ -430,11 +430,15 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
     bool asked = ctx->request_reset != 0;
     if (asked) ctx->request_reset = 0;
     if (asked && step != NETPLAY_STEP_OFF) asked = false;
+    /* The player pressed a button at "nobody else is in the room": the same
+     * reset, back in their own settings (netplay_empty_room_pump). */
+    bool alone = step == NETPLAY_STEP_OFF && netplay_take_empty_restart();
 
-    if (step == NETPLAY_STEP_RESET || asked) {
+    if (step == NETPLAY_STEP_RESET || asked || alone) {
         emu_mutex_lock(&ctx->mutex);
-        if (asked) asked = netplay_reset_board_now();
-        else       netplay_do_reset();
+        if (alone)      netplay_restart_alone();
+        else if (asked) asked = netplay_reset_board_now();
+        else            netplay_do_reset();
         /* THE STEP COUNT IS PART OF THE BOARD, because the frame check hashes
          * it -- `netplay_frame_check` calls it "the instruction count since
          * reset" and it has to actually be one. Left running, it carries the

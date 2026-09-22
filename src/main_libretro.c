@@ -756,6 +756,16 @@ static void lr_rpcn_report(void) {
             lr_notify(msg, 8000);
         }
     }
+    /* The room emptied with the board still in its VS mode
+     * (netplay_empty_room_pump). Said again every few seconds while it holds,
+     * short enough each time that it is gone soon after the restart. */
+    static int64_t empty_said_us;
+    if (st->empty_room && (!empty_said_us || emu_now_us() - empty_said_us > 4000000)) {
+        lr_notify("There are no other players in the lobby. Press any button to restart the game.", 5000);
+        empty_said_us = emu_now_us();
+    } else if (!st->empty_room) {
+        empty_said_us = 0;
+    }
     /* A desync is the one thing the old overlay kept on screen for good; say it
      * once, and the status row goes on saying the match is finished. */
     static uint32_t desync_said = LOCKSTEP_NO_CHECK;

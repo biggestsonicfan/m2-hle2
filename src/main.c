@@ -963,6 +963,7 @@ static void frame(void) {
         if (state.show_m68k_mem)    m68k_memview_draw(&state.show_m68k_mem);
         if (state.show_debug)       debug_window_draw(&state.show_debug);
         if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
+        netplay_empty_room_overlay();
         if (state.show_demo)        igShowDemoWindow(&state.show_demo);
     }
 

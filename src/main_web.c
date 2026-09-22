@@ -1026,6 +1026,9 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
         st.frame, st.stalls, st.generation, (unsigned)g_netplay.cfg.frame_delay);
     if (st.desync_frame != LOCKSTEP_NO_CHECK) PUT(",\"desync\":%u", st.desync_frame);
     else                                      PUT(",\"desync\":null");
+    /* Nobody else in the room and the board still in its VS mode: any button
+     * restarts the game (netplay_empty_room_pump). */
+    PUT(",\"empty_room\":%s", st.empty_room ? "true" : "false");
 
     PUT(",\"search_pending\":%s,\"rooms\":[", st.search_pending ? "true" : "false");
     for (uint32_t i = 0; i < st.room_count && i < RPCN_MAX_ROOMS; i++) {
