@@ -455,4 +455,22 @@ static inline uint64_t net_now_ms(void) {
 #endif
 }
 
+/* The same clock in microseconds, for timing a round trip. net_now_ms is
+ * GetTickCount64 on Windows, which moves in 15.6 ms steps: coarser than the
+ * thing being measured. */
+static inline uint64_t net_now_us(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (uint64_t)(now.QuadPart / freq.QuadPart) * 1000000ull
+         + (uint64_t)(now.QuadPart % freq.QuadPart) * 1000000ull / (uint64_t)freq.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+#endif
+}
+
 #endif /* NET_SOCKET_H */

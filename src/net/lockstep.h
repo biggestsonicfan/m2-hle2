@@ -90,6 +90,12 @@ typedef enum {
     /* A watcher asking a fighter to send one side's inputs again from a frame
      * on. See lockstep_repair_packet_t. */
     LOCKSTEP_PACKET_REPAIR   = 4,
+    /* A round-trip probe between two members, and its answer: the answer echoes
+     * the probe's stamp, so only the sender's clock is ever read. Room-level, not
+     * part of any match: members ping each other from the moment they are heard,
+     * and nothing gates on it. Like BYE, a build that predates it drops both. */
+    LOCKSTEP_PACKET_PING     = 5,
+    LOCKSTEP_PACKET_PONG     = 6,
 } lockstep_packet_type_t;
 
 #pragma pack(push, 1)
@@ -160,6 +166,14 @@ typedef struct {
     uint32_t          side;
     uint32_t          frame;
 } lockstep_repair_packet_t;
+
+/* PING and PONG. `stamp_us` is the pinger's microsecond clock (net_now_us, low
+ * 32 bits), sent back unchanged; it wraps every 71 minutes, which a difference
+ * of two nearby stamps does not notice. */
+typedef struct {
+    lockstep_header_t header;
+    uint32_t          stamp_us;
+} lockstep_ping_packet_t;
 
 #pragma pack(pop)
 

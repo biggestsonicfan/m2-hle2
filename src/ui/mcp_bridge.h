@@ -1759,10 +1759,10 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
 
     mcp_json_escape(esc, sizeof(esc), st.peer_npid);
     NP_APPEND(",\"peer\":{\"npid\":\"%s\",\"known\":%s,\"heard\":%s,"
-              "\"ready\":%s,\"ready_gen\":%u,\"addr\":\"",
+              "\"ready\":%s,\"ready_gen\":%u,\"rtt_ms\":%d,\"addr\":\"",
               esc, st.peer_known ? "true" : "false",
               st.peer_heard ? "true" : "false",
-              st.peer_ready ? "true" : "false", st.peer_ready_gen);
+              st.peer_ready ? "true" : "false", st.peer_ready_gen, (int)st.peer_rtt_ms);
     mcp_json_escape(esc, sizeof(esc), st.peer_addr);
     NP_APPEND("%s\"}", esc);
 
@@ -1784,7 +1784,7 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
         NP_APPEND("%s{\"id\":%u,\"npid\":\"%s\",\"me\":%s,\"owner\":%s,\"line\":%d,\"side\":%d,"
                   "\"known\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"playing\":%u,"
                   "\"result_match\":%u,\"games\":%u,\"wins\":%u,\"points\":%u,"
-                  "\"addr_known\":%s,\"heard\":%s}",
+                  "\"addr_known\":%s,\"heard\":%s,\"rtt_ms\":%d}",
                   i ? "," : "", m->member_id, esc, m->is_me ? "true" : "false",
                   m->is_owner ? "true" : "false", m->line_pos, m->side,
                   m->known ? "true" : "false",
@@ -1792,7 +1792,7 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
                   (m->data.flags & ROOM_MEMBER_WATCH) ? "true" : "false",
                   m->data.entry, m->data.playing, m->data.result_match,
                   m->data.games, m->data.wins, m->data.points,
-                  m->addr_known ? "true" : "false", m->heard ? "true" : "false");
+                  m->addr_known ? "true" : "false", m->heard ? "true" : "false", (int)m->rtt_ms);
     }
     NP_APPEND("]}");
 

@@ -298,6 +298,7 @@ typedef struct {
     room_member_data_t data;
     bool     addr_known;     /* (not for is_me) the server has told us where they are */
     bool     heard;          /* (not for is_me) a datagram has come back from them */
+    int32_t  rtt_ms;         /* (not for is_me) round trip to them; -1 = not measured */
 } netplay_member_status_t;
 
 /* The snapshot the UI draws from, published under the netplay mutex. */
@@ -324,6 +325,7 @@ typedef struct {
     char            peer_addr[32];
     bool            peer_known;
     bool            peer_heard;
+    int32_t         peer_rtt_ms;       /* round trip to "the peer"; -1 = not measured */
     uint32_t        frame;
     uint32_t        stalls;
     uint32_t        desync_frame;      /* LOCKSTEP_NO_CHECK while in agreement */
@@ -355,6 +357,29 @@ typedef struct {
     char log[NETPLAY_LOG_LINES][NETPLAY_LOG_LEN];
     uint32_t log_count;     /* total ever written; index = (n % LINES) */
 } netplay_status_t;
+
+/*
+ * Round trip to one member, from LOCKSTEP_PACKET_PING / PONG. Measured peer to
+ * peer over the same path the inputs take -- straight across, or through the
+ * web gateway for a browser -- which the gateway echo in m2hle-netplay.js cannot
+ * see: that one only reaches the gateway.
+ *
+ * A ping is sent and answered from netplay_begin_frame, which runs once a slice,
+ * so each end can hold it for up to a slice before it is read. That wait is in
+ * the figure on purpose: an input waits the same way, and the frame delay has
+ * to cover what an input sees, not the bare network.
+ */
+#define NETPLAY_PING_MS      1000u
+#define NETPLAY_RTT_SAMPLES  8u
+/* An answer older than this is a ping from before a stall or a reconnect. */
+#define NETPLAY_RTT_MAX_US   5000000u
+
+typedef struct {
+    uint16_t member_id;      /* whose these are; a reused peer slot starts over */
+    uint32_t samples_us[NETPLAY_RTT_SAMPLES];
+    uint32_t count, next;
+    uint64_t last_ping_ms;
+} netplay_rtt_t;
 
 typedef struct {
     bool              enabled;        /* a session has been asked for */
@@ -434,6 +459,10 @@ typedef struct {
     uint64_t          last_announce_ms;
     uint64_t          last_resend_ms;
     uint64_t          last_peer_input_ms;
+
+    /* Round trips to the other members, by the same index as session.peers
+     * (netplay_ping_pump). */
+    netplay_rtt_t     rtt[RPCN_MAX_PEERS];
 
     /* The frame this board was last cleared to run, and since when. Both
      * players' inputs being in is permission to run the frame, not proof that it
@@ -991,6 +1020,74 @@ static inline void netplay_answer_repair(uint16_t member, uint32_t frame) {
     }
 }
 
+/* ---- Round trip to each member (netplay_rtt_t) ----------------------------- */
+
+/* The slot for `member`, or NULL if they are not in the room. */
+static inline netplay_rtt_t *netplay_rtt_slot(uint16_t member) {
+    for (uint32_t i = 0; member && i < RPCN_MAX_PEERS; i++) {
+        const rpcn_peer_t *p = &g_netplay.session.peers[i];
+        if (!p->used || p->member_id != member) continue;
+        netplay_rtt_t *r = &g_netplay.rtt[i];
+        if (r->member_id != member) {
+            memset(r, 0, sizeof(*r));
+            r->member_id = member;
+        }
+        return r;
+    }
+    return NULL;
+}
+
+/* The median of the last few round trips to `member`, in whole milliseconds
+ * (rounded), or -1 before the first answer. The median, because one ping that
+ * lands behind a long slice is not the connection. */
+static inline int32_t netplay_rtt_ms(uint16_t member) {
+    for (uint32_t i = 0; member && i < RPCN_MAX_PEERS; i++) {
+        const netplay_rtt_t *r = &g_netplay.rtt[i];
+        if (r->member_id != member || !r->count || !g_netplay.session.peers[i].used
+            || g_netplay.session.peers[i].member_id != member) continue;
+        uint32_t v[NETPLAY_RTT_SAMPLES], n = r->count;
+        memcpy(v, r->samples_us, sizeof(v));
+        for (uint32_t a = 1; a < n; a++)
+            for (uint32_t b = a; b > 0 && v[b - 1] > v[b]; b--) { uint32_t t = v[b]; v[b] = v[b - 1]; v[b - 1] = t; }
+        uint32_t med = (n & 1) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+        return (int32_t)((med + 500) / 1000);
+    }
+    return -1;
+}
+
+static inline void netplay_send_ping(uint16_t member, uint8_t type, uint32_t stamp_us) {
+    lockstep_ping_packet_t pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    netplay_fill_header(&pkt.header, type);
+    pkt.stamp_us = stamp_us;
+    netplay_send_to(member, &pkt, sizeof(pkt));
+}
+
+/* Once a second, a ping to every member we have heard from: before a match as
+ * well as during one, so the room shows how far away each player is. At most
+ * seven a second in a full room, against the gateway's 240. */
+static inline void netplay_ping_pump(void) {
+    uint64_t now = net_now_ms();
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        const rpcn_peer_t *p = &g_netplay.session.peers[i];
+        if (!p->used) { g_netplay.rtt[i].member_id = 0; continue; }
+        if (!p->heard) continue;
+        netplay_rtt_t *r = netplay_rtt_slot(p->member_id);
+        if (!r || now - r->last_ping_ms < NETPLAY_PING_MS) continue;
+        r->last_ping_ms = now;
+        netplay_send_ping(p->member_id, LOCKSTEP_PACKET_PING, (uint32_t)net_now_us());
+    }
+}
+
+static inline void netplay_on_pong(uint16_t from, uint32_t stamp_us) {
+    netplay_rtt_t *r = netplay_rtt_slot(from);
+    uint32_t rtt = (uint32_t)net_now_us() - stamp_us;
+    if (!r || rtt > NETPLAY_RTT_MAX_US) return;
+    r->samples_us[r->next] = rtt;
+    r->next = (r->next + 1) % NETPLAY_RTT_SAMPLES;
+    if (r->count < NETPLAY_RTT_SAMPLES) r->count++;
+}
+
 static inline void netplay_end_match(const char *why);   /* below; a BYE ends the match */
 
 static inline void netplay_drain_socket(void) {
@@ -1039,6 +1136,10 @@ static inline void netplay_drain_socket(void) {
             /* The generation is the room's, not either fighter's: both read it
              * from the same room state, so there is nothing here to adopt. */
             lockstep_on_peer_announce(&g_netplay.lockstep, hdr->player, hdr->generation);
+        } else if (hdr->type == LOCKSTEP_PACKET_PING && got >= (int)sizeof(lockstep_ping_packet_t)) {
+            netplay_send_ping(from, LOCKSTEP_PACKET_PONG, ((const lockstep_ping_packet_t *)buf)->stamp_us);
+        } else if (hdr->type == LOCKSTEP_PACKET_PONG && got >= (int)sizeof(lockstep_ping_packet_t)) {
+            netplay_on_pong(from, ((const lockstep_ping_packet_t *)buf)->stamp_us);
         } else if (hdr->type == LOCKSTEP_PACKET_REPAIR
                    && got >= (int)sizeof(lockstep_repair_packet_t)) {
             const lockstep_repair_packet_t *req = (const lockstep_repair_packet_t *)buf;
@@ -1554,6 +1655,7 @@ static inline void netplay_publish_status(void) {
                 row->addr_known = p->ip && p->port;
                 row->heard      = p->heard;
             }
+            row->rtt_ms = row->is_me ? -1 : netplay_rtt_ms(ids[i]);
             st->member_count++;
         }
     }
@@ -1573,6 +1675,7 @@ static inline void netplay_publish_status(void) {
     snprintf(st->peer_addr, sizeof(st->peer_addr), "%s", rpcn_peer_addr_text(peer));
     st->peer_known   = peer && peer->ip && peer->port;
     st->peer_heard   = peer && peer->heard;
+    st->peer_rtt_ms  = peer ? netplay_rtt_ms(peer->member_id) : -1;
     st->frame        = g_netplay.frame;
     st->stalls       = g_netplay.lockstep.stalls;
     st->desync_frame = g_netplay.desync_frame;
@@ -1869,6 +1972,9 @@ static inline void netplay_forget_room(void) {
     g_netplay.auto_deadline_ms = 0;
     g_netplay.fighters_seen = 0;
     g_netplay.local_player  = -1;
+    /* Member ids are small and every room hands them out again: a round trip
+     * kept under one would be shown against somebody else in the next room. */
+    memset(g_netplay.rtt, 0, sizeof(g_netplay.rtt));
     /* Stats and flags start again with the room; the entry request and the
      * choice to sit out are the player's and outlive it. */
     uint8_t entry = g_netplay.me.entry;
@@ -2813,6 +2919,7 @@ static inline netplay_step_t netplay_begin_frame(void) {
         netplay_member_pump();
         netplay_linger_pump();
         netplay_publish_me();
+        netplay_ping_pump();
     }
 
     netplay_step_t step = NETPLAY_STEP_OFF;

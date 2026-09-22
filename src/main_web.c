@@ -999,6 +999,9 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
     PUTS("peer", st.peer_npid, true);
     PUT(",\"peer_known\":%s,\"peer_heard\":%s,\"peer_ready\":%s",
         st.peer_known ? "true" : "false", st.peer_heard ? "true" : "false", st.peer_ready ? "true" : "false");
+    /* Round trips measured peer to peer (netplay_rtt_t), null until the first answer. */
+    if (st.peer_rtt_ms >= 0) PUT(",\"peer_rtt_ms\":%d", (int)st.peer_rtt_ms);
+    else                     PUT(",\"peer_rtt_ms\":null");
     /* The room of up to eight (net/room.h): phase, match, and the line. */
     PUT(",\"max\":%u,\"phase\":\"%s\",\"match\":%u,\"auto_start_s\":%u,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"members\":[",
         st.max_slot, st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby", st.room.match, st.auto_start_s,
@@ -1013,6 +1016,8 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
             (m->data.flags & ROOM_MEMBER_WATCH) ? "true" : "false", m->data.entry,
             m->data.wins, m->data.games, m->data.points, (m->is_me || m->heard) ? "true" : "false");
         PUTS("npid", m->npid, true);
+        if (m->rtt_ms >= 0) PUT(",\"rtt_ms\":%d", (int)m->rtt_ms);
+        else                PUT(",\"rtt_ms\":null");
         PUT("}");
     }
     PUT("]}");
