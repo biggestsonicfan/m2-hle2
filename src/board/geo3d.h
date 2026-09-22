@@ -694,8 +694,14 @@ static float g_light_dir[3]  = {0.3f, 0.5f, 1.0f};
 static float g_light_ambient = 0.45f;
 static float g_light_diffuse = 0.55f;
 /* Debug: when == a model index, dump that model's per-face texture tiles
- * (sheet,texx,texy,texw,texh) to model_tex.txt while it is decoded. -1 = off. */
+ * (sheet,texx,texy,texw,texh) to model_tex.txt while it is decoded. -1 = off.
+ * Test it with GEO3D_DUMP_TEX(), never with a bare ==: a polygon-RAM object
+ * decodes as model -1 too, so "off" matched every one of them. On the desktop
+ * that quietly rewrote model_tex.txt per face; on the web, with no file
+ * system, the stub fopen answered fd 0 and the write threw out of the frame
+ * (the Death Egg screens in attract, adv_movie_egg). */
 static int  g_dump_model_tex = -1;
+#define GEO3D_DUMP_TEX(model_idx) (g_dump_model_tex >= 0 && (model_idx) == g_dump_model_tex)
 /* Texture bank override: 0=auto (texsheet bit12), 1=force sheet0, 2=force sheet1,
  * 3=swap (invert the bit12 selection). */
 static int  g_uv_bank_mode = 0;
@@ -1875,7 +1881,7 @@ static inline void geo3d_decode_model(int model_idx,
                     geo3d_bgr555(cw, &fr, &fg, &fb);
                 }
                 /* Debug dump of this model's per-face texture tiles. */
-                if (model_idx == g_dump_model_tex) {
+                if (GEO3D_DUMP_TEX(model_idx)) {
                     static FILE *mtf = NULL;
                     if (fi == 0) { if (mtf) fclose(mtf); mtf = fopen("model_tex.txt", "w");
                         if (mtf) {
@@ -1955,7 +1961,7 @@ static inline void geo3d_decode_model(int model_idx,
                 if (g_uv_flip_v) tv = (float)texh - tv;
                 if (g_uv_swap)   { float t = tu; tu = tv; tv = t; }
                 uvu[slot[k]] = tu; uvv[slot[k]] = tv;   /* tile-texel; shader wraps */
-                if (model_idx == g_dump_model_tex && fi <= 12) {
+                if (GEO3D_DUMP_TEX(model_idx) && fi <= 12) {
                     static FILE *uf = NULL;
                     if (fi == 0 && k == 0) { if (uf) fclose(uf); uf = fopen("model_uv.txt", "w"); }
                     if (!uf) uf = fopen("model_uv.txt", "a");
@@ -2342,7 +2348,7 @@ static inline void geo3d_decode_model_cached(int model_idx,
         materials, materials_size, table_off, table_count, mesh_ptr_subtract, mesh_ptr_add, matrix, cr, cg, cb)
     if (!g_geo3d_mesh_cache || !g_geo3d_board_luma || !matrix || g_geo3d_obj_mesh || g_geo_flat_color ||
             g_uv_bank_mode || g_uv_quad_order || g_uv_swap || g_uv_flip_u || g_uv_flip_v ||
-            model_idx == g_dump_model_tex) {
+            GEO3D_DUMP_TEX(model_idx)) {
         GEO3D_FULL_DECODE();
         return;
     }
