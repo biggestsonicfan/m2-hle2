@@ -56,6 +56,7 @@ typedef enum {
     RPCN_CMD_JOIN_ROOM                = 15,
     RPCN_CMD_LEAVE_ROOM               = 16,
     RPCN_CMD_SEARCH_ROOM              = 17,
+    RPCN_CMD_SET_ROOM_DATA_EXTERNAL   = 19,
     RPCN_CMD_GET_ROOM_DATA_INTERNAL   = 20,
     RPCN_CMD_SET_ROOM_DATA_INTERNAL   = 21,
     RPCN_CMD_SET_ROOM_MEMBER_DATA     = 23,
@@ -152,6 +153,16 @@ typedef enum {
 #define RPCN_ROOM_BIN_MAX            64u
 #define RPCN_MEMBER_BIN_MAX          32u
 #define RPCN_ROOM_MAX_MEMBERS        8u
+/*
+ * Room searchable int attribute 1 (SCE_NP_MATCHING2_ROOM_SEARCHABLE_INT_ATTR_EXTERNAL_1_ID):
+ * the owner's round trip to RPCN's signaling helper, in ms, 0 = not measured.
+ * Unlike the flag word it is only in a search result when the search asks for
+ * it by id (attrId), and only the owner may change it (set_roomdata_external).
+ * A lobby adds its own trip to the owner's to estimate the trip between the two
+ * before joining -- see rpcn_session_relay_ms for why that is a fair estimate.
+ */
+#define RPCN_ROOM_INT_ATTR_RELAY     0x4Cu
+
 /* SCE_NP_MATCHING2_ROOMMEMBER_FLAG_ATTR_OWNER, in a member's flagAttr. */
 #define RPCN_MEMBER_FLAG_OWNER       0x80000000u
 
@@ -177,6 +188,7 @@ typedef struct {
     bool     has_password;
     char     owner[20];
     uint32_t flag_attr;          /* as published by CreateRoom */
+    uint32_t relay_ms;           /* RPCN_ROOM_INT_ATTR_RELAY; 0 = not published */
 } rpcn_room_listing_t;
 
 /* One RoomMemberDataInternal: who, where in the room, and their own attribute. */
@@ -586,16 +598,27 @@ static inline void rpcn_pb_bin_attr(pb_writer_t *w, uint32_t field, uint16_t id,
     pb_end_sub(w, tok);
 }
 
+/* IntAttr { uint16 id = 1; uint32 num = 2; } as field `field`. The id is a
+ * wrapper, as in BinAttr; the number is a bare varint. */
+static inline void rpcn_pb_int_attr(pb_writer_t *w, uint32_t field, uint16_t id, uint32_t num) {
+    uint32_t tok = pb_begin_sub(w, field);
+    pb_wrapped(w, 1, id);
+    pb_varint(w, 2, num);
+    pb_end_sub(w, tok);
+}
+
 /*
  * `room_bin` / `member_bin` seed the room's shared state and the creator's own
  * attribute (room.h), so the room is never seen without them. Either may be
- * null, which leaves the attribute empty.
+ * null, which leaves the attribute empty. `relay_ms` is RPCN_ROOM_INT_ATTR_RELAY,
+ * left unset at 0.
  */
 static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
                                         uint32_t max_slot, const char *password,
                                         uint32_t flag_attr,
                                         const uint8_t *room_bin, uint32_t room_len,
-                                        const uint8_t *member_bin, uint32_t member_len) {
+                                        const uint8_t *member_bin, uint32_t member_len,
+                                        uint32_t relay_ms) {
     uint8_t pb[512];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
@@ -608,6 +631,8 @@ static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, ui
     }
     if (room_bin && room_len)                   /* roomBinAttrInternal */
         rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, room_bin, room_len);
+    if (relay_ms)                               /* roomSearchableIntAttrExternal */
+        rpcn_pb_int_attr(&w, 6, RPCN_ROOM_INT_ATTR_RELAY, relay_ms);
     if (password && *password) {
         /* TWO RULES, BOTH ENFORCED SILENTLY BY THE SERVER — get either wrong and
          * the room ends up with NO password while still looking protected here.
@@ -748,6 +773,25 @@ static inline uint64_t rpcn_set_member_data_internal(rpcn_client_t *c, const cha
 }
 
 /*
+ * SetRoomDataExternalRequest { roomId = 1; repeated IntAttr
+ * roomSearchableIntAttrExternal = 2; ... }. Owner only: anyone else is
+ * Unauthorized. Used for RPCN_ROOM_INT_ATTR_RELAY alone.
+ */
+static inline uint64_t rpcn_set_room_relay(rpcn_client_t *c, const char *com_id, uint64_t room_id,
+                                           uint32_t relay_ms) {
+    uint8_t pb[64];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);
+    rpcn_pb_int_attr(&w, 2, RPCN_ROOM_INT_ATTR_RELAY, relay_ms);
+    if (!w.ok) { rpcn_fail(c, "SetRoomDataExternal: protobuf overflow"); return 0; }
+    uint8_t payload[128];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "SetRoomDataExternal: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_SET_ROOM_DATA_EXTERNAL, payload, n);
+}
+
+/*
  * GetRoomDataInternal { roomId = 1; repeated uint16 attrId = 2; }. The whole room
  * again. Needed because RPCN says nothing when ownership moves: a departing
  * owner's successor is picked in room_manager.rs `leave_room` and the other
@@ -782,6 +826,9 @@ static inline uint64_t rpcn_search_room(rpcn_client_t *c, const char *com_id, ui
      * its own values for anything outside that. */
     pb_varint(&w, 4, 1);                        /* rangeFilter_startIndex */
     pb_varint(&w, 5, 20);                       /* rangeFilter_max */
+    /* attrId: which searchable attributes to include. `repeated uint16`, so each
+     * is a wrapper. Without it the owner's round trip is not in the reply. */
+    pb_wrapped(&w, 10, RPCN_ROOM_INT_ATTR_RELAY);
     if (!w.ok) { rpcn_fail(c, "SearchRoom: protobuf overflow"); return 0; }
 
     uint8_t payload[512];
@@ -848,6 +895,18 @@ static inline uint32_t rpcn_parse_room_list(const uint8_t *payload, uint32_t siz
                     break;
                 }
                 case 14: row.flag_attr = (uint32_t)room.varint; break;
+                case 15: {
+                    /* IntAttr { uint16 id = 1 (wrapper); uint32 num = 2 } */
+                    if (room.wire != PB_WIRE_LEN) break;
+                    pb_reader_t attr = pb_sub(&room);
+                    uint32_t id = 0, num = 0;
+                    while (pb_next(&attr)) {
+                        if (attr.field == 1 && attr.wire == PB_WIRE_LEN) id = (uint32_t)pb_as_wrapped(&attr);
+                        else if (attr.field == 2 && attr.wire == PB_WIRE_VARINT) num = (uint32_t)attr.varint;
+                    }
+                    if (id == RPCN_ROOM_INT_ATTR_RELAY) row.relay_ms = num;
+                    break;
+                }
                 default: break;
             }
         }

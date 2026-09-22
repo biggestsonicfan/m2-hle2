@@ -70,6 +70,12 @@
 #define RPCN_PUNCH_MS         250
 #define RPCN_PUNCH_IDLE_MS    1000
 #define RPCN_SIGNALING_RETRY_MS 2000
+
+/* Keepalive round trips kept for the median, and how often, and by how much it
+ * must have moved, before an owner publishes it again. */
+#define RPCN_RELAY_SAMPLES      8u
+#define RPCN_RELAY_PUBLISH_MS   5000u
+#define RPCN_RELAY_PUBLISH_STEP 10u
 #define RPCN_ACCOUNT_TIMEOUT_MS 15000
 
 #define RPCN_MAX_ROOMS 32
@@ -222,6 +228,15 @@ typedef struct {
 
     uint64_t last_keepalive_ms;
     uint64_t last_intro_ms;
+
+    /* Round trips to the signaling helper, one per keepalive answered
+     * (rpcn_session_relay_ms), and what we last published of them as a room's
+     * owner (RPCN_ROOM_INT_ATTR_RELAY). */
+    uint64_t keepalive_sent_us;
+    uint32_t relay_rtt_us[RPCN_RELAY_SAMPLES];
+    uint32_t relay_count, relay_next;
+    uint32_t relay_published_ms;
+    uint64_t relay_publish_ms;
 
     void *log_ctx;
     void (*log)(void *ctx, const char *msg);
@@ -393,6 +408,7 @@ static inline void rpcn_session_clear_room(rpcn_session_t *s) {
     s->room_bin_len = 0;
     s->my_bin_len   = 0;
     s->pending_room_data = 0;
+    s->relay_published_ms = 0;
     memset(s->peers, 0, sizeof(s->peers));
     s->room_rev++;
 }
@@ -564,7 +580,59 @@ static inline void rpcn_session_pump_keepalive(rpcn_session_t *s) {
     uint64_t now = net_now_ms();
     if (now - s->last_keepalive_ms < RPCN_KEEPALIVE_MS) return;
     s->last_keepalive_ms = now;
-    rpcn_send_signaling_ping(&s->client, 0);
+    if (rpcn_send_signaling_ping(&s->client, 0)) s->keepalive_sent_us = net_now_us();
+}
+
+/*
+ * Our round trip to RPCN's signaling helper: the median of the last few
+ * keepalives, in ms (at least 1), or 0 before the first answer.
+ *
+ * It stands in for "how far this player is from the relay". A web player's
+ * keepalive goes through the gateway, and the gateway runs beside RPCN, so for
+ * a browser this IS the trip to the gateway that every one of its datagrams
+ * makes. Two browsers talk through that gateway, so the sum of their two trips
+ * is the trip between them; a desktop player talks straight to a browser's
+ * gateway, which again is where the helper is. Only two desktop players are
+ * estimated poorly, since they talk directly and may both be far from RPCN.
+ *
+ * The answer is read when the socket is next drained, so it carries up to a
+ * slice of this end's polling, as the peer-to-peer ping does.
+ */
+static inline uint32_t rpcn_session_relay_ms(const rpcn_session_t *s) {
+    uint32_t n = s->relay_count, v[RPCN_RELAY_SAMPLES];
+    if (!n) return 0;
+    memcpy(v, s->relay_rtt_us, sizeof(v));
+    for (uint32_t a = 1; a < n; a++)
+        for (uint32_t b = a; b > 0 && v[b - 1] > v[b]; b--) { uint32_t t = v[b]; v[b] = v[b - 1]; v[b - 1] = t; }
+    uint32_t med = (n & 1) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    uint32_t ms = (med + 500) / 1000;
+    return ms ? ms : 1;
+}
+
+static inline void rpcn_session_on_keepalive_answer(rpcn_session_t *s) {
+    if (!s->keepalive_sent_us) return;   /* one answer per keepalive */
+    uint64_t rtt = net_now_us() - s->keepalive_sent_us;
+    s->keepalive_sent_us = 0;
+    if (rtt > 5000000u) return;
+    s->relay_rtt_us[s->relay_next] = (uint32_t)rtt;
+    s->relay_next = (s->relay_next + 1) % RPCN_RELAY_SAMPLES;
+    if (s->relay_count < RPCN_RELAY_SAMPLES) s->relay_count++;
+}
+
+/* The owner keeps the room's RPCN_ROOM_INT_ATTR_RELAY current: its own trip,
+ * so a lobby can estimate its distance to this room. RPCN hands a room on when
+ * its owner leaves, and the new owner then publishes its own. */
+static inline void rpcn_session_pump_relay(rpcn_session_t *s) {
+    if (!s->room_id || !rpcn_session_is_owner(s)) return;
+    uint32_t ms = rpcn_session_relay_ms(s);
+    if (!ms) return;
+    uint32_t was = s->relay_published_ms;
+    if (was && (ms > was ? ms - was : was - ms) < RPCN_RELAY_PUBLISH_STEP) return;
+    uint64_t now = net_now_ms();
+    if (was && now - s->relay_publish_ms < RPCN_RELAY_PUBLISH_MS) return;
+    if (!rpcn_set_room_relay(&s->client, s->com_id, s->room_id, ms)) return;
+    s->relay_published_ms = ms;
+    s->relay_publish_ms   = now;
 }
 
 static inline void rpcn_session_pump_punch(rpcn_session_t *s) {
@@ -768,7 +836,8 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
          * the change back as a notification, which is where it is applied. A
          * refusal is worth a line, since it means the room did not move. */
         if ((rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_DATA_INTERNAL
-            || (rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_MEMBER_DATA) {
+            || (rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_MEMBER_DATA
+            || (rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_DATA_EXTERNAL) {
             if (pkt.error != RPCN_OK)
                 rpcn_session_note(s, "the server refused a room update (ErrorType=%u)", (unsigned)pkt.error);
             continue;
@@ -954,6 +1023,7 @@ static inline void rpcn_session_update(rpcn_session_t *s) {
         rpcn_session_pump_signaling(s);
         rpcn_session_pump_punch(s);
         rpcn_session_pump_intro(s, &s->last_intro_ms);
+        rpcn_session_pump_relay(s);
     }
 }
 
@@ -974,7 +1044,8 @@ static inline bool rpcn_session_host(rpcn_session_t *s, uint32_t max_slot, const
     if (max_slot < 2) max_slot = 2;
     if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
     s->pending_room = rpcn_create_room(&s->client, s->com_id, s->world_id, max_slot, password,
-                                       flag_attr, room_bin, room_len, member_bin, member_len);
+                                       flag_attr, room_bin, room_len, member_bin, member_len,
+                                       rpcn_session_relay_ms(s));
     if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
     return true;
 }
@@ -1068,7 +1139,11 @@ static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap,
         /* Signaling replies share this socket; route them by SOURCE rather than
          * by content, since a signaling reply's leading bytes can look exactly
          * like a game packet header. */
-        if (rpcn_is_signaling_source(&s->client, ip, port)) { s->signaling_seen = true; continue; }
+        if (rpcn_is_signaling_source(&s->client, ip, port)) {
+            s->signaling_seen = true;
+            rpcn_session_on_keepalive_answer(s);
+            continue;
+        }
 
         /* A datagram from OURSELVES. This is not paranoia: when two peers share a
          * public IPv4 the server hands each the other's LOCAL address with port
