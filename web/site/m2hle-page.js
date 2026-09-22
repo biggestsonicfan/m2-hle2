@@ -353,6 +353,42 @@ window.addEventListener('drop', (e) => {
   readFile(e.dataTransfer && e.dataTransfer.files[0]);
 });
 
+/* ---- The menu ----------------------------------------------------------------
+ *
+ * The bar holds two buttons -- the source link and this menu -- and the menu holds
+ * everything else. Its items keep the ids and the handlers they had in the bar, so
+ * the panels (m2hle-netplay.js, m2hle-pad.js, m2hle-tools.js) and the test scripts
+ * press them by id whether or not the menu is open. */
+
+/* Off the bar and back to the game: the bar fades out again (m2hle.css uses
+ * :focus-visible for that) and the keys go where a player expects them. */
+function leaveBar() {
+  const canvas = $('canvas');
+  if (document.activeElement && document.activeElement.closest('.bar')) {
+    if ($('panel').hidden) canvas.focus();
+    else document.activeElement.blur();
+  }
+}
+
+function menuShow(open) {
+  const menu = $('menu');
+  if (open === undefined) open = menu.hidden;
+  menu.hidden = !open;
+  $('btn-menu').setAttribute('aria-expanded', String(open));
+  if (!open) leaveBar();
+}
+
+$('btn-menu').addEventListener('click', () => menuShow());
+/* An item does its own thing (a handler of its own, registered by the panel it
+ * belongs to); the menu just closes behind it. */
+$('menu').addEventListener('click', (e) => { if (e.target.closest('button')) menuShow(false); });
+document.addEventListener('pointerdown', (e) => {
+  if (!$('menu').hidden && !e.target.closest('.bar')) menuShow(false);
+}, true);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('menu').hidden) { menuShow(false); $('btn-menu').focus(); }
+});
+
 /* ---- Fullscreen --------------------------------------------------------------
  *
  * The whole page, not the canvas alone: the touch buttons, the Controls panel and
@@ -371,6 +407,9 @@ if (fsRequest && (document.fullscreenEnabled || document.webkitFullscreenEnabled
   const label = () => {
     btn.textContent = fsElement() ? 'Exit fullscreen' : 'Fullscreen';
     btn.setAttribute('aria-pressed', String(!!fsElement()));
+    /* Going either way leaves this button focused, and a focused button in the
+     * bar is one the keyboard could be driving: hand the keys back to the game. */
+    leaveBar();
   };
   document.addEventListener('fullscreenchange', label);
   document.addEventListener('webkitfullscreenchange', label);
