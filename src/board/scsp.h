@@ -23,6 +23,25 @@
  * capture tools record. Where that is a MAME choice rather than known hardware
  * it is marked "MAME:" so it can be revisited against a real board.
  *
+ * Two other implementations were read for speed, not behaviour (2026-09-22):
+ *   - Ymir (Saturn; libs/ymir-core/.../hw/scsp) models the chip's own pipeline:
+ *     slots advance in the chip's 7-stage order, the DSP runs 4 steps per slot
+ *     with delay-line reads landing a step late, envelopes step at the chip's
+ *     rates, pan and send levels are shifts rather than tables, and MIXS is
+ *     double-buffered. That is closer to hardware and would change every
+ *     sample against MAME, so none of it is here. What is: its leading-zero
+ *     pack (scsp_dsp_pack) and keeping a slot's register-derived values in the
+ *     slot (the gains, scsp_slot_gains).
+ *   - Supermodel (Model 3; Src/Sound/SCSP*.cpp) is the ElSemi code MAME's came
+ *     from, rendering a frame of samples at a time. Its DSP recompiler
+ *     (DYNDSP) is a stub that is compiled out; the DSP kinds below are the
+ *     portable version of that idea. It differs from MAME on purpose for VF3
+ *     (MDL masked to 0x1E, PLFOS to 0xE, sample addresses to 0x7FFFE, delay
+ *     memory addressed in words and zeroed past 0x7FFFF, no noise source), and
+ *     keeps sound RAM in host byte order so a sample is one load. Ours is the
+ *     68000's big-endian bytes; one load and a byte swap in its place measured
+ *     within noise under MSVC, so the two-byte read stays.
+ *
  * Registers (16-bit, big-endian, offsets from the chip base):
  *   0x000-0x3FF  32 slots x 0x20
  *   0x400-0x42F  common: MVOL, RBL/RBP, MIDI in/out, monitor, DMA, timers,
