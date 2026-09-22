@@ -77,7 +77,12 @@ RetroArch's **Quick Menu > Controls**, as with any core.
   Double.
 - **Draw rate** at 30 halves the graphics work. The game itself still runs at 60.
 - **Heat guard** switches to drawing every second frame when the device passes the chosen
-  temperature, and back once it's 5 degrees cooler. It reads Linux's thermal zones, so it does
+  temperature, and back once it's 5 degrees cooler. If that happens a second time it stays at
+  every second frame, and if the device is still hot after that (hot a third time, or not below
+  the limit a minute later) it switches the sound board off, until the game is next loaded.
+  None of this touches an online match: the draw rate is this machine's business only, and the
+  sound board stays on while a match is being set up or played, because the other board runs it
+  too. It goes off once the match is over. The guard reads Linux's thermal zones, so it does
   nothing on Windows or macOS. The handheld build has it at 85 C by default.
 - **Sound board** off is silent and cheaper on a handheld. An online match turns it on anyway,
   because the other player's board always runs it and the two games have to match.

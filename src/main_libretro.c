@@ -54,6 +54,7 @@
 #include "watchpoint.h"
 #include "rom_loader.h"
 #include "emu_thread.h"
+#include "heat_guard.h"
 #include "geo3d.h"
 #include "game_render.h"
 #include "video_window.h"
@@ -154,6 +155,9 @@ static struct {
     const char *profile;        /* a profile id, or NULL for the ROM set's default (read at load) */
 } opt = { .scale = 0, .sound = true, .online = LR_ONLINE_RETROARCH, .net_delay = 2, .draw_every = 1 };
 
+/* The heat guard's stages (core/heat_guard.h); lr_heat_tick feeds it once a retro_run. */
+static heat_guard_t g_heat;
+
 static struct retro_core_option_v2_category option_cats[] = {
     { "video",  "Video",       "The picture." },
     { "online", "Online play", "Netplay: RetroArch's own sessions, or RPCN rooms shared with the PC and the website." },
@@ -186,7 +190,9 @@ static struct retro_core_option_v2_definition option_defs[] = {
       "60" },
     { "m2hle_heat_guard", "Heat guard", NULL,
       "Above this temperature, draw every second frame until the device has cooled 5 degrees below it. "
-      "Reads the kernel's thermal zones; does nothing where there are none.", NULL, "video",
+      "Hot a second time: every second frame from then on. Still hot after that: the sound board is "
+      "switched off until the game is next loaded (never during an online match). Reads the kernel's "
+      "thermal zones; does nothing where there are none.", NULL, "video",
       { { "off", "Off" }, { "80", "80 C" }, { "85", "85 C" }, { "90", "90 C" }, { NULL, NULL } },
       LR_DEFAULT_HEAT },
     { "m2hle_online", "Online play", NULL,
@@ -234,7 +240,10 @@ static void lr_read_options(bool at_load) {
         opt.net_delay = d < 1 ? 1 : d > 8 ? 8 : d;
     }
     if ((v = lr_var("m2hle_draw_rate")))  opt.draw_every = strcmp(v, "30") ? 1 : 2;
-    if ((v = lr_var("m2hle_heat_guard"))) opt.heat_limit = atoi(v);   /* "off" -> 0 */
+    if ((v = lr_var("m2hle_heat_guard"))) {
+        opt.heat_limit = atoi(v);   /* "off" -> 0 */
+        heat_guard_set_limit(&g_heat, opt.heat_limit);   /* a new limit starts its stages over */
+    }
     if ((v = lr_var("m2hle_rpcn_login")))
         opt.login = !strcmp(v, "twitch") ? LR_LOGIN_TWITCH : !strcmp(v, "account") ? LR_LOGIN_ACCOUNT : LR_LOGIN_OFF;
     if (!at_load) return;
@@ -991,8 +1000,9 @@ static bool g_can_dupe;
 /* ---- Heat ------------------------------------------------------------------------------
  *
  * The hottest of the kernel's thermal zones, read at most every two seconds;
- * -1 where there are none (Windows, a desktop without them). The guard drops
- * to every second frame above the limit and comes back 5 degrees below it. */
+ * -1 where there are none (Windows, a desktop without them). What the guard
+ * does with it is core/heat_guard.h: every second frame while hot, for good
+ * the second time, and the sound board off if it is still hot at that. */
 static int lr_hottest_c(void) {
 #if defined(_WIN32)
     return -1;
@@ -1017,25 +1027,75 @@ static int lr_hottest_c(void) {
 #endif
 }
 
-static bool g_heat_hot;
+/* Whether the sound board may come off the board right now: not while a
+ * session is being set up or played, either kind (the RetroArch one from its
+ * barrier on, the RPCN one from SYNCING on). A session is a cold boot with the
+ * sound board attached on both machines (lr_sound_for_netplay) and lockstep
+ * from there, and a board without it runs different i960 code, so detaching it
+ * would be a desync. The guard waits for the match to end instead. */
+static bool lr_sound_may_go(void) {
+    if (g_pkt.state != PKT_OFF && g_pkt.state != PKT_ENDED) return false;
+    if (g_netplay.enabled && (g_netplay.state == NETPLAY_SYNCING || netplay_running_match())) return false;
+    return true;
+}
+
+/* Once a retro_run: the guard's stages on the hottest zone, its messages, and
+ * the sound board when it says so and it may go. Drawing every second frame is
+ * this host's business alone and touches nothing the other player's board has
+ * to agree with, so that part needs no such care. */
+static void lr_heat_tick(void) {
+    static bool waiting_said;   /* the "after the match" line, once per verdict */
+    int c = lr_hottest_c();
+    if (c < 0) return;
+    char msg[128];
+    heat_event_t ev = heat_guard_update(&g_heat, c, emu_now_us());
+    switch (ev) {
+        case HEAT_HOT:
+            snprintf(msg, sizeof msg, "Hot (%d C): drawing every second frame until it cools", c);
+            lr_notify(msg, 5000);
+            break;
+        case HEAT_COOLED:
+            lr_notify("Cooled down: drawing every frame again", 3000);
+            break;
+        case HEAT_STUCK:
+            snprintf(msg, sizeof msg, "Hot again (%d C): drawing every second frame from now on", c);
+            lr_notify(msg, 5000);
+            break;
+        case HEAT_COOLED_STUCK:
+            snprintf(msg, sizeof msg, "Cooled down (%d C); staying at every second frame", c);
+            lr_notify(msg, 3000);
+            break;
+        default:
+            break;
+    }
+    if (!g_heat.sound_off) { waiting_said = false; return; }
+    if (!g_sound_on) {
+        /* Nothing left to drop: the option had it off, or an earlier tick did. */
+        if (ev == HEAT_HOT_STUCK) {
+            snprintf(msg, sizeof msg, "Hot again (%d C)", c);
+            lr_notify(msg, 3000);
+        }
+        return;
+    }
+    if (!lr_sound_may_go()) {
+        if (!waiting_said) {
+            waiting_said = true;
+            snprintf(msg, sizeof msg, "Still hot (%d C): the sound board goes off when the match is over", c);
+            lr_notify(msg, 5000);
+        }
+        return;
+    }
+    sound_detach(&state.bus);
+    g_sound.out_r = g_sound.out_w;   /* this host is the ring's reader: nothing left to play */
+    g_sound_on = false;
+    snprintf(msg, sizeof msg, "Still hot (%d C): sound board off until the game is next loaded", c);
+    lr_notify(msg, 5000);
+    lr_log(RETRO_LOG_WARN, "heat guard: %d C with every second frame drawn; sound board detached", c);
+}
 
 /* How many board frames each drawn frame covers, this frame. */
 static int lr_draw_every(void) {
-    if (opt.heat_limit > 0) {
-        int c = lr_hottest_c();
-        if (c >= 0) {
-            if (!g_heat_hot && c >= opt.heat_limit) {
-                g_heat_hot = true;
-                char msg[96];
-                snprintf(msg, sizeof msg, "Hot (%d C): drawing every second frame until it cools", c);
-                lr_notify(msg, 5000);
-            } else if (g_heat_hot && c <= opt.heat_limit - 5) {
-                g_heat_hot = false;
-                lr_notify("Cooled down: drawing every frame again", 3000);
-            }
-        }
-    }
-    return g_heat_hot ? 2 : opt.draw_every;
+    return heat_guard_draw_every(&g_heat) == 2 ? 2 : opt.draw_every;
 }
 
 static void lr_draw(bool ran) {
@@ -1274,6 +1334,7 @@ RETRO_API void retro_deinit(void) {
 RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     if (!game || !game->path) return false;
     lr_read_options(true);
+    heat_guard_init(&g_heat, opt.heat_limit);   /* a new load starts the guard's stages over */
 
     if (!env_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &g_can_dupe)) g_can_dupe = false;
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
@@ -1351,6 +1412,7 @@ RETRO_API void retro_run(void) {
 
     g_lr_runs++;
     if (!ran) g_lr_skips++;
+    lr_heat_tick();
     lr_push_audio();
     lr_draw(ran);
 }

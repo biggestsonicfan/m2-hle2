@@ -93,6 +93,40 @@ int main(void) {
     emu_thread_shutdown(&ctx);
     CHECK(!ctx.thread_alive, "emu thread shut down cleanly");
 
+    /* The sound board comes off the bus mid-run (sound_detach: the libretro
+     * core's heat guard): the UART is a plain region again, the 68000 + SCSP
+     * step nothing, and sound_attach puts it all back. The 68000 boots into
+     * zeroed RAM here; what it executes is beside the point, the SCSP's
+     * sample clock is what sound_run has to stop and restart. */
+    {
+        static const uint8_t vectors[16] = { 0, 0, 0x10, 0, 0, 0, 0, 0x10 };   /* SSP 0x1000, PC 0x10 */
+        sound_load_rom(vectors, sizeof vectors);
+        sound_reset();
+        sound_attach(&bus);
+        uint64_t t0 = g_sound.out_total;
+        sound_run(64);
+        CHECK(g_sound.out_total == t0 + 64, "sound attached: sound_run(64) makes 64 samples");
+        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "sound attached: the UART answers transmitter-ready");
+        uint64_t w0 = g_sound.write_count;
+        mem_write8(&bus, MIDI_BASE, 0x80);
+        CHECK(g_sound.write_count == w0 + 1, "sound attached: a UART byte reaches the board");
+        sound_detach(&bus);
+        CHECK(g_sound.detached, "sound_detach: marked detached");
+        t0 = g_sound.out_total;
+        sound_run(64);
+        CHECK(g_sound.out_total == t0, "detached: sound_run steps nothing");
+        mem_write8(&bus, MIDI_BASE, 0x81);
+        CHECK(g_sound.write_count == w0 + 1, "detached: a UART byte no longer reaches the board");
+        CHECK(bus.midi[0] == 0x81, "detached: it lands in the plain region instead");
+        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x00, "detached: the UART status is the region's own byte");
+        sound_reset();
+        sound_attach(&bus);
+        CHECK(!g_sound.detached, "attached again: the flag is cleared");
+        t0 = g_sound.out_total;
+        sound_run(64);
+        CHECK(g_sound.out_total == t0 + 64, "attached again: the board runs");
+    }
+
     mem_shutdown(&bus);
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);
     return g_fail ? 1 : 0;
