@@ -510,7 +510,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         }
         PCPROF_TICK(ctx->cpu->sfr.ip);
         if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
-        ctx->total_steps++;
+        steps++;
         if (g_active_profile) {
             if (s_irq_in_service) emu_service_sound_again(ctx);
             else if (g_irqt_sound_kick) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
@@ -520,6 +520,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
         if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
     }
+    ctx->total_steps += steps;
     ctx->slice_capped = (i >= max_steps);
     /* The game's frame ended on the instruction the loop stopped at, so
      * this is between two frames' display lists: mark it for a capture. */

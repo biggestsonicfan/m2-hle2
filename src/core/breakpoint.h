@@ -25,6 +25,13 @@ typedef struct {
 typedef struct {
     breakpoint_t list[BP_MAX];
     int          count;
+    /* One bit per (addr >> 2) & 63 over the ACTIVE slots -- a Bloom filter of
+     * one word, so the check an instruction pays is a shift and a test where
+     * it used to be a walk of the table. Deliberately built from `active` and
+     * not from `enabled`, which the UI checkbox and the bridge flip without
+     * going through bp_add / bp_remove: a superset is safe, since a bit that
+     * survives only costs the walk below, which reads `enabled` itself. */
+    uint64_t     bloom;
     volatile int hit;
     uint32_t     hit_addr;
 } bp_state_t;
@@ -32,6 +39,15 @@ typedef struct {
 static bp_state_t g_bp = {0};
 
 static inline void bp_init(void) { memset(&g_bp, 0, sizeof(g_bp)); }
+
+#define BP_BIT(addr) (1ull << (((addr) >> 2) & 63u))
+
+static inline void bp__rebuild_bloom(void) {
+    uint64_t m = 0;
+    for (int i = 0; i < BP_MAX; i++)
+        if (g_bp.list[i].active) m |= BP_BIT(g_bp.list[i].addr);
+    g_bp.bloom = m;
+}
 
 static inline void bp_add(uint32_t addr, const char *label) {
     for (int i = 0; i < BP_MAX; i++) {
@@ -41,6 +57,7 @@ static inline void bp_add(uint32_t addr, const char *label) {
             g_bp.list[i].active = true;
             strncpy(g_bp.list[i].label, label ? label : "", 63);
             g_bp.count++;
+            g_bp.bloom |= BP_BIT(addr);
             LOG_INFO("breakpoint added: 0x%08X (%s)", addr, g_bp.list[i].label);
             return;
         }
@@ -53,15 +70,19 @@ static inline void bp_remove(int index) {
         LOG_INFO("breakpoint removed: 0x%08X (%s)", g_bp.list[index].addr, g_bp.list[index].label);
         g_bp.list[index].active = false;
         g_bp.count--;
+        bp__rebuild_bloom();
     }
 }
 
 /* Called from the emu thread before each instruction. */
 static inline int bp_check(uint32_t ip) {
-    /* Walking all BP_MAX slots per instruction was half the emu thread's cost;
-     * with breakpoints set (every grader has one on the frame hook) the walk
-     * stops once it has seen the ones in use. */
-    if (g_bp.count == 0) return 0;
+    /* Walking all BP_MAX slots per instruction was half the emu thread's cost.
+     * The bloom word answers for every instruction that is not one of the 64
+     * addresses a breakpoint could be at, which is what made the walk below
+     * affordable: a grader runs the whole board with a breakpoint on the
+     * frame hook, and used to pay for the table on every instruction to do
+     * it. The walk still stops once it has seen the slots in use. */
+    if (!(g_bp.bloom & BP_BIT(ip))) return 0;
     for (int i = 0, seen = 0; i < BP_MAX && seen < g_bp.count; i++) {
         if (!g_bp.list[i].active) continue;
         seen++;
