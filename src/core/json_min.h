@@ -28,15 +28,21 @@ static inline int json_u32hex(char *buf, int cap, const char *key, uint32_t v) {
     return snprintf(buf, (size_t)cap, "\"%s\":\"0x%08X\"", key, v);
 }
 
-/* The string value of `"key":"value"`. Returns 1 on success. */
-static inline int json_get_str(const char *json, const char *key, char *out, int out_cap) {
+/* Where key's value starts (after the colon and any blanks), or NULL. */
+static inline const char *json_value_at(const char *json, const char *key) {
     char needle[64];
     snprintf(needle, sizeof(needle), "\"%s\":", key);
     const char *p = strstr(json, needle);
-    if (!p) return 0;
+    if (!p) return NULL;
     p += strlen(needle);
     while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') return 0;
+    return p;
+}
+
+/* The string value of `"key":"value"`. Returns 1 on success. */
+static inline int json_get_str(const char *json, const char *key, char *out, int out_cap) {
+    const char *p = json_value_at(json, key);
+    if (!p || *p != '"') return 0;
     p++;
     int i = 0;
     while (*p && *p != '"' && i < out_cap - 1) out[i++] = *p++;
@@ -51,12 +57,8 @@ static inline int json_get_u32(const char *json, const char *key, uint32_t *out)
         *out = (uint32_t)strtoul(vstr, NULL, 0);
         return 1;
     }
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    const char *p = strstr(json, needle);
+    const char *p = json_value_at(json, key);
     if (!p) return 0;
-    p += strlen(needle);
-    while (*p == ' ' || *p == '\t') p++;
     *out = (uint32_t)strtoul(p, NULL, 0);
     return 1;
 }
@@ -65,12 +67,8 @@ static inline int json_get_u32(const char *json, const char *key, uint32_t *out)
 static inline int json_get_f32(const char *json, const char *key, float *out) {
     char vstr[48];
     if (json_get_str(json, key, vstr, sizeof(vstr))) { *out = (float)atof(vstr); return 1; }
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    const char *p = strstr(json, needle);
+    const char *p = json_value_at(json, key);
     if (!p) return 0;
-    p += strlen(needle);
-    while (*p == ' ' || *p == '\t') p++;
     *out = (float)atof(p);
     return 1;
 }
@@ -84,12 +82,8 @@ static inline int json_get_int(const char *json, const char *key, int *out) {
         *out = (int)strtol(vstr, NULL, 0);
         return 1;
     }
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    const char *p = strstr(json, needle);
+    const char *p = json_value_at(json, key);
     if (!p) return 0;
-    p += strlen(needle);
-    while (*p == ' ' || *p == '\t') p++;
     if (!strncmp(p, "true", 4))  { *out = 1; return 1; }
     if (!strncmp(p, "false", 5)) { *out = 0; return 1; }
     *out = (int)strtol(p, NULL, 0);

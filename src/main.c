@@ -1,11 +1,10 @@
 /*
  * m2-hle — Sega Model 2 HLE emulator
- * Host shell: sokol window + cimgui (dear_bindings) via sokol_imgui.
- *
- * Phase 4: ROM loading + profile resolution. File→Load ROMs picks a ROM zip,
- * auto-selects the matching profile by basename, runs load_fn + install_fn,
- * and the CPU's initial IP is set from the PRCB reset vector. (Free-running
- * execution arrives with the emu thread in Phase 5.)
+ * Host shell: sokol window + cimgui (dear_bindings) via sokol_imgui, the
+ * headless and kiosk modes, and the command line. File→Load ROMs (or --rom)
+ * picks a ROM zip, the profile resolves from the set's CRC32s, load_fn +
+ * install_fn fill the bus, and the emu thread runs the board from the PRCB
+ * reset vector.
  */
 #include <stdbool.h>
 #include <stdlib.h>
@@ -528,8 +527,7 @@ static void kiosk_restart_sound_cb(void *ud) {
 
 static void init(void) {
     log_init();
-    LOG_INFO("m2-hle starting (Phase 4: ROM load + profile resolution; %zu profile(s))",
-             g_profile_count);
+    LOG_INFO("m2-hle starting (%zu profile(s))", g_profile_count);
 
     /* Before anything slow: sokol has already created AND SHOWN the window, so
      * capture mode has to claim it now — parking it after the ROM load would
@@ -1180,7 +1178,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--nowarnskip") == 0) {
             g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
         } else if (strcmp(argv[i], "--realirq") == 0) {
-            g_real_irq = 1;           /* tick board timers → real timer ISR delivery */
+            /* The board timers have driven the timer ISR since they were
+             * wired (there is no other mode); accepted for old command lines. */
         } else if (strcmp(argv[i], "--no-mesh-cache") == 0) {
             /* Decode every model in full every frame, as the renderer did
              * before the mesh cache. The cache is meant to be invisible — it

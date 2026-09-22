@@ -25,8 +25,7 @@ typedef enum {
     LOG_LVL_INFO,
     LOG_LVL_WARN,
     LOG_LVL_ERROR,
-    LOG_LVL_DEBUG,
-    LOG_LVL_HLE    /* separate channel so hooks can be muted independently */
+    LOG_LVL_DEBUG
 } log_level_t;
 
 typedef struct {
@@ -36,8 +35,6 @@ typedef struct {
     int          scroll_to_bottom;
     int          break_on_warn;
     volatile int warn_triggered;
-    int          show_hle;          /* show HLE in log window */
-    int          show_hle_console;  /* show HLE in stderr */
     FILE        *file;
     int          file_open_attempted;
 } log_state_t;
@@ -75,7 +72,7 @@ static inline void log_init(void) {
 
 static inline void log_msg(log_level_t level, const char *fmt, ...) {
     static const char *prefixes[] = {
-        "[INFO]", "[WARN]", "[ERR ]", "[DBG ]", "[HLE ]"
+        "[INFO]", "[WARN]", "[ERR ]", "[DBG ]"
     };
     char buf[LOG_MAX_LINE];
 
@@ -88,16 +85,6 @@ static inline void log_msg(log_level_t level, const char *fmt, ...) {
     if (g_log.file) {
         fprintf(g_log.file, "%s %s\n", prefixes[level], buf);
         fflush(g_log.file); /* per-line flush so `tail -f` works */
-    }
-
-    if (level == LOG_LVL_HLE && !g_log.show_hle) {
-#ifndef NDEBUG
-        if (g_log.show_hle_console) {
-            fprintf(stderr, "[HLE ] %s\n", buf);
-            fflush(stderr);
-        }
-#endif
-        return;
     }
 
     int idx = g_log.count % LOG_MAX_LINES;
@@ -114,10 +101,8 @@ static inline void log_msg(log_level_t level, const char *fmt, ...) {
     /* A release build is silent on a desktop, where m2hle.log is the record. In a
      * browser there is no file, so the lines go to the console in every build. */
 #if !defined(NDEBUG) || defined(__EMSCRIPTEN__)
-    if (level != LOG_LVL_HLE || g_log.show_hle_console) {
-        fprintf(stderr, "%s %s\n", prefixes[level], buf);
-        fflush(stderr);
-    }
+    fprintf(stderr, "%s %s\n", prefixes[level], buf);
+    fflush(stderr);
 #endif
 }
 
@@ -125,6 +110,5 @@ static inline void log_msg(log_level_t level, const char *fmt, ...) {
 #define LOG_WARN(fmt, ...)  log_msg(LOG_LVL_WARN,  fmt, ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) log_msg(LOG_LVL_ERROR, fmt, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) log_msg(LOG_LVL_DEBUG, fmt, ##__VA_ARGS__)
-#define LOG_HLE(fmt, ...)   log_msg(LOG_LVL_HLE,   fmt, ##__VA_ARGS__)
 
 #endif /* LOG_H */

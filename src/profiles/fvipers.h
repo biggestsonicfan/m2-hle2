@@ -35,21 +35,12 @@
 #define FVIPERS_HOOK_ADDR_FRAME_PACE        0x00011C80
 #define FVIPERS_HOOK_ADDR_READ_SW           0x0000229C
 
-/* TODO: find in IDA */
-#define FVIPERS_HOOK_ADDR_CHECK_TIMER_SPIN  0xFFFFFFFF  /* TODO: STF 0x0004A58C */
-#define FVIPERS_HOOK_ADDR_IDLE              0xFFFFFFFF  /* TODO: STF 0x00011610 */
-#define FVIPERS_HOOK_ADDR_700000_LOOP       0xFFFFFFFF  /* TODO: STF 0x00007264 */
-#define FVIPERS_HOOK_ADDR_COP_ERR_HANG      0xFFFFFFFF  /* TODO: STF 0x000077F8 */
-
 /* VsyncScr: tile/sprite layer update called once per vsync (STF: 0x00000C40). */
 #define FVIPERS_VSYNC_SCR_ADDR  0x000013A0
 
 /* Return address after the interrupt_wait spin loop — first instruction after
  * both back-edges at 0x2240 and 0x2244 (confirmed via IDA). */
 #define FVIPERS_INTERRUPT_WAIT_RETURN  0x00002248
-
-/* Timer interrupt flag byte zeroed by check_timer_4_spin (STF: 0x0050008C). */
-#define FVIPERS_TIMER_FLAG_ADDR  0xFFFFFFFF  /* TODO */
 
 /* prev_held address zeroed by read_sw — confirmed via IDA (INTERUPT_FLAGS_HELD). */
 #define FVIPERS_PREV_HELD_ADDR  0x00500700
@@ -233,14 +224,6 @@ static int fvipers_hook_check_timer_4(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 0;
 }
 
-/* check_timer_4_spin: inner polling loop — write 0x01 so it exits.
- * Address TODO; implement mirrors STF 0x0004A58C. */
-static int fvipers_hook_check_timer_4_spin(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu;
-    mem_write8(bus, FVIPERS_TIMER_FLAG_ADDR, 0x01);
-    return 1;
-}
-
 /* interrupt_wait (0x2238): inject VsyncScr then skip the spin loop.
  * FVIPERS_INTERRUPT_WAIT_RETURN must be set to the instruction after the loop. */
 static int fvipers_hook_interrupt_wait(i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -264,46 +247,13 @@ static int fvipers_hook_interrupt_wait_b_spin(i960_cpu_t *cpu, memory_bus_t *bus
     return 1;
 }
 
-/* _idle: inject VsyncScr on first entry; let ldob RAM_BASE execute on second.
- * Address TODO; implement mirrors STF 0x00011610. */
-static int fvipers_hook_idle(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    static int s_vsync_fired = 0;
-    if (!s_vsync_fired) {
-        s_vsync_fired = 1;
-        hle_call(cpu, FVIPERS_VSYNC_SCR_ADDR, FVIPERS_HOOK_ADDR_IDLE);
-        return 0;
-    }
-    s_vsync_fired = 0;
-    return 1;
-}
-
-/* _700000_loop: sound-init delay loop — zero r3 so cmpdeco exits.
- * Address TODO; implement mirrors STF 0x00007264. */
-static int fvipers_hook_700000_loop(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->locals.r[3] = 0;
-    return 1;
-}
-
 /* variable_diff_calc (0x11C80): fires once per game frame at end of main_loop.
- * Snapshots the geo capture ring boundary and signals the emu thread. */
+ * Marks the geo capture ring's frame boundary and signals the emu thread. */
 static int fvipers_hook_frame_pace(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu; (void)bus;
-    g_cop.geo_frame_start = g_cop.geo_frame_end;
-    g_cop.geo_frame_end   = g_cop.geo_capture_head;
+    cop_geo_frame_edge();
     g_frame_done = 1;
     return 1;
-}
-
-/* co_processor_error_hang: halt on COP self-test failure.
- * Address TODO; implement mirrors STF 0x000077F8. */
-static int fvipers_hook_cop_err_hang(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    LOG_ERROR("fvipers: COP self-test failed — error code 0x%08X  (IP=0x%08X)",
-              cpu->globals.g[4], cpu->sfr.ip);
-    cpu->halted = 1;
-    return 0;
 }
 
 /* read_sw (0x229C): zero prev_held so the momentary-diff computation starts clean. */
@@ -321,9 +271,9 @@ static int fvipers_hook_read_sw(i960_cpu_t *cpu, memory_bus_t *bus) {
 /* ---- Profile object ----------------------------------------------------- */
 
 /*
- * Active hooks: the 7 addresses confirmed above.
- * Remaining TODOs (check_timer_4_spin, _idle, _700000_loop, cop_err_hang):
- * fill in FVIPERS_HOOK_ADDR_* above and add the entry here when found.
+ * Active hooks: the 7 addresses confirmed above. STF's check_timer_4_spin,
+ * _idle, _700000_loop and co_processor_error_hang have no FV addresses yet;
+ * sfight.h has the handlers to port when they are found.
  */
 #define FVIPERS_HOOK_COUNT 7
 

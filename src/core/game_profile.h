@@ -12,13 +12,12 @@
  *                      handles per-game region mirroring (e.g. STF's
  *                      XTRA_DATA→ROM[0x01000000] mapping), and sets the
  *                      CPU's initial IP from the PRCB.
- *   - hooks          : address → HLE hook function table (later phase)
- *   - input_map      : abstract action → I/O port bit (later phase)
+ *   - hooks          : address → HLE hook function table
+ *   - input_map      : abstract action → I/O port bit
  *   - quirks         : polygon-decoder mask, mesh-pointer offsets, etc.
  *
- * The active profile is resolved at ROM-load time. For now main.c just picks
- * by name from g_profiles; later this becomes CRC32 detection of the picked
- * zip against each profile's identifier files.
+ * The active profile is resolved at ROM-load time from the loaded set's CRC32s
+ * (profile_for_rom_set); --profile names one outright.
  */
 #ifndef GAME_PROFILE_H
 #define GAME_PROFILE_H

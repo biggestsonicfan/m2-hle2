@@ -58,10 +58,14 @@ static inline void bp_remove(int index) {
 
 /* Called from the emu thread before each instruction. */
 static inline int bp_check(uint32_t ip) {
-    /* Walking all BP_MAX slots per instruction was half the emu thread's cost. */
+    /* Walking all BP_MAX slots per instruction was half the emu thread's cost;
+     * with breakpoints set (every grader has one on the frame hook) the walk
+     * stops once it has seen the ones in use. */
     if (g_bp.count == 0) return 0;
-    for (int i = 0; i < BP_MAX; i++) {
-        if (g_bp.list[i].active && g_bp.list[i].enabled && g_bp.list[i].addr == ip) {
+    for (int i = 0, seen = 0; i < BP_MAX && seen < g_bp.count; i++) {
+        if (!g_bp.list[i].active) continue;
+        seen++;
+        if (g_bp.list[i].enabled && g_bp.list[i].addr == ip) {
             g_bp.hit = 1;
             g_bp.hit_addr = ip;
             return 1;
