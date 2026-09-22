@@ -32,7 +32,6 @@ typedef struct {
     uint32_t intena;                 /* interrupt enable mask  (0xE80004)   */
 
     int64_t  timer_count[IRQT_TIMERS];   /* current down-count (cycles)     */
-    uint32_t timer_reload[IRQT_TIMERS];  /* last programmed reload (20-bit)  */
     bool     timer_run[IRQT_TIMERS];     /* one-shot armed flag              */
 
     /* Live timers (g_irqt_live): cycles the i960 has run that the counts do not
@@ -40,10 +39,6 @@ typedef struct {
      * timer expires, so the run loop brings the counts up to date then. */
     int64_t  pending;
     int64_t  horizon;
-
-    /* diagnostics */
-    uint64_t deliver_count;          /* interrupts vectored to a handler    */
-    uint32_t deliver_by_pin[4];
 } irq_timer_t;
 
 static irq_timer_t g_irqt = {0};
@@ -66,13 +61,6 @@ static inline void     irqt_enable_write(uint32_t d)  { g_irqt.intena = d; }
 
 /* Assert a pending bit (from timer expiry / vblank / sound UART). */
 static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
-
-/* timers→interrupts rework, additive step: when nonzero, the run loop ticks the
- * board timers so the (already-enabled) timer IRQ fires and its ISR runs, ON TOP
- * of the existing HLE bypasses (no bypass removed → no idle-loop hang).  DEFAULT
- * ON: the timer ISR drives the real attract-mode progression (our bypass froze
- * it).  Toggle off via --realirq=0 path / UI if needed. */
-static int g_real_irq = 1;
 
 /* Live board timers. Off (the default): the run loop takes a whole slice's
  * cycles off the timers when the slice starts, so a timer the i960 reads during
@@ -127,7 +115,6 @@ static inline void irqt_flush(void) {
 static inline void irqt_timer_write(uint32_t off, uint32_t val) {
     int t = (int)((off >> 2) & 3u);
     irqt_flush();
-    g_irqt.timer_reload[t] = val & 0xFFFFFu;
     g_irqt.timer_count[t]  = (int64_t)(val & 0xFFFFFu);
     g_irqt.timer_run[t]    = true;
     irqt__horizon();
@@ -154,21 +141,14 @@ static inline int irqt_pending_pin(void) {
 }
 
 static inline void irqt_reset(void) {
-    uint64_t dc = g_irqt.deliver_count;
-    /* preserve nothing; full reset */
-    (void)dc;
     for (int i = 0; i < IRQT_TIMERS; i++) {
-        g_irqt.timer_count[i]  = 0;
-        g_irqt.timer_reload[i] = 0;
-        g_irqt.timer_run[i]    = false;
+        g_irqt.timer_count[i] = 0;
+        g_irqt.timer_run[i]   = false;
     }
     g_irqt.intreq = 0;
     g_irqt.intena = 0;
     g_irqt.pending = 0;
     g_irqt.horizon = INT64_MAX;
-    g_irqt.deliver_count = 0;
-    g_irqt.deliver_by_pin[0]=g_irqt.deliver_by_pin[1]=
-    g_irqt.deliver_by_pin[2]=g_irqt.deliver_by_pin[3]=0;
 }
 
 #endif /* IRQ_TIMER_H */

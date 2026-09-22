@@ -187,6 +187,14 @@ static inline void cop_write(uint32_t val) {
     }
 }
 
+/* A game frame ended: the words captured since the last edge are that frame's
+ * draw commands, and the scanner reads exactly those (geo3d.h). The profile's
+ * frame-pace hook calls this; so does the run loop for a board_vblank homebrew. */
+static inline void cop_geo_frame_edge(void) {
+    g_cop.geo_frame_start = g_cop.geo_frame_end;
+    g_cop.geo_frame_end   = g_cop.geo_capture_head;
+}
+
 /* Called for every read from the COPROGRAM region. */
 static inline uint32_t cop_read(void) {
     g_cop.reads++;

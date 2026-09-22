@@ -16,12 +16,10 @@
  *
  * Region table ORDER MATTERS for overlapping regions (TILE before H_SYNC).
  *
- * PHASE 2 NOTE: every region is created here as a plain backing buffer. The
- * MMIO side-effect callbacks (COPROGRAM→cop_write, GEO clip-window capture,
- * IRQ ack, board timers) and watchpoint hooks attach in their own phases
- * (COP = Phase 7, IRQ/timers = Phase 11, watchpoints alongside breakpoints).
- * Until then those regions behave as plain RAM, which is correct for the
- * read/write round-trip checkpoint.
+ * The MMIO callbacks live here too: COPROGRAM forwards to cop.h, GEO and
+ * GEO_PROGRAM feed the display list and the clip-window capture, IRQ and
+ * TIMERS go to irq_timer.h; the sound board attaches its own (sound.h). Every
+ * write also runs the watchpoints (watchpoint.h) and the display-list tap.
  */
 #ifndef MEMORY_H
 #define MEMORY_H

@@ -17,10 +17,8 @@
  * romset.main_data[0x01000000..] into bus->xtra_data. The mirror was found
  * empirically (string "SNC_ZIBA" at ROM[0x01000000+0x4012FB]) — STF-specific.
  *
- * PHASE 4 NOTE: this profile carries the loader, installer, input map and
- * quirks (all data the later phases consume). The HLE hook *functions* depend
- * on hle_ret/hle_call/g_cop/g_frame_done from Phase 6, so the hook table is
- * empty for now (hook_count = 0); Phase 6 fills it in.
+ * The profile carries the loader, installer, input map, quirks and the HLE
+ * hook table (SFIGHT_BASE_HOOKS below; sfight_console.h adds to it).
  */
 #ifndef PROFILES_SFIGHT_H
 #define PROFILES_SFIGHT_H
@@ -274,15 +272,12 @@ static int sfight_hook_700000_loop(i960_cpu_t *cpu, memory_bus_t *bus) {
 
 /* variable_diff_calc (0x11A04): fires once per game frame at the end of the
  * main loop. Setting g_frame_done lets the emu thread pace to the next 60Hz
- * tick (and ends the slice early, freeing the mutex for the UI).
- * NOTE: the COP geo-capture frame boundary (Phase 9) and the CSV ground-truth
- * dump are layered on here later. */
+ * tick (and ends the slice early, freeing the mutex for the UI); the geo
+ * capture ring's frame boundary is marked so the scanner reads exactly one
+ * game frame's draw commands. */
 static int sfight_hook_frame_pace(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu; (void)bus;
-    /* Snapshot this frame's slice of the geo-capture ring so the Phase 9
-     * scanner reads exactly one game frame's draw commands. */
-    g_cop.geo_frame_start = g_cop.geo_frame_end;
-    g_cop.geo_frame_end   = g_cop.geo_capture_head;
+    cop_geo_frame_edge();
     g_frame_done = 1;
     return 1;
 }

@@ -857,65 +857,6 @@ static inline uint32_t rpcn_parse_room_list(const uint8_t *payload, uint32_t siz
     return count;
 }
 
-/* CreateRoomResponse{ internal = 1 } and JoinRoomResponse{ room_data = 1 } both
- * wrap a RoomDataInternal at field 1, whose roomId is field 4. */
-static inline uint64_t rpcn_parse_room_id(const uint8_t *payload, uint32_t size) {
-    if (!rpcn_strip_data_packet(&payload, &size)) return 0;
-    pb_reader_t top = pb_reader(payload, size);
-    while (pb_next(&top)) {
-        if (top.field != 1 || top.wire != PB_WIRE_LEN) continue;
-        pb_reader_t room = pb_sub(&top);
-        while (pb_next(&room))
-            if (room.field == 4 && room.wire == PB_WIRE_VARINT) return room.varint;
-    }
-    return 0;
-}
-
-/* Same wrapper, flagAttr at field 10. This is what lets a guest learn the host's
- * settings from the join alone, with no search and no extra request. 0 is also
- * the value of a room created without flags, so callers must treat "no flags" and
- * "flags we do not understand" identically. */
-static inline uint32_t rpcn_parse_room_flag_attr(const uint8_t *payload, uint32_t size) {
-    if (!rpcn_strip_data_packet(&payload, &size)) return 0;
-    pb_reader_t top = pb_reader(payload, size);
-    while (pb_next(&top)) {
-        if (top.field != 1 || top.wire != PB_WIRE_LEN) continue;
-        pb_reader_t room = pb_sub(&top);
-        while (pb_next(&room))
-            if (room.field == 10 && room.wire == PB_WIRE_VARINT) return (uint32_t)room.varint;
-    }
-    return 0;
-}
-
-/* RoomDataInternal.memberList = 7 -> RoomMemberDataInternal.userInfo = 1 ->
- * UserInfo.npId = 1. */
-static inline uint32_t rpcn_parse_room_members(const uint8_t *payload, uint32_t size,
-                                               char out[][20], uint32_t max_out) {
-    uint32_t count = 0;
-    if (!rpcn_strip_data_packet(&payload, &size)) return 0;
-
-    pb_reader_t top = pb_reader(payload, size);
-    while (pb_next(&top)) {
-        if (top.field != 1 || top.wire != PB_WIRE_LEN) continue;
-        pb_reader_t room = pb_sub(&top);
-        while (pb_next(&room)) {
-            if (room.field != 7 || room.wire != PB_WIRE_LEN) continue;
-            pb_reader_t member = pb_sub(&room);
-            while (pb_next(&member)) {
-                if (member.field != 1 || member.wire != PB_WIRE_LEN) continue;
-                pb_reader_t ui = pb_sub(&member);
-                while (pb_next(&ui)) {
-                    if (ui.field != 1 || ui.wire != PB_WIRE_LEN) continue;
-                    if (count >= max_out) return count;
-                    pb_copy_string(&ui, out[count], 20);
-                    count++;
-                }
-            }
-        }
-    }
-    return count;
-}
-
 /* SignalingAddr { bytes ip = 1; uint16 port = 2; } — the port is a WRAPPER
  * submessage. Shared by every message that embeds an address. */
 static inline bool rpcn_read_signaling_addr(pb_reader_t addr, uint32_t *out_ip_be,
@@ -937,30 +878,6 @@ static inline bool rpcn_parse_signaling_addr(const uint8_t *payload, uint32_t si
                                              uint32_t *out_ip_be, uint16_t *out_port) {
     if (!rpcn_strip_data_packet(&payload, &size)) return false;
     return rpcn_read_signaling_addr(pb_reader(payload, size), out_ip_be, out_port);
-}
-
-/*
- * The peer address out of a JoinRoomResponse's signaling_data (field 2, repeated
- * Matching2SignalingInfo { uint16 member_id = 1; SignalingAddr addr = 2; }).
- * Present only when the room was created with sigOptParam, which is why
- * rpcn_create_room always sets it. Returns the FIRST entry — in a two-slot room
- * that is the host — so a guest needs no RequestSignalingInfos round trip at all.
- */
-static inline bool rpcn_parse_join_signaling_addr(const uint8_t *payload, uint32_t size,
-                                                  uint32_t *out_ip_be, uint16_t *out_port) {
-    if (!rpcn_strip_data_packet(&payload, &size)) return false;
-    pb_reader_t top = pb_reader(payload, size);
-    while (pb_next(&top)) {
-        if (top.field != 2 || top.wire != PB_WIRE_LEN) continue;
-        pb_reader_t info = pb_sub(&top);
-        while (pb_next(&info)) {
-            if (info.field == 2 && info.wire == PB_WIRE_LEN) {
-                pb_reader_t sub = pb_sub(&info);
-                if (rpcn_read_signaling_addr(sub, out_ip_be, out_port)) return true;
-            }
-        }
-    }
-    return false;
 }
 
 /*
@@ -1424,18 +1341,6 @@ static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
     memcpy(pkt + 9, &c->local_ip, 4);
 
     return net_udp_send(c->udp, c->signaling_addr, RPCN_SIGNALING_PORT, pkt, sizeof(pkt));
-}
-
-/* A signaling reply body: [0..2] VPort=0, [2] subset=0, [3..7] public IPv4,
- * [7..9] public port. NOTE the port is BIG-endian here while the rest of the
- * protocol is little-endian. */
-static inline bool rpcn_parse_signaling_reply(const void *buf, uint32_t len,
-                                              uint32_t *out_ip_be, uint16_t *out_port) {
-    const uint8_t *p = (const uint8_t *)buf;
-    if (len < 9 || rpcn_get_u16(p) != 0 || p[2] != 0) return false;
-    if (out_ip_be) memcpy(out_ip_be, p + 3, 4);
-    if (out_port)  *out_port = (uint16_t)((p[7] << 8) | p[8]);
-    return true;
 }
 
 /*

@@ -2149,17 +2149,7 @@ static inline int mcp_bridge_start(int port) {
     return 0;
 }
 
-static inline void mcp_bridge_shutdown(void) {
-    if (!g_mcp.alive) return;
-    g_mcp.alive = 0;
-    mcp_close(g_mcp.listen_sock);
-#ifdef _WIN32
-    if (g_mcp.thread) { WaitForSingleObject(g_mcp.thread, 1000); CloseHandle(g_mcp.thread); g_mcp.thread = NULL; }
-    WSACleanup();
-#else
-    pthread_join(g_mcp.thread, NULL);
-#endif
-    LOG_INFO("mcp: bridge stopped");
-}
+/* There is no shutdown: the bridge thread lives until the process exits, and
+ * every frontend lets the exit close the socket. */
 
 #endif /* MCP_BRIDGE_H */

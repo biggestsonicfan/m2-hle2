@@ -799,12 +799,6 @@ static inline void netplay_send_watchers(const void *pkt, uint32_t len) {
 }
 
 /*
- * How long an announce counts for. A peer sitting at the barrier sends one every
- * NETPLAY_ANNOUNCE_MS, so anything above a few hundred milliseconds is generous.
- */
-#define NETPLAY_READY_WINDOW_MS 2000u
-
-/*
  * How often a machine that is WAITING repeats itself: the announce at the
  * barrier, and its newest inputs while stalled.
  *
