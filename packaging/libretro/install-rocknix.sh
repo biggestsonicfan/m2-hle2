@@ -54,48 +54,70 @@ fi
 if [ -f "$HERE/m2hle-update.sh" ]; then
   mkdir -p /storage/.local/bin
   install -m 755 "$HERE/m2hle-update.sh" /storage/.local/bin/m2hle-update.sh
-  # "Update m2-hle" in the Sega Model 2 game list, beside the game. Not a Tools
-  # entry: ROCKNIX's boot rsync deletes anything in /storage/.config/modules.
-  bash /storage/.local/bin/m2hle-update.sh --install-entry || echo "could not add the Update m2-hle entry" >&2
 fi
 
-# 2. An emulator entry under segamodel2, beside whatever is there already.
-if awk '/<name>segamodel2<\/name>/ { s = 1 } s && /<\/system>/ { exit } s && /<core[^>]*>m2hle<\/core>/ { f = 1; exit } END { exit !f }' "$ES/es_systems.cfg"; then
-  echo "es_systems.cfg: RetroArch / m2hle already listed"
+# 2. The Sega Model 2 system, which is what lists this core as an emulator.
+#
+#    es_systems_m2hle.cfg is a drop-in: ES merges every es_systems_*.cfg beside
+#    es_systems.cfg, and unlike es_systems.cfg itself nothing renames it on an OS
+#    upgrade (/usr/share/post-update symlinks the stock copy over that one every
+#    time). It already names retroarch / m2hle as the default emulator, so with it
+#    in place there is nothing to add. It arrives with either installer, since a
+#    device may have only the core.
+#
+#    This used to edit es_systems.cfg in place, and ROCKNIX 7.0.2 is where that
+#    stopped working twice over: the edit is undone by the next upgrade, and 7.0.2
+#    removed the segamodel2 system altogether, so there was no longer a block to
+#    edit -- under set -e the failing awk took the rest of this script with it.
+if [ -f "$ES/es_systems_m2hle.cfg" ]; then
+  echo "es_systems_m2hle.cfg: Sega Model 2 already installed"
+elif [ -f "$HERE/es_systems_m2hle.cfg" ]; then
+  install -m 644 "$HERE/es_systems_m2hle.cfg" "$ES/es_systems_m2hle.cfg"
+  [ -f "$HERE/m2hle-runemu.sh" ] && install -m 755 "$HERE/m2hle-runemu.sh" /storage/.local/bin/m2hle-runemu.sh
+  echo "es_systems_m2hle.cfg: Sega Model 2 installed (restart EmulationStation)"
+  echo "  the standalone emulator is offered too; m2hle-update.sh --component sa installs it"
 else
-  cp "$ES/es_systems.cfg" "$ES/es_systems.cfg.bak-$STAMP"
-  awk '
-    /<name>segamodel2<\/name>/ { s = 1 }
-    { print }
-    s && /<emulators>/ {
-      print "\t\t\t<emulator name=\"retroarch\">"
-      print "\t\t\t\t<cores>"
-      print "\t\t\t\t\t<core>m2hle</core>"
-      print "\t\t\t\t</cores>"
-      print "\t\t\t</emulator>"
-      s = 0; done = 1
-    }
-    END { if (!done) exit 1 }
-  ' "$ES/es_systems.cfg.bak-$STAMP" > "$ES/es_systems.cfg.new"
-  mv "$ES/es_systems.cfg.new" "$ES/es_systems.cfg"
-  echo "es_systems.cfg: added RetroArch / m2hle (backup es_systems.cfg.bak-$STAMP)"
+  echo "warning: no es_systems_m2hle.cfg here or in $ES, so nothing lists this core" >&2
+  echo "         as a Sega Model 2 emulator. Install the standalone zip as well." >&2
 fi
 
 # 2b. The core in ES's feature list, so the game's options offer RetroArch's
 #     netplay for it. Only netplay: rewind and autosave need savestates, which
 #     this core does not have.
-if grep -q '<core name="m2hle"' "$ES/es_features.cfg"; then
+#
+#     This one does still edit es_features.cfg, and so is undone by the next OS
+#     upgrade -- re-running this script puts it back. It is not a drop-in because
+#     the entry has to go *inside* ROCKNIX's <emulator name="retroarch">, and a
+#     drop-in that named that emulator again might replace its whole core list
+#     rather than add to it, which would cost every other RetroArch core its
+#     options. Losing netplay from one core's menu is the smaller risk; the core
+#     carries its own RPCN lobby in its core options either way.
+if [ -L "$ES/es_features.cfg" ] && [ ! -w "$(readlink -f "$ES/es_features.cfg")" ]; then
+  echo "es_features.cfg is the OS's read-only copy; skipping the netplay feature"
+elif grep -q '<core name="m2hle"' "$ES/es_features.cfg" 2>/dev/null; then
   echo "es_features.cfg: m2hle already listed"
 else
   cp "$ES/es_features.cfg" "$ES/es_features.cfg.bak-$STAMP"
-  awk '
-    /<emulator name="retroarch"/ { ra = 1 }
-    { print }
-    ra && /<cores>/ { print "      <core name=\"m2hle\" features=\"netplay\" />"; ra = 0; done = 1 }
-    END { if (!done) exit 1 }
-  ' "$ES/es_features.cfg.bak-$STAMP" > "$ES/es_features.cfg.new"
-  mv "$ES/es_features.cfg.new" "$ES/es_features.cfg"
-  echo "es_features.cfg: added m2hle to the RetroArch cores (backup es_features.cfg.bak-$STAMP)"
+  if awk '
+      /<emulator name="retroarch"/ { ra = 1 }
+      { print }
+      ra && /<cores>/ { print "      <core name=\"m2hle\" features=\"netplay\" />"; ra = 0; done = 1 }
+      END { if (!done) exit 1 }
+    ' "$ES/es_features.cfg.bak-$STAMP" > "$ES/es_features.cfg.new"; then
+    mv "$ES/es_features.cfg.new" "$ES/es_features.cfg"
+    echo "es_features.cfg: added m2hle to the RetroArch cores (backup es_features.cfg.bak-$STAMP)"
+  else
+    rm -f "$ES/es_features.cfg.new"
+    echo "es_features.cfg: no <emulator name=\"retroarch\"> to add the core to; skipped"
+  fi
+fi
+
+# 2c. "Update m2-hle" in the Sega Model 2 game list, beside the game. Not a
+#     Tools entry: ROCKNIX's boot rsync deletes anything in
+#     /storage/.config/modules. After 2, because it reads the system's <path>
+#     and checks .sh is among its extensions.
+if [ -x /storage/.local/bin/m2hle-update.sh ]; then
+  bash /storage/.local/bin/m2hle-update.sh --install-entry || echo "could not add the Update m2-hle entry" >&2
 fi
 
 # 3. ROCKNIX's RetroArch keeps saves in the ROM folder, which is usually

@@ -26,15 +26,49 @@ something costs one `cp` to undo. What it does:
 |---|---|
 | `/storage/.local/share/m2hle/m2hle` | the aarch64 binary |
 | `/storage/.local/bin/start_m2hle.sh` | the launcher ES calls |
-| `/storage/.emulationstation/es_systems.cfg` | adds `m2hle` / `m2hle-sa` beside `sm2-emu` under `segamodel2` |
-| `/storage/.emulationstation/es_features.cfg` | the per-game options below |
+| `/storage/.emulationstation/es_systems_m2hle.cfg` | the Sega Model 2 system itself, and the two emulators it offers |
+| `/storage/.emulationstation/es_features_m2hle.cfg` | the per-game options below |
+| `/storage/.local/bin/m2hle-runemu.sh` | what the system's `<command>` runs (see below) |
 | `/storage/.local/bin/m2hle-update.sh` | the updater (below) |
 | `/storage/roms/segamodel2/Update m2-hle.sh` | its entry in the game list (below) |
 | `/storage/.local/share/m2hle/VERSION.txt` | which canary is installed |
 
-Then put the ROM zip in `/storage/roms/segamodel2/` and pick **m2hle** as the
-emulator for it (ES game options → Emulator). Restart ES for the config to be
-re-read.
+Then put the ROM zip in `/storage/roms/segamodel2/` and restart ES. The game
+runs on the libretro core by default; **m2hle** in ES's game options → Emulator
+picks the standalone one instead.
+
+## Surviving an OS update
+
+ROCKNIX owns `es_systems.cfg` and `es_features.cfg`: `/usr/share/post-update`
+moves each aside to `last_<name>.cfg` and symlinks the read-only `/usr/config`
+copy over it on **every** OS upgrade, "so they are managed with OS updates".
+So an edit to either lasts exactly until the next upgrade. ROCKNIX 7.0.2
+(20260919) is what proved it here, and the same upgrade removed the
+`segamodel2` system and the `sm2-emu` package from the stock files, so the AM2
+tile disappeared with them rather than merely losing our emulator.
+
+What does survive is a drop-in. ES merges every `es_systems_*.cfg` and
+`es_features_*.cfg` it finds beside the managed pair, nothing renames those,
+and — measured on 7.0.2 — a system defined in a drop-in takes precedence over
+the same name in `es_systems.cfg`. So `es_systems_m2hle.cfg` defines the whole
+system, and it holds whether or not a future ROCKNIX brings its own back.
+
+The other half is `<command>`. `runemu.sh` runs a standalone emulator's
+launcher from `/usr/bin/start_<core>.sh`, and `/usr` is a read-only squashfs,
+so `start_m2hle.sh` cannot go there. It used to be reached through a forked
+copy of `runemu.sh` in `/storage/.local/bin` with that one path changed — and
+a copy is a copy of the day it was made: by 7.0.2 the fork had missed the
+exit-code handling that decides whether ES records a game as played.
+`m2hle-runemu.sh` derives that copy instead, from whatever `runemu.sh` the OS
+currently ships, and re-derives it whenever that file is newer. A libretro
+core and a `.sh` rom both take paths that never look at `/usr/bin/start_*`, so
+for those the wrapper is exactly `/usr/bin/runemu.sh`.
+
+Nothing else needs saving: `/storage/roms`, `/storage/.local`,
+`/storage/cores` and the per-game settings in
+`/storage/.config/system/configs/system.cfg` are all outside what
+`post-update` touches. If the tile ever does go missing again, re-running
+`install-es.sh` is the whole fix.
 
 ## Updates
 

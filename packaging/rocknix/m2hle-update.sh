@@ -90,37 +90,66 @@ fail() {  # before any component: nothing can be done
 ENTRY_NAME="Update m2-hle.sh"
 
 entry_dir() {  # the segamodel2 rom directory ES is configured with
-  local p=""
-  [ -f "$ES/es_systems.cfg" ] && p=$(awk '
-    /<name>segamodel2<\/name>/ { s = 1 }
-    s && /<path>/ { gsub(/.*<path>|<\/path>.*/, ""); print; exit }' "$ES/es_systems.cfg")
+  local p="" f
+  # The drop-in is what defines the system now (see es_systems_m2hle.cfg);
+  # es_systems.cfg is only still read for an install that predates it.
+  for f in "$ES/es_systems_m2hle.cfg" "$ES/es_systems.cfg"; do
+    [ -f "$f" ] || continue
+    p=$(awk '
+      /<name>segamodel2<\/name>/ { s = 1 }
+      s && /<path>/ { gsub(/.*<path>|<\/path>.*/, ""); print; exit }' "$f")
+    [ -n "$p" ] && break
+  done
   echo "${p:-/storage/roms/segamodel2}"
 }
 ENTRY_FILE="$(entry_dir)/$ENTRY_NAME"
 
-install_entry() {
-  local stamp roms tmp changed=0
-  stamp=$(date +%Y%m%d-%H%M%S)
-  roms=$(entry_dir)
-  [ -f "$ES/es_systems.cfg" ] || { echo "no $ES/es_systems.cfg" >&2; return 2; }
+# system.cfg, ROCKNIX's per-game settings, written the way its own set_setting
+# would -- except that set_setting cannot do this one.
+#
+# It deletes the old line with  sed -i "/^${key}=/d" , and our key is
+#   segamodel2["Update m2-hle.sh"].emulator
+# in which ["Update m2-hle.sh"] is a regex bracket expression, not a literal. It
+# matches one character out of that set, never the [ that is actually there, so
+# nothing was ever deleted and every run appended another copy: the device this
+# was found on had seven .core lines and five .emulator lines. Match the key as
+# a literal string instead, under ROCKNIX's own lock so a running ES does not
+# write over the top of us.
+set_game_setting() {
+  local key="$1" val="$2" conf=/storage/.config/system/configs/system.cfg
+  local lock=/tmp/.system.cfg.lock tmp="$conf.m2hle-$$" held=0 n=0
+  [ -f "$conf" ] || return 0
+  # ROCKNIX's own lock and the way its wait_lock takes it (noclobber, so the
+  # create is the test), but bounded: this runs while a game is being launched,
+  # and a stale lock must not hang the launch. Release only a lock we took.
+  while [ "$n" -lt 50 ]; do
+    if (set -o noclobber; echo "$$" > "$lock") 2>/dev/null; then held=1; break; fi
+    sleep 0.1; n=$((n + 1))
+  done
+  awk -v k="$key=" -v line="$key=$val" '
+    index($0, k) == 1 { next }   # every stale copy, however many there are
+    { print }
+    END { print line }
+  ' "$conf" > "$tmp" && mv -f "$tmp" "$conf"
+  rm -f "$tmp"
+  [ "$held" = 1 ] && [ "$(cat "$lock" 2>/dev/null)" = "$$" ] && rm -f "$lock"
+  return 0
+}
 
-  # ES lists a rom only if its extension is one the system declares.
-  if ! awk '
+install_entry() {
+  local roms tmp changed=0
+  roms=$(entry_dir)
+
+  # ES lists a rom only if its extension is one the system declares. The drop-in
+  # declares .sh; an install that still runs off an edited es_systems.cfg may not.
+  if ! grep -qs "\.sh" "$ES/es_systems_m2hle.cfg" \
+     && ! awk '
       /<name>segamodel2<\/name>/ { s = 1 }
       s && /<\/system>/ { exit }
       s && /<extension>/ { if (index($0, ".sh")) f = 1; exit }
-      END { exit !f }' "$ES/es_systems.cfg"; then
-    cp "$ES/es_systems.cfg" "$ES/es_systems.cfg.bak-$stamp"
-    awk '
-      /<name>segamodel2<\/name>/ { s = 1 }
-      s && !done && /<extension>/ { sub(/<\/extension>/, " .sh</extension>"); done = 1 }
-      { print }
-      END { if (!done) exit 1 }
-    ' "$ES/es_systems.cfg.bak-$stamp" > "$ES/es_systems.cfg.new" \
-      || { rm -f "$ES/es_systems.cfg.new"; echo "could not add .sh to segamodel2's extensions" >&2; return 2; }
-    mv "$ES/es_systems.cfg.new" "$ES/es_systems.cfg"
-    echo "es_systems.cfg: segamodel2 now lists .sh too (backup es_systems.cfg.bak-$stamp)"
-    changed=1
+      END { exit !f }' "$ES/es_systems.cfg" 2>/dev/null; then
+    echo "warning: segamodel2 does not list .sh as an extension, so ES will not" >&2
+    echo "         show the updater. Re-run install-es.sh." >&2
   fi
 
   mkdir -p "$roms" || return 2
@@ -146,19 +175,8 @@ ENTRY
   # a libretro core, which is a button press in the way of an updater. Name the
   # standalone emulator for this entry instead: runemu.sh runs a .sh rom
   # directly, so which emulator ES has against it changes nothing else.
-  # set_setting is ROCKNIX's own writer for system.cfg, lock and all, and is
-  # what everything else uses while ES is running.
-  # In a subshell of its own: that file defines a log() and a good deal else,
-  # and is not written to be read under set -u.
-  if [ -f /etc/profile.d/001-functions ]; then
-    ( set +u
-      # shellcheck disable=SC1091
-      . /etc/profile.d/001-functions
-      [ "$(type -t set_setting)" = function ] || exit 0
-      set_setting "segamodel2[\"$ENTRY_NAME\"].emulator" m2hle
-      set_setting "segamodel2[\"$ENTRY_NAME\"].core" m2hle-sa
-    ) >/dev/null 2>&1 || true
-  fi
+  set_game_setting "segamodel2[\"$ENTRY_NAME\"].emulator" m2hle
+  set_game_setting "segamodel2[\"$ENTRY_NAME\"].core" m2hle-sa
 
   # The Tools entry this replaces: the boot rsync deletes it anyway, and one
   # that is there until the next reboot is worse than none.

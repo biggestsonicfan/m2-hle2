@@ -200,7 +200,11 @@ jobs:
           mkdir -p dist/stage
           cp build/m2hle dist/stage/
           cp packaging/rocknix/start_m2hle.sh packaging/rocknix/install-es.sh dist/stage/
-          cp packaging/rocknix/m2hle-update.sh dist/stage/
+          cp packaging/rocknix/m2hle-update.sh packaging/rocknix/m2hle-runemu.sh dist/stage/
+          # The EmulationStation drop-ins install-es.sh installs; without these the
+          # Sega Model 2 tile is whatever the OS happens to ship, which since
+          # ROCKNIX 7.0.2 is nothing at all.
+          cp packaging/rocknix/es_systems_m2hle.cfg packaging/rocknix/es_features_m2hle.cfg dist/stage/
           cp packaging/rocknix/README.md dist/stage/
           chmod +x dist/stage/m2hle dist/stage/*.sh
           echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
@@ -406,6 +410,9 @@ jobs:
             packaging/libretro/m2hle_libretro.info > dist/stage/m2hle_libretro.info
           cp packaging/libretro/README.md packaging/libretro/INSTALL.md packaging/libretro/install-rocknix.sh dist/stage/
           cp packaging/rocknix/m2hle-update.sh dist/stage/
+          # install-rocknix.sh installs these when the device has no Sega Model 2
+          # system yet -- ROCKNIX 7.0.2 ships none, and a device may have only the core.
+          cp packaging/rocknix/es_systems_m2hle.cfg packaging/rocknix/m2hle-runemu.sh dist/stage/
           chmod +x dist/stage/*.sh
           echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
           cd dist/stage && zip -r ../m2hle-libretro-linux-arm64.zip ./*
