@@ -135,8 +135,13 @@ export class M2Hle {
      * default for sfight.zip is the console one, whose patches (Honey's head
      * tilt, for one) move every fighter off what MAME and the explorer do. It
      * only picks between profiles of the ROM set being loaded, so it is inert
-     * for any other game. null leaves the emulator's own default. */
+     * for any other game. null leaves the emulator's own default.
+     *
+     * `region` defaults to 'japan' for the same reason: the emulator powers
+     * STF up as USA, and MAME's sfight boots as Japan, which changes the boot
+     * warning, attract and the fighters' names. null leaves the emulator's own. */
     static async launch({ rom, port = DEFAULT_PORT, run = true, exe = null, profile = 'sfight',
+                          region = 'japan',
                           quiet = true, timeoutMs = 30000,
                           headless = !process.env.M2_WINDOW, extraArgs = [] } = {}) {
         if (!rom) throw new Error('launch needs a rom path');
@@ -146,7 +151,8 @@ export class M2Hle {
          * handheld's --live-timers, say). */
         const envArgs = (process.env.M2HLE_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean);
         const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom),
-                      ...(profile ? ['--profile', profile] : []), ...extraArgs, ...envArgs];
+                      ...(profile ? ['--profile', profile] : []),
+                      ...(region ? ['--region', region] : []), ...extraArgs, ...envArgs];
         if (run) args.push('--run');
         if (headless) args.push('--headless');
         /* Run it beside the ROM: a split set needs schamp.zip found next to
