@@ -7,8 +7,11 @@
 #   m2hle-update.sh --check [SECS]   check only; skipped if the last check is
 #                                    younger than SECS. Exit 0 = update waiting,
 #                                    1 = current, 2 = could not tell (offline...)
-#   m2hle-update.sh --tool           what ES's Tools > "Update m2hle" runs: the
-#                                    default, plus an on-screen result
+#   m2hle-update.sh --tool           what the "Update m2-hle" entry in the Sega
+#                                    Model 2 game list runs: the default, plus
+#                                    an on-screen result
+#   m2hle-update.sh --install-entry  (re-)create that entry; the installers call
+#                                    it, and it is safe to run at any time
 #   --component sa|core              (with any of the above) only that one, and
 #                                    install it even if it is not installed yet
 #
@@ -45,10 +48,11 @@ while [ $# -gt 0 ]; do
              if [[ "${2:-}" =~ ^[0-9]+$ ]]; then MAX_AGE=$2; shift; fi ;;
     --force) MODE=force ;;
     --tool)  MODE=tool ;;
+    --install-entry) MODE=entry ;;
     --component)
       case "${2:-}" in sa|core) ONLY=$2; shift ;;
         *) echo "--component takes sa or core" >&2; exit 2 ;; esac ;;
-    *) echo "usage: $0 [--check [SECS] | --force | --tool] [--component sa|core]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--check [SECS] | --force | --tool | --install-entry] [--component sa|core]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -60,11 +64,114 @@ notify() {  # tool mode only: a result that stays up until a button
   return 0
 }
 
+notify_bg() {  # the same, without holding up the work it is announcing
+  [ "$MODE" = tool ] && [ -x /usr/bin/sdl2notify ] && /usr/bin/sdl2notify --center "$1" 255 255 255 "${2:-3}" >/dev/null 2>&1 &
+  return 0
+}
+
+# VERSION.txt is "r234-c25e0be (c25e0be...40 hex...)"; the screen is 640 px
+# wide and sdl2notify does not wrap, so the on-screen lines keep the short one.
+short() { echo "${1%% (*}"; }
+
 fail() {  # before any component: nothing can be done
   log "m2hle update: $1"
   notify "m2hle update failed||$1"
   exit 2
 }
+
+# ---- "Update m2-hle", the entry in the Sega Model 2 game list that runs this.
+#
+# It is a game and not a Tools entry because ROCKNIX's autostart rsyncs
+# /usr/config/modules over /storage/.config/modules with --delete on every boot
+# (/usr/lib/autostart/common/001-sync-modules), so anything added to ES's Tools
+# menu is gone the next time the device starts. /storage/roms is never touched,
+# and runemu.sh runs a "rom" whose name ends in .sh directly, so the updater
+# sits beside Sonic The Fighters instead and survives.
+ENTRY_NAME="Update m2-hle.sh"
+
+entry_dir() {  # the segamodel2 rom directory ES is configured with
+  local p=""
+  [ -f "$ES/es_systems.cfg" ] && p=$(awk '
+    /<name>segamodel2<\/name>/ { s = 1 }
+    s && /<path>/ { gsub(/.*<path>|<\/path>.*/, ""); print; exit }' "$ES/es_systems.cfg")
+  echo "${p:-/storage/roms/segamodel2}"
+}
+ENTRY_FILE="$(entry_dir)/$ENTRY_NAME"
+
+install_entry() {
+  local stamp roms tmp changed=0
+  stamp=$(date +%Y%m%d-%H%M%S)
+  roms=$(entry_dir)
+  [ -f "$ES/es_systems.cfg" ] || { echo "no $ES/es_systems.cfg" >&2; return 2; }
+
+  # ES lists a rom only if its extension is one the system declares.
+  if ! awk '
+      /<name>segamodel2<\/name>/ { s = 1 }
+      s && /<\/system>/ { exit }
+      s && /<extension>/ { if (index($0, ".sh")) f = 1; exit }
+      END { exit !f }' "$ES/es_systems.cfg"; then
+    cp "$ES/es_systems.cfg" "$ES/es_systems.cfg.bak-$stamp"
+    awk '
+      /<name>segamodel2<\/name>/ { s = 1 }
+      s && !done && /<extension>/ { sub(/<\/extension>/, " .sh</extension>"); done = 1 }
+      { print }
+      END { if (!done) exit 1 }
+    ' "$ES/es_systems.cfg.bak-$stamp" > "$ES/es_systems.cfg.new" \
+      || { rm -f "$ES/es_systems.cfg.new"; echo "could not add .sh to segamodel2's extensions" >&2; return 2; }
+    mv "$ES/es_systems.cfg.new" "$ES/es_systems.cfg"
+    echo "es_systems.cfg: segamodel2 now lists .sh too (backup es_systems.cfg.bak-$stamp)"
+    changed=1
+  fi
+
+  mkdir -p "$roms" || return 2
+  tmp="$roms/.update-m2hle.new"
+  cat > "$tmp" <<'ENTRY' || return 2
+#!/bin/bash
+# EmulationStation runs this when "Update m2-hle" is launched from the Sega
+# Model 2 game list (ROCKNIX's runemu.sh runs a .sh rom directly).
+# m2hle-update.sh --install-entry writes this file; change it there.
+. /etc/profile
+exec bash /storage/.local/bin/m2hle-update.sh --tool
+ENTRY
+  chmod 755 "$tmp"
+  if cmp -s "$tmp" "$roms/$ENTRY_NAME"; then
+    rm -f "$tmp"
+  else
+    mv -f "$tmp" "$roms/$ENTRY_NAME" || return 2
+    echo "game list: $roms/$ENTRY_NAME"
+    changed=1
+  fi
+
+  # ES offers its savestate manager before launching anything whose emulator is
+  # a libretro core, which is a button press in the way of an updater. Name the
+  # standalone emulator for this entry instead: runemu.sh runs a .sh rom
+  # directly, so which emulator ES has against it changes nothing else.
+  # set_setting is ROCKNIX's own writer for system.cfg, lock and all, and is
+  # what everything else uses while ES is running.
+  # In a subshell of its own: that file defines a log() and a good deal else,
+  # and is not written to be read under set -u.
+  if [ -f /etc/profile.d/001-functions ]; then
+    ( set +u
+      # shellcheck disable=SC1091
+      . /etc/profile.d/001-functions
+      [ "$(type -t set_setting)" = function ] || exit 0
+      set_setting "segamodel2[\"$ENTRY_NAME\"].emulator" m2hle
+      set_setting "segamodel2[\"$ENTRY_NAME\"].core" m2hle-sa
+    ) >/dev/null 2>&1 || true
+  fi
+
+  # The Tools entry this replaces: the boot rsync deletes it anyway, and one
+  # that is there until the next reboot is worse than none.
+  rm -f "/storage/.config/modules/Update m2hle.sh"
+
+  [ "$changed" = 1 ] && echo "restart EmulationStation for it to appear"
+  return 0
+}
+
+if [ "$MODE" = entry ]; then
+  install_entry
+  exit $?
+fi
 
 # ---- This device's platform and CPU, as the release's asset names spell them.
 case "$(uname -s)" in
@@ -124,6 +231,7 @@ if [ "$MODE" = check ] && [ "$MAX_AGE" -gt 0 ] && [ -f "$CHECKED" ] \
   [ -f "$AVAILABLE" ] && exit 0 || exit 1
 fi
 
+notify_bg "m2hle update||asking GitHub what the canary is..." 3
 log "This device: $OS-$ARCH"
 log "Asking GitHub for the $TAG release..."
 JSON=$(curl -fsSL --max-time 20 -H 'Accept: application/vnd.github+json' "$API") \
@@ -162,6 +270,7 @@ update_one() {
   zip="$STAGE/$asset"
   if [ "$(sha256sum "$zip" 2>/dev/null | cut -d' ' -f1)" != "$digest" ]; then
     log "Downloading $asset..."
+    notify_bg "m2hle update||downloading the new $name..." 4
     curl -fsSL --max-time 300 -o "$zip.part" "$url" || { rm -f "$zip.part"; ERR="download failed"; return 2; }
     mv -f "$zip.part" "$zip"
   fi
@@ -264,18 +373,21 @@ update_one() {
   return 0
 }
 
-es_before=$(cat "$ES/es_systems.cfg" "$ES/es_features.cfg" 2>/dev/null | md5sum)
+# What ES reads at startup: its two config files and the game-list entry an
+# installer may add below.
+es_state() { cat "$ES/es_systems.cfg" "$ES/es_features.cfg" "$ENTRY_FILE" 2>/dev/null | md5sum; }
+es_before=$(es_state)
 UPDATED=() WAITING=() FAILED=() CURRENT=()
 for c in "${COMPONENTS[@]}"; do
   update_one "$c"
   case $? in
-    0) if [ "$MODE" = check ]; then WAITING+=("$(label "$c") $NEW_VERSION")
-       else UPDATED+=("$(label "$c") $NEW_VERSION"); log "Updated $(label "$c"): $NEW_VERSION"; fi ;;
-    1) CURRENT+=("$(label "$c") $NEW_VERSION"); log "$(label "$c") is up to date." ;;
+    0) if [ "$MODE" = check ]; then WAITING+=("$(label "$c") $(short "$NEW_VERSION")")
+       else UPDATED+=("$(label "$c") $(short "$NEW_VERSION")"); log "Updated $(label "$c"): $NEW_VERSION"; fi ;;
+    1) CURRENT+=("$(label "$c") $(short "$NEW_VERSION")"); log "$(label "$c") is up to date." ;;
     *) FAILED+=("$(label "$c"): $ERR"); log "m2hle update: $(label "$c"): $ERR" ;;
   esac
 done
-es_after=$(cat "$ES/es_systems.cfg" "$ES/es_features.cfg" 2>/dev/null | md5sum)
+es_after=$(es_state)
 
 join() { local IFS=,; echo "$*" | sed 's/,/, /g'; }
 

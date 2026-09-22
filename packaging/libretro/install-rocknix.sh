@@ -8,10 +8,11 @@
 #
 # Idempotent: running it again only refreshes the core and its info file.
 #
-# It also installs m2hle-update.sh and ES's Tools > "Update m2hle", which keep
-# the core current from the canary release from then on (m2hle-update.sh runs
-# this script from each new zip). /storage/.local/share/m2hle/libretro/ holds
-# the VERSION.txt of the zip installed last.
+# It also installs m2hle-update.sh and the "Update m2-hle" entry in the Sega
+# Model 2 game list, which keep the core current from the canary release from
+# then on (m2hle-update.sh runs this script from each new zip).
+# /storage/.local/share/m2hle/libretro/ holds the VERSION.txt of the zip
+# installed last.
 set -euo pipefail
 STAMP=$(date +%Y%m%d-%H%M%S)
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -43,7 +44,7 @@ echo "installed the core -> /storage/cores/m2hle_libretro.so"
 [ -f /storage/cores/core_info.cache ] && mv -f /storage/cores/core_info.cache /storage/cores/core_info.cache.old
 
 # 1b. Which canary this is, the updater (it updates this core and the
-#     standalone m2hle from the canary release) and its ES Tools entry.
+#     standalone m2hle from the canary release) and its game-list entry.
 STATE=/storage/.local/share/m2hle/libretro
 mkdir -p "$STATE"
 if [ -f "$HERE/VERSION.txt" ]; then
@@ -53,11 +54,9 @@ fi
 if [ -f "$HERE/m2hle-update.sh" ]; then
   mkdir -p /storage/.local/bin
   install -m 755 "$HERE/m2hle-update.sh" /storage/.local/bin/m2hle-update.sh
-fi
-if [ -f "$HERE/tool-update-m2hle.sh" ]; then
-  mkdir -p /storage/.config/modules
-  install -m 755 "$HERE/tool-update-m2hle.sh" "/storage/.config/modules/Update m2hle.sh"
-  echo "ES Tools: Update m2hle"
+  # "Update m2-hle" in the Sega Model 2 game list, beside the game. Not a Tools
+  # entry: ROCKNIX's boot rsync deletes anything in /storage/.config/modules.
+  bash /storage/.local/bin/m2hle-update.sh --install-entry || echo "could not add the Update m2-hle entry" >&2
 fi
 
 # 2. An emulator entry under segamodel2, beside whatever is there already.
@@ -130,5 +129,5 @@ else
   echo "Pick it per game in EmulationStation (the game's options > emulator), or"
   echo "run again with --make-default. Restart EmulationStation to see the new entry."
 fi
-[ -x /storage/.local/bin/m2hle-update.sh ] && echo "Updates: EmulationStation > Tools > Update m2hle, or m2hle-update.sh over ssh."
+[ -x /storage/.local/bin/m2hle-update.sh ] && echo "Updates: the Update m2-hle entry in the Sega Model 2 game list, or m2hle-update.sh over ssh."
 exit 0

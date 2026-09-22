@@ -83,5 +83,5 @@ echo "Command: ${M2HLE} ${OPTIONS[*]} ${1}" >>/var/log/exec.log 2>&1
 ${EMUPERF} "${M2HLE}" "${OPTIONS[@]}" "${1}" >>/var/log/exec.log 2>&1 ||:
 
 if [ "${UPDATE_CHECK}" != "off" ] && [ -f /storage/.local/share/m2hle/UPDATE_AVAILABLE ]; then
-  /usr/bin/sdl2notify --center "m2hle update available||$(cat /storage/.local/share/m2hle/UPDATE_AVAILABLE) - Tools > Update m2hle" 255 255 255 4 >/dev/null 2>&1 ||:
+  /usr/bin/sdl2notify --center "m2hle update available||$(cat /storage/.local/share/m2hle/UPDATE_AVAILABLE) - launch Update m2-hle" 255 255 255 4 >/dev/null 2>&1 ||:
 fi
