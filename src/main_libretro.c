@@ -1187,6 +1187,13 @@ static bool lr_run_rpcn(uint32_t local_held) {
             continue;
         }
         lr_slice();
+        /* A watcher behind the fighters runs a few extra slices a frame until it
+         * has caught up (netplay_catching_up): one retro_run is one slice, and
+         * nothing else would ever close the gap. */
+        for (int extra = 0; extra < 3 && netplay_catching_up(); extra++) {
+            if (emu_netplay_pump(&state.emu) != NETPLAY_STEP_READY) break;
+            lr_slice();
+        }
         return true;
     }
 }

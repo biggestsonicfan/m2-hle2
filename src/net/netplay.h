@@ -2435,9 +2435,15 @@ static inline void netplay_owner_pump(void) {
 
     if (s.phase == ROOM_PHASE_LOBBY) {
         uint32_t players = room_player_count(&s, m, n);
-        bool due = (s.flags & ROOM_FLAG_AUTO) && g_netplay.auto_deadline_ms && now >= g_netplay.auto_deadline_ms;
+        /* "Everyone is ready" starts the FIRST match. After a result the ready
+         * flags are all still set, so honouring them again would start the next
+         * match the moment the lobby reopened -- and cut off a watcher still a
+         * few frames short of the result it is about to be told about. From then
+         * on the countdown decides (or the owner, with Start now). */
+        bool rolling = (s.flags & ROOM_FLAG_AUTO) != 0;
+        bool due = rolling && g_netplay.auto_deadline_ms && now >= g_netplay.auto_deadline_ms;
         uint16_t f[2];
-        if (players >= 2 && (g_netplay.force_start || room_all_ready(&s, m, n) || due)
+        if (players >= 2 && (g_netplay.force_start || (!rolling && room_all_ready(&s, m, n)) || due)
             && room_pick_fighters(&s, m, n, f)) {
             s.phase       = ROOM_PHASE_MATCH;
             s.match       = (uint16_t)(s.match + 1u);
@@ -2802,6 +2808,26 @@ static inline bool netplay_reset_board_now(void) {
     input_reset();
     netplay_log("board reset on request (no session)");
     return true;
+}
+
+/*
+ * A watcher behind the inputs it already holds should run without pacing.
+ *
+ * A watcher is paced to 60 Hz like everybody else, but nothing waits on it: every
+ * frame it spends waiting -- a record that came late, a repair -- is a frame it
+ * stays behind the fighters for good. Over a long match that added up to seconds,
+ * and a watcher that far behind is still short of the result when the room moves
+ * on. So while the next few frames are already in hand, the run loop skips its
+ * sleep and lets the watcher catch up.
+ */
+#define NETPLAY_CATCH_UP_FRAMES 6u
+static inline bool netplay_catching_up(void) {
+    if (g_netplay.state != NETPLAY_WATCHING || g_netplay.reset_pending) return false;
+    const lockstep_t *l = &g_netplay.lockstep;
+    uint32_t n0 = l->rings[0].newest, n1 = l->rings[1].newest;
+    if (n0 == LOCKSTEP_INVALID_FRAME || n1 == LOCKSTEP_INVALID_FRAME) return false;
+    uint32_t newest = n0 < n1 ? n0 : n1;
+    return newest > g_netplay.frame + NETPLAY_CATCH_UP_FRAMES;
 }
 
 /* A session owns the board: fighting or watching. */

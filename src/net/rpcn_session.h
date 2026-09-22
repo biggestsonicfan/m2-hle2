@@ -84,6 +84,25 @@
 static const uint8_t g_rpcn_punch_tag[4] = { 'M', '2', 'N', '!' };
 #define RPCN_PUNCH_SIZE 6u
 
+/*
+ * An INTRODUCTION: "here is where I hear the others from". Tag, then up to
+ * RPCN_MAX_PEERS entries of { u16 member, u32 ip (network order), u16 port }.
+ *
+ * RPCN alone cannot connect two members who share a public address with a
+ * third. It tells each of them the other's LOCAL address with port 3658
+ * HARDCODED (room_manager.rs, cmd_misc.rs), so everybody on one address is told
+ * everybody else is on 3658 -- which is at most one of them. With two players
+ * that never mattered: the one on 3658 hears the other's first datagram and
+ * learns the real port from it. With three, the two who are not on 3658 each
+ * punch 3658 and never hear each other. Every member already knows where it
+ * hears the others from, so each passes that on to the rest: the rendezvous
+ * that a room of more than two needs, and one that also lets two members behind
+ * one NAT use the mapping a third member sees.
+ */
+static const uint8_t g_rpcn_intro_tag[4] = { 'M', '2', 'N', 'I' };
+#define RPCN_INTRO_ENTRY 8u
+#define RPCN_INTRO_MS    1000
+
 typedef enum {
     RPCN_STAGE_IDLE,
     RPCN_STAGE_LOGGING_IN,
@@ -128,6 +147,10 @@ typedef struct {
 
     uint32_t ip;             /* network byte order; 0 = not known yet */
     uint16_t port;
+    /* Where another member hears them from (rpcn_session_pump_intro). Punched
+     * beside ip:port until one of the two answers. */
+    uint32_t alt_ip;
+    uint16_t alt_port;
     bool     heard;          /* a datagram has actually arrived from them */
     uint64_t last_punch_ms;
     uint64_t signaling_retry_ms;
@@ -198,6 +221,7 @@ typedef struct {
     uint32_t            foreign_room_count;
 
     uint64_t last_keepalive_ms;
+    uint64_t last_intro_ms;
 
     void *log_ctx;
     void (*log)(void *ctx, const char *msg);
@@ -345,7 +369,7 @@ static inline void rpcn_session_set_peer_addr(rpcn_session_t *s, rpcn_peer_t *p,
 static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port) {
     if (!p) return false;
     if (p->heard) return p->ip == ip && p->port == port;
-    if (p->ip && p->ip != ip) return false;
+    if (p->ip && p->ip != ip && !(p->alt_ip && p->alt_ip == ip)) return false;
     bool moved = (port != p->port || ip != p->ip);
     p->heard = true;
     p->ip    = ip;
@@ -555,6 +579,53 @@ static inline void rpcn_session_pump_punch(rpcn_session_t *s) {
         if (p->last_punch_ms != 0 && now - p->last_punch_ms < interval) continue;
         p->last_punch_ms = now;
         rpcn_send_to(&s->client, p->ip, p->port, punch, sizeof(punch));
+        if (!p->heard && p->alt_ip && p->alt_port && (p->alt_ip != p->ip || p->alt_port != p->port))
+            rpcn_send_to(&s->client, p->alt_ip, p->alt_port, punch, sizeof(punch));
+    }
+}
+
+/* Tell every member we hear where we hear the rest (g_rpcn_intro_tag), once a
+ * second. We cannot know which pairs of the others have not found each other,
+ * and the whole thing is a few dozen bytes. */
+static inline void rpcn_session_pump_intro(rpcn_session_t *s, uint64_t *last_ms) {
+    uint64_t now = net_now_ms();
+    if (*last_ms && now - *last_ms < RPCN_INTRO_MS) return;
+    *last_ms = now;
+    uint8_t pkt[4 + RPCN_MAX_PEERS * RPCN_INTRO_ENTRY];
+    for (uint32_t to = 0; to < RPCN_MAX_PEERS; to++) {
+        const rpcn_peer_t *dst = &s->peers[to];
+        if (!dst->used || !dst->heard) continue;
+        uint32_t n = 0;
+        memcpy(pkt, g_rpcn_intro_tag, 4);
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+            const rpcn_peer_t *p = &s->peers[i];
+            if (i == to || !p->used || !p->heard) continue;
+            uint8_t *e = pkt + 4 + n * RPCN_INTRO_ENTRY;
+            rpcn_put_u16(e, p->member_id);
+            memcpy(e + 2, &p->ip, 4);
+            rpcn_put_u16(e + 6, p->port);
+            n++;
+        }
+        if (n) rpcn_send_to(&s->client, dst->ip, dst->port, pkt, 4 + n * RPCN_INTRO_ENTRY);
+    }
+}
+
+static inline void rpcn_session_on_intro(rpcn_session_t *s, const uint8_t *buf, uint32_t len,
+                                         const rpcn_peer_t *from) {
+    for (uint32_t at = 4; at + RPCN_INTRO_ENTRY <= len; at += RPCN_INTRO_ENTRY) {
+        rpcn_peer_t *p = rpcn_session_peer(s, rpcn_get_u16(buf + at));
+        if (!p || p->heard) continue;
+        uint32_t ip;
+        memcpy(&ip, buf + at + 2, 4);
+        uint16_t port = rpcn_get_u16(buf + at + 6);
+        if (!ip || !port || (ip == p->alt_ip && port == p->alt_port)) continue;
+        if (!p->ip) { rpcn_session_set_peer_addr(s, p, ip, port, "introduced"); continue; }
+        p->alt_ip   = ip;
+        p->alt_port = port;
+        p->last_punch_ms = 0;
+        char text[32];
+        rpcn_session_note(s, "%s introduces %s at %s", rpcn_peer_name(from), rpcn_peer_name(p),
+                          net_addr_text(text, sizeof(text), ip, port));
     }
 }
 
@@ -882,6 +953,7 @@ static inline void rpcn_session_update(rpcn_session_t *s) {
     if (rpcn_session_in_room(s)) {
         rpcn_session_pump_signaling(s);
         rpcn_session_pump_punch(s);
+        rpcn_session_pump_intro(s, &s->last_intro_ms);
     }
 }
 
@@ -1012,6 +1084,15 @@ static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap,
         /* A punch names its sender, so it can introduce an address nobody told us. */
         if (got == (int)RPCN_PUNCH_SIZE && memcmp(buf, g_rpcn_punch_tag, sizeof(g_rpcn_punch_tag)) == 0) {
             rpcn_session_hear(s, rpcn_session_peer(s, rpcn_get_u16((const uint8_t *)buf + 4)), ip, port);
+            continue;
+        }
+        /* An introduction, only from a member we already hear. */
+        if (got >= 4 && memcmp(buf, g_rpcn_intro_tag, sizeof(g_rpcn_intro_tag)) == 0) {
+            for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+                const rpcn_peer_t *p = &s->peers[i];
+                if (p->used && p->heard && p->ip == ip && p->port == port)
+                    rpcn_session_on_intro(s, (const uint8_t *)buf, (uint32_t)got, p);
+            }
             continue;
         }
 

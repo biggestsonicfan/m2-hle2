@@ -599,7 +599,9 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 static int unthrottled = -1;
                 if (unthrottled < 0) { const char *e = getenv("M2HLE_UNTHROTTLE"); unthrottled = e && e[0] == '1'; }
                 int64_t sleep_us = ctx->frame_deadline_us - emu_now_us();
-                if (unthrottled) ctx->frame_deadline_us = 0;
+                /* A netplay watcher behind the fighters runs flat out until it
+                 * has caught up (netplay_catching_up). */
+                if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
                 else if (sleep_us > 0) emu_sleep_us(sleep_us);
             } else {
                 /* No game-pace hook yet — fall back to fixed slice timing

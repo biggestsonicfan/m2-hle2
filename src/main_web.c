@@ -294,7 +294,11 @@ static void web_run_owed_slices(void) {
         state.owed_us = 0;
         return;
     }
-    for (int n = 0; n < WEB_MAX_SLICES_PER_FRAME && state.owed_us >= WEB_SLICE_DUE_US; n++) {
+    /* A netplay watcher behind the fighters takes the extra slices whether it is
+     * owed them or not, until it has caught up (netplay_catching_up). */
+    for (int n = 0; n < WEB_MAX_SLICES_PER_FRAME
+                    && (state.owed_us >= WEB_SLICE_DUE_US || netplay_catching_up()); n++) {
+        bool owed = state.owed_us >= WEB_SLICE_DUE_US;
         if (!web_slice()) {
             /* Waiting on the other player: let the time go rather than owe it.
              * Owed, it is repaid with an extra slice on the next callback, which
@@ -308,7 +312,7 @@ static void web_run_owed_slices(void) {
             if (g_web_waited) state.owed_us = 0;
             break;
         }
-        state.owed_us -= EMU_SLICE_US;
+        if (owed) state.owed_us -= EMU_SLICE_US;   /* a catch-up slice owes nothing back */
     }
 }
 

@@ -208,6 +208,7 @@ typedef struct {
     /* Inbound reassembly: TLS gives a byte stream, packets straddle records. */
     uint8_t      in[64 * 1024];
     uint32_t     in_used;
+    uint32_t     in_consumed;   /* bytes of `in` the last poll handed out; dropped at the next */
 
     net_sock_t   udp;
     /* The signaling helper lives on the SAME host as the TLS server but on UDP
@@ -261,6 +262,7 @@ static inline void rpcn_disconnect(rpcn_client_t *c) {
     tls_close(&c->tls);
     net_close(&c->udp);
     c->in_used = 0;
+    c->in_consumed = 0;
 }
 
 static inline bool rpcn_connect(rpcn_client_t *c, const char *host, uint16_t port,
@@ -1311,6 +1313,13 @@ static inline bool rpcn_parse_twitch_poll(const uint8_t *payload, uint32_t size,
 static inline bool rpcn_poll(rpcn_client_t *c, rpcn_packet_t *out) {
     if (!out || !tls_is_connected(&c->tls)) return false;
 
+    /* The packet the last poll returned, now that its caller is done with it. */
+    if (c->in_consumed) {
+        memmove(c->in, c->in + c->in_consumed, c->in_used - c->in_consumed);
+        c->in_used -= c->in_consumed;
+        c->in_consumed = 0;
+    }
+
     for (;;) {
         if (c->in_used >= RPCN_HEADER_SIZE) {
             uint32_t size = rpcn_get_u32(c->in + 3);
@@ -1351,10 +1360,13 @@ static inline bool rpcn_poll(rpcn_client_t *c, rpcn_packet_t *out) {
                         c->user_id = (int64_t)rpcn_get_u64(out->payload + at);
                 }
 
-                /* Slide the remainder down. The caller's payload pointer stays
-                 * valid only until the next poll, which is documented. */
-                memmove(c->in, c->in + size, c->in_used - size);
-                c->in_used -= size;
+                /* The caller's payload points into `in`, so the packet stays
+                 * where it is until the NEXT poll slides it out. Sliding it here
+                 * moved the following packet over the payload before the caller
+                 * had read a byte of it -- invisible while replies arrived one
+                 * at a time, and every time once a room joined: the join reply
+                 * comes with room notifications right behind it in one read. */
+                c->in_consumed = size;
                 return true;
             }
         }
