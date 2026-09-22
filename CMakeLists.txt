@@ -494,6 +494,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(geo_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/geo_test.c)
     add_executable(m68k_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/m68k_opcode_test.c)
     add_executable(input_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/input_test.c)
+    add_executable(tile_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/tile_test.c)
     # Netplay: the lockstep engine, the protobuf codec and the ComId standard.
     # No sockets and no server — see the header of tests/net_test.c.
     add_executable(net_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/net_test.c)
@@ -526,7 +527,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(emu_test   PRIVATE sokol)
     target_link_libraries(input_test PRIVATE miniz sokol)
 
-    foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test)
+    foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test tile_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -538,7 +539,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     # nothing that carries it.
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
-                  input_test net_test cop_replay snd_replay)
+                  input_test net_test tile_test cop_replay snd_replay)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

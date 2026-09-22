@@ -340,50 +340,20 @@ static inline void video_shutdown(video_state_t *vid) {
     vid->initialized = false;
 }
 
-/* Screen colours for every 15-bit palette colour (tile_pen_lut, rebuilt on use). */
-static uint8_t g_video_pen[0x8000][3];
-
-/* tile_pen_lut one channel at a time. Each channel of a pen depends only on its
- * own 5 bits, so 3 x 32 values give every entry of the 0x8000-entry table:
- * lut[c][ch] == chan[ch][(c >> 5 * ch) & 31]. The GPU path needs 8192 pens per
- * palette change, not 32768 built with a division each. --verify-gpu-tiles
- * holds this to tile_pen_lut, which the CPU compositor still uses. */
-static inline void video_pen_channels(const memory_bus_t *bus, uint8_t chan[3][32]) {
-    int loaded = 0;
-    for (int c5 = 0; c5 < 32 && !loaded; c5++)
-        for (int ch = 0; ch < 3 && !loaded; ch++)
-            if (bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u]) loaded = 1;
-    for (int ch = 0; ch < 3; ch++)
-        for (int c5 = 0; c5 < 32; c5++) {
-            if (!loaded) { chan[ch][c5] = (uint8_t)(c5 << 3); continue; }
-            int v = bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u];
-            int g = (v - 64) * 255 / 191;
-            chan[ch][c5] = (uint8_t)(g < 0 ? 0 : g);
-        }
-}
-
 /* Compose both layers on the CPU into bg_pixels / fg_pixels (RGBA, row 0 top). */
 static inline void video_compose_cpu(video_state_t *vid, memory_bus_t *bus) {
     render_bg_layer(bus, &vid->layers);
     render_fg_layer(bus, &vid->layers);
-    tile_pen_lut(bus, g_video_pen);
+    video_pen_table(bus);
 
     int n = VIDEO_WIDTH * VIDEO_HEIGHT;
     for (int i = 0; i < n; i++) {
         int o = i * 4;
         /* BG tiles, OPAQUE (matches MAME TILEMAP_DRAW_OPAQUE for layers C/D);
          * empty cells render palette[0] = the backdrop colour. */
-        uint16_t bc = vid->layers.bg[i] & 0x7FFF;
-        vid->bg_pixels[o+0] = g_video_pen[bc][0];
-        vid->bg_pixels[o+1] = g_video_pen[bc][1];
-        vid->bg_pixels[o+2] = g_video_pen[bc][2];
-        vid->bg_pixels[o+3] = 255;
-
+        memcpy(vid->bg_pixels + o, g_video_pen[vid->layers.bg[i] & 0x7FFF], 4);
         /* FG tiles, alpha-keyed. */
-        uint16_t fc = vid->layers.fg[i] & 0x7FFF;
-        vid->fg_pixels[o+0] = g_video_pen[fc][0];
-        vid->fg_pixels[o+1] = g_video_pen[fc][1];
-        vid->fg_pixels[o+2] = g_video_pen[fc][2];
+        memcpy(vid->fg_pixels + o, g_video_pen[vid->layers.fg[i] & 0x7FFF], 4);
         vid->fg_pixels[o+3] = vid->layers.alpha[i];
     }
 }
