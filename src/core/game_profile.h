@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 struct i960_cpu;
 struct memory_bus;
@@ -166,7 +167,11 @@ typedef void (*game_install_fn)(const struct romset *rs,
 
 typedef struct game_profile {
     const char       *id;            /* "sfight" */
-    const char       *display_name;  /* "Sonic The Fighters (Export, US)" */
+    const char       *display_name;  /* "Sonic the Fighters - Arcade" */
+    /* The ROM set this profile runs: the zip basename it is picked by. NULL =
+     * the id. Several profiles can run one set (STF's Console and Arcade); the
+     * first registered is the default, see profile_for_rom_set(). */
+    const char       *rom_set;
     const char       *parent_zip_name; /* MAME parent set zip name, e.g. "schamp.zip" */
     board_variant_t   board;
 
@@ -187,5 +192,32 @@ extern const game_profile_t *const g_profiles[];
 extern const size_t              g_profile_count;
 
 extern const game_profile_t *g_active_profile;
+
+static inline const char *profile_rom_set(const game_profile_t *p) {
+    return p->rom_set ? p->rom_set : p->id;
+}
+
+/* The profile with this id, or NULL. */
+static inline const game_profile_t *profile_by_id(const char *id) {
+    for (size_t i = 0; id && i < g_profile_count; i++)
+        if (strcmp(g_profiles[i]->id, id) == 0) return g_profiles[i];
+    return NULL;
+}
+
+/*
+ * The profile to run a ROM set with. `preferred` wins when it runs this set --
+ * that is how --profile, a core option or the Game menu picks STF's Arcade
+ * profile over the Console default, and why the choice survives the zip being
+ * loaded. Otherwise the first profile registered for the set, which is the
+ * default (registry.h lists it first). NULL when no profile runs the set.
+ */
+static inline const game_profile_t *profile_for_rom_set(const char *set,
+                                                        const game_profile_t *preferred) {
+    if (!set) return NULL;
+    if (preferred && strcmp(profile_rom_set(preferred), set) == 0) return preferred;
+    for (size_t i = 0; i < g_profile_count; i++)
+        if (strcmp(profile_rom_set(g_profiles[i]), set) == 0) return g_profiles[i];
+    return NULL;
+}
 
 #endif /* GAME_PROFILE_H */

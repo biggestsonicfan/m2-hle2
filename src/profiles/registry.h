@@ -11,16 +11,21 @@
 
 #include "game_profile.h"
 #include "sfight.h"
+#include "sfight_console.h"
 /* The web build (M2HLE_WEB) registers Sonic the Fighters and nothing else: it
  * exists to play that game over RPCN, and a set that cannot be played online
- * there is only download size. Left out, not hidden. See WEB-PORT.md. */
+ * there is only download size. Left out, not hidden. See WEB-PORT.md. Both STF
+ * profiles are there, since each is its own lobby space. */
 #ifndef M2HLE_WEB
 #include "fvipers.h"
 #include "m2snake.h"
 #endif
 /* Future: vf2.h, daytona.h, vcop.h, ... */
 
+/* Order matters: the first profile for a ROM set is its default
+ * (profile_for_rom_set), so Console comes before Arcade. */
 const game_profile_t *const g_profiles[] = {
+    &sfight_console_profile,
     &sfight_profile,
 #ifndef M2HLE_WEB
     &fvipers_profile,

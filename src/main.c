@@ -63,6 +63,7 @@
 #include "registry.h"
 
 static char g_rom_path[512] = {0};
+static char g_profile_arg[64] = {0};   /* --profile <id>: e.g. sfight for STF's arcade game */
 static int  g_autorun = 0;
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
@@ -130,8 +131,21 @@ static void emu_ensure_started(void) {
 
 /* ---- ROM loading -------------------------------------------------------- */
 
-/* Pick the profile whose id matches the zip basename (e.g. "fvipers.zip" →
- * fvipers). Falls back to leaving g_active_profile unchanged if no match. */
+/* The profile to start with: --profile's, or the first registered. */
+static const game_profile_t *startup_profile(void) {
+    if (g_profile_arg[0]) {
+        const game_profile_t *p = profile_by_id(g_profile_arg);
+        if (p) return p;
+        LOG_WARN("--profile %s: no such profile; using the default", g_profile_arg);
+    }
+    return g_profile_count > 0 ? g_profiles[0] : NULL;
+}
+
+/* Pick the profile that runs the zip's ROM set, by basename (e.g. "fvipers.zip"
+ * → fvipers). The active profile is kept when it runs that set, so --profile or
+ * a Game-menu choice between STF's Console and Arcade survives the load; else
+ * the set's default. Falls back to leaving g_active_profile unchanged if no
+ * profile runs the set. */
 static void select_profile_for_zip(const char *path) {
     const char *sep_f = strrchr(path, '/');
     const char *sep_b = strrchr(path, '\\');
@@ -142,14 +156,11 @@ static void select_profile_for_zip(const char *path) {
     size_t n = dot ? (size_t)(dot - base) : strlen(base);
     if (n >= sizeof(id)) n = sizeof(id) - 1;
     memcpy(id, base, n);
-    for (size_t i = 0; i < g_profile_count; i++) {
-        if (strcmp(g_profiles[i]->id, id) == 0) {
-            if (g_active_profile != g_profiles[i])
-                LOG_INFO("auto-selected profile: %s", g_profiles[i]->display_name);
-            g_active_profile = g_profiles[i];
-            return;
-        }
-    }
+    const game_profile_t *p = profile_for_rom_set(id, g_active_profile);
+    if (!p) return;
+    if (g_active_profile != p)
+        LOG_INFO("auto-selected profile: %s", p->display_name);
+    g_active_profile = p;
 }
 
 static void load_active_profile(const char *primary_zip) {
@@ -540,7 +551,7 @@ static void init(void) {
 
     /* Default to the first registered profile so File→Load ROMs has somewhere
      * to install into without the user clicking through Profile first. */
-    if (g_profile_count > 0) g_active_profile = g_profiles[0];
+    g_active_profile = startup_profile();
 
     sg_setup(&(sg_desc){
         .environment = sglue_environment(),
@@ -759,7 +770,7 @@ static int headless_main(void) {
     i960_reset(&state.cpu);
     bp_init();
     wp_init();
-    if (g_profile_count > 0) g_active_profile = g_profiles[0];
+    g_active_profile = startup_profile();
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
     objview_init();
@@ -1154,6 +1165,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--rom") == 0 && i + 1 < argc) {
             strncpy(g_rom_path, argv[++i], sizeof(g_rom_path) - 1);
+        } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+            strncpy(g_profile_arg, argv[++i], sizeof(g_profile_arg) - 1);
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--camlog") == 0) {
