@@ -120,6 +120,12 @@ typedef struct {
      * screen (0 = disabled).  STF: 0x500410. */
     uint32_t warning_skip_addr;
 
+    /* The profile carries a hook that honours g_vs_mode (hle_hooks.h): a
+     * decided versus match goes back to character select with both players
+     * in. Netplay continues a session across that rematch only for a profile
+     * that says so; any other board would keep the winner on against the CPU. */
+    bool     vs_rematch;
+
     /* match_replay (--match-replay / the bridge command): take attract mode
      * straight to its preprogrammed replay fight instead of playing the intro
      * movie first. At the first frame edge where the attract step byte holds

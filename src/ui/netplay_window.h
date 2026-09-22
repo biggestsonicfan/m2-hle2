@@ -159,6 +159,7 @@ static inline void netplay_window_draw(bool *p_open) {
             if (!g_np_ui.port)        g_np_ui.port = RPCN_DEFAULT_PORT;
             if (!g_np_ui.frame_delay) g_np_ui.frame_delay = 2;
         }
+        g_np_ui.vs_mode = g_vs_mode != 0;   /* --vs-mode */
     }
 
     /* ---- Status line ----------------------------------------------------- */
@@ -173,7 +174,7 @@ static inline void netplay_window_draw(bool *p_open) {
                st.member_count, st.max_slot, role, st.is_host ? "  (you run the room)" : "");
         if (st.room_known) {
             if (st.room.phase == ROOM_PHASE_MATCH)
-                igText("Match %u in progress", st.room.match);
+                igText("Match %u in progress%s", st.room.match, st.room.vs_mode ? " (VS mode)" : "");
             else if (st.auto_start_s)
                 igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f}, "Next match in %u s", st.auto_start_s);
             else if (st.room.match)
@@ -348,6 +349,12 @@ static inline void netplay_window_draw(bool *p_open) {
                          "rest wait in line and watch, and the winner stays on (the PS3 "
                          "port's Room Match).");
         igInputText("Room password", g_np_ui.room_password, sizeof(g_np_ui.room_password), 0);
+        igCheckbox("VS mode", &g_np_ui.vs_mode);
+        if (igIsItemHovered(0))
+            igSetTooltip("For a room you host. After a match both players go straight back to "
+                         "character select, already in, with no reboot. The winner does not stay on "
+                         "against the CPU. With other players waiting in line, the line still moves "
+                         "as usual.");
 
         igBeginDisabled(!online);
         if (igButton("Host a room")) netplay_post(NETPLAY_CMD_HOST, &g_np_ui);

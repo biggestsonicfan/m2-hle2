@@ -1169,6 +1169,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             int r = game_region_parse(argv[++i]);   /* japan | usa | export */
             if (r < 0) LOG_WARN("--region %s: expected japan, usa or export; keeping usa", argv[i]);
             else       g_region = r;
+        } else if (strcmp(argv[i], "--vs-mode") == 0) {
+            g_vs_mode = 1;            /* a decided versus match goes back to select */
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--camlog") == 0) {

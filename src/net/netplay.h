@@ -132,8 +132,11 @@
  * TOLD why a room is not joinable instead of finding out at the barrier.
  *
  * 2: rooms of up to eight (room.h) and the 12-byte packet header.
+ * 3: VS mode (a rematch on the running boards, room.h) and the room state's
+ *    vs_mode / session fields; and STF Console boots on free play, which a
+ *    board from before it does not.
  */
-#define NETPLAY_PROTO_REV 2
+#define NETPLAY_PROTO_REV 3
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
@@ -265,6 +268,7 @@ typedef struct {
     uint64_t room_id;           /* join target */
     uint32_t frame_delay;
     uint32_t max_players;       /* hosting: 2..8; 0 = 2 */
+    bool     vs_mode;           /* hosting: play this room's matches in VS mode (g_vs_mode) */
     uint8_t  entry;             /* room_entry_t, for NETPLAY_CMD_ENTRY */
     bool     watch_only;        /* for NETPLAY_CMD_WATCH */
     bool     browse_yamp;       /* also search YAMP's lobby space, read-only */
@@ -379,6 +383,11 @@ typedef struct {
     uint16_t            match_started;
     bool                match_live;
     bool                match_result_seen;
+    /* The match whose board reset this board is running (room_state_t.session),
+     * and whether it was started in VS mode. In VS mode `match_started` moves on
+     * by one at each result while this stays put. */
+    uint16_t            session_started;
+    bool                session_vs;
     /* After our board reaches a result a fighter goes on answering for a
      * while: the other fighter may still need our last inputs, and a watcher may
      * still be catching up. */
@@ -719,6 +728,15 @@ static inline uint32_t netplay_room_flags(const game_profile_t *p, uint32_t fram
     f |= (frame_delay & NETPLAY_ROOM_DELAY_MASK)     << NETPLAY_ROOM_DELAY_SHIFT;
     f |= (netplay_game_tag(p) & NETPLAY_ROOM_GAME_MASK) << NETPLAY_ROOM_GAME_SHIFT;
     return f;
+}
+
+/* The VS mode this machine plays the matches it starts in, as a room's owner:
+ * what the room was hosted with, and only on a profile whose board honours it
+ * (game_quirks_t.vs_rematch). On any other board a decided match keeps the
+ * winner on against the CPU, and a session carried across it would never see
+ * another result. */
+static inline bool netplay_room_vs_mode(void) {
+    return g_netplay.cfg.vs_mode && g_active_profile && g_active_profile->quirks.vs_rematch;
 }
 
 /*
@@ -1838,6 +1856,8 @@ static inline void netplay_forget_room(void) {
     g_netplay.was_owner     = false;
     g_netplay.match_started = 0;
     g_netplay.match_live    = false;
+    g_netplay.session_started = 0;
+    g_netplay.session_vs    = false;
     g_netplay.me_dirty      = false;
     g_netplay.force_start   = false;
     g_netplay.auto_deadline_ms = 0;
@@ -1868,6 +1888,7 @@ static inline void netplay_do_disconnect(void) {
 static inline void netplay_do_host(const netplay_config_t *cfg) {
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
     g_netplay.cfg.max_players   = cfg->max_players;
+    g_netplay.cfg.vs_mode       = cfg->vs_mode;
     g_netplay.cfg.room_password[0] = '\0';
     snprintf(g_netplay.cfg.room_password, sizeof(g_netplay.cfg.room_password), "%s",
              cfg->room_password);
@@ -1895,7 +1916,8 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
      * (see lockstep.h) but it is what proves in a log that two machines think
      * they are in the same session. Each match gets a fresh one. */
     g_netplay.seed = (uint32_t)(net_now_ms() * 2654435761u) | 1u;
-    netplay_log("hosting a room for up to %u; waiting for players", slots);
+    netplay_log("hosting a room for up to %u%s; waiting for players", slots,
+                netplay_room_vs_mode() ? ", in VS mode" : "");
 }
 
 static inline void netplay_do_join(const netplay_config_t *cfg) {
@@ -2465,6 +2487,8 @@ static inline void netplay_owner_pump(void) {
             s.fighter[1]  = f[1];
             s.seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s.match << 16) ^ 0x5A5Au;
             s.region      = (uint8_t)g_region;
+            s.vs_mode     = netplay_room_vs_mode() ? 1u : 0u;
+            s.session     = s.match;
             s.last_result = ROOM_RESULT_NONE;
             s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
             g_netplay.match_begun_ms = now;
@@ -2479,7 +2503,23 @@ static inline void netplay_owner_pump(void) {
     } else {
         int res = (g_netplay.me.result_match == s.match && g_netplay.me.result <= 1)
                 ? g_netplay.me.result : room_reported_result(m, n, s.match);
-        if (res >= 0) {
+        if (res >= 0 && room_vs_continues(&s, m, n)) {
+            /* VS mode, and nobody else waiting: the boards are already on their
+             * way back to character select with both players in, so the next
+             * match is played on them. The line still moves, so a rematch looks
+             * like any other result to everyone reading the room. */
+            room_rotate_line(&s, (uint32_t)res);
+            netplay_log("match %u won by %s (%s); VS mode - match %u is the rematch, no reset",
+                        (unsigned)s.match, netplay_member_name(s.fighter[res]), res == 0 ? "1P" : "2P",
+                        (unsigned)(uint16_t)(s.match + 1u));
+            s.last_result = (uint8_t)res;   /* the match just decided; `phase` says a new one is on */
+            s.match       = (uint16_t)(s.match + 1u);
+            if (!s.match) s.match = 1;
+            s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
+            g_netplay.match_begun_ms = now;
+            g_netplay.fighters_seen  = 0;
+            changed = true;
+        } else if (res >= 0) {
             uint16_t loser = room_rotate_line(&s, (uint32_t)res);
             s.last_result = (uint8_t)res;
             s.phase       = ROOM_PHASE_LOBBY;
@@ -2527,35 +2567,72 @@ static inline void netplay_member_pump(void) {
     if (!g_netplay.room_known || !me) return;
     const room_state_t *r = &g_netplay.room;
 
-    if (r->phase == ROOM_PHASE_MATCH && r->match && r->match != g_netplay.match_started) {
+    /* The match whose cold boot the room's current match is played on. A
+     * room state from before VS mode has no session; every match was its own. */
+    uint16_t session = r->session ? r->session : r->match;
+    bool on_our_boards = g_netplay.match_live && session == g_netplay.session_started;
+
+    /* A match on a session we have not run yet. A match is started once: the
+     * room saying MATCH again after we have left it is the same match. In VS
+     * mode the same holds for the whole session, since a rematch is played on
+     * the boards already running it, and our board moves on to it by itself
+     * when it reaches the result (netplay_end_frame). Sessions only go up, which
+     * `match_started` does not: a board that played on past a result has
+     * counted a rematch the room may never hold, so the room's next match can
+     * carry that same number. */
+    if (r->phase == ROOM_PHASE_MATCH && r->match && session != g_netplay.session_started) {
         int side = room_side_of(r, me);
         netplay_end_match(NULL);
-        g_netplay.match_started = r->match;
-        g_netplay.seed          = r->seed;
-        /* The owner's region, before the reset that boots into it: a board
-         * booted as another region is another game from frame 0. */
+        /* Counted from the cold boot. A member who arrives in the middle of a VS
+         * session runs it from frame 0 like any watcher, and the results it
+         * reaches are the session's first ones, not the room's current one. */
+        g_netplay.match_started   = session;
+        g_netplay.session_started = session;
+        g_netplay.session_vs      = r->vs_mode != 0;
+        g_netplay.seed            = r->seed;
+        /* The owner's region and VS mode, before the reset that boots into
+         * them: a board booted as another region is another game from frame 0,
+         * and one in the other VS mode leaves the match a different way. */
         if (g_region != (int)r->region) {
             netplay_log("playing this room in the owner's region (%s)",
                         r->region == GAME_REGION_JAPAN ? "Japan" : r->region == GAME_REGION_EXPORT ? "Export" : "USA");
             g_region = r->region;
         }
+        if (g_vs_mode != (int)r->vs_mode) {
+            netplay_log(r->vs_mode ? "this room plays in VS mode: after a match, both players go back to character select"
+                                   : "this room does not play in VS mode");
+            g_vs_mode = r->vs_mode ? 1 : 0;
+        }
         if (side >= 0) {
             netplay_log("match %u: you are %s against %s", (unsigned)r->match, side == 0 ? "1P" : "2P",
                         netplay_member_name(r->fighter[side ^ 1]));
-            netplay_begin_generation(r->match, (uint32_t)side, r->frame_delay);
+            netplay_begin_generation(session, (uint32_t)side, r->frame_delay);
         } else {
             netplay_log("match %u: watching %s vs %s", (unsigned)r->match,
                         netplay_member_name(r->fighter[0]), netplay_member_name(r->fighter[1]));
-            netplay_begin_generation(r->match, LOCKSTEP_WATCHER, r->frame_delay);
+            netplay_begin_generation(session, LOCKSTEP_WATCHER, r->frame_delay);
         }
         g_netplay.match_live = true;
-        g_netplay.me.playing = r->match;
+        g_netplay.me.playing = session;
         g_netplay.me_dirty   = true;
+        on_our_boards = true;
     }
 
-    if (g_netplay.match_live && r->match == g_netplay.match_started
-        && r->phase == ROOM_PHASE_LOBBY && r->last_result == ROOM_RESULT_NONE)
+    if (on_our_boards && r->phase == ROOM_PHASE_LOBBY && r->last_result == ROOM_RESULT_NONE) {
+        g_netplay.match_started = r->match;
         netplay_end_match("called off by the room");
+    }
+
+    /* A VS session the room has closed after a result -- somebody else is
+     * waiting to play, so the next match needs a reset -- once our board has
+     * played past that result. A board still short of it goes on until it gets
+     * there (netplay_vs_plays_on). */
+    if (on_our_boards && g_netplay.match_live && g_netplay.session_vs && r->phase == ROOM_PHASE_LOBBY
+        && r->last_result <= 1 && (int16_t)(g_netplay.match_started - r->match) > 0) {
+        if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
+        g_netplay.match_started = r->match;   /* the rematch it counted never happened */
+        netplay_end_match("the room moves on to the next players");
+    }
 
     /* A result our board did not see -- we were not running it, or dropped out
      * of it -- is still ours to record, and still moves our entry request. */
@@ -2764,6 +2841,21 @@ static inline netplay_step_t netplay_begin_frame(void) {
 }
 
 /*
+ * Does this board play on after the result of `match`? In a VS session, unless
+ * the room has already closed the session at or before `match` (somebody else is
+ * waiting, so the next match needs a reset). The room usually has not decided
+ * yet when the board gets here, so this plays on, and if the room then closes
+ * the session netplay_member_pump ends it.
+ */
+static inline bool netplay_vs_plays_on(uint16_t match) {
+    const room_state_t *r = &g_netplay.room;
+    if (!g_netplay.session_vs || !g_netplay.room_known) return false;
+    if ((r->session ? r->session : r->match) != g_netplay.session_started) return false;
+    if (r->phase == ROOM_PHASE_LOBBY && (int16_t)(r->match - match) <= 0) return false;
+    return true;
+}
+
+/*
  * Called from the emu thread with the mutex held, right after a slice that ended
  * on a frame boundary. Records this frame's check for the next outgoing packet
  * and advances the netplay frame counter.
@@ -2795,16 +2887,32 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
 
     if (versus_result >= 1 && versus_result <= 2 && !g_netplay.match_result_seen) {
         uint32_t winner = (uint32_t)versus_result - 1u;
+        uint16_t match  = g_netplay.match_started;
         g_netplay.match_result_seen = true;
-        netplay_log("match %u over at frame %u: %s (%s) won", (unsigned)g_netplay.match_started, frame,
+        netplay_log("match %u over at frame %u: %s (%s) won", (unsigned)match, frame,
                     netplay_member_name(g_netplay.room.fighter[winner]), winner == 0 ? "1P" : "2P");
-        if (room_after_result(&g_netplay.me, g_netplay.session.my_member_id, &g_netplay.room,
-                              g_netplay.match_started, winner)) {
+        /* In a VS session the room may be on a later match than our board by
+         * now. The result is still this one's, and the fighters are the same. */
+        room_state_t r = g_netplay.room;
+        if (g_netplay.session_vs && (r.session ? r.session : r.match) == g_netplay.session_started)
+            r.match = match;
+        if (room_after_result(&g_netplay.me, g_netplay.session.my_member_id, &r, match, winner)) {
             g_netplay.me_dirty = true;
             netplay_after_result_ready();
         }
-        if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
-        netplay_end_match(NULL);
+        if (netplay_vs_plays_on(match)) {
+            /* The board is on its way back to character select with both
+             * players in: the rematch is the next match, on this session. */
+            g_netplay.match_started     = (uint16_t)(match + 1u);
+            if (!g_netplay.match_started) g_netplay.match_started = 1;
+            g_netplay.match_result_seen = false;
+            g_netplay.me.playing        = g_netplay.match_started;
+            g_netplay.me_dirty          = true;
+            netplay_log("VS mode: back to character select for match %u", (unsigned)g_netplay.match_started);
+        } else {
+            if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
+            netplay_end_match(NULL);
+        }
     }
 }
 

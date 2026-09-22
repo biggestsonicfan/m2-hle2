@@ -24,6 +24,12 @@
  * background colours [46-48], the wind term [11], the credit scroll [62] and
  * four attract durations [49-52]. None of those are ported.
  *
+ * Two cabinet settings from the DLL's config block [8] are ported. FREE PLAY is
+ * this profile's factory default (sfc_hook_free_play). VS MODE [26] is in
+ * sfight.h and shared with the Arcade profile, and --vs-mode or a netplay room
+ * turns it on. The VS stage pick [21] is not ported: it draws from the host's
+ * RNG, and two boards in lockstep cannot both do that.
+ *
  * One deliberate difference from the DLL: it unlocks Metal Sonic and Robotnik
  * (and every hidden slot) only when the cabinet is set to VS mode, and Honey
  * alone otherwise. This profile always uses the VS table, so all three are
@@ -263,6 +269,36 @@ static int sfc_hook_head_tilt(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 1;
 }
 
+/* ---- Free play ----------------------------------------------------------- */
+
+/*
+ * sram_clear_for_coin_assign+0x14 (0x62754): `stob r3, CREDITS_REQUIRED`
+ * (backup RAM 0x1D03324), r3 = 0, the factory default of the coin setting.
+ * This profile's default is 26, "26:FREE PLAY" in the test menu, which is what
+ * the ROM itself tests for (`cmpobne 26` in TEST_MENU_EXIT and south_credit).
+ * The next instruction stores r3 again to the working copy at 0x59C324, and r3
+ * goes on to zero the bytes after it, so r3 is left alone. Both copies are
+ * written here and both stores are skipped.
+ *
+ * Backup RAM starts blank on every boot, so a cold boot always takes this path,
+ * and the test menu's INITIALIZE does as well (the same pattern as the region
+ * default in sfight.h). The coin settings' checksum at 0x1D03300 is computed
+ * after this returns, so it covers the new value.
+ *
+ * Sega's emulator writes the same byte from its own config block, 26 when free
+ * play or VS mode is set (DLL table index 8, handler RVA 0x529D0). It writes
+ * that byte on every boot, over whatever the test menu left there. Here it is
+ * only the factory default.
+ */
+#define SFC_CREDITS_FREE_PLAY 26u
+
+static int sfc_hook_free_play(i960_cpu_t *cpu, memory_bus_t *bus) {
+    mem_write8(bus, 0x01D03324, SFC_CREDITS_FREE_PLAY);
+    mem_write8(bus, 0x0059C324, SFC_CREDITS_FREE_PLAY);
+    cpu->sfr.ip = 0x00062764;
+    return 0;
+}
+
 /* ---- Profile object ------------------------------------------------------ */
 
 static inline void sfight_console_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -278,9 +314,11 @@ static const game_profile_t sfight_console_profile = {
     .board            = BOARD_MODEL2B_CRX,
     .load_fn      = sfight_load,
     .install_fn   = sfight_console_install,
-    .hook_count   = SFIGHT_BASE_HOOK_COUNT + 23,
+    .hook_count   = SFIGHT_BASE_HOOK_COUNT + 24,
     .hooks        = {
         SFIGHT_BASE_HOOKS
+        /* free play by default */
+        { 0x00062754, sfc_hook_free_play,        "sram_clear_for_coin_assign+0x14" },
         /* hidden-character select */
         { 0x000366F0, sfc_hook_hidden_flag_p1,   "char_add2_pass_p1+0x810" },
         { 0x0003674C, sfc_hook_slot_p1,          "char_add2_pass_p1+0x86c" },

@@ -555,6 +555,7 @@ static bool parse_args(int argc, char **argv) {
             if (r < 0) return false;
             g_region = r;
         }
+        else if (!strcmp(a, "--vs-mode"))           g_vs_mode = 1;
         else if (!strcmp(a, "--render-fps") && more) opt.render_fps = atof(argv[++i]);
         else if (!strcmp(a, "--steps-per-slice") && more) {
             int n = atoi(argv[++i]);
