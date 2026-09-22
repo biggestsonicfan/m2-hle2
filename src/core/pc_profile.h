@@ -37,6 +37,7 @@ typedef struct {
     int32_t   frame_us[PCPROF_FRAMES];  /* host microseconds of each slice */
     uint32_t  frame_steps[PCPROF_FRAMES];
     uint32_t  frame_no[PCPROF_FRAMES];  /* g_emu_frames at the frame's end */
+    int64_t   sound_us;                 /* of the window's time: the 68000 + SCSP */
 } pcprof_t;
 
 static pcprof_t g_pcprof;
@@ -48,6 +49,7 @@ static inline void pcprof_arm(int on) {
         else memset(g_pcprof.counts, 0, (size_t)PCPROF_SLOTS * 4);
         g_pcprof.steps = 0;
         g_pcprof.nframes = 0;
+        g_pcprof.sound_us = 0;
     }
     g_pcprof.on = on && g_pcprof.counts != NULL;
 }
@@ -78,8 +80,10 @@ static inline int pcprof_write(const char *path) {
     fclose(f);
 
     char fp[1024];
+
     snprintf(fp, sizeof fp, "%s.frames.csv", path);
     if ((f = fopen(fp, "wb")) != NULL) {
+        fprintf(f, "#sound_us,%lld\n", (long long)g_pcprof.sound_us);
         fprintf(f, "frame,us,steps\n");
         for (uint32_t i = 0; i < g_pcprof.nframes; i++)
             fprintf(f, "%u,%d,%u\n", g_pcprof.frame_no[i], g_pcprof.frame_us[i], g_pcprof.frame_steps[i]);

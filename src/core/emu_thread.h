@@ -95,6 +95,9 @@ typedef struct {
      * this, resuming after a BP hit immediately re-fires the same BP because
      * the IP hasn't advanced. */
     volatile int step_over_bp;
+    /* The last slice used its whole step budget without reaching the game's
+     * frame hook: it stopped MID-FRAME, and there is nothing to pace. */
+    int          slice_capped;
 
     /* A board reset asked for from outside a netplay session (the MCP bridge's
      * `board_reset`). Serviced where the barrier's reset is, by the same code;
@@ -433,6 +436,11 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
  *                     frame that ended as a stop arrived is still a FRAME (and
  *                     the run state is STOPPED as well): it ran, so it is
  *                     counted and paced like any other. */
+/* How long a frame may go on being run flat out across slices before the run
+ * loop decides the board is not mid-frame but stuck, and paces it again.
+ * STF's worst load frame is three slices; a quarter of a second is fifteen. */
+#define EMU_MIDFRAME_GRACE_US 250000
+
 typedef enum {
     EMU_SLICE_STOPPED,   /* the run state is STOPPED now, mid-frame */
     EMU_SLICE_FRAME,     /* a game frame ended: pace to the next 60 Hz tick */
@@ -451,7 +459,6 @@ static inline bool emu_slice_should_stop(emu_thread_ctx_t *ctx) {
 
 static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     int64_t  prof_t0 = g_pcprof_on ? emu_now_us() : 0;
-    uint64_t prof_s0 = ctx->total_steps;
     g_frame_done = 0;
     /* Board-level vblank (opt-in per profile): raise the vsync pending
      * bit once per 60 Hz slice, like the real board / MAME at scanline
@@ -474,6 +481,13 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
     int max_steps = g_emu_steps_per_slice;
+    /* The step count is accumulated in a register and written back once.
+     * ctx->total_steps is volatile -- netplay hashes it into every frame's
+     * desync check -- so incrementing it in the loop was a load and a store
+     * to memory per instruction that the compiler was not allowed to keep
+     * in a register. The write-back is before anything reads it: the frame
+     * edge and netplay_end_frame are both past the loop. */
+    uint64_t steps = 0;
     /* NOT `!ctx->request_stop`. A slice charges a whole frame to the timers
      * above and to the sound board below whatever the i960 does in between,
      * so a stop that cut the i960 short left that frame to be run again on
@@ -481,7 +495,8 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * the board 52 fps and put 762 samples to the frame instead of 735. A
      * stop now takes effect between slices (emu_slice_should_stop), and a
      * slice that has begun runs its frame to the end. */
-    for (int i = 0;
+    int i;
+    for (i = 0;
          i < max_steps
          && !g_frame_done
          && !(board_vblank && g_vblank_acked)   /* stop at the frame's vsync-ACK */
@@ -505,6 +520,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
         if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
     }
+    ctx->slice_capped = (i >= max_steps);
     /* The game's frame ended on the instruction the loop stopped at, so
      * this is between two frames' display lists: mark it for a capture. */
     if (g_frame_done || (board_vblank && g_vblank_acked)) {
@@ -515,7 +531,13 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
 
     /* The sound board runs on its own sample clock: a slice's worth of
      * 44.1 kHz samples, the 68000 in lockstep with the SCSP. */
+#ifdef M2HLE_PROFILE
+    int64_t snd_t0 = g_pcprof_on ? emu_now_us() : 0;
+#endif
     sound_run_slice(EMU_SLICES_PER_SEC);
+#ifdef M2HLE_PROFILE
+    if (g_pcprof_on) g_pcprof.sound_us += emu_now_us() - snd_t0;
+#endif
 
     /* Snapshot the GEO display list while the i960 is idle (mutex held) — the
      * homebrew is vblank-waiting just past geo_flush, so bufferram holds the
@@ -526,8 +548,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
     ctx->cpu_snapshot      = *ctx->cpu;
     if (g_pcprof_on)
-        pcprof_frame((int32_t)(emu_now_us() - prof_t0),
-                     (uint32_t)(ctx->total_steps - prof_s0), g_emu_frames);
+        pcprof_frame((int32_t)(emu_now_us() - prof_t0), (uint32_t)steps, g_emu_frames);
 }
 
 static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
@@ -591,6 +612,7 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
     uint64_t sps_steps_start = ctx->total_steps;
     int64_t  last_sps_time   = emu_now_us();
+    int64_t  last_frame_us   = 0;   /* when a slice last ended on a game frame */
 
     while (ctx->thread_alive) {
         emu_run_state_t s = ctx->run_state;
@@ -623,6 +645,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                  * the next 16.67ms tick. For board_vblank this also ends the i960's
                  * vsync busy-spin, throttling it to 60 Hz and freeing the host CPU. */
                 int64_t now = emu_now_us();
+                last_frame_us = now;
                 if (ctx->frame_deadline_us == 0) {
                     ctx->frame_deadline_us = now + EMU_SLICE_US;
                 } else {
@@ -643,6 +666,22 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                  * has caught up (netplay_catching_up). */
                 if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
                 else if (sleep_us > 0) emu_sleep_us(sleep_us);
+            } else if (ctx->slice_capped && last_frame_us
+                       && emu_now_us() - last_frame_us < EMU_MIDFRAME_GRACE_US) {
+                /* A frame that wants more instructions than one slice carries.
+                 * STF's texture loader does it on the VS screen: 14 of that
+                 * state's 80 slices ran the whole 500,000-step budget without
+                 * reaching the frame hook, and pacing each of them as though
+                 * the frame were over slept out the rest of a 16.67 ms tick --
+                 * 45% of that state's wall clock, spent idle while the board
+                 * was already behind. The frame is not over; go straight back
+                 * in, and let the UI have the mutex the next slice releases.
+                 *
+                 * Only while frames are still arriving. A profile with no
+                 * game-pace hook at all never ends a slice on a frame, and a
+                 * board stuck in its own loop stops reaching one: both fall
+                 * through to the fixed pacing below, as before. */
+                emu_yield();
             } else {
                 /* No game-pace hook yet — fall back to fixed slice timing
                  * so the host CPU doesn't pin at 100%. */

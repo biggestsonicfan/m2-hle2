@@ -25,10 +25,15 @@
 #  define emu_mutex_lock(m)     EnterCriticalSection(m)
 #  define emu_mutex_unlock(m)   LeaveCriticalSection(m)
 #  define emu_sleep_ms(ms)      Sleep((DWORD)(ms))
+   /* Give another ready thread the CPU without sleeping. Sleep(1) is ~15.6 ms
+    * in a process with neither a window nor an audio device, which is far too
+    * expensive to spend on letting the UI take a mutex. */
+#  define emu_yield()           ((void)SwitchToThread())
 #else
 #  include <pthread.h>
 #  include <unistd.h>
 #  include <time.h>
+#  include <sched.h>
    typedef pthread_t       emu_thread_t;
    typedef pthread_mutex_t emu_mutex_t;
 #  define emu_mutex_init(m)     pthread_mutex_init(m, NULL)
@@ -36,6 +41,7 @@
 #  define emu_mutex_lock(m)     pthread_mutex_lock(m)
 #  define emu_mutex_unlock(m)   pthread_mutex_unlock(m)
 #  define emu_sleep_ms(ms)      usleep((useconds_t)((ms) * 1000))
+#  define emu_yield()           ((void)sched_yield())
 #endif
 
 #endif /* THREAD_MUTEX_H */
