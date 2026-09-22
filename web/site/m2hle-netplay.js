@@ -55,8 +55,10 @@ const m2hleNetplay = (() => {
 
   /* ---- Round trip to the gateway ------------------------------------------------
    * The gateway echoes a datagram addressed to 0.0.0.0:0; web_socket.h consumes
-   * the echo and keeps the times. Only this leg is measurable -- the opponent's
-   * is not -- so the frame delay assumes they are about as far away. */
+   * the echo and keeps the times. In the lobby this is the only leg there is --
+   * nobody has joined yet -- so the frame delay assumes the opponent is about as
+   * far away. Once somebody is in the room the emulator pings them directly
+   * (netplay_rtt_t in netplay.h) and the room shows that instead: peerMs(). */
   function ping() {
     const socks = (M && M.m2ws && M.m2ws.socks) || {};
     for (const s of Object.values(socks)) {
@@ -85,6 +87,14 @@ const m2hleNetplay = (() => {
     if (rtt === null) return 2;
     return Math.max(2, Math.min(6, Math.ceil(rtt / 16.7) + 1));
   }
+
+  /* Round trip to a member of the room, peer to peer, or null before the first
+   * answer (or from a build that does not answer pings). */
+  function peerMs(ms) { return typeof ms === 'number' ? ms : null; }
+
+  /* Frames of input delay a round trip needs: half of it each way, plus a frame
+   * of slack, as autoDelay reckons it. */
+  function framesFor(rtt) { return Math.ceil(rtt / 2 / 16.7) + 1; }
 
   function quality(rtt) {
     if (rtt === null) return 'measuring…';
@@ -119,7 +129,8 @@ const m2hleNetplay = (() => {
      * with the menu closed it is what the menu button says it is holding (the
      * button also turns green: m2hle.css, .online-btn.live). */
     let pill = '';
-    if (state === 'playing') pill = 'Online: playing ' + (st.room.peer || '');
+    const peerRtt = peerMs(st.room && st.room.peer_rtt_ms);
+    if (state === 'playing') pill = 'Online: playing ' + (st.room.peer || '') + (peerRtt === null ? '' : ' · ' + peerRtt + ' ms');
     else if (state === 'watching') pill = 'Online: watching';
     else if (state === 'waiting at the barrier') pill = 'Online: starting…';
     else if (state === 'in a room') pill = st.room.peer_heard ? 'Online: ' + st.room.peer + ' is here' : 'Online: waiting';
@@ -311,7 +322,9 @@ const m2hleNetplay = (() => {
       what.className = 'np-what';
       what.textContent = (m.side === 0 ? '1P' : m.side === 1 ? '2P'
                          : m.watch ? 'watching' : m.ready ? 'ready' : m.heard ? 'waiting' : 'connecting…')
-                       + ' · ' + m.wins + '-' + (m.games - m.wins);
+                       + ' · ' + m.wins + '-' + (m.games - m.wins)
+                       + (!m.me && peerMs(m.rtt_ms) !== null ? ' · ' + m.rtt_ms + ' ms' : '');
+      if (!m.me && peerMs(m.rtt_ms) !== null) what.title = 'Round trip between you and ' + m.npid + ', measured directly';
       li.append(who, what);
       list.append(li);
     }
@@ -323,11 +336,20 @@ const m2hleNetplay = (() => {
     setText('np-stop', watching ? 'Stop watching' : 'End match');
 
     const bits = [];
+    const rtt = peerMs(r.peer_rtt_ms);
+    if (rtt !== null && !watching) bits.push('connection to ' + peer + ': ' + quality(rtt));
     if (playing || syncing) {
       bits.push('input delay ' + st.delay + ' frames');
       if (st.stalls) bits.push(st.stalls + ' waits for the other player');
     }
     setText('np-room-status', bits.join(' · '));
+    /* The delay was fixed when the room was made, before anyone's distance was
+     * known. Say so when the trip turns out longer than it covers. */
+    const short = rtt !== null && !watching && st.delay > 0 && framesFor(rtt) > st.delay;
+    errorText('np-rtt-warn', short
+      ? 'The round trip to ' + peer + ' needs about ' + framesFor(rtt) + ' frames of input delay and this room uses ' +
+        st.delay + ', so the game will pause now and then to wait. A room made with a longer delay plays smoother.'
+      : '');
     errorText('np-desync', st.desync === null ? ''
       : 'The two games stopped matching at frame ' + st.desync + '. What you see from here on may differ from ' +
         'what ' + peer + ' sees. Leave and start a new match.');

@@ -86,6 +86,7 @@ static inline void netplay_window_room(const netplay_status_t *st) {
                    (unsigned)m->data.points);
             igTableSetColumnIndex(4);
             if (m->is_me)              igTextDisabled("-");
+            else if (m->heard && m->rtt_ms >= 0) igText("reachable, %d ms", (int)m->rtt_ms);
             else if (m->heard)         igText("reachable");
             else if (m->addr_known)    igTextDisabled("punching...");
             else                       igTextDisabled("no address yet");

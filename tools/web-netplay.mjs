@@ -16,7 +16,8 @@
  * It passes when both boards reach "playing", both keep advancing, and neither
  * latches a desync (the per-frame check values the two boards exchange). The
  * two players must be on the same build: this is the web-vs-web gate of
- * WEB-NETPLAY.md, N2.
+ * WEB-NETPLAY.md, N2. Each board must also have timed a round trip to the
+ * other (the room's "N ms", netplay_rtt_t in netplay.h).
  *
  * --ui-shots DIR saves a screenshot of the online panel at each step (sign-in,
  * lobby, a room waiting, a room with the opponent in it) for looking at.
@@ -273,16 +274,23 @@ try {
       const st = await b.status();
       const prev = last[b.who];
       line.push(`${b.who}: ${st.state} frame=${st.frame} (+${prev ? st.frame - prev.frame : 0}) stalls=${st.stalls}` +
-                `${st.desync !== null ? ' DESYNC@' + st.desync : ''}`);
+                ` peer=${st.room.peer_rtt_ms ?? '?'}ms${st.desync !== null ? ' DESYNC@' + st.desync : ''}`);
       if (st.desync !== null) failed = true;
       if (st.state !== 'playing') failed = true;
       last[b.who] = st;
     }
     console.log(`${stamp()}s  ${line.join('   ')}`);
   }
+  /* Two round trips: to the gateway (the page's echo), and to the other player
+   * (the emulators' own ping, netplay_rtt_t). The second has to have been
+   * measured by the end of a match. */
   const rtts = [];
-  for (const b of browsers) rtts.push(`${b.who} rtt ${Math.round((await b.eval('m2hleNetplay.rtt()')) || 0)} ms`);
-  console.log(`${stamp()}s  ${rtts.join(', ')}`);
+  for (const b of browsers) {
+    const peer = last[b.who] ? last[b.who].room.peer_rtt_ms : null;
+    rtts.push(`${b.who} gateway ${Math.round((await b.eval('m2hleNetplay.rtt()')) || 0)} ms, peer ${peer ?? '?'} ms`);
+    if (typeof peer !== 'number') { failed = true; console.log(`FAIL: ${b.who} never measured the round trip to the other player`); }
+  }
+  console.log(`${stamp()}s  ${rtts.join('; ')}`);
 
   if (shot) {
     for (const b of browsers) {
