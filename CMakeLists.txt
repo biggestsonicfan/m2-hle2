@@ -455,6 +455,10 @@ else()
     add_executable(m2hle ${SRC}/main.c ${SRC}/ui/mem_edit.cpp)
 endif()
 target_link_libraries(m2hle PRIVATE sokol miniz imguifiledialog)
+# The debug dumps (model_tex.txt, cam_ours.csv, the texture extractor, the COP
+# stream) are this build's alone: the handheld, libretro and web builds write no
+# debug files (geo3d.h, GEO3D_DUMP_TEX).
+target_compile_definitions(m2hle PRIVATE M2HLE_DEBUG_DUMPS)
 target_include_directories(m2hle PRIVATE
     ${SRC}
     ${SRC}/board

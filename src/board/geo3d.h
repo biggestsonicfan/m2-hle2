@@ -701,7 +701,18 @@ static float g_light_diffuse = 0.55f;
  * system, the stub fopen answered fd 0 and the write threw out of the frame
  * (the Death Egg screens in attract, adv_movie_egg). */
 static int  g_dump_model_tex = -1;
+/* The debug dumps (this one, the camera CSV, the texture extractor, the COP
+ * stream) exist only in the desktop build, the one with a UI and a bridge to
+ * ask for them (CMake defines M2HLE_DEBUG_DUMPS on that target alone). The
+ * handheld, libretro and web builds write no debug files at all: before
+ * 74eab22 this one fired for every polygon-RAM object, and a ROCKNIX core
+ * rewrote model_tex.txt on the SD card for every face of them, every frame --
+ * STF's win screen crawled on it. Compiled out, a bug like that cannot write. */
+#ifdef M2HLE_DEBUG_DUMPS
 #define GEO3D_DUMP_TEX(model_idx) (g_dump_model_tex >= 0 && (model_idx) == g_dump_model_tex)
+#else
+#define GEO3D_DUMP_TEX(model_idx) ((void)(model_idx), 0)
+#endif
 /* Texture bank override: 0=auto (texsheet bit12), 1=force sheet0, 2=force sheet1,
  * 3=swap (invert the bit12 selection). */
 static int  g_uv_bank_mode = 0;
@@ -2514,6 +2525,7 @@ static inline void geo3d_decode_model_cached(int model_idx,
     g_geo3d_emit_zs     = GEO3D_ZSORT_NONE;
 }
 
+#ifdef M2HLE_DEBUG_DUMPS   /* desktop only; see GEO3D_DUMP_TEX */
 /* ---- Programmatic per-model texture extractor -------------------------------
  * Pulls a model's texture data straight from ROM — no MAME memory capture for
  * the descriptors.  Walks the per-face material records (8 bytes each) at
@@ -2631,6 +2643,7 @@ static void geo3d_extract_model_texture(int model_idx,
     if (mf) fclose(mf);
     LOG_INFO("geo3d_extract_model_texture: model %d  %u faces  %d tiles", model_idx, nfaces, nt);
 }
+#endif /* M2HLE_DEBUG_DUMPS */
 
 /* ---- Build wireframes for the current capture list --------------------- */
 
@@ -2781,6 +2794,7 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
     /* Debug: dump the raw camera struct per game frame for MAME comparison
      * (MAME = ground truth). Keyed by the STF frame counter so the two
      * deterministic-from-boot attract runs align frame-for-frame. */
+#ifdef M2HLE_DEBUG_DUMPS
     if (g_cam_log) {
         static FILE *cf = NULL; static uint32_t prevf = 0xFFFFFFFFu;
         uint32_t fr = mem_read32(bus, 0x00500020);
@@ -2791,6 +2805,7 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
                     fr, xpos, ypos, zpos, (int)xang16, (int)yang16);
             fflush(cf); }
     }
+#endif
 }
 
 /* ---- Debug: log a summary of the current capture list ------------------- */
@@ -2814,6 +2829,7 @@ static inline void geo3d_log_captures(const geo3d_state_t *geo) {
         LOG_INFO("  ... %d more", geo->captured_count - 16);
 }
 
+#ifdef M2HLE_DEBUG_DUMPS   /* desktop only; see GEO3D_DUMP_TEX */
 /* ---- Raw COP capture-stream dump (for per-pass view-base analysis) -------- */
 
 /* Walk the current frame's geo_capture ring and write an annotated, decoded
@@ -2873,5 +2889,6 @@ static inline void geo3d_dump_capture_stream(void) {
     fclose(f);
     LOG_INFO("cop dump -> %s (%d words)", path, total);
 }
+#endif /* M2HLE_DEBUG_DUMPS */
 
 #endif /* GEO3D_H */
