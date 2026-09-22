@@ -178,7 +178,6 @@ const m2hleKeys = (() => {
   }
 
   function render() {
-    legend();
     const rows = $('key-rows');
     if (!rows || $('controls').hidden) return;
     for (const p of ['p1', 'p2']) {
@@ -252,27 +251,6 @@ const m2hleKeys = (() => {
       }
     }
     return out.join(' ');
-  }
-
-  /* The key hints in the bottom bar follow player 1's first key for each. */
-  function legend() {
-    const el = $('keys');
-    if (!el) return;
-    const k = (id) => {
-      const c = binds.p1[id][0];
-      const kbd = document.createElement('kbd');
-      kbd.textContent = c ? keyName(c) : '–';
-      return kbd;
-    };
-    const item = (ids, text) => {
-      const s = document.createElement('span');
-      for (const id of ids) s.appendChild(k(id));
-      s.appendChild(document.createTextNode(' ' + text));
-      return s;
-    };
-    el.textContent = '';
-    el.append(item(['left', 'up', 'down', 'right'], 'move'), item(['b1'], 'punch'), item(['b2'], 'kick'),
-              item(['b3'], 'barrier'), item(['coin'], 'coin'), item(['start'], 'start'));
   }
 
   function init() {
