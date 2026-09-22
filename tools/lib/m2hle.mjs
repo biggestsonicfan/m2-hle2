@@ -129,8 +129,14 @@ export class M2Hle {
      */
     /* Launched headless — no window, GPU or audio device — since nothing here
      * looks at the screen. $M2_WINDOW=1 (or headless: false) brings the window
-     * back, to watch what a grader is doing. */
-    static async launch({ rom, port = DEFAULT_PORT, run = true, exe = null,
+     * back, to watch what a grader is doing.
+     *
+     * `profile` defaults to 'sfight', STF's ARCADE profile: the emulator's
+     * default for sfight.zip is the console one, whose patches (Honey's head
+     * tilt, for one) move every fighter off what MAME and the explorer do. It
+     * only picks between profiles of the ROM set being loaded, so it is inert
+     * for any other game. null leaves the emulator's own default. */
+    static async launch({ rom, port = DEFAULT_PORT, run = true, exe = null, profile = 'sfight',
                           quiet = true, timeoutMs = 30000,
                           headless = !process.env.M2_WINDOW, extraArgs = [] } = {}) {
         if (!rom) throw new Error('launch needs a rom path');
@@ -139,7 +145,8 @@ export class M2Hle {
          * be graded with an option the grader itself knows nothing about (the
          * handheld's --live-timers, say). */
         const envArgs = (process.env.M2HLE_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean);
-        const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom), ...extraArgs, ...envArgs];
+        const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom),
+                      ...(profile ? ['--profile', profile] : []), ...extraArgs, ...envArgs];
         if (run) args.push('--run');
         if (headless) args.push('--headless');
         /* Run it beside the ROM: a split set needs schamp.zip found next to
