@@ -130,7 +130,7 @@ const m2hleKeys = (() => {
 
   /* Keys aimed at the page's own panels are theirs (and m2hle-tools.js keeps them
    * from the emulator); so are shortcuts with Ctrl, Alt or the system key. */
-  const PANELS = '#drawer, #online, #controls, #touch-edit, input, textarea, select';
+  const PANELS = '#drawer, #online, #controls, #touch-edit, #menu, input, textarea, select';
   const inPanel = (e) => e.target instanceof Element && e.target.closest(PANELS);
 
   function onKey(e) {

@@ -107,6 +107,7 @@ static struct {
     uint64_t long_callbacks;    /* callbacks that arrived more than 25 ms after the last */
     uint64_t forgiven_us;       /* board time dropped because a callback owed too much */
     uint64_t background_ticks;  /* worker ticks that ran the board with no frame (web_background_tick) */
+    uint64_t pictures_skipped;  /* interpolated pictures given up: web_afford_picture */
     uint32_t slice_us_max, render_us_max, gap_us_max;
     int64_t  last_cb_us;
     int      gpu_timing;        /* the page wants m2hleFrameBegin/End around the GL work */
@@ -403,6 +404,65 @@ static void init(void) {
     EM_ASM({ if (Module.onM2hleReady) Module.onM2hleReady(); });
 }
 
+/* ---- Pictures the board has no new frame behind -------------------------------
+ *
+ * requestAnimationFrame follows the display, so a 120 or 144 Hz screen asks for
+ * two or more pictures per board frame. The extra ones are not repeats:
+ * game_frame_lerp interpolates the 3D between the board's frames, and that is
+ * what makes motion smooth on such a screen. Each is also a whole picture --
+ * measured in a browser here, 1.35 ms of CPU beside the board's own 2.6, and
+ * several times that on a phone -- so a machine that cannot afford both gives
+ * these up and keeps the board at 60. The board's rate is never what is dropped.
+ *
+ * Whether it can afford them is a sum, not a symptom, and that is the point:
+ * a rule that waits for the board to fall behind would turn the smoothing off
+ * and on a second at a time, because turning it off is what puts the board back
+ * on time. The two costs are measured (a slice, and a picture) and so is what
+ * the display asks for, and none of the three changes with the answer:
+ *
+ *     60 slices + (display rate) pictures, per second of wall clock
+ *
+ * against a budget that leaves the browser its own share of the thread. Under
+ * it, every frame the display asks for is drawn; over it, only the board's own.
+ * A 60 Hz display never reaches this: every callback there has a new board
+ * frame, so there is nothing to give up.
+ */
+#define WEB_PICTURE_BUDGET_US 850000   /* of each second, for the board and the picture */
+
+/* ?args=--pictures-board-rate / --pictures-all pin the answer (sokol_main). */
+typedef enum { WEB_PICTURES_MEASURE, WEB_PICTURES_ALL, WEB_PICTURES_BOARD_RATE } web_pictures_t;
+static web_pictures_t g_web_pictures = WEB_PICTURES_MEASURE;
+
+static bool web_afford_picture(void) {
+    if (g_web_pictures != WEB_PICTURES_MEASURE) return g_web_pictures == WEB_PICTURES_ALL;
+    static double slice_ema, picture_ema, gap_ema;
+    /* Averaged over roughly the last two seconds of callbacks, so one long GC
+     * pause neither switches the smoothing off nor is hidden by the rest. */
+    const double a = 1.0 / 128.0;
+    static uint64_t last_slices, last_pictures;
+    static uint64_t last_slice_us, last_render_us;
+    static int64_t  last_us;
+
+    const int64_t now = emu_now_us();
+    const uint64_t slices = g_web_perf.slices, pictures = g_game_frame_times.frames;
+    if (slices > last_slices)
+        slice_ema += a * ((double)(g_web_perf.slice_us - last_slice_us) / (double)(slices - last_slices) - slice_ema);
+    if (pictures > last_pictures)
+        picture_ema += a * ((double)(g_web_perf.render_us - last_render_us) / (double)(pictures - last_pictures) - picture_ema);
+    if (last_us) {
+        double gap = (double)(now - last_us);
+        if (gap > 100000.0) gap = 100000.0;      /* a hidden tab, a tab switch: not a display rate */
+        gap_ema += a * (gap - gap_ema);
+    }
+    last_slices = slices; last_pictures = pictures;
+    last_slice_us = g_web_perf.slice_us; last_render_us = g_web_perf.render_us;
+    last_us = now;
+
+    if (gap_ema < 1.0 || picture_ema <= 0.0) return true;    /* nothing measured yet */
+    const double per_second = (double)EMU_SLICES_PER_SEC * slice_ema + (1000000.0 / gap_ema) * picture_ema;
+    return per_second <= (double)WEB_PICTURE_BUDGET_US;
+}
+
 static void frame(void) {
     int64_t cb_us = emu_now_us();
     if (g_web_perf.last_cb_us) {
@@ -416,11 +476,29 @@ static void frame(void) {
     web_run_owed_slices();
     web_push_audio();
 
+    const bool have_game = state.romset.loaded;
+
+    /* Every callback, not only the ones that might be skipped: what it measures
+     * includes how often the display asks, and half the callbacks are not half
+     * the rate. */
+    const bool afford = web_afford_picture();
+
+    static uint64_t s_drawn_slices;
+    static int      s_drawn_w, s_drawn_h;
+    const bool board_moved = g_web_perf.slices != s_drawn_slices;
+    const bool resized     = sapp_width() != s_drawn_w || sapp_height() != s_drawn_h;
+    if (have_game && !board_moved && !resized && !g_web_objview_show && !afford) {
+        g_web_perf.pictures_skipped++;
+        return;
+    }
+    s_drawn_slices = g_web_perf.slices;
+    s_drawn_w      = sapp_width();
+    s_drawn_h      = sapp_height();
+
     const int64_t render_t0 = emu_now_us();
     if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameBegin(); });
     web_rt_apply();
 
-    const bool have_game = state.romset.loaded;
     float lerp_t = 1.0f;
     if (have_game) {
         game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
@@ -502,6 +580,12 @@ sapp_desc sokol_main(int argc, char *argv[]) {
         else if (!strcmp(a, "--fill-no-split")) g_game_render_fill_split = 0;
         else if (!strcmp(a, "--fill-no-ramp"))  g_game_render_fill_ramp = 0;
         else if (!strcmp(a, "--cpu-tiles"))     g_video_force_cpu_tiles = 1;
+        /* Force either answer out of web_afford_picture, whose own is a
+         * measurement: --pictures-board-rate draws only the board's own frames
+         * (what a 120 Hz display falls back to on a machine that cannot afford
+         * the interpolated ones), --pictures-all never gives them up. */
+        else if (!strcmp(a, "--pictures-board-rate")) g_web_pictures = WEB_PICTURES_BOARD_RATE;
+        else if (!strcmp(a, "--pictures-all"))        g_web_pictures = WEB_PICTURES_ALL;
     }
     return (sapp_desc){
         .init_cb      = init,
@@ -592,21 +676,30 @@ EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {
 /* The running totals above, as JSON, plus what else the lag check reasons from.
  * `reset` clears the maxima, so each reading's worst case is its own. */
 EMSCRIPTEN_KEEPALIVE const char *web_perf(int reset) {
-    static char out[640];
+    static char out[896];
     netplay_status_t np;
     netplay_get_status(&np);
     snprintf(out, sizeof out,
              "{\"now_us\":%.0f,\"callbacks\":%llu,\"slices\":%llu,\"frames\":%u,"
              "\"slice_us\":%llu,\"render_us\":%llu,\"long_callbacks\":%llu,\"forgiven_us\":%llu,"
-             "\"background_ticks\":%llu,\"slice_us_max\":%u,\"render_us_max\":%u,\"gap_us_max\":%u,"
+             "\"background_ticks\":%llu,\"pictures_skipped\":%llu,\"slice_us_max\":%u,\"render_us_max\":%u,\"gap_us_max\":%u,"
              "\"render_scale\":%d,\"canvas_w\":%d,\"canvas_h\":%d,\"gpu_tiles\":%s,"
+             /* Where the picture's own time went (frame_times.h), so a slow
+              * frame can be blamed on a stage rather than on "the picture". */
+             "\"draw_frames\":%llu,\"compose_us\":%lld,\"scan_us\":%lld,"
+             "\"upload_us\":%lld,\"draw3d_us\":%lld,\"tiles_us\":%lld,"
              "\"netplay\":\"%s\",\"netplay_stalls\":%u,\"netplay_delay\":%u}",
              (double)emu_now_us(),
              (unsigned long long)g_web_perf.callbacks, (unsigned long long)g_web_perf.slices, (unsigned)g_emu_frames,
              (unsigned long long)g_web_perf.slice_us, (unsigned long long)g_web_perf.render_us,
              (unsigned long long)g_web_perf.long_callbacks, (unsigned long long)g_web_perf.forgiven_us,
-             (unsigned long long)g_web_perf.background_ticks, g_web_perf.slice_us_max, g_web_perf.render_us_max, g_web_perf.gap_us_max,
+             (unsigned long long)g_web_perf.background_ticks, (unsigned long long)g_web_perf.pictures_skipped,
+             g_web_perf.slice_us_max, g_web_perf.render_us_max, g_web_perf.gap_us_max,
              g_web_rt.scale, sapp_width(), sapp_height(), state.video.gpu ? "true" : "false",
+             (unsigned long long)g_game_frame_times.frames,
+             (long long)g_game_frame_times.compose_us, (long long)g_game_frame_times.scan_us,
+             (long long)g_game_frame_times.upload_us, (long long)g_game_frame_times.draw3d_us,
+             (long long)g_game_frame_times.tiles_us,
              netplay_state_text(np.state), np.stalls, (unsigned)g_netplay.cfg.frame_delay);
     if (reset) g_web_perf.slice_us_max = g_web_perf.render_us_max = g_web_perf.gap_us_max = 0;
     return out;

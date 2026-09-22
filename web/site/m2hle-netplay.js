@@ -115,7 +115,9 @@ const m2hleNetplay = (() => {
     const tw = st.twitch || {};
     const state = st.state;
 
-    /* The small line in the bottom bar, visible with the panel closed too. */
+    /* The state of the game online, in a line. It sits on the menu's own item, so
+     * with the menu closed it is what the menu button says it is holding (the
+     * button also turns green: m2hle.css, .online-btn.live). */
     let pill = '';
     if (state === 'playing') pill = 'Online: playing ' + (st.room.peer || '');
     else if (state === 'watching') pill = 'Online: watching';
@@ -124,6 +126,7 @@ const m2hleNetplay = (() => {
     else if (state === 'online') pill = 'Online';
     setText('btn-online-label', pill || 'Play online');
     $('btn-online').classList.toggle('live', !!pill);
+    if ($('btn-menu')) $('btn-menu').title = pill || 'Menu';
 
     if (tw.state === TWITCH_STARTING || tw.state === TWITCH_WAITING) {
       show('np-twitch');

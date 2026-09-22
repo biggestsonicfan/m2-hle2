@@ -98,9 +98,14 @@ code {
 .fine { margin: 1.1rem 0 0; font-size: 0.8125rem; color: var(--dim); }
 .fine.build { margin-top: 0.4rem; opacity: 0.6; }
 
-/* The tools: a small cluster floating in the top-right corner, over the canvas,
- * so the game has the whole window. Usually that corner is the letterbox; where
- * it is the picture, the cluster stays faint until the pointer or focus is on it. */
+/* The tools: two buttons floating in the top-right corner, over the canvas, so
+ * the game has the whole window. Usually that corner is the letterbox; where it
+ * is the picture, they stay faint until the pointer or the keyboard is on them.
+ *
+ * :focus-visible, not :focus-within: a button keeps the focus after it is
+ * clicked, and with :focus-within the bar then stayed lit for good -- most
+ * visibly after Fullscreen, whose button is still focused when the game comes
+ * back. The keyboard still lights it, because that is what :focus-visible is. */
 .bar {
   position: fixed;
   top: 0.4rem;
@@ -111,10 +116,45 @@ code {
   opacity: 0.35;
   transition: opacity 0.15s;
 }
-.bar:hover, .bar:focus-within { opacity: 1; }
+@media (hover: hover) {
+  .bar:hover { opacity: 1; }      /* not on a touch screen, where a tap leaves :hover behind */
+}
+.bar:has(:focus-visible) { opacity: 1; }
 .bar-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.3rem; }
 .bar .tool { padding: 0.15rem 0.5rem; background: rgba(20, 26, 41, 0.85); }
 .bar:has([aria-expanded="true"]), .bar:has(.online-btn.live) { opacity: 1; }
+
+/* The menu: everything but the source link, one item a row under the two buttons. */
+.menu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
+  width: max-content;
+  min-width: 10rem;
+  margin-top: 0.3rem;
+  margin-left: auto;
+  padding: 0.35rem;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+.menu[hidden], .menu [hidden] { display: none; }
+.menu .tool { padding: 0.35rem 0.6rem; background: none; border-color: transparent; text-align: left; }
+.menu .tool:hover, .menu .tool:focus-visible { background: #161c2b; border-color: var(--accent); }
+.bar .menu-btn { display: flex; align-items: center; padding: 0.2rem 0.4rem; }
+/* What the menu would have shown if it were open: a game in progress online, and
+ * errors waiting in the console. */
+.bar:has(.online-btn.live) .menu-btn { border-color: #3c8f5a; background: #123322; }
+.bar:has(#console-badge:not([hidden])) .menu-btn::after {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-left: 0.3rem;
+  border-radius: 50%;
+  background: var(--bad);
+}
 
 .tool {
   padding: 0.25rem 0.7rem;
@@ -322,7 +362,7 @@ a.tool { display: inline-block; text-decoration: none; }
 .online [hidden] { display: none !important; }
 
 /* The GitHub link in the bar, and the one on the start panel. */
-a.tool.github { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text); }
+a.tool.github { display: inline-flex; align-items: center; color: var(--text); }
 .panel a { color: var(--accent); }
 
 /* ---- Controls (m2hle-pad.js): the same side panel as Play online ---- */
@@ -434,6 +474,6 @@ a.tool.github { display: inline-flex; align-items: center; gap: 0.35rem; color: 
 /* A phone: the tools have to fit. */
 @media (max-width: 640px) {
   .bar-tools { max-width: calc(100vw - 0.8rem); }
-  a.tool.github span { display: none; }
+  .menu { max-width: calc(100vw - 0.8rem); }
   .te-what { flex-basis: 100%; }
 }
