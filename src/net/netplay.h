@@ -2334,6 +2334,24 @@ static inline void netplay_board_stopped(uint32_t ip, bool halted) {
 /* Our own attribute is republished at most this often. */
 #define NETPLAY_MEMBER_PUBLISH_MS  200u
 
+/*
+ * Does the room move on to the next match by itself after a result?
+ *
+ * Only a room with a line in it. The PS3 port rotates only in Room Match, and a
+ * two-seat room here is the one-on-one it always was: after a result both
+ * players press Start again (and a lobby that accepts challenges -- the fly's --
+ * sees the same thing it always did).
+ */
+static inline bool netplay_room_rolls(void) { return g_netplay.session.max_slot > 2; }
+
+/* What a result does to our own attribute beyond the stats: in a room that does
+ * not roll on, "ready" was for the match just played. */
+static inline void netplay_after_result_ready(void) {
+    if (netplay_room_rolls() || !(g_netplay.me.flags & ROOM_MEMBER_READY)) return;
+    g_netplay.me.flags = (uint8_t)(g_netplay.me.flags & ~ROOM_MEMBER_READY);
+    g_netplay.me_dirty = true;
+}
+
 /* The room as room.h sees it: us, from our own copy, and everybody else from
  * the server's. */
 static inline uint32_t netplay_room_members(room_member_t *out) {
@@ -2469,7 +2487,7 @@ static inline void netplay_owner_pump(void) {
             uint16_t loser = room_rotate_line(&s, (uint32_t)res);
             s.last_result = (uint8_t)res;
             s.phase       = ROOM_PHASE_LOBBY;
-            s.flags       = (uint8_t)(s.flags | ROOM_FLAG_AUTO);
+            if (netplay_room_rolls()) s.flags = (uint8_t)(s.flags | ROOM_FLAG_AUTO);
             g_netplay.auto_deadline_ms = now + NETPLAY_NEXT_MATCH_MS;
             changed = true;
             netplay_log("match %u won by %s (%s); %s goes to the back of the line", (unsigned)s.match,
@@ -2540,7 +2558,10 @@ static inline void netplay_member_pump(void) {
      * of it -- is still ours to record, and still moves our entry request. */
     if (r->phase == ROOM_PHASE_LOBBY && r->match && r->last_result <= 1
         && g_netplay.me.result_match != r->match && !g_netplay.match_live) {
-        if (room_after_result(&g_netplay.me, me, r, r->match, r->last_result)) g_netplay.me_dirty = true;
+        if (room_after_result(&g_netplay.me, me, r, r->match, r->last_result)) {
+            g_netplay.me_dirty = true;
+            netplay_after_result_ready();
+        }
     }
 }
 
@@ -2775,8 +2796,10 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
         netplay_log("match %u over at frame %u: %s (%s) won", (unsigned)g_netplay.match_started, frame,
                     netplay_member_name(g_netplay.room.fighter[winner]), winner == 0 ? "1P" : "2P");
         if (room_after_result(&g_netplay.me, g_netplay.session.my_member_id, &g_netplay.room,
-                              g_netplay.match_started, winner))
+                              g_netplay.match_started, winner)) {
             g_netplay.me_dirty = true;
+            netplay_after_result_ready();
+        }
         if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
         netplay_end_match(NULL);
     }
