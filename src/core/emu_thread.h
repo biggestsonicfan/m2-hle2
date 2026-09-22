@@ -29,6 +29,7 @@
 #include "i960_exec.h"
 #include "memory.h"
 #include "breakpoint.h"
+#include "pc_profile.h"  /* i960 instruction counts per address (M2HLE_PROFILE builds) */
 #include "hle_hooks.h"   /* g_frame_done, hle_call, g_active_profile */
 #include "irq_timer.h"   /* board IRQ controller + timers */
 #include "../board/sound.h"  /* sound_run_slice: the 68000 + SCSP */
@@ -449,6 +450,8 @@ static inline bool emu_slice_should_stop(emu_thread_ctx_t *ctx) {
 }
 
 static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
+    int64_t  prof_t0 = g_pcprof_on ? emu_now_us() : 0;
+    uint64_t prof_s0 = ctx->total_steps;
     g_frame_done = 0;
     /* Board-level vblank (opt-in per profile): raise the vsync pending
      * bit once per 60 Hz slice, like the real board / MAME at scanline
@@ -490,6 +493,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         } else if (bp_check(ctx->cpu->sfr.ip)) {
             break;
         }
+        PCPROF_TICK(ctx->cpu->sfr.ip);
         if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
         ctx->total_steps++;
         if (g_active_profile) {
@@ -521,6 +525,9 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
 
     ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
     ctx->cpu_snapshot      = *ctx->cpu;
+    if (g_pcprof_on)
+        pcprof_frame((int32_t)(emu_now_us() - prof_t0),
+                     (uint32_t)(ctx->total_steps - prof_s0), g_emu_frames);
 }
 
 static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {

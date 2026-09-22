@@ -36,6 +36,15 @@ set(SRC    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(M2HLE_VERSION "dev" CACHE STRING "Version string baked into the binary")
 add_compile_definitions(M2HLE_VERSION="${M2HLE_VERSION}")
 
+# An instrumented build: the i960 address profiler (src/core/pc_profile.h) and
+# the MCP "prof" / "prof_dump" commands that arm and read it. OFF by default --
+# the counter sits in the i960 step loop, which is half the emulator's time, so
+# the measurement gets its own binary and the one being optimised stays clean.
+option(M2HLE_PROFILE "Count i960 instructions per code address (tools/prof-state.mjs)" OFF)
+if(M2HLE_PROFILE)
+    add_compile_definitions(M2HLE_PROFILE)
+endif()
+
 # How many 68000 clock periods before the end of an instruction the sound
 # board samples the SCSP interrupt lines (board/sound.h, SOUND_IPL_LEAD). It is
 # a fitted constant standing in for the real chip sampling IPL at the microcode
