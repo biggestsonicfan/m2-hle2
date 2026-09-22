@@ -700,6 +700,54 @@ clear. What it cannot see is anything that differs between two *machines* rather
 than two boots on one, the GEO's private RAM, and the sound board, which has its
 own grader.
 
+## One state at a time
+
+`bench-builds` times the board in steady flight, deliberately past the texture-load
+spike, and `ab-builds` asks whether two builds compute the same board. Neither can
+answer a complaint about one game state -- "the VS screen hitches" -- because the
+state is over in a second and a ten-second average hides it completely.
+
+Two tools do. `prof-state.mjs` needs an instrumented emulator
+(`cmake -DM2HLE_PROFILE=ON`, `src/core/pc_profile.h`) and answers what the BOARD is
+doing: i960 instructions per ROM address between two breakpoints, symbolicated
+through the live IDA bridge, with the host microseconds and step count of every
+frame and the sound board's share of them. `bench-state.mjs` runs on any build and
+answers how fast: instructions a second over the same window, builds alternated,
+best of each.
+
+    cmake -S . -B build_prof -G "Visual Studio 17 2022" -A x64 -DM2HLE_PROFILE=ON
+    node tools/prof-state.mjs --exe build_prof/Release/m2hle.exe --state round-mask
+    node tools/bench-state.mjs build_base/Release/m2hle.exe build_opt/Release/m2hle.exe \r
+         --state round-mask --rounds 5
+
+It reports instructions a second and not milliseconds on purpose. The board has to
+free-run into the state (`lib/drive.mjs` says why it cannot be driven frame by frame
+off the frame hook), so it enters from a frame that wanders by a few either way: two
+runs of one build differ by 15% of wall clock and by a fraction of a percent of
+throughput. The window's instruction count is printed beside it, so the milliseconds
+an optimisation is worth are the report's last line.
+
+### What the first two states measured (2026-09-22)
+
+**ROUND_MASK** (`0xB820` -> `0xC34C`, the VS screen) is a texture decompression
+state: 9.01M instructions over 80 slices, 88% of them in `unpack_lod_data`,
+`send_lod_data`, `send_lod_data_q_sub_norm` and the RLE fill at `sub_4BAE8`. Fourteen
+of those slices ran the whole 500,000-step budget without reaching the frame hook,
+and the run loop paced each of them as if the frame were over -- 45% of the state's
+wall clock spent asleep. Fixing that and the step loop's own per-instruction overhead
+took the state from 340 ms to 186 ms (26.4 -> 48.5 Mi/s, +83%), `ab-builds` identical
+against master at 600, 1800 and 3600.
+
+**adv_movie_egg** (`0x5320C` -> `0x541DC`, the Death Egg scene of attract) is the
+opposite and worth knowing as a shape: 470 frames, 15.7M instructions, NO capped
+slice, and no hot routine -- `set_obj` leads at 10%, and the rest is the ordinary
+per-frame spread of `get_fcurve_value_f`, `rob_disp`, `calc_unit_mat`. **54% of its
+host time is the sound board**, and the i960 half runs at 51 Mi/s. There is nothing
+state-specific to optimise in it: it costs what any ordinary frame costs, and what
+would move it is the 68000 + SCSP (see the sound board, below), not these routines.
+The step-loop work above is worth +0.3% here, which is the same change measured
+against a state where the i960 is under half the time.
+
 ## Two builds, one board
 
 Any "does this change the emulation?" question — an optimisation, a long-lived

@@ -116,6 +116,7 @@ static void mcp_cmd_get_status(char *resp, int cap) {
     int halted  = b->cpu && b->cpu->halted;
     uint32_t ip = 0;
     uint32_t sps = 0;
+    uint64_t steps = 0;
     const char *profile_id = "none";
 
     if (b->emu && b->emu->thread_alive) {
@@ -125,6 +126,12 @@ static void mcp_cmd_get_status(char *resp, int cap) {
          * ip/sps is fine for a status query. */
         ip  = b->emu->cpu_snapshot.sfr.ip;
         sps = b->emu->steps_per_second;
+        /* Instructions since boot. A benchmark that times a game state divides
+         * by it (tools/bench-state.mjs): a state is never entered from exactly
+         * the same frame twice, so the window is never quite the same work, and
+         * instructions a second is the comparable number where milliseconds are
+         * not. */
+        steps = b->emu->total_steps;
     }
     if (g_active_profile) profile_id = g_active_profile->id;
 
@@ -149,16 +156,52 @@ static void mcp_cmd_get_status(char *resp, int cap) {
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
-             "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"profile\":\"%s\","
+             "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
              "\"av\":%s,\"overlay\":%s,\"render\":%s}",
              running ? "true" : "false",
              halted  ? "true" : "false",
-             ip, sps, profile_id,
+             ip, sps, (unsigned long long)steps, profile_id,
              g_emu_frames,
              (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
              g_match_replay_frame, av, ov, rt);
+}
+
+/* {"cmd":"prof","on":1} arms the i960 address profiler (clearing it),
+ * {"cmd":"prof","on":0} disarms, {"cmd":"prof_dump","path":"..."} writes
+ * addr,count and its .frames.csv companion. Only an M2HLE_PROFILE build
+ * counts anything; the rest answer ok:false so a driver can say why. */
+static void mcp_cmd_prof(const char *req, char *resp, int cap) {
+#ifdef M2HLE_PROFILE
+    uint32_t on = 1;
+    mcp_json_get_u32(req, "on", &on);
+    pcprof_arm((int)on);
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"on\":%s}", on ? "true" : "false");
+#else
+    (void)req;
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":false,\"error\":\"this build has no profiler (cmake -DM2HLE_PROFILE=ON)\"}");
+#endif
+}
+
+static void mcp_cmd_prof_dump(const char *req, char *resp, int cap) {
+#ifdef M2HLE_PROFILE
+    char path[512] = {0};
+    if (!mcp_json_get_str(req, "path", path, sizeof path)) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"prof_dump needs a path\"}");
+        return;
+    }
+    int n = pcprof_write(path);
+    if (n < 0) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"nothing profiled\"}"); return; }
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"addresses\":%d,\"steps\":%llu,\"frames\":%u}",
+             n, (unsigned long long)g_pcprof.steps, g_pcprof.nframes);
+#else
+    (void)req;
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":false,\"error\":\"this build has no profiler (cmake -DM2HLE_PROFILE=ON)\"}");
+#endif
 }
 
 /* match_replay: arm the jump from attract mode's intro movie straight to its
@@ -1944,6 +1987,8 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
 
     if      (strcmp(cmd, "get_status")       == 0) mcp_cmd_get_status(resp, cap);
     else if (strcmp(cmd, "set_input")        == 0) mcp_cmd_set_input(req, resp, cap);
+    else if (strcmp(cmd, "prof")             == 0) mcp_cmd_prof(req, resp, cap);
+    else if (strcmp(cmd, "prof_dump")        == 0) mcp_cmd_prof_dump(req, resp, cap);
     else if (strcmp(cmd, "set_camera")       == 0) mcp_cmd_set_camera(req, resp, cap);
     else if (strcmp(cmd, "get_registers")    == 0) mcp_cmd_get_registers(resp, cap);
     else if (strcmp(cmd, "read_memory")      == 0) mcp_cmd_read_memory(req, resp, cap);
