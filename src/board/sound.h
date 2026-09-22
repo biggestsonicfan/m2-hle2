@@ -56,6 +56,7 @@ typedef struct {
     uint8_t        ram[SOUND_RAM_SIZE];
     uint8_t        rom[M68K_ROM_SIZE];
     bool           rom_loaded;
+    bool           detached;            /* sound_detach: the host has taken the board off (heat) */
     const uint8_t *samples;             /* the whole sample set (romset.samples, not owned) */
     uint32_t       samples_size;
     uint32_t       bank4, bank5;        /* offsets into samples for 0xA00000 / 0xE00000 */
@@ -514,6 +515,7 @@ static inline void sound_load_samples(const uint8_t *bytes, uint32_t size) {
 
 /* Hook the UART callbacks. Call after mem_init(). */
 static inline void sound_attach(memory_bus_t *bus) {
+    g_sound.detached = false;
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
         if (r->base == MIDI_BASE) {
@@ -524,6 +526,29 @@ static inline void sound_attach(memory_bus_t *bus) {
         }
     }
     LOG_WARN("sound: MIDI region not found — sound inactive");
+}
+
+/* Take the board off again, mid-run: the UART goes back to the plain region
+ * mem_init made it (the i960's bytes land in bus->midi and mean nothing, as
+ * with the sound board never attached -- the game writes the UART's control
+ * register at boot and never reads its status), and sound_run steps nothing
+ * until the next sound_attach. The driver's state goes with it, so coming
+ * back is sound_reset + sound_attach, a fresh boot of the 68000. A host does
+ * this when the device has to run cooler (main_libretro.c, the heat guard),
+ * and never inside a netplay session: the other board runs the sound board,
+ * so this one has to. The output ring is the reader's; a host that stops
+ * reading moves out_r itself. */
+static inline void sound_detach(memory_bus_t *bus) {
+    g_sound.detached = true;
+    for (int i = 0; i < bus->region_count; i++) {
+        mem_region_t *r = &bus->regions[i];
+        if (r->base == MIDI_BASE) {
+            r->read_cb  = NULL;
+            r->write_cb = NULL;
+            break;
+        }
+    }
+    LOG_INFO("sound: board detached");
 }
 
 /* ---- the sample clock ------------------------------------------------------------- */
@@ -560,7 +585,7 @@ static inline void sound_out_push(int16_t l, int16_t r) {
 
 /* Run the board for n output samples. */
 static void sound_run(uint32_t n) {
-    if (!g_sound.rom_loaded) return;
+    if (!g_sound.rom_loaded || g_sound.detached) return;
     m68k_state_t *m = &g_sound.m68k;
     for (uint32_t i = 0; i < n; i++) {
         if (g_snd_watch.on) snd_watch_sample();

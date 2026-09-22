@@ -117,7 +117,7 @@ Open **Quick Menu > Core Options** while the game runs.
 |---|---|---|---|
 | Internal resolution | Native, Double, Triple, Quadruple, Full screen | The size the game is drawn at. Native is the arcade's own 496x384. Full screen draws at your window's or screen's size. | at once |
 | Draw rate | 60, 30 | 30 draws every second frame: half the graphics work, cooler on a handheld. The game still runs at 60. | at once |
-| Heat guard | off, 80, 85, 90 °C | Above that temperature, draws every second frame until the device has cooled 5 degrees. Linux and handhelds only. | at once |
+| Heat guard | off, 80, 85, 90 °C | Above that temperature, draws every second frame until the device has cooled 5 degrees. The second time, it stays at every second frame; still hot after that, it turns the sound board off until the next load (never during an online match). Linux and handhelds only. | at once |
 | Sound board | enabled, disabled | Disabled is silent and uses less power. | next time you load the game |
 | Online play | RetroArch, RPCN | Which netplay to use (see below). | next time you load the game |
 | RPCN sign-in | Signed out, Sign in using Twitch, RPCN account | Only shown with Online play set to RPCN. | at once |
@@ -357,7 +357,8 @@ for pixel instead of stretched.
   Native on a 640x480 screen, so it runs warmer.
 - **Heat guard:** **85 °C** (the handheld build's default). An RG ARC-S reached 83 °C in two
   minutes with the sound board on and began to throttle; the guard eases the load before it gets
-  hotter.
+  hotter, and eases it further each time that wasn't enough: every second frame for good the
+  second time, then the sound board off. A message on screen says which step it took.
 - **Sound board:** your choice. Off saves power and heat. An online match turns it on
   automatically, because both players' games have to run the same hardware.
 - **Draw rate:** **30** if the device still runs hot.
@@ -391,7 +392,7 @@ there as well as `m2-hle.opt` beside it.
 | Black screen, but the picture shows behind RetroArch's menu | Update the core. Early test builds left GL state behind that RetroArch then drew with. |
 | **RetroArch / m2hle** isn't in the emulator list | Check step 2, then restart EmulationStation. |
 | "Could not load" or the core is missing | Check that `/storage/cores/m2hle_libretro.so` exists, and that you installed the ARM Linux zip, not Android's. |
-| The device gets very hot | Keep Heat guard on, set Draw rate to 30, or turn the sound board off. |
+| The device gets very hot | Keep Heat guard on: it drops to 30 by itself, stays there the second time and turns the sound board off after that. To start cooler, set Draw rate to 30 or turn the sound board off yourself. |
 | Update m2hle says it couldn't reach GitHub | Turn Wi-Fi on. It needs to reach `api.github.com` and `github.com`. |
 | Update m2hle says RetroArch is running | Quit the game, then run it again. |
 | Update m2hle says the release has no core for this device | The release has no zip for this processor. `uname -m` shows which one the device has. |
