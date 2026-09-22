@@ -207,6 +207,19 @@ static inline uint32_t get_cc(i960_cpu_t *cpu) {
     return cpu->sfr.ac & AC_CC_MASK;
 }
 
+/* The eight conditions the CTRL branches (bno..bo), the COBR tests (testno..
+ * testo) and the compare-and-branches share, in the opcode's low three bits:
+ * a mask over the condition code (bit 0 greater, 1 equal, 2 less), true when
+ * any masked bit is set -- and, for the empty mask (the "no" forms), true when
+ * none is. */
+static inline bool i960_cond(uint32_t cc, uint32_t mask) {
+    return mask ? (cc & mask) != 0 : cc == 0;
+}
+
+/* The condition code a compare leaves: exactly one of L, E, G. */
+static inline uint32_t i960_cmp_cc_o(uint32_t a, uint32_t b) { return a < b ? CC_L : a == b ? CC_E : CC_G; }
+static inline uint32_t i960_cmp_cc_i(int32_t a, int32_t b)   { return a < b ? CC_L : a == b ? CC_E : CC_G; }
+
 //--- Instruction cost in clock cycles -------------------------------------------
 
 /* What an instruction costs at the i960KB's 25 MHz, as MAME's i960.cpp charges
@@ -367,30 +380,10 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                     cpu->sfr.ip = ip + disp;
                     return 0;
 
-                // Conditional branches
-                case 0x10: // bno
-                    if (get_cc(cpu) == CC_NO) { cpu->sfr.ip = ip + disp; return 0; }
-                    break;
-                case 0x11: // bg
-                    if (get_cc(cpu) & CC_G) { cpu->sfr.ip = ip + disp; return 0; }
-                    break;
-                case 0x12: // be
-                    if (get_cc(cpu) & CC_E) { cpu->sfr.ip = ip + disp; return 0; }
-                    break;
-                case 0x13: // bge
-                    if (get_cc(cpu) & CC_G || get_cc(cpu) & CC_E) { cpu->sfr.ip = ip + disp; return 0; }
-                    break;
-                case 0x14: // bl
-                    if (get_cc(cpu) & CC_L) { cpu->sfr.ip = ip + disp; return 0; }
-                    break;
-                case 0x15: // bne — mask 101: branch if G or L (not if NO or E)
-                    if (get_cc(cpu) & (CC_G | CC_L)) { cpu->sfr.ip = ip + disp; return 0; }
-                    break;
-                case 0x16: // ble
-                    if (get_cc(cpu) & CC_L || get_cc(cpu) & CC_E) { cpu->sfr.ip = ip + disp; return 0; }
-                    break;
-                case 0x17: // bo — mask 111: branch if any condition bit set
-                    if (get_cc(cpu) != 0) { cpu->sfr.ip = ip + disp; return 0; }
+                // Conditional branches: bno bg be bge bl bne ble bo
+                case 0x10: case 0x11: case 0x12: case 0x13:
+                case 0x14: case 0x15: case 0x16: case 0x17:
+                    if (i960_cond(get_cc(cpu), (uint32_t)opcode & 7u)) { cpu->sfr.ip = ip + disp; return 0; }
                     break;
 
                 default:
@@ -421,23 +414,11 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
             }
 
             switch (opcode) {
-                // test instructions (single operand, check CC)
-                case 0x20: // testno
-                    reg_write(cpu, src1_idx, (get_cc(cpu) == CC_NO) ? 1 : 0); break;
-                case 0x21: // testg
-                    reg_write(cpu, src1_idx, (get_cc(cpu) & CC_G) ? 1 : 0); break;
-                case 0x22: // teste
-                    reg_write(cpu, src1_idx, (get_cc(cpu) & CC_E) ? 1 : 0); break;
-                case 0x23: // testge
-                    reg_write(cpu, src1_idx, (get_cc(cpu) & (CC_G|CC_E)) ? 1 : 0); break;
-                case 0x24: // testl
-                    reg_write(cpu, src1_idx, (get_cc(cpu) & CC_L) ? 1 : 0); break;
-                case 0x25: // testne — mask 101: set if G or L
-                    reg_write(cpu, src1_idx, (get_cc(cpu) & (CC_G | CC_L)) ? 1 : 0); break;
-                case 0x26: // testle
-                    reg_write(cpu, src1_idx, (get_cc(cpu) & (CC_L|CC_E)) ? 1 : 0); break;
-                case 0x27: // testo — mask 111: set if any condition bit set
-                    reg_write(cpu, src1_idx, (get_cc(cpu) != 0) ? 1 : 0); break;
+                // test instructions (single operand, check CC): testno .. testo
+                case 0x20: case 0x21: case 0x22: case 0x23:
+                case 0x24: case 0x25: case 0x26: case 0x27:
+                    reg_write(cpu, src1_idx, i960_cond(get_cc(cpu), (uint32_t)opcode & 7u) ? 1 : 0);
+                    break;
 
                 // Bit branch — per spec: CC_E if branch taken, CC_NO if not taken
                 case 0x30: // bbc (branch if bit clear)
@@ -455,89 +436,29 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
                     set_cc(cpu, CC_NO);
                     break;
 
-                // Compare and branch (ordinal / unsigned)
-                // CRITICAL: cmpobX instructions DO set the condition codes on
-                // real i960 hardware, NOT just branch. The CPU manual states:
-                // "Performs a comparison... and updates the condition code
-                // register, then branches if the condition is satisfied."
-                // A subsequent `bg`/`bl`/`be` after a `cmpobe` uses these
-                // updated CC bits — without setting them, those branches use
-                // STALE CC values from earlier instructions and produce wrong
-                // control flow.
-                //
-                // Get_start_value's opcode dispatcher (in Sonic the Fighters)
-                // is one example of code that depends on this:
+                // Compare and branch, ordinal (cmpobg .. cmpoble) and integer
+                // (cmpibg .. cmpible). The compare records its condition code
+                // whether or not the branch is taken -- the manual's "updates
+                // the condition code register, then branches" -- and a `bg` /
+                // `bl` / `be` that follows reads it. STF's get_start_value
+                // opcode dispatcher is one that does:
                 //   cmpobe 4, r6, loc_30B00    ; sets CC, branches if r6==4
                 //   bg     loc_30AE8           ; uses CC, branches if r6<4
-                // Without the CC update, the bg uses stale CC and the wrong
-                // path is taken for opcodes 0..3, causing get_start_value to
-                // read unrelated bytes from g2 instead of writing 0 to scratch.
-                case 0x31: // cmpobg
-                    if (src1 < src2)       set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                    set_cc(cpu, CC_G);
-                    if (src1 > src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x32: // cmpobe
-                    if (src1 < src2)       set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                    set_cc(cpu, CC_G);
-                    if (src1 == src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x33: // cmpobge
-                    if (src1 < src2)       set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                    set_cc(cpu, CC_G);
-                    if (src1 >= src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x34: // cmpobl
-                    if (src1 < src2)       set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                    set_cc(cpu, CC_G);
-                    if (src1 < src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x35: // cmpobne
-                    if (src1 < src2)       set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                    set_cc(cpu, CC_G);
-                    if (src1 != src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x36: // cmpoble
-                    if (src1 < src2)       set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                    set_cc(cpu, CC_G);
-                    if (src1 <= src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-
-                // Compare and branch (integer / signed)
-                // Same CC-update fix as the ordinal versions above.
-                case 0x38: // cmpibno - never branches
+                // With a stale CC the wrong path is taken for opcodes 0..3 and
+                // get_start_value reads unrelated bytes from g2.
+                case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: case 0x36:
+                    set_cc(cpu, i960_cmp_cc_o(src1, src2));
+                    if (i960_cond(get_cc(cpu), (uint32_t)opcode & 7u)) { cpu->sfr.ip = ip + disp; return 0; }
                     break;
-                case 0x39: // cmpibg
-                    if ((int32_t)src1 < (int32_t)src2)       set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
-                    if ((int32_t)src1 > (int32_t)src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x3a: // cmpibe
-                    if ((int32_t)src1 < (int32_t)src2)       set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
-                    if ((int32_t)src1 == (int32_t)src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x3b: // cmpibge
-                    if ((int32_t)src1 < (int32_t)src2)       set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
-                    if ((int32_t)src1 >= (int32_t)src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x3c: // cmpibl
-                    if ((int32_t)src1 < (int32_t)src2)       set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
-                    if ((int32_t)src1 < (int32_t)src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x3d: // cmpibne
-                    if ((int32_t)src1 < (int32_t)src2)       set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
-                    if ((int32_t)src1 != (int32_t)src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x3e: // cmpible
-                    if ((int32_t)src1 < (int32_t)src2)       set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
-                    if ((int32_t)src1 <= (int32_t)src2) { cpu->sfr.ip = ip + disp; return 0; } break;
-                case 0x3f: // cmpibo - always branches
+                case 0x39: case 0x3a: case 0x3b: case 0x3c: case 0x3d: case 0x3e:
+                    set_cc(cpu, i960_cmp_cc_i((int32_t)src1, (int32_t)src2));
+                    if (i960_cond(get_cc(cpu), (uint32_t)opcode & 7u)) { cpu->sfr.ip = ip + disp; return 0; }
+                    break;
+                // cmpibno never branches and cmpibo always does. Neither records
+                // the compare here (as before; no STF code uses either).
+                case 0x38: // cmpibno
+                    break;
+                case 0x3f: // cmpibo
                     cpu->sfr.ip = ip + disp; return 0;
 
                 default:
@@ -627,14 +548,10 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
 
                 // Compare
                 case 0x5a0: // cmpo (compare ordinal)
-                    if (src1 < src2)      set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                   set_cc(cpu, CC_G);
+                    set_cc(cpu, i960_cmp_cc_o(src1, src2));
                     break;
                 case 0x5a1: // cmpi (compare integer)
-                    if ((int32_t)src1 < (int32_t)src2)      set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
+                    set_cc(cpu, i960_cmp_cc_i((int32_t)src1, (int32_t)src2));
                     break;
                 case 0x5a2: // concmpo (conditional compare ordinal)
                     // Compares only when condition-code bit 2 (less, 0b100) is
@@ -655,27 +572,19 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
 
                 // Compare and increment/decrement
                 case 0x5a4: // cmpinco (compare, increment ordinal)
-                    if (src1 < src2)      set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                   set_cc(cpu, CC_G);
+                    set_cc(cpu, i960_cmp_cc_o(src1, src2));
                     reg_write(cpu, dst_idx, src2 + 1);
                     break;
                 case 0x5a5: // cmpinci (compare, increment integer)
-                    if ((int32_t)src1 < (int32_t)src2)      set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
+                    set_cc(cpu, i960_cmp_cc_i((int32_t)src1, (int32_t)src2));
                     reg_write(cpu, dst_idx, (uint32_t)((int32_t)src2 + 1));
                     break;
                 case 0x5a6: // cmpdeco (compare, decrement ordinal)
-                    if (src1 < src2)      set_cc(cpu, CC_L);
-                    else if (src1 == src2) set_cc(cpu, CC_E);
-                    else                   set_cc(cpu, CC_G);
+                    set_cc(cpu, i960_cmp_cc_o(src1, src2));
                     reg_write(cpu, dst_idx, src2 - 1);
                     break;
                 case 0x5a7: // cmpdeci (compare, decrement integer)
-                    if ((int32_t)src1 < (int32_t)src2)      set_cc(cpu, CC_L);
-                    else if ((int32_t)src1 == (int32_t)src2) set_cc(cpu, CC_E);
-                    else                                      set_cc(cpu, CC_G);
+                    set_cc(cpu, i960_cmp_cc_i((int32_t)src1, (int32_t)src2));
                     reg_write(cpu, dst_idx, (uint32_t)((int32_t)src2 - 1));
                     break;
 
