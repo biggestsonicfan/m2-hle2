@@ -151,6 +151,7 @@ static struct {
     lr_login_t  login;          /* RPCN sign-in; a change takes effect at once */
     int         draw_every;     /* 1 = every frame, 2 = every second frame (cooler) */
     int         heat_limit;     /* degrees C above which drawing drops to every second frame; 0 = off */
+    const char *profile;        /* a profile id, or NULL for the ROM set's default (read at load) */
 } opt = { .scale = 0, .sound = true, .online = LR_ONLINE_RETROARCH, .net_delay = 2, .draw_every = 1 };
 
 static struct retro_core_option_v2_category option_cats[] = {
@@ -166,6 +167,13 @@ static struct retro_core_option_v2_definition option_defs[] = {
       { { "native", "Native (496x384)" }, { "double", "Double (992x768)" }, { "triple", "Triple (1488x1152)" },
         { "quadruple", "Quadruple (1984x1536)" }, { "fullscreen", "Full screen" }, { NULL, NULL } },
       LR_DEFAULT_RES },
+    { "m2hle_stf_version", "Sonic the Fighters version", NULL,
+      "Console: the game as Sega's console release runs it, with Honey, Metal Sonic and Robotnik selectable "
+      "(Start on Amy, Sonic or Bean at character select). Arcade: the arcade board as it shipped. Each has its own "
+      "online rooms. Takes effect when the game is next loaded.",
+      NULL, NULL,
+      { { "console", "Console" }, { "arcade", "Arcade" }, { NULL, NULL } },
+      "console" },
     { "m2hle_sound", "Sound board", NULL,
       "Run the 68000 + SCSP sound board. Off is silent and cheaper on a handheld. Takes effect when the game is next loaded.",
       NULL, NULL,
@@ -232,6 +240,7 @@ static void lr_read_options(bool at_load) {
     if (!at_load) return;
     if ((v = lr_var("m2hle_sound")))  opt.sound  = strcmp(v, "disabled") != 0;
     if ((v = lr_var("m2hle_online"))) opt.online = strcmp(v, "rpcn") ? LR_ONLINE_RETROARCH : LR_ONLINE_RPCN;
+    if ((v = lr_var("m2hle_stf_version"))) opt.profile = strcmp(v, "arcade") ? NULL : "sfight";
 }
 
 /* The RPCN sign-in only means something with RPCN chosen. */
@@ -253,6 +262,7 @@ static void lr_set_options(void) {
     /* An old frontend: the v0 table, first value is the default. */
     static struct retro_variable vars[] = {
         { "m2hle_resolution", "Internal resolution; " LR_DEFAULT_RES "|native|double|triple|quadruple|fullscreen" },
+        { "m2hle_stf_version", "Sonic the Fighters version; console|arcade" },
         { "m2hle_sound",      "Sound board; " LR_DEFAULT_SOUND "|enabled|disabled" },
         { "m2hle_draw_rate",  "Draw rate; 60|30" },
         { "m2hle_heat_guard", "Heat guard; " LR_DEFAULT_HEAT "|off|80|85|90" },
@@ -330,14 +340,12 @@ static bool lr_load_rom(const char *zip) {
     if (n >= sizeof id) n = sizeof id - 1;
     memcpy(id, base, n);
 
-    g_active_profile = NULL;
-    for (size_t i = 0; i < g_profile_count; i++)
-        if (!strcmp(g_profiles[i]->id, id)) g_active_profile = g_profiles[i];
+    g_active_profile = profile_for_rom_set(id, profile_by_id(opt.profile));
     if (!g_active_profile) {
         char msg[256];
         int k = snprintf(msg, sizeof msg, "m2hle: no profile for ROM set '%s'. Supported:", id);
         for (size_t i = 0; i < g_profile_count && k > 0 && (size_t)k < sizeof msg; i++)
-            k += snprintf(msg + k, sizeof msg - (size_t)k, " %s", g_profiles[i]->id);
+            k += snprintf(msg + k, sizeof msg - (size_t)k, " %s", profile_rom_set(g_profiles[i]));
         lr_message(msg, 600);
         return false;
     }

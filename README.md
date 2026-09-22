@@ -87,8 +87,28 @@ the next game cheaper instead of being spent on a single ROM set.
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
 
-Game profiles live in [src/profiles/](src/profiles/): `sfight`, `fvipers`, `m2snake` (the web
-build carries `sfight` only).
+Game profiles live in [src/profiles/](src/profiles/): `sfight_console`, `sfight`, `fvipers`,
+`m2snake` (the web build carries the two Sonic the Fighters profiles only).
+
+### Sonic the Fighters: Console and Arcade
+
+`sfight.zip` runs as one of two profiles:
+
+- **Sonic the Fighters - Console** (`sfight_console`, the default). Sega's own emulator does
+  not run the arcade ROM untouched for the console release: it patches 76 i960 instructions.
+  This profile adds the ones that concern Honey and the hidden characters
+  ([sfight_console.h](src/profiles/sfight_console.h) lists them with the DLL's own table
+  indices). Press Start on a slot at character select for its hidden fighter: **Amy → Honey**,
+  **Sonic → Metal Sonic**, **Bean → Robotnik**. Press Start again to go back, or move the
+  cursor. Honey also gets her VS portrait and name card, her own angle table and still eyes,
+  and the motion blend drops the head-tilt term for every fighter, as the official build does. The official build unlocks Metal Sonic and Robotnik only on a cabinet set to
+  VS mode. Here all three can be picked in every mode, lobby matches included.
+- **Sonic the Fighters - Arcade** (`sfight`): the arcade board as it shipped, which MAME also
+  runs. Pick it with `--profile sfight`, the Game menu, or the libretro core's *Sonic the
+  Fighters version* option. The graders in [tools/](tools/) use it.
+
+The two profiles behave differently, so each has its own netplay lobby: two players have to
+pick the same one to see each other's rooms.
 
 ## Layout
 

@@ -101,6 +101,11 @@ static const comid_entry_t g_comid_registry[] = {
     { "SONICTHEFIGHTERS",   "SNCFTR", "SNCFTR" },
     { "SONICCHAMPIONSHIP",  "SNCFTR", "SNCFTR" },
     { "STF",                "SNCFTR", "SNCFTR" },
+    /* Sonic the Fighters - Console: the same ROM with the console release's
+     * patches (profiles/sfight_console.h). It simulates differently from the
+     * arcade game, so it is a lobby space of its own. YAMP runs that console
+     * emulator, so its browse space is YAMP's STF one. */
+    { "SFIGHTCONSOLE",      "SNCFTC", "SNCFTR" },
 
     /* Fighting Vipers — boots on the same board layer. */
     { "FVIPERS",            "FGTVPR", "FGTVPR" },

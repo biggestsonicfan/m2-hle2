@@ -26,6 +26,21 @@ install -m 755 "$BIN" /storage/.local/share/m2hle/m2hle
 install -m 755 "$LAUNCHER" /storage/.local/bin/start_m2hle.sh
 echo "installed $(basename "$BIN") -> /storage/.local/share/m2hle/m2hle"
 
+# Which canary this is (m2hle-update.sh compares it), the updater itself, and
+# its ES Tools entry. The old cross-build flow has none of these: skip them.
+if [ -f "$HERE/VERSION.txt" ]; then
+  install -m 644 "$HERE/VERSION.txt" /storage/.local/share/m2hle/VERSION.txt
+  echo "version: $(cat "$HERE/VERSION.txt")"
+fi
+if [ -f "$HERE/m2hle-update.sh" ]; then
+  install -m 755 "$HERE/m2hle-update.sh" /storage/.local/bin/m2hle-update.sh
+fi
+if [ -f "$HERE/tool-update-m2hle.sh" ]; then
+  mkdir -p /storage/.config/modules
+  install -m 755 "$HERE/tool-update-m2hle.sh" "/storage/.config/modules/Update m2hle.sh"
+  echo "ES Tools: Update m2hle"
+fi
+
 if grep -q 'm2hle-sa' "$ES/es_systems.cfg"; then
   echo "es_systems.cfg: m2hle already listed"
 else
@@ -114,6 +129,7 @@ add_feature "screen size" "fit screen=fit" "1x (496x384)=1"
 add_feature "audio" "on=on" "off (cooler)=off"
 add_feature "button macros" "off=off" "on (X Y Z)=on"
 add_feature "online play" "off=off" "on=on"
+add_feature "update check" "on=on" "off=off"
 
 # Netplay settings copied from a PC: a netplay.cfg beside this script goes where
 # the launcher's --net-config points. Private, since it holds a login. The one

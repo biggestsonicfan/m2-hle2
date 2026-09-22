@@ -122,6 +122,7 @@ static struct {
 
 static struct {
     const char *rom;
+    const char *profile;            /* --profile <id>; NULL = the ROM set's default */
     double      render_fps;
     int         win_w, win_h;       /* 0 = fullscreen */
     bool        stats;
@@ -324,12 +325,12 @@ static bool load_rom(const char *zip) {
     if (n >= sizeof id) n = sizeof id - 1;
     memcpy(id, base, n);
 
-    g_active_profile = NULL;
-    for (size_t i = 0; i < g_profile_count; i++)
-        if (!strcmp(g_profiles[i]->id, id)) g_active_profile = g_profiles[i];
+    const game_profile_t *want = opt.profile ? profile_by_id(opt.profile) : NULL;
+    if (opt.profile && !want) fprintf(stderr, "m2hle: --profile %s: no such profile; using the default\n", opt.profile);
+    g_active_profile = profile_for_rom_set(id, want);
     if (!g_active_profile) {
         fprintf(stderr, "m2hle: no profile for ROM set '%s'. Supported:", id);
-        for (size_t i = 0; i < g_profile_count; i++) fprintf(stderr, " %s", g_profiles[i]->id);
+        for (size_t i = 0; i < g_profile_count; i++) fprintf(stderr, " %s", profile_rom_set(g_profiles[i]));
         fprintf(stderr, "\n");
         return false;
     }
@@ -548,6 +549,7 @@ static bool parse_args(int argc, char **argv) {
         const char *a = argv[i];
         bool more = i + 1 < argc;
         if      (!strcmp(a, "--rom") && more)        opt.rom = argv[++i];
+        else if (!strcmp(a, "--profile") && more)    opt.profile = argv[++i];
         else if (!strcmp(a, "--render-fps") && more) opt.render_fps = atof(argv[++i]);
         else if (!strcmp(a, "--steps-per-slice") && more) {
             int n = atoi(argv[++i]);

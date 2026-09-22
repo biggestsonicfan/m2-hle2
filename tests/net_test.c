@@ -312,6 +312,10 @@ int main(void) {
 
         CHECK(comid_for_game("fvipers", b) && strcmp(a, b) != 0,
               "a different game gets a different lobby");
+        CHECK(comid_for_game("sfight_console", b) && strcmp(b, "M2HSNCFTC_00") == 0,
+              "STF's console profile has a lobby of its own, apart from the arcade game's");
+        CHECK(comid_yamp_for_game("sfight_console", b) && strcmp(b, "YMPSNCFTR_00") == 0,
+              "…and browses YAMP's STF rooms, since YAMP runs the console emulator");
 
         /* Every id we can produce must satisfy RPCN's own rule, or the server
          * answers Malformed three requests into discovery. */

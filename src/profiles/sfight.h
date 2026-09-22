@@ -1,5 +1,10 @@
 /*
- * profiles/sfight.h — Sonic The Fighters (sfight/schamp) profile.
+ * profiles/sfight.h — Sonic the Fighters - Arcade (sfight/schamp) profile.
+ *
+ * The game as the arcade board runs it. It shares its ROM set with Sonic the
+ * Fighters - Console (sfight_console.h), which is the default for sfight.zip;
+ * pick this one with --profile sfight or from the Game menu. MAME runs the
+ * arcade game, so every grader in tools/ asks for this profile.
  *
  * MAME-equivalent ROM set: sfight (clone of schamp). load_fn extracts files
  * from sfight.zip first, falls back to schamp.zip for shared files.
@@ -328,89 +333,101 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
 
 /* ---- Profile object ----------------------------------------------------- */
 
+/* Two profiles run this ROM set: this one, and Sonic the Fighters - Console
+ * (sfight_console.h), which adds the official console emulator's Honey and
+ * hidden-character patches on top. What the two share is spelled once, in the
+ * macros below, so a fix to one reaches both. */
+
+/* The hooks every STF profile needs to boot and pace frames, and the versus
+ * hook netplay rooms read the result from. */
+#define SFIGHT_BASE_HOOK_COUNT 10
+#define SFIGHT_BASE_HOOKS                                                      \
+    { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
+    { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
+    { 0x0004A58C, sfight_hook_check_timer_4_spin, "check_timer_4_spin"      }, \
+    { 0x00001768, sfight_hook_interrupt_wait,     "interrupt_wait"          }, \
+    { 0x00011580, sfight_hook_interrupt_wait_b,   "interrupt_wait_b"        }, \
+    { 0x00011610, sfight_hook_idle,               "_idle"                   }, \
+    { 0x00007264, sfight_hook_700000_loop,        "_700000_loop"            }, \
+    { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
+    { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
+    { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           },
+
+#define SFIGHT_INPUT_MAP                                                        \
+    .held_addr       = 0x00500700,                                              \
+    .momentary_addr  = 0x00500704,                                              \
+    .p1_credits_addr = 0x0059C388,                                              \
+    .p2_credits_addr = 0x0059C38C,                                              \
+    .bits = {                                                                   \
+        [GAME_INPUT_P1_UP]    = 0x00002000,                                     \
+        [GAME_INPUT_P1_DOWN]  = 0x00001000,                                     \
+        [GAME_INPUT_P1_LEFT]  = 0x00008000,                                     \
+        [GAME_INPUT_P1_RIGHT] = 0x00004000,                                     \
+        [GAME_INPUT_P1_B1]    = 0x00000100,                                     \
+        [GAME_INPUT_P1_B2]    = 0x00000200,                                     \
+        [GAME_INPUT_P1_B3]    = 0x00000400,                                     \
+        [GAME_INPUT_P1_START] = 0x00000010,                                     \
+        [GAME_INPUT_P2_UP]    = 0x00200000,                                     \
+        [GAME_INPUT_P2_DOWN]  = 0x00100000,                                     \
+        [GAME_INPUT_P2_LEFT]  = 0x00800000,                                     \
+        [GAME_INPUT_P2_RIGHT] = 0x00400000,                                     \
+        [GAME_INPUT_P2_B1]    = 0x00010000,                                     \
+        [GAME_INPUT_P2_B2]    = 0x00020000,                                     \
+        [GAME_INPUT_P2_B3]    = 0x00040000,                                     \
+        [GAME_INPUT_P2_START] = 0x00000020,                                     \
+        [GAME_INPUT_SERVICE]  = 0x00000004,                                     \
+        /* Coins map to IN0 (held byte0) COIN1/COIN2 — active-low at IO+0x02. \
+         * The game's read_sw edge-detects these and updates credits. */        \
+        [GAME_INPUT_P1_COIN]  = 0x00000001,                                     \
+        [GAME_INPUT_P2_COIN]  = 0x00000002,                                     \
+    },
+
+/* advertise_steps[_sub_mode]: 5 is ADV_MOVIE_DSP (the ~2200-frame intro
+ * movie), 6 ADV_REPLAY_PIC, which leads into the Sonic vs Bean replay on
+ * stage 1 (replay_bank_init_data, ROM 0xDC9B0). The movie controller
+ * (am_cntr .. 0x5004E7) keeps running through the replay, so it is set to
+ * the state a natural boot has at fc 2435, where MOVIE_DSP hands over:
+ * animation 3, frame 0x1A7. prep_adv_movie writes adv_movie_cont_ex
+ * (0x5004CC) in the frame the step becomes 5, which is what "ready" waits
+ * for. Captured off this emulator and checked bit for bit against the
+ * natural boot's fight (1097 frames, both fighters). */
+#define SFIGHT_QUIRKS                                                                 \
+    .poly_connect_mask  = 0x45B4,                                                     \
+    .mesh_ptr_subtract  = 0x02000010,                                                 \
+    .mesh_ptr_add       = 0x10,                                                       \
+    .model_table_offset = 0x000E0004,                                                 \
+    .model_table_count  = 5103,                                                       \
+    .camera_struct_addr = 0x00519E98,                                                 \
+    .enable_68k_sound   = true,                                                       \
+    /* Real interrupt handlers (dispatch table @0x46b4): pin0 VsyncScr,               \
+     * pin1 VsyncObj, pin2 Timer, pin3 Other(sound). */                               \
+    .irq_handler        = { 0x00000C40, 0x00000D10, 0x00000D30, 0x00000DF0 },         \
+    .sound_queue_count_addr = 0x00504001,   /* byte_504001 */                         \
+    .sound_queue_state_addr = 0x00504014,   /* byte_504014 */                         \
+    .warning_skip_addr      = 0x00500410,   /* poke 1 → skip boot warning screen */ \
+    .attract_replay = {                                                               \
+        .step_addr   = 0x00500030,           /* _sub_mode */                          \
+        .from_step   = 5,                                                             \
+        .to_step     = 6,                                                             \
+        .ready_addr  = 0x005004CC,           /* adv_movie_cont_ex */                  \
+        .state_addr  = 0x005004C4,           /* am_cntr, am_num, dword_5004C8, ... */ \
+        .state_count = 9,                                                             \
+        .state = { 0x000301A7, 0x00000028, 0x00055DDC, 0x000562D0, 0xC1200000,        \
+                   0x433A8000, 0x43810000, 0xC1200000, 0x43398000 },                  \
+    },
+
 static const game_profile_t sfight_profile = {
     .id               = "sfight",
-    .display_name     = "Sonic The Fighters",
+    .display_name     = "Sonic the Fighters - Arcade",
+    .rom_set          = "sfight",
     .parent_zip_name  = "schamp.zip",
     .board            = BOARD_MODEL2B_CRX,
     .load_fn      = sfight_load,
     .install_fn   = sfight_install,
-    .hook_count   = 10,
-    .hooks = {
-        { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       },
-        { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           },
-        { 0x0004A58C, sfight_hook_check_timer_4_spin, "check_timer_4_spin"      },
-        { 0x00001768, sfight_hook_interrupt_wait,     "interrupt_wait"          },
-        { 0x00011580, sfight_hook_interrupt_wait_b,   "interrupt_wait_b"        },
-        { 0x00011610, sfight_hook_idle,               "_idle"                   },
-        { 0x00007264, sfight_hook_700000_loop,        "_700000_loop"            },
-        { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              },
-        { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" },
-        { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           },
-    },
-    .input = {
-        .held_addr       = 0x00500700,
-        .momentary_addr  = 0x00500704,
-        .p1_credits_addr = 0x0059C388,
-        .p2_credits_addr = 0x0059C38C,
-        .bits = {
-            [GAME_INPUT_P1_UP]    = 0x00002000,
-            [GAME_INPUT_P1_DOWN]  = 0x00001000,
-            [GAME_INPUT_P1_LEFT]  = 0x00008000,
-            [GAME_INPUT_P1_RIGHT] = 0x00004000,
-            [GAME_INPUT_P1_B1]    = 0x00000100,
-            [GAME_INPUT_P1_B2]    = 0x00000200,
-            [GAME_INPUT_P1_B3]    = 0x00000400,
-            [GAME_INPUT_P1_START] = 0x00000010,
-            [GAME_INPUT_P2_UP]    = 0x00200000,
-            [GAME_INPUT_P2_DOWN]  = 0x00100000,
-            [GAME_INPUT_P2_LEFT]  = 0x00800000,
-            [GAME_INPUT_P2_RIGHT] = 0x00400000,
-            [GAME_INPUT_P2_B1]    = 0x00010000,
-            [GAME_INPUT_P2_B2]    = 0x00020000,
-            [GAME_INPUT_P2_B3]    = 0x00040000,
-            [GAME_INPUT_P2_START] = 0x00000020,
-            [GAME_INPUT_SERVICE]  = 0x00000004,
-            /* Coins map to IN0 (held byte0) COIN1/COIN2 — active-low at IO+0x02.
-             * The game's read_sw edge-detects these and updates credits. */
-            [GAME_INPUT_P1_COIN]  = 0x00000001,
-            [GAME_INPUT_P2_COIN]  = 0x00000002,
-        },
-    },
-    .quirks = {
-        .poly_connect_mask  = 0x45B4,
-        .mesh_ptr_subtract  = 0x02000010,
-        .mesh_ptr_add       = 0x10,
-        .model_table_offset = 0x000E0004,
-        .model_table_count  = 5103,
-        .camera_struct_addr = 0x00519E98,
-        .enable_68k_sound   = true,
-        /* Real interrupt handlers (dispatch table @0x46b4): pin0 VsyncScr,
-         * pin1 VsyncObj, pin2 Timer, pin3 Other(sound). */
-        .irq_handler        = { 0x00000C40, 0x00000D10, 0x00000D30, 0x00000DF0 },
-        .sound_queue_count_addr = 0x00504001,   /* byte_504001 */
-        .sound_queue_state_addr = 0x00504014,   /* byte_504014 */
-        .warning_skip_addr      = 0x00500410,   /* poke 1 → skip boot warning screen */
-        /* advertise_steps[_sub_mode]: 5 is ADV_MOVIE_DSP (the ~2200-frame intro
-         * movie), 6 ADV_REPLAY_PIC, which leads into the Sonic vs Bean replay on
-         * stage 1 (replay_bank_init_data, ROM 0xDC9B0). The movie controller
-         * (am_cntr .. 0x5004E7) keeps running through the replay, so it is set to
-         * the state a natural boot has at fc 2435, where MOVIE_DSP hands over:
-         * animation 3, frame 0x1A7. prep_adv_movie writes adv_movie_cont_ex
-         * (0x5004CC) in the frame the step becomes 5, which is what "ready" waits
-         * for. Captured off this emulator and checked bit for bit against the
-         * natural boot's fight (1097 frames, both fighters). */
-        .attract_replay = {
-            .step_addr   = 0x00500030,           /* _sub_mode */
-            .from_step   = 5,
-            .to_step     = 6,
-            .ready_addr  = 0x005004CC,           /* adv_movie_cont_ex */
-            .state_addr  = 0x005004C4,           /* am_cntr, am_num, dword_5004C8, ... */
-            .state_count = 9,
-            .state = { 0x000301A7, 0x00000028, 0x00055DDC, 0x000562D0, 0xC1200000,
-                       0x433A8000, 0x43810000, 0xC1200000, 0x43398000 },
-        },
-    },
+    .hook_count   = SFIGHT_BASE_HOOK_COUNT,
+    .hooks        = { SFIGHT_BASE_HOOKS },
+    .input        = { SFIGHT_INPUT_MAP },
+    .quirks       = { SFIGHT_QUIRKS },
 };
 
 #endif /* PROFILES_SFIGHT_H */

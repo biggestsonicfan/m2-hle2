@@ -68,8 +68,20 @@ ONLINE=$(get_setting online_play "${PLATFORM}" "${GAME}")
 # The RK3566's critical trip powers the unit off at ~95 C: quit first.
 OPTIONS+=(--max-temp 90)
 
+# Update check: in the background, at most every 6 hours, never holding up the
+# game (m2hle-update.sh has the details). The result is shown after the game.
+UPDATE_CHECK=$(get_setting update_check "${PLATFORM}" "${GAME}")
+M2HLE_UPDATE=/storage/.local/bin/m2hle-update.sh
+if [ "${UPDATE_CHECK}" != "off" ] && [ -x "${M2HLE_UPDATE}" ]; then
+  "${M2HLE_UPDATE}" --check 21600 >/dev/null 2>&1 </dev/null &
+fi
+
 sway_fullscreen m2hle pidof &
 
 cd "${CONFIG_DIR}"
 echo "Command: ${M2HLE} ${OPTIONS[*]} ${1}" >>/var/log/exec.log 2>&1
 ${EMUPERF} "${M2HLE}" "${OPTIONS[@]}" "${1}" >>/var/log/exec.log 2>&1 ||:
+
+if [ "${UPDATE_CHECK}" != "off" ] && [ -f /storage/.local/share/m2hle/UPDATE_AVAILABLE ]; then
+  /usr/bin/sdl2notify --center "m2hle update available||$(cat /storage/.local/share/m2hle/UPDATE_AVAILABLE) - Tools > Update m2hle" 255 255 255 4 >/dev/null 2>&1 ||:
+fi

@@ -42,7 +42,7 @@ import { findRom } from './lib/rom.mjs';
 import { Report } from './lib/report.mjs';
 import { parseArgs } from './lib/args.mjs';
 
-const args = parseArgs(['pre', 'frames', 'port', 'out']);
+const args = parseArgs(['pre', 'frames', 'port', 'out', 'profile']);
 const rep = new Report('grade-reset — the boot after a netplay reset, against a first boot');
 
 const FRAME_HOOK = 0x11a04;   /* STF variable_diff_calc: the emulator's frame boundary */
@@ -68,10 +68,12 @@ const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 /* Attract runs a lot faster than 60 Hz when nobody is watching it. */
 process.env.M2HLE_UNTHROTTLE = '1';
 
-const emu = await M2Hle.launch({ rom: findRom().primary, port: args.num('port', 7172), run: false });
+/* --profile sfight_console grades the console profile's reset; both share STF's frame hook. */
+const PROFILE = args.str('profile', 'sfight');
+const emu = await M2Hle.launch({ rom: findRom().primary, port: args.num('port', 7172), run: false, profile: PROFILE });
 try {
     const st0 = await emu.waitForRom();
-    if (st0.profile !== 'sfight')
+    if (st0.profile !== PROFILE || !/^sfight/.test(PROFILE))
         throw new Error(`profile is '${st0.profile}': the frame hook address here is STF's`);
 
     /* Run to the FRAMES-th frame boundary after a boot or a reset, and take the board. */
