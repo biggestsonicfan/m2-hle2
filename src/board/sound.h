@@ -24,8 +24,9 @@
  * the SCSP produces the sample. The 68000 takes the SCSP's interrupt lines
  * between instructions, and every register access lands on a chip that is at
  * exactly that point in time — the driver's timing loops and its slot-monitor
- * polling depend on it. The emu thread runs a slice's worth of samples per
- * slice and the host audio callback (core/audio_out.h) drains them.
+ * polling depend on it. The emu thread runs a frame's worth of samples when
+ * the game's frame ends (emu_thread.h, emu_sound_slice_end) and the host audio
+ * callback (core/audio_out.h) drains them.
  */
 #ifndef SOUND_H
 #define SOUND_H
@@ -51,7 +52,7 @@
 #define SOUND_OUT_FRAMES          16384u   /* host output ring, stereo frames (power of 2) */
 #define SOUND_CODE_LOG            512u     /* i960 commands kept (power of 2) */
 #define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_make_midi_room) */
-#define SOUND_AHEAD_MAX           735      /* at most a slice of samples run ahead of it (44100 / 60) */
+#define SOUND_AHEAD_MAX           735      /* at most a frame of samples run ahead of it (44100 / 60) */
 
 typedef struct {
     m68k_state_t   m68k;

@@ -5,6 +5,45 @@ exactly as it found it (`ab-builds` identical against master); this is the
 accuracy bug that work walked past, written down with its measurement so it can
 be fixed on its own terms.
 
+## Status (branch `fix/slice-clocks`, 2026-09-22)
+
+**Option A is in.** `emu_sound_slice_end` (`src/core/emu_thread.h`) charges the sound
+board a frame of samples when the game's frame ends. `emu_slice_body`,
+`det_digest`'s traced slice and `arc_bench`'s slice all call it, so the copies
+cannot drift. There is one addition the proposal did not have: a board that never
+reaches a frame edge (booting, stuck, or a profile with no frame hook) would never
+run its sound. So once a frame has run `EMU_FRAME_STEPS_MAX` (4M) i960
+instructions, each further slice is charged as before. The limit counts
+instructions, not slices, so the rule is the same at any `--steps-per-slice`.
+`NETPLAY_PROTO_REV` is now 5. `sound_status` reports `midi_holds`.
+
+Measured with `tools/clock-state.mjs` (new; the acceptance test below as a tool):
+
+| build | VS screen (0xB820 → 0xC34C) | attract Death Egg (0x5320C → 0x541DC) |
+|---|---|---|
+| master | 65 frames, 58,800 samples = **904.6**/frame | 736.6/frame |
+| master `--live-timers` | 802.8/frame | — |
+| branch (also with `--live-timers` and `--steps-per-slice 150000`) | **735.0**/frame | 735.0/frame |
+
+- **`SOUND_AHEAD_MAX` left at 735.** Three MIDI bytes cross the VS screen, with no
+  catch-up steps and none held back. The cap does not bind here. Raise it only if a
+  state that sends a burst during a long frame shows holds.
+- **`--live-timers` does not make the frames shorter.** It is still 65 frames and the
+  same 9.01M instructions, so the long frames are not an artefact of frozen timers.
+  Sound per slice was simply wrong, not accidentally right.
+- `match-replay` against a fresh MAME reference gives the same result on master and
+  the branch: the same fight over 1299 frames, the known residuals from +321, and
+  byte-identical reports. (The harness itself wanders: the replay stage loads on
+  frame 198, 199, 255 or 573 from run to run, on either build. Only the 198 runs
+  compare.)
+- `grade-reset` passes (22/22), and `det_digest`'s traced slice matches the plain one
+  over 1500 frames. `mem/i960/cop/m68k/emu/net/tile` ctests pass.
+
+**Still to do** from the list below: `grade-osage`; a MAME sound capture *through a
+load*; `det_digest` in the wasm tree; and a listen for ring underruns through the VS
+screen on the ARC-S. The drive.mjs warning about frame-hook breakpoints now applies
+only to the timers.
+
 ---
 
 ## What is wrong

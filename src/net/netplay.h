@@ -138,8 +138,11 @@
  * 4: the sound UART's interrupt is taken when the game enables it, not once a
  *    slice (emu_thread.h, "The sound UART"), so the i960 runs its sound handler
  *    at different points in the frame from a board before it.
+ * 5: the sound board is charged a frame of samples when the game's frame ends,
+ *    not once a slice (emu_thread.h, emu_sound_slice_end), so across a frame
+ *    that spans several slices it runs fewer samples than a board before it.
  */
-#define NETPLAY_PROTO_REV 4
+#define NETPLAY_PROTO_REV 5
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

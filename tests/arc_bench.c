@@ -262,6 +262,7 @@ __attribute__((noinline)) static void emu_slice(void) {
     emu_service_irq(&ctx);
     int i;
     bool prof = g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to;
+    uint64_t steps = 0;
     for (i = 0;
          i < g_emu_steps_per_slice && !g_frame_done
          && !(board_vblank && g_vblank_acked) && !cpu.halted;
@@ -271,6 +272,7 @@ __attribute__((noinline)) static void emu_slice(void) {
         if (bp_check(cpu.sfr.ip)) break;
         if (i960_step_hot(&cpu, &bus) != 0) break;
         ctx.total_steps++;
+        steps++;
         if (s_irq_in_service && g_active_profile) emu_service_sound_again(&ctx);
         if (g_irqt_live) emu_timers_after_step(&ctx);
         if (g_log.warn_triggered) break;
@@ -279,7 +281,7 @@ __attribute__((noinline)) static void emu_slice(void) {
     }
     bool frame = g_frame_done || (board_vblank && g_vblank_acked);
     if (frame) { emu_timers_frame_edge(&ctx); dl_frame_edge(&bus, g_emu_frames); emu_match_replay_edge(&ctx); }
-    if (g_with_68k) sound_run_slice(EMU_SLICES_PER_SEC);
+    if (g_with_68k) emu_sound_slice_end(frame, steps);
     if (q->geo_displaylist) geodl_capture(&bus);
     ctx.cpu_prev_snapshot = ctx.cpu_snapshot;
     ctx.cpu_snapshot      = cpu;

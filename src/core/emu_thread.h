@@ -173,6 +173,7 @@ static inline void emu_sleep_us(int64_t us) {
  * the injected frame. Also poke the per-game warning-skip flag. */
 static bool s_irq_in_service     = false;
 static int  s_irq_baseline_depth = 0;
+static uint64_t s_frame_steps    = 0;   /* i960 instructions since the last frame edge (emu_sound_slice_end) */
 
 /* Warning-screen auto-skip. ON normally; turn OFF to keep our attract timeline
  * frame-aligned with MAME (which shows the warning for its full duration) when
@@ -229,6 +230,7 @@ static inline void emu_board_reset_state(void) {
     g_versus_result      = 0;
     g_vblank_acked       = 0;
     g_emu_frames         = 0;
+    s_frame_steps        = 0;
     /* The frame number restarts with the board; the sample clock does not —
      * g_sound.out_total survives a reset, and an A/V client mid-stream would
      * hear the seam as a jump backwards in time. */
@@ -374,6 +376,37 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
     if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FCu) &&
             g_active_profile && g_active_profile->quirks.irq_handler[2])
         emu_service_irq(ctx);
+}
+
+/* ---- The sound board against the game's frames ----------------------------
+ *
+ * The sound board is charged a frame of samples when the game's frame ENDS, not
+ * once per slice (SLICE-CLOCKS.md). A frame that needs more than a slice of
+ * i960 instructions -- STF's texture loads, where unpack_lod_data wants ~1.1M --
+ * spans two or three slices, and charging each of them a whole frame ran the
+ * music ~21% fast across the VS screen: 891 samples a frame against 735.
+ *
+ * Mid-frame the board still advances as far as the MIDI conversation needs:
+ * sound_make_midi_room runs it early and `ahead` owes those samples back at the
+ * edge. What it no longer does is gain time.
+ *
+ * A board that never reaches a frame edge -- still booting, stuck in its own
+ * loop, or a profile with no frame hook -- would then never run its sound at
+ * all. So once a frame has run EMU_FRAME_STEPS_MAX instructions it is not
+ * treated as a frame any more, and each further slice is charged a frame's
+ * samples as before. The count is instructions, not slices or wall time, so the
+ * rule is the same at any --steps-per-slice and on every machine of a netplay
+ * session. STF's worst load frame is ~1.5M. */
+#define EMU_FRAME_STEPS_MAX 4000000u
+
+/* End of a slice: `frame` if the game's frame ended in it, `steps` the
+ * instructions it ran. Returns whether the sound board was charged. */
+static inline bool emu_sound_slice_end(bool frame, uint64_t steps) {
+    s_frame_steps += steps;
+    if (!frame && s_frame_steps < EMU_FRAME_STEPS_MAX) return false;
+    if (frame) s_frame_steps = 0;
+    sound_run_slice(EMU_SLICES_PER_SEC);
+    return true;
 }
 
 /* ---- Run loop ------------------------------------------------------------ */
@@ -524,18 +557,20 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->slice_capped = (i >= max_steps);
     /* The game's frame ended on the instruction the loop stopped at, so
      * this is between two frames' display lists: mark it for a capture. */
-    if (g_frame_done || (board_vblank && g_vblank_acked)) {
+    bool frame = g_frame_done || (board_vblank && g_vblank_acked);
+    if (frame) {
         emu_timers_frame_edge(ctx);
         dl_frame_edge(ctx->bus, g_emu_frames);
         emu_match_replay_edge(ctx);
     }
 
-    /* The sound board runs on its own sample clock: a slice's worth of
-     * 44.1 kHz samples, the 68000 in lockstep with the SCSP. */
+    /* The sound board runs on its own sample clock: a frame's worth of
+     * 44.1 kHz samples when the frame ends, the 68000 in lockstep with the
+     * SCSP (see emu_sound_slice_end). */
 #ifdef M2HLE_PROFILE
     int64_t snd_t0 = g_pcprof_on ? emu_now_us() : 0;
 #endif
-    sound_run_slice(EMU_SLICES_PER_SEC);
+    emu_sound_slice_end(frame, steps);
 #ifdef M2HLE_PROFILE
     if (g_pcprof_on) g_pcprof.sound_us += emu_now_us() - snd_t0;
 #endif

@@ -135,6 +135,7 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
     }
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);
+    uint64_t steps = 0;
     for (int i = 0; i < g_emu_steps_per_slice && !g_frame_done && !(board_vblank && g_vblank_acked)
                     && !ctx->request_stop && !ctx->cpu->halted; i++) {
         if (ctx->step_over_bp) ctx->step_over_bp = 0;
@@ -142,6 +143,7 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
         uint32_t ip = ctx->cpu->sfr.ip;
         if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
         ctx->total_steps++;
+        steps++;
         const i960_cpu_t *c = ctx->cpu;
         uint64_t h = fnv(FNV0, c->globals.g, sizeof c->globals.g);
         h = fnv(h, c->locals.r, sizeof c->locals.r);
@@ -154,12 +156,13 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
         if (g_wp.hit) break;
         if (g_sharc.unknown_triggered) break;
     }
-    if (g_frame_done || (board_vblank && g_vblank_acked)) {
+    bool frame = g_frame_done || (board_vblank && g_vblank_acked);
+    if (frame) {
         emu_timers_frame_edge(ctx);
         dl_frame_edge(ctx->bus, g_emu_frames);
         emu_match_replay_edge(ctx);
     }
-    sound_run_slice(EMU_SLICES_PER_SEC);
+    emu_sound_slice_end(frame, steps);
     if (g_active_profile->quirks.geo_displaylist) geodl_capture(ctx->bus);
     ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
     ctx->cpu_snapshot      = *ctx->cpu;

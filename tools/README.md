@@ -748,6 +748,21 @@ would move it is the 68000 + SCSP (see the sound board, below), not these routin
 The step-loop work above is worth +0.3% here, which is the same change measured
 against a state where the i960 is under half the time.
 
+### Does the sound board keep time with the frames?
+
+`clock-state.mjs` drives to the same windows and reads the frame counter and the
+SCSP's sample counter either side (plus the MIDI traffic: bytes, catch-up steps, bytes
+held to a later slice). The answer should be 735 samples a frame (44100 / 60)
+everywhere. It is not a timing, so one run per build is the measurement.
+
+    node tools/clock-state.mjs buildA/m2hle.exe buildB/m2hle.exe --state round-mask
+    node tools/clock-state.mjs build/m2hle.exe --state round-mask --args "--live-timers"
+
+Before `emu_sound_slice_end` the sound board was charged a frame per *slice*, and the
+VS screen's 65 frames spanned 80 slices: 904.6 samples a frame (802.8 with
+`--live-timers`), the music ~23% fast through the load. It is 735.0 now, at any
+`--steps-per-slice`. See `SLICE-CLOCKS.md`.
+
 ## Two builds, one board
 
 Any "does this change the emulation?" question — an optimisation, a long-lived

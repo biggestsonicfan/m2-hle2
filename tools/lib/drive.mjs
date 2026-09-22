@@ -8,9 +8,10 @@
  * is not: do NOT drive a fight frame by frame off a breakpoint on the frame
  * hook, the way ab-builds counts frames. The hook fires BEFORE the instruction
  * that ends the frame, so each game frame then takes two slices — and a slice
- * charges the board timers and the sound board a whole frame each
- * (emu_timers_slice_begin, sound_run_slice), so the board's clocks run at twice
- * the video rate. Attract and character select are timed off those clocks, and
+ * charges the board timers a whole frame each (emu_timers_slice_begin), so the
+ * board's timers run at twice the video rate. (The sound board is charged at
+ * the frame edge now, emu_sound_slice_end, and no longer skews this way; the
+ * frozen timers still do.) Attract and character select are timed off those clocks, and
  * a coin script written for a free-running board never gets through: measured
  * here, 12,000 frames of coins and Start with the game still in attract.
  * ab-builds gets away with it because it only hashes, and both of its builds
