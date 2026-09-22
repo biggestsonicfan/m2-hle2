@@ -29,9 +29,7 @@ html, body {
   html, body { height: 100dvh; }
 }
 
-/* A column: the canvas takes what the key legend leaves. The legend gets a row
- * of its own rather than floating over the canvas, because the game draws its
- * own text (CREDIT, the timer) right up to the bottom edge of the picture. */
+/* A column: the canvas takes what the tools drawer leaves. */
 body {
   display: flex;
   flex-direction: column;
@@ -61,7 +59,7 @@ body {
   text-align: center;
 }
 
-.panel[hidden], section[hidden], .keys[hidden], p[hidden] { display: none; }
+.panel[hidden], section[hidden], p[hidden] { display: none; }
 
 h1 {
   margin: 0 0 0.75rem;
@@ -100,26 +98,23 @@ code {
 .fine { margin: 1.1rem 0 0; font-size: 0.8125rem; color: var(--dim); }
 .fine.build { margin-top: 0.4rem; opacity: 0.6; }
 
-/* The bottom row: the key legend once a game is running, and the two tools. */
+/* The tools: a small cluster floating in the top-right corner, over the canvas,
+ * so the game has the whole window. Usually that corner is the letterbox; where
+ * it is the picture, the cluster stays faint until the pointer or focus is on it. */
 .bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.35rem 0.75rem;
-  background: #000;
-  font-size: 0.8125rem;
+  position: fixed;
+  top: 0.4rem;
+  right: 0.4rem;
+  z-index: 4;
+  font-size: 0.75rem;
   color: var(--dim);
+  opacity: 0.35;
+  transition: opacity 0.15s;
 }
-.keys {
-  flex: 1 1 auto;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.35rem 1.1rem;
-}
-.keys[hidden] { display: none; }
-.bar-tools { margin-left: auto; display: flex; gap: 0.4rem; }
+.bar:hover, .bar:focus-within { opacity: 1; }
+.bar-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.3rem; }
+.bar .tool { padding: 0.15rem 0.5rem; background: rgba(20, 26, 41, 0.85); }
+.bar:has([aria-expanded="true"]), .bar:has(.online-btn.live) { opacity: 1; }
 
 .tool {
   padding: 0.25rem 0.7rem;
@@ -261,9 +256,9 @@ kbd {
 /* ---- Playing online (m2hle-netplay.js) ---- */
 .online {
   position: fixed;
-  top: 0.75rem;
+  top: 2.4rem;
   right: 0.75rem;
-  bottom: 3rem;
+  bottom: 0.75rem;
   width: min(24rem, calc(100vw - 1.5rem));
   overflow: auto;
   padding: 1rem 1.25rem 1.25rem;
@@ -429,19 +424,16 @@ a.tool.github { display: inline-flex; align-items: center; gap: 0.35rem; color: 
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
   font-size: 0.875rem;
 }
-.touch-edit.bottom { top: auto; bottom: 3rem; }
+.touch-edit.bottom { top: auto; bottom: 0.5rem; }
 .te-hint { margin: 0 0 0.4rem; color: var(--dim); }
 .te-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem 0.8rem; margin-top: 0.35rem; }
 .te-row label { display: flex; align-items: center; gap: 0.35rem; color: var(--dim); }
 .te-row input[type="range"] { width: 6.5rem; }
 .te-what { flex: 0 0 6rem; font-weight: 600; }
 
-/* A phone: the key legend is no use without keys, and the tools have to fit. */
-body.touch-on .keys { display: none; }
-body.touch-on .bar-tools { margin-left: auto; }
+/* A phone: the tools have to fit. */
 @media (max-width: 640px) {
-  .bar { gap: 0.5rem; padding: 0.3rem 0.5rem; }
-  .bar-tools { flex-wrap: wrap; justify-content: flex-end; }
+  .bar-tools { max-width: calc(100vw - 0.8rem); }
   a.tool.github span { display: none; }
   .te-what { flex-basis: 100%; }
 }

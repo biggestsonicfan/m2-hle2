@@ -555,7 +555,7 @@ const m2hleTools = (() => {
     }
     $('render-scale').addEventListener('change', (e) => setRenderScale(Number(e.target.value)));
     /* sokol_app re-measures the canvas when the WINDOW resizes, and only then. The
-     * drawer (and the key legend) change the canvas's size without that, and the old
+     * drawer changes the canvas's size without that, and the old
      * drawing buffer gets stretched into the new box: a squashed picture. Tell it. */
     if (window.ResizeObserver) {
       new ResizeObserver(() => window.dispatchEvent(new Event('resize'))).observe($('canvas'));

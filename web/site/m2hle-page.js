@@ -70,7 +70,6 @@ function loadZip(bytes) {
       return;
     }
     $('panel').hidden = true;
-    $('keys').hidden = false;
     keepRunning();
     m2hleNetplay.onGame();
     m2hleTouch.onGame();
