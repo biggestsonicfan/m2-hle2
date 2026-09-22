@@ -127,6 +127,7 @@ typedef struct {
     uint8_t     mi[32], mi_r, mi_w;
     uint32_t    mi_drops;        /* MIDI bytes lost to a full input ring (see scsp_midi_in) */
     uint8_t     mi_hi;           /* high-water fill of that ring, to see how close it gets */
+    uint64_t    mi_taken;        /* bytes the 68000 has read out of that ring */
     uint8_t     mo[32], mo_r, mo_w;
     uint16_t    tim_cnt[3];      /* MAME: 0xFFFF once expired, reload << 8 after a write */
     uint64_t    tim_due[3];      /* expiry, in clock periods of *clock; 0 = not running */
@@ -829,7 +830,7 @@ static uint16_t scsp_r16(scsp_t *s, uint32_t addr) {
         switch (r) {
         case 0x02: {                                    /* MIDI in */
             uint16_t v = (uint16_t)((s->c[0x02] & 0xFF00) | s->mi[s->mi_r]);
-            if (s->mi_r != s->mi_w) s->mi_r = (uint8_t)((s->mi_r + 1) & 31);
+            if (s->mi_r != s->mi_w) { s->mi_r = (uint8_t)((s->mi_r + 1) & 31); s->mi_taken++; }
             if (s->mi_r == s->mi_w) {
                 s->lines &= (uint8_t)~(1u << s->lvl_midi);
                 s->c[0x10] &= (uint16_t)~0x08;

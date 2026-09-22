@@ -648,6 +648,26 @@ rather than a late refill -- the window address is fixed per slot, so a reload
 copies over it from offset 0 with the old sample still releasing, and no register
 changes to mark it.
 
+### Which commands reached the board (`sound_codes`)
+
+`{"cmd":"sound_codes","since":N}` returns every command the i960 has sent the
+sound UART since command N (a 512-deep ring), framed as the driver frames them:
+a status byte and two data bytes, so `0xAE1004` is South Island's BGM. A lone
+data byte, or a status cut short, comes back with bit 31 set. Beside them:
+`sent` and `taken` (UART bytes written, and read out of the SCSP's MIDI buffer
+by the 68000), `midi_drops`, `midi_holds` (bytes that waited a slice for room),
+and `queue_hi`, the deepest the game's own queue has
+been.
+
+That is how the "wrong music on some stages" report was taken apart
+(2026-09-22). Pinned stages showed the i960 sending the right code, and a MAME
+run that fed each BGM code straight into the UART with the i960 suspended showed
+the 68000 playing the right song for it: identical key-ons in all 13 songs. What
+was left was the path between, and `sound_codes` in a mashed two-player session
+showed commands arriving as `00 00 00` and `0D B1 A8`. The cause was the ROM's
+queue overlapping other variables, exposed because the emulator took the sound
+interrupt only once a slice. CLAUDE.md has it under the sound board.
+
 ## The netplay reset
 
 A netplay session is a cold boot on both machines, so the reset at the barrier

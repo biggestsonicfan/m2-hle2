@@ -717,6 +717,41 @@ static void mcp_cmd_dump_midi_log(char *resp, int cap) {
 #undef MAPPEND
 }
 
+/* sound_codes {since}: the commands the i960 has sent the sound board
+ * (board/sound.h code_log), oldest first, from command number `since` on.
+ * `next` is what to pass as `since` to read on (a reply that runs out of room
+ * stops early and says so there); `lost` is how many asked for had already
+ * left the ring. `sent` and `taken` are UART bytes the i960 wrote and bytes
+ * the 68000 read out of the SCSP's MIDI buffer: equal once the driver has
+ * caught up, and a gap that stays is bytes lost. */
+static void mcp_cmd_sound_codes(const char *req, char *resp, int cap) {
+    char *p = resp; int left = cap, n;
+#define CAPPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); p += n; left -= n; } while(0)
+    uint32_t total = g_sound.code_n;
+    uint32_t first = total > SOUND_CODE_LOG ? total - SOUND_CODE_LOG : 0;
+    int asked = 0;
+    mcp_json_get_int(req, "since", &asked);
+    uint32_t since = asked < 0 ? 0 : (uint32_t)asked > total ? total : (uint32_t)asked;
+    uint32_t lost = since < first ? first - since : 0;
+    if (since < first) since = first;
+    uint32_t end = since;
+    while (end < total && end - since < 400) end++;     /* ~40 bytes a record */
+    const scsp_t *sc = &g_sound.scsp;
+    CAPPEND("{\"ok\":true,\"next\":%u,\"total\":%u,\"lost\":%u,\"sent\":%llu,\"taken\":%llu,"
+            "\"midi_drops\":%u,\"midi_hi\":%u,\"midi_drains\":%llu,\"midi_holds\":%llu,\"queue_hi\":%u,\"sample\":%llu,\"codes\":[",
+            end, total, lost, (unsigned long long)g_sound.write_count, (unsigned long long)sc->mi_taken,
+            sc->mi_drops, sc->mi_hi, (unsigned long long)g_sound.midi_drains,
+            (unsigned long long)g_sound.midi_holds, g_sound.queue_hi,
+            (unsigned long long)g_sound.out_total);
+    for (uint32_t i = since; i < end; i++) {
+        uint32_t k = i & (SOUND_CODE_LOG - 1);
+        CAPPEND("%s[\"0x%08X\",%llu]", i == since ? "" : ",", g_sound.code_log[k].code,
+                (unsigned long long)g_sound.code_log[k].sample);
+    }
+    CAPPEND("]}");
+#undef CAPPEND
+}
+
 static void mcp_cmd_dump_bones(char *resp, int cap) {
     char *p = resp; int left = cap, n;
 #define BAPPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); p += n; left -= n; } while(0)
@@ -1952,6 +1987,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "quit")                     == 0) mcp_cmd_quit(resp, cap);
     else if (strcmp(cmd, "reset_sound")              == 0) mcp_cmd_reset_sound(req, resp, cap);
     else if (strcmp(cmd, "dump_midi_log")            == 0) mcp_cmd_dump_midi_log(resp, cap);
+    else if (strcmp(cmd, "sound_codes")              == 0) mcp_cmd_sound_codes(req, resp, cap);
     else if (strcmp(cmd, "read_wave")                == 0) {   /* sound RAM bytes */
         uint32_t addr=0,len=0; mcp_json_get_u32(req,"addr",&addr); mcp_json_get_u32(req,"len",&len);
         if (len>256) len=256;

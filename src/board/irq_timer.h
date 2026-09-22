@@ -57,7 +57,14 @@ static inline void     irqt_request_ack (uint32_t d)  {
     g_irqt.intreq &= d;                                          /* write = ACK */
 }
 static inline uint32_t irqt_enable_read (void)        { return g_irqt.intena; }
-static inline void     irqt_enable_write(uint32_t d)  { g_irqt.intena = d; }
+/* A write that enables the sound UART's line is where the board would take its
+ * interrupt: TxRDY is already up, so the run loop offers it straight away
+ * (emu_thread.h emu_offer_sound) instead of at the next slice. */
+static volatile int g_irqt_sound_kick = 0;
+static inline void     irqt_enable_write(uint32_t d)  {
+    if (d & ~g_irqt.intena & 0x0C00u) g_irqt_sound_kick = 1;
+    g_irqt.intena = d;
+}
 
 /* Assert a pending bit (from timer expiry / vblank / sound UART). */
 static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
@@ -147,6 +154,7 @@ static inline void irqt_reset(void) {
     }
     g_irqt.intreq = 0;
     g_irqt.intena = 0;
+    g_irqt_sound_kick = 0;
     g_irqt.pending = 0;
     g_irqt.horizon = INT64_MAX;
 }

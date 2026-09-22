@@ -125,7 +125,43 @@ int main(void) {
         t0 = g_sound.out_total;
         sound_run(64);
         CHECK(g_sound.out_total == t0 + 64, "attached again: the board runs");
+
+        /* Backpressure (sound_make_midi_room). This 68000 never reads MIDI, so
+         * the ring fills: 31 bytes fit, and the 32nd runs the board early -- at
+         * most a slice -- and is then dropped and counted. The samples run early
+         * belong to the slice and are owed back, so the clock comes out exact. */
+        sound_reset();
+        t0 = g_sound.out_total;
+        for (int i = 0; i < 31; i++) mem_write8(&bus, MIDI_BASE, 0x10);
+        CHECK(scsp_midi_room(&g_sound.scsp) == 0 && g_sound.out_total == t0,
+              "backpressure: 31 bytes fill the MIDI ring without running the board");
+        mem_write8(&bus, MIDI_BASE, 0x11);
+        CHECK(g_sound.scsp.mi_drops == 1, "backpressure: a byte the driver never takes is dropped and counted");
+        CHECK(g_sound.ahead > 0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
+              g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
+              "backpressure: the board ran early, by no more than a slice");
+        sound_run_slice(60);
+        CHECK(g_sound.ahead == 0 && g_sound.out_total == t0 + 735,
+              "backpressure: the slice owes the early samples back (735 in all)");
+        sound_run_slice(60);
+        CHECK(g_sound.out_total == t0 + 1470, "backpressure: the next slice is a whole one");
+        sound_reset();
+        CHECK(g_sound.ahead == 0 && g_sound.slice_frac == 0,
+              "sound_reset clears the slice carry (two cold-booted boards must agree)");
     }
+
+    /* The sound UART's interrupt is offered when the game enables its line
+     * (emu_offer_sound), so the enable write kicks -- on the rising edge only. */
+    irqt_reset();
+    irqt_enable_write(0x021);
+    CHECK(!g_irqt_sound_kick, "irq kick: enabling other lines does not kick the sound pin");
+    irqt_enable_write(0x421);
+    CHECK(g_irqt_sound_kick, "irq kick: enabling the sound line kicks it");
+    g_irqt_sound_kick = 0;
+    irqt_enable_write(0x421);
+    CHECK(!g_irqt_sound_kick, "irq kick: rewriting an enabled line does not");
+    irqt_reset();
+    CHECK(!g_irqt_sound_kick, "irq kick: irqt_reset clears it");
 
     mem_shutdown(&bus);
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

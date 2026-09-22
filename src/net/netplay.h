@@ -135,8 +135,11 @@
  * 3: VS mode (a rematch on the running boards, room.h) and the room state's
  *    vs_mode / session fields; and STF Console boots on free play, which a
  *    board from before it does not.
+ * 4: the sound UART's interrupt is taken when the game enables it, not once a
+ *    slice (emu_thread.h, "The sound UART"), so the i960 runs its sound handler
+ *    at different points in the frame from a board before it.
  */
-#define NETPLAY_PROTO_REV 3
+#define NETPLAY_PROTO_REV 4
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
