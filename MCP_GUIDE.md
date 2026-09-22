@@ -498,7 +498,11 @@ token is kept, not cleared.
 Every command from here down answers at once with `queued` (the verb) and the
 current `state`; poll `netplay_status` for the result.
 
-**`netplay_host(delay, room_pass)`** — take a room. 2 slots; host is always P1.
+**`netplay_host(delay, room_pass, max_players)`** — take a room for 2..8 (default 2).
+In a room of more than two, two fight and the rest wait in line and watch; the
+winner stays on and the loser goes to the back (`net/room.h`). The room's owner
+starts the first match once every player has pressed `netplay_start`, and after
+that the room rolls on by itself on a countdown.
 **`netplay_join(room_id, room_pass)`** — join one. `room_id` is a string.
 Straight after sign-in, both wait until RPCN's signaling helper has answered
 (at most 4 s; the log says "waiting for the server to learn this machine's
@@ -509,6 +513,18 @@ that line.
 **`netplay_stop()`** — leave the match, keep the room, so the next challenger
 has one to join.
 **`netplay_disconnect()`** — give the room back and drop the session.
+**`netplay_leave()`** — leave the room and stay signed in.
+**`netplay_entry(entry)`** — 0 either side, 1 "1P Entry", 2 "2P Entry": jump the
+line for that side.
+**`netplay_watch(watch)`** — 1 sits out (never picked to fight), 0 comes back.
+**`netplay_force_start()`** — the room's owner only: start the next match now.
+
+`netplay_status` carries a `room` object: `phase` ("lobby"/"match"), `match`,
+`fighters` (member ids on 1P and 2P), `last_result` (0 = 1P won), `auto_start_s`,
+`max`, `me`, and `members` in line order, each with `id`, `npid`, `line`,
+`side` (0/1, -1 when not fighting), `ready`, `watch`, `entry`, `games`, `wins`,
+`points` and whether we hear them. `state` is "watching" while this board runs
+somebody else's match; `player` is then 2.
 
 **`netplay_start()`** — **accept.** Begin (or restart) a lockstepped session.
 Refused until this end is in a room.

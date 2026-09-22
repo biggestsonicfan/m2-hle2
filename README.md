@@ -186,6 +186,15 @@ datagram repairs itself, and the frame delay (default 2) buys that much network 
 either side has to stall. Whichever key set you press locally drives *your* side of the cabinet,
 so the guest plays on P2 without rebinding anything.
 
+**A room can hold up to eight.** Two fight and the rest wait in line and watch — their boards
+reset with the fighters' and run the same match from the same inputs, so watching costs nobody
+any lag. After every result the winner stays on their side and goes to the front of the line, the
+loser goes to the back, and the next match starts on its own after a short countdown. Anyone can
+ask for the 1P or 2P side ("1P Entry" / "2P Entry"), which jumps the line for that side, or sit
+out and only watch. These are the rules of the PS3 port's Room Match, read out of its code
+([ROOM-MATCH.md](ROOM-MATCH.md)); the room's owner runs them, and if the owner leaves, somebody
+else in the room carries on. A two-seat room is the plain one-on-one it always was.
+
 **Lobbies are per-game.** RPCN partitions everything by Communication ID, so each ROM set gets
 one of its own (`M2HSNCFTR_00` for Sonic The Fighters) rather than every Model 2 game sharing a
 list. The browser also shows YAMP's rooms for the same arcade game, greyed out and unjoinable:
@@ -201,6 +210,8 @@ Scriptable without the GUI, which is how it gets tested:
 m2hle --rom sfight.zip --run --netplay       --net-server <host> --net-user <name> --net-pass <password> --net-host --net-start
 m2hle --rom sfight.zip --run --netplay       --net-server <host> --net-user <other> --net-pass <password> --net-join <room id> --net-start
 ```
+
+`--net-players N` makes the hosted room hold N (2..8).
 
 **Or without a person at the keyboard.** The same buttons are on the MCP bridge
 (`netplay_status`, `netplay_connect`, `netplay_host`, `netplay_start`, ...), which is enough to

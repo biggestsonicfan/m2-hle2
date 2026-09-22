@@ -1299,6 +1299,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_net_cli.local_p2p_port = (uint16_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--net-host") == 0) {
             g_net_auto = 1;
+        } else if (strcmp(argv[i], "--net-players") == 0 && i + 1 < argc) {
+            /* The room --net-host makes holds this many (2..8): two fight, the
+             * rest wait in line and watch (net/room.h). */
+            g_net_cli.max_players = (uint32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--net-join") == 0 && i + 1 < argc) {
             g_net_auto = 2;
 #ifdef _WIN32
