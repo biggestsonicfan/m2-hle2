@@ -31,6 +31,7 @@
 #include "objview_cmd.h"  /* the object viewer's commands, shared with the web build */
 #include "av_stream.h"    /* the --av-port server, for the "av" block of get_status */
 #include "overlay_host.h" /* ...and the "overlay" block: is the plugin actually running */
+#include "frame_times.h"  /* ...and "render": where the host's frame time goes */
 /* Before this header's own winsock block, and before anything else that could
  * reach <windows.h>: net_socket.h owns the include order and <winsock2.h> has
  * to precede it. main.c already includes this first, so here it is a no-op --
@@ -135,19 +136,29 @@ static void mcp_cmd_get_status(char *resp, int cap) {
      * between a puzzled look at a blank column and a one-line message. */
     char ov[256];
     overlay_host_status_json(ov, (int)sizeof ov);
+    /* Where the host's rendering time has gone, cumulative: two readings some
+     * seconds apart give the cost of each stage per rendered frame, which is
+     * how a change to the renderer is measured (tools/bench-render.mjs). */
+    const game_frame_times_t *ft = &g_game_frame_times;
+    char rt[256];
+    snprintf(rt, sizeof rt,
+             "{\"frames\":%llu,\"compose_us\":%lld,\"scan_us\":%lld,\"upload_us\":%lld,"
+             "\"draw3d_us\":%lld,\"tiles_us\":%lld}",
+             (unsigned long long)ft->frames, (long long)ft->compose_us, (long long)ft->scan_us,
+             (long long)ft->upload_us, (long long)ft->draw3d_us, (long long)ft->tiles_us);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
-             "\"av\":%s,\"overlay\":%s}",
+             "\"av\":%s,\"overlay\":%s,\"render\":%s}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, profile_id,
              g_emu_frames,
              (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame, av, ov);
+             g_match_replay_frame, av, ov, rt);
 }
 
 /* match_replay: arm the jump from attract mode's intro movie straight to its
