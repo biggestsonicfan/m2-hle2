@@ -3,13 +3,17 @@
  *
  * scsp_dsp_step was rewritten for the handhelds' in-order cores (the decoded
  * op now holds the step's choices as flags it selects on, and writes a step
- * does not make go to spare slots). The step it replaced is kept here verbatim
- * as the reference, and both run random microprograms over random registers,
- * sound RAM and ring buffers, compared after every sample: EFREG, TEMP, MEMS,
- * MIXS, DEC and the delay line in sound RAM. STF's own program exercises only
- * some fields, so this is what covers the rest -- TABLE, NOFL, every Y source
- * and shifter mode, a program cut short by a bad IRA, and a program rewritten
- * or lengthened between samples.
+ * does not make go to spare slots), and again to run each step by its kind
+ * (the 32 sets of writes compiled apart, with the rest in one body). The
+ * step before both is kept here verbatim as the reference, and both run
+ * random microprograms over random registers, sound RAM and ring buffers,
+ * compared after every sample: EFREG, TEMP, MEMS, MIXS, DEC and the delay line
+ * in sound RAM. STF's own program exercises only some fields, so this is what
+ * covers the rest -- TABLE, NOFL, every Y source and shifter mode, a program
+ * cut short by a bad IRA, and a program rewritten or lengthened between
+ * samples. Half the random steps are drawn without the fields that send a
+ * step to the general body, so every kind runs too (the count is printed).
+ * The delay line's float pack is also held against MAME's over every input.
  *
  * Build it with SCSP_DSP_MASKS=0 and =1 (CMake does both): the two ways
  * SCSP_SEL is spelled must compute the same bits on every host.
@@ -51,6 +55,8 @@ static void ref_dsp_decode(const scsp_dsp_t *d, ref_op_t *ops) {
         o->masa  = (p[3] >> 2) & 0x1F;  o->adreb = (p[3] >> 1) & 1;  o->nxadr = p[3] & 1;
     }
 }
+
+static uint16_t ref_dsp_pack(int32_t val);
 
 static void ref_dsp_step(scsp_t *s, const ref_op_t *ops) {
     scsp_dsp_t *d = &s->dsp;
@@ -107,13 +113,45 @@ static void ref_dsp_step(scsp_t *s, const ref_op_t *ops) {
             addr <<= 1;
             /* MAME: the delay memory is only touched on odd steps */
             if (o->mrd && (st & 1)) memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
-            if (o->mwt && (st & 1)) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : scsp_dsp_pack(shifted));
+            if (o->mwt && (st & 1)) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : ref_dsp_pack(shifted));
         }
         if (o->adrl) adrs = o->sh == 3 ? (uint32_t)((shifted >> 12) & 0xFFF) : (uint32_t)(inputs >> 16);
         if (o->ewt) d->efreg[o->ewa] = (int16_t)(d->efreg[o->ewa] + (shifted >> 8));
     }
     d->dec--;
     memset(d->mixs, 0, sizeof d->mixs);
+}
+
+/* The delay line's float pack as MAME writes it, verbatim: scsp_dsp_pack now
+ * counts the exponent with a leading-zero count instead of this loop. */
+static uint16_t ref_dsp_pack(int32_t val) {
+    int sign = (val >> 23) & 1;
+    uint32_t temp = ((uint32_t)val ^ ((uint32_t)val << 1)) & 0xFFFFFFu;
+    int exponent = 0;
+    for (int k = 0; k < 12; k++) {
+        if (temp & 0x800000u) break;
+        temp <<= 1;
+        exponent++;
+    }
+    if (exponent < 12) val = (int32_t)(((uint32_t)val << exponent) & 0x3FFFFF);
+    else               val = (int32_t)((uint32_t)val << 11);
+    val >>= 11;
+    val &= 0x7FF;
+    val |= sign << 15;
+    val |= exponent << 11;
+    return (uint16_t)val;
+}
+
+/* Every value the shifter can hand the pack (24-bit signed), and a million
+ * words outside that range for good measure. */
+static void pack_exhaustive(void) {
+    int bad = 0;
+    for (int32_t v = -0x800000; v <= 0x7FFFFF && bad < 5; v++)
+        if (scsp_dsp_pack(v) != ref_dsp_pack(v)) { CHECK(0, "pack(%d): %04X, the loop %04X", v, scsp_dsp_pack(v), ref_dsp_pack(v)); bad++; }
+    for (uint32_t i = 0; i < 1u << 20 && bad < 5; i++) {
+        int32_t v = (int32_t)(i * 2654435761u);
+        if (scsp_dsp_pack(v) != ref_dsp_pack(v)) { CHECK(0, "pack(%08X) differs", (uint32_t)v); bad++; }
+    }
 }
 
 /* ---- random chip state ------------------------------------------------------ */
@@ -129,6 +167,14 @@ static uint32_t rnd32(void) { return (rnd() << 16) ^ rnd(); }
 static void random_step(uint16_t *p) {
     for (int k = 0; k < 4; k++) p[k] = (uint16_t)rnd();
     if ((p[1] >> 6 & 0x3F) > 0x31 && rnd() % 16) p[1] = (uint16_t)((p[1] & ~0x0FC0u) | ((rnd() % 0x32) << 6));
+    /* Half the steps without what makes a step SCSP_DK_ANY -- YRL, FRCL, ADRL,
+     * TABLE, ADREB, NOFL, SHIFT 2/3, YSEL 2/3 -- so each of the other kinds
+     * runs. IW_SELF is left to chance. */
+    if (rnd() & 1) {
+        p[1] &= (uint16_t)~0x4000u;                      /* YSEL 0 or 1 */
+        p[2] &= (uint16_t)~(0x8000u | 0x00C8u | 0x0020u); /* TABLE, ADRL FRCL YRL, SHIFT bit 1 */
+        p[3] &= (uint16_t)~(0x8000u | 0x0002u);          /* NOFL, ADREB */
+    }
 }
 
 static void scenario(scsp_t *s, uint8_t *ram, unsigned seed) {
@@ -174,6 +220,8 @@ int main(void) {
     static uint8_t ram_ours[RAM_MAX], ram_ref[RAM_MAX];
     static ref_op_t ref_ops[128];
     int cut_short = 0, rewritten = 0, samples = 0;
+    static long kind_steps[SCSP_DK_ANY + 1];
+    pack_exhaustive();
     for (unsigned seed = 1; seed <= 400; seed++) {
         scenario(&ours, ram_ours, seed);
         ref = ours;
@@ -208,6 +256,8 @@ int main(void) {
             scsp_dsp_step(&ours);
             ref_dsp_step(&ref, ref_ops);
             samples++;
+            if (!ours.dsp.stopped)
+                for (int st = 0; st < ours.dsp.ops_run; st++) kind_steps[ours.dsp.ops[st].kind]++;
             if (!same_state(&ours, &ref)) {
                 CHECK(0, "seed %u sample %d: DSP registers differ (last_step %d)", seed, n, ref.dsp.last_step);
                 break;
@@ -217,7 +267,14 @@ int main(void) {
         if (g_fail > 10) break;
     }
     CHECK(cut_short > 0, "some program was cut short by a bad IRA");
-    printf("%s: %d samples of 400 random programs (%d cut short, %d changed mid-run), %s selects\n",
-           g_fail ? "FAILED" : "ok", samples, cut_short, rewritten, SCSP_DSP_MASKS ? "mask" : "ternary");
+    long fewest = -1;
+    for (int k = 0; k <= SCSP_DK_ANY; k++) {
+        CHECK(kind_steps[k] > 0, "no step of kind %d ran", k);
+        if (fewest < 0 || kind_steps[k] < fewest) fewest = kind_steps[k];
+    }
+    printf("%s: %d samples of 400 random programs (%d cut short, %d changed mid-run), %s selects; "
+           "every step kind ran (%ld general-body steps, the rarest kind %ld)\n",
+           g_fail ? "FAILED" : "ok", samples, cut_short, rewritten, SCSP_DSP_MASKS ? "mask" : "ternary",
+           kind_steps[SCSP_DK_ANY], fewest);
     return g_fail ? 1 : 0;
 }

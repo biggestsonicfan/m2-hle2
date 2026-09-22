@@ -23,6 +23,25 @@
  * capture tools record. Where that is a MAME choice rather than known hardware
  * it is marked "MAME:" so it can be revisited against a real board.
  *
+ * Two other implementations were read for speed, not behaviour (2026-09-22):
+ *   - Ymir (Saturn; libs/ymir-core/.../hw/scsp) models the chip's own pipeline:
+ *     slots advance in the chip's 7-stage order, the DSP runs 4 steps per slot
+ *     with delay-line reads landing a step late, envelopes step at the chip's
+ *     rates, pan and send levels are shifts rather than tables, and MIXS is
+ *     double-buffered. That is closer to hardware and would change every
+ *     sample against MAME, so none of it is here. What is: its leading-zero
+ *     pack (scsp_dsp_pack) and keeping a slot's register-derived values in the
+ *     slot (the gains, scsp_slot_gains).
+ *   - Supermodel (Model 3; Src/Sound/SCSP*.cpp) is the ElSemi code MAME's came
+ *     from, rendering a frame of samples at a time. Its DSP recompiler
+ *     (DYNDSP) is a stub that is compiled out; the DSP kinds below are the
+ *     portable version of that idea. It differs from MAME on purpose for VF3
+ *     (MDL masked to 0x1E, PLFOS to 0xE, sample addresses to 0x7FFFE, delay
+ *     memory addressed in words and zeroed past 0x7FFFF, no noise source), and
+ *     keeps sound RAM in host byte order so a sample is one load. Ours is the
+ *     68000's big-endian bytes; one load and a byte swap in its place measured
+ *     within noise under MSVC, so the two-byte read stays.
+ *
  * Registers (16-bit, big-endian, offsets from the chip base):
  *   0x000-0x3FF  32 slots x 0x20
  *   0x400-0x42F  common: MVOL, RBL/RBP, MIDI in/out, monitor, DMA, timers,
@@ -37,6 +56,9 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
 
 #define SCSP_SHIFT     12        /* play position: 20.12 samples */
 #define SCSP_EG_SHIFT  16
@@ -65,6 +87,15 @@ typedef struct {
     int32_t    ar, d1r, d2r, rr, dl;
     int        eghold;
     scsp_lfo_t plfo, alfo;
+    /* The slot's output gains, looked up in scsp_lpan / scsp_rpan when TL,
+     * SDIR, IMXL, DISDL/DIPAN or EFSDL/EFPAN are written (scsp_slot_gains)
+     * rather than three or four times a sample: those tables are 256 KB each,
+     * and a voice's index into them changes only with its registers. Ymir
+     * keeps its slots' registers decoded the same way (scsp_slot.hpp). */
+    int32_t    g_mixs;           /* into the DSP's MIXS: TL | IMXL << 13 */
+    int32_t    g_dl, g_dr;       /* direct out: TL | DIPAN << 8 | DISDL << 13 */
+    int32_t    g_sous;           /* into the sound stack: TL (0 with SDIR) | 7 << 13 */
+    int32_t    g_el, g_er;       /* EFREG out (slots 0-15): EFPAN << 8 | EFSDL << 13 */
 } scsp_slot_t;
 
 /* One MPRO step, decoded into what scsp_dsp_step does with it. The program
@@ -77,7 +108,19 @@ typedef struct {
  * in-order core (the handhelds' Cortex-A55) a branch or a byte load per field
  * was most of the DSP's time, so the yes/no choices sit in one word, f, and the
  * step selects between values it has already computed (SCSP_SEL). Writes a
- * step does not make go to a slot nobody reads. */
+ * step does not make go to a slot nobody reads.
+ *
+ * Each step also has a kind, which scsp_dsp_step switches on. A kind is the
+ * set of things the step writes (SCSP_DK_*), and each of the 32 is compiled
+ * with that set as constants, so a step does only its own writes, and a step
+ * that writes nothing (36 of STF's 84) stops at ACC without running the
+ * shifter. The steps a kind covers read Y from COEF or FRC, saturate, and
+ * address the ring as floats; anything else (YRL, FRCL, ADRL, TABLE, ADREB,
+ * NOFL, the wrapping shifter, Y from YREG, IWT into the IRA it reads) is
+ * SCSP_DK_ANY, which runs every choice. A kind is what the program's steps
+ * are, not what a game is: the DSP's time went on the generality of one body
+ * for every step (a program compiled to straight-line code ran 2.4x faster
+ * than that body), and this gets most of it back for any program. */
 enum {
     SCSP_DF_IW_SELF,             /* INPUTS becomes MEMVAL (IWT with IRA == IWA) */
     SCSP_DF_TWT, SCSP_DF_XSEL, SCSP_DF_BSEL, SCSP_DF_ZERO, SCSP_DF_NEGB, SCSP_DF_YRL,
@@ -89,8 +132,17 @@ enum {
 };
 #define SCSP_DM(f, bit) ((int32_t)((uint32_t)(f) << (31 - (bit))) >> 31)   /* flag -> 0 / ~0 */
 
+/* kinds: the writes a step makes, or SCSP_DK_ANY */
+#define SCSP_DK_TWT 1
+#define SCSP_DK_MRD 2
+#define SCSP_DK_MWT 4
+#define SCSP_DK_IWT 8
+#define SCSP_DK_EWT 16
+#define SCSP_DK_ANY 32
+
 typedef struct {
     uint32_t f;                  /* SCSP_DF_* */
+    uint8_t  kind;               /* SCSP_DK_* */
     uint8_t  ira;                /* index into the step's input bank: MEMS, MIXS, EXTS */
     uint8_t  tra, twa, coef, masa;
     uint8_t  iwa;                /* 0x3F (a bank slot nothing reads) when the step writes no MEMS */
@@ -283,6 +335,18 @@ static void scsp_tables_init(void) {
 
 /* ---- slots ----------------------------------------------------------------- */
 
+static inline void scsp_slot_gains(scsp_slot_t *sl) {
+    uint32_t tl = SCSP_TL(sl);
+    uint32_t dir = tl | SCSP_DIPAN(sl) << 8 | SCSP_DISDL(sl) << 13;
+    uint32_t eff = SCSP_EFPAN(sl) << 8 | SCSP_EFSDL(sl) << 13;
+    sl->g_mixs = scsp_lpan[tl | SCSP_IMXL(sl) << 13];
+    sl->g_dl   = scsp_lpan[dir];
+    sl->g_dr   = scsp_rpan[dir];
+    sl->g_sous = scsp_lpan[(SCSP_SDIR(sl) ? 0 : tl) | 7u << 13];
+    sl->g_el   = scsp_lpan[eff];
+    sl->g_er   = scsp_rpan[eff];
+}
+
 static inline uint32_t scsp_slot_step(const scsp_slot_t *sl) {
     int oct = ((int)SCSP_OCT(sl) ^ 8) - 8 + SCSP_SHIFT - 10;
     uint32_t fn = SCSP_FNS(sl) + (1u << 10);
@@ -371,7 +435,9 @@ static inline uint8_t scsp_ram_b(const scsp_t *s, uint32_t a) {
     return a < s->ram_size ? s->ram[a] : 0;
 }
 static inline uint16_t scsp_ram_w(const scsp_t *s, uint32_t a) {
-    return (uint16_t)((scsp_ram_b(s, a) << 8) | scsp_ram_b(s, a + 1));
+    a &= 0xFFFFFu;
+    if (a + 1 < s->ram_size) return (uint16_t)((s->ram[a] << 8) | s->ram[a + 1]);
+    return (uint16_t)((scsp_ram_b(s, a) << 8) | scsp_ram_b(s, a + 1));   /* the end of RAM, or past it */
 }
 static inline void scsp_ram_ww(scsp_t *s, uint32_t a, uint16_t v) {
     a &= 0xFFFFFu;
@@ -475,10 +541,7 @@ static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous) {
         else
             sample = (int32_t)(((int64_t)sample * scsp_eg_table[scsp_eg_update(sl) >> (SCSP_SHIFT - 10)]) >> SCSP_SHIFT);
     }
-    if (!SCSP_STWINH(sl)) {
-        uint16_t enc = (uint16_t)((SCSP_SDIR(sl) ? 0 : SCSP_TL(sl)) | (7u << 13));
-        *sous = (int16_t)((sample * scsp_lpan[enc]) >> (SCSP_SHIFT + 1));
-    }
+    if (!SCSP_STWINH(sl)) *sous = (int16_t)((sample * sl->g_sous) >> (SCSP_SHIFT + 1));
     return sample;
 }
 
@@ -486,22 +549,38 @@ static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous) {
 
 static inline int32_t scsp_sext(int32_t v, int bits) { return (int32_t)((uint32_t)v << (32 - bits)) >> (32 - bits); }
 
+/* leading zeros of a non-zero word */
+static inline int scsp_clz32(uint32_t v) {
+#if defined(_MSC_VER) && !defined(__clang__)
+    unsigned long i;
+    _BitScanReverse(&i, v);
+    return 31 - (int)i;
+#else
+    return __builtin_clz(v);
+#endif
+}
+
+/* The delay line's 16-bit float, MAME's format.
+ *
+ * pack runs on every delay-line write (ten a sample in STF's reverb). Its
+ * exponent is how many of bits 23..12 of val ^ (val << 1) are clear above the
+ * first one set. MAME counts them in a loop of up to 12. A leading-zero count
+ * gives the same number, with bit 11 set as a stop so it never passes 12
+ * (Ymir's IntToFloat, scsp_dsp.hpp). The mantissa is bits 21..11 of
+ * val << exponent, except at exponent 12, where MAME's arithmetic comes to
+ * val's low 11 bits, i.e. a shift of 11. tests/scsp_dsp_test.c holds it
+ * against MAME's loop over every 24-bit input.
+ *
+ * unpack stays as MAME writes it. A branchless one (Ymir's FloatToInt shape)
+ * was 2% slower under MSVC: the exponent of any one tap drifts slowly, so the
+ * branch predicts, and a predicted branch lets the read's consumers start
+ * before the exponent is known. */
 static uint16_t scsp_dsp_pack(int32_t val) {
-    int sign = (val >> 23) & 1;
+    uint32_t sign = ((uint32_t)val >> 23) & 1;
     uint32_t temp = ((uint32_t)val ^ ((uint32_t)val << 1)) & 0xFFFFFFu;
-    int exponent = 0;
-    for (int k = 0; k < 12; k++) {
-        if (temp & 0x800000u) break;
-        temp <<= 1;
-        exponent++;
-    }
-    if (exponent < 12) val = (int32_t)(((uint32_t)val << exponent) & 0x3FFFFF);
-    else               val = (int32_t)((uint32_t)val << 11);
-    val >>= 11;
-    val &= 0x7FF;
-    val |= sign << 15;
-    val |= exponent << 11;
-    return (uint16_t)val;
+    uint32_t exponent = (uint32_t)scsp_clz32((temp << 8) | 0x80000u);
+    uint32_t mant = (((uint32_t)val << (exponent - (exponent == 12))) >> 11) & 0x7FF;
+    return (uint16_t)(mant | sign << 15 | exponent << 11);
 }
 
 static int32_t scsp_dsp_unpack(uint16_t val) {
@@ -569,6 +648,13 @@ static void scsp_dsp_decode(scsp_dsp_t *d) {
         f |= (uint32_t)((p[2] >> 15) & 1) << SCSP_DF_TABLE;
         f |= (uint32_t)((p[3] >> 1) & 1)  << SCSP_DF_ADREB;
         o->f = f;
+        int any = (p[2] >> 3 & 1) || (p[2] >> 6 & 1) || (p[2] >> 7 & 1)        /* YRL FRCL ADRL */
+               || (o->mem && ((p[2] >> 15 & 1) || (p[3] >> 1 & 1) || o->nofl)) /* TABLE ADREB NOFL */
+               || sh >= 2 || ysel >= 2 || (f & (1u << SCSP_DF_IW_SELF));
+        o->kind = (uint8_t)(any ? SCSP_DK_ANY
+                                : ((p[0] >> 7 & 1) ? SCSP_DK_TWT : 0) | (o->mrd ? SCSP_DK_MRD : 0) |
+                                  (o->mwt ? SCSP_DK_MWT : 0) | (iwt ? SCSP_DK_IWT : 0) |
+                                  ((p[2] >> 12 & 1) ? SCSP_DK_EWT : 0));
         /* An IRA past EXTS ends the program on that step, before it does anything. */
         if (o->ira > 0x31 && st < d->ops_run) d->ops_run = st;
     }
@@ -600,11 +686,43 @@ static inline int32_t scsp_sel(int32_t m, int32_t a, int32_t b) { return (a & m)
 #define SCSP_SEL(f, bit, a, b) (((f) & (1u << (bit))) ? (a) : (b))
 #endif
 
+/* One step of a kind other than SCSP_DK_ANY, K its writes (a constant, so each
+ * case keeps only its own). Same order of events as the SCSP_DK_ANY body, and
+ * two shortcuts that give the same bits: TEMP is only ever written with the
+ * shifter's output, which is 24-bit signed, so it is read as it is; and a
+ * 16-bit COEF >> 3 is already the 13-bit signed Y that COEF[15:3] reads as. */
+#define SCSP_DSP_KIND(K) case K: {                                                        \
+        int32_t inputs = scsp_sext(in[o->ira], 24);                                       \
+        int32_t tr = temp[(o->tra + dec) & 0x7F];            /* already 24-bit signed */ \
+        int32_t b  = SCSP_SEL(f, SCSP_DF_BSEL, acc, tr);                                  \
+        b = SCSP_SEL(f, SCSP_DF_NEGB, (int32_t)(0u - (uint32_t)b), b);                    \
+        b = SCSP_SEL(f, SCSP_DF_ZERO, 0, b);                                              \
+        int32_t x  = SCSP_SEL(f, SCSP_DF_XSEL, inputs, tr);                               \
+        int32_t y  = SCSP_SEL(f, SCSP_DF_Y_COEF, d->coef[o->coef] >> 3, scsp_sext(frc, 13)); \
+        int32_t shifted = 0;                                                              \
+        if ((K) & (SCSP_DK_TWT | SCSP_DK_MWT | SCSP_DK_EWT)) {                            \
+            int64_t v = (int64_t)((uint64_t)(int64_t)acc << o->dbl);                      \
+            shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); \
+        }                                                                                 \
+        acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;                             \
+        if ((K) & SCSP_DK_IWT) in[o->iwa] = memval;                                       \
+        if ((K) & SCSP_DK_TWT) temp[(o->twa + dec) & 0x7F] = shifted;                     \
+        if ((K) & (SCSP_DK_MRD | SCSP_DK_MWT)) {                                          \
+            uint32_t addr = ((((uint32_t)d->madrs[o->masa] + dec + o->nxadr) & rbl_mask) + rbp) << 1; \
+            if ((K) & SCSP_DK_MRD) memval = scsp_dsp_unpack(scsp_ram_w(s, addr));         \
+            if ((K) & SCSP_DK_MWT) scsp_ram_ww(s, addr, scsp_dsp_pack(shifted));          \
+        }                                                                                 \
+        if ((K) & SCSP_DK_EWT) efreg[o->ewa] = (int16_t)(efreg[o->ewa] + (shifted >> 8)); \
+        (void)shifted;                                                                    \
+        break;                                                                            \
+    }
+#define SCSP_DSP_KIND4(K) SCSP_DSP_KIND(K) SCSP_DSP_KIND(K + 1) SCSP_DSP_KIND(K + 2) SCSP_DSP_KIND(K + 3)
+
 static void scsp_dsp_step(scsp_t *s) {
     scsp_dsp_t *d = &s->dsp;
     if (d->stopped) return;
     if (!d->ops_ok || d->ops_last != d->last_step) scsp_dsp_decode(d);
-    int16_t efreg[17] = {0};     /* [16] takes the steps that write no EFREG */
+    int16_t efreg[17] = {0};     /* [16] takes the SCSP_DK_ANY steps that write no EFREG */
 
     /* The input bank IRA indexes: MEMS, then MIXS << 4, then EXTS << 8. MEMS
      * is written back below, and only the step writes it. */
@@ -622,45 +740,51 @@ static void scsp_dsp_step(scsp_t *s) {
     for (int st = 0; st < run; st++) {
         const scsp_dsp_op_t *o = &d->ops[st];
         const uint32_t f = o->f;
+        switch (o->kind) {
+        SCSP_DSP_KIND4(0)  SCSP_DSP_KIND4(4)  SCSP_DSP_KIND4(8)  SCSP_DSP_KIND4(12)
+        SCSP_DSP_KIND4(16) SCSP_DSP_KIND4(20) SCSP_DSP_KIND4(24) SCSP_DSP_KIND4(28)
+        default: {                                                    /* SCSP_DK_ANY */
+            int32_t inputs = scsp_sext(in[o->ira], 24);
+            inputs = SCSP_SEL(f, SCSP_DF_IW_SELF, memval, inputs);
+            in[o->iwa] = memval;
 
-        int32_t inputs = scsp_sext(in[o->ira], 24);
-        inputs = SCSP_SEL(f, SCSP_DF_IW_SELF, memval, inputs);
-        in[o->iwa] = memval;
+            int32_t tr = scsp_sext(temp[(o->tra + dec) & 0x7F], 24);
+            int32_t b  = SCSP_SEL(f, SCSP_DF_BSEL, acc, tr);
+            b = SCSP_SEL(f, SCSP_DF_NEGB, (int32_t)(0u - (uint32_t)b), b);
+            b = SCSP_SEL(f, SCSP_DF_ZERO, 0, b);
+            int32_t x  = SCSP_SEL(f, SCSP_DF_XSEL, inputs, tr);
 
-        int32_t tr = scsp_sext(temp[(o->tra + dec) & 0x7F], 24);
-        int32_t b  = SCSP_SEL(f, SCSP_DF_BSEL, acc, tr);
-        b = SCSP_SEL(f, SCSP_DF_NEGB, (int32_t)(0u - (uint32_t)b), b);
-        b = SCSP_SEL(f, SCSP_DF_ZERO, 0, b);
-        int32_t x  = SCSP_SEL(f, SCSP_DF_XSEL, inputs, tr);
+            int32_t ys = SCSP_SEL(f, SCSP_DF_Y_COEF, d->coef[o->coef], frc);
+            ys = SCSP_SEL(f, SCSP_DF_Y_YREG, yreg, ys);
+            int32_t y  = scsp_sext((ys >> o->ysh) & o->ymask, 13);
+            yreg = SCSP_SEL(f, SCSP_DF_YRL, inputs, yreg);
 
-        int32_t ys = SCSP_SEL(f, SCSP_DF_Y_COEF, d->coef[o->coef], frc);
-        ys = SCSP_SEL(f, SCSP_DF_Y_YREG, yreg, ys);
-        int32_t y  = scsp_sext((ys >> o->ysh) & o->ymask, 13);
-        yreg = SCSP_SEL(f, SCSP_DF_YRL, inputs, yreg);
+            int64_t v = (int64_t)((uint64_t)(int64_t)acc << o->dbl);
+            int64_t c = v > 0x7FFFFF ? 0x7FFFFF : v;
+            c = c < -0x800000 ? -0x800000 : c;
+            int32_t shifted = SCSP_SEL(f, SCSP_DF_SAT, (int32_t)c, scsp_sext((int32_t)(uint32_t)v, 24));
 
-        int64_t v = (int64_t)((uint64_t)(int64_t)acc << o->dbl);
-        int64_t c = v > 0x7FFFFF ? 0x7FFFFF : v;
-        c = c < -0x800000 ? -0x800000 : c;
-        int32_t shifted = SCSP_SEL(f, SCSP_DF_SAT, (int32_t)c, scsp_sext((int32_t)(uint32_t)v, 24));
+            acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
 
-        acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+            int32_t *tw = &temp[(o->twa + dec) & 0x7F];
+            *tw = SCSP_SEL(f, SCSP_DF_TWT, shifted, *tw);
+            frc = SCSP_SEL(f, SCSP_DF_FRCL, (shifted >> o->frc_sh) & o->frc_mask, frc);
 
-        int32_t *tw = &temp[(o->twa + dec) & 0x7F];
-        *tw = SCSP_SEL(f, SCSP_DF_TWT, shifted, *tw);
-        frc = SCSP_SEL(f, SCSP_DF_FRCL, (shifted >> o->frc_sh) & o->frc_mask, frc);
-
-        if (o->mem) {
-            uint32_t table = (uint32_t)SCSP_DM(f, SCSP_DF_TABLE);
-            uint32_t addr = d->madrs[o->masa] + (dec & ~table)
-                          + (adrs & 0x0FFF & (uint32_t)SCSP_DM(f, SCSP_DF_ADREB)) + o->nxadr;
-            addr &= (0xFFFFu & table) | (rbl_mask & ~table);
-            addr = (addr + rbp) << 1;
-            if (o->mrd) memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
-            if (o->mwt) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : scsp_dsp_pack(shifted));
+            if (o->mem) {
+                uint32_t table = (uint32_t)SCSP_DM(f, SCSP_DF_TABLE);
+                uint32_t addr = d->madrs[o->masa] + (dec & ~table)
+                              + (adrs & 0x0FFF & (uint32_t)SCSP_DM(f, SCSP_DF_ADREB)) + o->nxadr;
+                addr &= (0xFFFFu & table) | (rbl_mask & ~table);
+                addr = (addr + rbp) << 1;
+                if (o->mrd) memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
+                if (o->mwt) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : scsp_dsp_pack(shifted));
+            }
+            int32_t na = SCSP_SEL(f, SCSP_DF_ADRL_SH, (shifted >> 12) & 0xFFF, inputs >> 16);
+            adrs = (uint32_t)SCSP_SEL(f, SCSP_DF_ADRL, na, (int32_t)adrs);
+            efreg[o->ewa] = (int16_t)(efreg[o->ewa] + (shifted >> 8));
+            break;
         }
-        int32_t na = SCSP_SEL(f, SCSP_DF_ADRL_SH, (shifted >> 12) & 0xFFF, inputs >> 16);
-        adrs = (uint32_t)SCSP_SEL(f, SCSP_DF_ADRL, na, (int32_t)adrs);
-        efreg[o->ewa] = (int16_t)(efreg[o->ewa] + (shifted >> 8));
+        }
     }
     memcpy(d->mems, in, sizeof d->mems);
     memcpy(d->efreg, efreg, sizeof d->efreg);
@@ -754,6 +878,7 @@ static void scsp_w16(scsp_t *s, uint32_t addr, uint16_t v) {
         case 0x8: sl->step = scsp_slot_step(sl); break;
         case 0x5: sl->rr = scsp_rate(scsp_dr_table, 0, SCSP_RR(sl)); sl->dl = 0x1F - (int32_t)SCSP_DL(sl); break;
         case 0x9: scsp_slot_lfo(sl); break;
+        case 0x6: case 0xA: case 0xB: scsp_slot_gains(sl); break;
         }
         return;
     }
@@ -936,7 +1061,10 @@ static void scsp_reset(scsp_t *s, uint8_t *ram, uint32_t ram_size, const uint64_
     s->clock = clock;
     s->tim_next = UINT64_MAX;
     s->noise = 0x12345678u;
-    for (int i = 0; i < 32; i++) s->slot[i].state = SCSP_RELEASE;
+    for (int i = 0; i < 32; i++) {
+        s->slot[i].state = SCSP_RELEASE;
+        scsp_slot_gains(&s->slot[i]);                  /* all registers 0: the sound stack's gain is not */
+    }
     for (int t = 0; t < 3; t++) s->tim_cnt[t] = 0xFFFF;
     s->dsp.rbl = 8u * 1024u;
     s->dsp.stopped = 1;
@@ -959,10 +1087,9 @@ static void scsp_sample(scsp_t *s, int16_t *out_l, int16_t *out_r) {
         int16_t *sous = &s->sous[s->sous_ptr];
         if (sl->active) {
             int32_t smp = scsp_slot_sample(s, sl, sous);
-            s->dsp.mixs[SCSP_ISEL(sl)] += (smp * scsp_lpan[SCSP_TL(sl) | (SCSP_IMXL(sl) << 13)]) >> (SCSP_SHIFT - 2);
-            uint16_t enc = (uint16_t)(SCSP_TL(sl) | (SCSP_DIPAN(sl) << 8) | (SCSP_DISDL(sl) << 13));
-            l += (smp * scsp_lpan[enc]) >> SCSP_SHIFT;
-            r += (smp * scsp_rpan[enc]) >> SCSP_SHIFT;
+            s->dsp.mixs[SCSP_ISEL(sl)] += (smp * sl->g_mixs) >> (SCSP_SHIFT - 2);
+            l += (smp * sl->g_dl) >> SCSP_SHIFT;
+            r += (smp * sl->g_dr) >> SCSP_SHIFT;
         }
         s->sous_ptr = (uint8_t)((s->sous_ptr + 1) & 63);
     }
@@ -970,9 +1097,8 @@ static void scsp_sample(scsp_t *s, int16_t *out_l, int16_t *out_r) {
     for (int i = 0; i < 16; i++) {
         const scsp_slot_t *sl = &s->slot[i];
         if (!SCSP_EFSDL(sl)) continue;
-        uint16_t enc = (uint16_t)((SCSP_EFPAN(sl) << 8) | (SCSP_EFSDL(sl) << 13));
-        l += (s->dsp.efreg[i] * scsp_lpan[enc]) >> SCSP_SHIFT;
-        r += (s->dsp.efreg[i] * scsp_rpan[enc]) >> SCSP_SHIFT;
+        l += (s->dsp.efreg[i] * sl->g_el) >> SCSP_SHIFT;
+        r += (s->dsp.efreg[i] * sl->g_er) >> SCSP_SHIFT;
     }
     if (SCSP_C_DAC18B(s)) {
         l = l < -131072 ? -131072 : l > 131071 ? 131071 : l;

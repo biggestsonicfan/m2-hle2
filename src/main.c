@@ -73,6 +73,15 @@ static int  g_headless   = 0;      /* --headless: no window, GPU or audio device
 static int  g_net_window = 0;      /* --netplay: open the netplay window at startup */
 static int  g_kiosk_on   = 0;      /* --kiosk: capture mode from startup */
 static int  g_no_tray    = 0;      /* --no-tray: --headless without its icon */
+/* --no-sound-board (or M2HLE_NO_SOUND_BOARD=1): boot with the 68000 and SCSP
+ * detached, for training runs that want frames, not sound. The sound board is
+ * a third to a half of the emu thread. It is board state, not only audio: its
+ * UART backpressure decides when the i960 takes the sound interrupt, so a
+ * board without it runs the same game but not the same instructions at the
+ * same moments -- it is not held to MAME, and ab-builds / bench-builds /
+ * the graders must leave it on. A netplay reset attaches the sound board
+ * regardless (netplay_reset_board_cb): the other machine runs one. */
+static int  g_no_sound_board = 0;
 static int  g_kiosk_w    = KIOSK_DEFAULT_WIDTH;
 static int  g_kiosk_h    = KIOSK_DEFAULT_HEIGHT;
 static int  g_kiosk_show = 0;      /* --kiosk-show: start it on screen, not parked */
@@ -202,6 +211,10 @@ static void load_active_profile(const char *primary_zip) {
                 sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
             if (state.romset.samples && state.romset.samples_size > 0)
                 sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+            if (g_no_sound_board) {
+                sound_detach(&state.bus);
+                LOG_INFO("sound: --no-sound-board, the board boots without its 68000 and SCSP");
+            }
         }
         /* Inputs are delivered via the I/O ports (read by the game's vblank
          * interrupt), so attach the I/O read callback after the bus re-init. */
@@ -1160,6 +1173,7 @@ static void event(const sapp_event* ev) {
 }
 
 sapp_desc sokol_main(int argc, char* argv[]) {
+    { const char *e = getenv("M2HLE_NO_SOUND_BOARD"); if (e && e[0] == '1') g_no_sound_board = 1; }
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--rom") == 0 && i + 1 < argc) {
             strncpy(g_rom_path, argv[++i], sizeof(g_rom_path) - 1);
@@ -1225,6 +1239,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_mcp_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+        } else if (strcmp(argv[i], "--no-sound-board") == 0) {
+            g_no_sound_board = 1;
         } else if (strcmp(argv[i], "--no-tray") == 0) {
             /* For a service or a Session 0 run, where there is no shell to put
              * an icon in and the process is stopped some other way. */

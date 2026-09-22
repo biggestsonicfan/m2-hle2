@@ -374,8 +374,14 @@ static uint32_t sound_bus_read(sound_state_t *ss, uint32_t addr, int sz, int pee
         if (g_sndcap.active) sndcap_scsp(0, off, v, sz);
         return v;
     }
-    if (addr + (uint32_t)sz <= 0x080000u) {                /* the hot path */
-        const uint8_t *p = ss->ram + addr;
+    /* The hot paths: sound RAM, and the program ROM the driver runs from (every
+     * opcode fetch), each read in place when the whole access lies inside it.
+     * sound_rom_byte, a byte at a time through every region test, was an
+     * eighth of the sound board. */
+    const uint8_t *p = NULL;
+    if (addr + (uint32_t)sz <= 0x080000u) p = ss->ram + addr;
+    else if (addr - M68K_ROM_BASE <= M68K_ROM_SIZE - (uint32_t)sz) p = ss->rom + (addr - M68K_ROM_BASE);
+    if (p) {
         if (sz == 1) return p[0];
         if (sz == 2) return ((uint32_t)p[0] << 8) | p[1];
         return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
