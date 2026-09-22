@@ -265,7 +265,13 @@ if(M2HLE_WEB)
         SUFFIX ".js"
         RUNTIME_OUTPUT_DIRECTORY ${M2HLE_SITE_DIR}
     )
+    # Link-time optimisation across the three objects (the board is header-only, so
+    # this is mostly miniz and sokol): 16 KB off the wasm and nothing measurable
+    # either way on the board's speed. det_digest is byte-identical with it over
+    # 6000 frames of attract, which is what cross-play needs (WEB-NETPLAY.md 3).
+    target_compile_options(m2hle PRIVATE "-flto")
     target_link_options(m2hle PRIVATE
+        "-flto"
         "-sMIN_WEBGL_VERSION=2"
         "-sMAX_WEBGL_VERSION=2"
         # The ROM regions alone are 82.5 MB and the bus copies 48 MB of them again;
@@ -273,6 +279,15 @@ if(M2HLE_WEB)
         "-sINITIAL_MEMORY=268435456"
         "-sALLOW_MEMORY_GROWTH=1"
         "-sSTACK_SIZE=8388608"
+        # No file system: the browser build opens no files (log.h writes none under
+        # __EMSCRIPTEN__, the ROM arrives as bytes from the page). That is 48 KB of
+        # the JS -- a third of it -- for MEMFS and the syscalls behind it. Nothing
+        # below sokol_app asks for a file either; if something ever does, the link
+        # fails here rather than at run time.
+        "-sFILESYSTEM=0"
+        # This page runs in a browser tab. Without this the glue also carries the
+        # Node and shell paths, and probes for them as it starts.
+        "-sENVIRONMENT=web,worker"
         "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
         "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,UTF8ToString,stringToUTF8,lengthBytesUTF8"
     )
@@ -291,10 +306,13 @@ if(M2HLE_WEB)
     # asked for (--target det_digest), with every flag the page's build has.
     add_executable(det_digest EXCLUDE_FROM_ALL ${CMAKE_CURRENT_SOURCE_DIR}/tests/det_digest.c)
     target_compile_definitions(det_digest PRIVATE M2HLE_WEB)
+    target_compile_options(det_digest PRIVATE "-flto")   # the page's codegen
     target_link_libraries(det_digest PRIVATE sokol miniz)
     target_include_directories(det_digest PRIVATE
         ${SRC} ${SRC}/board ${SRC}/core ${SRC}/net ${SRC}/ui ${SRC}/profiles)
-    target_link_options(det_digest PRIVATE
+    # Its own file system (it reads the zip and writes the digest) and its own
+    # environment (Node), so the page's -sFILESYSTEM=0 / -sENVIRONMENT are not here.
+    target_link_options(det_digest PRIVATE "-flto"
         "-sNODERAWFS=1" "-sINITIAL_MEMORY=536870912" "-sALLOW_MEMORY_GROWTH=1" "-sSTACK_SIZE=8388608")
     return()
 endif()

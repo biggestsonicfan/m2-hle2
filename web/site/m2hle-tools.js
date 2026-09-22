@@ -270,6 +270,11 @@ const m2hleTools = (() => {
     return {
       seconds: T, hidden,
       drawRate: d('callbacks') / T,                   /* frames the browser let us draw, per second */
+      /* Of those, the ones actually drawn: on a display faster than the board, a
+       * page short of time draws only the board's own frames rather than
+       * interpolating between them (main_web.c, web_afford_picture). */
+      pictureRate: (d('callbacks') - d('pictures_skipped')) / T,
+      skipped: d('pictures_skipped'),
       speed: d('slices') / T,                         /* emulated frames per second: 60 is full speed */
       sliceMs: d('slices') ? d('slice_us') / d('slices') / 1000 : 0,
       sliceMaxMs: b.slice_us_max / 1000,
@@ -432,7 +437,8 @@ const m2hleTools = (() => {
     }
     out.push('Measurements over ' + f1(m.seconds) + ' s:',
       '  game speed        ' + f1(m.speed) + ' / 60 fps',
-      '  drawn             ' + f1(m.drawRate) + ' fps',
+      '  drawn             ' + f1(m.pictureRate) + ' fps' +
+                              (m.skipped ? ' (of ' + f1(m.drawRate) + ' the display asked for; the rest would have been interpolated between board frames)' : ''),
       '  emulation         ' + f1(m.sliceMs) + ' ms avg, ' + f1(m.sliceMaxMs) + ' worst',
       '  picture (CPU)     ' + f1(m.renderMs) + ' ms avg, ' + f1(m.renderMaxMs) + ' worst',
       '  GPU               ' + (m.gpuMs === null ? 'not measurable in this browser' : f1(m.gpuMs) + ' ms avg'),
