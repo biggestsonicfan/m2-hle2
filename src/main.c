@@ -1167,6 +1167,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             strncpy(g_rom_path, argv[++i], sizeof(g_rom_path) - 1);
         } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
             strncpy(g_profile_arg, argv[++i], sizeof(g_profile_arg) - 1);
+        } else if (strcmp(argv[i], "--region") == 0 && i + 1 < argc) {
+            int r = game_region_parse(argv[++i]);   /* japan | usa | export */
+            if (r < 0) LOG_WARN("--region %s: expected japan, usa or export; keeping usa", argv[i]);
+            else       g_region = r;
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--camlog") == 0) {
