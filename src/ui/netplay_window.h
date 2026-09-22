@@ -48,6 +48,31 @@ static char     g_np_ui_join_id[24] = "";
 static bool     g_np_ui_show_signup = false;
 static uint64_t g_np_ui_selected    = 0;
 
+/*
+ * Over the middle of the game: the room has emptied and the board is still in
+ * its VS mode (netplay_empty_room_pump). Drawn whether or not the netplay window
+ * is open, because the player is looking at the game, and it takes no input --
+ * the button that answers it goes to the board.
+ */
+static inline void netplay_empty_room_overlay(void) {
+    netplay_status_t st;
+    netplay_get_status(&st);
+    if (!st.empty_room) return;
+    const ImGuiViewport *vp = igGetMainViewport();
+    igSetNextWindowPosEx((ImVec2){ vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                   vp->WorkPos.y + vp->WorkSize.y * 0.5f },
+                         ImGuiCond_Always, (ImVec2){ 0.5f, 0.5f });
+    igSetNextWindowBgAlpha(0.8f);
+    if (igBegin("##netplay_empty_room", NULL,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings)) {
+        igTextUnformatted("There are no other players in the lobby.");
+        igTextUnformatted("Press any button to restart the game.");
+    }
+    igEnd();
+}
+
 /* netplay_state_text lives in net/netplay.h: the MCP bridge names these
  * states too, and it is included before this window is. */
 

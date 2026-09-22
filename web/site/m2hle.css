@@ -47,6 +47,24 @@ body {
   touch-action: none;
 }
 
+/* The empty-room prompt, over the middle of the game. */
+.np-empty {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  width: min(26rem, calc(100vw - 2rem));
+  padding: 1rem 1.25rem;
+  background: rgba(5, 7, 13, 0.85);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  text-align: center;
+  pointer-events: none;
+}
+.np-empty p { margin: 0.2rem 0; }
+.np-empty[hidden] { display: none; }
+
 .panel {
   position: fixed;
   left: 50%;

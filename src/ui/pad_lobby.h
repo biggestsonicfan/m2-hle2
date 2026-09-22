@@ -335,6 +335,13 @@ static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
             snprintf(buf, sizeof buf, "DESYNC at frame %u", st->desync_frame);
             lobby_text(1.0f, 1.25f, cols, 255, 90, 90, buf);
         }
+        /* The room emptied with the board still in its VS mode: in the middle,
+         * until a button restarts the game (netplay_empty_room_pump). */
+        if (st->empty_room) {
+            float y = (float)fb_h / scale / 8.0f * 0.5f - 2.0f;
+            y = lobby_text(1.0f, y, cols, 255, 255, 140, "There are no other players in the lobby.");
+            lobby_text(1.0f, y + 0.5f, cols, 255, 255, 255, "Press any button to restart the game.");
+        }
         return;
     }
 

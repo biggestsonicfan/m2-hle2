@@ -40,6 +40,9 @@ static uint32_t enc_ctrl(uint32_t op, int32_t disp) {
 }
 #define G(n) (16 + (n))
 
+static int s_empty_resets;
+static void empty_room_reset(void *c) { (void)c; s_empty_resets++; }
+
 int main(void) {
     static memory_bus_t bus;
     static i960_cpu_t   cpu;
@@ -162,6 +165,36 @@ int main(void) {
     CHECK(!g_irqt_sound_kick, "irq kick: rewriting an enabled line does not");
     irqt_reset();
     CHECK(!g_irqt_sound_kick, "irq kick: irqt_reset clears it");
+
+    /* A room left the board in VS mode and then emptied (netplay_empty_room_pump):
+     * the player is asked for a button, a button already down does not count, a
+     * fresh press cold boots the board in the player's own VS mode and region. */
+    {
+        g_netplay.reset_board = empty_room_reset;
+        g_netplay.own_saved   = true;
+        g_netplay.own_vs_mode = 0;
+        g_netplay.own_region  = GAME_REGION_USA;
+        g_vs_mode = 1;
+        g_region  = GAME_REGION_JAPAN;
+        g_netplay.vs_board = true;
+        g_input.held = 0x10;
+        netplay_empty_room_pump();
+        CHECK(g_netplay.empty_prompt, "empty room: a VS board with nobody else in the room asks for a button");
+        netplay_empty_room_pump();
+        CHECK(!netplay_take_empty_restart(), "empty room: a button held from before does not restart");
+        g_input.held = 0;
+        netplay_empty_room_pump();
+        g_input.held = 0x10;
+        netplay_empty_room_pump();
+        CHECK(!g_netplay.empty_prompt && netplay_take_empty_restart(), "empty room: pressing it again does");
+        CHECK(!netplay_take_empty_restart(), "empty room: the press is taken once");
+        netplay_restart_alone();
+        CHECK(s_empty_resets == 1, "empty room: the restart resets the board");
+        CHECK(g_vs_mode == 0 && g_region == GAME_REGION_USA, "empty room: ...in the player's own VS mode and region");
+        g_input.held = 0;
+        netplay_empty_room_pump();
+        CHECK(!g_netplay.empty_prompt, "empty room: a board that is not in VS mode is not asked");
+    }
 
     mem_shutdown(&bus);
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

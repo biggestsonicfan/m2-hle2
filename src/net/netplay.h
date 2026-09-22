@@ -336,6 +336,9 @@ typedef struct {
      * start and we have not. See `peer_ready_gen` in netplay_t. */
     bool            peer_ready;
     uint32_t        peer_ready_gen;
+    /* The board is still in the VS mode a room put it in, and nobody else is
+     * left in the room: any button restarts the game (netplay_empty_room_pump). */
+    bool            empty_room;
 
     rpcn_room_listing_t rooms[RPCN_MAX_ROOMS];
     uint32_t            room_count;
@@ -420,6 +423,23 @@ typedef struct {
      * by one at each result while this stays put. */
     uint16_t            session_started;
     bool                session_vs;
+    /*
+     * The board was booted by a VS-mode session and has not been reset since.
+     * A room turns g_vs_mode on and nothing turns it off, so such a board stays
+     * a versus lobby after the session: a decided match goes back to character
+     * select, not on through the game. Once nobody else is left in the room,
+     * `empty_prompt` asks the player to press a button, and that press cold
+     * boots the board under the player's own VS mode and region, which
+     * `own_vs_mode` / `own_region` hold from before the first room match
+     * overrode them.
+     */
+    bool                vs_board;
+    bool                own_saved;
+    int                 own_vs_mode;
+    int                 own_region;
+    bool                empty_prompt;
+    uint32_t            empty_held;     /* buttons already down when the prompt went up */
+    bool                empty_restart;  /* pressed: restart at the next pump */
     /* After our board reaches a result a fighter goes on answering for a
      * while: the other fighter may still need our last inputs, and a watcher may
      * still be catching up. */
@@ -1685,6 +1705,7 @@ static inline void netplay_publish_status(void) {
     st->seed         = g_netplay.seed;
     st->peer_ready     = netplay_peer_ready();
     st->peer_ready_gen = g_netplay.room.match;
+    st->empty_room     = g_netplay.empty_prompt;
 
     st->room_count = g_netplay.session.room_count;
     memcpy(st->rooms, g_netplay.session.rooms, sizeof(st->rooms));
@@ -2704,6 +2725,15 @@ static inline void netplay_member_pump(void) {
         g_netplay.session_started = session;
         g_netplay.session_vs      = r->vs_mode != 0;
         g_netplay.seed            = r->seed;
+        /* The player's own settings, before the room's replace them. Kept from
+         * the first match until the board goes back to being the player's. */
+        if (!g_netplay.own_saved) {
+            g_netplay.own_saved   = true;
+            g_netplay.own_vs_mode = g_vs_mode;
+            g_netplay.own_region  = g_region;
+        }
+        /* This session cold boots the board, so it decides what is left behind. */
+        g_netplay.vs_board        = r->vs_mode != 0;
         /* The owner's region and VS mode, before the reset that boots into
          * them: a board booted as another region is another game from frame 0,
          * and one in the other VS mode leaves the match a different way. */
@@ -2897,6 +2927,41 @@ static inline netplay_step_t netplay_fight_step(void) {
 }
 
 /*
+ * A board left in VS mode by a room that has since emptied.
+ *
+ * With nobody left to rematch, character select is a dead end: say so, and let
+ * any button restart the game. Only between sessions, and only once the room is
+ * down to this player -- signed out or out of the room counts too. A button
+ * already down when the prompt goes up has to be let go and pressed again, so a
+ * player still holding one from the fight does not restart by accident.
+ */
+static inline void netplay_empty_room_pump(void) {
+    bool others = false;
+    if (g_netplay.enabled && rpcn_session_in_room(&g_netplay.session))
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++)
+            if (g_netplay.session.peers[i].used) others = true;
+    bool show = g_netplay.vs_board && !others && !g_netplay.empty_restart
+             && !netplay_running_match() && g_netplay.state != NETPLAY_SYNCING;
+    uint32_t held = g_input.held;
+    if (show && !g_netplay.empty_prompt) {
+        netplay_log("nobody else is in the room - press any button to restart the game");
+        g_netplay.empty_held = held;
+    } else if (show) {
+        if (held & ~g_netplay.empty_held) { g_netplay.empty_restart = true; show = false; }
+        g_netplay.empty_held &= held;
+    }
+    g_netplay.empty_prompt = show;
+}
+
+/* The press, taken once: true means cold boot the board now
+ * (netplay_restart_alone, from emu_netplay_pump). */
+static inline bool netplay_take_empty_restart(void) {
+    bool r = g_netplay.empty_restart;
+    g_netplay.empty_restart = false;
+    return r;
+}
+
+/*
  * Called once per slice from the emu thread, OUTSIDE the emu mutex. Pumps the
  * network and the room, then answers what this slice may do.
  */
@@ -2908,7 +2973,7 @@ static inline netplay_step_t netplay_begin_frame(void) {
     rpcn_account_update(&g_netplay.account);
     netplay_pump_twitch();
 
-    if (!g_netplay.enabled) { netplay_publish_status(); return NETPLAY_STEP_OFF; }
+    if (!g_netplay.enabled) { netplay_empty_room_pump(); netplay_publish_status(); return NETPLAY_STEP_OFF; }
 
     rpcn_session_update(&g_netplay.session);
     netplay_mirror_stage();
@@ -2951,6 +3016,7 @@ static inline netplay_step_t netplay_begin_frame(void) {
     }
     /* Anything else: not in a match. The board runs normally and the keyboard
      * drives it. */
+    netplay_empty_room_pump();
     netplay_publish_status();
     return step;
 }
@@ -3057,6 +3123,24 @@ static inline bool netplay_reset_board_now(void) {
     input_reset();
     netplay_log("board reset on request (no session)");
     return true;
+}
+
+/*
+ * The empty room's restart: the player's own VS mode and region back, then the
+ * same cold boot. Emu thread, emu mutex held, no session running.
+ */
+static inline void netplay_restart_alone(void) {
+    if (g_netplay.own_saved) {
+        g_vs_mode  = g_netplay.own_vs_mode;
+        g_region   = g_netplay.own_region;
+        g_netplay.own_saved = false;
+    }
+    g_netplay.vs_board     = false;
+    g_netplay.empty_prompt = false;
+    if (!g_netplay.reset_board) return;
+    g_netplay.reset_board(g_netplay.reset_ctx);
+    input_reset();
+    netplay_log("the room is empty; the game has restarted");
 }
 
 /*

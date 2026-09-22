@@ -151,6 +151,7 @@ const m2hleNetplay = (() => {
     if (!st) return;
     const tw = st.twitch || {};
     const state = st.state;
+    $('np-empty').hidden = !st.empty_room;
 
     /* The state of the game online, in a line. It sits on the menu's own item, so
      * with the menu closed it is what the menu button says it is holding (the
