@@ -200,7 +200,7 @@ jobs:
           mkdir -p dist/stage
           cp build/m2hle dist/stage/
           cp packaging/rocknix/start_m2hle.sh packaging/rocknix/install-es.sh dist/stage/
-          cp packaging/rocknix/m2hle-update.sh packaging/rocknix/tool-update-m2hle.sh dist/stage/
+          cp packaging/rocknix/m2hle-update.sh dist/stage/
           cp packaging/rocknix/README.md dist/stage/
           chmod +x dist/stage/m2hle dist/stage/*.sh
           echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
@@ -405,7 +405,7 @@ jobs:
           sed 's/^display_version = .*/display_version = "${{ steps.ver.outputs.version }}"/' \
             packaging/libretro/m2hle_libretro.info > dist/stage/m2hle_libretro.info
           cp packaging/libretro/README.md packaging/libretro/INSTALL.md packaging/libretro/install-rocknix.sh dist/stage/
-          cp packaging/rocknix/m2hle-update.sh packaging/rocknix/tool-update-m2hle.sh dist/stage/
+          cp packaging/rocknix/m2hle-update.sh dist/stage/
           chmod +x dist/stage/*.sh
           echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
           cd dist/stage && zip -r ../m2hle-libretro-linux-arm64.zip ./*

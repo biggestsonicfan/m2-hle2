@@ -27,18 +27,13 @@ install -m 755 "$LAUNCHER" /storage/.local/bin/start_m2hle.sh
 echo "installed $(basename "$BIN") -> /storage/.local/share/m2hle/m2hle"
 
 # Which canary this is (m2hle-update.sh compares it), the updater itself, and
-# its ES Tools entry. The old cross-build flow has none of these: skip them.
+# its game-list entry. The old cross-build flow has none of these: skip them.
 if [ -f "$HERE/VERSION.txt" ]; then
   install -m 644 "$HERE/VERSION.txt" /storage/.local/share/m2hle/VERSION.txt
   echo "version: $(cat "$HERE/VERSION.txt")"
 fi
 if [ -f "$HERE/m2hle-update.sh" ]; then
   install -m 755 "$HERE/m2hle-update.sh" /storage/.local/bin/m2hle-update.sh
-fi
-if [ -f "$HERE/tool-update-m2hle.sh" ]; then
-  mkdir -p /storage/.config/modules
-  install -m 755 "$HERE/tool-update-m2hle.sh" "/storage/.config/modules/Update m2hle.sh"
-  echo "ES Tools: Update m2hle"
 fi
 
 if grep -q 'm2hle-sa' "$ES/es_systems.cfg"; then
@@ -142,6 +137,13 @@ if [ -f "$HERE/netplay.cfg" ]; then
   fi
   install -m 600 "$HERE/netplay.cfg" "$NETCFG_DIR/netplay.cfg"
   echo "installed netplay.cfg -> $NETCFG_DIR/netplay.cfg"
+fi
+
+# "Update m2-hle" in the Sega Model 2 game list, beside the game: launching it
+# runs m2hle-update.sh. (ES's Tools menu cannot hold it -- ROCKNIX's boot rsync
+# deletes anything there; m2hle-update.sh says so at length.)
+if [ -x /storage/.local/bin/m2hle-update.sh ]; then
+  bash /storage/.local/bin/m2hle-update.sh --install-entry || echo "could not add the Update m2-hle entry" >&2
 fi
 
 grep -n -A12 '<name>segamodel2</name>' "$ES/es_systems.cfg" | grep -E 'emulator|core'

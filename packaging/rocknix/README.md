@@ -29,7 +29,7 @@ something costs one `cp` to undo. What it does:
 | `/storage/.emulationstation/es_systems.cfg` | adds `m2hle` / `m2hle-sa` beside `sm2-emu` under `segamodel2` |
 | `/storage/.emulationstation/es_features.cfg` | the per-game options below |
 | `/storage/.local/bin/m2hle-update.sh` | the updater (below) |
-| `/storage/.config/modules/Update m2hle.sh` | its entry in ES's **Tools** |
+| `/storage/roms/segamodel2/Update m2-hle.sh` | its entry in the game list (below) |
 | `/storage/.local/share/m2hle/VERSION.txt` | which canary is installed |
 
 Then put the ROM zip in `/storage/roms/segamodel2/` and pick **m2hle** as the
@@ -41,8 +41,9 @@ re-read.
 Once installed, the device updates itself from this release; the `scp` above
 is only needed the first time.
 
-- **Tools → Update m2hle** updates whichever of the two m2hle builds is on the
-  device: this standalone emulator and the RetroArch core
+- **Update m2-hle**, the entry beside Sonic The Fighters in the Sega Model 2
+  game list, updates whichever of the two m2hle builds is on the device: this
+  standalone emulator and the RetroArch core
   (`packaging/libretro`). It finds the zip for this device on the canary release
   by the platform and CPU `uname` reports (`m2hle-rocknix-arm64.zip` and
   `m2hle-libretro-linux-arm64.zip` on an arm64 handheld, the `x64` zips on an
@@ -57,6 +58,16 @@ is only needed the first time.
 - **When a game starts**, the launcher checks in the background, at most every
   6 hours and never delaying the game. If an update is waiting, a notice appears
   after the game exits. Turn it off per game with the "update check" option.
+
+The updater is a game entry and not an item in ES's **Tools** menu on purpose:
+ROCKNIX's autostart re-syncs `/usr/config/modules` over
+`/storage/.config/modules` with `rsync --delete` on every boot
+(`/usr/lib/autostart/common/001-sync-modules`), so anything installed into Tools
+is gone at the next restart. `/storage/roms` is never touched, and `runemu.sh`
+runs a "rom" whose name ends in `.sh` directly. `m2hle-update.sh
+--install-entry` writes it, adds `.sh` to `segamodel2`'s extensions, and points
+the entry at the standalone emulator so ES does not offer its savestate manager
+first; restart EmulationStation once for it to appear.
 
 "Newer" means that the zip's sha256 on the release differs from the zip that was
 installed, not that the release notes name a new commit: when the handheld CI job

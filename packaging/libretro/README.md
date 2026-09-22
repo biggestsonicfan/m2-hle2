@@ -32,8 +32,9 @@ itself; if it doesn't, pick `glcore` or `gl` in **Settings > Drivers**.
   installs the core, adds **RetroArch / m2hle** to Sega Model 2's emulator list in
   EmulationStation, and keeps the core's files out of the ROM folder. Restart EmulationStation
   afterwards. `bash install-rocknix.sh --make-default` also makes it Model 2's default emulator.
-  It also installs **Tools > Update m2hle**, which updates the core (and the standalone m2hle,
-  if that is installed too) from the canary release, picking the zip for the device's CPU.
+  It also adds **Update m2-hle** to the Sega Model 2 game list, which updates the core (and the
+  standalone m2hle, if that is installed too) from the canary release, picking the zip for the
+  device's CPU.
   See INSTALL.md, "Updating".
   Other handheld distributions: copy the two files by hand as above.
 
@@ -44,7 +45,8 @@ Online Updater doesn't know this core: on Windows, Linux, macOS and Android, dow
 again and replace the two files. **Information > Core Information** shows the installed
 build's version (`r<count>-<commit>`), the same as the zip's `VERSION.txt`.
 
-On ROCKNIX, **Tools > Update m2hle** (or `m2hle-update.sh` over ssh) does it. It finds the zip
+On ROCKNIX, **Update m2-hle** in the Sega Model 2 game list (or `m2hle-update.sh` over ssh)
+does it. It finds the zip
 for the device's CPU on the release, checks the download against GitHub's sha256 and that the
 core will load on the device, and installs it with the new zip's `install-rocknix.sh`. The
 script is `packaging/rocknix/m2hle-update.sh`.
