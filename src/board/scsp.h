@@ -68,6 +68,15 @@ typedef struct {
     int32_t    ar, d1r, d2r, rr, dl;
     int        eghold;
     scsp_lfo_t plfo, alfo;
+    /* The slot's output gains, looked up in scsp_lpan / scsp_rpan when TL,
+     * SDIR, IMXL, DISDL/DIPAN or EFSDL/EFPAN are written (scsp_slot_gains)
+     * rather than three or four times a sample: those tables are 256 KB each,
+     * and a voice's index into them changes only with its registers. Ymir
+     * keeps its slots' registers decoded the same way (scsp_slot.hpp). */
+    int32_t    g_mixs;           /* into the DSP's MIXS: TL | IMXL << 13 */
+    int32_t    g_dl, g_dr;       /* direct out: TL | DIPAN << 8 | DISDL << 13 */
+    int32_t    g_sous;           /* into the sound stack: TL (0 with SDIR) | 7 << 13 */
+    int32_t    g_el, g_er;       /* EFREG out (slots 0-15): EFPAN << 8 | EFSDL << 13 */
 } scsp_slot_t;
 
 /* One MPRO step, decoded into what scsp_dsp_step does with it. The program
@@ -307,6 +316,18 @@ static void scsp_tables_init(void) {
 
 /* ---- slots ----------------------------------------------------------------- */
 
+static inline void scsp_slot_gains(scsp_slot_t *sl) {
+    uint32_t tl = SCSP_TL(sl);
+    uint32_t dir = tl | SCSP_DIPAN(sl) << 8 | SCSP_DISDL(sl) << 13;
+    uint32_t eff = SCSP_EFPAN(sl) << 8 | SCSP_EFSDL(sl) << 13;
+    sl->g_mixs = scsp_lpan[tl | SCSP_IMXL(sl) << 13];
+    sl->g_dl   = scsp_lpan[dir];
+    sl->g_dr   = scsp_rpan[dir];
+    sl->g_sous = scsp_lpan[(SCSP_SDIR(sl) ? 0 : tl) | 7u << 13];
+    sl->g_el   = scsp_lpan[eff];
+    sl->g_er   = scsp_rpan[eff];
+}
+
 static inline uint32_t scsp_slot_step(const scsp_slot_t *sl) {
     int oct = ((int)SCSP_OCT(sl) ^ 8) - 8 + SCSP_SHIFT - 10;
     uint32_t fn = SCSP_FNS(sl) + (1u << 10);
@@ -501,10 +522,7 @@ static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous) {
         else
             sample = (int32_t)(((int64_t)sample * scsp_eg_table[scsp_eg_update(sl) >> (SCSP_SHIFT - 10)]) >> SCSP_SHIFT);
     }
-    if (!SCSP_STWINH(sl)) {
-        uint16_t enc = (uint16_t)((SCSP_SDIR(sl) ? 0 : SCSP_TL(sl)) | (7u << 13));
-        *sous = (int16_t)((sample * scsp_lpan[enc]) >> (SCSP_SHIFT + 1));
-    }
+    if (!SCSP_STWINH(sl)) *sous = (int16_t)((sample * sl->g_sous) >> (SCSP_SHIFT + 1));
     return sample;
 }
 
@@ -841,6 +859,7 @@ static void scsp_w16(scsp_t *s, uint32_t addr, uint16_t v) {
         case 0x8: sl->step = scsp_slot_step(sl); break;
         case 0x5: sl->rr = scsp_rate(scsp_dr_table, 0, SCSP_RR(sl)); sl->dl = 0x1F - (int32_t)SCSP_DL(sl); break;
         case 0x9: scsp_slot_lfo(sl); break;
+        case 0x6: case 0xA: case 0xB: scsp_slot_gains(sl); break;
         }
         return;
     }
@@ -1023,7 +1042,10 @@ static void scsp_reset(scsp_t *s, uint8_t *ram, uint32_t ram_size, const uint64_
     s->clock = clock;
     s->tim_next = UINT64_MAX;
     s->noise = 0x12345678u;
-    for (int i = 0; i < 32; i++) s->slot[i].state = SCSP_RELEASE;
+    for (int i = 0; i < 32; i++) {
+        s->slot[i].state = SCSP_RELEASE;
+        scsp_slot_gains(&s->slot[i]);                  /* all registers 0: the sound stack's gain is not */
+    }
     for (int t = 0; t < 3; t++) s->tim_cnt[t] = 0xFFFF;
     s->dsp.rbl = 8u * 1024u;
     s->dsp.stopped = 1;
@@ -1046,10 +1068,9 @@ static void scsp_sample(scsp_t *s, int16_t *out_l, int16_t *out_r) {
         int16_t *sous = &s->sous[s->sous_ptr];
         if (sl->active) {
             int32_t smp = scsp_slot_sample(s, sl, sous);
-            s->dsp.mixs[SCSP_ISEL(sl)] += (smp * scsp_lpan[SCSP_TL(sl) | (SCSP_IMXL(sl) << 13)]) >> (SCSP_SHIFT - 2);
-            uint16_t enc = (uint16_t)(SCSP_TL(sl) | (SCSP_DIPAN(sl) << 8) | (SCSP_DISDL(sl) << 13));
-            l += (smp * scsp_lpan[enc]) >> SCSP_SHIFT;
-            r += (smp * scsp_rpan[enc]) >> SCSP_SHIFT;
+            s->dsp.mixs[SCSP_ISEL(sl)] += (smp * sl->g_mixs) >> (SCSP_SHIFT - 2);
+            l += (smp * sl->g_dl) >> SCSP_SHIFT;
+            r += (smp * sl->g_dr) >> SCSP_SHIFT;
         }
         s->sous_ptr = (uint8_t)((s->sous_ptr + 1) & 63);
     }
@@ -1057,9 +1078,8 @@ static void scsp_sample(scsp_t *s, int16_t *out_l, int16_t *out_r) {
     for (int i = 0; i < 16; i++) {
         const scsp_slot_t *sl = &s->slot[i];
         if (!SCSP_EFSDL(sl)) continue;
-        uint16_t enc = (uint16_t)((SCSP_EFPAN(sl) << 8) | (SCSP_EFSDL(sl) << 13));
-        l += (s->dsp.efreg[i] * scsp_lpan[enc]) >> SCSP_SHIFT;
-        r += (s->dsp.efreg[i] * scsp_rpan[enc]) >> SCSP_SHIFT;
+        l += (s->dsp.efreg[i] * sl->g_el) >> SCSP_SHIFT;
+        r += (s->dsp.efreg[i] * sl->g_er) >> SCSP_SHIFT;
     }
     if (SCSP_C_DAC18B(s)) {
         l = l < -131072 ? -131072 : l > 131071 ? 131071 : l;
