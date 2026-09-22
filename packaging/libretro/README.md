@@ -73,6 +73,9 @@ RetroArch's **Quick Menu > Controls**, as with any core.
 | Online play | RetroArch, RPCN | next load |
 | RPCN sign-in | signed out, Twitch, RPCN account | at once |
 | Input delay (frames) | 1 to 8 | the next session you host |
+| RPCN status / room to join / players / lobby action | the lobby itself, see below | at once |
+| RPCN room size (hosting) | 2 to 8 players | the next room you host |
+| RPCN side to play / take part | whichever is free, 1P, 2P / play, watch only | at once |
 
 - **Full screen** draws the game at the size of the window or screen, fitted to its 496:384
   shape, so RetroArch has nothing left to scale. Where the core can't find the size, it uses
@@ -112,7 +115,12 @@ same moment and runs them in lockstep from there.
     off if the server doesn't use one. The password can't contain `:`. RetroArch saves cheats
     to a plain-text file.
 
-  Then press **L1+R1** in game for the rooms: host, join, and start a match.
+  The lobby is the same menu. Once you're signed in, the rows under **RPCN sign-in** fill in:
+  **RPCN status** says what the session is doing, **RPCN room to join** lists the rooms,
+  **RPCN players in the room** is the line you're standing in, and **RPCN lobby action** is what
+  you can do right now — host, join, refresh, ready, leave. RetroArch pauses the game while its
+  menu is open, so an action happens when you close the menu, and a message on screen says what
+  came of it.
 
   RPCN keeps one Twitch login per account, so signing in here with Twitch signs the desktop
   emulator's Twitch login out, and the other way round. **RPCN isn't available on Android**: its
@@ -146,5 +154,8 @@ How it fits together: `src/main_libretro.c` runs one board slice per `retro_run`
 framebuffer through `game_frame.h` with sokol_gfx, and resets GL to its defaults after each
 frame, because RetroArch draws with the same context and sokol's leftover state (its scissor
 test above all) blacked out the picture on GLES. RetroArch netplay is `src/net/pkt_lockstep.h`
-over `RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE`; RPCN is `src/net/netplay.h` with the gamepad
-lobby in `src/ui/pad_lobby.h`.
+over `RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE`; RPCN is `src/net/netplay.h`, and its lobby is
+`src/ui/retro_lobby.h` — core option definitions that the core rebuilds and re-sends as the
+session moves, so RetroArch draws the rooms in its own theme and the core draws nothing but the
+game. (`src/ui/pad_lobby.h` is the same lobby drawn by hand, for the SDL3 handheld build, which
+has no menu of its own.)

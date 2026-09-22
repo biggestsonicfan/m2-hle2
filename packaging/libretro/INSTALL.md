@@ -122,6 +122,17 @@ Open **Quick Menu > Core Options** while the game runs.
 | Online play | RetroArch, RPCN | Which netplay to use (see below). | next time you load the game |
 | RPCN sign-in | Signed out, Sign in using Twitch, RPCN account | Only shown with Online play set to RPCN. | at once |
 | Input delay (frames) | 1 to 8 | For matches you host. Higher hides more network lag. | the next match you host |
+| RPCN status | (one line) | What the session is doing, and as whom. Reading only. | — |
+| RPCN room to join | the rooms RPCN last listed | Which room **RPCN lobby action > Join the room above** takes. | at once |
+| RPCN players in the room | the line in the room | Who is in the room, front of the line first. Reading only. | — |
+| RPCN lobby action | what this moment allows | Host, join, refresh, ready, leave. Goes back to *(nothing)* once done. | when you close the menu |
+| RPCN room size (hosting) | 2 to 8 players | How many a room you host holds. Two fight, the rest wait in line and watch. | the next room you host |
+| RPCN side to play | Whichever is free, 1P, 2P | Which side to ask for when your turn comes. | at once |
+| RPCN take part | Play, Watch only | Watch only sits out: never picked to fight. | at once |
+
+The last seven appear only with **Online play** set to RPCN, and each only when it has something
+to say — the room list is there when you're signed in and out of a room, the player line when
+you're in one.
 
 Savestates, rewind and run-ahead don't work with this core. RetroArch says the core doesn't
 support save states if you try.
@@ -154,9 +165,18 @@ joins. Both players need **the same build** of the core; RetroArch refuses a mis
      `rpcn:NAME:PASSWORD:TOKEN`, and apply the changes. TOKEN is the one RPCN e-mailed you when
      you registered; leave `:TOKEN` off if your server doesn't use one. The password can't
      contain `:`.
-3. Press **L1 and R1 together** in game to open the lobby. From there you can host a room, join
-   one, and start the match. The d-pad moves, the bottom face button picks, and the right face
-   button closes.
+3. The lobby is in the same place: **Quick Menu > Core Options > Online play**. Once you're
+   signed in, the rows below the sign-in fill in.
+   - To **host**: set **RPCN room size** if you want more than two, then set **RPCN lobby
+     action** to *Host a room*.
+   - To **join**: pick a room in **RPCN room to join**, then set **RPCN lobby action** to *Join
+     the room above*.
+   - Either way, once you're in the room set **RPCN lobby action** to *Ready to play*. The match
+     starts when everyone in the room is ready.
+
+   RetroArch pauses the game while its menu is open, so what you pick in **RPCN lobby action**
+   happens when you close the menu; a message on screen then says what came of it. Open the menu
+   again to see where things stand.
 
 Keep in mind:
 
