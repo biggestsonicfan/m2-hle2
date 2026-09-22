@@ -92,9 +92,36 @@ const m2hleNetplay = (() => {
    * answer (or from a build that does not answer pings). */
   function peerMs(ms) { return typeof ms === 'number' ? ms : null; }
 
-  /* Frames of input delay a round trip needs: half of it each way, plus a frame
-   * of slack, as autoDelay reckons it. */
-  function framesFor(rtt) { return Math.ceil(rtt / 2 / 16.7) + 1; }
+  /* Frames of input delay a round trip needs: an input has `delay` frames to
+   * make the one-way trip, half the round trip. */
+  const FRAME_MS = 1000 / 60;
+  function framesFor(rtt) { return Math.max(1, Math.ceil(rtt / 2 / FRAME_MS)); }
+
+  /* How a match with this round trip and this input delay will play. Lockstep
+   * runs frame f once the other side's input for f has arrived, and that input
+   * was sent `delay` frames earlier; so a trip that fits keeps full speed, and
+   * past that the game slows to delay / (one-way trip in frames). 'good' keeps
+   * up; 'lag' runs at 60% or more, so it pauses now and then; 'bad' runs slower
+   * than that the whole match. */
+  function pace(rtt, delay) {
+    const speed = Math.min(1, (Math.max(1, delay) * 2 * FRAME_MS) / Math.max(1, rtt));
+    return speed >= 1 ? 'good' : speed >= 0.6 ? 'lag' : 'bad';
+  }
+  const PACE_TEXT = { good: 'good', lag: 'will probably lag', bad: 'too far to play' };
+
+  /*
+   * The round trip to a room's owner, estimated before joining: our trip to the
+   * relay plus theirs (rpcn_session_relay_ms says why that is fair). Each relay
+   * trip already carries a frame of its own end's polling, which is about what
+   * the trip between two games carries on top of the network, so nothing is
+   * added for it. Measured on one machine through a local gateway: relay trips
+   * of 15 and 18 ms, so ~33 ms shown, then 18-30 ms measured once joined.
+   * Null when either side has no figure (a room from a build before this).
+   */
+  function estimateMs(room) {
+    if (!st || !st.relay_ms || !room.relay_ms) return null;
+    return st.relay_ms + room.relay_ms;
+  }
 
   function quality(rtt) {
     if (rtt === null) return 'measuring…';
@@ -263,7 +290,7 @@ const m2hleNetplay = (() => {
     setText('np-rooms-count', playable.length ? playable.length + ' waiting' : '');
 
     /* Rebuild only when the rows changed, so a button is not replaced under a click. */
-    const key = JSON.stringify(rows.map((r) => [r.id, r.owner, r.members, r.why, r.password]));
+    const key = JSON.stringify(rows.map((r) => [r.id, r.owner, r.members, r.why, r.password, estimateMs(r)]));
     if (list.dataset.key === key) return;
     list.dataset.key = key;
     list.textContent = '';
@@ -278,6 +305,23 @@ const m2hleNetplay = (() => {
       what.textContent = r.why ? r.why
                        : r.members >= r.slots ? 'is already playing'
                        : r.password ? 'is waiting (private match)' : 'is waiting';
+      if (!r.why) {
+        /* The estimated ping, coloured by how this room's input delay copes with it. */
+        const est = estimateMs(r);
+        const ping = document.createElement('span');
+        if (est === null) {
+          ping.className = 'np-ping';
+          ping.textContent = 'ping ?';
+          ping.title = 'This room does not say how far away its host is.';
+        } else {
+          const p = pace(est, r.delay);
+          ping.className = 'np-ping np-ping-' + p;
+          ping.textContent = '~' + est + ' ms';
+          ping.title = 'Estimated round trip to ' + (r.owner || 'the host') + ': ' + PACE_TEXT[p] +
+                       ' with this room’s input delay of ' + r.delay + ' frames. Measured exactly once you join.';
+        }
+        what.append(' · ', ping);
+      }
       li.append(who, what);
       if (!r.why && r.members < r.slots) {
         const b = document.createElement('button');
@@ -322,9 +366,16 @@ const m2hleNetplay = (() => {
       what.className = 'np-what';
       what.textContent = (m.side === 0 ? '1P' : m.side === 1 ? '2P'
                          : m.watch ? 'watching' : m.ready ? 'ready' : m.heard ? 'waiting' : 'connecting…')
-                       + ' · ' + m.wins + '-' + (m.games - m.wins)
-                       + (!m.me && peerMs(m.rtt_ms) !== null ? ' · ' + m.rtt_ms + ' ms' : '');
-      if (!m.me && peerMs(m.rtt_ms) !== null) what.title = 'Round trip between you and ' + m.npid + ', measured directly';
+                       + ' · ' + m.wins + '-' + (m.games - m.wins);
+      if (!m.me && peerMs(m.rtt_ms) !== null) {
+        const p = pace(m.rtt_ms, st.delay);
+        const ping = document.createElement('span');
+        ping.className = 'np-ping np-ping-' + p;
+        ping.textContent = m.rtt_ms + ' ms';
+        ping.title = 'Round trip between you and ' + m.npid + ', measured directly: ' + PACE_TEXT[p] +
+                     ' with this room’s input delay of ' + st.delay + ' frames';
+        what.append(' · ', ping);
+      }
       li.append(who, what);
       list.append(li);
     }
@@ -337,7 +388,15 @@ const m2hleNetplay = (() => {
 
     const bits = [];
     const rtt = peerMs(r.peer_rtt_ms);
-    if (rtt !== null && !watching) bits.push('connection to ' + peer + ': ' + quality(rtt));
+    const ping = $('np-room-ping');
+    if (rtt !== null && !watching) {
+      const p = pace(rtt, st.delay);
+      setText('np-room-ping', 'Ping to ' + peer + ': ' + rtt + ' ms, ' + PACE_TEXT[p]);
+      ping.className = 'np-ping np-ping-' + p;
+      ping.hidden = false;
+    } else {
+      ping.hidden = true;
+    }
     if (playing || syncing) {
       bits.push('input delay ' + st.delay + ' frames');
       if (st.stalls) bits.push(st.stalls + ' waits for the other player');
@@ -345,7 +404,7 @@ const m2hleNetplay = (() => {
     setText('np-room-status', bits.join(' · '));
     /* The delay was fixed when the room was made, before anyone's distance was
      * known. Say so when the trip turns out longer than it covers. */
-    const short = rtt !== null && !watching && st.delay > 0 && framesFor(rtt) > st.delay;
+    const short = rtt !== null && !watching && st.delay > 0 && pace(rtt, st.delay) !== 'good';
     errorText('np-rtt-warn', short
       ? 'The round trip to ' + peer + ' needs about ' + framesFor(rtt) + ' frames of input delay and this room uses ' +
         st.delay + ', so the game will pause now and then to wait. A room made with a longer delay plays smoother.'

@@ -977,6 +977,9 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
     PUTS("error", st.error, true);
     PUTS("npid", g_netplay.cfg.npid, true);
     PUT(",\"has_password\":%s", g_netplay.cfg.password[0] ? "true" : "false");
+    /* Our trip to the relay; a room's owner publishes theirs (relay_ms below),
+     * and the lobby adds the two to estimate the trip before joining. */
+    PUT(",\"relay_ms\":%u", st.relay_ms);
     PUT(",\"family\":\"%s\",\"cross_play\":%s",
         NETPLAY_BUILD_FAMILY == NETPLAY_FAMILY_WASM ? "web" : "desktop", NETPLAY_CROSS_PLAY ? "true" : "false");
 
@@ -1032,11 +1035,12 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
         const rpcn_room_listing_t *r = &st.rooms[i];
         const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
         uint32_t family = (r->flag_attr >> NETPLAY_ROOM_FAMILY_SHIFT) & NETPLAY_ROOM_FAMILY_MASK;
-        PUT("%s{\"id\":\"%llu\",\"members\":%u,\"slots\":%u,\"password\":%s,\"delay\":%u,\"web\":%s",
+        PUT("%s{\"id\":\"%llu\",\"members\":%u,\"slots\":%u,\"password\":%s,\"delay\":%u,\"web\":%s,"
+            "\"relay_ms\":%u",
             i ? "," : "", (unsigned long long)r->room_id, r->cur_members, r->max_slots,
             r->has_password ? "true" : "false",
             (r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK,
-            family == NETPLAY_FAMILY_WASM ? "true" : "false");
+            family == NETPLAY_FAMILY_WASM ? "true" : "false", r->relay_ms);
         PUTS("owner", r->owner, true);
         PUTS("why", why ? why : "", true);
         PUT("}");

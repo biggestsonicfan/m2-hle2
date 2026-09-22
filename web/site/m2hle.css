@@ -10,6 +10,8 @@
   --dim: #97a1ba;
   --accent: #4da3ff;
   --bad: #ff8a7a;
+  --good: #7ee2a8;
+  --warn: #ffd166;
 }
 
 * { box-sizing: border-box; }
@@ -357,6 +359,13 @@ a.tool { display: inline-block; text-decoration: none; }
 .np-who { font-weight: 600; }
 .np-what { flex: 1; color: var(--dim); font-size: 0.875rem; }
 .np-room-off { opacity: 0.6; }
+/* A room's estimated ping, and the room's measured one: green keeps up, yellow
+ * will lag, red is too far to play (pace() in m2hle-netplay.js). */
+.np-ping { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.np-ping-good { color: var(--good); }
+.np-ping-lag  { color: var(--warn); }
+.np-ping-bad  { color: var(--bad); }
+#np-room-ping { margin: 0.75rem 0 0; }
 .online-btn.live { border-color: #3c8f5a; background: #123322; }
 .online .error { text-align: left; }
 .online [hidden] { display: none !important; }

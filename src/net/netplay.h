@@ -326,6 +326,7 @@ typedef struct {
     bool            peer_known;
     bool            peer_heard;
     int32_t         peer_rtt_ms;       /* round trip to "the peer"; -1 = not measured */
+    uint32_t        relay_ms;          /* our trip to RPCN's helper (rpcn_session_relay_ms); 0 = not yet */
     uint32_t        frame;
     uint32_t        stalls;
     uint32_t        desync_frame;      /* LOCKSTEP_NO_CHECK while in agreement */
@@ -1676,6 +1677,7 @@ static inline void netplay_publish_status(void) {
     st->peer_known   = peer && peer->ip && peer->port;
     st->peer_heard   = peer && peer->heard;
     st->peer_rtt_ms  = peer ? netplay_rtt_ms(peer->member_id) : -1;
+    st->relay_ms     = rpcn_session_relay_ms(s);
     st->frame        = g_netplay.frame;
     st->stalls       = g_netplay.lockstep.stalls;
     st->desync_frame = g_netplay.desync_frame;

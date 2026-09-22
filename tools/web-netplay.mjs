@@ -213,9 +213,17 @@ try {
   const hosted = await until(A, 'a room', (s) => s.state === 'in a room' && s.room.id !== '0');
   log('A', `hosting room ${hosted.room.id} (flags 0x${hosted.room.flags.toString(16)})`);
 
-  const seen = await until(B, 'A\'s room in the list', (s) => (s.rooms || []).some((r) => r.id === hosted.room.id), 30000);
+  /* Waits for the host's relay trip too: the lobby's ping estimate needs it. */
+  const seen = await until(B, 'A\'s room in the list, with its relay trip',
+    (s) => (s.rooms || []).some((r) => r.id === hosted.room.id && r.relay_ms > 0) && s.relay_ms > 0, 30000);
   const row = seen.rooms.find((r) => r.id === hosted.room.id);
   log('B', `sees ${row.owner}'s room: ${row.why || 'joinable'} (web=${row.web}, delay ${row.delay})`);
+  await sleep(500);   /* the panel redraws from the next poll */
+  const shown = await B.eval(`(() => { const li = [...document.querySelectorAll('#np-rooms .np-room')]
+    .find((li) => li.querySelector('.np-who').textContent === ${JSON.stringify(row.owner)});
+    const p = li && li.querySelector('.np-ping'); return p ? p.textContent + ' ' + p.className : 'none'; })()`);
+  log('B', `lobby estimate: relay ${seen.relay_ms} + host ${row.relay_ms} ms -> shown "${shown}"`);
+  if (!/ms np-ping np-ping-(good|lag|bad)$/.test(shown)) { failed = true; log('B', 'FAIL: the room row shows no coloured ping'); }
   if (row.why) throw new Error(`B refuses A's room: ${row.why}`);
   await uiShot(A, '3-room-waiting');
   await uiShot(B, '4-lobby-with-room');
