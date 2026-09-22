@@ -35,6 +35,8 @@ import { driveToAddr, fightInputAt, attractInputAt } from './lib/drive.mjs';
 const STATES = {
     'round-mask': { from: 0xB820, to: 0xC34C, drive: 'fight',
                     what: "ROUND_MASK_INT -> ROUND_INT: the VS screen, where the round's textures load" },
+    'movie-egg':  { from: 0x5320C, to: 0x541DC, drive: 'attract',
+                    what: 'adv_movie_egg_init -> adv_movie_snc_init: the Death Egg scene of the attract movie' },
 };
 
 const args = parseArgs(['from', 'to', 'state', 'rounds', 'rom', 'port', 'drive', 'max-frames']);

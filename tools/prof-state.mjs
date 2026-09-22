@@ -84,7 +84,7 @@ for (const z of ['sfight.zip', 'schamp.zip']) {
     if (fs.existsSync(src) && !fs.existsSync(path.join(RUNDIR, z))) fs.copyFileSync(src, path.join(RUNDIR, z));
 }
 
-const emu = await M2Hle.launch({ exe: EXE, rom: path.join(RUNDIR, path.basename(ROM)), port: PORT, run: false });
+const emu = await M2Hle.launch({ exe: EXE, rom: path.join(RUNDIR, path.basename(ROM)), port: PORT, run: true });
 try {
     await emu.waitForRom();
     const probe = await emu.rpc('prof', { on: 0 });
@@ -107,7 +107,7 @@ try {
 const rows = fs.readFileSync(path.join(OUT, 'pc.csv'), 'utf8').trim().split('\n').slice(1)
     .map((l) => l.split(',').map(Number));
 const frames = fs.readFileSync(path.join(OUT, 'pc.csv.frames.csv'), 'utf8').trim().split('\n').slice(1)
-    .filter(Boolean)
+    .filter((l) => l && !l.startsWith('#'))
     .map((l) => { const [f, us, st] = l.split(',').map(Number); return { f, us, st }; });
 
 const sym = symbolizer(await idaFunctions());
