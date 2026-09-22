@@ -90,7 +90,6 @@ static inline uint32_t sharc_coli_remap(uint32_t mask) {
 /* ---- Fn_coli_set_ball_adrs (0x38, PM 0x20DA8) ------------------------------- */
 static inline void sharc_coli_set_ball_adrs(uint32_t a0) {
     sharc_dm_set(0x3033Eu, a0 == 1u ? 0x1407E80u : 0x1403E80u);
-    g_sharc.coli_buf_base = a0 == 1u ? 0x1FA00u : 0xFA00u;
 }
 
 /* ---- Fn_coli_point_trans (0x39, PM 0x20DC2): the new position replaces the

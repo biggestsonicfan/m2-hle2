@@ -396,7 +396,6 @@ int main(int argc, char **argv) {
                     if (resync) {
                         for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) g_sharc.rot[c][r] = b2f(snap_words[c*3 + r]);
                         for (int r = 0; r < 3; r++) g_sharc.pos[r] = b2f(snap_words[9 + r]);
-                        g_sharc.matrix_dirty = true; g_sharc.bone_dirty = true;
                     }
                 }
             } else if (tag >= 0x900000u && tag < 0x980000u) {

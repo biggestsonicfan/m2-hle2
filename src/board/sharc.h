@@ -19,17 +19,11 @@
  *
  *   Angles: signed 16-bit fixed-point, 0x10000 = 360°.
  *
- *   World-pos snapshot: 0x04800909 (set Y angle) snapshots pos[] → world_pos[].
- *   0x07800F0F returns world_pos[], NOT pos[].
+ *   0x07800F0F returns the current translation pos[] (Fn_read_world_pos).
  *
- *   Z-negation convention for 0x14802929 / 0x35006A6A:
- *     rx = M[0]·(ix, iy, −iz) + T[0]
- *     ry = M[1]·(ix, iy, −iz) + T[1]
- *     rz = M[2]·(ix, iy, +iz) + T[2]   ← z row uses raw iz, NOT negated
- *   (Verified cases 6 and 9 in verify_14802929_mame.py against MAME SHARC.)
- *
- *   Bone scratch: column-major [col0|col1|col2|T], evolves across successive
- *   0x35806B6B calls; reset to dirty when main matrix changes.
+ *   0x14802929 (Fn_point_trans) is rot × v + T on the raw column-major rot[],
+ *   accumulated onto T one column at a time; 0x35006A6A is its inverse,
+ *   R^T × (v − T). Neither negates z: the handlers work on rot[] directly.
  */
 #ifndef SHARC_H
 #define SHARC_H
@@ -44,7 +38,7 @@
 
 /* ---- Limits -------------------------------------------------------------- */
 
-#define SHARC_REPLY_MAX       1024  /* Fn_osage answers 13 words a sway segment in one command */
+#define SHARC_REPLY_MAX       1024  /* Fn_osage answers a whole chain set in one command (61 words for Bean) */
 #define SHARC_UNKNOWN_LOG_MAX 64
 
 /* ---- State --------------------------------------------------------------- */
@@ -74,43 +68,14 @@ typedef struct {
     /* Debug shadow of last angle set for each command — NOT used for matrix building. */
     int32_t  ang[3];        /* X=0x04000808  Y=0x04800909  Z=0x05000A0A */
 
-    /* Snapshot of pos[] taken when Y angle is set (0x04800909).
-     * Not returned by 0x07800F0F (which returns rotation entries slot[1..3]),
-     * but kept as a diagnostic / stack save/restore value. */
-    float    world_pos[3];
-
-    /* 3×4 rotation+translation matrix, row-major:
-     *   row0 = [R00 R01 R02 Tx]
-     *   row1 = [R10 R11 R12 Ty]
-     *   row2 = [R20 R21 R22 Tz]
-     * Rebuilt lazily from rot[]/pos[] when matrix_dirty is set.
-     *
-     * Z-negation convention (rows 0/1 only): m[r][2] = −rot[2][r] for r∈{0,1},
-     * but m[2][2] = rot[2][2].  This compensates for the z-negation the i960
-     * applies to the input iz before 0x14802929 / 0x35006A6A (rows 0/1 negate,
-     * row 2 does not), making our row-major transform produce identical output
-     * to the SHARC's raw column-major multiply. */
-    float    matrix[3][4];
-    bool     matrix_dirty;
-
     /* Matrix stack for 0x00800101 (push) / 0x01000202 (pop). */
 #define SHARC_STACK_DEPTH 8
     struct {
         float   rot[3][3];   /* accumulated rotation (column-major, same as sharc) */
         float   pos[3];
-        float   world_pos[3];
         int32_t ang[3];      /* debug shadow */
     } stack[SHARC_STACK_DEPTH];
     int stack_top;
-
-    /* Running bone-chain scratch state for 0x35806B6B (calc_rob_angle_cont).
-     *   bone_col[0..8] — column-major 3×3 rotation
-     *   bone_T[0..2]   — world-space joint position
-     *   bone_dirty     — re-initialise from matrix on next call
-     * Reset to dirty whenever the main matrix changes. */
-    float bone_col[9];
-    float bone_T[3];
-    bool  bone_dirty;
 
     /* TGP bone slot storage (written by 0x35806B6B, read by geometry decoder).
      *   P1 bone N → slot N    (TGP addrs 0x3A30..0x3AB4)
@@ -142,10 +107,6 @@ typedef struct {
      * from here: type 1 loads a 12-word col-major matrix into the current slot. */
     uint8_t *sharc_dm_ext;       /* points to memory_bus_t::buff_ram */
     uint32_t sharc_dm_ext_size;  /* bytes (BUFF_RAM_SIZE) */
-
-    /* Active collision-ball buffer base (set by 0x1C003838).
-     * P1 = 0xFA00, P2 = 0x1FA00 (byte offset into sharc_dm_ext). */
-    uint32_t coli_buf_base;
 
     /* The firmware's own data memory, DM 0x30000..0x32FFF, one word each —
      * what Fn_write_ram (0x49) fills and Fn_read_ram (0x48) reads, and the
@@ -185,12 +146,6 @@ typedef struct {
         uint32_t count;
     } unknown_log[SHARC_UNKNOWN_LOG_MAX];
     int unknown_log_count;
-
-    /* Diagnostic snapshot of most recent 0x14802929 transform. */
-    float   dbg_xform_pos[3];
-    int32_t dbg_xform_ang[3];
-    float   dbg_xform_in[3];
-    float   dbg_xform_out[3];
 } sharc_state_t;
 
 static sharc_state_t g_sharc = {0};
@@ -511,36 +466,6 @@ static inline void sharc_premul_ry(float c, float s) {
 static inline void sharc_rot_identity(void) {
     memset(g_sharc.rot, 0, sizeof(g_sharc.rot));
     g_sharc.rot[0][0] = g_sharc.rot[1][1] = g_sharc.rot[2][2] = 1.0f;
-}
-
-/* ---- Matrix builder ------------------------------------------------------ */
-
-/*
- * Converts the column-major rot[3][3] (SHARC convention) to our row-major
- * matrix[3][4] (HLE convention) with z-negation:
- *   rows 0,1: m[r][2] = −rot[2][r]  (compensates for −iz in 14802929 rows 0/1)
- *   row  2:   m[2][2] =  rot[2][2]  (row 2 uses raw +iz, so no sign flip)
- * All other elements: m[r][c] = rot[c][r].
- */
-static inline void sharc_build_matrix(void) {
-    float (*r)[3] = g_sharc.rot;
-    float (*m)[4] = g_sharc.matrix;
-
-    m[0][0] =  r[0][0]; m[0][1] =  r[1][0]; m[0][2] = -r[2][0]; m[0][3] = g_sharc.pos[0];
-    m[1][0] =  r[0][1]; m[1][1] =  r[1][1]; m[1][2] = -r[2][1]; m[1][3] = g_sharc.pos[1];
-    m[2][0] =  r[0][2]; m[2][1] =  r[1][2]; m[2][2] =  r[2][2]; m[2][3] = g_sharc.pos[2];
-
-    g_sharc.matrix_dirty = false;
-}
-
-static inline void sharc_transform_vec3(float ix, float iy, float iz,
-                                         float *ox, float *oy, float *oz,
-                                         bool with_translation) {
-    if (g_sharc.matrix_dirty) sharc_build_matrix();
-    float (*m)[4] = g_sharc.matrix;
-    *ox = m[0][0]*ix + m[0][1]*iy + m[0][2]*iz + (with_translation ? m[0][3] : 0.0f);
-    *oy = m[1][0]*ix + m[1][1]*iy + m[1][2]*iz + (with_translation ? m[1][3] : 0.0f);
-    *oz = m[2][0]*ix + m[2][1]*iy + m[2][2]*iz + (with_translation ? m[2][3] : 0.0f);
 }
 
 #endif /* SHARC_H */
