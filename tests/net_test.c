@@ -365,12 +365,13 @@ int main(void) {
         s.phase = ROOM_PHASE_MATCH; s.flags = ROOM_FLAG_AUTO; s.frame_delay = 3; s.last_result = 1;
         s.match = 513; s.fighter[0] = 0x21; s.fighter[1] = 0x32; s.seed = 0xCAFEF00Du;
         s.line_count = 3; s.line[0] = 0x32; s.line[1] = 0x41; s.line[2] = 0x21; s.region = 2;
+        s.vs_mode = 1; s.session = 511;
         uint8_t bin[ROOM_STATE_SIZE];
         uint32_t len = room_state_encode(&s, bin);
         CHECK(room_state_decode(bin, len, &back) && back.match == 513 && back.fighter[1] == 0x32
               && back.seed == 0xCAFEF00Du && back.line_count == 3 && back.line[1] == 0x41
               && back.frame_delay == 3 && back.last_result == 1 && back.flags == ROOM_FLAG_AUTO
-              && back.region == 2,
+              && back.region == 2 && back.vs_mode == 1 && back.session == 511,
               "the room state round-trips");
         bin[0] ^= 1;
         CHECK(!room_state_decode(bin, len, &back), "bytes without our magic are not a room state");
@@ -384,6 +385,38 @@ int main(void) {
               && mback.entry == ROOM_ENTRY_2P && mback.playing == 7 && mback.result_match == 6
               && mback.result == 0 && mback.points == 21 && mback.wins == 4,
               "a member's attribute round-trips");
+    }
+    {
+        /* VS mode: the same two play on, on the running boards, only when nobody
+         * else is waiting to play. */
+        room_state_t s;
+        memset(&s, 0, sizeof(s));
+        s.phase = ROOM_PHASE_MATCH; s.match = 9; s.session = 7; s.vs_mode = 1;
+        s.fighter[0] = 1; s.fighter[1] = 2;
+        s.line_count = 2; s.line[0] = 1; s.line[1] = 2;
+        room_member_t m[3];
+        memset(m, 0, sizeof(m));
+        for (int i = 0; i < 3; i++) { m[i].id = (uint16_t)(i + 1); m[i].known = true; }
+        CHECK(room_vs_continues(&s, m, 2), "VS mode, two players: the rematch is on the same boards");
+
+        s.vs_mode = 0;
+        CHECK(!room_vs_continues(&s, m, 2), "without VS mode every match gets its own reset");
+        s.vs_mode = 1;
+
+        s.line_count = 3; s.line[2] = 3;
+        CHECK(!room_vs_continues(&s, m, 3), "somebody waiting in line: the line moves, with a reset");
+
+        m[2].data.flags = ROOM_MEMBER_WATCH;
+        CHECK(room_vs_continues(&s, m, 3), "somebody only watching does not stop the rematch");
+
+        m[1].data.flags = ROOM_MEMBER_WATCH;
+        CHECK(!room_vs_continues(&s, m, 3), "a fighter who sits out ends it");
+        m[1].data.flags = 0;
+
+        CHECK(!room_vs_continues(&s, m, 1), "a fighter who left ends it");
+
+        s.phase = ROOM_PHASE_LOBBY;
+        CHECK(!room_vs_continues(&s, m, 3), "a match that is not on has nothing to continue");
     }
     {
         /* The line follows the room: leavers out, newcomers on the end in id order. */

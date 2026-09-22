@@ -814,6 +814,7 @@ EMSCRIPTEN_KEEPALIVE int web_netplay_set(const char *key, const char *value) {
     if (!strcmp(key, "room_id"))     { c->room_id = strtoull(value, NULL, 10); return 0; }
     if (!strcmp(key, "frame_delay")) { c->frame_delay = (uint32_t)strtoul(value, NULL, 10); return 0; }
     if (!strcmp(key, "max_players")) { c->max_players = (uint32_t)strtoul(value, NULL, 10); return 0; }
+    if (!strcmp(key, "vs_mode"))     { c->vs_mode = strtoul(value, NULL, 10) != 0; return 0; }
     if (!strcmp(key, "entry"))       { c->entry = (uint8_t)strtoul(value, NULL, 10); return 0; }
     if (!strcmp(key, "watch"))       { c->watch_only = strtoul(value, NULL, 10) != 0; return 0; }
     return -1;

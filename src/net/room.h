@@ -45,6 +45,12 @@
  *     simply last in line.
  *   * A MEMBER MAY SIT OUT (ROOM_MEMBER_WATCH). The port picks everybody in turn;
  *     a room here can hold people who only came to watch.
+ *   * VS MODE CAN SKIP THE RESET. With the owner's VS mode on, a decided match
+ *     sends every board back to character select with both players still in.
+ *     When those two are the only players, the next match is that rematch, on
+ *     the boards already running (room_vs_continues): `match` counts on while
+ *     `session` stays on the match that did the cold boot. The results, the
+ *     stats and the line are handled exactly as for any other match.
  */
 #ifndef ROOM_H
 #define ROOM_H
@@ -83,11 +89,20 @@ typedef struct {
      * a backup-RAM setting). The owner's: two boards that disagree on it are
      * running two different games from frame 0. */
     uint8_t  region;
+    /* VS mode for `match` (hle_hooks.h g_vs_mode), the owner's like `region`:
+     * a decided match sends the board back to character select with both
+     * players still in. */
+    uint8_t  vs_mode;
+    /* The match whose cold boot the boards are running `match` on. Equal to
+     * `match` for every match that began with a board reset. In VS mode, when
+     * the same two players play on, the next match is a rematch on the running
+     * boards: `match` moves on and `session` stays where it was. */
+    uint16_t session;
 } room_state_t;
 
 #define ROOM_STATE_MAGIC   0x4D52324Du   /* "M2RM" */
 #define ROOM_STATE_VERSION 1u
-#define ROOM_STATE_SIZE    (21u + 2u * ROOM_MAX_MEMBERS)
+#define ROOM_STATE_SIZE    (24u + 2u * ROOM_MAX_MEMBERS)
 
 static inline void room_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static inline void room_put32(uint8_t *p, uint32_t v) { room_put16(p, (uint16_t)v); room_put16(p + 2, (uint16_t)(v >> 16)); }
@@ -110,6 +125,8 @@ static inline uint32_t room_state_encode(const room_state_t *s, uint8_t *out) {
     room_put32(out + 16, s->seed);
     for (uint32_t i = 0; i < out[15]; i++) room_put16(out + 20 + 2 * i, s->line[i]);
     out[20 + 2 * ROOM_MAX_MEMBERS] = s->region;
+    out[21 + 2 * ROOM_MAX_MEMBERS] = s->vs_mode;
+    room_put16(out + 22 + 2 * ROOM_MAX_MEMBERS, s->session);
     return ROOM_STATE_SIZE;
 }
 
@@ -130,6 +147,8 @@ static inline bool room_state_decode(const uint8_t *in, uint32_t len, room_state
     s->seed        = room_get32(in + 16);
     for (uint32_t i = 0; i < s->line_count; i++) s->line[i] = room_get16(in + 20 + 2 * i);
     s->region      = in[20 + 2 * ROOM_MAX_MEMBERS];
+    s->vs_mode     = in[21 + 2 * ROOM_MAX_MEMBERS];
+    s->session     = room_get16(in + 22 + 2 * ROOM_MAX_MEMBERS);
     return true;
 }
 
@@ -363,6 +382,29 @@ static inline bool room_after_result(room_member_data_t *me_data, uint16_t me,
             me_data->points = (uint16_t)(me_data->points + 1u);
             me_data->entry  = ROOM_ENTRY_NONE;
         }
+    }
+    return true;
+}
+
+/*
+ * VS mode: after a result, do the two who just fought play again on the boards
+ * already running, with no reset? Only when nobody else is waiting to play.
+ * With a line, the rotation brings somebody else on, and a new fighter needs a
+ * cold boot like any new match. The sides stay as they are, because the board
+ * keeps them.
+ *
+ * Counting players and not asking room_pick_fighters is deliberate. The owner
+ * decides the moment a result arrives, and the fighters' entry requests are
+ * their own attributes and may still say what they said before the result. A
+ * pick made from those can bring back the loser ahead of somebody waiting.
+ */
+static inline bool room_vs_continues(const room_state_t *s, const room_member_t *m, uint32_t n) {
+    if (!s->vs_mode || s->phase != ROOM_PHASE_MATCH) return false;
+    if (room_player_count(s, m, n) != 2) return false;
+    for (uint32_t side = 0; side < 2; side++) {
+        const room_member_t *mm = room_find(m, n, s->fighter[side]);
+        if (!mm || room_line_index(s, s->fighter[side]) < 0) return false;
+        if (mm->known && (mm->data.flags & ROOM_MEMBER_WATCH)) return false;
     }
     return true;
 }

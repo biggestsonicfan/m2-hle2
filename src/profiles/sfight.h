@@ -314,6 +314,30 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /*
+ * vs_rematch (0xE584, next_round+0x1A4): VS mode's rematch. Sega's console
+ * emulator traps this instruction (its table index 26, handler RVA 0x52EC0).
+ *
+ * 0xE584 is `ldob winner, r14`, which a decided versus match reaches on the way
+ * to 0xF5D4 (1P won) or 0xF620 (2P won). Both of those keep the winner on and
+ * send the loser out, so the next fight is the winner against the CPU. With VS
+ * mode set, the DLL ORs 5 into both players' flag words (0x500248 / 0x50024C,
+ * bits 0 and 2) and jumps to 0xF524 instead. That is the ROM's own "both players
+ * continue" path: it sets bit 2 of both flags again, clears the round state and
+ * branches to SEL_INT with mode 6. So the board is back at character select
+ * with both players already in.
+ *
+ * With VS mode off the instruction runs as it always has, so the Arcade profile
+ * and every grader see the ROM's own flow.
+ */
+static int sfight_hook_vs_rematch(i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!g_vs_mode) return 1;
+    mem_write8(bus, 0x00500248, (uint8_t)(mem_read8(bus, 0x00500248) | 5u));
+    mem_write8(bus, 0x0050024C, (uint8_t)(mem_read8(bus, 0x0050024C) | 5u));
+    cpu->sfr.ip = 0x0000F524;
+    return 0;
+}
+
+/*
  * country_default (0x62688, init_game_assignments+0x1A8): the factory default
  * of the region setting. The instruction is `stob r15, country_val_bk`
  * (backup RAM 0x1D03352) after `mov 0, r15`, and the next one stores r15 again
@@ -351,8 +375,9 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
  * macros below, so a fix to one reaches both. */
 
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
- * netplay rooms read the result from, and the region default. */
-#define SFIGHT_BASE_HOOK_COUNT 11
+ * netplay rooms read the result from, VS mode's rematch, and the region
+ * default. */
+#define SFIGHT_BASE_HOOK_COUNT 12
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
@@ -364,6 +389,7 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
     { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \
+    { 0x0000E584, sfight_hook_vs_rematch,         "next_round+0x1a4"        }, \
     { 0x00062688, sfight_hook_country_default,    "country_default"         },
 
 #define SFIGHT_INPUT_MAP                                                        \
@@ -418,6 +444,7 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
     .sound_queue_count_addr = 0x00504001,   /* byte_504001 */                         \
     .sound_queue_state_addr = 0x00504014,   /* byte_504014 */                         \
     .warning_skip_addr      = 0x00500410,   /* poke 1 → skip boot warning screen */ \
+    .vs_rematch             = true,         /* sfight_hook_vs_rematch */             \
     .attract_replay = {                                                               \
         .step_addr   = 0x00500030,           /* _sub_mode */                          \
         .from_step   = 5,                                                             \

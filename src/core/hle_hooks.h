@@ -41,6 +41,14 @@ static volatile int g_versus_result = 0;
 typedef enum { GAME_REGION_JAPAN = 0, GAME_REGION_USA = 1, GAME_REGION_EXPORT = 2 } game_region_t;
 static volatile int g_region = GAME_REGION_USA;
 
+/* Versus mode: the cabinet setting Sega's console emulator calls VS mode. When
+ * a two-player match is decided the board goes straight back to character
+ * select with both players still in, rather than keeping the winner on against
+ * the CPU. A profile that honours it says so (game_quirks_t.vs_rematch). Off by
+ * default; --vs-mode turns it on, and in a netplay room the owner's setting is
+ * the one every board plays by, like g_region. */
+static volatile int g_vs_mode = 0;
+
 /* "japan"/"jpn", "usa"/"us", "export"/"exp"; -1 for anything else. */
 static inline int game_region_parse(const char *s) {
     if (!s) return -1;

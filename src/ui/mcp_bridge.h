@@ -1493,6 +1493,11 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
     if (mcp_json_get_u32(req, "p2p_port", &v))    cfg->local_p2p_port = (uint16_t)v;
     if (mcp_json_get_u32(req, "browse_yamp", &v)) cfg->browse_yamp = v != 0;
     if (mcp_json_get_u32(req, "max_players", &v)) cfg->max_players = v;
+    /* VS mode for a room this hosts: a decided match goes back to character
+     * select with both players in, and the same two play on without a reset.
+     * Unset, it follows the board's own setting (--vs-mode). */
+    cfg->vs_mode = g_vs_mode != 0;
+    if (mcp_json_get_u32(req, "vs", &v))          cfg->vs_mode = v != 0;
     if (mcp_json_get_u32(req, "entry", &v))       cfg->entry = (uint8_t)v;
     if (mcp_json_get_u32(req, "watch", &v))       cfg->watch_only = v != 0;
     /* A room id is 64 bits and mcp_json_get_u32 is not, so it travels as a
@@ -1684,11 +1689,14 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
 
     /* The room (net/room.h): its phase, the match, and every member in line
      * order with the side they are on and what they have published. */
-    NP_APPEND(",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"fighters\":[%u,%u],"
+    NP_APPEND(",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"session\":%u,"
+              "\"vs_mode\":%s,\"fighters\":[%u,%u],"
               "\"last_result\":%d,\"auto_start_s\":%u,\"max\":%u,\"me\":%u,\"members\":[",
               st.room_known ? "true" : "false",
               st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby",
-              st.room.match, st.room.fighter[0], st.room.fighter[1],
+              st.room.match, st.room.session ? st.room.session : st.room.match,
+              st.room.vs_mode ? "true" : "false",
+              st.room.fighter[0], st.room.fighter[1],
               st.room.last_result <= 1 ? (int)st.room.last_result : -1,
               st.auto_start_s, st.max_slot, st.my_member_id);
     for (uint32_t i = 0; i < st.member_count && left > 256; i++) {
