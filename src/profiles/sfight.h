@@ -318,6 +318,23 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 1;
 }
 
+/*
+ * country_default (0x62688, init_game_assignments+0x1A8): the factory default
+ * of the region setting. The instruction is `stob r15, country_val_bk`
+ * (backup RAM 0x1D03352) after `mov 0, r15`, and the next one stores r15 again
+ * to the working copy, country_val (0x59C352). Load g_region into r15 and let
+ * both stores run. Backup RAM starts blank on every boot here, so the game
+ * takes this path on every cold boot, as well as from the test menu's
+ * INITIALIZE. Japan (0) shows the "only in Japan" warning; USA (1) skips it,
+ * shows the FBI picture before the Sega logo in attract, and uses the US
+ * names and credit limit.
+ */
+static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)bus;
+    cpu->locals.r[15] = (uint32_t)g_region;
+    return 1;
+}
+
 /* NOTE: there is intentionally NO read_sw (0x17CC) hook. Inputs are delivered
  * the authentic way — input.h serves the active-low I/O ports (0x1C00000) and
  * the game's own read_sw, called from the VsyncScr vblank interrupt, reads them
@@ -338,9 +355,9 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
  * hidden-character patches on top. What the two share is spelled once, in the
  * macros below, so a fix to one reaches both. */
 
-/* The hooks every STF profile needs to boot and pace frames, and the versus
- * hook netplay rooms read the result from. */
-#define SFIGHT_BASE_HOOK_COUNT 10
+/* The hooks every STF profile needs to boot and pace frames, the versus hook
+ * netplay rooms read the result from, and the region default. */
+#define SFIGHT_BASE_HOOK_COUNT 11
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
@@ -351,7 +368,8 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
     { 0x00007264, sfight_hook_700000_loop,        "_700000_loop"            }, \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
-    { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           },
+    { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \
+    { 0x00062688, sfight_hook_country_default,    "country_default"         },
 
 #define SFIGHT_INPUT_MAP                                                        \
     .held_addr       = 0x00500700,                                              \

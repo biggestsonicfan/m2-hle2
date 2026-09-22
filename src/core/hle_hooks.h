@@ -32,6 +32,24 @@ static volatile int g_frame_done = 0;
  * on the same frame. Part of a board reset (emu_board_reset_state). */
 static volatile int g_versus_result = 0;
 
+/* The region the board powers up as, for games whose region is a backup-RAM
+ * setting (STF's country_val: 0 Japan, 1 USA, 2 Export). A profile's hook
+ * applies it where the game writes its factory default, so it holds for every
+ * cold boot and for the test menu's INITIALIZE. USA by default; --region picks
+ * another. MAME's sfight boots as Japan, so the graders ask for japan. Both
+ * boards in a netplay session have to agree on it. */
+typedef enum { GAME_REGION_JAPAN = 0, GAME_REGION_USA = 1, GAME_REGION_EXPORT = 2 } game_region_t;
+static volatile int g_region = GAME_REGION_USA;
+
+/* "japan"/"jpn", "usa"/"us", "export"/"exp"; -1 for anything else. */
+static inline int game_region_parse(const char *s) {
+    if (!s) return -1;
+    if (!strcmp(s, "japan")  || !strcmp(s, "jpn") || !strcmp(s, "jp")) return GAME_REGION_JAPAN;
+    if (!strcmp(s, "usa")    || !strcmp(s, "us"))                      return GAME_REGION_USA;
+    if (!strcmp(s, "export") || !strcmp(s, "exp"))                     return GAME_REGION_EXPORT;
+    return -1;
+}
+
 /* Monotonic count of completed game frames. The emu thread bumps it at every
  * frame boundary (HLE pace hook or board vblank ACK). Tooling outside the
  * emulator needs a frame clock to pace a capture by — MAME's drivers use the

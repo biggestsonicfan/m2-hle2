@@ -550,6 +550,11 @@ static bool parse_args(int argc, char **argv) {
         bool more = i + 1 < argc;
         if      (!strcmp(a, "--rom") && more)        opt.rom = argv[++i];
         else if (!strcmp(a, "--profile") && more)    opt.profile = argv[++i];
+        else if (!strcmp(a, "--region") && more) {   /* japan | usa | export */
+            int r = game_region_parse(argv[++i]);
+            if (r < 0) return false;
+            g_region = r;
+        }
         else if (!strcmp(a, "--render-fps") && more) opt.render_fps = atof(argv[++i]);
         else if (!strcmp(a, "--steps-per-slice") && more) {
             int n = atoi(argv[++i]);

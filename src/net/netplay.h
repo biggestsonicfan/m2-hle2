@@ -102,6 +102,7 @@
 
 #include "constants.h"
 #include "game_profile.h"
+#include "hle_hooks.h"      /* g_region: every board in a match boots as one */
 #include "i960.h"
 #include "input.h"
 #include "log.h"
@@ -2469,6 +2470,7 @@ static inline void netplay_owner_pump(void) {
             s.fighter[0]  = f[0];
             s.fighter[1]  = f[1];
             s.seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s.match << 16) ^ 0x5A5Au;
+            s.region      = (uint8_t)g_region;
             s.last_result = ROOM_RESULT_NONE;
             s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
             g_netplay.match_begun_ms = now;
@@ -2536,6 +2538,13 @@ static inline void netplay_member_pump(void) {
         netplay_end_match(NULL);
         g_netplay.match_started = r->match;
         g_netplay.seed          = r->seed;
+        /* The owner's region, before the reset that boots into it: a board
+         * booted as another region is another game from frame 0. */
+        if (g_region != (int)r->region) {
+            netplay_log("playing this room in the owner's region (%s)",
+                        r->region == GAME_REGION_JAPAN ? "Japan" : r->region == GAME_REGION_EXPORT ? "Export" : "USA");
+            g_region = r->region;
+        }
         if (side >= 0) {
             netplay_log("match %u: you are %s against %s", (unsigned)r->match, side == 0 ? "1P" : "2P",
                         netplay_member_name(r->fighter[side ^ 1]));

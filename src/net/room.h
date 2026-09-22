@@ -79,11 +79,15 @@ typedef struct {
     uint32_t seed;
     uint8_t  line_count;
     uint16_t line[ROOM_MAX_MEMBERS];   /* the waiting line, front first */
+    /* The region every board in `match` cold-boots as (hle_hooks.h g_region,
+     * a backup-RAM setting). The owner's: two boards that disagree on it are
+     * running two different games from frame 0. */
+    uint8_t  region;
 } room_state_t;
 
 #define ROOM_STATE_MAGIC   0x4D52324Du   /* "M2RM" */
 #define ROOM_STATE_VERSION 1u
-#define ROOM_STATE_SIZE    (20u + 2u * ROOM_MAX_MEMBERS)
+#define ROOM_STATE_SIZE    (21u + 2u * ROOM_MAX_MEMBERS)
 
 static inline void room_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static inline void room_put32(uint8_t *p, uint32_t v) { room_put16(p, (uint16_t)v); room_put16(p + 2, (uint16_t)(v >> 16)); }
@@ -105,6 +109,7 @@ static inline uint32_t room_state_encode(const room_state_t *s, uint8_t *out) {
     out[15] = s->line_count > ROOM_MAX_MEMBERS ? ROOM_MAX_MEMBERS : s->line_count;
     room_put32(out + 16, s->seed);
     for (uint32_t i = 0; i < out[15]; i++) room_put16(out + 20 + 2 * i, s->line[i]);
+    out[20 + 2 * ROOM_MAX_MEMBERS] = s->region;
     return ROOM_STATE_SIZE;
 }
 
@@ -124,6 +129,7 @@ static inline bool room_state_decode(const uint8_t *in, uint32_t len, room_state
     s->line_count  = in[15] > ROOM_MAX_MEMBERS ? ROOM_MAX_MEMBERS : in[15];
     s->seed        = room_get32(in + 16);
     for (uint32_t i = 0; i < s->line_count; i++) s->line[i] = room_get16(in + 20 + 2 * i);
+    s->region      = in[20 + 2 * ROOM_MAX_MEMBERS];
     return true;
 }
 
