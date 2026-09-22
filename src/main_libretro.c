@@ -751,7 +751,7 @@ static void lr_rpcn_autojoin(void) {
     if (st->state == NETPLAY_IN_ROOM && st->peer_known && !started) {
         netplay_post(NETPLAY_CMD_START, &c);
         started = true;
-        lr_log(RETRO_LOG_INFO, "rpcn autojoin: in the room with %s - challenging (Start)", st->peer_npid);
+        lr_log(RETRO_LOG_INFO, "rpcn autojoin: in the room with %s - ready (Start)", st->peer_npid);
     }
 }
 
@@ -1074,7 +1074,7 @@ static void lr_draw(bool ran) {
     });
     bool rpcn = opt.online == LR_ONLINE_RPCN;
     /* The lobby is drawn on black, to be read; over a match, on the match. */
-    bool show_game = !(rpcn && g_lobby.open && g_lobby.st.state != NETPLAY_PLAYING);
+    bool show_game = !(rpcn && g_lobby.open && !netplay_state_running(g_lobby.st.state));
     if (show_game) game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, w, h, 1.0f);
     if (rpcn) {
         lobby_draw(w, h, (uint64_t)emu_now_us() * 1000u);
@@ -1195,6 +1195,13 @@ static bool lr_run_rpcn(uint32_t local_held) {
             continue;
         }
         lr_slice();
+        /* A watcher behind the fighters runs a few extra slices a frame until it
+         * has caught up (netplay_catching_up): one retro_run is one slice, and
+         * nothing else would ever close the gap. */
+        for (int extra = 0; extra < 3 && netplay_catching_up(); extra++) {
+            if (emu_netplay_pump(&state.emu) != NETPLAY_STEP_READY) break;
+            lr_slice();
+        }
         return true;
     }
 }

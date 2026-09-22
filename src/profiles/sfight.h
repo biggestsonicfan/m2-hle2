@@ -298,6 +298,27 @@ static int sfight_hook_cop_err_hang(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /*
+ * versus_result (0xDC3C, in ROUND_DSP): a two-player match has been decided.
+ * OBSERVE ONLY -- it records the result and lets the instruction run.
+ *
+ * 0xDC3C is `stib r15, _sub_mode`, the step past the arcade's win-streak
+ * bookkeeping (byte_500066 / word_5000A2) that runs once per decided match.
+ * The PS3 port hooks the same instruction for the same reason
+ * (i960hook_DC3C_JUDGE_postResult, which posts its OnMatchResult event), and
+ * gates it on the same two facts the arcade's own streak code tests just before:
+ * not_scr_bg_move (0x500068) bit 1, the versus flag, and gameprogram (0x50004C)
+ * == 2, both players. The winning side is `winner` (0x500065): 0 = 1P.
+ */
+static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if ((mem_read8(bus, 0x00500068) & 2u) && mem_read8(bus, 0x0050004C) == 2u) {
+        g_versus_result = mem_read8(bus, 0x00500065) ? 2 : 1;
+        LOG_INFO("versus match decided: %s won", g_versus_result == 1 ? "1P" : "2P");
+    }
+    return 1;
+}
+
+/*
  * country_default (0x62688, init_game_assignments+0x1A8): the factory default
  * of the region setting. The instruction is `stob r15, country_val_bk`
  * (backup RAM 0x1D03352) after `mov 0, r15`, and the next one stores r15 again
@@ -334,9 +355,9 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
  * hidden-character patches on top. What the two share is spelled once, in the
  * macros below, so a fix to one reaches both. */
 
-/* The hooks every STF profile needs to boot and pace frames, and the region
- * default. */
-#define SFIGHT_BASE_HOOK_COUNT 10
+/* The hooks every STF profile needs to boot and pace frames, the versus hook
+ * netplay rooms read the result from, and the region default. */
+#define SFIGHT_BASE_HOOK_COUNT 11
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
@@ -347,6 +368,7 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
     { 0x00007264, sfight_hook_700000_loop,        "_700000_loop"            }, \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
+    { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \
     { 0x00062688, sfight_hook_country_default,    "country_default"         },
 
 #define SFIGHT_INPUT_MAP                                                        \

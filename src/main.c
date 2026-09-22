@@ -475,13 +475,13 @@ static void draw_menu_bar(void) {
             netplay_get_status(&st);
             igTextDisabled("%s", netplay_state_text(st.state));
             if (st.room_id)
-                igTextDisabled("room %llu (%s)", (unsigned long long)st.room_id,
-                               st.is_host ? "hosting" : "guest");
+                igTextDisabled("room %llu (%u of %u%s)", (unsigned long long)st.room_id,
+                               st.member_count, st.max_slot, st.is_host ? ", yours" : "");
             if (st.peer_npid[0])
                 igTextDisabled("peer %s %s", st.peer_npid,
                                st.peer_heard ? "[reachable]"
                                              : st.peer_known ? "[punching]" : "[no address]");
-            if (st.state == NETPLAY_PLAYING)
+            if (netplay_state_running(st.state))
                 igTextDisabled("frame %u, %u stall%s", st.frame, st.stalls,
                                st.stalls == 1 ? "" : "s");
             if (st.error[0]) igTextDisabled("%s", st.error);
@@ -1299,6 +1299,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_net_cli.local_p2p_port = (uint16_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--net-host") == 0) {
             g_net_auto = 1;
+        } else if (strcmp(argv[i], "--net-players") == 0 && i + 1 < argc) {
+            /* The room --net-host makes holds this many (2..8): two fight, the
+             * rest wait in line and watch (net/room.h). */
+            g_net_cli.max_players = (uint32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--net-join") == 0 && i + 1 < argc) {
             g_net_auto = 2;
 #ifdef _WIN32

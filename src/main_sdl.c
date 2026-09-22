@@ -1029,7 +1029,7 @@ int main(int argc, char **argv) {
         });
         /* The lobby is drawn on black, to be read; over a match, on the match. */
         if (opt.netplay) lobby_update(SDL_GetTicksNS());
-        bool show_game = !(opt.netplay && g_lobby.open && g_lobby.st.state != NETPLAY_PLAYING);
+        bool show_game = !(opt.netplay && g_lobby.open && !netplay_state_running(g_lobby.st.state));
         if (show_game && opt.render_scale > 0)
             game_render_draw_target(rt_texture, opt.linear, ox, oy, w, h);
         else if (show_game)

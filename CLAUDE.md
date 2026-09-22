@@ -379,6 +379,45 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   netcode instead of the browser. Unlisted games get a deterministic base32 hash of the game key;
   `CreateMissing=true` registers a new id on first use, so no `servers.cfg` edit is needed.
 
+### Rooms of more than two (`net/room.h`, after the PS3 port's Room Match)
+
+Up to eight in a room: two fight, the rest wait in line and watch, and after every result the
+winner goes to the front and keeps their side, the loser to the back (the PS3 port's
+`np_session_build_fight_entries` / `rotate_queue_after_match`, reverse-engineered from
+NPUB30927 -- room.h cites the addresses). The owner writes the room state to RPCN (room bin attr
+0x57) and each member its own (member bin attr 0x59); nobody sends room state peer to peer, so a
+new owner carries on from the server's copy. What bites:
+
+- **Every match is a cold board reset on EVERY member**, fighters and watchers alike, and a
+  lockstep generation of its own. The PS3 port never resets; this emulator has no savestates, so
+  the reset is the only shared state. **The room's owner also decides the region** (room state,
+  `g_region`): members on another region boot another game from frame 0.
+- **Only the two fighters gate a frame.** Watchers (`LOCKSTEP_WATCHER`) run the fighters' two
+  input streams, get a record every `NETPLAY_WATCH_STRIDE` frames (the web gateway caps a player
+  at 240 datagrams/s), and ask a fighter to re-send with `LOCKSTEP_PACKET_REPAIR`.
+- **A watcher paced to 60 Hz never makes up a frame it waited for.** It fell ~160 frames behind
+  over one match and the next match cut it off short of the result. `netplay_catching_up` lets
+  the run loop (native, web and libretro alike) run it unpaced while it holds frames ahead.
+- **The result is read off the board**: an observe-only hook at STF 0xDC3C (`SFIGHT_BASE_HOOKS`,
+  the instruction the PS3 port hooks too) sets `g_versus_result`, which the emu thread hands to
+  `netplay_end_frame` at the frame boundary. A board reset clears it.
+- **"Everyone ready" starts only the FIRST match.** Ready flags stay set, so honouring them after
+  a result started the next match instantly. After that the countdown decides -- and only in a
+  room of three or more (`netplay_room_rolls`); a two-seat room is the old one-on-one, where
+  both press Start again.
+- **`rpcn_poll` hands out a pointer INTO its receive buffer** and must not slide that buffer until
+  the NEXT poll. It used to slide it at once, so a reply with a notification behind it in the
+  same read was read as the notification's bytes -- every room join failed that way ("the room
+  reply carried no room id").
+- **RPCN tells members who share a public address that each other is on port 3658**, which is at
+  most one of them. Two players never needed more than the first datagram to fix that; three
+  never find each other. Members pass on where they hear the others from (`g_rpcn_intro_tag`
+  introductions), punched beside the server's address.
+- **RPCN never announces a new owner** -- `leave_room` picks a successor silently -- so every
+  departure is followed by a GetRoomDataInternal.
+- A local RPCN (`RipleyTom\rpcn`'s built `rpcn.exe --cert-gen`, EmailUrl empty) and the MCP bridge
+  run three clients on one machine; that is how every item above was found.
+
 ---
 
 ## STF Disassembly Reference

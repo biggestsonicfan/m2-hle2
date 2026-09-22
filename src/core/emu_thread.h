@@ -226,6 +226,7 @@ static inline void emu_board_reset_state(void) {
     s_irq_in_service     = false;
     s_irq_baseline_depth = 0;
     g_frame_done         = 0;
+    g_versus_result      = 0;
     g_vblank_acked       = 0;
     g_emu_frames         = 0;
     /* The frame number restarts with the board; the sample clock does not —
@@ -509,7 +510,11 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
         /* The netplay frame clock and this frame's state check. Fed the
          * snapshot rather than the live CPU: it was taken under the mutex
          * a few lines up and is the same state, without racing the UI. */
-        netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps);
+        /* The versus hook's verdict belongs to the frame it happened in: taken
+         * here, at the frame boundary every board in a room shares. */
+        int versus_result = g_versus_result;
+        g_versus_result = 0;
+        netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
         if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
     }
     if (g_bp.hit || g_wp.hit || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
@@ -594,7 +599,9 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 static int unthrottled = -1;
                 if (unthrottled < 0) { const char *e = getenv("M2HLE_UNTHROTTLE"); unthrottled = e && e[0] == '1'; }
                 int64_t sleep_us = ctx->frame_deadline_us - emu_now_us();
-                if (unthrottled) ctx->frame_deadline_us = 0;
+                /* A netplay watcher behind the fighters runs flat out until it
+                 * has caught up (netplay_catching_up). */
+                if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
                 else if (sleep_us > 0) emu_sleep_us(sleep_us);
             } else {
                 /* No game-pace hook yet — fall back to fixed slice timing

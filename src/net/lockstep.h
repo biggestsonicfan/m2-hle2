@@ -28,7 +28,16 @@
  * from a COLD BOARD RESET on both machines (netplay.h drives that) and every
  * frame from boot is lockstepped. A generation is therefore one whole session
  * from reset, and bumping it is how a session is restarted without leaving the
- * room.
+ * room. In a room of more than two (room.h) a generation is one MATCH.
+ *
+ * WATCHERS. Only the two players on the cabinet (the "sides") have rings and
+ * only they gate the frame. Everybody else in the room is a watcher
+ * (LOCKSTEP_WATCHER): it resets with the fighters, runs the same board from the
+ * same two input streams, and never holds anybody up -- the PS3 port's
+ * spectators, which `SyncIo_Update_gate_speed` counts out of the gate the same
+ * way. A watcher has no ring of its own, sends no inputs, and repairs a loss it
+ * cannot wait out by asking a fighter to send that stretch again
+ * (LOCKSTEP_PACKET_REPAIR).
  */
 #ifndef LOCKSTEP_H
 #define LOCKSTEP_H
@@ -47,9 +56,14 @@
  * burst we can absorb without stalling. */
 #define LOCKSTEP_REDUNDANCY 10u
 
-/* Two players: one cabinet's worth of Model 2 I/O. The rings are per-player, so
- * raising this is mostly the barrier mask and the transport. */
+/* Two players: one cabinet's worth of Model 2 I/O. The rings are per-SIDE, not
+ * per room member -- a room of eight still has one 1P and one 2P, and the other
+ * six are watchers. */
 #define LOCKSTEP_MAX_PLAYERS 2u
+
+/* The local "player" of a machine that is watching: past the last side, so it
+ * owns no ring and appears in no barrier mask. */
+#define LOCKSTEP_WATCHER LOCKSTEP_MAX_PLAYERS
 
 #define LOCKSTEP_INVALID_FRAME 0xFFFFFFFFu
 
@@ -73,13 +87,16 @@ typedef enum {
      * next input and leaves at the stall timeout, fifteen seconds later. A build
      * that predates it drops the unknown type, so it is safe to send to anyone. */
     LOCKSTEP_PACKET_BYE      = 3,
+    /* A watcher asking a fighter to send one side's inputs again from a frame
+     * on. See lockstep_repair_packet_t. */
+    LOCKSTEP_PACKET_REPAIR   = 4,
 } lockstep_packet_type_t;
 
 #pragma pack(push, 1)
 
 typedef struct {
     uint8_t  type;
-    uint8_t  player;
+    uint8_t  player;       /* the sender's side, or LOCKSTEP_WATCHER */
     uint8_t  generation;
     uint8_t  reserved;
     /* Low 32 bits of the room id. Game traffic is plain P2P between two
@@ -89,6 +106,12 @@ typedef struct {
      * makes cross-room traffic self-identifying and free to drop. 0 means "room
      * unknown", which only happens before a room is taken. */
     uint32_t session;
+    /* The sender's RPCN member id. In a room of more than two the address a
+     * datagram came from is not always enough to say who sent it (the first
+     * datagram from a peer behind a NAT arrives from a port nobody advertised),
+     * and the session layer asks for this to put a name to it. 0 = unknown. */
+    uint16_t member;
+    uint16_t pad;
 } lockstep_header_t;
 
 /* Wire record. Fixed size, little-endian, no padding surprises — every member is
@@ -123,9 +146,24 @@ typedef struct {
     uint32_t          seed;
 } lockstep_announce_packet_t;
 
+/*
+ * "Send me side `side` again, from `frame`." Only a watcher asks. A fighter never
+ * needs to: the two fighters gate each other, so each keeps re-sending what the
+ * other is missing (lockstep_resend_floor). Nothing gates on a watcher, so a
+ * fighter has no idea one fell behind until it says so -- and a loss longer than
+ * a record's redundancy would otherwise leave the watcher stuck for the rest of
+ * the match. The PS3 port avoided this by carrying watcher traffic on reliable
+ * UDP (cellRudp); a request is the datagram version of the same promise.
+ */
+typedef struct {
+    lockstep_header_t header;
+    uint32_t          side;
+    uint32_t          frame;
+} lockstep_repair_packet_t;
+
 #pragma pack(pop)
 
-_Static_assert(sizeof(lockstep_header_t) == 8, "lockstep header must stay 8 bytes");
+_Static_assert(sizeof(lockstep_header_t) == 12, "lockstep header must stay 12 bytes");
 _Static_assert(sizeof(lockstep_record_t) == 8 + LOCKSTEP_REDUNDANCY * 4,
                "lockstep record must stay packed");
 
@@ -191,9 +229,13 @@ typedef struct {
     uint32_t stalls;
 } lockstep_t;
 
+static inline bool lockstep_is_watcher(const lockstep_t *l) {
+    return l->local_player >= LOCKSTEP_MAX_PLAYERS;
+}
+
 static inline void lockstep_configure(lockstep_t *l, uint32_t local_player,
                                       uint32_t player_count, uint32_t frame_delay) {
-    l->local_player = (local_player < LOCKSTEP_MAX_PLAYERS) ? local_player : 0;
+    l->local_player = (local_player < LOCKSTEP_MAX_PLAYERS) ? local_player : LOCKSTEP_WATCHER;
     l->player_count = (player_count == 0 || player_count > LOCKSTEP_MAX_PLAYERS)
                     ? LOCKSTEP_MAX_PLAYERS : player_count;
     l->frame_delay      = frame_delay;
@@ -209,7 +251,9 @@ static inline void lockstep_configure(lockstep_t *l, uint32_t local_player,
  * generation field defends against on the wire. */
 static inline void lockstep_begin_round(lockstep_t *l, uint32_t generation) {
     l->generation       = generation & 0x1Fu;
-    l->announce_mask    = 1u << l->local_player;   /* we have announced by definition */
+    /* We have announced by definition -- unless we are only watching, in which
+     * case nothing waits on us and there is nothing to announce. */
+    l->announce_mask    = lockstep_is_watcher(l) ? 0u : 1u << l->local_player;
     l->last_local_frame = LOCKSTEP_INVALID_FRAME;
     for (uint32_t i = 0; i < LOCKSTEP_MAX_PLAYERS; i++) lockstep_ring_clear(&l->rings[i]);
 }
@@ -230,10 +274,11 @@ static inline bool lockstep_barrier_released(const lockstep_t *l) {
  * other end (newest-wins), which is what lets a record be built and sent again
  * at any time. */
 static inline void lockstep_fill_record(const lockstep_t *l, uint32_t frame, lockstep_record_t *out) {
-    const lockstep_ring_t *mine = &l->rings[l->local_player];
     memset(out, 0, sizeof(*out));
     out->frame  = frame;
     out->packed = lockstep_pack(l->local_player, l->generation);
+    if (lockstep_is_watcher(l)) return;   /* no ring, nothing to say */
+    const lockstep_ring_t *mine = &l->rings[l->local_player];
 
     /* inputs[0] is this frame, inputs[i] is frame-i. Frames we do not have (the
      * start of a session, where frame-i underflows) stay 0, a neutral pad. */
@@ -248,6 +293,7 @@ static inline void lockstep_fill_record(const lockstep_t *l, uint32_t frame, loc
  * transmit: this frame plus the previous LOCKSTEP_REDUNDANCY-1 from our ring. */
 static inline void lockstep_submit_local(lockstep_t *l, uint32_t frame, uint32_t input,
                                          lockstep_record_t *out) {
+    if (lockstep_is_watcher(l)) { if (out) lockstep_fill_record(l, frame, out); return; }
     lockstep_ring_t *mine = &l->rings[l->local_player];
     lockstep_ring_insert(mine, frame, input);
     if (l->last_local_frame == LOCKSTEP_INVALID_FRAME || frame > l->last_local_frame)

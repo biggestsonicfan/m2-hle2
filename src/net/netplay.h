@@ -54,6 +54,31 @@
  * The canonical form also means the guest plays on P2 without rebinding anything:
  * whichever key set you press locally becomes your own side's bits.
  *
+ * ── ROOMS OF MORE THAN TWO ─────────────────────────────────────────────────
+ *
+ * A room holds up to eight (room.h, after the PS3 port's Room Match). Two of
+ * them fight; everyone else waits in line and watches. The owner decides who
+ * fights by writing the room's state to the server, and every member reacts to
+ * that state the same way:
+ *
+ *   * A new MATCH is a new lockstep generation. BOTH fighters and EVERY watcher
+ *     cold-reset the board for it, so a match starts from the one state every
+ *     machine is certain to share -- the same reason a two-player session does.
+ *     The PS3 port never resets: it forces START in attract and zeroes the frame
+ *     counter at character select. It gets away with that on one build of one
+ *     emulator; this one has to hold bit for bit against MAME and across native
+ *     and wasm builds, and a reset is the only thing that promises it.
+ *   * The fighters lockstep with each other exactly as two players always did.
+ *     Watchers run the same board from the same two input streams and never hold
+ *     anybody up (lockstep.h, "WATCHERS").
+ *   * The result is read off the board -- the game profile's versus hook, on the
+ *     same frame on every machine -- and the owner moves the line: winner to the
+ *     front and staying on their side, loser to the back (room.h).
+ *
+ * WHICH SIDE A PLAYER DRIVES is the only thing that moves between matches. The
+ * wire word is still "what my player is doing"; the room state says which side
+ * of the cabinet each fighter's word lands on.
+ *
  * ── THREADING ──────────────────────────────────────────────────────────────
  *
  * All netplay state belongs to the EMU THREAD, which pumps it once per slice.
@@ -72,10 +97,12 @@
 
 #include "com_id.h"
 #include "lockstep.h"
+#include "room.h"
 #include "rpcn_session.h"
 
 #include "constants.h"
 #include "game_profile.h"
+#include "hle_hooks.h"      /* g_region: every board in a match boots as one */
 #include "i960.h"
 #include "input.h"
 #include "log.h"
@@ -103,8 +130,10 @@
  * word, or a lockstep rule both sides must agree on. Unlike the ComId revision
  * channel (com_id.h) this does not partition the room list — it lets a joiner be
  * TOLD why a room is not joinable instead of finding out at the barrier.
+ *
+ * 2: rooms of up to eight (room.h) and the 12-byte packet header.
  */
-#define NETPLAY_PROTO_REV 1
+#define NETPLAY_PROTO_REV 2
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
@@ -170,10 +199,11 @@ typedef enum {
     NETPLAY_OFF,
     NETPLAY_CONNECTING,
     NETPLAY_ONLINE,       /* logged in, no room */
-    NETPLAY_IN_ROOM,      /* room taken; waiting for a peer, or idling with one */
-    NETPLAY_SYNCING,      /* barrier: both peers announcing the same generation */
-    NETPLAY_PLAYING,      /* the board is being stepped in lockstep */
+    NETPLAY_IN_ROOM,      /* room taken; waiting in line, or in the lobby */
+    NETPLAY_SYNCING,      /* barrier: both fighters announcing the same generation */
+    NETPLAY_PLAYING,      /* fighting: the board is being stepped in lockstep */
     NETPLAY_FAILED,
+    NETPLAY_WATCHING,     /* the board is running somebody else's match */
 } netplay_state_t;
 
 /* What the emu thread should do with this slice. */
@@ -191,8 +221,12 @@ typedef enum {
     NETPLAY_CMD_HOST,
     NETPLAY_CMD_JOIN,
     NETPLAY_CMD_SEARCH,
-    NETPLAY_CMD_START,        /* begin (or restart) a lockstepped session */
-    NETPLAY_CMD_STOP,         /* leave the match, stay in the room */
+    NETPLAY_CMD_START,        /* ready to play: the owner starts once every player is */
+    NETPLAY_CMD_STOP,         /* not ready; leave the match being played, stay in the room */
+    NETPLAY_CMD_ENTRY,        /* cfg.entry: ask for a side (room.h, "1P/2P Entry") */
+    NETPLAY_CMD_WATCH,        /* cfg.watch_only: sit out, or stop sitting out */
+    NETPLAY_CMD_FORCE_START,  /* owner only: start the next match now */
+    NETPLAY_CMD_LEAVE_ROOM,   /* leave the room, stay signed in */
     NETPLAY_CMD_CREATE_ACCOUNT,
     NETPLAY_CMD_RESEND_TOKEN,
     NETPLAY_CMD_TWITCH_START,   /* begin the OAuth device flow */
@@ -230,6 +264,9 @@ typedef struct {
     char     room_password[16];
     uint64_t room_id;           /* join target */
     uint32_t frame_delay;
+    uint32_t max_players;       /* hosting: 2..8; 0 = 2 */
+    uint8_t  entry;             /* room_entry_t, for NETPLAY_CMD_ENTRY */
+    bool     watch_only;        /* for NETPLAY_CMD_WATCH */
     bool     browse_yamp;       /* also search YAMP's lobby space, read-only */
     uint16_t local_p2p_port;    /* 0 = RPCN_P2P_PORT */
 } netplay_config_t;
@@ -239,12 +276,36 @@ typedef struct {
     netplay_config_t   cfg;
 } netplay_cmd_t;
 
+/* One row of the room, as the UI shows it. */
+typedef struct {
+    uint16_t member_id;
+    char     npid[20];
+    bool     is_me;
+    bool     is_owner;
+    int8_t   line_pos;       /* 0 = front of the line; -1 = not in it yet */
+    int8_t   side;           /* 0 = 1P, 1 = 2P in the current match; -1 = not fighting */
+    bool     known;          /* their member attribute has arrived */
+    room_member_data_t data;
+    bool     addr_known;     /* (not for is_me) the server has told us where they are */
+    bool     heard;          /* (not for is_me) a datagram has come back from them */
+} netplay_member_status_t;
+
 /* The snapshot the UI draws from, published under the netplay mutex. */
 typedef struct {
     netplay_state_t state;
     rpcn_stage_t    stage;
-    bool            is_host;
-    int32_t         local_player;      /* -1 until a room is taken */
+    bool            is_host;           /* we own the room (not necessarily created it) */
+    int32_t         local_player;      /* 0 = 1P, 1 = 2P, 2 = watching, -1 = neither */
+
+    /* The room. */
+    uint16_t                my_member_id;
+    uint32_t                max_slot;
+    room_state_t            room;
+    bool                    room_known;   /* the room's state has been read */
+    netplay_member_status_t members[ROOM_MAX_MEMBERS];
+    uint32_t                member_count;
+    room_member_data_t      me;
+    uint32_t                auto_start_s; /* owner's countdown to the next match; 0 = none */
     uint64_t        room_id;
     uint32_t        room_flags;
     char            com_id[COMID_BUFFER_SIZE];
@@ -295,12 +356,41 @@ typedef struct {
     rpcn_twitch_t     twitch;
     lockstep_t        lockstep;
 
-    int32_t           local_player;   /* 0 = host/P1, 1 = guest/P2, -1 = none */
+    /* This machine's part in the match being run: 0 = 1P, 1 = 2P,
+     * LOCKSTEP_WATCHER, or -1 when the board is not running one. */
+    int32_t           local_player;
     uint32_t          generation;
     uint32_t          seed;
     uint32_t          frame;          /* frames executed since the board reset */
     bool              reset_pending;  /* the barrier released; reset before frame 0 */
     bool              delay_seeded;
+
+    /* ---- The room (room.h) ---- */
+    room_state_t        room;          /* as we last read it, or as we (the owner) last wrote it */
+    bool                room_known;
+    uint32_t            room_rev_seen; /* session.room_rev when `room` was last refreshed */
+    bool                was_owner;
+    room_member_data_t  me;            /* our own attribute; the server's copy follows this one */
+    bool                me_dirty;
+    uint64_t            me_sent_ms;
+    /* The match this board was last started for, and whether it is still
+     * running it. A match is started once: the room state saying MATCH again
+     * after we have left it is the same match, not a new one. */
+    uint16_t            match_started;
+    bool                match_live;
+    bool                match_result_seen;
+    /* After our board reaches a result a fighter goes on answering for a
+     * while: the other fighter may still need our last inputs, and a watcher may
+     * still be catching up. */
+    uint64_t            linger_until_ms;
+    uint32_t            watch_stride;
+    uint64_t            last_repair_ms;
+    uint64_t            watch_stall_ms;
+    /* Owner bookkeeping (see netplay_owner_pump). */
+    bool                force_start;
+    uint64_t            auto_deadline_ms;
+    uint64_t            match_begun_ms;
+    uint32_t            fighters_seen;   /* bit per side whose board has started this match */
 
     /* Desync detection. The check is a hash of the board's state at a frame
      * boundary; the FIRST disagreement is latched and reported, and the session
@@ -318,23 +408,6 @@ typedef struct {
     uint32_t          p1_mask, p2_mask, sys_mask;
     uint32_t          bit_p1[12], bit_p2[12];   /* canonical bit -> profile mask */
 
-    /*
-     * The last generation the peer announced, and when. Latched from EVERY
-     * announce, including the ones `lockstep_on_peer_announce` throws away --
-     * it drops anything that is not the round we are already in, which is
-     * exactly the case that matters here: a peer who has pressed start while
-     * we are still idling in the room announces a generation we have not begun,
-     * so the barrier mask never sees it and nothing else in this file knows the
-     * challenge happened.
-     *
-     * Freshness rather than a sticky flag, because a peer in SYNCING announces
-     * once per slice and a peer who gave up stops. A latched bool would say
-     * "somebody is waiting for you" for the rest of the room's life.
-     */
-    uint32_t          peer_ready_gen;
-    uint64_t          peer_ready_ms;
-
-    uint64_t          last_seed_ms;
     uint64_t          last_wait_report_ms;
     uint64_t          stall_since_ms;
     uint32_t          stall_timeout_ms;
@@ -458,9 +531,17 @@ static inline void netplay_inputlog_open(void) {
     fprintf(g_netplay.inlog, "# version %s\n", M2HLE_VERSION);
     fprintf(g_netplay.inlog, "# game %s\n", g_active_profile && g_active_profile->id ? g_active_profile->id : "?");
     fprintf(g_netplay.inlog, "# session %u seed 0x%08X\n", (unsigned)g_netplay.generation, (unsigned)g_netplay.seed);
-    fprintf(g_netplay.inlog, "# player %d delay %u peer %s\n", (int)g_netplay.local_player + 1,
-            (unsigned)g_netplay.lockstep.frame_delay,
-            g_netplay.session.peer_npid[0] ? g_netplay.session.peer_npid : "?");
+    /* player 1 or 2 is a side; 3 is a watcher (LOCKSTEP_WATCHER + 1). */
+    const char *fighter[2];
+    for (int side = 0; side < 2; side++) {
+        uint16_t id = g_netplay.room.fighter[side];
+        rpcn_peer_t *p = rpcn_session_peer(&g_netplay.session, id);
+        fighter[side] = id && id == g_netplay.session.my_member_id ? g_netplay.session.npid
+                      : p && p->npid[0] ? p->npid : "?";
+    }
+    fprintf(g_netplay.inlog, "# player %d delay %u match %u 1P %s 2P %s\n", (int)g_netplay.local_player + 1,
+            (unsigned)g_netplay.lockstep.frame_delay, (unsigned)g_netplay.room.match,
+            fighter[0], fighter[1]);
     fprintf(g_netplay.inlog, "# frame w0 w1 check (hex)\n");
 #endif
 }
@@ -672,21 +753,54 @@ static inline uint32_t netplay_session_id(void) {
     return (uint32_t)g_netplay.session.room_id;
 }
 
+static inline uint16_t netplay_my_id(void) { return g_netplay.session.my_member_id; }
+
 static inline void netplay_fill_header(lockstep_header_t *h, uint8_t type) {
     h->type       = type;
-    h->player     = (uint8_t)(g_netplay.local_player < 0 ? 0 : g_netplay.local_player);
+    h->player     = (uint8_t)(g_netplay.local_player < 0 ? LOCKSTEP_WATCHER : g_netplay.local_player);
     h->generation = (uint8_t)(g_netplay.generation & 0x1F);
     h->reserved   = 0;
     h->session    = netplay_session_id();
+    h->member     = netplay_my_id();
+    h->pad        = 0;
 }
 
-static inline bool netplay_is_host(void) { return g_netplay.local_player == 0; }
+/* The owner of the room: the member who runs it (room.h). Not necessarily who
+ * created it -- RPCN hands the room on when its owner leaves. */
+static inline bool netplay_is_host(void) { return rpcn_session_is_owner(&g_netplay.session); }
+
+static inline bool netplay_is_fighter(void) {
+    return g_netplay.local_player == 0 || g_netplay.local_player == 1;
+}
+
+/* The member on the other side of the cabinet from us in the match we are
+ * running, or 0. */
+static inline uint16_t netplay_opponent_id(void) {
+    if (!netplay_is_fighter()) return ROOM_NO_MEMBER;
+    return g_netplay.room.fighter[g_netplay.local_player ^ 1];
+}
+
+/* A member we are running a match with who is not fighting in it. */
+static inline bool netplay_is_watcher_of_match(uint16_t id) {
+    return id && id != g_netplay.room.fighter[0] && id != g_netplay.room.fighter[1];
+}
+
+static inline void netplay_send_to(uint16_t member, const void *pkt, uint32_t len) {
+    if (member) rpcn_session_send_to(&g_netplay.session, member, pkt, len);
+}
+
+/* Everybody else in the room who is not fighting. */
+static inline void netplay_send_watchers(const void *pkt, uint32_t len) {
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        const rpcn_peer_t *p = &g_netplay.session.peers[i];
+        if (p->used && netplay_is_watcher_of_match(p->member_id))
+            rpcn_session_send_to(&g_netplay.session, p->member_id, pkt, len);
+    }
+}
 
 /*
  * How long an announce counts for. A peer sitting at the barrier sends one every
- * NETPLAY_ANNOUNCE_MS, so anything above a few hundred milliseconds is generous,
- * and the window is what makes the answer clear itself when they give up and
- * walk away instead of leaving a challenge on screen forever.
+ * NETPLAY_ANNOUNCE_MS, so anything above a few hundred milliseconds is generous.
  */
 #define NETPLAY_READY_WINDOW_MS 2000u
 
@@ -704,6 +818,25 @@ static inline bool netplay_is_host(void) { return g_netplay.local_player == 0; }
 #define NETPLAY_ANNOUNCE_MS 50u
 #define NETPLAY_RESEND_MS   50u
 
+/*
+ * A fighter sends a watcher one record every this many frames, not every frame.
+ * A record carries LOCKSTEP_REDUNDANCY frames, so this still delivers each frame
+ * three times over. What it buys is the web gateway's per-player cap of 240
+ * datagrams a second (WEB-NETPLAY.md): at one a frame a fighter in a full room
+ * would need 60 x 7, and at one every three it needs 60 + 20 x 6.
+ */
+#define NETPLAY_WATCH_STRIDE 3u
+/* A watcher missing a frame this long asks for it again; a repair is repeated
+ * at this pace until it lands. */
+#define NETPLAY_REPAIR_AFTER_MS 150u
+#define NETPLAY_REPAIR_MS       100u
+/* A watcher that has asked this long without the frame arriving gives up on
+ * the match -- almost always a member who joined too far into it for the
+ * fighters' 1024-frame history to still hold frame 0. */
+#define NETPLAY_WATCH_GIVEUP_MS 8000u
+/* A fighter whose board has reached the result keeps answering for this long. */
+#define NETPLAY_LINGER_MS 5000u
+
 /* A board cleared to run a frame and still on it this long later gets a line in
  * the log. No frame of any game is near it: the longest, a scene load, is a few
  * slices. It leaves the session at stall_timeout_ms, like any other stall. */
@@ -712,26 +845,22 @@ static inline bool netplay_is_host(void) { return g_netplay.local_player == 0; }
 #define NETPLAY_OWN_BOARD_QUIET_MS  250u
 
 /*
- * Is somebody waiting for us to accept? True only while we are idling in a room
- * we have not started a session from: once WE have started, the barrier owns the
- * question and `lockstep_barrier_released` is the one to ask.
+ * Is somebody waiting for us? Another player in the lobby has pressed Start and
+ * we have not. That is the room's version of a challenge: once every player is
+ * ready the owner starts the match.
  */
 static inline bool netplay_peer_ready(void) {
-    if (g_netplay.state != NETPLAY_IN_ROOM) return false;
-    /* No peer in the room, no challenge. The npid is cleared by the room's
-     * own leave notification, so this is also what retracts a challenge from
-     * somebody who announced and then closed their emulator. */
-    if (!g_netplay.session.peer_npid[0]) return false;
-    if (!g_netplay.peer_ready_ms) return false;
-    return net_now_ms() - g_netplay.peer_ready_ms <= NETPLAY_READY_WINDOW_MS;
-}
-
-/* Forget any standing challenge. Called wherever the answer has been given,
- * so an announce heard during the barrier cannot re-arm the moment a session
- * ends and start the next one without anybody asking for it. */
-static inline void netplay_clear_ready(void) {
-    g_netplay.peer_ready_ms  = 0;
-    g_netplay.peer_ready_gen = 0;
+    if (g_netplay.state != NETPLAY_IN_ROOM || !g_netplay.room_known) return false;
+    if (g_netplay.room.phase != ROOM_PHASE_LOBBY) return false;
+    if (g_netplay.me.flags & (ROOM_MEMBER_READY | ROOM_MEMBER_WATCH)) return false;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        const rpcn_peer_t *p = &g_netplay.session.peers[i];
+        room_member_data_t d;
+        if (p->used && room_member_decode(p->bin, p->bin_len, &d) && (d.flags & ROOM_MEMBER_READY)
+            && !(d.flags & ROOM_MEMBER_WATCH))
+            return true;
+    }
+    return false;
 }
 
 static inline const char *netplay_state_text(netplay_state_t s) {
@@ -742,41 +871,33 @@ static inline const char *netplay_state_text(netplay_state_t s) {
         case NETPLAY_IN_ROOM:    return "in a room";
         case NETPLAY_SYNCING:    return "waiting at the barrier";
         case NETPLAY_PLAYING:    return "playing";
+        case NETPLAY_WATCHING:   return "watching";
         case NETPLAY_FAILED:     return "failed";
         default:                 return "?";
     }
 }
 
+/* The board is being driven by the room, whether we fight or watch. */
+static inline bool netplay_state_running(netplay_state_t s) {
+    return s == NETPLAY_PLAYING || s == NETPLAY_WATCHING;
+}
+static inline bool netplay_running_match(void) { return netplay_state_running(g_netplay.state); }
+
 static inline void netplay_send_announce(void) {
     lockstep_announce_packet_t pkt;
     memset(&pkt, 0, sizeof(pkt));
     netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_ANNOUNCE);
-    pkt.seed = netplay_is_host() ? g_netplay.seed : 0;   /* only the host's is authoritative */
-    rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
+    pkt.seed = g_netplay.seed;
+    netplay_send_to(netplay_opponent_id(), &pkt, sizeof(pkt));
     g_netplay.last_announce_ms = net_now_ms();
 }
 
-/*
- * Publish the session seed from the moment the room exists, not from the moment a
- * session starts. Until yampnet did this, the seed only ever travelled on an
- * announce, and announces only begin when a peer presses start — so whoever
- * pressed first decided whether the session could work. Cheap and unconditional
- * rather than clever: 12 bytes a few times a second while idling in a room.
- */
-static inline void netplay_send_seed(void) {
-    if (!netplay_is_host()) return;
-    lockstep_announce_packet_t pkt;
-    memset(&pkt, 0, sizeof(pkt));
-    netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_SEED);
-    pkt.seed = g_netplay.seed;
-    rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
-}
-
-static inline void netplay_begin_generation(uint32_t generation) {
-    g_netplay.generation = generation & 0x1F;
-    lockstep_configure(&g_netplay.lockstep, (uint32_t)(g_netplay.local_player < 0 ? 0 : g_netplay.local_player),
-                       LOCKSTEP_MAX_PLAYERS,
-                       g_netplay.cfg.frame_delay ? g_netplay.cfg.frame_delay : 2u);
+/* Everything that was per-generation, cleared. `player` is our side or
+ * LOCKSTEP_WATCHER. */
+static inline void netplay_begin_generation(uint32_t generation, uint32_t player, uint32_t delay) {
+    g_netplay.generation   = generation & 0x1F;
+    g_netplay.local_player = (int32_t)player;
+    lockstep_configure(&g_netplay.lockstep, player, LOCKSTEP_MAX_PLAYERS, delay ? delay : 2u);
     lockstep_begin_round(&g_netplay.lockstep, g_netplay.generation);
     netplay_check_clear();
     g_netplay.frame         = 0;
@@ -789,9 +910,20 @@ static inline void netplay_begin_generation(uint32_t generation) {
     g_netplay.ready_since_ms      = 0;
     g_netplay.ready_reported      = false;
     g_netplay.stopped_noted_frame = LOCKSTEP_INVALID_FRAME;
-    g_netplay.state = NETPLAY_SYNCING;
+    g_netplay.linger_until_ms     = 0;
+    g_netplay.watch_stride        = 0;
+    g_netplay.last_repair_ms      = 0;
+    g_netplay.watch_stall_ms      = 0;
+    g_netplay.match_result_seen   = false;
     g_netplay.last_wait_report_ms = net_now_ms();
-    netplay_send_announce();
+    if (lockstep_is_watcher(&g_netplay.lockstep)) {
+        /* Nothing to agree on: reset now and follow the fighters' frames. */
+        g_netplay.state         = NETPLAY_WATCHING;
+        g_netplay.reset_pending = true;
+    } else {
+        g_netplay.state = NETPLAY_SYNCING;
+        netplay_send_announce();
+    }
 }
 
 /* Frames [0, delay) have no local input yet — the delay means input sampled now
@@ -805,17 +937,51 @@ static inline void netplay_seed_delay_frames(void) {
         netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_INPUT);
         pkt.check_frame = LOCKSTEP_NO_CHECK;
         lockstep_submit_local(&g_netplay.lockstep, f, 0, &pkt.record);
-        rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
+        netplay_send_to(netplay_opponent_id(), &pkt, sizeof(pkt));
+        netplay_send_watchers(&pkt, sizeof(pkt));
     }
     g_netplay.delay_seeded = true;
 }
 
-static inline void netplay_leave_session(void);   /* below; a BYE ends the session */
+/* One of our records, whose newest frame is `top`, to one member. */
+static inline void netplay_send_record(uint16_t member, uint32_t top) {
+    lockstep_input_packet_t pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_INPUT);
+    pkt.check_frame = g_netplay.last_check_frame;
+    pkt.check_value = g_netplay.last_check_value;
+    lockstep_fill_record(&g_netplay.lockstep, top, &pkt.record);
+    netplay_send_to(member, &pkt, sizeof(pkt));
+}
+
+/*
+ * A watcher is missing our frames from `frame` on: send what we still hold,
+ * four records deep (40 frames). A frame our ring has already lapped is not
+ * sent at all -- a record fills a frame it does not have with a neutral pad,
+ * and a watcher that took that would run a different match from then on.
+ */
+static inline void netplay_answer_repair(uint16_t member, uint32_t frame) {
+    const lockstep_t *l = &g_netplay.lockstep;
+    if (lockstep_is_watcher(l) || l->last_local_frame == LOCKSTEP_INVALID_FRAME) return;
+    if (frame > l->last_local_frame) return;
+    if (!lockstep_ring_has(&l->rings[l->local_player], frame)) return;
+    for (int k = 0; k < 4; k++) {
+        uint32_t top = frame + LOCKSTEP_REDUNDANCY - 1 + (uint32_t)k * LOCKSTEP_REDUNDANCY;
+        if (top > l->last_local_frame) top = l->last_local_frame;
+        netplay_send_record(member, top);
+        if (top == l->last_local_frame) break;
+    }
+}
+
+static inline void netplay_end_match(const char *why);   /* below; a BYE ends the match */
 
 static inline void netplay_drain_socket(void) {
     uint8_t buf[sizeof(lockstep_input_packet_t) + 64];
     for (;;) {
-        int got = rpcn_session_recv(&g_netplay.session, buf, (uint32_t)sizeof(buf));
+        uint16_t from = 0;
+        uint32_t ip = 0;
+        uint16_t port = 0;
+        int got = rpcn_session_recv(&g_netplay.session, buf, (uint32_t)sizeof(buf), &from, &ip, &port);
         if (got <= 0) break;
         if (got < (int)sizeof(lockstep_header_t)) continue;
 
@@ -828,13 +994,23 @@ static inline void netplay_drain_socket(void) {
         uint32_t mine = netplay_session_id();
         if (mine != 0 && hdr->session != 0 && hdr->session != mine) continue;
 
+        /* An address nobody has claimed yet, which names its sender: the first
+         * datagram from a member behind a NAT that picked a port of its own. */
+        if (!from) {
+            if (!hdr->member || !rpcn_session_claim(&g_netplay.session, hdr->member, ip, port)) continue;
+            from = hdr->member;
+        }
+        if (hdr->member && hdr->member != from) continue;   /* says it is somebody else */
+
         if (hdr->type == LOCKSTEP_PACKET_INPUT && got >= (int)sizeof(lockstep_input_packet_t)) {
             const lockstep_input_packet_t *pkt = (const lockstep_input_packet_t *)buf;
+            if (hdr->player >= LOCKSTEP_MAX_PLAYERS) continue;   /* watchers send no inputs */
             lockstep_on_record(&g_netplay.lockstep, &pkt->record);
-            if ((int32_t)hdr->player != g_netplay.local_player
+            if (from == netplay_opponent_id()
                 && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F))
                 g_netplay.last_peer_input_ms = net_now_ms();
-            if (pkt->check_frame != LOCKSTEP_NO_CHECK) {
+            if (pkt->check_frame != LOCKSTEP_NO_CHECK
+                && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)) {
                 uint32_t idx = pkt->check_frame & LOCKSTEP_RING_MASK;
                 g_netplay.peer_check_frame[idx] = pkt->check_frame;
                 g_netplay.peer_check_value[idx] = pkt->check_value;
@@ -842,53 +1018,31 @@ static inline void netplay_drain_socket(void) {
             }
         } else if (hdr->type == LOCKSTEP_PACKET_ANNOUNCE
                    && got >= (int)sizeof(lockstep_announce_packet_t)) {
-            const lockstep_announce_packet_t *ann = (const lockstep_announce_packet_t *)buf;
-
-            /* THE HOST OWNS THE GENERATION, exactly as it owns the seed. Both
-             * peers must compute the same one or the barrier never releases, and
-             * neither knows how many sessions the other has played — so a guest
-             * simply adopts whatever the host announces. */
-            if (!netplay_is_host() && hdr->player == 0 && g_netplay.state == NETPLAY_SYNCING
-                && hdr->generation != (uint8_t)(g_netplay.generation & 0x1F)) {
-                netplay_log("adopting the host's session %u", hdr->generation);
-                netplay_begin_generation(hdr->generation);
-            }
-
-            /* Before the barrier gets a say: `lockstep_on_peer_announce` keeps
-             * only announces for the round we are already in, and a challenge
-             * arrives as an announce for a round we are NOT in. Latch it here,
-             * where every announce still exists. */
-            if ((int32_t)hdr->player != g_netplay.local_player) {
-                g_netplay.peer_ready_gen = hdr->generation;
-                g_netplay.peer_ready_ms  = net_now_ms();
-            }
-
+            /* The generation is the room's, not either fighter's: both read it
+             * from the same room state, so there is nothing here to adopt. */
             lockstep_on_peer_announce(&g_netplay.lockstep, hdr->player, hdr->generation);
-            if (!netplay_is_host() && hdr->player == 0) g_netplay.seed = ann->seed;
+        } else if (hdr->type == LOCKSTEP_PACKET_REPAIR
+                   && got >= (int)sizeof(lockstep_repair_packet_t)) {
+            const lockstep_repair_packet_t *req = (const lockstep_repair_packet_t *)buf;
+            if (hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)
+                && (int32_t)req->side == g_netplay.local_player)
+                netplay_answer_repair(from, req->frame);
         } else if (hdr->type == LOCKSTEP_PACKET_BYE
                    && got >= (int)sizeof(lockstep_announce_packet_t)) {
-            /* The peer left THIS session: end it now rather than freeze until the
-             * stall timeout. A bye for another round is a late copy; ignored. */
+            /* The other fighter left THIS match: end it now rather than freeze
+             * until the stall timeout. A watcher is told too, since its board
+             * cannot go on without both sides. A bye for another match is a late
+             * copy; ignored. */
             const lockstep_announce_packet_t *bye = (const lockstep_announce_packet_t *)buf;
-            if ((int32_t)hdr->player != g_netplay.local_player
+            bool from_fighter = from == g_netplay.room.fighter[0] || from == g_netplay.room.fighter[1];
+            if (from_fighter && from != netplay_my_id()
                 && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)
-                && (g_netplay.state == NETPLAY_PLAYING || g_netplay.state == NETPLAY_SYNCING)) {
-                netplay_log("the other player ended the session (their frame %u, ours %u)",
+                && (netplay_running_match() || g_netplay.state == NETPLAY_SYNCING)
+                && !g_netplay.match_result_seen) {
+                netplay_log("%s left the match (their frame %u, ours %u)",
+                            rpcn_peer_name(rpcn_session_peer(&g_netplay.session, from)),
                             (unsigned)bye->seed, (unsigned)g_netplay.frame);
-                netplay_leave_session();
-                netplay_clear_ready();
-            }
-        } else if (hdr->type == LOCKSTEP_PACKET_SEED
-                   && got >= (int)sizeof(lockstep_announce_packet_t)) {
-            /* Seed only. Pointedly does NOT feed the barrier: this arrives while
-             * the host is merely sitting in the room, and treating it as an
-             * announcement would release a barrier for a session the guest has
-             * not begun. */
-            const lockstep_announce_packet_t *ann = (const lockstep_announce_packet_t *)buf;
-            if (!netplay_is_host() && hdr->player == 0 && ann->seed != 0
-                && g_netplay.seed != ann->seed) {
-                g_netplay.seed = ann->seed;
-                netplay_log("adopted the host's session seed 0x%08X", ann->seed);
+                netplay_end_match(NULL);
             }
         }
     }
@@ -1079,6 +1233,7 @@ static inline void netplay_settings_save(void) {
     netplay_text_add(&t, "npid=%s\n",         g_netplay.cfg.npid);
     netplay_text_add(&t, "fingerprint=%s\n",  g_netplay.cfg.fingerprint);
     netplay_text_add(&t, "frame_delay=%u\n",  g_netplay.cfg.frame_delay);
+    netplay_text_add(&t, "max_players=%u\n",  g_netplay.cfg.max_players);
     netplay_text_add(&t, "browse_yamp=%d\n",  g_netplay.cfg.browse_yamp ? 1 : 0);
     /* Only when there is one: an empty `password=` in the file would claim a
      * stored credential that does not exist, and a Twitch login clears the
@@ -1150,6 +1305,7 @@ static inline void netplay_settings_parse_line(netplay_config_t *cfg, char *line
     else if (!strcmp(key, "npid"))         snprintf(cfg->npid, sizeof(cfg->npid), "%s", val);
     else if (!strcmp(key, "fingerprint"))  snprintf(cfg->fingerprint, sizeof(cfg->fingerprint), "%s", val);
     else if (!strcmp(key, "frame_delay"))  cfg->frame_delay = (uint32_t)atoi(val);
+    else if (!strcmp(key, "max_players"))  cfg->max_players = (uint32_t)atoi(val);
     else if (!strcmp(key, "browse_yamp"))  cfg->browse_yamp = atoi(val) != 0;
     else if (!strcmp(key, "password"))     snprintf(cfg->password, sizeof(cfg->password), "%s", val);
     else if (!strcmp(key, "token"))        snprintf(cfg->token, sizeof(cfg->token), "%s", val);
@@ -1250,6 +1406,8 @@ static inline void netplay_twitch_merge_disk(void) {
 static inline void netplay_init(void) {
     memset(&g_netplay, 0, sizeof(g_netplay));
     g_netplay.local_player     = -1;
+    g_netplay.me.result        = ROOM_RESULT_NONE;
+    g_netplay.room.last_result = ROOM_RESULT_NONE;
     g_netplay.desync_frame     = LOCKSTEP_NO_CHECK;
     g_netplay.stall_timeout_ms = 15000;
     /* Both sockets start INVALID rather than 0: a zeroed handle is not the
@@ -1324,25 +1482,86 @@ static inline bool netplay_take_cmd(netplay_cmd_t *out) {
 static inline void netplay_publish_status(void) {
     emu_mutex_lock(&g_netplay.mutex);
     netplay_status_t *st = &g_netplay.status;
+    const rpcn_session_t *s = &g_netplay.session;
     st->state        = g_netplay.state;
-    st->stage        = g_netplay.session.stage;
+    st->stage        = s->stage;
     st->is_host      = netplay_is_host();
-    st->local_player = g_netplay.local_player;
-    st->room_id      = g_netplay.session.room_id;
-    st->room_flags   = g_netplay.session.room_flags;
-    snprintf(st->com_id, sizeof(st->com_id), "%s", g_netplay.session.com_id);
-    snprintf(st->com_id_foreign, sizeof(st->com_id_foreign), "%s", g_netplay.session.com_id_foreign);
-    snprintf(st->peer_npid, sizeof(st->peer_npid), "%s", g_netplay.session.peer_npid);
-    snprintf(st->peer_addr, sizeof(st->peer_addr), "%s", rpcn_session_peer_text(&g_netplay.session));
-    st->peer_known   = rpcn_session_peer_known(&g_netplay.session);
-    st->peer_heard   = g_netplay.session.peer_heard;
+    st->local_player = g_netplay.local_player < 0 ? -1
+                     : g_netplay.local_player >= (int32_t)LOCKSTEP_WATCHER ? 2 : g_netplay.local_player;
+    st->room_id      = s->room_id;
+    st->room_flags   = s->room_flags;
+    snprintf(st->com_id, sizeof(st->com_id), "%s", s->com_id);
+    snprintf(st->com_id_foreign, sizeof(st->com_id_foreign), "%s", s->com_id_foreign);
+
+    /* The room, one row per member, in line order where there is one. */
+    st->my_member_id = s->my_member_id;
+    st->max_slot     = s->max_slot;
+    st->room         = g_netplay.room;
+    st->room_known   = g_netplay.room_known;
+    st->me           = g_netplay.me;
+    st->member_count = 0;
+    if (rpcn_session_in_room(s)) {
+        uint16_t ids[ROOM_MAX_MEMBERS];
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < g_netplay.room.line_count && n < ROOM_MAX_MEMBERS; i++)
+            ids[n++] = g_netplay.room.line[i];
+        if (s->my_member_id) {
+            bool listed = false;
+            for (uint32_t i = 0; i < n; i++) if (ids[i] == s->my_member_id) listed = true;
+            if (!listed && n < ROOM_MAX_MEMBERS) ids[n++] = s->my_member_id;
+        }
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS && n < ROOM_MAX_MEMBERS; i++) {
+            if (!s->peers[i].used) continue;
+            bool listed = false;
+            for (uint32_t k = 0; k < n; k++) if (ids[k] == s->peers[i].member_id) listed = true;
+            if (!listed) ids[n++] = s->peers[i].member_id;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            netplay_member_status_t *row = &st->members[st->member_count];
+            memset(row, 0, sizeof(*row));
+            row->member_id = ids[i];
+            row->is_me     = ids[i] == s->my_member_id;
+            row->is_owner  = ids[i] == s->owner_id;
+            row->line_pos  = (int8_t)room_line_index(&g_netplay.room, ids[i]);
+            row->side      = (int8_t)room_side_of(&g_netplay.room, ids[i]);
+            if (row->is_me) {
+                snprintf(row->npid, sizeof(row->npid), "%s", s->npid);
+                row->known = true;
+                row->data  = g_netplay.me;
+            } else {
+                const rpcn_peer_t *p = rpcn_session_peer((rpcn_session_t *)s, ids[i]);
+                if (!p) continue;   /* in the line, but gone from the room */
+                snprintf(row->npid, sizeof(row->npid), "%s", p->npid);
+                row->known      = room_member_decode(p->bin, p->bin_len, &row->data);
+                row->addr_known = p->ip && p->port;
+                row->heard      = p->heard;
+            }
+            st->member_count++;
+        }
+    }
+    st->auto_start_s = 0;
+    if (netplay_is_host() && g_netplay.room.phase == ROOM_PHASE_LOBBY
+        && (g_netplay.room.flags & ROOM_FLAG_AUTO) && g_netplay.auto_deadline_ms) {
+        uint64_t now = net_now_ms();
+        st->auto_start_s = g_netplay.auto_deadline_ms > now
+                         ? (uint32_t)((g_netplay.auto_deadline_ms - now + 999) / 1000) : 0;
+    }
+
+    /* "The peer": the opponent while there is one, otherwise the first other
+     * member. What a two-player front end (and the MCP status) has always shown. */
+    const rpcn_peer_t *peer = rpcn_session_peer((rpcn_session_t *)s, netplay_opponent_id());
+    for (uint32_t i = 0; !peer && i < RPCN_MAX_PEERS; i++) if (s->peers[i].used) peer = &s->peers[i];
+    snprintf(st->peer_npid, sizeof(st->peer_npid), "%s", peer ? peer->npid : "");
+    snprintf(st->peer_addr, sizeof(st->peer_addr), "%s", rpcn_peer_addr_text(peer));
+    st->peer_known   = peer && peer->ip && peer->port;
+    st->peer_heard   = peer && peer->heard;
     st->frame        = g_netplay.frame;
     st->stalls       = g_netplay.lockstep.stalls;
     st->desync_frame = g_netplay.desync_frame;
     st->generation   = g_netplay.generation;
     st->seed         = g_netplay.seed;
     st->peer_ready     = netplay_peer_ready();
-    st->peer_ready_gen = g_netplay.peer_ready_gen;
+    st->peer_ready_gen = g_netplay.room.match;
 
     st->room_count = g_netplay.session.room_count;
     memcpy(st->rooms, g_netplay.session.rooms, sizeof(st->rooms));
@@ -1578,42 +1797,111 @@ static inline void netplay_twitch_refused(void) {
     }
 }
 
-static inline void netplay_send_bye(void);   /* below, beside netplay_do_stop */
+/*
+ * Tell the room this fighter has walked out of the match (LOCKSTEP_PACKET_BYE):
+ * the opponent, who cannot go on alone, and every watcher, whose board cannot
+ * either. Three copies each: it is one datagram with nothing after it to repair
+ * a loss, and a lost one costs the receiver the whole stall timeout.
+ *
+ * Only for walking OUT. A match that reached its result sends nothing: the
+ * opponent may be a few frames short of the result frame and still has to get
+ * there, and the room already knows (netplay_linger_pump keeps feeding it).
+ */
+static inline void netplay_send_bye(void) {
+    if (!netplay_is_fighter() || g_netplay.match_result_seen) return;
+    if (g_netplay.state != NETPLAY_PLAYING && g_netplay.state != NETPLAY_SYNCING) return;
+    lockstep_announce_packet_t pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_BYE);
+    pkt.seed = g_netplay.frame;
+    for (int i = 0; i < 3; i++) {
+        netplay_send_to(netplay_opponent_id(), &pkt, sizeof(pkt));
+        netplay_send_watchers(&pkt, sizeof(pkt));
+    }
+}
+
+/* Stop running a match on this board, whatever the reason, and hand it back to
+ * the keyboard. The rings are kept: a fighter goes on answering repairs from
+ * them until the next match clears them. */
+static inline void netplay_end_match(const char *why) {
+    if (netplay_running_match() || g_netplay.state == NETPLAY_SYNCING) {
+        if (why) netplay_log("match %u: %s", (unsigned)g_netplay.match_started, why);
+        g_netplay.state = rpcn_session_in_room(&g_netplay.session) ? NETPLAY_IN_ROOM : NETPLAY_ONLINE;
+    }
+    g_netplay.match_live     = false;
+    g_netplay.reset_pending  = false;
+    g_netplay.stall_since_ms = 0;
+    if (g_netplay.me.playing) { g_netplay.me.playing = 0; g_netplay.me_dirty = true; }
+    netplay_release_inputs();
+}
+
+/* Everything we knew about a room, forgotten. */
+static inline void netplay_forget_room(void) {
+    memset(&g_netplay.room, 0, sizeof(g_netplay.room));
+    g_netplay.room.last_result = ROOM_RESULT_NONE;
+    g_netplay.room_known    = false;
+    g_netplay.room_rev_seen = 0;
+    g_netplay.was_owner     = false;
+    g_netplay.match_started = 0;
+    g_netplay.match_live    = false;
+    g_netplay.me_dirty      = false;
+    g_netplay.force_start   = false;
+    g_netplay.auto_deadline_ms = 0;
+    g_netplay.fighters_seen = 0;
+    g_netplay.local_player  = -1;
+    /* Stats and flags start again with the room; the entry request and the
+     * choice to sit out are the player's and outlive it. */
+    uint8_t entry = g_netplay.me.entry;
+    bool    watch = (g_netplay.me.flags & ROOM_MEMBER_WATCH) != 0;
+    memset(&g_netplay.me, 0, sizeof(g_netplay.me));
+    g_netplay.me.entry  = entry;
+    g_netplay.me.flags  = watch ? ROOM_MEMBER_WATCH : 0;
+    g_netplay.me.result = ROOM_RESULT_NONE;
+}
 
 static inline void netplay_do_disconnect(void) {
     netplay_send_bye();
     rpcn_session_stop(&g_netplay.session);
+    netplay_end_match(NULL);
+    netplay_forget_room();
     g_netplay.enabled      = false;
     g_netplay.state        = NETPLAY_OFF;
-    g_netplay.local_player = -1;
     g_netplay.frame        = 0;
     netplay_check_clear();
-    netplay_clear_ready();
-    netplay_release_inputs();
     netplay_log("disconnected");
 }
 
 static inline void netplay_do_host(const netplay_config_t *cfg) {
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
+    g_netplay.cfg.max_players   = cfg->max_players;
     g_netplay.cfg.room_password[0] = '\0';
     snprintf(g_netplay.cfg.room_password, sizeof(g_netplay.cfg.room_password), "%s",
              cfg->room_password);
-    uint32_t flags = netplay_room_flags(g_active_profile,
-                                        cfg->frame_delay ? cfg->frame_delay : 2u);
-    if (!rpcn_session_host(&g_netplay.session, 2,
-                           cfg->room_password[0] ? cfg->room_password : NULL, flags)) {
+    uint32_t delay = cfg->frame_delay ? cfg->frame_delay : 2u;
+    uint32_t slots = cfg->max_players < 2 ? 2u
+                   : cfg->max_players > ROOM_MAX_MEMBERS ? ROOM_MAX_MEMBERS : cfg->max_players;
+    uint32_t flags = netplay_room_flags(g_active_profile, delay);
+
+    /* The room is born with its state, so nobody ever reads it empty: in the
+     * lobby, nobody in line yet (the owner puts itself there the moment the
+     * server says who it is), and the delay every match in it will use. */
+    netplay_forget_room();
+    g_netplay.room.phase       = ROOM_PHASE_LOBBY;
+    g_netplay.room.frame_delay = (uint8_t)delay;
+    uint8_t room_bin[ROOM_STATE_SIZE], me_bin[ROOM_MEMBER_SIZE];
+    uint32_t room_len = room_state_encode(&g_netplay.room, room_bin);
+    uint32_t me_len   = room_member_encode(&g_netplay.me, me_bin);
+    if (!rpcn_session_host(&g_netplay.session, slots,
+                           cfg->room_password[0] ? cfg->room_password : NULL, flags,
+                           room_bin, room_len, me_bin, me_len)) {
         g_netplay.state = NETPLAY_FAILED;
         return;
     }
-    /* The host is always player 0. That is not a convention we are free to pick
-     * per machine: it decides which side of the cabinet each board drives, and
-     * both ends have to answer it the same way with nothing to negotiate it. */
-    g_netplay.local_player = 0;
     /* One nonce per room, from the clock. It is not load-bearing for determinism
      * (see lockstep.h) but it is what proves in a log that two machines think
-     * they are in the same session. */
+     * they are in the same session. Each match gets a fresh one. */
     g_netplay.seed = (uint32_t)(net_now_ms() * 2654435761u) | 1u;
-    netplay_log("hosting; waiting for a peer");
+    netplay_log("hosting a room for up to %u; waiting for players", slots);
 }
 
 static inline void netplay_do_join(const netplay_config_t *cfg) {
@@ -1625,48 +1913,70 @@ static inline void netplay_do_join(const netplay_config_t *cfg) {
         if (why) { netplay_log("not joining: %s", why); return; }
         break;
     }
+    netplay_forget_room();
+    uint8_t me_bin[ROOM_MEMBER_SIZE];
+    uint32_t me_len = room_member_encode(&g_netplay.me, me_bin);
     if (!rpcn_session_join(&g_netplay.session, cfg->room_id,
-                           cfg->room_password[0] ? cfg->room_password : NULL)) {
+                           cfg->room_password[0] ? cfg->room_password : NULL, me_bin, me_len)) {
         g_netplay.state = NETPLAY_FAILED;
         return;
     }
-    g_netplay.local_player = 1;
     netplay_log("joining room %llu", (unsigned long long)cfg->room_id);
 }
 
+/* Start: "I am ready to play". The owner starts the first match once every
+ * player has said so; a player who was sitting out is back in. */
 static inline void netplay_do_start(void) {
-    if (g_netplay.local_player < 0 || !g_netplay.session.room_id) {
+    if (!rpcn_session_in_room(&g_netplay.session)) {
         netplay_log("take a room before starting a session");
         return;
     }
-    /* The host picks the generation; a guest pressing start announces its own and
-     * adopts the host's the moment one arrives (see netplay_drain_socket). */
-    uint32_t gen = (g_netplay.generation + 1) & 0x1F;
-    netplay_clear_ready();
-    netplay_begin_generation(gen);
-    netplay_log("session %u: waiting for both boards at the barrier", gen);
+    uint8_t before = g_netplay.me.flags;
+    g_netplay.me.flags = (uint8_t)((g_netplay.me.flags | ROOM_MEMBER_READY) & ~ROOM_MEMBER_WATCH);
+    if (g_netplay.me.flags != before) {
+        g_netplay.me_dirty = true;
+        netplay_log("ready to play");
+    }
 }
 
-/* Tell the peer this session is over (LOCKSTEP_PACKET_BYE). Three copies: it is
- * one datagram with nothing after it to repair a loss, and a lost one costs the
- * peer the whole stall timeout. Only from inside a session. */
-static inline void netplay_send_bye(void) {
-    if (g_netplay.state != NETPLAY_PLAYING && g_netplay.state != NETPLAY_SYNCING) return;
-    lockstep_announce_packet_t pkt;
-    memset(&pkt, 0, sizeof(pkt));
-    netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_BYE);
-    pkt.seed = g_netplay.frame;
-    for (int i = 0; i < 3; i++) rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
-}
-
+/* Stop: not ready, and out of the match this board is running if there is one.
+ * A fighter who stops ends the match for both (the owner calls it off, since
+ * the other side cannot play on alone); a watcher only stops watching. */
 static inline void netplay_do_stop(void) {
+    bool fighting = netplay_is_fighter() && (g_netplay.match_live || g_netplay.state == NETPLAY_SYNCING);
     netplay_send_bye();
-    if (g_netplay.state == NETPLAY_PLAYING || g_netplay.state == NETPLAY_SYNCING)
-        g_netplay.state = NETPLAY_IN_ROOM;
-    g_netplay.reset_pending = false;
-    netplay_clear_ready();
-    netplay_release_inputs();
-    netplay_log("session stopped");
+    if (g_netplay.me.flags & ROOM_MEMBER_READY) {
+        g_netplay.me.flags = (uint8_t)(g_netplay.me.flags & ~ROOM_MEMBER_READY);
+        g_netplay.me_dirty = true;
+    }
+    netplay_end_match(fighting ? "left by this player" : (g_netplay.match_live ? "stopped watching" : NULL));
+    netplay_log("not ready");
+}
+
+static inline void netplay_do_entry(uint8_t entry) {
+    if (entry > ROOM_ENTRY_2P) entry = ROOM_ENTRY_NONE;
+    if (g_netplay.me.entry == entry) return;
+    g_netplay.me.entry = entry;
+    g_netplay.me_dirty = true;
+    netplay_log(entry == ROOM_ENTRY_1P ? "asking for the 1P side"
+              : entry == ROOM_ENTRY_2P ? "asking for the 2P side" : "either side will do");
+}
+
+static inline void netplay_do_watch(bool watch) {
+    uint8_t flags = watch ? (uint8_t)((g_netplay.me.flags | ROOM_MEMBER_WATCH) & ~ROOM_MEMBER_READY)
+                          : (uint8_t)(g_netplay.me.flags & ~ROOM_MEMBER_WATCH);
+    if (flags == g_netplay.me.flags) return;
+    g_netplay.me.flags = flags;
+    g_netplay.me_dirty = true;
+    netplay_log(watch ? "sitting out: watching only" : "back in the line to play");
+}
+
+static inline void netplay_do_leave_room(void) {
+    netplay_send_bye();
+    netplay_end_match(NULL);
+    rpcn_session_leave(&g_netplay.session);
+    netplay_forget_room();
+    if (g_netplay.state != NETPLAY_OFF && g_netplay.state != NETPLAY_FAILED) g_netplay.state = NETPLAY_ONLINE;
 }
 
 /*
@@ -1734,6 +2044,13 @@ static inline void netplay_pump_commands(void) {
                 break;
             case NETPLAY_CMD_START:      netplay_do_start(); break;
             case NETPLAY_CMD_STOP:       netplay_do_stop(); break;
+            case NETPLAY_CMD_ENTRY:      netplay_do_entry(cmd.cfg.entry); break;
+            case NETPLAY_CMD_WATCH:      netplay_do_watch(cmd.cfg.watch_only); break;
+            case NETPLAY_CMD_FORCE_START:
+                if (netplay_is_host()) g_netplay.force_start = true;
+                else netplay_log("only the room's owner can start a match early");
+                break;
+            case NETPLAY_CMD_LEAVE_ROOM: netplay_do_leave_room(); break;
             case NETPLAY_CMD_CREATE_ACCOUNT:
                 rpcn_account_create(&g_netplay.account, cmd.cfg.server, cmd.cfg.port,
                                     cmd.cfg.fingerprint, cmd.cfg.npid, cmd.cfg.password,
@@ -1779,12 +2096,17 @@ static inline void netplay_pump_commands(void) {
 /* ---- The pump, and the frame gate ---------------------------------------- */
 
 static inline void netplay_mirror_stage(void) {
-    /* The session's own progress becomes our state, except while a session is
-     * running: SYNCING/PLAYING are owned by the barrier, not by the transport. */
-    if (g_netplay.state == NETPLAY_SYNCING || g_netplay.state == NETPLAY_PLAYING) return;
+    /* The session's own progress becomes our state, except while a match is
+     * running: SYNCING/PLAYING/WATCHING are owned by the room, not by the
+     * transport -- unless the room itself went away under the match. */
+    if (g_netplay.state == NETPLAY_SYNCING || netplay_running_match()) {
+        if (rpcn_session_in_room(&g_netplay.session)) return;
+        netplay_end_match("the room is gone");
+    }
     switch (g_netplay.session.stage) {
         case RPCN_STAGE_LOGGING_IN: g_netplay.state = NETPLAY_CONNECTING; break;
         case RPCN_STAGE_ONLINE:
+            if (g_netplay.state == NETPLAY_IN_ROOM) netplay_forget_room();   /* closed, or left */
             /* Remember the server and account only once they are known to WORK —
              * storing what was typed would just as happily store a typo. */
             if (g_netplay.state != NETPLAY_ONLINE) {
@@ -1853,15 +2175,18 @@ static inline void netplay_report_wait(void) {
     if (now - g_netplay.last_wait_report_ms <= 5000) return;
     g_netplay.last_wait_report_ms = now;
 
-    if (!rpcn_session_peer_known(&g_netplay.session))
-        netplay_log("still waiting: the server has not given us the peer's address yet");
-    else if (!g_netplay.session.peer_heard)
-        netplay_log("still waiting: punching %s but nothing has come back - check that UDP %u "
+    const rpcn_peer_t *p = rpcn_session_peer(&g_netplay.session, netplay_opponent_id());
+    if (!p)
+        netplay_log("still waiting: the opponent is not in the room");
+    else if (!p->ip || !p->port)
+        netplay_log("still waiting: the server has not given us %s's address yet", rpcn_peer_name(p));
+    else if (!p->heard)
+        netplay_log("still waiting: punching %s at %s but nothing has come back - check that UDP %u "
                     "is not blocked by a firewall on either machine",
-                    rpcn_session_peer_text(&g_netplay.session), (unsigned)RPCN_P2P_PORT);
+                    rpcn_peer_name(p), rpcn_peer_addr_text(p), (unsigned)RPCN_P2P_PORT);
     else
-        netplay_log("still waiting: peer %s is reachable but has not announced this session",
-                    rpcn_session_peer_text(&g_netplay.session));
+        netplay_log("still waiting: %s at %s is reachable but has not started this match",
+                    rpcn_peer_name(p), rpcn_peer_addr_text(p));
 }
 
 /*
@@ -1922,7 +2247,7 @@ static inline void netplay_pump_twitch(void) {
  */
 static inline void netplay_resend_inputs(void) {
     const lockstep_t *l = &g_netplay.lockstep;
-    if (l->last_local_frame == LOCKSTEP_INVALID_FRAME) return;
+    if (lockstep_is_watcher(l) || l->last_local_frame == LOCKSTEP_INVALID_FRAME) return;
 
     uint64_t now = net_now_ms();
     if (now - g_netplay.last_resend_ms < NETPLAY_RESEND_MS) return;
@@ -1933,22 +2258,10 @@ static inline void netplay_resend_inputs(void) {
     /* Newest first: it is the one most likely to be the only thing missing.
      * Four records is 40 frames, well past what the largest delay can need. */
     for (int sent = 0; sent < 4; sent++) {
-        lockstep_input_packet_t pkt;
-        memset(&pkt, 0, sizeof(pkt));
-        netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_INPUT);
-        pkt.check_frame = g_netplay.last_check_frame;
-        pkt.check_value = g_netplay.last_check_value;
-        lockstep_fill_record(l, top, &pkt.record);
-        rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
+        netplay_send_record(netplay_opponent_id(), top);
         if (top < floor + LOCKSTEP_REDUNDANCY) break;   /* this record reached the floor */
         top -= LOCKSTEP_REDUNDANCY;
     }
-}
-
-static inline void netplay_leave_session(void) {
-    g_netplay.state          = NETPLAY_IN_ROOM;
-    g_netplay.stall_since_ms = 0;
-    netplay_release_inputs();
 }
 
 /*
@@ -1990,7 +2303,7 @@ static inline bool netplay_watch_own_board(uint32_t frame) {
     if (g_netplay.stall_timeout_ms && held > g_netplay.stall_timeout_ms) {
         netplay_log("this board did not finish frame %u in %u ms - leaving the session",
                     frame, g_netplay.stall_timeout_ms);
-        netplay_leave_session();
+        netplay_end_match(NULL);
         return true;
     }
     return false;
@@ -1999,70 +2312,345 @@ static inline bool netplay_watch_own_board(uint32_t frame) {
 /* The run loop's half of the same report: it knows WHY the board is not running.
  * Called from the emu thread whenever it finds itself stopped; once per frame. */
 static inline void netplay_board_stopped(uint32_t ip, bool halted) {
-    if (!g_netplay.enabled || g_netplay.state != NETPLAY_PLAYING || g_netplay.reset_pending) return;
+    if (!g_netplay.enabled || !netplay_running_match() || g_netplay.reset_pending) return;
     if (g_netplay.stopped_noted_frame == g_netplay.frame) return;
     g_netplay.stopped_noted_frame = g_netplay.frame;
     netplay_log(halted ? "the emulated CPU HALTED at IP=0x%08X on frame %u - this session cannot continue"
-                       : "the emulator is paused at IP=0x%08X on frame %u - the peer is waiting (F9 resumes)",
+                       : "the emulator is paused at IP=0x%08X on frame %u - the room is waiting (F9 resumes)",
                 (unsigned)ip, g_netplay.frame);
 }
 
+/* ---- The room ------------------------------------------------------------ */
+
 /*
- * Called once per slice from the emu thread, OUTSIDE the emu mutex. Pumps the
- * network, then answers what this slice may do.
+ * How long the owner waits after a result before the next match starts on its
+ * own: long enough to see who won and change an entry or sit out, short enough
+ * that a room keeps rolling like a cabinet with a line in front of it. The port
+ * uses 10 s for its result screen and a lobby countdown after that.
  */
-static inline netplay_step_t netplay_begin_frame(void) {
-    if (!g_netplay.mutex_ready) return NETPLAY_STEP_OFF;
-    if (g_netplay.inlog && g_netplay.state != NETPLAY_PLAYING) netplay_inputlog_close();
+#define NETPLAY_NEXT_MATCH_MS    10000u
+/* Both fighters must have started their boards within this long of the owner
+ * calling a match, or it is called off and the room tries again. */
+#define NETPLAY_MATCH_START_MS   30000u
+/* Our own attribute is republished at most this often. */
+#define NETPLAY_MEMBER_PUBLISH_MS  200u
 
-    netplay_pump_commands();
-    rpcn_account_update(&g_netplay.account);
-    netplay_pump_twitch();
+/*
+ * Does the room move on to the next match by itself after a result?
+ *
+ * Only a room with a line in it. The PS3 port rotates only in Room Match, and a
+ * two-seat room here is the one-on-one it always was: after a result both
+ * players press Start again (and a lobby that accepts challenges -- the fly's --
+ * sees the same thing it always did).
+ */
+static inline bool netplay_room_rolls(void) { return g_netplay.session.max_slot > 2; }
 
-    if (!g_netplay.enabled) { netplay_publish_status(); return NETPLAY_STEP_OFF; }
+/* What a result does to our own attribute beyond the stats: in a room that does
+ * not roll on, "ready" was for the match just played. */
+static inline void netplay_after_result_ready(void) {
+    if (netplay_room_rolls() || !(g_netplay.me.flags & ROOM_MEMBER_READY)) return;
+    g_netplay.me.flags = (uint8_t)(g_netplay.me.flags & ~ROOM_MEMBER_READY);
+    g_netplay.me_dirty = true;
+}
 
-    rpcn_session_update(&g_netplay.session);
-    netplay_mirror_stage();
-    netplay_drain_socket();
-    netplay_pump_deferred_room();
+/* The room as room.h sees it: us, from our own copy, and everybody else from
+ * the server's. */
+static inline uint32_t netplay_room_members(room_member_t *out) {
+    uint32_t n = 0;
+    const rpcn_session_t *s = &g_netplay.session;
+    if (s->my_member_id) {
+        out[n].id    = s->my_member_id;
+        out[n].known = true;
+        out[n].data  = g_netplay.me;
+        n++;
+    }
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS && n < ROOM_MAX_MEMBERS; i++) {
+        if (!s->peers[i].used) continue;
+        out[n].id    = s->peers[i].member_id;
+        out[n].known = room_member_decode(s->peers[i].bin, s->peers[i].bin_len, &out[n].data);
+        n++;
+    }
+    return n;
+}
 
-    /* The host republishes the seed while idling in a room, so a guest holds it
-     * long before anyone presses start. */
-    if (g_netplay.state == NETPLAY_IN_ROOM && netplay_is_host()) {
-        uint64_t now = net_now_ms();
-        if (now - g_netplay.last_seed_ms >= 1000) { g_netplay.last_seed_ms = now; netplay_send_seed(); }
+static inline const char *netplay_member_name(uint16_t id) {
+    if (!id) return "nobody";
+    if (id == g_netplay.session.my_member_id) return g_netplay.session.npid;
+    return rpcn_peer_name(rpcn_session_peer(&g_netplay.session, id));
+}
+
+static inline void netplay_publish_me(void) {
+    if (!g_netplay.me_dirty || !rpcn_session_in_room(&g_netplay.session)) return;
+    uint64_t now = net_now_ms();
+    if (now - g_netplay.me_sent_ms < NETPLAY_MEMBER_PUBLISH_MS) return;
+    uint8_t bin[ROOM_MEMBER_SIZE];
+    uint32_t len = room_member_encode(&g_netplay.me, bin);
+    if (rpcn_session_set_member_state(&g_netplay.session, bin, len)) {
+        g_netplay.me_dirty   = false;
+        g_netplay.me_sent_ms = now;
+    }
+}
+
+/*
+ * Read the room's state off the session, once per change. The OWNER does not:
+ * its own copy is the newest there is, and the server's is at best the echo of
+ * an earlier write -- taking that would undo whatever it decided in between.
+ * The one time the owner does read it is on becoming the owner, which is how a
+ * room survives its owner leaving: the successor carries on from the state on
+ * the server.
+ */
+static inline void netplay_refresh_room(void) {
+    rpcn_session_t *s = &g_netplay.session;
+    if (s->room_rev == g_netplay.room_rev_seen) return;
+    g_netplay.room_rev_seen = s->room_rev;
+
+    bool owner = netplay_is_host();
+    if (!owner || !g_netplay.was_owner) {
+        room_state_t fresh;
+        if (room_state_decode(s->room_bin, s->room_bin_len, &fresh)) {
+            g_netplay.room       = fresh;
+            g_netplay.room_known = true;
+        }
+        if (owner && s->my_member_id) {
+            netplay_log(s->is_host ? "you run this room" : "the room's owner left - this machine runs it now");
+            g_netplay.auto_deadline_ms = net_now_ms() + NETPLAY_NEXT_MATCH_MS;
+            g_netplay.match_begun_ms   = net_now_ms();
+            g_netplay.fighters_seen    = 0;
+        }
+    }
+    if (s->my_member_id) g_netplay.was_owner = owner;
+}
+
+static inline void netplay_publish_room(void) {
+    uint8_t bin[ROOM_STATE_SIZE];
+    uint32_t len = room_state_encode(&g_netplay.room, bin);
+    rpcn_session_set_room_state(&g_netplay.session, bin, len);
+}
+
+/*
+ * The owner's half: keep the line in step with who is in the room, start a
+ * match when it is time, and finish it when a board reports the result -- or
+ * call it off when it cannot finish. Every decision is one write of the room
+ * state, which every member (the owner included) then acts on.
+ */
+static inline void netplay_owner_pump(void) {
+    if (!netplay_is_host() || !g_netplay.session.my_member_id) return;
+
+    room_member_t m[ROOM_MAX_MEMBERS];
+    uint32_t n = netplay_room_members(m);
+    room_state_t s = g_netplay.room;
+    bool changed = false;
+    uint64_t now = net_now_ms();
+
+    if (!g_netplay.room_known) {
+        memset(&s, 0, sizeof(s));
+        s.phase       = ROOM_PHASE_LOBBY;
+        s.frame_delay = (uint8_t)(g_netplay.cfg.frame_delay ? g_netplay.cfg.frame_delay : 2u);
+        s.last_result = ROOM_RESULT_NONE;
+        g_netplay.room_known = true;
+        changed = true;
+    }
+    if (room_line_sync(&s, m, n)) changed = true;
+
+    if (s.phase == ROOM_PHASE_LOBBY) {
+        uint32_t players = room_player_count(&s, m, n);
+        /* "Everyone is ready" starts the FIRST match. After a result the ready
+         * flags are all still set, so honouring them again would start the next
+         * match the moment the lobby reopened -- and cut off a watcher still a
+         * few frames short of the result it is about to be told about. From then
+         * on the countdown decides (or the owner, with Start now). */
+        bool rolling = (s.flags & ROOM_FLAG_AUTO) != 0;
+        bool due = rolling && g_netplay.auto_deadline_ms && now >= g_netplay.auto_deadline_ms;
+        uint16_t f[2];
+        if (players >= 2 && (g_netplay.force_start || (!rolling && room_all_ready(&s, m, n)) || due)
+            && room_pick_fighters(&s, m, n, f)) {
+            s.phase       = ROOM_PHASE_MATCH;
+            s.match       = (uint16_t)(s.match + 1u);
+            if (!s.match) s.match = 1;   /* 0 means "none yet" */
+            s.fighter[0]  = f[0];
+            s.fighter[1]  = f[1];
+            s.seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s.match << 16) ^ 0x5A5Au;
+            s.region      = (uint8_t)g_region;
+            s.last_result = ROOM_RESULT_NONE;
+            s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
+            g_netplay.match_begun_ms = now;
+            g_netplay.fighters_seen  = 0;
+            changed = true;
+            netplay_log("match %u: %s (1P) vs %s (2P)", (unsigned)s.match,
+                        netplay_member_name(f[0]), netplay_member_name(f[1]));
+        } else if (g_netplay.force_start) {
+            netplay_log("cannot start: a match needs two players who are not sitting out");
+        }
+        g_netplay.force_start = false;
+    } else {
+        int res = (g_netplay.me.result_match == s.match && g_netplay.me.result <= 1)
+                ? g_netplay.me.result : room_reported_result(m, n, s.match);
+        if (res >= 0) {
+            uint16_t loser = room_rotate_line(&s, (uint32_t)res);
+            s.last_result = (uint8_t)res;
+            s.phase       = ROOM_PHASE_LOBBY;
+            if (netplay_room_rolls()) s.flags = (uint8_t)(s.flags | ROOM_FLAG_AUTO);
+            g_netplay.auto_deadline_ms = now + NETPLAY_NEXT_MATCH_MS;
+            changed = true;
+            netplay_log("match %u won by %s (%s); %s goes to the back of the line", (unsigned)s.match,
+                        netplay_member_name(s.fighter[res]), res == 0 ? "1P" : "2P",
+                        netplay_member_name(loser));
+        } else {
+            const char *why = NULL;
+            for (uint32_t side = 0; side < 2; side++) {
+                const room_member_t *mm = room_find(m, n, s.fighter[side]);
+                if (!mm)                                         why = "a fighter left the room";
+                else if (mm->known && mm->data.playing == s.match) g_netplay.fighters_seen |= 1u << side;
+                else if (g_netplay.fighters_seen & (1u << side))   why = "a fighter stopped playing";
+            }
+            if (!why && g_netplay.fighters_seen != 3u && now - g_netplay.match_begun_ms > NETPLAY_MATCH_START_MS)
+                why = "the fighters' boards did not both start";
+            if (why) {
+                s.phase       = ROOM_PHASE_LOBBY;
+                s.last_result = ROOM_RESULT_NONE;
+                changed = true;
+                netplay_log("match %u called off: %s", (unsigned)s.match, why);
+            }
+        }
     }
 
-    if (g_netplay.state == NETPLAY_SYNCING) {
-        /* Keep announcing until the barrier releases: the announce is a plain
-         * datagram and may be lost, and it is also how the host's generation and
-         * seed reach a guest that pressed start first. Paced, because this runs
-         * every millisecond while we wait: see NETPLAY_ANNOUNCE_MS. */
-        if (net_now_ms() - g_netplay.last_announce_ms >= NETPLAY_ANNOUNCE_MS)
-            netplay_send_announce();
-        netplay_report_wait();
+    if (changed) {
+        g_netplay.room = s;
+        netplay_publish_room();
+    }
+}
 
-        if (lockstep_barrier_released(&g_netplay.lockstep)) {
-            netplay_seed_delay_frames();
-            g_netplay.reset_pending = true;
-            g_netplay.state         = NETPLAY_PLAYING;
-            g_netplay.frame         = 0;
-            netplay_log("barrier released; session %u seed 0x%08X - resetting the board",
-                        g_netplay.generation, g_netplay.seed);
-            netplay_publish_status();
-            return NETPLAY_STEP_RESET;
+/*
+ * Every member's half, the owner's included: do what the room state says.
+ * A match we have not started yet is started -- as a fighter if the state names
+ * us, as a watcher otherwise -- and a match the room has called off is stopped.
+ * A match the room has FINISHED is not cut short: a board a few frames behind the
+ * one that reported the result still has to reach it itself, or it would miss
+ * the rotation it is about to see.
+ */
+static inline void netplay_member_pump(void) {
+    uint16_t me = g_netplay.session.my_member_id;
+    if (!g_netplay.room_known || !me) return;
+    const room_state_t *r = &g_netplay.room;
+
+    if (r->phase == ROOM_PHASE_MATCH && r->match && r->match != g_netplay.match_started) {
+        int side = room_side_of(r, me);
+        netplay_end_match(NULL);
+        g_netplay.match_started = r->match;
+        g_netplay.seed          = r->seed;
+        /* The owner's region, before the reset that boots into it: a board
+         * booted as another region is another game from frame 0. */
+        if (g_region != (int)r->region) {
+            netplay_log("playing this room in the owner's region (%s)",
+                        r->region == GAME_REGION_JAPAN ? "Japan" : r->region == GAME_REGION_EXPORT ? "Export" : "USA");
+            g_region = r->region;
         }
-        netplay_publish_status();
+        if (side >= 0) {
+            netplay_log("match %u: you are %s against %s", (unsigned)r->match, side == 0 ? "1P" : "2P",
+                        netplay_member_name(r->fighter[side ^ 1]));
+            netplay_begin_generation(r->match, (uint32_t)side, r->frame_delay);
+        } else {
+            netplay_log("match %u: watching %s vs %s", (unsigned)r->match,
+                        netplay_member_name(r->fighter[0]), netplay_member_name(r->fighter[1]));
+            netplay_begin_generation(r->match, LOCKSTEP_WATCHER, r->frame_delay);
+        }
+        g_netplay.match_live = true;
+        g_netplay.me.playing = r->match;
+        g_netplay.me_dirty   = true;
+    }
+
+    if (g_netplay.match_live && r->match == g_netplay.match_started
+        && r->phase == ROOM_PHASE_LOBBY && r->last_result == ROOM_RESULT_NONE)
+        netplay_end_match("called off by the room");
+
+    /* A result our board did not see -- we were not running it, or dropped out
+     * of it -- is still ours to record, and still moves our entry request. */
+    if (r->phase == ROOM_PHASE_LOBBY && r->match && r->last_result <= 1
+        && g_netplay.me.result_match != r->match && !g_netplay.match_live) {
+        if (room_after_result(&g_netplay.me, me, r, r->match, r->last_result)) {
+            g_netplay.me_dirty = true;
+            netplay_after_result_ready();
+        }
+    }
+}
+
+/* A fighter whose board has reached the result goes on repeating its last
+ * inputs for a while: the other fighter may be a few frames behind and missing
+ * the last of them, and watchers catch up from them. */
+static inline void netplay_linger_pump(void) {
+    if (!g_netplay.linger_until_ms || net_now_ms() > g_netplay.linger_until_ms) {
+        g_netplay.linger_until_ms = 0;
+        return;
+    }
+    const lockstep_t *l = &g_netplay.lockstep;
+    if (lockstep_is_watcher(l) || l->last_local_frame == LOCKSTEP_INVALID_FRAME) return;
+    uint64_t before = g_netplay.last_resend_ms;
+    netplay_resend_inputs();
+    if (g_netplay.last_resend_ms != before) {
+        lockstep_input_packet_t pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        netplay_fill_header(&pkt.header, LOCKSTEP_PACKET_INPUT);
+        pkt.check_frame = g_netplay.last_check_frame;
+        pkt.check_value = g_netplay.last_check_value;
+        lockstep_fill_record(l, l->last_local_frame, &pkt.record);
+        netplay_send_watchers(&pkt, sizeof(pkt));
+    }
+}
+
+/* A watcher that has fallen behind asks the fighter who is missing a frame to
+ * send it again -- but only once there is evidence the match got past it,
+ * because before the fighters' barrier releases every frame is "missing". */
+static inline void netplay_watch_repair(uint32_t frame) {
+    const lockstep_t *l = &g_netplay.lockstep;
+    uint64_t now = net_now_ms();
+    if (now - g_netplay.watch_stall_ms < NETPLAY_REPAIR_AFTER_MS) return;
+    if (now - g_netplay.last_repair_ms < NETPLAY_REPAIR_MS) return;
+    g_netplay.last_repair_ms = now;
+    for (uint32_t side = 0; side < LOCKSTEP_MAX_PLAYERS; side++) {
+        if (lockstep_ring_has(&l->rings[side], frame)) continue;
+        uint32_t n0 = l->rings[0].newest, n1 = l->rings[1].newest;
+        bool past = (n0 != LOCKSTEP_INVALID_FRAME && n0 >= frame) || (n1 != LOCKSTEP_INVALID_FRAME && n1 >= frame);
+        if (!past) continue;
+        lockstep_repair_packet_t req;
+        memset(&req, 0, sizeof(req));
+        netplay_fill_header(&req.header, LOCKSTEP_PACKET_REPAIR);
+        req.side  = side;
+        req.frame = frame;
+        netplay_send_to(g_netplay.room.fighter[side], &req, sizeof(req));
+    }
+}
+
+/* One slice of a watcher: run the frame when both fighters' inputs are in. */
+static inline netplay_step_t netplay_watch_step(void) {
+    if (g_netplay.reset_pending) return NETPLAY_STEP_RESET;
+    uint32_t frame = g_netplay.frame;
+    const lockstep_t *l = &g_netplay.lockstep;
+    if (!lockstep_ready(l, frame)) {
+        uint64_t now = net_now_ms();
+        if (!g_netplay.watch_stall_ms) g_netplay.watch_stall_ms = now;
+        netplay_watch_repair(frame);
+        /* Only once the fighters have started: until then it is the barrier we
+         * are waiting on, and the room calls the match off if that never goes. */
+        bool started = l->rings[0].newest != LOCKSTEP_INVALID_FRAME || l->rings[1].newest != LOCKSTEP_INVALID_FRAME;
+        if (started && now - g_netplay.watch_stall_ms > NETPLAY_WATCH_GIVEUP_MS) {
+            netplay_log("could not get frame %u of the match from the fighters - "
+                        "you will be in the next one", frame);
+            netplay_end_match(NULL);
+        }
+        g_netplay.ready_frame = LOCKSTEP_INVALID_FRAME;
         return NETPLAY_STEP_WAIT;
     }
+    g_netplay.watch_stall_ms = 0;
+    if (netplay_watch_own_board(frame)) return NETPLAY_STEP_WAIT;
+    g_netplay.inlog_w0 = lockstep_input_for(l, 0, frame);
+    g_netplay.inlog_w1 = lockstep_input_for(l, 1, frame);
+    netplay_apply_inputs(g_netplay.inlog_w0, g_netplay.inlog_w1);
+    return NETPLAY_STEP_READY;
+}
 
-    if (g_netplay.state != NETPLAY_PLAYING) {
-        netplay_publish_status();
-        /* Not in a session: the board runs normally and the keyboard drives it. */
-        return NETPLAY_STEP_OFF;
-    }
-
-    if (g_netplay.reset_pending) { netplay_publish_status(); return NETPLAY_STEP_RESET; }
+/* One slice of a fighter: sample, send, and run the frame when both sides are in. */
+static inline netplay_step_t netplay_fight_step(void) {
+    if (g_netplay.reset_pending) return NETPLAY_STEP_RESET;
 
     /* Sample local input for frame + delay. This is the delay in "delay-based":
      * what the player does now is consumed `delay` frames from now, which buys
@@ -2077,7 +2665,11 @@ static inline netplay_step_t netplay_begin_frame(void) {
         pkt.check_frame = g_netplay.last_check_frame;
         pkt.check_value = g_netplay.last_check_value;
         lockstep_submit_local(&g_netplay.lockstep, send_frame, netplay_sample_local(), &pkt.record);
-        rpcn_session_send(&g_netplay.session, &pkt, sizeof(pkt));
+        netplay_send_to(netplay_opponent_id(), &pkt, sizeof(pkt));
+        if (++g_netplay.watch_stride >= NETPLAY_WATCH_STRIDE) {
+            g_netplay.watch_stride = 0;
+            netplay_send_watchers(&pkt, sizeof(pkt));
+        }
     }
 
     if (!lockstep_ready(&g_netplay.lockstep, frame)) {
@@ -2092,45 +2684,103 @@ static inline netplay_step_t netplay_begin_frame(void) {
              * the network or the process went away, and recent input means the
              * other board is the one that stopped. */
             if (g_netplay.last_peer_input_ms)
-                netplay_log("stalled for more than %u ms at frame %u (the peer's last input "
-                            "arrived %u ms ago) - leaving the session",
+                netplay_log("stalled for more than %u ms at frame %u (the opponent's last input "
+                            "arrived %u ms ago) - leaving the match",
                             g_netplay.stall_timeout_ms, frame,
                             (unsigned)(now - g_netplay.last_peer_input_ms));
             else
                 netplay_log("stalled for more than %u ms at frame %u (no input ever arrived "
-                            "from the peer) - leaving the session",
+                            "from the opponent) - leaving the match",
                             g_netplay.stall_timeout_ms, frame);
-            netplay_leave_session();
-            netplay_publish_status();
+            netplay_send_bye();   /* the watchers cannot go on either */
+            netplay_end_match(NULL);
             return NETPLAY_STEP_WAIT;
         }
         netplay_resend_inputs();
         /* Not ours to answer for while we wait on the peer. */
         g_netplay.ready_frame = LOCKSTEP_INVALID_FRAME;
-        netplay_publish_status();
         return NETPLAY_STEP_WAIT;
     }
     g_netplay.stall_since_ms = 0;
 
-    if (netplay_watch_own_board(frame)) {
-        netplay_publish_status();
-        return NETPLAY_STEP_WAIT;
-    }
+    if (netplay_watch_own_board(frame)) return NETPLAY_STEP_WAIT;
 
     g_netplay.inlog_w0 = lockstep_input_for(&g_netplay.lockstep, 0, frame);
     g_netplay.inlog_w1 = lockstep_input_for(&g_netplay.lockstep, 1, frame);
     netplay_apply_inputs(g_netplay.inlog_w0, g_netplay.inlog_w1);
-    netplay_publish_status();
     return NETPLAY_STEP_READY;
+}
+
+/*
+ * Called once per slice from the emu thread, OUTSIDE the emu mutex. Pumps the
+ * network and the room, then answers what this slice may do.
+ */
+static inline netplay_step_t netplay_begin_frame(void) {
+    if (!g_netplay.mutex_ready) return NETPLAY_STEP_OFF;
+    if (g_netplay.inlog && !netplay_running_match()) netplay_inputlog_close();
+
+    netplay_pump_commands();
+    rpcn_account_update(&g_netplay.account);
+    netplay_pump_twitch();
+
+    if (!g_netplay.enabled) { netplay_publish_status(); return NETPLAY_STEP_OFF; }
+
+    rpcn_session_update(&g_netplay.session);
+    netplay_mirror_stage();
+    netplay_drain_socket();
+    netplay_pump_deferred_room();
+
+    if (rpcn_session_in_room(&g_netplay.session)) {
+        netplay_refresh_room();
+        netplay_owner_pump();
+        netplay_member_pump();
+        netplay_linger_pump();
+        netplay_publish_me();
+    }
+
+    netplay_step_t step = NETPLAY_STEP_OFF;
+    if (g_netplay.state == NETPLAY_SYNCING) {
+        /* Keep announcing until the barrier releases: the announce is a plain
+         * datagram and may be lost. Paced, because this runs every millisecond
+         * while we wait: see NETPLAY_ANNOUNCE_MS. */
+        if (net_now_ms() - g_netplay.last_announce_ms >= NETPLAY_ANNOUNCE_MS)
+            netplay_send_announce();
+        netplay_report_wait();
+
+        if (lockstep_barrier_released(&g_netplay.lockstep)) {
+            netplay_seed_delay_frames();
+            g_netplay.reset_pending = true;
+            g_netplay.state         = NETPLAY_PLAYING;
+            g_netplay.frame         = 0;
+            netplay_log("barrier released; match %u seed 0x%08X - resetting the board",
+                        (unsigned)g_netplay.match_started, g_netplay.seed);
+            step = NETPLAY_STEP_RESET;
+        } else {
+            step = NETPLAY_STEP_WAIT;
+        }
+    } else if (g_netplay.state == NETPLAY_PLAYING) {
+        step = netplay_fight_step();
+    } else if (g_netplay.state == NETPLAY_WATCHING) {
+        step = netplay_watch_step();
+    }
+    /* Anything else: not in a match. The board runs normally and the keyboard
+     * drives it. */
+    netplay_publish_status();
+    return step;
 }
 
 /*
  * Called from the emu thread with the mutex held, right after a slice that ended
  * on a frame boundary. Records this frame's check for the next outgoing packet
  * and advances the netplay frame counter.
+ *
+ * `versus_result` is the game's own verdict on this frame, from the profile's
+ * versus hook (hle_hooks.h): 0 = nothing, 1 = 1P won the match, 2 = 2P won.
+ * Every board in the match reaches it on the same frame, which is what makes it
+ * safe to act on.
  */
-static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps) {
-    if (!g_netplay.enabled || g_netplay.state != NETPLAY_PLAYING) return;
+static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps, int versus_result) {
+    if (!g_netplay.enabled || !netplay_running_match()) return;
 
     uint32_t frame = g_netplay.frame;
     uint32_t check = netplay_frame_check(cpu, total_steps);
@@ -2148,6 +2798,20 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
     }
 
     g_netplay.frame = frame + 1;
+
+    if (versus_result >= 1 && versus_result <= 2 && !g_netplay.match_result_seen) {
+        uint32_t winner = (uint32_t)versus_result - 1u;
+        g_netplay.match_result_seen = true;
+        netplay_log("match %u over at frame %u: %s (%s) won", (unsigned)g_netplay.match_started, frame,
+                    netplay_member_name(g_netplay.room.fighter[winner]), winner == 0 ? "1P" : "2P");
+        if (room_after_result(&g_netplay.me, g_netplay.session.my_member_id, &g_netplay.room,
+                              g_netplay.match_started, winner)) {
+            g_netplay.me_dirty = true;
+            netplay_after_result_ready();
+        }
+        if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
+        netplay_end_match(NULL);
+    }
 }
 
 /* Called from the emu thread with the mutex held when netplay_begin_frame
@@ -2178,8 +2842,29 @@ static inline bool netplay_reset_board_now(void) {
     return true;
 }
 
+/*
+ * A watcher behind the inputs it already holds should run without pacing.
+ *
+ * A watcher is paced to 60 Hz like everybody else, but nothing waits on it: every
+ * frame it spends waiting -- a record that came late, a repair -- is a frame it
+ * stays behind the fighters for good. Over a long match that added up to seconds,
+ * and a watcher that far behind is still short of the result when the room moves
+ * on. So while the next few frames are already in hand, the run loop skips its
+ * sleep and lets the watcher catch up.
+ */
+#define NETPLAY_CATCH_UP_FRAMES 6u
+static inline bool netplay_catching_up(void) {
+    if (g_netplay.state != NETPLAY_WATCHING || g_netplay.reset_pending) return false;
+    const lockstep_t *l = &g_netplay.lockstep;
+    uint32_t n0 = l->rings[0].newest, n1 = l->rings[1].newest;
+    if (n0 == LOCKSTEP_INVALID_FRAME || n1 == LOCKSTEP_INVALID_FRAME) return false;
+    uint32_t newest = n0 < n1 ? n0 : n1;
+    return newest > g_netplay.frame + NETPLAY_CATCH_UP_FRAMES;
+}
+
+/* A session owns the board: fighting or watching. */
 static inline bool netplay_active(void) {
-    return g_netplay.enabled && g_netplay.state == NETPLAY_PLAYING;
+    return g_netplay.enabled && netplay_running_match();
 }
 
 static inline void netplay_shutdown(void) {

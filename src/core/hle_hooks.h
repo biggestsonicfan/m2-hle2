@@ -25,6 +25,13 @@
  * cut short and the thread sleeps until the next 16.67 ms tick. */
 static volatile int g_frame_done = 0;
 
+/* A versus match was just decided: 1 = the 1P side won, 2 = the 2P side, 0 =
+ * nothing. Set by the profile's versus hook -- an observe-only hook on the
+ * arcade's own "match over" path -- and taken by the emu thread at the end of
+ * the frame (netplay_end_frame), so every board in a netplay room sees a result
+ * on the same frame. Part of a board reset (emu_board_reset_state). */
+static volatile int g_versus_result = 0;
+
 /* The region the board powers up as, for games whose region is a backup-RAM
  * setting (STF's country_val: 0 Japan, 1 USA, 2 Export). A profile's hook
  * applies it where the game writes its factory default, so it holds for every

@@ -51,6 +51,94 @@ static uint64_t g_np_ui_selected    = 0;
 /* netplay_state_text lives in net/netplay.h: the MCP bridge names these
  * states too, and it is included before this window is. */
 
+/*
+ * The room: everybody in it in line order, what they are doing, and this
+ * player's own choices. The line and the sides are the owner's (net/room.h);
+ * the buttons here only change what THIS player has published.
+ */
+static inline void netplay_window_room(const netplay_status_t *st) {
+    ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit;
+    if (igBeginTable("##members", 5, tf)) {
+        igTableSetupColumnEx("#",       ImGuiTableColumnFlags_WidthFixed,  24.0f, 0);
+        igTableSetupColumnEx("Player",  ImGuiTableColumnFlags_WidthFixed, 150.0f, 0);
+        igTableSetupColumnEx("Now",     ImGuiTableColumnFlags_WidthFixed,  90.0f, 0);
+        igTableSetupColumnEx("W-L  pts", ImGuiTableColumnFlags_WidthFixed, 80.0f, 0);
+        igTableSetupColumnEx("Link",    ImGuiTableColumnFlags_WidthStretch, 0.0f, 0);
+        igTableHeadersRow();
+        for (uint32_t i = 0; i < st->member_count; i++) {
+            const netplay_member_status_t *m = &st->members[i];
+            igTableNextRow();
+            igTableSetColumnIndex(0);
+            if (m->line_pos >= 0) igText("%d", m->line_pos + 1); else igTextDisabled("-");
+            igTableSetColumnIndex(1);
+            igText("%s%s%s", m->npid, m->is_me ? " (you)" : "", m->is_owner ? " *" : "");
+            igTableSetColumnIndex(2);
+            if (m->side == 0)                             igTextColored((ImVec4){0.5f, 0.8f, 1.0f, 1.0f}, "1P");
+            else if (m->side == 1)                        igTextColored((ImVec4){1.0f, 0.6f, 0.5f, 1.0f}, "2P");
+            else if (!m->known)                           igTextDisabled("...");
+            else if (m->data.flags & ROOM_MEMBER_WATCH)   igTextDisabled("sitting out");
+            else if (m->data.entry == ROOM_ENTRY_1P)      igText("wants 1P");
+            else if (m->data.entry == ROOM_ENTRY_2P)      igText("wants 2P");
+            else if (m->data.flags & ROOM_MEMBER_READY)   igText("ready");
+            else                                          igTextDisabled("waiting");
+            igTableSetColumnIndex(3);
+            igText("%u-%u  %u", (unsigned)m->data.wins, (unsigned)(m->data.games - m->data.wins),
+                   (unsigned)m->data.points);
+            igTableSetColumnIndex(4);
+            if (m->is_me)              igTextDisabled("-");
+            else if (m->heard)         igText("reachable");
+            else if (m->addr_known)    igTextDisabled("punching...");
+            else                       igTextDisabled("no address yet");
+        }
+        igEndTable();
+    }
+    igTextDisabled("* runs the room. Two fight; the winner stays on their side and the loser goes "
+                   "to the back of the line.");
+
+    bool running = netplay_state_running(st->state) || st->state == NETPLAY_SYNCING;
+    if (running) {
+        if (igButton(st->state == NETPLAY_WATCHING ? "Stop watching" : "Leave the match"))
+            netplay_post(NETPLAY_CMD_STOP, &g_np_ui);
+        igSameLine();
+        igTextWrapped(st->state == NETPLAY_WATCHING
+            ? "Every board in the room was reset for this match; yours runs the fighters' inputs."
+            : "Every board in the room was reset for this match. Leaving calls it off.");
+    } else if (st->me.flags & ROOM_MEMBER_READY) {
+        if (igButton("Not ready")) netplay_post(NETPLAY_CMD_STOP, &g_np_ui);
+    } else {
+        igBeginDisabled(st->member_count < 2);
+        if (igButton("Ready")) netplay_post(NETPLAY_CMD_START, &g_np_ui);
+        igEndDisabled();
+        igSameLine();
+        igTextWrapped("The first match starts once every player is ready; after that the room "
+                      "keeps going on its own.");
+    }
+
+    bool watch = (st->me.flags & ROOM_MEMBER_WATCH) != 0;
+    if (igCheckbox("Sit out (watch only)", &watch)) {
+        netplay_config_t c = g_np_ui;
+        c.watch_only = watch;
+        netplay_post(NETPLAY_CMD_WATCH, &c);
+    }
+    igSameLine();
+    int entry = st->me.entry;
+    igSetNextItemWidth(140.0f);
+    if (igComboEx("Side##entry", &entry, "Either\0" "1P Entry\0" "2P Entry\0", -1)) {
+        netplay_config_t c = g_np_ui;
+        c.entry = (uint8_t)entry;
+        netplay_post(NETPLAY_CMD_ENTRY, &c);
+    }
+    if (igIsItemHovered(0))
+        igSetTooltip("Jump the line for that side of the cabinet. The first player asking for a "
+                     "side gets it when the next match starts.");
+
+    if (st->is_host && !running && st->room.phase == ROOM_PHASE_LOBBY) {
+        igSameLine();
+        if (igButton("Start now")) netplay_post(NETPLAY_CMD_FORCE_START, &g_np_ui);
+    }
+    if (igButton("Leave the room")) netplay_post(NETPLAY_CMD_LEAVE_ROOM, &g_np_ui);
+}
+
 static inline void netplay_window_draw(bool *p_open) {
     igSetNextWindowSize((ImVec2){620, 640}, ImGuiCond_FirstUseEver);
     if (!igBegin("Netplay (RPCN)", p_open, 0)) { igEnd(); return; }
@@ -79,26 +167,32 @@ static inline void netplay_window_draw(bool *p_open) {
     if (st.error[0]) igTextColored((ImVec4){1.0f, 0.45f, 0.45f, 1.0f}, "%s", st.error);
 
     if (st.state >= NETPLAY_IN_ROOM && st.state != NETPLAY_FAILED) {
-        igText("Room %llu   you are %s (P%d)", (unsigned long long)st.room_id,
-               st.is_host ? "hosting" : "the guest", st.local_player + 1);
-        igText("Peer %s at %s   %s", st.peer_npid[0] ? st.peer_npid : "(nobody yet)",
-               st.peer_addr, st.peer_heard ? "[reachable]"
-                            : st.peer_known ? "[punching - nothing heard back yet]"
-                                            : "[address unknown]");
-        /* Somebody has pressed start and is sitting at the barrier waiting for
-         * this end to do the same. Worth saying outright: from here it is
-         * otherwise indistinguishable from a peer who has merely joined. */
+        const char *role = st.local_player == 0 ? "1P" : st.local_player == 1 ? "2P"
+                         : st.local_player == 2 ? "watching" : "in line";
+        igText("Room %llu   %u of %u   you: %s%s", (unsigned long long)st.room_id,
+               st.member_count, st.max_slot, role, st.is_host ? "  (you run the room)" : "");
+        if (st.room_known) {
+            if (st.room.phase == ROOM_PHASE_MATCH)
+                igText("Match %u in progress", st.room.match);
+            else if (st.auto_start_s)
+                igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f}, "Next match in %u s", st.auto_start_s);
+            else if (st.room.match)
+                igText("Lobby - %u match%s played", st.room.match, st.room.match == 1 ? "" : "es");
+            else
+                igText("Lobby - the first match starts when every player is ready");
+        }
+        /* Somebody else is ready and this end is not. Worth saying outright: from
+         * here it is otherwise indistinguishable from somebody who merely joined. */
         if (st.peer_ready)
             igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f},
-                          "%s is ready and waiting - press Start to accept",
-                          st.peer_npid[0] ? st.peer_npid : "the peer");
+                          "Others are ready and waiting - press Ready to start");
     }
-    if (st.state == NETPLAY_PLAYING) {
-        igText("frame %u   stalls %u   session %u   seed 0x%08X",
+    if (netplay_state_running(st.state)) {
+        igText("frame %u   stalls %u   match %u   seed 0x%08X",
                st.frame, st.stalls, st.generation, st.seed);
         if (st.desync_frame != LOCKSTEP_NO_CHECK)
             igTextColored((ImVec4){1.0f, 0.35f, 0.35f, 1.0f},
-                          "DESYNC at frame %u - the two boards no longer agree",
+                          "DESYNC at frame %u - this board no longer agrees with the fighters'",
                           st.desync_frame);
     }
 
@@ -246,6 +340,13 @@ static inline void netplay_window_draw(bool *p_open) {
             igSetTooltip("How many frames of network latency are absorbed before either machine "
                          "has to stall. Higher is smoother and less responsive. 2-4 on a good "
                          "connection; raise it if the stall counter climbs.");
+        int players = (int)(g_np_ui.max_players >= 2 ? g_np_ui.max_players : 2);
+        if (igSliderIntEx("Room size", &players, 2, (int)ROOM_MAX_MEMBERS, "%d players", 0))
+            g_np_ui.max_players = (uint32_t)players;
+        if (igIsItemHovered(0))
+            igSetTooltip("How many people a room you host can hold. Two fight at a time; the "
+                         "rest wait in line and watch, and the winner stays on (the PS3 "
+                         "port's Room Match).");
         igInputText("Room password", g_np_ui.room_password, sizeof(g_np_ui.room_password), 0);
 
         igBeginDisabled(!online);
@@ -333,19 +434,7 @@ static inline void netplay_window_draw(bool *p_open) {
 
         if (in_room) {
             igSeparator();
-            if (st.state == NETPLAY_PLAYING || st.state == NETPLAY_SYNCING) {
-                if (igButton("Leave the session")) netplay_post(NETPLAY_CMD_STOP, &g_np_ui);
-                igSameLine();
-                igTextWrapped("Both boards were reset together when this started; leaving stops "
-                              "the lockstep and hands the board back to your keyboard.");
-            } else {
-                igBeginDisabled(!st.peer_known);
-                if (igButton("Start the session")) netplay_post(NETPLAY_CMD_START, &g_np_ui);
-                igEndDisabled();
-                igSameLine();
-                igTextWrapped("Both machines reset the board and play every frame from boot in "
-                              "lockstep. Either side may press this; the other follows.");
-            }
+            netplay_window_room(&st);
         }
     }
 

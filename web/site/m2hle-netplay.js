@@ -118,6 +118,7 @@ const m2hleNetplay = (() => {
     /* The small line in the bottom bar, visible with the panel closed too. */
     let pill = '';
     if (state === 'playing') pill = 'Online: playing ' + (st.room.peer || '');
+    else if (state === 'watching') pill = 'Online: watching';
     else if (state === 'waiting at the barrier') pill = 'Online: starting…';
     else if (state === 'in a room') pill = st.room.peer_heard ? 'Online: ' + st.room.peer + ' is here' : 'Online: waiting';
     else if (state === 'online') pill = 'Online';
@@ -159,7 +160,7 @@ const m2hleNetplay = (() => {
       renderLobby();
       return;
     }
-    if (state === 'in a room' || state === 'waiting at the barrier' || state === 'playing') {
+    if (state === 'in a room' || state === 'waiting at the barrier' || state === 'playing' || state === 'watching') {
       show('np-room');
       renderRoom();
       return;
@@ -277,22 +278,46 @@ const m2hleNetplay = (() => {
 
   function renderRoom() {
     const r = st.room;
+    const members = r.members || [];
     const peer = r.peer || 'your opponent';
     const playing = st.state === 'playing';
+    const watching = st.state === 'watching';
     const syncing = st.state === 'waiting at the barrier';
+    const nameOf = (side) => (members.find((m) => m.side === side) || {}).npid || '?';
     let lead;
     if (playing) lead = 'Playing ' + peer + '.';
+    else if (watching) lead = 'Watching ' + nameOf(0) + ' vs ' + nameOf(1) + '.';
     else if (syncing) lead = r.peer_heard ? 'Starting the match with ' + peer + '…' : 'Starting…';
-    else if (!r.peer_known && !r.peer_heard) lead = r.host ? 'Waiting for an opponent to join…' : 'Joining…';
-    else if (!r.peer_heard) lead = 'Connecting to ' + peer + '…';
-    else if (st.room.peer_ready) lead = peer + ' is ready to play.';
-    else lead = peer + ' joined.';
+    else if (members.length < 2) lead = r.host ? 'Waiting for players to join…' : 'Joining…';
+    else if (r.auto_start_s) lead = 'Next match in ' + r.auto_start_s + ' s.';
+    else if (r.phase === 'match') lead = 'A match is being played.';
+    else if (r.peer_ready && !r.ready) lead = 'Others are ready to play.';
+    else lead = members.length + ' in the room (up to ' + r.max + ').';
     setText('np-room-lead', lead);
 
-    $('np-start').hidden = playing || syncing || !r.peer_heard;
-    setText('np-start', st.room.peer_ready ? 'Accept' : 'Start match');
-    $('np-room-hint').hidden = playing;
-    $('np-stop').hidden = !playing && !syncing;
+    /* The line, front first: who is up, who is on which side. */
+    const list = $('np-members');
+    list.textContent = '';
+    for (const m of members) {
+      const li = document.createElement('li');
+      li.className = 'np-room' + (m.me ? ' np-me' : '');
+      const who = document.createElement('span');
+      who.className = 'np-who';
+      who.textContent = (m.line >= 0 ? (m.line + 1) + '. ' : '') + m.npid + (m.me ? ' (you)' : '');
+      const what = document.createElement('span');
+      what.className = 'np-what';
+      what.textContent = (m.side === 0 ? '1P' : m.side === 1 ? '2P'
+                         : m.watch ? 'watching' : m.ready ? 'ready' : m.heard ? 'waiting' : 'connecting…')
+                       + ' · ' + m.wins + '-' + (m.games - m.wins);
+      li.append(who, what);
+      list.append(li);
+    }
+
+    $('np-start').hidden = playing || watching || syncing || members.length < 2;
+    setText('np-start', r.ready ? 'Not ready' : 'Ready');
+    $('np-room-hint').hidden = playing || watching;
+    $('np-stop').hidden = !playing && !syncing && !watching;
+    setText('np-stop', watching ? 'Stop watching' : 'End match');
 
     const bits = [];
     if (playing || syncing) {
@@ -381,14 +406,18 @@ const m2hleNetplay = (() => {
     });
 
     $('np-create-match').addEventListener('click', () => {
-      post('host', { frame_delay: hostDelay(), room_password: $('np-private').value });
+      post('host', { frame_delay: hostDelay(), room_password: $('np-private').value,
+                     max_players: $('np-size').value });
     });
     $('np-delay').addEventListener('change', (e) => { delayChoice = e.target.value; });
     $('np-signout').addEventListener('click', signOut);
 
-    $('np-start').addEventListener('click', () => { post('start'); $('canvas').focus(); });
+    $('np-start').addEventListener('click', () => {
+      post(st && st.room.ready ? 'stop' : 'start');
+      $('canvas').focus();
+    });
     $('np-stop').addEventListener('click', () => post('stop'));
-    $('np-leave').addEventListener('click', () => { post('disconnect'); post('connect'); });
+    $('np-leave').addEventListener('click', () => post('leave'));
 
     $('np-failed-back').addEventListener('click', () => {
       const why = st ? (st.error || 'The connection failed.') : '';
@@ -442,7 +471,8 @@ const m2hleNetplay = (() => {
      * the bar still says who you are playing. Once, on the way INTO playing:
      * doing it on every poll while playing shut the panel again a quarter of a
      * second after the player opened it to end the match or leave. */
-    if (st.state === 'playing' && lastState !== 'playing' && open) toggle(false);
+    const running = st.state === 'playing' || st.state === 'watching';
+    if (running && lastState !== st.state && open) toggle(false);
     lastState = st.state;
     render();
   }
