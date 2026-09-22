@@ -67,6 +67,17 @@ typedef struct {
     scsp_lfo_t plfo, alfo;
 } scsp_slot_t;
 
+/* One MPRO step with its 25 fields unpacked. The program runs last_step of
+ * these every sample, and unpacking them from the four microcode words each
+ * time was a quarter of the whole emulator thread; they are a pure function
+ * of mpro[], so they are unpacked once per program change instead
+ * (scsp_dsp_decode) and the step computes exactly what it did. */
+typedef struct {
+    uint8_t tra, twt, twa, xsel, ysel, ira, iwt, iwa;
+    uint8_t table, mwt, mrd, ewt, ewa, adrl, frcl, sh, yrl, negb, zero, bsel;
+    uint8_t nofl, coef, masa, adreb, nxadr;
+} scsp_dsp_op_t;
+
 typedef struct {
     int16_t  coef[64];
     uint16_t madrs[32];
@@ -78,6 +89,8 @@ typedef struct {
     int16_t  exts[2];
     uint32_t dec, rbp, rbl;
     int      stopped, last_step;
+    scsp_dsp_op_t ops[128];      /* mpro[] decoded; valid while ops_ok */
+    int      ops_ok;             /* cleared by every mpro write and by reset */
 } scsp_dsp_t;
 
 typedef struct {
@@ -485,74 +498,83 @@ static void scsp_dsp_start(scsp_dsp_t *d) {
     d->last_step = i + 1;
 }
 
+static void scsp_dsp_decode(scsp_dsp_t *d) {
+    for (int st = 0; st < 128; st++) {
+        const uint16_t *p = d->mpro + st * 4;
+        scsp_dsp_op_t  *o = &d->ops[st];
+        o->tra   = (p[0] >> 8) & 0x7F;  o->twt  = (p[0] >> 7) & 1;   o->twa   = p[0] & 0x7F;
+        o->xsel  = (p[1] >> 15) & 1;    o->ysel = (p[1] >> 13) & 3;  o->ira   = (p[1] >> 6) & 0x3F;
+        o->iwt   = (p[1] >> 5) & 1;     o->iwa  = p[1] & 0x1F;
+        o->table = (p[2] >> 15) & 1;    o->mwt  = (p[2] >> 14) & 1;  o->mrd   = (p[2] >> 13) & 1;
+        o->ewt   = (p[2] >> 12) & 1;    o->ewa  = (p[2] >> 8) & 0xF; o->adrl  = (p[2] >> 7) & 1;
+        o->frcl  = (p[2] >> 6) & 1;     o->sh   = (p[2] >> 4) & 3;   o->yrl   = (p[2] >> 3) & 1;
+        o->negb  = (p[2] >> 2) & 1;     o->zero = (p[2] >> 1) & 1;   o->bsel  = p[2] & 1;
+        o->nofl  = (p[3] >> 15) & 1;    o->coef = (p[3] >> 9) & 0x3F;
+        o->masa  = (p[3] >> 2) & 0x1F;  o->adreb = (p[3] >> 1) & 1;  o->nxadr = p[3] & 1;
+    }
+    d->ops_ok = 1;
+}
+
 static void scsp_dsp_step(scsp_t *s) {
     scsp_dsp_t *d = &s->dsp;
     if (d->stopped) return;
+    if (!d->ops_ok) scsp_dsp_decode(d);
     memset(d->efreg, 0, sizeof d->efreg);
     int32_t  acc = 0, memval = 0, frc = 0, yreg = 0;
     uint32_t adrs = 0;
     for (int st = 0; st < d->last_step; st++) {
-        const uint16_t *p = d->mpro + st * 4;
-        uint32_t TRA = (p[0] >> 8) & 0x7F, TWT = (p[0] >> 7) & 1, TWA = p[0] & 0x7F;
-        uint32_t XSEL = (p[1] >> 15) & 1, YSEL = (p[1] >> 13) & 3, IRA = (p[1] >> 6) & 0x3F;
-        uint32_t IWT = (p[1] >> 5) & 1, IWA = p[1] & 0x1F;
-        uint32_t TABLE = (p[2] >> 15) & 1, MWT = (p[2] >> 14) & 1, MRD = (p[2] >> 13) & 1;
-        uint32_t EWT = (p[2] >> 12) & 1, EWA = (p[2] >> 8) & 0xF, ADRL = (p[2] >> 7) & 1;
-        uint32_t FRCL = (p[2] >> 6) & 1, SH = (p[2] >> 4) & 3, YRL = (p[2] >> 3) & 1;
-        uint32_t NEGB = (p[2] >> 2) & 1, ZERO = (p[2] >> 1) & 1, BSEL = p[2] & 1;
-        uint32_t NOFL = (p[3] >> 15) & 1, COEF = (p[3] >> 9) & 0x3F;
-        uint32_t MASA = (p[3] >> 2) & 0x1F, ADREB = (p[3] >> 1) & 1, NXADR = p[3] & 1;
+        const scsp_dsp_op_t *o = &d->ops[st];
 
         int32_t inputs;
-        if (IRA <= 0x1F)      inputs = d->mems[IRA];
-        else if (IRA <= 0x2F) inputs = d->mixs[IRA - 0x20] * 16;
-        else if (IRA <= 0x31) inputs = d->exts[IRA - 0x30] * 256;
+        if (o->ira <= 0x1F)      inputs = d->mems[o->ira];
+        else if (o->ira <= 0x2F) inputs = d->mixs[o->ira - 0x20] * 16;
+        else if (o->ira <= 0x31) inputs = d->exts[o->ira - 0x30] * 256;
         else return;
         inputs = scsp_sext(inputs, 24);
-        if (IWT) {
-            d->mems[IWA] = memval;
-            if (IRA == IWA) inputs = memval;
+        if (o->iwt) {
+            d->mems[o->iwa] = memval;
+            if (o->ira == o->iwa) inputs = memval;
         }
 
         int32_t b = 0;
-        if (!ZERO) {
-            b = BSEL ? acc : scsp_sext(d->temp[(TRA + d->dec) & 0x7F], 24);
-            if (NEGB) b = -b;
+        if (!o->zero) {
+            b = o->bsel ? acc : scsp_sext(d->temp[(o->tra + d->dec) & 0x7F], 24);
+            if (o->negb) b = -b;
         }
-        int32_t x = XSEL ? inputs : scsp_sext(d->temp[(TRA + d->dec) & 0x7F], 24);
+        int32_t x = o->xsel ? inputs : scsp_sext(d->temp[(o->tra + d->dec) & 0x7F], 24);
         int32_t y = 0;
-        if (YSEL == 0)      y = frc;
-        else if (YSEL == 1) y = d->coef[COEF] >> 3;
-        else if (YSEL == 2) y = (yreg >> 11) & 0x1FFF;
-        else                y = (yreg >> 4) & 0x0FFF;
-        if (YRL) yreg = inputs;
+        if (o->ysel == 0)      y = frc;
+        else if (o->ysel == 1) y = d->coef[o->coef] >> 3;
+        else if (o->ysel == 2) y = (yreg >> 11) & 0x1FFF;
+        else                   y = (yreg >> 4) & 0x0FFF;
+        if (o->yrl) yreg = inputs;
 
         int32_t shifted;
-        if (SH == 0)      shifted = acc < -0x800000 ? -0x800000 : acc > 0x7FFFFF ? 0x7FFFFF : acc;
-        else if (SH == 1) { int64_t v2 = (int64_t)acc * 2; shifted = v2 < -0x800000 ? -0x800000 : v2 > 0x7FFFFF ? 0x7FFFFF : (int32_t)v2; }
-        else if (SH == 2) shifted = scsp_sext((int32_t)((uint32_t)acc * 2u), 24);
-        else              shifted = scsp_sext(acc, 24);
+        if (o->sh == 0)      shifted = acc < -0x800000 ? -0x800000 : acc > 0x7FFFFF ? 0x7FFFFF : acc;
+        else if (o->sh == 1) { int64_t v2 = (int64_t)acc * 2; shifted = v2 < -0x800000 ? -0x800000 : v2 > 0x7FFFFF ? 0x7FFFFF : (int32_t)v2; }
+        else if (o->sh == 2) shifted = scsp_sext((int32_t)((uint32_t)acc * 2u), 24);
+        else                 shifted = scsp_sext(acc, 24);
 
         y = scsp_sext(y, 13);
         acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
 
-        if (TWT) d->temp[(TWA + d->dec) & 0x7F] = shifted;
-        if (FRCL) frc = SH == 3 ? (shifted & 0x0FFF) : ((shifted >> 11) & 0x1FFF);
+        if (o->twt) d->temp[(o->twa + d->dec) & 0x7F] = shifted;
+        if (o->frcl) frc = o->sh == 3 ? (shifted & 0x0FFF) : ((shifted >> 11) & 0x1FFF);
 
-        if (MRD || MWT) {
-            uint32_t addr = d->madrs[MASA];
-            if (!TABLE) addr += d->dec;
-            if (ADREB)  addr += adrs & 0x0FFF;
-            if (NXADR)  addr++;
-            addr &= TABLE ? 0xFFFFu : d->rbl - 1;
+        if (o->mrd || o->mwt) {
+            uint32_t addr = d->madrs[o->masa];
+            if (!o->table) addr += d->dec;
+            if (o->adreb)  addr += adrs & 0x0FFF;
+            if (o->nxadr)  addr++;
+            addr &= o->table ? 0xFFFFu : d->rbl - 1;
             addr += d->rbp << 12;
             addr <<= 1;
             /* MAME: the delay memory is only touched on odd steps */
-            if (MRD && (st & 1)) memval = NOFL ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
-            if (MWT && (st & 1)) scsp_ram_ww(s, addr, NOFL ? (uint16_t)(shifted >> 8) : scsp_dsp_pack(shifted));
+            if (o->mrd && (st & 1)) memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
+            if (o->mwt && (st & 1)) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : scsp_dsp_pack(shifted));
         }
-        if (ADRL) adrs = SH == 3 ? (uint32_t)((shifted >> 12) & 0xFFF) : (uint32_t)(inputs >> 16);
-        if (EWT) d->efreg[EWA] = (int16_t)(d->efreg[EWA] + (shifted >> 8));
+        if (o->adrl) adrs = o->sh == 3 ? (uint32_t)((shifted >> 12) & 0xFFF) : (uint32_t)(inputs >> 16);
+        if (o->ewt) d->efreg[o->ewa] = (int16_t)(d->efreg[o->ewa] + (shifted >> 8));
     }
     d->dec--;
     memset(d->mixs, 0, sizeof d->mixs);
@@ -705,6 +727,7 @@ static void scsp_w16(scsp_t *s, uint32_t addr, uint16_t v) {
     if (addr < 0x800) { s->dsp.madrs[(addr - 0x7C0) >> 1] = v; return; }
     if (addr < 0xC00) {
         s->dsp.mpro[(addr - 0x800) >> 1] = v;
+        s->dsp.ops_ok = 0;
         if (addr == 0xBF0) scsp_dsp_start(&s->dsp);
     }
 }

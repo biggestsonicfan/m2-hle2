@@ -107,7 +107,7 @@ jobs:
       - name: Test
         run: >
           ctest --test-dir build -C Release --output-on-failure
-          -R "^(mem_test|i960_test|cop_test|m68k_test|emu_test|net_test|heat_test)$"
+          -R "^(mem_test|i960_test|cop_test|m68k_test|emu_test|net_test|tile_test|heat_test)$"
 
       - name: Package
         shell: bash

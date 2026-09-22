@@ -236,12 +236,6 @@ static inline bool comid_is_yamp(const char *id) {
     return comid_looks_like_id(id) && strncmp(id, COMID_PREFIX_YAMP, 3) == 0;
 }
 
-/* A canonical id that is neither ours nor YAMP's: a real PSN title's space, or a
- * build that hardcodes one id for everything. Callers use it to decide to warn. */
-static inline bool comid_is_shared_space(const char *id) {
-    return comid_looks_like_id(id) && !comid_is_ours(id) && !comid_is_yamp(id);
-}
-
 /*
  * The ComId for a game key. Returns false, leaving `out` untouched, only for a
  * null or effectively empty key. `out_listed`, when given, says whether the id

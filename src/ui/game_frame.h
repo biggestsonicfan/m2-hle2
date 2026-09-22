@@ -24,17 +24,7 @@
 #include "rom_loader.h"
 #include "video_window.h"
 
-/* Host time spent in each stage, accumulated in microseconds. A frontend can
- * read and reset these to report where a frame goes; nothing else uses them. */
-typedef struct {
-    int64_t compose_us;   /* tile layers → RGBA textures */
-    int64_t scan_us;      /* this frame's 3D output → model list */
-    int64_t upload_us;    /* texture atlas + luma/colorxlat LUTs */
-    int64_t draw3d_us;    /* model decode + fill/line submission */
-    int64_t tiles_us;     /* the three tile-layer quads */
-} game_frame_times_t;
-
-static game_frame_times_t g_game_frame_times;
+#include "frame_times.h"   /* g_game_frame_times: host time per stage, per frame */
 
 /* Sub-frame interpolation factor: time since the last game frame ended,
  * normalised over one frame period. Resets when a new frame boundary lands. */
@@ -185,6 +175,7 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
     else            game_render_draw_game(video->fg_view, ox, oy, w, h);
     g_game_frame_times.draw3d_us += t3 - t2;
     g_game_frame_times.tiles_us  += (t2 - t1) + (emu_now_us() - t3);
+    g_game_frame_times.frames++;
 }
 
 #endif /* GAME_FRAME_H */

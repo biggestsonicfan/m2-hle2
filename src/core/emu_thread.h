@@ -13,12 +13,8 @@
  *   - cpu_snapshot is double-buffered (snapshot + prev_snapshot) so the UI
  *     can compute changed-since-last-frame diffs without tearing.
  *   - g_frame_done is the frame-boundary trip flag set by the per-game HLE
- *     pacing hook. Until that hook lands (Phase 6) it stays 0 and we fall back
- *     to fixed-slice timing so the CPU doesn't busy-spin.
- *
- * PHASE 5 NOTE: the 68K sound stepping (Phase 10) and the real i960 interrupt
- * delivery (Phase 11, emu_service_irq + irq_timer.h) are NOT wired here yet.
- * They slot back into the RUNNING branch when those phases land.
+ *     pacing hook. A profile without one falls back to fixed-slice timing so
+ *     the CPU doesn't busy-spin.
  */
 #ifndef EMU_THREAD_H
 #define EMU_THREAD_H
@@ -264,8 +260,6 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     s_irq_baseline_depth = cpu->frame_depth;
     hle_interrupt(cpu, h);                   /* vector to handler; ret resumes, AC/PC restored */
     s_irq_in_service = true;
-    g_irqt.deliver_count++;
-    g_irqt.deliver_by_pin[pin & 3]++;
 }
 
 /* The sound UART is ready for its next byte the moment the last one is out
@@ -291,8 +285,6 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
     s_irq_baseline_depth = ctx->cpu->frame_depth;
     hle_interrupt(ctx->cpu, q->irq_handler[3]);
     s_irq_in_service = true;
-    g_irqt.deliver_count++;
-    g_irqt.deliver_by_pin[3]++;
 }
 
 /* ---- Board timers against the i960's clock (irq_timer.h g_irqt_live) ------ */
@@ -307,7 +299,6 @@ static uint64_t s_slice_cycles0     = 0;   /* cpu->cycles when this game frame b
  * put the wait ahead of the new frame's budget, and STF then skipped half its
  * sway chains at character select, where the board runs them all. */
 static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
-    if (!g_real_irq) return;
     if (!g_irqt_live) { irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC); return; }
     i960_cycle_table_init();
     i960_cpu_t *cpu = ctx->cpu;
@@ -319,7 +310,7 @@ static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
 /* The game's frame has ended: the board would spin here until vsync, so give the
  * timers the rest of this 1/60 s before the frame that follows starts to count. */
 static inline void emu_timers_frame_edge(emu_thread_ctx_t *ctx) {
-    if (!g_real_irq || !g_irqt_live) return;
+    if (!g_irqt_live) return;
     i960_cpu_t *cpu = ctx->cpu;
     g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
@@ -428,13 +419,12 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     if (board_vblank) {
         irqt_raise(0x1u);
         g_vblank_acked = 0;     /* the homebrew's vsync-ACK ends this slice */
-        /* Mark the geo capture frame boundary, exactly as sfight/fvipers
-         * do in their HLE frame hook. Without it geo3d falls back to
-         * scanning the WHOLE capture ring (the 24K-word COP boot firmware
-         * + every accumulated frame) instead of just this frame's draws,
-         * so a homebrew object draw never isolates / renders. */
-        g_cop.geo_frame_start = g_cop.geo_frame_end;
-        g_cop.geo_frame_end   = g_cop.geo_capture_head;
+        /* Mark the geo capture frame boundary, as the profiles' frame hook
+         * does. Without it geo3d falls back to scanning the WHOLE capture
+         * ring (the 24K-word COP boot firmware + every accumulated frame)
+         * instead of just this frame's draws, so a homebrew object draw
+         * never isolates / renders. */
+        cop_geo_frame_edge();
     }
     /* Additive: advance the board timers one frame of cycles so the
      * enabled timer IRQ (bit5) expires and vectors its ISR. */

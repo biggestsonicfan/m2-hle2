@@ -63,7 +63,10 @@ static inline uint32_t zz_mask_addr (int p1) { return p1 ? 0x32240u : 0x321E0u; 
 
 /* ---- Fn_zanzou_init (0x81, PM 0x208E1) ----------------------------------- */
 static inline void sharc_zanzou_init(void) {
-    for (uint32_t k = 0; k < 0x5480u; k++) sharc_dm_set(0x32180u + k, 0);
+    /* 0x32180..0x375FF lies wholly in the plain dm[] window (above the
+     * unit-matrix cache alias, below bufferram), so this is what 0x5480
+     * sharc_dm_set(.., 0) calls come to. */
+    memset(&g_sharc.dm[0x32180u - 0x30000u], 0, 0x5480u * sizeof(uint32_t));
 }
 
 /* ---- Fn_zanzou_kill_timer_buffer (0x86, PM 0x20955) ---------------------- */

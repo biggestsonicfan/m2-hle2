@@ -110,7 +110,6 @@ typedef struct {
 static overlay_host_t g_overlay;
 
 static inline bool overlay_host_loaded(void) { return g_overlay.loaded; }
-static inline bool overlay_host_wanted(void) { return g_overlay.want; }
 
 /* ---- platform: the library, and the file's timestamp --------------------- */
 

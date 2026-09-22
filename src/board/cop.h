@@ -143,19 +143,7 @@ static inline void cop_write(uint32_t val) {
     if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
         g_cop.geo_capture_count++;
 
-    /* A variable-length command: the handler consumes words until it says it
-     * is done, pushing its answers as it goes so the i960's loop finds each
-     * one waiting where the board would have left it. */
-    if (g_cop.args_needed == COP_ARGS_STREAM) {
-        if (g_cop_tap) g_cop_tap(0x20000000u, val);
-        int before = g_sharc.reply_count;
-        bool done  = sharc_zanzou_feed(val);
-        for (int k = before; k < g_sharc.reply_count; k++)
-            if (g_cop_tap) g_cop_tap(0x30000000u, g_sharc.reply[k]);
-        if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
-        return;
-    }
-
+    /* An argument of a fixed-length command: most words are one. */
     if (g_cop.args_needed > 0) {
         if (g_cop_tap) g_cop_tap(0x20000000u, val);
         if (g_cop.args_received < COP_ARGS_MAX)
@@ -166,6 +154,19 @@ static inline void cop_write(uint32_t val) {
             g_cop.cur_cmd       = 0;
             g_cop.args_received = 0;
         }
+        return;
+    }
+
+    /* A variable-length command: the handler consumes words until it says it
+     * is done, pushing its answers as it goes so the i960's loop finds each
+     * one waiting where the board would have left it. */
+    if (g_cop.args_needed == COP_ARGS_STREAM) {
+        if (g_cop_tap) g_cop_tap(0x20000000u, val);
+        int before = g_sharc.reply_count;
+        bool done  = sharc_zanzou_feed(val);
+        if (g_cop_tap)
+            for (int k = before; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
+        if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
         return;
     }
 
@@ -184,6 +185,14 @@ static inline void cop_write(uint32_t val) {
         cop_tap_replies();
         g_cop.cur_cmd = 0;
     }
+}
+
+/* A game frame ended: the words captured since the last edge are that frame's
+ * draw commands, and the scanner reads exactly those (geo3d.h). The profile's
+ * frame-pace hook calls this; so does the run loop for a board_vblank homebrew. */
+static inline void cop_geo_frame_edge(void) {
+    g_cop.geo_frame_start = g_cop.geo_frame_end;
+    g_cop.geo_frame_end   = g_cop.geo_capture_head;
 }
 
 /* Called for every read from the COPROGRAM region. */
@@ -207,7 +216,6 @@ static inline void cop_reset(void) {
     memset(&g_sharc, 0, sizeof(g_sharc));
     memset(&g_geo_win, 0, sizeof(g_geo_win));
     sharc_rot_identity();
-    g_sharc.matrix_dirty = true;
     /* firmware init (cpres1 PM 0x20080..): DM[0x30300..2] = 0, 1.0, 2.0 */
     g_sharc.dm[0x301] = 0x3F800000u;
     g_sharc.dm[0x302] = 0x40000000u;

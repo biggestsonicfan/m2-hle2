@@ -256,8 +256,7 @@ __attribute__((noinline)) static void emu_slice(void) {
     if (board_vblank) {
         irqt_raise(0x1u);
         g_vblank_acked = 0;
-        g_cop.geo_frame_start = g_cop.geo_frame_end;
-        g_cop.geo_frame_end   = g_cop.geo_capture_head;
+        cop_geo_frame_edge();
     }
     emu_timers_slice_begin(&ctx);
     emu_service_irq(&ctx);

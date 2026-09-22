@@ -1,10 +1,11 @@
 /*
  * watchpoint.h — memory read/write watchpoints (data breakpoints).
  *
- * wp_check_write / wp_check_read are called from the memory bus (memory.h) on
- * every access; a match sets g_wp.hit, which the emu thread polls to stop just
- * like a code breakpoint.  Used by the MCP bridge to locate the code that
- * touches a given address (e.g. texture-RAM uploads).
+ * wp_check is called from the memory bus (memory.h) on every WRITE; a match
+ * sets g_wp.hit, which the emu thread polls to stop just like a code
+ * breakpoint. Used by the MCP bridge to locate the code that touches a given
+ * address (e.g. texture-RAM uploads). A watchpoint's on_read flag is accepted
+ * and reported but not honoured: the bus's reads do not call in.
  */
 #ifndef WATCHPOINT_H
 #define WATCHPOINT_H
@@ -81,9 +82,11 @@ static inline void wp_clear_all(void) {
  * Records the FIRST match per slice; the emu thread clears g_wp.hit after stop. */
 static inline void wp_check(uint32_t addr, uint32_t val, bool is_write, uint32_t ip) {
     if (g_wp.count == 0 || g_wp.hit) return;
-    for (int i = 0; i < WP_MAX; i++) {
+    for (int i = 0, seen = 0; i < WP_MAX && seen < g_wp.count; i++) {
         const watchpoint_t *w = &g_wp.list[i];
-        if (!w->active || !w->enabled) continue;
+        if (!w->active) continue;
+        seen++;
+        if (!w->enabled) continue;
         if (addr < w->lo || addr >= w->hi) continue;
         if (is_write ? !w->on_write : !w->on_read) continue;
         g_wp.hit = 1;
