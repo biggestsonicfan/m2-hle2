@@ -33,8 +33,18 @@
  *
  * ── ROLES ──────────────────────────────────────────────────────────────────
  *
- * This end joins a room a PS3 created and plays as a room MEMBER. The owner's
- * part (the phase machine, choosing the fighters, the seed) runs on the PS3.
+ * Either end of a room. As a MEMBER this end joins a room a PS3 created and
+ * follows the phase the owner writes. As the OWNER (ps3_owner_pump) it creates
+ * the room the way a PS3 does and runs the owner's half too: the phase machine
+ * (np_session_update_room_phase 0xBF258), choosing the fighters from the
+ * waiting line (np_session_build_fight_entries 0xBEBD0), keeping each fighter's
+ * entrant data, the seed and match flags (np_session_seed_match 0xBD7B8), and
+ * relaying messages between members (np_rudp_dispatch_message 0xB7504). The
+ * order of room writes was checked against an RPCS3 log of a PS3 owning one.
+ *
+ * A member not chosen to fight waits in the room; unlike a PS3 it does not
+ * watch the match, and takes the new order in line from what the fighters
+ * publish after it.
  *
  * ── THE ROOM (np_session_*) ────────────────────────────────────────────────
  *
@@ -42,9 +52,13 @@
  *   0x00 u32 seed   0x04 u8 room mode   0x05 u8 match flags   0x08 8 rule bytes
  *   0x10 u32 PHASE  0x14 u32 fighter count   0x18 u16[2] fighters (1P, 2P)
  *   0x1C u32 max round trip (ms)   0x20 / 0x84 fighter slots (u32 flags + 96 B)
+ * The match flags change the lockstep (SyncIo_Init_rings 0x6E67C): 0x40 = the
+ * room holds more than the two fighters, 0x80 = a fighter has no direct link
+ * to the other, whose inputs then go through the owner.
  * Member internal attribute 0x59, 0x20 bytes, each member's own:
  *   0x00 u32 flags: bit 31 ready, 30 in the match, 29 line rotated after it
  *   0x04 u32 battle points (0xFFFFFFFF: none yet) ... 0x1C u8 entry request
+ *   0x1D (a pad byte; ours, PS3_ME_NO_RESULT: we set bit 29 without a result)
  * The member's teamId is its place in the waiting line (0xFF when new).
  *
  * The phases, as a member sees them (captured):
@@ -98,6 +112,30 @@
 #define PS3_MFLAG_READY      0x80000000u
 #define PS3_MFLAG_IN_MATCH   0x40000000u
 #define PS3_MFLAG_ROTATED    0x20000000u
+/* Ours, in the member attribute's first pad byte after the entry request,
+ * which a PS3 leaves 0: this member marked itself done (bit 29) without
+ * seeing a result, so its place and entry say nothing about who won. */
+#define PS3_ME_NO_RESULT     0x1Du
+
+/* Room blob byte 5, the match flags (np_session_seed_match). */
+#define PS3_MATCH_SPECTATORS 0x40u
+#define PS3_MATCH_RELAY      0x80u
+/* A fighter slot's flags word (blob +0x20 / +0x84). */
+#define PS3_SLOT_FILLED      0x80000000u
+#define PS3_SLOT_NO_LINK     0x40000000u
+
+/* Room flags the owner sets and clears (SetRoomDataInternal's flagFilter). */
+#define PS3_ROOM_CLOSED_HIDDEN 0x50000000u
+
+/* The owner's clocks. The PS3 counts frames: 1800 (0x708, vtable+0x4C) in the
+ * lobby, and 300 once three are in a Room Match (Lobby_ReadyCountdownFrames). */
+#define PS3_LOBBY_US         30000000u
+#define PS3_LOBBY_CROWD_US    5000000u
+#define PS3_PREPARE_US       30000000u   /* ours: a fighter that never gets ready */
+#define PS3_LINK_WAIT_US      5000000u   /* ours: before owning up to no link */
+#define PS3_REWRITE_US        3000000u   /* ours: a room write the server never echoed */
+#define PS3_MATCH_MAX_US    900000000u   /* ours: a match nobody reported the end of */
+#define PS3_NO_RESULT_US      3000000u   /* ours: before owning up to no result */
 
 enum { PS3_MSG_SYNCIO = 0, PS3_MSG_SYNCIO_TCP = 1, PS3_MSG_UPDATE_SETTING = 2,
        PS3_MSG_SYNC_START = 3, PS3_MSG_RESPONSE_SYNC_START = 4 };
@@ -145,6 +183,8 @@ typedef struct {
     int32_t  sync_timeout;   /* +0xC0 */
     int32_t  resend_ss;      /* +0xC4 */
     bool     ss_echoed;      /* ours, sent again on hearing theirs (not the PS3's) */
+    bool     spectators;     /* room match flag 0x40 (session 0x400000) */
+    bool     relay;          /* room match flag 0x80 (session 0x800000) */
 } ps3_sio_t;
 
 struct ps3_link_s;
@@ -174,6 +214,7 @@ typedef struct ps3_link_s {
     uint32_t fighter_count;
     uint16_t fighters[2];
     uint32_t room_rtt_ms;
+    uint8_t  match_flags;      /* blob +0x05 */
 
     /* Us. */
     uint8_t  me[PS3_MEMBER_BIN_SIZE];
@@ -183,11 +224,28 @@ typedef struct ps3_link_s {
     bool     entrant_sent;
     uint64_t results_since_us;
     bool     results_cleared;
+    bool     rotated;          /* our place in line is taken for this match */
+    uint64_t seen_since_us;    /* when the room's phase last changed, as we read it */
+
+    /* The owner's half (ps3_owner_pump), when this end owns the room. `blob` is
+     * the room as we last wrote it; the phase machine steps only once the
+     * server has echoed that write back, as a PS3 owner's does. */
+    bool     hosting;
+    uint8_t  blob[PS3_ROOM_BIN_SIZE];
+    uint32_t max_slot;
+    uint64_t phase_since_us;
+    uint64_t lobby_until_us;
+    uint64_t last_write_us;
+    uint32_t write_filter, write_attr;   /* the flags that went with it */
+    uint32_t rewrites;         /* times the last write went again unechoed */
+    bool     crowd;            /* the lobby countdown was cut short for three */
+    bool     own_entrant;      /* our own fighter slot is filled */
+    bool     match_seen;       /* we fought, and our board's match has begun */
 
     /* The match on our board. */
     bool     match;            /* between phase 3 and the end of the match */
     bool     need_reset;       /* the board was not in attract: reboot it first */
-    bool     owner_gone;       /* the room's owner left: leave too (we cannot host one) */
+    bool     owner_gone;       /* the room's owner left a room we joined: leave too */
     uint8_t  rules_blob[4];    /* room blob +0x09..+0x0C, what the rules came from */
     uint16_t last_result;      /* 1 = 1P won, 2 = 2P won, 0 = none yet */
     bool     frame_live;       /* inputs for `sio.play` were applied this frame */
@@ -374,7 +432,23 @@ static inline void ps3_sio_start(ps3_link_t *L, uint32_t side) {
     S->small_every   = 1;
     S->holdoff_reset = 10;
     S->big_every     = 60;
-    S->delay = ps3_clamp_delay(ps3_delay_from_ping_ms(L->room_rtt_ms));
+    S->relay      = (L->match_flags & PS3_MATCH_RELAY) != 0;
+    S->spectators = (L->match_flags & PS3_MATCH_SPECTATORS) != 0;
+    if (S->relay) {
+        /* Inputs go round through the owner: a packet every 4th frame, and
+         * the delay stays at its initial 10. */
+        S->small_every = 4;
+        S->delay = 10;
+    } else {
+        S->delay = ps3_clamp_delay(ps3_delay_from_ping_ms(L->room_rtt_ms));
+        /* Somebody is watching: every 2nd frame to the other fighter, every
+         * 12th straight to the watchers, and one frame more of delay. */
+        if (S->spectators) {
+            S->small_every = 2;
+            S->big_every   = 12;
+            S->delay       = S->delay < 9 ? S->delay + 1 : 10;
+        }
+    }
     S->init_delay = S->delay;
     ps3_sio_reset_counters(S);
 }
@@ -466,30 +540,80 @@ static inline void ps3_send_response(ps3_link_t *L, uint16_t via, uint16_t targe
 /* np_session_send_entrant_data: our 100 bytes, to the owner. A PS3 fighter sends
  * its own settings block here; ours is all zero, which is what the capture
  * shows a fresh PS3 profile sending too. */
-static inline void ps3_send_entrant(ps3_link_t *L) {
+static inline void ps3_send_entrant(ps3_link_t *L, bool no_link) {
     uint8_t m[7 + PS3_ENTRANT_SIZE];
     memset(m, 0, sizeof(m));
     m[0] = PS3_MSG_UPDATE_SETTING;
     m[6] = (uint8_t)L->my_side;
+    if (no_link) m[7] |= 0x40;   /* becomes the slot's PS3_SLOT_NO_LINK */
     ps3_send_ch1(L, m, sizeof(m), L->session->owner_id);
 }
 
-/* Session_SendSyncIo_or_Spectator: the per-frame packet, straight to the other
- * fighter on channel 2, latency-critical (write flag 8). */
+/* The other fighter can be reached directly (FUN_000b6450 tests each queued
+ * peer's RUDP contexts). Otherwise the entrant data says so, and the owner
+ * puts the match in relay mode. */
+static inline bool ps3_linked_to_fighters(const ps3_link_t *L) {
+    for (uint32_t k = 0; k < L->fighter_count && k < 2; k++) {
+        if (L->fighters[k] == L->session->my_member_id) continue;
+        const ps3_peer_t *p = NULL;
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS && !p; i++)
+            if (L->peers[i].used && L->peers[i].member_id == L->fighters[k]) p = &L->peers[i];
+        if (!p || !p->rudp_up || !rudp_all_open(&p->rudp)) return false;
+    }
+    return true;
+}
+
+/* np_session_entry_position (0xB8D58): 1 for 1P, 2 for 2P, 0 for anyone else. */
+static inline uint32_t ps3_entry_position(const ps3_link_t *L, uint16_t member_id) {
+    for (uint32_t k = 0; k < L->fighter_count && k < 2; k++)
+        if (L->fighters[k] == member_id) return k + 1u;
+    return 0;
+}
+
+/* Session_SendSyncIo_or_Spectator -> FUN_000b871c: the per-frame packet,
+ * straight to the other fighter on channel 2, latency-critical (write flag 8).
+ * Only a plain two-player room names the sender after the packet. In relay
+ * mode a member sends it to the owner instead, flagged 0x100 for passing on. */
 static inline void ps3_send_small(ps3_link_t *L, const uint8_t pkt[16]) {
+    const ps3_sio_t *S = &L->sio;
     uint8_t m[6 + 3 + 16 + 4];
     memset(m, 0, sizeof(m));
     m[0] = PS3_MSG_SYNCIO;
-    m[6] = (uint8_t)(L->sio.side + 1u);
+    m[6] = (uint8_t)(S->side + 1u);
     ps3_put16(m + 7, 16);
     memcpy(m + 9, pkt, 16);
-    ps3_put16(m + 25, L->session->my_member_id);
+    ps3_put16(m + 25, (S->spectators || S->relay) ? 0 : L->session->my_member_id);
     ps3_put16(m + 27, 0);
     uint64_t now = net_now_ms();
+    if (S->relay && !ps3_is_owner(L)) {
+        ps3_put32(m + 2, 0x100u);
+        ps3_peer_t *owner = ps3_peer_by_id(L, L->session->owner_id);
+        if (owner && owner->rudp_up) rudp_write(&owner->rudp, 2, m, sizeof(m), false, now);
+        return;
+    }
     for (uint32_t k = 0; k < L->fighter_count && k < 2; k++) {
         if (L->fighters[k] == L->session->my_member_id) continue;
         ps3_peer_t *p = ps3_peer_by_id(L, L->fighters[k]);
         if (p && p->rudp_up) rudp_write(&p->rudp, 2, m, sizeof(m), true, now);
+    }
+}
+
+/* Session_SendSyncIo_or_Spectator(.., 1) -> FUN_000b7274: with somebody
+ * watching, every 12th frame's 60-frame packet also goes straight to each
+ * member who is not fighting, on channel 2. Not in relay mode. */
+static inline void ps3_send_watchers(ps3_link_t *L, const uint8_t pkt[68]) {
+    if (L->sio.relay) return;
+    uint8_t m[6 + 3 + 68 + 4];
+    memset(m, 0, sizeof(m));
+    m[0] = PS3_MSG_SYNCIO;
+    m[6] = (uint8_t)(L->sio.side + 1u);
+    ps3_put16(m + 7, 68);
+    memcpy(m + 9, pkt, 68);
+    uint64_t now = net_now_ms();
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        ps3_peer_t *p = &L->peers[i];
+        if (!p->used || !p->rudp_up || ps3_entry_position(L, p->member_id)) continue;
+        rudp_write(&p->rudp, 2, m, sizeof(m), false, now);
     }
 }
 
@@ -561,15 +685,17 @@ static inline void ps3_sio_sample(ps3_link_t *L, uint8_t local) {
             uint32_t i = (uint32_t)(f - k) & (PS3_RING - 1);
             pkt[8 + k] = (uint8_t)S->ring_input[S->side][par][i];
         }
-        /* Only 1P sets the delay, from its round trip to 2P. */
-        if (S->side == 0) {
+        /* Only 1P sets the delay, from its round trip to 2P, and not when the
+         * inputs go round through the owner. */
+        if (S->side == 0 && !S->relay) {
             ps3_peer_t *other = NULL;
             for (uint32_t k = 0; k < 2 && !other; k++)
                 if (L->fighters[k] != L->session->my_member_id) other = ps3_peer_by_id(L, L->fighters[k]);
             rpcs3_sig_peer_t *sp = other ? rpcs3_sig_find(&L->sig, other->npid) : NULL;
             uint32_t rtt_us = rpcs3_sig_rtt_us(sp);
             if (rtt_us) {
-                int32_t d = ps3_clamp_delay(ps3_delay_from_ping_ms(rtt_us / 1000u));
+                int32_t d = ps3_delay_from_ping_ms(rtt_us / 1000u) + (S->spectators ? 1 : 0);
+                d = ps3_clamp_delay(d);
                 if (d != S->delay && d > 0) {
                     S->delay = d;
                     pkt[5] = (uint8_t)(0x80u | ((uint32_t)(d & 0xF) << 3));
@@ -577,6 +703,7 @@ static inline void ps3_sio_sample(ps3_link_t *L, uint8_t local) {
             }
         }
         if (f % 60 == 0) ps3_send_big(L, pkt);
+        if (S->big_every < 60) ps3_send_watchers(L, pkt);
     }
     S->sample = f + 1;
 }
@@ -661,6 +788,16 @@ static inline void ps3_on_message(ps3_link_t *L, ps3_peer_t *from, uint16_t vpor
     (void)vport;
     if (len < 6) return;
     ps3_sio_t *S = &L->sio;
+    bool owner = ps3_is_owner(L);
+    uint64_t now = net_now_ms();
+    /* np_rudp_dispatch_message: the owner passes a broadcast on, as it came,
+     * to every other member on channel 1, then reads it itself. */
+    if (owner && m[1] == 0xFF) {
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+            ps3_peer_t *p = &L->peers[i];
+            if (p->used && p->rudp_up && p != from) rudp_write(&p->rudp, 1, m, len, false, now);
+        }
+    }
     switch (m[0]) {
         case PS3_MSG_SYNCIO:
         case PS3_MSG_SYNCIO_TCP: {
@@ -668,6 +805,16 @@ static inline void ps3_on_message(ps3_link_t *L, ps3_peer_t *from, uint16_t vpor
             uint32_t n = ps3_be16(m + 7);
             if (9 + n > len) return;
             ps3_sio_on_input(L, m + 9, n);
+            /* Relay mode: a fighter's inputs reach the other fighter through
+             * the owner (case 0, header flag 0x100). */
+            if (owner && m[0] == PS3_MSG_SYNCIO && (ps3_be32(m + 2) & 0x100u)) {
+                for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+                    ps3_peer_t *p = &L->peers[i];
+                    if (!p->used || !p->rudp_up || p == from) continue;
+                    uint32_t pos = ps3_entry_position(L, p->member_id);
+                    if (pos && pos != m[6]) rudp_write(&p->rudp, 2, m, len, true, now);
+                }
+            }
             break;
         }
         case PS3_MSG_SYNC_START: {
@@ -702,7 +849,12 @@ static inline void ps3_on_message(ps3_link_t *L, ps3_peer_t *from, uint16_t vpor
         }
         case PS3_MSG_RESPONSE_SYNC_START: {
             if (len < 8) return;
-            if (ps3_be16(m + 6) != L->session->my_member_id) return;
+            if (ps3_be16(m + 6) != L->session->my_member_id) {
+                /* An answer to somebody else's SyncStart: the owner hands it on. */
+                ps3_peer_t *to = owner ? ps3_peer_by_id(L, ps3_be16(m + 6)) : NULL;
+                if (to && to->rudp_up) rudp_write(&to->rudp, 1, m, len, false, now);
+                return;
+            }
             /* SyncIo_OnResponseSyncStart_evt9 */
             if (S->resp_done) return;
             if (++S->resp_count >= S->nplayers - 1u) {
@@ -712,7 +864,20 @@ static inline void ps3_on_message(ps3_link_t *L, ps3_peer_t *from, uint16_t vpor
             }
             break;
         }
-        case PS3_MSG_UPDATE_SETTING:
+        case PS3_MSG_UPDATE_SETTING: {
+            /* A fighter's entrant data, kept by the owner in that side's slot
+             * of the room, whose first word becomes the slot's flags. */
+            if (!owner || !L->hosting || len < 7 + PS3_ENTRANT_SIZE || m[6] > 1) return;
+            /* Only from the fighter chosen for that side, while fighters are
+             * being prepared: anything else would fill a slot for somebody. */
+            if (ps3_be32(L->blob + 0x10) != PS3_PHASE_PREPARING
+                || ps3_be16(L->blob + 0x18 + 2u * m[6]) != from->member_id) return;
+            uint8_t *slot = L->blob + 0x20 + (uint32_t)m[6] * PS3_ENTRANT_SIZE;
+            memcpy(slot, m + 7, PS3_ENTRANT_SIZE);
+            ps3_put32(slot, ps3_be32(slot) | PS3_SLOT_FILLED);
+            ps3_note(L, "PS3: %s's entrant data for %s", from->npid, m[6] ? "2P" : "1P");
+            break;
+        }
         default:
             break;
     }
@@ -768,6 +933,7 @@ static inline void ps3_build_rules(const uint8_t *blob, uint8_t out[5]) {
 /* The board is taken for a match (NetMatch_StateMachine, NetGameMode_Set(2)). */
 static inline void ps3_match_begin(ps3_link_t *L) {
     L->match = true;
+    L->match_seen = true;
     L->last_result = 0;
     L->frame_live = false;
     L->stalled_frames = 0;
@@ -776,6 +942,7 @@ static inline void ps3_match_begin(ps3_link_t *L) {
     memcpy(L->rules_blob, blob + 9, 4);
     ps3_build_rules(blob, g_xplay_rules);
     g_xplay_seed          = L->seed;
+    g_xplay_spectators    = L->sio.spectators ? 1 : 0;
     g_xplay_ready         = 0;
     g_xplay_rules_pending = 1;
     /* FUN_000ac554: a board that is not in attract (ADV_INT..INFO_DSP) is
@@ -801,23 +968,113 @@ static inline void ps3_match_end(ps3_link_t *L, const char *why) {
     g_xplay_match   = 0;
     g_xplay_barrier = 0;
     g_xplay_ready   = 0;
+    g_xplay_spectators = 0;
     g_xplay_rules_pending = 0;
     ps3_sio_teardown(&L->sio);
     L->sio.started = false;
     ps3_note(L, "PS3: match over (%s)", why);
 }
 
-/* np_session_rotate_queue_after_match, for us: the winner goes to the front of
- * the line and the loser to the back, and everyone publishes their own place. */
-static inline void ps3_after_result(ps3_link_t *L) {
-    if (L->last_result == 0 || L->my_side < 0) return;
-    bool won = (uint32_t)(L->last_result - 1u) == (uint32_t)L->my_side;
-    uint32_t members = 1u + rpcn_session_peer_count(L->session);
-    L->team = won ? 1u : (uint8_t)members;
+/* A member's flags word, ours or as another member last published it. */
+static inline uint32_t ps3_member_flags(const ps3_link_t *L, uint16_t member_id) {
+    if (member_id == L->session->my_member_id) return ps3_be32(L->me);
+    const rpcn_peer_t *p = rpcn_session_peer(L->session, member_id);
+    return (p && p->bin_len >= 4) ? ps3_be32(p->bin) : 0;
+}
+
+/* One member's place in a sort: the PS3 sorts u32 keys built from teamId and
+ * memberId, ascending (FUN_0025e878). */
+typedef struct { uint32_t key; uint16_t id; uint8_t entry; } ps3_rank_t;
+
+static inline void ps3_rank_sort(ps3_rank_t *r, uint32_t n) {
+    for (uint32_t a = 1; a < n; a++)
+        for (uint32_t b = a; b > 0 && r[b - 1].key > r[b].key; b--) {
+            ps3_rank_t t = r[b]; r[b] = r[b - 1]; r[b - 1] = t;
+        }
+}
+
+/* Everyone in the room, keyed (teamId << 16) | memberId: the waiting line. */
+static inline uint32_t ps3_rank_members(const ps3_link_t *L, ps3_rank_t *r) {
+    const rpcn_session_t *s = L->session;
+    uint32_t n = 0;
+    r[n].id = s->my_member_id;
+    r[n].key = ((uint32_t)L->team << 16) | s->my_member_id;
+    r[n].entry = L->me[0x1C];
+    n++;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        const rpcn_peer_t *p = &s->peers[i];
+        if (!p->used) continue;
+        r[n].id = p->member_id;
+        r[n].key = ((uint32_t)p->team_id << 16) | p->member_id;
+        r[n].entry = p->bin_len > 0x1C ? p->bin[0x1C] : 0;
+        n++;
+    }
+    return n;
+}
+
+/*
+ * np_session_rotate_queue_after_match (0xBE788), run by every member of a Room
+ * Match: `win` is the queue position (1 or 2) of the side that won. The winner
+ * goes to the front and asks for the same side again; the loser goes to the
+ * back and asks for nothing; everyone else keeps their order. Each member then
+ * publishes only its own place (teamId) and bit 29.
+ */
+static inline void ps3_rotate(ps3_link_t *L, uint32_t win) {
+    if (L->rotated) return;
+    L->rotated = true;
+    L->me[PS3_ME_NO_RESULT] = win ? 0 : 1;
+    const rpcn_session_t *s = L->session;
+    if (s->room_bin_len > 4 && s->room_bin[4] == 1 && win) {
+        ps3_rank_t r[RPCN_MAX_PEERS + 1];
+        uint32_t n = ps3_rank_members(L, r);
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t pos = ps3_entry_position(L, r[i].id);
+            if (!pos) continue;
+            bool mine = r[i].id == s->my_member_id;
+            if (pos == win) {
+                r[i].key = r[i].id;
+                if (mine) L->me[0x1C] = (uint8_t)pos;
+            } else {
+                r[i].key |= 0x80000000u;
+                if (mine) L->me[0x1C] = 0;
+            }
+        }
+        ps3_rank_sort(r, n);
+        for (uint32_t i = 0; i < n; i++)
+            if (r[i].id == s->my_member_id) L->team = (uint8_t)(i + 1u);
+        ps3_note(L, "PS3: %s won; our place in line is %u", win == 1 ? "1P" : "2P", (unsigned)L->team);
+    }
     ps3_set_flags(L, ps3_be32(L->me) | PS3_MFLAG_ROTATED);
-    /* The results screen runs from here, whichever came first: the PS3's
-     * result can move the room to phase 4 before our board gets here. */
+}
+
+/* Which side won, from what the fighters published after it: the winner is
+ * at the front of the line (teamId 1) asking for its own side again, the
+ * loser behind it asking for nothing. For a member whose board did not see
+ * the result (it is not fighting, or its lockstep gave out). A fighter of
+ * ours that saw no result marks it (PS3_ME_NO_RESULT) and is skipped: a
+ * winner that stays on still has teamId 1 and its side from the last match,
+ * the very shape of a winner. A PS3 fighter never sets the mark, so a PS3
+ * winner that stays on and then times out is still read that way; nothing
+ * on our side can tell. 0 = not known. */
+static inline uint32_t ps3_published_winner(const ps3_link_t *L) {
+    for (int pass = 0; pass < 2; pass++)
+        for (uint32_t k = 0; k < L->fighter_count && k < 2; k++) {
+            const rpcn_peer_t *p = rpcn_session_peer(L->session, L->fighters[k]);
+            if (!p || p->bin_len <= PS3_ME_NO_RESULT || !(ps3_be32(p->bin) & PS3_MFLAG_ROTATED)) continue;
+            if (p->bin[PS3_ME_NO_RESULT]) continue;
+            if (pass == 0 && p->team_id == 1 && p->bin[0x1C] == k + 1u) return k + 1u;
+            if (pass == 1 && p->team_id != 1 && p->bin[0x1C] == 0) return 2u - k;
+        }
+    return 0;
+}
+
+/* Our board's match is over: take our place in line, and the results screen
+ * runs from here, whichever came first: the PS3's result can move the room to
+ * phase 4 before our board gets here. */
+static inline void ps3_after_result(ps3_link_t *L) {
     L->results_since_us = net_now_us();
+    uint32_t win = L->last_result ? L->last_result : ps3_published_winner(L);
+    if (win) ps3_rotate(L, win);
 }
 
 static inline void ps3_read_room(ps3_link_t *L) {
@@ -828,13 +1085,15 @@ static inline void ps3_read_room(ps3_link_t *L) {
     const uint8_t *b = s->room_bin;
     uint32_t phase = ps3_be32(b + 0x10);
     L->seed          = ps3_be32(b + 0x00);
+    L->match_flags   = b[0x05];
     L->fighter_count = ps3_be32(b + 0x14);
     L->fighters[0]   = ps3_be16(b + 0x18);
     L->fighters[1]   = ps3_be16(b + 0x1A);
     L->room_rtt_ms   = ps3_be32(b + 0x1C);
     if (!L->room_known || phase != L->phase) {
-        ps3_note(L, "PS3: room phase %u (fighters %u: %u, %u; seed %08X; rtt %u ms)", (unsigned)phase,
-                 (unsigned)L->fighter_count, L->fighters[0], L->fighters[1], L->seed, L->room_rtt_ms);
+        ps3_note(L, "PS3: room phase %u (fighters %u: %u, %u; seed %08X; rtt %u ms; flags %02X)", (unsigned)phase,
+                 (unsigned)L->fighter_count, L->fighters[0], L->fighters[1], L->seed, L->room_rtt_ms,
+                 L->match_flags);
     }
     uint32_t was = L->room_known ? L->phase : 0xFFFFFFFFu;
     L->room_known = true;
@@ -845,6 +1104,7 @@ static inline void ps3_read_room(ps3_link_t *L) {
         if (L->fighters[k] == s->my_member_id) L->my_side = (int32_t)k;
 
     if (phase == was) return;
+    L->seen_since_us = net_now_us();
     /* The owner moved on without us finishing: the PS3 gave up on the match
      * (its lockstep timed out, or somebody left). */
     if (L->match && phase != PS3_PHASE_MATCH) {
@@ -857,13 +1117,21 @@ static inline void ps3_read_room(ps3_link_t *L) {
     switch (phase) {
         case PS3_PHASE_LOBBY:
             L->entrant_sent = false;
+            L->rotated = false;
             ps3_set_flags(L, 0);
             break;
+        case PS3_PHASE_CHOOSING:
         case PS3_PHASE_PREPARING:
             L->entrant_sent = false;
+            L->rotated = false;
+            L->match_seen = false;
             break;
         case PS3_PHASE_MATCH:
             if (L->my_side >= 0 && !L->match) ps3_match_begin(L);
+            /* Published whether or not the flags below change: they may
+             * already read IN_MATCH | READY | ROTATED if the last match's
+             * were never cleared. */
+            if (L->me[PS3_ME_NO_RESULT]) { L->me[PS3_ME_NO_RESULT] = 0; L->me_dirty = true; }
             ps3_set_flags(L, ps3_be32(L->me) | PS3_MFLAG_IN_MATCH | PS3_MFLAG_READY);
             break;
         case PS3_PHASE_RESULTS:
@@ -875,30 +1143,298 @@ static inline void ps3_read_room(ps3_link_t *L) {
     }
 }
 
+/* ---- The owner ----------------------------------------------------------- */
+
+static inline void ps3_owner_write(ps3_link_t *L, uint32_t flag_filter, uint32_t flag_attr, uint64_t now_us) {
+    rpcn_session_set_room_state_flags(L->session, flag_filter, flag_attr, L->blob, PS3_ROOM_BIN_SIZE);
+    L->last_write_us = now_us;
+    L->write_filter  = flag_filter;
+    L->write_attr    = flag_attr;
+}
+
+/* A new write: the resend clock starts again. */
+static inline void ps3_owner_write_new(ps3_link_t *L, uint32_t flag_filter, uint32_t flag_attr, uint64_t now_us) {
+    L->rewrites = 0;
+    ps3_owner_write(L, flag_filter, flag_attr, now_us);
+}
+
+static inline void ps3_owner_set_phase(ps3_link_t *L, uint32_t phase, uint32_t flag_filter, uint32_t flag_attr,
+                                       uint64_t now_us) {
+    ps3_put32(L->blob + 0x10, phase);
+    L->phase_since_us = now_us;
+    ps3_owner_write_new(L, flag_filter, flag_attr, now_us);
+}
+
+/* Back to the lobby with nobody chosen, and the room open again (phase 1 or 2
+ * failing in a Room Match). */
+static inline void ps3_owner_to_lobby(ps3_link_t *L, const char *why, uint64_t now_us) {
+    ps3_note(L, "PS3: back to the lobby (%s)", why);
+    ps3_put32(L->blob + 0x14, 0);
+    memset(L->blob + 0x20, 0, 2 * PS3_ENTRANT_SIZE);
+    L->lobby_until_us = now_us + PS3_LOBBY_US;
+    ps3_owner_set_phase(L, PS3_PHASE_LOBBY, PS3_ROOM_CLOSED_HIDDEN, 0, now_us);
+}
+
+/*
+ * np_session_build_fight_entries (0xBEBD0): the two fighters, from the waiting
+ * line. The first member in line who asked for 1P gets it and the first who
+ * asked for 2P gets that; the rest are taken in line order to fill whichever
+ * side is empty. Fighters go to blob +0x18 in side order and the two entrant
+ * slots are cleared. False if the room cannot field two.
+ */
+static inline bool ps3_owner_choose(ps3_link_t *L) {
+    ps3_rank_t r[RPCN_MAX_PEERS + 1];
+    uint32_t n = ps3_rank_members(L, r);
+    ps3_rank_sort(r, n);
+    uint32_t n1 = 0, n2 = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t cls;
+        if      (r[i].entry == 1 && n1 < 1) { n1++; cls = 0; }
+        else if (r[i].entry == 2 && n2 < 1) { n2++; cls = 0x04000000u; }
+        else if (r[i].entry == 1 || r[i].entry == 2) cls = 0x40000000u;
+        else                                          cls = 0x80000000u;
+        r[i].key = cls | (r[i].key & 0xFFFFFFu);
+    }
+    ps3_rank_sort(r, n);
+    uint32_t c = n < 2 ? n : 2;
+    for (uint32_t i = 0; i < c; i++)
+        if (r[i].key & 0xF0000000u) r[i].key = (r[i].key & 0xFFFFFFu) | 0x02000000u;
+    ps3_rank_sort(r, c);
+    ps3_put32(L->blob + 0x14, c);
+    ps3_put16(L->blob + 0x18, c > 0 ? r[0].id : 0);
+    ps3_put16(L->blob + 0x1A, c > 1 ? r[1].id : 0);
+    memset(L->blob + 0x20, 0, 2 * PS3_ENTRANT_SIZE);
+    return c >= 2;
+}
+
+/* The round trip to a member, in ms, as signaling measures it (0 = unknown). */
+static inline uint32_t ps3_rtt_ms(ps3_link_t *L, uint16_t member_id) {
+    ps3_peer_t *p = ps3_peer_by_id(L, member_id);
+    rpcs3_sig_peer_t *sp = p ? rpcs3_sig_find(&L->sig, p->npid) : NULL;
+    return rpcs3_sig_rtt_us(sp) / 1000u;
+}
+
+/*
+ * The owner's half of np_session_update_room_phase (0xBF258), once a pump. As
+ * on the PS3, a step is taken only once the server has echoed the last write
+ * (the owner compares its phase with the room's), so there is one write in
+ * flight at a time. The sequence, as a PS3 owner writes it:
+ *   0 lobby     until two are in (a room of two) or the countdown runs out
+ *   1 choosing  room closed and hidden; pick the fighters
+ *   2 preparing the fighters send their entrant data and set ready
+ *   3 match     seed, match flags and round trip written; everyone plays
+ *   4 results   room reopened; back to 0 once nobody is marked in the match
+ */
+static inline void ps3_owner_pump(ps3_link_t *L, uint64_t now_us) {
+    if (!L->hosting || !ps3_is_owner(L)) return;
+    rpcn_session_t *s = L->session;
+    uint32_t phase = ps3_be32(L->blob + 0x10);
+    uint32_t echo  = s->room_bin_len >= 0x14 ? ps3_be32(s->room_bin + 0x10) : 0xFFFFFFFFu;
+    if (echo != phase) {
+        /* Again after 3 s, then backing off to a minute: a server that keeps
+         * refusing the write is told so less and less often. */
+        uint32_t shift = L->rewrites < 5 ? L->rewrites : 5;
+        uint64_t wait  = (uint64_t)PS3_REWRITE_US << shift;
+        if (wait > 60000000u) wait = 60000000u;
+        if (now_us > L->last_write_us + wait) {
+            if (L->rewrites < 3 || (L->rewrites & 7) == 0)
+                ps3_note(L, "PS3: the room write for phase %u was not echoed; sending it again (%u)",
+                         (unsigned)phase, (unsigned)(L->rewrites + 1));
+            L->rewrites++;
+            ps3_owner_write(L, L->write_filter, L->write_attr, now_us);
+        }
+        return;
+    }
+    uint32_t members = 1u + rpcn_session_peer_count(s);
+    uint16_t me = s->my_member_id;
+    uint32_t count = ps3_be32(L->blob + 0x14);
+    uint16_t fighter[2] = { ps3_be16(L->blob + 0x18), ps3_be16(L->blob + 0x1A) };
+    uint32_t my_pos = 0;
+    bool fighter_gone = false;
+    for (uint32_t k = 0; k < count && k < 2; k++) {
+        if (fighter[k] == me) my_pos = k + 1u;
+        else if (!rpcn_session_peer(s, fighter[k])) fighter_gone = true;
+    }
+
+    switch (phase) {
+        case PS3_PHASE_LOBBY:
+            /* np_session_entries_should_close: a room of two starts the moment
+             * it is full; a bigger one when its countdown runs out, which is
+             * shorter once three are in. */
+            /* Ours: the countdown starts with the second player, not with the
+             * room. The PS3's runs from the lobby's start, so a room left
+             * empty for 30 s starts the moment a second player walks in and
+             * a third never makes it. */
+            if (members < 2) L->lobby_until_us = now_us + PS3_LOBBY_US;
+            if (members >= 3 && L->lobby_until_us > now_us + PS3_LOBBY_CROWD_US) {
+                L->lobby_until_us = now_us + PS3_LOBBY_CROWD_US;
+                L->crowd = true;
+            } else if (members < 3 && L->crowd) {
+                L->crowd = false;                /* down to two: the full wait again */
+                L->lobby_until_us = now_us + PS3_LOBBY_US;
+            }
+            if (members > 1 && (L->max_slot <= 2 || now_us >= L->lobby_until_us)) {
+                ps3_note(L, "PS3: choosing the fighters (%u in the room)", (unsigned)members);
+                ps3_owner_set_phase(L, PS3_PHASE_CHOOSING, PS3_ROOM_CLOSED_HIDDEN, PS3_ROOM_CLOSED_HIDDEN, now_us);
+            }
+            break;
+
+        case PS3_PHASE_CHOOSING:
+            if (members > 1 && ps3_owner_choose(L)) {
+                L->own_entrant = false;
+                L->match_seen  = false;
+                ps3_note(L, "PS3: fighters %u (1P) and %u (2P)", ps3_be16(L->blob + 0x18), ps3_be16(L->blob + 0x1A));
+                ps3_owner_set_phase(L, PS3_PHASE_PREPARING, 0, 0, now_us);
+            } else {
+                ps3_owner_to_lobby(L, "not enough players", now_us);
+            }
+            break;
+
+        case PS3_PHASE_PREPARING: {
+            if (fighter_gone) { ps3_owner_to_lobby(L, "a fighter left", now_us); break; }
+            if (now_us > L->phase_since_us + PS3_PREPARE_US) {
+                ps3_owner_to_lobby(L, "a fighter never got ready", now_us);
+                break;
+            }
+            /* np_session_send_entrant_data, for the owner: its own entrant
+             * data goes straight into its slot, once it can reach the other
+             * fighter or has waited long enough to say it cannot. */
+            if (my_pos && !L->own_entrant) {
+                bool linked = ps3_linked_to_fighters(L);
+                if (linked || now_us > L->phase_since_us + PS3_LINK_WAIT_US) {
+                    uint8_t *slot = L->blob + 0x20 + (my_pos - 1u) * PS3_ENTRANT_SIZE;
+                    memset(slot, 0, PS3_ENTRANT_SIZE);
+                    ps3_put32(slot, PS3_SLOT_FILLED | (linked ? 0 : PS3_SLOT_NO_LINK));
+                    ps3_set_flags(L, ps3_be32(L->me) | PS3_MFLAG_READY);
+                    L->own_entrant = true;
+                    ps3_note(L, "PS3: our entrant data is in; ready as %s%s", my_pos == 1 ? "1P" : "2P",
+                             linked ? "" : " (no direct link to the other fighter)");
+                }
+            }
+            bool all = count >= 2;
+            for (uint32_t k = 0; k < count && k < 2 && all; k++) {
+                const uint8_t *slot = L->blob + 0x20 + k * PS3_ENTRANT_SIZE;
+                if (!(ps3_member_flags(L, fighter[k]) & PS3_MFLAG_READY) || !(ps3_be32(slot) & PS3_SLOT_FILLED))
+                    all = false;
+            }
+            if (!all) break;
+            /* np_session_seed_match: a fresh seed, and the flags that shape the
+             * lockstep. */
+            uint64_t x = now_us ^ ((uint64_t)me << 32) ^ 0x9E3779B97F4A7C15ull;
+            x ^= x >> 33; x *= 0xFF51AFD7ED558CCDull; x ^= x >> 33;
+            ps3_put32(L->blob + 0x00, (uint32_t)x);
+            uint8_t flags = 0;
+            if (members != count) flags |= PS3_MATCH_SPECTATORS;
+            for (uint32_t k = 0; k < count && k < 2; k++)
+                if (ps3_be32(L->blob + 0x20 + k * PS3_ENTRANT_SIZE) & PS3_SLOT_NO_LINK) flags |= PS3_MATCH_RELAY;
+            L->blob[0x05] = flags;
+            uint32_t rtt = 0;
+            for (uint32_t k = 0; k < count && k < 2; k++) {
+                if (fighter[k] == me) continue;
+                uint32_t r = ps3_rtt_ms(L, fighter[k]);
+                if (r > rtt) rtt = r;
+            }
+            ps3_put32(L->blob + 0x1C, rtt);
+            ps3_note(L, "PS3: both fighters ready; the match is on (rtt %u ms, flags %02X)", rtt, flags);
+            ps3_owner_set_phase(L, PS3_PHASE_MATCH, 0, 0, now_us);
+            break;
+        }
+
+        case PS3_PHASE_MATCH: {
+            /* The PS3 owner moves on when its own match is over, as it sees it;
+             * a PS3 not fighting watches the match. We do not watch, so a
+             * non-fighting owner waits for both fighters to publish their
+             * places in line. */
+            bool done = fighter_gone;
+            if (my_pos) {
+                done = done || (L->match_seen && !L->match);
+            } else {
+                bool both = true;
+                for (uint32_t k = 0; k < count && k < 2; k++)
+                    if (!(ps3_member_flags(L, fighter[k]) & PS3_MFLAG_ROTATED)) both = false;
+                done = done || both;
+            }
+            if (!done && now_us > L->phase_since_us + PS3_MATCH_MAX_US) {
+                ps3_note(L, "PS3: nobody reported the end of the match");
+                done = true;
+            }
+            if (done) ps3_owner_set_phase(L, PS3_PHASE_RESULTS, PS3_ROOM_CLOSED_HIDDEN, 0, now_us);
+            break;
+        }
+
+        case PS3_PHASE_RESULTS: {
+            bool busy = false;
+            if (ps3_be32(L->me) & (PS3_MFLAG_IN_MATCH | PS3_MFLAG_ROTATED)) busy = true;
+            for (uint32_t i = 0; i < RPCN_MAX_PEERS && !busy; i++) {
+                const rpcn_peer_t *p = &s->peers[i];
+                if (p->used && p->bin_len >= 4 && (ps3_be32(p->bin) & (PS3_MFLAG_IN_MATCH | PS3_MFLAG_ROTATED)))
+                    busy = true;
+            }
+            if (!busy) {
+                char who[160];
+                int w = snprintf(who, sizeof(who), "%08X", ps3_be32(L->me));
+                for (uint32_t i = 0; i < RPCN_MAX_PEERS && w > 0 && w < (int)sizeof(who); i++)
+                    if (s->peers[i].used)
+                        w += snprintf(who + w, sizeof(who) - (size_t)w, " %s=%08X/%u", s->peers[i].npid,
+                                      s->peers[i].bin_len >= 4 ? ps3_be32(s->peers[i].bin) : 0u,
+                                      (unsigned)s->peers[i].bin_len);
+                ps3_note(L, "PS3: results over after %.1f s (flags %s); back to the lobby",
+                         (double)(now_us > L->phase_since_us ? now_us - L->phase_since_us : 0) / 1e6, who);
+                L->lobby_until_us = now_us + PS3_LOBBY_US;
+                ps3_owner_set_phase(L, PS3_PHASE_LOBBY, 0, 0, now_us);
+            }
+            break;
+        }
+
+        default:
+            ps3_owner_to_lobby(L, "an unknown phase", now_us);
+            break;
+    }
+}
+
 /* What a member does in the room each pump (np_session_update_room_phase's
- * non-owner half). */
+ * non-owner half), and, when we own the room, the owner's half after it. */
 static inline void ps3_room_pump(ps3_link_t *L, uint64_t now_us) {
     ps3_read_room(L);
     if (!L->room_known) return;
-    if (L->phase == PS3_PHASE_PREPARING && L->my_side >= 0 && !L->entrant_sent) {
+    if (L->phase == PS3_PHASE_PREPARING && L->my_side >= 0 && !L->entrant_sent && !ps3_is_owner(L)) {
         ps3_peer_t *owner = ps3_peer_by_id(L, L->session->owner_id);
-        if (owner && owner->rudp_up && rudp_open(&owner->rudp, 1)) {
+        bool linked = ps3_linked_to_fighters(L);
+        if (owner && owner->rudp_up && rudp_open(&owner->rudp, 1)
+            && (linked || now_us > L->seen_since_us + PS3_LINK_WAIT_US)) {
             ps3_set_flags(L, ps3_be32(L->me) | PS3_MFLAG_READY);
-            ps3_send_entrant(L);
+            ps3_send_entrant(L, !linked);
             L->entrant_sent = true;
-            ps3_note(L, "PS3: entrant data sent; ready as %s", L->my_side == 0 ? "1P" : "2P");
+            ps3_note(L, "PS3: entrant data sent; ready as %s%s", L->my_side == 0 ? "1P" : "2P",
+                     linked ? "" : " (no direct link to the other fighter)");
         }
     }
+    /* Not fighting, or our board never saw the result: our place in line
+     * follows the result the fighters publish. */
+    if ((L->phase == PS3_PHASE_MATCH || L->phase == PS3_PHASE_RESULTS) && !L->match && !L->rotated) {
+        uint32_t win = ps3_published_winner(L);
+        if (win) ps3_rotate(L, win);
+        /* A fighter whose match ended with no result (its lockstep gave out)
+         * still says it is done, as the PS3 does (rotate_queue with no winner
+         * changes nothing but sets bit 29), or a non-fighting owner would sit
+         * in phase 3 until PS3_MATCH_MAX_US. It gives the other fighter's
+         * result a moment to arrive first. */
+        else if (L->my_side >= 0 && L->match_seen && now_us > L->results_since_us + PS3_NO_RESULT_US)
+            ps3_rotate(L, 0);
+    }
     /* After the result screen the flags go back to 0, and the owner moves on
-     * once nobody is still marked in the match. A PS3 member clears them some
+     * once nobody is still marked in the match. (The stamps are taken with a
+     * later clock than `now_us`, inside this pump: compare, never subtract, or
+     * the wait underflows and ends at once.) A PS3 member clears them some
      * 10 s after publishing its place in line (the captured match); 8 s after
      * the later of phase 4 and our own result keeps the rotation on show. */
     if (L->phase == PS3_PHASE_RESULTS && !L->results_cleared && !L->match
-        && now_us - L->results_since_us > PS3_RESULTS_US) {
+        && now_us > L->results_since_us + PS3_RESULTS_US) {
         L->results_cleared = true;
         ps3_set_flags(L, 0);
     }
     ps3_publish_me(L);
+    ps3_owner_pump(L, now_us);
 }
 
 /* ---- Peers: signaling, then RUDP ----------------------------------------- */
@@ -912,9 +1448,11 @@ static inline void ps3_peers_pump(ps3_link_t *L, uint64_t now_us) {
             if (p->rudp_up) rudp_close_all(&p->rudp);
             rpcs3_sig_finish(&L->sig, p->npid);
             ps3_note(L, "PS3: %s left", p->npid);
-            /* RPCN hands the room to whoever is left, and only a PS3 knows how
-             * to run one; a room with nobody else in it is no use either. */
-            if (p->member_id == s->owner_id || rpcn_session_peer_count(s) == 0) L->owner_gone = true;
+            /* RPCN hands the room to whoever is left, and we run only a room we
+             * created; a room with nobody else in it is no use either. Our own
+             * room stays open for the next player. */
+            if (!L->hosting && (p->member_id == s->owner_id || rpcn_session_peer_count(s) == 0))
+                L->owner_gone = true;
             memset(p, 0, sizeof(*p));
         }
     }
@@ -992,10 +1530,41 @@ static inline void ps3_link_leave(ps3_link_t *L) {
     L->room_known = false;
     L->room_rev_seen = 0;
     L->entrant_sent = false;
+    L->rotated = false;
+    L->hosting = false;
     memset(L->me, 0, sizeof(L->me));
     ps3_put32(L->me + 4, 0xFFFFFFFFu);
     L->team = 0xFF;
     L->my_side = -1;
+}
+
+/*
+ * Before creating a room of our own (rpcn_session_host_ps3): the room's first
+ * state and its eight searchable ints, as a PS3 creating a Player Match room
+ * with the default rules writes them (MatchCond_SetDefaults 0xAF230, checked
+ * against a PS3's CreateJoinRoom): room mode 1, rounds 3 and time 30
+ * (indices 1 and 1), game type A, no secret characters, worldwide. Byte 8 and
+ * int 0x4C are the player count's index, 2 players = 0.
+ */
+static inline void ps3_link_host(ps3_link_t *L, uint32_t max_slot, uint32_t int_attr[8]) {
+    ps3_link_leave(L);
+    if (max_slot < 2) max_slot = 2;
+    if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
+    uint64_t now = net_now_us();
+    L->hosting  = true;
+    L->max_slot = max_slot;
+    memset(L->blob, 0, sizeof(L->blob));
+    L->blob[0x04] = 1;                          /* room mode: Room Match */
+    L->blob[0x08] = (uint8_t)(max_slot - 2u);   /* players */
+    L->blob[0x09] = 1;                          /* rounds: 3 */
+    L->blob[0x0A] = 1;                          /* time: 30 */
+    const uint32_t ints[8] = { max_slot - 2u, 1, 1, 0, 0, 0, 1, RPCN_PS3_VERSION_TAG };
+    memcpy(int_attr, ints, sizeof(ints));
+    L->phase_since_us = now;
+    L->lobby_until_us = now + PS3_LOBBY_US;
+    L->last_write_us  = now;                    /* the create carries the blob */
+    L->write_filter = L->write_attr = 0;
+    L->own_entrant = L->match_seen = false;
 }
 
 static inline void ps3_link_stop(ps3_link_t *L) {
@@ -1055,7 +1624,10 @@ static inline bool ps3_link_pump(ps3_link_t *L, uint8_t local_wire, uint64_t now
         if (!ps3_sio_gate(L)) { ok = false; break; }
         L->next_tick_us += PS3_TICK_US;
     }
-    if (!ok) ps3_match_end(L, "the lockstep timed out");
+    if (!ok) {
+        ps3_match_end(L, "the lockstep timed out");
+        ps3_after_result(L);
+    }
     return ok;
 }
 

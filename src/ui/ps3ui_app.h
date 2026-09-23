@@ -442,7 +442,7 @@ typedef struct {
 
     /* the on-screen keyboard (ours) */
     int osk_field;              /* 0 = name, 1 = password */
-    char osk_text[2][64];
+    char osk_text[2][128];   /* [1] holds RPCS3's 64-character derived key too */
     int osk_row, osk_col, osk_shift;
     ps3ui_screen_t osk_back;
 } ps3ui_app_t;
@@ -739,14 +739,14 @@ static void ps3ui_update_osk(ps3ui_app_t *a)
     int done = ps3ui_hit(a, PS3UI_PAD_START);
     if (ps3ui_hit(a, PS3UI_PAD_CROSS)) {
         if (a->osk_row < 4) {
-            if (len + 1 < (a->osk_field == 0 ? 17u : 63u)) {
+            if (len + 1 < (a->osk_field == 0 ? 17u : (uint32_t)sizeof a->osk_text[1])) {
                 t[len] = ps3ui_osk_rows[a->osk_shift][a->osk_row][a->osk_col];
                 t[len + 1] = 0;
             }
         } else if (a->osk_col == PS3UI_OSK_ACT_SHIFT) {
             a->osk_shift ^= 1;
         } else if (a->osk_col == PS3UI_OSK_ACT_SPACE) {
-            if (len + 1 < 63) t[len] = ' ', t[len + 1] = 0;
+            if (len + 1 < (uint32_t)sizeof a->osk_text[1]) t[len] = ' ', t[len + 1] = 0;
         } else if (a->osk_col == PS3UI_OSK_ACT_BACK) {
             if (len) t[len - 1] = 0;
         } else {
@@ -1410,7 +1410,7 @@ static void ps3ui_draw_osk(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     float alpha = ps3ui_slot_alpha(&s, "p_txt_01_lt");
     ps3ui_text_style_t st = ps3ui_style_text(37.0f);
     /* row 0: the field */
-    char shown[80];
+    char shown[sizeof a->osk_text[1]];
     if (a->osk_field == 1) {
         size_t n = strlen(a->osk_text[1]);
         memset(shown, '*', n);
@@ -1418,7 +1418,7 @@ static void ps3ui_draw_osk(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     } else {
         snprintf(shown, sizeof shown, "%s", a->osk_text[0]);
     }
-    char line[128];
+    char line[sizeof shown + 32];
     snprintf(line, sizeof line, "%s: %s_", a->osk_field ? "Password" : "Online ID", shown);
     ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly, line, alpha);
     /* rows 1..4: keys; row 5: actions */

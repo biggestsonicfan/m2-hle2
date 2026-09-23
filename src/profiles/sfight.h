@@ -470,12 +470,29 @@ static int sfight_hook_xplay_replay_timer(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /* xplay_match_over (0xE6EC, VIC_INT entry): a versus match is over, when the
- * versus flag (0x500068 bit 1) is set (i960hook_E6EC_VIC_INT_matchOver).
- * Observe only. */
+ * versus flag (0x500068 bit 1) is set, unless somebody is watching
+ * (i960hook_E6EC_VIC_INT_matchOver). Observe only. */
 static int sfight_hook_xplay_match_over(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu;
-    if (g_xplay_match && (mem_read8(bus, 0x00500068) & 2u)) g_xplay_events |= XPLAY_EV_MATCH_OVER;
+    if (g_xplay_match && !g_xplay_spectators && (mem_read8(bus, 0x00500068) & 2u))
+        g_xplay_events |= XPLAY_EV_MATCH_OVER;
     return 1;
+}
+
+/* xplay_vic_dsp (0xE93C, VIC_DSP `ld INTERUPT_FLAGS_MOMENTARY, r8`): in a
+ * network match START does not cut the victory screen short, the load is
+ * skipped with r8 = 0; and with somebody watching, the match ends here, once
+ * CTRL_TIMER (0x500024) has counted down to 60 (i960hook_E93C_VIC_DSP_
+ * blockStart). */
+static int sfight_hook_xplay_vic_dsp(i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!g_xplay_match || !(mem_read8(bus, 0x00500068) & 2u)) return 1;
+    if (g_xplay_spectators && mem_read32(bus, 0x00500024) == 0x3C) g_xplay_events |= XPLAY_EV_MATCH_OVER;
+    cpu->locals.r[8] = 0;
+    uint32_t w = mem_read32(bus, cpu->sfr.ip);
+    uint32_t mode = (w >> 10) & 0xFu;
+    bool two = ((w >> 12) & 1u) && (mode == 5 || mode >= 12);
+    cpu->sfr.ip += two ? 8u : 4u;
+    return 0;
 }
 
 /* NOTE: there is intentionally NO read_sw (0x17CC) hook. Inputs are delivered
@@ -669,6 +686,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x000083F4, sfight_hook_xplay_force_start,  "xplay_force_start"       }, \
     { 0x0000A218, sfight_hook_xplay_barrier,      "xplay_sel_int_barrier"   }, \
     { 0x0000E6EC, sfight_hook_xplay_match_over,   "xplay_vic_int"           }, \
+    { 0x0000E93C, sfight_hook_xplay_vic_dsp,      "xplay_vic_dsp"           }, \
     { 0x0000AF84, sfight_hook_xplay_stage,        "xplay_stage"             }, \
     { 0x0000B0F8, sfight_hook_xplay_game_time,    "xplay_game_time"         }, \
     { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      },

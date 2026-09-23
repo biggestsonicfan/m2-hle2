@@ -493,6 +493,12 @@ EBOOT (Ghidra) and checked against a PS3-vs-PS3 match captured through RPCS3's `
   table at EBOOT 0x377AB0 into the game assignments (0x59C340 / 0x1D03340): rounds, energy 1, time,
   the flag byte (AUTOMATIC always on; game type A-D sets HYPER MODE and BARRIER RESET), barrier 5.
   Stage = seed % 9 (0xAF84). A board that is not in attract is rebooted first (FUN_000ac554).
+- **m2hle can own a PS3 room too** (`ps3_owner_pump`, ported from `np_session_update_room_phase` 0xBF258 and held against an RPCS3 log of a PS3 owner). Three things are not obvious:
+  - **Step only on the echo.** The PS3 owner advances only when the room's phase, as the server sent it back, equals its own; RPCN echoes SetRoomDataInternal to the writer too. One write in flight at a time, or phases reach members out of order.
+  - **Room flags travel with the phase**: phase 1 closes and hides the room (flagFilter/flagAttr `0x50000000`), phase 4 reopens it (filter `0x50000000`, attr 0).
+  - **Room byte 5 changes the PS3's lockstep** (`SyncIo_Init_rings` 0x6E67C): `0x40` (more members than fighters) means a small packet every 2 frames, a 60-frame packet every 12 straight to the watchers, one frame more delay, and the match ends at VIC_DSP when CTRL_TIMER is 60 (hook 0xE93C), not at VIC_INT. `0x80` (a fighter has no link) sends inputs through the owner with header flag `0x100`. A member that ignores these plays a different first frame from the PS3.
+- **The peer-to-peer socket is bound before the TLS connect** (a taken port fails at once), so the session takes its own `net_startup` reference first and holds it until `rpcn_session_stop`. Without it, a sign-in with no MCP bridge or A/V stream up failed with `could not bind UDP (10093)` (WSANOTINITIALISED) on Windows: every test ran with the bridge, which had started Winsock for it.
+- **RPCS3's RPCN password is a derived key**, not what the player typed: PBKDF2/SHA3-256 as 64 hex characters (`rpcn_settings_dialog.cpp` `derive_password`). `netplay_config_t.password` must hold 64 characters; at `char[64]` it lost the last one and the server said "wrong password".
 - **The two boards still compute different fights** from the same inputs: the PS3's COP is
   single-precision C with FMA, its `rand` an MT19937, and it has no sound CPU. So its result can come
   before ours: the member's post-match update (flags 0xE0, place in line) has to follow our own result
