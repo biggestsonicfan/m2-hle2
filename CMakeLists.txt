@@ -536,6 +536,9 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     # Netplay: the lockstep engine, the protobuf codec and the ComId standard.
     # No sockets and no server — see the header of tests/net_test.c.
     add_executable(net_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/net_test.c)
+    # PS3 cross-play: Sony RUDP against bytes captured from a real PS3, and
+    # RPCS3 signaling. No sockets.
+    add_executable(ps3net_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/ps3net_test.c)
     # The libretro core's heat guard (core/heat_guard.h): a pure state machine, no zones read.
     add_executable(heat_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/heat_test.c)
     # The PS3 release's game settings (profiles/sfight.h sfight_apply_menu_settings) on a bus:
@@ -589,7 +592,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(emu_test   PRIVATE sokol)
     target_link_libraries(input_test PRIVATE miniz sokol)
 
-    foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test tile_test heat_test
+    foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test
               scsp_dsp_test scsp_dsp_test_masks sfight_settings_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
@@ -602,7 +605,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     # nothing that carries it.
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
-                  input_test net_test tile_test heat_test scsp_dsp_test scsp_dsp_test_masks
+                  input_test net_test ps3net_test tile_test heat_test scsp_dsp_test scsp_dsp_test_masks
                   cop_replay snd_replay snd_bench sfight_settings_test ps3ui_render)
             target_link_libraries(${t} PRIVATE m)
         endforeach()

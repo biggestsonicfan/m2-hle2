@@ -146,11 +146,12 @@ typedef enum {
  * Room internal attribute 1 is the room's shared state and member internal
  * attribute 1 each member's own, exactly the slots the PS3 port used for the
  * same two things (0x57 and 0x59, np_session_create_join_room). The server
- * holds up to 256 and 128 bytes; room.h uses far less.
+ * holds up to 256 and 128 bytes. room.h uses far less; a PS3 room's (ps3_link.h)
+ * is 0xE8 bytes, so the buffer is the server's whole 256.
  */
 #define RPCN_ROOM_BIN_ATTR_ID        0x57u
 #define RPCN_MEMBER_BIN_ATTR_ID      0x59u
-#define RPCN_ROOM_BIN_MAX            64u
+#define RPCN_ROOM_BIN_MAX            256u
 #define RPCN_MEMBER_BIN_MAX          32u
 #define RPCN_ROOM_MAX_MEMBERS        8u
 /*
@@ -189,6 +190,10 @@ typedef struct {
     char     owner[20];
     uint32_t flag_attr;          /* as published by CreateRoom */
     uint32_t relay_ms;           /* RPCN_ROOM_INT_ATTR_RELAY; 0 = not published */
+    /* Searchable int attributes 0x4C..0x53, the ones the search asked for
+     * (bit i of int_mask = 0x4C + i came back). A PS3 room's rules live here. */
+    uint32_t int_attr[8];
+    uint8_t  int_mask;
 } rpcn_room_listing_t;
 
 /* One RoomMemberDataInternal: who, where in the room, and their own attribute. */
@@ -737,13 +742,13 @@ static inline uint64_t rpcn_leave_room(rpcn_client_t *c, const char *com_id, uin
 static inline uint64_t rpcn_set_room_data_internal(rpcn_client_t *c, const char *com_id,
                                                    uint64_t room_id,
                                                    const uint8_t *bin, uint32_t len) {
-    uint8_t pb[256];
+    uint8_t pb[RPCN_ROOM_BIN_MAX + 64];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
     pb_varint(&w, 1, room_id);
     rpcn_pb_bin_attr(&w, 4, RPCN_ROOM_BIN_ATTR_ID, bin, len);
     if (!w.ok) { rpcn_fail(c, "SetRoomDataInternal: protobuf overflow"); return 0; }
-    uint8_t payload[320];
+    uint8_t payload[RPCN_ROOM_BIN_MAX + 128];
     uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
     if (!n) { rpcn_fail(c, "SetRoomDataInternal: bad ComId"); return 0; }
     return rpcn_request(c, RPCN_CMD_SET_ROOM_DATA_INTERNAL, payload, n);
@@ -837,6 +842,76 @@ static inline uint64_t rpcn_search_room(rpcn_client_t *c, const char *com_id, ui
     return rpcn_request(c, RPCN_CMD_SEARCH_ROOM, payload, n);
 }
 
+/*
+ * The PS3 port's own lobby requests (Sonic the Fighters, NPUB30927), for
+ * cross-play with it (ps3_link.h). The values are the game's, taken from an
+ * RPCS3 log of it creating, searching and joining rooms, not chosen here.
+ */
+
+/* SearchRoom as the PS3 game shapes it: closed, full and hidden rooms left out
+ * (flagFilter 0x70000000, flagAttr 0), only rooms carrying the game's version tag
+ * in searchable int 0x53, and all eight rule ints returned. The game also
+ * filters on its own region and room mode; we show every room it could join. */
+static inline uint64_t rpcn_ps3_search_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
+                                            uint32_t version_tag) {
+    uint8_t pb[256];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, 1);                        /* option: with the owner's npid */
+    pb_varint(&w, 2, world_id);
+    pb_varint(&w, 4, 1);                        /* rangeFilter_startIndex (1-based) */
+    pb_varint(&w, 5, 20);                       /* rangeFilter_max */
+    pb_varint(&w, 6, 0x70000000u);              /* flagFilter */
+    /* flagAttr 0 is proto3's default and needs no bytes. */
+    {
+        uint32_t f = pb_begin_sub(&w, 8);       /* intFilter */
+        pb_wrapped(&w, 1, 1);                   /* searchOperator: EQ */
+        rpcn_pb_int_attr(&w, 2, 0x53, version_tag);
+        pb_end_sub(&w, f);
+    }
+    for (uint16_t id = 0x4C; id <= 0x53; id++) pb_wrapped(&w, 10, id);   /* attrId */
+    if (!w.ok) { rpcn_fail(c, "SearchRoom: protobuf overflow"); return 0; }
+    uint8_t payload[512];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "SearchRoom: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_SEARCH_ROOM, payload, n);
+}
+
+/* JoinRoom as the PS3 game sends it: teamId 0xFF (a newcomer's place in the
+ * waiting line is last) and its 0x20-byte member attribute. */
+static inline uint64_t rpcn_ps3_join_room(rpcn_client_t *c, const char *com_id, uint64_t room_id,
+                                          const uint8_t *member_bin, uint32_t member_len) {
+    uint8_t pb[256];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);
+    if (member_bin && member_len) rpcn_pb_bin_attr(&w, 4, RPCN_MEMBER_BIN_ATTR_ID, member_bin, member_len);
+    pb_wrapped(&w, 6, 0xFF);                    /* teamId */
+    if (!w.ok) { rpcn_fail(c, "JoinRoom: protobuf overflow"); return 0; }
+    uint8_t payload[512];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "JoinRoom: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_JOIN_ROOM, payload, n);
+}
+
+/* SetRoomMemberDataInternal with a teamId: the PS3 game publishes its place in
+ * the waiting line there (0 would leave it unchanged). */
+static inline uint64_t rpcn_set_member_data_team(rpcn_client_t *c, const char *com_id, uint64_t room_id,
+                                                 uint8_t team_id, const uint8_t *bin, uint32_t len) {
+    uint8_t pb[160];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);
+    pb_wrapped(&w, 2, 0);                       /* memberId: self */
+    pb_wrapped(&w, 3, team_id);
+    rpcn_pb_bin_attr(&w, 4, RPCN_MEMBER_BIN_ATTR_ID, bin, len);
+    if (!w.ok) { rpcn_fail(c, "SetRoomMemberDataInternal: protobuf overflow"); return 0; }
+    uint8_t payload[224];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "SetRoomMemberDataInternal: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_SET_ROOM_MEMBER_DATA, payload, n);
+}
+
 static inline uint64_t rpcn_request_signaling_infos(rpcn_client_t *c, const char *npid) {
     if (!npid || !*npid) { rpcn_fail(c, "RequestSignalingInfos needs an npid"); return 0; }
     rpcn_strpack_t p;
@@ -905,6 +980,10 @@ static inline uint32_t rpcn_parse_room_list(const uint8_t *payload, uint32_t siz
                         else if (attr.field == 2 && attr.wire == PB_WIRE_VARINT) num = (uint32_t)attr.varint;
                     }
                     if (id == RPCN_ROOM_INT_ATTR_RELAY) row.relay_ms = num;
+                    if (id >= 0x4C && id <= 0x53) {
+                        row.int_attr[id - 0x4C] = num;
+                        row.int_mask |= (uint8_t)(1u << (id - 0x4C));
+                    }
                     break;
                 }
                 default: break;

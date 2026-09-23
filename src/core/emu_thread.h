@@ -228,6 +228,11 @@ static inline void emu_board_reset_state(void) {
     s_irq_baseline_depth = 0;
     g_frame_done         = 0;
     g_versus_result      = 0;
+    g_xplay_barrier      = 0;
+    g_xplay_events       = 0;
+    g_xplay_ready        = 0;
+    g_xplay_mode         = -1;
+    g_xplay_also_mode    = -1;
     g_vblank_acked       = 0;
     g_emu_frames         = 0;
     s_frame_steps        = 0;

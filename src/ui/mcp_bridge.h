@@ -1571,6 +1571,9 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
     if (mcp_json_get_u32(req, "delay", &v))       cfg->frame_delay = v;
     if (mcp_json_get_u32(req, "p2p_port", &v))    cfg->local_p2p_port = (uint16_t)v;
     if (mcp_json_get_u32(req, "browse_yamp", &v)) cfg->browse_yamp = v != 0;
+    if (mcp_json_get_u32(req, "ps3", &v))         cfg->ps3 = v != 0;
+    if (mcp_json_get_str(req, "wire", s, sizeof(s)))
+        snprintf(cfg->ps3_wire, sizeof(cfg->ps3_wire), "%s", s);
     if (mcp_json_get_u32(req, "max_players", &v)) cfg->max_players = v;
     /* VS mode for a room this hosts: a decided match goes back to character
      * select with both players in, and the same two play on without a reset.
@@ -1798,6 +1801,31 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
 
     NP_APPEND(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
               st.frame, st.stalls, st.generation, st.seed);
+    /* PS3 cross-play (net/ps3_link.h): the PS3 room's phase, our side, the
+     * lockstep's counters, and each member's signaling and RUDP channels
+     * (0 idle, 1 SYN sent, 2 SYN received, 3 open, 4 closed). */
+    if (st.ps3) {
+        NP_APPEND(",\"ps3\":{\"room_known\":%s,\"phase\":%u,\"side\":%d,\"match\":%s,"
+                  "\"gen\":%u,\"rgen\":%u,\"gen_ok\":%s,\"resp_done\":%s,\"passed\":%s,"
+                  "\"sample\":%d,\"play\":%d,\"newest\":%d,\"delay\":%d,\"stalled\":%u,"
+                  "\"seed\":\"0x%08X\",\"me_flags\":\"0x%08X\",\"peers\":[",
+                  st.ps3_room_known ? "true" : "false", st.ps3_phase, st.ps3_side,
+                  st.ps3_match ? "true" : "false", st.ps3_gen, st.ps3_rgen,
+                  st.ps3_gen_ok ? "true" : "false", st.ps3_resp_done ? "true" : "false",
+                  st.ps3_passed ? "true" : "false", st.ps3_sample, st.ps3_play, st.ps3_newest,
+                  st.ps3_delay, st.ps3_stalled_frames, st.ps3_seed, st.ps3_me_flags);
+        for (uint32_t i = 0; i < st.ps3_peer_count && left > 256; i++) {
+            mcp_json_escape(esc, sizeof(esc), st.ps3_peers[i].npid);
+            NP_APPEND("%s{\"id\":%u,\"npid\":\"%s\",\"sig\":%s,\"sig_peer\":%s,\"rtt_us\":%u,"
+                      "\"ch\":[%u,%u,%u],\"addr\":\"%s\"}",
+                      i ? "," : "", st.ps3_peers[i].member_id, esc,
+                      st.ps3_peers[i].sig_active ? "true" : "false",
+                      st.ps3_peers[i].sig_peer_active ? "true" : "false", st.ps3_peers[i].rtt_us,
+                      st.ps3_peers[i].ch_state[0], st.ps3_peers[i].ch_state[1],
+                      st.ps3_peers[i].ch_state[2], st.ps3_peers[i].addr);
+        }
+        NP_APPEND("]}");
+    }
     /* The room emptied with the board still in its VS mode: any input restarts
      * the game (netplay_empty_room_pump). */
     NP_APPEND(",\"empty_room\":%s", st.empty_room ? "true" : "false");

@@ -304,7 +304,7 @@ The NP globals are at 0x8e42d8 (TOC `0x4018e0` and `0x401920`). My member id is 
 | SyncStart | `FUN_000b6c1c` | ch0 | dest 0xFF, relayed by the owner to all. Sets `session+0x1C9 = 1` |
 | ResponseSyncStart | case 3 in `FUN_000b7504` | the ctx it arrived on | goes back to the sender. The owner forwards it to the member whose id is in `[6..7]`. The addressee posts event 9 |
 
-All of this is **cellRudp**, reliable and ordered. No plain-UDP game path exists. The `socket`/`bind` imports belong to the NP signalling layer. Receive dispatch (`FUN_000b7504`) posts: type 0 → event 10 `{slot,len,ptr}`, type 1 → event 11, type 3 → event 8 `{gen,side,0,0,memberId}`, type 4 → event 9 (for me only). Event handlers are registered in `SyncIo_Start_side_nplayers` 0x6cf74: 10→0x6d41c, 11→0x6d928, 8→0x6d1c4, 9→0x6c810.
+All of this is **cellRudp**. **Correction (2026-09-22, from librudp and a captured match):** no channel is ordered. Channel 1 (RUDP vport 1, owner <-> each member) is reliable but unordered; channels 2 and 3 are unreliable, and the per-frame inputs ride channel 2 with their 10-frame redundancy covering loss. See `src/net/rudp.h`. No plain-UDP game path exists. The `socket`/`bind` imports belong to the NP signalling layer. Receive dispatch (`FUN_000b7504`) posts: type 0 → event 10 `{slot,len,ptr}`, type 1 → event 11, type 3 → event 8 `{gen,side,0,0,memberId}`, type 4 → event 9 (for me only). Event handlers are registered in `SyncIo_Start_side_nplayers` 0x6cf74: 10→0x6d41c, 11→0x6d928, 8→0x6d1c4, 9→0x6c810.
 
 ---
 

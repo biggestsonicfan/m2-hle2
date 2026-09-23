@@ -80,6 +80,11 @@
 
 #define RPCN_MAX_ROOMS 32
 
+/* The PS3 port's lobby space and the version tag its rooms carry in searchable
+ * int 0x53 (np_session_create_join_room; 20120910, which looks like a date). */
+#define RPCN_PS3_COM_ID       "NPWR03869_00"
+#define RPCN_PS3_VERSION_TAG  0x0133054Eu
+
 /* Everybody in the room but us. */
 #define RPCN_MAX_PEERS (RPCN_ROOM_MAX_MEMBERS - 1u)
 
@@ -133,6 +138,10 @@ typedef struct {
     const char *com_id;            /* our lobby space, e.g. "M2HSNCFTR_00" */
     const char *com_id_foreign;    /* YAMP's space for the same game, or null */
     uint16_t    local_p2p_port;    /* override for tests only */
+    /* Cross-play with the PS3 port (ps3_link.h): its lobby space, its room
+     * shape, and no m2hle datagrams (punches, introductions) sent to members,
+     * since they are RPCS3 clients and speak RPCS3's P2P framing. */
+    bool        ps3;
 
     /* Optional progress log. Connection problems here are almost always somebody's
      * NAT or firewall rather than a bug, and none of that is diagnosable from
@@ -185,6 +194,7 @@ typedef struct {
     uint64_t room_id;
     uint32_t room_flags;
     bool     is_host;        /* we created this room (the owner may since have moved) */
+    bool     ps3;            /* rpcn_session_config_t.ps3 */
 
     /* The room we are in. */
     uint16_t    my_member_id;
@@ -523,8 +533,9 @@ static inline bool rpcn_session_start(rpcn_session_t *s, const rpcn_session_conf
 
     snprintf(s->com_id, sizeof(s->com_id), "%s", cfg->com_id);
     snprintf(s->npid, sizeof(s->npid), "%s", cfg->npid);
+    s->ps3 = cfg->ps3;
     s->com_id_foreign[0] = '\0';
-    if (cfg->com_id_foreign && comid_is_well_formed(cfg->com_id_foreign))
+    if (!s->ps3 && cfg->com_id_foreign && comid_is_well_formed(cfg->com_id_foreign))
         snprintf(s->com_id_foreign, sizeof(s->com_id_foreign), "%s", cfg->com_id_foreign);
 
     /* The token as the player supplied it, which normally means pasted out of an
@@ -941,6 +952,14 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
                 else if (pkt.error == RPCN_ERR_ROOM_FULL)        why = "that room is full";
                 else if (pkt.error == RPCN_ERR_ROOM_PASSWORD_MISMATCH) why = "wrong room password";
                 else if (pkt.error == RPCN_ERR_ROOM_PASSWORD_MISSING)  why = "that room needs a password";
+                if (s->ps3 && !s->is_host) {
+                    /* PS3 rooms open and close between matches, and the list is
+                     * only as fresh as the last search: say so and stay online. */
+                    rpcn_session_note(s, "could not join: %s (ErrorType=%u)", why, (unsigned)pkt.error);
+                    rpcn_session_clear_room(s);
+                    s->stage = RPCN_STAGE_ONLINE;
+                    continue;
+                }
                 rpcn_session_fail(s, "%s (ErrorType=%u)", why, (unsigned)pkt.error);
                 return false;
             }
@@ -1021,9 +1040,11 @@ static inline void rpcn_session_update(rpcn_session_t *s) {
     rpcn_session_pump_keepalive(s);
     if (rpcn_session_in_room(s)) {
         rpcn_session_pump_signaling(s);
-        rpcn_session_pump_punch(s);
-        rpcn_session_pump_intro(s, &s->last_intro_ms);
-        rpcn_session_pump_relay(s);
+        if (!s->ps3) {
+            rpcn_session_pump_punch(s);
+            rpcn_session_pump_intro(s, &s->last_intro_ms);
+            rpcn_session_pump_relay(s);
+        }
     }
 }
 
@@ -1058,7 +1079,8 @@ static inline bool rpcn_session_join(rpcn_session_t *s, uint64_t room_id, const 
     }
     rpcn_session_clear_room(s);
     s->is_host = false;
-    s->pending_room = rpcn_join_room(&s->client, s->com_id, room_id, password, member_bin, member_len);
+    s->pending_room = s->ps3 ? rpcn_ps3_join_room(&s->client, s->com_id, room_id, member_bin, member_len)
+                             : rpcn_join_room(&s->client, s->com_id, room_id, password, member_bin, member_len);
     if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
     return true;
 }
@@ -1085,6 +1107,13 @@ static inline bool rpcn_session_set_member_state(rpcn_session_t *s, const uint8_
     return rpcn_set_member_data_internal(&s->client, s->com_id, s->room_id, bin, len) != 0;
 }
 
+/* The same with our teamId, which the PS3 game uses as the waiting line. */
+static inline bool rpcn_session_set_member_team(rpcn_session_t *s, uint8_t team,
+                                                const uint8_t *bin, uint32_t len) {
+    if (!rpcn_session_in_room(s)) return false;
+    return rpcn_set_member_data_team(&s->client, s->com_id, s->room_id, team, bin, len) != 0;
+}
+
 /* Ask the server for the rooms in our world, and optionally for YAMP's too. The
  * reply is asynchronous: the room lists report the result of the LAST completed
  * search. Only valid once online. */
@@ -1100,7 +1129,8 @@ static inline bool rpcn_session_search(rpcn_session_t *s, bool include_foreign) 
     }
 
     if (s->pending_search != 0) return true;   /* one in flight; its reply refreshes the list */
-    s->pending_search = rpcn_search_room(&s->client, s->com_id, s->world_id);
+    s->pending_search = s->ps3 ? rpcn_ps3_search_room(&s->client, s->com_id, s->world_id, RPCN_PS3_VERSION_TAG)
+                               : rpcn_search_room(&s->client, s->com_id, s->world_id);
     return s->pending_search != 0;
 }
 

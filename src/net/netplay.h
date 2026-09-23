@@ -97,6 +97,7 @@
 
 #include "com_id.h"
 #include "lockstep.h"
+#include "ps3_link.h"
 #include "room.h"
 #include "rpcn_session.h"
 
@@ -278,6 +279,13 @@ typedef struct {
     uint8_t  entry;             /* room_entry_t, for NETPLAY_CMD_ENTRY */
     bool     watch_only;        /* for NETPLAY_CMD_WATCH */
     bool     browse_yamp;       /* also search YAMP's lobby space, read-only */
+    /* Play the PS3 port's rooms (ps3_link.h). Always on against the official
+     * RPCN server for Sonic the Fighters; this forces it elsewhere, for testing
+     * against a local server. */
+    bool     ps3;
+    /* Where to write the PS3 wire log (ps3_link.h), for tools/ps3-audit.py.
+     * Empty = none. */
+    char     ps3_wire[260];
     uint16_t local_p2p_port;    /* 0 = RPCN_P2P_PORT */
 } netplay_config_t;
 
@@ -340,6 +348,28 @@ typedef struct {
      * left in the room: any button restarts the game (netplay_empty_room_pump). */
     bool            empty_room;
 
+    /* PS3 cross-play (ps3_link.h). */
+    bool            ps3;
+    bool            ps3_room_known;
+    uint32_t        ps3_phase;
+    int32_t         ps3_side;
+    bool            ps3_match;
+    uint8_t         ps3_gen, ps3_rgen;
+    bool            ps3_gen_ok, ps3_resp_done, ps3_passed;
+    int32_t         ps3_sample, ps3_play, ps3_newest, ps3_delay;
+    uint32_t        ps3_stalled_frames;
+    uint32_t        ps3_seed;
+    uint32_t        ps3_me_flags;
+    struct {
+        uint16_t member_id;
+        char     npid[20];
+        bool     sig_active, sig_peer_active;
+        uint32_t rtt_us;
+        uint8_t  ch_state[3];
+        char     addr[32];
+    } ps3_peers[RPCN_MAX_PEERS];
+    uint32_t        ps3_peer_count;
+
     rpcn_room_listing_t rooms[RPCN_MAX_ROOMS];
     uint32_t            room_count;
     rpcn_room_listing_t foreign_rooms[RPCN_MAX_ROOMS];
@@ -394,6 +424,11 @@ typedef struct {
     rpcn_account_t    account;
     rpcn_twitch_t     twitch;
     lockstep_t        lockstep;
+
+    /* Cross-play with the PS3 port: this session is in its lobby space and
+     * plays by its rules (ps3_link.h) instead of lockstep.h / room.h. */
+    bool              ps3;
+    ps3_link_t        ps3link;
 
     /* This machine's part in the match being run: 0 = 1P, 1 = 2P,
      * LOCKSTEP_WATCHER, or -1 when the board is not running one. */
@@ -1111,7 +1146,22 @@ static inline void netplay_on_pong(uint16_t from, uint32_t stamp_us) {
 
 static inline void netplay_end_match(const char *why);   /* below; a BYE ends the match */
 
+/* Every datagram from the room goes to the PS3 link, which knows RPCS3's
+ * framing; none of it is lockstep.h's. */
+static inline void netplay_drain_socket_ps3(void) {
+    uint8_t buf[2048];
+    for (;;) {
+        uint16_t from = 0;
+        uint32_t ip = 0;
+        uint16_t port = 0;
+        int got = rpcn_session_recv(&g_netplay.session, buf, (uint32_t)sizeof(buf), &from, &ip, &port);
+        if (got <= 0) break;
+        ps3_link_on_datagram(&g_netplay.ps3link, ip, port, buf, (uint32_t)got, net_now_us());
+    }
+}
+
 static inline void netplay_drain_socket(void) {
+    if (g_netplay.ps3) { netplay_drain_socket_ps3(); return; }
     uint8_t buf[sizeof(lockstep_input_packet_t) + 64];
     for (;;) {
         uint16_t from = 0;
@@ -1730,6 +1780,45 @@ static inline void netplay_publish_status(void) {
 
     snprintf(st->error, sizeof(st->error), "%s",
              g_netplay.state == NETPLAY_FAILED ? rpcn_session_error(&g_netplay.session) : "");
+
+    st->ps3 = g_netplay.ps3;
+    if (g_netplay.ps3) {
+        const ps3_link_t *L = &g_netplay.ps3link;
+        st->ps3_room_known = L->room_known;
+        st->ps3_phase      = L->phase;
+        st->ps3_side       = L->my_side;
+        st->ps3_match      = L->match;
+        st->ps3_gen        = L->sio.gen;
+        st->ps3_rgen       = L->sio.rgen;
+        st->ps3_gen_ok     = L->sio.gen_ok;
+        st->ps3_resp_done  = L->sio.resp_done;
+        st->ps3_passed     = L->sio.passed;
+        st->ps3_sample     = L->sio.sample;
+        st->ps3_play       = L->sio.play;
+        st->ps3_newest     = L->sio.newest;
+        st->ps3_delay      = L->sio.delay;
+        st->ps3_stalled_frames = L->stalled_frames;
+        st->ps3_seed       = L->seed;
+        st->ps3_me_flags   = ps3_be32(L->me);
+        st->ps3_peer_count = 0;
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+            const ps3_peer_t *p = &L->peers[i];
+            if (!p->used) continue;
+            uint32_t k = st->ps3_peer_count++;
+            st->ps3_peers[k].member_id = p->member_id;
+            snprintf(st->ps3_peers[k].npid, sizeof(st->ps3_peers[k].npid), "%s", p->npid);
+            const rpcs3_sig_peer_t *sp = NULL;
+            for (uint32_t j = 0; j < RPCS3_SIG_MAX_PEERS; j++)
+                if (L->sig.peers[j].used && strncmp(L->sig.peers[j].npid, p->npid, 16) == 0) sp = &L->sig.peers[j];
+            st->ps3_peers[k].sig_active      = sp && sp->active;
+            st->ps3_peers[k].sig_peer_active = sp && sp->peer_active;
+            st->ps3_peers[k].rtt_us          = rpcs3_sig_rtt_us(sp);
+            if (sp) net_addr_text(st->ps3_peers[k].addr, sizeof(st->ps3_peers[k].addr), sp->ip, sp->port);
+            else st->ps3_peers[k].addr[0] = '\0';
+            for (uint32_t c = 0; c < 3; c++)
+                st->ps3_peers[k].ch_state[c] = p->rudp_up ? (uint8_t)p->rudp.ch[c].state : 0;
+        }
+    }
     memcpy(st->log, g_netplay.log, sizeof(st->log));
     st->log_count = g_netplay.log_count;
     emu_mutex_unlock(&g_netplay.mutex);
@@ -1744,6 +1833,19 @@ static inline void netplay_get_status(netplay_status_t *out) {
 }
 
 /* ---- Commands ------------------------------------------------------------ */
+
+/* The official RPCN server, where PS3 players are: np.rpcs3.net (any case). */
+static inline bool netplay_server_is_official(const char *server) {
+    const char *want = "np.rpcs3.net";
+    if (!server) return false;
+    size_t i = 0;
+    for (; server[i] && want[i]; i++) {
+        char c = server[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != want[i]) return false;
+    }
+    return server[i] == '\0' && want[i] == '\0';
+}
 
 static inline void netplay_do_connect(const netplay_config_t *cfg) {
     if (!g_active_profile) { netplay_log("load a ROM set before connecting"); return; }
@@ -1778,7 +1880,19 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
 
     char com_id[COMID_BUFFER_SIZE];
     const char *note = "";
-    if (!comid_resolve(g_active_profile->id, com_id, &note)) {
+    /* The PS3 port's rooms are Sonic the Fighters only, and only on the
+     * official server, where the PS3 players are: the community server keeps
+     * this emulator's own protocol, and a player picks by picking the server. */
+    bool stf = strncmp(g_active_profile->id, "sfight", 6) == 0;
+    g_netplay.ps3 = stf && (cfg->ps3 || netplay_server_is_official(cfg->server));
+    if (cfg->ps3 && !stf) netplay_log("PS3 cross-play is for Sonic the Fighters only; using this game's own rooms");
+    if (g_netplay.ps3) {
+        snprintf(com_id, sizeof(com_id), "%s", RPCN_PS3_COM_ID);
+        note = "the PS3 port's rooms";
+        if (strcmp(g_active_profile->id, "sfight_console") != 0)
+            netplay_log("WARNING: the PS3 game runs on free play; the %s profile boots on coins, so the "
+                        "forced start will not begin a game (use the Console profile)", g_active_profile->id);
+    } else if (!comid_resolve(g_active_profile->id, com_id, &note)) {
         netplay_log("no lobby space for '%s': %s", g_active_profile->id, note);
         return;
     }
@@ -1818,6 +1932,7 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     sc.com_id          = com_id;
     sc.com_id_foreign  = have_foreign ? com_id_foreign : NULL;
     sc.local_p2p_port  = g_netplay.cfg.local_p2p_port;
+    sc.ps3             = g_netplay.ps3;
     sc.log             = netplay_session_log_cb;
     sc.log_ctx         = NULL;
 
@@ -1830,6 +1945,14 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     if (!rpcn_session_start(&g_netplay.session, &sc)) {
         g_netplay.state = NETPLAY_FAILED;
         netplay_log("%s", rpcn_session_error(&g_netplay.session));
+        return;
+    }
+    if (g_netplay.ps3) {
+        ps3_link_begin(&g_netplay.ps3link, &g_netplay.session, netplay_session_log_cb, NULL);
+        if (cfg->ps3_wire[0]) {
+            if (ps3_wire_open(cfg->ps3_wire)) netplay_log("PS3 wire log: %s", cfg->ps3_wire);
+            else netplay_log("could not open the PS3 wire log %s", cfg->ps3_wire);
+        }
     }
 }
 
@@ -2010,6 +2133,9 @@ static inline void netplay_forget_room(void) {
 
 static inline void netplay_do_disconnect(void) {
     netplay_send_bye();
+    if (g_netplay.ps3) ps3_link_stop(&g_netplay.ps3link);
+    ps3_wire_close();
+    netplay_release_inputs();
     rpcn_session_stop(&g_netplay.session);
     netplay_end_match(NULL);
     netplay_forget_room();
@@ -2021,6 +2147,10 @@ static inline void netplay_do_disconnect(void) {
 }
 
 static inline void netplay_do_host(const netplay_config_t *cfg) {
+    if (g_netplay.ps3) {
+        netplay_log("hosting a room for PS3 players is not supported yet - join one a PS3 made");
+        return;
+    }
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
     g_netplay.cfg.max_players   = cfg->max_players;
     g_netplay.cfg.vs_mode       = cfg->vs_mode;
@@ -2056,6 +2186,17 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
 }
 
 static inline void netplay_do_join(const netplay_config_t *cfg) {
+    if (g_netplay.ps3) {
+        netplay_forget_room();
+        ps3_link_leave(&g_netplay.ps3link);
+        if (!rpcn_session_join(&g_netplay.session, cfg->room_id, NULL,
+                               ps3_link_member_bin(&g_netplay.ps3link), PS3_MEMBER_BIN_SIZE)) {
+            g_netplay.state = NETPLAY_FAILED;
+            return;
+        }
+        netplay_log("joining PS3 room %llu", (unsigned long long)cfg->room_id);
+        return;
+    }
     /* Refuse a room we can already tell will not work, and say why. */
     for (uint32_t i = 0; i < g_netplay.session.room_count; i++) {
         if (g_netplay.session.rooms[i].room_id != cfg->room_id) continue;
@@ -2124,6 +2265,7 @@ static inline void netplay_do_watch(bool watch) {
 
 static inline void netplay_do_leave_room(void) {
     netplay_send_bye();
+    if (g_netplay.ps3) { ps3_link_leave(&g_netplay.ps3link); netplay_release_inputs(); }
     netplay_end_match(NULL);
     rpcn_session_leave(&g_netplay.session);
     netplay_forget_room();
@@ -2280,7 +2422,7 @@ static inline void netplay_mirror_stage(void) {
                 netplay_log("room %llu ready (%s)",
                             (unsigned long long)g_netplay.session.room_id,
                             g_netplay.session.is_host ? "hosting" : "joined");
-                if (!g_netplay.session.is_host) {
+                if (!g_netplay.session.is_host && !g_netplay.ps3) {
                     /* The attribute word the server actually holds, read back on
                      * join. Two things come out of it, and both are the reason it
                      * is published at all rather than assumed. */
@@ -2980,6 +3122,39 @@ static inline netplay_step_t netplay_begin_frame(void) {
     netplay_drain_socket();
     netplay_pump_deferred_room();
 
+    if (g_netplay.ps3) {
+        /* The PS3 port's rules, start to finish (ps3_link.h). Our player's input
+         * goes out as the PS3's wire byte; the board plays the two bytes the
+         * lockstep hands back, through the same canonical path as ever. */
+        uint8_t local = ps3_wire_from_canonical(netplay_sample_local());
+        ps3_link_pump(&g_netplay.ps3link, local, net_now_us());
+        if (g_netplay.ps3link.owner_gone) {
+            netplay_log("the PS3 that owned the room has left; leaving it too");
+            netplay_do_leave_room();
+        }
+        if (g_netplay.ps3link.need_reset) {
+            /* A match on a board that is not in attract: the PS3 reboots its
+             * own the same way, so both reach the forced START. */
+            g_netplay.ps3link.need_reset = false;
+            g_netplay.reset_pending = true;
+            netplay_publish_status();
+            return NETPLAY_STEP_RESET;
+        }
+        uint8_t in[2];
+        ps3_step_t st = ps3_link_frame(&g_netplay.ps3link, in);
+        netplay_step_t step = NETPLAY_STEP_OFF;
+        if (st == PS3_STEP_READY) {
+            netplay_apply_inputs(ps3_canonical_from_wire(in[0]), ps3_canonical_from_wire(in[1]));
+            step = NETPLAY_STEP_READY;
+        } else if (st == PS3_STEP_WAIT) {
+            step = NETPLAY_STEP_WAIT;
+        } else if (g_input.use_net) {
+            netplay_release_inputs();
+        }
+        netplay_publish_status();
+        return step;
+    }
+
     if (rpcn_session_in_room(&g_netplay.session)) {
         netplay_refresh_room();
         netplay_owner_pump();
@@ -3047,6 +3222,7 @@ static inline bool netplay_vs_plays_on(uint16_t match) {
  * safe to act on.
  */
 static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps, int versus_result) {
+    if (g_netplay.enabled && g_netplay.ps3) { ps3_link_end_frame(&g_netplay.ps3link, versus_result); return; }
     if (!g_netplay.enabled || !netplay_running_match()) return;
 
     uint32_t frame = g_netplay.frame;
@@ -3155,6 +3331,7 @@ static inline void netplay_restart_alone(void) {
  */
 #define NETPLAY_CATCH_UP_FRAMES 6u
 static inline bool netplay_catching_up(void) {
+    if (g_netplay.ps3) return ps3_link_hurry(&g_netplay.ps3link);
     if (g_netplay.state != NETPLAY_WATCHING || g_netplay.reset_pending) return false;
     const lockstep_t *l = &g_netplay.lockstep;
     uint32_t n0 = l->rings[0].newest, n1 = l->rings[1].newest;

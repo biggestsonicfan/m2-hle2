@@ -58,6 +58,49 @@ static inline int game_region_parse(const char *s) {
     return -1;
 }
 
+/*
+ * Cross-play with the PS3 port (net/ps3_link.h). A PS3 match drives the board
+ * the way the PS3's own emulator does in its network mode, through three hooks
+ * on the same instructions it traps (sfight.h). All three are inert unless
+ * g_xplay_match is set.
+ *
+ *   g_xplay_match    a PS3 match owns the board
+ *   g_xplay_barrier  SEL_INT: 0 = hold (skip it, as `ret`), 1 = release at the
+ *                    next call, 2 = released (run it)
+ *   g_xplay_events   what the board did, for ps3_link to take: bit 0 = the
+ *                    forced START at ADV_DSP (a new generation), bit 1 = the
+ *                    barrier released, bit 2 = VIC_INT after a versus match
+ *
+ * Part of a board reset (emu_board_reset_state).
+ */
+static volatile int g_xplay_match   = 0;
+static volatile int g_xplay_barrier = 0;
+static volatile int g_xplay_events  = 0;
+#define XPLAY_EV_NEW_GENERATION 1
+#define XPLAY_EV_BARRIER        2
+#define XPLAY_EV_MATCH_OVER     4
+
+/*
+ * The match's settings, the way the PS3 build puts them on its board
+ * (NetMatch_StateMachine -> NetGameMode_Set(2) -> Settings_ApplyRoomRules): the
+ * room's rules go into the game's own settings block, the "game assignments"
+ * the test menu edits (RAM 0x59C340 and backup RAM 0x1D03340, 0x42 bytes), once
+ * the board has booted past WARNING. Until they are in, the forced START waits.
+ *
+ *   g_xplay_rules   +0x01 rounds to win, +0x04 energy (VS), +0x11 round time,
+ *                   +0x13 the flag byte (AUTOMATIC, HYPER MODE, BARRIER RESET,
+ *                   DAMAGE, ...), +0x18 barrier (also word 0x50A424)
+ *   g_xplay_seed    the room's seed: the PS3 picks the stage from it (0xAF84)
+ *   g_xplay_mode / g_xplay_also_mode   mode (0x50002A) and also_mode (0x50002B)
+ *                   at the last frame boundary, -1 before the first
+ */
+static volatile int      g_xplay_rules_pending = 0;
+static volatile int      g_xplay_ready         = 0;
+static uint8_t           g_xplay_rules[5];
+static volatile uint32_t g_xplay_seed          = 0;
+static volatile int      g_xplay_mode          = -1;
+static volatile int      g_xplay_also_mode     = -1;
+
 /* Monotonic count of completed game frames. The emu thread bumps it at every
  * frame boundary (HLE pace hook or board vblank ACK). Tooling outside the
  * emulator needs a frame clock to pace a capture by — MAME's drivers use the
