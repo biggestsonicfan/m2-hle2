@@ -1951,7 +1951,7 @@ static inline void geo3d_decode_model(int model_idx,
                  * check_culling), so the group standing here is wiped, and at the
                  * head of a mesh that is the mesh's first polygon too. AM2's
                  * one-link 2x2 shadow card (70 STF entries) is exactly that and
-                 * draws nothing, whatever the explorer decodes (noclip#24). */
+                 * draws nothing. */
                 idx[n_idx - 4] = -1; idx[n_idx - 3] = -1;
                 idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
                 idx[n_idx++] = new_a - 2; idx[n_idx++] = new_a - 1;

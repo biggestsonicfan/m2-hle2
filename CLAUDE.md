@@ -120,7 +120,7 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
 | 2 | Plain new quad group |
 | 3 | Anchor new strip off previous corner (`f1==1` → `Index[-1]`, else `Index[-2]`; `anchor_b = Index[-3]`) |
 
-**iFlag 0 wipes its group at the head of a mesh too.** The board culls any polygon whose own link type is 0 (MAME `check_culling`, `model2_v.cpp`, before `model2_3d_process_polygon` rasterises). AM2's one-link 2×2 shadow card at y = −2 is a single quad of link type 0 (`attr 00040401`), so it draws nothing: 70 STF entries decode empty. The explorer draws them (noclip#24, from its Daytona port); do not port its `vcount > 0` guard. `grade-models` carries those 70 as a named departure until the explorer is fixed.
+**iFlag 0 wipes its group at the head of a mesh too.** The board culls any polygon whose own link type is 0 (MAME `check_culling`, `model2_v.cpp`, before `model2_3d_process_polygon` rasterises). AM2's one-link 2×2 shadow card at y = −2 is a single quad of link type 0 (`attr 00040401`), so it draws nothing: 70 STF entries decode empty. Do not skip the wipe at the head. The explorer's Daytona port once did, and drew a square the board culls (noclip#24, fixed in #26).
 
 **Face loop:** `i < n_idx - 8`, always 2 groups behind tail.
 **Face type:** `f1 == 2` → triangle; otherwise quad with **A-B-D-C** winding.
