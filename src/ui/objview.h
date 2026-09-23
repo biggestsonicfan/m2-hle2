@@ -84,6 +84,7 @@ typedef struct {
     int   wireframe;           /* overlay the decoder's edges */
     int   textured;            /* 0: flat face colour, texture ignored */
     int   cull;                /* 0 none, 1 CW front, 2 CCW front */
+    int   layers;              /* faces lying on faces drawn over them (geo3d_mesh_layers) */
 
     /* --- what the last render found (callers read, never write) --- */
     int   have_result;
@@ -180,6 +181,7 @@ static inline void objview_init(void) {
     v->bg[0] = 0.10f; v->bg[1] = 0.11f; v->bg[2] = 0.13f; v->bg[3] = 1.0f;
     v->textured   = 1;
     v->cull       = 0;
+    v->layers     = 1;
     g_objview.window_request = -1;
 }
 
@@ -330,6 +332,9 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
      * geo3d_build_wireframes — which is also why objview_service has to run
      * after the swapchain pass, not before it. */
     g_geo3d_lines.count = 0;
+    /* This runs on the render thread, which owns the mesh cache, so the decode
+     * may take each face's layer from it (geo3d_mesh_layers). */
+    g_geo3d_decode_layers = v->layers;
 
     geo3d_decode_model(model,
                        rs->main_data, rs->main_data_size,
@@ -339,6 +344,7 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
                        q->mesh_ptr_subtract, q->mesh_ptr_add,
                        mat, cr, cg, cb);
 
+    g_geo3d_decode_layers = 0;
     g_geo3d_tri_sink    = saved_sink;
     g_geo3d_dump_busy   = 0;
     g_geo3d_palram      = saved_pal;
@@ -561,8 +567,11 @@ static inline void objview__upload(int *out_fill_verts, int *out_line_verts) {
                 v[k].lb=lb; v[k].pl=T->pl; v[k].fl=T->fl; v[k].texlod=T->texlod;
                 /* Plain depth here: the board's polygon z-sort is right under
                  * the board's own camera and turns a floor into a wall under a
-                 * free one, and this viewer's camera goes anywhere. */
-                v[k].zs=GEO3D_ZSORT_NONE;
+                 * free one, and this viewer's camera goes anywhere. A face's
+                 * layer holds from any side it is drawn from, so it stays (the
+                 * explorer's model view keeps it too); its plane is camera
+                 * space for the board's camera and does not. */
+                v[k].zs=GEO3D_ZSORT_NONE; v[k].zl=T->zl;
             }
         }
         sg_update_buffer(g_objview.fill_vbuf, &(sg_range){

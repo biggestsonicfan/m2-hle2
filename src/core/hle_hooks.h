@@ -32,6 +32,14 @@ static volatile int g_frame_done = 0;
  * on the same frame. Part of a board reset (emu_board_reset_state). */
 static volatile int g_versus_result = 0;
 
+/* match_replay's stage (--match-replay-stage): the stage the replay fight is
+ * played on instead of its own. g_match_replay_stage is what was asked for;
+ * the jump arms g_replay_stage_pin with it, and the profile's stage hook then
+ * writes it where the replay hands stage_num to change_scene. MAME's side does
+ * the same from the jump on (tools/mame/match-replay.lua, MR_STAGE). -1: off. */
+static int          g_match_replay_stage = -1;
+static volatile int g_replay_stage_pin   = -1;
+
 /* The region the board powers up as, for games whose region is a backup-RAM
  * setting (STF's country_val: 0 Japan, 1 USA, 2 Export). A profile's hook
  * applies it where the game writes its factory default, so it holds for every

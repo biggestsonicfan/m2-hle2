@@ -22,6 +22,16 @@
 --   MR_ROB (hex, default 0x3400) bytes of fighter 0 (0x510D00), then of fighter 1 (0x514100),
 --   then each MR_EXTRA range ("hexaddr:hexlen,...") in order -- bufferram the
 --   coprocessor writes and the i960 reads back directly, not through the FIFO
+--
+-- Optional:
+--   MR_STAGE=n       play the replay on stage n: the replay's own stores of its
+--                    stage (ADV_REPLAY_INT stores byte_50005B, then stage_num,
+--                    then calls change_scene at 0x941C) are given n instead.
+--                    m2hle's --match-replay-stage writes n to both at 0x941C,
+--                    which leaves memory the same when change_scene reads it.
+--   MR_SNAP=a:b:s    a snapshot of the screen at replay frames a, a+s, ... <= b
+--                    (frames counted from the jump, as the records are), named
+--                    r<frame>.png in -snapshot_directory (tools/grade-zsort.mjs).
 
 local OUT    = assert(os.getenv("MR_OUT"), "set MR_OUT")
 local FRAMES = tonumber(os.getenv("MR_FRAMES") or "1300")
@@ -36,6 +46,10 @@ local EXTRA = {}
 for a, l in string.gmatch(os.getenv("MR_EXTRA") or "", "(%x+):(%x+)") do
     EXTRA[#EXTRA + 1] = { tonumber(a, 16), tonumber(l, 16) }
 end
+
+local STAGE = tonumber(os.getenv("MR_STAGE") or "")
+local SNAP_A, SNAP_B, SNAP_S = string.match(os.getenv("MR_SNAP") or "", "^(%d+):(%d+):(%d+)$")
+SNAP_A, SNAP_B, SNAP_S = tonumber(SNAP_A), tonumber(SNAP_B), tonumber(SNAP_S)
 
 local sp = manager.machine.devices[":maincpu"].spaces["program"]
 local f = assert(io.open(OUT, "wb"))
@@ -53,6 +67,9 @@ local function edge(offset, data, mask)
         end
         return nil
     end
+    if SNAP_A and n >= SNAP_A and n <= SNAP_B and (n - SNAP_A) % SNAP_S == 0 then
+        manager.machine.screens[":screen"]:snapshot(string.format("r%05d.png", n))
+    end
     f:write(string.pack("<I4BBI2", sp:read_u32(0x500020), sp:read_u8(0x500064), sp:read_u8(STEP_ADDR), 0))
     for _, base in ipairs(ROBS) do f:write(sp:read_range(base, base + ROB - 1, 8)) end
     for _, e in ipairs(EXTRA) do f:write(sp:read_range(e[1], e[1] + e[2] - 1, 8)) end
@@ -68,3 +85,20 @@ local function edge(offset, data, mask)
 end
 
 _G.MATCH_REPLAY_TAP = sp:install_write_tap(0x50D000, 0x50D003, "match_replay", edge)
+
+-- The stage substitution: the first store to each byte after the jump. The
+-- bus is 32 bits wide; byte_50005B is the top lane of 0x500058 and stage_num
+-- the bottom lane of 0x500064.
+if STAGE then
+    local lanes = { [0x500058] = 24, [0x500064] = 0 }
+    local pending = { [0x500058] = true, [0x500064] = true }
+    local function sub(offset, data, mask)
+        local sh = lanes[offset]
+        if not jumped or not sh or not pending[offset] or ((mask >> sh) & 0xFF) == 0 then return nil end
+        pending[offset] = nil
+        log:write(string.format("stage %d substituted at 0x%X (was %d)\n", STAGE, offset + (sh // 8), (data >> sh) & 0xFF))
+        log:flush()
+        return (data & ~(0xFF << sh)) | ((STAGE & 0xFF) << sh)
+    end
+    _G.MATCH_REPLAY_STAGE_TAP = sp:install_write_tap(0x500058, 0x500067, "match_replay_stage", sub)
+end

@@ -446,6 +446,21 @@ static int sfight_hook_xplay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 1;
 }
 
+/* replay_stage (0x941C, ADV_REPLAY_INT `call change_scene`): the attract
+ * replay has just stored its stage (byte_50005B + 1, wrapping past 7) in both
+ * byte_50005B and stage_num, and change_scene loads it next, so a stage written
+ * to both now is the one the replay is played on (stage_num alone still loads
+ * the natural stage). match_replay's stage pin (g_replay_stage_pin). MAME's
+ * side substitutes the value of those two stores with write taps, which leaves
+ * memory the same at this instruction. */
+static int sfight_hook_replay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if (g_replay_stage_pin < 0) return 1;
+    mem_write8(bus, 0x0050005B, (uint8_t)g_replay_stage_pin);
+    mem_write8(bus, 0x00500064, (uint8_t)g_replay_stage_pin);
+    return 1;
+}
+
 /* xplay_game_time (0xB0F8, GAME_INT+4): `time` (0x500090) is the round-time
  * setting, settings byte +0x11 (0x59C351), before the instruction runs. */
 static int sfight_hook_xplay_game_time(i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -668,7 +683,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 19
+#define SFIGHT_BASE_HOOK_COUNT 21
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
@@ -689,7 +704,8 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0000E93C, sfight_hook_xplay_vic_dsp,      "xplay_vic_dsp"           }, \
     { 0x0000AF84, sfight_hook_xplay_stage,        "xplay_stage"             }, \
     { 0x0000B0F8, sfight_hook_xplay_game_time,    "xplay_game_time"         }, \
-    { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      },
+    { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      }, \
+    { 0x0000941C, sfight_hook_replay_stage,       "replay_stage"            },
 
 #define SFIGHT_INPUT_MAP                                                        \
     .held_addr       = 0x00500700,                                              \

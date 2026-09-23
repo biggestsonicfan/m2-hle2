@@ -46,6 +46,7 @@ typedef struct {
     float fl;                   /* GEO3D_FACE_* flags */
     float texlod;               /* the board's texlod, or GEO3D_TEXLOD_NONE */
     float zs;                   /* the polygon's sort z, or GEO3D_ZSORT_NONE */
+    float zl;                   /* its layer as a [0, 1] depth offset (geo3d_mesh_layers) */
 } game_render_tex_vertex_t;
 
 typedef struct {
@@ -325,7 +326,7 @@ static const char *game_render_fill_vs_glsl =
     "layout(location=2) in vec2 a_uv;\n"
     "layout(location=3) in vec4 a_tile;\n"
     "layout(location=4) in vec4 a_lbpl;\n"
-    "layout(location=5) in float a_zs;\n"
+    "layout(location=5) in vec2 a_zs;\n"   /* sort z, layer offset */
     "out vec4 color;\n"
     "out vec2 uv;\n"
     "out float ez;\n"
@@ -355,11 +356,14 @@ static const char *game_render_fill_vs_glsl =
      * lens w is negative and the clamp would hand back the near plane, which
      * tells the clipper to cut the edge at the vertex it should be keeping and
      * throws the polygon out whole. */
-    "  if (a_zs < 1.0e29 && gl_Position.w > 0.0) {\n"
-    "    float zc = mvp[0][2]*a_pos.x + mvp[1][2]*a_pos.y + mvp[2][2]*a_zs + mvp[3][2];\n"
-    "    float zw = mvp[0][3]*a_pos.x + mvp[1][3]*a_pos.y + mvp[2][3]*a_zs + mvp[3][3];\n"
+    "  if (a_zs.x < 1.0e29 && gl_Position.w > 0.0) {\n"
+    "    float zc = mvp[0][2]*a_pos.x + mvp[1][2]*a_pos.y + mvp[2][2]*a_zs.x + mvp[3][2];\n"
+    "    float zw = mvp[0][3]*a_pos.x + mvp[1][3]*a_pos.y + mvp[2][3]*a_zs.x + mvp[3][3];\n"
     "    gl_Position.z = clamp(zc / max(zw, 1e-6), -1.0, 1.0) * gl_Position.w;\n"
     "  }\n"
+    /* A face lying on others in its plane is pulled in front of them by its layer
+     * (geo3d_mesh_layers), in [0, 1] depth units: twice that in GL's [-1, 1]. */
+    "  if (gl_Position.w > 0.0) gl_Position.z -= 2.0 * a_zs.y * gl_Position.w;\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl; ez = -a_pos.z;\n"
     "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
     "  if (tw > 0 && th > 0 && (tw & (tw - 1)) == 0 && (th & (th - 1)) == 0) fl |= 64;\n"
@@ -676,16 +680,17 @@ static const char *game_render_fill_fs_glsl =
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
-    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float4 lbpl : TEXCOORD2; float zs : TEXCOORD3; };\n"
+    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float4 lbpl : TEXCOORD2; float2 zs : TEXCOORD3; };\n"
     "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
     /* The board's polygon z-sort — see the GLSL vertex shader above. */
-    "  if (inp.zs < 1.0e29 && outp.pos.w > 0.0) {\n"
-    "    float4 pz = float4(inp.pos.xy, inp.zs, 1.0);\n"
+    "  if (inp.zs.x < 1.0e29 && outp.pos.w > 0.0) {\n"
+    "    float4 pz = float4(inp.pos.xy, inp.zs.x, 1.0);\n"
     "    outp.pos.z = clamp(dot(mvp[2], pz) / max(dot(mvp[3], pz), 1e-6), -1.0, 1.0) * outp.pos.w;\n"
     "  }\n"
+    "  if (outp.pos.w > 0.0) outp.pos.z -= inp.zs.y * outp.pos.w;\n"
     "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl; outp.ez = -inp.pos.z;\n"
     "  return outp;\n"
     "}\n";
@@ -1221,7 +1226,7 @@ static inline void game_render_init(void) {
         p.layout.attrs[3].offset   = offsetof(game_render_tex_vertex_t, tx);
         p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT4;
         p.layout.attrs[4].offset   = offsetof(game_render_tex_vertex_t, lb);
-        p.layout.attrs[5].format   = SG_VERTEXFORMAT_FLOAT;
+        p.layout.attrs[5].format   = SG_VERTEXFORMAT_FLOAT2;   /* zs, zl */
         p.layout.attrs[5].offset   = offsetof(game_render_tex_vertex_t, zs);
         p.layout.buffers[0].stride = sizeof(game_render_tex_vertex_t);
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
@@ -1798,6 +1803,7 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
             v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
             v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=T->fl; v[_k].texlod=T->texlod;
             v[_k].zs = _k == 0 ? T->zs0 : (_k == 1 ? T->zs1 : T->zs2);
+            v[_k].zl = T->zl;
         }
     }
     int vcount = n * 3;
@@ -1942,6 +1948,7 @@ static inline void game_render_batch_flush(bool lines_only) {
                 v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
                 v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=fl;    v[k].texlod=T->texlod;
                 v[k].zs = k == 0 ? T->zs0 : (k == 1 ? T->zs1 : T->zs2);
+                v[k].zl = T->zl;
             }
         }
         sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
@@ -2077,6 +2084,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_obj_tha = cm->tha;
                 g_geo3d_board_luma = 1;
                 g_geo3d_mode = cm->geo_mode;
+                g_geo3d_zadjust = cm->zadjust;
                 g_geo3d_lod  = cm->geo_lod;
                 if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
                     uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;

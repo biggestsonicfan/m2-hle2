@@ -87,6 +87,7 @@ its built-in `WebSocket`.
 | `grade-stage.mjs` | arena placement only, by running the explorer toolkit's own `stf-tools/verify-stage.mjs` unchanged on a `capture_dl` capture of a fight here. Needs a sibling `stf-tools` checkout (`$M2_STF_TOOLS` overrides) and skips cleanly without one. `grade-stages` is the fuller check |
 | `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
+| `grade-zsort.mjs` | which face wins where faces lie on faces (`geo3d_mesh_layers`), in pictures against MAME's. Plays the attract replay in MAME and here, here with the layers off and on, and counts, of the pixels the layers change, how many each puts nearer MAME. `--stage N` puts the replay on another stage in both. See "Faces lying on faces" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `bench-builds.mjs` | how fast each build runs the board, headless and unthrottled: game frames a second past the texture-load spike, builds alternated, best of each. The throughput companion of `ab-builds`; `bench-render.mjs` is the renderer's: each build headless with the A/V server up and drained, so the main thread draws every board frame on the real D3D11 device, and `get_status`'s `render` block gives the microseconds each stage (tile compose, scan, upload, 3D draw, tile quads) costs a frame |
@@ -401,6 +402,55 @@ Still differing, with no effect on the fight so far:
 - one bit of `P1+0x1114` from +321;
 - the rig from +382;
 - the sign of zero in TGP bufferram.
+
+## Faces lying on faces (`grade-zsort`)
+
+A depth buffer cannot tell two faces in one plane apart; the board's polygon sort
+can, a polygon at a time, and MAME's software renderer sorts the way the board
+does. So this grader holds pictures, not state. It plays the attract replay (above)
+in MAME with snapshots at replay frames `--from`..`--to` by `--step`, and here
+twice over the A/V stream at the board's 496x384, face layers off and then on.
+Pictures are paired by the edge count from the jump. The `frame_counter` both
+sides read there has to differ by one constant: MAME's is 640 ahead, the boot
+warning this emulator skips.
+
+```sh
+node tools/grade-zsort.mjs --mame --stage 5   # MAME's snapshots (~12 min)
+node tools/grade-zsort.mjs --stage 5          # here, twice, and grade (~1 min)
+```
+
+`--stage N` plays the replay on another stage in both emulators, at the same
+instruction: `--match-replay-stage N` here writes N to `byte_50005B` and `stage_num`
+at `0x941C` (ADV_REPLAY_INT's `call change_scene`), and `MR_STAGE` in
+`tools/mame/match-replay.lua` substitutes N into the two stores just before it.
+The replay is recorded for stage 1, so on another stage it drifts sooner.
+
+- **Camera match:** a frame is graded only if the camera matches MAME's within
+  `--cam-tol` (0.05 units, 64/65536 of a turn). The off and on pictures share
+  their camera, so a small difference adds the same noise to both.
+- **The measurement:** of the pixels where off and on differ, how many each
+  puts nearer MAME's (largest channel difference, by more than `--tol`).
+- **Pictures:** the frame the layers change most is written as MAME | off | on |
+  changes, with the changes in green (nearer with the layers) and red (nearer
+  without), plus a crop of just the changes.
+- **Finding a model:** `--only-model N` (or `LO-HI`) layers only those models,
+  which is how a bad result is traced to one. The emulator reports which models
+  drew layered faces, and `--set k=v` passes more `set_camera` switches to the
+  play with the layers on.
+
+What it found, on the way to the current rules (`CLAUDE.md`, "3D Polygon
+Decoder"): a straight port of the explorer's layers put 5,588 of 5,613 changed
+pixels further from MAME on Casino Night. Three departures fixed that:
+- the floor emblem's base face had stopped receding (model 194);
+- a glove's parallel faces had been pulled onto one plane (1813/1818);
+- the order comes from the board's sort under the real camera, not a vote.
+
+With all three, at 31 frames a stage:
+
+```
+stage 1  PASS  1469 pixels changed: 1465 nearer MAME with the layers, 3 nearer without
+stage 5  PASS  808 pixels changed: 788 nearer MAME with the layers, 18 nearer without
+```
 
 ## Sway chains (osage) at character select
 
