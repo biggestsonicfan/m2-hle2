@@ -189,6 +189,8 @@ typedef struct {
      * Twitch login token from a server that merely went away, and the error text
      * is for people, not for strcmp. */
     bool     credential_refused;
+    /* What the server said to the login, RPCN_OK until it has refused one. */
+    rpcn_error_t login_error;
 
     uint16_t server_id;
     uint32_t world_id;
@@ -506,6 +508,7 @@ static inline void rpcn_session_stop(rpcn_session_t *s) {
     s->signaling_seen = false;
     s->sent_token = false;
     s->credential_refused = false;
+    s->login_error = RPCN_OK;
     s->pending_serverlist = s->pending_worldlist = s->pending_room = 0;
     s->pending_search = 0;
     s->pending_foreign_serverlist = s->pending_foreign_worldlist = s->pending_foreign_search = 0;
@@ -878,6 +881,7 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
             if (pkt.error != RPCN_OK) {
                 s->credential_refused = pkt.error == RPCN_ERR_LOGIN_BAD_USERNAME
                                      || pkt.error == RPCN_ERR_LOGIN_BAD_PASSWORD;
+                s->login_error = (rpcn_error_t)pkt.error;
                 rpcn_session_fail(s, "login rejected: %s (ErrorType=%u)",
                                   rpcn_login_error_text(pkt.error, s->sent_token),
                                   (unsigned)pkt.error);

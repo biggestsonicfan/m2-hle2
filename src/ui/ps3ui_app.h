@@ -441,8 +441,9 @@ typedef struct {
     char result_names[2][20];
 
     /* the on-screen keyboard (ours) */
-    int osk_field;              /* 0 = name, 1 = password */
-    char osk_text[2][128];   /* [1] holds RPCS3's 64-character derived key too */
+    int osk_field;              /* 0 = name, 1 = password, 2 = e-mail token */
+    char osk_text[3][128];   /* [1] holds RPCS3's 64-character derived key too */
+    int fail_shown;             /* this failure's error has been shown */
     int osk_row, osk_col, osk_shift;
     ps3ui_screen_t osk_back;
 } ps3ui_app_t;
@@ -545,6 +546,8 @@ static void ps3ui_app_go(ps3ui_app_t *a, ps3ui_screen_t s)
 
 static void ps3ui_post(ps3ui_app_t *a, netplay_cmd_kind_t k)
 {
+    if (k == NETPLAY_CMD_CONNECT || k == NETPLAY_CMD_TWITCH_START)
+        a->fail_shown = 0;              /* a new attempt: its failure is news */
     if (a->be.post)
         a->be.post(k, &a->cfg);
 }
@@ -760,8 +763,13 @@ static void ps3ui_update_osk(ps3ui_app_t *a)
         a->osk_row = a->osk_col = 0;
         return;
     }
-    snprintf(a->cfg.npid, sizeof a->cfg.npid, "%s", a->osk_text[0]);
-    snprintf(a->cfg.password, sizeof a->cfg.password, "%s", a->osk_text[1]);
+    if (a->osk_field == 2) {
+        /* the e-mail token, for the account and password already typed */
+        snprintf(a->cfg.token, sizeof a->cfg.token, "%s", a->osk_text[2]);
+    } else {
+        snprintf(a->cfg.npid, sizeof a->cfg.npid, "%s", a->osk_text[0]);
+        snprintf(a->cfg.password, sizeof a->cfg.password, "%s", a->osk_text[1]);
+    }
     a->cfg.twitch_token[0] = 0;
     ps3ui_post(a, NETPLAY_CMD_CONNECT);
     ps3ui_app_go(a, PS3UI_SCR_CONNECT);
@@ -1024,11 +1032,29 @@ static void ps3ui_follow(ps3ui_app_t *a)
         a->scr = PS3UI_SCR_NONE;                     /* the game has the screen */
         break;
     case NETPLAY_FAILED:
-        if (a->dialog != PS3UI_DLG_ERROR && st->error[0]) {
-            snprintf(a->dialog_text, sizeof a->dialog_text, "%s", st->error);
+        /* Once per failure. Netplay stays FAILED until the next attempt, so
+         * asking again whenever the dialog is closed brings it straight back,
+         * and the player can never get past it to try anything else. */
+        if (!a->fail_shown && st->error[0]) {
+            a->fail_shown = 1;
+            if (st->need_email_token) {
+                /* The password was right; the server verifies accounts by
+                 * e-mail. There is no token box on the sign-in screen, so the
+                 * keyboard asks for it and signs in again with it. */
+                a->osk_field = 2;
+                snprintf(a->osk_text[2], sizeof a->osk_text[2], "%s", a->cfg.token);
+                a->osk_row = a->osk_col = 0;
+                a->osk_back = PS3UI_SCR_SIGNIN;
+                ps3ui_app_go(a, PS3UI_SCR_OSK);
+                snprintf(a->dialog_text, sizeof a->dialog_text, "%s",
+                         a->cfg.token[0] ? "The server refused that e-mail token. Check it against the sign-up e-mail and enter it again."
+                                         : "This server verifies accounts by e-mail. Enter the token from the sign-up e-mail.");
+            } else {
+                snprintf(a->dialog_text, sizeof a->dialog_text, "%s", st->error);
+            }
             ps3ui_app_ask(a, PS3UI_DLG_ERROR, a->dialog_text);
         }
-        if (a->scr != PS3UI_SCR_SIGNIN)
+        if (a->scr != PS3UI_SCR_SIGNIN && a->scr != PS3UI_SCR_OSK)
             ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
         break;
     }
@@ -1416,10 +1442,11 @@ static void ps3ui_draw_osk(ps3ui_canvas_t *cv, ps3ui_app_t *a)
         memset(shown, '*', n);
         shown[n] = 0;
     } else {
-        snprintf(shown, sizeof shown, "%s", a->osk_text[0]);
+        snprintf(shown, sizeof shown, "%s", a->osk_text[a->osk_field]);
     }
+    static const char *const label[3] = { "Online ID", "Password", "E-mail token" };
     char line[sizeof shown + 32];
-    snprintf(line, sizeof line, "%s: %s_", a->osk_field ? "Password" : "Online ID", shown);
+    snprintf(line, sizeof line, "%s: %s_", label[a->osk_field], shown);
     ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly, line, alpha);
     /* rows 1..4: keys; row 5: actions */
     float cell = (rx - lx) / 10.0f;

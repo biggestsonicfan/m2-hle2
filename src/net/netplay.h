@@ -423,6 +423,10 @@ typedef struct {
     char server[128];       /* and the server it is on */
 
     char error[256];
+    /* The password was right and the server wants the e-mail verification token
+     * (none given, or the wrong one): a lobby asks for it rather than showing
+     * the same refusal again. */
+    bool need_email_token;
     char log[NETPLAY_LOG_LINES][NETPLAY_LOG_LEN];
     uint32_t log_count;     /* total ever written; index = (n % LINES) */
 } netplay_status_t;
@@ -1465,12 +1469,11 @@ static inline void netplay_text_add(netplay_text_t *t, const char *fmt, ...) {
 
 static inline void netplay_twitch_merge_disk(void);
 
-static inline void netplay_settings_save(void) {
-    netplay_twitch_merge_disk();
-    char text[2048];
-    netplay_text_t t = { text, sizeof(text) };
+/* The settings file's text for what g_netplay.cfg holds now, under `header`. */
+static inline void netplay_settings_text(char *text, size_t size, const char *header) {
+    netplay_text_t t = { text, size };
     text[0] = '\0';
-    netplay_text_add(&t, "# m2-hle2 netplay settings. Delete this file to forget them.\n");
+    netplay_text_add(&t, "%s", header);
     if (g_netplay.cfg.password[0])
         netplay_text_add(&t, "# This file holds a password in clear text.\n");
     netplay_text_add(&t, "server=%s\n",       g_netplay.cfg.server);
@@ -1498,16 +1501,17 @@ static inline void netplay_settings_save(void) {
         netplay_text_add(&t, "twitch_server=%s\n", g_netplay.cfg.twitch_server);
         netplay_text_add(&t, "twitch_port=%u\n", (unsigned)g_netplay.cfg.twitch_port);
     }
+}
 
-    memcpy(g_netplay.twitch_synced, g_netplay.cfg.twitch_token, sizeof(g_netplay.twitch_synced));
+/* Write settings text to `path` (on the web build, a storage key). */
+static inline void netplay_settings_write(const char *path, const char *text) {
 #ifdef __EMSCRIPTEN__
-    netplay_web_store(NETPLAY_CFG_PATH, text);
+    netplay_web_store(path, text);
 #else
     /* Written whole and renamed into place: every copy of the emulator on the
      * machine shares this file, and a stream and its training runs can sign in
      * at the same moment. A reader must never see half of one. */
-    const char *path = netplay_cfg_path();
-    char tmp[sizeof(g_netplay_cfg_path) + 24];
+    char tmp[sizeof(g_netplay_cfg_path) + 48];
 #ifdef _WIN32
     snprintf(tmp, sizeof(tmp), "%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
 #else
@@ -1537,6 +1541,40 @@ static inline void netplay_settings_save(void) {
         netplay_log("could not save the netplay settings to %s", path);
     }
 #endif
+}
+
+static inline void netplay_settings_save(void) {
+    netplay_twitch_merge_disk();
+    char text[2048];
+    netplay_settings_text(text, sizeof(text),
+                          "# m2-hle2 netplay settings. Delete this file to forget them.\n");
+    memcpy(g_netplay.twitch_synced, g_netplay.cfg.twitch_token, sizeof(g_netplay.twitch_synced));
+#ifdef __EMSCRIPTEN__
+    netplay_settings_write(NETPLAY_CFG_PATH, text);
+#else
+    netplay_settings_write(netplay_cfg_path(), text);
+#endif
+}
+
+/* Sign-out forgets every credential, and a Twitch token or an e-mail token cannot
+ * be typed back in from memory. So the sign-in is copied aside first, beside the
+ * settings file: renaming the copy over it undoes the sign-out. Only the latest
+ * sign-out is kept. */
+static inline void netplay_settings_backup(void) {
+    if (!g_netplay.cfg.password[0] && !g_netplay.cfg.token[0] && !g_netplay.cfg.twitch_token[0])
+        return;   /* nothing that could be lost */
+    char text[2048];
+    netplay_settings_text(text, sizeof(text),
+                          "# m2-hle2 netplay settings, copied at sign-out. Rename this file over\n"
+                          "# the settings file to sign back in with them.\n");
+    char path[560];
+#ifdef __EMSCRIPTEN__
+    snprintf(path, sizeof(path), "%s.signed-out", NETPLAY_CFG_PATH);
+#else
+    snprintf(path, sizeof(path), "%s.signed-out", netplay_cfg_path());
+#endif
+    netplay_settings_write(path, text);
+    netplay_log("the sign-in was copied to %s before being forgotten", path);
 }
 
 static inline void netplay_settings_parse_line(netplay_config_t *cfg, char *line) {
@@ -1849,6 +1887,8 @@ static inline void netplay_publish_status(void) {
 
     snprintf(st->error, sizeof(st->error), "%s",
              g_netplay.state == NETPLAY_FAILED ? rpcn_session_error(&g_netplay.session) : "");
+    st->need_email_token = g_netplay.state == NETPLAY_FAILED
+                        && g_netplay.session.login_error == RPCN_ERR_LOGIN_BAD_TOKEN;
 
     st->ps3 = g_netplay.ps3;
     if (g_netplay.ps3) {
@@ -2484,6 +2524,7 @@ static inline void netplay_pump_commands(void) {
                  * lobby's "Sign out" is how a player changes account or server,
                  * and on a shared machine it has to mean it. */
                 netplay_do_disconnect();
+                netplay_settings_backup();
                 g_netplay.cfg.twitch_token[0]  = '\0';
                 g_netplay.cfg.twitch_npid[0]   = '\0';
                 g_netplay.cfg.twitch_server[0] = '\0';
