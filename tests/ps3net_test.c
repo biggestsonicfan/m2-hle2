@@ -527,6 +527,33 @@ static void test_owner_pump(void) {
     s.peers[0].bin[0x1C] = 1;
     ps3_put32(s.peers[0].bin, PS3_MFLAG_ROTATED);
     CHECK(ps3_published_winner(&L) == 0, "a fighter at the same place asking for its side is not a winner");
+    /* The common case: last match's winner, staying on at teamId 1 and asking
+     * for its side again, whose lockstep gives out this match. */
+    s.peers[0].team_id = 1;
+    CHECK(ps3_published_winner(&L) == 1, "(without the mark, last match's winner looks like this match's)");
+    s.peers[0].bin[PS3_ME_NO_RESULT] = 1;
+    CHECK(ps3_published_winner(&L) == 0, "marked 'no result', last match's winner is not read as this one's");
+    ps3_put32(s.peers[1].bin, PS3_MFLAG_ROTATED);   /* 40, 2P, at the back asking for nothing */
+    s.peers[1].team_id = 2;
+    CHECK(ps3_published_winner(&L) == 1, "the other fighter's real result still counts");
+    s.peers[1].team_id = 1;
+    s.peers[1].bin[0x1C] = 2;
+    CHECK(ps3_published_winner(&L) == 2, "and says who won when the marked fighter lost");
+    /* Our own no-result rotation marks us, and the next match clears it. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    L.team = 1; L.me[0x1C] = 1;
+    ps3_rotate(&L, 0);
+    CHECK(L.me[PS3_ME_NO_RESULT] == 1 && L.team == 1 && L.me[0x1C] == 1, "our no-result rotation is marked");
+    s.room_bin_len = PS3_ROOM_BIN_SIZE;
+    ps3_put32(s.room_bin + 0x10, PS3_PHASE_PREPARING);
+    s.room_rev++;
+    ps3_read_room(&L);
+    ps3_put32(s.room_bin + 0x10, PS3_PHASE_MATCH);
+    s.room_rev++;
+    ps3_read_room(&L);
+    CHECK(L.me[PS3_ME_NO_RESULT] == 0, "and the mark is gone when the next match starts");
+    ps3_match_end(&L, "test");
 }
 
 /* The peer-to-peer port is bound before the TLS connect, and on Windows that
@@ -536,6 +563,15 @@ static void test_owner_pump(void) {
 static void test_bind_order(void) {
     static rpcn_session_t s;
     memset(&s, 0, sizeof(s));
+    /* A port nothing holds, found with the library up and then let go of. */
+    uint16_t port = 0;
+    net_startup();
+    for (uint16_t p = 3747; p < 3800 && !port; p++) {
+        net_sock_t k = NET_SOCK_INVALID;
+        if (net_udp_open(&k, p)) { net_close(&k); port = p; }
+    }
+    net_shutdown_lib();
+    CHECK(port != 0 && g_net_refs == 0, "a free port, and nothing holds the socket library");
     rpcn_session_config_t c;
     memset(&c, 0, sizeof(c));
     c.server = "127.0.0.1";
@@ -544,14 +580,18 @@ static void test_bind_order(void) {
     c.password = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     c.token = "";
     c.com_id = "NPWR03869_00";
-    c.local_p2p_port = 3747;
+    c.local_p2p_port = port;
     c.ps3 = true;
     bool ok = rpcn_session_start(&s, &c);
     const char *err = rpcn_session_error(&s);
     printf("      (%s)\n", err);
     CHECK(!ok && s.stage == RPCN_STAGE_FAILED && !strstr(err, "could not bind"),
           "a first sign-in gets as far as the connect: the socket library is up for the bind");
+    CHECK(s.net_held && g_net_refs == 1, "the session holds its one reference on the library");
     rpcn_session_stop(&s);
+    CHECK(!s.net_held && g_net_refs == 0, "and gives it back when it stops");
+    rpcn_session_stop(&s);
+    CHECK(g_net_refs == 0, "a second stop gives back nothing more");
 }
 
 int main(void) {
