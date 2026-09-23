@@ -22,17 +22,22 @@
  *              netpacket interface). RetroArch's own netplay needs savestates,
  *              which this emulator does not have, so this is the only way it
  *              can carry a session.
- *   RPCN       the desktop's and the website's netplay (net/netplay.h), whose
- *              lobby IS the frontend's menu: RetroArch draws the rooms, the
- *              line and the actions from core options this core keeps up to
- *              date (ui/retro_lobby.h). Plays against the PC and the browser.
+ *   RPCN       the desktop's and the website's netplay (net/netplay.h), with
+ *              the lobby the PS3 port of the game has: its menus, rebuilt from
+ *              the PS3's own layouts and drawn by the core (ui/ps3ui_app.h),
+ *              driven with the pad. Plays against the PC and the browser.
  *
  * Either way a session is a cold boot on both machines and lockstep from there.
  *
- * The core draws nothing but the game. The gamepad lobby it used to put over
- * the picture (ui/pad_lobby.h) belongs to the frontend that has no menu of its
- * own -- the SDL3 handheld build -- and inside RetroArch it was a menu in
- * another program's font, with the pad taken off the game to drive it.
+ * THE PS3'S INTERFACE: with the Console version the core is the PS3 port as a
+ * player meets it (ui/ps3ui_shell.h) -- PUSH START over the attract, the main
+ * menu, Arcade and Offline Versus with the PS3's rule settings, SELECT for the
+ * pause menu, Help & Options with the PS3's button presets, and Online Battle,
+ * which is the RPCN lobby. Menus are a 16:9 frame of their own; the pause menu
+ * sits over the game. Signing in needs no keyboard: Twitch shows a code, and an
+ * RPCN account is typed on the lobby's own on-screen keyboard. The Arcade
+ * version is the board as it shipped (coins on SELECT); its RPCN lobby opens at
+ * load and with L + R together.
  */
 
 /* net/ first, as in main.c: net_socket.h owns the socket include order. */
@@ -67,7 +72,10 @@
 #include "sound.h"
 #include "input.h"
 #include "net/pkt_lockstep.h"
-#include "retro_lobby.h"
+#include "sokol_gl.h"
+#include "ps3ui_app.h"
+#include "ps3ui_gpu.h"
+#include "ps3ui_shell.h"
 
 /* registry.h is the single TU that defines g_profiles[] / g_active_profile. */
 #include "registry.h"
@@ -147,14 +155,12 @@ static void lr_notify(const char *msg, unsigned ms) {
 /* ---- Core options ------------------------------------------------------------ */
 
 typedef enum { LR_ONLINE_RETROARCH, LR_ONLINE_RPCN } lr_online_t;
-typedef enum { LR_LOGIN_OFF, LR_LOGIN_TWITCH, LR_LOGIN_ACCOUNT } lr_login_t;
 
 static struct {
     int         scale;          /* the game drawn at N x 496x384; 0 = at the output's size */
     bool        sound;          /* the sound board is attached (read at load) */
     lr_online_t online;         /* read at load */
     int         net_delay;      /* frames of input delay a session hosted here uses */
-    lr_login_t  login;          /* RPCN sign-in; a change takes effect at once */
     int         draw_every;     /* 1 = every frame, 2 = every second frame (cooler) */
     int         heat_limit;     /* degrees C above which drawing drops to every second frame; 0 = off */
     const char *profile;        /* a profile id, or NULL for the ROM set's default (read at load) */
@@ -162,6 +168,9 @@ static struct {
 
 /* The heat guard's stages (core/heat_guard.h); lr_heat_tick feeds it once a retro_run. */
 static heat_guard_t g_heat;
+
+/* The PS3's interface (ui/ps3ui_shell.h): the Console version has it. */
+static bool g_shell_on;
 
 static struct retro_core_option_v2_category option_cats[] = {
     { "video",  "Video",       "The picture." },
@@ -202,20 +211,12 @@ static struct retro_core_option_v2_definition option_defs[] = {
       LR_DEFAULT_HEAT },
     { "m2hle_online", "Online play", NULL,
       "RetroArch: host and join through RetroArch's Netplay menu and lobby (password, player list and all). "
-      "RPCN: the same rooms as the PC and the website, from the rows below -- sign in with RPCN sign-in, then "
-      "host or join in RPCN lobby action. Takes effect when the game is next loaded.",
+      "RPCN: the same rooms as the PC and the website, in the game's own online lobby, which opens at load and "
+      "with L + R together, and is driven with the pad (sign in with Twitch or an RPCN account). Takes effect "
+      "when the game is next loaded.",
       NULL, "online",
       { { "retroarch", "RetroArch" }, { "rpcn", "RPCN" }, { NULL, NULL } },
       "retroarch" },
-    { "m2hle_rpcn_login", "RPCN sign-in", NULL,
-      "Sign in using Twitch: a code appears on screen; enter it at the address shown. The login is kept, so "
-      "this is once. RPCN account: add a cheat (Quick Menu > Cheats) whose code is rpcn:NAME:PASSWORD:TOKEN "
-      "(TOKEN is the one RPCN e-mailed; leave it off if the server does not ask for one) and apply it. The "
-      "account is kept too.",
-      NULL, "online",
-      { { "off", "Signed out" }, { "twitch", "Sign in using Twitch" }, { "account", "RPCN account (cheat code)" },
-        { NULL, NULL } },
-      "off" },
     { "m2hle_net_delay", "Input delay (frames)", NULL,
       "Frames between a button press and the board seeing it in a session this machine hosts. More hides more "
       "network latency. A player who joins uses the host's.",
@@ -225,33 +226,9 @@ static struct retro_core_option_v2_definition option_defs[] = {
     { NULL, NULL, NULL, NULL, NULL, NULL, { { NULL, NULL } }, NULL },
 };
 
-/*
- * The table as the frontend gets it: the fixed options above, then the seven
- * the RPCN lobby owns (ui/retro_lobby.h), which change as a session moves. The
- * whole thing is re-sent whenever one of those changes -- which a core may do
- * "as long as the number of options doesn't change from the number given in the
- * first call" (libretro.h), so it is always all of them, and a row with nothing
- * to say is hidden instead of dropped.
- */
-#define LR_BASE_OPTIONS (sizeof option_defs / sizeof option_defs[0] - 1)   /* less the terminator */
-static struct retro_core_option_v2_definition option_all[LR_BASE_OPTIONS + RL_OPTION_COUNT + 1];
-static struct retro_core_options_v2 options_v2 = { option_cats, option_all };
-static bool g_options_v2;   /* the frontend took the v2 table, so it can be re-sent */
-
-static void lr_fill_options(void) {
-    size_t n = 0;
-    for (size_t i = 0; i < LR_BASE_OPTIONS; i++) option_all[n++] = option_defs[i];
-    for (int i = 0; i < RL_OPTION_COUNT; i++)    option_all[n++] = g_rlobby_defs[i];
-    memset(&option_all[n], 0, sizeof option_all[n]);
-}
-
-/* RetroArch answers this by writing its options file and building the manager
- * again, so it goes out only when the lobby says a string actually changed. */
-static void lr_push_options(void) {
-    if (!g_options_v2) return;
-    lr_fill_options();
-    env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &options_v2);
-}
+/* The options are sent once and never change: the RPCN lobby is the core's
+ * own screen now, not rows in this table. */
+static struct retro_core_options_v2 options_v2 = { option_cats, option_defs };
 
 static const char *lr_var(const char *key) {
     struct retro_variable v = { key, NULL };
@@ -269,51 +246,28 @@ static void lr_read_options(bool at_load) {
     if ((v = lr_var("m2hle_net_delay"))) {
         int d = atoi(v);
         opt.net_delay = d < 1 ? 1 : d > 8 ? 8 : d;
-        rlobby_set_delay(opt.net_delay);
+        g_ps3ui_app.default_delay = opt.net_delay;
     }
     if ((v = lr_var("m2hle_draw_rate")))  opt.draw_every = strcmp(v, "30") ? 1 : 2;
     if ((v = lr_var("m2hle_heat_guard"))) {
         opt.heat_limit = atoi(v);   /* "off" -> 0 */
         heat_guard_set_limit(&g_heat, opt.heat_limit);   /* a new limit starts its stages over */
     }
-    if ((v = lr_var("m2hle_rpcn_login")))
-        opt.login = !strcmp(v, "twitch") ? LR_LOGIN_TWITCH : !strcmp(v, "account") ? LR_LOGIN_ACCOUNT : LR_LOGIN_OFF;
-    rlobby_read_options(emu_now_us());   /* the lobby's own rows, when it has any */
     if (!at_load) return;
     if ((v = lr_var("m2hle_sound")))  opt.sound  = strcmp(v, "disabled") != 0;
     if ((v = lr_var("m2hle_online"))) opt.online = strcmp(v, "rpcn") ? LR_ONLINE_RETROARCH : LR_ONLINE_RPCN;
     if ((v = lr_var("m2hle_stf_version"))) opt.profile = strcmp(v, "arcade") ? NULL : "sfight";
 }
 
-/* The frontend is about to draw the option list and wants to know what to
- * leave out: the RPCN sign-in only means something with RPCN chosen, and the
- * lobby's own rows follow what the session is doing. */
-static bool RETRO_CALLCONV lr_update_display(void) {
-    const char *v = lr_var("m2hle_online");
-    struct retro_core_option_display d = { "m2hle_rpcn_login", v && !strcmp(v, "rpcn") };
-    env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &d);
-    rlobby_apply_visibility(true);
-    return true;
-}
-
 static void lr_set_options(void) {
     unsigned version = 0;
-    rlobby_defaults(env_cb);   /* the lobby's rows as they stand with no session */
     if (env_cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &version) && version >= 2) {
-        g_options_v2 = true;
-        lr_fill_options();
         /* Its answer says whether the frontend groups options into categories,
-         * NOT whether it took them (libretro.h): a frontend with categories
-         * switched off still has the table, and sending the v0 one after it
-         * would throw the lobby's rows away. */
+         * NOT whether it took them (libretro.h). */
         env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &options_v2);
-        static struct retro_core_options_update_display_callback cb = { lr_update_display };
-        env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK, &cb);
         return;
     }
-    /* An old frontend: the v0 table, first value is the default. The RPCN lobby
-     * is not in it -- it is a table sent again as rooms come and go, which this
-     * interface cannot carry -- so online play there is RetroArch's own. */
+    /* An old frontend: the v0 table, first value is the default. */
     static struct retro_variable vars[] = {
         { "m2hle_resolution", "Internal resolution; " LR_DEFAULT_RES "|native|double|triple|quadruple|fullscreen" },
         { "m2hle_stf_version", "Sonic the Fighters version; console|arcade" },
@@ -321,7 +275,6 @@ static void lr_set_options(void) {
         { "m2hle_draw_rate",  "Draw rate; 60|30" },
         { "m2hle_heat_guard", "Heat guard; " LR_DEFAULT_HEAT "|off|80|85|90" },
         { "m2hle_online",     "Online play; retroarch|rpcn" },
-        { "m2hle_rpcn_login", "RPCN sign-in; off|twitch|account" },
         { "m2hle_net_delay",  "Input delay (frames); 2|1|3|4|5|6|8" },
         { NULL, NULL },
     };
@@ -458,8 +411,8 @@ static void lr_set_input_descriptors(void) {
             desc[n++] = (struct retro_input_descriptor){ port, RETRO_DEVICE_JOYPAD, 0, lr_binds[i].id, names[i] };
         }
     if (opt.online == LR_ONLINE_RPCN) {
-        desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "Lobby (with R)" };
-        desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Lobby (with L)" };
+        desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "Online lobby (with R)" };
+        desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Online lobby (with L)" };
     }
     desc[n] = (struct retro_input_descriptor){ 0, 0, 0, 0, NULL };
     env_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
@@ -574,7 +527,7 @@ static struct retro_netpacket_callback lr_netpacket = {
     "m2hle2-lockstep-1/" M2HLE_VERSION,
 };
 
-/* ---- Online play: RPCN (netplay.h + retro_lobby.h) ---------------------------------- */
+/* ---- Online play: RPCN (netplay.h + ui/ps3ui_app.h) ---------------------------------- */
 
 /* Make every directory along `path` that is missing. */
 static void lr_mkdirs(const char *path) {
@@ -629,77 +582,14 @@ static void lr_rpcn_config_path(void) {
     lr_log(RETRO_LOG_INFO, "RPCN: settings in %s", path);
 }
 
-static lr_login_t g_login_applied = LR_LOGIN_OFF;
-
-/* Make the session match the "RPCN sign-in" option. */
-static void lr_rpcn_apply_login(void) {
-    if (opt.login == g_login_applied) return;
-    lr_login_t was = g_login_applied;
-    g_login_applied = opt.login;
-    netplay_config_t c = g_rlobby.cfg;
-    if (was != LR_LOGIN_OFF) {
-        netplay_post(NETPLAY_CMD_TWITCH_CANCEL, &c);
-        netplay_post(NETPLAY_CMD_DISCONNECT, &c);
-    }
-    switch (opt.login) {
-        case LR_LOGIN_OFF:
-            if (was != LR_LOGIN_OFF) lr_message("RPCN: signed out", 180);
-            break;
-        case LR_LOGIN_TWITCH:
-            /* A stored Twitch login is reused; the device flow (and its code)
-             * runs only when there is none (netplay_twitch_reuse). */
-            c.npid[0] = '\0';
-            netplay_post(NETPLAY_CMD_TWITCH_START, &c);
-            lr_message("RPCN: signing in using Twitch...", 180);
-            break;
-        case LR_LOGIN_ACCOUNT:
-            if (c.npid[0] && c.password[0]) {
-                netplay_post(NETPLAY_CMD_CONNECT, &c);
-                lr_message("RPCN: signing in...", 180);
-            } else {
-                lr_notify("RPCN: add a cheat with the code rpcn:NAME:PASSWORD:TOKEN and apply it "
-                          "(Quick Menu > Cheats)", 15000);
-            }
-            break;
-    }
-}
-
-/* A cheat code "rpcn:NAME:PASSWORD[:TOKEN]" -- the one free-text field a
- * libretro frontend hands a core, typed on its own keyboard, on-screen ones
- * included. The password may not contain ':'. */
-static bool lr_rpcn_cheat(const char *code) {
-    if (!code || strncmp(code, "rpcn:", 5) != 0) return false;
-    char buf[256];
-    snprintf(buf, sizeof buf, "%s", code + 5);
-    char *name = buf, *pass = strchr(name, ':'), *token = NULL;
-    if (pass) { *pass++ = '\0'; token = strchr(pass, ':'); }
-    if (token) *token++ = '\0';
-    if (!name[0] || !pass || !pass[0]) {
-        lr_message("RPCN: the code is rpcn:NAME:PASSWORD:TOKEN", 300);
-        return true;
-    }
-    netplay_config_t *c = &g_rlobby.cfg;
-    snprintf(c->npid, sizeof c->npid, "%s", name);
-    snprintf(c->password, sizeof c->password, "%s", pass);
-    snprintf(c->token, sizeof c->token, "%s", token ? token : "");
-    char msg[96];
-    snprintf(msg, sizeof msg, "RPCN: account %s entered", c->npid);
-    lr_message(msg, 180);
-    if (opt.login == LR_LOGIN_ACCOUNT) {
-        netplay_post(NETPLAY_CMD_DISCONNECT, c);
-        netplay_post(NETPLAY_CMD_CONNECT, c);
-    }
-    return true;
-}
-
-/* Say what the sign-in is doing, where the player is looking: the Twitch code
- * above all, which is the whole of that sign-in. Once per frame. */
+/* What the session says while the lobby is not on screen -- a match, the room
+ * emptying, a desync -- as the frontend's notifications, and the session's log
+ * into the frontend's. Everything else is on the lobby's own screens. */
 static void lr_rpcn_report(void) {
-    static int last_state = -1, last_twitch = -1;
-    static char last_code[32];
-    static int64_t code_shown_us;
+    static int last_state = -1;
     static uint32_t log_seen;
-    const netplay_status_t *st = &g_rlobby.st;
+    const netplay_status_t *st = &g_ps3ui_app.st;
+    if (!g_ps3ui_app.be.get_status) return;   /* no session behind the lobby yet */
 
     /* The session's own log (sign-in, rooms, barrier, stalls, desync) into
      * RetroArch's, so a netplay problem can be read afterwards. */
@@ -708,35 +598,9 @@ static void lr_rpcn_report(void) {
         lr_log(RETRO_LOG_INFO, "rpcn: %s", st->log[log_seen % NETPLAY_LOG_LINES]);
     char msg[400];
 
-    if ((int)st->twitch_state != last_twitch || strcmp(last_code, st->twitch_user_code)
-            || (st->twitch_state == RPCN_TWITCH_WAITING && emu_now_us() - code_shown_us > 55000000)) {
-        last_twitch = (int)st->twitch_state;
-        snprintf(last_code, sizeof last_code, "%s", st->twitch_user_code);
-        if (st->twitch_state == RPCN_TWITCH_WAITING) {
-            snprintf(msg, sizeof msg, "RPCN: sign in using Twitch - go to %s and enter the code %s",
-                     st->twitch_uri, st->twitch_user_code);
-            lr_notify(msg, 60000);
-            code_shown_us = emu_now_us();
-        } else if (st->twitch_error[0]) {
-            snprintf(msg, sizeof msg, "RPCN: Twitch sign-in: %s", st->twitch_error);
-            lr_notify(msg, 8000);
-        }
-    }
     if ((int)st->state != last_state) {
-        int was = last_state;
         last_state = (int)st->state;
-        /* rlobby_update has already adopted the login the session ended up
-         * with, so g_rlobby.cfg names whoever actually got in. */
-        if (st->state == NETPLAY_ONLINE && was < (int)NETPLAY_ONLINE) {
-            snprintf(msg, sizeof msg, "RPCN: signed in as %s - rooms are in Core Options > Online play",
-                     g_rlobby.cfg.twitch_token[0] && g_rlobby.cfg.twitch_npid[0]
-                         ? g_rlobby.cfg.twitch_npid : g_rlobby.cfg.npid);
-            lr_notify(msg, 5000);
-        } else if (st->state == NETPLAY_IN_ROOM && was < (int)NETPLAY_IN_ROOM) {
-            snprintf(msg, sizeof msg, "RPCN: in room %llu - say Ready in Core Options > Online play",
-                     (unsigned long long)st->room_id);
-            lr_notify(msg, 6000);
-        } else if (st->state == NETPLAY_PLAYING) {
+        if (st->state == NETPLAY_PLAYING) {
             /* What the overlay used to put in a corner of the picture. A
              * notification is the frontend's own, so it is in its font and
              * fades the way every other message it shows does. */
@@ -751,9 +615,6 @@ static void lr_rpcn_report(void) {
             }
             snprintf(msg, sizeof msg, "Watching %s against %s", n1, n2);
             lr_notify(msg, 5000);
-        } else if (st->state == NETPLAY_FAILED && st->error[0]) {
-            snprintf(msg, sizeof msg, "RPCN: %s", st->error);
-            lr_notify(msg, 8000);
         }
     }
     /* The room emptied with the board still in its VS mode
@@ -769,7 +630,8 @@ static void lr_rpcn_report(void) {
     /* A desync is the one thing the old overlay kept on screen for good; say it
      * once, and the status row goes on saying the match is finished. */
     static uint32_t desync_said = LOCKSTEP_NO_CHECK;
-    if (st->desync_frame != LOCKSTEP_NO_CHECK && st->desync_frame != desync_said) {
+    bool in_session = st->state >= NETPLAY_IN_ROOM && st->state != NETPLAY_FAILED;
+    if (in_session && st->desync_frame != LOCKSTEP_NO_CHECK && st->desync_frame != desync_said) {
         desync_said = st->desync_frame;
         snprintf(msg, sizeof msg, "The two boards no longer agree (frame %u) - the match is over",
                  st->desync_frame);
@@ -795,8 +657,8 @@ static void lr_rpcn_autojoin(void) {
         if (want) lr_log(RETRO_LOG_INFO, "rpcn autojoin: looking for %s", strcmp(want, "1") ? want : "any open room");
     }
     if (!want) return;
-    const netplay_status_t *st = &g_rlobby.st;
-    netplay_config_t c = g_rlobby.cfg;
+    const netplay_status_t *st = &g_ps3ui_app.st;
+    netplay_config_t c = g_ps3ui_app.cfg;
     int64_t now = emu_now_us();
 
     if (st->state == NETPLAY_ONLINE && !st->search_pending && st->room_count != rooms_logged) {
@@ -839,15 +701,117 @@ static void lr_rpcn_autojoin(void) {
 }
 
 static void lr_rpcn_init(void) {
-    lr_rpcn_config_path();   /* before rlobby_init, whose netplay_init reads the file */
-    rlobby_init(env_cb, lr_notify, opt.net_delay);
-    /* What the menu already holds -- the room size, and a "Do" left behind by a
-     * run that ended before it could put the row back. */
-    rlobby_read_options(emu_now_us());
-    lr_push_options();       /* the lobby's rows exist now: hand the table over again */
+    lr_rpcn_config_path();   /* before netplay_init reads the file */
+    ps3ui_app_netplay(&g_ps3ui_app, opt.net_delay);
     netplay_set_reset_hook(lr_netplay_reset_cb, NULL);
-    g_login_applied = LR_LOGIN_OFF;
-    lr_rpcn_apply_login();
+    /* The Console version reaches it through the shell's Online Battle; the
+     * Arcade version has no shell, so its lobby is the first thing on screen. */
+    if (!g_shell_on) ps3ui_app_open(&g_ps3ui_app);
+}
+
+/* The RetroPad as the lobby's pad: B (bottom) is cross, the confirm button on a
+ * Western PS3, A (right) circle, Y (left) square, X (top) triangle. */
+static uint32_t lr_lobby_pad_port(unsigned port) {
+    static const struct { unsigned id; uint32_t bit; } map[] = {
+        { RETRO_DEVICE_ID_JOYPAD_UP, PS3UI_PAD_UP },       { RETRO_DEVICE_ID_JOYPAD_DOWN, PS3UI_PAD_DOWN },
+        { RETRO_DEVICE_ID_JOYPAD_LEFT, PS3UI_PAD_LEFT },   { RETRO_DEVICE_ID_JOYPAD_RIGHT, PS3UI_PAD_RIGHT },
+        { RETRO_DEVICE_ID_JOYPAD_B, PS3UI_PAD_CROSS },     { RETRO_DEVICE_ID_JOYPAD_A, PS3UI_PAD_CIRCLE },
+        { RETRO_DEVICE_ID_JOYPAD_Y, PS3UI_PAD_SQUARE },    { RETRO_DEVICE_ID_JOYPAD_X, PS3UI_PAD_TRIANGLE },
+        { RETRO_DEVICE_ID_JOYPAD_START, PS3UI_PAD_START }, { RETRO_DEVICE_ID_JOYPAD_SELECT, PS3UI_PAD_SELECT },
+        { RETRO_DEVICE_ID_JOYPAD_L, PS3UI_PAD_L1 },        { RETRO_DEVICE_ID_JOYPAD_R, PS3UI_PAD_R1 },
+    };
+    const int dead = 16000;
+    int ax = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
+    int ay = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
+    uint32_t pad = 0;
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (lr_btn(port, map[i].id)) pad |= map[i].bit;
+    if (ay < -dead) pad |= PS3UI_PAD_UP;
+    if (ay >  dead) pad |= PS3UI_PAD_DOWN;
+    if (ax < -dead) pad |= PS3UI_PAD_LEFT;
+    if (ax >  dead) pad |= PS3UI_PAD_RIGHT;
+    return pad;
+}
+
+static uint32_t lr_lobby_pad(void) { return lr_lobby_pad_port(0); }
+
+/* ---- The PS3 shell (Console version) -------------------------------------------- */
+
+static float g_volume = 1.0f;  /* the shell's Settings: music and effects, one board output */
+
+static void lr_shell_reset(void *u) {
+    (void)u;
+    lr_install_board();
+    if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+}
+
+static void lr_shell_apply(void *u, const uint8_t v[8], int versus) {
+    (void)u;
+    sfight_apply_menu_settings(&state.bus, v, versus);
+    lr_log(RETRO_LOG_INFO, "%s: difficulty %u, rounds %u, time %u, attack %u, barriers %u, type %u",
+           versus ? "Offline Versus" : "Arcade", v[0], v[4], v[3], v[5], v[6], v[7]);
+}
+
+static void lr_shell_volume(void *u, int music, int se) {
+    (void)u;
+    g_volume = (float)(music + se) / 10.0f;   /* 5 and 5, the PS3's defaults, are the board as it is */
+}
+
+/* A RetroPad port as the board's buttons, the way the shell's Controls screen
+ * sets them: the PS3 names the face buttons by shape -- top triangle, right
+ * circle, left square, bottom cross -- and gives each, and L1 L2 R1 R2, a
+ * punch, kick or guard (or a combination). SELECT is the pause menu's. */
+static uint32_t lr_port_held_shell(unsigned port) {
+    const game_input_map_t *in = &g_active_profile->input;
+    static const unsigned keys[PS3UI_KEYS] = {
+        RETRO_DEVICE_ID_JOYPAD_X, RETRO_DEVICE_ID_JOYPAD_A, RETRO_DEVICE_ID_JOYPAD_Y, RETRO_DEVICE_ID_JOYPAD_B,
+        RETRO_DEVICE_ID_JOYPAD_L, RETRO_DEVICE_ID_JOYPAD_L2, RETRO_DEVICE_ID_JOYPAD_R, RETRO_DEVICE_ID_JOYPAD_R2,
+    };
+    static const uint8_t pkg[PS3UI_BTN_CODES] = { 0, 1, 2, 4, 1 | 4, 1 | 2, 2 | 4, 1 | 2 | 4 };
+    const int p = port == 0 ? GAME_INPUT_P1_B1 : GAME_INPUT_P2_B1;   /* B1 punch, B2 kick, B3 guard */
+    const uint8_t *code = ps3ui_shell_buttons(&g_ps3ui_shell);
+    uint32_t held = lr_port_held(port);
+    /* the face buttons and shoulders are the Controls screen's, not lr_binds' */
+    for (int b = 0; b < 3; b++) held &= ~in->bits[p + b];
+    held &= ~in->bits[port == 0 ? GAME_INPUT_P1_B4 : GAME_INPUT_P2_B4];
+    held &= ~in->bits[port == 0 ? GAME_INPUT_P1_COIN : GAME_INPUT_P2_COIN];
+    for (int k = 0; k < PS3UI_KEYS; k++) {
+        if (!lr_btn(port, keys[k])) continue;
+        for (int b = 0; b < 3; b++)
+            if (pkg[code[k]] & (1 << b)) held |= in->bits[p + b];
+    }
+    return held;
+}
+
+/* The shell's frame; true when the game gets the pad. *board_paused: the
+ * shell holds the board still (its offline menus). */
+static bool lr_shell_input(bool *board_paused) {
+    bool session = pkt_lockstep_playing(&g_pkt) || netplay_active();
+    ps3ui_shell_frame(&g_ps3ui_shell, lr_lobby_pad(), lr_lobby_pad_port(1), session);
+    /* Online Battle in RetroArch's own netplay mode: say where it lives */
+    if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE && opt.online != LR_ONLINE_RPCN) {
+        ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_MAIN);
+        g_ps3ui_shell.dlg_kind = PS3UI_SHDLG_NONE;
+        ps3ui_dialog_ask(&g_ps3ui_shell.dlg, "Online play is set to RetroArch's netplay. Host or join from "
+                         "RetroArch's Netplay menu, or set Online play to RPCN in the core's options.", 0);
+    }
+    *board_paused = ps3ui_shell_board_paused(&g_ps3ui_shell);
+    return ps3ui_shell_game_pad(&g_ps3ui_shell);
+}
+
+/* Once a retro_run: L + R together opens the lobby (a new press, so holding
+ * them does not open it again after it closes), and while it is open it has
+ * the pad. True when it took the pad from the game this frame. */
+static bool lr_lobby_input(void) {
+    static bool lr_was;
+    ps3ui_app_t *a = &g_ps3ui_app;
+    bool lr = lr_btn(0, RETRO_DEVICE_ID_JOYPAD_L) && lr_btn(0, RETRO_DEVICE_ID_JOYPAD_R);
+    if (lr && !lr_was && !a->open) ps3ui_app_open(a);
+    lr_was = lr;
+    uint32_t pad = lr_lobby_pad();
+    bool had = ps3ui_app_visible(a);
+    ps3ui_app_frame(a, had ? pad : 0);
+    return had || ps3ui_app_visible(a);
 }
 
 /* ---- Video ---------------------------------------------------------------------------- */
@@ -944,6 +908,8 @@ static void lr_context_reset(void) {
     if (!sg_isvalid()) { lr_log(RETRO_LOG_ERROR, "sokol_gfx setup failed"); return; }
     game_render_init();
     video_init(&state.video);
+    sgl_setup(&(sgl_desc_t){ .logger.func = slog_func });
+    ps3ui_gpu_setup();
     g_gfx_ready = true;
     lr_log(RETRO_LOG_INFO, "GL context ready; tile layers composed on the %s", state.video.gpu ? "GPU" : "CPU");
 }
@@ -951,6 +917,8 @@ static void lr_context_reset(void) {
 static void lr_context_destroy(void) {
     if (!g_gfx_ready) return;
     g_gfx_ready = false;
+    ps3ui_gpu_shutdown();
+    sgl_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     sg_shutdown();
@@ -1144,13 +1112,29 @@ static int lr_draw_every(void) {
     return heat_guard_draw_every(&g_heat) == 2 ? 2 : opt.draw_every;
 }
 
+/* The lobby's frame: 16:9, the largest the output holds within the frontend's
+ * framebuffer, never below 1280x720 -- the PS3's own frame. */
+static void lr_lobby_size(int *w, int *h) {
+    int ow = 1280, oh = 720;
+    if (!lr_output_size(&ow, &oh)) { ow = 1280; oh = 720; }
+    if (ow > VIDEO_WIDTH * LR_MAX_SCALE)  ow = VIDEO_WIDTH * LR_MAX_SCALE;
+    if (oh > VIDEO_HEIGHT * LR_MAX_SCALE) oh = VIDEO_HEIGHT * LR_MAX_SCALE;
+    if ((int64_t)ow * 9 > (int64_t)oh * 16) { *h = oh; *w = oh * 16 / 9; }
+    else                                     { *w = ow; *h = ow * 9 / 16; }
+    if (*h < 720) { *w = 1280; *h = 720; }
+}
+
 static void lr_draw(bool ran) {
     int w, h;
-    lr_render_size(&w, &h);
+    ps3ui_view_t view = g_shell_on ? ps3ui_shell_view(&g_ps3ui_shell)
+                      : ps3ui_app_visible(&g_ps3ui_app) ? PS3UI_VIEW_FULL : PS3UI_VIEW_GAME;
+    bool lobby = view == PS3UI_VIEW_FULL, overlay = view == PS3UI_VIEW_OVERLAY;
+    if (lobby) lr_lobby_size(&w, &h);
+    else       lr_render_size(&w, &h);
     /* Show the last picture again, drawing nothing: when the board did not move
      * (waiting on the other player), and on the frames the draw rate skips. */
     static unsigned phase;
-    bool skip = !ran || (++phase % (unsigned)lr_draw_every()) != 0;
+    bool skip = !lobby && !overlay && (!ran || (++phase % (unsigned)lr_draw_every()) != 0);
     if (skip && g_can_dupe && g_gfx_ready && g_geom_w == w && g_geom_h == h) {
         video_cb(NULL, (unsigned)w, (unsigned)h, 0);
         return;
@@ -1159,12 +1143,18 @@ static void lr_draw(bool ran) {
         g_geom_w = w;
         g_geom_h = h;
         struct retro_game_geometry geom = { (unsigned)w, (unsigned)h, VIDEO_WIDTH * LR_MAX_SCALE,
-                                            VIDEO_HEIGHT * LR_MAX_SCALE, LR_ASPECT };
+                                            VIDEO_HEIGHT * LR_MAX_SCALE, lobby ? 16.0f / 9.0f : LR_ASPECT };
         env_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
     }
     if (!g_gfx_ready) { video_cb(NULL, (unsigned)w, (unsigned)h, 0); return; }
     sg_reset_state_cache();   /* the context is shared: RetroArch drew with it since */
-    if (ran) game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+    if (ran && !lobby) game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+    static ps3ui_canvas_t lobby_cv;
+    if (lobby || overlay) {
+        ps3ui_gpu_record(&lobby_cv, w, h);
+        if (g_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, &lobby_cv);
+        else            ps3ui_app_draw(&g_ps3ui_app, &lobby_cv);
+    }
 
     sg_begin_pass(&(sg_pass){
         .action = {
@@ -1176,9 +1166,12 @@ static void lr_draw(bool ran) {
                        .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
                        .gl.framebuffer = (uint32_t)hw_render.get_current_framebuffer() },
     });
-    /* The game and nothing else. The lobby is the frontend's menu and anything
-     * it has to say goes out as a notification (lr_notify). */
-    game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, w, h, 1.0f);
+    if (!lobby)
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, w, h, 1.0f);
+    if (lobby || overlay) {
+        ps3ui_gpu_draw(&lobby_cv);   /* over the game, for the title prompt and the pause menu */
+        sgl_draw();
+    }
     sg_end_pass();
     sg_commit();
     lr_gl_restore();
@@ -1209,7 +1202,7 @@ static void lr_push_audio(void) {
             float y = x - g_dc_x[c] + R * g_dc_y[c];
             g_dc_x[c] = x;
             g_dc_y[c] = y;
-            int v = (int)lrintf(y);
+            int v = (int)lrintf(y * g_volume);
             g_audio[n * 2 + c] = (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
         }
         n++;
@@ -1383,24 +1376,19 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
         return false;
     }
     if (!lr_load_rom(game->path)) return false;
+    g_shell_on = g_active_profile && !strcmp(g_active_profile->id, "sfight_console");
+    if (g_shell_on)
+        ps3ui_shell_init(&g_ps3ui_shell, (ps3ui_host_t){ lr_shell_reset, lr_shell_apply, lr_shell_volume, NULL },
+                         &g_ps3ui_app);
+    g_volume = 1.0f;
     lr_set_input_descriptors();
 
-    /* The RPCN lobby IS the frontend's option menu, so a frontend too old to be
-     * handed an option table twice cannot carry it. Fall back rather than run a
-     * session nobody can see or steer. */
-    if (opt.online == LR_ONLINE_RPCN && !g_options_v2) {
-        opt.online = LR_ONLINE_RETROARCH;
-        lr_notify("This frontend is too old for the RPCN lobby: using RetroArch's netplay instead", 8000);
-    }
     if (opt.online == LR_ONLINE_RETROARCH) {
         if (!env_cb(RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE, &lr_netpacket))
             lr_log(RETRO_LOG_WARN, "this frontend has no netpacket interface: no RetroArch netplay");
     } else {
         lr_rpcn_init();
     }
-    /* Whether or not the frontend ever asks (lr_update_display), the lobby's
-     * rows are only in the menu when there is a session behind them. */
-    rlobby_apply_visibility(true);
 
     emu_ctx_init(&state.emu, &state.cpu, &state.bus);
     emu_run(&state.emu);
@@ -1418,7 +1406,7 @@ RETRO_API bool retro_load_game_special(unsigned type, const struct retro_game_in
 
 RETRO_API void retro_unload_game(void) {
     if (opt.online == LR_ONLINE_RPCN) netplay_shutdown();
-    rlobby_stop();
+    ps3ui_app_close(&g_ps3ui_app);
     netplay_release_inputs();
     romset_free(&state.romset);
     g_game_loaded = false;
@@ -1435,21 +1423,25 @@ RETRO_API void retro_run(void) {
     bool updated = false;
     if (env_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
         lr_read_options(false);   /* a new size is announced by lr_draw */
-        if (opt.online == LR_ONLINE_RPCN && g_game_loaded) lr_rpcn_apply_login();
     }
 
     input_poll_cb();
-    uint32_t held = lr_port_held(0);
+    uint32_t held = g_shell_on ? lr_port_held_shell(0) : lr_port_held(0);
     /* Port 2 is the second player on this machine -- not in a session, where
      * each machine is one player. */
     bool in_session = pkt_lockstep_playing(&g_pkt) || netplay_active();
-    if (!in_session) held |= lr_port_held(1);
+    if (!in_session) held |= g_shell_on ? lr_port_held_shell(1) : lr_port_held(1);
+    bool board_paused = false;
+    if (g_shell_on && !lr_shell_input(&board_paused)) held = 0;
 
     bool ran;
-    if (opt.online == LR_ONLINE_RPCN) {
-        /* The lobby's rows are option definitions, so a change to them is a
-         * table the frontend has to be handed again. */
-        if (rlobby_update(emu_now_us())) lr_push_options();
+    if (board_paused) {
+        ran = false;   /* the shell's menus: the board waits, as the PS3 suspends it */
+    } else if (opt.online == LR_ONLINE_RPCN) {
+        /* The lobby on screen has the pad; the game gets none of it. With the
+         * shell, the shell has already run the lobby (Online Battle). */
+        if (g_shell_on) ps3ui_app_frame(&g_ps3ui_app, ps3ui_app_visible(&g_ps3ui_app) ? lr_lobby_pad() : 0);
+        else if (lr_lobby_input()) held = 0;
         lr_rpcn_report();
         lr_rpcn_autojoin();
         ran = lr_run_rpcn(held);
@@ -1477,12 +1469,8 @@ RETRO_API bool   retro_serialize(void *data, size_t size) { (void)data; (void)si
 RETRO_API bool   retro_unserialize(const void *data, size_t size) { (void)data; (void)size; return false; }
 
 RETRO_API void   retro_cheat_reset(void) {}
-/* Cheats are not cheats here: the code field is how an RPCN account is entered
- * (lr_rpcn_cheat). Anything else is ignored. */
 RETRO_API void   retro_cheat_set(unsigned index, bool enabled, const char *code) {
-    (void)index;
-    if (!enabled || opt.online != LR_ONLINE_RPCN || !g_game_loaded) return;
-    if (!lr_rpcn_cheat(code)) lr_log(RETRO_LOG_WARN, "cheat codes are not supported (only rpcn:...)");
+    (void)index; (void)enabled; (void)code;
 }
 
 RETRO_API void  *retro_get_memory_data(unsigned id) {

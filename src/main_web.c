@@ -53,6 +53,10 @@
 #include "audio_out.h"
 #include "input.h"
 #include "objview_cmd.h"  /* the debug object viewer, driven from the page */
+#include "sokol_gl.h"
+#include "ps3ui_app.h"    /* the online lobby, as the PS3 port draws it */
+#include "ps3ui_gpu.h"
+#include "ps3ui_shell.h"   /* the PS3's menus around the board (the Console version) */
 #include "json_min.h"
 
 /* The single TU that defines g_profiles[] / g_active_profile. Under M2HLE_WEB it
@@ -186,6 +190,26 @@ static void web_install_board(void) {
     emu_board_reset_state();
 }
 
+/* ---- The PS3 shell (Console version): its host hooks ----------------------- */
+
+static bool  g_web_shell_on;       /* the Console version: the PS3's interface */
+static bool  g_web_hold;           /* the shell's menus hold the board still */
+static float g_web_volume = 1.0f;  /* the shell's Settings */
+
+static void web_shell_reset(void *u) {
+    (void)u;
+    web_install_board();
+    if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+}
+static void web_shell_apply(void *u, const uint8_t v[8], int versus) {
+    (void)u;
+    sfight_apply_menu_settings(&state.bus, v, versus);
+}
+static void web_shell_volume(void *u, int music, int se) {
+    (void)u;
+    g_web_volume = (float)(music + se) / 10.0f;   /* 5 and 5, the PS3's defaults: as it is */
+}
+
 static void web_netplay_reset_cb(void *ctx) {
     (void)ctx;
     if (!g_active_profile || !state.romset.loaded) return;
@@ -288,9 +312,10 @@ static void web_run_owed_slices(void) {
         state.owed_us = cap;
     }
 
-    if (state.emu.run_state != EMU_RUNNING) {
-        /* Not running yet, and netplay still has to breathe: the login and the
-         * room happen before the match starts (emu_thread.h, STOPPED branch). */
+    if (state.emu.run_state != EMU_RUNNING || g_web_hold) {
+        /* Not running yet (or held under the shell's menus), and netplay still
+         * has to breathe: the login and the room happen before the match
+         * starts (emu_thread.h, STOPPED branch). */
         emu_netplay_pump(&state.emu);
         state.owed_us = 0;
         return;
@@ -352,6 +377,8 @@ EMSCRIPTEN_KEEPALIVE void web_audio_set_nudge(double nudge) {
 static void web_push_audio(void) {
     if (g_web_audio != WEB_AUDIO_WORKLET) return;
     int frames = audio_out_drain(g_web_audio_chunk, WEB_AUDIO_CHUNK_FRAMES, g_web_audio_nudge);
+    if (g_web_volume != 1.0f)
+        for (int i = 0; i < frames * 2; i++) g_web_audio_chunk[i] *= g_web_volume;
     if (frames > 0)
         EM_ASM({ Module.m2hleAudioPush($0, $1); }, g_web_audio_chunk, frames);
 }
@@ -393,10 +420,17 @@ static void init(void) {
     netplay_set_reset_hook(web_netplay_reset_cb, NULL);
     netplay_set_open_browser(false);   /* the page shows the link; see WEB-PORT.md 3.2 */
 
+    /* The lobby (ui/ps3ui_app.h) over the same netplay: drawn on the canvas with
+     * sokol_gl, opened from the page (web_lobby_open). */
+    sgl_setup(&(sgl_desc_t){ .logger.func = slog_func });
+    ps3ui_gpu_setup();
+    ps3ui_app_init(&g_ps3ui_app, (ps3ui_backend_t){ netplay_get_status, netplay_post, netplay_stored_settings });
+
     emu_ctx_init(&state.emu, &state.cpu, &state.bus);
 
     state.pass_action = (sg_pass_action){
-        .colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0.0f, 0.0f, 0.0f, 1.0f } },
+        /* the letterbox: the PS3 menus' own bottom colour, #001735, which the page uses too */
+        .colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0.0f, 0x17 / 255.0f, 0x35 / 255.0f, 1.0f } },
         .depth     = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f },
     };
 
@@ -463,6 +497,67 @@ static bool web_afford_picture(void) {
     return per_second <= (double)WEB_PICTURE_BUDGET_US;
 }
 
+/* The page's pad as the lobby's: the actions the default bindings put on the
+ * standard pad's face buttons (m2hle-pad.js) -- bottom B2, right B3, left B1,
+ * top B4 -- are the PS3's cross, circle, square and triangle. */
+
+static uint32_t g_web_pad;   /* defined with web_pad_set below */
+
+static uint32_t web_lobby_pad(void) {
+    static const struct { int act; uint32_t bit; } map[] = {
+        { GAME_INPUT_P1_UP, PS3UI_PAD_UP },       { GAME_INPUT_P1_DOWN, PS3UI_PAD_DOWN },
+        { GAME_INPUT_P1_LEFT, PS3UI_PAD_LEFT },   { GAME_INPUT_P1_RIGHT, PS3UI_PAD_RIGHT },
+        { GAME_INPUT_P1_B2, PS3UI_PAD_CROSS },    { GAME_INPUT_P1_B3, PS3UI_PAD_CIRCLE },
+        { GAME_INPUT_P1_B1, PS3UI_PAD_SQUARE },   { GAME_INPUT_P1_B4, PS3UI_PAD_TRIANGLE },
+        { GAME_INPUT_P1_START, PS3UI_PAD_START }, { GAME_INPUT_P1_COIN, PS3UI_PAD_SELECT },
+    };
+    uint32_t pad = 0;
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (g_web_pad & (1u << map[i].act)) pad |= map[i].bit;
+    return pad;
+}
+
+/* Player 2's pad, for the shell's Offline Versus (START claims the side). */
+static uint32_t web_lobby_pad2(void) {
+    uint32_t pad = 0;
+    if (g_web_pad & (1u << GAME_INPUT_P2_START)) pad |= PS3UI_PAD_START;
+    if (g_web_pad & (1u << GAME_INPUT_P2_B2))    pad |= PS3UI_PAD_CROSS;
+    return pad;
+}
+
+/* What the menus want on screen this callback. */
+static ps3ui_view_t web_view(void) {
+    if (g_web_shell_on) return ps3ui_shell_view(&g_ps3ui_shell);
+    return ps3ui_app_visible(&g_ps3ui_app) ? PS3UI_VIEW_FULL : PS3UI_VIEW_GAME;
+}
+
+static bool web_game_pad(void) {
+    return g_web_shell_on ? ps3ui_shell_game_pad(&g_ps3ui_shell) != 0 : !ps3ui_app_visible(&g_ps3ui_app);
+}
+
+/* The menus run at 60 Hz whatever the display's rate: their windows, cursors
+ * and countdowns are counted in the PS3's frames. */
+static ps3ui_view_t web_lobby_tick(void) {
+    static int64_t next_us;
+    int64_t now = emu_now_us();
+    ps3ui_app_t *a = &g_ps3ui_app;
+    bool had = web_game_pad();
+    if (!next_us || now - next_us > 250000) next_us = now;
+    while (now >= next_us) {
+        if (g_web_shell_on) {
+            ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad(), web_lobby_pad2(), netplay_active());
+            if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE)
+                ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
+        } else {
+            ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
+        }
+        next_us += 1000000 / EMU_SLICES_PER_SEC;
+    }
+    g_web_hold = g_web_shell_on && ps3ui_shell_board_paused(&g_ps3ui_shell);
+    if (had && !web_game_pad()) input_release_all();   /* the game lets go of what the menus now hold */
+    return web_view();
+}
+
 static void frame(void) {
     int64_t cb_us = emu_now_us();
     if (g_web_perf.last_cb_us) {
@@ -477,6 +572,8 @@ static void frame(void) {
     web_push_audio();
 
     const bool have_game = state.romset.loaded;
+    const ps3ui_view_t view = web_lobby_tick();
+    const bool lobby = view == PS3UI_VIEW_FULL, overlay = have_game && view == PS3UI_VIEW_OVERLAY;
 
     /* Every callback, not only the ones that might be skipped: what it measures
      * includes how often the display asks, and half the callbacks are not half
@@ -487,7 +584,7 @@ static void frame(void) {
     static int      s_drawn_w, s_drawn_h;
     const bool board_moved = g_web_perf.slices != s_drawn_slices;
     const bool resized     = sapp_width() != s_drawn_w || sapp_height() != s_drawn_h;
-    if (have_game && !board_moved && !resized && !g_web_objview_show && !afford) {
+    if (have_game && !lobby && !overlay && !board_moved && !resized && !g_web_objview_show && !afford) {
         g_web_perf.pictures_skipped++;
         return;
     }
@@ -500,13 +597,32 @@ static void frame(void) {
     web_rt_apply();
 
     float lerp_t = 1.0f;
-    if (have_game) {
+    static ps3ui_canvas_t lobby_cv;
+    if (lobby || overlay) {
+        if (overlay) {
+            /* over the game: the 16:9 layout fitted to the game's letterboxed picture */
+            int ox, oy, gw, gh;
+            game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &gw, &gh);
+            ps3ui_gpu_record(&lobby_cv, sapp_width(), sapp_height());
+            ps3ui_canvas_size(&lobby_cv, sapp_width(), sapp_height());
+            float k = (float)gw / 1920.0f;
+            if ((float)gh / 1080.0f < k) k = (float)gh / 1080.0f;
+            lobby_cv.k = k;
+            lobby_cv.ox = (float)ox + ((float)gw - 1920.0f * k) * 0.5f;
+            lobby_cv.oy = (float)oy + ((float)gh - 1080.0f * k) * 0.5f;
+        } else {
+            ps3ui_gpu_record(&lobby_cv, sapp_width(), sapp_height());
+        }
+        if (g_web_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, &lobby_cv);
+        else                ps3ui_app_draw(&g_ps3ui_app, &lobby_cv);
+    }
+    if (have_game && !lobby) {
         game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
         lerp_t = game_frame_lerp();
     }
 
     /* Offscreen first, when there is a render scale: the game at N x 496x384. */
-    const bool offscreen = have_game && g_web_rt.scale > 0;
+    const bool offscreen = have_game && !lobby && g_web_rt.scale > 0;
     if (offscreen) {
         sg_begin_pass(&(sg_pass){
             .action = state.pass_action,
@@ -526,7 +642,11 @@ static void frame(void) {
     const bool show_objview = g_web_objview_show && g_objview.color_tex.id && g_objview.rt_w > 0;
 
     sg_begin_pass(&(sg_pass){ .action = state.pass_action, .swapchain = sglue_swapchain() });
-    if (show_objview) {
+    if (lobby) {
+        /* The lobby's 16:9 frame fitted to the canvas; its own colour fills the rest. */
+        ps3ui_gpu_draw(&lobby_cv);
+        sgl_draw();
+    } else if (show_objview) {
         /* In place of the game, letterboxed to the viewer target's own shape. */
         int ox, oy, w, h;
         game_render_letterbox(sapp_width(), sapp_height(), g_objview.rt_w, g_objview.rt_h, &ox, &oy, &w, &h);
@@ -536,6 +656,10 @@ static void frame(void) {
         game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
         if (offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
         else           game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
+        if (overlay) {   /* the pause menu over the game */
+            ps3ui_gpu_draw(&lobby_cv);
+            sgl_draw();
+        }
     }
     sg_end_pass();
     sg_commit();
@@ -547,6 +671,8 @@ static void frame(void) {
 }
 
 static void cleanup(void) {
+    ps3ui_gpu_shutdown();
+    sgl_shutdown();
     netplay_shutdown();
     audio_out_shutdown();
     romset_free(&state.romset);
@@ -630,6 +756,14 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     state.last_us = 0;
     state.owed_us = 0;
     LOG_INFO("web: '%s' loaded; reset IP = 0x%08X", g_active_profile->id, state.cpu.sfr.ip);
+    /* The Console version is the PS3 port as a player meets it: its menus. */
+    g_web_shell_on = !strcmp(g_active_profile->id, "sfight_console");
+    if (g_web_shell_on) {
+        ps3ui_shell_init(&g_ps3ui_shell, (ps3ui_host_t){ web_shell_reset, web_shell_apply, web_shell_volume, NULL },
+                         &g_ps3ui_app);
+        g_ps3ui_shell.no_controls = 1;   /* the page binds the buttons (m2hle-pad.js) */
+    }
+    g_web_volume = 1.0f;
     return 0;
 }
 
@@ -660,6 +794,12 @@ EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { input_release_all(); g_web_pa
  * next poll. */
 EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
     uint32_t changed = actions ^ g_web_pad;
+    if (!web_game_pad()) {
+        g_web_pad = actions;   /* the menus have the pad (web_lobby_pad); the game gets none of it */
+        return;
+    }
+    if (g_web_shell_on)
+        actions &= ~(1u << GAME_INPUT_P1_COIN);   /* SELECT is the pause menu's (free play needs no coin) */
     for (int a = 0; a < GAME_INPUT_COUNT; a++) {
         if (!(changed & (1u << a))) continue;
         if (actions & (1u << a)) input_action_down(a);
@@ -667,6 +807,15 @@ EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
     }
     g_web_pad = actions;
 }
+
+/* The page's "Online" button: the lobby, as the PS3's Online Battle opens it. */
+EMSCRIPTEN_KEEPALIVE void web_lobby_open(void) {
+    g_ps3ui_app.default_delay = g_ps3ui_app.default_delay > 0 ? g_ps3ui_app.default_delay : 2;
+    if (g_web_shell_on) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_ONLINE);
+    ps3ui_app_open(&g_ps3ui_app);
+}
+EMSCRIPTEN_KEEPALIVE void web_lobby_close(void) { ps3ui_app_close(&g_ps3ui_app); }
+EMSCRIPTEN_KEEPALIVE int  web_lobby_visible(void) { return web_view() != PS3UI_VIEW_GAME; }
 
 /* Game frames since the last board reset. */
 EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {

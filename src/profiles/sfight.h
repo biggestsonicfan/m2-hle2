@@ -367,6 +367,156 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
  * chunks follow the low bytes of fighter positions. tools/grade-cull.mjs holds
  * the chunks drawn against the ROM's own rule. */
 
+/* ---- Pre-game menu settings (the PS3 port's ARCADE / OFFLINE VERSUS menus) --
+ *
+ * The PS3 port (NPUB30927) runs this same i960 program and applies its menus by
+ * rewriting the arcade's own GAME ASSIGNMENTS block, which is what the test
+ * menu edits. Decide calls NetGameMode_Set (PS3 0x57110) with eight bytes, and
+ * that calls Settings_ApplyArcade (0x11E20C, mode 0) or Settings_ApplyRoomRules
+ * (0x11DFF0, versus). Both copy the 0x42-byte block at add_BACKUP_RAM_TO_RAM
+ * (0x50016C) + 0x3340, patch it from the lookup table at PS3 0x377AB0, write it
+ * to backup RAM 0x1D03340 AND its work-RAM copy 0x59C340, and store the barrier
+ * count to barrier_default_num (0x50A424).
+ *
+ * The block (offsets from 0x3340; the test menu's GAME ASSIGNMENTS rows):
+ *   +0x00 MATCH COUNT(1P)  rounds to win, 2..5          arcade only
+ *   +0x01 MATCH COUNT(VS)  rounds to win, 2..5          both
+ *   +0x02 ENEMY RANK       match_enemy_rank, 0..3       arcade only
+ *   +0x03 ENERGY(1P)       max_energy_1p_list index     arcade only
+ *   +0x04 ENERGY(VS)       max_energy_vs_list index     both
+ *   +0x11 TIME             time_vars index (see below)
+ *   +0x12 COUNTRY          left alone
+ *   +0x13 flag byte        game_assign_byte_flag, rebuilt whole:
+ *                          b7 DAMAGE (1 = REAL), b6 HYPER MODE (1 = OFF),
+ *                          b4 AUTOMATIC (1 = ON), b3 BARRIER RESET (1 = ON);
+ *                          b0 ADVERTISE SOUND, b1 CONTINUE, b2 DISPLAY TYPE
+ *                          and b5 VS FINISH come out 0 (ON, ON, C.R.T., OFF)
+ *   +0x18 BARRIER          barriers per match, 1..10
+ *   +0x19..+0x1F           monitor colour settings, left alone
+ *
+ * WHEN THE BOARD READS THEM. The game runs on the work-RAM copy: after the boot
+ * check add_BACKUP_RAM_TO_RAM holds 0x599000 (BACKUP_RAM_TO_RAM), and backup RAM
+ * is only read at power-on (backup_ram_check copies it down).
+ * - Rounds: re-read at the start of every game (just before loc_A670).
+ * - Enemy rank and energy: set_game_setting, called from SEL_INT and on
+ *   continue; the AI reads rank per fight (sub_3B22C).
+ * - Flag byte: tested live all over the game.
+ * - Barriers: only game_engine_setup (boot) copies +0x18 to barrier_default_num,
+ *   so the PS3 writes 0x50A424 itself, and so does this.
+ * - Time: only main (boot, ROM 0x71F8) turns +0x11 into `time` (0x500090), and
+ *   there +0x11 is an INDEX into time_vars {10,20,..,90,99}. The PS3 stores the
+ *   seconds there instead (10/30/60/99) and has its own trap on GAME_INT (i960
+ *   0xB0F8, PS3 FUN_00081ab8) copy +0x11 into `time` at every game start. This
+ *   profile has no such hook, so this function writes `time` itself and stores
+ *   the time_vars index in +0x11: the test menu then shows the right TIME, and a
+ *   boot that ever read the block back would get the same seconds, where the
+ *   PS3's byte would index past the end of time_vars.
+ * So everything can be applied while the board sits in attract or at the title
+ * and holds for the next game. Nothing after boot writes these back, except the
+ * test menu (every change) and init_game_assignments (INITIALIZE, or a cold
+ * boot whose backup CRC fails -- every cold boot here, since backup RAM starts
+ * blank). A cold board reset therefore needs the settings applied again once
+ * add_BACKUP_RAM_TO_RAM reads 0x599000.
+ *
+ * CHECKSUM. Backup RAM 0x1D03302 (crc_value_bk) is make_crc (
+ * CRC-16/XMODEM: poly 0x1021, init 0, MSB first) over the block's first 0x20
+ * bytes. Only power-on checks it; a mismatch resets the block to the factory
+ * defaults. The PS3 never recomputes it (its boot trap at i960 0x3B44,
+ * i960hook_3B44_applyBootSettings, skips the check altogether). This does, as
+ * the test menu does after every change (set_game_assign_byte_flag, 0x62300),
+ * so backup RAM always holds a block the ROM itself would accept.
+ */
+#define SFIGHT_SETTINGS_PTR      0x0050016Cu  /* add_BACKUP_RAM_TO_RAM          */
+#define SFIGHT_SETTINGS_WORK     0x0059C340u  /* BACKUP_RAM_TO_RAM + 0x3340     */
+#define SFIGHT_SETTINGS_BACKUP   0x01D03340u  /* backup RAM + 0x3340            */
+#define SFIGHT_SETTINGS_CRC      0x01D03302u  /* crc_value_bk                   */
+#define SFIGHT_SETTINGS_LEN      0x42u        /* what the PS3 copies            */
+#define SFIGHT_SETTINGS_CRC_LEN  0x20u        /* what make_crc covers           */
+#define SFIGHT_BARRIER_DEFAULT   0x0050A424u  /* barrier_default_num (.long)    */
+#define SFIGHT_ROUND_TIME        0x00500090u  /* time, seconds (.byte)          */
+
+/* The eight bytes the PS3 menus hand NetGameMode_Set, in that order. Indices
+ * are menu rows; out of range falls back to index 0, as the PS3 does. */
+typedef struct {
+    uint8_t difficulty;   /* s[0] Easy/Normal/Hard/Hardest, 0..3 (arcade only)  */
+    uint8_t not_trial;    /* s[1] !trial -- not read by the apply functions     */
+    uint8_t reserved;     /* s[2] always 0                                      */
+    uint8_t time_idx;     /* s[3] 10/30/60/99 s                                 */
+    uint8_t rounds_idx;   /* s[4] 2/3/4/5 rounds                                */
+    uint8_t attack_idx;   /* s[5] -1/Normal/+1/+2/+3                            */
+    uint8_t barriers_idx; /* s[6] 1..10 barriers                                */
+    uint8_t type_idx;     /* s[7] game type A..D                                */
+} sfight_menu_settings_t;
+
+/* The menus' defaults (PS3 TaskMenuArcade / TaskMenuVersus Init). */
+static const sfight_menu_settings_t SFIGHT_MENU_DEFAULT_ARCADE = { 1, 1, 0, 1, 0, 1, 4, 0 };
+static const sfight_menu_settings_t SFIGHT_MENU_DEFAULT_VERSUS = { 1, 1, 0, 1, 1, 1, 4, 0 };
+
+/* make_crc with its table crc_variables: CRC-16/XMODEM. */
+static inline uint16_t sfight_make_crc(const uint8_t *p, uint32_t n) {
+    uint16_t crc = 0;
+    while (n--) {
+        crc ^= (uint16_t)(*p++ << 8);
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u) : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
+
+/*
+ * Apply the PS3 menu settings s[8] (sfight_menu_settings_t's layout) to the
+ * board: versus = 0 is Settings_ApplyArcade, non-zero Settings_ApplyRoomRules.
+ * Call it between frames with the board past its boot check (attract, title).
+ * The two differences from the PS3 are the checksum and the time byte, both
+ * explained above.
+ */
+static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s[8], int versus) {
+    /* PS3 0x377AB0. +0x00: attack {flag, energy index} pairs; +0x0A: game type
+     * {barrier reset, hyper} pairs; +0x18 rounds; +0x20 seconds; +0x28 barriers. */
+    static const uint8_t attack[5][2] = { {0,0}, {0,1}, {0,2}, {0,3}, {1,3} };
+    static const uint8_t type[4][2]   = { {0,1}, {0,0}, {1,1}, {1,0} };
+    static const uint8_t rounds[4]    = { 2, 3, 4, 5 };
+    static const uint8_t seconds[4]   = { 10, 30, 60, 99 };
+    /* time_vars is {10,20,30,40,50,60,70,80,90,99}. */
+    static const uint8_t time_var[4]  = { 0, 2, 5, 9 };
+
+    unsigned a = s[5] < 5 ? s[5] : 0;
+    unsigned t = s[7] < 4 ? s[7] : 0;
+    unsigned r = s[4] < 4 ? s[4] : 0;
+    unsigned m = s[3] < 4 ? s[3] : 0;
+    unsigned b = s[6] < 10 ? s[6] : 0;
+    uint8_t  barriers = (uint8_t)(b + 1);
+
+    /* Read the block the game runs on, through its own pointer. Before the boot
+     * check sets it this is not a usable address; take the work copy then. */
+    uint32_t base = mem_read32(bus, SFIGHT_SETTINGS_PTR);
+    uint32_t src  = (base == 0x00599000u || base == 0x01D00000u)
+                  ? base + 0x3340u : SFIGHT_SETTINGS_WORK;
+    uint8_t blk[SFIGHT_SETTINGS_LEN];
+    for (uint32_t i = 0; i < SFIGHT_SETTINGS_LEN; i++)
+        blk[i] = (uint8_t)mem_read8(bus, src + i);
+
+    if (!versus) {
+        blk[0x00] = rounds[r];
+        blk[0x02] = s[0] < 4 ? s[0] : 1;  /* the PS3 stores it unchecked */
+        blk[0x03] = attack[a][1];
+    }
+    blk[0x01] = rounds[r];
+    blk[0x04] = attack[a][1];
+    blk[0x11] = time_var[m];              /* the PS3 stores seconds[m] */
+    blk[0x13] = (uint8_t)((attack[a][0] << 7) | ((type[t][1] ^ 1u) << 6)
+                        | 0x10u | (type[t][0] << 3));
+    blk[0x18] = barriers;
+
+    for (uint32_t i = 0; i < SFIGHT_SETTINGS_LEN; i++) {
+        mem_write8(bus, SFIGHT_SETTINGS_BACKUP + i, blk[i]);
+        mem_write8(bus, SFIGHT_SETTINGS_WORK + i, blk[i]);
+    }
+    mem_write16(bus, SFIGHT_SETTINGS_CRC, sfight_make_crc(blk, SFIGHT_SETTINGS_CRC_LEN));
+    mem_write32(bus, SFIGHT_BARRIER_DEFAULT, barriers);
+    mem_write8(bus, SFIGHT_ROUND_TIME, seconds[m]);  /* PS3: its GAME_INT trap */
+}
+
 /* ---- Profile object ----------------------------------------------------- */
 
 /* Two profiles run this ROM set: this one, and Sonic the Fighters - Console

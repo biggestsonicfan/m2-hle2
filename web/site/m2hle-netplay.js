@@ -153,9 +153,10 @@ const m2hleNetplay = (() => {
     const state = st.state;
     $('np-empty').hidden = !st.empty_room;
 
-    /* The state of the game online, in a line. It sits on the menu's own item, so
-     * with the menu closed it is what the menu button says it is holding (the
-     * button also turns green: m2hle.css, .online-btn.live). */
+    /* The state of the game online, in a line. It sits on the menu's Online Battle
+     * item, so with the menu closed it is what the menu button says it is holding
+     * (the button also lights up: m2hle.css, .online-btn.live). The account item
+     * (btn-online, this panel) says what the panel will show. */
     let pill = '';
     const peerRtt = peerMs(st.room && st.room.peer_rtt_ms);
     if (state === 'playing') pill = 'Online: playing ' + (st.room.peer || '') + (peerRtt === null ? '' : ' · ' + peerRtt + ' ms');
@@ -163,8 +164,10 @@ const m2hleNetplay = (() => {
     else if (state === 'waiting at the barrier') pill = 'Online: starting…';
     else if (state === 'in a room') pill = st.room.peer_heard ? 'Online: ' + st.room.peer + ' is here' : 'Online: waiting';
     else if (state === 'online') pill = 'Online';
-    setText('btn-online-label', pill || 'Play online');
-    $('btn-online').classList.toggle('live', !!pill);
+    const inRoom = state === 'in a room' || state === 'waiting at the barrier' || state === 'playing' || state === 'watching';
+    setText('btn-online-label', inRoom ? 'Match controls' : 'RPCN account');
+    setText('btn-lobby-label', pill || 'Online Battle');
+    $('btn-lobby').classList.toggle('live', !!pill);
     if ($('btn-menu')) $('btn-menu').title = pill || 'Menu';
 
     if (tw.state === TWITCH_STARTING || tw.state === TWITCH_WAITING) {
@@ -432,6 +435,8 @@ const m2hleNetplay = (() => {
 
   function wire() {
     $('btn-online').addEventListener('click', () => toggle());
+    $('btn-lobby').addEventListener('click', openLobby);
+    $('np-to-lobby').addEventListener('click', openLobby);
     $('np-close').addEventListener('click', () => toggle(false));
 
     $('np-twitch').querySelector('.np-cancel').addEventListener('click', () => post('twitch_cancel'));
@@ -527,6 +532,19 @@ const m2hleNetplay = (() => {
     poll();
   }
 
+  /* The lobby drawn on the game screen (ui/ps3ui_app.h), as the PS3's Online
+   * Battle opens it. The pad and the keys drive it, so the canvas takes the focus. */
+  function lobbyAvailable() {
+    return !!(M && M._web_lobby_open) && !$('btn-lobby').hidden;
+  }
+
+  function openLobby() {
+    if (!lobbyAvailable()) { toggle(true); return; }
+    if (open) toggle(false);
+    M._web_lobby_open();
+    $('canvas').focus();
+  }
+
   function toggle(want) {
     open = want === undefined ? !open : want;
     $('online').hidden = !open;
@@ -575,10 +593,14 @@ const m2hleNetplay = (() => {
     poll();
   }
 
-  /* The game has loaded: online play can be offered. */
+  /* The game has loaded: online play can be offered -- the lobby on the game
+   * screen when this build has one, and the account panel either way. */
   function onGame() {
     $('btn-online').hidden = false;
+    const lobby = !!(M && M._web_lobby_open);
+    $('btn-lobby').hidden = !lobby;
+    $('np-to-lobby').hidden = !lobby;
   }
 
-  return { onReady, onGame, toggle, status: () => st, rtt: rttMs };
+  return { onReady, onGame, toggle, openLobby, status: () => st, rtt: rttMs };
 })();

@@ -425,6 +425,18 @@ new owner carries on from the server's copy. What bites:
 - A local RPCN (`RipleyTom\rpcn`'s built `rpcn.exe --cert-gen`, EmailUrl empty) and the MCP bridge
   run three clients on one machine; that is how every item above was found.
 
+### The PS3 release's menus (`src/ui/ps3ui*.h`, libretro core + web build)
+
+The libretro core and the web build present the Console version as the PS3 release (NPUB30927) does: title, MAIN MENU, Arcade / Offline Versus with the PS3's rule settings, SELECT = pause, Help & Options (the PS3's button presets), and the online lobby (the PS3's TaskSession over `net/netplay.h`). The RPCN lobby used to be RetroArch core options (`retro_lobby.h`, removed); it is now drawn by the core. `tools/ps3ui/README.md` has the pipeline and the facts behind it.
+
+- **No Sega asset is in the repo, and none may be added.** Layouts are numbers generated from the player's own PS3 data (`tools/ps3ui/gen_layout.py`); every sprite is painted by code (`ps3ui_sprites.h`) and graded against the original (`tools/ps3ui/grade.py`); the fonts are OFL (`licenses/`). Do not commit decoded PNGs, JSON dumps or pixel tables.
+- **Frontends draw through the GPU path only** (`ps3ui_gpu.h`, sokol_gl). The CPU path (`ps3ui_canvas_t` without a draw list) is 24 ms a frame at 720p and exists for `tests/ps3ui_render.c` and the grader. A recording canvas hands the GPU pointers into the glyph cache, so the cache (`PS3UI_MAX_GLYPH_CACHE`) must hold a whole frame's text.
+- **Windows and timers run on the task's 60 Hz clock, not the draw's.** Open a window in the update (`ps3ui_app_windows`), never in a draw function: a frontend that skips a draw left every window stuck on its first, transparent frame.
+- **The shell is the Console version's only** (`g_shell_on` = profile `sfight_console`). The Arcade version stays the board as shipped: coins on SELECT, no shell, its lobby at load and on L + R.
+- **The shell holds the board still under its offline menus -- never while netplay runs** (`ps3ui_shell_board_paused`): the barrier's reset and the match need the board stepped.
+- **Arcade / Versus settings go through `sfight_apply_menu_settings`** (`profiles/sfight.h`, ported from the PS3's `Settings_ApplyArcade` / `Settings_ApplyRoomRules`): the work copy at 0x59C340 is what the game reads; time and barriers are read only at boot, so they are also written to `time` (0x500090) and 0x50A424; the block's CRC-16 at 0x1D03302 is recomputed. `sfight_settings_test` (a ctest) holds it.
+- **A test core must not sign in as a live account.** The libretro core copies the desktop's per-user netplay settings on first run; on the dev machine that file is the fly bot's (saltyfreeman) Twitch login, and a test RetroArch signed in as it (it failed only because UDP 3658 was taken). Test with a blank `m2hle-rpcn.cfg` in the RetroArch saves folder.
+
 ---
 
 ## STF Disassembly Reference

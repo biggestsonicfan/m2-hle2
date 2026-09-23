@@ -9,6 +9,11 @@
 # new m2hle.js against the old page script, or the old .wasm against the new .js
 # -- and those are built as a pair. With it, one index.html always asks for one
 # consistent set.
-file(READ "${SITE}/index.html" html)
-string(REPLACE "@M2HLE_VERSION@" "${VERSION}" html "${html}")
-file(WRITE "${SITE}/index.html" "${html}")
+#
+# The stylesheet names its fonts (fonts/*.woff2) the same way, and index.html
+# preloads them under those very URLs, so both files are stamped.
+foreach(page index.html m2hle.css)
+  file(READ "${SITE}/${page}" text)
+  string(REPLACE "@M2HLE_VERSION@" "${VERSION}" text "${text}")
+  file(WRITE "${SITE}/${page}" "${text}")
+endforeach()
