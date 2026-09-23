@@ -88,6 +88,7 @@ its built-in `WebSocket`.
 | `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-zsort.mjs` | which face wins where faces lie on faces (`geo3d_mesh_layers`), in pictures against MAME's. Plays the attract replay in MAME and here, here with the layers off and on, and counts, of the pixels the layers change, how many each puts nearer MAME. `--stage N` puts the replay on another stage in both. See "Faces lying on faces" below |
+| `grade-carpet.mjs` | the explorer's Flying Carpet rug against MAME's pictures, from the board's own camera: the plate `draw_sphynx_head` lays under the rug (3332) must cover none of it, because the board sorts it behind every strip. Reads `grade-zsort --mame --stage 1`'s snapshots and cameras, renders the explorer headless (puppeteer-core, Edge) at each, and counts the rug pixels the plate changes. See "The Flying Carpet's rug" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `bench-builds.mjs` | how fast each build runs the board, headless and unthrottled: game frames a second past the texture-load spike, builds alternated, best of each. The throughput companion of `ab-builds`; `bench-render.mjs` is the renderer's: each build headless with the A/V server up and drained, so the main thread draws every board frame on the real D3D11 device, and `get_status`'s `render` block gives the microseconds each stage (tile compose, scan, upload, 3D draw, tile quads) costs a frame |
@@ -455,6 +456,45 @@ With all three, at 31 frames a stage:
 stage 1  PASS  1469 pixels changed: 1465 nearer MAME with the layers, 3 nearer without
 stage 5  PASS  808 pixels changed: 788 nearer MAME with the layers, 18 nearer without
 ```
+
+
+## The Flying Carpet's rug (`grade-carpet`)
+
+The explorer's fill is a depth buffer with a bounded recede, not the board's
+polygon sort, and the Flying Carpet is where the two parted visibly (noclip
+issue 23): the plate `draw_sphynx_head` lays at y = 0 under the rug is one quad
+as wide as the rug, the rug's floor ripples a tenth of a unit either side of
+that plane, and where the plate was too deep along the view to recede, the
+ripple's troughs fell behind it and the rug went flat. The board sorts the
+plate by its farthest corner, behind every strip, and MAME never shows it.
+
+This grader holds the explorer to that from the board's own camera. It reuses
+`grade-zsort`'s MAME run on stage 1 — the snapshots, and beside each the
+`frame_counter` and the camera at `0x519E98` — so take that once:
+
+```sh
+node tools/grade-zsort.mjs --mame --stage 1        # MAME's snapshots (~12 min)
+node tools/grade-carpet.mjs [--out DIR]             # the explorer at each (~30 s)
+```
+
+- **The explorer:** served from `$M2_NOCLIP` into headless Edge (SwiftShader)
+  through `puppeteer-core`, resolved from `$M2_PUPPETEER`, the explorer or
+  `../noclip`; `$M2_BROWSER` names another Chromium. The stage clock is held
+  on MAME's `frame_counter`, the carpet is ridden so the scene is in the
+  board's frame, and the camera stands at the board's eye, pitch and yaw at a
+  fitted `--fov` (58).
+- **The measurement:** three renders a frame — as drawn, plate hidden, rug
+  alone — and the rug pixels the plate changes. The board's answer is none.
+  The plate's sliver past the rug's lifted edge is the board's picture too and
+  is only counted. Where the plate does cover the rug, the report gives how
+  much of the rug's pattern (red at 80 or more) each render and MAME show
+  there; the plate and the rug's ground are one colour, so the pattern is what
+  tells them apart.
+- **Pictures:** `--out DIR` writes MAME | explorer | changes, with the plate
+  over the rug in magenta and past it in cyan.
+- **Numbers:** noclip master at 2e4cd5d has the plate over 751,768 rug pixels
+  across the 31 frames of replay 400..1300; with the plate conceding the
+  bound a pixel at a time, none.
 
 ## Sway chains (osage) at character select
 
