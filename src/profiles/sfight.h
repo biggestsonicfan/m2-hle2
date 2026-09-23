@@ -358,6 +358,25 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /*
+ * damage_default (0x62674, init_game_assignments+0x194): the factory default of
+ * the GAME ASSIGNMENTS flag byte, `stob r15, game_assign_byte_flag_bk` after
+ * `mov 0, r15`, with the store to the working copy (0x59C353) next. Like
+ * country_default, the game takes this path on every cold boot here. With
+ * g_damage_real set, bit 7 goes in: the test menu's DAMAGE row reads it through
+ * DAMAGE_TYPE {NORMAL, REAL}. Every other bit keeps its factory 0.
+ *
+ * What the bit does: `ketchup` (0x19740, called by damage_calculation) scales
+ * each hit by 1 + 0.01 * the energy gap, clamped, when bit 7 is CLEAR (NORMAL)
+ * and returns the damage as it is when it is set (REAL); ACT_RC_DOWN_ATTACK
+ * tests it the same way. So REAL is the setting without the catch-up.
+ */
+static int sfight_hook_damage_default(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)bus;
+    if (g_damage_real) cpu->locals.r[15] = 0x80u;
+    return 1;
+}
+
+/*
  * Cross-play with the PS3 port (net/ps3_link.h, hle_hooks.h g_xplay_*). The PS3
  * build's emulator runs a network match through traps on these three
  * instructions, and a board playing against it has to reach the same points:
@@ -632,7 +651,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 18
+#define SFIGHT_BASE_HOOK_COUNT 19
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
@@ -646,6 +665,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \
     { 0x0000E584, sfight_hook_vs_rematch,         "next_round+0x1a4"        }, \
     { 0x00062688, sfight_hook_country_default,    "country_default"         }, \
+    { 0x00062674, sfight_hook_damage_default,     "damage_default"          }, \
     { 0x000083F4, sfight_hook_xplay_force_start,  "xplay_force_start"       }, \
     { 0x0000A218, sfight_hook_xplay_barrier,      "xplay_sel_int_barrier"   }, \
     { 0x0000E6EC, sfight_hook_xplay_match_over,   "xplay_vic_int"           }, \

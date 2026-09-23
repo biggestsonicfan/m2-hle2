@@ -641,6 +641,93 @@ static void lr_rpcn_report(void) {
     }
 }
 
+/* How a toast names a server: the two the lobby offers by their short names. */
+static const char *lr_server_name(const char *server) {
+    if (netplay_server_is_official(server))  return "RPCN";
+    if (netplay_server_is_community(server)) return "sonicthefighte.rs";
+    return server[0] ? server : "RPCN";
+}
+
+/* Signing in and out, and players coming into and leaving the room, as the
+ * frontend's notifications: said whatever is on screen, the lobby or the game,
+ * so a player who is fighting or sitting in a menu still hears that somebody
+ * arrived. Once a retro_run, whether or not the board ran. */
+static void lr_rpcn_toasts(void) {
+    const netplay_status_t *st = &g_ps3ui_app.st;
+    if (!g_ps3ui_app.be.get_status) return;
+    char msg[256];
+
+    /* Signed in: logged in, in a room or not. */
+    static bool signed_in;
+    static char as_npid[20], on_server[128];
+    netplay_state_t s = st->state;
+    bool online = s == NETPLAY_ONLINE || s == NETPLAY_IN_ROOM || s == NETPLAY_SYNCING
+               || s == NETPLAY_PLAYING || s == NETPLAY_WATCHING;
+    if (online && !signed_in) {
+        signed_in = true;
+        snprintf(as_npid, sizeof as_npid, "%s", st->npid);
+        snprintf(on_server, sizeof on_server, "%s", st->server);
+        snprintf(msg, sizeof msg, "Signed in to %s as %s", lr_server_name(on_server), as_npid);
+        lr_notify(msg, 4000);
+    } else if (!online && signed_in && s != NETPLAY_CONNECTING) {
+        signed_in = false;
+        if (s == NETPLAY_FAILED && st->error[0])
+            snprintf(msg, sizeof msg, "Signed out of %s: %s", lr_server_name(on_server), st->error);
+        else
+            snprintf(msg, sizeof msg, "Signed out of %s", lr_server_name(on_server));
+        lr_notify(msg, 4000);
+    }
+
+    /* The room's other members. Entering a room takes its members as they are
+     * for a second (nobody "joined" a room we walked into); after that, a new member is a
+     * join, and one missing for a second is a departure -- a member row can
+     * drop out for a poll while the room is re-read, and that is not a leave. */
+    enum { LEAVE_FRAMES = 60 };
+    static struct { uint16_t id; char npid[20]; int missing; } seen[ROOM_MAX_MEMBERS];
+    static uint32_t seen_n;
+    static uint64_t seen_room;
+    static int room_frames;
+    bool in_room = s == NETPLAY_IN_ROOM || s == NETPLAY_SYNCING || s == NETPLAY_PLAYING || s == NETPLAY_WATCHING;
+    if (!in_room || !st->room_id) {
+        seen_n = 0;
+        seen_room = 0;
+        return;
+    }
+    if (st->room_id != seen_room) {
+        seen_n = 0;
+        seen_room = st->room_id;
+        room_frames = 0;
+    }
+    /* the room's rows can arrive a poll or two after we do */
+    bool fresh = room_frames < LEAVE_FRAMES;
+    if (fresh) room_frames++;
+    for (uint32_t i = 0; i < st->member_count; i++) {
+        const netplay_member_status_t *m = &st->members[i];
+        if (m->is_me || !m->member_id || !m->npid[0]) continue;
+        uint32_t k = 0;
+        while (k < seen_n && seen[k].id != m->member_id) k++;
+        if (k < seen_n) { seen[k].missing = 0; continue; }
+        if (seen_n >= ROOM_MAX_MEMBERS) continue;
+        seen[seen_n].id = m->member_id;
+        snprintf(seen[seen_n].npid, sizeof seen[seen_n].npid, "%s", m->npid);
+        seen[seen_n].missing = 0;
+        seen_n++;
+        if (!fresh) {
+            snprintf(msg, sizeof msg, "%s joined the room", m->npid);
+            lr_notify(msg, 4000);
+        }
+    }
+    for (uint32_t k = 0; k < seen_n;) {
+        bool here = false;
+        for (uint32_t i = 0; i < st->member_count; i++)
+            if (st->members[i].member_id == seen[k].id) here = true;
+        if (here || ++seen[k].missing < LEAVE_FRAMES) { k++; continue; }
+        snprintf(msg, sizeof msg, "%s left the room", seen[k].npid);
+        lr_notify(msg, 4000);
+        seen[k] = seen[--seen_n];
+    }
+}
+
 /* M2HLE_RPCN_AUTOJOIN=<owner> (or 1 for any open room): once signed in, join
  * that player's room and challenge them -- press Start, which the host sees as
  * a challenge to accept. What the lobby's own buttons do, for driving a session
@@ -1433,6 +1520,8 @@ RETRO_API void retro_run(void) {
     if (!in_session) held |= g_shell_on ? lr_port_held_shell(1) : lr_port_held(1);
     bool board_paused = false;
     if (g_shell_on && !lr_shell_input(&board_paused)) held = 0;
+
+    if (opt.online == LR_ONLINE_RPCN) lr_rpcn_toasts();
 
     bool ran;
     if (board_paused) {

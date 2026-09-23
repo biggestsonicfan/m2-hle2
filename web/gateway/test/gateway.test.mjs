@@ -16,6 +16,7 @@ import { SIGNALING_TAG, ipv4, ipv4Text } from '../rules.mjs';
 
 const ORIGIN = 'https://play.sonicthefighte.rs';
 let gw, rpcn, signaling, sigPort, lastSignaling;
+let rpcn2, signaling2, lastSignaling2;       /* a second upstream, chosen by name */
 
 const udp = () => new Promise((resolve) => {
   const s = dgram.createSocket('udp4');
@@ -31,11 +32,25 @@ before(async () => {
     lastSignaling = { msg, rinfo };
     signaling.send(Buffer.from('sig-reply'), rinfo.port, rinfo.address);
   });
+  rpcn2 = net.createServer((c) => c.on('data', (b) => c.write(Buffer.concat([Buffer.from('other:'), b]))));
+  await new Promise((r) => rpcn2.listen(0, '127.0.0.1', r));
+  signaling2 = await udp();
+  signaling2.on('message', (msg, rinfo) => {
+    lastSignaling2 = { msg, rinfo };
+    signaling2.send(Buffer.from('sig2-reply'), rinfo.port, rinfo.address);
+  });
   gw = await startGateway({
     listen: { host: '127.0.0.1', port: 0 },
     origins: [ORIGIN],
     rpcn: { host: '127.0.0.1', port: rpcn.address().port, tls: false },
     signaling: { host: '127.0.0.1', port: sigPort },
+    name: 'ours.test',
+    upstreams: {
+      'other.test': {
+        rpcn: { host: '127.0.0.1', port: rpcn2.address().port, tls: false },
+        signaling: { host: '127.0.0.1', port: signaling2.address().port },
+      },
+    },
     udp: { bind: '127.0.0.1', portMin: 41000, portMax: 41010 },
     allowPrivateDestinations: true,
     limits: { dgramsPerIp: 3, heartbeatSec: 0.2 },
@@ -46,6 +61,8 @@ after(async () => {
   await gw.close();
   rpcn.close();
   signaling.close();
+  rpcn2.close();
+  signaling2.close();
 });
 
 function connect(path, origin = ORIGIN) {
@@ -178,4 +195,31 @@ test('dgram: per-address limit', async () => {
   const socks = [await connect('/gw/dgram'), await connect('/gw/dgram'), await connect('/gw/dgram')];
   await assert.rejects(connect('/gw/dgram'), /429/);
   for (const s of socks) s.close();
+});
+
+test('upstreams: the path picks one by name, the default answers to its own name, others are refused', async () => {
+  await new Promise((r) => setTimeout(r, 100));   /* the limit test's sockets finish closing */
+  for (const [path, want] of [['/gw/stream/other.test', 'other:x'], ['/gw/stream/OURS.test', 'echo:x'],
+                              ['/gw/stream', 'echo:x'],
+                              /* a query is not how a server is named: it goes to the default, as an
+                               * old gateway would send it, which is why the name is in the path */
+                              ['/gw/stream?server=other.test', 'echo:x']]) {
+    const ws = await connect(path);
+    ws.send(Buffer.from('x'));
+    assert.equal((await next(ws)).toString(), want, path);
+    ws.close();
+  }
+  await assert.rejects(connect('/gw/stream/127.0.0.1'), /404/);
+  await assert.rejects(connect('/gw/dgram/evil.example'), /404/);
+  await assert.rejects(connect('/gw/stream/other.test/extra'), /404/);
+  await assert.rejects(connect('/gw/stream/%E0%A4%A'), /404/);   /* malformed: refused, not a crash */
+});
+
+test('upstreams: a dgram socket signals to its own upstream\'s helper', async () => {
+  const ws = await connect('/gw/dgram/other.test');
+  ws.send(frame(SIGNALING_TAG, 3657, Buffer.from([1, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])));
+  const r = unframe(await next(ws));
+  assert.deepEqual([r.ip, r.port, r.payload.toString()], [SIGNALING_TAG, 3657, 'sig2-reply']);
+  assert.equal(ipv4Text(lastSignaling2.msg.readUInt32BE(9)).startsWith('100.64.'), true);
+  ws.close();
 });

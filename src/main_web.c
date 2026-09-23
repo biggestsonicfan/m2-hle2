@@ -1013,17 +1013,23 @@ EMSCRIPTEN_KEEPALIVE unsigned web_audio_resyncs(void)   { return (unsigned)g_aud
  * rather than as one JSON string, because a password can hold any character and
  * json_min.h reads a quote as the end of the value.
  *
- * The server is fixed. The gateway decides where the stream really goes (tls.h,
- * web backend); the name still matters because a Twitch login token is only
- * offered to the server that issued it (netplay_twitch_reuse), and that is this
- * one.
+ * The server is one of two: the official RPCN server (the default) or ours, the
+ * one with Twitch sign-in (netplay.h, NETPLAY_SERVER_*). The page cannot name
+ * any other, and the gateway would refuse it if it did: the name travels to the
+ * gateway in the socket's path (web_socket.h, m2ws_url), and it picks one of
+ * its configured upstreams and never dials a host a page asks for. The name also matters
+ * because a Twitch login token is only offered to the server that issued it
+ * (netplay_twitch_here).
  */
-#define WEB_NETPLAY_SERVER "rpcn.sonicthefighte.rs"
-
 static netplay_config_t g_web_np;
 
+static bool web_server_known(const char *server) {
+    return netplay_server_is_official(server) || netplay_server_is_community(server);
+}
+
 static void web_netplay_defaults(netplay_config_t *c) {
-    snprintf(c->server, sizeof(c->server), "%s", WEB_NETPLAY_SERVER);
+    if (!web_server_known(c->server))
+        snprintf(c->server, sizeof(c->server), "%s", NETPLAY_SERVER_OFFICIAL);
     c->port = RPCN_DEFAULT_PORT;
     c->fingerprint[0] = '\0';
     c->browse_yamp = false;
@@ -1059,6 +1065,18 @@ EMSCRIPTEN_KEEPALIVE int web_netplay_set(const char *key, const char *value) {
     if (!strcmp(key, "vs_mode"))     { c->vs_mode = strtoul(value, NULL, 10) != 0; return 0; }
     if (!strcmp(key, "entry"))       { c->entry = (uint8_t)strtoul(value, NULL, 10); return 0; }
     if (!strcmp(key, "watch"))       { c->watch_only = strtoul(value, NULL, 10) != 0; return 0; }
+    /* DAMAGE for a room hosted on our server: "normal" (catch-up) or "real". */
+    if (!strcmp(key, "damage"))      { c->damage_normal = !strcmp(value, "normal"); return 0; }
+    if (!strcmp(key, "server")) {
+        if (!web_server_known(value)) return -1;
+        if (!netplay_same_name(c->server, value)) {
+            /* an account is the server's own: nothing typed for the other one */
+            c->password[0] = '\0';
+            c->token[0]    = '\0';
+        }
+        snprintf(c->server, sizeof(c->server), "%s", value);
+        return 0;
+    }
     return -1;
 }
 
@@ -1084,6 +1102,9 @@ EMSCRIPTEN_KEEPALIVE int web_netplay_post(const char *cmd) {
     if (!cmd) return -1;
     for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
         if (strcmp(cmd, k[i].name)) continue;
+        /* Twitch sign-in is our server's: the official one has none. */
+        if (k[i].kind == NETPLAY_CMD_TWITCH_START)
+            snprintf(g_web_np.server, sizeof(g_web_np.server), "%s", NETPLAY_SERVER_COMMUNITY);
         web_netplay_defaults(&g_web_np);
         netplay_post(k[i].kind, &g_web_np);
         return 0;
@@ -1092,13 +1113,9 @@ EMSCRIPTEN_KEEPALIVE int web_netplay_post(const char *cmd) {
 }
 
 /* Sign out: leave, and forget every credential this browser holds -- the Twitch
- * login token and a remembered password alike. */
+ * login token and a remembered password alike (NETPLAY_CMD_SIGN_OUT). */
 EMSCRIPTEN_KEEPALIVE void web_netplay_signout(void) {
-    netplay_post(NETPLAY_CMD_DISCONNECT, NULL);
-    netplay_post(NETPLAY_CMD_TWITCH_FORGET, NULL);
-    g_netplay.cfg.password[0] = '\0';
-    g_netplay.cfg.token[0]    = '\0';
-    netplay_settings_save();
+    netplay_post(NETPLAY_CMD_SIGN_OUT, NULL);
 }
 
 static int web_json_str(char *out, int cap, const char *key, const char *value, bool comma) {
@@ -1125,6 +1142,7 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
     PUT(",\"stage\":%d", (int)st.stage);
     PUTS("error", st.error, true);
     PUTS("npid", g_netplay.cfg.npid, true);
+    PUTS("server", g_netplay.cfg.server, true);
     PUT(",\"has_password\":%s", g_netplay.cfg.password[0] ? "true" : "false");
     /* Our trip to the relay; a room's owner publishes theirs (relay_ms below),
      * and the lobby adds the two to estimate the trip before joining. */

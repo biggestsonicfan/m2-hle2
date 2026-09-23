@@ -127,14 +127,24 @@
   <section id="np-signin">
     <div id="np-returning" hidden>
       <p class="lead">Welcome back, <strong id="np-returning-name"></strong>.</p>
+      <p class="fine">On <span id="np-returning-server"></span>.</p>
       <button id="np-continue" class="tool primary big">Continue</button>
       <p class="fine"><button id="np-not-me" class="linkish">Not you? Sign out</button></p>
     </div>
     <div id="np-fresh">
       <p class="lead">Sign in to find someone to play.</p>
       <button id="np-twitch-start" class="tool primary big">Sign in with Twitch</button>
+      <p class="fine">Twitch sign-in is on the sonicthefighte.rs server.</p>
       <p id="np-twitch-error" class="error" hidden></p>
       <p class="np-or"><span>or use an RPCN account</span></p>
+      <label class="np-server">Server
+        <select id="np-server" class="tool">
+          <option value="np.rpcs3.net">RPCN, the official server (np.rpcs3.net)</option>
+          <option value="rpcn.sonicthefighte.rs">sonicthefighte.rs</option>
+        </select>
+      </label>
+      <p class="fine left">An account belongs to one server. Either way the sign-in passes through
+        this site's gateway, because a browser cannot reach RPCN directly.</p>
       <div class="np-tabs" role="tablist">
         <button id="np-tab-signin" class="tab" role="tab" aria-selected="true" aria-controls="np-form-signin">Sign in</button>
         <button id="np-tab-create" class="tab" role="tab" aria-selected="false" aria-controls="np-form-create">Create an account</button>
@@ -188,7 +198,7 @@
   </section>
 
   <section id="np-lobby" hidden>
-    <p class="np-me">Signed in as <strong id="np-me"></strong> · <button id="np-signout" class="linkish">Sign out</button></p>
+    <p class="np-me">Signed in as <strong id="np-me"></strong> on <span id="np-me-server"></span> · <button id="np-signout" class="linkish">Sign out</button></p>
     <button id="np-create-match" class="tool primary big">Create a match</button>
     <h3>Open matches <span id="np-rooms-count" class="count-box"></span></h3>
     <ul id="np-rooms" class="np-rooms"></ul>
@@ -216,6 +226,12 @@
         </select>
       </label>
       <label>Private match password <input id="np-private" maxlength="8" autocomplete="off" placeholder="none"></label>
+      <label id="np-damage-row" hidden>Damage
+        <select id="np-damage" class="tool">
+          <option value="real">REAL</option>
+          <option value="normal">NORMAL (catch-up damage)</option>
+        </select>
+      </label>
       <p class="fine left">The web version plays other people on the web version.</p>
     </details>
   </section>

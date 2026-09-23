@@ -365,13 +365,14 @@ int main(void) {
         s.phase = ROOM_PHASE_MATCH; s.flags = ROOM_FLAG_AUTO; s.frame_delay = 3; s.last_result = 1;
         s.match = 513; s.fighter[0] = 0x21; s.fighter[1] = 0x32; s.seed = 0xCAFEF00Du;
         s.line_count = 3; s.line[0] = 0x32; s.line[1] = 0x41; s.line[2] = 0x21; s.region = 2;
-        s.vs_mode = 1; s.session = 511;
+        s.vs_mode = 1; s.session = 511; s.damage_real = 1;
         uint8_t bin[ROOM_STATE_SIZE];
         uint32_t len = room_state_encode(&s, bin);
         CHECK(room_state_decode(bin, len, &back) && back.match == 513 && back.fighter[1] == 0x32
               && back.seed == 0xCAFEF00Du && back.line_count == 3 && back.line[1] == 0x41
               && back.frame_delay == 3 && back.last_result == 1 && back.flags == ROOM_FLAG_AUTO
-              && back.region == 2 && back.vs_mode == 1 && back.session == 511,
+              && back.region == 2 && back.vs_mode == 1 && back.session == 511
+              && back.damage_real == 1,
               "the room state round-trips");
         bin[0] ^= 1;
         CHECK(!room_state_decode(bin, len, &back), "bytes without our magic are not a room state");

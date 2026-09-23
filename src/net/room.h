@@ -98,11 +98,15 @@ typedef struct {
      * the same two players play on, the next match is a rematch on the running
      * boards: `match` moves on and `session` stays where it was. */
     uint16_t session;
+    /* DAMAGE for `match` (hle_hooks.h g_damage_real): 1 = REAL, 0 = NORMAL
+     * (catch-up damage). The owner's, like `region`, and applied the same way,
+     * at the cold boot. */
+    uint8_t  damage_real;
 } room_state_t;
 
 #define ROOM_STATE_MAGIC   0x4D52324Du   /* "M2RM" */
 #define ROOM_STATE_VERSION 1u
-#define ROOM_STATE_SIZE    (24u + 2u * ROOM_MAX_MEMBERS)
+#define ROOM_STATE_SIZE    (25u + 2u * ROOM_MAX_MEMBERS)
 
 static inline void room_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static inline void room_put32(uint8_t *p, uint32_t v) { room_put16(p, (uint16_t)v); room_put16(p + 2, (uint16_t)(v >> 16)); }
@@ -127,6 +131,7 @@ static inline uint32_t room_state_encode(const room_state_t *s, uint8_t *out) {
     out[20 + 2 * ROOM_MAX_MEMBERS] = s->region;
     out[21 + 2 * ROOM_MAX_MEMBERS] = s->vs_mode;
     room_put16(out + 22 + 2 * ROOM_MAX_MEMBERS, s->session);
+    out[24 + 2 * ROOM_MAX_MEMBERS] = s->damage_real;
     return ROOM_STATE_SIZE;
 }
 
@@ -149,6 +154,7 @@ static inline bool room_state_decode(const uint8_t *in, uint32_t len, room_state
     s->region      = in[20 + 2 * ROOM_MAX_MEMBERS];
     s->vs_mode     = in[21 + 2 * ROOM_MAX_MEMBERS];
     s->session     = room_get16(in + 22 + 2 * ROOM_MAX_MEMBERS);
+    s->damage_real = in[24 + 2 * ROOM_MAX_MEMBERS];
     return true;
 }
 
