@@ -263,11 +263,11 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     g_geo3d_layer_model_count = 0;
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
-             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"layer_models\":[%s]}",
+             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"layer_models\":[%s],\"zadjust\":\"0x%08X\"}",
              g_geo3d_state->cam_x,g_geo3d_state->cam_y,g_geo3d_state->cam_z,
              g_geo3d_state->rot_y,g_geo3d_state->rot_x,g_geo3d_state->fov_deg,
              g_geo3d_lines.count, g_geo3d_tris.count, g_geo3d_state->test_triangle ? 1 : 0,
-             g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces, models);
+             g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces, models, g_geo3d_zadjust);
 }
 
 static void mcp_cmd_get_registers(char *resp, int cap) {

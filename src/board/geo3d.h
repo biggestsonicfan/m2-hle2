@@ -240,6 +240,7 @@ typedef struct {
     float    light[3];
     uint32_t geo_mode;      /* the list's mode word (bit 0: specular) and LOD scale */
     float    geo_lod;       /* when the object was drawn (model2_v.cpp commands 07, 16) */
+    uint32_t zadjust;       /* the z-sort mode (command 08) then: the raster's z_adjust */
     uint32_t tpa, tha;      /* the object command's texture point / header addresses */
     /* Debug fields populated by the scanner */
     uint32_t dbg_mesh_ptr;
@@ -1630,6 +1631,7 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
     /* Mode and LOD are the geometrizer's own state and outlive a list. */
     static uint32_t mode = 0;
     static float    lod  = 0.0f;
+    static uint32_t zadj = 0;
     int16_t  wvp[4]  = { 0, 0, 496, 384 };                /* viewport, list coordinates */
     int16_t  wc[4][2] = { {248, 192}, {248, 192}, {248, 192}, {248, 192} };
     int      window = 0;
@@ -1688,6 +1690,7 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
                 cm->light[0] = light[0]; cm->light[1] = light[1]; cm->light[2] = -light[2];
                 cm->geo_mode = mode;
                 cm->geo_lod  = lod;
+                cm->zadjust  = zadj;
                 cm->dbg_mesh_ptr = A(2);
                 cm->tpa = A(0);
                 cm->tha = A(1);
@@ -1718,7 +1721,10 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
             case 0x06: len = 2 + 2 * A(1); break;
             case 0x07: case 0x17: len = 1; mode = A(0); break;
             case 0x16:            len = 1; lod = u32_as_float(A(0)); break;
-            case 0x08: case 0x18: case 0x10: case 0x1E: len = 1; break;
+            /* z-sort mode: the raster keeps (word >> 8) << 8 as its z_adjust
+             * (model2_v.cpp geo_zsort_mode, raster command 08) */
+            case 0x08: case 0x18: len = 1; zadj = A(0) & 0xFFFFFF00u; break;
+            case 0x10: case 0x1E: len = 1; break;
             case 0x09: case 0x19:                              /* focal lengths */
                 len = 2;
                 fx = u32_as_float(A(0)); fy = u32_as_float(A(1));
@@ -2709,17 +2715,27 @@ done:
     free(L); free(ord); free(eb); free(et); free(es);
 }
 
+/* The z-sort mode in force for the object being drawn (the display list's
+ * command 08, captured_model_t.zadjust); set by the draw loop like g_geo3d_mode. */
+static uint32_t g_geo3d_zadjust = 0;
+
 /* The board's sort key for a polygon depth (board z, positive into the screen):
- * MAME's float_to_zval less the window's z_adjust, which shifts every key of a
- * window alike and so never changes which of two is nearer. The mantissa is
- * rounded to 12 bits, so depths closer than that share a bucket. */
+ * MAME's float_to_zval, z_adjust and all. The exponent is taken relative to
+ * z_adjust's and the mantissa rounded to 12 bits, so depths closer than that
+ * share a bucket; below the range the key denormalises and then clamps to 0,
+ * above it clamps to 0xFFFF, and there the board ties where depth would not. */
 static inline uint32_t geo3d_board_zkey(float z) {
     uint32_t u;
     memcpy(&u, &z, 4);
     if ((int32_t)u < 0) return 0;
-    uint32_t e = (u >> 23) & 0xffu, mant = (u & 0x7fffffu) + 0x400u;
+    int32_t  e = (int32_t)((u >> 23) & 0xffu) - (int32_t)((g_geo3d_zadjust >> 23) & 0xffu);
+    uint32_t mant = (u & 0x7fffffu) + 0x400u;
     if (mant > 0x7fffffu) { e++; mant = (mant & 0x7fffffu) >> 1; }
-    return (e << 12) | (mant >> 11);
+    mant >>= 11;
+    if (e < -12) return 0;
+    if (e < 0)   return (mant | 0x1000u) >> -e;
+    if (e < 15)  return ((uint32_t)(e + 1) << 12) | mant;
+    return 0xffffu;
 }
 
 /* A face's key under this draw: its nearest corner (mode 1) or farthest (2),

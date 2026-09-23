@@ -2084,6 +2084,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_obj_tha = cm->tha;
                 g_geo3d_board_luma = 1;
                 g_geo3d_mode = cm->geo_mode;
+                g_geo3d_zadjust = cm->zadjust;
                 g_geo3d_lod  = cm->geo_lod;
                 if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
                     uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
