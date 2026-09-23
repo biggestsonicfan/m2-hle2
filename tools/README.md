@@ -70,7 +70,7 @@ Each grader launches its own emulator and kills it afterwards, headless (no
 window, GPU or audio device). `$M2_WINDOW=1` shows the window. `--attach` uses
 one you already have running with `--mcp` (`grade-models`, `grade-pose`,
 `grade-texram`, `grade-colors`, `grade-all`, `dump-board` and `watch-var` take
-it). The most recently built `m2hle` under `build_vs22/` or `build/` is
+it). The most recently built `m2hle` under `build/` is
 launched unless `$M2_EXE` names one, and `$M2HLE_EXTRA_ARGS` is appended to
 every emulator a grader starts, so a run can be graded with an option the grader
 knows nothing about. The browser tools (`web-*.mjs`) need Node 22 or newer, for
@@ -659,7 +659,7 @@ in three steps that keep the i960 out of it:
 #    interrupt, with 68000 clock-period timestamps, plus MAME's own WAV
 MAME_ROMPATH=<zips> claude_mame/mcp_server/.venv/Scripts/python.exe tools/mame/snd_capture.py cap/mame 5400
 # 2. MAME's MIDI stream, byte for byte at the same clock period, through board/sound.h
-build_vs22/Release/snd_replay.exe cap/mame cap/ours
+build/Release/snd_replay.exe cap/mame cap/ours
 # 3. line them up on the music-start command and compare
 python tools/mame/snd_compare.py cap/mame cap/ours 70
 ```
@@ -813,7 +813,7 @@ frame and the sound board's share of them. `bench-state.mjs` runs on any build a
 answers how fast: instructions a second over the same window, builds alternated,
 best of each.
 
-    cmake -S . -B build_prof -G "Visual Studio 17 2022" -A x64 -DM2HLE_PROFILE=ON
+    cmake -S . -B build_prof -G "Visual Studio 18 2026" -A x64 -DM2HLE_PROFILE=ON
     node tools/prof-state.mjs --exe build_prof/Release/m2hle.exe --state round-mask
     node tools/bench-state.mjs build_base/Release/m2hle.exe build_opt/Release/m2hle.exe \r
          --state round-mask --rounds 5

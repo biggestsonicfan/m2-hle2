@@ -36,8 +36,7 @@ export const hex = (v) =>
 /** Where a Release build puts the emulator; the most recently built one wins. */
 export function findExe() {
     if (process.env.M2_EXE) return process.env.M2_EXE;
-    const candidates = ['build_vs22/Release/m2hle.exe', 'build/Release/m2hle.exe',
-                        'build/m2hle', 'build_vs22/m2hle'];
+    const candidates = ['build/Release/m2hle.exe', 'build/m2hle'];
     let best = null, bestTime = -1;
     for (const c of candidates) {
         const p = path.join(REPO, c);

@@ -198,7 +198,7 @@ The gateway host, its firewall range and its certificate are separate (section 4
 
 ## 7. Milestones
 
-Each ends on something measured. Native builds for verification go in a **fresh build directory, never `build_vs22`** — live processes run out of it.
+Each ends on something measured. Native builds for verification go in a **fresh build directory, never one a live process is running from**.
 
 - **M0 — done.** Branch, analysis, this document.
 - **M1 — done (`dd6f3cb`).** Gate as run: MSVC build of every target, `ctest` 6/6, D3D11 launched (HLSL compiles, runs), and `arc_bench --draw-digest` identical with and without the mesh cache over 4,531 frames / 324,749 cache hits. Not run: `--verify-atlas`, `grade-models`, `match-replay` (they need the MCP bridge on a machine whose default port is not in use), and the GL shaders on a native GPU. *Original scope:* Resolve §2's five hunks; port `8391e6b` into the cached decoder and every fill-shader variant, GLSL and HLSL. *Gate:* MSVC build + `ctest`; `arc_bench --draw-digest` identical with and without the mesh cache; `--verify-atlas`; `node tools/grade-models.mjs`; `node tools/match-replay.mjs`.
