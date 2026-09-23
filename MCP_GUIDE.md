@@ -597,6 +597,18 @@ the `.json` index. With `async: 1` it only arms (returns `armed`), so a driver
 can arm before `emu_run` and catch power-on; **`capture_snd_finish(timeout_ms)`**
 then waits for it and writes the index. Returns `records`, `frames`.
 
+**`sound_codes(since = 0)`** — every command the i960 has sent the sound board,
+oldest first, framed, from command number `since` on (`codes`, with `next` to pass
+as `since` to read on and `lost` for any that left the ring). `sent` and `taken`
+are UART bytes the i960 wrote and bytes the 68000 read back out of the SCSP's MIDI
+buffer: a gap that stays is bytes lost. `queue_hi` is the high-water mark of the
+ROM's command queue, and `midi_hi` / `midi_holds` / `midi_drops` the MIDI buffer's.
+
+**`prof(on = 1)`**, **`prof_dump(path)`** — the i960 address profiler
+(`tools/prof-state.mjs`): `prof` arms it (clearing it) or disarms it with `on: 0`,
+and `prof_dump` writes `addr,count` to `path` with a `.frames.csv` companion. Only
+an `M2HLE_PROFILE` build counts anything; any other answers `ok: false`.
+
 **`dump_geo_list(path)`** — the GEO display list the renderer walks, as last
 published: u32 read pointer, u32 publish count, u16 H-sync, u16 V-sync, then
 bufferram's words. Returns `read_start`, `seq`, `hsync`, `vsync`.
@@ -692,7 +704,11 @@ sound RAM, or of the SCSP registers (no read side effects), as a decimal array `
 | `0x000077F8` | `co_processor_error_hang` | Halts the CPU and logs the COP self-test error code |
 
 There is deliberately no `read_sw` (`0x17CC`) hook: inputs reach the game through
-its I/O ports. The table is `src/profiles/sfight.h`.
+its I/O ports. These are the boot and pacing hooks; the table in
+`src/profiles/sfight.h` (`SFIGHT_BASE_HOOKS`) also holds the region and DAMAGE
+defaults (`0x62688`, `0x62674`), the versus result (`0xDC3C`), the VS rematch
+(`0xE584`), the attract replay's stage (`0x941C`) and the PS3 cross-play hooks
+(`xplay_*`), and `sfight_console.h` adds the Console profile's.
 
 ### Memory bus regions (board-level, all Model 2 games)
 | Base address | Size | Region |

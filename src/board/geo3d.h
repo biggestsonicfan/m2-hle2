@@ -620,15 +620,6 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
     T->zl  = g_geo3d_emit_layer * g_geo3d_layer_steps * (1.0f / 16777216.0f);
 }
 
-/* Backward-compatible: untextured triangle (tw=0 → shader uses flat color). */
-static inline void geo3d_emit_tri(float x0, float y0, float z0,
-                                   float x1, float y1, float z1,
-                                   float x2, float y2, float z2,
-                                   float r,  float g,  float b) {
-    geo3d_emit_tri_uv(x0,y0,z0,0.0f,0.0f, x1,y1,z1,0.0f,0.0f,
-                      x2,y2,z2,0.0f,0.0f, r,g,b, 0.0f,0.0f,0.0f,0.0f, 0.0f,1.0f, 0.0f);
-}
-
 static inline void geo3d_emit_line(float x0, float y0, float z0,
                                     float x1, float y1, float z1,
                                     float r,  float g,  float b) {
@@ -681,12 +672,7 @@ typedef struct {
     int              filter_max;
     int              isolate_index;   /* >=0: show only this single capture */
 
-    /* Polygon connectivity (cached from the active profile each scan). */
-    uint32_t         connect_when;
-    bool             simple_connect;
-
-    /* View matrix read from game RAM, if has_game_view. */
-    float            game_view[12];
+    /* A view matrix was read from game RAM this frame. */
     bool             has_game_view;
 
     /* Windows in the display list last walked (geo3d_scan_geo_list). */
@@ -703,8 +689,6 @@ static inline void geo3d_init(geo3d_state_t *geo) {
     geo->use_matrix     = true;
     geo->use_game_view  = true;
     geo->isolate_index  = -1;
-    geo->connect_when   = 0xFFFF;
-    geo->simple_connect = false;
 }
 
 /* Global pointer set by main.c so mcp_bridge.h can read captured models. */
@@ -841,12 +825,6 @@ static int  g_dump_model_tex = -1;
 /* Texture bank override: 0=auto (texsheet bit12), 1=force sheet0, 2=force sheet1,
  * 3=swap (invert the bit12 selection). */
 static int  g_uv_bank_mode = 0;
-
-/* Fight stage camera-relative fix: the fight stage geometry comes through the
- * FIFO already camera-relative (world − camera) while bone fighters are world.
- * When a fighter (bone model) is on screen, add the camera back to non-bone
- * matrices so the uniform game camera doesn't subtract it twice. */
-static bool g_stage_camera_fix = true;
 
 /* Texture-path debug counters (cumulative across decode calls).  Read via the
  * MCP bridge "dump_tex_stats" to see whether faces actually come out textured. */

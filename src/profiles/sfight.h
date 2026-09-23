@@ -707,11 +707,9 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      }, \
     { 0x0000941C, sfight_hook_replay_stage,       "replay_stage"            },
 
+/* read_sw's copies of the pad: held 0x500700, momentary 0x500704; the
+ * credits are at 0x59C388 (P1) and 0x59C38C (P2). */
 #define SFIGHT_INPUT_MAP                                                        \
-    .held_addr       = 0x00500700,                                              \
-    .momentary_addr  = 0x00500704,                                              \
-    .p1_credits_addr = 0x0059C388,                                              \
-    .p2_credits_addr = 0x0059C38C,                                              \
     .bits = {                                                                   \
         [GAME_INPUT_P1_UP]    = 0x00002000,                                     \
         [GAME_INPUT_P1_DOWN]  = 0x00001000,                                     \
@@ -746,7 +744,6 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
  * for. Captured off this emulator and checked bit for bit against the
  * natural boot's fight (1097 frames, both fighters). */
 #define SFIGHT_QUIRKS                                                                 \
-    .poly_connect_mask  = 0x45B4,                                                     \
     .mesh_ptr_subtract  = 0x02000010,                                                 \
     .mesh_ptr_add       = 0x10,                                                       \
     .model_table_offset = 0x000E0004,                                                 \

@@ -110,8 +110,6 @@ static const game_profile_t m2snake_profile = {
         /* Standard Model 2B board input bits (same layout STF assembles), so the
          * existing active-low IN0/IN1/IN2 port serving in input.h feeds the
          * homebrew's port reads directly. */
-        .held_addr      = 0,
-        .momentary_addr = 0,
         .bits = {
             [GAME_INPUT_P1_UP]    = 0x00002000,
             [GAME_INPUT_P1_DOWN]  = 0x00001000,
@@ -142,7 +140,6 @@ static const game_profile_t m2snake_profile = {
         /* Enable the authentic 3D draw path (0x3C007878): the shared STF data
          * ROMs carry the 5103-entry model table + meshes, so the homebrew can
          * issue real object draws and geo3d decodes them from the COP stream. */
-        .poly_connect_mask  = 0x45B4,
         .mesh_ptr_subtract  = 0x02000010,
         .mesh_ptr_add       = 0x10,
         .model_table_offset = 0x000E0004,

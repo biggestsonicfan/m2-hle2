@@ -207,6 +207,8 @@ static void load_active_profile(const char *primary_zip) {
     if (state.emu_started) { emu_stop(&state.emu); emu_sleep_ms(10); }
 
     if (g_active_profile->load_fn(&state.romset, primary_zip, parent_zip_ptr) == 0) {
+        /* The model lookup is built from the ROM's model table: a new set needs a new one. */
+        geo3d_lookup_invalidate();
         g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
         /* Bring up the 68K sound block: attach the MIDI/SCSP bus callbacks, load
          * the 68K program ROM + PCM sample ROM. (install_fn re-inits the bus, so

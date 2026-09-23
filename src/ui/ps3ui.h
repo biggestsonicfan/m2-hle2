@@ -83,17 +83,6 @@ static inline void ps3ui_image_over(ps3ui_image_t *im, int x, int y, const float
     p[3] = oa;
 }
 
-static inline void ps3ui_image_set(ps3ui_image_t *im, int x, int y, const float rgb[3], float a)
-{
-    if (x < 0 || y < 0 || x >= im->w || y >= im->h)
-        return;
-    float *p = ps3ui_px(im, x, y);
-    p[0] = rgb[0];
-    p[1] = rgb[1];
-    p[2] = rgb[2];
-    p[3] = a;
-}
-
 /* ---------------------------------------------------------------------------
  * Polygon coverage: nonzero winding, 4x4 samples per pixel. Sprites are
  * painted once, at start-up, so exactness matters more than speed.

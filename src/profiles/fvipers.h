@@ -295,12 +295,9 @@ static const game_profile_t fvipers_profile = {
         { FVIPERS_HOOK_ADDR_READ_SW,           fvipers_hook_read_sw,          "read_sw"              },
     },
     .input = {
-        /* TODO: find held/momentary/credits addresses in fvipers RAM.
-         * Locate read_sw (0x229C) in IDA; the stores nearby are these. */
-        .held_addr       = 0x00500700,  /* INTERUPT_FLAGS_HELD     — confirmed IDA */
-        .momentary_addr  = 0x00500704,  /* INTERUPT_FLAGS_MOMENTARY — confirmed IDA */
-        .p1_credits_addr = 0x00000000,  /* TODO: not found in IDA database */
-        .p2_credits_addr = 0x00000000,  /* TODO: not found in IDA database */
+        /* read_sw (0x229C) copies the pad to INTERUPT_FLAGS_HELD (0x500700) and
+         * INTERUPT_FLAGS_MOMENTARY (0x500704), confirmed in IDA. The credits
+         * are not found yet. */
         .bits = {
             /* Same I/O board as STF — bit masks are likely identical. */
             [GAME_INPUT_P1_UP]    = 0x00002000,
@@ -323,9 +320,8 @@ static const game_profile_t fvipers_profile = {
         },
     },
     .quirks = {
-        /* Start with STF values; re-run poly bruteforce against fvipers
-         * reference renders before finalising (see CLAUDE.md §3D Polygon Decoder). */
-        .poly_connect_mask  = 0x45B4,       /* tentative — verify against fvipers OBJs */
+        /* Start with STF values; check the decoder against fvipers reference
+         * renders before finalising (see CLAUDE.md §3D Polygon Decoder). */
         .mesh_ptr_subtract  = 0x02000010,   /* TODO: verify encoding for fvipers */
         .mesh_ptr_add       = 0x10,
         .model_table_offset = 0x000E0004,   /* TODO: find in IDA */

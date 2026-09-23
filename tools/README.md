@@ -43,7 +43,9 @@ toolkit regenerates it, copy the new one over.
 git submodule update --init vendor/noclip
 ```
 
-No `npm install`: nothing here has a dependency. Node 18 or newer, because the
+No `npm install`: nothing here has a dependency, except `grade-carpet.mjs`, which
+drives a headless browser through `puppeteer-core` found outside this tree
+(`$M2_PUPPETEER`, the explorer's, or `../noclip`'s). Node 18 or newer, because the
 explorer's zip reader goes through `DecompressionStream`.
 
 You supply the ROM set. Nothing here carries one and `.gitignore` refuses
@@ -68,7 +70,7 @@ Each grader launches its own emulator and kills it afterwards, headless (no
 window, GPU or audio device). `$M2_WINDOW=1` shows the window. `--attach` uses
 one you already have running with `--mcp` (`grade-models`, `grade-pose`,
 `grade-texram`, `grade-colors`, `grade-all`, `dump-board` and `watch-var` take
-it). The most recently built `m2hle` under `build_vs22/` or `build/` is
+it). The most recently built `m2hle` under `build/` is
 launched unless `$M2_EXE` names one, and `$M2HLE_EXTRA_ARGS` is appended to
 every emulator a grader starts, so a run can be graded with an option the grader
 knows nothing about. The browser tools (`web-*.mjs`) need Node 22 or newer, for
@@ -88,6 +90,7 @@ its built-in `WebSocket`.
 | `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-zsort.mjs` | which face wins where faces lie on faces (`geo3d_mesh_layers`), in pictures against MAME's. Plays the attract replay in MAME and here, here with the layers off and on, and counts, of the pixels the layers change, how many each puts nearer MAME. `--stage N` puts the replay on another stage in both. See "Faces lying on faces" below |
+| `grade-carpet.mjs` | the explorer's Flying Carpet rug against MAME's pictures, from the board's own camera: the plate `draw_sphynx_head` lays under the rug (3332) must cover none of it, because the board sorts it behind every strip. Reads `grade-zsort --mame --stage 1`'s snapshots and cameras, renders the explorer headless (puppeteer-core, Edge) at each, and counts the rug pixels the plate changes. See "The Flying Carpet's rug" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `bench-builds.mjs` | how fast each build runs the board, headless and unthrottled: game frames a second past the texture-load spike, builds alternated, best of each. The throughput companion of `ab-builds`; `bench-render.mjs` is the renderer's: each build headless with the A/V server up and drained, so the main thread draws every board frame on the real D3D11 device, and `get_status`'s `render` block gives the microseconds each stage (tile compose, scan, upload, 3D draw, tile quads) costs a frame |
@@ -112,6 +115,8 @@ its built-in `WebSocket`.
 | `lib/texref.mjs` | the board digests and the exact slices they are cut at |
 | `lib/cop-replay.mjs` | the coprocessor's current matrix replayed from the FIFO words, every matrix-writing command and the three matrix banks included, in the chip's float32 or in double; and a capture walked into per-frame draws |
 | `lib/matrix.mjs` | row-major 4x4s in the board's convention, and an explorer op list turned into one |
+| `lib/png.mjs` | just enough PNG for the graders: reads MAME's snapshots and writes RGB pictures, with node's own zlib |
+| `ps3ui/` | the PS3-menu layout, font and sprite pipeline and its grader; see [ps3ui/README.md](ps3ui/README.md) |
 
 ## Replacing MAME
 
@@ -456,6 +461,45 @@ stage 1  PASS  1469 pixels changed: 1465 nearer MAME with the layers, 3 nearer w
 stage 5  PASS  808 pixels changed: 788 nearer MAME with the layers, 18 nearer without
 ```
 
+
+## The Flying Carpet's rug (`grade-carpet`)
+
+The explorer's fill is a depth buffer with a bounded recede, not the board's
+polygon sort, and the Flying Carpet is where the two parted visibly (noclip
+issue 23): the plate `draw_sphynx_head` lays at y = 0 under the rug is one quad
+as wide as the rug, the rug's floor ripples a tenth of a unit either side of
+that plane, and where the plate was too deep along the view to recede, the
+ripple's troughs fell behind it and the rug went flat. The board sorts the
+plate by its farthest corner, behind every strip, and MAME never shows it.
+
+This grader holds the explorer to that from the board's own camera. It reuses
+`grade-zsort`'s MAME run on stage 1 — the snapshots, and beside each the
+`frame_counter` and the camera at `0x519E98` — so take that once:
+
+```sh
+node tools/grade-zsort.mjs --mame --stage 1        # MAME's snapshots (~12 min)
+node tools/grade-carpet.mjs [--out DIR]             # the explorer at each (~30 s)
+```
+
+- **The explorer:** served from `$M2_NOCLIP` into headless Edge (SwiftShader)
+  through `puppeteer-core`, resolved from `$M2_PUPPETEER`, the explorer or
+  `../noclip`; `$M2_BROWSER` names another Chromium. The stage clock is held
+  on MAME's `frame_counter`, the carpet is ridden so the scene is in the
+  board's frame, and the camera stands at the board's eye, pitch and yaw at a
+  fitted `--fov` (58).
+- **The measurement:** three renders a frame — as drawn, plate hidden, rug
+  alone — and the rug pixels the plate changes. The board's answer is none.
+  The plate's sliver past the rug's lifted edge is the board's picture too and
+  is only counted. Where the plate does cover the rug, the report gives how
+  much of the rug's pattern (red at 80 or more) each render and MAME show
+  there; the plate and the rug's ground are one colour, so the pattern is what
+  tells them apart.
+- **Pictures:** `--out DIR` writes MAME | explorer | changes, with the plate
+  over the rug in magenta and past it in cyan.
+- **Numbers:** noclip master at 2e4cd5d has the plate over 751,768 rug pixels
+  across the 31 frames of replay 400..1300; with the plate conceding the
+  bound a pixel at a time, none.
+
 ## Sway chains (osage) at character select
 
 ```
@@ -615,7 +659,7 @@ in three steps that keep the i960 out of it:
 #    interrupt, with 68000 clock-period timestamps, plus MAME's own WAV
 MAME_ROMPATH=<zips> claude_mame/mcp_server/.venv/Scripts/python.exe tools/mame/snd_capture.py cap/mame 5400
 # 2. MAME's MIDI stream, byte for byte at the same clock period, through board/sound.h
-build_vs22/Release/snd_replay.exe cap/mame cap/ours
+build/Release/snd_replay.exe cap/mame cap/ours
 # 3. line them up on the music-start command and compare
 python tools/mame/snd_compare.py cap/mame cap/ours 70
 ```
@@ -769,7 +813,7 @@ frame and the sound board's share of them. `bench-state.mjs` runs on any build a
 answers how fast: instructions a second over the same window, builds alternated,
 best of each.
 
-    cmake -S . -B build_prof -G "Visual Studio 17 2022" -A x64 -DM2HLE_PROFILE=ON
+    cmake -S . -B build_prof -G "Visual Studio 18 2026" -A x64 -DM2HLE_PROFILE=ON
     node tools/prof-state.mjs --exe build_prof/Release/m2hle.exe --state round-mask
     node tools/bench-state.mjs build_base/Release/m2hle.exe build_opt/Release/m2hle.exe \r
          --state round-mask --rounds 5
@@ -921,10 +965,13 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
 
 The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
-`boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`) are
-ctest unit tests, built with the emulator and run by `ctest -C Release` in the
-build directory (or `run_tests.ps1`). Several load the ROM set from a fixed path
-under the sibling `claude_mame` checkout.
+`boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`,
+`ps3net_test`, `heat_test`, `scsp_dsp_test`, `scsp_dsp_test_masks`,
+`retro_shader_test`, `sfight_settings_test`) are ctest unit tests, built with the
+emulator and run by `ctest -C Release` in the build directory (or
+`run_tests.ps1`). `rom_test`, `boot_test`, `geo_test` and `input_test` load the
+ROM set from a fixed path under the sibling `claude_mame` checkout. `det_digest`,
+`snd_bench` and `ps3ui_render` are built beside them but are tools, not ctests.
 
 ## What is not here yet
 
@@ -936,8 +983,9 @@ strongest available statement about texture RAM is emulator-vs-explorer.
 
 **Pinning a scene in attract mode does not work.** Holding `stage_num` for
 2700 frames never loads the arena, and `watch-var.mjs` shows nothing reads or
-writes `0x500064` during attract. Attract only fights its Flying Carpet replay.
-A played round does take a stage, if it is written where ROUND_INIT stores it
+writes `0x500064` during attract. Attract only fights its Flying Carpet replay,
+unless the `replay_stage` hook at `0x941C` moves it (`--match-replay-stage N`,
+which `grade-zsort --stage` uses). A played round does take a stage, if it is written where ROUND_INIT stores it
 (`captureStage`, above). `dump-board.mjs` and `grade-all.mjs` still pin during
 attract, so they grade whichever scene loaded, and say which.
 

@@ -1,5 +1,5 @@
 # Build output. CLAUDE.md says to configure a fresh directory rather than reuse
-# one set up for another generator, so these multiply (build_vs22, build_test,
+# one set up for another generator, so these multiply (build, build_test,
 # ...); the pattern covers the MSBuild .tlog / .vcxproj litter in all of them.
 build/
 build_*/
@@ -91,12 +91,10 @@ mcp_server/*
 # cover a run that was pointed here instead.
 tools/out/
 tools/**/capture.json
-texram0.bin
-texram1.bin
-lumaram.bin
-colorxlat.bin
-palram.bin
-build_vs22_*.log
+
+# Memory dumps (texram0.bin, palram.bin, a display list pulled over the bridge,
+# ...). Nothing binary in the repo ends in .bin, so take them all.
+*.bin
 
 # Netplay settings, written at runtime. Holds the Twitch login token.
 m2hle_netplay.cfg

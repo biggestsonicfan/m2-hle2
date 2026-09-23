@@ -14,10 +14,11 @@
  *                      CPU's initial IP from the PRCB.
  *   - hooks          : address → HLE hook function table
  *   - input_map      : abstract action → I/O port bit
- *   - quirks         : polygon-decoder mask, mesh-pointer offsets, etc.
+ *   - quirks         : mesh-pointer offsets, model table, camera, etc.
  *
- * The active profile is resolved at ROM-load time from the loaded set's CRC32s
- * (profile_for_rom_set); --profile names one outright.
+ * The active profile is resolved at ROM-load time from the set's name, the zip
+ * basename (profile_for_rom_set); --profile names one outright. The CRC32s
+ * validate each file the profile loads.
  */
 #ifndef GAME_PROFILE_H
 #define GAME_PROFILE_H
@@ -66,17 +67,11 @@ typedef enum {
 } game_input_t;
 
 /*
- * Most Model 2 games write the pad state into RAM (held flags + momentary
- * flags), with the i960 reading those RAM words rather than the I/O ports
- * directly.  We mirror that: the host UI sets a 32-bit `held` and
- * `pending` bitfield (built from per-action masks below) and writes them
- * to the RAM addresses on each frame.
+ * Inputs reach the game through the board's I/O ports (input.h), which the
+ * game's own read_sw copies into RAM. A profile only says which port bit each
+ * abstract action is.
  */
 typedef struct {
-    uint32_t held_addr;        /* held bits live here    (e.g. STF: 0x500700) */
-    uint32_t momentary_addr;   /* momentary bits go here (e.g. STF: 0x500704) */
-    uint32_t p1_credits_addr;  /* per-player credit byte (0 = not used)        */
-    uint32_t p2_credits_addr;
     uint32_t bits[GAME_INPUT_COUNT];  /* mask per abstract action */
 } game_input_map_t;
 
@@ -93,7 +88,6 @@ typedef struct {
 } attract_replay_t;
 
 typedef struct {
-    uint16_t poly_connect_mask;     /* 0 = board default 0x45B4 (STF-tuned) */
     uint32_t mesh_ptr_subtract;     /* 0 = board default 0x02000010 */
     uint32_t mesh_ptr_add;          /* 0 = board default 0x10 */
     uint32_t model_table_offset;    /* byte offset of model table within main_data */

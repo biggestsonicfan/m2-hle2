@@ -579,21 +579,6 @@ static ps3ui__c4 ps3ui__ramp(const ps3ui__stop_t *s, int n, float v)
 
 static float ps3ui__clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
 
-/* Blend b over a, both straight alpha, b at coverage t. */
-static ps3ui__c4 ps3ui__over(ps3ui__c4 a, ps3ui__c4 b, float t)
-{
-    float ba = b.a * t, da = a.a * (1.0f - ba / 255.0f), oa = ba + da;
-    ps3ui__c4 c = { 0, 0, 0, oa };
-    if (oa > 0.0f) {
-        c.r = (b.r * ba + a.r * da) / oa;
-        c.g = (b.g * ba + a.g * da) / oa;
-        c.b = (b.b * ba + a.b * da) / oa;
-    } else {
-        c.r = b.r; c.g = b.g; c.b = b.b;
-    }
-    return c;
-}
-
 /* ---- the small header tab (hw_ovr_line_cnr_s) ------------------------------ */
 
 static void ps3ui__paint_tab_s(ps3ui_image_t *im)

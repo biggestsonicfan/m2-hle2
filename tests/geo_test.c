@@ -10,8 +10,8 @@
  * NOTE on the formal Jaccard=1.0 milestone: the offline comparator and the
  * model-index -> reference-OBJ filename mapping (C:\m2\3d\new\stf-poly) are not
  * checked into these repos, so a literal Jaccard re-measurement isn't done here.
- * The decoder is the verbatim J=1.0 implementation + STF's bruteforced
- * connectivity mask (0x45B4) and mesh-pointer quirks; this test verifies the
+ * The decoder is the verbatim J=1.0 implementation + STF's mesh-pointer
+ * quirks; this test verifies the
  * port reproduces valid geometry. See the Phase 9 report for the caveat.
  */
 #define NDEBUG 1

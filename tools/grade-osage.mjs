@@ -73,7 +73,7 @@ if (args.bool('mame')) {
 
 /* ---- this emulator --------------------------------------------------------- */
 
-const replayExe = process.env.COP_REPLAY ?? ['build_vs22/Release/cop_replay.exe', 'build/Release/cop_replay.exe', 'build/cop_replay']
+const replayExe = process.env.COP_REPLAY ?? ['build/Release/cop_replay.exe', 'build/cop_replay']
     .map((p) => path.join(REPO, p)).find((p) => fs.existsSync(p));
 if (!replayExe) { rep.skip('cop_replay is built', 'build the cop_replay target, or set $COP_REPLAY'); rep.finish(); process.exit(); }
 const missing = CHARS.filter((ch) => !fs.existsSync(path.join(OUT, `mame-c${ch}.bin`)));

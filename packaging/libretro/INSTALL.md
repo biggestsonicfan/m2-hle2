@@ -116,23 +116,15 @@ Open **Quick Menu > Core Options** while the game runs.
 | Option | Choices | What it does | Takes effect |
 |---|---|---|---|
 | Internal resolution | Native, Double, Triple, Quadruple, Full screen | The size the game is drawn at. Native is the arcade's own 496x384. Full screen draws at your window's or screen's size. | at once |
+| Sonic the Fighters version | Console, Arcade | Console adds Honey, Metal Sonic and Robotnik and the PS3 release's menus; Arcade is the board as it shipped. | next time you load the game |
 | Draw rate | 60, 30 | 30 draws every second frame: half the graphics work, cooler on a handheld. The game still runs at 60. | at once |
 | Heat guard | off, 80, 85, 90 °C | Above that temperature, draws every second frame until the device has cooled 5 degrees. The second time, it stays at every second frame; still hot after that, it turns the sound board off until the next load (never during an online match). Linux and handhelds only. | at once |
 | Sound board | enabled, disabled | Disabled is silent and uses less power. | next time you load the game |
 | Online play | RetroArch, RPCN | Which netplay to use (see below). | next time you load the game |
-| RPCN sign-in | Signed out, Sign in using Twitch, RPCN account | Only shown with Online play set to RPCN. | at once |
 | Input delay (frames) | 1 to 8 | For matches you host. Higher hides more network lag. | the next match you host |
-| RPCN status | (one line) | What the session is doing, and as whom. Reading only. | — |
-| RPCN room to join | the rooms RPCN last listed | Which room **RPCN lobby action > Join the room above** takes. | at once |
-| RPCN players in the room | the line in the room | Who is in the room, front of the line first. Reading only. | — |
-| RPCN lobby action | what this moment allows | Host, join, refresh, ready, leave. Goes back to *(nothing)* once done. | when you close the menu |
-| RPCN room size (hosting) | 2 to 8 players | How many a room you host holds. Two fight, the rest wait in line and watch. | the next room you host |
-| RPCN side to play | Whichever is free, 1P, 2P | Which side to ask for when your turn comes. | at once |
-| RPCN take part | Play, Watch only | Watch only sits out: never picked to fight. | at once |
 
-The last seven appear only with **Online play** set to RPCN, and each only when it has something
-to say — the room list is there when you're signed in and out of a room, the player line when
-you're in one.
+The RPCN lobby is not in this menu: the core draws it in the game, as the PS3 release does (see
+below).
 
 Savestates, rewind and run-ahead don't work with this core. RetroArch says the core doesn't
 support save states if you try.
@@ -156,34 +148,26 @@ joins. Both players need **the same build** of the core; RetroArch refuses a mis
 **RPCN** (plays against the m2-hle desktop emulator and play.sonicthefighte.rs)
 
 1. Set **Online play** to **RPCN**, then close and reload the game.
-2. Set **RPCN sign-in**:
-   - **Sign in using Twitch:** a notification shows a twitch.tv/activate address and a code.
-     Open the address on any phone or computer and enter the code. Later launches sign in by
-     themselves.
-   - **RPCN account:** cores can't show a text box, so the account is entered as a cheat code.
-     In **Quick Menu > Cheats**, add a new cheat, set its code to
-     `rpcn:NAME:PASSWORD:TOKEN`, and apply the changes. TOKEN is the one RPCN e-mailed you when
-     you registered; leave `:TOKEN` off if your server doesn't use one. The password can't
-     contain `:`.
-3. The lobby is in the same place: **Quick Menu > Core Options > Online play**. Once you're
-   signed in, the rows below the sign-in fill in.
-   - To **host**: set **RPCN room size** if you want more than two, then set **RPCN lobby
-     action** to *Host a room*.
-   - To **join**: pick a room in **RPCN room to join**, then set **RPCN lobby action** to *Join
-     the room above*.
-   - Either way, once you're in the room set **RPCN lobby action** to *Ready to play*. The match
-     starts when everyone in the room is ready.
+2. Choose **Online Battle** from the game's main menu. (The Arcade version opens the lobby at
+   load, and L + R together open it again.) Signing in needs no keyboard:
+   - **Sign in with Twitch:** the lobby shows a twitch.tv/activate address and a code. Open the
+     address on any phone or computer and enter the code. Later launches sign in by themselves.
+   - **Sign in with an RPCN account:** type the name and password on the lobby's on-screen
+     keyboard (cross types a key, square deletes, Start or Done finishes).
+3. From there it is the PS3's **PLAYER MATCH**:
+   - **Quick Match** joins a room that will have you, or makes one.
+   - **Custom Match** is the room list: cross joins, square refreshes.
+   - **Create Match** sets the room's size (up to eight: two fight, the rest wait in line and
+     watch), game type and input delay.
 
-   RetroArch pauses the game while its menu is open, so what you pick in **RPCN lobby action**
-   happens when you close the menu; a message on screen then says what came of it. Open the menu
-   again to see where things stand.
+   A room of two shows the VS lobby: cross is Ready, and the 30-second countdown readies you
+   when it runs out. A room of three or more shows the ROOM MATCH list, where cross asks for 1P
+   or 2P and the room's owner can skip the countdown with square.
 
 Keep in mind:
 
 - **One Twitch sign-in per account.** RPCN keeps a single Twitch login per account, so signing in
   with Twitch here signs out any other copy of m2-hle using that account with Twitch.
-- **Cheats are saved in plain text.** RetroArch writes cheat codes to a text file, so the password
-  from an RPCN-account cheat ends up there. Use a password you don't use anywhere else.
 - **No RPCN on Android.** Its sign-in needs the system's OpenSSL, which Android doesn't have.
   RetroArch netplay works there.
 

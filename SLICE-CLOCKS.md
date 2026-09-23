@@ -1,11 +1,10 @@
 # One slice is not one frame
 
-A proposal, not a change. The performance work on this branch left the board
-exactly as it found it (`ab-builds` identical against master); this is the
-accuracy bug that work walked past, written down with its measurement so it can
-be fixed on its own terms.
+Option A below is merged (PR #61); B and C are the alternatives not taken. This
+began as the accuracy bug the performance work walked past, written down with its
+measurement so it could be fixed on its own terms.
 
-## Status (branch `fix/slice-clocks`, 2026-09-22)
+## Status (merged in PR #61, 2026-09-22)
 
 **Option A is in.** `emu_sound_slice_end` (`src/core/emu_thread.h`) charges the sound
 board a frame of samples when the game's frame ends. `emu_slice_body`,
@@ -15,7 +14,7 @@ reaches a frame edge (booting, stuck, or a profile with no frame hook) would nev
 run its sound. So once a frame has run `EMU_FRAME_STEPS_MAX` (4M) i960
 instructions, each further slice is charged as before. The limit counts
 instructions, not slices, so the rule is the same at any `--steps-per-slice`.
-`NETPLAY_PROTO_REV` is now 5. `sound_status` reports `midi_holds`.
+`NETPLAY_PROTO_REV` went to 5 (it has been bumped again since). `sound_status` reports `midi_holds`.
 
 Measured with `tools/clock-state.mjs` (new; the acceptance test below as a tool):
 

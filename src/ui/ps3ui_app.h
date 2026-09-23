@@ -96,11 +96,6 @@ static void ps3ui_win_close(ps3ui_win_t *w)
     }
 }
 
-static int ps3ui_win_is(const ps3ui_win_t *w, const char *name)
-{
-    return w->def && w->state != PS3UI_WIN_CLOSED && w->state != PS3UI_WIN_CLOSING && strcmp(w->def->name, name) == 0;
-}
-
 static void ps3ui_win_tick(ps3ui_win_t *w)
 {
     switch (w->state) {
@@ -403,7 +398,7 @@ typedef struct {
     int open;                   /* Online Battle was chosen */
     ps3ui_screen_t scr;
     int cursor;
-    int dialog, dialog_cursor;
+    int dialog;
     char dialog_text[256];
     ps3ui_dialog_t dlg;
 
@@ -438,7 +433,6 @@ typedef struct {
     uint16_t last_match;
     int result_side;            /* 0/1 = winner side, -1 = none */
     float result_t;
-    char result_names[2][20];
 
     /* the on-screen keyboard (ours) */
     int osk_field;              /* 0 = name, 1 = password, 2 = e-mail token */
@@ -601,11 +595,6 @@ static int ps3ui_move(ps3ui_app_t *a, int *cur, int n, int wrap)
 }
 
 /* ---- the room, read off the status --------------------------------------------- */
-
-static int ps3ui_in_room(const netplay_status_t *st)
-{
-    return st->state == NETPLAY_IN_ROOM || st->state == NETPLAY_SYNCING;
-}
 
 /* The two fighters of the next match: the room's fighters when a match is
  * under way, else the front of the line (1P/2P entries first), as room.h
@@ -864,14 +853,6 @@ static void ps3ui_update_connect(ps3ui_app_t *a)
         a->searching = 0;
         ps3ui_app_go(a, PS3UI_SCR_MENU);
     }
-}
-
-static int ps3ui_me(const netplay_status_t *st)
-{
-    for (uint32_t i = 0; i < st->member_count; i++)
-        if (st->members[i].is_me)
-            return (int)i;
-    return -1;
 }
 
 static void ps3ui_update_room(ps3ui_app_t *a)
