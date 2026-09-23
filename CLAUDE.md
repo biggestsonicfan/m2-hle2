@@ -2,7 +2,7 @@
 
 Seeds a fresh Claude session with the hard-won facts that took trial-and-error to discover — things that cannot be re-derived from the i960 manual or general emulator-design knowledge.
 
-Pair with [PROPOSAL.md](PROPOSAL.md) §8 for the full subsystem gotcha catalogue and §3 for the board-vs-game layering. This file is for the *invariants that must never be re-derived*; the proposal is for the broader context.
+[PROPOSAL.md](PROPOSAL.md) is the original plan: its §3 has the board-vs-game rationale, and its §8 is an older subset of this file. This file is for the *invariants that must never be re-derived*; the proposal is historical context.
 
 ---
 
@@ -21,7 +21,7 @@ See [PROPOSAL.md](PROPOSAL.md) for the architecture, module map, build commands,
 Code lives in one of two layers. Get this distinction wrong and you'll re-implement board-level fixes in per-game files.
 
 - **Board layer** — anything shared by every Model 2 ROM set: i960 CPU core, memory bus, COP math, tile renderer, 3D polygon decoder, sound block, threading. Lives in shared `.h` modules.
-- **Game-profile layer** — anything specific to one ROM set: HLE hook table (addresses), input map, ROM file list + CRC32s, optional quirks struct. Lives in a `game_profile_t` entry resolved from the loaded ROM CRC32s.
+- **Game-profile layer** — anything specific to one ROM set: HLE hook table (addresses), input map, ROM file list + CRC32s, optional quirks struct. Lives in a `game_profile_t` entry resolved from the ROM set's name (the zip basename, `profile_for_rom_set`); the CRC32s validate each file.
 
 **Default to the board layer.** If a bug surfaces in STF, your first hypothesis should be "this is board-level and another game is also affected" — not "this is STF-specific." Only move a fix to the per-game layer when you have positive evidence (e.g. another game's ROM relies on the opposite behaviour).
 
@@ -165,7 +165,7 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
 ### Tile Renderer (board-level)
 
 - **16-bit byteswap on pixel bytes**: indices `[0,1,2,3]` are read as `[1,0,3,2]` (XOR low bit of byte index). Within each swapped word, high nibble = left pixel, low nibble = right.
-- **Tilemap entry** (MAME `segaic24` tile_info): bit15=priority, bits[14:7]=pal_bank (**8-bit**, `(entry >> 7) & 0xFF` — bit 14 is a palette bit, *not* h_flip; `change_bg_color` uses it), char = low bits. Full tile index = `entry & 0x3FFF`. Palette LUT index = `pal_bank * 16 + color_idx` (stride=16 entries = 32 bytes per bank). Verified: CG87 palette written to pal+0x660 = bank 51×32; tile entry pal_bank=(0x9980>>7)&0x7F=51; pal+51×32=0x660 ✓.
+- **Tilemap entry** (MAME `segaic24` tile_info): bit15=priority, bits[14:7]=pal_bank (**8-bit**, `(entry >> 7) & 0xFF` — bit 14 is a palette bit, *not* h_flip; `change_bg_color` uses it), char = low bits. Full tile index = `entry & 0x3FFF`. Palette LUT index = `pal_bank * 16 + color_idx` (stride=16 entries = 32 bytes per bank). Verified: CG87 palette written to pal+0x660 = bank 51×32; tile entry pal_bank=(0x9980>>7)&0xFF=51; pal+51×32=0x660 ✓.
 - **Color index 0 is transparent on foreground layers only**; background layers fully opaque (pass `NULL` for `alpha_out`).
 - **Four tilemaps, each with its own scroll, and a window mask per pair** (MAME `segaic24` draw_common, `model2_v.cpp` screen_update). Tilemap t sits at tile RAM word `0x1000*t`, H scroll `0x5000+t`, V scroll `0x5004+t` (bit 15 disables), and samples at `(x − hscroll, y + vscroll)`. Pairs 0/1 and 2/3 share a control word (`0x5004` / `0x5006`, bits 14:13) and a mask (`0x6000` / `0x6800`, four words a line, one bit per 8 px):
   - control 0: the even tilemap draws where the mask bit is 0, the odd one where it is 1;
@@ -408,9 +408,10 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   single hardcoded id puts every Model 2 game in one room list where the mismatch is found by the
   netcode instead of the browser. Unlisted games get a deterministic base32 hash of the game key;
   `CreateMissing=true` registers a new id on first use, so no `servers.cfg` edit is needed.
-- **Two servers, and the pad and web lobbies let the player pick** (`NETPLAY_SERVER_OFFICIAL`
-  np.rpcs3.net, the default there; `NETPLAY_SERVER_COMMUNITY` rpcn.sonicthefighte.rs). Accounts
-  are per server. What bites:
+- **Two servers, and the PS3-menu lobby (libretro core, web build) lets the player pick**
+  (`NETPLAY_SERVER_OFFICIAL` np.rpcs3.net, the default there; `NETPLAY_SERVER_COMMUNITY`
+  rpcn.sonicthefighte.rs, the default of the desktop window and the handheld's pad lobby, which
+  has no picker). Accounts are per server. What bites:
   - **A Twitch token is a password and must only go to the server that issued it.** Once the
     server can change, the stored `server` no longer says where the token came from, so it is
     kept in `twitch_server` / `twitch_port` (a file without them adopts `server`), and
@@ -546,9 +547,9 @@ For other Model 2 games, see **MAME** (`src/mame/sega/model2.cpp`) as a cross-re
 
 ## Build
 
-`cmake` is on `PATH` (`C:\Program Files\CMake\bin\cmake`). The installed toolchain is **Visual Studio 2022**; a `build/` tree configured for an older generator fails with "could not find specified instance of Visual Studio" — configure a fresh directory rather than reusing it.
+`cmake` is on `PATH` (`C:\Program Files\CMake\bin\cmake`). **Visual Studio 2022 and Visual Studio 18 (2026)** are both installed. `build_vs22` is the VS 2022 tree the graders launch; `build\` is a VS 18 tree that `build.ps1` and `run_tests.ps1` hard-code. A tree configured for a generator that is not installed fails with "could not find specified instance of Visual Studio" — configure a fresh directory rather than reusing it.
 
-Everything under `vendor/` is a **git submodule pinned to an exact upstream commit** — `imgui`, `dear_bindings`, `sokol`, `miniz`, `ImGuiFileDialog`, `imgui_club` (its `imgui_memory_editor` is the hex grid both memory viewers are built on), and `noclip` (the last only feeds `tools/`). A tree cloned without them fails configure with the `git submodule update --init …` line to run.
+Everything under `vendor/` is a **git submodule pinned to an exact upstream commit** — `imgui`, `dear_bindings`, `sokol`, `miniz`, `ImGuiFileDialog`, `imgui_club` (its `imgui_memory_editor` is the hex grid both memory viewers are built on), `stb` (stb_truetype, for the PS3-menu fonts; every frontend needs it), and `noclip` (the last only feeds `tools/`). A tree cloned without them fails configure with the `git submodule update --init …` line to run.
 
 The cimgui C bindings are **not committed**: CMake runs `vendor/dear_bindings/dear_bindings.py` over `vendor/imgui/imgui.h` into `<build>/cimgui-gen/` at build time, with `--replace-prefix ImGui_=ig` to keep the `ig*` spelling that `src/` and `sokol_imgui.h`'s "original cimgui" path expect. That needs Python 3 with `ply` (`python -m pip install ply==3.11`); configure fails with the exact install line if the interpreter CMake picks up cannot import it. Do **not** swap this for the `cimgui/cimgui` repo — that is a different generator, and it produced an `ImGuiIO` ABI mismatch here (`MousePos` updated, `MouseDown` stuck at 0).
 
@@ -557,7 +558,9 @@ cmake -S <repo> -B <repo>/build_vs22 -G "Visual Studio 17 2022" -A x64
 cmake --build <repo>/build_vs22 --config Release --target ALL_BUILD -j 16
 ```
 
-Output: `build_vs22\Release\m2hle.exe`. The unit tests in `tests/` build alongside it (`M2HLE_BUILD_TESTS`, on by default) and run under `ctest` or `run_tests.ps1`; CI (`.github/workflows/canary.yml`) runs the self-contained ones — `mem_test`, `i960_test`, `cop_test`, `m68k_test`, `emu_test`, `net_test` — since `rom_test`, `boot_test`, `geo_test` and `input_test` load a ROM from a dev-machine path. `cop_replay` and `snd_replay` are built but are not ctests: they replay MAME captures. Everything beyond that is graded by `tools/` or checked interactively. `--headless --mcp --rom <zip> --run` runs the emulator and its bridge with no window, GPU or audio device; the graders launch it that way (`$M2_WINDOW=1` shows the window). The active game profile is resolved by matching ROM CRC32s; STF (sfight + schamp) loads by default if present in the working directory.
+The other frontends are `-DM2HLE_FRONTEND=sdl3` (the handheld, below), `web` (`emcmake cmake -S . -B build_web -DM2HLE_FRONTEND=web`; see WEB-PORT.md) and `libretro` (a RetroArch core; `-DM2HLE_LIBRETRO_GLES=ON` for GLES 3; see packaging/libretro/).
+
+Output: `build_vs22\Release\m2hle.exe`. The unit tests in `tests/` build alongside it (`M2HLE_BUILD_TESTS`, on by default) and run under `ctest` or `run_tests.ps1`; CI (`.github/workflows/canary.yml`) runs every ROM-free one — `mem_test`, `i960_test`, `cop_test`, `m68k_test`, `emu_test`, `net_test`, `ps3net_test`, `tile_test`, `heat_test`, `scsp_dsp_test`, `scsp_dsp_test_masks`, `retro_shader_test`, `sfight_settings_test` — since `rom_test`, `boot_test`, `geo_test` and `input_test` load a ROM from a dev-machine path. `cop_replay`, `snd_replay`, `snd_bench`, `det_digest` and `ps3ui_render` are built but are not ctests: capture replays, benches and a renderer for the graders. Everything beyond that is graded by `tools/` or checked interactively. `--headless --mcp --rom <zip> --run` runs the emulator and its bridge with no window, GPU or audio device; the graders launch it that way (`$M2_WINDOW=1` shows the window). Nothing loads without `--rom <zip>` (or File → Load ROMs in the window); `schamp.zip` is found beside `sfight.zip`. The profile is picked by the set's name, and `--profile` or the Game menu chooses among profiles for the same set.
 
 **The handheld build** (`-DM2HLE_FRONTEND=sdl3`) is the same board with a fullscreen SDL3/GLES 3 host and no ImGui — it runs on the Anbernic RG ARC-S (RK3566, ROCKNIX) at 58-60 game fps. CI cross-compiles it on every push to master and attaches `m2hle-rocknix-arm64.zip` to the `canary` release; [packaging/rocknix/](packaging/rocknix/) holds the launcher EmulationStation calls, the installer, the toolchain file and the notes. Two things there are load-bearing: the container is **debian:trixie**, the one distribution with `libsdl3-dev` for arm64 and ROCKNIX's own glibc 2.41, so the binary carries no libraries of its own; and `CMAKE_TOOLCHAIN_FILE` must be **absolute**, since a relative one is looked for from the build directory and CMake then quietly configures for the host. Netplay's TLS on Linux is the system OpenSSL opened with `dlopen` (`net/tls.h`), not linked, so it does not add a fifth library; do not "fix" that with `-lssl`.
 
@@ -567,7 +570,7 @@ Output: `build_vs22\Release\m2hle.exe`. The unit tests in `tests/` build alongsi
 
 ## Conventions
 
-- All modules except the entry points (`main.c`, `main_sdl.c`, `main_web.c`), the sokol implementation units (`sokol_*impl.c`) and the vendored `miniz.c` are **header-only `.h` files**. This is intentional — do not split into `.c`/`.h` pairs.
+- All modules except the entry points (`main.c`, `main_sdl.c`, `main_web.c`, `main_libretro.c`), the sokol implementation units (`sokol_*impl.c`, `sokol_impl.m`) and the vendored `miniz.c` are **header-only `.h` files**. This is intentional — do not split into `.c`/`.h` pairs.
   - The one deliberate exception is `src/ui/mem_edit.cpp`, the single C++ translation unit: `vendor/imgui_club`'s `MemoryEditor` is a C++ struct against the ImGui C++ API, and C11 sources cannot include it. It hands out the C handle declared in `mem_edit.h`; keep C++ from spreading past that file.
 - Default new code to the **board layer**; only move to a `game_profile_t` quirk when there's positive evidence of game-specific behaviour.
 - Memory addresses and sizes use `uint32_t`. Sign-extension is handled per-instruction.

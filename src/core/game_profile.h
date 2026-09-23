@@ -16,8 +16,9 @@
  *   - input_map      : abstract action → I/O port bit
  *   - quirks         : polygon-decoder mask, mesh-pointer offsets, etc.
  *
- * The active profile is resolved at ROM-load time from the loaded set's CRC32s
- * (profile_for_rom_set); --profile names one outright.
+ * The active profile is resolved at ROM-load time from the set's name, the zip
+ * basename (profile_for_rom_set); --profile names one outright. The CRC32s
+ * validate each file the profile loads.
  */
 #ifndef GAME_PROFILE_H
 #define GAME_PROFILE_H

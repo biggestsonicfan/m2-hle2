@@ -43,7 +43,9 @@ toolkit regenerates it, copy the new one over.
 git submodule update --init vendor/noclip
 ```
 
-No `npm install`: nothing here has a dependency. Node 18 or newer, because the
+No `npm install`: nothing here has a dependency, except `grade-carpet.mjs`, which
+drives a headless browser through `puppeteer-core` found outside this tree
+(`$M2_PUPPETEER`, the explorer's, or `../noclip`'s). Node 18 or newer, because the
 explorer's zip reader goes through `DecompressionStream`.
 
 You supply the ROM set. Nothing here carries one and `.gitignore` refuses
@@ -113,6 +115,8 @@ its built-in `WebSocket`.
 | `lib/texref.mjs` | the board digests and the exact slices they are cut at |
 | `lib/cop-replay.mjs` | the coprocessor's current matrix replayed from the FIFO words, every matrix-writing command and the three matrix banks included, in the chip's float32 or in double; and a capture walked into per-frame draws |
 | `lib/matrix.mjs` | row-major 4x4s in the board's convention, and an explorer op list turned into one |
+| `lib/png.mjs` | just enough PNG for the graders: reads MAME's snapshots and writes RGB pictures, with node's own zlib |
+| `ps3ui/` | the PS3-menu layout, font and sprite pipeline and its grader; see [ps3ui/README.md](ps3ui/README.md) |
 
 ## Replacing MAME
 
@@ -961,10 +965,13 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
 
 The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
-`boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`) are
-ctest unit tests, built with the emulator and run by `ctest -C Release` in the
-build directory (or `run_tests.ps1`). Several load the ROM set from a fixed path
-under the sibling `claude_mame` checkout.
+`boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`,
+`ps3net_test`, `heat_test`, `scsp_dsp_test`, `scsp_dsp_test_masks`,
+`retro_shader_test`, `sfight_settings_test`) are ctest unit tests, built with the
+emulator and run by `ctest -C Release` in the build directory (or
+`run_tests.ps1`). `rom_test`, `boot_test`, `geo_test` and `input_test` load the
+ROM set from a fixed path under the sibling `claude_mame` checkout. `det_digest`,
+`snd_bench` and `ps3ui_render` are built beside them but are tools, not ctests.
 
 ## What is not here yet
 
@@ -976,8 +983,9 @@ strongest available statement about texture RAM is emulator-vs-explorer.
 
 **Pinning a scene in attract mode does not work.** Holding `stage_num` for
 2700 frames never loads the arena, and `watch-var.mjs` shows nothing reads or
-writes `0x500064` during attract. Attract only fights its Flying Carpet replay.
-A played round does take a stage, if it is written where ROUND_INIT stores it
+writes `0x500064` during attract. Attract only fights its Flying Carpet replay,
+unless the `replay_stage` hook at `0x941C` moves it (`--match-replay-stage N`,
+which `grade-zsort --stage` uses). A played round does take a stage, if it is written where ROUND_INIT stores it
 (`captureStage`, above). `dump-board.mjs` and `grade-all.mjs` still pin during
 attract, so they grade whichever scene loaded, and say which.
 

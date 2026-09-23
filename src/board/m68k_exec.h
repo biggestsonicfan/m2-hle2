@@ -4,11 +4,7 @@
  * Call m68k_startup() once after ROM is loaded to set PC/SSP from the reset
  * vectors, then call m68k_step() to execute one instruction per call.
  *
- * 68K address space (Model 2B/2C sound block):
- *   0x000000–0x07FFFF  sound program ROM (read-only)
- *   0x100000–0x10FFFF  SCSP registers (stub)
- *   0x200000–0x27FFFF  SCSP wave RAM (512 KB)
- *   0xFF8000–0xFFFFFF  68K on-chip work RAM (32 KB)
+ * The 68000's address map is the sound board's: see sound.h.
  *
  * Implementation status:
  *   Implemented:  MOVE/MOVEM/MOVEQ/LEA/PEA, ADD/SUB/CMP/AND/OR/EOR,

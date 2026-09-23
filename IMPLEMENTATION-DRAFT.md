@@ -1,5 +1,8 @@
 # IMPLEMENTATION-DRAFT.md — Rebuilding the Model 2 HLE Emulator from Scratch
 
+> **Historical.** The rebuild this plans is complete, and this repository is it. Where this file
+> and [CLAUDE.md](CLAUDE.md) disagree, CLAUDE.md is current.
+
 This is the document I would write to myself before re-implementing this project cold.
 It supersedes the optimistic 14-phase checklist in [PROPOSAL.md](PROPOSAL.md): the real
 build grew a SHARC geometry-coprocessor core, a full MC68000 sound-CPU core, an SCSP
@@ -543,7 +546,7 @@ Rocket Metal and the egg-disp head window were not re-triaged in this tree.
   `.c`/`.h` pairs.
 - Default new code to the **board layer**; only `game_profile_t` quirks get game-specific code.
 - Addresses/sizes are `uint32_t`; sign-extension handled per-instruction.
-- Threading abstracted in `emu_thread.h` (`emu_lock()`/`emu_unlock()`).
+- Threading abstracted in `thread_mutex.h` (`emu_mutex_lock()`/`emu_mutex_unlock()`), pulled in by `emu_thread.h`.
 - `log_msg(LOG_INFO|WARN|ERROR, fmt, ...)`. **Log unknown COP opcodes and unhandled MMIO at
   WARN** so new-game support surfaces automatically.
 - **Never `rm -rf`** (`feedback_no_rm_rf.md`) — the user deletes folders manually.

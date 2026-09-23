@@ -1,5 +1,8 @@
 # Model 2 HLE Emulator — Rebuild Proposal
 
+> **Historical (June 2026).** Every phase below is done, and the "(now: …)" notes record where the
+> build went differently. [CLAUDE.md](CLAUDE.md) is current and supersedes §8.
+
 A bootstrap outline for recreating the project as a **general Sega Model 2 arcade emulator** in a fresh Claude Code session. *Sonic The Fighters* (STF) is the **reference game** — it's where the bulk of the prior reverse-engineering happened and the first title that must boot end-to-end — but the architecture must accommodate the full Model 2 catalogue from day one. Generalising across games strengthens every subsystem: a fix for Virtua Cop's tile compositor may fix STF's HUD; a Daytona polygon-format finding already drove STF's 3D decoder; a COP matrix bug found in Virtua Fighter 2 would surface in Fighting Vipers and STF identically.
 
 ---
@@ -230,7 +233,7 @@ These are non-obvious facts a textbook reading of the i960 manual or "generic em
 ### 2D tile renderer — board-level
 
 - **Tile pixel bytes are 16-bit byte-swapped**: byte indices `[0,1,2,3]` are read as `[1,0,3,2]` (XOR low bit of byte index). Within each swapped word, *high* nibble = left pixel, *low* nibble = right pixel.
-- **Tilemap entry layout**: full tile index = `(pal_bank << 8) | (entry & 0xFF)`; palette LUT index = `pal_bank * 16 + color_idx` (16 colors per bank). (now corrected: bit15 = priority, bit14 = h_flip, bits[13:7] = pal_bank, bits[6:0] = char; full tile index = `entry & 0x3FFF` = `(pal_bank << 7) | char`.)
+- **Tilemap entry layout**: full tile index = `(pal_bank << 8) | (entry & 0xFF)`; palette LUT index = `pal_bank * 16 + color_idx` (16 colors per bank). (now corrected: bit15 = priority, bits[14:7] = pal_bank (8-bit; bit 14 is a palette bit, not h_flip), full tile index = `entry & 0x3FFF`.)
 - **Four tilemaps, each with its own scroll, and a window mask per pair** (`s24_draw_tilemap`); drawing only the even tilemap of each pair cuts split screens in half. See CLAUDE.md "Tile Renderer".
 - **Color index 0 is transparent on foreground layers only.** Background layers are fully opaque — pass `NULL` for `alpha_out`.
 

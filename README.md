@@ -14,19 +14,20 @@ git clone --recurse-submodules <this repo>       # or: git submodule update --in
 python -m pip install ply==3.11                  # dear_bindings generates the ImGui C bindings
 cmake -S . -B build
 cmake --build build --config Release -j
-build/Release/m2hle.exe --rom <romset>.zip --run
+build/Release/m2hle.exe --rom <romset>.zip --run   # build/m2hle on Linux
 ```
 
 Dependencies are git submodules under [vendor/](vendor/); `vendor/noclip` is only needed by
 [tools/](tools/), so `git submodule update --init vendor/imgui vendor/dear_bindings vendor/sokol
-vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club` is enough to build.
+vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb` is enough to build.
 
 That is the default frontend, the ImGui debugger (D3D11 on Windows, GL core on Linux, Metal on
 macOS). `-DM2HLE_FRONTEND=sdl3` builds a fullscreen SDL3 / GLES 3 host with no ImGui for
 handhelds (see [packaging/rocknix/](packaging/rocknix/)), and `-DM2HLE_FRONTEND=web` the
 Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, remappable keys, gamepads and
-touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)); both need
-only `vendor/sokol` and `vendor/miniz`.
+touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)).
+`-DM2HLE_FRONTEND=libretro` builds a RetroArch core (see [packaging/libretro/](packaging/libretro/)).
+These three need only `vendor/sokol`, `vendor/miniz` and `vendor/stb`.
 
 No ROMs, ROM-derived data, or other copyrighted material is included in this repository, and
 none will be accepted into it. You must supply your own dumps.
@@ -82,7 +83,8 @@ the next game cheaper instead of being spent on a single ROM set.
 | SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
 | Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
 | Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
-| Netplay | RPCN matchmaking + direct peer-to-peer delay lockstep (`--netplay`) |
+| Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
+| PS3-release menus | The Console profile's title, main menu, Arcade / Offline Versus settings and online lobby, redrawn after the PS3 release (libretro core and web build) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
@@ -122,15 +124,16 @@ pick the same one to see each other's rooms.
 - [src/ui/](src/ui/) — ImGui debug windows, game render target, MCP bridge.
 - [src/profiles/](src/profiles/) — one `game_profile_t` per ROM set (hook addresses, input map,
   ROM list + CRC32s, quirks).
-- [tests/](tests/) — ten standalone CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input,
-  netplay), plus the `cop_replay` and `snd_replay` capture replays the graders drive.
+- [tests/](tests/) — seventeen CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input,
+  netplay, PS3 netplay, tiles, heat guard, SCSP DSP ×2, shader presets, PS3 menu settings), plus
+  `cop_replay`, `snd_replay`, `snd_bench`, `det_digest` and `ps3ui_render`, which the graders drive.
 - [mcp_server/](mcp_server/) — Python MCP server that drives a running emulator over the bridge.
 - [tools/](tools/) — graders that measure this emulator against an independent implementation
   of the same ROM formats, with a MAME digest as the third point. See [tools/README.md](tools/README.md).
 - [vendor/](vendor/) — dependencies, all git submodules pinned to an exact upstream commit:
   Dear ImGui, dear_bindings (generates the `ig*` C bindings into the build tree at build
   time — nothing generated is committed), Sokol, ImGuiFileDialog, imgui_club (the hex editor
-  behind the memory viewers), miniz, and noclip.
+  behind the memory viewers), miniz, stb (stb_truetype, for the PS3-menu fonts), and noclip.
 
 Everything except the frontends' `main*.c` and `sokol_*impl.c/.m`, `ui/mem_edit.cpp`, and the submodules' `.c` files
 is a header-only `.h` module. That is deliberate — see [CLAUDE.md](CLAUDE.md).
@@ -197,7 +200,8 @@ out and only watch. These are the rules of the PS3 port's Room Match, read out o
 else in the room carries on. A two-seat room is the plain one-on-one it always was.
 
 **Lobbies are per-game.** RPCN partitions everything by Communication ID, so each ROM set gets
-one of its own (`M2HSNCFTR_00` for Sonic The Fighters) rather than every Model 2 game sharing a
+one of its own (`M2HSNCFTR_00` for Sonic The Fighters' Arcade profile, `M2HSNCFTC_00` for
+Console) rather than every Model 2 game sharing a
 list. The browser also shows YAMP's rooms for the same arcade game, greyed out and unjoinable:
 YAMP plays the console port, so a cross-emulator match could never stay in sync, but an empty
 lobby with people next door is worth telling apart from an empty one. Rooms made by the browser
@@ -224,8 +228,10 @@ releases, so getting back to a fight is coin-and-START like anybody else; and `w
 **desync**, so everything during a session goes through `set_input`. See
 [MCP_GUIDE.md](MCP_GUIDE.md#netplay-rpcn).
 
-TLS is Schannel, so netplay currently connects only on Windows; [src/net/tls.h](src/net/tls.h)
-is the one file a POSIX backend would go in. The browser build has no sockets at all: it reaches
+TLS is Schannel on Windows and the system OpenSSL (opened with `dlopen`) on Linux; macOS has no
+backend yet, and [src/net/tls.h](src/net/tls.h) is the one file it would go in. On the official
+server (np.rpcs3.net) the emulator plays the PS3 release's rooms by the PS3's rules, so it can
+fight a PS3 running in RPCS3 ([ROOM-MATCH.md](ROOM-MATCH.md)). The browser build has no sockets at all: it reaches
 RPCN through a WebSocket gateway on the RPCN host ([web/gateway/](web/gateway/)). The design follows
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
 worked the RPCN protocol out first.
@@ -424,13 +430,20 @@ host side is [src/ui/overlay_host.h](src/ui/overlay_host.h).
 - [CLAUDE.md](CLAUDE.md) — the load-bearing invariants: facts that were reverse-engineered or
   debugged out of the hardware and appear in no datasheet. Read this before changing the CPU,
   COP, or polygon decoder.
-- [IMPLEMENTATION-DRAFT.md](IMPLEMENTATION-DRAFT.md) — the authoritative, dependency-ordered
-  build plan, written *after* the first implementation, as the document to hand to a cold
-  restart. Supersedes PROPOSAL.md where they disagree.
-- [PROPOSAL.md](PROPOSAL.md) — the original architecture proposal, kept for context.
 - [MCP_GUIDE.md](MCP_GUIDE.md) — the emulator's automation protocol and tool reference.
 - [tools/README.md](tools/README.md) — the grading harness: what it measures, what it cannot,
   and the numbers it currently reports.
+- [ROOM-MATCH.md](ROOM-MATCH.md) — the PS3 port's Room Match and online protocol, read out of
+  its EBOOT: the rules the rooms of eight and the PS3 cross-play follow.
+- [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md) — the browser build and its
+  netplay gateway; the gateway itself is [web/gateway/](web/gateway/README.md).
+- [SLICE-CLOCKS.md](SLICE-CLOCKS.md) — how the sound board is charged against the i960's
+  frame, and the alternatives not taken.
+- [packaging/libretro/](packaging/libretro/README.md) and [packaging/rocknix/](packaging/rocknix/README.md)
+  — the RetroArch core and the handheld build.
+- [IMPLEMENTATION-DRAFT.md](IMPLEMENTATION-DRAFT.md) — historical: the dependency-ordered plan
+  this repository was rebuilt from. The rebuild is done; CLAUDE.md is current.
+- [PROPOSAL.md](PROPOSAL.md) — historical: the original architecture proposal.
 
 ---
 
@@ -464,7 +477,7 @@ Model 2 board bugs shared by the whole catalogue. That bet paid off repeatedly. 
   tests (`JMP` decoded as `JSR`, `SWAP` as `PEA` — each silently corrupting the stack) and
   live BGM playback.
 
-**3. `m2-hle2` — this repository (2026-06-06 → present, 156 commits).** A clean from-scratch
+**3. `m2-hle2` — this repository (2026-06-06 → present).** A clean from-scratch
 rebuild following IMPLEMENTATION-DRAFT.md's phase order, carrying the known-good invariants
 forward and leaving the dead ends behind. It opened at feature parity — STF and FV booting with
 3D, tiles, and audio — and the commits since are the hard remainder:
@@ -481,6 +494,10 @@ forward and leaving the dead ends behind. It opened at feature parity — STF an
   commercial games never tripped — the i960 core did not decode the `+0.0` / `+1.0` FP literals,
   so every `1.0 - x` silently became `-x` and all homebrew 3D collapsed. Also: per-tile bit15
   priority against the 3D layer, the GEO `LIGHT` command, and per-object colorbase.
+- *September* — the sound board rebuilt as a 68000 and SCSP in sample lockstep; the fight
+  collision, motion and sway-chain COP chains ported from the firmware and held against MAME
+  frame by frame; netplay over RPCN, rooms of eight and cross-play with the PS3 release; the
+  browser build, the handheld build and the libretro core.
 
 The through-line is the working method, not the feature list: **build the oracle before the
 thing it judges.** Reference meshes for the polygon decoder, a scripted MAME session for the CPU
@@ -494,7 +511,7 @@ testing every single time.
 This project was built almost entirely as a human–AI pair. Direction, hardware knowledge, ROM
 dumps, prior reverse-engineering, and every acceptance decision are the author's; the
 implementation, the debugging loops, and the documentation were driven with
-[Claude Code](https://claude.com/claude-code). Nearly all 234 commits across `m2-hle` and
+[Claude Code](https://claude.com/claude-code). Nearly all the commits across `m2-hle` and
 `m2-hle2` carry a `Co-Authored-By: Claude` trailer (Sonnet 4.6, then Opus 4.7 / 4.8 / 5 and
 Fable 5.1 as they shipped).
 

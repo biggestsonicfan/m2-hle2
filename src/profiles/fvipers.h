@@ -295,7 +295,7 @@ static const game_profile_t fvipers_profile = {
         { FVIPERS_HOOK_ADDR_READ_SW,           fvipers_hook_read_sw,          "read_sw"              },
     },
     .input = {
-        /* TODO: find held/momentary/credits addresses in fvipers RAM.
+        /* TODO: find the credits address in fvipers RAM.
          * Locate read_sw (0x229C) in IDA; the stores nearby are these. */
         .held_addr       = 0x00500700,  /* INTERUPT_FLAGS_HELD     — confirmed IDA */
         .momentary_addr  = 0x00500704,  /* INTERUPT_FLAGS_MOMENTARY — confirmed IDA */
