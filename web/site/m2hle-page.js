@@ -315,6 +315,7 @@ var Module = {
     buildLine();
     m2hleTools.onReady();
     m2hleObjview.onReady();
+    m2hleShader.onReady();
     m2hleNetplay.onReady(Module);
     m2hlePad.onReady();
     debugStart();

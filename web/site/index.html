@@ -328,6 +328,7 @@
   <div class="drawer-head" role="tablist">
     <button id="tab-lag" class="tab" role="tab" aria-controls="pane-lag">Lag check</button>
     <button id="tab-console" class="tab" role="tab" aria-controls="pane-console">Console</button>
+    <button id="tab-picture" class="tab" role="tab" aria-controls="pane-picture">Picture</button>
     <span class="spacer"></span>
     <button id="drawer-close" class="tool ps-back" aria-label="Close tools"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
   </div>
@@ -361,6 +362,46 @@
     <div id="log" class="log" role="log" tabindex="0" aria-label="Emulator log"></div>
     <p id="log-empty" class="status log-empty">Nothing to show with these filters.</p>
   </div>
+
+  <!-- A filter over the game's 4:3 picture (m2hle-shader.js, src/ui/post_shader.h). -->
+  <div id="pane-picture" class="pane" role="tabpanel" hidden>
+    <div class="picture">
+      <details class="np-advanced picture-advanced">
+        <summary>Advanced: CRT filter and shaders</summary>
+        <p class="shader-warn">These filters draw the picture a second time on your graphics chip, every frame,
+          and can cut performance. If the game slows down or stutters, set the filter back to None.</p>
+        <label>Filter
+          <select id="shader-mode" class="tool">
+            <option value="0">None</option>
+            <option value="1">CRT (Lost Judgment's scanlines, from YAMP)</option>
+            <option value="2" id="shader-mode-custom" disabled>Your shader (load one below)</option>
+          </select>
+        </label>
+        <p class="fine left">Filters cover only the game's picture. They read it at the size chosen under
+          Feels laggy? &rarr; Picture; for your own shader, &ldquo;Full resolution&rdquo; means the arcade's 496&times;384.</p>
+
+        <h3 class="shader-h">Your own shader</h3>
+        <p class="fine left">A libretro GLSL shader: a <code>.glslp</code> preset with the <code>.glsl</code> files and
+          textures it uses, or a single <code>.glsl</code>, from
+          <a href="https://github.com/libretro/glsl-shaders" target="_blank" rel="noopener noreferrer">libretro's glsl-shaders</a>.
+          Pick the files, or a folder that holds them. Slang presets (<code>.slangp</code>) don't work in a browser.</p>
+        <p class="np-row shader-row">
+          <button id="shader-files" class="tool">Choose files&hellip;</button>
+          <button id="shader-folder" class="tool">Choose a folder&hellip;</button>
+          <button id="shader-forget" class="tool" hidden>Forget this shader</button>
+        </p>
+        <input id="shader-file-input" type="file" multiple hidden
+               accept=".glslp,.glsl,.inc,.png,.jpg,.jpeg,.bmp,.tga">
+        <input id="shader-folder-input" type="file" webkitdirectory multiple hidden>
+        <select id="shader-preset" class="tool" hidden aria-label="Which shader to use"></select>
+        <p id="shader-status" class="status" role="status"></p>
+        <div id="shader-params-box" hidden>
+          <p class="np-row shader-row"><strong>Parameters</strong> <button id="shader-reset" class="tool">Reset</button></p>
+          <div id="shader-params" class="shader-params"></div>
+        </div>
+      </details>
+    </div>
+  </div>
 </section>
 
 <!-- Two buttons float in the top-right corner, over the canvas, so the game gets the
@@ -384,6 +425,7 @@
     <button id="btn-controls" class="tool" aria-expanded="false" aria-controls="controls">Controls</button>
     <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>
     <button id="btn-console" class="tool" aria-expanded="false" aria-controls="drawer">Console <span id="console-badge" class="badge" hidden></span></button>
+    <button id="btn-picture" class="tool" aria-expanded="false" aria-controls="drawer">Picture</button>
   </div>
 </footer>
 
@@ -393,6 +435,7 @@
 <script src="m2hle-keys.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-tools.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-objview.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-shader.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-netplay.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-pad.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-touch.js?v=@M2HLE_VERSION@"></script>
