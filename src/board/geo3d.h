@@ -375,14 +375,20 @@ static inline float geo3d_sort_z(const vec3_t *sv, const int *zsrc, uint32_t zmo
  * every face keeps the depth the projection gives it, as HUD faces do.
  *
  * *Symptom that surfaced this in STF (issue #78):* Aurora Icefield's ice
- * pillars (4278) and walrus statues (1601) had their bases cut off flat at the
- * ice, and the pillars' lower panels streaked with the far wall's texture.
- * Every face of both is sorted by its farthest corner and is only a few units
- * deep, so each receded in full, through the ice (1602), which is too deep to
- * recede and must not (see above). On the board 1602 sorts by a corner out at
- * its tip, so both solids win every pixel they cover; the depth buffer gives
- * the same answer for a closed solid over the ice. The explorer does the same
- * for the draws aurora_disp marks `standing` (noclip#7, ZSORT_KEEP). */
+ * pillars (4278) had their bases cut off flat at the ice, and their lower
+ * panels streaked with the far wall's texture. Every face is sorted by its
+ * farthest corner and is only a few units deep, so each receded in full,
+ * through the ice (1602), which is too deep to recede and must not (see
+ * above). On the board 1602 sorts by a corner out at its tip, so the pillar
+ * wins every pixel it covers; the depth buffer gives the same answer for a
+ * closed solid over the ice. The explorer does the same for the draws
+ * aurora_disp marks `standing` (noclip#7, ZSORT_KEEP).
+ *
+ * The explorer also marks the walrus statues (1601). They are not listed
+ * here: the game draws them only when the camera looks across the ring at
+ * them (bit 0 of 0x500288), and from there their feet are whole either way.
+ * The one visible difference is the smaller walrus's tusks, and which way the
+ * board draws those has not been checked against MAME. */
 static const uint16_t *g_geo3d_standing;
 static int             g_geo3d_standing_count;
 static int             g_geo3d_zsort_standing = 1;   /* 0: standing models recede like the rest */

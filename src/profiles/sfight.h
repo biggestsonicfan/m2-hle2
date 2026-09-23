@@ -745,9 +745,10 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     .warning_skip_addr      = 0x00500410,   /* poke 1 → skip boot warning screen */ \
     .vs_rematch             = true,         /* sfight_hook_vs_rematch */             \
     /* Aurora Icefield's ice pillars (aurora_ice_pillar_init, records at        \
-     * 0x754F8, field +0x18) and walrus statues stand on the ice (issue #78). */ \
-    .zsort_standing_count   = 2,                                                      \
-    .zsort_standing         = { 4278, 1601 },                                         \
+     * 0x754F8, field +0x18) stand on the ice (issue #78; geo3d.h says why     \
+     * the walruses, 1601, are not listed). */                                   \
+    .zsort_standing_count   = 1,                                                      \
+    .zsort_standing         = { 4278 },                                               \
     .attract_replay = {                                                             \
         .step_addr   = 0x00500030,           /* _sub_mode */                          \
         .from_step   = 5,                                                             \
