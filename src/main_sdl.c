@@ -11,7 +11,7 @@
  * so a lower render rate skips frames rather than slowing the game.
  *
  *   m2hle [--rom] <set.zip> [--render-fps N] [--window WxH] [--stats] [--osd]
- *         [--log FILE] [--pad-map LIST] [--shot FRAME:FILE]... [--exit-after N]
+ *         [--log FILE] [--log-level SPEC] [--pad-map LIST] [--shot FRAME:FILE]... [--exit-after N]
  *
  * --pad-map  comma-separated button=action pairs overriding the defaults, e.g.
  *            "south=b1,east=b2,west=b3". Buttons: south east west north start
@@ -129,6 +129,7 @@ static struct {
     bool        osd;
     bool        sound;
     const char *log_path;
+    const char *log_levels;
     const char *pad_map;
     int         shot_count;
     unsigned    shot_frame[MAX_SHOTS];
@@ -568,6 +569,7 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--sound"))              opt.sound = true;
         else if (!strcmp(a, "--osd"))                opt.osd = true;
         else if (!strcmp(a, "--log") && more)        opt.log_path = argv[++i];
+        else if (!strcmp(a, "--log-level") && more)  opt.log_levels = argv[++i];
         else if (!strcmp(a, "--pad-map") && more)    opt.pad_map = argv[++i];
         else if (!strcmp(a, "--exit-after") && more) opt.exit_after = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--gl-finish"))          opt.gl_finish = true;
@@ -724,7 +726,7 @@ static void sdl_netplay_reset_cb(void *ctx) {
 int main(int argc, char **argv) {
     if (!parse_args(argc, argv)) {
         fprintf(stderr, "usage: m2hle [--rom] <set.zip> [--render-fps N] [--window WxH] [--stats] [--osd]\n"
-                        "             [--log FILE] [--pad-map LIST] [--shot FRAME:FILE] [--exit-after N]\n"
+                        "             [--log FILE] [--log-level SPEC] [--pad-map LIST] [--shot FRAME:FILE] [--exit-after N]\n"
                         "             [--netplay] [--net-config FILE] [--net-delay N]\n");
         return 2;
     }
@@ -733,11 +735,10 @@ int main(int argc, char **argv) {
     /* The session log flushes every line to disk and a running game warns
      * about unknown COP commands many times a second: off unless asked for. */
     log_init();
-    if (opt.log_path) {
-        g_log.file = fopen(opt.log_path, "w");
-        if (!g_log.file) fprintf(stderr, "m2hle: could not open log %s\n", opt.log_path);
-    }
-    g_log.file_open_attempted = 1;
+    log_set_path(opt.log_path ? opt.log_path : "off");
+    if (opt.log_levels && !log_set_levels(opt.log_levels))
+        fprintf(stderr, "m2hle: --log-level %s: expected LEVEL or CHANNEL=LEVEL, comma separated\n",
+                opt.log_levels);
 
     mem_init(&state.bus, NULL, 0);
     i960_reset(&state.cpu);
