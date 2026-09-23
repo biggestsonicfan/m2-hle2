@@ -5,58 +5,124 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sonic the Fighters</title>
 <meta name="description" content="Play Sonic the Fighters in your browser, online, with your own copy of the game.">
+<meta name="theme-color" content="#001735">
+<!-- The two faces the first screen shows, asked for before the stylesheet names
+     them. Same URLs as m2hle.css's @font-face (stamped there too), so they are
+     fetched once. -->
+<link rel="preload" href="fonts/text.woff2?v=@M2HLE_VERSION@" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/title.woff2?v=@M2HLE_VERSION@" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="m2hle.css?v=@M2HLE_VERSION@">
 </head>
 <body>
+
+<!-- The PS3's button glyphs, drawn here (no image files): <svg><use href="#ps-cross"/></svg>.
+     Not display:none -- a gradient inside a hidden SVG does not paint in every browser. -->
+<svg class="ps-sprite" width="0" height="0" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="ps-bevel" x1="0.15" y1="0.1" x2="0.85" y2="0.9">
+      <stop offset="0" stop-color="#4D4A4D"/>
+      <stop offset="1" stop-color="#7A787A"/>
+    </linearGradient>
+    <symbol id="ps-disc" viewBox="0 0 44 44">
+      <circle cx="22" cy="22" r="21" fill="#211C21"/>
+      <circle cx="22" cy="22" r="20" fill="url(#ps-bevel)"/>
+      <circle cx="22" cy="22" r="16.5" fill="#333433"/>
+    </symbol>
+    <symbol id="ps-circle" viewBox="0 0 44 44">
+      <use href="#ps-disc"/>
+      <circle cx="22" cy="22" r="8.5" fill="none" stroke="#FF4118" stroke-width="3"/>
+    </symbol>
+    <symbol id="ps-cross" viewBox="0 0 44 44">
+      <use href="#ps-disc"/>
+      <path d="M14.5 14.5 29.5 29.5M29.5 14.5 14.5 29.5" stroke="#7B75B5" stroke-width="3" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="ps-triangle" viewBox="0 0 44 44">
+      <use href="#ps-disc"/>
+      <path d="M22 12.5 31 28.5H13Z" fill="none" stroke="#39C78C" stroke-width="3" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="ps-square" viewBox="0 0 44 44">
+      <use href="#ps-disc"/>
+      <rect x="14" y="14" width="16" height="16" fill="none" stroke="#DE5DDE" stroke-width="3"/>
+    </symbol>
+  </defs>
+</svg>
 
 <canvas id="canvas" tabindex="0" aria-label="The game screen"></canvas>
 
 <!-- Over the game when a room has emptied with the board still in VS mode
      (netplay_empty_room_pump). It takes no clicks: the button that answers it is
      the game's. -->
-<div id="np-empty" class="np-empty" role="status" hidden>
+<div id="np-empty" class="np-empty ps-win" role="status" hidden>
+  <p class="ps-title np-empty-title">Online Battle</p>
   <p>There are no other players in the lobby.</p>
   <p>Press any button to restart the game.</p>
 </div>
 
-<!-- Step 1 of the wizard (WEB-PORT.md section 5). Sign-in and the lobby follow in M4. -->
+<!-- Step 1 of the wizard (WEB-PORT.md section 5): a screen of its own, laid out the
+     way the game's own menus are (src/ui/ps3ui_*.h) so the two read as one. -->
 <main id="panel" class="panel" aria-live="polite">
-  <h1>Sonic the Fighters</h1>
+  <div class="panel-stage">
+    <div class="ps-win panel-win">
+      <div class="ps-head"><h1 class="ps-title">Sonic the Fighters</h1></div>
+      <div class="ps-body">
+        <section id="step-loading">
+          <p class="lead">Starting up&hellip;</p>
+        </section>
 
-  <section id="step-loading">
-    <p class="lead">Starting up&hellip;</p>
-  </section>
+        <section id="step-rom" hidden>
+          <p class="lead">Add your copy of the game to begin.</p>
+          <input id="file" type="file" accept=".zip,application/zip" class="visually-hidden">
+          <label id="drop" class="drop ps-selected" for="file">
+            <svg class="ps-glyph drop-glyph" aria-hidden="true"><use href="#ps-cross"/></svg>
+            <strong>Choose your game file</strong>
+            <span>or drop it here</span>
+            <span class="hint">A merged <code>sfight.zip</code> or <code>schamp.zip</code></span>
+          </label>
+          <p id="rom-error" class="error" hidden></p>
+          <p class="fine">Your file stays on this computer. It is read by this page and is never uploaded.</p>
+        </section>
 
-  <section id="step-rom" hidden>
-    <p class="lead">Add your copy of the game to begin.</p>
-    <label id="drop" class="drop" for="file">
-      <strong>Choose your game file</strong>
-      <span>or drop it here</span>
-      <span class="hint">A merged <code>sfight.zip</code> or <code>schamp.zip</code></span>
-    </label>
-    <input id="file" type="file" accept=".zip,application/zip" class="visually-hidden">
-    <p id="rom-error" class="error" hidden></p>
-    <p class="fine">Your file stays on this computer. It is read by this page and is never uploaded.</p>
-    <p class="fine build"><span id="build"></span> &middot; <a href="https://github.com/biggestsonicfan/m2-hle2" target="_blank" rel="noopener noreferrer">Source on GitHub</a></p>
-  </section>
+        <section id="step-busy" hidden>
+          <p class="lead">Reading your game file&hellip;</p>
+          <p class="ps-loading" aria-hidden="true"><span></span><span></span><span></span></p>
+        </section>
 
-  <section id="step-busy" hidden>
-    <p class="lead">Reading your game file&hellip;</p>
-  </section>
+        <section id="step-fatal" hidden>
+          <p class="lead">This browser could not start the game.</p>
+          <p id="fatal-text" class="error"></p>
+        </section>
+      </div>
+    </div>
+  </div>
 
-  <section id="step-fatal" hidden>
-    <p class="lead">This browser could not start the game.</p>
-    <p id="fatal-text" class="error"></p>
-  </section>
+  <!-- The PS3's bottom band: a strip of fine print, then the button hints. -->
+  <footer class="ps-hintbar">
+    <p class="ps-strip">
+      <span id="build"></span> &middot;
+      <a href="https://github.com/biggestsonicfan/m2-hle2" target="_blank" rel="noopener noreferrer">Source on GitHub</a> &middot;
+      Fonts: Anybody, M&nbsp;PLUS&nbsp;1p and M&nbsp;PLUS&nbsp;1&nbsp;Code, under the SIL Open Font License
+      (<a href="fonts/OFL-Anybody.txt" target="_blank">Anybody</a>,
+      <a href="fonts/OFL-MPLUS.txt" target="_blank">M+</a>,
+      <a href="fonts/OFL-MPLUS1Code.txt" target="_blank">M+ Code</a>)
+    </p>
+    <div class="ps-hints">
+      <label for="file" class="ps-hint hint-rom"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-cross"/></svg>:Choose file</label>
+    </div>
+  </footer>
 </main>
 
-<!-- Playing online (m2hle-netplay.js, WEB-NETPLAY.md section 5). A side panel over
-     the game, opened from the bar once a game is loaded. -->
-<aside id="online" class="online" hidden aria-label="Play online">
-  <div class="online-head">
-    <h2>Play online</h2>
-    <button id="np-close" class="tool" aria-label="Close">Close</button>
+<!-- The account side of playing online (m2hle-netplay.js, WEB-NETPLAY.md section 5).
+     The lobby itself is drawn on the game screen (Online Battle in the menu,
+     web_lobby_open); this panel keeps what a pad and an on-screen keyboard do
+     badly -- making an account with an e-mail address, sending its code again --
+     and the match controls, for anyone who wants them in the page. -->
+<aside id="online" class="online ps-win" hidden aria-label="RPCN account">
+  <div class="online-head ps-head">
+    <h2 class="ps-title">RPCN account</h2>
+    <button id="np-close" class="tool ps-back" aria-label="Close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
   </div>
+  <p class="np-to-lobby-row fine left">The lobby is on the game screen.
+    <button id="np-to-lobby" class="linkish" type="button" hidden>Open Online Battle</button></p>
 
   <section id="np-signin">
     <div id="np-returning" hidden>
@@ -124,7 +190,7 @@
   <section id="np-lobby" hidden>
     <p class="np-me">Signed in as <strong id="np-me"></strong> · <button id="np-signout" class="linkish">Sign out</button></p>
     <button id="np-create-match" class="tool primary big">Create a match</button>
-    <h3>Open matches <span id="np-rooms-count" class="status"></span></h3>
+    <h3>Open matches <span id="np-rooms-count" class="count-box"></span></h3>
     <ul id="np-rooms" class="np-rooms"></ul>
     <p id="np-rooms-empty" class="status"><span id="np-rooms-empty-text"></span></p>
     <p id="np-quality" class="status"></p>
@@ -173,10 +239,10 @@
 
 <!-- Controller mapping (m2hle-pad.js) and the touch buttons (m2hle-touch.js). Kept in
      this browser's localStorage. On a touch screen the touch section is moved first. -->
-<aside id="controls" class="online controls" hidden aria-label="Controls">
-  <div class="online-head">
-    <h2>Controls</h2>
-    <button id="pad-close" class="tool" aria-label="Close">Close</button>
+<aside id="controls" class="online controls ps-win" hidden aria-label="Controls">
+  <div class="online-head ps-head">
+    <h2 class="ps-title">Controls</h2>
+    <button id="pad-close" class="tool ps-back" aria-label="Close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
   </div>
   <section id="touch-section" class="ctl-section">
     <h3>Touch buttons</h3>
@@ -210,12 +276,16 @@
   <p id="key-clash" class="status" role="status" hidden></p>
   <p class="np-row"><button id="key-reset" class="tool">Reset to defaults</button></p>
   </section>
+  <p class="fine left credits">Fonts: Anybody, M&nbsp;PLUS&nbsp;1p and M&nbsp;PLUS&nbsp;1&nbsp;Code, under the SIL Open Font License
+    (<a href="fonts/OFL-Anybody.txt" target="_blank">Anybody</a>,
+    <a href="fonts/OFL-MPLUS.txt" target="_blank">M+</a>,
+    <a href="fonts/OFL-MPLUS1Code.txt" target="_blank">M+ Code</a>).</p>
 </aside>
 
 <!-- The touch buttons (m2hle-touch.js): laid over the game canvas, one layout for
      holding the phone upright and one for holding it sideways. -->
 <div id="touch" class="touch" hidden aria-hidden="true"></div>
-<div id="touch-edit" class="touch-edit" hidden role="dialog" aria-label="Customize touch buttons">
+<div id="touch-edit" class="touch-edit ps-win" hidden role="dialog" aria-label="Customize touch buttons">
   <p class="te-hint">Drag a button to move it. Tap one to size or hide it. <span id="te-orient"></span></p>
   <div class="te-row">
     <span class="te-what">All buttons</span>
@@ -243,7 +313,7 @@
     <button id="tab-lag" class="tab" role="tab" aria-controls="pane-lag">Lag check</button>
     <button id="tab-console" class="tab" role="tab" aria-controls="pane-console">Console</button>
     <span class="spacer"></span>
-    <button id="drawer-close" class="tool" aria-label="Close tools">Close</button>
+    <button id="drawer-close" class="tool ps-back" aria-label="Close tools"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
   </div>
 
   <div id="pane-lag" class="pane" role="tabpanel">
@@ -280,7 +350,9 @@
 <!-- Two buttons float in the top-right corner, over the canvas, so the game gets the
      whole window: the source link, and the menu that holds everything else. Keys are
      listed under Controls. The menu's buttons keep their ids -- the panels and the
-     test scripts press them by id, whether or not the menu is open. -->
+     test scripts press them by id, whether or not the menu is open. Online Battle
+     opens the lobby on the game screen; RPCN account (btn-online) is the page's own
+     panel for what that lobby leaves to a keyboard. -->
 <footer class="bar">
   <div class="bar-tools">
     <a id="github" class="tool github" href="https://github.com/biggestsonicfan/m2-hle2" target="_blank" rel="noopener noreferrer"
@@ -288,8 +360,10 @@
     <button id="btn-menu" class="tool menu-btn" aria-expanded="false" aria-controls="menu" aria-haspopup="true"
             title="Menu" aria-label="Menu"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M1 3h14v2H1zM1 7h14v2H1zM1 11h14v2H1z"/></svg></button>
   </div>
-  <div id="menu" class="menu" hidden>
-    <button id="btn-online" class="tool online-btn" aria-expanded="false" aria-controls="online" hidden><span id="btn-online-label">Play online</span></button>
+  <div id="menu" class="menu ps-win" hidden>
+    <p class="ps-title menu-title" aria-hidden="true">Menu</p>
+    <button id="btn-lobby" class="tool online-btn" hidden><span id="btn-lobby-label">Online Battle</span></button>
+    <button id="btn-online" class="tool account-btn" aria-expanded="false" aria-controls="online" hidden><span id="btn-online-label">RPCN account</span></button>
     <button id="btn-fullscreen" class="tool" hidden>Fullscreen</button>
     <button id="btn-controls" class="tool" aria-expanded="false" aria-controls="controls">Controls</button>
     <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>

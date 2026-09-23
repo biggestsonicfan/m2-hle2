@@ -90,11 +90,11 @@ endif()
 # tree was cloned without them.
 # ---------------------------------------------------------------------------
 if(M2HLE_SDL3 OR M2HLE_WEB OR M2HLE_LIBRETRO)
-    set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz)
-    set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c)
+    set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz vendor/stb)
+    set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c stb/stb_truetype.h)
 else()
-    set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club)
-    set(M2HLE_SUBMODULE_PROBES imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp
+    set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb)
+    set(M2HLE_SUBMODULE_PROBES imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp stb/stb_truetype.h
                                imgui_club/imgui_memory_editor/imgui_memory_editor.h)
 endif()
 foreach(probe ${M2HLE_SUBMODULE_PROBES})
@@ -224,6 +224,7 @@ if(M2HLE_LIBRETRO)
     endif()
     target_link_libraries(m2hle_libretro PRIVATE sokol_gfx miniz)
     target_include_directories(m2hle_libretro PRIVATE
+        ${VENDOR}/stb
         ${SRC}
         ${SRC}/board
         ${SRC}/core
@@ -262,6 +263,7 @@ if(M2HLE_WEB)
     target_compile_definitions(m2hle PRIVATE M2HLE_WEB)
     target_link_libraries(m2hle PRIVATE sokol miniz)
     target_include_directories(m2hle PRIVATE
+        ${VENDOR}/stb
         ${SRC}
         ${SRC}/board
         ${SRC}/core
@@ -514,7 +516,7 @@ option(M2HLE_BUILD_TESTS "Build the standalone unit tests" ON)
 # paths) — not meaningful for the Emscripten/web build, so skip them there.
 if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     enable_testing()
-    set(TEST_INCLUDES ${SRC} ${SRC}/board ${SRC}/core ${SRC}/net ${SRC}/ui ${SRC}/profiles)
+    set(TEST_INCLUDES ${SRC} ${SRC}/board ${SRC}/core ${SRC}/net ${SRC}/ui ${SRC}/profiles ${VENDOR}/stb)
 
     add_executable(mem_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/mem_test.c)
     add_executable(i960_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/i960_test.c)
@@ -539,6 +541,10 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(ps3net_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/ps3net_test.c)
     # The libretro core's heat guard (core/heat_guard.h): a pure state machine, no zones read.
     add_executable(heat_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/heat_test.c)
+    # The PS3 release's game settings (profiles/sfight.h sfight_apply_menu_settings) on a bus:
+    # the bytes, the backup RAM CRC, the defaults. No ROM.
+    add_executable(sfight_settings_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/sfight_settings_test.c)
+    target_link_libraries(sfight_settings_test PRIVATE miniz sokol)
     # Not a ctest: replays a MAME capture of the COP conversation (needs a capture file).
     add_executable(cop_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/cop_replay.c)
     target_include_directories(cop_replay PRIVATE ${TEST_INCLUDES})
@@ -560,6 +566,16 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(MSVC)
         target_compile_definitions(snd_bench PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
+    # Not a ctest: renders the PS3-style UI (ui/ps3ui*.h) to PNGs for
+    # tools/ps3ui/grade.py, which holds them against the PS3's own screens.
+    add_executable(ps3ui_render ${CMAKE_CURRENT_SOURCE_DIR}/tests/ps3ui_render.c)
+    target_include_directories(ps3ui_render PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ps3ui_render PRIVATE miniz sokol)
+    if(MSVC)
+        target_compile_definitions(ps3ui_render PRIVATE _CRT_SECURE_NO_WARNINGS)
+    elseif(NOT WIN32)
+        target_link_libraries(ps3ui_render PRIVATE m)
+    endif()
     # Not a ctest: a per-frame digest of the board for holding two builds against
     # each other (the wasm-vs-desktop cross-play gate). Needs a merged ROM zip.
     add_executable(det_digest ${CMAKE_CURRENT_SOURCE_DIR}/tests/det_digest.c)
@@ -577,7 +593,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(input_test PRIVATE miniz sokol)
 
     foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test
-              scsp_dsp_test scsp_dsp_test_masks)
+              scsp_dsp_test scsp_dsp_test_masks sfight_settings_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -590,7 +606,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test scsp_dsp_test scsp_dsp_test_masks
-                  cop_replay snd_replay snd_bench)
+                  cop_replay snd_replay snd_bench sfight_settings_test ps3ui_render)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

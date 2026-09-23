@@ -1175,6 +1175,29 @@ static void event(const sapp_event* ev) {
 
 sapp_desc sokol_main(int argc, char* argv[]) {
     { const char *e = getenv("M2HLE_NO_SOUND_BOARD"); if (e && e[0] == '1') g_no_sound_board = 1; }
+    /* The log's own options come first: the first line logged, a warning about
+     * any argument below included, opens the file. Without --log, an instance
+     * given its own --mcp-port gets its own file, because instances started
+     * side by side from one directory (a training population) otherwise all
+     * truncate and interleave one m2hle.log (issue #69). */
+    {
+        const char *log_path = NULL, *log_levels = NULL;
+        int port = 0;
+        for (int i = 1; i + 1 < argc; i++) {
+            if      (strcmp(argv[i], "--log") == 0)       log_path   = argv[++i];
+            else if (strcmp(argv[i], "--log-level") == 0) log_levels = argv[++i];
+            else if (strcmp(argv[i], "--mcp-port") == 0)  port       = atoi(argv[++i]);
+        }
+        char per_port[32];
+        if (!log_path && port > 0 && port != g_mcp_port) {
+            snprintf(per_port, sizeof per_port, "m2hle-%d.log", port);
+            log_path = per_port;
+        }
+        log_set_path(log_path);
+        if (log_levels && !log_set_levels(log_levels))
+            LOG_WARN("--log-level %s: expected LEVEL or CHANNEL=LEVEL, comma separated, "
+                     "LEVEL one of debug, info, warn, error, off; keeping everything", log_levels);
+    }
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--rom") == 0 && i + 1 < argc) {
             strncpy(g_rom_path, argv[++i], sizeof(g_rom_path) - 1);
@@ -1238,6 +1261,9 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_mcp_enable = 1;                  /* start TCP debug server */
         } else if (strcmp(argv[i], "--mcp-port") == 0 && i + 1 < argc) {
             g_mcp_port = atoi(argv[++i]);
+        } else if ((strcmp(argv[i], "--log") == 0 || strcmp(argv[i], "--log-level") == 0)
+                   && i + 1 < argc) {
+            i++;                                /* taken above, before anything logged */
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
         } else if (strcmp(argv[i], "--no-sound-board") == 0) {

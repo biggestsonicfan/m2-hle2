@@ -70,6 +70,68 @@ int main(void) {
     (void)mem_read32(&bus, 0xFFFFFFF0);
     CHECK(bus.unmapped_reads == um_before + 1, "unmapped read tracked");
 
+    /* A game that writes to ROM every frame must not write a line every time
+     * (issue #69: 33.8 million lines, 2.2 GB). The count stays exact; the log
+     * gets the first MEM_WARN_FIRST and then one line per power of two. */
+    int lines_before = g_log.count;
+    uint64_t ro_before = bus.ro_writes;
+    for (int i = 0; i < 100000; i++) mem_write32(&bus, ROM_BASE + 0x40, (uint32_t)i);
+    CHECK(bus.ro_writes == ro_before + 100000, "every RO write is counted");
+    CHECK(g_log.count - lines_before <= (int)MEM_WARN_FIRST + 17, "RO write warnings are throttled");
+    CHECK(g_log.count - lines_before >= (int)MEM_WARN_FIRST, "the first RO writes are still logged");
+
+    /* --log-level: a default level and per-channel levels, by the line's tag. */
+    CHECK(log_set_levels("warn,mem=off,netplay=debug"), "level spec parses");
+    lines_before = g_log.count;
+    LOG_WARN("mem: dropped by its channel");
+    LOG_INFO("emu: dropped by the default");
+    LOG_DEBUG("netplay: kept by its channel");
+    LOG_WARN("MEM: channels ignore case, so dropped");
+    LOG_ERROR("untagged, kept by the default");
+    CHECK(g_log.count - lines_before == 2, "levels filter by channel, then default");
+    CHECK(!log_set_levels("loud"), "a bad level is refused");
+    CHECK(!log_set_levels("mem=loud"), "a bad channel level is refused");
+    CHECK(log_set_levels("debug"), "back to everything");
+
+    /* The file cap. Past it the file stays OPEN -- closing it raced any other
+     * thread mid-fprintf -- takes one notice, then only errors until the
+     * reserve is spent. A tiny cap stands in for 64 MB. */
+    {
+        const char *path = "mem_test_cap.log";
+        log_file_close();
+        g_log.file_open_attempted = 0;
+        log_set_path(path);
+        log_set_file_cap(1024);
+        for (int i = 0; i < 200; i++) LOG_INFO("cap: filler line %d", i);
+        CHECK(g_log.file != NULL, "the file stays open past the cap");
+        CHECK(g_log.file_capped, "the cap is reached");
+        unsigned long long at_cap = g_log.file_bytes;
+        CHECK(at_cap < 1024 + LOG_MAX_LINE, "writing stopped at the cap");
+        LOG_WARN("cap: a warning past the cap");
+        CHECK(g_log.file_bytes == at_cap, "past the cap, a warning is not written");
+        LOG_ERROR("cap: an error past the cap");
+        CHECK(g_log.file_bytes > at_cap, "past the cap, an error still is");
+        g_log.file_bytes = 1024 + LOG_FILE_ERR_RESERVE;
+        unsigned long long spent = g_log.file_bytes;
+        LOG_ERROR("cap: an error past the reserve");
+        CHECK(g_log.file_bytes == spent, "past the reserve, nothing is written");
+        log_file_close();
+        FILE *fh = fopen(path, "rb");
+        int notices = 0, errs = 0;
+        char line[LOG_MAX_LINE + 16];
+        while (fh && fgets(line, sizeof line, fh)) {
+            if (strstr(line, "reached its cap")) notices++;
+            if (strstr(line, "an error past the cap")) errs++;
+            CHECK(!strstr(line, "a warning past the cap"), "no warning in the file");
+            CHECK(!strstr(line, "past the reserve"), "no line past the reserve");
+        }
+        if (fh) fclose(fh);
+        CHECK(notices == 1 && errs == 1, "one notice, then the error");
+        remove(path);
+        log_set_file_cap(0);
+        log_set_path(NULL);
+    }
+
     /* A re-init must not MOVE the heap regions. A netplay session re-runs
      * mem_init on the emu thread while the frame callback is decoding texture
      * RAM through a pointer it loaded earlier; a block that moved is a block
