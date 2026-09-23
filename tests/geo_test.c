@@ -67,7 +67,7 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
     }
     printf("\ninfo: model %d layered faces span (%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)\n",
            idx, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
-    free(m.sv); free(m.faces); free(m.edges);
+    free(m.sv); free(m.faces); free(m.edges); free(m.rests);
 }
 
 /* GEO_TEST_DUMP=<model>: every face the ranking touched, and its orderings. */
@@ -104,7 +104,7 @@ static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
     }
     for (int e = 0; e < m.n_edges; e++)
         printf("dump:   %3d / %3d  top %3d  %s\n", m.edges[e].lo, m.edges[e].hi, m.edges[e].top, m.edges[e].by_sort ? "by sort" : "held apart");
-    free(m.sv); free(m.faces); free(m.edges);
+    free(m.sv); free(m.faces); free(m.edges); free(m.rests);
 }
 
 int main(void) {
