@@ -145,6 +145,17 @@ export class M2Hle {
                           quiet = true, timeoutMs = 30000,
                           headless = !process.env.M2_WINDOW, extraArgs = [] } = {}) {
         if (!rom) throw new Error('launch needs a rom path');
+        /* Something already listening on the port would be attached to below
+         * instead of the emulator this launches, which cannot take the port and
+         * runs on without a bridge. On a machine with a live emulator on the
+         * default port (a stream, a bot) a grader then breakpoints and resets
+         * that one. Refuse instead. */
+        const taken = await new Promise((res) => {
+            const s = net.createConnection({ host: '127.0.0.1', port });
+            s.once('connect', () => { s.destroy(); res(true); });
+            s.once('error', () => res(false));
+        });
+        if (taken) throw new Error(`port ${port} already has something listening (another emulator?) — pass a free --port`);
         const bin = exe ?? findExe();
         /* $M2HLE_EXTRA_ARGS goes to every emulator a grader starts, so a run can
          * be graded with an option the grader itself knows nothing about (the

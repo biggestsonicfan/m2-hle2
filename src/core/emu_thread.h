@@ -197,6 +197,7 @@ static inline void emu_match_replay_edge(emu_thread_ctx_t *ctx) {
     for (int i = 0; i < ar->state_count; i++)
         mem_write32(ctx->bus, ar->state_addr + 4u * (uint32_t)i, ar->state[i]);
     mem_write8(ctx->bus, ar->step_addr, ar->to_step);
+    g_replay_stage_pin = g_match_replay_stage;
     g_match_replay = 2;
     g_match_replay_frame = g_emu_frames;
     LOG_INFO("match_replay: attract step %u -> %u at frame %u", ar->from_step, ar->to_step, g_emu_frames);
@@ -228,6 +229,7 @@ static inline void emu_board_reset_state(void) {
     s_irq_baseline_depth = 0;
     g_frame_done         = 0;
     g_versus_result      = 0;
+    g_replay_stage_pin   = -1;
     g_xplay_barrier      = 0;
     g_xplay_events       = 0;
     g_xplay_ready        = 0;

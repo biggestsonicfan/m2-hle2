@@ -249,13 +249,25 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     /* Faces lying on faces (geo3d_mesh_layers): 0 draws them as before. */
     if (mcp_json_get_str(req,"zlayers",  v,sizeof v)) g_geo3d_layers = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zlayer_steps",v,sizeof v)) g_geo3d_layer_steps = (float)atof(v);
+    /* zlayer_model: N, or LO-HI, or -1 for every model */
+    if (mcp_json_get_str(req,"zlayer_model",v,sizeof v)) {
+        const char *dash = v[0] ? strchr(v + 1, '-') : NULL;
+        g_geo3d_layer_only = atoi(v);
+        g_geo3d_layer_only_hi = dash ? atoi(dash + 1) : g_geo3d_layer_only;
+    }
+    if (mcp_json_get_str(req,"zlayer_board",v,sizeof v)) g_geo3d_layer_board = (atoi(v) != 0);
+    if (mcp_json_get_str(req,"zlayer_plane",v,sizeof v)) g_geo3d_layer_plane = (atoi(v) != 0);
+    char models[GEO3D_LAYER_MODELS_MAX * 8] = "";
+    for (int i = 0, o = 0; i < g_geo3d_layer_model_count && o < (int)sizeof models - 8; i++)
+        o += snprintf(models + o, sizeof models - (size_t)o, "%s%d", i ? "," : "", g_geo3d_layer_models[i]);
+    g_geo3d_layer_model_count = 0;
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
-             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zlayers\":%d,\"layer_faces\":%llu}",
+             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"layer_models\":[%s]}",
              g_geo3d_state->cam_x,g_geo3d_state->cam_y,g_geo3d_state->cam_z,
              g_geo3d_state->rot_y,g_geo3d_state->rot_x,g_geo3d_state->fov_deg,
              g_geo3d_lines.count, g_geo3d_tris.count, g_geo3d_state->test_triangle ? 1 : 0,
-             g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces);
+             g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces, models);
 }
 
 static void mcp_cmd_get_registers(char *resp, int cap) {

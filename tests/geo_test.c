@@ -67,7 +67,44 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
     }
     printf("\ninfo: model %d layered faces span (%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)\n",
            idx, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
-    free(m.sv); free(m.faces);
+    free(m.sv); free(m.faces); free(m.edges);
+}
+
+/* GEO_TEST_DUMP=<model>: every face the ranking touched, and its orderings. */
+static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
+    static geo3d_cmesh_t m;
+    uint32_t toff = q->model_table_offset + (uint32_t)idx * MODEL_ENTRY_SIZE;
+    memset(&m, 0, sizeof m);
+    m.model_idx = idx;
+    m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
+    m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
+    m.polygons = rs->polygons;   m.polygons_size  = rs->polygons_size;
+    m.materials = rs->textures;  m.materials_size = rs->textures_size;
+    m.main_data = rs->main_data;
+    uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
+    if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
+    printf("dump: model %d, %d faces, %d orderings\n", idx, m.n_faces, m.n_edges);
+    for (int i = 0; i < m.n_faces; i++) {
+        const geo3d_cface_t *f = &m.faces[i];
+        bool in = false;
+        for (int e = 0; e < m.n_edges && !in; e++) in = m.edges[e].lo == i || m.edges[e].hi == i;
+        if (!in) continue;
+        const int c[4] = { f->ai, f->bi, f->ci, f->di };
+        const int nc = f->is_tri ? 3 : 4;
+        float cx = 0, cy = 0, cz = 0, off = 0;
+        for (int k = 0; k < nc; k++) {
+            vec3_t p = m.sv[c[k]];
+            cx += p.x / nc; cy += p.y / nc; cz += p.z / nc;
+            float d = f->plane[0] * p.x + f->plane[1] * p.y + f->plane[2] * p.z - f->plane[3];
+            if (fabsf(d) > fabsf(off)) off = d;
+        }
+        printf("dump:   face %3d fi %3d layer %u zmode %u fl %2d tile %4.0f,%4.0f %s centre (%7.2f,%7.2f,%7.2f) plane %s off %+.3f\n",
+               i, f->fi, f->layer, f->zmode, (int)f->fl, f->tx, f->ty, f->tw > 0 ? "tex" : "flat", cx, cy, cz,
+               f->has_plane ? "yes" : "no ", off);
+    }
+    for (int e = 0; e < m.n_edges; e++)
+        printf("dump:   %3d / %3d  top %3d  %s\n", m.edges[e].lo, m.edges[e].hi, m.edges[e].top, m.edges[e].by_sort ? "by sort" : "held apart");
+    free(m.sv); free(m.faces); free(m.edges);
 }
 
 int main(void) {
@@ -76,6 +113,11 @@ int main(void) {
         printf("FAIL: ROM load\n"); return 1;
     }
     const game_quirks_t *q = &sfight_profile.quirks;
+    if (getenv("GEO_TEST_DUMP")) {
+        layer_dump(&rs, q, atoi(getenv("GEO_TEST_DUMP")));
+        romset_free(&rs);
+        return 0;
+    }
 
     int      nonempty = 0;
     long     total_tris = 0, total_lines = 0;

@@ -388,9 +388,21 @@ static inline float geo3d_zs_vertex(float zb, float z) {
  * layer and no plane keeps its own depth. Set per face by the cached draw;
  * everything else leaves them at 0. */
 static int   g_geo3d_layers         = 1;      /* 0: no face is layered */
+static int   g_geo3d_layer_only     = -1;     /* >= 0: only models g_geo3d_layer_only..g_geo3d_layer_only_hi (bisecting) */
+static int   g_geo3d_layer_only_hi  = -1;
+static int   g_geo3d_layer_plane    = 1;      /* 0: layered faces keep their own depth, offset only */
 static float g_geo3d_layer_steps    = 4.0f;   /* 24-bit depth steps a layer is pulled forward */
 static float g_geo3d_emit_layer     = 0.0f;
 static uint64_t g_geo3d_layer_faces;          /* faces drawn layered or on a plane (set_camera reports it) */
+/* The models those faces came from since set_camera last asked (it reports and
+ * empties the list): which models the layers touch in a scene. */
+#define GEO3D_LAYER_MODELS_MAX 64
+static int g_geo3d_layer_models[GEO3D_LAYER_MODELS_MAX];
+static int g_geo3d_layer_model_count;
+static inline void geo3d_note_layer_model(int model_idx) {
+    for (int i = 0; i < g_geo3d_layer_model_count; i++) if (g_geo3d_layer_models[i] == model_idx) return;
+    if (g_geo3d_layer_model_count < GEO3D_LAYER_MODELS_MAX) g_geo3d_layer_models[g_geo3d_layer_model_count++] = model_idx;
+}
 /* geo3d_decode_model takes the layers from the mesh cache only when its caller
  * is on the render thread, which owns the cache, and says so (the object
  * viewer). The bridge's model dump decodes on its own thread. */
@@ -2092,9 +2104,11 @@ static inline void geo3d_decode_model(int model_idx,
         geo3d_zsort_step((fi < n_qt) ? qa[fi] : 0u, is_tri, has_C, ai, bi, ci, di,
                          zsrc, &zmode, &zset);
         g_geo3d_emit_zs = geo3d_sort_z(sv, zsrc, zmode);
-        g_geo3d_emit_layer     = have_lay ? (float)lay[fi].layer : 0.0f;
+        /* Far-corner faces keep the recede alone, as in the cached draw. */
+        const bool lay_face = have_lay && zmode != 2u && zmode != 3u;
+        g_geo3d_emit_layer     = lay_face ? (float)lay[fi].layer : 0.0f;
         g_geo3d_emit_has_plane = 0;
-        if (have_lay && lay[fi].has_plane) {
+        if (lay_face && lay[fi].has_plane) {
             if (matrix) g_geo3d_emit_has_plane = geo3d_plane_to_view(lay[fi].plane, matrix, g_geo3d_emit_plane);
             else { memcpy(g_geo3d_emit_plane, lay[fi].plane, sizeof g_geo3d_emit_plane); g_geo3d_emit_has_plane = 1; }
         }
@@ -2263,6 +2277,17 @@ typedef struct {
     float    plane[4];           /* its group's plane in model space, n.p = d, |n| = 1 */
 } geo3d_cface_t;
 
+/* One ordering between two faces of a mesh (geo3d_mesh_layers), by index into
+ * its faces, lo submitted before hi. BY_SORT: the two are in one plane or ask
+ * for different corners, so the board's polygon sort decides, and a draw with
+ * the board's camera decides it that way (geo3d_mesh_draw_layers); `top` is the
+ * explorer's vote over view directions, for a draw without one. Otherwise
+ * `top` stands: the faces are held apart and the nearer is in front. */
+typedef struct {
+    uint16_t lo, hi, top;
+    uint8_t  by_sort;
+} geo3d_ledge_t;
+
 typedef struct {
     bool           used;
     int            model_idx;
@@ -2273,6 +2298,8 @@ typedef struct {
     int            n_sv, n_faces;
     vec3_t        *sv;           /* untransformed, Z negated */
     geo3d_cface_t *faces;        /* only the faces that emit, in decode order */
+    int            n_edges;
+    geo3d_ledge_t *edges;        /* the orderings behind the faces' layers */
 } geo3d_cmesh_t;
 
 static int           g_geo3d_mesh_cache = 1;   /* 0: always run the full decoder */
@@ -2284,6 +2311,7 @@ static inline void geo3d_mesh_cache_clear(void) {
     for (unsigned i = 0; i < GEO3D_MESH_CACHE_SLOTS; i++) {
         free(g_geo3d_meshes[i].sv);
         free(g_geo3d_meshes[i].faces);
+        free(g_geo3d_meshes[i].edges);
     }
     memset(g_geo3d_meshes, 0, sizeof g_geo3d_meshes);
     g_geo3d_mesh_count = 0;
@@ -2312,7 +2340,14 @@ static inline void geo3d_mesh_cache_clear(void) {
  * nothing lies under, else one more than the highest face under it) and the
  * faces that were ordered at all share their group's plane, the largest face's.
  * Only the model's own faces are ranked, in model space, once per cached mesh.
- * A layered face does not recede (geo3d_zs_corner). */
+ * A layered face does not recede (geo3d_zs_corner).
+ *
+ * Three departures from the explorer, each measured against MAME's pictures
+ * (tools/grade-zsort.mjs; CLAUDE.md has the numbers): a draw with the board's
+ * camera orders each pair by the board's sort from that camera, not by the vote
+ * (geo3d_mesh_draw_layers); a face sorted by its farthest corner keeps the
+ * recede and takes no layer or plane (the cached draw); and pairs held apart by
+ * more than the tie with the same corner are left to the depth buffer (below). */
 #define GEO3D_LAYER_GAP    0.5    /* how far apart two faces may stand and be ordered */
 #define GEO3D_LAYER_TIE    0.02   /* how far apart counts as one plane */
 #define GEO3D_LAYER_COSINE 0.999  /* least cosine between their normals */
@@ -2464,12 +2499,18 @@ static int geo3d_layer_by_lo(const void *a, const void *b) {
 }
 
 /* Rank a cached mesh's faces (sets layer / has_plane / plane on each). Faces are
- * left unlayered if memory runs out. */
+ * left unlayered if memory runs out.
+ *
+ * Render thread only, like the mesh cache it serves: qsort's context rides in
+ * g_geo3d_layer_sorting and the view directions are filled in on first use,
+ * neither of them locked. A caller on another thread (a dump tool, a worker)
+ * has to rank under a lock or with its own copies of both. */
 static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
     const int nf = m->n_faces;
     geo3d_lface_t *L   = malloc((size_t)(nf ? nf : 1) * sizeof *L);
     int           *ord = malloc((size_t)(nf ? nf : 1) * sizeof *ord);
     int           *eb = NULL, *et = NULL;      /* edges: bottom face -> top face */
+    uint8_t       *es = NULL;                  /* the edge is the board's sort's to decide */
     int            ne = 0, cap = 0;
     if (!L || !ord) goto done;
 
@@ -2558,7 +2599,14 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
             const bool window = fabs(behind) <= tie && !f->cut && g->cut && f->area < g->area * (1.0 - 1e-3);
             /* The sort has the last word only where the two are in one plane to
              * within the tie, or where one asks for a different corner. */
-            const double share = fabs(behind) <= tie || f->zmode != g->zmode ? geo3d_layer_later_share(f, g) : 0.5;
+            /* Held apart by more than the tie and asking for the same corner, the
+             * two are what they look like: the nearer is in front for the depth
+             * buffer as for the board, so they are left to it and join no group.
+             * The explorer orders them too, and then puts both on one plane; on a
+             * model a few tenths across (a fighter's glove, 1813/1818) that moved
+             * faces 0.15 apart onto each other, away from MAME. */
+            if (!(fabs(behind) <= tie || f->zmode != g->zmode)) continue;
+            const double share = geo3d_layer_later_share(f, g);
             int top;
             if (window || share >= 0.75)  top = j;
             else if (share <= 0.25)       top = i;
@@ -2575,10 +2623,14 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
                 int *nt = realloc(et, (size_t)nc2 * sizeof *et);
                 if (!nt) { free(ordered); goto done; }
                 et = nt;
+                uint8_t *ns = realloc(es, (size_t)nc2 * sizeof *es);
+                if (!ns) { free(ordered); goto done; }
+                es = ns;
                 cap = nc2;
             }
             eb[ne] = top == i ? j : i;
             et[ne] = top;
+            es[ne] = fabs(behind) <= tie || f->zmode != g->zmode;
             ne++;
             ordered[i] = ordered[j] = 1;
         }
@@ -2641,10 +2693,70 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
             }
         }
         free(below); free(layer); free(start); free(adj); free(queue); free(root); free(largest);
+        /* Kept for the draws that have the board's camera. */
+        m->edges = malloc((size_t)ne * sizeof *m->edges);
+        if (m->edges) {
+            for (int e = 0; e < ne; e++) {
+                const int a = L[eb[e]].face, b = L[et[e]].face;
+                m->edges[e] = (geo3d_ledge_t){ .lo = (uint16_t)(a < b ? a : b), .hi = (uint16_t)(a < b ? b : a),
+                                               .top = (uint16_t)b, .by_sort = es[e] };
+            }
+            m->n_edges = ne;
+        }
     }
     free(ordered);
 done:
-    free(L); free(ord); free(eb); free(et);
+    free(L); free(ord); free(eb); free(et); free(es);
+}
+
+/* The board's sort key for a polygon depth (board z, positive into the screen):
+ * MAME's float_to_zval less the window's z_adjust, which shifts every key of a
+ * window alike and so never changes which of two is nearer. The mantissa is
+ * rounded to 12 bits, so depths closer than that share a bucket. */
+static inline uint32_t geo3d_board_zkey(float z) {
+    uint32_t u;
+    memcpy(&u, &z, 4);
+    if ((int32_t)u < 0) return 0;
+    uint32_t e = (u >> 23) & 0xffu, mant = (u & 0x7fffffu) + 0x400u;
+    if (mant > 0x7fffffu) { e++; mant = (mant & 0x7fffffu) >> 1; }
+    return (e << 12) | (mant >> 11);
+}
+
+/* A face's key under this draw: its nearest corner (mode 1) or farthest (2),
+ * or the board's error case (3), from the corners it is sorted by. tv is camera
+ * space, z negative into the screen. */
+static inline uint32_t geo3d_face_board_key(const geo3d_cface_t *f, const vec3_t *tv) {
+    if (f->zmode == 3u) return geo3d_board_zkey(1.0e10f);
+    float lo = -tv[f->zsrc[0]].z, hi = lo;
+    for (int k = 1; k < 4; k++) {
+        float z = -tv[f->zsrc[k]].z;
+        if (z < lo) lo = z;
+        if (z > hi) hi = z;
+    }
+    return geo3d_board_zkey(f->zmode == 2u ? hi : lo);
+}
+
+/* Draw with the board's camera: each ordering the sort decides goes the way
+ * the board's sort goes from here, not the way most view directions go
+ * (MAME model2_v.cpp: buckets drawn nearest first, newest polygon first within
+ * one, a pixel written once, so the nearer key wins and a tie goes to the later
+ * polygon). Layers are then the longest path again, relaxed to a fixed point
+ * (a cycle stops at the pass limit). out gets a layer per face. */
+static int g_geo3d_layer_board = 1;   /* 0: the vote over view directions, as the explorer */
+static void geo3d_mesh_draw_layers(const geo3d_cmesh_t *m, const vec3_t *tv, uint16_t *out) {
+    memset(out, 0, (size_t)m->n_faces * sizeof *out);
+    for (int pass = 0; pass < 32; pass++) {
+        bool changed = false;
+        for (int e = 0; e < m->n_edges; e++) {
+            const geo3d_ledge_t *E = &m->edges[e];
+            int top = E->top;
+            if (E->by_sort && g_geo3d_layer_board)
+                top = geo3d_face_board_key(&m->faces[E->hi], tv) <= geo3d_face_board_key(&m->faces[E->lo], tv) ? E->hi : E->lo;
+            const int bottom = top == E->hi ? E->lo : E->hi;
+            if (out[top] < out[bottom] + 1) { out[top] = (uint16_t)(out[bottom] + 1); changed = true; }
+        }
+        if (!changed) break;
+    }
 }
 
 /* The static half of geo3d_decode_model for one (model, material, UV): same
@@ -2909,6 +3021,8 @@ static inline void geo3d_decode_model_cached(int model_idx,
 
     static vec3_t tv[GEO3D_IA_MAX_VERTS];
     for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
+    static uint16_t draw_layer[GEO3D_IA_MAX_IDX / 4];
+    if (m->n_edges) geo3d_mesh_draw_layers(m, tv, draw_layer);
 
     geo3d_split_reset();
     bool lines = g_geo_wireframe != 0;
@@ -2919,10 +3033,18 @@ static inline void geo3d_decode_model_cached(int model_idx,
         vec3_t D = f->is_tri ? (vec3_t){0, 0, 0} : tv[f->di];
 
         g_geo3d_emit_zs = geo3d_sort_z(tv, f->zsrc, f->zmode);
-        g_geo3d_emit_layer     = g_geo3d_layers ? (float)f->layer : 0.0f;
-        g_geo3d_emit_has_plane = g_geo3d_layers && f->has_plane &&
+        /* A face sorted by its farthest corner (mode 2) keeps the recede and
+         * nothing else: that is what stands it out of the way of other models,
+         * as the board's far key does. The layers are for the faces laid on it.
+         * Layered too, Casino Night's floor emblem (model 194, its base face 130
+         * over three held a little below) stopped stepping back and covered the
+         * green MAME shows beside it (tools/grade-zsort.mjs). */
+        const bool layers = g_geo3d_layers && (g_geo3d_layer_only < 0 || (model_idx >= g_geo3d_layer_only && model_idx <= g_geo3d_layer_only_hi)) &&
+                            f->zmode != 2u && f->zmode != 3u;
+        g_geo3d_emit_layer     = layers ? (float)(m->n_edges ? draw_layer[n] : 0) : 0.0f;
+        g_geo3d_emit_has_plane = layers && g_geo3d_layer_plane && f->has_plane &&
                                  geo3d_plane_to_view(f->plane, matrix, g_geo3d_emit_plane);
-        if (g_geo3d_emit_layer > 0.0f || g_geo3d_emit_has_plane) g_geo3d_layer_faces++;
+        if (g_geo3d_emit_layer > 0.0f || g_geo3d_emit_has_plane) { g_geo3d_layer_faces++; geo3d_note_layer_model(model_idx); }
 
         float fr = cr, fg = cg, fb = cb;
         if (f->mat_ok) {
