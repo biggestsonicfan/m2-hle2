@@ -1066,7 +1066,7 @@ EMSCRIPTEN_KEEPALIVE int web_netplay_set(const char *key, const char *value) {
     if (!strcmp(key, "entry"))       { c->entry = (uint8_t)strtoul(value, NULL, 10); return 0; }
     if (!strcmp(key, "watch"))       { c->watch_only = strtoul(value, NULL, 10) != 0; return 0; }
     /* DAMAGE for a room hosted on our server: "normal" (catch-up) or "real". */
-    if (!strcmp(key, "damage"))      { c->damage_normal = !strcmp(value, "normal"); return 0; }
+    if (!strcmp(key, "damage"))      { c->damage_real = !strcmp(value, "real"); return 0; }
     if (!strcmp(key, "server")) {
         if (!web_server_known(value)) return -1;
         if (!netplay_same_name(c->server, value)) {

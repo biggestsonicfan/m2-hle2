@@ -301,9 +301,9 @@ typedef struct {
     uint32_t frame_delay;
     uint32_t max_players;       /* hosting: 2..8; 0 = 2 */
     bool     vs_mode;           /* hosting: play this room's matches in VS mode (g_vs_mode) */
-    /* hosting: DAMAGE NORMAL, the cabinet's catch-up damage (g_damage_real).
-     * False, the default, is REAL. */
-    bool     damage_normal;
+    /* hosting: DAMAGE REAL, no catch-up damage (g_damage_real). False, the
+     * default, is NORMAL: the cabinet's factory setting and the console's. */
+    bool     damage_real;
     uint8_t  entry;             /* room_entry_t, for NETPLAY_CMD_ENTRY */
     bool     watch_only;        /* for NETPLAY_CMD_WATCH */
     bool     browse_yamp;       /* also search YAMP's lobby space, read-only */
@@ -2248,7 +2248,7 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
     g_netplay.cfg.max_players   = cfg->max_players;
     g_netplay.cfg.vs_mode       = cfg->vs_mode;
-    g_netplay.cfg.damage_normal = cfg->damage_normal;
+    g_netplay.cfg.damage_real   = cfg->damage_real;
     g_netplay.cfg.room_password[0] = '\0';
     snprintf(g_netplay.cfg.room_password, sizeof(g_netplay.cfg.room_password), "%s",
              cfg->room_password);
@@ -2881,7 +2881,7 @@ static inline void netplay_owner_pump(void) {
             s.seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s.match << 16) ^ 0x5A5Au;
             s.region      = (uint8_t)g_region;
             s.vs_mode     = netplay_room_vs_mode() ? 1u : 0u;
-            s.damage_real = g_netplay.cfg.damage_normal ? 0u : 1u;
+            s.damage_real = g_netplay.cfg.damage_real ? 1u : 0u;
             s.session     = s.match;
             s.last_result = ROOM_RESULT_NONE;
             s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
