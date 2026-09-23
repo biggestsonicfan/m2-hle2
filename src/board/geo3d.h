@@ -371,6 +371,28 @@ static inline float geo3d_sort_z(const vec3_t *sv, const int *zsrc, uint32_t zmo
     return zmode == 2u ? far_ : near_;
 }
 
+/* Models the game profile says stand on a floor (game_quirks_t.zsort_standing):
+ * every face keeps the depth the projection gives it, as HUD faces do.
+ *
+ * *Symptom that surfaced this in STF (issue #78):* Aurora Icefield's ice
+ * pillars (4278) and walrus statues (1601) had their bases cut off flat at the
+ * ice, and the pillars' lower panels streaked with the far wall's texture.
+ * Every face of both is sorted by its farthest corner and is only a few units
+ * deep, so each receded in full, through the ice (1602), which is too deep to
+ * recede and must not (see above). On the board 1602 sorts by a corner out at
+ * its tip, so both solids win every pixel they cover; the depth buffer gives
+ * the same answer for a closed solid over the ice. The explorer does the same
+ * for the draws aurora_disp marks `standing` (noclip#7, ZSORT_KEEP). */
+static const uint16_t *g_geo3d_standing;
+static int             g_geo3d_standing_count;
+static int             g_geo3d_zsort_standing = 1;   /* 0: standing models recede like the rest */
+static inline bool geo3d_model_standing(int model_idx) {
+    if (!g_geo3d_zsort_standing) return false;
+    for (int i = 0; i < g_geo3d_standing_count; i++)
+        if (g_geo3d_standing[i] == model_idx) return true;
+    return false;
+}
+
 /* The bound, applied per vertex so the slope of a polygon lying along the view
  * survives: the vertex may recede to its polygon's sorted depth, no further
  * than the bound, and is never pulled forward. Done here rather than in the
@@ -1838,6 +1860,7 @@ static inline void geo3d_decode_model(int model_idx,
     int efi = 0;
     /* The board's z-sort, carried across the walk (see geo3d_sort_z). */
     int zsrc[4] = {0,0,0,0}; uint32_t zmode = 0u; bool zset = false;
+    const bool standing = geo3d_model_standing(model_idx);
     geo3d_split_reset();
     for (int i = 0; i < n_idx - 8; i += 4) {
         int fi = i / 4;
@@ -2010,7 +2033,7 @@ static inline void geo3d_decode_model(int model_idx,
 
         geo3d_zsort_step((fi < n_qt) ? qa[fi] : 0u, is_tri, has_C, ai, bi, ci, di,
                          zsrc, &zmode, &zset);
-        g_geo3d_emit_zs = geo3d_sort_z(sv, zsrc, zmode);
+        g_geo3d_emit_zs = standing ? GEO3D_ZSORT_NONE : geo3d_sort_z(sv, zsrc, zmode);
 
         /* Per-face luminance (poly_luma) = |normal·light|*diffuse + ambient,
          * approximating MAME's per-polygon lighting (model2_v.cpp geo_parse).
@@ -2428,13 +2451,14 @@ static inline void geo3d_decode_model_cached(int model_idx,
 
     geo3d_split_reset();
     bool lines = g_geo_wireframe != 0;
+    const bool standing = geo3d_model_standing(model_idx);
     for (int n = 0; n < m->n_faces; n++) {
         const geo3d_cface_t *f = &m->faces[n];
         vec3_t A = tv[f->ai], B = tv[f->bi];
         vec3_t C = f->has_c ? tv[f->ci] : (vec3_t){0, 0, 0};
         vec3_t D = f->is_tri ? (vec3_t){0, 0, 0} : tv[f->di];
 
-        g_geo3d_emit_zs = geo3d_sort_z(tv, f->zsrc, f->zmode);
+        g_geo3d_emit_zs = standing ? GEO3D_ZSORT_NONE : geo3d_sort_z(tv, f->zsrc, f->zmode);
 
         float fr = cr, fg = cg, fb = cb;
         if (f->mat_ok) {

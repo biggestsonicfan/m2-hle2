@@ -158,6 +158,8 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
         /* Faces take their colour from palette RAM, as the rasterizer does. */
         g_geo3d_palram      = bus->palette;
         g_geo3d_palram_size = PALETTE_SIZE;
+        g_geo3d_standing       = q->zsort_standing;
+        g_geo3d_standing_count = q->zsort_standing_count;
         game_render_draw_captured_models(geo3d,
                                          rs->main_data, rs->main_data_size,
                                          rs->polygons,  rs->polygons_size,

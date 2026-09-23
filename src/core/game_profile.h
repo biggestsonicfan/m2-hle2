@@ -152,6 +152,13 @@ typedef struct {
      * hardware path — required for non-STF games and homebrew that drive the GEO
      * directly. STF/FV leave this false (their 3D is HLE'd from the COP stream). */
     bool     geo_displaylist;
+
+    /* Models that keep their projected depth under the polygon z-sort, with
+     * no recede (geo3d_model_standing). For closed solids standing on a floor
+     * too deep to recede: sorted by their far corners, they would step back
+     * through it. Model numbers are the ROM's, so the list is the game's. */
+    uint8_t  zsort_standing_count;
+    uint16_t zsort_standing[8];
 } game_quirks_t;
 
 /* ---- Loader / installer function-pointer types --------------------------- */
