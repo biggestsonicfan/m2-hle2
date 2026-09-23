@@ -150,6 +150,7 @@ static inline void objview_cmd_apply(const char *req) {
     if (json_get_int(req, "wireframe", &i)) v->wireframe = i ? 1 : 0;
     if (json_get_int(req, "textured",  &i)) v->textured  = i ? 1 : 0;
     if (json_get_int(req, "cull",      &i)) v->cull = (i == 1 || i == 2) ? i : 0;
+    if (json_get_int(req, "layers",    &i)) v->layers = i ? 1 : 0;
 }
 
 /* ---- Shots ---------------------------------------------------------------- */

@@ -17,6 +17,7 @@
 #define NDEBUG 1
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
 
 #include "sfight.h"     /* sfight_profile (quirks), load/install */
 #include "geo3d.h"      /* geo3d_decode_model, g_geo3d_tris/lines */
@@ -30,6 +31,44 @@ static int g_fail = 0;
 } while (0)
 
 static int finite_f(float v){ return (v == v) && v < 1e20f && v > -1e20f; }
+
+/* Rank one model's faces the way the display-list draw does (geo3d_mesh_build →
+ * geo3d_mesh_layers) and count its triangles above layer 0 and at it. */
+static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
+                         int *tris_up, int *tris_flat, int *planes) {
+    static geo3d_cmesh_t m;
+    *tris_up = *tris_flat = *planes = 0;
+    uint32_t toff = q->model_table_offset + (uint32_t)idx * MODEL_ENTRY_SIZE;
+    memset(&m, 0, sizeof m);
+    m.model_idx = idx;
+    m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
+    m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
+    m.polygons = rs->polygons;   m.polygons_size  = rs->polygons_size;
+    m.materials = rs->textures;  m.materials_size = rs->textures_size;
+    m.main_data = rs->main_data;
+    uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
+    if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
+    printf("info: model %d mat_ptr=%06X uv_ptr=%06X layered faces:", idx, m.mat_ptr, m.uv_ptr);
+    float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+    for (int i = 0; i < m.n_faces; i++) {
+        const geo3d_cface_t *f = &m.faces[i];
+        if (f->is_tri && !f->has_c) continue;
+        int t = f->is_tri ? 1 : 2;
+        if (f->layer) {
+            *tris_up += t;
+            printf(" %d(L%d)", i, f->layer);
+            const int c[4] = { f->ai, f->bi, f->ci, f->di };
+            for (int k = 0; k < (f->is_tri ? 3 : 4); k++) {
+                const float p[3] = { m.sv[c[k]].x, m.sv[c[k]].y, m.sv[c[k]].z };
+                for (int a = 0; a < 3; a++) { if (p[a] < lo[a]) lo[a] = p[a]; if (p[a] > hi[a]) hi[a] = p[a]; }
+            }
+        } else *tris_flat += t;
+        if (f->has_plane) *planes += 1;
+    }
+    printf("\ninfo: model %d layered faces span (%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)\n",
+           idx, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    free(m.sv); free(m.faces);
+}
 
 int main(void) {
     static romset_t rs;
@@ -93,6 +132,46 @@ int main(void) {
     }
     printf("info: richest model X extent [%.2f, %.2f]\n", minx, maxx);
     CHECK(maxx > minx, "richest model has non-degenerate spatial extent");
+
+    /* Faces lying on faces (issue #75), against the explorer's js/layers.js:
+     * 580's 32 shadow triangles over its 262 of sand, and 188's two JACKPOT
+     * panels (4 triangles) over the slot machine's 60. */
+    int up, flat, planes;
+    layer_counts(&rs, q, 580, &up, &flat, &planes);
+    printf("info: model 580: %d triangles layered, %d at layer 0, %d faces on a plane\n", up, flat, planes);
+    CHECK(up == 32 && flat == 262, "model 580: the pyramid shadows lie over the sand");
+    layer_counts(&rs, q, 188, &up, &flat, &planes);
+    printf("info: model 188: %d triangles layered, %d at layer 0, %d faces on a plane\n", up, flat, planes);
+    CHECK(up == 4 && flat == 60, "model 188: the JACKPOT panels lie over the cabinet");
+
+    /* What ranking costs: it runs once per mesh, the first time a model is
+     * drawn, so the slowest model is a first-sight hitch. */
+    {
+        static geo3d_cmesh_t mm;
+        double worst = 0.0, total = 0.0;
+        int worst_idx = -1;
+        for (uint32_t m = 0; m < q->model_table_count; m++) {
+            uint32_t toff = q->model_table_offset + m * MODEL_ENTRY_SIZE;
+            uint32_t mp = read_u32_le(rs.main_data + toff + 8);
+            if (!mp) continue;
+            memset(&mm, 0, sizeof mm);
+            mm.model_idx = (int)m;
+            mm.uv_ptr  = read_u32_le(rs.main_data + toff + 0);
+            mm.mat_ptr = read_u32_le(rs.main_data + toff + 4);
+            mm.polygons = rs.polygons;  mm.polygons_size  = rs.polygons_size;
+            mm.materials = rs.textures; mm.materials_size = rs.textures_size;
+            mm.main_data = rs.main_data;
+            clock_t t0 = clock();
+            if (geo3d_mesh_build(&mm, mp * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mm.mat_ptr != 0, mm.uv_ptr != 0)) {
+                double ms = 1000.0 * (double)(clock() - t0) / CLOCKS_PER_SEC;
+                total += ms;
+                if (ms > worst) { worst = ms; worst_idx = (int)m; }
+                free(mm.sv); free(mm.faces);
+            }
+        }
+        printf("info: mesh build + ranking, every model: %.0f ms total, slowest model %d at %.1f ms\n",
+               total, worst_idx, worst);
+    }
 
     romset_free(&rs);
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

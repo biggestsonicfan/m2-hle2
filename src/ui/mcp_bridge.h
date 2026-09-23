@@ -246,12 +246,16 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
      * co-planar decal wants. */
     if (mcp_json_get_str(req,"zsort",    v,sizeof v)) g_geo3d_zsort = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zrecede",  v,sizeof v)) g_geo3d_zsort_recede = (float)atof(v);
+    /* Faces lying on faces (geo3d_mesh_layers): 0 draws them as before. */
+    if (mcp_json_get_str(req,"zlayers",  v,sizeof v)) g_geo3d_layers = (atoi(v) != 0);
+    if (mcp_json_get_str(req,"zlayer_steps",v,sizeof v)) g_geo3d_layer_steps = (float)atof(v);
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
-             "\"lines\":%d,\"tris\":%d,\"test\":%d}",
+             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zlayers\":%d,\"layer_faces\":%llu}",
              g_geo3d_state->cam_x,g_geo3d_state->cam_y,g_geo3d_state->cam_z,
              g_geo3d_state->rot_y,g_geo3d_state->rot_x,g_geo3d_state->fov_deg,
-             g_geo3d_lines.count, g_geo3d_tris.count, g_geo3d_state->test_triangle ? 1 : 0);
+             g_geo3d_lines.count, g_geo3d_tris.count, g_geo3d_state->test_triangle ? 1 : 0,
+             g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces);
 }
 
 static void mcp_cmd_get_registers(char *resp, int cap) {
