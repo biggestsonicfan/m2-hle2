@@ -56,6 +56,10 @@ const WHAT = TOGGLE === 'zlayers' ? 'the layers' : TOGGLE;
 const CAM_TOL = args.num('cam-tol', 0.05);
 /* --only-model N: the layers on only model N's faces, to find which model a result comes from. */
 const ONLY = args.str('only-model', '-1');   /* N or LO-HI */
+if (ONLY !== '-1' && TOGGLE !== 'zlayers') {
+    console.error(`--only-model picks which models are layered, so it goes with the layers, not --toggle ${TOGGLE}`);
+    process.exit(2);
+}
 /* --set k=v,k=v: more set_camera settings for the play with the layers on (zlayer_steps, zlayer_board). */
 const SET = Object.fromEntries((args.str('set', '') || '').split(',').filter(Boolean).map((kv) => kv.split('=')));
 const STAGE = args.num('stage', 5);

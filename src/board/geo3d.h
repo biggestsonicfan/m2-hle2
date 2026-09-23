@@ -1947,17 +1947,13 @@ static inline void geo3d_decode_model(int model_idx,
 
         switch (iflag) {
             case 0:
-                /* Mid-mesh this ends the previous group and wipes it. The head of
-                 * a mesh is the exception: there is no previous group there, and
-                 * the four points standing there are the board's first polygon
-                 * (MAME model2_3d_push case 0x01; the relink runs after it). A
-                 * mesh that opens on this link is AM2's one-link 2x2 shadow card,
-                 * 70 entries in STF that used to decode to nothing (explorer
-                 * js/model.js, measured over STF, FV, HotD and Daytona). */
-                if (vcount > 0) {
-                    idx[n_idx - 4] = -1; idx[n_idx - 3] = -1;
-                    idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
-                }
+                /* The board culls a polygon whose own link type is 0 (MAME
+                 * check_culling), so the group standing here is wiped, and at the
+                 * head of a mesh that is the mesh's first polygon too. AM2's
+                 * one-link 2x2 shadow card (70 STF entries) is exactly that and
+                 * draws nothing, whatever the explorer decodes (noclip#24). */
+                idx[n_idx - 4] = -1; idx[n_idx - 3] = -1;
+                idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
                 idx[n_idx++] = new_a - 2; idx[n_idx++] = new_a - 1;
                 idx[n_idx++] = new_a;     idx[n_idx++] = new_a + 1;
                 break;
@@ -2867,10 +2863,8 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         qt[n_qt++] = f1;
         int new_a = 2 * (vcount + 2);
         switch (iflag) {
-            case 0:   /* the head of a mesh keeps its first polygon, as above */
-                if (vcount > 0) {
-                    idx[n_idx - 4] = -1; idx[n_idx - 3] = -1; idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
-                }
+            case 0:   /* culled by the board, the head of a mesh included (above) */
+                idx[n_idx - 4] = -1; idx[n_idx - 3] = -1; idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
                 idx[n_idx++] = new_a - 2; idx[n_idx++] = new_a - 1; idx[n_idx++] = new_a; idx[n_idx++] = new_a + 1;
                 break;
             case 1: {

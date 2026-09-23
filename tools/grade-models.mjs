@@ -99,6 +99,24 @@ const tex = { faces: 0, texturedBoth: 0, texturedHere: 0, texturedThere: 0,
 const FILL_FLAGS = 31 | 256 | 512;
 const perModelUv = [];
 
+/*
+ * The one place the explorer is known to be wrong about which entries draw
+ * (noclip#24): a mesh whose only polygon is its head link and that link's type
+ * is 0. The board culls a polygon of link type 0 (MAME check_culling), so this
+ * decoder leaves it empty; the explorer's Daytona port keeps it. In STF these
+ * are AM2's 2x2 shadow cards, 70 of them. Held to exactly that shape, so that
+ * any other disagreement still fails.
+ */
+const { readModelEntry, meshOffsetOf } = await nc('romset.js');
+const headCards = [];
+function headLinkZeroCard(index) {
+    const off = meshOffsetOf(rom, readModelEntry(rom, index));
+    const v = rom.polygonsView;
+    if (off < 0 || off + 80 > v.byteLength) return false;
+    const attr0 = v.getUint32(off + 24, true), attr1 = v.getUint32(off + 64, true);
+    return (attr0 & 3) !== 0 && ((attr0 >> 8) & 3) === 0 && attr1 === 0;
+}
+
 for (const { index, tris, uvs, tiles, flags } of models) {
     const theirs = decodeModel(rom, index);
     const theirTris = theirs ? theirs.positions.length / 9 : 0;
@@ -106,7 +124,11 @@ for (const { index, tris, uvs, tiles, flags } of models) {
 
     if (!ourTris && !theirTris) { bothEmpty++; continue; }
     if (!theirTris) { onlyEmu++; continue; }
-    if (!ourTris) { onlyExplorer++; continue; }
+    if (!ourTris) {
+        if (theirTris === 2 && headLinkZeroCard(index)) headCards.push(index);
+        else onlyExplorer++;
+        continue;
+    }
     bothGeometry++;
     if (ourTris === theirTris) sameCount++;
 
@@ -129,12 +151,16 @@ for (const { index, tris, uvs, tiles, flags } of models) {
 const measured = bothGeometry;
 rep.note(`${models.length} entries: ${bothGeometry} carry geometry in both, ` +
          `${bothEmpty} empty in both, ${onlyEmu} only here, ${onlyExplorer} only there`);
+if (headCards.length)
+    rep.note(`${headCards.length} one-link cards of link type 0 decode only in the explorer, which the board ` +
+             `culls (noclip#24): ${headCards.join(',')}`);
 
 rep.check('every entry decodes the same way (empty or not)',
           onlyEmu === 0 && onlyExplorer === 0,
           onlyEmu || onlyExplorer
               ? `${onlyEmu} decode here but not there, ${onlyExplorer} the other way`
-              : `${models.length} entries agree`);
+              : `${models.length - headCards.length} entries agree` +
+                (headCards.length ? `, ${headCards.length} are the explorer's culled cards above` : ''));
 
 rep.check('triangle counts agree', sameCount === measured,
           `${sameCount} of ${measured} models`);
