@@ -10,3 +10,6 @@
 #include "sokol_gfx.h"
 #include "sokol_log.h"
 #include "sokol_debugtext.h"
+/* The PS3-style menus draw through sokol_gl (ui/ps3ui_gpu.h). */
+#define SOKOL_GL_IMPL
+#include "sokol_gl.h"

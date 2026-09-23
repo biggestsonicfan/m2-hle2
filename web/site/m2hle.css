@@ -1,17 +1,67 @@
-/* The page around the game canvas. The canvas fills the window and the game is
- * letterboxed inside it by the emulator; the panel sits over it until a game is
- * running. */
+/* The page around the game canvas, dressed as the PS3 port's menus that the
+ * emulator itself draws on the canvas (src/ui/ps3ui_*.h), so the page and the
+ * game read as one interface. Everything here is drawn with CSS and inline SVG
+ * from colours measured off the PS3's own frames; no image comes from the PS3
+ * data. Sizes are the PS3's 1920x1080 figures scaled to roughly a 1280-wide
+ * window.
+ *
+ * The canvas fills the window and the game is letterboxed inside it by the
+ * emulator; the start-up screen (#panel) covers it until a game is running. */
+
+/* The fonts the canvas uses too (tools/ps3ui/bake_fonts.py --site): SIL OFL 1.1,
+ * the licences beside them in fonts/. @M2HLE_VERSION@ is stamped by
+ * web/stamp-site.cmake like the page's own ?v= links. */
+@font-face {
+  font-family: "PS3 Title";
+  src: url("fonts/title.woff2?v=@M2HLE_VERSION@") format("woff2");
+  font-weight: 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "PS3 Text";
+  src: url("fonts/text.woff2?v=@M2HLE_VERSION@") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: "PS3 Mono";
+  src: url("fonts/mono.woff2?v=@M2HLE_VERSION@") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
-  --bg: #05070d;
-  --panel: #10141f;
-  --edge: #273049;
-  --text: #e8ecf6;
-  --dim: #97a1ba;
-  --accent: #4da3ff;
-  --bad: #ff8a7a;
-  --good: #7ee2a8;
-  --warn: #ffd166;
+  /* The PS3's screen: its background gradient, the windows, the highlight. */
+  --bg-top: #122868;
+  --bg-bottom: #001735;
+  --win: rgba(19, 34, 65, 0.8);         /* #132241 at 0.8 */
+  --win-solid: #132241;
+  --win-edge: #303030;
+  --hl-1: #DEE7FD;
+  --hl-2: #D7E1F7;
+  --hl-3: #A4AEC5;
+  --hl-fade: #525D75;
+  --glow: #6F798E;
+  --rim: #9BA5B8;
+  --plate-edge: #595959;
+  --sel: #125992;                       /* #00BAFF at 0.3 over the window */
+  --sel-bar: #0596D6;
+  --sel-line: #00BAFF;
+  --cyan: #00FFFF;
+  --strip: #184684;
+  /* Text. The PS3 writes white on its windows; the dim tone keeps 7:1 on them. */
+  --text: #ffffff;
+  --dim: #B9C5DE;
+  --link: #8FE0FF;
+  --bad: #FF8266;
+  --good: #6BE39A;
+  --warn: #FFD166;
+  --focus: #00FFFF;
+  --drawer-h: min(44vh, 26rem);
+  --font-title: "PS3 Title", "Arial Black", Impact, sans-serif;
+  --font-text: "PS3 Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "PS3 Mono", ui-monospace, Consolas, "Cascadia Mono", monospace;
 }
 
 * { box-sizing: border-box; }
@@ -19,12 +69,13 @@
 html, body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
+  background: var(--bg-bottom) linear-gradient(to bottom, var(--bg-top), var(--bg-bottom)) no-repeat;
   color: var(--text);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 500 16px/1.5 var(--font-text);
   overflow: hidden;
   /* No double-tap zoom, and no 300 ms wait for one before a tap counts. */
   touch-action: manipulation;
+  scrollbar-color: var(--hl-fade) transparent;
 }
 /* A phone's browser bar comes and goes: the dynamic height keeps the bottom row on screen. */
 @supports (height: 100dvh) {
@@ -43,251 +94,227 @@ body {
   width: 100%;
   display: block;
   outline: none;
-  background: #000;
+  background: var(--bg-bottom);        /* the menus' letterbox colour */
   touch-action: none;
 }
 
-/* The empty-room prompt, over the middle of the game. */
-.np-empty {
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 3;
-  width: min(26rem, calc(100vw - 2rem));
-  padding: 1rem 1.25rem;
-  background: rgba(5, 7, 13, 0.85);
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  text-align: center;
+.ps-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+/* ---- The PS3 window ---------------------------------------------------------
+ *
+ * One element, drawn with background layers so nothing sticks out of its box
+ * (a scrolling panel would clip a pseudo-element hung outside it):
+ *
+ *   - the white rail, an L of 10 px bars with #595959 edges, along the top and
+ *     left, the window's corner tucked 9 px in from it;
+ *   - the title plate at the top-left: a white pillow (opaque rims, 0.78 inside)
+ *     with the 3x3 grid of #8D8D8D squares;
+ *   - the window: #132241 at 0.8 inside a #303030 border, a bright top edge
+ *     fading down into the body, a glow down the left, a rim along the bottom
+ *     and right that brightens to #9BA5B8;
+ *   - a soft black shadow below.
+ */
+.ps-win {
+  --rail: 9px;
+  --pad: 1.1rem;
+  position: relative;
+  /* The top clears the plate (30 px), which nothing is written over. */
+  padding: calc(var(--rail) + 1.5rem) var(--pad) var(--pad) calc(var(--rail) + var(--pad));
+  color: var(--text);
+  background:
+    /* the plate, with its grid */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='132' height='30'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23fff'/%3E%3Cstop offset='.5' stop-color='%23dfe3ec'/%3E%3Cstop offset='1' stop-color='%23fff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M1.5 1.5H130C116 9 108 26.5 76 28.5H1.5Z' fill='url(%23g)' stroke='%23595959' stroke-width='3'/%3E%3Cg fill='%238D8D8D'%3E%3Crect x='7' y='6' width='5' height='5'/%3E%3Crect x='14' y='6' width='5' height='5'/%3E%3Crect x='21' y='6' width='5' height='5' fill='%23b8b8b8'/%3E%3Crect x='7' y='13' width='5' height='5'/%3E%3Crect x='14' y='13' width='5' height='5'/%3E%3Crect x='21' y='13' width='5' height='5' fill='%23b8b8b8'/%3E%3Crect x='7' y='20' width='5' height='5'/%3E%3Crect x='14' y='20' width='5' height='5'/%3E%3Crect x='21' y='20' width='5' height='5' fill='%23fff'/%3E%3C/g%3E%3C/svg%3E")
+      0 0 / 132px 30px no-repeat,
+    /* the rail */
+    linear-gradient(to bottom, var(--plate-edge) 0 2px, #fff 2px 7px, var(--plate-edge) 7px 9px)
+      0 0 / calc(100% - var(--rail)) var(--rail) no-repeat,
+    linear-gradient(to right, var(--plate-edge) 0 2px, #fff 2px 7px, var(--plate-edge) 7px 9px)
+      0 0 / var(--rail) calc(100% - var(--rail)) no-repeat,
+    /* the window's top edge, fading into the body */
+    linear-gradient(to bottom, var(--win-edge) 0 2px, var(--hl-1) 2px 3px, var(--hl-2) 3px 4px,
+                    var(--hl-3) 4px 5px, var(--hl-fade) 5px, rgba(82, 93, 117, 0) 18px)
+      var(--rail) var(--rail) / calc(100% - var(--rail)) 18px no-repeat,
+    /* its left glow */
+    linear-gradient(to right, var(--win-edge) 0 2px, rgba(111, 121, 142, 0.75) 2px, rgba(111, 121, 142, 0) 16px)
+      var(--rail) var(--rail) / 16px calc(100% - var(--rail)) no-repeat,
+    /* its bottom and right rims */
+    linear-gradient(to top, var(--win-edge) 0 2px, var(--rim) 2px 3px, #7C869B 3px 4px,
+                    rgba(111, 121, 142, 0.55) 4px 6px, rgba(111, 121, 142, 0) 9px)
+      var(--rail) 100% / calc(100% - var(--rail)) 9px no-repeat,
+    linear-gradient(to left, var(--win-edge) 0 2px, var(--rim) 2px 3px,
+                    rgba(111, 121, 142, 0.55) 3px 5px, rgba(111, 121, 142, 0) 8px)
+      100% var(--rail) / 8px calc(100% - var(--rail)) no-repeat,
+    /* the body */
+    linear-gradient(var(--win), var(--win))
+      var(--rail) var(--rail) / calc(100% - var(--rail)) calc(100% - var(--rail)) no-repeat;
+  box-shadow: 0 17px 12px -9px rgba(0, 0, 0, 0.63), 7px 6px 9px -6px rgba(0, 0, 0, 0.5);
+}
+
+/* The window's title: the heavy extended face, white, over a white rule that
+ * runs the width of the window. */
+.ps-title {
+  margin: 0;
+  font: 900 1.3rem/1.2 var(--font-title);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #fff;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.45);
+}
+.ps-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 calc(-1 * var(--pad)) 0.9rem;
+  padding: 0.15rem var(--pad) 0.65rem;
+  border-bottom: 2px solid #fff;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+/* Over the game, whatever it is showing, a window needs a firmer body than the
+ * PS3's 0.8 over its own blue: a white SEGA screen washed the panels out. */
+.online, .menu, .touch-edit, .np-empty { --win: rgba(19, 34, 65, 0.95); }
+.ps-head > .ps-title { grid-column: 2; text-align: center; }
+.ps-head:not(:has(.ps-back)) { display: block; text-align: center; }
+.ps-head > .ps-back { grid-column: 3; justify-self: end; }
+
+/* The selection: #00BAFF over the window, a brighter bar pulsing on it
+ * (0.65 to 1 over 1.5 s) with soft dark ends, and fine lines above and below. */
+@keyframes ps-pulse { from { opacity: 0.65; } to { opacity: 1; } }
+.ps-selected, .menu .tool:hover, .menu .tool:focus-visible,
+.drop:hover, .drop.over, #file:focus-visible + .drop {
+  position: relative;
+  isolation: isolate;
+  background: var(--sel);
+  box-shadow: inset 0 1px 0 var(--sel-line), inset 0 -1px 0 var(--sel-line);
+}
+.ps-selected::before, .menu .tool:hover::before, .menu .tool:focus-visible::before,
+.drop:hover::before, .drop.over::before, #file:focus-visible + .drop::before {
+  content: "";
+  position: absolute;
+  inset: 1px 0;
+  z-index: -1;
+  background: linear-gradient(to right, rgba(4, 36, 66, 0.95), rgba(4, 36, 66, 0) 18%,
+                              rgba(4, 36, 66, 0) 82%, rgba(4, 36, 66, 0.95)),
+              var(--sel-bar);
+  animation: ps-pulse 0.75s ease-in-out infinite alternate;
   pointer-events: none;
 }
-.np-empty p { margin: 0.2rem 0; }
-.np-empty[hidden] { display: none; }
 
-.panel {
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: min(30rem, calc(100vw - 2rem));
-  padding: 1.75rem 1.75rem 1.5rem;
-  background: var(--panel);
-  border: 1px solid var(--edge);
-  border-radius: 14px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
-  text-align: center;
+/* ---- The PS3 button glyphs (the sprite in index.html) ---- */
+.ps-glyph {
+  display: inline-block;
+  width: 1.55em;
+  height: 1.55em;
+  flex: 0 0 auto;
+  vertical-align: -0.42em;
 }
 
-.panel[hidden], section[hidden], p[hidden] { display: none; }
-
-h1 {
-  margin: 0 0 0.75rem;
-  font-size: 1.5rem;
-  letter-spacing: 0.01em;
-}
-
-.lead { margin: 0 0 1.25rem; color: var(--dim); }
-
-.drop {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  padding: 1.6rem 1rem;
-  border: 2px dashed var(--edge);
-  border-radius: 12px;
-  cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
-}
-.drop strong { font-size: 1.1rem; color: var(--accent); }
-.drop span { color: var(--dim); }
-.drop .hint { margin-top: 0.5rem; font-size: 0.875rem; }
-.drop:hover, .drop.over, #file:focus-visible + .drop {
-  border-color: var(--accent);
-  background: rgba(77, 163, 255, 0.08);
-}
-
-code {
-  padding: 0.05rem 0.35rem;
-  border-radius: 5px;
-  background: #1a2133;
-  font-size: 0.9em;
-}
-
-.error { margin: 1rem 0 0; color: var(--bad); text-align: left; }
-.fine { margin: 1.1rem 0 0; font-size: 0.8125rem; color: var(--dim); }
-.fine.build { margin-top: 0.4rem; opacity: 0.6; }
-
-/* The tools: two buttons floating in the top-right corner, over the canvas, so
- * the game has the whole window. Usually that corner is the letterbox; where it
- * is the picture, they stay faint until the pointer or the keyboard is on them.
- *
- * :focus-visible, not :focus-within: a button keeps the focus after it is
- * clicked, and with :focus-within the bar then stayed lit for good -- most
- * visibly after Fullscreen, whose button is still focused when the game comes
- * back. The keyboard still lights it, because that is what :focus-visible is. */
-.bar {
-  position: fixed;
-  top: 0.4rem;
-  right: 0.4rem;
-  z-index: 4;
-  font-size: 0.75rem;
-  color: var(--dim);
-  opacity: 0.35;
-  transition: opacity 0.15s;
-}
-@media (hover: hover) {
-  .bar:hover { opacity: 1; }      /* not on a touch screen, where a tap leaves :hover behind */
-}
-.bar:has(:focus-visible) { opacity: 1; }
-.bar-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.3rem; }
-.bar .tool { padding: 0.15rem 0.5rem; background: rgba(20, 26, 41, 0.85); }
-.bar:has([aria-expanded="true"]), .bar:has(.online-btn.live) { opacity: 1; }
-
-/* The menu: everything but the source link, one item a row under the two buttons. */
-.menu {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0.25rem;
-  width: max-content;
-  min-width: 10rem;
-  margin-top: 0.3rem;
-  margin-left: auto;
-  padding: 0.35rem;
-  background: var(--panel);
-  border: 1px solid var(--edge);
-  border-radius: 10px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
-}
-.menu[hidden], .menu [hidden] { display: none; }
-.menu .tool { padding: 0.35rem 0.6rem; background: none; border-color: transparent; text-align: left; }
-.menu .tool:hover, .menu .tool:focus-visible { background: #161c2b; border-color: var(--accent); }
-.bar .menu-btn { display: flex; align-items: center; padding: 0.2rem 0.4rem; }
-/* What the menu would have shown if it were open: a game in progress online, and
- * errors waiting in the console. */
-.bar:has(.online-btn.live) .menu-btn { border-color: #3c8f5a; background: #123322; }
-.bar:has(#console-badge:not([hidden])) .menu-btn::after {
-  content: "";
-  width: 0.45rem;
-  height: 0.45rem;
-  margin-left: 0.3rem;
-  border-radius: 50%;
-  background: var(--bad);
-}
-
+/* ---- Buttons ----------------------------------------------------------------
+ * Plain: a small dark window tile with the highlight edge. Primary: the blue
+ * glass of the PS3's count box (#0875A5 to #004265, a bright sheen on top and
+ * a #4283AD rim below). */
 .tool {
-  padding: 0.25rem 0.7rem;
-  border: 1px solid var(--edge);
-  border-radius: 7px;
-  background: #141a29;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #0B1224;
+  border-radius: 2px;
+  background:
+    linear-gradient(to bottom, rgba(222, 231, 253, 0.55) 0 1px, rgba(82, 93, 117, 0.9) 1px, rgba(82, 93, 117, 0) 70%),
+    #1A2B50;
+  box-shadow: inset 0 -1px 0 rgba(155, 165, 184, 0.45), 0 2px 4px rgba(0, 0, 0, 0.35);
   color: var(--text);
   font: inherit;
   cursor: pointer;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
 }
-.tool:hover { border-color: var(--accent); }
-.tool:focus-visible, .tab:focus-visible, .log:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.tool:disabled { opacity: 0.55; cursor: default; }
-.tool.primary { background: #17345c; border-color: #2f5f9e; }
+.tool:hover { background-color: #22407A; box-shadow: inset 0 -1px 0 rgba(155, 165, 184, 0.6), 0 0 0 1px var(--sel-line), 0 0 10px rgba(0, 186, 255, 0.35); }
+.tool:focus-visible, .tab:focus-visible, .log:focus-visible, .linkish:focus-visible, a:focus-visible,
+summary:focus-visible, .drop:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.tool:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
+.tool.primary {
+  border-color: #03263B;
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.55) 0 1px, rgba(255, 255, 255, 0.28) 1px, rgba(255, 255, 255, 0.07) 48%, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(to bottom, #0875A5, #004265);
+  box-shadow: inset 0 -2px 0 #4283AD, 0 2px 5px rgba(0, 0, 0, 0.4);
+}
+.tool.primary:hover {
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.6) 0 1px, rgba(255, 255, 255, 0.32) 1px, rgba(255, 255, 255, 0.1) 48%, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(to bottom, #0A8BC4, #00557F);
+  box-shadow: inset 0 -2px 0 #5BA2CF, 0 0 0 1px var(--sel-line), 0 0 12px rgba(0, 186, 255, 0.45);
+}
+.tool.big {
+  display: block;
+  width: 100%;
+  padding: 0.6rem 1rem;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+}
+a.tool { display: inline-block; text-decoration: none; }
+select.tool { padding-right: 0.5rem; }
+select option { background: var(--win-solid); color: var(--text); }
+
+/* "Back", with its circle: the PS3's cancel. */
+.tool.ps-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.1rem 0.6rem 0.1rem 0.25rem;
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+.tool.ps-back::before { content: none; }
+.tool.ps-back:hover { background: rgba(0, 186, 255, 0.15); box-shadow: inset 0 0 0 1px rgba(0, 186, 255, 0.6); }
+.tool.ps-back .ps-glyph { width: 1.45em; height: 1.45em; margin-right: 0.1rem; }
+
+.linkish {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.linkish:hover, a:hover { color: #fff; }
+a { color: var(--link); text-underline-offset: 2px; }
+
 .badge {
   display: inline-block;
-  min-width: 1.3em;
-  margin-left: 0.25rem;
+  min-width: 1.4em;
+  margin-left: 0.3rem;
   padding: 0 0.3rem;
-  border-radius: 999px;
-  background: var(--bad);
-  color: #200;
-  font-weight: 600;
+  border-radius: 2px;
+  background: linear-gradient(to bottom, #FF6A45, #C0260A);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  color: #fff;
+  font-size: 0.85em;
   text-align: center;
 }
 .badge[hidden] { display: none; }
 
-/* ---- The tools drawer ---- */
-.drawer {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  height: min(44vh, 26rem);
-  border-top: 1px solid var(--edge);
-  background: var(--panel);
-  font-size: 0.875rem;
-}
-.drawer[hidden], .pane[hidden] { display: none; }
-.drawer-head, .pane-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  padding: 0.4rem 0.75rem;
-}
-.drawer-head { border-bottom: 1px solid var(--edge); padding-bottom: 0; }
-.spacer { flex: 1 1 auto; }
-.tab {
-  padding: 0.35rem 0.9rem;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: none;
-  color: var(--dim);
-  font: inherit;
-  cursor: pointer;
-}
-.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
-.pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.status { color: var(--dim); }
-
-.filter[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
-.filter-warning { color: #ffd479; }
-.filter-error { color: var(--bad); }
-.count { opacity: 0.7; margin-left: 0.2rem; }
-
-.log {
-  flex: 1 1 auto;
-  min-height: 0;
-  margin: 0 0.75rem 0.6rem;
-  padding: 0.4rem 0.6rem;
-  overflow: auto;
-  border: 1px solid var(--edge);
-  border-radius: 8px;
-  background: #080b13;
-  font: 12px/1.5 ui-monospace, Consolas, "Cascadia Mono", monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-.ln-warning { color: #ffd479; }
-.ln-error { color: var(--bad); }
-.log-empty { margin: -2.2rem 0 0; text-align: center; pointer-events: none; }
-.log-empty[hidden] { display: none; }
-
-.findings { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 0.75rem 0.6rem; }
-.finding {
-  margin: 0 0 0.5rem;
-  padding: 0.6rem 0.8rem;
-  border: 1px solid var(--edge);
-  border-left-width: 4px;
-  border-radius: 8px;
-  background: #0c101a;
-}
-.finding h3 { margin: 0 0 0.25rem; font-size: 0.95rem; }
-.finding p { margin: 0 0 0.35rem; color: var(--dim); }
-.finding ul { margin: 0 0 0.4rem; padding-left: 1.2rem; }
-.finding-bad { border-left-color: var(--bad); }
-.finding-warn { border-left-color: #ffd479; }
-.finding-ok { border-left-color: #6fd08c; }
-.finding-info { border-left-color: var(--accent); }
-
-kbd {
+/* The blue glass count box ("24" beside PLAYER MATCH). */
+.count-box {
   display: inline-block;
-  min-width: 1.5em;
-  margin-right: 0.15rem;
-  padding: 0 0.35rem;
-  border: 1px solid var(--edge);
-  border-radius: 5px;
-  background: #161c2b;
-  color: var(--text);
-  font: inherit;
+  min-width: 2.2em;
+  margin-left: 0.5rem;
+  padding: 0 0.5rem;
+  border: 1px solid #0B1224;
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.5) 0 1px, rgba(255, 255, 255, 0.18) 1px, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(to bottom, rgba(8, 117, 165, 0.55), rgba(0, 66, 101, 0.55));
+  box-shadow: inset 0 -2px 0 #4283AD;
+  font: 900 0.85rem/1.6 var(--font-title);
+  letter-spacing: 0.04em;
   text-align: center;
+  vertical-align: 0.1em;
 }
+.count-box:empty { display: none; }
 
 .visually-hidden {
   position: absolute;
@@ -298,85 +325,336 @@ kbd {
   white-space: nowrap;
 }
 
-/* ?debug */
-.debug {
-  position: fixed;
-  top: 0.5rem;
-  left: 0.5rem;
-  margin: 0;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--edge);
-  border-radius: 8px;
-  background: rgba(5, 7, 13, 0.85);
-  color: var(--text);
-  font: 12px/1.45 ui-monospace, Consolas, monospace;
-  pointer-events: none;
+code {
+  padding: 0.05rem 0.35rem;
+  border: 1px solid rgba(155, 165, 184, 0.35);
+  background: rgba(0, 10, 30, 0.45);
+  font: 0.9em var(--font-mono);
 }
-
-/* ---- Playing online (m2hle-netplay.js) ---- */
-.online {
-  position: fixed;
-  top: 2.4rem;
-  right: 0.75rem;
-  bottom: 0.75rem;
-  width: min(24rem, calc(100vw - 1.5rem));
-  overflow: auto;
-  padding: 1rem 1.25rem 1.25rem;
-  background: var(--panel);
-  border: 1px solid var(--edge);
-  border-radius: 14px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
-  z-index: 5;
-}
-.online[hidden], .online section[hidden], .online div[hidden], .online form[hidden] { display: none; }
-.online-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
-.online h2 { margin: 0; font-size: 1.25rem; }
-.online h3 { margin: 1.25rem 0 0.4rem; font-size: 1rem; }
-.online .lead { margin-bottom: 1rem; }
-.tool.big { display: block; width: 100%; padding: 0.6rem 1rem; font-size: 1.05rem; }
-a.tool { display: inline-block; text-decoration: none; }
-.linkish { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
-.np-or { display: flex; align-items: center; gap: 0.6rem; margin: 1.25rem 0 0.5rem; color: var(--dim); font-size: 0.875rem; }
-.np-or::before, .np-or::after { content: ""; flex: 1; border-top: 1px solid var(--edge); }
-.np-tabs { display: flex; border-bottom: 1px solid var(--edge); margin-bottom: 0.75rem; }
-.np-form { display: flex; flex-direction: column; gap: 0.6rem; }
-.np-form label, .np-advanced label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.875rem; color: var(--dim); }
-.np-form input, .np-advanced input {
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--edge);
-  border-radius: 7px;
-  background: #0b0f19;
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  margin-right: 0.15rem;
+  padding: 0 0.35rem;
+  border: 1px solid #211C21;
+  border-radius: 3px;
+  background: linear-gradient(to bottom, #636163, #333433 60%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
   color: var(--text);
   font: inherit;
+  text-align: center;
 }
-.np-form input:focus-visible, .np-advanced input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.lead { margin: 0 0 1.1rem; color: var(--text); font-size: 1.05rem; }
+.status { color: var(--dim); }
+.error { margin: 1rem 0 0; color: var(--bad); text-align: left; }
+.fine { margin: 1.1rem 0 0; font-size: 0.8125rem; color: var(--dim); }
+.fine.left { text-align: left; margin-top: 0; }
+.spacer { flex: 1 1 auto; }
+[hidden] { display: none !important; }
+
+/* ---- The start-up screen: a whole PS3 screen of its own ---- */
+.panel {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-bottom) linear-gradient(to bottom, var(--bg-top), var(--bg-bottom)) no-repeat;
+}
+.panel[hidden] { display: none; }
+/* The tools drawer stays in view under it: a start-up that failed is what the
+ * Console is most often opened for. */
+body:has(#drawer:not([hidden])) .panel { bottom: var(--drawer-h); }
+.panel-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3.2rem 16px 1.5rem;
+}
+.panel-win {
+  width: min(36rem, 100%);
+  margin: auto 0;
+  text-align: center;
+}
+.panel-win .ps-title { font-size: clamp(1.1rem, 2.7vw, 1.6rem); }
+.panel-win .error { text-align: left; }
+
+/* The drop zone: a PS3 list row, full width, lit when the pointer, a dragged
+ * file or the keyboard is on it. */
+.drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  margin: 0 calc(-1 * var(--pad));
+  padding: 1.3rem 1rem 1.2rem;
+  border-top: 1px solid rgba(0, 186, 255, 0.35);
+  border-bottom: 1px solid rgba(0, 186, 255, 0.35);
+  background: rgba(0, 110, 220, 0.12);
+  cursor: pointer;
+}
+.drop strong { font-size: 1.25rem; font-weight: 500; color: #fff; }
+.drop span { color: var(--dim); }
+.drop .hint { margin-top: 0.45rem; font-size: 0.875rem; }
+.drop:hover span, .drop.over span, #file:focus-visible + .drop span { color: #fff; }
+#file:focus-visible + .drop { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* It is the screen's one choice, so it is lit from the start, as the game's
+ * menus always have a row lit. */
+.drop.ps-selected { background: var(--sel); border-color: transparent; }
+.drop.ps-selected span { color: #fff; }
+.drop-glyph { width: 2.3rem; height: 2.3rem; margin-bottom: 0.2rem; }
+
+/* "Accessing": three squares lighting in turn. */
+@keyframes ps-dot { 0%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+.ps-loading { display: flex; justify-content: center; gap: 0.5rem; margin: 0 0 0.4rem; }
+.ps-loading span {
+  width: 0.7rem;
+  height: 0.7rem;
+  background: var(--sel-line);
+  box-shadow: 0 0 8px rgba(0, 186, 255, 0.8);
+  animation: ps-dot 1.2s ease-in-out infinite;
+}
+.ps-loading span:nth-child(2) { animation-delay: 0.2s; }
+.ps-loading span:nth-child(3) { animation-delay: 0.4s; }
+
+/* The bottom band: the blue strip of fine print, then the dark band of hints. */
+.ps-hintbar { flex: 0 0 auto; }
+.ps-strip {
+  margin: 0;
+  padding: 0.3rem 16px;
+  background: var(--strip);
+  box-shadow: inset 0 1px 0 rgba(143, 188, 255, 0.25), inset 0 -1px 0 rgba(0, 0, 0, 0.35);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: #fff;
+}
+.ps-strip a { color: #CFF3FF; }
+.ps-hints {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem 2rem;
+  min-height: 4.4rem;
+  padding: 0.6rem max(16px, 7vw) 1.4rem;
+  background:
+    linear-gradient(to bottom, var(--rim) 0 1px, var(--hl-1) 1px 2px, var(--hl-fade) 2px 3px,
+                    rgba(82, 93, 117, 0.55) 3px, rgba(82, 93, 117, 0) 12px),
+    rgba(19, 34, 65, 0.9);
+}
+.ps-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.05rem;
+  font-size: 1.3rem;
+  color: #fff;
+  cursor: pointer;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+.ps-hint:hover { color: var(--link); }
+.panel:has(#step-rom[hidden]) .hint-rom { display: none; }
+
+/* ---- The empty-room prompt, over the middle of the game ---- */
+.np-empty {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  width: min(28rem, calc(100vw - 32px));
+  text-align: center;
+  pointer-events: none;
+}
+.np-empty p { margin: 0.2rem 0; }
+.np-empty .np-empty-title {
+  margin: 0 calc(-1 * var(--pad)) 0.7rem;
+  padding: 0 var(--pad) 0.55rem;
+  border-bottom: 2px solid #fff;
+}
+.np-empty[hidden] { display: none; }
+
+/* ---- The bar: two small tiles in the top-right corner, over the canvas ----
+ * Usually that corner is the letterbox; where it is the picture, they stay
+ * faint until the pointer or the keyboard is on them.
+ *
+ * :focus-visible, not :focus-within: a button keeps the focus after it is
+ * clicked, and with :focus-within the bar then stayed lit for good -- most
+ * visibly after Fullscreen, whose button is still focused when the game comes
+ * back. The keyboard still lights it, because that is what :focus-visible is. */
+.bar {
+  position: fixed;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 4;
+  font-size: 0.8rem;
+  color: var(--dim);
+  opacity: 0.45;
+  transition: opacity 0.15s;
+}
+@media (hover: hover) {
+  .bar:hover { opacity: 1; }      /* not on a touch screen, where a tap leaves :hover behind */
+}
+.bar:has(:focus-visible) { opacity: 1; }
+.bar:has([aria-expanded="true"]), .bar:has(.online-btn.live) { opacity: 1; }
+body:has(#panel:not([hidden])) .bar { opacity: 0.85; }
+.bar-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.35rem; }
+.bar-tools .tool { display: inline-flex; align-items: center; padding: 0.3rem 0.45rem; }
+a.tool.github { color: var(--text); }
+
+/* The menu: a PS3 window of rows under the two tiles, the row under the pointer
+ * or the keyboard lit the way the game lights its own. */
+.menu {
+  --pad: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: max-content;
+  min-width: 15rem;
+  margin: 0.45rem 0 0 auto;
+  padding-bottom: 0.9rem;
+  font-size: 1rem;
+  color: var(--text);
+}
+.menu[hidden] { display: none; }
+.menu .menu-title {
+  margin: 0 calc(-1 * var(--pad)) 0.35rem;
+  padding: 0 var(--pad) 0.45rem;
+  border-bottom: 2px solid #fff;
+  font-size: 1rem;
+  text-align: center;
+}
+.menu .tool {
+  margin: 0 calc(-1 * var(--pad));
+  padding: 0.38rem 1.1rem;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font-size: 1.05rem;
+  text-align: center;
+}
+.menu .tool:nth-of-type(even):not(:hover):not(:focus-visible) { background: rgba(0, 120, 255, 0.07); }
+.menu .tool:focus-visible { outline: none; }
+/* The lobby's item says what is happening online, with the PS3's green signal. */
+.online-btn.live::after {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 0.55em;
+  margin-left: 0.5em;
+  border: 1px solid #0C4D12;
+  background: #3BE04A;
+  box-shadow: 0 0 6px rgba(59, 224, 74, 0.8);
+  vertical-align: 0.05em;
+}
+/* What the menu would have shown if it were open: a game in progress online,
+ * and errors waiting in the console. */
+.bar:has(.online-btn.live) .menu-btn { box-shadow: 0 0 0 1px var(--sel-line), 0 0 10px rgba(0, 186, 255, 0.55); }
+.bar:has(#console-badge:not([hidden])) .menu-btn::after {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-left: 0.3rem;
+  background: var(--bad);
+}
+
+/* ---- Side panels: the account (m2hle-netplay.js) and Controls (m2hle-pad.js) ---- */
+.online {
+  position: fixed;
+  top: 2.9rem;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  z-index: 5;
+  width: min(27rem, calc(100vw - 1.5rem));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.online[hidden] { display: none; }
+
+.online h3 {
+  display: flex;
+  align-items: center;
+  margin: 1.3rem calc(-1 * var(--pad)) 0.5rem;
+  padding: 0.2rem var(--pad);
+  background: linear-gradient(to right, rgba(24, 70, 132, 0.9), rgba(24, 70, 132, 0));
+  font-size: 1rem;
+  font-weight: 500;
+}
+.online .lead { margin-bottom: 1rem; }
+.online .error { text-align: left; }
+.np-to-lobby-row { margin: -0.4rem 0 0.9rem; }
+.np-to-lobby-row:has(#np-to-lobby[hidden]) { display: none; }
+
+.np-or { display: flex; align-items: center; gap: 0.6rem; margin: 1.25rem 0 0.5rem; color: var(--dim); font-size: 0.875rem; }
+.np-or::before, .np-or::after { content: ""; flex: 1; border-top: 1px solid rgba(0, 255, 255, 0.4); }
+
+/* Tabs: the lit one gets the selection's colour and a cyan bar. */
+.np-tabs { display: flex; margin-bottom: 0.8rem; border-bottom: 1px solid rgba(155, 165, 184, 0.35); }
+.tab {
+  padding: 0.4rem 0.9rem;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+.tab:hover { color: #fff; }
+.tab[aria-selected="true"] {
+  color: #fff;
+  border-bottom-color: var(--sel-line);
+  background: linear-gradient(to top, rgba(0, 186, 255, 0.3), rgba(0, 186, 255, 0));
+}
+
+.np-form { display: flex; flex-direction: column; gap: 0.7rem; }
+.np-form label, .np-advanced label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.875rem; color: var(--dim); }
+.np-form input, .np-advanced input {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--hl-fade);
+  border-top-color: #0B1224;
+  border-radius: 0;
+  background: rgba(3, 12, 32, 0.75);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font: 1rem var(--font-mono);
+}
+.np-form input:focus-visible, .np-advanced input:focus-visible { border-color: var(--sel-line); }
 .np-form details, .np-advanced { font-size: 0.875rem; color: var(--dim); }
-.np-form summary, .np-advanced summary { cursor: pointer; }
+.np-form summary, .np-advanced summary { cursor: pointer; color: var(--link); }
 .np-advanced { margin-top: 1rem; }
 .np-advanced label { margin-top: 0.6rem; }
-.fine.left { text-align: left; margin-top: 0; }
 .np-code {
   margin: 0.25rem 0 0.75rem;
-  font: 600 2rem/1.2 ui-monospace, Consolas, monospace;
+  padding: 0.4rem 0;
+  border-top: 1px solid rgba(0, 255, 255, 0.4);
+  border-bottom: 1px solid rgba(0, 255, 255, 0.4);
+  font: 500 2rem/1.2 var(--font-mono);
   letter-spacing: 0.15em;
   text-align: center;
   user-select: all;
 }
 .np-row { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin: 0.75rem 0; }
 .np-me { margin: 0 0 0.75rem; color: var(--dim); }
-.np-rooms { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+
+/* Rooms and members: the PS3's list rows, names in the fixed-pitch face. */
+.np-rooms { list-style: none; margin: 0 calc(-1 * var(--pad)); padding: 0; display: flex; flex-direction: column; }
 .np-room {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--edge);
-  border-radius: 8px;
-  background: #0c101a;
+  padding: 0.45rem var(--pad);
+  border-bottom: 1px solid rgba(155, 165, 184, 0.22);
 }
-.np-who { font-weight: 600; }
+.np-room:nth-child(even) { background: rgba(0, 120, 255, 0.07); }
+.np-room:hover { background: rgba(0, 186, 255, 0.16); }
+.np-who { font-family: var(--font-mono); }
 .np-what { flex: 1; color: var(--dim); font-size: 0.875rem; }
 .np-room-off { opacity: 0.6; }
+li.np-me { margin: 0; background: rgba(0, 186, 255, 0.2); color: #fff; }
 /* A room's estimated ping, and the room's measured one: green keeps up, yellow
  * will lag, red is too far to play (pace() in m2hle-netplay.js). */
 .np-ping { white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -384,50 +662,129 @@ a.tool { display: inline-block; text-decoration: none; }
 .np-ping-lag  { color: var(--warn); }
 .np-ping-bad  { color: var(--bad); }
 #np-room-ping { margin: 0.75rem 0 0; }
-.online-btn.live { border-color: #3c8f5a; background: #123322; }
-.online .error { text-align: left; }
-.online [hidden] { display: none !important; }
 
-/* The GitHub link in the bar, and the one on the start panel. */
-a.tool.github { display: inline-flex; align-items: center; color: var(--text); }
-.panel a { color: var(--accent); }
-
-/* ---- Controls (m2hle-pad.js): the same side panel as Play online ---- */
-.pad-rows { list-style: none; margin: 0.75rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+/* ---- Controls (m2hle-pad.js, m2hle-keys.js) ---- */
+.pad-rows { list-style: none; margin: 0.75rem calc(-1 * var(--pad)); padding: 0; display: flex; flex-direction: column; }
 .pad-row {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--edge);
-  border-radius: 8px;
-  background: #0c101a;
-  transition: background 0.06s, border-color 0.06s;
+  padding: 0.35rem var(--pad);
+  border-bottom: 1px solid rgba(155, 165, 184, 0.22);
+  transition: background 0.06s;
 }
-.pad-row.pad-held { border-color: var(--accent); background: rgba(77, 163, 255, 0.14); }
-.pad-name { flex: 0 0 5.5rem; font-weight: 600; }
-.pad-sub { margin: 0.5rem 0 0.1rem; font-size: 0.8125rem; font-weight: 600; opacity: 0.8; }
+.pad-row:nth-child(even) { background: rgba(0, 120, 255, 0.07); }
+.pad-row.pad-held {
+  background: var(--sel);
+  box-shadow: inset 0 1px 0 var(--sel-line), inset 0 -1px 0 var(--sel-line);
+}
+.pad-name { flex: 0 0 5.5rem; }
+.pad-sub { margin: 0.6rem 0 0.1rem; padding: 0 var(--pad); font-size: 0.8125rem; color: var(--link); }
 .pad-chips { flex: 1; display: flex; flex-wrap: wrap; gap: 0.25rem; font-size: 0.8125rem; }
 .pad-chip {
-  padding: 0.05rem 0.45rem;
-  border: 1px solid var(--edge);
-  border-radius: 999px;
-  background: #161c2b;
+  padding: 0.02rem 0.45rem;
+  border: 1px solid #211C21;
+  border-radius: 2px;
+  background: linear-gradient(to bottom, #4D4A4D, #333433);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
   color: var(--text);
   font: inherit;
   cursor: pointer;
 }
 .pad-chip:hover { border-color: var(--bad); color: var(--bad); }
+.pad-chip:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .pad-add { flex: 0 0 auto; font-size: 0.8125rem; }
-.pad-add[aria-pressed="true"] { border-color: var(--accent); background: #17345c; }
+.pad-add[aria-pressed="true"] { background-color: var(--sel); box-shadow: 0 0 0 1px var(--sel-line); }
 .pad-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; color: var(--dim); }
+input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
 
-.ctl-section h3 { margin: 1rem 0 0.4rem; font-size: 1rem; }
-.ctl-section:first-of-type h3 { margin-top: 0.25rem; }
+.ctl-section h3:first-child { margin-top: 0.2rem; }
 .ctl-select { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin: 0.4rem 0; font-size: 0.875rem; color: var(--dim); }
+.credits { margin-top: 1.4rem; font-size: 0.75rem; }
+
+/* ---- The tools drawer: the PS3's bottom band, grown into a pane ---- */
+.drawer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  height: var(--drawer-h);
+  background:
+    linear-gradient(to bottom, var(--rim) 0 1px, var(--hl-1) 1px 2px, var(--hl-fade) 2px 3px,
+                    rgba(82, 93, 117, 0.55) 3px, rgba(82, 93, 117, 0) 12px),
+    var(--win-solid);
+  font-size: 0.875rem;
+}
+.drawer[hidden], .pane[hidden] { display: none; }
+.drawer-head, .pane-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.45rem 16px;
+}
+.drawer-head { padding-top: 0.5rem; padding-bottom: 0; background: var(--strip); box-shadow: inset 0 3px 0 rgba(222, 231, 253, 0.6); }
+.drawer-head .tab { color: #D5E4FF; }
+.drawer-head .tab[aria-selected="true"] { color: #fff; border-bottom-color: #fff; background: linear-gradient(to top, rgba(0, 186, 255, 0.45), rgba(0, 186, 255, 0)); }
+.pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+.filter[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
+.filter-warning { color: var(--warn); }
+.filter-error { color: var(--bad); }
+.count { opacity: 0.75; margin-left: 0.2rem; }
+
+.log {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0 16px 0.6rem;
+  padding: 0.4rem 0.6rem;
+  overflow: auto;
+  border: 2px solid var(--win-edge);
+  background: rgba(2, 9, 24, 0.85);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5);
+  font: 12px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.ln-warning { color: var(--warn); }
+.ln-error { color: var(--bad); }
+.log-empty { margin: -2.2rem 0 0; text-align: center; pointer-events: none; }
+.log-empty[hidden] { display: none; }
+
+.findings { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 16px 0.6rem; }
+.finding {
+  margin: 0 0 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid rgba(155, 165, 184, 0.3);
+  border-left-width: 4px;
+  background: rgba(2, 9, 24, 0.5);
+}
+.finding h3 { margin: 0 0 0.25rem; font-size: 0.95rem; font-weight: 500; }
+.finding p { margin: 0 0 0.35rem; color: var(--dim); }
+.finding ul { margin: 0 0 0.4rem; padding-left: 1.2rem; }
+.finding-bad { border-left-color: var(--bad); }
+.finding-warn { border-left-color: var(--warn); }
+.finding-ok { border-left-color: var(--good); }
+.finding-info { border-left-color: var(--sel-line); }
+
+/* ?debug */
+.debug {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.5rem;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border: 2px solid var(--win-edge);
+  background: rgba(19, 34, 65, 0.88);
+  box-shadow: inset 0 1px 0 var(--hl-1);
+  color: var(--text);
+  font: 12px/1.45 var(--font-mono);
+  pointer-events: none;
+}
 
 /* ---- Touch buttons (m2hle-touch.js) ----
- * The layer covers the canvas and lets everything but the buttons through. */
+ * The layer covers the canvas and lets everything but the buttons through.
+ * Each button is the PS3's button disc: a dark face in a bevelled ring. */
 .touch {
   position: fixed;
   z-index: 3;
@@ -444,11 +801,13 @@ a.tool.github { display: inline-flex; align-items: center; color: var(--text); }
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 2px solid transparent;
+  border: 2px solid #211C21;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.16);
+  background:
+    radial-gradient(closest-side, #333433 calc(100% - 7px), rgba(51, 52, 51, 0) calc(100% - 6px)),
+    linear-gradient(135deg, #4D4A4D, #7A787A);
   color: #fff;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.03em;
   text-transform: uppercase;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
@@ -456,39 +815,45 @@ a.tool.github { display: inline-flex; align-items: center; color: var(--text); }
   pointer-events: auto;
   touch-action: none;
 }
-.touch.outline .tb { border-color: rgba(255, 255, 255, 0.8); }
-.tb.down { background: rgba(77, 163, 255, 0.6); }
-.tb.dpad { background: rgba(255, 255, 255, 0.1); }
+.touch.outline .tb { border-color: rgba(255, 255, 255, 0.85); }
+.tb.down {
+  background:
+    radial-gradient(closest-side, var(--sel) calc(100% - 7px), rgba(18, 89, 146, 0) calc(100% - 6px)),
+    linear-gradient(135deg, #00BAFF, #0875A5);
+  box-shadow: 0 0 14px rgba(0, 186, 255, 0.75);
+}
+.tb.dpad {
+  background:
+    radial-gradient(closest-side, rgba(51, 52, 51, 0.75) calc(100% - 7px), rgba(51, 52, 51, 0) calc(100% - 6px)),
+    linear-gradient(135deg, #4D4A4D, #7A787A);
+}
 .arr {
   position: absolute;
   width: 26%;
   height: 26%;
-  background: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.9);
   clip-path: polygon(50% 0, 100% 100%, 0 100%);
 }
 .arr-up    { left: 37%; top: 6%; }
 .arr-down  { left: 37%; bottom: 6%; transform: rotate(180deg); }
 .arr-left  { left: 6%; top: 37%; transform: rotate(-90deg); }
 .arr-right { right: 6%; top: 37%; transform: rotate(90deg); }
-.arr.down { background: var(--accent); }
+.arr.down { background: var(--sel-line); }
 
 /* Customizing: every control is shown, a hidden one faintly; the selected one is ringed. */
-.touch.editing { background: rgba(0, 0, 0, 0.35); }
+.touch.editing { background: rgba(0, 8, 24, 0.45); }
 .touch.editing .tb { cursor: grab; }
 .touch.editing .tb.off { opacity: 0.25; border: 2px dashed rgba(255, 255, 255, 0.8); }
-.touch.editing .tb.sel { box-shadow: 0 0 0 3px var(--accent); }
+.touch.editing .tb.sel { box-shadow: 0 0 0 3px var(--cyan), 0 0 12px rgba(0, 255, 255, 0.6); }
 .touch-edit {
+  --pad: 0.8rem;
   position: fixed;
   top: 0.5rem;
   left: 50%;
   transform: translateX(-50%);
   z-index: 6;
   width: min(34rem, calc(100vw - 1rem));
-  padding: 0.6rem 0.75rem;
-  background: var(--panel);
-  border: 1px solid var(--edge);
-  border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  padding-bottom: 0.8rem;
   font-size: 0.875rem;
 }
 .touch-edit.bottom { top: auto; bottom: 0.5rem; }
@@ -496,11 +861,24 @@ a.tool.github { display: inline-flex; align-items: center; color: var(--text); }
 .te-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem 0.8rem; margin-top: 0.35rem; }
 .te-row label { display: flex; align-items: center; gap: 0.35rem; color: var(--dim); }
 .te-row input[type="range"] { width: 6.5rem; }
-.te-what { flex: 0 0 6rem; font-weight: 600; }
+.te-what { flex: 0 0 6rem; }
 
-/* A phone: the tools have to fit. */
+@media (prefers-reduced-motion: reduce) {
+  .ps-selected::before, .menu .tool:hover::before, .menu .tool:focus-visible::before,
+  .drop:hover::before, .drop.over::before, #file:focus-visible + .drop::before,
+  .ps-loading span { animation: none; }
+}
+
+/* A phone: the tools have to fit, in 16 px gutters. */
 @media (max-width: 640px) {
-  .bar-tools { max-width: calc(100vw - 0.8rem); }
-  .menu { max-width: calc(100vw - 0.8rem); }
+  .ps-win { --pad: 0.85rem; }
+  .online .ps-title { font-size: 1.1rem; }
+  .bar-tools { max-width: calc(100vw - 0.9rem); }
+  .menu { max-width: calc(100vw - 0.9rem); min-width: 13rem; }
+  .online { top: 2.9rem; right: 16px; left: 16px; bottom: 16px; width: auto; }
+  .panel-stage { padding: 3.2rem 16px 1rem; }
+  .ps-hints { min-height: 3.4rem; padding: 0.5rem 16px 0.9rem; }
+  .ps-hint { font-size: 1.1rem; }
+  .ps-strip { font-size: 0.72rem; }
   .te-what { flex-basis: 100%; }
 }

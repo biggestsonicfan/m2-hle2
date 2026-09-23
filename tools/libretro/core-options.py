@@ -5,9 +5,8 @@ the core registers and what it asks to have hidden.
 
     python tools/libretro/core-options.py build_lr/Release/m2hle_libretro.dll
 
-The RPCN lobby in the libretro core IS that table (src/ui/retro_lobby.h), so the
-things a frontend would quietly ignore are worth catching here rather than in
-RetroArch's menu:
+The things a frontend would quietly ignore in that table are worth catching here
+rather than in RetroArch's menu:
 
   * a default_value that is not one of the option's values -- libretro.h says
     "this option will be ignored", and the row simply does not appear;

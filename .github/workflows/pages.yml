@@ -53,7 +53,7 @@ jobs:
       # The web frontend has no ImGui, so it needs two submodules and no Python.
       # Tracks M2HLE_SUBMODULE_PATHS for M2HLE_WEB in CMakeLists.txt.
       - name: Fetch build submodules
-        run: git submodule update --init vendor/sokol vendor/miniz
+        run: git submodule update --init vendor/sokol vendor/miniz vendor/stb
 
       # Pinned on purpose. A toolchain bump can change float code generation, and
       # netplay needs two players' builds to compute the same frames

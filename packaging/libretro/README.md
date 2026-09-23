@@ -58,9 +58,21 @@ it. The ROM set is chosen by the zip's file name. No ROMs are included; supply y
 
 ## Controls
 
-RetroPad B, A, Y and X are the cabinet's buttons 1 to 4, Start is Start and Select inserts a
-coin. L3 is Test and R3 is Service. Port 1 is player 1 and port 2 is player 2. Remap them in
-RetroArch's **Quick Menu > Controls**, as with any core.
+**The Console version** (the default) is the game as its PS3 release presents it: PUSH START
+over the attract, then the PS3's **MAIN MENU** -- Arcade, Offline Versus, Online Battle and
+Help & Options -- drawn by the core in the PS3's own layout. The pad works as a PS3 pad:
+bottom button (RetroPad B) confirms, right (A) goes back, and **Select opens the pause menu**
+(Resume Game, Help & Options, Exit Game) -- it is on free play, so there is no coin. Punch,
+kick and guard are set per button in **Help & Options > Controls**, with the PS3's six presets
+(Standard, Arcade stick 1 to 5): top, right, left and bottom face buttons and L1, L2, R1, R2.
+Arcade and Offline Versus have the PS3's rule settings (difficulty, rounds, time, attack,
+barriers, game type); Offline Versus asks player 2 to press Start on port 2.
+
+**The Arcade version** is the board as it shipped: RetroPad B, A, Y and X are the cabinet's
+buttons 1 to 4, Start is Start and Select inserts a coin.
+
+Either way L3 is Test and R3 is Service, port 1 is player 1 and port 2 is player 2, and
+RetroArch's **Quick Menu > Controls** remaps on top, as with any core.
 
 ## Core options
 
@@ -71,11 +83,7 @@ RetroArch's **Quick Menu > Controls**, as with any core.
 | Heat guard | off, 80, 85, 90 C | at once |
 | Sound board | enabled, disabled | next load |
 | Online play | RetroArch, RPCN | next load |
-| RPCN sign-in | signed out, Twitch, RPCN account | at once |
 | Input delay (frames) | 1 to 8 | the next session you host |
-| RPCN status / room to join / players / lobby action | the lobby itself, see below | at once |
-| RPCN room size (hosting) | 2 to 8 players | the next room you host |
-| RPCN side to play / take part | whichever is free, 1P, 2P / play, watch only | at once |
 
 - **Full screen** draws the game at the size of the window or screen, fitted to its 496:384
   shape, so RetroArch has nothing left to scale. Where the core can't find the size, it uses
@@ -105,22 +113,21 @@ same moment and runs them in lockstep from there.
   savestates and can't run this core, so the core carries the match itself over RetroArch's
   connection.
 - **RPCN**: the same rooms as the m2-hle desktop emulator and the website
-  (play.sonicthefighte.rs). Set **Online play** to RPCN and reload the game, then choose an
-  **RPCN sign-in**:
-  - **Sign in using Twitch.** A notification shows a twitch.tv/activate address and a code.
-    Approve it there, and later launches sign straight in.
-  - **RPCN account.** Cores can't open a text box, so the account goes in through the one
-    RetroArch does have, the cheat code. In **Quick Menu > Cheats**, add a cheat whose code is
-    `rpcn:NAME:PASSWORD:TOKEN` and apply it. TOKEN is the one RPCN e-mailed you; leave `:TOKEN`
-    off if the server doesn't use one. The password can't contain `:`. RetroArch saves cheats
-    to a plain-text file.
+  (play.sonicthefighte.rs), in the PS3 release's own online lobby, drawn by the core and
+  driven with the pad. Set **Online play** to RPCN and reload the game, then choose **Online
+  Battle** from the main menu (the Arcade version opens the lobby at load, and L + R together
+  open it again). Signing in needs no keyboard:
+  - **Sign in with Twitch.** The lobby shows a twitch.tv/activate address and a code. Approve
+    it there, and later launches sign straight in.
+  - **Sign in with an RPCN account.** Type the name and password on the lobby's on-screen
+    keyboard (cross types a key, square deletes, Start or Done finishes).
 
-  The lobby is the same menu. Once you're signed in, the rows under **RPCN sign-in** fill in:
-  **RPCN status** says what the session is doing, **RPCN room to join** lists the rooms,
-  **RPCN players in the room** is the line you're standing in, and **RPCN lobby action** is what
-  you can do right now — host, join, refresh, ready, leave. RetroArch pauses the game while its
-  menu is open, so an action happens when you close the menu, and a message on screen says what
-  came of it.
+  From there it is the PS3's **PLAYER MATCH**: Quick Match (joins a room that will have you,
+  or makes one), Custom Match (the room list: cross joins, square refreshes), Create Match (the
+  room's size, game type and input delay). A room of two shows the VS lobby -- cross is Ready,
+  and the 30-second countdown readies you when it runs out -- and a room of three or more shows
+  the ROOM MATCH list, where cross asks for 1P or 2P and the room's owner can Skip the
+  countdown with square.
 
   RPCN keeps one Twitch login per account, so signing in here with Twitch signs the desktop
   emulator's Twitch login out, and the other way round. **RPCN isn't available on Android**: its
@@ -154,8 +161,8 @@ How it fits together: `src/main_libretro.c` runs one board slice per `retro_run`
 framebuffer through `game_frame.h` with sokol_gfx, and resets GL to its defaults after each
 frame, because RetroArch draws with the same context and sokol's leftover state (its scissor
 test above all) blacked out the picture on GLES. RetroArch netplay is `src/net/pkt_lockstep.h`
-over `RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE`; RPCN is `src/net/netplay.h`, and its lobby is
-`src/ui/retro_lobby.h` — core option definitions that the core rebuilds and re-sends as the
-session moves, so RetroArch draws the rooms in its own theme and the core draws nothing but the
-game. (`src/ui/pad_lobby.h` is the same lobby drawn by hand, for the SDL3 handheld build, which
-has no menu of its own.)
+over `RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE`; RPCN is `src/net/netplay.h`. The menus are
+`src/ui/ps3ui_shell.h` (the offline shell) and `src/ui/ps3ui_app.h` (the online lobby),
+rebuilt from the PS3 release's layouts and drawn with sokol_gl (`src/ui/ps3ui_gpu.h`); see
+`tools/ps3ui/README.md`. While a menu has the screen the core reports a 16:9 picture of its own.
+(`src/ui/pad_lobby.h` is the old text lobby, for the SDL3 handheld build.)
