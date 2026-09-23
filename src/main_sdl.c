@@ -352,6 +352,8 @@ static bool load_rom(const char *zip) {
         fprintf(stderr, "m2hle: could not load '%s' as %s\n", zip, g_active_profile->display_name);
         return false;
     }
+    /* The model lookup is built from the ROM's model table: a new set needs a new one. */
+    geo3d_lookup_invalidate();
     g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
     input_reset();
     input_attach(&state.bus);

@@ -4,9 +4,8 @@
  * The index-array decoder is the part of this emulator with the most
  * hand-derived rules in it. CLAUDE.md calls them load-bearing and says not to
  * re-derive them: the iFlag table, the A-B-D-C quad winding, the `i < n_idx - 8`
- * face loop that stays two groups behind the tail, the (x, y, -z) read, and the
- * 0x45B4 connectivity mask that was found by brute force rather than reasoned
- * out. Every one of those is a place a plausible-looking change silently
+ * face loop that stays two groups behind the tail and the (x, y, -z) read.
+ * Every one of those is a place a plausible-looking change silently
  * degrades thousands of models.
  *
  * So this sweeps the whole model table through both decoders and compares the

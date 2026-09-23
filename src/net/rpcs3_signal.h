@@ -266,11 +266,6 @@ static inline void rpcs3_sig_finish_all(rpcs3_sig_t *s) {
         if (s->peers[i].used) rpcs3_sig_finish(s, s->peers[i].npid);
 }
 
-static inline void rpcs3_sig_forget(rpcs3_sig_t *s, const char *npid) {
-    rpcs3_sig_peer_t *p = rpcs3_sig_find(s, npid);
-    if (p) memset(p, 0, sizeof(*p));
-}
-
 /*
  * A datagram from ip:port. True if it was signaling (whatever became of it), so
  * the caller does not pass it on as game traffic.

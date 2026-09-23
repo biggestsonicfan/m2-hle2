@@ -969,14 +969,4 @@ static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
     }
 }
 
-/* Convenience: install MMIO callbacks on the region containing `addr`. */
-static inline void mem_install_callbacks(memory_bus_t *bus, uint32_t addr,
-                                         mem_read_cb rcb, mem_write_cb wcb, void *user) {
-    mem_region_t *r = mem_find_region(bus, addr);
-    if (!r) { LOG_ERROR("mem: install_callbacks: no region at 0x%08X", addr); return; }
-    r->read_cb = rcb;
-    r->write_cb = wcb;
-    r->user = user;
-}
-
 #endif /* MEMORY_H */

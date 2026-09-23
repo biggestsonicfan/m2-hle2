@@ -1364,11 +1364,6 @@ static inline void game_render_shutdown(void) {
 
 /* ---- mat4 helpers -------------------------------------------------------- */
 
-static inline void gm_mat4_identity(float *m) {
-    memset(m, 0, 64);
-    m[0] = m[5] = m[10] = m[15] = 1.0f;
-}
-
 static inline void gm_mat4_mul(float *out, const float *a, const float *b) {
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++) {

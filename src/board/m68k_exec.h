@@ -73,7 +73,6 @@ static inline uint32_t m68k_fetch_l(m68k_state_t *s) {
 
 /* ---- stack (always A7) ---- */
 static inline void     m68k_push_l(m68k_state_t *s, uint32_t  v) { s->cpu.a[7] -= 4; m68k_wl(s, s->cpu.a[7], v); }
-static inline void     m68k_push_w(m68k_state_t *s, uint16_t  v) { s->cpu.a[7] -= 2; m68k_ww(s, s->cpu.a[7], v); }
 static inline uint32_t m68k_pop_l (m68k_state_t *s) { uint32_t v = m68k_rl(s, s->cpu.a[7]); s->cpu.a[7] += 4; return v; }
 static inline uint16_t m68k_pop_w (m68k_state_t *s) { uint16_t v = m68k_rw(s, s->cpu.a[7]); s->cpu.a[7] += 2; return v; }
 
@@ -164,14 +163,6 @@ static inline void m68k_flags_cmp(m68k_cpu_t *c, uint32_t dst, uint32_t src, int
     /* X unchanged */
 }
 
-/* NEG: flags as if subtracting from zero. */
-static inline void m68k_flags_neg(m68k_cpu_t *c, uint32_t src, int sz) {
-    m68k_flags_sub(c, 0, src, sz);
-    /* C is set if result non-zero (unlike SUB: C set if borrow) */
-    /* Actually for NEG: C is set if src != 0 */
-    if (src & m68k_sz_mask(sz)) c->sr |= M68K_SR_C; else c->sr &= ~M68K_SR_C;
-}
-
 /* NEGX: negate with extend. */
 static inline uint32_t m68k_do_negx(m68k_cpu_t *c, uint32_t src, int sz) {
     int x = (c->sr & M68K_SR_X) != 0;
@@ -218,13 +209,6 @@ static inline int m68k_test_cc(const m68k_cpu_t *c, int cc) {
 
 /* ================================================================ supervisor / SP bank switching */
 
-static inline void m68k_enter_supervisor(m68k_cpu_t *c) {
-    if (!(c->sr & M68K_SR_S)) {
-        c->usp  = c->a[7];
-        c->a[7] = c->ssp;
-        c->sr  |= M68K_SR_S;
-    }
-}
 static inline void m68k_leave_supervisor(m68k_cpu_t *c) {
     if (c->sr & M68K_SR_S) {
         c->ssp  = c->a[7];

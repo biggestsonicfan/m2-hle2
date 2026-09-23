@@ -374,6 +374,8 @@ static bool lr_load_rom(const char *zip) {
         lr_message(msg, 600);
         return false;
     }
+    /* The model lookup is built from the ROM's model table: a new set needs a new one. */
+    geo3d_lookup_invalidate();
     g_sound_on = opt.sound && g_active_profile->quirks.enable_68k_sound
               && state.romset.audiocpu && state.romset.audiocpu_size > 0;
     lr_install_board();

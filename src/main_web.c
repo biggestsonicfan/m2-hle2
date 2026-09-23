@@ -768,6 +768,8 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     rl_mem_zip_clear();
     free(zip);
     if (rc != 0) return -1;
+    /* The model lookup is built from the ROM's model table: a new set needs a new one. */
+    geo3d_lookup_invalidate();
 
     web_install_board();
     emu_run(&state.emu);

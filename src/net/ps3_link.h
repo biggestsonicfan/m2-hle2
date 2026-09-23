@@ -252,7 +252,6 @@ typedef struct ps3_link_s {
     uint8_t  cur_in[2];        /* this frame's two input bytes */
     uint64_t next_tick_us;
     uint32_t stalled_frames;
-    uint64_t wait_report_us;
 
     ps3_sio_t sio;
 
