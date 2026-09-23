@@ -25,6 +25,12 @@
  *   node tools/grade-zsort.mjs --mame [--stage 5]   # MAME's snapshots (~12 min)
  *   node tools/grade-zsort.mjs [--stage 5]          # play it here twice and grade
  *   node tools/grade-zsort.mjs --stage 1 --from 400 --to 1300 --step 30
+ *   node tools/grade-zsort.mjs --stage 0 --toggle texclamp   # another set_camera switch
+ *
+ * --toggle NAME plays the replay with that set_camera switch at 0 and then at 1
+ * in place of the face layers (which stay on in both), and grades the pixels it
+ * changes the same way: texclamp (the filter's clamp at a tile edge) on South
+ * Island's sky ring, zsort, zstanding.
  *
  * $MAME_EXE and $MAME_ROMPATH as tools/match-replay.mjs.
  */
@@ -40,13 +46,20 @@ import { Report } from './lib/report.mjs';
 import { parseArgs } from './lib/args.mjs';
 import { readPng, writePng } from './lib/png.mjs';
 
-const args = parseArgs(['stage', 'from', 'to', 'step', 'port', 'out', 'lag', 'tol', 'only-model', 'set', 'cam-tol']);
+const args = parseArgs(['stage', 'from', 'to', 'step', 'port', 'out', 'lag', 'tol', 'only-model', 'set', 'cam-tol', 'toggle']);
+/* --toggle NAME: the set_camera switch the two plays differ by (see above). */
+const TOGGLE = args.str('toggle', 'zlayers');
+const WHAT = TOGGLE === 'zlayers' ? 'the layers' : TOGGLE;
 /* --cam-tol D: grade frames whose camera eye is within D units of MAME's and whose angles are within
  * 64/65536 of a turn; 0 grades only bit-identical cameras. The off and on pictures share the camera, so
  * a small difference from MAME's adds the same noise to both. */
 const CAM_TOL = args.num('cam-tol', 0.05);
 /* --only-model N: the layers on only model N's faces, to find which model a result comes from. */
 const ONLY = args.str('only-model', '-1');   /* N or LO-HI */
+if (ONLY !== '-1' && TOGGLE !== 'zlayers') {
+    console.error(`--only-model picks which models are layered, so it goes with the layers, not --toggle ${TOGGLE}`);
+    process.exit(2);
+}
 /* --set k=v,k=v: more set_camera settings for the play with the layers on (zlayer_steps, zlayer_board). */
 const SET = Object.fromEntries((args.str('set', '') || '').split(',').filter(Boolean).map((kv) => kv.split('=')));
 const STAGE = args.num('stage', 5);
@@ -113,19 +126,21 @@ const mame = [];
 /* ---- here ------------------------------------------------------------------- */
 
 /*
- * One play of the replay with face layers on or off. The picture of every
+ * One play of the replay with face layers (or the --toggle switch) on or off. The picture of every
  * frame in reach of a MAME snapshot is kept, stamped with the board frame the
  * A/V stream gives it; capture_dl's marks give each board frame's
  * frame_counter and camera, which is how the two emulators' frames are paired.
  */
-async function playHere(zlayers, port) {
+async function playHere(on, port) {
     const avPort = port + 100;
     const emu = await M2Hle.launch({ rom: findRom().primary, port, run: false,
         extraArgs: ['--match-replay-stage', String(STAGE), '--av-port', String(avPort), '--av-size', `${W}x${H}`] });
     const pictures = new Map();
     let jump = -1, sock = null;
     try {
-        await emu.rpc('set_camera', { zlayers: String(zlayers), zlayer_model: String(ONLY), ...(zlayers ? SET : {}) });
+        await emu.rpc('set_camera', TOGGLE === 'zlayers'
+            ? { zlayers: String(on), zlayer_model: String(ONLY), ...(on ? SET : {}) }
+            : { [TOGGLE]: String(on), ...(on ? SET : {}) });
         sock = net.connect(avPort, '127.0.0.1');
         let buf = Buffer.alloc(0), hdr = false;
         sock.on('error', () => {});
@@ -158,7 +173,7 @@ async function playHere(zlayers, port) {
         }
         const st = await emu.status();
         if (st.frames - jump >= FROM - 10) throw new Error(`reached frame ${st.frames} before the capture could start (jump at ${jump})`);
-        const prefix = path.join(OUT, `here-z${zlayers}`);
+        const prefix = path.join(OUT, `here-${TOGGLE}${on}`);
         await emu.rpc('set_camera', {});   /* empties the list of layered models */
         const r = await emu.rpc('capture_dl', {
             frames: jump + TO + 12 - st.frames, path: prefix,
@@ -266,7 +281,7 @@ for (const p of graded) {
 }
 if (missing) rep.note(`${missing} graded frames had no picture here at the lag (the stream dropped it)`);
 for (const r of rows.filter((x) => x.changed).sort((x, y) => y.changed - x.changed).slice(0, 8))
-    rep.note(`replay frame ${r.n}: ${r.changed} pixels changed by the layers, ${r.won} nearer MAME with them, ${r.lost} nearer without`);
+    rep.note(`replay frame ${r.n}: ${r.changed} pixels changed by ${WHAT}, ${r.won} nearer MAME with them, ${r.lost} nearer without`);
 
 /* The frame the layers change most, side by side: MAME | layers off | layers
  * on | what changed (green: nearer MAME with the layers, red: nearer without,
@@ -297,15 +312,15 @@ if (top?.changed) {
         panels[k].copy(crop, d, s, s + 3);
     }
     writePng(stem + '-crop.png', { width: cw * z * panels.length, height: ch * z, rgb: crop });
-    rep.note(`MAME | layers off | layers on | changes, replay frame ${top.n}: ${stem}.png (and -crop.png, x${z})`);
+    rep.note(`MAME | ${WHAT} off | ${WHAT} on | changes, replay frame ${top.n}: ${stem}.png (and -crop.png, x${z})`);
 }
 
 rep.check('graded frames', rows.length > 0, `${rows.length} frames`);
 if (changed) {
-    rep.check('where the layers change the picture, they put it nearer MAME', nearerOn > nearerOff,
-              `${changed} pixels changed: ${nearerOn} nearer MAME with the layers, ${nearerOff} nearer without, ` +
+    rep.check(`where ${WHAT} change the picture, they put it nearer MAME`, nearerOn > nearerOff,
+              `${changed} pixels changed: ${nearerOn} nearer MAME with ${WHAT}, ${nearerOff} nearer without, ` +
               `${changed - nearerOn - nearerOff} no nearer either way`);
 } else {
-    rep.note('the layers changed no pixel on the graded frames');
+    rep.note(`${WHAT} changed no pixel on the graded frames`);
 }
 rep.finish();

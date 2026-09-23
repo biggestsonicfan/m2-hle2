@@ -564,7 +564,7 @@ static inline void objview__upload(int *out_fill_verts, int *out_line_verts) {
             for (int k = 0; k < 3; k++) {
                 v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=ramp;
                 v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
-                v[k].lb=lb; v[k].pl=T->pl; v[k].fl=T->fl; v[k].texlod=T->texlod;
+                v[k].lb=lb; v[k].pl=T->pl; v[k].fl=geo3d_face_fill_flags(T->fl); v[k].texlod=T->texlod;
                 /* Plain depth here: the board's polygon z-sort is right under
                  * the board's own camera and turns a floor into a wall under a
                  * free one, and this viewer's camera goes anywhere. A face's

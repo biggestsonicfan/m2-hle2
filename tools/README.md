@@ -437,6 +437,10 @@ The replay is recorded for stage 1, so on another stage it drifts sooner.
   which is how a bad result is traced to one. The emulator reports which models
   drew layered faces, and `--set k=v` passes more `set_camera` switches to the
   play with the layers on.
+- **Other switches:** `--toggle NAME` A/Bs another `set_camera` switch in place
+  of the layers, which stay on in both plays. `--stage 0 --toggle texclamp`
+  grades the texture filter's clamp at a tile edge (issue #81) on South Island's
+  sky ring.
 
 What it found, on the way to the current rules (`CLAUDE.md`, "3D Polygon
 Decoder"): a straight port of the explorer's layers put 5,588 of 5,613 changed

@@ -94,9 +94,9 @@ const tex = { faces: 0, texturedBoth: 0, texturedHere: 0, texturedThere: 0,
               tileSame: 0, corners: 0, cornersExact: 0, cornersWrapped: 0,
               flagsSame: 0, flagsDiffer: new Map() };
 /* The fill flags both decoders carry in the same bits: transparent renderer,
- * checker, starting sheet, mirror X and Y. The explorer's higher bits (z source,
- * two-sided) are not carried here yet. */
-const FILL_FLAGS = 31;
+ * checker, starting sheet, mirror X and Y (1..16), smooth wrap X and Y (256,
+ * 512). The explorer's other bits (z source, two-sided) are not carried here yet. */
+const FILL_FLAGS = 31 | 256 | 512;
 const perModelUv = [];
 
 for (const { index, tris, uvs, tiles, flags } of models) {

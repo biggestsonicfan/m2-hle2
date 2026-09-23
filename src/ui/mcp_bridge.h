@@ -259,6 +259,8 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     }
     if (mcp_json_get_str(req,"zlayer_board",v,sizeof v)) g_geo3d_layer_board = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zlayer_plane",v,sizeof v)) g_geo3d_layer_plane = (atoi(v) != 0);
+    /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
+    if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
     char models[GEO3D_LAYER_MODELS_MAX * 8] = "";
     for (int i = 0, o = 0; i < g_geo3d_layer_model_count && o < (int)sizeof models - 8; i++)
         o += snprintf(models + o, sizeof models - (size_t)o, "%s%d", i ? "," : "", g_geo3d_layer_models[i]);

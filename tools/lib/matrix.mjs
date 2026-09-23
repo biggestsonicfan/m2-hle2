@@ -83,6 +83,11 @@ export function boardMatrix(ops) {
         else if (kind === 'rx') m = mul(m, rotX(v));
         else if (kind === 'rz') m = mul(m, rotZ(-v));
         else if (kind === 't') m = mul(m, transM(v[0], v[1], -v[2]));
+        /* A turn to the camera's heading (display.js CAMERA_YAW): the explorer works
+         * it out per frame from its own camera, so it has no matrix here. Left out,
+         * it is the residual yaw grade-stages already allows the Flying Carpet's
+         * poles. */
+        else if (kind === 'cy') continue;
         else throw new Error(`boardMatrix: op '${kind}' has no matrix`);
     }
     return m;

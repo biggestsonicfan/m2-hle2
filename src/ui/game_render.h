@@ -403,7 +403,11 @@ static const char *game_render_fill_vs_glsl =
  *
  *   texel     bilinear over the 4-bit sheet with the board's half-texel offset,
  *             each tap wrapped within the tile the way the index mask wraps,
- *             and mirrored in an odd copy when the face says so (u = ~u).
+ *             and mirrored in an odd copy when the face says so (u = ~u). A
+ *             pair straddling the tile's last texel blends across only where
+ *             the face sets the smooth-wrap bit (flags 256 / 512); otherwise
+ *             it takes the nearer texel (fetch_bilinear_texel's clamp), or
+ *             every sky segment shows its tile's far edge at the join.
  *   level     the mip chain send_lod_data_q box-filters into texture RAM: level
  *             L of a tile sits at ((tx-2048)>>L)&2047, ((ty-1024)>>L)&1023 on
  *             the sheet that alternates with L (fetch_bilinear_texel). Picked
@@ -466,6 +470,9 @@ static const char *game_render_fill_fs_ref_glsl =
     "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
     "  ivec2 i0 = ivec2(floor(c));\n"
     "  vec2 f = fract(c);\n"
+    "  ivec2 edge = ivec2(uvec2(i0 + t.zw * 8) % uvec2(t.zw));\n"
+    "  if (!has(256) && edge.x == t.z - 1) f.x = step(0.5, f.x);\n"
+    "  if (!has(512) && edge.y == t.w - 1) f.y = step(0.5, f.y);\n"
     "  float t00 = tile_texel(t, i0);\n"
     "  float t10 = tile_texel(t, i0 + ivec2(1, 0));\n"
     "  float t01 = tile_texel(t, i0 + ivec2(0, 1));\n"
@@ -582,6 +589,10 @@ static const char *game_render_fill_fs_glsl =
     "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
     "  ivec2 i0 = ivec2(floor(c));\n"
     "  vec2 f = fract(c);\n"
+    "  ivec2 s0 = i0 + t.zw * 8;\n"
+    "  ivec2 q0 = (face.x & 64) != 0 ? (s0 & (t.zw - 1)) : ivec2(uvec2(s0) % uvec2(t.zw));\n"
+    "  if ((face.x & 256) == 0 && q0.x == t.z - 1) f.x = step(0.5, f.x);\n"
+    "  if ((face.x & 512) == 0 && q0.y == t.w - 1) f.y = step(0.5, f.y);\n"
     "  float t00, t10, t01, t11;\n"
     /* USE_GATHER: where the four taps are the atlas's own 2x2 — the tile does
      * not wrap or mirror between them and they do not cross the 2048 fold —
@@ -590,8 +601,6 @@ static const char *game_render_fill_fs_glsl =
      * shared corner, (i0 + 1) / 2048, which is exact in binary32. Anything else
      * keeps the four fetches. */
     "#ifdef USE_GATHER\n"
-    "  ivec2 s0 = i0 + t.zw * 8;\n"
-    "  ivec2 q0 = (face.x & 64) != 0 ? (s0 & (t.zw - 1)) : ivec2(uvec2(s0) % uvec2(t.zw));\n"
     "  ivec2 a0 = t.xy + q0;\n"
     "  if ((face.x & 24) == 0 && q0.x + 1 < t.z && q0.y + 1 < t.w && a0.x + 1 < 2048 && a0.y + 1 < 2048) {\n"
     "    vec4 g = textureGather(atlas_smp, (vec2(a0) + 1.0) / 2048.0, 0);\n"
@@ -732,6 +741,9 @@ static const char *game_render_fill_fs_hlsl =
     "  float2 c = uv / pow(2.0, (float)L) - 0.5;\n"
     "  int2 i0 = (int2)floor(c);\n"
     "  float2 f = frac(c);\n"
+    "  int2 edge = (int2)((uint2)(i0 + t.zw * 8) % (uint2)t.zw);\n"
+    "  if (!has(fl, 256) && edge.x == t.z - 1) f.x = step(0.5, f.x);\n"
+    "  if (!has(fl, 512) && edge.y == t.w - 1) f.y = step(0.5, f.y);\n"
     "  float t00 = tile_texel(t, fl, i0);\n"
     "  float t10 = tile_texel(t, fl, i0 + int2(1, 0));\n"
     "  float t01 = tile_texel(t, fl, i0 + int2(0, 1));\n"
@@ -1801,7 +1813,7 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
         float lb = g_luma_ramp ? T->lb : -1.0f;   /* -1 → old flat_color×luma path */
         for (int _k = 0; _k < 3; _k++) {
             v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
-            v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=T->fl; v[_k].texlod=T->texlod;
+            v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=geo3d_face_fill_flags(T->fl); v[_k].texlod=T->texlod;
             v[_k].zs = _k == 0 ? T->zs0 : (_k == 1 ? T->zs1 : T->zs2);
             v[_k].zl = T->zl;
         }
@@ -1933,7 +1945,7 @@ static inline void game_render_batch_flush(bool lines_only) {
              * textured face with a luma band takes a shade row where there is
              * one — the whole colour chain in a single fetch, flagged 128 — and
              * a colour ramp row otherwise. */
-            float ramp = 1.0f, fl = T->fl;
+            float ramp = 1.0f, fl = geo3d_face_fill_flags(T->fl);
             int row = -1;
             if (g_game_render.shade_enabled && T->tw > 0.0f)
                 row = game_render__shade_row(lb, T->pl, T->r, T->g, T->b);
