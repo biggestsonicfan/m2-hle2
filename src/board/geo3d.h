@@ -1947,8 +1947,9 @@ static inline void geo3d_decode_model(int model_idx,
 
         switch (iflag) {
             case 0:
-                /* Not at the head of a mesh: there is no previous group, and the
-                 * four points standing there are the board's first polygon
+                /* Mid-mesh this ends the previous group and wipes it. The head of
+                 * a mesh is the exception: there is no previous group there, and
+                 * the four points standing there are the board's first polygon
                  * (MAME model2_3d_push case 0x01; the relink runs after it). A
                  * mesh that opens on this link is AM2's one-link 2x2 shadow card,
                  * 70 entries in STF that used to decode to nothing (explorer
