@@ -469,6 +469,7 @@ target_include_directories(m2hle PRIVATE
     ${SRC}/ui
     ${SRC}/profiles
     ${IMGUI_CLUB_MEMEDIT_DIR}
+    ${VENDOR}/stb    # stb_image: a libretro shader preset's lookup textures (ui/retro_shader.h)
 )
 
 # ---------------------------------------------------------------------------
@@ -541,6 +542,8 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(ps3net_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/ps3net_test.c)
     # The libretro core's heat guard (core/heat_guard.h): a pure state machine, no zones read.
     add_executable(heat_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/heat_test.c)
+    # libretro GLSL presets (ui/retro_shader.h): parsing, paths, parameters, LUTs. No GL.
+    add_executable(retro_shader_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/retro_shader_test.c)
     # The PS3 release's game settings (profiles/sfight.h sfight_apply_menu_settings) on a bus:
     # the bytes, the backup RAM CRC, the defaults. No ROM.
     add_executable(sfight_settings_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/sfight_settings_test.c)
@@ -593,7 +596,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(input_test PRIVATE miniz sokol)
 
     foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test
-              scsp_dsp_test scsp_dsp_test_masks sfight_settings_test)
+              scsp_dsp_test scsp_dsp_test_masks sfight_settings_test retro_shader_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -606,7 +609,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test scsp_dsp_test scsp_dsp_test_masks
-                  cop_replay snd_replay snd_bench sfight_settings_test ps3ui_render)
+                  retro_shader_test cop_replay snd_replay snd_bench sfight_settings_test ps3ui_render)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

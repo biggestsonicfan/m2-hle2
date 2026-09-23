@@ -57,6 +57,7 @@
 #include "ps3ui_app.h"    /* the online lobby, as the PS3 port draws it */
 #include "ps3ui_gpu.h"
 #include "ps3ui_shell.h"   /* the PS3's menus around the board (the Console version) */
+#include "post_shader.h"   /* the CRT filter and libretro presets over the picture */
 #include "json_min.h"
 
 /* The single TU that defines g_profiles[] / g_active_profile. Under M2HLE_WEB it
@@ -400,6 +401,7 @@ static void init(void) {
         .logger.func = slog_func,
     });
     game_render_init();
+    post_shader_init();
     video_init(&state.video);
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
@@ -621,8 +623,23 @@ static void frame(void) {
         lerp_t = game_frame_lerp();
     }
 
+    /* A filter over the picture (post_shader.h) reads the game from a target of
+     * its own, at the render scale, and only covers the game's 4:3 rectangle. */
+    int gox, goy, gw, gh;
+    game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &gox, &goy, &gw, &gh);
+    post_shader_set_input_scale(g_web_rt.want);
+    const bool post = have_game && !lobby && !g_web_objview_show && post_shader_active();
+    if (post) {
+        int sw, sh;
+        post_shader_source_size(VIDEO_WIDTH, VIDEO_HEIGHT, gw, gh, &sw, &sh);
+        post_shader_begin_source(sw, sh, &state.pass_action);
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, sw, sh, lerp_t);
+        post_shader_end_source();
+        post_shader_prepare(gw, gh);
+    }
+
     /* Offscreen first, when there is a render scale: the game at N x 496x384. */
-    const bool offscreen = have_game && !lobby && g_web_rt.scale > 0;
+    const bool offscreen = have_game && !lobby && !post && g_web_rt.scale > 0;
     if (offscreen) {
         sg_begin_pass(&(sg_pass){
             .action = state.pass_action,
@@ -652,9 +669,9 @@ static void frame(void) {
         game_render_letterbox(sapp_width(), sapp_height(), g_objview.rt_w, g_objview.rt_h, &ox, &oy, &w, &h);
         game_render_draw_target(g_objview.color_tex, true, ox, oy, w, h);
     } else if (have_game) {
-        int ox, oy, w, h;
-        game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
-        if (offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
+        int ox = gox, oy = goy, w = gw, h = gh;
+        if (post)           post_shader_draw(ox, oy, w, h, sapp_width(), sapp_height());
+        else if (offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
         else           game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
         if (overlay) {   /* the pause menu over the game */
             ps3ui_gpu_draw(&lobby_cv);
@@ -676,6 +693,7 @@ static void cleanup(void) {
     netplay_shutdown();
     audio_out_shutdown();
     romset_free(&state.romset);
+    post_shader_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     sg_shutdown();
@@ -863,6 +881,66 @@ EMSCRIPTEN_KEEPALIVE void web_set_render_scale(int scale) {
     g_web_rt.want = scale < 0 ? 0 : scale > 4 ? 4 : scale;
 }
 EMSCRIPTEN_KEEPALIVE int web_render_scale(void) { return g_web_rt.want; }
+
+/* ---- A filter over the picture (post_shader.h) ------------------------------
+ *
+ * The page's Picture tab (web/site/m2hle-shader.js). The browser has no file
+ * system, so a custom preset arrives as files: the page clears the table, adds
+ * every file the player picked under its relative path, then loads the preset by
+ * its path in that table. A preset's own relative paths resolve against the
+ * table (retro_shader.h, rs_vfs_find), so the files may come from any folders.
+ * The table is kept, so the page can reload the same preset later.
+ */
+
+/* 0 off, 1 the built-in CRT, 2 the custom preset (if one is loaded). */
+EMSCRIPTEN_KEEPALIVE void web_shader_set_mode(int mode) {
+    post_shader_set_mode(mode == 1 ? POST_SHADER_CRT : mode == 2 ? POST_SHADER_CUSTOM : POST_SHADER_OFF);
+}
+EMSCRIPTEN_KEEPALIVE int web_shader_mode(void) { return (int)post_shader_mode(); }
+
+EMSCRIPTEN_KEEPALIVE void web_shader_files_clear(void) { rs_vfs_clear(); }
+
+/* Copies the bytes; the caller frees its buffer. */
+EMSCRIPTEN_KEEPALIVE int web_shader_file_add(const char *path, const uint8_t *data, int len) {
+    return path && data && len >= 0 && rs_vfs_add(path, data, (size_t)len) ? 1 : 0;
+}
+
+/* 1 = loaded and in use; 0 = web_shader_error says why. */
+EMSCRIPTEN_KEEPALIVE int web_shader_load(const char *path) {
+    return path && post_shader_load(path) ? 1 : 0;
+}
+EMSCRIPTEN_KEEPALIVE void web_shader_unload(void) { post_shader_unload(); }
+EMSCRIPTEN_KEEPALIVE const char *web_shader_error(void) { return post_shader_error(); }
+EMSCRIPTEN_KEEPALIVE const char *web_shader_name(void) { return post_shader_custom_name(); }
+/* The table's paths the last load read, one per line: what the page keeps. */
+EMSCRIPTEN_KEEPALIVE const char *web_shader_used(void) { return rs_vfs_used(); }
+
+/* The loaded preset's parameters, for sliders:
+ * [{"name":..,"desc":..,"value":..,"initial":..,"min":..,"max":..,"step":..}, ...] */
+EMSCRIPTEN_KEEPALIVE const char *web_shader_params(void) {
+    static char out[RS_MAX_PARAMS * 200 + 16];
+    char *p = out, *end = out + sizeof out;
+    p += snprintf(p, (size_t)(end - p), "[");
+    for (int i = 0; i < post_shader_param_count() && end - p > 256; i++) {
+        const rs_param_t *pr = post_shader_param(i);
+        char desc[sizeof pr->desc * 2];
+        size_t k = 0;
+        for (const char *c = pr->desc; *c && k + 2 < sizeof desc; c++) {
+            if (*c == '"' || *c == '\\') desc[k++] = '\\';
+            desc[k++] = (unsigned char)*c < 0x20 ? ' ' : *c;
+        }
+        desc[k] = '\0';
+        p += snprintf(p, (size_t)(end - p),
+                      "%s{\"name\":\"%s\",\"desc\":\"%s\",\"value\":%g,\"initial\":%g,\"min\":%g,\"max\":%g,\"step\":%g}",
+                      i ? "," : "", pr->name, desc, pr->value, pr->initial, pr->min, pr->max, pr->step);
+    }
+    snprintf(p, (size_t)(end - p), "]");
+    return out;
+}
+
+EMSCRIPTEN_KEEPALIVE int web_shader_set_param(const char *name, double value) {
+    return name && post_shader_set_param(name, (float)value) ? 1 : 0;
+}
 
 /* The sound board at a glance, as JSON: the same figures the desktop build's
  * sound_status bridge command reports, so a web run and a native run of the same

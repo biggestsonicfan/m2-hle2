@@ -56,6 +56,8 @@
 #include "netplay_window.h"  /* the RPCN netplay front-end */
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
 #include "overlay_host.h"    /* --overlay: a plugin paints layers over the picture */
+#include "post_shader.h"     /* the CRT filter and libretro presets over the picture */
+#include "shader_window.h"   /* ...and the Video menu that picks one */
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
  * g_active_profile and pulls in every per-game profile header. */
@@ -68,6 +70,11 @@ static int  g_browse_model = -1;   /* --model N: open single-model browser on N 
 static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
 static int  g_objview_model = -1;  /* --objview N: and select model N */
 static int  g_mcp_enable = 0;      /* --mcp: start the TCP debug server */
+/* --crt / --shader <preset> / --no-shader / --shader-scale N: the Video menu's
+ * filter for this run, over what video.cfg remembers (shader_window.h). */
+static int  g_shader_arg = -1;    /* -1 as remembered, else a post_shader_mode_t */
+static char g_shader_preset[512] = {0};
+static int  g_shader_scale = -1;
 static int  g_mcp_port   = 7172;   /* --mcp-port N */
 static int  g_headless   = 0;      /* --headless: no window, GPU or audio device */
 static int  g_net_window = 0;      /* --netplay: open the netplay window at startup */
@@ -479,6 +486,7 @@ static void draw_menu_bar(void) {
      * feature here a player rather than a developer reaches for, and the status
      * line is worth being able to read without opening the window — whether the
      * peer is reachable is the question people actually have. */
+    shader_ui_menu(state.file_dialog);
     if (igBeginMenu("Netplay")) {
         igMenuItemBoolPtr("Netplay window", NULL, &state.show_netplay, true);
         igSeparator();
@@ -572,6 +580,12 @@ static void init(void) {
     state.file_dialog = IGFD_Create();
     video_init(&state.video);
     game_render_init();
+    post_shader_init();
+    shader_ui_load();
+    if (g_shader_preset[0] && !post_shader_load(g_shader_preset))
+        LOG_WARN("--shader %s: %s", g_shader_preset, post_shader_error());
+    if (g_shader_arg >= 0) post_shader_set_mode((post_shader_mode_t)g_shader_arg);
+    if (g_shader_scale >= 0) post_shader_set_input_scale(g_shader_scale);
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
     objview_init();
@@ -940,6 +954,7 @@ static void frame(void) {
     if (draw_ui) {
         draw_menu_bar();
         draw_file_dialog();
+        shader_ui_draw(state.file_dialog);
 
         if (state.show_cpu)
             cpu_window_draw(&state.emu.cpu_snapshot, &state.emu.cpu_prev_snapshot, &state.show_cpu);
@@ -1021,6 +1036,42 @@ static void frame(void) {
                                win_ox, win_oy, win_gw, win_gh, menu_h, g_emu_frames);
     }
 
+    /* Where the game goes in the window: worked out before the swapchain pass
+     * opens, because a filter over the picture (post_shader.h) draws the game
+     * offscreen first. */
+    int ox, oy, w, h;
+    /* Reserve the top main-menu-bar strip so the game (and its row-0 HUD) isn't
+     * occluded by the opaque ImGui bar drawn on top - and reserve nothing when
+     * the bar is hidden, which is what gives the game the whole window.
+     * s_menu_bar_visible already folds in capture mode, so this covers the
+     * --kiosk case that used to be spelled out here. */
+    int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
+    int avail_h = sapp_height() - menu_h;
+    if (avail_h < 1) avail_h = 1;
+    /* Letterbox against whatever is actually being shown: the stream's
+     * target has its own aspect, chosen by --av-size. */
+    int src_w = s_av_mirror ? av_stream_width()  : VIDEO_WIDTH;
+    int src_h = s_av_mirror ? av_stream_height() : VIDEO_HEIGHT;
+    game_render_letterbox(sapp_width(), avail_h, src_w, src_h, &ox, &oy, &w, &h);
+    oy += menu_h;
+    /* An overlay owns the whole window: the board goes where the plugin
+     * was told it would be, so the window and the stream show the identical
+     * composition rather than two letterboxes of the same picture. */
+    if (win_overlay) { ox = win_ox; oy = win_oy; w = win_gw; h = win_gh; }
+
+    /* The filter reads the game from a target of its own and covers only the
+     * game's rectangle. Not while the window mirrors the A/V stream: that
+     * target is the stream's composition, overlay and all. */
+    const bool post = !s_av_mirror && post_shader_active();
+    if (post) {
+        int sw, sh;
+        post_shader_source_size(VIDEO_WIDTH, VIDEO_HEIGHT, w, h, &sw, &sh);
+        post_shader_begin_source(sw, sh, &state.pass_action);
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, sw, sh, lerp_t);
+        post_shader_end_source();
+        post_shader_prepare(w, h);
+    }
+
     sg_begin_pass(&(sg_pass){
         .action    = state.pass_action,
         .swapchain = sglue_swapchain(),
@@ -1029,25 +1080,6 @@ static void frame(void) {
     /* Draw the game letterboxed into the swapchain, then ImGui on top.
      * Layer order: back-back colour → background tiles → (3D, Phase 9) → FG/HUD. */
     {
-        int ox, oy, w, h;
-        /* Reserve the top main-menu-bar strip so the game (and its row-0 HUD) isn't
-         * occluded by the opaque ImGui bar drawn on top - and reserve nothing when
-         * the bar is hidden, which is what gives the game the whole window.
-         * s_menu_bar_visible already folds in capture mode, so this covers the
-         * --kiosk case that used to be spelled out here. */
-        int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
-        int avail_h = sapp_height() - menu_h;
-        if (avail_h < 1) avail_h = 1;
-        /* Letterbox against whatever is actually being shown: the stream's
-         * target has its own aspect, chosen by --av-size. */
-        int src_w = s_av_mirror ? av_stream_width()  : VIDEO_WIDTH;
-        int src_h = s_av_mirror ? av_stream_height() : VIDEO_HEIGHT;
-        game_render_letterbox(sapp_width(), avail_h, src_w, src_h, &ox, &oy, &w, &h);
-        oy += menu_h;
-        /* An overlay owns the whole window: the board goes where the plugin
-         * was told it would be, so the window and the stream show the identical
-         * composition rather than two letterboxes of the same picture. */
-        if (win_overlay) { ox = win_ox; oy = win_oy; w = win_gw; h = win_gh; }
         { static int _cs=0; if ((++_cs % 30)==0) {
             for (int i=0;i<state.geo3d.captured_count;i++){ const captured_model_t *cm=&state.geo3d.captured[i];
                 if (cm->model_idx==519 || cm->model_idx==2833)
@@ -1062,6 +1094,8 @@ static void frame(void) {
          * window shows that target rather than redrawing it. */
         if (s_av_mirror)
             game_render_draw_target(av_capture_color_tex(), true, ox, oy, w, h);
+        else if (post)
+            post_shader_draw(ox, oy, w, h, sapp_width(), sapp_height());
         else
             game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
                             ox, oy, w, h, lerp_t);
@@ -1122,6 +1156,7 @@ static void cleanup(void) {
     objview_shutdown();
     overlay_host_shutdown();   /* before game_render_shutdown: it owns sg images */
     av_capture_shutdown();
+    post_shader_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     simgui_shutdown();
@@ -1324,6 +1359,15 @@ sapp_desc sokol_main(int argc, char* argv[]) {
                          "keeping the board's own letterbox");
         } else if (strcmp(argv[i], "--overlay-reload") == 0) {
             overlay_host_set_watch(true);
+        } else if (strcmp(argv[i], "--crt") == 0) {
+            g_shader_arg = POST_SHADER_CRT;
+        } else if (strcmp(argv[i], "--no-shader") == 0) {
+            g_shader_arg = POST_SHADER_OFF;
+        } else if (strcmp(argv[i], "--shader") == 0 && i + 1 < argc) {
+            snprintf(g_shader_preset, sizeof g_shader_preset, "%s", argv[++i]);
+            g_shader_arg = POST_SHADER_CUSTOM;
+        } else if (strcmp(argv[i], "--shader-scale") == 0 && i + 1 < argc) {
+            g_shader_scale = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--av-mute") == 0) {
             g_av_mute = 1;                     /* stream the sound, do not play it */
         } else if (strcmp(argv[i], "--netplay") == 0) {

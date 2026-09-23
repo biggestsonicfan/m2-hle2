@@ -752,6 +752,27 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
 .log-empty[hidden] { display: none; }
 
 .findings { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 16px 0.6rem; }
+
+/* The Picture tab (m2hle-shader.js) */
+.picture { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0.2rem 16px 0.8rem; }
+.picture-advanced { margin-top: 0.3rem; max-width: 46rem; }
+.picture-advanced label { flex-direction: column; }
+.picture-advanced select { align-self: flex-start; max-width: 100%; }
+.shader-warn { margin: 0.6rem 0 0; padding: 0.45rem 0.7rem; border-left: 4px solid var(--warn); background: rgba(2, 9, 24, 0.5); color: var(--text); }
+.shader-h { margin: 1rem 0 0.2rem; font-size: 0.95rem; font-weight: 500; color: var(--text); }
+.shader-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin: 0.5rem 0 0; }
+.shader-st-bad { color: var(--bad); }
+.shader-st-warn { color: var(--warn); }
+.shader-st-good { color: var(--good); }
+.shader-params { display: grid; gap: 0.35rem; margin-top: 0.4rem; }
+.shader-param { display: grid !important; grid-template-columns: minmax(8rem, 1fr) minmax(6rem, 2fr) 3.5rem; align-items: center; gap: 0.6rem; margin: 0 !important; }
+.shader-param output { font-variant-numeric: tabular-nums; text-align: right; color: var(--text); }
+.shader-param input[type=range] { width: 100%; min-width: 0; }
+.picture code { font: 0.8125rem var(--font-mono); }
+@media (max-width: 520px) {
+  .shader-param { grid-template-columns: 1fr 3rem; }
+  .shader-param span { grid-column: 1 / -1; }
+}
 .finding {
   margin: 0 0 0.5rem;
   padding: 0.6rem 0.8rem;

@@ -258,6 +258,15 @@ with the board's own 44.1 kHz counter (`g_sound.out_total`, latched per game fra
   on the emu thread and clearing the function pointer does not retire a call already inside it.
   Same shape as the texram crash under "Memory Bus", same answer.
 
+### Picture filters (`ui/post_shader.h`, `ui/retro_shader.h`, host-side)
+
+The built-in CRT (YAMP's port of Lost Judgment's filter) goes through sokol with an HLSL and a GLSL source, so it runs on every backend. A libretro GLSL preset runs as raw GL between sokol passes (then `sg_reset_state_cache`), so only the GL builds have it; `tests/retro_shader_test.c` holds the parser and the rewrites below.
+
+- **The game is drawn into the filter's own target, and a GL target keeps its bottom row first.** The CRT samples `(p.x, 1 - p.y)` on GL and `p` on D3D, and takes `abs()` of its derivatives, because GL's window y runs the other way. The libretro chain flips the source on the way into `Orig`, so v = 0 is the TOP of the picture in every pass, as RetroArch's GL driver has it, and only the last pass flips onto the screen.
+- **WebGL rejects libretro shaders a phone's GLES driver accepts**, so `rs_gl_program` tries, in order: the shader as written as ES 3.00; every `lowp`/`mediump` made `highp` (a uniform declared at different precisions in the two stages will not link: zfast_crt_geo); a GLSL 1.10-to-ES 3.00 token rewrite (WebGL2 gives ES 1.00 shaders no `fwidth`: gizmo-crt); ES 1.00. Non-constant global initialisers (crt-hyllian, crt-royale) are moved into `main()` behind a macro defined where the declaration was, so an `#if` that is not taken leaves no assignment behind, and the compiler is asked again until it stops naming lines. The error reported is where the FIRST attempt ended, not the last fallback's: the last one's complaints are about the fallback.
+- **What still cannot run on WebGL, measured against glsl-shaders' `crt/` (67 of 78 run):** real slang files with a `.glsl` name (crt-blurPi), `##` token pasting (ntsc-pass2-2phase), and desktop GLSL's implicit int-to-float conversions (the rest of crt-royale, mame_hlsl). Those need a type-aware compiler.
+- **`PassPrevN` is the output N passes back, so `PassPrev1` is this pass's input and `PassPrev(p+1)` is `Orig`; `PrevN` is the history of `Orig` frames.** guest-dr-venom's green-and-magenta columns are its default mask, not a colour bug (pixels alternate (205,246,205) / (246,205,246)).
+
 ### Netplay / RPCN (`src/net/`, board-independent)
 
 Matchmaking is [RPCN](https://github.com/RipleyTom/rpcn); the design follows `yampnet`

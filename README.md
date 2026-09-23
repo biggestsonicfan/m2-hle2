@@ -86,6 +86,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
+| Picture filters | Lost Judgment's CRT scanlines, as YAMP ports them (every build), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
 
 Game profiles live in [src/profiles/](src/profiles/): `sfight_console`, `sfight`, `fvipers`,
 `m2snake` (the web build carries the two Sonic the Fighters profiles only).
@@ -228,6 +229,33 @@ is the one file a POSIX backend would go in. The browser build has no sockets at
 RPCN through a WebSocket gateway on the RPCN host ([web/gateway/](web/gateway/)). The design follows
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
 worked the RPCN protocol out first.
+
+## Picture filters
+
+A filter goes over the game's 4:3 picture only, never over the rest of the window. Filters draw
+the picture a second time every frame, so they can cost frame rate on a weak GPU.
+
+- **CRT (Lost Judgment's)** -- the CRT filter Lost Judgment's arcade cabinets put on Sonic the
+  Fighters, as YAMP reverse-engineered it: one scanline per Model 2 line, a faint aperture
+  grille, a dithered scanline phase. Every build, Direct3D 11 included.
+- **Your own shader** -- a libretro GLSL preset (`.glslp` with its `.glsl` files and textures, or
+  one `.glsl`), from [libretro's glsl-shaders](https://github.com/libretro/glsl-shaders). The web
+  and Linux builds; the Windows build draws with Direct3D 11 and offers the CRT only. Slang
+  presets (`.slangp`) are not supported. Of the 78 presets in glsl-shaders' `crt/` folder, 67 run
+  in the browser; the rest are slang files, use `##` token pasting, or rely on desktop GLSL's
+  implicit type conversions, which GLSL ES does not have.
+
+```
+m2hle --rom sfight.zip --crt                            # the CRT filter
+m2hle --rom sfight.zip --shader crt/crt-geom.glslp      # a libretro preset (GL builds)
+m2hle --rom sfight.zip --shader-scale 2                 # the picture the filter reads: 1-4 x 496x384
+```
+
+On the desktop the **Video** menu picks the filter, loads a preset, sets its parameters and is
+remembered in `video.cfg` beside the netplay settings (`%APPDATA%\m2hle2`, `~/.config/m2hle2`);
+the command line applies over it for one run. In the browser it is the menu's **Picture** tab:
+choose a preset's files or a whole folder, and only the files the preset uses are kept (in the
+browser's IndexedDB) for the next visit.
 
 ## Recording (capture mode)
 

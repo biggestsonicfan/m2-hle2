@@ -521,7 +521,7 @@ const m2hleTools = (() => {
     const same = !drawer.hidden && !$('pane-' + tab).hidden;
     if (same) { closeDrawer(); return; }
     drawer.hidden = false;
-    for (const t of ['lag', 'console']) {
+    for (const t of ['lag', 'console', 'picture']) {
       $('pane-' + t).hidden = t !== tab;
       $('tab-' + t).setAttribute('aria-selected', String(t === tab));
       $('btn-' + t).setAttribute('aria-expanded', String(t === tab));
@@ -533,7 +533,7 @@ const m2hleTools = (() => {
 
   function closeDrawer() {
     $('drawer').hidden = true;
-    for (const t of ['lag', 'console']) $('btn-' + t).setAttribute('aria-expanded', 'false');
+    for (const t of ['lag', 'console', 'picture']) $('btn-' + t).setAttribute('aria-expanded', 'false');
     $('canvas').focus();
   }
 
@@ -542,6 +542,8 @@ const m2hleTools = (() => {
     $('btn-console').addEventListener('click', () => openDrawer('console'));
     $('tab-lag').addEventListener('click', () => openDrawer('lag'));
     $('tab-console').addEventListener('click', () => openDrawer('console'));
+    $('btn-picture').addEventListener('click', () => openDrawer('picture'));
+    $('tab-picture').addEventListener('click', () => openDrawer('picture'));
     $('drawer-close').addEventListener('click', closeDrawer);
     $('lag-start').addEventListener('click', () => diagnose(5));
     $('lag-copy').addEventListener('click', (e) => copy(lastReport, e.currentTarget));
