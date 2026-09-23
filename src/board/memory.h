@@ -166,6 +166,7 @@ typedef struct memory_bus {
     uint64_t    writes;
     uint64_t    unmapped_reads;
     uint64_t    unmapped_writes;
+    uint64_t    ro_writes;        /* writes dropped by a read-only region (ROM) */
 
     /* Set by i960_step before each instruction dispatch — included in unmapped warnings. */
     uint32_t    cpu_ip;
@@ -668,12 +669,24 @@ static inline uint32_t mem_burst_step(memory_bus_t *bus, uint32_t addr) {
  * has been loaded) silently reads as zero and ignores writes. Without this
  * the memview window would deref NULL the moment it scrolls into ROM. */
 
+/* A game that writes to ROM or an unmapped address usually does it every frame,
+ * from the same loop, and one line per access filled 2.2 GB of m2hle.log in a
+ * headless training run (issue #69). Each kind of bus warning logs its first
+ * MEM_WARN_FIRST occurrences in full, then only when its count reaches a power
+ * of two, so a run that keeps doing it for a week still writes a few dozen lines.
+ * The counts themselves are exact (bus->unmapped_*, bus->ro_writes). */
+#define MEM_WARN_FIRST 32u
+static inline bool mem__warn_due(uint64_t n) {
+    return n <= MEM_WARN_FIRST || (n & (n - 1)) == 0;
+}
+
 static inline uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
     bus->reads++;
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
-        bus->unmapped_reads++;
-        LOG_WARN("mem: unmapped read8 @ 0x%08X", addr);
+        if (mem__warn_due(++bus->unmapped_reads))
+            LOG_WARN("mem: unmapped read8 @ 0x%08X (IP=0x%08X, %llu unmapped reads so far)",
+                     addr, bus->cpu_ip, (unsigned long long)bus->unmapped_reads);
         return 0;
     }
     if (r->read_cb) return r->read_cb(r, addr, 1) & 0xFF;
@@ -685,8 +698,9 @@ static inline uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
     bus->reads++;
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
-        bus->unmapped_reads++;
-        LOG_WARN("mem: unmapped read16 @ 0x%08X (IP=0x%08X)", addr, bus->cpu_ip);
+        if (mem__warn_due(++bus->unmapped_reads))
+            LOG_WARN("mem: unmapped read16 @ 0x%08X (IP=0x%08X, %llu unmapped reads so far)",
+                     addr, bus->cpu_ip, (unsigned long long)bus->unmapped_reads);
         return 0;
     }
     if (r->read_cb) return r->read_cb(r, addr, 2) & 0xFFFF;
@@ -699,8 +713,9 @@ static inline uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
     bus->reads++;
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
-        bus->unmapped_reads++;
-        LOG_WARN("mem: unmapped read32 @ 0x%08X (IP=0x%08X)", addr, bus->cpu_ip);
+        if (mem__warn_due(++bus->unmapped_reads))
+            LOG_WARN("mem: unmapped read32 @ 0x%08X (IP=0x%08X, %llu unmapped reads so far)",
+                     addr, bus->cpu_ip, (unsigned long long)bus->unmapped_reads);
         return 0;
     }
     if (r->read_cb) return r->read_cb(r, addr, 4);
@@ -829,12 +844,18 @@ static inline void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     dl_tap(addr, val & 0xFF);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
-        bus->unmapped_writes++;
-        LOG_WARN("mem: unmapped write8 @ 0x%08X = 0x%02X (IP=0x%08X)", addr, val & 0xFF, bus->cpu_ip);
+        if (mem__warn_due(++bus->unmapped_writes))
+            LOG_WARN("mem: unmapped write8 @ 0x%08X = 0x%02X (IP=0x%08X, %llu unmapped writes so far)",
+                     addr, val & 0xFF, bus->cpu_ip, (unsigned long long)bus->unmapped_writes);
         return;
     }
     if (r->write_cb) { r->write_cb(r, addr, val, 1); return; }
-    if (r->readonly) { LOG_WARN("mem: write8 to RO %s @ 0x%08X", r->name, addr); return; }
+    if (r->readonly) {
+        if (mem__warn_due(++bus->ro_writes))
+            LOG_WARN("mem: write8 to RO %s @ 0x%08X = 0x%02X (IP=0x%08X, %llu RO writes so far)",
+                     r->name, addr, val & 0xFF, bus->cpu_ip, (unsigned long long)bus->ro_writes);
+        return;
+    }
     if (!r->data)    return;
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && r->data[off] != (uint8_t)val;
@@ -849,12 +870,18 @@ static inline void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     dl_tap(addr, val & 0xFFFF);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
-        bus->unmapped_writes++;
-        LOG_WARN("mem: unmapped write16 @ 0x%08X = 0x%04X (IP=0x%08X)", addr, val & 0xFFFF, bus->cpu_ip);
+        if (mem__warn_due(++bus->unmapped_writes))
+            LOG_WARN("mem: unmapped write16 @ 0x%08X = 0x%04X (IP=0x%08X, %llu unmapped writes so far)",
+                     addr, val & 0xFFFF, bus->cpu_ip, (unsigned long long)bus->unmapped_writes);
         return;
     }
     if (r->write_cb) { r->write_cb(r, addr, val, 2); return; }
-    if (r->readonly) { LOG_WARN("mem: write16 to RO %s @ 0x%08X", r->name, addr); return; }
+    if (r->readonly) {
+        if (mem__warn_due(++bus->ro_writes))
+            LOG_WARN("mem: write16 to RO %s @ 0x%08X = 0x%04X (IP=0x%08X, %llu RO writes so far)",
+                     r->name, addr, val & 0xFFFF, bus->cpu_ip, (unsigned long long)bus->ro_writes);
+        return;
+    }
     if (!r->data)    return;
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && (r->data[off] | (r->data[off + 1] << 8)) != (val & 0xFFFF);
@@ -871,12 +898,18 @@ static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     if (g_dl.active && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
-        bus->unmapped_writes++;
-        LOG_WARN("mem: unmapped write32 @ 0x%08X = 0x%08X (IP=0x%08X)", addr, val, bus->cpu_ip);
+        if (mem__warn_due(++bus->unmapped_writes))
+            LOG_WARN("mem: unmapped write32 @ 0x%08X = 0x%08X (IP=0x%08X, %llu unmapped writes so far)",
+                     addr, val, bus->cpu_ip, (unsigned long long)bus->unmapped_writes);
         return;
     }
     if (r->write_cb) { r->write_cb(r, addr, val, 4); return; }
-    if (r->readonly) { LOG_WARN("mem: write32 to RO %s @ 0x%08X", r->name, addr); return; }
+    if (r->readonly) {
+        if (mem__warn_due(++bus->ro_writes))
+            LOG_WARN("mem: write32 to RO %s @ 0x%08X = 0x%08X (IP=0x%08X, %llu RO writes so far)",
+                     r->name, addr, val, bus->cpu_ip, (unsigned long long)bus->ro_writes);
+        return;
+    }
     if (!r->data)    return;
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && ((uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8)

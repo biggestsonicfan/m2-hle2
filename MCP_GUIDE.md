@@ -39,7 +39,9 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | Flag | Meaning |
 |------|---------|
 | `--mcp` | Enable the TCP bridge (required for MCP) |
-| `--mcp-port N` | Use port N instead of 7172 |
+| `--mcp-port N` | Use port N instead of 7172. Without `--log`, the session log becomes `m2hle-N.log`, so instances started side by side keep separate logs |
+| `--log <path>` | Write the session log here instead of `m2hle.log`; `--log off` writes no file (the log window still has it) |
+| `--log-level SPEC` | Drop lines below a level: `warn`, or per channel (the `mem:` / `netplay:` / `sound:` tag a line starts with), e.g. `warn,mem=error,netplay=debug`. Levels are `debug`, `info`, `warn`, `error`, `off`. The file stops at 64 MB whatever the level |
 | `--rom <path>` | Auto-load this ROM zip on startup |
 | `--run` | Start executing immediately after ROM load |
 | `--match-replay` | Arm `match_replay` (below) from boot |

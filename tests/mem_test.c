@@ -70,6 +70,29 @@ int main(void) {
     (void)mem_read32(&bus, 0xFFFFFFF0);
     CHECK(bus.unmapped_reads == um_before + 1, "unmapped read tracked");
 
+    /* A game that writes to ROM every frame must not write a line every time
+     * (issue #69: 33.8 million lines, 2.2 GB). The count stays exact; the log
+     * gets the first MEM_WARN_FIRST and then one line per power of two. */
+    int lines_before = g_log.count;
+    uint64_t ro_before = bus.ro_writes;
+    for (int i = 0; i < 100000; i++) mem_write32(&bus, ROM_BASE + 0x40, (uint32_t)i);
+    CHECK(bus.ro_writes == ro_before + 100000, "every RO write is counted");
+    CHECK(g_log.count - lines_before <= (int)MEM_WARN_FIRST + 17, "RO write warnings are throttled");
+    CHECK(g_log.count - lines_before >= (int)MEM_WARN_FIRST, "the first RO writes are still logged");
+
+    /* --log-level: a default level and per-channel levels, by the line's tag. */
+    CHECK(log_set_levels("warn,mem=off,netplay=debug"), "level spec parses");
+    lines_before = g_log.count;
+    LOG_WARN("mem: dropped by its channel");
+    LOG_INFO("emu: dropped by the default");
+    LOG_DEBUG("netplay: kept by its channel");
+    LOG_WARN("MEM: channels ignore case, so dropped");
+    LOG_ERROR("untagged, kept by the default");
+    CHECK(g_log.count - lines_before == 2, "levels filter by channel, then default");
+    CHECK(!log_set_levels("loud"), "a bad level is refused");
+    CHECK(!log_set_levels("mem=loud"), "a bad channel level is refused");
+    CHECK(log_set_levels("debug"), "back to everything");
+
     /* A re-init must not MOVE the heap regions. A netplay session re-runs
      * mem_init on the emu thread while the frame callback is decoding texture
      * RAM through a pointer it loaded earlier; a block that moved is a block
