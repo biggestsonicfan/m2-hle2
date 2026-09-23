@@ -317,6 +317,10 @@ typedef struct {
     uint16_t local_p2p_port;    /* 0 = RPCN_P2P_PORT */
 } netplay_config_t;
 
+/* RPCS3's password is 64 hex characters, and every copy of it in the UIs,
+ * the settings file and the MCP bridge takes its size from this field. */
+_Static_assert(sizeof(((netplay_config_t *)0)->password) > 64, "RPCS3's 64-character key must fit");
+
 typedef struct {
     netplay_cmd_kind_t kind;
     netplay_config_t   cfg;
@@ -2234,6 +2238,7 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
         ps3_link_host(&g_netplay.ps3link, slots, ints);
         if (!rpcn_session_host_ps3(&g_netplay.session, slots, ints, g_netplay.ps3link.blob, PS3_ROOM_BIN_SIZE,
                                    ps3_link_member_bin(&g_netplay.ps3link), PS3_MEMBER_BIN_SIZE)) {
+            ps3_link_leave(&g_netplay.ps3link);   /* no room: we own nothing */
             g_netplay.state = NETPLAY_FAILED;
             return;
         }

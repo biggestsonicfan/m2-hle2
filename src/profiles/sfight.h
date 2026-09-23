@@ -685,7 +685,8 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x00062674, sfight_hook_damage_default,     "damage_default"          }, \
     { 0x000083F4, sfight_hook_xplay_force_start,  "xplay_force_start"       }, \
     { 0x0000A218, sfight_hook_xplay_barrier,      "xplay_sel_int_barrier"   }, \
-    { 0x0000E6EC, sfight_hook_xplay_match_over,   "xplay_vic_int"           },     { 0x0000E93C, sfight_hook_xplay_vic_dsp,      "xplay_vic_dsp"           }, \
+    { 0x0000E6EC, sfight_hook_xplay_match_over,   "xplay_vic_int"           }, \
+    { 0x0000E93C, sfight_hook_xplay_vic_dsp,      "xplay_vic_dsp"           }, \
     { 0x0000AF84, sfight_hook_xplay_stage,        "xplay_stage"             }, \
     { 0x0000B0F8, sfight_hook_xplay_game_time,    "xplay_game_time"         }, \
     { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      },

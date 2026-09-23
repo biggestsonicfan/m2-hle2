@@ -196,6 +196,10 @@ typedef struct {
     uint32_t room_flags;
     bool     is_host;        /* we created this room (the owner may since have moved) */
     bool     ps3;            /* rpcn_session_config_t.ps3 */
+    /* We hold a reference on the socket library (net_startup) for the life of
+     * the peer-to-peer socket. The TLS layer holds its own only while it is
+     * connected, and the UDP socket is opened before it. */
+    bool     net_held;
 
     /* The room we are in. */
     uint16_t    my_member_id;
@@ -496,6 +500,7 @@ static inline void rpcn_session_apply_room(rpcn_session_t *s, const rpcn_room_in
 
 static inline void rpcn_session_stop(rpcn_session_t *s) {
     rpcn_disconnect(&s->client);
+    if (s->net_held) { net_shutdown_lib(); s->net_held = false; }
     s->stage      = RPCN_STAGE_IDLE;
     rpcn_session_clear_room(s);
     s->signaling_seen = false;
@@ -574,6 +579,14 @@ static inline bool rpcn_session_start(rpcn_session_t *s, const rpcn_session_conf
      * the server the connect picks, so it keeps the old order.) */
     uint16_t p2p_port = cfg->local_p2p_port ? cfg->local_p2p_port : RPCN_P2P_PORT;
     net_sock_t p2p = NET_SOCK_INVALID;
+    /* Before any socket: on Windows nothing else may have started Winsock yet
+     * (the TLS connect does, but only after this), and socket() then fails
+     * with WSANOTINITIALISED (10093). Held until rpcn_session_stop, so a
+     * reconnect after the TLS layer let go of its own finds it up too. */
+    if (!s->net_held) {
+        if (!net_startup()) { rpcn_session_fail(s, "could not start the socket library"); return false; }
+        s->net_held = true;
+    }
     if (!net_udp_open(&p2p, p2p_port)) {
         int err = net_errno();
 #ifdef _WIN32
