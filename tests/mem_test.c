@@ -93,6 +93,45 @@ int main(void) {
     CHECK(!log_set_levels("mem=loud"), "a bad channel level is refused");
     CHECK(log_set_levels("debug"), "back to everything");
 
+    /* The file cap. Past it the file stays OPEN -- closing it raced any other
+     * thread mid-fprintf -- takes one notice, then only errors until the
+     * reserve is spent. A tiny cap stands in for 64 MB. */
+    {
+        const char *path = "mem_test_cap.log";
+        log_file_close();
+        g_log.file_open_attempted = 0;
+        log_set_path(path);
+        log_set_file_cap(1024);
+        for (int i = 0; i < 200; i++) LOG_INFO("cap: filler line %d", i);
+        CHECK(g_log.file != NULL, "the file stays open past the cap");
+        CHECK(g_log.file_capped, "the cap is reached");
+        unsigned long long at_cap = g_log.file_bytes;
+        CHECK(at_cap < 1024 + LOG_MAX_LINE, "writing stopped at the cap");
+        LOG_WARN("cap: a warning past the cap");
+        CHECK(g_log.file_bytes == at_cap, "past the cap, a warning is not written");
+        LOG_ERROR("cap: an error past the cap");
+        CHECK(g_log.file_bytes > at_cap, "past the cap, an error still is");
+        g_log.file_bytes = 1024 + LOG_FILE_ERR_RESERVE;
+        unsigned long long spent = g_log.file_bytes;
+        LOG_ERROR("cap: an error past the reserve");
+        CHECK(g_log.file_bytes == spent, "past the reserve, nothing is written");
+        log_file_close();
+        FILE *fh = fopen(path, "rb");
+        int notices = 0, errs = 0;
+        char line[LOG_MAX_LINE + 16];
+        while (fh && fgets(line, sizeof line, fh)) {
+            if (strstr(line, "reached its cap")) notices++;
+            if (strstr(line, "an error past the cap")) errs++;
+            CHECK(!strstr(line, "a warning past the cap"), "no warning in the file");
+            CHECK(!strstr(line, "past the reserve"), "no line past the reserve");
+        }
+        if (fh) fclose(fh);
+        CHECK(notices == 1 && errs == 1, "one notice, then the error");
+        remove(path);
+        log_set_file_cap(0);
+        log_set_path(NULL);
+    }
+
     /* A re-init must not MOVE the heap regions. A netplay session re-runs
      * mem_init on the emu thread while the frame callback is decoding texture
      * RAM through a pointer it loaded earlier; a block that moved is a block

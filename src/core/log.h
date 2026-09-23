@@ -24,11 +24,14 @@
 #define LOG_MAX_LINES   1024
 #define LOG_MAX_LINE    256
 #define LOG_FILE_PATH   "m2hle.log"
-/* The most one session writes to its log file. Past it the file gets one last
- * line and is closed; the log window keeps going. A normal session writes a
- * few kilobytes, and nothing in it is worth a full disk (issue #69: logs of
- * 2.2 GB and 9.9 GB, and one that filled C: under a Docker VM). */
-#define LOG_FILE_CAP    (64u * 1024u * 1024u)
+/* The most one session writes to its log file. Past it the file gets one
+ * notice and then only errors, for LOG_FILE_ERR_RESERVE more bytes: what a
+ * long session is read for usually comes at its end. The log window keeps
+ * everything. A normal session writes a few kilobytes, and nothing in it is
+ * worth a full disk (issue #69: logs of 2.2 GB and 9.9 GB, and one that
+ * filled C: under a Docker VM). */
+#define LOG_FILE_CAP         (64ull * 1024ull * 1024ull)
+#define LOG_FILE_ERR_RESERVE (1ull * 1024ull * 1024ull)
 #define LOG_MAX_CHANNELS 16         /* --log-level CHANNEL=LEVEL entries */
 
 typedef enum {
@@ -48,6 +51,8 @@ typedef struct {
     FILE        *file;
     int          file_open_attempted;
     unsigned long long file_bytes;
+    unsigned long long file_cap;  /* 0 = LOG_FILE_CAP; see log_set_file_cap */
+    volatile int file_capped;     /* past the cap: errors only, until the reserve */
     char         path[512];     /* "" = LOG_FILE_PATH; see log_set_path */
     int          file_off;      /* --log off */
     int          min_rank;      /* --log-level default: lines below it are dropped */
@@ -68,6 +73,11 @@ static inline void log_set_path(const char *path) {
     g_log.file_off = 0;
     strncpy(g_log.path, path, sizeof(g_log.path) - 1);
     g_log.path[sizeof(g_log.path) - 1] = '\0';
+}
+
+/* The cap, for a test that wants to reach it without writing 64 MB. */
+static inline void log_set_file_cap(unsigned long long bytes) {
+    g_log.file_cap = bytes;
 }
 
 static inline const char *log_file_path(void) {
@@ -151,6 +161,7 @@ static inline void log_file_ensure_open(void) {
     g_log.file = fopen(log_file_path(), "w"); /* truncate per session */
     if (g_log.file) {
         g_log.file_bytes = 0;
+        g_log.file_capped = 0;
         fprintf(g_log.file, "=== m2-hle session log ===\n");
         fflush(g_log.file);
     }
@@ -181,17 +192,28 @@ static inline void log_msg(log_level_t level, const char *fmt, ...) {
     va_end(args);
     if (log__rank(level) < log__threshold(buf)) return;
 
+    /* The file is never closed while the session runs. This takes no lock and
+     * is called from the emu, MCP, A/V and main threads, so closing it at the
+     * cap would let a thread that had already read the pointer write through a
+     * closed FILE* (review on #69). Past the cap it stays open and takes only
+     * errors, until the reserve is spent. Two threads racing over the cap can
+     * each write the notice: a duplicate line, not a crash. */
     log_file_ensure_open();
-    if (g_log.file) {
-        int n = fprintf(g_log.file, "%s %s\n", prefixes[level], buf);
-        if (n > 0) g_log.file_bytes += (unsigned)n;
-        if (g_log.file_bytes >= LOG_FILE_CAP) {
-            fprintf(g_log.file, "[WARN] log: this file reached its %u MB cap; later lines "
-                                "are only in the log window\n", LOG_FILE_CAP >> 20);
-            fclose(g_log.file);
-            g_log.file = NULL;              /* file_open_attempted stays set */
-        } else {
-            fflush(g_log.file); /* per-line flush so `tail -f` works */
+    FILE *f = g_log.file;
+    if (f) {
+        unsigned long long cap = g_log.file_cap ? g_log.file_cap : LOG_FILE_CAP;
+        int take = !g_log.file_capped
+                || (level == LOG_LVL_ERROR
+                    && g_log.file_bytes < cap + LOG_FILE_ERR_RESERVE);
+        if (take) {
+            int n = fprintf(f, "%s %s\n", prefixes[level], buf);
+            if (n > 0) g_log.file_bytes += (unsigned)n;
+            if (!g_log.file_capped && g_log.file_bytes >= cap) {
+                g_log.file_capped = 1;
+                fprintf(f, "[WARN] log: this file reached its cap (%llu bytes); from here "
+                           "only errors are written, the log window has everything\n", cap);
+            }
+            fflush(f); /* per-line flush so `tail -f` works */
         }
     }
 
