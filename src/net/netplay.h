@@ -262,7 +262,11 @@ typedef struct {
     uint16_t port;
     char     fingerprint[80];
     char     npid[20];
-    char     password[64];
+    /* Room for RPCS3's: it never sends what the player typed, but a key
+     * derived from it (PBKDF2 over SHA3-256, `derive_password` in
+     * rpcn_settings_dialog.cpp), 64 hex characters -- one more than a
+     * char[64] holds, and a key one character short is "wrong password". */
+    char     password[128];
     char     token[64];
     char     email[128];        /* sign-up only */
     /*
@@ -297,9 +301,9 @@ typedef struct {
     uint32_t frame_delay;
     uint32_t max_players;       /* hosting: 2..8; 0 = 2 */
     bool     vs_mode;           /* hosting: play this room's matches in VS mode (g_vs_mode) */
-    /* hosting: DAMAGE NORMAL, the cabinet's catch-up damage (g_damage_real).
-     * False, the default, is REAL. */
-    bool     damage_normal;
+    /* hosting: DAMAGE REAL, no catch-up damage (g_damage_real). False, the
+     * default, is NORMAL: the cabinet's factory setting and the console's. */
+    bool     damage_real;
     uint8_t  entry;             /* room_entry_t, for NETPLAY_CMD_ENTRY */
     bool     watch_only;        /* for NETPLAY_CMD_WATCH */
     bool     browse_yamp;       /* also search YAMP's lobby space, read-only */
@@ -312,6 +316,10 @@ typedef struct {
     char     ps3_wire[260];
     uint16_t local_p2p_port;    /* 0 = RPCN_P2P_PORT */
 } netplay_config_t;
+
+/* RPCS3's password is 64 hex characters, and every copy of it in the UIs,
+ * the settings file and the MCP bridge takes its size from this field. */
+_Static_assert(sizeof(((netplay_config_t *)0)->password) > 64, "RPCS3's 64-character key must fit");
 
 typedef struct {
     netplay_cmd_kind_t kind;
@@ -415,6 +423,10 @@ typedef struct {
     char server[128];       /* and the server it is on */
 
     char error[256];
+    /* The password was right and the server wants the e-mail verification token
+     * (none given, or the wrong one): a lobby asks for it rather than showing
+     * the same refusal again. */
+    bool need_email_token;
     char log[NETPLAY_LOG_LINES][NETPLAY_LOG_LEN];
     uint32_t log_count;     /* total ever written; index = (n % LINES) */
 } netplay_status_t;
@@ -1457,12 +1469,11 @@ static inline void netplay_text_add(netplay_text_t *t, const char *fmt, ...) {
 
 static inline void netplay_twitch_merge_disk(void);
 
-static inline void netplay_settings_save(void) {
-    netplay_twitch_merge_disk();
-    char text[2048];
-    netplay_text_t t = { text, sizeof(text) };
+/* The settings file's text for what g_netplay.cfg holds now, under `header`. */
+static inline void netplay_settings_text(char *text, size_t size, const char *header) {
+    netplay_text_t t = { text, size };
     text[0] = '\0';
-    netplay_text_add(&t, "# m2-hle2 netplay settings. Delete this file to forget them.\n");
+    netplay_text_add(&t, "%s", header);
     if (g_netplay.cfg.password[0])
         netplay_text_add(&t, "# This file holds a password in clear text.\n");
     netplay_text_add(&t, "server=%s\n",       g_netplay.cfg.server);
@@ -1490,16 +1501,17 @@ static inline void netplay_settings_save(void) {
         netplay_text_add(&t, "twitch_server=%s\n", g_netplay.cfg.twitch_server);
         netplay_text_add(&t, "twitch_port=%u\n", (unsigned)g_netplay.cfg.twitch_port);
     }
+}
 
-    memcpy(g_netplay.twitch_synced, g_netplay.cfg.twitch_token, sizeof(g_netplay.twitch_synced));
+/* Write settings text to `path` (on the web build, a storage key). */
+static inline void netplay_settings_write(const char *path, const char *text) {
 #ifdef __EMSCRIPTEN__
-    netplay_web_store(NETPLAY_CFG_PATH, text);
+    netplay_web_store(path, text);
 #else
     /* Written whole and renamed into place: every copy of the emulator on the
      * machine shares this file, and a stream and its training runs can sign in
      * at the same moment. A reader must never see half of one. */
-    const char *path = netplay_cfg_path();
-    char tmp[sizeof(g_netplay_cfg_path) + 24];
+    char tmp[sizeof(g_netplay_cfg_path) + 48];
 #ifdef _WIN32
     snprintf(tmp, sizeof(tmp), "%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
 #else
@@ -1529,6 +1541,40 @@ static inline void netplay_settings_save(void) {
         netplay_log("could not save the netplay settings to %s", path);
     }
 #endif
+}
+
+static inline void netplay_settings_save(void) {
+    netplay_twitch_merge_disk();
+    char text[2048];
+    netplay_settings_text(text, sizeof(text),
+                          "# m2-hle2 netplay settings. Delete this file to forget them.\n");
+    memcpy(g_netplay.twitch_synced, g_netplay.cfg.twitch_token, sizeof(g_netplay.twitch_synced));
+#ifdef __EMSCRIPTEN__
+    netplay_settings_write(NETPLAY_CFG_PATH, text);
+#else
+    netplay_settings_write(netplay_cfg_path(), text);
+#endif
+}
+
+/* Sign-out forgets every credential, and a Twitch token or an e-mail token cannot
+ * be typed back in from memory. So the sign-in is copied aside first, beside the
+ * settings file: renaming the copy over it undoes the sign-out. Only the latest
+ * sign-out is kept. */
+static inline void netplay_settings_backup(void) {
+    if (!g_netplay.cfg.password[0] && !g_netplay.cfg.token[0] && !g_netplay.cfg.twitch_token[0])
+        return;   /* nothing that could be lost */
+    char text[2048];
+    netplay_settings_text(text, sizeof(text),
+                          "# m2-hle2 netplay settings, copied at sign-out. Rename this file over\n"
+                          "# the settings file to sign back in with them.\n");
+    char path[560];
+#ifdef __EMSCRIPTEN__
+    snprintf(path, sizeof(path), "%s.signed-out", NETPLAY_CFG_PATH);
+#else
+    snprintf(path, sizeof(path), "%s.signed-out", netplay_cfg_path());
+#endif
+    netplay_settings_write(path, text);
+    netplay_log("the sign-in was copied to %s before being forgotten", path);
 }
 
 static inline void netplay_settings_parse_line(netplay_config_t *cfg, char *line) {
@@ -1841,6 +1887,8 @@ static inline void netplay_publish_status(void) {
 
     snprintf(st->error, sizeof(st->error), "%s",
              g_netplay.state == NETPLAY_FAILED ? rpcn_session_error(&g_netplay.session) : "");
+    st->need_email_token = g_netplay.state == NETPLAY_FAILED
+                        && g_netplay.session.login_error == RPCN_ERR_LOGIN_BAD_TOKEN;
 
     st->ps3 = g_netplay.ps3;
     if (g_netplay.ps3) {
@@ -2010,6 +2058,10 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     g_netplay.state        = NETPLAY_CONNECTING;
     netplay_log("connecting to %s:%u as %s", g_netplay.cfg.server,
                 g_netplay.cfg.port ? g_netplay.cfg.port : RPCN_DEFAULT_PORT, g_netplay.cfg.npid);
+    /* The TLS handshake below blocks for seconds, and the status is otherwise
+     * published only after it: a caller polling for "online" or "failed" read
+     * "off" all that time, which looks like the connect was dropped. */
+    netplay_publish_status();
 
     if (!rpcn_session_start(&g_netplay.session, &sc)) {
         g_netplay.state = NETPLAY_FAILED;
@@ -2215,13 +2267,28 @@ static inline void netplay_do_disconnect(void) {
 
 static inline void netplay_do_host(const netplay_config_t *cfg) {
     if (g_netplay.ps3) {
-        netplay_log("hosting a room for PS3 players is not supported yet - join one a PS3 made");
+        /* A room in the PS3 port's own shape, run the way a PS3 owner runs one
+         * (ps3_link.h, ps3_owner_pump). Its rules are the PS3's defaults, and
+         * a PS3 room has no password of ours to put on it. */
+        uint32_t slots = cfg->max_players < 2 ? 2u
+                       : cfg->max_players > ROOM_MAX_MEMBERS ? ROOM_MAX_MEMBERS : cfg->max_players;
+        if (cfg->room_password[0]) netplay_log("PS3 rooms take no password; this one will be open");
+        netplay_forget_room();
+        uint32_t ints[8];
+        ps3_link_host(&g_netplay.ps3link, slots, ints);
+        if (!rpcn_session_host_ps3(&g_netplay.session, slots, ints, g_netplay.ps3link.blob, PS3_ROOM_BIN_SIZE,
+                                   ps3_link_member_bin(&g_netplay.ps3link), PS3_MEMBER_BIN_SIZE)) {
+            ps3_link_leave(&g_netplay.ps3link);   /* no room: we own nothing */
+            g_netplay.state = NETPLAY_FAILED;
+            return;
+        }
+        netplay_log("hosting a PS3 room for up to %u (3 rounds, 30 s, type A); waiting for players", slots);
         return;
     }
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
     g_netplay.cfg.max_players   = cfg->max_players;
     g_netplay.cfg.vs_mode       = cfg->vs_mode;
-    g_netplay.cfg.damage_normal = cfg->damage_normal;
+    g_netplay.cfg.damage_real   = cfg->damage_real;
     g_netplay.cfg.room_password[0] = '\0';
     snprintf(g_netplay.cfg.room_password, sizeof(g_netplay.cfg.room_password), "%s",
              cfg->room_password);
@@ -2457,6 +2524,7 @@ static inline void netplay_pump_commands(void) {
                  * lobby's "Sign out" is how a player changes account or server,
                  * and on a shared machine it has to mean it. */
                 netplay_do_disconnect();
+                netplay_settings_backup();
                 g_netplay.cfg.twitch_token[0]  = '\0';
                 g_netplay.cfg.twitch_npid[0]   = '\0';
                 g_netplay.cfg.twitch_server[0] = '\0';
@@ -2854,7 +2922,7 @@ static inline void netplay_owner_pump(void) {
             s.seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s.match << 16) ^ 0x5A5Au;
             s.region      = (uint8_t)g_region;
             s.vs_mode     = netplay_room_vs_mode() ? 1u : 0u;
-            s.damage_real = g_netplay.cfg.damage_normal ? 0u : 1u;
+            s.damage_real = g_netplay.cfg.damage_real ? 1u : 0u;
             s.session     = s.match;
             s.last_result = ROOM_RESULT_NONE;
             s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);

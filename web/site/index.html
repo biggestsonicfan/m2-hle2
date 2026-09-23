@@ -151,7 +151,7 @@
       </div>
       <form id="np-form-signin" class="np-form" autocomplete="on">
         <label>Name <input id="np-signin-name" name="username" autocomplete="username" required maxlength="16"></label>
-        <label>Password <input id="np-signin-password" name="password" type="password" autocomplete="current-password" required maxlength="63"></label>
+        <label>Password <input id="np-signin-password" name="password" type="password" autocomplete="current-password" required maxlength="127"></label>
         <details id="np-code-box">
           <summary>The server e-mailed me a code</summary>
           <label>Code from the e-mail <input id="np-signin-token" autocomplete="one-time-code" maxlength="63"></label>
@@ -228,8 +228,8 @@
       <label>Private match password <input id="np-private" maxlength="8" autocomplete="off" placeholder="none"></label>
       <label id="np-damage-row" hidden>Damage
         <select id="np-damage" class="tool">
-          <option value="real">REAL</option>
           <option value="normal">NORMAL (catch-up damage)</option>
+          <option value="real">REAL</option>
         </select>
       </label>
       <p class="fine left">The web version plays other people on the web version.</p>

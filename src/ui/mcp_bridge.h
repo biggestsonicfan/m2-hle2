@@ -246,6 +246,8 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
      * co-planar decal wants. */
     if (mcp_json_get_str(req,"zsort",    v,sizeof v)) g_geo3d_zsort = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zrecede",  v,sizeof v)) g_geo3d_zsort_recede = (float)atof(v);
+    /* 0: the profile's standing models (geo3d_model_standing) recede like the rest. */
+    if (mcp_json_get_str(req,"zstanding",v,sizeof v)) g_geo3d_zsort_standing = (atoi(v) != 0);
     /* Faces lying on faces (geo3d_mesh_layers): 0 draws them as before. */
     if (mcp_json_get_str(req,"zlayers",  v,sizeof v)) g_geo3d_layers = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zlayer_steps",v,sizeof v)) g_geo3d_layer_steps = (float)atof(v);

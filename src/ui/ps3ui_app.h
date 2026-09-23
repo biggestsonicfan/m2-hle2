@@ -426,7 +426,7 @@ typedef struct {
     int searching;              /* a search is out */
     uint32_t search_sent;
     int rule_players, rule_vs, rule_delay;
-    int rule_damage_normal;     /* DAMAGE NORMAL (catch-up); ours only, REAL by default */
+    int rule_damage_real;       /* DAMAGE REAL (no catch-up); ours only, NORMAL by default */
     int list_n;
     int list_idx[PS3UI_ROWS];
 
@@ -441,8 +441,9 @@ typedef struct {
     char result_names[2][20];
 
     /* the on-screen keyboard (ours) */
-    int osk_field;              /* 0 = name, 1 = password */
-    char osk_text[2][64];
+    int osk_field;              /* 0 = name, 1 = password, 2 = e-mail token */
+    char osk_text[3][128];   /* [1] holds RPCS3's 64-character derived key too */
+    int fail_shown;             /* this failure's error has been shown */
     int osk_row, osk_col, osk_shift;
     ps3ui_screen_t osk_back;
 } ps3ui_app_t;
@@ -545,6 +546,8 @@ static void ps3ui_app_go(ps3ui_app_t *a, ps3ui_screen_t s)
 
 static void ps3ui_post(ps3ui_app_t *a, netplay_cmd_kind_t k)
 {
+    if (k == NETPLAY_CMD_CONNECT || k == NETPLAY_CMD_TWITCH_START)
+        a->fail_shown = 0;              /* a new attempt: its failure is news */
     if (a->be.post)
         a->be.post(k, &a->cfg);
 }
@@ -668,7 +671,7 @@ static void ps3ui_host(ps3ui_app_t *a, int players)
 {
     a->cfg.max_players = (uint32_t)players;
     a->cfg.vs_mode = a->rule_vs != 0;
-    a->cfg.damage_normal = ps3ui_on_community(a) && a->rule_damage_normal;
+    a->cfg.damage_real = ps3ui_on_community(a) && a->rule_damage_real;
     a->cfg.frame_delay = (uint32_t)(a->rule_delay ? a->rule_delay : a->default_delay);
     ps3ui_post(a, NETPLAY_CMD_HOST);
     ps3ui_app_go(a, PS3UI_SCR_CONNECT);
@@ -739,14 +742,14 @@ static void ps3ui_update_osk(ps3ui_app_t *a)
     int done = ps3ui_hit(a, PS3UI_PAD_START);
     if (ps3ui_hit(a, PS3UI_PAD_CROSS)) {
         if (a->osk_row < 4) {
-            if (len + 1 < (a->osk_field == 0 ? 17u : 63u)) {
+            if (len + 1 < (a->osk_field == 0 ? 17u : (uint32_t)sizeof a->osk_text[1])) {
                 t[len] = ps3ui_osk_rows[a->osk_shift][a->osk_row][a->osk_col];
                 t[len + 1] = 0;
             }
         } else if (a->osk_col == PS3UI_OSK_ACT_SHIFT) {
             a->osk_shift ^= 1;
         } else if (a->osk_col == PS3UI_OSK_ACT_SPACE) {
-            if (len + 1 < 63) t[len] = ' ', t[len + 1] = 0;
+            if (len + 1 < (uint32_t)sizeof a->osk_text[1]) t[len] = ' ', t[len + 1] = 0;
         } else if (a->osk_col == PS3UI_OSK_ACT_BACK) {
             if (len) t[len - 1] = 0;
         } else {
@@ -760,8 +763,13 @@ static void ps3ui_update_osk(ps3ui_app_t *a)
         a->osk_row = a->osk_col = 0;
         return;
     }
-    snprintf(a->cfg.npid, sizeof a->cfg.npid, "%s", a->osk_text[0]);
-    snprintf(a->cfg.password, sizeof a->cfg.password, "%s", a->osk_text[1]);
+    if (a->osk_field == 2) {
+        /* the e-mail token, for the account and password already typed */
+        snprintf(a->cfg.token, sizeof a->cfg.token, "%s", a->osk_text[2]);
+    } else {
+        snprintf(a->cfg.npid, sizeof a->cfg.npid, "%s", a->osk_text[0]);
+        snprintf(a->cfg.password, sizeof a->cfg.password, "%s", a->osk_text[1]);
+    }
     a->cfg.twitch_token[0] = 0;
     ps3ui_post(a, NETPLAY_CMD_CONNECT);
     ps3ui_app_go(a, PS3UI_SCR_CONNECT);
@@ -805,7 +813,7 @@ static void ps3ui_update_rule(ps3ui_app_t *a)
         if (a->cursor == 0) a->rule_players = 2 + (a->rule_players - 2 + d + 7) % 7;
         if (a->cursor == 1) a->rule_vs ^= 1;
         if (a->cursor == 2) a->rule_delay = (a->rule_delay + d + 9) % 9;
-        if (a->cursor == 3) a->rule_damage_normal ^= 1;
+        if (a->cursor == 3) a->rule_damage_real ^= 1;
     }
     if (ps3ui_hit(a, PS3UI_PAD_CIRCLE))
         ps3ui_app_go(a, PS3UI_SCR_MENU);
@@ -1024,11 +1032,29 @@ static void ps3ui_follow(ps3ui_app_t *a)
         a->scr = PS3UI_SCR_NONE;                     /* the game has the screen */
         break;
     case NETPLAY_FAILED:
-        if (a->dialog != PS3UI_DLG_ERROR && st->error[0]) {
-            snprintf(a->dialog_text, sizeof a->dialog_text, "%s", st->error);
+        /* Once per failure. Netplay stays FAILED until the next attempt, so
+         * asking again whenever the dialog is closed brings it straight back,
+         * and the player can never get past it to try anything else. */
+        if (!a->fail_shown && st->error[0]) {
+            a->fail_shown = 1;
+            if (st->need_email_token) {
+                /* The password was right; the server verifies accounts by
+                 * e-mail. There is no token box on the sign-in screen, so the
+                 * keyboard asks for it and signs in again with it. */
+                a->osk_field = 2;
+                snprintf(a->osk_text[2], sizeof a->osk_text[2], "%s", a->cfg.token);
+                a->osk_row = a->osk_col = 0;
+                a->osk_back = PS3UI_SCR_SIGNIN;
+                ps3ui_app_go(a, PS3UI_SCR_OSK);
+                snprintf(a->dialog_text, sizeof a->dialog_text, "%s",
+                         a->cfg.token[0] ? "The server refused that e-mail token. Check it against the sign-up e-mail and enter it again."
+                                         : "This server verifies accounts by e-mail. Enter the token from the sign-up e-mail.");
+            } else {
+                snprintf(a->dialog_text, sizeof a->dialog_text, "%s", st->error);
+            }
             ps3ui_app_ask(a, PS3UI_DLG_ERROR, a->dialog_text);
         }
-        if (a->scr != PS3UI_SCR_SIGNIN)
+        if (a->scr != PS3UI_SCR_SIGNIN && a->scr != PS3UI_SCR_OSK)
             ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
         break;
     }
@@ -1410,16 +1436,17 @@ static void ps3ui_draw_osk(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     float alpha = ps3ui_slot_alpha(&s, "p_txt_01_lt");
     ps3ui_text_style_t st = ps3ui_style_text(37.0f);
     /* row 0: the field */
-    char shown[80];
+    char shown[sizeof a->osk_text[1]];
     if (a->osk_field == 1) {
         size_t n = strlen(a->osk_text[1]);
         memset(shown, '*', n);
         shown[n] = 0;
     } else {
-        snprintf(shown, sizeof shown, "%s", a->osk_text[0]);
+        snprintf(shown, sizeof shown, "%s", a->osk_text[a->osk_field]);
     }
-    char line[128];
-    snprintf(line, sizeof line, "%s: %s_", a->osk_field ? "Password" : "Online ID", shown);
+    static const char *const label[3] = { "Online ID", "Password", "E-mail token" };
+    char line[sizeof shown + 32];
+    snprintf(line, sizeof line, "%s: %s_", label[a->osk_field], shown);
     ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly, line, alpha);
     /* rows 1..4: keys; row 5: actions */
     float cell = (rx - lx) / 10.0f;
@@ -1523,7 +1550,7 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
             else
                 snprintf(d, sizeof d, "Auto");
             const char *values[4] = { p, a->rule_vs ? "VS (rematch)" : "Arcade", d,
-                                      a->rule_damage_normal ? "NORMAL" : "REAL" };
+                                      a->rule_damage_real ? "REAL" : "NORMAL" };
             ps3ui_draw_menu(cv, a, "RULE MENU", rows, ps3ui_rule_rows(a), values);
             break;
         }

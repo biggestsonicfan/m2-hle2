@@ -11,12 +11,18 @@
  *      message exactly once; channels 2 and 3 whatever arrives.
  *  (C) RPCS3's signaling (net/rpcs3_signal.h): the 75-byte layout, and the
  *      handshake between two ends that makes each one's game see the other.
+ *  (D) The room's owner and its line (net/ps3_link.h): choosing the fighters
+ *      (np_session_build_fight_entries), the line after a result
+ *      (np_session_rotate_queue_after_match), and the lockstep's shape under
+ *      the room's match flags (SyncIo_Init_rings); the owner's phase machine
+ *      stepped by hand; and the sign-in's bind before the TLS connect.
  */
 #define NDEBUG 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "ps3_link.h"
 #include "rpcs3_signal.h"
 #include "rudp.h"
 
@@ -337,10 +343,264 @@ static void test_signaling(void) {
     free(ab); free(ba);
 }
 
+/* A room of three with no network: us (16, the owner) and members 33 and 40. */
+static void room_of_three(rpcn_session_t *s, ps3_link_t *L) {
+    memset(s, 0, sizeof(*s));
+    memset(L, 0, sizeof(*L));
+    s->room_id = 1;
+    s->stage = RPCN_STAGE_HOSTING;
+    s->my_member_id = s->owner_id = 16;
+    s->room_bin_len = PS3_ROOM_BIN_SIZE;
+    s->room_bin[4] = 1;                          /* a Room Match */
+    const uint16_t ids[2] = { 33, 40 };
+    for (int i = 0; i < 2; i++) {
+        s->peers[i].used = true;
+        s->peers[i].member_id = ids[i];
+        s->peers[i].team_id = 0xFF;
+        s->peers[i].bin_len = PS3_MEMBER_BIN_SIZE;
+    }
+    L->session = s;
+    L->team = 0xFF;
+    L->hosting = true;
+}
+
+static void test_owner(void) {
+    static rpcn_session_t s;
+    static ps3_link_t L;
+
+    /* Nobody asked for a side: the first two in line, by join order. */
+    room_of_three(&s, &L);
+    CHECK(ps3_owner_choose(&L) && ps3_be32(L.blob + 0x14) == 2 && ps3_be16(L.blob + 0x18) == 16
+          && ps3_be16(L.blob + 0x1A) == 33, "with no entries the first two in line fight, 1P first");
+
+    /* 40 asked for 2P: it gets 2P, and the first in line fills 1P. */
+    room_of_three(&s, &L);
+    s.peers[1].bin[0x1C] = 2;
+    CHECK(ps3_owner_choose(&L) && ps3_be16(L.blob + 0x18) == 16 && ps3_be16(L.blob + 0x1A) == 40,
+          "a 2P entry takes 2P, a filler takes the empty side");
+
+    /* 40 asked for 1P and is last in line: it still takes 1P. */
+    room_of_three(&s, &L);
+    s.peers[0].team_id = 1;
+    L.team = 2;
+    s.peers[1].team_id = 3;
+    s.peers[1].bin[0x1C] = 1;
+    CHECK(ps3_owner_choose(&L) && ps3_be16(L.blob + 0x18) == 40 && ps3_be16(L.blob + 0x1A) == 33,
+          "a 1P entry beats the line; the front of the line fills 2P");
+
+    /* After 16 (1P) beat 33 (2P): 16 to the front asking for 1P again, 40
+     * next, the loser 33 to the back. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    ps3_rotate(&L, 1);
+    CHECK(L.team == 1 && L.me[0x1C] == 1 && (ps3_be32(L.me) & PS3_MFLAG_ROTATED),
+          "the winner goes to the front, asks for its side again and marks bit 29");
+    room_of_three(&s, &L);
+    s.my_member_id = 40;                         /* the same result, as the waiting member sees it */
+    s.peers[1].member_id = 16;
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    ps3_rotate(&L, 1);
+    CHECK(L.team == 2 && L.me[0x1C] == 0, "a waiting member moves up behind the winner");
+    room_of_three(&s, &L);
+    s.my_member_id = 33;
+    s.peers[0].member_id = 16;
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    L.me[0x1C] = 2;
+    ps3_rotate(&L, 1);
+    CHECK(L.team == 3 && L.me[0x1C] == 0, "the loser goes to the back and asks for nothing");
+
+    /* A member that did not see the result reads it off the fighters. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 33; L.fighters[1] = 40;
+    ps3_put32(s.peers[1].bin, PS3_MFLAG_ROTATED | PS3_MFLAG_IN_MATCH);   /* 40, 2P, asked for nothing */
+    s.peers[1].team_id = 3;                                              /* ... at the back */
+    CHECK(ps3_published_winner(&L) == 1, "2P went to the back asking for nothing: 1P won");
+    s.peers[1].team_id = 1;
+    s.peers[1].bin[0x1C] = 2;
+    CHECK(ps3_published_winner(&L) == 2, "2P went to the front asking for 2P again: 2P won");
+
+    /* The lockstep follows the room's match flags. */
+    room_of_three(&s, &L);
+    L.room_rtt_ms = 16;
+    ps3_sio_start(&L, 0);
+    CHECK(L.sio.small_every == 1 && L.sio.big_every == 60 && L.sio.init_delay == 2,
+          "two fighters alone: every frame, 60-frame packets, delay 2 at 16 ms");
+    L.match_flags = PS3_MATCH_SPECTATORS;
+    ps3_sio_start(&L, 0);
+    CHECK(L.sio.small_every == 2 && L.sio.big_every == 12 && L.sio.init_delay == 3,
+          "with watchers: every 2nd frame, every 12th to them, one frame more delay");
+    L.match_flags = PS3_MATCH_RELAY | PS3_MATCH_SPECTATORS;
+    ps3_sio_start(&L, 0);
+    CHECK(L.sio.small_every == 4 && L.sio.init_delay == 10, "relay mode: every 4th frame, delay 10");
+}
+
+/* The owner's phase machine, stepped by hand: the server's echo is simulated
+ * by copying the owner's blob into the session, as RPCN's self-notification
+ * would. A room of two: us (16) and 33. */
+static void echo(rpcn_session_t *s, const ps3_link_t *L) {
+    memcpy(s->room_bin, L->blob, PS3_ROOM_BIN_SIZE);
+    s->room_bin_len = PS3_ROOM_BIN_SIZE;
+}
+
+static void test_owner_pump(void) {
+    static rpcn_session_t s;
+    static ps3_link_t L;
+    room_of_three(&s, &L);
+    s.peers[1].used = false;                     /* just 33 */
+    L.max_slot = 2;
+    L.blob[4] = 1;
+    echo(&s, &L);
+    uint64_t t = 1000000;
+
+    ps3_owner_pump(&L, t);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_CHOOSING, "a full room of two starts choosing at once");
+    ps3_owner_pump(&L, t + 1000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_CHOOSING && s.room_bin[0x13] == PS3_PHASE_LOBBY,
+          "no step until the server has echoed the last write");
+
+    echo(&s, &L);
+    ps3_owner_pump(&L, t + 2000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_PREPARING && ps3_be16(L.blob + 0x18) == 16
+          && ps3_be16(L.blob + 0x1A) == 33, "then preparing, with the two of us as 1P and 2P");
+
+    echo(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;   /* what ps3_read_room takes from the echo */
+    ps3_owner_pump(&L, t + 3000);
+    CHECK(!L.own_entrant, "our own entrant data waits for a link to the other fighter");
+    ps3_owner_pump(&L, t + 3000 + PS3_LINK_WAIT_US + 1);
+    CHECK(L.own_entrant && (ps3_be32(L.blob + 0x20) & PS3_SLOT_NO_LINK) && (ps3_be32(L.me) & PS3_MFLAG_READY),
+          "or, after the wait, goes in marked as having none");
+
+    /* 33's entrant data: refused from anyone else, and for the wrong side. */
+    ps3_peer_t from;
+    memset(&from, 0, sizeof(from));
+    snprintf(from.npid, sizeof(from.npid), "m2hletest");
+    uint8_t m[7 + PS3_ENTRANT_SIZE];
+    memset(m, 0, sizeof(m));
+    m[0] = PS3_MSG_UPDATE_SETTING;
+    m[6] = 1;
+    from.member_id = 40;
+    ps3_on_message(&L, &from, 1, m, sizeof(m));
+    CHECK(!(ps3_be32(L.blob + 0x84) & PS3_SLOT_FILLED), "a member who is not 2P cannot fill 2P's slot");
+    from.member_id = 33;
+    m[6] = 0;
+    ps3_on_message(&L, &from, 1, m, sizeof(m));
+    CHECK(ps3_be32(L.blob + 0x20) & PS3_SLOT_NO_LINK, "nor 2P fill 1P's");
+    m[6] = 1;
+    ps3_on_message(&L, &from, 1, m, sizeof(m));
+    CHECK(ps3_be32(L.blob + 0x84) & PS3_SLOT_FILLED, "2P's own entrant data fills its slot");
+
+    ps3_owner_pump(&L, t + 7000000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_PREPARING, "not before 2P has also set ready");
+    ps3_put32(s.peers[0].bin, PS3_MFLAG_READY);
+    ps3_owner_pump(&L, t + 7001000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_MATCH && L.blob[5] == PS3_MATCH_RELAY,
+          "both ready: the match, in relay mode since we had no link");
+
+    echo(&s, &L);
+    ps3_owner_pump(&L, t + 8000000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_MATCH, "a fighting owner waits for its own match");
+    L.match_seen = true;
+    L.match = false;
+    ps3_owner_pump(&L, t + 9000000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_RESULTS, "and moves to the results when its match is over");
+
+    echo(&s, &L);
+    ps3_put32(s.peers[0].bin, PS3_MFLAG_IN_MATCH | PS3_MFLAG_ROTATED);
+    ps3_owner_pump(&L, t + 10000000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_RESULTS, "results last while anyone is still marked in the match");
+    ps3_put32(s.peers[0].bin, 0);
+    ps3_owner_pump(&L, t + 11000000);
+    CHECK(ps3_be32(L.blob + 0x10) == PS3_PHASE_LOBBY, "then back to the lobby");
+
+    /* A fighter whose lockstep gave out still marks itself done, with its
+     * place in line unchanged. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    L.team = 2;
+    ps3_rotate(&L, 0);
+    CHECK((ps3_be32(L.me) & PS3_MFLAG_ROTATED) && L.team == 2, "no result: bit 29 and the same place");
+    /* ... which a member reading the fighters does not take for a result. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 33; L.fighters[1] = 40;
+    s.peers[0].team_id = 2;
+    s.peers[0].bin[0x1C] = 1;
+    ps3_put32(s.peers[0].bin, PS3_MFLAG_ROTATED);
+    CHECK(ps3_published_winner(&L) == 0, "a fighter at the same place asking for its side is not a winner");
+    /* The common case: last match's winner, staying on at teamId 1 and asking
+     * for its side again, whose lockstep gives out this match. */
+    s.peers[0].team_id = 1;
+    CHECK(ps3_published_winner(&L) == 1, "(without the mark, last match's winner looks like this match's)");
+    s.peers[0].bin[PS3_ME_NO_RESULT] = 1;
+    CHECK(ps3_published_winner(&L) == 0, "marked 'no result', last match's winner is not read as this one's");
+    ps3_put32(s.peers[1].bin, PS3_MFLAG_ROTATED);   /* 40, 2P, at the back asking for nothing */
+    s.peers[1].team_id = 2;
+    CHECK(ps3_published_winner(&L) == 1, "the other fighter's real result still counts");
+    s.peers[1].team_id = 1;
+    s.peers[1].bin[0x1C] = 2;
+    CHECK(ps3_published_winner(&L) == 2, "and says who won when the marked fighter lost");
+    /* Our own no-result rotation marks us, and the next match clears it. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    L.team = 1; L.me[0x1C] = 1;
+    ps3_rotate(&L, 0);
+    CHECK(L.me[PS3_ME_NO_RESULT] == 1 && L.team == 1 && L.me[0x1C] == 1, "our no-result rotation is marked");
+    s.room_bin_len = PS3_ROOM_BIN_SIZE;
+    ps3_put32(s.room_bin + 0x10, PS3_PHASE_PREPARING);
+    s.room_rev++;
+    ps3_read_room(&L);
+    ps3_put32(s.room_bin + 0x10, PS3_PHASE_MATCH);
+    s.room_rev++;
+    ps3_read_room(&L);
+    CHECK(L.me[PS3_ME_NO_RESULT] == 0, "and the mark is gone when the next match starts");
+    ps3_match_end(&L, "test");
+}
+
+/* The peer-to-peer port is bound before the TLS connect, and on Windows that
+ * needs the socket library up first: with nothing else having started it, a
+ * sign-in failed with "could not bind UDP (10093)". Nothing here has started
+ * it, and the server does not exist, so the connect is what must fail. */
+static void test_bind_order(void) {
+    static rpcn_session_t s;
+    memset(&s, 0, sizeof(s));
+    /* A port nothing holds, found with the library up and then let go of. */
+    uint16_t port = 0;
+    net_startup();
+    for (uint16_t p = 3747; p < 3800 && !port; p++) {
+        net_sock_t k = NET_SOCK_INVALID;
+        if (net_udp_open(&k, p)) { net_close(&k); port = p; }
+    }
+    net_shutdown_lib();
+    CHECK(port != 0 && g_net_refs == 0, "a free port, and nothing holds the socket library");
+    rpcn_session_config_t c;
+    memset(&c, 0, sizeof(c));
+    c.server = "127.0.0.1";
+    c.port = 1;
+    c.npid = "nobody";
+    c.password = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    c.token = "";
+    c.com_id = "NPWR03869_00";
+    c.local_p2p_port = port;
+    c.ps3 = true;
+    bool ok = rpcn_session_start(&s, &c);
+    const char *err = rpcn_session_error(&s);
+    printf("      (%s)\n", err);
+    CHECK(!ok && s.stage == RPCN_STAGE_FAILED && !strstr(err, "could not bind"),
+          "a first sign-in gets as far as the connect: the socket library is up for the bind");
+    CHECK(s.net_held && g_net_refs == 1, "the session holds its one reference on the library");
+    rpcn_session_stop(&s);
+    CHECK(!s.net_held && g_net_refs == 0, "and gives it back when it stops");
+    rpcn_session_stop(&s);
+    CHECK(g_net_refs == 0, "a second stop gives back nothing more");
+}
+
 int main(void) {
     test_capture();
     test_pair();
     test_signaling();
+    test_owner();
+    test_owner_pump();
+    test_bind_order();
     printf(g_fail ? "\n%d FAILED\n" : "\nall passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

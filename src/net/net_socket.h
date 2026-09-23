@@ -230,7 +230,18 @@ static inline bool net_udp_open(net_sock_t *out, uint16_t port) {
     local.sin_family      = AF_INET;
     local.sin_addr.s_addr = INADDR_ANY;
     local.sin_port        = htons(port);
-    if (bind(s, (struct sockaddr *)&local, sizeof(local)) != 0) { net_close(&s); return false; }
+    if (bind(s, (struct sockaddr *)&local, sizeof(local)) != 0) {
+        /* Closing succeeds and clears the error, which then reads as 0 in
+         * "could not bind UDP 3658 (0)". Keep the bind's. */
+        int err = net_errno();
+        net_close(&s);
+#ifdef _WIN32
+        WSASetLastError(err);
+#else
+        errno = err;
+#endif
+        return false;
+    }
 
     *out = s;
     return true;
