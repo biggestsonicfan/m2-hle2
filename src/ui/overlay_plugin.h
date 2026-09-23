@@ -60,6 +60,12 @@
  * whose layer sizes are stable — which is all of them, between resizes — is
  * therefore called exactly once per composed frame. paint() must tolerate
  * being called twice for one frame, and must never write through a NULL `px`.
+ *
+ * `px` is sized for the `w`/`h` the layer ARRIVES with. A plugin that changes
+ * a layer's size in this call must not paint that layer in this call: its
+ * `px` is still the old buffer, non-NULL, and too small if the layer grew.
+ * Writing into it corrupts the host's heap, and the host finds out later, in
+ * free(). Paint on the next call, when the host hands back the new buffer.
  */
 typedef struct {
     int       id;          /* stable across frames: 0..M2_OVERLAY_MAX_LAYERS-1 */
