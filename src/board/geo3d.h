@@ -513,12 +513,32 @@ static inline void geo3d_zsort_step(uint32_t at, bool is_tri, bool has_C,
  *                alternates sheets from there.
  *   MIRROR_X/Y   bits 8 / 9: a coordinate that runs into an odd copy of the
  *                tile is inverted (fetch_bilinear_texel `u = ~u`) instead of
- *                repeating. */
+ *                repeating.
+ *   WRAP_X/Y     bits 6 / 7: the bilinear pair at the tile's last texel
+ *                blends into the next copy's first. Without the bit the board
+ *                clamps there, taking the nearer texel of the pair unblended
+ *                (fetch_bilinear_texel, `!tex_wrap_x && u1 == 0`), which is
+ *                what keeps STF's sky ring free of a seam at every segment
+ *                join. MAME clears wrap on a mirrored axis; the mirrored tap is
+ *                the edge texel again there, so the flag needs no masking.
+ *                Bits 64 and 128 belong to the renderer, hence 256 / 512 (the
+ *                explorer's too). */
 #define GEO3D_FACE_TRANSPARENT 1u
 #define GEO3D_FACE_CHECKER     2u
 #define GEO3D_FACE_SHEET1      4u
 #define GEO3D_FACE_MIRROR_X    8u
 #define GEO3D_FACE_MIRROR_Y    16u
+#define GEO3D_FACE_WRAP_X      256u
+#define GEO3D_FACE_WRAP_Y      512u
+
+/* 0: every face filters as if it set both wrap bits, the fill from before they
+ * were read (set_camera "texclamp", for a before/after). Applied where the
+ * renderer packs its vertices, since cached meshes hold the decoded flags. */
+static int g_geo3d_tex_clamp = 1;
+static inline float geo3d_face_fill_flags(float fl) {
+    return g_geo3d_tex_clamp ? fl
+        : (float)((unsigned)(fl + 0.5f) | GEO3D_FACE_WRAP_X | GEO3D_FACE_WRAP_Y);
+}
 
 typedef struct {
     geo3d_tri_t tris[GEO3D_MAX_TRIS];
@@ -1927,8 +1947,16 @@ static inline void geo3d_decode_model(int model_idx,
 
         switch (iflag) {
             case 0:
-                idx[n_idx - 4] = -1; idx[n_idx - 3] = -1;
-                idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
+                /* Not at the head of a mesh: there is no previous group, and the
+                 * four points standing there are the board's first polygon
+                 * (MAME model2_3d_push case 0x01; the relink runs after it). A
+                 * mesh that opens on this link is AM2's one-link 2x2 shadow card,
+                 * 70 entries in STF that used to decode to nothing (explorer
+                 * js/model.js, measured over STF, FV, HotD and Daytona). */
+                if (vcount > 0) {
+                    idx[n_idx - 4] = -1; idx[n_idx - 3] = -1;
+                    idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
+                }
                 idx[n_idx++] = new_a - 2; idx[n_idx++] = new_a - 1;
                 idx[n_idx++] = new_a;     idx[n_idx++] = new_a + 1;
                 break;
@@ -2008,6 +2036,8 @@ static inline void geo3d_decode_model(int model_idx,
                 if (texsheet)                   fflags |= GEO3D_FACE_SHEET1;
                 if ((th0 >> 8) & 1)             fflags |= GEO3D_FACE_MIRROR_X;
                 if ((th0 >> 9) & 1)             fflags |= GEO3D_FACE_MIRROR_Y;
+                if ((th0 >> 6) & 1)             fflags |= GEO3D_FACE_WRAP_X;
+                if ((th0 >> 7) & 1)             fflags |= GEO3D_FACE_WRAP_Y;
                 uint32_t matidx = (th3 >> 6) & 0x3ff;   /* colorbase → palette */
                 uint32_t pal = GEO3D_PALETTE_OFF + matidx * 2u;
                 uint32_t ram = (matidx + 0x1000u) * 2u;
@@ -2836,8 +2866,10 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         qt[n_qt++] = f1;
         int new_a = 2 * (vcount + 2);
         switch (iflag) {
-            case 0:
-                idx[n_idx - 4] = -1; idx[n_idx - 3] = -1; idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
+            case 0:   /* the head of a mesh keeps its first polygon, as above */
+                if (vcount > 0) {
+                    idx[n_idx - 4] = -1; idx[n_idx - 3] = -1; idx[n_idx - 2] = -1; idx[n_idx - 1] = -1;
+                }
                 idx[n_idx++] = new_a - 2; idx[n_idx++] = new_a - 1; idx[n_idx++] = new_a; idx[n_idx++] = new_a + 1;
                 break;
             case 1: {
@@ -2891,6 +2923,8 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
                 if (texsheet)                   fflags |= GEO3D_FACE_SHEET1;
                 if ((th0 >> 8) & 1)             fflags |= GEO3D_FACE_MIRROR_X;
                 if ((th0 >> 9) & 1)             fflags |= GEO3D_FACE_MIRROR_Y;
+                if ((th0 >> 6) & 1)             fflags |= GEO3D_FACE_WRAP_X;
+                if ((th0 >> 7) & 1)             fflags |= GEO3D_FACE_WRAP_Y;
                 matidx = (th3 >> 6) & 0x3ff;
                 mat_ok = true;
             }

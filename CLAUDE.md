@@ -120,6 +120,8 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
 | 2 | Plain new quad group |
 | 3 | Anchor new strip off previous corner (`f1==1` → `Index[-1]`, else `Index[-2]`; `anchor_b = Index[-3]`) |
 
+**iFlag 0 at the head of a mesh wipes nothing.** There is no previous group there: the four points standing at the head are the board's first polygon (MAME `model2_3d_push` case 0x01). Every mesh that opens on this link is AM2's one-link 2×2 shadow card at y = −2. Wiping it left 70 STF entries (110 in FV, 813 in Daytona) decoding to nothing. The explorer found it (noclip `js/model.js`); `grade-models` now holds 4,474 models, up from 4,404.
+
 **Face loop:** `i < n_idx - 8`, always 2 groups behind tail.
 **Face type:** `f1 == 2` → triangle; otherwise quad with **A-B-D-C** winding.
 **Vertex convention:** `(x, y, -z)` — Z is negated on read.
@@ -140,6 +142,8 @@ STF reference dataset: `C:\m2\3d\new\stf-poly` — 4405 OBJ files, 5-digit zero-
   - bit 13 on a textured face: the transparent renderer, where texel 15 is a hole (four-tap coverage ≥ 0.5 survives)
   - bit 15: checker, drawn on every other pixel
   - bits 8 / 9: mirror X / Y, where an odd repeat of the tile reads back to front
+  - bits 6 / 7: smooth wrap X / Y (face flags 256 / 512, the explorer's bits). Only with the bit does the bilinear pair at a tile's last texel blend into the next copy's first. Without it the board clamps: it takes the nearer texel of the pair (`fetch_bilinear_texel`, `!tex_wrap_x && u1 == 0`). MAME clears wrap on a mirrored axis, but the mirrored tap is the edge texel again there, so no masking is needed.
+    - *Symptom that surfaced this in STF (issue #81):* South Island's sky ring (one panorama over four 256×256 tiles in 16 segments; its faces set neither bit) showed a one-pixel seam of the tile's far edge at every join. The ground and water set both bits. `set_camera {"texclamp":0}` brings back the old always-wrap filter for an A/B, and `grade-zsort.mjs --stage 0 --toggle texclamp` grades it against MAME.
 
   Sampling is bilinear with the half-texel offset. The lumaram band is indexed with the *filtered* texel (`lumabase + t*120`), not the nearest of 16. Mip level L sits at `((tx-2048)>>L)&2047, ((ty-1024)>>L)&1023`, on alternating sheets. `grade-models.mjs` checks the face flags against the explorer.
 
