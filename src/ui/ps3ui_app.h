@@ -426,7 +426,7 @@ typedef struct {
     int searching;              /* a search is out */
     uint32_t search_sent;
     int rule_players, rule_vs, rule_delay;
-    int rule_damage_normal;     /* DAMAGE NORMAL (catch-up); ours only, REAL by default */
+    int rule_damage_real;       /* DAMAGE REAL (no catch-up); ours only, NORMAL by default */
     int list_n;
     int list_idx[PS3UI_ROWS];
 
@@ -668,7 +668,7 @@ static void ps3ui_host(ps3ui_app_t *a, int players)
 {
     a->cfg.max_players = (uint32_t)players;
     a->cfg.vs_mode = a->rule_vs != 0;
-    a->cfg.damage_normal = ps3ui_on_community(a) && a->rule_damage_normal;
+    a->cfg.damage_real = ps3ui_on_community(a) && a->rule_damage_real;
     a->cfg.frame_delay = (uint32_t)(a->rule_delay ? a->rule_delay : a->default_delay);
     ps3ui_post(a, NETPLAY_CMD_HOST);
     ps3ui_app_go(a, PS3UI_SCR_CONNECT);
@@ -805,7 +805,7 @@ static void ps3ui_update_rule(ps3ui_app_t *a)
         if (a->cursor == 0) a->rule_players = 2 + (a->rule_players - 2 + d + 7) % 7;
         if (a->cursor == 1) a->rule_vs ^= 1;
         if (a->cursor == 2) a->rule_delay = (a->rule_delay + d + 9) % 9;
-        if (a->cursor == 3) a->rule_damage_normal ^= 1;
+        if (a->cursor == 3) a->rule_damage_real ^= 1;
     }
     if (ps3ui_hit(a, PS3UI_PAD_CIRCLE))
         ps3ui_app_go(a, PS3UI_SCR_MENU);
@@ -1523,7 +1523,7 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
             else
                 snprintf(d, sizeof d, "Auto");
             const char *values[4] = { p, a->rule_vs ? "VS (rematch)" : "Arcade", d,
-                                      a->rule_damage_normal ? "NORMAL" : "REAL" };
+                                      a->rule_damage_real ? "REAL" : "NORMAL" };
             ps3ui_draw_menu(cv, a, "RULE MENU", rows, ps3ui_rule_rows(a), values);
             break;
         }
