@@ -142,8 +142,10 @@
  * 5: the sound board is charged a frame of samples when the game's frame ends,
  *    not once a slice (emu_thread.h, emu_sound_slice_end), so across a frame
  *    that spans several slices it runs fewer samples than a board before it.
+ * 6: the room state's damage_real (DAMAGE REAL / NORMAL, g_damage_real), which
+ *    the cold boot applies; a board before it always boots NORMAL.
  */
-#define NETPLAY_PROTO_REV 5
+#define NETPLAY_PROTO_REV 6
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
@@ -242,7 +244,16 @@ typedef enum {
     NETPLAY_CMD_TWITCH_START,   /* begin the OAuth device flow */
     NETPLAY_CMD_TWITCH_CANCEL,
     NETPLAY_CMD_TWITCH_FORGET,  /* drop the stored login token */
+    NETPLAY_CMD_SIGN_OUT,       /* disconnect and forget every stored credential */
 } netplay_cmd_kind_t;
+
+/* The two RPCN servers the pad and web lobbies offer. The official one is where
+ * RPCS3's players are (and, for Sonic the Fighters, the PS3 port's rooms:
+ * ps3_link.h); ours runs this emulator's own rooms and is the one with Twitch
+ * sign-in. Accounts are per server: an RPCN account on one does not exist on
+ * the other. */
+#define NETPLAY_SERVER_OFFICIAL  "np.rpcs3.net"
+#define NETPLAY_SERVER_COMMUNITY "rpcn.sonicthefighte.rs"
 
 /* Everything the UI can set. Copied into the netplay state when a command is
  * posted, so the UI's own buffers are never read from the emu thread. */
@@ -271,11 +282,24 @@ typedef struct {
      * npid in that case, which is what such a file always meant.
      */
     char     twitch_npid[20];
+    /*
+     * WHERE that token was issued. A token is only good on its own server, and
+     * it is a password: offered anywhere else it hands the credential to that
+     * server's operator. Once a player can pick the server (the official one or
+     * ours) the stored `server` stops saying where the token came from, so it is
+     * kept here. Empty in a file written before this existed; the load adopts
+     * `server`, which is what such a file always meant.
+     */
+    char     twitch_server[128];
+    uint16_t twitch_port;
     char     room_password[16];
     uint64_t room_id;           /* join target */
     uint32_t frame_delay;
     uint32_t max_players;       /* hosting: 2..8; 0 = 2 */
     bool     vs_mode;           /* hosting: play this room's matches in VS mode (g_vs_mode) */
+    /* hosting: DAMAGE NORMAL, the cabinet's catch-up damage (g_damage_real).
+     * False, the default, is REAL. */
+    bool     damage_normal;
     uint8_t  entry;             /* room_entry_t, for NETPLAY_CMD_ENTRY */
     bool     watch_only;        /* for NETPLAY_CMD_WATCH */
     bool     browse_yamp;       /* also search YAMP's lobby space, read-only */
@@ -387,6 +411,9 @@ typedef struct {
     char                 twitch_error[256];
     bool                 twitch_signed_in;   /* a login token is stored */
 
+    char npid[20];          /* the account signed in, or signing in */
+    char server[128];       /* and the server it is on */
+
     char error[256];
     char log[NETPLAY_LOG_LINES][NETPLAY_LOG_LEN];
     uint32_t log_count;     /* total ever written; index = (n % LINES) */
@@ -472,6 +499,7 @@ typedef struct {
     bool                own_saved;
     int                 own_vs_mode;
     int                 own_region;
+    int                 own_damage_real;
     bool                empty_prompt;
     uint32_t            empty_held;     /* buttons already down when the prompt went up */
     bool                empty_restart;  /* pressed: restart at the next pump */
@@ -1365,13 +1393,32 @@ static inline const char *netplay_cfg_path(void) {
 }
 #endif
 
-/* Is the stored Twitch token this account's? A token with no recorded owner
- * predates `twitch_npid` and belonged to whoever was stored beside it, which
- * `netplay_settings_load` has already filled in -- so an empty owner here
- * means there is no token at all. */
+/* RPCN account names, and server names, compare without case. */
+static inline bool netplay_same_name(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        char x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+        if (x != y) return false;
+    }
+    return *a == *b;
+}
+
+/* Was the stored Twitch token issued by the server `cfg` names? */
+static inline bool netplay_twitch_here(const netplay_config_t *cfg) {
+    if (!cfg->twitch_token[0]) return false;
+    uint16_t a = cfg->twitch_port ? cfg->twitch_port : RPCN_DEFAULT_PORT;
+    uint16_t b = cfg->port ? cfg->port : RPCN_DEFAULT_PORT;
+    return netplay_same_name(cfg->twitch_server, cfg->server) && a == b;
+}
+
+/* Is the stored Twitch token this account's, on this server? A token with no
+ * recorded owner predates `twitch_npid` and belonged to whoever was stored
+ * beside it, which `netplay_settings_load` has already filled in -- so an empty
+ * owner here means there is no token at all. */
 static inline bool netplay_twitch_is_for(const netplay_config_t *cfg,
                                          const char *npid) {
-    if (!cfg->twitch_token[0] || !npid || !npid[0]) return false;
+    if (!netplay_twitch_here(cfg) || !npid || !npid[0]) return false;
     if (!cfg->twitch_npid[0]) return true;      /* pre-owner file, already adopted */
     return strcmp(cfg->twitch_npid, npid) == 0;
 }
@@ -1438,8 +1485,11 @@ static inline void netplay_settings_save(void) {
     netplay_text_add(&t, "twitch_token=%s\n", g_netplay.cfg.twitch_token);
     /* Saved beside the token and never without it: a token whose owner was
      * forgotten is the thing this field exists to prevent. */
-    if (g_netplay.cfg.twitch_token[0])
+    if (g_netplay.cfg.twitch_token[0]) {
         netplay_text_add(&t, "twitch_npid=%s\n", g_netplay.cfg.twitch_npid);
+        netplay_text_add(&t, "twitch_server=%s\n", g_netplay.cfg.twitch_server);
+        netplay_text_add(&t, "twitch_port=%u\n", (unsigned)g_netplay.cfg.twitch_port);
+    }
 
     memcpy(g_netplay.twitch_synced, g_netplay.cfg.twitch_token, sizeof(g_netplay.twitch_synced));
 #ifdef __EMSCRIPTEN__
@@ -1501,6 +1551,21 @@ static inline void netplay_settings_parse_line(netplay_config_t *cfg, char *line
     else if (!strcmp(key, "token"))        snprintf(cfg->token, sizeof(cfg->token), "%s", val);
     else if (!strcmp(key, "twitch_token")) snprintf(cfg->twitch_token, sizeof(cfg->twitch_token), "%s", val);
     else if (!strcmp(key, "twitch_npid"))  snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", val);
+    else if (!strcmp(key, "twitch_server")) snprintf(cfg->twitch_server, sizeof(cfg->twitch_server), "%s", val);
+    else if (!strcmp(key, "twitch_port"))  cfg->twitch_port = (uint16_t)atoi(val);
+}
+
+/* What a file from before `twitch_npid` / `twitch_server` meant: a token
+ * belonged to the account and the server stored beside it, because there was
+ * only ever one of each in it. */
+static inline void netplay_settings_adopt_legacy(netplay_config_t *cfg) {
+    if (!cfg->twitch_token[0]) return;
+    if (!cfg->twitch_npid[0])
+        snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", cfg->npid);
+    if (!cfg->twitch_server[0]) {
+        snprintf(cfg->twitch_server, sizeof(cfg->twitch_server), "%s", cfg->server);
+        cfg->twitch_port = cfg->port;
+    }
 }
 
 /* Returns true when the settings came from an older build's file in the working
@@ -1529,10 +1594,7 @@ static inline bool netplay_settings_load(netplay_config_t *cfg) {
     fclose(f);
 #endif
 
-    /* A file written before tokens had owners: the token was whoever's name
-     * was stored with it, because there was only ever one account in it. */
-    if (cfg->twitch_token[0] && !cfg->twitch_npid[0])
-        snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", cfg->npid);
+    netplay_settings_adopt_legacy(cfg);
     return legacy;
 }
 
@@ -1548,27 +1610,24 @@ static inline bool netplay_settings_read_current(netplay_config_t *cfg) {
     char line[512];
     while (fgets(line, sizeof(line), f)) netplay_settings_parse_line(cfg, line);
     fclose(f);
-    if (cfg->twitch_token[0] && !cfg->twitch_npid[0])
-        snprintf(cfg->twitch_npid, sizeof(cfg->twitch_npid), "%s", cfg->npid);
+    netplay_settings_adopt_legacy(cfg);
     return true;
 #endif
 }
 
-/* RPCN account names compare without case. */
-static inline bool netplay_same_name(const char *a, const char *b) {
-    for (; *a && *b; a++, b++) {
-        char x = *a, y = *b;
-        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
-        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
-        if (x != y) return false;
-    }
-    return *a == *b;
+/* Were the two stored Twitch tokens issued by the same server? */
+static inline bool netplay_same_twitch_server(const netplay_config_t *a, const netplay_config_t *b) {
+    uint16_t pa = a->twitch_port ? a->twitch_port : RPCN_DEFAULT_PORT;
+    uint16_t pb = b->twitch_port ? b->twitch_port : RPCN_DEFAULT_PORT;
+    return netplay_same_name(a->twitch_server, b->twitch_server) && pa == pb;
 }
 
-static inline bool netplay_same_server(const netplay_config_t *a, const netplay_config_t *b) {
-    uint16_t pa = a->port ? a->port : RPCN_DEFAULT_PORT;
-    uint16_t pb = b->port ? b->port : RPCN_DEFAULT_PORT;
-    return netplay_same_name(a->server, b->server) && pa == pb;
+/* The stored Twitch login -- token, owner and issuing server -- from `from`. */
+static inline void netplay_twitch_copy(netplay_config_t *to, const netplay_config_t *from) {
+    memcpy(to->twitch_token,  from->twitch_token,  sizeof(to->twitch_token));
+    memcpy(to->twitch_npid,   from->twitch_npid,   sizeof(to->twitch_npid));
+    memcpy(to->twitch_server, from->twitch_server, sizeof(to->twitch_server));
+    to->twitch_port = from->twitch_port;
 }
 
 /*
@@ -1585,10 +1644,10 @@ static inline void netplay_twitch_merge_disk(void) {
     netplay_config_t disk;
     if (!netplay_settings_read_current(&disk)) return;
     if (strcmp(disk.twitch_token, g_netplay.twitch_synced) == 0) return;          /* nobody else */
-    if (disk.twitch_token[0] && !netplay_same_server(&disk, &g_netplay.cfg)) return;
-    memcpy(g_netplay.cfg.twitch_token, disk.twitch_token, sizeof(disk.twitch_token));
-    memcpy(g_netplay.cfg.twitch_npid,  disk.twitch_npid,  sizeof(disk.twitch_npid));
-    memcpy(g_netplay.twitch_synced,    disk.twitch_token, sizeof(disk.twitch_token));
+    if (disk.twitch_token[0] && g_netplay.cfg.twitch_token[0]
+        && !netplay_same_twitch_server(&disk, &g_netplay.cfg)) return;
+    netplay_twitch_copy(&g_netplay.cfg, &disk);
+    memcpy(g_netplay.twitch_synced, disk.twitch_token, sizeof(disk.twitch_token));
 }
 
 /* ---- Command queue (UI thread -> emu thread) ----------------------------- */
@@ -1769,6 +1828,8 @@ static inline void netplay_publish_status(void) {
 
     st->twitch_state     = g_netplay.twitch.state;
     st->twitch_signed_in = g_netplay.cfg.twitch_token[0] != '\0';
+    snprintf(st->npid, sizeof(st->npid), "%s", g_netplay.cfg.npid);
+    snprintf(st->server, sizeof(st->server), "%s", g_netplay.cfg.server);
     snprintf(st->twitch_user_code, sizeof(st->twitch_user_code), "%s", g_netplay.twitch.user_code);
     snprintf(st->twitch_uri, sizeof(st->twitch_uri), "%s", g_netplay.twitch.verification_uri);
     /* The token's owner, not whoever is in the account box: the window prints
@@ -1836,15 +1897,23 @@ static inline void netplay_get_status(netplay_status_t *out) {
 
 /* The official RPCN server, where PS3 players are: np.rpcs3.net (any case). */
 static inline bool netplay_server_is_official(const char *server) {
-    const char *want = "np.rpcs3.net";
-    if (!server) return false;
-    size_t i = 0;
-    for (; server[i] && want[i]; i++) {
-        char c = server[i];
-        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        if (c != want[i]) return false;
-    }
-    return server[i] == '\0' && want[i] == '\0';
+    return server && netplay_same_name(server, NETPLAY_SERVER_OFFICIAL);
+}
+
+/* Ours, the one with Twitch sign-in (the official server has none). */
+static inline bool netplay_server_is_community(const char *server) {
+    return server && netplay_same_name(server, NETPLAY_SERVER_COMMUNITY);
+}
+
+/* The official server's certificate is self-signed (CN=RPCN, valid 2020-07-23
+ * to 2030-07-21), so it cannot be validated and has to be pinned; RPCS3 itself
+ * checks nothing. Used when the player has not pinned one of their own. Should
+ * the server ever change it, the refusal names the new fingerprint (tls.h). */
+#define NETPLAY_OFFICIAL_FINGERPRINT "7028AD2117139EEA9E1FE14713D0CB4FCD8815B2F39AB4E10FF6725A38AFD155"
+
+static inline const char *netplay_pin_for(const char *server, const char *fingerprint) {
+    if (fingerprint && fingerprint[0]) return fingerprint;
+    return netplay_server_is_official(server) ? NETPLAY_OFFICIAL_FINGERPRINT : fingerprint;
 }
 
 static inline void netplay_do_connect(const netplay_config_t *cfg) {
@@ -1869,13 +1938,10 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
      * is not in its copy, so Connect wiped it and sent the player back to
      * twitch.tv; and a token that "Sign out" forgot was still in its copy, so
      * the next Connect signed them back in. */
-    char twitch_token[sizeof(g_netplay.cfg.twitch_token)];
-    char twitch_npid[sizeof(g_netplay.cfg.twitch_npid)];
-    memcpy(twitch_token, g_netplay.cfg.twitch_token, sizeof(twitch_token));
-    memcpy(twitch_npid,  g_netplay.cfg.twitch_npid,  sizeof(twitch_npid));
+    netplay_config_t stored_twitch;
+    netplay_twitch_copy(&stored_twitch, &g_netplay.cfg);
     g_netplay.cfg = *cfg;
-    memcpy(g_netplay.cfg.twitch_token, twitch_token, sizeof(twitch_token));
-    memcpy(g_netplay.cfg.twitch_npid,  twitch_npid,  sizeof(twitch_npid));
+    netplay_twitch_copy(&g_netplay.cfg, &stored_twitch);
     netplay_build_masks(g_active_profile);
 
     char com_id[COMID_BUFFER_SIZE];
@@ -1905,7 +1971,7 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     memset(&sc, 0, sizeof(sc));
     sc.server          = g_netplay.cfg.server;
     sc.port            = g_netplay.cfg.port;
-    sc.fingerprint_hex = g_netplay.cfg.fingerprint;
+    sc.fingerprint_hex = netplay_pin_for(g_netplay.cfg.server, g_netplay.cfg.fingerprint);
     sc.npid            = g_netplay.cfg.npid;
     /* A Twitch login token IS the password as far as RPCN is concerned, and it
      * wins when present: someone who signed in with Twitch has no password to
@@ -1922,10 +1988,13 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
      * can be wrong (the owner adopted at load is a guess -- the npid stored
      * beside a token is the last account that logged in, not necessarily the one
      * that signed in with Twitch), and the server is the only authority on whose
-     * token it is. `netplay_mirror_stage` writes down what it answers. */
+     * token it is. `netplay_mirror_stage` writes down what it answers.
+     *
+     * And never to a server that did not issue it (netplay_twitch_here): the
+     * token is a password, and the other server's operator would have it. */
     g_netplay.sent_twitch_token =
         netplay_twitch_is_for(&g_netplay.cfg, g_netplay.cfg.npid)
-        || (g_netplay.cfg.twitch_token[0] && !g_netplay.cfg.password[0]);
+        || (netplay_twitch_here(&g_netplay.cfg) && !g_netplay.cfg.password[0]);
     sc.password        = g_netplay.sent_twitch_token ? g_netplay.cfg.twitch_token
                                                      : g_netplay.cfg.password;
     sc.token           = g_netplay.cfg.token;
@@ -1974,12 +2043,10 @@ static inline bool netplay_twitch_reuse(const netplay_config_t *asked) {
     if (!g_netplay.cfg.twitch_token[0]) return false;
 
     /* A token is only good on the server that issued it. */
-    uint16_t asked_port  = asked->port ? asked->port : RPCN_DEFAULT_PORT;
-    uint16_t stored_port = g_netplay.cfg.port ? g_netplay.cfg.port : RPCN_DEFAULT_PORT;
-    if (strcmp(asked->server, g_netplay.cfg.server) != 0 || asked_port != stored_port)
-        return false;
-
     netplay_config_t c = *asked;
+    netplay_twitch_copy(&c, &g_netplay.cfg);
+    if (!netplay_twitch_here(&c)) return false;
+
     c.password[0] = '\0';   /* the token is the credential: see netplay_do_connect */
     c.token[0]    = '\0';   /* Twitch vouched; no e-mail token is checked */
     if (!c.npid[0]) snprintf(c.npid, sizeof(c.npid), "%s", g_netplay.cfg.twitch_npid);
@@ -2018,12 +2085,11 @@ static inline void netplay_twitch_refused(void) {
         netplay_config_t disk;
         if (netplay_settings_read_current(&disk) && disk.twitch_token[0]
             && strcmp(disk.twitch_token, g_netplay.cfg.twitch_token) != 0
-            && netplay_same_server(&disk, &g_netplay.cfg)
+            && netplay_same_twitch_server(&disk, &g_netplay.cfg)
             && (g_netplay.twitch_wanted || netplay_same_name(disk.twitch_npid, g_netplay.cfg.npid))) {
             g_netplay.twitch_tried_owner = true;
-            memcpy(g_netplay.cfg.twitch_token, disk.twitch_token, sizeof(disk.twitch_token));
-            memcpy(g_netplay.cfg.twitch_npid,  disk.twitch_npid,  sizeof(disk.twitch_npid));
-            memcpy(g_netplay.twitch_synced,    disk.twitch_token, sizeof(disk.twitch_token));
+            netplay_twitch_copy(&g_netplay.cfg, &disk);
+            memcpy(g_netplay.twitch_synced, disk.twitch_token, sizeof(disk.twitch_token));
             snprintf(g_netplay.cfg.npid, sizeof(g_netplay.cfg.npid), "%s", disk.twitch_npid);
             netplay_log("the stored Twitch login was replaced on this machine - signing in with "
                         "the new one as %s", g_netplay.cfg.npid);
@@ -2048,8 +2114,9 @@ static inline void netplay_twitch_refused(void) {
     }
 
     if (under_own_name) {
-        g_netplay.cfg.twitch_token[0] = '\0';
-        g_netplay.cfg.twitch_npid[0]  = '\0';
+        g_netplay.cfg.twitch_token[0]  = '\0';
+        g_netplay.cfg.twitch_npid[0]   = '\0';
+        g_netplay.cfg.twitch_server[0] = '\0';
         netplay_settings_save();
         netplay_log("the server no longer accepts the stored Twitch login - forgotten");
     }
@@ -2154,6 +2221,7 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
     g_netplay.cfg.max_players   = cfg->max_players;
     g_netplay.cfg.vs_mode       = cfg->vs_mode;
+    g_netplay.cfg.damage_normal = cfg->damage_normal;
     g_netplay.cfg.room_password[0] = '\0';
     snprintf(g_netplay.cfg.room_password, sizeof(g_netplay.cfg.room_password), "%s",
              cfg->room_password);
@@ -2346,12 +2414,14 @@ static inline void netplay_pump_commands(void) {
             case NETPLAY_CMD_LEAVE_ROOM: netplay_do_leave_room(); break;
             case NETPLAY_CMD_CREATE_ACCOUNT:
                 rpcn_account_create(&g_netplay.account, cmd.cfg.server, cmd.cfg.port,
-                                    cmd.cfg.fingerprint, cmd.cfg.npid, cmd.cfg.password,
+                                    netplay_pin_for(cmd.cfg.server, cmd.cfg.fingerprint),
+                                    cmd.cfg.npid, cmd.cfg.password,
                                     cmd.cfg.email);
                 break;
             case NETPLAY_CMD_RESEND_TOKEN:
                 rpcn_account_resend(&g_netplay.account, cmd.cfg.server, cmd.cfg.port,
-                                    cmd.cfg.fingerprint, cmd.cfg.npid, cmd.cfg.password);
+                                    netplay_pin_for(cmd.cfg.server, cmd.cfg.fingerprint),
+                                    cmd.cfg.npid, cmd.cfg.password);
                 break;
             case NETPLAY_CMD_TWITCH_START:
                 /* Already signed in? Then this is a login, not a trip to
@@ -2375,11 +2445,26 @@ static inline void netplay_pump_commands(void) {
                 netplay_log("Twitch sign-in cancelled");
                 break;
             case NETPLAY_CMD_TWITCH_FORGET:
-                g_netplay.cfg.twitch_token[0] = '\0';
-                g_netplay.cfg.twitch_npid[0]  = '\0';
+                g_netplay.cfg.twitch_token[0]  = '\0';
+                g_netplay.cfg.twitch_npid[0]   = '\0';
+                g_netplay.cfg.twitch_server[0] = '\0';
                 rpcn_twitch_reset(&g_netplay.twitch);
                 netplay_settings_save();
                 netplay_log("forgot the stored Twitch login");
+                break;
+            case NETPLAY_CMD_SIGN_OUT:
+                /* The Twitch login token and a remembered password alike: a
+                 * lobby's "Sign out" is how a player changes account or server,
+                 * and on a shared machine it has to mean it. */
+                netplay_do_disconnect();
+                g_netplay.cfg.twitch_token[0]  = '\0';
+                g_netplay.cfg.twitch_npid[0]   = '\0';
+                g_netplay.cfg.twitch_server[0] = '\0';
+                g_netplay.cfg.password[0]      = '\0';
+                g_netplay.cfg.token[0]         = '\0';
+                rpcn_twitch_reset(&g_netplay.twitch);
+                netplay_settings_save();
+                netplay_log("signed out");
                 break;
             default: break;
         }
@@ -2517,6 +2602,10 @@ static inline void netplay_pump_twitch(void) {
                  g_netplay.twitch.login_token);
         snprintf(g_netplay.cfg.twitch_npid, sizeof(g_netplay.cfg.twitch_npid), "%s",
                  g_netplay.twitch.npid);
+        /* the server the flow ran against: TWITCH_START stored it */
+        snprintf(g_netplay.cfg.twitch_server, sizeof(g_netplay.cfg.twitch_server), "%s",
+                 g_netplay.cfg.server);
+        g_netplay.cfg.twitch_port = g_netplay.cfg.port;
         g_netplay.cfg.password[0] = '\0';   /* the token stands in for it */
         g_netplay.cfg.token[0]    = '\0';   /* Twitch vouched; no e-mail token is checked */
         netplay_settings_save();
@@ -2765,6 +2854,7 @@ static inline void netplay_owner_pump(void) {
             s.seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s.match << 16) ^ 0x5A5Au;
             s.region      = (uint8_t)g_region;
             s.vs_mode     = netplay_room_vs_mode() ? 1u : 0u;
+            s.damage_real = g_netplay.cfg.damage_normal ? 0u : 1u;
             s.session     = s.match;
             s.last_result = ROOM_RESULT_NONE;
             s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
@@ -2873,6 +2963,7 @@ static inline void netplay_member_pump(void) {
             g_netplay.own_saved   = true;
             g_netplay.own_vs_mode = g_vs_mode;
             g_netplay.own_region  = g_region;
+            g_netplay.own_damage_real = g_damage_real;
         }
         /* This session cold boots the board, so it decides what is left behind. */
         g_netplay.vs_board        = r->vs_mode != 0;
@@ -2888,6 +2979,11 @@ static inline void netplay_member_pump(void) {
             netplay_log(r->vs_mode ? "this room plays in VS mode: after a match, both players go back to character select"
                                    : "this room does not play in VS mode");
             g_vs_mode = r->vs_mode ? 1 : 0;
+        }
+        if (g_damage_real != (int)r->damage_real) {
+            netplay_log(r->damage_real ? "this room plays with DAMAGE: REAL (no catch-up damage)"
+                                       : "this room plays with DAMAGE: NORMAL (catch-up damage)");
+            g_damage_real = r->damage_real ? 1 : 0;
         }
         if (side >= 0) {
             netplay_log("match %u: you are %s against %s", (unsigned)r->match, side == 0 ? "1P" : "2P",
@@ -3309,6 +3405,7 @@ static inline void netplay_restart_alone(void) {
     if (g_netplay.own_saved) {
         g_vs_mode  = g_netplay.own_vs_mode;
         g_region   = g_netplay.own_region;
+        g_damage_real = g_netplay.own_damage_real;
         g_netplay.own_saved = false;
     }
     g_netplay.vs_board     = false;

@@ -611,7 +611,7 @@ a.tool.github { color: var(--text); }
 }
 
 .np-form { display: flex; flex-direction: column; gap: 0.7rem; }
-.np-form label, .np-advanced label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.875rem; color: var(--dim); }
+.np-form label, .np-advanced label, label.np-server { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.875rem; color: var(--dim); }
 .np-form input, .np-advanced input {
   padding: 0.45rem 0.6rem;
   border: 1px solid var(--hl-fade);

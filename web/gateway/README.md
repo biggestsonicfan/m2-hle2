@@ -1,13 +1,14 @@
 # The web gateway
 
-Lets the browser build at **play.sonicthefighte.rs** reach the RPCN server at
-**rpcn.sonicthefighte.rs**. A browser tab cannot open TCP or UDP sockets, so each
-web player opens two WebSockets here instead:
+Lets the browser build at **play.sonicthefighte.rs** reach an RPCN server: ours at
+**rpcn.sonicthefighte.rs**, or the official one at **np.rpcs3.net**, whichever the
+player picked. A browser tab cannot open TCP or UDP sockets, so each web player
+opens two WebSockets here instead:
 
 | Path | What it carries |
 |---|---|
-| `/gw/stream` | One TLS connection to RPCN (fixed by config; the page cannot name a host). |
-| `/gw/dgram` | One UDP socket on the droplet's public address, plus a virtual address from a private pool. One WebSocket message is one datagram: `[ip: 4][port: u16 BE][payload]`. |
+| `/gw/stream` | One TLS connection to RPCN: the default upstream, or `/gw/stream/<name>` for another the config names. The page cannot name a host. |
+| `/gw/dgram` (`/gw/dgram/<name>`) | One UDP socket on the droplet's public address, plus a virtual address from a private pool. One WebSocket message is one datagram: `[ip: 4][port: u16 BE][payload]`. |
 
 Browser-to-browser traffic is routed inside the gateway through the virtual
 addresses; browser-to-desktop goes out of the session's real UDP socket. The
@@ -16,6 +17,17 @@ section 4. Nothing in RPCN changes, and the desktop build needs no change.
 
 **It never logs payload bytes.** It sees the RPCN protocol in the clear, login
 tokens included, which is why it runs on the RPCN host and nowhere else.
+
+**More than one RPCN.** `rpcn` + `signaling` are the default upstream, and `name`
+is what it is also called in a path (a socket that names nothing gets it, as every
+web build from before the choice does, and as the web build still does for our
+server). `upstreams` adds more by name, each with its own `rpcn` and `signaling`;
+the web build puts the server's host name in the path, `/gw/stream/np.rpcs3.net`,
+so the key is `np.rpcs3.net`. Anything else is refused with a 404. **Deploy the
+gateway before a web build that offers the official server:** an older gateway
+refuses the named path, so that choice fails cleanly until then, and nothing else
+changes. A player who picks the official server has their login relayed
+through this process like everyone else's, which the page says.
 
 ## As deployed (2026-09-21)
 
@@ -80,6 +92,10 @@ Everything here is the owner's to do. Order matters only for step 1.
    `143.198.49.181`, never `127.0.0.1`. RPCN records a player's address from the
    source of their UDP keepalive, and a loopback source would hand every desktop
    opponent `127.0.0.1`. The TCP side (`rpcn.host`) may be loopback.
+   The official server's entry under `upstreams` is filled in already: its
+   certificate is self-signed (CN=RPCN, valid to 2030-07-21), so it is pinned, and
+   its helper is `np.rpcs3.net:3657`. Check the pin before deploying:
+   `openssl s_client -connect np.rpcs3.net:31313 </dev/null | openssl x509 -noout -fingerprint -sha256`.
 4. **Firewall** (DigitalOcean cloud firewall, and ufw if it is on): allow inbound
    TCP 80 and 443, and **UDP 40000–40999**. RPCN's 31313/TCP and 3657/UDP rules
    stay as they are.

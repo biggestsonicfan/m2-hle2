@@ -26,9 +26,11 @@
 #define WEB_SOCKET_H
 
 #include <emscripten.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 /* Where the gateway is. The page may change it (?gw=, for a local gateway)
  * before anything connects: web_netplay_set_gateway in main_web.c. */
@@ -171,11 +173,46 @@ EM_JS(void, m2ws_close, (int id), {
     }
 });
 
-/* "<gateway>/<path>" into `out`. */
+/*
+ * Which RPCN the gateway should relay to: the server name the last TLS connect
+ * was made to (tls.h's web tls_connect sets it). The gateway looks the name up
+ * in its own list of upstreams and refuses one it does not have, so a page can
+ * choose between the servers the gateway's operator configured and nothing
+ * else. The datagram socket carries it too, since signaling goes to that
+ * server's helper; a session opens it after the stream (rpcn_open_signaling
+ * after rpcn_connect), so it sees the same name.
+ */
+static char g_web_upstream[128];
+
+/* The gateway's default upstream: ours, on play.sonicthefighte.rs. */
+#define WEB_GATEWAY_DEFAULT_UPSTREAM "rpcn.sonicthefighte.rs"
+
+/*
+ * "<gateway>/<path>" for the default upstream, "<gateway>/<path>/<name>" for
+ * any other, into `out`.
+ *
+ * THE NAME IS IN THE PATH, NOT A QUERY, ON PURPOSE. A gateway from before the
+ * choice existed ignores a query string and relays to its one upstream, so a
+ * page asking for the official server with ?server= would have sent that
+ * player's official password to ours. The same gateway answers a path it does
+ * not know with a 404: asking an old gateway for another server fails, and
+ * the default still works with both.
+ *
+ * The name is a host name (letters, digits, dots, dashes); anything else is
+ * not sent at all, and neither is the stream, which then fails as unknown.
+ */
 static inline void m2ws_url(char *out, size_t cap, const char *path) {
     size_t n = strlen(g_web_gateway_url);
     while (n && g_web_gateway_url[n - 1] == '/') n--;
-    snprintf(out, cap, "%.*s/%s", (int)n, g_web_gateway_url, path);
+    const char *name = g_web_upstream;
+    bool plain = true;
+    for (const char *c = name; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')
+              || *c == '.' || *c == '-'))
+            plain = false;
+    bool named = name[0] && strcasecmp(name, WEB_GATEWAY_DEFAULT_UPSTREAM) != 0;
+    snprintf(out, cap, "%.*s/%s%s%s", (int)n, g_web_gateway_url, path,
+             named ? "/" : "", named ? (plain ? name : "invalid") : "");
 }
 
 #endif /* WEB_SOCKET_H */

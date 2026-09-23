@@ -49,6 +49,15 @@ static volatile int g_region = GAME_REGION_USA;
  * the one every board plays by, like g_region. */
 static volatile int g_vs_mode = 0;
 
+/* The cabinet's DAMAGE setting (STF's GAME ASSIGNMENTS, flag byte bit 7):
+ * 0 = NORMAL, the factory default, where a fighter who is behind hits harder
+ * ("catch-up" damage); 1 = REAL, where every hit does what it says. Applied
+ * where the game writes the factory default, like g_region. Only a netplay room
+ * on the community server sets it -- the owner's choice, which every board in
+ * the match plays by -- so everything else, the graders included, stays on
+ * the factory NORMAL. */
+static volatile int g_damage_real = 0;
+
 /* "japan"/"jpn", "usa"/"us", "export"/"exp"; -1 for anything else. */
 static inline int game_region_parse(const char *s) {
     if (!s) return -1;

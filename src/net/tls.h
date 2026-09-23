@@ -576,9 +576,11 @@ static inline int tls_recv(tls_client_t *t, void *buf, uint32_t cap) {
  * The web build: no TLS here at all. The session is a WebSocket to the gateway
  * (web_socket.h), which the BROWSER encrypts and whose certificate the browser
  * checks against the public CA set -- VALIDATED mode, in effect -- and the
- * gateway holds the TLS session to RPCN, pinned by its own config. So `host`,
- * `port` and `pinned` are not ours to use: the gateway's upstream is fixed on
- * purpose, and a page that could name one would make it an open proxy.
+ * gateway holds the TLS session to RPCN, pinned by its own config. So `port`
+ * and `pinned` are not ours to use, and `host` is only a NAME: it goes to the
+ * gateway in the socket's path (web_socket.h, m2ws_url), and the gateway picks
+ * the upstream of that name from its own config or refuses. A page that could make
+ * it dial a host would make it an open proxy.
  *
  * The connect never blocks. It returns true at once; sends queue until the
  * socket opens; a gateway that cannot be reached, or that cannot reach RPCN,
@@ -593,8 +595,9 @@ static inline void tls_close(tls_client_t *t) {
 
 static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
                                const cert_fingerprint_t *pinned) {
-    (void)host; (void)port; (void)pinned;
+    (void)port; (void)pinned;
     memset(t, 0, sizeof(*t));
+    snprintf(g_web_upstream, sizeof(g_web_upstream), "%s", host ? host : "");
     char url[300];
     m2ws_url(url, sizeof(url), "stream");
     t->sock = m2ws_open(url, 0);

@@ -126,6 +126,14 @@ static int dump_app(const char *dir, int w, int h)
     shot(a, &cv, dir, "01_signin");
 
     run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_RIGHT);             /* Server: from the official one to ours */
+    run(a, 10, 0);
+    shot(a, &cv, dir, "01b_signin_server");
+    run(a, 1, PS3UI_PAD_UP);
+    run(a, 1, PS3UI_PAD_UP);
+
+    run(a, 1, PS3UI_PAD_DOWN);
     run(a, 1, PS3UI_PAD_CROSS);
     run(a, 40, 0);
     for (const char *p = "stftest"; *p; p++) {

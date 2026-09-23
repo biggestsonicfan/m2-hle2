@@ -1209,6 +1209,12 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             else       g_region = r;
         } else if (strcmp(argv[i], "--vs-mode") == 0) {
             g_vs_mode = 1;            /* a decided versus match goes back to select */
+        } else if (strcmp(argv[i], "--damage") == 0 && i + 1 < argc) {
+            /* the cabinet's DAMAGE: real, or normal (catch-up, the factory default) */
+            const char *d = argv[++i];
+            if (!strcmp(d, "real"))        g_damage_real = 1;
+            else if (!strcmp(d, "normal")) g_damage_real = 0;
+            else LOG_WARN("--damage %s: expected real or normal; keeping normal", d);
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--camlog") == 0) {

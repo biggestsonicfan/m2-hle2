@@ -28,6 +28,12 @@ const m2hleNetplay = (() => {
   let resending = false;
   let dismissedFailure = '';
   let lastState = '';           /* the state at the previous poll */
+  let serverPicked = false;     /* the player has chosen a server this visit */
+
+  const OFFICIAL = 'np.rpcs3.net', COMMUNITY = 'rpcn.sonicthefighte.rs';
+  const serverName = (s) => (String(s || '').toLowerCase() === COMMUNITY ? 'sonicthefighte.rs'
+                           : String(s || '').toLowerCase() === OFFICIAL ? 'the official RPCN server' : s || '?');
+  const onCommunity = () => !!st && String(st.server || '').toLowerCase() === COMMUNITY;
 
   /* ---- Calling into the emulator ----------------------------------------------- */
 
@@ -243,6 +249,12 @@ const m2hleNetplay = (() => {
     $('np-returning').hidden = !returning;
     $('np-fresh').hidden = !!returning;
     if (returning) setText('np-returning-name', tw.signed_in && tw.npid ? tw.npid : st.npid);
+    setText('np-returning-server', serverName(st.server));
+    /* The server the account form uses: the stored one until the player picks. */
+    if (!serverPicked && st.server) {
+      const want = String(st.server).toLowerCase() === COMMUNITY ? COMMUNITY : OFFICIAL;
+      if ($('np-server').value !== want) $('np-server').value = want;
+    }
     errorText('np-twitch-error', tw.state === 4 /* failed */ ? 'Twitch sign-in did not finish: ' + tw.error : '');
 
     /* A resend is only answered once it has been seen running: until the queued
@@ -267,7 +279,7 @@ const m2hleNetplay = (() => {
       selectTab('signin');
       setText('np-signin-note', 'Account created. If an e-mail with a code arrives, enter the code below.');
       $('np-signin-note').hidden = false;
-      post('connect', { npid: c.npid, password: c.password });
+      post('connect', { npid: c.npid, password: c.password, server: c.server });
     } else if (acct.state === ACCOUNT_DONE && resending === 2) {
       resending = false;
       setText('np-signin-note', 'Sent. Check your e-mail (and its spam folder) for the code.');
@@ -281,6 +293,8 @@ const m2hleNetplay = (() => {
 
   function renderLobby() {
     setText('np-me', st.npid);
+    setText('np-me-server', serverName(st.server));
+    $('np-damage-row').hidden = !onCommunity();   /* a rule of that server's rooms */
     const rtt = rttMs();
     setText('np-quality', 'Connection: ' + quality(rtt));
     const auto = autoDelay();
@@ -466,13 +480,14 @@ const m2hleNetplay = (() => {
       resending = 1;
       setText('np-signin-note', 'Asking the server to send the e-mail again…');
       $('np-signin-note').hidden = false;
-      post('resend_token', { npid, password });
+      post('resend_token', { npid, password, server: $('np-server').value });
     });
 
     $('np-form-signin').addEventListener('submit', (e) => {
       e.preventDefault();
       dismissedFailure = '';
       post('connect', {
+        server: $('np-server').value,
         npid: $('np-signin-name').value.trim(),
         password: $('np-signin-password').value,
         token: $('np-signin-token').value.trim(),
@@ -491,15 +506,18 @@ const m2hleNetplay = (() => {
       }
       if (password.length < 4) { errorText('np-create-error', 'Choose a longer password.'); return; }
       dismissedFailure = '';
-      pendingCreate = { npid, password };
-      post('create_account', { npid, password, email });
+      pendingCreate = { npid, password, server: $('np-server').value };
+      post('create_account', { npid, password, email, server: pendingCreate.server });
     });
 
     $('np-create-match').addEventListener('click', () => {
-      post('host', { frame_delay: hostDelay(), room_password: $('np-private').value,
-                     max_players: $('np-size').value });
+      const room = { frame_delay: hostDelay(), room_password: $('np-private').value,
+                     max_players: $('np-size').value };
+      if (onCommunity()) room.damage = $('np-damage').value;
+      post('host', room);
     });
     $('np-delay').addEventListener('change', (e) => { delayChoice = e.target.value; });
+    $('np-server').addEventListener('change', () => { serverPicked = true; });
     $('np-signout').addEventListener('click', signOut);
 
     $('np-start').addEventListener('click', () => {

@@ -29,9 +29,9 @@
 #include "ps3ui_screens.h"
 #include "netplay.h"
 
-#ifndef NETPLAY_DEFAULT_SERVER
-#define NETPLAY_DEFAULT_SERVER "rpcn.sonicthefighte.rs"   /* as ui/netplay_window.h */
-#endif
+/* The official RPCN server unless the player picks ours on the sign-in screen
+ * (netplay.h, NETPLAY_SERVER_*). Twitch sign-in is ours only. */
+#define PS3UI_DEFAULT_SERVER NETPLAY_SERVER_OFFICIAL
 
 /* ---- the pad ----------------------------------------------------------------- */
 
@@ -390,7 +390,7 @@ typedef enum {
     PS3UI_SCR_RESULT,           /* after a match */
 } ps3ui_screen_t;
 
-enum { PS3UI_DLG_NONE, PS3UI_DLG_LEAVE, PS3UI_DLG_EXIT, PS3UI_DLG_ERROR };
+enum { PS3UI_DLG_NONE, PS3UI_DLG_LEAVE, PS3UI_DLG_EXIT, PS3UI_DLG_ERROR, PS3UI_DLG_SIGNOUT };
 
 #define PS3UI_ROWS 6
 
@@ -426,6 +426,7 @@ typedef struct {
     int searching;              /* a search is out */
     uint32_t search_sent;
     int rule_players, rule_vs, rule_delay;
+    int rule_damage_normal;     /* DAMAGE NORMAL (catch-up); ours only, REAL by default */
     int list_n;
     int list_idx[PS3UI_ROWS];
 
@@ -453,14 +454,45 @@ static void ps3ui_app_ask(ps3ui_app_t *a, int kind, const char *msg);
 /* ---- strings, as the PS3 prints them (string_array ids in brackets) -------- */
 
 static const char *const ps3ui_str_title = "PLAYER MATCH";                          /* 0x158 */
-static const char *const ps3ui_str_menu[4] = { "Quick Match", "Custom Match", "Create Match", "Controls" };
+static const char *const ps3ui_str_menu[5] = { "Quick Match", "Custom Match", "Create Match", "Controls",
+                                               "Sign out" };                /* ours */
+
+/* ---- the server --------------------------------------------------------------- */
+
+static int ps3ui_on_community(const ps3ui_app_t *a) { return netplay_server_is_community(a->cfg.server); }
+
+/* Sign in on `server` from here on. An RPCN account is the server's own, so a
+ * password typed for the other one is not carried across, and neither is a
+ * certificate pin. */
+static void ps3ui_set_server(ps3ui_app_t *a, const char *server)
+{
+    if (netplay_same_name(a->cfg.server, server))
+        return;
+    snprintf(a->cfg.server, sizeof a->cfg.server, "%s", server);
+    a->cfg.port = RPCN_DEFAULT_PORT;
+    a->cfg.fingerprint[0] = 0;
+    a->cfg.password[0] = 0;
+    a->cfg.token[0] = 0;
+}
+
+static const char *ps3ui_server_label(const ps3ui_app_t *a)
+{
+    if (netplay_server_is_official(a->cfg.server))
+        return "RPCN (official)";
+    if (ps3ui_on_community(a))
+        return "sonicthefighte.rs";
+    return a->cfg.server;                   /* a settings file that names another */
+}
+
+/* The rule menu's rows: DAMAGE is a setting of our server's rooms. */
+static int ps3ui_rule_rows(const ps3ui_app_t *a) { return ps3ui_on_community(a) ? 4 : 3; }
 
 /* ---- the task's life ----------------------------------------------------------- */
 
 static void ps3ui_app_defaults(ps3ui_app_t *a)
 {
     netplay_config_t *c = &a->cfg;
-    if (!c->server[0])   snprintf(c->server, sizeof c->server, "%s", NETPLAY_DEFAULT_SERVER);
+    if (!c->server[0])   snprintf(c->server, sizeof c->server, "%s", PS3UI_DEFAULT_SERVER);
     if (!c->port)        c->port = RPCN_DEFAULT_PORT;
     if (!c->frame_delay) c->frame_delay = (uint32_t)a->default_delay;
     if (!c->max_players) c->max_players = 2;
@@ -636,6 +668,7 @@ static void ps3ui_host(ps3ui_app_t *a, int players)
 {
     a->cfg.max_players = (uint32_t)players;
     a->cfg.vs_mode = a->rule_vs != 0;
+    a->cfg.damage_normal = ps3ui_on_community(a) && a->rule_damage_normal;
     a->cfg.frame_delay = (uint32_t)(a->rule_delay ? a->rule_delay : a->default_delay);
     ps3ui_post(a, NETPLAY_CMD_HOST);
     ps3ui_app_go(a, PS3UI_SCR_CONNECT);
@@ -643,17 +676,23 @@ static void ps3ui_host(ps3ui_app_t *a, int players)
 
 static void ps3ui_update_signin(ps3ui_app_t *a)
 {
-    /* rows: Twitch, account, back */
-    ps3ui_move(a, &a->cursor, 3, 1);
+    /* rows: Twitch, account, server, back */
+    ps3ui_move(a, &a->cursor, 4, 1);
     if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
         ps3ui_app_close(a);
+        return;
+    }
+    if (a->cursor == 2 && ps3ui_hit(a, PS3UI_PAD_LEFT | PS3UI_PAD_RIGHT | PS3UI_PAD_CROSS)) {
+        ps3ui_set_server(a, ps3ui_on_community(a) ? NETPLAY_SERVER_OFFICIAL : NETPLAY_SERVER_COMMUNITY);
         return;
     }
     if (!ps3ui_hit(a, PS3UI_PAD_CROSS))
         return;
     if (a->cursor == 0) {
-        /* a stored Twitch login is reused; the device flow (and its code) runs
-         * only when there is none (netplay_twitch_reuse) */
+        /* Twitch sign-in is our server's: the official one has none. A stored
+         * Twitch login is reused; the device flow (and its code) runs only when
+         * there is none (netplay_twitch_reuse). */
+        ps3ui_set_server(a, NETPLAY_SERVER_COMMUNITY);
         a->cfg.npid[0] = 0;
         ps3ui_post(a, NETPLAY_CMD_TWITCH_START);
         ps3ui_app_go(a, PS3UI_SCR_TWITCH);
@@ -663,7 +702,7 @@ static void ps3ui_update_signin(ps3ui_app_t *a)
         a->osk_text[1][0] = 0;
         a->osk_back = PS3UI_SCR_SIGNIN;
         ps3ui_app_go(a, PS3UI_SCR_OSK);
-    } else {
+    } else if (a->cursor == 3) {
         ps3ui_app_close(a);
     }
 }
@@ -730,7 +769,7 @@ static void ps3ui_update_osk(ps3ui_app_t *a)
 
 static void ps3ui_update_menu(ps3ui_app_t *a)
 {
-    ps3ui_move(a, &a->cursor, 4, 1);
+    ps3ui_move(a, &a->cursor, 5, 1);
     if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
         ps3ui_app_ask(a, PS3UI_DLG_EXIT, "Do you want to exit Player Match?");
         return;
@@ -749,20 +788,24 @@ static void ps3ui_update_menu(ps3ui_app_t *a)
     case 2:                                 /* Create Match */
         ps3ui_app_go(a, PS3UI_SCR_RULE);
         break;
+    case 4:                                 /* Sign out (ours) */
+        ps3ui_app_ask(a, PS3UI_DLG_SIGNOUT, "Do you want to sign out? The sign-in will be forgotten.");
+        break;
     default:                                /* Controls: the game's own */
         break;
     }
 }
 
-/* RULE MENU rows: players, game type, frame delay. */
+/* RULE MENU rows: players, game type, frame delay, and on our server damage. */
 static void ps3ui_update_rule(ps3ui_app_t *a)
 {
-    ps3ui_move(a, &a->cursor, 3, 1);
+    ps3ui_move(a, &a->cursor, ps3ui_rule_rows(a), 1);
     int d = ps3ui_hit(a, PS3UI_PAD_RIGHT) ? 1 : ps3ui_hit(a, PS3UI_PAD_LEFT) ? -1 : 0;
     if (d) {
         if (a->cursor == 0) a->rule_players = 2 + (a->rule_players - 2 + d + 7) % 7;
         if (a->cursor == 1) a->rule_vs ^= 1;
         if (a->cursor == 2) a->rule_delay = (a->rule_delay + d + 9) % 9;
+        if (a->cursor == 3) a->rule_damage_normal ^= 1;
     }
     if (ps3ui_hit(a, PS3UI_PAD_CIRCLE))
         ps3ui_app_go(a, PS3UI_SCR_MENU);
@@ -891,6 +934,15 @@ static void ps3ui_update_dialog(ps3ui_app_t *a)
     if (kind == PS3UI_DLG_LEAVE) {
         ps3ui_post(a, NETPLAY_CMD_LEAVE_ROOM);
         ps3ui_app_go(a, PS3UI_SCR_MENU);
+    } else if (kind == PS3UI_DLG_SIGNOUT) {
+        ps3ui_post(a, NETPLAY_CMD_SIGN_OUT);
+        /* our copy too, or the sign-in screen signs straight back in */
+        a->cfg.password[0] = 0;
+        a->cfg.token[0] = 0;
+        a->cfg.twitch_token[0] = 0;
+        a->cfg.twitch_npid[0] = 0;
+        a->cfg.twitch_server[0] = 0;
+        ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
     } else {
         ps3ui_app_close(a);
     }
@@ -918,7 +970,7 @@ static void ps3ui_follow(ps3ui_app_t *a)
     switch (st->state) {
     case NETPLAY_OFF:
         if (a->scr != PS3UI_SCR_OSK && a->scr != PS3UI_SCR_TWITCH && a->scr != PS3UI_SCR_SIGNIN) {
-            if (a->have_cfg && (a->cfg.twitch_token[0] || a->cfg.password[0]) && a->scr == PS3UI_SCR_NONE) {
+            if (a->have_cfg && (netplay_twitch_here(&a->cfg) || a->cfg.password[0]) && a->scr == PS3UI_SCR_NONE) {
                 ps3ui_post(a, NETPLAY_CMD_CONNECT);   /* a stored login: straight in */
                 ps3ui_app_go(a, PS3UI_SCR_CONNECT);
             } else if (a->scr != PS3UI_SCR_CONNECT || a->frame % 60 == 0) {
@@ -991,17 +1043,17 @@ static void ps3ui_app_windows(ps3ui_app_t *a)
 {
     switch (a->scr) {
     case PS3UI_SCR_SIGNIN:
-        ps3ui_win_open(&a->main, &ps3ui_n_cmn_base, ps3ui_choice_win[3]);
+        ps3ui_win_open(&a->main, &ps3ui_n_cmn_base, ps3ui_choice_win[4]);
         ps3ui_win_open(&a->msg, &ps3ui_n_cmn_base, "cmn_win_b_01");
         break;
     case PS3UI_SCR_OSK:
         ps3ui_win_open(&a->main, &ps3ui_n_cmn_base, ps3ui_choice_win[7]);
         break;
     case PS3UI_SCR_MENU:
-        ps3ui_win_open(&a->main, &ps3ui_n_cmn_base, ps3ui_choice_win[4]);
+        ps3ui_win_open(&a->main, &ps3ui_n_cmn_base, ps3ui_choice_win[5]);
         break;
     case PS3UI_SCR_RULE:
-        ps3ui_win_open(&a->main, &ps3ui_n_cmn_base, ps3ui_choice_win[3]);
+        ps3ui_win_open(&a->main, &ps3ui_n_cmn_base, ps3ui_choice_win[ps3ui_rule_rows(a)]);
         break;
     case PS3UI_SCR_TWITCH:
     case PS3UI_SCR_CONNECT:
@@ -1098,10 +1150,10 @@ static void ps3ui_draw_cursor(ps3ui_canvas_t *cv, const ps3ui_scene_t *scene, co
     ps3ui_play(cv, scene, comp, t, ps3ui_mat_translate(x, y), &none);
 }
 
-/* A choice_win menu: title, centred rows, the cursor on the current row. When
- * `values` is set each row is "label:" right-aligned at the centre and its
- * value left of centre + 64, with arrows, as the RULE MENU and Matching range
- * rows are drawn. */
+/* A choice_win menu: title, centred rows, the cursor on the current row. A row
+ * with a value (`values` set, and non-NULL for that row) is "label:"
+ * right-aligned at the centre and its value left of centre + 64, with arrows,
+ * as the RULE MENU and Matching range rows are drawn. */
 static void ps3ui_draw_menu(ps3ui_canvas_t *cv, ps3ui_app_t *a, const char *title, const char *const *rows, int n,
                             const char *const *values)
 {
@@ -1118,7 +1170,7 @@ static void ps3ui_draw_menu(ps3ui_canvas_t *cv, ps3ui_app_t *a, const char *titl
     float cx = (lx + rx) * 0.5f;
     for (int i = 0; i < n; i++) {
         float y = ly + 54.0f * (float)i;
-        if (values) {
+        if (values && values[i]) {
             char label[80];
             snprintf(label, sizeof label, "%s:", rows[i]);
             ps3ui_text_right(cv, &st, cx, y, label, alpha);
@@ -1436,9 +1488,17 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
         ps3ui_draw_bg(cv, a->bg_t);
         switch (a->scr) {
         case PS3UI_SCR_SIGNIN: {
-            static const char *const rows[3] = { "Sign in with Twitch", "Sign in with an RPCN account", "Back" };
-            ps3ui_draw_menu(cv, a, "ONLINE BATTLE", rows, 3, NULL);
-            ps3ui_draw_message(cv, a, "Sign in to RPCN to play online.");
+            static const char *const rows[4] = { "Sign in with Twitch", "Sign in with an RPCN account", "Server",
+                                                 "Back" };
+            const char *values[4] = { NULL, NULL, ps3ui_server_label(a), NULL };
+            ps3ui_draw_menu(cv, a, "ONLINE BATTLE", rows, 4, values);
+            ps3ui_draw_message(cv, a, a->cursor == 0
+                ? "Twitch sign-in is on the sonicthefighte.rs server."
+                : ps3ui_on_community(a)
+                ? "sonicthefighte.rs: this emulator's own rooms, with Twitch sign-in."
+                : netplay_server_is_official(a->cfg.server)
+                ? "The official RPCN server (np.rpcs3.net), shared with RPCS3's players."
+                : "Sign in to RPCN to play online.");
             break;
         }
         case PS3UI_SCR_TWITCH: {
@@ -1453,17 +1513,18 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
             break;
         }
         case PS3UI_SCR_OSK: ps3ui_draw_osk(cv, a); break;
-        case PS3UI_SCR_MENU: ps3ui_draw_menu(cv, a, ps3ui_str_title, ps3ui_str_menu, 4, NULL); break;
+        case PS3UI_SCR_MENU: ps3ui_draw_menu(cv, a, ps3ui_str_title, ps3ui_str_menu, 5, NULL); break;
         case PS3UI_SCR_RULE: {
-            static const char *const rows[3] = { "Players", "Game type", "Frame delay" };
+            static const char *const rows[4] = { "Players", "Game type", "Frame delay", "Damage" };
             char p[8], d[16];
             snprintf(p, sizeof p, "%d", a->rule_players);
             if (a->rule_delay)
                 snprintf(d, sizeof d, "%d", a->rule_delay);
             else
                 snprintf(d, sizeof d, "Auto");
-            const char *values[3] = { p, a->rule_vs ? "VS (rematch)" : "Arcade", d };
-            ps3ui_draw_menu(cv, a, "RULE MENU", rows, 3, values);
+            const char *values[4] = { p, a->rule_vs ? "VS (rematch)" : "Arcade", d,
+                                      a->rule_damage_normal ? "NORMAL" : "REAL" };
+            ps3ui_draw_menu(cv, a, "RULE MENU", rows, ps3ui_rule_rows(a), values);
             break;
         }
         case PS3UI_SCR_CONNECT:

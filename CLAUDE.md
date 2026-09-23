@@ -195,6 +195,7 @@ These addresses are STF-specific. The **patterns** repeat across the catalogue â
   - **Both STF profiles power up as USA** (`g_region`, `--region japan|usa|export`): the hook at `0x62688` (`init_game_assignments`, the `stob` of `country_val`'s factory default) loads it, because backup RAM starts blank every boot. MAME's sfight boots as Japan, so anything held against MAME must also pass `--region japan` â€” `tools/lib/m2hle.mjs` does by default. USA skips the Japan-only warning, adds the FBI picture to attract and uses the US names.
   - The console build's ROM images (YAMP's loose `rom/stf_rom/*.bin`) are byte-identical to the arcade set's code, data, EPROM and polygon ROMs; only the texture ROM's layout differs. Every console difference is in the DLL's traps, none in data. Honey's VS portrait (sprite `0x96`) is her silhouette over a "???" plate, and that is correct, not a missing asset.
   - **The Console profile boots on FREE PLAY**: `sfc_hook_free_play` at `0x62754` (`sram_clear_for_coin_assign`) stores 26 in CREDITS_REQUIRED (`0x1D03324` and its RAM copy `0x59C324`), where the factory default is 0. The ROM itself tests for 26 (`26:FREE PLAY`). The Arcade profile still boots on coins. Coins do nothing on free play, which is harmless for a script that inserts them anyway.
+  - **DAMAGE** (`g_damage_real`, `--damage real|normal`) is the GAME ASSIGNMENTS flag byte's bit 7 (`0x59C353`), put in by `damage_default` at `0x62674` in `init_game_assignments`, like the region. The ROM's labels run the other way from what you might guess: the test menu's `DAMAGE_TYPE` is {NORMAL, REAL} by the bit, and `ketchup` (`0x19740`, called by `damage_calculation`; `ACT_RC_DOWN_ATTACK` too) scales a hit by the energy gap only when the bit is CLEAR. So **NORMAL (0, the factory default) is the catch-up damage and REAL turns it off.** Only a room on our server sets it (the owner's `damage_real` in the room state, REAL unless the host picks NORMAL); everything else boots NORMAL, so the graders are untouched.
   - **VS mode** (`g_vs_mode`, `--vs-mode`, off by default) is the DLL's trap at `0xE584` (`next_round+0x1A4`), in `SFIGHT_BASE_HOOKS` for both profiles. A decided versus match jumps to `0xF524`, the ROM's own "both continue" path, so both players go back to character select. Off, the winner stays on against the CPU and the loser is out. The DLL's VS stage pick (`0xAF84`) draws from host RNG and is not ported, and neither is its `vs_match_count = 3`.
 
 ### Threading
@@ -384,6 +385,24 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   single hardcoded id puts every Model 2 game in one room list where the mismatch is found by the
   netcode instead of the browser. Unlisted games get a deterministic base32 hash of the game key;
   `CreateMissing=true` registers a new id on first use, so no `servers.cfg` edit is needed.
+- **Two servers, and the pad and web lobbies let the player pick** (`NETPLAY_SERVER_OFFICIAL`
+  np.rpcs3.net, the default there; `NETPLAY_SERVER_COMMUNITY` rpcn.sonicthefighte.rs). Accounts
+  are per server. What bites:
+  - **A Twitch token is a password and must only go to the server that issued it.** Once the
+    server can change, the stored `server` no longer says where the token came from, so it is
+    kept in `twitch_server` / `twitch_port` (a file without them adopts `server`), and
+    `netplay_twitch_here` gates every use. Without it, `netplay_do_connect` offered our token to
+    np.rpcs3.net as the password of an account with none stored.
+  - **Twitch sign-in is ours only**: the lobbies switch the server to ours before
+    `NETPLAY_CMD_TWITCH_START`. The official server has no Twitch.
+  - **The official server's certificate is self-signed** (CN=RPCN, to 2030-07-21) and nothing
+    pinned it, so a native build could not reach it at all. `NETPLAY_OFFICIAL_FINGERPRINT` is
+    used when the player has no pin of their own (`netplay_pin_for`).
+  - **The web build names the server in the gateway PATH** (`/gw/stream/np.rpcs3.net`; ours is
+    the plain `/gw/stream`), never a query. The gateway from before the choice ignores a query
+    and would relay an official-server login to ours; an unknown path is a 404 there. So the
+    gateway must be deployed with its `upstreams` before a web build that offers the official
+    server, and until then that choice fails cleanly.
 
 ### Rooms of more than two (`net/room.h`, after the PS3 port's Room Match)
 
