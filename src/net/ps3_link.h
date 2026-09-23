@@ -1053,7 +1053,9 @@ static inline void ps3_rotate(ps3_link_t *L, uint32_t win) {
  * the result (it is not fighting, or its lockstep gave out). A fighter of
  * ours that saw no result marks it (PS3_ME_NO_RESULT) and is skipped: a
  * winner that stays on still has teamId 1 and its side from the last match,
- * the very shape of a winner. 0 = not known. */
+ * the very shape of a winner. A PS3 fighter never sets the mark, so a PS3
+ * winner that stays on and then times out is still read that way; nothing
+ * on our side can tell. 0 = not known. */
 static inline uint32_t ps3_published_winner(const ps3_link_t *L) {
     for (int pass = 0; pass < 2; pass++)
         for (uint32_t k = 0; k < L->fighter_count && k < 2; k++) {
@@ -1126,7 +1128,10 @@ static inline void ps3_read_room(ps3_link_t *L) {
             break;
         case PS3_PHASE_MATCH:
             if (L->my_side >= 0 && !L->match) ps3_match_begin(L);
-            L->me[PS3_ME_NO_RESULT] = 0;     /* published with the flags below */
+            /* Published whether or not the flags below change: they may
+             * already read IN_MATCH | READY | ROTATED if the last match's
+             * were never cleared. */
+            if (L->me[PS3_ME_NO_RESULT]) { L->me[PS3_ME_NO_RESULT] = 0; L->me_dirty = true; }
             ps3_set_flags(L, ps3_be32(L->me) | PS3_MFLAG_IN_MATCH | PS3_MFLAG_READY);
             break;
         case PS3_PHASE_RESULTS:
