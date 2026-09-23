@@ -894,6 +894,66 @@ static inline uint64_t rpcn_ps3_join_room(rpcn_client_t *c, const char *com_id, 
     return rpcn_request(c, RPCN_CMD_JOIN_ROOM, payload, n);
 }
 
+/*
+ * CreateJoinRoom as the PS3 game sends it (np_session_create_join_room 0xBB34C,
+ * checked against an RPCS3 log of a PS3 creating one): flagAttr 0x04000000,
+ * the 0xE8-byte room attribute 0x57, eight searchable ints 0x4C..0x53 (the
+ * rules, the room mode and the version tag), an all-zero password with no
+ * private slots, the creator's 0x20-byte member attribute 0x59, teamId 0xFF
+ * and mesh signaling.
+ */
+static inline uint64_t rpcn_ps3_create_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
+                                            uint32_t max_slot, const uint32_t int_attr[8],
+                                            const uint8_t *room_bin, uint32_t room_len,
+                                            const uint8_t *member_bin, uint32_t member_len) {
+    uint8_t pb[512];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, world_id);
+    pb_varint(&w, 3, max_slot);
+    pb_varint(&w, 4, 0x04000000u);                              /* flagAttr */
+    rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, room_bin, room_len);
+    for (uint32_t i = 0; i < 8; i++) rpcn_pb_int_attr(&w, 6, (uint16_t)(0x4C + i), int_attr[i]);
+    rpcn_pb_bin_attr(&w, 15, RPCN_MEMBER_BIN_ATTR_ID, member_bin, member_len);
+    pb_wrapped(&w, 16, 0xFF);                                   /* teamId */
+    {
+        uint32_t sig = pb_begin_sub(&w, 17);
+        pb_wrapped(&w, 1, 1);                                   /* mesh */
+        pb_wrapped(&w, 2, 0);
+        pb_wrapped(&w, 3, 0);
+        pb_end_sub(&w, sig);
+    }
+    if (!w.ok) { rpcn_fail(c, "CreateRoom: protobuf overflow"); return 0; }
+    uint8_t payload[640];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "CreateRoom: bad ComId '%s'", com_id ? com_id : "(null)"); return 0; }
+    return rpcn_request(c, RPCN_CMD_CREATE_ROOM, payload, n);
+}
+
+/* SetRoomDataInternal with the room's flags as well (np_session_set_room_data_
+ * internal 0xB9410): the PS3 owner closes and hides its room while a match is
+ * being set up (flagFilter 0x50000000, flagAttr 0x50000000) and reopens it for
+ * the results (flagAttr 0). A filter of 0 leaves the flags alone. Only the
+ * owner's flags are taken; the server ignores them from anyone else. */
+static inline uint64_t rpcn_set_room_data_flags(rpcn_client_t *c, const char *com_id, uint64_t room_id,
+                                                uint32_t flag_filter, uint32_t flag_attr,
+                                                const uint8_t *bin, uint32_t len) {
+    uint8_t pb[RPCN_ROOM_BIN_MAX + 64];
+    pb_writer_t w;
+    pb_writer_init(&w, pb, sizeof(pb));
+    pb_varint(&w, 1, room_id);
+    if (flag_filter) {
+        pb_varint(&w, 2, flag_filter);
+        if (flag_attr) pb_varint(&w, 3, flag_attr);
+    }
+    rpcn_pb_bin_attr(&w, 4, RPCN_ROOM_BIN_ATTR_ID, bin, len);
+    if (!w.ok) { rpcn_fail(c, "SetRoomDataInternal: protobuf overflow"); return 0; }
+    uint8_t payload[RPCN_ROOM_BIN_MAX + 128];
+    uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
+    if (!n) { rpcn_fail(c, "SetRoomDataInternal: bad ComId"); return 0; }
+    return rpcn_request(c, RPCN_CMD_SET_ROOM_DATA_INTERNAL, payload, n);
+}
+
 /* SetRoomMemberDataInternal with a teamId: the PS3 game publishes its place in
  * the waiting line there (0 would leave it unchanged). */
 static inline uint64_t rpcn_set_member_data_team(rpcn_client_t *c, const char *com_id, uint64_t room_id,

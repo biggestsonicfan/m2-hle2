@@ -157,6 +157,7 @@ typedef struct {
     uint16_t member_id;
     char     npid[20];
     uint32_t flag_attr;
+    uint8_t  team_id;        /* the PS3 game's place in the waiting line (ps3_link.h) */
     uint8_t  bin[RPCN_MEMBER_BIN_MAX];   /* their member attribute (room.h) */
     uint32_t bin_len;
 
@@ -448,6 +449,7 @@ static inline rpcn_peer_t *rpcn_session_upsert_member(rpcn_session_t *s, const r
     }
     if (m->npid[0]) snprintf(p->npid, sizeof(p->npid), "%s", m->npid);
     p->flag_attr = m->flag_attr;
+    p->team_id   = m->team_id;
     if (m->bin_len) {
         memcpy(p->bin, m->bin, m->bin_len);
         p->bin_len = m->bin_len;
@@ -563,10 +565,40 @@ static inline bool rpcn_session_start(rpcn_session_t *s, const rpcn_session_conf
         return false;
     }
 
+#ifndef __EMSCRIPTEN__
+    /* The peer-to-peer port first: it is the one thing here that fails in a
+     * second on a machine already running an emulator, and after the TLS
+     * handshake it failed seconds later, with the state still reading "off"
+     * the whole time. rpcn_connect clears the client, so the socket waits in
+     * a local until it has. (The web build's datagram channel is named after
+     * the server the connect picks, so it keeps the old order.) */
+    uint16_t p2p_port = cfg->local_p2p_port ? cfg->local_p2p_port : RPCN_P2P_PORT;
+    net_sock_t p2p = NET_SOCK_INVALID;
+    if (!net_udp_open(&p2p, p2p_port)) {
+        int err = net_errno();
+#ifdef _WIN32
+        bool taken = err == WSAEADDRINUSE;
+#else
+        bool taken = err == EADDRINUSE;
+#endif
+        rpcn_session_fail(s, "could not open the peer-to-peer socket: could not bind UDP %u (%d)%s",
+                          (unsigned)p2p_port, err,
+                          taken ? " - another program (a second emulator?) has it" : "");
+        return false;
+    }
+#endif
+
     if (!rpcn_connect(&s->client, cfg->server, cfg->port, &pin)) {
+#ifndef __EMSCRIPTEN__
+        net_close(&p2p);
+#endif
         rpcn_session_fail(s, "%s", rpcn_last_error(&s->client));
         return false;
     }
+#ifndef __EMSCRIPTEN__
+    s->client.udp        = p2p;
+    s->client.local_port = p2p_port;
+#endif
 
     /* The signaling socket must exist before login completes, so the keepalive
      * can start the moment we have a user id. */
@@ -1085,6 +1117,25 @@ static inline bool rpcn_session_join(rpcn_session_t *s, uint64_t room_id, const 
     return true;
 }
 
+/* A room in the PS3 port's own shape (ps3_link.h, rpcn_ps3_create_room): its
+ * rules in the eight searchable ints, and a teamId of 0xFF. */
+static inline bool rpcn_session_host_ps3(rpcn_session_t *s, uint32_t max_slot, const uint32_t int_attr[8],
+                                         const uint8_t *room_bin, uint32_t room_len,
+                                         const uint8_t *member_bin, uint32_t member_len) {
+    if (s->stage != RPCN_STAGE_ONLINE) {
+        rpcn_session_fail(s, "cannot host before discovery has finished");
+        return false;
+    }
+    rpcn_session_clear_room(s);
+    s->is_host = true;
+    if (max_slot < 2) max_slot = 2;
+    if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
+    s->pending_room = rpcn_ps3_create_room(&s->client, s->com_id, s->world_id, max_slot, int_attr,
+                                           room_bin, room_len, member_bin, member_len);
+    if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
+    return true;
+}
+
 /* Leave the room and stay signed in. */
 static inline void rpcn_session_leave(rpcn_session_t *s) {
     if (!s->room_id) return;
@@ -1099,6 +1150,13 @@ static inline void rpcn_session_leave(rpcn_session_t *s) {
 static inline bool rpcn_session_set_room_state(rpcn_session_t *s, const uint8_t *bin, uint32_t len) {
     if (!rpcn_session_in_room(s)) return false;
     return rpcn_set_room_data_internal(&s->client, s->com_id, s->room_id, bin, len) != 0;
+}
+
+/* The same, with the room's flags (rpcn_set_room_data_flags). */
+static inline bool rpcn_session_set_room_state_flags(rpcn_session_t *s, uint32_t flag_filter, uint32_t flag_attr,
+                                                     const uint8_t *bin, uint32_t len) {
+    if (!rpcn_session_in_room(s)) return false;
+    return rpcn_set_room_data_flags(&s->client, s->com_id, s->room_id, flag_filter, flag_attr, bin, len) != 0;
 }
 
 /* Publish our own member attribute. */

@@ -107,6 +107,10 @@ static volatile int      g_xplay_rules_pending = 0;
 static volatile int      g_xplay_ready         = 0;
 static uint8_t           g_xplay_rules[5];
 static volatile uint32_t g_xplay_seed          = 0;
+/* The room holds more than its two fighters (room match flag 0x40, the PS3's
+ * session flag 0x400000): the match then runs on into the victory screen
+ * (sfight.h, xplay_vic_dsp) instead of ending at VIC_INT. */
+static volatile int      g_xplay_spectators    = 0;
 static volatile int      g_xplay_mode          = -1;
 static volatile int      g_xplay_also_mode     = -1;
 

@@ -11,12 +11,17 @@
  *      message exactly once; channels 2 and 3 whatever arrives.
  *  (C) RPCS3's signaling (net/rpcs3_signal.h): the 75-byte layout, and the
  *      handshake between two ends that makes each one's game see the other.
+ *  (D) The room's owner and its line (net/ps3_link.h): choosing the fighters
+ *      (np_session_build_fight_entries), the line after a result
+ *      (np_session_rotate_queue_after_match), and the lockstep's shape under
+ *      the room's match flags (SyncIo_Init_rings).
  */
 #define NDEBUG 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "ps3_link.h"
 #include "rpcs3_signal.h"
 #include "rudp.h"
 
@@ -337,10 +342,100 @@ static void test_signaling(void) {
     free(ab); free(ba);
 }
 
+/* A room of three with no network: us (16, the owner) and members 33 and 40. */
+static void room_of_three(rpcn_session_t *s, ps3_link_t *L) {
+    memset(s, 0, sizeof(*s));
+    memset(L, 0, sizeof(*L));
+    s->room_id = 1;
+    s->stage = RPCN_STAGE_HOSTING;
+    s->my_member_id = s->owner_id = 16;
+    s->room_bin_len = PS3_ROOM_BIN_SIZE;
+    s->room_bin[4] = 1;                          /* a Room Match */
+    const uint16_t ids[2] = { 33, 40 };
+    for (int i = 0; i < 2; i++) {
+        s->peers[i].used = true;
+        s->peers[i].member_id = ids[i];
+        s->peers[i].team_id = 0xFF;
+        s->peers[i].bin_len = PS3_MEMBER_BIN_SIZE;
+    }
+    L->session = s;
+    L->team = 0xFF;
+    L->hosting = true;
+}
+
+static void test_owner(void) {
+    static rpcn_session_t s;
+    static ps3_link_t L;
+
+    /* Nobody asked for a side: the first two in line, by join order. */
+    room_of_three(&s, &L);
+    CHECK(ps3_owner_choose(&L) && ps3_be32(L.blob + 0x14) == 2 && ps3_be16(L.blob + 0x18) == 16
+          && ps3_be16(L.blob + 0x1A) == 33, "with no entries the first two in line fight, 1P first");
+
+    /* 40 asked for 2P: it gets 2P, and the first in line fills 1P. */
+    room_of_three(&s, &L);
+    s.peers[1].bin[0x1C] = 2;
+    CHECK(ps3_owner_choose(&L) && ps3_be16(L.blob + 0x18) == 16 && ps3_be16(L.blob + 0x1A) == 40,
+          "a 2P entry takes 2P, a filler takes the empty side");
+
+    /* 40 asked for 1P and is last in line: it still takes 1P. */
+    room_of_three(&s, &L);
+    s.peers[0].team_id = 1;
+    L.team = 2;
+    s.peers[1].team_id = 3;
+    s.peers[1].bin[0x1C] = 1;
+    CHECK(ps3_owner_choose(&L) && ps3_be16(L.blob + 0x18) == 40 && ps3_be16(L.blob + 0x1A) == 33,
+          "a 1P entry beats the line; the front of the line fills 2P");
+
+    /* After 16 (1P) beat 33 (2P): 16 to the front asking for 1P again, 40
+     * next, the loser 33 to the back. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    ps3_rotate(&L, 1);
+    CHECK(L.team == 1 && L.me[0x1C] == 1 && (ps3_be32(L.me) & PS3_MFLAG_ROTATED),
+          "the winner goes to the front, asks for its side again and marks bit 29");
+    room_of_three(&s, &L);
+    s.my_member_id = 40;                         /* the same result, as the waiting member sees it */
+    s.peers[1].member_id = 16;
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    ps3_rotate(&L, 1);
+    CHECK(L.team == 2 && L.me[0x1C] == 0, "a waiting member moves up behind the winner");
+    room_of_three(&s, &L);
+    s.my_member_id = 33;
+    s.peers[0].member_id = 16;
+    L.fighter_count = 2; L.fighters[0] = 16; L.fighters[1] = 33;
+    L.me[0x1C] = 2;
+    ps3_rotate(&L, 1);
+    CHECK(L.team == 3 && L.me[0x1C] == 0, "the loser goes to the back and asks for nothing");
+
+    /* A member that did not see the result reads it off the fighters. */
+    room_of_three(&s, &L);
+    L.fighter_count = 2; L.fighters[0] = 33; L.fighters[1] = 40;
+    ps3_put32(s.peers[1].bin, PS3_MFLAG_ROTATED | PS3_MFLAG_IN_MATCH);   /* 40, 2P, asked for nothing */
+    CHECK(ps3_published_winner(&L) == 1, "2P published a place with no entry: 1P won");
+    s.peers[1].bin[0x1C] = 2;
+    CHECK(ps3_published_winner(&L) == 2, "2P asked for 2P again: 2P won");
+
+    /* The lockstep follows the room's match flags. */
+    room_of_three(&s, &L);
+    L.room_rtt_ms = 16;
+    ps3_sio_start(&L, 0);
+    CHECK(L.sio.small_every == 1 && L.sio.big_every == 60 && L.sio.init_delay == 2,
+          "two fighters alone: every frame, 60-frame packets, delay 2 at 16 ms");
+    L.match_flags = PS3_MATCH_SPECTATORS;
+    ps3_sio_start(&L, 0);
+    CHECK(L.sio.small_every == 2 && L.sio.big_every == 12 && L.sio.init_delay == 3,
+          "with watchers: every 2nd frame, every 12th to them, one frame more delay");
+    L.match_flags = PS3_MATCH_RELAY | PS3_MATCH_SPECTATORS;
+    ps3_sio_start(&L, 0);
+    CHECK(L.sio.small_every == 4 && L.sio.init_delay == 10, "relay mode: every 4th frame, delay 10");
+}
+
 int main(void) {
     test_capture();
     test_pair();
     test_signaling();
+    test_owner();
     printf(g_fail ? "\n%d FAILED\n" : "\nall passed\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -262,7 +262,11 @@ typedef struct {
     uint16_t port;
     char     fingerprint[80];
     char     npid[20];
-    char     password[64];
+    /* Room for RPCS3's: it never sends what the player typed, but a key
+     * derived from it (PBKDF2 over SHA3-256, `derive_password` in
+     * rpcn_settings_dialog.cpp), 64 hex characters -- one more than a
+     * char[64] holds, and a key one character short is "wrong password". */
+    char     password[128];
     char     token[64];
     char     email[128];        /* sign-up only */
     /*
@@ -2010,6 +2014,10 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     g_netplay.state        = NETPLAY_CONNECTING;
     netplay_log("connecting to %s:%u as %s", g_netplay.cfg.server,
                 g_netplay.cfg.port ? g_netplay.cfg.port : RPCN_DEFAULT_PORT, g_netplay.cfg.npid);
+    /* The TLS handshake below blocks for seconds, and the status is otherwise
+     * published only after it: a caller polling for "online" or "failed" read
+     * "off" all that time, which looks like the connect was dropped. */
+    netplay_publish_status();
 
     if (!rpcn_session_start(&g_netplay.session, &sc)) {
         g_netplay.state = NETPLAY_FAILED;
@@ -2215,7 +2223,21 @@ static inline void netplay_do_disconnect(void) {
 
 static inline void netplay_do_host(const netplay_config_t *cfg) {
     if (g_netplay.ps3) {
-        netplay_log("hosting a room for PS3 players is not supported yet - join one a PS3 made");
+        /* A room in the PS3 port's own shape, run the way a PS3 owner runs one
+         * (ps3_link.h, ps3_owner_pump). Its rules are the PS3's defaults, and
+         * a PS3 room has no password of ours to put on it. */
+        uint32_t slots = cfg->max_players < 2 ? 2u
+                       : cfg->max_players > ROOM_MAX_MEMBERS ? ROOM_MAX_MEMBERS : cfg->max_players;
+        if (cfg->room_password[0]) netplay_log("PS3 rooms take no password; this one will be open");
+        netplay_forget_room();
+        uint32_t ints[8];
+        ps3_link_host(&g_netplay.ps3link, slots, ints);
+        if (!rpcn_session_host_ps3(&g_netplay.session, slots, ints, g_netplay.ps3link.blob, PS3_ROOM_BIN_SIZE,
+                                   ps3_link_member_bin(&g_netplay.ps3link), PS3_MEMBER_BIN_SIZE)) {
+            g_netplay.state = NETPLAY_FAILED;
+            return;
+        }
+        netplay_log("hosting a PS3 room for up to %u (3 rounds, 30 s, type A); waiting for players", slots);
         return;
     }
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
