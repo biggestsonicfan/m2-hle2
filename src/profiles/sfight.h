@@ -275,8 +275,11 @@ static int sfight_hook_700000_loop(i960_cpu_t *cpu, memory_bus_t *bus) {
  * tick (and ends the slice early, freeing the mutex for the UI); the geo
  * capture ring's frame boundary is marked so the scanner reads exactly one
  * game frame's draw commands. */
+static void sfight_xplay_frame(memory_bus_t *bus);
+
 static int sfight_hook_frame_pace(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu; (void)bus;
+    (void)cpu;
+    sfight_xplay_frame(bus);
     cop_geo_frame_edge();
     g_frame_done = 1;
     return 1;
@@ -354,6 +357,108 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 1;
 }
 
+/*
+ * Cross-play with the PS3 port (net/ps3_link.h, hle_hooks.h g_xplay_*). The PS3
+ * build's emulator runs a network match through traps on these three
+ * instructions, and a board playing against it has to reach the same points:
+ *
+ * xplay_force_start (0x83F4, ADV_DSP `call player_entry`): the PS3 writes
+ * START1|START2 into INTERUPT_FLAGS_MOMENTARY (0x500704) and lets the call run,
+ * so attract starts a two-player game by itself (on free play), and opens a new
+ * lockstep generation (i960hook_83F4_player_entry_forceStart).
+ */
+static int sfight_hook_xplay_force_start(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if (!g_xplay_match || !g_xplay_ready) return 1;
+    mem_write32(bus, 0x00500704, 0x30);
+    g_xplay_events |= XPLAY_EV_NEW_GENERATION;
+    return 1;
+}
+
+/*
+ * xplay_barrier (0xA218, SEL_INT entry): character select waits here, skipped
+ * as an i960 `ret`, until both machines' inputs are flowing. On the frame it is
+ * released it is skipped once more and frame_counter (0x500020) is zeroed, and
+ * from the next frame on every input comes out of the lockstep
+ * (i960hook_A218_SEL_INT_syncBarrier; the PS3 also reseeds its MT19937 `rand`
+ * there, which this board does not use).
+ */
+static int sfight_hook_xplay_barrier(i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!g_xplay_match || g_xplay_barrier == 2) return 1;
+    if (g_xplay_barrier == 1) {
+        mem_write32(bus, 0x00500020, 0);
+        g_xplay_barrier = 2;
+        g_xplay_events |= XPLAY_EV_BARRIER;
+    }
+    hle_ret(cpu);
+    return 0;
+}
+
+/*
+ * Once a frame, at the frame boundary: note mode / also_mode for ps3_link, and
+ * put a PS3 match's rules into the game's settings once the board is past
+ * WARNING (Settings_ApplyRoomRules: the RAM copy, the backup copy, and the
+ * barrier count at 0x50A424 that game_engine_setup copied at boot).
+ */
+static void sfight_xplay_frame(memory_bus_t *bus) {
+    g_xplay_mode      = mem_read8(bus, 0x0050002A);
+    g_xplay_also_mode = mem_read8(bus, 0x0050002B);
+    if (!g_xplay_match || !g_xplay_rules_pending) return;
+    if (g_xplay_also_mode < 2 && g_xplay_mode != 2) return;   /* still booting */
+    static const uint8_t offs[5] = { 0x01, 0x04, 0x11, 0x13, 0x18 };
+    for (int i = 0; i < 5; i++) {
+        mem_write8(bus, 0x0059C340u + offs[i], g_xplay_rules[i]);
+        mem_write8(bus, 0x01D03340u + offs[i], g_xplay_rules[i]);
+    }
+    mem_write32(bus, 0x0050A424, g_xplay_rules[4]);
+    g_xplay_rules_pending = 0;
+    g_xplay_ready = 1;
+    LOG_INFO("xplay: settings in place (rounds %u, energy %u, time %u, flags 0x%02X, barrier %u)",
+             g_xplay_rules[0], g_xplay_rules[1], g_xplay_rules[2], g_xplay_rules[3], g_xplay_rules[4]);
+}
+
+/* xplay_stage (0xAF84, set_vs_cnt_and_stage_num_sel+0x58 `stob r3, stage_num`):
+ * a network match is played on stage seed % 9 (i960hook_AF84_stage_fromSeed;
+ * its table at 0x3766D0+0x70 is 0..8). */
+static int sfight_hook_xplay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)bus;
+    if (!g_xplay_match) return 1;
+    cpu->locals.r[3] = (cpu->locals.r[3] & ~0xFFu) | (g_xplay_seed % 9u);
+    return 1;
+}
+
+/* xplay_game_time (0xB0F8, GAME_INT+4): `time` (0x500090) is the round-time
+ * setting, settings byte +0x11 (0x59C351), before the instruction runs. */
+static int sfight_hook_xplay_game_time(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if (g_xplay_match) mem_write8(bus, 0x00500090, mem_read8(bus, 0x0059C351));
+    return 1;
+}
+
+/* xplay_replay_timer (0x96AC, ADV_REPLAY_WAIT1A+0x128 `stis r15, game_timer`):
+ * the attract replay's timer is the round time, at most 30, times 64, and the
+ * store is skipped. */
+static int sfight_hook_xplay_replay_timer(i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!g_xplay_match) return 1;
+    uint32_t t = mem_read8(bus, 0x0059C351);
+    if (t > 30) t = 30;
+    mem_write16(bus, 0x00500028, (uint16_t)(t << 6));
+    uint32_t w = mem_read32(bus, cpu->sfr.ip);
+    uint32_t mode = (w >> 10) & 0xFu;
+    bool two = ((w >> 12) & 1u) && (mode == 5 || mode >= 12);
+    cpu->sfr.ip += two ? 8u : 4u;
+    return 0;
+}
+
+/* xplay_match_over (0xE6EC, VIC_INT entry): a versus match is over, when the
+ * versus flag (0x500068 bit 1) is set (i960hook_E6EC_VIC_INT_matchOver).
+ * Observe only. */
+static int sfight_hook_xplay_match_over(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if (g_xplay_match && (mem_read8(bus, 0x00500068) & 2u)) g_xplay_events |= XPLAY_EV_MATCH_OVER;
+    return 1;
+}
+
 /* NOTE: there is intentionally NO read_sw (0x17CC) hook. Inputs are delivered
  * the authentic way — input.h serves the active-low I/O ports (0x1C00000) and
  * the game's own read_sw, called from the VsyncScr vblank interrupt, reads them
@@ -377,7 +482,7 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 12
+#define SFIGHT_BASE_HOOK_COUNT 18
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
@@ -390,7 +495,13 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
     { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \
     { 0x0000E584, sfight_hook_vs_rematch,         "next_round+0x1a4"        }, \
-    { 0x00062688, sfight_hook_country_default,    "country_default"         },
+    { 0x00062688, sfight_hook_country_default,    "country_default"         }, \
+    { 0x000083F4, sfight_hook_xplay_force_start,  "xplay_force_start"       }, \
+    { 0x0000A218, sfight_hook_xplay_barrier,      "xplay_sel_int_barrier"   }, \
+    { 0x0000E6EC, sfight_hook_xplay_match_over,   "xplay_vic_int"           }, \
+    { 0x0000AF84, sfight_hook_xplay_stage,        "xplay_stage"             }, \
+    { 0x0000B0F8, sfight_hook_xplay_game_time,    "xplay_game_time"         }, \
+    { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      },
 
 #define SFIGHT_INPUT_MAP                                                        \
     .held_addr       = 0x00500700,                                              \

@@ -1357,6 +1357,15 @@ sapp_desc sokol_main(int argc, char* argv[]) {
              * and the twitch.tv address go to the log, and a browser is opened
              * if there is a desktop to open one on. */
             g_net_twitch = 1;
+        } else if (strcmp(argv[i], "--net-ps3") == 0) {
+            /* Play the PS3 port's rooms (net/ps3_link.h) on a server other
+             * than the official one, which gets them anyway: for testing
+             * against a local RPCN. */
+            g_net_cli.ps3 = true;
+        } else if (strcmp(argv[i], "--net-ps3-wire") == 0 && i + 1 < argc) {
+            /* Log every PS3-mode datagram and link event to this file, for
+             * tools/ps3-audit.py to hold against RPCS3's own log. */
+            snprintf(g_net_cli.ps3_wire, sizeof(g_net_cli.ps3_wire), "%s", argv[++i]);
         }
     }
     if (g_headless) exit(headless_main());

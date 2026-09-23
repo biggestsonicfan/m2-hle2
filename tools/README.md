@@ -835,6 +835,19 @@ draws correctly shaped, correctly textured and black-faced. It is not a web-only
 bites there first -- the page starts the board the moment the ROM loads, and a script can be
 asking two seconds later.
 
+## PS3 cross-play: `ps3-audit.py`
+
+`python tools/ps3-audit.py RPCS3.log ps3wire.log` holds two ends of a PS3 Sonic the Fighters session
+against each other. One end is RPCS3's own log with `sys_net_dump` (and `Signaling`) at Trace in its
+`config.yml`; the other is m2hle's wire log (`--net-ps3-wire FILE`, or `"wire"` on the bridge's
+`netplay_connect`), or a second RPCS3 log. It finds every datagram one side sent in the other side's
+receive log by its bytes, lays both on one clock, and reports the one-way delay, what was lost each
+way, each side's RUDP packet types and flags side by side (anything only one side does is marked),
+the input frames and silences of the lockstep, retransmissions, and a merged timeline. Only the time
+both logs cover is judged, so a long RPCS3 log with other sessions in it is fine. A PS3 against a PS3
+is the yardstick: that capture lost nothing, never retransmitted, and its longest input silence was
+0.7 s.
+
 ## `tools/mame` and `tests/`
 
 The MAME side runs under the sibling `claude_mame` checkout (its
