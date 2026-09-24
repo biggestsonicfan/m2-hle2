@@ -67,6 +67,8 @@ kick and guard are set per button in **Help & Options > Controls**, with the PS3
 (Standard, Arcade stick 1 to 5): top, right, left and bottom face buttons and L1, L2, R1, R2.
 Arcade and Offline Versus have the PS3's rule settings (difficulty, rounds, time, attack,
 barriers, game type); Offline Versus asks player 2 to press Start on port 2.
+**Help & Options > Credits** lists the open-source code and fonts the core is built from, with
+each one's licence, copyright and origin repository.
 
 **The Arcade version** is the board as it shipped: RetroPad B, A, Y and X are the cabinet's
 buttons 1 to 4, Start is Start and Select inserts a coin.

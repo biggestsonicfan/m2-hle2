@@ -14,11 +14,15 @@
  *   ONLINE       ps3ui_app.h, the online lobby
  *   GAME         the board, alone; SELECT opens the pause menu
  *   PAUSE        Resume Game / Help & Options / Exit Game
- *   OPTIONS      Controls (the PS3's six button presets) / Settings (volume)
+ *   OPTIONS      Controls (the PS3's six button presets) / Settings (volume) /
+ *                Credits
+ *   CREDITS      the open-source code and fonts the builds are made of: licence,
+ *                copyright and where each comes from
  *
  * Left out on purpose: the logo reel and the title logo (Sega's artwork; the
  * board shows its own), Scoreboards and Save Data (the PS3's network and
- * storage), How to Play, Credits and the Command List (Sega's text).
+ * storage), How to Play, the PS3's own Credits and the Command List (Sega's
+ * text).
  *
  * The frontend feeds both pads once a frame, asks ps3ui_shell_view() what to
  * show, gives the game the pad only when ps3ui_shell_game_pad() says so, and
@@ -39,7 +43,7 @@ typedef struct {
 
 typedef enum {
     PS3UI_SH_TITLE, PS3UI_SH_MAIN, PS3UI_SH_ARCADE, PS3UI_SH_VERSUS, PS3UI_SH_OPTIONS,
-    PS3UI_SH_CONTROLS, PS3UI_SH_SETTINGS, PS3UI_SH_ONLINE, PS3UI_SH_GAME, PS3UI_SH_PAUSE,
+    PS3UI_SH_CONTROLS, PS3UI_SH_SETTINGS, PS3UI_SH_CREDITS, PS3UI_SH_ONLINE, PS3UI_SH_GAME, PS3UI_SH_PAUSE,
 } ps3ui_sh_screen_t;
 
 typedef enum {
@@ -88,6 +92,37 @@ static const char *const ps3ui_btn_names[PS3UI_BTN_CODES] = { "Unused", "P", "K"
 static const char *const ps3ui_type_names[PS3UI_TYPES] = { "Standard", "Arcade stick 1", "Arcade stick 2",
                                                            "Arcade stick 3", "Arcade stick 4", "Arcade stick 5" };
 
+/* CREDITS: every third-party part of a build -- vendor/ (the submodules),
+ * src/libretro/libretro.h, licenses/ (the fonts), and the libraries the SDL3
+ * and Linux builds load. Copyright lines as the licence files give them. */
+typedef struct {
+    const char *name, *licence, *copyright, *url;
+} ps3ui_credit_t;
+
+static const ps3ui_credit_t ps3ui_credits[] = {
+    { "Sokol", "zlib", "Copyright (c) 2018 Andre Weissflog", "https://github.com/floooh/sokol" },
+    { "Dear ImGui", "MIT", "Copyright (c) 2014-2026 Omar Cornut", "https://github.com/ocornut/imgui" },
+    { "Dear Bindings", "MIT", "Copyright (c) 2021-2022 Ben Carter", "https://github.com/dearimgui/dear_bindings" },
+    { "imgui_club", "MIT", "Copyright (c) 2017-2024 Omar Cornut", "https://github.com/ocornut/imgui_club" },
+    { "ImGuiFileDialog", "MIT", "Copyright (c) 2018-2025 Stephane Cuillerdier (Aiekick)",
+      "https://github.com/aiekick/ImGuiFileDialog" },
+    { "miniz", "MIT", "Copyright 2013-2014 RAD Game Tools and Valve Software; 2010-2014 Rich Geldreich",
+      "https://github.com/richgel999/miniz" },
+    { "stb_truetype", "MIT / Public Domain", "Copyright (c) 2017 Sean Barrett", "https://github.com/nothings/stb" },
+    { "libretro API", "MIT", "Copyright (C) 2010-2024 The RetroArch team", "https://github.com/libretro/RetroArch" },
+    { "SDL 3", "zlib", "Copyright (C) 1997-2025 Sam Lantinga", "https://github.com/libsdl-org/SDL" },
+    { "OpenSSL", "Apache 2.0", "Copyright (c) 1998-2025 The OpenSSL Project Authors",
+      "https://github.com/openssl/openssl" },
+    { "Anybody (font)", "SIL OFL 1.1", "Copyright 2020 The Anybody Project Authors",
+      "https://github.com/Etcetera-Type-Co/Anybody" },
+    { "M PLUS 1p (font)", "SIL OFL 1.1", "Copyright 2016 The M+ Project Authors",
+      "https://github.com/coz-m/MPLUS_FONTS" },
+    { "M PLUS 1 Code (font)", "SIL OFL 1.1", "Copyright 2021 The M+ FONTS Project Authors",
+      "https://github.com/coz-m/MPLUS_FONTS" },
+};
+#define PS3UI_CREDITS ((int)(sizeof ps3ui_credits / sizeof ps3ui_credits[0]))
+#define PS3UI_CREDITS_ROWS 6    /* choice_win_06 */
+
 enum { PS3UI_SHDLG_NONE, PS3UI_SHDLG_EXIT_GAME };
 
 typedef struct {
@@ -100,6 +135,7 @@ typedef struct {
     int ctl_type;
     uint8_t ctl[PS3UI_TYPES][PS3UI_KEYS];
     int music, se;
+    int credits_top;            /* CREDITS: the first row on screen */
     int two_p;                  /* VERSUS: a second pad has pressed START */
     int resume_wait;            /* PAUSE -> GAME takes 10 frames, as the PS3's */
     int netplay;                /* a session is running: no pause */
@@ -147,6 +183,7 @@ static ps3ui_view_t ps3ui_shell_view(const ps3ui_shell_t *sh)
     case PS3UI_SH_OPTIONS:
     case PS3UI_SH_CONTROLS:
     case PS3UI_SH_SETTINGS:
+    case PS3UI_SH_CREDITS:
         return sh->options_from_pause ? PS3UI_VIEW_OVERLAY : PS3UI_VIEW_FULL;
     default:
         return PS3UI_VIEW_FULL;
@@ -178,6 +215,8 @@ static void ps3ui_shell_go(ps3ui_shell_t *sh, ps3ui_sh_screen_t s)
     ps3ui_win_close(&sh->msg);
     if (s == PS3UI_SH_VERSUS)
         sh->two_p = 0;
+    if (s == PS3UI_SH_CREDITS)
+        sh->credits_top = 0;
 }
 
 static void ps3ui_shell_pad(ps3ui_shell_t *sh, uint32_t held, uint32_t held2)
@@ -244,10 +283,10 @@ static const char *const ps3ui_main_explain[4] = {
     "Fight your way through every opponent on your own.",
     "Two players, two controllers, head to head.",
     "Play other people over the internet on RPCN.",
-    "Change the controls and the volume.",
+    "Change the controls and the volume, and see the credits.",
 };
-static const char *const ps3ui_option_rows[2] = { "Controls", "Settings" };
-static const char *const ps3ui_option_rows_nc[1] = { "Settings" };
+static const char *const ps3ui_option_rows[3] = { "Controls", "Settings", "Credits" };
+static const char *const ps3ui_option_rows_nc[2] = { "Settings", "Credits" };
 static const char *const ps3ui_pause_rows[4] = { "Resume Game", "Help & Options", "", "Exit Game" };
 
 static void ps3ui_sh_update_settings_menu(ps3ui_shell_t *sh, int versus)
@@ -298,6 +337,18 @@ static void ps3ui_sh_update_volume(ps3ui_shell_t *sh)
         ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
 }
 
+/* CREDITS: a list longer than its window, scrolled to keep the cursor on it. */
+static void ps3ui_sh_update_credits(ps3ui_shell_t *sh)
+{
+    ps3ui_sh_move(sh, PS3UI_CREDITS);
+    if (sh->cursor < sh->credits_top)
+        sh->credits_top = sh->cursor;
+    if (sh->cursor >= sh->credits_top + PS3UI_CREDITS_ROWS)
+        sh->credits_top = sh->cursor - PS3UI_CREDITS_ROWS + 1;
+    if (ps3ui_sh_hit(sh, PS3UI_PAD_CIRCLE | PS3UI_PAD_CROSS))
+        ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
+}
+
 static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, int netplay_session)
 {
     sh->frame++;
@@ -338,15 +389,19 @@ static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, in
         break;
     case PS3UI_SH_ARCADE: ps3ui_sh_update_settings_menu(sh, 0); break;
     case PS3UI_SH_VERSUS: ps3ui_sh_update_settings_menu(sh, 1); break;
-    case PS3UI_SH_OPTIONS:
-        ps3ui_sh_move(sh, sh->no_controls ? 1 : 2);
+    case PS3UI_SH_OPTIONS: {
+        static const ps3ui_sh_screen_t to[3] = { PS3UI_SH_CONTROLS, PS3UI_SH_SETTINGS, PS3UI_SH_CREDITS };
+        int first = sh->no_controls ? 1 : 0;     /* the web page has no Controls row */
+        ps3ui_sh_move(sh, 3 - first);
         if (ps3ui_sh_hit(sh, PS3UI_PAD_CIRCLE))
             ps3ui_shell_go(sh, sh->options_from_pause ? PS3UI_SH_PAUSE : PS3UI_SH_MAIN);
         else if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS))
-            ps3ui_shell_go(sh, sh->cursor == 0 && !sh->no_controls ? PS3UI_SH_CONTROLS : PS3UI_SH_SETTINGS);
+            ps3ui_shell_go(sh, to[sh->cursor + first]);
         break;
+    }
     case PS3UI_SH_CONTROLS: ps3ui_sh_update_controls(sh); break;
     case PS3UI_SH_SETTINGS: ps3ui_sh_update_volume(sh); break;
+    case PS3UI_SH_CREDITS: ps3ui_sh_update_credits(sh); break;
     case PS3UI_SH_ONLINE:
         if (!sh->online->open)
             ps3ui_shell_go(sh, PS3UI_SH_MAIN);   /* the lobby was left */
@@ -397,8 +452,10 @@ windows:
     case PS3UI_SH_VERSUS: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_05");
         ps3ui_win_open(&sh->msg, &ps3ui_n_cmn_base, "cmn_win_b_01"); break;
     case PS3UI_SH_OPTIONS:
-        ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, sh->no_controls ? "choice_win_02" : "choice_win_02");
+        ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, sh->no_controls ? "choice_win_02" : "choice_win_03");
         break;
+    case PS3UI_SH_CREDITS: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_06");
+        ps3ui_win_open(&sh->msg, &ps3ui_n_cmn_base, "cmn_win_b_01"); break;
     case PS3UI_SH_CONTROLS: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_screen, "controls_win_ps3"); break;
     case PS3UI_SH_SETTINGS: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_02"); break;
     case PS3UI_SH_PAUSE: if (!sh->resume_wait) ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "pause_win_s"); break;
@@ -519,6 +576,41 @@ static void ps3ui_sh_draw_controls(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
         ps3ui_text_centre(cv, &st, x, y - 21.0f, "Move", alpha);
 }
 
+/* CREDITS: name left, licence right, the rows from credits_top; the explain
+ * window below gives the copyright and origin of the row under the cursor. */
+static void ps3ui_sh_draw_credits(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
+{
+    ps3ui_slots_t s = { 0 };
+    ps3ui_win_draw(cv, &sh->main, 0, 0, &s);
+    float lx, ly, rx, ry, ex, ey, tx, ty;
+    if (!ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &lx, &ly) || !ps3ui_slot_xy(&s, "p_txt_03_rt", 1, 0, &rx, &ry))
+        return;
+    float alpha = ps3ui_slot_alpha(&s, "p_txt_01_lt");
+    if (sh->main.state == PS3UI_WIN_IDLE && ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey))
+        ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex,
+                          ey + 54.0f * (float)(sh->cursor - sh->credits_top), sh->cursor_t);
+    ps3ui_text_style_t st = ps3ui_style_text(37.0f);
+    ps3ui_text_style_t ls = st;
+    ls.rgb = 0x00F040;
+    for (int i = 0; i < PS3UI_CREDITS_ROWS && sh->credits_top + i < PS3UI_CREDITS; i++) {
+        const ps3ui_credit_t *c = &ps3ui_credits[sh->credits_top + i];
+        float y = ly + 54.0f * (float)i;
+        ps3ui_text_left(cv, &st, lx, y, c->name, alpha);
+        ps3ui_text_right(cv, sh->credits_top + i == sh->cursor ? &st : &ls, rx, y, c->licence, alpha);
+    }
+    if (ps3ui_slot_xy(&s, "head_tit_ct", 0.5f, 0, &tx, &ty)) {
+        char title[32];
+        snprintf(title, sizeof title, "CREDITS  %d/%d", sh->cursor + 1, PS3UI_CREDITS);
+        ps3ui_text_style_t ts = ps3ui_style_title(40.0f);
+        ps3ui_text(cv, &ts, tx - ps3ui_text_width(&ts, title) * 0.5f, ty + 47.0f, title,
+                   ps3ui_slot_alpha(&s, "head_tit_ct"));
+    }
+    const ps3ui_credit_t *c = &ps3ui_credits[sh->cursor];
+    char about[256];
+    snprintf(about, sizeof about, "%s\n%s", c->copyright, c->url);
+    ps3ui_sh_draw_explain(cv, sh, about);
+}
+
 static const char *ps3ui_shell_hints(const ps3ui_shell_t *sh)
 {
     if (ps3ui_dialog_showing(&sh->dlg))
@@ -528,6 +620,7 @@ static const char *ps3ui_shell_hints(const ps3ui_shell_t *sh)
     case PS3UI_SH_ARCADE: return "\x01:Back  \x02:Enter";
     case PS3UI_SH_VERSUS: return sh->two_p ? "\x01:Back  \x02:Enter" : "\x01:Back";
     case PS3UI_SH_OPTIONS: return "\x01:Back  \x02:Enter";
+    case PS3UI_SH_CREDITS: return "\x01:Back";
     case PS3UI_SH_CONTROLS:
     case PS3UI_SH_SETTINGS:
     case PS3UI_SH_PAUSE: return "\x02:Enter";
@@ -572,7 +665,10 @@ static void ps3ui_shell_draw(ps3ui_shell_t *sh, ps3ui_canvas_t *cv)
     }
     case PS3UI_SH_OPTIONS:
         ps3ui_sh_draw_list(cv, sh, "HELP & OPTIONS", sh->no_controls ? ps3ui_option_rows_nc : ps3ui_option_rows,
-                           sh->no_controls ? 1 : 2, sh->cursor);
+                           sh->no_controls ? 2 : 3, sh->cursor);
+        break;
+    case PS3UI_SH_CREDITS:
+        ps3ui_sh_draw_credits(cv, sh);
         break;
     case PS3UI_SH_CONTROLS:
         ps3ui_sh_draw_controls(cv, sh);
