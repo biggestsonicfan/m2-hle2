@@ -582,6 +582,14 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
         endif()
     endforeach()
+    # Not a ctest: the i960 and its bus running random code aimed at page, region
+    # and MMIO edges, one file to cmp between two builds (tools/README.md).
+    add_executable(i960_fuzz ${CMAKE_CURRENT_SOURCE_DIR}/tests/i960_fuzz.c)
+    target_include_directories(i960_fuzz PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(i960_fuzz PRIVATE miniz sokol)
+    if(MSVC)
+        target_compile_definitions(i960_fuzz PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
     # Not a ctest: renders the PS3-style UI (ui/ps3ui*.h) to PNGs for
     # tools/ps3ui/grade.py, which holds them against the PS3's own screens.
     add_executable(ps3ui_render ${CMAKE_CURRENT_SOURCE_DIR}/tests/ps3ui_render.c)
@@ -624,7 +632,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test audio_out_test scsp_dsp_test scsp_dsp_test_masks
-                  retro_shader_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz sfight_settings_test ps3ui_render)
+                  retro_shader_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test ps3ui_render)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

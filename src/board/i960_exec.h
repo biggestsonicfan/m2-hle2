@@ -286,9 +286,12 @@ static inline unsigned i960_cycle_cost(uint32_t word1) {
 #  define I960_HOT_INLINE inline
 #endif
 
-static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
+/* One instruction, for a caller that keeps the hook filter in sync
+ * (hle_filter_sync) and passes g_irqt_live, both fixed for a slice: the run
+ * loop, which would otherwise reload them per instruction. */
+static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bool live) {
     // Check HLE hooks before executing
-    if (hle_check(cpu, bus) == 0) {
+    if (hle_check_synced(cpu, bus) == 0) {
         return 0;  // hook handled it, IP already updated
     }
 
@@ -300,7 +303,7 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
     /* Only the live timers read this, and the lookup is worth 2-4% of the emu
      * thread on the RK3566 — 6% through a game load — so it is charged only
      * while they are on. */
-    if (g_irqt_live) cpu->cycles += i960_cycle_cost(word1);
+    if (live) cpu->cycles += i960_cycle_cost(word1);
 
     // Record in execution trace
     trace_record(ip, word1, cpu->frame_depth);
@@ -1177,6 +1180,13 @@ static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
 
     cpu->sfr.ip = ip + instr_len;
     return 0;
+}
+
+/* One instruction, from anywhere: syncs the hook filter and reads the live
+ * timers' flag itself. */
+static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
+    hle_filter_sync();
+    return i960_step_core(cpu, bus, g_irqt_live != 0);
 }
 
 static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {

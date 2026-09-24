@@ -244,6 +244,7 @@ static inline void input_attach(memory_bus_t *bus) {
     for (int i = 0; i < bus->region_count; i++) {
         if (bus->regions[i].base == IO_BASE) {
             bus->regions[i].read_cb = input_io_read_cb;
+            mem_regions_changed(bus);
             LOG_INFO("input: I/O port read callback attached @ 0x%08X", IO_BASE);
             return;
         }
