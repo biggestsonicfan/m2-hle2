@@ -55,6 +55,12 @@ typedef struct {
     m68k_read_fn  read_cb;
     m68k_write_fn write_cb;
     void         *mem_ctx;
+    /* Reads of plain memory, by 64 KB page of the 24-bit space: a page with a
+     * pointer here is read straight from it (big-endian, as the 68000 sees
+     * it), one without goes to read_cb. The owner fills it and must leave out
+     * anything a read has side effects on. An access that crosses a page end
+     * always goes to read_cb. Writes always go to write_cb. */
+    const uint8_t *rmap[256];
 } m68k_state_t;
 
 /* ---- Helpers ------------------------------------------------------------- */

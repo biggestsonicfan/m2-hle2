@@ -46,12 +46,23 @@ static inline int32_t m68k_sign_ext(uint32_t v, int sz) {
 /* ---- bus access ----
  * Time is charged per instruction from Motorola's tables (m68k_timing.h), in
  * m68k_step, not per access. */
-static inline uint8_t  m68k_rb(m68k_state_t *s, uint32_t a)
-    { return (uint8_t)s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 1); }
-static inline uint16_t m68k_rw(m68k_state_t *s, uint32_t a)
-    { return (uint16_t)s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 2); }
-static inline uint32_t m68k_rl(m68k_state_t *s, uint32_t a)
-    { return s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 4); }
+static inline const uint8_t *m68k_direct(const m68k_state_t *s, uint32_t a, uint32_t sz) {
+    const uint8_t *p = s->rmap[(a >> 16) & 0xFFu];
+    return p && (a & 0xFFFFu) <= 0x10000u - sz ? p + (a & 0xFFFFu) : NULL;
+}
+static inline uint8_t  m68k_rb(m68k_state_t *s, uint32_t a) {
+    const uint8_t *p = m68k_direct(s, a, 1);
+    return p ? p[0] : (uint8_t)s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 1);
+}
+static inline uint16_t m68k_rw(m68k_state_t *s, uint32_t a) {
+    const uint8_t *p = m68k_direct(s, a, 2);
+    return p ? (uint16_t)(p[0] << 8 | p[1]) : (uint16_t)s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 2);
+}
+static inline uint32_t m68k_rl(m68k_state_t *s, uint32_t a) {
+    const uint8_t *p = m68k_direct(s, a, 4);
+    return p ? (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]
+             : s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 4);
+}
 static inline void m68k_wb(m68k_state_t *s, uint32_t a, uint8_t  v)
     { s->write_cb(s->mem_ctx, a & 0xFFFFFFu, v, 1); }
 static inline void m68k_ww(m68k_state_t *s, uint32_t a, uint16_t v)
