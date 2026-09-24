@@ -196,7 +196,7 @@ static inline sg_image video__make_img(const char *label) {
         .width        = VIDEO_WIDTH,
         .height       = VIDEO_HEIGHT,
         .pixel_format = SG_PIXELFORMAT_RGBA8,
-        .usage        = { .stream_update = true },
+        .usage        = { .dynamic_update = true },
         .label        = label,
     });
 }
@@ -295,7 +295,7 @@ static inline void video_init(video_state_t *vid) {
     memset(vid->back_pixel, 0, sizeof(vid->back_pixel));
     vid->back_image = sg_make_image(&(sg_image_desc){
         .width = 1, .height = 1, .pixel_format = SG_PIXELFORMAT_RGBA8,
-        .usage = { .stream_update = true }, .label = "game-back" });
+        .usage = { .dynamic_update = true }, .label = "game-back" });
     vid->back_view = sg_make_view(&(sg_view_desc){
         .texture.image = vid->back_image, .label = "game-back-view" });
 

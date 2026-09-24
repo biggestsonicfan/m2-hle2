@@ -737,6 +737,9 @@ sapp_desc sokol_main(int argc, char *argv[]) {
         .cleanup_cb   = cleanup,
         .event_cb     = event,
         .high_dpi     = true,
+        /* sokol's default became depth-only; the offscreen game target and
+         * its pipelines are depth-stencil. */
+        .depth_format = SAPP_PIXELFORMAT_DEPTH_STENCIL,
         .window_title = "Sonic the Fighters",
         .html5 = {
             .canvas_selector = "#canvas",

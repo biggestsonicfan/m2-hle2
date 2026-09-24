@@ -505,7 +505,7 @@ static inline bool objview__ensure_buffers(int fill_verts, int line_verts) {
         if (g_objview.fill_vbuf.id) sg_destroy_buffer(g_objview.fill_vbuf);
         int cap = fill_verts + fill_verts / 2 + 3072;
         g_objview.fill_vbuf = sg_make_buffer(&(sg_buffer_desc){
-            .usage.stream_update = true,
+            .usage.dynamic_update = true,
             .size = (size_t)cap * sizeof(game_render_tex_vertex_t),
             .label = "objview-fill-vbuf" });
         g_objview.fill_cap = g_objview.fill_vbuf.id ? cap : 0;
@@ -514,7 +514,7 @@ static inline bool objview__ensure_buffers(int fill_verts, int line_verts) {
         if (g_objview.line_vbuf.id) sg_destroy_buffer(g_objview.line_vbuf);
         int cap = line_verts + line_verts / 2 + 3072;
         g_objview.line_vbuf = sg_make_buffer(&(sg_buffer_desc){
-            .usage.stream_update = true,
+            .usage.dynamic_update = true,
             .size = (size_t)cap * sizeof(game_render_line_vertex_t),
             .label = "objview-line-vbuf" });
         g_objview.line_cap = g_objview.line_vbuf.id ? cap : 0;
