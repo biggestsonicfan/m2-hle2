@@ -556,6 +556,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     const bool     bps     = g_bp.bloom != 0;
     bool slow = ctx->step_over_bp || g_frame_done || (board_vblank && g_vblank_acked) || g_irqt_sound_kick
              || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered;
+    hle_filter_sync();
     int i;
     for (i = 0; i < max_steps && !ctx->cpu->halted; i++) {
         if (slow) {
@@ -569,7 +570,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             break;
         }
         PCPROF_TICK(ctx->cpu->sfr.ip);
-        if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
+        if (i960_step_core(ctx->cpu, ctx->bus, live) != 0) break;
         steps++;
         if (slow || g_emu_attn != attn) {
             slow = true;

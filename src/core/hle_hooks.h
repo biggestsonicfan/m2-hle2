@@ -194,18 +194,25 @@ static inline void hle_interrupt(i960_cpu_t *cpu, uint32_t handler) {
 static const game_profile_t *s_hle_filter_profile = NULL;
 static uint8_t               s_hle_filter[65536 / 8];
 
-/* Dispatch: walk the active profile's hook table and call the first match. */
-static inline int hle_check(i960_cpu_t *cpu, memory_bus_t *bus) {
+/* Rebuild the filter if the active profile changed. The run loop does this
+ * once per slice (the profile cannot change inside one) and then calls
+ * hle_check_synced per instruction; hle_check does both. */
+static inline void hle_filter_sync(void) {
+    const game_profile_t *p = g_active_profile;
+    if (s_hle_filter_profile == p) return;
+    memset(s_hle_filter, 0, sizeof(s_hle_filter));
+    for (size_t i = 0; p && i < p->hook_count; i++) {
+        uint32_t k = (p->hooks[i].addr >> 2) & 0xFFFFu;
+        s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
+    }
+    s_hle_filter_profile = p;
+}
+
+/* Dispatch: walk the active profile's hook table and call the first match.
+ * The filter must be in sync with g_active_profile (hle_filter_sync). */
+static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus) {
     const game_profile_t *p = g_active_profile;
     uint32_t ip = cpu->sfr.ip;
-    if (s_hle_filter_profile != p) {
-        memset(s_hle_filter, 0, sizeof(s_hle_filter));
-        for (size_t i = 0; p && i < p->hook_count; i++) {
-            uint32_t k = (p->hooks[i].addr >> 2) & 0xFFFFu;
-            s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
-        }
-        s_hle_filter_profile = p;
-    }
     uint32_t k = (ip >> 2) & 0xFFFFu;
     if (!(s_hle_filter[k >> 3] & (1u << (k & 7u))))
         return 1;
@@ -216,6 +223,11 @@ static inline int hle_check(i960_cpu_t *cpu, memory_bus_t *bus) {
             return h[i].fn(cpu, bus);
     }
     return 1;
+}
+
+static inline int hle_check(i960_cpu_t *cpu, memory_bus_t *bus) {
+    hle_filter_sync();
+    return hle_check_synced(cpu, bus);
 }
 
 #endif /* HLE_HOOKS_H */
