@@ -429,6 +429,15 @@ def wait_frames(count: int = 1, timeout_ms: int = 10000) -> dict:
 
 
 @mcp.tool()
+def run_frames(count: int = 1, timeout_ms: int = 30000) -> dict:
+    """From a stopped emulator, run exactly `count` game frames and stop.
+    The emulator stops itself at the frame edge, so nothing overshoots the way
+    emu_run + wait_frames + emu_stop does. `reached` is false (with `reason`)
+    on a breakpoint, halt or timeout; the board is stopped either way."""
+    return _send({"cmd": "run_frames", "count": count, "timeout_ms": timeout_ms})
+
+
+@mcp.tool()
 def set_input(held: str = "0x0") -> dict:
     """Set the held input mask (hex string, the 0x500700 bit layout) that the
     game's input read serves. e.g. '0x1000' holds P1 DOWN, '0x0' releases."""

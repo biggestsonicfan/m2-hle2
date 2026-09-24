@@ -208,6 +208,17 @@ export class M2Hle {
     }
 
     /**
+     * From a stopped board: run exactly `count` frames and stop, in one round
+     * trip. The emulator stops itself at the frame edge, so unlike run +
+     * waitFrames + stop nothing overshoots. `reached` is false on a
+     * breakpoint, halt or timeout (`reason` says which); the board is stopped
+     * either way.
+     */
+    runFrames(count = 1, timeoutMs = 30000) {
+        return this.rpc('run_frames', { count, timeout_ms: timeoutMs });
+    }
+
+    /**
      * Wait for the ROM regions to be filled.
      *
      * Not the same as waiting for a profile: the profile resolves from the
