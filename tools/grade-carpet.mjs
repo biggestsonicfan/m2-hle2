@@ -18,7 +18,10 @@
  * attract's replay fight on the Flying Carpet, and beside each the board
  * camera (0x519E98: eye, then pitch and yaw at 65536 a turn) and the
  * frame_counter. For each, this loads the explorer headless, holds its stage
- * clock on that frame_counter, rides the carpet so the scene is in the board's
+ * clock on that frame_counter and the carpet's flight on the stage object's
+ * age (the explorer has one clock; the board runs the ripple, flames and rings
+ * off frame_counter and the flight off the age, 1160 frames apart on this
+ * replay), rides the carpet so the scene is in the board's
  * frame, stands the camera where the board's stood, and renders at 496x384
  * three times: as drawn, with the plate hidden, and the rug alone. The board's
  * answer is that the plate covers none of the rug, so a pixel of the rug it
@@ -27,10 +30,16 @@
  * render. The plate showing past the rug's edge, where the ripple lifts it off
  * the plane, is in the board's picture too, and is only counted.
  *
- * The comparison is not pixel for pixel. The field of view is fitted by eye
- * (--fov, 58 degrees on the corner posts and the rug's far edge), the desert
- * stands differently because the explorer's flight is not on the board's
- * phase, and the fighters are not drawn here at all. The rug's ground and the
+ * The projection is the board's. camera_init sends the GEO focal lengths of
+ * zoom (camera +0x13C) times focus_dist (0x501084/8, 280 by its own default),
+ * and the full-screen window is centred on the 496x384 picture, so the
+ * vertical field of view is 2 atan(192 / 280), 68.9 degrees. Zoom stays 1 and
+ * roll 0 through the replay fight, which is why the camera record can leave
+ * both out; --focal takes another focal length. The rug then registers
+ * with MAME's, and so does the desert: the pattern IoU on the rug's pixels and
+ * the sky's off it measure how well. They stop short of pixel for pixel: the
+ * fighters and the HUD are not drawn here and cover part of both in MAME's
+ * snapshot, so a perfect IoU is not 1. The rug's ground and the
  * plate are one colour — (38, 0, 0) in MAME, (39, 0, 0) here — so what tells
  * them apart is the pattern: its red outline and gold, anything with red at
  * 80 or more.
@@ -41,7 +50,7 @@
  * machine without the browser, skips.
  *
  *   node tools/grade-zsort.mjs --mame --stage 1     # MAME's snapshots, once (~12 min)
- *   node tools/grade-carpet.mjs [--frames 400,490] [--fov 58] [--out DIR]
+ *   node tools/grade-carpet.mjs [--frames 400,490] [--focal 280] [--flight-lag 323] [--out DIR]
  *
  * $M2_NOCLIP picks the explorer checkout, as every grader here.
  */
@@ -56,14 +65,28 @@ import { Report } from './lib/report.mjs';
 import { parseArgs } from './lib/args.mjs';
 import { readPng, writePng } from './lib/png.mjs';
 
-const args = parseArgs(['ref', 'frames', 'fov', 'out']);
+const args = parseArgs(['ref', 'frames', 'focal', 'flight-lag', 'out']);
 const REF = path.resolve(args.str('ref', path.join(os.tmpdir(), 'm2hle-zsort', 'stage1')));
 const OUT = args.str('out') ? path.resolve(args.str('out')) : null;
-const FOV = args.num('fov', 58);
 const W = 496, H = 384;
+/* The board's focal length in pixels, and the vertical field of view it gives the picture. */
+const FOCAL = args.num('focal', 280);
+const FOV = 2 * Math.atan(H / 2 / FOCAL) * 180 / Math.PI;
+/* The carpet's flight clock at MAME's record n is n - FLIGHT_LAG. Measured on this emulator's
+ * replay: fa_object0_ram's age (+6) runs (board frame - jump) - 323, and the frame a mark
+ * reads was flown at the age before (object_cont steps it after), so record n = jump + 1 + n
+ * flies at n - 323. carpetAt at that clock is stage_xpos/ypos/zpos to the last digit. */
+const FLIGHT_LAG = args.num('flight-lag', 323);
 const PLATE = 3332;
 /* A pixel of the rug's pattern rather than its ground. */
 const PATTERN_RED = 80;
+/* The pattern IoU that says the rug is where MAME's is. */
+const REGISTERED = 0.45;
+/* A pixel of sky rather than sand, pyramid or post; and the HUD's rows, which MAME draws over it. */
+const isSky = (P, i) => P[i + 2] >= P[i] + 60;
+const HUD_ROWS = 90;
+/* The sky IoU that says the desert is where MAME's is. */
+const DESERT = 0.6;
 const rep = new Report(`grade-carpet — the Flying Carpet's rug against MAME (explorer ${NOCLIP})`);
 
 /* ---- MAME's side ------------------------------------------------------------ */
@@ -86,6 +109,7 @@ const frames = want.filter((n) => shots.includes(n) && (n + 1) * REC <= bin.leng
         n, fc: bin.readUInt32LE(o), stage: bin[o + 4],
         eye: [bin.readFloatLE(c), bin.readFloatLE(c + 4), bin.readFloatLE(c + 8)],
         pitch: bin.readInt16LE(c + 12), yaw: bin.readInt16LE(c + 14),
+        flight: n - FLIGHT_LAG,
     };
 });
 const offStage = frames.filter((f) => f.stage !== 1);
@@ -130,14 +154,30 @@ const server = http.createServer((req, res) => {
 }).listen(0);
 
 /* One frame, in the page: the explorer's stage clock held on the board's frame_counter, the
- * camera where the board's stood, and three renders at the board's size. */
+ * flight on the carpet object's age, the camera where the board's stood, and three renders at
+ * the board's size. */
 async function renderFrame({ f, W, H, FOV, PLATE }) {
     const s = window.stf, v = s.viewer;
     const T = await import('three');
+    const D = await import('/js/display.js'), S = await import('/js/stages.js');
     const raf = () => new Promise((r) => requestAnimationFrame(() => r()));
-    /* Half a frame into fc, and held there. */
+    /* The explorer runs every draw off one frame; the board runs the flight off the object's
+     * age. A draw whose ops open with the world prologue is flown, so it reads its frame that
+     * much earlier; the ripple, the flames and the rings keep frame_counter. */
+    const stage = s.stages[s.stageIndex];
+    const prologue = JSON.stringify(D.stageWorldFrame(stage, 100, s.frames));
+    const n = D.stageWorldFrame(stage, 100, s.frames).length;
+    const lead = f.fc - f.flight;
+    for (const { entry } of s.anim.entries) {
+        const ops = entry.flownOps ?? entry.ops;
+        if (typeof ops !== 'function' || JSON.stringify(ops(100).slice(0, n)) !== prologue) continue;
+        entry.flownOps = ops;
+        entry.ops = (g) => ops(g - lead);
+    }
+    /* Half a frame into fc, and held there; -1 makes the explorer step even on a frame it has. */
     window.__clock = 1e7;
     s.anim.start = 1e7 - ((f.fc + 0.5) / 60) * 1000;
+    s.anim.frame = -1;
     await raf(); await raf();
     /* The board's camera is in the carpet's frame, and so is the scene while the carpet is
      * ridden. The explorer negates z on read; yaw = -atan2(dx, dz), pitch = atan2(dy, across). */
@@ -154,6 +194,10 @@ async function renderFrame({ f, W, H, FOV, PLATE }) {
     /* Let the billboards and the sky turn to it, then put it back exactly. */
     await raf(); await raf();
     place();
+    /* The sun is built against the heading, so it is flown too. Nothing steps it again while
+     * the frame is held. */
+    v.material.uniforms.uLight.value.set(
+        ...S.stageLight(stage.bright, stage.vecter[0], D.stageLightYaw(stage, f.flight, s.frames)));
     const keep = { fov: cam.fov, aspect: cam.aspect };
     cam.fov = FOV; cam.aspect = W / H; cam.updateProjectionMatrix();
     const rt = new T.WebGLRenderTarget(W, H);
@@ -225,9 +269,9 @@ try {
         const ride = document.querySelector('#opt-ride');
         if (!ride.checked) ride.click();
     });
-    rep.note(`${frames.length} of MAME's frames, replay ${frames[0].n}..${frames.at(-1).n}, at fov ${FOV}`);
+    rep.note(`${frames.length} of MAME's frames, replay ${frames[0].n}..${frames.at(-1).n}, at focal ${FOCAL} (fov ${FOV.toFixed(2)})`);
 
-    const totals = { changed: 0, over: 0, drawn: 0, hidden: 0, mame: 0 };
+    const totals = { changed: 0, over: 0, drawn: 0, hidden: 0, mame: 0, both: 0, either: 0, skyBoth: 0, skyEither: 0 };
     let held = 0, worst = null;
     for (const f of frames) {
         const shot = await page.evaluate(renderFrame, { f, W, H, FOV, PLATE });
@@ -237,10 +281,21 @@ try {
         if (M.width !== W || M.height !== H) throw new Error(`MAME's snapshot is ${M.width}x${M.height}, not ${W}x${H}`);
         const same = (P, Q, i) => P[i] === Q[i] && P[i + 1] === Q[i + 1] && P[i + 2] === Q[i + 2];
         const pat = (P, i) => P[i] >= PATTERN_RED;
-        const r = { changed: 0, over: 0, drawn: 0, hidden: 0, mame: 0 };
+        const r = { changed: 0, over: 0, drawn: 0, hidden: 0, mame: 0, both: 0, either: 0, skyBoth: 0, skyEither: 0 };
         const mask = Buffer.alloc(W * H * 3);
         for (let i = 0; i < W * H * 3; i += 3) {
-            const hit = !same(A, B, i), over = hit && same(RA, RB, i);
+            const rug = same(RA, RB, i);
+            /* Registration: on the rug's pixels, the pattern here against MAME's. */
+            if (rug && (pat(A, i) || pat(M.rgb, i))) {
+                r.either++;
+                if (pat(A, i) && pat(M.rgb, i)) r.both++;
+            }
+            /* The desert: off the rug and under the HUD, the sky here against MAME's. */
+            if (!rug && i >= HUD_ROWS * W * 3 && (isSky(A, i) || isSky(M.rgb, i))) {
+                r.skyEither++;
+                if (isSky(A, i) && isSky(M.rgb, i)) r.skyBoth++;
+            }
+            const hit = !same(A, B, i), over = hit && rug;
             /* The drawn picture, dimmed: magenta where the plate covers the rug, cyan past it. */
             mask[i] = over ? 255 : hit ? 0 : A[i] >> 2;
             mask[i + 1] = over ? 0 : hit ? 255 : A[i + 1] >> 2;
@@ -257,7 +312,7 @@ try {
         if (!worst || r.over > worst.r.over) worst = { f, r };
         const pc = (k) => (100 * r[k] / r.over).toFixed(1) + '%';
         rep.note(`replay ${String(f.n).padStart(4)}  fc ${f.fc}  the plate covers ${String(r.over).padStart(6)} px of the rug` +
-            ` (${r.changed - r.over} past its edge)` +
+            ` (${r.changed - r.over} past its edge), pattern IoU ${(r.both / r.either).toFixed(3)}, sky IoU ${(r.skyBoth / r.skyEither).toFixed(3)}` +
             (r.over ? `; pattern there: drawn ${pc('drawn')}, plate hidden ${pc('hidden')}, MAME ${pc('mame')}` : ''));
         if (OUT) {
             fs.mkdirSync(OUT, { recursive: true });
@@ -282,6 +337,16 @@ try {
         totals.over === 0 ? `0 px over ${frames.length} frames`
             : `${totals.over} px over ${frames.length} frames, worst replay ${worst.f.n} (${worst.r.over} px); ` +
               `pattern in those pixels: drawn ${pc('drawn')}, plate hidden ${pc('hidden')}, MAME ${pc('mame')}`);
+    /* 0.515 at the board's focal length, 0.30-0.32 a 15-pixel step either side, 0.23 at the
+     * 58 degrees once fitted by eye: a camera or a projection that has slipped falls under this. */
+    const iou = totals.both / totals.either;
+    rep.check('the rug registers with MAME\'s', iou >= REGISTERED,
+        `pattern IoU ${iou.toFixed(3)} on the rug's pixels, at least ${REGISTERED} wanted (the fighters and the HUD stand over it in MAME's)`);
+    /* 0.707 with the flight on the carpet's age, 0.697 four frames either side, 0.254 flown on
+     * frame_counter as the explorer's one clock would have it. */
+    const sky = totals.skyBoth / totals.skyEither;
+    rep.check('the desert registers with MAME\'s', sky >= DESERT,
+        `sky IoU ${sky.toFixed(3)} off the rug and under the HUD, at least ${DESERT} wanted`);
     if (pageErrors.length) rep.note(`page errors: ${pageErrors.slice(0, 3).join('; ')}`);
     if (OUT) rep.note(`pictures (MAME | explorer | magenta: plate over rug, cyan: past it) in ${OUT}`);
 } finally {
