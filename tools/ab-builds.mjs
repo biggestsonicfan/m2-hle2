@@ -5,7 +5,12 @@
  * count frames with a breakpoint on the frame hook so both stop on the SAME
  * instruction, then hash the registers and the nine regions the i960 writes.
  *
- *   node tools/ab-builds.mjs <exeA> <exeB> [--marks 600,1800] [--rom <zip>]
+ *   node tools/ab-builds.mjs <exeA> <exeB> [--marks 600,1800] [--rom <zip>] [--sound]
+ *
+ * --sound adds the sound board at every mark: all of sound RAM, the SCSP's
+ * register file and sound_status (the 68000's PC, SR and clock, the sample
+ * count, interrupts taken, voices keyed and playing). The i960 regions alone
+ * cannot see it, and a sound-board change has to hold both.
  */
 import os from 'node:os';
 import fs from 'node:fs';
@@ -31,6 +36,16 @@ const REGIONS = [
 ];
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex').slice(0, 16);
 process.env.M2HLE_UNTHROTTLE = '1';
+const SOUND = args.bool('sound');
+
+async function soundBoard(emu) {
+    const ram = [], regs = [];
+    for (let a = 0; a < 0x80000; a += 256) ram.push(...(await emu.rpc('read_wave', { addr: a, len: 256 })).b);
+    for (let a = 0; a < 0xF00; a += 256) regs.push(...(await emu.rpc('read_comm', { addr: a, len: 256 })).b);
+    const st = await emu.rpc('sound_status');
+    delete st.out_fill;   /* how far the host has drained its ring, not board state */
+    return { SND_RAM: sha(Buffer.from(ram)), SCSP_REGS: sha(Buffer.from(regs)), SND_STATUS: sha(JSON.stringify(st)) };
+}
 
 /* Its own directory per build, so neither shares m2hle.log with the other or
  * with the user's running instances. */
@@ -57,6 +72,7 @@ async function boards(exe, tag, port) {
             const b = { registers: sha(JSON.stringify(await emu.registers())) };
             for (const [name, addr, size] of REGIONS)
                 b[name] = sha((await emu.dumpRegion(addr, size, path.join(dir, `${name}.bin`))).bytes);
+            if (SOUND) Object.assign(b, await soundBoard(emu));
             out[mark] = b;
             console.log(`${tag} @${mark}  ` + Object.entries(b).map(([k, v]) => `${k}=${v}`).join(' '));
         }

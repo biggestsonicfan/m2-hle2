@@ -570,6 +570,18 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(MSVC)
         target_compile_definitions(snd_bench PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
+    # Not ctests: the SCSP under random register traffic, and the whole sound
+    # board running random code, each writing one file to cmp between two
+    # builds -- what snd_replay's driver never reaches (FM, noise, every loop
+    # kind, most 68000 forms). See tools/README.md, "The sound board".
+    foreach(t scsp_fuzz m68k_fuzz)
+        add_executable(${t} ${CMAKE_CURRENT_SOURCE_DIR}/tests/${t}.c)
+        target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
+        target_link_libraries(${t} PRIVATE miniz)
+        if(MSVC)
+            target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        endif()
+    endforeach()
     # Not a ctest: renders the PS3-style UI (ui/ps3ui*.h) to PNGs for
     # tools/ps3ui/grade.py, which holds them against the PS3's own screens.
     add_executable(ps3ui_render ${CMAKE_CURRENT_SOURCE_DIR}/tests/ps3ui_render.c)
@@ -612,7 +624,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test audio_out_test scsp_dsp_test scsp_dsp_test_masks
-                  retro_shader_test cop_replay snd_replay snd_bench sfight_settings_test ps3ui_render)
+                  retro_shader_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz sfight_settings_test ps3ui_render)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()
