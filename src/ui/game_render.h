@@ -1074,7 +1074,7 @@ static inline void game_render_init(void) {
     /* ---- Line pipeline ---------------------------------------------------- */
 
     g_game_render.line_vbuf = sg_make_buffer(&(sg_buffer_desc){
-        .usage = { .vertex_buffer = true, .stream_update = true },
+        .usage = { .vertex_buffer = true, .dynamic_update = true },
         .size  = sizeof(g_game_render.line_verts),
         .label = "game-render-line-vbuf",
     });
@@ -1127,7 +1127,7 @@ static inline void game_render_init(void) {
 
     /* ---- Fill (solid/textured triangle) pipeline -------------------------- */
     g_game_render.fill_vbuf = sg_make_buffer(&(sg_buffer_desc){
-        .usage = { .vertex_buffer = true, .stream_update = true },
+        .usage = { .vertex_buffer = true, .dynamic_update = true },
         .size  = GEO3D_MAX_TRIS * 3 * sizeof(game_render_tex_vertex_t),
         .label = "game-render-fill-vbuf",
     });
@@ -1276,7 +1276,7 @@ static inline void game_render_init(void) {
         .width        = GEO3D_ATLAS_W,
         .height       = GEO3D_ATLAS_H,
         .pixel_format = SG_PIXELFORMAT_R8,
-        .usage        = { .stream_update = true },
+        .usage        = { .dynamic_update = true },
         .label        = "geo3d-atlas",
     });
     g_game_render.atlas_view = sg_make_view(&(sg_view_desc){
@@ -1290,12 +1290,12 @@ static inline void game_render_init(void) {
     /* Luma-ramp LUTs: lumaram (0x20000 = 256×512) + colorxlat (0xC000 = 256×192). */
     g_game_render.luma_image = sg_make_image(&(sg_image_desc){
         .width = 256, .height = (int)(LUMA_SIZE / 256), .pixel_format = SG_PIXELFORMAT_R8,
-        .usage = { .stream_update = true }, .label = "geo3d-lumaram" });
+        .usage = { .dynamic_update = true }, .label = "geo3d-lumaram" });
     g_game_render.luma_view = sg_make_view(&(sg_view_desc){
         .texture.image = g_game_render.luma_image, .label = "geo3d-lumaram-view" });
     g_game_render.cxlat_image = sg_make_image(&(sg_image_desc){
         .width = 256, .height = (int)(COLORXLAT_SIZE / 256), .pixel_format = SG_PIXELFORMAT_R8,
-        .usage = { .stream_update = true }, .label = "geo3d-colorxlat" });
+        .usage = { .dynamic_update = true }, .label = "geo3d-colorxlat" });
     g_game_render.cxlat_view = sg_make_view(&(sg_view_desc){
         .texture.image = g_game_render.cxlat_image, .label = "geo3d-colorxlat-view" });
     g_game_render.lut_sampler = sg_make_sampler(&(sg_sampler_desc){

@@ -89,7 +89,7 @@ static void ps3ui_gpu_setup(void)
     g_ps3ui_gpu.atlas_px = (uint8_t *)calloc((size_t)PS3UI_ATLAS * PS3UI_ATLAS * 4, 1);
     g_ps3ui_gpu.atlas_img = sg_make_image(&(sg_image_desc){
         .width = PS3UI_ATLAS, .height = PS3UI_ATLAS, .pixel_format = SG_PIXELFORMAT_RGBA8,
-        .usage = { .stream_update = true } });
+        .usage = { .dynamic_update = true } });
     g_ps3ui_gpu.atlas = sg_make_view(&(sg_view_desc){ .texture = { .image = g_ps3ui_gpu.atlas_img } });
     g_ps3ui_gpu.ready = 1;
 }

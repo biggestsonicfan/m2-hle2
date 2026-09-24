@@ -1472,6 +1472,9 @@ sapp_desc sokol_main(int argc, char* argv[]) {
          * 1920x1080 window on a 125% desktop would present a 1536x864
          * swapchain — which is what OBS would then record. */
         .high_dpi    = g_kiosk_on ? true : false,
+        /* sokol's default became depth-only; everything here is built for
+         * the depth-stencil swapchain it used to give. */
+        .depth_format = SAPP_PIXELFORMAT_DEPTH_STENCIL,
         .window_title = "m2-hle",
         /* Ctrl-C and Ctrl-V inside an ImGui field. sokol_imgui already points
          * Dear ImGui's clipboard callbacks at sapp_{get,set}_clipboard_string,

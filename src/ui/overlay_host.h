@@ -548,7 +548,7 @@ static inline void overlay_host__ensure_image(overlay_layer_slot_t *L) {
         .width        = L->w,
         .height       = L->h,
         .pixel_format = SG_PIXELFORMAT_RGBA8,   /* the shader does the BGRA swap */
-        .usage        = { .stream_update = true },
+        .usage        = { .dynamic_update = true },
         .label        = "overlay-layer",
     });
     L->view = sg_make_view(&(sg_view_desc){
