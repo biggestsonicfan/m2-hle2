@@ -616,6 +616,49 @@ static inline void m68k_startup(m68k_state_t *s) {
  * Execute one instruction.  Returns approximate cycle count (not cycle-
  * accurate; useful only for rough timing).  Returns 0 if halted.
  */
+/* ================================================================ fast forms
+ *
+ * A sound driver spends most of its time in a few instruction forms: STF's
+ * polls its voices in a loop of JMP d16(PC), Bcc.W, MOVE.B (An),Dn, MOVE.B
+ * d16(An),d16(An), ADDA.W #imm,An and ROR.L #8,Dn -- nine opcodes are 77% of
+ * what it executes. m68k_fast[op] names those forms, and m68k_step runs them
+ * without the group decode, through the same helpers and in the same order as
+ * the general cases below, which stay the definition. M68K_FAST 0 turns the
+ * table off, to A/B. */
+#ifndef M68K_FAST
+#define M68K_FAST 1
+#endif
+enum {
+    M68K_F_NONE,
+    M68K_F_JMP_PCD16,       /* 4EFA           JMP (d16,PC) */
+    M68K_F_BRA_W,           /* 6000           BRA.W */
+    M68K_F_BRA_B,           /* 60xx           BRA.B */
+    M68K_F_BCC_W,           /* 6c00, c >= 2   Bcc.W */
+    M68K_F_BCC_B,           /* 6cxx, c >= 2   Bcc.B */
+    M68K_F_MOVEB_AI_DN,     /* 1n10-1n17      MOVE.B (An),Dn */
+    M68K_F_MOVEB_D16_D16,   /* 1n68-1n6F      MOVE.B (d16,An),(d16,An) */
+    M68K_F_ADDAW_IMM,       /* DnFC           ADDA.W #imm,An */
+    M68K_F_RORL_IMM         /* E098 | c << 9  ROR.L #c,Dn */
+};
+static uint8_t m68k_fast[65536];
+
+static void m68k_fast_init(void) {
+    memset(m68k_fast, 0, sizeof m68k_fast);
+    if (!M68K_FAST) return;
+    for (uint32_t op = 0; op < 65536; op++) {
+        uint8_t k = M68K_F_NONE;
+        uint32_t disp = op & 0xFF, cc = (op >> 8) & 0xF;
+        if (op == 0x4EFA)                                   k = M68K_F_JMP_PCD16;
+        else if ((op & 0xF000) == 0x6000 && cc == 0)        k = disp == 0 ? M68K_F_BRA_W : disp == 0xFF ? M68K_F_NONE : M68K_F_BRA_B;
+        else if ((op & 0xF000) == 0x6000 && cc >= 2)        k = disp == 0 ? M68K_F_BCC_W : disp == 0xFF ? M68K_F_NONE : M68K_F_BCC_B;
+        else if ((op & 0xF1F8) == 0x1010)                   k = M68K_F_MOVEB_AI_DN;
+        else if ((op & 0xF1F8) == 0x1168)                   k = M68K_F_MOVEB_D16_D16;
+        else if ((op & 0xF1FF) == 0xD0FC)                   k = M68K_F_ADDAW_IMM;
+        else if ((op & 0xF1F8) == 0xE098)                   k = M68K_F_RORL_IMM;
+        m68k_fast[op] = k;
+    }
+}
+
 static inline int m68k_step(m68k_state_t *s) {
     if (s->cpu.halted)  return 0;
     if (s->cpu.stopped) return 4;
@@ -625,8 +668,51 @@ static inline int m68k_step(m68k_state_t *s) {
     uint16_t    op    = m68k_fetch(s);
     int         grp   = (op >> 12) & 0xF;
 
-    if (!m68k_time_ready) m68k_timing_init();
+    if (!m68k_time_ready) { m68k_timing_init(); m68k_fast_init(); }
     c->cycles += m68k_time[op];
+
+    switch (m68k_fast[op]) {
+    case M68K_F_NONE: break;
+    case M68K_F_JMP_PCD16: {                    /* group 4, JMP: m68k_ea_addr(7, 2) */
+        uint32_t b = c->pc;
+        int16_t d16 = (int16_t)m68k_fetch(s);
+        c->pc = b + (int32_t)d16;
+        return (int)(c->cycles);
+    }
+    case M68K_F_BRA_W: { int16_t d16 = (int16_t)m68k_fetch(s); c->pc = op_pc + 2 + (int32_t)d16; return (int)(c->cycles); }
+    case M68K_F_BRA_B: c->pc = op_pc + 2 + (int32_t)(int8_t)(op & 0xFF); return (int)(c->cycles);
+    case M68K_F_BCC_W: {                        /* group 6 */
+        int16_t d16 = (int16_t)m68k_fetch(s);
+        if (m68k_test_cc(c, (op >> 8) & 0xF)) { c->pc = op_pc + 2 + (int32_t)d16; c->cycles += (uint64_t)-2; }
+        return (int)(c->cycles);
+    }
+    case M68K_F_BCC_B:
+        if (m68k_test_cc(c, (op >> 8) & 0xF)) { c->pc = op_pc + 2 + (int32_t)(int8_t)(op & 0xFF); c->cycles += 2; }
+        return (int)(c->cycles);
+    case M68K_F_MOVEB_AI_DN: {                  /* groups 1/2/3: ea_read(2), ea_write(0) */
+        uint32_t v = m68k_rb(s, c->a[op & 7]);
+        m68k_dn_write(c, (op >> 9) & 7, v, SZ_B);
+        m68k_flags_logic(c, v, SZ_B);
+        return (int)(c->cycles);
+    }
+    case M68K_F_MOVEB_D16_D16: {                /* groups 1/2/3: ea_read(5), ea_write(5) */
+        int16_t ds = (int16_t)m68k_fetch(s);
+        uint32_t v = m68k_rb(s, c->a[op & 7] + (int32_t)ds);
+        int16_t dd = (int16_t)m68k_fetch(s);
+        m68k_wb(s, c->a[(op >> 9) & 7] + (int32_t)dd, (uint8_t)v);
+        m68k_flags_logic(c, v, SZ_B);
+        return (int)(c->cycles);
+    }
+    case M68K_F_ADDAW_IMM:                      /* group D, ADDA: ea_read(7, 4) */
+        c->a[(op >> 9) & 7] += (uint32_t)(int32_t)(int16_t)m68k_fetch(s);
+        return (int)(c->cycles);
+    case M68K_F_RORL_IMM: {                     /* group E, register form */
+        int cnt = (op >> 9) & 7 ? (op >> 9) & 7 : 8;
+        c->cycles += 2u * (unsigned)cnt;
+        m68k_dn_write(c, op & 7, m68k_do_ror(c, c->d[op & 7], cnt, SZ_L), SZ_L);
+        return (int)(c->cycles);
+    }
+    }
 
     switch (grp) {
 
