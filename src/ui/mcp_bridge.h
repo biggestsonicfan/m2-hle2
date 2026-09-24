@@ -347,6 +347,90 @@ static void mcp_cmd_read_memory(const char *req, char *resp, int cap) {
     snprintf(p, (size_t)left, "\"}");
 }
 
+/* Several ranges in one round trip, copied under ONE hold of the emu mutex.
+ *
+ *   {"cmd":"read_many","ranges":[["0x00500700",8],[5883784,1]]}
+ *   -> {"ok":true,"frame":N,"data":["0102...","FF"]}
+ *
+ * The emu thread holds the mutex for a whole slice and a slice almost always
+ * ends at the frame hook, so every range comes from the same moment between
+ * two slices and the board never stops. That is the point: a caller that paused
+ * the board around its reads (emu_stop, reads, emu_run) stalled BOTH machines
+ * of a netplay session on every pause -- the fly's rounds ran at ~28 fps
+ * against 60 at character select on the same link. `frame` is g_emu_frames
+ * as the copy was taken.
+ *
+ * `ranges` is read as a flat run of numbers, addr then size, whatever the
+ * nesting; decimal or 0x hex, quoted or bare. */
+#define MCP_READ_MANY_RANGES 64
+#define MCP_READ_MANY_BYTES  32768   /* hex doubles it, inside the 128 kB reply */
+static void mcp_cmd_read_many(const char *req, char *resp, int cap) {
+    static uint8_t buf[MCP_READ_MANY_BYTES];   /* one client at a time */
+    uint32_t addr[MCP_READ_MANY_RANGES], size[MCP_READ_MANY_RANGES];
+    int n = 0, half = 0, depth = 0;
+    uint32_t total = 0;
+
+    const char *p = json_value_at(req, "ranges");
+    if (!p || *p != '[') {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing ranges\"}"); return;
+    }
+    for (; *p; p++) {
+        if (*p == '[') { depth++; continue; }
+        if (*p == ']') { if (--depth == 0) break; continue; }
+        if (*p >= '0' && *p <= '9') {
+            char *end;
+            uint32_t v = (uint32_t)strtoul(p, &end, 0);
+            p = end - 1;
+            if (!half) {
+                if (n == MCP_READ_MANY_RANGES) {
+                    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d ranges\"}",
+                             MCP_READ_MANY_RANGES); return;
+                }
+                addr[n] = v;
+            } else {
+                size[n] = v;
+                if (v > MCP_READ_MANY_BYTES - total) {
+                    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d bytes in all\"}",
+                             MCP_READ_MANY_BYTES); return;
+                }
+                total += v;
+                n++;
+            }
+            half ^= 1;
+        }
+    }
+    if (half || n == 0) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"ranges must be [addr,size] pairs\"}"); return;
+    }
+    if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
+
+    /* Under the mutex for the same two reasons as mcp_cmd_read_memory, and held
+     * across every range so they all come from one point between slices. */
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    unsigned frame = g_emu_frames;
+    uint8_t *b = buf;
+    for (int r = 0; r < n; r++)
+        for (uint32_t i = 0; i < size[r]; i++) *b++ = mem_read8(g_mcp.bus, addr[r] + i);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+
+    /* 32 kB of hex is 64 kB, well inside the bridge's 128 kB reply. */
+    static const char hex[] = "0123456789ABCDEF";
+    char *o = resp;
+    o += snprintf(o, (size_t)cap, "{\"ok\":true,\"frame\":%u,\"data\":[", frame);
+    b = buf;
+    for (int r = 0; r < n; r++) {
+        if (r) *o++ = ',';
+        *o++ = '"';
+        for (uint32_t i = 0; i < size[r]; i++, b++) {
+            *o++ = hex[*b >> 4];
+            *o++ = hex[*b & 15];
+        }
+        *o++ = '"';
+    }
+    *o++ = ']'; *o++ = '}'; *o = '\0';
+}
+
 static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
     uint32_t addr = 0;
     char hexdata[8192 + 1] = {0};
@@ -2080,6 +2164,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "set_camera")       == 0) mcp_cmd_set_camera(req, resp, cap);
     else if (strcmp(cmd, "get_registers")    == 0) mcp_cmd_get_registers(resp, cap);
     else if (strcmp(cmd, "read_memory")      == 0) mcp_cmd_read_memory(req, resp, cap);
+    else if (strcmp(cmd, "read_many")        == 0) mcp_cmd_read_many(req, resp, cap);
     else if (strcmp(cmd, "write_memory")     == 0) mcp_cmd_write_memory(req, resp, cap);
     else if (strcmp(cmd, "dump_memory_file") == 0) mcp_cmd_dump_memory_file(req, resp, cap);
     else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
