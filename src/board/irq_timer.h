@@ -25,6 +25,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "attention.h"
+
 #define IRQT_TIMERS 4
 
 typedef struct {
@@ -53,7 +55,7 @@ static volatile int g_vblank_acked = 0;
 
 static inline uint32_t irqt_request_read(void)        { return g_irqt.intreq; }
 static inline void     irqt_request_ack (uint32_t d)  {
-    if ((g_irqt.intreq & 1u) && !(d & 1u)) g_vblank_acked = 1;   /* vblank consumed */
+    if ((g_irqt.intreq & 1u) && !(d & 1u)) { g_vblank_acked = 1; emu_attn_bump(); }   /* vblank consumed */
     g_irqt.intreq &= d;                                          /* write = ACK */
 }
 static inline uint32_t irqt_enable_read (void)        { return g_irqt.intena; }
@@ -62,7 +64,7 @@ static inline uint32_t irqt_enable_read (void)        { return g_irqt.intena; }
  * (emu_thread.h emu_offer_sound) instead of at the next slice. */
 static volatile int g_irqt_sound_kick = 0;
 static inline void     irqt_enable_write(uint32_t d)  {
-    if (d & ~g_irqt.intena & 0x0C00u) g_irqt_sound_kick = 1;
+    if (d & ~g_irqt.intena & 0x0C00u) { g_irqt_sound_kick = 1; emu_attn_bump(); }
     g_irqt.intena = d;
 }
 

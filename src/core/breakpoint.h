@@ -47,6 +47,7 @@ static inline void bp__rebuild_bloom(void) {
     for (int i = 0; i < BP_MAX; i++)
         if (g_bp.list[i].active) m |= BP_BIT(g_bp.list[i].addr);
     g_bp.bloom = m;
+    emu_attn_bump();
 }
 
 static inline void bp_add(uint32_t addr, const char *label) {
@@ -58,6 +59,7 @@ static inline void bp_add(uint32_t addr, const char *label) {
             strncpy(g_bp.list[i].label, label ? label : "", 63);
             g_bp.count++;
             g_bp.bloom |= BP_BIT(addr);
+            emu_attn_bump();   /* after the bloom: the loop's fast path re-reads it */
             LOG_INFO("breakpoint added: 0x%08X (%s)", addr, g_bp.list[i].label);
             return;
         }

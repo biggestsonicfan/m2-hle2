@@ -253,6 +253,7 @@ static int fvipers_hook_frame_pace(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu; (void)bus;
     cop_geo_frame_edge();
     g_frame_done = 1;
+    emu_attn_bump();
     return 1;
 }
 

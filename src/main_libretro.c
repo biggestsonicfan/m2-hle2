@@ -938,6 +938,8 @@ static struct {
     void (LR_GLAPI *BindBuffer)(unsigned target, unsigned buffer);
     void (LR_GLAPI *UseProgram)(unsigned program);
     void (LR_GLAPI *PixelStorei)(unsigned pname, int param);
+    void (LR_GLAPI *BindFramebuffer)(unsigned target, unsigned framebuffer);
+    void (LR_GLAPI *InvalidateFramebuffer)(unsigned target, int count, const unsigned *attachments);
 } lr_gl;
 
 static void lr_gl_load(void) {
@@ -947,8 +949,23 @@ static void lr_gl_load(void) {
     #define LR_GL(name) *(retro_proc_address_t *)&lr_gl.name = get("gl" #name)
     LR_GL(Disable); LR_GL(ColorMask); LR_GL(DepthMask); LR_GL(StencilMask); LR_GL(BindSampler);
     LR_GL(ActiveTexture); LR_GL(BindTexture); LR_GL(BindVertexArray); LR_GL(BindBuffer);
-    LR_GL(UseProgram); LR_GL(PixelStorei);
+    LR_GL(UseProgram); LR_GL(PixelStorei); LR_GL(BindFramebuffer); LR_GL(InvalidateFramebuffer);
     #undef LR_GL
+}
+
+/* Tell the driver the frame's depth and stencil are finished with. Mali is a
+ * tile renderer: whatever is not invalidated at the end of a pass is written
+ * from tile memory back to RAM, and RetroArch only ever reads our colour. sokol
+ * invalidates its own offscreen passes' depth, but not a pass into a
+ * framebuffer it did not create (a "swapchain" pass, which is what RetroArch's
+ * is to it), so the whole screen's depth and stencil went out to memory every
+ * frame for nothing: bandwidth and GPU power, which on a handheld is heat.
+ * glInvalidateFramebuffer is GLES 3.0 / GL 4.3; without it this does nothing. */
+static void lr_gl_discard_depth(uintptr_t fbo) {
+    if (!lr_gl.InvalidateFramebuffer || !lr_gl.BindFramebuffer) return;
+    static const unsigned depth_stencil[1] = { 0x821A };   /* GL_DEPTH_STENCIL_ATTACHMENT */
+    lr_gl.BindFramebuffer(0x8CA9, (unsigned)fbo);           /* GL_DRAW_FRAMEBUFFER */
+    lr_gl.InvalidateFramebuffer(0x8CA9, 1, depth_stencil);
 }
 
 static void lr_gl_restore(void) {
@@ -1263,6 +1280,7 @@ static void lr_draw(bool ran) {
     }
     sg_end_pass();
     sg_commit();
+    lr_gl_discard_depth(hw_render.get_current_framebuffer());
     lr_gl_restore();
     video_cb(RETRO_HW_FRAME_BUFFER_VALID, (unsigned)w, (unsigned)h, 0);
 }

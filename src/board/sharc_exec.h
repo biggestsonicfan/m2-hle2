@@ -1856,6 +1856,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 g_sharc.unknown_triggered    = 1;
                 g_sharc.unknown_trigger_cmd  = cmd;
                 g_sharc.unknown_trigger_ip   = g_last_store_ip;
+                emu_attn_bump();
             }
             return;
     }
