@@ -144,8 +144,11 @@
  *    that spans several slices it runs fewer samples than a board before it.
  * 6: the room state's damage_real (DAMAGE REAL / NORMAL, g_damage_real), which
  *    the cold boot applies; a board before it always boots NORMAL.
+ * 7: STF Console clears the hidden-select latch at a VS-mode rematch
+ *    (sfight_console.h, sfc_on_vs_rematch); a board before it keeps it, so a
+ *    Start on the square of a hidden fighter just played loads the other one.
  */
-#define NETPLAY_PROTO_REV 6
+#define NETPLAY_PROTO_REV 7
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

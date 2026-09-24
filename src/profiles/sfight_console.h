@@ -39,9 +39,10 @@
  * 0x0B Robotnik, 0x0F Honey, and their second colours +0x1A (0x1D, 0x25, 0x29).
  *
  * DETERMINISM. The hidden-select latch is host state the i960 cannot see, so it
- * is cleared by install_fn -- which netplay's barrier reset re-runs -- and
- * changes only on the game's own momentary-input word (0x500704), which both
- * peers compute from the same lockstepped inputs.
+ * is cleared by install_fn -- which netplay's barrier reset re-runs -- and by a
+ * VS-mode rematch (sfc_on_vs_rematch), and changes only on the game's own
+ * momentary-input word (0x500704), which both peers compute from the same
+ * lockstepped inputs.
  */
 #ifndef PROFILES_SFIGHT_CONSOLE_H
 #define PROFILES_SFIGHT_CONSOLE_H
@@ -301,9 +302,19 @@ static int sfc_hook_free_play(i960_cpu_t *cpu, memory_bus_t *bus) {
 
 /* ---- Profile object ------------------------------------------------------ */
 
+/* A VS-mode rematch reopens character select with each cursor on the square it
+ * last confirmed, drawn as that square's plain fighter. The latch used to
+ * survive it, so Start there toggled it OFF: a player who had been Honey pressed
+ * Start on Amy's square, saw nothing change, and got Amy. Cleared here, Start
+ * means "the hidden one" every time, as it does on a fresh screen. */
+static void sfc_on_vs_rematch(void) {
+    s_sfc_hidden[0] = s_sfc_hidden[1] = 0;
+}
+
 static inline void sfight_console_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
     s_sfc_hidden[0] = s_sfc_hidden[1] = 0;
     sfight_install(rs, cpu, bus);
+    s_sfight_on_vs_rematch = sfc_on_vs_rematch;
 }
 
 static const game_profile_t sfight_console_profile = {

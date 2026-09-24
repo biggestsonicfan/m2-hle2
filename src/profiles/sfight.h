@@ -158,8 +158,16 @@ static inline uint32_t sfight_read32(const uint8_t *buf, uint32_t off) {
          | ((uint32_t)buf[off + 3] << 24);
 }
 
+/* A profile's own work at a VS-mode rematch (sfight_hook_vs_rematch), for host
+ * state the ROM's "both players continue" path cannot reset by itself: the
+ * Console profile's hidden-select latch. Set by that profile's install_fn after
+ * sfight_install, which clears it, so a board switched back to Arcade does not
+ * keep it. */
+static void (*s_sfight_on_vs_rematch)(void);
+
 static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
     if (!rs->loaded) { LOG_ERROR("sfight_install: romset not loaded"); return; }
+    s_sfight_on_vs_rematch = NULL;
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
@@ -331,9 +339,13 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
  *
  * With VS mode off the instruction runs as it always has, so the Arcade profile
  * and every grader see the ROM's own flow.
+ *
+ * s_sfight_on_vs_rematch runs first when a profile set one (Console: clear the
+ * hidden-select latch, which the select screen does not show).
  */
 static int sfight_hook_vs_rematch(i960_cpu_t *cpu, memory_bus_t *bus) {
     if (!g_vs_mode) return 1;
+    if (s_sfight_on_vs_rematch) s_sfight_on_vs_rematch();
     mem_write8(bus, 0x00500248, (uint8_t)(mem_read8(bus, 0x00500248) | 5u));
     mem_write8(bus, 0x0050024C, (uint8_t)(mem_read8(bus, 0x0050024C) | 5u));
     cpu->sfr.ip = 0x0000F524;
