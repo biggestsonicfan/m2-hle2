@@ -103,6 +103,10 @@ class M2HleBridge:
         self.send({"cmd": "emu_run"})
         return self.send({"cmd": "wait_for_stop", "timeout_ms": timeout_ms})
 
+    def run_frames(self, count=1, timeout_ms=30000) -> dict:
+        """From a stopped board, run exactly `count` frames and stop (one round trip)."""
+        return self.send({"cmd": "run_frames", "count": count, "timeout_ms": timeout_ms})
+
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _kill_existing(self):

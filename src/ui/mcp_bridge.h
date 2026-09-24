@@ -1262,6 +1262,57 @@ static void mcp_cmd_wait_frames(const char *req, char *resp, int cap) {
              g_emu_frames, advanced, advanced >= count ? "true" : "false", elapsed);
 }
 
+/* Run exactly N game frames from a stopped board, then stop, in one request.
+ *
+ * emu_run + wait_frames + emu_stop overshoots by however many frames go by
+ * while the stop is in flight: a mean of 8-15 unthrottled, and several at
+ * 60 Hz on a loaded host (issue #98). Here the emu thread stops itself at
+ * the edge of frame N (emu_slice_finish), so frame N+1 never begins, and the
+ * reply comes once it has. reached:false is a breakpoint, watchpoint, halt,
+ * a stop from elsewhere, or the timeout -- which stops the board, so it is
+ * stopped whatever the answer. */
+static void mcp_cmd_run_frames(const char *req, char *resp, int cap) {
+    uint32_t count = 1, timeout_ms = 30000;
+    mcp_json_get_u32(req, "count", &count);
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    if (count < 1) count = 1;
+    if (timeout_ms > 300000) timeout_ms = 300000;
+    if (!g_mcp.emu || !g_mcp.emu->thread_alive) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emu not started\"}"); return;
+    }
+    if (emu_is_running(g_mcp.emu)) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"must be stopped to run_frames\"}"); return;
+    }
+
+    unsigned start = g_emu_frames;
+    int64_t  t0    = emu_now_us();
+    int64_t  limit = (int64_t)timeout_ms * 1000;
+    g_bp.hit_addr = 0;   /* so a stop below can say whether a breakpoint made it */
+    emu_run_frames(g_mcp.emu, count);
+    bool timed_out = false;
+    while (emu_is_running(g_mcp.emu)) {
+        if (emu_now_us() - t0 >= limit) { timed_out = true; break; }
+        emu_nap_us(250);
+    }
+    if (timed_out) {
+        emu_stop(g_mcp.emu);
+        while (emu_is_running(g_mcp.emu) && g_mcp.emu->thread_alive) emu_nap_us(250);
+    }
+    unsigned advanced = g_emu_frames - start;
+    int halted = g_mcp.cpu && g_mcp.cpu->halted;
+    const char *reason = advanced >= count ? "frames"
+                       : timed_out         ? "timeout"
+                       : halted            ? "halted"
+                       : g_wp.hit          ? "watchpoint"
+                       : g_bp.hit_addr     ? "breakpoint"
+                       : "stopped";
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"frames\":%u,\"advanced\":%u,\"reached\":%s,"
+             "\"reason\":\"%s\",\"elapsed_ms\":%u}",
+             g_emu_frames, advanced, advanced >= count ? "true" : "false",
+             reason, (unsigned)((emu_now_us() - t0) / 1000));
+}
+
 /* Decode model-table entries and write the triangles out as a file.
  *
  * This is the emulator's own index-array polygon decoder — the one in geo3d.h,
@@ -2168,6 +2219,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "write_memory")     == 0) mcp_cmd_write_memory(req, resp, cap);
     else if (strcmp(cmd, "dump_memory_file") == 0) mcp_cmd_dump_memory_file(req, resp, cap);
     else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
+    else if (strcmp(cmd, "run_frames")       == 0) mcp_cmd_run_frames(req, resp, cap);
     else if (strcmp(cmd, "dump_model")       == 0) mcp_cmd_dump_model(req, resp, cap);
     else if (strcmp(cmd, "capture_dl")       == 0) mcp_cmd_capture_dl(req, resp, cap);
     else if (strcmp(cmd, "match_replay")     == 0) mcp_cmd_match_replay(resp, cap);

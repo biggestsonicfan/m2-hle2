@@ -105,6 +105,14 @@ typedef struct {
     volatile int      request_reset;
     volatile uint32_t reset_count;
 
+    /* Frames left before the board stops itself (emu_run_frames), 0 for none.
+     * Counted down at the frame edge in emu_slice_finish, so the stop lands
+     * between frame N and frame N+1 however late the asker would have been
+     * with an emu_stop. frame_budget_hit tells the run loop the last frame
+     * ended that way (see its pacing). */
+    volatile uint32_t frame_budget;
+    int               frame_budget_hit;
+
     emu_thread_t thread;
 } emu_thread_ctx_t;
 
@@ -133,8 +141,12 @@ static inline int64_t emu_now_us(void) {
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #  define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
-static inline void emu_sleep_us(int64_t us) {
-    if (us <= 1000) return;
+/* emu_nap_us waits even under a millisecond, where emu_sleep_us returns at
+ * once: the idle polls that a waiting client's latency hangs on (a stopped
+ * board waiting to be run, the bridge waiting for it to stop) use it, because
+ * Sleep(1) there is the same 15.6 ms. */
+static inline void emu_nap_us(int64_t us) {
+    if (us <= 0) return;
     static __declspec(thread) HANDLE timer;
     static __declspec(thread) int tried;
     if (!tried) {
@@ -152,7 +164,10 @@ static inline void emu_sleep_us(int64_t us) {
             return;
         }
     }
-    Sleep((DWORD)(us / 1000));
+    Sleep(us < 1000 ? 1 : (DWORD)(us / 1000));
+}
+static inline void emu_sleep_us(int64_t us) {
+    if (us > 1000) emu_nap_us(us);
 }
 #else
 static inline int64_t emu_now_us(void) {
@@ -163,6 +178,7 @@ static inline int64_t emu_now_us(void) {
 static inline void emu_sleep_us(int64_t us) {
     if (us > 0) usleep((useconds_t)us);
 }
+static inline void emu_nap_us(int64_t us) { emu_sleep_us(us); }
 #endif
 
 /* ---- Real i960 interrupt delivery --------------------------------------
@@ -497,6 +513,7 @@ typedef enum {
 static inline bool emu_slice_should_stop(emu_thread_ctx_t *ctx) {
     if (!ctx->request_stop) return false;
     ctx->request_stop = 0;
+    ctx->frame_budget = 0;
     ctx->run_state = EMU_STOPPED;
     return true;
 }
@@ -653,6 +670,13 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
         g_versus_result = 0;
         netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
         if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+        /* The last frame of an emu_run_frames: stop here, after the frame's
+         * bookkeeping and before another slice can begin frame N+1. The
+         * frame is still a FRAME to the caller. */
+        if (ctx->frame_budget && --ctx->frame_budget == 0) {
+            ctx->run_state = EMU_STOPPED;
+            ctx->frame_budget_hit = 1;
+        }
     }
     if (g_bp.hit || g_wp.hit || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
         if (g_bp.hit) {
@@ -675,6 +699,7 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
             g_sharc.unknown_triggered = 0;
         }
         ctx->request_stop = 0;
+        ctx->frame_budget = 0;   /* a stop for any other reason ends a run_frames */
         ctx->run_state = EMU_STOPPED;
         if (ctx->cpu->halted) {
             LOG_WARN("emu: CPU halted @ IP=0x%08X (steps=%llu)",
@@ -740,8 +765,16 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 int64_t sleep_us = ctx->frame_deadline_us - emu_now_us();
                 /* A netplay watcher behind the fighters runs flat out until it
                  * has caught up (netplay_catching_up). */
+                /* The frame that ended an emu_run_frames is not slept out here:
+                 * the asker is waiting on the stop. The deadline stands, so the
+                 * first frame of the next run waits out both ticks and the
+                 * board still keeps 60 Hz. A client that answers within the
+                 * tick thinks for free, where sleeping first would add a
+                 * frame per call. */
+                bool budget_hit = ctx->frame_budget_hit != 0;
+                ctx->frame_budget_hit = 0;
                 if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
-                else if (sleep_us > 0) emu_sleep_us(sleep_us);
+                else if (sleep_us > 0 && !budget_hit) emu_sleep_us(sleep_us);
             } else if (ctx->slice_capped && last_frame_us
                        && emu_now_us() - last_frame_us < EMU_MIDFRAME_GRACE_US) {
                 /* A frame that wants more instructions than one slice carries.
@@ -791,7 +824,9 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
              * answering "run the frame" and nothing runs it. Say so where the
              * player is looking, and say whether it was a pause or a halt. */
             if (netplay_active()) netplay_board_stopped(ctx->cpu->sfr.ip, ctx->cpu->halted != 0);
-            emu_sleep_ms(1);
+            /* A real millisecond, not Sleep(1): a bridge client stepping the
+             * board with run_frames waits this long for every run to start. */
+            emu_nap_us(1000);
         }
 
         int64_t now = emu_now_us();
@@ -862,13 +897,17 @@ static inline void emu_thread_shutdown(emu_thread_ctx_t *ctx) {
     LOG_INFO("emu: thread stopped");
 }
 
-static inline void emu_run(emu_thread_ctx_t *ctx) {
+static inline void emu_run_frames(emu_thread_ctx_t *ctx, uint32_t frames) {
     if (ctx->run_state == EMU_STOPPED) ctx->step_over_bp = 1;
     g_wp.hit = 0;          /* clear a reported watchpoint so we don't re-stop instantly */
     ctx->request_stop = 0; /* cancel any pending stop (e.g. from a prior ROM reload) so
                             * the run loop doesn't bail out of the first slice */
+    ctx->frame_budget = frames;
     ctx->run_state = EMU_RUNNING;
 }
+/* Run until stopped. emu_run_frames(ctx, n) instead stops by itself at the end
+ * of the n-th game frame from here. */
+static inline void emu_run(emu_thread_ctx_t *ctx) { emu_run_frames(ctx, 0); }
 /* ---- Sound board backdoor -------------------------------------------------
  *
  * Reboot the 68000 + SCSP without touching the rest of the board, so a driver

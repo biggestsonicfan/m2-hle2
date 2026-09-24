@@ -10,7 +10,7 @@ A new Claude instance reading this can fully operate the m2-hle Sega Model 2 emu
 
 The **MCP bridge** is a local TCP JSON server built into the emulator (`src/ui/mcp_bridge.h`). When launched with `--mcp`, the emulator listens on `127.0.0.1:7172`. The protocol is newline-delimited JSON: one `{"cmd":"...", ...}` object per line in, one reply object per line out, always carrying `ok` (and `error` when it is false). It serves **one client at a time**, one request at a time; a request line is capped at 8 kB and a reply at 128 kB.
 
-The Python MCP server (`mcp_server/server.py`) connects to that port and exposes a subset of the commands as MCP tools: `get_status`, `get_registers`, `read_memory`, `write_memory`, `emu_run`, `emu_stop`, `emu_step`, the six breakpoint tools, `set_break_on_unknown_cop`, `get_cop_diagnostics`, `wait_for_stop`, the five `objview_*` tools, `get_geo_captures`, `wait_frames` and `set_input`. Every other command in this guide is reached by sending its JSON line to the bridge directly (the graders under `tools/` and the netplay examples below do exactly that).
+The Python MCP server (`mcp_server/server.py`) connects to that port and exposes a subset of the commands as MCP tools: `get_status`, `get_registers`, `read_memory`, `write_memory`, `emu_run`, `emu_stop`, `emu_step`, the six breakpoint tools, `set_break_on_unknown_cop`, `get_cop_diagnostics`, `wait_for_stop`, the five `objview_*` tools, `get_geo_captures`, `wait_frames`, `run_frames` and `set_input`. Every other command in this guide is reached by sending its JSON line to the bridge directly (the graders under `tools/` and the netplay examples below do exactly that).
 
 ---
 
@@ -181,6 +181,21 @@ after four seconds, because the bridge accepts a client well before a 17 MB ROM
 set has finished loading and before `--run` has taken effect. Bailing out
 immediately there would hand every caller `reached: false` the moment it
 connected.
+
+**`run_frames(count: int = 1, timeout_ms: int = 30000)`**
+From a stopped board (refused while running, like `emu_step`): run exactly
+`count` game frames and stop, in one round trip. The emulator thread stops
+itself at the edge of the last frame, so frame `count + 1` never begins however
+busy the host is or whether the board is throttled. `emu_run` → `wait_frames`
+→ `emu_stop` overshoots by whatever runs while the stop is in flight: a mean of
+8-15 frames unthrottled, several at 60 Hz on a loaded host (issue #98).
+
+Returns `frames` (the clock), `advanced`, `reached`, `reason` and `elapsed_ms`.
+`reason` is `"frames"`, or why it came up short: `"timeout"`, `"halted"`,
+`"watchpoint"`, `"breakpoint"` or `"stopped"` (an `emu_stop` from elsewhere).
+The board is stopped on every reply; a timeout stops it. Throttled, the last
+frame is not slept out before the reply -- the next run's first frame waits both
+ticks instead -- so a client that answers within a frame steps at a full 60 Hz.
 
 **`wait_for_stop(timeout_ms: int = 30000)`**
 Block until the emulator stops (breakpoint hit, watchpoint hit, CPU halt, unknown COP command, or manual pause); `timeout_ms` is capped at 300000. Returns:
