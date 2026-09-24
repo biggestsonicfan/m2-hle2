@@ -94,6 +94,7 @@ static inline void wp_check(uint32_t addr, uint32_t val, bool is_write, uint32_t
         g_wp.hit_val = val;
         g_wp.hit_ip = ip;
         g_wp.hit_write = is_write;
+        emu_attn_bump();
         return;
     }
 }

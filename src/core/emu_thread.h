@@ -539,30 +539,58 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * the board 52 fps and put 762 samples to the frame instead of 735. A
      * stop now takes effect between slices (emu_slice_should_stop), and a
      * slice that has begun runs its frame to the end. */
+    /* One loop, two modes. The rare flags -- frame done, vsync ACK, sound
+     * kick, break-on-warn, watchpoint, break-on-unknown-COP, a breakpoint armed
+     * mid-slice -- are read through ONE word, g_emu_attn, that each of their
+     * setters bumps (attention.h). Until it moves the loop checks nothing else
+     * of theirs; the instruction that moves it gets every check in the order
+     * below, and so does the rest of the slice ("slow"), which is the loop as it
+     * was. A slice that starts with any of them set, or with a step over a
+     * breakpoint to make, is slow throughout. Kept as one loop on purpose:
+     * i960_step_hot is force-inlined, and a second copy of it pushed GCC past
+     * its inlining limits on the handheld -- mem_fetch2 became a call per
+     * instruction, and the two-loop version ran 5% MORE instructions. */
+    const uint32_t attn    = g_emu_attn;
+    const bool     profile = g_active_profile != NULL;
+    const bool     live    = g_irqt_live != 0;
+    const bool     bps     = g_bp.bloom != 0;
+    bool slow = ctx->step_over_bp || g_frame_done || (board_vblank && g_vblank_acked) || g_irqt_sound_kick
+             || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered;
     int i;
-    for (i = 0;
-         i < max_steps
-         && !g_frame_done
-         && !(board_vblank && g_vblank_acked)   /* stop at the frame's vsync-ACK */
-         && !ctx->cpu->halted;
-         i++)
-    {
-        if (ctx->step_over_bp) {
-            ctx->step_over_bp = 0;
-        } else if (bp_check(ctx->cpu->sfr.ip)) {
+    for (i = 0; i < max_steps && !ctx->cpu->halted; i++) {
+        if (slow) {
+            if (g_frame_done || (board_vblank && g_vblank_acked)) break;   /* stop at the frame's vsync-ACK */
+            if (ctx->step_over_bp) {
+                ctx->step_over_bp = 0;
+            } else if (bp_check(ctx->cpu->sfr.ip)) {
+                break;
+            }
+        } else if (bps && bp_check(ctx->cpu->sfr.ip)) {
             break;
         }
         PCPROF_TICK(ctx->cpu->sfr.ip);
         if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
         steps++;
-        if (g_active_profile) {
-            if (s_irq_in_service) emu_service_sound_again(ctx);
-            else if (g_irqt_sound_kick) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+        if (slow || g_emu_attn != attn) {
+            slow = true;
+            if (profile) {
+                if (s_irq_in_service) emu_service_sound_again(ctx);
+                else if (g_irqt_sound_kick) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+            }
+            if (live) emu_timers_after_step(ctx);
+            if (g_log.warn_triggered) break;
+            if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
+            if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
+        } else {
+            if (profile && s_irq_in_service) emu_service_sound_again(ctx);
+            if (live) emu_timers_after_step(ctx);
+            if (g_emu_attn != attn) {      /* flagged by the sound or timer service */
+                slow = true;
+                if (g_log.warn_triggered) break;
+                if (g_wp.hit) break;
+                if (g_sharc.unknown_triggered) break;
+            }
         }
-        if (g_irqt_live) emu_timers_after_step(ctx);
-        if (g_log.warn_triggered) break;
-        if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
-        if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
     }
     ctx->total_steps += steps;
     ctx->slice_capped = (i >= max_steps);

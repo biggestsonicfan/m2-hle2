@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "attention.h"
+
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
@@ -226,6 +228,7 @@ static inline void log_msg(log_level_t level, const char *fmt, ...) {
 
     if (level == LOG_LVL_WARN && g_log.break_on_warn) {
         g_log.warn_triggered = 1;
+        emu_attn_bump();
     }
 
     /* A release build is silent on a desktop, where m2hle.log is the record. In a

@@ -248,8 +248,28 @@ static bool g_with_68k = false;
 static uint32_t *g_prof = NULL;
 static uint64_t  g_prof_from = 900, g_prof_to = 900 + 3450;
 
+/* The slice as every host runs it (emu_thread.h): what the handheld's
+ * RetroArch core does per retro_run, minus the frontend. */
+static void emu_slice_real(void) {
+    int64_t a = now_us();
+    uint64_t s0 = ctx.total_steps;
+    uint32_t f0 = g_emu_frames;
+    emu_slice_body(&ctx);
+    emu_slice_finish(&ctx);
+    bool frame = g_emu_frames != f0;
+    int64_t d = now_us() - a;
+    g_es.slices++;
+    g_es.frames += frame;
+    g_es.steps  += ctx.total_steps - s0;
+    g_es.us     += d;
+    if (d > g_es.max_us) g_es.max_us = d;
+}
+
+/* --profile only: a copy of the slice with the per-address count inside the
+ * loop. Everything else runs emu_slice_real, the loop the app runs. */
 __attribute__((noinline)) static void emu_slice(void) {
     const game_quirks_t *q = &g_active_profile->quirks;
+    if (!(g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to)) { emu_slice_real(); return; }
     int64_t a = now_us();
     g_frame_done = 0;
     bool board_vblank = q->board_vblank;
@@ -550,6 +570,7 @@ int main(int argc, char **argv) {
     memset(&ctx, 0, sizeof(ctx));
     ctx.cpu = &cpu;
     ctx.bus = &bus;
+    ctx.run_state = EMU_RUNNING;
 
     pthread_t emu_th;
     if (threads) pthread_create(&emu_th, NULL, emu_thread_main, NULL);
