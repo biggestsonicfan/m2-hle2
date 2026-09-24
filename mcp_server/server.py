@@ -435,6 +435,21 @@ def set_input(held: str = "0x0") -> dict:
     return _send({"cmd": "set_input", "held": held})
 
 
+@mcp.tool()
+def overlay_swap(path: str, args: str | None = None, title: str = "", note: str = "",
+                 card: str = "", announce_s: float = 0, hold_s: float = 0) -> dict:
+    """Swap the --overlay plugin for the build at `path` on a live stream: a
+    FLY UPDATE toast, then a PLEASE STAND FLY card while it loads. `path` must
+    be a new file (Windows locks the running DLL). Returns at once; follow
+    get_status()['overlay']['swap'] until its state is 'idle', then 'last' is
+    ok / rolled_back / failed. 0 or "" leaves a field at its default."""
+    req = {"cmd": "overlay_swap", "path": path, "title": title, "note": note,
+           "card": card, "announce_s": announce_s, "hold_s": hold_s}
+    if args is not None:
+        req["args"] = args
+    return _send(req)
+
+
 # ---- Entry point -----------------------------------------------------------
 
 if __name__ == "__main__":

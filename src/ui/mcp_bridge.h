@@ -141,7 +141,7 @@ static void mcp_cmd_get_status(char *resp, int cap) {
      * end cannot switch one on after the fact -- it is a command-line flag,
      * like --mcp -- so being able to SEE that it is missing is the difference
      * between a puzzled look at a blank column and a one-line message. */
-    char ov[256];
+    char ov[2048];
     overlay_host_status_json(ov, (int)sizeof ov);
     /* Where the host's rendering time has gone, cumulative: two readings some
      * seconds apart give the cost of each stage per rendered frame, which is
@@ -644,6 +644,40 @@ static void mcp_cmd_quit(char *resp, int cap) {
     LOG_INFO("quit: asked over the bridge");
     g_mcp_quit = 1;
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"quitting\":true}");
+}
+
+/* overlay_swap: put a new build of the overlay plugin on a live stream without
+ * taking it down (ui/overlay_host.h, "SWAPPING TO A NEW BUILD").
+ *
+ *   {"cmd":"overlay_swap","path":"C:\\fly\\build-271\\flyoverlay.dll"}
+ *
+ * optional: "args" (replaces --overlay-args), "title" / "note" (the toast),
+ * "card" (the standby card; \n between lines), "announce_s", "hold_s".
+ *
+ * `path` must be a NEW file: Windows locks a loaded DLL, so a build cannot be
+ * written over the running one. Returns at once; get_status's overlay.swap
+ * goes queued -> announce -> standby -> hold -> idle, and its "last" is ok,
+ * rolled_back (the new one would not load; the old one is back) or failed. */
+static void mcp_cmd_overlay_swap(const char *req, char *resp, int cap) {
+    static overlay_swap_req_t r;       /* 2 KB: off the bridge thread's stack */
+    memset(&r, 0, sizeof r);
+    json_get_str_unescaped(req, "path",  r.path,  (int)sizeof r.path);
+    r.has_args = json_get_str_unescaped(req, "args", r.args, (int)sizeof r.args) != 0;
+    json_get_str_unescaped(req, "title", r.title, (int)sizeof r.title);
+    json_get_str_unescaped(req, "note",  r.note,  (int)sizeof r.note);
+    json_get_str_unescaped(req, "card",  r.card,  (int)sizeof r.card);
+    float f;
+    if (mcp_json_get_f32(req, "announce_s", &f)) r.announce_s = f;
+    if (mcp_json_get_f32(req, "hold_s", &f))     r.hold_s     = f;
+
+    char err[128];
+    if (!overlay_host_request_swap(&r, err, (int)sizeof err)) {
+        char err_js[256];
+        mcp_json_escape(err_js, (int)sizeof err_js, err);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"%s\"}", err_js);
+        return;
+    }
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"queued\":true}");
 }
 
 /* snd_watch: arm or read the streaming watchdog (board/sound.h).
@@ -2084,6 +2118,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "sound_status")             == 0) mcp_cmd_sound_status(resp, cap);
     else if (strcmp(cmd, "snd_watch")                == 0) mcp_cmd_snd_watch(req, resp, cap);
     else if (strcmp(cmd, "quit")                     == 0) mcp_cmd_quit(resp, cap);
+    else if (strcmp(cmd, "overlay_swap")             == 0) mcp_cmd_overlay_swap(req, resp, cap);
     else if (strcmp(cmd, "reset_sound")              == 0) mcp_cmd_reset_sound(req, resp, cap);
     else if (strcmp(cmd, "dump_midi_log")            == 0) mcp_cmd_dump_midi_log(resp, cap);
     else if (strcmp(cmd, "sound_codes")              == 0) mcp_cmd_sound_codes(req, resp, cap);

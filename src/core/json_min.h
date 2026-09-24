@@ -50,6 +50,48 @@ static inline int json_get_str(const char *json, const char *key, char *out, int
     return 1;
 }
 
+/* json_get_str, but with the string's escapes undone: \\ \" \/ \n \t and
+ * \uXXXX (below 0x80 only; anything else becomes '?'). For values a caller
+ * serialised with a real JSON library -- a Windows path arrives as
+ * "C:\\fly\\x.dll", which json_get_str hands back with the backslashes
+ * doubled, and an escaped quote would end it early. */
+static inline int json_get_str_unescaped(const char *json, const char *key,
+                                         char *out, int out_cap) {
+    const char *p = json_value_at(json, key);
+    if (!p || *p != '"' || out_cap <= 0) return 0;
+    p++;
+    int i = 0;
+    while (*p && *p != '"' && i < out_cap - 1) {
+        char c = *p++;
+        if (c == '\\' && *p) {
+            char e = *p++;
+            switch (e) {
+                case 'n': c = '\n'; break;
+                case 't': c = '\t'; break;
+                case 'r': c = '\r'; break;
+                case 'u': {
+                    unsigned v = 0;
+                    int k = 0;
+                    for (; k < 4 && *p; k++, p++) {
+                        char h = *p;
+                        v <<= 4;
+                        if      (h >= '0' && h <= '9') v |= (unsigned)(h - '0');
+                        else if (h >= 'a' && h <= 'f') v |= (unsigned)(h - 'a' + 10);
+                        else if (h >= 'A' && h <= 'F') v |= (unsigned)(h - 'A' + 10);
+                        else break;
+                    }
+                    c = (k == 4 && v > 0 && v < 0x80) ? (char)v : '?';
+                    break;
+                }
+                default: c = e; break;      /* \\ \" \/ and anything unknown */
+            }
+        }
+        out[i++] = c;
+    }
+    out[i] = '\0';
+    return 1;
+}
+
 /* A uint32, decimal or 0x hex, quoted or bare. */
 static inline int json_get_u32(const char *json, const char *key, uint32_t *out) {
     char vstr[32];

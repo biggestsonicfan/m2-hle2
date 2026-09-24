@@ -65,7 +65,8 @@ ROM set: MAME `sfight.zip` (clone of `schamp.zip`). The emulator looks for `scha
 Returns: `running` (bool), `halted` (bool), `ip` (hex string), `steps_per_second` (int),
 `profile` (string), `frames` (int), `rom_loaded` (bool), `match_replay`,
 `match_replay_frame`, and two objects: `av` (the `--av-port` server's state) and
-`overlay` (whether an `--overlay` plugin is loaded and running).
+`overlay` (whether an `--overlay` plugin is loaded and running, its `path`, and
+the `swap` block that `overlay_swap` below moves along).
 
 `frames` is a monotonic count of completed game frames — the emulator's own frame
 clock, which is what a capture should pace on rather than wall time or steps/s.
@@ -434,6 +435,20 @@ game — which never stopped running behind it.
 
 The geometry path is bit-identical to the desktop's: the same six angles of model 3544 came
 back with the same coverage and the same pixel boxes on D3D11 and on WebGL2.
+
+### Stream overlay
+
+**`overlay_swap(path, args, title, note, card, announce_s = 3, hold_s = 1.5)`** — put a
+new build of the overlay plugin on a live stream without taking it down. `path` must be a
+**new file**, because Windows locks the running DLL. The stream shows a **FLY UPDATE** toast for
+`announce_s`, then a **PLEASE STAND FLY** card over the game while the old plugin is swapped
+for the new one, and the game comes back `hold_s` after the card went up. Returns
+`{"ok":true,"queued":true}` at once. It returns `ok:false` with `error` if the file is missing
+or a swap is already running, and then nothing shows on the stream. Follow it with
+`get_status`: `overlay.swap.state` goes `queued` → `announce` → `standby` → `hold` → `idle`,
+then `overlay.swap.last` is `ok`, `rolled_back` (the new file would not load and the old one is
+running again) or `failed`. `README.md`, "Putting a new overlay build on a live stream", has
+the details. JSON-escape the path: `"C:\\fly\\flyoverlay.dll"`.
 
 ### Netplay (RPCN)
 

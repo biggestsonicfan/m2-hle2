@@ -401,6 +401,49 @@ m2hle --rom sfight.zip --run --headless --av-port 7180 --overlay flyoverlay.dll 
 - **`--overlay-reload`** — reload the library when it changes on disk, so a plugin can be
   rebuilt without restarting a live stream. The pixel buffers are host-owned and outlive the
   library, so the columns keep their last content across the swap and nothing blinks.
+  On Windows a loaded DLL is locked and cannot be written over, so use `overlay_swap` there.
+
+### Putting a new overlay build on a live stream (`overlay_swap`)
+
+Send this over the MCP bridge (`--mcp`, one JSON object per line on the TCP port):
+
+```
+{"cmd":"overlay_swap","path":"C:\\fly-kit\\overlay\\build-271\\flyoverlay.dll"}
+← {"ok":true,"queued":true}
+```
+
+`path` must be a **new file**. Copy each new build to a fresh name or folder, and never write over the
+DLL that is running. The emulator then does this on the stream, while the board keeps running:
+
+1. **Announce** (3 s): a **FLY UPDATE** toast along the bottom of the game, saying that a new overlay
+   was detected and the stream will pause for a moment. The old overlay keeps painting.
+2. **Standby**: a **PLEASE STAND FLY** card covers the game. Once the stream has sent a few frames of
+   it, the old plugin is shut down and the new one loaded. The load stalls the picture (about a
+   third of a second for the fly's plugin), and the card is on screen for the whole stall.
+3. **Hold** (1.5 s from when the card went up): the new plugin paints its columns under the card.
+   Then the game comes back.
+
+The reply comes straight back. To follow the swap, poll `get_status`: `overlay.swap.state` goes
+`queued` → `announce` → `standby` → `hold` → `idle`. At `idle`, `overlay.swap.last` is one of:
+
+- `ok`: the new build is running, and `overlay.path` names it.
+- `rolled_back`: the new file would not load (not a DLL, wrong ABI, `init` failed), so the old
+  build was loaded back. The stream carried on with the old overlay.
+- `failed`: nothing would load and the overlay is off.
+
+`overlay.swap.error` says which, and `m2hle.log` has the loader's reason. The request is refused
+at once (`ok:false`, nothing shown on the stream) if the file is not there or a swap is already
+running.
+
+Optional fields: `args` (replaces `--overlay-args`), `title` and `note` (the toast's words), `card`
+(the standby card, `\n` between lines), `announce_s`, `hold_s`. A swap works without `--overlay` at
+launch too: it loads the plugin, and the game moves into the overlay's letterbox.
+
+The old library is shut down (`shutdown()`) but **left mapped**. A plugin thread that has not quite
+finished leaving would otherwise run whatever gets loaded at that address next, and after a swap
+that is the new copy of the same DLL. That is how the first swap tried here crashed. Each swap
+therefore keeps an old image in memory, a megabyte or two. A plugin should still make `shutdown()`
+wait until its threads have really gone.
 
 **The ABI is pixels, not draw calls.** The plugin is handed a set of premultiplied-BGRA buffers
 the host owns and fills them; it never touches the GPU. Exporting sokol's `sg_*` state would weld
