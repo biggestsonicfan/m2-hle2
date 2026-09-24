@@ -112,6 +112,17 @@ The **condition code** is in `ac` bits `[2:0]`:
 **`read_memory(addr: str, size: int)`**
 Read up to 4096 bytes from the bus (a larger `size` is clamped). `addr` is a hex string (`"0x00500700"`). Returns `addr` and `data` as a hex string (`"DEADBEEF..."`). Decoding: every 2 hex chars = 1 byte, little-endian within each 32-bit word.
 
+**`read_many(ranges: [[addr, size], ...])`**
+Up to 64 ranges and 32 kB in all, in one round trip:
+`{"cmd":"read_many","ranges":[["0x00500700",8],["0x0059C388",1]]}` →
+`{"ok":true,"frame":N,"data":["0102...","FF"]}`, one hex string per range. Every range is
+copied under one hold of the emu mutex, so all of them come from the same point between
+two slices, which is almost always a frame end. `frame` is the frame counter at that moment.
+**The board never stops.** Use this, not `emu_stop` → reads → `emu_run`, for anything
+that samples a running game, and above all in a netplay session: a pause there stalls
+both machines. A bot that paused for each observation ran its rounds at ~28 fps against
+60 at character select on the same link.
+
 **`write_memory(addr: str, data: str)`**
 Write bytes to the bus. `data` is a hex string with no spaces. Returns `bytes_written`.
 Both are done under the emu mutex, so a write lands in one piece.
