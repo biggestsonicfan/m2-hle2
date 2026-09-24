@@ -337,6 +337,16 @@ static int dump_shell(const char *dir, int w, int h)
     sshot(sh, &cv, dir, "s08_settings");
     srun(sh, 1, PS3UI_PAD_CROSS, 0);
     srun(sh, 20, 0, 0);
+    srun(sh, 1, PS3UI_PAD_DOWN, 0);
+    srun(sh, 1, PS3UI_PAD_CROSS, 0);        /* Credits */
+    srun(sh, 30, 0, 0);
+    sshot(sh, &cv, dir, "s08b_credits");
+    for (int i = 0; i < PS3UI_CREDITS - 1; i++)
+        srun(sh, 1, PS3UI_PAD_DOWN, 0);     /* to the last row: the list scrolls */
+    srun(sh, 10, 0, 0);
+    sshot(sh, &cv, dir, "s08c_credits_end");
+    srun(sh, 1, PS3UI_PAD_CIRCLE, 0);
+    srun(sh, 20, 0, 0);
     srun(sh, 1, PS3UI_PAD_CIRCLE, 0);       /* back to main */
     srun(sh, 20, 0, 0);
     srun(sh, 1, PS3UI_PAD_UP, 0);
