@@ -580,6 +580,7 @@ static inline void sound_attach(memory_bus_t *bus) {
         if (r->base == MIDI_BASE) {
             r->read_cb  = sound_midi_read_cb;
             r->write_cb = sound_midi_write_cb;
+            mem_regions_changed(bus);
             LOG_INFO("sound: UART callbacks attached");
             return;
         }
@@ -604,6 +605,7 @@ static inline void sound_detach(memory_bus_t *bus) {
         if (r->base == MIDI_BASE) {
             r->read_cb  = NULL;
             r->write_cb = NULL;
+            mem_regions_changed(bus);
             break;
         }
     }

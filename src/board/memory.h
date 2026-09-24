@@ -152,6 +152,18 @@ typedef struct memory_bus {
      * (mem_fetch2): reading the two words at IP straight out of it skips two
      * whole bus reads on every instruction. */
     mem_region_t *fetch;
+    /* Direct pages (mem_build_pages): for a 64 KB page that lies wholly in one
+     * region the lookup would return, a pointer to the page's first byte when
+     * a read of it is a plain read of that region's buffer (no read callback),
+     * and, for writes, when a write is a plain store (no write callback, not
+     * read-only, no change tracking). NULL sends the access the long way. The
+     * i960's loads, stores and instruction fetches take one table load and one
+     * bounds test through these; everything that is not plain memory still
+     * goes through mem_find_region and its callbacks. Zeroed whenever the
+     * region table or a region's callbacks change (mem_regions_changed). */
+    uint8_t      *rd_page[1u << 16];
+    uint8_t      *wr_page[1u << 16];
+    int           maps_live;
 
     /* Bumped by every write that changes a tracked region (see change_gen):
      * tile RAM, tile graphics, palette, texture RAM, luma + colorxlat. */
@@ -173,6 +185,21 @@ typedef struct memory_bus {
 } memory_bus_t;
 
 /* ---- Region builder ------------------------------------------------------ */
+
+/* The region table or a region's callbacks changed: every cached lookup goes.
+ * Anything that sets a region's read_cb / write_cb / readonly / change
+ * tracking after mem_init must call this (input_attach, sound_attach,
+ * sound_detach do), or a direct page would keep reading around a callback. */
+static inline void mem_regions_changed(memory_bus_t *bus) {
+    bus->hit[0] = bus->hit[1] = NULL;
+    bus->fetch = NULL;
+    bus->page_ok = 0;
+    if (bus->maps_live) {
+        memset(bus->rd_page, 0, sizeof bus->rd_page);
+        memset(bus->wr_page, 0, sizeof bus->wr_page);
+        bus->maps_live = 0;
+    }
+}
 
 static inline mem_region_t *mem_add_region(memory_bus_t *bus,
                                            const char *name,
@@ -200,9 +227,7 @@ static inline mem_region_t *mem_add_region(memory_bus_t *bus,
         if ((uint64_t)e->base < (uint64_t)base + size && (uint64_t)base < (uint64_t)e->base + e->size)
             r->shadowed = 1;
     }
-    bus->hit[0] = bus->hit[1] = NULL;
-    bus->fetch = NULL;
-    bus->page_ok = 0;
+    mem_regions_changed(bus);
     return r;
 }
 
@@ -590,6 +615,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     }
 
     memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
+    mem_regions_changed(bus);   /* callbacks and change tracking were set after the adds */
 
     LOG_INFO("mem: bus initialized with %d regions, ROM=%zu bytes", bus->region_count, rom_size);
     return 1;
@@ -622,6 +648,20 @@ static inline void mem_build_pages(memory_bus_t *bus) {
             bus->page[p] = whole ? (uint8_t)(i + 1) : MEM_PAGE_MIXED;
         }
     }
+    /* The direct pages: exactly the pages mem_find_region answers with one
+     * region, and only where that region's read (write) is a plain buffer access. */
+    memset(bus->rd_page, 0, sizeof bus->rd_page);
+    memset(bus->wr_page, 0, sizeof bus->wr_page);
+    for (uint32_t p = 0; p < (1u << 16); p++) {
+        uint32_t e = bus->page[p];
+        if (e == MEM_PAGE_NONE || e == MEM_PAGE_MIXED) continue;
+        mem_region_t *r = &bus->regions[e - 1u];
+        if (!r->data) continue;
+        uint8_t *at = r->data + ((p << 16) - r->base);
+        if (!r->read_cb) bus->rd_page[p] = at;
+        if (!r->write_cb && !r->readonly && !r->change_gen && !r->dirty_kb) bus->wr_page[p] = at;
+    }
+    bus->maps_live = 1;
     bus->page_ok = 1;
 }
 
@@ -680,7 +720,15 @@ static inline bool mem__warn_due(uint64_t n) {
     return n <= MEM_WARN_FIRST || (n & (n - 1)) == 0;
 }
 
-static inline uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
+#if defined(_MSC_VER)
+#define MEM_NOINLINE __declspec(noinline)
+#define MEM_FORCE_INLINE __forceinline
+#else
+#define MEM_NOINLINE __attribute__((noinline))
+#define MEM_FORCE_INLINE inline __attribute__((always_inline))
+#endif
+
+static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
     bus->reads++;
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
@@ -694,7 +742,7 @@ static inline uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
     return r->data[addr - r->base];
 }
 
-static inline uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
+static MEM_NOINLINE uint32_t mem_read16_slow(memory_bus_t *bus, uint32_t addr) {
     bus->reads++;
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
@@ -709,7 +757,7 @@ static inline uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
     return (uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8);
 }
 
-static inline uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
+static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
     bus->reads++;
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
@@ -727,13 +775,48 @@ static inline uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
          | ((uint32_t)r->data[off + 3] << 24);
 }
 
+/* The i960's reads: plain memory through the direct page, the rest -- MMIO,
+ * callbacks, unmapped, an access that runs off the page -- the long way above,
+ * which these were before (same result, same counters). Kept small so they
+ * inline into the step: the long versions' logging made every load a call. */
+static inline uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
+    const uint8_t *p = bus->rd_page[addr >> 16];
+    if (!p) return mem_read8_slow(bus, addr);
+    bus->reads++;
+    return p[addr & 0xFFFFu];
+}
+static inline uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
+    const uint8_t *p = bus->rd_page[addr >> 16];
+    if (!p || (addr & 0xFFFFu) > 0xFFFEu) return mem_read16_slow(bus, addr);
+    bus->reads++;
+    p += addr & 0xFFFFu;
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+static inline uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
+    const uint8_t *p = bus->rd_page[addr >> 16];
+    if (!p || (addr & 0xFFFFu) > 0xFFFCu) return mem_read32_slow(bus, addr);
+    bus->reads++;
+    p += addr & 0xFFFFu;
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 /* The two words at addr, as mem_read32(addr) and mem_read32(addr + 4) return
  * them: the CPU's instruction fetch. When both lie in the region the last fetch
  * came from and that region is plain memory (unshadowed, no read callback, with
  * backing), they are read from it directly; otherwise through the bus, and the
  * region is remembered if it qualifies. The callback is checked on every fetch
  * because a region can be given one after it is added. */
-static inline void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32_t *w1, uint32_t *w2) {
+/* Forced inline: once per instruction, and when GCC outlined it (after the
+ * loads and stores started inlining) the A55 ran 5% more instructions. */
+static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32_t *w1, uint32_t *w2) {
+    const uint8_t *d = bus->rd_page[addr >> 16];
+    if (d && (addr & 0xFFFFu) <= 0xFFF8u) {             /* both words on one direct page */
+        d += addr & 0xFFFFu;
+        bus->reads += 2;
+        *w1 = (uint32_t)d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
+        *w2 = (uint32_t)d[4] | ((uint32_t)d[5] << 8) | ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
+        return;
+    }
     mem_region_t *r = bus->fetch;
     if (r) {
         uint32_t off = addr - r->base;
@@ -745,8 +828,8 @@ static inline void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32_t *w1, ui
             return;
         }
     }
-    *w1 = mem_read32(bus, addr);
-    *w2 = mem_read32(bus, addr + 4);
+    *w1 = mem_read32_slow(bus, addr);
+    *w2 = mem_read32_slow(bus, addr + 4);
     r = mem_find_region(bus, addr);
     if (r && !r->shadowed && !r->read_cb && r->data && (uint64_t)(addr - r->base) + 8u <= r->size)
         bus->fetch = r;
@@ -837,7 +920,7 @@ static inline void mem__note_change(mem_region_t *r, uint32_t off, uint32_t len)
     }
 }
 
-static inline void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
+static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
     if (g_wp.count) wp_check(addr, val, true, bus->cpu_ip);
@@ -863,7 +946,7 @@ static inline void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     if (changed) mem__note_change(r, off, 1);
 }
 
-static inline void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
+static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
     if (g_wp.count) wp_check(addr, val, true, bus->cpu_ip);
@@ -890,7 +973,7 @@ static inline void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     if (changed) mem__note_change(r, off, 2);
 }
 
-static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
+static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
     if (g_wp.count) wp_check(addr, val, true, bus->cpu_ip);
@@ -919,6 +1002,45 @@ static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     r->data[off + 2] = (uint8_t)((val >> 16) & 0xFF);
     r->data[off + 3] = (uint8_t)((val >> 24) & 0xFF);
     if (changed) mem__note_change(r, off, 4);
+}
+
+/* The i960's writes: every write keeps its bookkeeping in its order -- the
+ * counters, the last write's IP, the watchpoint check, the display-list taps --
+ * and a plain store to a direct page then skips the lookup (the long versions
+ * above for the rest, which these were before). */
+static inline void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
+    uint8_t *p = bus->wr_page[addr >> 16];
+    if (!p) { mem_write8_slow(bus, addr, val); return; }
+    bus->writes++;
+    g_mem_last_write_ip = bus->cpu_ip;
+    if (g_wp.count) wp_check(addr, val, true, bus->cpu_ip);
+    dl_tap(addr, val & 0xFF);
+    p[addr & 0xFFFFu] = (uint8_t)val;
+}
+static inline void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
+    uint8_t *p = bus->wr_page[addr >> 16];
+    if (!p || (addr & 0xFFFFu) > 0xFFFEu) { mem_write16_slow(bus, addr, val); return; }
+    bus->writes++;
+    g_mem_last_write_ip = bus->cpu_ip;
+    if (g_wp.count) wp_check(addr, val, true, bus->cpu_ip);
+    dl_tap(addr, val & 0xFFFF);
+    p += addr & 0xFFFFu;
+    p[0] = (uint8_t)val;
+    p[1] = (uint8_t)(val >> 8);
+}
+static inline void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
+    uint8_t *p = bus->wr_page[addr >> 16];
+    if (!p || (addr & 0xFFFFu) > 0xFFFCu) { mem_write32_slow(bus, addr, val); return; }
+    bus->writes++;
+    g_mem_last_write_ip = bus->cpu_ip;
+    if (g_wp.count) wp_check(addr, val, true, bus->cpu_ip);
+    dl_tap(addr, val);
+    if (g_dl.active && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
+    p += addr & 0xFFFFu;
+    p[0] = (uint8_t)val;
+    p[1] = (uint8_t)(val >> 8);
+    p[2] = (uint8_t)(val >> 16);
+    p[3] = (uint8_t)(val >> 24);
 }
 
 /* A frame edge: the run loop calls this, under the emu mutex, when the game's
