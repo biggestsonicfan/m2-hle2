@@ -203,7 +203,17 @@ static int32_t scsp_lpan[0x10000], scsp_rpan[0x10000];
 static int32_t scsp_ar_table[64], scsp_dr_table[64];
 static int32_t scsp_alfo_saw[256], scsp_alfo_sqr[256], scsp_alfo_tri[256], scsp_alfo_noi[256];
 static int32_t scsp_plfo_saw[256], scsp_plfo_sqr[256], scsp_plfo_tri[256], scsp_plfo_noi[256];
-static int32_t scsp_pscale[8][256], scsp_ascale[8][256];
+/* The pitch LFO scales (rows 0-7, by PLFOS) and then the amplitude ones (rows
+ * 8-15, by ALFOS), in one array. The noise waveform's table holds 128 - a, so
+ * a pitch lookup can land one past the end of its row. MAME does that too, and
+ * its m_ASCALES follows m_PSCALES in the device, so row 7's extra entry is the
+ * amplitude scales' first (unity gain). As two separate statics the entry past
+ * pitch row 7 was whatever the compiler put there: MSVC laid them out as MAME
+ * does, GCC did not, and a slot with a depth-7 noise pitch LFO played a
+ * different pitch in the two builds (tests/scsp_fuzz.c). */
+static int32_t scsp_lfo_scale[16][256];
+#define scsp_pscale (scsp_lfo_scale)
+#define scsp_ascale (scsp_lfo_scale + 8)
 static int     scsp_tables_ready;
 
 /* Envelope times in ms for rates 0..63 (the SCSP manual's table). */
