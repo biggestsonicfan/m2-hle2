@@ -15,6 +15,10 @@
  * step to the general body, so every kind runs too (the count is printed).
  * The delay line's float pack is also held against MAME's over every input.
  *
+ * The programs compiled to C (scsp_dsp_known.h) are held against the same
+ * reference: each over 300 random chip states, 64 samples apiece, with the
+ * compiled path checked to be the one scsp_dsp_step took.
+ *
  * Build it with SCSP_DSP_MASKS=0 and =1 (CMake does both): the two ways
  * SCSP_SEL is spelled must compute the same bits on every host.
  *
@@ -215,6 +219,32 @@ static int same_state(const scsp_t *a, const scsp_t *b) {
            x->dec == y->dec;
 }
 
+/* Every compiled program against the reference, from random state. */
+static void known_programs(scsp_t *ours, scsp_t *ref, uint8_t *ram_ours, uint8_t *ram_ref, ref_op_t *ref_ops) {
+    int n_known = (int)(sizeof scsp_dsp_known / sizeof scsp_dsp_known[0]);
+    for (int k = 0; k < n_known; k++) {
+        int bad = 0;
+        for (unsigned seed = 1; seed <= 300 && !bad; seed++) {
+            scenario(ours, ram_ours, 100000u * (unsigned)(k + 1) + seed);
+            memcpy(ours->dsp.mpro, scsp_dsp_known[k].mpro, sizeof ours->dsp.mpro);
+            scsp_dsp_start(&ours->dsp);
+            *ref = *ours;
+            ref->ram = ram_ref;
+            memcpy(ram_ref, ram_ours, RAM_MAX);
+            ref_dsp_decode(&ref->dsp, ref_ops);
+            for (int n = 0; n < 64; n++) {
+                feed(ours, ref);
+                scsp_dsp_step(ours);
+                ref_dsp_step(ref, ref_ops);
+                if (ours->dsp.known != k + 1) { CHECK(0, "program %d seed %u: the compiled path was not taken", k, seed); bad = 1; break; }
+                if (!same_state(ours, ref)) { CHECK(0, "program %d seed %u sample %d: DSP registers differ", k, seed, n); bad = 1; break; }
+            }
+            if (!bad && memcmp(ram_ours, ram_ref, RAM_MAX)) { CHECK(0, "program %d seed %u: sound RAM (delay line) differs", k, seed); bad = 1; }
+        }
+    }
+    printf("%d compiled program(s) against the reference over 300 random states each\n", n_known);
+}
+
 int main(void) {
     static scsp_t ours, ref;
     static uint8_t ram_ours[RAM_MAX], ram_ref[RAM_MAX];
@@ -222,6 +252,7 @@ int main(void) {
     int cut_short = 0, rewritten = 0, samples = 0;
     static long kind_steps[SCSP_DK_ANY + 1];
     pack_exhaustive();
+    if (SCSP_DSP_COMPILED) known_programs(&ours, &ref, ram_ours, ram_ref, ref_ops);
     for (unsigned seed = 1; seed <= 400; seed++) {
         scenario(&ours, ram_ours, seed);
         ref = ours;

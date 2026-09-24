@@ -169,6 +169,7 @@ typedef struct {
     int      ops_ok;             /* cleared by every mpro write and by reset */
     int      ops_last;           /* the last_step ops_run was worked out for */
     int      ops_run;            /* steps before one whose IRA reads nothing (the program ends there) */
+    int      known;              /* 1 + the scsp_dsp_known[] entry mpro[] is, 0 = interpret it */
 } scsp_dsp_t;
 
 typedef struct {
@@ -604,7 +605,24 @@ static void scsp_dsp_start(scsp_dsp_t *d) {
     d->last_step = i + 1;
 }
 
+/* Programs compiled to straight-line C (tools/gen-scsp-dsp.py): a driver loads
+ * one at boot and keeps it, and one with every field a constant runs about
+ * twice as fast as the loop below. SCSP_DSP_COMPILED 0 turns them off, to A/B. */
+#ifndef SCSP_DSP_COMPILED
+#define SCSP_DSP_COMPILED 1
+#endif
+#include "scsp_dsp_known.h"
+
+static int scsp_dsp_find_known(const scsp_dsp_t *d) {
+    if (!SCSP_DSP_COMPILED) return 0;
+    for (int i = 0; i < (int)(sizeof scsp_dsp_known / sizeof scsp_dsp_known[0]); i++)
+        if (scsp_dsp_known[i].last_step == d->last_step && !memcmp(scsp_dsp_known[i].mpro, d->mpro, sizeof d->mpro))
+            return i + 1;
+    return 0;
+}
+
 static void scsp_dsp_decode(scsp_dsp_t *d) {
+    d->known = scsp_dsp_find_known(d);
     d->ops_run = d->last_step;
     for (int st = 0; st < 128; st++) {
         const uint16_t *p = d->mpro + st * 4;
@@ -722,6 +740,7 @@ static void scsp_dsp_step(scsp_t *s) {
     scsp_dsp_t *d = &s->dsp;
     if (d->stopped) return;
     if (!d->ops_ok || d->ops_last != d->last_step) scsp_dsp_decode(d);
+    if (d->known) { scsp_dsp_known[d->known - 1].run(s); return; }
     int16_t efreg[17] = {0};     /* [16] takes the SCSP_DK_ANY steps that write no EFREG */
 
     /* The input bank IRA indexes: MEMS, then MIXS << 4, then EXTS << 8. MEMS
