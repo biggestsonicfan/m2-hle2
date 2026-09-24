@@ -94,7 +94,7 @@ its built-in `WebSocket`.
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `bench-builds.mjs` | how fast each build runs the board, headless and unthrottled: game frames a second past the texture-load spike, builds alternated, best of each. The throughput companion of `ab-builds`; `bench-render.mjs` is the renderer's: each build headless with the A/V server up and drained, so the main thread draws every board frame on the real D3D11 device, and `get_status`'s `render` block gives the microseconds each stage (tile compose, scan, upload, 3D draw, tile quads) costs a frame |
-| `ab-builds.mjs` | whether two *builds* emulate the same board. Counts frames with a breakpoint on the frame hook so both stop on the same instruction, then hashes the registers and the same nine regions `grade-reset` uses. No oracle: it answers "is this optimisation, this merge, this other compiler free?" in about ten minutes, where reasoning about it does not. What it cannot see: pixels (headless has no GPU), the GEO's and the 68000's private RAM, and anything that differs between two machines rather than two builds |
+| `ab-builds.mjs` | whether two *builds* emulate the same board. Counts frames with a breakpoint on the frame hook so both stop on the same instruction, then hashes the registers and the same nine regions `grade-reset` uses. No oracle: it answers "is this optimisation, this merge, this other compiler free?" in about ten minutes, where reasoning about it does not. `--sound` adds the sound board (all of sound RAM, the SCSP registers, the 68000's PC/SR/clock). What it cannot see: pixels (headless has no GPU), the GEO's private RAM, and anything that differs between two machines rather than two builds |
 | `grade-all.mjs` | `grade-models`, `grade-texram` and `grade-colors` off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
 | `av-record.py` | not a grader: the reference client for `--av-port`, the emulator's raw A/V server. Reads the BGRA frames and the 16-bit samples off the socket, lays the irregular video cadence onto a constant 60 fps grid using each frame's board-sample stamp, and hands both to ffmpeg. About a hundred lines against a documented format (README.md, "Raw A/V out"); reading it is the fastest way to see how the format goes back together |
@@ -699,6 +699,37 @@ different slot; audio envelope correlation 0.992 and loudness within 1% in every
 notes of the first five seconds and held 25-32 voices keyed where MAME holds
 5-16.
 
+### Holding a sound-board change to the same bits
+
+A speed change to `sound.h`, `scsp.h` or `m68k_exec.h` has to leave the board
+bit for bit where it was, and no one input reaches all of it. The MAME capture
+is 300 MIDI bytes of attract, and STF's driver never uses FM, the noise source,
+reverse or alternating loops or 8-bit samples, and runs 587 of the 68000's
+opcodes. Build both trees, run all four checks, `cmp` everything:
+
+```sh
+python tools/snd_stimuli.py stim            # bgm, sfx, sys, fuzz: ~2 min each
+for s in cap/mame stim/bgm stim/sfx stim/sys stim/fuzz; do
+    A/snd_replay $s outA/$(basename $s) 120; B/snd_replay $s outB/$(basename $s) 120
+done                                        # 5 inputs x 5 files, all cmp-identical
+A/scsp_fuzz a.bin; B/scsp_fuzz b.bin; cmp a.bin b.bin   # the chip, every mode
+A/m68k_fuzz a.bin; B/m68k_fuzz b.bin; cmp a.bin b.bin   # random code on the board
+node tools/ab-builds.mjs A/m2hle.exe B/m2hle.exe --marks 600,1800,3600,6000 --sound
+```
+
+`scsp_fuzz` and `m68k_fuzz` sequence every random draw, so they also hold two
+*compilers* to each other: build one side with MSVC and the other with GCC or
+emcc. That is how the pitch LFO's one-past-the-end read turned up (`scsp.h`,
+`scsp_lfo_scale`): GCC split from MSVC and MAME on a depth-7 noise LFO. Then
+`snd_bench <cap/mame> 30` from each side, interleaved, best of several, for the
+speed. Each check was made to fail on a planted one-line change before it was
+trusted.
+
+`tools/gen-scsp-dsp.py` compiles the DSP programs listed in
+`tools/scsp-dsp-programs.txt` to C (`src/board/scsp_dsp_known.h`); a game whose
+program is not listed runs on the interpreter. `scsp_dsp_test` holds each
+compiled program against the reference step.
+
 ### Over a long session it drifts, and 70 seconds does not show it
 
 The 70-second run above is the whole of what had ever been graded, and the board
@@ -981,7 +1012,8 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `mame/match-replay.lua`, `mame/osage-select.lua` | the autoboot scripts behind `match-replay.mjs --mame` and `grade-osage.mjs --mame` (above) |
 | `mame/snd-capture.lua`, `mame/snd_capture.py`, `mame/snd_compare.py` | the sound board's capture and comparison (see "The sound board") |
 | `tests/cop_replay.c` | replays a coprocessor capture through `sharc_exec()`, command by command with the arguments the firmware read, and checks every word it answers: `cop_replay <prefix> [examples-per-op] [only-op-hex]`. `$COPRO_ROM` names the COP data ROM; `OSAGE=<file>` dumps every `Fn_osage` call and `DRAWS=<file>` the draws as CSV, and `RESYNC` / `STATE_EXACT` tune the matrix-state check (`STATE_EXACT`: any differing bit is a bad state, not only 1e-3) |
-| `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips. Run it from two builds and `cmp` the five outputs to prove a sound-board change bit-exact: `ab-builds` cannot see the SCSP |
+| `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips. Run it from two builds and `cmp` the five outputs to prove a sound-board change bit-exact (`tools/snd_stimuli.py` writes four more inputs; see "Holding a sound-board change to the same bits") |
+| `tests/scsp_fuzz.c`, `tests/m68k_fuzz.c` | the SCSP under random register traffic, and the whole sound board running random code: each writes one file to `cmp` between two builds or two compilers. `scsp_fuzz <out> [scenarios] [samples]`, `m68k_fuzz <out> [scenarios] [samples]` (`$ROMDIR`) |
 | `tests/tile_test.c` | the tile compositor against the pixel-by-pixel original it replaced, kept verbatim as the reference: 48 random boards, every pair control mode, and the pen table against `tile_pen_lut`. A ctest; `tile_test --bench` times both compositors on one frame |
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
 
@@ -992,7 +1024,8 @@ The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
 emulator and run by `ctest -C Release` in the build directory (or
 `run_tests.ps1`). `rom_test`, `boot_test`, `geo_test` and `input_test` load the
 ROM set from a fixed path under the sibling `claude_mame` checkout. `det_digest`,
-`snd_bench` and `ps3ui_render` are built beside them but are tools, not ctests.
+`snd_bench`, `scsp_fuzz`, `m68k_fuzz` and `ps3ui_render` are built beside them but
+are tools, not ctests.
 
 ## What is not here yet
 

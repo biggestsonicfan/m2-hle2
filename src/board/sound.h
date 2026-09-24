@@ -400,10 +400,33 @@ static inline uint32_t sound_m68k_peek(sound_state_t *ss, uint32_t addr, int sz)
     return sound_bus_read(ss, addr, sz, 1);
 }
 
+/* The 68000's direct-read pages (m68k_state_t.rmap): sound RAM, the program
+ * ROM and the sample ROM windows -- every region a read does nothing to but
+ * read. A page is mapped only when all of it reads from one run of bytes the
+ * way sound_bus_read would, so a sample window past the end of the set stays
+ * on the callback and reads its zeros there. Rebuilt whenever what backs a
+ * page changes (reset, ROM load, a bank switch). */
+static inline void sound_map_pages(sound_state_t *ss) {
+    const uint8_t **m = ss->m68k.rmap;
+    memset((void *)m, 0, sizeof ss->m68k.rmap);
+    for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++) m[pg] = ss->ram + (pg << 16);
+    if (ss->rom_loaded)
+        for (uint32_t pg = 0; pg < M68K_ROM_SIZE >> 16; pg++) m[(M68K_ROM_BASE >> 16) + pg] = ss->rom + (pg << 16);
+    if (!ss->samples) return;
+    for (uint32_t pg = 0x80; pg < 0x100; pg++) {
+        uint32_t a = pg << 16, o;
+        if      (a < 0xA00000u) o = a - 0x800000u;
+        else if (a < 0xE00000u) o = ss->bank4 + (a - 0xA00000u);
+        else                    o = ss->bank5 + (a - 0xE00000u);
+        if (o + 0x10000u <= ss->samples_size) m[pg] = ss->samples + o;
+    }
+}
+
 static inline void sound_ctrl_w(sound_state_t *ss, uint32_t val) {
     if (ss->samples_size > 0x800000u) {                    /* bigger sets bank their upper half */
         ss->bank4 = (val & 0x20) ? 0x200000u : 0x800000u;
         ss->bank5 = (val & 0x20) ? 0x600000u : 0xA00000u;
+        sound_map_pages(ss);
     }
 }
 
@@ -492,6 +515,7 @@ static inline void sound_boot_68k(void) {
     g_sound.m68k.read_cb  = sound_m68k_read;
     g_sound.m68k.write_cb = sound_m68k_write;
     g_sound.m68k.mem_ctx  = &g_sound;
+    sound_map_pages(&g_sound);
     m68k_startup(&g_sound.m68k);
 }
 
@@ -521,6 +545,7 @@ static inline void sound_reset(void) {
     g_sound.m68k.read_cb  = sound_m68k_read;
     g_sound.m68k.write_cb = sound_m68k_write;
     g_sound.m68k.mem_ctx  = &g_sound;
+    sound_map_pages(&g_sound);
     if (rom_loaded) sound_boot_68k();
 }
 
@@ -543,6 +568,7 @@ static inline void sound_load_samples(const uint8_t *bytes, uint32_t size) {
     g_sound.samples_size = size;
     g_sound.bank4 = 0x200000u;
     g_sound.bank5 = 0x600000u;
+    sound_map_pages(&g_sound);
     LOG_INFO("sound: sample ROM mapped (%u bytes)", size);
 }
 

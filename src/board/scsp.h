@@ -169,6 +169,7 @@ typedef struct {
     int      ops_ok;             /* cleared by every mpro write and by reset */
     int      ops_last;           /* the last_step ops_run was worked out for */
     int      ops_run;            /* steps before one whose IRA reads nothing (the program ends there) */
+    int      known;              /* 1 + the scsp_dsp_known[] entry mpro[] is, 0 = interpret it */
 } scsp_dsp_t;
 
 typedef struct {
@@ -202,7 +203,17 @@ static int32_t scsp_lpan[0x10000], scsp_rpan[0x10000];
 static int32_t scsp_ar_table[64], scsp_dr_table[64];
 static int32_t scsp_alfo_saw[256], scsp_alfo_sqr[256], scsp_alfo_tri[256], scsp_alfo_noi[256];
 static int32_t scsp_plfo_saw[256], scsp_plfo_sqr[256], scsp_plfo_tri[256], scsp_plfo_noi[256];
-static int32_t scsp_pscale[8][256], scsp_ascale[8][256];
+/* The pitch LFO scales (rows 0-7, by PLFOS) and then the amplitude ones (rows
+ * 8-15, by ALFOS), in one array. The noise waveform's table holds 128 - a, so
+ * a pitch lookup can land one past the end of its row. MAME does that too, and
+ * its m_ASCALES follows m_PSCALES in the device, so row 7's extra entry is the
+ * amplitude scales' first (unity gain). As two separate statics the entry past
+ * pitch row 7 was whatever the compiler put there: MSVC laid them out as MAME
+ * does, GCC did not, and a slot with a depth-7 noise pitch LFO played a
+ * different pitch in the two builds (tests/scsp_fuzz.c). */
+static int32_t scsp_lfo_scale[16][256];
+#define scsp_pscale (scsp_lfo_scale)
+#define scsp_ascale (scsp_lfo_scale + 8)
 static int     scsp_tables_ready;
 
 /* Envelope times in ms for rates 0..63 (the SCSP manual's table). */
@@ -453,8 +464,9 @@ static inline int32_t scsp_lfo_a(scsp_lfo_t *l) {
     return l->scale[l->table[l->phase >> SCSP_LFO_SHIFT]] << (SCSP_SHIFT - SCSP_LFO_SHIFT);
 }
 
-/* one sample of one active slot; writes the sound stack entry at *sous */
-static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous) {
+/* one sample of one active slot; writes the sound stack entry at *sous, which
+ * is s->sous[ptr] (the stack position this slot's FM reads are relative to) */
+static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous, unsigned ptr) {
     if (SCSP_SSCTL(sl) == 3) return 0;                 /* "cannot be used" */
 
     int32_t  sample = 0;
@@ -466,7 +478,7 @@ static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous) {
     else { a1 = (sl->cur >> (SCSP_SHIFT - 1)) & ~1u; a2 = (sl->nxt >> (SCSP_SHIFT - 1)) & ~1u; }
 
     if (SCSP_MDL(sl) || SCSP_MDXSL(sl) || SCSP_MDYSL(sl)) {    /* FM from the sound stack */
-        int32_t smp = (s->sous[(s->sous_ptr + SCSP_MDXSL(sl)) & 63] + s->sous[(s->sous_ptr + SCSP_MDYSL(sl)) & 63]) / 2;
+        int32_t smp = (s->sous[(ptr + SCSP_MDXSL(sl)) & 63] + s->sous[(ptr + SCSP_MDYSL(sl)) & 63]) / 2;
         smp *= 1 << 10;
         smp >>= 0x1A - SCSP_MDL(sl);
         if (!SCSP_PCM8B(sl)) smp *= 2;
@@ -604,7 +616,24 @@ static void scsp_dsp_start(scsp_dsp_t *d) {
     d->last_step = i + 1;
 }
 
+/* Programs compiled to straight-line C (tools/gen-scsp-dsp.py): a driver loads
+ * one at boot and keeps it, and one with every field a constant runs about
+ * twice as fast as the loop below. SCSP_DSP_COMPILED 0 turns them off, to A/B. */
+#ifndef SCSP_DSP_COMPILED
+#define SCSP_DSP_COMPILED 1
+#endif
+#include "scsp_dsp_known.h"
+
+static int scsp_dsp_find_known(const scsp_dsp_t *d) {
+    if (!SCSP_DSP_COMPILED) return 0;
+    for (int i = 0; i < (int)(sizeof scsp_dsp_known / sizeof scsp_dsp_known[0]); i++)
+        if (scsp_dsp_known[i].last_step == d->last_step && !memcmp(scsp_dsp_known[i].mpro, d->mpro, sizeof d->mpro))
+            return i + 1;
+    return 0;
+}
+
 static void scsp_dsp_decode(scsp_dsp_t *d) {
+    d->known = scsp_dsp_find_known(d);
     d->ops_run = d->last_step;
     for (int st = 0; st < 128; st++) {
         const uint16_t *p = d->mpro + st * 4;
@@ -722,6 +751,7 @@ static void scsp_dsp_step(scsp_t *s) {
     scsp_dsp_t *d = &s->dsp;
     if (d->stopped) return;
     if (!d->ops_ok || d->ops_last != d->last_step) scsp_dsp_decode(d);
+    if (d->known) { scsp_dsp_known[d->known - 1].run(s); return; }
     int16_t efreg[17] = {0};     /* [16] takes the SCSP_DK_ANY steps that write no EFREG */
 
     /* The input bank IRA indexes: MEMS, then MIXS << 4, then EXTS << 8. MEMS
@@ -1082,17 +1112,20 @@ static inline void scsp_timers(scsp_t *s, uint64_t now) {
 /* Produce one sample: every slot, the DSP, the mix. */
 static void scsp_sample(scsp_t *s, int16_t *out_l, int16_t *out_r) {
     int32_t l = 0, r = 0;
-    for (int i = 0; i < 32; i++) {
+    /* Slot i writes the sound stack at sous_ptr + i. Kept in a register: as a
+     * field of *s it was stored and reloaded around every slot. */
+    const unsigned base = s->sous_ptr;
+    for (unsigned i = 0; i < 32; i++) {
         scsp_slot_t *sl = &s->slot[i];
-        int16_t *sous = &s->sous[s->sous_ptr];
         if (sl->active) {
-            int32_t smp = scsp_slot_sample(s, sl, sous);
+            unsigned ptr = (base + i) & 63;
+            int32_t smp = scsp_slot_sample(s, sl, &s->sous[ptr], ptr);
             s->dsp.mixs[SCSP_ISEL(sl)] += (smp * sl->g_mixs) >> (SCSP_SHIFT - 2);
             l += (smp * sl->g_dl) >> SCSP_SHIFT;
             r += (smp * sl->g_dr) >> SCSP_SHIFT;
         }
-        s->sous_ptr = (uint8_t)((s->sous_ptr + 1) & 63);
     }
+    s->sous_ptr = (uint8_t)((base + 32) & 63);
     scsp_dsp_step(s);
     for (int i = 0; i < 16; i++) {
         const scsp_slot_t *sl = &s->slot[i];
