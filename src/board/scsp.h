@@ -454,8 +454,9 @@ static inline int32_t scsp_lfo_a(scsp_lfo_t *l) {
     return l->scale[l->table[l->phase >> SCSP_LFO_SHIFT]] << (SCSP_SHIFT - SCSP_LFO_SHIFT);
 }
 
-/* one sample of one active slot; writes the sound stack entry at *sous */
-static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous) {
+/* one sample of one active slot; writes the sound stack entry at *sous, which
+ * is s->sous[ptr] (the stack position this slot's FM reads are relative to) */
+static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous, unsigned ptr) {
     if (SCSP_SSCTL(sl) == 3) return 0;                 /* "cannot be used" */
 
     int32_t  sample = 0;
@@ -467,7 +468,7 @@ static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous) {
     else { a1 = (sl->cur >> (SCSP_SHIFT - 1)) & ~1u; a2 = (sl->nxt >> (SCSP_SHIFT - 1)) & ~1u; }
 
     if (SCSP_MDL(sl) || SCSP_MDXSL(sl) || SCSP_MDYSL(sl)) {    /* FM from the sound stack */
-        int32_t smp = (s->sous[(s->sous_ptr + SCSP_MDXSL(sl)) & 63] + s->sous[(s->sous_ptr + SCSP_MDYSL(sl)) & 63]) / 2;
+        int32_t smp = (s->sous[(ptr + SCSP_MDXSL(sl)) & 63] + s->sous[(ptr + SCSP_MDYSL(sl)) & 63]) / 2;
         smp *= 1 << 10;
         smp >>= 0x1A - SCSP_MDL(sl);
         if (!SCSP_PCM8B(sl)) smp *= 2;
@@ -1101,17 +1102,20 @@ static inline void scsp_timers(scsp_t *s, uint64_t now) {
 /* Produce one sample: every slot, the DSP, the mix. */
 static void scsp_sample(scsp_t *s, int16_t *out_l, int16_t *out_r) {
     int32_t l = 0, r = 0;
-    for (int i = 0; i < 32; i++) {
+    /* Slot i writes the sound stack at sous_ptr + i. Kept in a register: as a
+     * field of *s it was stored and reloaded around every slot. */
+    const unsigned base = s->sous_ptr;
+    for (unsigned i = 0; i < 32; i++) {
         scsp_slot_t *sl = &s->slot[i];
-        int16_t *sous = &s->sous[s->sous_ptr];
         if (sl->active) {
-            int32_t smp = scsp_slot_sample(s, sl, sous);
+            unsigned ptr = (base + i) & 63;
+            int32_t smp = scsp_slot_sample(s, sl, &s->sous[ptr], ptr);
             s->dsp.mixs[SCSP_ISEL(sl)] += (smp * sl->g_mixs) >> (SCSP_SHIFT - 2);
             l += (smp * sl->g_dl) >> SCSP_SHIFT;
             r += (smp * sl->g_dr) >> SCSP_SHIFT;
         }
-        s->sous_ptr = (uint8_t)((s->sous_ptr + 1) & 63);
     }
+    s->sous_ptr = (uint8_t)((base + 32) & 63);
     scsp_dsp_step(s);
     for (int i = 0; i < 16; i++) {
         const scsp_slot_t *sl = &s->slot[i];
