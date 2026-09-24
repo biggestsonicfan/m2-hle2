@@ -1029,7 +1029,7 @@ static void frame(void) {
      * nothing to do — the target already has the overlay baked into it. */
     int win_ox = 0, win_oy = 0, win_gw = 0, win_gh = 0;
     bool win_overlay = false;
-    if (!s_av_mirror && overlay_host_loaded()) {
+    if (!s_av_mirror && overlay_host_wants_paint()) {
         int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
         win_overlay = overlay_host_game_rect(sapp_width(), sapp_height(), menu_h,
                                              &win_ox, &win_oy, &win_gw, &win_gh);

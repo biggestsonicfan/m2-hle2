@@ -266,6 +266,11 @@ with the board's own 44.1 kHz counter (`g_sound.out_total`, latched per game fra
   on the emu thread and clearing the function pointer does not retire a call already inside it.
   Same shape as the texram crash under "Memory Bus", same answer.
 
+### Overlay plugin swap (`overlay_swap`, `ui/overlay_host.h`, host-side)
+
+- **A swap to a different file shuts the old plugin down but never `FreeLibrary`s it** (`overlay_host__unload_ex(true)`). stf-fly's `feed_stop` waits 300 ms for its feed thread and then lets it go. After a swap the new copy of the same DLL is mapped at the old base, so the orphan runs the new copy's code with the old copy's stack cookie, and the CRT fast-fails (`c0000409`, in `flyoverlay!m2_overlay_query+…` on a `BaseThreadInitThunk` stack). That was the very first swap tried. `--overlay-reload` still frees, because it reloads the same path, and the loader would otherwise hand back the old module.
+- **The standby card has to be delivered before the load stalls the render thread.** The A/V capture reads frames back a few frames late, and a thread blocked in `LoadLibrary` reads back nothing. With two frames of card before the load, the stream froze on the last game frame for the whole load (measured). The swap waits 8 frames and 0.15 s.
+
 ### Picture filters (`ui/post_shader.h`, `ui/retro_shader.h`, host-side)
 
 The built-in CRT (YAMP's port of Lost Judgment's filter) goes through sokol with an HLSL and a GLSL source, so it runs on every backend. A libretro GLSL preset runs as raw GL between sokol passes (then `sg_reset_state_cache`), so only the GL builds have it; `tests/retro_shader_test.c` holds the parser and the rewrites below.
