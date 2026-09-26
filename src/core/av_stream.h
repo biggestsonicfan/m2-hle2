@@ -6,7 +6,10 @@
  * the MCP bridge does, and takes one client at a time. There is no encoding,
  * no resampling and no image format anywhere in here: the client gets BGRA
  * frames and 16-bit stereo samples as the board made them, and whatever is
- * downstream (ffmpeg, usually) does the rest.
+ * downstream (ffmpeg, usually) does the rest. --av-format nv12 is the one
+ * exception: the GPU converts the picture to BT.709 limited-range NV12 before
+ * it is read back (ui/av_capture.h), because a client that encodes needs YUV
+ * and that conversion costs more than a CPU core at 1080p60 in swscale.
  *
  * WHY BOTH STREAMS SHARE ONE SOCKET AND ONE CLOCK. Capturing the window and
  * the speakers separately leaves audio and video on two unrelated clocks — the
@@ -20,7 +23,7 @@
  * THE WIRE FORMAT, all little-endian. A 32-byte stream header once on connect:
  *
  *   char magic[4] = "M2AV";  u16 version = 1;  u16 header_size = 32;
- *   u16 width, height;       u32 pixfmt;      // the four bytes 'B','G','R','A'
+ *   u16 width, height;       u32 pixfmt;      // 'B','G','R','A' or 'N','V','1','2'
  *   u32 fps_num, fps_den;                     // nominal board rate, informational
  *   u32 audio_rate = 44100;  u8 channels = 2;  u8 bits = 16;  u16 reserved;
  *
@@ -33,10 +36,15 @@
  *                           // V: samples produced when the pictured frame ended
  *
  * flags bit 0 says something of THAT stream was dropped before this packet.
- * A video payload is width*height*4 bytes of BGRA, packed, top row first,
- * stride = width*4; an audio payload is size/4 interleaved L,R int16 frames.
- * pixfmt is written as the characters B,G,R,A in that order, so a reader can
- * memcmp it against "BGRA"; read as a little-endian u32 it is 0x41524742.
+ * A BGRA video payload is width*height*4 bytes, packed, top row first,
+ * stride = width*4. An NV12 payload is width*height bytes of Y, top row first,
+ * then width*height/2 bytes of interleaved Cb,Cr at half size both ways:
+ * BT.709, limited range (Y 16-235, C 16-240), each chroma sample the mean of
+ * its 2x2 block (centre-sited). An NV12 stream's width is a multiple of 4 and
+ * its height is even. An audio payload is size/4 interleaved L,R int16 frames.
+ * pixfmt is written as its four characters in order, so a reader can memcmp it
+ * against "BGRA" or "NV12". A reader that only knows BGRA refuses an NV12
+ * stream rather than misreading it, which is why the version did not change.
  *
  * WHAT MAY BE DROPPED. Video may: the timestamps make a missing frame harmless,
  * so when the queue is full or a readback is not back in time the frame is
@@ -114,6 +122,12 @@
  * frame go in one or two passes. */
 #define AV_SEND_BUF           (8 * 1024 * 1024)
 
+/* The picture's wire format (--av-format). */
+typedef enum {
+    AV_FORMAT_BGRA,
+    AV_FORMAT_NV12,
+} av_format_t;
+
 /* Why a board frame did not become a video packet. Three different faults,
  * and which one it is decides what to do about it: a socket that cannot keep
  * up, a readback that was not back in time, or a renderer that never reached
@@ -127,14 +141,15 @@ typedef enum {
 typedef struct {
     uint64_t frame, sample;
     uint8_t  flags;
-    uint8_t *px;                  /* width*height*4, BGRA, top row first */
+    uint8_t *px;                  /* vbytes: BGRA, or NV12's Y then CbCr; top row first */
 } av_vslot_t;
 
 typedef struct {
     int        enabled;
     int        port;
     int        width, height;
-    uint32_t   vbytes;            /* width * height * 4 */
+    av_format_t format;
+    uint32_t   vbytes;            /* width*height*4 (BGRA) or width*height*3/2 (NV12) */
 
     net_sock_t listen_sock;
     /* The writer thread owns the client socket; shutdown only shuts it down,
@@ -192,7 +207,8 @@ static inline void av__stream_header(uint8_t *b) {
     av__u16(&p, AV_HEADER_SIZE);
     av__u16(&p, (uint16_t)g_av.width);
     av__u16(&p, (uint16_t)g_av.height);
-    memcpy(p, "BGRA", 4);     p += 4;      /* fourcc, in memory order */
+    memcpy(p, g_av.format == AV_FORMAT_NV12 ? "NV12" : "BGRA", 4);
+    p += 4;                                /* fourcc, in memory order */
     av__u32(&p, AV_FPS_NUM);
     av__u32(&p, AV_FPS_DEN);
     av__u32(&p, SOUND_RATE);
@@ -236,6 +252,15 @@ static inline uint64_t av_stream_session(void) { return g_av.sessions; }
 static inline bool av_stream_active(void)  { return g_av.enabled && g_av.connected; }
 static inline int  av_stream_width(void)   { return g_av.width; }
 static inline int  av_stream_height(void)  { return g_av.height; }
+static inline av_format_t av_stream_format(void) { return g_av.format; }
+static inline const char *av_stream_format_name(void) {
+    return g_av.format == AV_FORMAT_NV12 ? "NV12" : "BGRA";
+}
+
+/* Pick the wire format. Before av_stream_start; a started stream keeps its own. */
+static inline void av_stream_set_format(av_format_t f) {
+    if (!g_av.enabled) g_av.format = f;
+}
 
 /* Where the next frame's pixels go, or NULL when the queue has no room (or
  * nobody is connected). A NULL is not a drop by itself — the caller decides
@@ -415,8 +440,8 @@ static void *av__thread_proc(void *arg) {
             continue;
         }
         g_av.client = c;
-        LOG_INFO("av: client connected (%dx%d BGRA, %u Hz 16-bit stereo)",
-                 g_av.width, g_av.height, SOUND_RATE);
+        LOG_INFO("av: client connected (%dx%d %s, %u Hz 16-bit stereo)",
+                 g_av.width, g_av.height, av_stream_format_name(), SOUND_RATE);
         av__serve(c);
         g_av.client = NET_SOCK_INVALID;
         net_close(&c);
@@ -441,6 +466,9 @@ static inline void av_stream_clamp_size(int *w, int *h) {
     if (*h > AV_MAX_DIM) *h = AV_MAX_DIM;
     *w &= ~1;                  /* every encoder downstream wants even dimensions */
     *h &= ~1;
+    /* NV12 is converted four pixels to a texel (ui/av_capture.h), so its
+     * width is a multiple of 4. 1396 and 1920 already are. */
+    if (g_av.format == AV_FORMAT_NV12) *w &= ~3;
 }
 
 /*
@@ -463,7 +491,9 @@ static inline bool av_stream_start(int port, int w, int h) {
     av_stream_clamp_size(&w, &h);
     g_av.width  = w;
     g_av.height = h;
-    g_av.vbytes = (uint32_t)w * (uint32_t)h * 4u;
+    g_av.vbytes = g_av.format == AV_FORMAT_NV12
+                ? (uint32_t)w * (uint32_t)h * 3u / 2u
+                : (uint32_t)w * (uint32_t)h * 4u;
 
     for (int i = 0; i < AV_VIDEO_SLOTS; i++) {
         free(g_av.vq[i].px);       /* a restart at a new size; see av__free_rings */
@@ -521,8 +551,8 @@ static inline bool av_stream_start(int port, int w, int h) {
 #else
     pthread_create(&g_av.thread, NULL, av__thread_proc, NULL);
 #endif
-    LOG_INFO("av: listening on 127.0.0.1:%d — %dx%d BGRA, %u Hz 16-bit stereo",
-             port, g_av.width, g_av.height, SOUND_RATE);
+    LOG_INFO("av: listening on 127.0.0.1:%d — %dx%d %s, %u Hz 16-bit stereo",
+             port, g_av.width, g_av.height, av_stream_format_name(), SOUND_RATE);
     return true;
 
 fail_net:
@@ -575,11 +605,13 @@ static inline int av_stream_status_json(char *buf, int cap) {
     if (!g_av.enabled)
         return snprintf(buf, (size_t)cap, "{\"enabled\":false}");
     return snprintf(buf, (size_t)cap,
-        "{\"enabled\":true,\"port\":%d,\"width\":%d,\"height\":%d,\"connected\":%s,"
+        "{\"enabled\":true,\"port\":%d,\"width\":%d,\"height\":%d,\"format\":\"%s\","
+        "\"connected\":%s,"
         "\"sessions\":%llu,\"video_sent\":%llu,\"video_dropped\":%llu,"
         "\"dropped_queue\":%llu,\"dropped_readback\":%llu,\"dropped_missed\":%llu,"
         "\"audio_sent\":%llu,\"audio_dropped\":%llu}",
-        g_av.port, g_av.width, g_av.height, g_av.connected ? "true" : "false",
+        g_av.port, g_av.width, g_av.height, av_stream_format_name(),
+        g_av.connected ? "true" : "false",
         (unsigned long long)g_av.sessions,
         (unsigned long long)g_av.v_sent, (unsigned long long)g_av.v_dropped,
         (unsigned long long)g_av.v_lost[AV_DROP_QUEUE],
