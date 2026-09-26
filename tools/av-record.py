@@ -5,7 +5,8 @@ av-record.py — reference client for the emulator's raw A/V server.
     m2hle --rom sfight.zip --run --headless --av-port 7180 --av-mute
     python tools/av-record.py --port 7180 --seconds 30 out.mp4
 
-The emulator hands over BGRA frames and 16-bit stereo samples on one socket and
+The emulator hands over BGRA frames (NV12 with --av-format nv12) and 16-bit
+stereo samples on one socket and
 does no encoding of its own (see README.md, "Raw A/V out"). This is the other
 half: it reads the stream, lays the irregular video cadence onto a constant
 60 fps grid using each frame's `sample` stamp, and lets ffmpeg do the rest.
@@ -63,16 +64,22 @@ def main():
     pixfmt = h[12:16]
     rate = struct.unpack_from("<I", h, 24)[0]
     channels, bits = struct.unpack_from("<BB", h, 28)
-    if pixfmt != b"BGRA" or bits != 16 or channels != 2:
+    if pixfmt not in (b"BGRA", b"NV12") or bits != 16 or channels != 2:
         sys.exit("unexpected format: pixfmt=%r %dch %dbit" % (pixfmt, channels, bits))
-    print("m2av v%d: %dx%d BGRA, %d Hz 16-bit stereo" % (version, w, height, rate))
-    vbytes = w * height * 4
+    print("m2av v%d: %dx%d %s, %d Hz 16-bit stereo" % (version, w, height, pixfmt.decode(), rate))
+    nv12 = pixfmt == b"NV12"
+    # NV12 is already BT.709 limited range, so it is tagged and passed through;
+    # BGRA is converted by ffmpeg below.
+    vbytes = w * height * 3 // 2 if nv12 else w * height * 4
+    colour = (["-color_primaries", "bt709", "-color_trc", "bt709",
+               "-colorspace", "bt709", "-color_range", "tv"] if nv12 else [])
 
     tmp_v = args.output + ".video.mp4"
     tmp_a = args.output + ".audio.raw"
     vproc = subprocess.Popen(
         [args.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-         "-f", "rawvideo", "-pix_fmt", "bgra", "-s", "%dx%d" % (w, height),
+         "-f", "rawvideo", "-pix_fmt", "nv12" if nv12 else "bgra", *colour,
+         "-s", "%dx%d" % (w, height),
          "-r", str(FPS), "-i", "pipe:0",
          "-an", "-c:v", "libx264", "-preset", args.preset, "-crf", args.crf,
          "-pix_fmt", "yuv420p", tmp_v],

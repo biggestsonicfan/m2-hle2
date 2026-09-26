@@ -310,9 +310,17 @@ m2hle --rom sfight.zip --run --headless --av-port 7180 --av-mute   # no window a
   rescaled anywhere; 1396x1080 is that shape to the nearest even pixel.
 - **`--av-mute`** — do not open a host audio device. The stream is unaffected: the tap sits at
   the sound board's producer, ahead of the ring the device would drain.
+- **`--av-format bgra|nv12`** — the picture's format (default `bgra`). `nv12` is converted on the
+  GPU: BT.709, limited range (Y 16–235, C 16–240), chroma the mean of each 2×2 block, rows top
+  first. The payload is `width*height` bytes of Y, then `width*height/2` of interleaved Cb,Cr,
+  and the stream header's `pixfmt` says `NV12`. A client that feeds an encoder then needs no
+  colour conversion of its own (`ffmpeg -f rawvideo -pix_fmt nv12 -color_primaries bt709
+  -color_trc bt709 -colorspace bt709 -color_range tv …`). The width is rounded down to a multiple of 4.
+- **`--av-test-card`** — colour bars over a grey ramp in place of the game, for checking a
+  client's colours and orientation.
 
 There is no encoding, resampling, PNG or libav anywhere in the emulator — it hands over raw
-frames and raw samples and nothing else. `tools/av-record.py` is a reference client that turns
+frames and raw samples and nothing else, apart from the optional NV12 conversion above. `tools/av-record.py` is a reference client that turns
 them into an mp4 with ffmpeg; it is about a hundred lines, and reading it is the fastest way to
 see the protocol.
 

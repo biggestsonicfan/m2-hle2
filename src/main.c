@@ -1349,6 +1349,20 @@ sapp_desc sokol_main(int argc, char* argv[]) {
                 LOG_WARN("--av-size wants WxH (e.g. 1396x1080); keeping %dx%d",
                          g_av_w, g_av_h);
             }
+        } else if (strcmp(argv[i], "--av-format") == 0 && i + 1 < argc) {
+            /* bgra (the default) or nv12: BT.709 limited-range planes made on
+             * the GPU, so an encoding client needs no swscale pass. */
+            const char *f = argv[++i];
+            if (strcmp(f, "nv12") == 0 || strcmp(f, "NV12") == 0)
+                av_stream_set_format(AV_FORMAT_NV12);
+            else if (strcmp(f, "bgra") == 0 || strcmp(f, "BGRA") == 0)
+                av_stream_set_format(AV_FORMAT_BGRA);
+            else
+                LOG_WARN("--av-format wants bgra or nv12; keeping %s", av_stream_format_name());
+        } else if (strcmp(argv[i], "--av-test-card") == 0) {
+            /* Colour bars over a grey ramp in place of the game, for checking
+             * a client's colour and orientation (tools/grade-av-nv12.mjs). */
+            av_capture_set_test_card(true);
         } else if (strcmp(argv[i], "--overlay") == 0 && i + 1 < argc) {
             /* Load a plugin that paints layers over the finished picture
              * (ui/overlay_plugin.h). Without this nothing changes anywhere. */
