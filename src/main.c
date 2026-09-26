@@ -207,6 +207,7 @@ static void load_active_profile(const char *primary_zip) {
      * bus and resets the CPU, which must not race the run loop. */
     if (state.emu_started) { emu_stop(&state.emu); emu_sleep_ms(10); }
 
+    g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
     if (g_active_profile->load_fn(&state.romset, primary_zip, parent_zip_ptr) == 0) {
         /* The model lookup is built from the ROM's model table: a new set needs a new one. */
         geo3d_lookup_invalidate();
@@ -243,6 +244,7 @@ static void load_active_profile(const char *primary_zip) {
         LOG_INFO("profile '%s' loaded; reset IP = 0x%08X",
                  g_active_profile->id, state.cpu.sfr.ip);
     }
+    g_mcp.installing = 0;
 }
 
 /*

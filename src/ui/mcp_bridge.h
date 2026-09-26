@@ -85,6 +85,13 @@ typedef struct {
      * rather than out of the running machine's RAM. Set by main.c after a load;
      * null until then, and every such command has to check. */
     const romset_t   *romset;
+    /* 0 while the host is installing a ROM set it has already loaded (the bus
+     * re-init, the CPU reset, the sound board): `romset->loaded` goes true
+     * inside the load, before any of that, and a client that starts the CPU
+     * in the gap runs it on an empty bus. The ASan build is slow enough to
+     * lose that race every time. 1 otherwise, so a host that never sets it
+     * reads as it always did. */
+    volatile int      installing;
 
 #ifdef _WIN32
     HANDLE            thread;
@@ -166,7 +173,7 @@ static void mcp_cmd_get_status(char *resp, int cap) {
              halted  ? "true" : "false",
              ip, sps, (unsigned long long)steps, profile_id,
              g_emu_frames,
-             (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false",
+             (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
              g_match_replay_frame, av, ov, rt, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
