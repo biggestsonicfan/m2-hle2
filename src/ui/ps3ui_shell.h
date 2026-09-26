@@ -46,12 +46,6 @@ typedef enum {
     PS3UI_SH_CONTROLS, PS3UI_SH_SETTINGS, PS3UI_SH_CREDITS, PS3UI_SH_ONLINE, PS3UI_SH_GAME, PS3UI_SH_PAUSE,
 } ps3ui_sh_screen_t;
 
-typedef enum {
-    PS3UI_VIEW_GAME,        /* the board's picture only */
-    PS3UI_VIEW_OVERLAY,     /* the board's picture with the shell over it */
-    PS3UI_VIEW_FULL,        /* the shell's own 16:9 frame */
-} ps3ui_view_t;
-
 /* Button codes for the Controls screen (the i960's input codes, in order). */
 enum { PS3UI_BTN_UNUSED, PS3UI_BTN_P, PS3UI_BTN_K, PS3UI_BTN_G, PS3UI_BTN_PG, PS3UI_BTN_PK, PS3UI_BTN_KG,
        PS3UI_BTN_PKG, PS3UI_BTN_CODES };
@@ -179,7 +173,7 @@ static ps3ui_view_t ps3ui_shell_view(const ps3ui_shell_t *sh)
     case PS3UI_SH_GAME:
         return PS3UI_VIEW_GAME;
     case PS3UI_SH_ONLINE:
-        return ps3ui_app_visible(sh->online) ? PS3UI_VIEW_FULL : PS3UI_VIEW_GAME;
+        return ps3ui_app_view(sh->online);
     case PS3UI_SH_OPTIONS:
     case PS3UI_SH_CONTROLS:
     case PS3UI_SH_SETTINGS:

@@ -382,6 +382,11 @@ typedef struct {
     /* The board is still in the VS mode a room put it in, and nobody else is
      * left in the room: any button restarts the game (netplay_empty_room_pump). */
     bool            empty_room;
+    /* VS-mode results this board has played on past (netplay_end_frame), and
+     * the side that won the last of them (0 = 1P, 1 = 2P). A lobby asks the
+     * player whether to go again each time the count moves (ps3ui_app.h). */
+    uint32_t        vs_results;
+    int8_t          vs_last_winner;
 
     /* PS3 cross-play (ps3_link.h). */
     bool            ps3;
@@ -518,6 +523,9 @@ typedef struct {
     bool                empty_prompt;
     uint32_t            empty_held;     /* buttons already down when the prompt went up */
     bool                empty_restart;  /* pressed: restart at the next pump */
+    /* netplay_status_t.vs_results / vs_last_winner */
+    uint32_t            vs_results;
+    int8_t              vs_last_winner;
     /* After our board reaches a result a fighter goes on answering for a
      * while: the other fighter may still need our last inputs, and a watcher may
      * still be catching up. */
@@ -1864,6 +1872,8 @@ static inline void netplay_publish_status(void) {
     st->peer_ready     = netplay_peer_ready();
     st->peer_ready_gen = g_netplay.room.match;
     st->empty_room     = g_netplay.empty_prompt;
+    st->vs_results     = g_netplay.vs_results;
+    st->vs_last_winner = g_netplay.vs_last_winner;
 
     st->room_count = g_netplay.session.room_count;
     memcpy(st->rooms, g_netplay.session.rooms, sizeof(st->rooms));
@@ -3432,6 +3442,8 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
             g_netplay.match_result_seen = false;
             g_netplay.me.playing        = g_netplay.match_started;
             g_netplay.me_dirty          = true;
+            g_netplay.vs_results++;
+            g_netplay.vs_last_winner    = (int8_t)winner;
             netplay_log("VS mode: back to character select for match %u", (unsigned)g_netplay.match_started);
         } else {
             if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;

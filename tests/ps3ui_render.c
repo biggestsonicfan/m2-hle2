@@ -101,9 +101,24 @@ static void run(ps3ui_app_t *a, int frames, uint32_t pad)
         ps3ui_app_frame(a, 0);
 }
 
+/* A stand-in for the board's picture under the overlays: a 4:3 checker. */
+static void fake_game(ps3ui_canvas_t *cv)
+{
+    for (int y = 0; y < cv->h; y++)
+        for (int x = 0; x < cv->w; x++) {
+            float *p = cv->rgb + ((size_t)y * (size_t)cv->w + (size_t)x) * 3;
+            int c = ((x / 40) + (y / 40)) & 1;
+            p[0] = c ? 0.55f : 0.35f;
+            p[1] = c ? 0.40f : 0.25f;
+            p[2] = c ? 0.20f : 0.15f;
+        }
+}
+
 static int shot(ps3ui_app_t *a, ps3ui_canvas_t *cv, const char *dir, const char *name)
 {
     char path[1024];
+    if (ps3ui_app_view(a) == PS3UI_VIEW_OVERLAY)
+        fake_game(cv);
     ps3ui_app_draw(a, cv);
     ps3ui_canvas_resolve(cv);
     snprintf(path, sizeof path, "%s/%s.png", dir, name);
@@ -223,6 +238,60 @@ static int dump_app(const char *dir, int w, int h)
     run(a, 20, 0);
     shot(a, &cv, dir, "12_dialog");
 
+    /* VS mode: a result on our board asks whether to go again, over the game */
+    run(a, 1, PS3UI_PAD_CROSS);             /* close the dialog on No */
+    run(a, 20, 0);
+    g_fake.state = NETPLAY_PLAYING;
+    g_fake.local_player = 1;
+    g_fake.room.phase = ROOM_PHASE_MATCH;
+    g_fake.room.last_result = ROOM_RESULT_NONE;
+    run(a, 10, 0);
+    int fails = 0;
+    if (ps3ui_app_view(a) != PS3UI_VIEW_GAME) { fprintf(stderr, "FAIL: playing should show the game\n"); fails++; }
+    g_fake.vs_results++;
+    g_fake.vs_last_winner = 1;
+    run(a, 40, PS3UI_PAD_CROSS);            /* still held from the fight: ignored */
+    if (a->scr != PS3UI_SCR_AGAIN || ps3ui_app_view(a) != PS3UI_VIEW_OVERLAY) {
+        fprintf(stderr, "FAIL: no go-again prompt after a VS result\n");
+        fails++;
+    }
+    shot(a, &cv, dir, "13_again");
+    run(a, 1, PS3UI_PAD_CROSS);             /* Play again */
+    if (a->scr != PS3UI_SCR_NONE) { fprintf(stderr, "FAIL: Play again kept the prompt\n"); fails++; }
+    g_fake.vs_results++;
+    run(a, 40, 0);
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 10, 0);
+    shot(a, &cv, dir, "13b_again_exit");
+    g_last_cmd = NETPLAY_CMD_NONE;
+    run(a, 1, PS3UI_PAD_CROSS);             /* Exit */
+    g_fake.state = NETPLAY_ONLINE;          /* netplay has taken us out */
+    run(a, 5, 0);
+    if (g_last_cmd != NETPLAY_CMD_LEAVE_ROOM || a->scr != PS3UI_SCR_MENU) {
+        fprintf(stderr, "FAIL: Exit did not leave the room\n");
+        fails++;
+    }
+    g_fake.vs_results++;                    /* timing out plays on */
+    run(a, 5, 0);
+    g_fake.state = NETPLAY_PLAYING;
+    run(a, 2, 0);
+    g_fake.vs_results++;
+    run(a, 601, 0);
+    if (a->scr != PS3UI_SCR_NONE) { fprintf(stderr, "FAIL: the prompt did not time out\n"); fails++; }
+    /* the opponent left: back to the room, and told why */
+    g_fake.state = NETPLAY_IN_ROOM;
+    g_fake.member_count = 1;
+    g_fake.members[0].data.flags = 0;
+    g_fake.me.flags = 0;
+    run(a, 30, 0);
+    if (!ps3ui_dialog_showing(&a->dlg)) { fprintf(stderr, "FAIL: no word that the opponent left\n"); fails++; }
+    shot(a, &cv, dir, "14_opponent_left");
+    run(a, 1, PS3UI_PAD_CROSS);
+    run(a, 20, 0);
+    if (fails)
+        return 1;
+    g_fake.member_count = 2;
+
     /* what a frame costs: the VS lobby, drawn and resolved */
     run(a, 1, PS3UI_PAD_CIRCLE);
     g_fake.room.last_result = ROOM_RESULT_NONE;
@@ -248,19 +317,6 @@ static void host_apply(void *u, const uint8_t v[8], int versus)
     (void)u;
     memcpy(g_applied, v, 8);
     g_applied_versus = versus;
-}
-
-/* A stand-in for the board's picture under the overlays: a 4:3 checker. */
-static void fake_game(ps3ui_canvas_t *cv)
-{
-    for (int y = 0; y < cv->h; y++)
-        for (int x = 0; x < cv->w; x++) {
-            float *p = cv->rgb + ((size_t)y * (size_t)cv->w + (size_t)x) * 3;
-            int c = ((x / 40) + (y / 40)) & 1;
-            p[0] = c ? 0.55f : 0.35f;
-            p[1] = c ? 0.40f : 0.25f;
-            p[2] = c ? 0.20f : 0.15f;
-        }
 }
 
 /* A press is one frame down and at least one up: two presses in a row are two. */

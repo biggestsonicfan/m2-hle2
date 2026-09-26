@@ -50,6 +50,13 @@ enum {
     PS3UI_PAD_R1 = 1u << 11,
 };
 
+/* What a frontend puts on screen for the menus. */
+typedef enum {
+    PS3UI_VIEW_GAME,        /* the board's picture only */
+    PS3UI_VIEW_OVERLAY,     /* the board's picture with the menus over it */
+    PS3UI_VIEW_FULL,        /* the menus' own 16:9 frame */
+} ps3ui_view_t;
+
 /* Held-button repeat on the d-pad: the first repeat after 20 frames, then
  * every 6. */
 #define PS3UI_REPEAT_DELAY 20
@@ -383,6 +390,7 @@ typedef enum {
     PS3UI_SCR_ROOM,             /* waiting, or the ROOM MATCH list */
     PS3UI_SCR_VS,               /* the VS lobby */
     PS3UI_SCR_RESULT,           /* after a match */
+    PS3UI_SCR_AGAIN,            /* ours: after a VS-mode match, over the game: go again? */
 } ps3ui_screen_t;
 
 enum { PS3UI_DLG_NONE, PS3UI_DLG_LEAVE, PS3UI_DLG_EXIT, PS3UI_DLG_ERROR, PS3UI_DLG_SIGNOUT };
@@ -433,6 +441,8 @@ typedef struct {
     uint16_t last_match;
     int result_side;            /* 0/1 = winner side, -1 = none */
     float result_t;
+    uint32_t vs_seen;           /* st.vs_results already asked about */
+    int again_left;             /* the opponent left while we were being asked */
 
     /* the on-screen keyboard (ours) */
     int osk_field;              /* 0 = name, 1 = password, 2 = e-mail token */
@@ -526,6 +536,15 @@ static void ps3ui_app_netplay(ps3ui_app_t *a, int delay)
 }
 
 static int ps3ui_app_visible(const ps3ui_app_t *a) { return a->open && a->scr != PS3UI_SCR_NONE; }
+
+/* The VS-mode prompt goes over the running game; every other screen is the
+ * lobby's own frame. */
+static ps3ui_view_t ps3ui_app_view(const ps3ui_app_t *a)
+{
+    if (!ps3ui_app_visible(a))
+        return PS3UI_VIEW_GAME;
+    return a->scr == PS3UI_SCR_AGAIN ? PS3UI_VIEW_OVERLAY : PS3UI_VIEW_FULL;
+}
 
 static void ps3ui_app_go(ps3ui_app_t *a, ps3ui_screen_t s)
 {
@@ -905,6 +924,33 @@ static void ps3ui_update_result(ps3ui_app_t *a)
         ps3ui_app_go(a, PS3UI_SCR_ROOM);
 }
 
+/*
+ * After a VS-mode match (ours; the PS3 has no VS mode). The boards are already
+ * on their way back to character select, and without this nothing on screen
+ * ever lets a player out of the session. So the result window goes up over the
+ * game with two rows: Play again, or Exit, which leaves the room. As on the
+ * PS3's result screen, 10 s with no answer is the same as staying.
+ *
+ * The board keeps running underneath -- it is in lockstep, and the other
+ * player may already be picking -- and gets none of the pad while this is up.
+ */
+#define PS3UI_AGAIN_FRAMES 600.0f
+
+static void ps3ui_update_again(ps3ui_app_t *a)
+{
+    a->result_t += 1.0f;
+    ps3ui_move(a, &a->cursor, 2, 0);
+    int pick = ps3ui_hit(a, PS3UI_PAD_CROSS) ? a->cursor : ps3ui_hit(a, PS3UI_PAD_CIRCLE) ? 0 : -1;
+    if (a->result_t >= PS3UI_AGAIN_FRAMES)
+        pick = 0;
+    if (pick == 1) {
+        ps3ui_post(a, NETPLAY_CMD_LEAVE_ROOM);
+        ps3ui_app_go(a, PS3UI_SCR_MENU);
+    } else if (pick == 0) {
+        ps3ui_app_go(a, PS3UI_SCR_NONE);
+    }
+}
+
 static void ps3ui_app_ask(ps3ui_app_t *a, int kind, const char *msg)
 {
     a->dialog = kind;
@@ -942,6 +988,12 @@ static void ps3ui_follow(ps3ui_app_t *a)
 {
     const netplay_status_t *st = &a->st;
     if ((int)st->state != a->last_state) {
+        /* A match that ended because the other player went -- out of the
+         * VS prompt, most often -- says so, rather than dropping us on a
+         * waiting screen with no reason given. */
+        if (a->last_state == NETPLAY_PLAYING && st->state == NETPLAY_IN_ROOM && st->member_count <= 1
+            && !a->dialog && !ps3ui_dialog_showing(&a->dlg))
+            ps3ui_app_ask(a, PS3UI_DLG_ERROR, "Your opponent has left the session.");
         a->last_state = (int)st->state;
         /* The login the session now holds -- a Twitch token the flow just
          * landed, an account typed in -- is the one we work with from here on;
@@ -1009,8 +1061,24 @@ static void ps3ui_follow(ps3ui_app_t *a)
         break;
     }
     case NETPLAY_PLAYING:
+        /* a VS-mode result on our board: ask, once per result */
+        if (st->vs_results != a->vs_seen) {
+            a->vs_seen = st->vs_results;
+            if (st->local_player == 0 || st->local_player == 1) {
+                a->result_side = st->vs_last_winner;
+                a->result_t = 0.0f;
+                a->held = ~0u;      /* a button still down from the fight has to be let go first */
+                a->pressed = 0;
+                a->scr = PS3UI_SCR_NONE;
+                ps3ui_app_go(a, PS3UI_SCR_AGAIN);
+                break;
+            }
+        }
+        if (a->scr != PS3UI_SCR_AGAIN)
+            a->scr = PS3UI_SCR_NONE;                 /* the game has the screen */
+        break;
     case NETPLAY_WATCHING:
-        a->scr = PS3UI_SCR_NONE;                     /* the game has the screen */
+        a->scr = PS3UI_SCR_NONE;
         break;
     case NETPLAY_FAILED:
         /* Once per failure. Netplay stays FAILED until the next attempt, so
@@ -1085,6 +1153,7 @@ static void ps3ui_app_windows(ps3ui_app_t *a)
         ps3ui_win_open(&a->main, &ps3ui_n_cmn_online, "z_base");
         break;
     case PS3UI_SCR_RESULT:
+    case PS3UI_SCR_AGAIN:
         ps3ui_win_open(&a->main, &ps3ui_n_cmn_online, "vs_end_menu_PS3");
         ps3ui_win_open(&a->timer, &ps3ui_n_cmn_online, "timer");
         break;
@@ -1102,6 +1171,8 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
         a->be.get_status(&a->st);       /* read even while closed: the host reports from it */
     if (!a->open)
         return;
+    if (a->st.state != NETPLAY_PLAYING)
+        a->vs_seen = a->st.vs_results;
     ps3ui_follow(a);
     if (a->dialog || ps3ui_dialog_showing(&a->dlg))
         ps3ui_update_dialog(a);
@@ -1122,6 +1193,7 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
         case PS3UI_SCR_ROOM: ps3ui_update_room(a); break;
         case PS3UI_SCR_VS: ps3ui_update_vs(a); break;
         case PS3UI_SCR_RESULT: ps3ui_update_result(a); break;
+        case PS3UI_SCR_AGAIN: ps3ui_update_again(a); break;
         default: break;
         }
     /* READY effects start when a fighter's flag goes up */
@@ -1398,9 +1470,16 @@ static void ps3ui_draw_result(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     if (ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &lx, &ly) && ps3ui_slot_xy(&s, "p_txt_02_rb", 1, 1, &rx, &ry)) {
         ps3ui_text_style_t st = ps3ui_style_text(37.0f);
         float ex, ey;
+        static const char *const setup[1] = { "Return to setup screen" };
+        static const char *const again[2] = { "Play again", "Exit" };
+        const char *const *rows = a->scr == PS3UI_SCR_AGAIN ? again : setup;
+        int n = a->scr == PS3UI_SCR_AGAIN ? 2 : 1;
         if (ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey) && a->main.state == PS3UI_WIN_IDLE)
-            ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, ey, a->cursor_t);
-        ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly, "Return to setup screen", ps3ui_slot_alpha(&s, "p_txt_01_lt"));
+            ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, ey + 54.0f * (float)a->cursor,
+                              a->cursor_t);
+        for (int i = 0; i < n; i++)
+            ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly + 54.0f * (float)i, rows[i],
+                              ps3ui_slot_alpha(&s, "p_txt_01_lt"));
     }
 }
 
@@ -1481,6 +1560,8 @@ static const char *ps3ui_hints(const ps3ui_app_t *a)
         return ready ? "" : "\x01:Exit  \x02:Ready";
     case PS3UI_SCR_RESULT:
         return "\x02:Enter";
+    case PS3UI_SCR_AGAIN:
+        return "\x01:Play again  \x02:Enter";
     default:
         return NULL;
     }
@@ -1492,6 +1573,10 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
         return;
     if (a->scr == PS3UI_SCR_VS) {
         ps3ui_draw_vs(cv, a);
+    } else if (a->scr == PS3UI_SCR_AGAIN) {
+        ps3ui_draw_result(cv, a);           /* over the game: no background */
+        ps3ui_slot_t bar = ps3ui_draw_hint_bar(cv, a->bar.t);
+        ps3ui_draw_hint_text(cv, &bar, ps3ui_hints(a));
     } else {
         ps3ui_draw_bg(cv, a->bg_t);
         switch (a->scr) {

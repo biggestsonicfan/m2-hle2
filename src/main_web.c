@@ -530,7 +530,7 @@ static uint32_t web_lobby_pad2(void) {
 /* What the menus want on screen this callback. */
 static ps3ui_view_t web_view(void) {
     if (g_web_shell_on) return ps3ui_shell_view(&g_ps3ui_shell);
-    return ps3ui_app_visible(&g_ps3ui_app) ? PS3UI_VIEW_FULL : PS3UI_VIEW_GAME;
+    return ps3ui_app_view(&g_ps3ui_app);
 }
 
 static bool web_game_pad(void) {
