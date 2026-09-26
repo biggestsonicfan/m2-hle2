@@ -288,6 +288,24 @@ static int dump_app(const char *dir, int w, int h)
     shot(a, &cv, dir, "14_opponent_left");
     run(a, 1, PS3UI_PAD_CROSS);
     run(a, 20, 0);
+    /* a session joined from elsewhere (the web page's panel): the lobby was
+     * never opened, and the prompt still comes up, then closes the task */
+    ps3ui_app_close(a);
+    g_fake.state = NETPLAY_PLAYING;
+    g_fake.member_count = 2;
+    run(a, 5, 0);
+    if (a->open) { fprintf(stderr, "FAIL: a closed lobby opened on its own\n"); fails++; }
+    g_fake.vs_results++;
+    run(a, 40, 0);
+    if (!a->open || a->scr != PS3UI_SCR_AGAIN) { fprintf(stderr, "FAIL: no prompt with the lobby closed\n"); fails++; }
+    run(a, 1, PS3UI_PAD_CROSS);
+    if (a->open) { fprintf(stderr, "FAIL: Play again left the lobby open\n"); fails++; }
+    g_fake.vs_results++;
+    run(a, 40, 0);
+    g_fake.state = NETPLAY_IN_ROOM;         /* the session ended under the prompt */
+    run(a, 5, 0);
+    if (a->open) { fprintf(stderr, "FAIL: the prompt outlived the session\n"); fails++; }
+    ps3ui_app_open(a);
     if (fails)
         return 1;
     g_fake.member_count = 2;
@@ -428,7 +446,30 @@ static int dump_shell(const char *dir, int w, int h)
     srun(sh, 30, 0, 0);
     printf("resets=%d screen=%d\n", g_resets, sh->scr);
     sshot(sh, &cv, dir, "s12_back_to_main");
-    return 0;
+
+    /* A VS session the page started while the shell sits on MAIN MENU: the
+     * prompt goes over the game, and the shell's own menu takes none of the pad.
+     * (Frames as main_web.c runs them: the shell, then the task in a session.) */
+    g_fake.state = NETPLAY_PLAYING;
+    g_fake.local_player = 0;
+    int main_cursor = sh->cursor, fails = 0;
+    for (int i = 0; i < 5; i++) {
+        ps3ui_shell_frame(sh, 0, 0, 1);
+        ps3ui_app_frame(&g_ps3ui_app, 0);
+    }
+    g_fake.vs_results++;
+    for (int i = 0; i < 40; i++) {
+        uint32_t pad = i == 20 ? PS3UI_PAD_DOWN : 0;
+        ps3ui_shell_frame(sh, pad, 0, 1);
+        ps3ui_app_frame(&g_ps3ui_app, ps3ui_app_visible(&g_ps3ui_app) ? pad : 0);
+    }
+    if (ps3ui_shell_view(sh) != PS3UI_VIEW_OVERLAY || ps3ui_shell_game_pad(sh) || sh->cursor != main_cursor) {
+        fprintf(stderr, "FAIL: the VS prompt over the shell (view %d, cursor %d)\n", ps3ui_shell_view(sh),
+                sh->cursor);
+        fails++;
+    }
+    sshot(sh, &cv, dir, "s13_vs_again_over_shell");
+    return fails ? 1 : 0;
 }
 
 int main(int argc, char **argv)

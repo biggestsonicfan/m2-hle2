@@ -73,6 +73,49 @@ static inline void netplay_empty_room_overlay(void) {
     igEnd();
 }
 
+/*
+ * After a VS-mode result (ps3ui_app.h has the same for the PS3-style menus):
+ * the boards are already going back to character select, so ask whether to go
+ * again, with leaving the room one click away. It goes after 10 s on its own,
+ * which is the same as staying. Mouse only: the keyboard stays the board's.
+ */
+static inline void netplay_vs_again_overlay(void) {
+    static uint32_t seen;
+    static bool     primed, showing;
+    static double   shown_at;
+    netplay_status_t st;
+    netplay_get_status(&st);
+    if (!primed || st.state != NETPLAY_PLAYING) { seen = st.vs_results; primed = true; showing = false; return; }
+    if (st.vs_results != seen) {
+        seen = st.vs_results;
+        showing = st.local_player == 0 || st.local_player == 1;
+        shown_at = igGetTime();
+    }
+    if (!showing) return;
+    double left = 10.0 - (igGetTime() - shown_at);
+    if (left <= 0.0) { showing = false; return; }
+    const ImGuiViewport *vp = igGetMainViewport();
+    igSetNextWindowPosEx((ImVec2){ vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                   vp->WorkPos.y + vp->WorkSize.y * 0.5f },
+                         ImGuiCond_Always, (ImVec2){ 0.5f, 0.5f });
+    igSetNextWindowBgAlpha(0.85f);
+    if (igBegin("##netplay_vs_again", NULL,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings)) {
+        igText("%s  Play again against %s?", st.vs_last_winner == st.local_player ? "You won." : "You lost.",
+               st.peer_npid);
+        if (igButton("Play again")) showing = false;
+        igSameLine();
+        if (igButton("Leave the room")) {
+            netplay_post(NETPLAY_CMD_LEAVE_ROOM, &g_np_ui);
+            showing = false;
+        }
+        igSameLine();
+        igText("  %d", (int)left + 1);
+    }
+    igEnd();
+}
+
 /* netplay_state_text lives in net/netplay.h: the MCP bridge names these
  * states too, and it is included before this window is. */
 
