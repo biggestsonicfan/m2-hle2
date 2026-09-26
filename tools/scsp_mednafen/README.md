@@ -230,6 +230,10 @@ Loudness against MAME: scsp.h 0.97-1.01, Mednafen +12.1 dB throughout.
 
   I haven't bisected which of these moves the tempo; each step is a 40-minute build.
 
+  Two things the captures rule in or out:
+  - **Ruled out:** SCIPD being made read-only. STF's driver writes SCIPD once, at boot (0x0000), and acknowledges through SCIRE (0x40/0x80/0x100, about 169k times).
+  - **Unchanged:** the SCSP's timer code is identical across the merge. Yet timer A, the level-1 interrupt that paces the music, fired 7952 times in the pre-merge capture against 7943 in the current one. That points at how the 68000 is clocked or synchronised (the Musashi regeneration, `sound.cpp`, `model2.cpp`), or at the monitor latch changing when the driver reloads timer A, rather than at the timer itself.
+
 - **Where this leaves the oracle:** current MAME has moved toward Mednafen on at least the monitor, and its timing now sits nearer the board on Mednafen's chip (62% of notes) than the board on scsp.h (22%). Which to follow is the owner's call.
 
 **Not changed in scsp.h.** MAME is the declared oracle, and `snd_replay` grades against it.
