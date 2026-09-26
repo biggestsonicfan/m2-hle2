@@ -700,6 +700,15 @@ different slot; audio envelope correlation 0.992 and loudness within 1% in every
 notes of the first five seconds and held 25-32 voices keyed where MAME holds
 5-16.
 
+### The chip against a second chip (Mednafen's)
+
+MAME is the oracle for everything above, so a chip bug that MAME shares goes unnoticed.
+`tools/scsp_mednafen/` builds `scsp_vs_mednafen`, which drives `scsp.h` and Mednafen's Saturn
+SCSP with the same register traffic and compares them sample by sample, one feature per probe
+(envelope fields, loops, LFOs, FM, noise, the DSP running STF's reverb, timers, the slot
+monitor, MIDI). Mednafen is fetched at build time and never committed (GPL). Its
+[README](scsp_mednafen/README.md) has the first run's table and what each difference is.
+
 ### Holding a sound-board change to the same bits
 
 A speed change to `sound.h`, `scsp.h` or `m68k_exec.h` has to leave the board
