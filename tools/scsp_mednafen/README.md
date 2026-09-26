@@ -211,8 +211,26 @@ Loudness against MAME: scsp.h 0.97-1.01, Mednafen +12.1 dB throughout.
 - So scsp.h matches the MAME it was tuned against, but not the current one.
 - Mednafen, whose timers free-run and never re-pend (item 5), now sits much closer to the current MAME.
 
-Which MAME is right is the same hardware question as everything above. A MAME built at the pre-merge
-commit (`73aa26cc913`) would show whether the merge alone explains the gap.
+**Confirmed with a MAME built at the pre-merge commit (`73aa26cc913`), same capture settings:**
+
+| graded against pre-merge MAME | notes within 30 ms | median timing error | envelope |
+|---|---|---|---|
+| scsp.h | **91.0%** | 2.5 ms | 0.979 (0 ms offset) |
+| Mednafen's chip | 22.9% | 18.0 ms | 0.810 |
+| post-merge MAME itself | 21.8% | 17.3 ms | 0.774 |
+
+- scsp.h reproduces the README's figures exactly (events identical to 12.82 s) against the MAME it was tuned on.
+- The merge alone moved MAME's own sound timing by about as much as Mednafen differs from scsp.h.
+- **What changed upstream in `73aa26cc913..1d6dbfafe53`:**
+  - `458507e06bc`: MSLC delayed sample updates, the slot monitor latched as samples are produced, which is what Mednafen does (item 8).
+  - `5039631dda3`: MIDI serial interface.
+  - `74e26d79131`: CPU interrupt, SCIPD read-only except bit 5.
+  - a regenerated Musashi 68000 core
+  - a rework of `src/emu/sound.cpp`
+
+  I haven't bisected which of these moves the tempo; each step is a 40-minute build.
+
+- **Where this leaves the oracle:** current MAME has moved toward Mednafen on at least the monitor, and its timing now sits nearer the board on Mednafen's chip (62% of notes) than the board on scsp.h (22%). Which to follow is the owner's call.
 
 **Not changed in scsp.h.** MAME is the declared oracle, and `snd_replay` grades against it.
 Any of these would change the board's output against MAME, and a change to the sound board's
