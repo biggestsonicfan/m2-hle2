@@ -94,6 +94,7 @@ its built-in `WebSocket`.
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `bench-builds.mjs` | how fast each build runs the board, headless and unthrottled: game frames a second past the texture-load spike, builds alternated, best of each. The throughput companion of `ab-builds`; `bench-render.mjs` is the renderer's: each build headless with the A/V server up and drained, so the main thread draws every board frame on the real D3D11 device, and `get_status`'s `render` block gives the microseconds each stage (tile compose, scan, upload, 3D draw, tile quads) costs a frame |
+| `build-debug.sh` | not a grader: a Linux m2hle with symbols, frame pointers and ASan + UBSan, optionally of another commit (the canary's), installed where the fly's kit runs it. See "A debug build" below |
 | `ab-builds.mjs` | whether two *builds* emulate the same board. Counts frames with a breakpoint on the frame hook so both stop on the same instruction, then hashes the registers and the same nine regions `grade-reset` uses. No oracle: it answers "is this optimisation, this merge, this other compiler free?" in about ten minutes, where reasoning about it does not. `--sound` adds the sound board (all of sound RAM, the SCSP registers, the 68000's PC/SR/clock). What it cannot see: pixels (headless has no GPU), the GEO's private RAM, and anything that differs between two machines rather than two builds |
 | `grade-all.mjs` | `grade-models`, `grade-texram` and `grade-colors` off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
@@ -937,6 +938,31 @@ and 6000 — the last two inside attract's replay fight, which is where a
 one-bit difference in the board would already have grown into a different
 fight. That is what says the hand-resolved conflict in the run loop
 (`emu_slice_body`) resolved to the same board.
+
+### A debug build (`build-debug.sh`)
+
+    tools/build-debug.sh [--flavor asan|symbols|debug] [--commit REV] [--install DIR]
+
+A Linux m2hle with symbols and frame pointers; `asan` (the default) adds
+AddressSanitizer and UBSan, `symbols` keeps release speed for perf and gdb,
+`debug` is `-O0`. `--commit` builds that commit in a worktree of its own under
+`~/.cache/m2hle-debug`, so the fly's kit can get a debug build of exactly the
+canary it runs (stf-fly's dashboard does: its emulator build switch puts
+`bin/linux-debug/m2hle` in place of the release for every launch after it).
+Every Linux build also logs a backtrace on SIGSEGV, SIGBUS, SIGILL, SIGFPE and
+SIGABRT (`core/crash_trace.h`); `addr2line -e m2hle <offset>` turns the
+`(+0x…)` lines into source lines on a build with symbols. `get_status` says
+which build answers (`version`, `build`: `release`, or e.g.
+`relwithdebinfo+address+undefined`).
+
+Measured 2026-09-26: the ASan build runs attract at about 260 fps
+unthrottled. Its first finding, in six minutes of attract, was ten sites of
+undefined behaviour in the i960 core, all the same two things: `1 << 31` on an
+`int` (the bit instructions) and signed overflow in `addi` / `subi`. Both are
+now unsigned. Its second was a race in `get_status`: `rom_loaded` went true
+before the set was installed, so `ab-builds` started the ASan build's CPU on an
+empty bus (halt at 0x1788). **Not yet measured:** `ab-builds` of release
+against ASan at one commit, and of master against the unsigned i960 ops.
 
 ### Cross-play: the web build against the desktop build
 
