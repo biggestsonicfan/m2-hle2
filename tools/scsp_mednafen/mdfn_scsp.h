@@ -16,7 +16,7 @@ void     mdfn_scsp_reset(void);
 uint16_t *mdfn_scsp_ram(void);               /* 256K words, host order */
 void     mdfn_scsp_write(uint32_t addr, uint32_t v, int size);
 uint32_t mdfn_scsp_read(uint32_t addr, int size);
-void     mdfn_scsp_midi_in(uint8_t b);
+int      mdfn_scsp_midi_in(uint8_t b);           /* 0: the 4-byte input FIFO was full, byte dropped */
 void     mdfn_scsp_sample(int16_t *l, int16_t *r);
 int      mdfn_scsp_irq_level(void);          /* the 68000's IPL, as last raised */
 #ifdef __cplusplus

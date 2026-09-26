@@ -140,6 +140,57 @@ idle                           22.8         1395.6   61.26x
 
 So swapping in Mednafen's chip would cost speed, not save it. Where hardware sides with Mednafen, the thing to port is the behaviour, into scsp.h.
 
+## Through the sound board (`snd_lockstep`)
+
+The probes drive the chip directly. `snd_lockstep` instead plays a capture's MIDI bytes through the real
+board: STF's 68000 and its driver. The capture can be MAME's (`tools/mame/snd_capture.py`) or
+`tools/snd_stimuli.py`'s. It hooks the 68000's bus so the second chip sees the driver too.
+
+```sh
+B=tools/scsp_mednafen/build
+$B/snd_lockstep <capture> out 120                  # mirror: board on scsp.h, Mednafen's chip in lockstep
+$B/snd_lockstep <capture> med 120 --chip mednafen  # the board on Mednafen's chip
+$B/snd_lockstep <capture> ours 120 --chip scsp     # the board on scsp.h alone (timing)
+python tools/scsp_mednafen/wav_compare.py cap/mame.wav out.wav out.mednafen.wav med.wav
+```
+
+- **The modes:**
+  - **mirror:** the board runs as it always does. Its WAV is `cmp`-identical to `snd_replay`'s. Mednafen's chip receives the same register writes and reads, sound RAM writes and MIDI bytes, and produces one sample per board sample. Only the chip differs.
+  - **mednafen:** the driver reads Mednafen's chip and takes Mednafen's interrupt level, so it runs on Mednafen's timers and monitor.
+- **`wav_compare.py`:** aligns any of these WAVs to MAME's, removes each one's DC, and reports per 5 s:
+  - envelope correlation
+  - level
+  - residual
+
+### First run (2026-09-26, `snd_stimuli.py` inputs, 120 s each; MAME's capture was not on this machine)
+
+**Mirror mode:** the same register traffic into both chips.
+- **The two chips match** apart from a constant gain once the DC offset settles, from about 10 s. Per 5 s:
+  - correlation: 0.996–0.9999
+  - residual after a gain match: 1–10%
+  - on bgm, sfx and sys alike
+- **Mednafen is a flat +12.2 dB louder** (4x) at every frequency. So the probes' timbre findings (attack, LFOs, FM, DSP) barely reach STF's music.
+- **DC offset:** scsp.h's output settles at a DC of about +4980, which CLAUDE.md says MAME's WAV shares. Mednafen's stays near 0.
+  - While scsp.h's DC climbs from 0 over the first ~20 s, the windows that include the climb score low. That is the DC, not the music.
+  - The DC and the 12 dB look like one question: what the DSP/EFREG output path is. It's the first thing to check against a board recording.
+- **Reads Mednafen would have answered differently:** 15–30% of them.
+  - Almost all are the slot monitor (0x408), which the driver polls, and SCIPD (0x420); see item 5.
+  - The driver acts on those answers only in `--chip mednafen`.
+
+**`--chip mednafen`:** the whole board on the other chip.
+- **bgm:** the music is the same. Per-5 s envelope correlation has a median of 0.985 (lowest 0.941). The timing drifts, since the timers differ, so the samples themselves no longer line up.
+- **sfx:** stays far apart (envelope correlation around 0.58). snd_stimuli's effects storm sends up to 12 bytes on one clock period, and Mednafen's MIDI input FIFO holds 4, as the chip's does, so it drops 4652 of 7371 bytes.
+  - scsp.h's 32-byte ring takes them all.
+  - A real UART can't deliver a burst like that; MAME's capture paces bytes 0.33 ms apart. On bgm and sys it dropped 5 bytes, from two boot commands sent on one period.
+  - The 32-byte ring stays: the i960 side needs it (see CLAUDE.md, "Sound board").
+
+**Speed:** the whole board, 120 s of audio.
+
+| input | `--chip scsp` | `--chip mednafen` |
+|---|---|---|
+| bgm | 3.0 s (40x real time) | 11.2 s (11x) |
+| sfx | 3.7 s (33x) | 11.0 s (11x) |
+
 **Not changed in scsp.h.** MAME is the declared oracle, and `snd_replay` grades against it.
 Any of these would change the board's output against MAME, and a change to the sound board's
 interrupt timing is a `NETPLAY_PROTO_REV` bump. Each item is a question to settle on a real

@@ -69,7 +69,10 @@ enum { SS_DBG_ERROR = 1, SS_DBG_WARNING = 2, SS_DBG_SCSP = 4, SS_DBG_SCSP_REGW =
        SS_DBG_SCSP_MOBUF = 16 };
 #define trio_snprintf snprintf
 
+/* The harness reads a little private state (the MIDI input count). */
+#define private public
 #include "scsp.h"
+#undef private
 
 static int g_ipl;
 static void SCSP_SoundIntChanged(SS_SCSP *, unsigned level) { g_ipl = (int)level; }
@@ -94,7 +97,7 @@ uint32_t mdfn_scsp_read(uint32_t addr, int size) {
     if (size == 1) { uint8 b = 0; chip->RW<uint8, false>(addr, b); return b; }
     uint16 w = 0; chip->RW<uint16, false>(addr & ~1u, w); return w;
 }
-void mdfn_scsp_midi_in(uint8_t b) { chip->WriteMIDI(b); }
+int mdfn_scsp_midi_in(uint8_t b) { int full = chip->MIDI.InputCount == 4; chip->WriteMIDI(b); return !full; }
 void mdfn_scsp_sample(int16_t *l, int16_t *r) {
     int16 o[2];
     chip->RunSample<int16>(o);
