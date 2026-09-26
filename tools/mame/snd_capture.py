@@ -12,9 +12,14 @@ import os
 import sys
 import time
 
-CLAUDE_MAME = r"C:\Users\bigge\source\repos\ai\claude_mame"
+# The claude_mame checkout: $CLAUDE_MAME, else beside this repository.
+# $MAME_EXE_NAME picks the build (an absolute path works: a Linux build kept
+# outside the Windows tree); $MAME_EXTRA_ARGS adds to MAME's command line
+# (headless Linux: "-video none -debugger none").
+CLAUDE_MAME = os.environ.get("CLAUDE_MAME") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "claude_mame")
 sys.path.insert(0, os.path.join(CLAUDE_MAME, "mcp_server"))
-os.environ.setdefault("MAME_EXE_NAME", "mame.exe")
+os.environ.setdefault("MAME_EXE_NAME", "mame.exe" if os.name == "nt" else "mame")
 from mame_client import MameBridge  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,7 +44,7 @@ async def main():
         await b.launch_mame("sfight", extra_args=[
             "-rompath", ROMPATH, "-sound", "none", "-nothrottle",
             "-window", "-nomax", "-wavwrite", OUT + ".wav",
-        ])
+        ] + os.environ.get("MAME_EXTRA_ARGS", "").split())
         print(await ev(f'dofile("{LUA}")'), flush=True)
         await ev(f"(function() _G.SNDCAP.want = {FRAMES}; return 'ok' end)()")
         print("start:", await ev(f'_G.SNDCAP.start("{OUT}")'), flush=True)
