@@ -961,8 +961,9 @@ undefined behaviour in the i960 core, all the same two things: `1 << 31` on an
 `int` (the bit instructions) and signed overflow in `addi` / `subi`. Both are
 now unsigned. Its second was a race in `get_status`: `rom_loaded` went true
 before the set was installed, so `ab-builds` started the ASan build's CPU on an
-empty bus (halt at 0x1788). **Not yet measured:** `ab-builds` of release
-against ASan at one commit, and of master against the unsigned i960 ops.
+empty bus (halt at 0x1788). `ab-builds --sound`, identical at 600, 1800, 4000
+and 6000: master (`204b480`) against the unsigned i960 ops, and the `symbols`
+build against the `asan` build of one commit.
 
 ### Cross-play: the web build against the desktop build
 
