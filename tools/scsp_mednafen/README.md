@@ -191,6 +191,29 @@ python tools/scsp_mednafen/wav_compare.py cap/mame.wav out.wav out.mednafen.wav 
 | bgm | 3.0 s (40x real time) | 11.2 s (11x) |
 | sfx | 3.7 s (33x) | 11.0 s (11x) |
 
+### MAME's capture (2026-09-26: rebuilt claude_mame for Linux, 5400 frames of attract)
+
+The capture was made fresh with claude_mame's MAME built on Linux: `snd_capture.py cap/mame 5400`, the
+setup in claude_mame's CLAUDE_MAME.md. Each board was then played through it and graded with
+`tools/mame/snd_compare.py` (first 70 s):
+
+| board | notes within 30 ms of MAME's | median timing error | events identical in order | audio envelope |
+|---|---|---|---|---|
+| scsp.h (`--chip scsp`, = `snd_replay`) | 22.0% | 17.1 ms | to 31.8 s | 0.791, drifting (about +50 ms at 30 s, +150 ms at 70 s) |
+| Mednafen's chip (`--chip mednafen`) | **62.4%** | **8.5 ms** | to 14.5 s | holds 0 ms offset for 85 s (`wav_compare.py`: 0.85-1.00 per 5 s) |
+
+In mirror mode, on the same traffic, the chips are again 0.999 apart except for the gain.
+Loudness against MAME: scsp.h 0.97-1.01, Mednafen +12.1 dB throughout.
+
+**This is not the 91% the sound board was graded at, and the MAME reference has moved, not the board.**
+- The same `snd_replay` built from `884267d` (the commit that recorded 91%, 2026-09-14) scores exactly the same 22.0% on this capture.
+- claude_mame's MAME fork merged upstream on 2026-09-23 (`1d6dbfafe53`). That merge brought in upstream's SCSP interrupt changes, among them `74e26d79131`: SCIPD is now read-only except for bit 5, plus a main-to-sound CPU interrupt.
+- So scsp.h matches the MAME it was tuned against, but not the current one.
+- Mednafen, whose timers free-run and never re-pend (item 5), now sits much closer to the current MAME.
+
+Which MAME is right is the same hardware question as everything above. A MAME built at the pre-merge
+commit (`73aa26cc913`) would show whether the merge alone explains the gap.
+
 **Not changed in scsp.h.** MAME is the declared oracle, and `snd_replay` grades against it.
 Any of these would change the board's output against MAME, and a change to the sound board's
 interrupt timing is a `NETPLAY_PROTO_REV` bump. Each item is a question to settle on a real

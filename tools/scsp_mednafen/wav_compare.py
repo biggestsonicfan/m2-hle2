@@ -14,7 +14,8 @@ gain that best maps it onto the reference, and then per 5 s:
   gain dB    the RMS level against the reference
   residual   what the best gain leaves, as a share of the reference
 
-Stereo is averaged to mono. numpy only.
+Stereo is averaged to mono, and a WAV at another rate (MAME's 48 kHz) is
+resampled to 44.1 kHz. numpy only.
 """
 import struct
 import sys
@@ -29,9 +30,15 @@ def load(path):
     with open(path, "rb") as f:
         d = f.read()
     i = d.find(b"data")
-    ch = struct.unpack_from("<H", d, 22)[0]
+    ch, rate = struct.unpack_from("<HI", d, 22)
     x = np.frombuffer(d[i + 8:], dtype=np.int16).astype(np.float64)
-    return x.reshape(-1, ch).mean(axis=1)
+    x = x[:len(x) // ch * ch].reshape(-1, ch).mean(axis=1)
+    if rate != RATE:
+        # MAME writes its mixer's rate (48 kHz), the board 44.1: linear
+        # resampling is plenty for envelopes and levels.
+        t = np.arange(int(len(x) * RATE / rate)) * (rate / RATE)
+        x = np.interp(t, np.arange(len(x)), x)
+    return x
 
 
 def env(x):

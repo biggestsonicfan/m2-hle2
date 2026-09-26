@@ -26,7 +26,8 @@
  *                    which the driver never reads.
  *
  * Writes <out>.wav (the chip the board ran on; in mirror mode scsp.h) and in
- * mirror mode <out>.mednafen.wav, and prints the time each chip took and,
+ * mirror mode <out>.mednafen.wav, the board's capture as snd_replay writes it
+ * (<out>.bin/.ram.bin/.regs.bin/.json, for tools/mame/snd_compare.py), and prints the time each chip took and,
  * per 5 s, both chips' loudness and the difference between them.
  * tools/scsp_mednafen/wav_compare.py holds either WAV against MAME's.
  *
@@ -79,7 +80,7 @@ static uint32_t hook_read(void *ctx, uint32_t addr, int sz) {
     if (!is_scsp(addr)) return orig_read(ctx, addr, sz);
     uint32_t off = addr - M68K_SCSP_BASE;
     uint32_t b = mdfn_rd(off, sz);
-    if (use_mdfn) return b;
+    if (use_mdfn) { if (g_sndcap.active) sndcap_scsp(0, off, b, sz); return b; }
     uint32_t a = orig_read(ctx, addr, sz);
     nreads++;
     if (a != b) { nread_bad++; if (off < 0x460 && off >= 0x400) read_bad_at[(off - 0x400) >> 1]++; }
@@ -90,7 +91,10 @@ static void hook_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
     addr &= 0xFFFFFFu;
     if (is_scsp(addr)) {
         mdfn_wr(addr - M68K_SCSP_BASE, val, sz);
-        if (use_mdfn) return;                   /* scsp.h is not in this board */
+        if (use_mdfn) {                         /* scsp.h is not in this board */
+            if (g_sndcap.active) sndcap_scsp(1, addr - M68K_SCSP_BASE, val, sz);
+            return;
+        }
     } else if (addr + (uint32_t)sz <= 0x080000u) {
         /* Sound RAM, into Mednafen's words: bytes are big-endian on the bus. */
         uint16_t *mr = mdfn_scsp_ram();
@@ -116,6 +120,7 @@ static void run_sample_mdfn(int16_t *l, int16_t *r) {
         int ipl = m68k_ipl(&m->cpu);
         if (lvl > ipl && lvl > g_sound.mask_seen && m68k_interrupt(m, lvl)) {
             g_sound.irqs[lvl]++;
+            if (g_sndcap.active) sndcap_put(4, (uint32_t)lvl, 0, m->cpu.pc);
         } else if (m->cpu.stopped) {
             g_sound.mask_seen = ipl;
             m->cpu.cycles += (uint64_t)g_sound.budget;
@@ -205,6 +210,20 @@ int main(int argc, char **argv) {
     if (!wa || (mode == MIRROR && !wb)) { fprintf(stderr, "cannot write %s.*\n", out); return 1; }
     wav_header(wa, 0); if (wb) wav_header(wb, 0);
 
+    /* The board's side in snd_replay's capture format (sound.h sndcap), so
+     * tools/mame/snd_compare.py grades any mode against MAME. In mednafen
+     * mode the per-frame register dump reads scsp.h, which is idle there:
+     * the key-on/off events snd_compare grades come from the record stream. */
+    const uint32_t frames_per_mark = SOUND_RATE * 1000u / 57524u;
+    uint32_t nmarks_cap = (uint32_t)(total / frames_per_mark) + 4;
+    uint32_t (*marks)[4] = calloc(nmarks_cap, sizeof *marks);
+    snprintf(path, sizeof path, "%s.bin", out);      g_sndcap.f     = fopen(path, "wb");
+    snprintf(path, sizeof path, "%s.ram.bin", out);  g_sndcap.ramf  = fopen(path, "wb");
+    snprintf(path, sizeof path, "%s.regs.bin", out); g_sndcap.regsf = fopen(path, "wb");
+    if (!marks || !g_sndcap.f || !g_sndcap.ramf || !g_sndcap.regsf) { fprintf(stderr, "cannot write %s.*\n", out); return 1; }
+    g_sndcap.marks = marks; g_sndcap.want = nmarks_cap; g_sndcap.active = 1;
+    uint32_t mark = 0;
+
     const uint64_t win = 5 * SOUND_RATE;
     /* Per window, per chip: the sum and the sum of squares (for the DC and
      * the level without it) and the cross term. The board's output carries a
@@ -218,7 +237,9 @@ int main(int argc, char **argv) {
         printf("%8s %8s %8s %10s %10s %8s %9s %9s\n", "seconds", "ours DC", "mdfn DC", "ours dBFS", "mdfn dBFS",
                "gain dB", "residual", "corr");
     for (uint64_t smp = 0; smp < total; smp++) {
+        if (smp % frames_per_mark == 0) sndcap_frame(mark++, 0);
         while (next < nmidi && (midi[next].t >> 8) <= smp) {
+            if (g_sndcap.active) sndcap_put(1, 0x9C0000, midi[next].b | 0xFF0000u, 0);
             if (mode != MDFN) scsp_midi_in(&g_sound.scsp, midi[next].b);
             if (mode != SCSP_ONLY && !mdfn_scsp_midi_in(midi[next].b)) midi_dropped++;
             next++;
@@ -254,6 +275,17 @@ int main(int argc, char **argv) {
         }
     }
     double t_all = secs() - t0;
+    {
+        uint32_t n = g_sndcap.n, nm = g_sndcap.nmarks;
+        sndcap_stop();
+        snprintf(path, sizeof path, "%s.json", out);
+        FILE *m = fopen(path, "w");
+        fprintf(m, "{\"source\":\"snd-lockstep-%s\",\"records\":%u,\"ram_base\":4096,\"ram_size\":16384,\"regs_words\":536,\"marks\":[",
+                mode == MDFN ? "mednafen" : "scsp", n);
+        for (uint32_t i = 0; i < nm; i++) fprintf(m, "%s[%u,%u,%u,%u]", i ? "," : "", marks[i][0], marks[i][1], marks[i][2], marks[i][3]);
+        fprintf(m, "]}\n");
+        fclose(m);
+    }
     fseek(wa, 0, SEEK_SET); wav_header(wa, (uint32_t)total); fclose(wa);
     if (wb) { fseek(wb, 0, SEEK_SET); wav_header(wb, (uint32_t)total); fclose(wb); }
     double audio = (double)total / SOUND_RATE;
