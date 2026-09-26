@@ -60,6 +60,8 @@ static struct {
     int              last_state;    /* -1 until the first snapshot */
     uint64_t           next_search;
     uint64_t           match_start;   /* when PLAYING began, for the "vs" banner */
+    uint32_t           vs_seen;       /* st.vs_results already asked about */
+    bool               again;         /* open on "go again?" after a VS-mode result */
     netplay_status_t st;
     lobby_row_t      rows[LOBBY_ROWS];
     int              nrows;
@@ -142,12 +144,25 @@ static void lobby_update(uint64_t now) {
         } else if (was == NETPLAY_PLAYING || was == NETPLAY_WATCHING) {
             lobby_show(true);   /* the match ended: say why, and what next */
         }
+        g_lobby.again = false;
         if (st->state == NETPLAY_ONLINE) g_lobby.next_search = 0;   /* list the rooms now */
         if (st->state == NETPLAY_ONLINE && g_lobby.net_host) {
             g_lobby.net_host = false;   /* once: a later sign-in is the player's */
             netplay_post(NETPLAY_CMD_HOST, &g_lobby.cfg);
         }
     }
+    /* A VS-mode result: the boards go back to character select on their own,
+     * so ask whether to go again, with leaving one button away. */
+    if (st->state != NETPLAY_PLAYING) {
+        g_lobby.vs_seen = st->vs_results;
+    } else if (st->vs_results != g_lobby.vs_seen) {
+        g_lobby.vs_seen = st->vs_results;
+        if (st->local_player == 0 || st->local_player == 1) {
+            lobby_show(true);
+            g_lobby.again = true;
+        }
+    }
+    if (!g_lobby.open) g_lobby.again = false;
     if (st->state == NETPLAY_ONLINE && g_lobby.open && !st->search_pending
             && now >= g_lobby.next_search) {
         netplay_post(NETPLAY_CMD_SEARCH, &g_lobby.cfg);
@@ -218,6 +233,11 @@ static void lobby_update(uint64_t now) {
             lobby_row(LB_CLOSE, true, 0, "Back to the game");
             break;
         case NETPLAY_PLAYING:
+            if (g_lobby.again) {
+                lobby_row(LB_CLOSE, true, 0, "Play again");
+                lobby_row(LB_LEAVE_ROOM, true, 0, "Leave the room");
+                break;
+            }
             lobby_row(LB_CLOSE, true, 0, "Back to the match");
             lobby_row(LB_STOP, true, 0, "Leave the match");
             break;
@@ -398,6 +418,11 @@ static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
         if (st->state == NETPLAY_SYNCING)
             y = lobby_text(1.0f, y, cols, 255, 255, 140, "Waiting for the opponent to start...");
         y += 0.5f;
+    }
+    if (st->state == NETPLAY_PLAYING && g_lobby.again) {
+        const char *w = st->vs_last_winner == st->local_player ? "You won." : "You lost.";
+        snprintf(buf, sizeof buf, "%s Play again against %.16s?", w, st->peer_npid);
+        y = lobby_text(1.0f, y, cols, 255, 255, 140, buf) + 0.5f;
     }
     if (st->state == NETPLAY_ONLINE && st->room_count == 0 && !st->search_pending)
         y = lobby_text(1.0f, y, cols, 170, 170, 170, "No rooms yet - host one.") + 0.5f;

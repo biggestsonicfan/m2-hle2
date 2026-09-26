@@ -1233,7 +1233,7 @@ static void lr_lobby_size(int *w, int *h) {
 static void lr_draw(bool ran) {
     int w, h;
     ps3ui_view_t view = g_shell_on ? ps3ui_shell_view(&g_ps3ui_shell)
-                      : ps3ui_app_visible(&g_ps3ui_app) ? PS3UI_VIEW_FULL : PS3UI_VIEW_GAME;
+                      : ps3ui_app_view(&g_ps3ui_app);
     bool lobby = view == PS3UI_VIEW_FULL, overlay = view == PS3UI_VIEW_OVERLAY;
     if (lobby) lr_lobby_size(&w, &h);
     else       lr_render_size(&w, &h);
