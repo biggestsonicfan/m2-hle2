@@ -64,7 +64,9 @@ if [ -n "$commit" ]; then
     src=$home/src
     if [ ! -e "$src/.git" ]; then
         mkdir -p "$home"
-        git -C "$here" worktree add --detach "$src" "$commit"
+        # -f: the cache is usually on a container's own disk, and a container
+        # rebuilt from its image leaves the old registration behind.
+        git -C "$here" worktree add -f --detach "$src" "$commit"
     else
         git -C "$src" fetch -q origin 2>/dev/null || true
         git -C "$src" checkout -q --detach "$commit"
