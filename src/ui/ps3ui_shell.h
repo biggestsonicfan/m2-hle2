@@ -166,6 +166,9 @@ static const uint8_t *ps3ui_shell_buttons(const ps3ui_shell_t *sh) { return sh->
 
 static ps3ui_view_t ps3ui_shell_view(const ps3ui_shell_t *sh)
 {
+    /* the VS prompt comes up over the game whichever screen the shell is on */
+    if (ps3ui_app_view(sh->online) == PS3UI_VIEW_OVERLAY)
+        return PS3UI_VIEW_OVERLAY;
     switch (sh->scr) {
     case PS3UI_SH_PAUSE:
         return PS3UI_VIEW_OVERLAY;
@@ -350,6 +353,10 @@ static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, in
     ps3ui_shell_pad(sh, pad, pad2);
     sh->t += 1.0f;
     sh->cursor_t = sh->cursor_t + 1.0f >= 180.0f ? 0.0f : sh->cursor_t + 1.0f;
+
+    /* the online task's VS prompt is on screen and has the pad */
+    if (sh->scr != PS3UI_SH_ONLINE && ps3ui_app_view(sh->online) == PS3UI_VIEW_OVERLAY)
+        goto windows;
 
     if (ps3ui_dialog_showing(&sh->dlg)) {
         int r = ps3ui_dialog_update(&sh->dlg, sh->pressed);
@@ -627,7 +634,7 @@ static void ps3ui_shell_draw(ps3ui_shell_t *sh, ps3ui_canvas_t *cv)
     ps3ui_view_t view = ps3ui_shell_view(sh);
     if (view == PS3UI_VIEW_GAME)
         return;
-    if (sh->scr == PS3UI_SH_ONLINE) {
+    if (sh->scr == PS3UI_SH_ONLINE || ps3ui_app_view(sh->online) == PS3UI_VIEW_OVERLAY) {
         ps3ui_app_draw(sh->online, cv);
         return;
     }

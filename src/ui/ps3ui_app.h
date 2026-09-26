@@ -442,7 +442,8 @@ typedef struct {
     int result_side;            /* 0/1 = winner side, -1 = none */
     float result_t;
     uint32_t vs_seen;           /* st.vs_results already asked about */
-    int again_left;             /* the opponent left while we were being asked */
+    int prompt_only;            /* opened by a VS result alone (the session came from elsewhere):
+                                   the answer closes the task again */
 
     /* the on-screen keyboard (ours) */
     int osk_field;              /* 0 = name, 1 = password, 2 = e-mail token */
@@ -576,6 +577,7 @@ static void ps3ui_app_open(ps3ui_app_t *a)
 static void ps3ui_app_close(ps3ui_app_t *a)
 {
     a->open = 0;
+    a->prompt_only = 0;
     a->scr = PS3UI_SCR_NONE;
 }
 
@@ -945,9 +947,14 @@ static void ps3ui_update_again(ps3ui_app_t *a)
         pick = 0;
     if (pick == 1) {
         ps3ui_post(a, NETPLAY_CMD_LEAVE_ROOM);
-        ps3ui_app_go(a, PS3UI_SCR_MENU);
+        if (a->prompt_only)
+            ps3ui_app_close(a);
+        else
+            ps3ui_app_go(a, PS3UI_SCR_MENU);
     } else if (pick == 0) {
         ps3ui_app_go(a, PS3UI_SCR_NONE);
+        if (a->prompt_only)
+            ps3ui_app_close(a);
     }
 }
 
@@ -1169,10 +1176,26 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
     ps3ui_app_pad(a, held);
     if (a->be.get_status)
         a->be.get_status(&a->st);       /* read even while closed: the host reports from it */
-    if (!a->open)
-        return;
     if (a->st.state != NETPLAY_PLAYING)
         a->vs_seen = a->st.vs_results;
+    /* The VS prompt does not wait for the lobby to have been opened: a session
+     * joined from the web page's panel, or by RetroArch's autojoin, never
+     * opened it, and those players need the way out as much as anyone. */
+    int vs_new = a->st.state == NETPLAY_PLAYING && a->st.vs_results != a->vs_seen
+              && (a->st.local_player == 0 || a->st.local_player == 1);
+    if (!a->open) {
+        if (!vs_new) {
+            a->vs_seen = a->st.vs_results;
+            return;
+        }
+        ps3ui_app_open(a);
+        a->prompt_only = 1;
+    }
+    /* opened only to ask: once the session is over, the task goes again */
+    if (a->prompt_only && a->st.state != NETPLAY_PLAYING) {
+        ps3ui_app_close(a);
+        return;
+    }
     ps3ui_follow(a);
     if (a->dialog || ps3ui_dialog_showing(&a->dlg))
         ps3ui_update_dialog(a);
