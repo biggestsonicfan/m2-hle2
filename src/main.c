@@ -27,6 +27,7 @@
 
 #include "constants.h"
 #include "log.h"
+#include "crash_trace.h"  /* a backtrace in the log on SIGSEGV (glibc) */
 #include "memory.h"
 #include "i960.h"
 #include "i960_exec.h"
@@ -550,7 +551,9 @@ static void kiosk_restart_sound_cb(void *ud) {
 
 static void init(void) {
     log_init();
-    LOG_INFO("m2-hle starting (%zu profile(s))", g_profile_count);
+    crash_trace_install();
+    LOG_INFO("m2-hle %s (%s) starting (%zu profile(s))", M2HLE_VERSION, M2HLE_BUILD_FLAVOR,
+             g_profile_count);
 
     /* Before anything slow: sokol has already created AND SHOWN the window, so
      * capture mode has to claim it now — parking it after the ROM load would
@@ -789,6 +792,8 @@ static bool headless_gpu_init(void) {
  * without an audio device. */
 static int headless_main(void) {
     log_init();
+    crash_trace_install();
+    LOG_INFO("m2-hle %s (%s) starting headless", M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
     if (!g_rom_path[0]) { LOG_ERROR("--headless needs --rom"); return 2; }
     if (g_kiosk_on)
         LOG_WARN("--kiosk ignored: --headless has no window to capture. Drop --headless "

@@ -90,6 +90,7 @@
 
 #include "constants.h"
 #include "log.h"
+#include "crash_trace.h"  /* a backtrace in the log on SIGSEGV (glibc) */
 #include "memory.h"
 #include "i960.h"
 #include "i960_exec.h"
@@ -737,6 +738,7 @@ int main(int argc, char **argv) {
     /* The session log flushes every line to disk and a running game warns
      * about unknown COP commands many times a second: off unless asked for. */
     log_init();
+    crash_trace_install();
     log_set_path(opt.log_path ? opt.log_path : "off");
     if (opt.log_levels && !log_set_levels(opt.log_levels))
         fprintf(stderr, "m2hle: --log-level %s: expected LEVEL or CHANNEL=LEVEL, comma separated\n",

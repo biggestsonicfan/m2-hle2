@@ -4,3 +4,5 @@
 packaging/rocknix/*.sh text eol=lf
 packaging/rocknix/*.cfg text eol=lf
 packaging/libretro/*.sh text eol=lf
+# tools/build-debug.sh runs in the Linux dev container off the shared checkout.
+tools/*.sh text eol=lf
