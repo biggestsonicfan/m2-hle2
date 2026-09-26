@@ -25,10 +25,12 @@
  * Build: tools/scsp_mednafen/build.sh (fetches Mednafen; see README.md).
  */
 #define NDEBUG 1
+#define _POSIX_C_SOURCE 199309L   /* clock_gettime, for --bench */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "scsp.h"
 #include "mdfn_scsp.h"
 
@@ -317,8 +319,48 @@ static void timer_table(void) {
             }
 }
 
+/* --bench: each chip alone, the same load, best of several runs. The loads
+ * are set up in both chips by the same writes, then each is timed producing
+ * the samples by itself (scsp.h with its timers call, as sound.h drives it). */
+
+static double secs(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static void bench_load(int voices, int dsp) {
+    rs = 12345; setup_common();
+    if (dsp) random_dsp(1);
+    for (int i = 0; i < voices; i++) {
+        voice_t v = plain(); p_pitch(&v);
+        v.w[4] = (uint16_t)(0x001F | (rnd() & 0x7C0));            /* attack 31, some decay */
+        if (dsp) { v.w[10] = (uint16_t)(((i & 15) << 3) | 5); v.w[11] |= (uint16_t)(5 << 5); }
+        key_on(i, &v);
+    }
+}
+static void bench(int samples) {
+    static const struct { const char *name; int voices, dsp; } L[] = {
+        {"idle", 0, 0}, {"8 voices", 8, 0}, {"32 voices", 32, 0}, {"32 voices + reverb", 32, 1}};
+    printf("%-20s %14s %14s %8s\n", "load", "scsp.h ns/smp", "mednafen", "ratio");
+    volatile int32_t sink = 0;
+    for (int k = 0; k < 4; k++) {
+        double best_a = 1e9, best_b = 1e9;
+        for (int rep = 0; rep < 5; rep++) {
+            bench_load(L[k].voices, L[k].dsp);
+            double t0 = secs();
+            for (int n = 0; n < samples; n++) {
+                int16_t l, r; clk += 256; scsp_timers(&m2, clk); scsp_sample(&m2, &l, &r); sink += l;
+            }
+            double t1 = secs();
+            for (int n = 0; n < samples; n++) { int16_t l, r; mdfn_scsp_sample(&l, &r); sink += l; }
+            double t2 = secs();
+            if (t1 - t0 < best_a) best_a = t1 - t0;
+            if (t2 - t1 < best_b) best_b = t2 - t1;
+        }
+        printf("%-20s %14.1f %14.1f %7.2fx\n", L[k].name, best_a / samples * 1e9, best_b / samples * 1e9, best_b / best_a);
+    }
+    (void)sink;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--timers")) { timer_table(); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "--bench")) { bench(argc > 2 ? atoi(argv[2]) : 441000); return 0; }
     if (argc > 1 && !strcmp(argv[1], "--show")) {
         if (argc < 4) { fprintf(stderr, "usage: --show <probe> <seed> [samples] [out.wav]\n"); return 2; }
         int p = find_probe(argv[2]), seed = atoi(argv[3]), n = argc > 4 ? atoi(argv[4]) : 8192;

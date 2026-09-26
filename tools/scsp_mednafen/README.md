@@ -17,6 +17,7 @@ B=tools/scsp_mednafen/build/scsp_vs_mednafen
 $B [seeds=40] [samples=8192] [probe]       # the table below
 $B --show <probe> <seed> [samples] [wav]   # one draw: first differing samples and reads, and a WAV
 $B --timers                                # when each timer fires, and how often, on each side
+$B --bench [samples=441000]                # each chip alone, the same load: ns per sample
 ```
 
 - **Build on Linux, WSL, MSYS2 or macOS.** The shim uses GCC builtins. The main CMake build doesn't include this tool, so an ordinary build never touches Mednafen.
@@ -118,6 +119,26 @@ Each of these was traced to its code on both sides unless marked **measured only
    - **Decay:** about +0.7 dB.
    - **Level and pan:** a small spread.
    - **Slot word 5 bit 15:** Mednafen's EG bypass. The probes keep it clear, and scsp.h doesn't implement it.
+
+### Speed (`--bench`, 2026-09-26)
+
+Each chip was timed alone on the same load: the best of 5 runs of 10 s of audio, built with gcc 13 at `-O2`,
+on the dev container's 8 cores (with a stream and a trainer running beside it).
+
+```
+load                  scsp.h ns/smp       mednafen    ratio
+idle                           22.8         1395.6   61.26x
+8 voices                      100.7         1427.8   14.18x
+32 voices                     344.7         1598.5    4.64x
+32 voices + reverb            507.7         1762.3    3.47x
+```
+
+- **With `-O3 -march=native`** the ratios were 84x, 20x, 6.2x and 4.2x.
+- **Why Mednafen is slower:** it runs every slot's full pipeline every sample, whether the slot is keyed or not, and interprets the DSP (its dynarec is compiled out here).
+- **Why scsp.h is faster:** it skips idle slots, and it runs STF's reverb as compiled C (`scsp_dsp_known.h`).
+- **STF holds 5-16 voices,** where scsp.h is roughly 14-20x faster.
+
+So swapping in Mednafen's chip would cost speed, not save it. Where hardware sides with Mednafen, the thing to port is the behaviour, into scsp.h.
 
 **Not changed in scsp.h.** MAME is the declared oracle, and `snd_replay` grades against it.
 Any of these would change the board's output against MAME, and a change to the sound board's
