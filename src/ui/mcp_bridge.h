@@ -25,6 +25,9 @@
 #include "emu_thread.h"
 #include "breakpoint.h"
 #include "log.h"
+#ifndef M2HLE_BUILD_FLAVOR
+#define M2HLE_BUILD_FLAVOR "unknown"
+#endif
 #include "game_profile.h"
 #include "rom_loader.h"   /* romset_t — the regions the model decoder reads */
 #include "input.h"     /* g_input.held — drive the game's I/O ports over the bridge */
@@ -82,6 +85,13 @@ typedef struct {
      * rather than out of the running machine's RAM. Set by main.c after a load;
      * null until then, and every such command has to check. */
     const romset_t   *romset;
+    /* 0 while the host is installing a ROM set it has already loaded (the bus
+     * re-init, the CPU reset, the sound board): `romset->loaded` goes true
+     * inside the load, before any of that, and a client that starts the CPU
+     * in the gap runs it on an empty bus. The ASan build is slow enough to
+     * lose that race every time. 1 otherwise, so a host that never sets it
+     * reads as it always did. */
+    volatile int      installing;
 
 #ifdef _WIN32
     HANDLE            thread;
@@ -158,14 +168,14 @@ static void mcp_cmd_get_status(char *resp, int cap) {
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
-             "\"av\":%s,\"overlay\":%s,\"render\":%s}",
+             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, (unsigned long long)steps, profile_id,
              g_emu_frames,
-             (g_mcp.romset && g_mcp.romset->loaded) ? "true" : "false",
+             (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame, av, ov, rt);
+             g_match_replay_frame, av, ov, rt, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
 /* {"cmd":"prof","on":1} arms the i960 address profiler (clearing it),

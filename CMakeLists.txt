@@ -45,6 +45,31 @@ if(M2HLE_PROFILE)
     add_compile_definitions(M2HLE_PROFILE)
 endif()
 
+# A build to debug a running emulator with (tools/build-debug.sh). Debug and
+# RelWithDebInfo keep the frame pointer, so perf, gdb and the crash backtrace
+# (core/crash_trace.h) can walk the stack. M2HLE_SANITIZE adds sanitizers, e.g.
+# "address,undefined": ASan stops at the first bad access, UBSan logs each
+# fault once and carries on. None of it changes the board's arithmetic, so a
+# debug build has to compute the frames a release build does (tools/ab-builds.mjs).
+set(M2HLE_SANITIZE "" CACHE STRING "Sanitizers for a debug build, e.g. address,undefined (GCC/Clang only)")
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options($<$<CONFIG:Debug,RelWithDebInfo>:-fno-omit-frame-pointer>)
+    if(M2HLE_SANITIZE)
+        add_compile_options(-fsanitize=${M2HLE_SANITIZE} -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=${M2HLE_SANITIZE})
+    endif()
+elseif(M2HLE_SANITIZE)
+    message(FATAL_ERROR "M2HLE_SANITIZE needs GCC or Clang")
+endif()
+# What get_status and the log call this binary: "release", "relwithdebinfo" or
+# "debug", then "+address+undefined" for the sanitizers.
+set(_m2_flavor "$<LOWER_CASE:$<CONFIG>>")
+if(M2HLE_SANITIZE)
+    string(REPLACE "," "+" _m2_san "${M2HLE_SANITIZE}")
+    string(APPEND _m2_flavor "+${_m2_san}")
+endif()
+add_compile_definitions(M2HLE_BUILD_FLAVOR="${_m2_flavor}")
+
 # How many 68000 clock periods before the end of an instruction the sound
 # board samples the SCSP interrupt lines (board/sound.h, SOUND_IPL_LEAD). It is
 # a fitted constant standing in for the real chip sampling IPL at the microcode

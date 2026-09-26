@@ -425,14 +425,14 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
 
                 // Bit branch — per spec: CC_E if branch taken, CC_NO if not taken
                 case 0x30: // bbc (branch if bit clear)
-                    if (!(src2 & (1 << (src1 & 31)))) {
+                    if (!(src2 & (1u << (src1 & 31)))) {
                         set_cc(cpu, CC_E);
                         cpu->sfr.ip = ip + disp; return 0;
                     }
                     set_cc(cpu, CC_NO);
                     break;
                 case 0x37: // bbs (branch if bit set)
-                    if (src2 & (1 << (src1 & 31))) {
+                    if (src2 & (1u << (src1 & 31))) {
                         set_cc(cpu, CC_E);
                         cpu->sfr.ip = ip + disp; return 0;
                     }
@@ -513,11 +513,13 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     break;
 
                 // Arithmetic (integer / signed)
+                // Two's complement in unsigned arithmetic: the same bits, and
+                // no signed overflow for the compiler to assume away (UBSan).
                 case 0x591: // addi
-                    reg_write(cpu, dst_idx, (uint32_t)((int32_t)src2 + (int32_t)src1));
+                    reg_write(cpu, dst_idx, src2 + src1);
                     break;
                 case 0x593: // subi
-                    reg_write(cpu, dst_idx, (uint32_t)((int32_t)src2 - (int32_t)src1));
+                    reg_write(cpu, dst_idx, src2 - src1);
                     break;
 
                 // Shifts
@@ -592,7 +594,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     break;
 
                 case 0x5ae: // chkbit
-                    if (src2 & (1 << (src1 & 31))) set_cc(cpu, CC_E);
+                    if (src2 & (1u << (src1 & 31))) set_cc(cpu, CC_E);
                     else                            set_cc(cpu, CC_NO);
                     break;
 
@@ -634,10 +636,10 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
 
                 // Bit operations
                 case 0x580: // notbit
-                    reg_write(cpu, dst_idx, src2 ^ (1 << (src1 & 31)));
+                    reg_write(cpu, dst_idx, src2 ^ (1u << (src1 & 31)));
                     break;
                 case 0x583: // setbit
-                    reg_write(cpu, dst_idx, src2 | (1 << (src1 & 31)));
+                    reg_write(cpu, dst_idx, src2 | (1u << (src1 & 31)));
                     break;
                 /* The four "not" logicals are not two pairs of synonyms: which
                  * operand is inverted is the whole difference. andnot / ornot
@@ -663,7 +665,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     reg_write(cpu, dst_idx, src2 | (~src1));
                     break;
                 case 0x58c: // clrbit
-                    reg_write(cpu, dst_idx, src2 & ~(1 << (src1 & 31)));
+                    reg_write(cpu, dst_idx, src2 & ~(1u << (src1 & 31)));
                     break;
                 case 0x58d: // notor
                     reg_write(cpu, dst_idx, src1 | (~src2));
@@ -673,9 +675,9 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     break;
                 case 0x58f: // alterbit
                     if (get_cc(cpu) & CC_E)
-                        reg_write(cpu, dst_idx, src2 | (1 << (src1 & 31)));
+                        reg_write(cpu, dst_idx, src2 | (1u << (src1 & 31)));
                     else
-                        reg_write(cpu, dst_idx, src2 & ~(1 << (src1 & 31)));
+                        reg_write(cpu, dst_idx, src2 & ~(1u << (src1 & 31)));
                     break;
 
                 // Multiply / Divide
