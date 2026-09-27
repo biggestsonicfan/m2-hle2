@@ -45,7 +45,8 @@
  * 80 or more.
  *
  * The explorer runs in a headless browser: puppeteer-core as node resolves it
- * from $M2_PUPPETEER, the explorer or ../noclip, driving Edge with SwiftShader.
+ * from $M2_PUPPETEER, stf-tools ($M2_STF_TOOLS or ../stf-tools), the explorer or
+ * ../noclip, driving Edge with SwiftShader.
  * $M2_BROWSER names another Chromium. A checkout without the package, or a
  * machine without the browser, skips.
  *
@@ -124,7 +125,8 @@ if (!rep.check('MAME\'s snapshots are of the Flying Carpet', frames.length > 0 &
 /* Resolved the way node would from each of these, so a worktree without node_modules of its own
  * finds its parent's. */
 function loadPuppeteer() {
-    for (const base of [process.env.M2_PUPPETEER, NOCLIP, path.resolve(REPO, '..', 'noclip'), path.join(REPO, 'tools')]) {
+    for (const base of [process.env.M2_PUPPETEER, process.env.M2_STF_TOOLS,
+        path.resolve(REPO, '..', 'stf-tools'), NOCLIP, path.resolve(REPO, '..', 'noclip'), path.join(REPO, 'tools')]) {
         if (!base) continue;
         try {
             return createRequire(path.join(path.resolve(base), 'package.json'))('puppeteer-core');
@@ -136,7 +138,7 @@ const puppeteer = loadPuppeteer();
 const browserExe = process.env.M2_BROWSER ?? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 if (!puppeteer || !fs.existsSync(browserExe)) {
     rep.skip('a headless browser to run the explorer in',
-        !puppeteer ? `no puppeteer-core from $M2_PUPPETEER, ${NOCLIP} or ../noclip` : `no browser at ${browserExe} — set $M2_BROWSER`);
+        !puppeteer ? `no puppeteer-core from $M2_PUPPETEER, ../stf-tools, ${NOCLIP} or ../noclip` : `no browser at ${browserExe} — set $M2_BROWSER`);
     rep.finish();
     process.exit();
 }
