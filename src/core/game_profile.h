@@ -105,10 +105,9 @@ typedef struct {
      * 0 = pin unused / not yet delivered. */
     uint32_t irq_handler[4];
     /* Sound output queue (drained by the pin3/Other handler = send_sound_code).
-     * The sound IRQ (intreq bit 10, UART TxRDY) is asserted while the queue has
-     * data: count byte > 0, or state byte != 0xFF (command in progress). */
+     * Its count feeds queue_hi; a profile with one also gets the sound IRQ
+     * (intreq bit 10, UART TxRDY), raised while the line is enabled. */
     uint32_t sound_queue_count_addr;   /* e.g. STF byte_504001 */
-    uint32_t sound_queue_state_addr;   /* e.g. STF byte_504014 */
 
     /* Convenience: RAM flag poked to 1 each slice to auto-skip the boot warning
      * screen (0 = disabled).  STF: 0x500410. */

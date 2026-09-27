@@ -767,7 +767,6 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
      * pin1 VsyncObj, pin2 Timer, pin3 Other(sound). */                               \
     .irq_handler        = { 0x00000C40, 0x00000D10, 0x00000D30, 0x00000DF0 },         \
     .sound_queue_count_addr = 0x00504001,   /* byte_504001 */                         \
-    .sound_queue_state_addr = 0x00504014,   /* byte_504014 */                         \
     .warning_skip_addr      = 0x00500410,   /* poke 1 → skip boot warning screen */ \
     .vs_rematch             = true,         /* sfight_hook_vs_rematch */             \
     /* Aurora Icefield's ice pillars (aurora_ice_pillar_init, records at        \

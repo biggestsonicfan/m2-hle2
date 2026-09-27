@@ -289,13 +289,24 @@ static inline void emu_board_reset_state(void) {
  * backpressure; a byte that does not fit waits in the game's queue for the
  * next slice, as it would wait on the UART. */
 
-/* Is there a byte to send? Raises TxRDY (bit 10) if so. */
+/* Is TxRDY's interrupt up? Raises bit 10 if so.
+ *
+ * TxRDY is a level: it is up whenever the UART can take a byte, whether or not
+ * the game has one, and the board raises the pin whenever the line is enabled
+ * as well (MAME model2.cpp sound_ready_w, txrdy_r() && intena). So the game
+ * takes one more interrupt after the last byte of a burst, and STF needs it:
+ * entered with an empty queue and no command half sent, send_sound_code
+ * (0x3F1DC-0x3F1FC) puts the queue's count and both indices back to 0 and
+ * returns with the line still masked, which ends the burst. This used to raise
+ * the pin only while bytes were queued, so that interrupt never came, the
+ * write index walked on through all 32 slots, and every command in time landed
+ * in slots 18-31 over sd_flag and the rest (issue #112): the sd_flag sequencer
+ * then read a command code as a pointer (unmapped reads at IP 0x3F5AC). */
 static inline bool emu_sound_pending(emu_thread_ctx_t *ctx, const game_quirks_t *q) {
     if (!q->sound_queue_count_addr) return false;
-    uint32_t cnt   = mem_read8(ctx->bus, q->sound_queue_count_addr);
-    uint32_t state = q->sound_queue_state_addr ? mem_read8(ctx->bus, q->sound_queue_state_addr) : 0xFFu;
+    uint32_t cnt = mem_read8(ctx->bus, q->sound_queue_count_addr);
     if (cnt > g_sound.queue_hi) g_sound.queue_hi = cnt;
-    if (cnt == 0 && state == 0xFFu) return false;
+    if (!(g_irqt.intena & 0x400u)) return false;
     irqt_raise(0x400u);                      /* bit 10 = sound */
     return true;
 }
@@ -331,7 +342,7 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (s_irq_in_service && cpu->frame_depth <= s_irq_baseline_depth)
         s_irq_in_service = false;
 
-    /* Sound UART TxRDY: keep bit 10 asserted while the i960 has bytes to send. */
+    /* Sound UART TxRDY: keep bit 10 asserted while the line is enabled. */
     emu_sound_pending(ctx, q);
 
     if (s_irq_in_service) return;

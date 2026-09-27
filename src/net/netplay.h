@@ -147,8 +147,11 @@
  * 7: STF Console clears the hidden-select latch at a VS-mode rematch
  *    (sfight_console.h, sfc_on_vs_rematch); a board before it keeps it, so a
  *    Start on the square of a hidden fighter just played loads the other one.
+ * 8: the sound UART's interrupt is a level while the line is enabled, so the
+ *    game takes one more after a burst and resets its queue (emu_thread.h,
+ *    emu_sound_pending); a board before it never takes that one.
  */
-#define NETPLAY_PROTO_REV 7
+#define NETPLAY_PROTO_REV 8
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
