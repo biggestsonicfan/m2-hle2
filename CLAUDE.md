@@ -323,6 +323,15 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   told to punch at their own socket, so `rpcn_session_recv` drops datagrams whose source is our own
   `local_ip:local_port` — without it `peer_heard` latches onto our own port and every real datagram
   from the peer is then discarded as a stray.
+- **A punch may come from an address the server never gave; a game packet may not** (issue #108,
+  `rpcn_session_hear(..., punch)`). A player in a container advertises its bridge address (172.x)
+  and its datagrams leave through the container host's NAT, so its LAN opponent hears it from an
+  address nobody named and used to drop every datagram as a stray: both sat at the barrier. A
+  punch names its sender, so it re-points a member not yet heard; once heard, nobody moves them.
+  `--net-local-ip` / `$M2HLE_NET_LOCAL_IP` puts the container host's LAN address in the keepalive
+  instead (`rpcn_client_t.advertised_ip`; `local_ip` stays the socket's own for the self filter).
+  It is a process setting, not a `netplay_config_t` field, so the wholesale config copies (file,
+  window, MCP) cannot drop it. `tests/net_test.c` part (G) holds both over loopback.
 - **A room copies each member's address when it is created or joined, and never refreshes it.**
   The address reaches RPCN only with the first UDP keepalive after login, so a Host or Join sent
   straight after sign-in snapshots nothing — for the life of the room — and two players on one

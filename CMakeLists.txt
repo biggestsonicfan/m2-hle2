@@ -560,7 +560,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_compile_definitions(scsp_dsp_test PRIVATE SCSP_DSP_MASKS=0)
     target_compile_definitions(scsp_dsp_test_masks PRIVATE SCSP_DSP_MASKS=1)
     # Netplay: the lockstep engine, the protobuf codec and the ComId standard.
-    # No sockets and no server — see the header of tests/net_test.c.
+    # No server; part (G) opens loopback sockets — see the header of tests/net_test.c.
     add_executable(net_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/net_test.c)
     # PS3 cross-play: Sony RUDP against bytes captured from a real PS3, and
     # RPCS3 signaling. No sockets.

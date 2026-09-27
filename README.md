@@ -218,6 +218,11 @@ m2hle --rom sfight.zip --run --netplay       --net-server <host> --net-user <oth
 
 `--net-players N` makes the hosted room hold N (2..8).
 
+**Hosting from inside a container** (Docker's bridge network): publish UDP 3658 and give the
+container host's LAN address with `--net-local-ip 192.168.1.20` (or `$M2HLE_NET_LOCAL_IP`). When
+two players share a public address the server hands each the other's *local* one, and a
+container's own (`172.x`) is one nobody on the LAN can reach.
+
 **Or without a person at the keyboard.** The same buttons are on the MCP bridge
 (`netplay_status`, `netplay_connect`, `netplay_host`, `netplay_start`, ...), which is enough to
 hold a lobby open, notice that somebody has joined and pressed Start, and accept the match. The

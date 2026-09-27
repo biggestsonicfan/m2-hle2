@@ -236,6 +236,11 @@ typedef struct {
      * recognise a datagram that came from ITSELF — see rpcn_session_recv. */
     uint32_t     local_ip;         /* network byte order */
     uint16_t     local_port;
+    /* The LAN address the keepalive tells the server, when it is not local_ip:
+     * a player inside a container, whose own interface is a bridge address
+     * (172.x) nobody on the LAN can reach, gives the container host's. 0 = say
+     * local_ip. local_ip itself stays the socket's own, for rpcn_session_recv. */
+    uint32_t     advertised_ip;
     int64_t      user_id;
     char         error[256];
 } rpcn_client_t;
@@ -1536,7 +1541,7 @@ static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
     pkt[0] = 1;
     for (int i = 0; i < 8; i++) pkt[1 + i] = (uint8_t)((uint64_t)user_id >> (i * 8));
 
-    memcpy(pkt + 9, &c->local_ip, 4);
+    memcpy(pkt + 9, c->advertised_ip ? &c->advertised_ip : &c->local_ip, 4);
 
     return net_udp_send(c->udp, c->signaling_addr, RPCN_SIGNALING_PORT, pkt, sizeof(pkt));
 }

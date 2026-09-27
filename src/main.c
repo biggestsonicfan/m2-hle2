@@ -1409,6 +1409,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
              * address with 3658 hardcoded, so a non-default port is not usable
              * for same-NAT play between two real machines. */
             g_net_cli.local_p2p_port = (uint16_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--net-local-ip") == 0 && i + 1 < argc) {
+            /* The LAN address to tell the server instead of this machine's own:
+             * inside a container, the container host's (issue #108). */
+            netplay_set_local_ip(argv[++i]);
         } else if (strcmp(argv[i], "--net-host") == 0) {
             g_net_auto = 1;
         } else if (strcmp(argv[i], "--net-players") == 0 && i + 1 < argc) {

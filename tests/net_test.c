@@ -17,6 +17,9 @@
  *  (E) Rooms of more than two (room.h): the PS3 port's rules for who fights and
  *      how the line moves after a result.
  *  (F) Watchers: never gating, and still getting every frame.
+ *  (G) A member heard from an address the server did not give (issue #108):
+ *      a punch may re-point them, a game packet may not. This part uses two
+ *      UDP sockets on loopback, and no server.
  */
 #define NDEBUG 1
 #include <stdio.h>
@@ -26,6 +29,7 @@
 #include "lockstep.h"
 #include "protobuf.h"
 #include "room.h"
+#include "rpcn_session.h"
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
@@ -43,6 +47,44 @@ static void pair_begin(pair_t *p, uint32_t generation, uint32_t delay) {
     lockstep_begin_round(&p->b, generation);
     lockstep_on_peer_announce(&p->a, 1, generation);
     lockstep_on_peer_announce(&p->b, 0, generation);
+}
+
+/* ---- (G) helpers ------------------------------------------------------- */
+
+/* A port nothing on this machine holds, from `from` up; 0 if none. */
+static uint16_t free_udp_port(uint16_t from) {
+    for (uint16_t p = from; p < from + 200; p++) {
+        net_sock_t k = NET_SOCK_INVALID;
+        if (net_udp_open(&k, p)) { net_close(&k); return p; }
+    }
+    return 0;
+}
+
+static char g_notes[1024];
+static void note_cb(void *ctx, const char *msg) {
+    (void)ctx;
+    size_t n = strlen(g_notes);
+    snprintf(g_notes + n, sizeof(g_notes) - n, "%s\n", msg);
+}
+
+/* Drain the session's socket for up to ~200 ms (loopback is quick, but not
+ * synchronous everywhere). Returns the last game datagram's length, or 0. */
+static int pump_recv(rpcn_session_t *s, uint16_t *from, uint32_t *ip, uint16_t *port) {
+    uint8_t buf[64];
+    int last = 0;
+    uint64_t end = net_now_ms() + 200;
+    while (net_now_ms() < end) {
+        int got = rpcn_session_recv(s, buf, sizeof(buf), from, ip, port);
+        if (got > 0) { last = got; break; }
+    }
+    return last;
+}
+
+static void punch_from(net_sock_t k, uint16_t to_port, uint16_t member) {
+    uint8_t pkt[RPCN_PUNCH_SIZE];
+    memcpy(pkt, g_rpcn_punch_tag, 4);
+    rpcn_put_u16(pkt + 4, member);
+    net_udp_send(k, htonl(0x7F000001u), to_port, pkt, sizeof(pkt));
 }
 
 int main(void) {
@@ -543,6 +585,104 @@ int main(void) {
         lockstep_submit_local(&w, 3, 0x777, &mine);
         CHECK(mine.inputs[0] == 0 && lockstep_input_for(&w, 0, 3) == 0xA03u,
               "a watcher has no input of its own and cannot write a side");
+    }
+
+    /* ---- (G) a member heard from an address the server did not give ------ */
+    /* The server told us member 34 is at 192.168.50.194:3658 (their LAN address:
+     * we share a public one). They are really behind a container host's NAT, so
+     * everything they send arrives from somewhere else -- here, 127.0.0.1. */
+    {
+        static rpcn_session_t s;
+        memset(&s, 0, sizeof(s));
+        g_notes[0] = 0;
+        s.log = note_cb;
+        CHECK(net_startup(), "(G) the socket library starts");
+        uint16_t mine = free_udp_port(3760);
+        net_sock_t them = NET_SOCK_INVALID, other = NET_SOCK_INVALID;
+        uint16_t them_port = free_udp_port((uint16_t)(mine + 1));
+        bool socks = mine && them_port && net_udp_open(&s.client.udp, mine) && net_udp_open(&them, them_port);
+        uint16_t other_port = socks ? free_udp_port((uint16_t)(them_port + 1)) : 0;
+        socks = socks && other_port && net_udp_open(&other, other_port);
+        CHECK(socks, "(G) three loopback sockets");
+        if (socks) {
+            s.client.local_ip   = htonl(0xAC120002u);     /* 172.18.0.2, the bridge address */
+            s.client.local_port = mine;
+            s.room_id = 1;
+            s.stage = RPCN_STAGE_HOSTING;
+            s.my_member_id = s.owner_id = 16;
+            rpcn_peer_t *p = &s.peers[0];
+            p->used = true;
+            p->member_id = 34;
+            snprintf(p->npid, sizeof(p->npid), "guest");
+            p->ip   = htonl(0xC0A832C2u);                 /* 192.168.50.194 */
+            p->port = 3658;
+
+            /* A game packet naming them from the wrong address: still refused. */
+            uint8_t game[12] = { 0 };
+            net_udp_send(them, htonl(0x7F000001u), mine, game, sizeof(game));
+            uint16_t from = 0; uint32_t ip = 0; uint16_t port = 0;
+            int got = pump_recv(&s, &from, &ip, &port);
+            CHECK(got == (int)sizeof(game) && from == 0, "(G) a game packet from elsewhere is nobody's");
+            CHECK(!rpcn_session_claim(&s, 34, ip, port) && !p->heard,
+                  "(G) and cannot claim a member the server placed at another address");
+
+            /* A punch from a member nobody knows: ignored. */
+            punch_from(them, mine, 99);
+            pump_recv(&s, &from, &ip, &port);
+            CHECK(!p->heard, "(G) a punch naming a stranger changes nothing");
+
+            /* Their punch, from the wrong address: they are linked where heard. */
+            punch_from(them, mine, 34);
+            pump_recv(&s, &from, &ip, &port);
+            CHECK(p->heard && p->ip == htonl(0x7F000001u) && p->port == them_port
+                  && s.stage == RPCN_STAGE_LINKED,
+                  "(G) a punch names its sender, so it re-points them to where it came from");
+            CHECK(strstr(g_notes, "not the address the server gave (192.168.50.194:3658)") != NULL,
+                  "(G) and the log says which address the server gave");
+
+            /* Their game packets now belong to them. */
+            net_udp_send(them, htonl(0x7F000001u), mine, game, sizeof(game));
+            from = 0;
+            got = pump_recv(&s, &from, &ip, &port);
+            CHECK(got == (int)sizeof(game) && from == 34, "(G) their game packets are theirs from then on");
+
+            /* Once heard, nobody moves them: not even a punch naming them. */
+            punch_from(other, mine, 34);
+            pump_recv(&s, &from, &ip, &port);
+            CHECK(p->ip == htonl(0x7F000001u) && p->port == them_port,
+                  "(G) a later punch from a third address does not move a member already heard");
+
+            /* The keepalive tells the server the advertised address when one is set. */
+            s.client.user_id = 7;
+            s.client.signaling_addr = htonl(0x7F000001u);
+            net_sock_t helper = NET_SOCK_INVALID;
+            if (net_udp_open(&helper, RPCN_SIGNALING_PORT)) {
+                uint8_t ka[32]; uint32_t kip; uint16_t kport;
+                s.client.advertised_ip = htonl(0xC0A83205u);   /* 192.168.50.5 */
+                rpcn_send_signaling_ping(&s.client, 0);
+                int n = 0;
+                for (uint64_t end = net_now_ms() + 200; n <= 0 && net_now_ms() < end;)
+                    n = net_udp_recv(helper, ka, sizeof(ka), &kip, &kport);
+                uint32_t said = 0;
+                if (n == 13) memcpy(&said, ka + 9, 4);
+                CHECK(n == 13 && said == htonl(0xC0A83205u), "(G) the keepalive carries the advertised LAN address");
+                s.client.advertised_ip = 0;
+                rpcn_send_signaling_ping(&s.client, 0);
+                n = 0;
+                for (uint64_t end = net_now_ms() + 200; n <= 0 && net_now_ms() < end;)
+                    n = net_udp_recv(helper, ka, sizeof(ka), &kip, &kport);
+                said = 0;
+                if (n == 13) memcpy(&said, ka + 9, 4);
+                CHECK(n == 13 && said == htonl(0xAC120002u), "(G) and the socket's own without one");
+                net_close(&helper);
+            } else {
+                printf("skip: (G) keepalive: UDP %u is taken on this machine\n", (unsigned)RPCN_SIGNALING_PORT);
+            }
+            s.client.signaling_addr = 0;   /* not the helper's any more: the drain below */
+        }
+        net_close(&them);
+        net_close(&other);
+        net_close(&s.client.udp);
     }
 
     printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail, g_fail == 1 ? "" : "s");
