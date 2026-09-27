@@ -165,6 +165,88 @@ static inline bool geo3d_split_other_way(uint32_t quad, uint32_t cut) {
     return false;
 }
 
+/* ---- A decal drawn as its own object ---------------------------------------
+ * The same tie, one step out: the copy is a separate object laid over the
+ * first with the same matrix. Both polygons get one z-sort key from the same
+ * corners, and the later submission keeps the bucket, so the later object wins
+ * every pixel. The depth buffer does not see it that way. The two draws are
+ * different meshes with the corners in a different order, and their depths
+ * differ in the low bits, so they fight pixel by pixel.
+ *
+ * So a face is matched by its corner set, not by its triangles. Between draws
+ * with a bit-identical matrix, a face whose corners and z-sort mode repeat a
+ * face of an earlier draw is pulled one layer in front of it (the layers'
+ * offset, geo3d_mesh_layers). Faces of the same draw keep the decal cut above.
+ * Far-corner faces (modes 2 and 3) are left out: they sort by one flat depth
+ * that the two copies share already, and a layer would take the recede away.
+ *
+ * *Symptom that surfaced this in STF:* in Tails' stage-clear close-up, specks
+ * of his pupils showed through his closed eyes. The closed-eye head (model
+ * 2405) is drawn right after the eye objects (205/206), whose texture points
+ * move the pupil off the eye, but not off every face the head covers. */
+#define GEO3D_TIE_SLOTS 8192u     /* power of two; filled at most half way */
+static int      g_geo3d_ties = 1;  /* 0: consecutive draws are left to the depth buffer */
+static uint32_t g_geo3d_tie_gen, g_geo3d_tie_draw, g_geo3d_tie_count;
+static uint32_t g_geo3d_tie_stamp[GEO3D_TIE_SLOTS];
+static uint32_t g_geo3d_tie_key[GEO3D_TIE_SLOTS];
+static uint32_t g_geo3d_tie_owner[GEO3D_TIE_SLOTS];
+static uint16_t g_geo3d_tie_layer[GEO3D_TIE_SLOTS];
+static uint8_t  g_geo3d_tie_zmode[GEO3D_TIE_SLOTS];
+static int      g_geo3d_tie_on;    /* set by the caller for a run of display-list draws */
+static uint64_t g_geo3d_tie_faces; /* faces pulled forward (set_camera reports it) */
+
+/* Forget every face: the next draw has a different matrix. */
+static inline void geo3d_tie_reset(void) {
+    g_geo3d_tie_count = 0;
+    if (++g_geo3d_tie_gen == 0) {
+        memset(g_geo3d_tie_stamp, 0, sizeof g_geo3d_tie_stamp);
+        g_geo3d_tie_gen = 1;
+    }
+}
+
+/* The draw about to be decoded; `id` must be the same if it is decoded again. */
+static inline void geo3d_tie_draw(uint32_t id) { g_geo3d_tie_draw = id; }
+
+/* A face's corner set, however many of its corners repeat. */
+static inline uint32_t geo3d_tie_face_key(uint32_t a, uint32_t b, uint32_t c, uint32_t d, bool tri) {
+    uint32_t k[4] = { a, b, c, d };
+    int n = tri ? 3 : 4;
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && k[j - 1] > k[j]; j--) { uint32_t t = k[j]; k[j] = k[j - 1]; k[j - 1] = t; }
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < n; i++) if (i == 0 || k[i] != k[i - 1]) h = (h ^ k[i]) * 16777619u;
+    return h;
+}
+
+/* The layer a face is drawn at: its own, or one in front of the same face of
+ * an earlier draw with this matrix. */
+static inline float geo3d_tie_layer(uint32_t key, uint32_t zmode, float own) {
+    if (!g_geo3d_ties || !g_geo3d_tie_on || zmode == 2u || zmode == 3u) return own;
+    uint32_t i = (key * 2654435761u) & (GEO3D_TIE_SLOTS - 1u);
+    for (;; i = (i + 1u) & (GEO3D_TIE_SLOTS - 1u)) {
+        if (g_geo3d_tie_stamp[i] != g_geo3d_tie_gen) break;
+        if (g_geo3d_tie_key[i] != key) continue;
+        if (g_geo3d_tie_owner[i] == g_geo3d_tie_draw) return (float)g_geo3d_tie_layer[i] > own ? (float)g_geo3d_tie_layer[i] : own;
+        float l = own;
+        if (g_geo3d_tie_zmode[i] == (uint8_t)zmode && (float)g_geo3d_tie_layer[i] + 1.0f > l) {
+            l = (float)g_geo3d_tie_layer[i] + 1.0f;
+            g_geo3d_tie_faces++;
+        }
+        g_geo3d_tie_owner[i] = g_geo3d_tie_draw;
+        g_geo3d_tie_layer[i] = (uint16_t)l;
+        g_geo3d_tie_zmode[i] = (uint8_t)zmode;
+        return l;
+    }
+    if (g_geo3d_tie_count >= GEO3D_TIE_SLOTS / 2u) return own;   /* full: the rest go unmatched */
+    g_geo3d_tie_count++;
+    g_geo3d_tie_stamp[i] = g_geo3d_tie_gen;
+    g_geo3d_tie_key[i]   = key;
+    g_geo3d_tie_owner[i] = g_geo3d_tie_draw;
+    g_geo3d_tie_layer[i] = (uint16_t)own;
+    g_geo3d_tie_zmode[i] = (uint8_t)zmode;
+    return own;
+}
+
 /* Decode a Model 2 BGR555 colour word to normalized float RGB.
  *   bits 0-4 = R, bits 5-9 = G, bits 10-14 = B  (matches game's colpal()).
  * The material stream stores this as a little-endian uint16. */
@@ -1615,7 +1697,7 @@ static const uint8_t *g_geo3d_palram      = NULL;
 static size_t         g_geo3d_palram_size = 0;
 
 static inline bool geo3d_tex_word(const uint8_t *rom, size_t rom_size, uint32_t addr, uint16_t *out) {
-    if (addr & 0x800000u) { *out = g_geo_texram_words[addr & 0xFFFFu]; return true; }
+    if (addr & 0x800000u) { *out = g_geo_rs->texram[addr & 0xFFFFu]; return true; }
     size_t b = (size_t)addr * 2u;
     if (!rom || b + 2 > rom_size) return false;
     *out = (uint16_t)(rom[b] | (rom[b + 1] << 8));
@@ -2182,7 +2264,7 @@ static inline void geo3d_decode_model(int model_idx,
              * (bits 8..9) is never drawn. */
             uint32_t at = (fi < n_qt) ? qa[fi] : 0u;
             board_cull = (((at >> 17) & 1u) == 0 && dotp < 0.0f) || ((at >> 8) & 3u) == 0;
-            const float *tp = g_geo_texparam[(at >> 18) & 0x1F];
+            const float *tp = g_geo_rs->texparam[(at >> 18) & 0x1F];
             float spec = 0.0f;
             if (g_geo3d_mode & 1u) {
                 /* Board z is this space's -z, for the normal and the light alike. */
@@ -2202,11 +2284,11 @@ static inline void geo3d_decode_model(int model_idx,
              * (bits 23-30) as the integer part, the next 15 bits' log from log
              * RAM as the fraction. A zero distance gives texlod 0 (the oracle's
              * model2_v.cpp; stock MAME would pick the coarsest level). */
-            float dist = g_geo_coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
+            float dist = g_geo_rs->coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
             uint32_t db;
             memcpy(&db, &dist, 4);
             g_geo3d_emit_texlod = (db >> 8) == 0 ? 0.0f
-                : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_logram[(db >> 8) & 0x7FFFu]);
+                : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_rs->logram[(db >> 8) & 0x7FFFu]);
         } else if (g_light_enable && has_C) {
             float e1x=B.x-A.x, e1y=B.y-A.y, e1z=B.z-A.z;
             float e2x=C.x-A.x, e2y=C.y-A.y, e2z=C.z-A.z;
@@ -2240,6 +2322,10 @@ static inline void geo3d_decode_model(int model_idx,
          * (model2rd.ipp draw_scanline_solid<true>). Only on the display-list
          * path, so the model tools keep comparing every face with the explorer. */
         if (g_geo3d_board_luma && (untex_trans || board_cull)) { efi++; continue; }
+        if (g_geo3d_tie_on && (!is_tri || has_C))
+            g_geo3d_emit_layer = geo3d_tie_layer(geo3d_tie_face_key(svk[ai], svk[bi], has_C ? svk[ci] : svk[ai],
+                                                                    has_D ? svk[di] : svk[ai], is_tri),
+                                                 zmode, g_geo3d_emit_layer);
         float lbv = g_geo_flat_color ? -1.0f : (float)lumabase;
 
         if (is_tri) {
@@ -2312,6 +2398,7 @@ typedef struct {
     int32_t  zsrc[4];            /* the corners the board sorts this polygon by */
     uint32_t zmode;              /* attribute bits 10..11, carried (geo3d_sort_z) */
     uint32_t split_quad, split_cut;
+    uint32_t tie_key;            /* its corner set (geo3d_tie_face_key) */
     uint32_t matidx;             /* colorbase, when mat_ok */
     vec3_t   qn;                 /* the record's normal, Z negated */
     float    tx, ty, tw, th, lb, fl;
@@ -3019,6 +3106,7 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         f->mat_ok = mat_ok;
         f->matidx = matidx;
         if (!f->is_tri) { f->split_quad = svk[ai] ^ svk[bi] ^ svk[ci] ^ svk[di]; f->split_cut = svk[ai] ^ svk[di]; }
+        f->tie_key = geo3d_tie_face_key(svk[ai], svk[bi], has_c ? svk[ci] : svk[ai], has_d ? svk[di] : svk[ai], f->is_tri);
         f->tx = (float)texx;
         f->ty = (float)((uint32_t)texsheet * GEO3D_SHEET_H + texy);
         f->tw = textured ? (float)texw : 0.0f;
@@ -3202,7 +3290,9 @@ static inline void geo3d_decode_model_cached(int model_idx,
         float lum  = (dotl * dotp < 0.0f) ? 0.0f : fabsf(dotl);
         uint32_t at = f->has_qn ? f->qa : 0u;
         if ((((at >> 17) & 1u) == 0 && dotp < 0.0f) || ((at >> 8) & 3u) == 0) continue;   /* board_cull */
-        const float *tp = g_geo_texparam[(at >> 18) & 0x1F];
+        if (g_geo3d_tie_on && (!f->is_tri || f->has_c))
+            g_geo3d_emit_layer = geo3d_tie_layer(f->tie_key, f->zmode, g_geo3d_emit_layer);
+        const float *tp = g_geo_rs->texparam[(at >> 18) & 0x1F];
         /* Specular, the truncated luma and the texlod belong to the instance
          * (the list's mode word and LOD scale, the eye-space normal), so they
          * are worked out here per draw and never kept in the mesh. */
@@ -3220,11 +3310,11 @@ static inline void geo3d_decode_model_cached(int model_idx,
         if (luma < 0.0f) luma = 0.0f;
         if (luma > 255.0f) luma = 255.0f;
         float pl = (float)(int)luma / 255.0f;
-        float dist = g_geo_coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
+        float dist = g_geo_rs->coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
         uint32_t db;
         memcpy(&db, &dist, 4);
         g_geo3d_emit_texlod = (db >> 8) == 0 ? 0.0f
-            : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_logram[(db >> 8) & 0x7FFFu]);
+            : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_rs->logram[(db >> 8) & 0x7FFFu]);
 
         if (f->is_tri) {
             if (f->has_c) {
