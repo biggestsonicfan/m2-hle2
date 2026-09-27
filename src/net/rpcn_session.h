@@ -138,6 +138,9 @@ typedef struct {
     const char *com_id;            /* our lobby space, e.g. "M2HSNCFTR_00" */
     const char *com_id_foreign;    /* YAMP's space for the same game, or null */
     uint16_t    local_p2p_port;    /* override for tests only */
+    /* The LAN address to tell the server in place of this machine's own
+     * (rpcn_client_t.advertised_ip), as a dotted quad. Null/empty = our own. */
+    const char *local_ip;
     /* Cross-play with the PS3 port (ps3_link.h): its lobby space, its room
      * shape, and no m2hle datagrams (punches, introductions) sent to members,
      * since they are RPCS3 clients and speak RPCS3's P2P framing. */
@@ -395,21 +398,39 @@ static inline void rpcn_session_set_peer_addr(rpcn_session_t *s, rpcn_peer_t *p,
     }
 }
 
-/* A datagram came from `ip:port` and says it is from `p`. The same rule a first
- * contact always had -- only the PORT may differ from what we were told (a NAT
- * picked another), never the address -- applied per member. */
-static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port) {
+/* A datagram came from `ip:port` and says it is from `p`. A game packet's first
+ * contact keeps the rule it always had -- only the PORT may differ from what we
+ * were told (a NAT picked another), never the address -- applied per member.
+ *
+ * A PUNCH (`punch`) may also come from another address. It exists for nothing
+ * else and names its sender, so it cannot be a stray, and the address it came
+ * from is the one path known to work. The case that needs it: a player inside a
+ * container (Docker's bridge network, 172.x) tells RPCN a local address nobody
+ * on the LAN can reach, and its punches leave through the container host's NAT,
+ * from the host's address. The LAN peer used to drop every one of them as a
+ * stray, and both sat at the barrier until someone left (issue #108). A peer
+ * already heard from is never moved. */
+static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port,
+                                     bool punch) {
     if (!p) return false;
     if (p->heard) return p->ip == ip && p->port == port;
-    if (p->ip && p->ip != ip && !(p->alt_ip && p->alt_ip == ip)) return false;
+    bool elsewhere = p->ip && p->ip != ip && !(p->alt_ip && p->alt_ip == ip);
+    if (elsewhere && !punch) return false;
+    char told[32];
+    net_addr_text(told, sizeof(told), p->ip, p->port);
     bool moved = (port != p->port || ip != p->ip);
     p->heard = true;
     p->ip    = ip;
     p->port  = port;
     if (s->stage == RPCN_STAGE_HOSTING || s->stage == RPCN_STAGE_JOINING) s->stage = RPCN_STAGE_LINKED;
-    rpcn_session_note(s, moved ? "%s reached us from %s (not the advertised port); using that"
-                               : "link established with %s at %s",
-                      rpcn_peer_name(p), rpcn_peer_addr_text(p));
+    if (elsewhere)
+        rpcn_session_note(s, "%s reached us from %s, not the address the server gave (%s): "
+                             "a NAT or container between us; using where they are heard from",
+                          rpcn_peer_name(p), rpcn_peer_addr_text(p), told);
+    else
+        rpcn_session_note(s, moved ? "%s reached us from %s (not the advertised port); using that"
+                                   : "link established with %s at %s",
+                          rpcn_peer_name(p), rpcn_peer_addr_text(p));
     return true;
 }
 
@@ -614,6 +635,19 @@ static inline bool rpcn_session_start(rpcn_session_t *s, const rpcn_session_conf
 #ifndef __EMSCRIPTEN__
     s->client.udp        = p2p;
     s->client.local_port = p2p_port;
+    /* After rpcn_connect, which clears the client and starts the socket library
+     * the lookup needs. */
+    if (cfg->local_ip && cfg->local_ip[0]) {
+        s->client.advertised_ip = net_resolve_ipv4(cfg->local_ip);
+        char mine[32], told[32];
+        if (s->client.advertised_ip)
+            rpcn_session_note(s, "telling the server our LAN address is %s, not %s",
+                              net_addr_text(told, sizeof(told), s->client.advertised_ip, p2p_port),
+                              net_addr_text(mine, sizeof(mine), s->client.local_ip, p2p_port));
+        else
+            rpcn_session_note(s, "could not read \"%s\" as a LAN address; telling the server our own",
+                              cfg->local_ip);
+    }
 #endif
 
     /* The signaling socket must exist before login completes, so the keepalive
@@ -1263,7 +1297,7 @@ static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap,
 
         /* A punch names its sender, so it can introduce an address nobody told us. */
         if (got == (int)RPCN_PUNCH_SIZE && memcmp(buf, g_rpcn_punch_tag, sizeof(g_rpcn_punch_tag)) == 0) {
-            rpcn_session_hear(s, rpcn_session_peer(s, rpcn_get_u16((const uint8_t *)buf + 4)), ip, port);
+            rpcn_session_hear(s, rpcn_session_peer(s, rpcn_get_u16((const uint8_t *)buf + 4)), ip, port, true);
             continue;
         }
         /* An introduction, only from a member we already hear. */
@@ -1287,7 +1321,7 @@ static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap,
 /* A datagram from an address nobody has claimed says it is from `member_id`:
  * adopt the address if that is plausible. True if it now belongs to them. */
 static inline bool rpcn_session_claim(rpcn_session_t *s, uint16_t member_id, uint32_t ip, uint16_t port) {
-    return rpcn_session_hear(s, rpcn_session_peer(s, member_id), ip, port);
+    return rpcn_session_hear(s, rpcn_session_peer(s, member_id), ip, port, false);
 }
 
 /* ======================================================================== */

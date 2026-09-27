@@ -1977,6 +1977,26 @@ static inline const char *netplay_pin_for(const char *server, const char *finger
     return netplay_server_is_official(server) ? NETPLAY_OFFICIAL_FINGERPRINT : fingerprint;
 }
 
+/* The LAN address to give the server in place of this machine's own, for a
+ * player inside a container (issue #108): Docker's bridge address (172.x) is one
+ * nobody on the LAN can reach, so a LAN opponent -- who is told our LOCAL address
+ * when we share a public one -- needs the container host's. `--net-local-ip` or
+ * $M2HLE_NET_LOCAL_IP. A process setting, not a netplay_config_t field: the
+ * config is copied wholesale from the settings file, the window and the MCP
+ * bridge, and none of them should be able to drop it, or save it for another
+ * machine. Empty = our own. */
+static char g_netplay_local_ip[64];
+
+static inline void netplay_set_local_ip(const char *ip) {
+    snprintf(g_netplay_local_ip, sizeof(g_netplay_local_ip), "%s", ip ? ip : "");
+}
+
+static inline const char *netplay_local_ip(void) {
+    if (g_netplay_local_ip[0]) return g_netplay_local_ip;
+    const char *env = getenv("M2HLE_NET_LOCAL_IP");
+    return env ? env : "";
+}
+
 static inline void netplay_do_connect(const netplay_config_t *cfg) {
     if (!g_active_profile) { netplay_log("load a ROM set before connecting"); return; }
     if (!g_netplay.reset_board) {
@@ -2062,6 +2082,7 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     sc.com_id          = com_id;
     sc.com_id_foreign  = have_foreign ? com_id_foreign : NULL;
     sc.local_p2p_port  = g_netplay.cfg.local_p2p_port;
+    sc.local_ip        = netplay_local_ip();
     sc.ps3             = g_netplay.ps3;
     sc.log             = netplay_session_log_cb;
     sc.log_ctx         = NULL;
