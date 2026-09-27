@@ -65,6 +65,10 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
 
     if (geo3d->enabled && g_active_profile && rs->main_data && rs->polygons) {
         const game_quirks_t *q = &g_active_profile->quirks;
+        /* One snapshot for the walk and the decode: the texture points and
+         * polygon RAM it reads are the ones published with it (memory.h). */
+        const uint32_t *snap = g_geodl_snap;
+        g_geo_rs = geodl_raster_for(snap);
         if (q->geo_displaylist) {
             /* Authentic hardware path: decode the GEO display list the i960 built
              * in bufferram. Scan the snapshot captured at geo_flush (g_geodl_snap),
@@ -72,12 +76,12 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
              * list between flushes. Every m2-snake homebrew uses read_start 0x10000. */
             if (g_geodl_snap_ready)
                 geo3d_scan_displaylist(geo3d,
-                                       g_geodl_snap, BUFF_RAM_SIZE / 4, 0x10000,
+                                       snap,         BUFF_RAM_SIZE / 4, 0x10000,
                                        rs->main_data, rs->main_data_size,
                                        q->model_table_offset, q->model_table_count,
                                        bus->palette, PALETTE_SIZE);
         } else if (!(g_geo_use_list && g_geodl_snap_ready &&
-                     geo3d_scan_geo_list(geo3d, g_geodl_snap, BUFF_RAM_SIZE / 4,
+                     geo3d_scan_geo_list(geo3d, snap, BUFF_RAM_SIZE / 4,
                                          g_geodl_snap_rstart,
                                          (int16_t)mem_read16(bus, H_SYNC_BASE),
                                          (int16_t)mem_read16(bus, V_SYNC_BASE),

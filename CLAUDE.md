@@ -218,6 +218,7 @@ These addresses are STF-specific. The **patterns** repeat across the catalogue �
 
 ### Threading
 
+- **The renderer reads the GEO state published with its list, never the live copy** (`g_geo_rs`, `geodl_raster_for`). Texture RAM, polygon RAM and the material slots are applied on the emu thread at each publish and copied beside that list's snapshot. STF lays each frame's replaced texture points (eyes, mouths) from `0x805000` on, a different set each frame, so a render still drawing list N from live RAM took list N+1's points.
 - **Unlock the emu mutex BEFORE sleeping.** Sleeping inside the critical section freezes the UI.
 - **Double-buffered CPU snapshot** (`cpu_snapshot` + `cpu_prev_snapshot`); UI always reads the current snapshot.
 - **Sleep granularity**: POSIX `usleep()` ≈ 1 µs, but Windows `Sleep()` is **~15.6 ms**, not 1 ms,

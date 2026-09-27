@@ -2095,7 +2095,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_lod  = cm->geo_lod;
                 if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
                     uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
-                    g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
+                    g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
                     g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
                 }
                 geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,

@@ -1615,7 +1615,7 @@ static const uint8_t *g_geo3d_palram      = NULL;
 static size_t         g_geo3d_palram_size = 0;
 
 static inline bool geo3d_tex_word(const uint8_t *rom, size_t rom_size, uint32_t addr, uint16_t *out) {
-    if (addr & 0x800000u) { *out = g_geo_texram_words[addr & 0xFFFFu]; return true; }
+    if (addr & 0x800000u) { *out = g_geo_rs->texram[addr & 0xFFFFu]; return true; }
     size_t b = (size_t)addr * 2u;
     if (!rom || b + 2 > rom_size) return false;
     *out = (uint16_t)(rom[b] | (rom[b + 1] << 8));
@@ -2182,7 +2182,7 @@ static inline void geo3d_decode_model(int model_idx,
              * (bits 8..9) is never drawn. */
             uint32_t at = (fi < n_qt) ? qa[fi] : 0u;
             board_cull = (((at >> 17) & 1u) == 0 && dotp < 0.0f) || ((at >> 8) & 3u) == 0;
-            const float *tp = g_geo_texparam[(at >> 18) & 0x1F];
+            const float *tp = g_geo_rs->texparam[(at >> 18) & 0x1F];
             float spec = 0.0f;
             if (g_geo3d_mode & 1u) {
                 /* Board z is this space's -z, for the normal and the light alike. */
@@ -2202,11 +2202,11 @@ static inline void geo3d_decode_model(int model_idx,
              * (bits 23-30) as the integer part, the next 15 bits' log from log
              * RAM as the fraction. A zero distance gives texlod 0 (the oracle's
              * model2_v.cpp; stock MAME would pick the coarsest level). */
-            float dist = g_geo_coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
+            float dist = g_geo_rs->coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
             uint32_t db;
             memcpy(&db, &dist, 4);
             g_geo3d_emit_texlod = (db >> 8) == 0 ? 0.0f
-                : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_logram[(db >> 8) & 0x7FFFu]);
+                : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_rs->logram[(db >> 8) & 0x7FFFu]);
         } else if (g_light_enable && has_C) {
             float e1x=B.x-A.x, e1y=B.y-A.y, e1z=B.z-A.z;
             float e2x=C.x-A.x, e2y=C.y-A.y, e2z=C.z-A.z;
@@ -3202,7 +3202,7 @@ static inline void geo3d_decode_model_cached(int model_idx,
         float lum  = (dotl * dotp < 0.0f) ? 0.0f : fabsf(dotl);
         uint32_t at = f->has_qn ? f->qa : 0u;
         if ((((at >> 17) & 1u) == 0 && dotp < 0.0f) || ((at >> 8) & 3u) == 0) continue;   /* board_cull */
-        const float *tp = g_geo_texparam[(at >> 18) & 0x1F];
+        const float *tp = g_geo_rs->texparam[(at >> 18) & 0x1F];
         /* Specular, the truncated luma and the texlod belong to the instance
          * (the list's mode word and LOD scale, the eye-space normal), so they
          * are worked out here per draw and never kept in the mesh. */
@@ -3220,11 +3220,11 @@ static inline void geo3d_decode_model_cached(int model_idx,
         if (luma < 0.0f) luma = 0.0f;
         if (luma > 255.0f) luma = 255.0f;
         float pl = (float)(int)luma / 255.0f;
-        float dist = g_geo_coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
+        float dist = g_geo_rs->coef[at >> 27] * fabsf(dotp) * g_geo3d_lod;
         uint32_t db;
         memcpy(&db, &dist, 4);
         g_geo3d_emit_texlod = (db >> 8) == 0 ? 0.0f
-            : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_logram[(db >> 8) & 0x7FFFu]);
+            : (float)((int)((db >> 16) & 0x7F80u) - 0x3F80 + (int)g_geo_rs->logram[(db >> 8) & 0x7FFFu]);
 
         if (f->is_tri) {
             if (f->has_c) {
