@@ -45,8 +45,9 @@ git submodule update --init vendor/noclip
 
 No `npm install`: nothing here has a dependency, except `grade-carpet.mjs`, which
 drives a headless browser through `puppeteer-core` found outside this tree
-(`$M2_PUPPETEER`, the explorer's, or `../noclip`'s). Node 18 or newer, because the
-explorer's zip reader goes through `DecompressionStream`.
+(`$M2_PUPPETEER`, a sibling `stf-tools`'s, the explorer's, or `../noclip`'s).
+Node 18 or newer, because the explorer's zip reader goes through
+`DecompressionStream`.
 
 You supply the ROM set. Nothing here carries one and `.gitignore` refuses
 `*.zip`. Drop `sfight.zip` in the repository root or in `roms/` (add
@@ -484,10 +485,11 @@ node tools/grade-carpet.mjs [--out DIR]             # the explorer at each (~25 
 ```
 
 - **The explorer:** served from `$M2_NOCLIP` into headless Edge (SwiftShader)
-  through `puppeteer-core`, resolved from `$M2_PUPPETEER`, the explorer or
-  `../noclip`; `$M2_BROWSER` names another Chromium. The stage clock is held
-  on MAME's `frame_counter` and the flight on the carpet's age (below), the
-  carpet is ridden so the scene is in the board's frame, and the camera stands
+  through `puppeteer-core`, resolved from `$M2_PUPPETEER`, `stf-tools`
+  (`$M2_STF_TOOLS` or `../stf-tools`), the explorer or `../noclip`;
+  `$M2_BROWSER` names another Chromium. The stage clock is held on MAME's
+  `frame_counter` and the flight on the carpet's age (below), the carpet is
+  ridden so the scene is in the board's frame, and the camera stands
   at the board's eye, pitch and yaw.
 - **The projection is the board's:** `camera_init` sends the GEO focal
   lengths of zoom (camera `+0x13C`) × `focus_dist` (`0x501084`, 280), and the
