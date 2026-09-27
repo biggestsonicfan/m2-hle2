@@ -96,7 +96,7 @@ EM_JS(int, m2ws_open, (const char *url_ptr, int datagram), {
         if (!s.error) {
             s.error = e.reason ? 'the gateway: ' + e.reason
                     : s.opened ? 'the connection to the gateway closed'
-                    : 'the gateway (' + url + ') could not be reached';
+                    : 'the gateway (' + url + ') could not be reached, or does not serve that server';
         }
     };
     s.ws.onerror = () => {};
