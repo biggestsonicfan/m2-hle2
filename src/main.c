@@ -1090,15 +1090,6 @@ static void frame(void) {
     /* Draw the game letterboxed into the swapchain, then ImGui on top.
      * Layer order: back-back colour → background tiles → (3D, Phase 9) → FG/HUD. */
     {
-        { static int _cs=0; if ((++_cs % 30)==0) {
-            for (int i=0;i<state.geo3d.captured_count;i++){ const captured_model_t *cm=&state.geo3d.captured[i];
-                if (cm->model_idx==519 || cm->model_idx==2833)
-                    LOG_INFO("CAGE m=%d bone=%d clip=%d mat=%d T=(%.2f,%.2f,%.2f) R0=(%.2f,%.2f,%.2f) R1=(%.2f,%.2f,%.2f) R2=(%.2f,%.2f,%.2f)",
-                        cm->model_idx, cm->from_bone, cm->has_clip_win, cm->has_matrix,
-                        cm->matrix[3],cm->matrix[7],cm->matrix[11],
-                        cm->matrix[0],cm->matrix[1],cm->matrix[2],
-                        cm->matrix[4],cm->matrix[5],cm->matrix[6],
-                        cm->matrix[8],cm->matrix[9],cm->matrix[10]); } } }
         /* Back colour → background tiles → 3D scene → foreground/HUD — unless
          * the A/V pass above has already drawn this frame, in which case the
          * window shows that target rather than redrawing it. */
