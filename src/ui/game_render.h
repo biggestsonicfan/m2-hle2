@@ -2086,6 +2086,14 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 const captured_model_t *cm = &geo->captured[k];
                 if (geo->isolate_index >= 0 && k != geo->isolate_index) continue;
                 if (geo->filter_enabled && (k < geo->filter_min || k > geo->filter_max)) continue;
+                /* A draw laid over the one before it with the same matrix wins
+                 * the faces the two share, as the later polygon does on the
+                 * board (geo3d_tie_layer). A run starts afresh, and so does
+                 * a run decoded again below. */
+                if (k == i || memcmp(cm->matrix, geo->captured[k - 1].matrix, 12 * sizeof(float)) != 0)
+                    geo3d_tie_reset();
+                geo3d_tie_draw((uint32_t)k + 1u);
+                g_geo3d_tie_on = geo->use_matrix;
                 g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
                 g_geo3d_obj_tpa = cm->tpa;
                 g_geo3d_obj_tha = cm->tha;
@@ -2105,6 +2113,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                                           cm->color[0], cm->color[1], cm->color[2]);
                 g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
                 g_geo3d_board_luma = 0;
+                g_geo3d_tie_on = 0;
                 g_geo3d_obj_mesh = NULL;
             }
             /* The run filled the shared buffer after earlier runs: draw those and
