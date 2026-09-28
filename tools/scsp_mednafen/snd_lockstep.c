@@ -240,7 +240,7 @@ int main(int argc, char **argv) {
         if (smp % frames_per_mark == 0) sndcap_frame(mark++, 0);
         while (next < nmidi && (midi[next].t >> 8) <= smp) {
             if (g_sndcap.active) sndcap_put(1, 0x9C0000, midi[next].b | 0xFF0000u, 0);
-            if (mode != MDFN) scsp_midi_in(&g_sound.scsp, midi[next].b);
+            if (mode != MDFN) sound_uart_write(&g_sound, midi[next].b, midi[next].t);
             if (mode != SCSP_ONLY && !mdfn_scsp_midi_in(midi[next].b)) midi_dropped++;
             next++;
         }

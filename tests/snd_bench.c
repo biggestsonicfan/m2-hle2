@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     size_t next = 0;
     double t0 = now_s();
     for (uint64_t smp = 0; smp < total; smp++) {
-        while (next < nmidi && (midi[next].t >> 8) <= smp) { scsp_midi_in(&g_sound.scsp, midi[next].b); next++; }
+        while (next < nmidi && (midi[next].t >> 8) <= smp) { sound_uart_write(&g_sound, midi[next].b, midi[next].t); next++; }
         uint32_t w0 = g_sound.out_w;
         sound_run(1);
         if (g_sound.out_w != w0) h_out = fnv(h_out, &g_sound.out[w0 * 2], 4);

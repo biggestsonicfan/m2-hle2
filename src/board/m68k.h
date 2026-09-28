@@ -61,6 +61,10 @@ typedef struct {
      * anything a read has side effects on. An access that crosses a page end
      * always goes to read_cb. Writes always go to write_cb. */
     const uint8_t *rmap[256];
+    /* Wait states, by 64 KB page: clock periods every bus cycle (a byte or a
+     * word; a long is two) to the page costs beyond the instruction's table
+     * time. MAME model2.cpp delays every sound RAM and SCSP access by one. */
+    uint8_t        wmap[256];
 } m68k_state_t;
 
 /* ---- Helpers ------------------------------------------------------------- */

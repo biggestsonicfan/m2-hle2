@@ -703,6 +703,40 @@ different slot; audio envelope correlation 0.992 and loudness within 1% in every
 notes of the first five seconds and held 25-32 voices keyed where MAME holds
 5-16.
 
+**Against current MAME (2026-09-28, claude_mame at `1d6dbfafe53`, a fresh 90 s
+capture on the Linux build):** the MAME above was from before its 2026-09-23
+merge, which gave the sound 68000 a wait state on every sound RAM and SCSP
+access, put the i960's UART on a real serial line into the SCSP, and latched
+the slot monitor. Against the new MAME the old board graded at 22.0% of notes
+within 30 ms, 17.4 ms median timing error, envelope 0.791; the board now
+follows it (CLAUDE.md, "Sound board": wait states, a 48-clock exception, the
+interrupt taken straight after RTE, operand-dependent DIVU/DIVS, the serial line,
+the latch, a sampling lead of 4):
+
+| | notes within 30 ms | timing error, median / p95 | events identical | envelope | timer A / B period (MAME 505.437 / 50.0142) |
+|---|---|---|---|---|---|
+| before | 22.0% | 17.4 / 28.7 ms | to 31.8 s | 0.791 | 505.195 / 49.881 |
+| wait states alone | 70.7% | 3.8 / 9.3 ms | to 12.9 s | 0.969 | 505.429 / 50.023 |
+| everything | 72.7% | 1.5 / 3.0 ms | to 31.7 s | 0.987 | 505.375 / 50.0146 |
+
+The MIDI interrupts now land within ±50 clocks of MAME's, byte for byte, and the
+timer handlers' instruction sequences take the same clocks (0-8 apart over
+24-52 instructions: `m68k_timing_compare.py`, below). The notes figure is
+mostly slot agreement (see the next section) and the first different slot is
+an ordering race at 31.7 s between a voice's release ending and the sequencer's
+next note; what decides it is the shape of the interrupt latency, which MAME
+samples at each instruction's last prefetch and this board 4 clocks before the
+end (CLAUDE.md has the measurement).
+
+`snd_timing.py <prefix> [seconds]` reads the clockwork off either capture: each
+timer's reload and its period fire to fire, the interrupt-to-reload clocks, and
+the i960 byte to MIDI interrupt delay. `m68k-trace.lua` + `m68k_timing_compare.py`
+hold the 68000's instruction timing to MAME's cycle-level core: the Lua traces
+the sound CPU's instruction order between two frames and stamps every program
+ROM read with the clock (the debugger's `{tracelog}` action writes nothing under
+`-debugger none`), snd_replay writes the same for this board with `$SND_TRACE`,
+and the script pairs identical instruction sequences between two anchor PCs.
+
 ### The chip against a second chip (Mednafen's)
 
 MAME is the oracle for everything above, so a chip bug that MAME shares goes unnoticed.
@@ -765,11 +799,12 @@ same music is a controlled repeat of the first, and it grades worse.
   step that loads the instruction register, a different number of cycles before
   the end of every instruction. MAME models that step (`M68000` is the
   microcode-level core in m68000.cpp, not Musashi), so there is a right answer
-  and a constant is not it: sweeping it with `-DM2HLE_SOUND_IPL_LEAD=N` gives
+  and a constant is not it: sweeping it with `-DM2HLE_SOUND_IPL_LEAD=N` gave
   timer A -15.2 / -8.0 / -8.1 / +9.6 / +12.4 clocks at N = 2 / 6 / 10 / 14 / 18
-  and timer B -7.3 / -3.6 / +0.1 / +4.7 / +8.3. Nothing matches both, and the
-  present 10 is the best of them end to end -- 12 and 14 fix timer A and make the
-  note drift three to five times worse, because timer B fires ten times as often.
+  and timer B -7.3 / -3.6 / +0.1 / +4.7 / +8.3. *(2026-09-28: that fit was
+  covering the 68000's missing wait states and exception clocks; with those in,
+  the lead is 4, the chip's own, and both timers sit within 8 ppm of current
+  MAME. What is left is the shape, above.)*
 - **Voice allocation diverges for good.** The two boards put every note on the
   same slot for the first 60 s; then 59% of them, 7% by 90 s, and none at all
   from 120 s on, off one timer race at 12.8 s (which is where

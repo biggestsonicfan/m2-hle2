@@ -26,6 +26,18 @@ const game_profile_t *g_active_profile = &sfight_profile;
 
 typedef struct { uint64_t t; uint8_t b; } midi_t;
 
+/* $SND_TRACE=<file>: every 68000 instruction between $SND_TRACE_FROM and
+ * $SND_TRACE_TO seconds as records of [u32 pc][u32 clock low][u32 clock high],
+ * for tools/mame/m68k_timing_compare.py against MAME's trace. */
+static FILE    *s_trace;
+static uint64_t s_trace_from, s_trace_to;
+static void trace_step(uint32_t pc, uint64_t cycles, void *ud) {
+    (void)ud;
+    if (cycles < s_trace_from || cycles >= s_trace_to) return;
+    uint32_t r[3] = { pc, (uint32_t)cycles, (uint32_t)(cycles >> 32) };
+    fwrite(r, 4, 3, s_trace);
+}
+
 static void wav_header(FILE *f, uint32_t frames) {
     uint32_t data = frames * 4, riff = 36 + data, fmt = 16, rate = SOUND_RATE, bps = SOUND_RATE * 4;
     uint16_t pcm = 1, ch = 2, align = 4, bits = 16;
@@ -84,6 +96,12 @@ int main(int argc, char **argv) {
     sound_reset();
     sound_load_rom(rs.audiocpu, (uint32_t)rs.audiocpu_size);
     sound_load_samples(rs.samples, (uint32_t)rs.samples_size);
+    if (getenv("SND_TRACE")) {
+        s_trace = fopen(getenv("SND_TRACE"), "wb");
+        s_trace_from = (uint64_t)(atof(getenv("SND_TRACE_FROM") ? getenv("SND_TRACE_FROM") : "0") * 11289600.0);
+        s_trace_to   = (uint64_t)(atof(getenv("SND_TRACE_TO")   ? getenv("SND_TRACE_TO")   : "1e9") * 11289600.0);
+        if (s_trace) g_sound_step_trace = trace_step;
+    }
 
     const uint32_t frames_per_mark = SOUND_RATE * 1000u / 57524u;   /* MAME's 57.524 Hz frames */
     uint32_t nmarks_cap = (uint32_t)(total / frames_per_mark) + 4;
@@ -103,10 +121,11 @@ int main(int argc, char **argv) {
     int16_t block[4096 * 2];
     uint32_t nblock = 0;
     for (uint64_t smp = 0; smp < total; smp++) {
-        /* bytes that arrived during this sample reach the SCSP before it runs */
+        /* bytes the i960 wrote during this sample go down the UART's line at
+         * the clock period it wrote them */
         while (next < nmidi && (midi[next].t >> 8) <= smp) {
             sndcap_put(1, 0x9C0000, midi[next].b | 0xFF0000u, 0);
-            scsp_midi_in(&g_sound.scsp, midi[next].b);
+            sound_uart_write(&g_sound, midi[next].b, midi[next].t);
             next++;
         }
         if (smp % frames_per_mark == 0) sndcap_frame(mark++, 0);
@@ -138,6 +157,7 @@ int main(int argc, char **argv) {
     printf("replayed: %u records, %u marks; 68000 pc 0x%06X; irqs L1 %llu L2 %llu L3 %llu; midi fed %zu\n",
            n, nm, g_sound.m68k.cpu.pc, (unsigned long long)g_sound.irqs[1],
            (unsigned long long)g_sound.irqs[2], (unsigned long long)g_sound.irqs[3], next);
+    if (s_trace) fclose(s_trace);
     romset_free(&rs);
     return 0;
 }

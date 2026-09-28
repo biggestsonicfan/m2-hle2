@@ -166,23 +166,32 @@ int main(void) {
         sound_run(64);
         CHECK(g_sound.out_total == t0 + 64, "attached again: the board runs");
 
-        /* Backpressure (sound_make_midi_room). This 68000 never reads MIDI, so
-         * the ring fills: 31 bytes fit, and the 32nd runs the board early -- at
-         * most a slice -- and is then dropped and counted. The samples run early
-         * belong to the slice and are owed back, so the clock comes out exact. */
+        /* Backpressure (sound_uart_make_room). A writer that is not the game
+         * fills the UART's 32-deep queue without running the board; the 33rd
+         * byte runs it early -- at most a slice -- until the line has carried
+         * one out, and queues. The samples run early belong to the slice and
+         * are owed back, so the clock comes out exact. This 68000 never reads
+         * MIDI, so once the slice has carried all 33 down the line (320 us
+         * each), the SCSP's 31-byte ring is full and it has dropped two. */
         sound_reset();
         t0 = g_sound.out_total;
-        for (int i = 0; i < 31; i++) mem_write8(&bus, MIDI_BASE, 0x10);
-        CHECK(scsp_midi_room(&g_sound.scsp) == 0 && g_sound.out_total == t0,
-              "backpressure: 31 bytes fill the MIDI ring without running the board");
+        for (int i = 0; i < 32; i++) mem_write8(&bus, MIDI_BASE, 0x10);
+        CHECK(g_sound.uart.count == 32 && g_sound.out_total == t0,
+              "backpressure: 32 bytes fill the UART's queue without running the board");
+        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x00, "backpressure: TxRDY is down with the holding register full");
         mem_write8(&bus, MIDI_BASE, 0x11);
-        CHECK(g_sound.scsp.mi_drops == 1, "backpressure: a byte the driver never takes is dropped and counted");
+        CHECK(g_sound.uart.drops == 0 && g_sound.uart.count == 32,
+              "backpressure: the 33rd byte waited for the line and queued");
         CHECK(g_sound.ahead > 0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
               g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
               "backpressure: the board ran early, by no more than a slice");
         sound_run_slice(60);
         CHECK(g_sound.ahead == 0 && g_sound.out_total == t0 + 735,
               "backpressure: the slice owes the early samples back (735 in all)");
+        CHECK(g_sound.uart.count == 0 && g_sound.uart.sent == 33 && scsp_midi_room(&g_sound.scsp) == 0 &&
+              g_sound.scsp.mi_drops == 2,
+              "backpressure: the line carried all 33 in the slice; the ring took 31 and dropped two");
+        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "backpressure: TxRDY and TxEMPTY are up again");
         sound_run_slice(60);
         CHECK(g_sound.out_total == t0 + 1470, "backpressure: the next slice is a whole one");
         sound_reset();

@@ -17,7 +17,9 @@
  * above 0xA00000.
  *
  * The i960 talks to the board through a UART (0x9C0000 data, 0x9C0004
- * control/status) whose bytes arrive in the SCSP's MIDI input buffer.
+ * control/status) that sends each byte down a MIDI-rate serial line to the
+ * SCSP's own receiver, which puts it in its MIDI input buffer 9.5 bit times
+ * later (sound_uart_t, below).
  *
  * Time: the board runs in samples. Each output sample the 68000 gets 256 clock
  * periods (11.2896 MHz / 44.1 kHz, counted per bus access in m68k_exec.h), then
@@ -47,12 +49,60 @@
 #define SOUND_RATE                44100u
 #define SOUND_CYCLES_PER_SAMPLE   256
 #ifndef SOUND_IPL_LEAD
-#define SOUND_IPL_LEAD            10        /* see sound_run */
+#define SOUND_IPL_LEAD            4         /* see sound_run */
 #endif
 #define SOUND_OUT_FRAMES          16384u   /* host output ring, stereo frames (power of 2) */
 #define SOUND_CODE_LOG            512u     /* i960 commands kept (power of 2) */
-#define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_make_midi_room) */
+#define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_uart_make_room) */
 #define SOUND_AHEAD_MAX           735      /* at most a frame of samples run ahead of it (44100 / 60) */
+
+/* ---- the sound UART and its serial line ------------------------------------
+ *
+ * The i960's UART is a uPD71051 (an i8251) clocked at 16 x 31250 baud, and its
+ * TxD runs into the SCSP's serial receiver (MAME model2.cpp model2_scsp: the
+ * uart's txd_handler is scsp_device::midi_in). A byte the i960 writes does not
+ * appear in the SCSP's MIDI buffer: it goes out as a start bit, eight data
+ * bits and a stop bit, 32 us each, and the SCSP takes it when it samples the
+ * stop bit. Measured off MAME's serial logging (diserial LOG_TX / LOG_RX):
+ *   - the UART's bit clock is free-running from power-on, and its ticks fall
+ *     at 18 us mod 32 us of board time (the i8251 counts its x16 clock's
+ *     falling edges from reset);
+ *   - a byte written to an idle UART starts at the next tick after the write;
+ *   - the UART holds ONE more byte, which starts the tick the line frees (10
+ *     bits after the previous start), and TxRDY -- the i960's interrupt -- is
+ *     up whenever that holding register is empty;
+ *   - the SCSP's receiver samples each bit 1.5 bit times after its edge, so
+ *     the byte lands 9.5 bit times after the start bit: 304 us.
+ * So a three-byte command takes about a millisecond to arrive, and in the
+ * MAME capture its bytes are 320 us apart, because the i960 sends the third
+ * on the TxRDY interrupt the second byte's start raises. Before this the byte
+ * went straight into the SCSP's buffer, 4 us after the i960 wrote it, and
+ * commands landed ~1 ms early against MAME.
+ *
+ * Time on the line is kept in units of 1/625 of a 68000 clock period, in
+ * which a microsecond is exactly 7056: integers only, so two builds agree.
+ * The bytes wait in a 32-deep queue rather than the chip's one holding
+ * register: the run loop only offers the i960 its interrupt when TxRDY is up
+ * (emu_thread.h emu_sound_ready), so the game never sees more than the chip
+ * holds, and any other writer's burst goes out back to back instead of being
+ * overwritten. */
+#define SOUND_UART_FIFO   32u
+#define SOUND_SER_UNIT    625u                     /* units per 68000 clock period */
+#define SOUND_SER_US      7056u                    /* 1 us = 11.2896 clock periods */
+#define SOUND_SER_BIT     (32u * SOUND_SER_US)     /* 31250 baud */
+#define SOUND_SER_PHASE   (18u * SOUND_SER_US)     /* the bit ticks, mod SOUND_SER_BIT */
+#define SOUND_SER_FRAME   (10u * SOUND_SER_BIT)    /* start, eight data bits, stop */
+#define SOUND_SER_RX      (19u * SOUND_SER_BIT / 2u)   /* start bit to the SCSP's stop-bit sample */
+
+typedef struct {
+    uint8_t  byte[SOUND_UART_FIFO];
+    uint64_t wrote[SOUND_UART_FIFO];  /* units: when the i960 wrote it */
+    uint8_t  r, w, count;             /* [r] is the byte on the line */
+    uint64_t start;                   /* units: the byte on the line began its start bit */
+    uint64_t deliver;                 /* clock period the SCSP takes it, 0 = taken */
+    uint64_t sent;                    /* bytes the SCSP has taken */
+    uint64_t drops;                   /* bytes written to a full queue */
+} sound_uart_t;
 
 typedef struct {
     m68k_state_t   m68k;
@@ -65,9 +115,9 @@ typedef struct {
     uint32_t       samples_size;
     uint32_t       bank4, bank5;        /* offsets into samples for 0xA00000 / 0xE00000 */
     int32_t        budget;              /* 68000 clock periods owed to the current sample */
-    int            mask_seen;           /* the interrupt mask the last instruction ran under */
     uint32_t       slice_frac;          /* sound_run_slice's remainder: part of the board, reset with it */
     int32_t        ahead;               /* samples run inside the slice, owed back by sound_run_slice */
+    sound_uart_t   uart;                /* the i960's UART and the serial line to the SCSP */
     uint64_t       irqs[8];             /* interrupts taken, by level */
 
     /* host output: emu thread writes, audio thread reads */
@@ -409,6 +459,13 @@ static inline uint32_t sound_m68k_peek(sound_state_t *ss, uint32_t addr, int sz)
 static inline void sound_map_pages(sound_state_t *ss) {
     const uint8_t **m = ss->m68k.rmap;
     memset((void *)m, 0, sizeof ss->m68k.rmap);
+    /* MAME model2.cpp model2_snd: one wait state on every sound RAM and SCSP
+     * access ("the same waitstate weights as Saturn"). Measured in its timer
+     * handlers: the interrupt-to-reload latency is 166 / 200 clocks against
+     * 128 / 160 without them. */
+    memset(ss->m68k.wmap, 0, sizeof ss->m68k.wmap);
+    for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++) ss->m68k.wmap[pg] = 1;
+    ss->m68k.wmap[M68K_SCSP_BASE >> 16] = 1;
     for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++) m[pg] = ss->ram + (pg << 16);
     if (ss->rom_loaded)
         for (uint32_t pg = 0; pg < M68K_ROM_SIZE >> 16; pg++) m[(M68K_ROM_BASE >> 16) + pg] = ss->rom + (pg << 16);
@@ -454,6 +511,58 @@ static void sound_m68k_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
     /* ROM and unmapped space ignore writes */
 }
 
+/* ---- the serial line (see sound_uart_t) --------------------------------------- */
+
+/* the first bit tick strictly after u (units) */
+static inline uint64_t sound_ser_tick_after(uint64_t u) {
+    if (u < SOUND_SER_PHASE) return SOUND_SER_PHASE;
+    return SOUND_SER_PHASE + ((u - SOUND_SER_PHASE) / SOUND_SER_BIT + 1u) * SOUND_SER_BIT;
+}
+
+/* The byte at the head of the queue goes onto the line: at free_at (units,
+ * the tick the previous byte's stop bit ended on) if it was waiting for the
+ * line, else at the first tick after its write. */
+static inline void sound_uart_begin(sound_uart_t *u, uint64_t free_at) {
+    uint64_t w = u->wrote[u->r];
+    u->start   = w < free_at ? free_at : sound_ser_tick_after(w);
+    u->deliver = (u->start + SOUND_SER_RX + SOUND_SER_UNIT - 1u) / SOUND_SER_UNIT;
+}
+
+/* Bring the line up to the 68000's clock: hand the SCSP the byte whose stop
+ * bit it has sampled, and start the next byte where the line freed. */
+static inline void sound_uart_service(sound_state_t *ss, uint64_t now) {
+    sound_uart_t *u = &ss->uart;
+    while (u->count) {
+        if (u->deliver) {
+            if (now < u->deliver) return;
+            scsp_midi_in(&ss->scsp, u->byte[u->r]);
+            u->deliver = 0;
+            u->sent++;
+        }
+        uint64_t end = u->start + SOUND_SER_FRAME;
+        if (now * SOUND_SER_UNIT < end) return;          /* the stop bit is still going out */
+        u->r = (uint8_t)((u->r + 1u) & (SOUND_UART_FIFO - 1u));
+        u->count--;
+        if (u->count) sound_uart_begin(u, end);
+    }
+}
+
+/* A byte written to the UART at clock period `clock`. */
+static inline void sound_uart_write(sound_state_t *ss, uint8_t b, uint64_t clock) {
+    sound_uart_t *u = &ss->uart;
+    sound_uart_service(ss, clock);
+    if (u->count == SOUND_UART_FIFO) { u->drops++; return; }
+    u->byte[u->w]  = b;
+    u->wrote[u->w] = clock * SOUND_SER_UNIT;
+    u->w = (uint8_t)((u->w + 1u) & (SOUND_UART_FIFO - 1u));
+    if (u->count++ == 0) sound_uart_begin(u, 0);
+}
+
+/* TxRDY: the holding register is empty (the chip holds one byte behind the one
+ * on the line). TxEMPTY: nothing on the line either. */
+static inline bool sound_uart_txrdy(const sound_state_t *ss)   { return ss->uart.count < 2; }
+static inline bool sound_uart_txempty(const sound_state_t *ss) { return ss->uart.count == 0; }
+
 /* ---- i960 side: the sound UART ---------------------------------------------- */
 
 static inline void sound_code_put(uint32_t code) {
@@ -477,13 +586,14 @@ static inline void sound_code_byte(uint8_t b) {
 static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     (void)r; (void)size;
     g_sound.read_count++;
-    /* i8251 status at +4: transmitter ready and empty — the byte went straight
-     * into the SCSP's MIDI buffer (MAME: model2_serial_w). */
-    return (addr - MIDI_BASE) == 4 ? 0x05u : 0u;
+    /* i8251 status at +4: TxRDY (bit 0) and TxEMPTY (bit 2) as the line stands */
+    if ((addr - MIDI_BASE) != 4) return 0u;
+    sound_uart_service(&g_sound, g_sound.m68k.cpu.cycles);
+    return (sound_uart_txrdy(&g_sound) ? 0x01u : 0u) | (sound_uart_txempty(&g_sound) ? 0x04u : 0u);
 }
 
 static void sound_run(uint32_t n);                      /* below */
-static inline bool sound_make_midi_room(uint32_t need);  /* below; the write callback needs it */
+static inline bool sound_uart_make_room(bool for_game);  /* below; the write callback needs it */
 
 static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     (void)r; (void)size;
@@ -497,12 +607,12 @@ static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, in
     }
     if (g_sound.log_writes) LOG_INFO("SOUND write @ 0x%08X sz=%d val=0x%08X", addr, size, val);
     sound_code_byte((uint8_t)val);
-    /* The run loop only hands the i960 a TxRDY interrupt when the ring has room
-     * (emu_sound_ready), so a byte the game sends always fits. This is for any
-     * other writer: make room the same accounted way, and if the driver truly
-     * will not take it, scsp_midi_in drops the byte and counts it. */
-    sound_make_midi_room(1);
-    scsp_midi_in(&g_sound.scsp, (uint8_t)val);
+    /* The run loop only hands the i960 a TxRDY interrupt when the UART can take
+     * a byte (emu_sound_ready), so a byte the game sends always fits. This is
+     * for any other writer: make room in the queue the same accounted way, and
+     * if the line truly cannot take it, sound_uart_write drops it and counts it. */
+    sound_uart_make_room(false);
+    sound_uart_write(&g_sound, (uint8_t)val, g_sound.m68k.cpu.cycles);
 }
 
 /* ---- lifecycle ------------------------------------------------------------------ */
@@ -531,9 +641,9 @@ static inline void sound_reset(void) {
     memset(&g_sound.m68k, 0, sizeof g_sound.m68k);
     scsp_reset(&g_sound.scsp, g_sound.ram, SOUND_RAM_SIZE, &g_sound.m68k.cpu.cycles);
     g_sound.budget = 0;
-    g_sound.mask_seen = 7;
     g_sound.slice_frac = 0;
     g_sound.ahead = 0;
+    memset(&g_sound.uart, 0, sizeof g_sound.uart);
     memset(g_sound.irqs, 0, sizeof g_sound.irqs);
     g_sound.write_count = g_sound.read_count = 0;
     g_sound.midi_log_n = 0;
@@ -644,6 +754,12 @@ static inline void sound_out_push(int16_t l, int16_t r) {
     g_sound.out_w = (w + 1) & (SOUND_OUT_FRAMES - 1);
 }
 
+/* A per-instruction tap for the graders: called with the 68000's PC and its
+ * clock before every instruction (tests/snd_replay.c $SND_TRACE writes them
+ * out, to hold the instruction timing against a MAME trace). NULL when off. */
+static void (*g_sound_step_trace)(uint32_t pc, uint64_t cycles, void *ud);
+static void  *g_sound_step_trace_ud;
+
 /* Run the board for n output samples. */
 static void sound_run(uint32_t n) {
     if (!g_sound.rom_loaded || g_sound.detached) return;
@@ -654,30 +770,38 @@ static void sound_run(uint32_t n) {
         while (g_sound.budget > 0) {
             if (m->cpu.halted) { g_sound.budget = 0; break; }
             uint64_t c0 = m->cpu.cycles;
-            /* The 68000 compares its interrupt lines with the mask while an
-             * instruction runs, SOUND_IPL_LEAD periods before it ends: a timer
-             * that expires later than that, or a mask lowered by the
-             * instruction itself (RTE, MOVE to SR), is only acted on after the
-             * next one. Both are measurable in the driver's timer periods
-             * (MAME: 49.884 samples for timer B, 505.30 for timer A). */
-            scsp_timers(&g_sound.scsp, c0 >= SOUND_IPL_LEAD ? c0 - SOUND_IPL_LEAD : 0);
+            /* The 68000 samples its interrupt lines while an instruction
+             * runs, SOUND_IPL_LEAD periods before it ends (MAME's m68000 loads
+             * the pending interrupt where the microcode moves IR to IRD, with
+             * the instruction's last prefetch): a timer that expires later
+             * than that, or a byte the serial line lands later than that, is
+             * only acted on after the next instruction. The mask it compares
+             * against is the one the instruction leaves: after an RTE that
+             * lowers it, a pending interrupt is taken before the next
+             * instruction (MAME's trace shows timer C's handler entered
+             * straight from timer B's RTE; a rule that let one instruction run
+             * first put the two handlers 70 clocks further apart, every
+             * period). Measurable in the driver's timer periods, fire to fire:
+             * MAME has 50.014 samples for timer B and 505.437 for timer A over
+             * 90 s of attract (tools/README.md, "The sound board"). */
+            uint64_t sampled = c0 >= SOUND_IPL_LEAD ? c0 - SOUND_IPL_LEAD : 0;
+            scsp_timers(&g_sound.scsp, sampled);
+            if (g_sound.uart.count) sound_uart_service(&g_sound, sampled);
             int lvl = scsp_irq_level(&g_sound.scsp);
             int ipl = m68k_ipl(&m->cpu);
-            if (lvl > ipl && lvl > g_sound.mask_seen && m68k_interrupt(m, lvl)) {
+            if (lvl > ipl && m68k_interrupt(m, lvl)) {
                 g_sound.irqs[lvl]++;
                 if (g_sndcap.active) sndcap_put(4, (uint32_t)lvl, 0, m->cpu.pc);
             } else if (m->cpu.stopped) {
-                g_sound.mask_seen = ipl;
                 m->cpu.cycles += (uint64_t)g_sound.budget;   /* time passes while it waits */
                 g_sound.budget = 0;
                 break;
             } else {
-                g_sound.mask_seen = ipl;
+                if (g_sound_step_trace) g_sound_step_trace(m->cpu.pc, c0, g_sound_step_trace_ud);
                 m68k_step(m);
                 g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
                 continue;
             }
-            g_sound.mask_seen = m68k_ipl(&m->cpu);
             g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
         }
         int16_t l, r;
@@ -688,30 +812,33 @@ static void sound_run(uint32_t n) {
 
 /* ---- the UART's backpressure ----------------------------------------------------
  *
- * The board runs a slice of the i960 and then a slice of sound, so the 68000
- * cannot take a MIDI byte while the i960 is sending it. On the board it would: the
- * UART sends a byte in a third of a millisecond (MAME's capture: 0.33 ms apart),
- * the driver takes it straight out of the SCSP's buffer, and the i960 queues
- * nothing it cannot send. Here a burst meets a buffer nobody is emptying.
+ * The board runs a slice of the i960 and then a slice of sound, so the line
+ * cannot carry a byte while the i960 is sending it. On the board it would: the
+ * UART sends a byte in a third of a millisecond, raises TxRDY, and the i960
+ * sends the next (MAME's capture: 320 us apart). Here a burst meets a line
+ * nobody is clocking.
  *
- * So when the buffer has no room for what is about to be sent, the sound board
- * runs on now, SOUND_AHEAD_STEP samples at a time, until the driver has taken
- * enough. Those samples are the slice's own, run early: `ahead` counts them and
- * sound_run_slice owes them back, so the board's clock -- and the host's audio --
- * never gain a sample. At most SOUND_AHEAD_MAX may be run early; past that the
- * byte waits for the next slice, as it would wait on the UART.
+ * So when the UART cannot take what is about to be sent, the sound board runs
+ * on now, SOUND_AHEAD_STEP samples at a time, until it can. Those samples are
+ * the slice's own, run early: `ahead` counts them and sound_run_slice owes them
+ * back, so the board's clock -- and the host's audio -- never gain a sample. At
+ * most SOUND_AHEAD_MAX may be run early; past that the byte waits for the next
+ * slice, as it would wait on the UART. The game is paced like the i960 on the
+ * board, one byte per TxRDY (for_game: the holding register must be empty);
+ * another writer is only held when the 32-deep queue is full.
  *
  * The old drain valve ran the 68000 without owing the samples back, and gave up
- * after 32 passes and dropped the byte. Returns whether `need` bytes now fit. */
-static inline bool sound_make_midi_room(uint32_t need) {
-    while (scsp_midi_room(&g_sound.scsp) < need) {
+ * after 32 passes and dropped the byte. Returns whether the byte now fits. */
+static inline bool sound_uart_make_room(bool for_game) {
+    for (;;) {
+        sound_uart_service(&g_sound, g_sound.m68k.cpu.cycles);
+        if (for_game ? sound_uart_txrdy(&g_sound) : g_sound.uart.count < SOUND_UART_FIFO) return true;
         if (!g_sound.rom_loaded || g_sound.detached ||
             g_sound.ahead + SOUND_AHEAD_STEP > SOUND_AHEAD_MAX) return false;
         g_sound.midi_drains++;
         sound_run(SOUND_AHEAD_STEP);
         g_sound.ahead += SOUND_AHEAD_STEP;
     }
-    return true;
 }
 
 /* One emu slice (1/60 s) of sound, less what was run early inside it. The
