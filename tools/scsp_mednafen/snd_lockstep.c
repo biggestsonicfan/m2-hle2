@@ -108,6 +108,18 @@ static void hook_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
     orig_write(ctx, addr, val, sz);
 }
 
+/* Bytes the serial line has handed the SCSP (sound_uart_t.sent) go to
+ * Mednafen's chip at the same moment, so both chips see the board's timing. */
+static uint8_t  midi_q[1 << 16];
+static uint32_t midi_qw, midi_qr;
+static uint64_t midi_sent_seen;
+static void midi_forward(void) {
+    while (midi_sent_seen < g_sound.uart.sent && midi_qr != midi_qw) {
+        if (!mdfn_scsp_midi_in(midi_q[midi_qr++ & 0xFFFF])) midi_dropped++;
+        midi_sent_seen++;
+    }
+}
+
 /* sound_run's loop, for one sample, with the interrupt level taken from
  * Mednafen's chip instead of scsp.h's. Kept line for line with sound.h. */
 static void run_sample_mdfn(int16_t *l, int16_t *r) {
@@ -116,23 +128,22 @@ static void run_sample_mdfn(int16_t *l, int16_t *r) {
     while (g_sound.budget > 0) {
         if (m->cpu.halted) { g_sound.budget = 0; break; }
         uint64_t c0 = m->cpu.cycles;
+        uint64_t sampled = c0 >= SOUND_IPL_LEAD ? c0 - SOUND_IPL_LEAD : 0;
+        if (g_sound.uart.count) { sound_uart_service(&g_sound, sampled); midi_forward(); }
         int lvl = mdfn_scsp_irq_level();
         int ipl = m68k_ipl(&m->cpu);
-        if (lvl > ipl && lvl > g_sound.mask_seen && m68k_interrupt(m, lvl)) {
+        if (lvl > ipl && m68k_interrupt(m, lvl)) {
             g_sound.irqs[lvl]++;
             if (g_sndcap.active) sndcap_put(4, (uint32_t)lvl, 0, m->cpu.pc);
         } else if (m->cpu.stopped) {
-            g_sound.mask_seen = ipl;
             m->cpu.cycles += (uint64_t)g_sound.budget;
             g_sound.budget = 0;
             break;
         } else {
-            g_sound.mask_seen = ipl;
             m68k_step(m);
             g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
             continue;
         }
-        g_sound.mask_seen = m68k_ipl(&m->cpu);
         g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
     }
     mdfn_scsp_sample(l, r);
@@ -233,6 +244,7 @@ int main(int argc, char **argv) {
     double ma = 0, mb = 0, sa = 0, sb = 0, sab = 0;
     size_t next = 0;
     double t0 = secs();
+    const int state_probe = getenv("SND_LOCKSTEP_STATE") != NULL;
     if (mode == MIRROR)
         printf("%8s %8s %8s %10s %10s %8s %9s %9s\n", "seconds", "ours DC", "mdfn DC", "ours dBFS", "mdfn dBFS",
                "gain dB", "residual", "corr");
@@ -240,8 +252,8 @@ int main(int argc, char **argv) {
         if (smp % frames_per_mark == 0) sndcap_frame(mark++, 0);
         while (next < nmidi && (midi[next].t >> 8) <= smp) {
             if (g_sndcap.active) sndcap_put(1, 0x9C0000, midi[next].b | 0xFF0000u, 0);
-            if (mode != MDFN) sound_uart_write(&g_sound, midi[next].b, midi[next].t);
-            if (mode != SCSP_ONLY && !mdfn_scsp_midi_in(midi[next].b)) midi_dropped++;
+            sound_uart_write(&g_sound, midi[next].b, midi[next].t);
+            if (mode != SCSP_ONLY) midi_q[midi_qw++ & 0xFFFF] = midi[next].b;
             next++;
         }
         int16_t al = 0, ar = 0, bl, br;
@@ -253,7 +265,29 @@ int main(int argc, char **argv) {
             sound_run(1);
             if (g_sound.out_w != w0) { al = g_sound.out[w0 * 2]; ar = g_sound.out[w0 * 2 + 1]; }
             g_sound.out_r = g_sound.out_w;
-            if (mode == MIRROR) mdfn_scsp_sample(&bl, &br); else bl = br = 0;
+            if (mode == MIRROR) { midi_forward(); mdfn_scsp_sample(&bl, &br); } else bl = br = 0;
+            if (mode == MIRROR && state_probe) {
+                /* SND_LOCKSTEP_STATE=1: every 7 s, the register words the two
+                 * chips hold differently (the status block and sound stack left
+                 * out: those are timing, not state), and every 10 s the running
+                 * mean of each EFREG. This is what found the MADRS mirror. */
+                static double ea[16], eb[16]; static uint64_t en;
+                for (int i = 0; i < 16; i++) { ea[i] += g_sound.scsp.dsp.efreg[i]; eb[i] += (int16_t)mdfn_scsp_read(REG + 0xEC0 + 2 * i, 2); }
+                if (en % (SOUND_RATE * 7) == 0) {
+                    int nd = 0;
+                    for (uint32_t o = 0; o < 0xC00; o += 2) {
+                        if (o >= 0x400 && o < 0x700) continue;          /* status and the sound stack: timing, not state */
+                        uint16_t a = scsp_read(&g_sound.scsp, o, 2), b = (uint16_t)mdfn_scsp_read(REG + o, 2);
+                        if (a != b && nd++ < 40) printf("  reg %03X scsp.h %04X mednafen %04X\n", o, a, b);
+                    }
+                    printf("state @%.0fs: %d register words differ\n", en / (double)SOUND_RATE, nd);
+                }
+                if (++en % (SOUND_RATE * 10) == 0) {
+                    printf("efreg mean @%3.0fs:", en / (double)SOUND_RATE);
+                    for (int i = 0; i < 16; i++) if (ea[i] || eb[i]) printf(" [%d] %.0f/%.0f", i, ea[i] / en, eb[i] / en);
+                    printf("\n");
+                }
+            }
         }
         int16_t pa[2] = {al, ar}, pb[2] = {bl, br};
         fwrite(pa, 2, 2, wa);

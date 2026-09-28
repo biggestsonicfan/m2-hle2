@@ -170,7 +170,7 @@ python tools/scsp_mednafen/wav_compare.py cap/mame.wav out.wav out.mednafen.wav 
   - residual after a gain match: 1–10%
   - on bgm, sfx and sys alike
 - **Mednafen is a flat +12.2 dB louder** (4x) at every frequency. So the probes' timbre findings (attack, LFOs, FM, DSP) barely reach STF's music.
-- **DC offset:** scsp.h's output settles at a DC of about +4980, which CLAUDE.md says MAME's WAV shares. Mednafen's stays near 0.
+- **DC offset:** scsp.h's output settles at a DC of about +4980, which CLAUDE.md says MAME's WAV shares. Mednafen's stays near 0. *(2026-09-28: a MADRS mirror MAME has and the chip does not; fixed, see "The reverb" below.)*
   - While scsp.h's DC climbs from 0 over the first ~20 s, the windows that include the climb score low. That is the DC, not the music.
   - The DC and the 12 dB look like one question: what the DSP/EFREG output path is. It's the first thing to check against a board recording.
 - **Reads Mednafen would have answered differently:** 15–30% of them.
@@ -245,3 +245,77 @@ board"). Items 1-4, 6, 7 and 9 of the list above are still where scsp.h and Medn
 Any of these would change the board's output against MAME, and a change to the sound board's
 interrupt timing is a `NETPLAY_PROTO_REV` bump. Each item is a question to settle on a real
 board, or against a hardware-tested reference, before scsp.h moves.
+
+## The audit again, on the board that follows current MAME (2026-09-28)
+
+Rerun after PR #119 (wait states, serial MIDI line, monitor latch), on the current-MAME
+capture (90 s of attract). `snd_lockstep` now feeds Mednafen's chip through the board's
+serial line too (`midi_forward`), so both chips get each byte at the same clock period.
+
+**The probe table is unchanged** from the first run, row for row, except `fuzz`, whose random
+writes reach 0x7C0-0x7FF (below). None of items 1-9 has moved: #119 changed the 68000 and the
+UART, not the chip.
+
+**Through the board, graded against current MAME** (`snd_compare.py`, first 70 s):
+
+| board | notes within 30 ms | median timing error | events identical in order | envelope |
+|---|---|---|---|---|
+| scsp.h (`--chip scsp`, = `snd_replay`) | **72.7%** | **1.5 ms** | to 31.69 s | 0.987 |
+| Mednafen's chip (`--chip mednafen`) | 38.0% | 15.7 ms | to 31.69 s | 0.859 (-40 ms) |
+
+The ranking has turned over since 09-26, when Mednafen's chip was the closer one: the board now
+reproduces current MAME's clocks, and Mednafen's timer A runs at 512.27 samples against MAME's
+505.40 (`snd_timing.py`) because its prescaler counts off a global sample counter, not from the
+write (item 5). Both chips pick the same slots, event for event, up to the same race at 31.69 s.
+
+### The reverb: a MADRS mirror that is not on the chip
+
+`SND_LOCKSTEP_STATE=1` (mirror mode) lists the register words the two chips hold differently,
+every 7 s, and each EFREG's running mean. On STF's traffic there were two:
+
+- **MADRS, all 32 words: zero in scsp.h, the driver's tap addresses in Mednafen.** The driver
+  writes 0x700-0x7FF in one pass of longs: COEF, then MADRS at 0x780-0x7BF, then zeros over
+  0x7C0-0x7FF. MAME, and scsp.h after it, mirror MADRS over 0x7C0 ("MADRS is mirrored twice",
+  added in MAME `0caa890ccac`, 2014, "Array bounds patrol": the writes used to run off the end of
+  the 32-entry array, and the mirror was the patch). Mednafen maps nothing there. The driver is the witness: Sega would not have shipped a reverb whose
+  every tap reads one address.
+  - With the mirror, STF's reverb settled on a constant: EFREG 0 and 1 averaged **+18,984** on
+    scsp.h against **+654** on Mednafen at 60 s. That constant is the ~+5000 DC offset on the
+    board's output and on MAME's WAV.
+  - Fixed in `scsp.h` (`scsp_w16`: 0x7C0-0x7FF writes nothing and reads 0). The EFREG means now
+    agree with Mednafen's to within 1 (3926 / 3925 at 10 s, 436 / 436 at 90 s) and the output's DC
+    is 0-20 instead of 4980.
+  - What it does to the sound: in attract the reverb's moving part is small (the audio minus its
+    mean changes by 0.1-0.5%), so the DC is most of it. The offset cost the output 15% of its
+    positive headroom, so loud passages clipped sooner on that side.
+  - Against MAME: the timing grade is untouched (above), as is `snd_compare`'s envelope, which
+    removes the mean. MAME's WAV keeps its offset; a sample-level comparison has to remove each
+    side's mean.
+  - Board state: the 68000 plays the same events either way (`snd_replay` is `cmp`-identical to
+    `--chip scsp`, and the event stream is unchanged). Sound RAM's delay line differs, but netplay's
+    frame check does not hash sound RAM and the i960 never sees the DSP, so no protocol bump.
+- **KYONB (slot word 0 bit 11)** on a few slots: scsp.h clears it when a voice ends (MAME's
+  `StopSlot`), Mednafen keeps what was written. The driver reads it back, MAME is the timing
+  oracle, and both chips choose the same slots to 31.69 s, so scsp.h keeps MAME's behaviour.
+
+With the mirror gone the register files agree at every 7 s check across 45 s.
+
+### The `dsp` probe is not a test of STF's reverb
+
+It runs STF's program on random COEF and MADRS, from random RAM. The program is a feedback
+network, so random coefficients make it chaotic and any difference is total. Tried with the
+driver's own COEF/MADRS and a cleared ring (not committed): both chips start pinned at
+saturation (a zero word in the delay line decodes to +0.5 full scale), scsp.h leaves it after
+~500 samples and Mednafen never does, with no input at all. Running the DSP before the slots
+(Mednafen's order, one sample of latency into MIXS) and a 26-bit accumulator (Mednafen's
+`SFT_REG`) each left that unchanged. On the board's real traffic the reverbs agree (above), so
+that start, which no driver produces, was left there.
+
+### Still open, as before
+
+Items 1-4 and 6-9 are MAME against Mednafen with scsp.h on MAME's side, and nothing in STF's
+driver decides between them. The attack curve (item 2) is the one most likely to be audible and
+most likely to be wrong in MAME (a linear attack, where Yamaha's chips run an exponential one),
+but the driver polls the slot monitor, whose EG field it changes, so it may move slot
+allocation away from the oracle. That needs a recording from a real board, not a second emulator.
+

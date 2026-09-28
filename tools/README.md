@@ -746,6 +746,11 @@ SCSP with the same register traffic and compares them sample by sample, one feat
 monitor, MIDI). Mednafen is fetched at build time and never committed (GPL). Its
 [README](scsp_mednafen/README.md) has the first run's table and what each difference is.
 
+`snd_lockstep` with `SND_LOCKSTEP_STATE=1` lists the register words the two chips hold
+differently on a whole capture. That found the one real chip bug so far: MAME mirrors the DSP's
+MADRS over 0x7C0-0x7FF, which STF's driver zeros, so the reverb sat on a constant and put a
+~5000 DC offset on the output (fixed 2026-09-28; the README's "The reverb").
+
 ### Holding a sound-board change to the same bits
 
 A speed change to `sound.h`, `scsp.h` or `m68k_exec.h` has to leave the board
