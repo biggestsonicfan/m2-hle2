@@ -23,7 +23,7 @@
  * full cushion against the next one.
  *
  * THE FADES ARE APPLIED AFTER THE DC BLOCKER, not before. The board's output
- * sits on a large DC offset (below), so fading the raw samples towards zero is
+ * can sit on a DC offset (below), so fading the raw samples towards zero is
  * itself a step, which the high-pass passes as a thump. After the blocker the
  * signal is centred on zero, and on the way back in the blocker is re-seeded
  * on the first new frame, so the jump from the old level to the new one is
@@ -47,10 +47,12 @@
  * reader jumps forward to the target instead -- one skip, faded out and back in
  * like a stall, rather than seconds of sound running behind the picture.
  *
- * The board's output sits on a DC offset (about 5000 of 32768 in STF — the DSP
- * path; MAME's WAV has the same one). A real cabinet's amplifier is AC-coupled,
- * so the host side takes it out with a one-pole high-pass (~5 Hz); the board's
- * own samples stay as they are, for grading.
+ * The board's output can sit on a DC offset. STF's used to sit at about 5000
+ * of 32768, as MAME's WAV still does: MAME mirrors the DSP's MADRS over
+ * 0x7C0-0x7FF, which the driver zeros, and the reverb settled on a constant
+ * (scsp.h, scsp_w16). A real cabinet's amplifier is AC-coupled, so the host
+ * side takes any offset out with a one-pole high-pass (~5 Hz); the board's own
+ * samples stay as they are, for grading.
  */
 #ifndef AUDIO_OUT_H
 #define AUDIO_OUT_H

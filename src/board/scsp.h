@@ -47,7 +47,7 @@
  *   0x400-0x42F  common: MVOL, RBL/RBP, MIDI in/out, monitor, DMA, timers,
  *                interrupts (SCIEB/SCIPD/SCIRE/SCILV0-2), MCIEB/MCIPD/MCIRE
  *   0x600-0x6FF  sound stack (the last output of each slot, for FM)
- *   0x700-0x77F  DSP COEF, 0x780-0x7FF MADRS (mirrored), 0x800-0xBFF MPRO,
+ *   0x700-0x77F  DSP COEF, 0x780-0x7BF MADRS (0x7C0-0x7FF nothing), 0x800-0xBFF MPRO,
  *   0xC00-0xEFF  DSP TEMP / MEMS / MIXS / EFREG read-back
  */
 #ifndef SCSP_H
@@ -972,8 +972,16 @@ static void scsp_w16(scsp_t *s, uint32_t addr, uint16_t v) {
     if (addr < 0x600) return;
     if (addr < 0x700) { s->sous[(addr - 0x600) >> 1] = (int16_t)v; return; }
     if (addr < 0x780) { s->dsp.coef[(addr - 0x700) >> 1] = (int16_t)v; return; }
+    /* MADRS is 32 words, 0x780-0x7BF, and 0x7C0-0x7FF is not a mirror of it.
+     * MAME makes it one ("MADRS is mirrored twice", from a 2014 array-bounds
+     * fix, not from hardware); Mednafen, from Saturn tests, maps nothing
+     * there. The deciding witness is Sega's driver: STF's sets 0x700-0x7FF in
+     * one pass, the tap addresses and then zeros over 0x7C0-0x7FF, so with the
+     * mirror every tap reads one address, and the reverb, fed back on itself,
+     * settles at +19000 on EFREG 0/1: the ~5000 DC offset on the board's (and
+     * MAME's) output. tools/scsp_mednafen/README.md, "The reverb". */
     if (addr < 0x7C0) { s->dsp.madrs[(addr - 0x780) >> 1] = v; return; }
-    if (addr < 0x800) { s->dsp.madrs[(addr - 0x7C0) >> 1] = v; return; }
+    if (addr < 0x800) return;
     if (addr < 0xC00) {
         s->dsp.mpro[(addr - 0x800) >> 1] = v;
         s->dsp.ops_ok = 0;
@@ -1014,7 +1022,7 @@ static uint16_t scsp_r16(scsp_t *s, uint32_t addr) {
     if (addr < 0x700) return (uint16_t)s->sous[(addr - 0x600) >> 1];
     if (addr < 0x780) return (uint16_t)s->dsp.coef[(addr - 0x700) >> 1];
     if (addr < 0x7C0) return s->dsp.madrs[(addr - 0x780) >> 1];
-    if (addr < 0x800) return s->dsp.madrs[(addr - 0x7C0) >> 1];
+    if (addr < 0x800) return 0;
     if (addr < 0xC00) return s->dsp.mpro[(addr - 0x800) >> 1];
     if (addr < 0xE00) return (addr & 2) ? (uint16_t)s->dsp.temp[(addr >> 2) & 0x7F] : (uint16_t)(s->dsp.temp[(addr >> 2) & 0x7F] >> 16);
     if (addr < 0xE80) return (addr & 2) ? (uint16_t)s->dsp.mems[(addr >> 2) & 0x1F] : (uint16_t)(s->dsp.mems[(addr >> 2) & 0x1F] >> 16);
