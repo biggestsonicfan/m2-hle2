@@ -822,8 +822,11 @@ EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
         g_web_pad = actions;   /* the menus have the pad (web_lobby_pad); the game gets none of it */
         return;
     }
+    /* SELECT is the pause menu's (free play needs no coin). Only the board goes
+     * without it: g_web_pad keeps it, because web_lobby_pad reads SELECT from
+     * there, and a pad that never held it could never open the pause menu. */
     if (g_web_shell_on)
-        actions &= ~(1u << GAME_INPUT_P1_COIN);   /* SELECT is the pause menu's (free play needs no coin) */
+        changed &= ~(1u << GAME_INPUT_P1_COIN);
     for (int a = 0; a < GAME_INPUT_COUNT; a++) {
         if (!(changed & (1u << a))) continue;
         if (actions & (1u << a)) input_action_down(a);

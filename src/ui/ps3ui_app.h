@@ -915,7 +915,10 @@ static void ps3ui_update_vs(ps3ui_app_t *a)
         ps3ui_post(a, NETPLAY_CMD_START);
         a->ready_sent = 1;
     }
-    if (!ready && ps3ui_hit(a, PS3UI_PAD_CIRCLE))
+    /* Ready is final on the PS3 -- but a barrier that never releases (the
+     * peers cannot reach each other) has no timeout, and a pad-only player
+     * had no way out of it. Nothing has been played yet, so leaving is safe. */
+    if ((!ready || st->state == NETPLAY_SYNCING) && ps3ui_hit(a, PS3UI_PAD_CIRCLE))
         ps3ui_app_ask(a, PS3UI_DLG_LEAVE, "Do you want to exit this session?");
 }
 
@@ -1361,9 +1364,12 @@ static void ps3ui_draw_search(ps3ui_canvas_t *cv, ps3ui_app_t *a)
         const char *labels[4] = { "Players", "Frame delay", "Game type", "Entry" };
         const char *values[4] = { players, delay, why ? "Other version" : "Sonic the Fighters",
                                   r->has_password ? "Private" : "Open" };
+        /* A label in each bar and its value under it, 104 units a row: the
+         * bars' pitch, measured off the drawn window. 72 and 68 drifted further
+         * off each bar until the game type ran into "Entry". */
         for (int i = 0; i < 4; i++) {
-            ps3ui_text_left(cv, &lab, px, py + 72.0f * (float)i, labels[i], alpha);
-            ps3ui_text_right(cv, &val, tx, ty + 68.0f * (float)i, values[i], alpha);
+            ps3ui_text_left(cv, &lab, px, py + 104.0f * (float)i, labels[i], alpha);
+            ps3ui_text_right(cv, &val, tx, ty + 104.0f * (float)i, values[i], alpha);
         }
     }
 }
@@ -1580,7 +1586,7 @@ static const char *ps3ui_hints(const ps3ui_app_t *a)
                                                         : "\x01:Exit  \x02:Match entry")
                                        : "\x01:Exit";
     case PS3UI_SCR_VS:
-        return ready ? "" : "\x01:Exit  \x02:Ready";
+        return ready ? (a->st.state == NETPLAY_SYNCING ? "\x01:Exit" : "") : "\x01:Exit  \x02:Ready";
     case PS3UI_SCR_RESULT:
         return "\x02:Enter";
     case PS3UI_SCR_AGAIN:
