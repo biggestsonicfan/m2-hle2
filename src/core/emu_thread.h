@@ -284,10 +284,11 @@ static inline void emu_board_reset_state(void) {
  * for its interrupt, and the per-frame writers got to it first. Now the pin is
  * offered where the board would take it: when the game enables the line after
  * queueing (irqt_enable_write's kick), and when any handler returns (the
- * chain in emu_service_sound_again). A byte is only handed over when the SCSP's
- * MIDI buffer can take it (sound_make_midi_room), which is the UART's own
- * backpressure; a byte that does not fit waits in the game's queue for the
- * next slice, as it would wait on the UART. */
+ * chain in emu_service_sound_again). A byte is only handed over when the UART
+ * can take it (sound_uart_make_room: its holding register is empty, so the
+ * game is paced one byte per TxRDY, 320 us apart, as on the board); a byte
+ * that does not fit waits in the game's queue for the next slice, as it would
+ * wait on the UART. */
 
 /* Is TxRDY's interrupt up? Raises bit 10 if so.
  *
@@ -313,7 +314,7 @@ static inline bool emu_sound_pending(emu_thread_ctx_t *ctx, const game_quirks_t 
 
 /* Can the UART take a byte now? Makes room in the MIDI buffer if it can. */
 static inline bool emu_sound_ready(void) {
-    if (sound_make_midi_room(1)) return true;
+    if (sound_uart_make_room(true)) return true;
     g_sound.midi_holds++;
     return false;
 }
@@ -421,7 +422,7 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
  * music ~21% fast across the VS screen: 891 samples a frame against 735.
  *
  * Mid-frame the board still advances as far as the MIDI conversation needs:
- * sound_make_midi_room runs it early and `ahead` owes those samples back at the
+ * sound_uart_make_room runs it early and `ahead` owes those samples back at the
  * edge. What it no longer does is gain time.
  *
  * A board that never reaches a frame edge -- still booting, stuck in its own
@@ -950,11 +951,11 @@ static inline void emu_sound_restart(emu_thread_ctx_t *ctx) {
              drops, (unsigned)hi, (unsigned long long)drains);
 }
 
-/* Push bytes straight into the SCSP's MIDI input, as the i960's UART would. */
+/* Send bytes down the sound UART's line, as the i960 would. */
 static inline int emu_sound_midi(emu_thread_ctx_t *ctx, const uint8_t *b, int n) {
     int locked = ctx && ctx->thread_alive;
     if (locked) emu_mutex_lock(&ctx->mutex);
-    for (int i = 0; i < n; i++) scsp_midi_in(&g_sound.scsp, b[i]);
+    for (int i = 0; i < n; i++) sound_uart_write(&g_sound, b[i], g_sound.m68k.cpu.cycles);
     if (locked) emu_mutex_unlock(&ctx->mutex);
     return n;
 }

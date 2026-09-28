@@ -150,8 +150,11 @@
  * 8: the sound UART's interrupt is a level while the line is enabled, so the
  *    game takes one more after a burst and resets its queue (emu_thread.h,
  *    emu_sound_pending); a board before it never takes that one.
+ * 9: the sound UART is a serial line (sound.h sound_uart_t): the game sends
+ *    one byte per TxRDY, 320 us apart, and the 68000 runs MAME's wait states
+ *    and exception timing, so the sound interrupts the i960 takes moved.
  */
-#define NETPLAY_PROTO_REV 8
+#define NETPLAY_PROTO_REV 9
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

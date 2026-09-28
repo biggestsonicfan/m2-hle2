@@ -45,30 +45,73 @@ static inline int32_t m68k_sign_ext(uint32_t v, int sz) {
 
 /* ---- bus access ----
  * Time is charged per instruction from Motorola's tables (m68k_timing.h), in
- * m68k_step, not per access. */
+ * m68k_step, not per access -- except a page's wait states (m68k_state_t.wmap),
+ * which are charged here, per bus cycle. */
+static inline void m68k_wait(m68k_state_t *s, uint32_t a, uint32_t cycles) {
+    s->cpu.cycles += (uint64_t)s->wmap[(a >> 16) & 0xFFu] * cycles;
+}
 static inline const uint8_t *m68k_direct(const m68k_state_t *s, uint32_t a, uint32_t sz) {
     const uint8_t *p = s->rmap[(a >> 16) & 0xFFu];
     return p && (a & 0xFFFFu) <= 0x10000u - sz ? p + (a & 0xFFFFu) : NULL;
 }
 static inline uint8_t  m68k_rb(m68k_state_t *s, uint32_t a) {
+    m68k_wait(s, a, 1);
     const uint8_t *p = m68k_direct(s, a, 1);
     return p ? p[0] : (uint8_t)s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 1);
 }
 static inline uint16_t m68k_rw(m68k_state_t *s, uint32_t a) {
+    m68k_wait(s, a, 1);
     const uint8_t *p = m68k_direct(s, a, 2);
     return p ? (uint16_t)(p[0] << 8 | p[1]) : (uint16_t)s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 2);
 }
 static inline uint32_t m68k_rl(m68k_state_t *s, uint32_t a) {
+    m68k_wait(s, a, 2);
     const uint8_t *p = m68k_direct(s, a, 4);
     return p ? (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]
              : s->read_cb(s->mem_ctx, a & 0xFFFFFFu, 4);
 }
 static inline void m68k_wb(m68k_state_t *s, uint32_t a, uint8_t  v)
-    { s->write_cb(s->mem_ctx, a & 0xFFFFFFu, v, 1); }
+    { m68k_wait(s, a, 1); s->write_cb(s->mem_ctx, a & 0xFFFFFFu, v, 1); }
 static inline void m68k_ww(m68k_state_t *s, uint32_t a, uint16_t v)
-    { s->write_cb(s->mem_ctx, a & 0xFFFFFFu, v, 2); }
+    { m68k_wait(s, a, 1); s->write_cb(s->mem_ctx, a & 0xFFFFFFu, v, 2); }
 static inline void m68k_wl(m68k_state_t *s, uint32_t a, uint32_t v)
-    { s->write_cb(s->mem_ctx, a & 0xFFFFFFu, v, 4); }
+    { m68k_wait(s, a, 2); s->write_cb(s->mem_ctx, a & 0xFFFFFFu, v, 4); }
+
+/* ---- the divides' clock counts ----
+ * DIVU and DIVS take a time that depends on the operands: the chip's restoring
+ * division runs 15 steps, each 4 or 6 clocks by whether the shifted-out bit
+ * carried and whether the trial subtraction stuck (DIVU), or by the quotient's
+ * bits and the operands' signs (DIVS), and an overflow is found before any of
+ * that. These are Musashi's getDivu68kCycles / getDivs68kCycles (MAME
+ * m68kcpu.h, from the chip's microcode), which MAME's cycle-level m68000 core
+ * agrees with: tools/mame/m68k_timing_compare.py holds the driver's divides
+ * against its trace. Whole instruction, Dn source (an ea adds its own). */
+static inline uint32_t m68k_divu_cycles(uint32_t dividend, uint16_t divisor) {
+    if ((dividend >> 16) >= divisor) return 10;                  /* overflow */
+    uint32_t m = 38, hdiv = (uint32_t)divisor << 16;
+    for (int i = 0; i < 15; i++) {
+        uint32_t t = dividend;
+        dividend <<= 1;
+        if ((int32_t)t < 0) dividend -= hdiv;                    /* carried out: the subtraction is free */
+        else {
+            m += 2;
+            if (dividend >= hdiv) { dividend -= hdiv; m--; }
+        }
+    }
+    return m * 2;
+}
+static inline uint32_t m68k_divs_cycles(int32_t dividend, int16_t divisor) {
+    uint32_t m = 6;
+    uint32_t adiv = (uint32_t)(dividend < 0 ? -(int64_t)dividend : dividend);
+    uint32_t asor = (uint32_t)(divisor < 0 ? -(int32_t)divisor : divisor);
+    if (dividend < 0) m++;
+    if ((adiv >> 16) >= asor) return (m + 2) * 2;                /* overflow */
+    uint32_t aquot = adiv / asor;
+    m += 55;
+    if (divisor >= 0) { if (dividend >= 0) m--; else m++; }
+    for (int i = 0; i < 15; i++) { if ((int16_t)(uint16_t)aquot >= 0) m++; aquot <<= 1; }
+    return m * 2;
+}
 
 /* ---- instruction stream fetch ---- */
 static inline uint16_t m68k_fetch(m68k_state_t *s) {
@@ -1237,10 +1280,14 @@ static inline int m68k_step(m68k_state_t *s) {
         int sz_bits = (op >> 6) & 3;
 
         if (sz_bits == 3) {
-            /* DIVU.W: 1000 Dn 011 ea */
+            /* DIVU.W: 1000 Dn 011 ea. The table charged the worst case (140 /
+             * 158); the chip's time depends on the operands, and the driver's
+             * sequencer divides on every tick: replace it with the chip's own
+             * count (m68k_divu_cycles / m68k_divs_cycles). */
             if (!dir) {
                 uint16_t divisor = (uint16_t)m68k_ea_read(s, mode, reg, SZ_W);
                 if (!divisor) { LOG_WARN("m68k: DIVU by zero pc=0x%06X", op_pc); break; }
+                c->cycles += (uint64_t)((int64_t)m68k_divu_cycles(c->d[dn], divisor) - 140);
                 uint32_t q = c->d[dn] / divisor, rem = c->d[dn] % divisor;
                 if (q > 0xFFFF) {
                     c->sr |= M68K_SR_V | M68K_SR_N;
@@ -1253,6 +1300,7 @@ static inline int m68k_step(m68k_state_t *s) {
                 /* DIVS.W: 1000 Dn 111 ea */
                 int16_t divisor = (int16_t)m68k_ea_read(s, mode, reg, SZ_W);
                 if (!divisor) { LOG_WARN("m68k: DIVS by zero pc=0x%06X", op_pc); break; }
+                c->cycles += (uint64_t)((int64_t)m68k_divs_cycles((int32_t)c->d[dn], divisor) - 158);
                 int32_t q = (int32_t)c->d[dn] / divisor;
                 int32_t rem = (int32_t)c->d[dn] % divisor;
                 if (q > 32767 || q < -32768) {
@@ -1537,7 +1585,7 @@ static inline int m68k_interrupt(m68k_state_t *s, int level) {
     if (level != 7 && level <= cur_ipl) return 0;   /* masked */
 
     uint32_t vec_addr = (uint32_t)(24 + level) * 4;
-    uint32_t handler  = s->read_cb(s->mem_ctx, vec_addr, 4);
+    uint32_t handler  = m68k_rl(s, vec_addr);
     if (!handler || handler == 0xFFFFFFFFu) return 0; /* vector not set */
 
     uint16_t old_sr = c->sr;
@@ -1561,7 +1609,7 @@ static inline int m68k_interrupt(m68k_state_t *s, int level) {
     c->pc      = handler;
     c->stopped = 0;
     c->halted  = 0;
-    c->cycles += 44;       /* interrupt exception processing */
+    c->cycles += 48;       /* interrupt exception processing: MAME m68000 (autovector acknowledge 8) */
     return 1;
 }
 

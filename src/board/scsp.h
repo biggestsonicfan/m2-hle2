@@ -175,6 +175,8 @@ typedef struct {
 typedef struct {
     scsp_slot_t slot[32];
     uint16_t    c[0x18];         /* common registers 0x400..0x42E, as words */
+    uint8_t     mslc;            /* the slot the monitor (0x408) watches */
+    uint16_t    mslc_data;       /* its CA / SGC / EG, latched once a sample (MAME 458507e06bc) */
     int16_t     sous[128];       /* sound stack; slots write [ptr & 63] in turn */
     uint8_t     sous_ptr;
     uint8_t     mi[32], mi_r, mi_w;
@@ -347,13 +349,16 @@ static void scsp_tables_init(void) {
 /* ---- slots ----------------------------------------------------------------- */
 
 static inline void scsp_slot_gains(scsp_slot_t *sl) {
-    uint32_t tl = SCSP_TL(sl);
+    /* SDIR sends the raw sample past the envelope AND past TL, into the DSP
+     * feed and the direct mix as well as the sound stack (MAME: flashbeats
+     * keys its effects with SDIR and TL 0xFF, which used to mute them). */
+    uint32_t tl = SCSP_SDIR(sl) ? 0 : SCSP_TL(sl);
     uint32_t dir = tl | SCSP_DIPAN(sl) << 8 | SCSP_DISDL(sl) << 13;
     uint32_t eff = SCSP_EFPAN(sl) << 8 | SCSP_EFSDL(sl) << 13;
     sl->g_mixs = scsp_lpan[tl | SCSP_IMXL(sl) << 13];
     sl->g_dl   = scsp_lpan[dir];
     sl->g_dr   = scsp_rpan[dir];
-    sl->g_sous = scsp_lpan[(SCSP_SDIR(sl) ? 0 : tl) | 7u << 13];
+    sl->g_sous = scsp_lpan[tl | 7u << 13];
     sl->g_el   = scsp_lpan[eff];
     sl->g_er   = scsp_rpan[eff];
 }
@@ -924,7 +929,7 @@ static void scsp_w16(scsp_t *s, uint32_t addr, uint16_t v) {
             s->mo[s->mo_w++ & 31] = (uint8_t)v;
             s->mo_w &= 31;
             break;
-        case 0x04: s->c[0x04] &= 0xF800; break;         /* only MSLC is writable */
+        case 0x04: s->mslc = (uint8_t)((v >> 11) & 0x1F); break;   /* only MSLC is writable */
         case 0x0B: if (v & 0x1000) scsp_dma(s); break;
         case 0x0C: case 0x0D: case 0x0E: {              /* timers A, B, C */
             int t = (int)r - 0x0C;
@@ -993,16 +998,13 @@ static uint16_t scsp_r16(scsp_t *s, uint32_t addr) {
             s->c[0x02] = v;
             break;
         }
-        case 0x04: {                                    /* slot monitor */
-            /* MAME: MSLC comes from the register word, which the read then
-             * overwrites — a second read without a new MSLC monitors slot 0. */
-            scsp_slot_t *sl = &s->slot[(s->c[0x04] >> 11) & 0x1F];
-            uint32_t sgc = sl->state & 3;
-            uint32_t ca  = (sl->cur >> (SCSP_SHIFT + 12)) & 0xF;
-            uint32_t eg  = (0x1Fu - (uint32_t)(sl->vol >> (SCSP_EG_SHIFT + 5))) & 0x1F;
-            s->c[0x04] = (uint16_t)((ca << 7) | (sgc << 5) | eg);
+        case 0x04:                                      /* slot monitor */
+            /* The value latched at the end of the last sample (scsp_sample),
+             * for the slot MSLC named then: a read right after a new MSLC still
+             * sees the old slot. MAME 458507e06bc, from hardware (vstriker,
+             * srallyc); it used to be worked out at the read. */
+            s->c[0x04] = s->mslc_data;
             break;
-        }
         case 0x15: s->c[0x15] = s->mcieb; break;
         case 0x16: s->c[0x16] = s->mcipd; break;
         }
@@ -1146,6 +1148,13 @@ static void scsp_sample(scsp_t *s, int16_t *out_l, int16_t *out_r) {
     *out_l = (int16_t)(l * mvol / 15);
     *out_r = (int16_t)(r * mvol / 15);
     s->samples++;
+    {                                                 /* the slot monitor's latch */
+        const scsp_slot_t *sl = &s->slot[s->mslc];
+        uint32_t sgc = sl->state & 3;
+        uint32_t ca  = (sl->cur >> (SCSP_SHIFT + 12)) & 0xF;
+        uint32_t eg  = (0x1Fu - (uint32_t)(sl->vol >> (SCSP_EG_SHIFT + 5))) & 0x1F;
+        s->mslc_data = (uint16_t)((ca << 7) | (sgc << 5) | eg);
+    }
 }
 
 #endif /* SCSP_H */

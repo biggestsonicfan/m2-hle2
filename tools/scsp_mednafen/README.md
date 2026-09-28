@@ -236,7 +236,12 @@ Loudness against MAME: scsp.h 0.97-1.01, Mednafen +12.1 dB throughout.
 
 - **Where this leaves the oracle:** current MAME has moved toward Mednafen on at least the monitor, and its timing now sits nearer the board on Mednafen's chip (62% of notes) than the board on scsp.h (22%). Which to follow is the owner's call.
 
-**Not changed in scsp.h.** MAME is the declared oracle, and `snd_replay` grades against it.
+**2026-09-28: the board now follows the current MAME** -- the serial line (a byte lands 304 µs after
+its start bit, the i960 paced by TxRDY), the 68000's wait states and exception time, the latched
+monitor -- and grades at 72.7% of notes / 1.5 ms on that capture (tools/README.md, "The sound
+board"). Items 1-4, 6, 7 and 9 of the list above are still where scsp.h and Mednafen differ.
+
+**Not changed in scsp.h before that.** MAME is the declared oracle, and `snd_replay` grades against it.
 Any of these would change the board's output against MAME, and a change to the sound board's
 interrupt timing is a `NETPLAY_PROTO_REV` bump. Each item is a question to settle on a real
 board, or against a hardware-tested reference, before scsp.h moves.
