@@ -282,6 +282,9 @@ static const char *const ps3ui_main_explain[4] = {
     "Play other people over the internet on RPCN.",
     "Change the controls and the volume, and see the credits.",
 };
+/* Where the host binds the buttons itself (no_controls: the web page), Help &
+ * Options has no Controls row, so it must not promise one. */
+static const char *const ps3ui_main_explain_nc = "Change the volume and see the credits.";
 static const char *const ps3ui_option_rows[3] = { "Controls", "Settings", "Credits" };
 static const char *const ps3ui_option_rows_nc[2] = { "Settings", "Credits" };
 static const char *const ps3ui_pause_rows[4] = { "Resume Game", "Help & Options", "", "Exit Game" };
@@ -643,7 +646,8 @@ static void ps3ui_shell_draw(ps3ui_shell_t *sh, ps3ui_canvas_t *cv)
     switch (sh->scr) {
     case PS3UI_SH_MAIN:
         ps3ui_sh_draw_list(cv, sh, "MAIN MENU", ps3ui_main_rows, 4, sh->cursor);
-        ps3ui_sh_draw_explain(cv, sh, ps3ui_main_explain[sh->cursor]);
+        ps3ui_sh_draw_explain(cv, sh, sh->no_controls && sh->cursor == 3 ? ps3ui_main_explain_nc
+                                                                        : ps3ui_main_explain[sh->cursor]);
         break;
     case PS3UI_SH_ARCADE:
     case PS3UI_SH_VERSUS: {

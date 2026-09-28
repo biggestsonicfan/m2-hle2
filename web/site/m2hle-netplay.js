@@ -43,10 +43,14 @@ const m2hleNetplay = (() => {
     try { return fn(p); } finally { M._free(p); }
   }
 
-  /* post('connect', { npid, password }) -> stage the fields, queue the command. */
+  /* post('connect', { npid, password }) -> stage the fields, queue the command.
+   * The server goes first: web_netplay_set forgets the password and code when the
+   * server changes, so staged after them it wiped what was typed for it, and
+   * Create account on the non-default server always said the password was missing. */
   function post(cmd, fields = {}) {
     M._web_netplay_begin();
-    for (const [k, v] of Object.entries(fields)) {
+    const order = Object.entries(fields).sort(([a], [b]) => (b === 'server') - (a === 'server'));
+    for (const [k, v] of order) {
       withString(k, (kp) => withString(String(v), (vp) => M._web_netplay_set(kp, vp)));
     }
     withString(cmd, (cp) => M._web_netplay_post(cp));
