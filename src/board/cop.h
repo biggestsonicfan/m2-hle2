@@ -65,6 +65,12 @@ typedef struct {
     /* MMIO activity counters. */
     uint32_t writes;
     uint32_t reads;
+
+    /* COPRO_CTL1 (0x980000), for its upload bit; set by mem_init. While bit 31
+     * is up, a FIFO word is a halfword of the SHARC's boot image, not a
+     * command (MAME model2b_state::copro_fifo_w). */
+    const uint8_t *ctl;
+    uint32_t       upload_words;
 } cop_state_t;
 
 static cop_state_t g_cop = {0};
@@ -137,6 +143,13 @@ static inline void cop_tap_replies(void) {
 /* Called for every 32-bit write to the COPROGRAM region. */
 static inline void cop_write(uint32_t val) {
     g_cop.writes++;
+
+    /* The boot image the i960 uploads before it lowers the bit: the HLE
+     * runs none of it, and none of it is a command. */
+    if (g_cop.ctl && (g_cop.ctl[3] & 0x80)) {
+        g_cop.upload_words++;
+        return;
+    }
 
     g_cop.geo_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
     g_cop.geo_capture_head++;
@@ -211,7 +224,9 @@ static inline uint32_t cop_read(void) {
 
 /* Reset all COP/SHARC state. Call when a new ROM is installed. */
 static inline void cop_reset(void) {
+    const uint8_t *ctl = g_cop.ctl;       /* the bus's, not COP state */
     memset(&g_cop, 0, sizeof(g_cop));
+    g_cop.ctl = ctl;
     g_zz.phase = 4;                       /* no stream in flight */
     memset(&g_sharc, 0, sizeof(g_sharc));
     memset(&g_geo_win, 0, sizeof(g_geo_win));

@@ -131,6 +131,26 @@ int main(void) {
     uint32_t unk0 = g_sharc.unknown_cmds;
     cop_write(0xDEADBEEF);   /* not in dispatch table -> default/unknown path */
     CHECK(g_sharc.unknown_cmds == unk0 + 1, "unknown COP command is counted");
+    cop_write(0x0000BEEF);   /* a zero top half is no excuse (issue #125) */
+    CHECK(g_sharc.unknown_cmds == unk0 + 2 && g_sharc.unknown_log_count >= 2
+          && g_sharc.unknown_log[g_sharc.unknown_log_count - 1].cmd == 0x0000BEEFu,
+          "an unknown command with a zero top half is logged too");
+
+    /* ---- the boot image: COPRO_CTL1 bit 31 up, the FIFO takes halfwords ---- */
+    uint8_t ctl[4] = {0, 0, 0, 0x80};
+    g_cop.ctl = ctl;
+    uint32_t unk1 = g_sharc.unknown_cmds;
+    for (uint32_t k = 0; k < 16; k++) cop_write(0x1234u + k);
+    CHECK(g_cop.upload_words == 16 && g_sharc.unknown_cmds == unk1
+          && g_cop.cur_cmd == 0 && g_cop.args_needed == 0,
+          "words written while uploading are the image, not commands");
+    ctl[3] = 0;
+    cop_write(0x00800101);   /* push */
+    CHECK(g_sharc.stack_top == 1, "commands resume once the bit is lowered");
+    cop_write(0x00000000);   /* Fn_initialize, cop_initialize's first word */
+    CHECK(g_sharc.stack_top == 0 && g_sharc.unknown_cmds == unk1,
+          "Fn_initialize empties the matrix stack");
+    g_cop.ctl = NULL;
 
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);
     return g_fail ? 1 : 0;

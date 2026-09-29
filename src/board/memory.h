@@ -591,6 +591,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     g_geo.wstart = g_geo.rstart = 0;
     g_geo.buff      = bus->buff_ram;
     g_geo.copro_ctl = bus->copro_ctl;
+    g_cop.ctl       = bus->copro_ctl;
     g_geodl_snap_ready = 0;
     mem_add_region(bus, "COPRO_CTL",       COPRO_CONTROL1_BASE,  COPRO_CONTROL1_SIZE,  bus->copro_ctl,     0);
     mem_add_region(bus, "MIDI",            MIDI_BASE,            MIDI_SIZE,            bus->midi,          0);
