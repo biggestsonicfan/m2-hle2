@@ -41,6 +41,7 @@
  * net/netplay.h can use the same mutex without including this header (the run
  * loop below calls into netplay, which would otherwise be a cycle). */
 #include "thread_mutex.h"
+#include "emu_times.h"    /* emu_now_us, and get_status's "emu" timings */
 
 /* ---- Tuning -------------------------------------------------------------- */
 
@@ -118,14 +119,8 @@ typedef struct {
 
 /* ---- High-res clock + precise sleep ------------------------------------- */
 
+/* emu_now_us is in emu_times.h, where the board's timers need it too. */
 #ifdef _WIN32
-static inline int64_t emu_now_us(void) {
-    static LARGE_INTEGER freq = {0};
-    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return (int64_t)(now.QuadPart * 1000000 / freq.QuadPart);
-}
 /*
  * The 60 Hz throttle sleeps here, and Sleep() is only as fine as the timer
  * resolution THIS process asked for. Since Windows 10 2004 another program
@@ -170,11 +165,6 @@ static inline void emu_sleep_us(int64_t us) {
     if (us > 1000) emu_nap_us(us);
 }
 #else
-static inline int64_t emu_now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-}
 static inline void emu_sleep_us(int64_t us) {
     if (us > 0) usleep((useconds_t)us);
 }
@@ -586,6 +576,10 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     bool slow = ctx->step_over_bp || g_frame_done || (board_vblank && g_vblank_acked) || g_irqt_sound_kick
              || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered;
     hle_filter_sync();
+    /* The loop's host time, less the sound board it ran early inside it
+     * (sound_uart_make_room): the i960 and the COP (emu_times.h). */
+    const int64_t loop_t0  = emu_now_us();
+    const int64_t loop_snd = g_emu_times.sound_us;
     int i;
     for (i = 0; i < max_steps && !ctx->cpu->halted; i++) {
         if (slow) {
@@ -622,6 +616,8 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             }
         }
     }
+    g_emu_times.loop_us += emu_now_us() - loop_t0 - (g_emu_times.sound_us - loop_snd);
+    g_emu_times.steps   += steps;
     ctx->total_steps += steps;
     ctx->slice_capped = (i >= max_steps);
     /* The game's frame ended on the instruction the loop stopped at, so
@@ -742,15 +738,23 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                  * the board must not advance. Sleep a tick so the UI and the
                  * network both get the host CPU, and come back to re-poll. */
                 emu_sleep_ms(1);
+                g_emu_times.net_us += emu_now_us() - slice_start;
                 continue;
             }
-            if (np_step == NETPLAY_STEP_RESET) continue;   /* done above; re-enter */
+            if (np_step == NETPLAY_STEP_RESET) {           /* done above; re-enter */
+                g_emu_times.net_us += emu_now_us() - slice_start;
+                continue;
+            }
+            int64_t work_t0 = emu_now_us();
+            g_emu_times.net_us += work_t0 - slice_start;
 
             emu_mutex_lock(&ctx->mutex);
             emu_slice_body(ctx);
             emu_mutex_unlock(&ctx->mutex);
 
             emu_slice_result_t slice = emu_slice_finish(ctx);
+            int64_t work_t1 = emu_now_us();
+            emu_times_slice(work_t1 - work_t0, slice == EMU_SLICE_FRAME);
             if (slice == EMU_SLICE_STOPPED) {
                 /* nothing to pace: the run state is STOPPED now */
             } else if (slice == EMU_SLICE_FRAME) {
@@ -786,7 +790,10 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 bool budget_hit = ctx->frame_budget_hit != 0;
                 ctx->frame_budget_hit = 0;
                 if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
-                else if (sleep_us > 0 && !budget_hit) emu_sleep_us(sleep_us);
+                else if (sleep_us > 0 && !budget_hit) {
+                    emu_sleep_us(sleep_us);
+                    g_emu_times.pace_us += emu_now_us() - work_t1;
+                }
             } else if (ctx->slice_capped && last_frame_us
                        && emu_now_us() - last_frame_us < EMU_MIDFRAME_GRACE_US) {
                 /* A frame that wants more instructions than one slice carries.
@@ -808,7 +815,10 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                  * so the host CPU doesn't pin at 100%. */
                 int64_t elapsed   = emu_now_us() - slice_start;
                 int64_t remaining = EMU_SLICE_US - elapsed;
-                if (remaining > 0) emu_sleep_us(remaining);
+                if (remaining > 0) {
+                    emu_sleep_us(remaining);
+                    g_emu_times.pace_us += emu_now_us() - work_t1;
+                }
                 /* A slice that ran past its frame (board_vblank homebrew, or a game
                  * stuck in its own error loop) still has to let the UI / MCP thread
                  * take the mutex. emu_sleep_us rounds anything under 1 ms to nothing

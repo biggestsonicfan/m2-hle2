@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "constants.h"
+#include "emu_times.h"   /* host time spent in the handlers, for get_status */
 
 /* ---- Limits -------------------------------------------------------------- */
 
@@ -149,7 +150,9 @@ static inline void cop_write(uint32_t val) {
         if (g_cop.args_received < COP_ARGS_MAX)
             g_cop.args[g_cop.args_received++] = val;
         if (--g_cop.args_needed == 0) {
+            int64_t t0 = emu_times_cop_begin();
             sharc_exec(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
+            emu_times_cop_end(t0);
             cop_tap_replies();
             g_cop.cur_cmd       = 0;
             g_cop.args_received = 0;
@@ -181,7 +184,9 @@ static inline void cop_write(uint32_t val) {
         return;
     }
     if (g_cop.args_needed == 0) {
+        int64_t t0 = emu_times_cop_begin();
         sharc_exec(val, NULL, 0);
+        emu_times_cop_end(t0);
         cop_tap_replies();
         g_cop.cur_cmd = 0;
     }
