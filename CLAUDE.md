@@ -103,6 +103,9 @@ The SHARC firmware itself is the reference for every handler here: `C:\Users\big
   - DM needed growing: the ring reaches `0x332FF` and `Fn_zanzou_init` clears `0x5480` words from `0x32180`, where `g_sharc.dm` stopped at `0x32FFF`.
   - *Which moves use it:* motion-script action `0x26` (table `_uk_player_actions` at ROM `0x1D1AC`, 13-byte record) sets `rob+0xC60` (part mask), `+0xC62` (life step), `+0xA1E` (turn angle) and `zanzou_ma` (spacing). Attract never plays one, so the quick way to exercise the path is to poke those three fields during any fight — `tests/cop_test.c` drives the FIFO conversation directly.
 
+- **While COPRO_CTL1 (`0x980000`) bit 31 is up, a FIFO word is a halfword of the SHARC's boot image, not a command** (MAME `copro_fifo_w`; `g_cop.upload_words`). STF's `load_cop_loop` (`0xF14`) writes 14862 of them at boot, lowers the bit, waits for the COP's ready flag and then sends `0x00000000`, which is opcode 0x00 `Fn_initialize` (empty the matrix stack), not padding.
+  - *Symptom that surfaced this:* `get_cop_diagnostics` reported 14863 unknown commands and logged none, because the unknown path dropped any word with a zero top half without logging it (issue #125). It no longer does.
+
 - *Note:* command opcodes documented here are the ones confirmed in STF. Other games may use additional opcodes — log unknown commands at WARN and extend the dispatch table.
 
 ### 3D Polygon Decoder (board-level — confirmed against two games)

@@ -604,7 +604,7 @@ static void mcp_cmd_get_cop_diagnostics(char *resp, int cap) {
 #define APPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); p += n; left -= n; } while(0)
 
     APPEND("{\"ok\":true,"
-           "\"writes\":%u,\"reads\":%u,"
+           "\"writes\":%u,\"reads\":%u,\"upload_words\":%u,"
            "\"transforms\":%u,\"matrix_reads\":%u,"
            "\"unknown_cmds\":%u,\"unknown_unique\":%d,"
            "\"break_on_unknown\":%s,\"unknown_triggered\":%s,"
@@ -622,7 +622,7 @@ static void mcp_cmd_get_cop_diagnostics(char *resp, int cap) {
            "\"atan2\":\"0x%08X\""
            "},"
            "\"unknown_log\":[",
-           g_cop.writes, g_cop.reads,
+           g_cop.writes, g_cop.reads, g_cop.upload_words,
            g_sharc.transform_count, g_sharc.matrix_read_count,
            g_sharc.unknown_cmds, g_sharc.unknown_log_count,
            g_sharc.break_on_unknown  ? "true" : "false",

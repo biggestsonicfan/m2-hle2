@@ -160,6 +160,7 @@ static inline int sharc_args_for_cmd(uint32_t cmd) {
         case 0x02800505: return 0;
         case 0x07800F0F: return 0;
         case 0x06000C0C: return 0;
+        case 0x00000000: return 0;
         case 0x00800101: return 0;
         case 0x01000202: return 0;
         case 0x01800303: return 0;
@@ -1486,6 +1487,12 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             return;
 
         /* ---- Matrix stack: push / pop ---- */
+        case 0x00000000:
+            /* Fn_initialize (PM 0x20360): stack depth 0, current slot back at
+             * the stack's base. cop_initialize (STF 0xF50) sends it once, when
+             * the COP has booted from the image the i960 uploaded. */
+            g_sharc.stack_top = 0;
+            return;
         case 0x00800101:
             /* _L20375: no push at depth 7 or more */
             if (g_sharc.stack_top < SHARC_STACK_DEPTH - 1) {
@@ -1834,7 +1841,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
 
         default:
             g_sharc.unknown_cmds++;
-            if ((cmd >> 16) == 0) return;
             {
                 int found = 0;
                 for (int _i = 0; _i < g_sharc.unknown_log_count; _i++) {
