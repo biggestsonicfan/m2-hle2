@@ -276,6 +276,16 @@ with the board's own 44.1 kHz counter (`g_sound.out_total`, latched per game fra
 - **The rings are allocated once and never freed** (`av_stream_shutdown` says so). The tap runs
   on the emu thread and clearing the function pointer does not retire a call already inside it.
   Same shape as the texram crash under "Memory Bus", same answer.
+- **On Linux, stream with `--headless --av-port`, not from a window.** Capture mode is Win32-only,
+  so `--kiosk` on Linux is an ordinary ImGui window, and on Xvfb every swap copies the whole back
+  buffer out of the GPU into the X server after waiting for the GPU to finish. In the fly's
+  docker container (Mesa d3d12 over WSL, the GPU shared with the stream's CUDA encoder) the frame
+  callback took ~6 ms and the swap ~19 ms: the board ran at 60 and the tap got 33-39 frames, all
+  counted as `dropped_missed` (a 16x16 window still paid ~10 ms). Headless is a surfaceless EGL
+  context (`headless_gpu_init` in `main.c`, libEGL by `dlopen`): nothing is presented, no X server
+  is needed, and the same bench held 60/60. `GALLIUM_DRIVER=d3d12` picks the GPU as it does for a
+  window; with none, Mesa gives llvmpipe, where the fill shader is 98% of the process.
+  *Symptom:* the stream's "board 17-26 fps in, ~700 gapped" while `get_status` said 60.
 
 ### Overlay plugin swap (`overlay_swap`, `ui/overlay_host.h`, host-side)
 

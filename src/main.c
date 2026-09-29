@@ -696,9 +696,7 @@ static void init(void) {
  * the format the wire wants, so choosing it here is also what makes the
  * readback a straight memcpy.
  *
- * Only the D3D11 backend. A GL build would need a surfaceless EGL context,
- * which is a different piece of work and not one this machine needs; --kiosk
- * covers the windowed case there.
+ * D3D11 here; Linux GL below.
  */
 #if defined(SOKOL_D3D11)
 static ID3D11Device        *g_hl_dev;
@@ -771,10 +769,117 @@ static bool headless_gpu_init(void) {
              state.video.gpu ? "GPU" : "CPU");
     return true;
 }
+#elif defined(SOKOL_GLCORE) && defined(__linux__)
+/*
+ * The same thing on Linux: a desktop GL context with no window, from EGL's
+ * surfaceless platform (EGL_MESA_platform_surfaceless + KHR_surfaceless_context
+ * + KHR_no_config_context). No X server is involved at all, so nothing is
+ * presented, and nothing waits for a present.
+ *
+ * That wait was the whole cost of streaming from a window on this platform.
+ * Capture mode is Win32-only, so --kiosk on Linux is an ordinary window, and
+ * on Xvfb every swap copies the whole back buffer out of the GPU into the X
+ * server and waits for the GPU to finish first. Measured in the fly's docker
+ * container (Mesa d3d12 over WSL, sharing the GPU with the stream's encoder):
+ * the frame callback took ~6 ms and the swap after it ~19 ms, so the tap
+ * delivered 33-39 of the board's 60 frames; a 16x16 window still paid ~10 ms.
+ *
+ * libEGL is opened with dlopen, as net/tls.h opens OpenSSL: a machine without
+ * it loses --headless --av-port and nothing else. GL itself is still libGL's,
+ * which libglvnd dispatches to whichever context is current, EGL's included.
+ * GALLIUM_DRIVER picks the device as it does for a window (d3d12 under WSL);
+ * with no GPU at all Mesa gives llvmpipe.
+ */
+#include <dlfcn.h>
+
+typedef void *hl_egl_display;
+typedef void *hl_egl_context;
+typedef void *(*hl_egl_proc_fn)(const char *);
+typedef hl_egl_display (*hl_egl_get_platform_display_fn)(unsigned, void *, const intptr_t *);
+typedef hl_egl_display (*hl_egl_get_platform_display_ext_fn)(unsigned, void *, const int32_t *);
+typedef unsigned (*hl_egl_initialize_fn)(hl_egl_display, int32_t *, int32_t *);
+typedef unsigned (*hl_egl_bind_api_fn)(unsigned);
+typedef hl_egl_context (*hl_egl_create_context_fn)(hl_egl_display, void *, hl_egl_context, const int32_t *);
+typedef unsigned (*hl_egl_make_current_fn)(hl_egl_display, void *, void *, hl_egl_context);
+typedef int32_t (*hl_egl_get_error_fn)(void);
+
+#define HL_EGL_PLATFORM_SURFACELESS_MESA        0x31DD
+#define HL_EGL_OPENGL_API                       0x30A2
+#define HL_EGL_CONTEXT_MAJOR_VERSION            0x3098
+#define HL_EGL_CONTEXT_MINOR_VERSION            0x30FB
+#define HL_EGL_CONTEXT_OPENGL_PROFILE_MASK      0x30FD
+#define HL_EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT  0x0001
+#define HL_EGL_NONE                             0x3038
+
+static void headless_sleep_ms(int ms) { emu_sleep_ms(ms); }
+
+static bool headless_gpu_init(void) {
+    void *lib = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        LOG_ERROR("av: --headless --av-port needs libEGL.so.1 on this platform (%s)", dlerror());
+        return false;
+    }
+    hl_egl_proc_fn           proc  = (hl_egl_proc_fn)dlsym(lib, "eglGetProcAddress");
+    hl_egl_initialize_fn     init  = (hl_egl_initialize_fn)dlsym(lib, "eglInitialize");
+    hl_egl_bind_api_fn       bind  = (hl_egl_bind_api_fn)dlsym(lib, "eglBindAPI");
+    hl_egl_create_context_fn mkctx = (hl_egl_create_context_fn)dlsym(lib, "eglCreateContext");
+    hl_egl_make_current_fn   cur   = (hl_egl_make_current_fn)dlsym(lib, "eglMakeCurrent");
+    hl_egl_get_error_fn      err   = (hl_egl_get_error_fn)dlsym(lib, "eglGetError");
+    hl_egl_get_platform_display_fn gpd =
+        (hl_egl_get_platform_display_fn)dlsym(lib, "eglGetPlatformDisplay");   /* EGL 1.5 */
+    hl_egl_get_platform_display_ext_fn gpd_ext = proc
+        ? (hl_egl_get_platform_display_ext_fn)proc("eglGetPlatformDisplayEXT") : NULL;
+    if (!init || !bind || !mkctx || !cur || !err || (!gpd && !gpd_ext)) {
+        LOG_ERROR("av: libEGL.so.1 lacks the entry points a headless context needs");
+        return false;
+    }
+    hl_egl_display dpy = gpd ? gpd(HL_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL)
+                             : gpd_ext(HL_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
+    int32_t major = 0, minor = 0;
+    if (!dpy || !init(dpy, &major, &minor)) {
+        LOG_ERROR("av: no surfaceless EGL display (0x%X) - is this Mesa?", (unsigned)err());
+        return false;
+    }
+    if (!bind(HL_EGL_OPENGL_API)) {
+        LOG_ERROR("av: EGL has no desktop OpenGL here (0x%X)", (unsigned)err());
+        return false;
+    }
+    /* The version a sokol_app window asks for, then the oldest sokol takes. */
+    static const int32_t versions[][2] = { { 4, 1 }, { 3, 3 } };
+    hl_egl_context ctx = NULL;
+    for (size_t i = 0; i < sizeof versions / sizeof versions[0] && !ctx; i++) {
+        const int32_t attrs[] = {
+            HL_EGL_CONTEXT_MAJOR_VERSION, versions[i][0],
+            HL_EGL_CONTEXT_MINOR_VERSION, versions[i][1],
+            HL_EGL_CONTEXT_OPENGL_PROFILE_MASK, HL_EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+            HL_EGL_NONE,
+        };
+        ctx = mkctx(dpy, NULL, NULL, attrs);    /* no config: KHR_no_config_context */
+    }
+    if (!ctx || !cur(dpy, NULL, NULL, ctx)) {  /* no surface: KHR_surfaceless_context */
+        LOG_ERROR("av: could not make a surfaceless GL context current (0x%X)", (unsigned)err());
+        return false;
+    }
+    sg_setup(&(sg_desc){
+        .environment = {
+            .defaults = { .color_format = SG_PIXELFORMAT_RGBA8,
+                          .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
+                          .sample_count = 1 },
+        },
+        .logger.func = slog_func,
+    });
+    if (!sg_isvalid()) { LOG_ERROR("av: sokol_gfx setup failed on the headless context"); return false; }
+    game_render_init();
+    video_init(&state.video);
+    LOG_INFO("av: headless graphics up (EGL %d.%d surfaceless, %s, %s); tiles on the %s",
+             (int)major, (int)minor, (const char *)glGetString(GL_RENDERER),
+             (const char *)glGetString(GL_VERSION), state.video.gpu ? "GPU" : "CPU");
+    return true;
+}
 #else
 static void headless_sleep_ms(int ms) { emu_sleep_ms(ms); }
 static bool headless_gpu_init(void) {
-    LOG_ERROR("av: --headless --av-port needs the D3D11 backend; use --kiosk on this one");
+    LOG_ERROR("av: --headless --av-port needs the D3D11 backend or Linux GL; use --kiosk on this one");
     return false;
 }
 #endif

@@ -43,7 +43,7 @@ def card_rgb(w, h):
     return img
 
 
-WINDOW = False   # --window: stream from a window (the GL builds have no headless path)
+WINDOW = False   # --window: stream from a window instead of headless
 
 
 def launch(exe, rom, port, fmt, size, card):
@@ -226,7 +226,7 @@ def main():
     ap.add_argument("--port", type=int, default=7280, help="first of four ports")
     ap.add_argument("--only", choices=("card", "attract"))
     ap.add_argument("--window", action="store_true",
-                    help="run the emulators windowed (GL builds; e.g. under xvfb-run on Linux)")
+                    help="run the emulators windowed (e.g. under xvfb-run on Linux)")
     args = ap.parse_args()
     global WINDOW
     WINDOW = args.window

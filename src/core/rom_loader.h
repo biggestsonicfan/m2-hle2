@@ -27,28 +27,6 @@
 #include "log.h"
 #include "miniz.h"
 
-/* ---- CRC32 --------------------------------------------------------------- */
-
-static uint32_t rl_crc32_tab[256];
-static int      rl_crc32_tab_ready = 0;
-
-static inline void rl_crc32_init(void) {
-    if (rl_crc32_tab_ready) return;
-    for (uint32_t i = 0; i < 256; i++) {
-        uint32_t c = i;
-        for (int j = 0; j < 8; j++) c = (c >> 1) ^ ((c & 1) ? 0xEDB88320u : 0u);
-        rl_crc32_tab[i] = c;
-    }
-    rl_crc32_tab_ready = 1;
-}
-
-static inline uint32_t rl_crc32(const uint8_t *data, size_t len) {
-    rl_crc32_init();
-    uint32_t c = 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; i++) c = rl_crc32_tab[(c ^ data[i]) & 0xFF] ^ (c >> 8);
-    return c ^ 0xFFFFFFFFu;
-}
-
 /* ---- File / zip extraction ---------------------------------------------- */
 
 static inline uint8_t *file_load(const char *path, size_t *out_size) {
@@ -131,12 +109,24 @@ static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, u
     return (uint8_t *)data;
 }
 
-static inline uint8_t *zip_extract(const char *zippath, const char *filename, size_t *out_size) {
+/* crc (optional) gets the file's CRC-32 as the zip's directory records it. That
+ * is the CRC of the bytes returned: miniz checks every file it extracts against
+ * it and fails the extraction on a mismatch (MINIZ_DISABLE_ZIP_READER_CRC32_CHECKS
+ * is not set), so computing it again from the data would only repeat that pass.
+ * It used to be repeated, byte by byte, over the whole set: a quarter of the
+ * time a desktop build took to load STF. */
+static inline uint8_t *zip_extract(const char *zippath, const char *filename,
+                                   size_t *out_size, uint32_t *crc) {
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_file(&zip, zippath, 0)) return NULL;
-    void *data = mz_zip_reader_extract_file_to_heap(&zip, filename, out_size,
-                                                    MZ_ZIP_FLAG_IGNORE_PATH);
+    void *data = NULL;
+    int i = mz_zip_reader_locate_file(&zip, filename, NULL, MZ_ZIP_FLAG_IGNORE_PATH);
+    mz_zip_archive_file_stat st;
+    if (i >= 0 && mz_zip_reader_file_stat(&zip, (mz_uint)i, &st)) {
+        data = mz_zip_reader_extract_to_heap(&zip, (mz_uint)i, out_size, 0);
+        if (data && crc) *crc = (uint32_t)st.m_crc32;
+    }
     mz_zip_reader_end(&zip);
     return (uint8_t *)data;
 }
@@ -157,11 +147,11 @@ static inline uint8_t *zip_extract_from_set(const char *child_zip, const char *p
         return mem;
     }
     uint8_t *data = NULL;
-    if (child_zip)  data = zip_extract(child_zip,  filename, out_size);
-    if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size);
+    uint32_t actual = 0;
+    if (child_zip)  data = zip_extract(child_zip,  filename, out_size, &actual);
+    if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size, &actual);
     if (!data) { LOG_ERROR("ROM not found: %s", filename); return NULL; }
 
-    uint32_t actual = rl_crc32(data, *out_size);
     if (actual != expected_crc) {
         LOG_WARN("CRC mismatch: %s (expected %08X, got %08X)", filename, expected_crc, actual);
     } else {
