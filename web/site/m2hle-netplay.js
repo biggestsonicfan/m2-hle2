@@ -157,11 +157,36 @@ const m2hleNetplay = (() => {
     $(id).hidden = !text;
   }
 
+  /* The code, its copy button and the Twitch link, in the panel ('np-twitch') or
+   * over the game ('np-twitch-float'). A new code puts the button back to Copy. */
+  function twitchCode(prefix, tw) {
+    if ($(prefix + '-code').textContent !== tw.code) setText(prefix + '-copy', 'Copy code');
+    setText(prefix + '-code', tw.code);
+    const a = $(prefix + '-link');
+    if (tw.uri && a.getAttribute('href') !== tw.uri) a.setAttribute('href', tw.uri);
+    a.hidden = !tw.uri;
+  }
+
+  /* The lobby on the game screen can only print the address and the code, so
+   * while it waits for Twitch they are laid over it as a link and a button. Not
+   * while the panel is open: it shows the same two itself. */
+  function twitchFloat(tw) {
+    const show = !open && tw.state === TWITCH_WAITING && !!tw.code;
+    $('np-twitch-float').hidden = !show;
+    if (show) twitchCode('np-twitch-float', tw);
+  }
+
+  function copyCode(prefix) {
+    navigator.clipboard.writeText($(prefix + '-code').textContent).then(
+      () => setText(prefix + '-copy', 'Copied'), () => {});
+  }
+
   function render() {
     if (!st) return;
     const tw = st.twitch || {};
     const state = st.state;
     $('np-empty').hidden = !st.empty_room;
+    twitchFloat(tw);
 
     /* The state of the game online, in a line. It sits on the menu's Online Battle
      * item, so with the menu closed it is what the menu button says it is holding
@@ -186,12 +211,7 @@ const m2hleNetplay = (() => {
       $('np-twitch-code-box').hidden = !waiting;
       setText('np-twitch-lead', waiting ? 'Almost there. Open Twitch, check the code matches this one, and approve it.'
                                         : 'Asking Twitch for a sign-in code…');
-      if (waiting) {
-        setText('np-twitch-code', tw.code);
-        const a = $('np-twitch-link');
-        if (tw.uri && a.getAttribute('href') !== tw.uri) a.setAttribute('href', tw.uri);
-        a.hidden = !tw.uri;
-      }
+      if (waiting) twitchCode('np-twitch', tw);
       return;
     }
 
@@ -458,10 +478,11 @@ const m2hleNetplay = (() => {
     $('np-close').addEventListener('click', () => toggle(false));
 
     $('np-twitch').querySelector('.np-cancel').addEventListener('click', () => post('twitch_cancel'));
-    $('np-twitch-copy').addEventListener('click', () => {
-      navigator.clipboard.writeText($('np-twitch-code').textContent).then(
-        () => setText('np-twitch-copy', 'Copied'), () => {});
-    });
+    $('np-twitch-copy').addEventListener('click', () => copyCode('np-twitch'));
+    /* Over the game: the pad and the keys still belong to the lobby, so the
+     * focus goes back to the canvas. */
+    $('np-twitch-float-copy').addEventListener('click', () => { copyCode('np-twitch-float'); $('canvas').focus(); });
+    $('np-twitch-float-link').addEventListener('click', () => $('canvas').focus());
 
     $('np-twitch-start').addEventListener('click', () => { dismissedFailure = ''; post('twitch_start'); });
     $('np-continue').addEventListener('click', () => {

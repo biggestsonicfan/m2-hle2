@@ -172,7 +172,7 @@ body {
 }
 /* Over the game, whatever it is showing, a window needs a firmer body than the
  * PS3's 0.8 over its own blue: a white SEGA screen washed the panels out. */
-.online, .menu, .touch-edit, .np-empty { --win: rgba(19, 34, 65, 0.95); }
+.online, .menu, .touch-edit, .np-empty, .np-twitch-float { --win: rgba(19, 34, 65, 0.95); }
 .ps-head > .ps-title { grid-column: 2; text-align: center; }
 .ps-head:not(:has(.ps-back)) { display: block; text-align: center; }
 .ps-head > .ps-back { grid-column: 3; justify-self: end; }
@@ -476,6 +476,19 @@ body:has(#drawer:not([hidden])) .panel { bottom: var(--drawer-h); }
   border-bottom: 2px solid #fff;
 }
 .np-empty[hidden] { display: none; }
+
+/* The Twitch code under the lobby's own text, low enough to leave it readable. */
+.np-twitch-float {
+  position: fixed;
+  left: 50%;
+  bottom: 12%;
+  transform: translateX(-50%);
+  z-index: 3;
+  width: min(22rem, calc(100vw - 32px));
+  text-align: center;
+}
+.np-twitch-float .np-row { margin-bottom: 0; }
+.np-twitch-float[hidden] { display: none; }
 
 /* ---- The bar: two small tiles in the top-right corner, over the canvas ----
  * Usually that corner is the letterbox; where it is the picture, they stay
