@@ -214,7 +214,7 @@ static inline bool netplay_families_compatible(uint32_t a, uint32_t b) {
 
 #define NETPLAY_LOG_LINES 64
 #define NETPLAY_LOG_LEN   160
-/* While netplay is off the status is republished at least this often. */
+/* Off, or waiting, the status is republished at least this often. */
 #define NETPLAY_STATUS_IDLE_MS 16
 #define NETPLAY_CMD_QUEUE 8
 
@@ -1800,9 +1800,9 @@ static inline void netplay_copy_str(char *dst, size_t size, const char *src) {
     dst[n] = '\0';
 }
 
-/* The UI reads this; it is refreshed once per pump while netplay is on, and
- * while it is off whenever something changed or 16 ms have passed
- * (netplay_begin_frame). */
+/* The UI reads this. It is refreshed once per pump while a board runs, and
+ * while netplay is off or waiting whenever something changed or 16 ms have
+ * passed (netplay_status_due). */
 static inline void netplay_publish_status(void) {
     emu_mutex_lock(&g_netplay.mutex);
     g_netplay.status_ms = net_now_ms();
@@ -3337,6 +3337,24 @@ static inline bool netplay_take_empty_restart(void) {
 }
 
 /*
+ * Is the published status due? A stopped board, and a board waiting at the
+ * barrier or on the peer's input, pumps a thousand times a second, and a full
+ * publish each time was more than half of an idle headless lane's CPU (issue
+ * #122). Publish when something the lobbies watch changed, and otherwise at
+ * display rate: nothing reads it faster. Only this thread writes the status.
+ */
+static inline bool netplay_status_due(bool took_cmd) {
+    const netplay_status_t *st = &g_netplay.status;
+    return took_cmd || st->log_count != g_netplay.log_count || st->state != g_netplay.state
+        || st->account_state != g_netplay.account.state || st->account_job != g_netplay.account.job
+        || st->twitch_state != g_netplay.twitch.state || st->empty_room != g_netplay.empty_prompt
+        || st->room_id != g_netplay.session.room_id || st->stalls != g_netplay.lockstep.stalls
+        || st->frame != g_netplay.frame || st->desync_frame != g_netplay.desync_frame
+        || st->generation != g_netplay.generation || st->peer_ready_gen != g_netplay.room.match
+        || net_now_ms() - g_netplay.status_ms >= NETPLAY_STATUS_IDLE_MS;
+}
+
+/*
  * Called once per slice from the emu thread, OUTSIDE the emu mutex. Pumps the
  * network and the room, then answers what this slice may do.
  */
@@ -3349,17 +3367,8 @@ static inline netplay_step_t netplay_begin_frame(void) {
     netplay_pump_twitch();
 
     if (!g_netplay.enabled) {
-        /* A stopped board pumps a thousand times a second, and a full publish
-         * was more than half of an idle headless lane's CPU (issue #122). Off,
-         * publish on a command, a new log line or a state change the lobbies
-         * watch, and otherwise at display rate: nothing reads it faster. */
         netplay_empty_room_pump();
-        const netplay_status_t *st = &g_netplay.status;   /* only this thread writes it */
-        if (took || st->log_count != g_netplay.log_count || st->state != g_netplay.state
-            || st->account_state != g_netplay.account.state || st->account_job != g_netplay.account.job
-            || st->twitch_state != g_netplay.twitch.state || st->empty_room != g_netplay.empty_prompt
-            || net_now_ms() - g_netplay.status_ms >= NETPLAY_STATUS_IDLE_MS)
-            netplay_publish_status();
+        if (netplay_status_due(took)) netplay_publish_status();
         return NETPLAY_STEP_OFF;
     }
 
@@ -3397,7 +3406,7 @@ static inline netplay_step_t netplay_begin_frame(void) {
         } else if (g_input.use_net) {
             netplay_release_inputs();
         }
-        netplay_publish_status();
+        if (step != NETPLAY_STEP_WAIT || netplay_status_due(took)) netplay_publish_status();
         return step;
     }
 
@@ -3438,7 +3447,9 @@ static inline netplay_step_t netplay_begin_frame(void) {
     /* Anything else: not in a match. The board runs normally and the keyboard
      * drives it. */
     netplay_empty_room_pump();
-    netplay_publish_status();
+    /* Waiting, the pump runs every millisecond (emu_sleep_ms(1)) to resend and
+     * announce; the status needs no more than the idle rate. */
+    if (step != NETPLAY_STEP_WAIT || netplay_status_due(took)) netplay_publish_status();
     return step;
 }
 
