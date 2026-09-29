@@ -70,6 +70,14 @@
 #define RPCN_PUNCH_MS         250
 #define RPCN_PUNCH_IDLE_MS    1000
 #define RPCN_SIGNALING_RETRY_MS 2000
+/* A member heard from nothing for this long has lost the address we hear them
+ * at: a NAT that dropped and remade its mapping, a laptop that changed networks.
+ * Every member sends at least a punch a second (RPCN_PUNCH_IDLE_MS), and a
+ * fighter an input every frame, so three seconds of silence is not a gap. */
+#define RPCN_PEER_QUIET_MS    3000
+/* When the peer-to-peer port is taken (another emulator, RPCS3), the next few
+ * are tried before giving up. Nothing is asked of the machine or the router. */
+#define RPCN_P2P_PORT_TRIES   16
 
 /* Keepalive round trips kept for the median, and how often, and by how much it
  * must have moved, before an owner publishes it again. */
@@ -171,6 +179,7 @@ typedef struct {
     uint32_t alt_ip;
     uint16_t alt_port;
     bool     heard;          /* a datagram has actually arrived from them */
+    uint64_t last_heard_ms;  /* the last one from where we hear them */
     uint64_t last_punch_ms;
     uint64_t signaling_retry_ms;
     uint64_t pending_signaling;
@@ -192,6 +201,10 @@ typedef struct {
      * Twitch login token from a server that merely went away, and the error text
      * is for people, not for strcmp. */
     bool     credential_refused;
+    /* The next room command is a return to a room we were in (a heal after a
+     * dropped link): if the room has gone meanwhile, stay online and say so. */
+    bool     join_soft;
+    bool     join_missed;    /* ...and it had: the room no longer exists */
     /* What the server said to the login, RPCN_OK until it has refused one. */
     rpcn_error_t login_error;
 
@@ -413,13 +426,36 @@ static inline void rpcn_session_set_peer_addr(rpcn_session_t *s, rpcn_peer_t *p,
 static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port,
                                      bool punch) {
     if (!p) return false;
-    if (p->heard) return p->ip == ip && p->port == port;
+    uint64_t now = net_now_ms();
+    if (p->heard) {
+        if (p->ip == ip && p->port == port) { p->last_heard_ms = now; return true; }
+        /* A member already heard from moves only once the old address has gone
+         * quiet, and then by the rules of first contact: a punch from anywhere,
+         * a game packet from the same address on another port. Their NAT made a
+         * new mapping (a router that timed the old one out, a phone or laptop
+         * that changed networks); they still send to us, and nothing they sent
+         * reached the match before this, so the stall timer ended it. */
+        if (now - p->last_heard_ms < RPCN_PEER_QUIET_MS) return false;
+        if (ip != p->ip && !punch) return false;
+        char was[32];
+        net_addr_text(was, sizeof(was), p->ip, p->port);
+        p->ip   = ip;
+        p->port = port;
+        p->alt_ip = 0;
+        p->alt_port = 0;
+        p->last_heard_ms = now;
+        p->last_punch_ms = 0;   /* answer at once: their side may be looking for us too */
+        rpcn_session_note(s, "%s went quiet at %s and is now heard from %s; following them",
+                          rpcn_peer_name(p), was, rpcn_peer_addr_text(p));
+        return true;
+    }
     bool elsewhere = p->ip && p->ip != ip && !(p->alt_ip && p->alt_ip == ip);
     if (elsewhere && !punch) return false;
     char told[32];
     net_addr_text(told, sizeof(told), p->ip, p->port);
     bool moved = (port != p->port || ip != p->ip);
     p->heard = true;
+    p->last_heard_ms = now;
     p->ip    = ip;
     p->port  = port;
     if (s->stage == RPCN_STAGE_HOSTING || s->stage == RPCN_STAGE_JOINING) s->stage = RPCN_STAGE_LINKED;
@@ -529,6 +565,8 @@ static inline void rpcn_session_stop(rpcn_session_t *s) {
     s->signaling_seen = false;
     s->sent_token = false;
     s->credential_refused = false;
+    s->join_soft = false;
+    s->join_missed = false;
     s->login_error = RPCN_OK;
     s->pending_serverlist = s->pending_worldlist = s->pending_room = 0;
     s->pending_search = 0;
@@ -611,18 +649,35 @@ static inline bool rpcn_session_start(rpcn_session_t *s, const rpcn_session_conf
         if (!net_startup()) { rpcn_session_fail(s, "could not start the socket library"); return false; }
         s->net_held = true;
     }
-    if (!net_udp_open(&p2p, p2p_port)) {
-        int err = net_errno();
+    /* A port somebody else holds is not worth failing over: the server learns
+     * our address and port from the keepalive this socket sends, and a peer
+     * told the wrong port finds us from our punches (rpcn_session_hear). So
+     * the next ones are tried, quietly, before anything is reported. */
+    uint16_t asked = p2p_port;
+    bool opened = false, taken = false;
+    int err = 0;
+    for (uint32_t t = 0; t < RPCN_P2P_PORT_TRIES && !opened; t++) {
+        p2p_port = (uint16_t)(asked + t);
+        if (!p2p_port) break;
+        opened = net_udp_open(&p2p, p2p_port);
+        if (opened) break;
+        err = net_errno();
 #ifdef _WIN32
-        bool taken = err == WSAEADDRINUSE;
+        taken = err == WSAEADDRINUSE;
 #else
-        bool taken = err == EADDRINUSE;
+        taken = err == EADDRINUSE;
 #endif
+        if (!taken) break;   /* not a busy port: another one will not help */
+    }
+    if (!opened) {
         rpcn_session_fail(s, "could not open the peer-to-peer socket: could not bind UDP %u (%d)%s",
                           (unsigned)p2p_port, err,
-                          taken ? " - another program (a second emulator?) has it" : "");
+                          taken ? " - it and the ports after it are taken" : "");
         return false;
     }
+    if (p2p_port != asked)
+        rpcn_session_note(s, "UDP %u is in use by another program; using %u", (unsigned)asked,
+                          (unsigned)p2p_port);
 #endif
 
     if (!rpcn_connect(&s->client, cfg->server, cfg->port, &pin)) {
@@ -728,6 +783,13 @@ static inline void rpcn_session_pump_relay(rpcn_session_t *s) {
     s->relay_publish_ms   = now;
 }
 
+/* A LAN or loopback address (network byte order). */
+static inline bool rpcn_addr_is_private(uint32_t ip_be) {
+    uint32_t ip = ntohl(ip_be);
+    return (ip >> 24) == 10 || (ip >> 24) == 127
+        || (ip >> 20) == (172u << 4 | 1u) || (ip >> 16) == (192u << 8 | 168u);
+}
+
 static inline void rpcn_session_pump_punch(rpcn_session_t *s) {
     uint8_t punch[RPCN_PUNCH_SIZE];
     memcpy(punch, g_rpcn_punch_tag, sizeof(g_rpcn_punch_tag));
@@ -742,6 +804,17 @@ static inline void rpcn_session_pump_punch(rpcn_session_t *s) {
         rpcn_send_to(&s->client, p->ip, p->port, punch, sizeof(punch));
         if (!p->heard && p->alt_ip && p->alt_port && (p->alt_ip != p->ip || p->alt_port != p->port))
             rpcn_send_to(&s->client, p->alt_ip, p->alt_port, punch, sizeof(punch));
+        /* Two players behind one public address are told each other's LAN
+         * address on port 3658 whatever port they really have (RPCN hardcodes
+         * it), and a player whose 3658 was taken is on one of the next few
+         * (rpcn_session_start). Knock on those too until one answers: the
+         * punch names us, so they adopt the port it came from. */
+        if (!p->heard && p->port == RPCN_P2P_PORT && rpcn_addr_is_private(p->ip))
+            for (uint16_t k = 1; k < RPCN_P2P_PORT_TRIES; k++) {
+                uint16_t port = (uint16_t)(RPCN_P2P_PORT + k);
+                if (p->ip == s->client.local_ip && port == s->client.local_port) continue;
+                rpcn_send_to(&s->client, p->ip, port, punch, sizeof(punch));
+            }
     }
 }
 
@@ -1029,13 +1102,16 @@ static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
 
         if (pkt.packet_id == s->pending_room) {
             s->pending_room = 0;
+            bool soft = s->join_soft;
+            s->join_soft = false;
             if (pkt.error != RPCN_OK) {
                 const char *why = "the room command failed";
                 if (pkt.error == RPCN_ERR_ROOM_MISSING)          why = "that room no longer exists";
                 else if (pkt.error == RPCN_ERR_ROOM_FULL)        why = "that room is full";
                 else if (pkt.error == RPCN_ERR_ROOM_PASSWORD_MISMATCH) why = "wrong room password";
                 else if (pkt.error == RPCN_ERR_ROOM_PASSWORD_MISSING)  why = "that room needs a password";
-                if (s->ps3 && !s->is_host) {
+                if (soft && pkt.error == RPCN_ERR_ROOM_MISSING) s->join_missed = true;
+                if ((s->ps3 && !s->is_host) || soft) {
                     /* PS3 rooms open and close between matches, and the list is
                      * only as fresh as the last search: say so and stay online. */
                     rpcn_session_note(s, "could not join: %s (ErrorType=%u)", why, (unsigned)pkt.error);
@@ -1312,7 +1388,11 @@ static inline int rpcn_session_recv(rpcn_session_t *s, void *buf, uint32_t cap,
 
         for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
             rpcn_peer_t *p = &s->peers[i];
-            if (p->used && p->heard && p->ip == ip && p->port == port) { *from = p->member_id; break; }
+            if (p->used && p->heard && p->ip == ip && p->port == port) {
+                *from = p->member_id;
+                p->last_heard_ms = net_now_ms();
+                break;
+            }
         }
         return got;
     }

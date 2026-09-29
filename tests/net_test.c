@@ -18,8 +18,10 @@
  *      how the line moves after a result.
  *  (F) Watchers: never gating, and still getting every frame.
  *  (G) A member heard from an address the server did not give (issue #108):
- *      a punch may re-point them, a game packet may not. This part uses two
- *      UDP sockets on loopback, and no server.
+ *      a punch may re-point them, a game packet may not. A member heard from
+ *      is followed to a new address only after the old one goes quiet (a NAT
+ *      that made a new mapping). And a taken peer-to-peer port is stepped
+ *      past. This part uses UDP sockets on loopback, and no server.
  */
 #define NDEBUG 1
 #include <stdio.h>
@@ -652,6 +654,35 @@ int main(void) {
             CHECK(p->ip == htonl(0x7F000001u) && p->port == them_port,
                   "(G) a later punch from a third address does not move a member already heard");
 
+            /* ...until the address they were heard at goes quiet: their NAT made a
+             * new mapping, and they are still talking to us from it. */
+            p->last_heard_ms = net_now_ms() - RPCN_PEER_QUIET_MS - 1;
+            net_udp_send(other, htonl(0x7F000001u), mine, game, sizeof(game));
+            from = 0;
+            got = pump_recv(&s, &from, &ip, &port);
+            CHECK(got == (int)sizeof(game) && from == 0 && rpcn_session_claim(&s, 34, ip, port)
+                  && p->port == other_port,
+                  "(G) once quiet, their game packet from a new port on the same address moves them");
+            CHECK(strstr(g_notes, "went quiet") != NULL, "(G) and the log says they were followed");
+            punch_from(them, mine, 34);
+            pump_recv(&s, &from, &ip, &port);
+            CHECK(p->port == other_port, "(G) the old address, heard again straight after, does not move them back");
+            net_udp_send(other, htonl(0x7F000001u), mine, game, sizeof(game));
+            from = 0;
+            got = pump_recv(&s, &from, &ip, &port);
+            CHECK(got == (int)sizeof(game) && from == 34, "(G) their packets from the new address are theirs");
+
+            /* A game packet from another ADDRESS is not enough, even when quiet:
+             * that is first contact's rule too. A punch is. */
+            p->last_heard_ms = net_now_ms() - RPCN_PEER_QUIET_MS - 1;
+            CHECK(!rpcn_session_claim(&s, 34, htonl(0x7F000002u), 4000) && p->port == other_port,
+                  "(G) a quiet member is not moved by a game packet from another address");
+            CHECK(rpcn_session_hear(&s, p, htonl(0x7F000002u), 4000, true) && p->ip == htonl(0x7F000002u),
+                  "(G) but a punch from one moves them");
+            p->ip = htonl(0x7F000001u);
+            p->port = them_port;
+            p->last_heard_ms = net_now_ms();
+
             /* The keepalive tells the server the advertised address when one is set. */
             s.client.user_id = 7;
             s.client.signaling_addr = htonl(0x7F000001u);
@@ -683,6 +714,39 @@ int main(void) {
         net_close(&them);
         net_close(&other);
         net_close(&s.client.udp);
+    }
+
+    /* ---- (G2) the peer-to-peer port is taken --------------------------------
+     * Another emulator, or RPCS3, holds it. The session steps to the next free
+     * one before it reaches for the server; the server is a closed port here,
+     * so the start fails after the bind, which is the part under test. */
+    {
+        static rpcn_session_t s;
+        memset(&s, 0, sizeof(s));
+        g_notes[0] = 0;
+        uint16_t held_port = free_udp_port(3860);
+        net_sock_t held = NET_SOCK_INVALID;
+        bool ok = held_port && net_udp_open(&held, held_port);
+        CHECK(ok, "(G2) a port to hold");
+        if (ok) {
+            rpcn_session_config_t cfg;
+            memset(&cfg, 0, sizeof(cfg));
+            cfg.server = "127.0.0.1";
+            cfg.port = 1;                         /* nothing listens: the connect fails */
+            cfg.npid = "someone";
+            cfg.password = "x";
+            cfg.token = "";
+            cfg.com_id = "NPWR99999_00";
+            cfg.local_p2p_port = held_port;
+            cfg.log = note_cb;
+            rpcn_session_start(&s, &cfg);
+            CHECK(strstr(g_notes, "is in use by another program; using") != NULL,
+                  "(G2) a taken port is stepped past, not reported as a failure");
+            CHECK(strstr(rpcn_session_error(&s), "bind UDP") == NULL,
+                  "(G2) and the session did not fail on the bind");
+            rpcn_session_stop(&s);
+        }
+        net_close(&held);
     }
 
     printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail, g_fail == 1 ? "" : "s");
