@@ -195,6 +195,7 @@ static inline void fvipers_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
     uint32_t sat_ptr  = fvipers_read32(rs->maincpu, 0x00);
     uint32_t prcb_ptr = fvipers_read32(rs->maincpu, 0x04);
     LOG_INFO("fvipers_install: SAT=0x%08X  PRCB=0x%08X", sat_ptr, prcb_ptr);
+    cpu->prcb = prcb_ptr;
     if (prcb_ptr + 0x2C < rs->maincpu_size) {
         uint32_t start_ip_ptr = fvipers_read32(rs->maincpu, prcb_ptr + PRCB_START_IP);
         if (start_ip_ptr < rs->maincpu_size) {

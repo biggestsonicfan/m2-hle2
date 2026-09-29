@@ -7,7 +7,9 @@
  *   - cmpobX always updates CC even when the branch is NOT taken
  *   - MEM mode 0x5 is IP-relative: EA = IP + 8 + disp
  *   - FP-from-GPR is a bit reinterpret (memcpy), not (float)int
- *   - call/ret frame: SP aligned to 64, locals zeroed, pfp/sp/rip saved, g15 synced
+ *   - call/ret frame: FP (g15) = SP aligned to 64, SP = FP + 64, locals zeroed,
+ *     pfp/sp/rip saved; ret puts the caller's g15 back
+ *   - modpc: mask from src2, new bits from src/dst, which gets the old PC
  * plus a few plain ALU / load-store sanity checks.
  *
  * Code is assembled by hand into work RAM and executed via i960_step().
@@ -133,6 +135,7 @@ int main(void) {
     cpu.locals.pfp = 0x0000AAAA;
     cpu.locals.sp  = 0x00001010;     /* not 64-aligned */
     cpu.locals.r[7] = 0xDEAD;        /* a local that ret must restore */
+    cpu.globals.fp  = 0x00000FC0;    /* the caller's frame */
     cpu.sfr.ip = CODE;
     put(CODE,        enc_ctrl(0x09, 0x80));  /* call +0x80 */
     put(CODE + 0x80, enc_ctrl(0x0A, 0));     /* ret        */
@@ -141,13 +144,27 @@ int main(void) {
     CHECK(cpu.frame_depth == 1, "call pushes a frame");
     CHECK(cpu.locals.rip == CODE + 4, "call saves return IP in rip");
     CHECK(cpu.locals.pfp == 0x0000AAAA, "call preserves pfp into new frame");
-    CHECK(cpu.locals.sp == 0x1040, "call aligns SP up to 64 bytes (0x1010 -> 0x1040)");
-    CHECK(cpu.globals.fp == cpu.locals.pfp, "call syncs g15/fp to pfp");
+    CHECK(cpu.globals.fp == 0x1040, "call: g15/fp is SP aligned up to 64 bytes (0x1010 -> 0x1040)");
+    CHECK(cpu.locals.sp == 0x1080, "call: SP starts a frame (64 bytes) above FP");
     CHECK(cpu.locals.r[7] == 0, "call zeroes new frame locals");
     i960_step(&cpu, &bus);   /* ret */
     CHECK(cpu.sfr.ip == CODE + 4, "ret returns to saved rip");
     CHECK(cpu.frame_depth == 0, "ret pops the frame");
     CHECK(cpu.locals.r[7] == 0xDEAD, "ret restores caller locals");
+    CHECK(cpu.globals.fp == 0x0FC0, "ret restores the caller's g15/fp");
+
+    /* ---- modpc src, mask, src/dst ---------------------------------------- */
+    /* The boot code's `modpc r4, r4, r5` with r4 = 0x1F0000 (the priority
+     * field) and r5 = 0 drops the priority to 0 and hands back the old PC. */
+    i960_reset(&cpu);
+    cpu.sfr.pc = 0x001F2002;
+    cpu.locals.r[4] = 0x001F0000;
+    cpu.locals.r[5] = 0;
+    cpu.sfr.ip = CODE;
+    put(CODE, enc_reg(0x655, L(5), L(4), 0, L(4), 0, 0));   /* modpc r4, r4, r5 */
+    i960_step(&cpu, &bus);
+    CHECK(cpu.sfr.pc == 0x00002002, "modpc: bits under the mask (src2) come from src/dst");
+    CHECK(cpu.locals.r[5] == 0x001F2002, "modpc: src/dst gets the old PC");
 
     /* ---- plain ALU + load/store sanity ---------------------------------- */
     i960_reset(&cpu);

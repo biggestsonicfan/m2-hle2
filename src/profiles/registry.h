@@ -19,6 +19,7 @@
 #ifndef M2HLE_WEB
 #include "fvipers.h"
 #include "m2snake.h"
+#include "sfight_homebrew.h"
 #endif
 /* Future: vf2.h, daytona.h, vcop.h, ... */
 
@@ -30,6 +31,7 @@ const game_profile_t *const g_profiles[] = {
 #ifndef M2HLE_WEB
     &fvipers_profile,
     &m2snake_profile,
+    &sfight_homebrew_profile,
 #endif
 };
 

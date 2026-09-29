@@ -374,6 +374,8 @@ static bool lr_load_rom(const char *zip) {
         lr_message(msg, 600);
         return false;
     }
+    if (profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size))
+        LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
     /* The model lookup is built from the ROM's model table: a new set needs a new one. */
     geo3d_lookup_invalidate();
     g_sound_on = opt.sound && g_active_profile->quirks.enable_68k_sound

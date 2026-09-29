@@ -353,8 +353,31 @@ static void test_addsub_flags(void) {
     CHECK("subq borrow: N set", (S.cpu.sr & M68K_SR_N)!=0);
 }
 
+static void test_stop_illegal(void) {
+    /* stop #$2000 = 0x4E72 0x2000: loads SR and waits for an interrupt. It used
+     * to be decoded at 0x4E74 (RTD, illegal on a 68000), and 0x4E72 halted. */
+    setup();
+    S.cpu.pc = 0x1000;
+    w16(0x1000, 0x4E72); w16(0x1002, 0x2000);
+    m68k_step(&S);
+    CHECKEQ("stop: pc past the immediate", S.cpu.pc, 0x1004);
+    CHECKEQ("stop: SR = immediate", S.cpu.sr, 0x2000);
+    CHECK("stop: stopped, not halted", S.cpu.stopped && !S.cpu.halted);
+    setup();
+    S.cpu.pc = 0x1000;
+    w16(0x1000, 0x4E74);
+    m68k_step(&S);
+    CHECK("0x4E74 (RTD) is illegal on a 68000", S.cpu.halted && !S.cpu.stopped);
+    setup();
+    S.cpu.pc = 0x1000;
+    w16(0x1000, 0x4AFC);
+    m68k_step(&S);
+    CHECK("0x4AFC is ILLEGAL", S.cpu.halted);
+}
+
 int main(void) {
     printf("m68k opcode tests\n");
+    test_stop_illegal();
     test_jmp_an();
     test_jmp_pcrel();
     test_jsr_an();

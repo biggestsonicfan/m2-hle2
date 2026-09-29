@@ -179,6 +179,10 @@ static inline void emu_nap_us(int64_t us) { emu_sleep_us(us); }
  * the injected frame. Also poke the per-game warning-skip flag. */
 static bool s_irq_in_service     = false;
 static int  s_irq_baseline_depth = 0;
+/* The handler in service came from the program's own interrupt table
+ * (game_quirks_t.irq_vectors), and the slices it has been in service for. */
+static bool s_irq_from_table     = false;
+static int  s_irq_slices         = 0;
 static uint64_t s_frame_steps    = 0;   /* i960 instructions since the last frame edge (emu_sound_slice_end) */
 
 /* Warning-screen auto-skip. ON normally; turn OFF to keep our attract timeline
@@ -233,6 +237,8 @@ static struct {
 static inline void emu_board_reset_state(void) {
     s_irq_in_service     = false;
     s_irq_baseline_depth = 0;
+    s_irq_from_table     = false;
+    s_irq_slices         = 0;
     g_frame_done         = 0;
     g_versus_result      = 0;
     g_replay_stage_pin   = -1;
@@ -309,17 +315,45 @@ static inline bool emu_sound_ready(void) {
     return false;
 }
 
+/* The handler for pin 0..3: the profile's, or with irq_vectors the one the
+ * program's own interrupt table gives (hle_irq_vector_handler). 0 = none. */
+static inline uint32_t emu_irq_handler(emu_thread_ctx_t *ctx, const game_quirks_t *q, int pin) {
+    if (q->irq_handler[pin]) return q->irq_handler[pin];
+    return q->irq_vectors ? hle_irq_vector_handler(ctx->cpu, ctx->bus, pin, NULL) : 0;
+}
+
+/* A profile's handler runs as STF's always have (hle_interrupt); one from the
+ * program's own table the way the processor runs it (hle_interrupt_on_stack). */
+static inline void emu_irq_enter(emu_thread_ctx_t *ctx, const game_quirks_t *q, int pin, uint32_t h) {
+    s_irq_baseline_depth = ctx->cpu->frame_depth;
+    uint32_t vector = 0;
+    if (q->irq_handler[pin] || !hle_irq_vector_handler(ctx->cpu, ctx->bus, pin, &vector))
+        hle_interrupt(ctx->cpu, h);
+    else
+        hle_interrupt_on_stack(ctx->cpu, ctx->bus, h, vector);
+    s_irq_in_service = true;
+    s_irq_from_table = !q->irq_handler[pin];
+    s_irq_slices     = 0;
+}
+
 /* Take the sound interrupt now, if it is the one to take. Call with no handler
  * in service. */
 static inline void emu_offer_sound(emu_thread_ctx_t *ctx) {
     const game_quirks_t *q = &g_active_profile->quirks;
-    if (!q->irq_handler[3] || !(g_irqt.intena & 0x0C00u)) return;
+    if (!(g_irqt.intena & 0x0C00u)) return;
+    uint32_t h = emu_irq_handler(ctx, q, 3);
+    if (!h) return;
     if (!emu_sound_pending(ctx, q)) return;
     if (irqt_pending_pin() != 3 || !emu_sound_ready()) return;
-    s_irq_baseline_depth = ctx->cpu->frame_depth;
-    hle_interrupt(ctx->cpu, q->irq_handler[3]);
-    s_irq_in_service = true;
+    emu_irq_enter(ctx, q, 3, h);
 }
+
+/* A handler from the program's own table need not return: an SDK kernel's
+ * vblank handler can switch to another task (flushreg, a new frame and stack,
+ * bx), and the frame depth it was entered at is then never seen again. With
+ * nothing else to go on, one still in service after this many slices is taken
+ * to have done that, so the pins are not masked for good. */
+#define EMU_IRQ_TABLE_MAX_SLICES 8
 
 static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (!g_active_profile) return;
@@ -339,13 +373,11 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (s_irq_in_service) return;
     int pin = irqt_pending_pin();            /* gated by (intreq & intena) */
     if (pin < 0) return;
-    uint32_t h = q->irq_handler[pin];
+    uint32_t h = emu_irq_handler(ctx, q, pin);
     if (!h) return;                          /* pin not yet delivered (still HLE) */
     if (pin == 3 && !emu_sound_ready()) return;
 
-    s_irq_baseline_depth = cpu->frame_depth;
-    hle_interrupt(cpu, h);                   /* vector to handler; ret resumes, AC/PC restored */
-    s_irq_in_service = true;
+    emu_irq_enter(ctx, q, pin, h);           /* vector to handler; ret resumes, AC/PC restored */
 }
 
 /* When a handler returns -- the sound handler after its byte, or any other --
@@ -398,8 +430,8 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
     g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
-    if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FCu) &&
-            g_active_profile && g_active_profile->quirks.irq_handler[2])
+    if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FCu) && g_active_profile &&
+            (g_active_profile->quirks.irq_handler[2] || g_active_profile->quirks.irq_vectors))
         emu_service_irq(ctx);
 }
 
@@ -539,6 +571,10 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
          * never isolates / renders. */
         cop_geo_frame_edge();
     }
+    if (s_irq_in_service && s_irq_from_table && ++s_irq_slices > EMU_IRQ_TABLE_MAX_SLICES) {
+        LOG_WARN("emu: interrupt handler never returned (task switch?) -- IP=0x%08X", ctx->cpu->sfr.ip);
+        s_irq_in_service = false;
+    }
     /* Additive: advance the board timers one frame of cycles so the
      * enabled timer IRQ (bit5) expires and vectors its ISR. */
     emu_timers_slice_begin(ctx);
@@ -576,6 +612,11 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     bool slow = ctx->step_over_bp || g_frame_done || (board_vblank && g_vblank_acked) || g_irqt_sound_kick
              || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered;
     hle_filter_sync();
+    /* A vblank the program takes as an interrupt is acknowledged by its
+     * handler at the START of the frame, not where the frame's work ends, so
+     * that acknowledge does not end the slice: the frame then runs the rest
+     * of the slice, and still counts as a frame (emu_slice_finish). */
+    bool vbl_irq = false;
     /* The loop's host time, less the sound board it ran early inside it
      * (sound_uart_make_room): the i960 and the COP (emu_times.h). */
     const int64_t loop_t0  = emu_now_us();
@@ -583,7 +624,8 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     int i;
     for (i = 0; i < max_steps && !ctx->cpu->halted; i++) {
         if (slow) {
-            if (g_frame_done || (board_vblank && g_vblank_acked)) break;   /* stop at the frame's vsync-ACK */
+            if (board_vblank && g_vblank_acked && s_irq_in_service) vbl_irq = true;
+            if (g_frame_done || (board_vblank && g_vblank_acked && !vbl_irq)) break;   /* stop at the frame's vsync-ACK */
             if (ctx->step_over_bp) {
                 ctx->step_over_bp = 0;
             } else if (bp_check(ctx->cpu->sfr.ip)) {

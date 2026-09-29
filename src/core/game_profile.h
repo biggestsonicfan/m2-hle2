@@ -146,6 +146,12 @@ typedef struct {
      * directly. STF/FV leave this false (their 3D is HLE'd from the COP stream). */
     bool     geo_displaylist;
 
+    /* Take an interrupt whose pin has no irq_handler through the program's own
+     * interrupt table, as the processor does (hle_irq_vector_handler): the
+     * vector from the interrupt control register, the handler from the table
+     * the PRCB names. For a program whose handlers no profile knows. */
+    bool     irq_vectors;
+
     /* Models that keep their projected depth under the polygon z-sort, with
      * no recede (geo3d_model_standing). For closed solids standing on a floor
      * too deep to recede: sorted by their far corners, they would step back
@@ -189,6 +195,11 @@ typedef struct game_profile {
     game_input_map_t  input;
 
     game_quirks_t     quirks;
+
+    /* Runs whatever program is in the set (sfight_homebrew.h). Never the
+     * set's default: profile_for_program picks it for a program that is not
+     * the set's game. */
+    bool              any_program;
 } game_profile_t;
 
 /* ---- Registry ------------------------------------------------------------ */
@@ -223,6 +234,64 @@ static inline const game_profile_t *profile_for_rom_set(const char *set,
     for (size_t i = 0; i < g_profile_count; i++)
         if (strcmp(profile_rom_set(g_profiles[i]), set) == 0) return g_profiles[i];
     return NULL;
+}
+
+/*
+ * Whether `rom` is the program of `p`'s game, as far as its interrupt table
+ * tells: p's hooks and interrupt handlers are addresses in that program. The
+ * table is found the way the processor finds it at reset (word 1 of the ROM is
+ * the PRCB, PRCB + 0x14 the table), and its vectors 12-15 (pins 0-3) must be
+ * the handlers p names. True when there is nothing to go on: p names no
+ * handlers, or the table is not in the ROM.
+ */
+static inline bool profile_program_matches(const game_profile_t *p, const uint8_t *rom, size_t size) {
+    const uint32_t *h = p->quirks.irq_handler;
+    if (!(h[0] | h[1] | h[2] | h[3]) || size < 8) return true;
+#define PFP_RD32(o) ((uint32_t)rom[(o)] | (uint32_t)rom[(o) + 1] << 8 | \
+                     (uint32_t)rom[(o) + 2] << 16 | (uint32_t)rom[(o) + 3] << 24)
+    uint32_t prcb = PFP_RD32(4);
+    if ((uint64_t)prcb + 0x18 > size) return true;
+    uint32_t table = PFP_RD32(prcb + 0x14);
+    if ((uint64_t)table + 36 + 8 * 4 > size) return true;
+    for (int pin = 0; pin < 4; pin++)
+        if (h[pin] && PFP_RD32(table + 36 + (4 + pin) * 4) != h[pin]) return false;
+#undef PFP_RD32
+    return true;
+}
+
+/*
+ * The profile to run a loaded program with. Homebrew ships as a stock set with
+ * the program EPROMs swapped (m2-pacman is `sfight` with three EPROMs
+ * replaced), and the game's profile would plant its hooks in it. So: `p`,
+ * unless the program is not p's game, when the set's any_program profile runs
+ * it instead; and an any_program profile hands a program that IS the set's
+ * game back to the set's default profile. A patched build of the game keeps
+ * its interrupt table, and so its profile.
+ */
+static inline const game_profile_t *profile_for_program(const game_profile_t *p,
+                                                        const uint8_t *rom, size_t size) {
+    if (!p || !rom) return p;
+    const char *set = profile_rom_set(p);
+    for (size_t i = 0; i < g_profile_count; i++) {
+        const game_profile_t *q = g_profiles[i];
+        if (strcmp(profile_rom_set(q), set) != 0 || q->any_program == p->any_program) continue;
+        if (p->any_program) {
+            /* the set's default game profile, if the program is its game */
+            return profile_program_matches(q, rom, size) && (q->quirks.irq_handler[0] |
+                   q->quirks.irq_handler[1] | q->quirks.irq_handler[2] | q->quirks.irq_handler[3]) ? q : p;
+        }
+        return profile_program_matches(p, rom, size) ? p : q;
+    }
+    return p;
+}
+
+/* After a load: make the active profile the one for the program just loaded
+ * (profile_for_program). True if it changed. */
+static inline bool profile_adopt_program(const uint8_t *rom, size_t size) {
+    const game_profile_t *p = profile_for_program(g_active_profile, rom, size);
+    if (p == g_active_profile) return false;
+    g_active_profile = p;
+    return true;
 }
 
 #endif /* GAME_PROFILE_H */

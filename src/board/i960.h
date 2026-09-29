@@ -85,12 +85,24 @@ typedef struct i960_cpu {
     uint32_t       frame_irq_ac[FRAME_STACK_DEPTH];
     uint32_t       frame_irq_pc[FRAME_STACK_DEPTH];
 
+    /* The caller's frame pointer (g15) at each push, put back by `ret`. A call
+     * makes g15 the new frame's base, (SP + 63) & ~63, and SP that + 64 (MAME
+     * do_call). g15 used to be set to pfp, which this model leaves at 0, so
+     * code that keeps its locals at fp+N (every gcc960 function) wrote them
+     * into ROM; STF's compiler never addresses through fp. */
+    uint32_t       frame_fp[FRAME_STACK_DEPTH];
+
     // Running state
     int            halted;
 
     /* Clock cycles the instructions run so far cost, at MAME's per-opcode
      * estimates (i960_cycle_cost). Only live board timers read it. */
     uint64_t       cycles;
+
+    /* The PRCB the processor was started or last re-initialised with (IAC
+     * reinitialize). Its interrupt table is where an interrupt pin's vector
+     * finds its handler (hle_irq_vector_handler). */
+    uint32_t       prcb;
 } i960_cpu_t;
 
 static inline void i960_reset(i960_cpu_t *cpu) {

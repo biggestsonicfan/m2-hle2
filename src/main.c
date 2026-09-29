@@ -209,6 +209,8 @@ static void load_active_profile(const char *primary_zip) {
 
     g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
     if (g_active_profile->load_fn(&state.romset, primary_zip, parent_zip_ptr) == 0) {
+        if (profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size))
+            LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
         /* The model lookup is built from the ROM's model table: a new set needs a new one. */
         geo3d_lookup_invalidate();
         g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
