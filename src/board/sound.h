@@ -593,6 +593,9 @@ static inline void sound_code_byte(uint8_t b) {
  * not modelled, and bytes do not overrun, the ring holds them. */
 static inline bool sound_uart_rxrdy(const sound_state_t *ss) { return ss->scsp.mo_r != ss->scsp.mo_w; }
 
+static void sound_run(uint32_t n);                      /* below */
+static inline bool sound_uart_make_room(bool for_game);  /* below; both callbacks need it */
+
 static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     (void)r; (void)size;
     g_sound.read_count++;
@@ -606,12 +609,14 @@ static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     /* i8251 status at +4: TxRDY (bit 0), RxRDY (bit 1) and TxEMPTY (bit 2) as the line stands */
     if ((addr - MIDI_BASE) != 4) return 0u;
     sound_uart_service(&g_sound, g_sound.m68k.cpu.cycles);
+    /* A program that polls TxRDY instead of taking the interrupt (m2-pacman's
+     * flush loop) would otherwise see the holding register full for the rest of
+     * the slice: nothing clocks the line while the i960 runs. Run the sound
+     * board on until TxRDY rises, as the interrupt path does (make_room). */
+    if (!sound_uart_txrdy(&g_sound)) sound_uart_make_room(true);
     return (sound_uart_txrdy(&g_sound) ? 0x01u : 0u) | (sound_uart_rxrdy(&g_sound) ? 0x02u : 0u)
          | (sound_uart_txempty(&g_sound) ? 0x04u : 0u);
 }
-
-static void sound_run(uint32_t n);                      /* below */
-static inline bool sound_uart_make_room(bool for_game);  /* below; the write callback needs it */
 
 static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     (void)r; (void)size;

@@ -178,13 +178,22 @@ int main(void) {
         for (int i = 0; i < 32; i++) mem_write8(&bus, MIDI_BASE, 0x10);
         CHECK(g_sound.uart.count == 32 && g_sound.out_total == t0,
               "backpressure: 32 bytes fill the UART's queue without running the board");
-        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x00, "backpressure: TxRDY is down with the holding register full");
         mem_write8(&bus, MIDI_BASE, 0x11);
         CHECK(g_sound.uart.drops == 0 && g_sound.uart.count == 32,
               "backpressure: the 33rd byte waited for the line and queued");
         CHECK(g_sound.ahead > 0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
               g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
               "backpressure: the board ran early, by no more than a slice");
+        /* A program that polls TxRDY (m2-pacman's flush loop) runs the board on
+         * from the status read, the same accounted way, until the holding
+         * register empties: with nothing clocking the line it would read
+         * "full" for the rest of the slice. */
+        int32_t ahead0 = g_sound.ahead;
+        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x01 && g_sound.uart.count == 1,
+              "backpressure: polling the status runs the line until TxRDY rises");
+        CHECK(g_sound.ahead > ahead0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
+              g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
+              "backpressure: the poll's samples are run early too, within the slice");
         sound_run_slice(60);
         CHECK(g_sound.ahead == 0 && g_sound.out_total == t0 + 735,
               "backpressure: the slice owes the early samples back (735 in all)");
