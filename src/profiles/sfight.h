@@ -199,7 +199,20 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
     uint32_t sat_ptr  = sfight_read32(rs->maincpu, 0x00);
     uint32_t prcb_ptr = sfight_read32(rs->maincpu, 0x04);
     LOG_INFO("sfight_install: SAT=0x%08X  PRCB=0x%08X", sat_ptr, prcb_ptr);
+    cpu->prcb = prcb_ptr;
     if (prcb_ptr + 0x2C < rs->maincpu_size) {
+        /* The processor starts on the PRCB's interrupt stack: FP there, SP a
+         * frame above (MAME i960 device_reset). An IAC re-initialise does not
+         * move FP, so a program that then enters main with a branch rather
+         * than a call (m2-sdk's kx_init, `b _main`) keeps its locals there.
+         * FP used to start at 0, and m2-pacman's main counted its loops in ROM. */
+        uint32_t isp = sfight_read32(rs->maincpu, prcb_ptr + PRCB_INTR_STACK);
+        cpu->globals.fp = isp;
+        cpu->locals.sp  = isp + 64;
+        /* ...at priority 31, in the interrupted state (bit 13), supervisor
+         * (MAME: 0x001F2002). A program that never leaves that state takes
+         * its interrupts on the stack it is on (hle_interrupt_on_stack). */
+        cpu->sfr.pc = 0x001F2002u;
         uint32_t start_ip_ptr = sfight_read32(rs->maincpu, prcb_ptr + PRCB_START_IP);
         if (start_ip_ptr < rs->maincpu_size) {
             cpu->sfr.ip = sfight_read32(rs->maincpu, start_ip_ptr);

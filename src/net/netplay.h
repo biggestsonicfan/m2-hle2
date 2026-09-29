@@ -153,8 +153,12 @@
  * 9: the sound UART is a serial line (sound.h sound_uart_t): the game sends
  *    one byte per TxRDY, 320 us apart, and the 68000 runs MAME's wait states
  *    and exception timing, so the sound interrupts the i960 takes moved.
+ * 10: the i960's call gives the callee a frame pointer (g15) and puts SP a
+ *    frame above it, the processor starts at MAME's reset PC, and modpc takes
+ *    its mask from src2 (i960_exec.h), so the registers the frame check hashes
+ *    and the stack differ from a board before it; the game does not.
  */
-#define NETPLAY_PROTO_REV 9
+#define NETPLAY_PROTO_REV 10
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

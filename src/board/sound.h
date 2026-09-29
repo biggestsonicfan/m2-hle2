@@ -584,13 +584,30 @@ static inline void sound_code_byte(uint8_t b) {
     if (++g_sound.code_have == 3) { sound_code_put(g_sound.code_acc); g_sound.code_have = 0; }
 }
 
+/* The SCSP's MIDI output is wired back to the UART's receive line (MAME
+ * model2.cpp, midi_out_cb -> i8251 write_rxd): what the 68000 writes to MOBUF
+ * is the byte the i960 reads at +0, with RxRDY (bit 1) up while one waits.
+ * STF's driver never writes MOBUF; m2-pacman's answers the i960's ping with
+ * 0x5A there, and without the line the game ran with no sound ("NO SOUND").
+ * The byte is there as soon as the 68000 has written it: the line's 320 us is
+ * not modelled, and bytes do not overrun, the ring holds them. */
+static inline bool sound_uart_rxrdy(const sound_state_t *ss) { return ss->scsp.mo_r != ss->scsp.mo_w; }
+
 static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     (void)r; (void)size;
     g_sound.read_count++;
-    /* i8251 status at +4: TxRDY (bit 0) and TxEMPTY (bit 2) as the line stands */
+    if ((addr - MIDI_BASE) == 0) {           /* i8251 data: the received byte */
+        scsp_t *s = &g_sound.scsp;
+        if (s->mo_r == s->mo_w) return 0u;
+        uint8_t b = s->mo[s->mo_r];
+        s->mo_r = (uint8_t)((s->mo_r + 1u) & 31u);
+        return b;
+    }
+    /* i8251 status at +4: TxRDY (bit 0), RxRDY (bit 1) and TxEMPTY (bit 2) as the line stands */
     if ((addr - MIDI_BASE) != 4) return 0u;
     sound_uart_service(&g_sound, g_sound.m68k.cpu.cycles);
-    return (sound_uart_txrdy(&g_sound) ? 0x01u : 0u) | (sound_uart_txempty(&g_sound) ? 0x04u : 0u);
+    return (sound_uart_txrdy(&g_sound) ? 0x01u : 0u) | (sound_uart_rxrdy(&g_sound) ? 0x02u : 0u)
+         | (sound_uart_txempty(&g_sound) ? 0x04u : 0u);
 }
 
 static void sound_run(uint32_t n);                      /* below */

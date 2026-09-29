@@ -141,7 +141,7 @@ static inline void hle_ret(i960_cpu_t *cpu) {
             cpu->frame_irq[cpu->frame_depth] = 0;
         }
         cpu->sfr.ip = ret_ip;
-        cpu->globals.fp = cpu->locals.pfp;
+        cpu->globals.fp = cpu->frame_fp[cpu->frame_depth];
     } else {
         LOG_WARN("hle_ret: empty frame stack at IP=0x%08X", cpu->sfr.ip);
         cpu->halted = 1;
@@ -154,6 +154,7 @@ static inline void hle_call(i960_cpu_t *cpu, uint32_t target, uint32_t ret_ip) {
     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
         cpu->frame_irq[cpu->frame_depth] = 0;
+        cpu->frame_fp[cpu->frame_depth] = cpu->globals.fp;
         cpu->locals.rip = ret_ip;
         cpu->frame_depth++;
     } else {
@@ -184,6 +185,58 @@ static inline void hle_interrupt(i960_cpu_t *cpu, uint32_t handler) {
         cpu->frame_irq_ac[d] = cpu->sfr.ac;
         cpu->frame_irq_pc[d] = cpu->sfr.pc;
     }
+}
+
+/*
+ * The handler the i960 itself would vector interrupt pin 0..3 to, as MAME's
+ * i960 does (execute_set_input / take_interrupt): the pin's vector is byte
+ * `pin` of the interrupt control register, which the program writes with a
+ * synmov to 0xFF000004 (it lands in the IAC block), and the handler is word
+ * 9 + (vector - 8) of the interrupt table the PRCB names. 0 when the program
+ * has not set the pin up (vector 0 is MAME's unsupported IAC mode), or when the
+ * processor's priority masks it: a vector's priority is vector / 8, and it is
+ * taken only above the current priority, or at 31.
+ *
+ * STF's own table gives exactly the handlers its profile names (vectors 12-15:
+ * 0xC40, 0xD10, 0xD30, 0xDF0); a program that is not STF finds its own here.
+ */
+static inline uint32_t hle_irq_vector_handler(const i960_cpu_t *cpu, memory_bus_t *bus, int pin,
+                                              uint32_t *vector_out) {
+    if (pin < 0 || pin > 3 || !cpu->prcb) return 0;
+    uint32_t vector = (mem_read32(bus, IAC_BASE + 4) >> (8 * pin)) & 0xFFu;
+    if (vector < 8) return 0;
+    uint32_t pri = vector >> 3, cur = (cpu->sfr.pc >> 16) & 0x1Fu;
+    if (pri != 31 && pri <= cur) return 0;
+    uint32_t table = mem_read32(bus, cpu->prcb + PRCB_INTR_TABLE);
+    if (vector_out) *vector_out = vector;
+    return mem_read32(bus, table + 36 + (vector - 8) * 4);
+}
+
+/*
+ * Deliver an interrupt the way the processor does (MAME take_interrupt): on
+ * the interrupt stack the PRCB names, unless the processor is already in the
+ * interrupted state (PC bit 13) and so on it, with the frame the call builds
+ * there, and the process priority raised to the vector's for the handler. `ret`
+ * puts PC, and so the priority, back (hle_interrupt).
+ *
+ * hle_interrupt alone runs the handler on the interrupted code's stack, from
+ * its SP up. STF's handlers are written for that; a gcc960 program's are not.
+ * Its SP is only where its frame ends, and an m2-sdk handler stores the global
+ * registers from there (`stq g0, (sp)` ...), over what the interrupted code
+ * keeps above it: m2-pacman's picture broke into garbage once the vblank came
+ * in during its sound queue's pump.
+ */
+static inline void hle_interrupt_on_stack(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t handler,
+                                          uint32_t vector) {
+    uint32_t sp = (cpu->sfr.pc & 0x2000u) ? cpu->locals.sp
+                                          : mem_read32(bus, cpu->prcb + PRCB_INTR_STACK);
+    int d = cpu->frame_depth;
+    hle_interrupt(cpu, handler);
+    if (cpu->frame_depth != d + 1) return;
+    sp = ((sp + FRAME_ALIGN_MASK) & ~FRAME_ALIGN_MASK) + 64;   /* MAME's padding frame */
+    cpu->globals.fp = sp;
+    cpu->locals.sp  = sp + 64;
+    cpu->sfr.pc = (cpu->sfr.pc & ~0x001F0401u) | ((vector >> 3) << 16) | 0x2002u;
 }
 
 /* One bit per (ip >> 2) & 0xFFFF, set for every hook address of the profile it

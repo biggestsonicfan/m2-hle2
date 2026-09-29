@@ -353,6 +353,8 @@ static bool load_rom(const char *zip) {
         fprintf(stderr, "m2hle: could not load '%s' as %s\n", zip, g_active_profile->display_name);
         return false;
     }
+    if (profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size))
+        LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
     /* The model lookup is built from the ROM's model table: a new set needs a new one. */
     geo3d_lookup_invalidate();
     g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);

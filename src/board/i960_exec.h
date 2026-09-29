@@ -335,6 +335,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
                         cpu->frame_irq[cpu->frame_depth] = 0;
+                        cpu->frame_fp[cpu->frame_depth] = cpu->globals.fp;
                         cpu->frame_depth++;
                     } else {
                         LOG_ERROR("Frame stack overflow at 0x%08X", ip);
@@ -347,11 +348,10 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     uint32_t old_sp = cpu->locals.sp;
                     memset(&cpu->locals, 0, sizeof(local_regs_t));
                     cpu->locals.pfp = old_fp;
-                    cpu->locals.sp = (old_sp + FRAME_ALIGN_MASK) & ~FRAME_ALIGN_MASK;  // align to 16-word boundary
+                    // New frame on a 16-word boundary, SP a frame above it, g15 = FP
+                    cpu->globals.fp = (old_sp + FRAME_ALIGN_MASK) & ~FRAME_ALIGN_MASK;
+                    cpu->locals.sp = cpu->globals.fp + 64;
                     cpu->locals.rip = ip + 4;               // return address
-
-                    // Also save sp in g15/fp for frame tracking
-                    cpu->globals.fp = cpu->locals.pfp;
 
                     cpu->sfr.ip = ip + disp;
                     return 0;
@@ -369,7 +369,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                             cpu->frame_irq[cpu->frame_depth] = 0;
                         }
                         cpu->sfr.ip = return_ip;
-                        cpu->globals.fp = cpu->locals.pfp;
+                        cpu->globals.fp = cpu->frame_fp[cpu->frame_depth];
                         return 0;
                     } else {
                         LOG_WARN("ret with empty frame stack at 0x%08X", ip);
@@ -797,6 +797,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
 
                                 memset(&cpu->locals, 0, sizeof(local_regs_t));
                                 cpu->frame_depth = 0;
+                                cpu->prcb = new_prcb;
 
                                 uint32_t new_isp = mem_read32(bus, new_prcb + PRCB_INTR_STACK);
                                 if (new_isp) {
@@ -881,11 +882,17 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     cpu->sfr.tc = (tc & ~src1) | (src2 & src1);
                     break;
                 }
-                case 0x655: // modpc (modify process controls)
+                case 0x655: // modpc src, mask, src/dst (modify process controls)
                 {
+                    /* The mask is src2 and the new bits come from src/dst,
+                     * which then gets the old PC (MAME i960.cpp). This used
+                     * to take the mask from src1 and the bits from src2, so
+                     * the boot code's `modpc r4, r4, r5` (r4 = the priority
+                     * field, r5 = 0), meant to drop the priority to 0, set it
+                     * to 31 and masked every interrupt vectored by priority. */
                     uint32_t pc = cpu->sfr.pc;
+                    cpu->sfr.pc = (pc & ~src2) | (reg_read(cpu, dst_idx) & src2);
                     reg_write(cpu, dst_idx, pc);
-                    cpu->sfr.pc = (pc & ~src1) | (src2 & src1);
                     break;
                 }
                 case 0x673: // ldtime
@@ -1150,6 +1157,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     if (cpu->frame_depth < FRAME_STACK_DEPTH) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
                         cpu->frame_irq[cpu->frame_depth] = 0;
+                        cpu->frame_fp[cpu->frame_depth] = cpu->globals.fp;
                         cpu->frame_depth++;
                     } else {
                         LOG_ERROR("Frame stack overflow at 0x%08X", ip);
@@ -1160,9 +1168,9 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     uint32_t old_pfp = cpu->locals.pfp;
                     memset(&cpu->locals, 0, sizeof(local_regs_t));
                     cpu->locals.pfp = old_pfp;
-                    cpu->locals.sp = (old_sp + FRAME_ALIGN_MASK) & ~FRAME_ALIGN_MASK;
+                    cpu->globals.fp = (old_sp + FRAME_ALIGN_MASK) & ~FRAME_ALIGN_MASK;
+                    cpu->locals.sp = cpu->globals.fp + 64;
                     cpu->locals.rip = ip + instr_len;
-                    cpu->globals.fp = cpu->locals.pfp;
                     cpu->sfr.ip = ea;
                     return 0;
                 }

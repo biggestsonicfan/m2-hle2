@@ -951,8 +951,11 @@ static inline int m68k_step(m68k_state_t *s) {
             break;
         }
 
-        /* 0100 1110 0111 0100: STOP #imm */
-        if (op == 0x4E74) {
+        /* 0100 1110 0111 0010: STOP #imm (M68000 PRM). It used to be decoded
+         * at 0x4E74, which is RTD, a 68010 instruction and illegal here, and
+         * 0x4E72 halted the CPU as ILLEGAL. STF's driver never idles on STOP;
+         * m2-pacman's does (`stop #$2000`), and its sound CPU stopped for good. */
+        if (op == 0x4E72) {
             if (!m68k_is_supervisor(c)) { LOG_WARN("m68k: STOP privilege violation"); break; }
             uint16_t imm = m68k_fetch(s);
             c->sr = imm;
@@ -961,8 +964,8 @@ static inline int m68k_step(m68k_state_t *s) {
             break;
         }
 
-        /* 0100 1110 0111 0010: ILLEGAL */
-        if (op == 0x4E72 || op == 0x4AFC) {
+        /* 0100 1010 1111 1100: ILLEGAL, and 0x4E74 (RTD) is illegal on a 68000 */
+        if (op == 0x4AFC || op == 0x4E74) {
             LOG_WARN("m68k: ILLEGAL at 0x%06X", op_pc);
             c->halted = 1;
             break;
