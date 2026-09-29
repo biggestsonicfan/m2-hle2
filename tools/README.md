@@ -1120,7 +1120,10 @@ has its own frontend's exact flags, then diff:
 `?script=` keys; uppercase letters and `!@#$` are player 2). When the two
 split, `--cop FROM:TO:FILE` logs the COP conversation of those frames and
 `--trace F:FILE` every i960 instruction of one frame, with a hash of the
-registers. The first differing line names the cause.
+registers. The first differing line names the cause. `--sound` adds sound RAM
+and the sample clock to each line; either way the last line on stderr hashes
+every sample the sound board produced, and `--no-sound-thread` runs it on the
+emu thread, so the same build holds the sound thread against itself.
 
 Measured 2026-09-21: identical over 12,000 frames of attract and a 10,000-frame
 two-player scripted match, after two fixes. Before them the builds split at

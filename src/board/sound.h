@@ -26,9 +26,10 @@
  * the SCSP produces the sample. The 68000 takes the SCSP's interrupt lines
  * between instructions, and every register access lands on a chip that is at
  * exactly that point in time — the driver's timing loops and its slot-monitor
- * polling depend on it. The emu thread runs a frame's worth of samples when
- * the game's frame ends (emu_thread.h, emu_sound_slice_end) and the host audio
- * callback (core/audio_out.h) drains them.
+ * polling depend on it. The emu thread hands a frame's worth of samples to
+ * the sound thread when the game's frame ends (emu_thread.h,
+ * emu_sound_slice_end; "The sound thread" below) and the host audio callback
+ * (core/audio_out.h) drains them.
  */
 #ifndef SOUND_H
 #define SOUND_H
@@ -36,6 +37,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "constants.h"
@@ -45,6 +47,7 @@
 #include "m68k_exec.h"
 #include "scsp.h"
 #include "emu_times.h"   /* host time spent here, for get_status */
+#include "thread_mutex.h" /* the sound thread */
 
 #define SOUND_RAM_SIZE            0x80000u
 #define SOUND_RATE                44100u
@@ -56,6 +59,26 @@
 #define SOUND_CODE_LOG            512u     /* i960 commands kept (power of 2) */
 #define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_uart_make_room) */
 #define SOUND_AHEAD_MAX           735      /* at most a frame of samples run ahead of it (44100 / 60) */
+
+/* The sound board runs on a thread of its own ("The sound thread", below)
+ * everywhere but the web build, which has one thread. */
+#if !defined(__EMSCRIPTEN__) && !defined(M2HLE_NO_SOUND_THREAD)
+#define SOUND_THREAD 1
+#else
+#define SOUND_THREAD 0
+#endif
+
+/* Publishing across threads: the output ring's write index (sound thread to
+ * the audio callback) and the sound thread's "done" flag. A volatile store is
+ * enough on x86, not on the handheld's ARM. MSVC gives volatile these
+ * semantics itself (/volatile:ms, x86 and x64). */
+#if defined(__GNUC__) || defined(__clang__)
+#define SOUND_STORE_RELEASE(x, v) __atomic_store_n(&(x), (v), __ATOMIC_RELEASE)
+#define SOUND_LOAD_ACQUIRE(x)     __atomic_load_n(&(x), __ATOMIC_ACQUIRE)
+#else
+#define SOUND_STORE_RELEASE(x, v) ((x) = (v))
+#define SOUND_LOAD_ACQUIRE(x)     (x)
+#endif
 
 /* ---- the sound UART and its serial line ------------------------------------
  *
@@ -129,6 +152,14 @@ typedef struct {
      * not. The one clock a consumer outside the ring can trust, and monotonic
      * across a board reset — sound_reset() leaves it, and the ring, alone. */
     uint64_t         out_total;
+    /* out_total once every run already handed out has finished: what the emu
+     * thread may read while the sound thread is still producing (the frame
+     * clock). And out_pub, the ring's write index as far as runs are known to
+     * be finished -- for a host that drains the ring on the emu thread's own
+     * thread (libretro), so it takes whole slices. Both written by the emu
+     * thread only (sound_advance). */
+    uint64_t         out_due;
+    uint32_t         out_pub;
     uint64_t         midi_drains;      /* catch-up steps run to make room in the MIDI ring */
     uint64_t         midi_holds;       /* times a byte had to wait for the next slice */
 
@@ -152,6 +183,11 @@ typedef struct {
 } sound_state_t;
 
 static sound_state_t g_sound;
+
+/* Wait for the sound thread to finish what it was handed ("The sound thread",
+ * below). Anything that reads or changes the sound board from the i960's side
+ * calls it first. */
+static inline void sound_settle(void);
 
 /* ---- capture, for grading against MAME ------------------------------------
  * The same files tools/mame/snd-capture.lua writes: records of four u32 words
@@ -236,6 +272,7 @@ static inline void sndcap_stop(void) {
 static inline void sndcap_frame(uint32_t frame, uint32_t frame_counter) {
     sndcap_t *c = &g_sndcap;
     if (!c->active) return;
+    sound_settle();
     uint32_t *mk = c->marks[c->nmarks++];
     mk[0] = frame; mk[1] = frame_counter; mk[2] = (uint32_t)g_sound.m68k.cpu.cycles; mk[3] = c->n;
     fwrite(g_sound.ram + 0x1000, 1, 0x4000, c->ramf);
@@ -392,6 +429,7 @@ static inline void snd_watch_write(uint32_t addr, int sz) {
 }
 
 static inline void snd_watch_arm(int on) {
+    sound_settle();
     memset(&g_snd_watch, 0, sizeof g_snd_watch);
     for (int i = 0; i < 32; i++) g_snd_watch.last_chunk[i] = -1;
     g_snd_watch.on = on;
@@ -598,6 +636,7 @@ static inline bool sound_uart_make_room(bool for_game);  /* below; both callback
 
 static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     (void)r; (void)size;
+    sound_settle();
     g_sound.read_count++;
     if ((addr - MIDI_BASE) == 0) {           /* i8251 data: the received byte */
         scsp_t *s = &g_sound.scsp;
@@ -620,6 +659,7 @@ static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
 
 static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     (void)r; (void)size;
+    sound_settle();
     if (g_sndcap.active) sndcap_put(1, addr, (val & 0xFFu) | 0xFF0000u, 0);
     if ((addr - MIDI_BASE) != 0) return;                   /* +4 is the UART's control register */
     g_sound.write_count++;
@@ -643,6 +683,7 @@ static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, in
 /* MAME model2.cpp reset_model2_scsp: the 68000's reset vectors come from the
  * first 16 bytes of the program ROM, copied into sound RAM. */
 static inline void sound_boot_68k(void) {
+    sound_settle();
     memcpy(g_sound.ram, g_sound.rom, 16);
     m68k_reset(&g_sound.m68k);
     g_sound.m68k.read_cb  = sound_m68k_read;
@@ -653,6 +694,7 @@ static inline void sound_boot_68k(void) {
 }
 
 static inline void sound_reset(void) {
+    sound_settle();
     bool log_writes = g_sound.log_writes;
     const uint8_t *samples = g_sound.samples;
     uint32_t samples_size = g_sound.samples_size;
@@ -666,6 +708,7 @@ static inline void sound_reset(void) {
     g_sound.budget = 0;
     g_sound.slice_frac = 0;
     g_sound.ahead = 0;
+    g_sound.out_due = g_sound.out_total;
     memset(&g_sound.uart, 0, sizeof g_sound.uart);
     memset(g_sound.irqs, 0, sizeof g_sound.irqs);
     g_sound.write_count = g_sound.read_count = 0;
@@ -684,6 +727,7 @@ static inline void sound_reset(void) {
 
 /* The sound program ROM, big-endian as it comes out of the zip. */
 static inline void sound_load_rom(const uint8_t *bytes, uint32_t size) {
+    sound_settle();
     if (size > M68K_ROM_SIZE) {
         LOG_WARN("sound: ROM size %u > %u — truncating", size, M68K_ROM_SIZE);
         size = M68K_ROM_SIZE;
@@ -697,6 +741,7 @@ static inline void sound_load_rom(const uint8_t *bytes, uint32_t size) {
 
 /* The sample ROMs, concatenated (not copied: the caller keeps them alive). */
 static inline void sound_load_samples(const uint8_t *bytes, uint32_t size) {
+    sound_settle();
     g_sound.samples      = bytes;
     g_sound.samples_size = size;
     g_sound.bank4 = 0x200000u;
@@ -707,6 +752,7 @@ static inline void sound_load_samples(const uint8_t *bytes, uint32_t size) {
 
 /* Hook the UART callbacks. Call after mem_init(). */
 static inline void sound_attach(memory_bus_t *bus) {
+    sound_settle();
     g_sound.detached = false;
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
@@ -732,6 +778,7 @@ static inline void sound_attach(memory_bus_t *bus) {
  * so this one has to. The output ring is the reader's; a host that stops
  * reading moves out_r itself. */
 static inline void sound_detach(memory_bus_t *bus) {
+    sound_settle();
     g_sound.detached = true;
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
@@ -774,7 +821,7 @@ static inline void sound_out_push(int16_t l, int16_t r) {
     if (((w + 1) & (SOUND_OUT_FRAMES - 1)) == g_sound.out_r) { g_sound.out_dropped++; return; }
     g_sound.out[w * 2] = l;
     g_sound.out[w * 2 + 1] = r;
-    g_sound.out_w = (w + 1) & (SOUND_OUT_FRAMES - 1);
+    SOUND_STORE_RELEASE(g_sound.out_w, (w + 1) & (SOUND_OUT_FRAMES - 1));
 }
 
 /* Whether a host drains the ring: a device is open (audio_out_init) or a
@@ -849,6 +896,141 @@ static void sound_run(uint32_t n) {
     g_emu_times.sound_samples += n;
 }
 
+/* ---- the sound thread ---------------------------------------------------------
+ *
+ * The sound board is ~40% of the emulation on the handheld, and it talks to the
+ * i960 at only a few points: the UART's data and status registers
+ * (sound_midi_read_cb / _write_cb), the backpressure that runs it early
+ * (sound_uart_make_room), and the frame's samples charged at the frame edge
+ * (sound_run_slice). So the slice's samples are handed to a thread of its own,
+ * and the emu thread goes on to the next slice of the i960 meanwhile. Every one
+ * of those points -- and anything else that reads or changes the board:
+ * a reset, a capture, the bridge -- first waits for the run to finish
+ * (sound_settle). The sound board then does exactly the same work in exactly
+ * the same order as when the emu thread ran it itself, and sees every byte from
+ * the i960 at the same 68000 clock, so the board -- and a netplay session, and
+ * every grader -- cannot tell the difference. What changes is only WHEN the
+ * samples appear: up to a frame later, while the next frame's i960 runs.
+ *
+ * Runs that are short and waited on at once stay on the emu thread (the
+ * UART's run-ahead: there is nothing to overlap). So does everything while the
+ * run has to be watched from the emu thread: a sound capture, break-on-warn (a
+ * WARN from the 68000 has to stop the slice it belongs to) and the 68000
+ * trace. M2HLE_SOUND_THREAD=0 in the environment turns the thread off, for an
+ * A/B.
+ *
+ * Where the overlap is lost: a slice that starts with a sound byte queued in
+ * the game. Whether the UART can take it (TxRDY) depends on the 68000's clock
+ * to the cycle, so the interrupt offer at the top of the slice waits for the
+ * run. Measured unthrottled on x86, STF attract and a scripted two-player
+ * game: a third of frames wait, for most of a run (~0.5 ms). A host that has
+ * other work between slices -- the libretro core draws, a paced host sleeps --
+ * gives the run that long to finish first. Taking that wait out would mean
+ * answering TxRDY and time-stamping the i960's bytes without the 68000's exact
+ * clock, which cannot be done and stay identical in every case (a halted 68000
+ * stops its clock). */
+typedef struct {
+    int         state;        /* 0 not started, 1 running, -1 off / could not start */
+    emu_mutex_t lock;
+    emu_cond_t  job_cv, done_cv;
+    uint32_t    job;          /* samples to run, 0 = nothing to do (under lock) */
+    volatile int busy;        /* a run is handed out and not finished */
+    emu_thread_t thread;
+} sound_thread_t;
+static sound_thread_t g_sound_thr;
+/* A host's (or a test's) switch: 0 keeps every run on the emu thread from the
+ * next one on. */
+static volatile int g_sound_thread_want = 1;
+
+static inline void sound_settle(void) {
+#if SOUND_THREAD
+    if (!SOUND_LOAD_ACQUIRE(g_sound_thr.busy)) return;
+    int64_t t0 = emu_now_us();
+    emu_mutex_lock(&g_sound_thr.lock);
+    while (g_sound_thr.busy) emu_cond_wait(&g_sound_thr.done_cv, &g_sound_thr.lock);
+    g_emu_times.sound_wait_us += emu_now_us() - t0;
+    emu_mutex_unlock(&g_sound_thr.lock);
+#endif
+}
+
+#if SOUND_THREAD
+static void sound_thread_loop(void) {
+    emu_mutex_lock(&g_sound_thr.lock);
+    for (;;) {
+        while (!g_sound_thr.job) emu_cond_wait(&g_sound_thr.job_cv, &g_sound_thr.lock);
+        uint32_t n = g_sound_thr.job;
+        emu_mutex_unlock(&g_sound_thr.lock);
+        sound_run(n);
+        emu_mutex_lock(&g_sound_thr.lock);
+        g_sound_thr.job = 0;
+        SOUND_STORE_RELEASE(g_sound_thr.busy, 0);
+        emu_cond_broadcast(&g_sound_thr.done_cv);   /* the bridge may be waiting too */
+    }
+}
+#ifdef _WIN32
+static DWORD WINAPI sound_thread_proc(LPVOID p) { (void)p; sound_thread_loop(); return 0; }
+#else
+static void *sound_thread_proc(void *p) { (void)p; sound_thread_loop(); return NULL; }
+#endif
+#endif
+
+/* Whether a run may go to the sound thread now; starts it the first time. */
+static inline bool sound_thread_usable(void) {
+#if SOUND_THREAD
+    if (!g_sound_thread_want || g_sndcap.active || g_log.break_on_warn || g_sound_step_trace) return false;
+    if (g_sound_thr.state == 0) {
+        const char *e = getenv("M2HLE_SOUND_THREAD");
+        g_sound_thr.state = -1;
+        if (e && e[0] == '0') {
+            LOG_INFO("sound: M2HLE_SOUND_THREAD=0, the sound board runs on the emu thread");
+            return false;
+        }
+        emu_mutex_init(&g_sound_thr.lock);
+        emu_cond_init(&g_sound_thr.job_cv);
+        emu_cond_init(&g_sound_thr.done_cv);
+#ifdef _WIN32
+        g_sound_thr.thread = CreateThread(NULL, 0, sound_thread_proc, NULL, 0, NULL);
+        bool ok = g_sound_thr.thread != NULL;
+#else
+        bool ok = pthread_create(&g_sound_thr.thread, NULL, sound_thread_proc, NULL) == 0;
+        if (ok) pthread_detach(g_sound_thr.thread);
+#endif
+        if (!ok) { LOG_WARN("sound: could not start the sound thread; running it on the emu thread"); return false; }
+        g_sound_thr.state = 1;
+        LOG_INFO("sound: the sound board runs on its own thread");
+    }
+    return g_sound_thr.state == 1;
+#else
+    return false;
+#endif
+}
+
+static inline bool sound_thread_on(void) { return SOUND_THREAD && g_sound_thr.state == 1; }
+
+/* Run the board n samples on from where every earlier run leaves it: on the
+ * sound thread if `hand_off` and it can, else here and now. Emu thread only. */
+static inline void sound_advance(uint32_t n, bool hand_off) {
+    sound_settle();
+    if (!n || !g_sound.rom_loaded || g_sound.detached) return;   /* sound_run would step nothing */
+    g_sound.out_due = g_sound.out_total + n;
+    g_sound.out_pub = g_sound.out_w;
+    if (hand_off && sound_thread_usable()) {
+#if SOUND_THREAD
+        emu_mutex_lock(&g_sound_thr.lock);
+        g_sound_thr.busy = 1;
+        g_sound_thr.job  = n;
+        g_emu_times.sound_jobs++;
+        emu_cond_signal(&g_sound_thr.job_cv);
+        emu_mutex_unlock(&g_sound_thr.lock);
+#endif
+        return;
+    }
+    int64_t t0 = emu_now_us();
+    sound_run(n);
+    g_emu_times.sound_inline_us += emu_now_us() - t0;
+    g_sound.out_pub = g_sound.out_w;
+}
+
 /* ---- the UART's backpressure ----------------------------------------------------
  *
  * The board runs a slice of the i960 and then a slice of sound, so the line
@@ -869,18 +1051,21 @@ static void sound_run(uint32_t n) {
  * The old drain valve ran the 68000 without owing the samples back, and gave up
  * after 32 passes and dropped the byte. Returns whether the byte now fits. */
 static inline bool sound_uart_make_room(bool for_game) {
+    sound_settle();
     for (;;) {
         sound_uart_service(&g_sound, g_sound.m68k.cpu.cycles);
         if (for_game ? sound_uart_txrdy(&g_sound) : g_sound.uart.count < SOUND_UART_FIFO) return true;
         if (!g_sound.rom_loaded || g_sound.detached ||
             g_sound.ahead + SOUND_AHEAD_STEP > SOUND_AHEAD_MAX) return false;
         g_sound.midi_drains++;
-        sound_run(SOUND_AHEAD_STEP);
+        sound_advance(SOUND_AHEAD_STEP, false);
         g_sound.ahead += SOUND_AHEAD_STEP;
     }
 }
 
-/* One emu slice (1/60 s) of sound, less what was run early inside it. The
+/* One emu slice (1/60 s) of sound, less what was run early inside it, handed
+ * to the sound thread (see above): the samples are there once sound_settle
+ * returns, and g_sound.out_due is the clock they end on. The
  * remainder carries from slice to slice and is reset with the board: two
  * boards cold-booted together have to put the same samples in every slice. */
 static inline void sound_run_slice(uint32_t slices_per_sec) {
@@ -889,7 +1074,7 @@ static inline void sound_run_slice(uint32_t slices_per_sec) {
     g_sound.slice_frac -= n * slices_per_sec;
     uint32_t early = (uint32_t)g_sound.ahead < n ? (uint32_t)g_sound.ahead : n;
     g_sound.ahead -= (int32_t)early;
-    sound_run(n - early);
+    sound_advance(n - early, true);
 }
 
 #endif /* SOUND_H */

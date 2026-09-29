@@ -100,7 +100,8 @@ static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
     const uint32_t mask = SOUND_OUT_FRAMES - 1;
     const float fade_step = 1.0f / (float)AUDIO_FADE;
     for (int i = 0; i < frames; i++) {
-        uint32_t r = g_sound.out_r, w = g_sound.out_w;
+        /* acquire: the sound thread writes the samples, then out_w */
+        uint32_t r = g_sound.out_r, w = SOUND_LOAD_ACQUIRE(g_sound.out_w);
         uint32_t fill = (w - r) & mask;
         float yl = 0.0f, yr = 0.0f;
 
@@ -293,7 +294,7 @@ static inline int audio_out_drain(float *buf, int cap_frames, double nudge) {
     const double step = (double)SOUND_RATE / (double)a->rate * (1.0 + nudge);
     int n = 0;
     while (n < cap_frames) {
-        uint32_t r = g_sound.out_r, fill = (g_sound.out_w - r) & mask;
+        uint32_t r = g_sound.out_r, fill = (SOUND_LOAD_ACQUIRE(g_sound.out_w) - r) & mask;
         if (fill < 2) break;                /* one frame stays behind to interpolate from */
         float f = (float)a->pos;
         const int16_t *p0 = g_sound.out + r * 2, *p1 = g_sound.out + ((r + 1) & mask) * 2;

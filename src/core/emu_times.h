@@ -16,6 +16,9 @@
  *   - the SCSP (slots, DSP and mix) is timed on one sample in 16, the same way.
  *   That is ~260 clock reads a frame, ~0.6% of STF attract's 1 ms of work.
  *     The 68000 is the rest of the sound board.
+ *   With the sound board on its own thread (sound.h, "The sound thread"),
+ *   sound_us is that thread's time and mostly overlaps the i960's; work_us is
+ *   the emu thread's alone, and sound_wait_us is where it waited on the other.
  *
  * Nothing here is board state: the board never reads it, so it cannot move
  * a netplay session or a grader. Written by the emu thread; the bridge reads
@@ -61,8 +64,11 @@ typedef struct {
     uint64_t slices;          /* slices run (a load frame takes several) */
     uint64_t steps;           /* i960 instructions */
     int64_t  work_us;         /* slice bodies and their bookkeeping: all but the waits */
-    int64_t  loop_us;         /* the i960 loop, less the sound board run inside it (COP included) */
+    int64_t  loop_us;         /* the i960 loop, less the sound board run or waited for inside it (COP included) */
     int64_t  sound_us;        /* the sound board, 68000 + SCSP, wherever it ran */
+    int64_t  sound_inline_us; /* ...of which on the emu thread (the UART's run-ahead, or no sound thread) */
+    int64_t  sound_wait_us;   /* the emu thread waiting for the sound thread to finish (sound_settle) */
+    uint64_t sound_jobs;      /* slices of sound handed to the sound thread */
     uint64_t sound_samples;
     int64_t  scsp_timed_us;   /* the sampled SCSP samples */
     uint64_t scsp_timed;
@@ -130,6 +136,7 @@ static inline void emu_times_json(char *out, int cap) {
              "{\"frames\":%llu,\"slices\":%llu,\"steps\":%llu,\"work_us\":%lld,"
              "\"i960_us\":%lld,\"cop_us\":%lld,\"cop_cmds\":%llu,"
              "\"sound_us\":%lld,\"m68k_us\":%lld,\"scsp_us\":%lld,\"sound_samples\":%llu,"
+             "\"sound_inline_us\":%lld,\"sound_wait_us\":%lld,\"sound_jobs\":%llu,"
              "\"pace_us\":%lld,\"net_us\":%lld,\"frame_max_us\":%lld,"
              "\"hist_ms\":[1,2,4,8,16.7,33.3,66.7],"
              "\"hist\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}",
@@ -138,6 +145,7 @@ static inline void emu_times_json(char *out, int cap) {
              (long long)(t->loop_us - cop), (long long)cop, (unsigned long long)t->cop_cmds,
              (long long)t->sound_us, (long long)(t->sound_us - scsp), (long long)scsp,
              (unsigned long long)t->sound_samples,
+             (long long)t->sound_inline_us, (long long)t->sound_wait_us, (unsigned long long)t->sound_jobs,
              (long long)t->pace_us, (long long)t->net_us, (long long)max,
              (unsigned long long)t->hist[0], (unsigned long long)t->hist[1],
              (unsigned long long)t->hist[2], (unsigned long long)t->hist[3],

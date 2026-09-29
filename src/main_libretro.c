@@ -197,6 +197,14 @@ static struct retro_core_option_v2_definition option_defs[] = {
       NULL, NULL,
       { { "enabled", NULL }, { "disabled", NULL }, { NULL, NULL } },
       LR_DEFAULT_SOUND },
+    { "m2hle_sound_thread", "Sound board on its own core", NULL,
+      "Run the sound board on a second CPU core, alongside the main CPU, instead of after it on the same one. "
+      "It does the same work in the same order, so the game and online play are exactly the same either way; "
+      "on a handheld it takes the sound board's share off the core that sets the frame rate. Sound comes out "
+      "one frame (17 ms) later.",
+      NULL, NULL,
+      { { "enabled", NULL }, { "disabled", NULL }, { NULL, NULL } },
+      "enabled" },
     { "m2hle_draw_rate", "Draw rate", NULL,
       "Draw every frame, or every second one. The board runs at 60 either way; at 30 RetroArch shows each "
       "picture twice, which halves the graphics work and runs cooler on a handheld.", NULL, "video",
@@ -249,6 +257,7 @@ static void lr_read_options(bool at_load) {
         g_ps3ui_app.default_delay = opt.net_delay;
     }
     if ((v = lr_var("m2hle_draw_rate")))  opt.draw_every = strcmp(v, "30") ? 1 : 2;
+    if ((v = lr_var("m2hle_sound_thread"))) g_sound_thread_want = strcmp(v, "disabled") != 0;   /* from the next slice */
     if ((v = lr_var("m2hle_heat_guard"))) {
         opt.heat_limit = atoi(v);   /* "off" -> 0 */
         heat_guard_set_limit(&g_heat, opt.heat_limit);   /* a new limit starts its stages over */
@@ -272,6 +281,7 @@ static void lr_set_options(void) {
         { "m2hle_resolution", "Internal resolution; " LR_DEFAULT_RES "|native|double|triple|quadruple|fullscreen" },
         { "m2hle_stf_version", "Sonic the Fighters version; console|arcade" },
         { "m2hle_sound",      "Sound board; " LR_DEFAULT_SOUND "|enabled|disabled" },
+        { "m2hle_sound_thread", "Sound board on its own core; enabled|disabled" },
         { "m2hle_draw_rate",  "Draw rate; 60|30" },
         { "m2hle_heat_guard", "Heat guard; " LR_DEFAULT_HEAT "|off|80|85|90" },
         { "m2hle_online",     "Online play; retroarch|rpcn" },
@@ -1304,7 +1314,9 @@ static void lr_push_audio(void) {
     }
     const float R = 0.99715f;   /* ~20 Hz at 44.1 kHz */
     size_t n = 0;
-    uint32_t r = g_sound.out_r, w = g_sound.out_w;
+    /* Only what finished runs made: the slice just handed to the sound thread
+     * is still being made (sound.h), and goes out whole with the next frame. */
+    uint32_t r = g_sound.out_r, w = g_sound.out_pub;
     while (r != w && n < LR_AUDIO_FRAMES) {
         for (int c = 0; c < 2; c++) {
             float x = (float)g_sound.out[r * 2 + c];
@@ -1517,6 +1529,7 @@ RETRO_API void retro_unload_game(void) {
     if (opt.online == LR_ONLINE_RPCN) netplay_shutdown();
     ps3ui_app_close(&g_ps3ui_app);
     netplay_release_inputs();
+    sound_settle();   /* the sound thread reads the sample ROMs */
     romset_free(&state.romset);
     g_game_loaded = false;
 }

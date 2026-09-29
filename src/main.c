@@ -206,6 +206,7 @@ static void load_active_profile(const char *primary_zip) {
     /* Stop the emu thread while we re-install the ROM: install_fn re-inits the
      * bus and resets the CPU, which must not race the run loop. */
     if (state.emu_started) { emu_stop(&state.emu); emu_sleep_ms(10); }
+    sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
 
     g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
     if (g_active_profile->load_fn(&state.romset, primary_zip, parent_zip_ptr) == 0) {
@@ -1087,6 +1088,7 @@ static void frame(void) {
         }
         objview_window_draw(&state.show_objview, &state.romset, &state.bus);
         if (state.show_bus_stats)   draw_bus_stats_window();
+        if (state.show_m68k_cpu || state.show_m68k_mem) sound_settle();   /* not mid-run on the sound thread */
         if (state.show_m68k_cpu) {
             m68k_window_draw(&g_sound.m68k, &state.m68k_snapshot, &state.show_m68k_cpu);
             state.m68k_snapshot = g_sound.m68k;

@@ -349,6 +349,7 @@ static bool load_rom(const char *zip) {
             parent_ptr = parent;
         }
     }
+    sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
     if (g_active_profile->load_fn(&state.romset, zip, parent_ptr) != 0) {
         fprintf(stderr, "m2hle: could not load '%s' as %s\n", zip, g_active_profile->display_name);
         return false;
