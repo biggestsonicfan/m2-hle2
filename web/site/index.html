@@ -58,6 +58,17 @@
   <p>Press any button to restart the game.</p>
 </div>
 
+<!-- Over the game while the lobby drawn on it (ps3ui_app.h, PS3UI_SCR_TWITCH) waits
+     for a Twitch approval. The canvas can only print the address and the code; this
+     makes them a link and a copy button. The account panel has its own. -->
+<div id="np-twitch-float" class="np-twitch-float ps-win" hidden>
+  <p id="np-twitch-float-code" class="np-code" aria-label="Your Twitch sign-in code"></p>
+  <p class="np-row">
+    <button id="np-twitch-float-copy" class="tool">Copy code</button>
+    <a id="np-twitch-float-link" class="tool primary" target="_blank" rel="noopener noreferrer" hidden>Open Twitch</a>
+  </p>
+</div>
+
 <!-- Step 1 of the wizard (WEB-PORT.md section 5): a screen of its own, laid out the
      way the game's own menus are (src/ui/ps3ui_*.h) so the two read as one. -->
 <main id="panel" class="panel" aria-live="polite">
