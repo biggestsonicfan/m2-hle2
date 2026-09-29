@@ -613,6 +613,29 @@ typedef struct {
     netplay_cmd_t     room_cmd;
     uint64_t          room_deferred_ms;
 
+    /* Signing back in after the link to the server dropped (netplay_heal_*).
+     * `heal_armed`: this login has reached the server, so a drop is the network
+     * and worth retrying, where a first connect that fails is an answer.
+     * `heal_room_id`: the room to go back to, and whether to open it again
+     * instead because it was ours and nobody else was in it. `room_password_used`
+     * is the one the room was taken with, which nothing else keeps for a join. */
+    bool              heal_armed;
+    bool              healing;
+    uint32_t          heal_tries;
+    uint64_t          heal_at_ms;
+    uint64_t          heal_room_id;
+    bool              heal_room_host;
+    bool              heal_rejoin;
+    /* A room the server lost with the link (a server restart closes them all):
+     * its owner opens it again, and the rest look for it under the owner's name
+     * until `heal_find_until_ms`. */
+    bool              heal_was_owner;
+    char              heal_owner[20];
+    uint64_t          heal_find_until_ms;
+    uint64_t          heal_search_ms;
+    bool              heal_joining;
+    char              room_password_used[sizeof(((netplay_config_t *)0)->room_password)];
+
     /* UI <-> emu thread */
     emu_mutex_t       mutex;
     bool              mutex_ready;
@@ -723,6 +746,9 @@ static inline void netplay_log(const char *fmt, ...) {
 
 static void netplay_session_log_cb(void *ctx, const char *msg) {
     (void)ctx;
+    /* A retry after a dropped link says so once, not once per attempt
+     * (netplay_heal_pump): the port notes and refusals repeat every time. */
+    if (g_netplay.healing) return;
     netplay_log("%s", msg);
 }
 
@@ -2052,7 +2078,18 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
      * the next Connect signed them back in. */
     netplay_config_t stored_twitch;
     netplay_twitch_copy(&stored_twitch, &g_netplay.cfg);
-    g_netplay.cfg = *cfg;
+    /* A connect somebody asked for is a new start: it is armed for healing only
+     * once it reaches the server, and it forgets any room a drop left behind. */
+    if (!g_netplay.healing) {
+        g_netplay.heal_armed   = false;
+        g_netplay.heal_tries   = 0;
+        g_netplay.heal_at_ms   = 0;
+        g_netplay.heal_room_id = 0;
+        g_netplay.heal_rejoin  = false;
+        g_netplay.heal_joining = false;
+        g_netplay.heal_find_until_ms = 0;
+    }
+    if (cfg != &g_netplay.cfg) g_netplay.cfg = *cfg;
     netplay_twitch_copy(&g_netplay.cfg, &stored_twitch);
     netplay_build_masks(g_active_profile);
 
@@ -2074,7 +2111,7 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
         netplay_log("no lobby space for '%s': %s", g_active_profile->id, note);
         return;
     }
-    netplay_log("lobby space %s (%s)", com_id, note);
+    if (!g_netplay.healing) netplay_log("lobby space %s (%s)", com_id, note);
 
     char com_id_foreign[COMID_BUFFER_SIZE];
     bool have_foreign = cfg->browse_yamp && comid_yamp_for_game(g_active_profile->id, com_id_foreign);
@@ -2121,7 +2158,8 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     g_netplay.enabled      = true;
     g_netplay.local_player = -1;
     g_netplay.state        = NETPLAY_CONNECTING;
-    netplay_log("connecting to %s:%u as %s", g_netplay.cfg.server,
+    if (!g_netplay.healing)
+        netplay_log("connecting to %s:%u as %s", g_netplay.cfg.server,
                 g_netplay.cfg.port ? g_netplay.cfg.port : RPCN_DEFAULT_PORT, g_netplay.cfg.npid);
     /* The TLS handshake below blocks for seconds, and the status is otherwise
      * published only after it: a caller polling for "online" or "failed" read
@@ -2130,7 +2168,7 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
 
     if (!rpcn_session_start(&g_netplay.session, &sc)) {
         g_netplay.state = NETPLAY_FAILED;
-        netplay_log("%s", rpcn_session_error(&g_netplay.session));
+        if (!g_netplay.healing) netplay_log("%s", rpcn_session_error(&g_netplay.session));
         return;
     }
     if (g_netplay.ps3) {
@@ -2316,6 +2354,12 @@ static inline void netplay_forget_room(void) {
 }
 
 static inline void netplay_do_disconnect(void) {
+    g_netplay.heal_armed   = false;
+    g_netplay.heal_find_until_ms = 0;
+    g_netplay.heal_joining = false;
+    g_netplay.heal_at_ms   = 0;
+    g_netplay.heal_room_id = 0;
+    g_netplay.heal_rejoin  = false;
     netplay_send_bye();
     if (g_netplay.ps3) ps3_link_stop(&g_netplay.ps3link);
     ps3_wire_close();
@@ -2357,6 +2401,7 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
     g_netplay.cfg.room_password[0] = '\0';
     snprintf(g_netplay.cfg.room_password, sizeof(g_netplay.cfg.room_password), "%s",
              cfg->room_password);
+    snprintf(g_netplay.room_password_used, sizeof(g_netplay.room_password_used), "%s", cfg->room_password);
     uint32_t delay = cfg->frame_delay ? cfg->frame_delay : 2u;
     uint32_t slots = cfg->max_players < 2 ? 2u
                    : cfg->max_players > ROOM_MAX_MEMBERS ? ROOM_MAX_MEMBERS : cfg->max_players;
@@ -2406,6 +2451,7 @@ static inline void netplay_do_join(const netplay_config_t *cfg) {
         break;
     }
     netplay_forget_room();
+    snprintf(g_netplay.room_password_used, sizeof(g_netplay.room_password_used), "%s", cfg->room_password);
     uint8_t me_bin[ROOM_MEMBER_SIZE];
     uint32_t me_len = room_member_encode(&g_netplay.me, me_bin);
     if (!rpcn_session_join(&g_netplay.session, cfg->room_id,
@@ -2464,6 +2510,10 @@ static inline void netplay_do_watch(bool watch) {
 }
 
 static inline void netplay_do_leave_room(void) {
+    g_netplay.heal_find_until_ms = 0;
+    g_netplay.heal_joining = false;
+    g_netplay.heal_room_id = 0;
+    g_netplay.heal_rejoin  = false;
     netplay_send_bye();
     if (g_netplay.ps3) { ps3_link_leave(&g_netplay.ps3link); netplay_release_inputs(); }
     netplay_end_match(NULL);
@@ -2610,18 +2660,179 @@ static inline bool netplay_pump_commands(void) {
 
 /* ---- The pump, and the frame gate ---------------------------------------- */
 
+/*
+ * SIGNING BACK IN after the link to the server dropped.
+ *
+ * A router that drops a long TCP connection, a server restart, a laptop that
+ * changes networks: the login is gone, and nothing about the player's account or
+ * settings is wrong. So it is made again, quietly, with the settings that worked,
+ * and the player is put back in the room they were in -- or, when it was theirs
+ * and nobody else was in it (the server closes an empty room), opens it again.
+ * Only a login that reached the server is retried, only when the server went
+ * away rather than answered, and never after a refused credential
+ * (netplay_twitch_refused): retrying one is how an account gets locked.
+ */
+#define NETPLAY_HEAL_FIRST_MS  1000u
+#define NETPLAY_HEAL_MAX_MS   16000u
+#define NETPLAY_HEAL_TRIES        8u    /* 1+2+4+8+16+16+16+16 s: about two minutes */
+#define NETPLAY_HEAL_FIND_MS  30000u    /* how long to look for the owner's new room */
+#define NETPLAY_HEAL_SEARCH_MS 2000u
+
+/* The session failed because the server went away, on a login worth retrying. */
+static inline bool netplay_heal_is_drop(void) {
+    return g_netplay.heal_armed && g_netplay.session.stage == RPCN_STAGE_FAILED
+        && !rpcn_is_connected(&g_netplay.session.client)
+        && !g_netplay.session.credential_refused;
+}
+
+/* The room we were in when the link dropped. The session's stage already says
+ * FAILED, so rpcn_session_in_room would say no: read the room it still holds. */
+static inline void netplay_heal_note_room(void) {
+    const rpcn_session_t *ss = &g_netplay.session;
+    if (!ss->room_id || g_netplay.ps3) return;
+    g_netplay.heal_room_id   = ss->room_id;
+    g_netplay.heal_was_owner = ss->my_member_id && ss->my_member_id == ss->owner_id;
+    bool alone = true;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) if (ss->peers[i].used) alone = false;
+    g_netplay.heal_room_host = g_netplay.heal_was_owner && alone;
+    g_netplay.heal_owner[0]  = '\0';
+    if (g_netplay.heal_was_owner) {
+        snprintf(g_netplay.heal_owner, sizeof(g_netplay.heal_owner), "%s", ss->npid);
+    } else {
+        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++)
+            if (ss->peers[i].used && ss->peers[i].member_id == ss->owner_id)
+                snprintf(g_netplay.heal_owner, sizeof(g_netplay.heal_owner), "%s", ss->peers[i].npid);
+    }
+}
+
+static inline void netplay_heal_schedule(void) {
+    if (g_netplay.heal_tries >= NETPLAY_HEAL_TRIES) {
+        netplay_log("could not reach the server again after %u tries - press Connect to try again",
+                    (unsigned)g_netplay.heal_tries);
+        g_netplay.heal_armed   = false;
+        g_netplay.heal_room_id = 0;
+        g_netplay.state        = NETPLAY_FAILED;
+        return;
+    }
+    uint32_t wait = NETPLAY_HEAL_FIRST_MS << (g_netplay.heal_tries < 5 ? g_netplay.heal_tries : 5);
+    if (wait > NETPLAY_HEAL_MAX_MS) wait = NETPLAY_HEAL_MAX_MS;
+    g_netplay.heal_at_ms = net_now_ms() + wait;
+    /* It is connecting, as far as anyone looking is concerned: "failed" would
+     * send the player to the Connect button for something already in hand. */
+    g_netplay.state = NETPLAY_CONNECTING;
+}
+
+/* Once per slice: the next attempt, when it is due. */
+/* Back into a room: `host` opens it again, otherwise `room_id` is joined, and
+ * a join that finds it gone comes back through netplay_heal_room_pump. */
+static inline void netplay_heal_take_room(bool host, uint64_t room_id) {
+    netplay_cmd_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.kind = host ? NETPLAY_CMD_HOST : NETPLAY_CMD_JOIN;
+    cmd.cfg  = g_netplay.cfg;
+    cmd.cfg.room_id = room_id;
+    snprintf(cmd.cfg.room_password, sizeof(cmd.cfg.room_password), "%s", g_netplay.room_password_used);
+    if (host) {
+        netplay_log("opening the room again");
+    } else {
+        netplay_log("going back to room %llu", (unsigned long long)room_id);
+        g_netplay.session.join_soft   = true;
+        g_netplay.session.join_missed = false;
+        g_netplay.heal_joining        = true;
+    }
+    netplay_room_or_defer(&cmd);
+}
+
+/* The room half of a heal, once signed in again. */
+static inline void netplay_heal_room_pump(void) {
+    uint64_t now = net_now_ms();
+    if (g_netplay.heal_rejoin && g_netplay.state == NETPLAY_ONLINE) {
+        g_netplay.heal_rejoin = false;
+        netplay_heal_take_room(g_netplay.heal_room_host, g_netplay.heal_room_id);
+        g_netplay.heal_room_id = 0;
+        return;
+    }
+    if (g_netplay.heal_joining) {
+        if (g_netplay.state == NETPLAY_IN_ROOM) { g_netplay.heal_joining = false; g_netplay.heal_find_until_ms = 0; return; }
+        if (g_netplay.state != NETPLAY_ONLINE || g_netplay.room_deferred || g_netplay.session.pending_room) return;
+        g_netplay.heal_joining = false;
+        if (!g_netplay.session.join_missed) { g_netplay.heal_find_until_ms = 0; return; }   /* full, or refused: stay online */
+        g_netplay.session.join_missed = false;
+        /* The server lost the room. Its owner opens it again; everyone else
+         * looks for the one that owner opens, for a while. */
+        if (g_netplay.heal_was_owner) {
+            netplay_log("the room closed while the server was away");
+            netplay_heal_take_room(true, 0);
+            return;
+        }
+        if (!g_netplay.heal_find_until_ms) {
+            if (!g_netplay.heal_owner[0]) return;
+            netplay_log("the room closed while the server was away; looking for %s's new one",
+                        g_netplay.heal_owner);
+            g_netplay.heal_find_until_ms = now + NETPLAY_HEAL_FIND_MS;
+        }
+    }
+    if (!g_netplay.heal_find_until_ms || g_netplay.state != NETPLAY_ONLINE) return;
+    if (now > g_netplay.heal_find_until_ms) {
+        netplay_log("%s has not opened a room again; pick one from the list", g_netplay.heal_owner);
+        g_netplay.heal_find_until_ms = 0;
+        return;
+    }
+    const rpcn_session_t *ss = &g_netplay.session;
+    for (uint32_t i = 0; i < ss->room_count; i++) {
+        if (!rpcn_same_npid(ss->rooms[i].owner, g_netplay.heal_owner)) continue;
+        netplay_heal_take_room(false, ss->rooms[i].room_id);
+        return;
+    }
+    if (now - g_netplay.heal_search_ms >= NETPLAY_HEAL_SEARCH_MS && !rpcn_session_search_pending(ss)) {
+        g_netplay.heal_search_ms = now;
+        rpcn_session_search(&g_netplay.session, false);
+    }
+}
+
+/* Once per slice: the next attempt, when it is due. */
+static inline void netplay_heal_pump(void) {
+    netplay_heal_room_pump();
+    if (!g_netplay.heal_at_ms || net_now_ms() < g_netplay.heal_at_ms) return;
+    g_netplay.heal_at_ms = 0;
+    g_netplay.heal_tries++;
+    g_netplay.healing = true;
+    netplay_do_connect(&g_netplay.cfg);
+    g_netplay.healing = false;
+    /* Failed on the spot (the server is not answering yet): try again later. A
+     * failure that comes later arrives through netplay_mirror_stage. */
+    if (g_netplay.state == NETPLAY_FAILED) netplay_heal_schedule();
+}
+
+/* Signed in: a drop from here on is worth healing, and a heal is over. */
+static inline void netplay_heal_online(void) {
+    if (g_netplay.heal_tries) {
+        netplay_log("back online after %u attempt%s", (unsigned)g_netplay.heal_tries,
+                    g_netplay.heal_tries == 1 ? "" : "s");
+        g_netplay.heal_rejoin = g_netplay.heal_room_id != 0;
+    }
+    g_netplay.heal_armed = true;
+    g_netplay.heal_tries = 0;
+}
+
 static inline void netplay_mirror_stage(void) {
     /* The session's own progress becomes our state, except while a match is
      * running: SYNCING/PLAYING/WATCHING are owned by the room, not by the
      * transport -- unless the room itself went away under the match. */
     if (g_netplay.state == NETPLAY_SYNCING || netplay_running_match()) {
-        if (rpcn_session_in_room(&g_netplay.session)) return;
-        netplay_end_match("the room is gone");
+        /* The server takes us out of the room the moment the link drops, and the
+         * room calls off a match a fighter has left. Waiting out the stall timer
+         * would only put the sign-in back fifteen seconds later. */
+        if (netplay_heal_is_drop())
+            netplay_end_match("the connection to the server was lost");
+        else if (rpcn_session_in_room(&g_netplay.session)) return;
+        else netplay_end_match("the room is gone");
     }
     switch (g_netplay.session.stage) {
         case RPCN_STAGE_LOGGING_IN: g_netplay.state = NETPLAY_CONNECTING; break;
         case RPCN_STAGE_ONLINE:
             if (g_netplay.state == NETPLAY_IN_ROOM) netplay_forget_room();   /* closed, or left */
+            if (g_netplay.state != NETPLAY_ONLINE) netplay_heal_online();
             /* Remember the server and account only once they are known to WORK —
              * storing what was typed would just as happily store a typo. */
             if (g_netplay.state != NETPLAY_ONLINE) {
@@ -2671,9 +2882,17 @@ static inline void netplay_mirror_stage(void) {
         case RPCN_STAGE_FAILED:
             /* On the edge only: the stage stays FAILED on every pump after it,
              * and the handler below may start a fresh login. */
-            if (g_netplay.state != NETPLAY_FAILED) {
+            if (g_netplay.state != NETPLAY_FAILED && !g_netplay.heal_at_ms) {
+                bool drop = netplay_heal_is_drop();
+                if (drop) netplay_heal_note_room();
                 g_netplay.state = NETPLAY_FAILED;
                 netplay_twitch_refused();
+                if (drop) {
+                    if (!g_netplay.heal_tries)
+                        netplay_log("lost the connection to the server (%s); signing back in",
+                                    rpcn_session_error(&g_netplay.session));
+                    netplay_heal_schedule();
+                }
             }
             break;
         default: break;
@@ -2698,7 +2917,7 @@ static inline void netplay_report_wait(void) {
     else if (!p->heard)
         netplay_log("still waiting: punching %s at %s but nothing has come back - check that UDP %u "
                     "is not blocked by a firewall on either machine",
-                    rpcn_peer_name(p), rpcn_peer_addr_text(p), (unsigned)RPCN_P2P_PORT);
+                    rpcn_peer_name(p), rpcn_peer_addr_text(p), (unsigned)g_netplay.session.client.local_port);
     else
         netplay_log("still waiting: %s at %s is reachable but has not started this match",
                     rpcn_peer_name(p), rpcn_peer_addr_text(p));
@@ -3374,6 +3593,7 @@ static inline netplay_step_t netplay_begin_frame(void) {
 
     rpcn_session_update(&g_netplay.session);
     netplay_mirror_stage();
+    netplay_heal_pump();
     netplay_drain_socket();
     netplay_pump_deferred_room();
 
