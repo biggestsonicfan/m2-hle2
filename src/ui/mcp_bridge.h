@@ -168,7 +168,7 @@ static void mcp_cmd_get_status(char *resp, int cap) {
      * sound board, and the waits (pace_us, net_us) apart from the work, so a
      * board short of 60 fps reads as slow or as throttled. frame_max_us is
      * the worst frame since the last get_status (emu_times.h). */
-    char et[768];
+    char et[1024];
     emu_times_json(et, (int)sizeof et);
 
     snprintf(resp, (size_t)cap,
@@ -2229,6 +2229,9 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing cmd\"}");
         return;
     }
+    /* The sound board as the slice left it, not halfway through its run on
+     * the sound thread (sound.h): a no-op unless one is in flight. */
+    sound_settle();
 
     if      (strcmp(cmd, "get_status")       == 0) mcp_cmd_get_status(resp, cap);
     else if (strcmp(cmd, "set_input")        == 0) mcp_cmd_set_input(req, resp, cap);

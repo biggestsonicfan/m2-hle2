@@ -618,9 +618,10 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * of the slice, and still counts as a frame (emu_slice_finish). */
     bool vbl_irq = false;
     /* The loop's host time, less the sound board it ran early inside it
-     * (sound_uart_make_room): the i960 and the COP (emu_times.h). */
+     * (sound_uart_make_room) or waited on (sound_settle): the i960 and the
+     * COP (emu_times.h). */
     const int64_t loop_t0  = emu_now_us();
-    const int64_t loop_snd = g_emu_times.sound_us;
+    const int64_t loop_snd = g_emu_times.sound_inline_us + g_emu_times.sound_wait_us;
     int i;
     for (i = 0; i < max_steps && !ctx->cpu->halted; i++) {
         if (slow) {
@@ -658,7 +659,8 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             }
         }
     }
-    g_emu_times.loop_us += emu_now_us() - loop_t0 - (g_emu_times.sound_us - loop_snd);
+    g_emu_times.loop_us += emu_now_us() - loop_t0
+                         - (g_emu_times.sound_inline_us + g_emu_times.sound_wait_us - loop_snd);
     g_emu_times.steps   += steps;
     ctx->total_steps += steps;
     ctx->slice_capped = (i >= max_steps);
@@ -673,7 +675,8 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
 
     /* The sound board runs on its own sample clock: a frame's worth of
      * 44.1 kHz samples when the frame ends, the 68000 in lockstep with the
-     * SCSP (see emu_sound_slice_end). */
+     * SCSP (see emu_sound_slice_end). They run on the sound thread while the
+     * next slice's i960 does (sound.h, "The sound thread"). */
 #ifdef M2HLE_PROFILE
     int64_t snd_t0 = g_pcprof_on ? emu_now_us() : 0;
 #endif
@@ -707,9 +710,10 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
     if (frame) {
         g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
         /* Stamp the frame with the board audio produced up to its end: the
-         * slice's own samples are already in, sound_run_slice ran in the body
-         * above. sample first, frame second (see g_frame_clock). */
-        g_frame_clock.sample = g_sound.out_total;
+         * slice's own samples, which sound_run_slice handed out in the body
+         * above and the sound thread may still be making (out_due is where
+         * they end). sample first, frame second (see g_frame_clock). */
+        g_frame_clock.sample = g_sound.out_due;
         g_frame_clock.frame  = g_emu_frames;
         /* The netplay frame clock and this frame's state check. Fed the
          * snapshot rather than the live CPU: it was taken under the mutex
@@ -957,6 +961,9 @@ static inline void emu_thread_shutdown(emu_thread_ctx_t *ctx) {
 #else
     pthread_join(ctx->thread, NULL);
 #endif
+    /* The sound thread stays parked for the life of the process, but must not
+     * be mid-run when the host frees the sample ROMs it reads. */
+    sound_settle();
     emu_mutex_destroy(&ctx->mutex);
     LOG_INFO("emu: thread stopped");
 }
@@ -1007,6 +1014,7 @@ static inline void emu_sound_restart(emu_thread_ctx_t *ctx) {
 static inline int emu_sound_midi(emu_thread_ctx_t *ctx, const uint8_t *b, int n) {
     int locked = ctx && ctx->thread_alive;
     if (locked) emu_mutex_lock(&ctx->mutex);
+    sound_settle();
     for (int i = 0; i < n; i++) sound_uart_write(&g_sound, b[i], g_sound.m68k.cpu.cycles);
     if (locked) emu_mutex_unlock(&ctx->mutex);
     return n;

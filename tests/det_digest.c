@@ -41,6 +41,13 @@
  * frame runs through trace_slice, a copy of emu_slice_body with the line added,
  * so keep the two in step.
  *
+ * --sound adds the sound board to each line: a hash of sound RAM and the
+ * sample clock. Reading it waits for the sound thread (sound.h), so the run
+ * then has no overlap to test; without it the sound thread runs as in a host,
+ * and the last line on stderr hashes every sample the board produced, which
+ * holds the overlapped run whole. --no-sound-thread (or M2HLE_SOUND_THREAD=0)
+ * keeps the sound board on this thread, for the A/B.
+ *
  * Two builds of it, one from each configuration, so each has exactly its
  * frontend's compiler flags:
  *   native  --target det_digest in a desktop build tree (not a ctest: it needs a ROM)
@@ -78,6 +85,15 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
     return h;
 }
 #define FNV0 0xcbf29ce484222325ull
+
+/* Every sample the board makes, folded in as it is made (on the sound thread). */
+static uint64_t snd_out_hash = FNV0, snd_out_n;
+static void snd_out_tap(int16_t l, int16_t r, uint64_t index, void *ud) {
+    (void)index; (void)ud;
+    int16_t lr[2] = { l, r };
+    snd_out_hash = fnv(snd_out_hash, lr, sizeof lr);
+    snd_out_n++;
+}
 
 #define SCRIPT_MAX 1024
 static struct { uint32_t frame, held; } script[SCRIPT_MAX];
@@ -234,7 +250,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint32_t frames = 3600, from = 0;
-    bool frames_given = false;
+    bool frames_given = false, sound_cols = false;
     const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL;
     for (int i = 2; i < argc; i++) {
         if      (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = (uint32_t)strtoul(argv[++i], NULL, 10); frames_given = true; }
@@ -242,6 +258,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--from")   && i + 1 < argc) from   = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) script_text = argv[++i];
         else if (!strcmp(argv[i], "--out")    && i + 1 < argc) out_path = argv[++i];
+        else if (!strcmp(argv[i], "--sound"))                   sound_cols = true;
+        else if (!strcmp(argv[i], "--no-sound-thread"))         g_sound_thread_want = 0;
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
@@ -303,6 +321,7 @@ int main(int argc, char **argv) {
     emu_board_reset_state();
     emu_ctx_init(&emu, &cpu, &bus);
     emu_run(&emu);
+    sound_set_tap(snd_out_tap, NULL);
 
     FILE *out = out_path ? fopen(out_path, "wb") : stdout;
     if (!out) { fprintf(stderr, "cannot write %s\n", out_path); return 2; }
@@ -338,15 +357,26 @@ int main(int argc, char **argv) {
         uint64_t ram  = fnv(fnv(FNV0, bus.ram, RAM_SIZE), bus.ram2, RAM2_SIZE);
         uint64_t buf  = fnv(FNV0, bus.buff_ram, BUFF_RAM_SIZE);
         uint64_t dm   = fnv(FNV0, g_sharc.dm, sizeof g_sharc.dm);
-        fprintf(out, "%u %08x %016llx %016llx %016llx %llu\n", (unsigned)g_emu_frames, check,
+        fprintf(out, "%u %08x %016llx %016llx %016llx %llu", (unsigned)g_emu_frames, check,
                 (unsigned long long)ram, (unsigned long long)buf, (unsigned long long)dm,
                 (unsigned long long)emu.total_steps);
+        if (sound_cols) {
+            sound_settle();
+            fprintf(out, " %016llx %llu", (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
+                    (unsigned long long)g_sound.out_total);
+        }
+        fputc('\n', out);
     }
     if (out != stdout) fclose(out);
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
             (unsigned long long)slices, (unsigned long long)emu.total_steps);
+    sound_settle();
+    fprintf(stderr, "sound: %llu samples, output %016llx, sound RAM %016llx (%s, %llu slices handed over)\n",
+            (unsigned long long)snd_out_n, (unsigned long long)snd_out_hash,
+            (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
+            sound_thread_on() ? "sound thread" : "one thread", (unsigned long long)g_emu_times.sound_jobs);
     if (in_n) {
         if (mismatches) fprintf(stderr, "input log: %u of %u frames' checks differ, the first at session frame %u\n",
                                 (unsigned)mismatches, (unsigned)g_emu_frames, (unsigned)first_mismatch);

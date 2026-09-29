@@ -29,6 +29,12 @@
     * in a process with neither a window nor an audio device, which is far too
     * expensive to spend on letting the UI take a mutex. */
 #  define emu_yield()           ((void)SwitchToThread())
+   /* A condition variable on an emu_mutex_t, for the sound board's thread. */
+   typedef CONDITION_VARIABLE emu_cond_t;
+#  define emu_cond_init(c)      InitializeConditionVariable(c)
+#  define emu_cond_wait(c, m)   ((void)SleepConditionVariableCS((c), (m), INFINITE))
+#  define emu_cond_signal(c)    WakeConditionVariable(c)
+#  define emu_cond_broadcast(c) WakeAllConditionVariable(c)
 #else
 #  include <pthread.h>
 #  include <unistd.h>
@@ -42,6 +48,11 @@
 #  define emu_mutex_unlock(m)   pthread_mutex_unlock(m)
 #  define emu_sleep_ms(ms)      usleep((useconds_t)((ms) * 1000))
 #  define emu_yield()           ((void)sched_yield())
+   typedef pthread_cond_t  emu_cond_t;
+#  define emu_cond_init(c)      pthread_cond_init(c, NULL)
+#  define emu_cond_wait(c, m)   pthread_cond_wait(c, m)
+#  define emu_cond_signal(c)    pthread_cond_signal(c)
+#  define emu_cond_broadcast(c) pthread_cond_broadcast(c)
 #endif
 
 #endif /* THREAD_MUTEX_H */

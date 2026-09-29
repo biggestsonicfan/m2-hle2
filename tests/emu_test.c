@@ -186,6 +186,9 @@ int main(void) {
               g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
               "backpressure: the board ran early, by no more than a slice");
         sound_run_slice(60);
+        CHECK(g_sound.ahead == 0 && g_sound.out_due == t0 + 735,
+              "backpressure: the frame clock knows where the slice ends before it has run");
+        sound_settle();   /* the rest of the slice ran on the sound thread */
         CHECK(g_sound.ahead == 0 && g_sound.out_total == t0 + 735,
               "backpressure: the slice owes the early samples back (735 in all)");
         CHECK(g_sound.uart.count == 0 && g_sound.uart.sent == 33 && scsp_midi_room(&g_sound.scsp) == 0 &&
@@ -193,10 +196,44 @@ int main(void) {
               "backpressure: the line carried all 33 in the slice; the ring took 31 and dropped two");
         CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "backpressure: TxRDY and TxEMPTY are up again");
         sound_run_slice(60);
+        sound_settle();
         CHECK(g_sound.out_total == t0 + 1470, "backpressure: the next slice is a whole one");
         sound_reset();
         CHECK(g_sound.ahead == 0 && g_sound.slice_frac == 0,
               "sound_reset clears the slice carry (two cold-booted boards must agree)");
+
+        /* The sound thread (sound.h) changes when the samples are made, never
+         * what they are: the same slices and UART traffic, run with it and
+         * without, leave the same board and the same output. */
+        uint64_t digest[2];
+        for (int pass = 0; pass < 2; pass++) {
+            g_sound_thread_want = pass == 0;
+            sound_reset();
+            sound_attach(&bus);
+            g_sound.out_r = g_sound.out_w;   /* nobody drains the ring here */
+            uint32_t r0 = g_sound.out_w;
+            for (int sl = 0; sl < 12; sl++) {
+                for (int b = 0; b < 3 + sl % 5; b++) mem_write8(&bus, MIDI_BASE, (uint8_t)(0x90 + sl + b));
+                (void)mem_read8(&bus, MIDI_BASE + 4);
+                sound_run_slice(60);
+            }
+            sound_settle();
+            uint64_t h = 0xcbf29ce484222325ull;
+            #define EMU_TEST_FNV(p, n) do { const uint8_t *q_ = (const uint8_t *)(p); \
+                for (size_t k_ = 0; k_ < (size_t)(n); k_++) { h ^= q_[k_]; h *= 0x100000001b3ull; } } while (0)
+            EMU_TEST_FNV(g_sound.ram, sizeof g_sound.ram);
+            EMU_TEST_FNV(&g_sound.m68k.cpu, sizeof g_sound.m68k.cpu);
+            EMU_TEST_FNV(&g_sound.uart, sizeof g_sound.uart);
+            for (uint32_t r = r0; r != g_sound.out_w; r = (r + 1) & (SOUND_OUT_FRAMES - 1))
+                EMU_TEST_FNV(&g_sound.out[r * 2], 4);
+            #undef EMU_TEST_FNV
+            digest[pass] = h;
+            if (pass == 0)
+                CHECK(sound_thread_on() && g_emu_times.sound_jobs > 0, "sound thread: slices went to the sound thread");
+        }
+        g_sound_thread_want = 1;
+        CHECK(digest[0] == digest[1], "sound thread: the same board and output with it and without");
+        sound_reset();
     }
 
     /* The sound UART's interrupt is offered when the game enables its line
