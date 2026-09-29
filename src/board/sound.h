@@ -44,6 +44,7 @@
 #include "m68k.h"
 #include "m68k_exec.h"
 #include "scsp.h"
+#include "emu_times.h"   /* host time spent here, for get_status */
 
 #define SOUND_RAM_SIZE            0x80000u
 #define SOUND_RATE                44100u
@@ -123,7 +124,7 @@ typedef struct {
     /* host output: emu thread writes, audio thread reads */
     int16_t          out[SOUND_OUT_FRAMES * 2];
     volatile uint32_t out_w, out_r;
-    uint64_t         out_dropped;
+    uint64_t         out_dropped;      /* grows by design while nobody reads the ring (g_sound_out_reader) */
     /* Every sample the board has ever produced, whether the ring took it or
      * not. The one clock a consumer outside the ring can trust, and monotonic
      * across a board reset — sound_reset() leaves it, and the ring, alone. */
@@ -754,6 +755,11 @@ static inline void sound_out_push(int16_t l, int16_t r) {
     g_sound.out_w = (w + 1) & (SOUND_OUT_FRAMES - 1);
 }
 
+/* Whether a host drains the ring: a device is open (audio_out_init) or a
+ * push host has begun (audio_out_push_begin). Without one out_dropped is
+ * every sample the board makes, which says nothing about real drops. */
+static volatile int g_sound_out_reader;
+
 /* A per-instruction tap for the graders: called with the 68000's PC and its
  * clock before every instruction (tests/snd_replay.c $SND_TRACE writes them
  * out, to hold the instruction timing against a MAME trace). NULL when off. */
@@ -764,6 +770,7 @@ static void  *g_sound_step_trace_ud;
 static void sound_run(uint32_t n) {
     if (!g_sound.rom_loaded || g_sound.detached) return;
     m68k_state_t *m = &g_sound.m68k;
+    int64_t run_t0 = emu_now_us();
     for (uint32_t i = 0; i < n; i++) {
         if (g_snd_watch.on) snd_watch_sample();
         g_sound.budget += SOUND_CYCLES_PER_SAMPLE;
@@ -805,9 +812,19 @@ static void sound_run(uint32_t n) {
             g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
         }
         int16_t l, r;
-        scsp_sample(&g_sound.scsp, &l, &r);
+        /* One sample in 16 is timed, for the SCSP's share (emu_times.h). */
+        if (g_sound.out_total & 15) {
+            scsp_sample(&g_sound.scsp, &l, &r);
+        } else {
+            int64_t t0 = emu_now_us();
+            scsp_sample(&g_sound.scsp, &l, &r);
+            g_emu_times.scsp_timed_us += emu_now_us() - t0;
+            g_emu_times.scsp_timed++;
+        }
         sound_out_push(l, r);
     }
+    g_emu_times.sound_us      += emu_now_us() - run_t0;
+    g_emu_times.sound_samples += n;
 }
 
 /* ---- the UART's backpressure ----------------------------------------------------

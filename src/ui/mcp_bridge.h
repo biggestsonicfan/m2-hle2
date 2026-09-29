@@ -35,6 +35,7 @@
 #include "av_stream.h"    /* the --av-port server, for the "av" block of get_status */
 #include "overlay_host.h" /* ...and the "overlay" block: is the plugin actually running */
 #include "frame_times.h"  /* ...and "render": where the host's frame time goes */
+#include "emu_times.h"    /* ...and "emu": where the emulated frame's time goes */
 /* Before this header's own winsock block, and before anything else that could
  * reach <windows.h>: net_socket.h owns the include order and <winsock2.h> has
  * to precede it. main.c already includes this first, so here it is a no-op --
@@ -163,19 +164,25 @@ static void mcp_cmd_get_status(char *resp, int cap) {
              "\"draw3d_us\":%lld,\"tiles_us\":%lld}",
              (unsigned long long)ft->frames, (long long)ft->compose_us, (long long)ft->scan_us,
              (long long)ft->upload_us, (long long)ft->draw3d_us, (long long)ft->tiles_us);
+    /* The same for the emulation, cumulative too: the i960, the COP, the
+     * sound board, and the waits (pace_us, net_us) apart from the work, so a
+     * board short of 60 fps reads as slow or as throttled. frame_max_us is
+     * the worst frame since the last get_status (emu_times.h). */
+    char et[768];
+    emu_times_json(et, (int)sizeof et);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
-             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
+             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, (unsigned long long)steps, profile_id,
              g_emu_frames,
              (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame, av, ov, rt, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
+             g_match_replay_frame, av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
 /* {"cmd":"prof","on":1} arms the i960 address profiler (clearing it),
@@ -708,7 +715,7 @@ static void mcp_cmd_sound_status(char *resp, int cap) {
              "\"cycles\":%llu,\"samples\":%llu,\"irqs\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu],"
              "\"midi_writes\":%llu,\"midi_fifo\":%u,\"scieb\":\"0x%03X\",\"scipd\":\"0x%03X\",\"lines\":\"0x%02X\","
              "\"levels\":[%u,%u,%u],\"timers\":[\"0x%04X\",\"0x%04X\",\"0x%04X\"],\"keyed\":\"0x%08X\",\"active\":\"0x%08X\","
-             "\"dsp_steps\":%d,\"out_fill\":%u,\"out_dropped\":%llu,\"midi_drops\":%u,\"midi_hi\":%u,\"midi_drains\":%llu,\"midi_holds\":%llu}",
+             "\"dsp_steps\":%d,\"out_fill\":%u,\"out_dropped\":%llu,\"out_reader\":%s,\"midi_drops\":%u,\"midi_hi\":%u,\"midi_drains\":%llu,\"midi_holds\":%llu}",
              g_sound.rom_loaded ? "true" : "false", g_sound.samples_size,
              g_sound.m68k.cpu.pc, (unsigned)g_sound.m68k.cpu.sr,
              (unsigned long long)g_sound.m68k.cpu.cycles, (unsigned long long)sc->samples,
@@ -719,6 +726,7 @@ static void mcp_cmd_sound_status(char *resp, int cap) {
              sc->c[0x0F], sc->c[0x10], sc->lines, sc->lvl_ta, sc->lvl_tbc, sc->lvl_midi,
              sc->c[0x0C], sc->c[0x0D], sc->c[0x0E], keyed, active,
              sc->dsp.stopped ? -1 : sc->dsp.last_step, fill, (unsigned long long)g_sound.out_dropped,
+             g_sound_out_reader ? "true" : "false",
              sc->mi_drops, sc->mi_hi, (unsigned long long)g_sound.midi_drains,
              (unsigned long long)g_sound.midi_holds);
 }

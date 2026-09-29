@@ -248,6 +248,7 @@ static inline void audio_out_init_ex(const audio_out_config_t *cfg) {
     a->fill_k = 1.0 / (0.25 * (double)a->rate);
     audio_out_set_low_water(a);
     a->ready  = true;
+    g_sound_out_reader = 1;
     LOG_INFO("audio: %u Hz output, resampled from the board's 44100 Hz; %d-frame callback, %.0f frames (%.0f ms) queued",
              a->rate, saudio_buffer_frames(), a->target, a->target * 1000.0 / (double)SOUND_RATE);
 }
@@ -281,6 +282,7 @@ static inline void audio_out_push_begin(uint32_t device_rate) {
     a->rate = device_rate ? device_rate : SOUND_RATE;
     a->pos  = 0.0;
     a->dc_xl = a->dc_xr = a->dc_yl = a->dc_yr = 0.0f;
+    g_sound_out_reader = 1;
     /* Whatever the board produced before there was anywhere to send it is old. */
     g_sound.out_r = g_sound.out_w;
 }
@@ -321,6 +323,7 @@ static inline uint32_t audio_out_queued(void) {
 static inline void audio_out_shutdown(void) {
     if (g_audio_out.ready) saudio_shutdown();
     g_audio_out.ready = false;
+    g_sound_out_reader = 0;
 }
 
 #endif /* AUDIO_OUT_H */
