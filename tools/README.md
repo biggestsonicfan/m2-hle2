@@ -756,8 +756,9 @@ MADRS over 0x7C0-0x7FF, which STF's driver zeros, so the reverb sat on a constan
 A speed change to `sound.h`, `scsp.h` or `m68k_exec.h` has to leave the board
 bit for bit where it was, and no one input reaches all of it. The MAME capture
 is 300 MIDI bytes of attract, and STF's driver never uses FM, the noise source,
-reverse or alternating loops or 8-bit samples, and runs 587 of the 68000's
-opcodes. Build both trees, run all four checks, `cmp` everything:
+reverse or alternating loops or 16-bit samples (every voice it keys is 8-bit),
+and runs 587 of the 68000's opcodes. Build both trees, run all four checks,
+`cmp` everything:
 
 ```sh
 python tools/snd_stimuli.py stim            # bgm, sfx, sys, fuzz: ~2 min each
@@ -871,6 +872,91 @@ was left was the path between, and `sound_codes` in a mashed two-player session
 showed commands arriving as `00 00 00` and `0D B1 A8`. The cause was the ROM's
 queue overlapping other variables, exposed because the emulator took the sound
 interrupt only once a slice. CLAUDE.md has it under the sound board.
+
+### Music against M2MidiDec (`grade-midi.py`)
+
+ValleyBell's [M2MidiDec](https://github.com/ValleyBell/MidiConverters) reads the
+sound program's sequence data and writes each of STF's 25 songs as a MIDI file,
+plus an SF2 of the sample ROMs. It reads the same driver data without running the
+68000, so it is a check on the board that shares no code with it.
+`grade-midi.py` holds `snd_replay`'s playback of each song (`stim`: the boot
+commands, then `AE 10 xx`) against the MIDI, note by note, and with `--wav`
+against a fluidsynth render of the MIDI, spectrum by spectrum. The commands are
+in its docstring; the tools are built outside the repo and nothing they write
+is committed.
+
+**The notes agree** (2026-09-29, all 25 songs, 88 s or the MIDI's end). Every
+MIDI note has a key-on: 100% of onsets within 12 ms, median error 0.5-6 ms.
+90-100% of notes land at the pitch their key always has on the board; the misses
+are chords, where two keys share a moment. A melodic note is held exactly as
+long as the MIDI says (97% within 20 ms). The two renders' spectra then agree
+within about ±1.5 dB below 16 kHz in every song but 0x10. Envelope correlation
+is 0.80-0.98 and chroma 0.78-0.94.
+
+It took four corrections to get there, and none of them is the board's:
+
+- **Tempo.** M2MidiDec writes a fixed 1.1719 ms a tick (853 Hz). The driver's
+  sequencer ticks on timer B: 50.0146 samples, 1.1341 ms, 882 Hz, the same as
+  MAME. So the MIDIs run 3.3% slow. Every song fitted a rate of 0.968. After
+  `fix` sets the tempo, the fitted rate is 1.000 ± 0.0005.
+- **MIDI channel 10 is melodic in STF.** The drum kit (instrument 11) is on
+  channel 16, and channel 10 carries programs 2, 8, 9, 10, 18 and 22. A GM synth
+  sends channel 10 to bank 128, where the SF2 has no such presets. So 3714 of
+  71891 notes (5%) were silent (fluidsynth: "No preset found on channel 9").
+  `fix` moves them to channel 13. M2MidiDec's `-c` swaps 10 and 16 instead.
+- **Interpolation.** The SCSP interpolates linearly (`scsp.h`, as MAME does).
+  fluidsynth defaults to 4th order, which rejects more of the images that a
+  resampled sample leaves above 16 kHz. Against a default render the board had
+  +5 to +8.5 dB more there; against `interp 1` it has 0 to +2.5 dB more.
+- **The SF2's envelopes do not matter for STF**, even though M2MidiDec converts
+  the SCSP's envelope wrongly in three ways. It treats DL as linear amplitude,
+  where the SCSP gives 3 dB a step. It writes D2R as the SF2 hold time. It drops
+  KRS. None of this reaches STF: its driver keys every voice with AR 31 and
+  D1R = D2R = DL = 0 and only ever sets RR, so every note is flat until key-off.
+
+Checked and ruled out:
+
+- Tuning: the long-term spectra line up at 0 cents in every song.
+- The DSP: its effect return sits 38 dB under the direct mix in STF's music.
+- CC1: there are 2969 of them, which fluidsynth plays as vibrato, and removing
+  them changed nothing.
+- The velocity curve: the ROM's table (0xFB04) is M2MidiDec's hard-coded one
+  behind a 7-byte header.
+
+Two differences are left:
+
+- **Drum lengths.** Only half of the lone notes are held as long as the MIDI
+  says, and nearly all the misses are on channel 16. The board holds a drum key
+  a median 0.44 s, where the MIDI releases it after 0.28 s, so the SF2 cuts drum
+  tails short.
+- **Some channels' levels.** Take lone notes, where one MIDI note and one key-on
+  stand alone within 30 ms. There the board's TL is the MIDI's velocity and
+  volume plus 3.4 dB. In 27 of 47 (song, channel, program) groups it is within
+  1 dB of that. The rest sit 2-5 dB off, with almost no spread inside a group:
+  song 0x17 channel 14 −5.3 dB, 0x10 channel 15 −4.9, 0x03 channel 3 +4.4.
+  That is a per-track level the MIDI does not carry. It is not in the
+  track-init record (byte 3 is the volume, which M2MidiDec converts; the rest is
+  pan and LFO), so it is presumably a sequence command M2MidiDec does not
+  convert. Song 0x10 has the largest spectral difference left, −4.2 dB at
+  8-16 kHz, and its channel 15 is one of these.
+
+**MAME as the third point.** A fresh 90 s attract capture (claude_mame
+`1d6dbfafe53`, the Linux build), replayed through the board, grades as before:
+72.7% of notes within 30 ms, envelope 0.987. Over song 0x10 before the first
+effect (17.6-22.9 s):
+
+- The board's spectrum is within 0.2 dB of MAME's up to 8 kHz.
+- Above that MAME falls away smoothly, from −0.9 dB at 12 kHz to −4.1 dB at
+  20 kHz. That is MAME resampling the SCSP's 44.1 kHz into its 48 kHz WAV, not
+  a difference in the chip.
+- The corrected render is within 1.5 dB of MAME in every band below 16 kHz.
+
+So wherever the MIDI render and the board still differ, MAME sides with the
+board.
+
+One more fact came out of it: every voice STF's driver keys is an 8-bit sample.
+That holds for all 77,705 music key-ons and for the `sfx`, `sys` and attract
+inputs.
 
 ## The netplay reset
 
@@ -1090,6 +1176,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `mame/cop_capture.py` | runs attract under MAME with that tap: `cop_capture.py <outprefix> <from> <frames> <probes>` |
 | `mame/match-replay.lua`, `mame/osage-select.lua` | the autoboot scripts behind `match-replay.mjs --mame` and `grade-osage.mjs --mame` (above) |
 | `mame/snd-capture.lua`, `mame/snd_capture.py`, `mame/snd_compare.py` | the sound board's capture and comparison (see "The sound board") |
+| `grade-midi.py` | the board's music against ValleyBell's M2MidiDec: per-song `snd_replay` inputs, the MIDIs corrected to the board's tempo and channels, then notes, pitch, lengths, levels and spectra (see "Music against M2MidiDec") |
 | `tests/cop_replay.c` | replays a coprocessor capture through `sharc_exec()`, command by command with the arguments the firmware read, and checks every word it answers: `cop_replay <prefix> [examples-per-op] [only-op-hex]`. `$COPRO_ROM` names the COP data ROM; `OSAGE=<file>` dumps every `Fn_osage` call and `DRAWS=<file>` the draws as CSV, and `RESYNC` / `STATE_EXACT` tune the matrix-state check (`STATE_EXACT`: any differing bit is a bad state, not only 1e-3) |
 | `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips. Run it from two builds and `cmp` the five outputs to prove a sound-board change bit-exact (`tools/snd_stimuli.py` writes four more inputs; see "Holding a sound-board change to the same bits") |
 | `tests/scsp_fuzz.c`, `tests/m68k_fuzz.c` | the SCSP under random register traffic, and the whole sound board running random code: each writes one file to `cmp` between two builds or two compilers. `scsp_fuzz <out> [scenarios] [samples]`, `m68k_fuzz <out> [scenarios] [samples]` (`$ROMDIR`) |
