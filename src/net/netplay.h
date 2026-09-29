@@ -214,6 +214,8 @@ static inline bool netplay_families_compatible(uint32_t a, uint32_t b) {
 
 #define NETPLAY_LOG_LINES 64
 #define NETPLAY_LOG_LEN   160
+/* Off, or waiting, the status is republished at least this often. */
+#define NETPLAY_STATUS_IDLE_MS 16
 #define NETPLAY_CMD_QUEUE 8
 
 typedef enum {
@@ -617,6 +619,7 @@ typedef struct {
     netplay_cmd_t     queue[NETPLAY_CMD_QUEUE];
     uint32_t          queue_head, queue_count;
     netplay_status_t  status;
+    uint64_t          status_ms;   /* when netplay_publish_status last ran */
     char              log[NETPLAY_LOG_LINES][NETPLAY_LOG_LEN];
     uint32_t          log_count;
 
@@ -1790,9 +1793,19 @@ static inline bool netplay_take_cmd(netplay_cmd_t *out) {
     return got;
 }
 
-/* The UI reads this; it is refreshed once per pump. */
+/* snprintf("%s") without the format parser: this runs once a pump. */
+static inline void netplay_copy_str(char *dst, size_t size, const char *src) {
+    size_t n = strnlen(src, size - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* The UI reads this. It is refreshed once per pump while a board runs, and
+ * while netplay is off or waiting whenever something changed or 16 ms have
+ * passed (netplay_status_due). */
 static inline void netplay_publish_status(void) {
     emu_mutex_lock(&g_netplay.mutex);
+    g_netplay.status_ms = net_now_ms();
     netplay_status_t *st = &g_netplay.status;
     const rpcn_session_t *s = &g_netplay.session;
     st->state        = g_netplay.state;
@@ -1802,8 +1815,8 @@ static inline void netplay_publish_status(void) {
                      : g_netplay.local_player >= (int32_t)LOCKSTEP_WATCHER ? 2 : g_netplay.local_player;
     st->room_id      = s->room_id;
     st->room_flags   = s->room_flags;
-    snprintf(st->com_id, sizeof(st->com_id), "%s", s->com_id);
-    snprintf(st->com_id_foreign, sizeof(st->com_id_foreign), "%s", s->com_id_foreign);
+    netplay_copy_str(st->com_id, sizeof(st->com_id), s->com_id);
+    netplay_copy_str(st->com_id_foreign, sizeof(st->com_id_foreign), s->com_id_foreign);
 
     /* The room, one row per member, in line order where there is one. */
     st->my_member_id = s->my_member_id;
@@ -1837,13 +1850,13 @@ static inline void netplay_publish_status(void) {
             row->line_pos  = (int8_t)room_line_index(&g_netplay.room, ids[i]);
             row->side      = (int8_t)room_side_of(&g_netplay.room, ids[i]);
             if (row->is_me) {
-                snprintf(row->npid, sizeof(row->npid), "%s", s->npid);
+                netplay_copy_str(row->npid, sizeof(row->npid), s->npid);
                 row->known = true;
                 row->data  = g_netplay.me;
             } else {
                 const rpcn_peer_t *p = rpcn_session_peer((rpcn_session_t *)s, ids[i]);
                 if (!p) continue;   /* in the line, but gone from the room */
-                snprintf(row->npid, sizeof(row->npid), "%s", p->npid);
+                netplay_copy_str(row->npid, sizeof(row->npid), p->npid);
                 row->known      = room_member_decode(p->bin, p->bin_len, &row->data);
                 row->addr_known = p->ip && p->port;
                 row->heard      = p->heard;
@@ -1864,8 +1877,8 @@ static inline void netplay_publish_status(void) {
      * member. What a two-player front end (and the MCP status) has always shown. */
     const rpcn_peer_t *peer = rpcn_session_peer((rpcn_session_t *)s, netplay_opponent_id());
     for (uint32_t i = 0; !peer && i < RPCN_MAX_PEERS; i++) if (s->peers[i].used) peer = &s->peers[i];
-    snprintf(st->peer_npid, sizeof(st->peer_npid), "%s", peer ? peer->npid : "");
-    snprintf(st->peer_addr, sizeof(st->peer_addr), "%s", rpcn_peer_addr_text(peer));
+    netplay_copy_str(st->peer_npid, sizeof(st->peer_npid), peer ? peer->npid : "");
+    netplay_copy_str(st->peer_addr, sizeof(st->peer_addr), rpcn_peer_addr_text(peer));
     st->peer_known   = peer && peer->ip && peer->port;
     st->peer_heard   = peer && peer->heard;
     st->peer_rtt_ms  = peer ? netplay_rtt_ms(peer->member_id) : -1;
@@ -1881,31 +1894,35 @@ static inline void netplay_publish_status(void) {
     st->vs_results     = g_netplay.vs_results;
     st->vs_last_winner = g_netplay.vs_last_winner;
 
+    /* Only the listings in use: the rest of each 2.5 KB table is never read. */
+    uint32_t rooms = g_netplay.session.room_count < RPCN_MAX_ROOMS ? g_netplay.session.room_count : RPCN_MAX_ROOMS;
+    uint32_t foreign = g_netplay.session.foreign_room_count < RPCN_MAX_ROOMS
+                     ? g_netplay.session.foreign_room_count : RPCN_MAX_ROOMS;
     st->room_count = g_netplay.session.room_count;
-    memcpy(st->rooms, g_netplay.session.rooms, sizeof(st->rooms));
+    memcpy(st->rooms, g_netplay.session.rooms, rooms * sizeof(st->rooms[0]));
     st->foreign_room_count = g_netplay.session.foreign_room_count;
-    memcpy(st->foreign_rooms, g_netplay.session.foreign_rooms, sizeof(st->foreign_rooms));
+    memcpy(st->foreign_rooms, g_netplay.session.foreign_rooms, foreign * sizeof(st->foreign_rooms[0]));
     st->search_pending = rpcn_session_search_pending(&g_netplay.session);
 
     st->account_state = g_netplay.account.state;
     st->account_job   = g_netplay.account.job;
-    snprintf(st->account_error, sizeof(st->account_error), "%s", g_netplay.account.error);
+    netplay_copy_str(st->account_error, sizeof(st->account_error), g_netplay.account.error);
 
     st->twitch_state     = g_netplay.twitch.state;
     st->twitch_signed_in = g_netplay.cfg.twitch_token[0] != '\0';
-    snprintf(st->npid, sizeof(st->npid), "%s", g_netplay.cfg.npid);
-    snprintf(st->server, sizeof(st->server), "%s", g_netplay.cfg.server);
-    snprintf(st->twitch_user_code, sizeof(st->twitch_user_code), "%s", g_netplay.twitch.user_code);
-    snprintf(st->twitch_uri, sizeof(st->twitch_uri), "%s", g_netplay.twitch.verification_uri);
+    netplay_copy_str(st->npid, sizeof(st->npid), g_netplay.cfg.npid);
+    netplay_copy_str(st->server, sizeof(st->server), g_netplay.cfg.server);
+    netplay_copy_str(st->twitch_user_code, sizeof(st->twitch_user_code), g_netplay.twitch.user_code);
+    netplay_copy_str(st->twitch_uri, sizeof(st->twitch_uri), g_netplay.twitch.verification_uri);
     /* The token's owner, not whoever is in the account box: the window prints
      * this as "Signed in with Twitch as ...", and with two accounts on one
      * machine those are no longer the same name. */
-    snprintf(st->twitch_npid, sizeof(st->twitch_npid), "%s",
-             g_netplay.cfg.twitch_npid[0] ? g_netplay.cfg.twitch_npid : g_netplay.cfg.npid);
-    snprintf(st->twitch_error, sizeof(st->twitch_error), "%s", g_netplay.twitch.error);
+    netplay_copy_str(st->twitch_npid, sizeof(st->twitch_npid),
+                     g_netplay.cfg.twitch_npid[0] ? g_netplay.cfg.twitch_npid : g_netplay.cfg.npid);
+    netplay_copy_str(st->twitch_error, sizeof(st->twitch_error), g_netplay.twitch.error);
 
-    snprintf(st->error, sizeof(st->error), "%s",
-             g_netplay.state == NETPLAY_FAILED ? rpcn_session_error(&g_netplay.session) : "");
+    netplay_copy_str(st->error, sizeof(st->error),
+                     g_netplay.state == NETPLAY_FAILED ? rpcn_session_error(&g_netplay.session) : "");
     st->need_email_token = g_netplay.state == NETPLAY_FAILED
                         && g_netplay.session.login_error == RPCN_ERR_LOGIN_BAD_TOKEN;
 
@@ -1934,7 +1951,7 @@ static inline void netplay_publish_status(void) {
             if (!p->used) continue;
             uint32_t k = st->ps3_peer_count++;
             st->ps3_peers[k].member_id = p->member_id;
-            snprintf(st->ps3_peers[k].npid, sizeof(st->ps3_peers[k].npid), "%s", p->npid);
+            netplay_copy_str(st->ps3_peers[k].npid, sizeof(st->ps3_peers[k].npid), p->npid);
             const rpcs3_sig_peer_t *sp = NULL;
             for (uint32_t j = 0; j < RPCS3_SIG_MAX_PEERS; j++)
                 if (L->sig.peers[j].used && strncmp(L->sig.peers[j].npid, p->npid, 16) == 0) sp = &L->sig.peers[j];
@@ -1947,7 +1964,15 @@ static inline void netplay_publish_status(void) {
                 st->ps3_peers[k].ch_state[c] = p->rudp_up ? (uint8_t)p->rudp.ch[c].state : 0;
         }
     }
-    memcpy(st->log, g_netplay.log, sizeof(st->log));
+    /* The log is a ring written in order: copy only the lines added since the
+     * last publish (all of it after a wrap, or if the count went backwards). */
+    uint32_t added = g_netplay.log_count - st->log_count;
+    if (g_netplay.log_count < st->log_count || added >= NETPLAY_LOG_LINES) {
+        memcpy(st->log, g_netplay.log, sizeof(st->log));
+    } else {
+        for (uint32_t n = st->log_count; n != g_netplay.log_count; n++)
+            memcpy(st->log[n % NETPLAY_LOG_LINES], g_netplay.log[n % NETPLAY_LOG_LINES], NETPLAY_LOG_LEN);
+    }
     st->log_count = g_netplay.log_count;
     emu_mutex_unlock(&g_netplay.mutex);
 }
@@ -2493,9 +2518,12 @@ static inline void netplay_pump_deferred_room(void) {
     netplay_take_room(&g_netplay.room_cmd);
 }
 
-static inline void netplay_pump_commands(void) {
+/* True when it took a command. */
+static inline bool netplay_pump_commands(void) {
     netplay_cmd_t cmd;
+    bool took = false;
     while (netplay_take_cmd(&cmd)) {
+        took = true;
         switch (cmd.kind) {
             case NETPLAY_CMD_CONNECT:
                 /* A named account: a refusal is an answer, not a cue to open a
@@ -2577,6 +2605,7 @@ static inline void netplay_pump_commands(void) {
             default: break;
         }
     }
+    return took;
 }
 
 /* ---- The pump, and the frame gate ---------------------------------------- */
@@ -3308,6 +3337,24 @@ static inline bool netplay_take_empty_restart(void) {
 }
 
 /*
+ * Is the published status due? A stopped board, and a board waiting at the
+ * barrier or on the peer's input, pumps a thousand times a second, and a full
+ * publish each time was more than half of an idle headless lane's CPU (issue
+ * #122). Publish when something the lobbies watch changed, and otherwise at
+ * display rate: nothing reads it faster. Only this thread writes the status.
+ */
+static inline bool netplay_status_due(bool took_cmd) {
+    const netplay_status_t *st = &g_netplay.status;
+    return took_cmd || st->log_count != g_netplay.log_count || st->state != g_netplay.state
+        || st->account_state != g_netplay.account.state || st->account_job != g_netplay.account.job
+        || st->twitch_state != g_netplay.twitch.state || st->empty_room != g_netplay.empty_prompt
+        || st->room_id != g_netplay.session.room_id || st->stalls != g_netplay.lockstep.stalls
+        || st->frame != g_netplay.frame || st->desync_frame != g_netplay.desync_frame
+        || st->generation != g_netplay.generation || st->peer_ready_gen != g_netplay.room.match
+        || net_now_ms() - g_netplay.status_ms >= NETPLAY_STATUS_IDLE_MS;
+}
+
+/*
  * Called once per slice from the emu thread, OUTSIDE the emu mutex. Pumps the
  * network and the room, then answers what this slice may do.
  */
@@ -3315,11 +3362,15 @@ static inline netplay_step_t netplay_begin_frame(void) {
     if (!g_netplay.mutex_ready) return NETPLAY_STEP_OFF;
     if (g_netplay.inlog && !netplay_running_match()) netplay_inputlog_close();
 
-    netplay_pump_commands();
+    bool took = netplay_pump_commands();
     rpcn_account_update(&g_netplay.account);
     netplay_pump_twitch();
 
-    if (!g_netplay.enabled) { netplay_empty_room_pump(); netplay_publish_status(); return NETPLAY_STEP_OFF; }
+    if (!g_netplay.enabled) {
+        netplay_empty_room_pump();
+        if (netplay_status_due(took)) netplay_publish_status();
+        return NETPLAY_STEP_OFF;
+    }
 
     rpcn_session_update(&g_netplay.session);
     netplay_mirror_stage();
@@ -3355,7 +3406,7 @@ static inline netplay_step_t netplay_begin_frame(void) {
         } else if (g_input.use_net) {
             netplay_release_inputs();
         }
-        netplay_publish_status();
+        if (step != NETPLAY_STEP_WAIT || netplay_status_due(took)) netplay_publish_status();
         return step;
     }
 
@@ -3396,7 +3447,9 @@ static inline netplay_step_t netplay_begin_frame(void) {
     /* Anything else: not in a match. The board runs normally and the keyboard
      * drives it. */
     netplay_empty_room_pump();
-    netplay_publish_status();
+    /* Waiting, the pump runs every millisecond (emu_sleep_ms(1)) to resend and
+     * announce; the status needs no more than the idle rate. */
+    if (step != NETPLAY_STEP_WAIT || netplay_status_due(took)) netplay_publish_status();
     return step;
 }
 
