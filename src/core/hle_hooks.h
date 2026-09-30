@@ -145,6 +145,7 @@ static inline void hle_ret(i960_cpu_t *cpu) {
     } else {
         LOG_WARN("hle_ret: empty frame stack at IP=0x%08X", cpu->sfr.ip);
         cpu->halted = 1;
+        emu_attn_bump();   /* the run loop tests a halt only on its slow path */
     }
 }
 

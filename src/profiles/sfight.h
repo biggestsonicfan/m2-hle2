@@ -314,6 +314,7 @@ static int sfight_hook_cop_err_hang(i960_cpu_t *cpu, memory_bus_t *bus) {
     LOG_ERROR("COP self-test failed — error code 0x%08X  (IP=0x%08X)",
               cpu->globals.g[4], cpu->sfr.ip);
     cpu->halted = 1;
+    emu_attn_bump();   /* the run loop tests a halt only on its slow path */
     return 0;
 }
 

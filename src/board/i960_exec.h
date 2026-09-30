@@ -39,26 +39,39 @@
 
 //--- Register read helpers (handle literal mode) ------------------------------
 
+/* i960_step_hot is forced inline into the loops that run the game (the emu
+ * thread's slice, the bench): as a call, the switch's callee-saved register
+ * saves and restores around every instruction were ~7% of the emu thread on
+ * the RK3566. Everything else calls i960_step, one out-of-line copy. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define I960_HOT_INLINE inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#  define I960_HOT_INLINE __forceinline
+#else
+#  define I960_HOT_INLINE inline
+#endif
+
 /* Register index 0..15 is r0..r15 (locals), 16..31 is g0..g15 (globals). The
  * CPU struct holds globals then locals, 16 words each, so (idx + 16) & 31 is
  * the word's place counted from globals: one indexed load, no branch on which
  * bank. An index past 31 (movq's dst + 3 can reach 34) reads 0 and writes
- * nothing, as before. */
+ * nothing, as before. Forced inline: in the step's one huge function GCC 13
+ * for the A55 made reg_write's single store a call in 66 places. */
 _Static_assert(offsetof(i960_cpu_t, locals) == offsetof(i960_cpu_t, globals) + 16 * sizeof(uint32_t),
                "reg_read/reg_write need locals to follow globals");
 
-static inline uint32_t reg_read(i960_cpu_t *cpu, int idx) {
-    if ((unsigned)idx >= 32u) return 0;
+static I960_HOT_INLINE uint32_t reg_read(i960_cpu_t *cpu, int idx) {
+    if (M2_UNLIKELY((unsigned)idx >= 32u)) return 0;
     return ((uint32_t *)&cpu->globals)[(idx + 16) & 31];
 }
 
-static inline void reg_write(i960_cpu_t *cpu, int idx, uint32_t val) {
-    if ((unsigned)idx >= 32u) return;
+static I960_HOT_INLINE void reg_write(i960_cpu_t *cpu, int idx, uint32_t val) {
+    if (M2_UNLIKELY((unsigned)idx >= 32u)) return;
     ((uint32_t *)&cpu->globals)[(idx + 16) & 31] = val;
 }
 
 // REG format: operand value, respecting literal mode bit
-static inline uint32_t reg_src(i960_cpu_t *cpu, int idx, int mode) {
+static I960_HOT_INLINE uint32_t reg_src(i960_cpu_t *cpu, int idx, int mode) {
     if (mode) return (uint32_t)idx;  // literal
     return reg_read(cpu, idx);
 }
@@ -274,24 +287,13 @@ static inline unsigned i960_cycle_cost(uint32_t word1) {
 
 //--- Execute one instruction --------------------------------------------------
 
-/* i960_step_hot is forced inline into the loops that run the game (the emu
- * thread's slice, the bench): as a call, the switch's callee-saved register
- * saves and restores around every instruction were ~7% of the emu thread on
- * the RK3566. Everything else calls i960_step, one out-of-line copy. */
-#if defined(__GNUC__) || defined(__clang__)
-#  define I960_HOT_INLINE inline __attribute__((always_inline))
-#elif defined(_MSC_VER)
-#  define I960_HOT_INLINE __forceinline
-#else
-#  define I960_HOT_INLINE inline
-#endif
 
 /* One instruction, for a caller that keeps the hook filter in sync
  * (hle_filter_sync) and passes g_irqt_live, both fixed for a slice: the run
  * loop, which would otherwise reload them per instruction. */
 static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bool live) {
     // Check HLE hooks before executing
-    if (hle_check_synced(cpu, bus) == 0) {
+    if (M2_UNLIKELY(hle_check_synced(cpu, bus) == 0)) {
         return 0;  // hook handled it, IP already updated
     }
 

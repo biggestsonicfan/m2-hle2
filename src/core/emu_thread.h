@@ -334,6 +334,7 @@ static inline void emu_irq_enter(emu_thread_ctx_t *ctx, const game_quirks_t *q, 
     s_irq_in_service = true;
     s_irq_from_table = !q->irq_handler[pin];
     s_irq_slices     = 0;
+    emu_attn_bump();        /* the run loop services a handler on its slow path */
 }
 
 /* Take the sound interrupt now, if it is the one to take. Call with no handler
@@ -597,21 +598,23 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * slice that has begun runs its frame to the end. */
     /* One loop, two modes. The rare flags -- frame done, vsync ACK, sound
      * kick, break-on-warn, watchpoint, break-on-unknown-COP, a breakpoint armed
-     * mid-slice -- are read through ONE word, g_emu_attn, that each of their
-     * setters bumps (attention.h). Until it moves the loop checks nothing else
-     * of theirs; the instruction that moves it gets every check in the order
-     * below, and so does the rest of the slice ("slow"), which is the loop as it
-     * was. A slice that starts with any of them set, or with a step over a
-     * breakpoint to make, is slow throughout. Kept as one loop on purpose:
+     * mid-slice, an interrupt handler entered -- are read through ONE word,
+     * g_emu_attn, that each of their setters bumps (attention.h). Until it
+     * moves the loop checks nothing else of theirs; the instruction that moves
+     * it gets every check in the order below ("slow"), which is the loop as it
+     * was, and so does every instruction after it until none of the flags is
+     * still up. A slice that starts with any of them set, or with a step over
+     * a breakpoint to make, starts slow. Kept as one loop on purpose:
      * i960_step_hot is force-inlined, and a second copy of it pushed GCC past
      * its inlining limits on the handheld -- mem_fetch2 became a call per
      * instruction, and the two-loop version ran 5% MORE instructions. */
-    const uint32_t attn    = g_emu_attn;
+    uint32_t       attn    = g_emu_attn;
     const bool     profile = g_active_profile != NULL;
     const bool     live    = g_irqt_live != 0;
-    const bool     bps     = g_bp.bloom != 0;
+    bool           bps     = g_bp.bloom != 0;
     bool slow = ctx->step_over_bp || g_frame_done || (board_vblank && g_vblank_acked) || g_irqt_sound_kick
-             || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered;
+             || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered || (profile && s_irq_in_service)
+             || ctx->cpu->halted;
     hle_filter_sync();
     /* A vblank the program takes as an interrupt is acknowledged by its
      * handler at the START of the frame, not where the frame's work ends, so
@@ -623,23 +626,31 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * COP (emu_times.h). */
     const int64_t loop_t0  = emu_now_us();
     const int64_t loop_snd = g_emu_times.sound_inline_us + g_emu_times.sound_wait_us;
+    /* A halt comes from the instruction just run: the step's own (it returns
+     * -1 and the loop stops at once) or a hook's, which bumps the word, so the
+     * fast path does not test it. The CPU and bus are the context's for the
+     * whole slice; as locals they stay in registers where ctx->cpu was
+     * reloaded after every store. */
+    i960_cpu_t   *const cpu = ctx->cpu;
+    memory_bus_t *const bus = ctx->bus;
     int i;
-    for (i = 0; i < max_steps && !ctx->cpu->halted; i++) {
-        if (slow) {
+    for (i = 0; i < max_steps; i++) {
+        if (M2_UNLIKELY(slow)) {
+            if (cpu->halted) break;
             if (board_vblank && g_vblank_acked && s_irq_in_service) vbl_irq = true;
             if (g_frame_done || (board_vblank && g_vblank_acked && !vbl_irq)) break;   /* stop at the frame's vsync-ACK */
             if (ctx->step_over_bp) {
                 ctx->step_over_bp = 0;
-            } else if (bp_check(ctx->cpu->sfr.ip)) {
+            } else if (bp_check(cpu->sfr.ip)) {
                 break;
             }
-        } else if (bps && bp_check(ctx->cpu->sfr.ip)) {
+        } else if (M2_UNLIKELY(bps) && bp_check(cpu->sfr.ip)) {
             break;
         }
-        PCPROF_TICK(ctx->cpu->sfr.ip);
-        if (i960_step_core(ctx->cpu, ctx->bus, live) != 0) break;
+        PCPROF_TICK(cpu->sfr.ip);
+        if (M2_UNLIKELY(i960_step_core(cpu, bus, live) != 0)) break;
         steps++;
-        if (slow || g_emu_attn != attn) {
+        if (M2_UNLIKELY(slow || g_emu_attn != attn)) {
             slow = true;
             if (profile) {
                 if (s_irq_in_service) emu_service_sound_again(ctx);
@@ -649,10 +660,25 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             if (g_log.warn_triggered) break;
             if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
             if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
-        } else {
-            if (profile && s_irq_in_service) emu_service_sound_again(ctx);
-            if (live) emu_timers_after_step(ctx);
-            if (g_emu_attn != attn) {      /* flagged by the sound or timer service */
+            /* Back to the fast path once nothing it was sent here for is still
+             * up. STF writes the interrupt registers a few times a frame (the
+             * sound kick), and staying slow for the rest of the slice put ~30%
+             * of its instructions through every check above. The word is read
+             * before the flags: a setter raises its flag and then bumps it, so
+             * one that lands after the read is seen at the next instruction.
+             * A handler in service stays here until it returns (0.06% of
+             * STF's instructions), so the fast path never looks for one. */
+            uint32_t now = g_emu_attn;
+            if (!g_frame_done && !(board_vblank && g_vblank_acked) && !g_irqt_sound_kick
+                    && !ctx->step_over_bp && !(profile && s_irq_in_service) && !cpu->halted) {
+                attn = now;
+                bps  = g_bp.bloom != 0;
+                slow = false;
+            }
+        } else if (live) {
+            /* Fast: no handler in service (entering one bumps the word). */
+            emu_timers_after_step(ctx);
+            if (g_emu_attn != attn) {      /* flagged by the timer service */
                 slow = true;
                 if (g_log.warn_triggered) break;
                 if (g_wp.hit) break;

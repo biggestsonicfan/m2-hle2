@@ -20,6 +20,9 @@
  *   log.h: g_log.warn_triggered     watchpoint.h: g_wp.hit
  *   sharc_exec.h: g_sharc.unknown_triggered
  *   breakpoint.h: g_bp.bloom (a breakpoint armed from another thread)
+ *   emu_thread.h: emu_irq_enter (a handler in service, s_irq_in_service)
+ *   a halt a hook makes (cpu->halted): hle_ret, sfight's COP-error hang
+ * The loop's slow path also drops back to fast once none of them is up.
  */
 #ifndef ATTENTION_H
 #define ATTENTION_H
