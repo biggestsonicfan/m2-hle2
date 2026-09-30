@@ -248,8 +248,8 @@ static int dump_app(const char *dir, int w, int h)
     run(a, 10, 0);
     int fails = 0;
     if (ps3ui_app_view(a) != PS3UI_VIEW_GAME) { fprintf(stderr, "FAIL: playing should show the game\n"); fails++; }
-    g_fake.vs_results++;
-    g_fake.vs_last_winner = 1;
+    g_fake.results++;
+    g_fake.last_winner = 1;
     run(a, 40, PS3UI_PAD_CROSS);            /* still held from the fight: ignored */
     if (a->scr != PS3UI_SCR_AGAIN || ps3ui_app_view(a) != PS3UI_VIEW_OVERLAY) {
         fprintf(stderr, "FAIL: no go-again prompt after a VS result\n");
@@ -258,7 +258,7 @@ static int dump_app(const char *dir, int w, int h)
     shot(a, &cv, dir, "13_again");
     run(a, 1, PS3UI_PAD_CROSS);             /* Play again */
     if (a->scr != PS3UI_SCR_NONE) { fprintf(stderr, "FAIL: Play again kept the prompt\n"); fails++; }
-    g_fake.vs_results++;
+    g_fake.results++;
     run(a, 40, 0);
     run(a, 1, PS3UI_PAD_DOWN);
     run(a, 10, 0);
@@ -271,11 +271,11 @@ static int dump_app(const char *dir, int w, int h)
         fprintf(stderr, "FAIL: Exit did not leave the room\n");
         fails++;
     }
-    g_fake.vs_results++;                    /* timing out plays on */
+    g_fake.results++;                    /* timing out plays on */
     run(a, 5, 0);
     g_fake.state = NETPLAY_PLAYING;
     run(a, 2, 0);
-    g_fake.vs_results++;
+    g_fake.results++;
     run(a, 601, 0);
     if (a->scr != PS3UI_SCR_NONE) { fprintf(stderr, "FAIL: the prompt did not time out\n"); fails++; }
     /* the opponent left: back to the room, and told why */
@@ -295,16 +295,42 @@ static int dump_app(const char *dir, int w, int h)
     g_fake.member_count = 2;
     run(a, 5, 0);
     if (a->open) { fprintf(stderr, "FAIL: a closed lobby opened on its own\n"); fails++; }
-    g_fake.vs_results++;
+    g_fake.results++;
     run(a, 40, 0);
     if (!a->open || a->scr != PS3UI_SCR_AGAIN) { fprintf(stderr, "FAIL: no prompt with the lobby closed\n"); fails++; }
     run(a, 1, PS3UI_PAD_CROSS);
     if (a->open) { fprintf(stderr, "FAIL: Play again left the lobby open\n"); fails++; }
-    g_fake.vs_results++;
+    g_fake.results++;
     run(a, 40, 0);
-    g_fake.state = NETPLAY_IN_ROOM;         /* the session ended under the prompt */
+    g_fake.state = NETPLAY_ONLINE;          /* out of the room under the prompt */
     run(a, 5, 0);
-    if (a->open) { fprintf(stderr, "FAIL: the prompt outlived the session\n"); fails++; }
+    if (a->open) { fprintf(stderr, "FAIL: the prompt outlived the room\n"); fails++; }
+    /* not VS mode: the match ends the session, and the prompt still asks,
+     * with the lobby closed; Play again is Start */
+    g_fake.state = NETPLAY_PLAYING;
+    run(a, 5, 0);
+    g_fake.state = NETPLAY_IN_ROOM;
+    g_fake.results++;
+    g_fake.last_winner = 0;
+    g_fake.last_side = 0;
+    run(a, 40, 0);
+    if (!a->open || a->scr != PS3UI_SCR_AGAIN) { fprintf(stderr, "FAIL: no prompt after a match outside VS mode\n"); fails++; }
+    shot(a, &cv, dir, "15_again_not_vs");
+    g_last_cmd = NETPLAY_CMD_NONE;
+    run(a, 1, PS3UI_PAD_CROSS);             /* Play again */
+    if (a->open || g_last_cmd != NETPLAY_CMD_START) {
+        fprintf(stderr, "FAIL: Play again outside VS mode did not ready us\n");
+        fails++;
+    }
+    g_fake.results++;                       /* and Exit leaves */
+    run(a, 40, 0);
+    run(a, 1, PS3UI_PAD_DOWN);
+    g_last_cmd = NETPLAY_CMD_NONE;
+    run(a, 1, PS3UI_PAD_CROSS);
+    if (a->open || g_last_cmd != NETPLAY_CMD_LEAVE_ROOM) {
+        fprintf(stderr, "FAIL: Exit outside VS mode did not leave the room\n");
+        fails++;
+    }
     ps3ui_app_open(a);
     if (fails)
         return 1;
@@ -457,7 +483,7 @@ static int dump_shell(const char *dir, int w, int h)
         ps3ui_shell_frame(sh, 0, 0, 1);
         ps3ui_app_frame(&g_ps3ui_app, 0);
     }
-    g_fake.vs_results++;
+    g_fake.results++;
     for (int i = 0; i < 40; i++) {
         uint32_t pad = i == 20 ? PS3UI_PAD_DOWN : 0;
         ps3ui_shell_frame(sh, pad, 0, 1);

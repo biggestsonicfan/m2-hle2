@@ -393,7 +393,7 @@ typedef enum {
     PS3UI_SCR_ROOM,             /* waiting, or the ROOM MATCH list */
     PS3UI_SCR_VS,               /* the VS lobby */
     PS3UI_SCR_RESULT,           /* after a match */
-    PS3UI_SCR_AGAIN,            /* ours: after a VS-mode match, over the game: go again? */
+    PS3UI_SCR_AGAIN,            /* ours: after a match, over the game: go again? */
 } ps3ui_screen_t;
 
 enum { PS3UI_DLG_NONE, PS3UI_DLG_LEAVE, PS3UI_DLG_EXIT, PS3UI_DLG_ERROR, PS3UI_DLG_SIGNOUT };
@@ -444,8 +444,8 @@ typedef struct {
     uint16_t last_match;
     int result_side;            /* 0/1 = winner side, -1 = none */
     float result_t;
-    uint32_t vs_seen;           /* st.vs_results already asked about */
-    int prompt_only;            /* opened by a VS result alone (the session came from elsewhere):
+    uint32_t res_seen;          /* st.results already asked about */
+    int prompt_only;            /* opened by a result alone (the session came from elsewhere):
                                    the answer closes the task again */
 
     /* the on-screen keyboard (ours) */
@@ -933,14 +933,16 @@ static void ps3ui_update_result(ps3ui_app_t *a)
 }
 
 /*
- * After a VS-mode match (ours; the PS3 has no VS mode). The boards are already
- * on their way back to character select, and without this nothing on screen
- * ever lets a player out of the session. So the result window goes up over the
- * game with two rows: Play again, or Exit, which leaves the room. As on the
- * PS3's result screen, 10 s with no answer is the same as staying.
+ * After a VS-mode match (ours; the PS3 has no VS mode), and after any match
+ * when the lobby is not open. The boards are on their way back to character
+ * select, and without this nothing on screen ever lets a player out of the
+ * room. So the result window goes up over the game with two rows: Play again,
+ * or Exit, which leaves the room. As on the PS3's result screen, 10 s with no
+ * answer is the same as staying.
  *
- * The board keeps running underneath -- it is in lockstep, and the other
- * player may already be picking -- and gets none of the pad while this is up.
+ * The board keeps running underneath -- in VS mode it is in lockstep, and the
+ * other player may already be picking -- and gets none of the pad while this
+ * is up.
  */
 #define PS3UI_AGAIN_FRAMES 600.0f
 
@@ -958,6 +960,11 @@ static void ps3ui_update_again(ps3ui_app_t *a)
         else
             ps3ui_app_go(a, PS3UI_SCR_MENU);
     } else if (pick == 0) {
+        /* Outside VS mode the match is over and the session with it: a
+         * one-on-one room waits for both players to be ready again (a room
+         * with a line, or the PS3's, goes on by itself and ignores this). */
+        if (a->st.state == NETPLAY_IN_ROOM)
+            ps3ui_post(a, NETPLAY_CMD_START);
         ps3ui_app_go(a, PS3UI_SCR_NONE);
         if (a->prompt_only)
             ps3ui_app_close(a);
@@ -994,6 +1001,23 @@ static void ps3ui_update_dialog(ps3ui_app_t *a)
     } else {
         ps3ui_app_close(a);
     }
+}
+
+/* In a room: the states a result can arrive in, and the prompt stays up in. */
+static int ps3ui_in_room(netplay_state_t s)
+{
+    return s == NETPLAY_IN_ROOM || s == NETPLAY_SYNCING || s == NETPLAY_PLAYING || s == NETPLAY_WATCHING;
+}
+
+/* Put the "go again?" prompt up for the result the status now holds. */
+static void ps3ui_app_ask_again(ps3ui_app_t *a)
+{
+    a->result_side = a->st.last_winner;
+    a->result_t = 0.0f;
+    a->held = ~0u;      /* a button still down from the fight has to be let go first */
+    a->pressed = 0;
+    a->scr = PS3UI_SCR_NONE;
+    ps3ui_app_go(a, PS3UI_SCR_AGAIN);
 }
 
 /* Follow netplay: which screen the state puts us on. */
@@ -1075,17 +1099,10 @@ static void ps3ui_follow(ps3ui_app_t *a)
     }
     case NETPLAY_PLAYING:
         /* a VS-mode result on our board: ask, once per result */
-        if (st->vs_results != a->vs_seen) {
-            a->vs_seen = st->vs_results;
-            if (st->local_player == 0 || st->local_player == 1) {
-                a->result_side = st->vs_last_winner;
-                a->result_t = 0.0f;
-                a->held = ~0u;      /* a button still down from the fight has to be let go first */
-                a->pressed = 0;
-                a->scr = PS3UI_SCR_NONE;
-                ps3ui_app_go(a, PS3UI_SCR_AGAIN);
-                break;
-            }
+        if (st->results != a->res_seen) {
+            a->res_seen = st->results;
+            ps3ui_app_ask_again(a);
+            break;
         }
         if (a->scr != PS3UI_SCR_AGAIN)
             a->scr = PS3UI_SCR_NONE;                 /* the game has the screen */
@@ -1182,49 +1199,66 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
     ps3ui_app_pad(a, held);
     if (a->be.get_status)
         a->be.get_status(&a->st);       /* read even while closed: the host reports from it */
-    if (a->st.state != NETPLAY_PLAYING)
-        a->vs_seen = a->st.vs_results;
-    /* The VS prompt does not wait for the lobby to have been opened: a session
+    /* The prompt does not wait for the lobby to have been opened: a session
      * joined from the web page's panel, or by RetroArch's autojoin, never
-     * opened it, and those players need the way out as much as anyone. */
-    int vs_new = a->st.state == NETPLAY_PLAYING && a->st.vs_results != a->vs_seen
-              && (a->st.local_player == 0 || a->st.local_player == 1);
+     * opened it, and those players need the way out as much as anyone. So
+     * every match we fought asks, in VS mode or not, on either server. */
+    int in_room = ps3ui_in_room(a->st.state);
+    int res_new = in_room && a->st.results != a->res_seen;
     if (!a->open) {
-        if (!vs_new) {
-            a->vs_seen = a->st.vs_results;
+        a->res_seen = a->st.results;
+        if (!res_new)
             return;
-        }
         ps3ui_app_open(a);
         a->prompt_only = 1;
+        ps3ui_app_ask_again(a);
     }
-    /* opened only to ask: once the session is over, the task goes again */
-    if (a->prompt_only && a->st.state != NETPLAY_PLAYING) {
-        ps3ui_app_close(a);
-        return;
-    }
-    ps3ui_follow(a);
-    if (a->dialog || ps3ui_dialog_showing(&a->dlg))
-        ps3ui_update_dialog(a);
-    else
-        switch (a->scr) {
-        case PS3UI_SCR_SIGNIN: ps3ui_update_signin(a); break;
-        case PS3UI_SCR_TWITCH:
-            if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
-                ps3ui_post(a, NETPLAY_CMD_TWITCH_CANCEL);
-                ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
-            }
-            break;
-        case PS3UI_SCR_OSK: ps3ui_update_osk(a); break;
-        case PS3UI_SCR_MENU: ps3ui_update_menu(a); break;
-        case PS3UI_SCR_RULE: ps3ui_update_rule(a); break;
-        case PS3UI_SCR_CONNECT: ps3ui_update_connect(a); break;
-        case PS3UI_SCR_SEARCH: ps3ui_update_search(a); break;
-        case PS3UI_SCR_ROOM: ps3ui_update_room(a); break;
-        case PS3UI_SCR_VS: ps3ui_update_vs(a); break;
-        case PS3UI_SCR_RESULT: ps3ui_update_result(a); break;
-        case PS3UI_SCR_AGAIN: ps3ui_update_again(a); break;
-        default: break;
+    if (a->prompt_only) {
+        /* opened only to ask: out of the room, the task goes again, and it
+         * never follows netplay onto the lobby's own screens */
+        if (!in_room) {
+            ps3ui_app_close(a);
+            return;
         }
+        if (res_new) {
+            a->res_seen = a->st.results;
+            ps3ui_app_ask_again(a);
+        }
+        if (a->scr != PS3UI_SCR_AGAIN) {
+            ps3ui_app_close(a);
+            return;
+        }
+        ps3ui_update_again(a);
+    } else {
+        /* The lobby is open. A VS result comes while still PLAYING and is
+         * asked about there (ps3ui_follow); any other result ends the match,
+         * and the room screens show it (PS3UI_SCR_RESULT), the way out on them. */
+        if (a->st.state != NETPLAY_PLAYING)
+            a->res_seen = a->st.results;
+        ps3ui_follow(a);
+        if (a->dialog || ps3ui_dialog_showing(&a->dlg))
+            ps3ui_update_dialog(a);
+        else
+            switch (a->scr) {
+            case PS3UI_SCR_SIGNIN: ps3ui_update_signin(a); break;
+            case PS3UI_SCR_TWITCH:
+                if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
+                    ps3ui_post(a, NETPLAY_CMD_TWITCH_CANCEL);
+                    ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
+                }
+                break;
+            case PS3UI_SCR_OSK: ps3ui_update_osk(a); break;
+            case PS3UI_SCR_MENU: ps3ui_update_menu(a); break;
+            case PS3UI_SCR_RULE: ps3ui_update_rule(a); break;
+            case PS3UI_SCR_CONNECT: ps3ui_update_connect(a); break;
+            case PS3UI_SCR_SEARCH: ps3ui_update_search(a); break;
+            case PS3UI_SCR_ROOM: ps3ui_update_room(a); break;
+            case PS3UI_SCR_VS: ps3ui_update_vs(a); break;
+            case PS3UI_SCR_RESULT: ps3ui_update_result(a); break;
+            case PS3UI_SCR_AGAIN: ps3ui_update_again(a); break;
+            default: break;
+            }
+    }
     /* READY effects start when a fighter's flag goes up */
     if (a->scr == PS3UI_SCR_VS) {
         int f[2];

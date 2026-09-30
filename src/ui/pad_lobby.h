@@ -60,7 +60,7 @@ static struct {
     int              last_state;    /* -1 until the first snapshot */
     uint64_t           next_search;
     uint64_t           match_start;   /* when PLAYING began, for the "vs" banner */
-    uint32_t           vs_seen;       /* st.vs_results already asked about */
+    uint32_t           vs_seen;       /* st.results already asked about */
     bool               again;         /* open on "go again?" after a VS-mode result */
     netplay_status_t st;
     lobby_row_t      rows[LOBBY_ROWS];
@@ -154,9 +154,9 @@ static void lobby_update(uint64_t now) {
     /* A VS-mode result: the boards go back to character select on their own,
      * so ask whether to go again, with leaving one button away. */
     if (st->state != NETPLAY_PLAYING) {
-        g_lobby.vs_seen = st->vs_results;
-    } else if (st->vs_results != g_lobby.vs_seen) {
-        g_lobby.vs_seen = st->vs_results;
+        g_lobby.vs_seen = st->results;
+    } else if (st->results != g_lobby.vs_seen) {
+        g_lobby.vs_seen = st->results;
         if (st->local_player == 0 || st->local_player == 1) {
             lobby_show(true);
             g_lobby.again = true;
@@ -420,7 +420,7 @@ static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
         y += 0.5f;
     }
     if (st->state == NETPLAY_PLAYING && g_lobby.again) {
-        const char *w = st->vs_last_winner == st->local_player ? "You won." : "You lost.";
+        const char *w = st->last_winner == st->last_side ? "You won." : "You lost.";
         snprintf(buf, sizeof buf, "%s Play again against %.16s?", w, st->peer_npid);
         y = lobby_text(1.0f, y, cols, 255, 255, 140, buf) + 0.5f;
     }
