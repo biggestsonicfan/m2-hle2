@@ -280,6 +280,8 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"zlayer_plane",v,sizeof v)) g_geo3d_layer_plane = (atoi(v) != 0);
     /* 0: a draw laid over the last with its matrix fights it for the faces they share (geo3d_tie_layer). */
     if (mcp_json_get_str(req,"zties",   v,sizeof v)) g_geo3d_ties = (atoi(v) != 0);
+    /* 0: each draw's faces are ranked alone, not with the draws sharing its matrix (geo3d_run_get). */
+    if (mcp_json_get_str(req,"zruns",   v,sizeof v)) g_geo3d_runs = (atoi(v) != 0);
     /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
     if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
     char models[GEO3D_LAYER_MODELS_MAX * 8] = "";

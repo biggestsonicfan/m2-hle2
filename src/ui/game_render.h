@@ -2046,6 +2046,49 @@ static inline void gm_mat4_geo_projection(float *m, const float *gproj, int win,
 }
 
 /*
+ * A run of draws with one matrix, from draw k (geo3d_run_get): the meshes the
+ * cache will draw them with, ranked together when that tells each something
+ * its own ranking does not. slot[d] is draw d's place in the run, or -1.
+ */
+static int game_render_run_slot[MAX_GEO_MODELS];
+static void game_render_begin_matrix_run(const geo3d_state_t *geo, int k, int end,
+                                         const uint8_t *main_data, size_t main_data_size,
+                                         const uint8_t *polygons,  size_t polygons_size,
+                                         const uint8_t *materials, size_t materials_size,
+                                         uint32_t table_off, uint32_t table_count,
+                                         uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add, int *slot) {
+    geo3d_cmesh_t *mesh[GEO3D_RUN_DRAWS];
+    int n = 0, e = k;
+    g_geo3d_run = NULL;
+    for (; e < end && (e == k || memcmp(geo->captured[e].matrix, geo->captured[k].matrix, 12 * sizeof(float)) == 0); e++) {
+        const captured_model_t *cm = &geo->captured[e];
+        slot[e] = -1;
+        if (!g_geo3d_runs || !geo->use_matrix || cm->model_idx < 0 || n == (int)GEO3D_RUN_DRAWS) continue;
+        if (geo->isolate_index >= 0 && e != geo->isolate_index) continue;
+        if (geo->filter_enabled && (e < geo->filter_min || e > geo->filter_max)) continue;
+        g_geo3d_obj_tpa = cm->tpa;
+        g_geo3d_obj_tha = cm->tha;
+        g_geo3d_board_luma = 1;
+        geo3d_cmesh_t *m;
+        if (geo3d_mesh_for_draw(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
+                                materials, materials_size, table_off, table_count,
+                                mesh_ptr_subtract, mesh_ptr_add, cm->matrix, &m) == GEO3D_DRAW_CACHED) {
+            slot[e] = n;
+            mesh[n++] = m;
+        }
+        g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
+        g_geo3d_board_luma = 0;
+    }
+    geo3d_run_t *run = geo3d_run_get(mesh, n);
+    if (run) {
+        geo3d_run_begin(run, geo->captured[k].matrix);
+        g_geo3d_run = run;
+    } else {
+        for (int d = k; d < e; d++) slot[d] = -1;
+    }
+}
+
+/*
  * Draw the frame's GEO display list: runs of objects that share a projection
  * and window are decoded together and drawn with that window's scissor.
  */
@@ -2090,8 +2133,13 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                  * the faces the two share, as the later polygon does on the
                  * board (geo3d_tie_layer). A run starts afresh, and so does
                  * a run decoded again below. */
-                if (k == i || memcmp(cm->matrix, geo->captured[k - 1].matrix, 12 * sizeof(float)) != 0)
+                if (k == i || memcmp(cm->matrix, geo->captured[k - 1].matrix, 12 * sizeof(float)) != 0) {
                     geo3d_tie_reset();
+                    game_render_begin_matrix_run(geo, k, j, main_data, main_data_size, polygons, polygons_size,
+                                                 materials, materials_size, table_off, table_count,
+                                                 mesh_ptr_subtract, mesh_ptr_add, game_render_run_slot);
+                }
+                g_geo3d_run_slot = game_render_run_slot[k];
                 geo3d_tie_draw((uint32_t)k + 1u);
                 g_geo3d_tie_on = geo->use_matrix;
                 g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
@@ -2115,6 +2163,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_board_luma = 0;
                 g_geo3d_tie_on = 0;
                 g_geo3d_obj_mesh = NULL;
+                g_geo3d_run_slot = -1;
             }
             /* The run filled the shared buffer after earlier runs: draw those and
              * decode it again into an empty buffer, where it gets the whole
