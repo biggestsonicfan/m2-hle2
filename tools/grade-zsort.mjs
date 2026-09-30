@@ -30,7 +30,8 @@
  * --toggle NAME plays the replay with that set_camera switch at 0 and then at 1
  * in place of the face layers (which stay on in both), and grades the pixels it
  * changes the same way: texclamp (the filter's clamp at a tile edge) on South
- * Island's sky ring, zsort, zstanding, zkeep.
+ * Island's sky ring, zsort, zstanding, zkeep, zruns (draws sharing a matrix
+ * ranked as one mesh).
  *
  * $MAME_EXE and $MAME_ROMPATH as tools/match-replay.mjs.
  */

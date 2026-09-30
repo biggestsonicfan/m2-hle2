@@ -2448,8 +2448,10 @@ static int           g_geo3d_mesh_cache = 1;   /* 0: always run the full decoder
 static geo3d_cmesh_t g_geo3d_meshes[GEO3D_MESH_CACHE_SLOTS];
 static unsigned      g_geo3d_mesh_count;
 static uint64_t      g_geo3d_mesh_hits, g_geo3d_mesh_builds;
+static uint32_t      g_geo3d_mesh_gen;         /* bumped by a clear: what a run of draws was ranked against */
 
 static inline void geo3d_mesh_cache_clear(void) {
+    g_geo3d_mesh_gen++;
     for (unsigned i = 0; i < GEO3D_MESH_CACHE_SLOTS; i++) {
         free(g_geo3d_meshes[i].sv);
         free(g_geo3d_meshes[i].faces);
@@ -3193,29 +3195,27 @@ static bool geo3d_mesh_layers_for(int model_idx, const uint8_t *main_data,
     return true;
 }
 
-/* geo3d_decode_model through the cache when the object allows it. */
-static inline void geo3d_decode_model_cached(int model_idx,
-                                             const uint8_t *main_data, size_t main_data_size,
-                                             const uint8_t *polygons,  size_t polygons_size,
-                                             const uint8_t *materials, size_t materials_size,
-                                             uint32_t table_off, uint32_t table_count,
-                                             uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
-                                             const float *matrix,
-                                             float cr, float cg, float cb) {
-    #define GEO3D_FULL_DECODE() geo3d_decode_model(model_idx, main_data, main_data_size, polygons, polygons_size, \
-        materials, materials_size, table_off, table_count, mesh_ptr_subtract, mesh_ptr_add, matrix, cr, cg, cb)
+/* Whether a draw goes through the mesh cache, and its mesh if so: NONE draws
+ * nothing, FULL is the full decoder's (see geo3d_decode_model_cached). */
+enum { GEO3D_DRAW_NONE, GEO3D_DRAW_FULL, GEO3D_DRAW_CACHED };
+static int geo3d_mesh_for_draw(int model_idx,
+                               const uint8_t *main_data, size_t main_data_size,
+                               const uint8_t *polygons,  size_t polygons_size,
+                               const uint8_t *materials, size_t materials_size,
+                               uint32_t table_off, uint32_t table_count,
+                               uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+                               const float *matrix, geo3d_cmesh_t **out) {
+    *out = NULL;
     if (!g_geo3d_mesh_cache || !g_geo3d_board_luma || !matrix || g_geo3d_obj_mesh || g_geo_flat_color ||
             g_uv_bank_mode || g_uv_quad_order || g_uv_swap || g_uv_flip_u || g_uv_flip_v ||
-            GEO3D_DUMP_TEX(model_idx)) {
-        GEO3D_FULL_DECODE();
-        return;
-    }
-    if (!main_data || !polygons) return;
-    if (model_idx < 0 || (uint32_t)model_idx >= table_count) return;
+            GEO3D_DUMP_TEX(model_idx))
+        return GEO3D_DRAW_FULL;
+    if (!main_data || !polygons) return GEO3D_DRAW_NONE;
+    if (model_idx < 0 || (uint32_t)model_idx >= table_count) return GEO3D_DRAW_NONE;
     uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
-    if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) return;
+    if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) return GEO3D_DRAW_NONE;
     uint32_t mesh_ptr_raw = read_u32_le(main_data + toff + 8);
-    if (mesh_ptr_raw == 0) return;
+    if (mesh_ptr_raw == 0) return GEO3D_DRAW_NONE;
     uint32_t mesh_offset = mesh_ptr_raw * 4u - mesh_ptr_subtract + mesh_ptr_add;
     uint32_t mat_ptr = 0, uv_ptr = 0;
     if (materials) {
@@ -3226,22 +3226,164 @@ static inline void geo3d_decode_model_cached(int model_idx,
     }
     bool have_mat = mat_ptr != 0, have_uv = uv_ptr != 0;
     /* Streams in texture RAM change under the cache: decode those every time. */
-    if ((have_mat && (mat_ptr & 0x800000u)) || (have_uv && (uv_ptr & 0x800000u))) {
-        GEO3D_FULL_DECODE();
+    if ((have_mat && (mat_ptr & 0x800000u)) || (have_uv && (uv_ptr & 0x800000u)))
+        return GEO3D_DRAW_FULL;
+    *out = geo3d_mesh_get(model_idx, main_data, polygons, polygons_size, materials, materials_size,
+                          table_off, table_count, mesh_ptr_subtract, mesh_ptr_add,
+                          mat_ptr, uv_ptr, mesh_offset);
+    return *out ? GEO3D_DRAW_CACHED : GEO3D_DRAW_FULL;
+}
+
+/* ---- Faces lying on faces across draws --------------------------------------
+ * The board sorts every polygon of a frame together, whichever object it came
+ * from; geo3d_mesh_layers ranks one model's faces only. A run of consecutive
+ * draws with a bit-identical matrix is one object as far as its faces lying on
+ * each other go: the run's meshes are put together, in submission order, and
+ * ranked as one mesh (the same rules, planes and all), once per run of meshes.
+ * A run with no ordering or resting pair across two of its draws is left to
+ * each mesh's own ranking, which is then the same answer.
+ *
+ * *Symptom that surfaced this in STF (Pinboard #133):* the slot machine on
+ * Casino Night is models 186, 187 and 188, drawn in that order with one matrix.
+ * 187's reel art (near-corner faces) stands 0.02 in front of 188's cabinet face
+ * (far corner), and in the round intro's close pass the cabinet's orange came
+ * through the reels in stripes. MAME shows the reels whole: the near key wins.
+ * geo3d_tie_layer covers the special case of the same face drawn twice. */
+#define GEO3D_RUN_DRAWS 16u
+#define GEO3D_RUN_SLOTS 256u      /* power of two */
+typedef struct {
+    bool           used, cross;   /* cross: some pair spans two draws */
+    uint32_t       gen;           /* g_geo3d_mesh_gen it was ranked against */
+    int            n;
+    const geo3d_cmesh_t *mesh[GEO3D_RUN_DRAWS];
+    int            off[GEO3D_RUN_DRAWS + 1];   /* each draw's first face in `all` */
+    geo3d_cmesh_t  all;           /* the run's faces as one ranked mesh */
+    vec3_t        *tv;            /* this draw of the run: `all`'s points in camera space */
+    uint16_t      *draw_layer;
+    uint8_t       *keep;
+    bool           keep_any;
+} geo3d_run_t;
+static int         g_geo3d_runs = 1;       /* 0: each draw ranked alone, as before */
+static geo3d_run_t g_geo3d_run_cache[GEO3D_RUN_SLOTS];
+static geo3d_run_t *g_geo3d_run;           /* the run being drawn, set by the caller */
+static int         g_geo3d_run_slot = -1;  /* this draw's place in it, or -1 */
+
+static void geo3d_run_free(geo3d_run_t *r) {
+    free(r->all.sv); free(r->all.faces); free(r->all.edges); free(r->all.rests);
+    free(r->tv); free(r->draw_layer); free(r->keep);
+    memset(r, 0, sizeof *r);
+}
+
+/* Which draw of the ranked mesh a face belongs to. */
+static int geo3d_run_draw_of(const geo3d_run_t *r, int face) {
+    int d = 0;
+    while (d + 1 < r->n && face >= r->off[d + 1]) d++;
+    return d;
+}
+
+/* The ranked run for these meshes, or NULL when it adds nothing to each mesh's own. */
+static geo3d_run_t *geo3d_run_get(geo3d_cmesh_t *const *mesh, int n) {
+    if (!g_geo3d_runs || n < 2 || n > (int)GEO3D_RUN_DRAWS) return NULL;
+    uint32_t h = 2166136261u;
+    for (int d = 0; d < n; d++) h = (h ^ (uint32_t)(uintptr_t)mesh[d]) * 16777619u;
+    geo3d_run_t *r = &g_geo3d_run_cache[h & (GEO3D_RUN_SLOTS - 1u)];
+    if (r->used && r->gen == g_geo3d_mesh_gen && r->n == n) {
+        int d = 0;
+        while (d < n && r->mesh[d] == mesh[d]) d++;
+        if (d == n) return r->cross ? r : NULL;
+    }
+    if (r->used) geo3d_run_free(r);
+    r->used = true;
+    r->gen = g_geo3d_mesh_gen;
+    r->n = n;
+    int nsv = 0, nf = 0;
+    for (int d = 0; d < n; d++) {
+        r->mesh[d] = mesh[d];
+        r->off[d] = nf;
+        nsv += mesh[d]->n_sv;
+        nf  += mesh[d]->n_faces;
+    }
+    r->off[n] = nf;
+    if (nf > 0xFFFF || !nf) return NULL;   /* the orderings index faces in 16 bits */
+    r->all.sv    = malloc((size_t)nsv * sizeof *r->all.sv);
+    r->all.faces = malloc((size_t)nf * sizeof *r->all.faces);
+    r->tv        = malloc((size_t)nsv * sizeof *r->tv);
+    r->draw_layer = malloc((size_t)nf * sizeof *r->draw_layer);
+    r->keep      = malloc((size_t)nf);
+    if (!r->all.sv || !r->all.faces || !r->tv || !r->draw_layer || !r->keep) return NULL;
+    for (int d = 0, sv = 0; d < n; d++) {
+        const geo3d_cmesh_t *m = mesh[d];
+        memcpy(r->all.sv + sv, m->sv, (size_t)m->n_sv * sizeof *m->sv);
+        for (int k = 0; k < m->n_faces; k++) {
+            geo3d_cface_t f = m->faces[k];
+            f.ai += sv; f.bi += sv; f.ci += sv; f.di += sv;
+            for (int c = 0; c < 4; c++) f.zsrc[c] += sv;
+            f.layer = 0;
+            f.has_plane = 0;
+            r->all.faces[r->off[d] + k] = f;
+        }
+        sv += m->n_sv;
+    }
+    r->all.n_sv = nsv;
+    r->all.n_faces = nf;
+    geo3d_mesh_layers(&r->all);
+    for (int e = 0; e < r->all.n_edges && !r->cross; e++)
+        r->cross = geo3d_run_draw_of(r, r->all.edges[e].lo) != geo3d_run_draw_of(r, r->all.edges[e].hi);
+    for (int e = 0; e < r->all.n_rests && !r->cross; e++)
+        r->cross = geo3d_run_draw_of(r, r->all.rests[e].front) != geo3d_run_draw_of(r, r->all.rests[e].back);
+    return r->cross ? r : NULL;
+}
+
+/* The run's camera-space points and orderings for this draw of it. */
+static void geo3d_run_begin(geo3d_run_t *r, const float *matrix) {
+    for (int i = 0; i < r->all.n_sv; i++) r->tv[i] = apply_matrix(r->all.sv[i], matrix);
+    if (r->all.n_edges) geo3d_mesh_draw_layers(&r->all, r->tv, r->draw_layer);
+    else memset(r->draw_layer, 0, (size_t)r->all.n_faces * sizeof *r->draw_layer);
+    r->keep_any = geo3d_mesh_keep_depth(&r->all, r->tv, r->keep);
+}
+
+/* geo3d_decode_model through the cache when the object allows it. */
+static inline void geo3d_decode_model_cached(int model_idx,
+                                             const uint8_t *main_data, size_t main_data_size,
+                                             const uint8_t *polygons,  size_t polygons_size,
+                                             const uint8_t *materials, size_t materials_size,
+                                             uint32_t table_off, uint32_t table_count,
+                                             uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+                                             const float *matrix,
+                                             float cr, float cg, float cb) {
+    geo3d_cmesh_t *m;
+    const int how = geo3d_mesh_for_draw(model_idx, main_data, main_data_size, polygons, polygons_size,
+                                        materials, materials_size, table_off, table_count,
+                                        mesh_ptr_subtract, mesh_ptr_add, matrix, &m);
+    if (how == GEO3D_DRAW_NONE) return;
+    if (how == GEO3D_DRAW_FULL) {
+        geo3d_decode_model(model_idx, main_data, main_data_size, polygons, polygons_size,
+                           materials, materials_size, table_off, table_count, mesh_ptr_subtract, mesh_ptr_add,
+                           matrix, cr, cg, cb);
         return;
     }
-    geo3d_cmesh_t *m = geo3d_mesh_get(model_idx, main_data, polygons, polygons_size, materials, materials_size,
-                                      table_off, table_count, mesh_ptr_subtract, mesh_ptr_add,
-                                      mat_ptr, uv_ptr, mesh_offset);
-    if (!m) { GEO3D_FULL_DECODE(); return; }
-    #undef GEO3D_FULL_DECODE
 
     static vec3_t tv[GEO3D_IA_MAX_VERTS];
     for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
-    static uint16_t draw_layer[GEO3D_IA_MAX_IDX / 4];
-    if (m->n_edges) geo3d_mesh_draw_layers(m, tv, draw_layer);
-    static uint8_t keep[GEO3D_IA_MAX_IDX / 4];
-    const bool keep_any = geo3d_mesh_keep_depth(m, tv, keep);
+    /* Ranked with the rest of its run (geo3d_run_get): the run's orderings,
+     * resting pairs and planes, from this mesh's first face on. */
+    const geo3d_run_t *run = g_geo3d_run && g_geo3d_run_slot >= 0 && g_geo3d_run_slot < g_geo3d_run->n &&
+                             g_geo3d_run->mesh[g_geo3d_run_slot] == m ? g_geo3d_run : NULL;
+    const int run_base = run ? run->off[g_geo3d_run_slot] : 0;
+    static uint16_t mesh_draw_layer[GEO3D_IA_MAX_IDX / 4];
+    static uint8_t mesh_keep[GEO3D_IA_MAX_IDX / 4];
+    const uint16_t *draw_layer = mesh_draw_layer;
+    const uint8_t *keep = mesh_keep;
+    bool keep_any;
+    if (run) {
+        draw_layer = run->draw_layer + run_base;
+        keep = run->keep + run_base;
+        keep_any = run->keep_any;
+    } else {
+        if (m->n_edges) geo3d_mesh_draw_layers(m, tv, mesh_draw_layer);
+        keep_any = geo3d_mesh_keep_depth(m, tv, mesh_keep);
+    }
+    const bool ranked = run ? run->all.n_edges != 0 : m->n_edges != 0;
 
     geo3d_split_reset();
     bool lines = g_geo_wireframe != 0;
@@ -3261,9 +3403,10 @@ static inline void geo3d_decode_model_cached(int model_idx,
          * green MAME shows beside it (tools/grade-zsort.mjs). */
         const bool layers = g_geo3d_layers && (g_geo3d_layer_only < 0 || (model_idx >= g_geo3d_layer_only && model_idx <= g_geo3d_layer_only_hi)) &&
                             f->zmode != 2u && f->zmode != 3u;
-        g_geo3d_emit_layer     = layers ? (float)(m->n_edges ? draw_layer[n] : 0) : 0.0f;
-        g_geo3d_emit_has_plane = layers && g_geo3d_layer_plane && f->has_plane &&
-                                 geo3d_plane_to_view(f->plane, matrix, g_geo3d_emit_plane);
+        const geo3d_cface_t *rf = run ? &run->all.faces[run_base + n] : f;   /* its layer and plane */
+        g_geo3d_emit_layer     = layers ? (float)(ranked ? draw_layer[n] : 0) : 0.0f;
+        g_geo3d_emit_has_plane = layers && g_geo3d_layer_plane && rf->has_plane &&
+                                 geo3d_plane_to_view(rf->plane, matrix, g_geo3d_emit_plane);
         if (g_geo3d_emit_layer > 0.0f || g_geo3d_emit_has_plane) { g_geo3d_layer_faces++; geo3d_note_layer_model(model_idx); }
 
         float fr = cr, fg = cg, fb = cb;
