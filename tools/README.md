@@ -766,9 +766,22 @@ for s in cap/mame stim/bgm stim/sfx stim/sys stim/fuzz; do
     A/snd_replay $s outA/$(basename $s) 120; B/snd_replay $s outB/$(basename $s) 120
 done                                        # 5 inputs x 5 files, all cmp-identical
 A/scsp_fuzz a.bin; B/scsp_fuzz b.bin; cmp a.bin b.bin   # the chip, every mode
-A/m68k_fuzz a.bin; B/m68k_fuzz b.bin; cmp a.bin b.bin   # random code on the board
+for r in 1 37 735; do                                   # random code on the board, runs of r samples
+    A/m68k_fuzz a.bin 600 3000 $r; B/m68k_fuzz b.bin 600 3000 $r; cmp a.bin b.bin
+done
+B/scsp_lazy_test 5                                      # the lazy chip's RAM ranges (a ctest at 1)
 node tools/ab-builds.mjs A/m2hle.exe B/m2hle.exe --marks 600,1800,3600,6000 --sound
 ```
+
+The SCSP makes its samples late (`scsp.h`, "The chip's own time"), so the
+chip's checks drive it the way the emulator does: `scsp_fuzz` leaves half its
+scenarios alone for long stretches and keeps a quarter "tame" (no FM, no noise,
+the delay line clear of the voices) so voices run apart; `m68k_fuzz`'s last
+argument is the samples per `sound_run`; `snd_bench` runs up to a frame's
+samples a call (its fourth argument, 735; 1 makes the chip sync every sample)
+and prints how often it synced. A range too small is invisible to all of these:
+`scsp_lazy_test` runs each voice and DSP program twice with different garbage
+outside the RAM it claims.
 
 `scsp_fuzz` and `m68k_fuzz` sequence every random draw, so they also hold two
 *compilers* to each other: build one side with MSVC and the other with GCC or
@@ -1182,7 +1195,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `grade-midi.py` | the board's music against ValleyBell's M2MidiDec: per-song `snd_replay` inputs, the MIDIs corrected to the board's tempo and channels, then notes, pitch, lengths, levels and spectra (see "Music against M2MidiDec") |
 | `tests/cop_replay.c` | replays a coprocessor capture through `sharc_exec()`, command by command with the arguments the firmware read, and checks every word it answers: `cop_replay <prefix> [examples-per-op] [only-op-hex]`. `$COPRO_ROM` names the COP data ROM; `OSAGE=<file>` dumps every `Fn_osage` call and `DRAWS=<file>` the draws as CSV, and `RESYNC` / `STATE_EXACT` tune the matrix-state check (`STATE_EXACT`: any differing bit is a bad state, not only 1e-3) |
 | `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips. Run it from two builds and `cmp` the five outputs to prove a sound-board change bit-exact (`tools/snd_stimuli.py` writes four more inputs; see "Holding a sound-board change to the same bits") |
-| `tests/scsp_fuzz.c`, `tests/m68k_fuzz.c` | the SCSP under random register traffic, and the whole sound board running random code: each writes one file to `cmp` between two builds or two compilers. `scsp_fuzz <out> [scenarios] [samples]`, `m68k_fuzz <out> [scenarios] [samples]` (`$ROMDIR`) |
+| `tests/scsp_fuzz.c`, `tests/m68k_fuzz.c` | the SCSP under random register traffic, and the whole sound board running random code: each writes one file to `cmp` between two builds or two compilers. `scsp_fuzz <out> [scenarios] [samples]`, `m68k_fuzz <out> [scenarios] [samples] [run]` (`$ROMDIR`) |
 | `tests/i960_fuzz.c` | the i960 and its bus running random code: memory instructions of every width and addressing mode aimed at page, region and MMIO edges, real ROM words and random ones, after 300 real frames. One file to `cmp` between two builds or compilers; `det_digest` holds the game's own code, this the forms it never takes. `i960_fuzz <merged zip> <out> [scenarios] [steps]` |
 | `tests/tile_test.c` | the tile compositor against the pixel-by-pixel original it replaced, kept verbatim as the reference: 48 random boards, every pair control mode, and the pen table against `tile_pen_lut`. A ctest; `tile_test --bench` times both compositors on one frame |
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
