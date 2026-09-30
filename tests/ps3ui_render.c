@@ -251,6 +251,11 @@ static int dump_app(const char *dir, int w, int h)
     g_fake.results++;
     g_fake.last_winner = 1;
     run(a, 40, PS3UI_PAD_CROSS);            /* still held from the fight: ignored */
+    /* still mashing through the knockout: the prompt stays up, Play again unpicked */
+    for (int i = 0; i < 90; i++)
+        ps3ui_app_frame(a, i % 6 < 2 ? PS3UI_PAD_CROSS : 0);
+    if (a->scr != PS3UI_SCR_AGAIN) { fprintf(stderr, "FAIL: mashing answered the prompt\n"); fails++; }
+    run(a, 40, 0);                          /* let go: it takes the pad */
     if (a->scr != PS3UI_SCR_AGAIN || ps3ui_app_view(a) != PS3UI_VIEW_OVERLAY) {
         fprintf(stderr, "FAIL: no go-again prompt after a VS result\n");
         fails++;
@@ -259,7 +264,7 @@ static int dump_app(const char *dir, int w, int h)
     run(a, 1, PS3UI_PAD_CROSS);             /* Play again */
     if (a->scr != PS3UI_SCR_NONE) { fprintf(stderr, "FAIL: Play again kept the prompt\n"); fails++; }
     g_fake.results++;
-    run(a, 40, 0);
+    run(a, 90, 0);
     run(a, 1, PS3UI_PAD_DOWN);
     run(a, 10, 0);
     shot(a, &cv, dir, "13b_again_exit");
@@ -296,7 +301,7 @@ static int dump_app(const char *dir, int w, int h)
     run(a, 5, 0);
     if (a->open) { fprintf(stderr, "FAIL: a closed lobby opened on its own\n"); fails++; }
     g_fake.results++;
-    run(a, 40, 0);
+    run(a, 90, 0);
     if (!a->open || a->scr != PS3UI_SCR_AGAIN) { fprintf(stderr, "FAIL: no prompt with the lobby closed\n"); fails++; }
     run(a, 1, PS3UI_PAD_CROSS);
     if (a->open) { fprintf(stderr, "FAIL: Play again left the lobby open\n"); fails++; }
@@ -313,7 +318,7 @@ static int dump_app(const char *dir, int w, int h)
     g_fake.results++;
     g_fake.last_winner = 0;
     g_fake.last_side = 0;
-    run(a, 40, 0);
+    run(a, 90, 0);
     if (!a->open || a->scr != PS3UI_SCR_AGAIN) { fprintf(stderr, "FAIL: no prompt after a match outside VS mode\n"); fails++; }
     shot(a, &cv, dir, "15_again_not_vs");
     g_last_cmd = NETPLAY_CMD_NONE;
@@ -323,7 +328,7 @@ static int dump_app(const char *dir, int w, int h)
         fails++;
     }
     g_fake.results++;                       /* and Exit leaves */
-    run(a, 40, 0);
+    run(a, 90, 0);
     run(a, 1, PS3UI_PAD_DOWN);
     g_last_cmd = NETPLAY_CMD_NONE;
     run(a, 1, PS3UI_PAD_CROSS);
@@ -495,6 +500,40 @@ static int dump_shell(const char *dir, int w, int h)
         fails++;
     }
     sshot(sh, &cv, dir, "s13_vs_again_over_shell");
+
+    /* The same from Online Battle (the libretro core's way in): the lobby is
+     * open, the match runs under it, and the result asks. */
+    for (int i = 0; i < 700; i++) {
+        ps3ui_shell_frame(sh, 0, 0, 1);
+        ps3ui_app_frame(&g_ps3ui_app, 0);
+    }
+    ps3ui_app_close(&g_ps3ui_app);
+    ps3ui_shell_go(sh, PS3UI_SH_ONLINE);
+    ps3ui_app_open(&g_ps3ui_app);
+    g_fake.state = NETPLAY_IN_ROOM;
+    for (int i = 0; i < 60; i++) {
+        ps3ui_shell_frame(sh, 0, 0, 0);
+        ps3ui_app_frame(&g_ps3ui_app, 0);
+    }
+    g_fake.state = NETPLAY_PLAYING;
+    for (int i = 0; i < 60; i++) {
+        ps3ui_shell_frame(sh, 0, 0, 1);
+        ps3ui_app_frame(&g_ps3ui_app, 0);
+    }
+    fprintf(stderr, "online: shell %d view %d app scr %d open %d\n", sh->scr, ps3ui_shell_view(sh), g_ps3ui_app.scr,
+            g_ps3ui_app.open);
+    g_fake.results++;
+    for (int i = 0; i < 40; i++) {
+        ps3ui_shell_frame(sh, 0, 0, 1);
+        ps3ui_app_frame(&g_ps3ui_app, 0);
+    }
+    fprintf(stderr, "after: shell %d view %d app scr %d open %d\n", sh->scr, ps3ui_shell_view(sh), g_ps3ui_app.scr,
+            g_ps3ui_app.open);
+    if (ps3ui_shell_view(sh) != PS3UI_VIEW_OVERLAY || g_ps3ui_app.scr != PS3UI_SCR_AGAIN) {
+        fprintf(stderr, "FAIL: no prompt from Online Battle\n");
+        fails++;
+    }
+    sshot(sh, &cv, dir, "s14_again_from_online");
     return fails ? 1 : 0;
 }
 
