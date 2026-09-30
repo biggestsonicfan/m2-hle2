@@ -1687,6 +1687,39 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
 static int            g_geo3d_board_luma  = 0;
 static uint32_t       g_geo3d_mode        = 0;
 static float          g_geo3d_lod         = 0.0f;
+/* 0: a mode with bit 1 set lights and culls with the ROM normal anyway (geo3d_board_normal). */
+static int            g_geo3d_nn_normals  = 1;
+
+/* The eye-space normal the geometrizer lights and culls a face with, from its
+ * transformed corners A, B, C (host space, z negated). In a mode with bit 1 set
+ * (geo_parse_nn_*) the ROM normal is skipped and the normal is worked out from
+ * the corners instead: (B - A) x (C - A), normalized, the two corners the strip
+ * carries and the link's first new point. Otherwise it is the ROM normal fn
+ * through the matrix. The cross is negated because the z flip mirrors it.
+ *
+ * *Symptom that surfaced this in STF:* fighter shadows came out shredded.
+ * rob_kage_disp_test draws them in mode 2 (set_mmode), under a matrix that
+ * flattens the fighter onto the floor. A ROM normal put through that matrix
+ * says nothing about which way the flattened face points, so the rear test
+ * dropped faces at random, most visibly Knuckles' dreadlocks at select. */
+static inline vec3_t geo3d_board_normal(const float *matrix, vec3_t fn, bool has_c,
+                                        vec3_t A, vec3_t B, vec3_t C) {
+    vec3_t n;
+    if ((g_geo3d_mode & 2u) && has_c && g_geo3d_nn_normals) {
+        float e1x = B.x - A.x, e1y = B.y - A.y, e1z = B.z - A.z;
+        float e2x = C.x - A.x, e2y = C.y - A.y, e2z = C.z - A.z;
+        n.x = -(e1y * e2z - e1z * e2y);
+        n.y = -(e1z * e2x - e1x * e2z);
+        n.z = -(e1x * e2y - e1y * e2x);
+        float len = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len != 0.0f) { float k = 1.0f / len; n.x *= k; n.y *= k; n.z *= k; }
+        return n;
+    }
+    n.x = matrix[0]*fn.x + matrix[1]*fn.y + matrix[2]*fn.z;
+    n.y = matrix[4]*fn.x + matrix[5]*fn.y + matrix[6]*fn.z;
+    n.z = matrix[8]*fn.x + matrix[9]*fn.y + matrix[10]*fn.z;
+    return n;
+}
 /* A mesh in polygon RAM rather than ROM (an object address without bit 23):
  * while set, the decoder reads it from here, with the texture addresses above. */
 static const uint8_t *g_geo3d_obj_mesh      = NULL;
@@ -2253,11 +2286,15 @@ static inline void geo3d_decode_model(int model_idx,
         /* No fallback to the approximation for a zero normal: the board lights
          * it too, to luminance 0, so the face gets its ambient term. */
         if (g_geo3d_board_luma && matrix) {
-            float nx = matrix[0]*fn.x + matrix[1]*fn.y + matrix[2]*fn.z;
-            float ny = matrix[4]*fn.x + matrix[5]*fn.y + matrix[6]*fn.z;
-            float nz = matrix[8]*fn.x + matrix[9]*fn.y + matrix[10]*fn.z;
+            const vec3_t N = geo3d_board_normal(matrix, fn, has_C, A, B, C);
+            float nx = N.x, ny = N.y, nz = N.z;
             float dotl = nx*g_light_dir[0] + ny*g_light_dir[1] + nz*g_light_dir[2];
-            float dotp = nx*A.x + ny*A.y + nz*A.z;
+            /* N.P with the link's first new point, C, the one the geometrizer
+             * reads after the normal (MAME geo_parse). A warped quad's ROM
+             * normal does not hold all four corners (B and C sit off its
+             * plane in about one STF face in seven), so the corner matters. */
+            const vec3_t P = has_C ? C : A;
+            float dotp = nx*P.x + ny*P.y + nz*P.z;
             float lum  = (dotl * dotp < 0.0f) ? 0.0f : fabsf(dotl);
             /* check_culling: a face whose attribute word lacks the double-sided
              * bit 17 is dropped when N.P < 0 (the rear), and a link of type 0
@@ -3424,12 +3461,11 @@ static inline void geo3d_decode_model_cached(int model_idx,
 
         /* The board's lighting and culling, as geo3d_decode_model does them on
          * the display-list path (board luma with a matrix: always this branch). */
-        vec3_t fn = f->qn;
-        float nx = matrix[0]*fn.x + matrix[1]*fn.y + matrix[2]*fn.z;
-        float ny = matrix[4]*fn.x + matrix[5]*fn.y + matrix[6]*fn.z;
-        float nz = matrix[8]*fn.x + matrix[9]*fn.y + matrix[10]*fn.z;
+        const vec3_t N = geo3d_board_normal(matrix, f->qn, f->has_c, A, B, C);
+        float nx = N.x, ny = N.y, nz = N.z;
         float dotl = nx*g_light_dir[0] + ny*g_light_dir[1] + nz*g_light_dir[2];
-        float dotp = nx*A.x + ny*A.y + nz*A.z;
+        const vec3_t P = f->has_c ? C : A;           /* the link's first new point, as above */
+        float dotp = nx*P.x + ny*P.y + nz*P.z;
         float lum  = (dotl * dotp < 0.0f) ? 0.0f : fabsf(dotl);
         uint32_t at = f->has_qn ? f->qa : 0u;
         if ((((at >> 17) & 1u) == 0 && dotp < 0.0f) || ((at >> 8) & 3u) == 0) continue;   /* board_cull */
