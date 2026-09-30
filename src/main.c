@@ -77,6 +77,7 @@ static int  g_shader_arg = -1;    /* -1 as remembered, else a post_shader_mode_t
 static char g_shader_preset[512] = {0};
 static int  g_shader_scale = -1;
 static int  g_mcp_port   = 7172;   /* --mcp-port N */
+static int  g_mcp_watch_port = 0;  /* --mcp-watch-port N: the bridge's read-only port */
 static int  g_headless   = 0;      /* --headless: no window, GPU or audio device */
 static int  g_net_window = 0;      /* --netplay: open the netplay window at startup */
 static int  g_kiosk_on   = 0;      /* --kiosk: capture mode from startup */
@@ -140,7 +141,7 @@ static void emu_ensure_started(void) {
         emu_thread_init(&state.emu, &state.cpu, &state.bus);
         mcp_bridge_init(&state.emu, &state.cpu, &state.bus);
         mcp_bridge_set_romset(&state.romset);
-        if (g_mcp_enable) mcp_bridge_start(g_mcp_port);
+        if (g_mcp_enable) mcp_bridge_start(g_mcp_port, g_mcp_watch_port);
         state.emu_started = true;
     }
 }
@@ -1415,6 +1416,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_mcp_enable = 1;                  /* start TCP debug server */
         } else if (strcmp(argv[i], "--mcp-port") == 0 && i + 1 < argc) {
             g_mcp_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--mcp-watch-port") == 0 && i + 1 < argc) {
+            g_mcp_watch_port = atoi(argv[++i]);
         } else if ((strcmp(argv[i], "--log") == 0 || strcmp(argv[i], "--log-level") == 0)
                    && i + 1 < argc) {
             i++;                                /* taken above, before anything logged */

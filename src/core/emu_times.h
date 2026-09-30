@@ -122,16 +122,18 @@ static inline void emu_times_slice(int64_t work_us, bool frame) {
 }
 
 /* The "emu" block of get_status. The sampled parts are scaled up to their
- * whole here; the i960 is the loop less the COP's estimate. Reading it starts
- * frame_max_us again. */
-static inline void emu_times_json(char *out, int cap) {
+ * whole here; the i960 is the loop less the COP's estimate. Reading it with
+ * `restart_max` starts frame_max_us again; a watcher (the bridge's read-only
+ * port) reads it without, so it does not take the worst frame from the client
+ * that drives the board. */
+static inline void emu_times_json(char *out, int cap, bool restart_max) {
     const emu_times_t *t = &g_emu_times;
     int64_t cop = t->cop_timed ? (int64_t)((double)t->cop_timed_us * (double)t->cop_cmds / (double)t->cop_timed) : 0;
     int64_t scsp = t->scsp_timed ? (int64_t)((double)t->scsp_timed_us * (double)t->sound_samples / (double)t->scsp_timed) : 0;
     if (cop > t->loop_us)   cop  = t->loop_us;
     if (scsp > t->sound_us) scsp = t->sound_us;
     int64_t max = t->frame_max_us;
-    g_emu_times.max_reset = 1;
+    if (restart_max) g_emu_times.max_reset = 1;
     snprintf(out, (size_t)cap,
              "{\"frames\":%llu,\"slices\":%llu,\"steps\":%llu,\"work_us\":%lld,"
              "\"i960_us\":%lld,\"cop_us\":%lld,\"cop_cmds\":%llu,"
