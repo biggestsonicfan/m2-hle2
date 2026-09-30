@@ -3,7 +3,10 @@
  * capture's MIDI stream (the input tests/snd_replay.c uses), and print hashes
  * of everything the board produced so two builds can be held bit-identical.
  *
- * Usage: snd_bench <mame-capture-prefix> [seconds=30] [dsp_iters=400000]
+ * Usage: snd_bench <mame-capture-prefix> [seconds=30] [dsp_iters=400000] [run=735]
+ *   run: at most this many samples per sound_run, as the emulator runs a
+ *   frame's (the chip makes its samples late, scsp.h "The chip's own time";
+ *   1 makes it sync every sample, the old lockstep cost)
  *   $ROMDIR: directory with sfight.zip and schamp.zip
  */
 #define NDEBUG 1
@@ -31,6 +34,8 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: snd_bench <mame-capture-prefix> [seconds] [dsp_iters]\n"); return 2; }
     double seconds = argc > 2 ? atof(argv[2]) : 30.0;
     long dsp_iters = argc > 3 ? atol(argv[3]) : 400000;
+    uint64_t run = argc > 4 ? strtoull(argv[4], NULL, 10) : 735;
+    if (!run) run = 1;
     const char *romdir = getenv("ROMDIR");
     if (!romdir) romdir = "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms";
 
@@ -64,18 +69,24 @@ int main(int argc, char **argv) {
     uint64_t total = (uint64_t)(seconds * SOUND_RATE), h_out = FNV0;
     size_t next = 0;
     double t0 = now_s();
-    for (uint64_t smp = 0; smp < total; smp++) {
+    for (uint64_t smp = 0; smp < total; ) {
         while (next < nmidi && (midi[next].t >> 8) <= smp) { sound_uart_write(&g_sound, midi[next].b, midi[next].t); next++; }
+        uint64_t n = total - smp;                       /* up to the next byte's sample */
+        if (n > run) n = run;
+        if (next < nmidi && (midi[next].t >> 8) - smp < n) n = (midi[next].t >> 8) - smp;
         uint32_t w0 = g_sound.out_w;
-        sound_run(1);
-        if (g_sound.out_w != w0) h_out = fnv(h_out, &g_sound.out[w0 * 2], 4);
+        sound_run((uint32_t)n);
+        for (uint32_t w = w0; w != g_sound.out_w; w = (w + 1) & (SOUND_OUT_FRAMES - 1)) h_out = fnv(h_out, &g_sound.out[w * 2], 4);
         g_sound.out_r = g_sound.out_w;
+        smp += n;
     }
     double t_board = now_s() - t0;
     scsp_t *s = &g_sound.scsp;
     uint64_t h_ram = fnv(FNV0, s->ram, s->ram_size);
     printf("board: %.2f s of sound in %.3f s  = %.2fx real time\n", seconds, t_board, seconds / t_board);
     printf("hash out %016llx  ram %016llx  dsp steps %d\n", (unsigned long long)h_out, (unsigned long long)h_ram, s->dsp.last_step);
+    printf("lazy chip: %llu full syncs, %llu slots run ahead alone, delay line [%05X, %05X)\n",
+           (unsigned long long)s->syncs, (unsigned long long)s->catches, s->dsp_lo, s->dsp_hi);
 
     /* 2. The DSP alone, from the state the board reached. Its delay line is in
      * sound RAM, so this runs on the live state; nothing below is run again. */

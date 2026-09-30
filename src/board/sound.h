@@ -188,6 +188,7 @@ static sound_state_t g_sound;
  * below). Anything that reads or changes the sound board from the i960's side
  * calls it first. */
 static inline void sound_settle(void);
+static void sound_scsp_sink(void *ud, int16_t l, int16_t r);   /* the chip's samples, to the ring */
 
 /* ---- capture, for grading against MAME ------------------------------------
  * The same files tools/mame/snd-capture.lua writes: records of four u32 words
@@ -468,7 +469,11 @@ static uint32_t sound_bus_read(sound_state_t *ss, uint32_t addr, int sz, int pee
      * sound_rom_byte, a byte at a time through every region test, was an
      * eighth of the sound board. */
     const uint8_t *p = NULL;
-    if (addr + (uint32_t)sz <= 0x080000u) p = ss->ram + addr;
+    if (addr + (uint32_t)sz <= 0x080000u) {
+        /* only pages sound_map_pages leaves off come here: the DSP's delay line */
+        if (!peek) scsp_ram_touch(&ss->scsp, addr, (uint32_t)sz, 0);
+        p = ss->ram + addr;
+    }
     else if (addr - M68K_ROM_BASE <= M68K_ROM_SIZE - (uint32_t)sz) p = ss->rom + (addr - M68K_ROM_BASE);
     if (p) {
         if (sz == 1) return p[0];
@@ -505,7 +510,12 @@ static inline void sound_map_pages(sound_state_t *ss) {
     memset(ss->m68k.wmap, 0, sizeof ss->m68k.wmap);
     for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++) ss->m68k.wmap[pg] = 1;
     ss->m68k.wmap[M68K_SCSP_BASE >> 16] = 1;
-    for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++) m[pg] = ss->ram + (pg << 16);
+    /* Not the pages the DSP keeps its delay line in: the chip makes its samples
+     * late (scsp.h, "The chip's own time"), so a read there has to go through
+     * sound_bus_read and have the DSP catch up first. */
+    for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++)
+        if (!((pg << 16) < ss->scsp.dsp_hi && ss->scsp.dsp_lo < ((pg + 1) << 16))) m[pg] = ss->ram + (pg << 16);
+    ss->scsp.dsp_moved = 0;
     if (ss->rom_loaded)
         for (uint32_t pg = 0; pg < M68K_ROM_SIZE >> 16; pg++) m[(M68K_ROM_BASE >> 16) + pg] = ss->rom + (pg << 16);
     if (!ss->samples) return;
@@ -531,6 +541,7 @@ static void sound_m68k_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
     addr &= 0xFFFFFFu;
     if (addr + (uint32_t)sz <= 0x080000u) {
         if (g_snd_watch.on) snd_watch_write(addr, sz);
+        scsp_ram_touch(&ss->scsp, addr, (uint32_t)sz, 1);   /* what the chip owes reads the old bytes */
         uint8_t *p = ss->ram + addr;
         if (sz == 1) { p[0] = (uint8_t)val; return; }
         if (sz == 2) { p[0] = (uint8_t)(val >> 8); p[1] = (uint8_t)val; return; }
@@ -541,6 +552,7 @@ static void sound_m68k_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
         uint32_t off = addr - M68K_SCSP_BASE;
         if (g_sndcap.active) sndcap_scsp(1, off, val, sz);
         scsp_write(&ss->scsp, off, val, sz);
+        if (ss->scsp.dsp_moved) sound_map_pages(ss);
         return;
     }
     if (addr >= M68K_SNDCTL_BASE && addr < M68K_SNDCTL_BASE + M68K_SNDCTL_SIZE) {
@@ -705,6 +717,7 @@ static inline void sound_reset(void) {
     memset(g_sound.ram, 0, sizeof g_sound.ram);
     memset(&g_sound.m68k, 0, sizeof g_sound.m68k);
     scsp_reset(&g_sound.scsp, g_sound.ram, SOUND_RAM_SIZE, &g_sound.m68k.cpu.cycles);
+    g_sound.scsp.sink = sound_scsp_sink;
     g_sound.budget = 0;
     g_sound.slice_frac = 0;
     g_sound.ahead = 0;
@@ -824,6 +837,8 @@ static inline void sound_out_push(int16_t l, int16_t r) {
     SOUND_STORE_RELEASE(g_sound.out_w, (w + 1) & (SOUND_OUT_FRAMES - 1));
 }
 
+static void sound_scsp_sink(void *ud, int16_t l, int16_t r) { (void)ud; sound_out_push(l, r); }
+
 /* Whether a host drains the ring: a device is open (audio_out_init) or a
  * push host has begun (audio_out_push_begin). Without one out_dropped is
  * every sample the board makes, which says nothing about real drops. */
@@ -880,18 +895,20 @@ static void sound_run(uint32_t n) {
             }
             g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
         }
-        int16_t l, r;
-        /* One sample in 16 is timed, for the SCSP's share (emu_times.h). */
-        if (g_sound.out_total & 15) {
-            scsp_sample(&g_sound.scsp, &l, &r);
-        } else {
-            int64_t t0 = emu_now_us();
-            scsp_sample(&g_sound.scsp, &l, &r);
-            g_emu_times.scsp_timed_us += emu_now_us() - t0;
-            g_emu_times.scsp_timed++;
-        }
-        sound_out_push(l, r);
+        /* The chip owes the sample and makes it when something needs it
+         * (scsp.h, "The chip's own time"). The watchdog and a capture look at
+         * the slots every sample, so they have them made every sample. */
+        scsp_tick(&g_sound.scsp);
+        if (g_snd_watch.on || g_sndcap.active) scsp_sync(&g_sound.scsp);
     }
+    /* The rest of the run's samples, which is most of the chip's work: timed,
+     * for its share (emu_times.h). Samples a register write or a sound RAM
+     * access made inside the run are counted in the 68000's time. */
+    uint64_t made = g_sound.scsp.samples;
+    int64_t t0 = emu_now_us();
+    scsp_sync(&g_sound.scsp);
+    g_emu_times.scsp_timed_us += emu_now_us() - t0;
+    g_emu_times.scsp_timed    += g_sound.scsp.samples - made;
     g_emu_times.sound_us      += emu_now_us() - run_t0;
     g_emu_times.sound_samples += n;
 }

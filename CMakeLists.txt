@@ -559,6 +559,8 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(scsp_dsp_test_masks ${CMAKE_CURRENT_SOURCE_DIR}/tests/scsp_dsp_test.c)
     target_compile_definitions(scsp_dsp_test PRIVATE SCSP_DSP_MASKS=0)
     target_compile_definitions(scsp_dsp_test_masks PRIVATE SCSP_DSP_MASKS=1)
+    # the RAM ranges the lazy SCSP runs slots and the DSP on by (scsp.h, "The chip's own time")
+    add_executable(scsp_lazy_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/scsp_lazy_test.c)
     # Netplay: the lockstep engine, the protobuf codec and the ComId standard.
     # No server; part (G) opens loopback sockets — see the header of tests/net_test.c.
     add_executable(net_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/net_test.c)
@@ -644,7 +646,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(audio_out_test PRIVATE sokol)
 
     foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test audio_out_test
-              scsp_dsp_test scsp_dsp_test_masks sfight_settings_test retro_shader_test)
+              scsp_dsp_test scsp_dsp_test_masks scsp_lazy_test sfight_settings_test retro_shader_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -657,7 +659,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test audio_out_test scsp_dsp_test scsp_dsp_test_masks
-                  retro_shader_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test ps3ui_render)
+                  scsp_lazy_test retro_shader_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test ps3ui_render)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

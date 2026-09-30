@@ -11,7 +11,10 @@
  * writes each sample's register hash, PC, SR, clock and output, and each
  * scenario's sound RAM hash, to one file. Build it from both trees and cmp.
  *
- * Usage: m68k_fuzz <out-file> [scenarios=600] [samples=3000]
+ * Usage: m68k_fuzz <out-file> [scenarios=600] [samples=3000] [run=1]
+ *   run: samples per sound_run. Above 1 the chip is left to make its samples
+ *   late (scsp.h, "The chip's own time") for that long, and each run's outputs
+ *   are written after it.
  *   $ROMDIR: directory with sfight.zip and schamp.zip
  *
  * Not a ctest.
@@ -52,6 +55,8 @@ int main(int argc, char **argv) {
     if (!out) { fprintf(stderr, "cannot write %s\n", argv[1]); return 1; }
     int scenarios = argc > 2 ? atoi(argv[2]) : 600;
     int samples = argc > 3 ? atoi(argv[3]) : 3000;
+    uint32_t run = argc > 4 ? (uint32_t)atoi(argv[4]) : 1;
+    if (run < 1) run = 1;
     const char *romdir = getenv("ROMDIR");
     if (!romdir) romdir = "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms";
     char child[1024], parent[1024];
@@ -106,7 +111,12 @@ int main(int argc, char **argv) {
         for (int n = 0; n < samples && !c->halted; n++) {
             if (rnd() % 64 == 0) scsp_midi_in(&g_sound.scsp, (uint8_t)rnd());
             if (rnd() % 256 == 0) { int r = (int)(rnd() % 7); c->a[r] = interesting(); }   /* keep aiming at the edges */
-            sound_run(1);
+            uint32_t w0 = g_sound.out_w;
+            sound_run(run);
+            n += run - 1;
+            if (run > 1)
+                for (uint32_t w = w0; w != g_sound.out_w; w = (w + 1) & (SOUND_OUT_FRAMES - 1))
+                    put((uint32_t)(uint16_t)g_sound.out[w * 2] | (uint32_t)(uint16_t)g_sound.out[w * 2 + 1] << 16);
             g_sound.out_r = g_sound.out_w;
             uint32_t h = 0x811C9DC5u;
             for (int i = 0; i < 8; i++) { h = (h ^ c->d[i]) * 16777619u; h = (h ^ c->a[i]) * 16777619u; }
