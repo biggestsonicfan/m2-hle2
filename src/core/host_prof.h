@@ -90,15 +90,21 @@ enum {
 
 /* dladdr and Dl_info are GNU extensions, and nothing defines _GNU_SOURCE
  * before the first system header in these translation units. The layout is
- * glibc's (and bionic's). */
-#ifndef __USE_GNU
+ * glibc's. Bionic declares them unconditionally. */
+#if !defined(__USE_GNU) && !defined(__BIONIC__)
 typedef struct { const char *dli_fname; void *dli_fbase; const char *dli_sname; void *dli_saddr; } Dl_info;
 extern int dladdr(const void *addr, Dl_info *info);
 #endif
 
 /* initial-exec: a plain load/store from the thread pointer even in the
- * libretro .so, where the default model would call __tls_get_addr. */
+ * libretro .so, where the default model would call __tls_get_addr. glibc
+ * keeps static TLS room for a dlopen'd library; Android's linker refuses one
+ * that asks for it, so the core there takes the default model. */
+#if defined(__GLIBC__)
 static __thread volatile uint8_t g_hprof_zone __attribute__((tls_model("initial-exec")));
+#else
+static __thread volatile uint8_t g_hprof_zone;
+#endif
 
 static inline int  hprof_enter(int z)   { int p = g_hprof_zone; g_hprof_zone = (uint8_t)z; return p; }
 static inline void hprof_leave(int prev) { g_hprof_zone = (uint8_t)prev; }
