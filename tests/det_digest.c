@@ -46,7 +46,10 @@
  * then has no overlap to test; without it the sound thread runs as in a host,
  * and the last line on stderr hashes every sample the board produced, which
  * holds the overlapped run whole. --no-sound-thread (or M2HLE_SOUND_THREAD=0)
- * keeps the sound board on this thread, for the A/B.
+ * keeps the sound board on this thread, for the A/B. --sound-hle runs the
+ * sound driver in C instead of on the 68000 (sound_hle.h): the i960 columns
+ * are the same frame for frame if the i960 cannot tell. --pcm FILE writes
+ * every sample the board produced (16-bit stereo, 44.1 kHz, raw).
  *
  * Two builds of it, one from each configuration, so each has exactly its
  * frontend's compiler flags:
@@ -88,10 +91,12 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 
 /* Every sample the board makes, folded in as it is made (on the sound thread). */
 static uint64_t snd_out_hash = FNV0, snd_out_n;
+static FILE *snd_pcm;          /* --pcm FILE */
 static void snd_out_tap(int16_t l, int16_t r, uint64_t index, void *ud) {
     (void)index; (void)ud;
     int16_t lr[2] = { l, r };
     snd_out_hash = fnv(snd_out_hash, lr, sizeof lr);
+    if (snd_pcm) fwrite(lr, sizeof lr, 1, snd_pcm);
     snd_out_n++;
 }
 
@@ -260,6 +265,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--out")    && i + 1 < argc) out_path = argv[++i];
         else if (!strcmp(argv[i], "--sound"))                   sound_cols = true;
         else if (!strcmp(argv[i], "--no-sound-thread"))         g_sound_thread_want = 0;
+        else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
+        else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
@@ -377,6 +384,9 @@ int main(int argc, char **argv) {
             (unsigned long long)snd_out_n, (unsigned long long)snd_out_hash,
             (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
             sound_thread_on() ? "sound thread" : "one thread", (unsigned long long)g_emu_times.sound_jobs);
+    fprintf(stderr, "sound: %s; i960 commands %u, bytes that waited a slice %llu, midi drops %u\n",
+            g_shle.on ? "driver in C (--sound-hle)" : "68000", g_sound.code_n,
+            (unsigned long long)g_sound.midi_holds, g_sound.scsp.mi_drops);
     if (in_n) {
         if (mismatches) fprintf(stderr, "input log: %u of %u frames' checks differ, the first at session frame %u\n",
                                 (unsigned)mismatches, (unsigned)g_emu_frames, (unsigned)first_mismatch);

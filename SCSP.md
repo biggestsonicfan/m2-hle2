@@ -146,3 +146,69 @@ The DSP is now the largest single cost, and in STF it mostly reverberates
 silence. An exact shortcut would have to prove the delay line and TEMP are at a
 fixed point under zero input before skipping a step; that is the next lever,
 not done here.
+
+## The driver in C (`--sound-hle`)
+
+`src/board/sound_hle.h` is STF's sound driver ported to C, run in place of the
+68000 when the host asks for it (`--sound-hle`, `M2HLE_SOUND_HLE=1`, the
+libretro option "Sound driver"; Pinboard #173). Off by default: the 68000 stays
+the board, the oracle, and the only path for any other program ROM (it takes
+only STF's, by a hash of its code) -- m2-pacman talks back over MIDI out, and
+nothing but the 68000 answers that.
+
+**What it is.** The driver, routine by routine, from the IDA listing in
+`schamp_SoundDriver_disasm`: MIDI framing into the command queue, the command
+dispatcher (songs, effects, the `A? 0x` specials), the music and effect
+sequencers, voice allocation and stealing (the 5-voice effect cap, priorities,
+exclusive groups), the controllers, the fades, the release countdowns, and the
+streaming refill of each voice's 8 KB window. It keeps the driver's own RAM
+layout, so a sound capture's RAM dumps read the same on both paths, and it
+writes the chip and sound RAM through the same paths the 68000's bus takes.
+**The chip is scsp.h either way**: what it plays is the same bytes and the
+same register values, only at slightly different moments.
+
+**What it cannot be: exact.** The 68000's main loop spreads the work out -- one
+queued event per pass over the slots, a streaming refill in between, a
+preloaded sample set copied a byte at a time for a third of a second -- and
+the driver's timers run a little later the busier it is, because it reloads
+them in the interrupt handler. The port models the parts that move notes by
+more than a millisecond, each measured on the board with `snd_replay`'s
+`$SND_TRACE`: the main loop's time per event and per preload byte, the
+handlers' lengths and how they block each other, the extra interrupt latency a
+refill's `movem.l` causes, the boot and restart timeline (the driver ignores
+the MIDI line for 2.94 s, and InitSCSP's four reads of MIBUF throw away what
+waited), and when a streamed one-shot is switched to its end (which is when its
+voice is freed, and so what the effect cap counts).
+
+**The i960 cannot tell.** It sees the sound board only through the UART, and
+the UART is clocked by board time, which runs the same with or without the
+68000 (`g_sound.m68k.cpu.cycles`, 256 a sample). The only way the two could
+part is a slice that sends more than ~50 bytes, where the run-ahead cap decides
+when a byte waits, and STF never does. `det_digest --sound-hle` against the
+68000: every frame identical (frame check, work RAM, buffer RAM, COP memory)
+over 12,000 frames of attract and 20,000 of a scripted game with 793 sound
+commands, no byte ever waiting a slice. So it is safe in a netplay session,
+even against a machine on the 68000.
+
+**Graded against the board** (`tools/grade-sound-hle.py`, `snd_replay` on
+`tools/snd_stimuli.py`'s inputs, 120 s each; the key-on is matched on what it
+plays -- pitch, level, pan, release, LFO -- not on the slot):
+
+| input | board key-ons | matched within 30 ms | timing, median / p95 | hold p90, board / C | loudness C/board | envelope corr. | bands, dB |
+|---|---|---|---|---|---|---|---|
+| bgm (every song) | 1991 | 100.0% | -0.6 / 4.1 ms | 1.484 / 1.481 s | 0.986-1.003 | 0.919 | within ±0.03 |
+| sfx (effects storm) | 7435 | 99.9% | -5.3 / 8.4 ms | 0.729 / 0.721 s | 0.989-1.011 | 0.833 | within ±0.02 |
+| sys (every AE 14, random commands) | 3480 | 99.9% | -3.2 / 19.4 ms | 0.848 / 0.850 s | 0.971-1.025 | 0.859 | within ±0.11 |
+| fuzz (random bytes, restarts) | 159 | 100.0% | -2.9 / 5.2 ms | 8.279 / 8.279 s | 0.982-1.020 | 0.989 | within ±0.01 |
+
+And over 5 minutes of the scripted game (the i960 driving it): loudness within
+3% and every band within ±0.5 dB in every 20 s window. The envelope correlation
+figures are 5 ms envelopes, which a few milliseconds of timing and the odd
+voice taken from a different note move; the notes themselves are the board's.
+
+**Cost.** The sound board takes about half the time: 120 s of the music input
+in 1.3 s against 2.4 s on x86 (`snd_bench`, `SND_HLE=1`), and on the RG ARC-S's
+Cortex-A55 60 s of it in 4.40 s against 8.21 s (effects storm 5.36 against
+9.11). What is left is the chip, and the DSP is most of that: in STF's music
+its return is exactly zero (measured by muting it), which the DSP shortcut
+under "What is left" would take.

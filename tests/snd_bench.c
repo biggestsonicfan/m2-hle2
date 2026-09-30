@@ -8,6 +8,7 @@
  *   frame's (the chip makes its samples late, scsp.h "The chip's own time";
  *   1 makes it sync every sample, the old lockstep cost)
  *   $ROMDIR: directory with sfight.zip and schamp.zip
+ *   $SND_HLE=1: the sound driver in C instead of on the 68000 (sound_hle.h)
  */
 #define NDEBUG 1
 #include <stdio.h>
@@ -61,6 +62,7 @@ int main(int argc, char **argv) {
     snprintf(child, sizeof child, "%s/sfight.zip", romdir);
     snprintf(parent, sizeof parent, "%s/schamp.zip", romdir);
     if (sfight_load(&rs, child, parent) != 0 || !rs.audiocpu || !rs.samples) { fprintf(stderr, "ROM load failed (%s)\n", romdir); return 1; }
+    if (getenv("SND_HLE")) g_sound_hle_want = atoi(getenv("SND_HLE"));   /* the driver in C (sound_hle.h) */
     sound_reset();
     sound_load_rom(rs.audiocpu, (uint32_t)rs.audiocpu_size);
     sound_load_samples(rs.samples, (uint32_t)rs.samples_size);

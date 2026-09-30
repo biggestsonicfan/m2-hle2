@@ -91,6 +91,12 @@ static int  g_no_tray    = 0;      /* --no-tray: --headless without its icon */
  * the graders must leave it on. A netplay reset attaches the sound board
  * regardless (netplay_reset_board_cb): the other machine runs one. */
 static int  g_no_sound_board = 0;
+/* --sound-hle (or M2HLE_SOUND_HLE=1): run the sound driver in C instead of on
+ * the 68000 (board/sound_hle.h), where the program ROM is one it knows (STF's);
+ * the SCSP is the same chip either way. The i960 sees the same UART line, so
+ * the game runs the same frames (det_digest --sound-hle); what changes is when
+ * the notes land, by a millisecond or two, and the cost: about half the sound
+ * board's. */
 static int  g_kiosk_w    = KIOSK_DEFAULT_WIDTH;
 static int  g_kiosk_h    = KIOSK_DEFAULT_HEIGHT;
 static int  g_kiosk_show = 0;      /* --kiosk-show: start it on screen, not parked */
@@ -1321,6 +1327,7 @@ static void event(const sapp_event* ev) {
 
 sapp_desc sokol_main(int argc, char* argv[]) {
     { const char *e = getenv("M2HLE_NO_SOUND_BOARD"); if (e && e[0] == '1') g_no_sound_board = 1; }
+    { const char *e = getenv("M2HLE_SOUND_HLE"); if (e && e[0] == '1') g_sound_hle_want = 1; }
     /* The log's own options come first: the first line logged, a warning about
      * any argument below included, opens the file. Without --log, an instance
      * given its own --mcp-port gets its own file, because instances started
@@ -1425,6 +1432,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_headless = 1;
         } else if (strcmp(argv[i], "--no-sound-board") == 0) {
             g_no_sound_board = 1;
+        } else if (strcmp(argv[i], "--sound-hle") == 0) {
+            g_sound_hle_want = 1;
         } else if (strcmp(argv[i], "--no-tray") == 0) {
             /* For a service or a Session 0 run, where there is no shell to put
              * an icon in and the process is stopped some other way. */

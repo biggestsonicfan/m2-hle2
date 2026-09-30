@@ -573,6 +573,7 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--window") && more)     { if (sscanf(argv[++i], "%dx%d", &opt.win_w, &opt.win_h) != 2) return false; }
         else if (!strcmp(a, "--stats"))              opt.stats = true;
         else if (!strcmp(a, "--sound"))              opt.sound = true;
+        else if (!strcmp(a, "--sound-hle"))          g_sound_hle_want = 1;   /* the sound driver in C (sound_hle.h) */
         else if (!strcmp(a, "--osd"))                opt.osd = true;
         else if (!strcmp(a, "--log") && more)        opt.log_path = argv[++i];
         else if (!strcmp(a, "--log-level") && more)  opt.log_levels = argv[++i];
