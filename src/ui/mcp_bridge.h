@@ -8,6 +8,11 @@
  *   → {"cmd":"get_status"}
  *   ← {"ok":true,"running":false,"halted":false,"ip":"0x00074E4","steps_per_second":0}
  *
+ * With --mcp-watch-port N it also listens on N for up to MCP_WATCH_CLIENTS
+ * watchers at once, each on its own thread, which may only look: see
+ * mcp_dispatch_watch. The controlling client never waits on them, and they
+ * never wait on it.
+ *
  * All reads from CPU state go through the emu mutex snapshot so the bridge
  * thread never races the emu thread.
  */
@@ -74,6 +79,9 @@
  * client well before --run has taken effect. */
 #define MCP_STOPPED_GRACE_MS  4000u
 
+/* Watchers the read-only port serves at once. One more is told so and closed. */
+#define MCP_WATCH_CLIENTS  4
+
 /* ---- Module state -------------------------------------------------------- */
 
 typedef struct {
@@ -101,6 +109,10 @@ typedef struct {
 #endif
     volatile int      alive;
     mcp_sock_t        listen_sock;
+    /* The read-only port (--mcp-watch-port), and how many watchers it has. */
+    int               watch_port;
+    mcp_sock_t        watch_sock;
+    volatile long     watchers;
 } mcp_bridge_t;
 
 static mcp_bridge_t g_mcp = {0};
@@ -121,7 +133,7 @@ static mcp_bridge_t g_mcp = {0};
 
 /* ---- Command handlers ---------------------------------------------------- */
 
-static void mcp_cmd_get_status(char *resp, int cap) {
+static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
     mcp_bridge_t *b = &g_mcp;
     int running = b->emu && emu_is_running(b->emu);
     int halted  = b->cpu && b->cpu->halted;
@@ -167,9 +179,10 @@ static void mcp_cmd_get_status(char *resp, int cap) {
     /* The same for the emulation, cumulative too: the i960, the COP, the
      * sound board, and the waits (pace_us, net_us) apart from the work, so a
      * board short of 60 fps reads as slow or as throttled. frame_max_us is
-     * the worst frame since the last get_status (emu_times.h). */
+     * the worst frame since the controlling client's last get_status
+     * (emu_times.h); a watcher's reading leaves it be. */
     char et[1024];
-    emu_times_json(et, (int)sizeof et);
+    emu_times_json(et, (int)sizeof et, restart_max);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
@@ -336,7 +349,24 @@ static void mcp_cmd_get_registers(char *resp, int cap) {
 #undef APPEND
 }
 
-static void mcp_cmd_read_memory(const char *req, char *resp, int cap) {
+/* One byte of the bus as the controlling client reads it (`peek` 0: the
+ * i960's own path, MMIO callbacks included), or as a watcher does (`peek` 1):
+ * backing memory only, and 0 for a register block. A callback read is not a
+ * look -- the UART's status runs the sound board on (sound_midi_read_cb), the
+ * GEO and COP FIFOs pop -- and a watcher must not move the board, least of all
+ * one machine of a netplay session. The scan is mem_find_region's, first match
+ * in declaration order, without its hit cache. Call it under the emu mutex. */
+static inline uint8_t mcp_bus_byte(memory_bus_t *bus, uint32_t addr, int peek) {
+    if (!peek) return (uint8_t)mem_read8(bus, addr);
+    for (int i = 0; i < bus->region_count; i++) {
+        const mem_region_t *r = &bus->regions[i];
+        if (addr - r->base < r->size)
+            return (r->read_cb || !r->data) ? 0 : r->data[addr - r->base];
+    }
+    return 0;
+}
+
+static void mcp_cmd_read_memory(const char *req, char *resp, int cap, int peek) {
     uint32_t addr = 0, size = 0;
     uint8_t buf[4096];
     if (!mcp_json_get_u32(req, "addr", &addr) || !mcp_json_get_u32(req, "size", &size)) {
@@ -353,7 +383,7 @@ static void mcp_cmd_read_memory(const char *req, char *resp, int cap) {
      * section is no longer than the read itself. */
     int locked = g_mcp.emu && g_mcp.emu->thread_alive;
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
-    for (uint32_t i = 0; i < size; i++) buf[i] = mem_read8(g_mcp.bus, addr + i);
+    for (uint32_t i = 0; i < size; i++) buf[i] = mcp_bus_byte(g_mcp.bus, addr + i, peek);
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 
     char *p = resp;
@@ -385,8 +415,8 @@ static void mcp_cmd_read_memory(const char *req, char *resp, int cap) {
  * nesting; decimal or 0x hex, quoted or bare. */
 #define MCP_READ_MANY_RANGES 64
 #define MCP_READ_MANY_BYTES  32768   /* hex doubles it, inside the 128 kB reply */
-static void mcp_cmd_read_many(const char *req, char *resp, int cap) {
-    static uint8_t buf[MCP_READ_MANY_BYTES];   /* one client at a time */
+static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
+    uint8_t *buf;   /* per call: watchers read on threads of their own */
     uint32_t addr[MCP_READ_MANY_RANGES], size[MCP_READ_MANY_RANGES];
     int n = 0, half = 0, depth = 0;
     uint32_t total = 0;
@@ -424,6 +454,9 @@ static void mcp_cmd_read_many(const char *req, char *resp, int cap) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"ranges must be [addr,size] pairs\"}"); return;
     }
     if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
+    if (!(buf = (uint8_t *)malloc(total ? total : 1))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
+    }
 
     /* Under the mutex for the same two reasons as mcp_cmd_read_memory, and held
      * across every range so they all come from one point between slices. */
@@ -432,7 +465,7 @@ static void mcp_cmd_read_many(const char *req, char *resp, int cap) {
     unsigned frame = g_emu_frames;
     uint8_t *b = buf;
     for (int r = 0; r < n; r++)
-        for (uint32_t i = 0; i < size[r]; i++) *b++ = mem_read8(g_mcp.bus, addr[r] + i);
+        for (uint32_t i = 0; i < size[r]; i++) *b++ = mcp_bus_byte(g_mcp.bus, addr[r] + i, peek);
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 
     /* 32 kB of hex is 64 kB, well inside the bridge's 128 kB reply. */
@@ -450,6 +483,7 @@ static void mcp_cmd_read_many(const char *req, char *resp, int cap) {
         *o++ = '"';
     }
     *o++ = ']'; *o++ = '}'; *o = '\0';
+    free(buf);
 }
 
 static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
@@ -2233,14 +2267,14 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
      * the sound thread (sound.h): a no-op unless one is in flight. */
     sound_settle();
 
-    if      (strcmp(cmd, "get_status")       == 0) mcp_cmd_get_status(resp, cap);
+    if      (strcmp(cmd, "get_status")       == 0) mcp_cmd_get_status(resp, cap, true);
     else if (strcmp(cmd, "set_input")        == 0) mcp_cmd_set_input(req, resp, cap);
     else if (strcmp(cmd, "prof")             == 0) mcp_cmd_prof(req, resp, cap);
     else if (strcmp(cmd, "prof_dump")        == 0) mcp_cmd_prof_dump(req, resp, cap);
     else if (strcmp(cmd, "set_camera")       == 0) mcp_cmd_set_camera(req, resp, cap);
     else if (strcmp(cmd, "get_registers")    == 0) mcp_cmd_get_registers(resp, cap);
-    else if (strcmp(cmd, "read_memory")      == 0) mcp_cmd_read_memory(req, resp, cap);
-    else if (strcmp(cmd, "read_many")        == 0) mcp_cmd_read_many(req, resp, cap);
+    else if (strcmp(cmd, "read_memory")      == 0) mcp_cmd_read_memory(req, resp, cap, 0);
+    else if (strcmp(cmd, "read_many")        == 0) mcp_cmd_read_many(req, resp, cap, 0);
     else if (strcmp(cmd, "write_memory")     == 0) mcp_cmd_write_memory(req, resp, cap);
     else if (strcmp(cmd, "dump_memory_file") == 0) mcp_cmd_dump_memory_file(req, resp, cap);
     else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
@@ -2351,9 +2385,51 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
 }
 
+/* The read-only port's commands: looks that neither pause the board nor
+ * change what the controlling client will see, so a watcher (a dashboard, a
+ * watchdog, a sampler) can run beside the client that drives the board --
+ * and, with netplay, beside the lockstep. Their state is read as the
+ * controlling client's is: the double-buffered CPU snapshot, the status
+ * copies, memory under the emu mutex. Memory is read without the bus's
+ * callbacks (mcp_bus_byte); get_status leaves frame_max_us to the controlling
+ * client. Anything else, a harmless-looking read included, is refused: a
+ * command gets onto this list by being checked, not by default. */
+static void mcp_dispatch_watch(const char *req, char *resp, int cap) {
+    char cmd[64] = {0};
+    if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing cmd\"}");
+        return;
+    }
+    if      (strcmp(cmd, "get_status")          == 0) mcp_cmd_get_status(resp, cap, false);
+    else if (strcmp(cmd, "get_registers")       == 0) mcp_cmd_get_registers(resp, cap);
+    else if (strcmp(cmd, "read_memory")         == 0) mcp_cmd_read_memory(req, resp, cap, 1);
+    else if (strcmp(cmd, "read_many")           == 0) mcp_cmd_read_many(req, resp, cap, 1);
+    else if (strcmp(cmd, "sound_status")        == 0) mcp_cmd_sound_status(resp, cap);
+    else if (strcmp(cmd, "get_cop_diagnostics") == 0) mcp_cmd_get_cop_diagnostics(resp, cap);
+    else if (strcmp(cmd, "netplay_status")      == 0) mcp_cmd_netplay_status(req, resp, cap);
+    else {
+        char esc[128];
+        mcp_json_escape(esc, sizeof(esc), cmd);
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"%s is not served on the read-only watch port\"}", esc);
+    }
+}
+
 /* ---- Bridge thread -------------------------------------------------------- */
 
-static void mcp_bridge_serve(mcp_sock_t client) {
+/* A reply to a client that has gone must not raise SIGPIPE, which would take
+ * the emulator down with it; a health check hangs up whenever it likes. */
+static inline void mcp_send(mcp_sock_t s, const char *buf, int len) {
+#ifdef _WIN32
+    send(s, buf, len, 0);
+#elif defined(MSG_NOSIGNAL)
+    send(s, buf, (size_t)len, MSG_NOSIGNAL);
+#else
+    send(s, buf, (size_t)len, 0);
+#endif
+}
+
+static void mcp_bridge_serve(mcp_sock_t client, bool watch) {
     char req_buf[8192];
     char resp_buf[131072];
     int  req_len = 0;
@@ -2375,17 +2451,15 @@ static void mcp_bridge_serve(mcp_sock_t client) {
             if (c == '\n' || c == '\r') {
                 if (req_len > 0) {
                     req_buf[req_len] = '\0';
-                    mcp_dispatch(req_buf, resp_buf, (int)sizeof(resp_buf));
+                    /* One byte short: the newline goes after the reply. */
+                    if (watch) mcp_dispatch_watch(req_buf, resp_buf, (int)sizeof(resp_buf) - 1);
+                    else       mcp_dispatch(req_buf, resp_buf, (int)sizeof(resp_buf) - 1);
 
                     /* Append newline terminator for the Python side. */
                     int resp_len = (int)strlen(resp_buf);
                     resp_buf[resp_len]     = '\n';
                     resp_buf[resp_len + 1] = '\0';
-#ifdef _WIN32
-                    send(client, resp_buf, resp_len + 1, 0);
-#else
-                    send(client, resp_buf, (size_t)(resp_len + 1), 0);
-#endif
+                    mcp_send(client, resp_buf, resp_len + 1);
                     req_len = 0;
                 }
             } else {
@@ -2417,8 +2491,75 @@ static void *mcp_thread_proc(void *arg) {
             continue;
         }
         LOG_INFO("mcp: client connected");
-        mcp_bridge_serve(client);
+        mcp_bridge_serve(client, false);
         LOG_INFO("mcp: client disconnected");
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+/* One watcher, on a thread of its own, so a slow one holds up nobody. */
+#ifdef _WIN32
+static DWORD WINAPI mcp_watch_client_proc(LPVOID arg) {
+    mcp_sock_t client = (mcp_sock_t)(uintptr_t)arg;
+#else
+static void *mcp_watch_client_proc(void *arg) {
+    mcp_sock_t client = (mcp_sock_t)(intptr_t)arg;
+#endif
+    mcp_bridge_serve(client, true);
+#ifdef _WIN32
+    InterlockedDecrement(&g_mcp.watchers);
+    return 0;
+#else
+    __atomic_sub_fetch(&g_mcp.watchers, 1, __ATOMIC_SEQ_CST);
+    return NULL;
+#endif
+}
+
+#ifdef _WIN32
+static DWORD WINAPI mcp_watch_thread_proc(LPVOID arg) {
+    (void)arg;
+#else
+static void *mcp_watch_thread_proc(void *arg) {
+    (void)arg;
+#endif
+    while (g_mcp.alive) {
+        mcp_sock_t client = accept(g_mcp.watch_sock, NULL, NULL);
+        if (client == MCP_INVALID_SOCK) {
+            if (g_mcp.alive) emu_sleep_ms(10);
+            continue;
+        }
+#ifdef _WIN32
+        long n = InterlockedIncrement(&g_mcp.watchers);
+#else
+        long n = __atomic_add_fetch(&g_mcp.watchers, 1, __ATOMIC_SEQ_CST);
+#endif
+        bool started = false;
+        if (n <= MCP_WATCH_CLIENTS) {
+#ifdef _WIN32
+            HANDLE t = CreateThread(NULL, 0, mcp_watch_client_proc, (LPVOID)(uintptr_t)client, 0, NULL);
+            if (t) { CloseHandle(t); started = true; }
+#else
+            pthread_t t;
+            if (pthread_create(&t, NULL, mcp_watch_client_proc, (void *)(intptr_t)client) == 0) {
+                pthread_detach(t);
+                started = true;
+            }
+#endif
+        }
+        if (!started) {
+            static const char busy[] = "{\"ok\":false,\"error\":\"the watch port is full\"}\n";
+            mcp_send(client, busy, (int)sizeof(busy) - 1);
+            mcp_close(client);
+#ifdef _WIN32
+            InterlockedDecrement(&g_mcp.watchers);
+#else
+            __atomic_sub_fetch(&g_mcp.watchers, 1, __ATOMIC_SEQ_CST);
+#endif
+        }
     }
 #ifdef _WIN32
     return 0;
@@ -2439,18 +2580,12 @@ static inline void mcp_bridge_init(emu_thread_ctx_t *emu, i960_cpu_t *cpu, memor
  * straight out of these rather than out of the running machine. */
 static inline void mcp_bridge_set_romset(const romset_t *rs) { g_mcp.romset = rs; }
 
-static inline int mcp_bridge_start(int port) {
-#ifdef _WIN32
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        LOG_ERROR("mcp: WSAStartup failed (%d)", WSAGetLastError());
-        return -1;
-    }
-#endif
+/* A socket listening on 127.0.0.1:port, or MCP_INVALID_SOCK. */
+static inline mcp_sock_t mcp_listen(int port, int backlog) {
     mcp_sock_t sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == MCP_INVALID_SOCK) {
         LOG_ERROR("mcp: socket() failed (%d)", mcp_sockerr());
-        return -1;
+        return MCP_INVALID_SOCK;
     }
 
     int opt = 1;
@@ -2468,13 +2603,27 @@ static inline int mcp_bridge_start(int port) {
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         LOG_ERROR("mcp: bind() failed on port %d (%d)", port, mcp_sockerr());
         mcp_close(sock);
-        return -1;
+        return MCP_INVALID_SOCK;
     }
-    if (listen(sock, 1) != 0) {
+    if (listen(sock, backlog) != 0) {
         LOG_ERROR("mcp: listen() failed (%d)", mcp_sockerr());
         mcp_close(sock);
+        return MCP_INVALID_SOCK;
+    }
+    return sock;
+}
+
+/* The controlling port, and with `watch_port` > 0 the read-only one beside it. */
+static inline int mcp_bridge_start(int port, int watch_port) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        LOG_ERROR("mcp: WSAStartup failed (%d)", WSAGetLastError());
         return -1;
     }
+#endif
+    mcp_sock_t sock = mcp_listen(port, 1);
+    if (sock == MCP_INVALID_SOCK) return -1;
 
     g_mcp.listen_sock = sock;
     g_mcp.port        = port;
@@ -2486,6 +2635,23 @@ static inline int mcp_bridge_start(int port) {
     pthread_create(&g_mcp.thread, NULL, mcp_thread_proc, NULL);
 #endif
     LOG_INFO("mcp: bridge listening on 127.0.0.1:%d", port);
+
+    /* The watch port is an extra: failing to open it leaves the bridge up. */
+    if (watch_port > 0) {
+        mcp_sock_t ws = mcp_listen(watch_port, MCP_WATCH_CLIENTS);
+        if (ws != MCP_INVALID_SOCK) {
+            g_mcp.watch_sock = ws;
+            g_mcp.watch_port = watch_port;
+#ifdef _WIN32
+            HANDLE t = CreateThread(NULL, 0, mcp_watch_thread_proc, NULL, 0, NULL);
+            if (t) CloseHandle(t);
+#else
+            pthread_t t;
+            if (pthread_create(&t, NULL, mcp_watch_thread_proc, NULL) == 0) pthread_detach(t);
+#endif
+            LOG_INFO("mcp: read-only watch port on 127.0.0.1:%d", watch_port);
+        }
+    }
     return 0;
 }
 

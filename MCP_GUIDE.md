@@ -40,6 +40,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 |------|---------|
 | `--mcp` | Enable the TCP bridge (required for MCP) |
 | `--mcp-port N` | Use port N instead of 7172. Without `--log`, the session log becomes `m2hle-N.log`, so instances started side by side keep separate logs |
+| `--mcp-watch-port N` | Also listen on N for read-only watchers (with `--mcp`; off by default). See "The watch port" below |
 | `--log <path>` | Write the session log here instead of `m2hle.log`; `--log off` writes no file (the log window still has it) |
 | `--log-level SPEC` | Drop lines below a level: `warn`, or per channel (the `mem:` / `netplay:` / `sound:` tag a line starts with), e.g. `warn,mem=error,netplay=debug`. Levels are `debug`, `info`, `warn`, `error`, `off`. A dropped line is dropped everywhere: the file, the log window and the MCP log. The file takes 64 MB whatever the level, then only errors (1 MB more) |
 | `--rom <path>` | Auto-load this ROM zip on startup |
@@ -54,6 +55,17 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--overlay-reload` | Reload the plugin when it changes on disk |
 
 ROM set: MAME `sfight.zip` (clone of `schamp.zip`). The emulator looks for `schamp.zip` in the same directory as `sfight.zip` for shared files.
+
+### The watch port
+
+The bridge's port serves one client, and a client that drives the board (a bot, a stream) holds it for hours. `--mcp-watch-port N` opens a second port beside it for **watchers**: a dashboard, a watchdog, a sampler. Up to four at once, each on its own thread, so neither side ever waits on the other; a fifth gets `{"ok":false,"error":"the watch port is full"}` and is closed. The protocol is the same, but only these commands answer:
+
+`get_status`, `get_registers`, `read_memory`, `read_many`, `sound_status`, `get_cop_diagnostics`, `netplay_status`
+
+Anything else answers `ok:false` with "… is not served on the read-only watch port". None of the seven pauses the board, so a netplay session is not disturbed. Two differences from the same command on the main port keep a watcher from changing what the controlling client sees, or the board:
+
+- `get_status`'s `emu.frame_max_us` is the worst frame since the *controlling client's* last `get_status`; a watcher reads it without starting it again.
+- `read_memory` / `read_many` read backing memory only: a register block (the I/O ports' callbacks, the UART, the COP and GEO FIFOs, the timers) reads as `00`, because reading one there is an action (a UART status read runs the sound board on; a FIFO read pops). RAM, ROM, tile, texture and palette memory read as they do on the main port.
 
 ---
 
