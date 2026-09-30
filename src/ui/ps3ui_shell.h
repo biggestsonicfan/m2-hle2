@@ -287,6 +287,10 @@ static const char *const ps3ui_main_explain[4] = {
 static const char *const ps3ui_main_explain_nc = "Change the volume and see the credits.";
 static const char *const ps3ui_option_rows[3] = { "Controls", "Settings", "Credits" };
 static const char *const ps3ui_option_rows_nc[2] = { "Settings", "Credits" };
+/* The PS3's pause list (0x376c6c) is Resume Game, Command List, Help & Options
+ * and, a row further down past the window's rule, Exit Game (item type 9 skips
+ * a row: TaskPauseMenu_Draw). Without the Command List it is three items, and
+ * the PS3 sizes the window by count (PauseMenu_WindowType): pause_win_ss. */
 static const char *const ps3ui_pause_rows[4] = { "Resume Game", "Help & Options", "", "Exit Game" };
 
 static void ps3ui_sh_update_settings_menu(ps3ui_shell_t *sh, int versus)
@@ -462,7 +466,7 @@ windows:
         ps3ui_win_open(&sh->msg, &ps3ui_n_cmn_base, "cmn_win_b_01"); break;
     case PS3UI_SH_CONTROLS: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_screen, "controls_win_ps3"); break;
     case PS3UI_SH_SETTINGS: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_02"); break;
-    case PS3UI_SH_PAUSE: if (!sh->resume_wait) ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "pause_win_s"); break;
+    case PS3UI_SH_PAUSE: if (!sh->resume_wait) ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "pause_win_ss"); break;
     default: ps3ui_win_close(&sh->main); ps3ui_win_close(&sh->msg); break;
     }
     ps3ui_win_tick(&sh->main);
@@ -472,37 +476,11 @@ windows:
 
 /* ---- draw ------------------------------------------------------------------------- */
 
-/* A value list (ARCADE / VERSUS / Settings): label left, value right, the
- * value green when it is the default, arrows around the current row's. */
+/* A value list (ARCADE / VERSUS / Settings): ps3ui_draw_values. */
 static void ps3ui_sh_draw_values(ps3ui_canvas_t *cv, ps3ui_shell_t *sh, const char *title, const char *const *labels,
                                  const char *const *values, const int *is_default, int n, int dim)
 {
-    ps3ui_slots_t s = { 0 };
-    ps3ui_win_draw(cv, &sh->main, 0, 0, &s);
-    float lx, ly, rx, ry, ex, ey, tx, ty;
-    if (!ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &lx, &ly) || !ps3ui_slot_xy(&s, "p_txt_03_rt", 1, 0, &rx, &ry))
-        return;
-    float alpha = ps3ui_slot_alpha(&s, "p_txt_01_lt") * (dim ? 0.5f : 1.0f);
-    if (!dim && sh->main.state == PS3UI_WIN_IDLE && ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey))
-        ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, ey + 54.0f * (float)sh->cursor, sh->cursor_t);
-    ps3ui_text_style_t st = ps3ui_style_text(37.0f);
-    for (int i = 0; i < n; i++) {
-        float y = ly + 54.0f * (float)i;
-        ps3ui_text_left(cv, &st, lx, y, labels[i], alpha);
-        ps3ui_text_style_t vs = st;
-        vs.rgb = is_default[i] ? 0x00F040 : 0xFFFFFF;
-        ps3ui_text_right(cv, &vs, rx - (i == sh->cursor && !dim ? 34.0f : 0.0f), y, values[i], alpha);
-        if (i == sh->cursor && !dim) {
-            float vw = ps3ui_text_width(&vs, values[i]);
-            ps3ui_text_right(cv, &st, rx, y, ">", alpha);
-            ps3ui_text_right(cv, &st, rx - 34.0f - vw - 12.0f, y, "<", alpha);
-        }
-    }
-    if (ps3ui_slot_xy(&s, "head_tit_ct", 0.5f, 0, &tx, &ty)) {
-        ps3ui_text_style_t ts = ps3ui_style_title(40.0f);
-        ps3ui_text(cv, &ts, tx - ps3ui_text_width(&ts, title) * 0.5f, ty + 47.0f, title,
-                   ps3ui_slot_alpha(&s, "head_tit_ct"));
-    }
+    ps3ui_draw_values(cv, &sh->main, sh->cursor, sh->cursor_t, title, labels, values, is_default, n, dim);
 }
 
 static void ps3ui_sh_draw_list(ps3ui_canvas_t *cv, ps3ui_shell_t *sh, const char *title, const char *const *rows,
@@ -561,17 +539,24 @@ static void ps3ui_sh_draw_controls(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
                        ps3ui_mat_mul(ps3ui_mat_translate(ex, cy), ps3ui_mat_scale(wdt / 1155.0f, 1.0f)), &none);
         }
     }
+    /* the type row: centred, the arrows either side while it has the cursor */
     if (ps3ui_slot_xy(&s, "p_ctrl_typesel_ct", 0.5f, 0, &x, &y)) {
-        char t[64];
-        snprintf(t, sizeof t, sh->cursor == 0 ? "< %s >" : "%s", ps3ui_type_names[sh->ctl_type]);
+        const char *t = ps3ui_type_names[sh->ctl_type];
         ps3ui_text_centre(cv, &st, x, y, t, alpha);
+        if (sh->cursor == 0)
+            ps3ui_draw_value_arrows(cv, &st, x, y, ps3ui_text_width(&st, t), alpha);
     }
     static const char *const keys[PS3UI_KEYS] = { "\x03", "\x01", "\x04", "\x02", "L1", "L2", "R1", "R2" };
     if (ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &lx, &ly) && ps3ui_slot_xy(&s, "p_txt_03_rt", 1, 0, &rx, &ry))
         for (int i = 0; i < PS3UI_KEYS; i++) {
             float yy = ly + 54.0f * (float)i;
+            const char *v = ps3ui_btn_names[sh->ctl[sh->ctl_type][i]];
             ps3ui_text_left(cv, &st, lx, yy, keys[i], alpha);
-            ps3ui_text_right(cv, &st, rx, yy, ps3ui_btn_names[sh->ctl[sh->ctl_type][i]], alpha);
+            ps3ui_text_right(cv, &st, rx, yy, v, alpha);
+            if (sh->cursor == i + 1) {
+                float vw = ps3ui_text_width(&st, v);
+                ps3ui_draw_value_arrows(cv, &st, rx - vw * 0.5f, yy, vw, alpha);
+            }
         }
     /* the pad diagram's two labels */
     if (ps3ui_slot_xy(&s, "p_controls_txt_01_c", 0.5f, 0.5f, &x, &y))

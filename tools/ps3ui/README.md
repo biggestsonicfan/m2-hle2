@@ -47,6 +47,25 @@ biggest remaining differences are letterforms (the fonts are not Sega's).
 
 ## Facts that took finding
 
+- **A placeholder is asked for by number** (`AetWin_GetPlaceholder(win, out, id, ...)`), and the
+  number is the layer's `name_id`: its name's place in the set's sorted name table (0x20
+  `head_tit_ct`, 0x5b `p_txt_01_lt`, 0x5c `p_txt_02_rb`, 0x5d `p_txt_03_rt`, 0x62
+  `p_win_edg_lt`, 0x263/0x264 `p_player1_lt`/`p_player2_lt`). It returns the layer's position,
+  its anchor point, not its top-left: a `_rb` placeholder gives its bottom-right corner.
+- **A value list is label left, value right-aligned at `p_txt_03_rt`, never moved**: Arcade,
+  Versus, Settings, Controls and the Rule Menu (TaskMultiMenuRule_Draw) all draw it so. The
+  arrows are separate (`Arrows_Place` 0x763ec), centred 24 units outside the value's ends. Only
+  TaskMultiMenu's one value row is "label：" right-aligned at the centre with the value at
+  centre + 64. The Rule Menu's title is string 0x158, PLAYER MATCH.
+- **Text boxes print from the top, left-aligned** (flag 0x800): the explain window, the info
+  window's message. Only the status window (`Lobby_DrawStatusWin`) centres vertically, and it
+  still keeps its lines left.
+- **The pause list is Resume Game, Command List, Help & Options, then Exit Game one row further
+  down** (table 0x376c6c; item type 9 skips a row, over the window's rule). The window is picked
+  by the item count (`PauseMenu_WindowType`: 3 `pause_win_ss` .. 6 `pause_win_l`).
+- **ROOM MATCH** (`Lobby_DrawRoomMembers`) fills the right panel with the room's four rules, as
+  the search list does for a room, and sets its 1P / 2P / ENTRY tags in font 2 at 24 x 32,
+  centred on (750, 24) of the row.
 - **Every scene is 1920x1080 at 60 fps.** Keyframes are Hermite in frame units; a layer's
   keys are in its parent composition's time; a child composition runs at
   `(t - start) * time_scale + offset`; layer 0 is on top.
