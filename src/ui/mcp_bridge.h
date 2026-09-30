@@ -188,6 +188,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
+             "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
              "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
@@ -195,7 +196,9 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              g_emu_frames,
              (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame, av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
+             g_match_replay_frame,
+             g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
+             av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
 /* {"cmd":"prof","on":1} arms the i960 address profiler (clearing it),
@@ -2163,6 +2166,21 @@ static void mcp_cmd_board_reset(char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"resets\":%u}", (unsigned)g_mcp.emu->reset_count);
 }
 
+/*
+ * {"cmd":"idle_hold","on":1} -- the CPU saver (g_idle_hold, emu_thread.h,
+ * --idle-until-match): while no netplay session owns the board, it is put back
+ * to power-on and not stepped. "on":0 lets it run attract again; no "on" only
+ * reads. "holding" says whether the run loop is holding it right now (it is
+ * not while a session plays, while stopped, or before the next slice).
+ */
+static void mcp_cmd_idle_hold(const char *req, char *resp, int cap) {
+    uint32_t on;
+    if (mcp_json_get_u32(req, "on", &on)) g_idle_hold = on != 0;
+    int holding = g_mcp.emu && g_mcp.emu->idle_holding;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"on\":%s,\"holding\":%s}",
+             g_idle_hold ? "true" : "false", holding ? "true" : "false");
+}
+
 /* ---- The debug object viewer (objview_cmd.h) -----------------------------
  *
  * The commands themselves are in objview_cmd.h, shared with the browser build.
@@ -2381,6 +2399,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "netplay_leave")            == 0) mcp_cmd_netplay_leave(resp, cap);
     else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
     else if (strcmp(cmd, "board_reset")              == 0) mcp_cmd_board_reset(resp, cap);
+    else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
     else if (strcmp(cmd, "dump_tex_stats")            == 0) {
         snprintf(resp, (size_t)cap,
             "{\"ok\":true,\"models\":%ld,\"models_uv\":%ld,\"models_mat\":%ld,"

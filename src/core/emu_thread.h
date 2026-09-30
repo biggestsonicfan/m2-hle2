@@ -43,6 +43,26 @@
 #include "thread_mutex.h"
 #include "emu_times.h"    /* emu_now_us, and get_status's "emu" timings */
 
+/* ---- CPU saver: hold the board until a match ----------------------------
+ *
+ * --idle-until-match, or {"cmd":"idle_hold","on":1}. A player who is only
+ * waiting for an online opponent (the fly, sitting in its room) has no use for
+ * attract: every match begins with a cold boot of both boards (the barrier's
+ * reset), so nothing the board does before that survives into the match. While
+ * this is set and no session owns the board, the run loop resets the board
+ * once, back to power-on, and then does not step it at all: no i960, no COP, no
+ * sound board, no frames. Netplay is still pumped every millisecond, so
+ * the login, the room and the barrier go on as before, and when the barrier
+ * releases the board boots from there exactly as it would have. The result of
+ * a match is read at the frame it is decided, so the hold only takes the board
+ * back once the session is over.
+ *
+ * A bridge client's run_frames still runs its frames (a client waiting on one
+ * would otherwise hang); the next hold resets the board again. The native run
+ * loop only: the web, libretro and handheld hosts step the board themselves. */
+static volatile int g_idle_hold;
+#define EMU_IDLE_POLL_US 1000   /* as STOPPED: the room's ping, which sets the delay, is answered from the pump */
+
 /* ---- Tuning -------------------------------------------------------------- */
 
 #define EMU_CPU_HZ           25000000               /* i960 KB on Model 2 = 25 MHz */
@@ -113,6 +133,10 @@ typedef struct {
      * ended that way (see its pacing). */
     volatile uint32_t frame_budget;
     int               frame_budget_hit;
+
+    /* The board is being held at power-on by g_idle_hold (get_status's
+     * "idle_hold"). Emu thread writes, anyone reads. */
+    volatile int      idle_holding;
 
     emu_thread_t thread;
 } emu_thread_ctx_t;
@@ -766,6 +790,27 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
     return frame ? EMU_SLICE_FRAME : EMU_SLICE_NO_FRAME;
 }
 
+/* One pass of the hold (g_idle_hold): back to power-on if the board has run
+ * since its last reset, then nap. A board at power-on has no steps behind it,
+ * so a launch with the hold on, or a second pass, only naps. */
+static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
+    if (ctx->total_steps != 0) {
+        emu_mutex_lock(&ctx->mutex);
+        bool reset = netplay_reset_board_now();
+        if (reset) {
+            ctx->total_steps       = 0;    /* as the barrier's reset: see emu_netplay_pump */
+            ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+            ctx->cpu_snapshot      = *ctx->cpu;
+            ctx->frame_deadline_us = 0;
+        }
+        emu_mutex_unlock(&ctx->mutex);
+        if (reset) LOG_INFO("emu: idle hold: the board is back at power-on until a match");
+    }
+    ctx->idle_holding = 1;
+    ctx->steps_per_second = 0;         /* the loop's own reading is skipped by the hold */
+    emu_nap_us(EMU_IDLE_POLL_US);
+}
+
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
     uint64_t sps_steps_start = ctx->total_steps;
     int64_t  last_sps_time   = emu_now_us();
@@ -795,6 +840,12 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 g_emu_times.net_us += emu_now_us() - slice_start;
                 continue;
             }
+            if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget) {
+                emu_idle_hold(ctx);
+                g_emu_times.net_us += emu_now_us() - slice_start;
+                continue;
+            }
+            ctx->idle_holding = 0;
             int64_t work_t0 = emu_now_us();
             g_emu_times.net_us += work_t0 - slice_start;
 
@@ -891,6 +942,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
         else {
             /* STOPPED. Netplay still has to breathe: the login, the room and the
              * peer handshake all happen before anybody presses Run. */
+            ctx->idle_holding = 0;
             emu_netplay_pump(ctx);
             /* ...and a session that is PLAYING cannot, from here: the pump keeps
              * answering "run the frame" and nothing runs it. Say so where the
