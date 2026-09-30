@@ -971,6 +971,28 @@ One more fact came out of it: every voice STF's driver keys is an 8-bit sample.
 That holds for all 77,705 music key-ons and for the `sfx`, `sys` and attract
 inputs.
 
+### The driver in C against the 68000 (`grade-sound-hle.py`)
+
+`--sound-hle` runs STF's sound driver ported to C (`src/board/sound_hle.h`,
+SCSP.md "The driver in C") in place of the 68000. It is not bit-exact by
+design, so it is graded, not `cmp`ed: `grade-sound-hle.py` runs `snd_replay`
+twice on each input, the board as is and with `SND_HLE=1`, and reports the
+board's key-ons matched on what they play (not the slot), their timing, how
+long voices are held, loudness, envelope and band energies per window, and any
+driver RAM (tracks, sequencers, controllers) that differs for over a second.
+
+```sh
+python tools/snd_stimuli.py stim
+ROMDIR=<zips> python tools/grade-sound-hle.py build/Release/snd_replay.exe cap/hle stim/bgm stim/sfx stim/sys stim/fuzz
+det_digest <merged zip> --frames 20000 --script "..." --out a.txt              # the i960, on the 68000
+det_digest <merged zip> --frames 20000 --script "..." --sound-hle --out b.txt  # ...and with the driver in C
+```
+
+The first five columns of the two `det_digest` outputs (frame, check, work
+RAM, buffer RAM, COP) must be identical: the i960 only sees the UART, which
+board time clocks. `--pcm FILE` writes each run's audio, for a gameplay
+comparison. The numbers are in SCSP.md.
+
 ## The netplay reset
 
 A netplay session is a cold boot on both machines, so the reset at the barrier
@@ -1192,6 +1214,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `mame/cop_capture.py` | runs attract under MAME with that tap: `cop_capture.py <outprefix> <from> <frames> <probes>` |
 | `mame/match-replay.lua`, `mame/osage-select.lua` | the autoboot scripts behind `match-replay.mjs --mame` and `grade-osage.mjs --mame` (above) |
 | `mame/snd-capture.lua`, `mame/snd_capture.py`, `mame/snd_compare.py` | the sound board's capture and comparison (see "The sound board") |
+| `grade-sound-hle.py` | the sound driver in C (`--sound-hle`) against the driver on the 68000, over `snd_replay` inputs: notes matched by what they play, timing, holds, audio per window, lasting driver-state differences (see "The driver in C against the 68000") |
 | `grade-midi.py` | the board's music against ValleyBell's M2MidiDec: per-song `snd_replay` inputs, the MIDIs corrected to the board's tempo and channels, then notes, pitch, lengths, levels and spectra (see "Music against M2MidiDec") |
 | `tests/cop_replay.c` | replays a coprocessor capture through `sharc_exec()`, command by command with the arguments the firmware read, and checks every word it answers: `cop_replay <prefix> [examples-per-op] [only-op-hex]`. `$COPRO_ROM` names the COP data ROM; `OSAGE=<file>` dumps every `Fn_osage` call and `DRAWS=<file>` the draws as CSV, and `RESYNC` / `STATE_EXACT` tune the matrix-state check (`STATE_EXACT`: any differing bit is a bad state, not only 1e-3) |
 | `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips. Run it from two builds and `cmp` the five outputs to prove a sound-board change bit-exact (`tools/snd_stimuli.py` writes four more inputs; see "Holding a sound-board change to the same bits") |

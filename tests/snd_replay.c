@@ -93,8 +93,6 @@ int main(int argc, char **argv) {
     if (sfight_load(&rs, child, parent) != 0 || !rs.audiocpu || !rs.samples) {
         fprintf(stderr, "ROM load failed (%s)\n", romdir); return 1;
     }
-    if (getenv("CE")) shle_cost_event = atoi(getenv("CE"));
-    if (getenv("CK")) shle_cost_keyon = atoi(getenv("CK"));
     if (getenv("SND_HLE")) g_sound_hle_want = atoi(getenv("SND_HLE"));
     sound_reset();
     sound_load_rom(rs.audiocpu, (uint32_t)rs.audiocpu_size);
@@ -159,8 +157,7 @@ int main(int argc, char **argv) {
 
     if (g_shle.on) printf("sound HLE: %llu events, %llu key-ons, %llu unknown\n",
                           (unsigned long long)g_shle.events, (unsigned long long)g_shle.keyons, (unsigned long long)g_shle.unknown);
-    if (g_shle.on) printf("sound HLE: late refills %llu\n", (unsigned long long)g_shle_late);
-    if (g_shle.on && g_shle.ticks_b > 1) printf("sound HLE: timer B %.4f samples\n", (double)(g_shle.last_b - g_shle.first_b) / (double)(g_shle.ticks_b - 1) / 256.0);
+    if (g_shle.on) printf("sound HLE: %llu refill chunks\n", (unsigned long long)g_shle.chunks_total);
     else if (g_sound_hle_want) printf("sound HLE: driver not known (code hash %08X); the board ran\n", shle_code_hash());
     printf("replayed: %u records, %u marks; 68000 pc 0x%06X; irqs L1 %llu L2 %llu L3 %llu; midi fed %zu\n",
            n, nm, g_sound.m68k.cpu.pc, (unsigned long long)g_sound.irqs[1],

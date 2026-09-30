@@ -753,7 +753,8 @@ static void mcp_cmd_sound_status(char *resp, int cap) {
              "\"cycles\":%llu,\"samples\":%llu,\"irqs\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu],"
              "\"midi_writes\":%llu,\"midi_fifo\":%u,\"scieb\":\"0x%03X\",\"scipd\":\"0x%03X\",\"lines\":\"0x%02X\","
              "\"levels\":[%u,%u,%u],\"timers\":[\"0x%04X\",\"0x%04X\",\"0x%04X\"],\"keyed\":\"0x%08X\",\"active\":\"0x%08X\","
-             "\"dsp_steps\":%d,\"out_fill\":%u,\"out_dropped\":%llu,\"out_reader\":%s,\"midi_drops\":%u,\"midi_hi\":%u,\"midi_drains\":%llu,\"midi_holds\":%llu}",
+             "\"dsp_steps\":%d,\"out_fill\":%u,\"out_dropped\":%llu,\"out_reader\":%s,\"midi_drops\":%u,\"midi_hi\":%u,\"midi_drains\":%llu,\"midi_holds\":%llu,"
+             "\"driver\":\"%s\",\"hle_events\":%llu,\"hle_keyons\":%llu}",
              g_sound.rom_loaded ? "true" : "false", g_sound.samples_size,
              g_sound.m68k.cpu.pc, (unsigned)g_sound.m68k.cpu.sr,
              (unsigned long long)g_sound.m68k.cpu.cycles, (unsigned long long)sc->samples,
@@ -766,7 +767,8 @@ static void mcp_cmd_sound_status(char *resp, int cap) {
              sc->dsp.stopped ? -1 : sc->dsp.last_step, fill, (unsigned long long)g_sound.out_dropped,
              g_sound_out_reader ? "true" : "false",
              sc->mi_drops, sc->mi_hi, (unsigned long long)g_sound.midi_drains,
-             (unsigned long long)g_sound.midi_holds);
+             (unsigned long long)g_sound.midi_holds,
+             g_shle.on ? "c" : "68000", (unsigned long long)g_shle.events, (unsigned long long)g_shle.keyons);
 }
 
 /* quit: ask the process to come down.

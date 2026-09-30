@@ -1,8 +1,8 @@
 /*
  * sound_hle.h — Sonic the Fighters' sound driver in C, in place of the 68000
- * and most of the SCSP (Pinboard #173). Optional: the real board (sound.h
- * running the driver on the 68000, scsp.h) stays the default, the oracle, and
- * the only path for any other driver or homebrew.
+ * (Pinboard #173; SCSP.md, "The driver in C"). Optional (--sound-hle): the
+ * 68000 running the driver stays the default, the oracle, and the only path
+ * for any other program ROM or homebrew.
  *
  * What it is. A port of the driver in epr-19021.31 (Hiro's driver; IDA listing
  * in schamp_SoundDriver_disasm, Explanation.txt / RAMData.txt), routine by
@@ -28,12 +28,13 @@
  *
  * Time. The board's clock still runs (g_sound.m68k.cpu.cycles, 256 periods a
  * sample), so the i960's UART is clocked exactly as with the 68000 and the
- * i960 sees the same line. The driver's three timers run on it: B (music) and
- * C (effects) tick the sequencers, A the voice release countdowns; their
- * periods include the handler's reload latency measured on the board (timer B
- * 50.0146 samples). The main loop's work -- dispatching the queued MIDI events
- * to the tracks -- happens at once instead of spread over the 68000's slot
- * loop, so a chord lands in one sample rather than over a millisecond or two.
+ * i960 sees the same line: it cannot tell the two apart (det_digest
+ * --sound-hle). The driver's three timers run on that clock: B (music) and C
+ * (effects) tick the sequencers, A the release countdowns. What the 68000's
+ * timing adds -- the main loop taking one event at a time, a preload holding
+ * everything behind it, handlers delaying each other -- is modelled where it
+ * moves a note by more than a millisecond, from measurements of the board
+ * (the constants below). The rest is a few milliseconds this way or that.
  */
 #ifndef SOUND_HLE_H
 #define SOUND_HLE_H
@@ -91,9 +92,13 @@
  * and timer A's (level 1) stretch what they interrupt. Measured on the board
  * (snd_replay traces, $SND_TRACE): the handlers' lengths are below, and with
  * them timer B comes out 50.015 samples in attract and 50.054 under an
- * effects storm on the board against 50.025 here: the rest is how long the
- * instruction the interrupt lands in has to run, which a busy main loop makes
- * longer (its refills are 76-clock movem.l). 0.05% of tempo, not modelled. */
+ * effects storm. The interrupt also waits for the instruction it lands in to
+ * end, and that depends on what the main loop is doing: 13 clock periods on
+ * average, but 37 inside a refill, whose movem.l take 76-88 each (a trace of
+ * the board under the effects storm: 24% of its time in refills). So the
+ * latency grows with the refill work, which the HLE knows: the chunks it
+ * copies (SHLE_CHUNK_CYCLES). Without it the music ran 0.05% fast under load
+ * and drifted tens of ms a minute. */
 #define SHLE_T16          16u
 #define SHLE_IRQ_LAT      70u          /* timer fires -> handler entered, main loop idle */
 #define SHLE_RELOAD_AT    187u         /* handler entered -> reload written (B and C) */
@@ -103,6 +108,8 @@
 #define SHLE_DUR_EVENT    650u         /* each event a sequencer queues */
 #define SHLE_DUR_MIDI     535u         /* Int3_MidiIn, one byte */
 #define SHLE_DUR_A        4000u        /* Interrupt1, timer A */
+#define SHLE_CHUNK_CYCLES 2752u        /* a refill: 16 x (movem.l in, movem.l out with its wait states, adda) */
+#define SHLE_REFILL_WAIT  24u          /* extra wait for an interrupt landing in one: 37 - 13 */
 /* The driver clears its RAM, runs a 2.3 s delay loop and only then takes an
  * interrupt: the first one on the board is at this clock period after reset.
  * The i960's bytes wait in the SCSP's MIDI buffer until then. */
@@ -111,6 +118,12 @@
  * after reset: until then whatever was playing plays on. The same after a
  * restart (MIDI byte 0xFF), measured on the board from the byte. */
 #define SHLE_INIT_CYCLES  4506800ull
+/* What fills that 0.4 s: a delay loop (0x1500 x 58 clock periods), then a
+ * clear of all 512 KB of sound RAM a long at a time, 8 clock periods a byte.
+ * The voices' windows go to zero as it passes them, so what was playing falls
+ * silent well before InitSCSP. */
+#define SHLE_CLEAR_DELAY  311808ull
+#define SHLE_CLEAR_BYTE   8u
 
 /* The main loop's pass over the 32 slots, where each streaming slot gets its
  * refill step: 11129 clock periods median on the board (43 samples). */
@@ -119,17 +132,20 @@
 /* The main loop's time. It takes one queued event per pass over a slot, in
  * between the streaming, so an event waits for the one before it; a burst of
  * notes on the board lands over a few milliseconds, and a preloaded sample set
- * (SC05, a byte loop) holds everything behind it for a quarter of a second.
- * Clock periods, fitted to the board (snd_replay, the bgm stimulus). */
-#define SHLE_COST_EVENT   shle_cost_event
-static uint32_t shle_cost_event = 600, shle_cost_keyon = 8000;
-#define SHLE_COST_KEYON   shle_cost_keyon
+ * (SC05, a byte loop) holds everything behind it for a third of a second
+ * (0.320 s for set 0's 134,116 bytes, interrupts included, which the
+ * handlers' own lengths add). Clock periods, fitted to the board (snd_replay
+ * traces, the bgm stimulus). */
+#define SHLE_COST_EVENT   600u
+#define SHLE_COST_KEYON   8000u
 #define SHLE_COST_BYTE    23u
 
 typedef struct {
     bool     on;             /* the HLE runs the sound board */
     bool     booted;         /* past the driver's boot delay */
     uint64_t restart_at;     /* a restart's InitSCSP is due (0 = none) */
+    uint64_t clear_at;       /* ...and its RAM clear begins here */
+    uint32_t cleared;        /* bytes of sound RAM the clear has reached */
     uint64_t boot_at;        /* clock period the driver takes its first interrupt */
     uint64_t due_a, due_b, due_c;   /* timer expiries, 1/16 clock periods */
     uint32_t pass_left;      /* samples to the main loop's next pass over the slots */
@@ -138,9 +154,10 @@ typedef struct {
     uint64_t busy_until;     /* clock period the main loop is free to take the next event */
     uint64_t l2_free;        /* clock period no level 2 or 3 handler is running any more */
     uint32_t enq;            /* events queued (the handlers' length) */
+    uint32_t chunks;         /* refill chunks copied in the current pass */
+    uint32_t refill_frac;    /* the main loop's share of time in refills, 16.16, averaged over passes */
     uint32_t cost;           /* clock periods the event being dispatched keeps it busy */
-    uint64_t events, keyons, unknown;
-    uint64_t ticks_b, first_b, last_b;
+    uint64_t events, keyons, unknown, chunks_total;
     bool     warned_fm, warned_a7x;
 } shle_t;
 
@@ -202,17 +219,8 @@ static inline bool shle_ca_upper(unsigned i) {
 
 /* n bytes from any 68000 address into sound RAM, which the chip may be
  * reading: what it owes out of there is made first */
-static uint64_t g_shle_late; static int g_shle_in_step;
 static void shle_copy(uint32_t dst, uint32_t src, uint32_t n) {
     dst &= 0x7FFFFu;
-    if (g_shle_in_step && getenv("SHLE_LATE") && dst >= 0x10000u && dst < 0x50000u && n == 0x200) {
-        unsigned i = (dst - 0x10000u) >> 13;
-        scsp_t *c = &g_sound.scsp;
-        if (c->owed && c->done[i] < c->owed) scsp_slot_run(c, i, c->owed);
-        uint32_t pos = (c->slot[i].cur >> SCSP_SHIFT) & 0x1FFF, off = dst & 0x1FFF;
-        if (c->slot[i].active && pos >= off && pos < off + 0x200) g_shle_late++;
-    }
-    if (dst + n > SOUND_RAM_SIZE) n = SOUND_RAM_SIZE - dst;
     scsp_ram_touch(&g_sound.scsp, dst, n, 1);
     uint8_t *d = g_sound.ram + dst;
     src &= 0xFFFFFFu;
@@ -505,6 +513,8 @@ static void shle_stream_step(unsigned i) {
         a2 = shle_rl(rec + 6);
     } else a2 = shle_rl(rec + 6);
     uint32_t a1 = shle_rl(rec + 2), d5 = shle_rl(rec + 0xA);
+    g_shle.chunks++;
+    g_shle.chunks_total++;
     if (d5 > 0x200) {                                   /* a whole chunk */
         shle_wl(rec + 0xA, d5 - 0x200);
         shle_wb(rec + 1, d2 + 0x10);
@@ -1524,12 +1534,13 @@ static void shle_boot(void) {
     dsp += shle_mw(dsp + 2);
     for (uint32_t k = 0; k < 0x500; k += 2) shle_sw16(0x700 + k, shle_mw(dsp + k));
     shle_sw16(0x402, 0x138);                            /* the delay line: 0x70000, 64 KB */
+    for (int k = 0; k < 4; k++)                         /* four reads of MIBUF: what waits in the FIFO is lost */
+        if (s->mi_r != s->mi_w) { s->mi_r = (uint8_t)((s->mi_r + 1) & 31); s->mi_taken++; }
     for (uint32_t k = 0; k < 32; k++) {
         shle_sw8(k * 0x20u + 0xB, 0xFF);
         shle_sw8(k * 0x20u + 0xD, 0xFF);
         shle_sw8(k * 0x20u + 0x0, 0x10);
     }
-    (void)s;
     SG8(0x1426, 0xEF);                                  /* sub_60141E */
     /* sub_601434: instrument library entry 0, its commands queued */
     uint32_t a1 = shle_ml(SHLE_P_INSLIB);
@@ -1568,7 +1579,6 @@ static void shle_boot(void) {
     }
     SG8(0x1440, 0xCE);
     SG8(0x1441, 0xCE);
-    shle_sw8(0x401, 0x0F);                              /* master volume 15 */
 }
 
 /* Is this a driver the HLE knows? STF's program ROM, byte for byte where it
@@ -1604,7 +1614,7 @@ static inline void shle_suspend(uint64_t at, uint32_t dur) {
 /* When the timer due at d (1/16 periods) gets its handler: after the
  * interrupt latency, and not while a level 2 or 3 handler runs. */
 static inline uint64_t shle_entry(uint64_t d) {
-    uint64_t e = d / SHLE_T16 + SHLE_IRQ_LAT;
+    uint64_t e = d / SHLE_T16 + SHLE_IRQ_LAT + ((SHLE_REFILL_WAIT * (uint64_t)g_shle.refill_frac) >> 16);
     return e > g_shle.l2_free ? e : g_shle.l2_free;
 }
 
@@ -1619,6 +1629,7 @@ static void shle_events(uint64_t now) {
         }
         if (now < g_shle.boot_at) return;
         g_shle.booted = true;
+        shle_sw8(0x401, 0x0F);                          /* master volume 15, the last thing before the interrupts */
         /* all three expired long ago; the board takes them A, B, C, a few
          * hundred clock periods apart, and that is their phase from then on */
         g_shle.due_a = (now - SHLE_IRQ_LAT) * SHLE_T16;
@@ -1636,6 +1647,8 @@ static void shle_events(uint64_t now) {
         if (!shle_midi_byte(b)) {                       /* 0xFF: the driver starts over */
             g_shle.booted = false;
             g_shle.restart_at = now + SHLE_INIT_CYCLES;
+            g_shle.clear_at = now + SHLE_CLEAR_DELAY;
+            g_shle.cleared = 0;
             g_shle.boot_at = now + SHLE_BOOT_CYCLES;
             return;
         }
@@ -1649,8 +1662,6 @@ static void shle_events(uint64_t now) {
         if (e > now) break;
         g_shle.enq = 0;
         if (which == 1) {                               /* Int2_Timer, timer B: the music */
-            if (!g_shle.ticks_b++) g_shle.first_b = e + SHLE_RELOAD_AT;
-            g_shle.last_b = e + SHLE_RELOAD_AT;
             g_shle.due_b = (e + SHLE_RELOAD_AT + shle_period(G8(0x1440), 0)) * SHLE_T16;
             if (G8(0x1406) != 0xFF) { shle_fade(); shle_seq(SHLE_SEQS); }
             uint32_t dur = SHLE_DUR_B + g_shle.enq * SHLE_DUR_EVENT;
@@ -1698,8 +1709,23 @@ static void shle_run(uint32_t n) {
         }
         if (--g_shle.pass_left == 0) {                  /* the main loop's pass over the slots */
             g_shle.pass_left = SHLE_PASS_SAMPLES;
-            if (g_shle.booted && now >= g_shle.stall_until)
-                { g_shle_in_step = 1; for (unsigned k = 0; k < 32; k++) shle_stream_step(k); g_shle_in_step = 0; }
+            if (g_shle.restart_at && now > g_shle.clear_at && g_shle.cleared < SOUND_RAM_SIZE) {   /* EntryPoint's clear */
+                uint64_t to = (now - g_shle.clear_at) / SHLE_CLEAR_BYTE;
+                if (to > SOUND_RAM_SIZE) to = SOUND_RAM_SIZE;
+                if (to > g_shle.cleared) {
+                    scsp_ram_touch(s, g_shle.cleared, (uint32_t)to - g_shle.cleared, 1);
+                    memset(g_sound.ram + g_shle.cleared, 0, (uint32_t)to - g_shle.cleared);
+                    g_shle.cleared = (uint32_t)to;
+                }
+            }
+            if (g_shle.booted && now >= g_shle.stall_until) {
+                g_shle.chunks = 0;
+                for (unsigned k = 0; k < 32; k++) shle_stream_step(k);
+                /* this pass's share of the main loop in refills, into a running average */
+                uint64_t f = ((uint64_t)g_shle.chunks * SHLE_CHUNK_CYCLES << 16) / (SHLE_PASS_SAMPLES * SOUND_CYCLES_PER_SAMPLE);
+                if (f > 0x10000u) f = 0x10000u;
+                g_shle.refill_frac = (uint32_t)((g_shle.refill_frac * 15u + f) / 16u);
+            }
         }
         scsp_tick(s);
     }
@@ -1711,7 +1737,21 @@ static inline void shle_reset(void) {
     g_shle.on = g_sound_hle_want && shle_driver_known();
     g_shle.events = g_shle.keyons = g_shle.unknown = 0;
     g_shle.warned_fm = g_shle.warned_a7x = false;
-    if (g_shle.on) shle_boot();
+    /* The driver's init comes 0.4 s after reset (SHLE_INIT_CYCLES), as on the
+     * board -- by then the host has also handed over the sample ROMs, which
+     * the boot's preload copies from. */
+    g_shle.booted = false;
+    g_shle.restart_at = g_sound.m68k.cpu.cycles + SHLE_INIT_CYCLES;
+    g_shle.clear_at = g_sound.m68k.cpu.cycles + SHLE_CLEAR_DELAY;
+    g_shle.cleared = 0;
+    g_shle.boot_at = g_sound.m68k.cpu.cycles + SHLE_BOOT_CYCLES;
 }
+
+#undef G8
+#undef G16
+#undef G32
+#undef SG8
+#undef SG16
+#undef SG32
 
 #endif /* SOUND_HLE_H */

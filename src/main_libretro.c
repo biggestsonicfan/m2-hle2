@@ -197,6 +197,14 @@ static struct retro_core_option_v2_definition option_defs[] = {
       NULL, NULL,
       { { "enabled", NULL }, { "disabled", NULL }, { NULL, NULL } },
       LR_DEFAULT_SOUND },
+    { "m2hle_sound_driver", "Sound driver", NULL,
+      "Where the game's sound driver runs. 68000: on the sound board's own processor, as the arcade board runs it. "
+      "In C: ported to C, playing through the same sound chip; about half the sound board's work, so cooler on a "
+      "handheld. The game and online play are the same either way; notes can land a millisecond or two apart. "
+      "Sonic the Fighters only (other games keep the 68000). Takes effect when the game is next loaded.",
+      NULL, NULL,
+      { { "68000", "68000 (the board)" }, { "c", "In C (lighter)" }, { NULL, NULL } },
+      "68000" },
     { "m2hle_sound_thread", "Sound board on its own core", NULL,
       "Run the sound board on a second CPU core, alongside the main CPU, instead of after it on the same one. "
       "It does the same work in the same order, so the game and online play are exactly the same either way; "
@@ -264,6 +272,7 @@ static void lr_read_options(bool at_load) {
     }
     if (!at_load) return;
     if ((v = lr_var("m2hle_sound")))  opt.sound  = strcmp(v, "disabled") != 0;
+    if ((v = lr_var("m2hle_sound_driver"))) g_sound_hle_want = !strcmp(v, "c");   /* read at the next sound_reset */
     if ((v = lr_var("m2hle_online"))) opt.online = strcmp(v, "rpcn") ? LR_ONLINE_RETROARCH : LR_ONLINE_RPCN;
     if ((v = lr_var("m2hle_stf_version"))) opt.profile = strcmp(v, "arcade") ? NULL : "sfight";
 }
@@ -281,6 +290,7 @@ static void lr_set_options(void) {
         { "m2hle_resolution", "Internal resolution; " LR_DEFAULT_RES "|native|double|triple|quadruple|fullscreen" },
         { "m2hle_stf_version", "Sonic the Fighters version; console|arcade" },
         { "m2hle_sound",      "Sound board; " LR_DEFAULT_SOUND "|enabled|disabled" },
+        { "m2hle_sound_driver", "Sound driver; 68000|c" },
         { "m2hle_sound_thread", "Sound board on its own core; enabled|disabled" },
         { "m2hle_draw_rate",  "Draw rate; 60|30" },
         { "m2hle_heat_guard", "Heat guard; " LR_DEFAULT_HEAT "|off|80|85|90" },
