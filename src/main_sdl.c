@@ -20,6 +20,10 @@
  *            e.g. "north=b1+b2,l3=b1+b2+b3".
  * --shot     save a PNG of the first rendered frame at or after game frame N.
  * --exit-after  quit after N game frames (for scripted checks).
+ * --host-prof START:SECS[:FILE]  sample the process's own CPU time for SECS
+ *            seconds, START seconds after launch, and write a report to FILE
+ *            (default /tmp/m2hle-hostprof-PID.txt). Linux only; the same as
+ *            M2HLE_HOSTPROF="start=START secs=SECS out=FILE" (core/host_prof.h).
  * --stats    print frame rates, per-stage host time and temperatures every 5 s.
  * --osd      show a status line in the top-right corner, refreshed every second:
  *            drawn/game frames per second, the hotter of the CPU and GPU
@@ -579,6 +583,13 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--log-level") && more)  opt.log_levels = argv[++i];
         else if (!strcmp(a, "--pad-map") && more)    opt.pad_map = argv[++i];
         else if (!strcmp(a, "--exit-after") && more) opt.exit_after = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--host-prof") && more) {
+            char spec[400], file[300] = "";
+            double start = 0, secs = 20;
+            if (sscanf(argv[++i], "%lf:%lf:%299s", &start, &secs, file) < 2) return false;
+            snprintf(spec, sizeof spec, "start=%g secs=%g%s%s", start, secs, file[0] ? " out=" : "", file);
+            hprof_request(spec);
+        }
         else if (!strcmp(a, "--gl-finish"))          opt.gl_finish = true;
         else if (!strcmp(a, "--render-scale") && more) opt.render_scale = atoi(argv[++i]);
         else if (!strcmp(a, "--display-scale") && more) opt.display_scale = atoi(argv[++i]);
@@ -1050,6 +1061,7 @@ int main(int argc, char **argv) {
         }
         if (opt.netplay) lobby_draw(fb_w, fb_h, SDL_GetTicksNS());
         if (opt.osd || opt.netplay) sdtx_draw();
+        int pzone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
         sg_end_pass();
         sg_commit();
         Uint64 cpu_end = SDL_GetTicksNS();
@@ -1064,6 +1076,7 @@ int main(int argc, char **argv) {
         Uint64 swap_start = SDL_GetTicksNS();
         SDL_GL_SwapWindow(window);
         stat_swap_ns += SDL_GetTicksNS() - swap_start;
+        hprof_leave(pzone);
         stat_renders++;
 
         Uint64 now = SDL_GetTicksNS();

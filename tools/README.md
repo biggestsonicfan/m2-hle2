@@ -1137,6 +1137,49 @@ empty bus (halt at 0x1788). `ab-builds --sound`, identical at 600, 1800, 4000
 and 6000: master (`204b480`) against the unsigned i960 ops, and the `symbols`
 build against the `asan` build of one commit.
 
+### The process profiling itself (`host_prof.h`, `hostprof.py`)
+
+On the handheld, `perf` cannot say where m2hle's time goes. The whole board is
+inlined into two or three functions, the device's perf cannot read inline debug
+info, and the ARC-S heats up faster than an ssh session can set up a run. So
+every Linux build (desktop, headless, sdl3, the libretro core) can sample
+itself. `src/core/host_prof.h` puts a CPU-time timer on each of the process's
+threads, the GL driver's and RetroArch's included. Each sample keeps the
+thread, the PC and a one-byte **zone** that the code sets at subsystem
+boundaries: `i960`, `cop`, `m68k`, `scsp`, and the frame's `compose`, `scan`,
+`upload`, `draw3d`, `tiles` and `present`. Inlining cannot hide a zone, so the
+subsystem split needs no symbols. The process writes the report itself: CPU
+time per thread (measured on the thread's own clock), zones per thread and
+overall, and leaf module:symbol (dladdr).
+
+Arm it any of three ways; none needs the launcher changed:
+
+    M2HLE_HOSTPROF="start=25 secs=20 hz=997 out=/tmp/prof.txt"   # environment
+    echo "start=0 secs=20" > /tmp/m2hle-hostprof                # while it runs
+    m2hle --host-prof 25:20:/tmp/prof.txt                       # sdl3 frontend
+
+The trigger file is checked about once a second and removed once read, so a
+game started from EmulationStation (the standalone build or the core in
+RetroArch) can be profiled over ssh while someone plays it. Then name the
+board's own samples with an unstripped copy of the same build:
+
+    python3 tools/hostprof.py prof.txt --sym m2hle=build_arm/m2hle     # or m2hle_libretro.so=...
+
+`hostprof.py` runs `addr2line -i` (`aarch64-linux-gnu-addr2line` for an ARM
+binary) and prints, per zone, the innermost inlined function of each sample and
+the whole inline chain. It has no call stacks: a sample in the GL driver is
+named by the zone it was called from and by the link register (the last
+section), not by a backtrace. For a debug-info build that runs as fast as the
+release, add `-g` and nothing else. Its `.text` is the release's, so strip the
+copy you install and give the unstripped one to the script.
+
+Two things this learnt the hard way. First, one process-wide `ITIMER_PROF` is
+not enough: the kernel checks CPU timers once a scheduler tick, so one timer
+fired once a tick for the whole process and saw 21% of the ARC-S's CPU time.
+Per-thread timers, with each sample weighted by `1 + si_overrun`, account for
+all of it. Second, a SIGPROF can cut a sleep short; the pacing loops take that
+as they take any early wake.
+
 ### Cross-play: the web build against the desktop build
 
 `ab-builds` drives two `m2hle.exe` over the bridge, and the web build has none.

@@ -60,6 +60,8 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+
+#include "host_prof.h"
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
 #endif
@@ -1003,7 +1005,7 @@ static uint32_t scsp_slot_run_pcm(scsp_t *s, scsp_slot_t *sl, unsigned i, uint32
 }
 
 /* Run slot i on from where it is in the owed samples to `to`. */
-static void scsp_slot_run(scsp_t *s, unsigned i, uint32_t to) {
+static void scsp_slot_run_body(scsp_t *s, unsigned i, uint32_t to) {
     scsp_slot_t *sl = &s->slot[i];
     uint32_t k = s->done[i];
     if (k >= to) return;
@@ -1027,10 +1029,18 @@ static void scsp_slot_run(scsp_t *s, unsigned i, uint32_t to) {
     }
 }
 
+/* One slot on to `to`, tagged for the host profiler (host_prof.h). */
+static inline void scsp_slot_run(scsp_t *s, unsigned i, uint32_t to) {
+    int zone = hprof_enter(HPROF_SCSP);
+    scsp_slot_run_body(s, i, to);
+    hprof_leave(zone);
+}
+
 /* Make every owed sample: the slots, then the DSP and the mix, in order. */
 static void scsp_sync(scsp_t *s) {
     const uint32_t n = s->owed;
     if (!n) return;
+    int zone = hprof_enter(HPROF_SCSP);
     for (unsigned i = 0; i < 32; i++) scsp_slot_run(s, i, n);
     if (!s->latch_fresh) { scsp_latch(s); s->latch_fresh = 1; }
     for (uint32_t k = 0; k < n; k++) {
@@ -1062,6 +1072,7 @@ static void scsp_sync(scsp_t *s) {
     s->owed = 0;
     memset(s->done, 0, sizeof s->done);
     s->syncs++;
+    hprof_leave(zone);
 }
 
 /* The monitor as the 68000 reads it: the latch of the last boundary, for the

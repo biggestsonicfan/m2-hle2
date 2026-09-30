@@ -31,6 +31,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "host_prof.h"   /* zone tags for the in-process profiler */
+
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
