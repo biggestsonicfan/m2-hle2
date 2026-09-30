@@ -160,10 +160,10 @@ def main():
         for fn in set(ch):
             incl[zone][fn] += n
 
-    print("%s: %s samples, %s s CPU over %s s wall, %s Hz" %
-          (a.report, head.get("samples"), head.get("cpu_s"), head.get("wall_s"), head.get("hz")))
+    print("%s: %s samples (%s periods), %s s CPU over %s s wall, %s Hz" %
+          (a.report, head.get("samples"), head.get("periods"), head.get("cpu_s"), head.get("wall_s"), head.get("hz")))
     for zone, zt in zone_tot.most_common():
-        print("\n== %s: %d samples, %.1f%% of those shown" % (zone, zt, 100.0 * zt / total))
+        print("\n== %s: %d periods, %.1f%% of those shown" % (zone, zt, 100.0 * zt / total))
         print("   leaf%s inclusive" % (" " * 52))
         L = leaf[zone].most_common(a.top)
         I = incl[zone].most_common(a.top)

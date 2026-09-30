@@ -1180,6 +1180,9 @@ Per-thread timers, with each sample weighted by `1 + si_overrun`, account for
 all of it. Second, a SIGPROF can cut a sleep short; the pacing loops take that
 as they take any early wake.
 
+A thread that blocks SIGPROF (SDL's and PulseAudio's audio threads do) still gets its CPU time
+in the thread table, but no zones or functions.
+
 ### Cross-play: the web build against the desktop build
 
 `ab-builds` drives two `m2hle.exe` over the bridge, and the web build has none.
