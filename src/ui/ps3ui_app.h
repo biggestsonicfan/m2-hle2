@@ -444,6 +444,8 @@ typedef struct {
     uint16_t last_match;
     int result_side;            /* 0/1 = winner side, -1 = none */
     float result_t;
+    int again_quiet;            /* frames the pad has been left alone, while the prompt waits */
+    int again_live;             /* the prompt takes the pad (ps3ui_update_again) */
     uint32_t res_seen;          /* st.results already asked about */
     int prompt_only;            /* opened by a result alone (the session came from elsewhere):
                                    the answer closes the task again */
@@ -946,11 +948,25 @@ static void ps3ui_update_result(ps3ui_app_t *a)
  */
 #define PS3UI_AGAIN_FRAMES 600.0f
 
+/* The result comes the moment the match is decided, with the player often
+ * still mashing: letting go once was not enough, the next press of cross
+ * answered Play again and the prompt was gone before it was seen (measured on
+ * the libretro core). So it takes the pad only after a second on screen and
+ * half a second of nothing held; from then on, as any other window. */
+#define PS3UI_AGAIN_SETTLE 60.0f
+#define PS3UI_AGAIN_QUIET  30
+
 static void ps3ui_update_again(ps3ui_app_t *a)
 {
     a->result_t += 1.0f;
-    ps3ui_move(a, &a->cursor, 2, 0);
-    int pick = ps3ui_hit(a, PS3UI_PAD_CROSS) ? a->cursor : ps3ui_hit(a, PS3UI_PAD_CIRCLE) ? 0 : -1;
+    if (!a->again_live && a->result_t > PS3UI_AGAIN_SETTLE && a->again_quiet >= PS3UI_AGAIN_QUIET)
+        a->again_live = 1;
+    a->again_quiet = a->held ? 0 : a->again_quiet + 1;
+    int pick = -1;
+    if (a->again_live) {
+        ps3ui_move(a, &a->cursor, 2, 0);
+        pick = ps3ui_hit(a, PS3UI_PAD_CROSS) ? a->cursor : ps3ui_hit(a, PS3UI_PAD_CIRCLE) ? 0 : -1;
+    }
     if (a->result_t >= PS3UI_AGAIN_FRAMES)
         pick = 0;
     if (pick == 1) {
@@ -1014,6 +1030,8 @@ static void ps3ui_app_ask_again(ps3ui_app_t *a)
 {
     a->result_side = a->st.last_winner;
     a->result_t = 0.0f;
+    a->again_quiet = 0;
+    a->again_live = 0;
     a->held = ~0u;      /* a button still down from the fight has to be let go first */
     a->pressed = 0;
     a->scr = PS3UI_SCR_NONE;
@@ -1609,16 +1627,21 @@ static void ps3ui_draw_result(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     if (ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &lx, &ly) && ps3ui_slot_xy(&s, "p_txt_02_rb", 1, 1, &rx, &ry)) {
         ps3ui_text_style_t st = ps3ui_style_text(37.0f);
         float ex, ey;
-        static const char *const setup[1] = { "Return to setup screen" };
-        static const char *const again[2] = { "Play again", "Exit" };
-        const char *const *rows = a->scr == PS3UI_SCR_AGAIN ? again : setup;
-        int n = a->scr == PS3UI_SCR_AGAIN ? 2 : 1;
+        float alpha = ps3ui_slot_alpha(&s, "p_txt_01_lt");
+        /* The row under the window's rule (p_txt_ok, the info window's OK
+         * box): Exit goes there, as the pause list puts Exit Game one row
+         * further down, over the rule. A second row at the 54 pitch sat on
+         * the rule itself. */
+        float ox, oy = ly + 108.0f;
+        int again = a->scr == PS3UI_SCR_AGAIN;
+        if (again)
+            ps3ui_slot_xy(&s, "p_txt_ok_01_lt", 0, 0, &ox, &oy);
+        float cy = again && a->cursor == 1 ? oy : ly;
         if (ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey) && a->main.state == PS3UI_WIN_IDLE)
-            ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, ey + 54.0f * (float)a->cursor,
-                              a->cursor_t);
-        for (int i = 0; i < n; i++)
-            ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly + 54.0f * (float)i, rows[i],
-                              ps3ui_slot_alpha(&s, "p_txt_01_lt"));
+            ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, cy - 4.0f, a->cursor_t);
+        ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly, again ? "Play again" : "Return to setup screen", alpha);
+        if (again)
+            ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, oy, "Exit", alpha);
     }
 }
 
