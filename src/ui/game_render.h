@@ -1416,8 +1416,68 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
 
 /* ---- Texture atlas upload ------------------------------------------------ */
 
+/* The GL builds (the handheld's GLES core and SDL3 host, the web build, Linux)
+ * send only the atlas rows that changed; see game_render__atlas_send. */
+#if defined(SOKOL_GLES3)
+#  include <GLES3/gl3.h>
+#  define GAME_RENDER_ATLAS_ROWS 1
+#elif defined(SOKOL_GLCORE) && defined(__linux__)
+#  include <GL/gl.h>
+#  define GAME_RENDER_ATLAS_ROWS 1
+#endif
+
 /* The decoded atlas as last uploaded: 2048×2048 R8, sheet 0 over sheet 1. */
 static uint8_t g_game_render_atlas_px[GEO3D_ATLAS_W * GEO3D_ATLAS_H];
+
+/* Which atlas rows the last decode rewrote, for the upload that follows. */
+static uint8_t g_game_render_atlas_row[GEO3D_ATLAS_H];
+
+/*
+ * Send the decoded rows to the GPU.
+ *
+ * sokol's sg_update_image replaces the whole image, 4 MB, however little of it
+ * changed. During a texture load (the VS screen, character select, boot) STF
+ * rewrites a slice of texture RAM every frame, so a handheld sent the full
+ * atlas each of those frames on top of the load itself (Pinboard #178). On GL
+ * the changed rows go up with glTexSubImage2D instead, in runs, straight into
+ * the texture sokol reads from. A gap of a few clean rows inside a run is
+ * sent with it: one call is cheaper than two, and the rows hold the same bytes.
+ *
+ * sokol gives a dynamic image one GL texture per frame in flight and moves to
+ * the next on every sg_update_image. Those are never called here, so the
+ * active texture stays the same one and every row it holds is current.
+ * D3D11 keeps sg_update_image: a dynamic texture there can only be mapped
+ * whole (WRITE_DISCARD), and Windows desktops were never short of time here.
+ */
+static inline void game_render__atlas_send(void) {
+#if defined(GAME_RENDER_ATLAS_ROWS)
+    sg_gl_image_info gi = sg_gl_query_image_info(g_game_render.atlas_image);
+    GLuint tex = gi.tex[gi.active_slot];
+    if (tex) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        int y = 0;
+        while (y < GEO3D_ATLAS_H) {
+            if (!g_game_render_atlas_row[y]) { y++; continue; }
+            int y1 = y + 1, gap = 0;
+            for (int k = y + 1; k < GEO3D_ATLAS_H; k++) {
+                if (g_game_render_atlas_row[k]) { y1 = k + 1; gap = 0; }
+                else if (++gap > 16) break;
+            }
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, GEO3D_ATLAS_W, y1 - y, GL_RED, GL_UNSIGNED_BYTE,
+                            g_game_render_atlas_px + (size_t)y * GEO3D_ATLAS_W);
+            y = y1;
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+        sg_reset_state_cache();   /* sokol caches GL bindings; we changed them behind its back */
+        return;
+    }
+#endif
+    sg_update_image(g_game_render.atlas_image, &(sg_image_data){
+        .mip_levels[0] = { .ptr = g_game_render_atlas_px, .size = sizeof g_game_render_atlas_px },
+    });
+}
 
 /*
  * Decode the 4-bit luma texture sheet (texram0) into the R8 atlas and upload.
@@ -1434,6 +1494,12 @@ static uint8_t g_game_render_atlas_px[GEO3D_ATLAS_W * GEO3D_ATLAS_H];
  * load that touches a few KB a frame no longer re-decodes all 4 million texels.
  * Each flag is cleared before its KB is read, so a write landing meanwhile
  * flags it again for the next call.
+ *
+ * Word w of row q is x 4w..4w+3 of both atlas rows: its low half is x 4w and
+ * 4w+1, its high half 4w+2 and 4w+3; within a half, the high byte is the even
+ * row and the low byte the odd one; within a byte, the high nibble is the even
+ * x. That is MAME's per-texel address worked out once per word, so the decode
+ * reads each word once instead of eight times.
  */
 static inline void game_render_upload_atlas(const uint8_t *texram0,
                                             const uint8_t *texram1,
@@ -1454,9 +1520,9 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
     uint8_t *atlas = g_game_render_atlas_px;
     const uint32_t *sheets[2] = { (const uint32_t *)texram0, (const uint32_t *)texram1 };
     volatile uint8_t *dirty[2] = { dirty0, dirty1 };
-    size_t nwords = sheet_size / 4;
     uint32_t rows = (uint32_t)(sheet_size >> 10);          /* word rows (KB) per bank */
     bool any = false;
+    memset(g_game_render_atlas_row, 0, sizeof g_game_render_atlas_row);
     for (int s = 0; s < 2; s++) {
         const uint32_t *sheet = sheets[s];
         if (!sheet) continue;
@@ -1466,27 +1532,25 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
                 dirty[s][q] = 0;
             }
             any = true;
-            int y0 = (int)((q & 511u) * 2u);
-            int x0 = q < 512u ? 0 : 1024;
-            for (int y = y0; y < y0 + 2; y++) {
-                for (int x = x0; x < x0 + 1024; x++) {
-                    int x2 = x, y2 = y;
-                    if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
-                    uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
-                    uint32_t word = ((off >> 1) < nwords) ? sheet[off >> 1] : 0;
-                    if (off & 1) word >>= 16;
-                    if ((y & 1) == 0) word >>= 8;
-                    if ((x & 1) == 0) word >>= 4;
-                    atlas[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] =
-                        (uint8_t)((word & 0xf) * 17u);          /* 0..15 → 0..255 */
+            uint32_t y0 = (uint32_t)s * GEO3D_SHEET_H + (q & 511u) * 2u;
+            uint8_t *even = atlas + (size_t)y0 * GEO3D_ATLAS_W + (q < 512u ? 0 : 1024);
+            uint8_t *odd  = even + GEO3D_ATLAS_W;
+            const uint32_t *src = sheet + (size_t)q * 256u;
+            for (int w = 0; w < 256; w++) {
+                uint32_t word = src[w];
+                for (int h = 0; h < 2; h++, word >>= 16) {
+                    uint8_t *e = even + 4 * w + 2 * h, *o = odd + 4 * w + 2 * h;
+                    e[0] = (uint8_t)(((word >> 12) & 0xf) * 17u);   /* 0..15 → 0..255 */
+                    e[1] = (uint8_t)(((word >>  8) & 0xf) * 17u);
+                    o[0] = (uint8_t)(((word >>  4) & 0xf) * 17u);
+                    o[1] = (uint8_t)(( word        & 0xf) * 17u);
                 }
             }
+            g_game_render_atlas_row[y0] = g_game_render_atlas_row[y0 + 1] = 1;
         }
     }
     if (!any) return;
-    sg_update_image(g_game_render.atlas_image, &(sg_image_data){
-        .mip_levels[0] = { .ptr = atlas, .size = sizeof g_game_render_atlas_px },
-    });
+    game_render__atlas_send();
 }
 
 /* ---- Colour ramps ---------------------------------------------------------- */
