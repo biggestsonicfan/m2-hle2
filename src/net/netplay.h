@@ -394,11 +394,15 @@ typedef struct {
     /* The board is still in the VS mode a room put it in, and nobody else is
      * left in the room: any button restarts the game (netplay_empty_room_pump). */
     bool            empty_room;
-    /* VS-mode results this board has played on past (netplay_end_frame), and
-     * the side that won the last of them (0 = 1P, 1 = 2P). A lobby asks the
-     * player whether to go again each time the count moves (ps3ui_app.h). */
-    uint32_t        vs_results;
-    int8_t          vs_last_winner;
+    /* Matches this board fought and saw decided (netplay_end_frame), in any
+     * room -- VS mode or not, ours or the PS3 port's -- and the side that won
+     * the last of them (0 = 1P, 1 = 2P). A frontend asks the player whether to
+     * go again or leave each time the count moves (ps3ui_app.h), so there is
+     * always a way out of a room without the lobby open. `last_side` is ours
+     * in that match: outside VS mode local_player has moved on by then. */
+    uint32_t        results;
+    int8_t          last_winner;
+    int8_t          last_side;
 
     /* PS3 cross-play (ps3_link.h). */
     bool            ps3;
@@ -535,9 +539,10 @@ typedef struct {
     bool                empty_prompt;
     uint32_t            empty_held;     /* buttons already down when the prompt went up */
     bool                empty_restart;  /* pressed: restart at the next pump */
-    /* netplay_status_t.vs_results / vs_last_winner */
-    uint32_t            vs_results;
-    int8_t              vs_last_winner;
+    /* netplay_status_t.results / last_winner / last_side */
+    uint32_t            results;
+    int8_t              last_winner;
+    int8_t              last_side;
     /* After our board reaches a result a fighter goes on answering for a
      * while: the other fighter may still need our last inputs, and a watcher may
      * still be catching up. */
@@ -1921,8 +1926,9 @@ static inline void netplay_publish_status(void) {
     st->peer_ready     = netplay_peer_ready();
     st->peer_ready_gen = g_netplay.room.match;
     st->empty_room     = g_netplay.empty_prompt;
-    st->vs_results     = g_netplay.vs_results;
-    st->vs_last_winner = g_netplay.vs_last_winner;
+    st->results        = g_netplay.results;
+    st->last_winner    = g_netplay.last_winner;
+    st->last_side      = g_netplay.last_side;
 
     /* Only the listings in use: the rest of each 2.5 KB table is never read. */
     uint32_t rooms = g_netplay.session.room_count < RPCN_MAX_ROOMS ? g_netplay.session.room_count : RPCN_MAX_ROOMS;
@@ -3703,7 +3709,17 @@ static inline bool netplay_vs_plays_on(uint16_t match) {
  * safe to act on.
  */
 static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps, int versus_result) {
-    if (g_netplay.enabled && g_netplay.ps3) { ps3_link_end_frame(&g_netplay.ps3link, versus_result); return; }
+    if (g_netplay.enabled && g_netplay.ps3) {
+        const ps3_link_t *L = &g_netplay.ps3link;
+        if ((versus_result == 1 || versus_result == 2) && L->active && L->match && !L->last_result
+            && (L->my_side == 0 || L->my_side == 1)) {
+            g_netplay.results++;
+            g_netplay.last_winner = (int8_t)(versus_result - 1);
+            g_netplay.last_side   = (int8_t)L->my_side;
+        }
+        ps3_link_end_frame(&g_netplay.ps3link, versus_result);
+        return;
+    }
     if (!g_netplay.enabled || !netplay_running_match()) return;
 
     uint32_t frame = g_netplay.frame;
@@ -3727,6 +3743,11 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
         uint32_t winner = (uint32_t)versus_result - 1u;
         uint16_t match  = g_netplay.match_started;
         g_netplay.match_result_seen = true;
+        if (netplay_is_fighter()) {
+            g_netplay.results++;
+            g_netplay.last_winner = (int8_t)winner;
+            g_netplay.last_side   = (int8_t)g_netplay.local_player;
+        }
         netplay_log("match %u over at frame %u: %s (%s) won", (unsigned)match, frame,
                     netplay_member_name(g_netplay.room.fighter[winner]), winner == 0 ? "1P" : "2P");
         /* In a VS session the room may be on a later match than our board by
@@ -3746,8 +3767,6 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
             g_netplay.match_result_seen = false;
             g_netplay.me.playing        = g_netplay.match_started;
             g_netplay.me_dirty          = true;
-            g_netplay.vs_results++;
-            g_netplay.vs_last_winner    = (int8_t)winner;
             netplay_log("VS mode: back to character select for match %u", (unsigned)g_netplay.match_started);
         } else {
             if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
@@ -3827,6 +3846,12 @@ static inline bool netplay_catching_up(void) {
 /* A session owns the board: fighting or watching. */
 static inline bool netplay_active(void) {
     return g_netplay.enabled && netplay_running_match();
+}
+
+/* In a room, match or no match: where a result can be asked about. */
+static inline bool netplay_in_room(void) {
+    netplay_state_t s = g_netplay.state;
+    return g_netplay.enabled && (s == NETPLAY_IN_ROOM || s == NETPLAY_SYNCING || netplay_state_running(s));
 }
 
 static inline void netplay_shutdown(void) {

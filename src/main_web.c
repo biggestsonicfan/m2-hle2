@@ -548,8 +548,8 @@ static ps3ui_view_t web_lobby_tick(void) {
     while (now >= next_us) {
         if (g_web_shell_on) {
             ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad(), web_lobby_pad2(), netplay_active());
-            /* in a session too: the VS prompt comes up over any shell screen */
-            if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_active())
+            /* in a room too: the go-again prompt comes up over any shell screen */
+            if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room())
                 ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
         } else {
             ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
