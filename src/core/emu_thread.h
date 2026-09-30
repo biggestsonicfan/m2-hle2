@@ -554,6 +554,7 @@ static inline bool emu_slice_should_stop(emu_thread_ctx_t *ctx) {
 
 static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     int64_t  prof_t0 = g_pcprof_on ? emu_now_us() : 0;
+    int      hzone   = hprof_enter(HPROF_I960);   /* host_prof.h; COP and sound tag themselves */
     g_frame_done = 0;
     /* Board-level vblank (opt-in per profile): raise the vsync pending
      * bit once per 60 Hz slice, like the real board / MAME at scanline
@@ -695,6 +696,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->cpu_snapshot      = *ctx->cpu;
     if (g_pcprof_on)
         pcprof_frame((int32_t)(emu_now_us() - prof_t0), (uint32_t)steps, g_emu_frames);
+    hprof_leave(hzone);
 }
 
 static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
@@ -768,9 +770,11 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
     uint64_t sps_steps_start = ctx->total_steps;
     int64_t  last_sps_time   = emu_now_us();
     int64_t  last_frame_us   = 0;   /* when a slice last ended on a game frame */
+    hprof_name_thread("m2-emu");
 
     while (ctx->thread_alive) {
         emu_run_state_t s = ctx->run_state;
+        hprof_tick();                   /* the in-process profiler's start / stop (host_prof.h) */
 
         if (s == EMU_RUNNING) {
             if (emu_slice_should_stop(ctx)) continue;
@@ -910,6 +914,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             last_sps_time   = now;
         }
     }
+    hprof_shutdown();                   /* a run cut short still writes its report */
 }
 
 #ifdef _WIN32

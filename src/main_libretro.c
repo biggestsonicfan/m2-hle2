@@ -1300,11 +1300,13 @@ static void lr_draw(bool ran) {
         ps3ui_gpu_draw(&lobby_cv);   /* over the game, for the title prompt and the pause menu */
         sgl_draw();
     }
+    int zone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
     sg_end_pass();
     sg_commit();
     lr_gl_discard_depth(hw_render.get_current_framebuffer());
     lr_gl_restore();
     video_cb(RETRO_HW_FRAME_BUFFER_VALID, (unsigned)w, (unsigned)h, 0);
+    hprof_leave(zone);
 }
 
 /* ---- Audio ------------------------------------------------------------------------------ */
@@ -1536,6 +1538,7 @@ RETRO_API bool retro_load_game_special(unsigned type, const struct retro_game_in
 }
 
 RETRO_API void retro_unload_game(void) {
+    hprof_shutdown();
     if (opt.online == LR_ONLINE_RPCN) netplay_shutdown();
     ps3ui_app_close(&g_ps3ui_app);
     netplay_release_inputs();
@@ -1552,6 +1555,7 @@ RETRO_API void retro_reset(void) {
 }
 
 RETRO_API void retro_run(void) {
+    hprof_tick();   /* the in-process profiler: M2HLE_HOSTPROF or /tmp/m2hle-hostprof (host_prof.h) */
     bool updated = false;
     if (env_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
         lr_read_options(false);   /* a new size is announced by lr_draw */

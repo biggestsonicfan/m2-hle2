@@ -164,7 +164,9 @@ static inline void cop_write(uint32_t val) {
             g_cop.args[g_cop.args_received++] = val;
         if (--g_cop.args_needed == 0) {
             int64_t t0 = emu_times_cop_begin();
+            int zone = hprof_enter(HPROF_COP);
             sharc_exec(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
+            hprof_leave(zone);
             emu_times_cop_end(t0);
             cop_tap_replies();
             g_cop.cur_cmd       = 0;
@@ -179,7 +181,9 @@ static inline void cop_write(uint32_t val) {
     if (g_cop.args_needed == COP_ARGS_STREAM) {
         if (g_cop_tap) g_cop_tap(0x20000000u, val);
         int before = g_sharc.reply_count;
+        int zone   = hprof_enter(HPROF_COP);
         bool done  = sharc_zanzou_feed(val);
+        hprof_leave(zone);
         if (g_cop_tap)
             for (int k = before; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
         if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
@@ -198,7 +202,9 @@ static inline void cop_write(uint32_t val) {
     }
     if (g_cop.args_needed == 0) {
         int64_t t0 = emu_times_cop_begin();
+        int zone = hprof_enter(HPROF_COP);
         sharc_exec(val, NULL, 0);
+        hprof_leave(zone);
         emu_times_cop_end(t0);
         cop_tap_replies();
         g_cop.cur_cmd = 0;

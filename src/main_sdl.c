@@ -20,6 +20,10 @@
  *            e.g. "north=b1+b2,l3=b1+b2+b3".
  * --shot     save a PNG of the first rendered frame at or after game frame N.
  * --exit-after  quit after N game frames (for scripted checks).
+ * --host-prof START:SECS[:FILE]  sample the process's own CPU time for SECS
+ *            seconds, START seconds after launch, and write a report to FILE
+ *            (default /tmp/m2hle-hostprof-PID.txt). Linux only; the same as
+ *            M2HLE_HOSTPROF="start=START secs=SECS out=FILE" (core/host_prof.h).
  * --stats    print frame rates, per-stage host time and temperatures every 5 s.
  * --osd      show a status line in the top-right corner, refreshed every second:
  *            drawn/game frames per second, the hotter of the CPU and GPU
@@ -579,6 +583,13 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--log-level") && more)  opt.log_levels = argv[++i];
         else if (!strcmp(a, "--pad-map") && more)    opt.pad_map = argv[++i];
         else if (!strcmp(a, "--exit-after") && more) opt.exit_after = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--host-prof") && more) {
+            char spec[400], file[300] = "";
+            double start = 0, secs = 20;
+            if (sscanf(argv[++i], "%lf:%lf:%299s", &start, &secs, file) < 2) return false;
+            snprintf(spec, sizeof spec, "start=%g secs=%g%s%s", start, secs, file[0] ? " out=" : "", file);
+            hprof_request(spec);
+        }
         else if (!strcmp(a, "--gl-finish"))          opt.gl_finish = true;
         else if (!strcmp(a, "--render-scale") && more) opt.render_scale = atoi(argv[++i]);
         else if (!strcmp(a, "--display-scale") && more) opt.display_scale = atoi(argv[++i]);
@@ -805,6 +816,7 @@ int main(int argc, char **argv) {
         .logger.func = slog_func,
     });
     if (!sg_isvalid()) { fprintf(stderr, "m2hle: sokol_gfx setup failed\n"); return 1; }
+    if (opt.stats) { sg_enable_stats(); g_game_frame_gl_counts = true; }   /* the "gl per render" line */
     if (opt.osd || opt.netplay)
         sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_cpc(), .logger.func = slog_func });
     g_video_force_cpu_tiles = opt.cpu_tiles;
@@ -860,6 +872,7 @@ int main(int argc, char **argv) {
     uint64_t stat_comp0 = 0, stat_uptile0 = 0, stat_upgfx0 = 0, stat_uppens0 = 0, stat_part0 = 0, stat_blk0 = 0;
     Uint64 next_temp_check = deadline;
     unsigned stat_renders = 0, stat_frames0 = g_emu_frames;
+    sg_frame_stats stat_gl = {0};   /* sums of sokol's per-frame counts over the window */
     int shots_done = 0;
     bool running = true;
     int rc = 0;
@@ -1050,10 +1063,25 @@ int main(int argc, char **argv) {
         }
         if (opt.netplay) lobby_draw(fb_w, fb_h, SDL_GetTicksNS());
         if (opt.osd || opt.netplay) sdtx_draw();
+        int pzone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
         sg_end_pass();
         sg_commit();
         Uint64 cpu_end = SDL_GetTicksNS();
         stat_cpu_ns += cpu_end - cpu_start;
+        if (opt.stats) {                 /* sg_commit just closed the frame: it is prev_frame now */
+            sg_stats st = sg_query_stats();
+            const sg_frame_stats *g = &st.prev_frame;
+            stat_gl.num_passes += g->num_passes;               stat_gl.num_apply_pipeline += g->num_apply_pipeline;
+            stat_gl.num_apply_bindings += g->num_apply_bindings; stat_gl.num_apply_uniforms += g->num_apply_uniforms;
+            stat_gl.num_draw += g->num_draw;
+            stat_gl.num_update_buffer += g->num_update_buffer; stat_gl.size_update_buffer += g->size_update_buffer;
+            stat_gl.num_append_buffer += g->num_append_buffer; stat_gl.size_append_buffer += g->size_append_buffer;
+            stat_gl.num_update_image += g->num_update_image;   stat_gl.size_update_image += g->size_update_image;
+            stat_gl.gl.num_bind_buffer += g->gl.num_bind_buffer;   stat_gl.gl.num_bind_texture += g->gl.num_bind_texture;
+            stat_gl.gl.num_use_program += g->gl.num_use_program;   stat_gl.gl.num_uniform += g->gl.num_uniform;
+            stat_gl.gl.num_render_state += g->gl.num_render_state;
+            stat_gl.gl.num_vertex_attrib_pointer += g->gl.num_vertex_attrib_pointer;
+        }
         if (opt.gl_finish) {
             glFinish();
             stat_gpu_ns += SDL_GetTicksNS() - cpu_end;
@@ -1064,6 +1092,7 @@ int main(int argc, char **argv) {
         Uint64 swap_start = SDL_GetTicksNS();
         SDL_GL_SwapWindow(window);
         stat_swap_ns += SDL_GetTicksNS() - swap_start;
+        hprof_leave(pzone);
         stat_renders++;
 
         Uint64 now = SDL_GetTicksNS();
@@ -1108,6 +1137,24 @@ int main(int argc, char **argv) {
                 printf(" | sound: %llu underrun frames, %llu dropped total",
                        (unsigned long long)g_audio_out.underruns, (unsigned long long)g_sound.out_dropped);
             printf("\n");
+            /* What the frame asks of the GL driver, per render (sokol's counts;
+             * all drawing goes through sokol). The Mali driver's CPU time is
+             * paid per call and per byte, so these are the baseline for it. */
+            const sg_frame_stats *g = &stat_gl;
+            printf("m2hle: gl per render: %.0f passes, %.0f pipelines, %.0f bindings, %.0f uniform blocks, "
+                   "%.0f draws (3d %.0f: %.0f pipelines, %.0f bindings, %.0f uniforms, %.0f buffer writes %.1f KB) | "
+                   "buffer updates %.1f (%.1f KB), appends %.1f (%.1f KB), image updates %.2f (%.1f KB) | "
+                   "gl calls: bind buffer %.0f, bind texture %.0f, use program %.0f, uniform %.0f, "
+                   "render state %.0f, vertex attrib %.0f\n",
+                   g->num_passes / n, g->num_apply_pipeline / n, g->num_apply_bindings / n, g->num_apply_uniforms / n,
+                   g->num_draw / n, t->draw3d_draws / n, t->draw3d_pipelines / n, t->draw3d_bindings / n,
+                   t->draw3d_uniforms / n, t->draw3d_buf_writes / n, t->draw3d_buf_bytes / 1024.0 / n,
+                   g->num_update_buffer / n, g->size_update_buffer / 1024.0 / n,
+                   g->num_append_buffer / n, g->size_append_buffer / 1024.0 / n,
+                   g->num_update_image / n, g->size_update_image / 1024.0 / n,
+                   g->gl.num_bind_buffer / n, g->gl.num_bind_texture / n, g->gl.num_use_program / n,
+                   g->gl.num_uniform / n, g->gl.num_render_state / n, g->gl.num_vertex_attrib_pointer / n);
+            memset(&stat_gl, 0, sizeof stat_gl);
             stat_game_gpu_ns = 0;
             fflush(stdout);
             stat_comp0 = v->gpu_composes; stat_uptile0 = v->up_tile; stat_upgfx0 = v->up_gfx; stat_uppens0 = v->up_pens;

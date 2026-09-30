@@ -52,9 +52,11 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
                                       memory_bus_t *bus, const romset_t *rs,
                                       bool read_camera) {
     int64_t t0 = emu_now_us();
+    int zone = hprof_enter(HPROF_COMPOSE);   /* host_prof.h */
     video_update(video, bus);
     int64_t t1 = emu_now_us();
     g_game_frame_times.compose_us += t1 - t0;
+    hprof_enter(HPROF_SCAN);
 
     if (read_camera && geo3d->use_game_view && g_active_profile &&
             g_active_profile->quirks.camera_struct_addr) {
@@ -99,6 +101,7 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
         geo3d_lines_reset();
     }
     g_game_frame_times.scan_us += emu_now_us() - t1;
+    hprof_leave(zone);
 }
 
 /* Draw the game into the viewport (ox, oy, w, h) of the current pass.
@@ -107,6 +110,7 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
                                    memory_bus_t *bus, const romset_t *rs,
                                    int ox, int oy, int w, int h, float lerp_t) {
     int64_t t0 = emu_now_us();
+    int zone = hprof_enter(HPROF_UPLOAD);   /* host_prof.h */
     /* Decode both 4-bit luma texture banks → GPU atlas for textured fills, and
      * upload the luma/colorxlat tables — each only when a write changed its RAM
      * since the last upload (sampled before uploading, so a write that lands
@@ -128,6 +132,7 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
     }
     int64_t t1 = emu_now_us();
     g_game_frame_times.upload_us += t1 - t0;
+    hprof_enter(HPROF_TILES);
 
     /* GPU-composed layers hold pens; the colours come from the pen texture. The
      * back layer there is opaque everywhere (the backdrop is its pen 0), so the
@@ -140,6 +145,9 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
         game_render_draw_game(video->bg_view, ox, oy, w, h);
     }
     int64_t t2 = emu_now_us();
+    hprof_enter(HPROF_DRAW3D);
+    sg_frame_stats gl0;
+    if (g_game_frame_gl_counts) gl0 = sg_query_stats().cur_frame;
     if (geo3d->enabled && g_active_profile && rs->main_data && rs->polygons) {
         const game_quirks_t *q = &g_active_profile->quirks;
         /* The geo_displaylist path emits geometry already in camera space (the
@@ -177,11 +185,25 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
         g_geo3d_palram = NULL;
     }
     int64_t t3 = emu_now_us();
+    if (g_game_frame_gl_counts) {
+        sg_frame_stats gl1 = sg_query_stats().cur_frame;
+        game_frame_times_t *ft = &g_game_frame_times;
+        ft->draw3d_draws      += gl1.num_draw - gl0.num_draw;
+        ft->draw3d_pipelines  += gl1.num_apply_pipeline - gl0.num_apply_pipeline;
+        ft->draw3d_bindings   += gl1.num_apply_bindings - gl0.num_apply_bindings;
+        ft->draw3d_uniforms   += gl1.num_apply_uniforms - gl0.num_apply_uniforms;
+        ft->draw3d_buf_writes += (gl1.num_update_buffer + gl1.num_append_buffer)
+                               - (gl0.num_update_buffer + gl0.num_append_buffer);
+        ft->draw3d_buf_bytes  += (gl1.size_update_buffer + gl1.size_append_buffer)
+                               - (gl0.size_update_buffer + gl0.size_append_buffer);
+    }
+    hprof_enter(HPROF_TILES);
     if (video->gpu) game_render_draw_indexed(video->fg_view, video->pal_rgba_view, false, ox, oy, w, h);
     else            game_render_draw_game(video->fg_view, ox, oy, w, h);
     g_game_frame_times.draw3d_us += t3 - t2;
     g_game_frame_times.tiles_us  += (t2 - t1) + (emu_now_us() - t3);
     g_game_frame_times.frames++;
+    hprof_leave(zone);
 }
 
 #endif /* GAME_FRAME_H */

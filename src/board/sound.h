@@ -865,6 +865,7 @@ static void sound_run(uint32_t n) {
     }
     m68k_state_t *m = &g_sound.m68k;
     int64_t run_t0 = emu_now_us();
+    int zone = hprof_enter(HPROF_M68K);
     for (uint32_t i = 0; i < n; i++) {
         if (g_snd_watch.on) snd_watch_sample();
         g_sound.budget += SOUND_CYCLES_PER_SAMPLE;
@@ -921,6 +922,7 @@ static void sound_run(uint32_t n) {
     g_emu_times.scsp_timed    += g_sound.scsp.samples - made;
     g_emu_times.sound_us      += emu_now_us() - run_t0;
     g_emu_times.sound_samples += n;
+    hprof_leave(zone);
 }
 
 /* ---- the sound thread ---------------------------------------------------------
@@ -997,7 +999,7 @@ static void sound_thread_loop(void) {
 #ifdef _WIN32
 static DWORD WINAPI sound_thread_proc(LPVOID p) { (void)p; sound_thread_loop(); return 0; }
 #else
-static void *sound_thread_proc(void *p) { (void)p; sound_thread_loop(); return NULL; }
+static void *sound_thread_proc(void *p) { (void)p; hprof_name_thread("m2-sound"); sound_thread_loop(); return NULL; }
 #endif
 #endif
 
