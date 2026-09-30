@@ -820,7 +820,10 @@ static inline const ps3ui_glyph_t *ps3ui_glyph(int font, float cap_px, float sx,
  * the metrics scale by cap / ps3_cap.
  *
  * mono_adv > 0 instead lays every character on a fixed pitch, centred in its
- * cell, which is how the PS3 sets names (font 1, 23 units a cell). */
+ * cell, which is how the PS3 sets names (font 1, 23 units a cell).
+ *
+ * wscale (0 = 1) narrows or widens everything horizontally: the PS3's
+ * Font_SetSizeWH, a font set with its own width and height. */
 typedef struct {
     int font;
     float cap;              /* cap height, 1080p units */
@@ -830,34 +833,36 @@ typedef struct {
     float skew;             /* x shear per pixel above the baseline (italic) */
     const uint8_t (*metrics)[2];
     float ps3_cap;
+    float wscale;
 } ps3ui_text_style_t;
 
 /* Where a character goes: ink left offset from the pen, x stretch, advance,
  * all in 1080p units. */
 static inline void ps3ui_text_place(const ps3ui_text_style_t *st, int cp, float *ink_off, float *sx, float *adv)
 {
+    float ws = st->wscale > 0.0f ? st->wscale : 1.0f;
     *ink_off = 0.0f;
-    *sx = 1.0f;
+    *sx = ws;
     if (st->mono_adv > 0.0f) {
-        *adv = st->mono_adv;
+        *adv = st->mono_adv * ws;
         return;
     }
     if (st->metrics && cp >= 32 && cp < 127) {
         float k = st->cap / st->ps3_cap;
         float il = (float)st->metrics[cp - 32][0], iw = (float)st->metrics[cp - 32][1];
-        *adv = (iw + 4.0f) * k;
+        *adv = (iw + 4.0f) * k * ws;
         float x0, x1;
         ps3ui_glyph_ink(st->font, st->cap, cp, &x0, &x1);
         if (cp != ' ' && x1 > x0 && iw > 0.0f) {
             float s = iw * k / (x1 - x0);
-            *sx = s < 0.8f ? 0.8f : s > 1.25f ? 1.25f : s;
+            *sx = (s < 0.8f ? 0.8f : s > 1.25f ? 1.25f : s) * ws;
             /* centre our (stretched) ink on the PS3's ink box */
-            *ink_off = (iw * k - (x1 - x0) * *sx) * 0.5f;
+            *ink_off = (iw * k * ws - (x1 - x0) * *sx) * 0.5f;
         }
         (void)il;
         return;
     }
-    *adv = ps3ui_glyph(st->font, st->cap, 1.0f, cp)->adv + st->track;
+    *adv = (ps3ui_glyph(st->font, st->cap, 1.0f, cp)->adv + st->track) * ws;
 }
 
 static inline float ps3ui_text_width(const ps3ui_text_style_t *st, const char *s)
@@ -868,6 +873,7 @@ static inline float ps3ui_text_width(const ps3ui_text_style_t *st, const char *s
         ps3ui_text_place(st, *p, &off, &sx, &adv);
         w += adv;
         last_pad = st->mono_adv > 0.0f ? 0.0f : st->metrics ? 4.0f * st->cap / st->ps3_cap : st->track;
+        last_pad *= st->wscale > 0.0f ? st->wscale : 1.0f;
     }
     return w - last_pad;
 }
