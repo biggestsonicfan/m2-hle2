@@ -614,6 +614,8 @@ static inline void sound_uart_write(sound_state_t *ss, uint8_t b, uint64_t clock
 static inline bool sound_uart_txrdy(const sound_state_t *ss)   { return ss->uart.count < 2; }
 static inline bool sound_uart_txempty(const sound_state_t *ss) { return ss->uart.count == 0; }
 
+#include "sound_hle.h"   /* the driver in C, in place of the 68000 (Pinboard #173) */
+
 /* ---- i960 side: the sound UART ---------------------------------------------- */
 
 static inline void sound_code_put(uint32_t code) {
@@ -703,6 +705,7 @@ static inline void sound_boot_68k(void) {
     g_sound.m68k.mem_ctx  = &g_sound;
     sound_map_pages(&g_sound);
     m68k_startup(&g_sound.m68k);
+    shle_reset();
 }
 
 static inline void sound_reset(void) {
@@ -853,6 +856,13 @@ static void  *g_sound_step_trace_ud;
 /* Run the board for n output samples. */
 static void sound_run(uint32_t n) {
     if (!g_sound.rom_loaded || g_sound.detached) return;
+    if (g_shle.on) {
+        int64_t t0 = emu_now_us();
+        shle_run(n);
+        g_emu_times.sound_us      += emu_now_us() - t0;
+        g_emu_times.sound_samples += n;
+        return;
+    }
     m68k_state_t *m = &g_sound.m68k;
     int64_t run_t0 = emu_now_us();
     for (uint32_t i = 0; i < n; i++) {
