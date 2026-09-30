@@ -9,6 +9,7 @@
 #ifndef FRAME_TIMES_H
 #define FRAME_TIMES_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct {
@@ -18,8 +19,13 @@ typedef struct {
     int64_t upload_us;    /* texture atlas + luma/colorxlat LUTs */
     int64_t draw3d_us;    /* model decode + fill/line submission */
     int64_t tiles_us;     /* the three tile-layer quads */
+    /* sokol's counts for the 3D stage alone, while g_game_frame_gl_counts
+     * (a frontend that has called sg_enable_stats) */
+    uint64_t draw3d_draws, draw3d_pipelines, draw3d_bindings, draw3d_uniforms;
+    uint64_t draw3d_buf_writes, draw3d_buf_bytes;
 } game_frame_times_t;
 
 static game_frame_times_t g_game_frame_times;
+static bool g_game_frame_gl_counts;
 
 #endif /* FRAME_TIMES_H */
