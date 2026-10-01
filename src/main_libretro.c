@@ -1103,6 +1103,26 @@ static void lr_context_reset(void) {
         .logger.func = slog_func,
     });
     if (!sg_isvalid()) { lr_log(RETRO_LOG_ERROR, "sokol_gfx setup failed"); return; }
+#if defined(M2HLE_LIBRETRO_GLES)
+    /* textureGather where the context is ES 3.1 or later, which RetroArch's
+     * GLES 3 context usually is (the ARC-S's Mali gives 3.2): the same pixels
+     * (--verify-fill; frame hashes on the ARC-S), fewer texture fetches. The
+     * shade-row cache stays off here: it works the rows out on the CPU, and on
+     * the A55 that cost more than the GPU saved (Pinboard #308: the ranking
+     * screen's draw3d went from 0.27 to 0.43 cores). $M2HLE_FILL_FAST=0 keeps
+     * the plain fill, for an A/B. */
+    {
+        const char *e = getenv("M2HLE_FILL_FAST");
+        const char *(LR_GLAPI *get_string)(unsigned) = NULL;
+        *(retro_proc_address_t *)&get_string = hw_render.get_proc_address ? hw_render.get_proc_address("glGetString") : NULL;
+        const char *ver = get_string ? get_string(0x1F02) : NULL;   /* GL_VERSION */
+        int major = 0, minor = 0;
+        if (ver) sscanf(ver, "OpenGL ES %d.%d", &major, &minor);
+        g_game_render_fill_gather = !(e && e[0] == '0') && (major > 3 || (major == 3 && minor >= 1));
+        lr_log(RETRO_LOG_INFO, "%s: textureGather %s", ver ? ver : "GL version unknown",
+               g_game_render_fill_gather ? "on" : "off");
+    }
+#endif
     game_render_init();
     video_init(&state.video);
     sgl_setup(&(sgl_desc_t){ .logger.func = slog_func });
