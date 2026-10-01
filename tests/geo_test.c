@@ -32,8 +32,8 @@ static int g_fail = 0;
 
 static int finite_f(float v){ return (v == v) && v < 1e20f && v > -1e20f; }
 
-/* Rank one model's faces the way the display-list draw does (geo3d_mesh_build →
- * geo3d_mesh_layers) and count its triangles above layer 0 and at it. */
+/* Rank one model's faces the way the object viewer does (geo3d_mesh_build →
+ * geo3d_mesh_layers; a game frame takes the board's sort key instead) and count its triangles above layer 0 and at it. */
 static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
                          int *tris_up, int *tris_flat, int *planes) {
     static geo3d_cmesh_t m;
@@ -48,6 +48,7 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
     m.main_data = rs->main_data;
     uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
     if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
+    geo3d_mesh_layers(&m);
     printf("info: model %d mat_ptr=%06X uv_ptr=%06X layered faces:", idx, m.mat_ptr, m.uv_ptr);
     float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
     for (int i = 0; i < m.n_faces; i++) {
@@ -67,10 +68,10 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
     }
     printf("\ninfo: model %d layered faces span (%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f)\n",
            idx, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
-    free(m.sv); free(m.faces); free(m.edges); free(m.rests);
+    free(m.sv); free(m.faces);
 }
 
-/* GEO_TEST_DUMP=<model>: every face the ranking touched, and its orderings. */
+/* GEO_TEST_DUMP=<model>: every face the ranking touched. */
 static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
     static geo3d_cmesh_t m;
     uint32_t toff = q->model_table_offset + (uint32_t)idx * MODEL_ENTRY_SIZE;
@@ -83,12 +84,11 @@ static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
     m.main_data = rs->main_data;
     uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
     if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
-    printf("dump: model %d, %d faces, %d orderings\n", idx, m.n_faces, m.n_edges);
+    geo3d_mesh_layers(&m);
+    printf("dump: model %d, %d faces\n", idx, m.n_faces);
     for (int i = 0; i < m.n_faces; i++) {
         const geo3d_cface_t *f = &m.faces[i];
-        bool in = false;
-        for (int e = 0; e < m.n_edges && !in; e++) in = m.edges[e].lo == i || m.edges[e].hi == i;
-        if (!in) continue;
+        if (!f->layer && !f->has_plane) continue;
         const int c[4] = { f->ai, f->bi, f->ci, f->di };
         const int nc = f->is_tri ? 3 : 4;
         float cx = 0, cy = 0, cz = 0, off = 0;
@@ -102,9 +102,7 @@ static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
                i, f->fi, f->layer, f->zmode, (int)f->fl, f->tx, f->ty, f->tw > 0 ? "tex" : "flat", cx, cy, cz,
                f->has_plane ? "yes" : "no ", off);
     }
-    for (int e = 0; e < m.n_edges; e++)
-        printf("dump:   %3d / %3d  top %3d  %s\n", m.edges[e].lo, m.edges[e].hi, m.edges[e].top, m.edges[e].by_sort ? "by sort" : "held apart");
-    free(m.sv); free(m.faces); free(m.edges); free(m.rests);
+    free(m.sv); free(m.faces);
 }
 
 int main(void) {
@@ -205,6 +203,7 @@ int main(void) {
             mm.main_data = rs.main_data;
             clock_t t0 = clock();
             if (geo3d_mesh_build(&mm, mp * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mm.mat_ptr != 0, mm.uv_ptr != 0)) {
+                geo3d_mesh_layers(&mm);
                 double ms = 1000.0 * (double)(clock() - t0) / CLOCKS_PER_SEC;
                 total += ms;
                 if (ms > worst) { worst = ms; worst_idx = (int)m; }

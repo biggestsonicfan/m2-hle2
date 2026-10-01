@@ -290,10 +290,12 @@ static inline unsigned i960_cycle_cost(uint32_t word1) {
 
 /* One instruction, for a caller that keeps the hook filter in sync
  * (hle_filter_sync) and passes g_irqt_live, both fixed for a slice: the run
- * loop, which would otherwise reload them per instruction. */
-static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bool live) {
+ * loop, which would otherwise reload them per instruction. `room` is the
+ * slice's instructions left, this one included, for a hook that stands in for
+ * several (g_hle_room, hle_hooks.h). */
+static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bool live, uint32_t room) {
     // Check HLE hooks before executing
-    if (M2_UNLIKELY(hle_check_synced(cpu, bus) == 0)) {
+    if (M2_UNLIKELY(hle_check_synced(cpu, bus, room) == 0)) {
         return 0;  // hook handled it, IP already updated
     }
 
@@ -1200,7 +1202,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
  * timers' flag itself. */
 static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
     hle_filter_sync();
-    return i960_step_core(cpu, bus, g_irqt_live != 0);
+    return i960_step_core(cpu, bus, g_irqt_live != 0, 1);
 }
 
 static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {

@@ -21,7 +21,7 @@
  * crop and over the whole frame, and a MAME | here strip of the worst crops.
  * The check: while the doors are in shot and clear of smoke (am_cntr < 195 of
  * the lab part), the
- * crop's worst pair within --tol (3) a channel. --set zheld=0 passes a
+ * crop's worst pair within --tol (3) a channel. --set zflat=0 passes a
  * set_camera key here, for an A/B.
  *
  *   node tools/grade-lunar-fox.mjs --mame [--char 0]   # MAME's snapshots (~10 min)
@@ -55,7 +55,7 @@ const EVERY = args.num('every', 10);
 const OUT = path.resolve(args.str('out', path.join(os.tmpdir(), 'm2hle-lunar-fox', `c${CHAR}`)));
 const W = 496, H = 384;
 const [CX, CY, CW, CH] = args.str('crop', '196,140,104,70').split(',').map(Number);
-/* set_camera switches to play with here, for an A/B: --set zlayers=0,zruns=0 */
+/* set_camera switches to play with here, for an A/B: --set zflat=0,checker=0 */
 const SET = Object.fromEntries((args.str('set', '') || '').split(',').filter(Boolean).map((kv) => kv.split('=')));
 const rep = new Report(`grade-lunar-fox — the Death Egg II cutscene, emulator vs MAME (fighter ${CHAR})`);
 

@@ -127,7 +127,7 @@ static inline int sharc_args_for_cmd(uint32_t cmd) {
         case 0x14802929: return 3;
         case 0x35006A6A: return 3;
         /* Bone slot write/select/flush — no FIFO output */
-        case 0x07000E0E: return 3;  /* write 3 floats to bone slot at DM[0x3033F]+1,+2,+3 */
+        case 0x07000E0E: return 3;  /* Fn_load_point: T = the three floats */
         case 0x1A803535: return 2;  /* save 12 words from bone slot to selection buffer */
         case 0x34806969: return 2;  /* load animation frame + build rotation matrix in bone slot */
         case 0x1C803939: return 4;  /* normalize 3 float args, write to bone buffer at arg4 offset */

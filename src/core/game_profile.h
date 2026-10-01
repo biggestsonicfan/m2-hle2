@@ -151,13 +151,6 @@ typedef struct {
      * vector from the interrupt control register, the handler from the table
      * the PRCB names. For a program whose handlers no profile knows. */
     bool     irq_vectors;
-
-    /* Models that keep their projected depth under the polygon z-sort, with
-     * no recede (geo3d_model_standing). For closed solids standing on a floor
-     * too deep to recede: sorted by their far corners, they would step back
-     * through it. Model numbers are the ROM's, so the list is the game's. */
-    uint8_t  zsort_standing_count;
-    uint16_t zsort_standing[8];
 } game_quirks_t;
 
 /* ---- Loader / installer function-pointer types --------------------------- */

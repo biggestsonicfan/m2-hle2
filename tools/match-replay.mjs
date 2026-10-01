@@ -113,16 +113,17 @@ function loadMame(file) {
 async function playHere() {
     fs.mkdirSync(OUT, { recursive: true });
     process.env.M2HLE_UNTHROTTLE = '1';
-    const emu = await M2Hle.launch({ rom: findRom().primary, port: args.num('port', 7172), extraArgs: ['--match-replay'] });
+    const emu = await M2Hle.launch({ rom: findRom().primary, port: args.num('port', 7172), run: false, extraArgs: ['--match-replay'] });
     const prefix = path.join(OUT, 'here');
     try {
-        await emu.waitUntilRunning();
-        /* From boot: the jump is a couple of hundred frames in. */
+        await emu.waitForRom();
+        /* From power-on (run: 1 starts the board once the capture is armed); the
+         * jump is a couple of hundred frames in. */
         const r = await emu.rpc('capture_dl', {
             frames: Math.min(3600, FRAMES + 400), path: prefix,
             probes: '500020:4,500064:1,500030:1',
             blocks: [...ROBS.map((a) => [a, ROB]), ...EXTRA].map(([a, l]) => `${a.toString(16)}:${l.toString(16)}`).join(','),
-            lo: 0x8cfff0, hi: 0x8d0000, max_words: 1024, timeout_ms: 900000,
+            lo: 0x8cfff0, hi: 0x8d0000, max_words: 1024, timeout_ms: 900000, run: 1,
         });
         const st = await emu.status();
         rep.check('the emulator took the jump', st.match_replay === 'done', `match_replay ${st.match_replay} at frame ${st.match_replay_frame}`);
