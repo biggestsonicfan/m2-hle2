@@ -27,22 +27,7 @@
 
 /* ---- Hook addresses ----------------------------------------------------- */
 
-#define FVIPERS_HOOK_ADDR_CHECK_TIMER_4     0x0004A88C
-#define FVIPERS_HOOK_ADDR_INTERRUPT_WAIT    0x00002238
-#define FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B       0x0001184C
-#define FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B_SPIN  0x000118DC
 #define FVIPERS_HOOK_ADDR_FRAME_PACE        0x00011C80
-#define FVIPERS_HOOK_ADDR_READ_SW           0x0000229C
-
-/* VsyncScr: tile/sprite layer update called once per vsync (STF: 0x00000C40). */
-#define FVIPERS_VSYNC_SCR_ADDR  0x000013A0
-
-/* Return address after the interrupt_wait spin loop — first instruction after
- * both back-edges at 0x2240 and 0x2244 (confirmed via IDA). */
-#define FVIPERS_INTERRUPT_WAIT_RETURN  0x00002248
-
-/* prev_held address zeroed by read_sw — confirmed via IDA (INTERUPT_FLAGS_HELD). */
-#define FVIPERS_PREV_HELD_ADDR  0x00500700
 
 /* ---- ROM loader --------------------------------------------------------- */
 
@@ -206,52 +191,19 @@ static inline void fvipers_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
 
 /* ---- HLE hook functions ------------------------------------------------- */
 
-/* check_timer_4 (0x4A88C): spin loop waiting for timer interrupt.
- * Skip the whole function — return 0 to caller. */
-static int fvipers_hook_check_timer_4(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->globals.g[0] = 0;
-    hle_ret(cpu);
-    return 0;
-}
-
-/* interrupt_wait (0x2238): inject VsyncScr then skip the spin loop.
- * FVIPERS_INTERRUPT_WAIT_RETURN must be set to the instruction after the loop. */
-static int fvipers_hook_interrupt_wait(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    hle_call(cpu, FVIPERS_VSYNC_SCR_ADDR, FVIPERS_INTERRUPT_WAIT_RETURN);
-    return 0;
-}
-
-/* interrupt_wait_b (0x1184C): frame-timing preamble — let it execute naturally. */
-static int fvipers_hook_interrupt_wait_b(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu; (void)bus;
-    return 1;
-}
-
-/* interrupt_wait_b spin (0x118DC): change-detection loop on byte_500000.
- * g0 holds the snapshot taken at 0x118D4; we write g0^1 so the cmpibe
- * immediately falls through — simulating one vsync toggle. */
-static int fvipers_hook_interrupt_wait_b_spin(i960_cpu_t *cpu, memory_bus_t *bus) {
-    uint32_t snap = cpu->globals.g[0];
-    mem_write8(bus, RAM_BASE, snap ^ 1);
-    return 1;
-}
+/* No hook waits for the vblank or a timer, as in sfight.h: interrupt_wait
+ * (0x2238), interrupt_wait_b (0x1184C / 0x118DC) and check_timer_4 (0x4A88C)
+ * spin in the ROM until the board's own interrupts end them, and the handlers
+ * (VsyncScr is 0x13A0) come from the program's interrupt table (irq_vectors).
+ * Nor is read_sw (0x229C) hooked: zeroing its last pad (0x500700) before every
+ * read made every held button look newly pressed (Pinboard #253). */
 
 /* variable_diff_calc (0x11C80): fires once per game frame at end of main_loop.
- * Marks the geo capture ring's frame boundary and signals the emu thread. */
+ * Marks the geo capture ring's frame boundary. */
 static int fvipers_hook_frame_pace(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu; (void)bus;
-    cop_geo_frame_edge();
-    g_frame_done = 1;
-    emu_attn_bump();
-    return 1;
-}
-
-/* read_sw (0x229C): zero prev_held so the momentary-diff computation starts clean. */
-static int fvipers_hook_read_sw(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu;
-    mem_write32(bus, FVIPERS_PREV_HELD_ADDR, 0);
+    cop_geo_frame_edge();
+    hle_game_frame_edge(bus);
     return 1;
 }
 
@@ -263,11 +215,11 @@ static int fvipers_hook_read_sw(i960_cpu_t *cpu, memory_bus_t *bus) {
 /* ---- Profile object ----------------------------------------------------- */
 
 /*
- * Active hooks: the 6 addresses confirmed above. STF's check_timer_4_spin,
- * _idle, _700000_loop and co_processor_error_hang have no FV addresses yet;
- * sfight.h has the handlers to port when they are found.
+ * Active hooks: the 1 address confirmed above. STF's _700000_loop and
+ * co_processor_error_hang have no FV addresses yet; sfight.h has the handlers
+ * to port when they are found.
  */
-#define FVIPERS_HOOK_COUNT 6
+#define FVIPERS_HOOK_COUNT 1
 
 static const game_profile_t fvipers_profile = {
     .id               = "fvipers",
@@ -278,12 +230,7 @@ static const game_profile_t fvipers_profile = {
     .install_fn       = fvipers_install,
     .hook_count       = FVIPERS_HOOK_COUNT,
     .hooks = {
-        { FVIPERS_HOOK_ADDR_CHECK_TIMER_4,     fvipers_hook_check_timer_4,    "check_timer_4"        },
-        { FVIPERS_HOOK_ADDR_INTERRUPT_WAIT,    fvipers_hook_interrupt_wait,   "interrupt_wait"       },
-        { FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B,      fvipers_hook_interrupt_wait_b,      "interrupt_wait_b"      },
-        { FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B_SPIN, fvipers_hook_interrupt_wait_b_spin, "interrupt_wait_b_spin" },
         { FVIPERS_HOOK_ADDR_FRAME_PACE,        fvipers_hook_frame_pace,       "frame_pace"           },
-        { FVIPERS_HOOK_ADDR_READ_SW,           fvipers_hook_read_sw,          "read_sw"              },
     },
     .input = {
         /* read_sw (0x229C) copies the pad to INTERUPT_FLAGS_HELD (0x500700) and
@@ -323,6 +270,7 @@ static const game_profile_t fvipers_profile = {
         .model_table_count  = 5412,
         .camera_struct_addr = 0x00515598,   /* eye x,y,z (g13+0x18) — confirmed MAME + IDA */
         .camera_angle_addr  = 0x00515584,   /* yaw = high16 (g13+0x06); camera_control ldos/stos 6(g13) */
+        .irq_vectors        = true,         /* handlers from the ROM's own table */
     },
 };
 

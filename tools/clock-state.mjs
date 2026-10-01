@@ -13,9 +13,9 @@
  * moves the counts and not the ratio).
  *
  *   node tools/clock-state.mjs <exeA> [exeB ...] --state round-mask
- *   node tools/clock-state.mjs <exe> --state movie-egg --args "--live-timers"
+ *   node tools/clock-state.mjs <exe> --state movie-egg --args "--steps-per-slice 150000"
  *
- * `--args` is passed to every build (e.g. --live-timers, --steps-per-slice N).
+ * `--args` is passed to every build (e.g. --steps-per-slice N).
  */
 import os from 'node:os';
 import path from 'node:path';

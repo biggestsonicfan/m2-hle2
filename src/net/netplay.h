@@ -160,8 +160,12 @@
  * 11: STF runs its boot's sound-init delay (no _700000_loop hook, sfight.h),
  *    so the cold boot takes 2.1M more instructions, which the frame check
  *    counts, and work RAM differs for frames 2-32; the game does not.
+ * 12: the vblank is raised on the i960's cycle clock and the timers run live,
+ *    where STF's and FV's wait-loop hooks used to run VsyncScr themselves and
+ *    the timers ticked once a slice (Pinboard #253): every interrupt lands
+ *    somewhere else, and with it rand() and the texture loads.
  */
-#define NETPLAY_PROTO_REV 11
+#define NETPLAY_PROTO_REV 12
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

@@ -1134,8 +1134,9 @@ static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint3
     p[3] = (uint8_t)(val >> 24);
 }
 
-/* A frame edge: the run loop calls this, under the emu mutex, when the game's
- * frame has ended and before the next instruction runs. */
+/* A frame edge: called under the emu mutex when the game's frame has ended and
+ * before the next instruction runs. A profile with a frame hook calls it from
+ * there (dl_game_frame_edge), the run loop at the vblank for one without. */
 static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
     if (!M2HLE_DEV_TOOLS) return;
     if (g_dl.armed && !g_dl.active && !g_dl.done) {
@@ -1177,5 +1178,15 @@ static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
         g_dl.done   = 1;
     }
 }
+
+/* The board's frame count (g_emu_frames), kept here by the run loop for a
+ * frame hook to stamp its mark with.
+ *
+ * The frame hook, not the vblank, is where a game frame ends: the slice now
+ * ends at the vblank (Pinboard #253), which lands wherever the game's main loop
+ * happens to be, while a capture's marks split one game frame's display list
+ * from the next and MAME's capture scripts sample at variable_diff_calc. */
+static uint32_t g_dl_frame_now;
+static inline void dl_game_frame_edge(memory_bus_t *bus) { dl_frame_edge(bus, g_dl_frame_now); }
 
 #endif /* MEMORY_H */

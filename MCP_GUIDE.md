@@ -784,13 +784,7 @@ sound RAM, or of the SCSP registers (no read side effects), as a decimal array `
 ### HLE hook addresses (all STF-specific)
 | Address | Function | What the hook does |
 |---------|----------|--------------------|
-| `0x0004A55C` | `check_timer_4` | Skips timer spin loop (returns 0) |
-| `0x0004A58C` | `check_timer_4_spin` | Writes `0x01` to `0x50008C` to unblock |
-| `0x00001768` | `interrupt_wait` | Runs `VsyncScr` (`0x0C40`), then skips the spin loop |
-| `0x00011580` | `interrupt_wait_b` | Clears `RAM_BASE` so `_idle`'s hook is reached |
-| `0x00011610` | `_idle` | Runs `VsyncScr` on first entry, then lets the loop exit |
-| `0x00007264` | `_700000_loop` | Zeroes r3 to exit sound-init delay |
-| `0x00011A04` | `frame_pace` | Sets `g_frame_done` for 60 Hz pacing |
+| `0x00011A04` | `frame_pace` | Marks the end of the game's frame for captures and match_replay |
 | `0x000077F8` | `co_processor_error_hang` | Halts the CPU and logs the COP self-test error code |
 
 There is deliberately no `read_sw` (`0x17CC`) hook: inputs reach the game through

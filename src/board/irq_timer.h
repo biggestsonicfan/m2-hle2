@@ -36,28 +36,32 @@ typedef struct {
     int64_t  timer_count[IRQT_TIMERS];   /* current down-count (cycles)     */
     bool     timer_run[IRQT_TIMERS];     /* one-shot armed flag              */
 
-    /* Live timers (g_irqt_live): cycles the i960 has run that the counts do not
-     * reflect yet, and the smallest running count — once pending reaches it a
-     * timer expires, so the run loop brings the counts up to date then. */
+    /* Cycles the i960 has run that the counts do not reflect yet, and the
+     * smallest running count, the vblank's included — once pending reaches it
+     * an event is due, so the run loop brings the counts up to date then. */
     int64_t  pending;
     int64_t  horizon;
+
+    /* The vblank, on the same clock: where the i960 is in the current video
+     * frame, in 1/IRQT_VBLANK_HZ-ths of a cycle (a frame is IRQT_CPU_HZ of
+     * them, so 25e6/60 cycles come out exact over any number of frames), and
+     * the vblanks since reset. */
+    int64_t  vbl_phase;
+    uint64_t vbl_count;
 } irq_timer_t;
+
+/* The video frame: 60 Hz of the i960's 25 MHz clock, 416,666.67 cycles.
+ * MAME's model2 screen is 16 MHz / (656 x 424), 57.52 Hz; the sound board,
+ * netplay and every host here run at 60, so the vblank does too. */
+#define IRQT_CPU_HZ   25000000
+#define IRQT_VBLANK_HZ 60
 
 static irq_timer_t g_irqt = {0};
 
 /* ---- IRQ controller register access (called from memory.h) -------------- */
 
-/* Set when the game ACKs (clears) the vblank pending bit (intreq bit0) — i.e. it
- * finished a frame and consumed the vsync. The emu thread uses this to end a
- * board_vblank slice at the frame boundary instead of busy-spinning the homebrew's
- * vsync wait loop, which both throttles the i960 to 60 Hz and frees the host CPU. */
-static volatile int g_vblank_acked = 0;
-
 static inline uint32_t irqt_request_read(void)        { return g_irqt.intreq; }
-static inline void     irqt_request_ack (uint32_t d)  {
-    if ((g_irqt.intreq & 1u) && !(d & 1u)) { g_vblank_acked = 1; emu_attn_bump(); }   /* vblank consumed */
-    g_irqt.intreq &= d;                                          /* write = ACK */
-}
+static inline void     irqt_request_ack (uint32_t d)  { g_irqt.intreq &= d; }   /* write = ACK */
 static inline uint32_t irqt_enable_read (void)        { return g_irqt.intena; }
 /* A write that enables the sound UART's line is where the board would take its
  * interrupt: TxRDY is already up, so the run loop offers it straight away
@@ -71,31 +75,39 @@ static inline void     irqt_enable_write(uint32_t d)  {
 /* Assert a pending bit (from timer expiry / vblank / sound UART). */
 static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
 
-/* Live board timers. Off (the default): the run loop takes a whole slice's
- * cycles off the timers when the slice starts, so a timer the i960 reads during
- * the slice has not moved, and one cannot expire before the next slice. On: the
- * timers count down by what each instruction costs as it runs (i960.cycles), a
- * timer interrupt is taken between the instructions where it expires, and a
- * slice that ended at a frame edge adds the rest of its 1/60 s at the next start
- * (the board idling until vsync).
+/* The board's clock is the i960's: the timers count down by what each
+ * instruction costs as it runs (i960.cycles), a timer interrupt is taken
+ * between the instructions where it expires, and the vblank comes every
+ * 1/60 s of those cycles, whatever the program is doing. The run loop ends a
+ * slice on it (emu_thread.h).
  *
- * Games budget work against these timers. STF's texture loader
- * (unp_send_tex_para_sub) arms timer 4 for what is left of a 500,000-cycle
- * budget since the frame began (check_timer_4_result, off_550008 = 20000 x 25)
- * and yields when its interrupt sets byte_50008C; with the timers frozen for the
- * slice it never yields and decodes to the step limit, ~1M instructions a frame.
- * Where interrupts land moves with this, so it stays off where results are held
- * against a capture until they have been graded with it on. */
-static int g_irqt_live = 0;
+ * Games budget work against these timers and wait for the vblank in their own
+ * loops. STF's texture loader (unp_send_tex_para_sub) arms timer 4 for what is
+ * left of a 500,000-cycle budget since the frame began (check_timer_4_result,
+ * off_550008 = 20000 x 25) and yields when its interrupt sets byte_50008C;
+ * interrupt_wait_b then spins in _idle until VsyncScr counts the vblank, and a
+ * frame that overran one counts a dropped frame (CPU_FAIL). The timers used to
+ * be frozen for a slice and the waits replaced by hooks that ran VsyncScr
+ * themselves (Pinboard #253, BUBBLEGUM.md §2): the loader never yielded and
+ * decoded to the step limit, and no frame was ever late. */
+
+/* Set by irqt_tick when a vblank falls due; the run loop clears it. */
+static volatile int g_irqt_vblank = 0;
+
+/* Cycles from now to the next vblank. */
+static inline int64_t irqt__vbl_left(void) {
+    int64_t per = (int64_t)IRQT_VBLANK_HZ;
+    return ((int64_t)IRQT_CPU_HZ - g_irqt.vbl_phase + per - 1) / per;
+}
 
 static inline void irqt__horizon(void) {
-    int64_t h = INT64_MAX;
+    int64_t h = irqt__vbl_left();
     for (int t = 0; t < IRQT_TIMERS; t++)
         if (g_irqt.timer_run[t] && g_irqt.timer_count[t] < h) h = g_irqt.timer_count[t];
     g_irqt.horizon = h;
 }
 
-/* ---- Timing: advance one-shot timers by `cycles` i960 cycles ------------- */
+/* ---- Timing: advance the board by `cycles` i960 cycles ------------------- */
 
 static inline void irqt_tick(int64_t cycles) {
     for (int t = 0; t < IRQT_TIMERS; t++) {
@@ -107,10 +119,20 @@ static inline void irqt_tick(int64_t cycles) {
             g_irqt.timer_run[t] = false;     /* one-shot; handler re-arms */
         }
     }
+    /* MAME screen_vblank: the line is raised only while it is enabled. No
+     * instruction costs more than a frame, so one tick crosses at most one. */
+    g_irqt.vbl_phase += cycles * IRQT_VBLANK_HZ;
+    if (g_irqt.vbl_phase >= IRQT_CPU_HZ) {
+        g_irqt.vbl_phase -= IRQT_CPU_HZ;
+        g_irqt.vbl_count++;
+        if (g_irqt.intena & 1u) g_irqt.intreq |= 1u;
+        g_irqt_vblank = 1;
+        emu_attn_bump();
+    }
     irqt__horizon();
 }
 
-/* Bring the counts up to the cycles run so far (live timers). */
+/* Bring the counts up to the cycles run so far. */
 static inline void irqt_flush(void) {
     if (g_irqt.pending) {
         int64_t c = g_irqt.pending;
@@ -158,7 +180,10 @@ static inline void irqt_reset(void) {
     g_irqt.intena = 0;
     g_irqt_sound_kick = 0;
     g_irqt.pending = 0;
-    g_irqt.horizon = INT64_MAX;
+    g_irqt.vbl_phase = 0;
+    g_irqt.vbl_count = 0;
+    g_irqt_vblank = 0;
+    irqt__horizon();
 }
 
 #endif /* IRQ_TIMER_H */

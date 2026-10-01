@@ -39,7 +39,7 @@
  * A row is left to the i960, which is always exact, when:
  *   - the slice has fewer instructions left than the row needs (g_hle_room),
  *     so the slice still ends part-way through it;
- *   - the live timers would reach their next event inside it, or an interrupt
+ *   - the timers or the vblank would come due inside it, or an interrupt
  *     is already pending: on the board it would be taken mid-row;
  *   - a data watchpoint is armed, or the debugger steps;
  *   - the code is not the code this was written from (an FNV over it), or a
@@ -462,8 +462,7 @@ typedef uint32_t (*tl_row_fn)(const m2_texload_t *, tl_run_t *, memory_bus_t *);
 /* Run one row in C if the board cannot tell; 1 leaves it to the i960. */
 static inline int m2_texload_row(const m2_texload_t *t, i960_cpu_t *cpu, memory_bus_t *bus, tl_row_fn fn) {
     if (!g_texload_hle || g_hle_room < 2 || wp_armed() || !tl_code_known(t, bus)) return 1;
-    const bool live = g_irqt_live != 0;
-    if (live && (g_irqt.intreq & g_irqt.intena & 0x03FCu)) return 1;
+    if (g_irqt.intreq & g_irqt.intena & 0x03FFu) return 1;
 
     tl_run_t *x = &s_tl_run;
     memcpy(x->g, cpu->globals.g, sizeof x->g);
@@ -478,7 +477,7 @@ static inline int m2_texload_row(const m2_texload_t *t, i960_cpu_t *cpu, memory_
     if (!end) return 1;
     /* The timers would come due inside the row, and on the board an interrupt
      * could be taken there. */
-    if (live && g_irqt.pending + (int64_t)x->cyc >= g_irqt.horizon) return 1;
+    if (g_irqt.pending + (int64_t)x->cyc >= g_irqt.horizon) return 1;
 
     for (uint32_t k = 0; k < x->nlog; k++) {
         uint32_t ip = x->log[k].ip + x->rel;
@@ -492,7 +491,7 @@ static inline int m2_texload_row(const m2_texload_t *t, i960_cpu_t *cpu, memory_
     memcpy(cpu->locals.r, x->r, sizeof x->r);
     cpu->sfr.ac = (cpu->sfr.ac & ~(uint32_t)AC_CC_MASK) | x->cc;
     cpu->sfr.ip = end + x->rel;
-    if (live) cpu->cycles += x->cyc;
+    cpu->cycles += x->cyc;
     g_hle_extra = x->n - 1u;
     emu_attn_bump();
     g_texload_rows++;

@@ -48,17 +48,9 @@ Two smaller gaps in the same area:
 
 ## 2. Frame sync and timers are hooks, not interrupts
 
-- **What we do:** STF's `interrupt_wait` (0x1768), `interrupt_wait_b` (0x11580) and `_idle` (0x11610) run VsyncScr (0xC40) themselves with `hle_call` and poke RAM so the game's wait loops exit (`sfight.h:250-280`). FV does the same at 0x2238 and 0x118DC.
-- **Why:** with a profile's `irq_handler` and no `board_vblank`, nothing raises the vblank pins at the right time.
-- **Real rule:** raise vblank on the i960 cycle clock (416,667 cycles) and deliver it to the profile's handlers. That would remove 3–5 hooks a game.
-- **Bug on the side:** `_idle`'s `static s_vsync_fired` survives a board reset, which `grade-reset.mjs` is meant to catch.
-- **FV:** its `read_sw` hook zeroes `prev_held` before every read, which breaks the game's own edge detection. It is probably compensating for the same missing interrupts.
-
-**Timers.** `check_timer_4` and `check_timer_4_spin` (STF `sfight.h:239-248`, FV 0x4A88C) exist because timers are frozen by default (`irq_timer.h:89`, `g_irqt_live = 0`): they tick once a slice, so the texture loader's budget never expires. `--live-timers` already exists. Turning it on by default should let the Timer handler set 0x50008C itself. The code change is tiny, but the re-grade is large: STF's texture loads move.
+*Fixed in Pinboard #253.* The vblank is raised on the i960's cycle clock (416,667 cycles) and delivered to the profiles' handlers, the timers are always live, and the wait hooks are gone: STF's `interrupt_wait` (0x1768), `interrupt_wait_b` (0x11580), `_idle` (0x11610), `check_timer_4` (0x4A55C) and `check_timer_4_spin` (0x4A58C), and FV's 0x2238, 0x1184C/0x118DC and 0x4A88C. The side bugs went with them: `_idle`'s static that survived a reset, and FV's `read_sw` hook that zeroed 0x500700. `EMU_FRAME_STEPS_MAX` is gone too; `EMU_STEPS_PER_SLICE` is only a cap now, and `EMU_IRQ_TABLE_MAX_SLICES` stays, for an SDK kernel's task switch. CLAUDE.md (HLE Hooks) has the rest.
 
 **COP ready bit.** The ready bit is set per game by a hook (STF 0xF3C, FV 0x190C), although `cop.h` already tracks the upload bit. A board-level read callback, "ready once the upload bit falls", would be about 15 lines and would cover every game.
-
-**The slice constants** (`EMU_STEPS_PER_SLICE`, `EMU_FRAME_STEPS_MAX`, `EMU_IRQ_TABLE_MAX_SLICES = 8` "the handler never returned, task switch?") mostly stand in for that missing frame clock and for the i960's call frames living on a host-side stack (`i960.h:75-93`, `flushreg` a no-op).
 
 ## 3. The old COP-stream renderer (retired, Pinboard #251)
 

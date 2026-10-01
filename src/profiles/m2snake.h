@@ -95,8 +95,9 @@ static inline void m2snake_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
 /* ---- Profile object -----------------------------------------------------
  * No HLE hooks and no hardcoded homebrew addresses: the snake self-paces by
  * polling + ACKing the board vblank bit (intreq bit0), exactly as it does on
- * real hardware and in MAME. The `board_vblank` quirk makes the emu thread
- * raise that bit each 60 Hz slice; the fallback slice timing paces it. */
+ * real hardware and in MAME. The board raises that bit at every vblank of the
+ * i960's clock, as for every profile; `board_vblank` says the snake has no
+ * frame hook, so the run loop marks its frames at the vblank. */
 
 static const game_profile_t m2snake_profile = {
     .id               = "m2snake",

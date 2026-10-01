@@ -20,11 +20,6 @@
 #include "log.h"
 #include "game_profile.h"
 
-/* Frame-pacing flag — set to 1 by the per-game frame-boundary hook.
- * Polled by emu_thread_run_loop after each step batch; when set the slice is
- * cut short and the thread sleeps until the next 16.67 ms tick. */
-static volatile int g_frame_done = 0;
-
 /* A versus match was just decided: 1 = the 1P side won, 2 = the 2P side, 0 =
  * nothing. Set by the profile's versus hook -- an observe-only hook on the
  * arcade's own "match over" path -- and taken by the emu thread at the end of
@@ -39,6 +34,40 @@ static volatile int g_versus_result = 0;
  * the same from the jump on (tools/mame/match-replay.lua, MR_STAGE). -1: off. */
 static int          g_match_replay_stage = -1;
 static volatile int g_replay_stage_pin   = -1;
+
+/* match_replay: 0 off, 1 armed, 2 done (the jump was made), -1 the profile has
+ * no attract replay. See game_quirks_t.attract_replay. */
+static volatile int      g_match_replay = 0;
+static volatile uint32_t g_match_replay_frame = 0;
+
+/* At a game frame's end: if armed and attract mode is at the profile's movie
+ * step with the movie set up, write the movie state a natural boot has when the
+ * replay starts and move on to the replay step. It runs where the game's frame
+ * ends (the profile's frame hook, or the vblank for a board_vblank profile),
+ * the point MAME's tools/mame/match-replay.lua makes the same jump at: made at
+ * a vblank in the middle of the game's frame, the fight split from MAME's
+ * (Pinboard #253). */
+static inline void hle_match_replay_edge(memory_bus_t *bus) {
+    if (g_match_replay != 1 || !g_active_profile) return;
+    const attract_replay_t *ar = &g_active_profile->quirks.attract_replay;
+    if (!ar->step_addr) { g_match_replay = -1; return; }
+    if (mem_read8(bus, ar->step_addr) != ar->from_step) return;
+    if (ar->ready_addr && mem_read32(bus, ar->ready_addr) == 0) return;
+    for (int i = 0; i < ar->state_count; i++)
+        mem_write32(bus, ar->state_addr + 4u * (uint32_t)i, ar->state[i]);
+    mem_write8(bus, ar->step_addr, ar->to_step);
+    g_replay_stage_pin = g_match_replay_stage;
+    g_match_replay = 2;
+    g_match_replay_frame = g_dl_frame_now;
+    LOG_INFO("match_replay: attract step %u -> %u at frame %u", ar->from_step, ar->to_step, g_dl_frame_now);
+}
+
+/* The game's frame hook: the display-list capture's frame mark and the
+ * match_replay jump, both on the game's frame rather than the board's. */
+static inline void hle_game_frame_edge(memory_bus_t *bus) {
+    dl_game_frame_edge(bus);
+    hle_match_replay_edge(bus);
+}
 
 /* The region the board powers up as, for games whose region is a backup-RAM
  * setting (STF's country_val: 0 Japan, 1 USA, 2 Export). A profile's hook
@@ -275,8 +304,8 @@ static inline void hle_filter_sync(void) {
  *
  * A hook that did stand in for more sets g_hle_extra to the instructions
  * beyond the first and bumps the attention word; the run loop's slow path adds
- * them to its count. Cycles it adds to cpu->cycles itself, when the timers are
- * live (i960_step_core charges none for a hooked instruction). */
+ * them to its count. Cycles it adds to cpu->cycles itself (i960_step_core
+ * charges none for a hooked instruction). */
 static uint32_t g_hle_room = 1;
 static uint32_t g_hle_extra = 0;
 

@@ -10,8 +10,8 @@
  * in the middle of its functions, or in its interrupt table.
  *
  * So this profile runs any program on the set with none of them: no hooks,
- * interrupts through the program's own interrupt table (irq_vectors), and the
- * vblank raised by the board (board_vblank). It is not picked by the set's
+ * interrupts through the program's own interrupt table (irq_vectors), and no
+ * frame hook (board_vblank: the run loop marks its frames at the vblank). It is not picked by the set's
  * name; profile_for_program picks it when the program's interrupt table does
  * not name the handlers STF's profile does. `--profile sfight_homebrew` picks
  * it outright.

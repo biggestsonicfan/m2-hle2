@@ -1462,10 +1462,9 @@ sapp_desc sokol_main(int argc, char* argv[]) {
              * by the older and slower route. */
             g_video_force_cpu_tiles = 1;
         } else if (strcmp(argv[i], "--live-timers") == 0) {
-            g_irqt_live = 1;          /* board timers count i960 cycles, IRQs mid-slice */
-            LOG_INFO("emu: live board timers on");
+            /* Always on now (irq_timer.h, Pinboard #253); kept for old scripts. */
         } else if (strcmp(argv[i], "--steps-per-slice") == 0 && i + 1 < argc) {
-            int n = atoi(argv[++i]);  /* i960 steps a slice may run without a frame edge */
+            int n = atoi(argv[++i]);  /* i960 steps a slice may run short of the vblank */
             if (n >= 1000) g_emu_steps_per_slice = n;
             LOG_INFO("emu: %d i960 steps a slice", g_emu_steps_per_slice);
         } else if (strcmp(argv[i], "--objview") == 0) {

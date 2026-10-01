@@ -145,8 +145,8 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
 
     if (b->emu && b->emu->thread_alive) {
         /* Read the double-buffered snapshot WITHOUT the mutex (like the UI does).
-         * board_vblank profiles run slices back-to-back and never release the
-         * mutex long enough, so locking here starves get_status. A slightly stale
+         * The emu thread holds the mutex for a whole slice, and runs slices
+         * back-to-back when catching up, so locking here starves get_status. A slightly stale
          * ip/sps is fine for a status query. */
         ip  = b->emu->cpu_snapshot.sfr.ip;
         sps = b->emu->steps_per_second;
