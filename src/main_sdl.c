@@ -74,6 +74,10 @@
  * --net-delay N  frames of input delay when hosting (default: the stored value, else 2).
  * --net-host  host a room as soon as the sign-in completes (implies --netplay).
  * --net-room-pass P  lock the rooms hosted here with P (8 characters: netplay.h).
+ * --nvram-dir DIR  keep backup RAM (the test menu's settings, bookkeeping,
+ *            rankings) in DIR/<set>/backup1 instead of the per-user
+ *            ~/.config/m2hle2/nvram (core/backup_ram.h).
+ * --no-nvram  boot with blank backup RAM every time and keep nothing.
  */
 #include <stdarg.h>
 #include <stdbool.h>
@@ -355,8 +359,16 @@ static bool load_rom(const char *zip) {
         fprintf(stderr, "m2hle: could not load '%s' as %s\n", zip, g_active_profile->display_name);
         return false;
     }
-    if (profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size))
+    bool homebrew = profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size);
+    if (homebrew)
         LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
+    /* The set's backup RAM, before install_fn boots the board with it. */
+    if (g_backup_want != 0) {
+        char key[96];
+        backup_ram_key(key, sizeof key, profile_rom_set(g_active_profile), homebrew,
+                       state.romset.maincpu, state.romset.maincpu_size);
+        backup_ram_open(key, true);
+    }
     /* The model lookup is built from the ROM's model table: a new set needs a new one. */
     geo3d_lookup_invalidate();
     g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
@@ -564,6 +576,11 @@ static bool parse_args(int argc, char **argv) {
             g_region = r;
         }
         else if (!strcmp(a, "--vs-mode"))           g_vs_mode = 1;
+        else if (!strcmp(a, "--no-nvram"))          g_backup_want = 0;
+        else if (!strcmp(a, "--nvram-dir") && more) {
+            snprintf(g_backup_dir, sizeof g_backup_dir, "%s", argv[++i]);
+            g_backup_want = 1;
+        }
         else if (!strcmp(a, "--render-fps") && more) opt.render_fps = atof(argv[++i]);
         else if (!strcmp(a, "--steps-per-slice") && more) {
             int n = atoi(argv[++i]);
@@ -1164,6 +1181,7 @@ int main(int argc, char **argv) {
     }
 
     emu_thread_shutdown(&state.emu);
+    backup_ram_flush();   /* the board has stopped: what it holds now is final */
     if (opt.netplay) netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     if (audio) SDL_DestroyAudioStream(audio);   /* after the emu thread: no more ring writes */
     if (opt.verify_fill)

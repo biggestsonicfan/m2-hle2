@@ -721,6 +721,10 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
         g_versus_result = 0;
         netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
         if (sndcap_on()) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+        /* A PS3 match plays on the board as it is, with no reset: from here on
+         * it is the match's, not the player's (core/backup_ram.h). */
+        if (g_xplay_match) backup_ram_detach();
+        backup_ram_frame(ctx->bus->back);
         /* The last frame of an emu_run_frames: stop here, after the frame's
          * bookkeeping and before another slice can begin frame N+1. The
          * frame is still a FRAME to the caller. */

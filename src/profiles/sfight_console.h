@@ -281,8 +281,8 @@ static int sfc_hook_head_tilt(i960_cpu_t *cpu, memory_bus_t *bus) {
  * goes on to zero the bytes after it, so r3 is left alone. Both copies are
  * written here and both stores are skipped.
  *
- * Backup RAM starts blank on every boot, so a cold boot always takes this path,
- * and the test menu's INITIALIZE does as well (the same pattern as the region
+ * A cold boot with blank backup RAM takes this path (any boot that keeps none:
+ * core/backup_ram.h), and the test menu's INITIALIZE does as well (the same pattern as the region
  * default in sfight.h). The coin settings' checksum at 0x1D03300 is computed
  * after this returns, so it covers the new value.
  *

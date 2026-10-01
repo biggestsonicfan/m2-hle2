@@ -349,6 +349,7 @@ static void lr_netplay_reset_cb(void *ctx) {
 /* The pkt_lockstep reset: emu_netplay_pump's, for a session it does not run. The
  * step count is part of the board -- the frame check hashes it. */
 static void lr_pkt_reset(void) {
+    backup_ram_detach();   /* a session's board is blank, and not the player's */
     lr_sound_for_netplay();
     lr_install_board();
     state.emu.total_steps       = 0;
@@ -356,6 +357,9 @@ static void lr_pkt_reset(void) {
     state.emu.cpu_snapshot      = state.cpu;
     if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
 }
+
+/* The frontend has filled the save RAM since the board was installed. */
+static bool g_backup_reload;
 
 static bool lr_load_rom(const char *zip) {
     const char *sep = strrchr(zip, '/'), *bsl = strrchr(zip, '\\');
@@ -394,8 +398,17 @@ static bool lr_load_rom(const char *zip) {
         lr_message(msg, 600);
         return false;
     }
-    if (profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size))
+    bool homebrew = profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size);
+    if (homebrew)
         LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
+    /* Backup RAM is the frontend's save RAM (.srm): g_backup.image, which it
+     * fills only after retro_load_game returns, so retro_run hands it to the
+     * board before the first slice (g_backup_reload). No file of our own. */
+    char key[96];
+    backup_ram_key(key, sizeof key, profile_rom_set(g_active_profile), homebrew,
+                   state.romset.maincpu, state.romset.maincpu_size);
+    backup_ram_open(key, false);
+    g_backup_reload = true;
     /* The model lookup is built from the ROM's model table: a new set needs a new one. */
     geo3d_lookup_invalidate();
     g_sound_on = opt.sound && g_active_profile->quirks.enable_68k_sound
@@ -1561,6 +1574,11 @@ RETRO_API void retro_run(void) {
         lr_read_options(false);   /* a new size is announced by lr_draw */
     }
 
+    if (g_backup_reload) {
+        g_backup_reload = false;
+        backup_ram_reload(state.bus.back);
+    }
+
     input_poll_cb();
     uint32_t held = g_shell_on ? lr_port_held_shell(0) : lr_port_held(0);
     /* Port 2 is the second player on this machine -- not in a session, where
@@ -1611,9 +1629,13 @@ RETRO_API void   retro_cheat_set(unsigned index, bool enabled, const char *code)
     (void)index; (void)enabled; (void)code;
 }
 
+/* Save RAM is the board's backup RAM as the player's own boards left it: a
+ * netplay session's is not written here (core/backup_ram.h). */
 RETRO_API void  *retro_get_memory_data(unsigned id) {
+    if (id == RETRO_MEMORY_SAVE_RAM) return g_backup.image;
     return id == RETRO_MEMORY_SYSTEM_RAM ? state.bus.main_data : NULL;
 }
 RETRO_API size_t retro_get_memory_size(unsigned id) {
+    if (id == RETRO_MEMORY_SAVE_RAM) return BACKUP_RAM_KEEP;
     return id == RETRO_MEMORY_SYSTEM_RAM && state.bus.main_data ? MAIN_DATA_SIZE : 0;
 }

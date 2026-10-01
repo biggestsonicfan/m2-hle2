@@ -72,8 +72,9 @@ static inline void hle_game_frame_edge(memory_bus_t *bus) {
 /* The region the board powers up as, for games whose region is a backup-RAM
  * setting (STF's country_val: 0 Japan, 1 USA, 2 Export). A profile's hook
  * applies it where the game writes its factory default, so it holds for every
- * cold boot and for the test menu's INITIALIZE. USA by default; --region picks
- * another. MAME's sfight boots as Japan, so the graders ask for japan. Both
+ * cold boot with blank backup RAM and for the test menu's INITIALIZE; saved
+ * backup RAM (core/backup_ram.h) keeps the region it was saved with. USA by
+ * default; --region picks another. MAME's sfight boots as Japan, so the graders ask for japan. Both
  * boards in a netplay session have to agree on it. */
 typedef enum { GAME_REGION_JAPAN = 0, GAME_REGION_USA = 1, GAME_REGION_EXPORT = 2 } game_region_t;
 static volatile int g_region = GAME_REGION_USA;
