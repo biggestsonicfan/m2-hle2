@@ -735,6 +735,8 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
   gap: 0.4rem;
   padding: 0.45rem 16px;
 }
+/* A label and its control wrap as one. */
+.bar-setting { display: inline-flex; align-items: center; gap: 0.4rem; }
 .drawer-head { padding-top: 0.5rem; padding-bottom: 0; background: var(--strip); box-shadow: inset 0 3px 0 rgba(222, 231, 253, 0.6); }
 .drawer-head .tab { color: #D5E4FF; }
 .drawer-head .tab[aria-selected="true"] { color: #fff; border-bottom-color: #fff; background: linear-gradient(to top, rgba(0, 186, 255, 0.45), rgba(0, 186, 255, 0)); }

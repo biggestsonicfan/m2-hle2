@@ -635,9 +635,9 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     uint32_t       attn    = g_emu_attn;
     const bool     profile = g_active_profile != NULL;
     const bool     live    = g_irqt_live != 0;
-    bool           bps     = g_bp.bloom != 0;
+    bool           bps     = bp_armed();
     bool slow = ctx->step_over_bp || g_frame_done || (board_vblank && g_vblank_acked) || g_irqt_sound_kick
-             || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered || (profile && s_irq_in_service)
+             || g_log.warn_triggered || wp_tripped() || g_sharc.unknown_triggered || (profile && s_irq_in_service)
              || ctx->cpu->halted;
     hle_filter_sync();
     /* A vblank the program takes as an interrupt is acknowledged by its
@@ -682,7 +682,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             }
             if (live) emu_timers_after_step(ctx);
             if (g_log.warn_triggered) break;
-            if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
+            if (wp_tripped()) break;   /* data watchpoint tripped mid-instruction */
             if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
             /* Back to the fast path once nothing it was sent here for is still
              * up. STF writes the interrupt registers a few times a frame (the
@@ -696,7 +696,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             if (!g_frame_done && !(board_vblank && g_vblank_acked) && !g_irqt_sound_kick
                     && !ctx->step_over_bp && !(profile && s_irq_in_service) && !cpu->halted) {
                 attn = now;
-                bps  = g_bp.bloom != 0;
+                bps  = bp_armed();
                 slow = false;
             }
         } else if (live) {
@@ -705,7 +705,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             if (g_emu_attn != attn) {      /* flagged by the timer service */
                 slow = true;
                 if (g_log.warn_triggered) break;
-                if (g_wp.hit) break;
+                if (wp_tripped()) break;
                 if (g_sharc.unknown_triggered) break;
             }
         }
@@ -775,7 +775,7 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
         int versus_result = g_versus_result;
         g_versus_result = 0;
         netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
-        if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+        if (sndcap_on()) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
         /* The last frame of an emu_run_frames: stop here, after the frame's
          * bookkeeping and before another slice can begin frame N+1. The
          * frame is still a FRAME to the caller. */
@@ -784,12 +784,12 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
             ctx->frame_budget_hit = 1;
         }
     }
-    if (g_bp.hit || g_wp.hit || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
-        if (g_bp.hit) {
+    if (bp_hit() || wp_tripped() || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
+        if (bp_hit()) {
             LOG_INFO("emu: breakpoint hit @ 0x%08X", g_bp.hit_addr);
             g_bp.hit = 0;
         }
-        if (g_wp.hit) {
+        if (wp_tripped()) {
             LOG_INFO("emu: watchpoint %s @ 0x%08X = 0x%08X (IP=0x%08X)",
                      g_wp.hit_write ? "write" : "read",
                      g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip);

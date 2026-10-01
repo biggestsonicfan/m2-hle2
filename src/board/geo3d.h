@@ -495,7 +495,17 @@ static inline float geo3d_sort_z(const vec3_t *sv, const int *zsrc, uint32_t zmo
  * here: the game draws them only when the camera looks across the ring at
  * them (bit 0 of 0x500288), and from there their feet are whole either way.
  * The one visible difference is the smaller walrus's tusks, and which way the
- * board draws those has not been checked against MAME. */
+ * board draws those has not been checked against MAME.
+ *
+ * *Also listed, Casino Night's slot reels (177, Pinboard #244):* each reel is
+ * a 16-sided drum of far-corner faces turning inside the cabinet (186-188,
+ * another matrix). Close to the machine its faces receded behind the
+ * cabinet's inner walls, which are too deep to recede, so the walls' purple
+ * and black covered the reel art. On the board the walls sort by far corners
+ * well behind the drum and it is whole. Kept at their projected depth, a
+ * reel's rim that pokes through the front panel now shows a sliver the
+ * board's sort hides: 14,298 of 16,148 changed pixels nearer MAME on the
+ * stage 5 replay (grade-zsort --toggle zstanding). */
 static const uint16_t *g_geo3d_standing;
 static int             g_geo3d_standing_count;
 static int             g_geo3d_zsort_standing = 1;   /* 0: standing models recede like the rest */

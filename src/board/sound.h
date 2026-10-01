@@ -41,6 +41,7 @@
 #include <string.h>
 
 #include "constants.h"
+#include "../core/build_features.h"
 #include "log.h"
 #include "memory.h"
 #include "m68k.h"
@@ -219,6 +220,10 @@ typedef struct {
     uint32_t reps[0x1000];
 } sndcap_t;
 static sndcap_t g_sndcap;
+
+/* Whether a capture is running. Constant false in a build without the
+ * debugger's hooks (build_features.h). */
+static inline bool sndcap_on(void) { return M2HLE_DEV_TOOLS && g_sndcap.active; }
 
 static inline void sndcap_put(uint32_t tag, uint32_t off, uint32_t data, uint32_t pc) {
     sndcap_t *c = &g_sndcap;
@@ -461,7 +466,7 @@ static uint32_t sound_bus_read(sound_state_t *ss, uint32_t addr, int sz, int pee
             return ((uint32_t)w << 16) | scsp_peek16(&ss->scsp, (off & ~1u) + 2);
         }
         uint32_t v = scsp_read(&ss->scsp, off, sz);
-        if (g_sndcap.active) sndcap_scsp(0, off, v, sz);
+        if (sndcap_on()) sndcap_scsp(0, off, v, sz);
         return v;
     }
     /* The hot paths: sound RAM, and the program ROM the driver runs from (every
@@ -550,7 +555,7 @@ static void sound_m68k_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
     }
     if (addr >= M68K_SCSP_BASE && addr < M68K_SCSP_BASE + M68K_SCSP_SIZE) {
         uint32_t off = addr - M68K_SCSP_BASE;
-        if (g_sndcap.active) sndcap_scsp(1, off, val, sz);
+        if (sndcap_on()) sndcap_scsp(1, off, val, sz);
         scsp_write(&ss->scsp, off, val, sz);
         if (ss->scsp.dsp_moved) sound_map_pages(ss);
         return;
@@ -674,7 +679,7 @@ static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
 static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     (void)r; (void)size;
     sound_settle();
-    if (g_sndcap.active) sndcap_put(1, addr, (val & 0xFFu) | 0xFF0000u, 0);
+    if (sndcap_on()) sndcap_put(1, addr, (val & 0xFFu) | 0xFF0000u, 0);
     if ((addr - MIDI_BASE) != 0) return;                   /* +4 is the UART's control register */
     g_sound.write_count++;
     if (g_sound.midi_log_n < 64) {
@@ -893,7 +898,7 @@ static void sound_run(uint32_t n) {
             int ipl = m68k_ipl(&m->cpu);
             if (lvl > ipl && m68k_interrupt(m, lvl)) {
                 g_sound.irqs[lvl]++;
-                if (g_sndcap.active) sndcap_put(4, (uint32_t)lvl, 0, m->cpu.pc);
+                if (sndcap_on()) sndcap_put(4, (uint32_t)lvl, 0, m->cpu.pc);
             } else if (m->cpu.stopped) {
                 m->cpu.cycles += (uint64_t)g_sound.budget;   /* time passes while it waits */
                 g_sound.budget = 0;
@@ -910,7 +915,7 @@ static void sound_run(uint32_t n) {
          * (scsp.h, "The chip's own time"). The watchdog and a capture look at
          * the slots every sample, so they have them made every sample. */
         scsp_tick(&g_sound.scsp);
-        if (g_snd_watch.on || g_sndcap.active) scsp_sync(&g_sound.scsp);
+        if (g_snd_watch.on || sndcap_on()) scsp_sync(&g_sound.scsp);
     }
     /* The rest of the run's samples, which is most of the chip's work: timed,
      * for its share (emu_times.h). Samples a register write or a sound RAM
@@ -1006,7 +1011,7 @@ static void *sound_thread_proc(void *p) { (void)p; hprof_name_thread("m2-sound")
 /* Whether a run may go to the sound thread now; starts it the first time. */
 static inline bool sound_thread_usable(void) {
 #if SOUND_THREAD
-    if (!g_sound_thread_want || g_sndcap.active || g_log.break_on_warn || g_sound_step_trace) return false;
+    if (!g_sound_thread_want || sndcap_on() || g_log.break_on_warn || g_sound_step_trace) return false;
     if (g_sound_thr.state == 0) {
         const char *e = getenv("M2HLE_SOUND_THREAD");
         g_sound_thr.state = -1;

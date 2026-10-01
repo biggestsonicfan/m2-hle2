@@ -18,6 +18,7 @@
  * 30 Hz display); single long frames; sound dropping out or a slow audio device;
  * and waiting on the other player. When the evidence points at the GPU it can
  * act on it, by drawing the game at a lower resolution (web_set_render_scale).
+ * When the CPU is short it can offer the lighter sound driver (web_set_sound_driver).
  * When it finds nothing it says so, with the numbers, and says what is left.
  */
 'use strict';
@@ -285,6 +286,7 @@ const m2hleTools = (() => {
       forgivenMs: d('forgiven_us') / 1000,
       gpuMs: gpuTimer.n ? gpuTimer.ns / gpuTimer.n / 1e6 : null,
       canvasW: b.canvas_w, canvasH: b.canvas_h, renderScale: b.render_scale,
+      soundDriver: Module._web_sound_driver(),
       renderer: g.renderer || 'unknown', software: !!g.software,
       audio: audioB, dropouts: (audioB.underruns || 0) - (audioA.underruns || 0),
       netplay: b.netplay, stalls: d('netplay_stalls'), netDelay: b.netplay_delay,
@@ -300,6 +302,10 @@ const m2hleTools = (() => {
     const megapixels = m.canvasW * m.canvasH / 1e6;
     const lowerRes = m.renderScale === 0 || m.renderScale > 2
       ? { label: 'Draw the game at lower resolution', run: () => setRenderScale(2) } : null;
+    const lighterSound = m.soundDriver === 0
+      ? { label: 'Use the lighter sound driver', run: () => setSoundDriver(1) } : null;
+    const soundTip = lighterSound
+      ? ['The button below swaps the emulated sound CPU for a lighter driver: up to a tenth less work per frame, and the music sounds the same.'] : [];
 
     if (m.hidden) {
       find('info', 'This tab was in the background during the check',
@@ -317,12 +323,13 @@ const m2hleTools = (() => {
            ' ms; together they have to fit in 16.7.',
            ['Close other tabs and programs, especially anything else using the CPU.',
             'On a laptop, plug in the charger and turn off battery saver: both slow the CPU down.',
-            'Chrome and Edge run this kind of code fastest.']);
+            'Chrome and Edge run this kind of code fastest.', ...soundTip], lighterSound);
     } else if (cpuBound) {
       find('warn', 'This computer is only just keeping up',
            'The game is at full speed (' + f1(m.speed) + '), but emulating a frame takes ' + f1(m.sliceMs) +
            ' ms and the picture ' + f1(m.renderMs) + ' ms of the 16.7 available, so anything else the computer does will cost frames.',
-           ['Close other tabs and programs.', 'On a laptop, plug in the charger and turn off battery saver.']);
+           ['Close other tabs and programs.', 'On a laptop, plug in the charger and turn off battery saver.', ...soundTip],
+           lighterSound);
     } else if (slow) {
       find('bad', 'The browser is not giving the game enough turns to run',
            'The game ran at ' + f1(m.speed) + ' of 60 frames a second, but the emulator itself was only busy ' +
@@ -445,6 +452,7 @@ const m2hleTools = (() => {
       '  main thread busy  ' + Math.round(m.busy * 100) + '%',
       '  late frames       ' + m.longFrames + ' (worst gap ' + f1(m.worstGapMs) + ' ms), time dropped ' + f1(m.forgivenMs) + ' ms',
       '  canvas            ' + m.canvasW + 'x' + m.canvasH + ', render scale ' + (m.renderScale || 'full'),
+      '  sound driver      ' + (m.soundDriver ? 'lighter (C)' : 'sound CPU (68000)'),
       '  audio             ' + (m.audio.mode || '?') + ', queue ' + Math.round(m.audio.queueMs || 0) + ' ms, device ' +
                               Math.round((m.audio.baseMs || 0) + (m.audio.outputMs || 0)) + ' ms, dropouts ' + m.dropouts,
       '  netplay           ' + m.netplay + (m.netplay === 'playing' ? ', stalls ' + m.stalls : ''),
@@ -514,6 +522,26 @@ const m2hleTools = (() => {
     if (sel) sel.value = String(n);
   }
 
+  /* ---- Sound driver -------------------------------------------------------------------
+   * 0: the emulated 68000 runs the game's own sound program. 1: the same driver
+   * ported to C (src/board/sound_hle.h): the sound board in about half the time,
+   * 4-11% of a whole frame in the WASM build (det_digest under Node). Online
+   * the change waits for the next match, since every match starts the board afresh. */
+
+  function setSoundDriver(n) {
+    try { localStorage.setItem('m2hle.soundDriver', String(n)); } catch (e) { /* private mode */ }
+    const sel = $('sound-driver');
+    if (sel) sel.value = String(n);
+    if (!ready) return;
+    const now = Module._web_set_sound_driver(n);
+    if (Module._web_state() === 0) return;           /* no game yet: it starts with this one */
+    $('lag-status').textContent = !now
+      ? 'The new sound driver starts with the next match.'
+      : Module._web_sound_driver() !== n
+        ? 'This game has no lighter sound driver: it keeps the sound CPU.'
+        : 'Sound driver changed. The music comes back with the game\'s next tune.';
+  }
+
   /* ---- The drawer ---------------------------------------------------------------------- */
 
   function openDrawer(tab) {
@@ -562,6 +590,7 @@ const m2hleTools = (() => {
       });
     }
     $('render-scale').addEventListener('change', (e) => setRenderScale(Number(e.target.value)));
+    $('sound-driver').addEventListener('change', (e) => setSoundDriver(Number(e.target.value)));
     /* sokol_app re-measures the canvas when the WINDOW resizes, and only then. The
      * drawer changes the canvas's size without that, and the old
      * drawing buffer gets stretched into the new box: a squashed picture. Tell it. */
@@ -580,6 +609,13 @@ const m2hleTools = (() => {
     const scale = asked !== null ? Number(asked) || 0 : stored;
     if (scale) Module._web_set_render_scale(scale);
     $('render-scale').value = String(scale);
+    /* Before the game is loaded, so the board boots with it. ?sounddriver=c|68000 for tests. */
+    let driver = 0;
+    try { driver = Number(localStorage.getItem('m2hle.soundDriver')) === 1 ? 1 : 0; } catch (e) { /* private mode */ }
+    const askedDriver = new URLSearchParams(location.search).get('sounddriver');
+    if (askedDriver !== null) driver = askedDriver === 'c' ? 1 : 0;
+    Module._web_set_sound_driver(driver);
+    $('sound-driver').value = String(driver);
     const g = gpuInfo();
     add('web: renderer "' + (g.renderer || 'unknown') + '"' + (g.software ? ' (software)' : '') +
         ', canvas ' + $('canvas').width + 'x' + $('canvas').height + ', devicePixelRatio ' + window.devicePixelRatio);

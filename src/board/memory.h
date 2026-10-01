@@ -43,6 +43,7 @@
 #include <string.h>
 
 #include "constants.h"
+#include "../core/build_features.h"
 #include "../core/log.h"
 #include "../core/watchpoint.h"
 #include "cop.h"
@@ -951,6 +952,10 @@ static struct {
     uint32_t    *cop_dm;                /* 0x1000 words */
 } g_dl;
 
+/* Whether a capture is running. Constant false in a build without the
+ * debugger's hooks (build_features.h), which takes the taps out of the bus. */
+static inline bool dl_active(void) { return M2HLE_DEV_TOOLS && g_dl.active; }
+
 static inline void dl_record(uint32_t addr, uint32_t val) {
     if (g_dl.n < g_dl.cap) {
         g_dl.recs[g_dl.n].addr = addr;
@@ -962,12 +967,12 @@ static inline void dl_record(uint32_t addr, uint32_t val) {
 }
 
 static inline void dl_tap(uint32_t addr, uint32_t val) {
-    if (M2_LIKELY(!g_dl.active) || g_dl.cop || addr - g_dl.lo >= g_dl.hi - g_dl.lo) return;
+    if (M2_LIKELY(!dl_active()) || g_dl.cop || addr - g_dl.lo >= g_dl.hi - g_dl.lo) return;
     dl_record(addr, val);
 }
 
-static void dl_cop_tap(uint32_t tag, uint32_t val) {
-    if (g_dl.active) dl_record(tag, val);
+static inline void dl_cop_tap(uint32_t tag, uint32_t val) {
+    if (dl_active()) dl_record(tag, val);
 }
 
 /* A plain write changed bytes off..off+len-1 of r, already stored: bump the
@@ -983,7 +988,7 @@ static inline void mem__note_change(mem_region_t *r, uint32_t off, uint32_t len)
 static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
-    if (M2_UNLIKELY(g_wp.count)) wp_check(addr, val, true, bus->cpu_ip);
+    if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFF);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
@@ -1009,7 +1014,7 @@ static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint3
 static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
-    if (M2_UNLIKELY(g_wp.count)) wp_check(addr, val, true, bus->cpu_ip);
+    if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFFFF);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
@@ -1036,9 +1041,9 @@ static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint
 static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
-    if (M2_UNLIKELY(g_wp.count)) wp_check(addr, val, true, bus->cpu_ip);
+    if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
-    if (M2_UNLIKELY(g_dl.active) && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
+    if (M2_UNLIKELY(dl_active()) && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         if (mem__warn_due(++bus->unmapped_writes))
@@ -1073,7 +1078,7 @@ static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32
     if (M2_UNLIKELY(!p)) { mem_write8_slow(bus, addr, val); return; }
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
-    if (M2_UNLIKELY(g_wp.count)) wp_check(addr, val, true, bus->cpu_ip);
+    if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFF);
     p[addr & 0xFFFFu] = (uint8_t)val;
 }
@@ -1082,7 +1087,7 @@ static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint3
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { mem_write16_slow(bus, addr, val); return; }
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
-    if (M2_UNLIKELY(g_wp.count)) wp_check(addr, val, true, bus->cpu_ip);
+    if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFFFF);
     p += addr & 0xFFFFu;
     p[0] = (uint8_t)val;
@@ -1093,9 +1098,9 @@ static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint3
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { mem_write32_slow(bus, addr, val); return; }
     bus->writes++;
     g_mem_last_write_ip = bus->cpu_ip;
-    if (M2_UNLIKELY(g_wp.count)) wp_check(addr, val, true, bus->cpu_ip);
+    if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
-    if (M2_UNLIKELY(g_dl.active) && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
+    if (M2_UNLIKELY(dl_active()) && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
     p += addr & 0xFFFFu;
     p[0] = (uint8_t)val;
     p[1] = (uint8_t)(val >> 8);
@@ -1106,6 +1111,7 @@ static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint3
 /* A frame edge: the run loop calls this, under the emu mutex, when the game's
  * frame has ended and before the next instruction runs. */
 static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
+    if (!M2HLE_DEV_TOOLS) return;
     if (g_dl.armed && !g_dl.active && !g_dl.done) {
         g_dl.active = 1;
         if (g_dl.cop_bufram) memcpy(g_dl.cop_bufram, bus->buff_ram, BUFF_RAM_SIZE);
