@@ -27,6 +27,10 @@
 
 #include "sfight.h"
 
+/* sfight.h's frame hook reads g_active_profile (hle_match_replay_edge); no
+ * registry here, so define it. Nothing in this test arms match_replay. */
+const game_profile_t *g_active_profile = &sfight_profile;
+
 static memory_bus_t bus;
 static int g_fail = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { printf("FAIL: " __VA_ARGS__); printf("\n"); g_fail++; } \
