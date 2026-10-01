@@ -133,6 +133,27 @@ def write_memory(addr: str, data: str) -> dict:
 
 
 @mcp.tool()
+def sky_eye(link: str = "", off: bool = False) -> dict:
+    """SKY EYE mode (STF): go to the stage a noclip view link names, wait for its
+    textures to stop changing, and hold the game's camera where the link puts it.
+    `link` is noclip's link (its `eye`/`ang` fields, or `pos` + `look`/`target`);
+    `off` ends the mode; neither just reports. Poll until `phase` is 'ready'."""
+    cmd = {"cmd": "sky_eye"}
+    if link:
+        cmd["link"] = link
+    if off:
+        cmd["off"] = 1
+    return _send(cmd)
+
+
+@mcp.tool()
+def sky_eye_link() -> dict:
+    """The game's current camera and stage as a noclip view link fragment
+    (append it to noclip's page URL)."""
+    return _send({"cmd": "sky_eye_link"})
+
+
+@mcp.tool()
 def emu_run() -> dict:
     """Start the emulator running freely (equivalent to pressing F9 / Resume)."""
     return _send({"cmd": "emu_run"})
