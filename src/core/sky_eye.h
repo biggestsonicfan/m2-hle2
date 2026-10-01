@@ -322,7 +322,9 @@ static int sky_eye_parse_link(const char *link, sky_eye_req_t *r, char *err, siz
 
 /* The game's camera as a noclip link (a fragment; noclip's page goes before
  * it). The explorer's `pos`/`look` are filled in too, for a noclip that predates
- * eye/ang, and are right on every stage that does not fly. */
+ * eye/ang, and are right on every stage that does not fly. `lens=1` ticks the
+ * explorer's board lens (focal 280 on 384 lines, the fov geo3d.h takes from
+ * the same focal), or it opens the view at its own field of view. */
 static int sky_eye_link(memory_bus_t *bus, char *out, size_t cap) {
     float p[3]; int a[3];
     if (!sky_eye_read_camera(bus, p, a)) return 0;
@@ -330,7 +332,7 @@ static int sky_eye_link(memory_bus_t *bus, char *out, size_t cap) {
     double pitch = a[0] * 2.0 * SKY_EYE_PI / 65536.0, yaw = a[1] * 2.0 * SKY_EYE_PI / 65536.0;
     double fx = -sin(yaw) * cos(pitch), fy = sin(pitch), fz = cos(yaw) * cos(pitch);
     int n = snprintf(out, cap,
-        "#game=sfight&tab=stage&stage=%d&eye=%.4f%%2C%.4f%%2C%.4f&ang=%d%%2C%d%%2C%d"
+        "#game=sfight&tab=stage&stage=%d&lens=1&eye=%.4f%%2C%.4f%%2C%.4f&ang=%d%%2C%d%%2C%d"
         "&cam=fly&pos=%.3f%%2C%.3f%%2C%.3f&target=%.3f%%2C%.3f%%2C%.3f&look=%.4f%%2C%.4f",
         stage, p[0], p[1], p[2], a[0], a[1], a[2],
         p[0], p[1], -p[2], p[0] + 5 * fx, p[1] + 5 * fy, -(p[2] + 5 * fz), yaw, pitch);

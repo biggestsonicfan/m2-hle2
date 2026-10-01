@@ -863,8 +863,10 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * against MAME — which leaves any segment ending on a key with a slope
          * slightly wrong: STF's stance motion 278 came out 2-3 binary radians
          * off the board on frames 30-38, and a steep turn (motion 265) thousands
-         * off. Evaluated in double: the board's own capture agrees with a
-         * double-precision Hermite to the binary radian (tools/grade-motion.mjs). */
+         * off. Evaluated in float, in the firmware's operation order below: a
+         * double Hermite agrees with the board's capture to the binary radian
+         * (tools/grade-motion.mjs) but not to the bit, and the i960 feeds the
+         * value back into the next frame. */
         case 0x19003232:
             if (n >= 6) {
                 float span = sharc_bits_to_float(args[0]);

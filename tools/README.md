@@ -744,13 +744,14 @@ What the first run found:
     the load.
 - **What `display.js` leaves out.** Each of these is read off the listing, and
   `grade-stages` reports when a part matches only with it:
-  - `pole_disp` resets the 3x3 before each flame.
-  - `draw_sphynx_head` and `giant_wing_disp` draw from inner slot 8, the arena
-    frame at 1.6. So the head is at 1.6, which is not the ROM bug the explorer
-    describes, and the plane's body, haze and clouds bank at 1.6.
-  - `slot6_obj0_init` starts the second gear at 0x800.
   - Cage walls shake by `dword_903D0[word_50A1E8[wall]]` when a fighter hits
     them.
+
+  There used to be four more: `pole_disp`'s 3x3 reset before each flame,
+  `draw_sphynx_head`'s and `giant_wing_disp`'s inner slot 8 (the arena frame at
+  1.6), and `slot6_obj0_init`'s second gear at 0x800. The explorer has made all
+  four itself since noclip 2509729, so the grader no longer adds them; three of
+  them would have been applied twice.
 - `grade-cull.mjs`'s replay multiplied `Fn_mul_matrix` the wrong way round.
   `_L201EA` post-multiplies, whatever the listing's comment says. Its grade is
   unchanged: 299 of 299 frames.
