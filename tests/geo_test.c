@@ -22,7 +22,7 @@
 #include "sfight.h"     /* sfight_profile (quirks), load/install */
 #include "geo3d.h"      /* geo3d_decode_model, g_geo3d_tris/lines */
 
-#define ROMDIR "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms/"
+#include "test_rom_dir.h"
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
@@ -109,7 +109,7 @@ static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
 
 int main(void) {
     static romset_t rs;
-    if (sfight_load(&rs, ROMDIR "sfight.zip", ROMDIR "schamp.zip") != 0) {
+    if (sfight_load(&rs, test_rom("sfight.zip"), test_rom("schamp.zip")) != 0) {
         printf("FAIL: ROM load\n"); return 1;
     }
     const game_quirks_t *q = &sfight_profile.quirks;

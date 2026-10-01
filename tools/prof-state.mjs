@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { M2Hle } from './lib/m2hle.mjs';
+import { findRom } from './lib/rom.mjs';
 import { parseArgs } from './lib/args.mjs';
 import { driveToAddr, fightInputAt } from './lib/drive.mjs';
 
@@ -33,7 +34,7 @@ const EXE  = args.str('exe', null) ? path.resolve(args.str('exe')) : null;
 const FROM = Number(args.str('from', '0xB820'));
 const TO   = Number(args.str('to', '0xC34C'));
 const OUT  = path.resolve(args.str('out', path.join(os.tmpdir(), 'm2hle-prof')));
-const ROM  = path.resolve(args.str('rom', 'C:/Users/bigge/source/repos/ai/m2-hle2/test_m2snake/sfight.zip'));
+const ROM  = path.resolve(args.str('rom', '') || findRom().primary);
 const PORT = args.num('port', 7341);
 const DRIVE = args.str('drive', 'fight');
 const IDA  = args.num('ida', 7331);
@@ -78,13 +79,8 @@ const driveTo = (emu, addr) =>
 /* Its own directory, so it neither shares m2hle.log with a running emulator
  * nor writes into the ROM folder the stream reads from. */
 const RUNDIR = path.join(OUT, 'run');
-fs.mkdirSync(RUNDIR, { recursive: true });
-for (const z of ['sfight.zip', 'schamp.zip']) {
-    const src = path.join(path.dirname(ROM), z);
-    if (fs.existsSync(src) && !fs.existsSync(path.join(RUNDIR, z))) fs.copyFileSync(src, path.join(RUNDIR, z));
-}
 
-const emu = await M2Hle.launch({ exe: EXE, rom: path.join(RUNDIR, path.basename(ROM)), port: PORT, run: true });
+const emu = await M2Hle.launch({ exe: EXE, rom: ROM, port: PORT, run: true, cwd: RUNDIR });
 try {
     await emu.waitForRom();
     const probe = await emu.rpc('prof', { on: 0 });

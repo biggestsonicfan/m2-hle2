@@ -11,10 +11,10 @@
  *   node tools/bench-render.mjs <exeA> [exeB] [--rounds 3] [--skip 500] [--seconds 10] [--rom <zip>]
  */
 import os from 'node:os';
-import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { M2Hle } from './lib/m2hle.mjs';
+import { findRom } from './lib/rom.mjs';
 import { parseArgs } from './lib/args.mjs';
 
 const args = parseArgs(['rounds', 'skip', 'seconds', 'rom', 'port']);
@@ -23,7 +23,7 @@ if (exes.length < 1) { console.error('usage: node tools/bench-render.mjs <exeA> 
 const ROUNDS  = args.num('rounds', 3);
 const SKIP    = args.num('skip', 500);
 const SECONDS = args.num('seconds', 10);
-const ROM     = path.resolve(args.str('rom', 'C:/Users/bigge/source/repos/ai/m2-hle2/test_m2snake/sfight.zip'));
+const ROM     = path.resolve(args.str('rom', '') || findRom().primary);
 const PORT    = args.num('port', 7361);
 const STAGES  = ['compose_us', 'scan_us', 'upload_us', 'draw3d_us', 'tiles_us'];
 
@@ -39,13 +39,8 @@ function drain(port) {
 
 async function measure(exe, tag, port) {
     const dir = path.join(os.tmpdir(), 'm2hle-render-' + tag);
-    fs.mkdirSync(dir, { recursive: true });
-    for (const z of ['sfight.zip', 'schamp.zip']) {
-        const src = path.join(path.dirname(ROM), z);
-        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, z));
-    }
     const avPort = port + 100;
-    const emu = await M2Hle.launch({ exe, rom: path.join(dir, 'sfight.zip'), port, run: true,
+    const emu = await M2Hle.launch({ exe, rom: ROM, port, run: true, cwd: dir,
                                      extraArgs: ['--av-port', String(avPort)] });
     let sock = null;
     try {

@@ -4,7 +4,8 @@ interrupt levels it takes, per-frame work RAM and SCSP registers (see
 snd-capture.lua), and MAME's own audio output as a WAV.
 
 Run: claude_mame/mcp_server/.venv/Scripts/python.exe snd_capture.py <outprefix> <frames>
-  MAME_ROMPATH: a directory holding only the zips (sfight, schamp, segabill).
+  MAME_ROMPATH: a directory of zips (sfight, schamp, segabill) with no loose
+    sfight/ folder; default $ROMS_DIR, else tools/mame/mameroms.
 Writes <outprefix>.bin/.ram.bin/.regs.bin/.json and <outprefix>.wav.
 """
 import asyncio
@@ -24,7 +25,11 @@ from mame_client import MameBridge  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LUA = os.path.join(HERE, "snd-capture.lua").replace("\\", "/")
-ROMPATH = os.environ.get("MAME_ROMPATH", os.path.join(HERE, "mameroms"))
+# The machine's one ROM folder (the dev container's $ROMS_DIR) when it has the set.
+_ROMS_DIR = os.environ.get("ROMS_DIR") or os.path.expanduser("~/build/mameroms")
+ROMPATH = os.environ.get("MAME_ROMPATH") or (
+    _ROMS_DIR if os.path.exists(os.path.join(_ROMS_DIR, "sfight.zip"))
+    else os.path.join(HERE, "mameroms"))
 
 OUT = os.path.abspath(sys.argv[1]).replace("\\", "/")
 FRAMES = int(sys.argv[2])

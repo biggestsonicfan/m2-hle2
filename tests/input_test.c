@@ -16,7 +16,7 @@
 #include "emu_thread.h"    /* emu thread */
 #include "input.h"         /* g_input, input_attach, input_io_read_cb */
 
-#define ROMDIR "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms/"
+#include "test_rom_dir.h"
 #define HELD_ADDR 0x00500700u
 
 /* hle_check / input bits dispatch through g_active_profile. */
@@ -81,7 +81,7 @@ int main(void) {
 
     /* ---- (B) end-to-end through the game's read_sw interrupt ---- */
     static romset_t rs; static memory_bus_t bus; static i960_cpu_t cpu; static emu_thread_ctx_t ctx;
-    if (sfight_load(&rs, ROMDIR "sfight.zip", ROMDIR "schamp.zip") != 0) {
+    if (sfight_load(&rs, test_rom("sfight.zip"), test_rom("schamp.zip")) != 0) {
         printf("FAIL: ROM load\n"); return 1;
     }
     sfight_install(&rs, &cpu, &bus);

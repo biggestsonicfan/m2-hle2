@@ -13,17 +13,17 @@
  * cannot see it, and a sound-board change has to hold both.
  */
 import os from 'node:os';
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { M2Hle } from './lib/m2hle.mjs';
+import { findRom } from './lib/rom.mjs';
 import { parseArgs } from './lib/args.mjs';
 
 const args = parseArgs(['marks', 'rom', 'port']);
 const [exeA, exeB] = process.argv.slice(2).filter((a) => !a.startsWith('--') && /\.exe$|m2hle$/i.test(a));
 if (!exeA || !exeB) { console.error('usage: node tools/ab-builds.mjs <exeA> <exeB> [--marks 600,1800]'); process.exit(2); }
 const MARKS = args.str('marks', '600,1800').split(',').map(Number);
-const ROM = path.resolve(args.str('rom', 'C:/Users/bigge/source/repos/ai/m2-hle2/test_m2snake/sfight.zip'));
+const ROM = path.resolve(args.str('rom', '') || findRom().primary);
 const PORT = args.num('port', 7311);
 const FRAME_HOOK = 0x11a04;
 
@@ -51,12 +51,7 @@ async function soundBoard(emu) {
  * with the user's running instances. */
 async function boards(exe, tag, port) {
     const dir = path.join(os.tmpdir(), 'm2hle-ab-' + tag);
-    fs.mkdirSync(dir, { recursive: true });
-    for (const z of ['sfight.zip', 'schamp.zip']) {
-        const src = path.join(path.dirname(ROM), z);
-        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, z));
-    }
-    const emu = await M2Hle.launch({ exe, rom: path.join(dir, 'sfight.zip'), port, run: false });
+    const emu = await M2Hle.launch({ exe, rom: ROM, port, run: false, cwd: dir });
     const out = {};
     try {
         await emu.waitForRom();

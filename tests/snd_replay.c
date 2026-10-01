@@ -11,10 +11,11 @@
  *
  * Usage: snd_replay <mame-capture-prefix> <out-prefix> [seconds]
  *   writes <out>.bin/.ram.bin/.regs.bin/.json and <out>.wav (44.1 kHz stereo)
- *   $ROMDIR: directory with sfight.zip and schamp.zip
+ *   $ROMDIR (else $ROMS_DIR): directory with sfight.zip and schamp.zip
  *     (default: the claude_mame oracle's roms)
  */
 #define NDEBUG 1
+#include "test_rom_dir.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,8 +52,7 @@ int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: snd_replay <mame-capture-prefix> <out-prefix> [seconds]\n"); return 2; }
     const char *in = argv[1], *out = argv[2];
     double seconds = argc > 3 ? atof(argv[3]) : 0.0;
-    const char *romdir = getenv("ROMDIR");
-    if (!romdir) romdir = "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms";
+    const char *romdir = test_rom_dir();
 
     char path[1024];
     snprintf(path, sizeof path, "%s.bin", in);

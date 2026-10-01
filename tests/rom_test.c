@@ -10,7 +10,7 @@
 
 #include "sfight.h"   /* pulls rom_loader, memory, i960, game_profile, constants */
 
-#define ROMDIR "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms/"
+#include "test_rom_dir.h"
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
@@ -23,7 +23,7 @@ int main(void) {
     static memory_bus_t bus;
     static i960_cpu_t cpu;
 
-    int rc = sfight_load(&rs, ROMDIR "sfight.zip", ROMDIR "schamp.zip");
+    int rc = sfight_load(&rs, test_rom("sfight.zip"), test_rom("schamp.zip"));
     CHECK(rc == 0, "sfight_load returns success");
     CHECK(rs.loaded, "romset marked loaded");
     CHECK(rs.maincpu_size == 0x200000, "maincpu is 2MB");

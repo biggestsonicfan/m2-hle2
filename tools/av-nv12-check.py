@@ -21,12 +21,14 @@ filter and with `area` (a 2x2 box, which is what the GPU does), because the
 two only disagree at colour edges. The pass criterion is the issue's: Y, Cb
 and Cr within +-1 of the box conversion, and nothing upside down.
 """
-import argparse, os, socket, struct, subprocess, sys, threading, time
+import argparse, os, socket, struct, subprocess, sys, tempfile, threading, time
 
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
+# The machine's one ROM folder (the dev container's $ROMS_DIR), when it has the set.
+ROMS_DIR = os.environ.get("ROMS_DIR") or os.path.expanduser("~/build/mameroms")
 BARS = [(255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
         (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)]
 
@@ -47,13 +49,16 @@ WINDOW = False   # --window: stream from a window instead of headless
 
 
 def launch(exe, rom, port, fmt, size, card):
-    args = [exe, "--rom", rom, "--profile", "sfight", "--region", "japan", "--run",
+    args = [exe, "--rom", os.path.abspath(rom), "--profile", "sfight", "--region", "japan", "--run",
             "--av-mute", "--av-port", str(port), "--av-size", size, "--av-format", fmt]
     if not WINDOW:
         args += ["--headless", "--no-tray"]
     if card:
         args.append("--av-test-card")
-    return subprocess.Popen(args, cwd=os.path.dirname(rom),
+    # Its own directory per port, never the ROM's: the log goes there.
+    run = os.path.join(tempfile.gettempdir(), "m2hle-run-%d" % port)
+    os.makedirs(run, exist_ok=True)
+    return subprocess.Popen(args, cwd=run,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -220,7 +225,10 @@ def check_attract(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--exe", default=os.path.join(REPO, "build", "Release", "m2hle.exe"))
-    ap.add_argument("--rom", default=os.path.join(REPO, "test_m2snake", "sfight.zip"))
+    rom = os.path.join(ROMS_DIR, "sfight.zip")
+    if not os.path.exists(rom):
+        rom = os.path.join(REPO, "test_m2snake", "sfight.zip")
+    ap.add_argument("--rom", default=rom)
     ap.add_argument("--size", default="1396x1080")
     ap.add_argument("--frame", type=int, default=1800, help="attract: first board frame to take")
     ap.add_argument("--port", type=int, default=7280, help="first of four ports")
