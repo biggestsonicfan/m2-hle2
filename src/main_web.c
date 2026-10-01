@@ -746,6 +746,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if      (!strcmp(a, "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
+        else if (!strcmp(a, "--no-nvram"))      g_backup_want = 0;
         else if (!strcmp(a, "--fill-ref"))      g_game_render_fill_use_ref = 1;
         else if (!strcmp(a, "--fill-no-split")) g_game_render_fill_split = 0;
         else if (!strcmp(a, "--fill-no-ramp"))  g_game_render_fill_ramp = 0;
@@ -800,6 +801,10 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     /* The model lookup is built from the ROM's model table: a new set needs a new one. */
     geo3d_lookup_invalidate();
 
+    /* The set's backup RAM, kept in this browser's localStorage. A scripted run
+     * (?script=) boots blank, so that two runs of a script are the same run. */
+    if (g_backup_want != 0 && g_web_script_n == 0)
+        backup_ram_open(profile_rom_set(g_active_profile), true);
     web_install_board();
     emu_run(&state.emu);
     state.last_us = 0;
@@ -817,6 +822,9 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
 }
 
 /* The files the last web_rom_load did not find, space separated ("" if none). */
+/* The page is going (pagehide): keep the newest backup RAM. */
+EMSCRIPTEN_KEEPALIVE void web_backup_flush(void) { backup_ram_flush(); }
+
 EMSCRIPTEN_KEEPALIVE const char *web_rom_missing(void) {
     return g_rl_mem_zip.missing_names;
 }

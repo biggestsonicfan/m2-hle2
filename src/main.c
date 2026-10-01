@@ -218,8 +218,18 @@ static void load_active_profile(const char *primary_zip) {
 
     g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
     if (g_active_profile->load_fn(&state.romset, primary_zip, parent_zip_ptr) == 0) {
-        if (profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size))
+        bool homebrew = profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size);
+        if (homebrew)
             LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
+        /* The set's backup RAM, before install_fn boots the board with it. A
+         * window keeps it; a headless or kiosk run (graders, the fly) boots
+         * blank as it always has, unless --nvram-dir asks. */
+        if (g_backup_want < 0 ? !g_headless && !g_kiosk_on : g_backup_want) {
+            char key[96];
+            backup_ram_key(key, sizeof key, profile_rom_set(g_active_profile), homebrew,
+                           state.romset.maincpu, state.romset.maincpu_size);
+            backup_ram_open(key, true);
+        }
         /* The model lookup is built from the ROM's model table: a new set needs a new one. */
         geo3d_lookup_invalidate();
         g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
@@ -1082,6 +1092,7 @@ static int headless_main(void) {
     LOG_INFO("headless: shutting down");
     av_stream_shutdown();
     if (state.emu_started) emu_thread_shutdown(&state.emu);
+    backup_ram_flush();
     netplay_shutdown();
     overlay_host_shutdown();
     av_capture_shutdown();
@@ -1323,6 +1334,7 @@ static void cleanup(void) {
      * target goes with the rest of the GPU resources further down. */
     av_stream_shutdown();
     if (state.emu_started) emu_thread_shutdown(&state.emu);
+    backup_ram_flush();   /* the board has stopped: what it holds now is final */
     netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
@@ -1418,6 +1430,12 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             int r = game_region_parse(argv[++i]);   /* japan | usa | export */
             if (r < 0) LOG_WARN("--region %s: expected japan, usa or export; keeping usa", argv[i]);
             else       g_region = r;
+        } else if (strcmp(argv[i], "--no-nvram") == 0) {
+            g_backup_want = 0;        /* backup RAM starts blank and is not kept */
+        } else if (strcmp(argv[i], "--nvram-dir") == 0 && i + 1 < argc) {
+            /* keep backup RAM in DIR/<set>/backup1 (MAME's layout), headless too */
+            snprintf(g_backup_dir, sizeof g_backup_dir, "%s", argv[++i]);
+            g_backup_want = 1;
         } else if (strcmp(argv[i], "--vs-mode") == 0) {
             g_vs_mode = 1;            /* a decided versus match goes back to select */
         } else if (strcmp(argv[i], "--idle-until-match") == 0) {

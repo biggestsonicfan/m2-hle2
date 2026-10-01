@@ -45,6 +45,8 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--log-level SPEC` | Drop lines below a level: `warn`, or per channel (the `mem:` / `netplay:` / `sound:` tag a line starts with), e.g. `warn,mem=error,netplay=debug`. Levels are `debug`, `info`, `warn`, `error`, `off`. A dropped line is dropped everywhere: the file, the log window and the MCP log. The file takes 64 MB whatever the level, then only errors (1 MB more) |
 | `--rom <path>` | Auto-load this ROM zip on startup |
 | `--run` | Start executing immediately after ROM load |
+| `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
+| `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
 | `--match-replay` | Arm `match_replay` (below) from boot |
 | `--sky-eye <link>` | Start `sky_eye` (below) from boot with a noclip view link |
 | `--objview [N]` | Open the object viewer at boot, optionally on model N |

@@ -3788,6 +3788,7 @@ static inline void netplay_do_reset(void) {
     if (!g_netplay.reset_pending) return;
     g_netplay.reset_pending = false;
     if (g_netplay.reset_board) {
+        backup_ram_detach();   /* every board here is blank, and not the player's */
         g_netplay.reset_board(g_netplay.reset_ctx);
         input_reset();
         netplay_log("board reset; frame 0 of session %u", g_netplay.generation);
@@ -3824,6 +3825,7 @@ static inline void netplay_restart_alone(void) {
     g_netplay.vs_board     = false;
     g_netplay.empty_prompt = false;
     if (!g_netplay.reset_board) return;
+    backup_ram_reattach();   /* the player's own settings, as before the session */
     g_netplay.reset_board(g_netplay.reset_ctx);
     input_reset();
     netplay_log("the room is empty; the game has restarted");

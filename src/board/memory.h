@@ -46,6 +46,7 @@
 #include "../core/build_features.h"
 #include "../core/log.h"
 #include "../core/watchpoint.h"
+#include "../core/backup_ram.h"
 #include "cop.h"
 #include "irq_timer.h"
 
@@ -569,7 +570,9 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     uint8_t *texram1     = bus->texram1;
     uint8_t *framebuffer = bus->framebuffer;
 
+    backup_ram_before_reset(bus->back);   /* a reset keeps the battery's contents */
     memset(bus, 0, sizeof(*bus));
+    backup_ram_after_reset(bus->back);
     /* Straight back, before anything else: the memset above is the only moment
      * these read as NULL, which the atlas upload already treats as "no sheet". */
     bus->main_data   = main_data;

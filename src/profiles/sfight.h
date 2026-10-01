@@ -318,9 +318,10 @@ static int sfight_hook_vs_rematch(i960_cpu_t *cpu, memory_bus_t *bus) {
  * of the region setting. The instruction is `stob r15, country_val_bk`
  * (backup RAM 0x1D03352) after `mov 0, r15`, and the next one stores r15 again
  * to the working copy, country_val (0x59C352). Load g_region into r15 and let
- * both stores run. Backup RAM starts blank on every boot here, so the game
- * takes this path on every cold boot, as well as from the test menu's
- * INITIALIZE. Japan (0) shows the "only in Japan" warning; USA (1) skips it,
+ * both stores run. The game takes this path on a cold boot whose backup RAM
+ * is blank or fails its checksum -- every boot of a graded, scripted or netplay
+ * run, which keep no backup RAM (core/backup_ram.h) -- and from the test menu's
+ * INITIALIZE. A player's saved backup RAM keeps the region it was saved with. Japan (0) shows the "only in Japan" warning; USA (1) skips it,
  * shows the FBI picture before the Sega logo in attract, and uses the US
  * names and credit limit.
  */
@@ -397,6 +398,7 @@ static void sfight_xplay_frame(memory_bus_t *bus) {
     g_xplay_also_mode = mem_read8(bus, 0x0050002B);
     if (!g_xplay_match || !g_xplay_rules_pending) return;
     if (g_xplay_also_mode < 2 && g_xplay_mode != 2) return;   /* still booting */
+    backup_ram_detach();   /* the match's rules are not the player's settings */
     static const uint8_t offs[5] = { 0x01, 0x04, 0x11, 0x13, 0x18 };
     for (int i = 0; i < 5; i++) {
         mem_write8(bus, 0x0059C340u + offs[i], g_xplay_rules[i]);
@@ -562,8 +564,8 @@ static int sfight_hook_xplay_vic_dsp(i960_cpu_t *cpu, memory_bus_t *bus) {
  * So everything can be applied while the board sits in attract or at the title
  * and holds for the next game. Nothing after boot writes these back, except the
  * test menu (every change) and init_game_assignments (INITIALIZE, or a cold
- * boot whose backup CRC fails -- every cold boot here, since backup RAM starts
- * blank). A cold board reset therefore needs the settings applied again once
+ * boot whose backup CRC fails -- every cold boot that keeps no backup RAM,
+ * core/backup_ram.h). A cold board reset therefore needs the settings applied again once
  * add_BACKUP_RAM_TO_RAM reads 0x599000.
  *
  * CHECKSUM. Backup RAM 0x1D03302 (crc_value_bk) is make_crc (

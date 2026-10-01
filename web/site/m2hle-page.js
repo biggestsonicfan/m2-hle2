@@ -71,6 +71,9 @@ function loadZip(bytes) {
     }
     $('panel').hidden = true;
     keepRunning();
+    /* Backup RAM (the test menu's settings, rankings) is kept once a minute;
+     * this keeps the last of it when the tab goes. */
+    addEventListener('pagehide', () => Module._web_backup_flush());
     m2hleNetplay.onGame();
     m2hleTouch.onGame();
     $('canvas').focus();
