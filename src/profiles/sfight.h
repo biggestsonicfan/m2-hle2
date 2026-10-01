@@ -35,6 +35,7 @@
 #include "memory.h"
 #include "i960.h"
 #include "hle_hooks.h"
+#include "m2_texload.h"
 
 /* ---- Loader ------------------------------------------------------------- */
 
@@ -168,6 +169,7 @@ static void (*s_sfight_on_vs_rematch)(void);
 static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
     if (!rs->loaded) { LOG_ERROR("sfight_install: romset not loaded"); return; }
     s_sfight_on_vs_rematch = NULL;
+    m2_texload_forget();   /* a new program: check its texture loader again */
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
@@ -480,6 +482,21 @@ static int sfight_hook_xplay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
  * the natural stage). match_replay's stage pin (g_replay_stage_pin). MAME's
  * side substitutes the value of those two stores with write taps, which leaves
  * memory the same at this instruction. */
+/* The texture loader in C (m2_texload.h, Pinboard #178): unpack_lod_data,
+ * send_beta_data, send_lod_data and send_lod_data_q, each replaced whole. */
+static int sfight_hook_tex_unpack(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return m2_texload_unpack(&M2_TEXLOAD_STF, cpu, bus);
+}
+static int sfight_hook_tex_send_beta(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return m2_texload_send_beta(&M2_TEXLOAD_STF, cpu, bus);
+}
+static int sfight_hook_tex_send_lod(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return m2_texload_send_lod(&M2_TEXLOAD_STF, cpu, bus);
+}
+static int sfight_hook_tex_send_lod_q(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return m2_texload_send_lod_q(&M2_TEXLOAD_STF, cpu, bus);
+}
+
 static int sfight_hook_replay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu;
     if (g_replay_stage_pin < 0) return 1;
@@ -710,7 +727,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 21
+#define SFIGHT_BASE_HOOK_COUNT 25
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
@@ -732,7 +749,11 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0000AF84, sfight_hook_xplay_stage,        "xplay_stage"             }, \
     { 0x0000B0F8, sfight_hook_xplay_game_time,    "xplay_game_time"         }, \
     { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      }, \
-    { 0x0000941C, sfight_hook_replay_stage,       "replay_stage"            },
+    { 0x0000941C, sfight_hook_replay_stage,       "replay_stage"            }, \
+    { 0x0004B3FC, sfight_hook_tex_unpack,         "unpack_lod_data"         }, \
+    { 0x0004BC70, sfight_hook_tex_send_beta,      "send_beta_data"          }, \
+    { 0x0004BE40, sfight_hook_tex_send_lod,       "send_lod_data"           }, \
+    { 0x0004BFF0, sfight_hook_tex_send_lod_q,     "send_lod_data_q"         },
 
 /* read_sw's copies of the pad: held 0x500700, momentary 0x500704; the
  * credits are at 0x59C388 (P1) and 0x59C38C (P2). */
