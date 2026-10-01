@@ -36,31 +36,6 @@
 #include "constants.h"
 #include "memory.h"
 
-/* ---- Layer buffers ------------------------------------------------------- */
-
-typedef struct {
-    uint16_t *bg;       /* background layer [VIDEO_WIDTH × VIDEO_HEIGHT] BGR555 */
-    uint16_t *fg;       /* foreground layer [VIDEO_WIDTH × VIDEO_HEIGHT] BGR555 */
-    uint8_t  *alpha;    /* foreground alpha [VIDEO_WIDTH × VIDEO_HEIGHT] 0=transparent */
-    uint8_t  *bg_alpha; /* background alpha — 0 where the back-back color shows through */
-} tile_layers_t;
-
-static inline int tile_layers_init(tile_layers_t *t) {
-    int n = VIDEO_WIDTH * VIDEO_HEIGHT;
-    t->bg       = (uint16_t *)calloc(n, sizeof(uint16_t));
-    t->fg       = (uint16_t *)calloc(n, sizeof(uint16_t));
-    t->alpha    = (uint8_t  *)calloc(n, sizeof(uint8_t));
-    t->bg_alpha = (uint8_t  *)calloc(n, sizeof(uint8_t));
-    return (t->bg && t->fg && t->alpha && t->bg_alpha) ? 1 : 0;
-}
-
-static inline void tile_layers_free(tile_layers_t *t) {
-    free(t->bg);       t->bg       = NULL;
-    free(t->fg);       t->fg       = NULL;
-    free(t->alpha);    t->alpha    = NULL;
-    free(t->bg_alpha); t->bg_alpha = NULL;
-}
-
 /* ---- Palette read -------------------------------------------------------- */
 
 /* Read one BGR555 entry from palette RAM. */
@@ -113,6 +88,20 @@ static inline uint16_t back_color_555(const memory_bus_t *bus) {
     return (uint16_t)bus->palette[0] | ((uint16_t)bus->palette[1] << 8);
 }
 
+/* Tile RAM words the compositor reads: the four tilemaps (words 0x0000-0x3FFF),
+ * their per-line H scroll tables (0x4000 + 0x200*t), the scroll and control
+ * registers (0x5000-0x5007) and both window masks (0x6000 / 0x6800, four words
+ * a line). Both compositors work from a snapshot of these, taken when they
+ * start, as little-endian words (the host's order). */
+#define TILE_SNAP_WORDS 0x7000
+_Static_assert(TILE_SNAP_WORDS >= 0x6800 + VIDEO_HEIGHT * 4, "the snapshot covers the window masks");
+_Static_assert(TILE_SNAP_WORDS * 2 <= TILE_SIZE, "the snapshot fits tile RAM");
+_Static_assert(0x4000 * 32 == TMAPGFX_SIZE, "every cell index is a whole cell of tile graphics");
+
+/* A pen is palette bank * 16 + colour index, so < 4096; this one marks a pixel
+ * of the front layer that no tilemap drew. */
+#define TILE_PEN_NONE 0x1000
+
 /*
  * The Sega System 24 tilemap chip, drawn the way MAME's segaic24 draw_common
  * does and layered the way model2_v.cpp screen_update does.
@@ -139,32 +128,33 @@ static inline uint16_t back_color_555(const memory_bus_t *bus) {
  * In front of the 3D: tilemaps 3, 2, 1, 0, category 1 only. Colour index 0 is
  * transparent wherever the draw is not opaque.
  */
-/* Draw tilemap t into dst: category `cat` only (non-transparent pixels), or
- * every pixel when `opaque`. dst_alpha gets 255 where something drew (for an
- * opaque draw, where the pen is not 0, which MAME copies as transparent).
+/* Draw tilemap t of the tile RAM words w into the pen layer dst, line y over
+ * [x0[y], x1[y]): category `cat` only (non-transparent pixels), or every pixel
+ * when `opaque`. The layers hold pens, not colours, so a palette write needs
+ * no redraw (tile_compose_cpu).
  *
  * A pixel of tilemap l at (x - h, y + vy) & 511 is cell ((y + vy) >> 3, (x - h)
  * >> 3)'s pixel ((x - h) & 7, (y + vy) & 7). The line's window-mask words and
  * split are fixed per line; a cell's row of eight pixels is decoded once when
  * the pixel walk enters the cell, and a cell that cannot draw in this pass
- * (wrong category, or blank -- most of a HUD layer) is stepped over whole;
- * the palette is read only for a pixel that is written. Eight full-screen
- * passes a compose made this the largest cost of a frame on the CPU path
- * (D3D11); tests/tile_test.c holds it to the pixel-by-pixel original. */
-static inline void s24_draw_tilemap(const memory_bus_t *bus, int t, int cat, bool opaque,
-                                    uint16_t *dst, uint8_t *dst_alpha) {
-    uint16_t hscr = tileram_word(bus, 0x5000u + (uint32_t)t);
-    uint16_t vscr = tileram_word(bus, 0x5004u + (uint32_t)t);
-    uint16_t ctrl = tileram_word(bus, 0x5004u + (uint32_t)(t & 2));
+ * (wrong category, or blank -- most of a HUD layer) is stepped over whole.
+ * tests/tile_test.c holds it to the pixel-by-pixel original. */
+static inline void s24_draw_tilemap(const uint16_t *w, const uint8_t *gfx, int t, int cat, bool opaque,
+                                    uint16_t *dst, const int16_t *x0, const int16_t *x1) {
+    uint16_t hscr = w[0x5000 + t];
+    uint16_t vscr = w[0x5004 + t];
+    uint16_t ctrl = w[0x5004 + (t & 2)];
     if (vscr & 0x8000) return;
     int mode = (ctrl & 0x6000) >> 13;
     if (mode && (t & 1)) return;                 /* split modes: the even tilemap draws both */
-    uint32_t hscrtb = 0x4000u + 0x200u * (uint32_t)t;
-    uint32_t maskw  = (t & 2) ? 0x6800u : 0x6000u;
+    const uint16_t *hscrtb = w + 0x4000 + 0x200 * t;
+    const uint16_t *maskw  = w + ((t & 2) ? 0x6800 : 0x6000);
     int vy = vscr & 0x1FF;
 
     for (int y = 0; y < VIDEO_HEIGHT; y++) {
-        uint16_t row = (hscr & 0x8000) ? tileram_word(bus, hscrtb + (uint32_t)y) : hscr;
+        int xs = x0[y], xe = x1[y];
+        if (xs >= xe) continue;
+        uint16_t row = (hscr & 0x8000) ? hscrtb[y] : hscr;
         int h = row & 0x1FF;
         int split_l = t, split_x = 0x7FFF;       /* x < split_x: split_l, else split_l ^ 1 */
         uint16_t mask[4] = { 0, 0, 0, 0 };       /* mode 0: one bit per 8 pixels, MSB first */
@@ -177,19 +167,18 @@ static inline void s24_draw_tilemap(const memory_bus_t *bus, int t, int cat, boo
             split_x = h;
         } else {
             for (int k = 0; k < 4; k++) {
-                uint16_t m = tileram_word(bus, maskw + (uint32_t)(y * 4 + k));
+                uint16_t m = maskw[y * 4 + k];
                 mask[k] = (t & 1) ? (uint16_t)~m : m;
             }
         }
         int      ty   = (y + vy) & 511;
-        uint32_t cell = (uint32_t)(ty >> 3) * 64u;     /* the tilemap row's first cell */
+        int      cell = (ty >> 3) * 64;          /* the tilemap row's first cell */
         uint16_t *drow = dst + y * VIDEO_WIDTH;
-        uint8_t  *arow = dst_alpha ? dst_alpha + y * VIDEO_WIDTH : NULL;
         int     cur = -1;                        /* l << 6 | column of the decoded cell */
         int     bank16 = 0;
         bool    dead = false;                    /* no pixel of the cell can draw in this pass */
         uint8_t pc = 0, nib[8] = { 0 };
-        for (int x = 0; x < VIDEO_WIDTH; x++) {
+        for (int x = xs; x < xe; x++) {
             int l = t;
             if (mode) l = (x < split_x) ? split_l : (split_l ^ 1);
             else if (mask[x >> 7] & (0x8000 >> ((x & 127) >> 3))) continue;
@@ -197,12 +186,14 @@ static inline void s24_draw_tilemap(const memory_bus_t *bus, int t, int cat, boo
             int key = (l << 6) | (tx >> 3);
             if (key != cur) {
                 cur = key;
-                uint16_t entry = tileram_word(bus, 0x1000u * (uint32_t)l + cell + (uint32_t)(tx >> 3));
+                uint16_t entry = w[0x1000 * l + cell + (tx >> 3)];
                 bank16 = ((entry >> 7) & 0xFF) * 16;
                 pc     = (uint8_t)((entry >> 15) & 1);
-                unsigned any = 0;
-                for (int p = 0; p < 8; p++) any |= nib[p] = tile_pixel_4bpp(bus, entry & 0x3FFF, p, ty & 7);
-                dead = !opaque && (pc != (uint8_t)cat || !any);
+                /* 16-bit byteswap: bytes 1, 0, 3, 2; high nibble first */
+                const uint8_t *g = gfx + (uint32_t)(entry & 0x3FFF) * 32u + (uint32_t)(ty & 7) * 4u;
+                nib[0] = g[1] >> 4; nib[1] = g[1] & 15; nib[2] = g[0] >> 4; nib[3] = g[0] & 15;
+                nib[4] = g[3] >> 4; nib[5] = g[3] & 15; nib[6] = g[2] >> 4; nib[7] = g[2] & 15;
+                dead = !opaque && (pc != (uint8_t)cat || !(g[0] | g[1] | g[2] | g[3]));
             }
             if (dead) {
                 /* a non-opaque draw writes a pixel only where ci != 0 and the
@@ -214,37 +205,210 @@ static inline void s24_draw_tilemap(const memory_bus_t *bus, int t, int cat, boo
                 continue;
             }
             uint8_t ci = nib[tx & 7];
-            int pen = bank16 + ci;
-            if (opaque) {
-                drow[x] = pal_read16(bus, pen);
-                if (arow) arow[x] = pen ? 255 : 0;
-            } else if (ci != 0 && pc == (uint8_t)cat) {
-                drow[x] = pal_read16(bus, pen);
-                if (arow) arow[x] = 255;
+            if (opaque || ci != 0) drow[x] = (uint16_t)(bank16 + ci);
+        }
+    }
+}
+
+/* ---- Which screen blocks a tile RAM change reaches ------------------------- */
+
+/* Both compositors redraw in 8x8 screen blocks: only the blocks a tile RAM
+ * change can reach are drawn again. */
+#define TILE_BLK_W (VIDEO_WIDTH / 8)
+#define TILE_BLK_H (VIDEO_HEIGHT / 8)
+_Static_assert(TILE_BLK_W * 8 == VIDEO_WIDTH && TILE_BLK_H * 8 == VIDEO_HEIGHT, "screen is whole 8x8 blocks");
+
+typedef struct {
+    uint8_t blk[TILE_BLK_H][TILE_BLK_W];     /* 1: the 8x8 block must be drawn again */
+    int     count;
+    bool    full;
+} tile_dirty_t;
+
+/* Mark the blocks covering screen pixels [x0, x1) x [y0, y1), clipped. */
+static inline void tile_dirty_mark(tile_dirty_t *d, int x0, int x1, int y0, int y1) {
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
+    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
+    if (x0 >= x1 || y0 >= y1) return;
+    for (int by = y0 >> 3; by <= (y1 - 1) >> 3; by++)
+        for (int bx = x0 >> 3; bx <= (x1 - 1) >> 3; bx++)
+            if (!d->blk[by][bx]) { d->blk[by][bx] = 1; d->count++; }
+}
+
+/* The screen pixels where tilemap cell (cx, cy) of tilemap l can show, marked.
+ * A pixel of drawing tilemap t samples tilemap l at ((x - h) & 511, (y + v) & 511)
+ * with t's own scroll: t == l, or under a split mode the even tilemap of the pair
+ * drawing the odd one. The coordinates wrap at 512, so a cell's 8 pixels can
+ * also sit 512 lower; with a per-line H scroll the cell's lines are marked whole. */
+static inline void tile_dirty_mark_cell(tile_dirty_t *d, const uint16_t *w, int l, int cx, int cy) {
+    for (int k = 0; k < 2; k++) {
+        int t = k ? (l & 2) : l;
+        if (k && t == l) break;
+        uint16_t hscr = w[0x5000 + t], vscr = w[0x5004 + t], ctrl = w[0x5004 + (t & 2)];
+        int mode = (ctrl & 0x6000) >> 13;
+        if (vscr & 0x8000) continue;             /* t disabled */
+        if (mode && (t & 1)) continue;           /* odd tilemap idle under a split */
+        if (k && !mode) continue;                /* no split: t draws only itself */
+        int y0 = (cy * 8 - (vscr & 0x1FF)) & 511;
+        for (int j = 0; j < 2; j++) {
+            int ys = y0 - 512 * j;
+            if (hscr & 0x8000) {
+                tile_dirty_mark(d, 0, VIDEO_WIDTH, ys, ys + 8);
+            } else {
+                int x0 = (cx * 8 + (hscr & 0x1FF)) & 511;
+                tile_dirty_mark(d, x0, x0 + 8, ys, ys + 8);
+                tile_dirty_mark(d, x0 - 512, x0 - 504, ys, ys + 8);
             }
         }
     }
 }
 
-/* Everything behind the 3D: the backdrop (palette 0), tilemaps 3 and 2 opaque,
- * then tilemaps 1 and 0 where their tiles are category 0. */
-static inline void render_bg_layer(const memory_bus_t *bus, tile_layers_t *t) {
-    int n = VIDEO_WIDTH * VIDEO_HEIGHT;
-    uint16_t backc = back_color_555(bus);
-    for (int i = 0; i < n; i++) { t->bg[i] = backc; t->bg_alpha[i] = 0; }
-    s24_draw_tilemap(bus, 3, 0, true,  t->bg, t->bg_alpha);
-    s24_draw_tilemap(bus, 2, 0, true,  t->bg, t->bg_alpha);
-    s24_draw_tilemap(bus, 1, 0, false, t->bg, t->bg_alpha);
-    s24_draw_tilemap(bus, 0, 0, false, t->bg, t->bg_alpha);
+/* Which blocks the change from `old` to `cur` tile RAM words can alter on
+ * screen. A scroll or control register change moves everything: full. A row
+ * scroll word redraws its line, a window mask word its 128-pixel span of the
+ * line, a tilemap cell where it shows. Words the compositor never reads change
+ * nothing. */
+static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const uint16_t *cur) {
+    for (int i = 0; i < TILE_SNAP_WORDS && !d->full; i += 64) {
+        int n = TILE_SNAP_WORDS - i < 64 ? TILE_SNAP_WORDS - i : 64;
+        if (!memcmp(old + i, cur + i, (size_t)n * sizeof *cur)) continue;
+        for (int wi = i; wi < i + n; wi++) {
+            if (old[wi] == cur[wi]) continue;
+            if (wi < 0x4000) {
+                tile_dirty_mark_cell(d, cur, wi >> 12, wi & 63, (wi >> 6) & 63);
+            } else if (wi < 0x4800) {
+                int y = (wi - 0x4000) & 0x1FF;
+                tile_dirty_mark(d, 0, VIDEO_WIDTH, y, y + 1);
+            } else if (wi >= 0x5000 && wi < 0x5008) {
+                d->full = true;
+                break;
+            } else if (wi >= 0x6000 && wi < 0x7000) {
+                int off = (wi - 0x6000) & 0x7FF;         /* 0x6000 and 0x6800 alike */
+                if (off < VIDEO_HEIGHT * 4) {
+                    int y = off / 4, x = (off % 4) * 128;
+                    tile_dirty_mark(d, x, x + 128, y, y + 1);
+                }
+            }
+        }
+    }
 }
 
-/* Everything in front of the 3D: tilemaps 3, 2, 1, 0 where their tiles are
- * category 1. */
-static inline void render_fg_layer(const memory_bus_t *bus, tile_layers_t *t) {
+/* ---- The CPU compositor --------------------------------------------------- */
+
+/*
+ * Both layers as pens, and the RGBA the GPU is given. A frame recomposes only
+ * what changed, and the palette (which STF writes a few words of in most
+ * frames) is applied last:
+ *   - graphics changed, or a scroll or control register: every pixel is drawn
+ *     again;
+ *   - otherwise a tile RAM change redraws only the blocks it reaches
+ *     (tile_dirty_find; the snapshot it is compared with is what the pens were
+ *     drawn from, so a write landing mid-compose is caught next time);
+ *   - a palette or colour-table change rebuilds the 4096 pen colours and
+ *     recolours only the pixels whose pen's colour changed.
+ * The result is the eight full-screen passes and colour conversion of before,
+ * byte for byte (tests/tile_test.c holds both, frame after random frame).
+ */
+typedef struct {
+    uint16_t bg[VIDEO_WIDTH * VIDEO_HEIGHT];   /* pen behind the 3D; the backdrop is pen 0 */
+    uint16_t fg[VIDEO_WIDTH * VIDEO_HEIGHT];   /* pen in front of it, or TILE_PEN_NONE */
+    uint16_t words[TILE_SNAP_WORDS];           /* the tile RAM the pens were drawn from */
+    uint16_t next[TILE_SNAP_WORDS];
+    uint8_t  pencol[TILE_PEN_NONE + 1][4];     /* RGBA of each pen; NONE is clear */
+    bool     valid;
+} tile_cpu_t;
+
+/* Behind the 3D: the backdrop (pen 0), tilemaps 3 and 2 opaque, then tilemaps 1
+ * and 0 where their tiles are category 0. In front: tilemaps 3, 2, 1, 0 where
+ * category 1. Line y over [x0[y], x1[y]). */
+static inline void tile_cpu_draw(tile_cpu_t *c, const uint8_t *gfx, const int16_t *x0, const int16_t *x1) {
+    for (int y = 0; y < VIDEO_HEIGHT; y++)
+        for (int x = x0[y]; x < x1[y]; x++) {
+            c->bg[y * VIDEO_WIDTH + x] = 0;
+            c->fg[y * VIDEO_WIDTH + x] = TILE_PEN_NONE;
+        }
+    s24_draw_tilemap(c->words, gfx, 3, 0, true,  c->bg, x0, x1);
+    s24_draw_tilemap(c->words, gfx, 2, 0, true,  c->bg, x0, x1);
+    s24_draw_tilemap(c->words, gfx, 1, 0, false, c->bg, x0, x1);
+    s24_draw_tilemap(c->words, gfx, 0, 0, false, c->bg, x0, x1);
+    for (int k = 3; k >= 0; k--) s24_draw_tilemap(c->words, gfx, k, 1, false, c->fg, x0, x1);
+}
+
+/* Bring bg_rgba / fg_rgba (RGBA, row 0 top) up to date with the bus. `full`
+ * draws everything again; tile_changed / pens_changed say what may have changed
+ * since the last call (gfx changing is `full`). chan is video_pen_channels of
+ * the current colour tables. Returns whether any output byte may have changed. */
+static inline bool tile_compose_cpu(tile_cpu_t *c, const memory_bus_t *bus, const uint8_t chan[3][32],
+                                    bool full, bool tile_changed, bool pens_changed,
+                                    uint8_t *bg_rgba, uint8_t *fg_rgba) {
+    static tile_dirty_t d;
+    static int16_t x0[VIDEO_HEIGHT], x1[VIDEO_HEIGHT];
+    static uint8_t changed[TILE_PEN_NONE + 1];
+    memset(&d, 0, sizeof d);
+    d.full = full || !c->valid;
+    if (d.full || tile_changed) {
+        memcpy(c->next, bus->tile, sizeof c->next);   /* little-endian words, as on the host */
+        if (!d.full) tile_dirty_find(&d, c->words, c->next);
+        memcpy(c->words, c->next, sizeof c->words);
+    }
+    if (d.count > TILE_BLK_W * TILE_BLK_H * 3 / 4) d.full = true;
+
+    /* Lines to draw again: each block row's dirty blocks, first to last. */
+    bool drawn = d.full || d.count;
+    for (int by = 0; by < TILE_BLK_H; by++) {
+        int b0 = 0, b1 = 0;
+        if (d.full) {
+            b1 = TILE_BLK_W;
+        } else {
+            while (b0 < TILE_BLK_W && !d.blk[by][b0]) b0++;
+            b1 = TILE_BLK_W;
+            while (b1 > b0 && !d.blk[by][b1 - 1]) b1--;
+        }
+        for (int y = by * 8; y < by * 8 + 8; y++) { x0[y] = (int16_t)(b0 * 8); x1[y] = (int16_t)(b1 * 8); }
+    }
+    if (drawn) tile_cpu_draw(c, bus->tmapgfx, x0, x1);
+
+    /* The pen colours, and which of them changed. */
+    int nchanged = 0;
+    if (pens_changed || !c->valid) {
+        memset(changed, 0, sizeof changed);
+        for (int p = 0; p <= TILE_PEN_NONE; p++) {
+            uint16_t col = p < TILE_PEN_NONE ? pal_read16(bus, p) : 0;
+            uint8_t rgba[4] = { chan[0][col & 31], chan[1][(col >> 5) & 31], chan[2][(col >> 10) & 31],
+                                p < TILE_PEN_NONE ? 255 : 0 };
+            if (!c->valid || memcmp(c->pencol[p], rgba, 4)) {
+                memcpy(c->pencol[p], rgba, 4);
+                changed[p] = 1;
+                nchanged++;
+            }
+        }
+    }
+    c->valid = true;
+
     int n = VIDEO_WIDTH * VIDEO_HEIGHT;
-    memset(t->fg, 0, (size_t)n * sizeof t->fg[0]);
-    memset(t->alpha, 0, (size_t)n);
-    for (int k = 3; k >= 0; k--) s24_draw_tilemap(bus, k, 1, false, t->fg, t->alpha);
+    if (d.full) {
+        for (int i = 0; i < n; i++) {
+            memcpy(bg_rgba + i * 4, c->pencol[c->bg[i]], 4);
+            memcpy(fg_rgba + i * 4, c->pencol[c->fg[i]], 4);
+        }
+        return true;
+    }
+    if (nchanged) {
+        for (int i = 0; i < n; i++) {
+            uint16_t b = c->bg[i], f = c->fg[i];
+            if (changed[b]) memcpy(bg_rgba + i * 4, c->pencol[b], 4);
+            if (changed[f]) memcpy(fg_rgba + i * 4, c->pencol[f], 4);
+        }
+    }
+    if (drawn) {
+        for (int y = 0; y < VIDEO_HEIGHT; y++)
+            for (int i = y * VIDEO_WIDTH + x0[y]; i < y * VIDEO_WIDTH + x1[y]; i++) {
+                memcpy(bg_rgba + i * 4, c->pencol[c->bg[i]], 4);
+                memcpy(fg_rgba + i * 4, c->pencol[c->fg[i]], 4);
+            }
+    }
+    return drawn || nchanged;
 }
 
 /* ---- Pen colour --------------------------------------------------------- */
@@ -278,20 +442,11 @@ static inline void tile_pen_lut(const memory_bus_t *bus, uint8_t lut[0x8000][3])
     }
 }
 
-/* Screen colours for every 15-bit palette colour, as RGBA8 with alpha 255:
- * tile_pen_lut's table laid out for the compose loop. Built from
- * video_pen_channels' 3 x 32 values (which is what tile_pen_lut's 32768 x 3
- * come to, see below) and only when those change: the colour tables rarely
- * do, and a compose rebuilt it with 98,304 divisions every frame. */
-static uint8_t g_video_pen[0x8000][4];
-static uint8_t g_video_pen_chan[3][32];
-static bool    g_video_pen_ok;
-
 /* tile_pen_lut one channel at a time. Each channel of a pen depends only on its
  * own 5 bits, so 3 x 32 values give every entry of the 0x8000-entry table:
  * lut[c][ch] == chan[ch][(c >> 5 * ch) & 31]. The GPU path needs 8192 pens per
  * palette change, not 32768 built with a division each, and the CPU
- * compositor's table (video_pen_table) is laid out from the same 96 values.
+ * compositor's pen colours (tile_compose_cpu) come from the same 96 values.
  * --verify-gpu-tiles holds this to tile_pen_lut. */
 static inline void video_pen_channels(const memory_bus_t *bus, uint8_t chan[3][32]) {
     int loaded = 0;
@@ -305,20 +460,6 @@ static inline void video_pen_channels(const memory_bus_t *bus, uint8_t chan[3][3
             int g = (v - 64) * 255 / 191;
             chan[ch][c5] = (uint8_t)(g < 0 ? 0 : g);
         }
-}
-
-static inline void video_pen_table(const memory_bus_t *bus) {
-    uint8_t chan[3][32];
-    video_pen_channels(bus, chan);
-    if (g_video_pen_ok && memcmp(chan, g_video_pen_chan, sizeof chan) == 0) return;
-    memcpy(g_video_pen_chan, chan, sizeof chan);
-    g_video_pen_ok = true;
-    for (int c = 0; c < 0x8000; c++) {
-        g_video_pen[c][0] = chan[0][c & 0x1F];
-        g_video_pen[c][1] = chan[1][(c >> 5) & 0x1F];
-        g_video_pen[c][2] = chan[2][(c >> 10) & 0x1F];
-        g_video_pen[c][3] = 255;
-    }
 }
 
 #endif /* TILE_RENDERER_H */
