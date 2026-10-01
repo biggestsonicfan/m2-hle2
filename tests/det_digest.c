@@ -51,6 +51,10 @@
  * are the same frame for frame if the i960 cannot tell. --pcm FILE writes
  * every sample the board produced (16-bit stereo, 44.1 kHz, raw).
  *
+ * --live-timers runs the board timers on the i960's clock (irq_timer.h
+ * g_irqt_live), --region picks the power-up region (MAME's sfight is japan),
+ * and --vars adds STF's rand state (0x500098), MODE and SUB to each line.
+ *
  * Two builds of it, one from each configuration, so each has exactly its
  * frontend's compiler flags:
  *   native  --target det_digest in a desktop build tree (not a ctest: it needs a ROM)
@@ -143,6 +147,7 @@ static void cop_tap(uint32_t tag, uint32_t val) {
 }
 
 static FILE    *trace_out;
+static bool vars_cols;
 static uint32_t trace_frame;
 
 /* emu_slice_body (emu_thread.h), with a line per instruction. */
@@ -266,6 +271,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sound"))                   sound_cols = true;
         else if (!strcmp(argv[i], "--no-sound-thread"))         g_sound_thread_want = 0;
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
+        else if (!strcmp(argv[i], "--live-timers"))             g_irqt_live = 1;
+        else if (!strcmp(argv[i], "--region") && i + 1 < argc)  g_region = game_region_parse(argv[++i]);
+        else if (!strcmp(argv[i], "--vars"))                    vars_cols = true;
         else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
@@ -372,6 +380,8 @@ int main(int argc, char **argv) {
             fprintf(out, " %016llx %llu", (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
                     (unsigned long long)g_sound.out_total);
         }
+        if (vars_cols) fprintf(out, " rand=%08x mode=%04x sub=%04x", mem_read32(&bus, 0x500098),
+                               mem_read16(&bus, 0x50002A), mem_read16(&bus, 0x500030));
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);

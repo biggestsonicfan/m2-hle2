@@ -157,8 +157,11 @@
  *    frame above it, the processor starts at MAME's reset PC, and modpc takes
  *    its mask from src2 (i960_exec.h), so the registers the frame check hashes
  *    and the stack differ from a board before it; the game does not.
+ * 11: a board timer that is not counting reads 0xFFFFF, as MAME's does
+ *    (irq_timer.h IRQT_IDLE), not 0; STF's rand adds all four timers, so its
+ *    numbers early in boot differ from a board before it.
  */
-#define NETPLAY_PROTO_REV 10
+#define NETPLAY_PROTO_REV 11
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

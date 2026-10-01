@@ -426,6 +426,8 @@ static uint64_t s_slice_cycles0     = 0;   /* cpu->cycles when this game frame b
  * game re-arms its frame timer in the vsync handler. Charging it here instead
  * put the wait ahead of the new frame's budget, and STF then skipped half its
  * sway chains at character select, where the board runs them all. */
+static bool s_vsync_waited = false;   /* this frame's wait was charged at its vsync */
+
 static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
     if (!g_irqt_live) { irqt_tick(EMU_CPU_HZ / EMU_SLICES_PER_SEC); return; }
     i960_cycle_table_init();
@@ -435,14 +437,28 @@ static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
     irqt_flush();
 }
 
-/* The game's frame has ended: the board would spin here until vsync, so give the
- * timers the rest of this 1/60 s before the frame that follows starts to count. */
+/* The game is waiting for vblank (irq_timer.h g_irqt_vsync_wait): give the
+ * timers the rest of this 1/60 s before its vsync handler runs. */
+static inline void emu_timers_vsync(i960_cpu_t *cpu) {
+    g_irqt_vsync_wait = 0;
+    irqt_flush();
+    int64_t idle = EMU_CPU_HZ / EMU_SLICES_PER_SEC - (int64_t)(cpu->cycles - s_slice_cycles0);
+    if (idle > 0) irqt_tick(idle);
+    s_slice_cycles0 = cpu->cycles;
+    s_vsync_waited  = true;
+}
+
+/* The game's frame has ended. A game whose hook marks its vsync wait has been
+ * given its idle time there; for any other the board would spin here until
+ * vsync, so give the timers the rest of this 1/60 s before the frame that
+ * follows starts to count. */
 static inline void emu_timers_frame_edge(emu_thread_ctx_t *ctx) {
     if (!g_irqt_live) return;
     i960_cpu_t *cpu = ctx->cpu;
     g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
     irqt_flush();
+    if (s_vsync_waited) { s_vsync_waited = false; return; }
     int64_t idle = EMU_CPU_HZ / EMU_SLICES_PER_SEC - (int64_t)(cpu->cycles - s_slice_cycles0);
     if (idle > 0) irqt_tick(idle);
     s_slice_cycles0 = cpu->cycles;
@@ -454,6 +470,7 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
     i960_cpu_t *cpu = ctx->cpu;
     g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
+    if (M2_UNLIKELY(g_irqt_vsync_wait)) emu_timers_vsync(cpu);
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
     if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FCu) && g_active_profile &&
             (g_active_profile->quirks.irq_handler[2] || g_active_profile->quirks.irq_vectors))

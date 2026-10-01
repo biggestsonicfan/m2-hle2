@@ -277,6 +277,7 @@ static int sfight_hook_idle(i960_cpu_t *cpu, memory_bus_t *bus) {
     static int s_vsync_fired = 0;
     if (!s_vsync_fired) {
         s_vsync_fired = 1;
+        if (g_irqt_live) { g_irqt_vsync_wait = 1; emu_attn_bump(); }   /* wait for vblank first */
         hle_call(cpu, 0x00000C40, 0x00011610);
         return 0;
     }
