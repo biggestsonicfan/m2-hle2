@@ -124,6 +124,7 @@ static struct {
     bool             show_breakpoints;
     bool             show_bus_stats;
     bool             show_cop;
+    bool             show_sky_eye;
     memory_bus_t     bus;
     i960_cpu_t       cpu;
     emu_thread_ctx_t emu;
@@ -394,6 +395,58 @@ static void draw_bus_stats_window(void) {
     igEnd();
 }
 
+/* SKY EYE (core/sky_eye.h): paste a noclip view link, go to its stage and
+ * camera; or copy the game's camera out as one. */
+static void draw_sky_eye_window(void) {
+    static char link[1024];
+    static char err[160];
+    igSetNextWindowSize((ImVec2){460, 230}, ImGuiCond_FirstUseEver);
+    if (!igBegin("SKY EYE", &state.show_sky_eye, 0)) { igEnd(); return; }
+    if (!sky_eye_profile_ok()) {
+        igTextWrapped("SKY EYE is for Sonic the Fighters (the sfight or sfight_console profile).");
+        igEnd();
+        return;
+    }
+    igTextWrapped("A noclip view link (the explorer's Share link, or its SKY EYE Copy):");
+    igInputText("##skyeye_link", link, sizeof link, 0);
+    const int locked = state.emu.thread_alive;
+    if (igButton("Go")) {
+        sky_eye_req_t r;
+        err[0] = 0;
+        if (sky_eye_parse_link(link, &r, err, sizeof err)) {
+            if (locked) emu_mutex_lock(&state.emu.mutex);
+            sky_eye_start(&r);
+            if (locked) emu_mutex_unlock(&state.emu.mutex);
+        }
+    }
+    igSameLine();
+    if (igButton("Off")) {
+        if (locked) emu_mutex_lock(&state.emu.mutex);
+        sky_eye_stop();
+        if (locked) emu_mutex_unlock(&state.emu.mutex);
+    }
+    igSameLine();
+    char out[512] = "";
+    float p[3] = {0}; int a[3] = {0};
+    if (locked) emu_mutex_lock(&state.emu.mutex);
+    int have = sky_eye_read_camera(&state.bus, p, a);
+    int stage = (int)mem_read8(&state.bus, SKY_EYE_STAGE_NUM);
+    if (igButton("Copy explorer link")) sky_eye_link(&state.bus, out, sizeof out);
+    if (locked) emu_mutex_unlock(&state.emu.mutex);
+    if (out[0]) igSetClipboardText(out);
+    if (err[0]) igTextColored((ImVec4){1, 0.4f, 0.4f, 1}, "%s", err);
+    const sky_eye_req_t *q = &g_sky_eye.req;
+    igText("phase: %s", SKY_EYE_PHASE_NAME[g_sky_eye.phase]);
+    if (g_sky_eye.phase != SKY_EYE_OFF)
+        igText("asked: stage %d  eye %.3f %.3f %.3f  ang 0x%04X 0x%04X%s", q->stage,
+               q->pos[0], q->pos[1], q->pos[2], q->xang & 0xFFFF, q->yang & 0xFFFF,
+               q->from_explorer ? "  (from the explorer's pos)" : "");
+    if (have)
+        igText("game:  STAGE NUMBER %d  Xpos %.3f Ypos %.3f Zpos %.3f\n       Xang 0x%04X Yang 0x%04X Zang 0x%04X",
+               stage + 1, p[0], p[1], p[2], a[0] & 0xFFFF, a[1] & 0xFFFF, a[2] & 0xFFFF);
+    igEnd();
+}
+
 /*
  * Whether the main menu bar is on screen this frame.
  *
@@ -484,6 +537,7 @@ static void draw_menu_bar(void) {
         igMenuItemBoolPtr("Break on unknown COP cmd", NULL, (bool*)&g_sharc.break_on_unknown, true);
         igMenuItemBoolPtr("3D viewer",        NULL, &state.show_geo3d,       true);
         igMenuItemBoolPtr("Object viewer",    NULL, &state.show_objview,     true);
+        igMenuItemBoolPtr("SKY EYE (noclip link)", NULL, &state.show_sky_eye, true);
         if (igMenuItem("Dump 3D captures")) geo3d_log_captures(&state.geo3d);
         if (igMenuItem("Dump COP stream"))  geo3d_dump_capture_stream();
         igMenuItemBoolPtr("68K sound CPU",    NULL, &state.show_m68k_cpu,    true);
@@ -1097,6 +1151,7 @@ static void frame(void) {
         }
         objview_window_draw(&state.show_objview, &state.romset, &state.bus);
         if (state.show_bus_stats)   draw_bus_stats_window();
+        if (state.show_sky_eye)     draw_sky_eye_window();
         if (state.show_m68k_cpu || state.show_m68k_mem) sound_settle();   /* not mid-run on the sound thread */
         if (state.show_m68k_cpu) {
             m68k_window_draw(&g_sound.m68k, &state.m68k_snapshot, &state.show_m68k_cpu);
@@ -1382,6 +1437,12 @@ sapp_desc sokol_main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--match-replay-stage") == 0 && i + 1 < argc) {
             g_match_replay = 1;       /* ... played on this stage (see g_match_replay_stage) */
             g_match_replay_stage = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--sky-eye") == 0 && i + 1 < argc) {
+            /* A noclip view link: its stage, then its camera, held (core/sky_eye.h). */
+            sky_eye_req_t r;
+            char err[160];
+            if (sky_eye_parse_link(argv[++i], &r, err, sizeof err)) sky_eye_start(&r);
+            else LOG_WARN("--sky-eye: %s", err);
         } else if (strcmp(argv[i], "--nowarnskip") == 0) {
             g_warning_skip = 0;       /* keep warning screen → frame-align with MAME */
         } else if (strcmp(argv[i], "--realirq") == 0) {

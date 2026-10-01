@@ -31,6 +31,7 @@
 #include "breakpoint.h"
 #include "pc_profile.h"  /* i960 instruction counts per address (M2HLE_PROFILE builds) */
 #include "hle_hooks.h"   /* hle_interrupt, g_active_profile */
+#include "sky_eye.h"     /* SKY EYE mode's stage hold (Pinboard #265) */
 #include "irq_timer.h"   /* board IRQ controller + timers */
 #include "../board/sound.h"  /* sound_run_slice: the 68000 + SCSP */
 #include "../net/netplay.h"  /* the lockstep frame gate (inert unless a session is up) */
@@ -665,6 +666,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             dl_frame_edge(ctx->bus, g_emu_frames);
             hle_match_replay_edge(ctx->bus);
         }
+        sky_eye_edge(ctx->bus);
     }
 
     /* The sound board runs on its own sample clock: a frame's worth of

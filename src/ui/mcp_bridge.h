@@ -516,6 +516,70 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"bytes_written\":%d}", count);
 }
 
+/* sky_eye: SKY EYE mode (core/sky_eye.h, Pinboard #265). {"link":"<noclip view
+ * link>"} or {"stage":n,"eye":"x,y,z","ang":"xang,yang,zang"} starts it,
+ * {"off":1} ends it, and nothing at all asks how it is going. Every answer
+ * carries the phase: "ready" means the stage is the one asked for, its textures
+ * have stopped changing and the camera is where the link put it. */
+static void mcp_cmd_sky_eye(const char *req, char *resp, int cap) {
+    if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
+    char link[1024] = {0}, v[128], err[160] = {0};
+    if (!json_get_str_unescaped(req, "link", link, sizeof link)) {
+        size_t n = 0;
+        if (json_get_str(req, "eye", v, sizeof v))
+            n += (size_t)snprintf(link + n, sizeof link - n, "&eye=%s", v);
+        if (json_get_str(req, "ang", v, sizeof v))
+            n += (size_t)snprintf(link + n, sizeof link - n, "&ang=%s", v);
+        uint32_t st;
+        if (mcp_json_get_u32(req, "stage", &st))
+            n += (size_t)snprintf(link + n, sizeof link - n, "&stage=%u", st);
+        if (n) link[0] = '#';
+    }
+    const char *ov = json_value_at(req, "off");     /* {"off":true} as well as 1 */
+    int off = ov && (*ov == 't' || strtoul(ov, NULL, 0) != 0);
+    sky_eye_req_t r;
+    if (link[0] && !sky_eye_parse_link(link, &r, err, sizeof err)) {
+        char esc[320];
+        mcp_json_escape(esc, (int)sizeof esc, err);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"%s\"}", esc);
+        return;
+    }
+    if (link[0] && !sky_eye_profile_ok()) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"SKY EYE needs the sfight or sfight_console profile\"}");
+        return;
+    }
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    if (off) sky_eye_stop();
+    else if (link[0]) sky_eye_start(&r);
+    float p[3] = {0}; int a[3] = {0};
+    int have = sky_eye_read_camera(g_mcp.bus, p, a);
+    int stage_now = (int)mem_read8(g_mcp.bus, SKY_EYE_STAGE_NUM);
+    const sky_eye_req_t *q = &g_sky_eye.req;
+    snprintf(resp, (size_t)cap,
+        "{\"ok\":true,\"phase\":\"%s\",\"stage\":%d,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d],"
+        "\"from_explorer\":%s,\"frames\":%u,\"phase_frames\":%u,\"texram_stable_polls\":%d,"
+        "\"camera_held\":%s,\"hook_calls\":%u,\"game\":{\"stage_num\":%d,\"camera\":%s,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d]}}",
+        SKY_EYE_PHASE_NAME[g_sky_eye.phase], q->stage, q->pos[0], q->pos[1], q->pos[2],
+        q->xang, q->yang, q->zang, q->from_explorer ? "true" : "false",
+        g_sky_eye.total_frames, g_sky_eye.phase_frames, g_sky_eye.stable,
+        g_sky_eye.camera_held ? "true" : "false", g_sky_eye.hook_calls, stage_now, have ? "true" : "false",
+        p[0], p[1], p[2], a[0], a[1], a[2]);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+}
+
+/* sky_eye_link: the game's camera and stage as a noclip view link fragment. */
+static void mcp_cmd_sky_eye_link(char *resp, int cap) {
+    if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
+    char link[512];
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    int ok = sky_eye_profile_ok() && sky_eye_link(g_mcp.bus, link, sizeof link);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    if (!ok) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no STF camera record\"}"); return; }
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"link\":\"%s\"}", link);
+}
+
 static void mcp_cmd_emu_run(char *resp, int cap) {
     if (!g_mcp.emu || !g_mcp.emu->thread_alive) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emu not started\"}"); return;
@@ -2308,6 +2372,8 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "read_memory")      == 0) mcp_cmd_read_memory(req, resp, cap, 0);
     else if (strcmp(cmd, "read_many")        == 0) mcp_cmd_read_many(req, resp, cap, 0);
     else if (strcmp(cmd, "write_memory")     == 0) mcp_cmd_write_memory(req, resp, cap);
+    else if (strcmp(cmd, "sky_eye")          == 0) mcp_cmd_sky_eye(req, resp, cap);
+    else if (strcmp(cmd, "sky_eye_link")     == 0) mcp_cmd_sky_eye_link(resp, cap);
     else if (strcmp(cmd, "dump_memory_file") == 0) mcp_cmd_dump_memory_file(req, resp, cap);
     else if (strcmp(cmd, "wait_frames")      == 0) mcp_cmd_wait_frames(req, resp, cap);
     else if (strcmp(cmd, "run_frames")       == 0) mcp_cmd_run_frames(req, resp, cap);

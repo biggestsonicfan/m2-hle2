@@ -46,6 +46,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--rom <path>` | Auto-load this ROM zip on startup |
 | `--run` | Start executing immediately after ROM load |
 | `--match-replay` | Arm `match_replay` (below) from boot |
+| `--sky-eye <link>` | Start `sky_eye` (below) from boot with a noclip view link |
 | `--objview [N]` | Open the object viewer at boot, optionally on model N |
 | `--headless` | No window, GPU or audio device. The object-viewer tools do not work here |
 | `--no-tray` | `--headless` without its notification-area icon (a service, or a Session 0 run) |
@@ -101,6 +102,34 @@ the profile's `quirks.attract_replay`; on a profile without one the command
 fails (`ok: false`, "this game profile has no attract replay"). Returns
 `match_replay` (`armed`, or `done` if it has already fired).
 `tools/match-replay.mjs` grades that fight against MAME.
+
+**`sky_eye(link?, off?)`** (STF; `{"cmd":"sky_eye","link":"…"}`)
+SKY EYE mode, after the debug menu page of that name (`core/sky_eye.h`). The
+`link` is a noclip view link: its `stage`, and the board camera noclip's SKY EYE
+readout writes as `eye=x,y,z` and `ang=xang,yang,zang` (board units; int16
+angles, 0x10000 a turn). A link without them falls back to the explorer's `pos`
+and `look` (fly) or `target` (orbit), which is the board's camera on every stage
+that does not fly (`from_explorer: true`). The fields can also go in on their
+own: `{"cmd":"sky_eye","stage":3,"eye":"0,1.6,-6","ang":"-512,0,0"}`.
+`{"off":1}` ends it; with nothing, it reports.
+
+The mode holds `stage_num` and the attract replay's stage every frame and waits
+for the game to load it (the loaded record's texture words against the ROM
+record's, as `tools/lib/capture.mjs` checks), then holds the camera record
+(`fa_camera` +0x18..+0x28) every frame in `camera_control`, after `camera_work`.
+It does not set the debug menu's `debug_flag` bit 5, which would also stop the
+fighters, collision and the attract movie. Returns `phase`: `loading` (the stage
+is not up yet), `settling` (it is, the camera is held, textures still arriving),
+`ready` (texture RAM unchanged for two polls 15 frames apart) or `off`; the
+request (`stage`, `eye`, `ang`), `frames` since it, `camera_held` (the hook found
+the record last frame), `hook_calls` (times `camera_control` reached it), and `game`: what the board holds now. Run it with a
+fight on screen, e.g. `--match-replay`: in the attract's other scenes the fight
+camera is not drawn.
+
+**`sky_eye_link()`**
+The game's camera and stage now as a noclip link fragment (`#game=sfight&tab=stage&…`
+with `eye`/`ang`, and `pos`/`target`/`look` for a noclip without them). Append it to
+the explorer's page URL.
 
 **`get_registers()`**
 Returns a full i960 CPU snapshot:

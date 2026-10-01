@@ -36,6 +36,7 @@
 #include "i960.h"
 #include "hle_hooks.h"
 #include "m2_texload.h"
+#include "sky_eye.h"     /* noclip view links -> the camera record (Pinboard #265) */
 
 /* ---- Loader ------------------------------------------------------------- */
 
@@ -674,7 +675,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 19
+#define SFIGHT_BASE_HOOK_COUNT 20
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
@@ -694,6 +695,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0004BD30, sfight_hook_tex_send_beta,     "send_beta_data row"      }, \
     { 0x0004BF64, sfight_hook_tex_send_lod,      "send_lod_data row"       }, \
     { 0x0004C1F8, sfight_hook_tex_q_norm,        "send_lod_data_q_sub_norm row" }, \
+    { SKY_EYE_HOOK_PC, sky_eye_hook_camera,       "camera_control sky_eye" }, \
     { 0x0004C334, sfight_hook_tex_q_anim,        "send_lod_data_q_sub_anim row" },
 
 /* hook_count stops the scan, so a count one short drops the last hook without
