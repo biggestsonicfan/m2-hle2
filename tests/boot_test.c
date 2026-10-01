@@ -13,7 +13,7 @@
 #include "sfight.h"        /* sfight_profile, load/install, hooks, hle_check */
 #include "i960_exec.h"
 
-#define ROMDIR "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms/"
+#include "test_rom_dir.h"
 #define FRAME_PACE_IP 0x00011A04u
 
 /* hle_check dispatches through g_active_profile — point it at STF. */
@@ -30,7 +30,7 @@ int main(void) {
     static memory_bus_t bus;
     static i960_cpu_t   cpu;
 
-    if (sfight_load(&rs, ROMDIR "sfight.zip", ROMDIR "schamp.zip") != 0) {
+    if (sfight_load(&rs, test_rom("sfight.zip"), test_rom("schamp.zip")) != 0) {
         printf("FAIL: ROM load\n"); return 1;
     }
     sfight_install(&rs, &cpu, &bus);

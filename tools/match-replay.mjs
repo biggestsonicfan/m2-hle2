@@ -24,14 +24,15 @@
  *
  * $MAME_EXE names mame.exe (default ../claude_mame/mame/mame.exe) and
  * $MAME_ROMPATH a directory holding only sfight.zip, schamp.zip and
- * segabill.zip (default tools/mame/mameroms), as tools/mame/cop_capture.py.
+ * segabill.zip (default $ROMS_DIR, else tools/mame/mameroms), as
+ * tools/mame/cop_capture.py.
  */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { M2Hle } from './lib/m2hle.mjs';
-import { findRom } from './lib/rom.mjs';
+import { findRom, mameRomPath } from './lib/rom.mjs';
 import { REPO } from './lib/noclip.mjs';
 import { Report } from './lib/report.mjs';
 import { parseArgs } from './lib/args.mjs';
@@ -66,7 +67,7 @@ const RIG = 0x1f8;
 
 if (args.bool('mame')) {
     const exe = process.env.MAME_EXE ?? path.resolve(REPO, '..', 'claude_mame', 'mame', 'mame.exe');
-    const rompath = process.env.MAME_ROMPATH ?? path.join(REPO, 'tools', 'mame', 'mameroms');
+    const rompath = mameRomPath();
     if (!fs.existsSync(exe)) { console.error(`no MAME at ${exe} — set $MAME_EXE`); process.exit(2); }
     for (const z of ['sfight.zip', 'schamp.zip', 'segabill.zip']) {
         if (!fs.existsSync(path.join(rompath, z))) { console.error(`${rompath} has no ${z} — set $MAME_ROMPATH`); process.exit(2); }

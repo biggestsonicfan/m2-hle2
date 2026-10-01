@@ -10,6 +10,7 @@
  * Search order, first hit wins:
  *
  *   $STF_ROM             an explicit path to the zip
+ *   $ROMS_DIR            the machine's one ROM folder (ROMS_DIR below)
  *   <repo>/sfight.zip    a dump dropped in the checkout (gitignored)
  *   <repo>/roms/         likewise (gitignored)
  *   ../stf-tools, ../noclip   a sibling checkout that already has one
@@ -17,18 +18,36 @@
  * A split set needs schamp.zip beside sfight.zip: the program EPROMs come from
  * the clone and the mask ROMs from the parent. A non-merged sfight.zip carries
  * everything and is enough on its own.
+ *
+ * Use a set where it lies; never copy one into a scratch directory. M2Hle.launch
+ * runs the emulator from a directory of its own, so nothing is written beside
+ * the ROM and no loose sfight/epr-* file there is taken for the program.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { REPO, nc } from './noclip.mjs';
 
 const NAMES = ['sfight.zip', 'schamp.zip'];
 
+/* The dev container keeps every stock set it has in one folder of symlinks
+ * (antigravity-dev-docker's link-roms.sh): if a set is not there, it is not in
+ * the container. $ROMS_DIR names it; elsewhere the default is simply absent. */
+export const ROMS_DIR = process.env.ROMS_DIR || path.join(os.homedir(), 'build', 'mameroms');
+
+/** MAME's -rompath: $MAME_ROMPATH, else ROMS_DIR (zips only, no loose sfight/
+ *  folder for MAME to prefer), else tools/mame/mameroms. */
+export function mameRomPath() {
+    if (process.env.MAME_ROMPATH) return process.env.MAME_ROMPATH;
+    if (fs.existsSync(path.join(ROMS_DIR, 'sfight.zip'))) return ROMS_DIR;
+    return path.join(REPO, 'tools', 'mame', 'mameroms');
+}
+
 /** Directories a ROM set might be sitting in, in preference order. */
 export function romSearchPath() {
     const dirs = [];
     if (process.env.STF_ROM) dirs.push(path.dirname(path.resolve(process.env.STF_ROM)));
-    dirs.push(REPO, path.join(REPO, 'roms'));
+    dirs.push(ROMS_DIR, REPO, path.join(REPO, 'roms'));
     dirs.push(path.resolve(REPO, '..', 'stf-tools'), path.resolve(REPO, '..', 'noclip'));
     return dirs;
 }

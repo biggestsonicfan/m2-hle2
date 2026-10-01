@@ -50,10 +50,23 @@ Node 18 or newer, because the explorer's zip reader goes through
 `DecompressionStream`.
 
 You supply the ROM set. Nothing here carries one and `.gitignore` refuses
-`*.zip`. Drop `sfight.zip` in the repository root or in `roms/` (add
-`schamp.zip` beside it for a split set), or point `$STF_ROM` at one; sibling `../stf-tools` and
-`../noclip` checkouts are searched too. Both sides of every comparison read that
-same file, so a grade can never be measuring two different games.
+`*.zip`. In the dev container every stock set is in one folder, `$ROMS_DIR`
+(`~/build/mameroms`, symlinks), and the tools look there first: if a set is not
+there, it is not in the container. Elsewhere, drop `sfight.zip` in the repository
+root or in `roms/` (add `schamp.zip` beside it for a split set), or point
+`$STF_ROM` at one; sibling `../stf-tools` and `../noclip` checkouts are searched
+too. Both sides of every comparison read that same file, so a grade can never be
+measuring two different games.
+
+Never copy a set into a scratch or build directory to run it. `M2Hle.launch`
+runs the emulator from a directory of its own per port (`<tmp>/m2hle-run-<port>`,
+or its `cwd` option), so its log never lands beside the ROM, and finds
+`schamp.zip` beside the `--rom` path. Running from the ROM's folder is also
+wrong for a second reason: the sfight profile loads a loose
+`sfight/epr-19001.15` / `epr-19002.16` from the working directory over the
+zip's, and `claude_mame/mame/roms` has such a folder (a homebrew program).
+The C tests that load STF (`rom_test`, `boot_test`, `geo_test`, `input_test`,
+`snd_replay`, `snd_bench`, `m68k_fuzz`) take `$ROMDIR`, else `$ROMS_DIR`.
 
 Anything a capture writes is the game's own data. It goes to a temp directory
 outside the checkout by default, and that is deliberate.
@@ -385,8 +398,9 @@ stage loads. It checks, in order:
 - the bufferram ranges.
 
 It needs `$MAME_EXE` (default `../claude_mame/mame/mame.exe`) and a
-`$MAME_ROMPATH` that holds only `sfight.zip`, `schamp.zip` and `segabill.zip`
-(default `tools/mame/mameroms`), as `tools/mame/cop_capture.py` does.
+`$MAME_ROMPATH` with `sfight.zip`, `schamp.zip` and `segabill.zip` and no loose
+`sfight/` folder (default `$ROMS_DIR`, else `tools/mame/mameroms`), as
+`tools/mame/cop_capture.py` does.
 `--ref <file>` grades against another MAME reference and `--show N` prints the differing
 words of N frames from each check's first difference (default 6).
 

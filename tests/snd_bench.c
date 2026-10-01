@@ -7,10 +7,11 @@
  *   run: at most this many samples per sound_run, as the emulator runs a
  *   frame's (the chip makes its samples late, scsp.h "The chip's own time";
  *   1 makes it sync every sample, the old lockstep cost)
- *   $ROMDIR: directory with sfight.zip and schamp.zip
+ *   $ROMDIR (else $ROMS_DIR): directory with sfight.zip and schamp.zip
  *   $SND_HLE=1: the sound driver in C instead of on the 68000 (sound_hle.h)
  */
 #define NDEBUG 1
+#include "test_rom_dir.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,8 +38,7 @@ int main(int argc, char **argv) {
     long dsp_iters = argc > 3 ? atol(argv[3]) : 400000;
     uint64_t run = argc > 4 ? strtoull(argv[4], NULL, 10) : 735;
     if (!run) run = 1;
-    const char *romdir = getenv("ROMDIR");
-    if (!romdir) romdir = "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms";
+    const char *romdir = test_rom_dir();
 
     char path[1024];
     snprintf(path, sizeof path, "%s.bin", argv[1]);
