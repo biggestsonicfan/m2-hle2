@@ -46,6 +46,7 @@
  * to precede it. main.c already includes this first, so here it is a no-op --
  * it is stated so the dependency is visible from the file that has it. */
 #include "net/netplay.h"   /* the lobby, over the bridge — see the netplay section */
+#include "m2_texload.h"   /* get_status reports the texture loader in C */
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -189,6 +190,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
              "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
+             "\"texload\":{\"hle\":%s,\"rows\":%llu},"
              "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
@@ -198,6 +200,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
              g_match_replay_frame,
              g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
+             g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
              av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
@@ -1571,6 +1574,11 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     /* cop: the coprocessor conversation in a MAME SHARC-side capture's format
      * (tests/cop_replay), with <path>.bufram.bin and <path>.dm.bin beside it. */
     mcp_json_get_u32(req, "cop", &want_cop);
+    /* run: start a stopped emulator once the capture is armed, so a grader
+     * launched without --run captures from power-on instead of from whenever
+     * this request happened to arrive. */
+    uint32_t want_run = 0;
+    mcp_json_get_u32(req, "run", &want_run);
     mcp_json_get_u32(req, "lo", &lo);
     mcp_json_get_u32(req, "hi", &hi);
     if (lo < DL_TAP_LO) lo = DL_TAP_LO;
@@ -1642,6 +1650,7 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     memcpy(g_dl.probe_size, psize, (size_t)np);
     g_dl.armed = 1;
     emu_mutex_unlock(&g_mcp.emu->mutex);
+    if (want_run && g_mcp.emu->thread_alive) emu_run(g_mcp.emu);
 
     /* Wait out the frames without holding the mutex, as wait_frames does. */
     uint32_t elapsed = 0, idle_ms = 0;

@@ -1328,6 +1328,7 @@ static void event(const sapp_event* ev) {
 sapp_desc sokol_main(int argc, char* argv[]) {
     { const char *e = getenv("M2HLE_NO_SOUND_BOARD"); if (e && e[0] == '1') g_no_sound_board = 1; }
     { const char *e = getenv("M2HLE_SOUND_HLE"); if (e && e[0] == '1') g_sound_hle_want = 1; }
+    { const char *e = getenv("M2HLE_TEXLOAD_HLE"); if (e && e[0] == '0') g_texload_hle = 0; }
     /* The log's own options come first: the first line logged, a warning about
      * any argument below included, opens the file. Without --log, an instance
      * given its own --mcp-port gets its own file, because instances started
@@ -1436,6 +1437,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_no_sound_board = 1;
         } else if (strcmp(argv[i], "--sound-hle") == 0) {
             g_sound_hle_want = 1;
+        } else if (strcmp(argv[i], "--texload-i960") == 0) {
+            g_texload_hle = 0;   /* STF's texture loader on the i960, not in C (m2_texload.h) */
         } else if (strcmp(argv[i], "--no-tray") == 0) {
             /* For a service or a Session 0 run, where there is no shell to put
              * an icon in and the process is stopped some other way. */
