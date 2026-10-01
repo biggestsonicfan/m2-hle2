@@ -17,6 +17,13 @@ local OUT     = assert(os.getenv("LF_OUT"), "set LF_OUT")
 local CHAR    = tonumber(os.getenv("LF_CHAR") or "0")
 local EVERY   = tonumber(os.getenv("LF_EVERY") or "10")
 local COIN_AT = tonumber(os.getenv("LF_COIN_AT") or "1800")
+-- LF_FIXRAND=1: rand() (0x66B0) adds four live timer counts to `random`, so
+-- the launch smoke is scattered differently on every board that is not
+-- cycle-exact. Its four timer loads become `mov 1, r13` / `mov 0, r13`, which
+-- leaves a counter stepping 16 a call, and `random` is pinned through
+-- sub-modes 30-32, so both boards enter the cutscene with one sequence.
+local FIXRAND = os.getenv("LF_FIXRAND") == "1"
+local RANDOM, RANDOM_SEED = 0x500098, 0x13572468
 
 local sp  = manager.machine.devices[":maincpu"].spaces["program"]
 local in0 = manager.machine.ioport.ports[":IN0"]
@@ -69,6 +76,7 @@ local function watch()
         sp:write_u16(sp:read_u32(FA_ROB1) + ENERGY, 1)
         if sp:read_i16(GAME_TIMER) > 60 then sp:write_u16(GAME_TIMER, 60) end
     end
+    if FIXRAND and sub >= 30 and sub <= 32 then sp:write_u32(RANDOM, RANDOM_SEED) end
     if sub ~= last_sub then
         say("sub %d at frame %d (frame_counter %d, mode %d, stage_num %d, am_cntr %d)", sub, frame,
             sp:read_u32(FRAME), sp:read_u8(MODE), sp:read_u8(0x500064), sp:read_u16(AM_CNTR))
@@ -79,7 +87,7 @@ local function watch()
         local am = sp:read_u16(AM_CNTR)
         if am ~= last_am and am % EVERY == 0 then
             manager.machine.video:snapshot()
-            say("  snapshot am %d frame %d frame_counter %d", am, frame, sp:read_u32(FRAME))
+            say("  snapshot am %d frame %d frame_counter %d random %08X", am, frame, sp:read_u32(FRAME), sp:read_u32(RANDOM))
         end
         last_am = am
     end
@@ -100,4 +108,9 @@ _G.LUNAR_FOX_SUB = emu.add_machine_frame_notifier(function()
     local ok, e = pcall(tick)
     if not ok then say("error: %s", tostring(e)); log:close(); manager.machine:exit() end
 end)
-say("lunar-fox armed: char %d, every %d", CHAR, EVERY)
+if FIXRAND then
+    local rom = manager.machine.memory.regions[":maincpu"]
+    rom:write_u32(0x66BC, 0x5C681E01)
+    for _, a in ipairs({ 0x66C8, 0x66D4, 0x66E0 }) do rom:write_u32(a, 0x5C681E00) end
+end
+say("lunar-fox armed: char %d, every %d, fixrand %s", CHAR, EVERY, tostring(FIXRAND))

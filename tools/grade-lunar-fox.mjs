@@ -19,7 +19,8 @@
  * The board's own figure of merit is the emblem on the lab doors (the Tails
  * head, --crop x,y,w,h): per pair, the mean difference a channel over the
  * crop and over the whole frame, and a MAME | here strip of the worst crops.
- * The check: while the doors are in shot (am_cntr < 200 of the lab part), the
+ * The check: while the doors are in shot and clear of smoke (am_cntr < 195 of
+ * the lab part), the
  * crop's worst pair within --tol (3) a channel. --set zheld=0 passes a
  * set_camera key here, for an A/B.
  *
@@ -43,6 +44,12 @@ import { readPng, writePng } from './lib/png.mjs';
 import { COIN1, IN } from './lib/board.mjs';
 
 const args = parseArgs(['char', 'every', 'port', 'out', 'lag', 'crop', 'set', 'part', 'tol']);
+/* --fixrand: rand() made a plain counter and `random` pinned into the cutscene
+ * on both boards (see lunar-fox.lua), so the launch smoke is laid out alike.
+ * Without it the smoke follows live timer counts and cannot match. Both sides
+ * must be taken with it. */
+const FIXRAND = args.bool('fixrand');
+const RANDOM = 0x500098, RANDOM_SEED = 0x13572468;
 const CHAR = args.num('char', 0);
 const EVERY = args.num('every', 10);
 const OUT = path.resolve(args.str('out', path.join(os.tmpdir(), 'm2hle-lunar-fox', `c${CHAR}`)));
@@ -73,7 +80,8 @@ if (args.bool('mame')) {
         '-seconds_to_run', '299', '-autoboot_script', path.join(REPO, 'tools', 'mame', 'lunar-fox.lua')],
         { stdio: 'ignore', timeout: 3600000,
           env: { ...process.env, SDL_VIDEODRIVER: process.env.SDL_VIDEODRIVER ?? 'dummy',
-                 LF_OUT: path.join(mameDir, 'mame'), LF_CHAR: String(CHAR), LF_EVERY: String(EVERY) } });
+                 LF_OUT: path.join(mameDir, 'mame'), LF_CHAR: String(CHAR), LF_EVERY: String(EVERY),
+                 LF_FIXRAND: FIXRAND ? '1' : '0' } });
     const log = fs.existsSync(path.join(mameDir, 'mame.log')) ? fs.readFileSync(path.join(mameDir, 'mame.log'), 'utf8') : '';
     rep.check('MAME played the cutscene through', /^done$/m.test(log), r.error ? String(r.error) : `exit ${r.status}`);
     rep.finish();
@@ -134,6 +142,11 @@ async function playHere(port) {
             }
         });
         await emu.waitForRom();
+        if (FIXRAND) {
+            const w = (a, v) => emu.rpc('write_memory', { addr: '0x' + a.toString(16), data: v.toString(16).padStart(8, '0').match(/../g).reverse().join(''), rom: '1' });
+            await w(0x66bc, 0x5c681e01);
+            for (const a of [0x66c8, 0x66d4, 0x66e0]) await w(a, 0x5c681e00);
+        }
         await emu.waitFrames(900);
         await tap(COIN1);
         await emu.waitFrames(60);
@@ -162,9 +175,22 @@ async function playHere(port) {
         }
         rep.note(`MEZASE_DEATHEGG_MASK_INT reached here, stage ${await u8(0x500064)}`);
         keep = true;
+        if (FIXRAND) {
+            /* a frame at a time, as lunar-fox.lua's frame hook does */
+            await emu.rpc('emu_stop', {});
+            for (let sub = await u8(SUB); sub >= SUB_MASK_INT && sub < SUB_DSP; sub = await u8(SUB)) {
+                await emu.writeMemory(RANDOM, [RANDOM_SEED & 0xff, (RANDOM_SEED >> 8) & 0xff, (RANDOM_SEED >> 16) & 0xff, RANDOM_SEED >>> 24]);
+                /* the stop lands at a frame edge, a moment after emu_stop answers */
+                for (let k = 0; !(await emu.rpc('run_frames', { count: 1 }, { allowFail: true })).ok; k++) {
+                    if (k > 200) throw new Error('the board never stopped');
+                    await new Promise((r2) => setTimeout(r2, 5));
+                }
+            }
+            await emu.rpc('emu_run', {});
+        }
         const prefix = path.join(OUT, 'here');
         const r = await emu.rpc('capture_dl', {
-            frames: 1100, path: prefix, probes: `${SUB.toString(16)}:4,${AM_CNTR.toString(16)}:4`,
+            frames: 1100, path: prefix, probes: `${SUB.toString(16)}:4,${AM_CNTR.toString(16)}:4,${RANDOM.toString(16)}:4`,
             lo: 0x8cfff0, hi: 0x8d0000, max_words: 1024, timeout_ms: 900000,
         });
         await new Promise((r2) => setTimeout(r2, 500));   /* the last pictures in flight */
@@ -181,6 +207,7 @@ async function playHere(port) {
             if (done) break;
             if (am < last) part++;
             if (am !== last) at.set(`${part}:${am}`, m[0]);
+            if (FIXRAND && am !== last && am % 50 === 0) rep.note(`  random at part ${part} am ${am}: ${(m[4] >>> 0).toString(16).toUpperCase()}`);
             last = am;
         }
         const keys = [...pictures.keys()], frames = [...at.values()];
@@ -247,14 +274,15 @@ for (const r of rows.filter((x) => x.part === part)) {
 rep.note(`MAME | here: ${OUT}/compare-p${part}-am*.png (and -crop.png, the emblem x4)`);
 rep.check('graded frames', rows.length > 0, `${rows.length} frames`);
 /* The doors stay in shot until am_cntr 200, where the camera goes overhead for
- * the launch. Each door's emblem is a quad 0.03 in front of the door, which
+ * the launch, but from 195 the launch smoke crosses the crop, and its puffs
+ * scatter by rand, which reads the board's timers (--fixrand pins it). Each door's emblem is a quad 0.03 in front of the door, which
  * the depth buffer cannot hold apart at that range (geo3d_mesh_layers, HELD):
  * before the fix half of it striped through to the door, 8.4 a channel. */
-const doors = rows.filter((r) => r.part === 0 && r.am < 200);
+const doors = rows.filter((r) => r.part === 0 && r.am < 195);
 const TOL = args.num('tol', 3);
 if (doors.length) {
     const worst = doors.reduce((w, r) => (r.crop > w.crop ? r : w));
-    rep.check(`the emblem while the doors are in shot (am < 200) within ${TOL} a channel of MAME`, worst.crop <= TOL,
+    rep.check(`the emblem while the doors are in shot (am < 195) within ${TOL} a channel of MAME`, worst.crop <= TOL,
               `mean ${(doors.reduce((s, r) => s + r.crop, 0) / doors.length).toFixed(2)}, worst ${worst.crop.toFixed(2)} at am ${worst.am}`);
 }
 rep.finish();
