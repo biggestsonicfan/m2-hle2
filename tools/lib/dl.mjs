@@ -235,14 +235,13 @@ export function loadDl(prefix) {
  * words — and defaults to both, which placement needs.
  */
 export async function captureDl(emu, prefix, frames, {
-    range = null, tgp = false, scene = false, slots = false, unit = false, probes = null,
+    range = null, scene = false, slots = false, unit = false, probes = null,
 } = {}) {
     fs.mkdirSync(path.dirname(path.resolve(prefix)), { recursive: true });
     const r = await emu.rpc('capture_dl', {
         frames, path: path.resolve(prefix),
         probes: probes ? probeListSpec(probes) : scene ? probeListSpec(SCENE_PROBES) : probeSpec(),
         ...(range ? { lo: range[0], hi: range[1] } : {}),
-        ...(tgp ? { tgp: 1 } : {}),
         ...(slots ? { slots: 1 } : {}),
         ...(unit ? { unit: 1 } : {}),
         /* A busy frame is a few thousand words on the coprocessor port alone. */
@@ -304,7 +303,7 @@ export async function captureFight(emu, {
  * which is what grading a scripted sequence like the intro needs.
  */
 export async function captureWindow(emu, {
-    from, frames, out = DEFAULT_DL_OUT, name = 'window', range = null, tgp = false,
+    from, frames, out = DEFAULT_DL_OUT, name = 'window', range = null,
     scene = false, slots = false, unit = false, log = () => {},
 } = {}) {
     fs.mkdirSync(out, { recursive: true });
@@ -319,7 +318,7 @@ export async function captureWindow(emu, {
         if (from - now <= 1) break;
     }
     const prefix = path.join(out, name);
-    const r = await captureDl(emu, prefix, frames, { range, tgp, scene, slots, unit });
+    const r = await captureDl(emu, prefix, frames, { range, scene, slots, unit });
     log(`captured frame_counter ${now}..${now + r.frames}: ${r.words} words -> ${prefix}`);
     return { prefix, words: r.words, frames: r.frames };
 }

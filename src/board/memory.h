@@ -355,6 +355,19 @@ static inline void geo_raster_publish(geo_raster_state_t *dst) {
     memcpy(dst->gen, g_geo_live.gen, sizeof dst->gen);
 }
 
+/* Words after a direct-data command (GEO 0x02/0x12, MAME geo_direct_data):
+ * tpa, tha, two points, then links of attr, luma, distance and one point (two
+ * for a quad) until an attr whose low two bits are 0. */
+static inline uint32_t geodl_direct_len(const uint32_t *L, uint32_t nw, uint32_t p) {
+    uint32_t q = p + 1u + 2u + 6u;
+    for (uint32_t guard = 0; guard < 0x4000u && q < nw; guard++) {
+        uint32_t attr = L[q++];
+        if ((attr & 3u) == 0) break;
+        q += 2u + 3u + ((attr & 1u) ? 3u : 0u);
+    }
+    return q - p - 1u;
+}
+
 static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart) {
     uint32_t p = (rstart & 0x1FFFFu) >> 2;
     for (uint32_t guard = 0; guard < 0x8000u && p < nw; guard++) {
@@ -414,7 +427,8 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             case 0x0A: case 0x1A: case 0x0C: case 0x1C: len = 3; break;
             case 0x0B: case 0x1B: len = 12; break;
             case 0x1D: len = 2 + 3 * LA(1); break;
-            case 0x02: case 0x12: case 0x0F: case 0x1F: return;   /* inline polygons (unwalkable) / END */
+            case 0x02: case 0x12: len = geodl_direct_len(L, nw, p); break;
+            case 0x0F: case 0x1F: return;     /* END */
             default: break;
         }
         #undef LA
@@ -949,7 +963,6 @@ static struct {
     uint32_t     probe_addr[DL_MAX_PROBES];
     uint8_t      probe_size[DL_MAX_PROBES];
     uint32_t     lo, hi;                /* the part of DL_TAP_LO..HI to record */
-    float       *tgp;                   /* NULL, or capmarks × 32 × 12 bone-slot floats */
     uint32_t    *slots;                 /* NULL, or capmarks × DL_SLOT_WORDS words out of bufferram */
     float       *unit;                  /* NULL, or capmarks × 32 × 12 unit-matrix cache floats */
     int          nblocks;               /* whole RAM ranges copied at every mark */
@@ -1143,11 +1156,6 @@ static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
                         : g_dl.probe_size[i] == 2 ? mem_read16(bus, a)
                         :                           mem_read32(bus, a);
         }
-        /* Both fighters' TGP bone slots as the coprocessor HLE holds them at the
-         * frame edge — the rig the frame was drawn with. */
-        if (g_dl.tgp)
-            memcpy(g_dl.tgp + (g_dl.nmarks - 1) * sizeof g_sharc.tgp_bone / sizeof(float),
-                   g_sharc.tgp_bone, sizeof g_sharc.tgp_bone);
         /* The same slots as the i960 can see them — bufferram, which is SHARC
          * DM 0x1400000: what op 0x67 stored, laid out the way a MAME capture
          * reads them out of i960 0x90E800 / 0x90EC00. */

@@ -316,14 +316,14 @@ static inline void sharc_ang_z(int32_t a) { float s_, c_; sharc_sincos(a, &s_, &
  *     with sin negated when [16] != 0; the slot -> [15]
  *   out of reach ((a12 + a13) <= |d|, compared as raw bits): the aimed slot to both.
  * Bufferram gets exactly those words (the i960 reads them back: Fn_mul_mot_yrot
- * loads the rotation). tgp_bone, which the renderer and grade-pose read, keeps
- * the lower bone at the elbow: T + a13 * the upper bone's x axis. */
+ * loads the rotation). Both slots keep T at the pivot; the lower bone is drawn
+ * from the elbow, T + a13 * the upper bone's x axis, which grade-pose adds. */
 static inline float sharc_clip1(float x) {
     uint32_t b = sharc_float_to_bits(x);
     if (!(b & 0x7F800000u)) return sharc_bits_to_float(b & 0x80000000u);
     return x < -1.0f ? -1.0f : x > 1.0f ? 1.0f : x;
 }
-static inline void sharc_ik_store(uint32_t tgp_addr, const float *tgp_T) {
+static inline void sharc_ik_store(uint32_t tgp_addr) {
     float words[12];
     for (int k = 0; k < 9; k++) words[k] = g_sharc.rot[k / 3][k % 3];
     for (int k = 0; k < 3; k++) words[9 + k] = g_sharc.pos[k];
@@ -331,12 +331,6 @@ static inline void sharc_ik_store(uint32_t tgp_addr, const float *tgp_T) {
         uint32_t bo = tgp_addr * 4u;
         if (bo + 48u <= g_sharc.sharc_dm_ext_size)
             for (int k = 0; k < 12; k++) { uint32_t u = sharc_float_to_bits(words[k]); memcpy(g_sharc.sharc_dm_ext + bo + 4u * (uint32_t)k, &u, 4); }
-    }
-    int idx = (tgp_addr >= 0x3B00 && tgp_addr < 0x3C00) ? (int)(16 + (tgp_addr - 0x3B00) / 0xC)
-            : (tgp_addr >= 0x3A00 && tgp_addr < 0x3B00) ? (int)((tgp_addr - 0x3A00) / 0xC) : -1;
-    if (idx >= 0 && idx < 32) {
-        memcpy(g_sharc.tgp_bone[idx], words, 9 * sizeof(float));
-        for (int k = 0; k < 3; k++) g_sharc.tgp_bone[idx][9 + k] = tgp_T[k];
     }
 }
 static void sharc_calc_unit_2_fast(const uint32_t *args) {
@@ -373,10 +367,8 @@ static void sharc_calc_unit_2_fast(const uint32_t *args) {
     sharc_postmul_ry(c, sn);                                                /* _L201C2 */
     uint32_t slot_lo = args[14], slot_up = args[15];
     if ((int32_t)sharc_float_to_bits(a12 + a13) <= (int32_t)sharc_float_to_bits(dtot)) {   /* _L21342 */
-        float elbow[3];
-        for (int w = 0; w < 3; w++) elbow[w] = T[w] + a13 * r[0][w];
-        sharc_ik_store(slot_lo, elbow);
-        sharc_ik_store(slot_up, T);
+        sharc_ik_store(slot_lo);
+        sharc_ik_store(slot_up);
     } else {
         float a12s = a12 * a12, dts = dtot * dtot, a13s = a13 * a13;
         float num = dts + a12s; num = num - a13s;
@@ -393,15 +385,13 @@ static void sharc_calc_unit_2_fast(const uint32_t *args) {
         float se = sharc_fw_sqrt(1.0f - ce * ce);
         if (args[16] != 0) se = -se;
         sharc_postmul_rz(sharc_clip1(nce), sharc_clip1(se));
-        /* The lower slot is stored between the two turns (bufferram does not
-         * care when); only its renderer T needs the upper bone's axis. */
-        float elbow[3], upper[3][3];
-        for (int w = 0; w < 3; w++) elbow[w] = T[w] + a13 * r[0][w];
+        /* The lower slot holds the frame between the two turns. */
+        float upper[3][3];
         memcpy(upper, g_sharc.rot, sizeof upper);
         memcpy(g_sharc.rot, lower, sizeof lower);
-        sharc_ik_store(slot_lo, elbow);
+        sharc_ik_store(slot_lo);
         memcpy(g_sharc.rot, upper, sizeof upper);
-        sharc_ik_store(slot_up, T);
+        sharc_ik_store(slot_up);
     }
 }
 
@@ -1158,15 +1148,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             int slot_idx = (int)args[1] / 12;
             if ((unsigned)slot_idx >= 16u) return;
             sharc_compose(g_sharc.rot_cache[player * 16 + slot_idx]);
-            /* Mirror post-compose result to tgp_bone so the geo3d scanner reads
-             * the C×B world-space matrix when 0x3C007878 follows this command. */
-            float *tb = g_sharc.tgp_bone[player * 16 + slot_idx];
-            for (int _c = 0; _c < 3; _c++)
-                for (int _r = 0; _r < 3; _r++)
-                    tb[_c*3+_r] = g_sharc.rot[_c][_r];
-            tb[9]  = g_sharc.pos[0];
-            tb[10] = g_sharc.pos[1];
-            tb[11] = g_sharc.pos[2];
             return;
         }
 
@@ -1547,10 +1528,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             dst[9]  = g_sharc.pos[0];
             dst[10] = g_sharc.pos[1];
             dst[11] = g_sharc.pos[2];
-            /* Mirror to tgp_bone so geo3d scanner finds the world-space matrix
-             * when 0x1B803737 references this slot.  (tgp_bone is otherwise only
-             * written by 0x35806B6B IK chains, which aren't called in attract.) */
-            memcpy(g_sharc.tgp_bone[player * 16 + slot_idx], dst, 12 * sizeof(float));
             return;
         }
 
@@ -1720,22 +1697,10 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
          * cannot be read back out of either ADSP's data space.
          *
          * The addresses are the ones the IK writes too: 0x0C a slot from 0x3A00
-         * for P1 and 0x3B00 for P2. So a store in that window has to reach
-         * g_sharc.tgp_bone[] as well as the SHARC's data space, or the geometry
-         * decoder can draw the slot stale — 0x1B803737 selects a slot and
-         * geo3d.h reads the transform straight out of tgp_bone.
-         *
-         * Measured in attract, this mirror is currently inert: 0x67 only ever
-         * stores slots 0, 1, 16 and 17 (the two waists and the two chests), and
-         * 0x1A803535 — the attract path's calc_unit_mat, which writes all 32 —
-         * was the last writer before the draw every time it could be seen. It
-         * closes a gap rather than fixing a visible symptom, and it matters
-         * wherever 0x67 is the last writer instead. The two do not agree: every
-         * 0x67 store differed from what 0x35 had left in the slot, by up to 4.5
-         * world units, so the ordering is doing real work.
+         * for P1 and 0x3B00 for P2, in the SHARC's data space (bufferram).
          *
          * shadow_rot is the kage-matrix path, which comes through here with
-         * arg0 = 0x3D00 — outside the slot window, and left alone by it. */
+         * arg0 = 0x3D00, the kage matrix, just past the two fighters' slots. */
         case 0x33806767: {
             for (int _c = 0; _c < 3; _c++)
                 for (int _r = 0; _r < 3; _r++)
@@ -1749,12 +1714,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 slot[9]  = g_sharc.pos[0];
                 slot[10] = g_sharc.pos[1];
                 slot[11] = g_sharc.pos[2];
-
-                int idx = (addr >= 0x3B00 && addr < 0x3C00) ? (int)(16 + (addr - 0x3B00) / 0xC)
-                        : (addr >= 0x3A00 && addr < 0x3B00) ? (int)(     (addr - 0x3A00) / 0xC)
-                        : -1;
-                if (idx >= 0 && idx < 32)
-                    memcpy(g_sharc.tgp_bone[idx], slot, sizeof(slot));
 
                 if (g_sharc.sharc_dm_ext) {
                     uint32_t byte_off = addr * 4;

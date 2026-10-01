@@ -52,17 +52,11 @@ Two smaller gaps in the same area:
 
 **COP ready bit.** The ready bit is set per game by a hook (STF 0xF3C, FV 0x190C), although `cop.h` already tracks the upload bit. A board-level read callback, "ready once the upload bit falls", would be about 15 lines and would cover every game.
 
-## 3. The old COP-stream renderer still carries heuristics
+## 3. The old COP-stream renderer (retired, Pinboard #251)
 
-`geo3d_scan_captures` (`geo3d.h:976-1527`) is the fallback for when the GEO display list does not reach END. Its comment says "No display list yet (or it did not reach END)" (`game_frame.h:84-98`). One more case sends a frame there: **any frame with direct data (GEO 0x02/0x12)**, because `geo3d_scan_geo_list` returns false on it (`geo3d.h:1847-1850`). The fallback holds the most obviously fitted code in the tree:
+`geo3d_scan_captures` was the fallback for a GEO display list that did not reach END, and for any list with direct data (GEO 0x02/0x12), which `geo3d_scan_geo_list` could not walk. It held the most obviously fitted code in the tree: the shadow floor from a running minimum of the feet's Y, the eye-bake ±3.0 test, the `cam_mode != 9` experiment and the five `g_cam_sign_*` dials, the identity view for clip-window cells, the model 3333 skip, and `g_sharc.tgp_bone` with its four writers.
 
-- **Shadow floor = running minimum of the feet's Y**, drifting up 0.003 a frame (`geo3d.h:1275-1328`), with its own TODO to use the kage projection or `word_5019AC`. Its `static` is never reset.
-- **Eye-bake auto-detect:** a SETPOS within ±3.0 of −eye with |eye| > 5 means "draw rotation only" (`geo3d.h:835-842`, `1056`, `1258`, `1523`).
-- **`cam_mode != 9` rotation-only** (off by default, an abandoned experiment) and the five `g_cam_sign_*` dials, which were meant to be "dialed live … then bake it here" (`geo3d.h:803-833`).
-- Identity view for clip-window cells (`game_render.h:2349-2358`), and skipping the unplaced model 3333 (`geo3d.h:1418-1429`).
-- `g_sharc.tgp_bone` and its four writers in `sharc_exec.h`. Apart from the `dl_trace` capture (`memory.h:1128`), only this path reads it.
-
-**Real fix:** walk direct data in `geo3d_scan_geo_list`, then retire the fallback, or keep it as a debug view. Most of the above, and `tgp_bone`, could then be deleted.
+`geo3d_scan_geo_list` now walks direct data (MAME `geo_direct_data`), and all of the above is deleted. Measured first: no STF or FV frame sends direct data (attract in both games, and a round on each STF stage), and every list but the first two after boot reaches END, so the fallback only ever drew those two frames. A list that does not reach END now draws no 3D.
 
 ## 4. Small, cheap ones
 
@@ -85,6 +79,6 @@ Two smaller gaps in the same area:
 ## Suggested order
 
 1. **The flat board key (§1).** This is the clearest case of "a few lines replacing a pile of patches", and `grade-zsort` can judge it against MAME today.
-2. Direct data in the display-list scan, then retire the fallback (§3).
+2. Direct data in the display-list scan, then retire the fallback (§3). Done (#251).
 3. The COP ready callback and the small COP items (§2 COP bit, §4). These are cheap, ROM-free and testable with `cop_replay`.
 4. Vblank on the cycle clock plus live timers (§2). This has the biggest payoff in removed hooks and the biggest re-grade, so it should be done last.

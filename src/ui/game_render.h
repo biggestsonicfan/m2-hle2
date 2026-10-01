@@ -1448,10 +1448,6 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
     m[10] =  cp*cyy;
     m[11] = -sp*cy - cp*(syy*cx + cyy*cz);
     m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1.0f;
-
-    /* Rotation-only: drop the (−eye) translation for geometry that already has
-     * the eye baked in (intro carnival flythrough etc.). */
-    if (g_cam_rot_only) { m[3] = 0.0f; m[7] = 0.0f; m[11] = 0.0f; }
 }
 
 /* ---- Texture atlas upload ------------------------------------------------ */
@@ -2205,16 +2201,22 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_mode = cm->geo_mode;
                 g_geo3d_zadjust = cm->zadjust;
                 g_geo3d_lod  = cm->geo_lod;
-                if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
-                    uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
-                    g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
-                    g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
+                if (cm->direct_len) {           /* direct data: the polygons are in the list */
+                    geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len,
+                                        materials, materials_size, main_data, main_data_size,
+                                        cm->gproj[0], cm->gproj[1]);
+                } else {
+                    if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
+                        uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
+                        g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
+                        g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
+                    }
+                    geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
+                                              materials, materials_size, table_off, table_count,
+                                              mesh_ptr_subtract, mesh_ptr_add,
+                                              geo->use_matrix ? cm->matrix : NULL,
+                                              cm->color[0], cm->color[1], cm->color[2]);
                 }
-                geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
-                                          materials, materials_size, table_off, table_count,
-                                          mesh_ptr_subtract, mesh_ptr_add,
-                                          geo->use_matrix ? cm->matrix : NULL,
-                                          cm->color[0], cm->color[1], cm->color[2]);
                 g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
                 g_geo3d_board_luma = 0;
                 g_geo3d_obj_mesh = NULL;
@@ -2253,11 +2255,8 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
 }
 
 /*
- * Draw all captured models with per-model clip windows applied as scissor rects.
- *
- * Replaces the separate geo3d_build_wireframes + game_render_draw_lines pair
- * when any model has a clip window (e.g. adv_movie_chaos portrait frames).
- * Falls back to a single-batch draw when no model has a clip window.
+ * Draw the captured models: a display list the board's way (windows, focal
+ * lengths and all), anything else through the host camera.
  *
  * ox/oy/w/h are the letterbox rect in framebuffer pixels (from game_render_letterbox).
  */
@@ -2281,83 +2280,17 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
         return;
     }
 
-    /* Check whether any captured model carries a clip window. */
-    bool any_clip = false;
-    if (geo->use_captures) {
-        for (int i = 0; i < geo->captured_count && !any_clip; i++)
-            if (geo->captured[i].has_clip_win) any_clip = true;
-    }
-
-    if (!any_clip || geo->test_triangle || !geo->use_captures) {
-        /* Fast path: single batch draw, no per-model scissor needed. */
-        geo3d_build_wireframes(geo, main_data, main_data_size,
-                               polygons, polygons_size,
-                               materials, materials_size,
-                               table_off, table_count,
-                               mesh_ptr_subtract, mesh_ptr_add, lerp_t,
-                               cam_x, cam_y, cam_z);
-        if (!geo->lines_only)
-            game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
-        game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
-        return;
-    }
-
-    /* Slow path: draw each model separately so we can scissor it. */
-    for (int i = 0; i < geo->captured_count; i++) {
-        if (geo->isolate_index >= 0 && i != geo->isolate_index) continue;
-        if (geo->filter_enabled && (i < geo->filter_min || i > geo->filter_max)) continue;
-
-        const captured_model_t *cm = &geo->captured[i];
-        geo3d_lines_reset();
-        geo3d_tris_reset();
-        const float *mat = (geo->use_matrix && cm->has_matrix) ? cm->matrix : NULL;
-
-        /* Interpolate translation with previous frame in the slow path too. */
-        float lerped[12];
-        if (mat && lerp_t > 0.0f && lerp_t < 1.0f
-                && i < geo->captured_prev_count
-                && geo->captured_prev[i].has_matrix
-                && geo->captured_prev[i].model_idx == cm->model_idx) {
-            geo3d_lerp_matrix(lerped, mat, geo->captured_prev[i].matrix, lerp_t);
-            mat = lerped;
-        }
-
-        geo3d_decode_model(cm->model_idx,
-                           main_data, main_data_size,
+    /* Homebrew lists (geo3d_scan_displaylist), the test triangle and the
+     * free camera: one batch through the host camera. */
+    geo3d_build_wireframes(geo, main_data, main_data_size,
                            polygons, polygons_size,
                            materials, materials_size,
                            table_off, table_count,
-                           mesh_ptr_subtract, mesh_ptr_add,
-                           mat, cm->color[0], cm->color[1], cm->color[2]);
-
-        if (cm->has_clip_win) {
-            /* Map clip rect (game pixels) to framebuffer pixels. */
-            int sx = ox + (int)cm->clip_win_x * w / VIDEO_WIDTH;
-            int sy = oy + (int)cm->clip_win_y * h / VIDEO_HEIGHT;
-            int sw = (int)cm->clip_win_w * w / VIDEO_WIDTH;
-            int sh = (int)cm->clip_win_h * h / VIDEO_HEIGHT;
-            float cell_aspect = (sh > 0) ? (float)sw / (float)sh : 1.0f;
-            /* Sub-window cells (character-select portraits, emeralds) are head-on
-             * previews placed in VIEW-relative space — every cell's geometry sits
-             * at the same ≈(0,-0.8,-4.0) in front, framed by its own cell viewport.
-             * Render with an IDENTITY view (no scene camera): the scene's look-at
-             * rotation (e.g. -90° Y) would swing them onto the camera plane and
-             * scissor them away, which is what left the cells black. */
-            sg_apply_viewport(sx, sy, sw, sh, true);
-            sg_apply_scissor_rect(sx, sy, sw, sh, true);
-            game_render_draw_fills(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, fov_deg, cell_aspect);
-            game_render_draw_lines(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, fov_deg, cell_aspect);
-        } else {
-            sg_apply_viewport(ox, oy, w, h, true);
-            sg_apply_scissor_rect(ox, oy, w, h, true);
-            game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
-            game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
-        }
-    }
-
-    /* Restore full viewport and scissor for subsequent UI draws. */
-    sg_apply_viewport(ox, oy, w, h, true);
-    sg_apply_scissor_rect(ox, oy, w, h, true);
+                           mesh_ptr_subtract, mesh_ptr_add, lerp_t,
+                           cam_x, cam_y, cam_z);
+    if (!geo->lines_only)
+        game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
+    game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
 }
 
 /*
