@@ -8,6 +8,8 @@ The board side of the sound path (`sound.h`, `scsp.h`, `m68k_*`), the tile rende
 
 ## 1. The z-sort: six rules standing in for one
 
+**Done in PR #159 (Pinboard #247).** Game frames now draw each face at its board key (`geo3d_flat_depth`), and the patches in the table below are gone from the game draw. The rest of this section is the audit as it was written. Pinboard #249 then went looking for the camera-dependent breakage that #244's patch had answered, using the round intro on every stage (`tools/grade-round-intro.mjs`); see "After the flat key" at the end of this section.
+
 **The board's rule** (MAME `model2_v.cpp`, `model2_3d_process_polygon` and `model2_3d_frame_end`) is short:
 
 - Each polygon gets one z, chosen by attribute bits 10–11: mode 0 is the previous polygon's z, mode 1 the nearest corner, mode 2 the farthest corner, mode 3 is 1e10.
@@ -73,12 +75,12 @@ Two smaller gaps in the same area:
 
 ## Doc drift found on the way
 
-- CLAUDE.md says `0x07000E0E` is a no-op; `sharc_exec.h:1520` now implements it as `Fn_load_point`.
+- ~~CLAUDE.md says `0x07000E0E` is a no-op~~ — fixed: CLAUDE.md now describes `Fn_load_point`.
 - `m68k_exec.h:659` says the step's cycle count is "approximate", but it has been held to MAME clock for clock since #119.
 
 ## Suggested order
 
-1. **The flat board key (§1).** This is the clearest case of "a few lines replacing a pile of patches", and `grade-zsort` can judge it against MAME today.
+1. ~~**The flat board key (§1).**~~ Done in PR #159. `grade-zsort` and `grade-round-intro` hold it against MAME.
 2. Direct data in the display-list scan, then retire the fallback (§3). Done (#251).
 3. The COP ready callback and the small COP items (§2 COP bit, §4). These are cheap, ROM-free and testable with `cop_replay`.
 4. Vblank on the cycle clock plus live timers (§2). This has the biggest payoff in removed hooks and the biggest re-grade, so it should be done last.
