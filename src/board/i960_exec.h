@@ -900,7 +900,9 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     break;
                 }
                 case 0x673: // ldtime
-                    reg_write(cpu, dst_idx, 0);  // stub: return 0 for now
+                    // Not on the KB (MAME's core stops on 67.3): the clock
+                    // count is the closest thing this model has.
+                    reg_write(cpu, dst_idx, (uint32_t)cpu->cycles);
                     break;
 
                 //--------------------------------------------------------------

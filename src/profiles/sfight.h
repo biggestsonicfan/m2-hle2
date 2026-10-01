@@ -225,17 +225,6 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
 
 /* ---- HLE hook functions -------------------------------------------------- */
 
-/* cop_initialize_l1 (0x0F3C): boot-time COP-ready spin loop. Reads
- * COPRO_CONTROL1+4 bit 0 until set. Set the bit and let the instruction run
- * normally — the next iteration sees ready=1 and exits. Without this hook STF
- * hangs on the BACKUP RAM screen forever. */
-static int sfight_hook_cop_init_l1(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu;
-    uint32_t cur = mem_read32(bus, COPRO_CONTROL1_BASE + 4);
-    mem_write32(bus, COPRO_CONTROL1_BASE + 4, cur | 0x01);
-    return 1;
-}
-
 /* check_timer_4 (0x4A55C): spin loop waiting for a timer interrupt.
  * Skip the whole function — return 0 to the caller. */
 static int sfight_hook_check_timer_4(i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -733,7 +722,6 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
  * default. */
 #define SFIGHT_BASE_HOOK_COUNT 25
 #define SFIGHT_BASE_HOOKS                                                      \
-    { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
     { 0x0004A58C, sfight_hook_check_timer_4_spin, "check_timer_4_spin"      }, \
     { 0x00001768, sfight_hook_interrupt_wait,     "interrupt_wait"          }, \
@@ -759,6 +747,13 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0004BF64, sfight_hook_tex_send_lod,      "send_lod_data row"       }, \
     { 0x0004C1F8, sfight_hook_tex_q_norm,        "send_lod_data_q_sub_norm row" }, \
     { 0x0004C334, sfight_hook_tex_q_anim,        "send_lod_data_q_sub_anim row" },
+
+/* hook_count stops the scan, so a count one short drops the last hook without
+ * a word: the merge of #151 left it at 25 over 26 entries, and the console
+ * profile lost its head-tilt trap. */
+_Static_assert(sizeof((hle_hook_entry_t[]){ SFIGHT_BASE_HOOKS }) ==
+               SFIGHT_BASE_HOOK_COUNT * sizeof(hle_hook_entry_t),
+               "SFIGHT_BASE_HOOK_COUNT does not match SFIGHT_BASE_HOOKS");
 
 /* read_sw's copies of the pad: held 0x500700, momentary 0x500704; the
  * credits are at 0x59C388 (P1) and 0x59C38C (P2). */

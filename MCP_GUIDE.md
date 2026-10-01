@@ -757,7 +757,6 @@ sound RAM, or of the SCSP registers (no read side effects), as a decimal array `
 ### HLE hook addresses (all STF-specific)
 | Address | Function | What the hook does |
 |---------|----------|--------------------|
-| `0x00000F3C` | `cop_initialize_l1` | Sets COP-ready bit to unblock boot |
 | `0x0004A55C` | `check_timer_4` | Skips timer spin loop (returns 0) |
 | `0x0004A58C` | `check_timer_4_spin` | Writes `0x01` to `0x50008C` to unblock |
 | `0x00001768` | `interrupt_wait` | Runs `VsyncScr` (`0x0C40`), then skips the spin loop |
