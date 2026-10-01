@@ -1,0 +1,98 @@
+# Bubblegum fixes: an audit (Pinboard #245)
+
+This file lists the places where m2-hle2 patches a symptom (a list of model numbers, a fitted threshold, a hook that pokes RAM) and the board has a simpler rule underneath. It is the audit of master at `28d3563` (2026-09-30), and nothing in `src/` was changed by it. Line numbers are as of that commit.
+
+The board side of the sound path (`sound.h`, `scsp.h`, `m68k_*`), the tile renderer and the host audio came out clean: their constants cite MAME, the manual or a measurement. The console-DLL traps, the region, damage and VS hooks, the cross-play hooks and the `versus_result` observer are deliberate features, not patches. Everything else below is ranked by how much it would condense.
+
+---
+
+## 1. The z-sort: six rules standing in for one
+
+**The board's rule** (MAME `model2_v.cpp`, `model2_3d_process_polygon` and `model2_3d_frame_end`) is short:
+
+- Each polygon gets one z, chosen by attribute bits 10–11: mode 0 is the previous polygon's z, mode 1 the nearest corner, mode 2 the farthest corner, mode 3 is 1e10.
+- `float_to_zval` (our `geo3d_board_zkey`, already ported) turns that z into a 16-bit bucket.
+- Buckets are drawn nearest first, the newest polygon first within a bucket, and a pixel is written only once.
+
+So there is no per-pixel depth, and the nearer key wins outright. A tie goes to the later polygon, and windows are drawn from last to first.
+
+**What we do instead** keeps the GPU's interpolated depth and lets a polygon only *recede* towards its key, by at most 12 units (`geo3d.h:408-456`, shader at `game_render.h:359-366`). This is the explorer's compromise (`vendor/noclip/js/viewer.js:104-113`), and it was made for a *free* camera: pulling a polygon forward "under a free one turns a floor into a wall". m2-hle2 draws every game frame from the board's own camera, so that reason does not apply here. The half-rule then needed these patches:
+
+| Patch | Where | Keyed on | Symptom it fixed |
+|---|---|---|---|
+| Recede limit `g_geo3d_zsort_recede = 12.0` | `geo3d.h:440` | fitted constant | Aurora's ice wedges (the root patch; also clamps mode 3, "behind everything", to 12 units) |
+| `zsort_standing = {4278}` | `sfight.h:789`, `geo3d.h:458-484` | **a model-number list** in the profile | Aurora pillars sinking through ice that is "too deep to recede" |
+| `geo3d_mesh_keep_depth` | `geo3d.h:2460, 2792, 2984` | 0.02–0.5 gap thresholds | Tails-lab CAUTION screen (#85) |
+| Coplanar layers + group planes, `geo3d_mesh_layers` | `geo3d.h:2502-2922` | 0.5 gap, 0.02 tie, cos 0.999, 1% overlap, `layer_steps=4`, mode-2 exclusion | pyramid shadows (580), reels (188), emblem (194), gloves (1813/1818), #75, #85 |
+| `geo3d_tie_layer` | `geo3d.h:168-247` | identical corner set and bit-identical matrix | Tails' pupils through closed eyes |
+| Same-matrix runs, `geo3d_run_get` | `geo3d.h:3274-3380` | consecutive draws with a bit-identical matrix (max 16) | Casino slot machine 186/187/188 (Pinboard #133) |
+| (and the held pairs, `zheld`, PR #156) | | | Lunar Fox emblem (#225) |
+
+Each comment says, in its own words, that "on the board the nearer key wins and a tie goes to the later polygon". The layers already compute that ordering (`geo3d_mesh_draw_layers`, `geo3d.h:2961`), but only for the pairs the heuristics picked out first.
+
+**The real fix, in a few lines:** give every vertex of a polygon the *same* clip-space depth, taken from that polygon's board key (`gl_Position.z = depth(key) * w`, inside the window's slice of the depth range). Then draw in submission order with `LEQUAL`, which is already the compare function (`game_render.h:1244`). That reproduces the board's fill exactly:
+
+- the nearer key wins;
+- equal keys go to the later draw;
+- checker and transparent holes already `discard`, which is the board's "no fill here";
+- a 16-bit key fits the 24-bit depth buffer with room for a window index.
+
+The recede limit, the standing list, keep-depth, layers, planes, ties, runs and held pairs would all go, along with their `set_camera` toggles (`mcp_bridge.h:277-297`). The quad split "same diagonal as before" would stop mattering for depth. The object viewer keeps the explorer's half-rule, because it has a free camera.
+
+**Risk, to be measured, not assumed:** commit `17e9b72` says an *unbounded* recede turned half of Aurora's rink black behind the walrus reflection. That was a recede on a depth buffer, which is not the board's rule. MAME draws Aurora correctly with the full rule, so a faithful flat key should too. `grade-zsort.mjs --stage 1/5` and the Aurora, Tails-lab and Casino pictures are the test.
+
+Two smaller gaps in the same area:
+
+- A mode-0 polygon at the head of a model falls back to the nearest corner (`zset = false` per decode, `geo3d.h:3073`). On the board, `polygon_z` carries over from the previous object.
+- `check_culling`'s `master_z_clip` and `max_z < 0` culls, and the four clip planes, are not modelled; `zclip_3d` RAM is mapped but never read. The homebrew HUD's "drop triangles over 1.5 units near the camera" reject (`geo3d.h:683-694`) hides a col0 decode bug that those planes would not have hidden.
+
+## 2. Frame sync and timers are hooks, not interrupts
+
+- **What we do:** STF's `interrupt_wait` (0x1768), `interrupt_wait_b` (0x11580) and `_idle` (0x11610) run VsyncScr (0xC40) themselves with `hle_call` and poke RAM so the game's wait loops exit (`sfight.h:250-280`). FV does the same at 0x2238 and 0x118DC.
+- **Why:** with a profile's `irq_handler` and no `board_vblank`, nothing raises the vblank pins at the right time.
+- **Real rule:** raise vblank on the i960 cycle clock (416,667 cycles) and deliver it to the profile's handlers. That would remove 3–5 hooks a game.
+- **Bug on the side:** `_idle`'s `static s_vsync_fired` survives a board reset, which `grade-reset.mjs` is meant to catch.
+- **FV:** its `read_sw` hook zeroes `prev_held` before every read, which breaks the game's own edge detection. It is probably compensating for the same missing interrupts.
+
+**Timers.** `check_timer_4` and `check_timer_4_spin` (STF `sfight.h:239-248`, FV 0x4A88C) exist because timers are frozen by default (`irq_timer.h:89`, `g_irqt_live = 0`): they tick once a slice, so the texture loader's budget never expires. `--live-timers` already exists. Turning it on by default should let the Timer handler set 0x50008C itself. The code change is tiny, but the re-grade is large: STF's texture loads move.
+
+**COP ready bit.** The ready bit is set per game by a hook (STF 0xF3C, FV 0x190C), although `cop.h` already tracks the upload bit. A board-level read callback, "ready once the upload bit falls", would be about 15 lines and would cover every game.
+
+**The slice constants** (`EMU_STEPS_PER_SLICE`, `EMU_FRAME_STEPS_MAX`, `EMU_IRQ_TABLE_MAX_SLICES = 8` "the handler never returned, task switch?") mostly stand in for that missing frame clock and for the i960's call frames living on a host-side stack (`i960.h:75-93`, `flushreg` a no-op).
+
+## 3. The old COP-stream renderer still carries heuristics
+
+`geo3d_scan_captures` (`geo3d.h:976-1527`) is the fallback for when the GEO display list does not reach END. Its comment says "No display list yet (or it did not reach END)" (`game_frame.h:84-98`). One more case sends a frame there: **any frame with direct data (GEO 0x02/0x12)**, because `geo3d_scan_geo_list` returns false on it (`geo3d.h:1847-1850`). The fallback holds the most obviously fitted code in the tree:
+
+- **Shadow floor = running minimum of the feet's Y**, drifting up 0.003 a frame (`geo3d.h:1275-1328`), with its own TODO to use the kage projection or `word_5019AC`. Its `static` is never reset.
+- **Eye-bake auto-detect:** a SETPOS within ±3.0 of −eye with |eye| > 5 means "draw rotation only" (`geo3d.h:835-842`, `1056`, `1258`, `1523`).
+- **`cam_mode != 9` rotation-only** (off by default, an abandoned experiment) and the five `g_cam_sign_*` dials, which were meant to be "dialed live … then bake it here" (`geo3d.h:803-833`).
+- Identity view for clip-window cells (`game_render.h:2349-2358`), and skipping the unplaced model 3333 (`geo3d.h:1418-1429`).
+- `g_sharc.tgp_bone` and its four writers in `sharc_exec.h`. Apart from the `dl_trace` capture (`memory.h:1128`), only this path reads it.
+
+**Real fix:** walk direct data in `geo3d_scan_geo_list`, then retire the fallback, or keep it as a debug view. Most of the above, and `tgp_bone`, could then be deleted.
+
+## 4. Small, cheap ones
+
+| What | Where | Fix |
+|---|---|---|
+| `SANITIZE` turns NaN or overflow into 0.0 in 8 COP handlers | `sharc_exec.h:680` | Contradicts the rule that NaN leaves the chip as all ones. Delete it and re-run `cop_replay`. |
+| `0x28805151` pushes three zeros | `sharc_exec.h:1820` | Port PM 0x20EF5 (reads the slot through DM 0x3033F). |
+| `cop_read` returns 0 on an empty FIFO | `cop.h:233` | The board would stall. At least log an underflow at WARN. This is how `0x17002E2E` once hid. |
+| `ldtime` returns 0 | `i960_exec.h:901` | Return the cycle count. |
+| `_700000_loop` hook zeroes the sound-init delay | `sfight.h:283` | A speed-up that shifts boot timing against MAME. Remove it, or label it as one. |
+| `warning_skip_addr` is on by default | `emu_thread.h:365` | Convenience, but it moves the timeline against MAME. |
+| FV model table / mesh pointer values are STF's with TODOs | `fvipers.h:~327` | Verify them against FV. |
+| `fov = 65` for display-list profiles | `main.c:246-251` | Derive it from the GEO's focal and window values. |
+
+## Doc drift found on the way
+
+- CLAUDE.md says `0x07000E0E` is a no-op; `sharc_exec.h:1520` now implements it as `Fn_load_point`.
+- `m68k_exec.h:659` says the step's cycle count is "approximate", but it has been held to MAME clock for clock since #119.
+
+## Suggested order
+
+1. **The flat board key (§1).** This is the clearest case of "a few lines replacing a pile of patches", and `grade-zsort` can judge it against MAME today.
+2. Direct data in the display-list scan, then retire the fallback (§3).
+3. The COP ready callback and the small COP items (§2 COP bit, §4). These are cheap, ROM-free and testable with `cop_replay`.
+4. Vblank on the cycle clock plus live timers (§2). This has the biggest payoff in removed hooks and the biggest re-grade, so it should be done last.
