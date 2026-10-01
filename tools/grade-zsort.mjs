@@ -3,11 +3,13 @@
  * pictures against MAME's.
  *
  * The board settles two faces in one plane with its polygon sort, a polygon at a
- * time; a depth buffer does it a pixel at a time and needs help (geo3d.h,
- * geo3d_mesh_layers). MAME's software renderer does what the board does, so its
- * picture is the answer. This grader plays attract's replay fight — the same
- * inputs on every board, so the same fight — in MAME and here, here twice (face
- * layers off, then on), and holds each picture against MAME's at the same frame.
+ * time; a depth buffer does it a pixel at a time. A game frame here draws each
+ * face at the board's own sort key (geo3d.h, geo3d_flat_depth); set_camera
+ * zflat=0 falls back to the half rule the explorer uses. MAME's software renderer
+ * does what the board does, so its picture is the answer. This grader plays
+ * attract's replay fight — the same inputs on every board, so the same fight — in
+ * MAME and here, here twice (the switch off, then on), and holds each picture
+ * against MAME's at the same frame.
  *
  * The replay is normally on Flying Carpet (stage 1, model 580's pyramid
  * shadows). --stage puts it elsewhere the same way in both emulators
@@ -15,7 +17,7 @@
  * Casino Night, where model 188's reel art stands 0.02 in front of its cabinet.
  *
  * The two renderers rasterise differently, so no frame matches to the pixel.
- * What is measured is the pixels the layers change: of every pixel where the
+ * What is measured is the pixels the switch changes: of every pixel where the
  * off and on pictures differ, how many does each put nearer MAME's. A frame is
  * only compared where both emulators drew it from the same camera, to within
  * --cam-tol (the eye and its angle at 0x519E98), since a fight that has drifted
@@ -28,10 +30,9 @@
  *   node tools/grade-zsort.mjs --stage 0 --toggle texclamp   # another set_camera switch
  *
  * --toggle NAME plays the replay with that set_camera switch at 0 and then at 1
- * in place of the face layers (which stay on in both), and grades the pixels it
- * changes the same way: texclamp (the filter's clamp at a tile edge) on South
- * Island's sky ring, zsort, zstanding, zkeep, zruns (draws sharing a matrix
- * ranked as one mesh).
+ * (zflat, the board's sort key, by default) and grades the pixels it changes:
+ * texclamp (the filter's clamp at a tile edge) on South Island's sky ring,
+ * zsort, nnormals.
  *
  * $MAME_EXE and $MAME_ROMPATH as tools/match-replay.mjs.
  */
@@ -47,21 +48,15 @@ import { Report } from './lib/report.mjs';
 import { parseArgs } from './lib/args.mjs';
 import { readPng, writePng } from './lib/png.mjs';
 
-const args = parseArgs(['stage', 'from', 'to', 'step', 'port', 'out', 'lag', 'tol', 'only-model', 'set', 'cam-tol', 'toggle']);
+const args = parseArgs(['stage', 'from', 'to', 'step', 'port', 'out', 'lag', 'tol', 'set', 'cam-tol', 'toggle']);
 /* --toggle NAME: the set_camera switch the two plays differ by (see above). */
-const TOGGLE = args.str('toggle', 'zlayers');
-const WHAT = TOGGLE === 'zlayers' ? 'the layers' : TOGGLE;
+const TOGGLE = args.str('toggle', 'zflat');
+const WHAT = TOGGLE;
 /* --cam-tol D: grade frames whose camera eye is within D units of MAME's and whose angles are within
  * 64/65536 of a turn; 0 grades only bit-identical cameras. The off and on pictures share the camera, so
  * a small difference from MAME's adds the same noise to both. */
 const CAM_TOL = args.num('cam-tol', 0.05);
-/* --only-model N: the layers on only model N's faces, to find which model a result comes from. */
-const ONLY = args.str('only-model', '-1');   /* N or LO-HI */
-if (ONLY !== '-1' && TOGGLE !== 'zlayers') {
-    console.error(`--only-model picks which models are layered, so it goes with the layers, not --toggle ${TOGGLE}`);
-    process.exit(2);
-}
-/* --set k=v,k=v: more set_camera settings for the play with the layers on (zlayer_steps, zlayer_board). */
+/* --set k=v,k=v: more set_camera settings for the play with the switch on. */
 const SET = Object.fromEntries((args.str('set', '') || '').split(',').filter(Boolean).map((kv) => kv.split('=')));
 const STAGE = args.num('stage', 5);
 const FROM = args.num('from', 400), TO = args.num('to', 1300), STEP = args.num('step', 30);
@@ -127,7 +122,7 @@ const mame = [];
 /* ---- here ------------------------------------------------------------------- */
 
 /*
- * One play of the replay with face layers (or the --toggle switch) on or off. The picture of every
+ * One play of the replay with the --toggle switch on or off. The picture of every
  * frame in reach of a MAME snapshot is kept, stamped with the board frame the
  * A/V stream gives it; capture_dl's marks give each board frame's
  * frame_counter and camera, which is how the two emulators' frames are paired.
@@ -139,9 +134,7 @@ async function playHere(on, port) {
     const pictures = new Map();
     let jump = -1, sock = null;
     try {
-        await emu.rpc('set_camera', TOGGLE === 'zlayers'
-            ? { zlayers: String(on), zlayer_model: String(ONLY), ...(on ? SET : {}) }
-            : { [TOGGLE]: String(on), ...(on ? SET : {}) });
+        await emu.rpc('set_camera', { [TOGGLE]: String(on), ...(on ? SET : {}) });
         sock = net.connect(avPort, '127.0.0.1');
         let buf = Buffer.alloc(0), hdr = false;
         sock.on('error', () => {});
@@ -175,7 +168,6 @@ async function playHere(on, port) {
         const st = await emu.status();
         if (st.frames - jump >= FROM - 10) throw new Error(`reached frame ${st.frames} before the capture could start (jump at ${jump})`);
         const prefix = path.join(OUT, `here-${TOGGLE}${on}`);
-        await emu.rpc('set_camera', {});   /* empties the list of layered models */
         const r = await emu.rpc('capture_dl', {
             frames: jump + TO + 12 - st.frames, path: prefix,
             probes: `500020:4,${[0, 4, 8, 12].map((o) => (CAMERA + o).toString(16) + ':4').join(',')}`,
@@ -183,7 +175,6 @@ async function playHere(on, port) {
         });
         if (!r.complete) throw new Error(`capture_dl stopped after ${r.frames} frames`);
         await new Promise((r2) => setTimeout(r2, 500));   /* the last pictures in flight */
-        const models = (await emu.rpc('set_camera', {})).layer_models ?? [];
         const meta = JSON.parse(fs.readFileSync(prefix + '.json', 'utf8'));
         const marks = new Map(meta.marks.map((m) => {
             const cam = Buffer.alloc(CAMERA_LEN);
@@ -191,7 +182,7 @@ async function playHere(on, port) {
             return [m[0], { fc: m[2] >>> 0, camera: cam }];
         }));
         for (const ext of ['.bin', '.json']) fs.rmSync(prefix + ext, { force: true });
-        return { jump, pictures, marks, models };
+        return { jump, pictures, marks };
     } finally {
         if (sock) sock.destroy();
         await emu.close();
@@ -203,7 +194,6 @@ for (const f of fs.readdirSync(OUT)) if (/^compare-r\d+(-crop)?\.png$/.test(f)) 
 const port = args.num('port', 7520);
 const [off, on] = [await playHere(0, port), await playHere(1, port + 2)];
 rep.check('both plays jumped on the same board frame', off.jump === on.jump, `off ${off.jump}, on ${on.jump}`);
-rep.note(`models drawn with layered faces: ${on.models.join(', ') || 'none'}${ONLY !== '-1' ? ` (layers on model ${ONLY} only)` : ''}`);
 
 /* MAME's record n is the n-th frame edge after its jump; here that edge is
  * board frame jump + 1 + n. frame_counter counts from power-on and MAME shows
@@ -256,7 +246,7 @@ if (lag === null) {
 }
 
 /*
- * Per graded frame: the pixels where the layers change the picture, and of
+ * Per graded frame: the pixels where the switch changes the picture, and of
  * those, how many each version puts nearer MAME (largest channel difference,
  * by more than TOL either way).
  */
@@ -284,8 +274,8 @@ if (missing) rep.note(`${missing} graded frames had no picture here at the lag (
 for (const r of rows.filter((x) => x.changed).sort((x, y) => y.changed - x.changed).slice(0, 8))
     rep.note(`replay frame ${r.n}: ${r.changed} pixels changed by ${WHAT}, ${r.won} nearer MAME with them, ${r.lost} nearer without`);
 
-/* The frame the layers change most, side by side: MAME | layers off | layers
- * on | what changed (green: nearer MAME with the layers, red: nearer without,
+/* The frame the switch changes most, side by side: MAME | switch off | switch
+ * on | what changed (green: nearer MAME with the switch, red: nearer without,
  * grey: neither), whole and then cropped to the changes and enlarged. */
 const top = rows.reduce((x, y) => (y.changed > (x?.changed ?? -1) ? y : x), null);
 if (top?.changed) {

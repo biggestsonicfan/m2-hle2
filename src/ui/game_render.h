@@ -342,6 +342,7 @@ static const char *game_render_fill_vs_glsl =
     "flat out ivec4 face;\n"
     "flat out ivec2 tile_log2;\n"   /* log2 of the tile sides (GLSL ES 3.00 has no findMSB) */
     "flat out int ramp_row;\n"      /* colour alpha - 2: the face's colour ramp row, or -1 */
+    "flat out float fdepth;\n"      /* the board's flat key as a window depth, or -1 (geo3d_flat_depth) */
     /* A decal is its surface's own faces drawn again, exactly on top, and passes on
      * a depth TIE (LESS_EQUAL). Since the fill was split, the surface can go through
      * the discard-free program and its decal through the discarding one, and two
@@ -372,7 +373,18 @@ static const char *game_render_fill_vs_glsl =
     "  }\n"
     /* A face lying on others in its plane is pulled in front of them by its layer
      * (geo3d_mesh_layers), in [0, 1] depth units: twice that in GL's [-1, 1]. */
-    "  if (gl_Position.w > 0.0) gl_Position.z -= 2.0 * a_zs.y * gl_Position.w;\n"
+    "  if (gl_Position.w > 0.0 && a_zs.y > 0.0) gl_Position.z -= 2.0 * a_zs.y * gl_Position.w;\n"
+    /* The board's own key (set_camera zflat): a depth in this window's slice,
+     * the slice's near end (z = -0.05) to its far end, written per fragment. */
+    "  fdepth = -1.0;\n"
+    "  if (a_zs.y < 0.0) {\n"
+    "    float zfar = -mvp[2][2], znear = zfar + 20.0 * mvp[3][2];\n"
+    "    fdepth = mix(znear, zfar, -a_zs.y - 1.0) * 0.5 + 0.5;\n"
+    /* The board clips only at the four sides through the eye: with z = 0 at
+     * every vertex, -w <= z <= w is w >= 0, so the clipper cuts at the eye
+     * plane, not at the near or far plane (MAME check_culling). */
+    "    gl_Position.z = 0.0;\n"
+    "  }\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl; ez = -a_pos.z;\n"
     "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
     "  if (tw > 0 && th > 0 && (tw & (tw - 1)) == 0 && (th & (th - 1)) == 0) fl |= 64;\n"
@@ -456,6 +468,7 @@ static const char *game_render_fill_fs_ref_glsl =
     "in vec3 bpix;\n"
     "flat in vec4 tile;\n"
     "flat in vec4 lbpl;\n"
+    "flat in float fdepth;\n"
     "out vec4 frag_color;\n"
     GAME_RENDER_FAST_LOG2_GLSL
     "bool has(int bit) { return (int(lbpl.z + 0.5) & bit) != 0; }\n"
@@ -551,6 +564,7 @@ static const char *game_render_fill_fs_ref_glsl =
     "    rgb = clamp(max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
+    "  gl_FragDepth = fdepth >= 0.0 ? fdepth : gl_FragCoord.z;\n"
     "}\n";
 
 /*
@@ -579,6 +593,7 @@ static const char *game_render_fill_fs_glsl =
     "flat in ivec4 face;\n"
     "flat in ivec2 tile_log2;\n"
     "flat in int ramp_row;\n"
+    "flat in float fdepth;\n"
     "out vec4 frag_color;\n"
     GAME_RENDER_FAST_LOG2_GLSL
     "ivec4 level_tile(int L) {\n"
@@ -699,12 +714,13 @@ static const char *game_render_fill_fs_glsl =
     "    rgb = shade(li);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
+    "  gl_FragDepth = fdepth >= 0.0 ? fdepth : gl_FragCoord.z;\n"
     "}\n";
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
     "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float4 lbpl : TEXCOORD2; float2 zs : TEXCOORD3; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; nointerpolation float fdepth : TEXCOORD5; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
@@ -716,7 +732,13 @@ static const char *game_render_fill_vs_hlsl =
     "    if (outp.pos.w > 0.0) outp.pos.z = clamp(zc / max(zw, 1e-6), -1.0, 1.0) * outp.pos.w;\n"
     "    else if (zw > 0.0) outp.pos.z = (zc / zw) * outp.pos.w;\n"
     "  }\n"
-    "  if (outp.pos.w > 0.0) outp.pos.z -= inp.zs.y * outp.pos.w;\n"
+    "  if (outp.pos.w > 0.0 && inp.zs.y > 0.0) outp.pos.z -= inp.zs.y * outp.pos.w;\n"
+    "  outp.fdepth = -1.0;\n"
+    "  if (inp.zs.y < 0.0) {\n"
+    "    float zfar = -mvp[2][2], znear = zfar + 20.0 * mvp[2][3];\n"
+    "    outp.fdepth = lerp(znear, zfar, -inp.zs.y - 1.0);\n"
+    "    outp.pos.z = 0.0;\n"
+    "  }\n"
     "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl; outp.ez = -inp.pos.z;\n"
     "  return outp;\n"
     "}\n";
@@ -726,7 +748,7 @@ static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> lumat : register(t1);\n"
     "Texture2D<float4> cxlat : register(t2);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; nointerpolation float fdepth : TEXCOORD5; };\n"
     "static const int LOG2[128] = { " GAME_RENDER_LOG2_TABLE " };\n"
     "bool has(float fl, int bit) { return (((int)(fl + 0.5)) & bit) != 0; }\n"
     "int fast_log2(float z) {\n"
@@ -782,7 +804,8 @@ static const char *game_render_fill_fs_hlsl =
     "  }\n"
     "  return float2(lerp(row0, row1, f.y), a);\n"
     "}\n"
-    "float4 main(fs_in inp) : SV_Target0 {\n"
+    "float4 main(fs_in inp, out float depth : SV_Depth) : SV_Target0 {\n"
+    "  depth = inp.fdepth >= 0.0 ? inp.fdepth : inp.pos.z;\n"
     "  float fl = inp.lbpl.z;\n"
     "  float lmax = floor(log2(max(min(inp.tile.z, inp.tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(ddx(inp.uv)), length(ddy(inp.uv)))), 0.0, lmax);\n"
@@ -2131,49 +2154,6 @@ static inline void gm_mat4_geo_projection(float *m, const float *gproj, int win,
 }
 
 /*
- * A run of draws with one matrix, from draw k (geo3d_run_get): the meshes the
- * cache will draw them with, ranked together when that tells each something
- * its own ranking does not. slot[d] is draw d's place in the run, or -1.
- */
-static int game_render_run_slot[MAX_GEO_MODELS];
-static void game_render_begin_matrix_run(const geo3d_state_t *geo, int k, int end,
-                                         const uint8_t *main_data, size_t main_data_size,
-                                         const uint8_t *polygons,  size_t polygons_size,
-                                         const uint8_t *materials, size_t materials_size,
-                                         uint32_t table_off, uint32_t table_count,
-                                         uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add, int *slot) {
-    geo3d_cmesh_t *mesh[GEO3D_RUN_DRAWS];
-    int n = 0, e = k;
-    g_geo3d_run = NULL;
-    for (; e < end && (e == k || memcmp(geo->captured[e].matrix, geo->captured[k].matrix, 12 * sizeof(float)) == 0); e++) {
-        const captured_model_t *cm = &geo->captured[e];
-        slot[e] = -1;
-        if (!g_geo3d_runs || !geo->use_matrix || cm->model_idx < 0 || n == (int)GEO3D_RUN_DRAWS) continue;
-        if (geo->isolate_index >= 0 && e != geo->isolate_index) continue;
-        if (geo->filter_enabled && (e < geo->filter_min || e > geo->filter_max)) continue;
-        g_geo3d_obj_tpa = cm->tpa;
-        g_geo3d_obj_tha = cm->tha;
-        g_geo3d_board_luma = 1;
-        geo3d_cmesh_t *m;
-        if (geo3d_mesh_for_draw(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
-                                materials, materials_size, table_off, table_count,
-                                mesh_ptr_subtract, mesh_ptr_add, cm->matrix, &m) == GEO3D_DRAW_CACHED) {
-            slot[e] = n;
-            mesh[n++] = m;
-        }
-        g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
-        g_geo3d_board_luma = 0;
-    }
-    geo3d_run_t *run = geo3d_run_get(mesh, n);
-    if (run) {
-        geo3d_run_begin(run, geo->captured[k].matrix);
-        g_geo3d_run = run;
-    } else {
-        for (int d = k; d < e; d++) slot[d] = -1;
-    }
-}
-
-/*
  * Draw the frame's GEO display list: runs of objects that share a projection
  * and window are decoded together and drawn with that window's scissor.
  */
@@ -2192,6 +2172,8 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
     g_render_batch.count = 0;
     geo3d_lines_reset();
     geo3d_tris_reset();
+    g_geo3d_flat_prev_z = 1.0e10f;   /* MAME render_frame_start */
+    g_geo3d_flat_list = 1;
     for (int i = 0; i < count; ) {
         const captured_model_t *c0 = &geo->captured[i];
         int j = i;
@@ -2208,25 +2190,14 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
         if (!(x1 > x0 && y1 > y0)) { i = j; continue; }   /* off-screen window: nothing drawn */
 
         if (g_render_batch.count == GAME_RENDER_MAX_RUNS) game_render_batch_flush(geo->lines_only);
+        const float flat_prev_z = g_geo3d_flat_prev_z;
         for (int attempt = 0; ; attempt++) {
             const int tri_first = g_geo3d_tris.count, line_first = g_geo3d_lines.count;
+            g_geo3d_flat_prev_z = flat_prev_z;
             for (int k = i; k < j; k++) {
                 const captured_model_t *cm = &geo->captured[k];
                 if (geo->isolate_index >= 0 && k != geo->isolate_index) continue;
                 if (geo->filter_enabled && (k < geo->filter_min || k > geo->filter_max)) continue;
-                /* A draw laid over the one before it with the same matrix wins
-                 * the faces the two share, as the later polygon does on the
-                 * board (geo3d_tie_layer). A run starts afresh, and so does
-                 * a run decoded again below. */
-                if (k == i || memcmp(cm->matrix, geo->captured[k - 1].matrix, 12 * sizeof(float)) != 0) {
-                    geo3d_tie_reset();
-                    game_render_begin_matrix_run(geo, k, j, main_data, main_data_size, polygons, polygons_size,
-                                                 materials, materials_size, table_off, table_count,
-                                                 mesh_ptr_subtract, mesh_ptr_add, game_render_run_slot);
-                }
-                g_geo3d_run_slot = game_render_run_slot[k];
-                geo3d_tie_draw((uint32_t)k + 1u);
-                g_geo3d_tie_on = geo->use_matrix;
                 g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
                 g_geo3d_obj_tpa = cm->tpa;
                 g_geo3d_obj_tha = cm->tha;
@@ -2246,9 +2217,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                                           cm->color[0], cm->color[1], cm->color[2]);
                 g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
                 g_geo3d_board_luma = 0;
-                g_geo3d_tie_on = 0;
                 g_geo3d_obj_mesh = NULL;
-                g_geo3d_run_slot = -1;
             }
             /* The run filled the shared buffer after earlier runs: draw those and
              * decode it again into an empty buffer, where it gets the whole
@@ -2277,6 +2246,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
         gm_mat4_transpose(run->mvp_t, mvp);
         i = j;
     }
+    g_geo3d_flat_list = 0;
     game_render_batch_flush(geo->lines_only);
     g_light_dir[0] = saved_light[0]; g_light_dir[1] = saved_light[1]; g_light_dir[2] = saved_light[2];
     sg_apply_scissor_rect(ox, oy, w, h, true);
