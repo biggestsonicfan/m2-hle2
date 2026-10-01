@@ -274,7 +274,7 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"cam_z",v,sizeof v)) g_geo3d_state->cam_z   = (float)atof(v);
     if (mcp_json_get_str(req,"rot_y",v,sizeof v)) g_geo3d_state->rot_y   = (float)atof(v);
     if (mcp_json_get_str(req,"rot_x",v,sizeof v)) g_geo3d_state->rot_x   = (float)atof(v);
-    if (mcp_json_get_str(req,"fov",  v,sizeof v)) g_geo3d_state->fov_deg = (float)atof(v);
+    if (mcp_json_get_str(req,"fov",  v,sizeof v)) { g_geo3d_state->fov_deg = (float)atof(v); g_geo3d_state->fov_auto = false; }
     if (mcp_json_get_str(req,"test", v,sizeof v)) g_geo3d_state->test_triangle = (atoi(v) != 0);
     if (mcp_json_get_str(req,"lines_only",v,sizeof v)) g_geo3d_state->lines_only = (atoi(v) != 0);
     /* The board's polygon z-sort (geo3d.h geo3d_sort_z) — 0 leaves every face

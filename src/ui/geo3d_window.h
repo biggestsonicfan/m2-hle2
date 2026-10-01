@@ -125,14 +125,14 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     if (geo->use_game_view) {
         igText("  X=%.3f  Y=%.3f  Z=%.3f", geo->cam_x, geo->cam_y, geo->cam_z);
         igText("  rot_x=%.3f  rot_y=%.3f", geo->rot_x, geo->rot_y);
-        igDragFloatEx("FOV", &geo->fov_deg, 1.0f, 15.0f, 120.0f, "%.1f deg", 0);
+        if (igDragFloatEx("FOV", &geo->fov_deg, 1.0f, 15.0f, 120.0f, "%.1f deg", 0)) geo->fov_auto = false;
     } else {
         igDragFloatEx("cam X", &geo->cam_x, 0.1f, -1000.0f, 1000.0f, "%.2f", 0);
         igDragFloatEx("cam Y", &geo->cam_y, 0.1f, -1000.0f, 1000.0f, "%.2f", 0);
         igDragFloatEx("cam Z", &geo->cam_z, 0.1f, -1000.0f, 1000.0f, "%.2f", 0);
         igDragFloatEx("rot Y", &geo->rot_y, 0.01f, -6.28f, 6.28f, "%.3f rad", 0);
         igDragFloatEx("rot X", &geo->rot_x, 0.01f, -6.28f, 6.28f, "%.3f rad", 0);
-        igDragFloatEx("FOV",   &geo->fov_deg, 1.0f, 15.0f, 120.0f, "%.1f deg", 0);
+        if (igDragFloatEx("FOV",   &geo->fov_deg, 1.0f, 15.0f, 120.0f, "%.1f deg", 0)) geo->fov_auto = false;
     }
     if (igButton("Reset Camera")) {
         geo->cam_x   = 0.0f;

@@ -311,12 +311,16 @@ static const game_profile_t fvipers_profile = {
         },
     },
     .quirks = {
-        /* Start with STF values; check the decoder against fvipers reference
-         * renders before finalising (see CLAUDE.md §3D Polygon Decoder). */
-        .mesh_ptr_subtract  = 0x02000010,   /* TODO: verify encoding for fvipers */
+        /* Read off the FV ROMs (Pinboard #254). The model table sits where
+         * STF's does, at 0xE0004 in mpr-18614/18615, 16 bytes an entry, and the
+         * word before it is its length: 0x1524 = 5412 (STF's says 0x13EF =
+         * 5103). The mesh word is the polygon ROM's word address on the bus
+         * (0x02000000 up), as in STF: all 3711 non-zero ones decode to offsets
+         * 0x10-0x9E6104, ascending, inside the 12 MB polygon ROM. */
+        .mesh_ptr_subtract  = 0x02000010,
         .mesh_ptr_add       = 0x10,
-        .model_table_offset = 0x000E0004,   /* TODO: find in IDA */
-        .model_table_count  = 5412,            /* TODO */
+        .model_table_offset = 0x000E0004,
+        .model_table_count  = 5412,
         .camera_struct_addr = 0x00515598,   /* eye x,y,z (g13+0x18) — confirmed MAME + IDA */
         .camera_angle_addr  = 0x00515584,   /* yaw = high16 (g13+0x06); camera_control ldos/stos 6(g13) */
     },

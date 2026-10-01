@@ -275,12 +275,13 @@ static int sfight_hook_idle(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 1;
 }
 
-/* _700000_loop (0x7264): sound-init delay loop — zero r3 so cmpdeco exits. */
-static int sfight_hook_700000_loop(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->locals.r[3] = 0;
-    return 1;
-}
+/* No hook at _700000_loop (0x7264), the 700000-turn divr/cmpdeco delay after
+ * "Sound Initialize ..." (about a second on the board). It used to zero r3 to
+ * leave at once. That bought 2.1M instructions of host time and nothing else:
+ * boot slices are not game frames here, so the frame timeline, the sound and
+ * every RAM block but work RAM (frames 2-32) were the same with it, and MAME's
+ * 163 boot frames include the delay either way (Pinboard #254). It did change
+ * the netplay frame check, which counts instructions. */
 
 /* variable_diff_calc (0x11A04): fires once per game frame at the end of the
  * main loop. Setting g_frame_done lets the emu thread pace to the next 60Hz
@@ -720,14 +721,13 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 25
+#define SFIGHT_BASE_HOOK_COUNT 24
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
     { 0x0004A58C, sfight_hook_check_timer_4_spin, "check_timer_4_spin"      }, \
     { 0x00001768, sfight_hook_interrupt_wait,     "interrupt_wait"          }, \
     { 0x00011580, sfight_hook_interrupt_wait_b,   "interrupt_wait_b"        }, \
     { 0x00011610, sfight_hook_idle,               "_idle"                   }, \
-    { 0x00007264, sfight_hook_700000_loop,        "_700000_loop"            }, \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
     { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \
@@ -802,7 +802,7 @@ _Static_assert(sizeof((hle_hook_entry_t[]){ SFIGHT_BASE_HOOKS }) ==
      * pin1 VsyncObj, pin2 Timer, pin3 Other(sound). */                               \
     .irq_handler        = { 0x00000C40, 0x00000D10, 0x00000D30, 0x00000DF0 },         \
     .sound_queue_count_addr = 0x00504001,   /* byte_504001 */                         \
-    .warning_skip_addr      = 0x00500410,   /* poke 1 → skip boot warning screen */ \
+    .warning_skip_addr      = 0x00500410,   /* SKIP_WARNING; see g_warning_skip */   \
     .vs_rematch             = true,         /* sfight_hook_vs_rematch */             \
     .attract_replay = {                                                             \
         .step_addr   = 0x00500030,           /* _sub_mode */                          \
