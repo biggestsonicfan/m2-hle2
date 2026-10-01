@@ -587,6 +587,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     memset(bus->io, IO_IDLE_FILL, sizeof(bus->io));
 
     cop_reset();   /* clears g_cop / g_sharc and resets rot[] to identity */
+    irqt_reset();  /* timers idle (0xFFFFF), no interrupt pending, vblank phase 0 */
 
     bus->main_data   = mem_region_fresh(bus->main_data,   MAIN_DATA_SIZE);
     bus->xtra_data   = mem_region_fresh(bus->xtra_data,   XTRA_DATA_SIZE);
