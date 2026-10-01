@@ -1422,7 +1422,11 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
 #  include <GLES3/gl3.h>
 #  define GAME_RENDER_ATLAS_ROWS 1
 #elif defined(SOKOL_GLCORE) && defined(__linux__)
+/* With the prototypes, as av_capture.h and the others ask for them: this is
+ * the first GL include in the unit, and gl.h's guard makes theirs no-ops. */
+#  define GL_GLEXT_PROTOTYPES
 #  include <GL/gl.h>
+#  include <GL/glext.h>
 #  define GAME_RENDER_ATLAS_ROWS 1
 #endif
 
