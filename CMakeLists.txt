@@ -28,6 +28,14 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-ffp-contract=off -fno-strict-aliasing)
 endif()
 
+# A C function called with no prototype is taken to return int. A pointer it
+# returns loses its top half on a 64-bit host and the build still links: Linux
+# GL once got glFenceSync that way, every readback fence was garbage, and
+# --headless --av-port sent no picture at all (Pinboard #236).
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:-Werror=implicit-function-declaration>)
+endif()
+
 set(VENDOR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set(SRC    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
