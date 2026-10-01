@@ -104,6 +104,7 @@ its built-in `WebSocket`.
 | `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-zsort.mjs` | which face wins where faces lie on faces (the board's sort key, `geo3d_flat_depth`), in pictures against MAME's. Plays the attract replay in MAME and here, here with a switch (`zflat`) off and on, and counts, of the pixels it changes, how many each puts nearer MAME. `--stage N` puts the replay on another stage in both. See "Faces lying on faces" below |
+| `grade-round-intro.mjs` | the 1P round intro's camera sweep on each of the fourteen stages, in pictures against MAME's, where the camera passes closest to the set pieces (Casino Night's slot cabinet, #244). Both boards play the same inputs from power-on with the stage forced; pictures pair by the game's frame counter and a bit-identical camera. `--toggle zflat` A/Bs the board key on top. See "The round intro" below |
 | `grade-carpet.mjs` | the explorer's Flying Carpet rug against MAME's pictures, from the board's own camera: the plate `draw_sphynx_head` lays under the rug (3332) must cover none of it, because the board sorts it behind every strip. Reads `grade-zsort --mame --stage 1`'s snapshots and cameras, renders the explorer headless (puppeteer-core, Edge) at each, counts the rug pixels the plate changes, and holds the rug's pattern and the desert's sky to MAME's at the board's focal length and flight clock. See "The Flying Carpet's rug" below |
 | `grade-lunar-fox.mjs` | the Death Egg II cutscene (the Lunar Fox leaves Tails' lab), in pictures against MAME's. A cheat on both boards (`tools/mame/lunar-fox.lua` there) wins a 1P game up to Giant Wing; pictures pair by (part, `am_cntr`), and the Tails emblem on the lab doors must sit within `--tol` of MAME's. See "The Death Egg II cutscene" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
@@ -488,6 +489,41 @@ stage  changed   nearer MAME with  without  neither
 total   332250            325730     2655
 ```
 
+
+## The round intro (`grade-round-intro`)
+
+The round intro's camera sweep passes closer to each arena's set pieces than a
+fight does, so a camera-dependent clip or bend shows there first. This grader
+plays it on every stage in MAME (`tools/mame/round-intro.lua`) and here, from
+power-on, on the same coin / Start / Punch / Kick schedule. MAME rewrites
+STAGE_NUM as the game writes it; here the stage is written at ROUND_STAGE_PIN
+(0xAFC8).
+
+```sh
+node tools/grade-round-intro.mjs --mame           # MAME's side, ~2 min a stage
+node tools/grade-round-intro.mjs --toggle zflat   # here, twice a stage, and grade (~15 min)
+```
+
+- **Pairing:** by the game's frame counter (0x500020) and a camera (0x519E98)
+  identical bit for bit. The grader measures the counter's offset (MAME's runs
+  one ahead) by which shift lines up the most moving cameras. It also measures
+  the picture's lag against its display list (the A/V stream tags it one board
+  frame early).
+- **The schedule counts game frames.** Since PR #163 a board frame is a vblank
+  and a game frame can take more than one; a schedule in board frames drifted
+  far enough to make stage 1's median 22,432.
+- **Not graded:** the NEXT MATCH screen (the portraits slide in a frame apart),
+  the first frame after a sub-mode change, and any pair whose mean difference
+  is 20 a channel or more (a scene change a frame apart).
+- **Measure:** pixels more than 48 off MAME in any channel, as a median and a
+  worst per stage. The worst is written as a MAME | here | difference strip;
+  `--rows` lists every pair.
+
+What it found (2026-10-01): medians from 60 (stage 11) to 2,778 pixels of
+190,464, and the board key nearer MAME on every stage, by 539,225 changed
+pixels to 3,496. Every worst picture is animation phase: the rings' spin, water
+speckle, the Death Egg's floor scroll, the laser rails' blink, the stage card a
+frame apart. None of it is geometry. BUBBLEGUM.md §1 has the table.
 
 ## The Flying Carpet's rug (`grade-carpet`)
 

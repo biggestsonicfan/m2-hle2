@@ -8,6 +8,8 @@ The board side of the sound path (`sound.h`, `scsp.h`, `m68k_*`), the tile rende
 
 ## 1. The z-sort: six rules standing in for one
 
+**Done in PR #159 (Pinboard #247).** Game frames now draw each face at its board key (`geo3d_flat_depth`), and the patches in the table below are gone from the game draw. The rest of this section is the audit as it was written. Pinboard #249 then went looking for the camera-dependent breakage that #244's patch had answered, using the round intro on every stage (`tools/grade-round-intro.mjs`); see "After the flat key" at the end of this section.
+
 **The board's rule** (MAME `model2_v.cpp`, `model2_3d_process_polygon` and `model2_3d_frame_end`) is short:
 
 - Each polygon gets one z, chosen by attribute bits 10–11: mode 0 is the previous polygon's z, mode 1 the nearest corner, mode 2 the farthest corner, mode 3 is 1e10.
@@ -46,6 +48,36 @@ Two smaller gaps in the same area:
 - A mode-0 polygon at the head of a model falls back to the nearest corner (`zset = false` per decode, `geo3d.h:3073`). On the board, `polygon_z` carries over from the previous object.
 - `check_culling`'s `master_z_clip` and `max_z < 0` culls, and the four clip planes, are not modelled; `zclip_3d` RAM is mapped but never read. The homebrew HUD's "drop triangles over 1.5 units near the camera" reject (`geo3d.h:683-694`) hides a col0 decode bug that those planes would not have hidden.
 
+### After the flat key: the round intro (Pinboard #249, #287)
+
+#244's standing list answered a picture the camera made: the slot reels sank into the cabinet only as the round intro's sweep passed them. So once the flat key was in, the question was whether anything camera-dependent was left. `tools/grade-round-intro.mjs` plays the 1P round intro on all fourteen stages in MAME and here, from power-on on the same inputs, and holds every picture where the camera sweeps closest to the set pieces against MAME's. Pictures pair by the game's frame counter (0x500020) and a bit-identical camera (0x519E98). The measure is the pixels more than 48 off MAME in any channel, out of 496x384, with `--toggle zflat` on top:
+
+```
+stage  median  worst   changed  nearer MAME with  without
+    0     711   5053     16287             16238       49
+    1    1316   4690     28437             28371       66
+    2     691   3616     13531             13506       25
+    3     266   3766     12067             12007       58
+    4    1379  12879     23025             22968       54
+    5     654   3307    137120            136736      384
+    6     529   3229      7505              7498        7
+    7    2121   4140    216310            214622     1685
+    8     184  15711      7671              7646       25
+    9    2778   7509     13255             13254        1
+   10    1640  26072     23618             22808      809
+   11      60   3046      6819              6809       10
+   12     185   4675     10046              9805      241
+   13    1097   7248     27039             26957       82
+total                   542730            539225     3496
+```
+
+Each stage has 82-84 graded pairs. The NEXT MATCH screen (sub-mode 1) and the frames at a scene change are counted but not graded. The key is nearer MAME on every stage, by 539,225 changed pixels to 3,496. Every stage's worst picture was looked at: the ring's spin phase (South Island, Canyon Cruise), water and texture speckle, the 10K sign, the Death Egg's floor scroll, the laser rails' blink and the stage card arriving a frame apart (stage 10's 26,072). **None of it is geometry. No clipping or bending is left in the round intro on any stage.** What is left is animation phase, and phase depends on how long each board took to boot.
+
+Two things about timing will catch the next grader that pairs pictures with MAME's:
+
+- **Since PR #163 a board frame is a vblank, and a game frame can take more than one.** An input schedule written in board frames drifts against MAME's. That pushed stage 1's median from 1,316 to 22,432 and looked like a rendering regression until a bisect pinned it on the change in frame counting. The schedule has to read the game's counter.
+- **The A/V stream tags the picture of a display list one board frame early** (`capture_dl` marks the game frame edge, the picture comes out at the vblank before it). The grader measures this lag rather than assuming it, and MAME's counter runs one ahead of this board's (it measures that too, by camera votes).
+
 ## 2. Frame sync and timers are hooks, not interrupts
 
 *Fixed in Pinboard #253.* The vblank is raised on the i960's cycle clock (416,667 cycles) and delivered to the profiles' handlers, the timers are always live, and the wait hooks are gone: STF's `interrupt_wait` (0x1768), `interrupt_wait_b` (0x11580), `_idle` (0x11610), `check_timer_4` (0x4A55C) and `check_timer_4_spin` (0x4A58C), and FV's 0x2238, 0x1184C/0x118DC and 0x4A88C. The side bugs went with them: `_idle`'s static that survived a reset, and FV's `read_sw` hook that zeroed 0x500700. `EMU_FRAME_STEPS_MAX` is gone too; `EMU_STEPS_PER_SLICE` is only a cap now, and `EMU_IRQ_TABLE_MAX_SLICES` stays, for an SDK kernel's task switch. CLAUDE.md (HLE Hooks) has the rest.
@@ -73,12 +105,12 @@ Two smaller gaps in the same area:
 
 ## Doc drift found on the way
 
-- CLAUDE.md says `0x07000E0E` is a no-op; `sharc_exec.h:1520` now implements it as `Fn_load_point`.
+- ~~CLAUDE.md says `0x07000E0E` is a no-op~~ — fixed: CLAUDE.md now describes `Fn_load_point`.
 - `m68k_exec.h:659` says the step's cycle count is "approximate", but it has been held to MAME clock for clock since #119.
 
 ## Suggested order
 
-1. **The flat board key (§1).** This is the clearest case of "a few lines replacing a pile of patches", and `grade-zsort` can judge it against MAME today.
+1. ~~**The flat board key (§1).**~~ Done in PR #159. `grade-zsort` and `grade-round-intro` hold it against MAME.
 2. Direct data in the display-list scan, then retire the fallback (§3). Done (#251).
 3. The COP ready callback and the small COP items (§2 COP bit, §4). These are cheap, ROM-free and testable with `cop_replay`.
 4. Vblank on the cycle clock plus live timers (§2). This has the biggest payoff in removed hooks and the biggest re-grade, so it should be done last.
