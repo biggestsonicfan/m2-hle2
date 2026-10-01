@@ -350,6 +350,7 @@
       <button id="lag-copy" class="tool" hidden>Copy report</button>
       <span id="lag-status" class="status" role="status">Play as usual while it measures: it times the game, the picture and the sound.</span>
       <span class="spacer"></span>
+      <span class="bar-setting">
       <label class="status" for="render-scale">Picture</label>
       <select id="render-scale" class="tool">
         <option value="0">Full resolution</option>
@@ -357,6 +358,14 @@
         <option value="2">Low (992&times;768)</option>
         <option value="1">Arcade (496&times;384)</option>
       </select>
+      </span>
+      <span class="bar-setting">
+      <label class="status" for="sound-driver">Sound</label>
+      <select id="sound-driver" class="tool" title="Who runs the game's sound program. The lighter driver runs it as ordinary code instead of emulating the sound board's CPU: up to a tenth less work per frame, for slower computers and phones.">
+        <option value="0">Sound CPU (exact)</option>
+        <option value="1">Lighter driver</option>
+      </select>
+      </span>
     </div>
     <div id="lag-findings" class="findings" aria-live="polite"></div>
   </div>
