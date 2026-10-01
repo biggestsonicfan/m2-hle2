@@ -14,7 +14,7 @@
 
 #define FRAME_STACK_DEPTH          64
 #define FRAME_ALIGN_MASK           63
-#define EMU_STEPS_PER_SLICE        500000  /* sized to always reach frame boundary */
+#define EMU_STEPS_PER_SLICE        500000  /* a cap: a slice is a vblank, 416,667 cycles */
 
 /* ---- Display ------------------------------------------------------------- */
 

@@ -1136,12 +1136,13 @@ held to a later slice). The answer should be 735 samples a frame (44100 / 60)
 everywhere. It is not a timing, so one run per build is the measurement.
 
     node tools/clock-state.mjs buildA/m2hle.exe buildB/m2hle.exe --state round-mask
-    node tools/clock-state.mjs build/m2hle.exe --state round-mask --args "--live-timers"
+    node tools/clock-state.mjs build/m2hle.exe --state round-mask --args "--steps-per-slice 150000"
 
 Before `emu_sound_slice_end` the sound board was charged a frame per *slice*, and the
 VS screen's 65 frames spanned 80 slices: 904.6 samples a frame (802.8 with
 `--live-timers`), the music ~23% fast through the load. It is 735.0 now, at any
-`--steps-per-slice`. See `SLICE-CLOCKS.md`.
+`--steps-per-slice`. Since Pinboard #253 a slice is the board's own vblank and the
+timers are always live, so it holds by construction. See `SLICE-CLOCKS.md`.
 
 ## Two builds, one board
 

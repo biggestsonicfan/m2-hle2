@@ -1,5 +1,10 @@
 # One slice is not one frame
 
+*Superseded by Pinboard #253:* a slice now runs the i960 to the board's vblank on
+its own cycle clock, so a slice is one video frame of the board and the sound
+board is charged at every vblank. `EMU_FRAME_STEPS_MAX` is gone, and the timers
+are always live (`--live-timers` does nothing). What follows is the history.
+
 Option A below is merged (PR #61); B and C are the alternatives not taken. This
 began as the accuracy bug the performance work walked past, written down with its
 measurement so it could be fixed on its own terms.

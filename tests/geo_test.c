@@ -22,6 +22,8 @@
 #include "sfight.h"     /* sfight_profile (quirks), load/install */
 #include "geo3d.h"      /* geo3d_decode_model, g_geo3d_tris/lines */
 
+const game_profile_t *g_active_profile = &sfight_profile;
+
 #include "test_rom_dir.h"
 
 static int g_fail = 0;

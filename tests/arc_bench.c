@@ -271,41 +271,36 @@ __attribute__((noinline)) static void emu_slice(void) {
     const game_quirks_t *q = &g_active_profile->quirks;
     if (!(g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to)) { emu_slice_real(); return; }
     int64_t a = now_us();
-    g_frame_done = 0;
-    bool board_vblank = q->board_vblank;
-    if (board_vblank) {
-        irqt_raise(0x1u);
-        g_vblank_acked = 0;
-        cop_geo_frame_edge();
-    }
+    g_vblank_edge = 0;
     emu_timers_slice_begin(&ctx);
     emu_service_irq(&ctx);
     int i;
     bool prof = g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to;
     uint64_t steps = 0;
     for (i = 0;
-         i < g_emu_steps_per_slice && !g_frame_done
-         && !(board_vblank && g_vblank_acked) && !cpu.halted;
+         i < g_emu_steps_per_slice && !cpu.halted;
          i++)
     {
+        if (g_irqt_vblank) { g_irqt_vblank = 0; g_vblank_edge = 1; break; }
         if (prof && cpu.sfr.ip < 0x400000) g_prof[cpu.sfr.ip >> 2]++;
         if (bp_check(cpu.sfr.ip)) break;
         if (i960_step_hot(&cpu, &bus) != 0) break;
         ctx.total_steps++;
         steps++;
         if (s_irq_in_service && g_active_profile) emu_service_sound_again(&ctx);
-        if (g_irqt_live) emu_timers_after_step(&ctx);
+        emu_timers_after_step(&ctx);
         if (g_log.warn_triggered) break;
         if (g_wp.hit) break;
         if (g_sharc.unknown_triggered) break;
     }
-    bool frame = g_frame_done || (board_vblank && g_vblank_acked);
-    if (frame) { emu_timers_frame_edge(&ctx); dl_frame_edge(&bus, g_emu_frames); emu_match_replay_edge(&ctx); }
-    if (g_with_68k) emu_sound_slice_end(frame, steps);
+    bool frame = g_vblank_edge != 0;
+    if (frame && q->board_vblank) { cop_geo_frame_edge(); dl_frame_edge(&bus, g_emu_frames); hle_match_replay_edge(&bus); }
+    (void)steps;
+    if (g_with_68k) emu_sound_slice_end(frame);
     if (q->geo_displaylist) geodl_capture(&bus);
     ctx.cpu_prev_snapshot = ctx.cpu_snapshot;
     ctx.cpu_snapshot      = cpu;
-    if (frame) g_emu_frames++;
+    if (frame) g_dl_frame_now = ++g_emu_frames;
     g_log.warn_triggered = 0; g_wp.hit = 0; g_sharc.unknown_triggered = 0;
 
     int64_t d = now_us() - a;
@@ -522,7 +517,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) prof_path = argv[++i];
         else if (!strcmp(argv[i], "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
         else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--live-timers")) g_irqt_live = 1;
+        else if (!strcmp(argv[i], "--live-timers")) ;   /* always on now */
         else if (!strcmp(argv[i], "--verify-atlas")) g_verify_atlas = true;
         else if (!strcmp(argv[i], "--tile-stats")) g_tile_stats = true;
         else if (!strcmp(argv[i], "--draw-digest") && i + 1 < argc) digest_path = argv[++i];

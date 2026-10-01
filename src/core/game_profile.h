@@ -130,13 +130,10 @@ typedef struct {
      * step_addr 0 = not supported. */
     attract_replay_t attract_replay;
 
-    /* Board-level vblank: when true, the emu thread raises the vblank pending
-     * bit (intreq bit 0, 0xE80000) once per 60 Hz slice — exactly as the real
-     * board / MAME do at scanline 384. This lets a self-pacing homebrew (one
-     * that polls + ACKs the vblank bit, like STF's frame loop) run with NO HLE
-     * hook and NO hardcoded addresses. STF/FV leave this false because their
-     * vsync work is HLE-hooked instead. With intena bit0 clear (poll-only) it
-     * never vectors an IRQ, so it's inert for games that don't poll it. */
+    /* No frame hook: the vblank marks the geo capture ring's frame boundary
+     * (cop_geo_frame_edge), which STF's and FV's frame hooks mark where the
+     * game's frame ends. The vblank itself comes for every profile, on the
+     * i960's clock (irq_timer.h). */
     bool     board_vblank;
 
     /* GEO display-list rendering: when true, render 3D by decoding the GEO

@@ -225,55 +225,10 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
 
 /* ---- HLE hook functions -------------------------------------------------- */
 
-/* check_timer_4 (0x4A55C): spin loop waiting for a timer interrupt.
- * Skip the whole function — return 0 to the caller. */
-static int sfight_hook_check_timer_4(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    cpu->globals.g[0] = 0;
-    hle_ret(cpu);
-    return 0;
-}
-
-/* check_timer_4_spin (0x4A58C): inner polling loop reading byte_50008C.
- * Write 0x01 so the loop exits on its own next iteration. */
-static int sfight_hook_check_timer_4_spin(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu;
-    mem_write8(bus, 0x0050008C, 0x01);
-    return 1;
-}
-
-/* interrupt_wait (0x1768): inject VsyncScr then skip the spin loop entirely.
- * The real loop spins until RAM_BASE >= 2 and bit 0 is clear. We skip it by
- * returning to 0x1778 (the instruction after the loop) and use hle_call to run
- * VsyncScr (0x0C40) first so per-frame 2D work fires. */
-static int sfight_hook_interrupt_wait(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    hle_call(cpu, 0x00000C40, 0x00001778);
-    return 0;
-}
-
-/* interrupt_wait_b (0x11580): clear RAM_BASE to 0 so _idle's spin loop runs and
- * execution falls through to the _idle hook (rather than jumping past it). */
-static int sfight_hook_interrupt_wait_b(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu;
-    mem_write8(bus, RAM_BASE, 0x00);
-    return 1;
-}
-
-/* _idle (0x11610): inject VsyncScr on first entry; run the ldob normally after.
- * First call: push a VsyncScr frame returning to 0x11610 so the hook fires again.
- * Second call: let ldob execute so the cmpibe at 0x11618 sees the value and exits. */
-static int sfight_hook_idle(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)bus;
-    static int s_vsync_fired = 0;
-    if (!s_vsync_fired) {
-        s_vsync_fired = 1;
-        hle_call(cpu, 0x00000C40, 0x00011610);
-        return 0;
-    }
-    s_vsync_fired = 0;
-    return 1;
-}
+/* No hook waits for the vblank or a timer: the board raises both on the
+ * i960's own clock (irq_timer.h), VsyncScr (0xC40) and the Timer handler run as
+ * interrupts, and interrupt_wait / interrupt_wait_b / _idle / check_timer_4
+ * spin in the ROM until they do (Pinboard #253). */
 
 /* No hook at _700000_loop (0x7264), the 700000-turn divr/cmpdeco delay after
  * "Sound Initialize ..." (about a second on the board). It used to zero r3 to
@@ -284,18 +239,16 @@ static int sfight_hook_idle(i960_cpu_t *cpu, memory_bus_t *bus) {
  * the netplay frame check, which counts instructions. */
 
 /* variable_diff_calc (0x11A04): fires once per game frame at the end of the
- * main loop. Setting g_frame_done lets the emu thread pace to the next 60Hz
- * tick (and ends the slice early, freeing the mutex for the UI); the geo
- * capture ring's frame boundary is marked so the scanner reads exactly one
- * game frame's draw commands. */
+ * main loop. The geo capture ring's frame boundary is marked so the scanner
+ * reads exactly one game frame's draw commands. The slice ends at the vblank,
+ * not here (emu_thread.h). */
 static void sfight_xplay_frame(memory_bus_t *bus);
 
 static int sfight_hook_frame_pace(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu;
     sfight_xplay_frame(bus);
     cop_geo_frame_edge();
-    g_frame_done = 1;
-    emu_attn_bump();
+    hle_game_frame_edge(bus);
     return 1;
 }
 
@@ -721,13 +674,8 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 24
+#define SFIGHT_BASE_HOOK_COUNT 19
 #define SFIGHT_BASE_HOOKS                                                      \
-    { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
-    { 0x0004A58C, sfight_hook_check_timer_4_spin, "check_timer_4_spin"      }, \
-    { 0x00001768, sfight_hook_interrupt_wait,     "interrupt_wait"          }, \
-    { 0x00011580, sfight_hook_interrupt_wait_b,   "interrupt_wait_b"        }, \
-    { 0x00011610, sfight_hook_idle,               "_idle"                   }, \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
     { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \

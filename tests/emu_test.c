@@ -98,19 +98,19 @@ int main(void) {
 
     /* run_frames (issue #98): the board stops itself at the edge of the N-th
      * frame, from inside the slice's bookkeeping, not when a stop arrives.
-     * Driven through emu_slice_finish directly -- this test has no frame hook. */
+     * Driven through emu_slice_finish directly, with the vblank set by hand. */
     {
         unsigned f0 = g_emu_frames;
         emu_run_frames(&ctx, 3);
         for (int i = 0; i < 2; i++) {
-            g_frame_done = 1;
+            g_vblank_edge = 1;
             CHECK(emu_slice_finish(&ctx) == EMU_SLICE_FRAME && ctx.run_state == EMU_RUNNING,
                   "run_frames: frames before the last keep running");
         }
-        g_frame_done = 0;
+        g_vblank_edge = 0;
         CHECK(emu_slice_finish(&ctx) == EMU_SLICE_NO_FRAME && ctx.run_state == EMU_RUNNING,
               "run_frames: a slice that ends mid-frame spends nothing");
-        g_frame_done = 1;
+        g_vblank_edge = 1;
         CHECK(emu_slice_finish(&ctx) == EMU_SLICE_FRAME, "run_frames: the last frame is still a frame");
         CHECK(ctx.run_state == EMU_STOPPED && ctx.frame_budget == 0 && ctx.frame_budget_hit,
               "run_frames: the board stops at the end of frame N");
@@ -119,17 +119,17 @@ int main(void) {
 
         emu_run_frames(&ctx, 5);
         ctx.request_stop = 1;
-        g_frame_done = 0;
+        g_vblank_edge = 0;
         emu_slice_finish(&ctx);
         CHECK(ctx.run_state == EMU_STOPPED && ctx.frame_budget == 0,
               "run_frames: a stop from elsewhere drops the rest of the budget");
 
         emu_run(&ctx);
         CHECK(ctx.frame_budget == 0, "run_frames: a plain run carries no budget");
-        g_frame_done = 1;
+        g_vblank_edge = 1;
         emu_slice_finish(&ctx);
         CHECK(ctx.run_state == EMU_RUNNING && !ctx.frame_budget_hit, "run_frames: ...and never stops itself");
-        g_frame_done = 0;
+        g_vblank_edge = 0;
         ctx.run_state = EMU_STOPPED;
     }
 

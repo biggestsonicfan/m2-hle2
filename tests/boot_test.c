@@ -5,7 +5,11 @@
  * rather than hanging at the reset vector or halting.
  *
  * Runs the CPU single-threaded (no emu thread needed) against the real ROM set
- * from the claude_mame oracle. Links miniz.
+ * from the claude_mame oracle. Links miniz. The board's clock is driven here
+ * as the run loop drives it (emu_thread.h): the timers and the vblank count the
+ * i960's cycles, and their interrupts go to STF's handlers. The game's own
+ * wait loops spin until they come (Pinboard #253). The sound pin is left
+ * alone: it needs the UART.
  */
 #define NDEBUG 1
 #include <stdio.h>
@@ -43,6 +47,10 @@ int main(void) {
     int      frames = 0;
     uint32_t max_ip = 0;
     uint64_t first_frame_step = 0;
+    uint64_t seen = 0;
+    bool     in_service = false;
+    uint32_t base_depth = 0;
+    i960_cycle_table_init();
 
     while (steps < STEP_CAP && !cpu.halted && frames < TARGET_FRAMES) {
         if (cpu.sfr.ip == FRAME_PACE_IP) {
@@ -52,6 +60,16 @@ int main(void) {
         if (cpu.sfr.ip > max_ip && cpu.sfr.ip < ROM_SIZE * 2) max_ip = cpu.sfr.ip;
         if (i960_step(&cpu, &bus) != 0) break;
         steps++;
+        g_irqt.pending += (int64_t)(cpu.cycles - seen);
+        seen = cpu.cycles;
+        if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
+        if (in_service && cpu.frame_depth <= base_depth) in_service = false;
+        int pin = in_service ? -1 : irqt_pending_pin();
+        if (pin >= 0 && pin < 3 && sfight_profile.quirks.irq_handler[pin]) {
+            base_depth = cpu.frame_depth;
+            hle_interrupt(&cpu, sfight_profile.quirks.irq_handler[pin]);
+            in_service = true;
+        }
     }
 
     printf("info: ran %llu steps, frames=%d, halted=%d, final IP=0x%08X, max IP seen=0x%08X\n",

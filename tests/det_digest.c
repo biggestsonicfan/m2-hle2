@@ -152,19 +152,12 @@ static uint32_t trace_frame;
 
 /* emu_slice_body (emu_thread.h), with a line per instruction. */
 static void trace_slice(emu_thread_ctx_t *ctx) {
-    g_frame_done = 0;
-    bool board_vblank = g_active_profile->quirks.board_vblank;
-    if (board_vblank) {
-        irqt_raise(0x1u);
-        g_vblank_acked = 0;
-        cop_geo_frame_edge();
-
-    }
+    g_vblank_edge = 0;
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);
     uint64_t steps = 0;
-    for (int i = 0; i < g_emu_steps_per_slice && !g_frame_done && !(board_vblank && g_vblank_acked)
-                    && !ctx->request_stop && !ctx->cpu->halted; i++) {
+    for (int i = 0; i < g_emu_steps_per_slice && !ctx->request_stop && !ctx->cpu->halted; i++) {
+        if (g_irqt_vblank) { g_irqt_vblank = 0; g_vblank_edge = 1; break; }
         if (ctx->step_over_bp) ctx->step_over_bp = 0;
         else if (bp_check(ctx->cpu->sfr.ip)) break;
         uint32_t ip = ctx->cpu->sfr.ip;
@@ -177,19 +170,19 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
         h = fnv(h, &c->sfr.ac, sizeof c->sfr.ac);
         h = fnv(h, c->fp_regs, sizeof c->fp_regs);
         fprintf(trace_out, "%08x %016llx\n", ip, (unsigned long long)h);
+        if (g_hle_extra) { ctx->total_steps += g_hle_extra; steps += g_hle_extra; i += (int)g_hle_extra; g_hle_extra = 0; }
         if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
-        if (g_irqt_live) emu_timers_after_step(ctx);
+        else if (g_irqt_sound_kick && g_active_profile) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+        emu_timers_after_step(ctx);
         if (g_log.warn_triggered) break;
         if (g_wp.hit) break;
         if (g_sharc.unknown_triggered) break;
     }
-    bool frame = g_frame_done || (board_vblank && g_vblank_acked);
+    bool frame = g_vblank_edge != 0;
     if (frame) {
-        emu_timers_frame_edge(ctx);
-        dl_frame_edge(ctx->bus, g_emu_frames);
-        emu_match_replay_edge(ctx);
+        if (g_active_profile->quirks.board_vblank) { cop_geo_frame_edge(); dl_frame_edge(ctx->bus, g_emu_frames); hle_match_replay_edge(ctx->bus); }
     }
-    emu_sound_slice_end(frame, steps);
+    emu_sound_slice_end(frame);
     if (g_active_profile->quirks.geo_displaylist) geodl_capture(ctx->bus);
     ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
     ctx->cpu_snapshot      = *ctx->cpu;
@@ -275,8 +268,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-sound-thread"))         g_sound_thread_want = 0;
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
         else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
-        else if (!strcmp(argv[i], "--live-timers"))             g_irqt_live = 1;
+        else if (!strcmp(argv[i], "--live-timers"))             ;   /* always on now */
         else if (!strcmp(argv[i], "--nowarnskip"))              g_warning_skip = 0;
+        else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--region") && i + 1 < argc) { const char *r = argv[++i]; g_region = !strcmp(r, "japan") ? GAME_REGION_JAPAN : !strcmp(r, "export") ? GAME_REGION_EXPORT : GAME_REGION_USA; }
         else if (!strcmp(argv[i], "--peek")   && i + 1 < argc) peek_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");

@@ -43,13 +43,10 @@
  * --filter   nearest|linear scaling of the offscreen frame (default linear).
  * --cpu-tiles   compose the tile layers on the CPU instead of in a shader.
  * --no-mesh-cache  decode every display-list model in full every frame.
- * --steps-per-slice N  i960 steps a 60 Hz slice may run without reaching a
- *            frame edge (default 500000). Lower keeps game loads, which run
- *            ~1M steps a frame, inside the slice on a slow CPU.
- * --live-timers  count the board timers down by each i960 instruction's cycles
- *            and take their interrupts mid-slice (irq_timer.h g_irqt_live), so
- *            a game's own time budget can end its work: STF's texture loads
- *            then yield where the board's do.
+ * --steps-per-slice N  i960 steps a slice may run short of the vblank before
+ *            the run loop lets the UI in (default 500000).
+ * --live-timers  accepted and ignored: the board timers always count the
+ *            i960's cycles now (irq_timer.h).
  * --fill-shade-rows  give a textured face one row of finished colours (its luma
  *            band, poly_luma and colour together), so a pixel fetches its colour
  *            once instead of a lumaram texel and then a ramp texel.
@@ -573,7 +570,7 @@ static bool parse_args(int argc, char **argv) {
             if (n < 1000) return false;
             g_emu_steps_per_slice = n;
         }
-        else if (!strcmp(a, "--live-timers"))        g_irqt_live = 1;
+        else if (!strcmp(a, "--live-timers"))        ;   /* always on now */
         else if (!strcmp(a, "--window") && more)     { if (sscanf(argv[++i], "%dx%d", &opt.win_w, &opt.win_h) != 2) return false; }
         else if (!strcmp(a, "--stats"))              opt.stats = true;
         else if (!strcmp(a, "--sound"))              opt.sound = true;
