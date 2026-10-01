@@ -1283,6 +1283,35 @@ static bool geo3d_mesh_layers_for(int model_idx, const uint8_t *main_data,
                                   uint32_t mat_ptr, uint32_t uv_ptr, uint32_t mesh_offset,
                                   geo3d_face_layer_t *out, int cap);
 
+/* The texture header walk (MAME model2_3d_process_polygon): a polygon reads its
+ * header at the current address, then moves the address by the signed record
+ * count in bits 12-16 of its attribute, every polygon, culled ones included.
+ * Sonic The Fighters and Fighting Vipers store 1 on every face that draws and 0
+ * on the groups that do not, which is one record per emitted face; The House of
+ * the Dead reuses a header for a run of faces and steps back as well (the
+ * explorer's model.js, from the HOTD prototype). */
+static inline uint32_t geo3d_tho_step(uint32_t attr) {
+    int32_t tho = (int32_t)((attr >> 12) & 0x1Fu);
+    if (tho & 0x10) tho -= 0x20;
+    return (uint32_t)(tho * 4);
+}
+
+/* A triangle's record holds one new point, and the geometrizer takes the slot
+ * for a second with the first (MAME geo_parse_*, the raster's `rope of P1(n)`),
+ * which is what a polygon linking off it gets. STF and FV store the first point
+ * again there; HOTD stores zeros, which taken literally reach back to the
+ * part's origin. The record a triangle's attribute describes is the next one. */
+static inline void geo3d_relink_triangles(vec3_t *sv, uint32_t *svk, int n_sv,
+                                          const int *qt, int n_qt) {
+    for (int k = 0; k + 1 < n_qt; k++) {
+        if (qt[k] != 2) continue;
+        int a = 2 * (k + 1);
+        if (a + 1 >= n_sv) break;
+        sv[a + 1] = sv[a];
+        svk[a + 1] = svk[a];
+    }
+}
+
 static inline void geo3d_decode_model(int model_idx,
                                        const uint8_t *main_data, size_t main_data_size,
                                        const uint8_t *polygons,  size_t polygons_size,
@@ -1436,13 +1465,13 @@ static inline void geo3d_decode_model(int model_idx,
         vcount++;
     }
 
+    geo3d_relink_triangles(sv, svk, n_sv, qt, n_qt);
+
     /* Face loop — emit wireframe edges, stopping 2 groups before the tail. */
-    /* Material records are written per EMITTED face (sentinel/degenerate strip
-     * groups get none), while the UV stream stores 4 (pv,pu) pairs per face-loop
-     * ITERATION (incl. sentinels). So material is indexed by emitted-count (efi)
-     * and the UV stream advances 8 words every iteration. Verified on model 3351:
-     * 13 iterations, 3 sentinels → 10 material records, 104-word UV stream. */
-    int efi = 0;
+    /* The material stream is walked by each polygon's own step (geo3d_tho_step),
+     * while the UV stream stores 4 (pv,pu) pairs per face-loop ITERATION (incl.
+     * sentinels), so it advances 8 words every iteration. */
+    uint32_t mat_rec = mat_word;
     /* The board's z-sort, carried across the walk (see geo3d_sort_z). */
     int zsrc[4] = {0,0,0,0}; uint32_t zmode = 0u; bool zset = false;
     geo3d_split_reset();
@@ -1465,7 +1494,8 @@ static inline void geo3d_decode_model(int model_idx,
         uint32_t fflags = 0;                 /* GEO3D_FACE_* */
         bool untex_trans = false;            /* untextured + transparent: the board draws nothing */
         if (have_mat) {
-            uint32_t hw = mat_word + (uint32_t)efi * 4u;
+            uint32_t hw = mat_rec;
+            mat_rec += geo3d_tho_step((fi < n_qt) ? qa[fi] : 0u);
             uint16_t th0 = 0, th1 = 0, th2 = 0, th3 = 0;
             if (geo3d_tex_word(materials, materials_size, hw,      &th0) &&
                 geo3d_tex_word(materials, materials_size, hw + 1u, &th1) &&
@@ -1519,9 +1549,9 @@ static inline void geo3d_decode_model(int model_idx,
                         } }
                     int _skip = (ai < 0 || ai >= n_sv || bi < 0 || bi >= n_sv);
                     if (mtf) { fprintf(mtf,
-                        "face %3d: th0=%04X th2=%04X th3=%04X  textured=%d nv=%d f1=%d ai=%d bi=%d SKIP=%d have_uv=%d uv_word=%u sheet=%u tile=(%4u,%4u) %ux%u colorbase=%u efi=%d rgb=(%.2f,%.2f,%.2f) lb=%u fl=%u A=(%.2f,%.2f,%.2f) D=(%.2f,%.2f,%.2f)\n",
+                        "face %3d: th0=%04X th2=%04X th3=%04X  textured=%d nv=%d f1=%d ai=%d bi=%d SKIP=%d have_uv=%d uv_word=%u sheet=%u tile=(%4u,%4u) %ux%u colorbase=%u hdr=%u rgb=(%.2f,%.2f,%.2f) lb=%u fl=%u A=(%.2f,%.2f,%.2f) D=(%.2f,%.2f,%.2f)\n",
                         fi, th0, th2, th3, textured?1:0, nv, (fi < n_qt ? qt[fi] : -1),
-                        ai, bi, _skip, have_uv?1:0, uv_word, texsheet, texx, texy, texw, texh, matidx, efi, fr, fg, fb, lumabase, fflags,
+                        ai, bi, _skip, have_uv?1:0, uv_word, texsheet, texx, texy, texw, texh, matidx, hw, fr, fg, fb, lumabase, fflags,
                         (ai >= 0 && ai < n_sv) ? sv[ai].x : 0.0f, (ai >= 0 && ai < n_sv) ? sv[ai].y : 0.0f, (ai >= 0 && ai < n_sv) ? sv[ai].z : 0.0f,
                         (di >= 0 && di < n_sv) ? sv[di].x : 0.0f, (di >= 0 && di < n_sv) ? sv[di].y : 0.0f, (di >= 0 && di < n_sv) ? sv[di].z : 0.0f);
                         /* Raw UV-stream window around the first cone face, to find the
@@ -1716,7 +1746,7 @@ static inline void geo3d_decode_model(int model_idx,
         /* The untextured transparent renderer returns without writing a pixel
          * (model2rd.ipp draw_scanline_solid<true>). Only on the display-list
          * path, so the model tools keep comparing every face with the explorer. */
-        if (g_geo3d_board_luma && (untex_trans || board_cull)) { efi++; continue; }
+        if (g_geo3d_board_luma && (untex_trans || board_cull)) continue;
         float lbv = g_geo_flat_color ? -1.0f : (float)lumabase;
 
         if (is_tri) {
@@ -1755,7 +1785,6 @@ static inline void geo3d_decode_model(int model_idx,
                                   C.x,C.y,C.z, uvu[2],uvv[2], fr,fg,fb, ftx,fty,ftw,fth, lbv,pl, ffl);
             }
         }
-        efi++;   /* this face was emitted → consumes one material record */
     }
     g_geo3d_emit_texlod    = GEO3D_TEXLOD_NONE;
     g_geo3d_emit_zs        = GEO3D_ZSORT_NONE;
@@ -2413,8 +2442,10 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         vcount++;
     }
 
-    uint32_t mat_word = m->mat_ptr, uv_word = m->uv_ptr;
-    int n_faces = 0, efi = 0;
+    geo3d_relink_triangles(sv, svk, n_sv, qt, n_qt);
+
+    uint32_t mat_word = m->mat_ptr, uv_word = m->uv_ptr, mat_rec = mat_word;
+    int n_faces = 0;
     int zsrc[4] = {0,0,0,0}; uint32_t zmode = 0u; bool zset = false;
     for (int i = 0; i < n_idx - 8; i += 4) {
         int fi = i / 4;
@@ -2425,7 +2456,8 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         uint32_t texx = 0, texy = 0, texw = 32, texh = 32, texsheet = 0, lumabase = 0, fflags = 0, matidx = 0;
         bool textured = false, untex_trans = false, mat_ok = false;
         if (have_mat) {
-            uint32_t hw = mat_word + (uint32_t)efi * 4u;
+            uint32_t hw = mat_rec;
+            mat_rec += geo3d_tho_step((fi < n_qt) ? qa[fi] : 0u);
             uint16_t th0 = 0, th1 = 0, th2 = 0, th3 = 0;
             if (geo3d_tex_word(materials, m->materials_size, hw, &th0) &&
                 geo3d_tex_word(materials, m->materials_size, hw + 1u, &th1) &&
@@ -2474,7 +2506,7 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
          * every face of the walk, including the ones nothing is drawn for. */
         geo3d_zsort_step((fi < n_qt) ? qa[fi] : 0u, tri_cnt || !has_c || !has_d, has_c,
                          ai, bi, ci, di, zsrc, &zmode, &zset);
-        if (untex_trans) { efi++; continue; }   /* the board draws nothing for it */
+        if (untex_trans) continue;   /* the board draws nothing for it */
 
         geo3d_cface_t *f = &faces[n_faces++];
         memset(f, 0, sizeof *f);
@@ -2498,7 +2530,6 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         f->fl = (float)fflags;
         memcpy(f->uvu, uvu, sizeof uvu);
         memcpy(f->uvv, uvv, sizeof uvv);
-        efi++;
     }
 
     m->sv    = malloc((size_t)(n_sv ? n_sv : 1) * sizeof(vec3_t));

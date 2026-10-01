@@ -79,26 +79,7 @@ const stageName = (n) => NAMES[n] ? `stage ${n} (${NAMES[n]})` : `stage ${n}`;
  * part's own ops (its world prologue already taken off) and returns them
  * corrected, or null where it does not apply.
  */
-const S16 = ['s', [1.6, 1.6, 1.6]];
 const OMISSIONS = [
-    {
-        slot: FLYING_CARPET, id: 'flame-base3x3',
-        what: 'pole_disp resets the 3x3 (0x08001010) after lifting each flame 4.1, before its flicker scale',
-        applies: (e) => e.layer === 'poles' && e.anim,
-        fix: (own) => (own.some((op) => op[0] === 'b') ? null : [...own.slice(0, 3), ['b'], ...own.slice(3)]),
-    },
-    {
-        slot: FLYING_CARPET, id: 'sphynx-inner8',
-        what: 'draw_sphynx_head loads inner slot 8 (the arena frame, scaled 1.6) over its prologue before the translate, so the head is drawn at 1.6',
-        applies: (e) => e.model === SPHYNX_HEAD,
-        fix: (own) => (own[0]?.[0] === 't' ? [own[0], S16, ...own.slice(1)] : null),
-    },
-    {
-        slot: GIANT_WING, id: 'plane-inner8',
-        what: 'giant_wing_disp draws the body, haze and clouds from inner slot 8 (0x44(8)): the rolled arena frame at 1.6',
-        applies: (e) => e.layer === 'objects' && [2947, 3321, 3322, 3086, 3087, 3673].includes(e.model),
-        fix: (own) => [S16, ...own], world: true,
-    },
     {
         slot: null, id: 'cage-shake',
         what: 'cage_clip_m opens each wall with a translate of dword_903D0[word_50A1E8[wall]], the shake a fighter thrown into it sets off',
@@ -109,12 +90,6 @@ const OMISSIONS = [
             const z = ctx.cageShake?.(wall);
             return z ? [...own.slice(0, r + 1), ['t', [0, 0, -z]], ...own.slice(r + 1)] : null;
         },
-    },
-    {
-        slot: DYNAMITE_PLANT, id: 'gear-phase',
-        what: 'slot6_obj0_init starts the second gear\'s accumulator (+0x42) at 0x800 and the first at 0',
-        applies: (e) => e.model === 2265 && opsHas(e, (op) => op[0] === 's' && op[1][0] === 1.2),
-        fix: (own) => own.map((op) => (op[0] === 'rz' ? ['rz', op[1] - 0x800 * ANGLE_UNIT] : op)),
     },
 ];
 function opsHas(e, pred) { const ops = typeof e.ops === 'function' ? e.ops(0) : e.ops; return ops.some(pred); }
