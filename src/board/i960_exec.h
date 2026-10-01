@@ -5,7 +5,6 @@
 #include "memory.h"
 #include "log.h"
 #include "hle_hooks.h"
-#include "trace_window.h"
 #include <math.h>
 #include <string.h>
 
@@ -306,9 +305,6 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
     int instr_len = 4;
     /* The board's clock: the timers and the vblank count these (irq_timer.h). */
     cpu->cycles += i960_cycle_cost(word1);
-
-    // Record in execution trace
-    trace_record(ip, word1, cpu->frame_depth);
 
     uint32_t class = (word1 >> 28) & 0xF;
 

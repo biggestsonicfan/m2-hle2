@@ -148,8 +148,6 @@ typedef struct {
 
 static overlay_host_t g_overlay;
 
-static inline bool overlay_host_loaded(void) { return g_overlay.loaded; }
-
 /* ---- swap: the request, and where it has got to --------------------------- */
 
 enum { OVERLAY_NOTICE_TOAST, OVERLAY_NOTICE_CARD };

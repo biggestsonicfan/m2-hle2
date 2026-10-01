@@ -8,21 +8,19 @@
  * Getting this wrong is easy and quiet, so it is worth stating what the three
  * stages below are actually for.
  *
- * 1. Pinning. stage_num is a byte the front end sets and change_scene reads, so
- *    holding it every frame is how the game is walked into a chosen arena —
- *    the same trick the MAME capture Lua uses, and for the same reason: writing
- *    it once is not enough, because the front end writes it back.
+ * 1. Reaching. Attract only ever fights on the Flying Carpet, and holding
+ *    stage_num in attract does not take: change_scene reads it once, at
+ *    ROUND_INIT. So a stage is reached by playing into a round and writing
+ *    stage_num at the moment ROUND_INIT stores it (lib/dl.mjs reachRound), the
+ *    way grade-stages does.
  *
- * 2. Verifying. Pinning is not arriving. stage_num only sets what the draw
- *    routines branch on; the scene was chosen the last time change_scene ran,
- *    which may have been long before the pin. So the capture waits for the
- *    64-word record change_scene copies to 0x504800 to be the record the ROM
- *    holds for the stage that was asked for — on its texture-set words, which
- *    are the part of it the running game does not go on rewriting.
- *
- *    Without this the tool will happily dump whatever set was already resident
- *    and label it with the stage that was pinned. That is not a capture that
- *    merely fails; it is one that grades cleanly against the wrong scene.
+ * 2. Verifying. Reaching is checked on the 64-word record change_scene copies
+ *    to 0x504800 — on its texture-set words, which are the part of it the
+ *    running game does not go on rewriting — and every capture records the
+ *    scene it identified that way. Without this the tool will happily dump
+ *    whatever set was already resident and label it with the stage that was
+ *    asked for. That is not a capture that merely fails; it is one that grades
+ *    cleanly against the wrong scene.
  *
  * 3. Settling. The game unpacks a scene's pages over several frames, so a dump
  *    taken the moment a record lands catches a half-filled sheet. Settling is
@@ -83,36 +81,6 @@ export async function identifyScene(emu, stageCount = 16) {
     return { stage: hits.length ? hits[0] : null, texWords, ambiguous: hits.length > 1 ? hits : null };
 }
 
-/* ---- driving ------------------------------------------------------------- */
-
-/**
- * Hold stage_num at `stage` until the game has actually loaded that record.
- *
- * In attract mode the game changes scene on its own every half minute or so and
- * reads the pinned stage_num when it does, so this is mostly a matter of
- * holding the byte and waiting. Returns { arrived, polls, stage }.
- */
-export async function reachStage(emu, stage, { polls = 90, every = 30, log = () => {} } = {}) {
-    const want = await romTexWords(emu, stage);
-    for (let p = 0; p < polls; p++) {
-        for (let f = 0; f < every; f++) {
-            await emu.writeMemory(STAGE_NUM, [stage & 0xff]);
-            const w = await emu.waitFrames(1, 8000);
-            if (!w.reached) return { arrived: false, polls: p, stage: null, stalled: true };
-        }
-        const have = await loadedTexWords(emu);
-        if (have[0] === want[0] && have[1] === want[1]) {
-            log(`stage ${stage} loaded after ${(p + 1) * every} frames ` +
-                `(tex words ${have.map((v) => '0x' + v.toString(16)).join(', ')})`);
-            return { arrived: true, polls: p + 1, stage };
-        }
-        log(`waiting for stage ${stage}: loaded record has tex words ` +
-            `${have.map((v) => '0x' + v.toString(16)).join(', ')}, want ` +
-            `${want.map((v) => '0x' + v.toString(16)).join(', ')}`);
-    }
-    return { arrived: false, polls, stage: null };
-}
-
 /* ---- capturing ----------------------------------------------------------- */
 
 /**
@@ -121,33 +89,29 @@ export async function reachStage(emu, stage, { polls = 90, every = 30, log = () 
  * @param {import('./m2hle.mjs').M2Hle} emu   an emulator already running
  * @param {object} o
  * @param {string} [o.out]      directory to write into
- * @param {?number} [o.stage]   reach and hold this scene; null takes what is up
+ * @param {?number} [o.stage]   play into a round on this stage; null takes what is up
  * @param {number} [o.polls]    settle polls before giving up
  * @param {number} [o.every]    frames between polls
- * @param {number} [o.reachPolls] polls to spend waiting for the scene to load
  * @returns {Promise<object>} the manifest that was written
  */
 export async function captureBoard(emu, {
-    out = DEFAULT_OUT, stage = null, polls = 20, every = 30, reachPolls = 90,
+    out = DEFAULT_OUT, stage = null, polls = 20, every = 30,
     log = () => {},
 } = {}) {
     const scratch = path.join(os.tmpdir(), `m2hle-settle-${process.pid}.bin`);
     try {
         let reached = null;
         if (stage !== null) {
-            reached = await reachStage(emu, stage, { polls: reachPolls, every, log });
-            if (!reached.arrived) {
-                log(`WARNING: stage ${stage} never loaded — capturing whatever is up`);
-            }
+            /* dl.mjs imports this module, so it is loaded when it is needed. */
+            const { reachRound } = await import('./dl.mjs');
+            reached = await reachRound(emu, stage, { log });
         }
 
         /* Settle on the sheet's digest. A stable non-zero count is not the same
          * statement: two scenes can fill the same number of bytes. */
         let lastDigest = null, stable = 0, used = 0, nonzero = 0;
         for (; used < polls; used++) {
-            if (stage !== null) {
-                if (!await holdFrames(emu, stage, every)) break;
-            } else if (!(await emu.waitFrames(every, 30000)).reached) break;
+            if (!(await emu.waitFrames(every, 30000)).reached) break;
 
             const r = await emu.rpc('dump_memory_file', {
                 addr: '0x' + REGIONS.texram0.base.toString(16),
@@ -193,7 +157,7 @@ export async function captureBoard(emu, {
             sceneAmbiguous: scene.ambiguous,
             stageNum,
             stagePinned: stage,
-            stageReached: reached ? reached.arrived : null,
+            stageReached: reached ? true : null,
 
             settled: stable >= 2,
             frames: final.frames,
@@ -207,14 +171,6 @@ export async function captureBoard(emu, {
     } finally {
         fs.rmSync(scratch, { force: true });
     }
-}
-
-async function holdFrames(emu, stage, frames) {
-    for (let f = 0; f < frames; f++) {
-        await emu.writeMemory(STAGE_NUM, [stage & 0xff]);
-        if (!(await emu.waitFrames(1, 8000)).reached) return false;
-    }
-    return true;
 }
 
 /** Read a capture directory back. Throws with a useful message if it is not one. */

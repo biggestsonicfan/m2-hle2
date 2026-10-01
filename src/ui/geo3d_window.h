@@ -150,19 +150,6 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     igDragFloatEx("ambient", &g_light_ambient, 0.02f, 0.0f, 1.0f, "%.2f", 0);
     igDragFloatEx("diffuse", &g_light_diffuse, 0.02f, 0.0f, 1.0f, "%.2f", 0);
 
-    igSeparator();
-    igText("Texture UV orientation:");
-    igCheckbox("swap u/v (rotate 90)", &g_uv_swap);
-    igCheckbox("flip u (horizontal)",  &g_uv_flip_u);
-    igCheckbox("flip v (vertical)",    &g_uv_flip_v);
-    { bool qo = g_uv_quad_order != 0;
-      if (igCheckbox("old UV order A,B,D,C (vs B,A,C,D)", &qo)) g_uv_quad_order = qo; }
-    igText("Texture bank:");
-    igRadioButtonIntPtr("auto (bit12)",  &g_uv_bank_mode, 0);
-    igRadioButtonIntPtr("force sheet 0", &g_uv_bank_mode, 1);
-    igRadioButtonIntPtr("force sheet 1", &g_uv_bank_mode, 2);
-    igRadioButtonIntPtr("swap banks",    &g_uv_bank_mode, 3);
-
     igEnd();
 }
 

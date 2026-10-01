@@ -165,11 +165,16 @@ here before it was fixed.
 
 ## Verifying the scene, and why a capture cannot skip it
 
-`stage_num` is a byte the front end sets and `change_scene` reads. Pinning it is
-how the MAME driver walks the game into a chosen arena — but **pinning is not
-arriving**. `stage_num` only sets what the draw routines branch on; the scene
-itself was chosen the last time `change_scene` ran, which may have been long
-before the pin.
+`stage_num` is a byte the front end sets and `change_scene` reads once, at
+`ROUND_INIT`. Holding it at any other time does not take: attract only ever
+fights on the Flying Carpet, and a pin held through attract captured scene 15
+(the intro) or 1 while being labelled with the stage asked for. So
+`lib/dl.mjs`'s `reachRound` plays into a round (coin, start, attack buttons)
+and writes the byte at a breakpoint on `ROUND_STAGE_PIN` (`0xAFC8`), where
+`ROUND_INIT` has just stored it — the way `stf-tools/mame-dl-capture.lua`'s
+write tap chooses MAME's arena. `capture.mjs` and `grade-stages.mjs` both reach
+a stage this way. And **pinning is still not arriving**: the scene was chosen
+the last time `change_scene` ran.
 
 So `lib/capture.mjs` waits for the 64-word record `change_scene` copies to
 `0x504800` to be the record the ROM holds for the stage that was asked for,

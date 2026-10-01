@@ -47,12 +47,6 @@
 #define GEO3D_IA_MAX_VERTS (GEO3D_IA_MAX_VPS * 2)
 #define GEO3D_IA_MAX_IDX   (4 + GEO3D_IA_MAX_VPS * 4)
 
-/* Upper bound on words scanned when the per-frame geo window is unusable (first
- * frame, or a board_vblank marking race). Caps the cost of accumulated draws ×
- * the O(model_table_count) lookup so a raced frame can't freeze the render. One
- * real game frame is far smaller than this. */
-#define GEO3D_SCAN_FALLBACK_MAX 8192
-
 /* Global face-color palette in main_data (STF): BGR555 LE u16 per entry,
  * indexed by the per-face material index.  color = pal[main_data + OFF + matidx*2].
  * STF-specific; move to game_quirks_t if another ROMset places it elsewhere. */
@@ -85,15 +79,6 @@ static inline float u32_as_float(uint32_t u) {
     float f;
     memcpy(&f, &u, 4);
     return f;
-}
-
-/* Reject NaN/inf/insane-magnitude bit patterns when sniffing for floats in
- * the COP stream — used to gate matrix/position commands. */
-static inline bool is_sane_float(uint32_t u) {
-    float f = u32_as_float(u);
-    if (f != f) return false;
-    if (f > 1.0e6f || f < -1.0e6f) return false;
-    return true;
 }
 
 /* Apply a 3x4 row-major matrix (9 rotation + 3 translation) to a vec3. */
@@ -740,17 +725,6 @@ typedef struct {
 
 static geo3d_lookup_t g_geo3d_lookup = {0};
 
-/* Debug: dump the RAW camera struct (eye + angle word) once per game frame to
- * cam_ours.csv, keyed by the STF frame counter (0x500020). Attract is
- * deterministic from boot, so this aligns frame-for-frame with a MAME capture
- * → compare to localise wrong-camera-direction (values vs our render convention). */
-static int g_cam_log = 0;
-
-/* Texture UV orientation debug dials (geo3d window). The board needs none of
- * them: with the stream order below the raw coordinates are already right. */
-static bool g_uv_swap   = false;
-static bool g_uv_flip_u = false;
-static bool g_uv_flip_v = false;
 /* UV stream → corner order. The stream walks each face's loop the opposite way
  * from the index array, because negating Z on read reverses the winding: a
  * quad's corners come out A,B,D,C and its stream runs B,A,C,D (slots
@@ -763,10 +737,7 @@ static bool g_uv_flip_v = false;
  * mirrored every face whose texture axis runs along it. The explorer found and
  * documents the same thing (vendor/noclip TECHNICAL.md, "the UV stream runs
  * against the reconstructed winding") and tools/grade-models.mjs holds this
- * decoder to its coordinates corner for corner.
- *
- * 1 = the previous A,B,D,C / A,B,C reading, kept as a debug A/B. */
-static int  g_uv_quad_order = 0;
+ * decoder to its coordinates corner for corner. */
 
 /* Flat shading ("definition"): MAME shades each polygon by luminance =
  * |normal·light|*diffuse + ambient (model2_v.cpp geo_parse), which modulates
@@ -795,7 +766,7 @@ static float g_light_diffuse = 0.55f;
  * system, the stub fopen answered fd 0 and the write threw out of the frame
  * (the Death Egg screens in attract, adv_movie_egg). */
 static int  g_dump_model_tex = -1;
-/* The debug dumps (this one, the camera CSV, the texture extractor, the COP
+/* The debug dumps (this one, the texture extractor, the COP
  * stream) exist only in the desktop build, the one with a UI and a bridge to
  * ask for them (CMake defines M2HLE_DEBUG_DUMPS on that target alone). The
  * handheld, libretro and web builds write no debug files at all: before
@@ -807,19 +778,6 @@ static int  g_dump_model_tex = -1;
 #else
 #define GEO3D_DUMP_TEX(model_idx) ((void)(model_idx), 0)
 #endif
-/* Texture bank override: 0=auto (texsheet bit12), 1=force sheet0, 2=force sheet1,
- * 3=swap (invert the bit12 selection). */
-static int  g_uv_bank_mode = 0;
-
-/* Texture-path debug counters (cumulative across decode calls).  Read via the
- * MCP bridge "dump_tex_stats" to see whether faces actually come out textured. */
-static long g_dbg_tex_models = 0, g_dbg_tex_models_uv = 0, g_dbg_tex_models_mat = 0;
-static long g_dbg_tex_faces  = 0, g_dbg_tex_textured  = 0, g_dbg_tex_uv_faces  = 0;
-/* First N textured faces' UVs, for offline cross-check against the atlas dump. */
-typedef struct { int model; uint16_t texx, texy, texsheet, tri;
-                 float au[4], av[4]; uint16_t texw, texh, pu0, pv0; } dbg_face_uv_t;
-static dbg_face_uv_t g_dbg_face_uv[24];
-static int g_dbg_face_uv_n = 0;
 
 static inline void geo3d_lookup_invalidate(void) {
     g_geo3d_lookup.built = false;
@@ -886,8 +844,7 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
     if (!main_data || !buff_ram) { geo->captured_count = 0; return; }
     geo3d_lookup_build(main_data, main_data_size, table_off, table_count);
 
-    /* Snapshot the prev list for interpolation, once per vblank frame (same
-     * cadence the COP-stream scanner uses). */
+    /* Snapshot the prev list for interpolation, once per vblank frame. */
     if (g_cop.geo_frame_end != geo->last_frame_end) {
         memcpy(geo->captured_prev, geo->captured,
                (size_t)geo->captured_count * sizeof(captured_model_t));
@@ -1333,7 +1290,6 @@ static inline void geo3d_decode_model(int model_idx,
     /* Material stream — one 8-byte record per face: [6-byte tex key][LE u16 BGR555].
      * Base address = (model-table[+0x04] pointer) * 2 into the textures ROM.
      * Format reverse-engineered from the Obj2StF converter (GophUndMe/Obj2StF). */
-    uint32_t mat_base = 0;
     uint32_t mat_word = 0;
     bool     have_mat = false;
     /* UV stream — model-table[+0x00] word index into the textures ROM; per polygon
@@ -1350,7 +1306,7 @@ static inline void geo3d_decode_model(int model_idx,
         polygons_size = g_geo3d_obj_mesh_size;
         mesh_offset   = 0;
         if (materials && g_geo3d_obj_tha != 0xFFFFFFFFu) {
-            mat_word = g_geo3d_obj_tha; mat_base = mat_word * 2u; have_mat = mat_word != 0;
+            mat_word = g_geo3d_obj_tha; have_mat = mat_word != 0;
             uv_word  = g_geo3d_obj_tpa; have_uv = uv_word != 0;
         }
     } else {
@@ -1370,14 +1326,10 @@ static inline void geo3d_decode_model(int model_idx,
             if (g_geo3d_obj_tha != 0xFFFFFFFFu) mat_ptr_raw = g_geo3d_obj_tha;
             if (g_geo3d_obj_tpa != 0xFFFFFFFFu) uv_ptr_raw  = g_geo3d_obj_tpa;
             mat_word = mat_ptr_raw;        /* word address (bit 23: texture RAM) */
-            mat_base = mat_ptr_raw * 2u;
             have_mat = (mat_ptr_raw != 0);
             uv_word = uv_ptr_raw;          /* word index; byte = *2 */
             have_uv = (uv_ptr_raw != 0);
         }
-        g_dbg_tex_models++;
-        if (have_uv)  g_dbg_tex_models_uv++;
-        if (have_mat) g_dbg_tex_models_mat++;
     }
     }
 
@@ -1508,9 +1460,6 @@ static inline void geo3d_decode_model(int model_idx,
                 texx = 32u * (th2 & 0x3f);
                 texy = 32u * ((th2 >> 6) & 0x1f);
                 texsheet = (th2 >> 12) & 1u;            /* which texram bank */
-                if      (g_uv_bank_mode == 1) texsheet = 0u;
-                else if (g_uv_bank_mode == 2) texsheet = 1u;
-                else if (g_uv_bank_mode == 3) texsheet ^= 1u;
                 if (textured && (th0 & 0x2000)) fflags |= GEO3D_FACE_TRANSPARENT;
                 untex_trans = !textured && (th0 & 0x2000);
                 if (th0 & 0x8000)               fflags |= GEO3D_FACE_CHECKER;
@@ -1588,28 +1537,20 @@ static inline void geo3d_decode_model(int model_idx,
         /* uvv[] indexed by vertex slot: 0=A 1=B 2=C 3=D.  Stored as tile-relative
          * texel coords (may run past the tile); the shader wraps per-pixel. */
         float uvu[4] = {0,0,0,0}, uvv[4] = {0,0,0,0};
-        uint16_t cap_pu = 0, cap_pv = 0;
         if (have_uv) {
-            static const int quad_slot[4]     = {1,0,2,3};  /* stream k → B,A,C,D */
-            static const int tri_slot[3]      = {1,0,2};    /* stream k → B,A,C   */
-            static const int quad_slot_fwd[4] = {0,1,3,2};  /* old: A,B,D,C */
-            static const int tri_slot_fwd[3]  = {0,1,2};    /* old: A,B,C   */
-            const int *slot = g_uv_quad_order ? (tri_cnt ? tri_slot_fwd : quad_slot_fwd)
-                                              : (tri_cnt ? tri_slot     : quad_slot);
+            static const int quad_slot[4] = {1,0,2,3};  /* stream k → B,A,C,D */
+            static const int tri_slot[3]  = {1,0,2};    /* stream k → B,A,C   */
+            const int *slot = tri_cnt ? tri_slot : quad_slot;
             for (int k = 0; k < nv; k++) {
                 uint32_t tw_ = uv_word + (uint32_t)k * 2u;
                 uint16_t pv = 0, pu = 0;
                 if (!geo3d_tex_word(materials, materials_size, tw_, &pv) ||
                     !geo3d_tex_word(materials, materials_size, tw_ + 1u, &pu)) break;
-                if (k == 0) { cap_pu = pu; cap_pv = pv; }
                 /* Only assign atlas UVs for textured faces; untextured faces
                  * keep uv=-1 so the shader uses the flat palette color.  Still
                  * advance the stream below to stay aligned with MAME. */
                 if (!textured) continue;
                 float tu = (float)pu / 8.0f, tv = (float)pv / 8.0f;
-                if (g_uv_flip_u) tu = (float)texw - tu;
-                if (g_uv_flip_v) tv = (float)texh - tv;
-                if (g_uv_swap)   { float t = tu; tu = tv; tv = t; }
                 uvu[slot[k]] = tu; uvv[slot[k]] = tv;   /* tile-texel; shader wraps */
                 if (GEO3D_DUMP_TEX(model_idx) && fi <= 12) {
                     static FILE *uf = NULL;
@@ -1621,20 +1562,6 @@ static inline void geo3d_decode_model(int model_idx,
             }
         }
         uv_word += (uint32_t)nv * 2u;   /* nv (pv,pu) pairs per iteration (3 tri / 4 quad) */
-        g_dbg_tex_faces++;
-        if (textured) g_dbg_tex_textured++;
-        if (uvu[0] >= 0.0f || uvu[1] >= 0.0f) g_dbg_tex_uv_faces++;
-        /* Capture faces that sample the EYES tile region (sheet0, top-right) to
-         * find which models reference it (should include the Death Egg). */
-        if (textured && texsheet == 0 && texx >= 1600 && texx <= 1920
-                && texy <= 340 && g_dbg_face_uv_n < 24) {
-            dbg_face_uv_t *d = &g_dbg_face_uv[g_dbg_face_uv_n++];
-            d->model = model_idx; d->texx = (uint16_t)texx; d->texy = (uint16_t)texy;
-            d->texsheet = (uint16_t)texsheet; d->tri = (uint16_t)(tri_cnt ? 1 : 0);
-            for (int s = 0; s < 4; s++) { d->au[s] = uvu[s]; d->av[s] = uvv[s]; }
-            d->texw = (uint16_t)texw; d->texh = (uint16_t)texh;
-            d->pu0 = cap_pu; d->pv0 = cap_pv;
-        }
 
         if (ai < 0 || ai >= n_sv) continue;
         if (bi < 0 || bi >= n_sv) continue;
@@ -2619,7 +2546,6 @@ static int geo3d_mesh_for_draw(int model_idx,
                                const float *matrix, geo3d_cmesh_t **out) {
     *out = NULL;
     if (!g_geo3d_mesh_cache || !g_geo3d_board_luma || !matrix || g_geo3d_obj_mesh || g_geo_flat_color ||
-            g_uv_bank_mode || g_uv_quad_order || g_uv_swap || g_uv_flip_u || g_uv_flip_v ||
             GEO3D_DUMP_TEX(model_idx))
         return GEO3D_DRAW_FULL;
     if (!main_data || !polygons) return GEO3D_DRAW_NONE;
@@ -2826,9 +2752,6 @@ static void geo3d_extract_model_texture(int model_idx,
         uint32_t w  = 32u << (th0 & 7u), h = 32u << ((th0 >> 3) & 7u);
         uint32_t x  = 32u * (th2 & 0x3fu), y = 32u * ((th2 >> 6) & 0x1fu);
         uint32_t s  = (th2 >> 12) & 1u;          /* texture bank (texsheet) */
-        if      (g_uv_bank_mode == 1) s = 0u;    /* --bank override: force sheet 0 */
-        else if (g_uv_bank_mode == 2) s = 1u;    /*                  force sheet 1 */
-        else if (g_uv_bank_mode == 3) s ^= 1u;   /*                  swap banks    */
         uint32_t cb = (th3 >> 6) & 0x3ffu;       /* colorbase */
         uint32_t pal = GEO3D_PALETTE_OFF + cb * 2u;
         uint16_t col = ((size_t)pal + 2 <= main_data_size)
@@ -3029,22 +2952,6 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
     geo->rot_x = ((float)xang16 / 65536.0f) * TWO_PI;
     geo->rot_y = ((float)yang16 / 65536.0f) * TWO_PI;
     geo->has_game_view = true;
-
-    /* Debug: dump the raw camera struct per game frame for MAME comparison
-     * (MAME = ground truth). Keyed by the STF frame counter so the two
-     * deterministic-from-boot attract runs align frame-for-frame. */
-#ifdef M2HLE_DEBUG_DUMPS
-    if (g_cam_log) {
-        static FILE *cf = NULL; static uint32_t prevf = 0xFFFFFFFFu;
-        uint32_t fr = mem_read32(bus, 0x00500020);
-        if (!cf) { cf = fopen("cam_ours.csv", "w");
-                   if (cf) fprintf(cf, "frame,ex,ey,ez,xang,yang\n"); }
-        if (cf && fr != prevf) { prevf = fr;
-            fprintf(cf, "%u,%.4f,%.4f,%.4f,%d,%d\n",
-                    fr, xpos, ypos, zpos, (int)xang16, (int)yang16);
-            fflush(cf); }
-    }
-#endif
 }
 
 /* ---- Debug: log a summary of the current capture list ------------------- */
@@ -3067,67 +2974,5 @@ static inline void geo3d_log_captures(const geo3d_state_t *geo) {
     if (geo->captured_count > 16)
         LOG_INFO("  ... %d more", geo->captured_count - 16);
 }
-
-#ifdef M2HLE_DEBUG_DUMPS   /* desktop only; see GEO3D_DUMP_TEX */
-/* ---- Raw COP capture-stream dump (for per-pass view-base analysis) -------- */
-
-/* Walk the current frame's geo_capture ring and write an annotated, decoded
- * dump (push/pop/identity/matrix/set_pos/scale/ang/bone/window/obj) to
- * cop_stream_<N>.txt.  N increments each call so consecutive dumps (e.g.
- * carnival then console) land in separate files for diffing.  Used to find
- * whether a pass establishes a view-base matrix before its objects. */
-static inline void geo3d_dump_capture_stream(void) {
-    static int dump_n = 0;
-    char path[64];
-    snprintf(path, sizeof(path), "cop_stream_%d.txt", dump_n++);
-    FILE *f = fopen(path, "w");
-    if (!f) { LOG_WARN("cop dump: cannot open %s", path); return; }
-
-    int total = g_cop.geo_capture_count;
-    int head  = g_cop.geo_capture_head;
-    if (total > GEO_CAPTURE_SIZE) total = GEO_CAPTURE_SIZE;
-    fprintf(f, "# COP capture stream: %d words\n", total);
-
-    for (int i = 0; i < total; i++) {
-        int idx = (head - total + i + GEO_CAPTURE_SIZE) & (GEO_CAPTURE_SIZE - 1);
-        uint32_t v = g_cop.geo_capture[idx];
-        #define GC(o) g_cop.geo_capture[(idx + (o)) & (GEO_CAPTURE_SIZE - 1)]
-        #define F(o)  (is_sane_float(GC(o)) ? u32_as_float(GC(o)) : 0.0f)
-
-        if (v == 0x00800101)      { fprintf(f, "%5d  PUSH\n", i); }
-        else if (v == 0x01000202) { fprintf(f, "%5d  POP\n", i); }
-        else if (v == 0x01800303) { fprintf(f, "%5d  IDENTITY\n", i); }
-        else if (v == 0x02000404 || v == 0x05800B0B) {
-            fprintf(f, "%5d  MATRIX(%08X)  R0[%.3f %.3f %.3f] R1[%.3f %.3f %.3f] R2[%.3f %.3f %.3f] T[%.3f %.3f %.3f]\n",
-                    i, v, F(1),F(2),F(3), F(4),F(5),F(6), F(7),F(8),F(9), F(10),F(11),F(12));
-            i += 12;
-        }
-        else if (v == 0x03000606) { fprintf(f, "%5d  SETPOS [%.3f %.3f %.3f]\n", i, F(1),F(2),F(3)); i += 3; }
-        else if (v == 0x03800707) { fprintf(f, "%5d  SCALE  [%.3f %.3f %.3f]\n", i, F(1),F(2),F(3)); i += 3; }
-        else if (v == 0x04000808) { fprintf(f, "%5d  ANG_X  %d\n", i, (int)(int16_t)(GC(1)&0xFFFF)); i += 1; }
-        else if (v == 0x04800909) { fprintf(f, "%5d  ANG_Y  %d\n", i, (int)(int16_t)(GC(1)&0xFFFF)); i += 1; }
-        else if (v == 0x05000A0A) { fprintf(f, "%5d  ANG_Z  %d\n", i, (int)(int16_t)(GC(1)&0xFFFF)); i += 1; }
-        else if (v == 0x1F803F3F) { fprintf(f, "%5d  ANG_XYZ z=%d y=%d x=%d\n", i,
-                                            (int)(int16_t)(GC(1)&0xFFFF),(int)(int16_t)(GC(2)&0xFFFF),(int)(int16_t)(GC(3)&0xFFFF)); i += 3; }
-        else if (v == 0x1B003636) { fprintf(f, "%5d  BONE_LOAD pid=%u slot=%u\n", i, GC(1)&0xFF, (GC(2))/12); i += 2; }
-        else if (v == 0x1B803737) { fprintf(f, "%5d  BONE_SEL  pid=%u bone=%u\n", i, GC(1)&1, (GC(2)&0xFF)/0xC); i += 2; }
-        else if (v == GEO_WIN_SENTINEL) {
-            fprintf(f, "%5d  WINDOW  c0=%08X c1=%08X c2=%08X\n", i, GC(1),GC(2),GC(3)); i += 6;
-        }
-        else if (v == 0x3C007878) {
-            fprintf(f, "%5d  OBJ  mesh=%08X\n", i, GC(5)); i += 8;
-        }
-        else {
-            int na = sharc_args_for_cmd(v);
-            if (na > 0) { fprintf(f, "%5d  cmd %08X (+%d args)\n", i, v, na); i += na; }
-            else        { fprintf(f, "%5d  word %08X\n", i, v); }
-        }
-        #undef GC
-        #undef F
-    }
-    fclose(f);
-    LOG_INFO("cop dump -> %s (%d words)", path, total);
-}
-#endif /* M2HLE_DEBUG_DUMPS */
 
 #endif /* GEO3D_H */

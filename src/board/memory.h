@@ -17,7 +17,7 @@
  * Region table ORDER MATTERS for overlapping regions (TILE before H_SYNC).
  *
  * The MMIO callbacks live here too: COPROGRAM forwards to cop.h, GEO and
- * GEO_PROGRAM feed the display list and the clip-window capture, IRQ and
+ * GEO_PROGRAM feed the display list, IRQ and
  * TIMERS go to irq_timer.h; the sound board attaches its own (sound.h). Every
  * write also runs the watchpoints (watchpoint.h) and the display-list tap.
  */
@@ -457,15 +457,12 @@ static inline void geodl_publish(uint32_t rstart) {
     g_geodl_snap_ready  = 1;
 }
 
-/* GEO base (0x800000). set_window also writes 0x303 to offset 0x30 before its
- * six window words; the COP-stream scanner still keys clip windows off that. */
+/* GEO base (0x800000). */
 static void geo_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - GEO_BASE;
     if (r->data && off + 4 <= r->size)
         memcpy(r->data + off, &val, 4);
     if (size != 4) return;
-    if (off == 0x30 && val == 0x303)
-        geo_win_start();
     if (off < 0x1000) {
         uint32_t function = (off >> 4) & 0x3F;
         if (val & 0x80000000u) {
@@ -493,14 +490,12 @@ static uint32_t geo_read_cb(mem_region_t *r, uint32_t addr, int size) {
     return size == 1 ? (v & 0xFF) : size == 2 ? (v & 0xFFFF) : v;
 }
 
-/* GEO_PROGRAM (0x804000): raw list words — set_window's six. */
+/* GEO_PROGRAM (0x804000): raw list words. */
 static void geo_program_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - GEO_PROGRAM_BASE;
     if (r->data && off + 4 <= r->size)
         memcpy(r->data + off, &val, 4);
     if (size != 4) return;
-    if (off == 0)
-        geo_win_push(val);
     int uploading = g_geo.copro_ctl && (g_geo.copro_ctl[11] & 0x80);
     if (!uploading) geo_push(val);
 }
@@ -614,7 +609,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     mem_add_region(bus, "ROM",             ROM_BASE,             rom_size ? (uint32_t)rom_size : ROM_SIZE, rom_data, 1);
     mem_add_region(bus, "RAM2",            RAM2_BASE,            RAM2_SIZE,            bus->ram2,          0);
     mem_add_region(bus, "RAM",             RAM_BASE,             RAM_SIZE,             bus->ram,           0);
-    /* GEO / GEO_PROGRAM capture the set_window clip stream; COPROGRAM forwards
+    /* GEO / GEO_PROGRAM feed the display list; COPROGRAM forwards
      * the command/arg stream to the SHARC HLE (cop.h). */
     { mem_region_t *r = mem_add_region(bus, "GEO", GEO_BASE, GEO_SIZE, bus->geo, 0);
       if (r) { r->read_cb = geo_read_cb; r->write_cb = geo_write_cb; } }

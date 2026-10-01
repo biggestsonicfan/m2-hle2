@@ -780,15 +780,6 @@ static inline int m68k_step(m68k_state_t *s) {
 
     /* ---- group 0: bit manipulation + immediate ops ---- */
     case 0x0: {
-        /* Distinguish immediate bit ops (bit 8 set → static/imm form) and
-         * register-based bit ops (bits 8-6 = 1xx, bit 11-8 encode Dn). */
-        int bit8 = (op >> 8) & 1;
-
-        /* BTST/BCHG/BCLR/BSET register form: 0000 Dn 1 op mode reg */
-        if ((op & 0x0138) == 0x0100) { /* bit 8=1, bits 6-3 = 00 (mode bits) - actually need better decode */
-            /* Decode: 0000 Dn 1 op ea where bits [8:6] = 1 + 2-bit op */
-        }
-
         /* Decode based on bits [11:8] for immediate ops */
         int sub = (op >> 8) & 0xF;
         int mode = (op >> 3) & 7, reg = op & 7;
@@ -922,7 +913,6 @@ static inline int m68k_step(m68k_state_t *s) {
     /* ---- group 4: misc ---- */
     case 0x4: {
         int mode = (op >> 3) & 7, reg = op & 7;
-        int sub6 = (op >> 6) & 0x3F;
 
         /* 0100 1110 0111 0001: NOP */
         if (op == 0x4E71) break;

@@ -549,12 +549,10 @@ static void draw_menu_bar(void) {
         igMenuItemBoolPtr("Object viewer",    NULL, &state.show_objview,     true);
         igMenuItemBoolPtr("SKY EYE (noclip link)", NULL, &state.show_sky_eye, true);
         if (igMenuItem("Dump 3D captures")) geo3d_log_captures(&state.geo3d);
-        if (igMenuItem("Dump COP stream"))  geo3d_dump_capture_stream();
         igMenuItemBoolPtr("68K sound CPU",    NULL, &state.show_m68k_cpu,    true);
         igMenuItemBoolPtr("68K memory viewer", NULL, &state.show_m68k_mem,   true);
         igMenuItemBoolPtr("Log sound writes", NULL, &g_sound.log_writes,     true);
         { bool ws = g_warning_skip != 0;  if (igMenuItemBoolPtr("Warning-screen skip", NULL, &ws, true)) g_warning_skip = ws; }
-        { bool cl = g_cam_log != 0;        if (igMenuItemBoolPtr("Log camera CSV",      NULL, &cl, true)) g_cam_log = cl; }
         igSeparator();
         igMenuItemBoolPtr("Always show menu bar", NULL, &state.always_show_menu, true);
         igSeparator();
@@ -1449,8 +1447,6 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             else LOG_WARN("--damage %s: expected real or normal; keeping normal", d);
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
-        } else if (strcmp(argv[i], "--camlog") == 0) {
-            g_cam_log = 1;            /* dump cam_ours.csv per game frame */
         } else if (strcmp(argv[i], "--match-replay") == 0) {
             g_match_replay = 1;       /* attract mode straight to its replay fight */
         } else if (strcmp(argv[i], "--match-replay-stage") == 0 && i + 1 < argc) {
@@ -1497,8 +1493,6 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_browse_model = atoi(argv[++i]);  /* single-model browser on N */
         } else if (strcmp(argv[i], "--extract") == 0 && i + 1 < argc) {
             g_extract_model = atoi(argv[++i]); /* dump model N's tiles+colours */
-        } else if (strcmp(argv[i], "--bank") == 0 && i + 1 < argc) {
-            g_uv_bank_mode = atoi(argv[++i]);  /* 0=auto 1=sheet0 2=sheet1 3=swap */
         } else if (strcmp(argv[i], "--rombank") == 0 && i + 1 < argc) {
             g_extract_rombank = atoi(argv[++i]); /* texel source = textures ROM bank N */
         } else if (strcmp(argv[i], "--cyclemaps") == 0) {
