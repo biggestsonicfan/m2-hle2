@@ -23,11 +23,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Write a hex uint32 field. buf must be large enough. */
-static inline int json_u32hex(char *buf, int cap, const char *key, uint32_t v) {
-    return snprintf(buf, (size_t)cap, "\"%s\":\"0x%08X\"", key, v);
-}
-
 /* Where key's value starts (after the colon and any blanks), or NULL. */
 static inline const char *json_value_at(const char *json, const char *key) {
     char needle[64];

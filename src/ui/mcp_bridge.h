@@ -125,7 +125,6 @@ static mcp_bridge_t g_mcp = {0};
  * the names the ~140 call sites below already use.
  */
 
-#define mcp_json_u32hex   json_u32hex
 #define mcp_json_get_str  json_get_str
 #define mcp_json_get_u32  json_get_u32
 #define mcp_json_get_f32  json_get_f32
@@ -2438,22 +2437,6 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
         snprintf(p,(size_t)left,"]}");
     }
     else if (strcmp(cmd, "dump_geo_stream")          == 0) mcp_cmd_dump_geo_stream(resp, cap);
-    else if (strcmp(cmd, "dump_face_uv")              == 0) {
-        char *p = resp; int left = cap; int n;
-        n = snprintf(p, (size_t)left, "{\"ok\":true,\"faces\":["); p += n; left -= n;
-        for (int i = 0; i < g_dbg_face_uv_n && left > 200; i++) {
-            dbg_face_uv_t *d = &g_dbg_face_uv[i];
-            n = snprintf(p, (size_t)left,
-                "%s{\"m\":%d,\"texx\":%d,\"texy\":%d,\"texw\":%d,\"texh\":%d,"
-                "\"sheet\":%d,\"tri\":%d,\"pu0\":%d,\"pv0\":%d,"
-                "\"au\":[%.4f,%.4f,%.4f,%.4f],\"av\":[%.4f,%.4f,%.4f,%.4f]}",
-                i ? "," : "", d->model, d->texx, d->texy, d->texw, d->texh,
-                d->texsheet, d->tri, d->pu0, d->pv0,
-                d->au[0],d->au[1],d->au[2],d->au[3], d->av[0],d->av[1],d->av[2],d->av[3]);
-            p += n; left -= n;
-        }
-        snprintf(p, (size_t)left, "]}");
-    }
     else if (strcmp(cmd, "netplay_status")           == 0) mcp_cmd_netplay_status(req, resp, cap);
     else if (strcmp(cmd, "netplay_connect")          == 0) mcp_cmd_netplay_connect(req, resp, cap);
     else if (strcmp(cmd, "netplay_host")             == 0) mcp_cmd_netplay_host(req, resp, cap);
@@ -2468,13 +2451,6 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
     else if (strcmp(cmd, "board_reset")              == 0) mcp_cmd_board_reset(resp, cap);
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
-    else if (strcmp(cmd, "dump_tex_stats")            == 0) {
-        snprintf(resp, (size_t)cap,
-            "{\"ok\":true,\"models\":%ld,\"models_uv\":%ld,\"models_mat\":%ld,"
-            "\"faces\":%ld,\"textured\":%ld,\"uv_faces\":%ld}",
-            g_dbg_tex_models, g_dbg_tex_models_uv, g_dbg_tex_models_mat,
-            g_dbg_tex_faces, g_dbg_tex_textured, g_dbg_tex_uv_faces);
-    }
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
 }
 

@@ -732,9 +732,6 @@ words (`words`: 8 hex chars each, no spaces) through the i960's own MMIO path,
 argument counting and all; `reset: 1` clears COP and SHARC state first. Read the
 result back with `dump_tgp`. Returns `words` (how many went in).
 
-**`dump_face_uv()`** / **`dump_tex_stats()`** — texture-decode debug counters
-from the renderer.
-
 **`sound_status()`** — the sound board at a glance: the 68000's `m68k_pc` /
 `m68k_sr` / `cycles`, `samples`, `irqs`, the SCSP interrupt state (`scieb`,
 `scipd`, `lines`, `levels`, `timers`), the `keyed` and `active` slot masks,
