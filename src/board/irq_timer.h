@@ -29,12 +29,6 @@
 
 #define IRQT_TIMERS 4
 
-/* What a timer that is not counting reads: before its first write and after it
- * expires (MAME model2_timer_cb / machine_reset, m_timervals = 0xfffff). STF's
- * rand (0x66B0) adds all four counts into its state, so a timer the game never
- * arms still feeds every random number with this. It used to read 0. */
-#define IRQT_IDLE 0xFFFFFll
-
 typedef struct {
     uint32_t intreq;                 /* pending interrupt bits (0xE80000)   */
     uint32_t intena;                 /* interrupt enable mask  (0xE80004)   */
@@ -122,8 +116,7 @@ static inline void irqt_tick(int64_t cycles) {
         if (g_irqt.timer_count[t] <= 0) {
             uint32_t line = 1u << (t + 2);
             if (g_irqt.intena & line) g_irqt.intreq |= line;
-            g_irqt.timer_run[t]   = false;   /* one-shot; handler re-arms */
-            g_irqt.timer_count[t] = IRQT_IDLE;
+            g_irqt.timer_run[t] = false;     /* one-shot; handler re-arms */
         }
     }
     /* MAME screen_vblank: the line is raised only while it is enabled. No
@@ -180,7 +173,7 @@ static inline int irqt_pending_pin(void) {
 
 static inline void irqt_reset(void) {
     for (int i = 0; i < IRQT_TIMERS; i++) {
-        g_irqt.timer_count[i] = IRQT_IDLE;
+        g_irqt.timer_count[i] = 0;
         g_irqt.timer_run[i]   = false;
     }
     g_irqt.intreq = 0;
