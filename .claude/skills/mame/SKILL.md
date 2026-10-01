@@ -23,26 +23,14 @@ yourself on any other command line too.
 | Machine | Binary | Notes |
 |---|---|---|
 | Windows | `..\claude_mame\mame\mame.exe` | MSYS2 CLANG64, `SYMBOLS=1`. Graders default to it. |
-| Linux dev container | `/home/antigravity/build/claude_mame-mame/m2` | Named `m2` (`SUBTARGET=m2`), so a search for `mame*` misses it. |
+| Linux dev container | `/home/antigravity/build/mame-bin/mame-shared/shared` | The shared MAME (fork branch `shared`: every fork fix + upstream). Named `shared`, so a search for `mame*` misses it. |
 
-The Linux build lives on the container's overlay disk and has been wiped before.
-If it is missing, rebuild it (~40 min at `-j3` beside a live stream). Do not
-conclude there is no MAME. The recipe is in `../claude_mame/CLAUDE_MAME.md`,
-"Build environment (Linux)":
-
-```
-sudo apt-get install -y pkg-config libsdl2-dev libsdl2-ttf-dev libfontconfig-dev libpulse-dev \
-     libasound2-dev libxinerama-dev libxi-dev libxrandr-dev
-mkdir -p ~/build/claude_mame-mame
-git -C ../claude_mame/mame archive HEAD | tar -x -C ~/build/claude_mame-mame
-cd ~/build/claude_mame-mame
-setsid nohup sh -c 'nice -n 19 make SUBTARGET=m2 SOURCES=src/mame/sega/model2.cpp REGENIE=1 \
-     NOWERROR=1 USE_QTDEBUG=0 PYTHON_EXECUTABLE=/usr/bin/python3 -j3 > /tmp/mame-build.log 2>&1' &
-```
-
-Build on local disk, not on the repos share (9p is far too slow), and detach it
-with `setsid nohup`. A plain background job dies with the session, and make then
-has to resume where it stopped.
+On Linux, use the shared build: don't build a MAME of your own. If it is
+missing (the container's disk has been wiped before), rebuild it with
+`../claude_mame/build-shared-mame.sh`, detached (`setsid nohup ... &`): hours
+from scratch at `-j2`, incremental after that. Do not conclude there is no
+MAME. A MAME fix goes on a fork branch that is merged into `shared` (see
+`../claude_mame/CLAUDE_MAME.md`), then the script is rerun.
 
 ## ROMs
 
@@ -56,7 +44,7 @@ directory that holds only the three zips (symlinks are fine). On Linux that is
 ## Headless runs
 
 ```
-SDL_VIDEODRIVER=dummy ./m2 sfight -rompath <3 zips> -nvram_directory <tmp> -cfg_directory <tmp> \
+SDL_VIDEODRIVER=dummy ./shared sfight -rompath <3 zips> -nvram_directory <tmp> -cfg_directory <tmp> \
   -snapshot_directory <dir> -nodrc -video none -sound none -nothrottle -skip_gameinfo \
   -seconds_to_run 299 -autoboot_script <script.lua>
 ```
