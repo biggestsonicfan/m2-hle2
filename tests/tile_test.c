@@ -1,13 +1,17 @@
 /*
  * tile_test.c — the tile compositor against its own previous self.
  *
- * s24_draw_tilemap was rewritten for speed (per-line mask words, one cell
- * decode per eight pixels, palette reads only for pixels written). The
- * compositor it replaced is kept here verbatim as the reference, and both are
- * run over random tile RAM, cell graphics, palette, scroll registers, per-line
- * scroll tables, window masks and every pair control mode, with the four
- * layer buffers compared byte for byte. The pen table the CPU compose uses
- * (video_pen_table, built from 96 colour-table bytes) is held to
+ * The CPU compositor was rewritten twice for speed: s24_draw_tilemap (per-line
+ * mask words, one cell decode per eight pixels), then tile_compose_cpu, which
+ * keeps both layers as pens and draws again only the 8x8 blocks a tile RAM
+ * change reaches, recolouring only the pixels whose pen changed colour. The
+ * compositor all that replaced is kept here verbatim as the reference, colour
+ * conversion included, and both are run over random tile RAM, cell graphics,
+ * palette, colour tables, scroll registers, per-line scroll tables, window
+ * masks and every pair control mode: a full compose of each scenario, then
+ * frame after frame of random small edits composed incrementally, the RGBA of
+ * both layers compared byte for byte every time. The pen channels the
+ * compositors colour with (video_pen_channels, 96 values) are held to
  * tile_pen_lut, which derives every entry on its own.
  *
  * No ROM, no window: pure functions of the bus.
@@ -26,6 +30,22 @@ static int g_fail = 0;
 } while (0)
 
 /* ---- the previous compositor, verbatim ------------------------------------ */
+
+typedef struct {
+    uint16_t *bg;       /* background layer [VIDEO_WIDTH × VIDEO_HEIGHT] BGR555 */
+    uint16_t *fg;       /* foreground layer [VIDEO_WIDTH × VIDEO_HEIGHT] BGR555 */
+    uint8_t  *alpha;    /* foreground alpha [VIDEO_WIDTH × VIDEO_HEIGHT] 0=transparent */
+    uint8_t  *bg_alpha; /* background alpha — 0 where the back-back color shows through */
+} tile_layers_t;
+
+static inline int tile_layers_init(tile_layers_t *t) {
+    int n = VIDEO_WIDTH * VIDEO_HEIGHT;
+    t->bg       = (uint16_t *)calloc(n, sizeof(uint16_t));
+    t->fg       = (uint16_t *)calloc(n, sizeof(uint16_t));
+    t->alpha    = (uint8_t  *)calloc(n, sizeof(uint8_t));
+    t->bg_alpha = (uint8_t  *)calloc(n, sizeof(uint8_t));
+    return (t->bg && t->fg && t->alpha && t->bg_alpha) ? 1 : 0;
+}
 
 static inline uint16_t ref_s24_sample(const memory_bus_t *bus, int t, int x, int y,
                                   uint8_t *ci, uint8_t *cat, int *pen) {
@@ -101,6 +121,18 @@ static void ref_render_fg_layer(const memory_bus_t *bus, tile_layers_t *t) {
     for (int k = 3; k >= 0; k--) ref_s24_draw_tilemap(bus, k, 1, false, t->fg, t->alpha);
 }
 
+/* video_compose_cpu's colour pass: every 15-bit colour through the pen table
+ * (alpha 255), the front layer's alpha from where something drew. */
+static void ref_compose(const memory_bus_t *bus, tile_layers_t *t, const uint8_t lut[0x8000][3],
+                        uint8_t *bg_rgba, uint8_t *fg_rgba) {
+    ref_render_bg_layer(bus, t);
+    ref_render_fg_layer(bus, t);
+    for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++) {
+        memcpy(bg_rgba + i * 4, lut[t->bg[i] & 0x7FFF], 3); bg_rgba[i * 4 + 3] = 255;
+        memcpy(fg_rgba + i * 4, lut[t->fg[i] & 0x7FFF], 3); fg_rgba[i * 4 + 3] = t->alpha[i];
+    }
+}
+
 /* ---- random board state ----------------------------------------------------- */
 
 static uint32_t s_rng = 1;
@@ -141,60 +173,132 @@ static void scenario(memory_bus_t *bus, unsigned seed) {
     }
 }
 
+/* One frame's worth of what a game writes: a few cells (often near each
+ * other, as a HUD digit or a text line is), sometimes a row scroll or window
+ * mask word, palette words, rarely the colour tables, cell graphics or a scroll
+ * register. Says what changed, as the bus generations would. */
+static void edit(memory_bus_t *bus, bool *tile, bool *gfx, bool *pens) {
+    *tile = *gfx = *pens = false;
+    int k = (int)(rnd() % 16);
+    if (k < 9) {
+        uint32_t w = rnd() & 0x3FFF;
+        int n = 1 + (int)(rnd() % 12);
+        for (int i = 0; i < n; i++)
+            w16(bus, (w + (uint32_t)i * ((rnd() & 1) ? 1u : 64u)) & 0x3FFF, (uint16_t)rnd());
+        *tile = true;
+    } else if (k == 9) {
+        w16(bus, 0x4000u + (rnd() & 0x7FF), (uint16_t)rnd()); *tile = true;
+    } else if (k == 10) {
+        w16(bus, ((rnd() & 1) ? 0x6000u : 0x6800u) + rnd() % (VIDEO_HEIGHT * 4 + 64), (uint16_t)rnd()); *tile = true;
+    } else if (k == 11) {
+        uint32_t w = 0x5000u + (rnd() & 7);
+        uint16_t v = (uint16_t)(bus->tile[w * 2] | (bus->tile[w * 2 + 1] << 8));
+        w16(bus, w, (uint16_t)(v ^ (1u << (rnd() % 16)))); *tile = true;
+    } else if (k == 12) {
+        uint32_t c = (rnd() % (TMAPGFX_SIZE / 32)) * 32;
+        fill(bus->tmapgfx + c, 32); *gfx = true;
+    } else if (k == 13) {
+        bus->colorxlat[rnd() % COLORXLAT_SIZE] = (uint8_t)rnd(); *pens = true;
+    } else if (k == 14) {
+        *tile = true;                                     /* a write of the same value */
+    } else {
+        int n = 1 + (int)(rnd() % 40);
+        for (int i = 0; i < n; i++) bus->palette[rnd() % 8192] = (uint8_t)rnd();
+        *pens = true;
+    }
+    if ((rnd() & 3) == 0) { bus->palette[rnd() % 8192] = (uint8_t)rnd(); *pens = true; }
+}
+
 int main(int argc, char **argv) {
     static memory_bus_t bus;
-    static tile_layers_t ours, ref;
-    static uint8_t lut[0x8000][3];
-    if (!mem_init(&bus, NULL, 0) || !tile_layers_init(&ours) || !tile_layers_init(&ref)) {
+    static tile_layers_t ref;
+    static tile_cpu_t cpu;
+    static uint8_t lut[0x8000][3], chan[3][32];
+    static uint8_t bg[VIDEO_WIDTH * VIDEO_HEIGHT * 4], fg[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+    static uint8_t rbg[VIDEO_WIDTH * VIDEO_HEIGHT * 4], rfg[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+    static uint8_t pbg[VIDEO_WIDTH * VIDEO_HEIGHT * 4], pfg[VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+    if (!mem_init(&bus, NULL, 0) || !tile_layers_init(&ref)) {
         printf("FAIL: init\n"); return 1;
     }
-    size_t n = (size_t)VIDEO_WIDTH * VIDEO_HEIGHT;
+    size_t n = sizeof bg;
     int modes_seen[4] = { 0, 0, 0, 0 };
+    int frames = 0, quiet = 0;
     for (unsigned seed = 1; seed <= 48; seed++) {
         scenario(&bus, seed);
         for (int p = 0; p < 2; p++)
             modes_seen[(tileram_word(&bus, 0x5004u + 2u * (uint32_t)p) & 0x6000) >> 13]++;
-        render_bg_layer(&bus, &ours);     ref_render_bg_layer(&bus, &ref);
-        render_fg_layer(&bus, &ours);     ref_render_fg_layer(&bus, &ref);
-        CHECK(memcmp(ours.bg, ref.bg, n * 2) == 0,         "seed %u: bg colours differ", seed);
-        CHECK(memcmp(ours.bg_alpha, ref.bg_alpha, n) == 0, "seed %u: bg alpha differs", seed);
-        CHECK(memcmp(ours.fg, ref.fg, n * 2) == 0,         "seed %u: fg colours differ", seed);
-        CHECK(memcmp(ours.alpha, ref.alpha, n) == 0,       "seed %u: fg alpha differs", seed);
 
-        /* the pen table: from the colour tables as loaded, and as the blank
+        /* the pen channels: from the colour tables as loaded, and as the blank
          * tables of a game that never fills them */
         for (int pass = 0; pass < 2; pass++) {
-            if (pass == 0) fill(bus.colorxlat, COLORXLAT_SIZE);
-            else           memset(bus.colorxlat, 0, COLORXLAT_SIZE);
+            if (pass == 0) memset(bus.colorxlat, 0, COLORXLAT_SIZE);
+            else           fill(bus.colorxlat, COLORXLAT_SIZE);
             tile_pen_lut(&bus, lut);
-            video_pen_table(&bus);
+            video_pen_channels(&bus, chan);
             int bad = 0;
             for (int c = 0; c < 0x8000; c++)
-                if (g_video_pen[c][0] != lut[c][0] || g_video_pen[c][1] != lut[c][1] ||
-                    g_video_pen[c][2] != lut[c][2] || g_video_pen[c][3] != 255) bad++;
+                if (chan[0][c & 31] != lut[c][0] || chan[1][(c >> 5) & 31] != lut[c][1] ||
+                    chan[2][(c >> 10) & 31] != lut[c][2]) bad++;
             CHECK(bad == 0, "seed %u pass %d: %d pen entries differ from tile_pen_lut", seed, pass, bad);
+        }
+
+        /* a full compose, from a compositor that has drawn something else */
+        if (seed & 1) cpu.valid = false;
+        tile_compose_cpu(&cpu, &bus, (const uint8_t (*)[32])chan, true, true, true, bg, fg);
+        ref_compose(&bus, &ref, lut, rbg, rfg);
+        CHECK(memcmp(bg, rbg, n) == 0, "seed %u: bg differs", seed);
+        CHECK(memcmp(fg, rfg, n) == 0, "seed %u: fg differs", seed);
+
+        /* then frame after frame of edits, each composed incrementally */
+        for (int f = 0; f < 40 && !g_fail; f++) {
+            bool tile, gfx, pens;
+            edit(&bus, &tile, &gfx, &pens);
+            if (pens) { video_pen_channels(&bus, chan); tile_pen_lut(&bus, lut); }
+            memcpy(pbg, rbg, n); memcpy(pfg, rfg, n);
+            bool out = tile_compose_cpu(&cpu, &bus, (const uint8_t (*)[32])chan, gfx, tile, pens, bg, fg);
+            ref_compose(&bus, &ref, lut, rbg, rfg);
+            CHECK(memcmp(bg, rbg, n) == 0, "seed %u frame %d: bg differs", seed, f);
+            CHECK(memcmp(fg, rfg, n) == 0, "seed %u frame %d: fg differs", seed, f);
+            CHECK(out || (memcmp(pbg, rbg, n) == 0 && memcmp(pfg, rfg, n) == 0),
+                  "seed %u frame %d: the picture changed and the compose said it had not", seed, f);
+            frames++;
+            if (!out) quiet++;
         }
     }
     CHECK(modes_seen[0] && modes_seen[1] && modes_seen[2] && modes_seen[3],
           "every pair control mode was drawn (%d %d %d %d)", modes_seen[0], modes_seen[1], modes_seen[2], modes_seen[3]);
-    printf("%s: 48 scenarios, modes %d/%d/%d/%d\n", g_fail ? "FAILED" : "ok",
-           modes_seen[0], modes_seen[1], modes_seen[2], modes_seen[3]);
+    printf("%s: 48 scenarios, modes %d/%d/%d/%d, %d incremental frames (%d unchanged)\n", g_fail ? "FAILED" : "ok",
+           modes_seen[0], modes_seen[1], modes_seen[2], modes_seen[3], frames, quiet);
 
-    /* --bench: both compositors over a game-like frame (mode 0 pairs, window
-     * masks, whole layers), the cost of one compose each. Not a check. */
+    /* --bench: a game-like frame (mode 0 pairs, window masks, whole layers),
+     * the cost of one compose: the old compositor, the new one drawing it all,
+     * and the new one after a palette write and after a few cell writes. Not a
+     * check. */
     if (argc > 1 && strcmp(argv[1], "--bench") == 0) {
         scenario(&bus, 7);
         for (int p = 0; p < 2; p++) {
             uint32_t w = 0x5004u + 2u * (uint32_t)p;
             w16(&bus, w, (uint16_t)(bus.tile[w * 2] | (bus.tile[w * 2 + 1] << 8)) & 0x9FFF);
         }
-        for (int which = 0; which < 2; which++) {
+        tile_pen_lut(&bus, lut);
+        video_pen_channels(&bus, chan);
+        const char *what[4] = { "old", "new, full", "new, palette", "new, 8 cells" };
+        for (int which = 0; which < 4; which++) {
+            tile_compose_cpu(&cpu, &bus, (const uint8_t (*)[32])chan, true, true, true, bg, fg);
             clock_t t0 = clock();
             for (int k = 0; k < 40; k++) {
-                if (which) { render_bg_layer(&bus, &ours);     render_fg_layer(&bus, &ours); }
-                else       { ref_render_bg_layer(&bus, &ref);  ref_render_fg_layer(&bus, &ref); }
+                if (which == 0) ref_compose(&bus, &ref, lut, rbg, rfg);
+                else if (which == 1) tile_compose_cpu(&cpu, &bus, (const uint8_t (*)[32])chan, true, true, true, bg, fg);
+                else if (which == 2) {
+                    bus.palette[2 * (rnd() % 4096)] ^= 1;
+                    tile_compose_cpu(&cpu, &bus, (const uint8_t (*)[32])chan, false, false, true, bg, fg);
+                } else {
+                    uint32_t w = rnd() & 0x3FFF;
+                    for (uint32_t i = 0; i < 8; i++) w16(&bus, (w + i) & 0x3FFF, (uint16_t)rnd());
+                    tile_compose_cpu(&cpu, &bus, (const uint8_t (*)[32])chan, false, true, false, bg, fg);
+                }
             }
-            printf("%s compose: %.0f us\n", which ? "new" : "old", (clock() - t0) * 1e6 / CLOCKS_PER_SEC / 40);
+            printf("%-13s compose: %.0f us\n", what[which], (clock() - t0) * 1e6 / CLOCKS_PER_SEC / 40);
         }
     }
     return g_fail ? 1 : 0;

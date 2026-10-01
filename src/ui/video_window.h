@@ -46,13 +46,10 @@
 #define VIDEO_GFX_GPU_H  512
 #define VIDEO_PAL_GPU_W  256
 #define VIDEO_PAL_GPU_H  32
-/* The GPU layers are recomposed in 8x8 screen blocks: only the blocks a tile RAM
- * change can reach are drawn again (video__tile_dirty). */
-#define VIDEO_BLK_W      (VIDEO_WIDTH / 8)
-#define VIDEO_BLK_H      (VIDEO_HEIGHT / 8)
-_Static_assert(VIDEO_TILE_WORDS >= 0x6800 + VIDEO_HEIGHT * 4, "tile texture covers the window masks");
-_Static_assert(VIDEO_TILE_WORDS * 2 <= TILE_SIZE, "tile texture fits tile RAM");
-_Static_assert(VIDEO_BLK_W * 8 == VIDEO_WIDTH && VIDEO_BLK_H * 8 == VIDEO_HEIGHT, "screen is whole 8x8 blocks");
+/* Both compositors redraw in 8x8 screen blocks (tile_dirty_find). */
+#define VIDEO_BLK_W      TILE_BLK_W
+#define VIDEO_BLK_H      TILE_BLK_H
+_Static_assert(VIDEO_TILE_WORDS == TILE_SNAP_WORDS, "tile texture is the compositors' tile RAM snapshot");
 _Static_assert(VIDEO_GFX_GPU_W * VIDEO_GFX_GPU_H == TMAPGFX_SIZE, "gfx texture is tile graphics RAM");
 _Static_assert(VIDEO_PAL_GPU_W * VIDEO_PAL_GPU_H * 2 == PALETTE_SIZE, "one texel per palette entry");
 
@@ -73,7 +70,7 @@ typedef struct {
     uint8_t       bg_pixels[VIDEO_WIDTH * VIDEO_HEIGHT * VIDEO_BPP];
     uint8_t       fg_pixels[VIDEO_WIDTH * VIDEO_HEIGHT * VIDEO_BPP];
     uint8_t       back_pixel[4];   /* 1×1 back-back colour, stretched over the view */
-    tile_layers_t layers;
+    tile_cpu_t    cpu;             /* the CPU compositor's pens and snapshot */
     bool          initialized;
 
     /* The bus generations the layers show (see memory.h change_gen). */
@@ -281,8 +278,7 @@ static inline void video__init_gpu(video_state_t *vid) {
 static inline void video_init(video_state_t *vid) {
     memset(vid->bg_pixels, 0, sizeof(vid->bg_pixels));
     memset(vid->fg_pixels, 0, sizeof(vid->fg_pixels));
-    memset(&vid->layers, 0, sizeof(tile_layers_t));
-    tile_layers_init(&vid->layers);
+    vid->cpu.valid = false;
 
     vid->bg_image = video__make_img("game-bg");
     vid->fg_image = video__make_img("game-fg");
@@ -336,104 +332,17 @@ static inline void video_shutdown(video_state_t *vid) {
     sg_destroy_image(vid->bg_image);
     sg_destroy_image(vid->fg_image);
     sg_destroy_image(vid->back_image);
-    tile_layers_free(&vid->layers);
     vid->initialized = false;
 }
 
-/* Compose both layers on the CPU into bg_pixels / fg_pixels (RGBA, row 0 top). */
+/* Compose both layers on the CPU into bg_pixels / fg_pixels (RGBA, row 0 top),
+ * every pixel drawn again from the bus as it is now. pen_chan must be current. */
 static inline void video_compose_cpu(video_state_t *vid, memory_bus_t *bus) {
-    render_bg_layer(bus, &vid->layers);
-    render_fg_layer(bus, &vid->layers);
-    video_pen_table(bus);
-
-    int n = VIDEO_WIDTH * VIDEO_HEIGHT;
-    for (int i = 0; i < n; i++) {
-        int o = i * 4;
-        /* BG tiles, OPAQUE (matches MAME TILEMAP_DRAW_OPAQUE for layers C/D);
-         * empty cells render palette[0] = the backdrop colour. */
-        memcpy(vid->bg_pixels + o, g_video_pen[vid->layers.bg[i] & 0x7FFF], 4);
-        /* FG tiles, alpha-keyed. */
-        memcpy(vid->fg_pixels + o, g_video_pen[vid->layers.fg[i] & 0x7FFF], 4);
-        vid->fg_pixels[o+3] = vid->layers.alpha[i];
-    }
+    tile_compose_cpu(&vid->cpu, bus, (const uint8_t (*)[32])vid->pen_chan, true, true, true,
+                     vid->bg_pixels, vid->fg_pixels);
 }
 
 /* ---- Incremental GPU compose ----------------------------------------------- */
-
-typedef struct {
-    uint8_t blk[VIDEO_BLK_H][VIDEO_BLK_W];   /* 1: the 8x8 block must be drawn again */
-    int     count;
-    bool    full;
-} video_dirty_t;
-
-/* Mark the blocks covering screen pixels [x0, x1) x [y0, y1), clipped. */
-static inline void video__mark(video_dirty_t *d, int x0, int x1, int y0, int y1) {
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > VIDEO_WIDTH)  x1 = VIDEO_WIDTH;
-    if (y1 > VIDEO_HEIGHT) y1 = VIDEO_HEIGHT;
-    if (x0 >= x1 || y0 >= y1) return;
-    for (int by = y0 >> 3; by <= (y1 - 1) >> 3; by++)
-        for (int bx = x0 >> 3; bx <= (x1 - 1) >> 3; bx++)
-            if (!d->blk[by][bx]) { d->blk[by][bx] = 1; d->count++; }
-}
-
-/* The screen pixels where tilemap cell (cx, cy) of tilemap l can show, marked.
- * A pixel of drawing tilemap t samples tilemap l at ((x - h) & 511, (y + v) & 511)
- * with t's own scroll: t == l, or under a split mode the even tilemap of the pair
- * drawing the odd one. The coordinates wrap at 512, so a cell's 8 pixels can
- * also sit 512 lower; with a per-line H scroll the cell's lines are marked whole. */
-static inline void video__mark_cell(video_dirty_t *d, const uint16_t *w, int l, int cx, int cy) {
-    for (int k = 0; k < 2; k++) {
-        int t = k ? (l & 2) : l;
-        if (k && t == l) break;
-        uint16_t hscr = w[0x5000 + t], vscr = w[0x5004 + t], ctrl = w[0x5004 + (t & 2)];
-        int mode = (ctrl & 0x6000) >> 13;
-        if (vscr & 0x8000) continue;             /* t disabled */
-        if (mode && (t & 1)) continue;           /* odd tilemap idle under a split */
-        if (k && !mode) continue;                /* no split: t draws only itself */
-        int y0 = (cy * 8 - (vscr & 0x1FF)) & 511;
-        for (int j = 0; j < 2; j++) {
-            int ys = y0 - 512 * j;
-            if (hscr & 0x8000) {
-                video__mark(d, 0, VIDEO_WIDTH, ys, ys + 8);
-            } else {
-                int x0 = (cx * 8 + (hscr & 0x1FF)) & 511;
-                video__mark(d, x0, x0 + 8, ys, ys + 8);
-                video__mark(d, x0 - 512, x0 - 504, ys, ys + 8);
-            }
-        }
-    }
-}
-
-/* Which blocks the change from `old` to `cur` tile RAM can alter on screen. A
- * scroll or control register change moves everything: full. A row scroll word
- * redraws its line, a window mask word its 128-pixel span of the line, a tilemap
- * cell where it shows. Words the compositor never reads change nothing. */
-static inline void video__tile_dirty(video_dirty_t *d, const uint16_t *old, const uint16_t *cur) {
-    for (int i = 0; i < VIDEO_TILE_WORDS && !d->full; i += 64) {
-        int n = VIDEO_TILE_WORDS - i < 64 ? VIDEO_TILE_WORDS - i : 64;
-        if (!memcmp(old + i, cur + i, (size_t)n * sizeof *cur)) continue;
-        for (int wi = i; wi < i + n; wi++) {
-            if (old[wi] == cur[wi]) continue;
-            if (wi < 0x4000) {
-                video__mark_cell(d, cur, wi >> 12, wi & 63, (wi >> 6) & 63);
-            } else if (wi < 0x4800) {
-                int y = (wi - 0x4000) & 0x1FF;
-                video__mark(d, 0, VIDEO_WIDTH, y, y + 1);
-            } else if (wi >= 0x5000 && wi < 0x5008) {
-                d->full = true;
-                break;
-            } else if (wi >= 0x6000 && wi < 0x7000) {
-                int off = (wi - 0x6000) & 0x7FF;         /* 0x6000 and 0x6800 alike */
-                if (off < VIDEO_HEIGHT * 4) {
-                    int y = off / 4, x = (off % 4) * 128;
-                    video__mark(d, x, x + 128, y, y + 1);
-                }
-            }
-        }
-    }
-}
 
 /* Upload the RAM the GPU compositor reads (each part only if what it is made of
  * changed) and draw both layers in one pass: all of them when the targets are new
@@ -446,12 +355,12 @@ static inline void video__tile_dirty(video_dirty_t *d, const uint16_t *old, cons
 static inline void video__compose_gpu(video_state_t *vid, memory_bus_t *bus,
                                       bool tile_changed, bool gfx_changed, bool pens_changed) {
     static uint16_t snap[VIDEO_TILE_WORDS];
-    static video_dirty_t d;
+    static tile_dirty_t d;
     memset(&d, 0, sizeof d);
     d.full = !vid->targets_valid || gfx_changed;   /* pens: the targets hold pens, not colours */
     if (tile_changed) {
         memcpy(snap, bus->tile, sizeof snap);         /* little-endian words, as on the host */
-        if (!d.full) video__tile_dirty(&d, vid->tile_words, snap);
+        if (!d.full) tile_dirty_find(&d, vid->tile_words, snap);
         memcpy(vid->tile_words, snap, sizeof snap);
         sg_update_image(vid->tile_ram, &(sg_image_data){
             .mip_levels[0] = { .ptr = vid->tile_words, .size = sizeof vid->tile_words } });
@@ -568,13 +477,17 @@ static inline void video_update(video_state_t *vid, memory_bus_t *bus) {
     if (vid->gpu) {
         video__compose_gpu(vid, bus, tile_changed, gfx_changed, pens_changed);
     } else {
-        video_compose_cpu(vid, bus);
-        sg_update_image(vid->bg_image, &(sg_image_data){
-            .mip_levels[0] = { .ptr = vid->bg_pixels, .size = sizeof(vid->bg_pixels) },
-        });
-        sg_update_image(vid->fg_image, &(sg_image_data){
-            .mip_levels[0] = { .ptr = vid->fg_pixels, .size = sizeof(vid->fg_pixels) },
-        });
+        /* Only what changed is drawn again, and a frame that changes no
+         * pixel uploads nothing (tile_compose_cpu). */
+        if (tile_compose_cpu(&vid->cpu, bus, (const uint8_t (*)[32])vid->pen_chan, gfx_changed,
+                             tile_changed, pens_changed, vid->bg_pixels, vid->fg_pixels)) {
+            sg_update_image(vid->bg_image, &(sg_image_data){
+                .mip_levels[0] = { .ptr = vid->bg_pixels, .size = sizeof(vid->bg_pixels) },
+            });
+            sg_update_image(vid->fg_image, &(sg_image_data){
+                .mip_levels[0] = { .ptr = vid->fg_pixels, .size = sizeof(vid->fg_pixels) },
+            });
+        }
     }
 
     /* 1×1 solid back-back colour (palette[0] through the pen tables); only the
