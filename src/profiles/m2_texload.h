@@ -1,5 +1,5 @@
 /*
- * m2_texload.h — Sega's texture loader in C (Pinboard #178).
+ * m2_texload.h — Sega's texture loader in C (Pinboard #178, #228).
  *
  * Model 2 games keep their textures compressed in ROM and unpack them into
  * texture RAM on every scene change: the i960 decodes a Huffman page into a
@@ -11,486 +11,492 @@
  * work to do faster.
  *
  * The routines are Sega library code (STF's labels come from the Fighting
- * Vipers source), so this is written against a table of addresses rather than
- * against one game:
+ * Vipers source):
  *
  *   unpack_lod_data         Huffman page -> halfword + nibble streams
  *   send_lod_data           halfword stream -> texture RAM, runs expanded
- *   send_lod_data_q         nibble stream -> every mip level
+ *   send_lod_data_q_sub_*   nibble stream -> the next mip level
  *   send_beta_data          an uncompressed page -> every level
  *
- * Each one is replaced whole, at its entry, and does exactly the stores the
- * i960 would: texture RAM, the page header words, the code tree, the 8-bit
- * decode table (with the handler addresses the i960 would jump through), both
- * output streams, the animation ring. Ported from the i960 code itself, not
- * from the explorer's JavaScript (vendor/noclip/js/texture.js), which is the
- * same algorithm for every byte that reaches texture RAM but not for every
- * intermediate: a run of 256 packs its count differently.
+ * ---- One row at a time, and the board cannot tell -------------------------
  *
- * What is NOT the same is time. On the board the three copy routines give up
- * the CPU when the frame's budget runs out (check_timer_4_result arms timer 4;
- * its interrupt sets a flag they test once a row) and carry on next frame,
- * which is why a VS screen's load is spread over fifteen frames. Here a page is
- * done in one go, and timer 4 is never armed. The texture RAM a load leaves is
- * identical; the frame on which it is complete comes sooner. That changes what
- * the i960 executes, so both boards of a netplay session must agree on it.
+ * Each routine spends its time in a loop over rows, and between rows it looks
+ * at a flag that timer 4 raises when the frame's budget is spent, and gives the
+ * CPU back. What the CPU does next depends on that: the frame ends sooner or
+ * later, the game's rand() moves with the timers, and the CPU fighter decides
+ * differently. So the loader cannot just be run faster; the board has to see
+ * exactly what it would have seen.
  *
- * A routine is left to the i960 when it is resuming a page it gave up on (the
- * hook was switched on mid-load), when the board is in its RAM self-test
- * (RAMBASE_START), or when the game's jump table is not the one the addresses
- * describe.
+ * A hook sits on the first instruction of each row's body and does that row
+ * instruction for instruction. It ports the i960's own code: every register it
+ * touches (temporaries included), the condition code, every store in order and
+ * the address it was made from. It counts the instructions and their cycles from
+ * the ROM's own words, and the run loop charges them as the i960's (g_hle_extra
+ * in hle_hooks.h), so the slice ends on the same instruction and the live timers
+ * see the same clock. The i960 runs everything else: the preamble,
+ * check_timer_4_result, the flag test between rows, the yield and the resume.
+ *
+ * A row is left to the i960, which is always exact, when:
+ *   - the slice has fewer instructions left than the row needs (g_hle_room),
+ *     so the slice still ends part-way through it;
+ *   - the live timers would reach their next event inside it, or an interrupt
+ *     is already pending: on the board it would be taken mid-row;
+ *   - a data watchpoint is armed, or the debugger steps;
+ *   - the code is not the code this was written from (an FNV over it), or a
+ *     decode table names a handler that is not one of the five here.
+ * A row runs into a store log first and is committed only once it is known to
+ * fit, so a row declined after a dry run leaves nothing behind. Within a row no
+ * read sees one of the row's own stores (the tables, the streams and texture
+ * RAM are apart, and the mip filter writes behind where it reads), which is
+ * what makes the log exact.
+ *
+ * `--texload-i960` turns it off, and det_digest --cpu holds the two against
+ * each other frame by frame: registers, cycles and texture RAM.
  */
 #ifndef M2_TEXLOAD_H
 #define M2_TEXLOAD_H
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "i960.h"
 #include "memory.h"
 #include "log.h"
 #include "hle_hooks.h"
+#include "i960_exec.h"
+#include "irq_timer.h"
+#include "attention.h"
+#include "watchpoint.h"
 
 /* On unless the command line or a frontend option says otherwise. */
 static int g_texload_hle = 1;
 
-/* Pages done in C since start-up, for get_status and the log. */
-static uint64_t g_texload_pages;
+/* Rows done in C since start-up, for get_status. */
+static uint64_t g_texload_rows;
 
 typedef struct {
-    /* Entries of the four routines. */
-    uint32_t unpack, send_beta, send_lod, send_lod_q;
-    /* The four handlers the decode loop jumps to by tag (NUM_0_TO_7_LONGS
-     * entries 8..13): tag 8 literal, 9 indexed literal, 0xA inline literal,
-     * 0xB run, 0xC/0xD plain payload. */
-    uint32_t h_lit, h_idx, h_inline, h_run, h_plain;
+    /* The code the hooks stand in for: FNV-1a over its words [code_lo, code_hi).
+     * The ports below are written at STF's addresses; the same code elsewhere
+     * is relocated by code_lo - 0x4B3FC. */
+    uint32_t code_lo, code_hi, code_fnv;
+    /* Absolute addresses the code reads. */
     uint32_t handler_table;   /* NUM_0_TO_7_LONGS */
     uint32_t solid;           /* shader_fil_test: i * 0x1111 */
-    uint32_t literals;        /* the ROM's 256-entry literal table */
-    /* The code the hooks stand in for: FNV-1a over its words [code_lo, code_hi).
-     * A patched program that keeps the game's profile but moves a routine is
-     * left alone rather than having its code replaced by the wrong thing. */
-    uint32_t code_lo, code_hi, code_fnv;
-    /* RAM. */
-    uint32_t rambase_start;   /* nonzero during the RAM self-test */
-    uint32_t yield;           /* dword_550080: a routine is part-way through */
-    uint32_t yield_q;         /* dword_5500F4: send_lod_data_q_sub_* is */
-    uint32_t flags;           /* dword_55C2F4: the page's request flags */
-    uint32_t mip;             /* mip_pyramid_tex0: each level's texram address */
-    uint32_t hdr;             /* word_55C320: W, H, W*H, nodes, nsym, bits, len, nidx, ibits, escape */
-    uint32_t tree;            /* off_55C344 */
-    uint32_t indexed;         /* dword_55CD50 */
-    uint32_t fast;            /* dword_545000: 256 x (value, handler) */
-    uint32_t halfwords;       /* dword_5502F0 */
-    uint32_t nib;             /* byte_55C2EC: the nibble stream's top word */
-    uint32_t ring;            /* dword_5D0000: the animation ring's pointer */
+    uint32_t height;          /* word_55C322: the page's H */
+    uint32_t indexed;         /* dword_55CD50: the indexed literals */
 } m2_texload_t;
 
 /* Sonic The Fighters (both profiles). */
 static const m2_texload_t M2_TEXLOAD_STF = {
-    .unpack = 0x0004B3FC, .send_beta = 0x0004BC70, .send_lod = 0x0004BE40, .send_lod_q = 0x0004BFF0,
-    .h_lit = 0x0004BA5C, .h_idx = 0x0004BA2C, .h_inline = 0x0004BB30, .h_run = 0x0004BAE8,
-    .h_plain = 0x0004BA70, .handler_table = 0x0004A2EC, .solid = 0x0004A324,
-    .literals = 0x02300010,
     .code_lo = 0x0004B3FC, .code_hi = 0x0004C3D0, .code_fnv = 0x999E2680,
-    .rambase_start = 0x00500000, .yield = 0x00550080, .yield_q = 0x005500F4,
-    .flags = 0x0055C2F4, .mip = 0x0055C2F8, .hdr = 0x0055C320, .tree = 0x0055C344,
-    .indexed = 0x0055CD50, .fast = 0x00545000, .halfwords = 0x005502F0,
-    .nib = 0x0055C2EC, .ring = 0x005D0000,
+    .handler_table = 0x0004A2EC, .solid = 0x0004A324,
+    .height = 0x0055C322, .indexed = 0x0055CD50,
 };
 
-/* Header words, as offsets from hdr. */
-#define TL_W      0x00   /* 16-bit */
-#define TL_H      0x02   /* 16-bit */
-#define TL_WH     0x04
-#define TL_NODES  0x08
-#define TL_NSYM   0x0C
-#define TL_BITS   0x10
-#define TL_LEN    0x14
-#define TL_NIDX   0x18
-#define TL_IBITS  0x1C
-#define TL_ESCAPE 0x20
-
-#define tl_r8(a)      mem_read8(bus, (a))
-#define tl_r16(a)     mem_read16(bus, (a))
-#define tl_r32(a)     mem_read32(bus, (a))
-#define tl_w8(a, v)   mem_write8(bus, (a), (v))
-#define tl_w16(a, v)  mem_write16(bus, (a), (v))
-#define tl_w32(a, v)  mem_write32(bus, (a), (v))
+#define TL_BASE   0x0004B3FCu
+#define TL_WORDS  ((0x0004C3D0u - TL_BASE) / 4u)
 
 /* Whether the program's code is the one described: -1 until the first hook
  * after an install works it out (m2_texload_forget, from the profile's
- * install_fn, which every ROM load runs). */
+ * install_fn, which every ROM load runs). With it, each word's cycle cost. */
 static int s_tl_known = -1;
+static uint16_t s_tl_cost[TL_WORDS];
 
 static inline void m2_texload_forget(void) { s_tl_known = -1; }
 
 static inline bool tl_code_known(const m2_texload_t *t, memory_bus_t *bus) {
     if (s_tl_known < 0) {
         uint32_t h = 0x811C9DC5u;
-        for (uint32_t a = t->code_lo; a < t->code_hi; a += 4) { h ^= tl_r32(a); h *= 0x01000193u; }
-        s_tl_known = h == t->code_fnv;
-        if (!s_tl_known) LOG_INFO("texload: the program's texture loader is not the one known; the i960 runs it");
+        for (uint32_t a = t->code_lo; a < t->code_hi; a += 4) { h ^= mem_read32(bus, a); h *= 0x01000193u; }
+        s_tl_known = h == t->code_fnv && t->code_hi - t->code_lo == TL_WORDS * 4u;
+        if (s_tl_known) {
+            i960_cycle_table_init();
+            for (uint32_t k = 0; k < TL_WORDS; k++)
+                s_tl_cost[k] = (uint16_t)i960_cycle_cost(mem_read32(bus, t->code_lo + k * 4u));
+        } else {
+            LOG_INFO("texload: the program's texture loader is not the one known; the i960 runs it");
+        }
     }
     return s_tl_known == 1;
 }
 
-/* A routine the i960 has to run itself: resuming, self-test, other code. */
-static inline bool tl_leave_to_i960(const m2_texload_t *t, memory_bus_t *bus) {
-    return !g_texload_hle || tl_r32(t->yield) != 0 || tl_r32(t->yield_q) != 0
-        || tl_r8(t->rambase_start) != 0 || !tl_code_known(t, bus);
-}
+/* ---- A row's run ----------------------------------------------------------- */
 
-/* ---- The bit reader (unpack_lod_data's r13/r14/g11/r15) -------------------
- * LSB first, refilled 16 bits at a time from little-endian halfwords whenever
- * the count is 16 or less, the next halfword already fetched. */
+#define TL_LOG_MAX 4096
+
 typedef struct {
-    uint32_t buf, cnt, next, p;
-} tl_bits_t;
+    uint32_t g[16], r[16];
+    uint32_t cc;
+    uint32_t n, room;      /* instructions run, and the most allowed */
+    uint64_t cyc;
+    uint32_t ip;           /* the last instruction run (STF address) */
+    uint32_t rel;          /* code_lo - TL_BASE */
+    uint32_t nlog;
+    struct { uint32_t ip, a, v, size; } log[TL_LOG_MAX];
+} tl_run_t;
 
-static inline void tl_refill(memory_bus_t *bus, tl_bits_t *b) {
-    if (b->cnt <= 16) {
-        b->buf |= b->next << b->cnt;
-        b->next = tl_r16(b->p);
-        b->p += 2;
-        b->cnt += 16;
-    }
-}
+static tl_run_t s_tl_run;
 
-/* shro by 32 or more is 0 on the i960; C leaves it undefined. */
+/* One instruction, at STF address a. A row that would outgrow the slice (or a
+ * runaway one) gives up, and the i960 runs it. */
+#define I(a) do { if (++x->n > x->room) return 0; \
+        x->cyc += s_tl_cost[((a) - TL_BASE) >> 2]; x->ip = (a); } while (0)
+
+#define G(k) x->g[k]
+#define R(k) x->r[k]
+#define RD16(a) mem_read16(bus, (a))
+#define RD32(a) mem_read32(bus, (a))
+#define ST(sz_, addr_, val_) do { if (x->nlog == TL_LOG_MAX) return 0; \
+        x->log[x->nlog].ip = x->ip; x->log[x->nlog].a = (addr_); x->log[x->nlog].v = (val_); \
+        x->log[x->nlog].size = (sz_); x->nlog++; } while (0)
+#define CMPO(a, b) (x->cc = i960_cmp_cc_o((a), (b)))
+#define CMPI(a, b) (x->cc = i960_cmp_cc_i((int32_t)(a), (int32_t)(b)))
+/* cmpdeco 1, v, v */
+#define CMPDECO1(v) do { x->cc = i960_cmp_cc_o(1u, (v)); (v) -= 1u; } while (0)
+#define BL  (x->cc & CC_L)
+#define BE  (x->cc & CC_E)
+#define BG  (x->cc & CC_G)
+#define BGE (x->cc & CC_GE)
+
 static inline uint32_t tl_shr(uint32_t v, uint32_t n) { return n >= 32 ? 0 : v >> n; }
+static inline uint32_t tl_shl(uint32_t v, uint32_t n) { return n >= 32 ? 0 : v << n; }
 
-static inline uint32_t tl_take(memory_bus_t *bus, tl_bits_t *b, uint32_t n) {
-    uint32_t v = n >= 32 ? b->buf : b->buf & ((1u << n) - 1u);
-    b->cnt -= n;
-    b->buf = tl_shr(b->buf, n);
-    tl_refill(bus, b);
-    return v;
-}
+/* subo n, r14 / cmpo r14, 16 / shro n, r13 / bg, then the refill of 16 bits
+ * from (r15) when the count is down to 16. `at` is the subo's address. */
+#define TL_DROP(at, nbits) do { \
+        uint32_t nb_ = (nbits); \
+        I(at);      R(14) -= nb_; \
+        I(at + 4);  CMPO(R(14), 0x10u); \
+        I(at + 8);  R(13) = tl_shr(R(13), nb_); \
+        I(at + 12); if (!BG) { \
+            I(at + 16); G(0) = tl_shl(G(11), R(14)); \
+            I(at + 20); G(11) = RD16(R(15)); \
+            I(at + 24); R(15) += 2; \
+            I(at + 28); R(13) |= G(0); \
+            I(at + 32); R(14) += 0x10; \
+        } } while (0)
 
-/* ---- make_huf_8bit --------------------------------------------------------
- * The 8-bit decode table: for every next byte of the stream, either the leaf it
- * starts with (its value ORed with the code length in bits 24..27, then the
- * handler the decode loop jumps to) or, for a code longer than 8 bits, the
- * address of the tree node to walk on from. Tree entries are addresses for a
- * branch and negative for a leaf; a node's 0-child sits right after it. */
-static void tl_make_huf(const m2_texload_t *t, memory_bus_t *bus, uint32_t depth, uint32_t node, uint32_t code) {
-    if (depth == 8) { tl_w32(t->fast + code * 8u, node); return; }
-    uint32_t len = depth + 1;
-    for (int side = 0; side < 2; side++) {
-        uint32_t child = side == 0 ? node + 4u : tl_r32(node);
-        uint32_t c = side == 0 ? code : code | (1u << depth);
-        uint32_t v = tl_r32(child);
-        if ((int32_t)v < 0) {
-            uint32_t e = v | (len << 24);
-            uint32_t h = tl_r32(t->handler_table + (e >> 28) * 4u);
-            for (uint32_t i = c; i < 0x100u; i += 1u << len) {
-                tl_w32(t->fast + i * 8u, e);
-                tl_w32(t->fast + i * 8u + 4u, h);
-            }
-        } else {
-            tl_make_huf(t, bus, len, child, c);
-        }
-    }
-}
+/* shlo 24 / shro 24 / ldl (r5)[g0*8], g4: the fast table's entry for the next
+ * byte of the bit buffer. */
+#define TL_PEEK(at) do { \
+        I(at);     G(0) = R(13) << 24; \
+        I(at + 4); G(0) >>= 24; \
+        I(at + 8); G(4) = RD32(R(5) + G(0) * 8u); G(5) = RD32(R(5) + G(0) * 8u + 4u); \
+    } while (0)
 
-/* ---- unpack_lod_data ------------------------------------------------------ */
-static inline int m2_texload_unpack(const m2_texload_t *t, i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (tl_leave_to_i960(t, bus)) return 1;
-    /* The jump table has to be the one the handlers below stand for. */
-    const uint32_t want[6] = { t->h_lit, t->h_idx, t->h_inline, t->h_run, t->h_plain, t->h_plain };
-    for (int k = 0; k < 6; k++)
-        if (tl_r32(t->handler_table + (8u + (uint32_t)k) * 4u) != want[k]) return 1;
-
-    tl_bits_t b = { 0, 0, 0, cpu->globals.g[3] };
-    b.next = tl_r16(b.p); b.p += 2;
-    tl_refill(bus, &b);
-    tl_refill(bus, &b);
-
-    uint32_t w = (tl_take(bus, &b, 8) + 1u) >> 1;
-    tl_w16(t->hdr + TL_W, w);
-    uint32_t h = (tl_take(bus, &b, 8) + 1u) >> 1;
-    tl_w16(t->hdr + TL_H, h);
-    tl_w32(t->hdr + TL_WH, w * h);
-    uint32_t bits = tl_take(bus, &b, 8);   tl_w32(t->hdr + TL_BITS, bits);
-    uint32_t nsym = tl_take(bus, &b, 16);  tl_w32(t->hdr + TL_NSYM, nsym);
-    tl_w32(t->hdr + TL_LEN, tl_take(bus, &b, 16));
-    uint32_t nidx = tl_take(bus, &b, 16);  tl_w32(t->hdr + TL_NIDX, nidx);
-    uint32_t ibits = tl_take(bus, &b, 4);  tl_w32(t->hdr + TL_IBITS, ibits);
-    uint32_t escape = tl_take(bus, &b, 16); tl_w32(t->hdr + TL_ESCAPE, escape);
-
-    /* The code table. Symbols below 0x100 index the ROM's literal table, 0x100
-     * and 0x101 are the indexed and inline literals, 0x102..0x121 runs,
-     * 0x122..0x141 plain payloads, and 0x142 on a branch to node s - 0x142. */
-    uint32_t nodes = nsym * 2u - 1u;
-    /* The tree has to fit between off_55C344 and the indexed table; a page
-     * that says otherwise is left to the i960 (which rereads the same header,
-     * so the words written above come out the same). */
-    if (nsym == 0 || t->tree + nodes * 4u > t->indexed) return 1;
-    tl_w32(t->hdr + TL_NODES, nodes);
-    uint32_t mask = bits >= 32 ? 0xFFFFFFFFu : (1u << bits) - 1u;
-    uint32_t at = t->tree;
-    uint32_t n = nodes;
-    do {
-        uint32_t s = b.buf & mask;
-        b.cnt -= bits;
-        b.buf = tl_shr(b.buf, bits);
-        tl_refill(bus, &b);
-        uint32_t v;
-        if (s >= 0x142u) {
-            v = t->tree + (s - 0x142u) * 4u;
-        } else if (s >= 0x102u) {
-            bool plain = s >= 0x122u;
-            uint32_t k = s - (plain ? 0x122u : 0x102u) + 1u;
-            if (k >= 0x11u) k = (k - 0x10u) << 4;
-            v = (plain ? 0xD0000000u : 0xB0000000u) | k;
-        } else if (s < 0x100u) {
-            uint32_t e = tl_r32(t->literals + s * 4u);
-            v = (e & 0xFu) ? (0x80000000u | e) : (0xC0000000u | (e >> 8));
-        } else {
-            v = s == 0x100u ? 0x90000000u : 0xA0000000u;
-        }
-        tl_w32(at, v);
-        at += 4;
-    } while (n-- > 1u);
-
-    /* The indexed literals: 16-bit payload, 4-bit texel step. */
-    for (uint32_t i = 0; i < nidx; i++) {
-        uint32_t hi = tl_take(bus, &b, 16);
-        uint32_t lo = tl_take(bus, &b, 4);
-        tl_w32(t->indexed + i * 4u, (hi << 8) | lo);
-    }
-
-    tl_make_huf(t, bus, 0, t->tree, 0);
-
-    /* The two output streams. */
-    uint32_t out;
-    if (tl_r32(t->flags) & 2u) {             /* into the animation ring */
-        out = tl_r32(t->ring);
-        tl_w32(t->ring, out + 0x2004u);
-        tl_w32(out, escape);
-        out += 4;
-    } else {
-        out = t->halfwords;
-    }
-    uint32_t texel = 0, solid = 0;
-    uint32_t imask = ibits >= 32 ? 0xFFFFFFFFu : (1u << ibits) - 1u;
-    uint32_t odd = t->nib + 3u, even = t->nib + 2u;
-    uint32_t fv = tl_r32(t->fast + (b.buf & 0xFFu) * 8u);
-    uint32_t fh = tl_r32(t->fast + (b.buf & 0xFFu) * 8u + 4u);
-
-    /* A bad page must not hang the board: no real one comes near this. */
-    uint64_t guard = (uint64_t)(w ? w : 1) * (uint64_t)(h + 0x200u) * 2u + 0x10000u;
-
-    for (uint32_t row = w;;) {
-        uint32_t left = h;
-        for (;;) {
-            if (guard-- == 0) {
-                LOG_WARN("texload: page at 0x%08X ran past its size; stopped", cpu->globals.g[3]);
-                goto done;
-            }
-            uint32_t v = fv, handler = fh;
-            if ((int32_t)v >= 0) {
-                /* A code longer than 8 bits: walk the tree, one bit a node. */
-                uint32_t node = v, bit = 8;
-                for (;;) {
-                    v = tl_r32(node);
-                    bool one = (b.buf >> (bit & 31u)) & 1u;
-                    bit++;
-                    if (one) node = v; else node += 4;
-                    if ((int32_t)v < 0) break;
+/* ---- unpack_lod_data: one row of the decode (0x4B9B4 .. 0x4BAE0) ----------
+ * r13/r14 the bit buffer and its count, g11 the next halfword, r15 the source;
+ * g4/g5 the fast table's entry for the next byte; r8 the texel, r7 its solid
+ * colour; r10/r9 the two nibble rows, r11 the halfword stream, g10 the escape,
+ * r6/r12 the index width and mask; g13 counts the row, g14 the rows. */
+static uint32_t tl_row_unpack(const m2_texload_t *t, tl_run_t *x, memory_bus_t *bus) {
+    const uint32_t rel = x->rel;
+    I(0x4B9B4); G(13) = RD16(t->height);
+    I(0x4B9BC);
+    for (;;) {
+        /* A leaf in the first byte, or a walk down the tree. */
+        I(0x4BA98); CMPI(G(4), 0);
+        I(0x4BA9C); G(2) = G(4) >> 24;
+        I(0x4BAA0);
+        uint32_t handler;
+        if (BGE) {
+            I(0x4B9C0); G(3) = G(4);
+            I(0x4B9C4); R(4) = 8;
+            for (;;) {
+                I(0x4B9C8); G(4) = RD32(G(3));
+                I(0x4B9CC); x->cc = (R(13) >> (R(4) & 31u)) & 1u ? CC_E : CC_NO;
+                I(0x4B9D0); R(4) += 1;
+                I(0x4B9D4);
+                if (BE) {
+                    I(0x4B9E8); CMPI(G(4), 0);
+                    I(0x4B9EC); G(3) = G(4);
+                    I(0x4B9F0); if (BGE) continue;
+                } else {
+                    I(0x4B9D8); CMPI(G(4), 0);
+                    I(0x4B9DC); G(3) += 4;
+                    I(0x4B9E0); if (BGE) continue;
+                    I(0x4B9E4);
                 }
-                bit -= 1;
-                handler = tl_r32(t->handler_table + (v >> 28) * 4u);
-                b.cnt -= bit; b.buf = tl_shr(b.buf, bit); tl_refill(bus, &b);
-            } else {
-                uint32_t len = (v >> 24) & 0xFu;
-                b.cnt -= len; b.buf = tl_shr(b.buf, len); tl_refill(bus, &b);
+                break;
             }
-
-            bool last;
-            if (handler == t->h_run) {
-                tl_w16(out, escape); out += 2;
-                uint32_t cnt = v & 0xFFu;
-                left -= cnt;
-                uint32_t k = cnt;
-                do { tl_w8(odd, texel); odd -= 2; } while (k-- > 1u);
-                tl_w16(out, (solid << 8) | v); out += 2;
-                last = left == 0;
-            } else if (handler == t->h_inline) {
-                uint32_t payload = tl_take(bus, &b, 16);
-                uint32_t step = tl_take(bus, &b, 4);
-                texel = (texel + step) & 0xFu;
-                solid = tl_r16(t->solid + texel * 2u);
-                last = left == 1u; left--;
-                tl_w8(odd, texel); odd -= 2;
-                tl_w16(out, payload + solid); out += 2;
-            } else {
-                if (handler == t->h_idx) {
-                    uint32_t i = b.buf & imask;
-                    b.cnt -= ibits; b.buf = tl_shr(b.buf, ibits); tl_refill(bus, &b);
-                    v = tl_r32(t->indexed + i * 4u);
-                }
-                if (handler == t->h_idx || handler == t->h_lit) {
-                    texel = (texel + v) & 0xFu;
-                    solid = tl_r16(t->solid + texel * 2u);
-                    v >>= 8;
-                } else if (handler != t->h_plain) {
-                    LOG_WARN("texload: unknown decode handler 0x%08X; page left part-done", handler);
-                    goto done;
-                }
-                tl_w8(odd, texel); odd -= 2;
-                tl_w16(out, v + solid); out += 2;
-                last = left == 1u; left--;
-            }
-            fv = tl_r32(t->fast + (b.buf & 0xFFu) * 8u);
-            fh = tl_r32(t->fast + (b.buf & 0xFFu) * 8u + 4u);
-            if (last) break;
-        }
-        uint32_t sw = odd; odd = even; even = sw;
-        if (row-- <= 1u) break;
-    }
-done:
-    g_texload_pages++;
-    hle_ret(cpu);
-    return 0;
-}
-
-/* ---- send_lod_data --------------------------------------------------------
- * The halfword stream into the full-size level, one row pair (0x400 bytes of
- * texture RAM) per W; a halfword equal to the escape is followed by one whose
- * high byte is the repeated texel pair and whose low byte is the count. */
-static inline int m2_texload_send_lod(const m2_texload_t *t, i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (tl_leave_to_i960(t, bus)) return 1;
-    uint32_t flags = tl_r32(t->flags);
-    if (!(flags & 2u)) {
-        uint32_t escape = tl_r32(t->hdr + TL_ESCAPE);
-        uint32_t dst = tl_r32(t->mip);
-        uint32_t src;
-        if (flags & 4u) {
-            src = tl_r32(t->ring);
-            tl_w32(t->ring, src + 0x2004u);
-            escape = tl_r32(src);
-            src += 4;
+            I(0x4B9F4); G(0) = G(4) >> 28;
+            I(0x4B9F8); R(4) -= 1;
+            I(0x4B9FC); G(3) = RD32(t->handler_table + G(0) * 4u);
+            TL_DROP(0x4BA04, R(4));
+            I(0x4BA28); handler = G(3);
         } else {
-            src = t->halfwords;
+            I(0x4BAA4); G(2) &= 0xF;
+            TL_DROP(0x4BAA8, G(2));
+            I(0x4BACC); handler = G(5);
         }
-        uint32_t hw = tl_r16(src); src += 2;
-        uint32_t rows = tl_r16(t->hdr + TL_W), h = tl_r16(t->hdr + TL_H);
-        do {
-            uint32_t o = dst;
-            dst += 0x400;
-            int32_t left = (int32_t)h;
+
+        switch (handler - rel) {
+        case 0x4BA2C:            /* tag 9: indexed literal */
+            I(0x4BA2C); G(4) = R(13) & R(12);
+            TL_DROP(0x4BA30, R(6));
+            I(0x4BA54); G(4) = RD32(t->indexed + G(4) * 4u);
+            /* fall through */
+        case 0x4BA5C:            /* tag 8: literal */
+            I(0x4BA5C); R(8) = G(4) + R(8);
+            I(0x4BA60); R(8) &= 0xF;
+            I(0x4BA64); R(7) = RD16(t->solid + R(8) * 2u);
+            I(0x4BA6C); G(4) >>= 8;
+            /* fall through */
+        case 0x4BA70:            /* tags C, D: payload on the current colour */
+            I(0x4BA70); ST(1, R(10), R(8));
+            I(0x4BA74); R(10) -= 2;
+            I(0x4BA78); G(4) = R(7) + G(4);
+            I(0x4BA7C); ST(2, R(11), G(4));
+            I(0x4BA80); R(11) += 2;
+            TL_PEEK(0x4BA84);
+            I(0x4BA90); CMPDECO1(G(13));
+            break;
+        case 0x4BAE8:            /* tag B: a run of the current texel */
+            I(0x4BAE8); ST(2, R(11), G(10));
+            I(0x4BAEC); R(11) += 2;
+            I(0x4BAF0); G(1) = G(4) << 24;
+            I(0x4BAF4); G(1) >>= 24;
+            I(0x4BAF8); G(13) -= G(1);
             do {
-                left--;
-                if (hw == escape) {
-                    uint32_t packed = tl_r16(src); src += 2;
-                    left++;
-                    uint32_t hi = packed >> 8, value = hi | (hi << 8);
-                    uint32_t cnt = packed ^ (hi << 8);
-                    left -= (int32_t)cnt;
-                    do { tl_w16(o, value); o += 2; } while (cnt-- > 1u);
-                } else {
-                    tl_w16(o, hw); o += 2;
-                }
-                hw = tl_r16(src); src += 2;
-            } while (left > 0);
-        } while (rows-- > 1u);
-    }
-    g_texload_pages++;
-    hle_ret(cpu);
-    return 0;
-}
-
-/* ---- send_lod_data_q ------------------------------------------------------
- * Every smaller level from the nibble stream: four nibbles arrive as one word,
- * packed together they are this level's halfword and their average is the next
- * level's nibble, written back into the stream in place. The i960 keeps the
- * last word and its two results, so a run of equal words costs one sum; the
- * results are the same either way, but the first word compared against is -1
- * and the "results" before it are the frame's zeroed locals. */
-static inline int m2_texload_send_lod_q(const m2_texload_t *t, i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (tl_leave_to_i960(t, bus)) return 1;
-    bool anim = tl_r32(t->flags) & 2u;
-    uint32_t w = tl_r16(t->hdr + TL_W), h = tl_r16(t->hdr + TL_H);
-    uint32_t level_at = t->mip;
-    uint32_t ring = anim ? tl_r32(t->ring) : 0;
-    for (;;) {
-        w >>= 1; h >>= 1;
-        if (anim ? w * h == 0 : (w == 0 || h == 0)) break;
-        uint32_t dst = 0;
-        if (!anim) { level_at += 4; dst = tl_r32(level_at); }
-        uint32_t last = 0xFFFFFFFFu, half = 0, nib = 0;
-        uint32_t rd = t->nib, odd = t->nib + 3u, even = t->nib + 2u;
-        uint32_t word = tl_r32(rd);
-        for (uint32_t r = w;;) {
-            uint32_t o = dst;
-            dst += 0x400;
-            for (uint32_t c = h;;) {
-                rd -= 4;
-                if (word != last) {
-                    half = word | (word >> 12);
-                    last = word;
-                    uint32_t sum = (word >> 16) + word;
-                    word = tl_r32(rd);
-                    sum += sum >> 8;
-                    nib = (sum >> 2) & 0xFu;
-                } else {
-                    word = tl_r32(rd);
-                }
-                if (anim) { tl_w16(ring, half); ring += 2; }
-                else      { tl_w16(o, half);    o += 2;    }
-                tl_w8(odd, nib); odd -= 2;
-                if (c-- <= 1u) break;
-            }
-            uint32_t sw = odd; odd = even; even = sw;
-            if (r-- <= 1u) break;
+                I(0x4BAFC); ST(1, R(10), R(8));
+                I(0x4BB00); R(10) -= 2;
+                I(0x4BB04); CMPDECO1(G(1));
+                I(0x4BB08);
+            } while (BL);
+            I(0x4BB0C); G(2) = R(7) << 8;
+            I(0x4BB10); G(2) = G(4) | G(2);
+            I(0x4BB14); ST(2, R(11), G(2));
+            I(0x4BB18); R(11) += 2;
+            TL_PEEK(0x4BB1C);
+            I(0x4BB28); CMPO(0, G(13));
+            I(0x4BB2C);
+            break;
+        case 0x4BB30:            /* tag A: inline literal */
+            I(0x4BB30); G(2) = R(13) << 16;
+            I(0x4BB34); G(2) >>= 16;
+            TL_DROP(0x4BB38, 0x10u);
+            I(0x4BB5C); G(1) = R(13) & 0xF;
+            TL_DROP(0x4BB60, 4u);
+            TL_PEEK(0x4BB84);
+            I(0x4BB90); R(8) = G(1) + R(8);
+            I(0x4BB94); R(8) &= 0xF;
+            I(0x4BB98); R(7) = RD16(t->solid + R(8) * 2u);
+            I(0x4BBA0); CMPDECO1(G(13));
+            I(0x4BBA4); ST(1, R(10), R(8));
+            I(0x4BBA8); R(10) -= 2;
+            I(0x4BBAC); G(2) = R(7) + G(2);
+            I(0x4BBB0); ST(2, R(11), G(2));
+            I(0x4BBB4); R(11) += 2;
+            I(0x4BBB8);
+            break;
+        default:
+            return 0;            /* a handler this port does not know */
         }
+        I(0x4BA94);
+        if (BE) break;
     }
-    if (anim) tl_w32(t->ring, ring);
-    hle_ret(cpu);
-    return 0;
+    I(0x4BAD0); G(0) = R(9);
+    I(0x4BAD4); R(9) = R(10);
+    I(0x4BAD8); R(10) = G(0);
+    I(0x4BADC); CMPDECO1(G(14));
+    I(0x4BAE0);
+    return BL ? 0x4B974 : 0x4BAE4;
 }
 
-/* ---- send_beta_data --------------------------------------------------------
- * An uncompressed page: W+1, H+1, a header length, then every level's texels in
- * texture RAM order, sixteen bytes at a time (four words, low halves first). */
-static inline int m2_texload_send_beta(const m2_texload_t *t, i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (tl_leave_to_i960(t, bus)) return 1;
-    uint32_t p = cpu->globals.g[3];
-    uint32_t w = tl_r8(p) + 1u, h = tl_r8(p + 1) + 1u;
-    p += 2;
-    p += tl_r8(p);
-    if (p & 0xFu) return 1;   /* the i960 prints "Send Tex Align Error!!" */
-    uint32_t level_at = t->mip;
-    for (;;) {
-        uint32_t dst = tl_r32(level_at);
-        level_at += 4;
-        w >>= 1; h >>= 1;
-        if (w < 1 || h < 8) break;
-        for (uint32_t r = w;;) {
-            uint32_t o = dst;
-            dst += 0x400;
-            for (uint32_t g = h >> 3;;) {
-                uint32_t q[4] = { tl_r32(p), tl_r32(p + 4), tl_r32(p + 8), tl_r32(p + 12) };
-                p += 16;
-                for (int k = 0; k < 4; k++) { tl_w16(o, q[k]);       o += 2; }
-                for (int k = 0; k < 4; k++) { tl_w16(o, q[k] >> 16); o += 2; }
-                if (g-- <= 1u) break;
-            }
-            if (r-- <= 1u) break;
+/* ---- send_beta_data: one row (0x4BD30 .. 0x4BD98) --------------------------
+ * Sixteen bytes at a time from (r15) to (r10), the low halves first. */
+static uint32_t tl_row_send_beta(const m2_texload_t *t, tl_run_t *x, memory_bus_t *bus) {
+    (void)t;
+    I(0x4BD30); R(10) = R(11);
+    I(0x4BD34); R(11) += 0x400;
+    I(0x4BD38); G(13) = R(13) >> 3;
+    do {
+        I(0x4BD3C); for (uint32_t k = 0; k < 4; k++) G(k) = RD32(R(15) + 4u * k);
+        I(0x4BD40); R(15) += 0x10;
+        uint32_t at = 0x4BD44;
+        for (int k = 0; k < 4; k++) {
+            I(at); ST(2, R(10), G(k)); at += 4;
+            I(at); R(10) += 2;         at += 4;
         }
-    }
-    g_texload_pages++;
-    hle_ret(cpu);
-    return 0;
+        for (int k = 0; k < 4; k++) { I(at); G(4 + k) = G(k) >> 16; at += 4; }
+        for (int k = 0; k < 4; k++) {
+            I(at); ST(2, R(10), G(4 + k)); at += 4;
+            I(at); R(10) += 2;             at += 4;
+        }
+        I(0x4BD94); CMPDECO1(G(13));
+        I(0x4BD98);
+    } while (BL);
+    return 0x4BD9C;
 }
 
-#undef tl_r8
-#undef tl_r16
-#undef tl_r32
-#undef tl_w8
-#undef tl_w16
-#undef tl_w32
+/* ---- send_lod_data: one row (0x4BF64 .. 0x4BFE8) ---------------------------
+ * The halfword stream (r9, the next halfword in g2) into texture RAM at r10; a
+ * halfword equal to the escape (r8) is followed by the run's pair and count. */
+static uint32_t tl_row_send_lod(const m2_texload_t *t, tl_run_t *x, memory_bus_t *bus) {
+    I(0x4BF64); R(10) = R(11);
+    I(0x4BF68); R(11) += 0x400;
+    I(0x4BF6C); R(13) = RD16(t->height);
+    uint32_t end;
+    for (;;) {
+        I(0x4BF74); CMPO(R(8), G(2));
+        I(0x4BF78); R(13) -= 1;
+        I(0x4BF7C);
+        if (!BE) {
+            I(0x4BF80); ST(2, R(10), G(2));
+            I(0x4BF84); R(10) += 2;
+            I(0x4BF88); G(2) = RD16(R(9));
+            I(0x4BF8C); CMPI(0, R(13));
+            I(0x4BF90); R(9) += 2;
+            I(0x4BF94); if (BL) continue;
+            end = 0x4BF98;
+            break;
+        }
+        I(0x4BFA4); G(1) = RD16(R(9));
+        I(0x4BFA8); R(9) += 2;
+        I(0x4BFAC); R(13) += 1;
+        I(0x4BFB0); G(2) = G(1) >> 8;
+        I(0x4BFB4); G(4) = G(2) << 8;
+        I(0x4BFB8); G(2) |= G(4);
+        I(0x4BFBC); G(3) = G(1) ^ G(4);
+        I(0x4BFC0); R(13) -= G(3);
+        do {
+            I(0x4BFC4); ST(2, R(10), G(2));
+            I(0x4BFC8); R(10) += 2;
+            I(0x4BFCC); CMPDECO1(G(3));
+            I(0x4BFD0);
+        } while (BL);
+        I(0x4BFD4); G(2) = RD16(R(9));
+        I(0x4BFD8); CMPI(0, R(13));
+        I(0x4BFDC); R(9) += 2;
+        I(0x4BFE0); if (BL) continue;
+        end = 0x4BFE4;
+        break;
+    }
+    I(end);     CMPDECO1(R(12));
+    I(end + 4);
+    return BL ? 0x4BF14 : end + 8;
+}
+
+/* ---- send_lod_data_q_sub_norm / _anim: one row -----------------------------
+ * Four nibbles a word from (r9) downwards (the last word in g8, its packed
+ * halfword in r6 and its average in r5): the halfword to texture RAM at r10
+ * (norm) or the ring at g11 (anim), the average back into the stream at r3. */
+static uint32_t tl_row_send_q(tl_run_t *x, memory_bus_t *bus, bool anim) {
+    const uint32_t d = anim ? 0x134u : 0;   /* _anim is _norm moved down */
+    if (anim) {
+        I(0x4C334); R(13) = G(13);
+    } else {
+        I(0x4C1F8); R(10) = G(11);
+        I(0x4C1FC); G(11) = G(10) + G(11);
+        I(0x4C200); R(13) = G(13);
+    }
+    uint32_t *out = anim ? &G(11) : &R(10);
+    uint32_t end;
+    for (;;) {
+        I(0x4C204 + d); CMPO(R(8), G(8));
+        I(0x4C208 + d); R(9) -= 4;
+        I(0x4C20C + d);
+        if (!BE) {
+            I(0x4C210 + d); G(2) = R(8) >> 12;
+            I(0x4C214 + d); R(6) = R(8) | G(2);
+            I(0x4C218 + d); ST(2, *out, R(6));
+            I(0x4C21C + d); *out += 2;
+            I(0x4C220 + d); G(8) = R(8);
+            I(0x4C224 + d); G(2) = R(8) >> 16;
+            I(0x4C228 + d); G(2) = R(8) + G(2);
+            I(0x4C22C + d); R(8) = RD32(R(9));
+            I(0x4C230 + d); G(3) = G(2) >> 8;
+            I(0x4C234 + d); G(2) = G(2) + G(3);
+            I(0x4C238 + d); G(2) >>= 2;
+            I(0x4C23C + d); R(5) = G(2) & 0xF;
+            I(0x4C240 + d); ST(1, R(3), R(5));
+            I(0x4C244 + d); R(3) -= 2;
+            I(0x4C248 + d); CMPDECO1(R(13));
+            I(0x4C24C + d); if (BL) continue;
+            end = 0x4C250 + d;
+        } else {
+            I(0x4C268 + d); ST(2, *out, R(6));
+            I(0x4C26C + d); *out += 2;
+            I(0x4C270 + d); ST(1, R(3), R(5));
+            I(0x4C274 + d); R(3) -= 2;
+            I(0x4C278 + d); R(8) = RD32(R(9));
+            I(0x4C27C + d); CMPDECO1(R(13));
+            I(0x4C280 + d); if (BL) continue;
+            end = 0x4C284 + d;
+        }
+        break;
+    }
+    I(end);      G(0) = R(3);
+    I(end + 4);  R(3) = R(4);
+    I(end + 8);  R(4) = G(0);
+    I(end + 12); CMPDECO1(R(12));
+    I(end + 16);
+    return BL ? (anim ? 0x4C2E4 : 0x4C1A8) : end + 20;
+}
+static uint32_t tl_row_send_q_norm(const m2_texload_t *t, tl_run_t *x, memory_bus_t *bus) {
+    (void)t; return tl_row_send_q(x, bus, false);
+}
+static uint32_t tl_row_send_q_anim(const m2_texload_t *t, tl_run_t *x, memory_bus_t *bus) {
+    (void)t; return tl_row_send_q(x, bus, true);
+}
+
+#undef I
+#undef G
+#undef R
+#undef RD16
+#undef RD32
+#undef ST
+#undef CMPO
+#undef CMPI
+#undef CMPDECO1
+#undef BL
+#undef BE
+#undef BG
+#undef BGE
+#undef TL_DROP
+#undef TL_PEEK
+
+typedef uint32_t (*tl_row_fn)(const m2_texload_t *, tl_run_t *, memory_bus_t *);
+
+/* Run one row in C if the board cannot tell; 1 leaves it to the i960. */
+static inline int m2_texload_row(const m2_texload_t *t, i960_cpu_t *cpu, memory_bus_t *bus, tl_row_fn fn) {
+    if (!g_texload_hle || g_hle_room < 2 || g_wp.count != 0 || !tl_code_known(t, bus)) return 1;
+    const bool live = g_irqt_live != 0;
+    if (live && (g_irqt.intreq & g_irqt.intena & 0x03FCu)) return 1;
+
+    tl_run_t *x = &s_tl_run;
+    memcpy(x->g, cpu->globals.g, sizeof x->g);
+    memcpy(x->r, cpu->locals.r, sizeof x->r);
+    x->cc   = cpu->sfr.ac & AC_CC_MASK;
+    x->n    = 0;
+    x->room = g_hle_room;
+    x->cyc  = 0;
+    x->rel  = t->code_lo - TL_BASE;
+    x->nlog = 0;
+    uint32_t end = fn(t, x, bus);
+    if (!end) return 1;
+    /* The timers would come due inside the row, and on the board an interrupt
+     * could be taken there. */
+    if (live && g_irqt.pending + (int64_t)x->cyc >= g_irqt.horizon) return 1;
+
+    for (uint32_t k = 0; k < x->nlog; k++) {
+        uint32_t ip = x->log[k].ip + x->rel;
+        bus->cpu_ip = ip;
+        g_last_store_ip = ip;
+        if (x->log[k].size == 1) mem_write8(bus, x->log[k].a, x->log[k].v & 0xFFu);
+        else                     mem_write16(bus, x->log[k].a, x->log[k].v & 0xFFFFu);
+    }
+    bus->cpu_ip = x->ip + x->rel;
+    memcpy(cpu->globals.g, x->g, sizeof x->g);
+    memcpy(cpu->locals.r, x->r, sizeof x->r);
+    cpu->sfr.ac = (cpu->sfr.ac & ~(uint32_t)AC_CC_MASK) | x->cc;
+    cpu->sfr.ip = end + x->rel;
+    if (live) cpu->cycles += x->cyc;
+    g_hle_extra = x->n - 1u;
+    emu_attn_bump();
+    g_texload_rows++;
+    return 0;
+}
 
 #endif /* M2_TEXLOAD_H */

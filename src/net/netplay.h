@@ -157,11 +157,8 @@
  *    frame above it, the processor starts at MAME's reset PC, and modpc takes
  *    its mask from src2 (i960_exec.h), so the registers the frame check hashes
  *    and the stack differ from a board before it; the game does not.
- * 11: STF's texture loader runs in C (profiles/m2_texload.h): a load is done
- *    in one frame instead of fifteen, so the i960 runs different instructions
- *    through it, and timer 4 is never armed. Texture RAM is the same.
  */
-#define NETPLAY_PROTO_REV 11
+#define NETPLAY_PROTO_REV 10
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

@@ -482,19 +482,23 @@ static int sfight_hook_xplay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
  * the natural stage). match_replay's stage pin (g_replay_stage_pin). MAME's
  * side substitutes the value of those two stores with write taps, which leaves
  * memory the same at this instruction. */
-/* The texture loader in C (m2_texload.h, Pinboard #178): unpack_lod_data,
- * send_beta_data, send_lod_data and send_lod_data_q, each replaced whole. */
+/* The texture loader in C (m2_texload.h, Pinboard #178, #228): one row of
+ * unpack_lod_data, send_beta_data, send_lod_data and send_lod_data_q_sub_*
+ * at a time, exactly as the i960 does it. */
 static int sfight_hook_tex_unpack(i960_cpu_t *cpu, memory_bus_t *bus) {
-    return m2_texload_unpack(&M2_TEXLOAD_STF, cpu, bus);
+    return m2_texload_row(&M2_TEXLOAD_STF, cpu, bus, tl_row_unpack);
 }
 static int sfight_hook_tex_send_beta(i960_cpu_t *cpu, memory_bus_t *bus) {
-    return m2_texload_send_beta(&M2_TEXLOAD_STF, cpu, bus);
+    return m2_texload_row(&M2_TEXLOAD_STF, cpu, bus, tl_row_send_beta);
 }
 static int sfight_hook_tex_send_lod(i960_cpu_t *cpu, memory_bus_t *bus) {
-    return m2_texload_send_lod(&M2_TEXLOAD_STF, cpu, bus);
+    return m2_texload_row(&M2_TEXLOAD_STF, cpu, bus, tl_row_send_lod);
 }
-static int sfight_hook_tex_send_lod_q(i960_cpu_t *cpu, memory_bus_t *bus) {
-    return m2_texload_send_lod_q(&M2_TEXLOAD_STF, cpu, bus);
+static int sfight_hook_tex_q_norm(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return m2_texload_row(&M2_TEXLOAD_STF, cpu, bus, tl_row_send_q_norm);
+}
+static int sfight_hook_tex_q_anim(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return m2_texload_row(&M2_TEXLOAD_STF, cpu, bus, tl_row_send_q_anim);
 }
 
 static int sfight_hook_replay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -750,10 +754,11 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0000B0F8, sfight_hook_xplay_game_time,    "xplay_game_time"         }, \
     { 0x000096AC, sfight_hook_xplay_replay_timer, "xplay_replay_timer"      }, \
     { 0x0000941C, sfight_hook_replay_stage,       "replay_stage"            }, \
-    { 0x0004B3FC, sfight_hook_tex_unpack,         "unpack_lod_data"         }, \
-    { 0x0004BC70, sfight_hook_tex_send_beta,      "send_beta_data"          }, \
-    { 0x0004BE40, sfight_hook_tex_send_lod,       "send_lod_data"           }, \
-    { 0x0004BFF0, sfight_hook_tex_send_lod_q,     "send_lod_data_q"         },
+    { 0x0004B9B4, sfight_hook_tex_unpack,        "unpack_lod_data row"     }, \
+    { 0x0004BD30, sfight_hook_tex_send_beta,     "send_beta_data row"      }, \
+    { 0x0004BF64, sfight_hook_tex_send_lod,      "send_lod_data row"       }, \
+    { 0x0004C1F8, sfight_hook_tex_q_norm,        "send_lod_data_q_sub_norm row" }, \
+    { 0x0004C334, sfight_hook_tex_q_anim,        "send_lod_data_q_sub_anim row" },
 
 /* read_sw's copies of the pad: held 0x500700, momentary 0x500704; the
  * credits are at 0x59C388 (P1) and 0x59C38C (P2). */

@@ -152,7 +152,8 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
     if (board_vblank) {
         irqt_raise(0x1u);
         g_vblank_acked = 0;
-        cop_geo_frame_edge();
+        cop_geo_frame_edge();
+
     }
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);
@@ -255,7 +256,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint32_t frames = 3600, from = 0;
-    bool frames_given = false, sound_cols = false;
+    bool frames_given = false, sound_cols = false, cpu_cols = false;
     const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL;
     for (int i = 2; i < argc; i++) {
         if      (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = (uint32_t)strtoul(argv[++i], NULL, 10); frames_given = true; }
@@ -264,8 +265,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--script") && i + 1 < argc) script_text = argv[++i];
         else if (!strcmp(argv[i], "--out")    && i + 1 < argc) out_path = argv[++i];
         else if (!strcmp(argv[i], "--sound"))                   sound_cols = true;
+        else if (!strcmp(argv[i], "--cpu"))                     cpu_cols = true;
         else if (!strcmp(argv[i], "--no-sound-thread"))         g_sound_thread_want = 0;
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
+        else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
+        else if (!strcmp(argv[i], "--live-timers"))             g_irqt_live = 1;
         else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
@@ -367,6 +371,12 @@ int main(int argc, char **argv) {
         fprintf(out, "%u %08x %016llx %016llx %016llx %llu", (unsigned)g_emu_frames, check,
                 (unsigned long long)ram, (unsigned long long)buf, (unsigned long long)dm,
                 (unsigned long long)emu.total_steps);
+        if (cpu_cols) {
+            uint64_t tex  = fnv(fnv(FNV0, bus.texram0, TEXRAM0_SIZE), bus.texram1, TEXRAM1_SIZE);
+            uint64_t regs = fnv(fnv(fnv(FNV0, cpu.globals.g, sizeof cpu.globals.g), cpu.locals.r, sizeof cpu.locals.r), &cpu.sfr, sizeof cpu.sfr);
+            fprintf(out, " %016llx %016llx %llu", (unsigned long long)tex, (unsigned long long)regs,
+                    (unsigned long long)cpu.cycles);
+        }
         if (sound_cols) {
             sound_settle();
             fprintf(out, " %016llx %llu", (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
@@ -375,6 +385,7 @@ int main(int argc, char **argv) {
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);
+    fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,

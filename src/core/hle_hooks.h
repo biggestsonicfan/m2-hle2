@@ -262,14 +262,34 @@ static inline void hle_filter_sync(void) {
     s_hle_filter_profile = p;
 }
 
+/* A hook may stand in for a run of instructions rather than the one it sits
+ * on (m2_texload.h's rows), and then the board must not be able to tell: the
+ * run loop has to count every one of them, against the slice and in the
+ * frame's step total, and the live timers have to see their cycles.
+ *
+ * g_hle_room is how many instructions the slice has left, the hooked one
+ * included, set just before a hook runs. A hook that would need more declines
+ * (returns 1) and the i960 runs the code, so a slice still ends on the same
+ * instruction. Anything that steps one instruction at a time -- a debugger, a
+ * test -- passes 1, and sees the real instructions.
+ *
+ * A hook that did stand in for more sets g_hle_extra to the instructions
+ * beyond the first and bumps the attention word; the run loop's slow path adds
+ * them to its count. Cycles it adds to cpu->cycles itself, when the timers are
+ * live (i960_step_core charges none for a hooked instruction). */
+static uint32_t g_hle_room = 1;
+static uint32_t g_hle_extra = 0;
+
 /* Dispatch: walk the active profile's hook table and call the first match.
- * The filter must be in sync with g_active_profile (hle_filter_sync). */
-static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus) {
+ * The filter must be in sync with g_active_profile (hle_filter_sync). `room`
+ * is the slice's instructions left (g_hle_room). */
+static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t room) {
     const game_profile_t *p = g_active_profile;
     uint32_t ip = cpu->sfr.ip;
     uint32_t k = (ip >> 2) & 0xFFFFu;
     if (!(s_hle_filter[k >> 3] & (1u << (k & 7u))))
         return 1;
+    g_hle_room = room;
     const hle_hook_entry_t *h = p->hooks;
     size_t n = p->hook_count;
     for (size_t i = 0; i < n; i++) {
@@ -281,7 +301,7 @@ static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus) {
 
 static inline int hle_check(i960_cpu_t *cpu, memory_bus_t *bus) {
     hle_filter_sync();
-    return hle_check_synced(cpu, bus);
+    return hle_check_synced(cpu, bus, 1);
 }
 
 #endif /* HLE_HOOKS_H */

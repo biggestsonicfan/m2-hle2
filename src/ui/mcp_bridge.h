@@ -189,7 +189,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
-             "\"texload\":{\"hle\":%s,\"pages\":%llu},"
+             "\"texload\":{\"hle\":%s,\"rows\":%llu},"
              "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
@@ -198,7 +198,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
              g_match_replay_frame,
-             g_texload_hle ? "true" : "false", (unsigned long long)g_texload_pages,
+             g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
              av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 

@@ -275,9 +275,6 @@ static void netplay_reset_board_cb(void *ctx) {
     (void)ctx;
     if (!g_active_profile || !state.romset.loaded) return;
 
-    /* Every board of a session loads textures the same way; only --texload-i960
-     * could have made this one differ, and it is a local A/B switch. */
-    g_texload_hle = 1;
     g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
     irqt_reset();
 

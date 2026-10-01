@@ -648,10 +648,19 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             break;
         }
         PCPROF_TICK(cpu->sfr.ip);
-        if (M2_UNLIKELY(i960_step_core(cpu, bus, live) != 0)) break;
+        /* A hook may stand in for several instructions (g_hle_room); on the
+         * slow path, or with a breakpoint armed, it is offered only this one,
+         * so every check below still sees each instruction. */
+        if (M2_UNLIKELY(i960_step_core(cpu, bus, live,
+                                       (slow || bps) ? 1u : (uint32_t)(max_steps - i)) != 0)) break;
         steps++;
         if (M2_UNLIKELY(slow || g_emu_attn != attn)) {
             slow = true;
+            if (g_hle_extra) {          /* the hook's run, counted as the i960's */
+                i     += (int)g_hle_extra;
+                steps += g_hle_extra;
+                g_hle_extra = 0;
+            }
             if (profile) {
                 if (s_irq_in_service) emu_service_sound_again(ctx);
                 else if (g_irqt_sound_kick) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
