@@ -656,8 +656,9 @@ static inline void m68k_startup(m68k_state_t *s) {
 /* ================================================================ main step */
 
 /*
- * Execute one instruction.  Returns approximate cycle count (not cycle-
- * accurate; useful only for rough timing).  Returns 0 if halted.
+ * Execute one instruction.  Returns its clock count: Motorola's tables
+ * (m68k_timing.h) plus the run-dependent parts and the wait states, held to
+ * MAME's cycle-level 68000 (CLAUDE.md, "Sound board").  Returns 0 if halted.
  */
 /* ================================================================ fast forms
  *

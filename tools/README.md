@@ -103,7 +103,7 @@ its built-in `WebSocket`.
 | `grade-stage.mjs` | arena placement only, by running the explorer toolkit's own `stf-tools/verify-stage.mjs` unchanged on a `capture_dl` capture of a fight here. Needs a sibling `stf-tools` checkout (`$M2_STF_TOOLS` overrides) and skips cleanly without one. `grade-stages` is the fuller check |
 | `grade-stages.mjs` | every arena — its parts, its animations, its moving world, its texture scrolls — as this emulator runs them, against the explorer's stage builder. Plays a round on each of the fifteen stages, then checks four things off each capture: that every arena draw is an explorer part on one measured clock, that a moving stage's flight is the explorer's, that the coprocessor lays the firmware's matrices into the display list, and that texture points and luma bands step as the explorer steps them. See "Stages" below |
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
-| `grade-zsort.mjs` | which face wins where faces lie on faces (`geo3d_mesh_layers`), in pictures against MAME's. Plays the attract replay in MAME and here, here with the layers off and on, and counts, of the pixels the layers change, how many each puts nearer MAME. `--stage N` puts the replay on another stage in both. See "Faces lying on faces" below |
+| `grade-zsort.mjs` | which face wins where faces lie on faces (the board's sort key, `geo3d_flat_depth`), in pictures against MAME's. Plays the attract replay in MAME and here, here with a switch (`zflat`) off and on, and counts, of the pixels it changes, how many each puts nearer MAME. `--stage N` puts the replay on another stage in both. See "Faces lying on faces" below |
 | `grade-carpet.mjs` | the explorer's Flying Carpet rug against MAME's pictures, from the board's own camera: the plate `draw_sphynx_head` lays under the rug (3332) must cover none of it, because the board sorts it behind every strip. Reads `grade-zsort --mame --stage 1`'s snapshots and cameras, renders the explorer headless (puppeteer-core, Edge) at each, counts the rug pixels the plate changes, and holds the rug's pattern and the desert's sky to MAME's at the board's focal length and flight clock. See "The Flying Carpet's rug" below |
 | `grade-lunar-fox.mjs` | the Death Egg II cutscene (the Lunar Fox leaves Tails' lab), in pictures against MAME's. A cheat on both boards (`tools/mame/lunar-fox.lua` there) wins a 1P game up to Giant Wing; pictures pair by (part, `am_cntr`), and the Tails emblem on the lab doors must sit within `--tol` of MAME's. See "The Death Egg II cutscene" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
@@ -432,7 +432,8 @@ A depth buffer cannot tell two faces in one plane apart; the board's polygon sor
 can, a polygon at a time, and MAME's software renderer sorts the way the board
 does. So this grader holds pictures, not state. It plays the attract replay (above)
 in MAME with snapshots at replay frames `--from`..`--to` by `--step`, and here
-twice over the A/V stream at the board's 496x384, face layers off and then on.
+twice over the A/V stream at the board's 496x384, a `set_camera` switch off and
+then on (`zflat`, the board's sort key, by default).
 Pictures are paired by the edge count from the jump. The `frame_counter` both
 sides read there has to differ by one constant: MAME's is 640 ahead, the boot
 warning this emulator skips.
@@ -453,30 +454,38 @@ The replay is recorded for stage 1, so on another stage it drifts sooner.
   their camera, so a small difference adds the same noise to both.
 - **The measurement:** of the pixels where off and on differ, how many each
   puts nearer MAME's (largest channel difference, by more than `--tol`).
-- **Pictures:** the frame the layers change most is written as MAME | off | on |
-  changes, with the changes in green (nearer with the layers) and red (nearer
-  without), plus a crop of just the changes.
-- **Finding a model:** `--only-model N` (or `LO-HI`) layers only those models,
-  which is how a bad result is traced to one. The emulator reports which models
-  drew layered faces, and `--set k=v` passes more `set_camera` switches to the
-  play with the layers on.
-- **Other switches:** `--toggle NAME` A/Bs another `set_camera` switch in place
-  of the layers, which stay on in both plays. `--stage 0 --toggle texclamp`
-  grades the texture filter's clamp at a tile edge (issue #81) on South Island's
-  sky ring.
+- **Pictures:** the frame the switch changes most is written as MAME | off | on |
+  changes, with the changes in green (nearer with the switch) and red (nearer
+  without), plus a crop of just the changes. `--set k=v` passes more
+  `set_camera` switches to the play with it on.
+- **Other switches:** `--toggle NAME` A/Bs another `set_camera` switch.
+  `--stage 0 --toggle texclamp` grades the texture filter's clamp at a tile edge
+  (issue #81) on South Island's sky ring.
 
-What it found, on the way to the current rules (`CLAUDE.md`, "3D Polygon
-Decoder"): a straight port of the explorer's layers put 5,588 of 5,613 changed
-pixels further from MAME on Casino Night. Three departures fixed that:
-- the floor emblem's base face had stopped receding (model 194);
-- a glove's parallel faces had been pulled onto one plane (1813/1818);
-- the order comes from the board's sort under the real camera, not a vote.
-
-With all three, at 31 frames a stage:
+What it found: the explorer's depth buffer with a bounded recede needed seven
+patches to come near MAME (face layers and their planes, ties, same-matrix runs,
+held pairs, keep-depth, a standing list, the bound itself), each found here. The
+board's own key, drawn flat per face (`geo3d_flat_depth`, Pinboard #247), took
+all of them out. `--toggle zflat` against the half rule alone, at 31 frames a
+stage:
 
 ```
-stage 1  PASS  1469 pixels changed: 1465 nearer MAME with the layers, 3 nearer without
-stage 5  PASS  808 pixels changed: 788 nearer MAME with the layers, 18 nearer without
+stage  changed   nearer MAME with  without  neither
+    0     5862              5650      171       41
+    1     4734              4538      162       34
+    2     4895              4684      167       44
+    3     3222              3052      154       16
+    4    18791             18447      230      114
+    5    40156             39844      191      121
+    6     3897              3707      161       29
+    7    24868             21991      276     2601
+    8     7297              7090      164       43
+    9   167385            166578      289      518
+   10    24177             23772      197      208
+   11     3337              3153      158       26
+   12     3676              3484      163       29
+   13    19953             19740      172       41
+total   332250            325730     2655
 ```
 
 
@@ -554,7 +563,7 @@ is the grader over the bridge.
 ```sh
 node tools/grade-lunar-fox.mjs --mame [--char 0]   # MAME's snapshots (~10 min)
 node tools/grade-lunar-fox.mjs [--char 0]          # play it here and grade (~2 min)
-node tools/grade-lunar-fox.mjs --set zheld=0       # the same, with a set_camera key
+node tools/grade-lunar-fox.mjs --set zflat=0       # the same, with a set_camera key
 ```
 
 - **Pairing:** the fight takes a different number of frames on each board,
@@ -568,7 +577,8 @@ node tools/grade-lunar-fox.mjs --set zheld=0       # the same, with a set_camera
   model (3490, 3491) 0.032 in front of the door panel at depth ~113, where the
   depth buffer cannot tell them apart, and it fought the door in stripes:
   worst crop 8.51. With `geo3d_mesh_layers` ordering such pairs by the board's
-  sort (`zheld`), mean 0.78, worst 1.67. Past `am_cntr` 200 the camera looks
+  sort (`zheld`, since replaced by the board's flat key, `zflat`), mean 0.78,
+  worst 1.67. Past `am_cntr` 200 the camera looks
   down on the launch smoke, which differs by 17-36 and is not the emblem.
 
 ## Sway chains (osage) at character select

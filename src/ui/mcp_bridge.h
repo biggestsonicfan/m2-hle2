@@ -279,47 +279,26 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
      * co-planar decal wants. */
     if (mcp_json_get_str(req,"zsort",    v,sizeof v)) g_geo3d_zsort = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zrecede",  v,sizeof v)) g_geo3d_zsort_recede = (float)atof(v);
-    /* 0: the profile's standing models (geo3d_model_standing) recede like the rest. */
-    if (mcp_json_get_str(req,"zstanding",v,sizeof v)) g_geo3d_zsort_standing = (atoi(v) != 0);
-    /* 0: a far-corner face in front of one too deep to recede recedes anyway (geo3d_mesh_keep_depth). */
-    if (mcp_json_get_str(req,"zkeep",    v,sizeof v)) g_geo3d_zsort_keep = (atoi(v) != 0);
     /* Faces lying on faces (geo3d_mesh_layers): 0 draws them as before. */
     if (mcp_json_get_str(req,"zlayers",  v,sizeof v)) g_geo3d_layers = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zlayer_steps",v,sizeof v)) g_geo3d_layer_steps = (float)atof(v);
-    /* zlayer_model: N, or LO-HI, or -1 for every model */
-    if (mcp_json_get_str(req,"zlayer_model",v,sizeof v)) {
-        const char *dash = v[0] ? strchr(v + 1, '-') : NULL;
-        g_geo3d_layer_only = atoi(v);
-        g_geo3d_layer_only_hi = dash ? atoi(dash + 1) : g_geo3d_layer_only;
-    }
-    if (mcp_json_get_str(req,"zlayer_board",v,sizeof v)) g_geo3d_layer_board = (atoi(v) != 0);
-    if (mcp_json_get_str(req,"zlayer_plane",v,sizeof v)) g_geo3d_layer_plane = (atoi(v) != 0);
-    /* 0: faces of a mesh held further apart than one plane fight it out in the depth buffer. */
-    if (mcp_json_get_str(req,"zheld",   v,sizeof v)) g_geo3d_layer_held = (atoi(v) != 0);
+    /* 0: a game frame's faces take the half rule (zsort / zrecede) instead of
+     * the board's flat key (geo3d_flat_depth); the layers are the object viewer's. */
+    if (mcp_json_get_str(req,"zflat",   v,sizeof v)) g_geo3d_zflat = (atoi(v) != 0);
     /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
     if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
-    /* 0: a draw laid over the last with its matrix fights it for the faces they share (geo3d_tie_layer). */
-    if (mcp_json_get_str(req,"zties",   v,sizeof v)) g_geo3d_ties = (atoi(v) != 0);
-    /* 0: each draw's faces are ranked alone, not with the draws sharing its matrix (geo3d_run_get). */
-    if (mcp_json_get_str(req,"zruns",   v,sizeof v)) g_geo3d_runs = (atoi(v) != 0);
     /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
     if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
     if (mcp_json_get_str(req,"checker",v,sizeof v)) g_geo3d_checker_phase = (atoi(v) != 0);
     /* 0: a list in mode 2 or 3 is lit and culled with the ROM normals (geo3d_board_normal). */
     if (mcp_json_get_str(req,"nnormals",v,sizeof v)) g_geo3d_nn_normals = (atoi(v) != 0);
-    char models[GEO3D_LAYER_MODELS_MAX * 8] = "";
-    for (int i = 0, o = 0; i < g_geo3d_layer_model_count && o < (int)sizeof models - 8; i++)
-        o += snprintf(models + o, sizeof models - (size_t)o, "%s%d", i ? "," : "", g_geo3d_layer_models[i]);
-    g_geo3d_layer_model_count = 0;
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
-             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"layer_models\":[%s],\"zadjust\":\"0x%08X\","
-             "\"zties\":%d,\"tie_faces\":%llu}",
+             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zflat\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"zadjust\":\"0x%08X\"}",
              g_geo3d_state->cam_x,g_geo3d_state->cam_y,g_geo3d_state->cam_z,
              g_geo3d_state->rot_y,g_geo3d_state->rot_x,g_geo3d_state->fov_deg,
              g_geo3d_lines.count, g_geo3d_tris.count, g_geo3d_state->test_triangle ? 1 : 0,
-             g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces, models, g_geo3d_zadjust,
-             g_geo3d_ties, (unsigned long long)g_geo3d_tie_faces);
+             g_geo3d_zflat, g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces, g_geo3d_zadjust);
 }
 
 static void mcp_cmd_get_registers(char *resp, int cap) {
