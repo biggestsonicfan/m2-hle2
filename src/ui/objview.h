@@ -603,12 +603,7 @@ static inline void objview__draw(const objview_t *v, float yaw, float pitch,
     float aspect  = (g_objview.rt_h > 0) ? (float)g_objview.rt_w / (float)g_objview.rt_h : 1.0f;
     float fov_rad = (v->fov > 1.0f ? v->fov : 45.0f) * 3.14159265358979f / 180.0f;
     gm_mat4_perspective(proj, fov_rad, aspect, 0.1f, 5000.0f);
-    /* gm_mat4_view honours g_cam_rot_only, which the scene's eye-bake detector
-     * drives frame by frame — the viewer's own camera is never eye-baked. */
-    int saved_rot_only = g_cam_rot_only;
-    g_cam_rot_only = 0;
     gm_mat4_view(view, eye[0], eye[1], eye[2], rot_y, rot_x);
-    g_cam_rot_only = saved_rot_only;
     gm_mat4_mul(mvp, proj, view);
     gm_mat4_transpose(mvp_t, mvp);
 
