@@ -296,12 +296,15 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"zlayer_plane",v,sizeof v)) g_geo3d_layer_plane = (atoi(v) != 0);
     /* 0: faces of a mesh held further apart than one plane fight it out in the depth buffer. */
     if (mcp_json_get_str(req,"zheld",   v,sizeof v)) g_geo3d_layer_held = (atoi(v) != 0);
+    /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
+    if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
     /* 0: a draw laid over the last with its matrix fights it for the faces they share (geo3d_tie_layer). */
     if (mcp_json_get_str(req,"zties",   v,sizeof v)) g_geo3d_ties = (atoi(v) != 0);
     /* 0: each draw's faces are ranked alone, not with the draws sharing its matrix (geo3d_run_get). */
     if (mcp_json_get_str(req,"zruns",   v,sizeof v)) g_geo3d_runs = (atoi(v) != 0);
     /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
     if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
+    if (mcp_json_get_str(req,"checker",v,sizeof v)) g_geo3d_checker_phase = (atoi(v) != 0);
     /* 0: a list in mode 2 or 3 is lit and culled with the ROM normals (geo3d_board_normal). */
     if (mcp_json_get_str(req,"nnormals",v,sizeof v)) g_geo3d_nn_normals = (atoi(v) != 0);
     char models[GEO3D_LAYER_MODELS_MAX * 8] = "";
@@ -507,13 +510,24 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
     /* Same mutex as the read, for the same reason -- see mcp_cmd_read_memory.
      * A write also has to land as one piece: the i960 must not run between the
      * first byte and the last. */
+    /* "rom":1 patches what the CPU reads, program ROM included (a grader's
+     * cheat, e.g. pinning rand()); the bus's own write map leaves ROM alone. */
+    char rom_s[8] = {0};
+    const bool rom = mcp_json_get_str(req, "rom", rom_s, sizeof rom_s) && atoi(rom_s) != 0;
     int count = 0;
     int locked = g_mcp.emu && g_mcp.emu->thread_alive;
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     for (int i = 0; hexdata[i*2] && hexdata[i*2+1]; i++) {
         char byte_str[3] = { hexdata[i*2], hexdata[i*2+1], 0 };
         uint8_t b = (uint8_t)strtoul(byte_str, NULL, 16);
-        mem_write8(g_mcp.bus, addr + (uint32_t)i, b);
+        const uint32_t a = addr + (uint32_t)i;
+        if (rom) {
+            uint8_t *pg = g_mcp.bus->rd_page[a >> 16];
+            if (!pg) break;
+            pg[a & 0xFFFFu] = b;
+        } else {
+            mem_write8(g_mcp.bus, a, b);
+        }
         count++;
     }
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
