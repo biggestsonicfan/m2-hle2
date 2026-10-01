@@ -77,12 +77,6 @@ typedef struct {
     } stack[SHARC_STACK_DEPTH];
     int stack_top;
 
-    /* TGP bone slot storage (written by 0x35806B6B, read by geometry decoder).
-     *   P1 bone N → slot N    (TGP addrs 0x3A30..0x3AB4)
-     *   P2 bone N → slot 16+N (TGP addrs 0x3B30..0x3BB4)
-     * Each slot: col0(xyz)|col1(xyz)|col2(xyz)|T(xyz) — column-major 3×4. */
-    float tgp_bone[32][12];
-
     /* Bone matrix cache — SHARC DM[0x30420..0x305A0].
      * Written by 0x1A803535 (save current matrix → slot).
      * Read by 0x1B003636 (plain load) and 0x1B803737 (load + C×B multiply).

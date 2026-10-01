@@ -715,8 +715,7 @@ static void mcp_cmd_get_geo_captures(char *resp, int cap) {
                 "\"has_matrix\":%d,\"xyz\":[%.3f,%.3f,%.3f],"
                 "\"scale\":[%.3f,%.3f,%.3f],"
                 "\"up\":[%.2f,%.2f,%.2f],"
-                "\"clip\":%d,\"cx\":%d,\"cy\":%d,\"cw\":%d,\"ch\":%d,"
-                "\"bone\":%d,\"vs\":%d,\"win\":%d,\"vp\":[%d,%d,%d,%d],\"gp\":[%.1f,%.1f,%.1f,%.1f],\"tpa\":\"0x%X\",\"tha\":\"0x%X\",\"matptr\":\"0x%X\",\"m\":[",
+                "\"vs\":%d,\"win\":%d,\"vp\":[%d,%d,%d,%d],\"gp\":[%.1f,%.1f,%.1f,%.1f],\"tpa\":\"0x%X\",\"tha\":\"0x%X\",\"matptr\":\"0x%X\",\"m\":[",
                 i ? "," : "",
                 i, cm->model_idx, cm->dbg_mesh_ptr,
                 cm->dbg_pos[0], cm->dbg_pos[1], cm->dbg_pos[2],
@@ -726,9 +725,7 @@ static void mcp_cmd_get_geo_captures(char *resp, int cap) {
                 cm->matrix[3], cm->matrix[7], cm->matrix[11],
                 scx, scy, scz,
                 cm->matrix[1], cm->matrix[5], cm->matrix[9],
-                cm->has_clip_win ? 1 : 0, cm->clip_win_x, cm->clip_win_y,
-                cm->clip_win_w, cm->clip_win_h,
-                cm->from_bone ? 1 : 0, cm->view_space ? 1 : 0, cm->window,
+                cm->view_space ? 1 : 0, cm->window,
                 cm->vp[0], cm->vp[1], cm->vp[2], cm->vp[3],
                 cm->gproj[0], cm->gproj[1], cm->gproj[2], cm->gproj[3],
                 cm->tpa, cm->tha, cm->material_ptr);
@@ -999,6 +996,19 @@ static void mcp_cmd_sound_codes(const char *req, char *resp, int cap) {
 #undef CAPPEND
 }
 
+/* TGP bone slot s (P1 on 0..15, P2 on 16..31) as the coprocessor stored it:
+ * 12 words, column-major 3x4, at 0x3A00 / 0x3B00 + 0x0C a slot in its data
+ * space, which is bufferram (sharc_dm_ext). Zeros with no board loaded. */
+static void mcp_tgp_slot(int s, float out[12]) {
+    uint32_t bo = ((s < 16 ? 0x3A00u : 0x3B00u) + (uint32_t)(s & 15) * 0x0Cu) * 4u;
+    for (int k = 0; k < 12; k++) {
+        uint32_t u = 0;
+        if (g_sharc.sharc_dm_ext && bo + 48u <= g_sharc.sharc_dm_ext_size)
+            memcpy(&u, g_sharc.sharc_dm_ext + bo + 4u * (uint32_t)k, 4);
+        out[k] = sharc_bits_to_float(u);
+    }
+}
+
 static void mcp_cmd_dump_bones(char *resp, int cap) {
     char *p = resp; int left = cap, n;
 #define BAPPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); p += n; left -= n; } while(0)
@@ -1006,10 +1016,10 @@ static void mcp_cmd_dump_bones(char *resp, int cap) {
             g_sharc.pos[0], g_sharc.pos[1], g_sharc.pos[2]);
     for (int s = 0; s < 4; s++) {           /* pid0 slots 0-3 */
         const float *rc = g_sharc.rot_cache[s];
-        const float *tb = g_sharc.tgp_bone[s];
+        float tb[12]; mcp_tgp_slot(s, tb);
         BAPPEND("%s{\"slot\":%d,"
                 "\"rot_cache_T\":[%.3f,%.3f,%.3f],"
-                "\"tgp_bone_T\":[%.3f,%.3f,%.3f],"
+                "\"tgp_T\":[%.3f,%.3f,%.3f],"
                 "\"rot_cache_R\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]}",
                 s ? "," : "", s,
                 rc[9], rc[10], rc[11], tb[9], tb[10], tb[11],
@@ -1053,7 +1063,16 @@ static void mcp_cmd_cop_exec(const char *req, char *resp, int cap) {
     }
     int locked = g_mcp.emu && g_mcp.emu->thread_alive;
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
-    if (reset) cop_reset();
+    if (reset) {
+        /* cop_reset clears g_sharc whole, bufferram link included; keep the link
+         * and empty the TGP slot windows, so a slot nothing wrote reads zero. */
+        uint8_t *ext = g_sharc.sharc_dm_ext;
+        uint32_t ext_size = g_sharc.sharc_dm_ext_size;
+        cop_reset();
+        g_sharc.sharc_dm_ext = ext;
+        g_sharc.sharc_dm_ext_size = ext_size;
+        if (ext && 0x3C00u * 4u <= ext_size) memset(ext + 0x3A00u * 4u, 0, 0x200u * 4u);
+    }
     int n = 0;
     for (size_t i = 0; i + 8u <= len; i += 8u) {
         char w[9];
@@ -1065,7 +1084,8 @@ static void mcp_cmd_cop_exec(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"words\":%d}", n);
 }
 
-/* dump_tgp — the bone slots the geometry decoder draws a fighter from.
+/* dump_tgp — the TGP bone slots as the coprocessor stored them (bufferram
+ * 0x3A00 / 0x3B00, the words the i960 and the GEO list read back).
  *
  * `dump_bones` is a four-slot summary at three decimal places, for a human
  * reading a debug window. This is the whole 32-slot table — P1 on 0..15, P2 on
@@ -1086,8 +1106,9 @@ static void mcp_cmd_dump_tgp(char *resp, int cap) {
     TAPPEND("],\"tgp\":[");
     for (int s = 0; s < 32; s++) {
         TAPPEND("%s[", s ? "," : "");
+        float tb[12]; mcp_tgp_slot(s, tb);
         for (int k = 0; k < 12; k++)
-            TAPPEND("%s%.9g", k ? "," : "", g_sharc.tgp_bone[s][k]);
+            TAPPEND("%s%.9g", k ? "," : "", tb[k]);
         TAPPEND("]");
     }
     TAPPEND("]}");
@@ -1565,10 +1586,9 @@ static void mcp_cmd_capture_snd(const char *req, char *resp, int cap) {
 
 static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     uint32_t frames = 60, max_words = 8u * 1024u * 1024u, timeout_ms = 120000;
-    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_tgp = 0, want_slots = 0, want_unit = 0, want_cop = 0;
+    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_slots = 0, want_unit = 0, want_cop = 0;
     char path[512] = {0}, probes[2048] = {0}, blockspec[512] = {0};
     mcp_json_get_str(req, "blocks", blockspec, sizeof(blockspec));
-    mcp_json_get_u32(req, "tgp", &want_tgp);
     mcp_json_get_u32(req, "slots", &want_slots);
     mcp_json_get_u32(req, "unit", &want_unit);
     /* cop: the coprocessor conversation in a MAME SHARC-side capture's format
@@ -1617,17 +1637,15 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
 
     dl_rec_t  *recs  = (dl_rec_t *)malloc((size_t)max_words * sizeof(dl_rec_t));
     dl_mark_t *marks = (dl_mark_t *)calloc((size_t)frames + 2, sizeof(dl_mark_t));
-    const size_t tgp_per_mark = sizeof g_sharc.tgp_bone / sizeof(float);
-    float     *tgp   = want_tgp ? (float *)calloc(((size_t)frames + 2) * tgp_per_mark, sizeof(float)) : NULL;
     uint32_t  *slots = want_slots ? (uint32_t *)calloc(((size_t)frames + 2) * DL_SLOT_WORDS, sizeof(uint32_t)) : NULL;
     const size_t unit_per_mark = sizeof g_sharc.rot_cache / sizeof(float);
     float     *unit  = want_unit ? (float *)calloc(((size_t)frames + 2) * unit_per_mark, sizeof(float)) : NULL;
     uint8_t   *blocks = nb ? (uint8_t *)calloc(((size_t)frames + 2), bbytes) : NULL;
     uint8_t   *cop_bufram = want_cop ? (uint8_t *)calloc(BUFF_RAM_SIZE, 1) : NULL;
     uint32_t  *cop_dm = want_cop ? (uint32_t *)calloc(0x1000, sizeof(uint32_t)) : NULL;
-    if (!recs || !marks || (want_tgp && !tgp) || (want_slots && !slots) || (want_unit && !unit) || (nb && !blocks)
+    if (!recs || !marks || (want_slots && !slots) || (want_unit && !unit) || (nb && !blocks)
         || (want_cop && (!cop_bufram || !cop_dm))) {
-        free(recs); free(marks); free(tgp); free(slots); free(unit); free(blocks); free(cop_bufram); free(cop_dm);
+        free(recs); free(marks); free(slots); free(unit); free(blocks); free(cop_bufram); free(cop_dm);
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
     }
 
@@ -1637,7 +1655,6 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     g_dl.marks = marks; g_dl.capmarks = (size_t)frames + 2;
     g_dl.want = frames;
     g_dl.lo = lo; g_dl.hi = hi;
-    g_dl.tgp = tgp;
     g_dl.slots = slots;
     g_dl.unit = unit;
     g_dl.nblocks = nb; g_dl.block_bytes = bbytes; g_dl.blocks = blocks;
@@ -1669,7 +1686,7 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     g_dl.armed = 0; g_dl.active = 0;
     size_t n = g_dl.n, nmarks = g_dl.nmarks;
     int overflow = g_dl.overflow, done = g_dl.done;
-    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.tgp = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
+    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
     g_dl.blocks = NULL; g_dl.nblocks = 0; g_dl.block_bytes = 0;
     g_dl.cop = 0; g_dl.cop_bufram = NULL; g_dl.cop_dm = NULL; g_cop_tap = NULL;
     emu_mutex_unlock(&g_mcp.emu->mutex);
@@ -1702,18 +1719,6 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
         fclose(f);
     } else {
         wrote_ok = 0;
-    }
-    if (tgp && wrote_ok) {
-        /* <path>.tgp.bin: one record per mark, 32 slots × 12 f32 in the HLE's
-         * tgp_bone order (P1 slots 0..15, then P2's). */
-        snprintf(file, sizeof file, "%s.tgp.bin", path);
-        f = fopen(file, "wb");
-        if (f) {
-            if (fwrite(tgp, sizeof(float) * tgp_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
-            fclose(f);
-        } else {
-            wrote_ok = 0;
-        }
     }
     /* <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
      * TGP layout); <path>.unit.bin: the unit-matrix cache, 32 × 12 f32 per mark. */
@@ -1749,7 +1754,6 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
     free(cop_dm);
     free(recs);
     free(marks);
-    free(tgp);
     free(slots);
     free(unit);
     free(blocks);
@@ -2368,12 +2372,6 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
         snprintf(p,(size_t)left,"]}");
     }
     else if (strcmp(cmd, "dump_geo_stream")          == 0) mcp_cmd_dump_geo_stream(resp, cap);
-    else if (strcmp(cmd, "set_shadow_floor")         == 0) {
-        char ystr[32] = {0};
-        if (mcp_json_get_str(req, "y", ystr, sizeof(ystr)))
-            g_geo_shadow_floor_y = (float)atof(ystr);
-        snprintf(resp, (size_t)cap, "{\"ok\":true,\"shadow_floor_y\":%.3f}", g_geo_shadow_floor_y);
-    }
     else if (strcmp(cmd, "dump_face_uv")              == 0) {
         char *p = resp; int left = cap; int n;
         n = snprintf(p, (size_t)left, "{\"ok\":true,\"faces\":["); p += n; left -= n;

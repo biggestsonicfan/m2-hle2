@@ -26,13 +26,14 @@
 #include <string.h>
 
 #include "constants.h"
-#include "cop.h"            /* g_cop.geo_capture[], g_sharc.tgp_bone[] */
+#include "cop.h"            /* g_cop.geo_capture[] */
 #include "log.h"
 #include "memory.h"         /* mem_read8 / mem_read32 */
 
 /* ---- Capacities ---------------------------------------------------------- */
 
 #define MAX_GEO_MODELS     512
+#define GEO3D_DIRECT_WORDS 16384u
 #define GEO3D_MAX_LINES    32768
 #define MODEL_LOOKUP_SIZE  8192
 #define MODEL_ENTRY_SIZE   16
@@ -214,18 +215,6 @@ typedef struct {
     float    matrix[12];     /* 3x4 row-major */
     uint32_t material_ptr;
     float    color[3];
-    /* Clip window (screen-space, game coords 0–495 × 0–383).
-     * Set when a GEO_WIN_SENTINEL precedes this model in the capture stream.
-     * clip_win_x/y are the top-left origin of the window in game pixels. */
-    bool     has_clip_win;
-    /* True when this model was placed via the bone path (scan_active_bslot, i.e.
-     * a fighter rob).  Bone geometry is in WORLD space; non-bone fight-stage
-     * geometry comes through the FIFO already camera-relative (view space). */
-    bool     from_bone;
-    int16_t  clip_win_x;  /* left edge in game pixels */
-    int16_t  clip_win_y;  /* top  edge in game pixels */
-    int16_t  clip_win_w;  /* width  in game pixels */
-    int16_t  clip_win_h;  /* height in game pixels */
     /* Placed by the GEO display list (geo3d_scan_geo_list): `matrix` is already
      * the full model-to-eye transform the COP laid down, so the renderer skips
      * the host camera and projects the board's way instead — gproj holds focal
@@ -242,6 +231,9 @@ typedef struct {
     float    geo_lod;       /* when the object was drawn (model2_v.cpp commands 07, 16) */
     uint32_t zadjust;       /* the z-sort mode (command 08) then: the raster's z_adjust */
     uint32_t tpa, tha;      /* the object command's texture point / header addresses */
+    /* Direct data (GEO 0x02/0x12) instead of an object: its words after the
+     * command, at direct_off in geo3d_state_t.direct_words. 0: an object. */
+    uint32_t direct_off, direct_len;
     /* Debug fields populated by the scanner */
     uint32_t dbg_mesh_ptr;
     float    dbg_pos[3];
@@ -337,8 +329,7 @@ static float g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
  * rink that once went half black included.
  *
  * What is left of the half rule is geo3d_sort_z and the recede per vertex: the
- * object viewer's free camera, the COP-stream fallback and set_camera zflat=0
- * still use it.
+ * object viewer's free camera and set_camera zflat=0 still use it.
  *
  * Faces that never went through the geometry decoder (the homebrew HUD, the
  * wireframe, the object viewer's free camera) carry NONE and keep the depth the
@@ -710,6 +701,11 @@ typedef struct {
 
     /* Windows in the display list last walked (geo3d_scan_geo_list). */
     int              geo_windows;
+
+    /* That list's direct data, copied out of the snapshot: the emu thread
+     * reuses a snapshot two publishes on, while the frame may still draw. */
+    uint32_t         direct_words[GEO3D_DIRECT_WORDS];
+    uint32_t         direct_used;
 } geo3d_state_t;
 
 static inline void geo3d_init(geo3d_state_t *geo) {
@@ -741,58 +737,11 @@ typedef struct {
 
 static geo3d_lookup_t g_geo3d_lookup = {0};
 
-/* Ground-plane Y for character shadows (0x3A007474).  Tunable at runtime via the
- * MCP bridge ("set_shadow_floor") so the floor height can be dialed in visually
- * until the proper stage-floor source is wired. */
-static float g_geo_shadow_floor_y = 0.0f;
-
-
-/* Game-camera convention signs (dial live via the 3D window for the attract
- * "camera moving in wrong directions" bug). Multipliers applied in
- * geo3d_read_game_view to the camera struct's eye + angles. Defaults reproduce
- * the historical convention EXACTLY (z negated, yaw negated) so nothing changes
- * until toggled — once the right combo is found on-screen, bake it here. */
-static float g_cam_sign_x  =  1.0f;
-static float g_cam_sign_y  =  1.0f;
-static float g_cam_sign_z  = -1.0f;  /* cam_z = -zpos */
-static float g_cam_sign_rx =  1.0f;  /* pitch = +xang */
-static float g_cam_sign_ry =  1.0f;  /* yaw   = +yang (neg yaw off by default) */
-
 /* Debug: dump the RAW camera struct (eye + angle word) once per game frame to
  * cam_ours.csv, keyed by the STF frame counter (0x500020). Attract is
  * deterministic from boot, so this aligns frame-for-frame with a MAME capture
  * → compare to localise wrong-camera-direction (values vs our render convention). */
 static int g_cam_log = 0;
-
-/* Rotation-only view: apply the camera ROTATION but NOT its (−eye) translation.
- * Some scenes (e.g. the STF intro carnival flythrough) bake the eye-translation
- * into the captured COP geometry (it = world−eye already), so the normal
- * R·(p−eye) view subtracts the eye a second time → double-translation. With this
- * set, the view is R·p, correct for already-eye-baked geometry. */
-static int g_cam_rot_only = 0;
-
-/* cam_mode (camera struct +0x28; STF 0x519EC0 = g13+0x40). The fight's camera_init
- * sets cam_mode=9 (look-at, world-space geometry); ADV_MOVIE attract scenes set
- * cam_mode=0 (scripted, candidate eye-baked). Auto-select rotation-only when
- * cam_mode != 9 to test cam_mode as the per-scene baking discriminator. */
-static int g_cam_mode_value = -1;   /* last read; -1 = unknown */
-static int g_cam_auto_rot   = 0;    /* if set: g_cam_rot_only := (cam_mode != 9) */
-
-/* Raw camera eye (0x519E98 xpos,ypos,zpos) for the eye-bake auto-detector. */
-static float g_cam_eye_raw[3] = {0.0f, 0.0f, 0.0f};
-/* Auto eye-baked detection: a scene that emits a base SETPOS ≈ (−eye.x, −eye.y,
- * eye.z) bakes the camera translation into its geometry (STF intro carnival),
- * so that frame must render rotation-only.  When set, the scanner detects this
- * per frame and drives g_cam_rot_only.  Confirmed from the COP stream:
- * SETPOS [-17.4,-30.6,-7.5] ≈ −eye precedes the carnival objects.
- * Default ON: improves the carnival/eye-baked attract scenes; toggle off to debug. */
-static int g_cam_auto_baked = 1;
-
-/* Clip-window ("set_window") support. ON: GEO_WIN_SENTINEL sets per-model clip
- * rects + the slow per-window render path (scissor + game camera per window).
- * OFF: ignore windows entirely → every model renders full-screen through the
- * single game camera (fast path). Debug A/B for what the windows are doing. */
-static int g_geo_windows_enabled = 1;
 
 /* Texture UV orientation debug dials (geo3d window). The board needs none of
  * them: with the stream order below the raw coordinates are already right. */
@@ -902,580 +851,9 @@ static inline int geo3d_lookup_by_pol(uint32_t pol_ptr) {
     return -1;
 }
 
-/* ---- Capture-stream scanner --------------------------------------------- */
-
-/*
- * Walk the COP capture ring (g_cop.geo_capture) and extract draw calls.
- * Per-object state carried forward across the loop:
- *   current_pos[3]   — last position command  (0x03000606)
- *   current_ang[3]   — last Euler angle setters (0x04000808/04800909/05000A0A)
- *   current_mat[12]  — last explicit matrix     (0x02000404)
- *   have_pos / have_ang / have_mat — reset after each captured object
- *
- * Inputs:
- *   main_data, polygons   — already-loaded ROM regions
- *   table_off, table_count — model table location (from profile quirks)
- *   mesh_ptr_subtract/add  — mesh pointer encoding (from profile quirks)
- *
- * Output: geo->captured[] populated, geo->captured_count set.
- */
-static inline void geo3d_scan_captures(geo3d_state_t *geo,
-                                        const uint8_t *main_data, size_t main_data_size,
-                                        size_t polygons_size,
-                                        uint32_t table_off, uint32_t table_count,
-                                        uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add) {
-    if (!main_data) { geo->captured_count = 0; return; }
-
-    geo3d_lookup_build(main_data, main_data_size, table_off, table_count);
-
-    /* Use the per-frame ring range recorded by the frame-pace hook.
-     * This limits the scan to exactly one game frame's draw commands,
-     * eliminating ghosting from stale entries in the circular ring.
-     * Fall back to the full ring if the frame hook hasn't fired yet. */
-    int frame_end   = g_cop.geo_frame_end;
-    int frame_start = g_cop.geo_frame_start;
-    int total = frame_end - frame_start;
-    if (total <= 0 || total > GEO_CAPTURE_SIZE) {
-        /* Hook hasn't fired yet (first frame), OR the board_vblank marking raced
-         * with this UI-thread read and produced an empty/inverted window. Scan a
-         * BOUNDED recent slice — never the whole ring. The full ring can hold
-         * thousands of accumulated object draws, and each 0x3C007878 costs an
-         * O(model_table_count) lookup; scanning all of them would freeze the
-         * render for seconds (the m2snake "hang"). One game frame is far smaller
-         * than this bound, so a real first frame is unaffected; a raced frame
-         * just scans a little extra and self-corrects next frame. */
-        total = g_cop.geo_capture_count;
-        if (total > GEO3D_SCAN_FALLBACK_MAX) total = GEO3D_SCAN_FALLBACK_MAX;
-        frame_end = g_cop.geo_capture_head;
-    }
-    int head = frame_end;
-
-    /* When a new game frame arrives — detected via vblank (g_cop.geo_frame_end
-     * advances once per vsync, set by the frame-pace hook) rather than the game's
-     * RAM frame counter — snapshot the current captured list into captured_prev
-     * for interpolation. */
-    if (g_cop.geo_frame_end != geo->last_frame_end) {
-        memcpy(geo->captured_prev, geo->captured,
-               (size_t)geo->captured_count * sizeof(captured_model_t));
-        geo->captured_prev_count = geo->captured_count;
-        geo->last_frame_end      = g_cop.geo_frame_end;
-    }
-
-    geo->captured_count = 0;
-
-    float current_pos[3]  = {0.0f, 0.0f, 0.0f};
-    float current_mat[12] = {0.0f};
-    bool  have_pos = false;
-    bool  have_mat = false;
-    /* have_ang: set by any ang command, saved/restored with push/pop, NOT reset
-     * after a draw.  Allows models drawn inside a push block with only ang
-     * commands (no set_pos) to get the correct rotated matrix — e.g. model 3351
-     * (moustache) drawn after ang_x inside PUSH B where have_pos was already
-     * consumed by the preceding model 3545 draw.  scan_rot's push/pop scoping
-     * prevents stale angle state from earlier capture-ring entries from leaking. */
-    bool  have_ang = false;
-
-    /* Local rotation matrix: mirrors g_sharc.rot convention (column-major [col][row]).
-     * Updated by push/pop/identity/ang commands so the have_pos/have_ang matrix
-     * path captures the full transform, not just identity. */
-    float scan_rot[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
-    float scan_rot_stk[16][3][3];
-    float scan_T_stk[16][3];   /* saved current_pos per push level */
-    bool  scan_hp_stk[16];     /* saved have_pos per push level */
-    bool  scan_ha_stk[16];     /* saved have_ang per push level */
-    int   scan_bs_stk[16];     /* saved scan_active_bslot per push level */
-    int   scan_stk_top = 0;
-
-    /* Active clip window — set/cleared by the set_window event cursor (below) as
-     * the scan passes each event's stream position; stays active across draws
-     * until the next event. x/y/w/h in game pixels (0–495, 0–383); full-screen
-     * windows clear it (no clip). */
-    bool   have_clip_win      = false;
-    int16_t clip_win_x = 0, clip_win_y = 0, clip_win_w = 0, clip_win_h = 0;
-
-    /* Bone transform state (0x35806B6B + 0x1B803737).
-     * cop.h's 0x35806B6B handler writes the IK result into g_cop.tgp_bone[].
-     * 0x1B803737 selects which slot (pid*16+bone_idx) for the next mesh.
-     * Indexed: P1 bone N → tgp_bone[N], P2 bone N → tgp_bone[16+N]. */
-    int     scan_active_bslot = -1;
-
-    /* Eye-bake auto-detect: a base SETPOS ≈ (−eye.x, −eye.y, eye.z) means this
-     * frame's geometry is already world−eye (carnival intro) → render rot-only. */
-    int   frame_eye_baked = 0;
-    /* The eye-bake base SETPOS ≈ −raw_eye on ALL axes (raw zpos is positive;
-     * the camera readout shows −z only because cam_z = −zpos). */
-    float eb_x = -g_cam_eye_raw[0], eb_y = -g_cam_eye_raw[1], eb_z = -g_cam_eye_raw[2];
-    bool  eb_valid = (fabsf(g_cam_eye_raw[0]) + fabsf(g_cam_eye_raw[1])
-                      + fabsf(g_cam_eye_raw[2])) > 5.0f;
-
-    /* Clip-window cursor: replay the discrete set_window events (cop.h
-     * g_win_events[]) in stream order alongside the draws. Each event is tagged
-     * with the geo_capture_head at which it took effect; this frame spans
-     * [head-total, head). Advance the cursor to the oldest event still in range. */
-    int win_ev = g_win_event_head - GEO_WIN_EVENTS_MAX; if (win_ev < 0) win_ev = 0;
-    {   int win_frame_start = head - total;
-        while (win_ev < g_win_event_head &&
-               g_win_events[win_ev & (GEO_WIN_EVENTS_MAX-1)].head_pos < win_frame_start) win_ev++;
-    }
-
-    for (int i = 0; i < total && geo->captured_count < MAX_GEO_MODELS; i++) {
-        int idx = (head - total + i + GEO_CAPTURE_SIZE) & (GEO_CAPTURE_SIZE - 1);
-        uint32_t val = g_cop.geo_capture[idx];
-
-        /* Apply any set_window events that take effect at or before this stream
-         * position. Decode the two corner words (X = high16, Y = 511 - low16,
-         * verified against captured words); a full-screen window CLEARS the clip
-         * (so fights, which only set full-screen, stay on the fast path). */
-        if (g_geo_windows_enabled) {
-            int abs_pos = head - total + i;
-            while (win_ev < g_win_event_head &&
-                   g_win_events[win_ev & (GEO_WIN_EVENTS_MAX-1)].head_pos <= abs_pos) {
-                const geo_win_event_t *we = &g_win_events[win_ev & (GEO_WIN_EVENTS_MAX-1)];
-                int xa=(int)(int16_t)(we->w0>>16), ya=511-(int)(int16_t)(we->w0 & 0xFFFF);
-                int xb=(int)(int16_t)(we->w1>>16), yb=511-(int)(int16_t)(we->w1 & 0xFFFF);
-                int wl=xa<xb?xa:xb, wr=xa>xb?xa:xb, wt=ya<yb?ya:yb, wb=ya>yb?ya:yb;
-                if (wl<=0 && wt<=0 && wr>=495 && wb>=383) {
-                    have_clip_win = false;                  /* full-screen → no clip */
-                } else if (wr>wl && wb>wt) {
-                    have_clip_win = true;
-                    clip_win_x=(int16_t)wl; clip_win_y=(int16_t)wt;
-                    clip_win_w=(int16_t)(wr-wl); clip_win_h=(int16_t)(wb-wt);
-                }
-                win_ev++;
-            }
-        }
-
-        /* --- Matrix stack: push / identity / pop ----------------------------- */
-        if (val == 0x00800101) {
-            if (scan_stk_top < 16) {
-                memcpy(scan_rot_stk[scan_stk_top], scan_rot,    sizeof(scan_rot));
-                memcpy(scan_T_stk[scan_stk_top],   current_pos, sizeof(current_pos));
-                scan_hp_stk[scan_stk_top] = have_pos;
-                scan_ha_stk[scan_stk_top] = have_ang;
-                scan_bs_stk[scan_stk_top] = scan_active_bslot;
-                scan_stk_top++;
-            }
-            have_ang          = false;
-            scan_active_bslot = -1;
-            continue;
-        }
-        if (val == 0x01800303) {
-            /* SHARC identity reset: rot → I (scale baked into rot is also reset), T → (0,0,0). */
-            memset(scan_rot, 0, sizeof(scan_rot));
-            scan_rot[0][0] = scan_rot[1][1] = scan_rot[2][2] = 1.0f;
-            current_pos[0] = current_pos[1] = current_pos[2] = 0.0f;
-            have_pos = false;
-            have_ang = false;
-            continue;
-        }
-        if (val == 0x01000202) {
-            if (scan_stk_top > 0) {
-                --scan_stk_top;
-                memcpy(scan_rot,    scan_rot_stk[scan_stk_top], sizeof(scan_rot));
-                memcpy(current_pos, scan_T_stk[scan_stk_top],   sizeof(current_pos));
-                have_pos          = scan_hp_stk[scan_stk_top];
-                have_ang          = scan_ha_stk[scan_stk_top];
-                scan_active_bslot = scan_bs_stk[scan_stk_top];
-            }
-            continue;
-        }
-
-        /* --- Angle setters: update scan_rot with the same post-multiply as
-         *     sharc_postmul_ry/rz/rx in sharc.h.  The arg is the raw 32-bit
-         *     FIFO word (int32_t fixed-point, 0x10000 = 360°). -------------- */
-        if ((val == 0x04000808 || val == 0x04800909 || val == 0x05000A0A) && i + 1 < total) {
-            if (scan_stk_top == 0) { i += 1; continue; }
-            uint32_t aw = g_cop.geo_capture[(idx + 1) & (GEO_CAPTURE_SIZE - 1)];
-            /* Only the low 16 bits are meaningful (0x10000 = 360°); mask before
-             * converting so large accumulating angles (e.g. the attract portrait
-             * spin am_cntr*0xFFF0) don't blow up cosf/sinf precision. Matches the
-             * live SHARC sharc_angle_to_rad(). */
-            float a = ((float)(int16_t)(aw & 0xFFFF) / 65536.0f) * (2.0f * 3.14159265f);
-            float c = cosf(a), s = sinf(a);
-            float (*r)[3] = scan_rot;
-            int _ri;
-            if (val == 0x04800909) {          /* ang_y: col0,col2 */
-                for (_ri = 0; _ri < 3; _ri++) {
-                    float c0 =  c*r[0][_ri] + s*r[2][_ri];
-                    float c2 = -s*r[0][_ri] + c*r[2][_ri];
-                    r[0][_ri] = c0; r[2][_ri] = c2;
-                }
-            } else if (val == 0x04000808) {   /* ang_x: col1,col2 */
-                for (_ri = 0; _ri < 3; _ri++) {
-                    float c1 = c*r[1][_ri] - s*r[2][_ri];
-                    float c2 = s*r[1][_ri] + c*r[2][_ri];
-                    r[1][_ri] = c1; r[2][_ri] = c2;
-                }
-            } else {                           /* ang_z (0x05000A0A): col0,col1 */
-                for (_ri = 0; _ri < 3; _ri++) {
-                    float c0 = c*r[0][_ri] - s*r[1][_ri];
-                    float c1 = s*r[0][_ri] + c*r[1][_ri];
-                    r[0][_ri] = c0; r[1][_ri] = c1;
-                }
-            }
-            have_ang = true;
-            i++; continue;
-        }
-
-        /* --- 0x35806B6B: bone IK (17 args) — cop.h writes result to tgp_bone --- */
-        if (val == 0x35806B6B && i + 17 < total) {
-            i += 17; continue;
-        }
-
-        /* --- 0x1B003636: plain bone-cache load → current matrix (2 args) ----
-         * SHARC copies rot_cache[player*16+slot] into rot[] and pos[].
-         * Mirror that here so subsequent ang/set_pos commands stack correctly. */
-        if (val == 0x1B003636 && i + 2 < total) {
-            uint32_t a0 = g_cop.geo_capture[(idx+1) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t a1 = g_cop.geo_capture[(idx+2) & (GEO_CAPTURE_SIZE-1)];
-            int player   = ((a0 & 0xFF) == 1) ? 1 : 0;
-            int slot_idx = (int)a1 / 12;
-            if ((unsigned)slot_idx < 16u) {
-                const float *B = g_sharc.rot_cache[player * 16 + slot_idx];
-                for (int _c = 0; _c < 3; _c++)
-                    for (int _r = 0; _r < 3; _r++)
-                        scan_rot[_c][_r] = B[_c * 3 + _r];
-                current_pos[0] = B[9];
-                current_pos[1] = B[10];
-                current_pos[2] = B[11];
-                have_pos = true;
-            }
-            i += 2; continue;
-        }
-
-        /* --- 0x1B803737: bone slot selector (3 words: cmd + pid + bone_idx*0xC) ---
-         * arg0 = player_id (0=P1, 1=P2)
-         * arg1 = bone_idx * 0xC  → bone_idx = arg1/0xC
-         * tgp_bone index = player_id*16 + bone_idx */
-        if (val == 0x1B803737 && i + 2 < total) {
-            uint32_t pid_w = g_cop.geo_capture[(idx+1) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t boff  = g_cop.geo_capture[(idx+2) & (GEO_CAPTURE_SIZE-1)];
-            int pid      = (int)(pid_w & 1);
-            int bone_idx = (int)((boff & 0xFF) / 0xC);
-            int tgp_idx  = pid * 16 + bone_idx;
-            scan_active_bslot = (tgp_idx >= 0 && tgp_idx < 32) ? tgp_idx : -1;
-            i += 2; continue;
-        }
-
-        /* Clip windows are no longer spliced into this command stream as a
-         * synthetic sentinel. set_window now records discrete events (cop.h
-         * g_win_events[]) tagged with the stream position; the cursor at the top
-         * of this loop activates/clears have_clip_win as the scan passes them. */
-
-        /* --- 0x02000404 / 0x05800B0B: matrix (12 floats follow) ---
-         * 0x02000404: written directly by the i960 with a freshly-built transform.
-         * 0x05800B0B: written by the i960 after reading the current matrix via
-         *   0x02800505, applying a derived bone transform (e.g. neck attachment),
-         *   and sending it back.  Both carry the same row-major display-format matrix
-         *   (Z-negation already applied, m[2][3] = +pos[2] before have_mat negates it). */
-        if ((val == 0x02000404 || val == 0x05800B0B) && i + 12 < total) {
-            bool  all_sane = true;
-            float m[12];
-            for (int j = 0; j < 12; j++) {
-                uint32_t fv = g_cop.geo_capture[(idx + 1 + j) & (GEO_CAPTURE_SIZE - 1)];
-                if (!is_sane_float(fv) && fv != 0) { all_sane = false; break; }
-                m[j] = u32_as_float(fv);
-            }
-            if (all_sane) {
-                memcpy(current_mat, m, sizeof(m));
-                have_mat = true;
-                have_ang  = false;
-                scan_active_bslot = -1;
-                if (!have_pos) {
-                    current_pos[0] = m[3];
-                    current_pos[1] = m[7];
-                    current_pos[2] = m[11];
-                    have_pos = true;
-                }
-            }
-            i += 12; continue;
-        }
-
-        /* --- 0x03000606: position (3 floats follow) --- */
-        if (val == 0x03000606 && i + 3 < total) {
-            bool  all_sane = true;
-            float p[3];
-            for (int j = 0; j < 3; j++) {
-                uint32_t fv = g_cop.geo_capture[(idx + 1 + j) & (GEO_CAPTURE_SIZE - 1)];
-                if (!is_sane_float(fv)) { all_sane = false; break; }
-                p[j] = u32_as_float(fv);
-            }
-            if (all_sane) {
-                /* Eye-bake marker: a SETPOS whose raw args ≈ (−eye.x,−eye.y,eye.z)
-                 * is the base translation that makes subsequent geometry world−eye. */
-                if (eb_valid && fabsf(p[0]-eb_x) < 3.0f && fabsf(p[1]-eb_y) < 3.0f
-                             && fabsf(p[2]-eb_z) < 3.0f)
-                    frame_eye_baked = 1;
-                /* SHARC: T += rot × args (additive, rot-relative offset → world).
-                 * scan_rot is column-major [col][row]; result[r] = Σ_c rot[c][r]*p[c]. */
-                float (*r)[3] = scan_rot;
-                current_pos[0] += r[0][0]*p[0] + r[1][0]*p[1] + r[2][0]*p[2];
-                current_pos[1] += r[0][1]*p[0] + r[1][1]*p[1] + r[2][1]*p[2];
-                current_pos[2] += r[0][2]*p[0] + r[1][2]*p[1] + r[2][2]*p[2];
-                have_pos = true;
-            }
-            i += 3; continue;
-        }
-
-        /* --- 0x3A007474: shadow matrix setup (7 args) ---
-         * Called from rob_kage_disp_test immediately before the shadow model draw.
-         * Args: [pid, bone*0xC, flag, off.x, off.y, off.z, g5].  The firmware (PM
-         * 0x20D0A) loads the anchor bone (_L204D6) then multiplies by a SHARC
-         * shadow-projection matrix (PM 0x21F20, built by make_kage_matrix) that
-         * projects the bone onto the stage GROUND PLANE.  We don't yet capture that
-         * projection's ground-plane translation (g_sharc.shadow_rot is only the 3×3
-         * flatten), so for now we use the bone's X/Z (so the shadow tracks the
-         * character) and pin Y to the floor.  TODO: capture the full projection /
-         * stage floor height (word_5019AC) so the shadow sits exactly on the ground. */
-        if (val == 0x3A007474 && i + 7 < total) {
-            uint32_t pid_w = g_cop.geo_capture[(idx + 1) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t boff  = g_cop.geo_capture[(idx + 2) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t offy_w= g_cop.geo_capture[(idx + 5) & (GEO_CAPTURE_SIZE-1)]; /* off.y */
-            int pid  = (int)(pid_w & 1);
-            int bidx = (int)((boff & 0xFF) / 0xC);
-            int slot = pid * 16 + bidx;
-            if (slot >= 0 && slot < 32) {
-                const float *tb = g_sharc.tgp_bone[slot];
-                float rsum = 0.0f;
-                for (int _k = 0; _k < 9; _k++) rsum += tb[_k] * tb[_k];
-                if (rsum > 1e-6f) {            /* bone is populated → use its X/Z */
-                    current_pos[0] = tb[9];
-                    current_pos[2] = tb[11];
-                    have_pos = true;
-                }
-            }
-            for (int _c = 0; _c < 3; _c++)
-                for (int _r = 0; _r < 3; _r++)
-                    scan_rot[_c][_r] = g_sharc.shadow_rot[_c][_r];
-            /* off.y is 0 (game-frame floor); our render places fighters at negative Y,
-             * so the shadow floor must be the character's FEET in our frame = the
-             * extreme bone Y. Find the populated-bone Y range for this player. */
-            (void)offy_w;
-            float _ymin = 1e9f;
-            for (int _bi = 0; _bi < 16; _bi++) {
-                const float *bb = g_sharc.tgp_bone[pid * 16 + _bi];
-                float _brs = 0.0f; for (int _k = 0; _k < 9; _k++) _brs += bb[_k]*bb[_k];
-                if (_brs > 1e-6f && bb[10] < _ymin) _ymin = bb[10];
-            }
-            /* The arena floor = the lowest the feet ever reach (standing); jumps only
-             * raise the feet ABOVE it. So track a running min of the feet Y → a fixed
-             * ground plane the shadow stays on when a fighter jumps. Slow upward drift
-             * re-levels on stage/match changes. */
-            static float s_floor_y = 1e9f;
-            if (_ymin < 1e8f) {
-                if (_ymin < s_floor_y) s_floor_y = _ymin;                /* grab the floor */
-                else                   s_floor_y += (_ymin - s_floor_y) * 0.003f; /* re-level slowly */
-                current_pos[1] = s_floor_y;
-            } else {
-                current_pos[1] = g_geo_shadow_floor_y;
-            }
-            have_ang = true;
-            have_pos = true;
-            i += 7; continue;
-        }
-
-        /* --- 0x1F803F3F: set_ang_xyz — args[0]=ang_z, args[1]=ang_y, args[2]=ang_x --- */
-        if (val == 0x1F803F3F && i + 3 < total) {
-            if (scan_stk_top == 0) { i += 3; continue; }
-            /* Mirrors sharc_exec.h 0x1F803F3F: apply z, then y, then x post-multiply. */
-            float (*r)[3] = scan_rot;
-            int _ai, _ri;
-            for (_ai = 0; _ai < 3; _ai++) {
-                uint32_t aw = g_cop.geo_capture[(idx + 1 + _ai) & (GEO_CAPTURE_SIZE-1)];
-                /* Only the low 16 bits are meaningful (0x10000 = 360°); mask before
-             * converting so large accumulating angles (e.g. the attract portrait
-             * spin am_cntr*0xFFF0) don't blow up cosf/sinf precision. Matches the
-             * live SHARC sharc_angle_to_rad(). */
-            float a = ((float)(int16_t)(aw & 0xFFFF) / 65536.0f) * (2.0f * 3.14159265f);
-                float c = cosf(a), s = sinf(a);
-                if (_ai == 0) {        /* arg[0] = ang_z: col0, col1 */
-                    for (_ri = 0; _ri < 3; _ri++) {
-                        float c0 = c*r[0][_ri] - s*r[1][_ri];
-                        float c1 = s*r[0][_ri] + c*r[1][_ri];
-                        r[0][_ri] = c0; r[1][_ri] = c1;
-                    }
-                } else if (_ai == 1) { /* arg[1] = ang_y: col0, col2 */
-                    for (_ri = 0; _ri < 3; _ri++) {
-                        float c0 =  c*r[0][_ri] + s*r[2][_ri];
-                        float c2 = -s*r[0][_ri] + c*r[2][_ri];
-                        r[0][_ri] = c0; r[2][_ri] = c2;
-                    }
-                } else {               /* arg[2] = ang_x: col1, col2 */
-                    for (_ri = 0; _ri < 3; _ri++) {
-                        float c1 = c*r[1][_ri] - s*r[2][_ri];
-                        float c2 = s*r[1][_ri] + c*r[2][_ri];
-                        r[1][_ri] = c1; r[2][_ri] = c2;
-                    }
-                }
-            }
-            have_ang = true;
-            i += 3; continue;
-        }
-
-        /* --- 0x3800707: set_scale (3 float args: sx, sy, sz) ---
-         * The SHARC firmware multiplies scale directly into the current rotation
-         * columns (col0 *= sx, col1 *= sy, col2 *= sz) at the time the command
-         * executes — it does NOT store it for later application.  This means a
-         * second set_scale call compounds with the first rather than replacing it,
-         * which is exactly how consecutive draws get placed on opposite sides:
-         *   set_scale(-1, 0.5, 1) → col0 negated (left side), col1 halved
-         *   ang_x r5              → spin baked in
-         *   draw 3351             → left side, Y-compressed
-         *   set_scale(-1, 1, 1)   → col0 *= -1 again → back to +X (right side)
-         *   draw 3351             → right side, same spin direction
-         * Push/pop saves/restores scan_rot, so scale effects are naturally scoped. */
-        if (val == 0x03800707 && i + 3 < total) {
-            uint32_t fx = g_cop.geo_capture[(idx+1) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t fy = g_cop.geo_capture[(idx+2) & (GEO_CAPTURE_SIZE-1)];
-            uint32_t fz = g_cop.geo_capture[(idx+3) & (GEO_CAPTURE_SIZE-1)];
-            float sx = is_sane_float(fx) ? u32_as_float(fx) : 1.0f;
-            float sy = is_sane_float(fy) ? u32_as_float(fy) : 1.0f;
-            float sz = is_sane_float(fz) ? u32_as_float(fz) : 1.0f;
-            int _r;
-            for (_r = 0; _r < 3; _r++) {
-                scan_rot[0][_r] *= sx;
-                scan_rot[1][_r] *= sy;
-                scan_rot[2][_r] *= sz;
-            }
-            /* Scale baked into scan_rot — flag as transformed so draws after
-             * a scale-only setup (stage_dsp pattern: PUSH+set_scale+draw+POP)
-             * are captured with the correct scale matrix and not skipped by the
-             * no-placement guard. */
-            have_ang = true;
-            i += 3; continue;
-        }
-
-        /* --- Generic arg skip for all recognized non-draw commands -----------
-         * Any command whose args we don't specifically process above may have
-         * float args whose bit patterns accidentally match 0x3C007878 (≈ 1/128)
-         * or another sentinel.  Skip them to prevent false triggers.
-         * 0x3C007878 itself is excluded so its handler below still runs. */
-        if (val != 0x3C007878) {
-            int _nargs = sharc_args_for_cmd(val);
-            if (_nargs > 0) i += _nargs;
-            continue;
-        }
-
-        /* --- 0x3C007878: object marker, 8 args, mesh ptr at arg[4] (idx+5) --- */
-        if (i + 8 >= total) continue;
-
-        uint32_t w_mesh = g_cop.geo_capture[(idx + 5) & (GEO_CAPTURE_SIZE - 1)];
-
-        /* Skip no-placement models that appear inside a clipped sub-window.
-         * These are typically stale data or background art that was deliberately
-         * drawn inside a window region (e.g. adv_movie_egg model 3333 after
-         * set_window(win_down)) and must not bleed into other viewports.
-         * Background models WITHOUT a clip window (e.g. adv_movie_snc terrain)
-         * ARE legitimately at world origin and must render — don't skip them.
-         * have_ang guards angle-only placed models (Egg Robo uses ang_y/z/x inside
-         * push/pop without set_pos after the push clears it). */
-        if (scan_active_bslot < 0 && !have_mat && !have_pos && !have_ang && have_clip_win) {
-            i += 8;
-            continue;
-        }
-
-        if (w_mesh == 0 || w_mesh < 0x800000) { i += 8; continue; }
-
-        uint32_t mesh_off = w_mesh * 4u - mesh_ptr_subtract;
-        if (mesh_off >= polygons_size) { i += 8; continue; }
-
-        int model_idx = geo3d_lookup_by_pol(w_mesh);
-        if (model_idx < 0) { i += 8; continue; }
-
-        uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) { i += 8; continue; }
-        uint32_t entry_pol = read_u32_le(main_data + toff + 8);
-        if (entry_pol < 0x800000) { i += 8; continue; }
-
-        captured_model_t *cm = &geo->captured[geo->captured_count];
-        cm->model_idx    = model_idx;
-        cm->material_ptr = read_u32_le(main_data + toff + 4);
-        material_ptr_to_color(cm->material_ptr,
-                              &cm->color[0], &cm->color[1], &cm->color[2]);
-
-        if (scan_active_bslot >= 0 && scan_active_bslot < 32) {
-            /* Bone object: cop.h wrote the IK result to g_cop.tgp_bone[slot].
-             * Format: [0..8]=col-major 3×3, [9..11]=T[xyz].
-             * Convert to row-major 3×4 for cm->matrix; negate Z translation. */
-            float *tb = g_sharc.tgp_bone[scan_active_bslot];
-            int _r, _c;
-            for (_r = 0; _r < 3; _r++) {
-                for (_c = 0; _c < 3; _c++)
-                    cm->matrix[_r*4+_c] = tb[_c*3+_r];
-                cm->matrix[_r*4+3] = tb[9+_r];
-            }
-            cm->matrix[2]  = -cm->matrix[2];
-            cm->matrix[6]  = -cm->matrix[6];
-            cm->matrix[11] = -cm->matrix[11];
-            cm->has_matrix = true;
-        } else if (have_mat) {
-            memcpy(cm->matrix, current_mat, sizeof(cm->matrix));
-            cm->matrix[11] = -current_mat[11];
-            if (have_pos) {
-                cm->matrix[3]  =  current_pos[0];
-                cm->matrix[7]  =  current_pos[1];
-                cm->matrix[11] = -current_pos[2];
-            }
-            cm->has_matrix = true;
-        } else if (have_pos || have_ang) {
-            /* Build row-major 3×4 from scan_rot (column-major [col][row]) +
-             * current_pos.  Scale is already baked into scan_rot columns by the
-             * 0x3800707 handler, so no separate scale multiply needed here.
-             * have_ang covers models drawn after ang commands but without set_pos
-             * (e.g. model 3351 moustache, where have_pos was consumed by the
-             * preceding model draw).  scan_rot's push/pop scoping prevents stale
-             * angle state from leaking across unrelated command groups. */
-            float (*r)[3] = scan_rot;
-            cm->matrix[0]  =  r[0][0]; cm->matrix[1]  =  r[1][0]; cm->matrix[2]  = -r[2][0]; cm->matrix[3]  =  current_pos[0];
-            cm->matrix[4]  =  r[0][1]; cm->matrix[5]  =  r[1][1]; cm->matrix[6]  = -r[2][1]; cm->matrix[7]  =  current_pos[1];
-            cm->matrix[8]  =  r[0][2]; cm->matrix[9]  =  r[1][2]; cm->matrix[10] =  r[2][2]; cm->matrix[11] = -current_pos[2];
-            cm->has_matrix = true;
-        } else {
-            cm->has_matrix = false;
-        }
-
-        cm->has_clip_win         = have_clip_win;
-        cm->from_bone            = (scan_active_bslot >= 0 && scan_active_bslot < 32);
-        cm->clip_win_x           = clip_win_x;
-        cm->clip_win_y           = clip_win_y;
-        cm->clip_win_w           = clip_win_w;
-        cm->clip_win_h           = clip_win_h;
-
-        cm->dbg_mesh_ptr    = w_mesh;
-        cm->dbg_pos[0]      = current_pos[0];
-        cm->dbg_pos[1]      = current_pos[1];
-        cm->dbg_pos[2]      = current_pos[2];
-        cm->dbg_ang_deg[0]  = 0.0f;
-        cm->dbg_ang_deg[1]  = 0.0f;
-        cm->dbg_ang_deg[2]  = 0.0f;
-        cm->dbg_have_pos    = (int)have_pos;
-        cm->dbg_have_ang    = (int)have_ang;
-        cm->dbg_have_mat    = (int)have_mat;
-
-        geo->captured_count++;
-        i += 8;
-        have_pos = false;
-        have_mat = false;
-        /* scan_active_bslot intentionally NOT reset here: one 0x1B803737 command
-         * may precede multiple set_obj calls in the same push/pop scope (e.g.
-         * Rocket Metal body + jet exhaust + regular exhaust all share bone 12).
-         * It is reset on push (entering a new scope) and restored on pop. */
-        /* have_clip_win persists until the next GEO_WIN_SENTINEL — all models
-         * in a scene share the same clip window, not just the first one after
-         * set_window (fixes adv_movie_egg phase 2/3/4 missing scissor rect). */
-        (void)mesh_ptr_add;
-    }
-
-    /* Auto eye-baked: if this frame established a base SETPOS ≈ −eye, its
-     * geometry is world−eye → render rotation-only (no second −eye subtract). */
-    if (g_cam_auto_baked)
-        g_cam_rot_only = frame_eye_baked;
-}
-
 /* ---- GEO display-list scanner (authentic hardware path) ----------------- *
  * Non-STF games and the m2-snake homebrew drive the GEO directly: the i960
  * builds a display list in bufferram and points the GEO read pointer at it.
- * (STF is reconstructed from the COP bone stream by geo3d_scan_captures above.)
  * This walks that list with the geo_parse command grammar and turns each
  * (MATRIX, OBJECT) pair into a captured_model_t — reusing the same mesh+matrix
  * render path. Only object_data (cmd 1) is emitted; direct_data (cmd 2) inline
@@ -1697,9 +1075,8 @@ static inline bool geo3d_tex_word(const uint8_t *rom, size_t rom_size, uint32_t 
  * same way. STF's full-screen window is (0,127)-(496,511) centred (248,319), and
  * its H/V sync of -84/-3 put that centre at (248,192).
  *
- * Returns false (and captures nothing) when the list does not reach END — the
- * caller can fall back to the COP-stream scanner. */
-static int g_geo_use_list = 1;   /* 0: the old COP-stream reconstruction */
+ * Returns false (and captures nothing) when the list does not reach END: the
+ * frame then draws no 3D, as there is nothing the board would draw either. */
 
 static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
         const uint32_t *words, uint32_t nw, uint32_t rstart,
@@ -1730,6 +1107,27 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
     float    xoff = 84.0f + hsync, yoff = 130.0f + vsync;
     int      count = 0;
     bool     ended = false;
+    geo->direct_used = 0;
+    /* Where a draw lands: the projection, the window's scissor and the state
+     * the geometrizer holds for it. */
+    #define GEOL_PLACE(cm, sel) do {                                       \
+        (cm)->view_space = true;                                           \
+        (cm)->gproj[0] = fx;                                               \
+        (cm)->gproj[1] = fy;                                               \
+        (cm)->gproj[2] = xoff + wc[sel][0];                                \
+        (cm)->gproj[3] = (384.0f - wc[sel][1]) + yoff;                     \
+        (cm)->vp[0] = (int16_t)(wvp[0] + xoff);                            \
+        (cm)->vp[1] = (int16_t)((384 - wvp[3]) + yoff);                    \
+        (cm)->vp[2] = (int16_t)(wvp[2] + xoff);                            \
+        (cm)->vp[3] = (int16_t)((384 - wvp[1]) + yoff);                    \
+        (cm)->window   = (uint16_t)window;                                 \
+        (cm)->light[0] = light[0]; (cm)->light[1] = light[1]; (cm)->light[2] = -light[2]; \
+        (cm)->geo_mode = mode;                                             \
+        (cm)->geo_lod  = lod;                                              \
+        (cm)->zadjust  = zadj;                                             \
+        (cm)->tpa = A(0);                                                  \
+        (cm)->tha = A(1);                                                  \
+    } while (0)
 
     uint32_t p = (rstart & 0x1FFFFu) >> 2;
     for (uint32_t guard = 0; guard < 0x8000u && p < nw && count < MAX_GEO_MODELS; guard++) {
@@ -1768,32 +1166,27 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
                 H[4] =  M[1]; H[5] =  M[4]; H[6]  = -M[7]; H[7]  =  M[10];
                 H[8] = -M[2]; H[9] = -M[5]; H[10] =  M[8]; H[11] = -M[11];
                 cm->has_matrix = true;
-                cm->view_space = true;
-                int sel = (int)((op >> 29) & 3u);
-                cm->gproj[0] = fx;
-                cm->gproj[1] = fy;
-                cm->gproj[2] = xoff + wc[sel][0];
-                cm->gproj[3] = (384.0f - wc[sel][1]) + yoff;
-                cm->vp[0] = (int16_t)(wvp[0] + xoff);
-                cm->vp[1] = (int16_t)((384 - wvp[3]) + yoff);
-                cm->vp[2] = (int16_t)(wvp[2] + xoff);
-                cm->vp[3] = (int16_t)((384 - wvp[1]) + yoff);
-                cm->window   = (uint16_t)window;
-                cm->light[0] = light[0]; cm->light[1] = light[1]; cm->light[2] = -light[2];
-                cm->geo_mode = mode;
-                cm->geo_lod  = lod;
-                cm->zadjust  = zadj;
+                GEOL_PLACE(cm, (op >> 29) & 3u);
                 cm->dbg_mesh_ptr = A(2);
-                cm->tpa = A(0);
-                cm->tha = A(1);
                 cm->dbg_pos[0] = M[9]; cm->dbg_pos[1] = M[10]; cm->dbg_pos[2] = M[11];
                 cm->dbg_have_mat = 1;
                 break;
             }
-            case 0x02: case 0x12:                              /* direct data: inline polygons */
-                geo->captured_count = count;
-                geo->geo_windows = window + 1;
-                return false;
+            case 0x02: case 0x12: {                            /* direct data: polygons in the list */
+                len = geodl_direct_len(words, nw, p);
+                if (p + 1u + len > nw || geo->direct_used + len > GEO3D_DIRECT_WORDS) break;
+                captured_model_t *cm = &geo->captured[count++];
+                memset(cm, 0, sizeof *cm);
+                cm->model_idx  = -1;
+                cm->direct_off = geo->direct_used;
+                cm->direct_len = len;
+                memcpy(geo->direct_words + geo->direct_used, words + p + 1u, len * 4u);
+                geo->direct_used += len;
+                /* The raster command is (opcode >> 23) - 1, whose centre select
+                 * (bits 6..7) is always 0 (MAME geo_direct_data). */
+                GEOL_PLACE(cm, 0u);
+                break;
+            }
             case 0x03: case 0x13: {                            /* window */
                 len = 6;
                 uint32_t w0 = A(0), w1 = A(1);
@@ -1843,6 +1236,7 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
         p += 1u + len;
     }
     #undef GEOL_S12
+    #undef GEOL_PLACE
     geo->captured_count = count;
     geo->geo_windows    = window + 1;
     return ended;
@@ -2355,6 +1749,127 @@ static inline void geo3d_decode_model(int model_idx,
     g_geo3d_emit_flat      = -1.0f;
     g_geo3d_emit_layer     = 0.0f;
     g_geo3d_emit_has_plane = 0;
+}
+
+/* ---- Direct data -------------------------------------------------------------
+ * GEO command 0x02/0x12 carries its polygons in the list itself (MAME
+ * geo_direct_data): texture point and header addresses, two corners, then a
+ * link per polygon of attribute, luma, distance and one more corner (two for a
+ * quad), until an attribute whose low two bits are 0. The geometrizer passes
+ * them to the raster untouched apart from dropping each word's low byte, so the
+ * corners are already in view space with the focus applied (x * fx, y * fy, z),
+ * the luma word holds the polygon's luma (bits 30..23) and its rear flag (bit
+ * 31), and the distance word is the texture LOD's float. What the raster does
+ * with them is model2_3d_process_polygon, as for an object's polygons: P0 and P1
+ * of the previous link and the new corners make the polygon, the texture points
+ * run on NumVerts pairs a polygon, the header moves by the attribute's signed
+ * offset, and the link type says which corners the next polygon keeps. */
+static inline void geo3d_decode_direct(const uint32_t *w, uint32_t n,
+                                        const uint8_t *materials, size_t materials_size,
+                                        const uint8_t *main_data, size_t main_data_size,
+                                        float fx, float fy) {
+    if (n < 8u || fx == 0.0f || fy == 0.0f) return;
+    uint32_t tpa = w[0], tha = w[1];
+    /* A corner as the raster holds it, put where geo3d_decode_model's are: the
+     * host looks down -z. */
+    #define GEOD_PT(q) ((vec3_t){ u32_as_float(w[(q)] & 0xFFFFFF00u) / fx, \
+                                  u32_as_float(w[(q) + 1u] & 0xFFFFFF00u) / fy, \
+                                  -u32_as_float(w[(q) + 2u] & 0xFFFFFF00u) })
+    vec3_t p0 = GEOD_PT(2u), p1 = GEOD_PT(5u);   /* P0(n-1), P1(n-1) */
+    static float prev_zs = GEO3D_ZSORT_NONE;
+    uint32_t q = 8u;
+    while (q < n) {
+        uint32_t attr = w[q] & 0x00FFFFFFu;
+        if ((attr & 3u) == 0 || q + 6u > n) break;
+        const bool quad = (attr & 1u) != 0;
+        if (quad && q + 9u > n) break;
+        uint32_t lw = w[q + 1u] >> 8, dw = w[q + 2u] >> 8;
+        vec3_t c2 = GEOD_PT(q + 3u);                         /* P0(n) */
+        vec3_t c3 = quad ? GEOD_PT(q + 6u) : c2;             /* P1(n) */
+        q += quad ? 9u : 6u;
+        const int nv = quad ? 4 : 3;
+        vec3_t v[4] = { p1, p0, c2, c3 };                    /* the raster's object.v[] */
+
+        /* texture header and points, both advanced whether or not it draws */
+        uint16_t th[4] = { 0, 0, 0, 0 };
+        bool have_th = true;
+        for (uint32_t k = 0; k < 4u; k++)
+            have_th = geo3d_tex_word(materials, materials_size, tha + k, &th[k]) && have_th;
+        uint16_t pv[4] = { 0, 0, 0, 0 }, pu[4] = { 0, 0, 0, 0 };
+        for (int k = 0; k < nv; k++) {
+            geo3d_tex_word(materials, materials_size, tpa + 2u * (uint32_t)k,      &pv[k]);
+            geo3d_tex_word(materials, materials_size, tpa + 2u * (uint32_t)k + 1u, &pu[k]);
+        }
+        tpa += 2u * (uint32_t)nv;
+        int32_t tho = (int32_t)((attr >> 12) & 0x1Fu);
+        if (tho & 0x10) tho -= 0x20;
+        tha += (uint32_t)(tho * 4);
+
+        /* z-sort: every polygon sets the register, culled or not */
+        uint32_t zmode = (attr >> 10) & 3u;
+        static const int zsrc[4] = { 0, 1, 2, 3 };
+        g_geo3d_emit_flat = (g_geo3d_zflat && g_geo3d_flat_list) ? geo3d_flat_depth(v, zsrc, zmode) : -1.0f;
+        if (zmode != 0u) prev_zs = geo3d_sort_z(v, zsrc, zmode);
+        g_geo3d_emit_zs = prev_zs;
+        float max_z = -v[0].z;
+        for (int k = 1; k < nv; k++) if (-v[k].z > max_z) max_z = -v[k].z;
+
+        /* check_culling: the rear without the double-sided bit, link type 0,
+         * and a polygon wholly behind the eye */
+        bool cull = (((attr >> 17) & 1u) == 0 && (lw & 0x00800000u)) || ((attr >> 8) & 3u) == 0 || max_z < 0.0f;
+        if (have_th && !cull) {
+            uint16_t th0 = th[0], th1 = th[1], th2 = th[2], th3 = th[3];
+            bool textured = (th0 & 0x4000) != 0;
+            uint32_t texw = 32u << (th0 & 7), texh = 32u << ((th0 >> 3) & 7);
+            uint32_t texx = 32u * (th2 & 0x3f), texy = 32u * ((th2 >> 6) & 0x1f);
+            uint32_t sheet = (th2 >> 12) & 1u, fflags = 0;
+            if (textured && (th0 & 0x2000)) fflags |= GEO3D_FACE_TRANSPARENT;
+            if (th0 & 0x8000)               fflags |= GEO3D_FACE_CHECKER;
+            if (sheet)                      fflags |= GEO3D_FACE_SHEET1;
+            if ((th0 >> 8) & 1)             fflags |= GEO3D_FACE_MIRROR_X;
+            if ((th0 >> 9) & 1)             fflags |= GEO3D_FACE_MIRROR_Y;
+            if ((th0 >> 6) & 1)             fflags |= GEO3D_FACE_WRAP_X;
+            if ((th0 >> 7) & 1)             fflags |= GEO3D_FACE_WRAP_Y;
+            float fr = 0.7f, fg = 0.7f, fb = 0.7f;
+            uint32_t matidx = (th3 >> 6) & 0x3ff;
+            uint32_t pal = GEO3D_PALETTE_OFF + matidx * 2u, ram = (matidx + 0x1000u) * 2u;
+            if (g_geo3d_palram && (size_t)ram + 2 <= g_geo3d_palram_size)
+                geo3d_bgr555((uint16_t)(g_geo3d_palram[ram] | (g_geo3d_palram[ram + 1] << 8)) & 0x7FFF, &fr, &fg, &fb);
+            else if (main_data && (size_t)pal + 2 <= main_data_size)
+                geo3d_bgr555((uint16_t)(main_data[pal] | (main_data[pal + 1] << 8)), &fr, &fg, &fb);
+            /* the untextured transparent renderer writes nothing */
+            if (textured || !(th0 & 0x2000)) {
+                float uu[4], vv[4];
+                for (int k = 0; k < 4; k++) { uu[k] = textured ? (float)pu[k] / 8.0f : 0.0f;
+                                              vv[k] = textured ? (float)pv[k] / 8.0f : 0.0f; }
+                float ftx = (float)texx, fty = (float)(sheet * GEO3D_SHEET_H + texy);
+                float ftw = textured ? (float)texw : 0.0f, fth = (float)texh;
+                float pl = (float)((lw >> 15) & 0xFFu) / 255.0f;
+                float lb = (float)((uint32_t)(th1 & 0xff) << 7), ffl = (float)fflags;
+                g_geo3d_emit_texlod = dw == 0 ? 0.0f
+                    : (float)((int)((dw >> 8) & 0x7F80u) - 0x3F80 + (int)g_geo_rs->logram[dw & 0x7FFFu]);
+                g_geo3d_emit_layer = 0.0f;
+                g_geo3d_emit_has_plane = 0;
+                /* the raster fills the polygon v0, v1, v2(, v3) */
+                for (int k = 1; k + 1 < nv; k++)
+                    geo3d_emit_tri_uv(v[0].x, v[0].y, v[0].z, uu[0], vv[0],
+                                      v[k].x, v[k].y, v[k].z, uu[k], vv[k],
+                                      v[k + 1].x, v[k + 1].y, v[k + 1].z, uu[k + 1], vv[k + 1],
+                                      fr, fg, fb, ftx, fty, ftw, fth, lb, pl, ffl);
+            }
+        }
+
+        /* linking: which corners the next polygon starts from */
+        switch ((attr >> 8) & 3u) {
+            case 0: case 2: p0 = c2; p1 = c3; break;
+            case 1:         p1 = c2;          break;
+            case 3:         p0 = c3;          break;
+        }
+    }
+    #undef GEOD_PT
+    g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
+    g_geo3d_emit_zs     = GEO3D_ZSORT_NONE;
+    g_geo3d_emit_flat   = -1.0f;
 }
 
 /* ---- Mesh cache -------------------------------------------------------------
@@ -3464,21 +2979,12 @@ static inline void geo3d_read_game_view(geo3d_state_t *geo,
 #undef GEO3D_READ_F32
 
     static const float TWO_PI = 6.28318530717959f;
-    geo->cam_x = g_cam_sign_x * xpos;
-    geo->cam_y = g_cam_sign_y * ypos;
-    geo->cam_z = g_cam_sign_z * zpos;
-    geo->rot_x = g_cam_sign_rx * ((float)xang16 / 65536.0f) * TWO_PI;
-    geo->rot_y = g_cam_sign_ry * ((float)yang16 / 65536.0f) * TWO_PI;
+    geo->cam_x =  xpos;
+    geo->cam_y =  ypos;
+    geo->cam_z = -zpos;
+    geo->rot_x = ((float)xang16 / 65536.0f) * TWO_PI;
+    geo->rot_y = ((float)yang16 / 65536.0f) * TWO_PI;
     geo->has_game_view = true;
-
-    /* Raw eye for the eye-bake auto-detector (scanner compares base SETPOS to −eye). */
-    g_cam_eye_raw[0] = xpos; g_cam_eye_raw[1] = ypos; g_cam_eye_raw[2] = zpos;
-
-    /* cam_mode = camera_struct +0x28 (g13+0x40). Drives the per-scene baking
-     * heuristic: cam_mode 9 = fight look-at (world); others = attract (eye-baked). */
-    g_cam_mode_value = (int)(mem_read32(bus, cam_addr + 0x28) & 0xFF);
-    if (g_cam_auto_rot)
-        g_cam_rot_only = (g_cam_mode_value != 9) ? 1 : 0;
 
     /* Debug: dump the raw camera struct per game frame for MAME comparison
      * (MAME = ground truth). Keyed by the STF frame counter so the two

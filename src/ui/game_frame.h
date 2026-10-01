@@ -82,20 +82,16 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
                                        rs->main_data, rs->main_data_size,
                                        q->model_table_offset, q->model_table_count,
                                        bus->palette, PALETTE_SIZE);
-        } else if (!(g_geo_use_list && g_geodl_snap_ready &&
+        } else if (!(g_geodl_snap_ready &&
                      geo3d_scan_geo_list(geo3d, snap, BUFF_RAM_SIZE / 4,
                                          g_geodl_snap_rstart,
                                          (int16_t)mem_read16(bus, H_SYNC_BASE),
                                          (int16_t)mem_read16(bus, V_SYNC_BASE),
                                          rs->main_data, rs->main_data_size,
                                          q->model_table_offset, q->model_table_count))) {
-            /* No display list yet (or it did not reach END): rebuild the frame
-             * from the COP command stream the old way. */
-            geo3d_scan_captures(geo3d,
-                                rs->main_data, rs->main_data_size,
-                                rs->polygons_size,
-                                q->model_table_offset, q->model_table_count,
-                                q->mesh_ptr_subtract, q->mesh_ptr_add);
+            /* No display list yet, or it did not reach END (only the first two
+             * frames after boot): no 3D this frame. */
+            geo3d->captured_count = 0;
         }
     } else {
         geo3d_lines_reset();

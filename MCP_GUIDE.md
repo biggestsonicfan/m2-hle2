@@ -639,16 +639,15 @@ process, so pass absolute ones.
 **`get_geo_captures()`**
 The models the board drew in the last frame: `count` and `captures`, each with
 `idx` (what `objview_set`'s `capture` takes), `model`, `mesh`, `pos`, `ang`,
-`xyz`, per-column `scale`, `up`, the clip window (`clip`, `cx`, `cy`, `cw`, `ch`),
-`bone`, `vs`, `win`, `vp`, `gp`, `tpa`, `tha`, `matptr` and `m`, the 12-word matrix.
+`xyz`, per-column `scale`, `up`, `vs`, `win`, `vp`, `gp`, `tpa`, `tha`, `matptr` and `m`, the 12-word matrix.
 
-**`capture_dl(path, frames = 60, probes, max_words, timeout_ms = 120000, lo, hi, tgp, slots, unit, blocks, cop)`**
+**`capture_dl(path, frames = 60, probes, max_words, timeout_ms = 120000, lo, hi, slots, unit, blocks, cop)`**
 Record every write to the geometry processor and the coprocessor for `frames`
 whole frames (capped at 3600), in the explorer toolkit's MAME capture format:
 `<path>.bin` (u32 address, u32 value per write) and `<path>.json` (`words`,
 `frames`, `overflow`, `probes`, `marks`). `probes` is `"hexaddr:size,..."` read at
-each frame edge; `lo`/`hi` narrow the recorded window; `tgp:1`, `slots:1`,
-`unit:1` and `blocks:"hexaddr:hexlen,..."` add `<path>.tgp.bin`, `.slots.bin`,
+each frame edge; `lo`/`hi` narrow the recorded window; `slots:1`,
+`unit:1` and `blocks:"hexaddr:hexlen,..."` add `<path>.slots.bin`,
 `.unit.bin` and `.blocks.bin` per mark; `cop:1` records the coprocessor
 conversation in a MAME SHARC-side capture's format with `.bufram.bin` and
 `.dm.bin` beside it (`tests/cop_replay`). Blocks until done. Returns `words`,
@@ -689,14 +688,13 @@ Live-tune the 3D renderer's camera and switches; values travel as strings and
 an omitted one keeps its value. `zsort: 0` turns off the board's polygon z-sort.
 Returns `cam`, `rot`, `fov`, `lines`, `tris`, `test`.
 
-**`set_shadow_floor(y)`** — the shadow floor height. Returns `shadow_floor_y`.
-
 **`dump_bones()`** — the current position and a four-slot summary of P1's bone
-slots (`rot_cache_T`, `tgp_bone_T`, `rot_cache_R`), at three decimals.
+slots (`rot_cache_T`, `tgp_T`, `rot_cache_R`), at three decimals.
 
-**`dump_tgp()`** — the whole 32-slot bone table (`tgp`, P1 on 0..15, P2 on
-16..31, each a column-major 3x4) with the current `pos` and `rot`, at full
-precision for differencing.
+**`dump_tgp()`** — the whole 32-slot bone table as the coprocessor stored it in
+bufferram (`tgp`, P1 on 0..15 from 0x3A00, P2 on 16..31 from 0x3B00, each a
+column-major 3x4) with the current `pos` and `rot`, at full precision for
+differencing.
 
 **`cop_exec(words, reset = 0)`** — hand the coprocessor a stream of 32-bit
 words (`words`: 8 hex chars each, no spaces) through the i960's own MMIO path,

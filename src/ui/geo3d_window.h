@@ -27,9 +27,6 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     igCheckbox("Enabled",           &geo->enabled);
     igCheckbox("Use captures",      &geo->use_captures);
     igCheckbox("Use object matrix", &geo->use_matrix);
-    { bool gl = g_geo_use_list != 0;
-      if (igCheckbox("Draw the GEO display list", &gl)) g_geo_use_list = gl;
-      if (igIsItemHovered(0)) igSetTooltip("On: objects, matrices, windows and focal lengths as the board's display list has them.\nOff: the old reconstruction from the COP command stream and the game camera."); }
     igCheckbox("Use game view",     &geo->use_game_view);
     if (geo->use_game_view && geo->has_game_view) {
         igSameLine();
@@ -141,31 +138,6 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
         geo->rot_x   = 0.0f;
         geo->rot_y   = 0.0f;
         geo->fov_deg = 60.0f;
-    }
-
-    igSeparator();
-    igText("Game-camera convention (attract dir):");
-    {
-        bool nx = g_cam_sign_x < 0, ny = g_cam_sign_y < 0, nz = g_cam_sign_z < 0;
-        bool nrx = g_cam_sign_rx < 0, nry = g_cam_sign_ry < 0;
-        if (igCheckbox("neg eye X",  &nx))  g_cam_sign_x  = nx  ? -1.0f : 1.0f;
-        igSameLine(); if (igCheckbox("neg eye Y", &ny))  g_cam_sign_y  = ny  ? -1.0f : 1.0f;
-        if (igCheckbox("neg eye Z",  &nz))  g_cam_sign_z  = nz  ? -1.0f : 1.0f;
-        igSameLine(); if (igCheckbox("neg pitch", &nrx)) g_cam_sign_rx = nrx ? -1.0f : 1.0f;
-        if (igCheckbox("neg yaw",    &nry)) g_cam_sign_ry = nry ? -1.0f : 1.0f;
-        if (igButton("Reset convention")) {
-            g_cam_sign_x = 1.0f; g_cam_sign_y = 1.0f; g_cam_sign_z = -1.0f;
-            g_cam_sign_rx = 1.0f; g_cam_sign_ry = 1.0f;
-        }
-        bool ro = g_cam_rot_only != 0;
-        if (igCheckbox("rotation only (eye baked)", &ro)) g_cam_rot_only = ro;
-        bool ab = g_cam_auto_baked != 0;
-        if (igCheckbox("auto eye-baked (SETPOS=-eye)", &ab)) g_cam_auto_baked = ab;
-        igText("cam_mode = %d  (9=fight look-at, 0=attract movie)", g_cam_mode_value);
-        bool ar = g_cam_auto_rot != 0;
-        if (igCheckbox("auto rot-only when cam_mode != 9", &ar)) g_cam_auto_rot = ar;
-        bool we = g_geo_windows_enabled != 0;
-        if (igCheckbox("window (set_window) support", &we)) g_geo_windows_enabled = we;
     }
 
     igSeparator();

@@ -343,6 +343,14 @@ async function pass(snapped) {
         for (let k = 0; k < 4; k++) stream += chainWords(row, k, pose[k < 2 ? 1 : 9]);
         await emu.rpc('cop_exec', { words: stream, reset: 1 });
         const tgp = (await emu.rpc('dump_tgp')).tgp;
+        /* The slots are the board's words: both bones of a chain keep T at the
+         * pivot. The explorer's lower bone starts at the elbow, one upper-bone
+         * length along the upper bone's x axis, so move it there to compare. */
+        for (let k = 0; k < 4; k++) {
+            const c = CHAINS[k], lo = tgp[c.lowerSlot], up = tgp[c.upperSlot];
+            for (let w = 0; w < 3; w++)
+                lo[9 + w] = Math.fround(lo[9 + w] + Math.fround(row.limbs[k].upper * up[w]));
+        }
 
         acc.frames++;
         for (let k = 0; k < 4; k++) {
