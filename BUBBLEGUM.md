@@ -80,10 +80,10 @@ Two smaller gaps in the same area:
 | `0x28805151` pushes three zeros | `sharc_exec.h:1820` | Port PM 0x20EF5 (reads the slot through DM 0x3033F). |
 | `cop_read` returns 0 on an empty FIFO | `cop.h:233` | The board would stall. At least log an underflow at WARN. This is how `0x17002E2E` once hid. |
 | `ldtime` returns 0 | `i960_exec.h:901` | Return the cycle count. |
-| `_700000_loop` hook zeroes the sound-init delay | `sfight.h:283` | A speed-up that shifts boot timing against MAME. Remove it, or label it as one. |
-| `warning_skip_addr` is on by default | `emu_thread.h:365` | Convenience, but it moves the timeline against MAME. |
-| FV model table / mesh pointer values are STF's with TODOs | `fvipers.h:~327` | Verify them against FV. |
-| `fov = 65` for display-list profiles | `main.c:246-251` | Derive it from the GEO's focal and window values. |
+| `_700000_loop` hook zeroes the sound-init delay | `sfight.h:283` | **Removed (#254).** It moved no game frame: boot slices are not frames here, and every column of `det_digest` but work RAM (frames 2-32) was the same. Only the netplay check (instruction count) changed, so `NETPLAY_PROTO_REV` is 11. |
+| `warning_skip_addr` is on by default | `emu_thread.h:365` | **Labelled, measured (#254).** Japan boot: a frame here is MAME's + 800 with the skip (+812 by the attract fight), + 160 without (`det_digest --region japan --nowarnskip`). Kept on, since the graders pair frames by content; a netplay session now always skips. |
+| FV model table / mesh pointer values are STF's with TODOs | `fvipers.h:~327` | **Verified (#254).** FV's table is at 0xE0004 too, with its length (5412) in the word before; its 3711 mesh pointers decode with STF's encoding inside its polygon ROM. |
+| `fov = 65` for display-list profiles | `main.c:246-251` | **Derived (#254).** `geo3d_scan_displaylist` sets fov = 2·atan(192/fy) from the list's focal command (68.9° for m2-sdk's 280). The window's centre is the screen's for a full-screen window, and fx ≠ fy cannot be shown by the host camera. |
 
 ## Doc drift found on the way
 

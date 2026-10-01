@@ -51,6 +51,11 @@
  * are the same frame for frame if the i960 cannot tell. --pcm FILE writes
  * every sample the board produced (16-bit stereo, 44.1 kHz, raw).
  *
+ * --region japan|usa|export powers up in that region (USA by default, as the
+ * emulator does); --nowarnskip leaves the Japan warning screen in, ~640 game
+ * frames, as MAME does. --peek HEXADDR adds that byte to each line (the mode
+ * at 50002A, the sub-mode at 500030), to pair frames with a MAME log.
+ *
  * Two builds of it, one from each configuration, so each has exactly its
  * frontend's compiler flags:
  *   native  --target det_digest in a desktop build tree (not a ctest: it needs a ROM)
@@ -256,6 +261,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     uint32_t frames = 3600, from = 0;
+    uint32_t peek_addr = 0;
     bool frames_given = false, sound_cols = false, cpu_cols = false;
     const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL;
     for (int i = 2; i < argc; i++) {
@@ -270,6 +276,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
         else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
         else if (!strcmp(argv[i], "--live-timers"))             g_irqt_live = 1;
+        else if (!strcmp(argv[i], "--nowarnskip"))              g_warning_skip = 0;
+        else if (!strcmp(argv[i], "--region") && i + 1 < argc) { const char *r = argv[++i]; g_region = !strcmp(r, "japan") ? GAME_REGION_JAPAN : !strcmp(r, "export") ? GAME_REGION_EXPORT : GAME_REGION_USA; }
+        else if (!strcmp(argv[i], "--peek")   && i + 1 < argc) peek_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
@@ -382,6 +391,7 @@ int main(int argc, char **argv) {
             fprintf(out, " %016llx %llu", (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
                     (unsigned long long)g_sound.out_total);
         }
+        if (peek_addr) fprintf(out, " %02x", mem_read8(&bus, peek_addr));
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);

@@ -687,6 +687,9 @@ typedef struct {
     float            cam_x, cam_y, cam_z;
     float            rot_x, rot_y;
     float            fov_deg;
+    /* Take fov_deg from the display list's focal command (a geo_displaylist
+     * profile; geo3d_scan_displaylist). Moving the FOV by hand clears it. */
+    bool             fov_auto;
 
     /* Manual single-model browser (when use_captures = false) */
     int              model_index;
@@ -1588,6 +1591,16 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
                         geo->captured_count++;
                 }
             }
+        } else if ((cmd == 9 || cmd == 0x19) && p + 2u < buff_words) {
+            /* FOCAL: fx, fy in pixels; the GEO puts y at fy*y/z from the window's
+             * centre. The host's perspective puts it at 192*cot(fov/2)*y/z on the
+             * 384-line screen, and x at the same scale (aspect 496/384), so this
+             * fov is the board's projection when fx == fy (m2-sdk's geo_focal(280,
+             * 280): 68.9 degrees). */
+            float fy;
+            memcpy(&fy, &buff_ram[p + 2], 4);
+            if (geo->fov_auto && fy > 1.0f)
+                geo->fov_deg = 2.0f * atanf(192.0f / fy) * (180.0f / 3.14159265f);
         } else if (cmd == 0xa && p + 3u < buff_words) {
             /* LIGHT (0x05000A0A): 3 floats (x,y,z). The GEO lights each face by
              * normal·light; mirror it into the renderer's light dir so the flat

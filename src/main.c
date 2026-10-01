@@ -242,11 +242,13 @@ static void load_active_profile(const char *primary_zip) {
         input_reset();
         input_attach(&state.bus);
         /* geo_displaylist profiles emit camera-space geometry: start from an identity
-         * view + focal-matched fov (live-tunable via the set_camera bridge cmd). */
+         * view, and take the fov from the list's focal command (geo3d_scan_displaylist;
+         * set_camera's fov or the 3D window's drag overrides it). */
         if (g_active_profile->quirks.geo_displaylist) {
             state.geo3d.cam_x = state.geo3d.cam_y = state.geo3d.cam_z = 0.0f;
             state.geo3d.rot_x = state.geo3d.rot_y = 0.0f;
-            state.geo3d.fov_deg = 65.0f;
+            state.geo3d.fov_deg  = 60.0f;
+            state.geo3d.fov_auto = true;
         }
         emu_ensure_started();
         emu_update_snapshots(&state.emu);

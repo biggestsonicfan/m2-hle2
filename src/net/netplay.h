@@ -157,8 +157,11 @@
  *    frame above it, the processor starts at MAME's reset PC, and modpc takes
  *    its mask from src2 (i960_exec.h), so the registers the frame check hashes
  *    and the stack differ from a board before it; the game does not.
+ * 11: STF runs its boot's sound-init delay (no _700000_loop hook, sfight.h),
+ *    so the cold boot takes 2.1M more instructions, which the frame check
+ *    counts, and work RAM differs for frames 2-32; the game does not.
  */
-#define NETPLAY_PROTO_REV 10
+#define NETPLAY_PROTO_REV 11
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

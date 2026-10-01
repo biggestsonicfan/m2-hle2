@@ -209,9 +209,17 @@ static bool s_irq_from_table     = false;
 static int  s_irq_slices         = 0;
 static uint64_t s_frame_steps    = 0;   /* i960 instructions since the last frame edge (emu_sound_slice_end) */
 
-/* Warning-screen auto-skip. ON normally; turn OFF to keep our attract timeline
- * frame-aligned with MAME (which shows the warning for its full duration) when
- * comparing camera data by the game frame counter. */
+/* Warning-screen auto-skip: a convenience that MOVES THE TIMELINE against MAME.
+ * Holding the profile's flag at 1 (STF: SKIP_WARNING, 0x500410) makes the
+ * Japan boot go straight to attract instead of drawing the warning for its
+ * 640-frame CTRL_TIMER. Measured on STF powered up as Japan (Pinboard #254):
+ * with the skip a game frame here is MAME's frame + 800 (+812 by the attract
+ * fight, load timing); with --nowarnskip, + 160, which is MAME's boot before
+ * the game counts frames (163 frames to mode 1). USA and export skip the screen
+ * on their own, so it only matters for Japan. The graders run Japan with the
+ * skip on and pair frames by content (pins, camera), not by a fixed offset.
+ * A netplay session always skips, so a peer's menu setting cannot split the
+ * two boots. */
 static volatile int g_warning_skip = 1;
 
 /* match_replay: 0 off, 1 armed, 2 done (the jump was made), -1 the profile has
@@ -386,7 +394,7 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     const game_quirks_t *q   = &g_active_profile->quirks;
 
     /* Auto-skip the boot warning screen by holding its ack flag at 1. */
-    if (g_warning_skip && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
+    if ((g_warning_skip || netplay_active()) && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
 
     /* Did the in-service handler return? (frame unwound to/below baseline) */
     if (s_irq_in_service && cpu->frame_depth <= s_irq_baseline_depth)
