@@ -34,7 +34,9 @@ import { findRom, mameRomPath } from './lib/rom.mjs';
 import { REPO } from './lib/noclip.mjs';
 import { Report } from './lib/report.mjs';
 import { parseArgs } from './lib/args.mjs';
-import { IN, P1_ROB, ROB_CHAR } from './lib/board.mjs';
+import { COIN1, IN, P1_ROB, ROB_CHAR } from './lib/board.mjs';
+
+const MODE = 0x50002a;                               /* sub mode at MODE + 6 */
 
 const args = parseArgs(['chars', 'frames', 'out', 'port']);
 const CHARS = args.str('chars', '4,10').split(',').map(Number);
@@ -89,18 +91,26 @@ if (missing.length) {
  * cursor no longer answers the stick, so a second fighter in the same run
  * would silently be the first one again. */
 async function captureHere(ch) {
-    process.env.M2HLE_UNTHROTTLE = '1';
     const emu = await M2Hle.launch({ rom: findRom().primary, port: args.num('port', 7172) });
     const tap = async (bits, frames = 6) => { await emu.setInput(bits); await emu.waitFrames(frames); await emu.setInput(0); await emu.waitFrames(frames); };
     const charNow = async () => (await emu.readMemory(P1_ROB + ROB_CHAR, 1))[0];
     try {
         await emu.waitUntilRunning();
-        await emu.waitFrames(900, 120000);
-        await tap(0x1);                                   /* COIN1 */
-        await emu.waitFrames(60);
-        await tap(IN.START1);
+        /* Coin and Start the way lib/dl.mjs reachRound does, until the real
+         * select screen has held a second, as osage-select.lua waits for it:
+         * mode 7, sub 5. Attract passes through 7/5 briefly too, and fixed frame
+         * counts drifted when the slice became the board's vblank. Paced, so the
+         * inputs land on the frames they are timed for. */
+        for (let fc = 0, held = 0; held < 60; fc += 2) {
+            if (fc > 8000) throw new Error('character select never came up');
+            await emu.setInput(fc > 300 && fc % 600 < 8 ? COIN1 : fc > 300 && fc % 60 < 6 ? IN.START1 : 0);
+            await emu.waitFrames(2, 20000);
+            const [mode, , , , , , sub] = await emu.readMemory(MODE, 7);
+            held = mode === 7 && sub === 5 ? held + 2 : 0;
+        }
+        await emu.setInput(0);
         await emu.waitFrames(400, 120000);
-        for (let i = 0; i < 12 && await charNow() !== ch; i++) await tap(IN.P1_RIGHT, 12);
+        for (let i = 0; i < 12 && await charNow() !== ch; i++) await tap(IN.P1_RIGHT, 10);
         await emu.waitFrames(40);
         const got = await charNow();
         const r = await emu.rpc('capture_dl', { cop: 1, frames: FRAMES, path: path.join(OUT, `here-c${ch}`),
