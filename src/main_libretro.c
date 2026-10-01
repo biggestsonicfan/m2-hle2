@@ -512,6 +512,62 @@ static void lr_apply_words(uint32_t w0, uint32_t w1) {
     g_input.use_net  = 1;
 }
 
+/* ---- A scripted run (profiling) --------------------------------------------------
+ *
+ * M2HLE_SCRIPT="449:c,460:,517:s,530:,..." takes player 1's pad from a script
+ * keyed to board frames, the web build's ?script= (main_web.c): at frame N hold
+ * exactly these keys -- u d l r, 1-4 the buttons, s start, c coin. It is how a
+ * device profile plays the same match against the CPU on every run. Never in
+ * a session. */
+#define LR_SCRIPT_MAX 1024
+static struct { uint32_t frame, held; } g_lr_script[LR_SCRIPT_MAX];
+static int      g_lr_script_n = -1, g_lr_script_at;
+static uint32_t g_lr_script_held;
+
+static void lr_script_load(void) {
+    g_lr_script_n = 0;
+    const char *p = getenv("M2HLE_SCRIPT");
+    if (!p || !g_active_profile) return;
+    const game_input_map_t *in = &g_active_profile->input;
+    while (*p && g_lr_script_n < LR_SCRIPT_MAX) {
+        char *colon = NULL;
+        unsigned long frame = strtoul(p, &colon, 10);
+        if (!colon || *colon != ':') break;
+        const char *end = strchr(colon, ',');
+        if (!end) end = colon + strlen(colon);
+        uint32_t held = 0;
+        for (const char *k = colon + 1; k < end; k++) {
+            switch (*k) {
+                case 'u': held |= in->bits[GAME_INPUT_P1_UP];    break;
+                case 'd': held |= in->bits[GAME_INPUT_P1_DOWN];  break;
+                case 'l': held |= in->bits[GAME_INPUT_P1_LEFT];  break;
+                case 'r': held |= in->bits[GAME_INPUT_P1_RIGHT]; break;
+                case '1': held |= in->bits[GAME_INPUT_P1_B1];    break;
+                case '2': held |= in->bits[GAME_INPUT_P1_B2];    break;
+                case '3': held |= in->bits[GAME_INPUT_P1_B3];    break;
+                case '4': held |= in->bits[GAME_INPUT_P1_B4];    break;
+                case 's': held |= in->bits[GAME_INPUT_P1_START]; break;
+                case 'c': held |= in->bits[GAME_INPUT_P1_COIN];  break;
+                default: break;
+            }
+        }
+        g_lr_script[g_lr_script_n].frame = (uint32_t)frame;
+        g_lr_script[g_lr_script_n].held  = held;
+        g_lr_script_n++;
+        p = *end ? end + 1 : end;
+    }
+    lr_log(RETRO_LOG_INFO, "M2HLE_SCRIPT: %d steps", g_lr_script_n);
+}
+
+/* The script's pad at this board frame; `held` when there is no script. */
+static uint32_t lr_script_held(uint32_t held) {
+    if (g_lr_script_n < 0) lr_script_load();
+    if (!g_lr_script_n) return held;
+    while (g_lr_script_at < g_lr_script_n && g_lr_script[g_lr_script_at].frame <= g_emu_frames)
+        g_lr_script_held = g_lr_script[g_lr_script_at++].held;
+    return g_lr_script_held;
+}
+
 /* ---- Online play: RetroArch (netpacket) ------------------------------------------ */
 
 static pkt_lockstep_t          g_pkt;
@@ -1290,6 +1346,7 @@ static void lr_draw(bool ran) {
     if (!g_gfx_ready) { video_cb(NULL, (unsigned)w, (unsigned)h, 0); return; }
     sg_reset_state_cache();   /* the context is shared: RetroArch drew with it since */
     if (ran && !lobby) game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+    hprof_phase(3);
     static ps3ui_canvas_t lobby_cv;
     if (lobby || overlay) {
         ps3ui_gpu_record(&lobby_cv, w, h);
@@ -1313,11 +1370,13 @@ static void lr_draw(bool ran) {
         ps3ui_gpu_draw(&lobby_cv);   /* over the game, for the title prompt and the pause menu */
         sgl_draw();
     }
+    hprof_phase(4);
     int zone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
     sg_end_pass();
     sg_commit();
     lr_gl_discard_depth(hw_render.get_current_framebuffer());
     lr_gl_restore();
+    hprof_phase(5);
     video_cb(RETRO_HW_FRAME_BUFFER_VALID, (unsigned)w, (unsigned)h, 0);
     hprof_leave(zone);
 }
@@ -1587,9 +1646,12 @@ RETRO_API void retro_run(void) {
     if (!in_session) held |= g_shell_on ? lr_port_held_shell(1) : lr_port_held(1);
     bool board_paused = false;
     if (g_shell_on && !lr_shell_input(&board_paused)) held = 0;
+    if (!in_session) held = lr_script_held(held);
 
     if (opt.online == LR_ONLINE_RPCN) lr_rpcn_toasts();
 
+    hprof_phase(0);   /* the frame log's phases: 0 input, 1 board, 2 audio, 3-5 lr_draw, 6 sound wait */
+    int64_t snd_wait0 = g_emu_times.sound_wait_us;
     bool ran;
     if (board_paused) {
         ran = false;   /* the shell's menus: the board waits, as the PS3 suspends it */
@@ -1612,8 +1674,12 @@ RETRO_API void retro_run(void) {
     g_lr_runs++;
     if (!ran) g_lr_skips++;
     lr_heat_tick();
+    hprof_phase(1);
+    hprof_phase_set(6, g_emu_times.sound_wait_us - snd_wait0);
     lr_push_audio();
+    hprof_phase(2);
     lr_draw(ran);
+    hprof_frame_end(g_emu_frames);
 }
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }

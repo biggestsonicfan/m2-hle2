@@ -187,6 +187,11 @@ static int g_game_render_fill_shade = 0;
  * (one texture operation instead of four). Needs an ES 3.1 context on GLES.
  * Off by default. Set before game_render_init. */
 static int g_game_render_fill_gather = 0;
+/* Give a game frame's faces the board's sort key as their vertex z instead of
+ * writing it with gl_FragDepth, so the GPU keeps its early depth test. -1 (the
+ * default) is on for GLES and off elsewhere; $M2HLE_VDEPTH=0/1 overrides it.
+ * GL builds only. Set before game_render_init. */
+static int g_game_render_vertex_depth = -1;
 /* Give faces colour ramp rows (default); 0 keeps the shader's colorxlat lookup
  * for all of them (timing comparisons). Set before game_render_init. */
 static int g_game_render_fill_ramp = 1;
@@ -383,7 +388,24 @@ static const char *game_render_fill_vs_glsl =
     /* The board clips only at the four sides through the eye: with z = 0 at
      * every vertex, -w <= z <= w is w >= 0, so the clipper cuts at the eye
      * plane, not at the near or far plane (MAME check_culling). */
+    "#ifdef FLAT_VERTEX_DEPTH\n"
+    /* The same order as a vertex z, so the fill need not write gl_FragDepth and
+     * the GPU keeps its early depth test (g_game_render_vertex_depth). The
+     * slice (nearest window 0) and the key come back as integers, and
+     * slice*65536 + key goes on an odd multiple of 2^-25 just under depth 0.5:
+     * a float exactly, the middle of its 24-bit depth step, and so near z = 0
+     * that z/w rounds by far less than a step. Faces of one key write one depth,
+     * and a tie still goes to the later polygon. The clipper still cuts only
+     * at w = 0: |z| is under w / 64. On the Mali every frame of attract and a
+     * fight is identical to gl_FragDepth's; llvmpipe, which extrapolates z
+     * from its own plane equation, differs on a few pixels in a few frames. */
+    "    float sn = znear * 0.5 + 0.5, sf = zfar * 0.5 + 0.5;\n"
+    "    float nwin = floor(1.0 / (sf - sn) + 0.5), slice = floor(sn * nwin + 0.5);\n"
+    "    float order = slice * 65536.0 + floor((-a_zs.y - 1.0) * 65536.0);\n"
+    "    gl_Position.z = (2.0 * (order - nwin * 65536.0) + 1.0) * (1.0 / 16777216.0) * gl_Position.w;\n"
+    "#else\n"
     "    gl_Position.z = 0.0;\n"
+    "#endif\n"
     "  }\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl; ez = -a_pos.z;\n"
     "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
@@ -564,7 +586,9 @@ static const char *game_render_fill_fs_ref_glsl =
     "    rgb = clamp(max(vec3(cr,cg,cb) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
+    "#ifndef FLAT_VERTEX_DEPTH\n"
     "  gl_FragDepth = fdepth >= 0.0 ? fdepth : gl_FragCoord.z;\n"
+    "#endif\n"
     "}\n";
 
 /*
@@ -714,7 +738,9 @@ static const char *game_render_fill_fs_glsl =
     "    rgb = shade(li);\n"
     "  }\n"
     "  frag_color = vec4(rgb, 1.0);\n"
+    "#ifndef FLAT_VERTEX_DEPTH\n"
     "  gl_FragDepth = fdepth >= 0.0 ? fdepth : gl_FragCoord.z;\n"
+    "#endif\n"
     "}\n";
 
 static const char *game_render_fill_vs_hlsl =
@@ -877,7 +903,13 @@ static inline const char *game_render_glsl(sg_backend backend, const char *src, 
      * define goes only to the fill shader, which is the one that reads it. */
     bool gather = g_game_render_fill_gather != 0;
     bool define = gather && strstr(src, "USE_GATHER") != NULL;
-    if (backend != SG_BACKEND_GLES3 && !define) return src;
+    if (g_game_render_vertex_depth < 0) {
+        const char *e = getenv("M2HLE_VDEPTH");
+        g_game_render_vertex_depth = (e && (*e == '0' || *e == '1')) ? *e - '0'
+                                   : backend == SG_BACKEND_GLES3;
+    }
+    bool vdepth = g_game_render_vertex_depth > 0 && strstr(src, "FLAT_VERTEX_DEPTH") != NULL;
+    if (backend != SG_BACKEND_GLES3 && !define && !vdepth) return src;
     const char *body = src + sizeof head - 1;
     char *out = buf[stage], *end = out + sizeof buf[0];
     #define GAME_RENDER_GLSL_PUT(text) do { \
@@ -892,6 +924,7 @@ static inline const char *game_render_glsl(sg_backend backend, const char *src, 
         GAME_RENDER_GLSL_PUT(head);
     }
     if (define) GAME_RENDER_GLSL_PUT(gather_def);
+    if (vdepth) GAME_RENDER_GLSL_PUT("#define FLAT_VERTEX_DEPTH 1\n");
     GAME_RENDER_GLSL_PUT(body);
     #undef GAME_RENDER_GLSL_PUT
     *out = '\0';
