@@ -140,7 +140,7 @@ static struct {
     /* Its own vertex buffers: sokol allows one sg_update_buffer per buffer per
      * frame, and the frame has already spent the renderer's on the game. */
     sg_buffer fill_vbuf, line_vbuf;
-    int       fill_cap, line_cap;        /* in vertices */
+    int       fill_cap, line_cap;        /* triangles, line vertices */
 
     /* Its own triangle sink, so a decode here never lands in the buffer the
      * frame was built in (the same reason mcp_bridge.h's model dump has one). */
@@ -500,13 +500,13 @@ static inline bool objview__ensure_target(int w, int h) {
     return true;
 }
 
-static inline bool objview__ensure_buffers(int fill_verts, int line_verts) {
-    if (fill_verts > g_objview.fill_cap) {
+static inline bool objview__ensure_buffers(int fill_tris, int line_verts) {
+    if (fill_tris > g_objview.fill_cap) {
         if (g_objview.fill_vbuf.id) sg_destroy_buffer(g_objview.fill_vbuf);
-        int cap = fill_verts + fill_verts / 2 + 3072;
+        int cap = fill_tris + fill_tris / 2 + 1024;
         g_objview.fill_vbuf = sg_make_buffer(&(sg_buffer_desc){
             .usage.dynamic_update = true,
-            .size = (size_t)cap * sizeof(game_render_tex_vertex_t),
+            .size = (size_t)cap * sizeof(game_render_tex_tri_t),
             .label = "objview-fill-vbuf" });
         g_objview.fill_cap = g_objview.fill_vbuf.id ? cap : 0;
     }
@@ -519,7 +519,7 @@ static inline bool objview__ensure_buffers(int fill_verts, int line_verts) {
             .label = "objview-line-vbuf" });
         g_objview.line_cap = g_objview.line_vbuf.id ? cap : 0;
     }
-    return (fill_verts <= g_objview.fill_cap) && (line_verts <= g_objview.line_cap);
+    return (fill_tris <= g_objview.fill_cap) && (line_verts <= g_objview.line_cap);
 }
 
 /* ---- Drawing ------------------------------------------------------------- */
@@ -534,15 +534,15 @@ static inline bool objview__ensure_buffers(int fill_verts, int line_verts) {
  * The GPU buffers underneath are the viewer's, because sokol allows one
  * sg_update_buffer per buffer per frame and the frame has spent the renderer's.
  */
-static inline void objview__upload(int *out_fill_verts, int *out_line_verts) {
+static inline void objview__upload(int *out_fill_tris, int *out_line_verts) {
     int nt = g_objview.tris.count;
     if (nt > GEO3D_MAX_TRIS) nt = GEO3D_MAX_TRIS;
     int nl = g_geo3d_lines.count;
     if (nl > GEO3D_MAX_LINES) nl = GEO3D_MAX_LINES;
 
-    *out_fill_verts = 0;
+    *out_fill_tris = 0;
     *out_line_verts = 0;
-    if (!objview__ensure_buffers(nt * 3, nl * 2)) return;
+    if (!objview__ensure_buffers(nt, nl * 2)) return;
 
     if (nt > 0) {
         /* The frame's own packing (game_render_batch_flush), so shading here and
@@ -551,33 +551,24 @@ static inline void objview__upload(int *out_fill_verts, int *out_line_verts) {
          * colour the game has not drawn falls back to the flat path. */
         for (int i = 0; i < nt; i++) {
             const geo3d_tri_t *T = &g_objview.tris.tris[i];
-            game_render_tex_vertex_t *v = &g_game_render.fill_verts[i * 3];
-            v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].u=T->u0; v[0].v=T->v0;
-            v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
-            v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].u=T->u2; v[2].v=T->v2;
             float lb   = g_luma_ramp ? T->lb : -1.0f;
             float ramp = 1.0f;
             if (g_game_render.ramp_enabled) {
                 int row = game_render__ramp_row(T->r, T->g, T->b);
                 if (row >= 0) ramp = (float)(row + 2);
             }
-            for (int k = 0; k < 3; k++) {
-                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=ramp;
-                v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
-                v[k].lb=lb; v[k].pl=T->pl; v[k].fl=geo3d_face_fill_flags(T->fl); v[k].texlod=T->texlod;
-                /* Plain depth here: the board's polygon z-sort is right under
-                 * the board's own camera and turns a floor into a wall under a
-                 * free one, and this viewer's camera goes anywhere. A face's
-                 * layer holds from any side it is drawn from, so it stays (the
-                 * explorer's model view keeps it too); its plane is camera
-                 * space for the board's camera and does not. */
-                v[k].zs=GEO3D_ZSORT_NONE; v[k].zl=T->zl;
-            }
+            /* Plain depth here (zsort false): the board's polygon z-sort is
+             * right under the board's own camera and turns a floor into a wall
+             * under a free one, and this viewer's camera goes anywhere. A
+             * face's layer holds from any side it is drawn from, so it stays
+             * (the explorer's model view keeps it too); its plane is camera
+             * space for the board's camera and does not. */
+            game_render_pack_tri(&g_game_render.fill_tris[i], T, lb, geo3d_face_fill_flags(T->fl), ramp, false);
         }
         sg_update_buffer(g_objview.fill_vbuf, &(sg_range){
-            .ptr  = g_game_render.fill_verts,
-            .size = (size_t)nt * 3 * sizeof(game_render_tex_vertex_t) });
-        *out_fill_verts = nt * 3;
+            .ptr  = g_game_render.fill_tris,
+            .size = (size_t)nt * sizeof(game_render_tex_tri_t) });
+        *out_fill_tris = nt;
     }
     if (nl > 0) {
         for (int i = 0; i < nl; i++) {
@@ -595,7 +586,7 @@ static inline void objview__upload(int *out_fill_verts, int *out_line_verts) {
 
 /* One pass: clear the target and draw the uploaded geometry from one angle. */
 static inline void objview__draw(const objview_t *v, float yaw, float pitch,
-                                 int fill_verts, int line_verts) {
+                                 int fill_tris, int line_verts) {
     float eye[3], rot_y, rot_x;
     objview__eye(v, yaw, pitch, eye, &rot_y, &rot_x);
 
@@ -627,7 +618,7 @@ static inline void objview__draw(const objview_t *v, float yaw, float pitch,
     sg_apply_viewport(0, 0, g_objview.rt_w, g_objview.rt_h, true);
     sg_apply_scissor_rect(0, 0, g_objview.rt_w, g_objview.rt_h, true);
 
-    if (fill_verts > 0) {
+    if (fill_tris > 0) {
         sg_apply_pipeline(v->cull == 1 ? g_game_render.fill_pipeline_cw :
                           v->cull == 2 ? g_game_render.fill_pipeline_ccw :
                                          g_game_render.fill_pipeline);
@@ -640,7 +631,7 @@ static inline void objview__draw(const objview_t *v, float yaw, float pitch,
             .samplers[0]       = g_game_render.atlas_sampler,
         });
         sg_apply_uniforms(0, &(sg_range){ .ptr = &vs, .size = sizeof vs });
-        sg_draw(0, fill_verts, 1);
+        sg_draw(0, 3, fill_tris);   /* one instance per triangle */
     }
     if (v->wireframe && line_verts > 0) {
         sg_apply_pipeline(g_game_render.line_pipeline);
@@ -747,7 +738,7 @@ static inline void objview_service(const romset_t *rs, memory_bus_t *bus) {
     g_objview.refresh = 0;
 
     char     err[192];
-    int      fill_verts = 0, line_verts = 0;
+    int      fill_tris = 0, line_verts = 0;
     int      n = 1;
     uint8_t *px = NULL;
     float    eye[3], ry, rx;
@@ -766,8 +757,8 @@ static inline void objview_service(const romset_t *rs, memory_bus_t *bus) {
     v->height = g_objview.rt_h;
     if (v->autofit) objview__autofit(v);
 
-    objview__upload(&fill_verts, &line_verts);
-    if (fill_verts == 0 && line_verts == 0) {
+    objview__upload(&fill_tris, &line_verts);
+    if (fill_tris == 0 && line_verts == 0) {
         snprintf(err, sizeof err, "nothing to draw for model %d", v->drawn_model);
         goto fail;
     }
@@ -775,7 +766,7 @@ static inline void objview_service(const romset_t *rs, memory_bus_t *bus) {
     if (!shooting) {
         objview__eye(v, v->yaw, v->pitch, eye, &ry, &rx);
         memcpy(v->cam, eye, sizeof eye);
-        objview__draw(v, v->yaw, v->pitch, fill_verts, line_verts);
+        objview__draw(v, v->yaw, v->pitch, fill_tris, line_verts);
         g_objview.last_ok     = 1;
         g_objview.last_err[0] = '\0';
         g_objview.serial++;     /* last: a bridge caller polls this for a refresh */
@@ -804,7 +795,7 @@ static inline void objview_service(const romset_t *rs, memory_bus_t *bus) {
             pitch = rq->pitch0 + rq->pitch_step * (float)i;
         }
 
-        objview__draw(v, yaw, pitch, fill_verts, line_verts);
+        objview__draw(v, yaw, pitch, fill_tris, line_verts);
 
         objview_shot_t *s = &rq->shot[rq->shots];
         memset(s, 0, sizeof *s);

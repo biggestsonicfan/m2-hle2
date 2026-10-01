@@ -34,20 +34,39 @@ typedef struct {
     float r, g, b, a;
 } game_render_line_vertex_t;
 
-/* Textured fill vertex: position + flat color + tile-relative texel UV + atlas
- * tile rect (tx,ty,tw,th in pixels; tw<=0 → untextured).  The shader wraps the
- * interpolated UV within the tile per-pixel before sampling the atlas. */
+/* Textured fill triangle, drawn as one instance of three vertices: the three
+ * corners (position, the polygon's sort z or GEO3D_ZSORT_NONE, tile-relative
+ * texel UV) and the face's values once. The vertex shader picks its corner by
+ * gl_VertexID. As three vertices that each repeated the face, a triangle was
+ * 240 bytes, and the upload was most of the GL driver's time on the ARC-S. */
 typedef struct {
-    float x, y, z;
-    float r, g, b, a;
-    float u, v;
-    float tx, ty, tw, th;
+    float x0, y0, z0, zs0;
+    float x1, y1, z1, zs1;
+    float x2, y2, z2, zs2;
+    float u0, v0, u1, v1;
+    float u2, v2;
+    float zl;                   /* the layer as a [0, 1] depth offset (geo3d_mesh_layers) */
+    float pad;
+    float r, g, b, a;           /* flat colour; a = colour ramp row + 2 (1 for none) */
+    float tx, ty, tw, th;       /* atlas tile rect (pixels); tw<=0 → untextured */
     float lb, pl;               /* lumabase + poly_luma for the colorxlat luma ramp */
     float fl;                   /* GEO3D_FACE_* flags */
     float texlod;               /* the board's texlod, or GEO3D_TEXLOD_NONE */
-    float zs;                   /* the polygon's sort z, or GEO3D_ZSORT_NONE */
-    float zl;                   /* its layer as a [0, 1] depth offset (geo3d_mesh_layers) */
-} game_render_tex_vertex_t;
+} game_render_tex_tri_t;
+
+/* T's corners and face into an instance. lb, fl and a are the caller's: they
+ * depend on the view's toggles and the colour ramps. */
+static inline void game_render_pack_tri(game_render_tex_tri_t *o, const geo3d_tri_t *T,
+                                        float lb, float fl, float a, bool zsort) {
+    o->x0 = T->x0; o->y0 = T->y0; o->z0 = T->z0; o->zs0 = zsort ? T->zs0 : GEO3D_ZSORT_NONE;
+    o->x1 = T->x1; o->y1 = T->y1; o->z1 = T->z1; o->zs1 = zsort ? T->zs1 : GEO3D_ZSORT_NONE;
+    o->x2 = T->x2; o->y2 = T->y2; o->z2 = T->z2; o->zs2 = zsort ? T->zs2 : GEO3D_ZSORT_NONE;
+    o->u0 = T->u0; o->v0 = T->v0; o->u1 = T->u1; o->v1 = T->v1;
+    o->u2 = T->u2; o->v2 = T->v2; o->zl = T->zl; o->pad = 0.0f;
+    o->r = T->r;   o->g = T->g;   o->b = T->b;   o->a = a;
+    o->tx = T->tx; o->ty = T->ty; o->tw = T->tw; o->th = T->th;
+    o->lb = lb;    o->pl = T->pl; o->fl = fl;    o->texlod = T->texlod;
+}
 
 typedef struct {
     float mvp[16];
@@ -141,8 +160,8 @@ typedef struct {
     /* CPU scratch for line uploads — 2 verts per geo3d_line_t */
     game_render_line_vertex_t line_verts[GEO3D_MAX_LINES * 2];
 
-    /* CPU scratch for fill uploads — 3 verts per geo3d_tri_t */
-    game_render_tex_vertex_t  fill_verts[GEO3D_MAX_TRIS * 3];
+    /* CPU scratch for fill uploads — one instance per geo3d_tri_t */
+    game_render_tex_tri_t     fill_tris[GEO3D_MAX_TRIS];
 
     bool        initialized;
 } game_render_t;
@@ -321,12 +340,16 @@ static const char *game_render_line_fs_hlsl =
 static const char *game_render_fill_vs_glsl =
     "#version 410\n"
     "uniform vec4 vs_params[4];\n"
-    "layout(location=0) in vec3 a_pos;\n"
-    "layout(location=1) in vec4 a_color;\n"
-    "layout(location=2) in vec2 a_uv;\n"
-    "layout(location=3) in vec4 a_tile;\n"
-    "layout(location=4) in vec4 a_lbpl;\n"
-    "layout(location=5) in vec2 a_zs;\n"   /* sort z, layer offset */
+    /* One instance per triangle (game_render_tex_tri_t): the corners are
+     * x, y, z, sort z; then u0 v0 u1 v1, u2 v2 layer. */
+    "layout(location=0) in vec4 a_p0;\n"
+    "layout(location=1) in vec4 a_p1;\n"
+    "layout(location=2) in vec4 a_p2;\n"
+    "layout(location=3) in vec4 a_uv01;\n"
+    "layout(location=4) in vec4 a_uv2;\n"
+    "layout(location=5) in vec4 a_color;\n"
+    "layout(location=6) in vec4 a_tile;\n"
+    "layout(location=7) in vec4 a_lbpl;\n"
     "out vec4 color;\n"
     "out vec2 uv;\n"
     "out float ez;\n"
@@ -346,6 +369,10 @@ static const char *game_render_fill_vs_glsl =
      * bit, and a mouth or an eye z-fights with the face it is painted on. */
     "invariant gl_Position;\n"
     "void main() {\n"
+    "  vec4 p = gl_VertexID == 0 ? a_p0 : (gl_VertexID == 1 ? a_p1 : a_p2);\n"
+    "  vec2 a_uv = gl_VertexID == 0 ? a_uv01.xy : (gl_VertexID == 1 ? a_uv01.zw : a_uv2.xy);\n"
+    "  vec3 a_pos = p.xyz;\n"
+    "  vec2 a_zs = vec2(p.w, a_uv2.z);\n"   /* sort z, layer offset */
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
     /* The board's polygon z-sort (geo3d.h geo3d_sort_z): the whole polygon is
@@ -689,18 +716,23 @@ static const char *game_render_fill_fs_glsl =
 
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
-    "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float4 lbpl : TEXCOORD2; float2 zs : TEXCOORD3; };\n"
+    "struct vs_in { float4 p0 : TEXCOORD0; float4 p1 : TEXCOORD1; float4 p2 : TEXCOORD2; float4 uv01 : TEXCOORD3; float4 uv2 : TEXCOORD4;\n"
+    "               float4 color : TEXCOORD5; float4 tile : TEXCOORD6; float4 lbpl : TEXCOORD7; uint vid : SV_VertexID; };\n"
     "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
-    "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
+    /* The instance's corner — see the GLSL vertex shader above. */
+    "  float4 p = inp.vid == 0 ? inp.p0 : (inp.vid == 1 ? inp.p1 : inp.p2);\n"
+    "  float2 uv = inp.vid == 0 ? inp.uv01.xy : (inp.vid == 1 ? inp.uv01.zw : inp.uv2.xy);\n"
+    "  float2 zs = float2(p.w, inp.uv2.z);\n"
+    "  outp.pos = mul(mvp, float4(p.xyz, 1.0));\n"
     /* The board's polygon z-sort — see the GLSL vertex shader above. */
-    "  if (inp.zs.x < 1.0e29 && outp.pos.w > 0.0) {\n"
-    "    float4 pz = float4(inp.pos.xy, inp.zs.x, 1.0);\n"
+    "  if (zs.x < 1.0e29 && outp.pos.w > 0.0) {\n"
+    "    float4 pz = float4(p.xy, zs.x, 1.0);\n"
     "    outp.pos.z = clamp(dot(mvp[2], pz) / max(dot(mvp[3], pz), 1e-6), -1.0, 1.0) * outp.pos.w;\n"
     "  }\n"
-    "  if (outp.pos.w > 0.0) outp.pos.z -= inp.zs.y * outp.pos.w;\n"
-    "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl; outp.ez = -inp.pos.z;\n"
+    "  if (outp.pos.w > 0.0) outp.pos.z -= zs.y * outp.pos.w;\n"
+    "  outp.color = inp.color; outp.uv = uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl; outp.ez = -p.z;\n"
     "  return outp;\n"
     "}\n";
 
@@ -1128,18 +1160,17 @@ static inline void game_render_init(void) {
     /* ---- Fill (solid/textured triangle) pipeline -------------------------- */
     g_game_render.fill_vbuf = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .vertex_buffer = true, .dynamic_update = true },
-        .size  = GEO3D_MAX_TRIS * 3 * sizeof(game_render_tex_vertex_t),
+        .size  = GEO3D_MAX_TRIS * sizeof(game_render_tex_tri_t),
         .label = "game-render-fill-vbuf",
     });
     {
         sg_shader_desc d;
         memset(&d, 0, sizeof(d));
-        d.attrs[0].hlsl_sem_name  = "POSITION"; d.attrs[0].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[1].hlsl_sem_name  = "COLOR";    d.attrs[1].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[2].hlsl_sem_name  = "TEXCOORD"; d.attrs[2].hlsl_sem_index = 0; d.attrs[2].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[3].hlsl_sem_name  = "TEXCOORD"; d.attrs[3].hlsl_sem_index = 1; d.attrs[3].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[4].hlsl_sem_name  = "TEXCOORD"; d.attrs[4].hlsl_sem_index = 2; d.attrs[4].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[5].hlsl_sem_name  = "TEXCOORD"; d.attrs[5].hlsl_sem_index = 3; d.attrs[5].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+        for (int a = 0; a < 8; a++) {   /* a_p0 .. a_lbpl: TEXCOORD0..7 on D3D */
+            d.attrs[a].hlsl_sem_name  = "TEXCOORD";
+            d.attrs[a].hlsl_sem_index = (uint8_t)a;
+            d.attrs[a].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
+        }
         d.uniform_blocks[0].stage                 = SG_SHADERSTAGE_VERTEX;
         d.uniform_blocks[0].size                  = sizeof(game_render_vs_params_t);
         d.uniform_blocks[0].hlsl_register_b_n     = 0;
@@ -1228,19 +1259,20 @@ static inline void game_render_init(void) {
         memset(&p, 0, sizeof(p));
         p.shader                   = g_game_render.fill_shader;
         p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
-        p.layout.attrs[0].format   = SG_VERTEXFORMAT_FLOAT3;
-        p.layout.attrs[0].offset   = offsetof(game_render_tex_vertex_t, x);
-        p.layout.attrs[1].format   = SG_VERTEXFORMAT_FLOAT4;
-        p.layout.attrs[1].offset   = offsetof(game_render_tex_vertex_t, r);
-        p.layout.attrs[2].format   = SG_VERTEXFORMAT_FLOAT2;
-        p.layout.attrs[2].offset   = offsetof(game_render_tex_vertex_t, u);
-        p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
-        p.layout.attrs[3].offset   = offsetof(game_render_tex_vertex_t, tx);
-        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT4;
-        p.layout.attrs[4].offset   = offsetof(game_render_tex_vertex_t, lb);
-        p.layout.attrs[5].format   = SG_VERTEXFORMAT_FLOAT2;   /* zs, zl */
-        p.layout.attrs[5].offset   = offsetof(game_render_tex_vertex_t, zs);
-        p.layout.buffers[0].stride = sizeof(game_render_tex_vertex_t);
+        /* One instance per triangle; the vertex shader picks its corner by
+         * gl_VertexID / SV_VertexID. */
+        static const size_t tri_attr_off[8] = {
+            offsetof(game_render_tex_tri_t, x0), offsetof(game_render_tex_tri_t, x1),
+            offsetof(game_render_tex_tri_t, x2), offsetof(game_render_tex_tri_t, u0),
+            offsetof(game_render_tex_tri_t, u2), offsetof(game_render_tex_tri_t, r),
+            offsetof(game_render_tex_tri_t, tx), offsetof(game_render_tex_tri_t, lb),
+        };
+        for (int a = 0; a < 8; a++) {
+            p.layout.attrs[a].format = SG_VERTEXFORMAT_FLOAT4;
+            p.layout.attrs[a].offset = (int)tri_attr_off[a];
+        }
+        p.layout.buffers[0].stride    = sizeof(game_render_tex_tri_t);
+        p.layout.buffers[0].step_func = SG_VERTEXSTEP_PER_INSTANCE;
         p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
         p.depth.write_enabled      = true;
         p.label = "game-render-fill-pipeline";
@@ -1792,8 +1824,8 @@ static inline void game_render_draw_overlay(sg_view layer_view,
 }
 
 static inline void game_render_submit_lines(const game_render_vs_params_t *vs, int first, int vcount);
-static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int vcount);
-static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int vcount, int can_discard);
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int ntris);
+static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int ntris, int can_discard);
 
 /*
  * Draw the 3D wireframe lines currently in g_geo3d_lines over the tile quad.
@@ -1865,22 +1897,12 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
     if (n > GEO3D_MAX_TRIS) n = GEO3D_MAX_TRIS;
     for (int i = 0; i < n; i++) {
         const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
-        game_render_tex_vertex_t *v = &g_game_render.fill_verts[i * 3];
-        v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].r=T->r; v[0].g=T->g; v[0].b=T->b; v[0].a=1.f; v[0].u=T->u0; v[0].v=T->v0;
-        v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].r=T->r; v[1].g=T->g; v[1].b=T->b; v[1].a=1.f; v[1].u=T->u1; v[1].v=T->v1;
-        v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].r=T->r; v[2].g=T->g; v[2].b=T->b; v[2].a=1.f; v[2].u=T->u2; v[2].v=T->v2;
         float lb = g_luma_ramp ? T->lb : -1.0f;   /* -1 → old flat_color×luma path */
-        for (int _k = 0; _k < 3; _k++) {
-            v[_k].tx=T->tx; v[_k].ty=T->ty; v[_k].tw=T->tw; v[_k].th=T->th;
-            v[_k].lb=lb;    v[_k].pl=T->pl; v[_k].fl=geo3d_face_fill_flags(T->fl); v[_k].texlod=T->texlod;
-            v[_k].zs = _k == 0 ? T->zs0 : (_k == 1 ? T->zs1 : T->zs2);
-            v[_k].zl = T->zl;
-        }
+        game_render_pack_tri(&g_game_render.fill_tris[i], T, lb, geo3d_face_fill_flags(T->fl), 1.0f, true);
     }
-    int vcount = n * 3;
     sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
-        .ptr  = g_game_render.fill_verts,
-        .size = (size_t)vcount * sizeof(game_render_tex_vertex_t),
+        .ptr  = g_game_render.fill_tris,
+        .size = (size_t)n * sizeof(game_render_tex_tri_t),
     });
 
     float proj[16], view[16], mvp[16], mvp_t[16];
@@ -1894,7 +1916,7 @@ static inline void game_render_draw_fills(float cam_x, float cam_y, float cam_z,
 
     game_render_vs_params_t vs_params;
     memcpy(vs_params.mvp, mvp_t, sizeof(mvp_t));
-    game_render_submit_fills(&vs_params, 0, vcount);
+    game_render_submit_fills(&vs_params, 0, n);
 }
 
 /* The fill pipeline for a cull setting (g_backface_cull 0/1/2) and whether the
@@ -1905,15 +1927,18 @@ static inline sg_pipeline game_render_fill_pip(int cull, int can_discard) {
     return v == 1 ? g_game_render.fill_pipeline_cw : v == 2 ? g_game_render.fill_pipeline_ccw : g_game_render.fill_pipeline;
 }
 
-static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int vcount) {
-    game_render_submit_fills_as(vs, first, vcount, 1);
+static inline void game_render_submit_fills(const game_render_vs_params_t *vs, int first, int ntris) {
+    game_render_submit_fills_as(vs, first, ntris, 1);
 }
 
-static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int vcount, int can_discard) {
+/* Triangles [first, first + ntris) of the fill buffer, one instance each. GLES 3
+ * has no base instance, so the first is a buffer offset. */
+static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs, int first, int ntris, int can_discard) {
     const game_render_vs_params_t vs_params = *vs;
     sg_apply_pipeline(game_render_fill_pip(g_backface_cull, can_discard));
     sg_apply_bindings(&(sg_bindings){
         .vertex_buffers[0] = g_game_render.fill_vbuf,
+        .vertex_buffer_offsets[0] = first * (int)sizeof(game_render_tex_tri_t),
         .views[0]          = g_game_render.atlas_view,
         .views[1]          = g_game_render.luma_view,
         .views[2]          = g_game_render.cxlat_view,
@@ -1921,7 +1946,7 @@ static inline void game_render_submit_fills_as(const game_render_vs_params_t *vs
         .samplers[0]       = g_game_render.atlas_sampler,
     });
     sg_apply_uniforms(0, &(sg_range){ .ptr = &vs_params, .size = sizeof(vs_params) });
-    sg_draw(first, vcount, 1);
+    sg_draw(0, 3, ntris);
 }
 
 /* Replay this frame's layer behind the 3D and its logged fill draws into the
@@ -1944,6 +1969,7 @@ static inline void game_render_replay_fills(bool ref, sg_view back_view, sg_view
         sg_apply_scissor_rect(e->sx, e->sy, e->sw, e->sh, true);
         sg_apply_bindings(&(sg_bindings){
             .vertex_buffers[0] = g_game_render.fill_vbuf,
+            .vertex_buffer_offsets[0] = e->first * (int)sizeof(game_render_tex_tri_t),
             .views[0]          = g_game_render.atlas_view,
             .views[1]          = g_game_render.luma_view,
             .views[2]          = g_game_render.cxlat_view,
@@ -1953,7 +1979,7 @@ static inline void game_render_replay_fills(bool ref, sg_view back_view, sg_view
         game_render_vs_params_t vs;
         memcpy(vs.mvp, e->mvp, sizeof vs.mvp);
         sg_apply_uniforms(0, &(sg_range){ .ptr = &vs, .size = sizeof vs });
-        sg_draw(e->first, e->count, 1);
+        sg_draw(0, 3, e->count);
     }
 }
 
@@ -1995,10 +2021,6 @@ static inline void game_render_batch_flush(bool lines_only) {
         for (int i = 0; i < nt; i++) {
             const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
             can_discard[i] = ((int)(T->fl + 0.5f) & (int)(GEO3D_FACE_TRANSPARENT | GEO3D_FACE_CHECKER)) != 0;
-            game_render_tex_vertex_t *v = &g_game_render.fill_verts[i * 3];
-            v[0].x=T->x0; v[0].y=T->y0; v[0].z=T->z0; v[0].u=T->u0; v[0].v=T->v0;
-            v[1].x=T->x1; v[1].y=T->y1; v[1].z=T->z1; v[1].u=T->u1; v[1].v=T->v1;
-            v[2].x=T->x2; v[2].y=T->y2; v[2].z=T->z2; v[2].u=T->u2; v[2].v=T->v2;
             float lb = g_luma_ramp ? T->lb : -1.0f;
             /* colour alpha: the face's row + 2 (1.0, as before, without one). A
              * textured face with a luma band takes a shade row where there is
@@ -2014,16 +2036,10 @@ static inline void game_render_batch_flush(bool lines_only) {
                 row = game_render__ramp_row(T->r, T->g, T->b);
             }
             if (row >= 0) ramp = (float)(row + 2);
-            for (int k = 0; k < 3; k++) {
-                v[k].r=T->r; v[k].g=T->g; v[k].b=T->b; v[k].a=ramp;
-                v[k].tx=T->tx; v[k].ty=T->ty; v[k].tw=T->tw; v[k].th=T->th;
-                v[k].lb=lb;    v[k].pl=T->pl; v[k].fl=fl;    v[k].texlod=T->texlod;
-                v[k].zs = k == 0 ? T->zs0 : (k == 1 ? T->zs1 : T->zs2);
-                v[k].zl = T->zl;
-            }
+            game_render_pack_tri(&g_game_render.fill_tris[i], T, lb, fl, ramp, true);
         }
         sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
-            .ptr = g_game_render.fill_verts, .size = (size_t)nt * 3 * sizeof(game_render_tex_vertex_t) });
+            .ptr = g_game_render.fill_tris, .size = (size_t)nt * sizeof(game_render_tex_tri_t) });
         game_render__ramp_upload();
         g_fill_log.uploads++;
     }
@@ -2049,7 +2065,7 @@ static inline void game_render_batch_flush(bool lines_only) {
             int k = can_discard[s], e0 = s;
             if (split) while (e0 < end && can_discard[e0] == k) e0++;
             else       { e0 = end; k = 1; }
-            game_render_submit_fills_as(&vs, s * 3, (e0 - s) * 3, k);
+            game_render_submit_fills_as(&vs, s, e0 - s, k);
             if (g_game_render_fill_verify) {
                 if (g_fill_log.n == GAME_RENDER_FILL_LOG_MAX) {
                     g_fill_log.overflow = true;
@@ -2058,7 +2074,7 @@ static inline void game_render_batch_flush(bool lines_only) {
                     e->vx = g_fill_log.vx; e->vy = g_fill_log.vy; e->vw = g_fill_log.vw; e->vh = g_fill_log.vh;
                     e->sx = run->sx; e->sy = run->sy; e->sw = run->sw; e->sh = run->sh;
                     memcpy(e->mvp, vs.mvp, sizeof e->mvp);
-                    e->cull = g_backface_cull; e->first = s * 3; e->count = (e0 - s) * 3; e->can_discard = k;
+                    e->cull = g_backface_cull; e->first = s; e->count = e0 - s; e->can_discard = k;
                 }
             }
             s = e0;
