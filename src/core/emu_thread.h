@@ -541,6 +541,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     bool board_vblank = g_active_profile && g_active_profile->quirks.board_vblank;
     if (board_vblank) {
         irqt_raise(0x1u);
+        g_video_frame++;
         g_vblank_acked = 0;     /* the homebrew's vsync-ACK ends this slice */
         /* Mark the geo capture frame boundary, as the profiles' frame hook
          * does. Without it geo3d falls back to scanning the WHOLE capture

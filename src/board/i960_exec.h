@@ -946,12 +946,17 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     FP_DST_WRITE(v);
                     break;
                 }
-                case 0x675: // cvtilr
+                case 0x675: // cvtilr: the result is a LONG real (a register pair)
                 {
                     int32_t i = m1 ? (int32_t)i960_real_to_int32(cpu->fp_regs[src1_idx & 3])
                                    : (int32_t)reg_read(cpu, src1_idx);
                     double v = (double)i;
-                    FP_DST_WRITE(v);
+                    if (m3) cpu->fp_regs[dst_idx & 3] = v;
+                    else {
+                        uint64_t u = i960_double_to_bits(v);
+                        reg_write(cpu, dst_idx & 0x1E, (uint32_t)u);
+                        reg_write(cpu, (dst_idx & 0x1E) + 1, (uint32_t)(u >> 32));
+                    }
                     break;
                 }
 
@@ -1048,6 +1053,110 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, bo
                     break;
                 }
 
+                // Long reals: an integer operand is the register PAIR from the
+                // even register named (low word first), holding an IEEE double
+                // (MAME get_1_rifl / set_rifl). STF never uses them; Sega Rally
+                // does, in the code it copies into work RAM at boot.
+                #define FP_PAIR_AS_DOUBLE(idx) i960_bits_to_double( \
+                    (uint64_t)reg_read(cpu, (idx) & 0x1E) | (uint64_t)reg_read(cpu, ((idx) & 0x1E) + 1) << 32)
+                #define FP_SRC1L (m1 ? FP_LIT_OR_REG(src1_idx) : FP_PAIR_AS_DOUBLE(src1_idx))
+                #define FP_SRC2L (m2 ? FP_LIT_OR_REG(src2_idx) : FP_PAIR_AS_DOUBLE(src2_idx))
+                #define FP_DST_WRITEL(val) do { \
+                    double v_ = (val); \
+                    if (m3) cpu->fp_regs[dst_idx & 3] = v_; \
+                    else { uint64_t u_ = i960_double_to_bits(v_); \
+                           reg_write(cpu, dst_idx & 0x1E, (uint32_t)u_); \
+                           reg_write(cpu, (dst_idx & 0x1E) + 1, (uint32_t)(u_ >> 32)); } \
+                } while (0)
+
+                case 0x6D9: // movrl
+                    FP_DST_WRITEL(FP_SRC1L);
+                    break;
+                case 0x79F: // addrl
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b + a, b, a));
+                    break;
+                }
+                case 0x79D: // subrl
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b - a, b, a));
+                    break;
+                }
+                case 0x79C: // mulrl
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b * a, b, a));
+                    break;
+                }
+                case 0x79B: // divrl (MAME: a plain divide, x/0 is an infinity)
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b / a, b, a));
+                    break;
+                }
+                case 0x694: // cmporl
+                case 0x695: // cmprl (MAME cmp_d: unordered leaves no bit set)
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    if (a < b)       set_cc(cpu, CC_L);
+                    else if (a == b) set_cc(cpu, CC_E);
+                    else if (a > b)  set_cc(cpu, CC_G);
+                    else             set_cc(cpu, CC_NO);
+                    break;
+                }
+
+                // The rest of the FPU, single and long (MAME i960.cpp 68.x / 69.x).
+                // STF uses none of these; Sega Rally does. Host libm stands in for
+                // the 80960KB's microcode, as it does in MAME.
+                case 0x680: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(atan2(b, a), b, a)); break; }  // atanr
+                case 0x690: { double a = FP_SRC1L, b = FP_SRC2L; FP_DST_WRITEL(i960_nan_result(atan2(b, a), b, a)); break; }  // atanrl
+                case 0x681: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(b * log2(a + 1.0), b, a)); break; }  // logepr
+                case 0x682: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(b * log2(a), b, a)); break; }  // logr
+                case 0x692: { double a = FP_SRC1L, b = FP_SRC2L; FP_DST_WRITEL(i960_nan_result(b * log2(a), b, a)); break; }  // logrl
+                case 0x683: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(fmod(b, a), b, a)); break; }  // remr
+                case 0x689: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(pow(2.0, a) - 1.0, a, a)); break; }  // expr
+                case 0x699: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(pow(2.0, a) - 1.0, a, a)); break; }  // exprl
+                case 0x68A: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(logb(a), a, a)); break; }  // logbnr
+                case 0x69A: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(logb(a), a, a)); break; }  // logbnrl
+                case 0x68B: { double a = FP_SRC1;  FP_DST_WRITE (i960_round_ac(cpu, a)); break; }  // roundr
+                case 0x69B: { double a = FP_SRC1L; FP_DST_WRITEL(i960_round_ac(cpu, a)); break; }  // roundrl
+                case 0x68C: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(sin(a), a, a)); break; }  // sinr
+                case 0x69C: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(sin(a), a, a)); break; }  // sinrl
+                case 0x68D: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(cos(a), a, a)); break; }  // cosr
+                case 0x69D: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(cos(a), a, a)); break; }  // cosrl
+                case 0x68E: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(tan(a), a, a)); break; }  // tanr
+                case 0x69E: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(tan(a), a, a)); break; }  // tanrl
+                case 0x698: // sqrtrl
+                {
+                    double v = FP_SRC1L;
+                    FP_DST_WRITEL(i960_nan_result(sqrt(v), v, v));
+                    break;
+                }
+                case 0x6E2: // cpysre: |src1| with src2's sign
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(b >= 0.0 ? fabs(a) : -fabs(a));
+                    break;
+                }
+                case 0x676: // scalerl: src2 * 2^src1 (src1 an integer)
+                {
+                    int32_t n = (int32_t)reg_read(cpu, src1_idx);
+                    FP_DST_WRITEL(ldexp(FP_SRC2L, n));
+                    break;
+                }
+                case 0x677: // scaler
+                {
+                    int32_t n = (int32_t)reg_read(cpu, src1_idx);
+                    FP_DST_WRITE(ldexp(FP_SRC2, n));
+                    break;
+                }
+
+                #undef FP_PAIR_AS_DOUBLE
+                #undef FP_SRC1L
+                #undef FP_SRC2L
+                #undef FP_DST_WRITEL
                 #undef FP_SRC1
                 #undef FP_SRC2
                 #undef FP_DST_WRITE

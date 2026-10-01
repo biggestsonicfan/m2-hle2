@@ -131,6 +131,25 @@ static inline uint8_t *zip_extract(const char *zippath, const char *filename,
     return (uint8_t *)data;
 }
 
+/* The file in the zip whose CRC-32 is `crc`, whatever it is called. MAME finds
+ * a set's files by CRC, so older dumps that name them differently still load
+ * (Sega Rally's srallyc.zip from 2010 has "epr-17888.12" for MAME's
+ * "epr-17888c.12", and the two copro_data ROMs' IC numbers swapped). */
+static inline uint8_t *zip_extract_by_crc(const char *zippath, uint32_t crc, size_t *out_size) {
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_file(&zip, zippath, 0)) return NULL;
+    void *data = NULL;
+    mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count && !data; i++) {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st) || st.m_is_directory) continue;
+        if ((uint32_t)st.m_crc32 == crc) data = mz_zip_reader_extract_to_heap(&zip, i, out_size, 0);
+    }
+    mz_zip_reader_end(&zip);
+    return (uint8_t *)data;
+}
+
 /* Try the child zip first (e.g. sfight.zip), fall back to the parent
  * (e.g. schamp.zip) for files shared via MAME's clone mechanism.
  * Verifies CRC32 — mismatches log a warning but the buffer is still
@@ -150,6 +169,8 @@ static inline uint8_t *zip_extract_from_set(const char *child_zip, const char *p
     uint32_t actual = 0;
     if (child_zip)  data = zip_extract(child_zip,  filename, out_size, &actual);
     if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size, &actual);
+    if (!data && child_zip  && (data = zip_extract_by_crc(child_zip,  expected_crc, out_size))) actual = expected_crc;
+    if (!data && parent_zip && (data = zip_extract_by_crc(parent_zip, expected_crc, out_size))) actual = expected_crc;
     if (!data) { LOG_ERROR("ROM not found: %s", filename); return NULL; }
 
     if (actual != expected_crc) {
@@ -207,6 +228,8 @@ typedef struct romset {
     uint8_t *textures;    size_t textures_size;
     uint8_t *audiocpu;    size_t audiocpu_size;
     uint8_t *samples;     size_t samples_size;
+    /* The CPU board's coprocessor tables (Model 2 / 2A TGP: opr-14742a/43a). */
+    uint8_t *tgp_tables;  size_t tgp_tables_size;
     bool     loaded;
 } romset_t;
 
@@ -218,6 +241,7 @@ static inline void romset_free(romset_t *rs) {
     free(rs->textures);
     free(rs->audiocpu);
     free(rs->samples);
+    free(rs->tgp_tables);
     memset(rs, 0, sizeof(*rs));
 }
 

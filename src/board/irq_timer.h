@@ -53,6 +53,10 @@ static irq_timer_t g_irqt = {0};
  * vsync wait loop, which both throttles the i960 to 60 Hz and frees the host CPU. */
 static volatile int g_vblank_acked = 0;
 
+/* Vblanks raised so far (the screen's frame number, MAME m_screen->frame_number):
+ * the video control register at 0x98000C reports a bit of it (model2a.h). */
+static volatile uint32_t g_video_frame = 0;
+
 static inline uint32_t irqt_request_read(void)        { return g_irqt.intreq; }
 static inline void     irqt_request_ack (uint32_t d)  {
     if ((g_irqt.intreq & 1u) && !(d & 1u)) { g_vblank_acked = 1; emu_attn_bump(); }   /* vblank consumed */
