@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "build_features.h"
 #include "log.h"
 
 #define BP_MAX 64
@@ -41,6 +42,11 @@ static bp_state_t g_bp = {0};
 static inline void bp_init(void) { memset(&g_bp, 0, sizeof(g_bp)); }
 
 #define BP_BIT(addr) (1ull << (((addr) >> 2) & 63u))
+
+/* Whether the run loop has to call bp_check, and whether one has hit. Constant
+ * false in a build without the debugger's hooks (build_features.h). */
+static inline bool bp_armed(void) { return M2HLE_DEV_TOOLS && g_bp.bloom != 0; }
+static inline bool bp_hit(void)   { return M2HLE_DEV_TOOLS && g_bp.hit; }
 
 static inline void bp__rebuild_bloom(void) {
     uint64_t m = 0;
@@ -84,7 +90,7 @@ static inline int bp_check(uint32_t ip) {
      * affordable: a grader runs the whole board with a breakpoint on the
      * frame hook, and used to pay for the table on every instruction to do
      * it. The walk still stops once it has seen the slots in use. */
-    if (!(g_bp.bloom & BP_BIT(ip))) return 0;
+    if (!M2HLE_DEV_TOOLS || !(g_bp.bloom & BP_BIT(ip))) return 0;
     for (int i = 0, seen = 0; i < BP_MAX && seen < g_bp.count; i++) {
         if (!g_bp.list[i].active) continue;
         seen++;

@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "build_features.h"
 #include "log.h"
 
 #define WP_MAX 16
@@ -40,6 +41,11 @@ typedef struct {
 static wp_state_t g_wp = {0};
 
 static inline void wp_init(void) { memset(&g_wp, 0, sizeof(g_wp)); }
+
+/* Whether the bus has to call wp_check, and whether one has tripped. Constant
+ * false in a build without the debugger's hooks (build_features.h). */
+static inline bool wp_armed(void)   { return M2HLE_DEV_TOOLS && g_wp.count != 0; }
+static inline bool wp_tripped(void) { return M2HLE_DEV_TOOLS && g_wp.hit; }
 
 static inline int wp_add(uint32_t lo, uint32_t hi, bool on_write, bool on_read,
                          const char *label) {
@@ -81,7 +87,7 @@ static inline void wp_clear_all(void) {
 /* Called from the memory bus on each access.  `ip` is the i960 IP performing it.
  * Records the FIRST match per slice; the emu thread clears g_wp.hit after stop. */
 static inline void wp_check(uint32_t addr, uint32_t val, bool is_write, uint32_t ip) {
-    if (g_wp.count == 0 || g_wp.hit) return;
+    if (!wp_armed() || g_wp.hit) return;
     for (int i = 0, seen = 0; i < WP_MAX && seen < g_wp.count; i++) {
         const watchpoint_t *w = &g_wp.list[i];
         if (!w->active) continue;

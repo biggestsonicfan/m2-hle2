@@ -374,6 +374,31 @@ EMSCRIPTEN_KEEPALIVE void web_audio_set_nudge(double nudge) {
     g_web_audio_nudge = nudge < -0.01 ? -0.01 : nudge > 0.01 ? 0.01 : nudge;
 }
 
+/* Who runs the sound driver: the 68000 running the game's own program (0, the
+ * default) or STF's driver ported to C (1, board/sound_hle.h), which runs the
+ * sound board in about half the time (4-11% of a whole frame here, measured
+ * with det_digest under Node) -- the page offers it for slower devices. Any
+ * other game keeps the 68000 whatever this says (shle_driver_known).
+ *
+ * The board takes the choice at a sound reset. With no session that happens
+ * here and now: the driver boots afresh, so the music stops until the game's
+ * next cue, as emu_sound_restart says. In a session it waits for the next cold
+ * boot -- every match starts with one -- because restarting the sound board
+ * moves the UART's clock, and the i960 reads that. Either driver gives the i960
+ * the same frames (det_digest --sound-hle), so the two players need not agree.
+ * Returns 1 if the change took effect now, 0 if it waits. */
+EMSCRIPTEN_KEEPALIVE int web_set_sound_driver(int c) {
+    g_sound_hle_want = c != 0;
+    if (!state.romset.loaded || !g_active_profile->quirks.enable_68k_sound) return 0;
+    if (g_shle.on == (g_sound_hle_want && shle_driver_known())) return 1;   /* nothing to change */
+    if (netplay_active()) return 0;
+    emu_sound_restart(NULL);
+    return 1;
+}
+
+/* The driver the board is running now: 0 the 68000, 1 the one in C. */
+EMSCRIPTEN_KEEPALIVE int web_sound_driver(void) { return g_shle.on ? 1 : 0; }
+
 /* What the board produced since the last call goes to the worklet in one chunk. */
 static void web_push_audio(void) {
     if (g_web_audio != WEB_AUDIO_WORKLET) return;
