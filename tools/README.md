@@ -50,10 +50,23 @@ Node 18 or newer, because the explorer's zip reader goes through
 `DecompressionStream`.
 
 You supply the ROM set. Nothing here carries one and `.gitignore` refuses
-`*.zip`. Drop `sfight.zip` in the repository root or in `roms/` (add
-`schamp.zip` beside it for a split set), or point `$STF_ROM` at one; sibling `../stf-tools` and
-`../noclip` checkouts are searched too. Both sides of every comparison read that
-same file, so a grade can never be measuring two different games.
+`*.zip`. In the dev container every stock set is in one folder, `$ROMS_DIR`
+(`~/build/mameroms`, symlinks), and the tools look there first: if a set is not
+there, it is not in the container. Elsewhere, drop `sfight.zip` in the repository
+root or in `roms/` (add `schamp.zip` beside it for a split set), or point
+`$STF_ROM` at one; sibling `../stf-tools` and `../noclip` checkouts are searched
+too. Both sides of every comparison read that same file, so a grade can never be
+measuring two different games.
+
+Never copy a set into a scratch or build directory to run it. `M2Hle.launch`
+runs the emulator from a directory of its own per port (`<tmp>/m2hle-run-<port>`,
+or its `cwd` option), so its log never lands beside the ROM, and finds
+`schamp.zip` beside the `--rom` path. Running from the ROM's folder is also
+wrong for a second reason: the sfight profile loads a loose
+`sfight/epr-19001.15` / `epr-19002.16` from the working directory over the
+zip's, and `claude_mame/mame/roms` has such a folder (a homebrew program).
+The C tests that load STF (`rom_test`, `boot_test`, `geo_test`, `input_test`,
+`snd_replay`, `snd_bench`, `m68k_fuzz`) take `$ROMDIR`, else `$ROMS_DIR`.
 
 Anything a capture writes is the game's own data. It goes to a temp directory
 outside the checkout by default, and that is deliberate.
@@ -92,6 +105,7 @@ its built-in `WebSocket`.
 | `match-replay.mjs` | attract mode's preprogrammed Sonic vs Bean fight, frame by frame against MAME: both fighters' whole work structures and the bufferram the coprocessor hands back outside the FIFO. The fight is an input replay, so any difference is a difference in simulation. See "match_replay" below |
 | `grade-zsort.mjs` | which face wins where faces lie on faces (`geo3d_mesh_layers`), in pictures against MAME's. Plays the attract replay in MAME and here, here with the layers off and on, and counts, of the pixels the layers change, how many each puts nearer MAME. `--stage N` puts the replay on another stage in both. See "Faces lying on faces" below |
 | `grade-carpet.mjs` | the explorer's Flying Carpet rug against MAME's pictures, from the board's own camera: the plate `draw_sphynx_head` lays under the rug (3332) must cover none of it, because the board sorts it behind every strip. Reads `grade-zsort --mame --stage 1`'s snapshots and cameras, renders the explorer headless (puppeteer-core, Edge) at each, counts the rug pixels the plate changes, and holds the rug's pattern and the desert's sky to MAME's at the board's focal length and flight clock. See "The Flying Carpet's rug" below |
+| `grade-lunar-fox.mjs` | the Death Egg II cutscene (the Lunar Fox leaves Tails' lab), in pictures against MAME's. A cheat on both boards (`tools/mame/lunar-fox.lua` there) wins a 1P game up to Giant Wing; pictures pair by (part, `am_cntr`), and the Tails emblem on the lab doors must sit within `--tol` of MAME's. See "The Death Egg II cutscene" below |
 | `grade-osage.mjs` | the sway chains (Fang's tail, Bean's feathers) at character select, against MAME: `Fn_osage`'s answers replayed from the board's own records, the ops that build the matrix a chain hangs from, and that matrix as this emulator hands it over. See "Sway chains (osage) at character select" below |
 | `grade-reset.mjs` | the reset a netplay session starts from. Boots, runs into attract, performs the barrier's reset with no session (`board_reset` over the bridge) and holds the boot that follows against the first boot — registers and nine RAM regions, byte for byte — from two different states, the second reset on top of the first. Needs no oracle: the emulator is its own. See "The netplay reset" below |
 | `bench-builds.mjs` | how fast each build runs the board, headless and unthrottled: game frames a second past the texture-load spike, builds alternated, best of each. The throughput companion of `ab-builds`; `bench-render.mjs` is the renderer's: each build headless with the A/V server up and drained, so the main thread draws every board frame on the real D3D11 device, and `get_status`'s `render` block gives the microseconds each stage (tile compose, scan, upload, 3D draw, tile quads) costs a frame. Its `emu` block is the emulation's side, cumulative too: `i960_us`, `cop_us` (sampled, scaled by `cop_cmds`), `sound_us` split into `m68k_us` and `scsp_us` (sampled), `work_us` against `pace_us` (asleep for the 60 Hz pacing) and `net_us`, and a histogram of each frame's work with the worst since the last read (`src/core/emu_times.h`) |
@@ -385,8 +399,9 @@ stage loads. It checks, in order:
 - the bufferram ranges.
 
 It needs `$MAME_EXE` (default `../claude_mame/mame/mame.exe`) and a
-`$MAME_ROMPATH` that holds only `sfight.zip`, `schamp.zip` and `segabill.zip`
-(default `tools/mame/mameroms`), as `tools/mame/cop_capture.py` does.
+`$MAME_ROMPATH` with `sfight.zip`, `schamp.zip` and `segabill.zip` and no loose
+`sfight/` folder (default `$ROMS_DIR`, else `tools/mame/mameroms`), as
+`tools/mame/cop_capture.py` does.
 `--ref <file>` grades against another MAME reference and `--show N` prints the differing
 words of N frames from each check's first difference (default 6).
 
@@ -524,6 +539,37 @@ node tools/grade-carpet.mjs [--out DIR]             # the explorer at each (~25 
   heading, take that clock. The desert then registers: the sky IoU off the rug
   and under the HUD must reach 0.6, and is 0.707 at 323, 0.697 four frames
   either side and 0.254 on `frame_counter`.
+
+## The Death Egg II cutscene (`grade-lunar-fox`)
+
+After a 1P game beats the ninth fighter on Giant Wing, `VIC_DSP` moves to
+sub-mode 0x1E and `MEZASE_DEATHEGG_DSP` plays the Lunar Fox rolling out of
+Tails' lab and taking off. Attract never gets there, so both boards are taken
+there by the same cheat: coin, Start, the pilot picked at select (`--char`),
+`STAGE_ID` (`0x500054`) held at 8 through select so ROUND_INIT loads Giant
+Wing, and every round won on time (P1's energy at `rob+0x1AC` held full, P2's
+at 1, `game_timer` cut). On MAME that is `tools/mame/lunar-fox.lua`; here it
+is the grader over the bridge.
+
+```sh
+node tools/grade-lunar-fox.mjs --mame [--char 0]   # MAME's snapshots (~10 min)
+node tools/grade-lunar-fox.mjs [--char 0]          # play it here and grade (~2 min)
+node tools/grade-lunar-fox.mjs --set zheld=0       # the same, with a set_camera key
+```
+
+- **Pairing:** the fight takes a different number of frames on each board,
+  so frames pair by the cutscene's own clock, `am_cntr` (`0x5004C4`), which
+  starts again at 0 when the scene moves from the lab to space (the part).
+- **The measurement:** per pair, the mean difference a channel over the whole
+  frame and over the emblem crop (`--crop`, default `196,140,104,70`); `--out`
+  writes MAME | here strips of each. The check holds the crop's worst pair
+  while the doors are in shot (lab, `am_cntr` < 200) within `--tol` (3).
+- **What it found (Pinboard #225):** the emblem is a quad inside each door
+  model (3490, 3491) 0.032 in front of the door panel at depth ~113, where the
+  depth buffer cannot tell them apart, and it fought the door in stripes:
+  worst crop 8.51. With `geo3d_mesh_layers` ordering such pairs by the board's
+  sort (`zheld`), mean 0.78, worst 1.67. Past `am_cntr` 200 the camera looks
+  down on the launch smoke, which differs by 17-36 and is not the emblem.
 
 ## Sway chains (osage) at character select
 

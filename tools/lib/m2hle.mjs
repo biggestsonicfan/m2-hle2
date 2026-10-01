@@ -22,6 +22,7 @@
  */
 import net from 'node:net';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { REPO } from './noclip.mjs';
@@ -138,11 +139,19 @@ export class M2Hle {
      *
      * `region` defaults to 'japan' for the same reason: the emulator powers
      * STF up as USA, and MAME's sfight boots as Japan, which changes the boot
-     * warning, attract and the fighters' names. null leaves the emulator's own. */
+     * warning, attract and the fighters' names. null leaves the emulator's own.
+     *
+     * `cwd` is where it runs, and so where m2hle.log (or m2hle-<port>.log) goes:
+     * by default a directory of its own per port under the system temp folder,
+     * never the ROM's folder. That folder is shared (the dev container's
+     * $ROMS_DIR), and the sfight profile also loads loose sfight/epr-19001.15 /
+     * epr-19002.16 from the working directory over the zip's, which turns a
+     * stock set into homebrew. The parent zip (schamp.zip) is found beside the
+     * --rom path, so the ROMs need no copying. */
     static async launch({ rom, port = DEFAULT_PORT, run = true, exe = null, profile = 'sfight',
                           region = 'japan',
                           quiet = true, timeoutMs = 30000,
-                          headless = !process.env.M2_WINDOW, extraArgs = [] } = {}) {
+                          headless = !process.env.M2_WINDOW, extraArgs = [], cwd = null } = {}) {
         if (!rom) throw new Error('launch needs a rom path');
         /* Something already listening on the port would be attached to below
          * instead of the emulator this launches, which cannot take the port and
@@ -155,7 +164,9 @@ export class M2Hle {
             s.once('error', () => res(false));
         });
         if (taken) throw new Error(`port ${port} already has something listening (another emulator?) — pass a free --port`);
-        const bin = exe ?? findExe();
+        /* A relative path is resolved here: the emulator runs from runDir below. */
+        const raw = exe ?? findExe();
+        const bin = /[\\/]/.test(raw) ? path.resolve(raw) : raw;
         /* $M2HLE_EXTRA_ARGS goes to every emulator a grader starts, so a run can
          * be graded with an option the grader itself knows nothing about (the
          * handheld's --live-timers, say). */
@@ -165,10 +176,10 @@ export class M2Hle {
                       ...(region ? ['--region', region] : []), ...extraArgs, ...envArgs];
         if (run) args.push('--run');
         if (headless) args.push('--headless');
-        /* Run it beside the ROM: a split set needs schamp.zip found next to
-         * sfight.zip, the same rule the explorer's loader states. */
+        const runDir = cwd ?? path.join(os.tmpdir(), `m2hle-run-${port}`);
+        fs.mkdirSync(runDir, { recursive: true });
         const child = spawn(bin, args, {
-            cwd: path.dirname(path.resolve(rom)),
+            cwd: runDir,
             stdio: quiet ? 'ignore' : 'inherit',
         });
         let spawnErr = null;

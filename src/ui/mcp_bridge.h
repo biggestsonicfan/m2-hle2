@@ -189,6 +189,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
+             "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
              "\"texload\":{\"hle\":%s,\"rows\":%llu},"
              "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
@@ -198,6 +199,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
              g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
              g_match_replay_frame,
+             g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
              g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
              av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
@@ -295,12 +297,17 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     }
     if (mcp_json_get_str(req,"zlayer_board",v,sizeof v)) g_geo3d_layer_board = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zlayer_plane",v,sizeof v)) g_geo3d_layer_plane = (atoi(v) != 0);
+    /* 0: faces of a mesh held further apart than one plane fight it out in the depth buffer. */
+    if (mcp_json_get_str(req,"zheld",   v,sizeof v)) g_geo3d_layer_held = (atoi(v) != 0);
+    /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
+    if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
     /* 0: a draw laid over the last with its matrix fights it for the faces they share (geo3d_tie_layer). */
     if (mcp_json_get_str(req,"zties",   v,sizeof v)) g_geo3d_ties = (atoi(v) != 0);
     /* 0: each draw's faces are ranked alone, not with the draws sharing its matrix (geo3d_run_get). */
     if (mcp_json_get_str(req,"zruns",   v,sizeof v)) g_geo3d_runs = (atoi(v) != 0);
     /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
     if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
+    if (mcp_json_get_str(req,"checker",v,sizeof v)) g_geo3d_checker_phase = (atoi(v) != 0);
     /* 0: a list in mode 2 or 3 is lit and culled with the ROM normals (geo3d_board_normal). */
     if (mcp_json_get_str(req,"nnormals",v,sizeof v)) g_geo3d_nn_normals = (atoi(v) != 0);
     char models[GEO3D_LAYER_MODELS_MAX * 8] = "";
@@ -506,13 +513,24 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
     /* Same mutex as the read, for the same reason -- see mcp_cmd_read_memory.
      * A write also has to land as one piece: the i960 must not run between the
      * first byte and the last. */
+    /* "rom":1 patches what the CPU reads, program ROM included (a grader's
+     * cheat, e.g. pinning rand()); the bus's own write map leaves ROM alone. */
+    char rom_s[8] = {0};
+    const bool rom = mcp_json_get_str(req, "rom", rom_s, sizeof rom_s) && atoi(rom_s) != 0;
     int count = 0;
     int locked = g_mcp.emu && g_mcp.emu->thread_alive;
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     for (int i = 0; hexdata[i*2] && hexdata[i*2+1]; i++) {
         char byte_str[3] = { hexdata[i*2], hexdata[i*2+1], 0 };
         uint8_t b = (uint8_t)strtoul(byte_str, NULL, 16);
-        mem_write8(g_mcp.bus, addr + (uint32_t)i, b);
+        const uint32_t a = addr + (uint32_t)i;
+        if (rom) {
+            uint8_t *pg = g_mcp.bus->rd_page[a >> 16];
+            if (!pg) break;
+            pg[a & 0xFFFFu] = b;
+        } else {
+            mem_write8(g_mcp.bus, a, b);
+        }
         count++;
     }
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
@@ -2173,6 +2191,21 @@ static void mcp_cmd_board_reset(char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"resets\":%u}", (unsigned)g_mcp.emu->reset_count);
 }
 
+/*
+ * {"cmd":"idle_hold","on":1} -- the CPU saver (g_idle_hold, emu_thread.h,
+ * --idle-until-match): while no netplay session owns the board, it is put back
+ * to power-on and not stepped. "on":0 lets it run attract again; no "on" only
+ * reads. "holding" says whether the run loop is holding it right now (it is
+ * not while a session plays, while stopped, or before the next slice).
+ */
+static void mcp_cmd_idle_hold(const char *req, char *resp, int cap) {
+    uint32_t on;
+    if (mcp_json_get_u32(req, "on", &on)) g_idle_hold = on != 0;
+    int holding = g_mcp.emu && g_mcp.emu->idle_holding;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"on\":%s,\"holding\":%s}",
+             g_idle_hold ? "true" : "false", holding ? "true" : "false");
+}
+
 /* ---- The debug object viewer (objview_cmd.h) -----------------------------
  *
  * The commands themselves are in objview_cmd.h, shared with the browser build.
@@ -2391,6 +2424,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "netplay_leave")            == 0) mcp_cmd_netplay_leave(resp, cap);
     else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
     else if (strcmp(cmd, "board_reset")              == 0) mcp_cmd_board_reset(resp, cap);
+    else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
     else if (strcmp(cmd, "dump_tex_stats")            == 0) {
         snprintf(resp, (size_t)cap,
             "{\"ok\":true,\"models\":%ld,\"models_uv\":%ld,\"models_mat\":%ld,"

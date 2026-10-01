@@ -24,9 +24,9 @@
  * added this tool); an older build is refused rather than silently mismeasured.
  */
 import os from 'node:os';
-import fs from 'node:fs';
 import path from 'node:path';
 import { M2Hle } from './lib/m2hle.mjs';
+import { findRom } from './lib/rom.mjs';
 import { parseArgs } from './lib/args.mjs';
 import { driveToAddr, fightInputAt, attractInputAt } from './lib/drive.mjs';
 
@@ -49,7 +49,7 @@ const FROM   = args.str('from') ? Number(args.str('from')) : named.from;
 const TO     = args.str('to')   ? Number(args.str('to'))   : named.to;
 const DRIVE  = args.str('drive', named.drive ?? 'fight');
 const ROUNDS = args.num('rounds', 3);
-const ROM    = path.resolve(args.str('rom', 'C:/Users/bigge/source/repos/ai/m2-hle2/test_m2snake/sfight.zip'));
+const ROM    = path.resolve(args.str('rom', '') || findRom().primary);
 const PORT   = args.num('port', 7351);
 const MAXF   = args.num('max-frames', 12000);
 if (FROM === undefined || TO === undefined) { console.error('need --from and --to (or a known --state)'); process.exit(2); }
@@ -60,17 +60,11 @@ const hex = (n) => '0x' + (n >>> 0).toString(16).toUpperCase().padStart(8, '0');
 /* Each build in its own directory: neither shares m2hle.log with the other or
  * with an emulator someone is already running. */
 function rundir(tag) {
-    const dir = path.join(os.tmpdir(), 'm2hle-state-' + tag);
-    fs.mkdirSync(dir, { recursive: true });
-    for (const z of ['sfight.zip', 'schamp.zip']) {
-        const src = path.join(path.dirname(ROM), z);
-        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, z));
-    }
-    return path.join(dir, path.basename(ROM));
+    return path.join(os.tmpdir(), 'm2hle-state-' + tag);
 }
 
 async function measure(exe, tag, port) {
-    const emu = await M2Hle.launch({ exe, rom: rundir(tag), port, run: true });
+    const emu = await M2Hle.launch({ exe, rom: ROM, cwd: rundir(tag), port, run: true });
     try {
         await emu.waitForRom();
         const at = await driveToAddr(emu, FROM, {

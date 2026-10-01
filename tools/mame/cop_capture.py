@@ -4,7 +4,8 @@ and the unit-matrix cache (see cop-capture.lua). tests/cop_replay.c replays it.
 
 Run: claude_mame/mcp_server/.venv/Scripts/python.exe cop_capture.py <outprefix> <from> <frames> <probes>
   <probes>: "hexaddr:size,..." — node -e "import('./tools/lib/dl.mjs').then(m=>console.log(m.probeListSpec(m.SCENE_PROBES)))"
-  MAME_ROMPATH: a directory holding only the zips (sfight, schamp, segabill).
+  MAME_ROMPATH: a directory of zips (sfight, schamp, segabill) with no loose
+    sfight/ folder; default $ROMS_DIR, else tools/mame/mameroms.
   MAME has to run -nodrc: the capture reads the SHARC's PC in a read tap.
 """
 import asyncio
@@ -20,7 +21,11 @@ from mame_client import MameBridge  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LUA = os.path.join(HERE, "cop-capture.lua").replace("\\", "/")
-ROMPATH = os.environ.get("MAME_ROMPATH", os.path.join(HERE, "mameroms"))
+# The machine's one ROM folder (the dev container's $ROMS_DIR) when it has the set.
+_ROMS_DIR = os.environ.get("ROMS_DIR") or os.path.expanduser("~/build/mameroms")
+ROMPATH = os.environ.get("MAME_ROMPATH") or (
+    _ROMS_DIR if os.path.exists(os.path.join(_ROMS_DIR, "sfight.zip"))
+    else os.path.join(HERE, "mameroms"))
 
 OUT = os.path.abspath(sys.argv[1]).replace("\\", "/")
 FROM = int(sys.argv[2])

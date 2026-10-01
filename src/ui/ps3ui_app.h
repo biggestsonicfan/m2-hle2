@@ -1454,12 +1454,16 @@ static void ps3ui_draw_search(ps3ui_canvas_t *cv, ps3ui_app_t *a)
         ps3ui_text(cv, &ts, tx - ps3ui_text_width(&ts, ps3ui_str_title) * 0.5f, ty + 47.0f, ps3ui_str_title,
                    ps3ui_slot_alpha(&s, "head_tit_ct"));
     }
+    /* Two lines at p_match_area_c, font 1 at 32, flags 0x28. Text_DrawUtf16
+     * draws a line at a time and flag 0x20 centres each LINE on its pen y
+     * (Text_DrawLine: y - size/2), the pen moving size + 6 down between them:
+     * the first line sits in the box's dark band, the second in the light one. */
     if (ps3ui_slot_xy(&s, "p_match_area_c", 0.5f, 0.5f, &tx, &ty)) {
         ps3ui_text_style_t st = ps3ui_style_text(26.0f);
-        ps3ui_text_centre(cv, &st, tx, ty - 34.0f, "Rooms", alpha);
+        ps3ui_text_centre(cv, &st, tx, ty - 16.0f, "Rooms", alpha);
         char n[16];
         snprintf(n, sizeof n, "%d", a->list_n);
-        ps3ui_text_centre(cv, &st, tx, ty + 4.0f, n, alpha);
+        ps3ui_text_centre(cv, &st, tx, ty - 16.0f + 32.0f + 6.0f, n, alpha);
     }
     if (a->list_n && a->main.state == PS3UI_WIN_IDLE && ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey))
         ps3ui_draw_cursor(cv, &ps3ui_n_cmn_online, "cursor_search", ex, ey + 74.0f * (float)a->cursor, a->cursor_t);

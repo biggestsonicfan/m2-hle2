@@ -15,7 +15,7 @@
  *   run: samples per sound_run. Above 1 the chip is left to make its samples
  *   late (scsp.h, "The chip's own time") for that long, and each run's outputs
  *   are written after it.
- *   $ROMDIR: directory with sfight.zip and schamp.zip
+ *   $ROMDIR (else $ROMS_DIR): directory with sfight.zip and schamp.zip
  *
  * Not a ctest.
  *
@@ -24,6 +24,7 @@
  * different compilers can be compared too.
  */
 #define NDEBUG 1
+#include "test_rom_dir.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,8 +58,7 @@ int main(int argc, char **argv) {
     int samples = argc > 3 ? atoi(argv[3]) : 3000;
     uint32_t run = argc > 4 ? (uint32_t)atoi(argv[4]) : 1;
     if (run < 1) run = 1;
-    const char *romdir = getenv("ROMDIR");
-    if (!romdir) romdir = "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms";
+    const char *romdir = test_rom_dir();
     char child[1024], parent[1024];
     snprintf(child, sizeof child, "%s/sfight.zip", romdir);
     snprintf(parent, sizeof parent, "%s/schamp.zip", romdir);

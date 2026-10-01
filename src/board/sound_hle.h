@@ -196,7 +196,7 @@ static inline void shle_mww(uint32_t a, uint32_t v) { shle_mwb(a, v >> 8); shle_
  * chip merges a byte into its word, syncs what it owes first, and a capture
  * sees it. */
 static inline void shle_sw(uint32_t off, uint32_t v, int sz) {
-    if (g_sndcap.active) sndcap_scsp(1, off, v, sz);
+    if (sndcap_on()) sndcap_scsp(1, off, v, sz);
     scsp_write(&g_sound.scsp, off, v, sz);
     if (g_sound.scsp.dsp_moved) sound_map_pages(&g_sound);
 }

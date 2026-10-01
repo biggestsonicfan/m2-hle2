@@ -43,6 +43,26 @@
 #include "thread_mutex.h"
 #include "emu_times.h"    /* emu_now_us, and get_status's "emu" timings */
 
+/* ---- CPU saver: hold the board until a match ----------------------------
+ *
+ * --idle-until-match, or {"cmd":"idle_hold","on":1}. A player who is only
+ * waiting for an online opponent (the fly, sitting in its room) has no use for
+ * attract: every match begins with a cold boot of both boards (the barrier's
+ * reset), so nothing the board does before that survives into the match. While
+ * this is set and no session owns the board, the run loop resets the board
+ * once, back to power-on, and then does not step it at all: no i960, no COP, no
+ * sound board, no frames. Netplay is still pumped every millisecond, so
+ * the login, the room and the barrier go on as before, and when the barrier
+ * releases the board boots from there exactly as it would have. The result of
+ * a match is read at the frame it is decided, so the hold only takes the board
+ * back once the session is over.
+ *
+ * A bridge client's run_frames still runs its frames (a client waiting on one
+ * would otherwise hang); the next hold resets the board again. The native run
+ * loop only: the web, libretro and handheld hosts step the board themselves. */
+static volatile int g_idle_hold;
+#define EMU_IDLE_POLL_US 1000   /* as STOPPED: the room's ping, which sets the delay, is answered from the pump */
+
 /* ---- Tuning -------------------------------------------------------------- */
 
 #define EMU_CPU_HZ           25000000               /* i960 KB on Model 2 = 25 MHz */
@@ -113,6 +133,10 @@ typedef struct {
      * ended that way (see its pacing). */
     volatile uint32_t frame_budget;
     int               frame_budget_hit;
+
+    /* The board is being held at power-on by g_idle_hold (get_status's
+     * "idle_hold"). Emu thread writes, anyone reads. */
+    volatile int      idle_holding;
 
     emu_thread_t thread;
 } emu_thread_ctx_t;
@@ -611,9 +635,9 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     uint32_t       attn    = g_emu_attn;
     const bool     profile = g_active_profile != NULL;
     const bool     live    = g_irqt_live != 0;
-    bool           bps     = g_bp.bloom != 0;
+    bool           bps     = bp_armed();
     bool slow = ctx->step_over_bp || g_frame_done || (board_vblank && g_vblank_acked) || g_irqt_sound_kick
-             || g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered || (profile && s_irq_in_service)
+             || g_log.warn_triggered || wp_tripped() || g_sharc.unknown_triggered || (profile && s_irq_in_service)
              || ctx->cpu->halted;
     hle_filter_sync();
     /* A vblank the program takes as an interrupt is acknowledged by its
@@ -667,7 +691,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             }
             if (live) emu_timers_after_step(ctx);
             if (g_log.warn_triggered) break;
-            if (g_wp.hit) break;   /* data watchpoint tripped mid-instruction */
+            if (wp_tripped()) break;   /* data watchpoint tripped mid-instruction */
             if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
             /* Back to the fast path once nothing it was sent here for is still
              * up. STF writes the interrupt registers a few times a frame (the
@@ -681,7 +705,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             if (!g_frame_done && !(board_vblank && g_vblank_acked) && !g_irqt_sound_kick
                     && !ctx->step_over_bp && !(profile && s_irq_in_service) && !cpu->halted) {
                 attn = now;
-                bps  = g_bp.bloom != 0;
+                bps  = bp_armed();
                 slow = false;
             }
         } else if (live) {
@@ -690,7 +714,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             if (g_emu_attn != attn) {      /* flagged by the timer service */
                 slow = true;
                 if (g_log.warn_triggered) break;
-                if (g_wp.hit) break;
+                if (wp_tripped()) break;
                 if (g_sharc.unknown_triggered) break;
             }
         }
@@ -760,7 +784,7 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
         int versus_result = g_versus_result;
         g_versus_result = 0;
         netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
-        if (g_sndcap.active) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+        if (sndcap_on()) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
         /* The last frame of an emu_run_frames: stop here, after the frame's
          * bookkeeping and before another slice can begin frame N+1. The
          * frame is still a FRAME to the caller. */
@@ -769,12 +793,12 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
             ctx->frame_budget_hit = 1;
         }
     }
-    if (g_bp.hit || g_wp.hit || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
-        if (g_bp.hit) {
+    if (bp_hit() || wp_tripped() || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
+        if (bp_hit()) {
             LOG_INFO("emu: breakpoint hit @ 0x%08X", g_bp.hit_addr);
             g_bp.hit = 0;
         }
-        if (g_wp.hit) {
+        if (wp_tripped()) {
             LOG_INFO("emu: watchpoint %s @ 0x%08X = 0x%08X (IP=0x%08X)",
                      g_wp.hit_write ? "write" : "read",
                      g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip);
@@ -799,6 +823,27 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
         return frame ? EMU_SLICE_FRAME : EMU_SLICE_STOPPED;
     }
     return frame ? EMU_SLICE_FRAME : EMU_SLICE_NO_FRAME;
+}
+
+/* One pass of the hold (g_idle_hold): back to power-on if the board has run
+ * since its last reset, then nap. A board at power-on has no steps behind it,
+ * so a launch with the hold on, or a second pass, only naps. */
+static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
+    if (ctx->total_steps != 0) {
+        emu_mutex_lock(&ctx->mutex);
+        bool reset = netplay_reset_board_now();
+        if (reset) {
+            ctx->total_steps       = 0;    /* as the barrier's reset: see emu_netplay_pump */
+            ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+            ctx->cpu_snapshot      = *ctx->cpu;
+            ctx->frame_deadline_us = 0;
+        }
+        emu_mutex_unlock(&ctx->mutex);
+        if (reset) LOG_INFO("emu: idle hold: the board is back at power-on until a match");
+    }
+    ctx->idle_holding = 1;
+    ctx->steps_per_second = 0;         /* the loop's own reading is skipped by the hold */
+    emu_nap_us(EMU_IDLE_POLL_US);
 }
 
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
@@ -830,6 +875,12 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
                 g_emu_times.net_us += emu_now_us() - slice_start;
                 continue;
             }
+            if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget) {
+                emu_idle_hold(ctx);
+                g_emu_times.net_us += emu_now_us() - slice_start;
+                continue;
+            }
+            ctx->idle_holding = 0;
             int64_t work_t0 = emu_now_us();
             g_emu_times.net_us += work_t0 - slice_start;
 
@@ -926,6 +977,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
         else {
             /* STOPPED. Netplay still has to breathe: the login, the room and the
              * peer handshake all happen before anybody presses Run. */
+            ctx->idle_holding = 0;
             emu_netplay_pump(ctx);
             /* ...and a session that is PLAYING cannot, from here: the pump keeps
              * answering "run the frame" and nothing runs it. Say so where the

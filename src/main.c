@@ -1363,6 +1363,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             else       g_region = r;
         } else if (strcmp(argv[i], "--vs-mode") == 0) {
             g_vs_mode = 1;            /* a decided versus match goes back to select */
+        } else if (strcmp(argv[i], "--idle-until-match") == 0) {
+            g_idle_hold = 1;          /* hold the board at power-on until a session (emu_thread.h) */
         } else if (strcmp(argv[i], "--damage") == 0 && i + 1 < argc) {
             /* the cabinet's DAMAGE: real, or normal (catch-up, the factory default) */
             const char *d = argv[++i];

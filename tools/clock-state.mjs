@@ -18,9 +18,9 @@
  * `--args` is passed to every build (e.g. --live-timers, --steps-per-slice N).
  */
 import os from 'node:os';
-import fs from 'node:fs';
 import path from 'node:path';
 import { M2Hle } from './lib/m2hle.mjs';
+import { findRom } from './lib/rom.mjs';
 import { parseArgs } from './lib/args.mjs';
 import { driveToAddr, fightInputAt, attractInputAt } from './lib/drive.mjs';
 
@@ -38,7 +38,7 @@ const named = STATES[args.str('state', 'round-mask')] ?? {};
 const FROM  = args.str('from') ? Number(args.str('from')) : named.from;
 const TO    = args.str('to')   ? Number(args.str('to'))   : named.to;
 const DRIVE = args.str('drive', named.drive ?? 'fight');
-const ROM   = path.resolve(args.str('rom', 'C:/Users/bigge/source/repos/ai/m2-hle2/test_m2snake/sfight.zip'));
+const ROM   = path.resolve(args.str('rom', '') || findRom().primary);
 const PORT  = args.num('port', 7361);
 const MAXF  = args.num('max-frames', 12000);
 const EXTRA = args.str('args', '').split(/\s+/).filter(Boolean);
@@ -48,13 +48,7 @@ process.env.M2HLE_UNTHROTTLE = '1';
 const hex = (n) => '0x' + (n >>> 0).toString(16).toUpperCase();
 
 function rundir(tag) {
-    const dir = path.join(os.tmpdir(), 'm2hle-clock-' + tag);
-    fs.mkdirSync(dir, { recursive: true });
-    for (const z of ['sfight.zip', 'schamp.zip']) {
-        const src = path.join(path.dirname(ROM), z);
-        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, z));
-    }
-    return path.join(dir, path.basename(ROM));
+    return path.join(os.tmpdir(), 'm2hle-clock-' + tag);
 }
 
 async function clocks(emu) {
@@ -66,7 +60,7 @@ async function clocks(emu) {
 }
 
 async function measure(exe, tag, port) {
-    const emu = await M2Hle.launch({ exe, rom: rundir(tag), port, run: true, extraArgs: EXTRA });
+    const emu = await M2Hle.launch({ exe, rom: ROM, cwd: rundir(tag), port, run: true, extraArgs: EXTRA });
     try {
         await emu.waitForRom();
         const at = await driveToAddr(emu, FROM, {

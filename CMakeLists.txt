@@ -28,6 +28,14 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-ffp-contract=off -fno-strict-aliasing)
 endif()
 
+# A C function called with no prototype is taken to return int. A pointer it
+# returns loses its top half on a 64-bit host and the build still links: Linux
+# GL once got glFenceSync that way, every readback fence was garbage, and
+# --headless --av-port sent no picture at all (Pinboard #236).
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:-Werror=implicit-function-declaration>)
+endif()
+
 set(VENDOR ${CMAKE_CURRENT_SOURCE_DIR}/vendor)
 set(SRC    ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -180,6 +188,9 @@ if(M2HLE_SDL3)
     target_link_libraries(sokol_gfx PUBLIC ${M2HLE_GLESV2})
 
     add_executable(m2hle ${SRC}/main_sdl.c)
+    # No debugger here to arm the board's breakpoint/watchpoint/capture hooks
+    # (src/core/build_features.h).
+    target_compile_definitions(m2hle PRIVATE M2HLE_DEV_TOOLS=0)
     target_link_libraries(m2hle PRIVATE sokol_gfx miniz SDL3::SDL3 Threads::Threads m)
     target_include_directories(m2hle PRIVATE
         ${SRC}
@@ -248,6 +259,7 @@ if(M2HLE_LIBRETRO)
         target_link_options(m2hle_libretro PRIVATE -Wl,-z,defs)
     endif()
     target_link_libraries(m2hle_libretro PRIVATE sokol_gfx miniz)
+    target_compile_definitions(m2hle_libretro PRIVATE M2HLE_DEV_TOOLS=0)   # src/core/build_features.h
     target_include_directories(m2hle_libretro PRIVATE
         ${VENDOR}/stb
         ${SRC}
@@ -285,7 +297,7 @@ if(M2HLE_WEB)
     target_include_directories(sokol PUBLIC ${VENDOR}/sokol ${VENDOR}/sokol/util)
 
     add_executable(m2hle ${SRC}/main_web.c)
-    target_compile_definitions(m2hle PRIVATE M2HLE_WEB)
+    target_compile_definitions(m2hle PRIVATE M2HLE_WEB M2HLE_DEV_TOOLS=0)   # src/core/build_features.h
     target_link_libraries(m2hle PRIVATE sokol miniz)
     target_include_directories(m2hle PRIVATE
         ${VENDOR}/stb
@@ -341,7 +353,7 @@ if(M2HLE_WEB)
     # wasm half of the cross-play check (tests/det_digest.c). Built only when
     # asked for (--target det_digest), with every flag the page's build has.
     add_executable(det_digest EXCLUDE_FROM_ALL ${CMAKE_CURRENT_SOURCE_DIR}/tests/det_digest.c)
-    target_compile_definitions(det_digest PRIVATE M2HLE_WEB)
+    target_compile_definitions(det_digest PRIVATE M2HLE_WEB M2HLE_DEV_TOOLS=0)
     target_compile_options(det_digest PRIVATE "-flto")   # the page's codegen
     target_link_libraries(det_digest PRIVATE sokol miniz)
     target_include_directories(det_digest PRIVATE

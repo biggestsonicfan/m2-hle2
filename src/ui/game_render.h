@@ -330,6 +330,10 @@ static const char *game_render_fill_vs_glsl =
     "out vec4 color;\n"
     "out vec2 uv;\n"
     "out float ez;\n"
+    /* The board pixel (x, scanline) times w, and w: divided per fragment, a
+     * position that runs linearly across the screen whatever the viewport, the
+     * scale or which way the target's rows run. The checker needs it. */
+    "out vec3 bpix;\n"
     "flat out vec4 tile;\n"
     "flat out vec4 lbpl;\n"
     /* Per-face integers the fill works out per pixel otherwise: the GEO3D_FACE_*
@@ -348,6 +352,7 @@ static const char *game_render_fill_vs_glsl =
     "void main() {\n"
     "  mat4 mvp = mat4(vs_params[0], vs_params[1], vs_params[2], vs_params[3]);\n"
     "  gl_Position = mvp * vec4(a_pos, 1.0);\n"
+    "  bpix = vec3((gl_Position.x + gl_Position.w) * 248.0, (gl_Position.w - gl_Position.y) * 192.0, gl_Position.w);\n"
     /* The board's polygon z-sort (geo3d.h geo3d_sort_z): the whole polygon is
      * given one z, so the vertex keeps its own x, y and w and takes that z
      * through the same two rows of the matrix. Carried as z/w rather than as a
@@ -355,11 +360,15 @@ static const char *game_render_fill_vs_glsl =
      * is what survives. Only for a vertex the camera is in front of: behind the
      * lens w is negative and the clamp would hand back the near plane, which
      * tells the clipper to cut the edge at the vertex it should be keeping and
-     * throws the polygon out whole. */
-    "  if (a_zs.x < 1.0e29 && gl_Position.w > 0.0) {\n"
+     * throws the polygon out whole. A vertex behind the lens of a polygon whose
+     * sort z is in front takes that z too: z/w is then the same at every
+     * vertex, so the clipper cuts at w = 0, the eye plane, which is where the
+     * board clips (geo3d.h GEO3D_ZSORT_KEY0), and not at the near plane. */
+    "  if (a_zs.x < 1.0e29) {\n"
     "    float zc = mvp[0][2]*a_pos.x + mvp[1][2]*a_pos.y + mvp[2][2]*a_zs.x + mvp[3][2];\n"
     "    float zw = mvp[0][3]*a_pos.x + mvp[1][3]*a_pos.y + mvp[2][3]*a_zs.x + mvp[3][3];\n"
-    "    gl_Position.z = clamp(zc / max(zw, 1e-6), -1.0, 1.0) * gl_Position.w;\n"
+    "    if (gl_Position.w > 0.0) gl_Position.z = clamp(zc / max(zw, 1e-6), -1.0, 1.0) * gl_Position.w;\n"
+    "    else if (zw > 0.0) gl_Position.z = (zc / zw) * gl_Position.w;\n"
     "  }\n"
     /* A face lying on others in its plane is pulled in front of them by its layer
      * (geo3d_mesh_layers), in [0, 1] depth units: twice that in GL's [-1, 1]. */
@@ -444,6 +453,7 @@ static const char *game_render_fill_fs_ref_glsl =
     "in vec4 color;\n"
     "in vec2 uv;\n"
     "in float ez;\n"
+    "in vec3 bpix;\n"
     "flat in vec4 tile;\n"
     "flat in vec4 lbpl;\n"
     "out vec4 frag_color;\n"
@@ -497,7 +507,10 @@ static const char *game_render_fill_fs_ref_glsl =
     "void main() {\n"
     "  float lmax = floor(log2(max(min(tile.z, tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
-    "  if (has(2) && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
+    /* The board's checker draws a pixel where (x ^ scanline) & 1, in board
+     * pixels (model2rd.ipp). gl_FragCoord counts rows from the bottom, which on
+     * a 384-row target is the other parity: every checker was a pixel off. */
+    "  if (has(2) && ((int(floor(bpix.x / bpix.z)) ^ int(floor(bpix.y / bpix.z)) ^ (has(1024) ? 1 : 0)) & 1) == 0) discard;\n"
     "  vec3 rgb = color.rgb;\n"
     "  if (tile.z > 0.0) {\n"
     "    int L0 = int(floor(lod));\n"
@@ -559,6 +572,7 @@ static const char *game_render_fill_fs_glsl =
     "in vec4 color;\n"
     "in vec2 uv;\n"
     "in float ez;\n"
+    "in vec3 bpix;\n"
     "flat in vec4 tile;\n"
     "flat in vec4 lbpl;\n"
     "uniform sampler2D ramp_smp;\n"
@@ -650,7 +664,7 @@ static const char *game_render_fill_fs_glsl =
     "void main() {\n"
     "  float lmax = floor(log2(max(min(tile.z, tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
-    "  if ((face.x & 2) != 0 && ((int(gl_FragCoord.x) ^ int(gl_FragCoord.y)) & 1) == 0) discard;\n"
+    "  if ((face.x & 2) != 0 && ((int(floor(bpix.x / bpix.z)) ^ int(floor(bpix.y / bpix.z)) ^ (face.x >> 10)) & 1) == 0) discard;\n"
     "  vec3 rgb = color.rgb;\n"
     "  if (tile.z > 0.0) {\n"
     "    int L0 = int(floor(lod));\n"
@@ -690,14 +704,17 @@ static const char *game_render_fill_fs_glsl =
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
     "struct vs_in { float3 pos : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; float4 tile : TEXCOORD1; float4 lbpl : TEXCOORD2; float2 zs : TEXCOORD3; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     "  outp.pos = mul(mvp, float4(inp.pos, 1.0));\n"
+    "  outp.bpix = float3((outp.pos.x + outp.pos.w) * 248.0, (outp.pos.w - outp.pos.y) * 192.0, outp.pos.w);\n"
     /* The board's polygon z-sort — see the GLSL vertex shader above. */
-    "  if (inp.zs.x < 1.0e29 && outp.pos.w > 0.0) {\n"
+    "  if (inp.zs.x < 1.0e29) {\n"
     "    float4 pz = float4(inp.pos.xy, inp.zs.x, 1.0);\n"
-    "    outp.pos.z = clamp(dot(mvp[2], pz) / max(dot(mvp[3], pz), 1e-6), -1.0, 1.0) * outp.pos.w;\n"
+    "    float zc = dot(mvp[2], pz), zw = dot(mvp[3], pz);\n"
+    "    if (outp.pos.w > 0.0) outp.pos.z = clamp(zc / max(zw, 1e-6), -1.0, 1.0) * outp.pos.w;\n"
+    "    else if (zw > 0.0) outp.pos.z = (zc / zw) * outp.pos.w;\n"
     "  }\n"
     "  if (outp.pos.w > 0.0) outp.pos.z -= inp.zs.y * outp.pos.w;\n"
     "  outp.color = inp.color; outp.uv = inp.uv; outp.tile = inp.tile; outp.lbpl = inp.lbpl; outp.ez = -inp.pos.z;\n"
@@ -709,7 +726,7 @@ static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> lumat : register(t1);\n"
     "Texture2D<float4> cxlat : register(t2);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; };\n"
     "static const int LOG2[128] = { " GAME_RENDER_LOG2_TABLE " };\n"
     "bool has(float fl, int bit) { return (((int)(fl + 0.5)) & bit) != 0; }\n"
     "int fast_log2(float z) {\n"
@@ -769,7 +786,7 @@ static const char *game_render_fill_fs_hlsl =
     "  float fl = inp.lbpl.z;\n"
     "  float lmax = floor(log2(max(min(inp.tile.z, inp.tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(ddx(inp.uv)), length(ddy(inp.uv)))), 0.0, lmax);\n"
-    "  if (has(fl, 2) && ((((int)inp.pos.x) ^ ((int)inp.pos.y)) & 1) == 0) discard;\n"
+    "  if (has(fl, 2) && ((((int)floor(inp.bpix.x / inp.bpix.z)) ^ ((int)floor(inp.bpix.y / inp.bpix.z)) ^ (has(fl, 1024) ? 1 : 0)) & 1) == 0) discard;\n"
     "  float3 rgb = inp.color.rgb;\n"
     "  if (inp.tile.z > 0.0) {\n"
     "    int L0 = (int)floor(lod);\n"
@@ -1422,7 +1439,11 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
 #  include <GLES3/gl3.h>
 #  define GAME_RENDER_ATLAS_ROWS 1
 #elif defined(SOKOL_GLCORE) && defined(__linux__)
+/* With the prototypes, as av_capture.h and the others ask for them: this is
+ * the first GL include in the unit, and gl.h's guard makes theirs no-ops. */
+#  define GL_GLEXT_PROTOTYPES
 #  include <GL/gl.h>
+#  include <GL/glext.h>
 #  define GAME_RENDER_ATLAS_ROWS 1
 #endif
 
@@ -2087,7 +2108,7 @@ static inline void game_render_batch_flush(bool lines_only) {
  */
 static inline void gm_mat4_geo_projection(float *m, const float *gproj, int win, int windows) {
     const float W = (float)VIDEO_WIDTH, H = (float)VIDEO_HEIGHT;
-    const float n = 0.05f, f = 20000.0f;
+    const float n = GEO3D_NEAR, f = 20000.0f;
     float nwin = (float)(windows > 0 ? windows : 1);
     memset(m, 0, 64);
     m[0]  = 2.0f * gproj[0] / W;

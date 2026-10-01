@@ -49,8 +49,10 @@ has to resume where it stopped.
 `../claude_mame/mame/roms/` holds `sfight.zip`, `schamp.zip` and `segabill.zip`
 (and others). Never point `-rompath` at that folder: its loose `roms/sfight/`
 directory is a homebrew program ROM, and MAME prefers it over the zip. Use a
-directory that holds only the three zips (symlinks are fine). On Linux that is
-`/home/antigravity/build/mameroms`. Also give every run its own
+directory of zips with no loose folder. In the dev container that is `$ROMS_DIR`
+(`/home/antigravity/build/mameroms`): the container's one ROM folder, symlinks to
+every stock set it has, kept by antigravity-dev-docker's `link-roms.sh`. If a set
+is not there, it is not in the container; do not copy zips anywhere. Also give every run its own
 `-nvram_directory` and `-cfg_directory`, so no saved state carries over.
 
 ## Headless runs

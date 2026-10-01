@@ -228,6 +228,17 @@ vector. Returns `resets`, the number performed so far. Refused with no ROM set
 loaded, and while a netplay session is at the barrier or playing -- there it
 would reset one board of two. `tools/grade-reset.mjs` is built on it.
 
+**`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
+for an online opponent (`--idle-until-match` sets it at launch). While it is on
+and no netplay session owns the board, the board is put back to power-on once
+and then not stepped at all: no i960, COP, sound board or frames, ~2% of a core
+against ~27% for attract. Netplay is still pumped every millisecond, so the
+login, the room and the barrier carry on, and the barrier's cold boot starts the
+match exactly as it would have; when the session ends the board goes back to
+power-on. `on: 0` lets attract run again; no `on` only reads. Returns `on` and
+`holding` (whether the run loop is holding the board right now); `get_status`
+carries the same pair as `idle_hold`. A `run_frames` still runs its frames.
+
 ### Input
 
 **`set_input(held: str = "0x0")`**

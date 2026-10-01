@@ -461,7 +461,7 @@ typedef uint32_t (*tl_row_fn)(const m2_texload_t *, tl_run_t *, memory_bus_t *);
 
 /* Run one row in C if the board cannot tell; 1 leaves it to the i960. */
 static inline int m2_texload_row(const m2_texload_t *t, i960_cpu_t *cpu, memory_bus_t *bus, tl_row_fn fn) {
-    if (!g_texload_hle || g_hle_room < 2 || g_wp.count != 0 || !tl_code_known(t, bus)) return 1;
+    if (!g_texload_hle || g_hle_room < 2 || wp_armed() || !tl_code_known(t, bus)) return 1;
     const bool live = g_irqt_live != 0;
     if (live && (g_irqt.intreq & g_irqt.intena & 0x03FCu)) return 1;
 
