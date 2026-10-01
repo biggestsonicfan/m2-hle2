@@ -268,6 +268,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-sound-thread"))         g_sound_thread_want = 0;
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
         else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
+        else if (!strcmp(argv[i], "--spin-i960"))               g_spin_skip = 0;
         else if (!strcmp(argv[i], "--live-timers"))             ;   /* always on now */
         else if (!strcmp(argv[i], "--nowarnskip"))              g_warning_skip = 0;
         else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
@@ -390,6 +391,7 @@ int main(int argc, char **argv) {
     }
     if (out != stdout) fclose(out);
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
+    fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
