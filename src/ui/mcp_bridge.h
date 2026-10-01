@@ -294,6 +294,8 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     }
     if (mcp_json_get_str(req,"zlayer_board",v,sizeof v)) g_geo3d_layer_board = (atoi(v) != 0);
     if (mcp_json_get_str(req,"zlayer_plane",v,sizeof v)) g_geo3d_layer_plane = (atoi(v) != 0);
+    /* 0: faces of a mesh held further apart than one plane fight it out in the depth buffer. */
+    if (mcp_json_get_str(req,"zheld",   v,sizeof v)) g_geo3d_layer_held = (atoi(v) != 0);
     /* 0: a draw laid over the last with its matrix fights it for the faces they share (geo3d_tie_layer). */
     if (mcp_json_get_str(req,"zties",   v,sizeof v)) g_geo3d_ties = (atoi(v) != 0);
     /* 0: each draw's faces are ranked alone, not with the draws sharing its matrix (geo3d_run_get). */

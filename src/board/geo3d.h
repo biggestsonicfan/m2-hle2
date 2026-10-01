@@ -2447,14 +2447,16 @@ typedef struct {
 } geo3d_cface_t;
 
 /* One ordering between two faces of a mesh (geo3d_mesh_layers), by index into
- * its faces, lo submitted before hi. BY_SORT: the two are in one plane or ask
- * for different corners, so the board's polygon sort decides, and a draw with
- * the board's camera decides it that way (geo3d_mesh_draw_layers); `top` is the
- * explorer's vote over view directions, for a draw without one. Otherwise
- * `top` stands: the faces are held apart and the nearer is in front. */
+ * its faces, lo submitted before hi. BY_SORT: the board's polygon sort decides,
+ * and a draw with the board's camera decides it that way
+ * (geo3d_mesh_draw_layers); `top` is the explorer's vote over view directions,
+ * or for a HELD pair the nearer face, for a draw without one. HELD: the two
+ * stand further apart than the tie and ask for the same corner, so they join
+ * no group and take no plane; the ordering only settles what the depth buffer
+ * cannot resolve. */
 typedef struct {
     uint16_t lo, hi, top;
-    uint8_t  by_sort;
+    uint8_t  by_sort, held;
 } geo3d_ledge_t;
 
 /* A far-corner face lying a little in front of another (geo3d_mesh_layers),
@@ -2693,6 +2695,7 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
     int           *ord = malloc((size_t)(nf ? nf : 1) * sizeof *ord);
     int           *eb = NULL, *et = NULL;      /* edges: bottom face -> top face */
     uint8_t       *es = NULL;                  /* the edge is the board's sort's to decide */
+    uint8_t       *ep = NULL;                  /* the edge joins its faces' groups (a plane) */
     int            ne = 0, cap = 0;
     geo3d_lrest_t *rs = NULL;                  /* far-corner faces on far-corner faces */
     int            nr = 0, rcap = 0;
@@ -2784,16 +2787,19 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
             /* The sort has the last word only where the two are in one plane to
              * within the tie, or where one asks for a different corner. */
             /* Held apart by more than the tie and asking for the same corner, the
-             * two are what they look like: the nearer is in front for the depth
-             * buffer as for the board, so they are left to it and join no group.
-             * The explorer orders them too, and then puts both on one plane; on a
-             * model a few tenths across (a fighter's glove, 1813/1818) that moved
-             * faces 0.15 apart onto each other, away from MAME. */
-            if (!(fabs(behind) <= tie || f->zmode != g->zmode)) {
+             * two are what they look like: the nearer is in front, and they join
+             * no group. The explorer orders them too, and then puts both on one
+             * plane; on a model a few tenths across (a fighter's glove, 1813/1818)
+             * that moved faces 0.15 apart onto each other, away from MAME. They
+             * still take an ordering, decided by the board's sort, because the
+             * depth buffer alone cannot tell them apart far off: a few hundredths
+             * at a depth of a hundred is below its step. */
+            const bool held = !(fabs(behind) <= tie || f->zmode != g->zmode);
+            if (held && (f->zmode == 2 || f->zmode == 3)) {
                 /* Both sorted by their farthest corner: kept for the draw
                  * where the back one is too deep to recede and the front one
                  * is not (geo3d_mesh_keep_depth). */
-                if (f->zmode == 2 && g->zmode == 2) {
+                if (f->zmode == 2) {
                     if (nr == rcap) {
                         int nc2 = rcap ? rcap * 2 : 16;
                         geo3d_lrest_t *nrs = realloc(rs, (size_t)nc2 * sizeof *rs);
@@ -2808,7 +2814,8 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
             }
             const double share = geo3d_layer_later_share(f, g);
             int top;
-            if (window || share >= 0.75)  top = j;
+            if (held)                     top = behind > 0.0 ? i : j;
+            else if (window || share >= 0.75)  top = j;
             else if (share <= 0.25)       top = i;
             else if (behind > tie)        top = i;
             else if (behind < -tie)       top = j;
@@ -2826,13 +2833,17 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
                 uint8_t *ns = realloc(es, (size_t)nc2 * sizeof *es);
                 if (!ns) { free(ordered); goto done; }
                 es = ns;
+                uint8_t *np = realloc(ep, (size_t)nc2 * sizeof *ep);
+                if (!np) { free(ordered); goto done; }
+                ep = np;
                 cap = nc2;
             }
             eb[ne] = top == i ? j : i;
             et[ne] = top;
-            es[ne] = fabs(behind) <= tie || f->zmode != g->zmode;
+            es[ne] = 1;   /* held apart, or in one plane, or asking for different corners */
+            ep[ne] = !held;
             ne++;
-            ordered[i] = ordered[j] = 1;
+            if (!held) ordered[i] = ordered[j] = 1;
         }
     }
 
@@ -2870,6 +2881,7 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
              * covered them (issue #85). */
             for (int i = 0; i < n; i++) { root[i] = i; largest[i] = -1; }
             for (int e = 0; e < ne; e++) {
+                if (!ep[e]) continue;
                 int ra = eb[e], rb = et[e];
                 while (root[ra] != ra) ra = root[ra] = root[root[ra]];
                 while (root[rb] != rb) rb = root[rb] = root[root[rb]];
@@ -2908,7 +2920,7 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
             for (int e = 0; e < ne; e++) {
                 const int a = L[eb[e]].face, b = L[et[e]].face;
                 m->edges[e] = (geo3d_ledge_t){ .lo = (uint16_t)(a < b ? a : b), .hi = (uint16_t)(a < b ? b : a),
-                                               .top = (uint16_t)b, .by_sort = es[e] };
+                                               .top = (uint16_t)b, .by_sort = es[e], .held = !ep[e] };
             }
             m->n_edges = ne;
         }
@@ -2918,7 +2930,7 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
     m->n_rests = nr;
     rs = NULL;
 done:
-    free(L); free(ord); free(eb); free(et); free(es); free(rs);
+    free(L); free(ord); free(eb); free(et); free(es); free(ep); free(rs);
 }
 
 /* The z-sort mode in force for the object being drawn (the display list's
@@ -2965,12 +2977,14 @@ static inline uint32_t geo3d_face_board_key(const geo3d_cface_t *f, const vec3_t
  * polygon). Layers are then the longest path again, relaxed to a fixed point
  * (a cycle stops at the pass limit). out gets a layer per face. */
 static int g_geo3d_layer_board = 1;   /* 0: the vote over view directions, as the explorer */
+static int g_geo3d_layer_held  = 1;   /* 0: faces held apart are left to the depth buffer */
 static void geo3d_mesh_draw_layers(const geo3d_cmesh_t *m, const vec3_t *tv, uint16_t *out) {
     memset(out, 0, (size_t)m->n_faces * sizeof *out);
     for (int pass = 0; pass < 32; pass++) {
         bool changed = false;
         for (int e = 0; e < m->n_edges; e++) {
             const geo3d_ledge_t *E = &m->edges[e];
+            if (E->held && !g_geo3d_layer_held) continue;
             int top = E->top;
             if (E->by_sort && g_geo3d_layer_board)
                 top = geo3d_face_board_key(&m->faces[E->hi], tv) <= geo3d_face_board_key(&m->faces[E->lo], tv) ? E->hi : E->lo;
