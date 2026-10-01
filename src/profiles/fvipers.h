@@ -27,7 +27,6 @@
 
 /* ---- Hook addresses ----------------------------------------------------- */
 
-#define FVIPERS_HOOK_ADDR_COP_INIT_L1       0x0000190C
 #define FVIPERS_HOOK_ADDR_CHECK_TIMER_4     0x0004A88C
 #define FVIPERS_HOOK_ADDR_INTERRUPT_WAIT    0x00002238
 #define FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B       0x0001184C
@@ -207,15 +206,6 @@ static inline void fvipers_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
 
 /* ---- HLE hook functions ------------------------------------------------- */
 
-/* cop_initialize_l1 (0x190C): boot-time COP-ready spin.
- * Sets the ready bit so the loop exits on its next iteration. */
-static int fvipers_hook_cop_init_l1(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu;
-    uint32_t cur = mem_read32(bus, COPRO_CONTROL1_BASE + 4);
-    mem_write32(bus, COPRO_CONTROL1_BASE + 4, cur | 0x01);
-    return 1;
-}
-
 /* check_timer_4 (0x4A88C): spin loop waiting for timer interrupt.
  * Skip the whole function — return 0 to caller. */
 static int fvipers_hook_check_timer_4(i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -273,11 +263,11 @@ static int fvipers_hook_read_sw(i960_cpu_t *cpu, memory_bus_t *bus) {
 /* ---- Profile object ----------------------------------------------------- */
 
 /*
- * Active hooks: the 7 addresses confirmed above. STF's check_timer_4_spin,
+ * Active hooks: the 6 addresses confirmed above. STF's check_timer_4_spin,
  * _idle, _700000_loop and co_processor_error_hang have no FV addresses yet;
  * sfight.h has the handlers to port when they are found.
  */
-#define FVIPERS_HOOK_COUNT 7
+#define FVIPERS_HOOK_COUNT 6
 
 static const game_profile_t fvipers_profile = {
     .id               = "fvipers",
@@ -288,7 +278,6 @@ static const game_profile_t fvipers_profile = {
     .install_fn       = fvipers_install,
     .hook_count       = FVIPERS_HOOK_COUNT,
     .hooks = {
-        { FVIPERS_HOOK_ADDR_COP_INIT_L1,      fvipers_hook_cop_init_l1,      "cop_initialize_l1"    },
         { FVIPERS_HOOK_ADDR_CHECK_TIMER_4,     fvipers_hook_check_timer_4,    "check_timer_4"        },
         { FVIPERS_HOOK_ADDR_INTERRUPT_WAIT,    fvipers_hook_interrupt_wait,   "interrupt_wait"       },
         { FVIPERS_HOOK_ADDR_INTERRUPT_WAIT_B,      fvipers_hook_interrupt_wait_b,      "interrupt_wait_b"      },

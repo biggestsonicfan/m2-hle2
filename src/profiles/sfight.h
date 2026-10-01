@@ -223,17 +223,6 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
 
 /* ---- HLE hook functions -------------------------------------------------- */
 
-/* cop_initialize_l1 (0x0F3C): boot-time COP-ready spin loop. Reads
- * COPRO_CONTROL1+4 bit 0 until set. Set the bit and let the instruction run
- * normally — the next iteration sees ready=1 and exits. Without this hook STF
- * hangs on the BACKUP RAM screen forever. */
-static int sfight_hook_cop_init_l1(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu;
-    uint32_t cur = mem_read32(bus, COPRO_CONTROL1_BASE + 4);
-    mem_write32(bus, COPRO_CONTROL1_BASE + 4, cur | 0x01);
-    return 1;
-}
-
 /* check_timer_4 (0x4A55C): spin loop waiting for a timer interrupt.
  * Skip the whole function — return 0 to the caller. */
 static int sfight_hook_check_timer_4(i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -710,9 +699,8 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 21
+#define SFIGHT_BASE_HOOK_COUNT 20
 #define SFIGHT_BASE_HOOKS                                                      \
-    { 0x00000F3C, sfight_hook_cop_init_l1,        "cop_initialize_l1"       }, \
     { 0x0004A55C, sfight_hook_check_timer_4,      "check_timer_4"           }, \
     { 0x0004A58C, sfight_hook_check_timer_4_spin, "check_timer_4_spin"      }, \
     { 0x00001768, sfight_hook_interrupt_wait,     "interrupt_wait"          }, \

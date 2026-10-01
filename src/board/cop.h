@@ -72,6 +72,11 @@ typedef struct {
      * command (MAME model2b_state::copro_fifo_w). */
     const uint8_t *ctl;
     uint32_t       upload_words;
+
+    /* Reads of an empty reply FIFO. On the board the i960 would stall there
+     * until the SHARC answered, so each one is a reply the HLE owes. */
+    uint64_t       underflows;
+    uint32_t       last_cmd;      /* the newest command word, for that warning */
 } cop_state_t;
 
 static cop_state_t g_cop = {0};
@@ -192,6 +197,7 @@ static inline void cop_write(uint32_t val) {
 
     if (g_cop_tap) g_cop_tap(0x21000000u, val);
     g_cop.cur_cmd       = val;
+    g_cop.last_cmd      = val;
     g_cop.args_needed   = sharc_args_for_cmd(val);
     g_cop.args_received = 0;
     if (g_cop.args_needed == COP_ARGS_STREAM) {
@@ -230,7 +236,21 @@ static inline uint32_t cop_read(void) {
         }
         return v;
     }
+    /* A handler that answers fewer words than the firmware, or a command
+     * missing from the arg table (0x17002E2E hid this way), shows up here. */
+    uint64_t n = ++g_cop.underflows;
+    if (n <= 8 || (n & (n - 1)) == 0)
+        LOG_WARN("COP: read of an empty reply FIFO (last cmd 0x%08X, IP~0x%08X, %llu so far)",
+                 g_cop.last_cmd, g_last_store_ip, (unsigned long long)n);
     return 0;
+}
+
+/* 0x980004 bit 0: the reply FIFO is empty (MAME model2_state::fifo_control_r).
+ * Boot code waits on it after lowering the upload bit (STF cop_initialize_l1
+ * 0xF3C, FV 0x190C). The HLE answers each command at once, so it is up
+ * whenever no reply is waiting. */
+static inline uint32_t cop_fifo_status(void) {
+    return g_sharc.reply_idx < g_sharc.reply_count ? 0u : 1u;
 }
 
 /* Reset all COP/SHARC state. Call when a new ROM is installed. */

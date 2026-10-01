@@ -174,7 +174,7 @@ static inline int sharc_args_for_cmd(uint32_t cmd) {
         case 0x16002C2C: return 6;  /* 3D distance: (x1,x2,y1,y2,z1,z2) → 1 float */
         case 0x17002E2E: return 3;  /* Fn_get_3d_len: |(x, y, z)| → 1 float */
         case 0x18803131: return 4;  /* interpolation: 4 floats → 1 float */
-        case 0x28805151: return 0;  /* 0-arg: reads bone slot, pushes 3 results */
+        case 0x28805151: return 0;  /* Fn_get_glo_ang: 3 angles of the current matrix */
         case 0x0D001A1A: return 1;  /* sqrt(arg0) → 1 float — PM 0x0205AF */
         default:         return 0;
     }
@@ -412,6 +412,14 @@ static inline float sharc_fw_asin_rad(float x) {
     if (1.0f == x)  return sharc_bits_to_float(0x3FC90FD7u);
     if (-1.0f == x) return sharc_bits_to_float(0xBFC90FD7u);
     return sharc_fw_atan2(x, sharc_fw_sqrt(1.0f - xx));
+}
+
+/* _L20332: asin(a) as an angle word -- atan2(a, sqrt(1 - a*a)), with +-1
+ * answered outright as 0x4000 / 0xC000. No clamp: |a| > 1 goes to the sqrt. */
+static inline uint32_t sharc_fw_asin_word(float a) {
+    if (a == 1.0f)  return 0x4000u;
+    if (a == -1.0f) return 0xC000u;
+    return sharc_fw_atan2_word(a, sharc_fw_sqrt(1.0f - a * a));
 }
 
 /* Fn_get_sm_ang_f / Fn_get_sm_ang_r (0x54 / 0x55): the current matrix becomes
@@ -677,7 +685,6 @@ static inline void sharc_osage(uint32_t arg) {
 /* ---- Command executor ---------------------------------------------------- */
 
 static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
-#define SANITIZE(r) do { if (!((r)==(r)) || (r)>1e30f || (r)<-1e30f) (r)=0.0f; } while(0)
 
     g_sharc.reply_count = 0;
     g_sharc.reply_idx   = 0;
@@ -839,7 +846,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 float   rad   = ((float)ang16 / 65536.0f) * (2.0f * 3.14159265358979f);
                 float s_, c_; (void)rad; sharc_sincos(ang16, &s_, &c_);
                 float   r     = s_ * sharc_bits_to_float(args[1]);
-                SANITIZE(r);
                 sharc_push_f(r);
             }
             return;
@@ -850,7 +856,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 float   rad   = ((float)ang16 / 65536.0f) * (2.0f * 3.14159265358979f);
                 float s_, c_; (void)rad; sharc_sincos(ang16, &s_, &c_);
                 float   r     = c_ * sharc_bits_to_float(args[1]);
-                SANITIZE(r);
                 sharc_push_f(r);
             }
             return;
@@ -897,7 +902,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 } else {
                     r = v0;
                 }
-                SANITIZE(r);
                 sharc_push_f(r);
             }
             return;
@@ -967,7 +971,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                     case 0x0B001616: r = sharc_fw_div(a, b); break;             /* _L205D0 */
                     default:         r = sharc_fw_sqrt(a*a + b*b); break;      /* 0x16802D2D: _L20352 */
                 }
-                SANITIZE(r);
                 sharc_push_f(r);
             }
             return;
@@ -1467,9 +1470,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
                 float _a = sharc_bits_to_float(args[0]);
                 if (_a >  1.0f) _a =  1.0f;
                 if (_a < -1.0f) _a = -1.0f;
-                /* _L20332: atan2(a, sqrt(1 - a*a)), with +-1 answered outright */
-                float _c = 1.0f - _a * _a;
-                sharc_push_u(_a == 1.0f ? 0x4000u : _a == -1.0f ? 0xC000u : sharc_fw_atan2_word(_a, sharc_fw_sqrt(_c)));
+                sharc_push_u(sharc_fw_asin_word(_a));        /* _L20332 */
             }
             return;
 
@@ -1697,7 +1698,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             if (n >= 1) {
                 float s_, c; sharc_sincos((int32_t)args[0], &s_, &c);
                 float r = sharc_fw_div(s_, c);
-                SANITIZE(r);
                 sharc_push_f(r);
             }
             return;
@@ -1798,7 +1798,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             memcpy(&z1, &args[4], 4); memcpy(&z2, &args[5], 4);
             float dx = x1-x2, dy = y1-y2, dz = z1-z2;
             float r = sharc_fw_sqrt(dx*dx + dy*dy + dz*dz);         /* Fn_get_3d_r: _L202AE */
-            SANITIZE(r);
             sharc_push_f(r);
             return;
         }
@@ -1813,18 +1812,18 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             memcpy(&span, &args[3], 4);
             float r = (b - a) * t;                          /* Fn_fcurve_lin: _L205D0, then + a */
             r = sharc_fw_div(r, span) + a;
-            SANITIZE(r);
             sharc_push_f(r);
             return;
         }
         case 0x28805151: {
-            /* Bone slot readback — 0 args, 3 16-bit results.
-             * PM 0x020EF5; IDA 0x17CD4: ldis g0,g1,g2 from output FIFO.
-             * Reads rot matrix entries from current bone slot via DM[0x3033F].
-             * Stub: push 3 zeros until full bone-slot state is wired. */
-            sharc_push_u(0);
-            sharc_push_u(0);
-            sharc_push_u(0);
+            /* Fn_get_glo_ang (cpres1 PM 0x2114F): the current matrix's angles,
+             * read as _L2117C reads them for Fn_get_sm_ang but with no
+             * half-turn alternative. Each is an angle word (_L202CA / _L20332).
+             * IDA 0x17CD4: ldis g0,g1,g2. */
+            float (*r)[3] = g_sharc.rot;
+            sharc_push_u(sharc_fw_atan2_word(r[2][0], r[2][2]));  /* col2.x, col2.z */
+            sharc_push_u(sharc_fw_asin_word(r[2][1]));            /* col2.y */
+            sharc_push_u(sharc_fw_atan2_word(r[0][1], r[1][1]));  /* col0.y, col1.y */
             return;
         }
         case 0x0D001A1A: {
@@ -1834,7 +1833,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             float a;
             memcpy(&a, &args[0], 4);
             float r = sharc_fw_sqrt(a);                     /* Fn_sqr: _L202AE */
-            SANITIZE(r);
             sharc_push_f(r);
             return;
         }
@@ -1866,7 +1864,6 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
             }
             return;
     }
-#undef SANITIZE
 }
 
 #endif /* SHARC_EXEC_H */

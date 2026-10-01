@@ -110,6 +110,9 @@ The SHARC firmware itself is the reference for every handler here: `C:\Users\big
 - **While COPRO_CTL1 (`0x980000`) bit 31 is up, a FIFO word is a halfword of the SHARC's boot image, not a command** (MAME `copro_fifo_w`; `g_cop.upload_words`). STF's `load_cop_loop` (`0xF14`) writes 14862 of them at boot, lowers the bit, waits for the COP's ready flag and then sends `0x00000000`, which is opcode 0x00 `Fn_initialize` (empty the matrix stack), not padding.
   - *Symptom that surfaced this:* `get_cop_diagnostics` reported 14863 unknown commands and logged none, because the unknown path dropped any word with a zero top half without logging it (issue #125). It no longer does.
 
+- **`0x980004` reads the reply FIFO's status: bit 0 is up while it is empty** (MAME `fifo_control_r`; `cop_fifo_status`, the COPRO_CTL read callback in `memory.h`). STF's `cop_initialize` waits on it at `0xF3C` and FV's at `0x190C`; each profile used to hook its own loop. A read of the empty FIFO answers 0 and logs a WARN (`g_cop.underflows`): on the board the i960 would stall there, so it means a reply count is wrong.
+- **`0x28805151` (`Fn_get_glo_ang`, cpres1 PM 0x2114F) answers the current matrix's three angles**: atan2(col2.x, col2.z), asin(col2.y) (`_L20332`, no clamp; `sharc_fw_asin_word`), atan2(col0.y, col1.y). It used to answer three zeros. Attract never sends it; `cop_test` holds it.
+
 - *Note:* command opcodes documented here are the ones confirmed in STF. Other games may use additional opcodes — log unknown commands at WARN and extend the dispatch table.
 
 ### 3D Polygon Decoder (board-level — confirmed against two games)

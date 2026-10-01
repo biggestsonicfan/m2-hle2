@@ -260,6 +260,18 @@ static void coprogram_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int
     if (size == 4) cop_write(val);
 }
 
+/* COPRO_CTL (0x980000): plain registers, except that 0x980004 reads the COP's
+ * reply-FIFO status (cop_fifo_status), which boot code polls for ready. */
+static uint32_t copro_ctl_read_cb(mem_region_t *r, uint32_t addr, int size) {
+    uint32_t off = addr - r->base, v = 0;
+    for (int k = size - 1; k >= 0; k--) {
+        uint32_t o = off + (uint32_t)k;
+        uint8_t  b = o >= r->size ? 0 : (o & ~3u) == 4 ? (uint8_t)(cop_fifo_status() >> (8 * (o & 3))) : r->data[o];
+        v = (v << 8) | b;
+    }
+    return v;
+}
+
 /* ---- GEO display list (board-level) -------------------------------------
  * The i960 does not hand the geometrizer draw calls: it builds a display list in
  * bufferram (0x900000, the SHARC's DM 0x1400000) and the GEO walks it once a
@@ -606,7 +618,8 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     g_geo.copro_ctl = bus->copro_ctl;
     g_cop.ctl       = bus->copro_ctl;
     g_geodl_snap_ready = 0;
-    mem_add_region(bus, "COPRO_CTL",       COPRO_CONTROL1_BASE,  COPRO_CONTROL1_SIZE,  bus->copro_ctl,     0);
+    { mem_region_t *r = mem_add_region(bus, "COPRO_CTL", COPRO_CONTROL1_BASE, COPRO_CONTROL1_SIZE, bus->copro_ctl, 0);
+      if (r) r->read_cb = copro_ctl_read_cb; }
     mem_add_region(bus, "MIDI",            MIDI_BASE,            MIDI_SIZE,            bus->midi,          0);
     mem_add_region(bus, "CPU_CTRL",        CPU_CTRL_BASE,        CPU_CTRL_SIZE,        bus->cpu_ctrl,      0);
     /* IRQ controller (0xE80000) + 4 board timers (0xF00000) — real hardware model. */

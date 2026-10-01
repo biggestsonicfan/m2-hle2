@@ -26,6 +26,7 @@ static int g_fail = 0;
 static uint32_t f2b(float f){ uint32_t u; memcpy(&u,&f,4); return u; }
 static float    b2f(uint32_t u){ float f; memcpy(&f,&u,4); return f; }
 static int      feq(float a, float b){ return fabsf(a-b) < 1e-4f; }
+static int      ang_near(uint32_t w, uint32_t want){ uint32_t d = (w - want) & 0xFFFFu; return w <= 0xFFFFu && (d <= 2u || d >= 0xFFFEu); }
 
 int main(void) {
     cop_reset();
@@ -62,6 +63,38 @@ int main(void) {
     CHECK(feq(r[0][0],0)&&feq(r[0][1],0)&&feq(r[0][2],1), "ang_y 90: col0 -> (0,0,1)");
     CHECK(feq(r[1][0],0)&&feq(r[1][1],1)&&feq(r[1][2],0), "ang_y 90: col1 unchanged (0,1,0)");
     CHECK(feq(r[2][0],-1)&&feq(r[2][1],0)&&feq(r[2][2],0), "ang_y 90: col2 -> (-1,0,0)");
+
+    /* ---- Fn_get_glo_ang (0x28805151): the current matrix's three angles ---- */
+    /* atan2(col2.x, col2.z), asin(col2.y), atan2(col0.y, col1.y), as angle
+     * words (cpres1 PM 0x2114F).  After ang_y 90, col2 = (-1,0,0): -90 deg. */
+    cop_write(0x28805151);
+    uint32_t ga0 = cop_read(), ga1 = cop_read(), ga2 = cop_read();
+    CHECK(ang_near(ga0, 0xC000) && ang_near(ga1, 0) && ang_near(ga2, 0),
+          "get_glo_ang after ang_y 90 = (0xC000, 0, 0)");
+    cop_reset();
+    cop_write(0x04000808); cop_write(0x00002000);   /* ang_x 45 deg */
+    cop_write(0x28805151);
+    ga0 = cop_read(); ga1 = cop_read(); ga2 = cop_read();
+    CHECK(ang_near(ga0, 0) && ang_near(ga1, 0x2000) && ang_near(ga2, 0),
+          "get_glo_ang after ang_x 45 = (0, 0x2000, 0): asin of col2.y");
+    cop_reset();
+    cop_write(0x05000A0A); cop_write(0x00001000);   /* ang_z 22.5 deg */
+    cop_write(0x28805151);
+    ga0 = cop_read(); ga1 = cop_read(); ga2 = cop_read();
+    /* col0 = (c, -s, 0), col1 = (s, c, 0): atan2(-s, c) */
+    CHECK(ang_near(ga0, 0) && ang_near(ga1, 0) && ang_near(ga2, 0xF000),
+          "get_glo_ang after ang_z 22.5 = (0, 0, 0xF000)");
+
+    /* ---- 0x980004: reply FIFO status, bit 0 up while it is empty ---- */
+    cop_reset();
+    CHECK(cop_fifo_status() == 1, "FIFO status reads 1 with no replies waiting");
+    cop_write(0x07800F0F);
+    CHECK(cop_fifo_status() == 0, "FIFO status reads 0 while replies wait");
+    cop_read(); cop_read(); cop_read();
+    CHECK(cop_fifo_status() == 1, "FIFO status reads 1 once drained");
+    uint64_t uf0 = g_cop.underflows;
+    CHECK(cop_read() == 0 && g_cop.underflows == uf0 + 1,
+          "a read of the empty FIFO answers 0 and is counted");
 
     /* ---- model->world transform (0x14802929) end-to-end ---- */
     cop_reset();
