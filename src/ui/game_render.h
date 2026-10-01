@@ -1422,6 +1422,13 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
 #  include <GLES3/gl3.h>
 #  define GAME_RENDER_ATLAS_ROWS 1
 #elif defined(SOKOL_GLCORE) && defined(__linux__)
+/* The first <GL/gl.h> of main.c's unit is this one, so it has to ask for the
+ * prototypes av_capture.h and retro_shader.h use: once glext.h is in, theirs is
+ * a no-op. Without it glFenceSync was an implicit int, every fence came back
+ * cut to 32 bits, and headless --av-port sent no video (dropped_readback). */
+#  ifndef GL_GLEXT_PROTOTYPES
+#    define GL_GLEXT_PROTOTYPES
+#  endif
 #  include <GL/gl.h>
 #  define GAME_RENDER_ATLAS_ROWS 1
 #endif
