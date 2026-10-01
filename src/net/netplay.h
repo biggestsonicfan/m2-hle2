@@ -164,10 +164,8 @@
  *    where STF's and FV's wait-loop hooks used to run VsyncScr themselves and
  *    the timers ticked once a slice (Pinboard #253): every interrupt lands
  *    somewhere else, and with it rand() and the texture loads.
- * 13: a board timer that is not counting reads 0xFFFFF, not 0 (MAME), and
- *    STF's rand adds all four timers, so its numbers differ (Pinboard #307).
  */
-#define NETPLAY_PROTO_REV 13
+#define NETPLAY_PROTO_REV 12
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
