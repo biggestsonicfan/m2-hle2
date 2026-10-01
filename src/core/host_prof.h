@@ -38,6 +38,13 @@
  * can be profiled over ssh while someone plays it. `start` counts seconds from
  * when the profiler sees the request.
  *
+ * The run also keeps a frame timeline: when each host frame began
+ * (hprof_tick), how long the core's own work in it took (hprof_frame_end),
+ * which board frame it ended on, and every half second the hottest thermal
+ * zone and the CPU and GPU clocks. A stutter is a long gap between two frames,
+ * and the timeline says whether the core's work filled it (too slow), or
+ * something outside it (the frontend, the driver, a throttled clock).
+ *
  * Nothing here changes what the board computes: the signal handler reads
  * registers and a byte and writes to its own buffer. A signal can cut a sleep
  * short (EINTR), which the pacing loops already tolerate.
@@ -122,6 +129,20 @@ typedef struct {
 } hprof_sample_t;
 
 #define HPROF_MAX_THREADS 128
+#define HPROF_PHASES      8
+
+typedef struct {
+    uint32_t t_us;              /* the frame's start, from the run's start */
+    uint32_t work_us;           /* the core's work in it; 0 = not closed */
+    uint32_t board;             /* the board frame it ended on */
+    uint32_t ph[HPROF_PHASES];  /* hprof_phase stamps, us from the frame's start; 0 = not reached */
+} hprof_frame_t;
+
+typedef struct {
+    uint32_t t_ms;
+    int16_t  temp_c;            /* hottest thermal zone; -1 = none */
+    uint16_t cpu_mhz, gpu_mhz;  /* 0 = unknown */
+} hprof_heat_t;
 
 typedef struct {
     int     tid;
@@ -149,6 +170,11 @@ typedef struct {
     hprof_thread_t  thr[HPROF_MAX_THREADS];
     int             nthr;
     int64_t         next_scan_us;
+    /* the frame timeline */
+    hprof_frame_t  *frames;
+    uint32_t        frames_cap, nframes;
+    hprof_heat_t    heat[1024];
+    uint32_t        nheat;
     /* the trigger file poll */
     int64_t  next_poll_us;
     bool     env_read;
@@ -231,6 +257,44 @@ static int64_t hprof__thread_cpu_ns(int tid) {
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
 
+static long hprof__read_long(const char *path) {
+    FILE *f = fopen(path, "r");
+    long v = -1;
+    if (f) { if (fscanf(f, "%ld", &v) != 1) v = -1; fclose(f); }
+    return v;
+}
+
+/* One heat sample: the hottest zone, CPU 0's clock, the first devfreq (the GPU). */
+static void hprof__heat_sample(int64_t now) {
+    if (g_hprof.nheat >= sizeof g_hprof.heat / sizeof g_hprof.heat[0]) return;
+    hprof_heat_t *h = &g_hprof.heat[g_hprof.nheat++];
+    h->t_ms = (uint32_t)((now - g_hprof.t0_us) / 1000);
+    long hot = -1;
+    for (int z = 0; z < 8; z++) {
+        char path[64];
+        snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/temp", z);
+        long m = hprof__read_long(path);
+        if (m < 0) break;
+        if (m / 1000 > hot) hot = m / 1000;
+    }
+    h->temp_c = (int16_t)hot;
+    long khz = hprof__read_long("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq");
+    h->cpu_mhz = (uint16_t)(khz > 0 ? khz / 1000 : 0);
+    h->gpu_mhz = 0;
+    DIR *d = opendir("/sys/class/devfreq");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            char path[300];
+            snprintf(path, sizeof path, "/sys/class/devfreq/%s/cur_freq", e->d_name);
+            long hz = hprof__read_long(path);
+            if (hz > 0) { h->gpu_mhz = (uint16_t)(hz / 1000000); break; }
+        }
+        closedir(d);
+    }
+}
+
 /* The kernel's struct sigevent, for SIGEV_THREAD_ID, which glibc only names
  * under _GNU_SOURCE. Raw syscalls keep librt out of the link on old glibc. */
 typedef struct { union sigval value; int signo; int notify; int tid; int pad[11]; } hprof_kevent_t;
@@ -296,6 +360,14 @@ static bool hprof__start(void) {
         g_hprof.cap = g_hprof.buf ? cap : 0;
     }
     if (!g_hprof.buf) { fprintf(stderr, "hostprof: out of memory\n"); return false; }
+    uint32_t fcap = (uint32_t)(g_hprof.secs * 250.0) + 64;   /* room for a 240 Hz frontend */
+    if (fcap > g_hprof.frames_cap || !g_hprof.frames) {
+        free(g_hprof.frames);
+        g_hprof.frames = (hprof_frame_t *)calloc(fcap, sizeof *g_hprof.frames);
+        g_hprof.frames_cap = g_hprof.frames ? fcap : 0;
+    }
+    g_hprof.nframes = 0;
+    g_hprof.nheat = 0;
     atomic_store(&g_hprof.n, 0);
 
     struct sigaction sa;
@@ -319,6 +391,7 @@ static bool hprof__start(void) {
     }
     g_hprof.t0_us = hprof__now_us();
     g_hprof.next_scan_us = g_hprof.t0_us + 500000;
+    hprof__heat_sample(g_hprof.t0_us);
     g_hprof.stop_at_us = g_hprof.t0_us + (int64_t)(g_hprof.secs * 1e6);
     fprintf(stderr, "hostprof: sampling %d threads for %.1f s\n", g_hprof.nthr, g_hprof.secs);
     return true;
@@ -365,6 +438,57 @@ static void hprof__sym_key(uintptr_t pc, char *out, size_t n) {
     } else {
         snprintf(out, n, "[unknown]");
     }
+}
+
+static int hprof__cmp_u32_desc(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x > y ? -1 : x < y ? 1 : 0;
+}
+
+/* The frame timeline: a summary, the worst gaps, the heat, and every frame. */
+static void hprof__write_frames(FILE *f) {
+    uint32_t n = g_hprof.nframes;
+    fprintf(f, "\n## frames (host frames: gap = start to next start, work = the core's part of it)\n");
+    if (n < 2) { fprintf(f, "frames %u\n", n); return; }
+    uint32_t *gap = (uint32_t *)malloc(sizeof(uint32_t) * n), *work = (uint32_t *)malloc(sizeof(uint32_t) * n);
+    if (!gap || !work) { free(gap); free(work); return; }
+    static const uint32_t edges[] = { 18000, 25000, 34000, 50000, 100000 };
+    uint32_t hist[6] = { 0 };
+    for (uint32_t i = 0; i + 1 < n; i++) {
+        gap[i]  = g_hprof.frames[i + 1].t_us - g_hprof.frames[i].t_us;
+        work[i] = g_hprof.frames[i].work_us;
+        int b = 0;
+        while (b < 5 && gap[i] > edges[b]) b++;
+        hist[b]++;
+    }
+    uint32_t m = n - 1;
+    uint32_t board0 = g_hprof.frames[0].board, board1 = g_hprof.frames[m - 1].board;
+    double span = (double)(g_hprof.frames[m].t_us - g_hprof.frames[0].t_us) / 1e6;
+    fprintf(f, "frames %u over %.2f s = %.2f Hz; board frames %u = %.2f Hz\n", m, span, span > 0 ? m / span : 0,
+            board1 - board0, span > 0 ? (board1 - board0) / span : 0);
+    fprintf(f, "gaps <=18ms %u, <=25 %u, <=34 %u, <=50 %u, <=100 %u, >100 %u\n",
+            hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]);
+    uint32_t *sw = (uint32_t *)malloc(sizeof(uint32_t) * m);
+    if (sw) {
+        memcpy(sw, work, sizeof(uint32_t) * m);
+        qsort(sw, m, sizeof *sw, hprof__cmp_u32_desc);
+        fprintf(f, "work ms: max %.2f, p1 %.2f, p5 %.2f, median %.2f\n", sw[0] / 1e3, sw[m / 100] / 1e3,
+                sw[m / 20] / 1e3, sw[m / 2] / 1e3);
+        free(sw);
+    }
+    fprintf(f, "\n## heat (t_s temp_c cpu_mhz gpu_mhz)\n");
+    for (uint32_t i = 0; i < g_hprof.nheat; i++)
+        fprintf(f, "%.1f %d %u %u\n", g_hprof.heat[i].t_ms / 1e3, g_hprof.heat[i].temp_c,
+                g_hprof.heat[i].cpu_mhz, g_hprof.heat[i].gpu_mhz);
+    fprintf(f, "\n## frame-log (t_ms gap_ms work_ms board phase_ms...)\n");
+    for (uint32_t i = 0; i < m; i++) {
+        fprintf(f, "%.1f %.2f %.2f %u", g_hprof.frames[i].t_us / 1e3, gap[i] / 1e3, work[i] / 1e3,
+                g_hprof.frames[i].board);
+        for (int k = 0; k < HPROF_PHASES; k++) fprintf(f, " %.2f", g_hprof.frames[i].ph[k] / 1e3);
+        fprintf(f, "\n");
+    }
+    free(gap);
+    free(work);
 }
 
 static void hprof__write(void) {
@@ -469,6 +593,7 @@ static void hprof__write(void) {
     free(syms);
 
     /* The executable mappings, for tools/hostprof.py. */
+    hprof__write_frames(f);
     fprintf(f, "\n## maps\n");
     FILE *m = fopen("/proc/self/maps", "r");
     if (m) {
@@ -529,6 +654,7 @@ __attribute__((noinline)) static void hprof__tick_slow(int64_t now) {
         else {                                          /* threads started since */
             g_hprof.next_scan_us = now + 500000;
             hprof__arm_threads();
+            hprof__heat_sample(now);
         }
         return;
     }
@@ -552,10 +678,38 @@ __attribute__((noinline)) static void hprof__tick_slow(int64_t now) {
  * a requested run. Cheap when idle: a clock read and a compare. */
 static inline void hprof_tick(void) {
     int64_t now = hprof__now_us();
+    if (g_hprof.running && g_hprof.nframes < g_hprof.frames_cap)
+        g_hprof.frames[g_hprof.nframes++] = (hprof_frame_t){ (uint32_t)(now - g_hprof.t0_us), 0, 0, { 0 } };
     int64_t due = g_hprof.running ? (g_hprof.stop_at_us < g_hprof.next_scan_us ? g_hprof.stop_at_us : g_hprof.next_scan_us)
                 : g_hprof.pending ? g_hprof.start_at_us
                 : g_hprof.next_poll_us;
     if (now >= due || !g_hprof.env_read) hprof__tick_slow(now);
+}
+
+/* Stamp phase k (0..HPROF_PHASES-1) of the frame hprof_tick opened: the time
+ * since its start. The host decides what its phases are; the frame log lists
+ * them in order. */
+static inline void hprof_phase(int k) {
+    if (!g_hprof.running || !g_hprof.nframes || (unsigned)k >= HPROF_PHASES) return;
+    hprof_frame_t *fr = &g_hprof.frames[g_hprof.nframes - 1];
+    uint32_t t = (uint32_t)(hprof__now_us() - g_hprof.t0_us);
+    fr->ph[k] = t > fr->t_us ? t - fr->t_us : 1;
+}
+
+/* Put a duration of the host's own (us) in phase slot k instead of a stamp. */
+static inline void hprof_phase_set(int k, int64_t us) {
+    if (!g_hprof.running || !g_hprof.nframes || (unsigned)k >= HPROF_PHASES) return;
+    g_hprof.frames[g_hprof.nframes - 1].ph[k] = (uint32_t)(us < 0 ? 0 : us);
+}
+
+/* Close the frame hprof_tick opened: the core's work is done, and the board is
+ * at `board`. Call it from the same thread, at the end of the host frame. */
+static inline void hprof_frame_end(uint32_t board) {
+    if (!g_hprof.running || !g_hprof.nframes) return;
+    hprof_frame_t *fr = &g_hprof.frames[g_hprof.nframes - 1];
+    uint32_t t = (uint32_t)(hprof__now_us() - g_hprof.t0_us);
+    fr->work_us = t > fr->t_us ? t - fr->t_us : 1;
+    fr->board = board;
 }
 
 /* Finish a run early (the process is quitting): write what there is. */
@@ -572,6 +726,9 @@ static inline void hprof_leave(int prev)             { (void)prev; }
 static inline void hprof_name_thread(const char *n)  { (void)n; }
 static inline void hprof_request(const char *spec)   { (void)spec; }
 static inline void hprof_tick(void)                  {}
+static inline void hprof_frame_end(uint32_t board)   { (void)board; }
+static inline void hprof_phase(int k)                { (void)k; }
+static inline void hprof_phase_set(int k, int64_t us) { (void)k; (void)us; }
 static inline void hprof_shutdown(void)              {}
 #endif
 
