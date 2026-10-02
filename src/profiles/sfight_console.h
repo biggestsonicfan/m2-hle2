@@ -106,6 +106,11 @@ static uint8_t s_sfc_hidden[2];
 static inline bool sfc_hidden_toggle(i960_cpu_t *cpu, memory_bus_t *bus, int p) {
     uint32_t sel = cpu->globals.g[13];                    /* the select screen's work */
     uint32_t mom = mem_read32(bus, 0x00500704);           /* momentary input */
+    /* A room's Secret character rule: Off, Start picks nothing hidden. */
+    if (!(g_xplay_match ? g_xplay_secret : g_hidden_chars)) {
+        s_sfc_hidden[p] = 0;
+        return false;
+    }
     if ((mom >> (p + 4)) & 1) {                           /* this player's Start */
         uint32_t mine   = mem_read8(bus, sel + (p ? 0x78 : 0x5C));
         uint32_t theirs = mem_read8(bus, sel + (p ? 0x5C : 0x78));

@@ -172,6 +172,23 @@ typedef enum {
  */
 #define RPCN_ROOM_INT_ATTR_RELAY     0x4Cu
 
+/*
+ * Some of a room's eight searchable int attributes, 0x4C..0x53: bit i of `mask`
+ * says value[i] is attribute 0x4C + i. Published at CreateRoom, or a search
+ * filter, where the server keeps a room only if each one is EQUAL (and every
+ * room has all eight, 0 where its creator wrote none).
+ */
+typedef struct {
+    uint8_t  mask;
+    uint32_t value[8];
+} rpcn_int_attrs_t;
+
+static inline void rpcn_int_attrs_set(rpcn_int_attrs_t *a, uint16_t id, uint32_t v) {
+    if (id < 0x4C || id > 0x53) return;
+    a->mask |= (uint8_t)(1u << (id - 0x4C));
+    a->value[id - 0x4C] = v;
+}
+
 /* SCE_NP_MATCHING2_ROOMMEMBER_FLAG_ATTR_OWNER, in a member's flagAttr. */
 #define RPCN_MEMBER_FLAG_OWNER       0x80000000u
 
@@ -628,18 +645,27 @@ static inline void rpcn_pb_int_attr(pb_writer_t *w, uint32_t field, uint16_t id,
     pb_end_sub(w, tok);
 }
 
+/* An EQ intFilter (SearchRoom field 8, repeated: the server ANDs them). */
+static inline void rpcn_pb_int_filter_eq(pb_writer_t *w, uint16_t id, uint32_t num) {
+    uint32_t f = pb_begin_sub(w, 8);
+    pb_wrapped(w, 1, 1);                        /* searchOperator: EQ */
+    rpcn_pb_int_attr(w, 2, id, num);
+    pb_end_sub(w, f);
+}
+
 /*
  * `room_bin` / `member_bin` seed the room's shared state and the creator's own
  * attribute (room.h), so the room is never seen without them. Either may be
  * null, which leaves the attribute empty. `relay_ms` is RPCN_ROOM_INT_ATTR_RELAY,
- * left unset at 0.
+ * left unset at 0. `ints` (may be null) are more searchable ints, the room's
+ * rules (room.h, match_rules_t); one for the relay id is ignored.
  */
 static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
                                         uint32_t max_slot, const char *password,
                                         uint32_t flag_attr,
                                         const uint8_t *room_bin, uint32_t room_len,
                                         const uint8_t *member_bin, uint32_t member_len,
-                                        uint32_t relay_ms) {
+                                        uint32_t relay_ms, const rpcn_int_attrs_t *ints) {
     uint8_t pb[512];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
@@ -654,6 +680,8 @@ static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, ui
         rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, room_bin, room_len);
     if (relay_ms)                               /* roomSearchableIntAttrExternal */
         rpcn_pb_int_attr(&w, 6, RPCN_ROOM_INT_ATTR_RELAY, relay_ms);
+    for (uint32_t i = 1; ints && i < 8; i++)
+        if (ints->mask & (1u << i)) rpcn_pb_int_attr(&w, 6, (uint16_t)(0x4C + i), ints->value[i]);
     if (password && *password) {
         /* TWO RULES, BOTH ENFORCED SILENTLY BY THE SERVER — get either wrong and
          * the room ends up with NO password while still looking protected here.
@@ -832,7 +860,9 @@ static inline uint64_t rpcn_get_room_data_internal(rpcn_client_t *c, const char 
     return rpcn_request(c, RPCN_CMD_GET_ROOM_DATA_INTERNAL, payload, n);
 }
 
-static inline uint64_t rpcn_search_room(rpcn_client_t *c, const char *com_id, uint32_t world_id) {
+/* `filter` (may be null) keeps only the rooms whose ints are equal to it. */
+static inline uint64_t rpcn_search_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
+                                        const rpcn_int_attrs_t *filter) {
     uint8_t pb[256];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
@@ -847,9 +877,12 @@ static inline uint64_t rpcn_search_room(rpcn_client_t *c, const char *com_id, ui
      * its own values for anything outside that. */
     pb_varint(&w, 4, 1);                        /* rangeFilter_startIndex */
     pb_varint(&w, 5, 20);                       /* rangeFilter_max */
+    for (uint32_t i = 0; filter && i < 8; i++)
+        if (filter->mask & (1u << i)) rpcn_pb_int_filter_eq(&w, (uint16_t)(0x4C + i), filter->value[i]);
     /* attrId: which searchable attributes to include. `repeated uint16`, so each
-     * is a wrapper. Without it the owner's round trip is not in the reply. */
-    pb_wrapped(&w, 10, RPCN_ROOM_INT_ATTR_RELAY);
+     * is a wrapper. Without it the owner's round trip is not in the reply. The
+     * rest are the room's rules (0x4D..0x51), for the search list. */
+    for (uint16_t id = RPCN_ROOM_INT_ATTR_RELAY; id <= 0x51; id++) pb_wrapped(&w, 10, id);
     if (!w.ok) { rpcn_fail(c, "SearchRoom: protobuf overflow"); return 0; }
 
     uint8_t payload[512];
@@ -866,10 +899,12 @@ static inline uint64_t rpcn_search_room(rpcn_client_t *c, const char *com_id, ui
 
 /* SearchRoom as the PS3 game shapes it: closed, full and hidden rooms left out
  * (flagFilter 0x70000000, flagAttr 0), only rooms carrying the game's version tag
- * in searchable int 0x53, and all eight rule ints returned. The game also
- * filters on its own region and room mode; we show every room it could join. */
+ * in searchable int 0x53, and all eight rule ints returned. The game's Custom
+ * Match adds an EQ filter for each rule the player specified, its matching
+ * range (0x51) and the room mode (0x52) -- `filter`, which may be null for every
+ * room it could join. */
 static inline uint64_t rpcn_ps3_search_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
-                                            uint32_t version_tag) {
+                                            uint32_t version_tag, const rpcn_int_attrs_t *filter) {
     uint8_t pb[256];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
@@ -879,12 +914,9 @@ static inline uint64_t rpcn_ps3_search_room(rpcn_client_t *c, const char *com_id
     pb_varint(&w, 5, 20);                       /* rangeFilter_max */
     pb_varint(&w, 6, 0x70000000u);              /* flagFilter */
     /* flagAttr 0 is proto3's default and needs no bytes. */
-    {
-        uint32_t f = pb_begin_sub(&w, 8);       /* intFilter */
-        pb_wrapped(&w, 1, 1);                   /* searchOperator: EQ */
-        rpcn_pb_int_attr(&w, 2, 0x53, version_tag);
-        pb_end_sub(&w, f);
-    }
+    for (uint32_t i = 0; filter && i < 7; i++)
+        if (filter->mask & (1u << i)) rpcn_pb_int_filter_eq(&w, (uint16_t)(0x4C + i), filter->value[i]);
+    rpcn_pb_int_filter_eq(&w, 0x53, version_tag);
     for (uint16_t id = 0x4C; id <= 0x53; id++) pb_wrapped(&w, 10, id);   /* attrId */
     if (!w.ok) { rpcn_fail(c, "SearchRoom: protobuf overflow"); return 0; }
     uint8_t payload[512];
