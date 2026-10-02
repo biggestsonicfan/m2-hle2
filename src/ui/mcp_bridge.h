@@ -19,6 +19,7 @@
 #ifndef MCP_BRIDGE_H
 #define MCP_BRIDGE_H
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -408,15 +409,42 @@ static void mcp_cmd_read_memory(const char *req, char *resp, int cap, int peek) 
  * nesting; decimal or 0x hex, quoted or bare. */
 #define MCP_READ_MANY_RANGES 64
 #define MCP_READ_MANY_BYTES  32768   /* hex doubles it, inside the 128 kB reply */
-static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
-    uint8_t *buf;   /* per call: watchers read on threads of their own */
+/* The ranges as parsed: addresses, sizes, how many, and their bytes in all.
+ * half says whether the next number is a size. */
+typedef struct {
     uint32_t addr[MCP_READ_MANY_RANGES], size[MCP_READ_MANY_RANGES];
-    int n = 0, half = 0, depth = 0;
-    uint32_t total = 0;
+    int      n, half;
+    uint32_t total;
+} mcp_read_many_t;
 
+/* One number of the flat run: an address, or the size after it. False, with
+ * the refusal written, when the ranges go past a limit. */
+static bool mcp_read_many_take(mcp_read_many_t *rm, uint32_t v, char *resp, int cap) {
+    if (!rm->half) {
+        if (rm->n == MCP_READ_MANY_RANGES) {
+            snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d ranges\"}",
+                     MCP_READ_MANY_RANGES); return false;
+        }
+        rm->addr[rm->n] = v;
+    } else {
+        rm->size[rm->n] = v;
+        if (v > MCP_READ_MANY_BYTES - rm->total) {
+            snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d bytes in all\"}",
+                     MCP_READ_MANY_BYTES); return false;
+        }
+        rm->total += v;
+        rm->n++;
+    }
+    rm->half ^= 1;
+    return true;
+}
+
+/* `ranges` into rm. False, with the refusal written, when it is not usable. */
+static bool mcp_read_many_parse(const char *req, mcp_read_many_t *rm, char *resp, int cap) {
+    int depth = 0;
     const char *p = json_value_at(req, "ranges");
     if (!p || *p != '[') {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing ranges\"}"); return;
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing ranges\"}"); return false;
     }
     for (; *p; p++) {
         if (*p == '[') { depth++; continue; }
@@ -425,29 +453,42 @@ static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
             char *end;
             uint32_t v = (uint32_t)strtoul(p, &end, 0);
             p = end - 1;
-            if (!half) {
-                if (n == MCP_READ_MANY_RANGES) {
-                    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d ranges\"}",
-                             MCP_READ_MANY_RANGES); return;
-                }
-                addr[n] = v;
-            } else {
-                size[n] = v;
-                if (v > MCP_READ_MANY_BYTES - total) {
-                    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d bytes in all\"}",
-                             MCP_READ_MANY_BYTES); return;
-                }
-                total += v;
-                n++;
-            }
-            half ^= 1;
+            if (!mcp_read_many_take(rm, v, resp, cap)) return false;
         }
     }
-    if (half || n == 0) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"ranges must be [addr,size] pairs\"}"); return;
+    if (rm->half || rm->n == 0) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"ranges must be [addr,size] pairs\"}"); return false;
     }
+    return true;
+}
+
+/* The reply: every range's bytes as one hex string. */
+static void mcp_read_many_reply(char *resp, int cap, unsigned frame, const mcp_read_many_t *rm,
+                                const uint8_t *b) {
+    /* 32 kB of hex is 64 kB, well inside the bridge's 128 kB reply. */
+    static const char hex[] = "0123456789ABCDEF";
+    char *o = resp;
+    o += snprintf(o, (size_t)cap, "{\"ok\":true,\"frame\":%u,\"data\":[", frame);
+    for (int r = 0; r < rm->n; r++) {
+        if (r) *o++ = ',';
+        *o++ = '"';
+        for (uint32_t i = 0; i < rm->size[r]; i++, b++) {
+            *o++ = hex[*b >> 4];
+            *o++ = hex[*b & 15];
+        }
+        *o++ = '"';
+    }
+    *o++ = ']'; *o++ = '}'; *o = '\0';
+}
+
+static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
+    uint8_t *buf;   /* per call: watchers read on threads of their own */
+    mcp_read_many_t rm;
+    rm.n = 0; rm.half = 0; rm.total = 0;
+
+    if (!mcp_read_many_parse(req, &rm, resp, cap)) return;
     if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
-    if (!(buf = (uint8_t *)malloc(total ? total : 1))) {
+    if (!(buf = (uint8_t *)malloc(rm.total ? rm.total : 1))) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
     }
 
@@ -457,25 +498,11 @@ static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     unsigned frame = g_emu_frames;
     uint8_t *b = buf;
-    for (int r = 0; r < n; r++)
-        for (uint32_t i = 0; i < size[r]; i++) *b++ = mcp_bus_byte(g_mcp.bus, addr[r] + i, peek);
+    for (int r = 0; r < rm.n; r++)
+        for (uint32_t i = 0; i < rm.size[r]; i++) *b++ = mcp_bus_byte(g_mcp.bus, rm.addr[r] + i, peek);
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 
-    /* 32 kB of hex is 64 kB, well inside the bridge's 128 kB reply. */
-    static const char hex[] = "0123456789ABCDEF";
-    char *o = resp;
-    o += snprintf(o, (size_t)cap, "{\"ok\":true,\"frame\":%u,\"data\":[", frame);
-    b = buf;
-    for (int r = 0; r < n; r++) {
-        if (r) *o++ = ',';
-        *o++ = '"';
-        for (uint32_t i = 0; i < size[r]; i++, b++) {
-            *o++ = hex[*b >> 4];
-            *o++ = hex[*b & 15];
-        }
-        *o++ = '"';
-    }
-    *o++ = ']'; *o++ = '}'; *o = '\0';
+    mcp_read_many_reply(resp, cap, frame, &rm, buf);
     free(buf);
 }
 
@@ -520,20 +547,43 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
  * {"off":1} ends it, and nothing at all asks how it is going. Every answer
  * carries the phase: "ready" means the stage is the one asked for, its textures
  * have stopped changing and the camera is where the link put it. */
+/* A link fragment from the request's stage, eye and ang, for a request that
+ * names no link. Empty when it names none of them either. */
+static void mcp_sky_eye_link_of(const char *req, char *link, size_t cap) {
+    char v[128];
+    size_t n = 0;
+    if (json_get_str(req, "eye", v, sizeof v))
+        n += (size_t)snprintf(link + n, cap - n, "&eye=%s", v);
+    if (json_get_str(req, "ang", v, sizeof v))
+        n += (size_t)snprintf(link + n, cap - n, "&ang=%s", v);
+    uint32_t st;
+    if (mcp_json_get_u32(req, "stage", &st))
+        n += (size_t)snprintf(link + n, cap - n, "&stage=%u", st);
+    if (n) link[0] = '#';
+}
+
+/* The phase, what was asked for and where the game's camera is now. */
+static void mcp_sky_eye_reply(char *resp, int cap) {
+    float p[3] = {0}; int a[3] = {0};
+    int have = sky_eye_read_camera(g_mcp.bus, p, a);
+    int stage_now = (int)mem_read8(g_mcp.bus, SKY_EYE_STAGE_NUM);
+    const sky_eye_req_t *q = &g_sky_eye.req;
+    snprintf(resp, (size_t)cap,
+        "{\"ok\":true,\"phase\":\"%s\",\"stage\":%d,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d],"
+        "\"from_explorer\":%s,\"frames\":%u,\"phase_frames\":%u,\"texram_stable_polls\":%d,"
+        "\"camera_held\":%s,\"hook_calls\":%u,\"game\":{\"stage_num\":%d,\"camera\":%s,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d]}}",
+        SKY_EYE_PHASE_NAME[g_sky_eye.phase], q->stage, q->pos[0], q->pos[1], q->pos[2],
+        q->xang, q->yang, q->zang, q->from_explorer ? "true" : "false",
+        g_sky_eye.total_frames, g_sky_eye.phase_frames, g_sky_eye.stable,
+        g_sky_eye.camera_held ? "true" : "false", g_sky_eye.hook_calls, stage_now, have ? "true" : "false",
+        p[0], p[1], p[2], a[0], a[1], a[2]);
+}
+
 static void mcp_cmd_sky_eye(const char *req, char *resp, int cap) {
     if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
-    char link[1024] = {0}, v[128], err[160] = {0};
-    if (!json_get_str_unescaped(req, "link", link, sizeof link)) {
-        size_t n = 0;
-        if (json_get_str(req, "eye", v, sizeof v))
-            n += (size_t)snprintf(link + n, sizeof link - n, "&eye=%s", v);
-        if (json_get_str(req, "ang", v, sizeof v))
-            n += (size_t)snprintf(link + n, sizeof link - n, "&ang=%s", v);
-        uint32_t st;
-        if (mcp_json_get_u32(req, "stage", &st))
-            n += (size_t)snprintf(link + n, sizeof link - n, "&stage=%u", st);
-        if (n) link[0] = '#';
-    }
+    char link[1024] = {0}, err[160] = {0};
+    if (!json_get_str_unescaped(req, "link", link, sizeof link))
+        mcp_sky_eye_link_of(req, link, sizeof link);
     const char *ov = json_value_at(req, "off");     /* {"off":true} as well as 1 */
     int off = ov && (*ov == 't' || strtoul(ov, NULL, 0) != 0);
     sky_eye_req_t r;
@@ -551,19 +601,7 @@ static void mcp_cmd_sky_eye(const char *req, char *resp, int cap) {
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     if (off) sky_eye_stop();
     else if (link[0]) sky_eye_start(&r);
-    float p[3] = {0}; int a[3] = {0};
-    int have = sky_eye_read_camera(g_mcp.bus, p, a);
-    int stage_now = (int)mem_read8(g_mcp.bus, SKY_EYE_STAGE_NUM);
-    const sky_eye_req_t *q = &g_sky_eye.req;
-    snprintf(resp, (size_t)cap,
-        "{\"ok\":true,\"phase\":\"%s\",\"stage\":%d,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d],"
-        "\"from_explorer\":%s,\"frames\":%u,\"phase_frames\":%u,\"texram_stable_polls\":%d,"
-        "\"camera_held\":%s,\"hook_calls\":%u,\"game\":{\"stage_num\":%d,\"camera\":%s,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d]}}",
-        SKY_EYE_PHASE_NAME[g_sky_eye.phase], q->stage, q->pos[0], q->pos[1], q->pos[2],
-        q->xang, q->yang, q->zang, q->from_explorer ? "true" : "false",
-        g_sky_eye.total_frames, g_sky_eye.phase_frames, g_sky_eye.stable,
-        g_sky_eye.camera_held ? "true" : "false", g_sky_eye.hook_calls, stage_now, have ? "true" : "false",
-        p[0], p[1], p[2], a[0], a[1], a[2]);
+    mcp_sky_eye_reply(resp, cap);
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 }
 
@@ -1903,17 +1941,9 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
  * arguments at all means "sign in as whoever signed in last", which is what a
  * scripted lobby wants -- the browser dance happens once, ever, by hand.
  */
-static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
-    uint32_t v = 0;
+/* The request's text fields of the config (mcp_netplay_cfg). */
+static void mcp_netplay_cfg_strings(const char *req, netplay_config_t *cfg) {
     char s[256];
-
-    memset(cfg, 0, sizeof(*cfg));
-    if (!netplay_stored_settings(cfg)) {
-        cfg->port        = RPCN_DEFAULT_PORT;
-        cfg->frame_delay = 2;
-    }
-    if (!cfg->frame_delay) cfg->frame_delay = 2;
-
     if (mcp_json_get_str(req, "server", s, sizeof(s)))
         snprintf(cfg->server, sizeof(cfg->server), "%s", s);
     if (mcp_json_get_str(req, "user", s, sizeof(s)))
@@ -1934,6 +1964,12 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
         snprintf(cfg->fingerprint, sizeof(cfg->fingerprint), "%s", s);
     if (mcp_json_get_str(req, "room_pass", s, sizeof(s)))
         snprintf(cfg->room_password, sizeof(cfg->room_password), "%s", s);
+}
+
+/* The request's numbers and switches (and the PS3 wire log's path). */
+static void mcp_netplay_cfg_numbers(const char *req, netplay_config_t *cfg) {
+    uint32_t v = 0;
+    char s[256];
     if (mcp_json_get_u32(req, "port", &v) && v)   cfg->port = (uint16_t)v;
     if (mcp_json_get_u32(req, "delay", &v))       cfg->frame_delay = v;
     if (mcp_json_get_u32(req, "p2p_port", &v))    cfg->local_p2p_port = (uint16_t)v;
@@ -1949,31 +1985,48 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
     if (mcp_json_get_u32(req, "vs", &v))          cfg->vs_mode = v != 0;
     if (mcp_json_get_u32(req, "entry", &v))       cfg->entry = (uint8_t)v;
     if (mcp_json_get_u32(req, "watch", &v))       cfg->watch_only = v != 0;
-    /* The room's rules (net/room.h match_rules_t; PS3 Player Match): rounds
-     * 0-3 = 2-5 to win, time 0-3 = 10/30/60/99 s, type 0-3 = A-D, secret 0/1,
-     * range 0 = Worldwide / 1 = same area. netplay_host publishes them (unset
-     * fields keep the PS3's defaults); netplay_search filters on them (unset
-     * fields match anything). players (2-8 seats) filters a PS3 search only:
-     * a community room's 0x4C is its relay time, so the lobby filters that
-     * list itself. */
-    {
-        static const char *const key[6] = { "rounds", "time", "type", "secret", "range", "players" };
-        match_rules_t host = match_rules_ps3(), want = match_rules_any();
-        uint8_t *hv[6] = { &host.rounds, &host.time, &host.type, &host.secret, &host.range, &host.players };
-        uint8_t *wv[6] = { &want.rounds, &want.time, &want.type, &want.secret, &want.range, &want.players };
-        bool any = false;
-        for (int i = 0; i < 6; i++) {
-            if (!mcp_json_get_u32(req, key[i], &v)) continue;
-            *hv[i] = *wv[i] = (uint8_t)v;
-            any = true;
-        }
-        if (any) {
-            cfg->has_rules = true;
-            cfg->rules     = host;
-            cfg->filter    = true;
-            cfg->want      = want;
-        }
+}
+
+/* The room's rules (net/room.h match_rules_t; PS3 Player Match): rounds
+ * 0-3 = 2-5 to win, time 0-3 = 10/30/60/99 s, type 0-3 = A-D, secret 0/1,
+ * range 0 = Worldwide / 1 = same area. netplay_host publishes them (unset
+ * fields keep the PS3's defaults); netplay_search filters on them (unset
+ * fields match anything). players (2-8 seats) filters a PS3 search only:
+ * a community room's 0x4C is its relay time, so the lobby filters that
+ * list itself. */
+static void mcp_netplay_cfg_rules(const char *req, netplay_config_t *cfg) {
+    uint32_t v = 0;
+    static const char *const key[6] = { "rounds", "time", "type", "secret", "range", "players" };
+    match_rules_t host = match_rules_ps3(), want = match_rules_any();
+    uint8_t *hv[6] = { &host.rounds, &host.time, &host.type, &host.secret, &host.range, &host.players };
+    uint8_t *wv[6] = { &want.rounds, &want.time, &want.type, &want.secret, &want.range, &want.players };
+    bool any = false;
+    for (int i = 0; i < 6; i++) {
+        if (!mcp_json_get_u32(req, key[i], &v)) continue;
+        *hv[i] = *wv[i] = (uint8_t)v;
+        any = true;
     }
+    if (any) {
+        cfg->has_rules = true;
+        cfg->rules     = host;
+        cfg->filter    = true;
+        cfg->want      = want;
+    }
+}
+
+static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
+    char s[256];
+
+    memset(cfg, 0, sizeof(*cfg));
+    if (!netplay_stored_settings(cfg)) {
+        cfg->port        = RPCN_DEFAULT_PORT;
+        cfg->frame_delay = 2;
+    }
+    if (!cfg->frame_delay) cfg->frame_delay = 2;
+
+    mcp_netplay_cfg_strings(req, cfg);
+    mcp_netplay_cfg_numbers(req, cfg);
+    mcp_netplay_cfg_rules(req, cfg);
     /* A room id is 64 bits and mcp_json_get_u32 is not, so it travels as a
      * string. Quoted or not: mcp_json_get_str finds the quoted form, and the
      * unquoted one is read straight out of the request. */
@@ -2126,151 +2179,194 @@ static void mcp_cmd_netplay_disconnect(char *resp, int cap) {
  * emulator's own netplay log with a total count beside it, so a poller can tell
  * "nothing happened" from "I missed some lines".
  */
+/* The reply's write head: what is left of the buffer, and where it goes on.
+ * A write that does not fit is cut at the end of the buffer, as snprintf
+ * cuts it, and the head stops there. */
+typedef struct {
+    char *p;
+    int   left;
+} mcp_np_out_t;
+
+static void mcp_np_append(mcp_np_out_t *o, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(o->p, (size_t)o->left, fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= o->left) n = o->left > 0 ? o->left - 1 : 0;
+    o->p += n; o->left -= n;
+}
+
+static const char *mcp_tf(bool b) { return b ? "true" : "false"; }
+
+/* The state, the ComId and the peer. */
+static void mcp_np_status_head(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_np_append(o, "{\"ok\":true,\"state\":\"%s\",\"state_num\":%d,\"stage\":%d,"
+              "\"is_host\":%s,\"player\":%d,\"room_id\":\"%llu\","
+              "\"room_flags\":\"0x%08X\"",
+              netplay_state_text(st->state), (int)st->state, (int)st->stage,
+              mcp_tf(st->is_host), st->local_player,
+              (unsigned long long)st->room_id, st->room_flags);
+
+    mcp_json_escape(esc, sizeof(esc), st->com_id);
+    mcp_np_append(o, ",\"com_id\":\"%s\"", esc);
+
+    mcp_json_escape(esc, sizeof(esc), st->peer_npid);
+    mcp_np_append(o, ",\"peer\":{\"npid\":\"%s\",\"known\":%s,\"heard\":%s,"
+              "\"ready\":%s,\"ready_gen\":%u,\"rtt_ms\":%d,\"addr\":\"",
+              esc, mcp_tf(st->peer_known),
+              mcp_tf(st->peer_heard),
+              mcp_tf(st->peer_ready), st->peer_ready_gen, (int)st->peer_rtt_ms);
+    mcp_json_escape(esc, sizeof(esc), st->peer_addr);
+    mcp_np_append(o, "%s\"}", esc);
+}
+
+/* One member of the room, in line order. */
+static void mcp_np_status_member(mcp_np_out_t *o, const netplay_member_status_t *m, uint32_t i) {
+    char esc[512];
+    mcp_json_escape(esc, sizeof(esc), m->npid);
+    mcp_np_append(o, "%s{\"id\":%u,\"npid\":\"%s\",\"me\":%s,\"owner\":%s,\"line\":%d,\"side\":%d,"
+              "\"known\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"playing\":%u,"
+              "\"result_match\":%u,\"games\":%u,\"wins\":%u,\"points\":%u,"
+              "\"addr_known\":%s,\"heard\":%s,\"rtt_ms\":%d}",
+              i ? "," : "", m->member_id, esc, mcp_tf(m->is_me),
+              mcp_tf(m->is_owner), m->line_pos, m->side,
+              mcp_tf(m->known),
+              mcp_tf(m->data.flags & ROOM_MEMBER_READY),
+              mcp_tf(m->data.flags & ROOM_MEMBER_WATCH),
+              m->data.entry, m->data.playing, m->data.result_match,
+              m->data.games, m->data.wins, m->data.points,
+              mcp_tf(m->addr_known), mcp_tf(m->heard), (int)m->rtt_ms);
+}
+
+/* The room (net/room.h): its phase, the match, and every member in line
+ * order with the side they are on and what they have published. */
+static void mcp_np_status_room(mcp_np_out_t *o, const netplay_status_t *st) {
+    mcp_np_append(o, ",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"session\":%u,"
+              "\"vs_mode\":%s,\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,"
+              "\"range\":%u},\"fighters\":[%u,%u],"
+              "\"last_result\":%d,\"auto_start_s\":%u,\"max\":%u,\"me\":%u,\"members\":[",
+              mcp_tf(st->room_known),
+              st->room.phase == ROOM_PHASE_MATCH ? "match" : "lobby",
+              st->room.match, st->room.session ? st->room.session : st->room.match,
+              mcp_tf(st->room.vs_mode),
+              st->room_rules.rounds, st->room_rules.time, st->room_rules.type, st->room_rules.secret,
+              st->room_rules.range,
+              st->room.fighter[0], st->room.fighter[1],
+              st->room.last_result <= 1 ? (int)st->room.last_result : -1,
+              st->auto_start_s, st->max_slot, st->my_member_id);
+    for (uint32_t i = 0; i < st->member_count && o->left > 256; i++)
+        mcp_np_status_member(o, &st->members[i], i);
+    mcp_np_append(o, "]}");
+}
+
+/* PS3 cross-play (net/ps3_link.h): the PS3 room's phase, our side, the
+ * lockstep's counters, and each member's signaling and RUDP channels
+ * (0 idle, 1 SYN sent, 2 SYN received, 3 open, 4 closed). */
+static void mcp_np_status_ps3(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_np_append(o, ",\"ps3\":{\"room_known\":%s,\"phase\":%u,\"side\":%d,\"match\":%s,"
+              "\"gen\":%u,\"rgen\":%u,\"gen_ok\":%s,\"resp_done\":%s,\"passed\":%s,"
+              "\"sample\":%d,\"play\":%d,\"newest\":%d,\"delay\":%d,\"stalled\":%u,"
+              "\"seed\":\"0x%08X\",\"me_flags\":\"0x%08X\",\"peers\":[",
+              mcp_tf(st->ps3_room_known), st->ps3_phase, st->ps3_side,
+              mcp_tf(st->ps3_match), st->ps3_gen, st->ps3_rgen,
+              mcp_tf(st->ps3_gen_ok), mcp_tf(st->ps3_resp_done),
+              mcp_tf(st->ps3_passed), st->ps3_sample, st->ps3_play, st->ps3_newest,
+              st->ps3_delay, st->ps3_stalled_frames, st->ps3_seed, st->ps3_me_flags);
+    for (uint32_t i = 0; i < st->ps3_peer_count && o->left > 256; i++) {
+        mcp_json_escape(esc, sizeof(esc), st->ps3_peers[i].npid);
+        mcp_np_append(o, "%s{\"id\":%u,\"npid\":\"%s\",\"sig\":%s,\"sig_peer\":%s,\"rtt_us\":%u,"
+                  "\"ch\":[%u,%u,%u],\"addr\":\"%s\"}",
+                  i ? "," : "", st->ps3_peers[i].member_id, esc,
+                  mcp_tf(st->ps3_peers[i].sig_active),
+                  mcp_tf(st->ps3_peers[i].sig_peer_active), st->ps3_peers[i].rtt_us,
+                  st->ps3_peers[i].ch_state[0], st->ps3_peers[i].ch_state[1],
+                  st->ps3_peers[i].ch_state[2], st->ps3_peers[i].addr);
+    }
+    mcp_np_append(o, "]}");
+}
+
+/* The Twitch sign-in: its state, and the code and page a player is sent to. */
+static void mcp_np_status_twitch(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_json_escape(esc, sizeof(esc), st->twitch_npid);
+    mcp_np_append(o, ",\"twitch\":{\"state\":%d,\"signed_in\":%s,\"npid\":\"%s\"",
+              (int)st->twitch_state, mcp_tf(st->twitch_signed_in), esc);
+    mcp_json_escape(esc, sizeof(esc), st->twitch_user_code);
+    mcp_np_append(o, ",\"user_code\":\"%s\"", esc);
+    mcp_json_escape(esc, sizeof(esc), st->twitch_uri);
+    mcp_np_append(o, ",\"uri\":\"%s\"", esc);
+    mcp_json_escape(esc, sizeof(esc), st->twitch_error);
+    mcp_np_append(o, ",\"error\":\"%s\"}", esc);
+}
+
+/* The rooms netplay_search found. */
+static void mcp_np_status_rooms(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_np_append(o, ",\"search_pending\":%s,\"rooms\":[",
+              mcp_tf(st->search_pending));
+    for (uint32_t i = 0; i < st->room_count && o->left > 128; i++) {
+        mcp_json_escape(esc, sizeof(esc), st->rooms[i].owner);
+        match_rules_t rr = netplay_rules_of_listing(&st->rooms[i], st->ps3);
+        mcp_np_append(o, "%s{\"room_id\":\"%llu\",\"owner\":\"%s\",\"members\":%u,"
+                  "\"max\":%u,\"password\":%s,\"flags\":\"0x%08X\","
+                  "\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,\"range\":%u}}",
+                  i ? "," : "", (unsigned long long)st->rooms[i].room_id, esc,
+                  st->rooms[i].cur_members, st->rooms[i].max_slots,
+                  mcp_tf(st->rooms[i].has_password),
+                  st->rooms[i].flag_attr, rr.rounds, rr.time, rr.type, rr.secret, rr.range);
+    }
+    mcp_np_append(o, "]");
+}
+
+/* The tail of the netplay log, the last want_log lines of it. */
+static void mcp_np_status_log(mcp_np_out_t *o, const netplay_status_t *st, uint32_t want_log) {
+    char esc[512];
+    mcp_np_append(o, ",\"log_count\":%u,\"log\":[", st->log_count);
+    if (want_log) {
+        uint32_t have  = st->log_count < NETPLAY_LOG_LINES ? st->log_count : NETPLAY_LOG_LINES;
+        uint32_t take  = want_log < have ? want_log : have;
+        uint32_t first = st->log_count - take;
+        for (uint32_t i = 0; i < take && o->left > 64; i++) {
+            mcp_json_escape(esc, sizeof(esc), st->log[(first + i) % NETPLAY_LOG_LINES]);
+            mcp_np_append(o, "%s\"%s\"", i ? "," : "", esc);
+        }
+    }
+    mcp_np_append(o, "]}");
+}
+
 static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
     netplay_status_t st;
     uint32_t want_log = 12, want_rooms = 0;
     char esc[512];
-    char *p = resp;
-    int left = cap, n;
+    mcp_np_out_t o = { resp, cap };
 
     mcp_json_get_u32(req, "log", &want_log);
     mcp_json_get_u32(req, "rooms", &want_rooms);
     if (want_log > NETPLAY_LOG_LINES) want_log = NETPLAY_LOG_LINES;
     netplay_get_status(&st);
 
-#define NP_APPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__);      \
-                            if (n < 0 || n >= left) n = left > 0 ? left - 1 : 0; \
-                            p += n; left -= n; } while (0)
+    mcp_np_status_head(&o, &st);
+    mcp_np_status_room(&o, &st);
 
-    NP_APPEND("{\"ok\":true,\"state\":\"%s\",\"state_num\":%d,\"stage\":%d,"
-              "\"is_host\":%s,\"player\":%d,\"room_id\":\"%llu\","
-              "\"room_flags\":\"0x%08X\"",
-              netplay_state_text(st.state), (int)st.state, (int)st.stage,
-              st.is_host ? "true" : "false", st.local_player,
-              (unsigned long long)st.room_id, st.room_flags);
-
-    mcp_json_escape(esc, sizeof(esc), st.com_id);
-    NP_APPEND(",\"com_id\":\"%s\"", esc);
-
-    mcp_json_escape(esc, sizeof(esc), st.peer_npid);
-    NP_APPEND(",\"peer\":{\"npid\":\"%s\",\"known\":%s,\"heard\":%s,"
-              "\"ready\":%s,\"ready_gen\":%u,\"rtt_ms\":%d,\"addr\":\"",
-              esc, st.peer_known ? "true" : "false",
-              st.peer_heard ? "true" : "false",
-              st.peer_ready ? "true" : "false", st.peer_ready_gen, (int)st.peer_rtt_ms);
-    mcp_json_escape(esc, sizeof(esc), st.peer_addr);
-    NP_APPEND("%s\"}", esc);
-
-    /* The room (net/room.h): its phase, the match, and every member in line
-     * order with the side they are on and what they have published. */
-    NP_APPEND(",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"session\":%u,"
-              "\"vs_mode\":%s,\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,"
-              "\"range\":%u},\"fighters\":[%u,%u],"
-              "\"last_result\":%d,\"auto_start_s\":%u,\"max\":%u,\"me\":%u,\"members\":[",
-              st.room_known ? "true" : "false",
-              st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby",
-              st.room.match, st.room.session ? st.room.session : st.room.match,
-              st.room.vs_mode ? "true" : "false",
-              st.room_rules.rounds, st.room_rules.time, st.room_rules.type, st.room_rules.secret,
-              st.room_rules.range,
-              st.room.fighter[0], st.room.fighter[1],
-              st.room.last_result <= 1 ? (int)st.room.last_result : -1,
-              st.auto_start_s, st.max_slot, st.my_member_id);
-    for (uint32_t i = 0; i < st.member_count && left > 256; i++) {
-        const netplay_member_status_t *m = &st.members[i];
-        mcp_json_escape(esc, sizeof(esc), m->npid);
-        NP_APPEND("%s{\"id\":%u,\"npid\":\"%s\",\"me\":%s,\"owner\":%s,\"line\":%d,\"side\":%d,"
-                  "\"known\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"playing\":%u,"
-                  "\"result_match\":%u,\"games\":%u,\"wins\":%u,\"points\":%u,"
-                  "\"addr_known\":%s,\"heard\":%s,\"rtt_ms\":%d}",
-                  i ? "," : "", m->member_id, esc, m->is_me ? "true" : "false",
-                  m->is_owner ? "true" : "false", m->line_pos, m->side,
-                  m->known ? "true" : "false",
-                  (m->data.flags & ROOM_MEMBER_READY) ? "true" : "false",
-                  (m->data.flags & ROOM_MEMBER_WATCH) ? "true" : "false",
-                  m->data.entry, m->data.playing, m->data.result_match,
-                  m->data.games, m->data.wins, m->data.points,
-                  m->addr_known ? "true" : "false", m->heard ? "true" : "false", (int)m->rtt_ms);
-    }
-    NP_APPEND("]}");
-
-    NP_APPEND(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
+    mcp_np_append(&o, ",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
               st.frame, st.stalls, st.generation, st.seed);
-    /* PS3 cross-play (net/ps3_link.h): the PS3 room's phase, our side, the
-     * lockstep's counters, and each member's signaling and RUDP channels
-     * (0 idle, 1 SYN sent, 2 SYN received, 3 open, 4 closed). */
-    if (st.ps3) {
-        NP_APPEND(",\"ps3\":{\"room_known\":%s,\"phase\":%u,\"side\":%d,\"match\":%s,"
-                  "\"gen\":%u,\"rgen\":%u,\"gen_ok\":%s,\"resp_done\":%s,\"passed\":%s,"
-                  "\"sample\":%d,\"play\":%d,\"newest\":%d,\"delay\":%d,\"stalled\":%u,"
-                  "\"seed\":\"0x%08X\",\"me_flags\":\"0x%08X\",\"peers\":[",
-                  st.ps3_room_known ? "true" : "false", st.ps3_phase, st.ps3_side,
-                  st.ps3_match ? "true" : "false", st.ps3_gen, st.ps3_rgen,
-                  st.ps3_gen_ok ? "true" : "false", st.ps3_resp_done ? "true" : "false",
-                  st.ps3_passed ? "true" : "false", st.ps3_sample, st.ps3_play, st.ps3_newest,
-                  st.ps3_delay, st.ps3_stalled_frames, st.ps3_seed, st.ps3_me_flags);
-        for (uint32_t i = 0; i < st.ps3_peer_count && left > 256; i++) {
-            mcp_json_escape(esc, sizeof(esc), st.ps3_peers[i].npid);
-            NP_APPEND("%s{\"id\":%u,\"npid\":\"%s\",\"sig\":%s,\"sig_peer\":%s,\"rtt_us\":%u,"
-                      "\"ch\":[%u,%u,%u],\"addr\":\"%s\"}",
-                      i ? "," : "", st.ps3_peers[i].member_id, esc,
-                      st.ps3_peers[i].sig_active ? "true" : "false",
-                      st.ps3_peers[i].sig_peer_active ? "true" : "false", st.ps3_peers[i].rtt_us,
-                      st.ps3_peers[i].ch_state[0], st.ps3_peers[i].ch_state[1],
-                      st.ps3_peers[i].ch_state[2], st.ps3_peers[i].addr);
-        }
-        NP_APPEND("]}");
-    }
+    if (st.ps3) mcp_np_status_ps3(&o, &st);
     /* The room emptied with the board still in its VS mode: any input restarts
      * the game (netplay_empty_room_pump). */
-    NP_APPEND(",\"empty_room\":%s", st.empty_room ? "true" : "false");
+    mcp_np_append(&o, ",\"empty_room\":%s", mcp_tf(st.empty_room));
     /* LOCKSTEP_NO_CHECK means the two boards have never disagreed. Reporting it
      * as a frame number would be a desync at frame 4294967295. */
-    if (st.desync_frame != LOCKSTEP_NO_CHECK) NP_APPEND(",\"desync_frame\":%u", st.desync_frame);
-    else                                      NP_APPEND(",\"desync_frame\":null");
+    if (st.desync_frame != LOCKSTEP_NO_CHECK) mcp_np_append(&o, ",\"desync_frame\":%u", st.desync_frame);
+    else                                      mcp_np_append(&o, ",\"desync_frame\":null");
 
     mcp_json_escape(esc, sizeof(esc), st.error);
-    NP_APPEND(",\"error\":\"%s\"", esc);
+    mcp_np_append(&o, ",\"error\":\"%s\"", esc);
 
-    mcp_json_escape(esc, sizeof(esc), st.twitch_npid);
-    NP_APPEND(",\"twitch\":{\"state\":%d,\"signed_in\":%s,\"npid\":\"%s\"",
-              (int)st.twitch_state, st.twitch_signed_in ? "true" : "false", esc);
-    mcp_json_escape(esc, sizeof(esc), st.twitch_user_code);
-    NP_APPEND(",\"user_code\":\"%s\"", esc);
-    mcp_json_escape(esc, sizeof(esc), st.twitch_uri);
-    NP_APPEND(",\"uri\":\"%s\"", esc);
-    mcp_json_escape(esc, sizeof(esc), st.twitch_error);
-    NP_APPEND(",\"error\":\"%s\"}", esc);
-
-    if (want_rooms) {
-        NP_APPEND(",\"search_pending\":%s,\"rooms\":[",
-                  st.search_pending ? "true" : "false");
-        for (uint32_t i = 0; i < st.room_count && left > 128; i++) {
-            mcp_json_escape(esc, sizeof(esc), st.rooms[i].owner);
-            match_rules_t rr = netplay_rules_of_listing(&st.rooms[i], st.ps3);
-            NP_APPEND("%s{\"room_id\":\"%llu\",\"owner\":\"%s\",\"members\":%u,"
-                      "\"max\":%u,\"password\":%s,\"flags\":\"0x%08X\","
-                      "\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,\"range\":%u}}",
-                      i ? "," : "", (unsigned long long)st.rooms[i].room_id, esc,
-                      st.rooms[i].cur_members, st.rooms[i].max_slots,
-                      st.rooms[i].has_password ? "true" : "false",
-                      st.rooms[i].flag_attr, rr.rounds, rr.time, rr.type, rr.secret, rr.range);
-        }
-        NP_APPEND("]");
-    }
-
-    NP_APPEND(",\"log_count\":%u,\"log\":[", st.log_count);
-    if (want_log) {
-        uint32_t have  = st.log_count < NETPLAY_LOG_LINES ? st.log_count : NETPLAY_LOG_LINES;
-        uint32_t take  = want_log < have ? want_log : have;
-        uint32_t first = st.log_count - take;
-        for (uint32_t i = 0; i < take && left > 64; i++) {
-            mcp_json_escape(esc, sizeof(esc), st.log[(first + i) % NETPLAY_LOG_LINES]);
-            NP_APPEND("%s\"%s\"", i ? "," : "", esc);
-        }
-    }
-    NP_APPEND("]}");
-#undef NP_APPEND
+    mcp_np_status_twitch(&o, &st);
+    if (want_rooms) mcp_np_status_rooms(&o, &st);
+    mcp_np_status_log(&o, &st, want_log);
 }
 
 /*
