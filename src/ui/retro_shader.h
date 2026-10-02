@@ -645,6 +645,27 @@ static inline rs_param_t *rs_preset_param(rs_preset_t *p, const char *name) {
 
 typedef struct { size_t start, end; } rs_span_t;
 
+/* Past a comment that starts at s[i], or i itself when none does. */
+static inline size_t rs_skip_comment(const char *s, size_t i, size_t n) {
+    if (s[i] != '/') return i;
+    if (s[i + 1] == '/') { while (i < n && s[i] != '\n') i++; return i; }
+    if (s[i + 1] != '*') return i;
+    i += 2;
+    while (i < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+    return i < n ? i + 2 : n;
+}
+
+/* Past a preprocessor line that starts at s[i], continuation lines included,
+ * up to its '\n'. */
+static inline size_t rs_skip_directive(const char *s, size_t i, size_t n) {
+    while (i < n && s[i] != '\n') {
+        if (s[i] == '\\' && s[i + 1] == '\n') i++;
+        else if (s[i] == '\\' && s[i + 1] == '\r' && s[i + 2] == '\n') i += 2;
+        i++;
+    }
+    return i;
+}
+
 /* Statements at file scope, [start, end) with the ';', skipping comments,
  * preprocessor lines and the bodies of functions and structs. */
 static inline int rs_glsl_globals(const char *s, rs_span_t *out, int cap) {
@@ -654,23 +675,11 @@ static inline int rs_glsl_globals(const char *s, rs_span_t *out, int cap) {
     bool line_start = true;
     while (i < n) {
         const char c = s[i];
-        if (c == '/' && s[i + 1] == '/') { while (i < n && s[i] != '\n') i++; continue; }
-        if (c == '/' && s[i + 1] == '*') {
-            i += 2;
-            while (i < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
-            i = i < n ? i + 2 : n;
-            continue;
-        }
+        size_t past = rs_skip_comment(s, i, n);
+        if (past != i) { i = past; continue; }
         if (c == '\n') { line_start = true; i++; continue; }
         if (line_start && (c == ' ' || c == '\t' || c == '\r')) { i++; continue; }
-        if (line_start && c == '#') {
-            while (i < n && s[i] != '\n') {
-                if (s[i] == '\\' && s[i + 1] == '\n') i++;
-                else if (s[i] == '\\' && s[i + 1] == '\r' && s[i + 2] == '\n') i += 2;
-                i++;
-            }
-            continue;
-        }
+        if (line_start && c == '#') { i = rs_skip_directive(s, i, n); continue; }
         line_start = false;
         if (depth == 0) {
             if (st == (size_t)-1 && !isspace((unsigned char)c)) st = i;
@@ -696,41 +705,53 @@ static inline bool rs_word_at(const char *s, size_t i, const char *w) {
     return !strncmp(s + i, w, k) && !(isalnum((unsigned char)s[i + k]) || s[i + k] == '_');
 }
 
-/* One statement's replacement, or NULL to leave it alone. */
-static inline char *rs_hoist_one(const char *stmt, size_t len, int k) {
-    /* The initialiser's '=': the first at bracket depth 0 that is not ==, <=, >=, !=. */
+/* A line of the statement that starts with a directive, after any indent. */
+static inline bool rs_has_directive(const char *stmt, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (stmt[i] != '\n') continue;
+        size_t j = i + 1;
+        while (j < len && (stmt[j] == ' ' || stmt[j] == '\t')) j++;
+        if (j < len && stmt[j] == '#') return true;
+    }
+    return false;
+}
+
+/* Is stmt[i] an assignment's '=', not part of ==, <=, >= or !=? */
+static inline bool rs_is_assign(const char *stmt, size_t len, size_t i) {
+    if (stmt[i] != '=' || i + 1 >= len || stmt[i + 1] == '=') return false;
+    if (i == 0) return true;
+    char p = stmt[i - 1];
+    return p != '<' && p != '>' && p != '!' && p != '=';
+}
+
+/* The initialiser's '=': the first at bracket depth 0 that is an assignment.
+ * (size_t)-1 when there is none, or the statement declares more than one name. */
+static inline size_t rs_init_eq(const char *stmt, size_t len) {
     size_t eq = (size_t)-1;
     int depth = 0;
     for (size_t i = 0; i < len; i++) {
         char c = stmt[i];
         if (c == '(' || c == '[') depth++;
         else if (c == ')' || c == ']') depth--;
-        else if (c == ',' && depth == 0) return NULL;     /* more than one declarator */
-        else if (c == '\n' && eq == (size_t)-1) {
-            size_t j = i + 1;
-            while (j < len && (stmt[j] == ' ' || stmt[j] == '\t')) j++;
-            if (j < len && stmt[j] == '#') return NULL;    /* a directive inside the statement */
-        }
-        else if (c == '=' && depth == 0 && eq == (size_t)-1 && i + 1 < len && stmt[i + 1] != '=' &&
-                 (i == 0 || (stmt[i - 1] != '<' && stmt[i - 1] != '>' && stmt[i - 1] != '!' && stmt[i - 1] != '=')))
-            eq = i;
+        else if (c == ',' && depth == 0) return (size_t)-1;     /* more than one declarator */
+        else if (depth == 0 && eq == (size_t)-1 && rs_is_assign(stmt, len, i)) eq = i;
     }
-    if (eq == (size_t)-1) return NULL;
-    for (size_t i = eq; i < len; i++) {                   /* nor after the '=' */
-        if (stmt[i] != '\n') continue;
-        size_t j = i + 1;
-        while (j < len && (stmt[j] == ' ' || stmt[j] == '\t')) j++;
-        if (j < len && stmt[j] == '#') return NULL;
-    }
+    return eq;
+}
+
+/* A storage word before the '=' that keeps the statement where it is. */
+static inline bool rs_keep_out(const char *stmt, size_t eq) {
     static const char *const keep_out[] = { "uniform", "in", "out", "attribute", "varying", "layout",
                                             "precision", "struct", "inout", "buffer", "shared" };
     for (size_t i = 0; i < eq; i++)
         for (size_t w = 0; w < sizeof keep_out / sizeof keep_out[0]; w++)
-            if (rs_word_at(stmt, i, keep_out[w])) return NULL;
+            if (rs_word_at(stmt, i, keep_out[w])) return true;
+    return false;
+}
 
-    /* The declaration without const or static, and the name it declares. */
-    char *out = (char *)malloc(len * 2 + 128);
-    if (!out) return NULL;
+/* The declaration before the '=' into out, without const or static and
+ * without trailing space. Returns its length. */
+static inline size_t rs_decl_unqualified(const char *stmt, size_t eq, char *out) {
     size_t o = 0;
     for (size_t i = 0; i < eq; ) {
         if (rs_word_at(stmt, i, "const"))  { i += 5; continue; }
@@ -738,6 +759,11 @@ static inline char *rs_hoist_one(const char *stmt, size_t len, int k) {
         out[o++] = stmt[i++];
     }
     while (o > 0 && isspace((unsigned char)out[o - 1])) o--;
+    return o;
+}
+
+/* The name a declaration of length o declares, into name; false if there is none. */
+static inline bool rs_decl_name(const char *out, size_t o, char name[RS_NAME]) {
     size_t e = o;
     if (e > 0 && out[e - 1] == ']') {                     /* an array: the name is before its size */
         int d = 0;
@@ -746,33 +772,41 @@ static inline char *rs_hoist_one(const char *stmt, size_t len, int k) {
     }
     size_t nb = e;
     while (nb > 0 && (isalnum((unsigned char)out[nb - 1]) || out[nb - 1] == '_')) nb--;
-    if (nb == e) { free(out); return NULL; }
-    char name[RS_NAME];
-    size_t nl_ = e - nb < sizeof name - 1 ? e - nb : sizeof name - 1;
+    if (nb == e) return false;
+    size_t nl_ = e - nb < RS_NAME - 1 ? e - nb : RS_NAME - 1;
     memcpy(name, out + nb, nl_); name[nl_] = '\0';
+    return true;
+}
 
-    o += (size_t)sprintf(out + o, ";\n#define RS_INIT_%d %s = ", k, name);
-    /* The initialiser on one line: line comments cut, line breaks made spaces. */
+/* The initialiser after the '=' on one line: line comments cut, line breaks
+ * made spaces. Returns the new length of out. */
+static inline size_t rs_append_initialiser(const char *stmt, size_t eq, size_t len, char *out, size_t o) {
     for (size_t i = eq + 1; i < len; i++) {
         if (stmt[i] == '/' && i + 1 < len && stmt[i + 1] == '/') { while (i < len && stmt[i] != '\n') i++; out[o++] = ' '; continue; }
         out[o++] = stmt[i] == '\n' || stmt[i] == '\r' ? ' ' : stmt[i];
     }
+    return o;
+}
+
+/* One statement's replacement, or NULL to leave it alone. */
+static inline char *rs_hoist_one(const char *stmt, size_t len, int k) {
+    size_t eq = rs_init_eq(stmt, len);
+    if (eq == (size_t)-1 || rs_has_directive(stmt, len) || rs_keep_out(stmt, eq)) return NULL;
+    char *out = (char *)malloc(len * 2 + 128);
+    if (!out) return NULL;
+    size_t o = rs_decl_unqualified(stmt, eq, out);
+    char name[RS_NAME];
+    if (!rs_decl_name(out, o, name)) { free(out); return NULL; }
+    o += (size_t)sprintf(out + o, ";\n#define RS_INIT_%d %s = ", k, name);
+    o = rs_append_initialiser(stmt, eq, len, out, o);
     o += (size_t)sprintf(out + o, ";\n");
     out[o] = '\0';
     return out;
 }
 
-/* `lines` are 1-based lines of `text` the compiler rejected. Returns the new
- * text, or NULL when none of them was a statement this can move. *counter
- * numbers the macros across calls. */
-static inline char *rs_hoist_globals(const char *text, const int *lines, int n_lines, int *counter) {
-    enum { MAX_GLOBALS = 4096 };
-    rs_span_t *spans = (rs_span_t *)malloc(MAX_GLOBALS * sizeof *spans);
-    if (!spans) return NULL;
-    int n_spans = rs_glsl_globals(text, spans, MAX_GLOBALS);
-    /* Which statements the lines fall in, in source order, each once. */
-    bool *pick = (bool *)calloc((size_t)(n_spans ? n_spans : 1), sizeof *pick);
-    if (!pick) { free(spans); return NULL; }
+/* Which statements the 1-based `lines` fall in, each marked once in pick. */
+static inline void rs_pick_statements(const char *text, const rs_span_t *spans, int n_spans,
+                                      const int *lines, int n_lines, bool *pick) {
     for (int l = 0; l < n_lines; l++) {
         size_t off = 0;
         for (int line = 1; line < lines[l] && text[off]; off++) if (text[off] == '\n') line++;
@@ -781,10 +815,17 @@ static inline char *rs_hoist_globals(const char *text, const int *lines, int n_l
         for (int g = 0; g < n_spans; g++)
             if (spans[g].start <= le && spans[g].end > off) { pick[g] = true; break; }
     }
+}
+
+/* The text with each picked statement that can move replaced by its
+ * declaration and macro, in source order. *made counts them, and *counter
+ * numbers them. NULL when nothing moved or memory ran out. */
+static inline char *rs_replace_picked(const char *text, const rs_span_t *spans, int n_spans, const bool *pick,
+                                      int *counter, int *made) {
     size_t len = strlen(text), cap = len * 2 + 4096, o = 0;
     char *out = (char *)malloc(cap);
-    int first = *counter, made = 0;
     size_t at = 0;
+    *made = 0;
     for (int g = 0; out && g < n_spans; g++) {
         if (!pick[g]) continue;
         char *rep_ = rs_hoist_one(text + spans[g].start, spans[g].end - 1 - spans[g].start, *counter);
@@ -796,27 +837,37 @@ static inline char *rs_hoist_globals(const char *text, const int *lines, int n_l
         at = spans[g].end;
         free(rep_);
         (*counter)++;
-        made++;
+        (*made)++;
     }
-    free(spans);
-    free(pick);
-    if (!out || !made) { free(out); return NULL; }
+    if (!out || !*made) { free(out); return NULL; }
     if (o + (len - at) + 1 > cap) { cap = o + (len - at) + 1; char *gr = (char *)realloc(out, cap); if (!gr) { free(out); return NULL; } out = gr; }
     memcpy(out + o, text + at, len - at); o += len - at;
     out[o] = '\0';
+    return out;
+}
 
-    /* The assignments, at the top of every main(), after any from earlier calls. */
-    size_t blk_cap = (size_t)made * 64 + 32, b = 0;
-    char *blk = (char *)malloc(blk_cap);
-    if (!blk) { free(out); return NULL; }
-    for (int k = first; k < first + made; k++)
-        b += (size_t)snprintf(blk + b, blk_cap - b, "\n#ifdef RS_INIT_%d\nRS_INIT_%d\n#endif", k, k);
+/* Where the inits go when there is no marker yet: just past main()'s '{' when
+ * a main starts at out[i], else 0. */
+static inline size_t rs_main_body(const char *out, size_t i) {
+    if (!rs_word_at(out, i, "main")) return 0;
+    size_t j = i + 4;
+    while (isspace((unsigned char)out[j])) j++;
+    if (out[j] != '(') return 0;
+    while (out[j] && out[j] != ')') j++;
+    if (out[j] == ')') j++;
+    while (isspace((unsigned char)out[j])) j++;
+    return out[j] == '{' ? j + 1 : 0;
+}
+
+/* `out` with the assignment block `blk` (b bytes) at the top of every main(),
+ * after any from earlier calls (the marker). Frees nothing. */
+static inline char *rs_insert_inits(const char *out, const char *blk, size_t b) {
     static const char marker[] = "/*rs_inits*/";
     bool has_marker = strstr(out, marker) != NULL;
     size_t total = strlen(out);
     size_t cap2 = total + 1 + (b + sizeof marker + 8) * 8;
     char *res = (char *)malloc(cap2);
-    if (!res) { free(blk); free(out); return NULL; }
+    if (!res) return NULL;
     size_t r = 0;
     for (size_t i = 0; i < total; ) {
         if (has_marker && !strncmp(out + i, marker, sizeof marker - 1)) {
@@ -827,27 +878,46 @@ static inline char *rs_hoist_globals(const char *text, const int *lines, int n_l
             i += sizeof marker - 1;
             continue;
         }
-        if (!has_marker && rs_word_at(out, i, "main")) {
-            size_t j = i + 4;
-            while (isspace((unsigned char)out[j])) j++;
-            if (out[j] == '(') {
-                while (out[j] && out[j] != ')') j++;
-                if (out[j] == ')') j++;
-                while (isspace((unsigned char)out[j])) j++;
-                if (out[j] == '{' && r + (j + 1 - i) + b + sizeof marker + 2 <= cap2) {
-                    memcpy(res + r, out + i, j + 1 - i); r += j + 1 - i;
-                    memcpy(res + r, blk, b); r += b;
-                    res[r++] = '\n';
-                    memcpy(res + r, marker, sizeof marker - 1); r += sizeof marker - 1;
-                    i = j + 1;
-                    continue;
-                }
-            }
+        size_t body = has_marker ? 0 : rs_main_body(out, i);
+        if (body && r + (body - i) + b + sizeof marker + 2 <= cap2) {
+            memcpy(res + r, out + i, body - i); r += body - i;
+            memcpy(res + r, blk, b); r += b;
+            res[r++] = '\n';
+            memcpy(res + r, marker, sizeof marker - 1); r += sizeof marker - 1;
+            i = body;
+            continue;
         }
         if (r + 2 > cap2) break;
         res[r++] = out[i++];
     }
     res[r] = '\0';
+    return res;
+}
+
+/* `lines` are 1-based lines of `text` the compiler rejected. Returns the new
+ * text, or NULL when none of them was a statement this can move. *counter
+ * numbers the macros across calls. */
+static inline char *rs_hoist_globals(const char *text, const int *lines, int n_lines, int *counter) {
+    enum { MAX_GLOBALS = 4096 };
+    rs_span_t *spans = (rs_span_t *)malloc(MAX_GLOBALS * sizeof *spans);
+    if (!spans) return NULL;
+    int n_spans = rs_glsl_globals(text, spans, MAX_GLOBALS);
+    bool *pick = (bool *)calloc((size_t)(n_spans ? n_spans : 1), sizeof *pick);
+    if (!pick) { free(spans); return NULL; }
+    rs_pick_statements(text, spans, n_spans, lines, n_lines, pick);
+    int first = *counter, made = 0;
+    char *out = rs_replace_picked(text, spans, n_spans, pick, counter, &made);
+    free(spans);
+    free(pick);
+    if (!out) return NULL;
+
+    /* The assignments, at the top of every main(), after any from earlier calls. */
+    size_t blk_cap = (size_t)made * 64 + 32, b = 0;
+    char *blk = (char *)malloc(blk_cap);
+    if (!blk) { free(out); return NULL; }
+    for (int k = first; k < first + made; k++)
+        b += (size_t)snprintf(blk + b, blk_cap - b, "\n#ifdef RS_INIT_%d\nRS_INIT_%d\n#endif", k, k);
+    char *res = rs_insert_inits(out, blk, b);
     free(blk);
     free(out);
     return res;
