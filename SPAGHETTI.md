@@ -66,3 +66,21 @@ Two other smells do not show up in the path count:
 ## Is 25% bad?
 
 It is ordinary for an emulator, and the parts that matter most are better than the average. The two cores that every bug is first blamed on are the other way round from what "spaghetti" suggests. `i960_exec.h` is one long switch with about 7 lines per case, and the COP handlers are ports, cited handler by handler against the firmware. The branchy code is mostly the newest work: netplay, the PS3 lobby, the front ends. That is UI and protocol state, and it grew a feature at a time. If any of it were worth untangling, the first candidates would be `geo3d_decode_model` (a struct for its 15 parameters, one copy instead of two) and `main_sdl.c`'s `main` (split setup from the loop). Both are pure refactors that `grade-models.mjs` and `ab-builds.mjs` can prove changed nothing.
+
+## Since then
+
+**The model decoder (Pinboard #339, measured against master `3955e6c`).** The first candidate above is done. `geo3d.h` had the polygon format written out three times: in `geo3d_decode_model`, in the mesh cache's `geo3d_mesh_build`, and partly again in `geo3d_decode_model_cached` and `geo3d_decode_direct`. Now there is one of each step, and the four callers share them: the strip walk (`geo3d_strip_walk`), the face walk with its texture header and UVs (`geo3d_walk_next`, `geo3d_texhdr_read`), the palette colour, the board's facing and lighting (`geo3d_board_facing`, `geo3d_board_light`) and the face emit (`geo3d_emit_face`). A `geo3d_rom_t` carries the ROM pointers, sizes and model-table quirks that were ten parameters of every call (`geo3d_rom_of` in `core/geo_rom.h` makes one from a ROM set and its profile), and a `geo3d_paint_t` carries the colour, tile and lighting arguments of what was the 25-parameter `geo3d_emit_tri_uv`.
+
+| | master | with #339 |
+|---|---:|---:|
+| `geo3d_decode_model` | 157 paths, 346 lines | 42 paths, 82 lines |
+| `geo3d_decode_direct` | 47 paths, 90 lines | 30 paths, 57 lines |
+| `game_render_draw_geo_list` | 15 parameters | 6 |
+| `geo3d.h` | 3,065 lines | 2,947 |
+| over 20 paths, all of `src/` | 9,401 lines, 24.5% | 9,183 lines, 24.0% |
+| over 20 paths, `board/` | 18.5% | 16.3% |
+| over 50 paths | 12 functions, 5.6% | 11 functions, 4.7% |
+
+It emits the same bytes: `arc_bench --draw-digest` over 12,000 frames of attract is identical with the mesh cache and without it, and so is every triangle and line of all 4,405 models through both decoders under 48 settings each (matrix or none, wireframe, layers, board lighting, mode 2, flat colour, the flat key). The full decoder, which only `--no-mesh-cache` and the object viewer run, is about 7% slower (0.31 to 0.33 ms a frame on x86); the cached draw is unchanged.
+
+Still open, in the order they would pay: `main_sdl.c`'s `main` (setup, then one function per loop stage: events, netplay, pacing, draw), `mcp_cmd_capture_dl` (parse options, capture, write JSON as three functions), and `netplay_window_draw` (one function per connection state). `geo3d_scan_displaylist` and `geo3d_lookup_build` still take the ROM as loose parameters and could take a `geo3d_rom_t`.

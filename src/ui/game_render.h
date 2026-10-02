@@ -2212,12 +2212,7 @@ static inline void game_render__view_cull_planes(const float *mvp, int x0, int y
  * Draw the frame's GEO display list: runs of objects that share a projection
  * and window are decoded together and drawn with that window's scissor.
  */
-static inline void game_render_draw_geo_list(geo3d_state_t *geo,
-                                              const uint8_t *main_data, size_t main_data_size,
-                                              const uint8_t *polygons,  size_t polygons_size,
-                                              const uint8_t *materials, size_t materials_size,
-                                              uint32_t table_off, uint32_t table_count,
-                                              uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline void game_render_draw_geo_list(geo3d_state_t *geo, const geo3d_rom_t *rom,
                                               int ox, int oy, int w, int h) {
     if (g_geo3d_dump_busy) return;
     const int count = geo->captured_count;
@@ -2264,8 +2259,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                 g_geo3d_zadjust = cm->zadjust;
                 g_geo3d_lod  = cm->geo_lod;
                 if (cm->direct_len) {           /* direct data: the polygons are in the list */
-                    geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len,
-                                        materials, materials_size, main_data, main_data_size,
+                    geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len, rom,
                                         cm->gproj[0], cm->gproj[1]);
                 } else {
                     if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
@@ -2273,9 +2267,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
                         g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
                         g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
                     }
-                    geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
-                                              materials, materials_size, table_off, table_count,
-                                              mesh_ptr_subtract, mesh_ptr_add,
+                    geo3d_decode_model_cached(cm->model_idx, rom,
                                               geo->use_matrix ? cm->matrix : NULL,
                                               cm->color[0], cm->color[1], cm->color[2]);
                 }
@@ -2321,12 +2313,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
  *
  * ox/oy/w/h are the letterbox rect in framebuffer pixels (from game_render_letterbox).
  */
-static inline void game_render_draw_captured_models(geo3d_state_t *geo,
-                                                     const uint8_t *main_data, size_t main_data_size,
-                                                     const uint8_t *polygons,  size_t polygons_size,
-                                                     const uint8_t *materials, size_t materials_size,
-                                                     uint32_t table_off, uint32_t table_count,
-                                                     uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline void game_render_draw_captured_models(geo3d_state_t *geo, const geo3d_rom_t *rom,
                                                      int ox, int oy, int w, int h,
                                                      float cam_x, float cam_y, float cam_z,
                                                      float rot_y, float rot_x, float fov_deg,
@@ -2335,20 +2322,13 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
     if (!geo->enabled) { geo3d_lines_reset(); return; }
 
     if (geo->use_captures && geo->captured_count > 0 && geo->captured[0].view_space && !geo->test_triangle) {
-        game_render_draw_geo_list(geo, main_data, main_data_size, polygons, polygons_size,
-                                  materials, materials_size, table_off, table_count,
-                                  mesh_ptr_subtract, mesh_ptr_add, ox, oy, w, h);
+        game_render_draw_geo_list(geo, rom, ox, oy, w, h);
         return;
     }
 
     /* Homebrew lists (geo3d_scan_displaylist), the test triangle and the
      * free camera: one batch through the host camera. */
-    geo3d_build_wireframes(geo, main_data, main_data_size,
-                           polygons, polygons_size,
-                           materials, materials_size,
-                           table_off, table_count,
-                           mesh_ptr_subtract, mesh_ptr_add, lerp_t,
-                           cam_x, cam_y, cam_z);
+    geo3d_build_wireframes(geo, rom, lerp_t);
     if (!geo->lines_only)
         game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
     game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);

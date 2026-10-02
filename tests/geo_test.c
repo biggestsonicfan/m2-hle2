@@ -21,6 +21,7 @@
 
 #include "sfight.h"     /* sfight_profile (quirks), load/install */
 #include "geo3d.h"      /* geo3d_decode_model, g_geo3d_tris/lines */
+#include "geo_rom.h"    /* geo3d_rom_of */
 
 const game_profile_t *g_active_profile = &sfight_profile;
 
@@ -45,11 +46,9 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
     m.model_idx = idx;
     m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
     m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
-    m.polygons = rs->polygons;   m.polygons_size  = rs->polygons_size;
-    m.materials = rs->textures;  m.materials_size = rs->textures_size;
-    m.main_data = rs->main_data;
+    m.rom = geo3d_rom_of(rs, q);
     uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
-    if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
+    if (!geo3d_mesh_build(&m, mesh)) return;
     geo3d_mesh_layers(&m);
     printf("info: model %d mat_ptr=%06X uv_ptr=%06X layered faces:", idx, m.mat_ptr, m.uv_ptr);
     float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
@@ -81,11 +80,9 @@ static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
     m.model_idx = idx;
     m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
     m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
-    m.polygons = rs->polygons;   m.polygons_size  = rs->polygons_size;
-    m.materials = rs->textures;  m.materials_size = rs->textures_size;
-    m.main_data = rs->main_data;
+    m.rom = geo3d_rom_of(rs, q);
     uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
-    if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
+    if (!geo3d_mesh_build(&m, mesh)) return;
     geo3d_mesh_layers(&m);
     printf("dump: model %d, %d faces\n", idx, m.n_faces);
     for (int i = 0; i < m.n_faces; i++) {
@@ -124,15 +121,11 @@ int main(void) {
     int      bad_coord = 0;
     int      best_idx = -1, best_tris = 0;
 
+    const geo3d_rom_t rom = geo3d_rom_of(&rs, q);
     for (uint32_t m = 0; m < q->model_table_count; m++) {
         geo3d_tris_reset();
         geo3d_lines_reset();
-        geo3d_decode_model((int)m,
-                           rs.main_data, rs.main_data_size,
-                           rs.polygons,  rs.polygons_size,
-                           rs.textures,  rs.textures_size,
-                           q->model_table_offset, q->model_table_count,
-                           q->mesh_ptr_subtract, q->mesh_ptr_add,
+        geo3d_decode_model((int)m, &rom,
                            NULL,                  /* model space (no transform) */
                            1.0f, 1.0f, 1.0f);
         int nt = g_geo3d_tris.count, nl = g_geo3d_lines.count;
@@ -160,13 +153,7 @@ int main(void) {
     /* Re-decode the richest model and sanity-check bounds + winding (2 tris/quad
      * means tri count is even for an all-quad model; mixed tri/quad is allowed). */
     geo3d_tris_reset(); geo3d_lines_reset();
-    geo3d_decode_model(best_idx,
-                       rs.main_data, rs.main_data_size,
-                       rs.polygons,  rs.polygons_size,
-                       rs.textures,  rs.textures_size,
-                       q->model_table_offset, q->model_table_count,
-                       q->mesh_ptr_subtract, q->mesh_ptr_add,
-                       NULL, 1.0f, 1.0f, 1.0f);
+    geo3d_decode_model(best_idx, &rom, NULL, 1.0f, 1.0f, 1.0f);
     float minx=1e30f,maxx=-1e30f;
     for (int i = 0; i < g_geo3d_tris.count; i++) {
         const geo3d_tri_t *t = &g_geo3d_tris.tris[i];
@@ -200,11 +187,9 @@ int main(void) {
             mm.model_idx = (int)m;
             mm.uv_ptr  = read_u32_le(rs.main_data + toff + 0);
             mm.mat_ptr = read_u32_le(rs.main_data + toff + 4);
-            mm.polygons = rs.polygons;  mm.polygons_size  = rs.polygons_size;
-            mm.materials = rs.textures; mm.materials_size = rs.textures_size;
-            mm.main_data = rs.main_data;
+            mm.rom = rom;
             clock_t t0 = clock();
-            if (geo3d_mesh_build(&mm, mp * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mm.mat_ptr != 0, mm.uv_ptr != 0)) {
+            if (geo3d_mesh_build(&mm, mp * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add)) {
                 geo3d_mesh_layers(&mm);
                 double ms = 1000.0 * (double)(clock() - t0) / CLOCKS_PER_SEC;
                 total += ms;

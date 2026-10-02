@@ -41,6 +41,7 @@
 #include "game_profile.h"
 #include "game_render.h"
 #include "geo3d.h"
+#include "geo_rom.h"
 #include "gfx_readback.h"
 #include "log.h"
 #include "memory.h"
@@ -336,13 +337,8 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
      * may take each face's layer from it (geo3d_mesh_layers). */
     g_geo3d_decode_layers = v->layers;
 
-    geo3d_decode_model(model,
-                       rs->main_data, rs->main_data_size,
-                       rs->polygons,  rs->polygons_size,
-                       rs->textures,  rs->textures_size,
-                       q->model_table_offset, q->model_table_count,
-                       q->mesh_ptr_subtract, q->mesh_ptr_add,
-                       mat, cr, cg, cb);
+    const geo3d_rom_t rom = geo3d_rom_of(rs, q);
+    geo3d_decode_model(model, &rom, mat, cr, cg, cb);
 
     g_geo3d_decode_layers = 0;
     g_geo3d_tri_sink    = saved_sink;
