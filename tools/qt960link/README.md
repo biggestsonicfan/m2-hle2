@@ -11,6 +11,34 @@ tools/qt960link/run.sh                   # two windows on $DISPLAY (:1, the cont
 HEADLESS=300 tools/qt960link/run.sh      # no windows; stop after 300 checks
 ```
 
+## Run it yourself
+
+In the dev container, from a terminal inside the VNC desktop (`:1`, port 5901, or noVNC
+on 6080):
+
+1. Check out the branch (until PR #175 is merged it is not on master):
+   `git fetch origin && git switch feat/qt960-link`, or use the existing worktree
+   `~/source/repos/ai/.trees/m2-hle2/feat-qt960-link`.
+2. Run `tools/qt960link/run.sh`. It needs, and finds by itself:
+   - the shared MAME, `~/build/mame-bin/mame-shared/shared` (see "What the MAME needs");
+   - m2-kernel beside this repo, `~/source/repos/ai/m2-kernel` (its `roms/m2kernel`);
+   - `qt960.zip` in `$ROMS_DIR` (`~/build/mameroms`);
+   - the i960-elf toolchain in `/opt/i960/bin`, to build `qtlink.bin`;
+   - `xdotool`, to get past the warning screens (else press Shift in each window).
+3. Two windows open: the Model 2B on the left, the QT960 on the right. Within a few
+   seconds both warning screens go. NINDY prints its banner, then the right window fills
+   with `mo` lines for about half a minute while qtlink is typed in. After `go 10100000`
+   the check lines start scrolling (`... OK`), and the Model 2B's overlay counts QTTESTS
+   up with QTBAD staying 0.
+4. Close either window, or press Ctrl+C in the terminal, to stop both.
+
+From an ssh shell instead, `DISPLAY=:1 tools/qt960link/run.sh` puts the windows on the
+VNC desktop just the same. `HEADLESS=20 tools/qt960link/run.sh` needs no display and ends
+with `qt960_link: 20 checks, 0 differences` (about 15 s). Logs and the built `qtlink.bin`
+go in `$WORK`; the Model 2B's MAME log is `$WORK/m2kernel.log`.
+
+## Options
+
 `MAME`, `M2K` (an m2-kernel checkout), `ROMS_DIR`, `M2K_PORT` (7960) and `WORK`
 (`/tmp/qt960link`) override the defaults. Close either window, or press Ctrl+C, to stop both.
 
