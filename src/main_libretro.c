@@ -691,44 +691,44 @@ static void lr_rpcn_config_path(void) {
     lr_log(RETRO_LOG_INFO, "RPCN: settings in %s", path);
 }
 
-/* What the session says while the lobby is not on screen -- a match, the room
- * emptying, a desync -- as the frontend's notifications, and the session's log
- * into the frontend's. Everything else is on the lobby's own screens. */
-static void lr_rpcn_report(void) {
-    static int last_state = -1;
+/* The session's own log (sign-in, rooms, barrier, stalls, desync) into
+ * RetroArch's, so a netplay problem can be read afterwards. */
+static void lr_rpcn_report_log(const netplay_status_t *st) {
     static uint32_t log_seen;
-    const netplay_status_t *st = &g_ps3ui_app.st;
-    if (!g_ps3ui_app.be.get_status) return;   /* no session behind the lobby yet */
-
-    /* The session's own log (sign-in, rooms, barrier, stalls, desync) into
-     * RetroArch's, so a netplay problem can be read afterwards. */
     if (st->log_count - log_seen > NETPLAY_LOG_LINES) log_seen = st->log_count - NETPLAY_LOG_LINES;
     for (; log_seen < st->log_count; log_seen++)
         lr_log(RETRO_LOG_INFO, "rpcn: %s", st->log[log_seen % NETPLAY_LOG_LINES]);
-    char msg[400];
+}
 
-    if ((int)st->state != last_state) {
-        last_state = (int)st->state;
-        if (st->state == NETPLAY_PLAYING) {
-            /* What the overlay used to put in a corner of the picture. A
-             * notification is the frontend's own, so it is in its font and
-             * fades the way every other message it shows does. */
-            snprintf(msg, sizeof msg, "%dP against %s", st->local_player + 1,
-                     st->peer_npid[0] ? st->peer_npid : "?");
-            lr_notify(msg, 5000);
-        } else if (st->state == NETPLAY_WATCHING) {
-            const char *n1 = "?", *n2 = "?";
-            for (uint32_t i = 0; i < st->member_count; i++) {
-                if (st->members[i].side == 0) n1 = st->members[i].npid;
-                if (st->members[i].side == 1) n2 = st->members[i].npid;
-            }
-            snprintf(msg, sizeof msg, "Watching %s against %s", n1, n2);
-            lr_notify(msg, 5000);
+/* A match starting, as a player or a watcher: said once, when the state
+ * changes to it. */
+static void lr_rpcn_report_state(const netplay_status_t *st) {
+    static int last_state = -1;
+    char msg[400];
+    if ((int)st->state == last_state) return;
+    last_state = (int)st->state;
+    if (st->state == NETPLAY_PLAYING) {
+        /* What the overlay used to put in a corner of the picture. A
+         * notification is the frontend's own, so it is in its font and
+         * fades the way every other message it shows does. */
+        snprintf(msg, sizeof msg, "%dP against %s", st->local_player + 1,
+                 st->peer_npid[0] ? st->peer_npid : "?");
+        lr_notify(msg, 5000);
+    } else if (st->state == NETPLAY_WATCHING) {
+        const char *n1 = "?", *n2 = "?";
+        for (uint32_t i = 0; i < st->member_count; i++) {
+            if (st->members[i].side == 0) n1 = st->members[i].npid;
+            if (st->members[i].side == 1) n2 = st->members[i].npid;
         }
+        snprintf(msg, sizeof msg, "Watching %s against %s", n1, n2);
+        lr_notify(msg, 5000);
     }
-    /* The room emptied with the board still in its VS mode
-     * (netplay_empty_room_pump). Said again every few seconds while it holds,
-     * short enough each time that it is gone soon after the restart. */
+}
+
+/* The room emptied with the board still in its VS mode
+ * (netplay_empty_room_pump). Said again every few seconds while it holds,
+ * short enough each time that it is gone soon after the restart. */
+static void lr_rpcn_report_empty(const netplay_status_t *st) {
     static int64_t empty_said_us;
     if (st->empty_room && (!empty_said_us || emu_now_us() - empty_said_us > 4000000)) {
         lr_notify("There are no other players in the lobby. Press any button to restart the game.", 5000);
@@ -736,9 +736,13 @@ static void lr_rpcn_report(void) {
     } else if (!st->empty_room) {
         empty_said_us = 0;
     }
-    /* A desync is the one thing the old overlay kept on screen for good; say it
-     * once, and the status row goes on saying the match is finished. */
+}
+
+/* A desync is the one thing the old overlay kept on screen for good; say it
+ * once, and the status row goes on saying the match is finished. */
+static void lr_rpcn_report_desync(const netplay_status_t *st) {
     static uint32_t desync_said = LOCKSTEP_NO_CHECK;
+    char msg[400];
     bool in_session = st->state >= NETPLAY_IN_ROOM && st->state != NETPLAY_FAILED;
     if (in_session && st->desync_frame != LOCKSTEP_NO_CHECK && st->desync_frame != desync_said) {
         desync_said = st->desync_frame;
@@ -748,6 +752,18 @@ static void lr_rpcn_report(void) {
     } else if (st->desync_frame == LOCKSTEP_NO_CHECK) {
         desync_said = LOCKSTEP_NO_CHECK;
     }
+}
+
+/* What the session says while the lobby is not on screen -- a match, the room
+ * emptying, a desync -- as the frontend's notifications, and the session's log
+ * into the frontend's. Everything else is on the lobby's own screens. */
+static void lr_rpcn_report(void) {
+    const netplay_status_t *st = &g_ps3ui_app.st;
+    if (!g_ps3ui_app.be.get_status) return;   /* no session behind the lobby yet */
+    lr_rpcn_report_log(st);
+    lr_rpcn_report_state(st);
+    lr_rpcn_report_empty(st);
+    lr_rpcn_report_desync(st);
 }
 
 /* How a toast names a server: the two the lobby offers by their short names. */

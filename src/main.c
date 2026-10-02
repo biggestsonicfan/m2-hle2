@@ -923,37 +923,57 @@ typedef int32_t (*hl_egl_get_error_fn)(void);
 
 static void headless_sleep_ms(int ms) { emu_sleep_ms(ms); }
 
-static bool headless_gpu_init(void) {
+/* libEGL's entry points, opened by name. */
+typedef struct {
+    hl_egl_initialize_fn               init;
+    hl_egl_bind_api_fn                 bind;
+    hl_egl_create_context_fn           mkctx;
+    hl_egl_make_current_fn             cur;
+    hl_egl_get_error_fn                err;
+    hl_egl_get_platform_display_fn     gpd;
+    hl_egl_get_platform_display_ext_fn gpd_ext;
+} hl_egl_t;
+
+/* Open libEGL and find every entry point a headless context needs. */
+static bool headless_egl_load(hl_egl_t *e) {
     void *lib = dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
         LOG_ERROR("av: --headless --av-port needs libEGL.so.1 on this platform (%s)", dlerror());
         return false;
     }
-    hl_egl_proc_fn           proc  = (hl_egl_proc_fn)dlsym(lib, "eglGetProcAddress");
-    hl_egl_initialize_fn     init  = (hl_egl_initialize_fn)dlsym(lib, "eglInitialize");
-    hl_egl_bind_api_fn       bind  = (hl_egl_bind_api_fn)dlsym(lib, "eglBindAPI");
-    hl_egl_create_context_fn mkctx = (hl_egl_create_context_fn)dlsym(lib, "eglCreateContext");
-    hl_egl_make_current_fn   cur   = (hl_egl_make_current_fn)dlsym(lib, "eglMakeCurrent");
-    hl_egl_get_error_fn      err   = (hl_egl_get_error_fn)dlsym(lib, "eglGetError");
-    hl_egl_get_platform_display_fn gpd =
-        (hl_egl_get_platform_display_fn)dlsym(lib, "eglGetPlatformDisplay");   /* EGL 1.5 */
-    hl_egl_get_platform_display_ext_fn gpd_ext = proc
+    hl_egl_proc_fn proc = (hl_egl_proc_fn)dlsym(lib, "eglGetProcAddress");
+    e->init  = (hl_egl_initialize_fn)dlsym(lib, "eglInitialize");
+    e->bind  = (hl_egl_bind_api_fn)dlsym(lib, "eglBindAPI");
+    e->mkctx = (hl_egl_create_context_fn)dlsym(lib, "eglCreateContext");
+    e->cur   = (hl_egl_make_current_fn)dlsym(lib, "eglMakeCurrent");
+    e->err   = (hl_egl_get_error_fn)dlsym(lib, "eglGetError");
+    e->gpd   = (hl_egl_get_platform_display_fn)dlsym(lib, "eglGetPlatformDisplay");   /* EGL 1.5 */
+    e->gpd_ext = proc
         ? (hl_egl_get_platform_display_ext_fn)proc("eglGetPlatformDisplayEXT") : NULL;
-    if (!init || !bind || !mkctx || !cur || !err || (!gpd && !gpd_ext)) {
+    if (!e->init || !e->bind || !e->mkctx || !e->cur || !e->err || (!e->gpd && !e->gpd_ext)) {
         LOG_ERROR("av: libEGL.so.1 lacks the entry points a headless context needs");
         return false;
     }
-    hl_egl_display dpy = gpd ? gpd(HL_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL)
-                             : gpd_ext(HL_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
-    int32_t major = 0, minor = 0;
-    if (!dpy || !init(dpy, &major, &minor)) {
-        LOG_ERROR("av: no surfaceless EGL display (0x%X) - is this Mesa?", (unsigned)err());
-        return false;
+    return true;
+}
+
+/* The surfaceless display, initialised, with desktop OpenGL bound. */
+static hl_egl_display headless_egl_display(const hl_egl_t *e, int32_t *major, int32_t *minor) {
+    hl_egl_display dpy = e->gpd ? e->gpd(HL_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL)
+                                : e->gpd_ext(HL_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
+    if (!dpy || !e->init(dpy, major, minor)) {
+        LOG_ERROR("av: no surfaceless EGL display (0x%X) - is this Mesa?", (unsigned)e->err());
+        return NULL;
     }
-    if (!bind(HL_EGL_OPENGL_API)) {
-        LOG_ERROR("av: EGL has no desktop OpenGL here (0x%X)", (unsigned)err());
-        return false;
+    if (!e->bind(HL_EGL_OPENGL_API)) {
+        LOG_ERROR("av: EGL has no desktop OpenGL here (0x%X)", (unsigned)e->err());
+        return NULL;
     }
+    return dpy;
+}
+
+/* A core-profile context with no config and no surface, made current. */
+static bool headless_egl_context(const hl_egl_t *e, hl_egl_display dpy) {
     /* The version a sokol_app window asks for, then the oldest sokol takes. */
     static const int32_t versions[][2] = { { 4, 1 }, { 3, 3 } };
     hl_egl_context ctx = NULL;
@@ -964,12 +984,21 @@ static bool headless_gpu_init(void) {
             HL_EGL_CONTEXT_OPENGL_PROFILE_MASK, HL_EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
             HL_EGL_NONE,
         };
-        ctx = mkctx(dpy, NULL, NULL, attrs);    /* no config: KHR_no_config_context */
+        ctx = e->mkctx(dpy, NULL, NULL, attrs);    /* no config: KHR_no_config_context */
     }
-    if (!ctx || !cur(dpy, NULL, NULL, ctx)) {  /* no surface: KHR_surfaceless_context */
-        LOG_ERROR("av: could not make a surfaceless GL context current (0x%X)", (unsigned)err());
+    if (!ctx || !e->cur(dpy, NULL, NULL, ctx)) {  /* no surface: KHR_surfaceless_context */
+        LOG_ERROR("av: could not make a surfaceless GL context current (0x%X)", (unsigned)e->err());
         return false;
     }
+    return true;
+}
+
+static bool headless_gpu_init(void) {
+    hl_egl_t egl;
+    if (!headless_egl_load(&egl)) return false;
+    int32_t major = 0, minor = 0;
+    hl_egl_display dpy = headless_egl_display(&egl, &major, &minor);
+    if (!dpy || !headless_egl_context(&egl, dpy)) return false;
     sg_setup(&(sg_desc){
         .environment = {
             .defaults = { .color_format = SG_PIXELFORMAT_RGBA8,
