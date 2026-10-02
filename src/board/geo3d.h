@@ -744,6 +744,10 @@ typedef struct {
     int      model_idx[MODEL_LOOKUP_SIZE];
     int      count;
     bool     built;
+    /* Open-addressed index into the arrays above, keyed by pol_ptr; -1 is
+     * empty. A pointer keeps the slot of its first model, as the linear scan
+     * it replaced did. The scan cost ~80 samples a fight frame on the A55. */
+    int16_t  hash[MODEL_LOOKUP_SIZE * 2];
 } geo3d_lookup_t;
 
 static geo3d_lookup_t g_geo3d_lookup = {0};
@@ -807,6 +811,11 @@ static inline void geo3d_lookup_invalidate(void) {
     g_geo3d_lookup.count = 0;
 }
 
+_Static_assert(MODEL_LOOKUP_SIZE * 2 == 1 << 14, "geo3d_lookup_hash takes 14 bits");
+static inline uint32_t geo3d_lookup_hash(uint32_t pol_ptr) {
+    return (pol_ptr * 0x9E3779B1u) >> (32 - 14);
+}
+
 static inline void geo3d_lookup_build(const uint8_t *main_data, size_t main_data_size,
                                        uint32_t table_off, uint32_t table_count) {
     if (g_geo3d_lookup.built) return;
@@ -823,16 +832,26 @@ static inline void geo3d_lookup_build(const uint8_t *main_data, size_t main_data
             g_geo3d_lookup.count++;
         }
     }
+    memset(g_geo3d_lookup.hash, 0xFF, sizeof g_geo3d_lookup.hash);
+    for (int i = 0; i < g_geo3d_lookup.count; i++) {
+        uint32_t h = geo3d_lookup_hash(g_geo3d_lookup.pol_ptrs[i]);
+        while (g_geo3d_lookup.hash[h] >= 0 &&
+               g_geo3d_lookup.pol_ptrs[g_geo3d_lookup.hash[h]] != g_geo3d_lookup.pol_ptrs[i])
+            h = (h + 1) & (MODEL_LOOKUP_SIZE * 2 - 1);
+        if (g_geo3d_lookup.hash[h] < 0) g_geo3d_lookup.hash[h] = (int16_t)i;
+    }
     g_geo3d_lookup.built = true;
     LOG_INFO("geo3d_lookup_build: %d entries (table_off=0x%X count=%u)",
              g_geo3d_lookup.count, table_off, table_count);
 }
 
 static inline int geo3d_lookup_by_pol(uint32_t pol_ptr) {
-    for (int i = 0; i < g_geo3d_lookup.count; i++) {
+    if (!g_geo3d_lookup.built) return -1;
+    for (uint32_t h = geo3d_lookup_hash(pol_ptr);; h = (h + 1) & (MODEL_LOOKUP_SIZE * 2 - 1)) {
+        int i = g_geo3d_lookup.hash[h];
+        if (i < 0) return -1;
         if (g_geo3d_lookup.pol_ptrs[i] == pol_ptr) return g_geo3d_lookup.model_idx[i];
     }
-    return -1;
 }
 
 /* ---- GEO display-list scanner (authentic hardware path) ----------------- *
