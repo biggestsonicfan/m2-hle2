@@ -1526,16 +1526,11 @@ static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
     hdr[1] = 2; hdr[2] = first; hdr[3] = count;
     fwrite(hdr, 4, 4, f);
 
+    const geo3d_models_t md = geo3d_models_of(g_mcp.romset, q);
     uint32_t nonempty = 0, total_tris = 0;
     for (uint32_t m = first; m < first + count; m++) {
         dump_buf.count = 0;
-        geo3d_decode_model((int)m,
-                           g_mcp.romset->main_data, g_mcp.romset->main_data_size,
-                           g_mcp.romset->polygons,  g_mcp.romset->polygons_size,
-                           g_mcp.romset->textures,  g_mcp.romset->textures_size,
-                           q->model_table_offset, q->model_table_count,
-                           q->mesh_ptr_subtract, q->mesh_ptr_add,
-                           NULL, 1.0f, 1.0f, 1.0f);
+        geo3d_decode_model(&md, (int)m, NULL, 1.0f, 1.0f, 1.0f);
         uint32_t n = (uint32_t)dump_buf.count;
         uint32_t rec[2] = { m, n };
         fwrite(rec, 4, 2, f);

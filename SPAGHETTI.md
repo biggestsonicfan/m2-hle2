@@ -47,7 +47,7 @@ The worst hand-written functions, and what makes each one hard to follow:
 
 | Paths | Lines | Function | Why |
 |---:|---:|---|---|
-| 157 | 346 | `geo3d_decode_model` (`geo3d.h:1295`) | 15 parameters, static scratch arrays, and a global (`g_geo3d_obj_mesh`) that silently swaps its input. Its copy `geo3d_decode_model_cached` (51 paths, also 15 parameters) repeats the setup. |
+| 157 | 346 | `geo3d_decode_model` (`geo3d.h:1295`) | 15 parameters, static scratch arrays, and a global (`g_geo3d_obj_mesh`) that silently swaps its input. Its copy `geo3d_decode_model_cached` (51 paths, also 15 parameters) repeats the setup. *Untangled (#332): see below.* |
 | 132 | 414 | `main` (`main_sdl.c:758`) | Setup, the GL context, netplay and the whole event and render loop in one body. |
 | 101 | 272 | `netplay_window_draw` (`netplay_window.h:218`) | Every connection state's ImGui panel inline. |
 | 100 | 165 | `geo3d_mesh_layers` (`geo3d.h:2120`) | The coplanar-layer heuristics. Since #247 only the object viewer uses them (BUBBLEGUM.md §1). |
@@ -66,3 +66,7 @@ Two other smells do not show up in the path count:
 ## Is 25% bad?
 
 It is ordinary for an emulator, and the parts that matter most are better than the average. The two cores that every bug is first blamed on are the other way round from what "spaghetti" suggests. `i960_exec.h` is one long switch with about 7 lines per case, and the COP handlers are ports, cited handler by handler against the firmware. The branchy code is mostly the newest work: netplay, the PS3 lobby, the front ends. That is UI and protocol state, and it grew a feature at a time. If any of it were worth untangling, the first candidates would be `geo3d_decode_model` (a struct for its 15 parameters, one copy instead of two) and `main_sdl.c`'s `main` (split setup from the loop). Both are pure refactors that `grade-models.mjs` and `ab-builds.mjs` can prove changed nothing.
+
+## Untangled so far
+
+- **`geo3d_decode_model` (Pinboard #332).** Its ROM pointers, sizes and model-table numbers are one struct, `geo3d_models_t` (`geo3d.h`), which `geo3d_models_of` (`game_render.h`) fills from the ROM set and the profile. The decoder, the cached draw, the mesh cache and both `game_render` draw functions take it in place of 13 to 22 separate arguments. The model-table lookup is one function (`geo3d_model_streams`), not three copies, and a polygon-RAM mesh is a field of the struct (`obj_mesh`), not the global `g_geo3d_obj_mesh` the caller had to set and clear around the call. Measured by `tools/spaghetti.py` on master `f1c5ee7`: `geo3d_decode_model` 157 paths and 346 lines to 151 and 328, `game_render_draw_geo_list` 15 parameters to 6, `game_render_draw_captured_models` 22 to 13; 30 fewer lines over 20 paths in all. The picture is unchanged: 3,589 of 3,589 attract frames hash identical against the build before.

@@ -34,6 +34,16 @@ static int g_fail = 0;
 
 static int finite_f(float v){ return (v == v) && v < 1e20f && v > -1e20f; }
 
+static geo3d_models_t test_models(const romset_t *rs, const game_quirks_t *q) {
+    return (geo3d_models_t){
+        .main_data = rs->main_data, .main_data_size = rs->main_data_size,
+        .polygons  = rs->polygons,  .polygons_size  = rs->polygons_size,
+        .materials = rs->textures,  .materials_size = rs->textures_size,
+        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+        .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add,
+    };
+}
+
 /* Rank one model's faces the way the object viewer does (geo3d_mesh_build →
  * geo3d_mesh_layers; a game frame takes the board's sort key instead) and count its triangles above layer 0 and at it. */
 static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
@@ -45,9 +55,7 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
     m.model_idx = idx;
     m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
     m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
-    m.polygons = rs->polygons;   m.polygons_size  = rs->polygons_size;
-    m.materials = rs->textures;  m.materials_size = rs->textures_size;
-    m.main_data = rs->main_data;
+    m.md = test_models(rs, q);
     uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
     if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
     geo3d_mesh_layers(&m);
@@ -81,9 +89,7 @@ static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
     m.model_idx = idx;
     m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
     m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
-    m.polygons = rs->polygons;   m.polygons_size  = rs->polygons_size;
-    m.materials = rs->textures;  m.materials_size = rs->textures_size;
-    m.main_data = rs->main_data;
+    m.md = test_models(rs, q);
     uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
     if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
     geo3d_mesh_layers(&m);
@@ -113,6 +119,7 @@ int main(void) {
         printf("FAIL: ROM load\n"); return 1;
     }
     const game_quirks_t *q = &sfight_profile.quirks;
+    const geo3d_models_t md = test_models(&rs, q);
     if (getenv("GEO_TEST_DUMP")) {
         layer_dump(&rs, q, atoi(getenv("GEO_TEST_DUMP")));
         romset_free(&rs);
@@ -127,14 +134,7 @@ int main(void) {
     for (uint32_t m = 0; m < q->model_table_count; m++) {
         geo3d_tris_reset();
         geo3d_lines_reset();
-        geo3d_decode_model((int)m,
-                           rs.main_data, rs.main_data_size,
-                           rs.polygons,  rs.polygons_size,
-                           rs.textures,  rs.textures_size,
-                           q->model_table_offset, q->model_table_count,
-                           q->mesh_ptr_subtract, q->mesh_ptr_add,
-                           NULL,                  /* model space (no transform) */
-                           1.0f, 1.0f, 1.0f);
+        geo3d_decode_model(&md, (int)m, NULL /* model space (no transform) */, 1.0f, 1.0f, 1.0f);
         int nt = g_geo3d_tris.count, nl = g_geo3d_lines.count;
         if (nt > 0 || nl > 0) nonempty++;
         total_tris  += nt;
@@ -160,13 +160,7 @@ int main(void) {
     /* Re-decode the richest model and sanity-check bounds + winding (2 tris/quad
      * means tri count is even for an all-quad model; mixed tri/quad is allowed). */
     geo3d_tris_reset(); geo3d_lines_reset();
-    geo3d_decode_model(best_idx,
-                       rs.main_data, rs.main_data_size,
-                       rs.polygons,  rs.polygons_size,
-                       rs.textures,  rs.textures_size,
-                       q->model_table_offset, q->model_table_count,
-                       q->mesh_ptr_subtract, q->mesh_ptr_add,
-                       NULL, 1.0f, 1.0f, 1.0f);
+    geo3d_decode_model(&md, best_idx, NULL, 1.0f, 1.0f, 1.0f);
     float minx=1e30f,maxx=-1e30f;
     for (int i = 0; i < g_geo3d_tris.count; i++) {
         const geo3d_tri_t *t = &g_geo3d_tris.tris[i];
@@ -200,9 +194,7 @@ int main(void) {
             mm.model_idx = (int)m;
             mm.uv_ptr  = read_u32_le(rs.main_data + toff + 0);
             mm.mat_ptr = read_u32_le(rs.main_data + toff + 4);
-            mm.polygons = rs.polygons;  mm.polygons_size  = rs.polygons_size;
-            mm.materials = rs.textures; mm.materials_size = rs.textures_size;
-            mm.main_data = rs.main_data;
+            mm.md = md;
             clock_t t0 = clock();
             if (geo3d_mesh_build(&mm, mp * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mm.mat_ptr != 0, mm.uv_ptr != 0)) {
                 geo3d_mesh_layers(&mm);

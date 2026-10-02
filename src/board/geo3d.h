@@ -1056,10 +1056,8 @@ static inline vec3_t geo3d_board_normal(const float *matrix, vec3_t fn, bool has
     n.z = matrix[8]*fn.x + matrix[9]*fn.y + matrix[10]*fn.z;
     return n;
 }
-/* A mesh in polygon RAM rather than ROM (an object address without bit 23):
- * while set, the decoder reads it from here, with the texture addresses above. */
-static const uint8_t *g_geo3d_obj_mesh      = NULL;
-static size_t         g_geo3d_obj_mesh_size = 0;
+/* The object command's texture point and header addresses, over the model
+ * table's (0xFFFFFFFF: none). */
 static uint32_t       g_geo3d_obj_tpa     = 0xFFFFFFFFu;
 static uint32_t       g_geo3d_obj_tha     = 0xFFFFFFFFu;
 static const uint8_t *g_geo3d_palram      = NULL;
@@ -1274,11 +1272,45 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
  *
  *   Vertex convention: (x, y, -z).
  */
-static bool geo3d_mesh_layers_for(int model_idx, const uint8_t *main_data,
-                                  const uint8_t *polygons,  size_t polygons_size,
-                                  const uint8_t *materials, size_t materials_size,
-                                  uint32_t table_off, uint32_t table_count,
-                                  uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+
+/* What models are decoded from: the three ROMs and where the game keeps its
+ * model table (the profile's quirks). The renderer builds one a frame
+ * (game_render.h, geo3d_models_of). */
+typedef struct {
+    const uint8_t *main_data;  size_t main_data_size;
+    const uint8_t *polygons;   size_t polygons_size;
+    const uint8_t *materials;  size_t materials_size;   /* the textures ROM */
+    uint32_t table_off, table_count;
+    uint32_t mesh_ptr_subtract, mesh_ptr_add;
+    /* A mesh in polygon RAM rather than ROM (an object address without bit 23):
+     * when set, the decoder reads it from here, at offset 0, in place of
+     * model_idx's, with the object command's texture addresses. */
+    const uint8_t *obj_mesh;   size_t obj_mesh_size;
+} geo3d_models_t;
+
+/* Where a model's mesh, face records and UV stream start: its model-table
+ * entry, with the object command's texture addresses over the two streams.
+ * mat_ptr and uv_ptr are 0 without a textures ROM. False when the model has
+ * no mesh. */
+static inline bool geo3d_model_streams(const geo3d_models_t *md, int model_idx,
+                                       uint32_t *mesh_offset, uint32_t *mat_ptr, uint32_t *uv_ptr) {
+    if (model_idx < 0 || (uint32_t)model_idx >= md->table_count) return false;
+    uint32_t toff = md->table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
+    if ((size_t)toff + MODEL_ENTRY_SIZE > md->main_data_size) return false;
+    uint32_t mesh_ptr_raw = read_u32_le(md->main_data + toff + 8);
+    if (mesh_ptr_raw == 0) return false;
+    *mesh_offset = mesh_ptr_raw * 4u - md->mesh_ptr_subtract + md->mesh_ptr_add;
+    *mat_ptr = *uv_ptr = 0;
+    if (md->materials) {
+        *mat_ptr = read_u32_le(md->main_data + toff + 4);   /* word address (bit 23: texture RAM) */
+        *uv_ptr  = read_u32_le(md->main_data + toff + 0);   /* word index; byte = *2 */
+        if (g_geo3d_obj_tha != 0xFFFFFFFFu) *mat_ptr = g_geo3d_obj_tha;
+        if (g_geo3d_obj_tpa != 0xFFFFFFFFu) *uv_ptr  = g_geo3d_obj_tpa;
+    }
+    return true;
+}
+
+static bool geo3d_mesh_layers_for(const geo3d_models_t *md, int model_idx,
                                   uint32_t mat_ptr, uint32_t uv_ptr, uint32_t mesh_offset,
                                   geo3d_face_layer_t *out, int cap);
 
@@ -1311,12 +1343,7 @@ static inline void geo3d_relink_triangles(vec3_t *sv, uint32_t *svk, int n_sv,
     }
 }
 
-static inline void geo3d_decode_model(int model_idx,
-                                       const uint8_t *main_data, size_t main_data_size,
-                                       const uint8_t *polygons,  size_t polygons_size,
-                                       const uint8_t *materials, size_t materials_size,
-                                       uint32_t table_off, uint32_t table_count,
-                                       uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline void geo3d_decode_model(const geo3d_models_t *md, int model_idx,
                                        const float *matrix,
                                        float cr, float cg, float cb) {
     static vec3_t sv[GEO3D_IA_MAX_VERTS];
@@ -1340,39 +1367,27 @@ static inline void geo3d_decode_model(int model_idx,
     uint32_t uv_word = 0;     /* running word offset into materials[] for UVs */
     bool     have_uv = false;
 
+    const uint8_t *main_data = md->main_data, *materials = md->materials;
+    const size_t   main_data_size = md->main_data_size, materials_size = md->materials_size;
+    const uint8_t *polygons = md->polygons;
+    size_t         polygons_size = md->polygons_size;
+    const uint32_t table_off = md->table_off, table_count = md->table_count;
+
     if (!main_data || !polygons) return;
-    if (g_geo3d_obj_mesh) {
+    if (md->obj_mesh) {
         /* A polygon-RAM object: the mesh starts at the object address, and its
          * texture addresses come from the object command. */
-        polygons      = g_geo3d_obj_mesh;
-        polygons_size = g_geo3d_obj_mesh_size;
+        polygons      = md->obj_mesh;
+        polygons_size = md->obj_mesh_size;
         mesh_offset   = 0;
         if (materials && g_geo3d_obj_tha != 0xFFFFFFFFu) {
             mat_word = g_geo3d_obj_tha; have_mat = mat_word != 0;
             uv_word  = g_geo3d_obj_tpa; have_uv = uv_word != 0;
         }
     } else {
-    if (model_idx < 0 || (uint32_t)model_idx >= table_count) return;
-
-    {
-        uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) return;
-        uint32_t mesh_ptr_raw = read_u32_le(main_data + toff + 8);
-        if (mesh_ptr_raw == 0) return;
-        mesh_offset = mesh_ptr_raw * 4u - mesh_ptr_subtract;
-        mesh_offset += mesh_ptr_add;
-
-        if (materials) {
-            uint32_t mat_ptr_raw = read_u32_le(main_data + toff + 4);
-            uint32_t uv_ptr_raw  = read_u32_le(main_data + toff + 0);
-            if (g_geo3d_obj_tha != 0xFFFFFFFFu) mat_ptr_raw = g_geo3d_obj_tha;
-            if (g_geo3d_obj_tpa != 0xFFFFFFFFu) uv_ptr_raw  = g_geo3d_obj_tpa;
-            mat_word = mat_ptr_raw;        /* word address (bit 23: texture RAM) */
-            have_mat = (mat_ptr_raw != 0);
-            uv_word = uv_ptr_raw;          /* word index; byte = *2 */
-            have_uv = (uv_ptr_raw != 0);
-        }
-    }
+        if (!geo3d_model_streams(md, model_idx, &mesh_offset, &mat_word, &uv_word)) return;
+        have_mat = mat_word != 0;
+        have_uv  = uv_word != 0;
     }
 
     /* The faces' layers, from the mesh cache, for a caller that may use it. A game
@@ -1381,11 +1396,9 @@ static inline void geo3d_decode_model(int model_idx,
     static geo3d_face_layer_t lay[GEO3D_IA_MAX_IDX / 4];
     const bool game_draw = g_geo3d_flat_list && matrix;
     const bool flat = g_geo3d_zflat && game_draw;
-    bool have_lay = !game_draw && g_geo3d_decode_layers && g_geo3d_layers && !g_geo3d_obj_mesh && !g_geo_flat_color &&
+    bool have_lay = !game_draw && g_geo3d_decode_layers && g_geo3d_layers && !md->obj_mesh && !g_geo_flat_color &&
                     !(have_mat && (mat_word & 0x800000u)) && !(have_uv && (uv_word & 0x800000u)) &&
-                    geo3d_mesh_layers_for(model_idx, main_data, polygons, polygons_size, materials, materials_size,
-                                          table_off, table_count, mesh_ptr_subtract, mesh_ptr_add,
-                                          have_mat ? mat_word : 0u, have_uv ? uv_word : 0u, mesh_offset,
+                    geo3d_mesh_layers_for(md, model_idx, have_mat ? mat_word : 0u, have_uv ? uv_word : 0u, mesh_offset,
                                           lay, GEO3D_IA_MAX_IDX / 4);
 
     /* Initial Index: placeholder group that becomes the first face. */
@@ -1923,9 +1936,7 @@ typedef struct {
     bool           used;
     int            model_idx;
     uint32_t       mat_ptr, uv_ptr;
-    const uint8_t *polygons, *materials, *main_data;
-    size_t         polygons_size, materials_size;
-    uint32_t       table_off, table_count, mesh_ptr_subtract, mesh_ptr_add;
+    geo3d_models_t md;           /* what it was built from (never a polygon-RAM mesh) */
     int            n_sv, n_faces;
     vec3_t        *sv;           /* untransformed, Z negated */
     vec3_t         bc;           /* a sphere round sv: centre and radius */
@@ -2368,12 +2379,12 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
     static uint32_t qa[GEO3D_IA_MAX_VPS];
     static int      idx[GEO3D_IA_MAX_IDX];
     static geo3d_cface_t faces[GEO3D_IA_MAX_IDX / 4];
-    const uint8_t *polygons = m->polygons, *materials = m->materials;
+    const uint8_t *polygons = m->md.polygons, *materials = m->md.materials;
 
     int n_sv = 0, n_qt = 0, n_idx = 4, vcount = 0;
     idx[0] = 0; idx[1] = 1; idx[2] = 2; idx[3] = 3;
     while (vcount < GEO3D_IA_MAX_VPS) {
-        if ((size_t)mesh_offset + VERTEX_PAIR_SIZE > m->polygons_size) break;
+        if ((size_t)mesh_offset + VERTEX_PAIR_SIZE > m->md.polygons_size) break;
         if (n_sv + 2 > GEO3D_IA_MAX_VERTS || n_idx + 4 > GEO3D_IA_MAX_IDX) break;
         const uint8_t *vp = polygons + mesh_offset;
         bool is_end = (vp[24] == 0 && vp[25] == 0 && vp[26] == 0 && vp[27] == 0);
@@ -2430,10 +2441,10 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
             uint32_t hw = mat_rec;
             mat_rec += geo3d_tho_step((fi < n_qt) ? qa[fi] : 0u);
             uint16_t th0 = 0, th1 = 0, th2 = 0, th3 = 0;
-            if (geo3d_tex_word(materials, m->materials_size, hw, &th0) &&
-                geo3d_tex_word(materials, m->materials_size, hw + 1u, &th1) &&
-                geo3d_tex_word(materials, m->materials_size, hw + 2u, &th2) &&
-                geo3d_tex_word(materials, m->materials_size, hw + 3u, &th3)) {
+            if (geo3d_tex_word(materials, m->md.materials_size, hw, &th0) &&
+                geo3d_tex_word(materials, m->md.materials_size, hw + 1u, &th1) &&
+                geo3d_tex_word(materials, m->md.materials_size, hw + 2u, &th2) &&
+                geo3d_tex_word(materials, m->md.materials_size, hw + 3u, &th3)) {
                 lumabase = (uint32_t)(th1 & 0xff) << 7;
                 textured = (th0 & 0x4000) != 0;
                 texw = 32u << (th0 & 0x7);
@@ -2461,8 +2472,8 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
             for (int k = 0; k < nv; k++) {
                 uint32_t tw_ = uv_word + (uint32_t)k * 2u;
                 uint16_t pv = 0, pu = 0;
-                if (!geo3d_tex_word(materials, m->materials_size, tw_, &pv) ||
-                    !geo3d_tex_word(materials, m->materials_size, tw_ + 1u, &pu)) break;
+                if (!geo3d_tex_word(materials, m->md.materials_size, tw_, &pv) ||
+                    !geo3d_tex_word(materials, m->md.materials_size, tw_ + 1u, &pu)) break;
                 if (!textured) continue;
                 uvu[slot[k]] = (float)pu / 8.0f;
                 uvv[slot[k]] = (float)pv / 8.0f;
@@ -2528,11 +2539,14 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
 /* A model's static mesh from the cache, built on first sight. mesh_offset,
  * mat_ptr and uv_ptr as geo3d_decode_model works them out. NULL when out of
  * memory. Render thread only: the cache is not locked. */
-static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const uint8_t *main_data,
-                                     const uint8_t *polygons,  size_t polygons_size,
-                                     const uint8_t *materials, size_t materials_size,
-                                     uint32_t table_off, uint32_t table_count,
-                                     uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline bool geo3d_models_same(const geo3d_models_t *a, const geo3d_models_t *b) {
+    return a->polygons == b->polygons && a->materials == b->materials && a->main_data == b->main_data &&
+           a->polygons_size == b->polygons_size && a->materials_size == b->materials_size &&
+           a->table_off == b->table_off && a->table_count == b->table_count &&
+           a->mesh_ptr_subtract == b->mesh_ptr_subtract && a->mesh_ptr_add == b->mesh_ptr_add;
+}
+
+static geo3d_cmesh_t *geo3d_mesh_get(const geo3d_models_t *md, int model_idx,
                                      uint32_t mat_ptr, uint32_t uv_ptr, uint32_t mesh_offset) {
     uint32_t h = ((uint32_t)model_idx * 2654435761u) ^ (mat_ptr * 40503u) ^ (uv_ptr * 2246822519u);
     geo3d_cmesh_t *m = NULL;
@@ -2540,10 +2554,7 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const uint8_t *main_data,
         geo3d_cmesh_t *e = &g_geo3d_meshes[(h + probe) & (GEO3D_MESH_CACHE_SLOTS - 1u)];
         if (!e->used) { m = e; break; }
         if (e->model_idx == model_idx && e->mat_ptr == mat_ptr && e->uv_ptr == uv_ptr &&
-                e->polygons == polygons && e->materials == materials && e->main_data == main_data &&
-                e->polygons_size == polygons_size && e->materials_size == materials_size &&
-                e->table_off == table_off && e->table_count == table_count &&
-                e->mesh_ptr_subtract == mesh_ptr_subtract && e->mesh_ptr_add == mesh_ptr_add) {
+                geo3d_models_same(&e->md, md)) {
             m = e;
             break;
         }
@@ -2553,11 +2564,9 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const uint8_t *main_data,
         geo3d_mesh_cache_clear();
         m = &g_geo3d_meshes[h & (GEO3D_MESH_CACHE_SLOTS - 1u)];
     }
-    *m = (geo3d_cmesh_t){ .model_idx = model_idx, .mat_ptr = mat_ptr, .uv_ptr = uv_ptr,
-                          .polygons = polygons, .materials = materials, .main_data = main_data,
-                          .polygons_size = polygons_size, .materials_size = materials_size,
-                          .table_off = table_off, .table_count = table_count,
-                          .mesh_ptr_subtract = mesh_ptr_subtract, .mesh_ptr_add = mesh_ptr_add };
+    *m = (geo3d_cmesh_t){ .model_idx = model_idx, .mat_ptr = mat_ptr, .uv_ptr = uv_ptr, .md = *md };
+    m->md.obj_mesh = NULL;
+    m->md.obj_mesh_size = 0;
     if (!geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) { m->used = false; return NULL; }
     m->used = true;
     g_geo3d_mesh_count++;
@@ -2567,16 +2576,10 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const uint8_t *main_data,
 
 /* The layers of a model's faces by face-loop index, for geo3d_decode_model
  * (declared before it). False when the cache cannot answer. */
-static bool geo3d_mesh_layers_for(int model_idx, const uint8_t *main_data,
-                                  const uint8_t *polygons,  size_t polygons_size,
-                                  const uint8_t *materials, size_t materials_size,
-                                  uint32_t table_off, uint32_t table_count,
-                                  uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static bool geo3d_mesh_layers_for(const geo3d_models_t *md, int model_idx,
                                   uint32_t mat_ptr, uint32_t uv_ptr, uint32_t mesh_offset,
                                   geo3d_face_layer_t *out, int cap) {
-    geo3d_cmesh_t *m = geo3d_mesh_get(model_idx, main_data, polygons, polygons_size, materials, materials_size,
-                                      table_off, table_count, mesh_ptr_subtract, mesh_ptr_add,
-                                      mat_ptr, uv_ptr, mesh_offset);
+    geo3d_cmesh_t *m = geo3d_mesh_get(md, model_idx, mat_ptr, uv_ptr, mesh_offset);
     if (!m) return false;
     if (!m->ranked) { geo3d_mesh_layers(m); m->ranked = true; }
     memset(out, 0, (size_t)cap * sizeof *out);
@@ -2593,60 +2596,35 @@ static bool geo3d_mesh_layers_for(int model_idx, const uint8_t *main_data,
 /* Whether a draw goes through the mesh cache, and its mesh if so: NONE draws
  * nothing, FULL is the full decoder's (see geo3d_decode_model_cached). */
 enum { GEO3D_DRAW_NONE, GEO3D_DRAW_FULL, GEO3D_DRAW_CACHED };
-static int geo3d_mesh_for_draw(int model_idx,
-                               const uint8_t *main_data, size_t main_data_size,
-                               const uint8_t *polygons,  size_t polygons_size,
-                               const uint8_t *materials, size_t materials_size,
-                               uint32_t table_off, uint32_t table_count,
-                               uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static int geo3d_mesh_for_draw(const geo3d_models_t *md, int model_idx,
                                const float *matrix, geo3d_cmesh_t **out) {
     *out = NULL;
-    if (!g_geo3d_mesh_cache || !g_geo3d_board_luma || !matrix || g_geo3d_obj_mesh || g_geo_flat_color ||
+    if (!g_geo3d_mesh_cache || !g_geo3d_board_luma || !matrix || md->obj_mesh || g_geo_flat_color ||
             GEO3D_DUMP_TEX(model_idx))
         return GEO3D_DRAW_FULL;
-    if (!main_data || !polygons) return GEO3D_DRAW_NONE;
-    if (model_idx < 0 || (uint32_t)model_idx >= table_count) return GEO3D_DRAW_NONE;
-    uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
-    if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) return GEO3D_DRAW_NONE;
-    uint32_t mesh_ptr_raw = read_u32_le(main_data + toff + 8);
-    if (mesh_ptr_raw == 0) return GEO3D_DRAW_NONE;
-    uint32_t mesh_offset = mesh_ptr_raw * 4u - mesh_ptr_subtract + mesh_ptr_add;
-    uint32_t mat_ptr = 0, uv_ptr = 0;
-    if (materials) {
-        mat_ptr = read_u32_le(main_data + toff + 4);
-        uv_ptr  = read_u32_le(main_data + toff + 0);
-        if (g_geo3d_obj_tha != 0xFFFFFFFFu) mat_ptr = g_geo3d_obj_tha;
-        if (g_geo3d_obj_tpa != 0xFFFFFFFFu) uv_ptr  = g_geo3d_obj_tpa;
-    }
+    if (!md->main_data || !md->polygons) return GEO3D_DRAW_NONE;
+    uint32_t mesh_offset, mat_ptr, uv_ptr;
+    if (!geo3d_model_streams(md, model_idx, &mesh_offset, &mat_ptr, &uv_ptr)) return GEO3D_DRAW_NONE;
     bool have_mat = mat_ptr != 0, have_uv = uv_ptr != 0;
     /* Streams in texture RAM change under the cache: decode those every time. */
     if ((have_mat && (mat_ptr & 0x800000u)) || (have_uv && (uv_ptr & 0x800000u)))
         return GEO3D_DRAW_FULL;
-    *out = geo3d_mesh_get(model_idx, main_data, polygons, polygons_size, materials, materials_size,
-                          table_off, table_count, mesh_ptr_subtract, mesh_ptr_add,
-                          mat_ptr, uv_ptr, mesh_offset);
+    *out = geo3d_mesh_get(md, model_idx, mat_ptr, uv_ptr, mesh_offset);
     return *out ? GEO3D_DRAW_CACHED : GEO3D_DRAW_FULL;
 }
 
-static inline void geo3d_decode_model_cached(int model_idx,
-                                             const uint8_t *main_data, size_t main_data_size,
-                                             const uint8_t *polygons,  size_t polygons_size,
-                                             const uint8_t *materials, size_t materials_size,
-                                             uint32_t table_off, uint32_t table_count,
-                                             uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model_idx,
                                              const float *matrix,
                                              float cr, float cg, float cb) {
     geo3d_cmesh_t *m;
-    const int how = geo3d_mesh_for_draw(model_idx, main_data, main_data_size, polygons, polygons_size,
-                                        materials, materials_size, table_off, table_count,
-                                        mesh_ptr_subtract, mesh_ptr_add, matrix, &m);
+    const int how = geo3d_mesh_for_draw(md, model_idx, matrix, &m);
     if (how == GEO3D_DRAW_NONE) return;
     if (how == GEO3D_DRAW_FULL) {
-        geo3d_decode_model(model_idx, main_data, main_data_size, polygons, polygons_size,
-                           materials, materials_size, table_off, table_count, mesh_ptr_subtract, mesh_ptr_add,
-                           matrix, cr, cg, cb);
+        geo3d_decode_model(md, model_idx, matrix, cr, cg, cb);
         return;
     }
+    const uint8_t *main_data = md->main_data;
+    const size_t   main_data_size = md->main_data_size;
 
     static vec3_t tv[GEO3D_IA_MAX_VERTS];
     for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
@@ -2921,12 +2899,7 @@ static inline void geo3d_lerp_matrix(float *out, const float *cur, const float *
     out[11] = prev[11] + (cur[11] - prev[11]) * lerp_t;
 }
 
-static inline void geo3d_build_wireframes(geo3d_state_t *geo,
-                                           const uint8_t *main_data, size_t main_data_size,
-                                           const uint8_t *polygons,  size_t polygons_size,
-                                           const uint8_t *materials, size_t materials_size,
-                                           uint32_t table_off, uint32_t table_count,
-                                           uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline void geo3d_build_wireframes(geo3d_state_t *geo, const geo3d_models_t *md,
                                            float lerp_t,
                                            float cam_x, float cam_y, float cam_z) {
     /* A bridge model dump owns the emit sink for the moment; leave the scene as
@@ -2964,29 +2937,17 @@ static inline void geo3d_build_wireframes(geo3d_state_t *geo,
                 mat = lerped;
             }
 
-            geo3d_decode_model(cm->model_idx,
-                                main_data, main_data_size,
-                                polygons, polygons_size,
-                                materials, materials_size,
-                                table_off, table_count,
-                                mesh_ptr_subtract, mesh_ptr_add,
-                                mat, cm->color[0], cm->color[1], cm->color[2]);
+            geo3d_decode_model(md, cm->model_idx, mat, cm->color[0], cm->color[1], cm->color[2]);
         }
     } else {
         /* Single-model browser: derive colour from the model-table material ptr. */
         float cr = 0.0f, cg = 1.0f, cb = 0.0f;
-        uint32_t toff = table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
-        if (main_data && (size_t)toff + MODEL_ENTRY_SIZE <= main_data_size) {
-            uint32_t mat_ptr = read_u32_le(main_data + toff + 4);
+        uint32_t toff = md->table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
+        if (md->main_data && (size_t)toff + MODEL_ENTRY_SIZE <= md->main_data_size) {
+            uint32_t mat_ptr = read_u32_le(md->main_data + toff + 4);
             material_ptr_to_color(mat_ptr, &cr, &cg, &cb);
         }
-        geo3d_decode_model(geo->model_index,
-                            main_data, main_data_size,
-                            polygons, polygons_size,
-                            materials, materials_size,
-                            table_off, table_count,
-                            mesh_ptr_subtract, mesh_ptr_add,
-                            NULL, cr, cg, cb);
+        geo3d_decode_model(md, geo->model_index, NULL, cr, cg, cb);
     }
 }
 
