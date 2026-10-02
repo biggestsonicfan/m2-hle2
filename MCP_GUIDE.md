@@ -43,7 +43,8 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--mcp-watch-port N` | Also listen on N for read-only watchers (with `--mcp`; off by default). See "The watch port" below |
 | `--log <path>` | Write the session log here instead of `m2hle.log`; `--log off` writes no file (the log window still has it) |
 | `--log-level SPEC` | Drop lines below a level: `warn`, or per channel (the `mem:` / `netplay:` / `sound:` tag a line starts with), e.g. `warn,mem=error,netplay=debug`. Levels are `debug`, `info`, `warn`, `error`, `off`. A dropped line is dropped everywhere: the file, the log window and the MCP log. The file takes 64 MB whatever the level, then only errors (1 MB more) |
-| `--rom <path>` | Auto-load this ROM zip on startup |
+| `--rom <path>` | Auto-load this ROM zip on startup. A directory of region images (`--export-roms`) loads too, with no zip, interleave or CRC pass; its name picks the profile as a zip's does |
+| `--export-roms DIR` | With `--rom <zip>`: write the set into DIR as one straight image per region (`maincpu.bin`, `main_data.bin`, `copro_data.bin`, `polygons.bin`, `textures.bin`, `audiocpu.bin`, `samples.bin`), exactly as they sit in memory after the load, then quit. Name DIR after the set (`sfight`) |
 | `--run` | Start executing immediately after ROM load |
 | `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
 | `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
