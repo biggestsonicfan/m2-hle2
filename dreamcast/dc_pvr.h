@@ -68,6 +68,18 @@ static struct {
     uint32_t  us_tiles, us_scan, us_sort;   /* parts of us_decode */
 } g_dp;
 
+/* Tilemap 2 as strips (dp_ls_strips, below). */
+static struct {
+    bool      on;
+    pvr_ptr_t back, front;
+    uint16_t  cells[0x1000];      /* the tilemap 2 entries the textures hold */
+    uint8_t   front_set[0x1000];  /* the cell is category 1 with a pixel set */
+    uint16_t  bank_cells[256];    /* cells drawn with each palette bank */
+    unsigned  front_cells;
+    uint16_t  h[VIDEO_HEIGHT];    /* each line's H scroll, and the V scroll */
+    uint16_t  vy;
+} g_ls;
+
 static uint16_t g_dp_spread[1024];   /* i's bits at the even positions */
 static uint8_t  g_dp_cut[256 * 256 / 2];
 
@@ -233,6 +245,8 @@ static int dp_init(void) {
     g_dp.bg   = pvr_mem_malloc(512 * 512 * 2);
     g_dp.fg   = pvr_mem_malloc(512 * 512 * 2);
     g_dp.text = pvr_mem_malloc(1024 * 512 * 2);
+    g_ls.back  = pvr_mem_malloc(512 * 512 * 2);
+    g_ls.front = pvr_mem_malloc(512 * 512 * 2);
     /* The checker: texel (x ^ y) & 1 clear, 8x8 twiddled. */
     memset(g_dp_cut, 0, 32);
     for (unsigned y = 0; y < 8; y++)
@@ -241,7 +255,7 @@ static int dp_init(void) {
             g_dp_cut[i >> 1] |= (uint8_t)((((x ^ y) & 1u) ? 1u : 0u) << ((i & 1) * 4));
         }
     g_dp.checker = pvr_mem_malloc(32);
-    if (!g_dp.bg || !g_dp.fg || !g_dp.text || !g_dp.checker) return -1;
+    if (!g_dp.bg || !g_dp.fg || !g_dp.text || !g_dp.checker || !g_ls.back || !g_ls.front) return -1;
     pvr_txr_load(g_dp_cut, g_dp.checker, 32);
     memset((void *)g_dp.bg, 0, 512 * 512 * 2);
     memset((void *)g_dp.fg, 0, 512 * 512 * 2);
@@ -329,15 +343,117 @@ static void dp_text_rect(int r) {
  * the pens on screen changed: most of STF's palette writes are 3D colours. */
 static uint8_t g_dp_pen_used[TILE_PEN_NONE + 1];   /* a superset of the pens on screen */
 
-static void dp_tiles_convert(const tile_cpu_t *tiles, int y, int xs, int xe) {
+static void dp_tiles_convert(const tile_cpu_t *tiles, const uint16_t *bgpen, int y, int xs, int xe) {
     const uint16_t *bg = tiles->bg + y * VIDEO_WIDTH, *fg = tiles->fg + y * VIDEO_WIDTH;
     uint32_t *db = (uint32_t *)g_dp.bg + y * 256, *df = (uint32_t *)g_dp.fg + y * 256;
     for (int x = xs; x < xe; x += 2) {
         g_dp_pen_used[bg[x]] = g_dp_pen_used[bg[x + 1]] = 1;
         g_dp_pen_used[fg[x]] = g_dp_pen_used[fg[x + 1]] = 1;
-        db[x >> 1] = g_dp.pen565[bg[x]] | (uint32_t)g_dp.pen565[bg[x + 1]] << 16;
+        db[x >> 1] = bgpen[bg[x]] | (uint32_t)bgpen[bg[x + 1]] << 16;
         df[x >> 1] = g_dp.pen1555[fg[x]] | (uint32_t)g_dp.pen1555[fg[x + 1]] << 16;
     }
+}
+
+/* Tilemap 2 with a per-line H scroll (the title's starfield, #358): redrawn on
+ * the CPU, each scroll change was a whole line, ~2,100 of the 2,976 blocks a
+ * frame (~129 ms). When tilemap 2 covers the back layer alone (its pair in
+ * mode 0 with no window mask bit set, so tilemap 3 draws nowhere), the PVR
+ * scrolls it instead: the whole 512x512 tilemap sits in two textures, every
+ * pixel (RGB565) and its category 1 pixels (ARGB1555), and each run of lines
+ * with one scroll is a strip whose U starts at -scroll. Only the cells the game
+ * changes are drawn into them. Tilemaps 1 and 0 stay on the CPU, in a back
+ * layer with its empty pixels clear, drawn behind the 3D by depth: the
+ * translucent list's first quad, at the strips' z, GEQUAL. */
+static bool dp_ls_ok(const uint16_t *w) {
+    if (!(w[0x5002] & 0x8000) || (w[0x5006] & 0xE000)) return false;
+    for (int i = 0; i < VIDEO_HEIGHT * 4; i++)
+        if (w[0x6800 + i]) return false;
+    return true;
+}
+
+/* Cell i of tilemap 2 into both textures; true if it shows in front. */
+static bool dp_ls_cell(const uint8_t *gfx, int i, uint16_t e) {
+    int bank16 = ((e >> 7) & 0xFF) * 16;
+    bool cat = (e >> 15) != 0, any = false;
+    const uint8_t *g = gfx + (uint32_t)(e & 0x3FFF) * 32u;
+    unsigned o = (unsigned)(i >> 6) * 8u * 256u + (unsigned)(i & 63) * 4u;   /* in 32-bit words */
+    uint32_t *db = (uint32_t *)g_ls.back + o, *df = (uint32_t *)g_ls.front + o;
+    for (int r = 0; r < 8; r++, g += 4, db += 256, df += 256) {
+        const uint8_t nib[8] = { g[1] >> 4, g[1] & 15, g[0] >> 4, g[0] & 15, g[3] >> 4, g[3] & 15, g[2] >> 4, g[2] & 15 };
+        for (int x = 0; x < 8; x += 2) {
+            db[x >> 1] = g_dp.pen565[bank16 + nib[x]] | (uint32_t)g_dp.pen565[bank16 + nib[x + 1]] << 16;
+            df[x >> 1] = cat ? (nib[x] ? g_dp.pen1555[bank16 + nib[x]] : 0u) |
+                               (uint32_t)(nib[x + 1] ? g_dp.pen1555[bank16 + nib[x + 1]] : 0u) << 16 : 0u;
+            any |= (nib[x] | nib[x + 1]) != 0;
+        }
+    }
+    return cat && any;
+}
+
+/* Bring the textures to tilemap 2's entries w (0x1000 of them): every cell, or
+ * only those that changed. */
+static void dp_ls_draw(const uint16_t *w, const uint8_t *gfx, bool all) {
+    if (all) {
+        memset(g_ls.bank_cells, 0, sizeof g_ls.bank_cells);
+        memset(g_ls.front_set, 0, sizeof g_ls.front_set);
+        g_ls.front_cells = 0;
+    }
+    for (int i = 0; i < 0x1000; i += 64) {
+        if (!all && !memcmp(w + i, g_ls.cells + i, 64 * sizeof *w)) continue;
+        for (int k = i; k < i + 64; k++) {
+            uint16_t e = w[k];
+            if (!all) {
+                if (e == g_ls.cells[k]) continue;
+                g_ls.bank_cells[(g_ls.cells[k] >> 7) & 0xFF]--;
+                g_ls.front_cells -= g_ls.front_set[k];
+            }
+            g_ls.cells[k] = e;
+            g_ls.bank_cells[(e >> 7) & 0xFF]++;
+            g_ls.front_set[k] = dp_ls_cell(gfx, k, e);
+            g_ls.front_cells += g_ls.front_set[k];
+        }
+    }
+}
+
+/* Tilemap 2 as strips: a run of lines with one scroll, cut where the texture
+ * wraps (bilinear filtering wraps with it, so the cut does not show). */
+static void dp_ls_strips(pvr_list_t list, pvr_ptr_t tex, int fmt, float z) {
+    pvr_poly_cxt_t cxt;
+    pvr_poly_hdr_t hdr;
+    pvr_poly_cxt_txr(&cxt, list, fmt | PVR_TXRFMT_NONTWIDDLED, 512, 512, tex, PVR_FILTER_BILINEAR);
+    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+    pvr_poly_compile(&hdr, &cxt);
+    pvr_prim(&hdr, sizeof hdr);
+    const float k = 1.0f / 512.0f;
+    for (int y = 0; y < VIDEO_HEIGHT; ) {
+        int h = g_ls.h[y], ty = (y + g_ls.vy) & 511, e = y + 1;
+        while (e < VIDEO_HEIGHT && g_ls.h[e] == h && ((e + g_ls.vy) & 511)) e++;
+        float sy0 = (float)y * DC_S, sy1 = (float)e * DC_S;
+        float v0 = (float)ty * k, v1 = (float)(ty + e - y) * k;
+        int u = (-h) & 511, xs = 512 - u;           /* screen x 0 samples u; xs wraps to 0 */
+        int cut[3] = { 0, xs < VIDEO_WIDTH ? xs : VIDEO_WIDTH, VIDEO_WIDTH };
+        for (int q = 0; q < 2; q++) {
+            if (cut[q] >= cut[q + 1]) continue;
+            float ua = (float)((u + cut[q]) & 511) * k, ub = ua + (float)(cut[q + 1] - cut[q]) * k;
+            float xa = DC_X0 + (float)cut[q] * DC_S, xb = DC_X0 + (float)cut[q + 1] * DC_S;
+            dp_vertex(PVR_CMD_VERTEX,     xa, sy0, z, ua, v0, 0xFFFFFFFFu, 0);
+            dp_vertex(PVR_CMD_VERTEX,     xb, sy0, z, ub, v0, 0xFFFFFFFFu, 0);
+            dp_vertex(PVR_CMD_VERTEX,     xa, sy1, z, ua, v1, 0xFFFFFFFFu, 0);
+            dp_vertex(PVR_CMD_VERTEX_EOL, xb, sy1, z, ub, v1, 0xFFFFFFFFu, 0);
+        }
+        y = e;
+    }
+}
+
+/* tile_cpu_draw less tilemaps 2 and 3: the back layer clear where nothing drew. */
+static void dp_ls_rest(tile_cpu_t *c, const uint8_t *gfx, const int16_t *x0, const int16_t *x1) {
+    for (int y = 0; y < VIDEO_HEIGHT; y++)
+        for (int x = x0[y]; x < x1[y]; x++)
+            c->bg[y * VIDEO_WIDTH + x] = c->fg[y * VIDEO_WIDTH + x] = TILE_PEN_NONE;
+    s24_draw_tilemap(c->words, gfx, 1, 0, false, c->bg, x0, x1);
+    s24_draw_tilemap(c->words, gfx, 0, 0, false, c->bg, x0, x1);
+    s24_draw_tilemap(c->words, gfx, 1, 1, false, c->fg, x0, x1);
+    s24_draw_tilemap(c->words, gfx, 0, 1, false, c->fg, x0, x1);
 }
 
 static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
@@ -350,23 +466,9 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
     if (!redraw && !recolour) return;
     memset(&d, 0, sizeof d);
     d.full = !s_valid || bus->gen_gfx != s_gfx;
+    bool ls_all = d.full, all = false;
     s_tile = bus->gen_tile; s_gfx = bus->gen_gfx; s_pal = bus->gen_pal; s_lut = bus->gen_lut;
-    if (redraw) {
-        memcpy(tiles->next, bus->tile, sizeof tiles->next);
-        if (!d.full) tile_dirty_find(&d, tiles->words, tiles->next);
-        memcpy(tiles->words, tiles->next, sizeof tiles->words);
-        if (d.count > TILE_BLK_W * TILE_BLK_H * 3 / 4) d.full = true;
-        for (int by = 0; by < TILE_BLK_H; by++) {
-            int b0 = 0, b1 = TILE_BLK_W;
-            if (!d.full) {
-                while (b0 < TILE_BLK_W && !d.blk[by][b0]) b0++;
-                while (b1 > b0 && !d.blk[by][b1 - 1]) b1--;
-            }
-            for (int y = by * 8; y < by * 8 + 8; y++) { x0[y] = (int16_t)(b0 * 8); x1[y] = (int16_t)(b1 * 8); }
-        }
-        if (d.full || d.count) tile_cpu_draw(tiles, bus->tmapgfx, x0, x1);
-    }
-    bool all = d.full;
+    /* The pen colours first: tilemap 2's textures are drawn in them. */
     if (recolour) {
         uint8_t chan[3][32];
         video_pen_channels(bus, chan);
@@ -377,6 +479,7 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
             uint16_t c1555 = (uint16_t)(0x8000u | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3));
             if (c565 != g_dp.pen565[p] || c1555 != g_dp.pen1555[p]) {
                 if (g_dp_pen_used[p]) all = true;
+                if (g_ls.bank_cells[p >> 4]) ls_all = true;
                 g_dp.pen565[p] = c565;
                 g_dp.pen1555[p] = c1555;
             }
@@ -384,14 +487,48 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
         g_dp.pen565[TILE_PEN_NONE] = 0;
         g_dp.pen1555[TILE_PEN_NONE] = 0;
     }
-    if (!s_valid) all = true;
+    if (redraw) {
+        uint16_t *n = tiles->next;
+        memcpy(n, bus->tile, sizeof tiles->next);
+        bool ls = dp_ls_ok(n);
+        if (ls != g_ls.on) { d.full = ls_all = true; g_ls.on = ls; }
+        if (ls) {
+            for (int y = 0; y < VIDEO_HEIGHT; y++) g_ls.h[y] = n[0x4400 + y] & 0x1FF;
+            g_ls.vy = n[0x5006] & 0x1FF;
+            dp_ls_draw(n + 0x2000, bus->tmapgfx, ls_all);
+            ls_all = false;
+            /* Pair 2/3's cells, line scroll and mask stay as they were for the
+             * CPU's layers, which no longer draw them. */
+            memcpy(n + 0x2000, tiles->words + 0x2000, 0x2000 * sizeof *n);
+            memcpy(n + 0x4400, tiles->words + 0x4400, 0x400 * sizeof *n);
+            memcpy(n + 0x6800, tiles->words + 0x6800, 0x800 * sizeof *n);
+        }
+        if (!d.full) tile_dirty_find(&d, tiles->words, n);
+        memcpy(tiles->words, n, sizeof tiles->words);
+        if (d.count > TILE_BLK_W * TILE_BLK_H * 3 / 4) d.full = true;
+        for (int by = 0; by < TILE_BLK_H; by++) {
+            int b0 = 0, b1 = TILE_BLK_W;
+            if (!d.full) {
+                while (b0 < TILE_BLK_W && !d.blk[by][b0]) b0++;
+                while (b1 > b0 && !d.blk[by][b1 - 1]) b1--;
+            }
+            for (int y = by * 8; y < by * 8 + 8; y++) { x0[y] = (int16_t)(b0 * 8); x1[y] = (int16_t)(b1 * 8); }
+        }
+        if (d.full || d.count) {
+            if (g_ls.on) dp_ls_rest(tiles, bus->tmapgfx, x0, x1);
+            else         tile_cpu_draw(tiles, bus->tmapgfx, x0, x1);
+        }
+    }
+    if (g_ls.on && ls_all) dp_ls_draw(g_ls.cells, bus->tmapgfx, true);   /* a colour it shows changed */
+    if (d.full || !s_valid) all = true;
     s_valid = true;
+    const uint16_t *bgpen = g_ls.on ? g_dp.pen1555 : g_dp.pen565;
     if (all) {
         memset(g_dp_pen_used, 0, sizeof g_dp_pen_used);
-        for (int y = 0; y < VIDEO_HEIGHT; y++) dp_tiles_convert(tiles, y, 0, VIDEO_WIDTH);
+        for (int y = 0; y < VIDEO_HEIGHT; y++) dp_tiles_convert(tiles, bgpen, y, 0, VIDEO_WIDTH);
     } else if (redraw && d.count) {
         for (int y = 0; y < VIDEO_HEIGHT; y++)
-            if (x0[y] < x1[y]) dp_tiles_convert(tiles, y, x0[y], x1[y]);
+            if (x0[y] < x1[y]) dp_tiles_convert(tiles, bgpen, y, x0[y], x1[y]);
     }
 }
 
@@ -636,8 +773,11 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     const float U = VIDEO_WIDTH / 512.0f, V = VIDEO_HEIGHT / 512.0f;
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
-    dp_rect(PVR_LIST_OP_POLY, g_dp.bg, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED, 512, 512, true,
-            DC_X0, 0.0f, DC_X0 + W, H, U, V, 1.0e-4f);
+    if (g_ls.on)
+        dp_ls_strips(PVR_LIST_OP_POLY, g_ls.back, PVR_TXRFMT_RGB565, 1.0e-4f);
+    else
+        dp_rect(PVR_LIST_OP_POLY, g_dp.bg, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED, 512, 512, true,
+                DC_X0, 0.0f, DC_X0 + W, H, U, V, 1.0e-4f);
     uint32_t state = 0;
     for (int k = 0; k < n; k++) {
         int t = (int)g_dp_order[0][k];
@@ -645,11 +785,15 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     }
     pvr_list_finish();
     pvr_list_begin(PVR_LIST_TR_POLY);
+    if (g_ls.on)   /* tilemaps 1 and 0 behind the 3D: over the strips only */
+        dp_rect(PVR_LIST_TR_POLY, g_dp.bg, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, 512, 512, false,
+                DC_X0, 0.0f, DC_X0 + W, H, U, V, 1.0e-4f);
     state = 0;
     for (int k = 0; k < n; k++) {
         int t = (int)g_dp_order[0][k];
         if (dp_face_translucent(&g_geo3d_tris.tris[t])) dp_face(bus, t, PVR_LIST_TR_POLY, &state);
     }
+    if (g_ls.on && g_ls.front_cells) dp_ls_strips(PVR_LIST_TR_POLY, g_ls.front, PVR_TXRFMT_ARGB1555, 1.0e3f);
     dp_rect(PVR_LIST_TR_POLY, g_dp.fg, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, 512, 512, true,
             DC_X0, 0.0f, DC_X0 + W, H, U, V, 1.0e3f);
     dp_bar(0.0f, DC_X0);

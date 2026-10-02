@@ -17,19 +17,20 @@ The pad is mapped but untested.
 Figures from Flycast's libretro core with the HLE BIOS (emulated time, which is
 approximate), per frame shown:
 
-| | D1 (tiles only) | D2: FBI picture | D2: title | #355: title | #355: attract |
-|---|---|---|---|---|---|
-| board fps | 7.9 | 11.4 | 2.2 | 3.1-3.4 | 5.7-6.2 |
-| i960 slice | ~88 ms | 46 ms | 83 ms | ~80 ms | ~98 ms |
-| tile layers | ~36 ms | 1 ms | ~128 ms | ~129 ms | 1-2 ms |
-| 3D decode | - | 28 ms, 745 tris | ~197-384 ms, ~2,330 tris | 46-76 ms, ~2,300 tris | ~30 ms, ~3,000 tris |
-| depth sort | - | 1 ms | 3 ms | 3 ms | 4 ms |
+| | D1 (tiles only) | D2: FBI picture | D2: title | #355: title | #355: attract | #358: title |
+|---|---|---|---|---|---|---|
+| board fps | 7.9 | 11.4 | 2.2 | 3.1-3.4 | 5.7-6.2 | 5.1-5.9 |
+| i960 slice | ~88 ms | 46 ms | 83 ms | ~80 ms | ~98 ms | ~80 ms |
+| tile layers | ~36 ms | 1 ms | ~128 ms | ~129 ms | 1-2 ms | 5-6 ms |
+| 3D decode | - | 28 ms, 745 tris | ~197-384 ms, ~2,330 tris | 46-76 ms, ~2,300 tris | ~30 ms, ~3,000 tris | 47-75 ms, ~2,300 tris |
+| depth sort | - | 1 ms | 3 ms | 3 ms | 4 ms | 3 ms |
 
 The D2 title decode was not the SH-4's arithmetic: the heap was full, so 7-10
 mesh builds a frame failed (malloc), and each failure cost a mesh build plus
 the full decode, every frame. Only ~25 triangles a frame came through the
-cache. #355 freed the heap (below); a cached triangle costs ~9 us. The tile
-layers are the title's biggest cost now (Next optimization targets).
+cache. #355 freed the heap (below); a cached triangle costs ~9 us. #358 moved
+the title starfield's line scroll to the PVR (below): its tile layers went
+from ~129 ms to 5-6 ms a frame.
 
 ## The picture on the PowerVR (dreamcast/dc_pvr.h)
 
@@ -58,6 +59,18 @@ layers are the title's biggest cost now (Next optimization targets).
   `s24_draw_tilemap` (tile_renderer.h, every build) now walks a run at a time,
   to the next cell edge, mask group or split, not a pixel at a time;
   `tile_test` still holds it to the original pixel for pixel.
+- **A line-scrolled tilemap is scrolled by the PVR** (#358). The title's
+  starfield is tilemap 2 with a per-line H scroll; on the CPU each scroll
+  change redrew its whole line, ~2,100 of 2,976 blocks a frame. When tilemap
+  2 covers the back layer alone (pair 2/3 in mode 0, no window mask bit, so
+  tilemap 3 draws nowhere), all 512x512 of it sits in two textures (every
+  pixel RGB565, its category 1 pixels ARGB1555) and each run of lines with
+  one scroll is a strip with U starting at -scroll, cut where U wraps. Only
+  cells the game changes are drawn into them, and a colour change redraws
+  them only if a bank they use changed. Tilemaps 1 and 0 stay on the CPU, in
+  an ARGB1555 back layer that the translucent list draws first, at the
+  strips' z with GEQUAL, so the 3D hides it. Any other layout falls back to
+  the full CPU layer.
 - **The 3D can draw past the board's 496 pixels.** Black bars cover x < 10 and
   x > 630 at the end of the translucent list.
 
@@ -185,15 +198,10 @@ stale pages, with no error anywhere.
 
 ## Next optimization targets
 
-- **The tile layers on the title (~129 ms).** Measured (#355): no cell,
-  register or mask changes, only tilemap 2's per-line H scroll table (~270
-  lines a frame, the starfield; line scroll on, mode 0, opaque behind the
-  3D). Each changed line is redrawn whole, ~2,100 of the 2,976 8x8 blocks a
-  frame: ~104 ms in `tile_cpu_draw`, ~19 ms converting. The fix is on the PVR:
-  draw tilemap 2's rows once into a 512-wide texture and give each line (or
-  run of equal lines) its own strip with the scroll as a U offset, with the
-  other tilemaps in their own layer over it. Only changed cells would be
-  drawn by the CPU.
+- **Other line-scrolled screens.** The PVR strips cover only the title's
+  case: tilemap 2 alone behind. A per-line scroll on another tilemap, or
+  with a window mask, still redraws whole lines on the CPU. The attract's
+  "REVENGE OF DR. ROBOTONIC" banner costs ~18-27 ms a frame.
 - **The 3D decode (title: 46-76 ms).** Now mostly the cached path. The SH-4's
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
