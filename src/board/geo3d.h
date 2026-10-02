@@ -878,6 +878,146 @@ static inline int geo3d__dl_args(const uint32_t *L, uint32_t nw, uint32_t p, uin
     }
 }
 
+/* What geo3d_scan_displaylist's walk carries from one command to the next. */
+typedef struct {
+    geo3d_state_t  *geo;
+    const uint32_t *buff_ram;
+    uint32_t        buff_words;
+    const uint8_t  *main_data;
+    size_t          main_data_size;
+    uint32_t        table_off;
+    const uint8_t  *palette;
+    size_t          palette_size;
+    float           cur_mat[12];
+    bool            have_mat;
+} geo3d_dl_walk_t;
+
+/* Snapshot the prev list for interpolation, once per vblank frame. */
+static inline void geo3d__dl_snapshot_prev(geo3d_state_t *geo) {
+    if (g_cop.geo_frame_end != geo->last_frame_end) {
+        memcpy(geo->captured_prev, geo->captured,
+               (size_t)geo->captured_count * sizeof(captured_model_t));
+        geo->captured_prev_count = geo->captured_count;
+        geo->last_frame_end      = g_cop.geo_frame_end;
+    }
+}
+
+/* MATRIX: 12 floats stored column-major (col0,col1,col2,T) — convert
+ * to the captured_model_t row-major 3x4 layout. */
+static inline void geo3d__dl_matrix(geo3d_dl_walk_t *w, uint32_t p) {
+    float m[12];
+    for (int k = 0; k < 12; k++) memcpy(&m[k], &w->buff_ram[p + 1 + (uint32_t)k], 4);
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) w->cur_mat[r * 4 + c] = m[c * 3 + r];
+        w->cur_mat[r * 4 + 3] = m[9 + r];
+    }
+    w->have_mat = true;
+}
+
+/* Per-object flat colour: the homebrew encodes the colorbase in
+ * the object_data `tha` (= GEO_TEXRAM_BIT 0x800000 | colorbase*4)
+ * and stores the hue at palram[colorbase + 0x1000] (BGR555), set
+ * via m2_setcolor. Read it live from palette RAM. */
+static inline void geo3d__dl_object_color(const geo3d_dl_walk_t *w, uint32_t p, captured_model_t *cm) {
+    cm->color[0] = cm->color[1] = cm->color[2] = 1.0f;  /* fallback white */
+    {
+        uint32_t tha = w->buff_ram[p + 2];
+        uint32_t cb  = (tha & 0x007FFFFFu) >> 2;
+        uint32_t poff = (cb + 0x1000u) * 2u;
+        if (w->palette && poff + 1u < w->palette_size) {
+            uint16_t bgr = (uint16_t)(w->palette[poff] | (w->palette[poff + 1] << 8));
+            cm->color[0] = ( bgr        & 0x1F) / 31.0f;   /* R = bits[4:0]  */
+            cm->color[1] = ((bgr >> 5)  & 0x1F) / 31.0f;   /* G = bits[9:5]  */
+            cm->color[2] = ((bgr >> 10) & 0x1F) / 31.0f;   /* B = bits[14:10] */
+        }
+    }
+}
+
+/* OBJECT: args = tpa, tha, oba(mesh ptr), obc. The homebrew's oba is a
+ * model-table mesh pointer, so reverse-map it to a model index and reuse
+ * the STF mesh+matrix renderer. */
+static inline void geo3d__dl_object(geo3d_dl_walk_t *w, uint32_t p) {
+    geo3d_state_t *geo = w->geo;
+    const float *cur_mat = w->cur_mat;
+    uint32_t oba = w->buff_ram[p + 3];
+    int model_idx = geo3d_lookup_by_pol(oba);
+    if (model_idx < 0) return;
+    uint32_t toff = w->table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
+    if ((size_t)toff + MODEL_ENTRY_SIZE > w->main_data_size) return;
+    captured_model_t *cm = &geo->captured[geo->captured_count];
+    memset(cm, 0, sizeof(*cm));
+    cm->model_idx    = model_idx;
+    cm->material_ptr = read_u32_le(w->main_data + toff + 4);
+    geo3d__dl_object_color(w, p, cm);
+    cm->dbg_mesh_ptr = oba;
+    if (w->have_mat) {
+        memcpy(cm->matrix, cur_mat, sizeof(cm->matrix));
+        /* Homebrew geometry is camera space with +z forward (GEO
+         * projects screen = focal*x/z); the GL renderer looks down -z,
+         * so negate the whole Z-output row (row 2 = matrix[8..11]). */
+        cm->matrix[8]  = -cur_mat[8];
+        cm->matrix[9]  = -cur_mat[9];
+        cm->matrix[10] = -cur_mat[10];
+        cm->matrix[11] = -cur_mat[11];
+        cm->has_matrix = true;
+        cm->dbg_have_mat = 1;
+        cm->dbg_pos[0] = cur_mat[3];
+        cm->dbg_pos[1] = cur_mat[7];
+        cm->dbg_pos[2] = -cur_mat[11];
+    }
+    /* Near-plane cull: objects at/behind the camera (z >= ~0) project
+     * to infinity and streak across the screen (e.g. the starfield
+     * passing the camera). Keep only those safely in front. */
+    if (!w->have_mat || cm->matrix[11] <= -1.0f)
+        geo->captured_count++;
+}
+
+/* FOCAL: fx, fy in pixels; the GEO puts y at fy*y/z from the window's
+ * centre. The host's perspective puts it at 192*cot(fov/2)*y/z on the
+ * 384-line screen, and x at the same scale (aspect 496/384), so this
+ * fov is the board's projection when fx == fy (m2-sdk's geo_focal(280,
+ * 280): 68.9 degrees). */
+static inline void geo3d__dl_focal(geo3d_dl_walk_t *w, uint32_t p) {
+    float fy;
+    memcpy(&fy, &w->buff_ram[p + 2], 4);
+    if (w->geo->fov_auto && fy > 1.0f)
+        w->geo->fov_deg = 2.0f * atanf(192.0f / fy) * (180.0f / 3.14159265f);
+}
+
+/* LIGHT (0x05000A0A): 3 floats (x,y,z). The GEO lights each face by
+ * normal·light; mirror it into the renderer's light dir so the flat
+ * panels shade like the HLE. Camera space — negate z to match the
+ * Z-row negation the host (−z forward) applies to the geometry. */
+static inline void geo3d__dl_light(const geo3d_dl_walk_t *w, uint32_t p) {
+    float lx, ly, lz;
+    memcpy(&lx, &w->buff_ram[p + 1], 4);
+    memcpy(&ly, &w->buff_ram[p + 2], 4);
+    memcpy(&lz, &w->buff_ram[p + 3], 4);
+    g_light_dir[0] = lx; g_light_dir[1] = ly; g_light_dir[2] = -lz;
+}
+
+/* One command of the walk; false where the walk stops. */
+static inline bool geo3d__dl_command(geo3d_dl_walk_t *w, uint32_t p, uint32_t cmd) {
+    static int warned_direct = 0;
+    const uint32_t buff_words = w->buff_words;
+    if ((cmd == 0xb || cmd == 0x1b) && p + 12u < buff_words) {
+        geo3d__dl_matrix(w, p);
+    } else if ((cmd == 1 || cmd == 0x11) && p + 4u < buff_words) {
+        geo3d__dl_object(w, p);
+    } else if ((cmd == 9 || cmd == 0x19) && p + 2u < buff_words) {
+        geo3d__dl_focal(w, p);
+    } else if (cmd == 0xa && p + 3u < buff_words) {
+        geo3d__dl_light(w, p);
+    } else if (cmd == 2 || cmd == 0x12) {
+        if (!warned_direct) {
+            LOG_WARN("geo3d displaylist: direct_data (cmd 2) not yet decoded; stopping walk");
+            warned_direct = 1;
+        }
+        return false;   /* variable-length inline geometry — can't skip reliably yet */
+    }
+    return true;
+}
+
 static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
         const uint32_t *buff_ram, uint32_t buff_words, uint32_t rstart,
         const uint8_t *main_data, size_t main_data_size,
@@ -886,18 +1026,13 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
     if (!main_data || !buff_ram) { geo->captured_count = 0; return; }
     geo3d_lookup_build(main_data, main_data_size, table_off, table_count);
 
-    /* Snapshot the prev list for interpolation, once per vblank frame. */
-    if (g_cop.geo_frame_end != geo->last_frame_end) {
-        memcpy(geo->captured_prev, geo->captured,
-               (size_t)geo->captured_count * sizeof(captured_model_t));
-        geo->captured_prev_count = geo->captured_count;
-        geo->last_frame_end      = g_cop.geo_frame_end;
-    }
+    geo3d__dl_snapshot_prev(geo);
     geo->captured_count = 0;
 
-    float cur_mat[12];
-    bool  have_mat = false;
-    static int warned_direct = 0;
+    geo3d_dl_walk_t w = { .geo = geo, .buff_ram = buff_ram, .buff_words = buff_words,
+                          .main_data = main_data, .main_data_size = main_data_size,
+                          .table_off = table_off, .palette = palette, .palette_size = palette_size,
+                          .have_mat = false };
     uint32_t p = (rstart & (buff_words * 4u - 1u)) / 4u;   /* wrap within bufferram */
     for (uint32_t guard = 0; guard < buff_words && p < buff_words
                              && geo->captured_count < MAX_GEO_MODELS; guard++) {
@@ -906,95 +1041,7 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
         uint32_t cmd = (op >> 23) & 0x1f;
         if (cmd == 0xf || cmd == 0x1f) break;                 /* END */
 
-        if ((cmd == 0xb || cmd == 0x1b) && p + 12u < buff_words) {
-            /* MATRIX: 12 floats stored column-major (col0,col1,col2,T) — convert
-             * to the captured_model_t row-major 3x4 layout. */
-            float m[12];
-            for (int k = 0; k < 12; k++) memcpy(&m[k], &buff_ram[p + 1 + (uint32_t)k], 4);
-            for (int r = 0; r < 3; r++) {
-                for (int c = 0; c < 3; c++) cur_mat[r * 4 + c] = m[c * 3 + r];
-                cur_mat[r * 4 + 3] = m[9 + r];
-            }
-            have_mat = true;
-        } else if ((cmd == 1 || cmd == 0x11) && p + 4u < buff_words) {
-            /* OBJECT: args = tpa, tha, oba(mesh ptr), obc. The homebrew's oba is a
-             * model-table mesh pointer, so reverse-map it to a model index and reuse
-             * the STF mesh+matrix renderer. */
-            uint32_t oba = buff_ram[p + 3];
-            int model_idx = geo3d_lookup_by_pol(oba);
-            if (model_idx >= 0) {
-                uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
-                if ((size_t)toff + MODEL_ENTRY_SIZE <= main_data_size) {
-                    captured_model_t *cm = &geo->captured[geo->captured_count];
-                    memset(cm, 0, sizeof(*cm));
-                    cm->model_idx    = model_idx;
-                    cm->material_ptr = read_u32_le(main_data + toff + 4);
-                    /* Per-object flat colour: the homebrew encodes the colorbase in
-                     * the object_data `tha` (= GEO_TEXRAM_BIT 0x800000 | colorbase*4)
-                     * and stores the hue at palram[colorbase + 0x1000] (BGR555), set
-                     * via m2_setcolor. Read it live from palette RAM. */
-                    cm->color[0] = cm->color[1] = cm->color[2] = 1.0f;  /* fallback white */
-                    {
-                        uint32_t tha = buff_ram[p + 2];
-                        uint32_t cb  = (tha & 0x007FFFFFu) >> 2;
-                        uint32_t poff = (cb + 0x1000u) * 2u;
-                        if (palette && poff + 1u < palette_size) {
-                            uint16_t bgr = (uint16_t)(palette[poff] | (palette[poff + 1] << 8));
-                            cm->color[0] = ( bgr        & 0x1F) / 31.0f;   /* R = bits[4:0]  */
-                            cm->color[1] = ((bgr >> 5)  & 0x1F) / 31.0f;   /* G = bits[9:5]  */
-                            cm->color[2] = ((bgr >> 10) & 0x1F) / 31.0f;   /* B = bits[14:10] */
-                        }
-                    }
-                    cm->dbg_mesh_ptr = oba;
-                    if (have_mat) {
-                        memcpy(cm->matrix, cur_mat, sizeof(cm->matrix));
-                        /* Homebrew geometry is camera space with +z forward (GEO
-                         * projects screen = focal*x/z); the GL renderer looks down -z,
-                         * so negate the whole Z-output row (row 2 = matrix[8..11]). */
-                        cm->matrix[8]  = -cur_mat[8];
-                        cm->matrix[9]  = -cur_mat[9];
-                        cm->matrix[10] = -cur_mat[10];
-                        cm->matrix[11] = -cur_mat[11];
-                        cm->has_matrix = true;
-                        cm->dbg_have_mat = 1;
-                        cm->dbg_pos[0] = cur_mat[3];
-                        cm->dbg_pos[1] = cur_mat[7];
-                        cm->dbg_pos[2] = -cur_mat[11];
-                    }
-                    /* Near-plane cull: objects at/behind the camera (z >= ~0) project
-                     * to infinity and streak across the screen (e.g. the starfield
-                     * passing the camera). Keep only those safely in front. */
-                    if (!have_mat || cm->matrix[11] <= -1.0f)
-                        geo->captured_count++;
-                }
-            }
-        } else if ((cmd == 9 || cmd == 0x19) && p + 2u < buff_words) {
-            /* FOCAL: fx, fy in pixels; the GEO puts y at fy*y/z from the window's
-             * centre. The host's perspective puts it at 192*cot(fov/2)*y/z on the
-             * 384-line screen, and x at the same scale (aspect 496/384), so this
-             * fov is the board's projection when fx == fy (m2-sdk's geo_focal(280,
-             * 280): 68.9 degrees). */
-            float fy;
-            memcpy(&fy, &buff_ram[p + 2], 4);
-            if (geo->fov_auto && fy > 1.0f)
-                geo->fov_deg = 2.0f * atanf(192.0f / fy) * (180.0f / 3.14159265f);
-        } else if (cmd == 0xa && p + 3u < buff_words) {
-            /* LIGHT (0x05000A0A): 3 floats (x,y,z). The GEO lights each face by
-             * normal·light; mirror it into the renderer's light dir so the flat
-             * panels shade like the HLE. Camera space — negate z to match the
-             * Z-row negation the host (−z forward) applies to the geometry. */
-            float lx, ly, lz;
-            memcpy(&lx, &buff_ram[p + 1], 4);
-            memcpy(&ly, &buff_ram[p + 2], 4);
-            memcpy(&lz, &buff_ram[p + 3], 4);
-            g_light_dir[0] = lx; g_light_dir[1] = ly; g_light_dir[2] = -lz;
-        } else if (cmd == 2 || cmd == 0x12) {
-            if (!warned_direct) {
-                LOG_WARN("geo3d displaylist: direct_data (cmd 2) not yet decoded; stopping walk");
-                warned_direct = 1;
-            }
-            break;   /* variable-length inline geometry — can't skip reliably yet */
-        }
+        if (!geo3d__dl_command(&w, p, cmd)) break;
         p += 1u + (uint32_t)geo3d__dl_args(buff_ram, buff_words, p, cmd);
     }
 }
@@ -2976,6 +3023,41 @@ static inline void geo3d_lerp_matrix(float *out, const float *cur, const float *
     out[11] = prev[11] + (cur[11] - prev[11]) * lerp_t;
 }
 
+/* One capture of the live list, unless the filter leaves it out. */
+static inline void geo3d_wire_capture(const geo3d_state_t *geo, const geo3d_models_t *md,
+                                      int i, float lerp_t) {
+    if (geo->isolate_index >= 0) {
+        if (i != geo->isolate_index) return;
+    } else if (geo->filter_enabled) {
+        if (i < geo->filter_min || i > geo->filter_max) return;
+    }
+    const captured_model_t *cm = &geo->captured[i];
+    const float *mat = (geo->use_matrix && cm->has_matrix) ? cm->matrix : NULL;
+
+    /* Interpolate translation with the previous frame if available. */
+    float lerped[12];
+    if (mat && lerp_t > 0.0f && lerp_t < 1.0f
+            && i < geo->captured_prev_count
+            && geo->captured_prev[i].has_matrix
+            && geo->captured_prev[i].model_idx == cm->model_idx) {
+        geo3d_lerp_matrix(lerped, mat, geo->captured_prev[i].matrix, lerp_t);
+        mat = lerped;
+    }
+
+    geo3d_decode_model(md, cm->model_idx, mat, cm->color[0], cm->color[1], cm->color[2]);
+}
+
+/* Single-model browser: derive colour from the model-table material ptr. */
+static inline void geo3d_wire_browser(const geo3d_state_t *geo, const geo3d_models_t *md) {
+    float cr = 0.0f, cg = 1.0f, cb = 0.0f;
+    uint32_t toff = md->table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
+    if (md->main_data && (size_t)toff + MODEL_ENTRY_SIZE <= md->main_data_size) {
+        uint32_t mat_ptr = read_u32_le(md->main_data + toff + 4);
+        material_ptr_to_color(mat_ptr, &cr, &cg, &cb);
+    }
+    geo3d_decode_model(md, geo->model_index, NULL, cr, cg, cb);
+}
+
 static inline void geo3d_build_wireframes(geo3d_state_t *geo, const geo3d_models_t *md,
                                            float lerp_t,
                                            float cam_x, float cam_y, float cam_z) {
@@ -2995,36 +3077,10 @@ static inline void geo3d_build_wireframes(geo3d_state_t *geo, const geo3d_models
     }
 
     if (geo->use_captures) {
-        for (int i = 0; i < geo->captured_count; i++) {
-            if (geo->isolate_index >= 0) {
-                if (i != geo->isolate_index) continue;
-            } else if (geo->filter_enabled) {
-                if (i < geo->filter_min || i > geo->filter_max) continue;
-            }
-            const captured_model_t *cm = &geo->captured[i];
-            const float *mat = (geo->use_matrix && cm->has_matrix) ? cm->matrix : NULL;
-
-            /* Interpolate translation with the previous frame if available. */
-            float lerped[12];
-            if (mat && lerp_t > 0.0f && lerp_t < 1.0f
-                    && i < geo->captured_prev_count
-                    && geo->captured_prev[i].has_matrix
-                    && geo->captured_prev[i].model_idx == cm->model_idx) {
-                geo3d_lerp_matrix(lerped, mat, geo->captured_prev[i].matrix, lerp_t);
-                mat = lerped;
-            }
-
-            geo3d_decode_model(md, cm->model_idx, mat, cm->color[0], cm->color[1], cm->color[2]);
-        }
+        for (int i = 0; i < geo->captured_count; i++)
+            geo3d_wire_capture(geo, md, i, lerp_t);
     } else {
-        /* Single-model browser: derive colour from the model-table material ptr. */
-        float cr = 0.0f, cg = 1.0f, cb = 0.0f;
-        uint32_t toff = md->table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
-        if (md->main_data && (size_t)toff + MODEL_ENTRY_SIZE <= md->main_data_size) {
-            uint32_t mat_ptr = read_u32_le(md->main_data + toff + 4);
-            material_ptr_to_color(mat_ptr, &cr, &cg, &cb);
-        }
-        geo3d_decode_model(md, geo->model_index, NULL, cr, cg, cb);
+        geo3d_wire_browser(geo, md);
     }
 }
 
