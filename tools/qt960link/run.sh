@@ -3,6 +3,7 @@
 #
 #   tools/qt960link/run.sh            # windows on $DISPLAY (:1, the container's VNC)
 #   HEADLESS=300 tools/qt960link/run.sh   # no windows; stop after 300 checks
+#   HOST=1 tools/qt960link/run.sh     # load and relay with qtlink_host.py, as on the real board
 #
 # Left: a Model 2B running m2-kernel, its serial port on TCP through m2-kernel's own
 # bridge (m2k_serial.lua). Right: a QT960 (i960KB) at NINDY's prompt; qt960_link.lua types
@@ -75,6 +76,18 @@ if [ -z "$HEADLESS" ]; then
 fi
 
 cd "$WORK/q"
+if [ -n "$HOST" ]; then
+    # The real board's path: the QT960's serial port on TCP (qt960_wire.lua), and
+    # qtlink_host.py on it, as it would be on a COM port.
+    QTWIRE_PORT=$((PORT + 1)) "$MAME" qt960 -rompath "$ROMS" -skip_gameinfo $VIDEO \
+        -cfg_directory . -nvram_directory . -snapshot_directory . \
+        -autoboot_script "$HERE/qt960_wire.lua" > "$WORK/qt960.log" 2>&1 &
+    QPID=$!
+    trap 'kill $KPID $QPID 2>/dev/null; sleep 1 2>/dev/null; kill -9 $KPID $QPID 2>/dev/null; true' EXIT INT TERM
+    python3 "$HERE/qtlink_host.py" --board tcp:127.0.0.1:$((PORT + 1)) \
+        --m2k tcp:127.0.0.1:$PORT --bin "$WORK/qtlink.bin" ${HEADLESS:+--checks $HEADLESS --quiet}
+    exit
+fi
 QTLINK_BIN="$WORK/qtlink.bin" QTLINK_M2K=127.0.0.1:$PORT \
     "$MAME" qt960 -rompath "$ROMS" -skip_gameinfo $VIDEO \
     -cfg_directory . -nvram_directory . -snapshot_directory . \

@@ -8,3 +8,4 @@ packaging/libretro/*.sh text eol=lf
 tools/*.sh text eol=lf
 tools/qt960link/*.sh text eol=lf
 tools/qt960link/qtlink/*.sh text eol=lf
+tools/qt960link/*.py text eol=lf

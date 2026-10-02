@@ -9,6 +9,7 @@ claude_mame's fork. Each MAME has its own window, so you can watch the link come
 ```
 tools/qt960link/run.sh                   # two windows on $DISPLAY (:1, the container's VNC)
 HEADLESS=300 tools/qt960link/run.sh      # no windows; stop after 300 checks
+HOST=1 tools/qt960link/run.sh            # the real board's path: qtlink_host.py on the serial line
 ```
 
 ## Run it yourself
@@ -105,10 +106,44 @@ The fork's `shared` branch has everything. It needs three fixes beyond the qt960
 
 ## On the real board
 
-`qtlink.bin` is built for the board as it is: it loads at 0x10100000 through NINDY's `mo`
-or a download, and starts with `go 10100000`. On the PC end of the real cable, something
-has to do what `qt960_link.lua` does in relay mode. It must carry each `>` line to the
-Model 2B (a real board's serial port, or MAME's `m2k_serial.lua` over TCP) and type each
-reply back as a `<` line. That script is not written yet. The reply timeout is generous
-(`SPINS_BYTE`, a few seconds on the board), because the two ends need not run at the same
-speed.
+No flash upload is needed. qtlink runs from the QT960's SRAM at 0x10100000, and the PC
+types it in over the serial cable through NINDY's `mo`, the same way `qt960_link.lua` does
+in MAME. It is gone at power-off, so the PC loads it again each time. That is about a
+minute at NINDY's 9600 baud (1652 words). NINDY's `df` could put a program in the board's
+flash, but qtlink is linked for SRAM, and the PC has to stay on the cable to relay the
+Model 2B's frames anyway. Flash would gain nothing.
+
+`qtlink_host.py` is the program for that PC. It waits for NINDY's `=>`, loads qtlink with
+`mo`, types `go 10100000`, and relays: each `>A5...` line goes to the Model 2B as bytes, and
+each reply is typed back as `<5A...`.
+
+1. Build the image: `tools/qt960link/qtlink/build.sh` (i960-elf toolchain), or take `qtlink.bin` from
+   `$WORK` after any `run.sh`.
+2. Cable the QT960's serial port to the PC (9600 8N1, no flow control). For a COM port the
+   script needs pyserial (`pip install pyserial`).
+3. Start the Model 2B end. For now that is MAME, from the dev container or any machine with
+   the shared MAME: `M2K_PORT=7960 mame m2kernel -autoboot_script m2k_serial.lua` (see
+   `run.sh`). A real Model 2B running m2-kernel would be a second serial port instead.
+4. Run the host, then power on or reset the QT960 (or press Enter at its prompt):
+
+   ```
+   python3 tools/qt960link/qtlink_host.py --board COM3 --m2k tcp:127.0.0.1:7960 --bin qtlink.bin
+   python3 tools/qt960link/qtlink_host.py --board /dev/ttyUSB0 --m2k /dev/ttyUSB1
+   ```
+
+   The board's output scrolls by as it would on a terminal, then the check lines.
+   `--checks N` stops after N checks (exit status 1 on any DIFF), `--quiet` prints only the
+   count, the DIFF lines and the summary, `--no-load` skips the `mo` when qtlink is already
+   in SRAM. qtlink never returns to NINDY, so reset the board to stop it.
+
+The same program drives the emulated QT960. `qt960_wire.lua` puts the QT960's serial port
+on TCP (`QTWIRE_PORT`, 7961) and does nothing else, so the board in MAME sees what a real one
+on a cable would. `HOST=1 tools/qt960link/run.sh` runs the link that way (and
+`HOST=1 HEADLESS=30` with no windows: 30 checks, 0 differences). Nothing on that path is
+specific to MAME, so it is the test of the host program before it meets the board.
+
+Not yet checked on hardware: the real board's memory map (the driver's SRAM is 2 MB at
+0x10000000) and the 82510's registers. qtlink polls LSR at 0x20000014 and reads and writes
+data at 0x20000000, as NINDY leaves the chip, bank 0. If either differs, the `mo` load still
+works (it is NINDY's), and qtlink is what needs changing. The reply timeout (`SPINS_BYTE`,
+a few seconds on the board) is generous, because the two ends need not run at the same speed.
