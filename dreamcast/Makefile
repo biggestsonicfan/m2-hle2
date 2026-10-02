@@ -1,12 +1,13 @@
 # The Dreamcast build (Pinboard #340), with KallistiOS: source its environ.sh,
 # then from the repo root
 #
-#   make -C dreamcast [VENDOR=<a vendor/ with miniz and sokol>] [OUT=<dir>]
+#   make -C dreamcast [VENDOR=<a vendor/ with sokol>] [OUT=<dir>]
 #
 # OUT (default ../build_dc) gets m2hle2.elf and 1ST_READ.BIN; mkdisc.sh makes a
-# disc of them and a pack (m2pack). Only the board is compiled for the SH-4:
-# the board and the profiles are headers, main_dc.c is the one unit, and
-# miniz comes along because the profiles' zip loaders are in the table.
+# disc of them and the PS3 ROM files. Only the board is compiled for the SH-4:
+# the board and the profiles are headers and main_dc.c is the one unit. No zip
+# is ever opened, so miniz stays out (M2HLE_NO_ZIP). Sound (dc_sound.h) needs
+# SDL2 for KallistiOS (GPF's dreamcastSDL2, in $(KOS_BASE)/addons; README.md).
 
 REPO   := ..
 VENDOR ?= $(REPO)/vendor
@@ -18,28 +19,21 @@ endif
 
 CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address \
           -DM2HLE_VERSION='"dc"' -DM2HLE_DEV_TOOLS=0 \
-          -DGEO_CAPTURE_SIZE=4096 -DLOG_MAX_LINES=64 -DNDEBUG \
+          -DGEO_CAPTURE_SIZE=4096 -DLOG_MAX_LINES=64 -DNDEBUG -DM2HLE_NO_ZIP \
           -I$(REPO)/src -I$(REPO)/src/board -I$(REPO)/src/core -I$(REPO)/src/ui \
           -I$(REPO)/src/profiles -I$(REPO)/src/net -I. \
-          -I$(VENDOR)/sokol -I$(VENDOR)/miniz -I$(OUT)/gen
+          -I$(VENDOR)/sokol
 
-MINIZ  := miniz miniz_tdef miniz_tinfl miniz_zip
-OBJS   := $(OUT)/main_dc.o $(MINIZ:%=$(OUT)/%.o)
+OBJS   := $(OUT)/main_dc.o
 
 all: $(OUT)/1ST_READ.BIN
 
-$(OUT)/gen/miniz_export.h:
-	mkdir -p $(OUT)/gen
-	printf '#ifndef MINIZ_EXPORT_H\n#define MINIZ_EXPORT_H\n#define MINIZ_EXPORT\n#define MINIZ_NO_EXPORT\n#endif\n' > $@
-
-$(OUT)/main_dc.o: main_dc.c dc_pager.h dc_pack.h $(wildcard $(REPO)/src/*/*.h) $(OUT)/gen/miniz_export.h
-	kos-cc $(CFLAGS) -c $< -o $@
-
-$(OUT)/%.o: $(VENDOR)/miniz/%.c $(OUT)/gen/miniz_export.h
+$(OUT)/main_dc.o: main_dc.c dc_pager.h dc_layout.h dc_sound.h $(wildcard $(REPO)/src/*/*.h)
+	mkdir -p $(OUT)
 	kos-cc $(CFLAGS) -c $< -o $@
 
 $(OUT)/m2hle2.elf: $(OBJS)
-	kos-cc -o $@ $(OBJS) -lpthread -lm
+	kos-cc -o $@ $(OBJS) -lSDL2 -lpthread -lm
 
 # A GD-ROM image boots its program unscrambled (a CD-R would need scramble).
 $(OUT)/1ST_READ.BIN: $(OUT)/m2hle2.elf

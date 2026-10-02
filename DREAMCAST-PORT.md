@@ -9,8 +9,9 @@ Most of them apply to any small target, the ARC-S included.
 
 STF boots under Flycast through BACKUP RAM IS BROKEN, the SEGA logo, the title
 and attract, and shows FREE PLAY. Only the tile layers are drawn. There is no
-3D (the PowerVR is D2), no sound board (the AICA is D3) and no netplay. The
-pad is mapped but untested.
+3D (the PowerVR is D2) and no netplay. Sound is Sega's console approach, ADX
+cues behind the sound code (#342, below), not the sound board. The pad is
+mapped but untested.
 
 Figures from Flycast's libretro core with the HLE BIOS (emulated time, which is
 approximate) at frame 1675:
@@ -29,9 +30,15 @@ approximate) at frame 1675:
   (bus, COP tables, 3D decode, 68000). STF touches 11.2 MB in all, and the
   biggest 60-frame window is ~2 MB. That makes demand paging viable, where
   overlays or a cut-down set would not have been.
-- **Dedupe the ROM.** `m2pack` stores each distinct page once, so mirrors,
-  repeats and zero pages cost one table entry each. 21120 pages become 10005
-  stored (39.1 MB).
+- **Read the ROM files as they ship (#342).** The PS3 release's `stf_rom`
+  files are the board's address spaces, already joined and de-interleaved
+  (`dc_layout.h`), so the disc carries them unchanged: no zip on the SH-4 and
+  no pack step. ROM_EP.BIN is the 1 MB mirror the program repeats 16 times;
+  the layout maps it 16 times instead of storing it. What the PS3 files lack:
+  texture ROM 0x700000-0x7FFFFF (the UV streams of models 4319-5102) and
+  0xC00000-0xFFFFFF (never read), the copro tables (the board falls back to
+  libm) and the sound CPU's program and samples (no sound board here). The
+  older pack (`m2pack`, 39.1 MB deduplicated from the MAME set) is gone.
 - **Size static buffers per build.** The desktop's debug rings were most of
   the 9.2 MB of BSS: `GEO_CAPTURE_SIZE` (1 MB, only the MCP bridge reads it)
   and `LOG_MAX_LINES` (256 KB) can now be overridden. A handheld build gets the
@@ -79,6 +86,26 @@ stale pages, with no error anywhere.
 4. **It never raises the first-write (D bit) trap.** Writable ROM pages
    (STF writes into main_data) are checksummed on load and checked before they
    are evicted. On hardware the trap (`pg_first_write`) also catches them.
+
+## Sound: Sega's console way (#342, dreamcast/dc_sound.h)
+
+- **No sound board, by design.** The 68000 and the SCSP would cost more than
+  the i960 already does. Sega's console DLL has the same answer: it traps
+  `sound_request_special` (`0x3F268`) and plays an ADX2 cue for the code in g0
+  (CLAUDE.md, "Sound board"). The port does the same with Sega's own table,
+  read out of the PC DLL over the Ghidra bridge (`0x180126a70`, 123 entries;
+  the eight `0xAE14xx` stop codes are a switch in `FUN_180004b80`).
+- **The PS3 bank is HCA; the Dreamcast gets ADX in an AFS**, as Sega's own
+  Dreamcast games shipped music (`tools/mksound.py`). HCA's loop chunk gives
+  the loop in blocks; less the encoder delay it is the ADX v3 loop in samples.
+  Music is resampled 48 → 44.1 kHz so the mix needs no resampler for it.
+  The host test of `dc_sound.h` decodes bit for bit what ffmpeg does.
+- **The audio callback must never read the disc.** The pager reads it with
+  the GD-ROM syscalls from the TLB miss exception; a second reader would
+  collide. Music is read in the main loop into a 128 KB ring (2.6 s); effects
+  (1.1 MB) are loaded at boot, through KOS's driver, before the pager is up.
+- **SDL2 for KOS is GPF's fork** (`dreamcastSDL2`); kos-ports only has SDL
+  1.2. Its audio driver feeds KOS's `snd_stream` at any rate in S16.
 
 ## Toolchain and runtime traps
 

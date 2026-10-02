@@ -10,9 +10,10 @@
  * and no reader had to change (tests/rom_touch.c measured what it reads).
  *
  * Windows:
- *   - ROM: every region of the pack (dc_pack.h), laid out in its table order,
- *     so window page i is table entry i. Frames are evicted by a clock: a frame
- *     whose page took a TLB refill since the hand last passed is kept.
+ *   - ROM: every region of the layout (dc_layout.h), one after another. A page
+ *     is two sectors of one of the ROM files on the disc, or a fill byte.
+ *     Frames are evicted by a clock: a frame whose page took a TLB refill
+ *     since the hand last passed is kept.
  *   - anonymous: zero until first touched, then pinned (vid_ext_ram, 7 MB of
  *     which a game uses a little). pg_anon_clear() zeroes them for a reset.
  *
@@ -38,12 +39,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "dc_pack.h"
+#include "dc_layout.h"
 
 #define PG_VA_BASE    0x10000000u
 #define PG_SHIFT      12
-#define PG_SRC_ANON   0xFFFFFFFEu
+#define PG_SRC_ANON   0xFFFFFFFEu    /* src: anonymous; below 0x100: a fill byte; else a FAD */
 #define PG_MAX_ANON   8
+#define PG_MAX_PART   32             /* pages a file ends inside */
 
 typedef struct {
     uint32_t pteh, ptel;             /* what gen_tlb_miss loads (mmupage_t's tail) */
@@ -57,17 +59,18 @@ typedef struct {
 } pg_frame_t;
 
 typedef struct {
-    dc_pack_hdr_t     hdr;
-    dc_pack_region_t  rg[DC_PACK_REGIONS];
-    uint32_t         *src;           /* per window page: pack page, DC_PACK_ZERO, PG_SRC_ANON */
+    const dc_layout_t *lay;
+    uint32_t          first[DC_REGIONS];   /* each region's first window page */
+    uint32_t         *src;           /* per window page: FAD, fill byte or PG_SRC_ANON */
+    struct { uint32_t v; uint16_t valid; uint8_t fill; } part[PG_MAX_PART];
+    int               npart;
     uint16_t         *frame;         /* per window page: frame + 1, 0 = not resident */
     uint32_t          npages;        /* window pages (ROM + anonymous) */
-    uint32_t          nrom;          /* the first nrom are the pack's */
+    uint32_t          nrom;          /* the first nrom are the ROM's */
     pg_frame_t       *fr;
     uint8_t          *pool;          /* P1 address of frame 0 (16 KB aligned) */
     uint32_t          nframes;
     uint32_t          hand[4];       /* clock hand per colour */
-    uint32_t          data_fad;      /* FAD of the pack's stored page 0 */
     uint32_t          wr_lo, wr_hi;  /* window pages the board may write (main_data) */
     mmucontext_t     *cxt;
     struct { uint32_t va, size; } anon[PG_MAX_ANON];
@@ -121,7 +124,7 @@ static void pg_tlb_flush(void) {
 static uint32_t pg_sum(const uint8_t *p) {
     const uint32_t *w = (const uint32_t *)p;
     uint32_t h = 0;
-    for (int i = 0; i < DC_PACK_PAGE / 4; i++) h = (h << 5 | h >> 27) ^ w[i];
+    for (int i = 0; i < DC_PAGE / 4; i++) h = (h << 5 | h >> 27) ^ w[i];
     return h;
 }
 
@@ -133,7 +136,7 @@ static bool pg_written(pg_frame_t *f) {
     pager_t *g = &g_pg;
     if (f->dirty) return true;
     if (f->vpage < g->wr_lo || f->vpage >= g->wr_hi) return false;
-    if (pg_sum(g->pool + (uint32_t)(f - g->fr) * DC_PACK_PAGE) == f->sum) return false;
+    if (pg_sum(g->pool + (uint32_t)(f - g->fr) * DC_PAGE) == f->sum) return false;
     f->dirty = f->pinned = 1;
     g->rom_writes++;
     return true;
@@ -173,21 +176,23 @@ static mmupage_t *pg_map(mmucontext_t *cxt, int virtpage) {
         pg_tlb_flush();
         g->evictions++;
     }
-    uint8_t *p1 = g->pool + (uint32_t)fi * DC_PACK_PAGE;
+    uint8_t *p1 = g->pool + (uint32_t)fi * DC_PAGE;
     uint32_t src = g->src[v];
-    if (src == DC_PACK_ZERO) {
-        memset(p1, 0, DC_PACK_PAGE);
+    if (src < 0x100u) {
+        memset(p1, (int)src, DC_PAGE);
         g->zero_fills++;
     } else if (src == PG_SRC_ANON) {
-        memset(p1, 0, DC_PACK_PAGE);
+        memset(p1, 0, DC_PAGE);
         f->pinned = 1;
         g->anon_fills++;
     } else {
         uint64_t t0 = timer_ns_gettime64();
-        if (pg_read(p1, g->data_fad + src * (DC_PACK_PAGE / DC_PACK_SECTOR), DC_PACK_PAGE / DC_PACK_SECTOR) != 0) {
+        if (pg_read(p1, src, DC_PAGE / DC_SECTOR) != 0) {
             g->read_errors++;
-            memset(p1, 0xA5, DC_PACK_PAGE);
+            memset(p1, 0xA5, DC_PAGE);
         }
+        for (int i = 0; i < g->npart; i++)       /* a file's last page: the rest is fill */
+            if (g->part[i].v == v) memset(p1 + g->part[i].valid, g->part[i].fill, DC_PAGE - g->part[i].valid);
         g->read_ns += timer_ns_gettime64() - t0;
         g->loads++;
     }
@@ -291,44 +296,55 @@ static void pg_mmu_on(void) {
     irq_restore(old);
 }
 
-/* Read the pack's header and table, make the ROM windows and the frame pool.
- * anon_bytes reserves window space for pg_anon(). */
-static int pg_init(const char *file, uint32_t cache_bytes, uint32_t anon_bytes) {
+/* Lay the regions out as windows, every page pointing at its sectors, and
+ * make the frame pool. anon_bytes reserves window space for pg_anon(). */
+static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_bytes) {
     pager_t *g = &g_pg;
-    static uint8_t sec[2048] __attribute__((aligned(32)));
-    uint32_t fsize = 0;
-    uint32_t fad = pg_find_file(file, &fsize);
-    if (!fad) { printf("pager: %s not on the disc\n", file); return -1; }
-    if (cdrom_read_sectors(sec, fad, 1) != ERR_OK) return -1;
-    memcpy(&g->hdr, sec, sizeof g->hdr);
-    if (memcmp(g->hdr.magic, DC_PACK_MAGIC, 8) || g->hdr.page_size != DC_PACK_PAGE
-        || g->hdr.nregions != DC_PACK_REGIONS) {
-        printf("pager: %s is not a pack\n", file);
-        return -1;
+    g->lay = lay;
+    g->nrom = 0;
+    for (int r = 0; r < DC_REGIONS; r++) {
+        g->first[r] = g->nrom;
+        g->nrom += (lay->rg[r].size + DC_PAGE - 1) / DC_PAGE;
     }
-    memcpy(g->rg, sec + sizeof g->hdr, sizeof g->rg);
-
-    g->nrom   = g->hdr.npages;
-    g->npages = g->nrom + anon_bytes / DC_PACK_PAGE + PG_MAX_ANON * 4;
-    uint32_t head = (uint32_t)(sizeof g->hdr + sizeof g->rg) + g->nrom * 4u;
-    uint32_t hsec = (head + 2047) / 2048;
-    uint8_t *tmp = memalign(32, hsec * 2048);
+    g->npages = g->nrom + anon_bytes / DC_PAGE + PG_MAX_ANON * 4;
     g->src   = malloc(g->npages * 4u);
     g->frame = calloc(g->npages, 2);
-    if (!tmp || !g->src || !g->frame) return -1;
-    if (cdrom_read_sectors(tmp, fad, hsec) != ERR_OK) return -1;
-    memcpy(g->src, tmp + sizeof g->hdr + sizeof g->rg, g->nrom * 4u);
-    free(tmp);
+    if (!g->src || !g->frame) return -1;
     for (uint32_t i = g->nrom; i < g->npages; i++) g->src[i] = PG_SRC_ANON;
-    g->data_fad = fad + g->hdr.data_off / DC_PACK_SECTOR;
-    for (int r = 0; r < DC_PACK_REGIONS; r++)
-        if (!strcmp(g->rg[r].name, "main_data")) {
-            g->wr_lo = g->rg[r].first_page;
-            g->wr_hi = g->wr_lo + (g->rg[r].size + DC_PACK_PAGE - 1) / DC_PACK_PAGE;
+    for (int r = 0; r < DC_REGIONS; r++) {
+        const dc_region_t *rg = &lay->rg[r];
+        uint32_t n = (rg->size + DC_PAGE - 1) / DC_PAGE;
+        for (uint32_t i = 0; i < n; i++) g->src[g->first[r] + i] = rg->fill;
+        for (int k = 0; k < DC_MAX_SEGS && rg->seg[k].file; k++) {
+            const dc_seg_t *sg = &rg->seg[k];
+            uint32_t fsize = 0, fad = pg_find_file(sg->file, &fsize);
+            if (!fad) { printf("pager: %s not on the disc\n", sg->file); return -1; }
+            uint32_t len = sg->len;
+            if (sg->file_off >= fsize) len = 0;
+            else if (len > fsize - sg->file_off) len = fsize - sg->file_off;
+            uint32_t reps = sg->count ? sg->count : 1;
+            for (uint32_t c = 0; c < reps; c++)
+                for (uint32_t o = 0; o < len; o += DC_PAGE) {
+                    uint32_t ro = sg->reg_off + c * sg->period + o;
+                    if (ro >= rg->size) break;
+                    uint32_t v = g->first[r] + ro / DC_PAGE;
+                    g->src[v] = fad + (sg->file_off + o) / DC_SECTOR;
+                    if (len - o < DC_PAGE && g->npart < PG_MAX_PART) {
+                        g->part[g->npart].v = v;
+                        g->part[g->npart].valid = (uint16_t)(len - o);
+                        g->part[g->npart].fill = rg->fill;
+                        g->npart++;
+                    }
+                }
         }
+        if (!strcmp(rg->name, "main_data")) {
+            g->wr_lo = g->first[r];
+            g->wr_hi = g->wr_lo + n;
+        }
+    }
 
-    g->nframes = (cache_bytes / DC_PACK_PAGE) & ~3u;
-    g->pool = memalign(16384, g->nframes * DC_PACK_PAGE);
+    g->nframes = (cache_bytes / DC_PAGE) & ~3u;
+    g->pool = memalign(16384, g->nframes * DC_PAGE);
     g->fr   = calloc(g->nframes, sizeof *g->fr);
     if (!g->pool || !g->fr) return -1;
     for (uint32_t i = 0; i < g->nframes; i++) g->fr[i].vpage = ~0u;
@@ -340,17 +356,17 @@ static int pg_init(const char *file, uint32_t cache_bytes, uint32_t anon_bytes) 
     mmu_use_table(g->cxt);
     mmu_map_set_callback(pg_map);
     irq_set_handler(EXC_INITIAL_PAGE_WRITE, pg_first_write, NULL);
-    printf("pager: %s at FAD %u, %u pages (%u stored), %u KB cache\n", file, (unsigned)fad,
-           (unsigned)g->nrom, (unsigned)g->hdr.nunique, (unsigned)(g->nframes * 4));
+    printf("pager: %s, %u ROM pages, %u KB cache\n", lay->profile,
+           (unsigned)g->nrom, (unsigned)(g->nframes * 4));
     return 0;
 }
 
-/* The window of the pack region named `name`, or NULL. */
+/* The window of the region named `name`, or NULL. */
 static uint8_t *pg_region(const char *name, size_t *size) {
-    for (int r = 0; r < DC_PACK_REGIONS; r++)
-        if (!strcmp(g_pg.rg[r].name, name)) {
-            if (size) *size = g_pg.rg[r].size;
-            return (uint8_t *)(uintptr_t)(PG_VA_BASE + (g_pg.rg[r].first_page << PG_SHIFT));
+    for (int r = 0; r < DC_REGIONS; r++)
+        if (!strcmp(g_pg.lay->rg[r].name, name)) {
+            if (size) *size = g_pg.lay->rg[r].size;
+            return (uint8_t *)(uintptr_t)(PG_VA_BASE + (g_pg.first[r] << PG_SHIFT));
         }
     return NULL;
 }
@@ -362,8 +378,8 @@ static uint8_t *pg_anon(int idx, uint32_t size) {
     if (idx < 0 || idx >= PG_MAX_ANON) return NULL;
     if (idx < g->nanon) return g->anon[idx].size == size ? (uint8_t *)(uintptr_t)g->anon[idx].va : NULL;
     uint32_t start = g->nrom;
-    for (int i = 0; i < g->nanon; i++) start += (g->anon[i].size + DC_PACK_PAGE - 1) / DC_PACK_PAGE + 4;
-    if (start + (size + DC_PACK_PAGE - 1) / DC_PACK_PAGE > g->npages) return NULL;
+    for (int i = 0; i < g->nanon; i++) start += (g->anon[i].size + DC_PAGE - 1) / DC_PAGE + 4;
+    if (start + (size + DC_PAGE - 1) / DC_PAGE > g->npages) return NULL;
     g->anon[idx].va = PG_VA_BASE + (start << PG_SHIFT);
     g->anon[idx].size = size;
     g->nanon = idx + 1;
@@ -375,9 +391,9 @@ static void pg_anon_clear(int idx) {
     pager_t *g = &g_pg;
     if (idx < 0 || idx >= g->nanon) return;
     uint32_t v0 = (g->anon[idx].va - PG_VA_BASE) >> PG_SHIFT;
-    uint32_t n = (g->anon[idx].size + DC_PACK_PAGE - 1) / DC_PACK_PAGE;
+    uint32_t n = (g->anon[idx].size + DC_PAGE - 1) / DC_PAGE;
     for (uint32_t v = v0; v < v0 + n; v++)
-        if (g->frame[v]) memset(g->pool + (uint32_t)(g->frame[v] - 1) * DC_PACK_PAGE, 0, DC_PACK_PAGE);
+        if (g->frame[v]) memset(g->pool + (uint32_t)(g->frame[v] - 1) * DC_PAGE, 0, DC_PAGE);
 }
 
 /* Forget every write to a ROM page, for a board reset: elsewhere the install

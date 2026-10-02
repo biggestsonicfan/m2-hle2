@@ -5,10 +5,11 @@
  * Milestone D1: the board runs, the tile layers are on screen, the pad is mapped,
  * and the numbers that decide the rest are printed (dbgio and the screen):
  * board fps, the slice's and the compose's time, and the pager's traffic. No
- * 3D (the PowerVR is D2), no sound (the AICA is D3), no netplay.
+ * 3D (the PowerVR is D2), no netplay. Sound is Sega's console way, a trap at
+ * the game's sound call playing ADX cues off the disc (dc_sound.h, #342).
  *
- * The disc holds 1ST_READ.BIN and M2PACK.BIN (m2pack.c's output); see
- * dreamcast/README.md for the build and the disc image.
+ * The disc holds 1ST_READ.BIN and the PS3 release's ROM files as they ship
+ * (dc_layout.h); see dreamcast/README.md for the build and the disc image.
  */
 /* net/ first, as in main.c: net_socket.h owns the socket include order. */
 #include "net/netplay.h"
@@ -29,6 +30,7 @@
 #include "tile_renderer.h"
 
 #include "dc_pager.h"
+#include "dc_sound.h"
 
 KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM);
 
@@ -41,7 +43,7 @@ static uint16_t         pen565[TILE_PEN_NONE + 1];
 
 /* ---- The ROM, as windows ---------------------------------------------------- */
 
-/* memory.h's g_mem_window: the board's MAIN_DATA and XTRA_DATA are the pack's
+/* memory.h's g_mem_window: the board's MAIN_DATA and XTRA_DATA are the ROM's
  * main_data (STF's XTRA_DATA is its second 16 MB, sfight_install), and
  * VID_EXT_RAM is anonymous. Everything else the board allocates. */
 static uint8_t *dc_window(const char *name, size_t size) {
@@ -69,9 +71,30 @@ static int dc_romset(void) {
     }
     rs.loaded = rs.maincpu != NULL;
     for (size_t i = 0; i < g_profile_count; i++)
-        if (!strcmp(g_profiles[i]->id, g_pg.hdr.profile)) g_active_profile = g_profiles[i];
-    if (!g_active_profile) { printf("no profile %s in this build\n", g_pg.hdr.profile); return -1; }
+        if (!strcmp(g_profiles[i]->id, g_pg.lay->profile)) g_active_profile = g_profiles[i];
+    if (!g_active_profile) { printf("no profile %s in this build\n", g_pg.lay->profile); return -1; }
     return rs.loaded ? 0 : -1;
+}
+
+/* sound_request_special (0x3F268): the code in g0 goes to dc_sound.h and the
+ * function is skipped, so the sound board is never written (Sega's DLL traps
+ * it the same way). The profiles are const: the frontend runs a copy of the
+ * active one with the trap added. */
+static int dc_hook_sound(i960_cpu_t *c, memory_bus_t *b) {
+    (void)b;
+    ds_code(c->globals.g[0]);
+    hle_ret(c);
+    return 0;
+}
+
+static game_profile_t dc_profile;
+
+static void dc_add_sound_hook(void) {
+    if (strcmp(g_active_profile->id, "sfight") || g_active_profile->hook_count >= HLE_HOOK_TABLE_MAX) return;
+    dc_profile = *g_active_profile;
+    dc_profile.hooks[dc_profile.hook_count++] =
+        (hle_hook_entry_t){ 0x0003F268, dc_hook_sound, "sound_request_special (dc_sound)" };
+    g_active_profile = &dc_profile;
 }
 
 /* web_install_board, less the sound board. */
@@ -162,19 +185,24 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
     vid_set_mode(DM_640x480, PM_RGB565);
     memset(vram_s, 0, 640 * 480 * 2);
-    dc_text(0, "m2-hle2 for Dreamcast: reading M2PACK.BIN");
+    dc_text(0, "m2-hle2 for Dreamcast: finding the ROM files");
+
+    /* Sound first: its effects stay in RAM, and it reads the disc through
+     * KOS's driver, which the pager forbids once it is up. */
+    bool sound = ds_init() == 0;
 
     /* The frame pool takes what the board leaves: texture RAM (2 MB), its
      * framebuffer (0.5 MB) and the heap's own use come out of what is free now. */
     uint32_t cache = 8u << 20;
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
         if ((p = memalign(16384, cache + (3u << 20)))) { free(p); break; }
-    if (pg_init("M2PACK.BIN", cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0) {
-        dc_text(1, "no usable M2PACK.BIN on the disc");
+    if (pg_init(&dc_layout_sfight, cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0) {
+        dc_text(1, "the disc lacks a ROM file (dc_layout.h)");
         for (;;) thd_sleep(1000);
     }
     g_mem_window = dc_window;
-    printf("set %s, profile %s, cache %u KB\n", g_pg.hdr.set, g_active_profile->id, (unsigned)(cache >> 10));
+    if (sound) dc_add_sound_hook();
+    printf("profile %s, cache %u KB\n", g_active_profile->id, (unsigned)(cache >> 10));
 
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
@@ -194,6 +222,7 @@ int main(int argc, char **argv) {
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
         if (g_emu_frames != f) dc_compose();
+        ds_pump();
         uint64_t t2 = timer_us_gettime64();
         us_slice += t1 - t0;
         us_draw  += t2 - t1;
@@ -214,6 +243,12 @@ int main(int argc, char **argv) {
                      (unsigned)pg_pinned(), (unsigned)g_pg.rom_writes, (unsigned)g_pg.read_errors);
             printf("%s\n", line);
             dc_text(1, line);
+            snprintf(line, sizeof line, "snd %s codes %u unk %u bgm %d ring %u KB under %u",
+                     g_ds.dev ? "on" : "off", (unsigned)g_ds.codes, (unsigned)g_ds.unknown,
+                     g_ds.bgm == 0xFFFF ? -1 : (int)g_ds.bgm,
+                     (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
+            printf("%s\n", line);
+            dc_text(2, line);
             t_last = t2; f_last = g_emu_frames; us_slice = us_draw = 0; slices = 0;
             loads_last = g_pg.loads; refills_last = g_pg.refills; read_last = g_pg.read_ns;
         }
@@ -223,16 +258,16 @@ int main(int argc, char **argv) {
     snprintf(line, sizeof line, "the i960 halted at %08lx, frame %u", (unsigned long)cpu.sfr.ip,
              (unsigned)g_emu_frames);
     printf("%s\n", line);
-    dc_text(2, line);
+    dc_text(3, line);
     snprintf(line, sizeof line, "pager: %u loads %u refills %u errors %u writes",
              (unsigned)g_pg.loads, (unsigned)g_pg.refills, (unsigned)g_pg.read_errors,
              (unsigned)g_pg.rom_writes);
-    dc_text(3, line);
+    dc_text(4, line);
     for (int i = 0, n = g_log.count < 12 ? g_log.count : 12; i < n; i++) {
         const char *s = g_log.lines[(g_log.count - n + i) % LOG_MAX_LINES];
         snprintf(line, sizeof line, "%.52s", s);
         printf("%s\n", s);
-        dc_text(5 + i, line);
+        dc_text(6 + i, line);
     }
     for (;;) thd_sleep(1000);
     return 0;
