@@ -63,7 +63,11 @@ int main(void) {
     /* ROM is read-only: write is ignored (data is NULL here so it reads 0). */
     uint64_t w_before = bus.writes;
     mem_write32(&bus, ROM_BASE + 0x0, 0x55555555);
+#if MEM_COUNT
     CHECK(bus.writes == w_before + 1, "RO write counted but not applied");
+#else
+    (void)w_before;   /* a build without the tallies (memory.h MEM_COUNT) */
+#endif
 
     /* Unmapped access bumps the unmapped counters (gap above IAC). */
     uint64_t um_before = bus.unmapped_reads;

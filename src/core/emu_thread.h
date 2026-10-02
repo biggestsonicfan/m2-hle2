@@ -423,10 +423,12 @@ static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
 
 /* After each instruction: count its cycles, and take an interrupt as soon as
  * one is pending and none is in service. The sound pin has its own rules
- * (emu_offer_sound) and is left to them. */
+ * (emu_offer_sound) and is left to them. The cycles since the last step are
+ * one instruction's, or a hook's run that ends before the horizon, so their
+ * difference is taken in 32 bits (irqt_count_t). */
 static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
     i960_cpu_t *cpu = ctx->cpu;
-    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
     if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FFu) && g_active_profile)
@@ -437,7 +439,7 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
  * (entering one bumps the attention word, which sends the loop slow) and the
  * profile is the slice's: two loads an instruction fewer. */
 static inline void emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, bool profile) {
-    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
     if ((g_irqt.intreq & g_irqt.intena & 0x03FFu) && profile)
@@ -557,7 +559,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * to memory per instruction that the compiler was not allowed to keep
      * in a register. The write-back is before anything reads it: the frame
      * edge and netplay_end_frame are both past the loop. */
-    uint64_t steps = 0;
+    uint32_t steps = 0;   /* at most max_steps; 32-bit for the SH-4 */
     /* NOT `!ctx->request_stop`. A slice charges a whole frame to the timers
      * above and to the sound board below whatever the i960 does in between,
      * so a stop that cut the i960 short left that frame to be run again on

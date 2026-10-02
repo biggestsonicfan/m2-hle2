@@ -181,6 +181,41 @@ stale pages, with no error anywhere.
 - **SDL2 for KOS is GPF's fork** (`dreamcastSDL2`); kos-ports only has SDL
   1.2. Its audio driver feeds KOS's `snd_stream` at any rate in S16.
 
+## The i960 on the SH-4 (#360)
+
+Three switches, all off for every other target, all byte-identical to them
+(`det_digest --cpu`, 4000 frames of attract: HEAD, the host build and a host
+build with the DC's switches give the same file). Measured as the run loop's
+emulated time over the same frames 0-599 of attract, Flycast's dynarec:
+
+| switch | frames 0-599 | |
+|---|---|---|
+| none | 55.9 s | |
+| `MEM_COUNT=0`: no 64-bit bus tallies | 54.3 s | -2.9% |
+| `MEM_LE_DIRECT=1`: aligned words in one load | 52.1 s | -6.8% |
+| `IRQT_COUNT_T=int32_t`: 32-bit timer counts | 51.0 s | -8.8% |
+
+What the SH-4 taught, which holds for any 32-bit target:
+
+- **GCC for the SH-4 does not fold byte-wise little-endian loads into one
+  load**, as it does on x86 and ARM. An instruction fetch was 40 SH-4
+  instructions. **And an aligned fast path beside the byte path is not
+  enough**: GCC proves both compute the same value, merges them and keeps the
+  bytes. An empty `asm` on the pointer (`MEM_OPAQUE`) keeps the load.
+- **64-bit arithmetic is several instructions and two stores.** A `uint64_t`
+  counter bumped per access or per instruction costs more than it looks; the
+  timer update was ~45 SH-4 instructions an i960 step.
+- **Compare scenes, not seconds.** ns per i960 instruction ranges 640-850
+  across attract's scenes, so a single screenshot's figure says nothing about
+  a change. Latch a total at a fixed frame: the board is deterministic, so
+  frames 0-599 are the same work in every build.
+- **Flycast's timing.** Its dynarec charges issue cycles with dual issue, plus
+  2 cycles (5 with the MMU on) for each of a block's first 3 memory accesses.
+  Its interpreter charges external bus cycles for every access, about 10 times
+  too slow, but runs one instruction at a time: a PC sampled every N
+  instructions there (a local Flycast patch, not committed) is an exact
+  instruction count, where the dynarec only knows blocks.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
@@ -206,9 +241,13 @@ stale pages, with no error anywhere.
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
   texture fields) would let the 1 MB mesh cache hold more.
-- **The i960 slice (46-88 ms).** The interpreter on a 200 MHz SH-4. Options:
-  a threaded or cached decode, or keeping the hot `cpu` / `bus` state in the
-  8 KB operand-cache RAM mode.
+- **The i960 slice (~85 ms a frame, ~770 ns an instruction).** The interpreter
+  on a 200 MHz SH-4. What is left after #360's switches (below), by exact
+  SH-4 instruction counts: the step's own work ~20%, the run loop ~15%, the
+  timer check ~10%, the hook filter ~7%, `mem_ea` ~4%, `i960_cycle_cost` ~4%.
+  The next step is a threaded or cached decode (held by `i960_test`,
+  `i960_fuzz` and `det_digest`), or keeping the hot `cpu` / `bus` state in
+  the 8 KB operand-cache RAM mode.
 - **UTLB reach.** Map the hot code pages with 64 KB pages.
 - **Optional:** modifier-volume shadows; dropping SDL2 and GLdc for KOS's
   `snd_stream` directly.

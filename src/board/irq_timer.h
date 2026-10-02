@@ -35,6 +35,14 @@
  * arms still feeds every random number with this. It used to read 0. */
 #define IRQT_IDLE 0xFFFFFll
 
+/* pending and horizon never exceed a frame's cycles (416,667), and the run
+ * loop updates pending after every instruction. A 32-bit CPU with no 64-bit
+ * add (the Dreamcast's SH-4) may make them 32-bit: IRQT_COUNT_T int32_t. */
+#ifndef IRQT_COUNT_T
+#define IRQT_COUNT_T int64_t
+#endif
+typedef IRQT_COUNT_T irqt_count_t;
+
 typedef struct {
     uint32_t intreq;                 /* pending interrupt bits (0xE80000)   */
     uint32_t intena;                 /* interrupt enable mask  (0xE80004)   */
@@ -45,8 +53,8 @@ typedef struct {
     /* Cycles the i960 has run that the counts do not reflect yet, and the
      * smallest running count, the vblank's included — once pending reaches it
      * an event is due, so the run loop brings the counts up to date then. */
-    int64_t  pending;
-    int64_t  horizon;
+    irqt_count_t pending;
+    irqt_count_t horizon;
 
     /* The vblank, on the same clock: where the i960 is in the current video
      * frame, in 1/IRQT_VBLANK_HZ-ths of a cycle (a frame is IRQT_CPU_HZ of

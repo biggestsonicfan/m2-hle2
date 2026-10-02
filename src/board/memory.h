@@ -738,6 +738,67 @@ static inline void mem_shutdown(memory_bus_t *bus) {
 #define MEM_FORCE_INLINE inline __attribute__((always_inline))
 #endif
 
+/* ---- Small-target switches (both default to the desktop's behaviour) ------
+ *
+ * MEM_COUNT: the bus's reads/writes tallies, which only the CLI's summary
+ * prints. They are 64-bit, and on a 32-bit CPU without 64-bit adds (the
+ * Dreamcast's SH-4) each bump was a load, two adds and a store of two words on
+ * every access, ~10% of an instruction fetch. A build may set it to 0.
+ *
+ * MEM_LE_DIRECT: the board's words are little-endian and read byte by byte,
+ * which GCC and clang fold into one load on x86 and ARM. GCC for the SH-4
+ * does not (it cannot know the address is aligned): an instruction fetch was
+ * 40 SH-4 instructions. On a little-endian host with strict alignment, 1
+ * reads and writes an aligned word as one access, and falls back to bytes
+ * when it is not aligned. */
+#ifndef MEM_COUNT
+#define MEM_COUNT 1
+#endif
+#if MEM_COUNT
+#define MEM_TALLY(field, n) ((field) += (n))
+#else
+#define MEM_TALLY(field, n) ((void)0)
+#endif
+#ifndef MEM_LE_DIRECT
+#define MEM_LE_DIRECT 0
+#endif
+#if MEM_LE_DIRECT
+typedef uint32_t __attribute__((may_alias)) mem_u32_alias_t;
+typedef uint16_t __attribute__((may_alias)) mem_u16_alias_t;
+/* GCC sees that the byte path computes the same value as the word load, merges
+ * the two and keeps the bytes. Hiding the pointer from it keeps the load. */
+#define MEM_OPAQUE(ptr) __asm__("" : "+r"(ptr))
+#endif
+
+static MEM_FORCE_INLINE uint32_t mem_le32(const uint8_t *p) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 3u))) { const mem_u32_alias_t *q = (const mem_u32_alias_t *)p; MEM_OPAQUE(q); return *q; }
+#endif
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static MEM_FORCE_INLINE uint32_t mem_le16(const uint8_t *p) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 1u))) { const mem_u16_alias_t *q = (const mem_u16_alias_t *)p; MEM_OPAQUE(q); return *q; }
+#endif
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+static MEM_FORCE_INLINE void mem_le32_put(uint8_t *p, uint32_t val) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 3u))) { mem_u32_alias_t *q = (mem_u32_alias_t *)p; MEM_OPAQUE(q); *q = val; return; }
+#endif
+    p[0] = (uint8_t)val;
+    p[1] = (uint8_t)(val >> 8);
+    p[2] = (uint8_t)(val >> 16);
+    p[3] = (uint8_t)(val >> 24);
+}
+static MEM_FORCE_INLINE void mem_le16_put(uint8_t *p, uint32_t val) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 1u))) { mem_u16_alias_t *q = (mem_u16_alias_t *)p; MEM_OPAQUE(q); *q = (uint16_t)val; return; }
+#endif
+    p[0] = (uint8_t)val;
+    p[1] = (uint8_t)(val >> 8);
+}
+
 /* The scan returns the earliest region containing an address. Walking the table
  * backwards and letting each region overwrite the pages it reaches leaves every
  * page with its earliest region: that region's if it covers the whole page,
@@ -834,7 +895,7 @@ static inline bool mem__warn_due(uint64_t n) {
 }
 
 static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
-    bus->reads++;
+    MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         if (mem__warn_due(++bus->unmapped_reads))
@@ -848,7 +909,7 @@ static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
 }
 
 static MEM_NOINLINE uint32_t mem_read16_slow(memory_bus_t *bus, uint32_t addr) {
-    bus->reads++;
+    MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         if (mem__warn_due(++bus->unmapped_reads))
@@ -863,7 +924,7 @@ static MEM_NOINLINE uint32_t mem_read16_slow(memory_bus_t *bus, uint32_t addr) {
 }
 
 static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
-    bus->reads++;
+    MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         if (mem__warn_due(++bus->unmapped_reads))
@@ -889,22 +950,20 @@ static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
 static MEM_FORCE_INLINE uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = bus->rd_page[addr >> 16];
     if (M2_UNLIKELY(!p)) return mem_read8_slow(bus, addr);
-    bus->reads++;
+    MEM_TALLY(bus->reads, 1);
     return p[addr & 0xFFFFu];
 }
 static MEM_FORCE_INLINE uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = bus->rd_page[addr >> 16];
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) return mem_read16_slow(bus, addr);
-    bus->reads++;
-    p += addr & 0xFFFFu;
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+    MEM_TALLY(bus->reads, 1);
+    return mem_le16(p + (addr & 0xFFFFu));
 }
 static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = bus->rd_page[addr >> 16];
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) return mem_read32_slow(bus, addr);
-    bus->reads++;
-    p += addr & 0xFFFFu;
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    MEM_TALLY(bus->reads, 1);
+    return mem_le32(p + (addr & 0xFFFFu));
 }
 
 /* The two words at addr, as mem_read32(addr) and mem_read32(addr + 4) return
@@ -919,9 +978,9 @@ static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32
     const uint8_t *d = bus->rd_page[addr >> 16];
     if (M2_LIKELY(d && (addr & 0xFFFFu) <= 0xFFF8u)) {  /* both words on one direct page */
         d += addr & 0xFFFFu;
-        bus->reads += 2;
-        *w1 = (uint32_t)d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
-        *w2 = (uint32_t)d[4] | ((uint32_t)d[5] << 8) | ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
+        MEM_TALLY(bus->reads, 2);
+        *w1 = mem_le32(d);
+        *w2 = mem_le32(d + 4);
         return;
     }
     mem_region_t *r = bus->fetch;
@@ -929,9 +988,9 @@ static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32
         uint32_t off = addr - r->base;
         if ((uint64_t)off + 8u <= r->size && !r->read_cb) {
             const uint8_t *p = r->data + off;
-            bus->reads += 2;
-            *w1 = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-            *w2 = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+            MEM_TALLY(bus->reads, 2);
+            *w1 = mem_le32(p);
+            *w2 = mem_le32(p + 4);
             return;
         }
     }
@@ -1031,7 +1090,7 @@ static inline void mem__note_change(mem_region_t *r, uint32_t off, uint32_t len)
 }
 
 static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFF);
@@ -1057,7 +1116,7 @@ static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint3
 }
 
 static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFFFF);
@@ -1084,7 +1143,7 @@ static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint
 }
 
 static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
@@ -1121,7 +1180,7 @@ static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint
 static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = bus->wr_page[addr >> 16];
     if (M2_UNLIKELY(!p)) { mem_write8_slow(bus, addr, val); return; }
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFF);
@@ -1130,27 +1189,21 @@ static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32
 static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = bus->wr_page[addr >> 16];
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { mem_write16_slow(bus, addr, val); return; }
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFFFF);
-    p += addr & 0xFFFFu;
-    p[0] = (uint8_t)val;
-    p[1] = (uint8_t)(val >> 8);
+    mem_le16_put(p + (addr & 0xFFFFu), val);
 }
 static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = bus->wr_page[addr >> 16];
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { mem_write32_slow(bus, addr, val); return; }
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
     if (M2_UNLIKELY(dl_active()) && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
-    p += addr & 0xFFFFu;
-    p[0] = (uint8_t)val;
-    p[1] = (uint8_t)(val >> 8);
-    p[2] = (uint8_t)(val >> 16);
-    p[3] = (uint8_t)(val >> 24);
+    mem_le32_put(p + (addr & 0xFFFFu), val);
 }
 
 /* A frame edge: called under the emu mutex when the game's frame has ended and

@@ -21,7 +21,7 @@ CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address \
           -DM2HLE_VERSION='"dc"' -DM2HLE_DEV_TOOLS=0 \
           -DGEO_CAPTURE_SIZE=4096 -DLOG_MAX_LINES=64 -DNDEBUG -DM2HLE_NO_ZIP \
           -DGEO3D_MAX_LINES=16 -DGEO3D_MAX_TRIS=4096 -DGEO3D_MESH_CACHE_SLOTS=256u \
-          -DGEO3D_MESH_CACHE_BYTES=0x100000u \
+          -DGEO3D_MESH_CACHE_BYTES=0x100000u -DMEM_COUNT=0 -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t \
           -DSOUND_RAM_SIZE=0x1000u -DSOUND_OUT_FRAMES=1024u -DM68K_ROM_SIZE=0x10000u -DGEO_PUB_COPIES=1 \
           -I$(REPO)/src -I$(REPO)/src/board -I$(REPO)/src/core -I$(REPO)/src/ui \
           -I$(REPO)/src/profiles -I$(REPO)/src/net -I. \
