@@ -1282,6 +1282,42 @@ as they take any early wake.
 A thread that blocks SIGPROF (SDL's and PulseAudio's audio threads do) still gets its CPU time
 in the thread table, but no zones or functions.
 
+### The compiler's own instructions, with their counts (`asm-hot.py`)
+
+Pinboard #320 asked whether reading Ghidra's decompile of our own binary could
+show where the C makes the machine work harder than it reads. The same thing
+is closer to hand without Ghidra: the disassembly `objdump -dl` prints, every
+instruction marked with the count callgrind measured on it and the source line
+it came from. perf does not run under WSL; callgrind does, and because its
+counts are exact two builds compare without timing noise.
+
+    valgrind --tool=callgrind --dump-instr=yes --callgrind-out-file=cg.out \
+        build_lin/det_digest $ROMS_DIR/sfight.zip --frames 1500 --from 999999 --no-sound-thread
+    python3 tools/asm-hot.py cg.out build_lin/det_digest                              # hottest instructions
+    python3 tools/asm-hot.py cg.out build_lin/det_digest emu_slice_body.constprop.0 1000000
+
+`--from` past `--frames` keeps `det_digest` from hashing RAM every frame: with
+the hashes on, its own FNV loop is 55% of the run. Build with `-g` added to the
+release flags, and prove a change with `det_digest` (`--cpu --sound`, attract
+and a scripted game) before reading its count.
+
+What it found first (2026-10-01, x86, GCC 13, STF attract): the i960's run loop
+spends ~135 host instructions on a guest instruction, interpreter included, and
+the sound board 47% of the emulation. Two lines cost more than they read: the
+68000's table-init test on every instruction, and the fast path's interrupt
+test reloading `s_irq_in_service` and `g_active_profile`, which it already
+knows. Both went: 1.4% fewer instructions, board identical, and no wall time
+that x86 can measure (out of order, it hid those loads; the in-order A55 is
+where they could show, not measured yet). The rest of the
+hot paths had been taken apart by earlier passes (#148, #166, #187, the
+attention word); what is left there is the interpreter itself.
+
+The brute-force version of the same idea is profile-guided optimisation: the
+compiler lays out the code from a recorded run. On x86 GCC 13, trained on
+attract and a scripted 1P game, `-fprofile-use` ran 5.5% (attract) and 6.7%
+(the game) faster, `det_digest --cpu --sound` byte-identical over 9000 frames.
+The builds do not use it yet.
+
 ### Cross-play: the web build against the desktop build
 
 `ab-builds` drives two `m2hle.exe` over the bridge, and the web build has none.

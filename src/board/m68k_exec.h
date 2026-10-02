@@ -703,7 +703,10 @@ static void m68k_fast_init(void) {
     }
 }
 
-static inline int m68k_step(m68k_state_t *s) {
+/* One instruction, with the timing and fast-form tables already built
+ * (m68k_tables_init): the sound board's loop builds them once a run instead of
+ * testing for them on every instruction. */
+static inline int m68k_step_core(m68k_state_t *s) {
     if (s->cpu.halted)  return 0;
     if (s->cpu.stopped) return 4;
 
@@ -712,7 +715,6 @@ static inline int m68k_step(m68k_state_t *s) {
     uint16_t    op    = m68k_fetch(s);
     int         grp   = (op >> 12) & 0xF;
 
-    if (!m68k_time_ready) { m68k_timing_init(); m68k_fast_init(); }
     c->cycles += m68k_time[op];
 
     switch (m68k_fast[op]) {
@@ -1559,6 +1561,15 @@ static inline int m68k_step(m68k_state_t *s) {
     }
 
     return (int)(c->cycles);
+}
+
+static inline void m68k_tables_init(void) {
+    if (!m68k_time_ready) { m68k_timing_init(); m68k_fast_init(); }
+}
+
+static inline int m68k_step(m68k_state_t *s) {
+    m68k_tables_init();
+    return m68k_step_core(s);
 }
 
 /* ================================================================ interrupt */

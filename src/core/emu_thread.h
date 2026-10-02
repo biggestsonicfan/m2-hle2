@@ -433,6 +433,17 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
         emu_service_irq(ctx);
 }
 
+/* The same on the run loop's fast path, where no handler is in service
+ * (entering one bumps the attention word, which sends the loop slow) and the
+ * profile is the slice's: two loads an instruction fewer. */
+static inline void emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, bool profile) {
+    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    s_timer_cycles_seen = cpu->cycles;
+    if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
+    if ((g_irqt.intreq & g_irqt.intena & 0x03FFu) && profile)
+        emu_service_irq(ctx);
+}
+
 /* ---- The sound board against the board's clock ---------------------------
  *
  * The sound board is charged a frame of samples at each vblank, 735 at
@@ -639,7 +650,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             }
         } else {
             /* Fast: no handler in service (entering one bumps the word). */
-            emu_timers_after_step(ctx);
+            emu_timers_after_step_fast(ctx, cpu, profile);
             if (g_emu_attn != attn) {      /* flagged by the timer service */
                 slow = true;
                 if (g_log.warn_triggered) break;
