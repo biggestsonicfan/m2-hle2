@@ -166,8 +166,11 @@
  *    somewhere else, and with it rand() and the texture loads.
  * 13: a board timer that is not counting reads 0xFFFFF, not 0 (MAME), and
  *    STF's rand adds all four timers, so its numbers differ (Pinboard #307).
+ * 14: the room state's PLAYER MATCH rules (rounds, time, game type, secret
+ *    character; room.h), which the cold boot applies; a board before it plays
+ *    the factory rules whatever the room says (Pinboard #333).
  */
-#define NETPLAY_PROTO_REV 13
+#define NETPLAY_PROTO_REV 14
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
@@ -328,6 +331,19 @@ typedef struct {
     /* hosting: DAMAGE REAL, no catch-up damage (g_damage_real). False, the
      * default, is NORMAL: the cabinet's factory setting and the console's. */
     bool     damage_real;
+    /* hosting: the room's PLAYER MATCH rules (room.h, the PS3 port's RULE
+     * MENU), published for the search and played by every board in the room.
+     * Without them a room plays the factory rules (2 rounds, 30 s, Type A,
+     * Secret character on) and publishes none; a PS3 room the PS3's defaults. */
+    bool          has_rules;
+    match_rules_t rules;
+    /* NETPLAY_CMD_SEARCH: list only the rooms with these rules (MATCH_ANY for
+     * a field left open, the PS3's "None specified"), as its Custom Match does.
+     * False lists every room. */
+    bool          filter;
+    match_rules_t want;
+    /* Our country for a Same Area room or search ('u','s' when empty). */
+    char          country[3];
     uint8_t  entry;             /* room_entry_t, for NETPLAY_CMD_ENTRY */
     bool     watch_only;        /* for NETPLAY_CMD_WATCH */
     bool     browse_yamp;       /* also search YAMP's lobby space, read-only */
@@ -383,6 +399,9 @@ typedef struct {
     uint32_t                auto_start_s; /* owner's countdown to the next match; 0 = none */
     uint64_t        room_id;
     uint32_t        room_flags;
+    /* The PLAYER MATCH rules of the room we are in (room.h): a PS3 room's from
+     * its attribute, one of ours from its state. */
+    match_rules_t   room_rules;
     char            com_id[COMID_BUFFER_SIZE];
     char            com_id_foreign[COMID_BUFFER_SIZE];
     char            peer_npid[20];
@@ -545,6 +564,10 @@ typedef struct {
     int                 own_vs_mode;
     int                 own_region;
     int                 own_damage_real;
+    int                 own_rounds_to_win;
+    int                 own_round_time;
+    int                 own_game_type;
+    int                 own_hidden_chars;
     bool                empty_prompt;
     uint32_t            empty_held;     /* buttons already down when the prompt went up */
     bool                empty_restart;  /* pressed: restart at the next pump */
@@ -1896,6 +1919,14 @@ static inline void netplay_status_room(netplay_status_t *st, const rpcn_session_
     st->max_slot     = s->max_slot;
     st->room         = g_netplay.room;
     st->room_known   = g_netplay.room_known;
+    st->room_rules   = match_rules_from_room(&g_netplay.room);
+    if (g_netplay.ps3 && s->room_bin_len >= 0x0D) {
+        st->room_rules.rounds = s->room_bin[0x09] & 3u;
+        st->room_rules.time   = s->room_bin[0x0A] & 3u;
+        st->room_rules.type   = s->room_bin[0x0B] & 3u;
+        st->room_rules.secret = s->room_bin[0x0C] ? 1 : 0;
+    }
+    if (netplay_is_host() && g_netplay.cfg.has_rules) st->room_rules.range = g_netplay.cfg.rules.range;
     st->me           = g_netplay.me;
     st->member_count = 0;
     if (rpcn_session_in_room(s)) {
@@ -2430,6 +2461,55 @@ static inline void netplay_do_disconnect(void) {
     netplay_log("disconnected");
 }
 
+/*
+ * PLAYER MATCH rules as searchable ints (room.h): what a room of ours publishes
+ * (`search` false), or the EQ filter that finds such rooms. A PS3 room stores
+ * the menu indices; one of ours stores index + 1, so an older room's 0 is "none".
+ * The matching range always goes in (0 = Worldwide, which an older room also
+ * reads), and a PS3 search also asks for Player Match rooms (0x52 = 1).
+ */
+static inline void netplay_rules_ints(const match_rules_t *r, bool ps3, bool search,
+                                      const char *country, rpcn_int_attrs_t *out) {
+    memset(out, 0, sizeof(*out));
+    const uint8_t v[4] = { r->rounds, r->time, r->type, r->secret };
+    const uint8_t n[4] = { 4, 4, 4, 2 };
+    for (uint32_t i = 0; i < 4; i++) {
+        if (v[i] >= n[i]) continue;             /* MATCH_ANY: no filter, nothing published */
+        rpcn_int_attrs_set(out, (uint16_t)(0x4D + i), ps3 ? v[i] : v[i] + 1u);
+    }
+    rpcn_int_attrs_set(out, 0x51, r->range == MATCH_RANGE_AREA ? match_area_code(country) : 0u);
+    if (ps3 && search) rpcn_int_attrs_set(out, 0x52, 1);
+    /* A PS3 room's 0x4C is its size; ours is the relay time, so a search here
+     * leaves the size to the list (rpcn_room_listing_t.max_slots). */
+    if (ps3 && search && r->players >= 2 && r->players <= ROOM_MAX_MEMBERS)
+        rpcn_int_attrs_set(out, 0x4C, r->players - 2u);
+}
+
+/* "3 rounds, 30 s, Type A, secret Off, Worldwide", for the log. */
+static inline const char *netplay_rules_text(const match_rules_t *r, char *buf, size_t n) {
+    snprintf(buf, n, "%u rounds, %u s, Type %c, secret %s, %s",
+             (unsigned)match_rounds(r->rounds), (unsigned)match_seconds(r->time), 'A' + (r->type & 3),
+             r->secret ? "On" : "Off", r->range == MATCH_RANGE_AREA ? "Same Area" : "Worldwide");
+    return buf;
+}
+
+/* A listed room's rules, for the search list (the reverse of
+ * netplay_rules_ints). A room of ours from before the rules, or hosted without
+ * them, publishes none and plays the factory's: 2 rounds, 30 s, Type A, On. */
+static inline match_rules_t netplay_rules_of_listing(const rpcn_room_listing_t *l, bool ps3) {
+    match_rules_t r = { 0, 1, 0, 1, MATCH_RANGE_WORLD, MATCH_ANY };
+    uint8_t *f[4] = { &r.rounds, &r.time, &r.type, &r.secret };
+    for (uint32_t i = 0; i < 4; i++) {
+        if (!(l->int_mask & (1u << (1 + i)))) continue;
+        uint32_t v = l->int_attr[1 + i];
+        if (!ps3) { if (!v) continue; v--; }
+        *f[i] = (uint8_t)(i == 3 ? (v ? 1 : 0) : (v & 3u));
+    }
+    if ((l->int_mask & (1u << 5)) && l->int_attr[5]) r.range = MATCH_RANGE_AREA;
+    r.players = (uint8_t)l->max_slots;
+    return r;
+}
+
 static inline void netplay_do_host(const netplay_config_t *cfg) {
     if (g_netplay.ps3) {
         /* A room in the PS3 port's own shape, run the way a PS3 owner runs one
@@ -2440,20 +2520,27 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
         if (cfg->room_password[0]) netplay_log("PS3 rooms take no password; this one will be open");
         netplay_forget_room();
         uint32_t ints[8];
-        ps3_link_host(&g_netplay.ps3link, slots, ints);
+        match_rules_t rules = cfg->has_rules ? cfg->rules : match_rules_ps3();
+        ps3_link_host(&g_netplay.ps3link, slots, &rules, cfg->country, ints);
         if (!rpcn_session_host_ps3(&g_netplay.session, slots, ints, g_netplay.ps3link.blob, PS3_ROOM_BIN_SIZE,
                                    ps3_link_member_bin(&g_netplay.ps3link), PS3_MEMBER_BIN_SIZE)) {
             ps3_link_leave(&g_netplay.ps3link);   /* no room: we own nothing */
             g_netplay.state = NETPLAY_FAILED;
             return;
         }
-        netplay_log("hosting a PS3 room for up to %u (3 rounds, 30 s, type A); waiting for players", slots);
+        rules.rounds = (uint8_t)ints[1]; rules.time = (uint8_t)ints[2];
+        rules.type   = (uint8_t)ints[3]; rules.secret = (uint8_t)ints[4];
+        char rt[96];
+        netplay_log("hosting a PS3 room for up to %u (%s); waiting for players", slots,
+                    netplay_rules_text(&rules, rt, sizeof(rt)));
         return;
     }
     g_netplay.cfg.frame_delay   = cfg->frame_delay;
     g_netplay.cfg.max_players   = cfg->max_players;
     g_netplay.cfg.vs_mode       = cfg->vs_mode;
     g_netplay.cfg.damage_real   = cfg->damage_real;
+    g_netplay.cfg.has_rules     = cfg->has_rules;
+    g_netplay.cfg.rules         = cfg->rules;
     g_netplay.cfg.room_password[0] = '\0';
     snprintf(g_netplay.cfg.room_password, sizeof(g_netplay.cfg.room_password), "%s",
              cfg->room_password);
@@ -2469,12 +2556,16 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
     netplay_forget_room();
     g_netplay.room.phase       = ROOM_PHASE_LOBBY;
     g_netplay.room.frame_delay = (uint8_t)delay;
+    g_netplay.room.hidden      = 1;
+    if (cfg->has_rules) match_rules_to_room(&cfg->rules, &g_netplay.room);
     uint8_t room_bin[ROOM_STATE_SIZE], me_bin[ROOM_MEMBER_SIZE];
     uint32_t room_len = room_state_encode(&g_netplay.room, room_bin);
     uint32_t me_len   = room_member_encode(&g_netplay.me, me_bin);
+    rpcn_int_attrs_t ints;
+    if (cfg->has_rules) netplay_rules_ints(&cfg->rules, false, false, cfg->country, &ints);
     if (!rpcn_session_host(&g_netplay.session, slots,
                            cfg->room_password[0] ? cfg->room_password : NULL, flags,
-                           room_bin, room_len, me_bin, me_len)) {
+                           room_bin, room_len, me_bin, me_len, cfg->has_rules ? &ints : NULL)) {
         g_netplay.state = NETPLAY_FAILED;
         return;
     }
@@ -2482,8 +2573,10 @@ static inline void netplay_do_host(const netplay_config_t *cfg) {
      * (see lockstep.h) but it is what proves in a log that two machines think
      * they are in the same session. Each match gets a fresh one. */
     g_netplay.seed = (uint32_t)(net_now_ms() * 2654435761u) | 1u;
-    netplay_log("hosting a room for up to %u%s; waiting for players", slots,
-                netplay_room_vs_mode() ? ", in VS mode" : "");
+    char rt[96];
+    netplay_log("hosting a room for up to %u%s (%s); waiting for players", slots,
+                netplay_room_vs_mode() ? ", in VS mode" : "",
+                cfg->has_rules ? netplay_rules_text(&cfg->rules, rt, sizeof(rt)) : "factory rules");
 }
 
 static inline void netplay_do_join(const netplay_config_t *cfg) {
@@ -2641,9 +2734,13 @@ static inline bool netplay_pump_commands(void) {
             case NETPLAY_CMD_DISCONNECT: netplay_do_disconnect(); break;
             case NETPLAY_CMD_HOST:
             case NETPLAY_CMD_JOIN:       netplay_room_or_defer(&cmd); break;
-            case NETPLAY_CMD_SEARCH:
-                rpcn_session_search(&g_netplay.session, cmd.cfg.browse_yamp);
+            case NETPLAY_CMD_SEARCH: {
+                rpcn_int_attrs_t want;
+                if (cmd.cfg.filter)
+                    netplay_rules_ints(&cmd.cfg.want, g_netplay.ps3, true, cmd.cfg.country, &want);
+                rpcn_session_search(&g_netplay.session, cmd.cfg.browse_yamp, cmd.cfg.filter ? &want : NULL);
                 break;
+            }
             case NETPLAY_CMD_START:      netplay_do_start(); break;
             case NETPLAY_CMD_STOP:       netplay_do_stop(); break;
             case NETPLAY_CMD_ENTRY:      netplay_do_entry(cmd.cfg.entry); break;
@@ -2842,7 +2939,7 @@ static inline void netplay_heal_room_pump(void) {
     }
     if (now - g_netplay.heal_search_ms >= NETPLAY_HEAL_SEARCH_MS && !rpcn_session_search_pending(ss)) {
         g_netplay.heal_search_ms = now;
-        rpcn_session_search(&g_netplay.session, false);
+        rpcn_session_search(&g_netplay.session, false, NULL);
     }
 }
 
@@ -3267,6 +3364,8 @@ static inline void netplay_owner_pump(void) {
             s.region      = (uint8_t)g_region;
             s.vs_mode     = netplay_room_vs_mode() ? 1u : 0u;
             s.damage_real = g_netplay.cfg.damage_real ? 1u : 0u;
+            s.rounds_to_win = 0; s.round_time = 0; s.game_type = 0; s.hidden = 1;
+            if (g_netplay.cfg.has_rules) match_rules_to_room(&g_netplay.cfg.rules, &s);
             s.session     = s.match;
             s.last_result = ROOM_RESULT_NONE;
             s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
@@ -3376,6 +3475,10 @@ static inline void netplay_member_pump(void) {
             g_netplay.own_vs_mode = g_vs_mode;
             g_netplay.own_region  = g_region;
             g_netplay.own_damage_real = g_damage_real;
+            g_netplay.own_rounds_to_win = g_rounds_to_win;
+            g_netplay.own_round_time    = g_round_time;
+            g_netplay.own_game_type     = g_game_type;
+            g_netplay.own_hidden_chars  = g_hidden_chars;
         }
         /* This session cold boots the board, so it decides what is left behind. */
         g_netplay.vs_board        = r->vs_mode != 0;
@@ -3396,6 +3499,18 @@ static inline void netplay_member_pump(void) {
             netplay_log(r->damage_real ? "this room plays with DAMAGE: REAL (no catch-up damage)"
                                        : "this room plays with DAMAGE: NORMAL (catch-up damage)");
             g_damage_real = r->damage_real ? 1 : 0;
+        }
+        /* The room's PLAYER MATCH rules, at the same cold boot. */
+        if (g_rounds_to_win != (int)r->rounds_to_win || g_round_time != (int)r->round_time
+            || g_game_type != (int)r->game_type || g_hidden_chars != (int)r->hidden) {
+            g_rounds_to_win = r->rounds_to_win;
+            g_round_time    = r->round_time;
+            g_game_type     = r->game_type & 3;
+            g_hidden_chars  = r->hidden ? 1 : 0;
+            netplay_log("this room's rules: %u rounds to win, %u s a round, Type %c, secret characters %s",
+                        r->rounds_to_win ? (unsigned)r->rounds_to_win : 2u,
+                        r->round_time ? (unsigned)r->round_time : 30u,
+                        'A' + (r->game_type & 3), r->hidden ? "On" : "Off");
         }
         if (side >= 0) {
             netplay_log("match %u: you are %s against %s", (unsigned)r->match, side == 0 ? "1P" : "2P",
@@ -3859,6 +3974,10 @@ static inline void netplay_restart_alone(void) {
         g_vs_mode  = g_netplay.own_vs_mode;
         g_region   = g_netplay.own_region;
         g_damage_real = g_netplay.own_damage_real;
+        g_rounds_to_win = g_netplay.own_rounds_to_win;
+        g_round_time    = g_netplay.own_round_time;
+        g_game_type     = g_netplay.own_game_type;
+        g_hidden_chars  = g_netplay.own_hidden_chars;
         g_netplay.own_saved = false;
     }
     g_netplay.vs_board     = false;

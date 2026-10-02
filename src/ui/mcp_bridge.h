@@ -1949,6 +1949,31 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
     if (mcp_json_get_u32(req, "vs", &v))          cfg->vs_mode = v != 0;
     if (mcp_json_get_u32(req, "entry", &v))       cfg->entry = (uint8_t)v;
     if (mcp_json_get_u32(req, "watch", &v))       cfg->watch_only = v != 0;
+    /* The room's rules (net/room.h match_rules_t; PS3 Player Match): rounds
+     * 0-3 = 2-5 to win, time 0-3 = 10/30/60/99 s, type 0-3 = A-D, secret 0/1,
+     * range 0 = Worldwide / 1 = same area. netplay_host publishes them (unset
+     * fields keep the PS3's defaults); netplay_search filters on them (unset
+     * fields match anything). players (2-8 seats) filters a PS3 search only:
+     * a community room's 0x4C is its relay time, so the lobby filters that
+     * list itself. */
+    {
+        static const char *const key[6] = { "rounds", "time", "type", "secret", "range", "players" };
+        match_rules_t host = match_rules_ps3(), want = match_rules_any();
+        uint8_t *hv[6] = { &host.rounds, &host.time, &host.type, &host.secret, &host.range, &host.players };
+        uint8_t *wv[6] = { &want.rounds, &want.time, &want.type, &want.secret, &want.range, &want.players };
+        bool any = false;
+        for (int i = 0; i < 6; i++) {
+            if (!mcp_json_get_u32(req, key[i], &v)) continue;
+            *hv[i] = *wv[i] = (uint8_t)v;
+            any = true;
+        }
+        if (any) {
+            cfg->has_rules = true;
+            cfg->rules     = host;
+            cfg->filter    = true;
+            cfg->want      = want;
+        }
+    }
     /* A room id is 64 bits and mcp_json_get_u32 is not, so it travels as a
      * string. Quoted or not: mcp_json_get_str finds the quoted form, and the
      * unquoted one is read straight out of the request. */
@@ -2139,12 +2164,15 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
     /* The room (net/room.h): its phase, the match, and every member in line
      * order with the side they are on and what they have published. */
     NP_APPEND(",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"session\":%u,"
-              "\"vs_mode\":%s,\"fighters\":[%u,%u],"
+              "\"vs_mode\":%s,\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,"
+              "\"range\":%u},\"fighters\":[%u,%u],"
               "\"last_result\":%d,\"auto_start_s\":%u,\"max\":%u,\"me\":%u,\"members\":[",
               st.room_known ? "true" : "false",
               st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby",
               st.room.match, st.room.session ? st.room.session : st.room.match,
               st.room.vs_mode ? "true" : "false",
+              st.room_rules.rounds, st.room_rules.time, st.room_rules.type, st.room_rules.secret,
+              st.room_rules.range,
               st.room.fighter[0], st.room.fighter[1],
               st.room.last_result <= 1 ? (int)st.room.last_result : -1,
               st.auto_start_s, st.max_slot, st.my_member_id);
@@ -2219,12 +2247,14 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
                   st.search_pending ? "true" : "false");
         for (uint32_t i = 0; i < st.room_count && left > 128; i++) {
             mcp_json_escape(esc, sizeof(esc), st.rooms[i].owner);
+            match_rules_t rr = netplay_rules_of_listing(&st.rooms[i], st.ps3);
             NP_APPEND("%s{\"room_id\":\"%llu\",\"owner\":\"%s\",\"members\":%u,"
-                      "\"max\":%u,\"password\":%s,\"flags\":\"0x%08X\"}",
+                      "\"max\":%u,\"password\":%s,\"flags\":\"0x%08X\","
+                      "\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,\"range\":%u}}",
                       i ? "," : "", (unsigned long long)st.rooms[i].room_id, esc,
                       st.rooms[i].cur_members, st.rooms[i].max_slots,
                       st.rooms[i].has_password ? "true" : "false",
-                      st.rooms[i].flag_attr);
+                      st.rooms[i].flag_attr, rr.rounds, rr.time, rr.type, rr.secret, rr.range);
         }
         NP_APPEND("]");
     }

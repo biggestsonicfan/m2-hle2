@@ -1060,7 +1060,7 @@ static inline void rpcn_session_on_foreign_world_list(rpcn_session_t *s, const r
     s->foreign_world_id = worlds[0];
     s->foreign_ready    = true;
     s->pending_foreign_search =
-        rpcn_search_room(&s->client, s->com_id_foreign, s->foreign_world_id);
+        rpcn_search_room(&s->client, s->com_id_foreign, s->foreign_world_id, NULL);
 }
 
 static inline void rpcn_session_on_foreign_search(rpcn_session_t *s, const rpcn_packet_t *pkt) {
@@ -1235,11 +1235,13 @@ static inline void rpcn_session_update(rpcn_session_t *s) {
 /* ---- Rooms --------------------------------------------------------------- */
 
 /* `room_bin` and `member_bin` are the room's first shared state and our own
- * attribute (room.h), so nobody ever sees the room without them. */
+ * attribute (room.h), so nobody ever sees the room without them. `ints` (may be
+ * null) are its rules, in the searchable ints a search filters on. */
 static inline bool rpcn_session_host(rpcn_session_t *s, uint32_t max_slot, const char *password,
                                      uint32_t flag_attr,
                                      const uint8_t *room_bin, uint32_t room_len,
-                                     const uint8_t *member_bin, uint32_t member_len) {
+                                     const uint8_t *member_bin, uint32_t member_len,
+                                     const rpcn_int_attrs_t *ints) {
     if (s->stage != RPCN_STAGE_ONLINE) {
         rpcn_session_fail(s, "cannot host before discovery has finished");
         return false;
@@ -1250,7 +1252,7 @@ static inline bool rpcn_session_host(rpcn_session_t *s, uint32_t max_slot, const
     if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
     s->pending_room = rpcn_create_room(&s->client, s->com_id, s->world_id, max_slot, password,
                                        flag_attr, room_bin, room_len, member_bin, member_len,
-                                       rpcn_session_relay_ms(s));
+                                       rpcn_session_relay_ms(s), ints);
     if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
     return true;
 }
@@ -1326,8 +1328,10 @@ static inline bool rpcn_session_set_member_team(rpcn_session_t *s, uint8_t team,
 
 /* Ask the server for the rooms in our world, and optionally for YAMP's too. The
  * reply is asynchronous: the room lists report the result of the LAST completed
- * search. Only valid once online. */
-static inline bool rpcn_session_search(rpcn_session_t *s, bool include_foreign) {
+ * search. Only valid once online. `filter` (may be null) narrows our own world's
+ * search to rooms with those rules; YAMP's rooms carry none. */
+static inline bool rpcn_session_search(rpcn_session_t *s, bool include_foreign,
+                                       const rpcn_int_attrs_t *filter) {
     if (s->stage != RPCN_STAGE_ONLINE && s->stage != RPCN_STAGE_HOSTING
         && s->stage != RPCN_STAGE_JOINING && s->stage != RPCN_STAGE_LINKED) return false;
 
@@ -1335,12 +1339,12 @@ static inline bool rpcn_session_search(rpcn_session_t *s, bool include_foreign) 
         if (!s->foreign_ready) rpcn_session_begin_foreign_discovery(s);
         else if (!s->pending_foreign_search)
             s->pending_foreign_search = rpcn_search_room(&s->client, s->com_id_foreign,
-                                                         s->foreign_world_id);
+                                                         s->foreign_world_id, NULL);
     }
 
     if (s->pending_search != 0) return true;   /* one in flight; its reply refreshes the list */
-    s->pending_search = s->ps3 ? rpcn_ps3_search_room(&s->client, s->com_id, s->world_id, RPCN_PS3_VERSION_TAG)
-                               : rpcn_search_room(&s->client, s->com_id, s->world_id);
+    s->pending_search = s->ps3 ? rpcn_ps3_search_room(&s->client, s->com_id, s->world_id, RPCN_PS3_VERSION_TAG, filter)
+                               : rpcn_search_room(&s->client, s->com_id, s->world_id, filter);
     return s->pending_search != 0;
 }
 

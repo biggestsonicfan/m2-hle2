@@ -96,6 +96,34 @@ static volatile int g_vs_mode = 0;
  * the factory NORMAL. */
 static volatile int g_damage_real = 0;
 
+/* A room's PLAYER MATCH rules (the PS3 port's RULE MENU, ps3ui_app.h), for a
+ * room on our server. Each is 0 for the factory setting, which is what every
+ * board outside such a room plays, the graders included, and each is the
+ * owner's for every board in the match, like g_damage_real.
+ *   g_rounds_to_win  GAME ASSIGNMENTS +0x01 (factory 2), put in by
+ *                    sfight.h rounds_default where the game writes its default
+ *   g_round_time     seconds a round lasts (`time`, 0x500090), put in at
+ *                    GAME_INT as the PS3 does (sfight.h xplay_game_time)
+ *   g_game_type      Type A..D = 0..3: the flag byte's BARRIER RESET (b3, 1 =
+ *                    ON) and HYPER MODE (b6, 1 = OFF) as the PS3 sets them
+ *                    from its table at EBOOT 0x377AB0; Type A is factory 0 */
+static volatile int g_rounds_to_win = 0;
+static volatile int g_round_time    = 0;
+static volatile int g_game_type     = 0;
+
+/* Secret character (the PS3's rule row 0x173): whether Start on a fighter with
+ * a hidden variant picks it (sfight_console.h, sfc_hidden_toggle). On, the
+ * default, is the Console version as Sega's DLL ships it; a room on our server
+ * sets it from its rules. A PS3 match takes the PS3 room's own (g_xplay_secret):
+ * with it Off the PS3 offers no hidden fighter online. */
+static volatile int g_hidden_chars = 1;
+
+/* The flag byte's game-type bits for Type A..D (0..3). */
+static inline uint8_t game_type_flag_bits(int type) {
+    static const uint8_t bits[4] = { 0x00, 0x40, 0x08, 0x48 };
+    return bits[type & 3];
+}
+
 /* "japan"/"jpn", "usa"/"us", "export"/"exp"; -1 for anything else. */
 static inline int game_region_parse(const char *s) {
     if (!s) return -1;
@@ -149,6 +177,9 @@ static volatile uint32_t g_xplay_seed          = 0;
  * session flag 0x400000): the match then runs on into the victory screen
  * (sfight.h, xplay_vic_dsp) instead of ending at VIC_INT. */
 static volatile int      g_xplay_spectators    = 0;
+/* The PS3 room's Secret character rule (room byte 0x0C): hidden fighters can
+ * be picked in this match (sfight_console.h). */
+static volatile int      g_xplay_secret        = 0;
 static volatile int      g_xplay_mode          = -1;
 static volatile int      g_xplay_also_mode     = -1;
 

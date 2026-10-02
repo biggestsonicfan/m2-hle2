@@ -420,6 +420,31 @@ int main(void) {
               "the room state round-trips");
         bin[0] ^= 1;
         CHECK(!room_state_decode(bin, len, &back), "bytes without our magic are not a room state");
+        bin[0] ^= 1;
+
+        /* The PLAYER MATCH rules ride along, and a room state from a build
+         * before them still reads, as the factory rules with secret on. */
+        match_rules_t rules = { 3, 0, 2, 1, MATCH_RANGE_WORLD, MATCH_ANY };
+        match_rules_to_room(&rules, &s);
+        CHECK(s.rounds_to_win == 5 && s.round_time == 10 && s.game_type == 2 && s.hidden == 1,
+              "rules indices become rounds 5, 10 s, Type C, secret on");
+        len = room_state_encode(&s, bin);
+        CHECK(len == ROOM_STATE_SIZE && room_state_decode(bin, len, &back) && back.rounds_to_win == 5
+              && back.round_time == 10 && back.game_type == 2 && back.hidden == 1 && back.damage_real == 1,
+              "the rules round-trip in the room state");
+        match_rules_t again = match_rules_from_room(&back);
+        CHECK(again.rounds == 3 && again.time == 0 && again.type == 2 && again.secret == 1,
+              "the room state gives the menu's indices back");
+        CHECK(room_state_decode(bin, ROOM_STATE_SIZE_V1, &back) && back.match == 513 && back.damage_real == 1
+              && back.rounds_to_win == 0 && back.round_time == 0 && back.game_type == 0 && back.hidden == 1,
+              "an older, shorter room state plays the factory rules with secret characters on");
+        CHECK(!room_state_decode(bin, ROOM_STATE_SIZE_V1 - 1, &back), "anything shorter is not a room state");
+        match_rules_t ps3 = match_rules_ps3();
+        CHECK(ps3.rounds == 1 && ps3.time == 1 && ps3.type == 0 && ps3.secret == 0
+              && match_rounds(ps3.rounds) == 3 && match_seconds(ps3.time) == 30,
+              "the PS3 menu's defaults are 3 rounds, 30 s, Type A, secret off");
+        CHECK(match_area_code("us") == 0x7573u && match_area_code("") == 0x7573u && match_area_code("jp") == 0x6A70u,
+              "Same Area publishes the country code, 'us' by default");
 
         room_member_data_t md, mback;
         memset(&md, 0, sizeof(md));

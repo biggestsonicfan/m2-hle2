@@ -348,6 +348,23 @@ static int sfight_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
 static int sfight_hook_damage_default(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)bus;
     if (g_damage_real) cpu->locals.r[15] = 0x80u;
+    /* A room's Game type (hle_hooks.h g_game_type): Type A leaves the byte at
+     * the factory's HYPER MODE ON, BARRIER RESET OFF. */
+    cpu->locals.r[15] |= game_type_flag_bits(g_game_type);
+    return 1;
+}
+
+/*
+ * rounds_default (0x624F8, init_game_assignments+0x18): the factory default of
+ * MATCH COUNT(VS), `stob r15, 0x1D03341` after `mov 2, r15`, with the store to
+ * the working copy (0x59C341) next. A room's Round count (g_rounds_to_win, 2..5)
+ * goes in here on the cold boot every room match starts from; the game re-reads
+ * it at the start of every game. 0 leaves the factory 2.
+ */
+static int sfight_hook_rounds_default(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)bus;
+    if (g_rounds_to_win >= 2 && g_rounds_to_win <= 5)
+        cpu->locals.r[15] = (uint32_t)g_rounds_to_win;
     return 1;
 }
 
@@ -463,10 +480,13 @@ static int sfight_hook_replay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /* xplay_game_time (0xB0F8, GAME_INT+4): `time` (0x500090) is the round-time
- * setting, settings byte +0x11 (0x59C351), before the instruction runs. */
+ * setting, settings byte +0x11 (0x59C351), before the instruction runs. In a
+ * room on our server with a Time limit (g_round_time), it is that many seconds
+ * the same way: boot turns +0x11 into `time` only once, as an index. */
 static int sfight_hook_xplay_game_time(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu;
     if (g_xplay_match) mem_write8(bus, 0x00500090, mem_read8(bus, 0x0059C351));
+    else if (g_round_time) mem_write8(bus, 0x00500090, (uint8_t)g_round_time);
     return 1;
 }
 
@@ -684,7 +704,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 21
+#define SFIGHT_BASE_HOOK_COUNT 22
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
@@ -692,6 +712,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0000E584, sfight_hook_vs_rematch,         "next_round+0x1a4"        }, \
     { 0x00062688, sfight_hook_country_default,    "country_default"         }, \
     { 0x00062674, sfight_hook_damage_default,     "damage_default"          }, \
+    { 0x000624F8, sfight_hook_rounds_default,     "rounds_default"          }, \
     { 0x000083F4, sfight_hook_xplay_force_start,  "xplay_force_start"       }, \
     { 0x0000A218, sfight_hook_xplay_barrier,      "xplay_sel_int_barrier"   }, \
     { 0x0000E6EC, sfight_hook_xplay_match_over,   "xplay_vic_int"           }, \

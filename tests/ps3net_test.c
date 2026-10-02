@@ -594,7 +594,31 @@ static void test_bind_order(void) {
     CHECK(g_net_refs == 0, "a second stop gives back nothing more");
 }
 
+/* A room of ours in the PS3's shape carries the RULE MENU's choices where a
+ * PS3 reads them: blob bytes 9..0xC and searchable ints 0x4D..0x51. */
+static void test_host_rules(void) {
+    static rpcn_session_t s;
+    static ps3_link_t L;
+    uint32_t ints[8];
+    room_of_three(&s, &L);
+    ps3_link_host(&L, 4, NULL, NULL, ints);
+    CHECK(L.blob[8] == 2 && L.blob[9] == 1 && L.blob[10] == 1 && L.blob[11] == 0 && L.blob[12] == 0
+          && ints[0] == 2 && ints[1] == 1 && ints[2] == 1 && ints[3] == 0 && ints[4] == 0 && ints[5] == 0
+          && ints[6] == 1 && ints[7] == RPCN_PS3_VERSION_TAG,
+          "without rules a room is the PS3's default: 3 rounds, 30 s, Type A, secret off, worldwide");
+    match_rules_t r = { 3, 2, 3, 1, MATCH_RANGE_AREA, MATCH_ANY };
+    room_of_three(&s, &L);
+    ps3_link_host(&L, 2, &r, "us", ints);
+    CHECK(L.blob[9] == 3 && L.blob[10] == 2 && L.blob[11] == 3 && L.blob[12] == 1
+          && ints[1] == 3 && ints[2] == 2 && ints[3] == 3 && ints[4] == 1 && ints[5] == 0x7573u,
+          "5 rounds, 60 s, Type D, secret on, Same Area go in the blob and the ints");
+    uint8_t out[5];
+    ps3_build_rules(L.blob, out);
+    CHECK(out[0] == 5 && out[2] == 60 && out[3] == (0x10 | 0x48), "and the board plays them: 5 rounds, 60 s, Type D flags 0x58");
+}
+
 int main(void) {
+    test_host_rules();
     test_capture();
     test_pair();
     test_signaling();

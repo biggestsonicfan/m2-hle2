@@ -8,7 +8,8 @@
  *
  *   Online Battle        -> sign in (ours: the PS3 is always signed in)
  *   PLAYER MATCH menu    -> Quick Match / Custom Match / Create Match / Controls
- *   RULE MENU            -> the room to create
+ *   RULE MENU            -> the room to create (Create Match), or the rooms to
+ *                           look for (Custom Match: every rule "None specified")
  *   connect_win          -> "Accessing..." / "Searching for sessions..."
  *   search_rslt          -> up to six rooms, joined with the cross button
  *   connect_win          -> "Waiting for an opponent." (a room of two)
@@ -387,7 +388,7 @@ typedef enum {
     PS3UI_SCR_TWITCH,           /* ours: the Twitch code */
     PS3UI_SCR_OSK,              /* ours: the on-screen keyboard */
     PS3UI_SCR_MENU,             /* PLAYER MATCH: Quick / Custom / Create / Controls */
-    PS3UI_SCR_RULE,             /* RULE MENU: the room to create */
+    PS3UI_SCR_RULE,             /* RULE MENU: the room to create, or Custom Match's filter */
     PS3UI_SCR_CONNECT,          /* "Accessing..." / "Searching for sessions..." */
     PS3UI_SCR_SEARCH,           /* the session list */
     PS3UI_SCR_ROOM,             /* waiting, or the ROOM MATCH list */
@@ -433,6 +434,9 @@ typedef struct {
     uint32_t search_sent;
     int rule_players, rule_vs, rule_delay;
     int rule_damage_real;       /* DAMAGE REAL (no catch-up); ours only, NORMAL by default */
+    int rule_search;            /* the RULE MENU is Custom Match's search, not Create Match */
+    match_rules_t rule;         /* Create Match's rules (the PS3 menu's defaults) */
+    match_rules_t want;         /* Custom Match's filter: MATCH_ANY = "None specified" */
     int list_n;
     int list_idx[PS3UI_ROWS];
 
@@ -495,8 +499,41 @@ static const char *ps3ui_server_label(const ps3ui_app_t *a)
     return a->cfg.server;                   /* a settings file that names another */
 }
 
-/* The rule menu's rows: DAMAGE is a setting of our server's rooms. */
-static int ps3ui_rule_rows(const ps3ui_app_t *a) { return ps3ui_on_community(a) ? 4 : 3; }
+/* The RULE MENU's rows (TaskMultiMenuRule): the PS3's six, then ours. A PS3
+ * room has no frame delay, VS mode or damage of ours, so on the official server
+ * the rows are the PS3's alone. Our rooms are all in one place, so the matching
+ * range is the PS3's only, which keeps Create Match to choice_win_08. Custom
+ * Match searches on the PS3's rows. */
+enum {
+    PS3UI_RULE_PLAYERS, PS3UI_RULE_ROUNDS, PS3UI_RULE_TIME, PS3UI_RULE_TYPE, PS3UI_RULE_SECRET,
+    PS3UI_RULE_RANGE, PS3UI_RULE_DELAY, PS3UI_RULE_VS, PS3UI_RULE_DAMAGE,
+};
+static const char *const ps3ui_rule_label[9] = {
+    "No. of players", "Round count", "Time limit", "Game type", "Secret character",   /* 0x16f..0x173 */
+    "Matching range", "Frame delay", "VS mode", "Damage",                             /* 0x176; ours */
+};
+static const char *const ps3ui_str_any = "None specified";
+
+static int ps3ui_rule_list(const ps3ui_app_t *a, int ids[8])
+{
+    int n = 0;
+    for (int i = PS3UI_RULE_PLAYERS; i <= PS3UI_RULE_SECRET; i++)
+        ids[n++] = i;
+    if (!ps3ui_on_community(a)) {
+        ids[n++] = PS3UI_RULE_RANGE;
+    } else if (!a->rule_search) {
+        ids[n++] = PS3UI_RULE_DELAY;
+        ids[n++] = PS3UI_RULE_VS;
+        ids[n++] = PS3UI_RULE_DAMAGE;
+    }
+    return n;
+}
+
+static int ps3ui_rule_rows(const ps3ui_app_t *a)
+{
+    int ids[8];
+    return ps3ui_rule_list(a, ids);
+}
 
 /* ---- the task's life ----------------------------------------------------------- */
 
@@ -515,6 +552,8 @@ static void ps3ui_app_init(ps3ui_app_t *a, ps3ui_backend_t be)
     a->be = be;
     a->rule_players = 2;
     a->rule_delay = 0;
+    a->rule = match_rules_ps3();
+    a->want = match_rules_any();
     a->result_side = -1;
     a->default_delay = 2;
     a->last_state = -1;
@@ -672,6 +711,9 @@ static void ps3ui_collect_rooms(ps3ui_app_t *a)
         const rpcn_room_listing_t *r = &a->st.rooms[i];
         if (r->cur_members == 0 || r->room_id == a->st.room_id)
             continue;
+        /* the size filter our rooms cannot carry in the search (netplay_rules_ints) */
+        if (a->cfg.filter && a->cfg.want.players != MATCH_ANY && r->max_slots != a->cfg.want.players)
+            continue;
         a->list_idx[a->list_n++] = (int)i;
     }
 }
@@ -682,9 +724,14 @@ static int ps3ui_room_joinable(const ps3ui_app_t *a, const rpcn_room_listing_t *
         && !netplay_room_reject_reason(r->flag_attr, g_active_profile);
 }
 
+/* Quick Match hosts a room of two with the menu's defaults, as the PS3 does. */
 static void ps3ui_host(ps3ui_app_t *a, int players)
 {
     a->cfg.max_players = (uint32_t)players;
+    a->cfg.has_rules = true;
+    a->cfg.rules = a->quick ? match_rules_ps3() : a->rule;
+    if (ps3ui_on_community(a))
+        a->cfg.rules.range = MATCH_RANGE_WORLD;
     a->cfg.vs_mode = a->rule_vs != 0;
     a->cfg.damage_real = ps3ui_on_community(a) && a->rule_damage_real;
     a->cfg.frame_delay = (uint32_t)(a->rule_delay ? a->rule_delay : a->default_delay);
@@ -800,15 +847,15 @@ static void ps3ui_update_menu(ps3ui_app_t *a)
     if (!ps3ui_hit(a, PS3UI_PAD_CROSS))
         return;
     switch (a->cursor) {
-    case 0:                                 /* Quick Match */
+    case 0:                                 /* Quick Match: every room */
         a->quick = 1;
+        a->cfg.filter = false;
         ps3ui_start_search(a);
         break;
-    case 1:                                 /* Custom Match */
+    case 1:                                 /* Custom Match: the rules to look for */
+    case 2:                                 /* Create Match: the room to create */
         a->quick = 0;
-        ps3ui_start_search(a);
-        break;
-    case 2:                                 /* Create Match */
+        a->rule_search = a->cursor == 1;
         ps3ui_app_go(a, PS3UI_SCR_RULE);
         break;
     case 4:                                 /* Sign out (ours) */
@@ -819,21 +866,59 @@ static void ps3ui_update_menu(ps3ui_app_t *a)
     }
 }
 
-/* RULE MENU rows: players, game type, frame delay, and on our server damage. */
+/* Step a menu index through 0..n-1, with "None specified" (MATCH_ANY) before
+ * 0 when `any`. */
+static uint8_t ps3ui_step(uint8_t v, int n, int d, int any)
+{
+    int m = n + (any ? 1 : 0);
+    int pos = v == MATCH_ANY ? 0 : v + (any ? 1 : 0);
+    pos = (pos + d + m) % m;
+    return any ? (pos == 0 ? MATCH_ANY : (uint8_t)(pos - 1)) : (uint8_t)pos;
+}
+
+/* RULE MENU: Create Match's room (players, the PS3's rules, then ours), or the
+ * rules Custom Match looks for. */
 static void ps3ui_update_rule(ps3ui_app_t *a)
 {
-    ps3ui_move(a, &a->cursor, ps3ui_rule_rows(a), 1);
+    int ids[8], n = ps3ui_rule_list(a, ids);
+    ps3ui_move(a, &a->cursor, n, 1);
     int d = ps3ui_hit(a, PS3UI_PAD_RIGHT) ? 1 : ps3ui_hit(a, PS3UI_PAD_LEFT) ? -1 : 0;
-    if (d) {
-        if (a->cursor == 0) a->rule_players = 2 + (a->rule_players - 2 + d + 7) % 7;
-        if (a->cursor == 1) a->rule_vs ^= 1;
-        if (a->cursor == 2) a->rule_delay = (a->rule_delay + d + 9) % 9;
-        if (a->cursor == 3) a->rule_damage_real ^= 1;
+    int any = a->rule_search;
+    match_rules_t *r = any ? &a->want : &a->rule;
+    if (d && a->cursor < n) {
+        switch (ids[a->cursor]) {
+        case PS3UI_RULE_PLAYERS:
+            if (any) {
+                uint8_t p = r->players == MATCH_ANY ? MATCH_ANY : (uint8_t)(r->players - 2);
+                p = ps3ui_step(p, 7, d, 1);
+                r->players = p == MATCH_ANY ? MATCH_ANY : (uint8_t)(p + 2);
+            } else {
+                a->rule_players = 2 + (a->rule_players - 2 + d + 7) % 7;
+            }
+            break;
+        case PS3UI_RULE_ROUNDS: r->rounds = ps3ui_step(r->rounds, 4, d, any); break;
+        case PS3UI_RULE_TIME:   r->time = ps3ui_step(r->time, 4, d, any); break;
+        case PS3UI_RULE_TYPE:   r->type = ps3ui_step(r->type, 4, d, any); break;
+        case PS3UI_RULE_SECRET: r->secret = ps3ui_step(r->secret, 2, d, any); break;
+        case PS3UI_RULE_RANGE:  r->range ^= 1; break;
+        case PS3UI_RULE_DELAY:  a->rule_delay = (a->rule_delay + d + 9) % 9; break;
+        case PS3UI_RULE_VS:     a->rule_vs ^= 1; break;
+        case PS3UI_RULE_DAMAGE: a->rule_damage_real ^= 1; break;
+        }
     }
-    if (ps3ui_hit(a, PS3UI_PAD_CIRCLE))
+    if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
         ps3ui_app_go(a, PS3UI_SCR_MENU);
-    else if (ps3ui_hit(a, PS3UI_PAD_CROSS))
-        ps3ui_host(a, a->rule_players);
+    } else if (ps3ui_hit(a, PS3UI_PAD_CROSS)) {
+        if (any) {
+            a->cfg.filter = true;
+            a->cfg.want = a->want;
+            if (ps3ui_on_community(a))
+                a->cfg.want.range = MATCH_RANGE_WORLD;
+            ps3ui_start_search(a);
+        } else {
+            ps3ui_host(a, a->rule_players);
+        }
+    }
 }
 
 static void ps3ui_update_search(ps3ui_app_t *a)
@@ -1364,6 +1449,56 @@ static void ps3ui_draw_menu(ps3ui_canvas_t *cv, ps3ui_app_t *a, const char *titl
     }
 }
 
+/* A rule's value as the RULE MENU and the room panel print it. */
+static const char *ps3ui_rules_text(int id, uint8_t v, char *buf, size_t n)
+{
+    static const char *const type[4] = { "Type A", "Type B", "Type C", "Type D" };
+    if (v == MATCH_ANY)
+        return ps3ui_str_any;
+    switch (id) {
+    case PS3UI_RULE_ROUNDS: snprintf(buf, n, "%u", (unsigned)match_rounds(v)); return buf;
+    case PS3UI_RULE_TIME:   snprintf(buf, n, "%u", (unsigned)match_seconds(v)); return buf;
+    case PS3UI_RULE_TYPE:   return type[v & 3];
+    case PS3UI_RULE_SECRET: return v ? "On" : "Off";
+    case PS3UI_RULE_RANGE:  return v == MATCH_RANGE_AREA ? "Same Area" : "Worldwide";
+    default:                snprintf(buf, n, "%u", (unsigned)v); return buf;
+    }
+}
+
+/* One RULE MENU row's value, and whether it is the default (drawn green). */
+static const char *ps3ui_rule_value(const ps3ui_app_t *a, int id, char *buf, size_t n, int *is_def)
+{
+    const match_rules_t *r = a->rule_search ? &a->want : &a->rule;
+    const match_rules_t def = a->rule_search ? match_rules_any() : match_rules_ps3();
+    switch (id) {
+    case PS3UI_RULE_PLAYERS:
+        if (a->rule_search) {
+            *is_def = r->players == MATCH_ANY;
+            if (*is_def)
+                return ps3ui_str_any;
+            snprintf(buf, n, "%u", (unsigned)r->players);
+        } else {
+            *is_def = a->rule_players == 2;
+            snprintf(buf, n, "%d", a->rule_players);
+        }
+        return buf;
+    case PS3UI_RULE_ROUNDS: *is_def = r->rounds == def.rounds; return ps3ui_rules_text(id, r->rounds, buf, n);
+    case PS3UI_RULE_TIME:   *is_def = r->time == def.time; return ps3ui_rules_text(id, r->time, buf, n);
+    case PS3UI_RULE_TYPE:   *is_def = r->type == def.type; return ps3ui_rules_text(id, r->type, buf, n);
+    case PS3UI_RULE_SECRET: *is_def = r->secret == def.secret; return ps3ui_rules_text(id, r->secret, buf, n);
+    case PS3UI_RULE_RANGE:  *is_def = r->range == def.range; return ps3ui_rules_text(id, r->range, buf, n);
+    case PS3UI_RULE_DELAY:
+        *is_def = !a->rule_delay;
+        if (!a->rule_delay)
+            return "Auto";
+        snprintf(buf, n, "%d", a->rule_delay);
+        return buf;
+    case PS3UI_RULE_VS:     *is_def = !a->rule_vs; return a->rule_vs ? "On" : "Off";
+    case PS3UI_RULE_DAMAGE: *is_def = !a->rule_damage_real; return a->rule_damage_real ? "REAL" : "NORMAL";
+    default:                *is_def = 1; return "";
+    }
+}
+
 /* A value list, as TaskMenuArcade_Draw, TaskOptionSetting_Draw and
  * TaskMultiMenuRule_Draw draw one: the label left at p_txt_01_lt, the value
  * right-aligned at p_txt_03_rt, green (0x00F040) while it is the default, and
@@ -1429,17 +1564,22 @@ static void ps3ui_draw_status(ps3ui_canvas_t *cv, ps3ui_app_t *a, const char *te
 /* The panel right of the room rows: four labels at p_txt_01_lt, font 1 at 32,
  * and their values right-aligned at p_txt_03_rt at 36, each line 104 on from
  * the last (Lobby_DrawSearchResults / Lobby_DrawRoomMembers: size + a gap of 72
- * and 68). The search list shows the highlighted room, ROOM MATCH our own. */
-static void ps3ui_draw_room_info(ps3ui_canvas_t *cv, const ps3ui_slots_t *s, const char *const values[4], float alpha)
+ * and 68). The rows are the room's rules from the PS3's rule table: Round
+ * count, Time limit, Game type, Secret character; the search list puts the
+ * room's Matching range over them (string 0x176). It shows the highlighted
+ * room, ROOM MATCH our own. */
+static void ps3ui_draw_room_info(ps3ui_canvas_t *cv, const ps3ui_slots_t *s, const match_rules_t *r, float alpha)
 {
     float px, py, tx, ty;
     if (!ps3ui_slot_xy(s, "p_txt_01_lt", 0, 0, &px, &py) || !ps3ui_slot_xy(s, "p_txt_03_rt", 1, 0, &tx, &ty))
         return;
-    static const char *const labels[4] = { "Players", "Frame delay", "Game type", "Entry" };
     ps3ui_text_style_t lab = ps3ui_style_text(26.0f), val = ps3ui_style_text(29.0f);
+    const uint8_t v[4] = { r->rounds, r->time, r->type, r->secret };
     for (int i = 0; i < 4; i++) {
-        ps3ui_text_left(cv, &lab, px, py + 104.0f * (float)i, labels[i], alpha);
-        ps3ui_text_right(cv, &val, tx, ty + 104.0f * (float)i, values[i], alpha);
+        char buf[24];
+        ps3ui_text_left(cv, &lab, px, py + 104.0f * (float)i, ps3ui_rule_label[PS3UI_RULE_ROUNDS + i], alpha);
+        ps3ui_text_right(cv, &val, tx, ty + 104.0f * (float)i, ps3ui_rules_text(PS3UI_RULE_ROUNDS + i, v[i], buf,
+                                                                                  sizeof buf), alpha);
     }
 }
 
@@ -1482,17 +1622,33 @@ static void ps3ui_draw_search(ps3ui_canvas_t *cv, ps3ui_app_t *a)
         snprintf(count, sizeof count, "%u / %u", r->cur_members, r->max_slots);
         ps3ui_text_right(cv, &st, px + 800.0f, py + 2.0f, count, alpha);
     }
-    /* details of the highlighted room */
+    /* rules of the highlighted room */
     if (a->list_n) {
-        const rpcn_room_listing_t *r = &a->st.rooms[a->list_idx[a->cursor]];
-        const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
-        char delay[16], players[16];
-        snprintf(delay, sizeof delay, "%u", (r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK);
-        snprintf(players, sizeof players, "%u", r->max_slots);
-        const char *values[4] = { players, delay, why ? "Other version" : "Sonic the Fighters",
-                                  r->has_password ? "Private" : "Open" };
-        ps3ui_draw_room_info(cv, &s, values, alpha);
+        match_rules_t rules = netplay_rules_of_listing(&a->st.rooms[a->list_idx[a->cursor]], a->st.ps3);
+        ps3ui_draw_room_info(cv, &s, &rules, alpha);
     }
+}
+
+/* The search list's message: what the panel has no room for. A PS3 room's
+ * matching range; a community room's frame delay and password (ours, and
+ * always Worldwide). */
+static const char *ps3ui_search_message(const ps3ui_app_t *a, char *buf, size_t n)
+{
+    if (!a->list_n)
+        return "No sessions were found.";
+    const rpcn_room_listing_t *r = &a->st.rooms[a->list_idx[a->cursor]];
+    if (a->st.ps3) {
+        match_rules_t rules = netplay_rules_of_listing(r, 1);
+        snprintf(buf, n, "Select a session.  %s: %s", ps3ui_rule_label[PS3UI_RULE_RANGE],
+                 rules.range == MATCH_RANGE_AREA ? "Same Area" : "Worldwide");
+        return buf;
+    }
+    if (netplay_room_reject_reason(r->flag_attr, g_active_profile))
+        return "This session is for another version.";
+    snprintf(buf, n, "Select a session.  Frame delay: %u  %s",
+             (r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK,
+             r->has_password ? "Private" : "Open");
+    return buf;
 }
 
 /* The ROOM MATCH list: members in the search list's rows. */
@@ -1517,11 +1673,7 @@ static void ps3ui_draw_room_list(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     if (a->main.state == PS3UI_WIN_IDLE && ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey))
         ps3ui_draw_cursor(cv, &ps3ui_n_cmn_online, "cursor_search", ex, ey + 74.0f * (float)a->cursor, a->cursor_t);
     /* the room's own rules, in the panel the search list uses for a room */
-    char delay[16], players[16];
-    snprintf(delay, sizeof delay, "%u", (st->room_flags >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK);
-    snprintf(players, sizeof players, "%u", st->max_slot);
-    const char *info[4] = { players, delay, "Sonic the Fighters", a->cfg.room_password[0] ? "Private" : "Open" };
-    ps3ui_draw_room_info(cv, &s, info, alpha);
+    ps3ui_draw_room_info(cv, &s, &st->room_rules, alpha);
     /* ENTRY 1P / 1P tags: font 2 set 24 wide and 32 high, centred on (750, 24)
      * of the row. Font 2's own cell is 56 with a cap of 40. */
     ps3ui_text_style_t name = ps3ui_style_name(), tag = ps3ui_style_title(40.0f * 32.0f / 56.0f);
@@ -1709,7 +1861,7 @@ static const char *ps3ui_hints(const ps3ui_app_t *a)
     case PS3UI_SCR_MENU:
         return "\x01:Back  \x02:Enter";
     case PS3UI_SCR_RULE:
-        return "\x01:Back  \x02:Create";
+        return a->rule_search ? "\x01:Back  \x02:Search" : "\x01:Back  \x02:Create";
     case PS3UI_SCR_OSK:
         return "\x04:Delete  \x03:Space  \x01:Back  \x02:Enter";
     case PS3UI_SCR_TWITCH:
@@ -1774,27 +1926,26 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
         case PS3UI_SCR_OSK: ps3ui_draw_osk(cv, a); break;
         case PS3UI_SCR_MENU: ps3ui_draw_menu(cv, a, ps3ui_str_title, ps3ui_str_menu, 5, NULL); break;
         case PS3UI_SCR_RULE: {
-            static const char *const rows[4] = { "Players", "Game type", "Frame delay", "Damage" };
-            char p[8], d[16];
-            snprintf(p, sizeof p, "%d", a->rule_players);
-            if (a->rule_delay)
-                snprintf(d, sizeof d, "%d", a->rule_delay);
-            else
-                snprintf(d, sizeof d, "Auto");
-            const char *values[4] = { p, a->rule_vs ? "VS (rematch)" : "Arcade", d,
-                                      a->rule_damage_real ? "REAL" : "NORMAL" };
-            const int is_def[4] = { a->rule_players == 2, !a->rule_vs, !a->rule_delay, !a->rule_damage_real };
-            ps3ui_draw_values(cv, &a->main, a->cursor, a->cursor_t, ps3ui_str_title, rows, values, is_def,
-                              ps3ui_rule_rows(a), 0);
+            int ids[8], n = ps3ui_rule_list(a, ids);
+            const char *labels[8], *values[8];
+            int is_def[8];
+            char buf[8][24];
+            for (int i = 0; i < n; i++) {
+                labels[i] = ps3ui_rule_label[ids[i]];
+                values[i] = ps3ui_rule_value(a, ids[i], buf[i], sizeof buf[i], &is_def[i]);
+            }
+            ps3ui_draw_values(cv, &a->main, a->cursor, a->cursor_t, ps3ui_str_title, labels, values, is_def, n, 0);
             break;
         }
         case PS3UI_SCR_CONNECT:
             ps3ui_draw_status(cv, a, a->searching ? "Searching for sessions..." : "Accessing...");
             break;
-        case PS3UI_SCR_SEARCH:
+        case PS3UI_SCR_SEARCH: {
+            char m[128];
             ps3ui_draw_search(cv, a);
-            ps3ui_draw_message(cv, a, a->list_n ? "Select a session." : "No sessions were found.");
+            ps3ui_draw_message(cv, a, ps3ui_search_message(a, m, sizeof m));
             break;
+        }
         case PS3UI_SCR_ROOM:
             if (a->st.member_count >= 3)
                 ps3ui_draw_room_list(cv, a);
