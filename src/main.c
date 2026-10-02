@@ -305,6 +305,20 @@ static void netplay_reset_board_cb(void *ctx) {
     emu_board_reset_state();
 }
 
+/* --net-twitch: log each new stage of the sign-in once. */
+static void netplay_cli_log_twitch(const netplay_status_t *st) {
+    static rpcn_twitch_state_t tw_last = (rpcn_twitch_state_t)-1;
+    if (st->twitch_state == tw_last) return;
+    tw_last = st->twitch_state;
+    if (st->twitch_state == RPCN_TWITCH_WAITING)
+        LOG_INFO("netplay: Twitch code %s -- approve it at %s",
+                 st->twitch_user_code, st->twitch_uri);
+    else if (st->twitch_state == RPCN_TWITCH_DONE)
+        LOG_INFO("netplay: Twitch signed in as %s", st->twitch_npid);
+    else if (st->twitch_state == RPCN_TWITCH_FAILED)
+        LOG_INFO("netplay: Twitch failed: %s", st->twitch_error);
+}
+
 /*
  * Drives the --net-* flags. Called every frame from both the windowed and the
  * headless loop; posts exactly the commands the netplay window's buttons post,
@@ -330,19 +344,7 @@ static void netplay_cli_pump(void) {
     netplay_status_t st;
     netplay_get_status(&st);
 
-    if (g_net_twitch) {
-        static rpcn_twitch_state_t tw_last = (rpcn_twitch_state_t)-1;
-        if (st.twitch_state != tw_last) {
-            tw_last = st.twitch_state;
-            if (st.twitch_state == RPCN_TWITCH_WAITING)
-                LOG_INFO("netplay: Twitch code %s -- approve it at %s",
-                         st.twitch_user_code, st.twitch_uri);
-            else if (st.twitch_state == RPCN_TWITCH_DONE)
-                LOG_INFO("netplay: Twitch signed in as %s", st.twitch_npid);
-            else if (st.twitch_state == RPCN_TWITCH_FAILED)
-                LOG_INFO("netplay: Twitch failed: %s", st.twitch_error);
-        }
-    }
+    if (g_net_twitch) netplay_cli_log_twitch(&st);
 
     if (st.state != last) {
         last = st.state;
@@ -500,106 +502,125 @@ static bool menu_bar_should_show(void) {
     return igGetIO()->MousePos.y <= igGetFrameHeight() + 8.0f;
 }
 
+static void menu_file(void) {
+    if (!igBeginMenu("File")) return;
+    if (igMenuItem("Load ROMs...")) open_rom_dialog();
+    igSeparator();
+    /* Capture mode: the window loses its chrome, goes to the capture size
+     * and parks off the desktop, and a tray icon becomes the way back. */
+    if (igMenuItemEx("Capture mode (OBS)", NULL, false, true))
+        kiosk_enter(g_kiosk_w, g_kiosk_h, false);
+    igSeparator();
+    if (igMenuItemEx("Quit", "Esc", false, true)) sapp_request_quit();
+    igEndMenu();
+}
+
+static void menu_profile(void) {
+    if (!igBeginMenu("Profile")) return;
+    for (size_t i = 0; i < g_profile_count; i++) {
+        bool sel = (g_active_profile == g_profiles[i]);
+        if (igMenuItemBoolPtr(g_profiles[i]->display_name, NULL, &sel, true))
+            g_active_profile = g_profiles[i];
+    }
+    igEndMenu();
+}
+
+static void menu_emulation(void) {
+    if (!igBeginMenu("Emulation")) return;
+    bool can_run  = state.emu_started && state.romset.loaded && !state.cpu.halted;
+    bool running  = state.emu_started && emu_is_running(&state.emu);
+    bool can_step = can_run && !running;
+    if (running) {
+        if (igMenuItemEx("Pause", "F9", false, true)) emu_stop(&state.emu);
+    } else {
+        if (igMenuItemEx("Run",   "F9", false, can_run))  emu_run(&state.emu);
+    }
+    if (igMenuItemEx("Step",     "F5", false, can_step)) emu_step(&state.emu, 1);
+    if (igMenuItemEx("Step 10",  "F6", false, can_step)) emu_step(&state.emu, 10);
+    if (igMenuItemEx("Step 100", "F7", false, can_step)) emu_step(&state.emu, 100);
+    igSeparator();
+    igMenuItemBoolPtr("Break on warning", NULL, (bool *)&g_log.break_on_warn, true);
+    igEndMenu();
+}
+
+static void menu_debug(void) {
+    if (!igBeginMenu("Debug")) return;
+    igMenuItemBoolPtr("CPU registers",    NULL, &state.show_cpu,         true);
+    igMenuItemBoolPtr("Memory viewer",    NULL, &state.show_memview,     true);
+    igMenuItemBoolPtr("Memory bus stats", NULL, &state.show_bus_stats,   true);
+    igMenuItemBoolPtr("Breakpoints",      NULL, &state.show_breakpoints, true);
+    igMenuItemBoolPtr("COP diagnostics",  NULL, &state.show_cop,         true);
+    igMenuItemBoolPtr("Break on unknown COP cmd", NULL, (bool*)&g_sharc.break_on_unknown, true);
+    igMenuItemBoolPtr("3D viewer",        NULL, &state.show_geo3d,       true);
+    igMenuItemBoolPtr("Object viewer",    NULL, &state.show_objview,     true);
+    igMenuItemBoolPtr("SKY EYE (noclip link)", NULL, &state.show_sky_eye, true);
+    if (igMenuItem("Dump 3D captures")) geo3d_log_captures(&state.geo3d);
+    igMenuItemBoolPtr("68K sound CPU",    NULL, &state.show_m68k_cpu,    true);
+    igMenuItemBoolPtr("68K memory viewer", NULL, &state.show_m68k_mem,   true);
+    igMenuItemBoolPtr("Log sound writes", NULL, &g_sound.log_writes,     true);
+    { bool ws = g_warning_skip != 0;  if (igMenuItemBoolPtr("Warning-screen skip", NULL, &ws, true)) g_warning_skip = ws; }
+    igSeparator();
+    igMenuItemBoolPtr("Always show menu bar", NULL, &state.always_show_menu, true);
+    igSeparator();
+    igMenuItemBoolPtr("CPU opcode tests", NULL, &state.show_debug, true);
+    igMenuItemBoolPtr("ImGui demo window", NULL, &state.show_demo, true);
+    igEndMenu();
+}
+
+/* The Netplay menu's status lines. */
+static void menu_netplay_status(void) {
+    netplay_status_t st;
+    netplay_get_status(&st);
+    igTextDisabled("%s", netplay_state_text(st.state));
+    if (st.room_id)
+        igTextDisabled("room %llu (%u of %u%s)", (unsigned long long)st.room_id,
+                       st.member_count, st.max_slot, st.is_host ? ", yours" : "");
+    if (st.peer_npid[0])
+        igTextDisabled("peer %s %s", st.peer_npid,
+                       st.peer_heard ? "[reachable]"
+                                     : st.peer_known ? "[punching]" : "[no address]");
+    if (netplay_state_running(st.state))
+        igTextDisabled("frame %u, %u stall%s", st.frame, st.stalls,
+                       st.stalls == 1 ? "" : "s");
+    if (st.error[0]) igTextDisabled("%s", st.error);
+}
+
+/* Netplay gets a menu of its own rather than a line in Debug: it is the one
+ * feature here a player rather than a developer reaches for, and the status
+ * line is worth being able to read without opening the window — whether the
+ * peer is reachable is the question people actually have. */
+static void menu_netplay(void) {
+    if (!igBeginMenu("Netplay")) return;
+    igMenuItemBoolPtr("Netplay window", NULL, &state.show_netplay, true);
+    igSeparator();
+    menu_netplay_status();
+    igEndMenu();
+}
+
+/* Right-side status display (reads the UI snapshot, not the live CPU). */
+static void menu_bar_status(void) {
+    if (!g_active_profile) return;
+    igSeparator();
+    const char *runstate = "no ROM";
+    if (state.romset.loaded)
+        runstate = state.cpu.halted ? "halted"
+                 : (state.emu_started && emu_is_running(&state.emu) ? "running" : "stopped");
+    igText("  %s | %s | IP=0x%08X | %u steps/s",
+           g_active_profile->id, runstate,
+           state.emu.cpu_snapshot.sfr.ip,
+           state.emu.steps_per_second);
+}
+
 static void draw_menu_bar(void) {
     if (!s_menu_bar_visible) return;
     if (!igBeginMainMenuBar()) return;
-    if (igBeginMenu("File")) {
-        if (igMenuItem("Load ROMs...")) open_rom_dialog();
-        igSeparator();
-        /* Capture mode: the window loses its chrome, goes to the capture size
-         * and parks off the desktop, and a tray icon becomes the way back. */
-        if (igMenuItemEx("Capture mode (OBS)", NULL, false, true))
-            kiosk_enter(g_kiosk_w, g_kiosk_h, false);
-        igSeparator();
-        if (igMenuItemEx("Quit", "Esc", false, true)) sapp_request_quit();
-        igEndMenu();
-    }
-    if (igBeginMenu("Profile")) {
-        for (size_t i = 0; i < g_profile_count; i++) {
-            bool sel = (g_active_profile == g_profiles[i]);
-            if (igMenuItemBoolPtr(g_profiles[i]->display_name, NULL, &sel, true))
-                g_active_profile = g_profiles[i];
-        }
-        igEndMenu();
-    }
-    if (igBeginMenu("Emulation")) {
-        bool can_run  = state.emu_started && state.romset.loaded && !state.cpu.halted;
-        bool running  = state.emu_started && emu_is_running(&state.emu);
-        bool can_step = can_run && !running;
-        if (running) {
-            if (igMenuItemEx("Pause", "F9", false, true)) emu_stop(&state.emu);
-        } else {
-            if (igMenuItemEx("Run",   "F9", false, can_run))  emu_run(&state.emu);
-        }
-        if (igMenuItemEx("Step",     "F5", false, can_step)) emu_step(&state.emu, 1);
-        if (igMenuItemEx("Step 10",  "F6", false, can_step)) emu_step(&state.emu, 10);
-        if (igMenuItemEx("Step 100", "F7", false, can_step)) emu_step(&state.emu, 100);
-        igSeparator();
-        igMenuItemBoolPtr("Break on warning", NULL, (bool *)&g_log.break_on_warn, true);
-        igEndMenu();
-    }
-    if (igBeginMenu("Debug")) {
-        igMenuItemBoolPtr("CPU registers",    NULL, &state.show_cpu,         true);
-        igMenuItemBoolPtr("Memory viewer",    NULL, &state.show_memview,     true);
-        igMenuItemBoolPtr("Memory bus stats", NULL, &state.show_bus_stats,   true);
-        igMenuItemBoolPtr("Breakpoints",      NULL, &state.show_breakpoints, true);
-        igMenuItemBoolPtr("COP diagnostics",  NULL, &state.show_cop,         true);
-        igMenuItemBoolPtr("Break on unknown COP cmd", NULL, (bool*)&g_sharc.break_on_unknown, true);
-        igMenuItemBoolPtr("3D viewer",        NULL, &state.show_geo3d,       true);
-        igMenuItemBoolPtr("Object viewer",    NULL, &state.show_objview,     true);
-        igMenuItemBoolPtr("SKY EYE (noclip link)", NULL, &state.show_sky_eye, true);
-        if (igMenuItem("Dump 3D captures")) geo3d_log_captures(&state.geo3d);
-        igMenuItemBoolPtr("68K sound CPU",    NULL, &state.show_m68k_cpu,    true);
-        igMenuItemBoolPtr("68K memory viewer", NULL, &state.show_m68k_mem,   true);
-        igMenuItemBoolPtr("Log sound writes", NULL, &g_sound.log_writes,     true);
-        { bool ws = g_warning_skip != 0;  if (igMenuItemBoolPtr("Warning-screen skip", NULL, &ws, true)) g_warning_skip = ws; }
-        igSeparator();
-        igMenuItemBoolPtr("Always show menu bar", NULL, &state.always_show_menu, true);
-        igSeparator();
-        igMenuItemBoolPtr("CPU opcode tests", NULL, &state.show_debug, true);
-        igMenuItemBoolPtr("ImGui demo window", NULL, &state.show_demo, true);
-        igEndMenu();
-    }
-
-    /* Netplay gets a menu of its own rather than a line in Debug: it is the one
-     * feature here a player rather than a developer reaches for, and the status
-     * line is worth being able to read without opening the window — whether the
-     * peer is reachable is the question people actually have. */
+    menu_file();
+    menu_profile();
+    menu_emulation();
+    menu_debug();
     shader_ui_menu(state.file_dialog);
-    if (igBeginMenu("Netplay")) {
-        igMenuItemBoolPtr("Netplay window", NULL, &state.show_netplay, true);
-        igSeparator();
-        {
-            netplay_status_t st;
-            netplay_get_status(&st);
-            igTextDisabled("%s", netplay_state_text(st.state));
-            if (st.room_id)
-                igTextDisabled("room %llu (%u of %u%s)", (unsigned long long)st.room_id,
-                               st.member_count, st.max_slot, st.is_host ? ", yours" : "");
-            if (st.peer_npid[0])
-                igTextDisabled("peer %s %s", st.peer_npid,
-                               st.peer_heard ? "[reachable]"
-                                             : st.peer_known ? "[punching]" : "[no address]");
-            if (netplay_state_running(st.state))
-                igTextDisabled("frame %u, %u stall%s", st.frame, st.stalls,
-                               st.stalls == 1 ? "" : "s");
-            if (st.error[0]) igTextDisabled("%s", st.error);
-        }
-        igEndMenu();
-    }
-
-    /* Right-side status display (reads the UI snapshot, not the live CPU). */
-    if (g_active_profile) {
-        igSeparator();
-        const char *runstate = "no ROM";
-        if (state.romset.loaded)
-            runstate = state.cpu.halted ? "halted"
-                     : (state.emu_started && emu_is_running(&state.emu) ? "running" : "stopped");
-        igText("  %s | %s | IP=0x%08X | %u steps/s",
-               g_active_profile->id, runstate,
-               state.emu.cpu_snapshot.sfr.ip,
-               state.emu.steps_per_second);
-    }
+    menu_netplay();
+    menu_bar_status();
     igEndMainMenuBar();
 }
 
@@ -623,6 +644,87 @@ static void kiosk_restart_sound_cb(void *ud) {
     (void)ud;
     if (!state.emu_started) return;
     emu_sound_restart(&state.emu);
+}
+
+/* init's renderer half: sokol, ImGui, the 2D and 3D renderers, the picture
+ * filter and the viewers, with the command line's choices for each. */
+static void init_renderer(void) {
+    sg_setup(&(sg_desc){
+        .environment = sglue_environment(),
+        .logger.func = slog_func,
+    });
+    simgui_setup(&(simgui_desc_t){ .logger.func = slog_func });
+    state.file_dialog = IGFD_Create();
+    video_init(&state.video);
+    game_render_init();
+    post_shader_init();
+    shader_ui_load();
+    if (g_shader_preset[0] && !post_shader_load(g_shader_preset))
+        LOG_WARN("--shader %s: %s", g_shader_preset, post_shader_error());
+    if (g_shader_arg >= 0) post_shader_set_mode((post_shader_mode_t)g_shader_arg);
+    if (g_shader_scale >= 0) post_shader_set_input_scale(g_shader_scale);
+    geo3d_init(&state.geo3d);
+    g_geo3d_state = &state.geo3d;
+    objview_init();
+    if (g_objview_on) {
+        state.show_objview = true;
+        g_objview.v.active = 1;
+        if (g_objview_model >= 0) g_objview.v.model = g_objview_model;
+    }
+    if (g_browse_model >= 0) {            /* --model N: browse + dump its texture tiles */
+        state.geo3d.use_captures = false;
+        state.geo3d.model_index  = g_browse_model;
+        g_dump_model_tex         = g_browse_model;
+    }
+}
+
+/* init's sound and stream half. */
+static void init_audio_av(void) {
+    /* Host audio output, drained from the sound board's sample ring. --av-mute
+     * leaves the device unopened: a machine that is streaming does not need to
+     * play through its own speakers, and the A/V tap sits at the producer, so
+     * the stream is unaffected by there being no drain. */
+    if (g_av_mute) LOG_INFO("audio: --av-mute, no output device opened");
+    else           audio_out_init();
+
+    /* The raw A/V server, and the offscreen target it captures from. The
+     * target is made here, with the renderer, so the first board frame after a
+     * client connects already has somewhere to be drawn. */
+    if (g_av_port > 0) {
+        if (av_stream_start(g_av_port, g_av_w, g_av_h)) {
+            if (!av_capture_init(av_stream_width(), av_stream_height())) {
+                LOG_ERROR("av: no video path — stopping the server rather than "
+                          "streaming sound against a still picture");
+                av_stream_shutdown();
+            }
+        }
+    }
+}
+
+/* Keyboard focus on launch (Windows; nothing elsewhere). */
+static void init_take_focus(void) {
+#if defined(_WIN32)
+    /* Grab keyboard focus on launch so the user doesn't have to click the window
+     * before input works. SetForegroundWindow on its own is usually blocked by
+     * Windows' focus-stealing guard, so briefly attach our input queue to the
+     * current foreground thread's to be granted the foreground. Capture mode
+     * does its own placement, and a parked window has no business taking the
+     * foreground, so this is skipped there. */
+    if (!g_kiosk_on) {
+        HWND hwnd = (HWND)sapp_win32_get_hwnd();
+        if (hwnd) {
+            HWND  fg     = GetForegroundWindow();
+            DWORD fg_tid = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+            DWORD my_tid = GetCurrentThreadId();
+            if (fg_tid && fg_tid != my_tid) AttachThreadInput(fg_tid, my_tid, TRUE);
+            ShowWindow(hwnd, SW_SHOW);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+            if (fg_tid && fg_tid != my_tid) AttachThreadInput(fg_tid, my_tid, FALSE);
+        }
+    }
+#endif
 }
 
 static void init(void) {
@@ -653,53 +755,8 @@ static void init(void) {
      * to install into without the user clicking through Profile first. */
     g_active_profile = startup_profile();
 
-    sg_setup(&(sg_desc){
-        .environment = sglue_environment(),
-        .logger.func = slog_func,
-    });
-    simgui_setup(&(simgui_desc_t){ .logger.func = slog_func });
-    state.file_dialog = IGFD_Create();
-    video_init(&state.video);
-    game_render_init();
-    post_shader_init();
-    shader_ui_load();
-    if (g_shader_preset[0] && !post_shader_load(g_shader_preset))
-        LOG_WARN("--shader %s: %s", g_shader_preset, post_shader_error());
-    if (g_shader_arg >= 0) post_shader_set_mode((post_shader_mode_t)g_shader_arg);
-    if (g_shader_scale >= 0) post_shader_set_input_scale(g_shader_scale);
-    geo3d_init(&state.geo3d);
-    g_geo3d_state = &state.geo3d;
-    objview_init();
-    if (g_objview_on) {
-        state.show_objview = true;
-        g_objview.v.active = 1;
-        if (g_objview_model >= 0) g_objview.v.model = g_objview_model;
-    }
-    if (g_browse_model >= 0) {            /* --model N: browse + dump its texture tiles */
-        state.geo3d.use_captures = false;
-        state.geo3d.model_index  = g_browse_model;
-        g_dump_model_tex         = g_browse_model;
-    }
-
-    /* Host audio output, drained from the sound board's sample ring. --av-mute
-     * leaves the device unopened: a machine that is streaming does not need to
-     * play through its own speakers, and the A/V tap sits at the producer, so
-     * the stream is unaffected by there being no drain. */
-    if (g_av_mute) LOG_INFO("audio: --av-mute, no output device opened");
-    else           audio_out_init();
-
-    /* The raw A/V server, and the offscreen target it captures from. The
-     * target is made here, with the renderer, so the first board frame after a
-     * client connects already has somewhere to be drawn. */
-    if (g_av_port > 0) {
-        if (av_stream_start(g_av_port, g_av_w, g_av_h)) {
-            if (!av_capture_init(av_stream_width(), av_stream_height())) {
-                LOG_ERROR("av: no video path — stopping the server rather than "
-                          "streaming sound against a still picture");
-                av_stream_shutdown();
-            }
-        }
-    }
+    init_renderer();
+    init_audio_av();
 
     /* The overlay plugin, if one was asked for. After game_render_init because
      * its layers are GPU images, and before the emu thread because a plugin
@@ -733,28 +790,7 @@ static void init(void) {
         },
     };
 
-#if defined(_WIN32)
-    /* Grab keyboard focus on launch so the user doesn't have to click the window
-     * before input works. SetForegroundWindow on its own is usually blocked by
-     * Windows' focus-stealing guard, so briefly attach our input queue to the
-     * current foreground thread's to be granted the foreground. Capture mode
-     * does its own placement, and a parked window has no business taking the
-     * foreground, so this is skipped there. */
-    if (!g_kiosk_on) {
-        HWND hwnd = (HWND)sapp_win32_get_hwnd();
-        if (hwnd) {
-            HWND  fg     = GetForegroundWindow();
-            DWORD fg_tid = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
-            DWORD my_tid = GetCurrentThreadId();
-            if (fg_tid && fg_tid != my_tid) AttachThreadInput(fg_tid, my_tid, TRUE);
-            ShowWindow(hwnd, SW_SHOW);
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
-            SetFocus(hwnd);
-            if (fg_tid && fg_tid != my_tid) AttachThreadInput(fg_tid, my_tid, FALSE);
-        }
-    }
-#endif
+    init_take_focus();
 }
 
 /* ---- Headless GPU, for --headless --av-port -------------------------------
@@ -958,6 +994,111 @@ static bool headless_gpu_init(void) {
 }
 #endif
 
+/* headless_main's board, viewers and netplay, before anything starts. */
+static void headless_board_init(void) {
+    mem_init(&state.bus, NULL, 0);
+    i960_reset(&state.cpu);
+    bp_init();
+    wp_init();
+    g_active_profile = startup_profile();
+    geo3d_init(&state.geo3d);
+    g_geo3d_state = &state.geo3d;
+    objview_init();
+    netplay_init();
+    netplay_set_reset_hook(netplay_reset_board_cb, NULL);
+    netplay_set_open_browser(false);   /* no desktop here - the log carries the URL */
+}
+
+/* The headless GPU, the A/V server and its target, and the overlay plugin.
+ * False when any of them could not start. */
+static bool headless_av_start(void) {
+    if (!headless_gpu_init()) return false;
+    if (!av_stream_start(g_av_port, g_av_w, g_av_h)) return false;
+    if (!av_capture_init(av_stream_width(), av_stream_height())) {
+        av_stream_shutdown();
+        return false;
+    }
+    overlay_host_init();
+    return true;
+}
+
+/*
+ * The notification-area icon. A headless run has no window and no console
+ * once whatever started it goes away, so without this the only way to stop
+ * one is Task Manager -- and an orphan sits there holding its ports, its
+ * ROM and its A/V socket. The same two items capture mode has: Exit, and
+ * Restart sound board.
+ *
+ * The hooks are the kiosk's; they are about the emu thread, not about a
+ * window, and the tray menu is the only thing that drives either.
+ */
+static void headless_tray_start(void) {
+    kiosk_set_hooks(&(kiosk_hooks_t){
+        .is_running    = kiosk_is_running_cb,
+        .set_running   = kiosk_set_running_cb,
+        .restart_sound = kiosk_restart_sound_cb,
+    });
+    char note[128];
+    int  o = 0;
+    if (g_mcp_enable) o += snprintf(note + o, sizeof note - (size_t)o,
+                                    "--mcp %d", g_mcp_port);
+    if (g_av_port > 0) snprintf(note + o, sizeof note - (size_t)o,
+                                "%s--av-port %d", o ? ", " : "", g_av_port);
+    tray_headless_start(note);
+    if (g_active_profile && g_active_profile->display_name)
+        kiosk_set_label(g_active_profile->display_name);
+}
+
+/* One headless A/V frame, when one is due. */
+static void headless_av_frame(void) {
+    /* One render per board frame, and only while somebody is reading:
+     * with no client this is a poll loop and nothing else. */
+    uint64_t av_frame = 0, av_sample = 0;
+    if (!(av_capture_due(&av_frame, &av_sample) && av_stream_active())) return;
+    game_frame_prepare(&state.video, &state.geo3d, &state.bus,
+                       &state.romset, true);
+    /* With an overlay loaded the board is letterboxed into the
+     * target so the plugin has margin to live in; with none it is
+     * drawn across the whole target exactly as before. The pass
+     * action clears to black, so the columns have the right
+     * background before the plugin paints a thing. */
+    int ox = 0, oy = 0, gw = av_stream_width(), gh = av_stream_height();
+    overlay_host_game_rect(av_stream_width(), av_stream_height(), 0,
+                           &ox, &oy, &gw, &gh);
+    /* Outside the pass: sg_update_image cannot run inside one. */
+    overlay_host_paint(av_stream_width(), av_stream_height(),
+                       ox, oy, gw, gh, 0, g_emu_frames);
+    sg_begin_pass(&(sg_pass){
+        .action      = av_capture_action(),
+        .attachments = { .colors[0]     = av_capture_color_att(),
+                         .depth_stencil = av_capture_depth_att() },
+    });
+    game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                    ox, oy, gw, gh, 1.0f);
+    overlay_host_draw();
+    sg_end_pass();
+    av_capture_submit(av_frame, av_sample);
+    sg_commit();
+}
+
+/*
+ * Exit from the tray. Everything comes down in the same order cleanup()
+ * uses for a windowed run, and for the same reasons: the A/V writer thread
+ * is still sending out of buffers the renderer owns, and the audio tap
+ * runs on the emu thread, which is still going at this point.
+ */
+static void headless_shutdown(void) {
+    LOG_INFO("headless: shutting down");
+    av_stream_shutdown();
+    if (state.emu_started) emu_thread_shutdown(&state.emu);
+    backup_ram_flush();
+    netplay_shutdown();
+    overlay_host_shutdown();
+    av_capture_shutdown();
+    romset_free(&state.romset);
+    tray_headless_stop();
+}
+
 /* --headless: the emulator and its MCP bridge and nothing else. The graders in
  * tools/ drive the game over the bridge and read what they need out of memory
  * and the display list, so a window, a GPU context and an audio device are only
@@ -979,27 +1120,11 @@ static int headless_main(void) {
     if (g_kiosk_on)
         LOG_WARN("--kiosk ignored: --headless has no window to capture. Drop --headless "
                  "to record; OBS hooks a swapchain, so it needs a real window.");
-    mem_init(&state.bus, NULL, 0);
-    i960_reset(&state.cpu);
-    bp_init();
-    wp_init();
-    g_active_profile = startup_profile();
-    geo3d_init(&state.geo3d);
-    g_geo3d_state = &state.geo3d;
-    objview_init();
-    netplay_init();
-    netplay_set_reset_hook(netplay_reset_board_cb, NULL);
-    netplay_set_open_browser(false);   /* no desktop here - the log carries the URL */
+    headless_board_init();
 
     bool av_on = false;
     if (g_av_port > 0) {
-        if (!headless_gpu_init()) return 3;
-        if (!av_stream_start(g_av_port, g_av_w, g_av_h)) return 3;
-        if (!av_capture_init(av_stream_width(), av_stream_height())) {
-            av_stream_shutdown();
-            return 3;
-        }
-        overlay_host_init();
+        if (!headless_av_start()) return 3;
         av_on = true;
     }
 
@@ -1008,32 +1133,7 @@ static int headless_main(void) {
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
     if (g_autorun) emu_run(&state.emu);
 
-    /*
-     * The notification-area icon. A headless run has no window and no console
-     * once whatever started it goes away, so without this the only way to stop
-     * one is Task Manager -- and an orphan sits there holding its ports, its
-     * ROM and its A/V socket. The same two items capture mode has: Exit, and
-     * Restart sound board.
-     *
-     * The hooks are the kiosk's; they are about the emu thread, not about a
-     * window, and the tray menu is the only thing that drives either.
-     */
-    if (!g_no_tray) {
-        kiosk_set_hooks(&(kiosk_hooks_t){
-            .is_running    = kiosk_is_running_cb,
-            .set_running   = kiosk_set_running_cb,
-            .restart_sound = kiosk_restart_sound_cb,
-        });
-        char note[128];
-        int  o = 0;
-        if (g_mcp_enable) o += snprintf(note + o, sizeof note - (size_t)o,
-                                        "--mcp %d", g_mcp_port);
-        if (g_av_port > 0) snprintf(note + o, sizeof note - (size_t)o,
-                                    "%s--av-port %d", o ? ", " : "", g_av_port);
-        tray_headless_start(note);
-        if (g_active_profile && g_active_profile->display_name)
-            kiosk_set_label(g_active_profile->display_name);
-    }
+    if (!g_no_tray) headless_tray_start();
     LOG_INFO("headless: running%s%s", g_mcp_enable ? " with the MCP bridge" : "",
              av_on ? " with the A/V server"
                    : (g_mcp_enable ? "" : " (no --mcp: nothing can drive it)"));
@@ -1046,56 +1146,14 @@ static int headless_main(void) {
         tray_headless_pump();
         tray_headless_tick(g_emu_frames);
         if (av_on) {
-            /* One render per board frame, and only while somebody is reading:
-             * with no client this is a poll loop and nothing else. */
-            uint64_t av_frame = 0, av_sample = 0;
-            if (av_capture_due(&av_frame, &av_sample) && av_stream_active()) {
-                game_frame_prepare(&state.video, &state.geo3d, &state.bus,
-                                   &state.romset, true);
-                /* With an overlay loaded the board is letterboxed into the
-                 * target so the plugin has margin to live in; with none it is
-                 * drawn across the whole target exactly as before. The pass
-                 * action clears to black, so the columns have the right
-                 * background before the plugin paints a thing. */
-                int ox = 0, oy = 0, gw = av_stream_width(), gh = av_stream_height();
-                overlay_host_game_rect(av_stream_width(), av_stream_height(), 0,
-                                       &ox, &oy, &gw, &gh);
-                /* Outside the pass: sg_update_image cannot run inside one. */
-                overlay_host_paint(av_stream_width(), av_stream_height(),
-                                   ox, oy, gw, gh, 0, g_emu_frames);
-                sg_begin_pass(&(sg_pass){
-                    .action      = av_capture_action(),
-                    .attachments = { .colors[0]     = av_capture_color_att(),
-                                     .depth_stencil = av_capture_depth_att() },
-                });
-                game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                                ox, oy, gw, gh, 1.0f);
-                overlay_host_draw();
-                sg_end_pass();
-                av_capture_submit(av_frame, av_sample);
-                sg_commit();
-            }
+            headless_av_frame();
             headless_sleep_ms(1);
         } else {
             emu_sleep_ms(5);
         }
     }
 
-    /*
-     * Exit from the tray. Everything comes down in the same order cleanup()
-     * uses for a windowed run, and for the same reasons: the A/V writer thread
-     * is still sending out of buffers the renderer owns, and the audio tap
-     * runs on the emu thread, which is still going at this point.
-     */
-    LOG_INFO("headless: shutting down");
-    av_stream_shutdown();
-    if (state.emu_started) emu_thread_shutdown(&state.emu);
-    backup_ram_flush();
-    netplay_shutdown();
-    overlay_host_shutdown();
-    av_capture_shutdown();
-    romset_free(&state.romset);
-    tray_headless_stop();
+    headless_shutdown();
     return 0;
 }
 
