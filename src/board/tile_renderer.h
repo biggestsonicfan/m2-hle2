@@ -136,7 +136,8 @@ _Static_assert(0x4000 * 32 == TMAPGFX_SIZE, "every cell index is a whole cell of
  * A pixel of tilemap l at (x - h, y + vy) & 511 is cell ((y + vy) >> 3, (x - h)
  * >> 3)'s pixel ((x - h) & 7, (y + vy) & 7). The line's window-mask words and
  * split are fixed per line; a cell's row of eight pixels is decoded once when
- * the pixel walk enters the cell, and a cell that cannot draw in this pass
+ * the walk enters the cell, the walk goes a run at a time (to the next cell
+ * edge, mask group or split), and a cell that cannot draw in this pass
  * (wrong category, or blank -- most of a HUD layer) is stepped over whole.
  * tests/tile_test.c holds it to the pixel-by-pixel original. */
 static inline void s24_draw_tilemap(const uint16_t *w, const uint8_t *gfx, int t, int cat, bool opaque,
@@ -178,11 +179,21 @@ static inline void s24_draw_tilemap(const uint16_t *w, const uint8_t *gfx, int t
         int     bank16 = 0;
         bool    dead = false;                    /* no pixel of the cell can draw in this pass */
         uint8_t pc = 0, nib[8] = { 0 };
-        for (int x = xs; x < xe; x++) {
-            int l = t;
-            if (mode) l = (x < split_x) ? split_l : (split_l ^ 1);
-            else if (mask[x >> 7] & (0x8000 >> ((x & 127) >> 3))) continue;
+        for (int x = xs; x < xe; ) {
+            /* A run: the pixels to the next cell edge, mask group (8 screen
+             * pixels) or split, all drawn from the one decoded cell. */
+            int l = t, end = xe;
+            if (mode) {
+                if (x < split_x) { l = split_l; if (split_x < end) end = split_x; }
+                else l = split_l ^ 1;
+            } else {
+                int e8 = (x | 7) + 1;
+                if (e8 < end) end = e8;
+                if (mask[x >> 7] & (0x8000 >> ((x & 127) >> 3))) { x = end; continue; }
+            }
             int tx  = (x - h) & 511;
+            int ce  = x + 8 - (tx & 7);
+            if (ce < end) end = ce;
             int key = (l << 6) | (tx >> 3);
             if (key != cur) {
                 cur = key;
@@ -193,19 +204,19 @@ static inline void s24_draw_tilemap(const uint16_t *w, const uint8_t *gfx, int t
                 const uint8_t *g = gfx + (uint32_t)(entry & 0x3FFF) * 32u + (uint32_t)(ty & 7) * 4u;
                 nib[0] = g[1] >> 4; nib[1] = g[1] & 15; nib[2] = g[0] >> 4; nib[3] = g[0] & 15;
                 nib[4] = g[3] >> 4; nib[5] = g[3] & 15; nib[6] = g[2] >> 4; nib[7] = g[2] & 15;
+                /* a non-opaque draw writes a pixel only where ci != 0 and the
+                 * category matches: none in this cell */
                 dead = !opaque && (pc != (uint8_t)cat || !(g[0] | g[1] | g[2] | g[3]));
             }
-            if (dead) {
-                /* a non-opaque draw writes a pixel only where ci != 0 and the
-                 * category matches: none in this cell, so on to the next one --
-                 * or to the split, where the other tilemap's cell begins */
-                int run = 8 - (tx & 7);
-                if (mode && x < split_x && x + run > split_x) run = split_x - x;
-                x += run - 1;
-                continue;
+            if (dead) { x = end; continue; }
+            if (opaque) {
+                for (; x < end; x++, tx++) drow[x] = (uint16_t)(bank16 + nib[tx & 7]);
+            } else {
+                for (; x < end; x++, tx++) {
+                    uint8_t ci = nib[tx & 7];
+                    if (ci != 0) drow[x] = (uint16_t)(bank16 + ci);
+                }
             }
-            uint8_t ci = nib[tx & 7];
-            if (opaque || ci != 0) drow[x] = (uint16_t)(bank16 + ci);
         }
     }
 }

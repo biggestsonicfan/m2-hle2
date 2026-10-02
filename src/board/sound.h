@@ -50,13 +50,17 @@
 #include "emu_times.h"   /* host time spent here, for get_status */
 #include "thread_mutex.h" /* the sound thread */
 
+#ifndef SOUND_RAM_SIZE
 #define SOUND_RAM_SIZE            0x80000u
+#endif
 #define SOUND_RATE                44100u
 #define SOUND_CYCLES_PER_SAMPLE   256
 #ifndef SOUND_IPL_LEAD
 #define SOUND_IPL_LEAD            4         /* see sound_run */
 #endif
+#ifndef SOUND_OUT_FRAMES
 #define SOUND_OUT_FRAMES          16384u   /* host output ring, stereo frames (power of 2) */
+#endif
 #define SOUND_CODE_LOG            512u     /* i960 commands kept (power of 2) */
 #define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_uart_make_room) */
 #define SOUND_AHEAD_MAX           735      /* at most a frame of samples run ahead of it (44100 / 60) */

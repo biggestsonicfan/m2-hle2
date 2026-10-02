@@ -180,7 +180,8 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
     g_sharc_copro_rom      = rs->copro_data;
     g_sharc_copro_rom_size = rs->copro_data_size;
 
-    if (rs->main_data && bus->main_data) {
+    /* A host window (g_mem_window) already is the ROM: nothing to copy. */
+    if (rs->main_data && bus->main_data && bus->main_data != rs->main_data) {
         size_t n = rs->main_data_size < MAIN_DATA_SIZE ? rs->main_data_size : MAIN_DATA_SIZE;
         memcpy(bus->main_data, rs->main_data, n);
         LOG_INFO("sfight_install: copied %zu bytes to MAIN_DATA", n);
@@ -191,7 +192,7 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
      * ROM[0x01000000+0x4012FB]. */
     if (rs->main_data && bus->xtra_data) {
         const uint32_t src_off = 0x01000000;
-        if (src_off < rs->main_data_size) {
+        if (src_off < rs->main_data_size && bus->xtra_data != rs->main_data + src_off) {
             size_t avail = rs->main_data_size - src_off;
             size_t n = avail < XTRA_DATA_SIZE ? avail : XTRA_DATA_SIZE;
             memcpy(bus->xtra_data, rs->main_data + src_off, n);

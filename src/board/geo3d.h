@@ -34,7 +34,11 @@
 
 #define MAX_GEO_MODELS     512
 #define GEO3D_DIRECT_WORDS 16384u
+/* The line and triangle buffers a frame is decoded into. A small target sets
+ * both lower (the Dreamcast draws no lines and flushes per run). */
+#ifndef GEO3D_MAX_LINES
 #define GEO3D_MAX_LINES    32768
+#endif
 #define MODEL_LOOKUP_SIZE  8192
 #define MODEL_ENTRY_SIZE   16
 #define VERTEX_PAIR_SIZE   40
@@ -247,7 +251,9 @@ static inline void geo3d_lines_reset(void) { g_geo3d_lines.count = 0; }
 
 /* ---- Solid triangle buffer ----------------------------------------------- */
 
+#ifndef GEO3D_MAX_TRIS
 #define GEO3D_MAX_TRIS GEO3D_MAX_LINES
+#endif
 
 typedef struct {
     float x0, y0, z0,  u0, v0;   /* u,v = tile-relative texel (may run past the tile) */
@@ -2024,13 +2030,20 @@ static inline void geo3d_decode_direct(const uint32_t *w, uint32_t n, const geo3
  * dials and the texture dump. The wireframe lines are only built when they
  * will be drawn. */
 
+#ifndef GEO3D_MESH_CACHE_SLOTS
 #define GEO3D_MESH_CACHE_SLOTS 4096u   /* power of two */
+#endif
+/* The heap the cached meshes may hold before the cache starts over; 0: no
+ * bound but the slots. A desktop never reaches it; the Dreamcast's 16 MB does. */
+#ifndef GEO3D_MESH_CACHE_BYTES
+#define GEO3D_MESH_CACHE_BYTES 0u
+#endif
 
 typedef struct {
     int32_t  ai, bi, ci, di;
     uint8_t  is_tri, has_c, has_qn, mat_ok;
     uint32_t qa;                 /* attribute word: texparam slot in bits 18..22 */
-    int32_t  zsrc[4];            /* the corners the board sorts this polygon by */
+    int      zsrc[4];            /* the corners the board sorts this polygon by */
     uint32_t zmode;              /* attribute bits 10..11, carried (geo3d_sort_z) */
     uint32_t split_quad, split_cut;
     uint32_t matidx;             /* colorbase, when mat_ok */
@@ -2059,6 +2072,7 @@ typedef struct {
 static int           g_geo3d_mesh_cache = 1;   /* 0: always run the full decoder */
 static geo3d_cmesh_t g_geo3d_meshes[GEO3D_MESH_CACHE_SLOTS];
 static unsigned      g_geo3d_mesh_count;
+static size_t        g_geo3d_mesh_bytes;
 static uint64_t      g_geo3d_mesh_hits, g_geo3d_mesh_builds;
 
 static inline void geo3d_mesh_cache_clear(void) {
@@ -2068,6 +2082,7 @@ static inline void geo3d_mesh_cache_clear(void) {
     }
     memset(g_geo3d_meshes, 0, sizeof g_geo3d_meshes);
     g_geo3d_mesh_count = 0;
+    g_geo3d_mesh_bytes = 0;
 }
 
 /* ---- Faces lying on faces ---------------------------------------------------
@@ -2560,7 +2575,8 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const geo3d_rom_t *rom,
         }
     }
     if (m && m->used) { g_geo3d_mesh_hits++; return m; }
-    if (!m || g_geo3d_mesh_count >= GEO3D_MESH_CACHE_SLOTS * 3u / 4u) {
+    if (!m || g_geo3d_mesh_count >= GEO3D_MESH_CACHE_SLOTS * 3u / 4u ||
+            (GEO3D_MESH_CACHE_BYTES && g_geo3d_mesh_bytes >= GEO3D_MESH_CACHE_BYTES)) {
         geo3d_mesh_cache_clear();
         m = &g_geo3d_meshes[h & (GEO3D_MESH_CACHE_SLOTS - 1u)];
     }
@@ -2568,6 +2584,7 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const geo3d_rom_t *rom,
     if (!geo3d_mesh_build(m, mesh_offset)) { m->used = false; return NULL; }
     m->used = true;
     g_geo3d_mesh_count++;
+    g_geo3d_mesh_bytes += (size_t)m->n_sv * sizeof(vec3_t) + (size_t)m->n_faces * sizeof(geo3d_cface_t);
     g_geo3d_mesh_builds++;
     return m;
 }

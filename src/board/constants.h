@@ -29,7 +29,9 @@
  * → those props parse from overwritten data and jump/fly. The heavy stage-1 fight
  * frame exceeds 32768 words (gcount pegged), so size for the worst case. Power of 2
  * (ring is masked with SIZE-1). 262144 words = 1 MB. */
+#ifndef GEO_CAPTURE_SIZE   /* only the MCP bridge reads it: a build without one may keep less */
 #define GEO_CAPTURE_SIZE           262144
+#endif
 
 /* ---- Memory map ---------------------------------------------------------- */
 /* Region table is linear-scanned in declaration order in memory.h.
@@ -135,7 +137,9 @@
 #define M68K_SNDCTL_BASE   0x00400000u  /* sound control register (2 bytes) */
 #define M68K_SNDCTL_SIZE   0x00000002u
 #define M68K_ROM_BASE      0x00600000u  /* 68K program ROM (512 KB)         */
+#ifndef M68K_ROM_SIZE
 #define M68K_ROM_SIZE      0x00080000u
+#endif
 #define M68K_SAMPLE_BASE   0x00800000u  /* sample ROM window (up to 2 MB)   */
 #define M68K_SAMPLE_SIZE   0x00200000u  /* 68K window covers first 2 MB     */
 
