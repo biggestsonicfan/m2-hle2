@@ -2255,6 +2255,209 @@ static int geo3d_layer_by_lo(const void *a, const void *b) {
     return x < y ? -1 : x > y ? 1 : *(const int *)a - *(const int *)b;
 }
 
+/* One cached face as the ranking sees it: its corners, the normal of the
+ * larger of the triangles the fill draws, turned to agree with the ROM's, its
+ * area and its box. False for a line or a face with no area, which is not
+ * ranked. */
+static bool geo3d_layer_face(const geo3d_cmesh_t *m, int k, geo3d_lface_t *f) {
+    const geo3d_cface_t *c = &m->faces[k];
+    if (c->is_tri && !c->has_c) return false;   /* a line */
+    memset(f, 0, sizeof *f);
+    const int corner[4] = { c->ai, c->bi, c->ci, c->di };
+    f->npts = c->is_tri ? 3 : 4;
+    for (int i = 0; i < f->npts; i++) {
+        vec3_t p = m->sv[corner[i]];
+        f->pts[i][0] = p.x; f->pts[i][1] = p.y; f->pts[i][2] = p.z;
+    }
+    /* The triangles the fill draws: ABC, or ABD + ADC. */
+    const int tri[2][3] = { {0, 1, c->is_tri ? 2 : 3}, {0, 3, 2} };
+    double best = 0.0;
+    for (int t = 0; t < (c->is_tri ? 1 : 2); t++) {
+        const double *a = f->pts[tri[t][0]], *b = f->pts[tri[t][1]], *e = f->pts[tri[t][2]];
+        double e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+        double e2[3] = { e[0] - a[0], e[1] - a[1], e[2] - a[2] };
+        double x[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
+        double len = sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+        f->area += len / 2.0;
+        if (len > best) { best = len; for (int a2 = 0; a2 < 3; a2++) f->n[a2] = x[a2] / len; }
+    }
+    if (best <= 0.0 || f->area <= 1e-4) return false;
+    /* Turned to agree with the ROM's normal, so "further along the normal"
+     * is "further behind" for either face of a pair, and two faces back to
+     * back in one plane are never compared. */
+    if (c->qn.x * f->n[0] + c->qn.y * f->n[1] + c->qn.z * f->n[2] < 0.0)
+        for (int a2 = 0; a2 < 3; a2++) f->n[a2] = -f->n[a2];
+    for (int a2 = 0; a2 < 3; a2++) {
+        f->lo[a2] = f->hi[a2] = f->pts[0][a2];
+        for (int i = 1; i < f->npts; i++) {
+            if (f->pts[i][a2] < f->lo[a2]) f->lo[a2] = f->pts[i][a2];
+            if (f->pts[i][a2] > f->hi[a2]) f->hi[a2] = f->pts[i][a2];
+        }
+    }
+    f->face  = k;
+    f->cut   = ((int)(c->fl + 0.5f) & (int)GEO3D_FACE_TRANSPARENT) != 0;
+    f->zmode = c->zmode ? (int)c->zmode : 1;   /* the explorer's walk starts at 1 */
+    f->nhull[0] = f->nhull[1] = f->nhull[2] = -1;
+    return true;
+}
+
+/* Which of two ranked faces lies on top, i or j (j the later polygon), or -1
+ * when the pair is not ordered: turned apart, not overlapping, or held apart
+ * by more than the tie while asking for the same corner. */
+static int geo3d_layer_pair_top(geo3d_lface_t *L, int i, int j) {
+    const double gap = GEO3D_LAYER_GAP, tie = GEO3D_LAYER_TIE;
+    geo3d_lface_t *f = &L[i], *g = &L[j];
+    if (f->n[0] * g->n[0] + f->n[1] * g->n[1] + f->n[2] * g->n[2] < GEO3D_LAYER_COSINE) return -1;
+    if (f->lo[1] > g->hi[1] + gap || g->lo[1] > f->hi[1] + gap ||
+        f->lo[2] > g->hi[2] + gap || g->lo[2] > f->hi[2] + gap) return -1;
+    const int ax = fabs(f->n[0]) >= fabs(f->n[1]) && fabs(f->n[0]) >= fabs(f->n[2]) ? 0
+                 : fabs(f->n[1]) >= fabs(f->n[2]) ? 1 : 2;
+    double common[GEO3D_LAYER_POLY][2];
+    int nfh = geo3d_layer_flat_hull(f, ax), ngh = geo3d_layer_flat_hull(g, ax);
+    int nc = geo3d_layer_intersect(f->hull[ax], nfh, g->hull[ax], ngh, common);
+    double lim = 0.01 * (f->area < g->area ? f->area : g->area);
+    if (!nc || geo3d_layer_poly_area(common, nc) <= (lim > 1e-3 ? lim : 1e-3)) return -1;
+
+    /* How far g stands behind f across the overlap. */
+    double most = 0.0, sum = 0.0;
+    for (int k = 0; k < nc; k++) {
+        double pf[3], pg[3];
+        geo3d_layer_lift(f, ax, common[k], pf);
+        geo3d_layer_lift(g, ax, common[k], pg);
+        double s = f->n[0] * (pg[0] - pf[0]) + f->n[1] * (pg[1] - pf[1]) + f->n[2] * (pg[2] - pf[2]);
+        if (fabs(s) > most) most = fabs(s);
+        sum += s;
+    }
+    if (most > gap) return -1;
+
+    /* g over a smaller solid f in one plane is a window: a pane of light
+     * and over it the frame with holes cut for the glass. */
+    const double behind = sum / nc;
+    const bool window = fabs(behind) <= tie && !f->cut && g->cut && f->area < g->area * (1.0 - 1e-3);
+    /* The sort has the last word only where the two are in one plane to
+     * within the tie, or where one asks for a different corner. */
+    /* Held apart by more than the tie and asking for the same corner, the
+     * two are what they look like: the nearer is in front for the depth
+     * buffer as for the board, so they are left to it and join no group.
+     * The explorer orders them too, and then puts both on one plane; on a
+     * model a few tenths across (a fighter's glove, 1813/1818) that moved
+     * faces 0.15 apart onto each other, away from MAME. */
+    if (!(fabs(behind) <= tie || f->zmode != g->zmode)) return -1;
+    const double share = geo3d_layer_later_share(f, g);
+    if (window || share >= 0.75) return j;
+    if (share <= 0.25)           return i;
+    if (behind > tie)            return i;
+    if (behind < -tie)           return j;
+    if (fabs(f->area - g->area) > 1e-3 * (f->area > g->area ? f->area : g->area))
+                                 return f->area < g->area ? i : j;
+    return j;
+}
+
+/* The orderings found, as edges from the face underneath to the face on top. */
+typedef struct {
+    int *bottom, *top;
+    int  n, cap;
+} geo3d_layer_edges_t;
+
+static bool geo3d_layer_edge_add(geo3d_layer_edges_t *E, int bottom, int top) {
+    if (E->n == E->cap) {
+        int nc2 = E->cap ? E->cap * 2 : 64;
+        int *nb = realloc(E->bottom, (size_t)nc2 * sizeof *nb);
+        if (!nb) return false;
+        E->bottom = nb;
+        int *nt = realloc(E->top, (size_t)nc2 * sizeof *nt);
+        if (!nt) return false;
+        E->top = nt;
+        E->cap = nc2;
+    }
+    E->bottom[E->n] = bottom;
+    E->top[E->n]    = top;
+    E->n++;
+    return true;
+}
+
+/* Order every candidate pair: sweep along x over boxes grown by the gap.
+ * Marks each face that was ordered at all. False when memory runs out. */
+static bool geo3d_layer_order(geo3d_lface_t *L, int *ord, int n, uint8_t *ordered,
+                              geo3d_layer_edges_t *E) {
+    g_geo3d_layer_sorting = L;
+    qsort(ord, (size_t)n, sizeof *ord, geo3d_layer_by_lo);
+    for (int a = 0; a < n; a++) {
+        const geo3d_lface_t *A = &L[ord[a]];
+        for (int b = a + 1; b < n && L[ord[b]].lo[0] <= A->hi[0] + GEO3D_LAYER_GAP; b++) {
+            const int i = ord[a] < ord[b] ? ord[a] : ord[b], j = ord[a] < ord[b] ? ord[b] : ord[a];
+            const int top = geo3d_layer_pair_top(L, i, j);
+            if (top < 0) continue;
+            if (!geo3d_layer_edge_add(E, top == i ? j : i, top)) return false;
+            ordered[i] = ordered[j] = 1;
+        }
+    }
+    return true;
+}
+
+/* Longest path from the faces nothing lies under. A cycle is broken where it
+ * is met: whatever is still waiting keeps the layer it has reached. below,
+ * start, adj and queue are scratch (n, n + 1, E->n and n ints). */
+static void geo3d_layer_depths(int n, const geo3d_layer_edges_t *E, int *layer,
+                               int *below, int *start, int *adj, int *queue) {
+    for (int e = 0; e < E->n; e++) { start[E->bottom[e] + 1]++; below[E->top[e]]++; }
+    for (int i = 0; i < n; i++) start[i + 1] += start[i];
+    int *fill = queue;                     /* borrowed as a cursor per face */
+    for (int i = 0; i < n; i++) fill[i] = start[i];
+    for (int e = 0; e < E->n; e++) adj[fill[E->bottom[e]]++] = E->top[e];
+    int qn = 0;
+    for (int i = 0; i < n; i++) if (!below[i]) queue[qn++] = i;
+    for (int h = 0; h < qn; h++) {
+        const int u = queue[h];
+        for (int e = start[u]; e < start[u + 1]; e++) {
+            const int v = adj[e];
+            if (layer[u] + 1 > layer[v]) layer[v] = layer[u] + 1;
+            if (--below[v] == 0) queue[qn++] = v;
+        }
+    }
+}
+
+/* The group a face is in (union-find with path halving). */
+static int geo3d_layer_root(int *root, int r) {
+    while (root[r] != r) r = root[r] = root[root[r]];
+    return r;
+}
+
+/* The groups: faces joined by any ordering, each taking the plane of its
+ * largest face that takes a plane at all (largest[root], -1 for none). A face
+ * sorted by its farthest corner keeps its own depth (the cached draw), so its
+ * plane would only move the faces laid on it: the Tails lab's monitor pictures
+ * (model 3473, faces 682/683) stand 0.17 in front of the wall (face 6, mode 2),
+ * and on the wall's plane they went behind their own screen (680, mode 2, 0.03
+ * behind them), which then covered them (issue #85). */
+static void geo3d_layer_groups(const geo3d_cmesh_t *m, const geo3d_lface_t *L, int n,
+                               const geo3d_layer_edges_t *E, int *root, int *largest) {
+    for (int i = 0; i < n; i++) { root[i] = i; largest[i] = -1; }
+    for (int e = 0; e < E->n; e++) {
+        int ra = geo3d_layer_root(root, E->bottom[e]), rb = geo3d_layer_root(root, E->top[e]);
+        root[ra] = rb;
+    }
+    for (int i = 0; i < n; i++) {
+        int r = geo3d_layer_root(root, i);
+        const int zm = m->faces[L[i].face].zmode;
+        if (zm == 2 || zm == 3) continue;
+        if (largest[r] < 0 || L[i].area > L[largest[r]].area) largest[r] = i;
+    }
+}
+
+/* An ordered face takes its group's plane, unless it strayed off that plane
+ * through a tilt: then it keeps its depth. */
+static void geo3d_layer_plane(geo3d_cface_t *c, const geo3d_lface_t *f, const geo3d_lface_t *ref) {
+    const double *nn = ref->n;
+    const double d = nn[0] * ref->pts[0][0] + nn[1] * ref->pts[0][1] + nn[2] * ref->pts[0][2];
+    for (int k = 0; k < f->npts; k++)
+        if (fabs(nn[0] * f->pts[k][0] + nn[1] * f->pts[k][1] + nn[2] * f->pts[k][2] - d) > GEO3D_LAYER_GAP)
+            return;
+    c->has_plane = 1;
+    c->plane[0] = (float)nn[0]; c->plane[1] = (float)nn[1];
+    c->plane[2] = (float)nn[2]; c->plane[3] = (float)d;
+}
+
 /* Rank a cached mesh's faces (sets layer / has_plane / plane on each). Faces are
  * left unlayered if memory runs out.
  *
@@ -2266,198 +2469,37 @@ static void geo3d_mesh_layers(geo3d_cmesh_t *m) {
     const int nf = m->n_faces;
     geo3d_lface_t *L   = malloc((size_t)(nf ? nf : 1) * sizeof *L);
     int           *ord = malloc((size_t)(nf ? nf : 1) * sizeof *ord);
-    int           *eb = NULL, *et = NULL;      /* edges: bottom face -> top face */
-    int            ne = 0, cap = 0;
+    uint8_t       *ordered = NULL;
+    geo3d_layer_edges_t E = { 0 };
+    int           *scratch = NULL;
     if (!L || !ord) goto done;
 
     int n = 0;
-    for (int k = 0; k < nf; k++) {
-        const geo3d_cface_t *c = &m->faces[k];
-        if (c->is_tri && !c->has_c) continue;   /* a line */
-        geo3d_lface_t *f = &L[n];
-        memset(f, 0, sizeof *f);
-        const int corner[4] = { c->ai, c->bi, c->ci, c->di };
-        f->npts = c->is_tri ? 3 : 4;
-        for (int i = 0; i < f->npts; i++) {
-            vec3_t p = m->sv[corner[i]];
-            f->pts[i][0] = p.x; f->pts[i][1] = p.y; f->pts[i][2] = p.z;
-        }
-        /* The triangles the fill draws: ABC, or ABD + ADC. */
-        const int tri[2][3] = { {0, 1, c->is_tri ? 2 : 3}, {0, 3, 2} };
-        double best = 0.0;
-        for (int t = 0; t < (c->is_tri ? 1 : 2); t++) {
-            const double *a = f->pts[tri[t][0]], *b = f->pts[tri[t][1]], *e = f->pts[tri[t][2]];
-            double e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
-            double e2[3] = { e[0] - a[0], e[1] - a[1], e[2] - a[2] };
-            double x[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
-            double len = sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
-            f->area += len / 2.0;
-            if (len > best) { best = len; for (int a2 = 0; a2 < 3; a2++) f->n[a2] = x[a2] / len; }
-        }
-        if (best <= 0.0 || f->area <= 1e-4) continue;
-        /* Turned to agree with the ROM's normal, so "further along the normal"
-         * is "further behind" for either face of a pair, and two faces back to
-         * back in one plane are never compared. */
-        if (c->qn.x * f->n[0] + c->qn.y * f->n[1] + c->qn.z * f->n[2] < 0.0)
-            for (int a2 = 0; a2 < 3; a2++) f->n[a2] = -f->n[a2];
-        for (int a2 = 0; a2 < 3; a2++) {
-            f->lo[a2] = f->hi[a2] = f->pts[0][a2];
-            for (int i = 1; i < f->npts; i++) {
-                if (f->pts[i][a2] < f->lo[a2]) f->lo[a2] = f->pts[i][a2];
-                if (f->pts[i][a2] > f->hi[a2]) f->hi[a2] = f->pts[i][a2];
-            }
-        }
-        f->face  = k;
-        f->cut   = ((int)(c->fl + 0.5f) & (int)GEO3D_FACE_TRANSPARENT) != 0;
-        f->zmode = c->zmode ? (int)c->zmode : 1;   /* the explorer's walk starts at 1 */
-        f->nhull[0] = f->nhull[1] = f->nhull[2] = -1;
-        ord[n] = n;
-        n++;
+    for (int k = 0; k < nf; k++)
+        if (geo3d_layer_face(m, k, &L[n])) { ord[n] = n; n++; }
+
+    ordered = calloc((size_t)(n ? n : 1), 1);
+    if (!ordered || !geo3d_layer_order(L, ord, n, ordered, &E) || !E.n) goto done;
+
+    /* below, layer, queue, root and largest (n each), start (n + 1), adj (E.n) */
+    scratch = calloc((size_t)n * 6 + 1 + (size_t)E.n, sizeof *scratch);
+    if (!scratch) goto done;
+    int *below = scratch, *layer = below + n, *queue = layer + n, *root = queue + n;
+    int *largest = root + n, *start = largest + n, *adj = start + n + 1;
+
+    geo3d_layer_depths(n, &E, layer, below, start, adj, queue);
+    geo3d_layer_groups(m, L, n, &E, root, largest);
+    for (int i = 0; i < n; i++) {
+        geo3d_cface_t *c = &m->faces[L[i].face];
+        c->layer = (uint16_t)(layer[i] > 0xFFFF ? 0xFFFF : layer[i]);
+        if (!ordered[i]) continue;
+        const int r = geo3d_layer_root(root, i);
+        if (largest[r] < 0) continue;   /* none of the group takes a plane */
+        geo3d_layer_plane(c, &L[i], &L[largest[r]]);
     }
-
-    /* Candidate pairs: sweep along x over boxes grown by the gap. */
-    g_geo3d_layer_sorting = L;
-    qsort(ord, (size_t)n, sizeof *ord, geo3d_layer_by_lo);
-    uint8_t *ordered = calloc((size_t)(n ? n : 1), 1);
-    if (!ordered) goto done;
-    const double gap = GEO3D_LAYER_GAP, tie = GEO3D_LAYER_TIE;
-    for (int a = 0; a < n; a++) {
-        const geo3d_lface_t *A = &L[ord[a]];
-        for (int b = a + 1; b < n && L[ord[b]].lo[0] <= A->hi[0] + gap; b++) {
-            const int i = ord[a] < ord[b] ? ord[a] : ord[b], j = ord[a] < ord[b] ? ord[b] : ord[a];
-            geo3d_lface_t *f = &L[i], *g = &L[j];    /* g is the later */
-            if (f->n[0] * g->n[0] + f->n[1] * g->n[1] + f->n[2] * g->n[2] < GEO3D_LAYER_COSINE) continue;
-            if (f->lo[1] > g->hi[1] + gap || g->lo[1] > f->hi[1] + gap ||
-                f->lo[2] > g->hi[2] + gap || g->lo[2] > f->hi[2] + gap) continue;
-            const int ax = fabs(f->n[0]) >= fabs(f->n[1]) && fabs(f->n[0]) >= fabs(f->n[2]) ? 0
-                         : fabs(f->n[1]) >= fabs(f->n[2]) ? 1 : 2;
-            double common[GEO3D_LAYER_POLY][2];
-            int nfh = geo3d_layer_flat_hull(f, ax), ngh = geo3d_layer_flat_hull(g, ax);
-            int nc = geo3d_layer_intersect(f->hull[ax], nfh, g->hull[ax], ngh, common);
-            double lim = 0.01 * (f->area < g->area ? f->area : g->area);
-            if (!nc || geo3d_layer_poly_area(common, nc) <= (lim > 1e-3 ? lim : 1e-3)) continue;
-
-            /* How far g stands behind f across the overlap. */
-            double most = 0.0, sum = 0.0;
-            for (int k = 0; k < nc; k++) {
-                double pf[3], pg[3];
-                geo3d_layer_lift(f, ax, common[k], pf);
-                geo3d_layer_lift(g, ax, common[k], pg);
-                double s = f->n[0] * (pg[0] - pf[0]) + f->n[1] * (pg[1] - pf[1]) + f->n[2] * (pg[2] - pf[2]);
-                if (fabs(s) > most) most = fabs(s);
-                sum += s;
-            }
-            if (most > gap) continue;
-
-            /* g over a smaller solid f in one plane is a window: a pane of light
-             * and over it the frame with holes cut for the glass. */
-            const double behind = sum / nc;
-            const bool window = fabs(behind) <= tie && !f->cut && g->cut && f->area < g->area * (1.0 - 1e-3);
-            /* The sort has the last word only where the two are in one plane to
-             * within the tie, or where one asks for a different corner. */
-            /* Held apart by more than the tie and asking for the same corner, the
-             * two are what they look like: the nearer is in front for the depth
-             * buffer as for the board, so they are left to it and join no group.
-             * The explorer orders them too, and then puts both on one plane; on a
-             * model a few tenths across (a fighter's glove, 1813/1818) that moved
-             * faces 0.15 apart onto each other, away from MAME. */
-            if (!(fabs(behind) <= tie || f->zmode != g->zmode)) continue;
-            const double share = geo3d_layer_later_share(f, g);
-            int top;
-            if (window || share >= 0.75)  top = j;
-            else if (share <= 0.25)       top = i;
-            else if (behind > tie)        top = i;
-            else if (behind < -tie)       top = j;
-            else if (fabs(f->area - g->area) > 1e-3 * (f->area > g->area ? f->area : g->area))
-                                          top = f->area < g->area ? i : j;
-            else                          top = j;
-            if (ne == cap) {
-                int nc2 = cap ? cap * 2 : 64;
-                int *nb = realloc(eb, (size_t)nc2 * sizeof *eb);
-                if (!nb) { free(ordered); goto done; }
-                eb = nb;
-                int *nt = realloc(et, (size_t)nc2 * sizeof *et);
-                if (!nt) { free(ordered); goto done; }
-                et = nt;
-                cap = nc2;
-            }
-            eb[ne] = top == i ? j : i;
-            et[ne] = top;
-            ne++;
-            ordered[i] = ordered[j] = 1;
-        }
-    }
-
-    if (ne) {
-        /* Longest path from the faces nothing lies under. A cycle is broken where
-         * it is met: whatever is still waiting keeps the layer it has reached. */
-        int *below = calloc((size_t)n, sizeof *below), *layer = calloc((size_t)n, sizeof *layer);
-        int *start = calloc((size_t)n + 1, sizeof *start), *adj = malloc((size_t)ne * sizeof *adj);
-        int *queue = malloc((size_t)n * sizeof *queue), *root = malloc((size_t)n * sizeof *root);
-        int *largest = malloc((size_t)n * sizeof *largest);
-        if (below && layer && start && adj && queue && root && largest) {
-            for (int e = 0; e < ne; e++) { start[eb[e] + 1]++; below[et[e]]++; }
-            for (int i = 0; i < n; i++) start[i + 1] += start[i];
-            int *fill = queue;                     /* borrowed as a cursor per face */
-            for (int i = 0; i < n; i++) fill[i] = start[i];
-            for (int e = 0; e < ne; e++) adj[fill[eb[e]]++] = et[e];
-            int qn = 0;
-            for (int i = 0; i < n; i++) if (!below[i]) queue[qn++] = i;
-            for (int h = 0; h < qn; h++) {
-                const int u = queue[h];
-                for (int e = start[u]; e < start[u + 1]; e++) {
-                    const int v = adj[e];
-                    if (layer[u] + 1 > layer[v]) layer[v] = layer[u] + 1;
-                    if (--below[v] == 0) queue[qn++] = v;
-                }
-            }
-
-            /* The groups: faces joined by any ordering, each taking the plane of
-             * its largest face that takes a plane at all. A face sorted by its
-             * farthest corner keeps its own depth (the cached draw), so its plane
-             * would only move the faces laid on it: the Tails lab's monitor
-             * pictures (model 3473, faces 682/683) stand 0.17 in front of the
-             * wall (face 6, mode 2), and on the wall's plane they went behind
-             * their own screen (680, mode 2, 0.03 behind them), which then
-             * covered them (issue #85). */
-            for (int i = 0; i < n; i++) { root[i] = i; largest[i] = -1; }
-            for (int e = 0; e < ne; e++) {
-                int ra = eb[e], rb = et[e];
-                while (root[ra] != ra) ra = root[ra] = root[root[ra]];
-                while (root[rb] != rb) rb = root[rb] = root[root[rb]];
-                root[ra] = rb;
-            }
-            for (int i = 0; i < n; i++) {
-                int r = i;
-                while (root[r] != r) r = root[r] = root[root[r]];
-                const int zm = m->faces[L[i].face].zmode;
-                if (zm == 2 || zm == 3) continue;
-                if (largest[r] < 0 || L[i].area > L[largest[r]].area) largest[r] = i;
-            }
-            for (int i = 0; i < n; i++) {
-                geo3d_cface_t *c = &m->faces[L[i].face];
-                c->layer = (uint16_t)(layer[i] > 0xFFFF ? 0xFFFF : layer[i]);
-                if (!ordered[i]) continue;
-                int r = i;
-                while (root[r] != r) r = root[r] = root[root[r]];
-                if (largest[r] < 0) continue;   /* none of the group takes a plane */
-                const geo3d_lface_t *ref = &L[largest[r]];
-                const double *nn = ref->n;
-                const double d = nn[0] * ref->pts[0][0] + nn[1] * ref->pts[0][1] + nn[2] * ref->pts[0][2];
-                bool on = true;
-                for (int k = 0; k < L[i].npts && on; k++)
-                    on = fabs(nn[0] * L[i].pts[k][0] + nn[1] * L[i].pts[k][1] + nn[2] * L[i].pts[k][2] - d) <= gap;
-                if (!on) continue;   /* strayed off the plane through a tilt: keeps its depth */
-                c->has_plane = 1;
-                c->plane[0] = (float)nn[0]; c->plane[1] = (float)nn[1];
-                c->plane[2] = (float)nn[2]; c->plane[3] = (float)d;
-            }
-        }
-        free(below); free(layer); free(start); free(adj); free(queue); free(root); free(largest);
-    }
-    free(ordered);
 done:
-    free(L); free(ord); free(eb); free(et);
+    free(scratch);
+    free(L); free(ord); free(ordered); free(E.bottom); free(E.top);
 }
 
 /* The z-sort mode in force for the object being drawn (the display list's
