@@ -17,18 +17,19 @@ The pad is mapped but untested.
 Figures from Flycast's libretro core with the HLE BIOS (emulated time, which is
 approximate), per frame shown:
 
-| | D1 (tiles only) | D2: FBI picture | D2: title |
-|---|---|---|---|
-| board fps | 7.9 | 11.4 | 2.2 |
-| i960 slice | ~88 ms | 46 ms | 83 ms |
-| tile layers | ~36 ms | 1 ms | ~128 ms |
-| 3D decode | - | 28 ms, 745 tris | ~197 ms, ~2,330 tris |
-| depth sort | - | 1 ms | 3 ms |
+| | D1 (tiles only) | D2: FBI picture | D2: title | #355: title | #355: attract |
+|---|---|---|---|---|---|
+| board fps | 7.9 | 11.4 | 2.2 | 3.1-3.4 | 5.7-6.2 |
+| i960 slice | ~88 ms | 46 ms | 83 ms | ~80 ms | ~98 ms |
+| tile layers | ~36 ms | 1 ms | ~128 ms | ~129 ms | 1-2 ms |
+| 3D decode | - | 28 ms, 745 tris | ~197-384 ms, ~2,330 tris | 46-76 ms, ~2,300 tris | ~30 ms, ~3,000 tris |
+| depth sort | - | 1 ms | 3 ms | 3 ms | 4 ms |
 
-The title's two costs are the next work (below). The decode's cost per
-triangle is far higher than the SH-4's arithmetic explains (~85 us a
-triangle, all of it cached meshes), and no soft-float or libm call is in the
-loop, so part of it may be Flycast's timing. Real hardware would settle it.
+The D2 title decode was not the SH-4's arithmetic: the heap was full, so 7-10
+mesh builds a frame failed (malloc), and each failure cost a mesh build plus
+the full decode, every frame. Only ~25 triangles a frame came through the
+cache. #355 freed the heap (below); a cached triangle costs ~9 us. The tile
+layers are the title's biggest cost now (Next optimization targets).
 
 ## The picture on the PowerVR (dreamcast/dc_pvr.h)
 
@@ -87,8 +88,22 @@ loop, so part of it may be Flycast's timing. Real hardware would settle it.
   to stubs (`SOUND_RAM_SIZE`, `SOUND_OUT_FRAMES`, `M68K_ROM_SIZE`; the sound
   board never runs here), and `GEO_PUB_COPIES` 1 (memory.h): a host that draws
   each list on the emulator's thread before the next slice needs one published
-  copy, not two. BSS is ~9.9 MB. The page cache gets what is free after a
-  4 MB reserve (texture RAM, framebuffer, mesh cache, heap); 1 MB in practice.
+  copy, not two.
+- **Where the heap goes (#355).** A `--wrap=malloc` count by caller: texture
+  RAM 2 MB and framebuffer 0.5 MB (`mem_init`), the page cache 1 MB, the sound
+  effects ~1.1 MB (`ds_init`), the pager's tables ~110 KB, then the meshes.
+  That left ~330 KB for meshes, and the title needs ~900 KB.
+  `geo3d_mesh_build` had a 4096-face scratch in BSS (600 KB, faces are ~150
+  bytes); it now writes the faces into their heap block directly and shrinks
+  it to fit. BSS is ~9.3 MB. A mesh that does not fit stays a failed entry
+  until the cache starts over, so it is not rebuilt every frame. The page
+  cache gets what is free after a reserve computed from texture RAM,
+  framebuffer and `GEO3D_MESH_CACHE_BYTES` plus 768 KB; that is 1 MB, the
+  minimum.
+- **Not a mesh pack on the disc (#355).** Prebuilt ("Ninja-style") meshes
+  read through the pager would still need their pages in RAM while drawn, so
+  they save the build time (paid once per mesh) but not the memory, which was
+  the real limit. Worth it only if build hitches show up when scenes change.
 - **Let the host own the regions.** `g_mem_window` (memory.h) lets a host give
   the bus a window for MAIN_DATA / XTRA_DATA / VID_EXT_RAM instead of a heap
   copy. The profile skips its memcpy when the window already is the ROM. That
@@ -170,14 +185,19 @@ stale pages, with no error anywhere.
 
 ## Next optimization targets
 
-- **The tile layers when they scroll (title: ~128 ms).** A scroll register
-  change redraws every block. Draw each tilemap once into a texture and let
-  the PVR scroll it (a quad per scroll band), or move the layers to quads
-  outright (4096 pens against a 1024-entry palette, per-line masks and
-  scrolls make that hard).
-- **The 3D decode (title: ~197 ms for ~2,330 tris).** Measure on hardware
-  first. Then: the SH-4's `ftrv` for the vertex transform, and the store
-  queues for the vertex submission.
+- **The tile layers on the title (~129 ms).** Measured (#355): no cell,
+  register or mask changes, only tilemap 2's per-line H scroll table (~270
+  lines a frame, the starfield; line scroll on, mode 0, opaque behind the
+  3D). Each changed line is redrawn whole, ~2,100 of the 2,976 8x8 blocks a
+  frame: ~104 ms in `tile_cpu_draw`, ~19 ms converting. The fix is on the PVR:
+  draw tilemap 2's rows once into a 512-wide texture and give each line (or
+  run of equal lines) its own strip with the scroll as a U offset, with the
+  other tilemaps in their own layer over it. Only changed cells would be
+  drawn by the CPU.
+- **The 3D decode (title: 46-76 ms).** Now mostly the cached path. The SH-4's
+  `ftrv` for the vertex transform, and the store queues for the vertex
+  submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
+  texture fields) would let the 1 MB mesh cache hold more.
 - **The i960 slice (46-88 ms).** The interpreter on a 200 MHz SH-4. Options:
   a threaded or cached decode, or keeping the hot `cpu` / `bus` state in the
   8 KB operand-cache RAM mode.

@@ -1945,6 +1945,7 @@ typedef struct {
     float          br;
     geo3d_cface_t *faces;        /* only the faces that emit, in decode order */
     bool           ranked;       /* geo3d_mesh_layers has run (the object viewer asks for it) */
+    bool           failed;       /* out of memory when built: decoded in full until the cache starts over */
 } geo3d_cmesh_t;
 
 static int           g_geo3d_mesh_cache = 1;   /* 0: always run the full decoder */
@@ -2382,7 +2383,6 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
     static vec3_t   qn[GEO3D_IA_MAX_VPS];
     static uint32_t qa[GEO3D_IA_MAX_VPS];
     static int      idx[GEO3D_IA_MAX_IDX];
-    static geo3d_cface_t faces[GEO3D_IA_MAX_IDX / 4];
     const uint8_t *polygons = m->polygons, *materials = m->materials;
 
     int n_sv = 0, n_qt = 0, n_idx = 4, vcount = 0;
@@ -2429,6 +2429,14 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
     }
 
     geo3d_relink_triangles(sv, svk, n_sv, qt, n_qt);
+
+    /* The faces go straight to the heap, a block for one per index quad, cut
+     * to the ones that emit below: no 4096-face scratch in BSS (600 KB, which
+     * the Dreamcast's heap needs more). */
+    const int max_faces = n_idx > 8 ? (n_idx - 8 + 3) / 4 : 0;
+    m->sv = malloc((size_t)(n_sv ? n_sv : 1) * sizeof(vec3_t));
+    geo3d_cface_t *faces = malloc((size_t)(max_faces ? max_faces : 1) * sizeof(geo3d_cface_t));
+    if (!m->sv || !faces) { free(m->sv); free(faces); m->sv = NULL; return false; }
 
     uint32_t mat_word = m->mat_ptr, uv_word = m->uv_ptr, mat_rec = mat_word;
     int n_faces = 0;
@@ -2518,11 +2526,9 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         memcpy(f->uvv, uvv, sizeof uvv);
     }
 
-    m->sv    = malloc((size_t)(n_sv ? n_sv : 1) * sizeof(vec3_t));
-    m->faces = malloc((size_t)(n_faces ? n_faces : 1) * sizeof(geo3d_cface_t));
-    if (!m->sv || !m->faces) { free(m->sv); free(m->faces); m->sv = NULL; m->faces = NULL; return false; }
+    geo3d_cface_t *fit = n_faces < max_faces ? realloc(faces, (size_t)(n_faces ? n_faces : 1) * sizeof(geo3d_cface_t)) : NULL;
+    m->faces = fit ? fit : faces;
     memcpy(m->sv, sv, (size_t)n_sv * sizeof(vec3_t));
-    memcpy(m->faces, faces, (size_t)n_faces * sizeof(geo3d_cface_t));
     m->n_sv = n_sv;
     m->n_faces = n_faces;
     vec3_t lo = n_sv ? sv[0] : (vec3_t){ 0 }, hi = lo;
@@ -2563,7 +2569,11 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const uint8_t *main_data,
             break;
         }
     }
-    if (m && m->used) { g_geo3d_mesh_hits++; return m; }
+    if (m && m->used) {
+        if (m->failed) return NULL;
+        g_geo3d_mesh_hits++;
+        return m;
+    }
     if (!m || g_geo3d_mesh_count >= GEO3D_MESH_CACHE_SLOTS * 3u / 4u ||
             (GEO3D_MESH_CACHE_BYTES && g_geo3d_mesh_bytes >= GEO3D_MESH_CACHE_BYTES)) {
         geo3d_mesh_cache_clear();
@@ -2574,9 +2584,11 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const uint8_t *main_data,
                           .polygons_size = polygons_size, .materials_size = materials_size,
                           .table_off = table_off, .table_count = table_count,
                           .mesh_ptr_subtract = mesh_ptr_subtract, .mesh_ptr_add = mesh_ptr_add };
-    if (!geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) { m->used = false; return NULL; }
+    /* A mesh that did not fit stays a failed entry, not a build every frame:
+     * a failed build costs most of a full decode, which the draw runs too. */
     m->used = true;
     g_geo3d_mesh_count++;
+    if (!geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) { m->failed = true; return NULL; }
     g_geo3d_mesh_bytes += (size_t)m->n_sv * sizeof(vec3_t) + (size_t)m->n_faces * sizeof(geo3d_cface_t);
     g_geo3d_mesh_builds++;
     return m;

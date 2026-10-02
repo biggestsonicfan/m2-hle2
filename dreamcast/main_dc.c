@@ -157,9 +157,10 @@ int main(int argc, char **argv) {
     /* The frame pool takes what the board leaves: texture RAM (2 MB), its
      * framebuffer (0.5 MB), the mesh cache (GEO3D_MESH_CACHE_BYTES and one
      * mesh over) and the heap's own use come out of what is free now. */
+    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + GEO3D_MESH_CACHE_BYTES + (768u << 10);
     uint32_t cache = 8u << 20;
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
-        if ((p = memalign(16384, cache + (4u << 20)))) { free(p); break; }
+        if ((p = memalign(16384, cache + keep))) { free(p); break; }
     if (pg_init(&dc_layout_sfight, cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0) {
         dc_text(1, "the disc lacks a ROM file (dc_layout.h)");
         for (;;) thd_sleep(1000);
