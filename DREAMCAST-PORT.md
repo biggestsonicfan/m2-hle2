@@ -5,23 +5,60 @@ core. [dreamcast/README.md](dreamcast/README.md) has the build and the disc.
 This file covers what was measured, and the traps that cost the most time.
 Most of them apply to any small target, the ARC-S included.
 
-## Where it stands (milestone D1)
+## Where it stands (milestone D2, #353)
 
-STF boots under Flycast through BACKUP RAM IS BROKEN, the SEGA logo, the title
-and attract, and shows FREE PLAY. Only the tile layers are drawn. There is no
-3D (the PowerVR is D2) and no netplay. Sound is Sega's console approach, ADX
-cues behind the sound code (#342, below), not the sound board. The pad is
-mapped but untested.
+STF boots under Flycast through BACKUP RAM IS BROKEN, the SEGA logo, the FBI
+picture, the title and attract, and shows FREE PLAY. The PowerVR draws the
+picture (`dreamcast/dc_pvr.h`, below): both tile layers and the 3D scene from
+the board's own display list. There is no netplay. Sound is Sega's console
+approach, ADX cues behind the sound code (#342, below), not the sound board.
+The pad is mapped but untested.
 
 Figures from Flycast's libretro core with the HLE BIOS (emulated time, which is
-approximate) at frame 1675:
+approximate), per frame shown:
 
-| | |
-|---|---|
-| board fps | 7.9 |
-| i960 slice | ~88 ms a frame |
-| CPU tile compose | ~36 ms a frame |
-| pager | 108 evictions, 0 ROM writes, 0 read errors |
+| | D1 (tiles only) | D2: FBI picture | D2: title |
+|---|---|---|---|
+| board fps | 7.9 | 11.4 | 2.2 |
+| i960 slice | ~88 ms | 46 ms | 83 ms |
+| tile layers | ~36 ms | 1 ms | ~128 ms |
+| 3D decode | - | 28 ms, 745 tris | ~197 ms, ~2,330 tris |
+| depth sort | - | 1 ms | 3 ms |
+
+The title's two costs are the next work (below). The decode's cost per
+triangle is far higher than the SH-4's arithmetic explains (~85 us a
+triangle, all of it cached meshes), and no soft-float or libm call is in the
+loop, so part of it may be Flycast's timing. Real hardware would settle it.
+
+## The picture on the PowerVR (dreamcast/dc_pvr.h)
+
+- **KOS's PVR API, not GLdc.** geo3d.h already hands over eye-space
+  triangles, and the projection is two multiplies; GLdc would transform every
+  vertex again in software. SDL2 (and so `-lGL`) is still linked, for audio.
+- **The board's z-sort, run backwards.** The board gives each polygon one sort
+  key and fills near buckets first. The opaque list draws every face far to
+  near (a radix sort on slice, key and index) with depth compare ALWAYS, which
+  is the same rule, ties included. The vertex z stays the true 1/w for
+  perspective-correct texturing.
+- **Faces with holes go to the translucent list, not punch-through.** The PVR
+  forces punch-through's compare to GEQUAL (Flycast does too), so it cannot
+  draw in the board's order. The translucent list is presorted, with the
+  header's compare (GEQUAL against what the opaque list wrote).
+- **A texture tile becomes a twiddled 4bpp paletted PVR texture**, cut out of
+  texture RAM the first time a face uses it and dropped when the game writes
+  over it. The palette is a grey ramp, and texel 15 is clear in bank 1, for
+  faces with holes. A face's colour ramp (luma RAM, poly luma, colorxlat) is
+  fitted as base × texel + offset, the PVR's modulate with offset colour.
+- **The tile layers stay on the CPU, drawn incrementally.** A full redraw is
+  ~200-330 ms of SH-4 time. As `tile_compose_cpu` does, only the 8×8 blocks a
+  tile RAM change reaches are drawn again (`tile_dirty_find`) and converted
+  (RGB565 back, ARGB1555 front). A colour change converts everything, and only
+  when a pen on screen changed: most of STF's palette writes are 3D colours.
+  `s24_draw_tilemap` (tile_renderer.h, every build) now walks a run at a time,
+  to the next cell edge, mask group or split, not a pixel at a time;
+  `tile_test` still holds it to the original pixel for pixel.
+- **The 3D can draw past the board's 496 pixels.** Black bars cover x < 10 and
+  x > 630 at the end of the translucent list.
 
 ## Memory: 16 MB for an 80 MB board
 
@@ -43,6 +80,15 @@ approximate) at frame 1675:
   the 9.2 MB of BSS: `GEO_CAPTURE_SIZE` (1 MB, only the MCP bridge reads it)
   and `LOG_MAX_LINES` (256 KB) can now be overridden. A handheld build gets the
   same savings for free.
+- **The 3D and the rest of the board in 16 MB (#353).** Defines the Makefile
+  sets, all defaulting to the desktop's sizes: `GEO3D_MAX_TRIS` 4096,
+  `GEO3D_MAX_LINES` 16, the mesh cache at 256 slots and 1 MB
+  (`GEO3D_MESH_CACHE_*`), the sound board's RAM, output ring and 68000 ROM cut
+  to stubs (`SOUND_RAM_SIZE`, `SOUND_OUT_FRAMES`, `M68K_ROM_SIZE`; the sound
+  board never runs here), and `GEO_PUB_COPIES` 1 (memory.h): a host that draws
+  each list on the emulator's thread before the next slice needs one published
+  copy, not two. BSS is ~9.9 MB. The page cache gets what is free after a
+  4 MB reserve (texture RAM, framebuffer, mesh cache, heap); 1 MB in practice.
 - **Let the host own the regions.** `g_mem_window` (memory.h) lets a host give
   the bus a window for MAIN_DATA / XTRA_DATA / VID_EXT_RAM instead of a heap
   copy. The profile skips its memcpy when the window already is the ROM. That
@@ -124,9 +170,17 @@ stale pages, with no error anywhere.
 
 ## Next optimization targets
 
-- **The i960 slice (88 ms).** The interpreter on a 200 MHz SH-4 is the
-  bottleneck. Options: a threaded or cached decode, or keeping the hot
-  `cpu` / `bus` state in the 8 KB operand-cache RAM mode.
-- **The tile compose (36 ms).** Do it on the PowerVR as textured quads (D2)
-  instead of on the CPU.
+- **The tile layers when they scroll (title: ~128 ms).** A scroll register
+  change redraws every block. Draw each tilemap once into a texture and let
+  the PVR scroll it (a quad per scroll band), or move the layers to quads
+  outright (4096 pens against a 1024-entry palette, per-line masks and
+  scrolls make that hard).
+- **The 3D decode (title: ~197 ms for ~2,330 tris).** Measure on hardware
+  first. Then: the SH-4's `ftrv` for the vertex transform, and the store
+  queues for the vertex submission.
+- **The i960 slice (46-88 ms).** The interpreter on a 200 MHz SH-4. Options:
+  a threaded or cached decode, or keeping the hot `cpu` / `bus` state in the
+  8 KB operand-cache RAM mode.
 - **UTLB reach.** Map the hot code pages with 64 KB pages.
+- **Optional:** modifier-volume shadows; dropping SDL2 and GLdc for KOS's
+  `snd_stream` directly.

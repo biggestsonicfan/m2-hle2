@@ -301,7 +301,12 @@ static struct {
     const uint8_t *copro_ctl;             /* for geo_ctl1's upload bit */
 } g_geo;
 
-static uint32_t     g_geodl_snaps[2][BUFF_RAM_SIZE / 4];
+/* A host that draws each list on the emulator's own thread before the next
+ * slice (the Dreamcast) needs one copy, not two. */
+#ifndef GEO_PUB_COPIES
+#define GEO_PUB_COPIES 2
+#endif
+static uint32_t     g_geodl_snaps[GEO_PUB_COPIES][BUFF_RAM_SIZE / 4];
 static uint32_t    *g_geodl_snap          = g_geodl_snaps[0];
 static uint32_t     g_geodl_snap_rstart   = 0;
 static volatile int g_geodl_snap_ready    = 0;
@@ -335,12 +340,12 @@ typedef struct {
 } geo_raster_state_t;
 
 static geo_raster_state_t        g_geo_live;       /* emu thread: the lists applied so far */
-static geo_raster_state_t        g_geo_pub[2];     /* published beside g_geodl_snaps[0] / [1] */
+static geo_raster_state_t        g_geo_pub[GEO_PUB_COPIES]; /* published beside g_geodl_snaps[0] / [1] */
 static const geo_raster_state_t *g_geo_rs = &g_geo_pub[0];   /* the renderer's: set with its list */
 
 /* The copy published with a list snapshot (a g_geodl_snaps entry). */
 static inline const geo_raster_state_t *geodl_raster_for(const uint32_t *snap) {
-    return &g_geo_pub[snap == g_geodl_snaps[0] ? 0 : 1];
+    return &g_geo_pub[snap == g_geodl_snaps[0] ? 0 : GEO_PUB_COPIES - 1];
 }
 
 static inline void geo_raster_publish(geo_raster_state_t *dst) {
@@ -447,10 +452,10 @@ static inline void geo_push(uint32_t word) {
 /* Copy bufferram out as the list the next frame draws, starting at rstart. */
 static inline void geodl_publish(uint32_t rstart) {
     if (!g_geo.buff) return;
-    uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[1] : g_geodl_snaps[0];
+    uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[GEO_PUB_COPIES - 1] : g_geodl_snaps[0];
     memcpy(back, g_geo.buff, sizeof g_geodl_snaps[0]);
     geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart);
-    geo_raster_publish(&g_geo_pub[back == g_geodl_snaps[0] ? 0 : 1]);
+    geo_raster_publish(&g_geo_pub[back == g_geodl_snaps[0] ? 0 : GEO_PUB_COPIES - 1]);
     g_geodl_snap_rstart = rstart;
     g_geodl_snap        = back;
     g_geodl_snap_seq++;

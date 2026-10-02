@@ -2,8 +2,9 @@
 
 The board under KallistiOS, with the ROM read off the disc a page at a time,
 straight from the PS3 release's ROM files (no zip, no interleave: they are
-already the board's address spaces). Tile layers, and sound Sega's console way:
-ADX cues out of an AFS, decoded to PCM and mixed through SDL2. No 3D yet. See
+already the board's address spaces). The PowerVR draws the tile layers and the
+3D scene, and sound is Sega's console way: ADX cues out of an AFS, decoded to
+PCM and mixed through SDL2. See
 [../DREAMCAST-PORT.md](../DREAMCAST-PORT.md) for what was measured and why it
 is built this way.
 
@@ -61,10 +62,16 @@ It was tested in the libretro core with the core option
 `reicast_hle_bios = "enabled"` and no BIOS files. A real BIOS has not been
 tried. On screen:
 
-- row 0: board frame, fps, the i960 slice's and the tile compose's ms
+- row 0: board frame, fps (and frames shown), the i960 slice's ms, the
+  picture's ms (decode + submit)
 - row 1: pager loads (and their ms), TLB refills, evictions, pinned frames,
   ROM pages written, read errors
-- row 2: sound on/off, codes trapped, codes not in the table, the music's
+- row 2: the profile and the page cache's size
+- row 17: the decode's parts (tiles, 3D decode, sort) in ms; the mesh cache's
+  meshes, builds and hits
+- row 18: triangles drawn, projection runs, frames that hit the triangle cap;
+  textures cut, new, dropped, failed
+- row 19: sound on/off, codes trapped, codes not in the table, the music's
   entry, the ring's fill, underruns
 
 If the board halts, the screen shows the IP, the pager's totals and the last
@@ -79,6 +86,7 @@ Pad: D-pad, A/B/X/Y = B1-B4, Start, left trigger = coin.
 | `main_dc.c` | the frontend: video, pad, run loop, the sound trap, stats |
 | `dc_layout.h` | the PS3 ROM files → the board's regions |
 | `dc_pager.h` | MMU demand paging of the ROM off the GD-ROM |
+| `dc_pvr.h` | the picture on the PowerVR: tile layers, 3D, textures, stats text |
 | `dc_sound.h` | STF.AFS, the ADX decoder, the music's ring, the SDL2 mix |
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
 | `mkdisc.sh` | program + ROM files + STF.AFS → GDI |

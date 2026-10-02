@@ -2,10 +2,10 @@
  * main_dc.c -- the Dreamcast frontend (Pinboard #340): the board and a game
  * profile under KallistiOS, the ROM off the disc a page at a time (dc_pager.h).
  *
- * Milestone D1: the board runs, the tile layers are on screen, the pad is mapped,
- * and the numbers that decide the rest are printed (dbgio and the screen):
- * board fps, the slice's and the compose's time, and the pager's traffic. No
- * 3D (the PowerVR is D2), no netplay. Sound is Sega's console way, a trap at
+ * The board runs, the pad is mapped, and the picture is the PowerVR's (D2,
+ * dc_pvr.h): the tile layers and the 3D scene from the board's display list.
+ * The numbers that decide the rest are printed (dbgio and the screen): board
+ * fps, the slice's and the picture's time, and the pager's traffic. No netplay. Sound is Sega's console way, a trap at
  * the game's sound call playing ADX cues off the disc (dc_sound.h, #342).
  *
  * The disc holds 1ST_READ.BIN and the PS3 release's ROM files as they ship
@@ -31,6 +31,7 @@
 
 #include "dc_pager.h"
 #include "dc_sound.h"
+#include "dc_pvr.h"
 
 KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM);
 
@@ -39,7 +40,7 @@ static i960_cpu_t       cpu;
 static emu_thread_ctx_t ctx;
 static romset_t         rs;
 static tile_cpu_t       tiles;
-static uint16_t         pen565[TILE_PEN_NONE + 1];
+static geo3d_state_t    geo;
 
 /* ---- The ROM, as windows ---------------------------------------------------- */
 
@@ -136,56 +137,17 @@ static void dc_pad(void) {
     was = now;
 }
 
-/* ---- The picture -------------------------------------------------------------- */
-
-#define DC_OX ((640 - VIDEO_WIDTH) / 2)
-#define DC_OY ((480 - VIDEO_HEIGHT) / 2)
-
-/* Both tile layers as pens (tile_cpu_draw, the board's own compositor), then
- * straight to the RGB565 framebuffer: the front layer where it drew, the back
- * one elsewhere. No RGBA layers in between (video_window.h keeps 1.5 MB of
- * them for the GPU). Only when tile RAM, graphics or a colour changed. */
-static bool dc_compose(void) {
-    static uint32_t s_tile = ~0u, s_gfx = ~0u, s_pal = ~0u, s_lut = ~0u;
-    static int16_t x0[VIDEO_HEIGHT], x1[VIDEO_HEIGHT];
-    bool redraw = bus.gen_tile != s_tile || bus.gen_gfx != s_gfx;
-    bool recolour = bus.gen_pal != s_pal || bus.gen_lut != s_lut;
-    if (!redraw && !recolour) return false;
-    s_tile = bus.gen_tile; s_gfx = bus.gen_gfx; s_pal = bus.gen_pal; s_lut = bus.gen_lut;
-    if (redraw) {
-        memcpy(tiles.words, bus.tile, sizeof tiles.words);
-        for (int y = 0; y < VIDEO_HEIGHT; y++) { x0[y] = 0; x1[y] = VIDEO_WIDTH; }
-        tile_cpu_draw(&tiles, bus.tmapgfx, x0, x1);
-    }
-    if (recolour) {
-        uint8_t chan[3][32];
-        video_pen_channels(&bus, chan);
-        for (int p = 0; p < TILE_PEN_NONE; p++) {
-            uint16_t c = pal_read16(&bus, p);
-            uint8_t r = chan[0][c & 31], g = chan[1][(c >> 5) & 31], b = chan[2][(c >> 10) & 31];
-            pen565[p] = (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
-        }
-    }
-    for (int y = 0; y < VIDEO_HEIGHT; y++) {
-        const uint16_t *bg = tiles.bg + y * VIDEO_WIDTH, *fg = tiles.fg + y * VIDEO_WIDTH;
-        uint16_t *d = vram_s + (DC_OY + y) * 640 + DC_OX;
-        for (int x = 0; x < VIDEO_WIDTH; x++)
-            d[x] = pen565[fg[x] != TILE_PEN_NONE ? fg[x] : bg[x]];
-    }
-    return true;
-}
-
 /* ---- Main ----------------------------------------------------------------------- */
 
 static void dc_text(int row, const char *s) {
-    for (int y = 0; y < 24; y++) memset(vram_s + (row * 24 + y) * 640, 0, 640 * 2);
-    bfont_draw_str(vram_s + row * 24 * 640 + 8, 640, true, s);
+    dp_text(row, s);
+    dp_text_frame();
 }
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     vid_set_mode(DM_640x480, PM_RGB565);
-    memset(vram_s, 0, 640 * 480 * 2);
+    if (dp_init() != 0) { printf("pvr_init failed\n"); for (;;) thd_sleep(1000); }
     dc_text(0, "m2-hle2 for Dreamcast: finding the ROM files");
 
     /* Sound first: its effects stay in RAM, and it reads the disc through
@@ -193,28 +155,33 @@ int main(int argc, char **argv) {
     bool sound = ds_init() == 0;
 
     /* The frame pool takes what the board leaves: texture RAM (2 MB), its
-     * framebuffer (0.5 MB) and the heap's own use come out of what is free now. */
+     * framebuffer (0.5 MB), the mesh cache (GEO3D_MESH_CACHE_BYTES and one
+     * mesh over) and the heap's own use come out of what is free now. */
     uint32_t cache = 8u << 20;
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
-        if ((p = memalign(16384, cache + (3u << 20)))) { free(p); break; }
+        if ((p = memalign(16384, cache + (4u << 20)))) { free(p); break; }
     if (pg_init(&dc_layout_sfight, cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0) {
         dc_text(1, "the disc lacks a ROM file (dc_layout.h)");
         for (;;) thd_sleep(1000);
     }
     g_mem_window = dc_window;
     if (sound) dc_add_sound_hook();
-    printf("profile %s, cache %u KB\n", g_active_profile->id, (unsigned)(cache >> 10));
+    char line[128];
+    snprintf(line, sizeof line, "profile %s, cache %u KB", g_active_profile->id, (unsigned)(cache >> 10));
+    printf("%s\n", line);
+    dp_text(2, line);
 
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
     dc_install_board();
     emu_ctx_init(&ctx, &cpu, &bus);
+    geo3d_init(&geo);
     ctx.run_state = EMU_RUNNING;
 
     uint64_t t_last = timer_us_gettime64(), us_slice = 0, us_draw = 0;
-    uint32_t f_last = g_emu_frames, slices = 0, loads_last = 0, refills_last = 0;
+    uint32_t f_last = g_emu_frames, slices = 0, loads_last = 0, refills_last = 0, shown = 0, drawn_f = 0;
+    uint64_t builds_last = 0, hits_last = 0;
     uint64_t read_last = 0;
-    char line[128];
     while (!cpu.halted) {
         dc_pad();
         uint64_t t0 = timer_us_gettime64();
@@ -222,7 +189,9 @@ int main(int argc, char **argv) {
         emu_slice_body(&ctx);
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
-        if (g_emu_frames != f) dc_compose();
+        /* A board frame not yet shown goes to the PVR when it can take one. */
+        if (g_emu_frames != drawn_f && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; }
+        (void)f;
         ds_pump();
         uint64_t t2 = timer_us_gettime64();
         us_slice += t1 - t0;
@@ -233,24 +202,40 @@ int main(int argc, char **argv) {
             double sec = (double)(t2 - t_last) / 1e6;
             uint32_t loads = g_pg.loads - loads_last, refills = g_pg.refills - refills_last;
             uint32_t read_ms = (uint32_t)((g_pg.read_ns - read_last) / 1000000);
-            snprintf(line, sizeof line, "frame %u %.1f fps slice %u draw %u ms log %d",
-                     (unsigned)g_emu_frames, fr / sec, (unsigned)(us_slice / 1000 / (slices ? slices : 1)),
-                     (unsigned)(us_draw / 1000 / (fr ? fr : 1)), g_log.count);
+            snprintf(line, sizeof line, "frame %u %.1f fps (shown %.1f) slice %u ms 3d %u+%u ms",
+                     (unsigned)g_emu_frames, fr / sec, shown / sec,
+                     (unsigned)(us_slice / 1000 / (slices ? slices : 1)),
+                     (unsigned)(g_dp.us_decode / 1000 / (shown ? shown : 1)),
+                     (unsigned)(g_dp.us_submit / 1000 / (shown ? shown : 1)));
             printf("%s\n", line);
-            dc_text(0, line);
+            dp_text(0, line);
             /* Per 2 s: loads (their read time), refills; since boot: the rest. */
             snprintf(line, sizeof line, "ld %u (%u ms) tlb %u | ev %u pin %u wr %u err %u",
                      (unsigned)loads, (unsigned)read_ms, (unsigned)refills, (unsigned)g_pg.evictions,
                      (unsigned)pg_pinned(), (unsigned)g_pg.rom_writes, (unsigned)g_pg.read_errors);
             printf("%s\n", line);
-            dc_text(1, line);
+            dp_text(1, line);
             snprintf(line, sizeof line, "snd %s codes %u unk %u bgm %d ring %u KB under %u",
                      g_ds.dev ? "on" : "off", (unsigned)g_ds.codes, (unsigned)g_ds.unknown,
                      g_ds.bgm == 0xFFFF ? -1 : (int)g_ds.bgm,
                      (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
             printf("%s\n", line);
-            dc_text(19, line);   /* the bottom row: the game draws over row 2 */
-            t_last = t2; f_last = g_emu_frames; us_slice = us_draw = 0; slices = 0;
+            dp_text(19, line);   /* the bottom row: the game draws over row 2 */
+            snprintf(line, sizeof line, "tris %u runs %u full %u | tex %u new %u drop %u fail %u",
+                     g_dp.tris, g_dp.runs, g_dp.faces_dropped, g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails);
+            printf("%s\n", line);
+            dp_text(18, line);
+            unsigned d = shown ? shown : 1;
+            snprintf(line, sizeof line, "tiles %u scan %u sort %u ms | mesh %u built %u hit %u",
+                     (unsigned)(g_dp.us_tiles / 1000 / d), (unsigned)(g_dp.us_scan / 1000 / d),
+                     (unsigned)(g_dp.us_sort / 1000 / d), (unsigned)g_geo3d_mesh_count,
+                     (unsigned)(g_geo3d_mesh_builds - builds_last), (unsigned)(g_geo3d_mesh_hits - hits_last));
+            printf("%s\n", line);
+            dp_text(17, line);
+            builds_last = g_geo3d_mesh_builds; hits_last = g_geo3d_mesh_hits;
+            g_dp.us_tiles = g_dp.us_scan = g_dp.us_sort = 0;
+            t_last = t2; f_last = g_emu_frames; us_slice = us_draw = 0; slices = 0; shown = 0;
+            g_dp.us_decode = g_dp.us_submit = 0; g_dp.made = g_dp.dropped = 0;
             loads_last = g_pg.loads; refills_last = g_pg.refills; read_last = g_pg.read_ns;
         }
     }
