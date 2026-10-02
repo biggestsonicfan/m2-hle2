@@ -1642,92 +1642,122 @@ static void mcp_cmd_capture_snd(const char *req, char *resp, int cap) {
     mcp_cmd_capture_snd_finish(req, resp, cap);
 }
 
-static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
-    uint32_t frames = 60, max_words = 8u * 1024u * 1024u, timeout_ms = 120000;
-    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_slots = 0, want_unit = 0, want_cop = 0;
-    char path[512] = {0}, probes[2048] = {0}, blockspec[512] = {0};
+/* A capture_dl request: its options and the buffers the capture fills. */
+typedef struct {
+    uint32_t frames, max_words, timeout_ms, lo, hi;
+    uint32_t want_slots, want_unit, want_cop, want_run;
+    char     path[512];
+    uint32_t paddr[DL_MAX_PROBES]; uint8_t psize[DL_MAX_PROBES]; int np;
+    uint32_t baddr[DL_MAX_BLOCKS], blen[DL_MAX_BLOCKS], bbytes; int nb;
+    dl_rec_t  *recs;
+    dl_mark_t *marks;
+    uint32_t  *slots;
+    float     *unit;
+    uint8_t   *blocks, *cop_bufram;
+    uint32_t  *cop_dm;
+} mcp_dl_req_t;
+
+#define MCP_DL_UNIT_PER_MARK (sizeof g_sharc.rot_cache / sizeof(float))
+
+/* The request's options, clamped. False when it names no path. */
+static bool mcp_dl_parse(const char *req, mcp_dl_req_t *q) {
+    char probes[2048] = {0}, blockspec[512] = {0};
+    q->frames = 60; q->max_words = 8u * 1024u * 1024u; q->timeout_ms = 120000;
+    q->lo = DL_TAP_LO; q->hi = DL_TAP_HI;
     mcp_json_get_str(req, "blocks", blockspec, sizeof(blockspec));
-    mcp_json_get_u32(req, "slots", &want_slots);
-    mcp_json_get_u32(req, "unit", &want_unit);
+    mcp_json_get_u32(req, "slots", &q->want_slots);
+    mcp_json_get_u32(req, "unit", &q->want_unit);
     /* cop: the coprocessor conversation in a MAME SHARC-side capture's format
      * (tests/cop_replay), with <path>.bufram.bin and <path>.dm.bin beside it. */
-    mcp_json_get_u32(req, "cop", &want_cop);
+    mcp_json_get_u32(req, "cop", &q->want_cop);
     /* run: start a stopped emulator once the capture is armed, so a grader
      * launched without --run captures from power-on instead of from whenever
      * this request happened to arrive. */
-    uint32_t want_run = 0;
-    mcp_json_get_u32(req, "run", &want_run);
-    mcp_json_get_u32(req, "lo", &lo);
-    mcp_json_get_u32(req, "hi", &hi);
-    if (lo < DL_TAP_LO) lo = DL_TAP_LO;
-    if (hi > DL_TAP_HI || hi <= lo) hi = DL_TAP_HI;
-    mcp_json_get_u32(req, "frames", &frames);
-    mcp_json_get_u32(req, "max_words", &max_words);
-    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    mcp_json_get_u32(req, "run", &q->want_run);
+    mcp_json_get_u32(req, "lo", &q->lo);
+    mcp_json_get_u32(req, "hi", &q->hi);
+    if (q->lo < DL_TAP_LO) q->lo = DL_TAP_LO;
+    if (q->hi > DL_TAP_HI || q->hi <= q->lo) q->hi = DL_TAP_HI;
+    mcp_json_get_u32(req, "frames", &q->frames);
+    mcp_json_get_u32(req, "max_words", &q->max_words);
+    mcp_json_get_u32(req, "timeout_ms", &q->timeout_ms);
     mcp_json_get_str(req, "probes", probes, sizeof(probes));
-    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
-    }
-    if (!g_mcp.bus || !g_mcp.emu) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emulator not ready\"}"); return;
-    }
-    if (frames == 0 || frames > 3600) frames = frames ? 3600 : 1;
-    if (max_words > 64u * 1024u * 1024u) max_words = 64u * 1024u * 1024u;
+    if (!mcp_json_get_str(req, "path", q->path, sizeof(q->path))) return false;
+    if (q->frames == 0 || q->frames > 3600) q->frames = q->frames ? 3600 : 1;
+    if (q->max_words > 64u * 1024u * 1024u) q->max_words = 64u * 1024u * 1024u;
 
-    uint32_t paddr[DL_MAX_PROBES]; uint8_t psize[DL_MAX_PROBES]; int np = 0;
-    for (char *tok = strtok(probes, ","); tok && np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
+    for (char *tok = strtok(probes, ","); tok && q->np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
         char *colon = strchr(tok, ':');
-        paddr[np] = (uint32_t)strtoul(tok, NULL, 16);
+        q->paddr[q->np] = (uint32_t)strtoul(tok, NULL, 16);
         uint32_t sz = colon ? (uint32_t)strtoul(colon + 1, NULL, 10) : 4;
-        psize[np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
+        q->psize[q->np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
     }
 
     /* blocks: "hexaddr:hexlen,..." -- whole ranges copied at every mark into
      * <path>.blocks.bin, capmarks x (sum of lengths) bytes. */
-    uint32_t baddr[DL_MAX_BLOCKS], blen[DL_MAX_BLOCKS], bbytes = 0; int nb = 0;
-    for (char *tok = strtok(blockspec, ","); tok && nb < DL_MAX_BLOCKS; tok = strtok(NULL, ",")) {
+    for (char *tok = strtok(blockspec, ","); tok && q->nb < DL_MAX_BLOCKS; tok = strtok(NULL, ",")) {
         char *colon = strchr(tok, ':');
         if (!colon) continue;
         uint32_t len = (uint32_t)strtoul(colon + 1, NULL, 16);
-        if (!len || bbytes + len > DL_BLOCK_BYTES) continue;
-        baddr[nb] = (uint32_t)strtoul(tok, NULL, 16); blen[nb++] = len; bbytes += len;
+        if (!len || q->bbytes + len > DL_BLOCK_BYTES) continue;
+        q->baddr[q->nb] = (uint32_t)strtoul(tok, NULL, 16); q->blen[q->nb++] = len; q->bbytes += len;
     }
+    return true;
+}
 
-    dl_rec_t  *recs  = (dl_rec_t *)malloc((size_t)max_words * sizeof(dl_rec_t));
-    dl_mark_t *marks = (dl_mark_t *)calloc((size_t)frames + 2, sizeof(dl_mark_t));
-    uint32_t  *slots = want_slots ? (uint32_t *)calloc(((size_t)frames + 2) * DL_SLOT_WORDS, sizeof(uint32_t)) : NULL;
-    const size_t unit_per_mark = sizeof g_sharc.rot_cache / sizeof(float);
-    float     *unit  = want_unit ? (float *)calloc(((size_t)frames + 2) * unit_per_mark, sizeof(float)) : NULL;
-    uint8_t   *blocks = nb ? (uint8_t *)calloc(((size_t)frames + 2), bbytes) : NULL;
-    uint8_t   *cop_bufram = want_cop ? (uint8_t *)calloc(BUFF_RAM_SIZE, 1) : NULL;
-    uint32_t  *cop_dm = want_cop ? (uint32_t *)calloc(0x1000, sizeof(uint32_t)) : NULL;
-    if (!recs || !marks || (want_slots && !slots) || (want_unit && !unit) || (nb && !blocks)
-        || (want_cop && (!cop_bufram || !cop_dm))) {
-        free(recs); free(marks); free(slots); free(unit); free(blocks); free(cop_bufram); free(cop_dm);
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
+static void mcp_dl_free(mcp_dl_req_t *q) {
+    free(q->cop_bufram); free(q->cop_dm); free(q->recs); free(q->marks);
+    free(q->slots); free(q->unit); free(q->blocks);
+}
+
+/* The capture's buffers, the optional ones only when asked for. False (and
+ * nothing held) when memory runs out. */
+static bool mcp_dl_alloc(mcp_dl_req_t *q) {
+    const size_t nm = (size_t)q->frames + 2;
+    q->recs  = (dl_rec_t *)malloc((size_t)q->max_words * sizeof(dl_rec_t));
+    q->marks = (dl_mark_t *)calloc(nm, sizeof(dl_mark_t));
+    bool ok = q->recs && q->marks;
+    if (q->want_slots) ok &= (q->slots = (uint32_t *)calloc(nm * DL_SLOT_WORDS, sizeof(uint32_t))) != NULL;
+    if (q->want_unit)  ok &= (q->unit = (float *)calloc(nm * MCP_DL_UNIT_PER_MARK, sizeof(float))) != NULL;
+    if (q->nb)         ok &= (q->blocks = (uint8_t *)calloc(nm, q->bbytes)) != NULL;
+    if (q->want_cop) {
+        ok &= (q->cop_bufram = (uint8_t *)calloc(BUFF_RAM_SIZE, 1)) != NULL;
+        ok &= (q->cop_dm = (uint32_t *)calloc(0x1000, sizeof(uint32_t))) != NULL;
     }
+    if (!ok) { mcp_dl_free(q); memset(q, 0, sizeof *q); }
+    return ok;
+}
 
-    emu_mutex_lock(&g_mcp.emu->mutex);
+/* Hand the buffers to the display-list tap. Caller holds the emu mutex. */
+static void mcp_dl_arm(const mcp_dl_req_t *q) {
     memset(&g_dl, 0, sizeof g_dl);
-    g_dl.recs = recs;   g_dl.cap = max_words;
-    g_dl.marks = marks; g_dl.capmarks = (size_t)frames + 2;
-    g_dl.want = frames;
-    g_dl.lo = lo; g_dl.hi = hi;
-    g_dl.slots = slots;
-    g_dl.unit = unit;
-    g_dl.nblocks = nb; g_dl.block_bytes = bbytes; g_dl.blocks = blocks;
-    memcpy(g_dl.block_addr, baddr, sizeof(uint32_t) * (size_t)nb);
-    memcpy(g_dl.block_len, blen, sizeof(uint32_t) * (size_t)nb);
-    g_dl.cop = want_cop != 0; g_dl.cop_bufram = cop_bufram; g_dl.cop_dm = cop_dm;
-    g_cop_tap = want_cop ? dl_cop_tap : NULL;
-    g_dl.nprobes = np;
-    memcpy(g_dl.probe_addr, paddr, sizeof(uint32_t) * (size_t)np);
-    memcpy(g_dl.probe_size, psize, (size_t)np);
+    g_dl.recs = q->recs;   g_dl.cap = q->max_words;
+    g_dl.marks = q->marks; g_dl.capmarks = (size_t)q->frames + 2;
+    g_dl.want = q->frames;
+    g_dl.lo = q->lo; g_dl.hi = q->hi;
+    g_dl.slots = q->slots;
+    g_dl.unit = q->unit;
+    g_dl.nblocks = q->nb; g_dl.block_bytes = q->bbytes; g_dl.blocks = q->blocks;
+    memcpy(g_dl.block_addr, q->baddr, sizeof(uint32_t) * (size_t)q->nb);
+    memcpy(g_dl.block_len, q->blen, sizeof(uint32_t) * (size_t)q->nb);
+    g_dl.cop = q->want_cop != 0; g_dl.cop_bufram = q->cop_bufram; g_dl.cop_dm = q->cop_dm;
+    g_cop_tap = q->want_cop ? dl_cop_tap : NULL;
+    g_dl.nprobes = q->np;
+    memcpy(g_dl.probe_addr, q->paddr, sizeof(uint32_t) * (size_t)q->np);
+    memcpy(g_dl.probe_size, q->psize, (size_t)q->np);
     g_dl.armed = 1;
-    emu_mutex_unlock(&g_mcp.emu->mutex);
-    if (want_run && g_mcp.emu->thread_alive) emu_run(g_mcp.emu);
+}
 
-    /* Wait out the frames without holding the mutex, as wait_frames does. */
+/* Take the buffers back from the tap. Caller holds the emu mutex. */
+static void mcp_dl_disarm(void) {
+    g_dl.armed = 0; g_dl.active = 0;
+    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
+    g_dl.blocks = NULL; g_dl.nblocks = 0; g_dl.block_bytes = 0;
+    g_dl.cop = 0; g_dl.cop_bufram = NULL; g_dl.cop_dm = NULL; g_cop_tap = NULL;
+}
+
+/* Wait out the frames without holding the mutex, as wait_frames does. */
+static void mcp_dl_wait(uint32_t timeout_ms) {
     uint32_t elapsed = 0, idle_ms = 0;
     while (!g_dl.done && elapsed < timeout_ms) {
         if (!emu_is_running(g_mcp.emu)) {
@@ -1739,82 +1769,97 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
         emu_sleep_ms(2);
         elapsed += 2;
     }
+}
+
+/* <path><ext>: n items of size bytes. */
+static bool mcp_dl_dump(const char *path, const char *ext, const void *p, size_t size, size_t n) {
+    char file[600];
+    snprintf(file, sizeof file, "%s%s", path, ext);
+    FILE *f = fopen(file, "wb");
+    bool ok = f && fwrite(p, size, n, f) == n;
+    if (f) fclose(f);
+    return ok;
+}
+
+/* <path>.json: the word count, the probes and every mark. */
+static bool mcp_dl_write_index(const mcp_dl_req_t *q, size_t n, size_t nmarks, int overflow) {
+    char file[600];
+    snprintf(file, sizeof file, "%s.json", q->path);
+    FILE *f = fopen(file, "w");
+    if (!f) return false;
+    fprintf(f, "{\"words\":%zu,\"frames\":%zu,\"overflow\":%s,\"probes\":[",
+            n, nmarks ? nmarks - 1 : 0, overflow ? "true" : "false");
+    for (int i = 0; i < q->np; i++)
+        fprintf(f, "%s\"0x%06X:%u\"", i ? "," : "", q->paddr[i], q->psize[i]);
+    fprintf(f, "],\"marks\":[");
+    for (size_t m = 0; m < nmarks; m++) {
+        fprintf(f, "%s[%u,%u", m ? "," : "", q->marks[m].frame, q->marks[m].index);
+        for (int i = 0; i < q->np; i++) fprintf(f, ",%u", q->marks[m].probe[i]);
+        fprintf(f, "]");
+    }
+    fprintf(f, "]}\n");
+    fclose(f);
+    return true;
+}
+
+/* The capture's files, each only if every one before it was written:
+ * <path>.bin (address, value pairs), <path>.json, and those asked for --
+ * <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
+ * TGP layout); <path>.unit.bin: the unit-matrix cache, 32 × 12 f32 per mark;
+ * <path>.blocks.bin; <path>.bufram.bin and <path>.dm.bin. */
+static bool mcp_dl_write(const mcp_dl_req_t *q, size_t n, size_t nmarks, int overflow) {
+    char file[600];
+    snprintf(file, sizeof file, "%s.bin", q->path);
+    FILE *f = fopen(file, "wb");
+    if (!f) return false;
+    bool ok = true;
+    for (size_t i = 0; i < n && ok; i++) {
+        uint32_t pair[2] = { q->recs[i].addr, q->recs[i].val };
+        ok = fwrite(pair, 4, 2, f) == 2;
+    }
+    fclose(f);
+    if (!ok || !mcp_dl_write_index(q, n, nmarks, overflow)) return false;
+    if (q->slots && !mcp_dl_dump(q->path, ".slots.bin", q->slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks))
+        return false;
+    if (q->unit && !mcp_dl_dump(q->path, ".unit.bin", q->unit, sizeof(float) * MCP_DL_UNIT_PER_MARK, nmarks))
+        return false;
+    if (q->blocks && !mcp_dl_dump(q->path, ".blocks.bin", q->blocks, q->bbytes, nmarks))
+        return false;
+    if (q->cop_bufram) {
+        bool b = mcp_dl_dump(q->path, ".bufram.bin", q->cop_bufram, 1, BUFF_RAM_SIZE);
+        bool d = mcp_dl_dump(q->path, ".dm.bin", q->cop_dm, sizeof(uint32_t), 0x1000);
+        if (!b || !d) return false;
+    }
+    return true;
+}
+
+static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
+    mcp_dl_req_t q = {0};
+    if (!mcp_dl_parse(req, &q)) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    if (!g_mcp.bus || !g_mcp.emu) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emulator not ready\"}"); return;
+    }
+    if (!mcp_dl_alloc(&q)) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
+    }
 
     emu_mutex_lock(&g_mcp.emu->mutex);
-    g_dl.armed = 0; g_dl.active = 0;
+    mcp_dl_arm(&q);
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+    if (q.want_run && g_mcp.emu->thread_alive) emu_run(g_mcp.emu);
+
+    mcp_dl_wait(q.timeout_ms);
+
+    emu_mutex_lock(&g_mcp.emu->mutex);
     size_t n = g_dl.n, nmarks = g_dl.nmarks;
     int overflow = g_dl.overflow, done = g_dl.done;
-    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
-    g_dl.blocks = NULL; g_dl.nblocks = 0; g_dl.block_bytes = 0;
-    g_dl.cop = 0; g_dl.cop_bufram = NULL; g_dl.cop_dm = NULL; g_cop_tap = NULL;
+    mcp_dl_disarm();
     emu_mutex_unlock(&g_mcp.emu->mutex);
 
-    char file[600];
-    snprintf(file, sizeof file, "%s.bin", path);
-    FILE *f = fopen(file, "wb");
-    int wrote_ok = f != NULL;
-    if (f) {
-        for (size_t i = 0; i < n; i++) {
-            uint32_t pair[2] = { recs[i].addr, recs[i].val };
-            if (fwrite(pair, 4, 2, f) != 2) { wrote_ok = 0; break; }
-        }
-        fclose(f);
-    }
-    snprintf(file, sizeof file, "%s.json", path);
-    f = wrote_ok ? fopen(file, "w") : NULL;
-    if (f) {
-        fprintf(f, "{\"words\":%zu,\"frames\":%zu,\"overflow\":%s,\"probes\":[",
-                n, nmarks ? nmarks - 1 : 0, overflow ? "true" : "false");
-        for (int i = 0; i < np; i++)
-            fprintf(f, "%s\"0x%06X:%u\"", i ? "," : "", paddr[i], psize[i]);
-        fprintf(f, "],\"marks\":[");
-        for (size_t m = 0; m < nmarks; m++) {
-            fprintf(f, "%s[%u,%u", m ? "," : "", marks[m].frame, marks[m].index);
-            for (int i = 0; i < np; i++) fprintf(f, ",%u", marks[m].probe[i]);
-            fprintf(f, "]");
-        }
-        fprintf(f, "]}\n");
-        fclose(f);
-    } else {
-        wrote_ok = 0;
-    }
-    /* <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
-     * TGP layout); <path>.unit.bin: the unit-matrix cache, 32 × 12 f32 per mark. */
-    if (slots && wrote_ok) {
-        snprintf(file, sizeof file, "%s.slots.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks, f) != nmarks) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    if (unit && wrote_ok) {
-        snprintf(file, sizeof file, "%s.unit.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(unit, sizeof(float) * unit_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    if (blocks && wrote_ok) {
-        snprintf(file, sizeof file, "%s.blocks.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(blocks, bbytes, nmarks, f) != nmarks) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    if (cop_bufram && wrote_ok) {
-        snprintf(file, sizeof file, "%s.bufram.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(cop_bufram, 1, BUFF_RAM_SIZE, f) != BUFF_RAM_SIZE) wrote_ok = 0;
-        if (f) fclose(f);
-        snprintf(file, sizeof file, "%s.dm.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(cop_dm, sizeof(uint32_t), 0x1000, f) != 0x1000) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    free(cop_bufram);
-    free(cop_dm);
-    free(recs);
-    free(marks);
-    free(slots);
-    free(unit);
-    free(blocks);
+    const bool wrote_ok = mcp_dl_write(&q, n, nmarks, overflow);
+    mcp_dl_free(&q);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":%s,\"words\":%zu,\"frames\":%zu,\"complete\":%s,\"overflow\":%s%s}",
