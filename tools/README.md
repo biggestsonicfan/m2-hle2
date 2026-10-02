@@ -1366,6 +1366,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `tests/scsp_fuzz.c`, `tests/m68k_fuzz.c` | the SCSP under random register traffic, and the whole sound board running random code: each writes one file to `cmp` between two builds or two compilers. `scsp_fuzz <out> [scenarios] [samples]`, `m68k_fuzz <out> [scenarios] [samples] [run]` (`$ROMDIR`) |
 | `tests/i960_fuzz.c` | the i960 and its bus running random code: memory instructions of every width and addressing mode aimed at page, region and MMIO edges, real ROM words and random ones, after 300 real frames. One file to `cmp` between two builds or compilers; `det_digest` holds the game's own code, this the forms it never takes. `i960_fuzz <merged zip> <out> [scenarios] [steps]` |
 | `tests/tile_test.c` | the tile compositor against the pixel-by-pixel original it replaced, kept verbatim as the reference: 48 random boards, every pair control mode, and the pen table against `tile_pen_lut`. A ctest; `tile_test --bench` times both compositors on one frame |
+| `qt960link/` | a QT960 eval board (i960KB, NINDY) and a Model 2B (m2-kernel), both in MAME, run the same instructions over a serial link and compare the answers: `qt960link/run.sh` (see its README) |
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
 
 The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
