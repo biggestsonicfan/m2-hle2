@@ -536,6 +536,20 @@ static inline uint8_t *mem_region_fresh(uint8_t *have, size_t size) {
     return have;
 }
 
+/* A host that cannot hold a region in RAM can hand the bus a window instead
+ * (the Dreamcast: 16 MB for a board whose ROM and work regions are ~80 MB;
+ * DREAMCAST-PORT.md). The window comes back holding what the board would put
+ * there -- zeros for a work region, the ROM for MAIN_DATA / XTRA_DATA -- and
+ * the host pages it in as it is read, so the board neither clears it nor copies
+ * into it. NULL from the hook (or no hook) keeps the heap block. */
+typedef uint8_t *(*mem_window_fn)(const char *name, size_t size);
+static mem_window_fn g_mem_window;
+
+static inline uint8_t *mem_region_get(const char *name, uint8_t *have, size_t size) {
+    uint8_t *w = g_mem_window ? g_mem_window(name, size) : NULL;
+    return w ? w : mem_region_fresh(have, size);
+}
+
 static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
     /* Re-init KEEPS the heap regions and clears them in place. It never frees
      * them, because a netplay session re-runs this on the emu thread while the
@@ -589,9 +603,9 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     cop_reset();   /* clears g_cop / g_sharc and resets rot[] to identity */
     irqt_reset();  /* timers idle (0xFFFFF), no interrupt pending, vblank phase 0 */
 
-    bus->main_data   = mem_region_fresh(bus->main_data,   MAIN_DATA_SIZE);
-    bus->xtra_data   = mem_region_fresh(bus->xtra_data,   XTRA_DATA_SIZE);
-    bus->vid_ext_ram = mem_region_fresh(bus->vid_ext_ram, VID_EXT_RAM_SIZE);
+    bus->main_data   = mem_region_get("MAIN_DATA", bus->main_data,   MAIN_DATA_SIZE);
+    bus->xtra_data   = mem_region_get("XTRA_DATA", bus->xtra_data,   XTRA_DATA_SIZE);
+    bus->vid_ext_ram = mem_region_get("VID_EXT_RAM", bus->vid_ext_ram, VID_EXT_RAM_SIZE);
     bus->texram0     = mem_region_fresh(bus->texram0,     TEXRAM0_SIZE);
     bus->texram1     = mem_region_fresh(bus->texram1,     TEXRAM1_SIZE);
     bus->framebuffer = mem_region_fresh(bus->framebuffer, FRAMEBUFFER_SIZE);
@@ -700,6 +714,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
 }
 
 static inline void mem_shutdown(memory_bus_t *bus) {
+    if (g_mem_window) return;   /* the host's windows are its own */
     free(bus->main_data);   bus->main_data   = NULL;
     free(bus->xtra_data);   bus->xtra_data   = NULL;
     free(bus->vid_ext_ram); bus->vid_ext_ram = NULL;

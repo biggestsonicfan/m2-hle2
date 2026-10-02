@@ -29,7 +29,9 @@
  * → those props parse from overwritten data and jump/fly. The heavy stage-1 fight
  * frame exceeds 32768 words (gcount pegged), so size for the worst case. Power of 2
  * (ring is masked with SIZE-1). 262144 words = 1 MB. */
+#ifndef GEO_CAPTURE_SIZE   /* only the MCP bridge reads it: a build without one may keep less */
 #define GEO_CAPTURE_SIZE           262144
+#endif
 
 /* ---- Memory map ---------------------------------------------------------- */
 /* Region table is linear-scanned in declaration order in memory.h.
