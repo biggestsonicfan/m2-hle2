@@ -2183,6 +2183,37 @@ static inline void gm_mat4_geo_projection(float *m, const float *gproj, int win,
 }
 
 /*
+ * The planes geo3d_decode_model_cached drops a face against (geo3d.h,
+ * g_geo3d_cull_plane): rows of the run's projection taken into eye space, the
+ * window's sides moved GAME_RENDER_CULL_MARGIN board pixels out, so the
+ * scissor's rounding to target pixels can never reach a dropped face.
+ */
+#define GAME_RENDER_CULL_MARGIN 4.0f
+static inline void game_render__view_cull_planes(const float *mvp, int x0, int y0, int x1, int y1) {
+    if (g_geo3d_view_cull < 0) {
+        const char *e = getenv("M2HLE_VIEW_CULL");
+        g_geo3d_view_cull = !(e && e[0] == '0');
+    }
+    g_geo3d_cull_on = g_geo3d_view_cull;
+    if (!g_geo3d_cull_on) return;
+    const float W = (float)VIDEO_WIDTH, H = (float)VIDEO_HEIGHT, M = GAME_RENDER_CULL_MARGIN;
+    const float aL = 2.0f * ((float)x0 - M) / W - 1.0f, aR = 2.0f * ((float)x1 + M) / W - 1.0f;
+    const float bT = 1.0f - 2.0f * ((float)y0 - M) / H, bB = 1.0f - 2.0f * ((float)y1 + M) / H;
+    const float *r0 = mvp, *r1 = mvp + 4, *r3 = mvp + 12;   /* x, y and w rows (row-major) */
+    for (int k = 0; k < 4; k++) {
+        g_geo3d_cull_plane[0][k] = r0[k] - aL * r3[k];      /* x >= left  */
+        g_geo3d_cull_plane[1][k] = aR * r3[k] - r0[k];      /* x <= right */
+        g_geo3d_cull_plane[2][k] = bT * r3[k] - r1[k];      /* y below the top */
+        g_geo3d_cull_plane[3][k] = r1[k] - bB * r3[k];      /* y above the bottom */
+        g_geo3d_cull_plane[4][k] = r3[k];                   /* in front of the eye */
+    }
+    for (int k = 0; k < 5; k++) {
+        const float *q = g_geo3d_cull_plane[k];
+        g_geo3d_cull_nlen[k] = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+    }
+}
+
+/*
  * Draw the frame's GEO display list: runs of objects that share a projection
  * and window are decoded together and drawn with that window's scissor.
  */
@@ -2219,6 +2250,9 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
         if (!(x1 > x0 && y1 > y0)) { i = j; continue; }   /* off-screen window: nothing drawn */
 
         if (g_render_batch.count == GAME_RENDER_MAX_RUNS) game_render_batch_flush(geo->lines_only);
+        float mvp[16];
+        gm_mat4_geo_projection(mvp, c0->gproj, c0->window, geo->geo_windows);
+        game_render__view_cull_planes(mvp, x0, y0, x1, y1);
         const float flat_prev_z = g_geo3d_flat_prev_z;
         for (int attempt = 0; ; attempt++) {
             const int tri_first = g_geo3d_tris.count, line_first = g_geo3d_lines.count;
@@ -2276,12 +2310,11 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
         run->sy = oy + y0 * h / VIDEO_HEIGHT;
         run->sw = (x1 - x0) * w / VIDEO_WIDTH;
         run->sh = (y1 - y0) * h / VIDEO_HEIGHT;
-        float mvp[16];
-        gm_mat4_geo_projection(mvp, c0->gproj, c0->window, geo->geo_windows);
         gm_mat4_transpose(run->mvp_t, mvp);
         i = j;
     }
     g_geo3d_flat_list = 0;
+    g_geo3d_cull_on = 0;
     game_render_batch_flush(geo->lines_only);
     g_light_dir[0] = saved_light[0]; g_light_dir[1] = saved_light[1]; g_light_dir[2] = saved_light[2];
     sg_apply_scissor_rect(ox, oy, w, h, true);

@@ -385,6 +385,29 @@ static int   g_geo3d_flat_list   = 0;   /* set while game_render_draw_geo_list d
 static float g_geo3d_flat_prev_z = 1.0e10f;
 static float g_geo3d_emit_flat   = -1.0f;   /* this face's depth in its window's slice, or < 0 */
 
+/* Faces that cannot reach the window are not emitted (game_render_draw_geo_list
+ * sets the planes per run; $M2HLE_VIEW_CULL=0 turns it off for an A/B). The
+ * planes are the run's projection rows taken into eye space: the window's four
+ * sides, a few board pixels further out, and the eye plane. A face is dropped
+ * only when every corner is strictly outside the same one, which a linear
+ * function over the triangle carries to every point of it: no pixel, however
+ * the GPU rounds. Its key, carry and diagonal are still worked out. */
+static int   g_geo3d_view_cull = -1;   /* -1: read the environment once */
+static int   g_geo3d_cull_on;          /* planes set for the run being decoded */
+static float g_geo3d_cull_plane[5][4];
+static float g_geo3d_cull_nlen[5];       /* |xyz| of each plane */
+
+static inline uint8_t geo3d_cull_code(vec3_t p) {
+    uint8_t code = 0;
+    for (int k = 0; k < 5; k++) {
+        const float *q = g_geo3d_cull_plane[k];
+        float d = q[0] * p.x + q[1] * p.y + q[2] * p.z + q[3];
+        float m = 1.0e-5f * (fabsf(q[0] * p.x) + fabsf(q[1] * p.y) + fabsf(q[2] * p.z) + fabsf(q[3]));
+        if (d < -m) code |= (uint8_t)(1u << k);
+    }
+    return code;
+}
+
 static inline uint32_t geo3d_board_zkey(float z);
 static inline float geo3d_flat_depth(const vec3_t *sv, const int *zsrc, uint32_t zmode) {
     float z;
@@ -1886,6 +1909,8 @@ typedef struct {
     uint32_t       table_off, table_count, mesh_ptr_subtract, mesh_ptr_add;
     int            n_sv, n_faces;
     vec3_t        *sv;           /* untransformed, Z negated */
+    vec3_t         bc;           /* a sphere round sv: centre and radius */
+    float          br;
     geo3d_cface_t *faces;        /* only the faces that emit, in decode order */
     bool           ranked;       /* geo3d_mesh_layers has run (the object viewer asks for it) */
 } geo3d_cmesh_t;
@@ -2466,6 +2491,18 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
     memcpy(m->faces, faces, (size_t)n_faces * sizeof(geo3d_cface_t));
     m->n_sv = n_sv;
     m->n_faces = n_faces;
+    vec3_t lo = n_sv ? sv[0] : (vec3_t){ 0 }, hi = lo;
+    for (int i = 1; i < n_sv; i++) {
+        lo.x = fminf(lo.x, sv[i].x); lo.y = fminf(lo.y, sv[i].y); lo.z = fminf(lo.z, sv[i].z);
+        hi.x = fmaxf(hi.x, sv[i].x); hi.y = fmaxf(hi.y, sv[i].y); hi.z = fmaxf(hi.z, sv[i].z);
+    }
+    m->bc = (vec3_t){ 0.5f * (lo.x + hi.x), 0.5f * (lo.y + hi.y), 0.5f * (lo.z + hi.z) };
+    m->br = 0.0f;
+    for (int i = 0; i < n_sv; i++) {
+        float dx = sv[i].x - m->bc.x, dy = sv[i].y - m->bc.y, dz = sv[i].z - m->bc.z;
+        m->br = fmaxf(m->br, sqrtf(dx * dx + dy * dy + dz * dz));
+    }
+    m->br = m->br * 1.001f + 1.0e-6f;
     return true;
 }
 
@@ -2596,6 +2633,30 @@ static inline void geo3d_decode_model_cached(int model_idx,
     for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
     geo3d_split_reset();
     bool lines = g_geo_wireframe != 0;
+    static uint8_t oc[GEO3D_IA_MAX_VERTS];
+    bool cull = g_geo3d_cull_on && !lines;
+    if (cull) {
+        /* The model's sphere first: wholly inside every plane, nothing can be
+         * dropped; wholly outside one, everything is. Only a model across a
+         * side needs its corners' codes. */
+        const float *mx = matrix;
+        float s2 = fmaxf(fmaxf(mx[0] * mx[0] + mx[4] * mx[4] + mx[8] * mx[8],
+                               mx[1] * mx[1] + mx[5] * mx[5] + mx[9] * mx[9]),
+                         mx[2] * mx[2] + mx[6] * mx[6] + mx[10] * mx[10]);
+        vec3_t c = apply_matrix(m->bc, matrix);
+        float r = m->br * sqrtf(s2) * 1.001f;
+        uint8_t in = 0, all_out = 0;
+        for (int k = 0; k < 5; k++) {
+            const float *q = g_geo3d_cull_plane[k];
+            float d = q[0] * c.x + q[1] * c.y + q[2] * c.z + q[3];
+            float e = r * g_geo3d_cull_nlen[k] + 1.0e-3f * (fabsf(q[0] * c.x) + fabsf(q[1] * c.y) + fabsf(q[2] * c.z) + fabsf(q[3]));
+            if (d > e) in++;
+            else if (d < -e && !all_out) all_out = (uint8_t)(1u << k);
+        }
+        if (in == 5) cull = false;
+        else if (all_out) memset(oc, all_out, (size_t)m->n_sv);
+        else for (int i = 0; i < m->n_sv; i++) oc[i] = geo3d_cull_code(tv[i]);
+    }
     for (int n = 0; n < m->n_faces; n++) {
         const geo3d_cface_t *f = &m->faces[n];
         vec3_t A = tv[f->ai], B = tv[f->bi];
@@ -2607,9 +2668,15 @@ static inline void geo3d_decode_model_cached(int model_idx,
         const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
         g_geo3d_emit_flat = flat ? geo3d_flat_depth(tv, f->zsrc, f->zmode) : -1.0f;
         g_geo3d_emit_zs   = flat ? GEO3D_ZSORT_NONE : geo3d_sort_z(tv, f->zsrc, f->zmode);
+        bool out = false;
+        if (cull && f->has_c)
+            out = (oc[f->ai] & oc[f->bi] & oc[f->ci] & (f->is_tri ? 0xFFu : oc[f->di])) != 0;
+        /* Out of the window: a triangle has nothing left to do; a quad still
+         * records its diagonal below, if the board would have drawn it. */
+        if (out && f->is_tri) continue;
 
         float fr = cr, fg = cg, fb = cb;
-        if (f->mat_ok) {
+        if (f->mat_ok && !out) {
             uint32_t pal = GEO3D_PALETTE_OFF + f->matidx * 2u;
             uint32_t ram = (f->matidx + 0x1000u) * 2u;
             if (g_geo3d_palram && (size_t)ram + 2 <= g_geo3d_palram_size) {
@@ -2631,6 +2698,7 @@ static inline void geo3d_decode_model_cached(int model_idx,
         float lum  = (dotl * dotp < 0.0f) ? 0.0f : fabsf(dotl);
         uint32_t at = f->has_qn ? f->qa : 0u;
         if ((((at >> 17) & 1u) == 0 && dotp < 0.0f) || ((at >> 8) & 3u) == 0) continue;   /* board_cull */
+        if (out) { geo3d_split_other_way(f->split_quad, f->split_cut); continue; }
         const float *tp = g_geo_rs->texparam[(at >> 18) & 0x1F];
         /* Specular, the truncated luma and the texlod belong to the instance
          * (the list's mode word and LOD scale, the eye-space normal), so they
