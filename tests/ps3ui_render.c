@@ -71,9 +71,10 @@ static int dump_sprites(const char *dir)
 
 static netplay_status_t g_fake;
 static netplay_cmd_kind_t g_last_cmd;
+static netplay_config_t g_last_cfg;
 
 static void fake_status(netplay_status_t *out) { *out = g_fake; }
-static void fake_post(netplay_cmd_kind_t k, const netplay_config_t *cfg) { (void)cfg; g_last_cmd = k; }
+static void fake_post(netplay_cmd_kind_t k, const netplay_config_t *cfg) { g_last_cfg = *cfg; g_last_cmd = k; }
 
 static void add_member(const char *npid, int me, int8_t side, uint8_t flags, uint8_t entry, int rtt)
 {
@@ -134,6 +135,7 @@ static int dump_app(const char *dir, int w, int h)
     ps3ui_app_t *a = &g_ps3ui_app;
     ps3ui_app_init(a, be);
     memset(&g_fake, 0, sizeof g_fake);
+    int fails = 0;
 
     g_fake.state = NETPLAY_OFF;
     ps3ui_app_open(a);
@@ -166,7 +168,24 @@ static int dump_app(const char *dir, int w, int h)
     shot(a, &cv, dir, "04_menu");
 
     run(a, 1, PS3UI_PAD_DOWN);
-    run(a, 1, PS3UI_PAD_CROSS);             /* Custom Match -> search */
+    run(a, 1, PS3UI_PAD_CROSS);             /* Custom Match -> its search filter */
+    run(a, 40, 0);
+    shot(a, &cv, dir, "04b_custom_none");
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_RIGHT);             /* Round count: None specified -> 2 */
+    run(a, 1, PS3UI_PAD_RIGHT);             /* -> 3 */
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_LEFT);              /* Game type: None specified -> Type D */
+    run(a, 10, 0);
+    shot(a, &cv, dir, "04c_custom_filter");
+    run(a, 1, PS3UI_PAD_CROSS);             /* search */
+    if (g_last_cmd != NETPLAY_CMD_SEARCH || !g_last_cfg.filter || g_last_cfg.want.rounds != 1
+        || g_last_cfg.want.type != 3 || g_last_cfg.want.time != MATCH_ANY || g_last_cfg.want.secret != MATCH_ANY
+        || g_last_cfg.want.players != MATCH_ANY) {
+        fprintf(stderr, "FAIL: Custom Match did not search with its filter\n");
+        fails++;
+    }
     g_fake.search_pending = true;
     run(a, 40, 0);
     shot(a, &cv, dir, "05_searching");
@@ -179,6 +198,14 @@ static int dump_app(const char *dir, int w, int h)
         r->max_slots = (uint16_t)(i == 2 ? 8 : 2);
         snprintf(r->owner, sizeof r->owner, "%s", owners[i]);
         r->relay_ms = (uint32_t)(30 + 60 * i);
+        /* rules as our rooms publish them (index + 1); room 0 has none */
+        if (i) {
+            r->int_mask = 0x3F;
+            r->int_attr[1] = (uint32_t)(1 + i % 4);
+            r->int_attr[2] = (uint32_t)(1 + (i + 1) % 4);
+            r->int_attr[3] = (uint32_t)(1 + i % 4);
+            r->int_attr[4] = (uint32_t)(1 + (i & 1));
+        }
     }
     g_fake.room_count = 4;
     g_fake.search_pending = false;
@@ -194,6 +221,28 @@ static int dump_app(const char *dir, int w, int h)
     run(a, 1, PS3UI_PAD_CROSS);             /* Create Match -> rule menu */
     run(a, 40, 0);
     shot(a, &cv, dir, "07_rule");
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_RIGHT);             /* Round count 3 -> 4 */
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_DOWN);
+    run(a, 1, PS3UI_PAD_RIGHT);             /* Secret character Off -> On */
+    run(a, 10, 0);
+    shot(a, &cv, dir, "07b_rule_set");
+    if (ps3ui_rule_rows(a) != 8) {
+        fprintf(stderr, "FAIL: our server's Create Match has %d rows, not 8\n", ps3ui_rule_rows(a));
+        fails++;
+    }
+    run(a, 1, PS3UI_PAD_CROSS);             /* create */
+    if (g_last_cmd != NETPLAY_CMD_HOST || !g_last_cfg.has_rules || g_last_cfg.rules.rounds != 2
+        || g_last_cfg.rules.time != 1 || g_last_cfg.rules.type != 0 || g_last_cfg.rules.secret != 1) {
+        fprintf(stderr, "FAIL: Create Match did not host with its rules\n");
+        fails++;
+    }
+    g_fake.room.rounds_to_win = 4;
+    g_fake.room.round_time = 30;
+    g_fake.room.hidden = 1;
+    g_fake.room_rules = match_rules_from_room(&g_fake.room);
 
     g_fake.state = NETPLAY_IN_ROOM;
     g_fake.max_slot = 2;
@@ -246,7 +295,6 @@ static int dump_app(const char *dir, int w, int h)
     g_fake.room.phase = ROOM_PHASE_MATCH;
     g_fake.room.last_result = ROOM_RESULT_NONE;
     run(a, 10, 0);
-    int fails = 0;
     if (ps3ui_app_view(a) != PS3UI_VIEW_GAME) { fprintf(stderr, "FAIL: playing should show the game\n"); fails++; }
     g_fake.results++;
     g_fake.last_winner = 1;

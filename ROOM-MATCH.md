@@ -528,6 +528,15 @@ The rule menu opens from **Custom Match** (search) or **Create Match** (create).
 
 **There is no winner-stays vs rotation option, and no points/wins-to-finish option.** The rules are room-search attributes and the per-match game settings.
 
+#### How m2-hle2 carries these rules (Pinboard #333)
+
+`ps3ui_app.h` draws this menu (`PS3UI_SCR_RULE`): **Custom Match** opens it as a search filter (every row can be "None specified", except Matching range), **Create Match** as the room to host. The values are a `match_rules_t` (`net/room.h`), indices as in the table above.
+
+- **PS3 rooms (official server):** `ps3_link_host` writes them where the PS3 does: room blob bytes 9..0xC (rounds, time, type, secret) and int attrs 0x4C..0x53 = {players − 2, rounds, time, type, secret, range ? `'u'<<8|'s'`-style country code : 0, 1, 0x0133054E}. A search sends EQ filters for the rows that are set, plus 0x52 = 1 and 0x53, as `np_session_search_room` does. The match start applies them through the 0x377AB0 table (`ps3_build_rules`); `ps3_match_begin` also takes blob[0xC] as the secret-character switch (`g_xplay_secret`).
+- **Community rooms (our server):** the rules ride in the room state (`room_state_t` bytes 25..28, `ROOM_STATE_SIZE` 45; a 41-byte v1 state decodes as factory rules with secret characters on), and in int attrs 0x4D..0x51 as **value + 1**. RPCN gives every room all eight int attrs, 0 when unset, so a plain index would make an old room look like "2 rounds, 10 s, Type A". 0 means "an old room" and lists as the factory rules. 0x4C is already the relay round trip there, so a players filter is applied to the list on our side (`max_slots`). Community rooms are always Worldwide; the row is shown on the official server only.
+- **The board:** every member applies the room's rules before the match's cold boot (`netplay.h`, "this room's rules: ..."). The boot runs `init_game_assignments`, where the hooks put them in: `rounds_default` 0x624F8 (VS rounds to win), `damage_default` 0x62674 (game type bits A..D = 0x00/0x40/0x08/0x48 in the flag byte, with DAMAGE in bit 7), `xplay_game_time` 0xB0F8 (seconds). The secret characters are the Console profile's hidden-character traps (`sfc_hidden_toggle`), switched off by the rule. A member's own settings come back when the room empties (`netplay_restart_alone`). `NETPLAY_PROTO_REV` 14.
+- **MCP:** `netplay_host` and `netplay_search` take `rounds`, `time`, `type`, `secret`, `range` (and `players` for a PS3 search); `netplay_status` reports `room.rules` and each listed room's `rules`.
+
 The values become a 0x22-byte **MatchCond** (`MatchCond_Build` b3358, defaults in `MatchCond_SetDefaults` af230). It is stored at match-info+0x5e4 (`Multi_BuildMatchConditions` b3810 via ad344) and copied into the NP session (`np_session_set_config` b8f84 → session+0x10..+0x31). Layout:
 
 | byte | meaning |

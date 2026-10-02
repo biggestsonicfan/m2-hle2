@@ -102,11 +102,22 @@ typedef struct {
      * (catch-up damage). The owner's, like `region`, and applied the same way,
      * at the cold boot. */
     uint8_t  damage_real;
+    /* The room's PLAYER MATCH rules for `match` (hle_hooks.h), the owner's like
+     * `region` and applied at the cold boot: rounds to win (2..5, 0 = the
+     * factory 2), round time in seconds (0 = the factory 30), Game type A..D
+     * (0..3), and Secret character (1 = hidden fighters can be picked). */
+    uint8_t  rounds_to_win;
+    uint8_t  round_time;
+    uint8_t  game_type;
+    uint8_t  hidden;
 } room_state_t;
 
 #define ROOM_STATE_MAGIC   0x4D52324Du   /* "M2RM" */
 #define ROOM_STATE_VERSION 1u
-#define ROOM_STATE_SIZE    (25u + 2u * ROOM_MAX_MEMBERS)
+#define ROOM_STATE_SIZE    (29u + 2u * ROOM_MAX_MEMBERS)
+/* What a build from before the rules wrote: the same layout without them. Its
+ * rooms play the factory rules with Secret character on. */
+#define ROOM_STATE_SIZE_V1 (25u + 2u * ROOM_MAX_MEMBERS)
 
 static inline void room_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static inline void room_put32(uint8_t *p, uint32_t v) { room_put16(p, (uint16_t)v); room_put16(p + 2, (uint16_t)(v >> 16)); }
@@ -132,6 +143,10 @@ static inline uint32_t room_state_encode(const room_state_t *s, uint8_t *out) {
     out[21 + 2 * ROOM_MAX_MEMBERS] = s->vs_mode;
     room_put16(out + 22 + 2 * ROOM_MAX_MEMBERS, s->session);
     out[24 + 2 * ROOM_MAX_MEMBERS] = s->damage_real;
+    out[25 + 2 * ROOM_MAX_MEMBERS] = s->rounds_to_win;
+    out[26 + 2 * ROOM_MAX_MEMBERS] = s->round_time;
+    out[27 + 2 * ROOM_MAX_MEMBERS] = s->game_type;
+    out[28 + 2 * ROOM_MAX_MEMBERS] = s->hidden;
     return ROOM_STATE_SIZE;
 }
 
@@ -139,7 +154,7 @@ static inline uint32_t room_state_encode(const room_state_t *s, uint8_t *out) {
  * made by a build that stores something else there. */
 static inline bool room_state_decode(const uint8_t *in, uint32_t len, room_state_t *s) {
     memset(s, 0, sizeof(*s));
-    if (len < ROOM_STATE_SIZE || room_get32(in) != ROOM_STATE_MAGIC || in[4] != ROOM_STATE_VERSION)
+    if (len < ROOM_STATE_SIZE_V1 || room_get32(in) != ROOM_STATE_MAGIC || in[4] != ROOM_STATE_VERSION)
         return false;
     s->phase       = in[5];
     s->flags       = in[6];
@@ -155,7 +170,80 @@ static inline bool room_state_decode(const uint8_t *in, uint32_t len, room_state
     s->vs_mode     = in[21 + 2 * ROOM_MAX_MEMBERS];
     s->session     = room_get16(in + 22 + 2 * ROOM_MAX_MEMBERS);
     s->damage_real = in[24 + 2 * ROOM_MAX_MEMBERS];
+    s->hidden      = 1;
+    if (len >= ROOM_STATE_SIZE) {
+        s->rounds_to_win = in[25 + 2 * ROOM_MAX_MEMBERS];
+        s->round_time    = in[26 + 2 * ROOM_MAX_MEMBERS];
+        s->game_type     = in[27 + 2 * ROOM_MAX_MEMBERS] & 3u;
+        s->hidden        = in[28 + 2 * ROOM_MAX_MEMBERS] ? 1 : 0;
+    }
     return true;
+}
+
+/* ---- PLAYER MATCH rules (the PS3 port's RULE MENU) ----
+ *
+ * One room's rules as the PS3 menu rows hold them, indices into the tables
+ * below. A search filter uses the same struct with MATCH_ANY ("None
+ * specified") for a field it leaves open. They travel two ways:
+ * - In the room's searchable int attributes, for the search list and its
+ *   filter. A PS3 room stores the indices themselves (0x4D..0x50); one of ours
+ *   stores index + 1, since RPCN gives every room all eight attributes and 0
+ *   is what a room from an older build reads.
+ * - In room_state_t, as the board settings (rounds, seconds, ...) every board
+ *   in the match boots with. */
+#define MATCH_ANY 0xFFu
+
+typedef enum { MATCH_RANGE_WORLD = 0, MATCH_RANGE_AREA = 1 } match_range_t;
+
+typedef struct {
+    uint8_t rounds;   /* 0..3: 2, 3, 4, 5 rounds to win */
+    uint8_t time;     /* 0..3: 10, 30, 60, 99 seconds   */
+    uint8_t type;     /* 0..3: Type A..D                */
+    uint8_t secret;   /* 0 Off, 1 On                    */
+    uint8_t range;    /* match_range_t                  */
+    /* A search's room size, 2..8 (MATCH_ANY for any). A room's own is its
+     * slot count, so hosting does not read this. */
+    uint8_t players;
+} match_rules_t;
+
+/* Rounds to win and seconds for a menu index (0..3); 0 = the factory's. */
+static inline uint8_t match_rounds(uint8_t i)  { return i < 4 ? (uint8_t)(2 + i) : 0; }
+static inline uint8_t match_seconds(uint8_t i) { return i == 0 ? 10 : i == 1 ? 30 : i == 2 ? 60 : i == 3 ? 99 : 0; }
+
+/* The PS3 menu's own defaults (3 rounds, 30 s, Type A, Off, Worldwide). */
+static inline match_rules_t match_rules_ps3(void) {
+    match_rules_t r = { 1, 1, 0, 0, MATCH_RANGE_WORLD, MATCH_ANY };
+    return r;
+}
+/* A search that leaves everything open but the range. */
+static inline match_rules_t match_rules_any(void) {
+    match_rules_t r = { MATCH_ANY, MATCH_ANY, MATCH_ANY, MATCH_ANY, MATCH_RANGE_WORLD, MATCH_ANY };
+    return r;
+}
+
+/* The country code a Same Area room publishes in int attribute 0x51, as the
+ * PS3 does ('u' << 8 | 's' for "us"); 0 is Worldwide. */
+static inline uint32_t match_area_code(const char *country) {
+    if (!country || !country[0] || !country[1]) return ('u' << 8) | 's';
+    return ((uint32_t)(uint8_t)country[0] << 8) | (uint8_t)country[1];
+}
+
+/* The room state's board settings for these rules. */
+static inline void match_rules_to_room(const match_rules_t *r, room_state_t *s) {
+    s->rounds_to_win = match_rounds(r->rounds);
+    s->round_time    = match_seconds(r->time);
+    s->game_type     = r->type < 4 ? r->type : 0;
+    s->hidden        = r->secret ? 1 : 0;
+}
+
+/* The rules a room state plays, as menu indices (the range is not in it). */
+static inline match_rules_t match_rules_from_room(const room_state_t *s) {
+    match_rules_t r = match_rules_ps3();
+    r.rounds = s->rounds_to_win >= 2 && s->rounds_to_win <= 5 ? (uint8_t)(s->rounds_to_win - 2) : 0;
+    r.time   = s->round_time == 10 ? 0 : s->round_time == 60 ? 2 : s->round_time == 99 ? 3 : 1;
+    r.type   = s->game_type & 3u;
+    r.secret = s->hidden ? 1 : 0;
+    return r;
 }
 
 /* ---- A member's own state (member attribute 0x59, written by that member) ---- */

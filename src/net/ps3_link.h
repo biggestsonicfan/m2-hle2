@@ -89,6 +89,7 @@
 #define PS3_LINK_H
 
 #include "hle_hooks.h"
+#include "room.h"           /* match_rules_t */
 #include "rpcn_session.h"
 #include "rpcs3_signal.h"
 #include "rudp.h"
@@ -942,6 +943,7 @@ static inline void ps3_match_begin(ps3_link_t *L) {
     ps3_build_rules(blob, g_xplay_rules);
     g_xplay_seed          = L->seed;
     g_xplay_spectators    = L->sio.spectators ? 1 : 0;
+    g_xplay_secret        = blob[0x0C] ? 1 : 0;
     g_xplay_ready         = 0;
     g_xplay_rules_pending = 1;
     /* FUN_000ac554: a board that is not in attract (ADV_INT..INFO_DSP) is
@@ -968,6 +970,7 @@ static inline void ps3_match_end(ps3_link_t *L, const char *why) {
     g_xplay_barrier = 0;
     g_xplay_ready   = 0;
     g_xplay_spectators = 0;
+    g_xplay_secret     = 0;
     g_xplay_rules_pending = 0;
     ps3_sio_teardown(&L->sio);
     L->sio.started = false;
@@ -1540,24 +1543,36 @@ static inline void ps3_link_leave(ps3_link_t *L) {
 /*
  * Before creating a room of our own (rpcn_session_host_ps3): the room's first
  * state and its eight searchable ints, as a PS3 creating a Player Match room
- * with the default rules writes them (MatchCond_SetDefaults 0xAF230, checked
- * against a PS3's CreateJoinRoom): room mode 1, rounds 3 and time 30
- * (indices 1 and 1), game type A, no secret characters, worldwide. Byte 8 and
- * int 0x4C are the player count's index, 2 players = 0.
+ * writes them (MatchCond_SetDefaults 0xAF230, checked against a PS3's
+ * CreateJoinRoom): room mode 1, then the RULE MENU's rows. Byte 8 and int 0x4C
+ * are the player count's index, 2 players = 0; bytes 9..0xC and ints 0x4D..0x50
+ * the round count, time limit, game type and secret character indices; int 0x51
+ * the matching range, 0 for Worldwide or the country code for Same Area. Null
+ * `rules` are the menu's defaults: 3 rounds, 30 s, Type A, Off, Worldwide.
  */
-static inline void ps3_link_host(ps3_link_t *L, uint32_t max_slot, uint32_t int_attr[8]) {
+static inline void ps3_link_host(ps3_link_t *L, uint32_t max_slot, const match_rules_t *rules,
+                                 const char *country, uint32_t int_attr[8]) {
     ps3_link_leave(L);
     if (max_slot < 2) max_slot = 2;
     if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
+    match_rules_t r = rules ? *rules : match_rules_ps3();
+    if (r.rounds > 3) r.rounds = 1;
+    if (r.time > 3)   r.time = 1;
+    if (r.type > 3)   r.type = 0;
+    r.secret = r.secret == 1 ? 1 : 0;
     uint64_t now = net_now_us();
     L->hosting  = true;
     L->max_slot = max_slot;
     memset(L->blob, 0, sizeof(L->blob));
     L->blob[0x04] = 1;                          /* room mode: Room Match */
     L->blob[0x08] = (uint8_t)(max_slot - 2u);   /* players */
-    L->blob[0x09] = 1;                          /* rounds: 3 */
-    L->blob[0x0A] = 1;                          /* time: 30 */
-    const uint32_t ints[8] = { max_slot - 2u, 1, 1, 0, 0, 0, 1, RPCN_PS3_VERSION_TAG };
+    L->blob[0x09] = r.rounds;
+    L->blob[0x0A] = r.time;
+    L->blob[0x0B] = r.type;
+    L->blob[0x0C] = r.secret;
+    const uint32_t ints[8] = { max_slot - 2u, r.rounds, r.time, r.type, r.secret,
+                               r.range == MATCH_RANGE_AREA ? match_area_code(country) : 0u,
+                               1, RPCN_PS3_VERSION_TAG };
     memcpy(int_attr, ints, sizeof(ints));
     L->phase_since_us = now;
     L->lobby_until_us = now + PS3_LOBBY_US;
