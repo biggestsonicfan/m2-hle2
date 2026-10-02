@@ -90,7 +90,8 @@ static int dc_hook_sound(i960_cpu_t *c, memory_bus_t *b) {
 static game_profile_t dc_profile;
 
 static void dc_add_sound_hook(void) {
-    if (strcmp(g_active_profile->id, "sfight") || g_active_profile->hook_count >= HLE_HOOK_TABLE_MAX) return;
+    if (strncmp(g_active_profile->id, "sfight", 6) ||   /* sfight, sfight_console */
+         g_active_profile->hook_count >= HLE_HOOK_TABLE_MAX) return;
     dc_profile = *g_active_profile;
     dc_profile.hooks[dc_profile.hook_count++] =
         (hle_hook_entry_t){ 0x0003F268, dc_hook_sound, "sound_request_special (dc_sound)" };
@@ -248,7 +249,7 @@ int main(int argc, char **argv) {
                      g_ds.bgm == 0xFFFF ? -1 : (int)g_ds.bgm,
                      (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
             printf("%s\n", line);
-            dc_text(2, line);
+            dc_text(19, line);   /* the bottom row: the game draws over row 2 */
             t_last = t2; f_last = g_emu_frames; us_slice = us_draw = 0; slices = 0;
             loads_last = g_pg.loads; refills_last = g_pg.refills; read_last = g_pg.read_ns;
         }
