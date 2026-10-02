@@ -1676,6 +1676,7 @@ typedef struct {
     uint64_t pending;
     uint64_t deadline_ms;    /* when the device code dies */
     uint64_t next_poll_ms;
+    bool     started_sent;   /* the start went out (after the greeting) */
     bool     started_ok;     /* the start reply landed — see the disconnect rule */
     char     error[256];
 } rpcn_twitch_t;
@@ -1740,9 +1741,8 @@ static inline bool rpcn_twitch_begin(rpcn_twitch_t *t, const char *server, uint1
         return false;
     }
 
-    t->pending = rpcn_twitch_start(&t->client);
-    if (!t->pending) { rpcn_twitch_fail(t, "%s", rpcn_last_error(&t->client)); return false; }
-
+    /* The start goes out from rpcn_twitch_update once the greeting has said
+     * which ids this server uses. */
     t->state       = RPCN_TWITCH_STARTING;
     t->deadline_ms = net_now_ms() + 30000;   /* replaced by expires_in on the reply */
     return true;
@@ -1756,7 +1756,7 @@ static inline void rpcn_twitch_update(rpcn_twitch_t *t) {
         if (pkt.type != 1) continue;                     /* the ServerInfo greeting */
         if (t->pending && pkt.packet_id != t->pending) continue;
 
-        if ((rpcn_command_t)pkt.command == RPCN_CMD_TWITCH_DEVICE_START) {
+        if (pkt.command == rpcn_twitch_command(&t->client, false)) {
             t->pending = 0;
             if (pkt.error != RPCN_OK) {
                 rpcn_twitch_fail(t, "%s", rpcn_twitch_error_text(pkt.error));
@@ -1780,7 +1780,7 @@ static inline void rpcn_twitch_update(rpcn_twitch_t *t) {
             continue;
         }
 
-        if ((rpcn_command_t)pkt.command == RPCN_CMD_TWITCH_DEVICE_POLL) {
+        if (pkt.command == rpcn_twitch_command(&t->client, true)) {
             t->pending = 0;
             switch (pkt.error) {
                 case RPCN_ERR_TWITCH_PENDING:
@@ -1815,7 +1815,7 @@ static inline void rpcn_twitch_update(rpcn_twitch_t *t) {
     }
 
     if (!rpcn_is_connected(&t->client)) {
-        /* An RPCN without this feature does not know command 63: it answers
+        /* An RPCN without this feature does not know the command: it answers
          * Malformed and hangs up. Saying "no Twitch here" is both more likely to
          * be true and more useful than "the connection dropped". */
         rpcn_twitch_fail(t, t->started_ok
@@ -1830,6 +1830,13 @@ static inline void rpcn_twitch_update(rpcn_twitch_t *t) {
             ? "the code expired before it was approved - start again"
             : "the server did not answer the Twitch request");
         return;
+    }
+
+    if (t->state == RPCN_TWITCH_STARTING && !t->pending && !t->started_sent
+        && t->client.server_version) {
+        t->pending = rpcn_twitch_start(&t->client);
+        if (!t->pending) { rpcn_twitch_fail(t, "%s", rpcn_last_error(&t->client)); return; }
+        t->started_sent = true;
     }
 
     if (t->state == RPCN_TWITCH_WAITING && !t->pending && net_now_ms() >= t->next_poll_ms) {

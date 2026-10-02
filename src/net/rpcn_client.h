@@ -64,9 +64,17 @@ typedef enum {
     /* OAuth device code flow. Unauthenticated, like Login and Create, and unlike
      * those two the connection SURVIVES every status they return — a client that
      * offers both login methods can fall back to a password on the same socket. */
-    RPCN_CMD_TWITCH_DEVICE_START      = 63,
-    RPCN_CMD_TWITCH_DEVICE_POLL       = 64,
+    RPCN_CMD_TWITCH_DEVICE_START      = 240,   /* 0xF0, from protocol 32 */
+    RPCN_CMD_TWITCH_DEVICE_POLL       = 241,
 } rpcn_command_t;
+
+/* Protocol 32 gave 63/64 to RPCS3's UnlockTrophy/SyncTrophies, so the Twitch
+ * commands moved to 0xF0/0xF1, a block upstream's numbering won't reach. A
+ * server older than that (rpcn.sonicthefighte.rs before its update) knows them
+ * only as 63/64; rpcn_twitch_command picks by the version in the greeting. */
+#define RPCN_TWITCH_PROTOCOL           32u
+#define RPCN_CMD_V30_TWITCH_START      63
+#define RPCN_CMD_V30_TWITCH_POLL       64
 
 /*
  * The whole ErrorType enum rather than the handful this client can meet: the
@@ -242,6 +250,9 @@ typedef struct {
      * local_ip. local_ip itself stays the socket's own, for rpcn_session_recv. */
     uint32_t     advertised_ip;
     int64_t      user_id;
+    /* The protocol version from the server's ServerInfo greeting, the first
+     * packet on every connection; 0 until it has been read. */
+    uint32_t     server_version;
     char         error[256];
 } rpcn_client_t;
 
@@ -1352,15 +1363,24 @@ static inline bool rpcn_parse_joined_member(const uint8_t *payload, uint32_t siz
  * token that the ordinary Login command accepts IN PLACE OF THE PASSWORD. Every
  * later session is a plain login with no browser involved.
  *
- * Both commands are unauthenticated. An older RPCN does not know command 63 at
- * all: it answers Malformed and CLOSES the connection, so a disconnect right
+ * Both commands are unauthenticated. Their ids depend on the server's protocol
+ * version (see RPCN_TWITCH_PROTOCOL), so the start waits for the greeting. An
+ * RPCN without Twitch does not know them at all: it answers Malformed and
+ * CLOSES the connection, so a disconnect right
  * after the start means "this server has no Twitch support", the same as
  * TwitchDisabled.
  */
 
-/* Empty request body. */
+/* The id this server knows the Twitch start (or poll) by. */
+static inline uint16_t rpcn_twitch_command(const rpcn_client_t *c, bool poll) {
+    if (c->server_version >= RPCN_TWITCH_PROTOCOL)
+        return poll ? RPCN_CMD_TWITCH_DEVICE_POLL : RPCN_CMD_TWITCH_DEVICE_START;
+    return poll ? RPCN_CMD_V30_TWITCH_POLL : RPCN_CMD_V30_TWITCH_START;
+}
+
+/* Empty request body. Send it once the greeting has set server_version. */
 static inline uint64_t rpcn_twitch_start(rpcn_client_t *c) {
-    return rpcn_request(c, RPCN_CMD_TWITCH_DEVICE_START, NULL, 0);
+    return rpcn_request(c, (rpcn_command_t)rpcn_twitch_command(c, false), NULL, 0);
 }
 
 static inline uint64_t rpcn_twitch_poll_flow(rpcn_client_t *c, const char *flow_id) {
@@ -1369,7 +1389,7 @@ static inline uint64_t rpcn_twitch_poll_flow(rpcn_client_t *c, const char *flow_
     rpcn_strpack_init(&p);
     rpcn_strpack_put(&p, flow_id);
     if (!p.ok) { rpcn_fail(c, "flow id too long"); return 0; }
-    return rpcn_request(c, RPCN_CMD_TWITCH_DEVICE_POLL, p.buf, p.n);
+    return rpcn_request(c, (rpcn_command_t)rpcn_twitch_command(c, true), p.buf, p.n);
 }
 
 /* Walks NUL-terminated strings back to back, the shape every non-room payload
@@ -1464,6 +1484,10 @@ static inline bool rpcn_poll(rpcn_client_t *c, rpcn_packet_t *out) {
                     out->payload      = c->in + RPCN_HEADER_SIZE;
                     out->payload_size = size - RPCN_HEADER_SIZE;
                 }
+
+                /* ServerInfo: u32 LE protocol version. */
+                if (out->type == 3 && out->payload_size >= 4)
+                    c->server_version = rpcn_get_u32(out->payload);
 
                 /* Snoop our own Login reply for the user_id. Doing it here means
                  * callers never have to remember to parse it, and signaling just
