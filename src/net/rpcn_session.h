@@ -978,210 +978,235 @@ static inline void rpcn_session_begin_foreign_discovery(rpcn_session_t *s) {
     s->pending_foreign_serverlist = rpcn_get_server_list(&s->client, s->com_id_foreign);
 }
 
+/* The reply handlers below each take one kind of reply and return false only
+ * when it ends the session (rpcn_session_fail has been called). */
+
+static inline bool rpcn_session_on_login(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    if (pkt->error != RPCN_OK) {
+        s->credential_refused = pkt->error == RPCN_ERR_LOGIN_BAD_USERNAME
+                             || pkt->error == RPCN_ERR_LOGIN_BAD_PASSWORD;
+        s->login_error = (rpcn_error_t)pkt->error;
+        rpcn_session_fail(s, "login rejected: %s (ErrorType=%u)",
+                          rpcn_login_error_text(pkt->error, s->sent_token),
+                          (unsigned)pkt->error);
+        return false;
+    }
+    /* Discovery next. With CreateMissing on, this registers the title. */
+    s->pending_serverlist = rpcn_get_server_list(&s->client, s->com_id);
+    return true;
+}
+
+/* The room-state writes answer nothing worth keeping: the server echoes the
+ * change back as a notification, which is where it is applied. A refusal is
+ * worth a line, since it means the room did not move. */
+static inline bool rpcn_session_on_room_write(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    if (pkt->error != RPCN_OK)
+        rpcn_session_note(s, "the server refused a room update (ErrorType=%u)", (unsigned)pkt->error);
+    return true;
+}
+
+static inline bool rpcn_session_on_server_list(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_serverlist = 0;
+    uint16_t servers[8];
+    uint32_t n = rpcn_parse_server_list(pkt->payload, pkt->payload_size, servers, 8);
+    if (pkt->error != RPCN_OK || !n) {
+        rpcn_session_fail(s, "the server list request failed (ErrorType=%u)", (unsigned)pkt->error);
+        return false;
+    }
+    s->server_id = servers[0];
+    s->pending_worldlist = rpcn_get_world_list(&s->client, s->com_id, s->server_id);
+    return true;
+}
+
+static inline bool rpcn_session_on_world_list(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_worldlist = 0;
+    uint32_t worlds[8];
+    uint32_t n = rpcn_parse_world_list(pkt->payload, pkt->payload_size, worlds, 8);
+    if (pkt->error != RPCN_OK || !n) {
+        rpcn_session_fail(s, "the world list request failed (ErrorType=%u)", (unsigned)pkt->error);
+        return false;
+    }
+    s->world_id = worlds[0];
+    s->stage    = RPCN_STAGE_ONLINE;
+    return true;
+}
+
+/* --- the foreign (read-only) chain. Never fatal: it is a courtesy. --- */
+static inline void rpcn_session_on_foreign_server_list(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_foreign_serverlist = 0;
+    uint16_t servers[8];
+    uint32_t n = rpcn_parse_server_list(pkt->payload, pkt->payload_size, servers, 8);
+    if (pkt->error != RPCN_OK || !n) {
+        rpcn_session_note(s, "no server list for the %s lobby space; not browsing it",
+                          s->com_id_foreign);
+        s->com_id_foreign[0] = '\0';
+        return;
+    }
+    s->foreign_server_id = servers[0];
+    s->pending_foreign_worldlist =
+        rpcn_get_world_list(&s->client, s->com_id_foreign, s->foreign_server_id);
+}
+
+static inline void rpcn_session_on_foreign_world_list(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_foreign_worldlist = 0;
+    uint32_t worlds[8];
+    uint32_t n = rpcn_parse_world_list(pkt->payload, pkt->payload_size, worlds, 8);
+    if (pkt->error != RPCN_OK || !n) {
+        rpcn_session_note(s, "no world list for the %s lobby space; not browsing it",
+                          s->com_id_foreign);
+        s->com_id_foreign[0] = '\0';
+        return;
+    }
+    s->foreign_world_id = worlds[0];
+    s->foreign_ready    = true;
+    s->pending_foreign_search =
+        rpcn_search_room(&s->client, s->com_id_foreign, s->foreign_world_id);
+}
+
+static inline void rpcn_session_on_foreign_search(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_foreign_search = 0;
+    s->foreign_room_count = 0;
+    if (pkt->error == RPCN_OK) {
+        s->foreign_room_count = rpcn_parse_room_list(pkt->payload, pkt->payload_size,
+                                                     s->foreign_rooms, RPCN_MAX_ROOMS);
+    }
+}
+
+static inline void rpcn_session_on_search(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_search = 0;
+    s->room_count = 0;
+    if (pkt->error == RPCN_OK)
+        s->room_count = rpcn_parse_room_list(pkt->payload, pkt->payload_size,
+                                             s->rooms, RPCN_MAX_ROOMS);
+    /* A failed or empty search is not a session error — an empty server is
+     * the normal state — so the list simply comes back with nothing in it. */
+}
+
+static inline void rpcn_session_on_room_data(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_room_data = 0;
+    rpcn_room_info_t room;
+    if (pkt->error == RPCN_OK && rpcn_parse_room_data_internal(pkt->payload, pkt->payload_size, &room))
+        rpcn_session_apply_room(s, &room);
+}
+
+/* A create or join the server refused. */
+static inline bool rpcn_session_on_room_refused(rpcn_session_t *s, const rpcn_packet_t *pkt, bool soft) {
+    const char *why = "the room command failed";
+    if (pkt->error == RPCN_ERR_ROOM_MISSING)          why = "that room no longer exists";
+    else if (pkt->error == RPCN_ERR_ROOM_FULL)        why = "that room is full";
+    else if (pkt->error == RPCN_ERR_ROOM_PASSWORD_MISMATCH) why = "wrong room password";
+    else if (pkt->error == RPCN_ERR_ROOM_PASSWORD_MISSING)  why = "that room needs a password";
+    if (soft && pkt->error == RPCN_ERR_ROOM_MISSING) s->join_missed = true;
+    if ((s->ps3 && !s->is_host) || soft) {
+        /* PS3 rooms open and close between matches, and the list is
+         * only as fresh as the last search: say so and stay online. */
+        rpcn_session_note(s, "could not join: %s (ErrorType=%u)", why, (unsigned)pkt->error);
+        rpcn_session_clear_room(s);
+        s->stage = RPCN_STAGE_ONLINE;
+        return true;
+    }
+    rpcn_session_fail(s, "%s (ErrorType=%u)", why, (unsigned)pkt->error);
+    return false;
+}
+
+/* Every member already there, and where: in the join reply when the room has
+ * signaling on, so the common case needs no extra round trip. Anyone without
+ * one is asked about by the signaling pump. */
+static inline bool rpcn_session_on_join_members(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    uint16_t ids[RPCN_ROOM_MAX_MEMBERS];
+    uint32_t ips[RPCN_ROOM_MAX_MEMBERS];
+    uint16_t ports[RPCN_ROOM_MAX_MEMBERS];
+    uint32_t n = rpcn_parse_join_signaling_list(pkt->payload, pkt->payload_size,
+                                                ids, ips, ports, RPCN_ROOM_MAX_MEMBERS);
+    for (uint32_t i = 0; i < n; i++)
+        rpcn_session_set_peer_addr(s, rpcn_session_peer(s, ids[i]), ips[i], ports[i], "join reply");
+    if (!rpcn_session_peer_count(s)) {
+        rpcn_session_fail(s, "joined a room with no other member in it");
+        return false;
+    }
+    return true;
+}
+
+/* The answer to our create or join. */
+static inline bool rpcn_session_on_room(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_room = 0;
+    bool soft = s->join_soft;
+    s->join_soft = false;
+    if (pkt->error != RPCN_OK) return rpcn_session_on_room_refused(s, pkt, soft);
+
+    rpcn_room_info_t room;
+    if (!rpcn_parse_room_reply(pkt->payload, pkt->payload_size, &room)) {
+        rpcn_session_fail(s, "the room reply carried no room id");
+        return false;
+    }
+    s->room_id = room.room_id;
+    /* Read back rather than assumed, on BOTH sides. For a joiner this is
+     * the only place the host's settings arrive; for a host it is the
+     * server confirming what it actually stored (it clears the FULL bit
+     * it owns), so every member reads the same word from the same source. */
+    s->room_flags = room.flag_attr;
+    s->stage = s->is_host ? RPCN_STAGE_HOSTING : RPCN_STAGE_JOINING;
+    rpcn_session_apply_room(s, &room);
+    if (!s->my_member_id) {
+        rpcn_session_fail(s, "the room reply did not list us as a member");
+        return false;
+    }
+    return s->is_host || rpcn_session_on_join_members(s, pkt);
+}
+
+/* A signaling lookup answers whichever member it was asked about. */
+static inline void rpcn_session_on_signaling(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    rpcn_peer_t *asked = NULL;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS && !asked; i++)
+        if (s->peers[i].used && s->peers[i].pending_signaling == pkt->packet_id) asked = &s->peers[i];
+    if (!asked) return;
+    asked->pending_signaling = 0;
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    if (pkt->error != RPCN_OK
+        || !rpcn_parse_signaling_addr(pkt->payload, pkt->payload_size, &ip, &port)
+        || !ip || !port) {
+        /* NOT fatal. A member the UDP helper has not seen yet answers
+         * NotFound, which is a timing accident rather than a broken
+         * session — it fixes itself within a keepalive or two. */
+        rpcn_session_note(s, "no address for '%s' yet (ErrorType=%u); retrying",
+                          asked->npid, (unsigned)pkt->error);
+        asked->signaling_retry_ms = net_now_ms() + RPCN_SIGNALING_RETRY_MS;
+        return;
+    }
+    rpcn_session_set_peer_addr(s, asked, ip, port, "signaling lookup");
+}
+
+/* One reply, routed by its command and then by which request it answers, in
+ * that order. False when it ended the session. */
+static inline bool rpcn_session_on_reply(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    switch ((rpcn_command_t)pkt->command) {
+        case RPCN_CMD_LOGIN:                   return rpcn_session_on_login(s, pkt);
+        case RPCN_CMD_SET_ROOM_DATA_INTERNAL:
+        case RPCN_CMD_SET_ROOM_MEMBER_DATA:
+        case RPCN_CMD_SET_ROOM_DATA_EXTERNAL:  return rpcn_session_on_room_write(s, pkt);
+        case RPCN_CMD_LEAVE_ROOM:              return true;
+        default:                               break;
+    }
+    uint64_t id = pkt->packet_id;
+    if (id == s->pending_serverlist) return rpcn_session_on_server_list(s, pkt);
+    if (id == s->pending_worldlist)  return rpcn_session_on_world_list(s, pkt);
+    if (id == s->pending_foreign_serverlist)     rpcn_session_on_foreign_server_list(s, pkt);
+    else if (id == s->pending_foreign_worldlist) rpcn_session_on_foreign_world_list(s, pkt);
+    else if (id == s->pending_foreign_search)    rpcn_session_on_foreign_search(s, pkt);
+    else if (id == s->pending_search)            rpcn_session_on_search(s, pkt);
+    else if (id == s->pending_room_data)         rpcn_session_on_room_data(s, pkt);
+    else if (id == s->pending_room)              return rpcn_session_on_room(s, pkt);
+    else                                         rpcn_session_on_signaling(s, pkt);
+    return true;
+}
+
 static inline bool rpcn_session_pump_replies(rpcn_session_t *s) {
     rpcn_packet_t pkt;
     while (rpcn_poll(&s->client, &pkt)) {
         if (pkt.type == 2) { rpcn_session_on_notification(s, &pkt); continue; }
         if (pkt.type != 1) continue;   /* ServerInfo greeting — nothing to do with it */
-
-        if ((rpcn_command_t)pkt.command == RPCN_CMD_LOGIN) {
-            if (pkt.error != RPCN_OK) {
-                s->credential_refused = pkt.error == RPCN_ERR_LOGIN_BAD_USERNAME
-                                     || pkt.error == RPCN_ERR_LOGIN_BAD_PASSWORD;
-                s->login_error = (rpcn_error_t)pkt.error;
-                rpcn_session_fail(s, "login rejected: %s (ErrorType=%u)",
-                                  rpcn_login_error_text(pkt.error, s->sent_token),
-                                  (unsigned)pkt.error);
-                return false;
-            }
-            /* Discovery next. With CreateMissing on, this registers the title. */
-            s->pending_serverlist = rpcn_get_server_list(&s->client, s->com_id);
-            continue;
-        }
-
-        /* The room-state writes answer nothing worth keeping: the server echoes
-         * the change back as a notification, which is where it is applied. A
-         * refusal is worth a line, since it means the room did not move. */
-        if ((rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_DATA_INTERNAL
-            || (rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_MEMBER_DATA
-            || (rpcn_command_t)pkt.command == RPCN_CMD_SET_ROOM_DATA_EXTERNAL) {
-            if (pkt.error != RPCN_OK)
-                rpcn_session_note(s, "the server refused a room update (ErrorType=%u)", (unsigned)pkt.error);
-            continue;
-        }
-        if ((rpcn_command_t)pkt.command == RPCN_CMD_LEAVE_ROOM) continue;
-
-        if (pkt.packet_id == s->pending_serverlist) {
-            s->pending_serverlist = 0;
-            uint16_t servers[8];
-            uint32_t n = rpcn_parse_server_list(pkt.payload, pkt.payload_size, servers, 8);
-            if (pkt.error != RPCN_OK || !n) {
-                rpcn_session_fail(s, "the server list request failed (ErrorType=%u)", (unsigned)pkt.error);
-                return false;
-            }
-            s->server_id = servers[0];
-            s->pending_worldlist = rpcn_get_world_list(&s->client, s->com_id, s->server_id);
-            continue;
-        }
-
-        if (pkt.packet_id == s->pending_worldlist) {
-            s->pending_worldlist = 0;
-            uint32_t worlds[8];
-            uint32_t n = rpcn_parse_world_list(pkt.payload, pkt.payload_size, worlds, 8);
-            if (pkt.error != RPCN_OK || !n) {
-                rpcn_session_fail(s, "the world list request failed (ErrorType=%u)", (unsigned)pkt.error);
-                return false;
-            }
-            s->world_id = worlds[0];
-            s->stage    = RPCN_STAGE_ONLINE;
-            continue;
-        }
-
-        /* --- the foreign (read-only) chain. Never fatal: it is a courtesy. --- */
-        if (pkt.packet_id == s->pending_foreign_serverlist) {
-            s->pending_foreign_serverlist = 0;
-            uint16_t servers[8];
-            uint32_t n = rpcn_parse_server_list(pkt.payload, pkt.payload_size, servers, 8);
-            if (pkt.error != RPCN_OK || !n) {
-                rpcn_session_note(s, "no server list for the %s lobby space; not browsing it",
-                                  s->com_id_foreign);
-                s->com_id_foreign[0] = '\0';
-                continue;
-            }
-            s->foreign_server_id = servers[0];
-            s->pending_foreign_worldlist =
-                rpcn_get_world_list(&s->client, s->com_id_foreign, s->foreign_server_id);
-            continue;
-        }
-
-        if (pkt.packet_id == s->pending_foreign_worldlist) {
-            s->pending_foreign_worldlist = 0;
-            uint32_t worlds[8];
-            uint32_t n = rpcn_parse_world_list(pkt.payload, pkt.payload_size, worlds, 8);
-            if (pkt.error != RPCN_OK || !n) {
-                rpcn_session_note(s, "no world list for the %s lobby space; not browsing it",
-                                  s->com_id_foreign);
-                s->com_id_foreign[0] = '\0';
-                continue;
-            }
-            s->foreign_world_id = worlds[0];
-            s->foreign_ready    = true;
-            s->pending_foreign_search =
-                rpcn_search_room(&s->client, s->com_id_foreign, s->foreign_world_id);
-            continue;
-        }
-
-        if (pkt.packet_id == s->pending_foreign_search) {
-            s->pending_foreign_search = 0;
-            s->foreign_room_count = 0;
-            if (pkt.error == RPCN_OK) {
-                s->foreign_room_count = rpcn_parse_room_list(pkt.payload, pkt.payload_size,
-                                                             s->foreign_rooms, RPCN_MAX_ROOMS);
-            }
-            continue;
-        }
-
-        if (pkt.packet_id == s->pending_search) {
-            s->pending_search = 0;
-            s->room_count = 0;
-            if (pkt.error == RPCN_OK)
-                s->room_count = rpcn_parse_room_list(pkt.payload, pkt.payload_size,
-                                                     s->rooms, RPCN_MAX_ROOMS);
-            /* A failed or empty search is not a session error — an empty server is
-             * the normal state — so the list simply comes back with nothing in it. */
-            continue;
-        }
-
-        if (pkt.packet_id == s->pending_room_data) {
-            s->pending_room_data = 0;
-            rpcn_room_info_t room;
-            if (pkt.error == RPCN_OK && rpcn_parse_room_data_internal(pkt.payload, pkt.payload_size, &room))
-                rpcn_session_apply_room(s, &room);
-            continue;
-        }
-
-        if (pkt.packet_id == s->pending_room) {
-            s->pending_room = 0;
-            bool soft = s->join_soft;
-            s->join_soft = false;
-            if (pkt.error != RPCN_OK) {
-                const char *why = "the room command failed";
-                if (pkt.error == RPCN_ERR_ROOM_MISSING)          why = "that room no longer exists";
-                else if (pkt.error == RPCN_ERR_ROOM_FULL)        why = "that room is full";
-                else if (pkt.error == RPCN_ERR_ROOM_PASSWORD_MISMATCH) why = "wrong room password";
-                else if (pkt.error == RPCN_ERR_ROOM_PASSWORD_MISSING)  why = "that room needs a password";
-                if (soft && pkt.error == RPCN_ERR_ROOM_MISSING) s->join_missed = true;
-                if ((s->ps3 && !s->is_host) || soft) {
-                    /* PS3 rooms open and close between matches, and the list is
-                     * only as fresh as the last search: say so and stay online. */
-                    rpcn_session_note(s, "could not join: %s (ErrorType=%u)", why, (unsigned)pkt.error);
-                    rpcn_session_clear_room(s);
-                    s->stage = RPCN_STAGE_ONLINE;
-                    continue;
-                }
-                rpcn_session_fail(s, "%s (ErrorType=%u)", why, (unsigned)pkt.error);
-                return false;
-            }
-
-            rpcn_room_info_t room;
-            if (!rpcn_parse_room_reply(pkt.payload, pkt.payload_size, &room)) {
-                rpcn_session_fail(s, "the room reply carried no room id");
-                return false;
-            }
-            s->room_id = room.room_id;
-            /* Read back rather than assumed, on BOTH sides. For a joiner this is
-             * the only place the host's settings arrive; for a host it is the
-             * server confirming what it actually stored (it clears the FULL bit
-             * it owns), so every member reads the same word from the same source. */
-            s->room_flags = room.flag_attr;
-            s->stage = s->is_host ? RPCN_STAGE_HOSTING : RPCN_STAGE_JOINING;
-            rpcn_session_apply_room(s, &room);
-            if (!s->my_member_id) {
-                rpcn_session_fail(s, "the room reply did not list us as a member");
-                return false;
-            }
-
-            /* Every member already there, and where: in the join reply when the
-             * room has signaling on, so the common case needs no extra round
-             * trip. Anyone without one is asked about by the signaling pump. */
-            if (!s->is_host) {
-                uint16_t ids[RPCN_ROOM_MAX_MEMBERS];
-                uint32_t ips[RPCN_ROOM_MAX_MEMBERS];
-                uint16_t ports[RPCN_ROOM_MAX_MEMBERS];
-                uint32_t n = rpcn_parse_join_signaling_list(pkt.payload, pkt.payload_size,
-                                                            ids, ips, ports, RPCN_ROOM_MAX_MEMBERS);
-                for (uint32_t i = 0; i < n; i++)
-                    rpcn_session_set_peer_addr(s, rpcn_session_peer(s, ids[i]), ips[i], ports[i], "join reply");
-                if (!rpcn_session_peer_count(s)) {
-                    rpcn_session_fail(s, "joined a room with no other member in it");
-                    return false;
-                }
-            }
-            continue;
-        }
-
-        /* A signaling lookup answers whichever member it was asked about. */
-        rpcn_peer_t *asked = NULL;
-        for (uint32_t i = 0; i < RPCN_MAX_PEERS && !asked; i++)
-            if (s->peers[i].used && s->peers[i].pending_signaling == pkt.packet_id) asked = &s->peers[i];
-        if (asked) {
-            asked->pending_signaling = 0;
-            uint32_t ip = 0;
-            uint16_t port = 0;
-            if (pkt.error != RPCN_OK
-                || !rpcn_parse_signaling_addr(pkt.payload, pkt.payload_size, &ip, &port)
-                || !ip || !port) {
-                /* NOT fatal. A member the UDP helper has not seen yet answers
-                 * NotFound, which is a timing accident rather than a broken
-                 * session — it fixes itself within a keepalive or two. */
-                rpcn_session_note(s, "no address for '%s' yet (ErrorType=%u); retrying",
-                                  asked->npid, (unsigned)pkt.error);
-                asked->signaling_retry_ms = net_now_ms() + RPCN_SIGNALING_RETRY_MS;
-                continue;
-            }
-            rpcn_session_set_peer_addr(s, asked, ip, port, "signaling lookup");
-            continue;
-        }
+        if (!rpcn_session_on_reply(s, &pkt)) return false;
     }
     return true;
 }

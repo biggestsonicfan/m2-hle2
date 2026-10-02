@@ -1099,6 +1099,134 @@ static int headless_main(void) {
     return 0;
 }
 
+/* The debug windows and the menu bar: everything but the game. */
+static void draw_windows(void) {
+    draw_menu_bar();
+    draw_file_dialog();
+    shader_ui_draw(state.file_dialog);
+
+    if (state.show_cpu)
+        cpu_window_draw(&state.emu.cpu_snapshot, &state.emu.cpu_prev_snapshot, &state.show_cpu);
+    if (state.show_memview)     memview_draw(&state.bus, &state.show_memview);
+    if (state.show_breakpoints) bp_window_draw(&state.show_breakpoints);
+    if (state.show_cop)         cop_window_draw(&state.show_cop);
+    if (state.show_geo3d) {
+        const game_quirks_t *gq = g_active_profile ? &g_active_profile->quirks : NULL;
+        geo3d_window_draw(&state.geo3d, &state.show_geo3d,
+                          state.romset.main_data, state.romset.main_data_size,
+                          gq ? gq->model_table_offset : 0,
+                          gq ? gq->model_table_count  : 0,
+                          gq ? gq->mesh_ptr_subtract  : 0);
+    }
+    objview_window_draw(&state.show_objview, &state.romset, &state.bus);
+    if (state.show_bus_stats)   draw_bus_stats_window();
+    if (state.show_sky_eye)     draw_sky_eye_window();
+    if (state.show_m68k_cpu || state.show_m68k_mem) sound_settle();   /* not mid-run on the sound thread */
+    if (state.show_m68k_cpu) {
+        m68k_window_draw(&g_sound.m68k, &state.m68k_snapshot, &state.show_m68k_cpu);
+        state.m68k_snapshot = g_sound.m68k;
+    }
+    if (state.show_m68k_mem)    m68k_memview_draw(&state.show_m68k_mem);
+    if (state.show_debug)       debug_window_draw(&state.show_debug);
+    if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
+    netplay_empty_room_overlay();
+    netplay_vs_again_overlay();
+    if (state.show_demo)        igShowDemoWindow(&state.show_demo);
+}
+
+/*
+ * The A/V stream's own pass, before the swapchain's: sokol does not nest
+ * passes, and the board — not the display — is what paces this one. It
+ * runs exactly once per game frame, at the stream's own resolution, with
+ * lerp_t 1 (there is one picture per board frame, so there is nothing to
+ * interpolate towards).
+ *
+ * The window then MIRRORS that target instead of drawing the game a second
+ * time. Drawing it twice would double the 3D decode and the fill work for
+ * a picture nobody compares; this way the stream and the window are the
+ * same frame, and the only thing the window adds is ImGui on top.
+ */
+static bool s_av_mirror = false;
+
+static void av_stream_pass(void) {
+    uint64_t av_frame = 0, av_sample = 0;
+    /* Decided before the pass opens, because the overlay plugin has to run
+     * (and upload) outside one and av_capture_due() latches: it may be asked
+     * exactly once a frame. The short-circuit order is the one it always had. */
+    const bool av_due = av_stream_enabled() && av_capture_due(&av_frame, &av_sample) &&
+                        av_capture_ready() && av_stream_active();
+    if (av_due) {
+        int ox = 0, oy = 0, gw = av_stream_width(), gh = av_stream_height();
+        overlay_host_game_rect(av_stream_width(), av_stream_height(), 0,
+                               &ox, &oy, &gw, &gh);
+        overlay_host_paint(av_stream_width(), av_stream_height(),
+                           ox, oy, gw, gh, 0, g_emu_frames);
+        sg_begin_pass(&(sg_pass){
+            .action      = av_capture_action(),
+            .attachments = { .colors[0]     = av_capture_color_att(),
+                             .depth_stencil = av_capture_depth_att() },
+        });
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                        ox, oy, gw, gh, 1.0f);
+        overlay_host_draw();
+        sg_end_pass();
+        av_capture_submit(av_frame, av_sample);
+        s_av_mirror = true;
+    }
+    if (!av_stream_active()) s_av_mirror = false;
+}
+
+/* The window's own composition, when it is not mirroring the tap. Painted
+ * here, before the swapchain pass opens, for the same reason as above; the
+ * draw goes in below, after the board. When s_av_mirror is true there is
+ * nothing to do — the target already has the overlay baked into it. */
+static bool window_overlay_paint(int *ox, int *oy, int *gw, int *gh) {
+    if (s_av_mirror || !overlay_host_wants_paint()) return false;
+    int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
+    bool painted = overlay_host_game_rect(sapp_width(), sapp_height(), menu_h, ox, oy, gw, gh);
+    if (painted)
+        overlay_host_paint(sapp_width(), sapp_height(), *ox, *oy, *gw, *gh, menu_h, g_emu_frames);
+    return painted;
+}
+
+/* Where the game goes in the window: worked out before the swapchain pass
+ * opens, because a filter over the picture (post_shader.h) draws the game
+ * offscreen first. */
+static void window_game_rect(int *ox, int *oy, int *w, int *h) {
+    /* Reserve the top main-menu-bar strip so the game (and its row-0 HUD) isn't
+     * occluded by the opaque ImGui bar drawn on top - and reserve nothing when
+     * the bar is hidden, which is what gives the game the whole window.
+     * s_menu_bar_visible already folds in capture mode, so this covers the
+     * --kiosk case that used to be spelled out here. */
+    int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
+    int avail_h = sapp_height() - menu_h;
+    if (avail_h < 1) avail_h = 1;
+    /* Letterbox against whatever is actually being shown: the stream's
+     * target has its own aspect, chosen by --av-size. */
+    int src_w = s_av_mirror ? av_stream_width()  : VIDEO_WIDTH;
+    int src_h = s_av_mirror ? av_stream_height() : VIDEO_HEIGHT;
+    game_render_letterbox(sapp_width(), avail_h, src_w, src_h, ox, oy, w, h);
+    *oy += menu_h;
+}
+
+/* Programmatic per-model texture extractor (--extract N). Re-runs ~once/
+ * sec while set, so you can navigate to a scene where the model's texels
+ * are loaded; the ROM-side manifest/colours are always correct. */
+static void extract_model_tick(void) {
+    if (g_extract_model >= 0 && g_active_profile && state.romset.main_data) {
+        static int _ec = 0;
+        if ((_ec++ % 60) == 0) {
+            const game_quirks_t *q = &g_active_profile->quirks;
+            geo3d_extract_model_texture(g_extract_model,
+                state.romset.main_data, state.romset.main_data_size,
+                state.romset.textures,  state.romset.textures_size,
+                state.bus.texram0, state.bus.texram1,
+                q->model_table_offset, q->model_table_count);
+            if (g_extract_seq >= 0) g_extract_seq++;
+        }
+    }
+}
+
 static void frame(void) {
     /* `quit` over the bridge. Capture mode would otherwise swallow the close,
      * which is the point of capture mode -- so say we mean it. */
@@ -1140,117 +1268,19 @@ static void frame(void) {
         g_objview.window_request = -1;
     }
 
-    if (draw_ui) {
-        draw_menu_bar();
-        draw_file_dialog();
-        shader_ui_draw(state.file_dialog);
+    if (draw_ui) draw_windows();
 
-        if (state.show_cpu)
-            cpu_window_draw(&state.emu.cpu_snapshot, &state.emu.cpu_prev_snapshot, &state.show_cpu);
-        if (state.show_memview)     memview_draw(&state.bus, &state.show_memview);
-        if (state.show_breakpoints) bp_window_draw(&state.show_breakpoints);
-        if (state.show_cop)         cop_window_draw(&state.show_cop);
-        if (state.show_geo3d) {
-            const game_quirks_t *gq = g_active_profile ? &g_active_profile->quirks : NULL;
-            geo3d_window_draw(&state.geo3d, &state.show_geo3d,
-                              state.romset.main_data, state.romset.main_data_size,
-                              gq ? gq->model_table_offset : 0,
-                              gq ? gq->model_table_count  : 0,
-                              gq ? gq->mesh_ptr_subtract  : 0);
-        }
-        objview_window_draw(&state.show_objview, &state.romset, &state.bus);
-        if (state.show_bus_stats)   draw_bus_stats_window();
-        if (state.show_sky_eye)     draw_sky_eye_window();
-        if (state.show_m68k_cpu || state.show_m68k_mem) sound_settle();   /* not mid-run on the sound thread */
-        if (state.show_m68k_cpu) {
-            m68k_window_draw(&g_sound.m68k, &state.m68k_snapshot, &state.show_m68k_cpu);
-            state.m68k_snapshot = g_sound.m68k;
-        }
-        if (state.show_m68k_mem)    m68k_memview_draw(&state.show_m68k_mem);
-        if (state.show_debug)       debug_window_draw(&state.show_debug);
-        if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
-        netplay_empty_room_overlay();
-        netplay_vs_again_overlay();
-        if (state.show_demo)        igShowDemoWindow(&state.show_demo);
-    }
+    av_stream_pass();
 
-    /*
-     * The A/V stream's own pass, before the swapchain's: sokol does not nest
-     * passes, and the board — not the display — is what paces this one. It
-     * runs exactly once per game frame, at the stream's own resolution, with
-     * lerp_t 1 (there is one picture per board frame, so there is nothing to
-     * interpolate towards).
-     *
-     * The window then MIRRORS that target instead of drawing the game a second
-     * time. Drawing it twice would double the 3D decode and the fill work for
-     * a picture nobody compares; this way the stream and the window are the
-     * same frame, and the only thing the window adds is ImGui on top.
-     */
-    static bool s_av_mirror = false;
-    uint64_t av_frame = 0, av_sample = 0;
-    /* Decided before the pass opens, because the overlay plugin has to run
-     * (and upload) outside one and av_capture_due() latches: it may be asked
-     * exactly once a frame. The short-circuit order is the one it always had. */
-    const bool av_due = av_stream_enabled() && av_capture_due(&av_frame, &av_sample) &&
-                        av_capture_ready() && av_stream_active();
-    if (av_due) {
-        int ox = 0, oy = 0, gw = av_stream_width(), gh = av_stream_height();
-        overlay_host_game_rect(av_stream_width(), av_stream_height(), 0,
-                               &ox, &oy, &gw, &gh);
-        overlay_host_paint(av_stream_width(), av_stream_height(),
-                           ox, oy, gw, gh, 0, g_emu_frames);
-        sg_begin_pass(&(sg_pass){
-            .action      = av_capture_action(),
-            .attachments = { .colors[0]     = av_capture_color_att(),
-                             .depth_stencil = av_capture_depth_att() },
-        });
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                        ox, oy, gw, gh, 1.0f);
-        overlay_host_draw();
-        sg_end_pass();
-        av_capture_submit(av_frame, av_sample);
-        s_av_mirror = true;
-    }
-    if (!av_stream_active()) s_av_mirror = false;
-
-    /* The window's own composition, when it is not mirroring the tap. Painted
-     * here, before the swapchain pass opens, for the same reason as above; the
-     * draw goes in below, after the board. When s_av_mirror is true there is
-     * nothing to do — the target already has the overlay baked into it. */
     int win_ox = 0, win_oy = 0, win_gw = 0, win_gh = 0;
-    bool win_overlay = false;
-    if (!s_av_mirror && overlay_host_wants_paint()) {
-        int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
-        win_overlay = overlay_host_game_rect(sapp_width(), sapp_height(), menu_h,
-                                             &win_ox, &win_oy, &win_gw, &win_gh);
-        if (win_overlay)
-            overlay_host_paint(sapp_width(), sapp_height(),
-                               win_ox, win_oy, win_gw, win_gh, menu_h, g_emu_frames);
-    }
+    bool win_overlay = window_overlay_paint(&win_ox, &win_oy, &win_gw, &win_gh);
 
-    /* Where the game goes in the window: worked out before the swapchain pass
-     * opens, because a filter over the picture (post_shader.h) draws the game
-     * offscreen first. */
     int ox, oy, w, h;
-    /* Reserve the top main-menu-bar strip so the game (and its row-0 HUD) isn't
-     * occluded by the opaque ImGui bar drawn on top - and reserve nothing when
-     * the bar is hidden, which is what gives the game the whole window.
-     * s_menu_bar_visible already folds in capture mode, so this covers the
-     * --kiosk case that used to be spelled out here. */
-    int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
-    int avail_h = sapp_height() - menu_h;
-    if (avail_h < 1) avail_h = 1;
-    /* Letterbox against whatever is actually being shown: the stream's
-     * target has its own aspect, chosen by --av-size. */
-    int src_w = s_av_mirror ? av_stream_width()  : VIDEO_WIDTH;
-    int src_h = s_av_mirror ? av_stream_height() : VIDEO_HEIGHT;
-    game_render_letterbox(sapp_width(), avail_h, src_w, src_h, &ox, &oy, &w, &h);
-    oy += menu_h;
+    window_game_rect(&ox, &oy, &w, &h);
     /* An overlay owns the whole window: the board goes where the plugin
      * was told it would be, so the window and the stream show the identical
      * composition rather than two letterboxes of the same picture. */
     if (win_overlay) { ox = win_ox; oy = win_oy; w = win_gw; h = win_gh; }
-
     /* The filter reads the game from a target of its own and covers only the
      * game's rectangle. Not while the window mirrors the A/V stream: that
      * target is the stream's composition, overlay and all. */
@@ -1288,21 +1318,7 @@ static void frame(void) {
          * stream. simgui_render() is below, outside this block. */
         if (win_overlay) overlay_host_draw();
 
-        /* Programmatic per-model texture extractor (--extract N). Re-runs ~once/
-         * sec while set, so you can navigate to a scene where the model's texels
-         * are loaded; the ROM-side manifest/colours are always correct. */
-        if (g_extract_model >= 0 && g_active_profile && state.romset.main_data) {
-            static int _ec = 0;
-            if ((_ec++ % 60) == 0) {
-                const game_quirks_t *q = &g_active_profile->quirks;
-                geo3d_extract_model_texture(g_extract_model,
-                    state.romset.main_data, state.romset.main_data_size,
-                    state.romset.textures,  state.romset.textures_size,
-                    state.bus.texram0, state.bus.texram1,
-                    q->model_table_offset, q->model_table_count);
-                if (g_extract_seq >= 0) g_extract_seq++;
-            }
-        }
+        extract_model_tick();
     }
 
     simgui_render();

@@ -72,29 +72,31 @@ It is ordinary for an emulator, and the parts that matter most are better than t
 
 Each column is `python3 tools/spaghetti.py` with the `_Static_assert` fix, so `f1c5ee7` here is not the 66f4d4e table above: it has `geo3d_mesh_layers` and the rest of `geo3d.h` back in, and #325's draw work in.
 
-| | master `f1c5ee7` | #332 `461cc2c` | #334 `7f39255` | #335 `05d3d6a` | #336 |
-|---|---:|---:|---:|---:|---:|
-| over 20 paths (the headline) | 25.7% (114 functions) | 25.6% (113) | 24.6% (113) | 23.8% (114) | **22.3%** (112) |
-| over 30 | 15.5% (51) | 15.4% (51) | 14.4% (50) | 13.2% (49) | 11.6% (46) |
-| over 50 | 6.7% (15) | 6.7% (15) | 5.6% (14) | 4.3% (12) | 2.8% (9) |
-| `main*.c` over 20 | 32.3% | 32.3% | 22.8% | 22.8% | 22.8% |
-| `board/` over 20 | 23.2% | 22.6% | 22.6% | 19.5% | 18.2% |
-| `ui/` over 20 | | | | 28.2% | 25.0% |
+| | master `f1c5ee7` | #332 `461cc2c` | #334 `7f39255` | #335 `05d3d6a` | #336 `90c6ee9` | #338 |
+|---|---:|---:|---:|---:|---:|---:|
+| over 20 paths (the headline) | 25.7% (114 functions) | 25.6% (113) | 24.6% (113) | 23.8% (114) | 22.3% (112) | **20.8%** (108) |
+| over 30 | 15.5% (51) | 15.4% (51) | 14.4% (50) | 13.2% (49) | 11.6% (46) | 10.1% (42) |
+| over 50 | 6.7% (15) | 6.7% (15) | 5.6% (14) | 4.3% (12) | 2.8% (9) | 1.6% (6) |
+| `main*.c` over 20 | 32.3% | 32.3% | 22.8% | 22.8% | 22.8% | 19.3% |
+| `board/` over 20 | 23.2% | 22.6% | 22.6% | 19.5% | 18.2% | 18.2% |
+| `ui/` over 20 | | | | 28.2% | 25.0% | 25.0% |
+| `net/` over 20 | | | | | 25.5% | 21.0% |
+| `core/` over 20 | | | | | 20.6% | 15.5% |
 
-The worst ten now, for the next candidates. Nothing is over 71 paths; the top two branch as their sources do, the PS3 phase machine (`ps3_owner_pump`, ROOM-MATCH.md) and GLSL's grammar (`rs_hoist_one`):
+The worst ten now, for the next candidates. Nothing is over 71 paths; the top two branch as their sources do, the PS3 phase machine (`ps3_owner_pump`, ROOM-MATCH.md) and GLSL's grammar (`rs_hoist_one`). `emu_slice_body` is the run loop, where every board-time rule in CLAUDE.md lands, so a split there needs `det_digest` to hold the board identical:
 
 | Paths | Lines | Function |
 |---:|---:|---|
 | 71 | 142 | `ps3_owner_pump` (`ps3_link.h:1227`) |
 | 63 | 59 | `rs_hoist_one` (`retro_shader.h:700`) |
 | 58 | 111 | `lobby_draw` (`pad_lobby.h:329`) |
-| 57 | 174 | `rpcn_session_pump_replies` (`rpcn_session.h:981`) |
-| 55 | 121 | `hprof__write` (`host_prof.h:494`) |
-| 54 | 158 | `netplay_publish_status` (`netplay.h:1850`) |
 | 53 | 114 | `geo3d_decode_model` (`geo3d.h:1750`) |
 | 53 | 97 | `emu_slice_body` (`emu_thread.h:540`) |
 | 53 | 103 | `ps3ui_follow` (`ps3ui_app.h:1042`) |
-| 50 | 135 | `frame` (`main.c:1102`) |
+| 47 | 117 | `mcp_cmd_netplay_status` (`mcp_bridge.h:2104`) |
+| 45 | 114 | `lobby_update` (`pad_lobby.h:133`) |
+| 44 | 112 | `sharc_coli_calc_flag` (`sharc_coli.h:231`) |
+| 43 | 80 | `ps3_on_message` (`ps3_link.h:785`) |
 
 ## Untangled so far
 
@@ -104,3 +106,8 @@ The worst ten now, for the next candidates. Nothing is over 71 paths; the top tw
 - **`geo3d_mesh_layers` (Pinboard #336).** One function ranked a mesh's coplanar faces into layers: it tested every face pair for a shared plane and an overlap, decided which of the two lies on top, sorted the edges, took the longest path to each face, grouped faces under one plane with a union-find, and fitted each group's plane, with a dozen `malloc`s along the way. Each step is now its own function: `geo3d_layer_face` (is this face a layer candidate), `geo3d_layer_pair_top` (which of a pair is on top, or neither), `geo3d_layer_order` (the sort and sweep into a `geo3d_layer_edges_t`), `geo3d_layer_depths`, `geo3d_layer_root` / `geo3d_layer_groups` and `geo3d_layer_plane`. The scratch arrays are one allocation, freed at one label. Measured by `tools/spaghetti.py` against #335 `05d3d6a`: 100 paths over 165 lines to 16 over 31; the largest piece is `geo3d_layer_pair_top` (29). Only the object viewer uses the layers, so the check is direct: every STF model the table names (5,103 of them) is built and ranked by the code before and after, and the layer and plane of every face (5,990 layered, 10,401 planes) hash identical, also under ASan.
 - **`mcp_cmd_capture_dl` (Pinboard #336).** The bridge's display-list capture parsed a dozen options, allocated up to seven buffers, armed the tap under the mutex, waited the frames out, took the buffers back and wrote up to seven files, in one 162-line body. It is now a request struct (`mcp_dl_req_t`) and `mcp_dl_parse`, `mcp_dl_alloc` / `_free`, `mcp_dl_arm` / `_disarm` / `_wait`, `mcp_dl_dump`, `mcp_dl_write_index` (the `.json`) and `mcp_dl_write`, which keeps the old gating: a file is written only when every one before it was. 84 paths to 12; the largest piece is the parse (19). Every error string is the same. Checked by driving the bridge of both builds headless from power-on with every option at once (`run`, `slots`, `unit`, `cop`, probes of all three sizes and two blocks), for 40 frames and then 900 (4.25 million list words): all fourteen files are byte-identical to the build before, as two runs of that build are to each other, and a request without a path gets the same refusal.
 - **`netplay_window_draw` (Pinboard #336).** The desktop's netplay window drew every panel inline: the settings adopted at first draw, the status lines, the server and account boxes with the Twitch sign-in and the sign-up, the room options, the room list and its join buttons, YAMP's rooms and the log. Each is now its own function (`netplay_window_adopt`, `_status`, `_account` with `_twitch` and `_signup`, `_room_options`, `_room_list`, `_foreign`, `_log`), taking the status by pointer; `netplay_window_draw` keeps the window, the headers and the separators, and is 9 paths over 29 lines where it was 101 over 272. The largest piece is the status (18). The moved lines are the old ones with `st.` read as `st->`, nothing else. Checked under Xvfb, before and after side by side: signed out, the window is pixel-identical, with the sign-up open as well; on the local RPCN server, hosting a room, searching (both rooms listed) and a failed login draw the same but for names and room numbers, and selecting a room in the list and pressing Join selected joins it.
+- **`rpcn_session_pump_replies` (Pinboard #338).** The RPCN client's reply pump handled every reply inline: the login, the room writes, the server and world lists (ours and YAMP's), both searches, the room data, a refused or missing room, the join with its member list, and the signaling answer. Each reply is now its own handler (`rpcn_session_on_login`, `_on_room_write`, `_on_server_list`, `_on_world_list`, `_on_foreign_server_list`, `_on_foreign_world_list`, `_on_foreign_search`, `_on_search`, `_on_room_data`, `_on_room_refused`, `_on_room` with `_on_join_members`, `_on_signaling`), and each returns false only where the old code returned false. `rpcn_session_on_reply` picks the handler: by command for the login and the room writes, then by packet id in the old order. The pump is 5 paths over 9 lines where it was 57 over 174; the largest piece is the dispatcher, the refusal and the signaling answer (10 each). Every log line and error string is the same.
+- **`netplay_publish_status` (Pinboard #338).** The status snapshot the windows and the bridge read was filled in one body: the room's member rows, the room, the peer, the account, the PS3 link's peers and the log. Each is now its own function (`netplay_status_member_ids` / `_member_row`, `_room`, `_peer`, `_account`, `_ps3_peer` / `_ps3`, `_log`), called in the old order under the same lock. The PS3 peer row's anonymous struct is named (`struct netplay_ps3_peer_status`) so a function can take one. 54 paths over 158 lines to 5 over 41; the largest piece is the member list (14).
+- **`hprof__write` (Pinboard #338).** The self-profiler's report wrote its header, threads, zones, symbol table, frames, maps and both raw sections in one function. Each section is now its own (`hprof__write_header`, `_threads`, `_zones`, `_symbols` with `hprof__aggregate`, `_maps`, `_raw_lr`), sharing the file and the totals through a `hprof_report_t`; the sections come out in the old order. 55 paths over 121 lines to 9 over 34; the largest pieces are the symbol table (13) and the threads (12).
+- **The desktop's `frame` (Pinboard #338).** `main.c`'s frame callback drew the debug windows, ran the A/V stream's pass, painted the window overlay, worked out the game's rectangle, drew through the picture filter and ticked `--extract`, in one body. Those are now `draw_windows`, `av_stream_pass`, `window_overlay_paint`, `window_game_rect` and `extract_model_tick`; `s_av_mirror` moved to file scope with the two functions that read it. `frame` keeps the order of every pass, and the A/V pass decides `av_due` with the same short-circuit order (`av_capture_due` latches). 50 paths over 135 lines to 14 over 57; the largest piece is `draw_windows` (19).
+- **How the four were checked (Pinboard #338).** ctest passes 19 of 19. On the local RPCN server, two headless clients of each build sign in, host, search, join, play a lockstep match past frame 120, leave and sign out; every `netplay_status` reply along the way has the same fields and states in both builds, and the values differ only in room numbers, the random seed, frame counts and stalls. The self-profiler's report has the same sections and line formats in both builds, and `tools/hostprof.py` reads it. Under Xvfb, the window of each build with a ROM loaded and the board stopped is pixel-identical, with the File menu open as well. The A/V stream's frames, hashed by board frame from a windowed run of each build, differ on 3 of 419 and 5 of 481 frames shared with the build before; two runs of the build before differ on 5 of 347, and two of this one on 1 of 497. Each differing picture is one neither run produced on any other frame, so it is the windowed tap's own tearing, not the change.

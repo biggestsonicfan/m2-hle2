@@ -425,7 +425,7 @@ typedef struct {
     uint32_t        ps3_stalled_frames;
     uint32_t        ps3_seed;
     uint32_t        ps3_me_flags;
-    struct {
+    struct netplay_ps3_peer_status {
         uint16_t member_id;
         char     npid[20];
         bool     sig_active, sig_peer_active;
@@ -1844,6 +1844,172 @@ static inline void netplay_copy_str(char *dst, size_t size, const char *src) {
     dst[n] = '\0';
 }
 
+/* The room's member ids, in line order where there is one: the line, then us
+ * if the line does not hold us, then every other member it does not hold. */
+static inline uint32_t netplay_status_member_ids(const rpcn_session_t *s, uint16_t ids[ROOM_MAX_MEMBERS]) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g_netplay.room.line_count && n < ROOM_MAX_MEMBERS; i++)
+        ids[n++] = g_netplay.room.line[i];
+    if (s->my_member_id) {
+        bool listed = false;
+        for (uint32_t i = 0; i < n; i++) if (ids[i] == s->my_member_id) listed = true;
+        if (!listed && n < ROOM_MAX_MEMBERS) ids[n++] = s->my_member_id;
+    }
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS && n < ROOM_MAX_MEMBERS; i++) {
+        if (!s->peers[i].used) continue;
+        bool listed = false;
+        for (uint32_t k = 0; k < n; k++) if (ids[k] == s->peers[i].member_id) listed = true;
+        if (!listed) ids[n++] = s->peers[i].member_id;
+    }
+    return n;
+}
+
+/* One member's row. False for a member still in the line but gone from the
+ * room, which gets no row. */
+static inline bool netplay_status_member_row(const rpcn_session_t *s, uint16_t id,
+                                             netplay_member_status_t *row) {
+    memset(row, 0, sizeof(*row));
+    row->member_id = id;
+    row->is_me     = id == s->my_member_id;
+    row->is_owner  = id == s->owner_id;
+    row->line_pos  = (int8_t)room_line_index(&g_netplay.room, id);
+    row->side      = (int8_t)room_side_of(&g_netplay.room, id);
+    if (row->is_me) {
+        netplay_copy_str(row->npid, sizeof(row->npid), s->npid);
+        row->known = true;
+        row->data  = g_netplay.me;
+    } else {
+        const rpcn_peer_t *p = rpcn_session_peer((rpcn_session_t *)s, id);
+        if (!p) return false;   /* in the line, but gone from the room */
+        netplay_copy_str(row->npid, sizeof(row->npid), p->npid);
+        row->known      = room_member_decode(p->bin, p->bin_len, &row->data);
+        row->addr_known = p->ip && p->port;
+        row->heard      = p->heard;
+    }
+    row->rtt_ms = row->is_me ? -1 : netplay_rtt_ms(id);
+    return true;
+}
+
+/* The room, one row per member, in line order where there is one. */
+static inline void netplay_status_room(netplay_status_t *st, const rpcn_session_t *s) {
+    st->my_member_id = s->my_member_id;
+    st->max_slot     = s->max_slot;
+    st->room         = g_netplay.room;
+    st->room_known   = g_netplay.room_known;
+    st->me           = g_netplay.me;
+    st->member_count = 0;
+    if (rpcn_session_in_room(s)) {
+        uint16_t ids[ROOM_MAX_MEMBERS];
+        uint32_t n = netplay_status_member_ids(s, ids);
+        for (uint32_t i = 0; i < n; i++)
+            if (netplay_status_member_row(s, ids[i], &st->members[st->member_count]))
+                st->member_count++;
+    }
+    st->auto_start_s = 0;
+    if (netplay_is_host() && g_netplay.room.phase == ROOM_PHASE_LOBBY
+        && (g_netplay.room.flags & ROOM_FLAG_AUTO) && g_netplay.auto_deadline_ms) {
+        uint64_t now = net_now_ms();
+        st->auto_start_s = g_netplay.auto_deadline_ms > now
+                         ? (uint32_t)((g_netplay.auto_deadline_ms - now + 999) / 1000) : 0;
+    }
+}
+
+/* "The peer": the opponent while there is one, otherwise the first other
+ * member. What a two-player front end (and the MCP status) has always shown. */
+static inline void netplay_status_peer(netplay_status_t *st, const rpcn_session_t *s) {
+    const rpcn_peer_t *peer = rpcn_session_peer((rpcn_session_t *)s, netplay_opponent_id());
+    for (uint32_t i = 0; !peer && i < RPCN_MAX_PEERS; i++) if (s->peers[i].used) peer = &s->peers[i];
+    netplay_copy_str(st->peer_npid, sizeof(st->peer_npid), peer ? peer->npid : "");
+    netplay_copy_str(st->peer_addr, sizeof(st->peer_addr), rpcn_peer_addr_text(peer));
+    st->peer_known   = peer && peer->ip && peer->port;
+    st->peer_heard   = peer && peer->heard;
+    st->peer_rtt_ms  = peer ? netplay_rtt_ms(peer->member_id) : -1;
+}
+
+/* The account, the Twitch sign-in and the session's error. */
+static inline void netplay_status_account(netplay_status_t *st) {
+    st->account_state = g_netplay.account.state;
+    st->account_job   = g_netplay.account.job;
+    netplay_copy_str(st->account_error, sizeof(st->account_error), g_netplay.account.error);
+
+    st->twitch_state     = g_netplay.twitch.state;
+    st->twitch_signed_in = g_netplay.cfg.twitch_token[0] != '\0';
+    netplay_copy_str(st->npid, sizeof(st->npid), g_netplay.cfg.npid);
+    netplay_copy_str(st->server, sizeof(st->server), g_netplay.cfg.server);
+    netplay_copy_str(st->twitch_user_code, sizeof(st->twitch_user_code), g_netplay.twitch.user_code);
+    netplay_copy_str(st->twitch_uri, sizeof(st->twitch_uri), g_netplay.twitch.verification_uri);
+    /* The token's owner, not whoever is in the account box: the window prints
+     * this as "Signed in with Twitch as ...", and with two accounts on one
+     * machine those are no longer the same name. */
+    netplay_copy_str(st->twitch_npid, sizeof(st->twitch_npid),
+                     g_netplay.cfg.twitch_npid[0] ? g_netplay.cfg.twitch_npid : g_netplay.cfg.npid);
+    netplay_copy_str(st->twitch_error, sizeof(st->twitch_error), g_netplay.twitch.error);
+
+    netplay_copy_str(st->error, sizeof(st->error),
+                     g_netplay.state == NETPLAY_FAILED ? rpcn_session_error(&g_netplay.session) : "");
+    st->need_email_token = g_netplay.state == NETPLAY_FAILED
+                        && g_netplay.session.login_error == RPCN_ERR_LOGIN_BAD_TOKEN;
+}
+
+/* One PS3 member: its signaling and its three RUDP channels. */
+static inline void netplay_status_ps3_peer(const ps3_link_t *L, const ps3_peer_t *p,
+                                           struct netplay_ps3_peer_status *row) {
+    row->member_id = p->member_id;
+    netplay_copy_str(row->npid, sizeof(row->npid), p->npid);
+    const rpcs3_sig_peer_t *sp = NULL;
+    for (uint32_t j = 0; j < RPCS3_SIG_MAX_PEERS; j++)
+        if (L->sig.peers[j].used && strncmp(L->sig.peers[j].npid, p->npid, 16) == 0) sp = &L->sig.peers[j];
+    row->sig_active      = sp && sp->active;
+    row->sig_peer_active = sp && sp->peer_active;
+    row->rtt_us          = rpcs3_sig_rtt_us(sp);
+    if (sp) net_addr_text(row->addr, sizeof(row->addr), sp->ip, sp->port);
+    else row->addr[0] = '\0';
+    for (uint32_t c = 0; c < 3; c++)
+        row->ch_state[c] = p->rudp_up ? (uint8_t)p->rudp.ch[c].state : 0;
+}
+
+/* The PS3 link's lockstep and members, when the room is a PS3 one. */
+static inline void netplay_status_ps3(netplay_status_t *st) {
+    st->ps3 = g_netplay.ps3;
+    if (!g_netplay.ps3) return;
+    const ps3_link_t *L = &g_netplay.ps3link;
+    st->ps3_room_known = L->room_known;
+    st->ps3_phase      = L->phase;
+    st->ps3_side       = L->my_side;
+    st->ps3_match      = L->match;
+    st->ps3_gen        = L->sio.gen;
+    st->ps3_rgen       = L->sio.rgen;
+    st->ps3_gen_ok     = L->sio.gen_ok;
+    st->ps3_resp_done  = L->sio.resp_done;
+    st->ps3_passed     = L->sio.passed;
+    st->ps3_sample     = L->sio.sample;
+    st->ps3_play       = L->sio.play;
+    st->ps3_newest     = L->sio.newest;
+    st->ps3_delay      = L->sio.delay;
+    st->ps3_stalled_frames = L->stalled_frames;
+    st->ps3_seed       = L->seed;
+    st->ps3_me_flags   = ps3_be32(L->me);
+    st->ps3_peer_count = 0;
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
+        const ps3_peer_t *p = &L->peers[i];
+        if (!p->used) continue;
+        netplay_status_ps3_peer(L, p, &st->ps3_peers[st->ps3_peer_count++]);
+    }
+}
+
+/* The log is a ring written in order: copy only the lines added since the
+ * last publish (all of it after a wrap, or if the count went backwards). */
+static inline void netplay_status_log(netplay_status_t *st) {
+    uint32_t added = g_netplay.log_count - st->log_count;
+    if (g_netplay.log_count < st->log_count || added >= NETPLAY_LOG_LINES) {
+        memcpy(st->log, g_netplay.log, sizeof(st->log));
+    } else {
+        for (uint32_t n = st->log_count; n != g_netplay.log_count; n++)
+            memcpy(st->log[n % NETPLAY_LOG_LINES], g_netplay.log[n % NETPLAY_LOG_LINES], NETPLAY_LOG_LEN);
+    }
+    st->log_count = g_netplay.log_count;
+}
+
 /* The UI reads this. It is refreshed once per pump while a board runs, and
  * while netplay is off or waiting whenever something changed or 16 ms have
  * passed (netplay_status_due). */
@@ -1862,70 +2028,8 @@ static inline void netplay_publish_status(void) {
     netplay_copy_str(st->com_id, sizeof(st->com_id), s->com_id);
     netplay_copy_str(st->com_id_foreign, sizeof(st->com_id_foreign), s->com_id_foreign);
 
-    /* The room, one row per member, in line order where there is one. */
-    st->my_member_id = s->my_member_id;
-    st->max_slot     = s->max_slot;
-    st->room         = g_netplay.room;
-    st->room_known   = g_netplay.room_known;
-    st->me           = g_netplay.me;
-    st->member_count = 0;
-    if (rpcn_session_in_room(s)) {
-        uint16_t ids[ROOM_MAX_MEMBERS];
-        uint32_t n = 0;
-        for (uint32_t i = 0; i < g_netplay.room.line_count && n < ROOM_MAX_MEMBERS; i++)
-            ids[n++] = g_netplay.room.line[i];
-        if (s->my_member_id) {
-            bool listed = false;
-            for (uint32_t i = 0; i < n; i++) if (ids[i] == s->my_member_id) listed = true;
-            if (!listed && n < ROOM_MAX_MEMBERS) ids[n++] = s->my_member_id;
-        }
-        for (uint32_t i = 0; i < RPCN_MAX_PEERS && n < ROOM_MAX_MEMBERS; i++) {
-            if (!s->peers[i].used) continue;
-            bool listed = false;
-            for (uint32_t k = 0; k < n; k++) if (ids[k] == s->peers[i].member_id) listed = true;
-            if (!listed) ids[n++] = s->peers[i].member_id;
-        }
-        for (uint32_t i = 0; i < n; i++) {
-            netplay_member_status_t *row = &st->members[st->member_count];
-            memset(row, 0, sizeof(*row));
-            row->member_id = ids[i];
-            row->is_me     = ids[i] == s->my_member_id;
-            row->is_owner  = ids[i] == s->owner_id;
-            row->line_pos  = (int8_t)room_line_index(&g_netplay.room, ids[i]);
-            row->side      = (int8_t)room_side_of(&g_netplay.room, ids[i]);
-            if (row->is_me) {
-                netplay_copy_str(row->npid, sizeof(row->npid), s->npid);
-                row->known = true;
-                row->data  = g_netplay.me;
-            } else {
-                const rpcn_peer_t *p = rpcn_session_peer((rpcn_session_t *)s, ids[i]);
-                if (!p) continue;   /* in the line, but gone from the room */
-                netplay_copy_str(row->npid, sizeof(row->npid), p->npid);
-                row->known      = room_member_decode(p->bin, p->bin_len, &row->data);
-                row->addr_known = p->ip && p->port;
-                row->heard      = p->heard;
-            }
-            row->rtt_ms = row->is_me ? -1 : netplay_rtt_ms(ids[i]);
-            st->member_count++;
-        }
-    }
-    st->auto_start_s = 0;
-    if (netplay_is_host() && g_netplay.room.phase == ROOM_PHASE_LOBBY
-        && (g_netplay.room.flags & ROOM_FLAG_AUTO) && g_netplay.auto_deadline_ms) {
-        uint64_t now = net_now_ms();
-        st->auto_start_s = g_netplay.auto_deadline_ms > now
-                         ? (uint32_t)((g_netplay.auto_deadline_ms - now + 999) / 1000) : 0;
-    }
-
-    /* "The peer": the opponent while there is one, otherwise the first other
-     * member. What a two-player front end (and the MCP status) has always shown. */
-    const rpcn_peer_t *peer = rpcn_session_peer((rpcn_session_t *)s, netplay_opponent_id());
-    for (uint32_t i = 0; !peer && i < RPCN_MAX_PEERS; i++) if (s->peers[i].used) peer = &s->peers[i];
-    netplay_copy_str(st->peer_npid, sizeof(st->peer_npid), peer ? peer->npid : "");
-    netplay_copy_str(st->peer_addr, sizeof(st->peer_addr), rpcn_peer_addr_text(peer));
-    st->peer_known   = peer && peer->ip && peer->port;
-    st->peer_heard   = peer && peer->heard;
-    st->peer_rtt_ms  = peer ? netplay_rtt_ms(peer->member_id) : -1;
+    netplay_status_room(st, s);
+    netplay_status_peer(st, s);
     st->relay_ms     = rpcn_session_relay_ms(s);
     st->frame        = g_netplay.frame;
     st->stalls       = g_netplay.lockstep.stalls;
@@ -1949,76 +2053,9 @@ static inline void netplay_publish_status(void) {
     memcpy(st->foreign_rooms, g_netplay.session.foreign_rooms, foreign * sizeof(st->foreign_rooms[0]));
     st->search_pending = rpcn_session_search_pending(&g_netplay.session);
 
-    st->account_state = g_netplay.account.state;
-    st->account_job   = g_netplay.account.job;
-    netplay_copy_str(st->account_error, sizeof(st->account_error), g_netplay.account.error);
-
-    st->twitch_state     = g_netplay.twitch.state;
-    st->twitch_signed_in = g_netplay.cfg.twitch_token[0] != '\0';
-    netplay_copy_str(st->npid, sizeof(st->npid), g_netplay.cfg.npid);
-    netplay_copy_str(st->server, sizeof(st->server), g_netplay.cfg.server);
-    netplay_copy_str(st->twitch_user_code, sizeof(st->twitch_user_code), g_netplay.twitch.user_code);
-    netplay_copy_str(st->twitch_uri, sizeof(st->twitch_uri), g_netplay.twitch.verification_uri);
-    /* The token's owner, not whoever is in the account box: the window prints
-     * this as "Signed in with Twitch as ...", and with two accounts on one
-     * machine those are no longer the same name. */
-    netplay_copy_str(st->twitch_npid, sizeof(st->twitch_npid),
-                     g_netplay.cfg.twitch_npid[0] ? g_netplay.cfg.twitch_npid : g_netplay.cfg.npid);
-    netplay_copy_str(st->twitch_error, sizeof(st->twitch_error), g_netplay.twitch.error);
-
-    netplay_copy_str(st->error, sizeof(st->error),
-                     g_netplay.state == NETPLAY_FAILED ? rpcn_session_error(&g_netplay.session) : "");
-    st->need_email_token = g_netplay.state == NETPLAY_FAILED
-                        && g_netplay.session.login_error == RPCN_ERR_LOGIN_BAD_TOKEN;
-
-    st->ps3 = g_netplay.ps3;
-    if (g_netplay.ps3) {
-        const ps3_link_t *L = &g_netplay.ps3link;
-        st->ps3_room_known = L->room_known;
-        st->ps3_phase      = L->phase;
-        st->ps3_side       = L->my_side;
-        st->ps3_match      = L->match;
-        st->ps3_gen        = L->sio.gen;
-        st->ps3_rgen       = L->sio.rgen;
-        st->ps3_gen_ok     = L->sio.gen_ok;
-        st->ps3_resp_done  = L->sio.resp_done;
-        st->ps3_passed     = L->sio.passed;
-        st->ps3_sample     = L->sio.sample;
-        st->ps3_play       = L->sio.play;
-        st->ps3_newest     = L->sio.newest;
-        st->ps3_delay      = L->sio.delay;
-        st->ps3_stalled_frames = L->stalled_frames;
-        st->ps3_seed       = L->seed;
-        st->ps3_me_flags   = ps3_be32(L->me);
-        st->ps3_peer_count = 0;
-        for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
-            const ps3_peer_t *p = &L->peers[i];
-            if (!p->used) continue;
-            uint32_t k = st->ps3_peer_count++;
-            st->ps3_peers[k].member_id = p->member_id;
-            netplay_copy_str(st->ps3_peers[k].npid, sizeof(st->ps3_peers[k].npid), p->npid);
-            const rpcs3_sig_peer_t *sp = NULL;
-            for (uint32_t j = 0; j < RPCS3_SIG_MAX_PEERS; j++)
-                if (L->sig.peers[j].used && strncmp(L->sig.peers[j].npid, p->npid, 16) == 0) sp = &L->sig.peers[j];
-            st->ps3_peers[k].sig_active      = sp && sp->active;
-            st->ps3_peers[k].sig_peer_active = sp && sp->peer_active;
-            st->ps3_peers[k].rtt_us          = rpcs3_sig_rtt_us(sp);
-            if (sp) net_addr_text(st->ps3_peers[k].addr, sizeof(st->ps3_peers[k].addr), sp->ip, sp->port);
-            else st->ps3_peers[k].addr[0] = '\0';
-            for (uint32_t c = 0; c < 3; c++)
-                st->ps3_peers[k].ch_state[c] = p->rudp_up ? (uint8_t)p->rudp.ch[c].state : 0;
-        }
-    }
-    /* The log is a ring written in order: copy only the lines added since the
-     * last publish (all of it after a wrap, or if the count went backwards). */
-    uint32_t added = g_netplay.log_count - st->log_count;
-    if (g_netplay.log_count < st->log_count || added >= NETPLAY_LOG_LINES) {
-        memcpy(st->log, g_netplay.log, sizeof(st->log));
-    } else {
-        for (uint32_t n = st->log_count; n != g_netplay.log_count; n++)
-            memcpy(st->log[n % NETPLAY_LOG_LINES], g_netplay.log[n % NETPLAY_LOG_LINES], NETPLAY_LOG_LEN);
-    }
-    st->log_count = g_netplay.log_count;
+    netplay_status_account(st);
+    netplay_status_ps3(st);
+    netplay_status_log(st);
     emu_mutex_unlock(&g_netplay.mutex);
 }
 
