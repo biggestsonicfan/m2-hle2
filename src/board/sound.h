@@ -871,6 +871,7 @@ static void sound_run(uint32_t n) {
     m68k_state_t *m = &g_sound.m68k;
     int64_t run_t0 = emu_now_us();
     int zone = hprof_enter(HPROF_M68K);
+    m68k_tables_init();
     for (uint32_t i = 0; i < n; i++) {
         if (g_snd_watch.on) snd_watch_sample();
         g_sound.budget += SOUND_CYCLES_PER_SAMPLE;
@@ -905,7 +906,7 @@ static void sound_run(uint32_t n) {
                 break;
             } else {
                 if (g_sound_step_trace) g_sound_step_trace(m->cpu.pc, c0, g_sound_step_trace_ud);
-                m68k_step(m);
+                m68k_step_core(m);
                 g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
                 continue;
             }
