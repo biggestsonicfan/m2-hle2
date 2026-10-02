@@ -33,7 +33,7 @@ $(OUT)/main_dc.o: main_dc.c dc_pager.h dc_layout.h dc_sound.h $(wildcard $(REPO)
 	kos-cc $(CFLAGS) -c $< -o $@
 
 $(OUT)/m2hle2.elf: $(OBJS)
-	kos-cc -o $@ $(OBJS) -lSDL2 -lpthread -lm
+	kos-cc -o $@ $(OBJS) -lSDL2 -lGL -lpthread -lm
 
 # A GD-ROM image boots its program unscrambled (a CD-R would need scramble).
 $(OUT)/1ST_READ.BIN: $(OUT)/m2hle2.elf

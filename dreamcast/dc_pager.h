@@ -285,14 +285,14 @@ static void pg_mmu_on(void) {
     int old = irq_disable();
     memcpy(keep, at, sizeof sig);
     memcpy(at, sig, sizeof sig);
-    dcache_flush_range((uintptr_t)at, sizeof sig);
+    dcache_wback_range((uintptr_t)at, sizeof sig);
     mmu_init();
     for (int i = 0; i < 128; i++) pg_ttb[i] = (uint32_t)(uintptr_t)pg_ttb_group;
-    dcache_flush_range((uintptr_t)pg_ttb, sizeof pg_ttb);
+    dcache_wback_range((uintptr_t)pg_ttb, sizeof pg_ttb);
     *(volatile uint32_t *)0xFF000008u = (uint32_t)(uintptr_t)pg_ttb;   /* TTB */
     memcpy(at, keep, sizeof sig);
-    dcache_flush_range((uintptr_t)at, sizeof sig);
-    icache_flush_range((uintptr_t)at, sizeof sig);
+    dcache_wback_range((uintptr_t)at, sizeof sig);
+    icache_sync_range((uintptr_t)at, sizeof sig);
     irq_restore(old);
 }
 
