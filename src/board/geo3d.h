@@ -1747,164 +1747,232 @@ static inline void geo3d_dump_face_uv(int fi, int n_read, bool tri, const float 
     }
 }
 
+/* One model's walk in geo3d_decode_model: what it reads, where the texture
+ * header and UV streams stand, the faces' layers, and the board's z-sort,
+ * carried from face to face. */
+typedef struct {
+    const geo3d_models_t *md;
+    int            model_idx;
+    const float   *matrix;
+    float          cr, cg, cb;
+    const geo3d_ia_t *ia;
+    const uint8_t *polygons;
+    size_t         polygons_size;
+    uint32_t       mesh_offset;
+    /* Texture header stream: word address (bit 23: texture RAM), walked by each
+     * polygon's own step (geo3d_tho_step). */
+    uint32_t       mat_word, mat_rec;
+    bool           have_mat;
+    /* UV stream — model-table[+0x00] word index into the textures ROM; per polygon
+     * NumVerts (pv,pu) 16-bit pairs, tile-relative texel = raw/8 (geo3d_uv_read). */
+    uint32_t       uv_word;
+    bool           have_uv;
+    bool           flat, have_lay;
+    const geo3d_face_layer_t *lay;
+    /* The board's z-sort, carried across the walk (see geo3d_sort_z). */
+    int            zsrc[4];
+    uint32_t       zmode;
+    bool           zset;
+} geo3d_decode_walk_t;
+
+/* Where the model's mesh and its texture streams are: the model table's, or for
+ * a polygon-RAM object the object's own. False when there is nothing to walk. */
+static inline bool geo3d_decode_streams(geo3d_decode_walk_t *w) {
+    const geo3d_models_t *md = w->md;
+    w->mat_word = 0;
+    w->have_mat = false;
+    w->uv_word = 0;
+    w->have_uv = false;
+    w->polygons      = md->polygons;
+    w->polygons_size = md->polygons_size;
+
+    if (!md->main_data || !w->polygons) return false;
+    if (md->obj_mesh) {
+        /* A polygon-RAM object: the mesh starts at the object address, and its
+         * texture addresses come from the object command. */
+        w->polygons      = md->obj_mesh;
+        w->polygons_size = md->obj_mesh_size;
+        w->mesh_offset   = 0;
+        if (md->materials && g_geo3d_obj_tha != 0xFFFFFFFFu) {
+            w->mat_word = g_geo3d_obj_tha; w->have_mat = w->mat_word != 0;
+            w->uv_word  = g_geo3d_obj_tpa; w->have_uv = w->uv_word != 0;
+        }
+    } else {
+        if (!geo3d_model_streams(md, w->model_idx, &w->mesh_offset, &w->mat_word, &w->uv_word)) return false;
+        w->have_mat = w->mat_word != 0;
+        w->have_uv  = w->uv_word != 0;
+    }
+    return true;
+}
+
+/* The faces' layers, from the mesh cache, for a caller that may use it. A game
+ * frame's draw takes the board's key instead (or, with zflat off, the half
+ * rule alone, as the cached draw does) and has no use for them. */
+static inline bool geo3d_decode_layers(const geo3d_decode_walk_t *w, bool game_draw,
+                                       geo3d_face_layer_t *lay) {
+    const geo3d_models_t *md = w->md;
+    return !game_draw && g_geo3d_decode_layers && g_geo3d_layers && !md->obj_mesh && !g_geo_flat_color &&
+           !(w->have_mat && (w->mat_word & 0x800000u)) && !(w->have_uv && (w->uv_word & 0x800000u)) &&
+           geo3d_mesh_layers_for(md, w->model_idx, w->have_mat ? w->mat_word : 0u, w->have_uv ? w->uv_word : 0u,
+                                 w->mesh_offset, lay, GEO3D_IA_MAX_IDX / 4);
+}
+
+/* A face's texture header (tile rect + palette index) and flat colour, from
+ * the header stream, which it moves on by the polygon's own step. */
+static inline geo3d_texhdr_t geo3d_decode_face_header(geo3d_decode_walk_t *w, int fi, uint32_t at,
+                                                      int ai, int bi, int di, int nv,
+                                                      float *fr, float *fg, float *fb) {
+    const geo3d_models_t *md = w->md;
+    geo3d_texhdr_t h = GEO3D_TEXHDR_NONE;
+    if (w->have_mat) {
+        uint32_t hw = w->mat_rec;
+        w->mat_rec += geo3d_tho_step(at);
+        uint16_t th[4] = { 0, 0, 0, 0 };
+        if (geo3d_texhdr_words(md->materials, md->materials_size, hw, th)) {
+            h = geo3d_texhdr_decode(th);
+            geo3d_palette_color(h.matidx, md->main_data, md->main_data_size, fr, fg, fb);
+            if (GEO3D_DUMP_TEX(w->model_idx))
+                geo3d_dump_face_tex(md, w->model_idx, w->ia, fi, ai, bi, di, nv, hw, th, &h,
+                                    w->have_uv, w->uv_word, *fr, *fg, *fb);
+        }
+    }
+
+    /* Flat-colour override (homebrew display list): keep the caller's colour,
+     * force untextured — model 456's ROM material/texture is meaningless here. */
+    if (g_geo_flat_color) { h.textured = false; *fr = w->cr; *fg = w->cg; *fb = w->cb; h.fflags = 0; }
+    return h;
+}
+
+/* A face's texture points, and the UV stream moved on past them. */
+static inline void geo3d_decode_face_uv(geo3d_decode_walk_t *w, int fi, bool tri_cnt, int nv,
+                                        const geo3d_texhdr_t *h, const geo3d_paint_t *paint,
+                                        float uvu[4], float uvv[4]) {
+    if (w->have_uv) {
+        int n_read = geo3d_uv_read(w->md->materials, w->md->materials_size, w->uv_word, tri_cnt, h->textured, uvu, uvv);
+        if (GEO3D_DUMP_TEX(w->model_idx) && fi <= 12 && h->textured)
+            geo3d_dump_face_uv(fi, n_read, tri_cnt, uvu, uvv, paint->tx, paint->ty, paint->tw, paint->th);
+    }
+    w->uv_word += (uint32_t)nv * 2u;   /* nv (pv,pu) pairs per iteration (3 tri / 4 quad) */
+}
+
+/* Per-face luminance (poly_luma), passed through so the colorxlat luma
+ * ramp can use it (luma6 = lumaram[lumabase+texel]*poly_luma/256), not
+ * folded into the colour. No fallback to the approximation for a zero
+ * normal: the board lights it too, to luminance 0, so the face gets
+ * its ambient term. */
+static inline float geo3d_decode_face_luma(const geo3d_decode_walk_t *w, int fi, uint32_t at, bool has_C,
+                                           vec3_t A, vec3_t B, vec3_t C, bool *board_cull) {
+    const geo3d_ia_t *ia = w->ia;
+    float pl = 1.0f;
+    g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
+    *board_cull = false;             /* the geometrizer would not draw this face */
+    if (g_geo3d_board_luma && w->matrix) {
+        geo3d_lit_t lt;
+        vec3_t fn = (fi < ia->n_qt) ? ia->qn[fi] : (vec3_t){0, 0, 0};
+        *board_cull = geo3d_board_cull(w->matrix, fn, at, has_C, A, B, C, &lt);
+        pl = geo3d_board_luma(&lt);
+    } else if (g_light_enable && has_C) {
+        pl = geo3d_approx_light(A, B, C);
+    }
+    return pl;
+}
+
+/* Homebrew flat panels: the GEO brightens lit faces via the colorxlat luma
+ * ramp (dark base hue + lit normal → bright panel). The shader's flat path
+ * only darkens (×pl≤1), so the dark C_TUBE base never brightens. Approximate
+ * the ramp by scaling the flat colour up with poly-luma, then neutralise the
+ * shader's own ×pl so it isn't applied twice. */
+static inline void geo3d_flat_color_boost(float *fr, float *fg, float *fb, float *pl) {
+    if (g_geo_flat_color) {
+        float boost = *pl * g_geo_flat_boost;
+        *fr = fminf(*fr * boost, 1.0f);
+        *fg = fminf(*fg * boost, 1.0f);
+        *fb = fminf(*fb * boost, 1.0f);
+        *pl = 1.0f;
+    }
+}
+
+/* One iteration of the face loop: the face at index-array position i. The
+ * header and UV streams move on whether or not it draws. */
+static inline void geo3d_decode_face(geo3d_decode_walk_t *w, int i) {
+    const geo3d_ia_t *ia = w->ia;
+    const vec3_t *sv = ia->sv;
+    const int n_sv = ia->n_sv;
+    int fi = i / 4;
+    int ai = ia->idx[i], bi = ia->idx[i + 1], ci = ia->idx[i + 2], di = ia->idx[i + 3];
+    const uint32_t at = geo3d_ia_attr(ia, fi);
+    bool tri_cnt = (fi < ia->n_qt && ia->qt[fi] == 2);
+    int  nv = tri_cnt ? 3 : 4;
+
+    /* ---- texture header (tile rect + palette index) ---- */
+    float fr = w->cr, fg = w->cg, fb = w->cb;     /* flat color (palette) */
+    geo3d_texhdr_t h = geo3d_decode_face_header(w, fi, at, ai, bi, di, nv, &fr, &fg, &fb);
+
+    geo3d_paint_t paint;
+    geo3d_texhdr_tile(&h, &paint.tx, &paint.ty, &paint.tw, &paint.th);
+
+    float uvu[4] = {0,0,0,0}, uvv[4] = {0,0,0,0};
+    geo3d_decode_face_uv(w, fi, tri_cnt, nv, &h, &paint, uvu, uvv);
+
+    if (ai < 0 || ai >= n_sv) return;
+    if (bi < 0 || bi >= n_sv) return;
+
+    vec3_t A = sv[ai], B = sv[bi];
+    bool has_C = (ci >= 0 && ci < n_sv);
+    bool has_D = (di >= 0 && di < n_sv);
+    vec3_t C = has_C ? sv[ci] : (vec3_t){0,0,0};
+    vec3_t D = has_D ? sv[di] : (vec3_t){0,0,0};
+
+    bool is_tri = tri_cnt || !has_C || !has_D;
+
+    geo3d_zsort_step(at, is_tri, has_C, ai, bi, ci, di, w->zsrc, &w->zmode, &w->zset);
+    geo3d_face_depth(sv, w->zsrc, w->zmode, w->flat, w->have_lay ? &w->lay[fi] : NULL, w->matrix);
+
+    bool board_cull;
+    float pl = geo3d_decode_face_luma(w, fi, at, has_C, A, B, C, &board_cull);
+    geo3d_flat_color_boost(&fr, &fg, &fb, &pl);
+
+    /* The untextured transparent renderer returns without writing a pixel
+     * (model2rd.ipp draw_scanline_solid<true>). Only on the display-list
+     * path, so the model tools keep comparing every face with the explorer. */
+    if (g_geo3d_board_luma && (h.untex_trans || board_cull)) return;
+
+    paint.r = fr; paint.g = fg; paint.b = fb;
+    paint.lb = g_geo_flat_color ? -1.0f : (float)h.lumabase;
+    paint.pl = pl;
+    paint.fl = (float)h.fflags;
+    paint.u = uvu; paint.v = uvv;
+    uint32_t split_quad = 0, split_cut = 0;
+    if (!is_tri) {
+        uint32_t kA = ia->svk[ai], kB = ia->svk[bi], kC = ia->svk[ci], kD = ia->svk[di];
+        split_quad = kA ^ kB ^ kC ^ kD;
+        split_cut  = kA ^ kD;
+    }
+    geo3d_emit_face(A, B, C, D, is_tri, has_C, true, split_quad, split_cut, &paint);
+}
+
 static inline void geo3d_decode_model(const geo3d_models_t *md, int model_idx,
                                        const float *matrix,
                                        float cr, float cg, float cb) {
     static geo3d_ia_t ia;
-    uint32_t mesh_offset;
-    /* Texture header stream: word address (bit 23: texture RAM), walked by each
-     * polygon's own step (geo3d_tho_step). */
-    uint32_t mat_word = 0;
-    bool     have_mat = false;
-    /* UV stream — model-table[+0x00] word index into the textures ROM; per polygon
-     * NumVerts (pv,pu) 16-bit pairs, tile-relative texel = raw/8 (geo3d_uv_read). */
-    uint32_t uv_word = 0;
-    bool     have_uv = false;
+    geo3d_decode_walk_t w = { .md = md, .model_idx = model_idx, .matrix = matrix,
+                              .cr = cr, .cg = cg, .cb = cb, .ia = &ia };
+    if (!geo3d_decode_streams(&w)) return;
 
-    const uint8_t *materials = md->materials;
-    const size_t   materials_size = md->materials_size;
-    const uint8_t *polygons = md->polygons;
-    size_t         polygons_size = md->polygons_size;
-
-    if (!md->main_data || !polygons) return;
-    if (md->obj_mesh) {
-        /* A polygon-RAM object: the mesh starts at the object address, and its
-         * texture addresses come from the object command. */
-        polygons      = md->obj_mesh;
-        polygons_size = md->obj_mesh_size;
-        mesh_offset   = 0;
-        if (materials && g_geo3d_obj_tha != 0xFFFFFFFFu) {
-            mat_word = g_geo3d_obj_tha; have_mat = mat_word != 0;
-            uv_word  = g_geo3d_obj_tpa; have_uv = uv_word != 0;
-        }
-    } else {
-        if (!geo3d_model_streams(md, model_idx, &mesh_offset, &mat_word, &uv_word)) return;
-        have_mat = mat_word != 0;
-        have_uv  = uv_word != 0;
-    }
-
-    /* The faces' layers, from the mesh cache, for a caller that may use it. A game
-     * frame's draw takes the board's key instead (or, with zflat off, the half
-     * rule alone, as the cached draw does) and has no use for them. */
     static geo3d_face_layer_t lay[GEO3D_IA_MAX_IDX / 4];
     const bool game_draw = g_geo3d_flat_list && matrix;
-    const bool flat = g_geo3d_zflat && game_draw;
-    bool have_lay = !game_draw && g_geo3d_decode_layers && g_geo3d_layers && !md->obj_mesh && !g_geo_flat_color &&
-                    !(have_mat && (mat_word & 0x800000u)) && !(have_uv && (uv_word & 0x800000u)) &&
-                    geo3d_mesh_layers_for(md, model_idx, have_mat ? mat_word : 0u, have_uv ? uv_word : 0u, mesh_offset,
-                                          lay, GEO3D_IA_MAX_IDX / 4);
+    w.flat = g_geo3d_zflat && game_draw;
+    w.lay = lay;
+    w.have_lay = geo3d_decode_layers(&w, game_draw, lay);
 
-    geo3d_ia_walk(&ia, polygons, polygons_size, mesh_offset, matrix);
-    const vec3_t *sv = ia.sv;
-    const int n_sv = ia.n_sv;
+    geo3d_ia_walk(&ia, w.polygons, w.polygons_size, w.mesh_offset, matrix);
 
     /* Face loop, stopping 2 groups before the tail. The header stream moves by
      * each polygon's own step; the UV stream by NumVerts pairs every iteration,
      * sentinels included, exactly like MAME advances command_buffer[0]. */
-    uint32_t mat_rec = mat_word;
-    /* The board's z-sort, carried across the walk (see geo3d_sort_z). */
-    int zsrc[4] = {0,0,0,0}; uint32_t zmode = 0u; bool zset = false;
+    w.mat_rec = w.mat_word;
     geo3d_split_reset();
-    for (int i = 0; i < ia.n_idx - 8; i += 4) {
-        int fi = i / 4;
-        int ai = ia.idx[i], bi = ia.idx[i + 1], ci = ia.idx[i + 2], di = ia.idx[i + 3];
-        const uint32_t at = geo3d_ia_attr(&ia, fi);
-        bool tri_cnt = (fi < ia.n_qt && ia.qt[fi] == 2);
-        int  nv = tri_cnt ? 3 : 4;
-
-        /* ---- texture header (tile rect + palette index) ---- */
-        float fr = cr, fg = cg, fb = cb;     /* flat color (palette) */
-        geo3d_texhdr_t h = GEO3D_TEXHDR_NONE;
-        if (have_mat) {
-            uint32_t hw = mat_rec;
-            mat_rec += geo3d_tho_step(at);
-            uint16_t th[4] = { 0, 0, 0, 0 };
-            if (geo3d_texhdr_words(materials, materials_size, hw, th)) {
-                h = geo3d_texhdr_decode(th);
-                geo3d_palette_color(h.matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
-                if (GEO3D_DUMP_TEX(model_idx))
-                    geo3d_dump_face_tex(md, model_idx, &ia, fi, ai, bi, di, nv, hw, th, &h,
-                                        have_uv, uv_word, fr, fg, fb);
-            }
-        }
-
-        /* Flat-colour override (homebrew display list): keep the caller's colour,
-         * force untextured — model 456's ROM material/texture is meaningless here. */
-        if (g_geo_flat_color) { h.textured = false; fr = cr; fg = cg; fb = cb; h.fflags = 0; }
-
-        geo3d_paint_t paint;
-        geo3d_texhdr_tile(&h, &paint.tx, &paint.ty, &paint.tw, &paint.th);
-
-        float uvu[4] = {0,0,0,0}, uvv[4] = {0,0,0,0};
-        if (have_uv) {
-            int n_read = geo3d_uv_read(materials, materials_size, uv_word, tri_cnt, h.textured, uvu, uvv);
-            if (GEO3D_DUMP_TEX(model_idx) && fi <= 12 && h.textured)
-                geo3d_dump_face_uv(fi, n_read, tri_cnt, uvu, uvv, paint.tx, paint.ty, paint.tw, paint.th);
-        }
-        uv_word += (uint32_t)nv * 2u;   /* nv (pv,pu) pairs per iteration (3 tri / 4 quad) */
-
-        if (ai < 0 || ai >= n_sv) continue;
-        if (bi < 0 || bi >= n_sv) continue;
-
-        vec3_t A = sv[ai], B = sv[bi];
-        bool has_C = (ci >= 0 && ci < n_sv);
-        bool has_D = (di >= 0 && di < n_sv);
-        vec3_t C = has_C ? sv[ci] : (vec3_t){0,0,0};
-        vec3_t D = has_D ? sv[di] : (vec3_t){0,0,0};
-
-        bool is_tri = tri_cnt || !has_C || !has_D;
-
-        geo3d_zsort_step(at, is_tri, has_C, ai, bi, ci, di, zsrc, &zmode, &zset);
-        geo3d_face_depth(sv, zsrc, zmode, flat, have_lay ? &lay[fi] : NULL, matrix);
-
-        /* Per-face luminance (poly_luma), passed through so the colorxlat luma
-         * ramp can use it (luma6 = lumaram[lumabase+texel]*poly_luma/256), not
-         * folded into the colour. No fallback to the approximation for a zero
-         * normal: the board lights it too, to luminance 0, so the face gets
-         * its ambient term. */
-        float pl = 1.0f;
-        g_geo3d_emit_texlod = GEO3D_TEXLOD_NONE;
-        bool board_cull = false;             /* the geometrizer would not draw this face */
-        if (g_geo3d_board_luma && matrix) {
-            geo3d_lit_t lt;
-            vec3_t fn = (fi < ia.n_qt) ? ia.qn[fi] : (vec3_t){0, 0, 0};
-            board_cull = geo3d_board_cull(matrix, fn, at, has_C, A, B, C, &lt);
-            pl = geo3d_board_luma(&lt);
-        } else if (g_light_enable && has_C) {
-            pl = geo3d_approx_light(A, B, C);
-        }
-
-        /* Homebrew flat panels: the GEO brightens lit faces via the colorxlat luma
-         * ramp (dark base hue + lit normal → bright panel). The shader's flat path
-         * only darkens (×pl≤1), so the dark C_TUBE base never brightens. Approximate
-         * the ramp by scaling the flat colour up with poly-luma, then neutralise the
-         * shader's own ×pl so it isn't applied twice. */
-        if (g_geo_flat_color) {
-            float boost = pl * g_geo_flat_boost;
-            fr = fminf(fr * boost, 1.0f);
-            fg = fminf(fg * boost, 1.0f);
-            fb = fminf(fb * boost, 1.0f);
-            pl = 1.0f;
-        }
-
-        /* The untextured transparent renderer returns without writing a pixel
-         * (model2rd.ipp draw_scanline_solid<true>). Only on the display-list
-         * path, so the model tools keep comparing every face with the explorer. */
-        if (g_geo3d_board_luma && (h.untex_trans || board_cull)) continue;
-
-        paint.r = fr; paint.g = fg; paint.b = fb;
-        paint.lb = g_geo_flat_color ? -1.0f : (float)h.lumabase;
-        paint.pl = pl;
-        paint.fl = (float)h.fflags;
-        paint.u = uvu; paint.v = uvv;
-        uint32_t split_quad = 0, split_cut = 0;
-        if (!is_tri) {
-            uint32_t kA = ia.svk[ai], kB = ia.svk[bi], kC = ia.svk[ci], kD = ia.svk[di];
-            split_quad = kA ^ kB ^ kC ^ kD;
-            split_cut  = kA ^ kD;
-        }
-        geo3d_emit_face(A, B, C, D, is_tri, has_C, true, split_quad, split_cut, &paint);
-    }
+    for (int i = 0; i < ia.n_idx - 8; i += 4) geo3d_decode_face(&w, i);
     geo3d_emit_state_reset();
 }
 
