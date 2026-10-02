@@ -168,75 +168,76 @@ static inline void tls_close(tls_client_t *t) {
     t->peer_closed = false;
 }
 
-static inline bool tls_handshake(tls_client_t *t, const char *host) {
+/* Read more of the server's flight into the handshake buffer. */
+static inline bool tls_handshake_fill(tls_client_t *t) {
+    if (t->enc_used == t->enc_cap) { tls_fail(t, "handshake buffer overflow"); return false; }
+    int got = net_tcp_recv_timeout(t->sock, t->enc + t->enc_used,
+                                   t->enc_cap - t->enc_used, 10000);
+    if (got <= 0) { tls_fail(t, "connection closed during the TLS handshake"); return false; }
+    t->enc_used += (uint32_t)got;
+    return true;
+}
+
+/* One call into Schannel: hand it what we hold, send what it answers, and keep
+ * what it did not consume. `*ss` gets its status; false on a failure. */
+static inline bool tls_handshake_round(tls_client_t *t, const char *host, bool first,
+                                       SECURITY_STATUS *ss) {
     CredHandle *cred = (CredHandle *)t->cred;
     CtxtHandle *ctx  = (CtxtHandle *)t->ctx;
 
     const DWORD req = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT
                     | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM;
 
-    SECURITY_STATUS ss = SEC_I_CONTINUE_NEEDED;
-    bool first = true;
-    t->enc_used = 0;
+    SecBuffer in[2];
+    memset(in, 0, sizeof(in));
+    in[0].BufferType = SECBUFFER_TOKEN;
+    in[0].pvBuffer   = t->enc;
+    in[0].cbBuffer   = t->enc_used;
+    in[1].BufferType = SECBUFFER_EMPTY;
+    SecBufferDesc in_desc = { SECBUFFER_VERSION, 2, in };
 
-    while (ss == SEC_I_CONTINUE_NEEDED || ss == SEC_E_INCOMPLETE_MESSAGE) {
-        /* Schannel asks for more bytes until it holds a complete flight. */
-        if (!first && (ss == SEC_E_INCOMPLETE_MESSAGE || t->enc_used == 0)) {
-            if (t->enc_used == t->enc_cap) { tls_fail(t, "handshake buffer overflow"); return false; }
-            int got = net_tcp_recv_timeout(t->sock, t->enc + t->enc_used,
-                                           t->enc_cap - t->enc_used, 10000);
-            if (got <= 0) { tls_fail(t, "connection closed during the TLS handshake"); return false; }
-            t->enc_used += (uint32_t)got;
-        }
+    SecBuffer out[1];
+    memset(out, 0, sizeof(out));
+    out[0].BufferType = SECBUFFER_TOKEN;
+    SecBufferDesc out_desc = { SECBUFFER_VERSION, 1, out };
 
-        SecBuffer in[2];
-        memset(in, 0, sizeof(in));
-        in[0].BufferType = SECBUFFER_TOKEN;
-        in[0].pvBuffer   = t->enc;
-        in[0].cbBuffer   = t->enc_used;
-        in[1].BufferType = SECBUFFER_EMPTY;
-        SecBufferDesc in_desc = { SECBUFFER_VERSION, 2, in };
+    DWORD attrs = 0;
+    TimeStamp expiry;
+    memset(&expiry, 0, sizeof(expiry));
+    *ss = InitializeSecurityContextA(cred,
+                                     first ? NULL : ctx,
+                                     first ? (SEC_CHAR *)host : NULL,
+                                     req, 0, 0,
+                                     first ? NULL : &in_desc,
+                                     0, ctx, &out_desc, &attrs, &expiry);
+    if (first) t->have_ctx = true;
 
-        SecBuffer out[1];
-        memset(out, 0, sizeof(out));
-        out[0].BufferType = SECBUFFER_TOKEN;
-        SecBufferDesc out_desc = { SECBUFFER_VERSION, 1, out };
-
-        DWORD attrs = 0;
-        TimeStamp expiry;
-        memset(&expiry, 0, sizeof(expiry));
-        ss = InitializeSecurityContextA(cred,
-                                        first ? NULL : ctx,
-                                        first ? (SEC_CHAR *)host : NULL,
-                                        req, 0, 0,
-                                        first ? NULL : &in_desc,
-                                        0, ctx, &out_desc, &attrs, &expiry);
-        if (first) { first = false; t->have_ctx = true; }
-
-        if (out[0].pvBuffer && out[0].cbBuffer) {
-            bool sent = net_tcp_send_all(t->sock, out[0].pvBuffer, out[0].cbBuffer);
-            FreeContextBuffer(out[0].pvBuffer);
-            if (!sent) { tls_fail(t, "send failed during the TLS handshake"); return false; }
-        }
-
-        if (ss == SEC_E_INCOMPLETE_MESSAGE) continue;   /* need more; keep what we have */
-
-        if (ss == SEC_E_OK || ss == SEC_I_CONTINUE_NEEDED) {
-            /* Anything Schannel did not consume starts the next flight (or the
-             * application data) and must be preserved. */
-            if (in[1].BufferType == SECBUFFER_EXTRA && in[1].cbBuffer) {
-                memmove(t->enc, t->enc + (t->enc_used - in[1].cbBuffer), in[1].cbBuffer);
-                t->enc_used = in[1].cbBuffer;
-            } else {
-                t->enc_used = 0;
-            }
-            if (ss == SEC_E_OK) break;
-        } else {
-            tls_fail(t, "TLS handshake failed (0x%08lX)", (unsigned long)ss);
-            return false;
-        }
+    if (out[0].pvBuffer && out[0].cbBuffer) {
+        bool sent = net_tcp_send_all(t->sock, out[0].pvBuffer, out[0].cbBuffer);
+        FreeContextBuffer(out[0].pvBuffer);
+        if (!sent) { tls_fail(t, "send failed during the TLS handshake"); return false; }
     }
 
+    if (*ss == SEC_E_INCOMPLETE_MESSAGE) return true;   /* need more; keep what we have */
+
+    if (*ss == SEC_E_OK || *ss == SEC_I_CONTINUE_NEEDED) {
+        /* Anything Schannel did not consume starts the next flight (or the
+         * application data) and must be preserved. */
+        if (in[1].BufferType == SECBUFFER_EXTRA && in[1].cbBuffer) {
+            memmove(t->enc, t->enc + (t->enc_used - in[1].cbBuffer), in[1].cbBuffer);
+            t->enc_used = in[1].cbBuffer;
+        } else {
+            t->enc_used = 0;
+        }
+        return true;
+    }
+    tls_fail(t, "TLS handshake failed (0x%08lX)", (unsigned long)*ss);
+    return false;
+}
+
+/* The stream sizes of a finished handshake, and the plaintext buffer they size. */
+static inline bool tls_handshake_sizes(tls_client_t *t) {
+    CtxtHandle *ctx = (CtxtHandle *)t->ctx;
     SecPkgContext_StreamSizes sizes;
     memset(&sizes, 0, sizeof(sizes));
     if (QueryContextAttributes(ctx, SECPKG_ATTR_STREAM_SIZES, &sizes) != SEC_E_OK) {
@@ -251,6 +252,23 @@ static inline bool tls_handshake(tls_client_t *t, const char *host) {
     t->plain     = (uint8_t *)malloc(t->plain_cap);
     if (!t->plain) { tls_fail(t, "out of memory"); return false; }
     return true;
+}
+
+static inline bool tls_handshake(tls_client_t *t, const char *host) {
+    SECURITY_STATUS ss = SEC_I_CONTINUE_NEEDED;
+    bool first = true;
+    t->enc_used = 0;
+
+    while (ss == SEC_I_CONTINUE_NEEDED || ss == SEC_E_INCOMPLETE_MESSAGE) {
+        /* Schannel asks for more bytes until it holds a complete flight. */
+        if (!first && (ss == SEC_E_INCOMPLETE_MESSAGE || t->enc_used == 0)) {
+            if (!tls_handshake_fill(t)) return false;
+        }
+        if (!tls_handshake_round(t, host, first, &ss)) return false;
+        first = false;
+        if (ss == SEC_E_OK) break;
+    }
+    return tls_handshake_sizes(t);
 }
 
 /* Schannel's policy errors are numbers nobody can act on. These are the ones a
