@@ -631,23 +631,23 @@ static inline void ps3_send_big(ps3_link_t *L, const uint8_t pkt[68]) {
 
 /* ---- The lockstep, one tick at a time ------------------------------------ */
 
-/* SyncIo_SampleLocalAndSend, once per 60 Hz tick. `local` is this machine's
- * input as a wire byte. */
-static inline void ps3_sio_sample(ps3_link_t *L, uint8_t local) {
+/* SyncIo_SampleLocalAndSend's gate: true when this tick samples nothing (the
+ * SyncStart goes out instead, the hold-off is still running, or the board has
+ * fallen too far behind its own sampling). */
+static inline bool ps3_sio_hold(ps3_link_t *L) {
     ps3_sio_t *S = &L->sio;
-    if (!S->started || S->side >= 2) return;
     if (S->send_ss) {
         ps3_send_sync_start(L);
         S->send_ss = false;
-        return;
+        return true;
     }
     if (S->holdoff < 1) {
         S->holdoff = 0;
     } else if (--S->holdoff != 0) {
         if (S->gen_ok) { S->stall_count = 0; S->stall = true; }
-        return;
+        return true;
     }
-    if (!S->gen_ok || !S->resp_done) return;
+    if (!S->gen_ok || !S->resp_done) return true;
 
     if (!S->stall) {
         if (S->play < 1 || S->sample - S->play <= S->delay) S->stall_count = 0;
@@ -655,70 +655,94 @@ static inline void ps3_sio_sample(ps3_link_t *L, uint8_t local) {
     } else {
         S->stall_count = 0;
         if (S->speed) {
-            if (S->play > 0 && S->delay < S->sample - S->play) return;
+            if (S->play > 0 && S->delay < S->sample - S->play) return true;
             S->stall = false;
         }
     }
+    return false;
+}
+
+/* The small packet for frame f: the last 10 inputs. */
+static inline void ps3_sio_send_small_at(ps3_link_t *L, int32_t f, uint32_t par, uint8_t head) {
+    ps3_sio_t *S = &L->sio;
+    uint8_t pkt[16];
+    memset(pkt, 0, sizeof(pkt));
+    ps3_put32(pkt, (uint32_t)f);
+    pkt[4] = head;
+    for (int32_t k = 0; k < 10; k++) {
+        uint32_t i = (uint32_t)(f - k) & (PS3_RING - 1);
+        pkt[6 + k] = (uint8_t)S->ring_input[S->side][par][i];
+    }
+    ps3_send_small(L, pkt);
+}
+
+static inline void ps3_sio_set_delay(ps3_link_t *L, uint8_t pkt[68]) {
+    ps3_sio_t *S = &L->sio;
+    /* Only 1P sets the delay, from its round trip to 2P, and not when the
+     * inputs go round through the owner. */
+    if (S->side != 0 || S->relay) return;
+    ps3_peer_t *other = NULL;
+    for (uint32_t k = 0; k < 2 && !other; k++)
+        if (L->fighters[k] != L->session->my_member_id) other = ps3_peer_by_id(L, L->fighters[k]);
+    rpcs3_sig_peer_t *sp = other ? rpcs3_sig_find(&L->sig, other->npid) : NULL;
+    uint32_t rtt_us = rpcs3_sig_rtt_us(sp);
+    if (rtt_us) {
+        int32_t d = ps3_delay_from_ping_ms(rtt_us / 1000u) + (S->spectators ? 1 : 0);
+        d = ps3_clamp_delay(d);
+        if (d != S->delay && d > 0) {
+            S->delay = d;
+            pkt[5] = (uint8_t)(0x80u | ((uint32_t)(d & 0xF) << 3));
+        }
+    }
+}
+
+/* The 60-frame packet for frame f, to the owner and to any watchers. */
+static inline void ps3_sio_send_big_at(ps3_link_t *L, int32_t f, uint32_t par, uint8_t head) {
+    ps3_sio_t *S = &L->sio;
+    uint8_t pkt[68];
+    memset(pkt, 0, sizeof(pkt));
+    ps3_put32(pkt, (uint32_t)f);
+    pkt[4] = head;
+    for (int32_t k = 0; k < 60; k++) {
+        uint32_t i = (uint32_t)(f - k) & (PS3_RING - 1);
+        pkt[8 + k] = (uint8_t)S->ring_input[S->side][par][i];
+    }
+    ps3_sio_set_delay(L, pkt);
+    if (f % 60 == 0) ps3_send_big(L, pkt);
+    if (S->big_every < 60) ps3_send_watchers(L, pkt);
+}
+
+/* SyncIo_SampleLocalAndSend, once per 60 Hz tick. `local` is this machine's
+ * input as a wire byte. */
+static inline void ps3_sio_sample(ps3_link_t *L, uint8_t local) {
+    ps3_sio_t *S = &L->sio;
+    if (!S->started || S->side >= 2) return;
+    if (ps3_sio_hold(L)) return;
 
     uint32_t par = S->gen & 1u;
     int32_t f = S->sample;
     ps3_ring_put(S, S->side, par, f, local);
     uint8_t head = (uint8_t)(((S->side & 7u) << 5) | (S->gen & 0x1Fu));
 
-    if (f % S->small_every == 0) {
-        uint8_t pkt[16];
-        memset(pkt, 0, sizeof(pkt));
-        ps3_put32(pkt, (uint32_t)f);
-        pkt[4] = head;
-        for (int32_t k = 0; k < 10; k++) {
-            uint32_t i = (uint32_t)(f - k) & (PS3_RING - 1);
-            pkt[6 + k] = (uint8_t)S->ring_input[S->side][par][i];
-        }
-        ps3_send_small(L, pkt);
-    }
-    if (f > 0 && f % S->big_every == 0) {
-        uint8_t pkt[68];
-        memset(pkt, 0, sizeof(pkt));
-        ps3_put32(pkt, (uint32_t)f);
-        pkt[4] = head;
-        for (int32_t k = 0; k < 60; k++) {
-            uint32_t i = (uint32_t)(f - k) & (PS3_RING - 1);
-            pkt[8 + k] = (uint8_t)S->ring_input[S->side][par][i];
-        }
-        /* Only 1P sets the delay, from its round trip to 2P, and not when the
-         * inputs go round through the owner. */
-        if (S->side == 0 && !S->relay) {
-            ps3_peer_t *other = NULL;
-            for (uint32_t k = 0; k < 2 && !other; k++)
-                if (L->fighters[k] != L->session->my_member_id) other = ps3_peer_by_id(L, L->fighters[k]);
-            rpcs3_sig_peer_t *sp = other ? rpcs3_sig_find(&L->sig, other->npid) : NULL;
-            uint32_t rtt_us = rpcs3_sig_rtt_us(sp);
-            if (rtt_us) {
-                int32_t d = ps3_delay_from_ping_ms(rtt_us / 1000u) + (S->spectators ? 1 : 0);
-                d = ps3_clamp_delay(d);
-                if (d != S->delay && d > 0) {
-                    S->delay = d;
-                    pkt[5] = (uint8_t)(0x80u | ((uint32_t)(d & 0xF) << 3));
-                }
-            }
-        }
-        if (f % 60 == 0) ps3_send_big(L, pkt);
-        if (S->big_every < 60) ps3_send_watchers(L, pkt);
-    }
+    if (f % S->small_every == 0) ps3_sio_send_small_at(L, f, par, head);
+    if (f > 0 && f % S->big_every == 0) ps3_sio_send_big_at(L, f, par, head);
     S->sample = f + 1;
 }
 
-/* SyncIo_Update_gate_speed, once per tick. False if the match had to stop. */
-static inline bool ps3_sio_gate(ps3_link_t *L) {
-    ps3_sio_t *S = &L->sio;
-    if (!S->started) return true;
-    if (S->sync_timeout) S->sync_timeout--;
+/* The SyncStart's resend clock: until the first frame is played, it goes out
+ * again every 180 ticks. */
+static inline void ps3_sio_tick_resend(ps3_sio_t *S) {
     if (S->resend_ss) {
         if (S->resend_ss == 1) {
             if (!S->gen_ok || S->play < 0) { S->send_ss = true; S->resend_ss = 180; }
             else S->resend_ss = 0;
         } else S->resend_ss--;
     }
+}
+
+/* Both boards on one generation, while the lockstep runs. False if it timed out. */
+static inline bool ps3_sio_check_gen(ps3_link_t *L) {
+    ps3_sio_t *S = &L->sio;
     if (S->sync_active && !S->finished) {
         if (S->sync_timeout == 0) {
             ps3_note(L, "PS3: the lockstep timed out (generation %u/%u, play %d, sample %d, newest %d)",
@@ -733,24 +757,39 @@ static inline bool ps3_sio_gate(ps3_link_t *L) {
             ps3_note(L, "PS3: both boards on generation %u", (unsigned)S->gen);
         }
     }
+    return true;
+}
+
+/* The first frame played: the room's delay, once every player's inputs up to
+ * frame 10 are in. */
+static inline void ps3_sio_find_first(ps3_link_t *L) {
+    ps3_sio_t *S = &L->sio;
+    int32_t start = S->init_delay;
+    bool ok = true;
+    if (start < 11) {
+        for (uint32_t k = 0; k < S->nplayers && ok; k++)
+            for (int32_t f = start; f <= 10 && ok; f++)
+                if (!ps3_ring_has(S, k, f)) ok = false;
+    }
+    if (ok) {
+        S->play = start;
+        ps3_note(L, "PS3: inputs flowing; the first frame played is %d (delay %d)", start, S->delay);
+    }
+}
+
+/* SyncIo_Update_gate_speed, once per tick. False if the match had to stop. */
+static inline bool ps3_sio_gate(ps3_link_t *L) {
+    ps3_sio_t *S = &L->sio;
+    if (!S->started) return true;
+    if (S->sync_timeout) S->sync_timeout--;
+    ps3_sio_tick_resend(S);
+    if (!ps3_sio_check_gen(L)) return false;
     if (!S->gen_ok) {
         S->speed = !(S->sync_active && !S->finished);
         return true;
     }
     S->speed = true;
-    if (S->play < 0) {
-        int32_t start = S->init_delay;
-        bool ok = true;
-        if (start < 11) {
-            for (uint32_t k = 0; k < S->nplayers && ok; k++)
-                for (int32_t f = start; f <= 10 && ok; f++)
-                    if (!ps3_ring_has(S, k, f)) ok = false;
-        }
-        if (ok) {
-            S->play = start;
-            ps3_note(L, "PS3: inputs flowing; the first frame played is %d (delay %d)", start, S->delay);
-        }
-    }
+    if (S->play < 0) ps3_sio_find_first(L);
     if (S->passed) {
         if (S->side < 2 && S->sample - S->play < S->delay) S->speed = false;
         else
@@ -1442,11 +1481,9 @@ static inline void ps3_owner_pump(ps3_link_t *L, uint64_t now_us) {
     }
 }
 
-/* What a member does in the room each pump (np_session_update_room_phase's
- * non-owner half), and, when we own the room, the owner's half after it. */
-static inline void ps3_room_pump(ps3_link_t *L, uint64_t now_us) {
-    ps3_read_room(L);
-    if (!L->room_known) return;
+/* A fighter in a room it does not own sends its entrant data to the owner in
+ * phase 2, once it is linked to the other fighter or has waited long enough. */
+static inline void ps3_member_entrant(ps3_link_t *L, uint64_t now_us) {
     if (L->phase == PS3_PHASE_PREPARING && L->my_side >= 0 && !L->entrant_sent && !ps3_is_owner(L)) {
         ps3_peer_t *owner = ps3_peer_by_id(L, L->session->owner_id);
         bool linked = ps3_linked_to_fighters(L);
@@ -1459,6 +1496,9 @@ static inline void ps3_room_pump(ps3_link_t *L, uint64_t now_us) {
                      linked ? "" : " (no direct link to the other fighter)");
         }
     }
+}
+
+static inline void ps3_member_follow_result(ps3_link_t *L, uint64_t now_us) {
     /* Not fighting, or our board never saw the result: our place in line
      * follows the result the fighters publish. */
     if ((L->phase == PS3_PHASE_MATCH || L->phase == PS3_PHASE_RESULTS) && !L->match && !L->rotated) {
@@ -1472,6 +1512,9 @@ static inline void ps3_room_pump(ps3_link_t *L, uint64_t now_us) {
         else if (L->my_side >= 0 && L->match_seen && now_us > L->results_since_us + PS3_NO_RESULT_US)
             ps3_rotate(L, 0);
     }
+}
+
+static inline void ps3_member_clear_results(ps3_link_t *L, uint64_t now_us) {
     /* After the result screen the flags go back to 0, and the owner moves on
      * once nobody is still marked in the match. (The stamps are taken with a
      * later clock than `now_us`, inside this pump: compare, never subtract, or
@@ -1483,15 +1526,25 @@ static inline void ps3_room_pump(ps3_link_t *L, uint64_t now_us) {
         L->results_cleared = true;
         ps3_set_flags(L, 0);
     }
+}
+
+/* What a member does in the room each pump (np_session_update_room_phase's
+ * non-owner half), and, when we own the room, the owner's half after it. */
+static inline void ps3_room_pump(ps3_link_t *L, uint64_t now_us) {
+    ps3_read_room(L);
+    if (!L->room_known) return;
+    ps3_member_entrant(L, now_us);
+    ps3_member_follow_result(L, now_us);
+    ps3_member_clear_results(L, now_us);
     ps3_publish_me(L);
     ps3_owner_pump(L, now_us);
 }
 
 /* ---- Peers: signaling, then RUDP ----------------------------------------- */
 
-static inline void ps3_peers_pump(ps3_link_t *L, uint64_t now_us) {
+/* Drop the peers who are no longer in the room. */
+static inline void ps3_peers_drop_gone(ps3_link_t *L) {
     rpcn_session_t *s = L->session;
-    /* Mirror the room's members. */
     for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
         ps3_peer_t *p = &L->peers[i];
         if (p->used && !rpcn_session_peer(s, p->member_id)) {
@@ -1506,43 +1559,64 @@ static inline void ps3_peers_pump(ps3_link_t *L, uint64_t now_us) {
             memset(p, 0, sizeof(*p));
         }
     }
-    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) {
-        const rpcn_peer_t *rp = &s->peers[i];
-        if (!rp->used || !rp->npid[0]) continue;
-        ps3_peer_t *p = ps3_peer_by_id(L, rp->member_id);
-        if (!p) {
-            for (uint32_t k = 0; k < RPCN_MAX_PEERS && !p; k++) if (!L->peers[k].used) p = &L->peers[k];
-            if (!p) continue;
-            memset(p, 0, sizeof(*p));
-            p->used = true;
-            p->link = L;
-            p->member_id = rp->member_id;
-            snprintf(p->npid, sizeof(p->npid), "%s", rp->npid);
-        }
-        rpcs3_sig_peer_t *sp = rpcs3_sig_find(&L->sig, p->npid);
-        if ((!sp || (!sp->connecting && !sp->active && !sp->dead)) && rp->ip && rp->port)
-            sp = rpcs3_sig_start(&L->sig, p->npid, rp->ip, rp->port);
-        if (!sp) continue;
-        if (!p->rudp_up && rpcs3_sig_linked(sp)) {
-            rudp_peer_init(&p->rudp, sp->ip, sp->port, now_us ^ ((uint64_t)p->member_id << 40),
-                           ps3_link_send_udp, s, ps3_deliver_cb, p);
-            p->rudp_up = true;
-            /* Channel 1 exists only between the owner and each member; 2 and 3
-             * between every pair (the PS3's FUN_000b6884 connect loop). */
-            uint64_t ms = now_us / 1000u;
-            if (ps3_is_owner(L) || p->member_id == s->owner_id) rudp_connect(&p->rudp, 1, ms);
-            rudp_connect(&p->rudp, 2, ms);
-            rudp_connect(&p->rudp, 3, ms);
-            ps3_note(L, "PS3: opening RUDP to %s", p->npid);
-        }
-        if (p->rudp_up) {
-            p->rudp.ip = sp->ip;       /* signaling follows the peer; so do we */
-            p->rudp.port = sp->port;
-            bool was_open = rudp_all_open(&p->rudp);
-            rudp_pump(&p->rudp, now_us / 1000u);
-            (void)was_open;
-        }
+}
+
+/* The ps3_peer_t for a room member: its own, or a free slot taken for it.
+ * NULL when every slot is in use. */
+static inline ps3_peer_t *ps3_peer_for_member(ps3_link_t *L, const rpcn_peer_t *rp) {
+    ps3_peer_t *p = ps3_peer_by_id(L, rp->member_id);
+    if (!p) {
+        for (uint32_t k = 0; k < RPCN_MAX_PEERS && !p; k++) if (!L->peers[k].used) p = &L->peers[k];
+        if (!p) return NULL;
+        memset(p, 0, sizeof(*p));
+        p->used = true;
+        p->link = L;
+        p->member_id = rp->member_id;
+        snprintf(p->npid, sizeof(p->npid), "%s", rp->npid);
     }
+    return p;
+}
+
+/* Signaling has linked a peer: open RUDP to it. */
+static inline void ps3_peer_open_rudp(ps3_link_t *L, ps3_peer_t *p, const rpcs3_sig_peer_t *sp,
+                                      uint64_t now_us) {
+    rpcn_session_t *s = L->session;
+    rudp_peer_init(&p->rudp, sp->ip, sp->port, now_us ^ ((uint64_t)p->member_id << 40),
+                   ps3_link_send_udp, s, ps3_deliver_cb, p);
+    p->rudp_up = true;
+    /* Channel 1 exists only between the owner and each member; 2 and 3
+     * between every pair (the PS3's FUN_000b6884 connect loop). */
+    uint64_t ms = now_us / 1000u;
+    if (ps3_is_owner(L) || p->member_id == s->owner_id) rudp_connect(&p->rudp, 1, ms);
+    rudp_connect(&p->rudp, 2, ms);
+    rudp_connect(&p->rudp, 3, ms);
+    ps3_note(L, "PS3: opening RUDP to %s", p->npid);
+}
+
+/* One room member: signaling first, then RUDP over it. */
+static inline void ps3_peer_mirror(ps3_link_t *L, const rpcn_peer_t *rp, uint64_t now_us) {
+    if (!rp->used || !rp->npid[0]) return;
+    ps3_peer_t *p = ps3_peer_for_member(L, rp);
+    if (!p) return;
+    rpcs3_sig_peer_t *sp = rpcs3_sig_find(&L->sig, p->npid);
+    if ((!sp || (!sp->connecting && !sp->active && !sp->dead)) && rp->ip && rp->port)
+        sp = rpcs3_sig_start(&L->sig, p->npid, rp->ip, rp->port);
+    if (!sp) return;
+    if (!p->rudp_up && rpcs3_sig_linked(sp)) ps3_peer_open_rudp(L, p, sp, now_us);
+    if (p->rudp_up) {
+        p->rudp.ip = sp->ip;       /* signaling follows the peer; so do we */
+        p->rudp.port = sp->port;
+        bool was_open = rudp_all_open(&p->rudp);
+        rudp_pump(&p->rudp, now_us / 1000u);
+        (void)was_open;
+    }
+}
+
+static inline void ps3_peers_pump(ps3_link_t *L, uint64_t now_us) {
+    rpcn_session_t *s = L->session;
+    /* Mirror the room's members. */
+    ps3_peers_drop_gone(L);
+    for (uint32_t i = 0; i < RPCN_MAX_PEERS; i++) ps3_peer_mirror(L, &s->peers[i], now_us);
     rpcs3_sig_pump(&L->sig, now_us);
 }
 
