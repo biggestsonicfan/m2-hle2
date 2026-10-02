@@ -50,9 +50,6 @@
  * --fill-shade-rows  give a textured face one row of finished colours (its luma
  *            band, poly_luma and colour together), so a pixel fetches its colour
  *            once instead of a lumaram texel and then a ramp texel.
- * --fill-gather  read the bilinear 2x2 with one textureGather where the taps are
- *            the atlas's own (needs a GLES 3.1 context; falls back if there is
- *            none). The same texels, a quarter of the texture operations.
  * --verify-fill  after every game pass, draw its 3D fills again through the
  *            reference fill shader and the one in use, into two scratch targets,
  *            and compare the bytes (needs --render-scale 1 or more).
@@ -615,7 +612,6 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--fill-no-split"))      g_game_render_fill_split = 0;
         else if (!strcmp(a, "--fill-no-ramp"))       g_game_render_fill_ramp = 0;
         else if (!strcmp(a, "--fill-shade-rows"))    g_game_render_fill_shade = 1;
-        else if (!strcmp(a, "--fill-gather"))        g_game_render_fill_gather = 1;
         else if (!strcmp(a, "--match-replay"))       g_match_replay = 1;   /* attract straight to its replay fight */
         else if (!strcmp(a, "--netplay"))            opt.netplay = true;
         else if (!strcmp(a, "--net-config") && more) netplay_set_config_path(argv[++i]);   /* before netplay_init */
@@ -786,8 +782,7 @@ int main(int argc, char **argv) {
     SDL_AudioStream *audio = opt.sound ? sound_start() : NULL;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    /* textureGather is ES 3.1; everything else the frontend draws is 3.0. */
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, g_game_render_fill_gather ? 1 : 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
@@ -801,16 +796,6 @@ int main(int argc, char **argv) {
     SDL_Window *window = SDL_CreateWindow("m2hle", fullscreen ? 640 : opt.win_w, fullscreen ? 480 : opt.win_h,
                                           SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
     SDL_GLContext gl = window ? SDL_GL_CreateContext(window) : NULL;
-    if (!gl && g_game_render_fill_gather) {
-        /* No ES 3.1 here: fall back to 3.0 and the four fetches. */
-        fprintf(stderr, "m2hle: no GLES 3.1 context (%s); --fill-gather off\n", SDL_GetError());
-        g_game_render_fill_gather = 0;
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-        if (window) SDL_DestroyWindow(window);
-        window = SDL_CreateWindow("m2hle", fullscreen ? 640 : opt.win_w, fullscreen ? 480 : opt.win_h,
-                                  SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
-        gl = window ? SDL_GL_CreateContext(window) : NULL;
-    }
     if (!gl) {
         fprintf(stderr, "m2hle: GLES 3 window: %s\n", SDL_GetError());
         SDL_Quit();

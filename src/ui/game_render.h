@@ -183,10 +183,6 @@ static int g_game_render_fill_split = 1;
 /* Give textured faces shade rows: one fetch for the lumaram step, poly_luma and
  * colour ramp together. Off by default. Set before game_render_init. */
 static int g_game_render_fill_shade = 0;
-/* Read the bilinear 2x2 with textureGather where the taps are the atlas's own
- * (one texture operation instead of four). Needs an ES 3.1 context on GLES.
- * Off by default. Set before game_render_init. */
-static int g_game_render_fill_gather = 0;
 /* Give a game frame's faces the board's sort key as their vertex z instead of
  * writing it with gl_FragDepth, so the GPU keeps its early depth test. -1 (the
  * default) is on for GLES and off elsewhere; $M2HLE_VDEPTH=0/1 overrides it.
@@ -342,8 +338,8 @@ static const char *game_render_fill_vs_glsl =
     "flat out vec4 tile;\n"
     "flat out vec4 lbpl;\n"
     /* Per-face integers the fill works out per pixel otherwise: the GEO3D_FACE_*
-     * flags (plus 64 when both tile sides are powers of two) and the colour's
-     * 5-bit channels. A face's three vertices carry the same values. */
+     * flags and the colour's 5-bit channels. A face's three vertices carry the
+     * same values. */
     "flat out ivec4 face;\n"
     "flat out ivec2 tile_log2;\n"   /* log2 of the tile sides (GLSL ES 3.00 has no findMSB) */
     "flat out int ramp_row;\n"      /* colour alpha - 2: the face's colour ramp row, or -1 */
@@ -409,7 +405,6 @@ static const char *game_render_fill_vs_glsl =
     "  }\n"
     "  color = a_color; uv = a_uv; tile = a_tile; lbpl = a_lbpl; ez = -a_pos.z;\n"
     "  int fl = int(a_lbpl.z + 0.5), tw = int(a_tile.z), th = int(a_tile.w);\n"
-    "  if (tw > 0 && th > 0 && (tw & (tw - 1)) == 0 && (th & (th - 1)) == 0) fl |= 64;\n"
     "  ramp_row = int(a_color.a + 0.5) - 2;\n"
     "  tile_log2 = ivec2(0);\n"
     "  for (int i = 1; i < 16; i++) {\n"
@@ -596,11 +591,19 @@ static const char *game_render_fill_fs_ref_glsl =
  * (main_sdl --verify-fill replays each frame's fills through both and compares
  * the bytes), with the work per pixel cut where the result cannot change:
  *   - the flags and colour channels come from the vertex stage as flat ints;
- *   - a tile side is a power of two (32 << n, halved per level), so the wrap's
- *     % and / are & and >> of values that are never negative there;
+ *   - a textured tile's sides are 32 << n (geo3d.h: texw = 32u << (th0 & 7)),
+ *     so at level L a side is 1 << sh with sh = max(log2 side - L, 0). The
+ *     wrap's % is & m (m = side - 1, and two's complement wraps a negative
+ *     index the way adding side * 8 first did), the copy's parity is bit sh of
+ *     the index, the mirror's side - 1 - q is q ^ m, uv / 2^L is a multiply by
+ *     the float 2^-L, and lmax comes from the same logs;
  *   - the second mip level is fetched only when it has weight: mix(a, b, 0.0)
  *     is a, so at lod 0 (every magnified texel) or a whole level, 4 fetches
  *     instead of 8.
+ * On the ARC-S's Mali-G52 the general % / path cost about a tenth of the fill
+ * even where no face took it (registers), and four plain fetches beat
+ * textureGather with the branch that decides when it may be used (Pinboard
+ * #317: the fill's GPU time over attract went from 7.4 to 5.7 ms a frame).
  */
 static const char *game_render_fill_fs_glsl =
     "#version 410\n"
@@ -620,56 +623,29 @@ static const char *game_render_fill_fs_glsl =
     "flat in float fdepth;\n"
     "out vec4 frag_color;\n"
     GAME_RENDER_FAST_LOG2_GLSL
-    "ivec4 level_tile(int L) {\n"
-    "  int sheet = (face.x & 4) != 0 ? 1 : 0;\n"
-    "  uint x = (uint(int(tile.x)) - 2048u) >> uint(L);\n"
-    "  uint y = (uint(int(tile.y) - sheet * 1024) - 1024u) >> uint(L);\n"
-    "  return ivec4(int(x & 2047u), int(y & 1023u) + ((sheet + L) & 1) * 1024,\n"
-    "               max(int(tile.z) >> L, 1), max(int(tile.w) >> L, 1));\n"
-    "}\n"
-    "float tile_texel(ivec4 t, ivec2 sh, ivec2 p) {\n"
-    "  ivec2 s = p + t.zw * 8;\n"
-    "  ivec2 q, copy;\n"
-    "  if ((face.x & 64) != 0) { q = s & (t.zw - 1); copy = s >> sh; }\n"
-    "  else                    { q = ivec2(uvec2(s) % uvec2(t.zw)); copy = ivec2(uvec2(s) / uvec2(t.zw)); }\n"
-    "  if ((face.x & 8) != 0 && (copy.x & 1) != 0) q.x = t.z - 1 - q.x;\n"
-    "  if ((face.x & 16) != 0 && (copy.y & 1) != 0) q.y = t.w - 1 - q.y;\n"
-    "  return texelFetch(atlas_smp, (t.xy + q) & 2047, 0).r;\n"
-    "}\n"
     "vec2 sample_level(int L) {\n"
-    "  ivec4 t = level_tile(L);\n"
-    "  ivec2 sh = max(tile_log2 - ivec2(L), ivec2(0));\n"   /* log2 of t.zw = max(side >> L, 1) */
-    "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
+    "  ivec2 sh = max(tile_log2 - ivec2(L), ivec2(0));\n"   /* log2 of the level's sides */
+    "  ivec2 m = (ivec2(1) << sh) - 1;\n"
+    "  int sheet = (face.x >> 2) & 1;\n"
+    "  ivec2 base = ivec2((uvec2(ivec2(tile.xy) - ivec2(2048, 1024 + sheet * 1024)) >> uint(L)) & uvec2(2047u, 1023u));\n"
+    "  base.y += ((sheet + L) & 1) * 1024;\n"
+    "  vec2 c = uv * intBitsToFloat((127 - L) << 23) - 0.5;\n"   /* uv / 2^L */
     "  ivec2 i0 = ivec2(floor(c));\n"
     "  vec2 f = fract(c);\n"
-    "  ivec2 s0 = i0 + t.zw * 8;\n"
-    "  ivec2 q0 = (face.x & 64) != 0 ? (s0 & (t.zw - 1)) : ivec2(uvec2(s0) % uvec2(t.zw));\n"
-    "  if ((face.x & 256) == 0 && q0.x == t.z - 1) f.x = step(0.5, f.x);\n"
-    "  if ((face.x & 512) == 0 && q0.y == t.w - 1) f.y = step(0.5, f.y);\n"
-    "  float t00, t10, t01, t11;\n"
-    /* USE_GATHER: where the four taps are the atlas's own 2x2 — the tile does
-     * not wrap or mirror between them and they do not cross the 2048 fold —
-     * textureGather returns all four in one texture operation. Raw texels, no
-     * filtering, so they are the texelFetch values exactly; P sits on their
-     * shared corner, (i0 + 1) / 2048, which is exact in binary32. Anything else
-     * keeps the four fetches. */
-    "#ifdef USE_GATHER\n"
-    "  ivec2 a0 = t.xy + q0;\n"
-    "  if ((face.x & 24) == 0 && q0.x + 1 < t.z && q0.y + 1 < t.w && a0.x + 1 < 2048 && a0.y + 1 < 2048) {\n"
-    "    vec4 g = textureGather(atlas_smp, (vec2(a0) + 1.0) / 2048.0, 0);\n"
-    "    t00 = g.w; t10 = g.z; t01 = g.x; t11 = g.y;\n"
-    "  } else {\n"
-    "    t00 = tile_texel(t, sh, i0);\n"
-    "    t10 = tile_texel(t, sh, i0 + ivec2(1, 0));\n"
-    "    t01 = tile_texel(t, sh, i0 + ivec2(0, 1));\n"
-    "    t11 = tile_texel(t, sh, i0 + ivec2(1, 1));\n"
+    "  ivec2 i1 = i0 + 1;\n"
+    "  ivec2 q0 = i0 & m, q1 = i1 & m;\n"
+    "  if ((face.x & 256) == 0 && q0.x == m.x) f.x = step(0.5, f.x);\n"
+    "  if ((face.x & 512) == 0 && q0.y == m.y) f.y = step(0.5, f.y);\n"
+    "  if ((face.x & 24) != 0) {\n"
+    "    ivec2 mir = ivec2(face.x >> 3, face.x >> 4) & 1;\n"
+    "    q0 ^= m * (mir & (i0 >> sh));\n"
+    "    q1 ^= m * (mir & (i1 >> sh));\n"
     "  }\n"
-    "#else\n"
-    "  t00 = tile_texel(t, sh, i0);\n"
-    "  t10 = tile_texel(t, sh, i0 + ivec2(1, 0));\n"
-    "  t01 = tile_texel(t, sh, i0 + ivec2(0, 1));\n"
-    "  t11 = tile_texel(t, sh, i0 + ivec2(1, 1));\n"
-    "#endif\n"
+    "  ivec2 a0 = (base + q0) & 2047, a1 = (base + q1) & 2047;\n"
+    "  float t00 = texelFetch(atlas_smp, a0, 0).r;\n"
+    "  float t10 = texelFetch(atlas_smp, ivec2(a1.x, a0.y), 0).r;\n"
+    "  float t01 = texelFetch(atlas_smp, ivec2(a0.x, a1.y), 0).r;\n"
+    "  float t11 = texelFetch(atlas_smp, a1, 0).r;\n"
     "  float a = 1.0;\n"
     "  if ((face.x & 1) != 0) {\n"
     "    vec4 cover = 1.0 - step(1.0, vec4(t00, t10, t01, t11));\n"
@@ -701,7 +677,7 @@ static const char *game_render_fill_fs_glsl =
     "  return clamp(max(ramp(li) - 64.0, 0.0) * (255.0/191.0) / 255.0, 0.0, 1.0);\n"
     "}\n"
     "void main() {\n"
-    "  float lmax = floor(log2(max(min(tile.z, tile.w), 2.0)) + 0.5) - 1.0;\n"
+    "  float lmax = float(max(min(tile_log2.x, tile_log2.y), 1) - 1);\n"
     "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
     "  if ((face.x & 2) != 0 && ((int(floor(bpix.x / bpix.z)) ^ int(floor(bpix.y / bpix.z)) ^ (face.x >> 10)) & 1) == 0) discard;\n"
     "  vec3 rgb = color.rgb;\n"
@@ -886,30 +862,21 @@ static const char *game_render_fill_fs_hlsl =
  * so one buffer per stage only has to outlive that call. */
 static inline const char *game_render_glsl(sg_backend backend, const char *src, int stage) {
     static const char head[] = "#version 410\n";
-    /* textureGather needs ES 3.10 (it is core in GL 4.0), so the fills take that
-     * header when the gather path is compiled in. */
-    static const char es_head_300[] = "#version 300 es\n";
-    static const char es_head_310[] = "#version 310 es\n";
+    static const char es_head[] = "#version 300 es\n";
     static const char es_prec[] =
         "precision highp float;\n"
         "precision highp int;\n"
         "precision highp sampler2D;\n"
         "precision highp usampler2D;\n";
-    static const char gather_def[] = "#define USE_GATHER 1\n";
     static char buf[2][16384];
     if (strncmp(src, head, sizeof head - 1) != 0) return src;
-    /* The whole program shares one version, so with the gather path compiled in
-     * every ES shader takes the 3.10 header (3.00 sources are valid there); the
-     * define goes only to the fill shader, which is the one that reads it. */
-    bool gather = g_game_render_fill_gather != 0;
-    bool define = gather && strstr(src, "USE_GATHER") != NULL;
     if (g_game_render_vertex_depth < 0) {
         const char *e = getenv("M2HLE_VDEPTH");
         g_game_render_vertex_depth = (e && (*e == '0' || *e == '1')) ? *e - '0'
                                    : backend == SG_BACKEND_GLES3;
     }
     bool vdepth = g_game_render_vertex_depth > 0 && strstr(src, "FLAT_VERTEX_DEPTH") != NULL;
-    if (backend != SG_BACKEND_GLES3 && !define && !vdepth) return src;
+    if (backend != SG_BACKEND_GLES3 && !vdepth) return src;
     const char *body = src + sizeof head - 1;
     char *out = buf[stage], *end = out + sizeof buf[0];
     #define GAME_RENDER_GLSL_PUT(text) do { \
@@ -918,12 +885,11 @@ static inline const char *game_render_glsl(sg_backend backend, const char *src, 
         memcpy(out, (text), n_); out += n_; \
     } while (0)
     if (backend == SG_BACKEND_GLES3) {
-        GAME_RENDER_GLSL_PUT(gather ? es_head_310 : es_head_300);
+        GAME_RENDER_GLSL_PUT(es_head);
         GAME_RENDER_GLSL_PUT(es_prec);
     } else {
         GAME_RENDER_GLSL_PUT(head);
     }
-    if (define) GAME_RENDER_GLSL_PUT(gather_def);
     if (vdepth) GAME_RENDER_GLSL_PUT("#define FLAT_VERTEX_DEPTH 1\n");
     GAME_RENDER_GLSL_PUT(body);
     #undef GAME_RENDER_GLSL_PUT
