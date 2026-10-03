@@ -119,6 +119,30 @@ static inline bool rs_path_absolute(const char *p) {
     return p[0] == '/' || p[0] == '\\' || (p[0] && p[1] == ':');
 }
 
+/* A ".." component: pop the last component of out[0..n) unless there is none,
+ * or it is itself "..", in which case the ".." is kept. Returns the new length. */
+static inline size_t rs_path_normalize_up(char *out, size_t n, size_t root, size_t cap) {
+    size_t k = n;
+    while (k > root && out[k - 1] == '/') k--;
+    size_t start = k;
+    while (start > root && out[start - 1] != '/') start--;
+    bool poppable = k > start && !(k - start == 2 && out[start] == '.' && out[start + 1] == '.');
+    if (poppable) return start;
+    if (n + 3 < cap) { memcpy(out + n, "../", 3); n += 3; }
+    return n;
+}
+
+/* One component s[0..len) onto out[0..n), skipping "" and "."; returns the new length. */
+static inline size_t rs_path_normalize_comp(char *out, size_t n, size_t root, size_t cap, const char *s, size_t len) {
+    if (len == 0 || (len == 1 && s[0] == '.')) return n;
+    if (len == 2 && s[0] == '.' && s[1] == '.') return rs_path_normalize_up(out, n, root, cap);
+    if (n + len + 1 < cap) {
+        memcpy(out + n, s, len); n += len;
+        out[n++] = '/';
+    }
+    return n;
+}
+
 /* Forward slashes, no "." and no "dir/.." (a leading ".." that cannot be popped stays). */
 static inline void rs_path_normalize(char *p) {
     for (char *c = p; *c; c++) if (*c == '\\') *c = '/';
@@ -131,21 +155,7 @@ static inline void rs_path_normalize(char *p) {
     while (*s) {
         const char *e = strchr(s, '/');
         size_t len = e ? (size_t)(e - s) : strlen(s);
-        if (len == 0 || (len == 1 && s[0] == '.')) {
-            /* skip */
-        } else if (len == 2 && s[0] == '.' && s[1] == '.') {
-            /* Pop the last component unless there is none, or it is itself "..". */
-            size_t k = n;
-            while (k > root && out[k - 1] == '/') k--;
-            size_t start = k;
-            while (start > root && out[start - 1] != '/') start--;
-            bool poppable = k > start && !(k - start == 2 && out[start] == '.' && out[start + 1] == '.');
-            if (poppable) n = start;
-            else if (n + 3 < sizeof out) { memcpy(out + n, "../", 3); n += 3; }
-        } else if (n + len + 1 < sizeof out) {
-            memcpy(out + n, s, len); n += len;
-            out[n++] = '/';
-        }
+        n = rs_path_normalize_comp(out, n, root, sizeof out, s, len);
         if (!e) break;
         s = e + 1;
     }
@@ -494,6 +504,113 @@ static inline bool rs_load_lut(rs_lut_t *l, char *err, size_t errlen) {
     return true;
 }
 
+/* The formats this build refuses by their extension, with the sentence why. */
+static inline bool rs_preset_load_refused(const char *path, char *err, size_t errlen) {
+    if (rs_ext_is(path, ".slangp") || rs_ext_is(path, ".slang")) {
+        snprintf(err, errlen, "Slang shaders (.slang/.slangp) need a shader compiler this build doesn't have. "
+                              "Use the GLSL version (.glslp/.glsl) from libretro's glsl-shaders.");
+        return true;
+    }
+    if (rs_ext_is(path, ".cgp") || rs_ext_is(path, ".cg")) {
+        snprintf(err, errlen, "Cg shaders (.cg/.cgp) are not supported. Use the GLSL version (.glslp/.glsl).");
+        return true;
+    }
+    return false;
+}
+
+/* One .glsl as the whole preset: a single pass filling the screen. */
+static inline bool rs_preset_load_glsl(rs_preset_t *p, const char *path, char *err, size_t errlen) {
+    rs_pass_t *ps = &p->pass[0];
+    snprintf(ps->path, sizeof ps->path, "%s", path);
+    rs_path_normalize(ps->path);
+    ps->wrap = RS_WRAP_BORDER;
+    ps->type_x = ps->type_y = RS_SCALE_VIEWPORT;
+    ps->scale_x = ps->scale_y = 1.0f;
+    if (!rs_load_pass_source(ps, err, errlen)) { rs_preset_free(p); return false; }
+    p->n_passes = 1;
+    rs_scan_params(p, ps->source);
+    return true;
+}
+
+/* Pass i's settings from the preset's keys, all but its shader. */
+static inline void rs_preset_pass_keys(const rs_kvs_t *t, rs_pass_t *ps, int i, int n) {
+    char key[96];
+    #define RS_KEY(fmt) (snprintf(key, sizeof key, fmt, i), rs_kvs_str(t, key))
+    const char *v;
+    if ((v = RS_KEY("filter_linear%d")) != NULL) { ps->filter_set = true; ps->filter_linear = rs_bool(v); }
+    v = RS_KEY("wrap_mode%d");
+    if (!v) v = RS_KEY("texture_wrap_mode%d");
+    ps->wrap = rs_wrap(v);
+    ps->type_x = ps->type_y = RS_SCALE_SOURCE;
+    ps->scale_x = ps->scale_y = 1.0f;
+    rs_scale_type_t st;
+    if (rs_scale_type(RS_KEY("scale_type%d"), &st))   { ps->type_x = ps->type_y = st; ps->scale_set = true; }
+    if (rs_scale_type(RS_KEY("scale_type_x%d"), &st)) { ps->type_x = st; ps->scale_set = true; }
+    if (rs_scale_type(RS_KEY("scale_type_y%d"), &st)) { ps->type_y = st; ps->scale_set = true; }
+    if ((v = RS_KEY("scale%d")) != NULL)   ps->scale_x = ps->scale_y = (float)atof(v);
+    if ((v = RS_KEY("scale_x%d")) != NULL) ps->scale_x = (float)atof(v);
+    if ((v = RS_KEY("scale_y%d")) != NULL) ps->scale_y = (float)atof(v);
+    ps->float_fb     = rs_bool(RS_KEY("float_framebuffer%d"));
+    ps->srgb_fb      = rs_bool(RS_KEY("srgb_framebuffer%d"));
+    ps->mipmap_input = rs_bool(RS_KEY("mipmap_input%d"));
+    if ((v = RS_KEY("frame_count_mod%d")) != NULL) ps->frame_count_mod = (unsigned)atoi(v);
+    if ((v = RS_KEY("alias%d")) != NULL) snprintf(ps->alias, sizeof ps->alias, "%s", v);
+    #undef RS_KEY
+    /* The last pass without a scale of its own draws straight to the screen. */
+    if (i == n - 1 && !ps->scale_set) { ps->type_x = ps->type_y = RS_SCALE_VIEWPORT; }
+}
+
+/* The n passes, each with its source read and its parameters scanned. */
+static inline bool rs_preset_load_passes(rs_preset_t *p, const rs_kvs_t *t, int n, char *err, size_t errlen) {
+    char key[96];
+    for (int i = 0; i < n; i++) {
+        rs_pass_t *ps = &p->pass[i];
+        snprintf(key, sizeof key, "shader%d", i);
+        const rs_kv_t *sh = rs_kvs_get(t, key);
+        if (!sh) { snprintf(err, errlen, "%s has no %s.", p->name, key); return false; }
+        rs_path_join(sh->base, sh->val, ps->path, sizeof ps->path);
+        rs_preset_pass_keys(t, ps, i, n);
+        if (!rs_load_pass_source(ps, err, errlen)) return false;
+        p->n_passes = i + 1;
+        rs_scan_params(p, ps->source);
+    }
+    return true;
+}
+
+/* The LUT `name` names, with its settings, decoded. */
+static inline bool rs_preset_load_lut(rs_preset_t *p, const rs_kvs_t *t, const char *name, char *err, size_t errlen) {
+    char key[96];
+    if (p->n_luts >= RS_MAX_LUTS) { snprintf(err, errlen, "%s has more than %d textures.", p->name, RS_MAX_LUTS); return false; }
+    rs_lut_t *l = &p->lut[p->n_luts];
+    snprintf(l->name, sizeof l->name, "%s", name);
+    const rs_kv_t *e = rs_kvs_get(t, name);
+    if (!e) { snprintf(err, errlen, "%s names texture %s but gives no file for it.", p->name, name); return false; }
+    rs_path_join(e->base, e->val, l->path, sizeof l->path);
+    snprintf(key, sizeof key, "%s_linear", name);
+    l->linear = rs_bool(rs_kvs_str(t, key));
+    snprintf(key, sizeof key, "%s_mipmap", name);
+    l->mipmap = rs_bool(rs_kvs_str(t, key));
+    snprintf(key, sizeof key, "%s_wrap_mode", name);
+    l->wrap = rs_wrap(rs_kvs_str(t, key));
+    if (!rs_load_lut(l, err, errlen)) return false;
+    p->n_luts++;
+    return true;
+}
+
+/* Every LUT the "textures" list names. */
+static inline bool rs_preset_load_luts(rs_preset_t *p, const rs_kvs_t *t, char *err, size_t errlen) {
+    const char *tex = rs_kvs_str(t, "textures");
+    if (!tex || !*tex) return true;
+    char list[RS_PATH];
+    snprintf(list, sizeof list, "%s", tex);
+    for (char *name = strtok(list, ";"); name; name = strtok(NULL, ";")) {
+        name = rs_trim(name);
+        if (!*name) continue;
+        if (!rs_preset_load_lut(p, t, name, err, errlen)) return false;
+    }
+    return true;
+}
+
 /*
  * Load a .glslp (or one .glsl as a single pass). On failure `err` says why in a
  * sentence a player can act on, and `p` is left empty.
@@ -504,27 +621,8 @@ static inline bool rs_preset_load(rs_preset_t *p, const char *path, char *err, s
     snprintf(p->name, sizeof p->name, "%s", rs_path_base(path));
     for (int i = 0; i < g_rs_vfs_n; i++) g_rs_vfs[i].used = false;
 
-    if (rs_ext_is(path, ".slangp") || rs_ext_is(path, ".slang")) {
-        snprintf(err, errlen, "Slang shaders (.slang/.slangp) need a shader compiler this build doesn't have. "
-                              "Use the GLSL version (.glslp/.glsl) from libretro's glsl-shaders.");
-        return false;
-    }
-    if (rs_ext_is(path, ".cgp") || rs_ext_is(path, ".cg")) {
-        snprintf(err, errlen, "Cg shaders (.cg/.cgp) are not supported. Use the GLSL version (.glslp/.glsl).");
-        return false;
-    }
-    if (rs_ext_is(path, ".glsl")) {
-        rs_pass_t *ps = &p->pass[0];
-        snprintf(ps->path, sizeof ps->path, "%s", path);
-        rs_path_normalize(ps->path);
-        ps->wrap = RS_WRAP_BORDER;
-        ps->type_x = ps->type_y = RS_SCALE_VIEWPORT;
-        ps->scale_x = ps->scale_y = 1.0f;
-        if (!rs_load_pass_source(ps, err, errlen)) { rs_preset_free(p); return false; }
-        p->n_passes = 1;
-        rs_scan_params(p, ps->source);
-        return true;
-    }
+    if (rs_preset_load_refused(path, err, errlen)) return false;
+    if (rs_ext_is(path, ".glsl")) return rs_preset_load_glsl(p, path, err, errlen);
     if (!rs_ext_is(path, ".glslp")) {
         snprintf(err, errlen, "Pick a .glslp preset or a .glsl shader.");
         return false;
@@ -543,63 +641,10 @@ static inline bool rs_preset_load(rs_preset_t *p, const char *path, char *err, s
         free(t.kv);
         return false;
     }
-    char key[96];
-    for (int i = 0; i < n; i++) {
-        rs_pass_t *ps = &p->pass[i];
-        snprintf(key, sizeof key, "shader%d", i);
-        const rs_kv_t *sh = rs_kvs_get(&t, key);
-        if (!sh) { snprintf(err, errlen, "%s has no %s.", p->name, key); goto fail; }
-        rs_path_join(sh->base, sh->val, ps->path, sizeof ps->path);
-        #define RS_KEY(fmt) (snprintf(key, sizeof key, fmt, i), rs_kvs_str(&t, key))
-        const char *v;
-        if ((v = RS_KEY("filter_linear%d")) != NULL) { ps->filter_set = true; ps->filter_linear = rs_bool(v); }
-        v = RS_KEY("wrap_mode%d");
-        if (!v) v = RS_KEY("texture_wrap_mode%d");
-        ps->wrap = rs_wrap(v);
-        ps->type_x = ps->type_y = RS_SCALE_SOURCE;
-        ps->scale_x = ps->scale_y = 1.0f;
-        rs_scale_type_t st;
-        if (rs_scale_type(RS_KEY("scale_type%d"), &st))   { ps->type_x = ps->type_y = st; ps->scale_set = true; }
-        if (rs_scale_type(RS_KEY("scale_type_x%d"), &st)) { ps->type_x = st; ps->scale_set = true; }
-        if (rs_scale_type(RS_KEY("scale_type_y%d"), &st)) { ps->type_y = st; ps->scale_set = true; }
-        if ((v = RS_KEY("scale%d")) != NULL)   ps->scale_x = ps->scale_y = (float)atof(v);
-        if ((v = RS_KEY("scale_x%d")) != NULL) ps->scale_x = (float)atof(v);
-        if ((v = RS_KEY("scale_y%d")) != NULL) ps->scale_y = (float)atof(v);
-        ps->float_fb     = rs_bool(RS_KEY("float_framebuffer%d"));
-        ps->srgb_fb      = rs_bool(RS_KEY("srgb_framebuffer%d"));
-        ps->mipmap_input = rs_bool(RS_KEY("mipmap_input%d"));
-        if ((v = RS_KEY("frame_count_mod%d")) != NULL) ps->frame_count_mod = (unsigned)atoi(v);
-        if ((v = RS_KEY("alias%d")) != NULL) snprintf(ps->alias, sizeof ps->alias, "%s", v);
-        #undef RS_KEY
-        /* The last pass without a scale of its own draws straight to the screen. */
-        if (i == n - 1 && !ps->scale_set) { ps->type_x = ps->type_y = RS_SCALE_VIEWPORT; }
-        if (!rs_load_pass_source(ps, err, errlen)) goto fail;
-        p->n_passes = i + 1;
-        rs_scan_params(p, ps->source);
-    }
-
-    const char *tex = rs_kvs_str(&t, "textures");
-    if (tex && *tex) {
-        char list[RS_PATH];
-        snprintf(list, sizeof list, "%s", tex);
-        for (char *name = strtok(list, ";"); name; name = strtok(NULL, ";")) {
-            name = rs_trim(name);
-            if (!*name) continue;
-            if (p->n_luts >= RS_MAX_LUTS) { snprintf(err, errlen, "%s has more than %d textures.", p->name, RS_MAX_LUTS); goto fail; }
-            rs_lut_t *l = &p->lut[p->n_luts];
-            snprintf(l->name, sizeof l->name, "%s", name);
-            const rs_kv_t *e = rs_kvs_get(&t, name);
-            if (!e) { snprintf(err, errlen, "%s names texture %s but gives no file for it.", p->name, name); goto fail; }
-            rs_path_join(e->base, e->val, l->path, sizeof l->path);
-            snprintf(key, sizeof key, "%s_linear", name);
-            l->linear = rs_bool(rs_kvs_str(&t, key));
-            snprintf(key, sizeof key, "%s_mipmap", name);
-            l->mipmap = rs_bool(rs_kvs_str(&t, key));
-            snprintf(key, sizeof key, "%s_wrap_mode", name);
-            l->wrap = rs_wrap(rs_kvs_str(&t, key));
-            if (!rs_load_lut(l, err, errlen)) goto fail;
-            p->n_luts++;
-        }
+    if (!rs_preset_load_passes(p, &t, n, err, errlen) || !rs_preset_load_luts(p, &t, err, errlen)) {
+        free(t.kv);
+        rs_preset_free(p);
+        return false;
     }
 
     /* A preset overrides a parameter by naming it, listed in "parameters" or not. */
@@ -609,11 +654,6 @@ static inline bool rs_preset_load(rs_preset_t *p, const char *path, char *err, s
     }
     free(t.kv);
     return true;
-
-fail:
-    free(t.kv);
-    rs_preset_free(p);
-    return false;
 }
 
 static inline rs_param_t *rs_preset_param(rs_preset_t *p, const char *name) {
@@ -666,6 +706,18 @@ static inline size_t rs_skip_directive(const char *s, size_t i, size_t n) {
     return i;
 }
 
+/* Past what rs_glsl_globals passes over at s[i]: a comment, a newline, a
+ * line's indent or a preprocessor line. i itself when it is none of those. */
+static inline size_t rs_glsl_globals_skip(const char *s, size_t i, size_t n, bool *line_start) {
+    const char c = s[i];
+    size_t past = rs_skip_comment(s, i, n);
+    if (past != i) return past;
+    if (c == '\n') { *line_start = true; return i + 1; }
+    if (*line_start && (c == ' ' || c == '\t' || c == '\r')) return i + 1;
+    if (*line_start && c == '#') return rs_skip_directive(s, i, n);
+    return i;
+}
+
 /* Statements at file scope, [start, end) with the ';', skipping comments,
  * preprocessor lines and the bodies of functions and structs. */
 static inline int rs_glsl_globals(const char *s, rs_span_t *out, int cap) {
@@ -675,11 +727,8 @@ static inline int rs_glsl_globals(const char *s, rs_span_t *out, int cap) {
     bool line_start = true;
     while (i < n) {
         const char c = s[i];
-        size_t past = rs_skip_comment(s, i, n);
+        size_t past = rs_glsl_globals_skip(s, i, n, &line_start);
         if (past != i) { i = past; continue; }
-        if (c == '\n') { line_start = true; i++; continue; }
-        if (line_start && (c == ' ' || c == '\t' || c == '\r')) { i++; continue; }
-        if (line_start && c == '#') { i = rs_skip_directive(s, i, n); continue; }
         line_start = false;
         if (depth == 0) {
             if (st == (size_t)-1 && !isspace((unsigned char)c)) st = i;
@@ -1146,6 +1195,109 @@ static inline char *rs_gl_stage_source(const char *body, int how, bool fragment)
     return out;
 }
 
+/* The GLSL versions rs_gl_program tries, in order, and how it treats the source
+ * for each. A NULL version is skipped. */
+typedef struct {
+    const char *ver[6];
+    int         how[6];
+    bool        es;
+    bool        has_ext;     /* the body has an #extension line */
+} rs_gl_tries_t;
+
+static inline void rs_gl_program_tries(rs_gl_tries_t *tr, char *ver, const char *body) {
+#ifdef RS_GLES
+    static const char *const vers[6] = { NULL, "300 es", "300 es", "300 es", "100", "100" };
+    static const int         hows[6] = { RS_AS_IS, RS_AS_IS, RS_AS_HIGHP, RS_AS_LEGACY, RS_AS_IS, RS_AS_HIGHP };
+    tr->es = true;
+    memcpy(tr->ver, vers, sizeof vers);
+    memcpy(tr->how, hows, sizeof hows);
+    if (strstr(ver, "es") || !strcmp(ver, "100")) tr->ver[0] = ver;
+    /* A legacy rewrite declares its output ahead of the body, where an
+     * #extension line would then be out of place. */
+    tr->has_ext = strstr(body, "#extension") != NULL;
+#else
+    static const char *const vers[6] = { NULL, "130", "140", "330", "120", NULL };
+    (void)body;
+    tr->es = false;
+    memcpy(tr->ver, vers, sizeof vers);
+    memset(tr->how, 0, sizeof tr->how);
+    tr->how[0] = RS_AS_IS;
+    if (ver[0] && !strstr(ver, "es") && strcmp(ver, "100")) tr->ver[0] = ver;
+    tr->has_ext = false;
+#endif
+}
+
+/* The fragment stage of a legacy rewrite, with the output it writes declared
+ * ahead of it (unless the shader declares its own). Takes ftext. */
+static inline char *rs_gl_legacy_fragment(char *ftext, int how, const char *body) {
+    if (!ftext || how != RS_AS_LEGACY || rs_gl_has_fragcolor(body)) return ftext;
+    size_t n = strlen(ftext);
+    static const char decl[] = "out highp vec4 rs_FragColor;\n";
+    char *fdecl = (char *)malloc(n + sizeof decl);
+    if (fdecl) { memcpy(fdecl, decl, sizeof decl - 1); memcpy(fdecl + sizeof decl - 1, ftext, n + 1); }
+    free(ftext);
+    return fdecl;
+}
+
+/* Link the two stages; the program, or 0 with the link log in `log`. */
+static inline GLuint rs_gl_link(GLuint vs, GLuint fs, const char *name, const char *ver, int how, char *log, size_t logcap) {
+    GLuint p = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (ok) {
+        LOG_INFO("shader: %s compiled as GLSL %s%s", name, ver,
+                 how == RS_AS_HIGHP ? ", all highp" : how == RS_AS_LEGACY ? ", rewritten from GLSL 1.10" : "");
+        return p;
+    }
+    GLsizei got = 0;
+    glGetProgramInfoLog(p, (GLsizei)logcap, &got, log);
+    glDeleteProgram(p);
+    return 0;
+}
+
+/* One attempt: both stages as `how` makes them, compiled as GLSL `ver` and
+ * linked. 0 with the reason in `log` when it does not take. */
+static inline GLuint rs_gl_attempt(const char *body, const char *ver, int how, bool es, const char *name, char *log, size_t logcap) {
+    char *vtext = rs_gl_stage_source(body, how, false);
+    char *ftext = rs_gl_legacy_fragment(rs_gl_stage_source(body, how, true), how, body);
+    GLuint prog = 0;
+    log[0] = '\0';
+    GLuint vs = vtext ? rs_gl_compile(GL_VERTEX_SHADER, ver, vtext, es, log, logcap) : 0;
+    GLuint fs = vs && ftext ? rs_gl_compile(GL_FRAGMENT_SHADER, ver, ftext, es, log, logcap) : 0;
+    free(vtext);
+    free(ftext);
+    if (vs && fs) prog = rs_gl_link(vs, fs, name, ver, how, log, logcap);
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
+    return prog;
+}
+
+/* Globals GLSL ES will not initialise, named in `log`, moved into main():
+ * true with *body replaced when there were any to move. */
+static inline bool rs_gl_program_hoist(char **body, const char *log, bool es, int *hoisted) {
+    int lines[128];
+    int n = rs_glsl_global_init_errors(log, rs_gl_head_lines(*body, es), lines, 128);
+    char *next = n ? rs_hoist_globals(*body, lines, n, hoisted) : NULL;
+    if (!next) return false;
+    free(*body);
+    *body = next;
+    return true;
+}
+
+/* The error for a pass none of the attempts took. */
+static inline void rs_gl_program_fail(const char *name, const char *first_ver, int first_hoisted, const char *first) {
+    char what[192];
+    if (first_hoisted)
+        snprintf(what, sizeof what, "%s did not compile (as GLSL %s, with %d global initialiser%s moved into main())",
+                 name, first_ver, first_hoisted, first_hoisted == 1 ? "" : "s");
+    else
+        snprintf(what, sizeof what, "%s did not compile (as GLSL %s)", name, first_ver ? first_ver : "?");
+    rs_gl_err("%s: %s", what, first);
+}
+
 /* Compile and link one pass, trying GLSL versions until one takes: the shader's
  * own first, then the ones libretro's shaders are written for. When none takes,
  * the error reported is the first attempt's, which is the version the shader
@@ -1156,89 +1308,27 @@ static inline GLuint rs_gl_program(const char *src, const char *name) {
     int first_hoisted = 0;
     char *body = rs_gl_strip(src, ver, sizeof ver);
     if (!body) return 0;
-#ifdef RS_GLES
-    const bool es = true;
-    const char *tries[6] = { NULL, "300 es", "300 es", "300 es", "100", "100" };
-    const int   how[6]   = { RS_AS_IS, RS_AS_IS, RS_AS_HIGHP, RS_AS_LEGACY, RS_AS_IS, RS_AS_HIGHP };
-    if (strstr(ver, "es") || !strcmp(ver, "100")) tries[0] = ver;
-    /* A legacy rewrite declares its output ahead of the body, where an
-     * #extension line would then be out of place. */
-    const bool has_ext = strstr(body, "#extension") != NULL;
-#else
-    const bool es = false;
-    const char *tries[6] = { NULL, "130", "140", "330", "120", NULL };
-    const int   how[6]   = { RS_AS_IS };
-    if (ver[0] && !strstr(ver, "es") && strcmp(ver, "100")) tries[0] = ver;
-    const bool has_ext = false;
-#endif
+    rs_gl_tries_t tr;
+    rs_gl_program_tries(&tr, ver, body);
     GLuint prog = 0;
     int hoisted = 0;
-    for (size_t t = 0, round = 0; t < sizeof tries / sizeof tries[0] && !prog; ) {
-        if (!tries[t] || (how[t] == RS_AS_LEGACY && has_ext)) { t++; continue; }
-        char *vtext = rs_gl_stage_source(body, how[t], false);
-        char *ftext = rs_gl_stage_source(body, how[t], true);
-        char *fdecl = NULL;
-        if (ftext && how[t] == RS_AS_LEGACY && !rs_gl_has_fragcolor(body)) {
-            size_t n = strlen(ftext);
-            static const char decl[] = "out highp vec4 rs_FragColor;\n";
-            fdecl = (char *)malloc(n + sizeof decl);
-            if (fdecl) { memcpy(fdecl, decl, sizeof decl - 1); memcpy(fdecl + sizeof decl - 1, ftext, n + 1); }
-            free(ftext);
-            ftext = fdecl;
-        }
-        log[0] = '\0';
-        GLuint vs = vtext ? rs_gl_compile(GL_VERTEX_SHADER, tries[t], vtext, es, log, sizeof log) : 0;
-        GLuint fs = vs && ftext ? rs_gl_compile(GL_FRAGMENT_SHADER, tries[t], ftext, es, log, sizeof log) : 0;
-        free(vtext);
-        free(ftext);
-        if (vs && fs) {
-            GLuint p = glCreateProgram();
-            glAttachShader(p, vs);
-            glAttachShader(p, fs);
-            glLinkProgram(p);
-            GLint ok = 0;
-            glGetProgramiv(p, GL_LINK_STATUS, &ok);
-            if (ok) {
-                LOG_INFO("shader: %s compiled as GLSL %s%s", name, tries[t],
-                         how[t] == RS_AS_HIGHP ? ", all highp" : how[t] == RS_AS_LEGACY ? ", rewritten from GLSL 1.10" : "");
-                prog = p;
-            } else {
-                GLsizei got = 0;
-                glGetProgramInfoLog(p, (GLsizei)sizeof log, &got, log);
-                glDeleteProgram(p);
-            }
-        }
-        if (vs) glDeleteShader(vs);
-        if (fs) glDeleteShader(fs);
+    for (size_t t = 0, round = 0; t < sizeof tr.ver / sizeof tr.ver[0] && !prog; ) {
+        if (!tr.ver[t] || (tr.how[t] == RS_AS_LEGACY && tr.has_ext)) { t++; continue; }
+        prog = rs_gl_attempt(body, tr.ver[t], tr.how[t], tr.es, name, log, sizeof log);
         /* Globals GLSL ES will not initialise: move them into main() and try
          * the same version again, a few times, as each move can expose the next. */
-        if (!prog && es && how[t] != RS_AS_LEGACY && round < 12) {
-            int lines[128];
-            int n = rs_glsl_global_init_errors(log, rs_gl_head_lines(body, es), lines, 128);
-            char *next = n ? rs_hoist_globals(body, lines, n, &hoisted) : NULL;
-            if (next) {
-                free(body);
-                body = next;
-                round++;
-                continue;
-            }
+        if (!prog && tr.es && tr.how[t] != RS_AS_LEGACY && round < 12 && rs_gl_program_hoist(&body, log, tr.es, &hoisted)) {
+            round++;
+            continue;
         }
         /* The error to report is where the first attempt ended up, moves and all. */
-        if (!prog && !first_ver) { first_ver = tries[t]; first_hoisted = hoisted; snprintf(first, sizeof first, "%s", log); }
+        if (!prog && !first_ver) { first_ver = tr.ver[t]; first_hoisted = hoisted; snprintf(first, sizeof first, "%s", log); }
         round = 0;
         t++;
     }
     if (prog && hoisted) LOG_INFO("shader: %s: %d global initialiser%s moved into main()", name, hoisted, hoisted == 1 ? "" : "s");
     free(body);
-    if (!prog) {
-        char what[192];
-        if (first_hoisted)
-            snprintf(what, sizeof what, "%s did not compile (as GLSL %s, with %d global initialiser%s moved into main())",
-                     name, first_ver, first_hoisted, first_hoisted == 1 ? "" : "s");
-        else
-            snprintf(what, sizeof what, "%s did not compile (as GLSL %s)", name, first_ver ? first_ver : "?");
-        rs_gl_err("%s: %s", what, first);
-    }
+    if (!prog) rs_gl_program_fail(name, first_ver, first_hoisted, first);
     return prog;
 }
 
@@ -1520,23 +1610,20 @@ static inline void rs_gl_set_int(GLint loc, GLenum type, int v) {
     else                  glUniform1i(loc, v);
 }
 
-/* Pass i, drawn into whatever framebuffer and viewport are bound. */
-static inline void rs_gl_draw_pass(int i, bool to_screen, int out_w, int out_h) {
-    rs_preset_t *p = g_rs_gl.preset;
-    rs_gl_pass_t *gp = &g_rs_gl.pass[i];
-    const bool stock = i >= p->n_passes;
-    const rs_pass_t *ps = stock ? NULL : &p->pass[i];
+/* Prev is the frame before this one: fall back to this frame until the ring
+ * has filled that far. */
+static inline GLuint rs_gl_prev_tex(int index) {
+    GLuint tex = 0;
+    int back = index + 1, H = g_rs_gl.history;
+    if (H > 0 && back <= g_rs_gl.hist_filled)
+        tex = g_rs_gl.hist[(g_rs_gl.hist_head - back + H) % H].tex;
+    if (!tex) tex = g_rs_gl.orig.tex;
+    return tex;
+}
 
-    /* The pass's input: the previous output, or the original frame. */
-    GLuint in_tex = g_rs_gl.orig.tex;
-    int in_w = g_rs_gl.orig.w, in_h = g_rs_gl.orig.h;
-    if (i > 0) { in_tex = g_rs_gl.pass[i - 1].tex; in_w = g_rs_gl.pass[i - 1].w; in_h = g_rs_gl.pass[i - 1].h; }
-    const bool in_mips = i == 0 ? g_rs_gl.orig.mips : g_rs_gl.pass[i - 1].mips;
-    /* Unset means RetroArch's own smoothing: off, but the stock tail smooths. */
-    const bool linear = stock ? true : ps->filter_set ? ps->filter_linear : false;
-    const rs_wrap_t wrap = stock ? RS_WRAP_EDGE : ps->wrap;
-
-    glUseProgram(gp->prog);
+/* The pass's own uniforms: the matrix, the frame counters, the output size and
+ * the parameters. */
+static inline void rs_gl_draw_uniforms(const rs_gl_pass_t *gp, const rs_preset_t *p, const rs_pass_t *ps, int out_w, int out_h) {
     if (gp->u_mvp >= 0) {
         static const GLfloat mvp[16] = { 2, 0, 0, 0,  0, 2, 0, 0,  0, 0, -1, 0,  -1, -1, 0, 1 };
         glUniformMatrix4fv(gp->u_mvp, 1, GL_FALSE, mvp);
@@ -1548,36 +1635,35 @@ static inline void rs_gl_draw_pass(int i, bool to_screen, int out_w, int out_h) 
     rs_gl_size(gp->u_output_size, out_w, out_h);
     for (int k = 0; k < p->n_params; k++)
         if (gp->u_param[k] >= 0) glUniform1f(gp->u_param[k], p->param[k].value);
+}
 
-    for (int b = 0; b < gp->n_bind; b++) {
-        const rs_bind_t *bd = &gp->bind[b];
-        GLuint tex = 0; int w = 0, h = 0; bool mip = false, lin = linear; rs_wrap_t wr = wrap;
-        switch (bd->kind) {
-            case RS_SRC_INPUT: tex = in_tex; w = in_w; h = in_h; mip = in_mips && ps && ps->mipmap_input; break;
-            case RS_SRC_ORIG:  tex = g_rs_gl.orig.tex; w = g_rs_gl.orig.w; h = g_rs_gl.orig.h; break;
-            case RS_SRC_PASS:  tex = g_rs_gl.pass[bd->index].tex; w = g_rs_gl.pass[bd->index].w; h = g_rs_gl.pass[bd->index].h; break;
-            case RS_SRC_PREV: {
-                /* Prev is the frame before this one: fall back to this frame
-                 * until the ring has filled that far. */
-                int back = bd->index + 1, H = g_rs_gl.history;
-                if (H > 0 && back <= g_rs_gl.hist_filled)
-                    tex = g_rs_gl.hist[(g_rs_gl.hist_head - back + H) % H].tex;
-                if (!tex) tex = g_rs_gl.orig.tex;
-                w = g_rs_gl.orig.w; h = g_rs_gl.orig.h;
-                break;
-            }
-            case RS_SRC_LUT:
-                tex = g_rs_gl.lut_tex[bd->index];
-                lin = p->lut[bd->index].linear; wr = p->lut[bd->index].wrap; mip = p->lut[bd->index].mipmap;
-                break;
-        }
-        glActiveTexture(GL_TEXTURE0 + bd->unit);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glBindSampler(bd->unit, rs_gl_sampler(lin, wr, mip));
-        rs_gl_size(bd->loc_tex_size, w, h);
-        rs_gl_size(bd->loc_input_size, w, h);
+/* One sampler bound to its unit with its sizes. `in` is the pass's input;
+ * linear and wrap are the pass's, which a LUT replaces with its own. */
+static inline void rs_gl_draw_bind(const rs_bind_t *bd, const rs_preset_t *p, const rs_pass_t *ps,
+                                   const rs_gl_target_t *in, bool linear, rs_wrap_t wrap) {
+    GLuint tex = 0; int w = 0, h = 0; bool mip = false, lin = linear; rs_wrap_t wr = wrap;
+    switch (bd->kind) {
+        case RS_SRC_INPUT: tex = in->tex; w = in->w; h = in->h; mip = in->mips && ps && ps->mipmap_input; break;
+        case RS_SRC_ORIG:  tex = g_rs_gl.orig.tex; w = g_rs_gl.orig.w; h = g_rs_gl.orig.h; break;
+        case RS_SRC_PASS:  tex = g_rs_gl.pass[bd->index].tex; w = g_rs_gl.pass[bd->index].w; h = g_rs_gl.pass[bd->index].h; break;
+        case RS_SRC_PREV:
+            tex = rs_gl_prev_tex(bd->index);
+            w = g_rs_gl.orig.w; h = g_rs_gl.orig.h;
+            break;
+        case RS_SRC_LUT:
+            tex = g_rs_gl.lut_tex[bd->index];
+            lin = p->lut[bd->index].linear; wr = p->lut[bd->index].wrap; mip = p->lut[bd->index].mipmap;
+            break;
     }
+    glActiveTexture(GL_TEXTURE0 + bd->unit);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glBindSampler(bd->unit, rs_gl_sampler(lin, wr, mip));
+    rs_gl_size(bd->loc_tex_size, w, h);
+    rs_gl_size(bd->loc_input_size, w, h);
+}
 
+/* The quad, the screen's when to_screen, through the pass's attributes. */
+static inline void rs_gl_draw_quad(const rs_gl_pass_t *gp, bool to_screen) {
     glBindVertexArray(g_rs_gl.vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_rs_gl.vbo);
     const GLsizei stride = 4 * sizeof(GLfloat);
@@ -1597,6 +1683,27 @@ static inline void rs_gl_draw_pass(int i, bool to_screen, int out_w, int out_h) 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     if (gp->a_pos >= 0) glDisableVertexAttribArray((GLuint)gp->a_pos);
     for (int t = 0; t < gp->n_tex_attr; t++) glDisableVertexAttribArray((GLuint)gp->a_tex[t]);
+}
+
+/* Pass i, drawn into whatever framebuffer and viewport are bound. */
+static inline void rs_gl_draw_pass(int i, bool to_screen, int out_w, int out_h) {
+    rs_preset_t *p = g_rs_gl.preset;
+    rs_gl_pass_t *gp = &g_rs_gl.pass[i];
+    const bool stock = i >= p->n_passes;
+    const rs_pass_t *ps = stock ? NULL : &p->pass[i];
+
+    /* The pass's input: the previous output, or the original frame. */
+    rs_gl_target_t in = { g_rs_gl.orig.tex, 0, g_rs_gl.orig.w, g_rs_gl.orig.h, false };
+    if (i > 0) { in.tex = g_rs_gl.pass[i - 1].tex; in.w = g_rs_gl.pass[i - 1].w; in.h = g_rs_gl.pass[i - 1].h; }
+    in.mips = i == 0 ? g_rs_gl.orig.mips : g_rs_gl.pass[i - 1].mips;
+    /* Unset means RetroArch's own smoothing: off, but the stock tail smooths. */
+    const bool linear = stock ? true : ps->filter_set ? ps->filter_linear : false;
+    const rs_wrap_t wrap = stock ? RS_WRAP_EDGE : ps->wrap;
+
+    glUseProgram(gp->prog);
+    rs_gl_draw_uniforms(gp, p, ps, out_w, out_h);
+    for (int b = 0; b < gp->n_bind; b++) rs_gl_draw_bind(&gp->bind[b], p, ps, &in, linear, wrap);
+    rs_gl_draw_quad(gp, to_screen);
     for (int b = 0; b < gp->n_bind; b++) {
         glActiveTexture(GL_TEXTURE0 + gp->bind[b].unit);
         glBindTexture(GL_TEXTURE_2D, 0);
