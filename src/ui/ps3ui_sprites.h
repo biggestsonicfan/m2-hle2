@@ -839,49 +839,69 @@ static const ps3ui__mood_t ps3ui__moods[4] = {
 
 #define PS3UI__FACE_R 23.53f
 
+/* ^ ^ eyes, a smile */
+static int ps3ui__face_in_happy(float x, float y)
+{
+    float d;
+    for (int i = 0; i < 2; i++) {
+        d = hypotf(x - (i ? 32.17f : 14.48f), y - 22.42f);
+        if (y <= 22.42f && fabsf(d - 5.1f) < 1.17f) return 1;
+    }
+    d = hypotf(x - 23.82f, y - 25.46f);
+    return y >= 32.51f && fabsf(d - 13.66f) < 1.25f;
+}
+
+/* upright oval eyes, a flat mouth */
+static int ps3ui__face_in_flat(float x, float y)
+{
+    for (int i = 0; i < 2; i++) {
+        float ex = (x - (i ? 32.09f : 16.74f)) / 2.72f, ey = (y - 19.0f) / 4.99f;
+        if (ex * ex + ey * ey < 1.0f) return 1;
+    }
+    return x > 9.91f && x < 39.28f && y > 32.45f && y < 35.06f;
+}
+
+/* half-closed eyes, a ^ mouth */
+static int ps3ui__face_in_tired(float x, float y)
+{
+    for (int i = 0; i < 2; i++) {
+        float ex = (x - (i ? 32.81f : 15.76f)) / 4.4f, ey = (y - 19.1f) / 6.37f;
+        if (y >= 19.1f && ex * ex + ey * ey < 1.0f) return 1;
+    }
+    /* two strokes from the apex, 2.6 wide */
+    static const float seg[2][4] = { { 24.02f, 31.06f, 13.98f, 38.65f }, { 24.02f, 31.06f, 33.61f, 38.63f } };
+    for (int i = 0; i < 2; i++) {
+        float ax = seg[i][0], ay = seg[i][1], bx = seg[i][2], by = seg[i][3];
+        float vx = bx - ax, vy = by - ay, t = ((x - ax) * vx + (y - ay) * vy) / (vx * vx + vy * vy);
+        if (t < 0.0f || t > 1.0f) continue;
+        if (hypotf(x - ax - t * vx, y - ay - t * vy) < 1.32f) return 1;
+    }
+    return 0;
+}
+
+/* slanted angry eyes, a frown */
+static int ps3ui__face_in_angry(float x, float y)
+{
+    float d;
+    for (int i = 0; i < 2; i++) {
+        float ex = i ? 31.98f : 15.03f, s = i ? -1.0f : 1.0f;
+        /* a disc cut by the brow, a line falling towards the nose */
+        if (hypotf(x - ex, y - 20.02f) < 5.53f && (y - 13.86f) - 0.87f * s * (x - (i ? 37.41f : 9.77f)) > 0.0f)
+            return 1;
+    }
+    d = hypotf(x - 23.5f, y - 47.1f);
+    return y <= 39.08f && fabsf(d - 14.56f) < 1.26f;
+}
+
 /* Is (x, y) inside one of the face's strokes? Positions are measured off the
  * sprites. */
 static int ps3ui__face_in(int mood, float x, float y)
 {
-    float d;
     switch (mood) {
-    case 0:                                    /* ^ ^ eyes, a smile */
-        for (int i = 0; i < 2; i++) {
-            d = hypotf(x - (i ? 32.17f : 14.48f), y - 22.42f);
-            if (y <= 22.42f && fabsf(d - 5.1f) < 1.17f) return 1;
-        }
-        d = hypotf(x - 23.82f, y - 25.46f);
-        return y >= 32.51f && fabsf(d - 13.66f) < 1.25f;
-    case 1:                                    /* upright oval eyes, a flat mouth */
-        for (int i = 0; i < 2; i++) {
-            float ex = (x - (i ? 32.09f : 16.74f)) / 2.72f, ey = (y - 19.0f) / 4.99f;
-            if (ex * ex + ey * ey < 1.0f) return 1;
-        }
-        return x > 9.91f && x < 39.28f && y > 32.45f && y < 35.06f;
-    case 2: {                                  /* half-closed eyes, a ^ mouth */
-        for (int i = 0; i < 2; i++) {
-            float ex = (x - (i ? 32.81f : 15.76f)) / 4.4f, ey = (y - 19.1f) / 6.37f;
-            if (y >= 19.1f && ex * ex + ey * ey < 1.0f) return 1;
-        }
-        /* two strokes from the apex, 2.6 wide */
-        static const float seg[2][4] = { { 24.02f, 31.06f, 13.98f, 38.65f }, { 24.02f, 31.06f, 33.61f, 38.63f } };
-        for (int i = 0; i < 2; i++) {
-            float ax = seg[i][0], ay = seg[i][1], bx = seg[i][2], by = seg[i][3];
-            float vx = bx - ax, vy = by - ay, t = ((x - ax) * vx + (y - ay) * vy) / (vx * vx + vy * vy);
-            if (t < 0.0f || t > 1.0f) continue;
-            if (hypotf(x - ax - t * vx, y - ay - t * vy) < 1.32f) return 1;
-        }
-        return 0;
-    }
-    default:                                   /* slanted angry eyes, a frown */
-        for (int i = 0; i < 2; i++) {
-            float ex = i ? 31.98f : 15.03f, s = i ? -1.0f : 1.0f;
-            /* a disc cut by the brow, a line falling towards the nose */
-            if (hypotf(x - ex, y - 20.02f) < 5.53f && (y - 13.86f) - 0.87f * s * (x - (i ? 37.41f : 9.77f)) > 0.0f)
-                return 1;
-        }
-        d = hypotf(x - 23.5f, y - 47.1f);
-        return y <= 39.08f && fabsf(d - 14.56f) < 1.26f;
+    case 0: return ps3ui__face_in_happy(x, y);
+    case 1: return ps3ui__face_in_flat(x, y);
+    case 2: return ps3ui__face_in_tired(x, y);
+    default: return ps3ui__face_in_angry(x, y);
     }
 }
 
@@ -1240,10 +1260,12 @@ static void ps3ui__pad_ink(ps3ui_image_t *im, float *m, uint32_t rgb)
 
 #define PS3UI__N(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
-static void ps3ui__paint_pad(ps3ui_image_t *im)
+/* the face buttons' centres: triangle, square, circle, cross */
+static const float ps3ui__pad_face[4][2] = { { 277.5f, 88.0f }, { 248.0f, 117.8f }, { 307.3f, 117.8f }, { 277.5f, 147.5f } };
+
+static void ps3ui__pad_body(ps3ui_image_t *im)
 {
     const float M = PS3UI__PAD_M, D2R = 0.01745329f;
-    int w = im->w, h = im->h;
     ps3ui_path_t p;
 
     /* the body: the left half's outline from the top middle, down round the
@@ -1271,6 +1293,12 @@ static void ps3ui__paint_pad(ps3ui_image_t *im)
     for (int i = PS3UI__N(body) - 1; i >= 0; i--)
         ps3ui_path_line(&p, M - body[i][0], body[i][1]);
     ps3ui_path_fill(im, &p, 0x000000, 1.0f);
+}
+
+static void ps3ui__pad_grey(ps3ui_image_t *im)
+{
+    const float M = PS3UI__PAD_M;
+    ps3ui_path_t p;
 
     /* grey parts: shoulder buttons, d-pad, sticks, face buttons, select, start */
     static const float l2[][2] = {
@@ -1301,18 +1329,21 @@ static void ps3ui__paint_pad(ps3ui_image_t *im)
         ps3ui_path_move(&p, cx + 23.8f, 176.1f);
         ps3ui_path_arc(&p, cx, 176.1f, 23.8f, 0.0f, 6.2831853f, 64);
     }
-    static const float face[4][2] = { { 277.5f, 88.0f }, { 248.0f, 117.8f }, { 307.3f, 117.8f }, { 277.5f, 147.5f } };
     for (int k = 0; k < 4; k++) {
-        ps3ui_path_move(&p, face[k][0] + 11.9f, face[k][1]);
-        ps3ui_path_arc(&p, face[k][0], face[k][1], 11.9f, 0.0f, 6.2831853f, 48);
+        ps3ui_path_move(&p, ps3ui__pad_face[k][0] + 11.9f, ps3ui__pad_face[k][1]);
+        ps3ui_path_arc(&p, ps3ui__pad_face[k][0], ps3ui__pad_face[k][1], 11.9f, 0.0f, 6.2831853f, 48);
     }
     ps3ui_path_rect(&p, 136.0f, 113.5f, 149.0f, 120.0f);
     ps3ui_path_move(&p, 197.5f, 113.2f);
     ps3ui_path_line(&p, 213.0f, 117.2f);
     ps3ui_path_line(&p, 197.5f, 121.2f);
     ps3ui_path_fill(im, &p, 0x656666, 1.0f);
+}
 
-    float *m = (float *)calloc((size_t)w * (size_t)h, sizeof(float));
+/* The grooves and detail lines, through the scratch coverage m. */
+static void ps3ui__pad_details(ps3ui_image_t *im, float *m)
+{
+    int w = im->w, h = im->h;
     /* dark grooves across the shoulder buttons and round the sticks' tops */
     static const ps3ui__pad_line_t groove[] = {
         { 0, 56.5f, 14.8f, 66.0f, 13.3f, 0 }, { 0, 66.0f, 13.3f, 84.0f, 13.3f, 0 }, { 0, 84.0f, 13.3f, 98.5f, 18.0f, 0 },
@@ -1372,11 +1403,15 @@ static void ps3ui__paint_pad(ps3ui_image_t *im)
     ps3ui__pad_line_t ps = { 1, 173.4f, 136.8f, 11.7f, 0.0f, 360.0f };
     ps3ui__pad_stroke(m, w, h, ps, 1.0f, 0);
     ps3ui__pad_ink(im, m, 0x505050);
+}
 
+static void ps3ui__pad_symbols(ps3ui_image_t *im, float *m)
+{
+    int w = im->w, h = im->h;
     /* the face buttons' symbols */
     static const uint32_t sym[4] = { 0x00A4C1, 0xE288AC, 0xD43261, 0x6488CC };
     for (int k = 0; k < 4; k++) {
-        float cx = face[k][0], cy = face[k][1];
+        float cx = ps3ui__pad_face[k][0], cy = ps3ui__pad_face[k][1];
         if (k == 0) {
             float v[3][2] = { { cx, cy - 10.0f }, { cx + 8.6f, cy + 5.0f }, { cx - 8.6f, cy + 5.0f } };
             for (int i = 0; i < 3; i++) {
@@ -1401,6 +1436,15 @@ static void ps3ui__paint_pad(ps3ui_image_t *im)
         }
         ps3ui__pad_ink(im, m, sym[k]);
     }
+}
+
+static void ps3ui__paint_pad(ps3ui_image_t *im)
+{
+    ps3ui__pad_body(im);
+    ps3ui__pad_grey(im);
+    float *m = (float *)calloc((size_t)im->w * (size_t)im->h, sizeof(float));
+    ps3ui__pad_details(im, m);
+    ps3ui__pad_symbols(im, m);
     free(m);
 }
 

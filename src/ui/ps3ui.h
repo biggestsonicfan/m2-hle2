@@ -398,41 +398,32 @@ static inline void ps3ui_blend_px(float *d, const float *s, float a, int blend)
     }
 }
 
-/* Draw an image whose texel (u,v) sits at layout point m*(u,v). Pixels whose
- * centres fall inside the transformed rectangle are shaded, as a GPU would
- * rasterise the quad; the texture is sampled bilinearly, clamped to the
- * sprite, with the half-texel convention. tint multiplies RGB (NULL = none). */
-static inline void ps3ui_draw_image(ps3ui_canvas_t *cv, const ps3ui_image_t *im, ps3ui_mat_t m,
-                                    float opacity, int blend, const float *tint)
+/* The image's quad, recorded in the draw list for the GPU. */
+static inline void ps3ui_draw_image_dl(ps3ui_canvas_t *cv, const ps3ui_image_t *im, ps3ui_mat_t t, float opacity,
+                                       int blend, const float *tint)
 {
-    if (!im->px || opacity <= 0.0f)
+    ps3ui_dl_item_t *it = ps3ui_dl_push(cv->dl);
+    if (!it)
         return;
-    ps3ui_mat_t t = ps3ui_mat_mul(ps3ui_canvas_mat(cv), m);
-    float det = t.a * t.d - t.b * t.c;
-    if (fabsf(det) < 1e-9f)
-        return;
-    if (cv->dl) {
-        ps3ui_dl_item_t *it = ps3ui_dl_push(cv->dl);
-        if (!it)
-            return;
-        it->kind = PS3UI_DL_IMAGE;
-        it->blend = (uint8_t)blend;
-        it->src = im;
-        ps3ui_mat_apply(t, 0, 0, &it->x[0], &it->y[0]);
-        ps3ui_mat_apply(t, (float)im->w, 0, &it->x[1], &it->y[1]);
-        ps3ui_mat_apply(t, 0, (float)im->h, &it->x[2], &it->y[2]);
-        ps3ui_mat_apply(t, (float)im->w, (float)im->h, &it->x[3], &it->y[3]);
-        if (tint) {
-            it->r = tint[0];
-            it->g = tint[1];
-            it->b = tint[2];
-        }
-        it->a = opacity;
-        return;
+    it->kind = PS3UI_DL_IMAGE;
+    it->blend = (uint8_t)blend;
+    it->src = im;
+    ps3ui_mat_apply(t, 0, 0, &it->x[0], &it->y[0]);
+    ps3ui_mat_apply(t, (float)im->w, 0, &it->x[1], &it->y[1]);
+    ps3ui_mat_apply(t, 0, (float)im->h, &it->x[2], &it->y[2]);
+    ps3ui_mat_apply(t, (float)im->w, (float)im->h, &it->x[3], &it->y[3]);
+    if (tint) {
+        it->r = tint[0];
+        it->g = tint[1];
+        it->b = tint[2];
     }
-    /* inverse */
-    float ia = t.d / det, ib = -t.b / det, ic = -t.c / det, id = t.a / det;
-    float ie = -(ia * t.e + ic * t.f), iff = -(ib * t.e + id * t.f);
+    it->a = opacity;
+}
+
+/* The output pixels the image's corners under t span, clipped to the canvas. */
+static inline void ps3ui_image_box(const ps3ui_canvas_t *cv, const ps3ui_image_t *im, ps3ui_mat_t t, int *bx0,
+                                   int *by0, int *bx1, int *by1)
+{
     float xs[4], ys[4];
     ps3ui_mat_apply(t, 0, 0, &xs[0], &ys[0]);
     ps3ui_mat_apply(t, (float)im->w, 0, &xs[1], &ys[1]);
@@ -450,6 +441,58 @@ static inline void ps3ui_draw_image(ps3ui_canvas_t *cv, const ps3ui_image_t *im,
     if (y0 < cv->clip_y0) y0 = cv->clip_y0;
     if (x1 > cv->clip_x1) x1 = cv->clip_x1;
     if (y1 > cv->clip_y1) y1 = cv->clip_y1;
+    *bx0 = x0;
+    *by0 = y0;
+    *bx1 = x1;
+    *by1 = y1;
+}
+
+/* The texel at (u, v), bilinear with the half-texel convention, clamped to the
+ * sprite. */
+static inline void ps3ui_image_sample(const ps3ui_image_t *im, float u, float v, float s[4])
+{
+    float fu = u - 0.5f, fv = v - 0.5f;
+    int u0 = (int)floorf(fu), v0 = (int)floorf(fv);
+    float du = fu - (float)u0, dv = fv - (float)v0;
+    int ua = u0 < 0 ? 0 : u0, ub = u0 + 1 >= im->w ? im->w - 1 : u0 + 1;
+    int va = v0 < 0 ? 0 : v0, vb = v0 + 1 >= im->h ? im->h - 1 : v0 + 1;
+    if (ua >= im->w) ua = im->w - 1;
+    if (va >= im->h) va = im->h - 1;
+    if (ub < 0) ub = 0;
+    if (vb < 0) vb = 0;
+    const float *p00 = im->px + ((size_t)va * (size_t)im->w + (size_t)ua) * 4;
+    const float *p10 = im->px + ((size_t)va * (size_t)im->w + (size_t)ub) * 4;
+    const float *p01 = im->px + ((size_t)vb * (size_t)im->w + (size_t)ua) * 4;
+    const float *p11 = im->px + ((size_t)vb * (size_t)im->w + (size_t)ub) * 4;
+    for (int c = 0; c < 4; c++) {
+        float top = p00[c] + (p10[c] - p00[c]) * du;
+        float bot = p01[c] + (p11[c] - p01[c]) * du;
+        s[c] = top + (bot - top) * dv;
+    }
+}
+
+/* Draw an image whose texel (u,v) sits at layout point m*(u,v). Pixels whose
+ * centres fall inside the transformed rectangle are shaded, as a GPU would
+ * rasterise the quad; the texture is sampled bilinearly, clamped to the
+ * sprite, with the half-texel convention. tint multiplies RGB (NULL = none). */
+static inline void ps3ui_draw_image(ps3ui_canvas_t *cv, const ps3ui_image_t *im, ps3ui_mat_t m,
+                                    float opacity, int blend, const float *tint)
+{
+    if (!im->px || opacity <= 0.0f)
+        return;
+    ps3ui_mat_t t = ps3ui_mat_mul(ps3ui_canvas_mat(cv), m);
+    float det = t.a * t.d - t.b * t.c;
+    if (fabsf(det) < 1e-9f)
+        return;
+    if (cv->dl) {
+        ps3ui_draw_image_dl(cv, im, t, opacity, blend, tint);
+        return;
+    }
+    /* inverse */
+    float ia = t.d / det, ib = -t.b / det, ic = -t.c / det, id = t.a / det;
+    float ie = -(ia * t.e + ic * t.f), iff = -(ib * t.e + id * t.f);
+    int x0, y0, x1, y1;
+    ps3ui_image_box(cv, im, t, &x0, &y0, &x1, &y1);
     const float W = (float)im->w, H = (float)im->h;
     for (int y = y0; y < y1; y++) {
         float py = (float)y + 0.5f;
@@ -458,25 +501,8 @@ static inline void ps3ui_draw_image(ps3ui_canvas_t *cv, const ps3ui_image_t *im,
             float u = ia * px + ic * py + ie, v = ib * px + id * py + iff;
             if (u < 0.0f || v < 0.0f || u >= W || v >= H)
                 continue;
-            float fu = u - 0.5f, fv = v - 0.5f;
-            int u0 = (int)floorf(fu), v0 = (int)floorf(fv);
-            float du = fu - (float)u0, dv = fv - (float)v0;
-            int ua = u0 < 0 ? 0 : u0, ub = u0 + 1 >= im->w ? im->w - 1 : u0 + 1;
-            int va = v0 < 0 ? 0 : v0, vb = v0 + 1 >= im->h ? im->h - 1 : v0 + 1;
-            if (ua >= im->w) ua = im->w - 1;
-            if (va >= im->h) va = im->h - 1;
-            if (ub < 0) ub = 0;
-            if (vb < 0) vb = 0;
-            const float *p00 = im->px + ((size_t)va * (size_t)im->w + (size_t)ua) * 4;
-            const float *p10 = im->px + ((size_t)va * (size_t)im->w + (size_t)ub) * 4;
-            const float *p01 = im->px + ((size_t)vb * (size_t)im->w + (size_t)ua) * 4;
-            const float *p11 = im->px + ((size_t)vb * (size_t)im->w + (size_t)ub) * 4;
             float s[4];
-            for (int c = 0; c < 4; c++) {
-                float top = p00[c] + (p10[c] - p00[c]) * du;
-                float bot = p01[c] + (p11[c] - p01[c]) * du;
-                s[c] = top + (bot - top) * dv;
-            }
+            ps3ui_image_sample(im, u, v, s);
             if (tint) {
                 s[0] *= tint[0];
                 s[1] *= tint[1];
@@ -649,6 +675,18 @@ typedef struct {
 static void ps3ui_play_comp(const ps3ui_play_t *p, ps3ui_canvas_t *cv, int comp, float f,
                             ps3ui_mat_t parent, float opacity, int blend);
 
+/* Which of a video layer's sources shows at frame f. */
+static inline int ps3ui_layer_src(const ps3ui_layer_t *l, float f)
+{
+    int si = 0;
+    if (l->nsrc > 1 && l->frames_per_src > 0.0f) {
+        si = (int)(((f - l->start) * l->tscale + l->offset) / l->frames_per_src);
+        if (si < 0) si = 0;
+        if (si >= l->nsrc) si = l->nsrc - 1;
+    }
+    return si;
+}
+
 static inline void ps3ui_play_layer(const ps3ui_play_t *p, ps3ui_canvas_t *cv, const ps3ui_layer_t *l,
                                     float f, ps3ui_mat_t parent, float opacity, int blend)
 {
@@ -671,13 +709,7 @@ static inline void ps3ui_play_layer(const ps3ui_play_t *p, ps3ui_canvas_t *cv, c
             p->hook(p->user, cv, l->name, m, op, l->w, l->h);
         return;
     }
-    int si = 0;
-    if (l->nsrc > 1 && l->frames_per_src > 0.0f) {
-        si = (int)(((f - l->start) * l->tscale + l->offset) / l->frames_per_src);
-        if (si < 0) si = 0;
-        if (si >= l->nsrc) si = l->nsrc - 1;
-    }
-    int spr = s->srcs[l->item + si];
+    int spr = s->srcs[l->item + ps3ui_layer_src(l, f)];
     if (p->filter && !p->filter(p->user, l->name, &spr))
         return;
     const ps3ui_image_t *im = ps3ui_sprite(spr);
@@ -878,6 +910,70 @@ static inline float ps3ui_text_width(const ps3ui_text_style_t *st, const char *s
     return w - last_pad;
 }
 
+/* Where a glyph's pen point lands in output pixels (x only). */
+static inline float ps3ui_text_gx(const ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, int cp, float pen,
+                                  float off, float sx, const ps3ui_glyph_t *g)
+{
+    if (st->mono_adv > 0.0f)
+        return (pen * cv->k + cv->ox) + (st->mono_adv * cv->k - g->adv) * 0.5f;
+    if (st->metrics && cp >= 32 && cp < 127) {
+        /* put the ink's left edge at pen + off */
+        float x0, x1;
+        ps3ui_glyph_ink(st->font, st->cap, cp, &x0, &x1);
+        return (pen + off - x0 * sx) * cv->k + cv->ox;
+    }
+    return pen * cv->k + cv->ox;
+}
+
+/* One glyph's quad at output pixel (bx, by), recorded in the draw list. */
+static inline void ps3ui_text_glyph_dl(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, const ps3ui_glyph_t *g,
+                                       int bx, int by, const float c[3], float opacity)
+{
+    ps3ui_dl_item_t *it = ps3ui_dl_push(cv->dl);
+    if (!it)
+        return;
+    float top = st->skew != 0.0f ? -(float)g->yoff * st->skew : 0.0f;
+    float bot = st->skew != 0.0f ? -(float)(g->yoff + g->h) * st->skew : 0.0f;
+    it->kind = PS3UI_DL_GLYPH;
+    it->blend = PS3UI_BLEND_NORMAL;
+    it->src = g->bm;
+    it->sw = g->w;
+    it->sh = g->h;
+    it->key = ((uint64_t)(g->font & 3) << 62) | ((uint64_t)(g->size_q & 0xFFFF) << 40)
+            | ((uint64_t)(g->sx_q & 0xFFFF) << 24) | (uint64_t)(g->cp & 0xFFFFFF);
+    it->x[0] = (float)bx + top;
+    it->x[1] = (float)(bx + g->w) + top;
+    it->x[2] = (float)bx + bot;
+    it->x[3] = (float)(bx + g->w) + bot;
+    it->y[0] = it->y[1] = (float)by;
+    it->y[2] = it->y[3] = (float)(by + g->h);
+    it->r = c[0];
+    it->g = c[1];
+    it->b = c[2];
+    it->a = opacity;
+}
+
+/* One glyph's bitmap blended onto the canvas at output pixel (bx, by). */
+static inline void ps3ui_text_glyph_px(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, const ps3ui_glyph_t *g,
+                                       int bx, int by, const float c[3], float opacity)
+{
+    for (int yy = 0; yy < g->h; yy++) {
+        int py = by + yy;
+        if (py < cv->clip_y0 || py >= cv->clip_y1)
+            continue;
+        int shear = st->skew != 0.0f ? (int)lroundf(-(float)(g->yoff + yy) * st->skew) : 0;
+        for (int xx = 0; xx < g->w; xx++) {
+            int px = bx + xx + shear;
+            if (px < cv->clip_x0 || px >= cv->clip_x1)
+                continue;
+            float a = (float)g->bm[yy * g->w + xx] / 255.0f * opacity;
+            if (a > 0.0f)
+                ps3ui_blend_px(cv->rgb + ((size_t)py * (size_t)cv->w + (size_t)px) * 3, c, a,
+                               PS3UI_BLEND_NORMAL);
+        }
+    }
+}
+
 /* Draw text with its baseline-left at layout (x, y). Glyphs are rasterised at
  * the canvas's own resolution, so text stays sharp at any output size. */
 static inline void ps3ui_text(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, float x, float y,
@@ -893,59 +989,12 @@ static inline void ps3ui_text(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, 
         float off, sx, adv;
         ps3ui_text_place(st, *p, &off, &sx, &adv);
         const ps3ui_glyph_t *g = ps3ui_glyph(st->font, cap_px, sx, *p);
-        float gx;
-        if (st->mono_adv > 0.0f) {
-            gx = (pen * cv->k + cv->ox) + (st->mono_adv * cv->k - g->adv) * 0.5f;
-        } else if (st->metrics && *p >= 32 && *p < 127) {
-            /* put the ink's left edge at pen + off */
-            float x0, x1;
-            ps3ui_glyph_ink(st->font, st->cap, *p, &x0, &x1);
-            gx = (pen + off - x0 * sx) * cv->k + cv->ox;
-        } else {
-            gx = pen * cv->k + cv->ox;
-        }
+        float gx = ps3ui_text_gx(cv, st, *p, pen, off, sx, g);
         int bx = (int)lroundf(gx) + g->xoff, by = (int)lroundf(base) + g->yoff;
-        if (cv->dl && g->bm && g->w > 0 && g->h > 0) {
-            ps3ui_dl_item_t *it = ps3ui_dl_push(cv->dl);
-            if (it) {
-                float top = st->skew != 0.0f ? -(float)g->yoff * st->skew : 0.0f;
-                float bot = st->skew != 0.0f ? -(float)(g->yoff + g->h) * st->skew : 0.0f;
-                it->kind = PS3UI_DL_GLYPH;
-                it->blend = PS3UI_BLEND_NORMAL;
-                it->src = g->bm;
-                it->sw = g->w;
-                it->sh = g->h;
-                it->key = ((uint64_t)(g->font & 3) << 62) | ((uint64_t)(g->size_q & 0xFFFF) << 40)
-                        | ((uint64_t)(g->sx_q & 0xFFFF) << 24) | (uint64_t)(g->cp & 0xFFFFFF);
-                it->x[0] = (float)bx + top;
-                it->x[1] = (float)(bx + g->w) + top;
-                it->x[2] = (float)bx + bot;
-                it->x[3] = (float)(bx + g->w) + bot;
-                it->y[0] = it->y[1] = (float)by;
-                it->y[2] = it->y[3] = (float)(by + g->h);
-                it->r = c[0];
-                it->g = c[1];
-                it->b = c[2];
-                it->a = opacity;
-            }
-            pen += adv;
-            continue;
-        }
-        for (int yy = 0; yy < g->h; yy++) {
-            int py = by + yy;
-            if (py < cv->clip_y0 || py >= cv->clip_y1)
-                continue;
-            int shear = st->skew != 0.0f ? (int)lroundf(-(float)(g->yoff + yy) * st->skew) : 0;
-            for (int xx = 0; xx < g->w; xx++) {
-                int px = bx + xx + shear;
-                if (px < cv->clip_x0 || px >= cv->clip_x1)
-                    continue;
-                float a = (float)g->bm[yy * g->w + xx] / 255.0f * opacity;
-                if (a > 0.0f)
-                    ps3ui_blend_px(cv->rgb + ((size_t)py * (size_t)cv->w + (size_t)px) * 3, c, a,
-                                   PS3UI_BLEND_NORMAL);
-            }
-        }
+        if (cv->dl && g->bm && g->w > 0 && g->h > 0)
+            ps3ui_text_glyph_dl(cv, st, g, bx, by, c, opacity);
+        else
+            ps3ui_text_glyph_px(cv, st, g, bx, by, c, opacity);
         pen += adv;
     }
 }
