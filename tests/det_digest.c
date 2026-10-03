@@ -307,20 +307,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "replaying %u session frames from %s\n", (unsigned)in_n, inputs_path);
     }
 
-    /* The web build's load: one zip, read whole, strict by CRC. */
-    FILE *f = fopen(argv[1], "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *zip = (uint8_t *)malloc((size_t)len);
-    if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", argv[1]); return 2; }
-    fclose(f);
-    rl_mem_zip_set(zip, (size_t)len, true);
-    int rc = g_active_profile->load_fn(&romset, NULL, NULL);
-    rl_mem_zip_clear();
-    free(zip);
-    if (rc != 0) { fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names); return 2; }
+    /* A directory of region images (--export-roms) loads as it is. Otherwise
+     * the web build's load: one zip, read whole, strict by CRC. */
+    if (romset_is_dir(argv[1])) {
+        if (romset_load_dir(&romset, argv[1]) != 0) return 2;
+    } else {
+        FILE *f = fopen(argv[1], "rb");
+        if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        uint8_t *zip = (uint8_t *)malloc((size_t)len);
+        if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", argv[1]); return 2; }
+        fclose(f);
+        rl_mem_zip_set(zip, (size_t)len, true);
+        int rc = g_active_profile->load_fn(&romset, NULL, NULL);
+        rl_mem_zip_clear();
+        free(zip);
+        if (rc != 0) { fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names); return 2; }
+    }
 
     /* main_web.c web_install_board, which is also what a netplay reset runs. */
     g_active_profile->install_fn(&romset, &cpu, &bus);

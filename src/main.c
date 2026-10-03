@@ -65,6 +65,7 @@
 #include "registry.h"
 
 static char g_rom_path[512] = {0};
+static char g_export_roms[512] = {0};   /* --export-roms DIR: write the set's region images, then quit */
 static char g_profile_arg[64] = {0};   /* --profile <id>: e.g. sfight for STF's arcade game */
 static int  g_autorun = 0;
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
@@ -217,7 +218,12 @@ static void load_active_profile(const char *primary_zip) {
     sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
 
     g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
-    if (g_active_profile->load_fn(&state.romset, primary_zip, parent_zip_ptr) == 0) {
+    if (romset_load(&state.romset, g_active_profile->load_fn, primary_zip, parent_zip_ptr) == 0) {
+        if (g_export_roms[0]) {
+            int rc = romset_save_dir(&state.romset, g_export_roms);
+            if (rc == 0) LOG_INFO("wrote the %s region images to %s", profile_rom_set(g_active_profile), g_export_roms);
+            exit(rc == 0 ? 0 : 1);
+        }
         bool homebrew = profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size);
         if (homebrew)
             LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
@@ -1532,6 +1538,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             int r = game_region_parse(argv[++i]);   /* japan | usa | export */
             if (r < 0) LOG_WARN("--region %s: expected japan, usa or export; keeping usa", argv[i]);
             else       g_region = r;
+        } else if (strcmp(argv[i], "--export-roms") == 0 && i + 1 < argc) {
+            strncpy(g_export_roms, argv[++i], sizeof(g_export_roms) - 1);
         } else if (strcmp(argv[i], "--no-nvram") == 0) {
             g_backup_want = 0;        /* backup RAM starts blank and is not kept */
         } else if (strcmp(argv[i], "--nvram-dir") == 0 && i + 1 < argc) {
@@ -1719,6 +1727,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             /* The LAN address to tell the server instead of this machine's own:
              * inside a container, the container host's (issue #108). */
             netplay_set_local_ip(argv[++i]);
+        } else if (strcmp(argv[i], "--net-relay") == 0 && i + 1 < argc) {
+            /* on | off | auto | a ws(s):// /gw/dgram URL: datagrams through the
+             * web gateway, for a player nobody outside can reach (Pinboard #366). */
+            netplay_set_relay(argv[++i]);
         } else if (strcmp(argv[i], "--net-host") == 0) {
             g_net_auto = 1;
         } else if (strcmp(argv[i], "--net-players") == 0 && i + 1 < argc) {

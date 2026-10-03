@@ -14,6 +14,7 @@
  *   - interleave_32_word        : ROM_LOAD32_WORD — two halves into 32-bit words
  *   - load_16_word_swap         : ROM_LOAD16_WORD_SWAP — swap 16-bit pairs
  *   - rom_region_copy           : ROM_COPY — mirror a window within a region
+ *   - romset_load_dir / _save_dir : a set as one straight image a region
  */
 #ifndef ROM_LOADER_H
 #define ROM_LOADER_H
@@ -23,6 +24,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 
 #include "log.h"
 #include "miniz.h"
@@ -219,6 +225,76 @@ static inline void romset_free(romset_t *rs) {
     free(rs->audiocpu);
     free(rs->samples);
     memset(rs, 0, sizeof(*rs));
+}
+
+/* ---- A romset on disk ---------------------------------------------------- */
+
+/* A ROM set can also be a directory of straight images, one file a region,
+ * each byte for byte what load_fn leaves in memory: no zip to inflate, no
+ * interleave or byte swap, no CRC pass. `--export-roms DIR` writes one from a
+ * zip. The directory's name picks the profile, as the zip's basename does. A
+ * region whose file is missing stays NULL, as it does for a set without it. */
+static const char *const k_romset_files[7] = {
+    "maincpu.bin", "main_data.bin", "copro_data.bin", "polygons.bin",
+    "textures.bin", "audiocpu.bin", "samples.bin",
+};
+
+static inline uint8_t **romset_region(romset_t *rs, int i, size_t **size) {
+    uint8_t **r[7] = { &rs->maincpu, &rs->main_data, &rs->copro_data, &rs->polygons,
+                       &rs->textures, &rs->audiocpu, &rs->samples };
+    size_t *z[7] = { &rs->maincpu_size, &rs->main_data_size, &rs->copro_data_size,
+                     &rs->polygons_size, &rs->textures_size, &rs->audiocpu_size,
+                     &rs->samples_size };
+    *size = z[i];
+    return r[i];
+}
+
+static inline bool romset_is_dir(const char *path) {
+    struct stat st;
+    return path && stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR;
+}
+
+static inline int romset_load_dir(romset_t *rs, const char *dir) {
+    romset_free(rs);
+    for (int i = 0; i < 7; i++) {
+        char path[1024];
+        size_t *size;
+        uint8_t **region = romset_region(rs, i, &size);
+        snprintf(path, sizeof path, "%s/%s", dir, k_romset_files[i]);
+        *region = file_load(path, size);
+    }
+    if (!rs->maincpu) { LOG_ERROR("ROM directory %s has no %s", dir, k_romset_files[0]); romset_free(rs); return -1; }
+    rs->loaded = true;
+    LOG_INFO("ROM set loaded from the directory %s", dir);
+    return 0;
+}
+
+static inline int romset_save_dir(const romset_t *rs, const char *dir) {
+#ifdef _WIN32
+    _mkdir(dir);
+#else
+    mkdir(dir, 0777);
+#endif
+    for (int i = 0; i < 7; i++) {
+        char path[1024];
+        size_t *size;
+        uint8_t **region = romset_region((romset_t *)rs, i, &size);
+        if (!*region) continue;
+        snprintf(path, sizeof path, "%s/%s", dir, k_romset_files[i]);
+        FILE *f = fopen(path, "wb");
+        bool ok = f && fwrite(*region, 1, *size, f) == *size;
+        if (f && fclose(f) != 0) ok = false;
+        if (!ok) { LOG_ERROR("cannot write %s", path); return -1; }
+    }
+    return 0;
+}
+
+/* Load a ROM set from a zip (the profile's load_fn, with its parent) or from
+ * a directory of region images (romset_load_dir). */
+static inline int romset_load(romset_t *rs, int (*load_fn)(romset_t *, const char *, const char *),
+                              const char *path, const char *parent) {
+    if (romset_is_dir(path)) return romset_load_dir(rs, path);
+    return load_fn(rs, path, parent);
 }
 
 #endif /* ROM_LOADER_H */

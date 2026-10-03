@@ -149,6 +149,12 @@ typedef struct {
     /* The LAN address to tell the server in place of this machine's own
      * (rpcn_client_t.advertised_ip), as a dotted quad. Null/empty = our own. */
     const char *local_ip;
+    /* A ws:// or wss:// /gw/dgram URL to send every datagram through (ws_relay.h),
+     * for a client nobody outside can reach. Null/empty = straight from our own
+     * UDP socket. A relay that cannot be opened falls back to that, unless
+     * relay_required, when the start fails instead. */
+    const char *relay_url;
+    bool        relay_required;
     /* Cross-play with the PS3 port (ps3_link.h): its lobby space, its room
      * shape, and no m2hle datagrams (punches, introductions) sent to members,
      * since they are RPCS3 clients and speak RPCS3's P2P framing. */
@@ -682,6 +688,28 @@ static inline bool rpcn_session_open_p2p(rpcn_session_t *s, const rpcn_session_c
     return true;
 }
 
+/* Datagrams through the web gateway when asked (Pinboard #366). Fails the start
+ * only when the relay is required. */
+static inline bool rpcn_session_open_relay(rpcn_session_t *s, const rpcn_session_config_t *cfg) {
+    if (cfg->relay_url && cfg->relay_url[0]) {
+        if (ws_relay_open(&s->client.relay, cfg->relay_url)) {
+            /* The socket stays bound and unused: closing it would only let
+             * another program take the port a later direct session wants. */
+            s->client.relay_on = true;
+            rpcn_session_note(s, "sending datagrams through the gateway relay %s", cfg->relay_url);
+        } else if (cfg->relay_required) {
+            rpcn_session_fail(s, "could not open the gateway relay %s (%s)",
+                              cfg->relay_url, s->client.relay.error);
+            rpcn_disconnect(&s->client);
+            return false;
+        } else {
+            rpcn_session_note(s, "could not open the gateway relay %s (%s); sending datagrams directly",
+                              cfg->relay_url, s->client.relay.error);
+        }
+    }
+    return true;
+}
+
 /* The LAN address the config asks us to advertise, if any. After rpcn_connect,
  * which clears the client and starts the socket library the lookup needs. */
 static inline void rpcn_session_advertise(rpcn_session_t *s, const rpcn_session_config_t *cfg,
@@ -738,6 +766,7 @@ static inline bool rpcn_session_start(rpcn_session_t *s, const rpcn_session_conf
 #ifndef __EMSCRIPTEN__
     s->client.udp        = p2p;
     s->client.local_port = p2p_port;
+    if (!rpcn_session_open_relay(s, cfg)) return false;
     rpcn_session_advertise(s, cfg, p2p_port);
 #endif
 
