@@ -678,6 +678,66 @@ static uint32_t shle_exclusive(uint32_t t, uint8_t grp, bool sfx) {
     return 0;
 }
 
+/* a drum kit: one entry per key; the voice taken, or 0 */
+static uint32_t shle_note_drum(uint32_t t, uint32_t a2, uint8_t d2, uint8_t d4, uint8_t ch) {
+    uint32_t v = 0;
+    a2 += 2;
+    uint8_t lo = shle_rb(a2), hi = shle_rb(a2 + 1);
+    if (d2 < lo) return 0;
+    if ((int8_t)d2 > (int8_t)hi) return 0;
+    a2 += 2 + (uint32_t)(uint8_t)(d2 - lo) * 12u;
+    SG16(0x1416, shle_rw(a2));
+    if (shle_rw(a2) & 0x8000) return 0;
+    if (shle_rb(a2 + 5) & 0x80) SG8(0x1411, shle_rb(t + 6));
+    else                        SG8(0x1411, shle_rb(a2 + 4));
+    SG16(0x1412, shle_rw(a2 + 2));
+    SG8(0x140C, shle_rb(a2 + 6));
+    SG8(0x140A, shle_rb(a2 + 7));
+    SG32(0x143A, shle_rl(a2 + 8));
+    shle_wl(SHLE_A6(0x3290) + ch * 4u, a2);
+    uint8_t d1 = shle_rb(t + 0xD);
+    if (d1) shle_wb(t + 0xD, 0);
+    else {
+        d1 = shle_rb(t + 0xC);
+        if (!(d1 & 7)) d1 = shle_rb(a2 + 5) & 0x7F;
+    }
+    SG8(0x140D, d1);
+    SG8(0x1415, shle_mb(SHLE_T_OCTNOTE + (d4 & 0x7F)));
+    uint8_t grp = shle_rb(a2 + 7);
+    if (shle_rb(t) & 0x01) {
+        if (grp) v = shle_exclusive(t, grp, true);
+        if (!v) v = shle_alloc_sfx();
+    } else {
+        if (grp) v = shle_exclusive(t, grp, false);
+        if (!v) v = shle_alloc_music();
+    }
+    return v;
+}
+
+/* loc_601E04: key splits of 10 bytes; the voice taken, or 0 */
+static uint32_t shle_note_split(uint32_t t, uint32_t a2, uint32_t d3, uint8_t d4, uint8_t ch) {
+    uint32_t v = 0;
+    shle_wb(t, shle_rb(t) & ~0x10u);
+    if (shle_rb(a2) == 0x80) {
+        shle_wb(t, shle_rb(t) | 0x10);
+        if (!g_shle.warned_fm) { LOG_WARN("sound HLE: FM instrument %u (type 0x80) not modelled", d3); g_shle.warned_fm = true; }
+    } else {
+        int n = 0;
+        while (d4 > shle_rb(a2)) { a2 += 10; if (++n > 0x7F) return 0; }
+    }
+    shle_wl(SHLE_A6(0x3290) + ch * 4u, a2);
+    SG16(0x1416, shle_rw(a2 + 4));
+    SG8(0x1418, shle_rb(a2 + 2));
+    SG32(0x143A, shle_rl(a2 + 6));
+    d4 = (uint8_t)((d4 + shle_rb(a2 + 3)) & 0x7F);
+    SG8(0x1415, shle_mb(SHLE_T_OCTNOTE + d4));
+    SG8(0x1411, shle_rb(t + 6));
+    SG8(0x140C, shle_rb(t + 0xF));
+    if (shle_rb(t) & 0x01) v = shle_alloc_sfx();
+    else { SG8(0x140C, 0); v = shle_alloc_music(); }
+    return v;
+}
+
 static void shle_note_on(uint32_t t, uint32_t p) {
     uint8_t note = shle_rb(p);
     uint8_t d2 = note;
@@ -692,58 +752,11 @@ static void shle_note_on(uint32_t t, uint32_t p) {
     if ((int16_t)d3 > (int16_t)shle_rw(SHLE_INSTBL)) return;
     uint32_t a2 = SHLE_INSTBL + shle_rw(SHLE_INSTBL + 2 + d3 * 2);
     uint8_t ch = shle_rb(t + 1);
-    uint32_t v = 0;
-    if (shle_rb(t) & 0x08) {                            /* a drum kit: one entry per key */
-        a2 += 2;
-        uint8_t lo = shle_rb(a2), hi = shle_rb(a2 + 1);
-        if (d2 < lo) return;
-        if ((int8_t)d2 > (int8_t)hi) return;
-        a2 += 2 + (uint32_t)(uint8_t)(d2 - lo) * 12u;
-        SG16(0x1416, shle_rw(a2));
-        if (shle_rw(a2) & 0x8000) return;
-        if (shle_rb(a2 + 5) & 0x80) SG8(0x1411, shle_rb(t + 6));
-        else                        SG8(0x1411, shle_rb(a2 + 4));
-        SG16(0x1412, shle_rw(a2 + 2));
-        SG8(0x140C, shle_rb(a2 + 6));
-        SG8(0x140A, shle_rb(a2 + 7));
-        SG32(0x143A, shle_rl(a2 + 8));
-        shle_wl(SHLE_A6(0x3290) + ch * 4u, a2);
-        uint8_t d1 = shle_rb(t + 0xD);
-        if (d1) shle_wb(t + 0xD, 0);
-        else {
-            d1 = shle_rb(t + 0xC);
-            if (!(d1 & 7)) d1 = shle_rb(a2 + 5) & 0x7F;
-        }
-        SG8(0x140D, d1);
-        SG8(0x1415, shle_mb(SHLE_T_OCTNOTE + (d4 & 0x7F)));
-        uint8_t grp = shle_rb(a2 + 7);
-        if (shle_rb(t) & 0x01) {
-            if (grp) v = shle_exclusive(t, grp, true);
-            if (!v) v = shle_alloc_sfx();
-        } else {
-            if (grp) v = shle_exclusive(t, grp, false);
-            if (!v) v = shle_alloc_music();
-        }
-    } else {                                            /* loc_601E04: key splits of 10 bytes */
-        shle_wb(t, shle_rb(t) & ~0x10u);
-        if (shle_rb(a2) == 0x80) {
-            shle_wb(t, shle_rb(t) | 0x10);
-            if (!g_shle.warned_fm) { LOG_WARN("sound HLE: FM instrument %u (type 0x80) not modelled", d3); g_shle.warned_fm = true; }
-        } else {
-            int n = 0;
-            while (d4 > shle_rb(a2)) { a2 += 10; if (++n > 0x7F) return; }
-        }
-        shle_wl(SHLE_A6(0x3290) + ch * 4u, a2);
-        SG16(0x1416, shle_rw(a2 + 4));
-        SG8(0x1418, shle_rb(a2 + 2));
-        SG32(0x143A, shle_rl(a2 + 6));
-        d4 = (uint8_t)((d4 + shle_rb(a2 + 3)) & 0x7F);
-        SG8(0x1415, shle_mb(SHLE_T_OCTNOTE + d4));
-        SG8(0x1411, shle_rb(t + 6));
-        SG8(0x140C, shle_rb(t + 0xF));
-        if (shle_rb(t) & 0x01) v = shle_alloc_sfx();
-        else { SG8(0x140C, 0); v = shle_alloc_music(); }
-    }
+    uint32_t v;
+    if (shle_rb(t) & 0x08)                              /* a drum kit: one entry per key */
+        v = shle_note_drum(t, a2, d2, d4, ch);
+    else                                                /* loc_601E04: key splits of 10 bytes */
+        v = shle_note_split(t, a2, d3, d4, ch);
     if (v) shle_voice_setup(t, v);
 }
 
@@ -863,46 +876,113 @@ static inline uint32_t shle_ins_cache(uint32_t t, bool *ok) {
     return a2;
 }
 
+/* modulation, breath: the LFO depth */
+static void shle_ctrl_lfo(uint32_t t, uint8_t cc, uint8_t ch, uint8_t d0) {
+    uint8_t m = (d0 >> 4) & 7;
+    uint32_t tbl = SHLE_A6(cc == 1 ? 0x3220 : 0x3240) + ch;
+    uint8_t cur = shle_rb(tbl);
+    if ((cur & 0x7F) == m) return;
+    shle_wb(tbl, (cur & 0x80) | m);
+    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
+        if (shle_rb(v + 4) != ch || !shle_rb(v + 2)) continue;
+        uint32_t slot = shle_rw(v);
+        if (cc == 1) shle_sw8(slot + 0x13, (shle_sr8(slot + 0x13) & 0x1F) | (((shle_rb(t + 9) & 0xE0u) * m / 7) & 0xE0));
+        else         shle_sw8(slot + 0x13, (shle_sr8(slot + 0x13) & 0xF8) | (((shle_rb(t + 9) & 7u) * m / 7) & 7));
+    }
+}
+
+/* CtrlB0_SetVol */
+static void shle_ctrl_vol(uint32_t t, uint8_t d0) {
+    uint8_t vol = (uint8_t)(d0 << 1);
+    if (vol) vol++;
+    shle_wb(t + 3, vol);
+    uint32_t d2 = (shle_rb(t) & 1) ? 0xFF : G8(0x141F);
+    uint8_t fin = (uint8_t)((vol * d2) >> 8);
+    if (fin) fin++;
+    shle_wb(t + 0xA, fin);
+    shle_retl_voices(G8(0x140E) & 0xF, fin, true);
+}
+
+/* CtrlB0_SetPan */
+static void shle_ctrl_pan(uint32_t t, uint8_t d0) {
+    uint8_t pan = (shle_rb(t + 6) & 0xE0) | shle_mb(SHLE_T_PAN + (d0 & 0x7F));
+    shle_wb(t + 6, pan);
+    uint8_t c = G8(0x140E) & 0xF;
+    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16)
+        if (shle_rb(v + 4) == c && shle_rb(v + 2)) shle_sw8(shle_rw(v) + 0x16, pan);
+}
+
+/* 0x30-0x34 edit the envelope of the instrument entry the channel last keyed */
+static void shle_ctrl_env(uint32_t t, uint8_t cc, uint8_t d0) {
+    bool ok;
+    uint32_t a2;
+    switch (cc) {
+    case 0x30: a2 = shle_ins_cache(t, &ok); if (ok) shle_mwb(a2 + 7, (shle_mb(a2 + 7) & 0xE0) | (shle_min(d0, 0x1F, 0x1F) & 0x1F)); return;
+    case 0x31: a2 = shle_ins_cache(t, &ok); if (ok) shle_mww(a2 + 8, (shle_mw(a2 + 8) & 0xFC1F) | ((shle_min(d0, 0x1F, 0x1F) << 5) & 0x3E0)); return;
+    case 0x32: a2 = shle_ins_cache(t, &ok); if (ok) shle_mww(a2 + 6, (shle_mw(a2 + 6) & 0xF81F) | ((shle_min(d0, 0x1F, 0x1F) << 6) & 0x7C0)); return;
+    case 0x33: a2 = shle_ins_cache(t, &ok); if (ok) shle_mwb(a2 + 6, (shle_mb(a2 + 6) & 7) | ((shle_min(d0, 0x1F, 0x1F) << 3) & 0xF8)); return;
+    case 0x34: if (!d0) return; a2 = shle_ins_cache(t, &ok); if (ok) shle_mwb(a2 + 9, (shle_mb(a2 + 9) & 0xE0) | (shle_min(d0, 0x1F, 0x1F) & 0x1F)); return;
+    }
+}
+
+/* the loop of the channel's last sample, on or off */
+static void shle_ctrl_loop(uint32_t t, uint8_t d0) {
+    uint32_t e = (uint32_t)(SHLE_SMPTBL + (int16_t)(uint16_t)(shle_rw(SHLE_A6(0x3270) + (uint8_t)(shle_rb(t + 1) << 1)) << 4));
+    if (d0) shle_wl(e + 0xC, shle_rl(e + 4) + shle_rl(e) - shle_rl(e + 8));
+    else    shle_wl(e + 0xC, 0);
+}
+
+/* sustain pedal: 0x7F lets go (sic) */
+static void shle_ctrl_hold(uint8_t ch, uint8_t d0) {
+    uint32_t tbl = SHLE_A6(0x3220) + ch;
+    if (d0 != shle_mb(SHLE_P_HOLDVAL)) { shle_wb(tbl, shle_rb(tbl) | 0x80); return; }
+    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
+        if (shle_rb(v + 4) != ch || !(shle_rb(v + 2) & 0x02)) continue;
+        uint32_t slot = shle_rw(v);
+        shle_sw8(slot, 0x10);
+        uint8_t f = (uint8_t)((shle_rb(v + 2) & ~0x02) | 0x01);
+        shle_wb(v + 2, f);
+        if (f & 0x04) {
+            uint16_t r = shle_rw(SHLE_A6(0x1A00) + slot + 0xA);
+            if (r < shle_rw(v + 0xE)) shle_ww(v + 0xE, r);
+        }
+    }
+    shle_wb(tbl, shle_rb(tbl) & 0x7F);
+}
+
+/* 0x41-0x4C */
+static void shle_ctrl_rom_ins(uint32_t t, uint8_t cc, uint8_t d0) {
+    /* edits of a negative-id (ROM table) sample's instrument entry; only
+     * when the channel's last sample was one (sub_6032AE: bmi) */
+    if (!(shle_rw(SHLE_A6(0x3270) + (uint8_t)(shle_rb(t + 1) << 1)) & 0x8000)) return;
+    bool ok;
+    uint32_t a2 = shle_ins_cache(t, &ok);
+    if (!ok) return;
+    uint8_t hi = d0 == 0x7F ? 0x80 : (uint8_t)(d0 & 0x80);
+    switch (cc) {
+    case 0x41: shle_mwb(a2 + 0xD, (shle_mb(a2 + 0xD) & 0x80) | (d0 & 0x7F)); break;
+    case 0x42: shle_mww(a2 + 0xC, (shle_mw(a2 + 0xC) & 0x7F) | (uint16_t)((d0 & 0x7F) << 7)); break;
+    case 0x43: shle_mwb(a2 + 0xF, (shle_mb(a2 + 0xF) & 0x80) | (d0 & 0x7F)); break;
+    case 0x44: shle_mww(a2 + 0xE, (shle_mw(a2 + 0xE) & 0x7F) | (uint16_t)((d0 & 0x7F) << 7)); break;
+    case 0x45: shle_mwb(a2 + 0xA, (shle_mb(a2 + 0xA) & 8) | (uint8_t)((shle_min(d0, 0xF, 0xF) & 0x1F) << 4)); break;
+    case 0x46: shle_mwb(a2 + 0xA, (shle_mb(a2 + 0xA) & 0xF0) | ((d0 == 0x7F ? d0 : 0) & 8)); break;
+    case 0x47: shle_mwb(a2 + 0xB, (shle_mb(a2 + 0xB) & 0x7F) | hi); break;
+    case 0x48: shle_mwb(a2 + 0xB, (shle_mb(a2 + 0xB) & 0x80) | (d0 & 0x7F)); break;
+    case 0x49: shle_mwb(a2 + 0x10, (shle_mb(a2 + 0x10) & 0x7F) | hi); break;
+    case 0x4A: shle_mwb(a2 + 0x10, (shle_mb(a2 + 0x10) & 0x80) | (d0 & 0x7F)); break;
+    case 0x4B: shle_mwb(a2 + 0x11, (shle_mb(a2 + 0x11) & 0x7F) | hi); break;
+    case 0x4C: shle_mwb(a2 + 0x11, (shle_mb(a2 + 0x11) & 0x80) | (d0 & 0x7F)); break;
+    }
+}
+
 static void shle_ctrl(uint32_t t, uint32_t p) {
     uint8_t cc = shle_rb(p), d0 = shle_rb(p + 1);
     if (cc >= 0x51) return;
     uint8_t ch = shle_rb(t + 1) & 0xF;
-    bool ok;
-    uint32_t a2;
     switch (cc) {
-    case 0x01: case 0x02: {                             /* modulation, breath: the LFO depth */
-        uint8_t m = (d0 >> 4) & 7;
-        uint32_t tbl = SHLE_A6(cc == 1 ? 0x3220 : 0x3240) + ch;
-        uint8_t cur = shle_rb(tbl);
-        if ((cur & 0x7F) == m) return;
-        shle_wb(tbl, (cur & 0x80) | m);
-        for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
-            if (shle_rb(v + 4) != ch || !shle_rb(v + 2)) continue;
-            uint32_t slot = shle_rw(v);
-            if (cc == 1) shle_sw8(slot + 0x13, (shle_sr8(slot + 0x13) & 0x1F) | (((shle_rb(t + 9) & 0xE0u) * m / 7) & 0xE0));
-            else         shle_sw8(slot + 0x13, (shle_sr8(slot + 0x13) & 0xF8) | (((shle_rb(t + 9) & 7u) * m / 7) & 7));
-        }
-        return;
-    }
-    case 0x07: {                                        /* CtrlB0_SetVol */
-        uint8_t vol = (uint8_t)(d0 << 1);
-        if (vol) vol++;
-        shle_wb(t + 3, vol);
-        uint32_t d2 = (shle_rb(t) & 1) ? 0xFF : G8(0x141F);
-        uint8_t fin = (uint8_t)((vol * d2) >> 8);
-        if (fin) fin++;
-        shle_wb(t + 0xA, fin);
-        shle_retl_voices(G8(0x140E) & 0xF, fin, true);
-        return;
-    }
-    case 0x0A: {                                        /* CtrlB0_SetPan */
-        uint8_t pan = (shle_rb(t + 6) & 0xE0) | shle_mb(SHLE_T_PAN + (d0 & 0x7F));
-        shle_wb(t + 6, pan);
-        uint8_t c = G8(0x140E) & 0xF;
-        for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16)
-            if (shle_rb(v + 4) == c && shle_rb(v + 2)) shle_sw8(shle_rw(v) + 0x16, pan);
-        return;
-    }
+    case 0x01: case 0x02: shle_ctrl_lfo(t, cc, ch, d0); return;    /* modulation, breath: the LFO depth */
+    case 0x07: shle_ctrl_vol(t, d0); return;                       /* CtrlB0_SetVol */
+    case 0x0A: shle_ctrl_pan(t, d0); return;                       /* CtrlB0_SetPan */
     case 0x11: shle_wb(t + 4, (uint8_t)((d0 & 0x7F) - 0x40)); return;
     case 0x12: {
         uint8_t d1 = shle_mb(SHLE_T_PAN + (d0 & 0x7F));
@@ -919,60 +999,13 @@ static void shle_ctrl(uint32_t t, uint32_t p) {
     case 0x29: shle_wb(t + 0xD, (uint8_t)((d0 & 0xF) << 3) | ((d0 & 0x70) >> 4)); return;
     case 0x2A: shle_wb(t + 0xC, (shle_rb(t + 0xC) & 0x78) | (shle_min(d0, 8, 7) & 7)); return;
     case 0x2B: if (d0 < 0x10) shle_wb(t + 0xC, (shle_rb(t + 0xC) & 7) | ((d0 << 3) & 0x78)); return;
-    /* 0x30-0x34 edit the envelope of the instrument entry the channel last keyed */
-    case 0x30: a2 = shle_ins_cache(t, &ok); if (ok) shle_mwb(a2 + 7, (shle_mb(a2 + 7) & 0xE0) | (shle_min(d0, 0x1F, 0x1F) & 0x1F)); return;
-    case 0x31: a2 = shle_ins_cache(t, &ok); if (ok) shle_mww(a2 + 8, (shle_mw(a2 + 8) & 0xFC1F) | ((shle_min(d0, 0x1F, 0x1F) << 5) & 0x3E0)); return;
-    case 0x32: a2 = shle_ins_cache(t, &ok); if (ok) shle_mww(a2 + 6, (shle_mw(a2 + 6) & 0xF81F) | ((shle_min(d0, 0x1F, 0x1F) << 6) & 0x7C0)); return;
-    case 0x33: a2 = shle_ins_cache(t, &ok); if (ok) shle_mwb(a2 + 6, (shle_mb(a2 + 6) & 7) | ((shle_min(d0, 0x1F, 0x1F) << 3) & 0xF8)); return;
-    case 0x34: if (!d0) return; a2 = shle_ins_cache(t, &ok); if (ok) shle_mwb(a2 + 9, (shle_mb(a2 + 9) & 0xE0) | (shle_min(d0, 0x1F, 0x1F) & 0x1F)); return;
-    case 0x35: {                                        /* the loop of the channel's last sample, on or off */
-        uint32_t e = (uint32_t)(SHLE_SMPTBL + (int16_t)(uint16_t)(shle_rw(SHLE_A6(0x3270) + (uint8_t)(shle_rb(t + 1) << 1)) << 4));
-        if (d0) shle_wl(e + 0xC, shle_rl(e + 4) + shle_rl(e) - shle_rl(e + 8));
-        else    shle_wl(e + 0xC, 0);
-        return;
-    }
-    case 0x40: {                                        /* sustain pedal: 0x7F lets go (sic) */
-        uint32_t tbl = SHLE_A6(0x3220) + ch;
-        if (d0 != shle_mb(SHLE_P_HOLDVAL)) { shle_wb(tbl, shle_rb(tbl) | 0x80); return; }
-        for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
-            if (shle_rb(v + 4) != ch || !(shle_rb(v + 2) & 0x02)) continue;
-            uint32_t slot = shle_rw(v);
-            shle_sw8(slot, 0x10);
-            uint8_t f = (uint8_t)((shle_rb(v + 2) & ~0x02) | 0x01);
-            shle_wb(v + 2, f);
-            if (f & 0x04) {
-                uint16_t r = shle_rw(SHLE_A6(0x1A00) + slot + 0xA);
-                if (r < shle_rw(v + 0xE)) shle_ww(v + 0xE, r);
-            }
-        }
-        shle_wb(tbl, shle_rb(tbl) & 0x7F);
-        return;
-    }
+    case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: shle_ctrl_env(t, cc, d0); return;
+    case 0x35: shle_ctrl_loop(t, d0); return;      /* the loop of the channel's last sample, on or off */
+    case 0x40: shle_ctrl_hold(ch, d0); return;     /* sustain pedal: 0x7F lets go (sic) */
     case 0x50: if (d0 == 0x7C) shle_channel_off(); return;
     default: break;
     }
-    if (cc >= 0x41 && cc <= 0x4C) {
-        /* edits of a negative-id (ROM table) sample's instrument entry; only
-         * when the channel's last sample was one (sub_6032AE: bmi) */
-        if (!(shle_rw(SHLE_A6(0x3270) + (uint8_t)(shle_rb(t + 1) << 1)) & 0x8000)) return;
-        a2 = shle_ins_cache(t, &ok);
-        if (!ok) return;
-        uint8_t hi = d0 == 0x7F ? 0x80 : (uint8_t)(d0 & 0x80);
-        switch (cc) {
-        case 0x41: shle_mwb(a2 + 0xD, (shle_mb(a2 + 0xD) & 0x80) | (d0 & 0x7F)); break;
-        case 0x42: shle_mww(a2 + 0xC, (shle_mw(a2 + 0xC) & 0x7F) | (uint16_t)((d0 & 0x7F) << 7)); break;
-        case 0x43: shle_mwb(a2 + 0xF, (shle_mb(a2 + 0xF) & 0x80) | (d0 & 0x7F)); break;
-        case 0x44: shle_mww(a2 + 0xE, (shle_mw(a2 + 0xE) & 0x7F) | (uint16_t)((d0 & 0x7F) << 7)); break;
-        case 0x45: shle_mwb(a2 + 0xA, (shle_mb(a2 + 0xA) & 8) | (uint8_t)((shle_min(d0, 0xF, 0xF) & 0x1F) << 4)); break;
-        case 0x46: shle_mwb(a2 + 0xA, (shle_mb(a2 + 0xA) & 0xF0) | ((d0 == 0x7F ? d0 : 0) & 8)); break;
-        case 0x47: shle_mwb(a2 + 0xB, (shle_mb(a2 + 0xB) & 0x7F) | hi); break;
-        case 0x48: shle_mwb(a2 + 0xB, (shle_mb(a2 + 0xB) & 0x80) | (d0 & 0x7F)); break;
-        case 0x49: shle_mwb(a2 + 0x10, (shle_mb(a2 + 0x10) & 0x7F) | hi); break;
-        case 0x4A: shle_mwb(a2 + 0x10, (shle_mb(a2 + 0x10) & 0x80) | (d0 & 0x7F)); break;
-        case 0x4B: shle_mwb(a2 + 0x11, (shle_mb(a2 + 0x11) & 0x7F) | hi); break;
-        case 0x4C: shle_mwb(a2 + 0x11, (shle_mb(a2 + 0x11) & 0x80) | (d0 & 0x7F)); break;
-        }
-    }
+    if (cc >= 0x41 && cc <= 0x4C) shle_ctrl_rom_ins(t, cc, d0);
 }
 
 /* ---- program change (MidEvt_InsChg) ------------------------------------------------ */
@@ -1141,21 +1174,45 @@ static void shle_cut_voices(bool sfx) {
     }
 }
 
+/* everything stops */
+static void shle_stop_all(void) {
+    for (uint32_t a = SHLE_SEQS; a < SHLE_SEQS + 0x80; a++) shle_wb(a, 0);
+    for (uint32_t a = SHLE_A6(0x1600); a < SHLE_A6(0x1700); a++) shle_wb(a, 0);
+    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
+        if (!shle_rb(v + 2)) continue;
+        uint32_t slot = shle_rw(v);
+        shle_cut(slot); shle_stream_clear(slot);
+        shle_wb(v + 2, 0); shle_wb(v + 4, 0); shle_wb(v + 9, 0); shle_wb(v + 5, 0);
+    }
+    SG8(0x141E, 0); SG8(0x142E, 0);
+    for (int c = 0; c < 16; c++) { SG8(0x3220 + c, 0); SG8(0x3240 + c, 0); SG16(0x3200 + c * 2, 0); }
+}
+
+/* pause: every slot's source to silence, and back */
+static void shle_pause(void) {
+    if (!G8(0x1430)) {
+        for (uint32_t k = 0; k < 32; k++) shle_sw8(k * 0x20u, shle_sr8(k * 0x20u) | 1);
+        SG8(0x1430, 0x80);
+        uint8_t f = shle_rb(SHLE_SEQS);
+        shle_wb(SHLE_SEQS, f & 0x7F);
+        if (!(f & 0x80)) SG8(0x1430, 0x10);
+        for (uint32_t s = SHLE_SEQS + 0x10; s < SHLE_SEQS + 0x80; s += 16)
+            if (shle_rb(s) & 0x80) { shle_wb(s, 0); SG8(0x1431, G8(0x1431) | 1); }
+        uint16_t w = shle_mw(SHLE_P_PAUSE_ON);
+        shle_enqueue(0xA0, (uint8_t)(w >> 8), (uint8_t)w, 0);
+    } else {
+        if (G8(0x1430) & 0x80) shle_wb(SHLE_SEQS, shle_rb(SHLE_SEQS) | 0x80);
+        SG8(0x1430, 0);
+        for (uint32_t k = 0; k < 32; k++) shle_sw8(k * 0x20u, shle_sr8(k * 0x20u) & 0x1E);
+        uint16_t w = shle_mw(SHLE_P_PAUSE_OFF);
+        shle_enqueue(0xA0, (uint8_t)(w >> 8), (uint8_t)w, 0);
+    }
+}
+
 static void shle_cmd00(uint8_t d0) {
     if ((int8_t)d0 > 0xF) return;
     switch (d0) {
-    case 0x01:                                          /* everything stops */
-        for (uint32_t a = SHLE_SEQS; a < SHLE_SEQS + 0x80; a++) shle_wb(a, 0);
-        for (uint32_t a = SHLE_A6(0x1600); a < SHLE_A6(0x1700); a++) shle_wb(a, 0);
-        for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
-            if (!shle_rb(v + 2)) continue;
-            uint32_t slot = shle_rw(v);
-            shle_cut(slot); shle_stream_clear(slot);
-            shle_wb(v + 2, 0); shle_wb(v + 4, 0); shle_wb(v + 9, 0); shle_wb(v + 5, 0);
-        }
-        SG8(0x141E, 0); SG8(0x142E, 0);
-        for (int c = 0; c < 16; c++) { SG8(0x3220 + c, 0); SG8(0x3240 + c, 0); SG16(0x3200 + c * 2, 0); }
-        return;
+    case 0x01: shle_stop_all(); return;                 /* everything stops */
     case 0x02: {                                        /* the music stops (a song's own A0 00 02 only cuts voices) */
         uint32_t s = SHLE_SEQS;
         if (!(shle_rb(s) & 0x40)) { shle_wb(s, 0); shle_wb(s + 0xC, 0); }
@@ -1170,26 +1227,7 @@ static void shle_cmd00(uint8_t d0) {
         shle_cut_voices(true);
         SG8(0x142E, 0);
         return;
-    case 0x04: {                                        /* pause: every slot's source to silence, and back */
-        if (!G8(0x1430)) {
-            for (uint32_t k = 0; k < 32; k++) shle_sw8(k * 0x20u, shle_sr8(k * 0x20u) | 1);
-            SG8(0x1430, 0x80);
-            uint8_t f = shle_rb(SHLE_SEQS);
-            shle_wb(SHLE_SEQS, f & 0x7F);
-            if (!(f & 0x80)) SG8(0x1430, 0x10);
-            for (uint32_t s = SHLE_SEQS + 0x10; s < SHLE_SEQS + 0x80; s += 16)
-                if (shle_rb(s) & 0x80) { shle_wb(s, 0); SG8(0x1431, G8(0x1431) | 1); }
-            uint16_t w = shle_mw(SHLE_P_PAUSE_ON);
-            shle_enqueue(0xA0, (uint8_t)(w >> 8), (uint8_t)w, 0);
-        } else {
-            if (G8(0x1430) & 0x80) shle_wb(SHLE_SEQS, shle_rb(SHLE_SEQS) | 0x80);
-            SG8(0x1430, 0);
-            for (uint32_t k = 0; k < 32; k++) shle_sw8(k * 0x20u, shle_sr8(k * 0x20u) & 0x1E);
-            uint16_t w = shle_mw(SHLE_P_PAUSE_OFF);
-            shle_enqueue(0xA0, (uint8_t)(w >> 8), (uint8_t)w, 0);
-        }
-        return;
-    }
+    case 0x04: shle_pause(); return;                    /* pause: every slot's source to silence, and back */
     case 0x09: if (G8(0x1440) != 0xF8) SG8(0x1440, G8(0x1440) + 1); return;   /* tempo */
     case 0x0A: if (G8(0x1440) != 0) SG8(0x1440, G8(0x1440) - 1); return;
     case 0x0B: SG8(0x1440, 0xF8); return;
@@ -1306,6 +1344,100 @@ static void shle_sound_cmd(uint32_t p) {
 
 /* ---- the sequencers (sub_603DA2) and the fade (sub_604096) ---------------------------------- */
 
+/* what a step of the sequencer leaves it to do */
+enum { SHLE_SEQ_NEXT, SHLE_SEQ_WAIT, SHLE_SEQ_END, SHLE_SEQ_STOP, SHLE_SEQ_STUCK };
+
+/* one MIDI event of the segment at *pa3, sent on; true at the segment's end */
+static bool shle_seq_parse(uint32_t s, uint32_t *pa3) {
+    uint32_t a3 = *pa3;
+    bool end = false;
+    shle_wb(s, shle_rb(s) & ~1u);
+    uint8_t st = shle_mb(a3++);
+    if (!(st & 0x80)) { st = shle_rb(s + 1); a3--; }
+    shle_wb(s + 1, st);
+    uint8_t b1, b2;
+    switch (st >> 4) {
+    case 0x8:
+        b1 = shle_mb(a3++);
+        if (b1 & 0x80) shle_wb(s, shle_rb(s) | 1);
+        shle_enqueue3(st, b1 & 0x7F, 0x7F);
+        break;
+    case 0xA:
+        b1 = shle_mb(a3++);
+        if (b1 == 0) {
+            if ((shle_mb(a3) & 0x7F) == 2) shle_wb(s, shle_rb(s) | 0x40);
+        } else if (b1 == 1 && shle_rb(s + 0xC)) {
+            b2 = shle_mb(a3++);
+            if (shle_rb(s) & 0x10) SG8(0x1421, b2 & 0x7F);
+            if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
+            break;
+        }
+        b2 = shle_mb(a3++);
+        if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
+        shle_enqueue3(st, b1, b2 & 0x7F);
+        break;
+    case 0xC: case 0xD:
+        b1 = shle_mb(a3++);
+        if (b1 & 0x80) shle_wb(s, shle_rb(s) | 1);
+        shle_enqueue3(st, b1 & 0x7F, 0);
+        break;
+    case 0xF:
+        if (st == 0xF7) { a3 += 1u + shle_mb(a3); break; }
+        if (st == 0xF0) { while (shle_mb(a3++) != 0xF7) {} break; }
+        if (st == 0xFF) {
+            if (shle_mb(a3++) != 0x2F) { a3 += 1u + shle_mb(a3); break; }
+        }
+        end = true;
+        break;
+    default:                                    /* 9x, Bx, Ex (and 0x-7x, which never come) */
+        b1 = shle_mb(a3++);
+        b2 = shle_mb(a3++);
+        if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
+        shle_enqueue3(st, b1, b2 & 0x7F);
+        break;
+    }
+    *pa3 = a3;
+    return end;
+}
+
+/* one event and the delta time after it: on to the next event, wait (the
+ * delta is set), or the segment's end */
+static int shle_seq_event(uint32_t s, uint32_t *pa3) {
+    if (shle_seq_parse(s, pa3)) return SHLE_SEQ_END;
+    if (shle_rb(s) & 1) return SHLE_SEQ_NEXT;
+    uint32_t a3 = *pa3;
+    uint16_t d = shle_mb(a3++);
+    *pa3 = a3;
+    if (!d) return SHLE_SEQ_NEXT;
+    if (d & 0x80) d = (uint16_t)((d & 0x7F) << 7 | shle_mb(a3++));
+    shle_ww(s + 2, d);
+    shle_wl(s + 4, a3);
+    return SHLE_SEQ_WAIT;
+}
+
+/* an entry of the pattern list: a command, a jump, the end of the song, or
+ * the next segment (in *pa3) */
+static int shle_seq_list(uint32_t s, uint32_t *pa3, uint32_t *pa0) {
+    uint32_t a3 = *pa3, a0 = *pa0;
+    int r = SHLE_SEQ_NEXT;
+    if ((a3 & 0xFF000000u) == 0x80000000u) {        /* a command in the pattern list */
+        uint32_t d0 = a3 << 8;
+        shle_enqueue((uint8_t)(d0 >> 24), (uint8_t)(d0 >> 16), (uint8_t)(d0 >> 8), (uint8_t)d0);
+        a0 = shle_rl(s + 8);
+        if (d0 == 0xA0000200u) shle_wb(s, shle_rb(s) | 0x40);
+        a3 = shle_ml(a0); a0 += 4;
+        shle_wl(s + 8, a0);
+    } else if (a3 == 0xFFFFFFFFu) { shle_wb(s, 0); r = SHLE_SEQ_STOP; }
+    else if (a3 == 0xFFFFFFF1u) { a0 = shle_ml(a0); a3 = shle_ml(a0); a0 += 4; shle_wl(s + 8, a0); }
+    else if (a3 == 0xFFFFFFF2u) { for (uint32_t a = SHLE_SEQS; a < SHLE_SEQS + 0x80; a++) shle_wb(a, 0); r = SHLE_SEQ_STOP; }
+    else {
+        shle_wl(s + 8, a0);
+        if (a3 & 0x80000000u) r = SHLE_SEQ_STUCK;       /* the driver would spin here */
+    }
+    *pa3 = a3; *pa0 = a0;
+    return r;
+}
+
 static void shle_seq(uint32_t s) {
     if (!(shle_rb(s) & 0x80)) return;
     uint16_t w = (uint16_t)(shle_rw(s + 2) - 1);
@@ -1313,82 +1445,18 @@ static void shle_seq(uint32_t s) {
     if (w) return;
     uint32_t a3 = shle_rl(s + 4), a0 = shle_rl(s + 8);
     for (int guard = 0; guard < 4096; guard++) {
-        if (a3 & 0x80000000u) goto list;
-        {
-            shle_wb(s, shle_rb(s) & ~1u);
-            uint8_t st = shle_mb(a3++);
-            if (!(st & 0x80)) { st = shle_rb(s + 1); a3--; }
-            shle_wb(s + 1, st);
-            uint8_t b1, b2;
-            switch (st >> 4) {
-            case 0x8:
-                b1 = shle_mb(a3++);
-                if (b1 & 0x80) shle_wb(s, shle_rb(s) | 1);
-                shle_enqueue3(st, b1 & 0x7F, 0x7F);
-                break;
-            case 0xA:
-                b1 = shle_mb(a3++);
-                if (b1 == 0) {
-                    if ((shle_mb(a3) & 0x7F) == 2) shle_wb(s, shle_rb(s) | 0x40);
-                } else if (b1 == 1 && shle_rb(s + 0xC)) {
-                    b2 = shle_mb(a3++);
-                    if (shle_rb(s) & 0x10) SG8(0x1421, b2 & 0x7F);
-                    if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
-                    goto after;
-                }
-                b2 = shle_mb(a3++);
-                if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
-                shle_enqueue3(st, b1, b2 & 0x7F);
-                break;
-            case 0xC: case 0xD:
-                b1 = shle_mb(a3++);
-                if (b1 & 0x80) shle_wb(s, shle_rb(s) | 1);
-                shle_enqueue3(st, b1 & 0x7F, 0);
-                break;
-            case 0xF:
-                if (st == 0xF7) { a3 += 1u + shle_mb(a3); goto after; }
-                if (st == 0xF0) { while (shle_mb(a3++) != 0xF7) {} goto after; }
-                if (st == 0xFF) {
-                    if (shle_mb(a3++) != 0x2F) { a3 += 1u + shle_mb(a3); goto after; }
-                }
-                goto seg_end;
-            default:                                    /* 9x, Bx, Ex (and 0x-7x, which never come) */
-                b1 = shle_mb(a3++);
-                b2 = shle_mb(a3++);
-                if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
-                shle_enqueue3(st, b1, b2 & 0x7F);
-                break;
-            }
-        after:
-            if (shle_rb(s) & 1) continue;
-            {
-                uint16_t d = shle_mb(a3++);
-                if (!d) continue;
-                if (d & 0x80) d = (uint16_t)((d & 0x7F) << 7 | shle_mb(a3++));
-                shle_ww(s + 2, d);
-                shle_wl(s + 4, a3);
-                return;
-            }
-        }
-    seg_end:
-        if (!(shle_rb(s) & 0x08)) { shle_wb(s, 0); return; }
-        a0 = shle_rl(s + 8);
-        a3 = shle_ml(a0); a0 += 4;
-    list:
-        if ((a3 & 0xFF000000u) == 0x80000000u) {        /* a command in the pattern list */
-            uint32_t d0 = a3 << 8;
-            shle_enqueue((uint8_t)(d0 >> 24), (uint8_t)(d0 >> 16), (uint8_t)(d0 >> 8), (uint8_t)d0);
+        if (!(a3 & 0x80000000u)) {
+            int r = shle_seq_event(s, &a3);
+            if (r == SHLE_SEQ_NEXT) continue;
+            if (r == SHLE_SEQ_WAIT) return;
+            /* the segment's end */
+            if (!(shle_rb(s) & 0x08)) { shle_wb(s, 0); return; }
             a0 = shle_rl(s + 8);
-            if (d0 == 0xA0000200u) shle_wb(s, shle_rb(s) | 0x40);
             a3 = shle_ml(a0); a0 += 4;
-            shle_wl(s + 8, a0);
-            continue;
         }
-        if (a3 == 0xFFFFFFFFu) { shle_wb(s, 0); return; }
-        if (a3 == 0xFFFFFFF1u) { a0 = shle_ml(a0); a3 = shle_ml(a0); a0 += 4; shle_wl(s + 8, a0); continue; }
-        if (a3 == 0xFFFFFFF2u) { for (uint32_t a = SHLE_SEQS; a < SHLE_SEQS + 0x80; a++) shle_wb(a, 0); return; }
-        shle_wl(s + 8, a0);
-        if (a3 & 0x80000000u) break;                    /* the driver would spin here */
+        int r = shle_seq_list(s, &a3, &a0);
+        if (r == SHLE_SEQ_STOP) return;
+        if (r == SHLE_SEQ_STUCK) break;
     }
     LOG_WARN("sound HLE: sequencer at 0x%04X ran away (0x%08X); stopped", s, a3);
     shle_wb(s, 0);
