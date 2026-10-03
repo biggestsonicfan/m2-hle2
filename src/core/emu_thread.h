@@ -576,7 +576,10 @@ static I960_HOT_INLINE bool emu_slice_slow_gate(emu_thread_ctx_t *ctx, i960_cpu_
     return false;
 }
 
-/* The loop's own state, which the slow path's helpers move along. */
+/* The loop's own state, which the slow path's helpers move along. The loop
+ * keeps it in locals and hands the slow path a copy: with the struct itself
+ * as the loop's state, its address taken, GCC kept the fields in memory and
+ * the slice ran 4% more host instructions (Pinboard #387). */
 typedef struct {
     int      i;        /* instructions charged to the slice */
     uint64_t steps;    /* instructions run, written back once (see emu_slice_body) */
@@ -697,11 +700,11 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * its inlining limits on the handheld -- mem_fetch2 became a call per
      * instruction, and the two-loop version ran 5% MORE instructions. */
     const bool     profile = g_active_profile != NULL;
-    emu_slice_loop_t l;
-    l.steps = 0;
-    l.attn  = g_emu_attn;
-    l.bps   = bp_armed();
-    l.slow  = emu_slice_starts_slow(ctx, profile);
+    int      i;
+    uint64_t steps = 0;
+    uint32_t attn  = g_emu_attn;
+    bool     bps   = bp_armed();
+    bool     slow  = emu_slice_starts_slow(ctx, profile);
     hle_filter_sync();
     /* The loop's host time, less the sound board it ran early inside it
      * (sound_uart_make_room) or waited on (sound_settle): the i960 and the
@@ -715,10 +718,10 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * reloaded after every store. */
     i960_cpu_t   *const cpu = ctx->cpu;
     memory_bus_t *const bus = ctx->bus;
-    for (l.i = 0; l.i < max_steps; l.i++) {
-        if (M2_UNLIKELY(l.slow)) {
+    for (i = 0; i < max_steps; i++) {
+        if (M2_UNLIKELY(slow)) {
             if (emu_slice_slow_gate(ctx, cpu)) break;
-        } else if (M2_UNLIKELY(l.bps) && bp_check(cpu->sfr.ip)) {
+        } else if (M2_UNLIKELY(bps) && bp_check(cpu->sfr.ip)) {
             break;
         }
         PCPROF_TICK(cpu->sfr.ip);
@@ -726,27 +729,30 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
          * slow path, or with a breakpoint armed, it is offered only this one,
          * so every check below still sees each instruction. */
         if (M2_UNLIKELY(i960_step_core(cpu, bus,
-                                       (l.slow || l.bps) ? 1u : (uint32_t)(max_steps - l.i)) != 0)) break;
-        l.steps++;
-        if (M2_UNLIKELY(l.slow || g_emu_attn != l.attn)) {
-            if (emu_slice_slow_after(ctx, cpu, profile, &l)) break;
+                                       (slow || bps) ? 1u : (uint32_t)(max_steps - i)) != 0)) break;
+        steps++;
+        if (M2_UNLIKELY(slow || g_emu_attn != attn)) {
+            emu_slice_loop_t l = { i, steps, attn, bps, slow };
+            bool stop = emu_slice_slow_after(ctx, cpu, profile, &l);
+            i = l.i; steps = l.steps; attn = l.attn; bps = l.bps; slow = l.slow;
+            if (stop) break;
         } else {
             /* Fast: no handler in service (entering one bumps the word). */
             emu_timers_after_step_fast(ctx, cpu, profile);
-            if (g_emu_attn != l.attn) {      /* flagged by the timer service */
-                l.slow = true;
+            if (g_emu_attn != attn) {      /* flagged by the timer service */
+                slow = true;
                 if (emu_slice_break_flag()) break;
             }
         }
     }
     g_emu_times.loop_us += emu_now_us() - loop_t0
                          - (g_emu_times.sound_inline_us + g_emu_times.sound_wait_us - loop_snd);
-    g_emu_times.steps   += l.steps;
-    ctx->total_steps += l.steps;
-    ctx->slice_capped = (l.i >= max_steps);
+    g_emu_times.steps   += steps;
+    ctx->total_steps += steps;
+    ctx->slice_capped = (i >= max_steps);
     bool frame = g_vblank_edge != 0;
     if (frame) emu_slice_frame_edge(ctx);
-    emu_slice_after(ctx, frame, prof_t0, l.steps);
+    emu_slice_after(ctx, frame, prof_t0, steps);
     hprof_leave(hzone);
 }
 
