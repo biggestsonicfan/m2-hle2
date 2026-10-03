@@ -1287,6 +1287,88 @@ static inline void netplay_drain_socket_ps3(void) {
     }
 }
 
+/* Whether a datagram is ours to read, with `*from` the member it is from: of our
+ * room, and from who it says it is. */
+static inline bool netplay_datagram_accepted(const lockstep_header_t *hdr, uint16_t *from,
+                                             uint32_t ip, uint16_t port) {
+    /* Not our room: a stale process from an earlier test, or another session
+     * that happens to share this address pair. Dropping it here is what stops
+     * it releasing our barrier or feeding our rings. Only filter once we know
+     * our own room (0 = not yet). */
+    uint32_t mine = netplay_session_id();
+    if (mine != 0 && hdr->session != 0 && hdr->session != mine) return false;
+
+    /* An address nobody has claimed yet, which names its sender: the first
+     * datagram from a member behind a NAT that picked a port of its own. */
+    if (!*from) {
+        if (!hdr->member || !rpcn_session_claim(&g_netplay.session, hdr->member, ip, port)) return false;
+        *from = hdr->member;
+    }
+    return !(hdr->member && hdr->member != *from);   /* says it is somebody else */
+}
+
+static inline void netplay_on_input_packet(uint16_t from, const lockstep_input_packet_t *pkt) {
+    const lockstep_header_t *hdr = &pkt->header;
+    if (hdr->player >= LOCKSTEP_MAX_PLAYERS) return;   /* watchers send no inputs */
+    lockstep_on_record(&g_netplay.lockstep, &pkt->record);
+    if (from == netplay_opponent_id()
+        && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F))
+        g_netplay.last_peer_input_ms = net_now_ms();
+    if (pkt->check_frame != LOCKSTEP_NO_CHECK
+        && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)) {
+        uint32_t idx = pkt->check_frame & LOCKSTEP_RING_MASK;
+        g_netplay.peer_check_frame[idx] = pkt->check_frame;
+        g_netplay.peer_check_value[idx] = pkt->check_value;
+        netplay_check_compare(pkt->check_frame);
+    }
+}
+
+static inline void netplay_on_repair_packet(uint16_t from, const lockstep_repair_packet_t *req) {
+    if (req->header.generation == (uint8_t)(g_netplay.generation & 0x1F)
+        && (int32_t)req->side == g_netplay.local_player)
+        netplay_answer_repair(from, req->frame);
+}
+
+static inline void netplay_on_bye_packet(uint16_t from, const lockstep_announce_packet_t *bye) {
+    /* The other fighter left THIS match: end it now rather than freeze
+     * until the stall timeout. A watcher is told too, since its board
+     * cannot go on without both sides. A bye for another match is a late
+     * copy; ignored. */
+    bool from_fighter = from == g_netplay.room.fighter[0] || from == g_netplay.room.fighter[1];
+    if (from_fighter && from != netplay_my_id()
+        && bye->header.generation == (uint8_t)(g_netplay.generation & 0x1F)
+        && (netplay_running_match() || g_netplay.state == NETPLAY_SYNCING)
+        && !g_netplay.match_result_seen) {
+        netplay_log("%s left the match (their frame %u, ours %u)",
+                    rpcn_peer_name(rpcn_session_peer(&g_netplay.session, from)),
+                    (unsigned)bye->seed, (unsigned)g_netplay.frame);
+        netplay_end_match(NULL);
+    }
+}
+
+/* One accepted datagram, by its type; one too short for its type is dropped. */
+static inline void netplay_on_datagram(uint16_t from, const uint8_t *buf, int got) {
+    const lockstep_header_t *hdr = (const lockstep_header_t *)buf;
+    if (hdr->type == LOCKSTEP_PACKET_INPUT && got >= (int)sizeof(lockstep_input_packet_t)) {
+        netplay_on_input_packet(from, (const lockstep_input_packet_t *)buf);
+    } else if (hdr->type == LOCKSTEP_PACKET_ANNOUNCE
+               && got >= (int)sizeof(lockstep_announce_packet_t)) {
+        /* The generation is the room's, not either fighter's: both read it
+         * from the same room state, so there is nothing here to adopt. */
+        lockstep_on_peer_announce(&g_netplay.lockstep, hdr->player, hdr->generation);
+    } else if (hdr->type == LOCKSTEP_PACKET_PING && got >= (int)sizeof(lockstep_ping_packet_t)) {
+        netplay_send_ping(from, LOCKSTEP_PACKET_PONG, ((const lockstep_ping_packet_t *)buf)->stamp_us);
+    } else if (hdr->type == LOCKSTEP_PACKET_PONG && got >= (int)sizeof(lockstep_ping_packet_t)) {
+        netplay_on_pong(from, ((const lockstep_ping_packet_t *)buf)->stamp_us);
+    } else if (hdr->type == LOCKSTEP_PACKET_REPAIR
+               && got >= (int)sizeof(lockstep_repair_packet_t)) {
+        netplay_on_repair_packet(from, (const lockstep_repair_packet_t *)buf);
+    } else if (hdr->type == LOCKSTEP_PACKET_BYE
+               && got >= (int)sizeof(lockstep_announce_packet_t)) {
+        netplay_on_bye_packet(from, (const lockstep_announce_packet_t *)buf);
+    }
+}
+
 static inline void netplay_drain_socket(void) {
     if (g_netplay.ps3) { netplay_drain_socket_ps3(); return; }
     uint8_t buf[sizeof(lockstep_input_packet_t) + 64];
@@ -1297,71 +1379,8 @@ static inline void netplay_drain_socket(void) {
         int got = rpcn_session_recv(&g_netplay.session, buf, (uint32_t)sizeof(buf), &from, &ip, &port);
         if (got <= 0) break;
         if (got < (int)sizeof(lockstep_header_t)) continue;
-
-        const lockstep_header_t *hdr = (const lockstep_header_t *)buf;
-
-        /* Not our room: a stale process from an earlier test, or another session
-         * that happens to share this address pair. Dropping it here is what stops
-         * it releasing our barrier or feeding our rings. Only filter once we know
-         * our own room (0 = not yet). */
-        uint32_t mine = netplay_session_id();
-        if (mine != 0 && hdr->session != 0 && hdr->session != mine) continue;
-
-        /* An address nobody has claimed yet, which names its sender: the first
-         * datagram from a member behind a NAT that picked a port of its own. */
-        if (!from) {
-            if (!hdr->member || !rpcn_session_claim(&g_netplay.session, hdr->member, ip, port)) continue;
-            from = hdr->member;
-        }
-        if (hdr->member && hdr->member != from) continue;   /* says it is somebody else */
-
-        if (hdr->type == LOCKSTEP_PACKET_INPUT && got >= (int)sizeof(lockstep_input_packet_t)) {
-            const lockstep_input_packet_t *pkt = (const lockstep_input_packet_t *)buf;
-            if (hdr->player >= LOCKSTEP_MAX_PLAYERS) continue;   /* watchers send no inputs */
-            lockstep_on_record(&g_netplay.lockstep, &pkt->record);
-            if (from == netplay_opponent_id()
-                && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F))
-                g_netplay.last_peer_input_ms = net_now_ms();
-            if (pkt->check_frame != LOCKSTEP_NO_CHECK
-                && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)) {
-                uint32_t idx = pkt->check_frame & LOCKSTEP_RING_MASK;
-                g_netplay.peer_check_frame[idx] = pkt->check_frame;
-                g_netplay.peer_check_value[idx] = pkt->check_value;
-                netplay_check_compare(pkt->check_frame);
-            }
-        } else if (hdr->type == LOCKSTEP_PACKET_ANNOUNCE
-                   && got >= (int)sizeof(lockstep_announce_packet_t)) {
-            /* The generation is the room's, not either fighter's: both read it
-             * from the same room state, so there is nothing here to adopt. */
-            lockstep_on_peer_announce(&g_netplay.lockstep, hdr->player, hdr->generation);
-        } else if (hdr->type == LOCKSTEP_PACKET_PING && got >= (int)sizeof(lockstep_ping_packet_t)) {
-            netplay_send_ping(from, LOCKSTEP_PACKET_PONG, ((const lockstep_ping_packet_t *)buf)->stamp_us);
-        } else if (hdr->type == LOCKSTEP_PACKET_PONG && got >= (int)sizeof(lockstep_ping_packet_t)) {
-            netplay_on_pong(from, ((const lockstep_ping_packet_t *)buf)->stamp_us);
-        } else if (hdr->type == LOCKSTEP_PACKET_REPAIR
-                   && got >= (int)sizeof(lockstep_repair_packet_t)) {
-            const lockstep_repair_packet_t *req = (const lockstep_repair_packet_t *)buf;
-            if (hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)
-                && (int32_t)req->side == g_netplay.local_player)
-                netplay_answer_repair(from, req->frame);
-        } else if (hdr->type == LOCKSTEP_PACKET_BYE
-                   && got >= (int)sizeof(lockstep_announce_packet_t)) {
-            /* The other fighter left THIS match: end it now rather than freeze
-             * until the stall timeout. A watcher is told too, since its board
-             * cannot go on without both sides. A bye for another match is a late
-             * copy; ignored. */
-            const lockstep_announce_packet_t *bye = (const lockstep_announce_packet_t *)buf;
-            bool from_fighter = from == g_netplay.room.fighter[0] || from == g_netplay.room.fighter[1];
-            if (from_fighter && from != netplay_my_id()
-                && hdr->generation == (uint8_t)(g_netplay.generation & 0x1F)
-                && (netplay_running_match() || g_netplay.state == NETPLAY_SYNCING)
-                && !g_netplay.match_result_seen) {
-                netplay_log("%s left the match (their frame %u, ours %u)",
-                            rpcn_peer_name(rpcn_session_peer(&g_netplay.session, from)),
-                            (unsigned)bye->seed, (unsigned)g_netplay.frame);
-                netplay_end_match(NULL);
-            }
-        }
+        if (!netplay_datagram_accepted((const lockstep_header_t *)buf, &from, ip, port)) continue;
+        netplay_on_datagram(from, buf, got);
     }
 }
 
