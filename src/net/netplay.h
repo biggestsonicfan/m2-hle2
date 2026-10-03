@@ -3014,86 +3014,101 @@ static inline void netplay_heal_online(void) {
     g_netplay.heal_tries = 0;
 }
 
+/* A match the room owns while the session is still in the room: true, and the
+ * state is left alone. A match whose room went away under it is ended. */
+static inline bool netplay_mirror_match(void) {
+    if (g_netplay.state != NETPLAY_SYNCING && !netplay_running_match()) return false;
+    /* The server takes us out of the room the moment the link drops, and the
+     * room calls off a match a fighter has left. Waiting out the stall timer
+     * would only put the sign-in back fifteen seconds later. */
+    if (netplay_heal_is_drop())
+        netplay_end_match("the connection to the server was lost");
+    else if (rpcn_session_in_room(&g_netplay.session)) return true;
+    else netplay_end_match("the room is gone");
+    return false;
+}
+
+static inline void netplay_mirror_online(void) {
+    if (g_netplay.state == NETPLAY_IN_ROOM) netplay_forget_room();   /* closed, or left */
+    if (g_netplay.state != NETPLAY_ONLINE) netplay_heal_online();
+    /* Remember the server and account only once they are known to WORK —
+     * storing what was typed would just as happily store a typo. */
+    if (g_netplay.state != NETPLAY_ONLINE) {
+        /* And the same goes for WHOSE the Twitch token is. The owner
+         * adopted at load is a guess; a login that went out with the
+         * token and came back accepted is the server saying so. */
+        if (g_netplay.sent_twitch_token)
+            snprintf(g_netplay.cfg.twitch_npid, sizeof(g_netplay.cfg.twitch_npid),
+                     "%s", g_netplay.cfg.npid);
+        g_netplay.twitch_wanted      = false;
+        g_netplay.twitch_tried_owner = false;
+        netplay_settings_save();
+    }
+    g_netplay.state = NETPLAY_ONLINE;
+}
+
+/* A room we joined, as the server holds its attribute word. */
+static inline void netplay_check_joined_room(void) {
+    /* The attribute word the server actually holds, read back on
+     * join. Two things come out of it, and both are the reason it
+     * is published at all rather than assumed. */
+    uint32_t flags = g_netplay.session.room_flags;
+    const char *why = netplay_room_reject_reason(flags, g_active_profile);
+    if (why)
+        netplay_log("WARNING: %s - this session will not stay in sync", why);
+
+    /* THE HOST OWNS THE FRAME DELAY. A mismatch is not a desync
+     * (both machines still apply the same two words to the same
+     * frame) but it is unfair: whoever set the lower number plays
+     * with less input lag than the other. Adopting the host's is
+     * what makes the room's advertised delay mean something. */
+    uint32_t d = (flags >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK;
+    if (flags && d != g_netplay.cfg.frame_delay) {
+        netplay_log("using the host's frame delay of %u (yours was %u)",
+                    d, g_netplay.cfg.frame_delay);
+        g_netplay.cfg.frame_delay = d;
+    }
+}
+
+static inline void netplay_mirror_in_room(void) {
+    if (g_netplay.state != NETPLAY_IN_ROOM) {
+        netplay_log("room %llu ready (%s)",
+                    (unsigned long long)g_netplay.session.room_id,
+                    g_netplay.session.is_host ? "hosting" : "joined");
+        if (!g_netplay.session.is_host && !g_netplay.ps3) netplay_check_joined_room();
+    }
+    g_netplay.state = NETPLAY_IN_ROOM;
+}
+
+static inline void netplay_mirror_failed(void) {
+    /* On the edge only: the stage stays FAILED on every pump after it,
+     * and the handler below may start a fresh login. */
+    if (g_netplay.state != NETPLAY_FAILED && !g_netplay.heal_at_ms) {
+        bool drop = netplay_heal_is_drop();
+        if (drop) netplay_heal_note_room();
+        g_netplay.state = NETPLAY_FAILED;
+        netplay_twitch_refused();
+        if (drop) {
+            if (!g_netplay.heal_tries)
+                netplay_log("lost the connection to the server (%s); signing back in",
+                            rpcn_session_error(&g_netplay.session));
+            netplay_heal_schedule();
+        }
+    }
+}
+
 static inline void netplay_mirror_stage(void) {
     /* The session's own progress becomes our state, except while a match is
      * running: SYNCING/PLAYING/WATCHING are owned by the room, not by the
      * transport -- unless the room itself went away under the match. */
-    if (g_netplay.state == NETPLAY_SYNCING || netplay_running_match()) {
-        /* The server takes us out of the room the moment the link drops, and the
-         * room calls off a match a fighter has left. Waiting out the stall timer
-         * would only put the sign-in back fifteen seconds later. */
-        if (netplay_heal_is_drop())
-            netplay_end_match("the connection to the server was lost");
-        else if (rpcn_session_in_room(&g_netplay.session)) return;
-        else netplay_end_match("the room is gone");
-    }
+    if (netplay_mirror_match()) return;
     switch (g_netplay.session.stage) {
         case RPCN_STAGE_LOGGING_IN: g_netplay.state = NETPLAY_CONNECTING; break;
-        case RPCN_STAGE_ONLINE:
-            if (g_netplay.state == NETPLAY_IN_ROOM) netplay_forget_room();   /* closed, or left */
-            if (g_netplay.state != NETPLAY_ONLINE) netplay_heal_online();
-            /* Remember the server and account only once they are known to WORK —
-             * storing what was typed would just as happily store a typo. */
-            if (g_netplay.state != NETPLAY_ONLINE) {
-                /* And the same goes for WHOSE the Twitch token is. The owner
-                 * adopted at load is a guess; a login that went out with the
-                 * token and came back accepted is the server saying so. */
-                if (g_netplay.sent_twitch_token)
-                    snprintf(g_netplay.cfg.twitch_npid, sizeof(g_netplay.cfg.twitch_npid),
-                             "%s", g_netplay.cfg.npid);
-                g_netplay.twitch_wanted      = false;
-                g_netplay.twitch_tried_owner = false;
-                netplay_settings_save();
-            }
-            g_netplay.state = NETPLAY_ONLINE;
-            break;
+        case RPCN_STAGE_ONLINE:     netplay_mirror_online(); break;
         case RPCN_STAGE_HOSTING:
         case RPCN_STAGE_JOINING:
-        case RPCN_STAGE_LINKED:
-            if (g_netplay.state != NETPLAY_IN_ROOM) {
-                netplay_log("room %llu ready (%s)",
-                            (unsigned long long)g_netplay.session.room_id,
-                            g_netplay.session.is_host ? "hosting" : "joined");
-                if (!g_netplay.session.is_host && !g_netplay.ps3) {
-                    /* The attribute word the server actually holds, read back on
-                     * join. Two things come out of it, and both are the reason it
-                     * is published at all rather than assumed. */
-                    uint32_t flags = g_netplay.session.room_flags;
-                    const char *why = netplay_room_reject_reason(flags, g_active_profile);
-                    if (why)
-                        netplay_log("WARNING: %s - this session will not stay in sync", why);
-
-                    /* THE HOST OWNS THE FRAME DELAY. A mismatch is not a desync
-                     * (both machines still apply the same two words to the same
-                     * frame) but it is unfair: whoever set the lower number plays
-                     * with less input lag than the other. Adopting the host's is
-                     * what makes the room's advertised delay mean something. */
-                    uint32_t d = (flags >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK;
-                    if (flags && d != g_netplay.cfg.frame_delay) {
-                        netplay_log("using the host's frame delay of %u (yours was %u)",
-                                    d, g_netplay.cfg.frame_delay);
-                        g_netplay.cfg.frame_delay = d;
-                    }
-                }
-            }
-            g_netplay.state = NETPLAY_IN_ROOM;
-            break;
-        case RPCN_STAGE_FAILED:
-            /* On the edge only: the stage stays FAILED on every pump after it,
-             * and the handler below may start a fresh login. */
-            if (g_netplay.state != NETPLAY_FAILED && !g_netplay.heal_at_ms) {
-                bool drop = netplay_heal_is_drop();
-                if (drop) netplay_heal_note_room();
-                g_netplay.state = NETPLAY_FAILED;
-                netplay_twitch_refused();
-                if (drop) {
-                    if (!g_netplay.heal_tries)
-                        netplay_log("lost the connection to the server (%s); signing back in",
-                                    rpcn_session_error(&g_netplay.session));
-                    netplay_heal_schedule();
-                }
-            }
-            break;
+        case RPCN_STAGE_LINKED:     netplay_mirror_in_room(); break;
+        case RPCN_STAGE_FAILED:     netplay_mirror_failed(); break;
         default: break;
     }
 }
