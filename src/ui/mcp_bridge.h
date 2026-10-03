@@ -263,11 +263,9 @@ static void mcp_cmd_set_input(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"held\":\"0x%08X\"}", held);
 }
 
-/* Live-tune the 3D camera (for the geo_displaylist render path) without rebuilding.
- * Any omitted field keeps its current value. e.g.
- *   {"cmd":"set_camera","cam_z":"0","fov":"65","rot_y":"0"} */
-static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
-    if (!g_geo3d_state) { snprintf(resp,(size_t)cap,"{\"ok\":false,\"error\":\"geo3d not ready\"}"); return; }
+/* set_camera's view fields: where the debug camera stands and looks, and the
+ * test triangle / lines-only switches. */
+static void mcp_set_camera_view(const char *req) {
     char v[32];
     if (mcp_json_get_str(req,"cam_x",v,sizeof v)) g_geo3d_state->cam_x   = (float)atof(v);
     if (mcp_json_get_str(req,"cam_y",v,sizeof v)) g_geo3d_state->cam_y   = (float)atof(v);
@@ -277,6 +275,11 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"fov",  v,sizeof v)) { g_geo3d_state->fov_deg = (float)atof(v); g_geo3d_state->fov_auto = false; }
     if (mcp_json_get_str(req,"test", v,sizeof v)) g_geo3d_state->test_triangle = (atoi(v) != 0);
     if (mcp_json_get_str(req,"lines_only",v,sizeof v)) g_geo3d_state->lines_only = (atoi(v) != 0);
+}
+
+/* set_camera's depth fields: the z-sort and its layers. */
+static void mcp_set_camera_depth(const char *req) {
+    char v[32];
     /* The board's polygon z-sort (geo3d.h geo3d_sort_z) — 0 leaves every face
      * at the depth the projection gives it, which is what a before/after on a
      * co-planar decal wants. */
@@ -290,11 +293,26 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"zflat",   v,sizeof v)) g_geo3d_zflat = (atoi(v) != 0);
     /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
     if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
+}
+
+/* set_camera's fill fields: texture wrap, checker phase and corner normals. */
+static void mcp_set_camera_fill(const char *req) {
+    char v[32];
     /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
     if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
     if (mcp_json_get_str(req,"checker",v,sizeof v)) g_geo3d_checker_phase = (atoi(v) != 0);
     /* 0: a list in mode 2 or 3 is lit and culled with the ROM normals (geo3d_board_normal). */
     if (mcp_json_get_str(req,"nnormals",v,sizeof v)) g_geo3d_nn_normals = (atoi(v) != 0);
+}
+
+/* Live-tune the 3D camera (for the geo_displaylist render path) without rebuilding.
+ * Any omitted field keeps its current value. e.g.
+ *   {"cmd":"set_camera","cam_z":"0","fov":"65","rot_y":"0"} */
+static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
+    if (!g_geo3d_state) { snprintf(resp,(size_t)cap,"{\"ok\":false,\"error\":\"geo3d not ready\"}"); return; }
+    mcp_set_camera_view(req);
+    mcp_set_camera_depth(req);
+    mcp_set_camera_fill(req);
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
              "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zflat\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"zadjust\":\"0x%08X\"}",
