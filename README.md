@@ -223,6 +223,14 @@ container host's LAN address with `--net-local-ip 192.168.1.20` (or `$M2HLE_NET_
 two players share a public address the server hands each the other's *local* one, and a
 container's own (`172.x`) is one nobody on the LAN can reach.
 
+Players *outside* the house still cannot reach a container behind Docker Desktop: its NAT gives
+the keepalive a port of its own, and nothing sent to that port comes back in. So inside a
+container m2hle sends its datagrams through the web gateway's relay (`/gw/dgram`, the one the web
+build uses) and is reached at the gateway's address instead. `--net-relay` (or
+`$M2HLE_NET_RELAY`) picks: `auto` (the default: on inside a container), `on`, `off`, or the
+`ws://`/`wss://` URL of a gateway of your own. Only our server and the official one have a public
+gateway. Through it, a LAN opponent's datagrams go out to the gateway and back too.
+
 **Or without a person at the keyboard.** The same buttons are on the MCP bridge
 (`netplay_status`, `netplay_connect`, `netplay_host`, `netplay_start`, ...), which is enough to
 hold a lobby open, notice that somebody has joined and pressed Start, and accept the match. The

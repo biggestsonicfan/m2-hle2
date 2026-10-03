@@ -400,6 +400,20 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   instead (`rpcn_client_t.advertised_ip`; `local_ip` stays the socket's own for the self filter).
   It is a process setting, not a `netplay_config_t` field, so the wholesale config copies (file,
   window, MCP) cannot drop it. `tests/net_test.c` part (G) holds both over loopback.
+- **Behind Docker Desktop nobody outside the house can reach us at all, so a container relays
+  through the web gateway** (`ws_relay.h`, `--net-relay` / `$M2HLE_NET_RELAY`, Pinboard #366).
+  Docker Desktop's NAT gives the keepalive a random port that forwards nothing back (only the
+  published 3658 does), and RPCN tells guests to punch that port: they punched forever. Now every
+  datagram rides the gateway's `/gw/dgram` WebSocket (`[ip][port BE][payload]`, as the web build's
+  do), so RPCN and guests see the gateway's public address. It is decided once at session start,
+  never mid-room: a room keeps the address it saw at the join. `auto` is on in a container
+  (`/.dockerenv`) for the servers `ws_relay_url_for` knows; a process setting, like `local_ip`.
+  - The gateway refuses a WebSocket without an `Origin` it lists, so the relay sends the play
+    site's. It answers the gateway's pings (30 s) or is dropped.
+  - A lost relay drops the RPCN link too (`rpcn_recv_from`), so the heal signs back in and
+    reopens it. A heal attempt must not fall back to direct (`relay_required`, all but the last
+    try): the gateway shares the droplet with RPCN and came back a second after it in the test,
+    and a direct sign-in then left the room unreachable for good.
 - **A room copies each member's address when it is created or joined, and never refreshes it.**
   The address reaches RPCN only with the first UDP keepalive after login, so a Host or Join sent
   straight after sign-in snapshots nothing — for the life of the room — and two players on one

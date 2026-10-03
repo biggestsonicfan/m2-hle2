@@ -31,6 +31,7 @@
 #include "net_socket.h"
 #include "protobuf.h"
 #include "tls.h"
+#include "ws_relay.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -266,6 +267,13 @@ typedef struct {
      * (172.x) nobody on the LAN can reach, gives the container host's. 0 = say
      * local_ip. local_ip itself stays the socket's own, for rpcn_session_recv. */
     uint32_t     advertised_ip;
+#ifndef __EMSCRIPTEN__
+    /* When `relay_on`, every datagram goes through the web gateway's /gw/dgram
+     * instead of `udp` (ws_relay.h, Pinboard #366): for a client nobody outside
+     * can reach. The keepalive's address is then the gateway's. */
+    bool         relay_on;
+    ws_relay_t   relay;
+#endif
     int64_t      user_id;
     /* The protocol version from the server's ServerInfo greeting, the first
      * packet on every connection; 0 until it has been read. */
@@ -311,6 +319,10 @@ static inline int64_t rpcn_user_id(const rpcn_client_t *c) { return c->user_id; 
 static inline void rpcn_disconnect(rpcn_client_t *c) {
     tls_close(&c->tls);
     net_close(&c->udp);
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) ws_relay_close(&c->relay);
+    c->relay_on = false;
+#endif
     c->in_used = 0;
     c->in_consumed = 0;
 }
@@ -1574,6 +1586,9 @@ static inline bool rpcn_poll(rpcn_client_t *c, rpcn_packet_t *out) {
  */
 static inline bool rpcn_open_signaling(rpcn_client_t *c, uint16_t local_port) {
     if (net_sock_valid(c->udp)) return true;
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) return true;
+#endif
     c->local_port = local_port ? local_port : RPCN_P2P_PORT;
     if (!net_udp_open(&c->udp, c->local_port)) {
         rpcn_fail(c, "could not bind UDP %u (%d)", (unsigned)c->local_port, net_errno());
@@ -1584,8 +1599,15 @@ static inline bool rpcn_open_signaling(rpcn_client_t *c, uint16_t local_port) {
 
 /* The 13-byte keepalive that records/refreshes our public address. Call every
  * couple of seconds while online; pass 0 to use the logged-in user id. */
+static inline bool rpcn_send_to(rpcn_client_t *c, uint32_t ip_be, uint16_t port,
+                                const void *data, uint32_t len);
+
 static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
+#ifndef __EMSCRIPTEN__
+    if (!net_sock_valid(c->udp) && !c->relay_on) return false;
+#else
     if (!net_sock_valid(c->udp)) return false;
+#endif
     if (user_id == 0) user_id = c->user_id;
     if (user_id == 0 || c->signaling_addr == 0) return false;
 
@@ -1599,7 +1621,7 @@ static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
 
     memcpy(pkt + 9, c->advertised_ip ? &c->advertised_ip : &c->local_ip, 4);
 
-    return net_udp_send(c->udp, c->signaling_addr, RPCN_SIGNALING_PORT, pkt, sizeof(pkt));
+    return rpcn_send_to(c, c->signaling_addr, RPCN_SIGNALING_PORT, pkt, sizeof(pkt));
 }
 
 /*
@@ -1610,11 +1632,40 @@ static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
  */
 static inline bool rpcn_send_to(rpcn_client_t *c, uint32_t ip_be, uint16_t port,
                                 const void *data, uint32_t len) {
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) {
+        /* The gateway knows RPCN's helper by a tag, not by its address. */
+        if (ip_be == c->signaling_addr && port == RPCN_SIGNALING_PORT) {
+            static const uint8_t tag[4] = WS_RELAY_SIGNALING_TAG_BYTES;
+            memcpy(&ip_be, tag, 4);
+        }
+        return ws_relay_send(&c->relay, ip_be, port, data, len);
+    }
+#endif
     return net_udp_send(c->udp, ip_be, port, data, len);
 }
 
 static inline int rpcn_recv_from(rpcn_client_t *c, void *buf, uint32_t cap,
                                  uint32_t *out_ip_be, uint16_t *out_port) {
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) {
+        uint32_t ip = 0;
+        int got = ws_relay_recv(&c->relay, buf, cap, &ip, out_port);
+        if (got < 0) {
+            /* No datagrams without it: end the session the way a dropped RPCN
+             * link does, so the heal signs back in and opens a new relay. */
+            if (tls_is_connected(&c->tls)) {
+                rpcn_fail(c, "%s", c->relay.error);
+                rpcn_disconnect(c);
+            }
+            return 0;
+        }
+        static const uint8_t tag[4] = WS_RELAY_SIGNALING_TAG_BYTES;
+        if (got > 0 && memcmp(&ip, tag, 4) == 0) ip = c->signaling_addr;
+        if (out_ip_be) *out_ip_be = ip;
+        return got;
+    }
+#endif
     return net_udp_recv(c->udp, buf, cap, out_ip_be, out_port);
 }
 

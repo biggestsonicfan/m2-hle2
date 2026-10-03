@@ -1624,6 +1624,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             /* The LAN address to tell the server instead of this machine's own:
              * inside a container, the container host's (issue #108). */
             netplay_set_local_ip(argv[++i]);
+        } else if (strcmp(argv[i], "--net-relay") == 0 && i + 1 < argc) {
+            /* on | off | auto | a ws(s):// /gw/dgram URL: datagrams through the
+             * web gateway, for a player nobody outside can reach (Pinboard #366). */
+            netplay_set_relay(argv[++i]);
         } else if (strcmp(argv[i], "--net-host") == 0) {
             g_net_auto = 1;
         } else if (strcmp(argv[i], "--net-players") == 0 && i + 1 < argc) {

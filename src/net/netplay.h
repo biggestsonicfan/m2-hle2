@@ -2104,6 +2104,55 @@ static inline const char *netplay_local_ip(void) {
     return env ? env : "";
 }
 
+/* Whether datagrams go through the web gateway's relay (ws_relay.h, Pinboard
+ * #366). `--net-relay` or $M2HLE_NET_RELAY: `on`, `off`, `auto` (the default) or
+ * a ws:// / wss:// /gw/dgram URL of a gateway of one's own. A process setting,
+ * for the reason netplay_local_ip gives.
+ *
+ * `auto` relays inside a container. Docker Desktop gives the keepalive a port
+ * of its own that forwards nothing back, so a player outside the house is told
+ * to punch a dead port and never links (the fly's stream, 2026-10-02). The
+ * public gateway relays only for the servers it fronts (ours and the official
+ * one), so `on` and `auto` do nothing on any other: a test server on this
+ * machine is reached directly. */
+static char g_netplay_relay[256];
+/* Set for a heal's attempts but the last. The gateway and RPCN share a machine,
+ * so a heal can get in before the gateway is back; signing in direct then would
+ * leave the room unreachable for good, where the next attempt finds it. */
+static bool g_netplay_relay_required;
+
+static inline void netplay_set_relay(const char *mode) {
+    snprintf(g_netplay_relay, sizeof(g_netplay_relay), "%s", mode ? mode : "");
+}
+
+static inline bool netplay_in_container(void) {
+#ifdef __linux__
+    FILE *f = fopen("/.dockerenv", "rb");
+    if (!f) f = fopen("/run/.containerenv", "rb");
+    if (f) { fclose(f); return true; }
+#endif
+    return false;
+}
+
+/* The relay URL for `server`, or "" to send directly. */
+static inline const char *netplay_relay_url(const char *server, char *buf, size_t cap) {
+#ifdef __EMSCRIPTEN__
+    (void)server; (void)buf; (void)cap;
+    return "";   /* the web build's datagrams take the gateway anyway */
+#else
+    const char *mode = g_netplay_relay[0] ? g_netplay_relay : getenv("M2HLE_NET_RELAY");
+    if (!mode || !mode[0]) mode = "auto";
+    if (strncmp(mode, "ws://", 5) == 0 || strncmp(mode, "wss://", 6) == 0) {
+        snprintf(buf, cap, "%s", mode);
+        return buf;
+    }
+    bool want = strcmp(mode, "on") == 0 || strcmp(mode, "1") == 0
+             || (strcmp(mode, "auto") == 0 && netplay_in_container());
+    if (want && ws_relay_url_for(server, buf, cap)) return buf;
+    return "";
+#endif
+}
+
 static inline void netplay_do_connect(const netplay_config_t *cfg) {
     if (!g_active_profile) { netplay_log("load a ROM set before connecting"); return; }
     if (!g_netplay.reset_board) {
@@ -2201,6 +2250,9 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     sc.com_id_foreign  = have_foreign ? com_id_foreign : NULL;
     sc.local_p2p_port  = g_netplay.cfg.local_p2p_port;
     sc.local_ip        = netplay_local_ip();
+    char relay_url[256];
+    sc.relay_url       = netplay_relay_url(g_netplay.cfg.server, relay_url, sizeof(relay_url));
+    sc.relay_required  = g_netplay_relay_required;
     sc.ps3             = g_netplay.ps3;
     sc.log             = netplay_session_log_cb;
     sc.log_ctx         = NULL;
@@ -2913,7 +2965,9 @@ static inline void netplay_heal_pump(void) {
     g_netplay.heal_at_ms = 0;
     g_netplay.heal_tries++;
     g_netplay.healing = true;
+    g_netplay_relay_required = g_netplay.heal_tries < NETPLAY_HEAL_TRIES;
     netplay_do_connect(&g_netplay.cfg);
+    g_netplay_relay_required = false;
     g_netplay.healing = false;
     /* Failed on the spot (the server is not answering yet): try again later. A
      * failure that comes later arrives through netplay_mirror_stage. */
