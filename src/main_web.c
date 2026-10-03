@@ -305,20 +305,40 @@ static bool web_slice(void) {
  * pressed again. Offline only. In a room or a match the other boards run on, so
  * it is refused there, and a pause that a room catches up with is let go. It is
  * the page's, not the board's: nothing the board reads changes, a reset keeps it,
- * and a paused board is exactly the board it was, frame for frame. */
+ * and a paused board is exactly the board it was, frame for frame.
+ *
+ * In a Console game the PS3's own pause menu answers it instead: the PS3 pauses
+ * on SELECT (TaskPause_WaitTrigger 0xC7C28 tests button 0x100; START is 0x200),
+ * and the shell already ports that menu, so the button presses SELECT for it
+ * (g_web_select_tap). The plain freeze is left to the title (attract, where the
+ * PS3 has no pause either) and to a program with no shell. */
 static bool g_web_paused;
+static bool g_web_select_tap;   /* one shell frame of SELECT, from the page */
 
 static bool web_pause_refused(void) { return netplay_in_room() || netplay_active(); }
 
-/* Returns whether the board is now paused. */
-EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
-    g_web_paused = on && state.romset.loaded && !web_pause_refused();
-    return g_web_paused ? 1 : 0;
-}
-EMSCRIPTEN_KEEPALIVE int web_paused(void) { return g_web_paused ? 1 : 0; }
-/* 1 when the page may offer the button: a game is loaded and no room has us. */
+/* 1 when the page may offer the button: a game is loaded, no room has us, and
+ * the Console shell is not in one of its own menus (which hold the board). */
 EMSCRIPTEN_KEEPALIVE int web_pause_allowed(void) {
-    return state.romset.loaded && !web_pause_refused() ? 1 : 0;
+    if (!state.romset.loaded || web_pause_refused()) return 0;
+    if (!g_web_shell_on || g_web_paused) return 1;
+    ps3ui_sh_screen_t scr = g_ps3ui_shell.scr;
+    return scr == PS3UI_SH_TITLE || scr == PS3UI_SH_GAME || scr == PS3UI_SH_PAUSE;
+}
+/* 0 running, 1 the page's freeze ("Paused" over the picture), 2 the PS3 pause menu. */
+EMSCRIPTEN_KEEPALIVE int web_paused(void) {
+    return g_web_paused ? 1 : g_web_shell_on && g_ps3ui_shell.scr == PS3UI_SH_PAUSE ? 2 : 0;
+}
+/* Returns web_paused() as it will be. */
+EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
+    if (on && !web_pause_allowed()) return web_paused();
+    if (g_web_shell_on && !g_web_paused && g_ps3ui_shell.scr != PS3UI_SH_TITLE) {
+        bool menu = g_ps3ui_shell.scr == PS3UI_SH_PAUSE;
+        if (!!on != menu) g_web_select_tap = true;   /* SELECT opens it, and SELECT again resumes */
+        return on ? 2 : 0;
+    }
+    g_web_paused = on != 0;
+    return web_paused();
 }
 
 static void web_run_owed_slices(void) {
@@ -593,7 +613,10 @@ static ps3ui_view_t web_lobby_tick(void) {
     if (!next_us || now - next_us > 250000) next_us = now;
     while (now >= next_us) {
         if (g_web_shell_on) {
-            ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad(), web_lobby_pad2(), netplay_active());
+            /* the page's Pause: a SELECT for one frame, then let go, so the shell sees a press */
+            uint32_t tap = g_web_select_tap ? PS3UI_PAD_SELECT : 0;
+            g_web_select_tap = false;
+            ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad() | tap, web_lobby_pad2(), netplay_active());
             /* in a room too: the go-again prompt comes up over any shell screen */
             if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room())
                 ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
