@@ -423,6 +423,7 @@ static inline uint8_t geo3d_cull_code(vec3_t p) {
     for (int k = 0; k < 5; k++) {
         const float *q = g_geo3d_cull_plane[k];
         float d = q[0] * p.x + q[1] * p.y + q[2] * p.z + q[3];
+        if (!(d < 0.0f)) continue;   /* m >= 0, so only a negative d can be out */
         float m = 1.0e-5f * (fabsf(q[0] * p.x) + fabsf(q[1] * p.y) + fabsf(q[2] * p.z) + fabsf(q[3]));
         if (d < -m) code |= (uint8_t)(1u << k);
     }

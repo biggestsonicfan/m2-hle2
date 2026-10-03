@@ -299,7 +299,7 @@ build, 3000 frames of attract, 113k steps a frame):
 |---|---|
 | the i960 loop | 44 |
 | blocks (`ib_run`) | 29 |
-| of which the bus's slow path (COP / GEO: 4585 stores, 1689 loads) | 13 |
+| of which the bus's slow path (COP / GEO: 4585 stores, 1689 loads) | 13 (not so: see #392) |
 | interpreted steps | 4 |
 | hooks | ~0 |
 | 3D (decode + submit) | ~42 |
@@ -328,12 +328,81 @@ What would move the frame, in order:
 - **The 3D**: the PVR face path (store queues, `ftrv`) or drawing every other
   board frame.
 - **The COP / GEO store path**: 12 ms a slice for ~4600 stores, ~2.6 us each.
-  Handling the FIFO word in line instead of through the region table and the
-  COP's dispatch is the i960's largest single cost.
+  #392 measured this again and it is not so; see below.
 - **Then a recompiler**, if one is still wanted. It would have to keep
   registers in SH-4 registers across blocks, chain blocks without going back to
   the run loop, and have a bigger buffer or a cheaper flush. The prototype does
   none of these.
+
+## The face path and the bus, measured (#392)
+
+Attract now runs at 10-12 board fps (from ~10). A fight was not measured again.
+
+- **Faces go straight into the store queues** (`dp_vertex`, `dp_hdr`: KOS's
+  direct rendering, `pvr_dr_target` / `pvr_dr_commit`). `pvr_prim`'s call and
+  copy were ~4% of a frame.
+- **A texture keeps its compiled header** (`dc_tex_t.hdr`, `hdr_var`). A header
+  is compiled once for each texture, list and mirror/transparent variant, not
+  every time the texture changes. The untextured and checker headers are
+  compiled once (`g_dp_hdr_plain`).
+- **The last face's texture lookup and colour are remembered** (`g_dp_memo`).
+  The two halves of a quad sit side by side in the sorted order, and a model's
+  faces share textures and lights.
+- **A face with no corner near the eye skips the clipper.** Its three corners
+  are projected straight out, with the screen scale folded into the run's
+  projection (`dp_proj_t`).
+- **`DC_DRAW_EVERY=2`** (`make EXTRA=-DDC_DRAW_EVERY=2`; default 1) draws every
+  other board frame. The board runs every frame, and the frames between are
+  never decoded. Attract runs at 13-15 board fps then, with half of them
+  shown.
+- **The frame-hash line is drawn once.** It was redrawn every slice, at a
+  24-row memset plus bfont each time. The slice total to frame 1200 fell 5%
+  (66.9 s to 63.5 s), and the hash is unchanged.
+- `geo3d_cull_code` skips a plane's tolerance when the distance is not
+  negative. That gives the same codes: the tolerance is never negative, and a
+  NaN fails both tests.
+
+**The bus is not the bottleneck.** #386's 13 ms a slice for the COP / GEO
+stores (2.6 us a store) was an artifact of the timer. Flycast's TMU count only
+moves at the edges of its own dynarec blocks, so a short region timed with it
+takes whatever block it lands in. Two measurements that do not depend on it:
+
+- **An A/B of the slice total to frame 1200** (`HASH_FRAME=1200`, the frame
+  hash identical). A fast path that took the COP and GEO stores without the
+  block's sync gave 66,890 ms against 66,872 without it. Both runs repeated to
+  the millisecond. It was not kept.
+- **An instruction-count profile.** Flycast's interpreter was patched to sample
+  the PC every 97 SH-4 instructions, over attract frames ~1200-1330. Audio
+  runs in real time, so its share is overstated.
+
+| | % of SH-4 instructions |
+|---|---|
+| `ib_run` (the block replay) | 11.5 |
+| `adx_next` + `adx_mix` + `ds_callback` (sound) | 20.9 |
+| `geo3d_decode_model_cached` | 7.5 |
+| `dp_face` | 5.1 |
+| `emu_slice_body` | 4.1 |
+| `emit_tri_uv` | 3.4 |
+| `dp_sort` | 2.3 |
+| `i960_step_core` | 2.2 |
+| `geo3d_flat_depth` | 2.2 |
+| `s24_draw_tilemap` | 2.1 |
+| `ib_lookup` | 1.8 |
+| `apply_matrix` | 1.7 |
+| `mem_find_region` | 1.6 |
+| `cop_write` + `sharc_exec` | 2.1 |
+
+Leaving sound out, the i960 is ~32%, the 3D ~37% and the bus and COP ~4%. The
+GEO publish (`geodl_publish`: the 128 KB bufferram snapshot, about once a
+frame) is ~2 ms a slice.
+
+**So a recompiler is not worth building now.** If it made every block free, it
+would save the i960's block work and not the rest: at most ~25% of a frame,
+about 10 to 13 fps. Keeping the i960's registers in SH-4 registers and chaining
+blocks is a large piece of work, with all of attract's state to keep exact, and
+30 fps is out of its reach. 30 fps does not look reachable on this design.
+What is left is a few percent at a time: the mesh decode
+(`geo3d_decode_model_cached`, `emit_tri_uv`) and drawing every other frame.
 
 ## Toolchain and runtime traps
 
@@ -362,10 +431,9 @@ What would move the frame, in order:
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
   texture fields) would let the 1 MB mesh cache hold more.
-- **The i960 slice (53-79 ms a frame after #370's blocks).** First the COP /
-  GEO stores (13 ms of a 44 ms attract slice; see the recompiler prototype
-  above), then keeping the hot `cpu` / `bus` state in the 8 KB operand-cache
-  RAM mode.
+- **The i960 slice (53-79 ms a frame after #370's blocks).** Not the COP /
+  GEO stores (#392 measured ~4% for the bus and COP together). Keeping the hot
+  `cpu` / `bus` state in the 8 KB operand-cache RAM mode.
 - **The tile layer's snapshot.** Each redraw copies and compares 56 KB of tile
   RAM twice (`dc_pvr.h`); swapping two pointers would save one copy.
 - **UTLB reach.** Map the hot code pages with 64 KB pages.

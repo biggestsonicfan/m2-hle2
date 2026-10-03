@@ -53,6 +53,8 @@ typedef struct {
     uint16_t  w, h;          /* the PVR texture's size (>= 8 a side) */
     uint16_t  q0, q1;        /* the texture-RAM KB rows it was cut from */
     uint8_t   sheet;
+    uint8_t   hdr_var;       /* what hdr was compiled for (dp_face's variant), 0: nothing */
+    pvr_poly_hdr_t hdr;      /* the last header a face with this texture needed */
 } dc_tex_t;
 
 static struct {
@@ -278,10 +280,20 @@ static void dp_text(int row, const char *s) {
 
 /* ---- Submission ------------------------------------------------------------------- */
 
+/* Straight into a store queue and on to the TA (KOS's direct rendering: an open
+ * list holds the queues): pvr_prim's call and copy were ~4% of a frame. */
 static inline void dp_vertex(uint32_t flags, float x, float y, float z, float u, float v,
                              uint32_t argb, uint32_t oargb) {
-    pvr_vertex_t vx = { .flags = flags, .x = x, .y = y, .z = z, .u = u, .v = v, .argb = argb, .oargb = oargb };
-    pvr_prim(&vx, sizeof vx);
+    pvr_vertex_t *d = pvr_dr_target();
+    d->flags = flags; d->x = x; d->y = y; d->z = z; d->u = u; d->v = v; d->argb = argb; d->oargb = oargb;
+    pvr_dr_commit(d);
+}
+
+static inline void dp_hdr(const pvr_poly_hdr_t *h) {
+    uint32_t *d = pvr_dr_target();
+    const uint32_t *s = (const uint32_t *)h;
+    d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3]; d[4] = s[4]; d[5] = s[5]; d[6] = s[6]; d[7] = s[7];
+    pvr_dr_commit(d);
 }
 
 /* A screen-aligned textured rectangle: (x0, y0)-(x1, y1) on screen, (u1, v1)
@@ -293,7 +305,7 @@ static void dp_rect(pvr_list_t list, pvr_ptr_t tex, int fmt, int tw, int th, boo
     pvr_poly_cxt_txr(&cxt, list, fmt, tw, th, tex, PVR_FILTER_BILINEAR);
     cxt.depth.comparison = depth_always ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GEQUAL;
     pvr_poly_compile(&hdr, &cxt);
-    pvr_prim(&hdr, sizeof hdr);
+    dp_hdr(&hdr);
     dp_vertex(PVR_CMD_VERTEX,     x0, y0, z, 0.0f, 0.0f, 0xFFFFFFFFu, 0);
     dp_vertex(PVR_CMD_VERTEX,     x1, y0, z, u1,   0.0f, 0xFFFFFFFFu, 0);
     dp_vertex(PVR_CMD_VERTEX,     x0, y1, z, 0.0f, v1,   0xFFFFFFFFu, 0);
@@ -309,7 +321,7 @@ static void dp_bar(float x0, float x1) {
     cxt.blend.src = PVR_BLEND_ONE;
     cxt.blend.dst = PVR_BLEND_ZERO;
     pvr_poly_compile(&hdr, &cxt);
-    pvr_prim(&hdr, sizeof hdr);
+    dp_hdr(&hdr);
     dp_vertex(PVR_CMD_VERTEX,     x0, 0.0f,   1.0e3f, 0.0f, 0.0f, 0xFF000000u, 0);
     dp_vertex(PVR_CMD_VERTEX,     x1, 0.0f,   1.0e3f, 0.0f, 0.0f, 0xFF000000u, 0);
     dp_vertex(PVR_CMD_VERTEX,     x0, 480.0f, 1.0e3f, 0.0f, 0.0f, 0xFF000000u, 0);
@@ -325,7 +337,7 @@ static void dp_text_rect(int r) {
                      1024, 512, g_dp.text, PVR_FILTER_NONE);
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
     pvr_poly_compile(&hdr, &cxt);
-    pvr_prim(&hdr, sizeof hdr);
+    dp_hdr(&hdr);
     float v1 = v0 + 24.0f / 512.0f, u1 = 640.0f / 1024.0f;
     dp_vertex(PVR_CMD_VERTEX,     0.0f,   y,         1.0e3f, 0.0f, v0, 0xFFFFFFFFu, 0);
     dp_vertex(PVR_CMD_VERTEX,     640.0f, y,         1.0e3f, u1,   v0, 0xFFFFFFFFu, 0);
@@ -423,7 +435,7 @@ static void dp_ls_strips(pvr_list_t list, pvr_ptr_t tex, int fmt, float z) {
     pvr_poly_cxt_txr(&cxt, list, fmt | PVR_TXRFMT_NONTWIDDLED, 512, 512, tex, PVR_FILTER_BILINEAR);
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
     pvr_poly_compile(&hdr, &cxt);
-    pvr_prim(&hdr, sizeof hdr);
+    dp_hdr(&hdr);
     const float k = 1.0f / 512.0f;
     for (int y = 0; y < VIDEO_HEIGHT; ) {
         int h = g_ls.h[y], ty = (y + g_ls.vy) & 511, e = y + 1;
@@ -534,7 +546,7 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
 
 /* ---- The 3D scene ------------------------------------------------------------------ */
 
-typedef struct { float f0, f1, c0, c1; } dp_proj_t;
+typedef struct { float ax, bx, ay, by; } dp_proj_t;   /* screen x = bx + ax * x / -z, y = by + ay * y / -z */
 #define DP_MAX_RUNS 256
 static dp_proj_t g_dp_proj[DP_MAX_RUNS];
 static uint8_t   g_dp_tri_run[GEO3D_MAX_TRIS];
@@ -597,7 +609,7 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
         if (!(x1 > x0 && y1 > y0) || g_dp.runs >= DP_MAX_RUNS) { i = j; continue; }
         dp_cull_planes(c0->gproj, x0, y0, x1, y1);
         int run = (int)g_dp.runs++;
-        g_dp_proj[run] = (dp_proj_t){ c0->gproj[0], c0->gproj[1], c0->gproj[2], c0->gproj[3] };
+        g_dp_proj[run] = (dp_proj_t){ c0->gproj[0] * DC_S, DC_X0 + c0->gproj[2] * DC_S, -c0->gproj[1] * DC_S, c0->gproj[3] * DC_S };
         int slice = windows - 1 - (int)c0->window;
         slice = slice < 0 ? 0 : slice > 7 ? 7 : slice;
         int first = g_geo3d_tris.count;
@@ -671,40 +683,110 @@ static int dp_sort(void) {
 
 typedef struct { float x, y, z, u, v; } dp_ev_t;   /* eye space, texel uv */
 
+/* The colour and texture headers no texture holds: [list][0 colour, 1 checker]. */
+static pvr_poly_hdr_t g_dp_hdr_plain[2][2];
+static uint8_t        g_dp_hdr_plain_ok;
+
+static void dp_hdr_compile(pvr_poly_hdr_t *hdr, pvr_list_t list, const dc_tex_t *tex, bool checker, unsigned fl) {
+    pvr_poly_cxt_t cxt;
+    if (tex) {
+        int bank = (fl & GEO3D_FACE_TRANSPARENT) ? 1 : 0;
+        pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(bank) | PVR_TXRFMT_TWIDDLED,
+                         tex->w, tex->h, tex->ptr, PVR_FILTER_BILINEAR);
+        cxt.gen.specular = true;
+        cxt.txr.uv_flip = (pvr_uv_flip_t)(((fl & GEO3D_FACE_MIRROR_X) ? PVR_UVFLIP_U : 0) |
+                                          ((fl & GEO3D_FACE_MIRROR_Y) ? PVR_UVFLIP_V : 0));
+    } else if (checker) {
+        pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(2) | PVR_TXRFMT_TWIDDLED,
+                         8, 8, g_dp.checker, PVR_FILTER_NONE);
+    } else {
+        pvr_poly_cxt_col(&cxt, list);
+    }
+    cxt.gen.culling = PVR_CULLING_NONE;
+    cxt.depth.comparison = list == PVR_LIST_OP_POLY ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GEQUAL;
+    pvr_poly_compile(hdr, &cxt);
+}
+
+/* The last face's inputs and what came of them: the two halves of a quad sit
+ * side by side in the sorted order, and a model's faces share textures. */
+static struct {
+    float    tx, ty, tw, th, fl;  dc_tex_t *tex;               /* dp_tex_get */
+    float    r, g, b, pl, lb;     bool ctex; uint32_t base, off;   /* dp_face_colour */
+} g_dp_memo;
+
+static inline void dp_memo_reset(void) {
+    memset(&g_dp_memo, 0, sizeof g_dp_memo);
+    g_dp_memo.tw = g_dp_memo.r = -1.0f;
+}
+
 /* One face: near-clipped in eye space, projected, sent. */
 static void dp_face(memory_bus_t *bus, int t, pvr_list_t list, uint32_t *last_state) {
     const geo3d_tri_t *T = &g_geo3d_tris.tris[t];
     const dp_proj_t *P = &g_dp_proj[g_dp_tri_run[t]];
     unsigned fl = (unsigned)(T->fl + 0.5f);
     bool checker = (fl & GEO3D_FACE_CHECKER) != 0;
-    dc_tex_t *tex = (!checker && T->tw > 0.0f) ? dp_tex_get(bus, T) : NULL;
-    uint32_t base, off;
-    dp_face_colour(bus, T, tex != NULL || (T->tw > 0.0f && !checker), &base, &off);
+    dc_tex_t *tex = NULL;
+    if (!checker && T->tw > 0.0f) {
+        if (T->tx == g_dp_memo.tx && T->ty == g_dp_memo.ty && T->tw == g_dp_memo.tw &&
+                T->th == g_dp_memo.th && T->fl == g_dp_memo.fl) {
+            tex = g_dp_memo.tex;
+        } else {
+            tex = dp_tex_get(bus, T);
+            g_dp_memo.tx = T->tx; g_dp_memo.ty = T->ty; g_dp_memo.tw = T->tw; g_dp_memo.th = T->th;
+            g_dp_memo.fl = T->fl; g_dp_memo.tex = tex;
+        }
+    }
+    bool ctex = tex != NULL || (T->tw > 0.0f && !checker);
+    if (T->r != g_dp_memo.r || T->g != g_dp_memo.g || T->b != g_dp_memo.b || T->pl != g_dp_memo.pl ||
+            T->lb != g_dp_memo.lb || ctex != g_dp_memo.ctex) {
+        dp_face_colour(bus, T, ctex, &g_dp_memo.base, &g_dp_memo.off);
+        g_dp_memo.r = T->r; g_dp_memo.g = T->g; g_dp_memo.b = T->b; g_dp_memo.pl = T->pl;
+        g_dp_memo.lb = T->lb; g_dp_memo.ctex = ctex;
+    }
+    const uint32_t base = g_dp_memo.base, off = g_dp_memo.off;
 
-    /* The header, when it differs from the last face's. */
-    uint32_t state = tex ? (uint32_t)(uintptr_t)tex->ptr ^ (fl & (GEO3D_FACE_TRANSPARENT | GEO3D_FACE_MIRROR_X | GEO3D_FACE_MIRROR_Y)) << 1
-                         : checker ? 2u : 4u;
+    /* The header, when it differs from the last face's; compiled once per
+     * texture and variant (or per list, untextured), not per change. */
+    const unsigned var = (fl & (GEO3D_FACE_TRANSPARENT | GEO3D_FACE_MIRROR_X | GEO3D_FACE_MIRROR_Y)) << 1;
+    uint32_t state = tex ? (uint32_t)(uintptr_t)tex->ptr ^ var : checker ? 2u : 4u;
     if (state != *last_state) {
         *last_state = state;
-        pvr_poly_cxt_t cxt;
-        pvr_poly_hdr_t hdr;
+        const int li = list == PVR_LIST_OP_POLY ? 0 : 1;
         if (tex) {
-            int bank = (fl & GEO3D_FACE_TRANSPARENT) ? 1 : 0;
-            pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(bank) | PVR_TXRFMT_TWIDDLED,
-                             tex->w, tex->h, tex->ptr, PVR_FILTER_BILINEAR);
-            cxt.gen.specular = true;
-            cxt.txr.uv_flip = (pvr_uv_flip_t)(((fl & GEO3D_FACE_MIRROR_X) ? PVR_UVFLIP_U : 0) |
-                                              ((fl & GEO3D_FACE_MIRROR_Y) ? PVR_UVFLIP_V : 0));
-        } else if (checker) {
-            pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(2) | PVR_TXRFMT_TWIDDLED,
-                             8, 8, g_dp.checker, PVR_FILTER_NONE);
+            uint8_t want = (uint8_t)(0x80u | li << 6 | var);
+            if (tex->hdr_var != want) { dp_hdr_compile(&tex->hdr, list, tex, false, fl); tex->hdr_var = want; }
+            dp_hdr(&tex->hdr);
         } else {
-            pvr_poly_cxt_col(&cxt, list);
+            if (!g_dp_hdr_plain_ok) {
+                for (int l = 0; l < 2; l++)
+                    for (int c = 0; c < 2; c++)
+                        dp_hdr_compile(&g_dp_hdr_plain[l][c], l ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY, NULL, c != 0, 0);
+                g_dp_hdr_plain_ok = 1;
+            }
+            dp_hdr(&g_dp_hdr_plain[li][checker ? 1 : 0]);
         }
-        cxt.gen.culling = PVR_CULLING_NONE;
-        cxt.depth.comparison = list == PVR_LIST_OP_POLY ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GEQUAL;
-        pvr_poly_compile(&hdr, &cxt);
-        pvr_prim(&hdr, sizeof hdr);
+    }
+
+    float su = tex ? 1.0f / (float)tex->w : 0.0f, sv = tex ? 1.0f / (float)tex->h : 0.0f;
+    const float ck = 0.125f / DC_S;   /* the checker's texel: two board pixels */
+    if (T->z0 <= -DC_NEAR && T->z1 <= -DC_NEAR && T->z2 <= -DC_NEAR) {
+        /* Nothing to clip, the usual case: three corners straight out. */
+        float w0 = -1.0f / T->z0, w1 = -1.0f / T->z1, w2 = -1.0f / T->z2;
+        float x0 = P->bx + P->ax * T->x0 * w0, y0 = P->by + P->ay * T->y0 * w0;
+        float x1 = P->bx + P->ax * T->x1 * w1, y1 = P->by + P->ay * T->y1 * w1;
+        float x2 = P->bx + P->ax * T->x2 * w2, y2 = P->by + P->ay * T->y2 * w2;
+        if (checker) {   /* screen-space checker: one z, so the PVR maps it affinely */
+            float z = fmaxf(fmaxf(w0, w1), w2);
+            dp_vertex(PVR_CMD_VERTEX,     x0, y0, z, (x0 - DC_X0) * ck, y0 * ck, base, off);
+            dp_vertex(PVR_CMD_VERTEX,     x1, y1, z, (x1 - DC_X0) * ck, y1 * ck, base, off);
+            dp_vertex(PVR_CMD_VERTEX_EOL, x2, y2, z, (x2 - DC_X0) * ck, y2 * ck, base, off);
+        } else {
+            dp_vertex(PVR_CMD_VERTEX,     x0, y0, w0, T->u0 * su, T->v0 * sv, base, off);
+            dp_vertex(PVR_CMD_VERTEX,     x1, y1, w1, T->u1 * su, T->v1 * sv, base, off);
+            dp_vertex(PVR_CMD_VERTEX_EOL, x2, y2, w2, T->u2 * su, T->v2 * sv, base, off);
+        }
+        g_dp.tris++;
+        return;
     }
 
     /* Near clip (Sutherland-Hodgman against z = -DC_NEAR): 3 corners in, 4 out at most. */
@@ -723,18 +805,16 @@ static void dp_face(memory_bus_t *bus, int t, pvr_list_t list, uint32_t *last_st
         }
     }
     if (n < 3) return;
-    float su = tex ? 1.0f / (float)tex->w : 0.0f, sv = tex ? 1.0f / (float)tex->h : 0.0f;
     float sx[4], sy[4], sz[4], tu[4], tv[4];
     for (int k = 0; k < n; k++) {
         float iw = -1.0f / out[k].z;
-        float bx = P->c0 + P->f0 * out[k].x * iw, by = P->c1 - P->f1 * out[k].y * iw;
-        sx[k] = DC_X0 + bx * DC_S;
-        sy[k] = by * DC_S;
+        sx[k] = P->bx + P->ax * out[k].x * iw;
+        sy[k] = P->by + P->ay * out[k].y * iw;
         sz[k] = iw;
-        if (checker) { tu[k] = bx * 0.125f; tv[k] = by * 0.125f; }
+        if (checker) { tu[k] = (sx[k] - DC_X0) * ck; tv[k] = sy[k] * ck; }
         else         { tu[k] = out[k].u * su; tv[k] = out[k].v * sv; }
     }
-    if (checker) {   /* screen-space checker: one z, so the PVR maps it affinely */
+    if (checker) {
         float z = fmaxf(fmaxf(sz[0], sz[1]), sz[2]);
         for (int k = 0; k < n; k++) sz[k] = z;
     }
@@ -768,6 +848,7 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     g_dp.us_scan  += (uint32_t)(tb - ta);
     g_dp.us_sort  += (uint32_t)(t1 - tb);
     g_dp.tris = 0;
+    dp_memo_reset();
 
     const float W = VIDEO_WIDTH * DC_S, H = VIDEO_HEIGHT * DC_S;
     const float U = VIDEO_WIDTH / 512.0f, V = VIDEO_HEIGHT / 512.0f;

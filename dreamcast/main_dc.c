@@ -21,6 +21,11 @@
 
 /* -DDC_HASH_FRAME=n: at board frame n, a hash of work RAM, the i960's
  * registers and its cycle count goes on row 15 (an A/B of two builds). */
+/* Draw every Nth board frame (2: every other). The board runs every frame
+ * either way; the frames between are never decoded. */
+#ifndef DC_DRAW_EVERY
+#define DC_DRAW_EVERY 1
+#endif
 #ifndef DC_HASH_FRAME
 #define DC_HASH_FRAME 0
 #endif
@@ -230,20 +235,20 @@ int main(int argc, char **argv) {
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
-        if (g_emu_frames != drawn_f && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; }
+        if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; }
         (void)f;
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
             uint32_t h = 2166136261u;
             for (uint32_t a = 0x500000u; a < 0x600000u; a += 4) h = (h ^ mem_read32(&bus, a)) * 16777619u;
             for (int r = 0; r < 32; r++) h = (h ^ ((uint32_t *)&cpu.globals)[r]) * 16777619u;
             h = (h ^ (uint32_t)cpu.cycles) * 16777619u;
-            snprintf(line, sizeof line, "hash at frame %u: %08lx ip %08lx, slices %lu ms", (unsigned)g_emu_frames,
+            snprintf(line, sizeof line, "f%u %08lx ip %lx sl %lu ms", (unsigned)g_emu_frames,
                      (unsigned long)h, (unsigned long)cpu.sfr.ip, (unsigned long)(us_all / 1000));
             printf("%s\n", line);
             hashed_line[0] = 0; strncat(hashed_line, line, sizeof hashed_line - 1);
             hashed = 1;
+            dp_text(15, hashed_line);
         }
-        if (hashed) dp_text(15, hashed_line);
         ds_pump();
         uint64_t t2 = timer_us_gettime64();
         us_slice += t1 - t0;
