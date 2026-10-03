@@ -144,54 +144,67 @@ static inline void sharc_coli_trans_xz(float X, float Z, float ox, float oy, flo
 /* ---- Fn_area_table_gen (0x3A, PM 0x20DDF): per axis, P0's balls (swept from
  *      the previous to the current position, grown by their radii) mark 64 bins
  *      of 1/8 unit; a P1 ball keeps the P0 balls whose extent overlaps its own. */
+
+/* axis d: P0's balls mark the bin of each one's low end in lo, high end in hi */
+static inline void sharc_coli_area_mark(uint32_t d, uint32_t k0, uint32_t *sh0, uint32_t lo[64], uint32_t hi[64]) {
+    uint32_t bit = 1;
+    for (uint32_t i = 0; i < 32u; i++, bit <<= 1) {
+        float a = sharc_dm_getf(0x1403F40u + d + 3u * i), b = sharc_dm_getf(0x1403FA0u + d + 3u * i);
+        if (b - a < 0.0f) { float t = a; a = b; b = t; }
+        uint32_t Rb = sharc_dm_get(0x30600u + i);
+        if (Rb == 0) continue;
+        float R = sharc_bits_to_float(Rb);
+        uint32_t cur = *sh0; *sh0 >>= 1;
+        if ((cur & 1u) && k0 != 4u) R = R * sharc_dm_getf(0x306F0u);
+        float f0 = a - R, f1 = b + R;
+        float u = f0 * 8.0f; u = u + 32.0f; u = u - 0.5f;
+        lo[(int32_t)u & 63] |= bit;
+        u = f1 * 8.0f; u = u + 32.0f; u = u - 0.5f;
+        hi[(int32_t)u & 63] |= bit;
+    }
+}
+
+/* axis d: each P1 ball keeps, in its candidate mask, the P0 balls whose bins
+ * overlap its own extent */
+static inline void sharc_coli_area_keep(uint32_t d, uint32_t k1, uint32_t *sh1, const uint32_t lo[64], const uint32_t hi[64]) {
+    for (uint32_t j = 0; j < 32u; j++) {
+        float a = sharc_dm_getf(0x1407F40u + d + 3u * j), b = sharc_dm_getf(0x1407FA0u + d + 3u * j);
+        if (b - a < 0.0f) { float t = a; a = b; b = t; }
+        uint32_t Rb = sharc_dm_get(0x30700u + j), mask = 0;
+        if (Rb != 0) {
+            float R = sharc_bits_to_float(Rb);
+            uint32_t cur = *sh1; *sh1 >>= 1;
+            if ((cur & 1u) && k1 != 4u) R = R * sharc_dm_getf(0x307F0u);
+            float f0 = a - R, f1 = b + R;
+            float u = f0 * 8.0f; u = u + 32.0f;
+            if (!(u < 0.0f) && !(u - 64.0f >= 0.0f)) {
+                u = u - 0.5f;
+                mask = hi[(int32_t)u & 63];
+                float v = f1 * 8.0f; v = v + 32.0f;
+                if (!(v < 0.0f) && !(v - 64.0f >= 0.0f)) {
+                    v = v - 0.5f;
+                    mask &= lo[(int32_t)v & 63];
+                } else {
+                    mask = 0;
+                }
+            }
+        }
+        sharc_dm_set(0x1403E20u + j, sharc_dm_get(0x1403E20u + j) & mask);
+    }
+}
+
 static inline void sharc_coli_area_table_gen(uint32_t m0, uint32_t m1, uint32_t k0, uint32_t k1) {
     sharc_dm_set(0x3041Au, k0);
     sharc_dm_set(0x3041Bu, k1);
     for (uint32_t j = 0; j < 32u; j++) sharc_dm_set(0x1403E20u + j, 0xFFFFFFFFu);
     uint32_t sh0 = m0, sh1 = m1;          /* the firmware never reloads these between axes */
     for (uint32_t d = 0; d < 3u; d++) {
-        uint32_t lo[64] = {0}, hi[64] = {0}, bit = 1;
-        for (uint32_t i = 0; i < 32u; i++, bit <<= 1) {
-            float a = sharc_dm_getf(0x1403F40u + d + 3u * i), b = sharc_dm_getf(0x1403FA0u + d + 3u * i);
-            if (b - a < 0.0f) { float t = a; a = b; b = t; }
-            uint32_t Rb = sharc_dm_get(0x30600u + i);
-            if (Rb == 0) continue;
-            float R = sharc_bits_to_float(Rb);
-            uint32_t cur = sh0; sh0 >>= 1;
-            if ((cur & 1u) && k0 != 4u) R = R * sharc_dm_getf(0x306F0u);
-            float f0 = a - R, f1 = b + R;
-            float u = f0 * 8.0f; u = u + 32.0f; u = u - 0.5f;
-            lo[(int32_t)u & 63] |= bit;
-            u = f1 * 8.0f; u = u + 32.0f; u = u - 0.5f;
-            hi[(int32_t)u & 63] |= bit;
-        }
+        uint32_t lo[64] = {0}, hi[64] = {0};
+        sharc_coli_area_mark(d, k0, &sh0, lo, hi);
         for (int n = 1; n < 63; n++) lo[n] |= lo[n - 1];       /* lo[63] stays raw */
         for (int n = 62; n >= 1; n--) hi[n] |= hi[n + 1];      /* hi[0] stays raw */
         for (int n = 0; n < 64; n++) { sharc_dm_set(0x30340u + (uint32_t)n, lo[n]); sharc_dm_set(0x30380u + (uint32_t)n, hi[n]); }
-        for (uint32_t j = 0; j < 32u; j++) {
-            float a = sharc_dm_getf(0x1407F40u + d + 3u * j), b = sharc_dm_getf(0x1407FA0u + d + 3u * j);
-            if (b - a < 0.0f) { float t = a; a = b; b = t; }
-            uint32_t Rb = sharc_dm_get(0x30700u + j), mask = 0;
-            if (Rb != 0) {
-                float R = sharc_bits_to_float(Rb);
-                uint32_t cur = sh1; sh1 >>= 1;
-                if ((cur & 1u) && k1 != 4u) R = R * sharc_dm_getf(0x307F0u);
-                float f0 = a - R, f1 = b + R;
-                float u = f0 * 8.0f; u = u + 32.0f;
-                if (!(u < 0.0f) && !(u - 64.0f >= 0.0f)) {
-                    u = u - 0.5f;
-                    mask = hi[(int32_t)u & 63];
-                    float v = f1 * 8.0f; v = v + 32.0f;
-                    if (!(v < 0.0f) && !(v - 64.0f >= 0.0f)) {
-                        v = v - 0.5f;
-                        mask &= lo[(int32_t)v & 63];
-                    } else {
-                        mask = 0;
-                    }
-                }
-            }
-            sharc_dm_set(0x1403E20u + j, sharc_dm_get(0x1403E20u + j) & mask);
-        }
+        sharc_coli_area_keep(d, k1, &sh1, lo, hi);
     }
     for (uint32_t k = 0; k < 16u; k++) sharc_dm_set(0x1403D80u + k, 0);
 }
@@ -228,11 +241,17 @@ static inline void sharc_coli_area_table_gen(uint32_t m0, uint32_t m1, uint32_t 
 #define SHARC_COLI_MIRROR_MAGIC 0x494C4F43u   /* "COLI" */
 
 /* ---- Fn_calc_coli_flag (0x3B, PM 0x20ED5): the narrow phase ------------------ */
-static inline void sharc_coli_calc_flag(uint32_t mode, uint32_t am0, uint32_t am1, uint32_t nz0,
-                                        uint32_t nz1, uint32_t en0, uint32_t en1) {
-    sharc_dm_set(0x30417u, en0);
-    sharc_dm_set(0x30418u, en1);
 
+/* what the narrow phase carries from ball pair to ball pair: its arguments, the
+ * four replies it builds up */
+typedef struct {
+    uint32_t mode, am0, am1, nz0, nz1, en0, en1;
+    uint32_t tested, hits;
+    float pen, lift;
+} sharc_coli_flag_t;
+
+static inline void sharc_coli_flag_mirror(uint32_t mode, uint32_t am0, uint32_t am1, uint32_t nz0,
+                                          uint32_t nz1, uint32_t en0, uint32_t en1) {
     sharc_dm_set(SHARC_COLI_MIRROR + 0u, SHARC_COLI_MIRROR_MAGIC);
     sharc_dm_set(SHARC_COLI_MIRROR + 1u, am0);   /* P1 balls attacking */
     sharc_dm_set(SHARC_COLI_MIRROR + 2u, am1);   /* P2 balls attacking */
@@ -241,89 +260,97 @@ static inline void sharc_coli_calc_flag(uint32_t mode, uint32_t am0, uint32_t am
     sharc_dm_set(SHARC_COLI_MIRROR + 5u, mode);
     sharc_dm_set(SHARC_COLI_MIRROR + 6u, nz0);
     sharc_dm_set(SHARC_COLI_MIRROR + 7u, nz1);
-    uint32_t tested = 0, hits = 0;
-    float pen = 0.0f, lift = 0.0f;
-    for (uint32_t k = 0; k < 0x60u; k++) {
-        sharc_dm_set(0x30340u + k, sharc_dm_get(0x1403F40u + k));
-        sharc_dm_set(0x303A0u + k, sharc_dm_get(0x1403FA0u + k));
-    }
-    uint32_t bj = 1;
-    for (uint32_t r15 = 32; ; r15--, bj <<= 1) {
-        uint32_t j = 32u - r15;
-        uint32_t m = sharc_dm_get(0x1403E20u + j);
-        uint32_t R1b = m ? sharc_dm_get(0x30720u + r15) : 0;
-        if (m && R1b) {
-            float R1 = sharc_bits_to_float(R1b);
-            if ((am1 & bj) && sharc_dm_get(0x3041Bu) != 4u) R1 = R1 * sharc_dm_getf(0x307F0u);
-            sharc_dm_setf(0x30416u, R1);
-            uint32_t off = sharc_dm_get(0x30741u + r15);
-            float P1c[3], P1p[3];
-            for (uint32_t c = 0; c < 3u; c++) {
-                P1c[c] = sharc_dm_getf(0x1407F40u + off + c); sharc_dm_setf(0x30410u + c, P1c[c]);
-                P1p[c] = sharc_dm_getf(0x1407FA0u + off + c); sharc_dm_setf(0x30413u + c, P1p[c]);
-            }
-            uint32_t sw = (am1 & bj) ? 0xFFFFFFFFu : am0;
-            if (en1 & bj) {
-                uint32_t bi = 1;
-                for (uint32_t r14 = 32; ; r14--, bi <<= 1) {
-                    uint32_t R0b = ((en0 & bi) && (m & bi)) ? sharc_dm_get(0x30620u + r14) : 0;
-                    if (R0b) {
-                        tested++;
-                        float R0 = sharc_bits_to_float(R0b);
-                        if ((am0 & bi) && sharc_dm_get(0x3041Au) != 4u) R0 = R0 * sharc_dm_getf(0x306F0u);
-                        uint32_t p0 = sharc_dm_get(0x30662u + r14);
-                        float d[3];
-                        for (uint32_t c = 0; c < 3u; c++) { d[c] = P1c[c] - sharc_dm_getf(p0 + c); sharc_dm_setf(0x30406u + c, d[c]); }
-                        float D2;
-                        if (sw & bi) {                              /* swept: closest approach over the frame */
-                            float dp[3], v[3];
-                            for (uint32_t c = 0; c < 3u; c++) { dp[c] = P1p[c] - sharc_dm_getf(p0 + 0x60u + c); v[c] = d[c] - dp[c]; }
-                            float e = dp[0] * v[0]; e = e + dp[1] * v[1]; e = e + dp[2] * v[2];
-                            float ne = -e;
-                            if (ne <= 0.0f) {
-                                D2 = dp[0] * dp[0] + dp[1] * dp[1]; D2 = D2 + dp[2] * dp[2];
-                            } else {
-                                float vv = v[0] * v[0] + v[1] * v[1]; vv = vv + v[2] * v[2];
-                                if (vv - ne <= 0.0f) {
-                                    D2 = d[0] * d[0] + d[1] * d[1]; D2 = D2 + d[2] * d[2];
-                                } else {
-                                    float t = sharc_fw_div(ne, vv);        /* _L205D0 */
-                                    float q0 = v[0] * t + dp[0], q1 = v[1] * t + dp[1], q2 = v[2] * t + dp[2];
-                                    D2 = q0 * q0 + q1 * q1; D2 = D2 + q2 * q2;
-                                }
-                            }
-                        } else {
-                            D2 = d[0] * d[0] + d[1] * d[1]; D2 = D2 + d[2] * d[2];
-                        }
-                        float S = R1 + R0, S2 = S * S;
-                        if (!(D2 - S2 >= 0.0f)) {                  /* touching: strictly inside */
-                            hits++;
-                            sharc_dm_set(0x307F3u, r14);
-                            sharc_dm_set(0x307F4u, r15);
-                            if (mode == 4u || mode == 5u) {
-                                float a = S2 - d[0] * d[0];
-                                a = a - d[2] * d[2];
-                                float x = sharc_fw_sqrt(a);
-                                x = mode == 4u ? x - d[1] : x + d[1];
-                                if (!(lift - x >= 0.0f)) lift = x;
-                            } else if (!(sw & bi)) {
-                                float x = (R1 + R0) - sharc_fw_sqrt(D2);
-                                float k = ((nz0 & bi) && (nz1 & bj)) ? 0.0f : sharc_dm_getf(0x30301u);
-                                x = x * k;
-                                if (x - pen >= 0.0f) pen = x;
-                            }
-                        } else {
-                            m &= ~bi;
-                        }
-                    }
-                    if (r14 == 1u) break;
-                }
+}
+
+/* a ball pair's squared distance; d is P1 - P0 now, P1p P1's previous position */
+static inline float sharc_coli_flag_d2(const float d[3], const float P1p[3], uint32_t p0, int swept) {
+    float D2;
+    if (swept) {                              /* swept: closest approach over the frame */
+        float dp[3], v[3];
+        for (uint32_t c = 0; c < 3u; c++) { dp[c] = P1p[c] - sharc_dm_getf(p0 + 0x60u + c); v[c] = d[c] - dp[c]; }
+        float e = dp[0] * v[0]; e = e + dp[1] * v[1]; e = e + dp[2] * v[2];
+        float ne = -e;
+        if (ne <= 0.0f) {
+            D2 = dp[0] * dp[0] + dp[1] * dp[1]; D2 = D2 + dp[2] * dp[2];
+        } else {
+            float vv = v[0] * v[0] + v[1] * v[1]; vv = vv + v[2] * v[2];
+            if (vv - ne <= 0.0f) {
+                D2 = d[0] * d[0] + d[1] * d[1]; D2 = D2 + d[2] * d[2];
+            } else {
+                float t = sharc_fw_div(ne, vv);        /* _L205D0 */
+                float q0 = v[0] * t + dp[0], q1 = v[1] * t + dp[1], q2 = v[2] * t + dp[2];
+                D2 = q0 * q0 + q1 * q1; D2 = D2 + q2 * q2;
             }
         }
-        sharc_dm_set(0x1407E20u + j, m);
-        if (r15 == 1u) break;
+    } else {
+        D2 = d[0] * d[0] + d[1] * d[1]; D2 = D2 + d[2] * d[2];
     }
-    /* _L21083: every surviving ball pair marks unit u0 (P0) touching unit u1 (P1) */
+    return D2;
+}
+
+/* a touching pair: the lift (modes 4 and 5) or the push depth it asks for */
+static inline void sharc_coli_flag_touch(sharc_coli_flag_t *f, const float d[3], float R1, float R0,
+                                         float S2, float D2, int swept, uint32_t bi, uint32_t bj) {
+    if (f->mode == 4u || f->mode == 5u) {
+        float a = S2 - d[0] * d[0];
+        a = a - d[2] * d[2];
+        float x = sharc_fw_sqrt(a);
+        x = f->mode == 4u ? x - d[1] : x + d[1];
+        if (!(f->lift - x >= 0.0f)) f->lift = x;
+    } else if (!swept) {
+        float x = (R1 + R0) - sharc_fw_sqrt(D2);
+        float k = ((f->nz0 & bi) && (f->nz1 & bj)) ? 0.0f : sharc_dm_getf(0x30301u);
+        x = x * k;
+        if (x - f->pen >= 0.0f) f->pen = x;
+    }
+}
+
+/* P0 ball r14 (radius bits R0b) against P1 ball r15: true when they touch */
+static inline bool sharc_coli_flag_pair(sharc_coli_flag_t *f, uint32_t R0b, float R1, const float P1c[3],
+                                        const float P1p[3], int swept, uint32_t r14, uint32_t r15,
+                                        uint32_t bi, uint32_t bj) {
+    f->tested++;
+    float R0 = sharc_bits_to_float(R0b);
+    if ((f->am0 & bi) && sharc_dm_get(0x3041Au) != 4u) R0 = R0 * sharc_dm_getf(0x306F0u);
+    uint32_t p0 = sharc_dm_get(0x30662u + r14);
+    float d[3];
+    for (uint32_t c = 0; c < 3u; c++) { d[c] = P1c[c] - sharc_dm_getf(p0 + c); sharc_dm_setf(0x30406u + c, d[c]); }
+    float D2 = sharc_coli_flag_d2(d, P1p, p0, swept);
+    float S = R1 + R0, S2 = S * S;
+    if (D2 - S2 >= 0.0f) return false;                /* touching: strictly inside */
+    f->hits++;
+    sharc_dm_set(0x307F3u, r14);
+    sharc_dm_set(0x307F4u, r15);
+    sharc_coli_flag_touch(f, d, R1, R0, S2, D2, swept, bi, bj);
+    return true;
+}
+
+/* P1 ball r15 against every P0 ball its candidate mask m names; the pairs
+ * that do not touch leave the mask */
+static inline uint32_t sharc_coli_flag_ball(sharc_coli_flag_t *f, uint32_t m, uint32_t R1b, uint32_t r15, uint32_t bj) {
+    float R1 = sharc_bits_to_float(R1b);
+    if ((f->am1 & bj) && sharc_dm_get(0x3041Bu) != 4u) R1 = R1 * sharc_dm_getf(0x307F0u);
+    sharc_dm_setf(0x30416u, R1);
+    uint32_t off = sharc_dm_get(0x30741u + r15);
+    float P1c[3], P1p[3];
+    for (uint32_t c = 0; c < 3u; c++) {
+        P1c[c] = sharc_dm_getf(0x1407F40u + off + c); sharc_dm_setf(0x30410u + c, P1c[c]);
+        P1p[c] = sharc_dm_getf(0x1407FA0u + off + c); sharc_dm_setf(0x30413u + c, P1p[c]);
+    }
+    uint32_t sw = (f->am1 & bj) ? 0xFFFFFFFFu : f->am0;
+    if (!(f->en1 & bj)) return m;
+    uint32_t bi = 1;
+    for (uint32_t r14 = 32; ; r14--, bi <<= 1) {
+        uint32_t R0b = ((f->en0 & bi) && (m & bi)) ? sharc_dm_get(0x30620u + r14) : 0;
+        if (R0b && !sharc_coli_flag_pair(f, R0b, R1, P1c, P1p, (sw & bi) != 0, r14, r15, bi, bj))
+            m &= ~bi;
+        if (r14 == 1u) break;
+    }
+    return m;
+}
+
+/* _L21083: every surviving ball pair marks unit u0 (P0) touching unit u1 (P1) */
+static inline void sharc_coli_flag_units(uint32_t am0, uint32_t am1) {
     for (uint32_t j = 0; j < 32u; j++) {
         uint32_t u1 = sharc_dm_get(0x307A0u + j);
         if (u1 == 0) continue;
@@ -337,73 +364,90 @@ static inline void sharc_coli_calc_flag(uint32_t mode, uint32_t am0, uint32_t am
             sharc_dm_set(0x1403D80u + u0, sharc_dm_get(0x1403D80u + u0) | (1u << (u1 & 31u)));
         }
     }
-    sharc_push_u(tested);
-    sharc_push_u(hits);
-    sharc_push_f(pen);
-    sharc_push_f(lift);
+}
+
+static inline void sharc_coli_calc_flag(uint32_t mode, uint32_t am0, uint32_t am1, uint32_t nz0,
+                                        uint32_t nz1, uint32_t en0, uint32_t en1) {
+    sharc_dm_set(0x30417u, en0);
+    sharc_dm_set(0x30418u, en1);
+
+    sharc_coli_flag_mirror(mode, am0, am1, nz0, nz1, en0, en1);
+    sharc_coli_flag_t f = { mode, am0, am1, nz0, nz1, en0, en1, 0, 0, 0.0f, 0.0f };
+    for (uint32_t k = 0; k < 0x60u; k++) {
+        sharc_dm_set(0x30340u + k, sharc_dm_get(0x1403F40u + k));
+        sharc_dm_set(0x303A0u + k, sharc_dm_get(0x1403FA0u + k));
+    }
+    uint32_t bj = 1;
+    for (uint32_t r15 = 32; ; r15--, bj <<= 1) {
+        uint32_t j = 32u - r15;
+        uint32_t m = sharc_dm_get(0x1403E20u + j);
+        uint32_t R1b = m ? sharc_dm_get(0x30720u + r15) : 0;
+        if (m && R1b) m = sharc_coli_flag_ball(&f, m, R1b, r15, bj);
+        sharc_dm_set(0x1407E20u + j, m);
+        if (r15 == 1u) break;
+    }
+    sharc_coli_flag_units(am0, am1);
+    sharc_push_u(f.tested);
+    sharc_push_u(f.hits);
+    sharc_push_f(f.pen);
+    sharc_push_f(f.lift);
 }
 
 /* ---- Fn_area_coli (0x70, PM 0x20BBE): one fighter's balls against the arena:
  *      ground/soko/low masks, the four wall clearances and penetrations, the
  *      nearer wall pair kept; 22 replies. */
-static inline void sharc_coli_area_coli(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4) {
-    sharc_dm_set(0x30801u, a0);
-    sharc_dm_set(0x30800u, a1);
-    sharc_dm_set(0x30802u, a2);
-    sharc_dm_set(0x30804u, a3);
-    uint32_t player = a4 & 0x7FFFFFFFu;
-    sharc_dm_set(0x307F2u, player);
-    uint32_t table = 0x1407E80u, rad = 0x30700u;
-    if (player == 0) {
-        table = 0x1403E80u; rad = 0x30600u;
-        for (uint32_t k = 0; k < 16u; k++) sharc_dm_set(0x30817u + k, 0);
-    }
-    sharc_dm_set(0x30803u, table);
-    for (uint32_t k = 0; k < 18u; k++) sharc_dm_set(0x30805u + k, 0);
-    for (uint32_t k = 0; k < 4u; k++) sharc_dm_set(0x30813u + k, 0x42C80000u);     /* 100.0 */
-    float Y0 = sharc_bits_to_float(a0), soko = sharc_bits_to_float(a1);
-    float A = sharc_bits_to_float(a2), H = sharc_bits_to_float(a3);
-    uint32_t low = 0;
-    for (uint32_t k = 0; k < 32u; k++) {
-        float x = sharc_dm_getf(table + 3u * k), y = sharc_dm_getf(table + 3u * k + 1u), z = sharc_dm_getf(table + 3u * k + 2u);
-        uint32_t Rb = sharc_dm_get(rad + k);
-        if (Rb == 0) continue;
-        float R = sharc_bits_to_float(Rb);
-        uint32_t bit = 1u << k;
-        float top = y + R;
-        if (!(top <= sharc_dm_getf(0x3080Au))) sharc_dm_setf(0x3080Au, top);
-        float bot = y - R;
-        if (H <= bot) continue;
-        low |= bit;
-        if (bot <= 0.05f)          sharc_dm_set(0x30805u, sharc_dm_get(0x30805u) | bit);   /* ground */
-        if (top <= -0.1f)          sharc_dm_set(0x30806u, sharc_dm_get(0x30806u) | bit);
-        if (bot <= 0.05f + soko)   sharc_dm_set(0x30807u, sharc_dm_get(0x30807u) | bit);
-        if (bot <= 0.05f + Y0)     sharc_dm_set(0x30808u, sharc_dm_get(0x30808u) | bit);
-        for (uint32_t s = 0; s < 4u; s++) {                  /* +X, -X, +Z, -Z */
-            float p = (s & 2u) ? z : x;
-            float f7 = p + R, g = A - f7;
-            if (s & 1u) { f7 = p - R; g = A + f7; }
-            int penetrating = 0;
-            float pv = 0.0f;
-            if ((sharc_float_to_bits(f7) >> 31) == (s & 1u)) {
-                float af = fabsf(f7);
-                if (!(A > af)) {
-                    penetrating = 1;
-                    if (A < af) {
-                        sharc_dm_set(0x30809u, sharc_dm_get(0x30809u) | bit);
-                        pv = af - A;
-                    } else {
-                        pv = 0.001f;
-                    }
-                }
-            }
-            if (penetrating) {
-                if (!(pv < sharc_dm_getf(0x3080Bu + s))) sharc_dm_setf(0x3080Bu + s, pv);
+
+/* wall s of the arena (+X, -X, +Z, -Z, half-width A) against a ball at x/z, radius R */
+static inline void sharc_coli_area_wall(uint32_t s, float x, float z, float R, float A, uint32_t bit) {
+    float p = (s & 2u) ? z : x;
+    float f7 = p + R, g = A - f7;
+    if (s & 1u) { f7 = p - R; g = A + f7; }
+    int penetrating = 0;
+    float pv = 0.0f;
+    if ((sharc_float_to_bits(f7) >> 31) == (s & 1u)) {
+        float af = fabsf(f7);
+        if (!(A > af)) {
+            penetrating = 1;
+            if (A < af) {
+                sharc_dm_set(0x30809u, sharc_dm_get(0x30809u) | bit);
+                pv = af - A;
             } else {
-                if (!(g >= sharc_dm_getf(0x30813u + s))) sharc_dm_setf(0x30813u + s, g);
+                pv = 0.001f;
             }
         }
     }
+    if (penetrating) {
+        if (!(pv < sharc_dm_getf(0x3080Bu + s))) sharc_dm_setf(0x3080Bu + s, pv);
+    } else {
+        if (!(g >= sharc_dm_getf(0x30813u + s))) sharc_dm_setf(0x30813u + s, g);
+    }
+}
+
+/* ball k against the floor, the soko and Y0 heights and the walls; its bit
+ * when it is low enough to count (below H), else 0 */
+static inline uint32_t sharc_coli_area_ball(uint32_t table, uint32_t rad, uint32_t k,
+                                            float Y0, float soko, float A, float H) {
+    float x = sharc_dm_getf(table + 3u * k), y = sharc_dm_getf(table + 3u * k + 1u), z = sharc_dm_getf(table + 3u * k + 2u);
+    uint32_t Rb = sharc_dm_get(rad + k);
+    if (Rb == 0) return 0;
+    float R = sharc_bits_to_float(Rb);
+    uint32_t bit = 1u << k;
+    float top = y + R;
+    if (!(top <= sharc_dm_getf(0x3080Au))) sharc_dm_setf(0x3080Au, top);
+    float bot = y - R;
+    if (H <= bot) return 0;
+    if (bot <= 0.05f)          sharc_dm_set(0x30805u, sharc_dm_get(0x30805u) | bit);   /* ground */
+    if (top <= -0.1f)          sharc_dm_set(0x30806u, sharc_dm_get(0x30806u) | bit);
+    if (bot <= 0.05f + soko)   sharc_dm_set(0x30807u, sharc_dm_get(0x30807u) | bit);
+    if (bot <= 0.05f + Y0)     sharc_dm_set(0x30808u, sharc_dm_get(0x30808u) | bit);
+    for (uint32_t s = 0; s < 4u; s++)                    /* +X, -X, +Z, -Z */
+        sharc_coli_area_wall(s, x, z, R, A, bit);
+    return bit;
+}
+
+/* the clearances become the far side's distance, and of the four walls only
+ * the nearer side of the nearer pair is kept */
+static inline void sharc_coli_area_walls(uint32_t low, uint32_t a4, float A) {
     uint32_t pen_mask = sharc_dm_get(0x30809u);
     if ((low & pen_mask) == low && (a4 & 0x80000000u))
         for (uint32_t s = 0; s < 4u; s++) sharc_dm_set(0x3080Bu + s, 0);
@@ -425,6 +469,28 @@ static inline void sharc_coli_area_coli(uint32_t a0, uint32_t a1, uint32_t a2, u
     float fz = sharc_dm_getf(0x30811u) + sharc_dm_getf(0x30812u);
     if (fx < fz) { sharc_dm_set(0x30811u, 0); sharc_dm_set(0x30812u, 0); }
     else         { sharc_dm_set(0x3080Fu, 0); sharc_dm_set(0x30810u, 0); }
+}
+
+static inline void sharc_coli_area_coli(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4) {
+    sharc_dm_set(0x30801u, a0);
+    sharc_dm_set(0x30800u, a1);
+    sharc_dm_set(0x30802u, a2);
+    sharc_dm_set(0x30804u, a3);
+    uint32_t player = a4 & 0x7FFFFFFFu;
+    sharc_dm_set(0x307F2u, player);
+    uint32_t table = 0x1407E80u, rad = 0x30700u;
+    if (player == 0) {
+        table = 0x1403E80u; rad = 0x30600u;
+        for (uint32_t k = 0; k < 16u; k++) sharc_dm_set(0x30817u + k, 0);
+    }
+    sharc_dm_set(0x30803u, table);
+    for (uint32_t k = 0; k < 18u; k++) sharc_dm_set(0x30805u + k, 0);
+    for (uint32_t k = 0; k < 4u; k++) sharc_dm_set(0x30813u + k, 0x42C80000u);     /* 100.0 */
+    float Y0 = sharc_bits_to_float(a0), soko = sharc_bits_to_float(a1);
+    float A = sharc_bits_to_float(a2), H = sharc_bits_to_float(a3);
+    uint32_t low = 0;
+    for (uint32_t k = 0; k < 32u; k++) low |= sharc_coli_area_ball(table, rad, k, Y0, soko, A, H);
+    sharc_coli_area_walls(low, a4, A);
     for (uint32_t k = 0; k < 18u; k++) sharc_push_u(sharc_dm_get(0x30805u + k));
     sharc_push_u(sharc_coli_remap(sharc_dm_get(0x30805u)));
     sharc_push_u(sharc_coli_remap(sharc_dm_get(0x30809u)));

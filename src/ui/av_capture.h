@@ -615,16 +615,10 @@ static inline void av_capture_shutdown(void) {
     memset(&g_av_cap, 0, sizeof g_av_cap);
 }
 
-/* Make the offscreen target. Call once sokol_gfx is up; the target takes the
- * backend's DEFAULT formats because the game's pipelines were built against
- * those and sokol will not draw one into an attachment of another shape. */
-static inline bool av_capture_init(int w, int h) {
-    if (g_av_cap.ready) return true;
-#if !defined(AV_CAPTURE_BACKEND)
-    (void)w; (void)h;
-    LOG_ERROR("av: this build's graphics backend has no readback path (Metal / WebGPU)");
-    return false;
-#else
+#if defined(AV_CAPTURE_BACKEND)
+/* Start the capture state over for a w x h target, keeping a test card asked
+ * for before init. Returns false if the stream's format cannot take the size. */
+static inline bool av__cap_setup(int w, int h) {
     bool want_card = g_av_cap.want_card;
     memset(&g_av_cap, 0, sizeof g_av_cap);
     g_av_cap.want_card = want_card;
@@ -637,7 +631,12 @@ static inline bool av_capture_init(int w, int h) {
         LOG_ERROR("av: NV12 needs a width that is a multiple of 4 and an even height (%dx%d)", w, h);
         return false;
     }
+    return true;
+}
 
+/* The backend's default colour and depth formats, which the target must take.
+ * Returns false on a multisampled backend. */
+static inline bool av__cap_formats(sg_pixel_format *cfmt_out, sg_pixel_format *dfmt_out) {
     sg_desc d = sg_query_desc();
     sg_pixel_format cfmt = d.environment.defaults.color_format;
     sg_pixel_format dfmt = d.environment.defaults.depth_format;
@@ -653,7 +652,14 @@ static inline bool av_capture_init(int w, int h) {
         LOG_ERROR("av: the capture path needs a single-sampled backend (this one is %dx)", smp);
         return false;
     }
+    *cfmt_out = cfmt;
+    *dfmt_out = dfmt;
+    return true;
+}
 
+/* The offscreen colour and depth target and its views. Returns false if any
+ * of them could not be made; the caller tears down what was. */
+static inline bool av__cap_make_target(int w, int h, sg_pixel_format cfmt, sg_pixel_format dfmt) {
     g_av_cap.color_img = sg_make_image(&(sg_image_desc){
         .usage.color_attachment = true,
         .width = w, .height = h, .pixel_format = cfmt, .sample_count = 1,
@@ -674,12 +680,13 @@ static inline bool av_capture_init(int w, int h) {
         sg_query_view_state(g_av_cap.color_att)  != SG_RESOURCESTATE_VALID ||
         sg_query_view_state(g_av_cap.depth_att)  != SG_RESOURCESTATE_VALID) {
         LOG_ERROR("av: could not create a %dx%d capture target", w, h);
-        av_capture_shutdown();
         return false;
     }
-    if (!av__cap_make_convert(cfmt)) { av_capture_shutdown(); return false; }
-    if (!av__cap_make_stage())       { av_capture_shutdown(); return false; }
+    return true;
+}
 
+/* Everything is made: set the pass's clear and say what the stream will get. */
+static inline void av__cap_ready(int w, int h) {
     g_av_cap.action = (sg_pass_action){
         .colors[0] = { .load_action = SG_LOADACTION_CLEAR,
                        .clear_value = { 0.0f, 0.0f, 0.0f, 1.0f } },
@@ -691,6 +698,28 @@ static inline bool av_capture_init(int w, int h) {
              g_av_cap.nv12    ? "NV12 converted on the GPU" :
              g_av_cap.swap_rb ? "channels swapped on readback" : "BGRA straight through",
              g_av_cap.card_img.id ? ", test card in place of the game" : "");
+}
+#endif
+
+/* Make the offscreen target. Call once sokol_gfx is up; the target takes the
+ * backend's DEFAULT formats because the game's pipelines were built against
+ * those and sokol will not draw one into an attachment of another shape. */
+static inline bool av_capture_init(int w, int h) {
+    if (g_av_cap.ready) return true;
+#if !defined(AV_CAPTURE_BACKEND)
+    (void)w; (void)h;
+    LOG_ERROR("av: this build's graphics backend has no readback path (Metal / WebGPU)");
+    return false;
+#else
+    sg_pixel_format cfmt, dfmt;
+    if (!av__cap_setup(w, h))            return false;
+    if (!av__cap_formats(&cfmt, &dfmt))  return false;
+
+    if (!av__cap_make_target(w, h, cfmt, dfmt)) { av_capture_shutdown(); return false; }
+    if (!av__cap_make_convert(cfmt))             { av_capture_shutdown(); return false; }
+    if (!av__cap_make_stage())                   { av_capture_shutdown(); return false; }
+
+    av__cap_ready(w, h);
     return true;
 #endif
 }

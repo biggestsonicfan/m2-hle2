@@ -322,6 +322,37 @@ static int ps3ui_dialog_showing(const ps3ui_dialog_t *d)
     return d->open || (d->win.def && d->win.state != PS3UI_WIN_CLOSED);
 }
 
+/* A dialog's message, wrapped to the width x0..x1 from y0 down. */
+static void ps3ui_dialog_wrap(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, float x0, float y0, float x1,
+                              const char *p, float alpha)
+{
+    char line[320];
+    float y = y0;
+    while (*p) {
+        int n = 0, brk = -1;
+        while (p[n] && p[n] != '\n') {
+            char t[320];
+            memcpy(t, p, (size_t)n + 1);
+            t[n + 1] = 0;
+            if (brk >= 0 && ps3ui_rich_width(st, t) > x1 - x0)
+                break;
+            if (p[n] == ' ')
+                brk = n;
+            n++;
+        }
+        int take = (p[n] && p[n] != '\n' && brk >= 0) ? brk : n;
+        memcpy(line, p, (size_t)take);
+        line[take] = 0;
+        ps3ui_text_left(cv, st, x0, y, line, alpha);
+        y += 54.0f;
+        p += take;
+        while (*p == ' ')
+            p++;
+        if (*p == '\n')
+            p++;
+    }
+}
+
 static void ps3ui_dialog_draw(ps3ui_canvas_t *cv, const ps3ui_dialog_t *d, float cursor_t)
 {
     if (!ps3ui_dialog_showing(d))
@@ -334,32 +365,7 @@ static void ps3ui_dialog_draw(ps3ui_canvas_t *cv, const ps3ui_dialog_t *d, float
     float alpha = ps3ui_slot_alpha(&s, "p_txt_01_lt");
     ps3ui_text_style_t st = ps3ui_style_text(37.0f);
     /* the message, wrapped from the top of its box */
-    char line[320];
-    const char *p = d->msg;
-    float y = y0;
-    while (*p) {
-        int n = 0, brk = -1;
-        while (p[n] && p[n] != '\n') {
-            char t[320];
-            memcpy(t, p, (size_t)n + 1);
-            t[n + 1] = 0;
-            if (brk >= 0 && ps3ui_rich_width(&st, t) > x1 - x0)
-                break;
-            if (p[n] == ' ')
-                brk = n;
-            n++;
-        }
-        int take = (p[n] && p[n] != '\n' && brk >= 0) ? brk : n;
-        memcpy(line, p, (size_t)take);
-        line[take] = 0;
-        ps3ui_text_left(cv, &st, x0, y, line, alpha);
-        y += 54.0f;
-        p += take;
-        while (*p == ' ')
-            p++;
-        if (*p == '\n')
-            p++;
-    }
+    ps3ui_dialog_wrap(cv, &st, x0, y0, x1, d->msg, alpha);
     const char *a = d->yesno ? "p_txt_yes_01_lt" : "p_txt_ok_01_lt";
     const char *b = d->yesno ? "p_txt_yes_02_rb" : "p_txt_ok_02_rb";
     float ax, ay, bx, by;
@@ -780,6 +786,47 @@ static const char *const ps3ui_osk_rows[2][4] = {
 enum { PS3UI_OSK_ACT_SHIFT, PS3UI_OSK_ACT_SPACE, PS3UI_OSK_ACT_BACK, PS3UI_OSK_ACT_DONE, PS3UI_OSK_ACTS };
 static const char *const ps3ui_osk_act[PS3UI_OSK_ACTS] = { "Shift", "Space", "Delete", "Done" };
 
+/* Cross on the keyboard: type the key, or run the action. `len` is the text's
+ * length as the frame began. Returns 1 for Done. */
+static int ps3ui_osk_cross(ps3ui_app_t *a, char *t, size_t len)
+{
+    if (a->osk_row < 4) {
+        if (len + 1 < (a->osk_field == 0 ? 17u : (uint32_t)sizeof a->osk_text[1])) {
+            t[len] = ps3ui_osk_rows[a->osk_shift][a->osk_row][a->osk_col];
+            t[len + 1] = 0;
+        }
+    } else if (a->osk_col == PS3UI_OSK_ACT_SHIFT) {
+        a->osk_shift ^= 1;
+    } else if (a->osk_col == PS3UI_OSK_ACT_SPACE) {
+        if (len + 1 < (uint32_t)sizeof a->osk_text[1]) t[len] = ' ', t[len + 1] = 0;
+    } else if (a->osk_col == PS3UI_OSK_ACT_BACK) {
+        if (len) t[len - 1] = 0;
+    } else {
+        return 1;
+    }
+    return 0;
+}
+
+/* Done: on to the password, or sign in with what was typed. */
+static void ps3ui_osk_done(ps3ui_app_t *a)
+{
+    if (a->osk_field == 0) {
+        a->osk_field = 1;               /* on to the password */
+        a->osk_row = a->osk_col = 0;
+        return;
+    }
+    if (a->osk_field == 2) {
+        /* the e-mail token, for the account and password already typed */
+        snprintf(a->cfg.token, sizeof a->cfg.token, "%s", a->osk_text[2]);
+    } else {
+        snprintf(a->cfg.npid, sizeof a->cfg.npid, "%s", a->osk_text[0]);
+        snprintf(a->cfg.password, sizeof a->cfg.password, "%s", a->osk_text[1]);
+    }
+    a->cfg.twitch_token[0] = 0;
+    ps3ui_post(a, NETPLAY_CMD_CONNECT);
+    ps3ui_app_go(a, PS3UI_SCR_CONNECT);
+}
+
 static void ps3ui_update_osk(ps3ui_app_t *a)
 {
     char *t = a->osk_text[a->osk_field];
@@ -802,39 +849,11 @@ static void ps3ui_update_osk(ps3ui_app_t *a)
         return;
     }
     int done = ps3ui_hit(a, PS3UI_PAD_START);
-    if (ps3ui_hit(a, PS3UI_PAD_CROSS)) {
-        if (a->osk_row < 4) {
-            if (len + 1 < (a->osk_field == 0 ? 17u : (uint32_t)sizeof a->osk_text[1])) {
-                t[len] = ps3ui_osk_rows[a->osk_shift][a->osk_row][a->osk_col];
-                t[len + 1] = 0;
-            }
-        } else if (a->osk_col == PS3UI_OSK_ACT_SHIFT) {
-            a->osk_shift ^= 1;
-        } else if (a->osk_col == PS3UI_OSK_ACT_SPACE) {
-            if (len + 1 < (uint32_t)sizeof a->osk_text[1]) t[len] = ' ', t[len + 1] = 0;
-        } else if (a->osk_col == PS3UI_OSK_ACT_BACK) {
-            if (len) t[len - 1] = 0;
-        } else {
-            done = 1;
-        }
-    }
+    if (ps3ui_hit(a, PS3UI_PAD_CROSS) && ps3ui_osk_cross(a, t, len))
+        done = 1;
     if (!done)
         return;
-    if (a->osk_field == 0) {
-        a->osk_field = 1;               /* on to the password */
-        a->osk_row = a->osk_col = 0;
-        return;
-    }
-    if (a->osk_field == 2) {
-        /* the e-mail token, for the account and password already typed */
-        snprintf(a->cfg.token, sizeof a->cfg.token, "%s", a->osk_text[2]);
-    } else {
-        snprintf(a->cfg.npid, sizeof a->cfg.npid, "%s", a->osk_text[0]);
-        snprintf(a->cfg.password, sizeof a->cfg.password, "%s", a->osk_text[1]);
-    }
-    a->cfg.twitch_token[0] = 0;
-    ps3ui_post(a, NETPLAY_CMD_CONNECT);
-    ps3ui_app_go(a, PS3UI_SCR_CONNECT);
+    ps3ui_osk_done(a);
 }
 
 static void ps3ui_update_menu(ps3ui_app_t *a)
@@ -1123,83 +1142,137 @@ static void ps3ui_app_ask_again(ps3ui_app_t *a)
     ps3ui_app_go(a, PS3UI_SCR_AGAIN);
 }
 
+/* The session moved to another state. */
+static void ps3ui_follow_state(ps3ui_app_t *a)
+{
+    const netplay_status_t *st = &a->st;
+    /* A match that ended because the other player went -- out of the
+     * VS prompt, most often -- says so, rather than dropping us on a
+     * waiting screen with no reason given. */
+    if (a->last_state == NETPLAY_PLAYING && st->state == NETPLAY_IN_ROOM && st->member_count <= 1
+        && !a->dialog && !ps3ui_dialog_showing(&a->dlg))
+        ps3ui_app_ask(a, PS3UI_DLG_ERROR, "Your opponent has left the session.");
+    a->last_state = (int)st->state;
+    /* The login the session now holds -- a Twitch token the flow just
+     * landed, an account typed in -- is the one we work with from here on;
+     * the room settings stay ours. */
+    netplay_config_t fresh;
+    if (st->state == NETPLAY_ONLINE && a->be.stored_settings && a->be.stored_settings(&fresh)) {
+        fresh.frame_delay = a->cfg.frame_delay;
+        fresh.max_players = a->cfg.max_players;
+        fresh.vs_mode = a->cfg.vs_mode;
+        a->cfg = fresh;
+        a->have_cfg = 1;
+        ps3ui_app_defaults(a);
+    }
+}
+
+/* Signed out: a stored login goes straight in, anything else to the sign-in screen. */
+static void ps3ui_follow_off(ps3ui_app_t *a)
+{
+    if (a->scr != PS3UI_SCR_OSK && a->scr != PS3UI_SCR_TWITCH && a->scr != PS3UI_SCR_SIGNIN) {
+        if (a->have_cfg && (netplay_twitch_here(&a->cfg) || a->cfg.password[0]) && a->scr == PS3UI_SCR_NONE) {
+            ps3ui_post(a, NETPLAY_CMD_CONNECT);   /* a stored login: straight in */
+            ps3ui_app_go(a, PS3UI_SCR_CONNECT);
+        } else if (a->scr != PS3UI_SCR_CONNECT || a->frame % 60 == 0) {
+            ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
+        }
+    }
+    if (a->scr == PS3UI_SCR_TWITCH && a->st.twitch_state == RPCN_TWITCH_DONE)
+        ps3ui_app_go(a, PS3UI_SCR_CONNECT);
+}
+
+/* Signed in and in no room: the menu, from a room screen or the sign-in ones. */
+static void ps3ui_follow_online(ps3ui_app_t *a)
+{
+    if (a->scr == PS3UI_SCR_ROOM || a->scr == PS3UI_SCR_VS || a->scr == PS3UI_SCR_RESULT)
+        ps3ui_app_go(a, PS3UI_SCR_MENU);          /* the room went away */
+    if (a->scr == PS3UI_SCR_NONE || a->scr == PS3UI_SCR_SIGNIN || a->scr == PS3UI_SCR_TWITCH
+        || a->scr == PS3UI_SCR_OSK || (a->scr == PS3UI_SCR_CONNECT && !a->searching))
+        ps3ui_app_go(a, PS3UI_SCR_MENU);
+}
+
+/* In a room or at its barrier: the result first, then the room or VS screen. */
+static void ps3ui_follow_room(ps3ui_app_t *a)
+{
+    const netplay_status_t *st = &a->st;
+    if (a->scr == PS3UI_SCR_RESULT)
+        return;
+    /* a result has come in: show it first */
+    if (st->room.match != a->last_match) {
+        uint16_t prev = a->last_match;
+        a->last_match = st->room.match;
+        if (prev && st->room.phase == ROOM_PHASE_LOBBY && st->room.last_result <= 1) {
+            a->result_side = st->room.last_result;
+            a->result_t = 0.0f;
+            ps3ui_app_go(a, PS3UI_SCR_RESULT);
+            return;
+        }
+    }
+    int two = st->member_count <= 2 || st->max_slot <= 2;
+    ps3ui_screen_t want = two && st->member_count >= 2 ? PS3UI_SCR_VS : PS3UI_SCR_ROOM;
+    if (st->state == NETPLAY_SYNCING)
+        want = two ? PS3UI_SCR_VS : PS3UI_SCR_ROOM;
+    if (a->scr != want) {
+        ps3ui_app_go(a, want);
+        a->countdown = want == PS3UI_SCR_VS ? (two ? 1800.0f : 300.0f) : 1800.0f;
+        a->ready_sent = 0;
+        a->ready_age[0] = a->ready_age[1] = 0.0f;
+        a->last_ready[0] = a->last_ready[1] = 0;
+    }
+}
+
+/* The attempt failed: say why once, and back to signing in. */
+static void ps3ui_follow_failed(ps3ui_app_t *a)
+{
+    const netplay_status_t *st = &a->st;
+    /* Once per failure. Netplay stays FAILED until the next attempt, so
+     * asking again whenever the dialog is closed brings it straight back,
+     * and the player can never get past it to try anything else. */
+    if (!a->fail_shown && st->error[0]) {
+        a->fail_shown = 1;
+        if (st->need_email_token) {
+            /* The password was right; the server verifies accounts by
+             * e-mail. There is no token box on the sign-in screen, so the
+             * keyboard asks for it and signs in again with it. */
+            a->osk_field = 2;
+            snprintf(a->osk_text[2], sizeof a->osk_text[2], "%s", a->cfg.token);
+            a->osk_row = a->osk_col = 0;
+            a->osk_back = PS3UI_SCR_SIGNIN;
+            ps3ui_app_go(a, PS3UI_SCR_OSK);
+            snprintf(a->dialog_text, sizeof a->dialog_text, "%s",
+                     a->cfg.token[0] ? "The server refused that e-mail token. Check it against the sign-up e-mail and enter it again."
+                                     : "This server verifies accounts by e-mail. Enter the token from the sign-up e-mail.");
+        } else {
+            snprintf(a->dialog_text, sizeof a->dialog_text, "%s", st->error);
+        }
+        ps3ui_app_ask(a, PS3UI_DLG_ERROR, a->dialog_text);
+    }
+    if (a->scr != PS3UI_SCR_SIGNIN && a->scr != PS3UI_SCR_OSK)
+        ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
+}
+
 /* Follow netplay: which screen the state puts us on. */
 static void ps3ui_follow(ps3ui_app_t *a)
 {
     const netplay_status_t *st = &a->st;
-    if ((int)st->state != a->last_state) {
-        /* A match that ended because the other player went -- out of the
-         * VS prompt, most often -- says so, rather than dropping us on a
-         * waiting screen with no reason given. */
-        if (a->last_state == NETPLAY_PLAYING && st->state == NETPLAY_IN_ROOM && st->member_count <= 1
-            && !a->dialog && !ps3ui_dialog_showing(&a->dlg))
-            ps3ui_app_ask(a, PS3UI_DLG_ERROR, "Your opponent has left the session.");
-        a->last_state = (int)st->state;
-        /* The login the session now holds -- a Twitch token the flow just
-         * landed, an account typed in -- is the one we work with from here on;
-         * the room settings stay ours. */
-        netplay_config_t fresh;
-        if (st->state == NETPLAY_ONLINE && a->be.stored_settings && a->be.stored_settings(&fresh)) {
-            fresh.frame_delay = a->cfg.frame_delay;
-            fresh.max_players = a->cfg.max_players;
-            fresh.vs_mode = a->cfg.vs_mode;
-            a->cfg = fresh;
-            a->have_cfg = 1;
-            ps3ui_app_defaults(a);
-        }
-    }
+    if ((int)st->state != a->last_state)
+        ps3ui_follow_state(a);
     switch (st->state) {
     case NETPLAY_OFF:
-        if (a->scr != PS3UI_SCR_OSK && a->scr != PS3UI_SCR_TWITCH && a->scr != PS3UI_SCR_SIGNIN) {
-            if (a->have_cfg && (netplay_twitch_here(&a->cfg) || a->cfg.password[0]) && a->scr == PS3UI_SCR_NONE) {
-                ps3ui_post(a, NETPLAY_CMD_CONNECT);   /* a stored login: straight in */
-                ps3ui_app_go(a, PS3UI_SCR_CONNECT);
-            } else if (a->scr != PS3UI_SCR_CONNECT || a->frame % 60 == 0) {
-                ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
-            }
-        }
-        if (a->scr == PS3UI_SCR_TWITCH && st->twitch_state == RPCN_TWITCH_DONE)
-            ps3ui_app_go(a, PS3UI_SCR_CONNECT);
+        ps3ui_follow_off(a);
         break;
     case NETPLAY_CONNECTING:
         if (a->scr != PS3UI_SCR_TWITCH)
             ps3ui_app_go(a, PS3UI_SCR_CONNECT);
         break;
     case NETPLAY_ONLINE:
-        if (a->scr == PS3UI_SCR_ROOM || a->scr == PS3UI_SCR_VS || a->scr == PS3UI_SCR_RESULT)
-            ps3ui_app_go(a, PS3UI_SCR_MENU);          /* the room went away */
-        if (a->scr == PS3UI_SCR_NONE || a->scr == PS3UI_SCR_SIGNIN || a->scr == PS3UI_SCR_TWITCH
-            || a->scr == PS3UI_SCR_OSK || (a->scr == PS3UI_SCR_CONNECT && !a->searching))
-            ps3ui_app_go(a, PS3UI_SCR_MENU);
+        ps3ui_follow_online(a);
         break;
     case NETPLAY_IN_ROOM:
-    case NETPLAY_SYNCING: {
-        if (a->scr == PS3UI_SCR_RESULT)
-            break;
-        /* a result has come in: show it first */
-        if (st->room.match != a->last_match) {
-            uint16_t prev = a->last_match;
-            a->last_match = st->room.match;
-            if (prev && st->room.phase == ROOM_PHASE_LOBBY && st->room.last_result <= 1) {
-                a->result_side = st->room.last_result;
-                a->result_t = 0.0f;
-                ps3ui_app_go(a, PS3UI_SCR_RESULT);
-                break;
-            }
-        }
-        int two = st->member_count <= 2 || st->max_slot <= 2;
-        ps3ui_screen_t want = two && st->member_count >= 2 ? PS3UI_SCR_VS : PS3UI_SCR_ROOM;
-        if (st->state == NETPLAY_SYNCING)
-            want = two ? PS3UI_SCR_VS : PS3UI_SCR_ROOM;
-        if (a->scr != want) {
-            ps3ui_app_go(a, want);
-            a->countdown = want == PS3UI_SCR_VS ? (two ? 1800.0f : 300.0f) : 1800.0f;
-            a->ready_sent = 0;
-            a->ready_age[0] = a->ready_age[1] = 0.0f;
-            a->last_ready[0] = a->last_ready[1] = 0;
-        }
+    case NETPLAY_SYNCING:
+        ps3ui_follow_room(a);
         break;
-    }
     case NETPLAY_PLAYING:
         /* a VS-mode result on our board: ask, once per result */
         if (st->results != a->res_seen) {
@@ -1214,30 +1287,7 @@ static void ps3ui_follow(ps3ui_app_t *a)
         a->scr = PS3UI_SCR_NONE;
         break;
     case NETPLAY_FAILED:
-        /* Once per failure. Netplay stays FAILED until the next attempt, so
-         * asking again whenever the dialog is closed brings it straight back,
-         * and the player can never get past it to try anything else. */
-        if (!a->fail_shown && st->error[0]) {
-            a->fail_shown = 1;
-            if (st->need_email_token) {
-                /* The password was right; the server verifies accounts by
-                 * e-mail. There is no token box on the sign-in screen, so the
-                 * keyboard asks for it and signs in again with it. */
-                a->osk_field = 2;
-                snprintf(a->osk_text[2], sizeof a->osk_text[2], "%s", a->cfg.token);
-                a->osk_row = a->osk_col = 0;
-                a->osk_back = PS3UI_SCR_SIGNIN;
-                ps3ui_app_go(a, PS3UI_SCR_OSK);
-                snprintf(a->dialog_text, sizeof a->dialog_text, "%s",
-                         a->cfg.token[0] ? "The server refused that e-mail token. Check it against the sign-up e-mail and enter it again."
-                                         : "This server verifies accounts by e-mail. Enter the token from the sign-up e-mail.");
-            } else {
-                snprintf(a->dialog_text, sizeof a->dialog_text, "%s", st->error);
-            }
-            ps3ui_app_ask(a, PS3UI_DLG_ERROR, a->dialog_text);
-        }
-        if (a->scr != PS3UI_SCR_SIGNIN && a->scr != PS3UI_SCR_OSK)
-            ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
+        ps3ui_follow_failed(a);
         break;
     }
 }
@@ -1295,6 +1345,70 @@ static void ps3ui_app_windows(ps3ui_app_t *a)
     }
 }
 
+/* The task was opened for the "go again?" prompt alone. Returns 0 once it has
+ * closed. */
+static int ps3ui_app_prompt(ps3ui_app_t *a, int in_room, int res_new)
+{
+    /* opened only to ask: out of the room, the task goes again, and it
+     * never follows netplay onto the lobby's own screens */
+    if (!in_room) {
+        ps3ui_app_close(a);
+        return 0;
+    }
+    if (res_new) {
+        a->res_seen = a->st.results;
+        ps3ui_app_ask_again(a);
+    }
+    if (a->scr != PS3UI_SCR_AGAIN) {
+        ps3ui_app_close(a);
+        return 0;
+    }
+    ps3ui_update_again(a);
+    return 1;
+}
+
+/* The lobby is open: the dialog, or the screen's own update. */
+static void ps3ui_app_update_screen(ps3ui_app_t *a)
+{
+    if (a->dialog || ps3ui_dialog_showing(&a->dlg))
+        ps3ui_update_dialog(a);
+    else
+        switch (a->scr) {
+        case PS3UI_SCR_SIGNIN: ps3ui_update_signin(a); break;
+        case PS3UI_SCR_TWITCH:
+            if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
+                ps3ui_post(a, NETPLAY_CMD_TWITCH_CANCEL);
+                ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
+            }
+            break;
+        case PS3UI_SCR_OSK: ps3ui_update_osk(a); break;
+        case PS3UI_SCR_MENU: ps3ui_update_menu(a); break;
+        case PS3UI_SCR_RULE: ps3ui_update_rule(a); break;
+        case PS3UI_SCR_CONNECT: ps3ui_update_connect(a); break;
+        case PS3UI_SCR_SEARCH: ps3ui_update_search(a); break;
+        case PS3UI_SCR_ROOM: ps3ui_update_room(a); break;
+        case PS3UI_SCR_VS: ps3ui_update_vs(a); break;
+        case PS3UI_SCR_RESULT: ps3ui_update_result(a); break;
+        case PS3UI_SCR_AGAIN: ps3ui_update_again(a); break;
+        default: break;
+        }
+}
+
+/* Each fighter's READY effect: restarted when the flag goes up, aged while it stays. */
+static void ps3ui_app_ready_fx(ps3ui_app_t *a)
+{
+    int f[2];
+    ps3ui_fighters(&a->st, f);
+    for (int i = 0; i < 2; i++) {
+        int r = f[i] >= 0 && (a->st.members[f[i]].data.flags & ROOM_MEMBER_READY);
+        if (r && !a->last_ready[i])
+            a->ready_age[i] = 0.0f;
+        else if (r)
+            a->ready_age[i] += 1.0f;
+        a->last_ready[i] = r;
+    }
+}
+
 /* One frame of the task. `held` is the pad in PS3UI_PAD_* bits. */
 static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
 {
@@ -1317,21 +1431,8 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
         ps3ui_app_ask_again(a);
     }
     if (a->prompt_only) {
-        /* opened only to ask: out of the room, the task goes again, and it
-         * never follows netplay onto the lobby's own screens */
-        if (!in_room) {
-            ps3ui_app_close(a);
+        if (!ps3ui_app_prompt(a, in_room, res_new))
             return;
-        }
-        if (res_new) {
-            a->res_seen = a->st.results;
-            ps3ui_app_ask_again(a);
-        }
-        if (a->scr != PS3UI_SCR_AGAIN) {
-            ps3ui_app_close(a);
-            return;
-        }
-        ps3ui_update_again(a);
     } else {
         /* The lobby is open. A VS result comes while still PLAYING and is
          * asked about there (ps3ui_follow); any other result ends the match,
@@ -1339,42 +1440,11 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
         if (a->st.state != NETPLAY_PLAYING)
             a->res_seen = a->st.results;
         ps3ui_follow(a);
-        if (a->dialog || ps3ui_dialog_showing(&a->dlg))
-            ps3ui_update_dialog(a);
-        else
-            switch (a->scr) {
-            case PS3UI_SCR_SIGNIN: ps3ui_update_signin(a); break;
-            case PS3UI_SCR_TWITCH:
-                if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
-                    ps3ui_post(a, NETPLAY_CMD_TWITCH_CANCEL);
-                    ps3ui_app_go(a, PS3UI_SCR_SIGNIN);
-                }
-                break;
-            case PS3UI_SCR_OSK: ps3ui_update_osk(a); break;
-            case PS3UI_SCR_MENU: ps3ui_update_menu(a); break;
-            case PS3UI_SCR_RULE: ps3ui_update_rule(a); break;
-            case PS3UI_SCR_CONNECT: ps3ui_update_connect(a); break;
-            case PS3UI_SCR_SEARCH: ps3ui_update_search(a); break;
-            case PS3UI_SCR_ROOM: ps3ui_update_room(a); break;
-            case PS3UI_SCR_VS: ps3ui_update_vs(a); break;
-            case PS3UI_SCR_RESULT: ps3ui_update_result(a); break;
-            case PS3UI_SCR_AGAIN: ps3ui_update_again(a); break;
-            default: break;
-            }
+        ps3ui_app_update_screen(a);
     }
     /* READY effects start when a fighter's flag goes up */
-    if (a->scr == PS3UI_SCR_VS) {
-        int f[2];
-        ps3ui_fighters(&a->st, f);
-        for (int i = 0; i < 2; i++) {
-            int r = f[i] >= 0 && (a->st.members[f[i]].data.flags & ROOM_MEMBER_READY);
-            if (r && !a->last_ready[i])
-                a->ready_age[i] = 0.0f;
-            else if (r)
-                a->ready_age[i] += 1.0f;
-            a->last_ready[i] = r;
-        }
-    }
+    if (a->scr == PS3UI_SCR_VS)
+        ps3ui_app_ready_fx(a);
     ps3ui_app_windows(a);
     ps3ui_win_tick(&a->main);
     ps3ui_win_tick(&a->sub);
@@ -1651,6 +1721,32 @@ static const char *ps3ui_search_message(const ps3ui_app_t *a, char *buf, size_t 
     return buf;
 }
 
+/* One member's row of the room: link icon, name, and the 1P / 2P or ENTRY tag. */
+static void ps3ui_draw_room_member(ps3ui_canvas_t *cv, const netplay_member_status_t *m, int i, const int f[2],
+                                   const ps3ui_text_style_t *name, ps3ui_text_style_t *tag, float px, float py,
+                                   float alpha)
+{
+    if (!m->is_me)
+        ps3ui_draw_image(cv, ps3ui_sprite(ps3ui_net_icon(m->rtt_ms)), ps3ui_mat_translate(px, py), alpha,
+                         PS3UI_BLEND_NORMAL, NULL);
+    ps3ui_text(cv, name, px + 240.0f, py + 2.0f + 42.0f, m->npid, alpha);
+    const char *t = NULL;
+    uint32_t rgb = 0xFF0000;
+    if (i == f[0] || i == f[1]) {
+        t = i == f[0] ? "1P" : "2P";
+        rgb = i == f[0] ? 0xFF0000 : 0x0000FF;
+    } else if (m->data.entry) {
+        t = m->data.entry == 1 ? "ENTRY 1P" : "ENTRY 2P";
+        rgb = m->data.entry == 1 ? 0xFF0000 : 0x0000FF;
+    }
+    if (t) {
+        tag->rgb = rgb;
+        /* baseline 47 of the 56 cell, scaled to 32 and centred on the row's 24 */
+        ps3ui_text(cv, tag, px + 750.0f - ps3ui_text_width(tag, t) * 0.5f, py + 24.0f - 16.0f + 47.0f * 32.0f / 56.0f,
+                   t, alpha);
+    }
+}
+
 /* The ROOM MATCH list: members in the search list's rows. */
 static void ps3ui_draw_room_list(ps3ui_canvas_t *cv, ps3ui_app_t *a)
 {
@@ -1693,26 +1789,7 @@ static void ps3ui_draw_room_list(ps3ui_canvas_t *cv, ps3ui_app_t *a)
         }
         if ((uint32_t)i >= st->member_count)
             continue;
-        const netplay_member_status_t *m = &st->members[i];
-        if (!m->is_me)
-            ps3ui_draw_image(cv, ps3ui_sprite(ps3ui_net_icon(m->rtt_ms)), ps3ui_mat_translate(px, py), alpha,
-                             PS3UI_BLEND_NORMAL, NULL);
-        ps3ui_text(cv, &name, px + 240.0f, py + 2.0f + 42.0f, m->npid, alpha);
-        const char *t = NULL;
-        uint32_t rgb = 0xFF0000;
-        if (i == f[0] || i == f[1]) {
-            t = i == f[0] ? "1P" : "2P";
-            rgb = i == f[0] ? 0xFF0000 : 0x0000FF;
-        } else if (m->data.entry) {
-            t = m->data.entry == 1 ? "ENTRY 1P" : "ENTRY 2P";
-            rgb = m->data.entry == 1 ? 0xFF0000 : 0x0000FF;
-        }
-        if (t) {
-            tag.rgb = rgb;
-            /* baseline 47 of the 56 cell, scaled to 32 and centred on the row's 24 */
-            ps3ui_text(cv, &tag, px + 750.0f - ps3ui_text_width(&tag, t) * 0.5f, py + 24.0f - 16.0f + 47.0f * 32.0f / 56.0f,
-                       t, alpha);
-        }
+        ps3ui_draw_room_member(cv, &st->members[i], i, f, &name, &tag, px, py, alpha);
     }
     const char *msg = st->member_count >= 2 ? "Now accepting match entries. The top players in 1P Entry and 2P Entry get priority."
                                             : "Please wait.";

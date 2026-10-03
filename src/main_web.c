@@ -630,7 +630,8 @@ static ps3ui_view_t web_lobby_tick(void) {
     return web_view();
 }
 
-static void frame(void) {
+/* A display callback: count it, and the longest gap since the one before. */
+static void web_count_callback(void) {
     int64_t cb_us = emu_now_us();
     if (g_web_perf.last_cb_us) {
         uint32_t gap = (uint32_t)(cb_us - g_web_perf.last_cb_us);
@@ -639,87 +640,102 @@ static void frame(void) {
     }
     g_web_perf.last_cb_us = cb_us;
     g_web_perf.callbacks++;
+}
 
-    web_run_owed_slices();
-    web_push_audio();
-
-    const bool have_game = state.romset.loaded;
-    const ps3ui_view_t view = web_lobby_tick();
-    const bool lobby = view == PS3UI_VIEW_FULL, overlay = have_game && view == PS3UI_VIEW_OVERLAY;
-
-    /* Every callback, not only the ones that might be skipped: what it measures
-     * includes how often the display asks, and half the callbacks are not half
-     * the rate. */
-    const bool afford = web_afford_picture();
-
+/* Can this callback keep the picture it drew last? Only with a game and nothing
+ * over it, when the board has not moved, the canvas is the same size, the object
+ * viewer is not showing and the picture is not affordable anyway. A picture that
+ * is drawn remembers what it was drawn for. */
+static bool web_keep_picture(bool have_game, bool lobby, bool overlay, bool afford) {
     static uint64_t s_drawn_slices;
     static int      s_drawn_w, s_drawn_h;
     const bool board_moved = g_web_perf.slices != s_drawn_slices;
     const bool resized     = sapp_width() != s_drawn_w || sapp_height() != s_drawn_h;
     if (have_game && !lobby && !overlay && !board_moved && !resized && !g_web_objview_show && !afford) {
         g_web_perf.pictures_skipped++;
-        return;
+        return true;
     }
     s_drawn_slices = g_web_perf.slices;
     s_drawn_w      = sapp_width();
     s_drawn_h      = sapp_height();
+    return false;
+}
 
-    const int64_t render_t0 = emu_now_us();
-    if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameBegin(); });
-    web_rt_apply();
-
-    float lerp_t = 1.0f;
-    static ps3ui_canvas_t lobby_cv;
-    if (lobby || overlay) {
-        if (overlay) {
-            /* over the game: the 16:9 layout fitted to the game's letterboxed picture */
-            int ox, oy, gw, gh;
-            game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &gw, &gh);
-            ps3ui_gpu_record(&lobby_cv, sapp_width(), sapp_height());
-            ps3ui_canvas_size(&lobby_cv, sapp_width(), sapp_height());
-            float k = (float)gw / 1920.0f;
-            if ((float)gh / 1080.0f < k) k = (float)gh / 1080.0f;
-            lobby_cv.k = k;
-            lobby_cv.ox = (float)ox + ((float)gw - 1920.0f * k) * 0.5f;
-            lobby_cv.oy = (float)oy + ((float)gh - 1080.0f * k) * 0.5f;
-        } else {
-            ps3ui_gpu_record(&lobby_cv, sapp_width(), sapp_height());
-        }
-        if (g_web_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, &lobby_cv);
-        else                ps3ui_app_draw(&g_ps3ui_app, &lobby_cv);
+/* Record the menus into `cv`: the lobby on its own, or the pause menu over the game. */
+static void web_record_menus(ps3ui_canvas_t *cv, bool overlay) {
+    if (overlay) {
+        /* over the game: the 16:9 layout fitted to the game's letterboxed picture */
+        int ox, oy, gw, gh;
+        game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &gw, &gh);
+        ps3ui_gpu_record(cv, sapp_width(), sapp_height());
+        ps3ui_canvas_size(cv, sapp_width(), sapp_height());
+        float k = (float)gw / 1920.0f;
+        if ((float)gh / 1080.0f < k) k = (float)gh / 1080.0f;
+        cv->k = k;
+        cv->ox = (float)ox + ((float)gw - 1920.0f * k) * 0.5f;
+        cv->oy = (float)oy + ((float)gh - 1080.0f * k) * 0.5f;
+    } else {
+        ps3ui_gpu_record(cv, sapp_width(), sapp_height());
     }
-    if (have_game && !lobby) {
-        game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
-        lerp_t = game_frame_lerp();
-    }
+    if (g_web_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, cv);
+    else                ps3ui_app_draw(&g_ps3ui_app, cv);
+}
 
-    /* A filter over the picture (post_shader.h) reads the game from a target of
-     * its own, at the render scale, and only covers the game's 4:3 rectangle. */
-    int gox, goy, gw, gh;
-    game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &gox, &goy, &gw, &gh);
-    post_shader_set_input_scale(g_web_rt.want);
-    const bool post = have_game && !lobby && !g_web_objview_show && post_shader_active();
-    if (post) {
-        int sw, sh;
-        post_shader_source_size(VIDEO_WIDTH, VIDEO_HEIGHT, gw, gh, &sw, &sh);
-        post_shader_begin_source(sw, sh, &state.pass_action);
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, sw, sh, lerp_t);
-        post_shader_end_source();
-        post_shader_prepare(gw, gh);
-    }
+/* The game into the filter's own source target, at the render scale, for a
+ * filter over the picture (post_shader.h); it only covers the game's 4:3
+ * rectangle, gw x gh. */
+static void web_draw_post_source(int gw, int gh, float lerp_t) {
+    int sw, sh;
+    post_shader_source_size(VIDEO_WIDTH, VIDEO_HEIGHT, gw, gh, &sw, &sh);
+    post_shader_begin_source(sw, sh, &state.pass_action);
+    game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, sw, sh, lerp_t);
+    post_shader_end_source();
+    post_shader_prepare(gw, gh);
+}
 
-    /* Offscreen first, when there is a render scale: the game at N x 496x384. */
-    const bool offscreen = have_game && !lobby && !post && g_web_rt.scale > 0;
-    if (offscreen) {
-        sg_begin_pass(&(sg_pass){
-            .action = state.pass_action,
-            .attachments = { .colors[0] = g_web_rt.color_att, .depth_stencil = g_web_rt.depth_att },
-        });
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                        0, 0, VIDEO_WIDTH * g_web_rt.scale, VIDEO_HEIGHT * g_web_rt.scale, lerp_t);
-        sg_end_pass();
-    }
+/* The game offscreen at the render scale: N x 496x384. */
+static void web_draw_offscreen(float lerp_t) {
+    sg_begin_pass(&(sg_pass){
+        .action = state.pass_action,
+        .attachments = { .colors[0] = g_web_rt.color_att, .depth_stencil = g_web_rt.depth_att },
+    });
+    game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                    0, 0, VIDEO_WIDTH * g_web_rt.scale, VIDEO_HEIGHT * g_web_rt.scale, lerp_t);
+    sg_end_pass();
+}
 
+/* What a callback draws: whether the lobby or the pause menu is up, how the
+ * game was rendered (through the filter, offscreen or not yet), its letterbox
+ * on the canvas and the interpolation it was prepared with. */
+typedef struct {
+    bool  have_game, lobby, overlay, post, offscreen;
+    int   ox, oy, w, h;
+    float lerp_t;
+} web_picture_t;
+
+/* The game in its letterbox, through the filter, from the offscreen target or
+ * drawn straight in; then the pause menu over it. */
+static void web_present_game(const web_picture_t *pic, ps3ui_canvas_t *cv) {
+    int ox = pic->ox, oy = pic->oy, w = pic->w, h = pic->h;
+    if (pic->post)           post_shader_draw(ox, oy, w, h, sapp_width(), sapp_height());
+    else if (pic->offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
+    else           game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, pic->lerp_t);
+    if (pic->overlay) {   /* the pause menu over the game */
+        ps3ui_gpu_draw(cv);
+        sgl_draw();
+    }
+}
+
+/* The object viewer in place of the game, letterboxed to the viewer target's own shape. */
+static void web_present_objview(void) {
+    int ox, oy, w, h;
+    game_render_letterbox(sapp_width(), sapp_height(), g_objview.rt_w, g_objview.rt_h, &ox, &oy, &w, &h);
+    game_render_draw_target(g_objview.color_tex, true, ox, oy, w, h);
+}
+
+/* The object viewer's passes, then the swapchain pass: the lobby, the object
+ * viewer or the game. */
+static void web_present(const web_picture_t *pic, ps3ui_canvas_t *cv) {
     /* The object viewer draws passes of its own, so it runs before the
      * swapchain pass opens -- sokol does not nest them. It costs nothing
      * unless something asked for it: a shot is pending, a setting changed,
@@ -729,32 +745,69 @@ static void frame(void) {
     const bool show_objview = g_web_objview_show && g_objview.color_tex.id && g_objview.rt_w > 0;
 
     sg_begin_pass(&(sg_pass){ .action = state.pass_action, .swapchain = sglue_swapchain() });
-    if (lobby) {
+    if (pic->lobby) {
         /* The lobby's 16:9 frame fitted to the canvas; its own colour fills the rest. */
-        ps3ui_gpu_draw(&lobby_cv);
+        ps3ui_gpu_draw(cv);
         sgl_draw();
     } else if (show_objview) {
-        /* In place of the game, letterboxed to the viewer target's own shape. */
-        int ox, oy, w, h;
-        game_render_letterbox(sapp_width(), sapp_height(), g_objview.rt_w, g_objview.rt_h, &ox, &oy, &w, &h);
-        game_render_draw_target(g_objview.color_tex, true, ox, oy, w, h);
-    } else if (have_game) {
-        int ox = gox, oy = goy, w = gw, h = gh;
-        if (post)           post_shader_draw(ox, oy, w, h, sapp_width(), sapp_height());
-        else if (offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
-        else           game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
-        if (overlay) {   /* the pause menu over the game */
-            ps3ui_gpu_draw(&lobby_cv);
-            sgl_draw();
-        }
+        web_present_objview();
+    } else if (pic->have_game) {
+        web_present_game(pic, cv);
     }
     sg_end_pass();
     sg_commit();
+}
 
+/* The render's time, into the page's counters. */
+static void web_count_render(int64_t render_t0) {
     if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameEnd(); });
     uint32_t render_us = (uint32_t)(emu_now_us() - render_t0);
     g_web_perf.render_us += render_us;
     if (render_us > g_web_perf.render_us_max) g_web_perf.render_us_max = render_us;
+}
+
+static void frame(void) {
+    web_count_callback();
+
+    web_run_owed_slices();
+    web_push_audio();
+
+    web_picture_t pic = { .have_game = state.romset.loaded, .lerp_t = 1.0f };
+    const ps3ui_view_t view = web_lobby_tick();
+    pic.lobby   = view == PS3UI_VIEW_FULL;
+    pic.overlay = pic.have_game && view == PS3UI_VIEW_OVERLAY;
+
+    /* Every callback, not only the ones that might be skipped: what it measures
+     * includes how often the display asks, and half the callbacks are not half
+     * the rate. */
+    const bool afford = web_afford_picture();
+    if (web_keep_picture(pic.have_game, pic.lobby, pic.overlay, afford)) return;
+
+    const int64_t render_t0 = emu_now_us();
+    if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameBegin(); });
+    web_rt_apply();
+
+    static ps3ui_canvas_t lobby_cv;
+    if (pic.lobby || pic.overlay) web_record_menus(&lobby_cv, pic.overlay);
+    const bool game = pic.have_game && !pic.lobby;
+    if (game) {
+        game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+        pic.lerp_t = game_frame_lerp();
+    }
+
+    /* A filter over the picture (post_shader.h) reads the game from a target of
+     * its own, at the render scale, and only covers the game's 4:3 rectangle. */
+    game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &pic.ox, &pic.oy, &pic.w, &pic.h);
+    post_shader_set_input_scale(g_web_rt.want);
+    pic.post = game && !g_web_objview_show && post_shader_active();
+    if (pic.post) web_draw_post_source(pic.w, pic.h, pic.lerp_t);
+
+    /* Offscreen first, when there is a render scale: the game at N x 496x384. */
+    pic.offscreen = game && !pic.post && g_web_rt.scale > 0;
+    if (pic.offscreen) web_draw_offscreen(pic.lerp_t);
+
+    web_present(&pic, &lobby_cv);
+    web_count_render(render_t0);
 }
 
 static void cleanup(void) {
@@ -1288,6 +1341,141 @@ static int web_json_str(char *out, int cap, const char *key, const char *value, 
     return snprintf(out, (size_t)cap, "%s\"%s\":\"%s\"", comma ? "," : "", key, esc);
 }
 
+/* The status JSON as it is written: where the next byte goes, how much room is
+ * left, and whether a write has already run out of it. Once one has, every
+ * later write does nothing and the caller sends the short error instead. */
+typedef struct {
+    char *p;
+    int   left;
+    bool  full;
+} web_json_t;
+
+static void web_put(web_json_t *w, const char *fmt, ...) {
+    if (w->full) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(w->p, (size_t)w->left, fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= w->left) { w->full = true; return; }
+    w->p += n;
+    w->left -= n;
+}
+
+static void web_puts(web_json_t *w, const char *key, const char *val, bool comma) {
+    if (w->full) return;
+    int n = web_json_str(w->p, w->left, key, val, comma);
+    if (n < 0 || n >= w->left) { w->full = true; return; }
+    w->p += n;
+    w->left -= n;
+}
+
+static const char *web_tf(bool b) { return b ? "true" : "false"; }
+
+/* The sign-in: the session's state, the account, the Twitch flow. */
+static void web_status_sign_in(web_json_t *w, const netplay_status_t *st) {
+    web_puts(w, "state", netplay_state_text(st->state), false);
+    web_put(w, ",\"stage\":%d", (int)st->stage);
+    web_puts(w, "error", st->error, true);
+    web_puts(w, "npid", g_netplay.cfg.npid, true);
+    web_puts(w, "server", g_netplay.cfg.server, true);
+    web_put(w, ",\"has_password\":%s", web_tf(g_netplay.cfg.password[0]));
+    /* Our trip to the relay; a room's owner publishes theirs (relay_ms below),
+     * and the lobby adds the two to estimate the trip before joining. */
+    web_put(w, ",\"relay_ms\":%u", st->relay_ms);
+    web_put(w, ",\"family\":\"%s\",\"cross_play\":%s",
+            NETPLAY_BUILD_FAMILY == NETPLAY_FAMILY_WASM ? "web" : "desktop", web_tf(NETPLAY_CROSS_PLAY));
+
+    /* The activation address is shown to the player as a link, so it gets the
+     * same test netplay_open_url applies before a desktop opens one. */
+    const char *uri = !strncmp(st->twitch_uri, "https://", 8) ? st->twitch_uri : "";
+    web_put(w, ",\"twitch\":{\"state\":%d,\"signed_in\":%s", (int)st->twitch_state, web_tf(st->twitch_signed_in));
+    web_puts(w, "code", st->twitch_user_code, true);
+    web_puts(w, "uri", uri, true);
+    web_puts(w, "npid", st->twitch_npid, true);
+    web_puts(w, "error", st->twitch_error, true);
+    web_put(w, "}");
+
+    web_put(w, ",\"account\":{\"state\":%d,\"job\":%d", (int)st->account_state, (int)st->account_job);
+    web_puts(w, "error", st->account_error, true);
+    web_put(w, "}");
+}
+
+/* A round trip in milliseconds, null until the first answer. */
+static void web_put_rtt(web_json_t *w, const char *key, int rtt_ms) {
+    if (rtt_ms >= 0) web_put(w, ",\"%s\":%d", key, rtt_ms);
+    else             web_put(w, ",\"%s\":null", key);
+}
+
+/* One member of the room, `i` places down its line. */
+static void web_status_member(web_json_t *w, uint32_t i, const netplay_member_status_t *m) {
+    web_put(w, "%s{\"line\":%d,\"side\":%d,\"me\":%s,\"owner\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,"
+            "\"wins\":%u,\"games\":%u,\"points\":%u,\"heard\":%s",
+            i ? "," : "", m->line_pos, m->side, web_tf(m->is_me), web_tf(m->is_owner),
+            web_tf(m->data.flags & ROOM_MEMBER_READY),
+            web_tf(m->data.flags & ROOM_MEMBER_WATCH), m->data.entry,
+            m->data.wins, m->data.games, m->data.points, web_tf(m->is_me || m->heard));
+    web_puts(w, "npid", m->npid, true);
+    web_put_rtt(w, "rtt_ms", (int)m->rtt_ms);
+    web_put(w, "}");
+}
+
+/* The room we are in: its id, the peer, and the line of up to eight. */
+static void web_status_room(web_json_t *w, const netplay_status_t *st) {
+    web_put(w, ",\"room\":{\"id\":\"%llu\",\"host\":%s,\"player\":%d,\"flags\":%u",
+            (unsigned long long)st->room_id, web_tf(st->is_host), (int)st->local_player, st->room_flags);
+    web_puts(w, "peer", st->peer_npid, true);
+    web_put(w, ",\"peer_known\":%s,\"peer_heard\":%s,\"peer_ready\":%s",
+            web_tf(st->peer_known), web_tf(st->peer_heard), web_tf(st->peer_ready));
+    /* Round trips measured peer to peer (netplay_rtt_t), null until the first answer. */
+    web_put_rtt(w, "peer_rtt_ms", (int)st->peer_rtt_ms);
+    /* The room of up to eight (net/room.h): phase, match, and the line. */
+    web_put(w, ",\"max\":%u,\"phase\":\"%s\",\"match\":%u,\"auto_start_s\":%u,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"members\":[",
+            st->max_slot, st->room.phase == ROOM_PHASE_MATCH ? "match" : "lobby", st->room.match, st->auto_start_s,
+            web_tf(st->me.flags & ROOM_MEMBER_READY),
+            web_tf(st->me.flags & ROOM_MEMBER_WATCH), st->me.entry);
+    for (uint32_t i = 0; i < st->member_count; i++) web_status_member(w, i, &st->members[i]);
+    web_put(w, "]}");
+}
+
+/* The lockstep: frame, stalls, the round, and a desync if there was one. */
+static void web_status_play(web_json_t *w, const netplay_status_t *st) {
+    web_put(w, ",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"delay\":%u",
+            st->frame, st->stalls, st->generation, (unsigned)g_netplay.cfg.frame_delay);
+    if (st->desync_frame != LOCKSTEP_NO_CHECK) web_put(w, ",\"desync\":%u", st->desync_frame);
+    else                                       web_put(w, ",\"desync\":null");
+    /* Nobody else in the room and the board still in its VS mode: any button
+     * restarts the game (netplay_empty_room_pump). */
+    web_put(w, ",\"empty_room\":%s", web_tf(st->empty_room));
+}
+
+/* One row of the room search, `i` rows down, with why this build cannot join it. */
+static void web_status_listing(web_json_t *w, uint32_t i, const rpcn_room_listing_t *r) {
+    const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
+    uint32_t family = (r->flag_attr >> NETPLAY_ROOM_FAMILY_SHIFT) & NETPLAY_ROOM_FAMILY_MASK;
+    web_put(w, "%s{\"id\":\"%llu\",\"members\":%u,\"slots\":%u,\"password\":%s,\"delay\":%u,\"web\":%s,"
+            "\"relay_ms\":%u",
+            i ? "," : "", (unsigned long long)r->room_id, r->cur_members, r->max_slots,
+            web_tf(r->has_password),
+            (r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK,
+            web_tf(family == NETPLAY_FAMILY_WASM), r->relay_ms);
+    web_puts(w, "owner", r->owner, true);
+    web_puts(w, "why", why ? why : "", true);
+    web_put(w, "}");
+}
+
+/* The log lines after `log_from` that are still in the ring. */
+static void web_status_log(web_json_t *w, const netplay_status_t *st, unsigned log_from) {
+    web_put(w, ",\"log_count\":%u,\"log\":[", st->log_count);
+    uint32_t first = st->log_count > NETPLAY_LOG_LINES ? st->log_count - NETPLAY_LOG_LINES : 0;
+    if (log_from > first) first = log_from;
+    for (uint32_t i = first; i < st->log_count; i++) {
+        char esc[NETPLAY_LOG_LEN * 2];
+        json_escape(esc, (int)sizeof esc, st->log[i % NETPLAY_LOG_LINES]);
+        web_put(w, "%s\"%s\"", i > first ? "," : "", esc);
+    }
+    web_put(w, "]");
+}
+
 /*
  * Everything the page draws, as JSON. `log_from` is the log_count the page last
  * saw: only lines after it are included (all that are still in the ring).
@@ -1296,106 +1484,20 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
     static char out[48 * 1024];
     static netplay_status_t st;
     netplay_get_status(&st);
-    char *p = out;
-    int left = (int)sizeof out, n;
-#define PUT(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); if (n < 0 || n >= left) goto full; p += n; left -= n; } while (0)
-#define PUTS(key, val, comma) do { n = web_json_str(p, left, key, val, comma); if (n < 0 || n >= left) goto full; p += n; left -= n; } while (0)
+    web_json_t w = { out, (int)sizeof out, false };
 
-    PUT("{");
-    PUTS("state", netplay_state_text(st.state), false);
-    PUT(",\"stage\":%d", (int)st.stage);
-    PUTS("error", st.error, true);
-    PUTS("npid", g_netplay.cfg.npid, true);
-    PUTS("server", g_netplay.cfg.server, true);
-    PUT(",\"has_password\":%s", g_netplay.cfg.password[0] ? "true" : "false");
-    /* Our trip to the relay; a room's owner publishes theirs (relay_ms below),
-     * and the lobby adds the two to estimate the trip before joining. */
-    PUT(",\"relay_ms\":%u", st.relay_ms);
-    PUT(",\"family\":\"%s\",\"cross_play\":%s",
-        NETPLAY_BUILD_FAMILY == NETPLAY_FAMILY_WASM ? "web" : "desktop", NETPLAY_CROSS_PLAY ? "true" : "false");
-
-    /* The activation address is shown to the player as a link, so it gets the
-     * same test netplay_open_url applies before a desktop opens one. */
-    const char *uri = !strncmp(st.twitch_uri, "https://", 8) ? st.twitch_uri : "";
-    PUT(",\"twitch\":{\"state\":%d,\"signed_in\":%s", (int)st.twitch_state, st.twitch_signed_in ? "true" : "false");
-    PUTS("code", st.twitch_user_code, true);
-    PUTS("uri", uri, true);
-    PUTS("npid", st.twitch_npid, true);
-    PUTS("error", st.twitch_error, true);
-    PUT("}");
-
-    PUT(",\"account\":{\"state\":%d,\"job\":%d", (int)st.account_state, (int)st.account_job);
-    PUTS("error", st.account_error, true);
-    PUT("}");
-
-    PUT(",\"room\":{\"id\":\"%llu\",\"host\":%s,\"player\":%d,\"flags\":%u",
-        (unsigned long long)st.room_id, st.is_host ? "true" : "false", (int)st.local_player, st.room_flags);
-    PUTS("peer", st.peer_npid, true);
-    PUT(",\"peer_known\":%s,\"peer_heard\":%s,\"peer_ready\":%s",
-        st.peer_known ? "true" : "false", st.peer_heard ? "true" : "false", st.peer_ready ? "true" : "false");
-    /* Round trips measured peer to peer (netplay_rtt_t), null until the first answer. */
-    if (st.peer_rtt_ms >= 0) PUT(",\"peer_rtt_ms\":%d", (int)st.peer_rtt_ms);
-    else                     PUT(",\"peer_rtt_ms\":null");
-    /* The room of up to eight (net/room.h): phase, match, and the line. */
-    PUT(",\"max\":%u,\"phase\":\"%s\",\"match\":%u,\"auto_start_s\":%u,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"members\":[",
-        st.max_slot, st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby", st.room.match, st.auto_start_s,
-        (st.me.flags & ROOM_MEMBER_READY) ? "true" : "false",
-        (st.me.flags & ROOM_MEMBER_WATCH) ? "true" : "false", st.me.entry);
-    for (uint32_t i = 0; i < st.member_count; i++) {
-        const netplay_member_status_t *m = &st.members[i];
-        PUT("%s{\"line\":%d,\"side\":%d,\"me\":%s,\"owner\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,"
-            "\"wins\":%u,\"games\":%u,\"points\":%u,\"heard\":%s",
-            i ? "," : "", m->line_pos, m->side, m->is_me ? "true" : "false", m->is_owner ? "true" : "false",
-            (m->data.flags & ROOM_MEMBER_READY) ? "true" : "false",
-            (m->data.flags & ROOM_MEMBER_WATCH) ? "true" : "false", m->data.entry,
-            m->data.wins, m->data.games, m->data.points, (m->is_me || m->heard) ? "true" : "false");
-        PUTS("npid", m->npid, true);
-        if (m->rtt_ms >= 0) PUT(",\"rtt_ms\":%d", (int)m->rtt_ms);
-        else                PUT(",\"rtt_ms\":null");
-        PUT("}");
-    }
-    PUT("]}");
-
-    PUT(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"delay\":%u",
-        st.frame, st.stalls, st.generation, (unsigned)g_netplay.cfg.frame_delay);
-    if (st.desync_frame != LOCKSTEP_NO_CHECK) PUT(",\"desync\":%u", st.desync_frame);
-    else                                      PUT(",\"desync\":null");
-    /* Nobody else in the room and the board still in its VS mode: any button
-     * restarts the game (netplay_empty_room_pump). */
-    PUT(",\"empty_room\":%s", st.empty_room ? "true" : "false");
-
-    PUT(",\"search_pending\":%s,\"rooms\":[", st.search_pending ? "true" : "false");
-    for (uint32_t i = 0; i < st.room_count && i < RPCN_MAX_ROOMS; i++) {
-        const rpcn_room_listing_t *r = &st.rooms[i];
-        const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
-        uint32_t family = (r->flag_attr >> NETPLAY_ROOM_FAMILY_SHIFT) & NETPLAY_ROOM_FAMILY_MASK;
-        PUT("%s{\"id\":\"%llu\",\"members\":%u,\"slots\":%u,\"password\":%s,\"delay\":%u,\"web\":%s,"
-            "\"relay_ms\":%u",
-            i ? "," : "", (unsigned long long)r->room_id, r->cur_members, r->max_slots,
-            r->has_password ? "true" : "false",
-            (r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK,
-            family == NETPLAY_FAMILY_WASM ? "true" : "false", r->relay_ms);
-        PUTS("owner", r->owner, true);
-        PUTS("why", why ? why : "", true);
-        PUT("}");
-    }
-    PUT("]");
-
-    PUT(",\"log_count\":%u,\"log\":[", st.log_count);
-    uint32_t first = st.log_count > NETPLAY_LOG_LINES ? st.log_count - NETPLAY_LOG_LINES : 0;
-    if (log_from > first) first = log_from;
-    for (uint32_t i = first; i < st.log_count; i++) {
-        char esc[NETPLAY_LOG_LEN * 2];
-        json_escape(esc, (int)sizeof esc, st.log[i % NETPLAY_LOG_LINES]);
-        PUT("%s\"%s\"", i > first ? "," : "", esc);
-    }
-    PUT("]}");
+    web_put(&w, "{");
+    web_status_sign_in(&w, &st);
+    web_status_room(&w, &st);
+    web_status_play(&w, &st);
+    web_put(&w, ",\"search_pending\":%s,\"rooms\":[", web_tf(st.search_pending));
+    for (uint32_t i = 0; i < st.room_count && i < RPCN_MAX_ROOMS; i++) web_status_listing(&w, i, &st.rooms[i]);
+    web_put(&w, "]");
+    web_status_log(&w, &st, log_from);
+    web_put(&w, "}");
+    if (w.full)
+        snprintf(out, sizeof out, "{\"state\":\"%s\",\"error\":\"status too large\"}", netplay_state_text(st.state));
     return out;
-full:
-    snprintf(out, sizeof out, "{\"state\":\"%s\",\"error\":\"status too large\"}", netplay_state_text(st.state));
-    return out;
-#undef PUT
-#undef PUTS
 }
 
 /* The board runs on the wall clock, not on animation frames. A hidden tab gets

@@ -15,15 +15,8 @@
 
 #include "geo3d.h"
 
-static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
-                                      const uint8_t *main_data, size_t main_data_size,
-                                      uint32_t table_off, uint32_t table_count,
-                                      uint32_t mesh_ptr_subtract) {
-    igSetNextWindowPos((ImVec2){10, 460}, ImGuiCond_Once);
-    igSetNextWindowSize((ImVec2){360, 420}, ImGuiCond_Once);
-
-    if (!igBegin("3D", p_open, 0)) { igEnd(); return; }
-
+/* The pipeline switches: what is drawn, from where, and how it is culled. */
+static inline void geo3d_window__switches(geo3d_state_t *geo) {
     igCheckbox("Enabled",           &geo->enabled);
     igCheckbox("Use captures",      &geo->use_captures);
     igCheckbox("Use object matrix", &geo->use_matrix);
@@ -40,84 +33,98 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     if (igRadioButtonIntPtr("off", &g_backface_cull, 0)) {} igSameLine();
     if (igRadioButtonIntPtr("CW", &g_backface_cull, 1)) {} igSameLine();
     if (igRadioButtonIntPtr("CCW", &g_backface_cull, 2)) {}
+}
+
+/* ---- Capture isolate ---- */
+static inline void geo3d_window__isolate(geo3d_state_t *geo) {
+    igText("Isolate capture (-1 = off):");
+    if (geo->isolate_index < 0) {
+        if (igButton("Isolate")) geo->isolate_index = 0;
+        return;
+    }
+    igSetNextItemWidth(120);
+    int mx = geo->captured_count > 0 ? geo->captured_count - 1 : 0;
+    igDragIntEx("##iso", &geo->isolate_index, 1.0f, 0, mx, "%d", 0);
+    igSameLine();
+    if (igButton("Prev##iso")) { if (geo->isolate_index > 0) geo->isolate_index--; }
+    igSameLine();
+    if (igButton("Next##iso")) { if (geo->isolate_index < mx) geo->isolate_index++; }
+    igSameLine();
+    if (igButton("Off##iso"))  { geo->isolate_index = -1; }
+
+    if (geo->isolate_index >= 0 && geo->isolate_index < geo->captured_count) {
+        const captured_model_t *cm = &geo->captured[geo->isolate_index];
+        igText("  [%d] model_idx=%d  has_mat=%d",
+               geo->isolate_index, cm->model_idx, (int)cm->has_matrix);
+        if (cm->has_matrix)
+            igText("  pos=(%.2f, %.2f, %.2f)",
+                   cm->matrix[3], cm->matrix[7], cm->matrix[11]);
+    }
+}
+
+/* The capture list's isolate and filter range. */
+static inline void geo3d_window__captures(geo3d_state_t *geo) {
+    geo3d_window__isolate(geo);
 
     igSeparator();
-    igText("Captured: %d / %d   Lines: %d / %d",
-           geo->captured_count, MAX_GEO_MODELS,
-           g_geo3d_lines.count, GEO3D_MAX_LINES);
+    igText("Filter range:");
+    igCheckbox("Filter enabled", &geo->filter_enabled);
+    if (geo->filter_enabled) {
+        igDragIntEx("Filter min", &geo->filter_min, 1.0f, 0, MAX_GEO_MODELS - 1, "%d", 0);
+        igDragIntEx("Filter max", &geo->filter_max, 1.0f, 0, MAX_GEO_MODELS - 1, "%d", 0);
+    }
+}
 
-    igSeparator();
-    if (geo->use_captures) {
-        /* ---- Capture isolate ---- */
-        igText("Isolate capture (-1 = off):");
-        if (geo->isolate_index < 0) {
-            if (igButton("Isolate")) geo->isolate_index = 0;
-        } else {
-            igSetNextItemWidth(120);
-            int mx = geo->captured_count > 0 ? geo->captured_count - 1 : 0;
-            igDragIntEx("##iso", &geo->isolate_index, 1.0f, 0, mx, "%d", 0);
-            igSameLine();
-            if (igButton("Prev##iso")) { if (geo->isolate_index > 0) geo->isolate_index--; }
-            igSameLine();
-            if (igButton("Next##iso")) { if (geo->isolate_index < mx) geo->isolate_index++; }
-            igSameLine();
-            if (igButton("Off##iso"))  { geo->isolate_index = -1; }
+/* Live model table entry readout */
+static inline void geo3d_window__table_entry(const geo3d_state_t *geo,
+                                             const uint8_t *main_data, size_t main_data_size,
+                                             uint32_t table_off, uint32_t table_count,
+                                             uint32_t mesh_ptr_subtract) {
+    if (main_data && table_count > 0 && (uint32_t)geo->model_index < table_count) {
+        uint32_t toff = table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
+        if ((size_t)toff + MODEL_ENTRY_SIZE <= main_data_size) {
+            uint32_t f1  = read_u32_le(main_data + toff + 0);
+            uint32_t tex = read_u32_le(main_data + toff + 4);
+            uint32_t pol = read_u32_le(main_data + toff + 8);
+            uint32_t f4  = read_u32_le(main_data + toff + 12);
+            uint32_t mesh_off = (pol >= (mesh_ptr_subtract >> 2)) ?
+                                pol * 4u - mesh_ptr_subtract : 0;
+            igText("  f1=0x%08X  tex=0x%08X", f1, tex);
+            igText("  pol=0x%08X -> mesh@0x%08X", pol, mesh_off);
+            igText("  f4=0x%08X  Lines: %d", f4, g_geo3d_lines.count);
+        }
+    } else if (!main_data) {
+        igText("  (no ROM loaded)");
+    }
+}
 
-            if (geo->isolate_index >= 0 && geo->isolate_index < geo->captured_count) {
-                const captured_model_t *cm = &geo->captured[geo->isolate_index];
-                igText("  [%d] model_idx=%d  has_mat=%d",
-                       geo->isolate_index, cm->model_idx, (int)cm->has_matrix);
-                if (cm->has_matrix)
-                    igText("  pos=(%.2f, %.2f, %.2f)",
-                           cm->matrix[3], cm->matrix[7], cm->matrix[11]);
-            }
-        }
-
-        igSeparator();
-        igText("Filter range:");
-        igCheckbox("Filter enabled", &geo->filter_enabled);
-        if (geo->filter_enabled) {
-            igDragIntEx("Filter min", &geo->filter_min, 1.0f, 0, MAX_GEO_MODELS - 1, "%d", 0);
-            igDragIntEx("Filter max", &geo->filter_max, 1.0f, 0, MAX_GEO_MODELS - 1, "%d", 0);
-        }
-    } else {
-        /* ---- Single-model browser ---- */
-        igText("Single-model browser:");
-        igSetNextItemWidth(120);
-        int mi = geo->model_index;
-        if (igInputIntEx("##midx", &mi, 1, 10, 0)) {
-            if (mi < 0) mi = 0;
-            if (table_count > 0 && (uint32_t)mi >= table_count) mi = (int)table_count - 1;
-            geo->model_index = mi;
-        }
-        igSameLine();
-        if (igButton("Prev##mb")) { if (geo->model_index > 0) geo->model_index--; }
-        igSameLine();
-        if (igButton("Next##mb")) {
-            if (table_count == 0 || (uint32_t)geo->model_index + 1 < table_count)
-                geo->model_index++;
-        }
-
-        /* Live model table entry readout */
-        if (main_data && table_count > 0 && (uint32_t)geo->model_index < table_count) {
-            uint32_t toff = table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
-            if ((size_t)toff + MODEL_ENTRY_SIZE <= main_data_size) {
-                uint32_t f1  = read_u32_le(main_data + toff + 0);
-                uint32_t tex = read_u32_le(main_data + toff + 4);
-                uint32_t pol = read_u32_le(main_data + toff + 8);
-                uint32_t f4  = read_u32_le(main_data + toff + 12);
-                uint32_t mesh_off = (pol >= (mesh_ptr_subtract >> 2)) ?
-                                    pol * 4u - mesh_ptr_subtract : 0;
-                igText("  f1=0x%08X  tex=0x%08X", f1, tex);
-                igText("  pol=0x%08X -> mesh@0x%08X", pol, mesh_off);
-                igText("  f4=0x%08X  Lines: %d", f4, g_geo3d_lines.count);
-            }
-        } else if (!main_data) {
-            igText("  (no ROM loaded)");
-        }
+/* ---- Single-model browser ---- */
+static inline void geo3d_window__browser(geo3d_state_t *geo,
+                                         const uint8_t *main_data, size_t main_data_size,
+                                         uint32_t table_off, uint32_t table_count,
+                                         uint32_t mesh_ptr_subtract) {
+    igText("Single-model browser:");
+    igSetNextItemWidth(120);
+    int mi = geo->model_index;
+    if (igInputIntEx("##midx", &mi, 1, 10, 0)) {
+        if (mi < 0) mi = 0;
+        if (table_count > 0 && (uint32_t)mi >= table_count) mi = (int)table_count - 1;
+        geo->model_index = mi;
+    }
+    igSameLine();
+    if (igButton("Prev##mb")) { if (geo->model_index > 0) geo->model_index--; }
+    igSameLine();
+    if (igButton("Next##mb")) {
+        if (table_count == 0 || (uint32_t)geo->model_index + 1 < table_count)
+            geo->model_index++;
     }
 
-    igSeparator();
+    geo3d_window__table_entry(geo, main_data, main_data_size, table_off, table_count,
+                              mesh_ptr_subtract);
+}
+
+/* The camera: read out under the game's view, dragged by hand otherwise. */
+static inline void geo3d_window__camera(geo3d_state_t *geo) {
     igText("Camera:");
     if (geo->use_game_view) {
         igText("  X=%.3f  Y=%.3f  Z=%.3f", geo->cam_x, geo->cam_y, geo->cam_z);
@@ -139,8 +146,10 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
         geo->rot_y   = 0.0f;
         geo->fov_deg = 60.0f;
     }
+}
 
-    igSeparator();
+/* Flat shading: the luma ramp and the light. */
+static inline void geo3d_window__shading(void) {
     igText("Flat shading (definition):");
     { bool lr = g_luma_ramp != 0; if (igCheckbox("MAME luma ramp (colorxlat)", &lr)) g_luma_ramp = lr; }
     { bool le = g_light_enable != 0; if (igCheckbox("enable lighting", &le)) g_light_enable = le; }
@@ -149,6 +158,36 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     igDragFloatEx("light Z", &g_light_dir[2], 0.05f, -2.0f, 2.0f, "%.2f", 0);
     igDragFloatEx("ambient", &g_light_ambient, 0.02f, 0.0f, 1.0f, "%.2f", 0);
     igDragFloatEx("diffuse", &g_light_diffuse, 0.02f, 0.0f, 1.0f, "%.2f", 0);
+}
+
+static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
+                                      const uint8_t *main_data, size_t main_data_size,
+                                      uint32_t table_off, uint32_t table_count,
+                                      uint32_t mesh_ptr_subtract) {
+    igSetNextWindowPos((ImVec2){10, 460}, ImGuiCond_Once);
+    igSetNextWindowSize((ImVec2){360, 420}, ImGuiCond_Once);
+
+    if (!igBegin("3D", p_open, 0)) { igEnd(); return; }
+
+    geo3d_window__switches(geo);
+
+    igSeparator();
+    igText("Captured: %d / %d   Lines: %d / %d",
+           geo->captured_count, MAX_GEO_MODELS,
+           g_geo3d_lines.count, GEO3D_MAX_LINES);
+
+    igSeparator();
+    if (geo->use_captures)
+        geo3d_window__captures(geo);
+    else
+        geo3d_window__browser(geo, main_data, main_data_size, table_off, table_count,
+                              mesh_ptr_subtract);
+
+    igSeparator();
+    geo3d_window__camera(geo);
+
+    igSeparator();
+    geo3d_window__shading();
 
     igEnd();
 }

@@ -313,15 +313,21 @@ static inline bool av__send(net_sock_t s, const void *p, uint32_t n) {
     return net_tcp_send_all(s, p, n);
 }
 
-static void av__serve(net_sock_t c) {
-    static int16_t chunk[AV_AUDIO_MAX_CHUNK * 2];   /* writer thread only */
-    uint8_t  hdr[AV_HEADER_SIZE];
-    uint8_t  ph[AV_PKT_HEADER_SIZE];
-    bool     ok = true;
-    int      started = 0;         /* the first video packet has set the clock */
-    int      a_gap = 0;
-    int      one = 1;
+/* One client's session: whether the first video packet has set the clock, a
+ * pending audio discontinuity, when audio last went out, and whether the
+ * socket still takes what is sent. */
+typedef struct {
+    bool     ok;
+    int      started;             /* the first video packet has set the clock */
+    int      a_gap;
     uint64_t last_audio_ms;
+} av__session_t;
+
+/* The socket's options and the stream header, then the queues read from now.
+ * False when the header would not go. */
+static bool av__serve_open(net_sock_t c, av__session_t *ss) {
+    uint8_t hdr[AV_HEADER_SIZE];
+    int     one = 1;
 
     net_set_nonblocking(c);
     setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
@@ -329,73 +335,105 @@ static void av__serve(net_sock_t c) {
       setsockopt(c, SOL_SOCKET, SO_SNDBUF, (const char *)&sb, sizeof sb); }
 
     av__stream_header(hdr);
-    if (!av__send(c, hdr, AV_HEADER_SIZE)) return;
+    if (!av__send(c, hdr, AV_HEADER_SIZE)) return false;
 
     /* Start clean at the next board-frame boundary: whatever the queue holds is
      * from before this client existed. */
-    g_av.v_r      = g_av.v_w;
-    g_av.v_gap    = 0;
-    g_av.a_r      = g_av.a_w;
-    last_audio_ms = net_now_ms();
+    g_av.v_r          = g_av.v_w;
+    g_av.v_gap        = 0;
+    g_av.a_r          = g_av.a_w;
+    ss->last_audio_ms = net_now_ms();
     g_av.sessions++;
     g_av.connected = 1;
+    return true;
+}
 
-    while (g_av.alive && ok) {
-        bool did = false;
+/* The first video frame says where the audio starts, so both streams
+ * begin at the same instant on the board's own clock. */
+static void av__serve_origin(av__session_t *ss) {
+    if (ss->started || g_av.v_r == g_av.v_w) return;
+    uint64_t origin = g_av.vq[g_av.v_r % AV_VIDEO_SLOTS].sample;
+    /* ...but only as far back as the ring still holds. A frame stamped
+     * long before this client existed would otherwise set the read
+     * head minutes in the past, and the whole session would then be
+     * spent lapping through stale audio. */
+    uint64_t w = g_av.a_w, span = AV_AUDIO_RING - AV_AUDIO_MARGIN;
+    uint64_t oldest = w > span ? w - span : 0;
+    g_av.a_r          = origin < oldest ? oldest : origin;
+    ss->started       = 1;
+    ss->last_audio_ms = net_now_ms();
+}
 
-        /* The first video frame says where the audio starts, so both streams
-         * begin at the same instant on the board's own clock. */
-        if (!started && g_av.v_r != g_av.v_w) {
-            uint64_t origin = g_av.vq[g_av.v_r % AV_VIDEO_SLOTS].sample;
-            /* ...but only as far back as the ring still holds. A frame stamped
-             * long before this client existed would otherwise set the read
-             * head minutes in the past, and the whole session would then be
-             * spent lapping through stale audio. */
-            uint64_t w = g_av.a_w, span = AV_AUDIO_RING - AV_AUDIO_MARGIN;
-            uint64_t oldest = w > span ? w - span : 0;
-            g_av.a_r      = origin < oldest ? oldest : origin;
-            started       = 1;
-            last_audio_ms = net_now_ms();
+/* What the audio ring holds for this client. Lapped -- this client has
+ * effectively stopped reading -- it skips to a safe distance behind the write
+ * head rather than send samples that are being overwritten as they are copied. */
+static uint64_t av__serve_audio_avail(av__session_t *ss) {
+    uint64_t w = g_av.a_w, avail = w - g_av.a_r;
+    if (avail > AV_AUDIO_RING) {
+        uint64_t lost = avail - (AV_AUDIO_RING - AV_AUDIO_MARGIN);
+        g_av.a_r       += lost;
+        g_av.a_dropped += lost;
+        ss->a_gap = 1;
+        avail = w - g_av.a_r;
+        LOG_WARN("av: audio ring lapped, %llu samples lost",
+                 (unsigned long long)lost);
+    }
+    return avail;
+}
+
+/* Audio first: it is the stream that may not be dropped, and a 6 MB
+ * video frame ahead of it would hold it up for a whole send. True when
+ * anything went out. */
+static bool av__serve_audio(net_sock_t c, av__session_t *ss) {
+    static int16_t chunk[AV_AUDIO_MAX_CHUNK * 2];   /* writer thread only */
+    uint8_t ph[AV_PKT_HEADER_SIZE];
+    bool    did = false;
+    for (int burst = 0; ss->started && ss->ok && burst < AV_AUDIO_MAX_BURST; burst++) {
+        uint64_t avail = av__serve_audio_avail(ss);
+        uint64_t now = net_now_ms();
+        bool due = avail >= AV_AUDIO_CHUNK ||
+                   (avail > 0 && now - ss->last_audio_ms >= AV_AUDIO_FLUSH_MS);
+        if (!due) break;
+
+        uint32_t n     = (uint32_t)(avail > AV_AUDIO_MAX_CHUNK ? AV_AUDIO_MAX_CHUNK : avail);
+        uint64_t first = g_av.a_r;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t slot = (uint32_t)((first + i) & (AV_AUDIO_RING - 1u));
+            chunk[i * 2]     = g_av.a_ring[slot * 2];
+            chunk[i * 2 + 1] = g_av.a_ring[slot * 2 + 1];
         }
+        av__pkt_header(ph, 'A', (uint8_t)(ss->a_gap ? AV_FLAG_DISCONTINUITY : 0),
+                       n * 4u, g_av.last_frame, first);
+        ss->ok = av__send(c, ph, AV_PKT_HEADER_SIZE) && av__send(c, chunk, n * 4u);
+        if (!ss->ok) break;
+        ss->a_gap          = 0;
+        g_av.a_r          += n;
+        g_av.a_sent       += n;
+        ss->last_audio_ms  = now;
+        did = true;
+    }
+    return did;
+}
 
-        /* Audio first: it is the stream that may not be dropped, and a 6 MB
-         * video frame ahead of it would hold it up for a whole send. */
-        for (int burst = 0; started && ok && burst < AV_AUDIO_MAX_BURST; burst++) {
-            uint64_t w = g_av.a_w, avail = w - g_av.a_r;
-            if (avail > AV_AUDIO_RING) {
-                /* Lapped — this client has effectively stopped reading. Skip to
-                 * a safe distance behind the write head rather than send samples
-                 * that are being overwritten as they are copied. */
-                uint64_t lost = avail - (AV_AUDIO_RING - AV_AUDIO_MARGIN);
-                g_av.a_r       += lost;
-                g_av.a_dropped += lost;
-                a_gap = 1;
-                avail = w - g_av.a_r;
-                LOG_WARN("av: audio ring lapped, %llu samples lost",
-                         (unsigned long long)lost);
-            }
-            uint64_t now = net_now_ms();
-            bool due = avail >= AV_AUDIO_CHUNK ||
-                       (avail > 0 && now - last_audio_ms >= AV_AUDIO_FLUSH_MS);
-            if (!due) break;
+/* The oldest queued frame. False when the client would not take it. */
+static bool av__serve_video(net_sock_t c) {
+    uint8_t     ph[AV_PKT_HEADER_SIZE];
+    av_vslot_t *s = &g_av.vq[g_av.v_r % AV_VIDEO_SLOTS];
+    av__pkt_header(ph, 'V', s->flags, g_av.vbytes, s->frame, s->sample);
+    if (!(av__send(c, ph, AV_PKT_HEADER_SIZE) && av__send(c, s->px, g_av.vbytes))) return false;
+    g_av.v_r++;           /* last: the slot is the render thread's again */
+    g_av.v_sent++;
+    return true;
+}
 
-            uint32_t n     = (uint32_t)(avail > AV_AUDIO_MAX_CHUNK ? AV_AUDIO_MAX_CHUNK : avail);
-            uint64_t first = g_av.a_r;
-            for (uint32_t i = 0; i < n; i++) {
-                uint32_t slot = (uint32_t)((first + i) & (AV_AUDIO_RING - 1u));
-                chunk[i * 2]     = g_av.a_ring[slot * 2];
-                chunk[i * 2 + 1] = g_av.a_ring[slot * 2 + 1];
-            }
-            av__pkt_header(ph, 'A', (uint8_t)(a_gap ? AV_FLAG_DISCONTINUITY : 0),
-                           n * 4u, g_av.last_frame, first);
-            ok = av__send(c, ph, AV_PKT_HEADER_SIZE) && av__send(c, chunk, n * 4u);
-            if (!ok) break;
-            a_gap          = 0;
-            g_av.a_r      += n;
-            g_av.a_sent   += n;
-            last_audio_ms  = now;
-            did = true;
-        }
+static void av__serve(net_sock_t c) {
+    av__session_t ss = { .ok = true };
+
+    if (!av__serve_open(c, &ss)) return;
+
+    while (g_av.alive && ss.ok) {
+        av__serve_origin(&ss);
+        bool did = av__serve_audio(c, &ss);
 
         /* Then ONE queued frame, and back round for the audio. Draining the
          * whole queue here starved the sound whenever the client took about as
@@ -405,13 +443,8 @@ static void av__serve(net_sock_t c) {
          * frames went out back to back -- then arrived as nine 8192-frame
          * packets at once. A player that holds a fixed cushion of sound
          * cannot absorb that: it runs dry, then overflows and skips. */
-        if (ok && g_av.v_r != g_av.v_w) {
-            av_vslot_t *s = &g_av.vq[g_av.v_r % AV_VIDEO_SLOTS];
-            av__pkt_header(ph, 'V', s->flags, g_av.vbytes, s->frame, s->sample);
-            ok = av__send(c, ph, AV_PKT_HEADER_SIZE) && av__send(c, s->px, g_av.vbytes);
-            if (!ok) break;
-            g_av.v_r++;           /* last: the slot is the render thread's again */
-            g_av.v_sent++;
+        if (ss.ok && g_av.v_r != g_av.v_w) {
+            if (!av__serve_video(c)) break;
             did = true;
         }
 

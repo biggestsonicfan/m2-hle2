@@ -160,34 +160,30 @@ static inline bool ws_relay_send_frame(ws_relay_t *r, uint8_t opcode, const uint
     return ws_relay_write(r, f, h + len);
 }
 
-/* Opens the WebSocket. Blocks for the connect and the upgrade, as the TLS connect
- * to RPCN does; the caller runs outside the emu mutex. */
-static inline bool ws_relay_open(ws_relay_t *r, const char *url) {
-    memset(r, 0, sizeof(*r));
-    r->sock     = NET_SOCK_INVALID;
-    r->tls.sock = NET_SOCK_INVALID;   /* a zeroed one is fd 0, which a close would take */
-    snprintf(r->url, sizeof(r->url), "%s", url ? url : "");
-
+/* The scheme, host, port and path of r->url. */
+static inline bool ws_relay_parse_url(ws_relay_t *r, char *host, size_t host_cap, uint16_t *port,
+                                      const char **path) {
     const char *p = r->url;
-    uint16_t port;
-    if (ws_relay__strnicmp(p, "wss://", 6) == 0)     { r->secure = true;  p += 6; port = 443; }
-    else if (ws_relay__strnicmp(p, "ws://", 5) == 0) { r->secure = false; p += 5; port = 80; }
+    if (ws_relay__strnicmp(p, "wss://", 6) == 0)     { r->secure = true;  p += 6; *port = 443; }
+    else if (ws_relay__strnicmp(p, "ws://", 5) == 0) { r->secure = false; p += 5; *port = 80; }
     else { ws_relay_fail(r, "the relay must be a ws:// or wss:// URL"); return false; }
 
-    char host[128];
     size_t n = strcspn(p, ":/");
-    if (!n || n >= sizeof(host)) { ws_relay_fail(r, "the relay URL names no host"); return false; }
+    if (!n || n >= host_cap) { ws_relay_fail(r, "the relay URL names no host"); return false; }
     memcpy(host, p, n);
     host[n] = 0;
     p += n;
     if (*p == ':') {
         char *after;
-        port = (uint16_t)strtoul(p + 1, &after, 10);
+        *port = (uint16_t)strtoul(p + 1, &after, 10);
         p = after;
-        if (!port) { ws_relay_fail(r, "the relay URL's port is not a number"); return false; }
+        if (!*port) { ws_relay_fail(r, "the relay URL's port is not a number"); return false; }
     }
-    const char *path = *p ? p : "/";
+    *path = *p ? p : "/";
+    return true;
+}
 
+static inline bool ws_relay_connect(ws_relay_t *r, const char *host, uint16_t port) {
     if (r->secure) {
         if (!tls_connect(&r->tls, host, port, NULL)) {
             snprintf(r->error, sizeof(r->error), "%.180s", tls_last_error(&r->tls));
@@ -206,14 +202,17 @@ static inline bool ws_relay_open(ws_relay_t *r, const char *url) {
      * previous one's ACK. */
     int one = 1;
     setsockopt(r->sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+    return true;
+}
 
+/* A fresh Sec-WebSocket-Key: 16 random bytes in base64. */
+static inline void ws_relay_key64(ws_relay_t *r, char key64[25]) {
     uint8_t key[16];
     for (int i = 0; i < 16; i += 4) {
         uint32_t v = ws_relay_rand(r);
         memcpy(key + i, &v, 4);
     }
     static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    char key64[25];
     for (int i = 0, o = 0; i < 16; i += 3) {
         uint32_t v = (uint32_t)key[i] << 16 | (i + 1 < 16 ? (uint32_t)key[i + 1] << 8 : 0)
                    | (i + 2 < 16 ? key[i + 2] : 0);
@@ -223,36 +222,33 @@ static inline bool ws_relay_open(ws_relay_t *r, const char *url) {
         key64[o++] = i + 2 < 16 ? b64[v & 63] : '=';
         key64[o] = 0;
     }
-    char req[640];
-    int len = snprintf(req, sizeof(req),
-                       "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                       "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\n"
-                       "User-Agent: m2hle\r\n\r\n",
-                       path, host, key64, WS_RELAY_ORIGIN);
-    if (len <= 0 || len >= (int)sizeof(req) || !ws_relay_write(r, req, (uint32_t)len)) {
-        ws_relay_fail(r, "could not send the WebSocket upgrade");
-        return false;
-    }
+}
 
-    /* The reply's head; anything after it is already frames. */
+/* The upgrade reply's head, 1 when it is in and accepted, 0 for not yet, -1
+ * refused. Anything after the head is already frames, and stays in r->in. */
+static inline int ws_relay_upgrade_reply(ws_relay_t *r) {
+    r->in[r->in_used] = 0;
+    char *end = strstr((char *)r->in, "\r\n\r\n");
+    if (!end) return 0;
+    if (strncmp((char *)r->in, "HTTP/1.1 101", 12) != 0) {
+        char why[160];
+        size_t line = strcspn((char *)r->in, "\r\n");
+        snprintf(why, sizeof(why), "the gateway refused the relay: %.*s",
+                 (int)(line < 100 ? line : 100), (char *)r->in);
+        ws_relay_fail(r, why);
+        return -1;
+    }
+    uint32_t head = (uint32_t)(end + 4 - (char *)r->in);
+    memmove(r->in, r->in + head, r->in_used - head);
+    r->in_used -= head;
+    return 1;
+}
+
+static inline bool ws_relay_await_upgrade(ws_relay_t *r) {
     uint64_t deadline = net_now_ms() + WS_RELAY_TIMEOUT_MS;
     for (;;) {
-        r->in[r->in_used] = 0;
-        char *end = strstr((char *)r->in, "\r\n\r\n");
-        if (end) {
-            if (strncmp((char *)r->in, "HTTP/1.1 101", 12) != 0) {
-                char why[160];
-                size_t line = strcspn((char *)r->in, "\r\n");
-                snprintf(why, sizeof(why), "the gateway refused the relay: %.*s",
-                         (int)(line < 100 ? line : 100), (char *)r->in);
-                ws_relay_fail(r, why);
-                return false;
-            }
-            uint32_t head = (uint32_t)(end + 4 - (char *)r->in);
-            memmove(r->in, r->in + head, r->in_used - head);
-            r->in_used -= head;
-            break;
-        }
+        int head = ws_relay_upgrade_reply(r);
+        if (head) return head > 0;
         if (r->in_used + 1 >= sizeof(r->in)) { ws_relay_fail(r, "the gateway's reply is too long"); return false; }
         int got = ws_relay_read(r, r->in + r->in_used, (uint32_t)sizeof(r->in) - 1 - r->in_used);
         if (got < 0) { ws_relay_fail(r, "the gateway closed the connection"); return false; }
@@ -264,6 +260,35 @@ static inline bool ws_relay_open(ws_relay_t *r, const char *url) {
         struct timeval tv = { 0, 50000 };
         select((int)r->sock + 1, &rd, NULL, NULL, &tv);
     }
+}
+
+/* Opens the WebSocket. Blocks for the connect and the upgrade, as the TLS connect
+ * to RPCN does; the caller runs outside the emu mutex. */
+static inline bool ws_relay_open(ws_relay_t *r, const char *url) {
+    memset(r, 0, sizeof(*r));
+    r->sock     = NET_SOCK_INVALID;
+    r->tls.sock = NET_SOCK_INVALID;   /* a zeroed one is fd 0, which a close would take */
+    snprintf(r->url, sizeof(r->url), "%s", url ? url : "");
+
+    char host[128];
+    uint16_t port;
+    const char *path;
+    if (!ws_relay_parse_url(r, host, sizeof(host), &port, &path)) return false;
+    if (!ws_relay_connect(r, host, port)) return false;
+
+    char key64[25];
+    ws_relay_key64(r, key64);
+    char req[640];
+    int len = snprintf(req, sizeof(req),
+                       "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                       "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\n"
+                       "User-Agent: m2hle\r\n\r\n",
+                       path, host, key64, WS_RELAY_ORIGIN);
+    if (len <= 0 || len >= (int)sizeof(req) || !ws_relay_write(r, req, (uint32_t)len)) {
+        ws_relay_fail(r, "could not send the WebSocket upgrade");
+        return false;
+    }
+    if (!ws_relay_await_upgrade(r)) return false;
     r->open = true;
     return true;
 }
@@ -282,62 +307,85 @@ static inline bool ws_relay_send(ws_relay_t *r, uint32_t ip_be, uint16_t port, c
     return true;
 }
 
+#define WS_RELAY_MORE (-2)   /* ws_relay_next_frame: the frame is not all in yet */
+
+/* The waiting frame's header length and payload length, or false while the
+ * header is not all in. */
+static inline bool ws_relay_frame_head(const ws_relay_t *r, uint32_t *h, uint64_t *len) {
+    if (r->in_used < 2) return false;
+    *h = 2;
+    *len = r->in[1] & 0x7F;
+    if (*len == 126) {
+        if (r->in_used < 4) return false;
+        *len = (uint32_t)r->in[2] << 8 | r->in[3];
+        *h = 4;
+    } else if (*len == 127) {
+        if (r->in_used < 10) return false;
+        *len = 0;
+        for (int i = 0; i < 8; i++) *len = *len << 8 | r->in[2 + i];
+        *h = 10;
+    }
+    return true;
+}
+
+/* A frame that is not a datagram: 0 handled, -1 the relay is closed. */
+static inline int ws_relay_control(ws_relay_t *r, uint8_t b0, const uint8_t *pl, uint64_t len) {
+    uint8_t op = b0 & 0x0F;
+    if (!(b0 & 0x80) || op == 0x0 || op == 0x1) {
+        ws_relay_fail(r, "the gateway sent a message the relay does not understand");
+        return -1;
+    }
+    if (op == 0x8) {
+        char why[160];
+        snprintf(why, sizeof(why), "the gateway closed the relay%s%.*s", len > 2 ? ": " : "",
+                 len > 2 ? (int)(len - 2 < 100 ? len - 2 : 100) : 0, (const char *)pl + 2);
+        ws_relay_fail(r, why);
+        return -1;
+    }
+    if (op == 0x9 && !ws_relay_send_frame(r, 0xA, pl, (uint32_t)len, NULL, 0)) {
+        ws_relay_fail(r, "the connection to the gateway was lost");
+        return -1;
+    }
+    return 0;
+}
+
+/* Takes the waiting frame: a datagram's length, 0 for a frame that was not one,
+ * -1 the relay is closed, WS_RELAY_MORE when the frame is not all in. */
+static inline int ws_relay_next_frame(ws_relay_t *r, void *buf, uint32_t cap, uint32_t *out_ip_be,
+                                      uint16_t *out_port) {
+    uint32_t h;
+    uint64_t len;
+    if (!ws_relay_frame_head(r, &h, &len)) return WS_RELAY_MORE;
+    uint8_t b0 = r->in[0];
+    bool masked = (r->in[1] & 0x80) != 0;
+    if (len > sizeof(r->in) - 14) { ws_relay_fail(r, "the gateway sent a message too large"); return -1; }
+    if (r->in_used < h + (masked ? 4 : 0) + len) return WS_RELAY_MORE;
+    uint8_t *pl = r->in + h + (masked ? 4 : 0);
+    if (masked)
+        for (uint32_t i = 0; i < (uint32_t)len; i++) pl[i] ^= r->in[h + (i & 3)];
+    uint32_t total = (uint32_t)(pl - r->in) + (uint32_t)len;
+    if (ws_relay_control(r, b0, pl, len) < 0) return -1;
+    int out = 0;
+    if ((b0 & 0x0F) == 0x2 && len >= 6 && len - 6 <= cap) {
+        if (out_ip_be) memcpy(out_ip_be, pl, 4);
+        if (out_port)  *out_port = (uint16_t)(pl[4] << 8 | pl[5]);
+        memcpy(buf, pl + 6, (size_t)len - 6);
+        out = (int)len - 6;
+    }
+    memmove(r->in, r->in + total, r->in_used - total);
+    r->in_used -= total;
+    return out;
+}
+
 /* The next datagram: its length, 0 = none waiting, -1 = the relay is closed
  * (r->error says why). Pings are answered here. */
 static inline int ws_relay_recv(ws_relay_t *r, void *buf, uint32_t cap, uint32_t *out_ip_be, uint16_t *out_port) {
     if (!r->open) return -1;
     for (int pass = 0; pass < 64; pass++) {
-        /* A whole frame waiting? */
-        if (r->in_used >= 2) {
-            uint8_t b0 = r->in[0], b1 = r->in[1];
-            uint32_t h = 2;
-            uint64_t len = b1 & 0x7F;
-            if (len == 126) {
-                if (r->in_used < 4) goto more;
-                len = (uint32_t)r->in[2] << 8 | r->in[3];
-                h = 4;
-            } else if (len == 127) {
-                if (r->in_used < 10) goto more;
-                len = 0;
-                for (int i = 0; i < 8; i++) len = len << 8 | r->in[2 + i];
-                h = 10;
-            }
-            bool masked = (b1 & 0x80) != 0;
-            if (len > sizeof(r->in) - 14) { ws_relay_fail(r, "the gateway sent a message too large"); return -1; }
-            if (r->in_used < h + (masked ? 4 : 0) + len) goto more;
-            uint8_t *pl = r->in + h + (masked ? 4 : 0);
-            if (masked)
-                for (uint32_t i = 0; i < (uint32_t)len; i++) pl[i] ^= r->in[h + (i & 3)];
-            uint32_t total = (uint32_t)(pl - r->in) + (uint32_t)len;
-            uint8_t op = b0 & 0x0F;
-            int out = 0;
-            if (!(b0 & 0x80) || op == 0x0 || op == 0x1) {
-                ws_relay_fail(r, "the gateway sent a message the relay does not understand");
-                return -1;
-            }
-            if (op == 0x8) {
-                char why[160];
-                snprintf(why, sizeof(why), "the gateway closed the relay%s%.*s", len > 2 ? ": " : "",
-                         len > 2 ? (int)(len - 2 < 100 ? len - 2 : 100) : 0, (char *)pl + 2);
-                ws_relay_fail(r, why);
-                return -1;
-            }
-            if (op == 0x9 && !ws_relay_send_frame(r, 0xA, pl, (uint32_t)len, NULL, 0)) {
-                ws_relay_fail(r, "the connection to the gateway was lost");
-                return -1;
-            }
-            if (op == 0x2 && len >= 6 && len - 6 <= cap) {
-                if (out_ip_be) memcpy(out_ip_be, pl, 4);
-                if (out_port)  *out_port = (uint16_t)(pl[4] << 8 | pl[5]);
-                memcpy(buf, pl + 6, (size_t)len - 6);
-                out = (int)len - 6;
-            }
-            memmove(r->in, r->in + total, r->in_used - total);
-            r->in_used -= total;
-            if (out) { r->received++; return out; }
-            continue;
-        }
-    more:;
+        int out = ws_relay_next_frame(r, buf, cap, out_ip_be, out_port);
+        if (out == -1) return -1;
+        if (out > 0) { r->received++; return out; }
+        if (out == 0) continue;
         int got = ws_relay_read(r, r->in + r->in_used, (uint32_t)sizeof(r->in) - r->in_used);
         if (got < 0) { ws_relay_fail(r, "the connection to the gateway was lost"); return -1; }
         if (got == 0) return 0;

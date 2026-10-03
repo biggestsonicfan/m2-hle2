@@ -51,26 +51,34 @@ static int g_spin_skip = 1;
 /* Iterations done here since start-up, for det_digest. */
 static uint64_t g_spin_iters;
 
+/* The loop at ip, decoded from memory: the load's words (ld, ea) and the
+ * compare-and-branch's (cb). False when the IP holds anything else. */
+static inline bool m2_spin_match(memory_bus_t *bus, uint32_t ip, uint32_t *ld, uint32_t *ea, uint32_t *cb) {
+    uint32_t unused;
+    mem_fetch2(bus, ip, ld, ea);
+    mem_fetch2(bus, ip + 8u, cb, &unused);
+
+    /* ldob / ldos / ld from a work-RAM address (MEMB, mode 0xC). */
+    uint32_t lop = *ld >> 24;
+    if ((lop != 0x80 && lop != 0x88 && lop != 0x90) || (*ld & 0x3C00u) != 0x3000u) return false;
+    if (*ea < 0x00500000u || *ea > 0x005FFFFFu) return false;
+    /* A compare-and-branch back to the load. */
+    uint32_t cop = *cb >> 24;
+    if (!((cop >= 0x31 && cop <= 0x36) || (cop >= 0x39 && cop <= 0x3E))) return false;
+    int32_t disp = (int32_t)(*cb & 0x00001FFCu);
+    if (disp & 0x1000) disp |= (int32_t)0xFFFFE000;
+    return ip + 8u + (uint32_t)disp == ip;
+}
+
 /* Skip the idle iterations of the load + compare-and-branch loop at the IP;
  * 1 leaves it to the i960. */
 static inline int m2_spin_skip(i960_cpu_t *cpu, memory_bus_t *bus) {
     if (!g_spin_skip || g_hle_room < 2 || wp_armed()) return 1;
     if (g_irqt.intreq & g_irqt.intena & 0x03FFu) return 1;
 
-    uint32_t ip = cpu->sfr.ip, ld, ea, cb, unused;
-    mem_fetch2(bus, ip, &ld, &ea);
-    mem_fetch2(bus, ip + 8u, &cb, &unused);
-
-    /* ldob / ldos / ld from a work-RAM address (MEMB, mode 0xC). */
-    uint32_t lop = ld >> 24;
-    if ((lop != 0x80 && lop != 0x88 && lop != 0x90) || (ld & 0x3C00u) != 0x3000u) return 1;
-    if (ea < 0x00500000u || ea > 0x005FFFFFu) return 1;
-    /* A compare-and-branch back to the load. */
-    uint32_t cop = cb >> 24;
-    if (!((cop >= 0x31 && cop <= 0x36) || (cop >= 0x39 && cop <= 0x3E))) return 1;
-    int32_t disp = (int32_t)(cb & 0x00001FFCu);
-    if (disp & 0x1000) disp |= (int32_t)0xFFFFE000;
-    if (ip + 8u + (uint32_t)disp != ip) return 1;
+    uint32_t ip = cpu->sfr.ip, ld, ea, cb;
+    if (!m2_spin_match(bus, ip, &ld, &ea, &cb)) return 1;
+    uint32_t lop = ld >> 24, cop = cb >> 24;
 
     uint32_t v = lop == 0x80 ? mem_read8(bus, ea) : lop == 0x88 ? mem_read16(bus, ea) : mem_read32(bus, ea);
     int dst = (int)MEM_SRCDST(ld);
