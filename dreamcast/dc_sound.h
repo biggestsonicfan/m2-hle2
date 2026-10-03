@@ -107,17 +107,18 @@ static int adx_next(adx_dec_t *d, adx_fetch_fn fetch, void *src) {
     for (uint32_t c = 0; c < h->ch; c++, f += 18) {
         int scale = ds_be16(f);
         int32_t s1 = d->s1[c], s2 = d->s2[c];
+        int32_t c1 = h->c1, c2 = h->c2;
         for (int i = 0; i < 32; i++) {
-            int nib = (f[2 + i / 2] >> (i & 1 ? 0 : 4)) & 15;
-            int32_t s = (nib ^ 8) - 8;
-            s = s * scale + ((h->c1 * s1 + h->c2 * s2) >> 12);
+            int32_t s = (int32_t)((uint32_t)f[2 + i / 2] << (i & 1 ? 28 : 24)) >> 28;  /* signed nibble */
+            s = s * scale + ((c1 * s1 + c2 * s2) >> 12);
             if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
             s2 = s1; s1 = s;
             d->pcm[i][c] = (int16_t)s;
-            if (h->ch == 1) d->pcm[i][1] = (int16_t)s;
         }
         d->s1[c] = s1; d->s2[c] = s2;
     }
+    if (h->ch == 1)
+        for (int i = 0; i < 32; i++) d->pcm[i][1] = d->pcm[i][0];
     uint32_t base = d->frame * 32, hi = 32;
     if (base + 32 > h->le) hi = h->le - base;
     d->frame++;
@@ -129,6 +130,29 @@ static int adx_next(adx_dec_t *d, adx_fetch_fn fetch, void *src) {
 /* Adds n stereo samples at DS_RATE into acc, scaled by vol (16.16). Stops at
  * an underrun or the end. */
 static void adx_mix(adx_dec_t *d, adx_fetch_fn fetch, void *src, int32_t *acc, int n, int32_t vol) {
+    if (d->step == 1u << 16 && d->frac == 1u << 16) {
+        /* At DS_RATE (the music) each output is the sample before the one it
+         * loads, as below with f = 0, without the per-sample bookkeeping. */
+        int i = 0;
+        while (i < n && !d->done) {
+            if (d->pos >= d->end && !adx_next(d, fetch, src)) return;
+            int k = d->end - d->pos;
+            if (k > n - i) k = n - i;
+            const int16_t (*p)[2] = &d->pcm[d->pos];
+            int32_t l = d->cur[0], r = d->cur[1];
+            int32_t *o = acc + 2 * i;
+            if (vol == 1 << 16)
+                for (int j = 0; j < k; j++) { o[2 * j] += l; o[2 * j + 1] += r; l = p[j][0]; r = p[j][1]; }
+            else
+                for (int j = 0; j < k; j++) {
+                    o[2 * j] += (l * vol) >> 16; o[2 * j + 1] += (r * vol) >> 16;
+                    l = p[j][0]; r = p[j][1];
+                }
+            d->cur[0] = (int16_t)l; d->cur[1] = (int16_t)r;
+            d->pos += k; i += k;
+        }
+        return;
+    }
     for (int i = 0; i < n && !d->done; i++) {
         while (d->frac >= (1u << 16)) {
             if (d->pos >= d->end && !adx_next(d, fetch, src)) return;
@@ -141,8 +165,9 @@ static void adx_mix(adx_dec_t *d, adx_fetch_fn fetch, void *src, int32_t *acc, i
         int32_t f = (int32_t)d->frac;
         int32_t l = d->prev[0] + (((d->cur[0] - d->prev[0]) * f) >> 16);
         int32_t r = d->prev[1] + (((d->cur[1] - d->prev[1]) * f) >> 16);
-        acc[2 * i]     += (int32_t)(((int64_t)l * vol) >> 16);
-        acc[2 * i + 1] += (int32_t)(((int64_t)r * vol) >> 16);
+        /* vol is at most 1 << 16, so a 16-bit sample times it fits 32 bits. */
+        if (vol == 1 << 16) { acc[2 * i] += l; acc[2 * i + 1] += r; }
+        else { acc[2 * i] += (l * vol) >> 16; acc[2 * i + 1] += (r * vol) >> 16; }
         d->frac += d->step;
     }
 }

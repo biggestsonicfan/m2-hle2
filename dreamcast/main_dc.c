@@ -4,7 +4,8 @@
  *
  * The board runs, the pad is mapped, and the picture is the PowerVR's (D2,
  * dc_pvr.h): the tile layers and the 3D scene from the board's display list.
- * The numbers that decide the rest are printed (dbgio and the screen): board
+ * The numbers that decide the rest are on the screen (and dbgio with
+ * -DDC_STATS_DBGIO=1: the serial port costs ~2% of the SH-4): board
  * fps, the slice's and the picture's time, and the pager's traffic. No netplay. Sound is Sega's console way, a trap at
  * the game's sound call playing ADX cues off the disc (dc_sound.h, #342).
  *
@@ -17,6 +18,11 @@
 #include <kos.h>
 #include <dc/maple/controller.h>
 #include <dc/biosfont.h>
+
+#ifndef DC_STATS_DBGIO
+#define DC_STATS_DBGIO 0
+#endif
+#define STATS_PRINT(l) do { if (DC_STATS_DBGIO) printf("%s\n", (l)); } while (0)
 
 #include "constants.h"
 #include "log.h"
@@ -172,6 +178,7 @@ int main(int argc, char **argv) {
     printf("%s\n", line);
     dp_text(2, line);
 
+    if (!DC_STATS_DBGIO) dbgio_dev_select("null");  /* printf to the serial port was 2% of a fight */
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
     dc_install_board();
@@ -208,30 +215,30 @@ int main(int argc, char **argv) {
                      (unsigned)(us_slice / 1000 / (slices ? slices : 1)),
                      (unsigned)(g_dp.us_decode / 1000 / (shown ? shown : 1)),
                      (unsigned)(g_dp.us_submit / 1000 / (shown ? shown : 1)));
-            printf("%s\n", line);
+            STATS_PRINT(line);
             dp_text(0, line);
             /* Per 2 s: loads (their read time), refills; since boot: the rest. */
             snprintf(line, sizeof line, "ld %u (%u ms) tlb %u | ev %u pin %u wr %u err %u",
                      (unsigned)loads, (unsigned)read_ms, (unsigned)refills, (unsigned)g_pg.evictions,
                      (unsigned)pg_pinned(), (unsigned)g_pg.rom_writes, (unsigned)g_pg.read_errors);
-            printf("%s\n", line);
+            STATS_PRINT(line);
             dp_text(1, line);
             snprintf(line, sizeof line, "snd %s codes %u unk %u bgm %d ring %u KB under %u",
                      g_ds.dev ? "on" : "off", (unsigned)g_ds.codes, (unsigned)g_ds.unknown,
                      g_ds.bgm == 0xFFFF ? -1 : (int)g_ds.bgm,
                      (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
-            printf("%s\n", line);
+            STATS_PRINT(line);
             dp_text(19, line);   /* the bottom row: the game draws over row 2 */
             snprintf(line, sizeof line, "tris %u runs %u full %u | tex %u new %u drop %u fail %u",
                      g_dp.tris, g_dp.runs, g_dp.faces_dropped, g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails);
-            printf("%s\n", line);
+            STATS_PRINT(line);
             dp_text(18, line);
             unsigned d = shown ? shown : 1;
             snprintf(line, sizeof line, "tiles %u scan %u sort %u ms | mesh %u built %u hit %u",
                      (unsigned)(g_dp.us_tiles / 1000 / d), (unsigned)(g_dp.us_scan / 1000 / d),
                      (unsigned)(g_dp.us_sort / 1000 / d), (unsigned)g_geo3d_mesh_count,
                      (unsigned)(g_geo3d_mesh_builds - builds_last), (unsigned)(g_geo3d_mesh_hits - hits_last));
-            printf("%s\n", line);
+            STATS_PRINT(line);
             dp_text(17, line);
             builds_last = g_geo3d_mesh_builds; hits_last = g_geo3d_mesh_hits;
             g_dp.us_tiles = g_dp.us_scan = g_dp.us_sort = 0;

@@ -209,6 +209,7 @@ static int  s_irq_baseline_depth = 0;
 static bool s_irq_from_table     = false;
 static int  s_irq_slices         = 0;
 static uint64_t s_timer_cycles_seen = 0;   /* cpu->cycles the board's clock has been given */
+#include "i960_blocks.h"     /* the decoded-block cache (I960_BLOCKS builds) */
 /* The slice ended on a vblank: one video frame of the board ran. */
 static volatile int g_vblank_edge = 0;
 
@@ -252,6 +253,9 @@ static inline void emu_board_reset_state(void) {
     s_irq_from_table     = false;
     s_irq_slices         = 0;
     s_timer_cycles_seen  = 0;   /* install_fn put cpu->cycles back to 0 */
+#if I960_BLOCKS
+    s_ib_valid           = 0;   /* new code, perhaps */
+#endif
     g_vblank_edge        = 0;
     g_versus_result      = 0;
     g_replay_stage_pin   = -1;
@@ -613,12 +617,31 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         } else if (M2_UNLIKELY(bps) && bp_check(cpu->sfr.ip)) {
             break;
         }
+#if I960_BLOCKS
+        /* A decoded block, when nothing can come between its instructions that
+         * this path would have to see (i960_blocks.h): it counts as the steps
+         * it ran, and the checks after a step follow its last. */
+        if (!slow && !bps && !g_pcprof_on) {
+            const ib_block_t *b = ib_lookup(cpu, bus, cpu->sfr.ip);
+            if (b->n && b->n <= (uint32_t)(max_steps - i)
+                    && g_irqt.pending + (irqt_count_t)b->cyc < g_irqt.horizon
+                    && !(g_irqt.intreq & g_irqt.intena & 0x03FFu)) {
+                uint32_t k = ib_run(cpu, bus, b, attn);
+                g_ib.ops += k; g_ib.runs++;
+                i += (int)k - 1; steps += k - 1;
+                goto ib_ran;
+            }
+        }
+#endif
         PCPROF_TICK(cpu->sfr.ip);
         /* A hook may stand in for several instructions (g_hle_room); on the
          * slow path, or with a breakpoint armed, it is offered only this one,
          * so every check below still sees each instruction. */
         if (M2_UNLIKELY(i960_step_core(cpu, bus,
                                        (slow || bps) ? 1u : (uint32_t)(max_steps - i)) != 0)) break;
+#if I960_BLOCKS
+    ib_ran:
+#endif
         steps++;
         if (M2_UNLIKELY(slow || g_emu_attn != attn)) {
             slow = true;

@@ -117,11 +117,26 @@ static inline vec3_t apply_matrix(vec3_t v, const float *m) {
  * the J = 0.990 that tool first measured was this rule and nothing else. */
 #define GEO3D_SPLIT_SLOTS 8192u   /* power of two, > 2 × GEO3D_IA_MAX_VPS */
 
+/* floor(c * 4096 + 0.5) as int32, without the double floor (a library call on
+ * the SH-4, a tenth of its frame there). c * 4096 is exact in float; its
+ * integer part truncates and the fraction left is exact, so rounding half up
+ * from those two is the double expression's value. Out of int32's range (and
+ * NaN) it takes the double path as before. */
+static inline int32_t geo3d_round4096(float c) {
+    const float y = c * 4096.0f;
+    if (fabsf(y) < 1073741824.0f) {
+        const int32_t i = (int32_t)y;
+        const float fr = y - (float)i;
+        return i + (fr >= 0.5f) - (fr < -0.5f);
+    }
+    return (int32_t)floor((double)c * 4096.0 + 0.5);
+}
+
 static inline uint32_t geo3d_corner_key(vec3_t p) {
     const float c[3] = { p.x, p.y, p.z };
     uint32_t h = 2166136261u;
     for (int a = 0; a < 3; a++) {
-        uint32_t q = (uint32_t)(int32_t)floor((double)c[a] * 4096.0 + 0.5);
+        uint32_t q = (uint32_t)geo3d_round4096(c[a]);
         h = (h ^ (q & 0xffffu)) * 16777619u;
         h = (h ^ ((q >> 16) & 0xffffu)) * 16777619u;
     }
