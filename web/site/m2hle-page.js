@@ -434,7 +434,8 @@ function pauseRender() {
   const on = how !== 0;
   btn.hidden = !Module._web_pause_allowed();
   btn.setAttribute('aria-pressed', String(on));
-  btn.title = on ? 'Resume (P)' : 'Pause (P)';
+  const key = m2hleKeys.binds.p1.pause[0];
+  btn.title = (on ? 'Resume' : 'Pause') + (key ? ' (' + m2hleKeys.keyName(key) + ')' : '');
   btn.setAttribute('aria-label', on ? 'Resume' : 'Pause');
   $('paused').hidden = how !== 1;   /* the PS3's menu says so itself */
 }
@@ -450,18 +451,9 @@ function pauseOnGame() {
   if (pauseOnGame.done) return;
   pauseOnGame.done = true;
   $('btn-pause').addEventListener('click', () => { pauseToggle(); leaveBar(); });
-  /* Ahead of the emulator's own key listener (this script loads before m2hle.js). */
-  window.addEventListener('keydown', (e) => {
-    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.target instanceof Element && e.target.closest('#drawer, #online, #controls, #touch-edit, #menu, input, textarea, select')) return;
-    if (e.code !== 'Pause' && e.code !== 'KeyP') return;
-    if (e.code === 'KeyP') {
-      const b = m2hleKeys.binds;
-      for (const p of ['p1', 'p2']) for (const list of Object.values(b[p])) if (list.includes('KeyP')) return;
-    }
-    e.preventDefault();
-    pauseToggle();
-  }, true);
+  /* The keys and pad buttons bound to Pause in the Controls panel (P and the Pause
+   * key unless the player changes them; m2hle-keys.js, m2hle-pad.js). */
+  window.addEventListener('m2hle-pause', pauseToggle);
   /* The PS3 pauses by itself when a player's pad goes (TaskPause_WaitTrigger), so a
    * pad that drops out mid-game stops the board here too. */
   window.addEventListener('gamepaddisconnected', () => {
