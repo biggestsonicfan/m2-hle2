@@ -517,6 +517,28 @@ body:has(#panel:not([hidden])) .bar { opacity: 0.85; }
 .bar-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.35rem; }
 .bar-tools .tool { display: inline-flex; align-items: center; padding: 0.3rem 0.45rem; }
 a.tool.github { color: var(--text); }
+/* Pause shows what pressing it does: the bars while the game runs, the arrow
+ * once it stands still, and the bar stays lit while it does. */
+.pause-btn .play-icon, .pause-btn[aria-pressed="true"] .pause-icon { display: none; }
+.pause-btn[aria-pressed="true"] .play-icon { display: inline; }
+.bar:has(.pause-btn[aria-pressed="true"]) { opacity: 1; }
+.paused-label {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  margin: 0;
+  padding: 0.4rem 1.2rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  font-size: 1.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.paused-label[hidden] { display: none; }
 
 /* The menu: a PS3 window of rows under the two tiles, the row under the pointer
  * or the keyboard lit the way the game lights its own. */

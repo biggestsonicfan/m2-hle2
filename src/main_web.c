@@ -301,6 +301,26 @@ static bool web_slice(void) {
     return true;
 }
 
+/* The page's Pause button: the board stands still, picture and all, until it is
+ * pressed again. Offline only. In a room or a match the other boards run on, so
+ * it is refused there, and a pause that a room catches up with is let go. It is
+ * the page's, not the board's: nothing the board reads changes, a reset keeps it,
+ * and a paused board is exactly the board it was, frame for frame. */
+static bool g_web_paused;
+
+static bool web_pause_refused(void) { return netplay_in_room() || netplay_active(); }
+
+/* Returns whether the board is now paused. */
+EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
+    g_web_paused = on && state.romset.loaded && !web_pause_refused();
+    return g_web_paused ? 1 : 0;
+}
+EMSCRIPTEN_KEEPALIVE int web_paused(void) { return g_web_paused ? 1 : 0; }
+/* 1 when the page may offer the button: a game is loaded and no room has us. */
+EMSCRIPTEN_KEEPALIVE int web_pause_allowed(void) {
+    return state.romset.loaded && !web_pause_refused() ? 1 : 0;
+}
+
 static void web_run_owed_slices(void) {
     int64_t now = emu_now_us();
     if (state.last_us == 0) state.last_us = now;
@@ -313,8 +333,9 @@ static void web_run_owed_slices(void) {
         state.owed_us = cap;
     }
 
-    if (state.emu.run_state != EMU_RUNNING || g_web_hold) {
-        /* Not running yet (or held under the shell's menus), and netplay still
+    if (g_web_paused && web_pause_refused()) g_web_paused = false;   /* a room or a match took over */
+    if (state.emu.run_state != EMU_RUNNING || g_web_hold || g_web_paused) {
+        /* Not running yet (or held under the shell's menus, or paused), and netplay still
          * has to breathe: the login and the room happen before the match
          * starts (emu_thread.h, STOPPED branch). */
         emu_netplay_pump(&state.emu);

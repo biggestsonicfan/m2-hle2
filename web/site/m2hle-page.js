@@ -76,6 +76,7 @@ function loadZip(bytes) {
     addEventListener('pagehide', () => Module._web_backup_flush());
     m2hleNetplay.onGame();
     m2hleTouch.onGame();
+    pauseOnGame();
     $('canvas').focus();
   }, 0));
 }
@@ -359,7 +360,7 @@ window.addEventListener('drop', (e) => {
 
 /* ---- The menu ----------------------------------------------------------------
  *
- * The bar holds two buttons -- the source link and this menu -- and the menu holds
+ * The bar holds the source link, Pause and this menu, and the menu holds
  * everything else. Its items keep the ids and the handlers they had in the bar, so
  * the panels (m2hle-netplay.js, m2hle-pad.js, m2hle-tools.js) and the test scripts
  * press them by id whether or not the menu is open. */
@@ -417,4 +418,48 @@ if (fsRequest && (document.fullscreenEnabled || document.webkitFullscreenEnabled
   };
   document.addEventListener('fullscreenchange', label);
   document.addEventListener('webkitfullscreenchange', label);
+}
+
+/* ---- Pause -------------------------------------------------------------------
+ *
+ * Offline play only: the board stands still (main_web.c, web_set_paused) and the
+ * sound with it, until Pause is pressed again. In a room the other boards run on,
+ * so the button goes away there, and a pause still on when a room starts is let
+ * go by the emulator itself. P does the same, unless the player has bound P to
+ * the game; so does the keyboard's Pause key. */
+function pauseRender() {
+  const btn = $('btn-pause');
+  const on = !!Module._web_paused();
+  btn.hidden = !Module._web_pause_allowed();
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'Resume (P)' : 'Pause (P)';
+  btn.setAttribute('aria-label', on ? 'Resume' : 'Pause');
+  $('paused').hidden = !on;
+}
+
+function pauseToggle() {
+  if (!Module._web_pause_allowed()) return;
+  const on = !!Module._web_set_paused(Module._web_paused() ? 0 : 1);
+  m2hleTools.print(on ? 'paused' : 'resumed');
+  pauseRender();
+}
+
+function pauseOnGame() {
+  if (pauseOnGame.done) return;
+  pauseOnGame.done = true;
+  $('btn-pause').addEventListener('click', () => { pauseToggle(); leaveBar(); });
+  /* Ahead of the emulator's own key listener (this script loads before m2hle.js). */
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target instanceof Element && e.target.closest('#drawer, #online, #controls, #touch-edit, #menu, input, textarea, select')) return;
+    if (e.code !== 'Pause' && e.code !== 'KeyP') return;
+    if (e.code === 'KeyP') {
+      const b = m2hleKeys.binds;
+      for (const p of ['p1', 'p2']) for (const list of Object.values(b[p])) if (list.includes('KeyP')) return;
+    }
+    e.preventDefault();
+    pauseToggle();
+  }, true);
+  setInterval(pauseRender, 250);   /* a room can start, or end, at any time */
+  pauseRender();
 }
