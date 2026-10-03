@@ -1,4 +1,4 @@
-# The web gateway for play.sonicthefighte.rs (m2-hle2 web/gateway, WEB-NETPLAY.md).
+# The web gateway for play.sonicthefighte.rs (m2-hle2 web/gateway, docs/WEB-NETPLAY.md).
 # Host networking: it needs the UDP range on the public address and RPCN on
 # 127.0.0.1. It listens only on the forgejo_forgejo bridge (172.18.0.1), where
 # the caddy container reaches it; /root/forgejo/Caddyfile routes /gw/* here.

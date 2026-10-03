@@ -1,5 +1,5 @@
 /*
- * main_web.c -- the browser host (-DM2HLE_FRONTEND=web, Emscripten). WEB-PORT.md
+ * main_web.c -- the browser host (-DM2HLE_FRONTEND=web, Emscripten). docs/WEB-PORT.md
  * is the plan this follows.
  *
  * One ROM set (Sonic the Fighters), no ImGui, no debugger, no MCP bridge, no
@@ -486,7 +486,7 @@ static void init(void) {
 
     netplay_init();
     netplay_set_reset_hook(web_netplay_reset_cb, NULL);
-    netplay_set_open_browser(false);   /* the page shows the link; see WEB-PORT.md 3.2 */
+    netplay_set_open_browser(false);   /* the page shows the link; see docs/WEB-PORT.md 3.2 */
 
     /* The lobby (ui/ps3ui_app.h) over the same netplay: drawn on the canvas with
      * sokol_gl, opened from the page (web_lobby_open). */

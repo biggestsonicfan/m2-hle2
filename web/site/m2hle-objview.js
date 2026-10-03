@@ -67,7 +67,7 @@ const m2hleObjview = (() => {
   /*
    * Select the object, place it in 3D space and aim the camera, then wait for
    * one render pass so the reply carries this object's triangle count, bounds
-   * and auto-fit distance. See MCP_GUIDE.md for every field; the common ones
+   * and auto-fit distance. See docs/MCP_GUIDE.md for every field; the common ones
    * are { model, capture, use_capture_matrix, yaw, pitch, dist, fov, autofit,
    * fit_margin, width, height, wireframe, textured, cull }.
    *

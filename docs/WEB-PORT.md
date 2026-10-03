@@ -2,7 +2,7 @@
 
 The plan for **play.sonicthefighte.rs**: a UI-stripped WebAssembly build of this emulator that plays *Sonic the Fighters* over RPCN, deployed to GitHub Pages from this repository on every push to master.
 
-Pair with [CLAUDE.md](CLAUDE.md) (invariants) and [PROPOSAL.md](PROPOSAL.md) (architecture). This file is the web target's equivalent of both: what was found, what was decided and why, and the order to build it in. Work happened on the `wasm` branch until PR #20 (`3d2ca3e`) merged it into master; master is now where the web frontend lives and what deploys.
+Pair with [CLAUDE.md](../CLAUDE.md) (invariants) and [PROPOSAL.md](PROPOSAL.md) (architecture). This file is the web target's equivalent of both: what was found, what was decided and why, and the order to build it in. Work happened on the `wasm` branch until PR #20 (`3d2ca3e`) merged it into master; master is now where the web frontend lives and what deploys.
 
 Status: **M1 done, M2 boots.** `arc-s` is merged (`dd6f3cb`) and the web frontend runs: a full Sonic-vs-Knuckles fight at 60 game fps in headless Edge, from a merged zip loaded by CRC, with keyboard input and sound in sync (confirmed by ear), on one thread. The deploy pipeline (M5) is in and publishes from master. Netplay is in too (PR #31): web backends for `tls.h` / `net_socket.h` (`src/net/web_socket.h`), the gateway (`web/gateway/`, running on the RPCN droplet), and the sign-in / lobby / room panel (`web/site/m2hle-netplay.js`). Two browsers have played a whole match through it. The determinism gate passed on 2026-09-21 and cross-play is on (`NETPLAY_CROSS_PLAY`, [WEB-NETPLAY.md](WEB-NETPLAY.md) section 3), but a real web-vs-desktop session has still not been run. **[WEB-NETPLAY.md](WEB-NETPLAY.md) is the netplay design as built, and replaces sections 3.2, 3.4, 4 and 5 here where they disagree.** Gamepads (with a Controls panel) and touch buttons are in as well (M6). Section 8 is what has been *measured*; everything else about browser behaviour is still a claim to be checked at the milestone that names it.
 
@@ -139,7 +139,7 @@ The site ships the emulator and nothing else. The player picks (or drops) **one 
 
 ## 4. The gateway
 
-One small daemon on the RPCN host (`rpcn.sonicthefighte.rs`, `143.198.49.181`). It lives in this repo under `web/gateway/` but is **not** deployed by the Pages workflow — GitHub Pages cannot run it, and it needs a real certificate for `wss://` (Caddy or nginx + Let's Encrypt in front is the simple way). Node is the default choice because `tools/` is already Node; nothing about the design depends on it. *As built* it is Node + `ws` (`gateway.mjs`, routing rules in `rules.mjs`), running in Docker behind the droplet's existing Caddy; [web/gateway/README.md](web/gateway/README.md) has the deployment and WEB-NETPLAY.md section 4 the rules.
+One small daemon on the RPCN host (`rpcn.sonicthefighte.rs`, `143.198.49.181`). It lives in this repo under `web/gateway/` but is **not** deployed by the Pages workflow — GitHub Pages cannot run it, and it needs a real certificate for `wss://` (Caddy or nginx + Let's Encrypt in front is the simple way). Node is the default choice because `tools/` is already Node; nothing about the design depends on it. *As built* it is Node + `ws` (`gateway.mjs`, routing rules in `rules.mjs`), running in Docker behind the droplet's existing Caddy; [web/gateway/README.md](../web/gateway/README.md) has the deployment and WEB-NETPLAY.md section 4 the rules.
 
 ### 4.1 Two channels per player
 

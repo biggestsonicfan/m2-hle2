@@ -659,7 +659,7 @@ A lobby that holds itself open, in full:
 {"cmd":"netplay_stop"}                     // match over — the room stays open
 ```
 
-`flystf/rpcn.py` in the [stf-fly](../stf-fly) sibling is that loop with a fruit
+`flystf/rpcn.py` in the [stf-fly](../../stf-fly) sibling is that loop with a fruit
 fly behind it.
 
 ### Captures and diagnostics

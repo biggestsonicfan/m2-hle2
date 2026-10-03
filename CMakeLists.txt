@@ -22,7 +22,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # through a pointer of another type, which C leaves undefined; MSVC never
 # optimises on that rule and Clang does. The wasm build (Clang) left the
 # desktop build (MSVC) at frame 2948 of attract, and computed the same frames
-# again with this flag and no other change (tests/det_digest.c, WEB-NETPLAY.md
+# again with this flag and no other change (tests/det_digest.c, docs/WEB-NETPLAY.md
 # "Cross-play"). It costs nothing measurable there.
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-ffp-contract=off -fno-strict-aliasing)
@@ -95,7 +95,7 @@ endif()
 #          input, sokol_gfx on GLES 3, no ImGui — and so no Python either
 #   web    the browser build (src/main_web.c, Emscripten only): sokol_app on a
 #          canvas, sokol_gfx on WebGL2, no ImGui; the page in web/ is its UI.
-#          See WEB-PORT.md. Configure with emcmake.
+#          See docs/WEB-PORT.md. Configure with emcmake.
 #   libretro  a libretro core (src/main_libretro.c): m2hle_libretro.dll/.so for
 #          RetroArch, which owns the window, input, audio and netplay lobby.
 #          GL 4.1 core; -DM2HLE_LIBRETRO_GLES=ON for GLES 3 (the handheld).
@@ -289,7 +289,7 @@ endif()
 # the desktop sokol TU, the unit tests) is part of this build.
 #
 # One thread, on purpose: GitHub Pages cannot send the COOP/COEP headers that
-# SharedArrayBuffer (and so -pthread) needs. WEB-PORT.md, "Threading".
+# SharedArrayBuffer (and so -pthread) needs. docs/WEB-PORT.md, "Threading".
 # ---------------------------------------------------------------------------
 if(M2HLE_WEB)
     add_library(sokol STATIC ${SRC}/sokol_web_impl.c)
@@ -316,7 +316,7 @@ if(M2HLE_WEB)
     # Link-time optimisation across the three objects (the board is header-only, so
     # this is mostly miniz and sokol): 16 KB off the wasm and nothing measurable
     # either way on the board's speed. det_digest is byte-identical with it over
-    # 6000 frames of attract, which is what cross-play needs (WEB-NETPLAY.md 3).
+    # 6000 frames of attract, which is what cross-play needs (docs/WEB-NETPLAY.md 3).
     target_compile_options(m2hle PRIVATE "-flto")
     target_link_options(m2hle PRIVATE
         "-flto"

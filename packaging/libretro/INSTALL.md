@@ -120,6 +120,8 @@ Open **Quick Menu > Core Options** while the game runs.
 | Draw rate | 60, 30 | 30 draws every second frame: half the graphics work, cooler on a handheld. The game still runs at 60. | at once |
 | Heat guard | off, 80, 85, 90 °C | Above that temperature, draws every second frame until the device has cooled 5 degrees. The second time, it stays at every second frame; still hot after that, it turns the sound board off until the next load (never during an online match). Linux and handhelds only. | at once |
 | Sound board | enabled, disabled | Disabled is silent and uses less power. | next time you load the game |
+| Sound driver | 68000, In C | 68000 runs the game's sound driver on the board's own processor. In C runs a port of it through the same sound chip: about half the work, so cooler on a handheld. Sonic the Fighters only. | next time you load the game |
+| Sound board on its own core | enabled, disabled | Runs the sound board on a second CPU core. The game is the same either way; the sound comes out one frame later. | at once |
 | Online play | RetroArch, RPCN | Which netplay to use (see below). | next time you load the game |
 | Input delay (frames) | 1 to 8 | For matches you host. Higher hides more network lag. | the next match you host |
 

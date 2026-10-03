@@ -81,9 +81,12 @@ RetroArch's **Quick Menu > Controls** remaps on top, as with any core.
 | Option | Values | Applies |
 |---|---|---|
 | Internal resolution | Native (496x384), Double, Triple, Quadruple, Full screen | at once |
+| Sonic the Fighters version | Console, Arcade | next load |
 | Draw rate | every frame (60), every second frame (30, cooler) | at once |
 | Heat guard | off, 80, 85, 90 C | at once |
 | Sound board | enabled, disabled | next load |
+| Sound driver | 68000 (the board), In C (lighter) | next load |
+| Sound board on its own core | enabled, disabled | at once |
 | Online play | RetroArch, RPCN | next load |
 | Input delay (frames) | 1 to 8 | the next session you host |
 

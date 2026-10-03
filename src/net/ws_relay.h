@@ -10,7 +10,7 @@
  * peer is told about is one only RPCN may answer through.
  *
  * The browser build has the same problem with no UDP at all, and the gateway on
- * the RPCN host solves it (web/gateway/gateway.mjs, WEB-NETPLAY.md section 4):
+ * the RPCN host solves it (web/gateway/gateway.mjs, docs/WEB-NETPLAY.md section 4):
  * /gw/dgram is a WebSocket whose messages are datagrams, framed
  * [ip: 4, network order][port: u16 BE][payload], sent and received from a UDP
  * socket on the gateway's public address. That address is reachable by anybody,

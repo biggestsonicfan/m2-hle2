@@ -14,7 +14,7 @@
 #include "sfight_console.h"
 /* The web build (M2HLE_WEB) registers Sonic the Fighters and nothing else: it
  * exists to play that game over RPCN, and a set that cannot be played online
- * there is only download size. Left out, not hidden. See WEB-PORT.md. Both STF
+ * there is only download size. Left out, not hidden. See docs/WEB-PORT.md. Both STF
  * profiles are there, since each is its own lobby space. */
 #ifndef M2HLE_WEB
 #include "fvipers.h"

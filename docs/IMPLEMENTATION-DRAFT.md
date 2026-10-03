@@ -1,7 +1,7 @@
 # IMPLEMENTATION-DRAFT.md — Rebuilding the Model 2 HLE Emulator from Scratch
 
 > **Historical.** The rebuild this plans is complete, and this repository is it. Where this file
-> and [CLAUDE.md](CLAUDE.md) disagree, CLAUDE.md is current.
+> and [CLAUDE.md](../CLAUDE.md) disagree, CLAUDE.md is current.
 
 This is the document I would write to myself before re-implementing this project cold.
 It supersedes the optimistic 14-phase checklist in [PROPOSAL.md](PROPOSAL.md): the real
@@ -14,7 +14,7 @@ sequence). The truth is post-multiply column-major accumulation, recovered by re
 SHARC firmware and diffing against MAME. A rebuild that doesn't stand up the verification
 harness *first* will re-walk every one of those dead ends.
 
-Read alongside [CLAUDE.md](CLAUDE.md) (load-bearing invariants) and the auto-memory index
+Read alongside [CLAUDE.md](../CLAUDE.md) (load-bearing invariants) and the auto-memory index
 `MEMORY.md`. Where this doc and PROPOSAL.md disagree, this doc wins.
 
 ---

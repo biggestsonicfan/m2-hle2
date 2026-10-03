@@ -1,7 +1,7 @@
 # Model 2 HLE Emulator — Rebuild Proposal
 
 > **Historical (June 2026).** Every phase below is done, and the "(now: …)" notes record where the
-> build went differently. [CLAUDE.md](CLAUDE.md) is current and supersedes §8.
+> build went differently. [CLAUDE.md](../CLAUDE.md) is current and supersedes §8.
 
 A bootstrap outline for recreating the project as a **general Sega Model 2 arcade emulator** in a fresh Claude Code session. *Sonic The Fighters* (STF) is the **reference game** — it's where the bulk of the prior reverse-engineering happened and the first title that must boot end-to-end — but the architecture must accommodate the full Model 2 catalogue from day one. Generalising across games strengthens every subsystem: a fix for Virtua Cop's tile compositor may fix STF's HUD; a Daytona polygon-format finding already drove STF's 3D decoder; a COP matrix bug found in Virtua Fighter 2 would surface in Fighting Vipers and STF identically.
 

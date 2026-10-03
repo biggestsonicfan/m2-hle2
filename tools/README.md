@@ -528,7 +528,7 @@ What it found (2026-10-01): medians from 60 (stage 11) to 2,778 pixels of
 190,464, and the board key nearer MAME on every stage, by 539,225 changed
 pixels to 3,496. Every worst picture is animation phase: the rings' spin, water
 speckle, the Death Egg's floor scroll, the laser rails' blink, the stage card a
-frame apart. None of it is geometry. BUBBLEGUM.md §1 has the table.
+frame apart. None of it is geometry. docs/BUBBLEGUM.md §1 has the table.
 
 ## The Flying Carpet's rug (`grade-carpet`)
 
@@ -1072,7 +1072,7 @@ inputs.
 ### The driver in C against the 68000 (`grade-sound-hle.py`)
 
 `--sound-hle` runs STF's sound driver ported to C (`src/board/sound_hle.h`,
-SCSP.md "The driver in C") in place of the 68000. It is not bit-exact by
+docs/SCSP.md "The driver in C") in place of the 68000. It is not bit-exact by
 design, so it is graded, not `cmp`ed: `grade-sound-hle.py` runs `snd_replay`
 twice on each input, the board as is and with `SND_HLE=1`, and reports the
 board's key-ons matched on what they play (not the slot), their timing, how
@@ -1089,7 +1089,7 @@ det_digest <merged zip> --frames 20000 --script "..." --sound-hle --out b.txt  #
 The first five columns of the two `det_digest` outputs (frame, check, work
 RAM, buffer RAM, COP) must be identical: the i960 only sees the UART, which
 board time clocks. `--pcm FILE` writes each run's audio, for a gameplay
-comparison. The numbers are in SCSP.md.
+comparison. The numbers are in docs/SCSP.md.
 
 ## The netplay reset
 
@@ -1184,7 +1184,7 @@ Before `emu_sound_slice_end` the sound board was charged a frame per *slice*, an
 VS screen's 65 frames spanned 80 slices: 904.6 samples a frame (802.8 with
 `--live-timers`), the music ~23% fast through the load. It is 735.0 now, at any
 `--steps-per-slice`. Since Pinboard #253 a slice is the board's own vblank and the
-timers are always live, so it holds by construction. See `SLICE-CLOCKS.md`.
+timers are always live, so it holds by construction. See `docs/SLICE-CLOCKS.md`.
 
 ## Two builds, one board
 
@@ -1343,7 +1343,7 @@ emu thread, so the same build holds the sound thread against itself.
 
 Measured 2026-09-21: identical over 12,000 frames of attract and a 10,000-frame
 two-player scripted match, after two fixes. Before them the builds split at
-frame 2948, on a NaN's sign and on strict aliasing (WEB-NETPLAY.md,
+frame 2948, on a NaN's sign and on strict aliasing (docs/WEB-NETPLAY.md,
 "Cross-play").
 ## The object viewer, in a browser
 
@@ -1359,7 +1359,7 @@ node tools/web-objview.mjs --url "http://localhost:8080/?rom=/dev-rom.zip"      
 
 `--list FIRST:COUNT` lists triangle counts instead; `--opts '{...}'` takes any field the
 viewer understands; `--show` screenshots the page with the viewer on the canvas. Full
-reference, and the same commands on the desktop, in MCP_GUIDE.md.
+reference, and the same commands on the desktop, in docs/MCP_GUIDE.md.
 
 Two things it waits for, and they are different questions. `waitReady` waits for the board to
 have *drawn* 3D, which is when the texture sheets and the palette are up. `--at-frame N`
