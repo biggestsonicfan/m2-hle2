@@ -59,7 +59,7 @@ Snapshots of the code at one commit, each with what came of it.
   dead code taken out after.
 - [BUBBLEGUM.md](BUBBLEGUM.md) — the places that patched a symptom where the board has a simpler
   rule (Pinboard #245). Most are fixed; the file says which.
-- [NOCLIP-SYNC.md](NOCLIP-SYNC.md) — where m2-hle2 and the STF explorer (noclip) differ, and
+- [NOCLIP-SYNC.md](NOCLIP-SYNC.md) — where m2-hle2 and the STF explorer ([noclip](https://github.com/biggestsonicfan/noclip)) differ, and
   which side is right (Pinboard #298).
 - [SPAGHETTI.md](SPAGHETTI.md) — how much of the code is tangled, measured, and the untangling
   since (Pinboard #321).

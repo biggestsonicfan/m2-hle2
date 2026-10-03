@@ -44,7 +44,7 @@ The browser takes one merged `sfight.zip` or `schamp.zip`.
 
 ## Controls
 
-The keyboard defaults are MAME's:
+The keyboard defaults are based on the Model 2 Emulator's (m2emulator), with changes:
 
 | | Player 1 | Player 2 |
 |---|---|---|

@@ -160,7 +160,7 @@ Also: every browser player reaches RPCN from one IP, so any per-IP limit RPCN ap
 
 ## 5. The wizard and the lobby
 
-Three steps, one visible at a time, each with one obvious button. Everything the native window exposes that a player does not need — server, port, certificate fingerprint, e-mail token, classic account, YAMP's room list, the log — is gone or behind an "Advanced" disclosure (frame delay, private-match password).
+Three steps, one visible at a time, each with one obvious button. Everything the native window exposes that a player does not need — server, port, certificate fingerprint, e-mail token, classic account, [YAMP](https://github.com/biggestsonicfan/YAMP)'s room list, the log — is gone or behind an "Advanced" disclosure (frame delay, private-match password).
 
 1. **Add your game.** Drop zone + file button. On success: "Sonic the Fighters — ready", and the game boots into attract behind the panel. On failure: which files are missing and what kind of set that means (§3.5).
 2. **Sign in with Twitch.** One button. Then the code, large, with a Copy button, and an **Open Twitch** link (§3.2): "Check the code on Twitch matches this one, then approve." Then "Waiting for Twitch…" with Cancel. Then "Signed in as *name*". A returning player with a good token skips this step — that is `netplay_twitch_reuse`, already built. The states map one-to-one onto `rpcn_twitch_state_t`; `TwitchAuthPending` and `TwitchAuthSlowDown` are not errors and must not end the flow, and **the flow must stay on one connection** — so the gateway must not recycle the upstream mid-flow.

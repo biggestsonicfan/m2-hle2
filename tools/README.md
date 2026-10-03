@@ -45,7 +45,7 @@ git submodule update --init vendor/noclip
 
 No `npm install`: nothing here has a dependency, except `grade-carpet.mjs`, which
 drives a headless browser through `puppeteer-core` found outside this tree
-(`$M2_PUPPETEER`, a sibling `stf-tools`'s, the explorer's, or `../noclip`'s).
+(`$M2_PUPPETEER`, a sibling [`stf-tools`](https://github.com/biggestsonicfan/stf-tools)'s, the explorer's, or `../noclip`'s).
 Node 18 or newer, because the explorer's zip reader goes through
 `DecompressionStream`.
 
@@ -801,7 +801,7 @@ different slot; audio envelope correlation 0.992 and loudness within 1% in every
 notes of the first five seconds and held 25-32 voices keyed where MAME holds
 5-16.
 
-**Against current MAME (2026-09-28, claude_mame at `1d6dbfafe53`, a fresh 90 s
+**Against current MAME (2026-09-28, [claude_mame](https://github.com/biggestsonicfan/mame) at `1d6dbfafe53`, a fresh 90 s
 capture on the Linux build):** the MAME above was from before its 2026-09-23
 merge, which gave the sound 68000 a wait state on every sound RAM and SCSP
 access, put the i960's UART on a real serial line into the SCSP, and latched

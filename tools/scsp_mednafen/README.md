@@ -193,7 +193,7 @@ python tools/scsp_mednafen/wav_compare.py cap/mame.wav out.wav out.mednafen.wav 
 
 ### MAME's capture (2026-09-26: rebuilt claude_mame for Linux, 5400 frames of attract)
 
-The capture was made fresh with claude_mame's MAME built on Linux: `snd_capture.py cap/mame 5400`, the
+The capture was made fresh with [claude_mame](https://github.com/biggestsonicfan/mame)'s MAME built on Linux: `snd_capture.py cap/mame 5400`, the
 setup in claude_mame's CLAUDE_MAME.md. Each board was then played through it and graded with
 `tools/mame/snd_compare.py` (first 70 s):
 

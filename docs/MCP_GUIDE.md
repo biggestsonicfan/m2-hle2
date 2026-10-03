@@ -49,7 +49,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
 | `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
 | `--match-replay` | Arm `match_replay` (below) from boot |
-| `--sky-eye <link>` | Start `sky_eye` (below) from boot with a noclip view link |
+| `--sky-eye <link>` | Start `sky_eye` (below) from boot with a [noclip](https://github.com/biggestsonicfan/noclip) view link |
 | `--objview [N]` | Open the object viewer at boot, optionally on model N |
 | `--headless` | No window, GPU or audio device. The object-viewer tools do not work here |
 | `--no-tray` | `--headless` without its notification-area icon (a service, or a Session 0 run) |

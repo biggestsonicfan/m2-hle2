@@ -51,7 +51,7 @@ core's *Sonic the Fighters version* option.
   board's backup RAM is blank. Once your saved settings exist, change them in the test menu
   (F3).
 
-**Homebrew.** Put a homebrew program in place of a stock set's program ROMs; m2-pacman is an
+**Homebrew.** Put a homebrew program in place of a stock set's program ROMs; [m2-pacman](https://github.com/biggestsonicfan/m2-pacman) is an
 example. The emulator notices that the program is not Sega's and runs it with no game-specific
 patches. It also gets its own save file, so it never touches the game's.
 
@@ -167,7 +167,7 @@ from the same cold boot (see [Online play](#online-play)).
 
 ## Controls
 
-The desktop's keyboard defaults are MAME's. The browser starts with the same keys.
+The desktop's keyboard defaults are based on the Model 2 Emulator's (m2emulator), with changes. The browser starts with the same keys.
 
 | | Player 1 | Player 2 |
 |---|---|---|
@@ -242,7 +242,7 @@ F2 is Service and F3 is Test, which opens the operator menu.
   - **PS3:** on the official server you can join or host rooms of the PS3 release (NPUB30927)
     running in RPCS3. `--net-ps3` allows this on other servers.
 - **Separate lobbies:** each game, and each STF version, has its own room list. The desktop can
-  also list YAMP's rooms, read-only.
+  also list [YAMP](https://github.com/biggestsonicfan/YAMP)'s rooms, read-only.
 - **Fixes connection problems by itself:**
   - If UDP 3658 is taken, it moves to the next free port.
   - If your router changes your address, it follows.
@@ -342,7 +342,7 @@ RetroArch keeps `m2hle-rpcn.cfg` in its saves folder instead.
 - **Object viewer:** browse every model in the ROM with a free camera. Open it with
   `--objview [N]`, from the Debug menu, or with the browser's `?objview`. For single models,
   use `--model N` and `--extract N`.
-- **SKY EYE:** paste a camera link from the STF explorer (noclip) and the game's camera jumps
+- **SKY EYE:** paste a camera link from the STF explorer ([noclip](https://github.com/biggestsonicfan/noclip)) and the game's camera jumps
   there, on the stage it names. *Copy explorer link* goes the other way. STF only; also
   `--sky-eye LINK`.
 - **Attract replay:** `--match-replay` skips straight to attract's preprogrammed fight, and

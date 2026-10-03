@@ -93,7 +93,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
-| Picture filters | Lost Judgment's CRT scanlines, as YAMP ports them (every build), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
+| Picture filters | Lost Judgment's CRT scanlines, as [YAMP](https://github.com/biggestsonicfan/YAMP) ports them (every build), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
 
 Game profiles live in [src/profiles/](../src/profiles/): `sfight_console`, `sfight`, `fvipers`,
 `m2snake` (the web build carries the two Sonic the Fighters profiles only).
@@ -138,7 +138,7 @@ pick the same one to see each other's rooms.
 - [vendor/](../vendor/) — dependencies, all git submodules pinned to an exact upstream commit:
   Dear ImGui, dear_bindings (generates the `ig*` C bindings into the build tree at build
   time — nothing generated is committed), Sokol, ImGuiFileDialog, imgui_club (the hex editor
-  behind the memory viewers), miniz, stb (stb_truetype, for the PS3-menu fonts), and noclip.
+  behind the memory viewers), miniz, stb (stb_truetype, for the PS3-menu fonts), and [noclip](https://github.com/biggestsonicfan/noclip).
 
 Everything except the frontends' `main*.c` and `sokol_*impl.c/.m`, `ui/mem_edit.cpp`, and the submodules' `.c` files
 is a header-only `.h` module. That is deliberate — see [CLAUDE.md](../CLAUDE.md).

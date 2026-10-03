@@ -52,7 +52,7 @@ const m2hleKeys = (() => {
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   const P2_OFFSET = 10;
 
-  /* The desktop build's keys (src/board/input.h), which are MAME's. */
+  /* The desktop build's keys (src/board/input.h): m2emulator's defaults, modified. */
   const DEFAULTS = {
     p1: { up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'],
           b1: ['KeyZ'], b2: ['KeyX'], b3: ['KeyC'], b4: ['KeyV'], start: ['Digit1'], coin: ['Digit5'],
