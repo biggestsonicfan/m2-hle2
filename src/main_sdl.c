@@ -452,19 +452,20 @@ static void show_layer(sg_view pens, uint8_t *out) {
         memcpy(out + (size_t)y * VIDEO_WIDTH * 4, tmp + (size_t)(VIDEO_HEIGHT - 1 - y) * VIDEO_WIDTH * 4, (size_t)VIDEO_WIDTH * 4);
 }
 
-/* Compare the GPU layers against a CPU compose of the same RAM: the pens the
- * targets hold, turned into colours through the pen texture's texels, and the
- * colours the indexed quads actually put on screen. */
-static void verify_gpu_tiles(void) {
-    video_compose_cpu(&state.video, &state.bus);
-    read_layer(state.video.bg_image, g_vt.bg);
-    read_layer(state.video.fg_image, g_vt.fg);
+/* The pens read back from both layers, turned into colours in place through the
+ * pen texture's texels (the alpha byte is left as read). */
+static void verify_tiles_pens_to_colours(void) {
     for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++)
         for (int k = 0; k < 2; k++) {
             uint8_t *px = k ? &g_vt.fg[i * 4] : &g_vt.bg[i * 4];
             const uint8_t *c = &state.video.pal_texels[(px[0] | (px[1] << 8)) * 4];
             px[0] = c[0]; px[1] = c[1]; px[2] = c[2];
         }
+}
+
+/* How many pixels the indexed quads put on screen in another colour than the
+ * CPU's, over both layers (a clear foreground pixel is not counted). */
+static int verify_tiles_shown_bad(void) {
     int shown_bad = 0;
     for (int k = 0; k < 2; k++) {
         show_layer(k ? state.video.fg_view : state.video.bg_view, g_vt.shown);
@@ -474,28 +475,51 @@ static void verify_gpu_tiles(void) {
             if ((k == 0 || c[3]) && (s[0] != c[0] || s[1] != c[1] || s[2] != c[2])) shown_bad++;
         }
     }
-    if (shown_bad && g_vt.bad_frames < 5)
-        printf("verify-gpu-tiles: game frame %u, %d shown pixels differ from the CPU colours\n", g_emu_frames, shown_bad);
-    int bad = shown_bad, first = -1;
-    const char *what = "";
+    return shown_bad;
+}
+
+/* How many pixels of the GPU layers differ from the CPU's, and the first: its
+ * index in `*first` and its layer in `*what` (left alone when none differs). */
+static int verify_tiles_layers_bad(int *first, const char **what) {
+    int bad = 0;
     for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++) {
         const uint8_t *gb = &g_vt.bg[i * 4], *cb = &state.video.bg_pixels[i * 4];
         const uint8_t *gf = &g_vt.fg[i * 4], *cf = &state.video.fg_pixels[i * 4];
         bool bg_ok = gb[0] == cb[0] && gb[1] == cb[1] && gb[2] == cb[2] && gb[3] == cb[3];
         bool fg_ok = gf[3] == cf[3] && (cf[3] == 0 || (gf[0] == cf[0] && gf[1] == cf[1] && gf[2] == cf[2]));
         if (!bg_ok || !fg_ok) {
-            if (first < 0) { first = i; what = bg_ok ? "fg" : "bg"; }
+            if (*first < 0) { *first = i; *what = bg_ok ? "fg" : "bg"; }
             bad++;
         }
     }
+    return bad;
+}
+
+/* The first pixel that differed, GPU against CPU. */
+static void verify_tiles_report(int bad, int first, const char *what) {
+    int x = first % VIDEO_WIDTH, y = first / VIDEO_WIDTH;
+    const uint8_t *g = strcmp(what, "bg") ? &g_vt.fg[first * 4] : &g_vt.bg[first * 4];
+    const uint8_t *c = strcmp(what, "bg") ? &state.video.fg_pixels[first * 4] : &state.video.bg_pixels[first * 4];
+    printf("verify-gpu-tiles: game frame %u, %d pixels differ; first %s at (%d,%d) gpu %02x%02x%02x%02x cpu %02x%02x%02x%02x\n",
+           g_emu_frames, bad, what, x, y, g[0], g[1], g[2], g[3], c[0], c[1], c[2], c[3]);
+}
+
+/* Compare the GPU layers against a CPU compose of the same RAM: the pens the
+ * targets hold, turned into colours through the pen texture's texels, and the
+ * colours the indexed quads actually put on screen. */
+static void verify_gpu_tiles(void) {
+    video_compose_cpu(&state.video, &state.bus);
+    read_layer(state.video.bg_image, g_vt.bg);
+    read_layer(state.video.fg_image, g_vt.fg);
+    verify_tiles_pens_to_colours();
+    int shown_bad = verify_tiles_shown_bad();
+    if (shown_bad && g_vt.bad_frames < 5)
+        printf("verify-gpu-tiles: game frame %u, %d shown pixels differ from the CPU colours\n", g_emu_frames, shown_bad);
+    int first = -1;
+    const char *what = "";
+    int bad = shown_bad + verify_tiles_layers_bad(&first, &what);
     g_vt.frames++;
-    if (bad && g_vt.bad_frames++ < 5) {
-        int x = first % VIDEO_WIDTH, y = first / VIDEO_WIDTH;
-        const uint8_t *g = strcmp(what, "bg") ? &g_vt.fg[first * 4] : &g_vt.bg[first * 4];
-        const uint8_t *c = strcmp(what, "bg") ? &state.video.fg_pixels[first * 4] : &state.video.bg_pixels[first * 4];
-        printf("verify-gpu-tiles: game frame %u, %d pixels differ; first %s at (%d,%d) gpu %02x%02x%02x%02x cpu %02x%02x%02x%02x\n",
-               g_emu_frames, bad, what, x, y, g[0], g[1], g[2], g[3], c[0], c[1], c[2], c[3]);
-    }
+    if (bad && g_vt.bad_frames++ < 5) verify_tiles_report(bad, first, what);
 }
 
 /* ---- --verify-fill ------------------------------------------------------------ */
