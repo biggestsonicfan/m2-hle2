@@ -40,6 +40,9 @@ const m2hlePad = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* The page's Pause (m2hle-page.js), not a game button: it holds nothing.
+     * Unbound until the player binds it, as every standard button has a job. */
+    { id: 'pause', label: 'Pause',     acts: [],        page: true },
   ];
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   const P2_OFFSET = 10;
@@ -58,7 +61,7 @@ const m2hlePad = (() => {
     b4:    [{ b: 3 }],
     start: [{ b: 9 }],
     coin:  [{ b: 8 }],
-    pk: [], pb: [], kb: [], pkb: [],
+    pk: [], pb: [], kb: [], pkb: [], pause: [],
   };
   const MAX_BINDS = 4;
   const PRESS = 0.5;          /* a button counts as held past this (analogue triggers) */
@@ -73,6 +76,8 @@ const m2hlePad = (() => {
   let padMask = 0;            /* what the pads held at the last poll */
   let touchMask = 0;          /* what the touch buttons hold (m2hle-touch.js, setTouch) */
   let keyMask = 0;            /* what the keyboard holds (m2hle-keys.js, setKeys) */
+  let pauseHeld = false;      /* a pad held Pause at the last poll */
+  const PAUSE_ROW = 1 << ACTIONS.findIndex((a) => a.id === 'pause');
 
   function load() {
     try {
@@ -148,12 +153,15 @@ const m2hlePad = (() => {
     const list = pads();
     if (listening) { capture(list); return; }
 
-    let mask = 0;
+    let mask = 0, pause = false;
     list.forEach((pad, i) => {
       const r = padRows(pad), m = rowActions(r);
       mask |= (i === 1 && secondIsP2) ? m << P2_OFFSET : m;
+      pause = pause || !!(r & PAUSE_ROW);
       if (i === 0) showHeld(r);
     });
+    if (pause && !pauseHeld) window.dispatchEvent(new Event('m2hle-pause'));
+    pauseHeld = pause;
     if (list.length === 0) showHeld(0);
     padMask = mask;
     /* Every frame, not only on a change: the emulator forgets what the pad held
@@ -223,6 +231,12 @@ const m2hlePad = (() => {
         });
       }
       if (got) {
+        /* A button is the game's or Pause's, not both: binding it to one takes it
+         * off the other, so Select can move from Coin to Pause in one step. */
+        for (const a of ACTIONS) {
+          if (!!a.page !== (listening.id === 'pause')) binds[a.id] = binds[a.id].filter((x) => !same(x, got));
+        }
+        pauseHeld = true;   /* the press that bound it does not pause */
         const list2 = binds[listening.id];
         if (!list2.some((x) => same(x, got))) {
           if (list2.length >= MAX_BINDS) list2.shift();
@@ -246,6 +260,12 @@ const m2hlePad = (() => {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
         sub.textContent = 'Macros: one press holds several buttons';
+        rows.appendChild(sub);
+      }
+      if (a.page) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = 'The page: offline only, as the button beside the menu';
         rows.appendChild(sub);
       }
       const tr = document.createElement('li');
