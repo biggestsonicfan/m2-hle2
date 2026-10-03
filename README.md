@@ -229,7 +229,10 @@ container m2hle sends its datagrams through the web gateway's relay (`/gw/dgram`
 build uses) and is reached at the gateway's address instead. `--net-relay` (or
 `$M2HLE_NET_RELAY`) picks: `auto` (the default: on inside a container), `on`, `off`, or the
 `ws://`/`wss://` URL of a gateway of your own. Only our server and the official one have a public
-gateway. Through it, a LAN opponent's datagrams go out to the gateway and back too.
+gateway. Through it, a LAN opponent's datagrams go out to the gateway and back too. A player
+sending directly (`auto` outside a container) joins a room whose owner is behind the gateway
+through the gateway as well, since some networks cannot reach its UDP port; `off` turns that
+off too, and `auto:ws://...` names the gateway to use for it.
 
 **Or without a person at the keyboard.** The same buttons are on the MCP bridge
 (`netplay_status`, `netplay_connect`, `netplay_host`, `netplay_start`, ...), which is enough to
