@@ -392,7 +392,7 @@ static bool lr_load_rom(const char *zip) {
             parent_ptr = parent;
         }
     }
-    if (g_active_profile->load_fn(&state.romset, zip, parent_ptr) != 0) {
+    if (romset_load(&state.romset, g_active_profile->load_fn, zip, parent_ptr) != 0) {
         char msg[256];
         snprintf(msg, sizeof msg, "m2hle: could not load %s as %s", base, g_active_profile->display_name);
         lr_message(msg, 600);
