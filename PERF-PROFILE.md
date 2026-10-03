@@ -36,7 +36,7 @@ Inclusive, as a share of all samples on both threads (`perf report --children --
 
 ## The bench, by inlined function (top 30, exclusive)
 
-`tools/perf_inline.py attract.data arc_bench` — every sample charged to the innermost inlined
+`python3 tools/perf_inline.py attract.data arc_bench` — every sample charged to the innermost inlined
 function at its address, which `perf report` cannot do (it puts 31% on `emu_slice_body`):
 
 ```
@@ -101,12 +101,12 @@ Then, from a scratch directory (never the ROM folder):
 
 ```bash
 perf record -F 2000 --call-graph fp -o attract.data -- $B/arc_bench $ROMS_DIR/sfight.zip --sound --frames 30000
-tools/perf_inline.py attract.data $B/arc_bench --top 40          # by inlined function
+python3 tools/perf_inline.py attract.data $B/arc_bench --top 40          # by inlined function
 perf report -i attract.data --no-children --sort srcline --stdio -g none   # by source line
 # inclusive, through the inlining: a dwarf unwind (big: 170 MB for 12,000 frames at 500 Hz)
 perf record -F 500 --call-graph dwarf,16384 -o dwarf.data -- $B/arc_bench ... --frames 12000
 perf report -i dwarf.data --children --inline --sort symbol --stdio -g none
-tools/perf_inline.py dwarf.data $B/arc_bench --callers __memcpy_avx_unaligned_erms
+python3 tools/perf_inline.py dwarf.data $B/arc_bench --callers __memcpy_avx_unaligned_erms
 ```
 
 The desktop path: `GALLIUM_DRIVER=d3d12 perf record ... -- timeout -s INT 70 $B/Release/m2hle

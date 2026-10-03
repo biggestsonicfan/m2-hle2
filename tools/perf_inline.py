@@ -9,7 +9,7 @@ address instead (addr2line -i), which is what a reader of the source means by
 "function". See PERF-PROFILE.md.
 
     perf record -F 2000 --call-graph fp -o run.data -- <exe> ...
-    tools/perf_inline.py run.data <exe> [--top N] [--chain] [--callers SYM]
+    python3 tools/perf_inline.py run.data <exe> [--top N] [--chain] [--callers SYM]
 
   --chain        key each sample by its inline chain (innermost first, 4 deep)
                  instead of the innermost function alone
