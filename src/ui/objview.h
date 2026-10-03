@@ -269,23 +269,15 @@ static inline void objview__grow(float *lo, float *hi, float x, float y, float z
 }
 
 /*
- * Decode the selected model into the viewer's own triangle sink and measure it.
- * Returns false with a reason the caller can pass on.
+ * Which model the viewer is to decode, and under which matrix: the browser's
+ * own pick, or a model the last frame drew. A NULL *mat means the caller's
+ * placement. Returns false with a reason the caller can pass on.
  */
-static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
-                                   char *err, size_t errcap) {
-    objview_t *v = &g_objview.v;
-
-    if (!rs || !rs->loaded || !rs->main_data || !rs->polygons) {
-        snprintf(err, errcap, "no ROM set loaded yet");
-        return false;
-    }
-    if (!g_active_profile) { snprintf(err, errcap, "no game profile resolved"); return false; }
-    const game_quirks_t *q = &g_active_profile->quirks;
-
+static inline bool objview__pick(const objview_t *v, const game_quirks_t *q,
+                                 int *model_out, const float **mat_out,
+                                 char *err, size_t errcap) {
     int          model = v->model;
     const float *mat   = NULL;
-    float        place[12];
 
     if (v->source == 1) {
         if (!g_geo3d_state) { snprintf(err, errcap, "geo3d not initialised"); return false; }
@@ -302,22 +294,17 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
         snprintf(err, errcap, "model %d is past the table's %u", model, q->model_table_count);
         return false;
     }
-    if (!mat) { objview__placement(v, place); mat = place; }
+    *model_out = model;
+    *mat_out   = mat;
+    return true;
+}
 
-    /* The model table's material pointer is what the single-model browser
-     * colours an untextured face with; keep the two agreeing. */
-    float cr = 1.0f, cg = 1.0f, cb = 1.0f;
-    uint32_t toff = q->model_table_offset + (uint32_t)model * MODEL_ENTRY_SIZE;
-    if ((size_t)toff + MODEL_ENTRY_SIZE <= rs->main_data_size)
-        material_ptr_to_color(read_u32_le(rs->main_data + toff + 4), &cr, &cg, &cb);
-
-    /* geo3d_decode_model keeps its scratch in statics, so only one decode may be
-     * in flight anywhere. The bridge's model dump raises the same flag. */
-    if (g_geo3d_dump_busy) {
-        snprintf(err, errcap, "another model decode is in flight");
-        return false;
-    }
-
+/* Decode one model into the viewer's own triangle sink, with every decoder
+ * global the frame owns saved around it and put back after. */
+static inline void objview__decode_into_sink(const romset_t *rs, memory_bus_t *bus,
+                                             const game_quirks_t *q, int layers,
+                                             int model, const float *mat,
+                                             float cr, float cg, float cb) {
     const uint8_t   *saved_pal      = g_geo3d_palram;
     size_t           saved_pal_size = g_geo3d_palram_size;
     geo3d_tri_buf_t *saved_sink     = g_geo3d_tri_sink;
@@ -334,7 +321,7 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
     g_geo3d_lines.count = 0;
     /* This runs on the render thread, which owns the mesh cache, so the decode
      * may take each face's layer from it (geo3d_mesh_layers). */
-    g_geo3d_decode_layers = v->layers;
+    g_geo3d_decode_layers = layers;
 
     const geo3d_models_t md = geo3d_models_of(rs, q);
     geo3d_decode_model(&md, model, mat, cr, cg, cb);
@@ -344,20 +331,10 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
     g_geo3d_dump_busy   = 0;
     g_geo3d_palram      = saved_pal;
     g_geo3d_palram_size = saved_pal_size;
+}
 
-    v->drawn_model = model;
-    v->tris        = g_objview.tris.count;
-    v->lines       = g_geo3d_lines.count;
-    v->have_result = 1;
-
-    if (v->tris == 0 && v->lines == 0) {
-        memset(v->bmin, 0, sizeof v->bmin);
-        memset(v->bmax, 0, sizeof v->bmax);
-        snprintf(err, errcap, "model %d decoded to no geometry (empty table entry?)", model);
-        return false;
-    }
-
-    /* Bounds over everything emitted, so autofit frames a lines-only model too. */
+/* Bounds over everything emitted, so autofit frames a lines-only model too. */
+static inline void objview__bounds(objview_t *v) {
     float lo[3] = {  1e30f,  1e30f,  1e30f };
     float hi[3] = { -1e30f, -1e30f, -1e30f };
     for (int i = 0; i < g_objview.tris.count; i++) {
@@ -373,6 +350,59 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
     }
     memcpy(v->bmin, lo, sizeof lo);
     memcpy(v->bmax, hi, sizeof hi);
+}
+
+/*
+ * Decode the selected model into the viewer's own triangle sink and measure it.
+ * Returns false with a reason the caller can pass on.
+ */
+static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
+                                   char *err, size_t errcap) {
+    objview_t *v = &g_objview.v;
+
+    if (!rs || !rs->loaded || !rs->main_data || !rs->polygons) {
+        snprintf(err, errcap, "no ROM set loaded yet");
+        return false;
+    }
+    if (!g_active_profile) { snprintf(err, errcap, "no game profile resolved"); return false; }
+    const game_quirks_t *q = &g_active_profile->quirks;
+
+    int          model;
+    const float *mat;
+    float        place[12];
+
+    if (!objview__pick(v, q, &model, &mat, err, errcap)) return false;
+    if (!mat) { objview__placement(v, place); mat = place; }
+
+    /* The model table's material pointer is what the single-model browser
+     * colours an untextured face with; keep the two agreeing. */
+    float cr = 1.0f, cg = 1.0f, cb = 1.0f;
+    uint32_t toff = q->model_table_offset + (uint32_t)model * MODEL_ENTRY_SIZE;
+    if ((size_t)toff + MODEL_ENTRY_SIZE <= rs->main_data_size)
+        material_ptr_to_color(read_u32_le(rs->main_data + toff + 4), &cr, &cg, &cb);
+
+    /* geo3d_decode_model keeps its scratch in statics, so only one decode may be
+     * in flight anywhere. The bridge's model dump raises the same flag. */
+    if (g_geo3d_dump_busy) {
+        snprintf(err, errcap, "another model decode is in flight");
+        return false;
+    }
+
+    objview__decode_into_sink(rs, bus, q, v->layers, model, mat, cr, cg, cb);
+
+    v->drawn_model = model;
+    v->tris        = g_objview.tris.count;
+    v->lines       = g_geo3d_lines.count;
+    v->have_result = 1;
+
+    if (v->tris == 0 && v->lines == 0) {
+        memset(v->bmin, 0, sizeof v->bmin);
+        memset(v->bmax, 0, sizeof v->bmax);
+        snprintf(err, errcap, "model %d decoded to no geometry (empty table entry?)", model);
+        return false;
+    }
+
+    objview__bounds(v);
 
     /* Untextured on request: the fill shader takes a zero tile width as flat
      * colour, which separates a texturing artifact from a geometry one. */
@@ -712,6 +742,156 @@ static inline void objview_free_shots(void) {
 /* ---- Per-frame service --------------------------------------------------- */
 
 /*
+ * Decode, make the target and upload: everything a preview and a shot batch
+ * both need. Returns false with a reason in err.
+ */
+static inline bool objview__prepare(const romset_t *rs, memory_bus_t *bus,
+                                    int *fill_tris, int *line_verts,
+                                    char *err, size_t errcap) {
+    objview_t *v = &g_objview.v;
+
+    if (!g_game_render.initialized) {
+        snprintf(err, errcap, "the renderer is not initialised (headless run?)");
+        return false;
+    }
+    if (!objview__decode(rs, bus, err, errcap)) return false;
+    if (!objview__ensure_target(v->width, v->height)) {
+        snprintf(err, errcap, "could not create a %dx%d render target", v->width, v->height);
+        return false;
+    }
+    v->width  = g_objview.rt_w;      /* report what was actually made */
+    v->height = g_objview.rt_h;
+    if (v->autofit) objview__autofit(v);
+
+    objview__upload(fill_tris, line_verts);
+    if (*fill_tris == 0 && *line_verts == 0) {
+        snprintf(err, errcap, "nothing to draw for model %d", v->drawn_model);
+        return false;
+    }
+    return true;
+}
+
+/* The live preview: one pass from the viewer's own angle. */
+static inline void objview__preview(objview_t *v, int fill_tris, int line_verts) {
+    float eye[3], ry, rx;
+    objview__eye(v, v->yaw, v->pitch, eye, &ry, &rx);
+    memcpy(v->cam, eye, sizeof eye);
+    objview__draw(v, v->yaw, v->pitch, fill_tris, line_verts);
+    g_objview.last_ok     = 1;
+    g_objview.last_err[0] = '\0';
+    g_objview.serial++;     /* last: a bridge caller polls this for a refresh */
+}
+
+/*
+ * Shot i of n: draw it, read it back into px, measure it and encode it, and
+ * save or keep the PNG. Returns false with a reason in err; the shot counts
+ * only when it returns true.
+ */
+static inline bool objview__shoot_one(objview_t *v, objview_req_t *rq, int i, int n,
+                                      int fill_tris, int line_verts, uint8_t *px,
+                                      char *err, size_t errcap) {
+    float yaw, pitch;
+    if (rq->six) objview__six(i, &yaw, &pitch);
+    else {
+        yaw   = rq->yaw0   + rq->yaw_step   * (float)i;
+        pitch = rq->pitch0 + rq->pitch_step * (float)i;
+    }
+
+    objview__draw(v, yaw, pitch, fill_tris, line_verts);
+
+    objview_shot_t *s = &rq->shot[rq->shots];
+    memset(s, 0, sizeof *s);
+    s->yaw   = yaw;
+    s->pitch = pitch;
+    if (rq->path[0]) objview__shot_path(rq->path, i, n, s->path, sizeof s->path);
+
+    if (!gfx_readback_rgba8(g_objview.color_img, g_objview.rt_w, g_objview.rt_h, px)) {
+        snprintf(err, errcap, "readback failed: %s", gfx_readback_error());
+        return false;
+    }
+    objview__measure(px, g_objview.rt_w, g_objview.rt_h, v->bg, s);
+
+    size_t len = 0;
+    void  *png = gfx_encode_png(px, g_objview.rt_w, g_objview.rt_h, &len);
+    if (!png) {
+        snprintf(err, errcap, "%s", gfx_readback_error());
+        return false;
+    }
+    if (s->path[0] && gfx_save_png(s->path, png, len) == 0) {
+        gfx_free_png(png);
+        snprintf(err, errcap, "%s", gfx_readback_error());
+        return false;
+    }
+    s->bytes = len;
+    if (rq->keep) s->png = png;      /* collected by the caller, freed next batch */
+    else          gfx_free_png(png);
+    rq->shots++;
+    return true;
+}
+
+/* Every shot of the batch the bridge asked for, through one readback buffer.
+ * Returns false with a reason in err. */
+static inline bool objview__shoot(objview_t *v, objview_req_t *rq,
+                                  int fill_tris, int line_verts,
+                                  char *err, size_t errcap) {
+    if (!gfx_readback_supported()) {
+        snprintf(err, errcap, "no screenshot path on this graphics backend");
+        return false;
+    }
+
+    int n = rq->six ? 6 : rq->count;
+    if (n < 1) n = 1;
+    if (n > OBJVIEW_MAX_SHOTS) n = OBJVIEW_MAX_SHOTS;
+
+    uint8_t *px = (uint8_t *)malloc((size_t)g_objview.rt_w * (size_t)g_objview.rt_h * 4);
+    if (!px) { snprintf(err, errcap, "out of memory for the readback buffer"); return false; }
+
+    objview_free_shots();      /* whatever the last batch kept, the caller has had */
+    rq->shots = 0;
+    for (int i = 0; i < n; i++) {
+        if (!objview__shoot_one(v, rq, i, n, fill_tris, line_verts, px, err, errcap)) {
+            free(px);
+            return false;
+        }
+    }
+    free(px);
+    return true;
+}
+
+/* A batch went through: hand the bridge thread its answer. */
+static inline void objview__batch_done(objview_t *v, objview_req_t *rq) {
+    float eye[3], ry, rx;
+    /* Leave the viewer's own angle on the last shot, so the preview window and
+     * the files on disk do not disagree about what was looked at. */
+    if (rq->shots > 0) {
+        v->yaw   = rq->shot[rq->shots - 1].yaw;
+        v->pitch = rq->shot[rq->shots - 1].pitch;
+        objview__eye(v, v->yaw, v->pitch, eye, &ry, &rx);
+        memcpy(v->cam, eye, sizeof eye);
+    }
+    rq->ok                = 1;
+    rq->err[0]            = '\0';
+    g_objview.last_ok     = 1;
+    g_objview.last_err[0] = '\0';
+    g_objview.serial++;
+    rq->pending = 0;
+    rq->done    = 1;        /* last: the bridge thread is spinning on it */
+}
+
+/* Something failed: say so to the preview, and to a waiting batch. */
+static inline void objview__failed(objview_req_t *rq, bool shooting, const char *err) {
+    g_objview.last_ok = 0;
+    snprintf(g_objview.last_err, sizeof g_objview.last_err, "%s", err);
+    g_objview.serial++;
+    if (shooting) {
+        rq->ok = 0;
+        snprintf(rq->err, sizeof rq->err, "%s", err);
+        rq->pending = 0;
+        rq->done    = 1;
+    }
+}
+
+/*
  * Called once per host frame from the frontend, OUTSIDE any pass — the viewer
  * opens passes of its own and sokol does not nest them. Put it after the
  * swapchain pass has ended: it takes the shared line buffer, which the next
@@ -732,125 +912,23 @@ static inline void objview_service(const romset_t *rs, memory_bus_t *bus) {
     if (!shooting && !refresh && !(v->active && g_objview.preview_open)) return;
     g_objview.refresh = 0;
 
-    char     err[192];
-    int      fill_tris = 0, line_verts = 0;
-    int      n = 1;
-    uint8_t *px = NULL;
-    float    eye[3], ry, rx;
+    char err[192];
+    int  fill_tris = 0, line_verts = 0;
     err[0] = '\0';
 
-    if (!g_game_render.initialized) {
-        snprintf(err, sizeof err, "the renderer is not initialised (headless run?)");
-        goto fail;
-    }
-    if (!objview__decode(rs, bus, err, sizeof err)) goto fail;
-    if (!objview__ensure_target(v->width, v->height)) {
-        snprintf(err, sizeof err, "could not create a %dx%d render target", v->width, v->height);
-        goto fail;
-    }
-    v->width  = g_objview.rt_w;      /* report what was actually made */
-    v->height = g_objview.rt_h;
-    if (v->autofit) objview__autofit(v);
-
-    objview__upload(&fill_tris, &line_verts);
-    if (fill_tris == 0 && line_verts == 0) {
-        snprintf(err, sizeof err, "nothing to draw for model %d", v->drawn_model);
-        goto fail;
-    }
-
-    if (!shooting) {
-        objview__eye(v, v->yaw, v->pitch, eye, &ry, &rx);
-        memcpy(v->cam, eye, sizeof eye);
-        objview__draw(v, v->yaw, v->pitch, fill_tris, line_verts);
-        g_objview.last_ok     = 1;
-        g_objview.last_err[0] = '\0';
-        g_objview.serial++;     /* last: a bridge caller polls this for a refresh */
+    if (!objview__prepare(rs, bus, &fill_tris, &line_verts, err, sizeof err)) {
+        objview__failed(rq, shooting, err);
         return;
     }
-
-    if (!gfx_readback_supported()) {
-        snprintf(err, sizeof err, "no screenshot path on this graphics backend");
-        goto fail;
+    if (!shooting) {
+        objview__preview(v, fill_tris, line_verts);
+        return;
     }
-
-    n = rq->six ? 6 : rq->count;
-    if (n < 1) n = 1;
-    if (n > OBJVIEW_MAX_SHOTS) n = OBJVIEW_MAX_SHOTS;
-
-    px = (uint8_t *)malloc((size_t)g_objview.rt_w * (size_t)g_objview.rt_h * 4);
-    if (!px) { snprintf(err, sizeof err, "out of memory for the readback buffer"); goto fail; }
-
-    objview_free_shots();      /* whatever the last batch kept, the caller has had */
-    rq->shots = 0;
-    for (int i = 0; i < n; i++) {
-        float yaw, pitch;
-        if (rq->six) objview__six(i, &yaw, &pitch);
-        else {
-            yaw   = rq->yaw0   + rq->yaw_step   * (float)i;
-            pitch = rq->pitch0 + rq->pitch_step * (float)i;
-        }
-
-        objview__draw(v, yaw, pitch, fill_tris, line_verts);
-
-        objview_shot_t *s = &rq->shot[rq->shots];
-        memset(s, 0, sizeof *s);
-        s->yaw   = yaw;
-        s->pitch = pitch;
-        if (rq->path[0]) objview__shot_path(rq->path, i, n, s->path, sizeof s->path);
-
-        if (!gfx_readback_rgba8(g_objview.color_img, g_objview.rt_w, g_objview.rt_h, px)) {
-            snprintf(err, sizeof err, "readback failed: %s", gfx_readback_error());
-            goto fail;
-        }
-        objview__measure(px, g_objview.rt_w, g_objview.rt_h, v->bg, s);
-
-        size_t len = 0;
-        void  *png = gfx_encode_png(px, g_objview.rt_w, g_objview.rt_h, &len);
-        if (!png) {
-            snprintf(err, sizeof err, "%s", gfx_readback_error());
-            goto fail;
-        }
-        if (s->path[0] && gfx_save_png(s->path, png, len) == 0) {
-            gfx_free_png(png);
-            snprintf(err, sizeof err, "%s", gfx_readback_error());
-            goto fail;
-        }
-        s->bytes = len;
-        if (rq->keep) s->png = png;      /* collected by the caller, freed next batch */
-        else          gfx_free_png(png);
-        rq->shots++;
+    if (!objview__shoot(v, rq, fill_tris, line_verts, err, sizeof err)) {
+        objview__failed(rq, shooting, err);
+        return;
     }
-    free(px);
-    px = NULL;
-
-    /* Leave the viewer's own angle on the last shot, so the preview window and
-     * the files on disk do not disagree about what was looked at. */
-    if (rq->shots > 0) {
-        v->yaw   = rq->shot[rq->shots - 1].yaw;
-        v->pitch = rq->shot[rq->shots - 1].pitch;
-        objview__eye(v, v->yaw, v->pitch, eye, &ry, &rx);
-        memcpy(v->cam, eye, sizeof eye);
-    }
-    rq->ok                = 1;
-    rq->err[0]            = '\0';
-    g_objview.last_ok     = 1;
-    g_objview.last_err[0] = '\0';
-    g_objview.serial++;
-    rq->pending = 0;
-    rq->done    = 1;        /* last: the bridge thread is spinning on it */
-    return;
-
-fail:
-    free(px);
-    g_objview.last_ok = 0;
-    snprintf(g_objview.last_err, sizeof g_objview.last_err, "%s", err);
-    g_objview.serial++;
-    if (shooting) {
-        rq->ok = 0;
-        snprintf(rq->err, sizeof rq->err, "%s", err);
-        rq->pending = 0;
-        rq->done    = 1;
-    }
+    objview__batch_done(v, rq);
 }
 
 static inline void objview_shutdown(void) {
