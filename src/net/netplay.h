@@ -2160,46 +2160,39 @@ static inline const char *netplay_local_ip(void) {
     return env ? env : "";
 }
 
-static inline void netplay_do_connect(const netplay_config_t *cfg) {
-    if (!g_active_profile) { netplay_log("load a ROM set before connecting"); return; }
+/* Whether a connect can start at all: a game loaded, a board-reset hook and an
+ * account name. */
+static inline bool netplay_connect_ready(const netplay_config_t *cfg) {
+    if (!g_active_profile) { netplay_log("load a ROM set before connecting"); return false; }
     if (!g_netplay.reset_board) {
         netplay_log("no board-reset hook installed - netplay cannot start a session");
-        return;
+        return false;
     }
     /* RPCN reads a login with no name as Malformed and says only that, which
      * reads as a broken client. It is what Connect sends after a Twitch sign-in
      * that did not complete: the account boxes are still empty. */
     if (!cfg->npid[0]) {
         netplay_log("no account name - type one, or sign in with Twitch first");
-        return;
+        return false;
     }
+    return true;
+}
 
-    /* THE STORED TWITCH LOGIN IS NOT THE CALLER'S TO OVERWRITE. Every other field
-     * here is something a caller typed or passed; the token and its owner are
-     * not, there is no box for them, and the config a caller posts is a COPY
-     * that goes stale in both directions. The netplay window adopts the stored
-     * settings once, at its first draw: a token the device flow lands after that
-     * is not in its copy, so Connect wiped it and sent the player back to
-     * twitch.tv; and a token that "Sign out" forgot was still in its copy, so
-     * the next Connect signed them back in. */
-    netplay_config_t stored_twitch;
-    netplay_twitch_copy(&stored_twitch, &g_netplay.cfg);
-    /* A connect somebody asked for is a new start: it is armed for healing only
-     * once it reaches the server, and it forgets any room a drop left behind. */
-    if (!g_netplay.healing) {
-        g_netplay.heal_armed   = false;
-        g_netplay.heal_tries   = 0;
-        g_netplay.heal_at_ms   = 0;
-        g_netplay.heal_room_id = 0;
-        g_netplay.heal_rejoin  = false;
-        g_netplay.heal_joining = false;
-        g_netplay.heal_find_until_ms = 0;
-    }
-    if (cfg != &g_netplay.cfg) g_netplay.cfg = *cfg;
-    netplay_twitch_copy(&g_netplay.cfg, &stored_twitch);
-    netplay_build_masks(g_active_profile);
+/* A connect somebody asked for is a new start: it is armed for healing only
+ * once it reaches the server, and it forgets any room a drop left behind. */
+static inline void netplay_heal_forget(void) {
+    g_netplay.heal_armed   = false;
+    g_netplay.heal_tries   = 0;
+    g_netplay.heal_at_ms   = 0;
+    g_netplay.heal_room_id = 0;
+    g_netplay.heal_rejoin  = false;
+    g_netplay.heal_joining = false;
+    g_netplay.heal_find_until_ms = 0;
+}
 
-    char com_id[COMID_BUFFER_SIZE];
+/* The lobby space for this connect, into `com_id` with a note on where it came
+ * from; this also decides whether the session plays the PS3 port's rules. */
+static inline bool netplay_pick_lobby(const netplay_config_t *cfg, char *com_id, const char **note_out) {
     const char *note = "";
     /* The PS3 port's rooms are Sonic the Fighters only, and only on the
      * official server, where the PS3 players are: the community server keeps
@@ -2208,26 +2201,26 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     g_netplay.ps3 = stf && (cfg->ps3 || netplay_server_is_official(cfg->server));
     if (cfg->ps3 && !stf) netplay_log("PS3 cross-play is for Sonic the Fighters only; using this game's own rooms");
     if (g_netplay.ps3) {
-        snprintf(com_id, sizeof(com_id), "%s", RPCN_PS3_COM_ID);
+        snprintf(com_id, COMID_BUFFER_SIZE, "%s", RPCN_PS3_COM_ID);
         note = "the PS3 port's rooms";
         if (strcmp(g_active_profile->id, "sfight_console") != 0)
             netplay_log("WARNING: the PS3 game runs on free play; the %s profile boots on coins, so the "
                         "forced start will not begin a game (use the Console profile)", g_active_profile->id);
     } else if (!comid_resolve(g_active_profile->id, com_id, &note)) {
         netplay_log("no lobby space for '%s': %s", g_active_profile->id, note);
-        return;
+        return false;
     }
-    if (!g_netplay.healing) netplay_log("lobby space %s (%s)", com_id, note);
+    *note_out = note;
+    return true;
+}
 
-    char com_id_foreign[COMID_BUFFER_SIZE];
-    bool have_foreign = cfg->browse_yamp && comid_yamp_for_game(g_active_profile->id, com_id_foreign);
-
-    rpcn_session_config_t sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.server          = g_netplay.cfg.server;
-    sc.port            = g_netplay.cfg.port;
-    sc.fingerprint_hex = netplay_pin_for(g_netplay.cfg.server, g_netplay.cfg.fingerprint);
-    sc.npid            = g_netplay.cfg.npid;
+/* The session's login and lobby, from the settings now in g_netplay.cfg. */
+static inline void netplay_session_config(rpcn_session_config_t *sc, const char *com_id,
+                                          const char *com_id_foreign) {
+    sc->server          = g_netplay.cfg.server;
+    sc->port            = g_netplay.cfg.port;
+    sc->fingerprint_hex = netplay_pin_for(g_netplay.cfg.server, g_netplay.cfg.fingerprint);
+    sc->npid            = g_netplay.cfg.npid;
     /* A Twitch login token IS the password as far as RPCN is concerned, and it
      * wins when present: someone who signed in with Twitch has no password to
      * type, and their account's real one is random and never disclosed.
@@ -2250,16 +2243,56 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     g_netplay.sent_twitch_token =
         netplay_twitch_is_for(&g_netplay.cfg, g_netplay.cfg.npid)
         || (netplay_twitch_here(&g_netplay.cfg) && !g_netplay.cfg.password[0]);
-    sc.password        = g_netplay.sent_twitch_token ? g_netplay.cfg.twitch_token
-                                                     : g_netplay.cfg.password;
-    sc.token           = g_netplay.cfg.token;
-    sc.com_id          = com_id;
-    sc.com_id_foreign  = have_foreign ? com_id_foreign : NULL;
-    sc.local_p2p_port  = g_netplay.cfg.local_p2p_port;
-    sc.local_ip        = netplay_local_ip();
-    sc.ps3             = g_netplay.ps3;
-    sc.log             = netplay_session_log_cb;
-    sc.log_ctx         = NULL;
+    sc->password        = g_netplay.sent_twitch_token ? g_netplay.cfg.twitch_token
+                                                      : g_netplay.cfg.password;
+    sc->token           = g_netplay.cfg.token;
+    sc->com_id          = com_id;
+    sc->com_id_foreign  = com_id_foreign;
+    sc->local_p2p_port  = g_netplay.cfg.local_p2p_port;
+    sc->local_ip        = netplay_local_ip();
+    sc->ps3             = g_netplay.ps3;
+    sc->log             = netplay_session_log_cb;
+    sc->log_ctx         = NULL;
+}
+
+/* The PS3 port's link over a session that started, and its wire log. */
+static inline void netplay_connect_ps3_link(const netplay_config_t *cfg) {
+    ps3_link_begin(&g_netplay.ps3link, &g_netplay.session, netplay_session_log_cb, NULL);
+    if (cfg->ps3_wire[0]) {
+        if (ps3_wire_open(cfg->ps3_wire)) netplay_log("PS3 wire log: %s", cfg->ps3_wire);
+        else netplay_log("could not open the PS3 wire log %s", cfg->ps3_wire);
+    }
+}
+
+static inline void netplay_do_connect(const netplay_config_t *cfg) {
+    if (!netplay_connect_ready(cfg)) return;
+
+    /* THE STORED TWITCH LOGIN IS NOT THE CALLER'S TO OVERWRITE. Every other field
+     * here is something a caller typed or passed; the token and its owner are
+     * not, there is no box for them, and the config a caller posts is a COPY
+     * that goes stale in both directions. The netplay window adopts the stored
+     * settings once, at its first draw: a token the device flow lands after that
+     * is not in its copy, so Connect wiped it and sent the player back to
+     * twitch.tv; and a token that "Sign out" forgot was still in its copy, so
+     * the next Connect signed them back in. */
+    netplay_config_t stored_twitch;
+    netplay_twitch_copy(&stored_twitch, &g_netplay.cfg);
+    if (!g_netplay.healing) netplay_heal_forget();
+    if (cfg != &g_netplay.cfg) g_netplay.cfg = *cfg;
+    netplay_twitch_copy(&g_netplay.cfg, &stored_twitch);
+    netplay_build_masks(g_active_profile);
+
+    char com_id[COMID_BUFFER_SIZE];
+    const char *note = "";
+    if (!netplay_pick_lobby(cfg, com_id, &note)) return;
+    if (!g_netplay.healing) netplay_log("lobby space %s (%s)", com_id, note);
+
+    char com_id_foreign[COMID_BUFFER_SIZE];
+    bool have_foreign = cfg->browse_yamp && comid_yamp_for_game(g_active_profile->id, com_id_foreign);
+
+    rpcn_session_config_t sc;
+    memset(&sc, 0, sizeof(sc));
+    netplay_session_config(&sc, com_id, have_foreign ? com_id_foreign : NULL);
 
     g_netplay.enabled      = true;
     g_netplay.local_player = -1;
@@ -2277,13 +2310,7 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
         if (!g_netplay.healing) netplay_log("%s", rpcn_session_error(&g_netplay.session));
         return;
     }
-    if (g_netplay.ps3) {
-        ps3_link_begin(&g_netplay.ps3link, &g_netplay.session, netplay_session_log_cb, NULL);
-        if (cfg->ps3_wire[0]) {
-            if (ps3_wire_open(cfg->ps3_wire)) netplay_log("PS3 wire log: %s", cfg->ps3_wire);
-            else netplay_log("could not open the PS3 wire log %s", cfg->ps3_wire);
-        }
-    }
+    if (g_netplay.ps3) netplay_connect_ps3_link(cfg);
 }
 
 /*
