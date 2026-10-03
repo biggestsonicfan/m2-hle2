@@ -653,6 +653,10 @@ typedef struct {
     bool              room_deferred;
     netplay_cmd_t     room_cmd;
     uint64_t          room_deferred_ms;
+    /* ... or until we know where the room's owner is (netplay_room_or_defer):
+     * an owner behind the gateway is joined through it. */
+    bool              room_probing;
+    uint32_t          room_gateway_ip;
 
     /* Signing back in after the link to the server dropped (netplay_heal_*).
      * `heal_armed`: this login has reached the server, so a drop is the network
@@ -2153,6 +2157,29 @@ static inline const char *netplay_relay_url(const char *server, char *buf, size_
 #endif
 }
 
+/*
+ * The relay kept in reserve when netplay_relay_url sends directly: a Join turns
+ * it on when the room's owner is behind it (netplay_room_or_defer). "auto"
+ * outside a container keeps the server's gateway; "auto:ws://..." names one
+ * (the tests' local gateway); "off" keeps none.
+ */
+static inline const char *netplay_relay_standby_url(const char *server, char *buf, size_t cap) {
+#ifdef __EMSCRIPTEN__
+    (void)server; (void)buf; (void)cap;
+    return "";
+#else
+    const char *mode = g_netplay_relay[0] ? g_netplay_relay : getenv("M2HLE_NET_RELAY");
+    if (!mode || !mode[0]) mode = "auto";
+    if (strncmp(mode, "auto:", 5) == 0) {
+        snprintf(buf, cap, "%s", mode + 5);
+        return buf;
+    }
+    if (strcmp(mode, "auto") == 0 && !netplay_in_container() && ws_relay_url_for(server, buf, cap))
+        return buf;
+    return "";
+#endif
+}
+
 static inline void netplay_do_connect(const netplay_config_t *cfg) {
     if (!g_active_profile) { netplay_log("load a ROM set before connecting"); return; }
     if (!g_netplay.reset_board) {
@@ -2253,6 +2280,9 @@ static inline void netplay_do_connect(const netplay_config_t *cfg) {
     char relay_url[256];
     sc.relay_url       = netplay_relay_url(g_netplay.cfg.server, relay_url, sizeof(relay_url));
     sc.relay_required  = g_netplay_relay_required;
+    char relay_standby[256];
+    sc.relay_standby_url = netplay_relay_standby_url(g_netplay.cfg.server, relay_standby,
+                                                     sizeof(relay_standby));
     sc.ps3             = g_netplay.ps3;
     sc.log             = netplay_session_log_cb;
     sc.log_ctx         = NULL;
@@ -2712,19 +2742,61 @@ static inline void netplay_take_room(const netplay_cmd_t *cmd) {
     else                               netplay_do_join(&cmd->cfg);
 }
 
+/* The owner of a room in the last list, or NULL. */
+static inline const char *netplay_room_owner(uint64_t room_id) {
+    const rpcn_session_t *s = &g_netplay.session;
+    for (uint32_t i = 0; i < s->room_count; i++)
+        if (s->rooms[i].room_id == room_id && s->rooms[i].owner[0]) return s->rooms[i].owner;
+    return g_netplay.heal_owner[0] ? g_netplay.heal_owner : NULL;
+}
+
+/*
+ * A Join first asks where the room's owner is. An owner the server places at
+ * the gateway relays its datagrams through it (a player in a container), and
+ * nothing outside reaches that relay's UDP port directly: a guest behind a
+ * carrier-grade NAT or a strict firewall punched at it for the whole match and
+ * neither side ever heard the other (Pinboard #382). Joined through the gateway
+ * too, both players hold its addresses, and it carries the match between them.
+ */
 static inline void netplay_room_or_defer(const netplay_cmd_t *cmd) {
-    if (g_netplay.session.signaling_seen) { netplay_take_room(cmd); return; }
-    if (!g_netplay.room_deferred)
+    bool probing = false;
+    if (cmd->kind == NETPLAY_CMD_JOIN && !g_netplay.ps3) {
+        uint32_t gw = rpcn_session_standby_ip(&g_netplay.session);
+        const char *owner = gw ? netplay_room_owner(cmd->cfg.room_id) : NULL;
+        if (owner && rpcn_session_probe(&g_netplay.session, owner)) {
+            probing = true;
+            g_netplay.room_gateway_ip = gw;
+        }
+    }
+    if (!probing && g_netplay.session.signaling_seen) { netplay_take_room(cmd); return; }
+    if (!g_netplay.room_deferred && !probing)
         netplay_log("waiting for the server to learn this machine's address before taking a room");
     g_netplay.room_cmd         = *cmd;
     g_netplay.room_deferred    = true;
+    g_netplay.room_probing     = probing;
     g_netplay.room_deferred_ms = net_now_ms();
 }
 
 static inline void netplay_pump_deferred_room(void) {
     if (!g_netplay.room_deferred) return;
-    if (g_netplay.state != NETPLAY_ONLINE) { g_netplay.room_deferred = false; return; }
+    if (g_netplay.state != NETPLAY_ONLINE) {
+        g_netplay.room_deferred = g_netplay.room_probing = false;
+        return;
+    }
     bool timed_out = net_now_ms() - g_netplay.room_deferred_ms > NETPLAY_ROOM_WAIT_MS;
+    if (g_netplay.room_probing) {
+        rpcn_session_t *s = &g_netplay.session;
+        if (!s->probe_done && !timed_out) return;
+        g_netplay.room_probing = false;
+        if (s->probe_done && s->probe_ip && s->probe_ip == g_netplay.room_gateway_ip) {
+            netplay_log("the room's owner plays through the gateway; joining through it too");
+            if (rpcn_session_relay_on(s)) {
+                g_netplay.room_deferred_ms = net_now_ms();
+                return;   /* the server has to learn the relayed address first */
+            }
+        }
+        timed_out = net_now_ms() - g_netplay.room_deferred_ms > NETPLAY_ROOM_WAIT_MS;
+    }
     if (!g_netplay.session.signaling_seen && !timed_out) return;
     if (!g_netplay.session.signaling_seen)
         netplay_log("the server's UDP helper has not answered; taking the room anyway");

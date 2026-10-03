@@ -414,6 +414,15 @@ are **silently wrong** rather than loudly wrong when you get them half right.
     reopens it. A heal attempt must not fall back to direct (`relay_required`, all but the last
     try): the gateway shares the droplet with RPCN and came back a second after it in the test,
     and a direct sign-in then left the room unreachable for good.
+  - **A guest outside joins a relayed owner through the gateway too** (Pinboard #382). The
+    gateway's UDP port is not reachable from every network: a guest behind a carrier-grade NAT
+    punched the fly at `143.198.49.181:40xxx` for the whole match and was never heard. So a client
+    sending directly keeps the gateway in reserve (`relay_standby_url`), asks where a room's owner
+    is before joining (`rpcn_session_probe`, RequestSignalingInfos), and when the server places
+    the owner at the gateway's address it turns the relay on, waits for the helper to see the new
+    address, and only then joins. Both members then hold the gateway's virtual addresses and it
+    carries the match inside itself. Turning the relay on is before the room, so "never mid-room"
+    still holds. `auto:ws://...` names the reserve gateway (the tests'); `off` keeps none.
 - **A room copies each member's address when it is created or joined, and never refreshes it.**
   The address reaches RPCN only with the first UDP keepalive after login, so a Host or Join sent
   straight after sign-in snapshots nothing — for the life of the room — and two players on one
