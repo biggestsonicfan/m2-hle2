@@ -188,29 +188,60 @@ static void select_profile_for_zip(const char *path) {
     g_active_profile = p;
 }
 
+/* MAME clone fall-through: the parent zip's path (same directory as the picked
+ * zip) from profile->parent_zip_name, or NULL for a self-contained set. */
+static const char *parent_zip_path(const char *primary_zip, char *buf, size_t cap) {
+    const char *name = g_active_profile->parent_zip_name;
+    if (!name) return NULL;
+    const char *sep_f = strrchr(primary_zip, '/');
+    const char *sep_b = strrchr(primary_zip, '\\');
+    const char *sep = sep_f > sep_b ? sep_f : sep_b;
+    if (!sep) {
+        strncpy(buf, name, cap - 1);
+        return buf;
+    }
+    size_t dir_len = (size_t)(sep - primary_zip + 1);
+    if (dir_len < cap - 32) {
+        memcpy(buf, primary_zip, dir_len);
+        strcat(buf, name);
+    }
+    return buf;
+}
+
+/* The set's backup RAM, before install_fn boots the board with it. A
+ * window keeps it; a headless or kiosk run (graders, the fly) boots
+ * blank as it always has, unless --nvram-dir asks. */
+static void open_backup_ram(bool homebrew) {
+    if (!(g_backup_want < 0 ? !g_headless && !g_kiosk_on : g_backup_want)) return;
+    char key[96];
+    backup_ram_key(key, sizeof key, profile_rom_set(g_active_profile), homebrew,
+                   state.romset.maincpu, state.romset.maincpu_size);
+    backup_ram_open(key, true);
+}
+
+/* Bring up the 68K sound block: attach the MIDI/SCSP bus callbacks, load
+ * the 68K program ROM + PCM sample ROM. (install_fn re-inits the bus, so
+ * this must run after it.) */
+static void load_sound_board(void) {
+    if (!g_active_profile->quirks.enable_68k_sound) return;
+    sound_reset();
+    sound_attach(&state.bus);
+    if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
+        sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
+    if (state.romset.samples && state.romset.samples_size > 0)
+        sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+    if (g_no_sound_board) {
+        sound_detach(&state.bus);
+        LOG_INFO("sound: --no-sound-board, the board boots without its 68000 and SCSP");
+    }
+}
+
 static void load_active_profile(const char *primary_zip) {
     select_profile_for_zip(primary_zip);
     if (!g_active_profile) { LOG_ERROR("no active profile selected"); return; }
 
-    /* MAME clone fall-through: build the parent zip path (same directory as the
-     * picked zip) from profile->parent_zip_name. NULL = self-contained set. */
     char parent_zip[512] = {0};
-    const char *parent_zip_ptr = NULL;
-    if (g_active_profile->parent_zip_name) {
-        const char *sep_f = strrchr(primary_zip, '/');
-        const char *sep_b = strrchr(primary_zip, '\\');
-        const char *sep = sep_f > sep_b ? sep_f : sep_b;
-        if (sep) {
-            size_t dir_len = (size_t)(sep - primary_zip + 1);
-            if (dir_len < sizeof(parent_zip) - 32) {
-                memcpy(parent_zip, primary_zip, dir_len);
-                strcat(parent_zip, g_active_profile->parent_zip_name);
-            }
-        } else {
-            strncpy(parent_zip, g_active_profile->parent_zip_name, sizeof(parent_zip) - 1);
-        }
-        parent_zip_ptr = parent_zip;
-    }
+    const char *parent_zip_ptr = parent_zip_path(primary_zip, parent_zip, sizeof(parent_zip));
 
     /* Stop the emu thread while we re-install the ROM: install_fn re-inits the
      * bus and resets the CPU, which must not race the run loop. */
@@ -227,33 +258,11 @@ static void load_active_profile(const char *primary_zip) {
         bool homebrew = profile_adopt_program(state.romset.maincpu, state.romset.maincpu_size);
         if (homebrew)
             LOG_INFO("the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
-        /* The set's backup RAM, before install_fn boots the board with it. A
-         * window keeps it; a headless or kiosk run (graders, the fly) boots
-         * blank as it always has, unless --nvram-dir asks. */
-        if (g_backup_want < 0 ? !g_headless && !g_kiosk_on : g_backup_want) {
-            char key[96];
-            backup_ram_key(key, sizeof key, profile_rom_set(g_active_profile), homebrew,
-                           state.romset.maincpu, state.romset.maincpu_size);
-            backup_ram_open(key, true);
-        }
+        open_backup_ram(homebrew);
         /* The model lookup is built from the ROM's model table: a new set needs a new one. */
         geo3d_lookup_invalidate();
         g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
-        /* Bring up the 68K sound block: attach the MIDI/SCSP bus callbacks, load
-         * the 68K program ROM + PCM sample ROM. (install_fn re-inits the bus, so
-         * this must run after it.) */
-        if (g_active_profile->quirks.enable_68k_sound) {
-            sound_reset();
-            sound_attach(&state.bus);
-            if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
-                sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
-            if (state.romset.samples && state.romset.samples_size > 0)
-                sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
-            if (g_no_sound_board) {
-                sound_detach(&state.bus);
-                LOG_INFO("sound: --no-sound-board, the board boots without its 68000 and SCSP");
-            }
-        }
+        load_sound_board();
         /* Inputs are delivered via the I/O ports (read by the game's vblank
          * interrupt), so attach the I/O read callback after the bus re-init. */
         input_reset();
