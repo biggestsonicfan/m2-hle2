@@ -19,6 +19,11 @@
 #include <dc/maple/controller.h>
 #include <dc/biosfont.h>
 
+/* -DDC_HASH_FRAME=n: at board frame n, a hash of work RAM, the i960's
+ * registers and its cycle count goes on row 15 (an A/B of two builds). */
+#ifndef DC_HASH_FRAME
+#define DC_HASH_FRAME 0
+#endif
 #ifndef DC_STATS_DBGIO
 #define DC_STATS_DBGIO 0
 #endif
@@ -150,6 +155,11 @@ static void dc_text(int row, const char *s) {
     dp_text_frame();
 }
 
+#include "dc_jit_test.h"
+#ifdef IB_WHY
+static char g_calib[64];
+#endif
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     vid_set_mode(DM_640x480, PM_RGB565);
@@ -182,6 +192,24 @@ int main(int argc, char **argv) {
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
     dc_install_board();
+#ifdef IB_WHY
+    {   /* calibration: Flycast's SH-4 clock against TMU2, for 1M dt/bf loops and 1M loads */
+        static uint32_t arr[16384];
+        uint64_t tps = *(volatile uint32_t *)0xFFD80020u + 1u;
+        uint32_t n = 1000000u, t0 = IBW_T();
+        __asm__ volatile("1: dt %0\n bf 1b" : "+r"(n));
+        uint32_t d1 = IBW_D(t0), sum = 0; t0 = IBW_T();
+        for (uint32_t i = 0; i < 1000000u; i++) sum += ((volatile uint32_t *)arr)[(i * 7u) & 16383u];
+        uint32_t d2 = IBW_D(t0);
+        snprintf(g_calib, sizeof g_calib, "calib: loop %u ns, load %u ns (%u)",
+                 (unsigned)((uint64_t)d1 * 1000 / tps), (unsigned)((uint64_t)d2 * 1000 / tps), (unsigned)sum);
+        printf("%s\n", g_calib);
+    }
+#endif
+#if I960_JIT && IB_JIT_SELFTEST
+    jt_run(&cpu, &bus, IB_JIT_SELFTEST, 3);
+    thd_sleep(5000);
+#endif
     emu_ctx_init(&ctx, &cpu, &bus);
     geo3d_init(&geo);
     ctx.run_state = EMU_RUNNING;
@@ -190,6 +218,10 @@ int main(int argc, char **argv) {
     uint32_t f_last = g_emu_frames, slices = 0, loads_last = 0, refills_last = 0, shown = 0, drawn_f = 0;
     uint64_t builds_last = 0, hits_last = 0;
     uint64_t read_last = 0;
+    int hashed = 0;
+    uint64_t steps_last = 0, ops_last = 0, loop_last = 0, cop_last = 0;
+    uint64_t us_all = 0;   /* every slice's time since boot */
+    static char hashed_line[96];
     while (!cpu.halted) {
         dc_pad();
         uint64_t t0 = timer_us_gettime64();
@@ -200,9 +232,22 @@ int main(int argc, char **argv) {
         /* A board frame not yet shown goes to the PVR when it can take one. */
         if (g_emu_frames != drawn_f && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; }
         (void)f;
+        if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
+            uint32_t h = 2166136261u;
+            for (uint32_t a = 0x500000u; a < 0x600000u; a += 4) h = (h ^ mem_read32(&bus, a)) * 16777619u;
+            for (int r = 0; r < 32; r++) h = (h ^ ((uint32_t *)&cpu.globals)[r]) * 16777619u;
+            h = (h ^ (uint32_t)cpu.cycles) * 16777619u;
+            snprintf(line, sizeof line, "hash at frame %u: %08lx ip %08lx, slices %lu ms", (unsigned)g_emu_frames,
+                     (unsigned long)h, (unsigned long)cpu.sfr.ip, (unsigned long)(us_all / 1000));
+            printf("%s\n", line);
+            hashed_line[0] = 0; strncat(hashed_line, line, sizeof hashed_line - 1);
+            hashed = 1;
+        }
+        if (hashed) dp_text(15, hashed_line);
         ds_pump();
         uint64_t t2 = timer_us_gettime64();
         us_slice += t1 - t0;
+        us_all += t1 - t0;
         us_draw  += t2 - t1;
         slices++;
         if (t2 - t_last >= 2000000) {
@@ -240,6 +285,62 @@ int main(int argc, char **argv) {
                      (unsigned)(g_geo3d_mesh_builds - builds_last), (unsigned)(g_geo3d_mesh_hits - hits_last));
             STATS_PRINT(line);
             dp_text(17, line);
+            unsigned sl = slices ? slices : 1;
+            {   /* the i960's loop (the COP's commands inside it), per slice; blocks' share of its steps */
+                uint64_t st = g_emu_times.steps - steps_last, ops = g_ib.ops - ops_last;
+                const emu_times_t *et = &g_emu_times;
+                uint64_t cop = et->cop_timed ? (uint64_t)((double)et->cop_timed_us * (double)et->cop_cmds / (double)et->cop_timed) : 0;
+                snprintf(line, sizeof line, "i960 %u ms (cop %u) /slice, %u%% blocks, %u steps",
+                         (unsigned)((g_emu_times.loop_us - loop_last) / 1000 / sl), (unsigned)((cop - cop_last) / 1000 / sl),
+                         (unsigned)(st ? ops * 100 / st : 0), (unsigned)(st / sl));
+                STATS_PRINT(line);
+                dp_text(16, line);
+                cop_last = cop; steps_last = g_emu_times.steps; ops_last = g_ib.ops; loop_last = g_emu_times.loop_us;
+            }
+#ifdef IB_WHY
+            snprintf(line, sizeof line, "not blk: slow %u empty %u long %u hor %u irq %u",
+                     (unsigned)(g_ib.why[0] / sl), (unsigned)(g_ib.why[1] / sl), (unsigned)(g_ib.why[2] / sl),
+                     (unsigned)(g_ib.why[3] / sl), (unsigned)(g_ib.why[4] / sl));
+            dp_text(13, line);
+            uint64_t tps = *(volatile uint32_t *)0xFFD80020u + 1u;
+            snprintf(line, sizeof line, "ms blk %u step %u hook %u (x%u)",
+                     (unsigned)(g_ib.ns[0] * 1000 / tps / sl), (unsigned)(g_ib.ns[1] * 1000 / tps / sl),
+                     (unsigned)(g_ib.ns[2] * 1000 / tps / sl), (unsigned)(g_ib.why[5] / sl));
+            dp_text(12, line);
+            {   /* the three blocks that took longest: ip, ms a slice, runs a slice, ops */
+                int top[3] = { -1, -1, -1 };
+                for (int k = 0; k < 3; k++)
+                    for (int x = 0; x < (int)IB_ENTRIES; x++)
+                        if (x != top[0] && x != top[1] && (top[k] < 0 || s_ib[x].t > s_ib[top[k]].t)) top[k] = x;
+                char *o = line; o += sprintf(o, "top");
+                for (int k = 0; k < 3; k++) { const ib_block_t *q = &s_ib[top[k]];
+                    o += sprintf(o, " %lx %u/%u/%u", (unsigned long)q->ip, (unsigned)((uint64_t)q->t * 10000 / tps / sl), (unsigned)(q->r / sl), (unsigned)q->n); }
+                dp_text(11, line);
+                dp_text(10, g_calib);
+#if I960_JIT && IB_JIT_SELFTEST
+                dp_text(8, g_jt_bench);
+                dp_text(7, g_jt_bench2);
+#endif
+                {   /* the bus slow path: ms a slice and calls, loads and stores; the regions over 1 ms */
+                    char *o = line;
+                    for (int w = 0; w < 2; w++) {
+                        o += sprintf(o, "%s %u/%u", w ? " st" : "bus ld", (unsigned)((uint64_t)g_mslow.t[w] * 1000 / tps / sl), (unsigned)(g_mslow.n[w] / sl));
+                        for (int r = 0; r < 16; r++) if ((uint64_t)g_mslow.rt[w][r] * 1000 / tps / sl) o += sprintf(o, " %x:%u", r, (unsigned)((uint64_t)g_mslow.rt[w][r] * 1000 / tps / sl));
+                    }
+                    dp_text(9, line);
+                    memset(&g_mslow, 0, sizeof g_mslow);
+                }
+                for (int x = 0; x < (int)IB_ENTRIES; x++) s_ib[x].t = s_ib[x].r = 0;
+            }
+            memset(g_ib.why, 0, sizeof g_ib.why); memset(g_ib.ns, 0, sizeof g_ib.ns);
+#endif
+#if I960_JIT
+            snprintf(line, sizeof line, "jit %u blk %u KB %u fl %u ms %u slow",
+                     (unsigned)g_ibj.blocks, (unsigned)(g_ibj.bytes >> 10), (unsigned)g_ibj.flushes,
+                     (unsigned)(g_ibj.us_compile / 1000), (unsigned)g_ibj.slow);
+            STATS_PRINT(line);
+            dp_text(14, line);
+#endif
             builds_last = g_geo3d_mesh_builds; hits_last = g_geo3d_mesh_hits;
             g_dp.us_tiles = g_dp.us_scan = g_dp.us_sort = 0;
             t_last = t2; f_last = g_emu_frames; us_slice = us_draw = 0; slices = 0; shown = 0;

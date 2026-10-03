@@ -188,6 +188,133 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
     ctx->cpu_snapshot      = *ctx->cpu;
 }
 
+#if I960_BLOCKS
+/* --census F0:F1:FILE (an I960_BLOCKS build): what a recompiler would have to
+ * cover. Every instruction of those game frames is stepped as trace_slice does
+ * and sorted: a hook's, one a block takes (ib_decode), or another, by opcode.
+ * Also the runs of block-able instructions between the others, the code's
+ * footprint and the memory ops that leave plain memory. */
+static FILE    *census_out;
+static uint32_t census_from, census_to;
+static struct {
+    uint64_t n, hook, hook_extra, blk, mmio, frames, xfer, taken;
+    uint64_t key[0x2000];          /* the others: CTRL/COBR op, REG 0x1000|op, MEM 0x800|op */
+    uint64_t kind[64];             /* the block-able, by IB_ kind */
+    uint64_t run[65];              /* runs of block-able instructions, by length (64 = longer) */
+    uint64_t run_ins;              /* instructions in them */
+    uint32_t cur;
+    uint8_t  seen[0x400000u / 32u];
+    uint32_t hits[0x400000u / 4u];   /* per instruction word */
+    uint64_t mmio_pg[0x1000];         /* off plain memory, by 1 MB region; +0x800 for stores */
+} cz;
+
+static void census_end_run(void) {
+    if (cz.cur) { cz.run[cz.cur > 64 ? 64 : cz.cur]++; cz.run_ins += cz.cur; cz.cur = 0; }
+}
+
+static void census_slice(emu_thread_ctx_t *ctx) {
+    i960_cpu_t *c = ctx->cpu; memory_bus_t *b = ctx->bus;
+    g_vblank_edge = 0;
+    emu_timers_slice_begin(ctx);
+    emu_service_irq(ctx);
+    hle_filter_sync();
+    cz.frames++;
+    for (int i = 0; i < g_emu_steps_per_slice && !ctx->request_stop && !c->halted; i++) {
+        if (g_irqt_vblank) { g_irqt_vblank = 0; g_vblank_edge = 1; break; }
+        if (ctx->step_over_bp) ctx->step_over_bp = 0;
+        else if (bp_check(c->sfr.ip)) break;
+        uint32_t ip = c->sfr.ip, k = (ip >> 2) & 0xFFFFu;
+        bool hook = (s_hle_filter[k >> 3] >> (k & 7u)) & 1u;
+        ib_op_t o; bool end = false; uint32_t len = 0, w1 = 0, w2 = 0;
+        const uint8_t *p = ip >> 16 < 0x10000u ? b->rd_page[ip >> 16] : NULL;
+        if (p && (ip & 0xFFFFu) <= 0xFFF8u) { w1 = mem_le32(p + (ip & 0xFFFFu)); w2 = mem_le32(p + (ip & 0xFFFFu) + 4); len = ib_decode(c, &o, ip, w1, w2, &end); }
+        if (ip < 0x400000u) { cz.seen[ip >> 5] |= (uint8_t)(1u << ((ip >> 2) & 7u)); cz.hits[ip >> 2]++; }
+        cz.n++;
+        if (len && !hook) {
+            cz.blk++; cz.cur++; cz.kind[o.kind & 63]++;
+            if (o.kind >= IB_LD && o.kind <= IB_STN && o.kind != IB_LDA) {
+                uint32_t ea = o.k + *o.a + (*o.b << o.sh);
+                bool st = o.kind >= IB_ST && o.kind != IB_LDN;
+                if (!(st ? b->wr_page : b->rd_page)[ea >> 16]) { cz.mmio++; cz.mmio_pg[((ea >> 20) & 0x7FFu) | (st ? 0x800u : 0u)]++; }
+            }
+            if (o.kind >= IB_B) cz.xfer++;
+        } else {
+            census_end_run();
+            if (hook) cz.hook++;
+            else {
+                uint32_t cls = w1 >> 28, key;
+                if (cls <= 3)                 key = w1 >> 24;
+                else if (cls >= 5 && cls <= 7) key = 0x1000u | ((w1 >> 7) & 0xFF0u) | ((w1 >> 7) & 0xFu);
+                else                          key = 0x800u | (w1 >> 24);
+                cz.key[key & 0x1FFFu]++;
+                cz.xfer++;
+            }
+        }
+        uint32_t before = c->sfr.ip;
+        if (i960_step_hot(c, b) != 0) break;
+        if (len && !hook && o.kind >= IB_B && c->sfr.ip != before + len) cz.taken++;
+        ctx->total_steps++;
+        if (g_hle_extra) { cz.hook_extra += g_hle_extra; ctx->total_steps += g_hle_extra; i += (int)g_hle_extra; g_hle_extra = 0; }
+        if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
+        else if (g_irqt_sound_kick && g_active_profile) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+        emu_timers_after_step(ctx);
+        if (g_log.warn_triggered) break;
+        if (g_wp.hit) break;
+        if (g_sharc.unknown_triggered) break;
+    }
+    census_end_run();
+    bool frame = g_vblank_edge != 0;
+    if (frame) {
+        if (g_active_profile->quirks.board_vblank) { cop_geo_frame_edge(); dl_frame_edge(ctx->bus, g_emu_frames); hle_match_replay_edge(ctx->bus); }
+    }
+    emu_sound_slice_end(frame);
+    if (g_active_profile->quirks.geo_displaylist) geodl_capture(ctx->bus);
+    ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+    ctx->cpu_snapshot      = *ctx->cpu;
+}
+
+static void census_write(void) {
+    FILE *f = census_out;
+    double n = (double)cz.n, fr = cz.frames ? (double)cz.frames : 1.0;
+    uint64_t foot = 0;
+    for (size_t i = 0; i < sizeof cz.seen; i++) foot += (uint64_t)__builtin_popcount(cz.seen[i]);
+    fprintf(f, "frames %llu  instructions %llu (%.0f a frame)  hook-skipped steps %llu\n",
+            (unsigned long long)cz.frames, (unsigned long long)cz.n, n / fr, (unsigned long long)cz.hook_extra);
+    fprintf(f, "block-able %.2f%%  hooks %.2f%%  others %.2f%%\n", 100.0 * cz.blk / n, 100.0 * cz.hook / n,
+            100.0 * (cz.n - cz.blk - cz.hook) / n);
+    fprintf(f, "memory ops off plain memory %llu (%.2f%% of instructions)\n", (unsigned long long)cz.mmio, 100.0 * cz.mmio / n);
+    fprintf(f, "control transfers %llu (one per %.1f instructions); block branches taken %llu\n",
+            (unsigned long long)cz.xfer, n / (double)(cz.xfer ? cz.xfer : 1), (unsigned long long)cz.taken);
+    fprintf(f, "code footprint %llu instruction words (%llu KB)\n", (unsigned long long)foot, (unsigned long long)(foot * 4 / 1024));
+    uint64_t runs = 0; for (int i = 1; i <= 64; i++) runs += cz.run[i];
+    fprintf(f, "runs of block-able instructions: %llu, %.2f long on average\n", (unsigned long long)runs, runs ? (double)cz.run_ins / runs : 0.0);
+    uint64_t acc = 0;
+    for (int i = 1; i <= 64; i++) if (cz.run[i]) { acc += cz.run[i] * (uint64_t)i; fprintf(f, "  run %2d%s %8llu  (cum. instr %5.1f%%)\n", i, i == 64 ? "+" : " ", (unsigned long long)cz.run[i], 100.0 * acc / (double)(cz.run_ins ? cz.run_ins : 1)); }
+    fprintf(f, "block-able by kind (IB_ enum order):\n");
+    for (int i = 0; i < 64; i++) if (cz.kind[i]) fprintf(f, "  kind %2d %10llu %6.2f%%\n", i, (unsigned long long)cz.kind[i], 100.0 * cz.kind[i] / n);
+    fprintf(f, "off plain memory, by 1 MB region (L load, S store):\n");
+    for (int i = 0; i < 0x1000; i++) if (cz.mmio_pg[i] * 1000 > cz.mmio) fprintf(f, "  %c %03xxxxxx %10llu\n", i & 0x800 ? 'S' : 'L', i & 0x7FF, (unsigned long long)cz.mmio_pg[i]);
+    fprintf(f, "hottest instructions (IP, count, hook):\n");
+    for (int t = 0; t < 12; t++) {
+        uint32_t best = 0;
+        for (uint32_t i = 1; i < 0x100000u; i++) if (cz.hits[i] > cz.hits[best]) best = i;
+        if (!cz.hits[best]) break;
+        uint32_t k = best & 0xFFFFu;
+        fprintf(f, "  %08x %10u %6.2f%% %s\n", best * 4u, cz.hits[best], 100.0 * cz.hits[best] / n,
+                (s_hle_filter[k >> 3] >> (k & 7u)) & 1u ? "hook" : "");
+        cz.hits[best] = 0;
+    }
+    fprintf(f, "others by opcode (CTRL/COBR: op; MEM: 0x8xx; REG: 0x1xxx):\n");
+    for (;;) {
+        int best = -1;
+        for (int i = 0; i < 0x2000; i++) if (cz.key[i] && (best < 0 || cz.key[i] > cz.key[best])) best = i;
+        if (best < 0 || cz.key[best] * 2000 < cz.n) break;   /* down to 0.05% */
+        fprintf(f, "  0x%04x %10llu %6.2f%%\n", best, (unsigned long long)cz.key[best], 100.0 * cz.key[best] / n);
+        cz.key[best] = 0;
+    }
+}
+#endif
+
 /* --inputs: a session's words and checks, indexed by session frame. */
 static uint32_t *in_w0, *in_w1, *in_check;
 static uint32_t  in_n;
@@ -275,6 +402,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--region") && i + 1 < argc) { const char *r = argv[++i]; g_region = !strcmp(r, "japan") ? GAME_REGION_JAPAN : !strcmp(r, "export") ? GAME_REGION_EXPORT : GAME_REGION_USA; }
         else if (!strcmp(argv[i], "--peek")   && i + 1 < argc) peek_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
+#if I960_BLOCKS
+        else if (!strcmp(argv[i], "--census") && i + 1 < argc) {
+            char path[1024];
+            if (sscanf(argv[++i], "%u:%u:%1023s", &census_from, &census_to, path) != 3 || !(census_out = fopen(path, "wb"))) {
+                fprintf(stderr, "--census F0:F1:FILE\n");
+                return 2;
+            }
+        }
+#endif
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
@@ -348,6 +484,10 @@ int main(int argc, char **argv) {
         /* Inputs change only on a frame boundary, as the lockstep's do. */
         while (at < script_n && script[at].frame <= g_emu_frames) g_input.held = script[at++].held;
         if (in_n && g_emu_frames < in_n) g_input.held = words_mask(in_w0[g_emu_frames], in_w1[g_emu_frames]);
+#if I960_BLOCKS
+        if (census_out && g_emu_frames + 1 >= census_from && g_emu_frames + 1 <= census_to) census_slice(&emu);
+        else
+#endif
         if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
         else                                              emu_slice_body(&emu);
         emu_slice_result_t r = emu_slice_finish(&emu);
@@ -394,6 +534,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
+#if I960_BLOCKS
+    if (census_out) { census_write(); fclose(census_out); }
+#endif
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
             (unsigned long long)slices, (unsigned long long)emu.total_steps);
     sound_settle();

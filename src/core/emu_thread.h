@@ -626,19 +626,41 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             if (b->n && b->n <= (uint32_t)(max_steps - i)
                     && g_irqt.pending + (irqt_count_t)b->cyc < g_irqt.horizon
                     && !(g_irqt.intreq & g_irqt.intena & 0x03FFu)) {
+#ifdef IB_WHY
+                uint32_t t0 = IBW_T();
                 uint32_t k = ib_run(cpu, bus, b, attn);
+                { uint32_t d = IBW_D(t0); g_ib.ns[0] += d; ((ib_block_t *)b)->t += d; ((ib_block_t *)b)->r++; }
+#else
+                uint32_t k = ib_run(cpu, bus, b, attn);
+#endif
                 g_ib.ops += k; g_ib.runs++;
                 i += (int)k - 1; steps += k - 1;
                 goto ib_ran;
             }
+#ifdef IB_WHY
+            g_ib.why[!b->n ? 1 : b->n > (uint32_t)(max_steps - i) ? 2
+                     : !(g_irqt.pending + (irqt_count_t)b->cyc < g_irqt.horizon) ? 3 : 4]++;
+        } else {
+            g_ib.why[0]++;
+#endif
         }
 #endif
         PCPROF_TICK(cpu->sfr.ip);
         /* A hook may stand in for several instructions (g_hle_room); on the
          * slow path, or with a breakpoint armed, it is offered only this one,
          * so every check below still sees each instruction. */
+#ifdef IB_WHY
+        {
+            uint32_t t0 = IBW_T();
+            int r = i960_step_core(cpu, bus, (slow || bps) ? 1u : (uint32_t)(max_steps - i));
+            uint32_t dt = IBW_D(t0);
+            if (g_hle_extra) { g_ib.ns[2] += dt; g_ib.why[5] += g_hle_extra; } else g_ib.ns[1] += dt;
+            if (M2_UNLIKELY(r != 0)) break;
+        }
+#else
         if (M2_UNLIKELY(i960_step_core(cpu, bus,
                                        (slow || bps) ? 1u : (uint32_t)(max_steps - i)) != 0)) break;
+#endif
 #if I960_BLOCKS
     ib_ran:
 #endif

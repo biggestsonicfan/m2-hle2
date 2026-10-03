@@ -264,15 +264,76 @@ executing a frame (110k steps, counting the idle loop's skipped spins), at
 be ~13 fps. There is no single hot spot left; each remaining target is a
 few percent. What it would take:
 
-- **An i960 to SH-4 recompiler**, not a faster interpreter. The block replay
-  still dispatches every op through a switch and loads its operands through
-  pointers. Generated SH-4 code with the i960 registers in SH-4 registers is
-  the only step that is several times faster. It needs the same proof as the
-  blocks (`det_digest`, `i960_test`, `i960_fuzz`).
+- **An i960 to SH-4 recompiler**, not a faster interpreter. #386 built a
+  prototype and measured it: on its own it does not get there (below).
 - **Skip the 3D on alternate frames** (render every other board frame): ~9 fps
   in a fight, and smoother play rather than more frames shown.
 - **The PVR face path**: the store queues for vertex submission, and `ftrv`
   for the transform.
+
+## The recompiler prototype (#386)
+
+`I960_JIT=1` (`make JIT=1`, off by default) compiles each decoded block to
+straight SH-4 code (`src/core/i960_jit_sh4.h`; the header has the rules).
+It is correct: `make JIT=1 JIT_TEST=400` runs 400 random blocks both ways on
+the Dreamcast and compares every register, the condition code and memory
+(400/400), and attract's frame hash matches the interpreter's. But it does not
+make the board faster, and a better one would not reach 30 fps either.
+
+**What the i960 does** (`det_digest --census F0:F1:FILE`, an `I960_BLOCKS` host
+build, 3000 frames of attract, 113k steps a frame):
+
+- 33% of the steps are the idle loop at `0x11610`, which the spin hook
+  already skips without running it. 65% are instructions a block can take, 2%
+  others.
+- A run of block-able instructions is 1.9 long on average. Half of all steps
+  are runs of one (the idle loop's other instruction), and 85% sit in runs
+  under 64. There is no long straight code for a compiler to win on.
+- 5.9% of instructions touch something other than plain memory, nearly all
+  of it stores to `0x008xxxxx`, the COP FIFO and the GEO.
+
+**Where an attract slice goes on Flycast**, timed with TMU2's raw count
+(`EXTRA=-DIB_WHY`, 80 ns a count):
+
+| | ms a slice |
+|---|---|
+| the i960 loop | 44 |
+| blocks (`ib_run`) | 29 |
+| of which the bus's slow path (COP / GEO: 4585 stores, 1689 loads) | 13 |
+| interpreted steps | 4 |
+| hooks | ~0 |
+| 3D (decode + submit) | ~42 |
+
+**The compiled code against the replay**, ns per i960 op on Flycast:
+
+| block | `ib_run` | compiled |
+|---|---|---|
+| 16 register `addo`s, 5000 runs | 309 | 96 |
+| the self-test's random blocks | 330-340 | 306-310 |
+| attract, all blocks | 29 ms | 34 ms |
+
+The compiled code is 3x faster on pure register work, and that work is a
+small part of a real block. Real blocks are one or two instructions, so
+entering and leaving one costs more than its ops. The stores call the same C
+handlers as before. The 384 KB code buffer fills and flushes: by frame 1152
+it had flushed 224 times, compiled 197k blocks (7 s of compiling) and made
+4.7M slow-path calls. With the JIT on, the i960 took 61 ms a slice against 44.
+In the same 170 s, attract reached frame 1152 with the JIT and 3299 without.
+
+**So 30 fps is not a recompiler's to give.** A perfect one that made every
+block free would save at most the ~16 ms of block work outside the bus. The
+i960 would still need ~28 ms a slice and the 3D ~42 ms, against a 33 ms frame.
+What would move the frame, in order:
+
+- **The 3D**: the PVR face path (store queues, `ftrv`) or drawing every other
+  board frame.
+- **The COP / GEO store path**: 12 ms a slice for ~4600 stores, ~2.6 us each.
+  Handling the FIFO word in line instead of through the region table and the
+  COP's dispatch is the i960's largest single cost.
+- **Then a recompiler**, if one is still wanted. It would have to keep
+  registers in SH-4 registers across blocks, chain blocks without going back to
+  the run loop, and have a bigger buffer or a cheaper flush. The prototype does
+  none of these.
 
 ## Toolchain and runtime traps
 
@@ -301,9 +362,10 @@ few percent. What it would take:
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
   texture fields) would let the 1 MB mesh cache hold more.
-- **The i960 slice (53-79 ms a frame after #370's blocks).** The next step is
-  a recompiler (Toward 30 fps, above), or keeping the hot `cpu` / `bus`
-  state in the 8 KB operand-cache RAM mode.
+- **The i960 slice (53-79 ms a frame after #370's blocks).** First the COP /
+  GEO stores (13 ms of a 44 ms attract slice; see the recompiler prototype
+  above), then keeping the hot `cpu` / `bus` state in the 8 KB operand-cache
+  RAM mode.
 - **The tile layer's snapshot.** Each redraw copies and compares 56 KB of tile
   RAM twice (`dc_pvr.h`); swapping two pointers would save one copy.
 - **UTLB reach.** Map the hot code pages with 64 KB pages.

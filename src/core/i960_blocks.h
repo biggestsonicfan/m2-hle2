@@ -43,6 +43,9 @@
 #define IB_MISSES  8              /* misses in a row that evict a block */
 #endif
 #define IB_MAX     16             /* ops a block at most */
+#ifndef I960_JIT
+#define I960_JIT   0              /* compile blocks to SH-4 code (i960_jit_sh4.h) */
+#endif
 
 enum {
     IB_MOV, IB_ADD, IB_SUB, IB_AND, IB_OR, IB_XOR, IB_NOT, IB_ANDNOT, IB_NOTAND,
@@ -71,6 +74,12 @@ typedef struct {
     uint16_t n, cyc;          /* ops; their cycles */
     uint32_t next;            /* the IP after the last op, when it does not branch */
     ib_op_t *op;
+#if I960_JIT
+    const struct ibj_meta *jit;   /* its code, or NULL */
+#endif
+#ifdef IB_WHY
+    uint32_t t, r;            /* TMU2 ticks in it, runs (main_dc's census) */
+#endif
 } ib_block_t;
 
 static ib_block_t            s_ib[IB_ENTRIES];
@@ -83,7 +92,13 @@ static int                   s_ib_valid   = 0;
 static const uint32_t        s_ib_lit[32] = {
     0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31 };
 static uint32_t              s_ib_sink;          /* a write to "register 32+" */
-static struct { uint64_t ops, runs, builds; } g_ib;
+static struct { uint64_t ops, runs, builds; uint64_t why[6], ns[3]; } g_ib;
+#ifdef IB_WHY   /* TMU2's raw count (KOS's clock: counts down, reloads once a second) */
+#define IBW_T()   (*(volatile uint32_t *)0xFFD80024u)
+static inline uint32_t IBW_D(uint32_t t0) { uint32_t t1 = IBW_T(); return t0 >= t1 ? t0 - t1 : t0 + *(volatile uint32_t *)0xFFD80020u - t1; }
+#endif   /* why: steps not in a block: slow, empty, too long, horizon, irq */
+
+#include "i960_jit_sh4.h"
 
 /* Drop every block: a new board, a new profile (the hook filter's), new code. */
 static inline void ib_flush(void) {
@@ -91,6 +106,10 @@ static inline void ib_flush(void) {
     memset(s_ib_miss, 0, sizeof s_ib_miss);
     s_ib_used  = 0;
     s_ib_valid = 1;
+#if I960_JIT
+    ibj_reset();
+    g_ibj.flushes++;
+#endif
 }
 
 static inline uint32_t *ib_reg(i960_cpu_t *cpu, uint32_t idx) {
@@ -224,7 +243,13 @@ static inline uint32_t ib_decode(i960_cpu_t *cpu, ib_op_t *o, uint32_t ip, uint3
 static inline void ib_build(i960_cpu_t *cpu, memory_bus_t *bus, ib_block_t *b, uint32_t ip) {
     g_ib.builds++;
     if (s_ib_used > IB_POOL - IB_MAX) ib_flush();  /* the blocks a pool's worth back go */
+#if I960_JIT
+    if (s_ibj_used + IBJ_ROOM > IB_JIT_BYTES) ib_flush();
+#endif
     b->ip = ip; b->n = 0; b->cyc = 0; b->op = &s_ib_pool[s_ib_used];
+#ifdef IB_WHY
+    b->t = b->r = 0;
+#endif
     for (;;) {
         uint32_t k = (ip >> 2) & 0xFFFFu;
         if (s_hle_filter[k >> 3] & (1u << (k & 7u))) break;          /* a hook's address */
@@ -243,6 +268,15 @@ static inline void ib_build(i960_cpu_t *cpu, memory_bus_t *bus, ib_block_t *b, u
     }
     b->next = ip;
     s_ib_used += b->n;
+#if I960_JIT
+#ifdef _arch_dreamcast
+    uint64_t t0 = timer_us_gettime64();
+    ib_jit_compile(cpu, b);
+    g_ibj.us_compile += timer_us_gettime64() - t0;
+#else
+    ib_jit_compile(cpu, b);
+#endif
+#endif
 }
 
 static inline const ib_block_t *ib_lookup(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip) {
@@ -269,6 +303,9 @@ static inline const ib_block_t *ib_lookup(i960_cpu_t *cpu, memory_bus_t *bus, ui
  * leaves them after the last. The board's clock (pending) is the caller's,
  * as after any step. */
 static inline uint32_t ib_run(i960_cpu_t *cpu, memory_bus_t *bus, const ib_block_t *blk, uint32_t attn) {
+#if I960_JIT
+    if (blk->jit && s_ibj_on) return ib_jit_run(cpu, bus, blk, attn);
+#endif
     const uint64_t base = cpu->cycles;
     const irqt_count_t h0 = g_irqt.horizon;
     uint32_t c = 0;                       /* cycles charged, this op's included */

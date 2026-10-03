@@ -919,6 +919,17 @@ static inline bool mem__warn_due(uint64_t n) {
     return n <= MEM_WARN_FIRST || (n & (n - 1)) == 0;
 }
 
+#if defined(IB_WHY) && defined(_arch_dreamcast)
+/* main_dc's census: TMU2 ticks and calls in the bus's slow path, loads [0] and stores [1], by 16 MB region. */
+static struct { uint32_t t[2], n[2], rt[2][16]; } g_mslow;
+#define MSLOW_T0 uint32_t mt0_ = *(volatile uint32_t *)0xFFD80024u
+#define MSLOW_T1(w, a) do { uint32_t mt1_ = *(volatile uint32_t *)0xFFD80024u; \
+    uint32_t d_ = mt0_ >= mt1_ ? mt0_ - mt1_ : mt0_ + *(volatile uint32_t *)0xFFD80020u - mt1_; \
+    g_mslow.t[w] += d_; g_mslow.n[w]++; g_mslow.rt[w][((a) >> 24) & 15u] += d_; } while (0)
+#else
+#define MSLOW_T0 (void)0
+#define MSLOW_T1(w, a) (void)0
+#endif
 static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
     MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
@@ -974,19 +985,19 @@ static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
  * to these, a quarter of STF's instructions. */
 static MEM_FORCE_INLINE uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = bus->rd_page[addr >> 16];
-    if (M2_UNLIKELY(!p)) return mem_read8_slow(bus, addr);
+    if (M2_UNLIKELY(!p)) { MSLOW_T0; uint32_t v_ = mem_read8_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
     return p[addr & 0xFFFFu];
 }
 static MEM_FORCE_INLINE uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = bus->rd_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) return mem_read16_slow(bus, addr);
+    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { MSLOW_T0; uint32_t v_ = mem_read16_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
     return mem_le16(p + (addr & 0xFFFFu));
 }
 static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = bus->rd_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) return mem_read32_slow(bus, addr);
+    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { MSLOW_T0; uint32_t v_ = mem_read32_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
     return mem_le32(p + (addr & 0xFFFFu));
 }
@@ -1204,7 +1215,7 @@ static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint
  * above for the rest, which these were before). */
 static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = bus->wr_page[addr >> 16];
-    if (M2_UNLIKELY(!p)) { mem_write8_slow(bus, addr, val); return; }
+    if (M2_UNLIKELY(!p)) { MSLOW_T0; mem_write8_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
@@ -1213,7 +1224,7 @@ static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32
 }
 static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = bus->wr_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { mem_write16_slow(bus, addr, val); return; }
+    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { MSLOW_T0; mem_write16_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
@@ -1222,7 +1233,7 @@ static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint3
 }
 static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = bus->wr_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { mem_write32_slow(bus, addr, val); return; }
+    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { MSLOW_T0; mem_write32_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
