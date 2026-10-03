@@ -1,6 +1,6 @@
 # m2-hle2 and noclip: where they differ, and who is right (Pinboard #298)
 
-Both projects read the same ROMs and the same reverse engineering, and both have been finding bugs on their own. This file compares them: m2-hle2 at `330fe77` and noclip (the STF explorer, `vendor/noclip`) at `2509729`, both from 2026-10-01. For each difference it says which side is right and why. "Right" means it agrees with the board: MAME's `model2_v.cpp` / `model2rd.ipp` for the 3D, and the SHARC firmware (`stf-sharc`) and the i960 listing for the coprocessor. Where neither side has the board's rule, the entry says so.
+Both projects read the same ROMs and the same reverse engineering, and both have been finding bugs on their own. This file compares them: m2-hle2 at `330fe77` and [noclip](https://github.com/biggestsonicfan/noclip) (the STF explorer, `vendor/noclip`) at `2509729`, both from 2026-10-01. For each difference it says which side is right and why. "Right" means it agrees with the board: MAME's `model2_v.cpp` / `model2rd.ipp` for the 3D, and the SHARC firmware ([`stf-sharc`](https://github.com/biggestsonicfan/stf-sharc)) and the i960 listing for the coprocessor. Where neither side has the board's rule, the entry says so.
 
 This branch makes the m2-hle2 changes in section 1. The noclip side (section 2) is a list for whoever works on noclip next; nothing in noclip was changed.
 

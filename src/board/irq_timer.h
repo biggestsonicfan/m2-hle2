@@ -94,7 +94,7 @@ static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
  * interrupt_wait_b then spins in _idle until VsyncScr counts the vblank, and a
  * frame that overran one counts a dropped frame (CPU_FAIL). The timers used to
  * be frozen for a slice and the waits replaced by hooks that ran VsyncScr
- * themselves (Pinboard #253, BUBBLEGUM.md §2): the loader never yielded and
+ * themselves (Pinboard #253, docs/BUBBLEGUM.md §2): the loader never yielded and
  * decoded to the step limit, and no frame was ever late. */
 
 /* Set by irqt_tick when a vblank falls due; the run loop clears it. */

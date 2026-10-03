@@ -4,7 +4,7 @@
  * The same ROM set and board as Sonic the Fighters - Arcade (sfight.h), with
  * the Honey and hidden-character patches Sega's own emulator applies when it
  * runs this ROM for the console release. This is the default profile for
- * sfight.zip; --profile sfight (or the Game menu) gives the arcade game.
+ * sfight.zip; --profile sfight (or the Profile menu) gives the arcade game.
  *
  * WHERE THE PATCHES COME FROM. The console build does not run the arcade ROM
  * unmodified. At board bring-up its emulator DLL overwrites 76 i960

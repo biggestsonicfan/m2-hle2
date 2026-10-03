@@ -1,6 +1,6 @@
 /*
  * sound_hle.h — Sonic the Fighters' sound driver in C, in place of the 68000
- * (Pinboard #173; SCSP.md, "The driver in C"). Optional (--sound-hle): the
+ * (Pinboard #173; docs/SCSP.md, "The driver in C"). Optional (--sound-hle): the
  * 68000 running the driver stays the default, the oracle, and the only path
  * for any other program ROM or homebrew.
  *

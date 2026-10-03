@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""How tangled is src/? (Pinboard #321; SPAGHETTI.md has the reading.)
+"""How tangled is src/? (Pinboard #321; docs/SPAGHETTI.md has the reading.)
 
 Runs lizard (pip install lizard) over src/ and prints the share of
 hand-written function code that sits in functions too branchy to follow.

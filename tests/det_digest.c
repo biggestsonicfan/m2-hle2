@@ -1,7 +1,7 @@
 /*
  * det_digest.c -- one line per game frame saying what the board computed, so two
  * builds can be held against each other. The question it answers is the
- * cross-play gate (WEB-NETPLAY.md section 3): does the WebAssembly build compute
+ * cross-play gate (docs/WEB-NETPLAY.md section 3): does the WebAssembly build compute
  * the same frames as the desktop one? Lockstep netplay sends inputs, not state,
  * so the two must agree to the bit.
  *

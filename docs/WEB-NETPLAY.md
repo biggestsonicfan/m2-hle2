@@ -4,7 +4,7 @@ Netplay on **play.sonicthefighte.rs**: the WebAssembly build of *Sonic the Fight
 
 This expands [WEB-PORT.md](WEB-PORT.md) sections 3.4, 4, 5 and milestones M3–M4, and replaces them where the two disagree.
 
-**Status (2026-09-21): built, tested end to end locally, and deployed.** Two browsers, each with a new account, went through the page's own screens: sign-up, lobby, host, join, start and accept. They then played a 40-second match: about 2,400 frames each, random inputs on both sides, zero stalls, no desync. That run used a gateway on this machine against a local RPCN. The gateway now also runs on the RPCN droplet, in Docker behind the existing Caddy ([web/gateway/README.md](web/gateway/README.md), "As deployed"). What remains is in section 8, and the cross-play decision (section 3).
+**Status (2026-09-21): built, tested end to end locally, and deployed.** Two browsers, each with a new account, went through the page's own screens: sign-up, lobby, host, join, start and accept. They then played a 40-second match: about 2,400 frames each, random inputs on both sides, zero stalls, no desync. That run used a gateway on this machine against a local RPCN. The gateway now also runs on the RPCN droplet, in Docker behind the existing Caddy ([web/gateway/README.md](../web/gateway/README.md), "As deployed"). What remains is in section 8, and the cross-play decision (section 3).
 
 ---
 
@@ -62,7 +62,7 @@ The field sits in the top two bits of the protocol-revision byte. Bits 28–31, 
 
 ---
 
-## 4. The gateway ([web/gateway/](web/gateway/))
+## 4. The gateway ([web/gateway/](../web/gateway/))
 
 Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `pages.yml`.
 
@@ -129,7 +129,7 @@ A hidden tab gets no animation frames, and a throttled window gets them late. Fr
 - *Measured in headless Chrome:* the hidden board kept ~57 fps, and the opponent never stalled out. Without a match (`tools/web-smoke.mjs --hide 12:12`, headless Edge): 60-61 fps for the 12 s hidden, sound back on return.
 - Not yet measured in Firefox or Safari.
 
-### 5.4 The panel ([web/site/m2hle-netplay.js](web/site/m2hle-netplay.js))
+### 5.4 The panel ([web/site/m2hle-netplay.js](../web/site/m2hle-netplay.js))
 
 The **Play online** button in the bar appears once the game is loaded.
 
@@ -161,7 +161,7 @@ The datagram seam in `net_socket.h` is narrow enough that either can replace the
 
 ## 8. What is not done
 
-- **Deploy:** the gateway is up on the droplet ([web/gateway/README.md](web/gateway/README.md), "As deployed", which also lists what was still open there: the certificate Caddy serves for `rpcn.`). Not recorded as done: the RPCN fork's `pick_free_npid` fix, without which a Twitch sign-up whose lowercase name collides with an existing account fails.
+- **Deploy:** the gateway is up on the droplet ([web/gateway/README.md](../web/gateway/README.md), "As deployed", which also lists what was still open there: the certificate Caddy serves for `rpcn.`). Not recorded as done: the RPCN fork's `pick_free_npid` fix, without which a Twitch sign-up whose lowercase name collides with an existing account fails.
 - **Twitch's success path** (the code and link screen) has not run: the local RPCN has no Twitch client ID. The failure path has run.
 - **A desktop client against a web room** has not been run. The refusal logic is in code, and the room word it depends on was checked (`0x41` low byte), but nothing has been held against a real desktop client.
 - **Firefox and Safari**, the hidden-tab worker there, and real distances for the automatic input delay.
@@ -171,7 +171,7 @@ The datagram seam in `net_socket.h` is narrow enough that either can replace the
 
 ## 9. Testing
 
-Details are in [web/gateway/README.md](web/gateway/README.md), "Testing locally".
+Details are in [web/gateway/README.md](../web/gateway/README.md), "Testing locally".
 
 - `cd web/gateway && npm test`: the gateway alone. `node web/gateway/test/probe-live.mjs`: the deployed one, from outside.
 - `node tools/web-netplay.mjs --seconds 40`: two headless browsers play a match through the real page, a local gateway and a local RPCN.

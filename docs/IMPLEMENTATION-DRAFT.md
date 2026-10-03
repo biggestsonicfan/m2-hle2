@@ -1,7 +1,7 @@
 # IMPLEMENTATION-DRAFT.md — Rebuilding the Model 2 HLE Emulator from Scratch
 
 > **Historical.** The rebuild this plans is complete, and this repository is it. Where this file
-> and [CLAUDE.md](CLAUDE.md) disagree, CLAUDE.md is current.
+> and [CLAUDE.md](../CLAUDE.md) disagree, CLAUDE.md is current.
 
 This is the document I would write to myself before re-implementing this project cold.
 It supersedes the optimistic 14-phase checklist in [PROPOSAL.md](PROPOSAL.md): the real
@@ -14,7 +14,7 @@ sequence). The truth is post-multiply column-major accumulation, recovered by re
 SHARC firmware and diffing against MAME. A rebuild that doesn't stand up the verification
 harness *first* will re-walk every one of those dead ends.
 
-Read alongside [CLAUDE.md](CLAUDE.md) (load-bearing invariants) and the auto-memory index
+Read alongside [CLAUDE.md](../CLAUDE.md) (load-bearing invariants) and the auto-memory index
 `MEMORY.md`. Where this doc and PROPOSAL.md disagree, this doc wins.
 
 ---
@@ -124,7 +124,7 @@ own the internal math, mirroring the `i960.h`/`i960_exec.h` split.
   - `ang_x` (`0x04000808` → PM `0x201AA`): `col1' = c·col1 − s·col2`, `col2' = s·col1 + c·col2`
   - `ang_z` (`0x05000A0A` → PM `0x201D4`): `col0' = c·col0 − s·col1`, `col1' = s·col0 + c·col1`
   - Verified from the SHARC firmware dispatch table at DM[0x30000] (`C:\temp\sharc_bone.asm`;
-    now gone — the firmware sources live in `ai\stf-sharc`, `cpres1.asm` = COP, `cpres2.asm` = GEO).
+    now gone — the firmware sources live in [`ai\stf-sharc`](https://github.com/biggestsonicfan/stf-sharc), `cpres1.asm` = COP, `cpres2.asm` = GEO).
   - **PROPOSAL.md had ang_x/ang_z PM addresses and formulas swapped.** Fixed here.
 - Angles are signed 16-bit fixed-point, `0x10000 = 360°`; only low 16 bits meaningful.
   Mask with `(int16_t)(aw & 0xFFFF)` before `cosf/sinf` or large spins overflow and tumble
