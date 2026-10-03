@@ -68,6 +68,7 @@ static struct {
     unsigned  tris, faces_dropped, runs;
     uint32_t  us_decode, us_submit;
     uint32_t  us_tiles, us_scan, us_sort;   /* parts of us_decode */
+    uint64_t  tt_tiles, tt_scan, tt_sort, tt_submit;   /* the same, since boot (DC_HASH_FRAME) */
 } g_dp;
 
 /* Tilemap 2 as strips (dp_ls_strips, below). */
@@ -847,6 +848,7 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     g_dp.us_tiles += (uint32_t)(ta - t0);
     g_dp.us_scan  += (uint32_t)(tb - ta);
     g_dp.us_sort  += (uint32_t)(t1 - tb);
+    g_dp.tt_tiles += ta - t0; g_dp.tt_scan += tb - ta; g_dp.tt_sort += t1 - tb;
     g_dp.tris = 0;
     dp_memo_reset();
 
@@ -886,6 +888,7 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     uint64_t t2 = timer_us_gettime64();
     g_dp.us_decode += (uint32_t)(t1 - t0);
     g_dp.us_submit += (uint32_t)(t2 - t1);
+    g_dp.tt_submit += t2 - t1;
     return true;
 }
 

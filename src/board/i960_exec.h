@@ -157,7 +157,7 @@ static inline double i960_round_ac(i960_cpu_t *cpu, double v) {
 
 //--- MEM format effective address calculation ---------------------------------
 
-static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t word1, uint32_t word2, int *len) {
+static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t ip, uint32_t word1, uint32_t word2, int *len) {
     uint32_t abase_val = reg_read(cpu, MEM_ABASE(word1));
 
     *len = 4;
@@ -187,7 +187,7 @@ static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t word1, uint32_t word2, i
                 return abase_val;
             case 0x5:  // IP + displacement + 8
                 *len = 8;
-                return cpu->sfr.ip + 8 + word2;
+                return ip + 8 + word2;
             case 0x7:  // (abase)[index*scale]
                 return abase_val + index_val * scale;
             case 0xC:  // displacement
@@ -203,7 +203,7 @@ static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t word1, uint32_t word2, i
                 *len = 8;
                 return word2 + abase_val + index_val * scale;
             default:
-                LOG_WARN("mem_ea: unhandled MEMB mode 0x%X at IP=0x%08X", mode, cpu->sfr.ip);
+                LOG_WARN("mem_ea: unhandled MEMB mode 0x%X at IP=0x%08X", mode, ip);
                 return 0;
         }
     }
@@ -292,6 +292,9 @@ static inline unsigned i960_cycle_cost(uint32_t word1) {
  * reload it per instruction. `room` is the
  * slice's instructions left, this one included, for a hook that stands in for
  * several (g_hle_room, hle_hooks.h). */
+static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                          uint32_t word1, uint32_t word2);
+
 static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t room) {
     // Check HLE hooks before executing
     if (M2_UNLIKELY(hle_check_synced(cpu, bus, room) == 0)) {
@@ -302,10 +305,18 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
     bus->cpu_ip = ip;
     uint32_t word1, word2;
     mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
-    int instr_len = 4;
     /* The board's clock: the timers and the vblank count these (irq_timer.h). */
     cpu->cycles += i960_cycle_cost(word1);
+    return i960_exec_word(cpu, bus, ip, word1, word2);
+}
 
+/* The instruction at `ip` whose words are word1, word2, after its fetch and
+ * its cycles: leaves the next IP in cpu->sfr.ip. Forced inline, so the static
+ * recompiler (i960_aot.h), which calls it with constant words, gets one
+ * instruction's code out of it and not the switch. */
+static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                          uint32_t word1, uint32_t word2) {
+    int instr_len = 4;
     uint32_t class = (word1 >> 28) & 0xF;
 
     switch (class) {
@@ -810,7 +821,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                                 LOG_DEBUG("IAC Purge instruction cache (noop)");
                                 break;
                             default:
-                                LOG_WARN("IAC unknown message type 0x%02X at 0x%08X", msg_type, cpu->sfr.ip);
+                                LOG_WARN("IAC unknown message type 0x%02X at 0x%08X", msg_type, ip);
                                 break;
                         }
                     } else {
@@ -1078,21 +1089,21 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
         case 0xC: {
             int opcode = (word1 >> 24) & 0xFF;
             int dst_idx = MEM_SRCDST(word1);
-            uint32_t ea = mem_ea(cpu, word1, word2, &instr_len);
+            uint32_t ea = mem_ea(cpu, ip, word1, word2, &instr_len);
 
             switch (opcode) {
                 case 0x80: // ldob (load ordinal byte)
                     reg_write(cpu, dst_idx, mem_read8(bus, ea));
                     break;
                 case 0x82: // stob (store ordinal byte)
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     mem_write8(bus, ea, (uint8_t)reg_read(cpu, dst_idx));
                     break;
                 case 0x88: // ldos (load ordinal short)
                     reg_write(cpu, dst_idx, mem_read16(bus, ea));
                     break;
                 case 0x8a: // stos (store ordinal short)
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     mem_write16(bus, ea, (uint16_t)reg_read(cpu, dst_idx));
                     break;
                 case 0x8C: // lda (load address)
@@ -1102,7 +1113,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                     reg_write(cpu, dst_idx, mem_read32(bus, ea));
                     break;
                 case 0x92: // st (store)
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     mem_write32(bus, ea, reg_read(cpu, dst_idx));
                     break;
                 // Multi-word loads/stores walk +4 a word only on burst devices;
@@ -1123,7 +1134,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                 case 0xA2: // stt (store triple - 3 regs)
                 case 0xB2: // stq (store quad - 4 regs)
                 {
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     int n = opcode == 0x9a ? 2 : opcode == 0xA2 ? 3 : 4;
                     uint32_t a = ea;
                     for (int k = 0; k < n; k++) {

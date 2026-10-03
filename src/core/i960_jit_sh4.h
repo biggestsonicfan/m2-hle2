@@ -24,6 +24,9 @@
 #define I960_JIT_SH4_H
 
 #if I960_JIT
+#if MEM_PAGES != (1u << 16)
+#error "the JIT's code indexes the whole page tables: MEM_PAGES must be 1 << 16"
+#endif
 
 #ifndef IB_JIT_BYTES
 #define IB_JIT_BYTES (384u * 1024u)    /* the code buffer; full, every block goes */
@@ -456,8 +459,8 @@ static int32_t ibj_slow(uint32_t ea, uint32_t i) {
         cpu->cycles = base + (c - (o->cyc & 0x7FFu));                                            \
         g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);           \
         s_timer_cycles_seen = cpu->cycles; cpu->cycles = base + c; slow = true; } while (0)
-#define IB_RD(sz)  (M2_UNLIKELY(!bus->rd_page[ea >> 16] || (ea & 0xFFFFu) > 0x10000u - (sz)))
-#define IB_WR(sz)  (M2_UNLIKELY(!bus->wr_page[ea >> 16] || (ea & 0xFFFFu) > 0x10000u - (sz)))
+#define IB_RD(sz)  (M2_UNLIKELY(!MEM_PAGE(bus->rd_page, ea) || (ea & 0xFFFFu) > 0x10000u - (sz)))
+#define IB_WR(sz)  (M2_UNLIKELY(!MEM_PAGE(bus->wr_page, ea) || (ea & 0xFFFFu) > 0x10000u - (sz)))
 #define IB_STORED(ls) do { bus->cpu_ip = o->ip; s_ibj.bus_idx = s_ibj.mw_idx = (int)i;            \
         if (ls) { g_last_store_ip = o->ip; s_ibj.ls_idx = (int)i; } } while (0)
     switch (o->kind) {

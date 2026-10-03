@@ -53,6 +53,14 @@
 /* ---- Region descriptor --------------------------------------------------- */
 
 #define MEM_REGIONS_MAX 64
+/* The direct page tables (rd_page, wr_page) cover the address space below
+ * MEM_PAGES << 16; an access above it goes the long way. 1 << 16, all of it,
+ * costs no test. The Dreamcast's 16 MB wants the 470 KB that the pages above
+ * the framebuffer (0x12C00000), where nothing is plain memory, cost. */
+#ifndef MEM_PAGES
+#define MEM_PAGES (1u << 16)
+#endif
+#define MEM_PAGE(tab, a) ((uint32_t)(a) >> 16 < MEM_PAGES ? (tab)[(uint32_t)(a) >> 16] : NULL)
 #define MEM_PAGE_NONE   0x00u
 #define MEM_PAGE_MIXED  0xFFu
 
@@ -175,8 +183,8 @@ typedef struct memory_bus {
      * bounds test through these; everything that is not plain memory still
      * goes through mem_find_region and its callbacks. Zeroed whenever the
      * region table or a region's callbacks change (mem_regions_changed). */
-    uint8_t      *rd_page[1u << 16];
-    uint8_t      *wr_page[1u << 16];
+    uint8_t      *rd_page[MEM_PAGES];
+    uint8_t      *wr_page[MEM_PAGES];
     int           maps_live;
 
     /* Bumped by every write that changes a tracked region (see change_gen):
@@ -844,7 +852,7 @@ static MEM_NOINLINE void mem_build_pages(memory_bus_t *bus) {
      * region, and only where that region's read (write) is a plain buffer access. */
     memset(bus->rd_page, 0, sizeof bus->rd_page);
     memset(bus->wr_page, 0, sizeof bus->wr_page);
-    for (uint32_t p = 0; p < (1u << 16); p++) {
+    for (uint32_t p = 0; p < MEM_PAGES; p++) {
         uint32_t e = bus->page[p];
         if (e == MEM_PAGE_NONE || e == MEM_PAGE_MIXED) continue;
         mem_region_t *r = &bus->regions[e - 1u];
@@ -984,19 +992,19 @@ static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
  * Forced: GCC 13 for the A55 still made every `ld` and `st` of the step a call
  * to these, a quarter of STF's instructions. */
 static MEM_FORCE_INLINE uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
-    const uint8_t *p = bus->rd_page[addr >> 16];
+    const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
     if (M2_UNLIKELY(!p)) { MSLOW_T0; uint32_t v_ = mem_read8_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
     return p[addr & 0xFFFFu];
 }
 static MEM_FORCE_INLINE uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
-    const uint8_t *p = bus->rd_page[addr >> 16];
+    const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { MSLOW_T0; uint32_t v_ = mem_read16_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
     return mem_le16(p + (addr & 0xFFFFu));
 }
 static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
-    const uint8_t *p = bus->rd_page[addr >> 16];
+    const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { MSLOW_T0; uint32_t v_ = mem_read32_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
     return mem_le32(p + (addr & 0xFFFFu));
@@ -1011,7 +1019,7 @@ static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
 /* Forced inline: once per instruction, and when GCC outlined it (after the
  * loads and stores started inlining) the A55 ran 5% more instructions. */
 static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32_t *w1, uint32_t *w2) {
-    const uint8_t *d = bus->rd_page[addr >> 16];
+    const uint8_t *d = MEM_PAGE(bus->rd_page, addr);
     if (M2_LIKELY(d && (addr & 0xFFFFu) <= 0xFFF8u)) {  /* both words on one direct page */
         d += addr & 0xFFFFu;
         MEM_TALLY(bus->reads, 2);
@@ -1214,7 +1222,7 @@ static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint
  * and a plain store to a direct page then skips the lookup (the long versions
  * above for the rest, which these were before). */
 static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    uint8_t *p = bus->wr_page[addr >> 16];
+    uint8_t *p = MEM_PAGE(bus->wr_page, addr);
     if (M2_UNLIKELY(!p)) { MSLOW_T0; mem_write8_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
@@ -1223,7 +1231,7 @@ static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32
     p[addr & 0xFFFFu] = (uint8_t)val;
 }
 static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    uint8_t *p = bus->wr_page[addr >> 16];
+    uint8_t *p = MEM_PAGE(bus->wr_page, addr);
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { MSLOW_T0; mem_write16_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
@@ -1232,7 +1240,7 @@ static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint3
     mem_le16_put(p + (addr & 0xFFFFu), val);
 }
 static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    uint8_t *p = bus->wr_page[addr >> 16];
+    uint8_t *p = MEM_PAGE(bus->wr_page, addr);
     if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { MSLOW_T0; mem_write32_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;

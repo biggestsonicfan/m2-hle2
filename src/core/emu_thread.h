@@ -210,6 +210,10 @@ static bool s_irq_from_table     = false;
 static int  s_irq_slices         = 0;
 static uint64_t s_timer_cycles_seen = 0;   /* cpu->cycles the board's clock has been given */
 #include "i960_blocks.h"     /* the decoded-block cache (I960_BLOCKS builds) */
+#ifndef I960_AOT
+#define I960_AOT 0
+#endif
+#include "i960_aot.h"        /* the ROM compiled to C (I960_AOT builds) */
 /* The slice ended on a vblank: one video frame of the board ran. */
 static volatile int g_vblank_edge = 0;
 
@@ -602,6 +606,9 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * reloaded after every store. */
     i960_cpu_t   *const cpu = ctx->cpu;
     memory_bus_t *const bus = ctx->bus;
+#if I960_AOT
+    const bool aot = aot_check(bus);
+#endif
     int i;
     for (i = 0; i < max_steps; i++) {
         if (M2_UNLIKELY(slow)) {
@@ -617,6 +624,16 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         } else if (M2_UNLIKELY(bps) && bp_check(cpu->sfr.ip)) {
             break;
         }
+#if I960_AOT
+        /* The compiled code (i960_aot.h), on the same terms as a block. */
+        if (aot && !slow && !bps && !g_pcprof_on && aot_lead(cpu->sfr.ip)
+                && !(g_irqt.intreq & g_irqt.intena & 0x03FFu)) {
+            int halt;
+            uint32_t k = aot_run(cpu, bus, (uint32_t)(max_steps - i), attn, &halt);
+            if (M2_UNLIKELY(halt)) { i += (int)k; steps += k; break; }
+            if (k) { g_aot_ops += k; i += (int)k - 1; steps += k - 1; goto ib_ran; }
+        }
+#endif
 #if I960_BLOCKS
         /* A decoded block, when nothing can come between its instructions that
          * this path would have to see (i960_blocks.h): it counts as the steps
@@ -661,7 +678,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         if (M2_UNLIKELY(i960_step_core(cpu, bus,
                                        (slow || bps) ? 1u : (uint32_t)(max_steps - i)) != 0)) break;
 #endif
-#if I960_BLOCKS
+#if I960_BLOCKS || I960_AOT
     ib_ran:
 #endif
         steps++;

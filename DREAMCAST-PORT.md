@@ -404,6 +404,70 @@ blocks is a large piece of work, with all of attract's state to keep exact, and
 What is left is a few percent at a time: the mesh decode
 (`geo3d_decode_model_cached`, `emit_tri_uv`) and drawing every other frame.
 
+## The program ROM compiled ahead of time (#394)
+
+STF's i960 code is compiled to C on the host, built into the program, and run
+in place of the interpreter (`src/core/i960_aot.h`, `tools/i960_aot.py`;
+`make AOT=<PS3>/stf_rom/rom_code1.bin`). `dreamcast/sfight.aotmap` lists the
+code `sfight_console` runs in attract and a scripted fight
+(`det_digest --aot-map`), by address and weight only. The generator reads the
+instructions out of the player's own ROM into `$(OUT)/aot_gen.h`, which holds
+ROM words and is never committed. The chunks are 2^n bytes of code each: a
+switch over the blocks that start there, then the blocks. The common
+instructions are C with their operands decoded. The rest call the
+interpreter's `i960_exec_word` out of line.
+
+**The board cannot tell.** Each block runs only if its cycles end before the
+timers' horizon and its instructions end inside the slice, as in the block
+runner (`i960_blocks.h`). An access off plain memory, or an instruction that
+talks to the board, first brings the interpreter's state up to date
+(`aot_slow`), and stops the run if the attention word, the interrupt lines or
+the horizon moved. A hook's address is never compiled. `det_digest --cpu` on
+the host is identical with and without the AOT code: 6000 frames of attract
+and 3200 of a scripted fight. On the Dreamcast, the frame-1500 hash is
+unchanged (88ddb134).
+
+| attract to frame 1500 | i960 slices | draws (count) | heap left |
+|---|---|---|---|
+| interpreter + blocks | 81.8 s | 41.1 s (1427) | 512 KB |
+| AOT, `AOT_COVER=0.9` | 66.8 s | 41.2 s (1424) | |
+| AOT, `AOT_COVER=0.98` (the default) | 54.6 s | 41.9 s (1421) | 128 KB |
+
+`AOT_COVER` is the share of the map's weight compiled, hottest first. All of
+it is 4.8 MB of SH-4. 0.98 is 1.0 MB more than the interpreter's build, and
+0.9 is 0.4 MB more.
+
+The room for it came out of the heap:
+
+- **The mesh cache is one static arena** (`GEO3D_MESH_ARENA`, 768 KB),
+  bump-allocated and cleared whole when full. It used to be `malloc` per mesh
+  under a byte cap. With the heap short, a failed build left the slot
+  `failed`, and that model was decoded in full at every draw: an AOT build's
+  draws went from 41 s to over 70 s. A full arena now clears and builds again
+  once.
+- **The page tables cover only what lies below the framebuffer**
+  (`MEM_PAGES` 0x1300, `MEM_PAGE()`; 470 KB). Nothing above 0x12C00000 is
+  plain memory. The JIT keeps the full table (`#error` otherwise).
+- **The block runner's pool is 2 KB with AOT** (`IB_POOL`), where the
+  interpreter build keeps 16 KB.
+
+**A build that does not fit halts at 0x77F8** ("COP self-test failed", the
+i960 executing zeros at 0x77D0). This was the boot failure of builds whose
+image was over ~11.3 MB, and it was not the pager: `mem_init` could not
+allocate texture RAM, returned 0 with no region table, and the run went on
+regardless. `main_dc.c` now stops there with "out of memory for the board's
+RAM". A 1 MB pad in bss halted the interpreter's build the same way. KOS's heap
+runs to 64 KB under the top of RAM (`mm_sbrk`, `THD_KERNEL_STACK_SIZE`). The
+frame pool's sizing (`keep`) still stops at its 1 MB floor without checking
+that the rest fits.
+
+**Where a frame goes now** (frame 1500, AOT 0.98): 36 ms of i960 and 28 ms of
+drawing for each board frame. The drawing breaks down as tile layers 6.5 ms,
+the display-list scan and mesh decode 12.8 ms, the sort 1.8 ms and the PVR
+submit 6.5 ms. 30 fps needs the two together under 33 ms, so neither half
+alone reaches it. The draw side is where assets converted ahead of time can
+help: meshes pre-decoded to strips, and textures pre-converted to `.pvr`.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
@@ -430,7 +494,7 @@ What is left is a few percent at a time: the mesh decode
 - **The 3D decode (title: 46-76 ms).** Now mostly the cached path. The SH-4's
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
-  texture fields) would let the 1 MB mesh cache hold more.
+  texture fields) would let the mesh arena (768 KB) hold more.
 - **The i960 slice (53-79 ms a frame after #370's blocks).** Not the COP /
   GEO stores (#392 measured ~4% for the bus and COP together). Keeping the hot
   `cpu` / `bus` state in the 8 KB operand-cache RAM mode.

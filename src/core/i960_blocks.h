@@ -253,8 +253,8 @@ static inline void ib_build(i960_cpu_t *cpu, memory_bus_t *bus, ib_block_t *b, u
     for (;;) {
         uint32_t k = (ip >> 2) & 0xFFFFu;
         if (s_hle_filter[k >> 3] & (1u << (k & 7u))) break;          /* a hook's address */
-        const uint8_t *p = bus->rd_page[ip >> 16];
-        if (!p || bus->wr_page[ip >> 16] || (ip & 0xFFFFu) > 0xFFF8u) break;  /* ROM only */
+        const uint8_t *p = MEM_PAGE(bus->rd_page, ip);
+        if (!p || MEM_PAGE(bus->wr_page, ip) || (ip & 0xFFFFu) > 0xFFF8u) break;  /* ROM only */
         p += ip & 0xFFFFu;
         uint32_t w1 = mem_le32(p), w2 = mem_le32(p + 4);
         bool end = false;
@@ -318,8 +318,8 @@ static inline uint32_t ib_run(i960_cpu_t *cpu, memory_bus_t *bus, const ib_block
         g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);           \
         s_timer_cycles_seen = cpu->cycles; cpu->cycles = base + c; slow = true; } while (0)
 #define IB_EA()   (o->k + *o->a + (*o->b << o->sh))
-#define IB_RD(sz)  (M2_UNLIKELY(!bus->rd_page[ea >> 16] || (ea & 0xFFFFu) > 0x10000u - (sz)))
-#define IB_WR(sz)  (M2_UNLIKELY(!bus->wr_page[ea >> 16] || (ea & 0xFFFFu) > 0x10000u - (sz)))
+#define IB_RD(sz)  (M2_UNLIKELY(!MEM_PAGE(bus->rd_page, ea) || (ea & 0xFFFFu) > 0x10000u - (sz)))
+#define IB_WR(sz)  (M2_UNLIKELY(!MEM_PAGE(bus->wr_page, ea) || (ea & 0xFFFFu) > 0x10000u - (sz)))
 #define IB_CC(v)  (ac = (ac & ~AC_CC_MASK) | ((v) & AC_CC_MASK))
     for (; o < end; o++) {
         bool slow = false;

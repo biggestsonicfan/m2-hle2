@@ -176,9 +176,9 @@ int main(int argc, char **argv) {
     bool sound = ds_init() == 0;
 
     /* The frame pool takes what the board leaves: texture RAM (2 MB), its
-     * framebuffer (0.5 MB), the mesh cache (GEO3D_MESH_CACHE_BYTES and one
-     * mesh over) and the heap's own use come out of what is free now. */
-    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + GEO3D_MESH_CACHE_BYTES + (768u << 10);
+     * framebuffer (0.5 MB) and the heap's own use come out of what is free
+     * now. The mesh cache has its own block (GEO3D_MESH_ARENA). */
+    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (768u << 10);
     uint32_t cache = 8u << 20;
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
         if ((p = memalign(16384, cache + keep))) { free(p); break; }
@@ -194,9 +194,23 @@ int main(int argc, char **argv) {
     dp_text(2, line);
 
     if (!DC_STATS_DBGIO) dbgio_dev_select("null");  /* printf to the serial port was 2% of a fight */
-    mem_init(&bus, NULL, 0);
+    if (!mem_init(&bus, NULL, 0)) {   /* no map: the i960 would read zeros and fail its COP test */
+        dc_text(1, "out of memory for the board's RAM (texture RAM, framebuffer)");
+        for (;;) thd_sleep(1000);
+    }
     i960_reset(&cpu);
     dc_install_board();
+    {   /* what the heap has left once the board is up */
+        uint32_t left = 0;
+        for (void *p; left < (16u << 20); left += 64u << 10) {
+            if (!(p = malloc(left + (64u << 10)))) break;
+            free(p);
+        }
+        snprintf(line, sizeof line, "profile %s, cache %u KB, heap %u KB", g_active_profile->id,
+                 (unsigned)(cache >> 10), (unsigned)(left >> 10));
+        printf("%s\n", line);
+        dp_text(2, line);
+    }
 #ifdef IB_WHY
     {   /* calibration: Flycast's SH-4 clock against TMU2, for 1M dt/bf loops and 1M loads */
         static uint32_t arr[16384];
@@ -224,8 +238,8 @@ int main(int argc, char **argv) {
     uint64_t builds_last = 0, hits_last = 0;
     uint64_t read_last = 0;
     int hashed = 0;
-    uint64_t steps_last = 0, ops_last = 0, loop_last = 0, cop_last = 0;
-    uint64_t us_all = 0;   /* every slice's time since boot */
+    uint64_t steps_last = 0, ops_last = 0, loop_last = 0, cop_last = 0, aot_last = 0;
+    uint64_t us_all = 0, us_dall = 0, n_drawn = 0, us_snd = 0, t_boot = timer_us_gettime64();   /* since boot: slices, draws, sound */
     static char hashed_line[96];
     while (!cpu.halted) {
         dc_pad();
@@ -235,25 +249,34 @@ int main(int argc, char **argv) {
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
-        if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; }
+        if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }
         (void)f;
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
             uint32_t h = 2166136261u;
             for (uint32_t a = 0x500000u; a < 0x600000u; a += 4) h = (h ^ mem_read32(&bus, a)) * 16777619u;
             for (int r = 0; r < 32; r++) h = (h ^ ((uint32_t *)&cpu.globals)[r]) * 16777619u;
             h = (h ^ (uint32_t)cpu.cycles) * 16777619u;
-            snprintf(line, sizeof line, "f%u %08lx ip %lx sl %lu ms", (unsigned)g_emu_frames,
-                     (unsigned long)h, (unsigned long)cpu.sfr.ip, (unsigned long)(us_all / 1000));
+            snprintf(line, sizeof line, "f%u %08lx ip %lx sl %lu dr %lu/%lu all %lu ms", (unsigned)g_emu_frames,
+                     (unsigned long)h, (unsigned long)cpu.sfr.ip, (unsigned long)(us_all / 1000),
+                     (unsigned long)(us_dall / 1000), (unsigned long)n_drawn, (unsigned long)((t1 - t_boot) / 1000));
             printf("%s\n", line);
             hashed_line[0] = 0; strncat(hashed_line, line, sizeof hashed_line - 1);
             hashed = 1;
             dp_text(15, hashed_line);
+            static char tt_line[96];   /* the draws' parts and the sound, since boot */
+            snprintf(tt_line, sizeof tt_line, "ti %lu sc %lu so %lu su %lu snd %lu", (unsigned long)(g_dp.tt_tiles / 1000),
+                     (unsigned long)(g_dp.tt_scan / 1000), (unsigned long)(g_dp.tt_sort / 1000),
+                     (unsigned long)(g_dp.tt_submit / 1000), (unsigned long)(us_snd / 1000));
+            dp_text(14, tt_line);
         }
+        uint64_t ts = timer_us_gettime64();
         ds_pump();
+        us_snd += timer_us_gettime64() - ts;
         uint64_t t2 = timer_us_gettime64();
         us_slice += t1 - t0;
         us_all += t1 - t0;
         us_draw  += t2 - t1;
+        us_dall  += t2 - t1;
         slices++;
         if (t2 - t_last >= 2000000) {
             uint32_t fr = g_emu_frames - f_last;
@@ -295,9 +318,15 @@ int main(int argc, char **argv) {
                 uint64_t st = g_emu_times.steps - steps_last, ops = g_ib.ops - ops_last;
                 const emu_times_t *et = &g_emu_times;
                 uint64_t cop = et->cop_timed ? (uint64_t)((double)et->cop_timed_us * (double)et->cop_cmds / (double)et->cop_timed) : 0;
-                snprintf(line, sizeof line, "i960 %u ms (cop %u) /slice, %u%% blocks, %u steps",
+                uint64_t aot = 0;   /* compiled ahead of time (i960_aot.h) */
+#if I960_AOT
+                aot = g_aot_ops - aot_last; aot_last = g_aot_ops;
+#else
+                (void)aot_last;
+#endif
+                snprintf(line, sizeof line, "i960 %u ms (cop %u) /slice, %u%% blk %u%% aot, %u steps",
                          (unsigned)((g_emu_times.loop_us - loop_last) / 1000 / sl), (unsigned)((cop - cop_last) / 1000 / sl),
-                         (unsigned)(st ? ops * 100 / st : 0), (unsigned)(st / sl));
+                         (unsigned)(st ? ops * 100 / st : 0), (unsigned)(st ? aot * 100 / st : 0), (unsigned)(st / sl));
                 STATS_PRINT(line);
                 dp_text(16, line);
                 cop_last = cop; steps_last = g_emu_times.steps; ops_last = g_ib.ops; loop_last = g_emu_times.loop_us;

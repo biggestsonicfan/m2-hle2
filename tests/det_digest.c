@@ -188,6 +188,75 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
     ctx->cpu_snapshot      = *ctx->cpu;
 }
 
+/* --aot-map F0:F1:FILE: the code those game frames run, for the static
+ * recompiler (tools/i960_aot.py). One line per program-ROM instruction run:
+ * its IP, its two words, how often it ran and whether it was ever reached
+ * other than from the instruction before it (a branch, call, return or
+ * interrupt landing there). Then a line per hook of the profile. Stepped as
+ * trace_slice does. */
+#define AOTMAP_ROM 0x100000u
+static FILE     *aotmap_out;
+static char      aotmap_path[1024];
+static uint32_t  aotmap_from, aotmap_to;
+static uint32_t *aotmap_hits;
+static uint8_t  *aotmap_jump;
+
+static uint32_t aotmap_len(uint32_t w1) {
+    uint32_t cls = w1 >> 28, mode = MEM_MODE(w1);
+    return cls >= 8 && cls <= 0xC && (mode == 5u || mode >= 0xCu) ? 8u : 4u;
+}
+
+static void aotmap_slice(emu_thread_ctx_t *ctx) {
+    static uint32_t prev = 1, prev_len;
+    if (!aotmap_hits) { aotmap_hits = calloc(AOTMAP_ROM / 4, 4); aotmap_jump = calloc(AOTMAP_ROM / 4, 1); }
+    g_vblank_edge = 0;
+    emu_timers_slice_begin(ctx);
+    emu_service_irq(ctx);
+    for (int i = 0; i < g_emu_steps_per_slice && !ctx->request_stop && !ctx->cpu->halted; i++) {
+        if (g_irqt_vblank) { g_irqt_vblank = 0; g_vblank_edge = 1; break; }
+        if (ctx->step_over_bp) ctx->step_over_bp = 0;
+        else if (bp_check(ctx->cpu->sfr.ip)) break;
+        uint32_t ip = ctx->cpu->sfr.ip;
+        if (ip < AOTMAP_ROM) {
+            aotmap_hits[ip >> 2]++;
+            if (ip != prev + prev_len) aotmap_jump[ip >> 2] = 1;
+            prev = ip; prev_len = aotmap_len(mem_read32(ctx->bus, ip));
+        } else prev = 1;
+        if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
+        ctx->total_steps++;
+        if (g_hle_extra) { ctx->total_steps += g_hle_extra; i += (int)g_hle_extra; g_hle_extra = 0; prev = 1; }
+        if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
+        else if (g_irqt_sound_kick && g_active_profile) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+        emu_timers_after_step(ctx);
+        if (g_log.warn_triggered) break;
+        if (g_wp.hit) break;
+        if (g_sharc.unknown_triggered) break;
+    }
+    bool frame = g_vblank_edge != 0;
+    if (frame) {
+        if (g_active_profile->quirks.board_vblank) { cop_geo_frame_edge(); dl_frame_edge(ctx->bus, g_emu_frames); hle_match_replay_edge(ctx->bus); }
+    }
+    emu_sound_slice_end(frame);
+    if (g_active_profile->quirks.geo_displaylist) geodl_capture(ctx->bus);
+    ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+    ctx->cpu_snapshot      = *ctx->cpu;
+}
+
+static void aotmap_write(memory_bus_t *b, const char *path) {
+    /* The code as the i960 reads it, for the generator (a ROM image: scratch only). */
+    char rp[1040];
+    snprintf(rp, sizeof rp, "%s.rom", path);
+    FILE *f = fopen(rp, "wb");
+    for (uint32_t a = 0; f && a < AOTMAP_ROM; a += 4) { uint32_t v = mem_read32(b, a); fwrite(&v, 4, 1, f); }
+    if (f) fclose(f);
+    for (uint32_t k = 0; aotmap_hits && k < AOTMAP_ROM / 4; k++)
+        if (aotmap_hits[k])
+            fprintf(aotmap_out, "%08x %08x %08x %u %u\n", k * 4u, mem_read32(b, k * 4u), mem_read32(b, k * 4u + 4u),
+                    aotmap_hits[k], aotmap_jump[k]);
+    for (size_t i = 0; i < g_active_profile->hook_count; i++)
+        fprintf(aotmap_out, "hook %08x\n", g_active_profile->hooks[i].addr);
+}
+
 #if I960_BLOCKS
 /* --census F0:F1:FILE (an I960_BLOCKS build): what a recompiler would have to
  * cover. Every instruction of those game frames is stepped as trace_slice does
@@ -377,13 +446,13 @@ static void parse_script(const char *s) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--profile ID]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
     uint32_t peek_addr = 0;
     bool frames_given = false, sound_cols = false, cpu_cols = false;
-    const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL;
+    const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL, *profile_id = "sfight";
     for (int i = 2; i < argc; i++) {
         if      (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = (uint32_t)strtoul(argv[++i], NULL, 10); frames_given = true; }
         else if (!strcmp(argv[i], "--inputs") && i + 1 < argc) inputs_path = argv[++i];
@@ -411,6 +480,14 @@ int main(int argc, char **argv) {
             }
         }
 #endif
+        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
+        else if (!strcmp(argv[i], "--aot-map") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%u:%u:%1023s", &aotmap_from, &aotmap_to, aotmap_path) != 3
+                    || !(aotmap_out = fopen(aotmap_path, "wb"))) {
+                fprintf(stderr, "--aot-map F0:F1:FILE\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
@@ -434,8 +511,8 @@ int main(int argc, char **argv) {
     bp_init();
     wp_init();
     for (size_t i = 0; i < g_profile_count; i++)
-        if (!strcmp(g_profiles[i]->id, "sfight")) g_active_profile = g_profiles[i];
-    if (!g_active_profile) { fprintf(stderr, "no sfight profile\n"); return 2; }
+        if (!strcmp(g_profiles[i]->id, profile_id)) g_active_profile = g_profiles[i];
+    if (!g_active_profile) { fprintf(stderr, "no %s profile\n", profile_id); return 2; }
     if (script_text) parse_script(script_text);
     if (inputs_path) {
         if (!load_inputs(inputs_path)) { fprintf(stderr, "cannot read an input log from %s\n", inputs_path); return 2; }
@@ -488,6 +565,8 @@ int main(int argc, char **argv) {
         if (census_out && g_emu_frames + 1 >= census_from && g_emu_frames + 1 <= census_to) census_slice(&emu);
         else
 #endif
+        if (aotmap_out && g_emu_frames + 1 >= aotmap_from && g_emu_frames + 1 <= aotmap_to) aotmap_slice(&emu);
+        else
         if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
         else                                              emu_slice_body(&emu);
         emu_slice_result_t r = emu_slice_finish(&emu);
@@ -534,8 +613,13 @@ int main(int argc, char **argv) {
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
+    if (aotmap_out) { aotmap_write(&bus, aotmap_path); fclose(aotmap_out); }
 #if I960_BLOCKS
     if (census_out) { census_write(); fclose(census_out); }
+#endif
+#if I960_AOT
+    fprintf(stderr, "aot: %llu instructions compiled (%.1f%%)\n", (unsigned long long)g_aot_ops,
+            emu.total_steps ? 100.0 * (double)g_aot_ops / (double)emu.total_steps : 0.0);
 #endif
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
             (unsigned long long)slices, (unsigned long long)emu.total_steps);

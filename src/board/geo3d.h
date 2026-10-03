@@ -1930,6 +1930,14 @@ static inline void geo3d_decode_direct(const uint32_t *w, uint32_t n,
 #ifndef GEO3D_MESH_CACHE_BYTES
 #define GEO3D_MESH_CACHE_BYTES 0u
 #endif
+/* Bytes of a block of its own that the cached meshes live in, in place of the
+ * heap; 0: the heap. A full block starts the cache over. On the Dreamcast the
+ * heap is what the ROM pager leaves, and a mesh cache on it ran out: the
+ * meshes that did not fit were decoded in full every draw, and the draws took
+ * twice as long (Pinboard #394). */
+#ifndef GEO3D_MESH_ARENA
+#define GEO3D_MESH_ARENA 0u
+#endif
 
 typedef struct {
     int32_t  ai, bi, ci, di;
@@ -1969,12 +1977,20 @@ static geo3d_cmesh_t g_geo3d_meshes[GEO3D_MESH_CACHE_SLOTS];
 static unsigned      g_geo3d_mesh_count;
 static size_t        g_geo3d_mesh_bytes;
 static uint64_t      g_geo3d_mesh_hits, g_geo3d_mesh_builds;
+#if GEO3D_MESH_ARENA
+static uint8_t       g_geo3d_arena[GEO3D_MESH_ARENA] __attribute__((aligned(32)));
+static size_t        g_geo3d_arena_used;
+#endif
 
 static inline void geo3d_mesh_cache_clear(void) {
+#if GEO3D_MESH_ARENA
+    g_geo3d_arena_used = 0;
+#else
     for (unsigned i = 0; i < GEO3D_MESH_CACHE_SLOTS; i++) {
         free(g_geo3d_meshes[i].sv);
         free(g_geo3d_meshes[i].faces);
     }
+#endif
     memset(g_geo3d_meshes, 0, sizeof g_geo3d_meshes);
     g_geo3d_mesh_count = 0;
     g_geo3d_mesh_bytes = 0;
@@ -2450,9 +2466,17 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
      * to the ones that emit below: no 4096-face scratch in BSS (600 KB, which
      * the Dreamcast's heap needs more). */
     const int max_faces = n_idx > 8 ? (n_idx - 8 + 3) / 4 : 0;
+#if GEO3D_MESH_ARENA
+    /* the faces last, so that cutting them to the ones that emit gives the rest back */
+    const size_t sv_bytes = ((size_t)n_sv * sizeof(vec3_t) + 31u) & ~(size_t)31u;
+    if (g_geo3d_arena_used + sv_bytes + (size_t)max_faces * sizeof(geo3d_cface_t) > GEO3D_MESH_ARENA) return false;
+    m->sv = (vec3_t *)(g_geo3d_arena + g_geo3d_arena_used);
+    geo3d_cface_t *faces = (geo3d_cface_t *)(g_geo3d_arena + g_geo3d_arena_used + sv_bytes);
+#else
     m->sv = malloc((size_t)(n_sv ? n_sv : 1) * sizeof(vec3_t));
     geo3d_cface_t *faces = malloc((size_t)(max_faces ? max_faces : 1) * sizeof(geo3d_cface_t));
     if (!m->sv || !faces) { free(m->sv); free(faces); m->sv = NULL; return false; }
+#endif
 
     uint32_t mat_word = m->mat_ptr, uv_word = m->uv_ptr, mat_rec = mat_word;
     int n_faces = 0;
@@ -2542,8 +2566,13 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         memcpy(f->uvv, uvv, sizeof uvv);
     }
 
+#if GEO3D_MESH_ARENA
+    m->faces = faces;
+    g_geo3d_arena_used += sv_bytes + (((size_t)n_faces * sizeof(geo3d_cface_t) + 31u) & ~(size_t)31u);
+#else
     geo3d_cface_t *fit = n_faces < max_faces ? realloc(faces, (size_t)(n_faces ? n_faces : 1) * sizeof(geo3d_cface_t)) : NULL;
     m->faces = fit ? fit : faces;
+#endif
     memcpy(m->sv, sv, (size_t)n_sv * sizeof(vec3_t));
     m->n_sv = n_sv;
     m->n_faces = n_faces;
@@ -2595,16 +2624,23 @@ static geo3d_cmesh_t *geo3d_mesh_get(int model_idx, const uint8_t *main_data,
         geo3d_mesh_cache_clear();
         m = &g_geo3d_meshes[h & (GEO3D_MESH_CACHE_SLOTS - 1u)];
     }
-    *m = (geo3d_cmesh_t){ .model_idx = model_idx, .mat_ptr = mat_ptr, .uv_ptr = uv_ptr,
-                          .polygons = polygons, .materials = materials, .main_data = main_data,
-                          .polygons_size = polygons_size, .materials_size = materials_size,
-                          .table_off = table_off, .table_count = table_count,
-                          .mesh_ptr_subtract = mesh_ptr_subtract, .mesh_ptr_add = mesh_ptr_add };
-    /* A mesh that did not fit stays a failed entry, not a build every frame:
-     * a failed build costs most of a full decode, which the draw runs too. */
-    m->used = true;
-    g_geo3d_mesh_count++;
-    if (!geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) { m->failed = true; return NULL; }
+    for (int retry = 0;; retry++) {
+        *m = (geo3d_cmesh_t){ .model_idx = model_idx, .mat_ptr = mat_ptr, .uv_ptr = uv_ptr,
+                              .polygons = polygons, .materials = materials, .main_data = main_data,
+                              .polygons_size = polygons_size, .materials_size = materials_size,
+                              .table_off = table_off, .table_count = table_count,
+                              .mesh_ptr_subtract = mesh_ptr_subtract, .mesh_ptr_add = mesh_ptr_add };
+        m->used = true;
+        g_geo3d_mesh_count++;
+        if (geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) break;
+        /* Out of memory (or arena), which the cache's own meshes may be
+         * holding: start over once. A mesh that still does not fit stays a
+         * failed entry, not a build every frame: a failed build costs most of
+         * a full decode, which the draw runs too. */
+        if (retry || g_geo3d_mesh_count <= 1) { m->failed = true; return NULL; }
+        geo3d_mesh_cache_clear();
+        m = &g_geo3d_meshes[h & (GEO3D_MESH_CACHE_SLOTS - 1u)];
+    }
     g_geo3d_mesh_bytes += (size_t)m->n_sv * sizeof(vec3_t) + (size_t)m->n_faces * sizeof(geo3d_cface_t);
     g_geo3d_mesh_builds++;
     return m;

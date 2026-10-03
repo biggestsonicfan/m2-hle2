@@ -28,6 +28,9 @@ From the repo root:
 ```sh
 . $KOS_BASE/environ.sh
 make -C dreamcast OUT=/tmp/dc
+# or with STF's i960 code compiled ahead of time (~1.5x the i960's speed;
+# AOT_COVER=0.98 by default, DREAMCAST-PORT.md #394)
+make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS
@@ -86,6 +89,7 @@ Pad: D-pad, A/B/X/Y = B1-B4, Start, left trigger = coin.
 | `main_dc.c` | the frontend: video, pad, run loop, the sound trap, stats |
 | `dc_layout.h` | the PS3 ROM files → the board's regions |
 | `dc_pager.h` | MMU demand paging of the ROM off the GD-ROM |
+| `sfight.aotmap` | the i960 code STF runs, by address, for `AOT=` (`tools/i960_aot.py`) |
 | `dc_pvr.h` | the picture on the PowerVR: tile layers, 3D, textures, stats text |
 | `dc_sound.h` | STF.AFS, the ADX decoder, the music's ring, the SDL2 mix |
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
