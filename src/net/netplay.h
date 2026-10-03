@@ -3865,6 +3865,71 @@ static inline bool netplay_status_due(bool took_cmd) {
         || net_now_ms() - g_netplay.status_ms >= NETPLAY_STATUS_IDLE_MS;
 }
 
+/* The PS3 port's rules, start to finish (ps3_link.h). Our player's input
+ * goes out as the PS3's wire byte; the board plays the two bytes the
+ * lockstep hands back, through the same canonical path as ever. */
+static inline netplay_step_t netplay_begin_frame_ps3(bool took) {
+    uint8_t local = ps3_wire_from_canonical(netplay_sample_local());
+    ps3_link_pump(&g_netplay.ps3link, local, net_now_us());
+    if (g_netplay.ps3link.owner_gone) {
+        netplay_log("the PS3 that owned the room has left; leaving it too");
+        netplay_do_leave_room();
+    }
+    if (g_netplay.ps3link.need_reset) {
+        /* A match on a board that is not in attract: the PS3 reboots its
+         * own the same way, so both reach the forced START. */
+        g_netplay.ps3link.need_reset = false;
+        g_netplay.reset_pending = true;
+        netplay_publish_status();
+        return NETPLAY_STEP_RESET;
+    }
+    uint8_t in[2];
+    ps3_step_t st = ps3_link_frame(&g_netplay.ps3link, in);
+    netplay_step_t step = NETPLAY_STEP_OFF;
+    if (st == PS3_STEP_READY) {
+        netplay_apply_inputs(ps3_canonical_from_wire(in[0]), ps3_canonical_from_wire(in[1]));
+        step = NETPLAY_STEP_READY;
+    } else if (st == PS3_STEP_WAIT) {
+        step = NETPLAY_STEP_WAIT;
+    } else if (g_input.use_net) {
+        netplay_release_inputs();
+    }
+    if (step != NETPLAY_STEP_WAIT || netplay_status_due(took)) netplay_publish_status();
+    return step;
+}
+
+/* A room we are in: its state, the owner's and our own halves of it, and the
+ * datagrams that go out whatever the match is doing. */
+static inline void netplay_room_pumps(void) {
+    netplay_refresh_room();
+    netplay_owner_pump();
+    netplay_member_pump();
+    netplay_linger_pump();
+    netplay_publish_me();
+    netplay_ping_pump();
+}
+
+/* Waiting at the barrier: RESET once it releases. */
+static inline netplay_step_t netplay_sync_step(void) {
+    /* Keep announcing until the barrier releases: the announce is a plain
+     * datagram and may be lost. Paced, because this runs every millisecond
+     * while we wait: see NETPLAY_ANNOUNCE_MS. */
+    if (net_now_ms() - g_netplay.last_announce_ms >= NETPLAY_ANNOUNCE_MS)
+        netplay_send_announce();
+    netplay_report_wait();
+
+    if (lockstep_barrier_released(&g_netplay.lockstep)) {
+        netplay_seed_delay_frames();
+        g_netplay.reset_pending = true;
+        g_netplay.state         = NETPLAY_PLAYING;
+        g_netplay.frame         = 0;
+        netplay_log("barrier released; match %u seed 0x%08X - resetting the board",
+                    (unsigned)g_netplay.match_started, g_netplay.seed);
+        return NETPLAY_STEP_RESET;
+    }
+    return NETPLAY_STEP_WAIT;
+}
+
 /*
  * Called once per slice from the emu thread, OUTSIDE the emu mutex. Pumps the
  * network and the room, then answers what this slice may do.
@@ -3889,68 +3954,13 @@ static inline netplay_step_t netplay_begin_frame(void) {
     netplay_drain_socket();
     netplay_pump_deferred_room();
 
-    if (g_netplay.ps3) {
-        /* The PS3 port's rules, start to finish (ps3_link.h). Our player's input
-         * goes out as the PS3's wire byte; the board plays the two bytes the
-         * lockstep hands back, through the same canonical path as ever. */
-        uint8_t local = ps3_wire_from_canonical(netplay_sample_local());
-        ps3_link_pump(&g_netplay.ps3link, local, net_now_us());
-        if (g_netplay.ps3link.owner_gone) {
-            netplay_log("the PS3 that owned the room has left; leaving it too");
-            netplay_do_leave_room();
-        }
-        if (g_netplay.ps3link.need_reset) {
-            /* A match on a board that is not in attract: the PS3 reboots its
-             * own the same way, so both reach the forced START. */
-            g_netplay.ps3link.need_reset = false;
-            g_netplay.reset_pending = true;
-            netplay_publish_status();
-            return NETPLAY_STEP_RESET;
-        }
-        uint8_t in[2];
-        ps3_step_t st = ps3_link_frame(&g_netplay.ps3link, in);
-        netplay_step_t step = NETPLAY_STEP_OFF;
-        if (st == PS3_STEP_READY) {
-            netplay_apply_inputs(ps3_canonical_from_wire(in[0]), ps3_canonical_from_wire(in[1]));
-            step = NETPLAY_STEP_READY;
-        } else if (st == PS3_STEP_WAIT) {
-            step = NETPLAY_STEP_WAIT;
-        } else if (g_input.use_net) {
-            netplay_release_inputs();
-        }
-        if (step != NETPLAY_STEP_WAIT || netplay_status_due(took)) netplay_publish_status();
-        return step;
-    }
+    if (g_netplay.ps3) return netplay_begin_frame_ps3(took);
 
-    if (rpcn_session_in_room(&g_netplay.session)) {
-        netplay_refresh_room();
-        netplay_owner_pump();
-        netplay_member_pump();
-        netplay_linger_pump();
-        netplay_publish_me();
-        netplay_ping_pump();
-    }
+    if (rpcn_session_in_room(&g_netplay.session)) netplay_room_pumps();
 
     netplay_step_t step = NETPLAY_STEP_OFF;
     if (g_netplay.state == NETPLAY_SYNCING) {
-        /* Keep announcing until the barrier releases: the announce is a plain
-         * datagram and may be lost. Paced, because this runs every millisecond
-         * while we wait: see NETPLAY_ANNOUNCE_MS. */
-        if (net_now_ms() - g_netplay.last_announce_ms >= NETPLAY_ANNOUNCE_MS)
-            netplay_send_announce();
-        netplay_report_wait();
-
-        if (lockstep_barrier_released(&g_netplay.lockstep)) {
-            netplay_seed_delay_frames();
-            g_netplay.reset_pending = true;
-            g_netplay.state         = NETPLAY_PLAYING;
-            g_netplay.frame         = 0;
-            netplay_log("barrier released; match %u seed 0x%08X - resetting the board",
-                        (unsigned)g_netplay.match_started, g_netplay.seed);
-            step = NETPLAY_STEP_RESET;
-        } else {
-            step = NETPLAY_STEP_WAIT;
-        }
+        step = netplay_sync_step();
     } else if (g_netplay.state == NETPLAY_PLAYING) {
         step = netplay_fight_step();
     } else if (g_netplay.state == NETPLAY_WATCHING) {
@@ -3980,31 +3990,22 @@ static inline bool netplay_vs_plays_on(uint16_t match) {
     return true;
 }
 
-/*
- * Called from the emu thread with the mutex held, right after a slice that ended
- * on a frame boundary. Records this frame's check for the next outgoing packet
- * and advances the netplay frame counter.
- *
- * `versus_result` is the game's own verdict on this frame, from the profile's
- * versus hook (hle_hooks.h): 0 = nothing, 1 = 1P won the match, 2 = 2P won.
- * Every board in the match reaches it on the same frame, which is what makes it
- * safe to act on.
- */
-static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps, int versus_result) {
-    if (g_netplay.enabled && g_netplay.ps3) {
-        const ps3_link_t *L = &g_netplay.ps3link;
-        if ((versus_result == 1 || versus_result == 2) && L->active && L->match && !L->last_result
-            && (L->my_side == 0 || L->my_side == 1)) {
-            g_netplay.results++;
-            g_netplay.last_winner = (int8_t)(versus_result - 1);
-            g_netplay.last_side   = (int8_t)L->my_side;
-        }
-        ps3_link_end_frame(&g_netplay.ps3link, versus_result);
-        return;
+/* The PS3 port's frame end: a result our side of its match reached is counted
+ * here, and its lockstep is told. */
+static inline void netplay_end_frame_ps3(int versus_result) {
+    const ps3_link_t *L = &g_netplay.ps3link;
+    if ((versus_result == 1 || versus_result == 2) && L->active && L->match && !L->last_result
+        && (L->my_side == 0 || L->my_side == 1)) {
+        g_netplay.results++;
+        g_netplay.last_winner = (int8_t)(versus_result - 1);
+        g_netplay.last_side   = (int8_t)L->my_side;
     }
-    if (!g_netplay.enabled || !netplay_running_match()) return;
+    ps3_link_end_frame(&g_netplay.ps3link, versus_result);
+}
 
-    uint32_t frame = g_netplay.frame;
+/* This frame's check, kept for the next outgoing packet and held against the
+ * peer's, and the frame's line in the input log. */
+static inline void netplay_record_check(uint32_t frame, const i960_cpu_t *cpu, uint64_t total_steps) {
     uint32_t check = netplay_frame_check(cpu, total_steps);
     uint32_t idx   = frame & LOCKSTEP_RING_MASK;
     g_netplay.check_frame[idx] = frame;
@@ -4018,43 +4019,67 @@ static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps
         fprintf(g_netplay.inlog, "%u %03X %03X %08X\n", frame, g_netplay.inlog_w0, g_netplay.inlog_w1, check);
         if (frame % 60 == 59) fflush(g_netplay.inlog);
     }
+}
 
+/* Our board reached the result of the match it plays, at `frame`: 0 = 1P won,
+ * 1 = 2P. */
+static inline void netplay_on_board_result(uint32_t frame, uint32_t winner) {
+    uint16_t match  = g_netplay.match_started;
+    g_netplay.match_result_seen = true;
+    if (netplay_is_fighter()) {
+        g_netplay.results++;
+        g_netplay.last_winner = (int8_t)winner;
+        g_netplay.last_side   = (int8_t)g_netplay.local_player;
+    }
+    netplay_log("match %u over at frame %u: %s (%s) won", (unsigned)match, frame,
+                netplay_member_name(g_netplay.room.fighter[winner]), winner == 0 ? "1P" : "2P");
+    /* In a VS session the room may be on a later match than our board by
+     * now. The result is still this one's, and the fighters are the same. */
+    room_state_t r = g_netplay.room;
+    if (g_netplay.session_vs && (r.session ? r.session : r.match) == g_netplay.session_started)
+        r.match = match;
+    if (room_after_result(&g_netplay.me, g_netplay.session.my_member_id, &r, match, winner)) {
+        g_netplay.me_dirty = true;
+        netplay_after_result_ready();
+    }
+    if (netplay_vs_plays_on(match)) {
+        /* The board is on its way back to character select with both
+         * players in: the rematch is the next match, on this session. */
+        g_netplay.match_started     = (uint16_t)(match + 1u);
+        if (!g_netplay.match_started) g_netplay.match_started = 1;
+        g_netplay.match_result_seen = false;
+        g_netplay.me.playing        = g_netplay.match_started;
+        g_netplay.me_dirty          = true;
+        netplay_log("VS mode: back to character select for match %u", (unsigned)g_netplay.match_started);
+    } else {
+        if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
+        netplay_end_match(NULL);
+    }
+}
+
+/*
+ * Called from the emu thread with the mutex held, right after a slice that ended
+ * on a frame boundary. Records this frame's check for the next outgoing packet
+ * and advances the netplay frame counter.
+ *
+ * `versus_result` is the game's own verdict on this frame, from the profile's
+ * versus hook (hle_hooks.h): 0 = nothing, 1 = 1P won the match, 2 = 2P won.
+ * Every board in the match reaches it on the same frame, which is what makes it
+ * safe to act on.
+ */
+static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps, int versus_result) {
+    if (g_netplay.enabled && g_netplay.ps3) {
+        netplay_end_frame_ps3(versus_result);
+        return;
+    }
+    if (!g_netplay.enabled || !netplay_running_match()) return;
+
+    uint32_t frame = g_netplay.frame;
+    netplay_record_check(frame, cpu, total_steps);
     g_netplay.frame = frame + 1;
 
-    if (versus_result >= 1 && versus_result <= 2 && !g_netplay.match_result_seen) {
-        uint32_t winner = (uint32_t)versus_result - 1u;
-        uint16_t match  = g_netplay.match_started;
-        g_netplay.match_result_seen = true;
-        if (netplay_is_fighter()) {
-            g_netplay.results++;
-            g_netplay.last_winner = (int8_t)winner;
-            g_netplay.last_side   = (int8_t)g_netplay.local_player;
-        }
-        netplay_log("match %u over at frame %u: %s (%s) won", (unsigned)match, frame,
-                    netplay_member_name(g_netplay.room.fighter[winner]), winner == 0 ? "1P" : "2P");
-        /* In a VS session the room may be on a later match than our board by
-         * now. The result is still this one's, and the fighters are the same. */
-        room_state_t r = g_netplay.room;
-        if (g_netplay.session_vs && (r.session ? r.session : r.match) == g_netplay.session_started)
-            r.match = match;
-        if (room_after_result(&g_netplay.me, g_netplay.session.my_member_id, &r, match, winner)) {
-            g_netplay.me_dirty = true;
-            netplay_after_result_ready();
-        }
-        if (netplay_vs_plays_on(match)) {
-            /* The board is on its way back to character select with both
-             * players in: the rematch is the next match, on this session. */
-            g_netplay.match_started     = (uint16_t)(match + 1u);
-            if (!g_netplay.match_started) g_netplay.match_started = 1;
-            g_netplay.match_result_seen = false;
-            g_netplay.me.playing        = g_netplay.match_started;
-            g_netplay.me_dirty          = true;
-            netplay_log("VS mode: back to character select for match %u", (unsigned)g_netplay.match_started);
-        } else {
-            if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
-            netplay_end_match(NULL);
-        }
-    }
+    if (versus_result >= 1 && versus_result <= 2 && !g_netplay.match_result_seen)
+        netplay_on_board_result(frame, (uint32_t)versus_result - 1u);
 }
 
 /* Called from the emu thread with the mutex held when netplay_begin_frame
