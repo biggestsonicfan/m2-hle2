@@ -501,6 +501,8 @@ host side is [src/ui/overlay_host.h](src/ui/overlay_host.h).
   its EBOOT: the rules the rooms of eight and the PS3 cross-play follow.
 - [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md) — the browser build and its
   netplay gateway; the gateway itself is [web/gateway/](web/gateway/README.md).
+- [MODEL2A-TGP.md](MODEL2A-TGP.md) — what the Sega Rally recomp teaches about Model 2A and its
+  TGP coprocessor, for when a 2A game is added.
 - [SLICE-CLOCKS.md](SLICE-CLOCKS.md) — how the sound board is charged against the i960's
   frame, and the alternatives not taken.
 - [packaging/libretro/](packaging/libretro/README.md) and [packaging/rocknix/](packaging/rocknix/README.md)

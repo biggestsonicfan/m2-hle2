@@ -35,10 +35,10 @@ struct romset;
 /* ---- Board variants ------------------------------------------------------ */
 
 typedef enum {
-    BOARD_MODEL2,        /* original — Daytona, VF2 */
-    BOARD_MODEL2A_CRX,   /* Virtua Cop, VF2.1 */
-    BOARD_MODEL2B_CRX,   /* Sonic The Fighters, Fighting Vipers, VC2, Last Bronx */
-    BOARD_MODEL2C_CRX,   /* Sega Rally, Dynamite Cop, Top Skater */
+    BOARD_MODEL2,        /* original — Daytona, Virtua Cop */
+    BOARD_MODEL2A_CRX,   /* TGP coprocessor — VF2, Sega Rally, Virtua Cop 2, Manx TT, Dynamite Cop */
+    BOARD_MODEL2B_CRX,   /* SHARC coprocessor — Sonic The Fighters, Fighting Vipers, Last Bronx */
+    BOARD_MODEL2C_CRX,   /* Top Skater, Sega Touring Car */
 } board_variant_t;
 
 /* ---- HLE hook table ------------------------------------------------------ */
