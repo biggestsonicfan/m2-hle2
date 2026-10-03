@@ -854,6 +854,47 @@ static inline bool tls_ossl_verify(tls_client_t *t, const cert_fingerprint_t *pi
     return false;
 }
 
+/* The SSL_CTX and the SSL over the connected socket, with the host name for SNI
+ * and, unless `pin`, for OpenSSL's own check. False, with the reason set. */
+static inline bool tls_ossl_session(tls_client_t *t, const char *host, bool pin) {
+    tls_ossl_t *o = &g_tls_ossl;
+    o->err_clear();
+    t->cred = o->ctx_new(o->client_method());
+    if (!t->cred) { tls_ossl_fail(t, "SSL_CTX_new failed"); return false; }
+    o->ctx_set_verify(t->cred, 0 /* SSL_VERIFY_NONE: judged after the handshake */, NULL);
+    if (!pin) o->ctx_default_paths(t->cred);
+
+    t->ctx = o->ssl_new(t->cred);
+    if (!t->ctx || !o->set_fd(t->ctx, (int)t->sock)) {
+        tls_ossl_fail(t, "SSL_new failed");
+        return false;
+    }
+    if (tls_ossl_is_ip(host)) {
+        if (!pin) o->param_ip_asc(o->get0_param(t->ctx), host);
+    } else {
+        o->ctrl(t->ctx, TLS_OSSL_CTRL_SET_SNI, 0 /* TLSEXT_NAMETYPE_host_name */, (void *)host);
+        if (!pin) o->set1_host(t->ctx, host);
+    }
+    return true;
+}
+
+/* SSL_connect until it completes, waiting on the socket. False, with the reason
+ * set, on a failure or after TLS_OSSL_TIMEOUT_MS. */
+static inline bool tls_ossl_handshake(tls_client_t *t, const char *host, uint16_t port) {
+    tls_ossl_t *o = &g_tls_ossl;
+    uint64_t deadline = net_now_ms() + TLS_OSSL_TIMEOUT_MS;
+    for (;;) {
+        int rc = o->do_connect(t->ctx);
+        if (rc == 1) return true;
+        int err = o->get_error(t->ctx, rc);
+        bool again = err == TLS_OSSL_ERROR_WANT_READ || err == TLS_OSSL_ERROR_WANT_WRITE;
+        if (again && tls_ossl_wait(t, err, deadline)) continue;
+        if (again) tls_fail(t, "TLS handshake with %s:%u timed out", host, port);
+        else       tls_ossl_fail(t, "TLS handshake failed");
+        return false;
+    }
+}
+
 static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
                                const cert_fingerprint_t *pinned) {
     memset(t, 0, sizeof(*t));
@@ -861,7 +902,6 @@ static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
 
     if (!host || !*host) { tls_fail(t, "no server given"); return false; }
     if (!tls_ossl_load()) { tls_fail(t, "%s", g_tls_ossl.why); return false; }
-    tls_ossl_t *o = &g_tls_ossl;
     net_startup();
     t->lib_held = true;
     const bool pin = pinned && pinned->is_set;
@@ -871,39 +911,11 @@ static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
         tls_close(t);
         return false;
     }
-
-    o->err_clear();
-    t->cred = o->ctx_new(o->client_method());
-    if (!t->cred) { tls_ossl_fail(t, "SSL_CTX_new failed"); tls_close(t); return false; }
-    o->ctx_set_verify(t->cred, 0 /* SSL_VERIFY_NONE: judged after the handshake */, NULL);
-    if (!pin) o->ctx_default_paths(t->cred);
-
-    t->ctx = o->ssl_new(t->cred);
-    if (!t->ctx || !o->set_fd(t->ctx, (int)t->sock)) {
-        tls_ossl_fail(t, "SSL_new failed");
+    if (!tls_ossl_session(t, host, pin) || !tls_ossl_handshake(t, host, port)
+        || !tls_ossl_verify(t, pinned)) {
         tls_close(t);
         return false;
     }
-    if (tls_ossl_is_ip(host)) {
-        if (!pin) o->param_ip_asc(o->get0_param(t->ctx), host);
-    } else {
-        o->ctrl(t->ctx, TLS_OSSL_CTRL_SET_SNI, 0 /* TLSEXT_NAMETYPE_host_name */, (void *)host);
-        if (!pin) o->set1_host(t->ctx, host);
-    }
-
-    uint64_t deadline = net_now_ms() + TLS_OSSL_TIMEOUT_MS;
-    for (;;) {
-        int rc = o->do_connect(t->ctx);
-        if (rc == 1) break;
-        int err = o->get_error(t->ctx, rc);
-        bool again = err == TLS_OSSL_ERROR_WANT_READ || err == TLS_OSSL_ERROR_WANT_WRITE;
-        if (again && tls_ossl_wait(t, err, deadline)) continue;
-        if (again) tls_fail(t, "TLS handshake with %s:%u timed out", host, port);
-        else       tls_ossl_fail(t, "TLS handshake failed");
-        tls_close(t);
-        return false;
-    }
-    if (!tls_ossl_verify(t, pinned)) { tls_close(t); return false; }
 
     t->connected = true;
     return true;
