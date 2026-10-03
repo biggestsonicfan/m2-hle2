@@ -3379,6 +3379,127 @@ static inline void netplay_publish_room(void) {
     rpcn_session_set_room_state(&g_netplay.session, bin, len);
 }
 
+/* A room state with no match yet: what the owner writes when it knows none. */
+static inline void netplay_owner_fresh_room(room_state_t *s) {
+    memset(s, 0, sizeof(*s));
+    s->phase       = ROOM_PHASE_LOBBY;
+    s->frame_delay = (uint8_t)(g_netplay.cfg.frame_delay ? g_netplay.cfg.frame_delay : 2u);
+    s->last_result = ROOM_RESULT_NONE;
+}
+
+/* Match `s->match + 1` between `f[0]` (1P) and `f[1]` (2P), on the owner's
+ * region and rules. */
+static inline void netplay_owner_start_match(room_state_t *s, const uint16_t f[2], uint64_t now) {
+    s->phase       = ROOM_PHASE_MATCH;
+    s->match       = (uint16_t)(s->match + 1u);
+    if (!s->match) s->match = 1;   /* 0 means "none yet" */
+    s->fighter[0]  = f[0];
+    s->fighter[1]  = f[1];
+    s->seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s->match << 16) ^ 0x5A5Au;
+    s->region      = (uint8_t)g_region;
+    s->vs_mode     = netplay_room_vs_mode() ? 1u : 0u;
+    s->damage_real = g_netplay.cfg.damage_real ? 1u : 0u;
+    s->rounds_to_win = 0; s->round_time = 0; s->game_type = 0; s->hidden = 1;
+    if (g_netplay.cfg.has_rules) match_rules_to_room(&g_netplay.cfg.rules, s);
+    s->session     = s->match;
+    s->last_result = ROOM_RESULT_NONE;
+    s->flags       = (uint8_t)(s->flags & ~ROOM_FLAG_AUTO);
+    g_netplay.match_begun_ms = now;
+    g_netplay.fighters_seen  = 0;
+    netplay_log("match %u: %s (1P) vs %s (2P)", (unsigned)s->match,
+                netplay_member_name(f[0]), netplay_member_name(f[1]));
+}
+
+/* The lobby: start a match when it is time. Whether it started one. */
+static inline bool netplay_owner_lobby(room_state_t *s, const room_member_t *m, uint32_t n, uint64_t now) {
+    bool changed = false;
+    uint32_t players = room_player_count(s, m, n);
+    /* "Everyone is ready" starts the FIRST match. After a result the ready
+     * flags are all still set, so honouring them again would start the next
+     * match the moment the lobby reopened -- and cut off a watcher still a
+     * few frames short of the result it is about to be told about. From then
+     * on the countdown decides (or the owner, with Start now). */
+    bool rolling = (s->flags & ROOM_FLAG_AUTO) != 0;
+    bool due = rolling && g_netplay.auto_deadline_ms && now >= g_netplay.auto_deadline_ms;
+    uint16_t f[2];
+    if (players >= 2 && (g_netplay.force_start || (!rolling && room_all_ready(s, m, n)) || due)
+        && room_pick_fighters(s, m, n, f)) {
+        netplay_owner_start_match(s, f, now);
+        changed = true;
+    } else if (g_netplay.force_start) {
+        netplay_log("cannot start: a match needs two players who are not sitting out");
+    }
+    g_netplay.force_start = false;
+    return changed;
+}
+
+/* A VS rematch on the boards already running: match `res` is decided. */
+static inline void netplay_owner_rematch(room_state_t *s, int res, uint64_t now) {
+    /* VS mode, and nobody else waiting: the boards are already on their
+     * way back to character select with both players in, so the next
+     * match is played on them. The line still moves, so a rematch looks
+     * like any other result to everyone reading the room. */
+    room_rotate_line(s, (uint32_t)res);
+    netplay_log("match %u won by %s (%s); VS mode - match %u is the rematch, no reset",
+                (unsigned)s->match, netplay_member_name(s->fighter[res]), res == 0 ? "1P" : "2P",
+                (unsigned)(uint16_t)(s->match + 1u));
+    s->last_result = (uint8_t)res;   /* the match just decided; `phase` says a new one is on */
+    s->match       = (uint16_t)(s->match + 1u);
+    if (!s->match) s->match = 1;
+    s->flags       = (uint8_t)(s->flags & ~ROOM_FLAG_AUTO);
+    g_netplay.match_begun_ms = now;
+    g_netplay.fighters_seen  = 0;
+}
+
+/* A decided match that ends the session: the loser to the back of the line,
+ * and back to the lobby. */
+static inline void netplay_owner_finish(room_state_t *s, int res, uint64_t now) {
+    uint16_t loser = room_rotate_line(s, (uint32_t)res);
+    s->last_result = (uint8_t)res;
+    s->phase       = ROOM_PHASE_LOBBY;
+    if (netplay_room_rolls()) s->flags = (uint8_t)(s->flags | ROOM_FLAG_AUTO);
+    g_netplay.auto_deadline_ms = now + NETPLAY_NEXT_MATCH_MS;
+    netplay_log("match %u won by %s (%s); %s goes to the back of the line", (unsigned)s->match,
+                netplay_member_name(s->fighter[res]), res == 0 ? "1P" : "2P",
+                netplay_member_name(loser));
+}
+
+/* Why a match with no result cannot finish, or NULL while it still can. */
+static inline const char *netplay_owner_call_off_reason(const room_state_t *s, const room_member_t *m,
+                                                        uint32_t n, uint64_t now) {
+    const char *why = NULL;
+    for (uint32_t side = 0; side < 2; side++) {
+        const room_member_t *mm = room_find(m, n, s->fighter[side]);
+        if (!mm)                                         why = "a fighter left the room";
+        else if (mm->known && mm->data.playing == s->match) g_netplay.fighters_seen |= 1u << side;
+        else if (g_netplay.fighters_seen & (1u << side))   why = "a fighter stopped playing";
+    }
+    if (!why && g_netplay.fighters_seen != 3u && now - g_netplay.match_begun_ms > NETPLAY_MATCH_START_MS)
+        why = "the fighters' boards did not both start";
+    return why;
+}
+
+/* A match on: finish it when a board reports the result, or call it off when
+ * it cannot finish. Whether the state changed. */
+static inline bool netplay_owner_match(room_state_t *s, const room_member_t *m, uint32_t n, uint64_t now) {
+    int res = (g_netplay.me.result_match == s->match && g_netplay.me.result <= 1)
+            ? g_netplay.me.result : room_reported_result(m, n, s->match);
+    if (res >= 0 && room_vs_continues(s, m, n)) {
+        netplay_owner_rematch(s, res, now);
+        return true;
+    }
+    if (res >= 0) {
+        netplay_owner_finish(s, res, now);
+        return true;
+    }
+    const char *why = netplay_owner_call_off_reason(s, m, n, now);
+    if (!why) return false;
+    s->phase       = ROOM_PHASE_LOBBY;
+    s->last_result = ROOM_RESULT_NONE;
+    netplay_log("match %u called off: %s", (unsigned)s->match, why);
+    return true;
+}
+
 /*
  * The owner's half: keep the line in step with who is in the room, start a
  * match when it is time, and finish it when a board reports the result -- or
@@ -3395,96 +3516,16 @@ static inline void netplay_owner_pump(void) {
     uint64_t now = net_now_ms();
 
     if (!g_netplay.room_known) {
-        memset(&s, 0, sizeof(s));
-        s.phase       = ROOM_PHASE_LOBBY;
-        s.frame_delay = (uint8_t)(g_netplay.cfg.frame_delay ? g_netplay.cfg.frame_delay : 2u);
-        s.last_result = ROOM_RESULT_NONE;
+        netplay_owner_fresh_room(&s);
         g_netplay.room_known = true;
         changed = true;
     }
     if (room_line_sync(&s, m, n)) changed = true;
 
     if (s.phase == ROOM_PHASE_LOBBY) {
-        uint32_t players = room_player_count(&s, m, n);
-        /* "Everyone is ready" starts the FIRST match. After a result the ready
-         * flags are all still set, so honouring them again would start the next
-         * match the moment the lobby reopened -- and cut off a watcher still a
-         * few frames short of the result it is about to be told about. From then
-         * on the countdown decides (or the owner, with Start now). */
-        bool rolling = (s.flags & ROOM_FLAG_AUTO) != 0;
-        bool due = rolling && g_netplay.auto_deadline_ms && now >= g_netplay.auto_deadline_ms;
-        uint16_t f[2];
-        if (players >= 2 && (g_netplay.force_start || (!rolling && room_all_ready(&s, m, n)) || due)
-            && room_pick_fighters(&s, m, n, f)) {
-            s.phase       = ROOM_PHASE_MATCH;
-            s.match       = (uint16_t)(s.match + 1u);
-            if (!s.match) s.match = 1;   /* 0 means "none yet" */
-            s.fighter[0]  = f[0];
-            s.fighter[1]  = f[1];
-            s.seed        = (uint32_t)(now * 2654435761u) ^ ((uint32_t)s.match << 16) ^ 0x5A5Au;
-            s.region      = (uint8_t)g_region;
-            s.vs_mode     = netplay_room_vs_mode() ? 1u : 0u;
-            s.damage_real = g_netplay.cfg.damage_real ? 1u : 0u;
-            s.rounds_to_win = 0; s.round_time = 0; s.game_type = 0; s.hidden = 1;
-            if (g_netplay.cfg.has_rules) match_rules_to_room(&g_netplay.cfg.rules, &s);
-            s.session     = s.match;
-            s.last_result = ROOM_RESULT_NONE;
-            s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
-            g_netplay.match_begun_ms = now;
-            g_netplay.fighters_seen  = 0;
-            changed = true;
-            netplay_log("match %u: %s (1P) vs %s (2P)", (unsigned)s.match,
-                        netplay_member_name(f[0]), netplay_member_name(f[1]));
-        } else if (g_netplay.force_start) {
-            netplay_log("cannot start: a match needs two players who are not sitting out");
-        }
-        g_netplay.force_start = false;
-    } else {
-        int res = (g_netplay.me.result_match == s.match && g_netplay.me.result <= 1)
-                ? g_netplay.me.result : room_reported_result(m, n, s.match);
-        if (res >= 0 && room_vs_continues(&s, m, n)) {
-            /* VS mode, and nobody else waiting: the boards are already on their
-             * way back to character select with both players in, so the next
-             * match is played on them. The line still moves, so a rematch looks
-             * like any other result to everyone reading the room. */
-            room_rotate_line(&s, (uint32_t)res);
-            netplay_log("match %u won by %s (%s); VS mode - match %u is the rematch, no reset",
-                        (unsigned)s.match, netplay_member_name(s.fighter[res]), res == 0 ? "1P" : "2P",
-                        (unsigned)(uint16_t)(s.match + 1u));
-            s.last_result = (uint8_t)res;   /* the match just decided; `phase` says a new one is on */
-            s.match       = (uint16_t)(s.match + 1u);
-            if (!s.match) s.match = 1;
-            s.flags       = (uint8_t)(s.flags & ~ROOM_FLAG_AUTO);
-            g_netplay.match_begun_ms = now;
-            g_netplay.fighters_seen  = 0;
-            changed = true;
-        } else if (res >= 0) {
-            uint16_t loser = room_rotate_line(&s, (uint32_t)res);
-            s.last_result = (uint8_t)res;
-            s.phase       = ROOM_PHASE_LOBBY;
-            if (netplay_room_rolls()) s.flags = (uint8_t)(s.flags | ROOM_FLAG_AUTO);
-            g_netplay.auto_deadline_ms = now + NETPLAY_NEXT_MATCH_MS;
-            changed = true;
-            netplay_log("match %u won by %s (%s); %s goes to the back of the line", (unsigned)s.match,
-                        netplay_member_name(s.fighter[res]), res == 0 ? "1P" : "2P",
-                        netplay_member_name(loser));
-        } else {
-            const char *why = NULL;
-            for (uint32_t side = 0; side < 2; side++) {
-                const room_member_t *mm = room_find(m, n, s.fighter[side]);
-                if (!mm)                                         why = "a fighter left the room";
-                else if (mm->known && mm->data.playing == s.match) g_netplay.fighters_seen |= 1u << side;
-                else if (g_netplay.fighters_seen & (1u << side))   why = "a fighter stopped playing";
-            }
-            if (!why && g_netplay.fighters_seen != 3u && now - g_netplay.match_begun_ms > NETPLAY_MATCH_START_MS)
-                why = "the fighters' boards did not both start";
-            if (why) {
-                s.phase       = ROOM_PHASE_LOBBY;
-                s.last_result = ROOM_RESULT_NONE;
-                changed = true;
-                netplay_log("match %u called off: %s", (unsigned)s.match, why);
-            }
-        }
+        if (netplay_owner_lobby(&s, m, n, now)) changed = true;
+    } else if (netplay_owner_match(&s, m, n, now)) {
+        changed = true;
     }
 
     if (changed) {
