@@ -3534,6 +3534,103 @@ static inline void netplay_owner_pump(void) {
     }
 }
 
+/* The player's own settings, before the room's replace them. Kept from
+ * the first match until the board goes back to being the player's. */
+static inline void netplay_save_own_settings(void) {
+    if (g_netplay.own_saved) return;
+    g_netplay.own_saved   = true;
+    g_netplay.own_vs_mode = g_vs_mode;
+    g_netplay.own_region  = g_region;
+    g_netplay.own_damage_real = g_damage_real;
+    g_netplay.own_rounds_to_win = g_rounds_to_win;
+    g_netplay.own_round_time    = g_round_time;
+    g_netplay.own_game_type     = g_game_type;
+    g_netplay.own_hidden_chars  = g_hidden_chars;
+}
+
+/* The owner's region and VS mode, before the reset that boots into
+ * them: a board booted as another region is another game from frame 0,
+ * and one in the other VS mode leaves the match a different way. */
+static inline void netplay_adopt_room_settings(const room_state_t *r) {
+    if (g_region != (int)r->region) {
+        netplay_log("playing this room in the owner's region (%s)",
+                    r->region == GAME_REGION_JAPAN ? "Japan" : r->region == GAME_REGION_EXPORT ? "Export" : "USA");
+        g_region = r->region;
+    }
+    if (g_vs_mode != (int)r->vs_mode) {
+        netplay_log(r->vs_mode ? "this room plays in VS mode: after a match, both players go back to character select"
+                               : "this room does not play in VS mode");
+        g_vs_mode = r->vs_mode ? 1 : 0;
+    }
+    if (g_damage_real != (int)r->damage_real) {
+        netplay_log(r->damage_real ? "this room plays with DAMAGE: REAL (no catch-up damage)"
+                                   : "this room plays with DAMAGE: NORMAL (catch-up damage)");
+        g_damage_real = r->damage_real ? 1 : 0;
+    }
+    /* The room's PLAYER MATCH rules, at the same cold boot. */
+    if (g_rounds_to_win != (int)r->rounds_to_win || g_round_time != (int)r->round_time
+        || g_game_type != (int)r->game_type || g_hidden_chars != (int)r->hidden) {
+        g_rounds_to_win = r->rounds_to_win;
+        g_round_time    = r->round_time;
+        g_game_type     = r->game_type & 3;
+        g_hidden_chars  = r->hidden ? 1 : 0;
+        netplay_log("this room's rules: %u rounds to win, %u s a round, Type %c, secret characters %s",
+                    r->rounds_to_win ? (unsigned)r->rounds_to_win : 2u,
+                    r->round_time ? (unsigned)r->round_time : 30u,
+                    'A' + (r->game_type & 3), r->hidden ? "On" : "Off");
+    }
+}
+
+/* Start the room's match on `session`: a cold boot of our board, as a fighter
+ * if the state names us `me`, as a watcher otherwise. */
+static inline void netplay_member_start_session(const room_state_t *r, uint16_t me, uint16_t session) {
+    int side = room_side_of(r, me);
+    netplay_end_match(NULL);
+    /* Counted from the cold boot. A member who arrives in the middle of a VS
+     * session runs it from frame 0 like any watcher, and the results it
+     * reaches are the session's first ones, not the room's current one. */
+    g_netplay.match_started   = session;
+    g_netplay.session_started = session;
+    g_netplay.session_vs      = r->vs_mode != 0;
+    g_netplay.seed            = r->seed;
+    netplay_save_own_settings();
+    /* This session cold boots the board, so it decides what is left behind. */
+    g_netplay.vs_board        = r->vs_mode != 0;
+    netplay_adopt_room_settings(r);
+    if (side >= 0) {
+        netplay_log("match %u: you are %s against %s", (unsigned)r->match, side == 0 ? "1P" : "2P",
+                    netplay_member_name(r->fighter[side ^ 1]));
+        netplay_begin_generation(session, (uint32_t)side, r->frame_delay);
+    } else {
+        netplay_log("match %u: watching %s vs %s", (unsigned)r->match,
+                    netplay_member_name(r->fighter[0]), netplay_member_name(r->fighter[1]));
+        netplay_begin_generation(session, LOCKSTEP_WATCHER, r->frame_delay);
+    }
+    g_netplay.match_live = true;
+    g_netplay.me.playing = session;
+    g_netplay.me_dirty   = true;
+}
+
+/* The match on our boards, which the room has stopped: called off, or a VS
+ * session it has closed. */
+static inline void netplay_member_stop_session(const room_state_t *r) {
+    if (r->phase == ROOM_PHASE_LOBBY && r->last_result == ROOM_RESULT_NONE) {
+        g_netplay.match_started = r->match;
+        netplay_end_match("called off by the room");
+    }
+
+    /* A VS session the room has closed after a result -- somebody else is
+     * waiting to play, so the next match needs a reset -- once our board has
+     * played past that result. A board still short of it goes on until it gets
+     * there (netplay_vs_plays_on). */
+    if (g_netplay.match_live && g_netplay.session_vs && r->phase == ROOM_PHASE_LOBBY
+        && r->last_result <= 1 && (int16_t)(g_netplay.match_started - r->match) > 0) {
+        if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
+        g_netplay.match_started = r->match;   /* the rematch it counted never happened */
+        netplay_end_match("the room moves on to the next players");
+    }
+}
+
 /*
  * Every member's half, the owner's included: do what the room state says.
  * A match we have not started yet is started -- as a fighter if the state names
@@ -3561,89 +3658,11 @@ static inline void netplay_member_pump(void) {
      * counted a rematch the room may never hold, so the room's next match can
      * carry that same number. */
     if (r->phase == ROOM_PHASE_MATCH && r->match && session != g_netplay.session_started) {
-        int side = room_side_of(r, me);
-        netplay_end_match(NULL);
-        /* Counted from the cold boot. A member who arrives in the middle of a VS
-         * session runs it from frame 0 like any watcher, and the results it
-         * reaches are the session's first ones, not the room's current one. */
-        g_netplay.match_started   = session;
-        g_netplay.session_started = session;
-        g_netplay.session_vs      = r->vs_mode != 0;
-        g_netplay.seed            = r->seed;
-        /* The player's own settings, before the room's replace them. Kept from
-         * the first match until the board goes back to being the player's. */
-        if (!g_netplay.own_saved) {
-            g_netplay.own_saved   = true;
-            g_netplay.own_vs_mode = g_vs_mode;
-            g_netplay.own_region  = g_region;
-            g_netplay.own_damage_real = g_damage_real;
-            g_netplay.own_rounds_to_win = g_rounds_to_win;
-            g_netplay.own_round_time    = g_round_time;
-            g_netplay.own_game_type     = g_game_type;
-            g_netplay.own_hidden_chars  = g_hidden_chars;
-        }
-        /* This session cold boots the board, so it decides what is left behind. */
-        g_netplay.vs_board        = r->vs_mode != 0;
-        /* The owner's region and VS mode, before the reset that boots into
-         * them: a board booted as another region is another game from frame 0,
-         * and one in the other VS mode leaves the match a different way. */
-        if (g_region != (int)r->region) {
-            netplay_log("playing this room in the owner's region (%s)",
-                        r->region == GAME_REGION_JAPAN ? "Japan" : r->region == GAME_REGION_EXPORT ? "Export" : "USA");
-            g_region = r->region;
-        }
-        if (g_vs_mode != (int)r->vs_mode) {
-            netplay_log(r->vs_mode ? "this room plays in VS mode: after a match, both players go back to character select"
-                                   : "this room does not play in VS mode");
-            g_vs_mode = r->vs_mode ? 1 : 0;
-        }
-        if (g_damage_real != (int)r->damage_real) {
-            netplay_log(r->damage_real ? "this room plays with DAMAGE: REAL (no catch-up damage)"
-                                       : "this room plays with DAMAGE: NORMAL (catch-up damage)");
-            g_damage_real = r->damage_real ? 1 : 0;
-        }
-        /* The room's PLAYER MATCH rules, at the same cold boot. */
-        if (g_rounds_to_win != (int)r->rounds_to_win || g_round_time != (int)r->round_time
-            || g_game_type != (int)r->game_type || g_hidden_chars != (int)r->hidden) {
-            g_rounds_to_win = r->rounds_to_win;
-            g_round_time    = r->round_time;
-            g_game_type     = r->game_type & 3;
-            g_hidden_chars  = r->hidden ? 1 : 0;
-            netplay_log("this room's rules: %u rounds to win, %u s a round, Type %c, secret characters %s",
-                        r->rounds_to_win ? (unsigned)r->rounds_to_win : 2u,
-                        r->round_time ? (unsigned)r->round_time : 30u,
-                        'A' + (r->game_type & 3), r->hidden ? "On" : "Off");
-        }
-        if (side >= 0) {
-            netplay_log("match %u: you are %s against %s", (unsigned)r->match, side == 0 ? "1P" : "2P",
-                        netplay_member_name(r->fighter[side ^ 1]));
-            netplay_begin_generation(session, (uint32_t)side, r->frame_delay);
-        } else {
-            netplay_log("match %u: watching %s vs %s", (unsigned)r->match,
-                        netplay_member_name(r->fighter[0]), netplay_member_name(r->fighter[1]));
-            netplay_begin_generation(session, LOCKSTEP_WATCHER, r->frame_delay);
-        }
-        g_netplay.match_live = true;
-        g_netplay.me.playing = session;
-        g_netplay.me_dirty   = true;
+        netplay_member_start_session(r, me, session);
         on_our_boards = true;
     }
 
-    if (on_our_boards && r->phase == ROOM_PHASE_LOBBY && r->last_result == ROOM_RESULT_NONE) {
-        g_netplay.match_started = r->match;
-        netplay_end_match("called off by the room");
-    }
-
-    /* A VS session the room has closed after a result -- somebody else is
-     * waiting to play, so the next match needs a reset -- once our board has
-     * played past that result. A board still short of it goes on until it gets
-     * there (netplay_vs_plays_on). */
-    if (on_our_boards && g_netplay.match_live && g_netplay.session_vs && r->phase == ROOM_PHASE_LOBBY
-        && r->last_result <= 1 && (int16_t)(g_netplay.match_started - r->match) > 0) {
-        if (netplay_is_fighter()) g_netplay.linger_until_ms = net_now_ms() + NETPLAY_LINGER_MS;
-        g_netplay.match_started = r->match;   /* the rematch it counted never happened */
-        netplay_end_match("the room moves on to the next players");
-    }
+    if (on_our_boards) netplay_member_stop_session(r);
 
     /* A result our board did not see -- we were not running it, or dropped out
      * of it -- is still ours to record, and still moves our entry request. */
