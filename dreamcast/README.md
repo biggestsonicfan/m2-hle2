@@ -3,8 +3,8 @@
 The board under KallistiOS, with the ROM read off the disc a page at a time,
 straight from the PS3 release's ROM files (no zip, no interleave: they are
 already the board's address spaces). The PowerVR draws the tile layers and the
-3D scene, and sound is Sega's console way: ADX cues out of an AFS, decoded to
-PCM and mixed through SDL2. See
+3D scene, and sound is Sega's console way: ADX cues out of an AFS, the music
+decoded on the SH-4 into a KOS stream, the effects played by the AICA. See
 [../DREAMCAST-PORT.md](../DREAMCAST-PORT.md) for what was measured and why it
 is built this way.
 
@@ -13,9 +13,6 @@ is built this way.
 - A KallistiOS toolchain: sh-elf GCC built by KOS's `utils/kos-chain`
   (`make` in that directory; `makejobs=2` in its `Makefile.cfg` here), then KOS
   itself and `utils/makeip`. Source KOS's `environ.sh`.
-- SDL2 for KallistiOS: GPF's fork (`github.com/GPF/SDL2`, branch
-  `dreamcastSDL2`), built and installed into `$KOS_BASE/addons` by its
-  `build-scripts/dreamcast.sh` (`BUILD_JOBS=2`). kos-ports has SDL 1.2 only.
 - `genisoimage`; on the host, `ffmpeg` (with the `hca` decoder and the
   `adpcm_adx` encoder) and Python 3 with numpy, for the sound.
 - Your own copy of the PS3 release's `stf_rom` and `sound` folders.
@@ -53,9 +50,12 @@ g0, as Sega's console DLL does, and `dc_sound.h` plays it:
   DLL, `0x180126a70`, plus its eight per-cue stop codes `0xAE14xx`); the rest
   are ADX v3 files with their loops, one per cue. Format in `mksound.py`.
 - Music (category 5) is 44.1 kHz stereo, streamed: the main loop reads it
-  through the pager's drive calls into a 128 KB ring. Effects and voices
-  (category 2, 22 kHz mono) are in RAM, ~1.1 MB, loaded at boot.
-- SDL2's audio callback decodes and mixes 16 voices and the music at 44.1 kHz.
+  through the pager's drive calls into a 128 KB ring, and a thread feeds a
+  KOS stream (`snd_stream`) from it. Effects and voices (category 2, 22 kHz
+  mono) are decoded at boot and written again as the AICA's 4-bit ADPCM into
+  sound RAM (~1 MB); each plays on an AICA channel of its own, 16 at most. A
+  channel holds 65534 samples, so the four effects longer than that play at
+  half their rate.
   `0xA00001`-`3` stop, `0xA003xx` fades the music over `xx` frames.
 
 ## Run

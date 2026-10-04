@@ -297,7 +297,7 @@ int main(int argc, char **argv) {
             STATS_PRINT(line);
             dp_text(1, line);
             snprintf(line, sizeof line, "snd %s codes %u unk %u bgm %d ring %u KB under %u",
-                     g_ds.dev ? "on" : "off", (unsigned)g_ds.codes, (unsigned)g_ds.unknown,
+                     g_ds.on ? "on" : "off", (unsigned)g_ds.codes, (unsigned)g_ds.unknown,
                      g_ds.bgm == 0xFFFF ? -1 : (int)g_ds.bgm,
                      (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
             STATS_PRINT(line);

@@ -11,15 +11,28 @@
  *   category 0   a stop code: stops the looping cue of that entry
  *   0xA00001/2/3 stop all / music / effects; 0xA003xx fades music over xx frames
  *
- * The ADX decode to PCM and the mix happen in SDL2's audio callback (S16 stereo
- * at 44.1 kHz). The callback never reads the disc: the pager owns the drive and
- * reads it with interrupts off (dc_pager.h), so the music is read in the main
- * loop (ds_pump) into a ring of ADX bytes the callback drains.
+ * The AICA plays the effects itself (Pinboard #394): at boot each one's ADX is
+ * decoded and written again as the AICA's 4-bit ADPCM into sound RAM, and a
+ * cue starts it on a channel of its own. Nothing is mixed on the SH-4, and the
+ * effects' 1.1 MB stay out of main RAM. A channel holds at most 65534
+ * samples, so the four effects longer than that go at half their rate.
+ *
+ * The music stays ADX, decoded on the SH-4 into a KOS stream (S16 stereo at
+ * the file's 44.1 kHz) that a thread of ours tops up. The stream's callback
+ * never reads the disc: the pager owns the drive and reads it with
+ * interrupts off (dc_pager.h), so the music is read in the main loop
+ * (ds_pump) into a ring of ADX bytes the callback drains.
  */
 #ifndef DC_SOUND_H
 #define DC_SOUND_H
 
-#include <SDL2/SDL.h>
+#include <dc/sound/sfxmgr.h>
+#include <dc/sound/sound.h>
+#include <dc/sound/stream.h>
+#include <kos/mutex.h>
+#include <kos/thread.h>
+#include <arch/timer.h>
+#include <malloc.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -29,6 +42,8 @@
 
 #define DS_RATE      44100
 #define DS_VOICES    16
+#define DS_AICA_MAX  65534u             /* samples a channel can play */
+#define DS_STREAM    (32u << 10)        /* the stream's buffer per channel, bytes */
 #define DS_RING      (128u << 10)       /* ~2.6 s of 44.1 kHz stereo ADX */
 #define DS_STAGE_SEC 8                  /* sectors per music read */
 #define DS_CAT_STOP  0
@@ -80,15 +95,11 @@ typedef struct {
     uint32_t frame;                    /* the next frame to decode */
     uint8_t  pos, end;                 /* what is left of pcm */
     uint8_t  done;
-    int16_t  prev[2], cur[2];          /* the resampler's two samples */
-    uint32_t frac, step;               /* 16.16 */
 } adx_dec_t;
 
 static void adx_start(adx_dec_t *d, const adx_hdr_t *h) {
     memset(d, 0, sizeof *d);
     d->h = h;
-    d->step = (uint32_t)(((uint64_t)h->rate << 16) / DS_RATE);
-    d->frac = 1u << 16;                /* load a sample on the first output */
 }
 
 /* The next frame set's bytes (ch x 18), or NULL: not there yet (music). */
@@ -108,12 +119,16 @@ static int adx_next(adx_dec_t *d, adx_fetch_fn fetch, void *src) {
         int scale = ds_be16(f);
         int32_t s1 = d->s1[c], s2 = d->s2[c];
         int32_t c1 = h->c1, c2 = h->c2;
-        for (int i = 0; i < 32; i++) {
-            int32_t s = (int32_t)((uint32_t)f[2 + i / 2] << (i & 1 ? 28 : 24)) >> 28;  /* signed nibble */
-            s = s * scale + ((c1 * s1 + c2 * s2) >> 12);
-            if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
-            s2 = s1; s1 = s;
-            d->pcm[i][c] = (int16_t)s;
+        int16_t *o = &d->pcm[0][c];
+        for (int i = 0; i < 16; i++) {
+            int32_t b = (int32_t)((uint32_t)f[2 + i] << 24);
+            int32_t s = (b >> 28) * scale + ((c1 * s1 + c2 * s2) >> 12);  /* high nibble first */
+            s = s > 32767 ? 32767 : s < -32768 ? -32768 : s;
+            s2 = s1; s1 = s; o[0] = (int16_t)s;
+            s = ((b << 4) >> 28) * scale + ((c1 * s1 + c2 * s2) >> 12);
+            s = s > 32767 ? 32767 : s < -32768 ? -32768 : s;
+            s2 = s1; s1 = s; o[2] = (int16_t)s;
+            o += 4;
         }
         d->s1[c] = s1; d->s2[c] = s2;
     }
@@ -127,54 +142,26 @@ static int adx_next(adx_dec_t *d, adx_fetch_fn fetch, void *src) {
     return 1;
 }
 
-/* Adds n stereo samples at DS_RATE into acc, scaled by vol (16.16). Stops at
- * an underrun or the end. */
-static void adx_mix(adx_dec_t *d, adx_fetch_fn fetch, void *src, int32_t *acc, int n, int32_t vol) {
-    if (d->step == 1u << 16 && d->frac == 1u << 16) {
-        /* At DS_RATE (the music) each output is the sample before the one it
-         * loads, as below with f = 0, without the per-sample bookkeeping. */
-        int i = 0;
-        while (i < n && !d->done) {
-            if (d->pos >= d->end && !adx_next(d, fetch, src)) return;
-            int k = d->end - d->pos;
-            if (k > n - i) k = n - i;
-            const int16_t (*p)[2] = &d->pcm[d->pos];
-            int32_t l = d->cur[0], r = d->cur[1];
-            int32_t *o = acc + 2 * i;
-            if (vol == 1 << 16)
-                for (int j = 0; j < k; j++) { o[2 * j] += l; o[2 * j + 1] += r; l = p[j][0]; r = p[j][1]; }
-            else
-                for (int j = 0; j < k; j++) {
-                    o[2 * j] += (l * vol) >> 16; o[2 * j + 1] += (r * vol) >> 16;
-                    l = p[j][0]; r = p[j][1];
-                }
-            d->cur[0] = (int16_t)l; d->cur[1] = (int16_t)r;
-            d->pos += k; i += k;
-        }
-        return;
+/* Up to n stereo samples into out (S16, interleaved) at the file's own rate:
+ * how many, short of n only at an underrun or the end. */
+static int adx_out(adx_dec_t *d, adx_fetch_fn fetch, void *src, int16_t *out, int n) {
+    int i = 0;
+    while (i < n && !d->done) {
+        if (d->pos >= d->end && !adx_next(d, fetch, src)) break;
+        int k = d->end - d->pos;
+        if (k > n - i) k = n - i;
+        memcpy(out + 2 * i, d->pcm[d->pos], (size_t)k * 4);
+        d->pos += k; i += k;
     }
-    for (int i = 0; i < n && !d->done; i++) {
-        while (d->frac >= (1u << 16)) {
-            if (d->pos >= d->end && !adx_next(d, fetch, src)) return;
-            if (d->pos >= d->end) continue;
-            d->prev[0] = d->cur[0]; d->prev[1] = d->cur[1];
-            d->cur[0] = d->pcm[d->pos][0]; d->cur[1] = d->pcm[d->pos][1];
-            d->pos++;
-            d->frac -= 1u << 16;
-        }
-        int32_t f = (int32_t)d->frac;
-        int32_t l = d->prev[0] + (((d->cur[0] - d->prev[0]) * f) >> 16);
-        int32_t r = d->prev[1] + (((d->cur[1] - d->prev[1]) * f) >> 16);
-        /* vol is at most 1 << 16, so a 16-bit sample times it fits 32 bits. */
-        if (vol == 1 << 16) { acc[2 * i] += l; acc[2 * i + 1] += r; }
-        else { acc[2 * i] += (l * vol) >> 16; acc[2 * i + 1] += (r * vol) >> 16; }
-        d->frac += d->step;
-    }
+    return i;
 }
 
 /* ---- The disc file ------------------------------------------------------------ */
 
 typedef struct { uint32_t code; uint8_t cat; uint16_t entry; } ds_cue_t;
+
+/* An effect as the AICA plays it: ADPCM in sound RAM, in samples. */
+typedef struct { sfxhnd_t h; uint32_t rate, len, ls, le; uint8_t loop; } ds_se_t;
 
 typedef struct {
     uint32_t  fad, nsec;               /* STF.AFS's first sector, its length */
@@ -182,12 +169,15 @@ typedef struct {
     uint32_t *off, *size;              /* the AFS's entries */
     ds_cue_t *cue;
     uint32_t  ncue;
-    uint8_t  **ram;                    /* an effect's ADX, in RAM; else NULL */
+    ds_se_t  *se;                      /* an effect in sound RAM; else .h 0 */
     adx_hdr_t *hdr;                    /* loaded ones' headers; music's when played */
 
-    SDL_AudioDeviceID dev;
-    adx_dec_t voice[DS_VOICES];
+    int       on;
+    snd_stream_hnd_t stream;
+    mutex_t   mx;                      /* the music, between the stream's thread and ours */
+    int       voice_chn[DS_VOICES];    /* the AICA channels the effects play on */
     uint16_t  voice_entry[DS_VOICES];
+    uint64_t  voice_end[DS_VOICES];    /* ms it stops by itself; ~0 looping */
     uint32_t  voice_age[DS_VOICES], age;
 
     /* Music: the reader walks the file as the decoder will (adx_next) and puts
@@ -253,32 +243,39 @@ static const uint8_t *ds_fetch_ring(void *src, const adx_dec_t *d) {
     return p;
 }
 
-static void ds_callback(void *user, Uint8 *stream, int len) {
-    (void)user;
-    static int32_t acc[2 * 4096];
-    int n = len / 4;
-    if (n > 4096) n = 4096;
-    memset(acc, 0, (size_t)n * 8);
+/* The stream's data: n bytes of S16 stereo. The music, its fade, else
+ * silence; an underrun is silence too, the stream goes on. */
+static void *ds_stream_cb(snd_stream_hnd_t hnd, int req, int *got) {
+    (void)hnd;
+    static int16_t out[DS_STREAM] __attribute__((aligned(32)));
+    int n = req / 4, k = 0;
+    if (n > (int)(DS_STREAM / 2)) n = DS_STREAM / 2;
+    mutex_lock(&g_ds.mx);
     if (g_ds.bgm != 0xFFFF && !g_ds.bgm_dec.done) {
-        int32_t v = g_ds.bgm_vol;
+        k = adx_out(&g_ds.bgm_dec, ds_fetch_ring, NULL, out, n);
         if (g_ds.bgm_fade) {
-            v -= g_ds.bgm_fade * n;
-            if (v <= 0) { v = 0; g_ds.bgm_dec.done = 1; }
+            int32_t v = g_ds.bgm_vol;
+            for (int i = 0; i < k; i++) {
+                out[2 * i] = (int16_t)((out[2 * i] * v) >> 16);
+                out[2 * i + 1] = (int16_t)((out[2 * i + 1] * v) >> 16);
+                if ((v -= g_ds.bgm_fade) <= 0) { v = 0; g_ds.bgm_dec.done = 1; k = i + 1; break; }
+            }
             g_ds.bgm_vol = v;
         }
-        adx_mix(&g_ds.bgm_dec, ds_fetch_ring, NULL, acc, n, v);
     }
-    for (int i = 0; i < DS_VOICES; i++) {
-        adx_dec_t *d = &g_ds.voice[i];
-        if (d->h && !d->done)
-            adx_mix(d, ds_fetch_ram, g_ds.ram[g_ds.voice_entry[i]], acc, n, 1 << 16);
+    mutex_unlock(&g_ds.mx);
+    if (k < n) memset(out + 2 * k, 0, (size_t)(n - k) * 4);
+    *got = n * 4;
+    return out;
+}
+
+static void *ds_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        snd_stream_poll(g_ds.stream);
+        thd_sleep(10);
     }
-    int16_t *out = (int16_t *)stream;
-    for (int i = 0; i < 2 * n; i++) {
-        int32_t s = acc[i];
-        out[i] = (int16_t)(s > 32767 ? 32767 : s < -32768 ? -32768 : s);
-    }
-    if (n * 4 < len) memset(stream + n * 4, 0, (size_t)(len - n * 4));
+    return NULL;
 }
 
 /* ---- Codes -------------------------------------------------------------------------- */
@@ -290,18 +287,26 @@ static void ds_stop_bgm(void) {
 
 static void ds_stop_se(int entry) {
     for (int i = 0; i < DS_VOICES; i++)
-        if (entry < 0 || g_ds.voice_entry[i] == entry) g_ds.voice[i].done = 1;
+        if (g_ds.voice_end[i] && (entry < 0 || g_ds.voice_entry[i] == entry)) {
+            snd_sfx_stop(g_ds.voice_chn[i]);
+            g_ds.voice_end[i] = 0;
+        }
 }
 
 static void ds_play_se(uint16_t e) {
-    if (e >= g_ds.n || !g_ds.ram[e]) return;
+    if (e >= g_ds.n || !g_ds.se[e].h) return;
+    const ds_se_t *se = &g_ds.se[e];
+    uint64_t now = timer_ms_gettime64();
     int v = 0;
     for (int i = 0; i < DS_VOICES; i++) {
-        if (!g_ds.voice[i].h || g_ds.voice[i].done) { v = i; break; }
+        if (g_ds.voice_end[i] <= now) { v = i; break; }
         if (g_ds.voice_age[i] < g_ds.voice_age[v]) v = i;
     }
-    adx_start(&g_ds.voice[v], &g_ds.hdr[e]);
+    sfx_play_data_t p = { .chn = g_ds.voice_chn[v], .idx = se->h, .vol = 255, .pan = 128,
+                          .loop = se->loop, .loopstart = se->ls, .loopend = se->le };
+    snd_sfx_play_ex(&p);
     g_ds.voice_entry[v] = e;
+    g_ds.voice_end[v] = se->loop ? ~(uint64_t)0 : now + (uint64_t)se->len * 1000u / se->rate + 1u;
     g_ds.voice_age[v] = ++g_ds.age;
 }
 
@@ -318,16 +323,16 @@ static void ds_play_bgm(uint16_t e) {
 
 /* sound_request_special's code (the trap, on the emulation's thread). */
 static void ds_code(uint32_t code) {
-    if (!g_ds.dev) return;
+    if (!g_ds.on) return;
     g_ds.codes++;
-    SDL_LockAudioDevice(g_ds.dev);
+    mutex_lock(&g_ds.mx);
     if (code == 0xA00001) { ds_stop_bgm(); ds_stop_se(-1); }
     else if (code == 0xA00002) ds_stop_bgm();
     else if (code == 0xA00003) ds_stop_se(-1);
     else if ((code & 0xFFFFFF00u) == 0xA00300) {
         uint32_t frames = code & 0xFF;
         if (!frames) ds_stop_bgm();
-        else if (g_ds.bgm != 0xFFFF) g_ds.bgm_fade = (int32_t)((1u << 16) / (frames * DS_RATE / 60) + 1);
+        else if (g_ds.bgm != 0xFFFF) g_ds.bgm_fade = (int32_t)((1u << 16) / (frames * g_ds.bgm_hdr.rate / 60) + 1);
     } else {
         uint32_t lo = 0, hi = g_ds.ncue;
         while (lo < hi) {
@@ -342,7 +347,7 @@ static void ds_code(uint32_t code) {
             else ds_play_se(c->entry);
         }
     }
-    SDL_UnlockAudioDevice(g_ds.dev);
+    mutex_unlock(&g_ds.mx);
 }
 
 /* ---- The music's reader (main loop) ------------------------------------------------- */
@@ -351,7 +356,7 @@ static void ds_code(uint32_t code) {
  * in between (the trap runs inside the slice, on this thread) only resets
  * the ring, so nothing here races it. */
 static void ds_pump(void) {
-    if (!g_ds.dev || g_ds.bgm == 0xFFFF) return;
+    if (!g_ds.on || g_ds.bgm == 0xFFFF) return;
     const adx_hdr_t *h = &g_ds.bgm_hdr;
     uint32_t e = g_ds.bgm, fs = 18 * h->ch, end = adx_frames_end(h);
     for (int rounds = 0; rounds < 4; rounds++) {
@@ -379,18 +384,65 @@ static void ds_pump(void) {
             g_ds.stage_n = 0;
             continue;
         }
-        SDL_LockAudioDevice(g_ds.dev);
+        mutex_lock(&g_ds.mx);
         if (g_ds.bgm == e) {
             for (uint32_t i = 0; i < k; i++)
                 g_ds.ring[(g_ds.r_head + i) % DS_RING] = g_ds.stage[o + i];
             g_ds.r_head += k;
             g_ds.rd_frame += k / fs;
         }
-        SDL_UnlockAudioDevice(g_ds.dev);
+        mutex_unlock(&g_ds.mx);
     }
 }
 
 /* ---- Boot ------------------------------------------------------------------------- */
+
+/* The AICA's ADPCM (Yamaha's 4-bit, low nibble first), the encoder the
+ * hardware's decoder undoes: ffmpeg's adpcm_yamaha. */
+static void ds_adpcm(const int16_t *pcm, uint32_t n, uint8_t *out) {
+    static const int16_t scale[8] = { 230, 230, 230, 230, 307, 409, 512, 614 };
+    int32_t pred = 0, step = 127;
+    for (uint32_t i = 0; i < n; i++) {
+        int32_t d = pcm[i] - pred, a = d < 0 ? -d : d;
+        int32_t q = a * 4 / step;
+        if (q > 7) q = 7;
+        int32_t v = (step * (2 * q + 1)) >> 3;
+        pred += d < 0 ? -v : v;
+        pred = pred > 32767 ? 32767 : pred < -32768 ? -32768 : pred;
+        step = (step * scale[q]) >> 8;
+        step = step < 127 ? 127 : step > 24576 ? 24576 : step;
+        uint8_t nib = (uint8_t)(q | (d < 0 ? 8 : 0));
+        if (i & 1) out[i >> 1] |= (uint8_t)(nib << 4); else out[i >> 1] = nib;
+    }
+}
+
+/* An effect's ADX (whole, in buf) into sound RAM as ADPCM: the samples up to
+ * its loop end, at half the rate if that is more than a channel holds. */
+static int ds_load_se(uint16_t e, const uint8_t *buf) {
+    const adx_hdr_t *h = &g_ds.hdr[e];
+    uint32_t n = h->le, rate = h->rate, ls = h->ls;
+    int16_t *pcm = malloc((size_t)n * 2 + 8);
+    uint8_t *ad = memalign(32, n / 2 + 8);
+    if (!pcm || !ad) { free(pcm); free(ad); return -1; }
+    adx_dec_t d;
+    adx_start(&d, h);
+    uint32_t k = 0;
+    while (k < n && d.frame < adx_frames_end(h) && adx_next(&d, ds_fetch_ram, (void *)buf))
+        for (; d.pos < d.end && k < n; d.pos++) pcm[k++] = d.pcm[d.pos][0];
+    n = k;
+    if (n > DS_AICA_MAX) {
+        for (uint32_t i = 0; i < n / 2; i++) pcm[i] = (int16_t)((pcm[2 * i] + pcm[2 * i + 1]) >> 1);
+        n /= 2; rate /= 2; ls /= 2;
+    }
+    n &= ~7u;                          /* whole 32-bit words of nibbles */
+    ds_adpcm(pcm, n, ad);
+    free(pcm);
+    sfxhnd_t sh = n ? snd_sfx_load_raw_buf((char *)ad, n / 2, rate, 4, 1) : SFXHND_INVALID;
+    free(ad);
+    if (sh == SFXHND_INVALID) return -1;
+    g_ds.se[e] = (ds_se_t){ sh, rate, n, ls < n ? ls : 0, n, (uint8_t)(h->loop != 0) };
+    return 0;
+}
 
 /* Before pg_init: reads the AFS's table and CUES.BIN, loads every effect into
  * RAM and every music header, and opens the audio device. Returns 0, or -1
@@ -406,7 +458,7 @@ static int ds_init(void) {
     if (g_ds.n < 2 || 8 + 8 * g_ds.n > 2048) return -1;
     g_ds.off  = calloc(g_ds.n, 4);
     g_ds.size = calloc(g_ds.n, 4);
-    g_ds.ram  = calloc(g_ds.n, sizeof *g_ds.ram);
+    g_ds.se   = calloc(g_ds.n, sizeof *g_ds.se);
     g_ds.hdr  = calloc(g_ds.n, sizeof *g_ds.hdr);
     for (uint32_t i = 0; i < g_ds.n; i++) {
         g_ds.off[i]  = ds_le32(sec + 8 + 8 * i);
@@ -421,6 +473,10 @@ static int ds_init(void) {
         g_ds.cue[i] = (ds_cue_t){ ds_be32(c), c[4], ds_be16(c + 6) };
     }
     free(cues);
+    mutex_init(&g_ds.mx, MUTEX_TYPE_NORMAL);
+    if (snd_stream_init() < 0) return -1;
+    for (int i = 0; i < DS_VOICES; i++)
+        if ((g_ds.voice_chn[i] = snd_sfx_chn_alloc()) < 0) return -1;
     uint32_t ram = 0;
     for (uint32_t i = 0; i < g_ds.ncue; i++) {
         uint16_t e = g_ds.cue[i].entry;
@@ -429,21 +485,19 @@ static int ds_init(void) {
         if (ds_read_entry(e, 0, sizeof h, h) || adx_parse(h, sizeof h, &g_ds.hdr[e])) continue;
         if (g_ds.cue[i].cat != DS_CAT_SE) continue;
         uint8_t *p = malloc(g_ds.size[e] + 64);   /* a last partial frame reads past */
-        if (!p || ds_read_entry(e, 0, g_ds.size[e], p)) { free(p); g_ds.hdr[e].rate = 0; continue; }
-        g_ds.ram[e] = p;
-        ram += g_ds.size[e];
+        if (!p || ds_read_entry(e, 0, g_ds.size[e], p) || ds_load_se(e, p)) g_ds.hdr[e].rate = 0;
+        else ram += g_ds.se[e].len / 2;
+        free(p);
     }
     g_ds.ring  = malloc(DS_RING);
     g_ds.stage = memalign(32, DS_STAGE_SEC * 2048);
     if (!g_ds.ring || !g_ds.stage) return -1;
 
-    if (SDL_Init(SDL_INIT_AUDIO) != 0) { printf("SDL audio: %s\n", SDL_GetError()); return -1; }
-    SDL_AudioSpec want = { .freq = DS_RATE, .format = AUDIO_S16LSB, .channels = 2,
-                           .samples = 2048, .callback = ds_callback }, have;
-    g_ds.dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-    if (!g_ds.dev) { printf("SDL audio: %s\n", SDL_GetError()); return -1; }
-    SDL_PauseAudioDevice(g_ds.dev, 0);
-    printf("sound: %u cues, %u ADX, effects %u KB in RAM\n", (unsigned)g_ds.ncue,
+    if ((g_ds.stream = snd_stream_alloc(ds_stream_cb, DS_STREAM)) < 0) return -1;
+    snd_stream_start(g_ds.stream, DS_RATE, 1);
+    g_ds.on = 1;
+    thd_create(1, ds_thread, NULL);
+    printf("sound: %u cues, %u ADX, effects %u KB in sound RAM\n", (unsigned)g_ds.ncue,
            (unsigned)g_ds.n - 1, (unsigned)(ram >> 10));
     return 0;
 }

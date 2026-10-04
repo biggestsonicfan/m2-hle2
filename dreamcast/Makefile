@@ -6,8 +6,8 @@
 # OUT (default ../build_dc) gets m2hle2.elf and 1ST_READ.BIN; mkdisc.sh makes a
 # disc of them and the PS3 ROM files. Only the board is compiled for the SH-4:
 # the board and the profiles are headers and main_dc.c is the one unit. No zip
-# is ever opened, so miniz stays out (M2HLE_NO_ZIP). Sound (dc_sound.h) needs
-# SDL2 for KallistiOS (GPF's dreamcastSDL2, in $(KOS_BASE)/addons; README.md).
+# is ever opened, so miniz stays out (M2HLE_NO_ZIP). Sound (dc_sound.h) is
+# KOS's own (snd_stream, snd_sfx).
 #
 # AOT=<rom_code1.bin> compiles the i960 code STF runs to C ahead of time
 # (Pinboard #394, src/core/i960_aot.h): tools/i960_aot.py reads the code at the
@@ -63,7 +63,7 @@ $(OUT)/main_dc.o: main_dc.c dc_math.h dc_pager.h dc_layout.h dc_sound.h dc_pvr.h
 	kos-cc $(CFLAGS) -c $< -o $@
 
 $(OUT)/m2hle2.elf: $(OBJS)
-	kos-cc -o $@ $(OBJS) -lSDL2 -lGL -lpthread -lm
+	kos-cc -o $@ $(OBJS) -lGL -lpthread -lm
 
 # A GD-ROM image boots its program unscrambled (a CD-R would need scramble).
 $(OUT)/1ST_READ.BIN: $(OUT)/m2hle2.elf
