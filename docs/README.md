@@ -28,6 +28,8 @@ page, [README.md](../README.md), is for players; everything here goes deeper.
 - [SLICE-CLOCKS.md](SLICE-CLOCKS.md) — how the sound board is charged against the i960's frame,
   and the alternatives not taken. Superseded by the vblank on the cycle clock (Pinboard #253);
   kept as the history.
+- [PERF-PROFILE.md](PERF-PROFILE.md) — where the emulator spends its time on x86 Linux, from
+  `perf` with inline attribution (Pinboard #399): the bench, a 60 fps stream and the board alone.
 - [MCP_GUIDE.md](MCP_GUIDE.md) — the automation bridge (`--mcp`): the protocol and every
   command, from registers and memory to netplay, the object viewer and overlay swaps.
 

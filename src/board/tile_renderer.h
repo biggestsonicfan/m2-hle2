@@ -169,39 +169,51 @@ static inline void s24_cell_load(s24_cell_t *cl, const uint16_t *w, const uint8_
     uint16_t entry = w[0x1000 * l + cell + (tx >> 3)];
     cl->bank16 = ((entry >> 7) & 0xFF) * 16;
     cl->pc     = (uint8_t)((entry >> 15) & 1);
+    /* the other category's cell draws nothing: its graphics are not read */
+    cl->dead   = !opaque && cl->pc != (uint8_t)cat;
+    if (cl->dead) return;
     /* 16-bit byteswap: bytes 1, 0, 3, 2; high nibble first */
     const uint8_t *g = gfx + (uint32_t)(entry & 0x3FFF) * 32u + (uint32_t)(ty & 7) * 4u;
     cl->nib[0] = g[1] >> 4; cl->nib[1] = g[1] & 15; cl->nib[2] = g[0] >> 4; cl->nib[3] = g[0] & 15;
     cl->nib[4] = g[3] >> 4; cl->nib[5] = g[3] & 15; cl->nib[6] = g[2] >> 4; cl->nib[7] = g[2] & 15;
-    cl->dead = !opaque && (cl->pc != (uint8_t)cat || !(g[0] | g[1] | g[2] | g[3]));
+    cl->dead = !opaque && !(g[0] | g[1] | g[2] | g[3]);
 }
 
-/* Line y of s24_draw_tilemap, over [xs, xe). */
+/* Line y of s24_draw_tilemap, over [xs, xe). The walk goes a run at a time:
+ * a run stays in one cell, one window-mask group (8 screen pixels) and one
+ * side of the split, so the cell, the mask bit and the tilemap are looked at
+ * once per run, not once per pixel. */
 static inline void s24_draw_line(const uint16_t *w, const uint8_t *gfx, int t, int cat, bool opaque, int mode,
                                  const s24_line_t *ln, int h, int ty, uint16_t *drow, int xs, int xe) {
     int        cell = (ty >> 3) * 64;        /* the tilemap row's first cell */
     s24_cell_t cl = { .cur = -1 };
-    for (int x = xs; x < xe; x++) {
+    for (int x = xs, run; x < xe; x += run) {
+        int tx = (x - h) & 511;
+        run = 8 - (tx & 7);                  /* to the cell's edge */
         int l = t;
-        if (mode) l = (x < ln->split_x) ? ln->split_l : (ln->split_l ^ 1);
-        else if (ln->mask[x >> 7] & (0x8000 >> ((x & 127) >> 3))) continue;
-        int tx  = (x - h) & 511;
+        if (mode) {
+            if (x < ln->split_x) {
+                l = ln->split_l;
+                if (x + run > ln->split_x) run = ln->split_x - x;
+            } else l = ln->split_l ^ 1;
+        } else {
+            int g = 8 - (x & 7);             /* to the mask group's edge */
+            if (g < run) run = g;
+        }
+        if (x + run > xe) run = xe - x;
+        if (!mode && (ln->mask[x >> 7] & (0x8000 >> ((x & 127) >> 3)))) continue;
         int key = (l << 6) | (tx >> 3);
         if (key != cl.cur) {
             cl.cur = key;
             s24_cell_load(&cl, w, gfx, l, cell, tx, ty, cat, opaque);
         }
-        if (cl.dead) {
-            /* a non-opaque draw writes a pixel only where ci != 0 and the
-             * category matches: none in this cell, so on to the next one --
-             * or to the split, where the other tilemap's cell begins */
-            int run = 8 - (tx & 7);
-            if (mode && x < ln->split_x && x + run > ln->split_x) run = ln->split_x - x;
-            x += run - 1;
-            continue;
-        }
-        uint8_t ci = cl.nib[tx & 7];
-        if (opaque || ci != 0) drow[x] = (uint16_t)(cl.bank16 + ci);
+        /* a non-opaque draw writes a pixel only where ci != 0 and the category
+         * matches: none in a dead cell */
+        if (cl.dead) continue;
+        const uint8_t *nib = cl.nib + (tx & 7);
+        uint16_t      *d   = drow + x;
+        if (opaque) for (int i = 0; i < run; i++) d[i] = (uint16_t)(cl.bank16 + nib[i]);
+        else        for (int i = 0; i < run; i++) if (nib[i]) d[i] = (uint16_t)(cl.bank16 + nib[i]);
     }
 }
 
@@ -335,7 +347,7 @@ static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const u
  *     (tile_dirty_find; the snapshot it is compared with is what the pens were
  *     drawn from, so a write landing mid-compose is caught next time);
  *   - a palette or colour-table change rebuilds the 4096 pen colours and
- *     recolours only the pixels whose pen's colour changed.
+ *     colours every pixel again from its pen.
  * The result is the eight full-screen passes and colour conversion of before,
  * byte for byte (tests/tile_test.c holds both, frame after random frame).
  */
@@ -393,33 +405,19 @@ static inline void tile_cpu_lines(const tile_dirty_t *d, int16_t *x0, int16_t *x
     }
 }
 
-/* The pen colours, and which of them changed; returns how many did. */
-static inline int tile_cpu_pens(tile_cpu_t *c, const memory_bus_t *bus, const uint8_t chan[3][32],
-                                uint8_t *changed) {
+/* The pen colours; returns how many changed. */
+static inline int tile_cpu_pens(tile_cpu_t *c, const memory_bus_t *bus, const uint8_t chan[3][32]) {
     int nchanged = 0;
-    memset(changed, 0, TILE_PEN_NONE + 1);
     for (int p = 0; p <= TILE_PEN_NONE; p++) {
         uint16_t col = p < TILE_PEN_NONE ? pal_read16(bus, p) : 0;
         uint8_t rgba[4] = { chan[0][col & 31], chan[1][(col >> 5) & 31], chan[2][(col >> 10) & 31],
                             p < TILE_PEN_NONE ? 255 : 0 };
         if (!c->valid || memcmp(c->pencol[p], rgba, 4)) {
             memcpy(c->pencol[p], rgba, 4);
-            changed[p] = 1;
             nchanged++;
         }
     }
     return nchanged;
-}
-
-/* Recolour the pixels whose pen's colour changed. */
-static inline void tile_cpu_recolour(const tile_cpu_t *c, const uint8_t *changed,
-                                     uint8_t *bg_rgba, uint8_t *fg_rgba) {
-    int n = VIDEO_WIDTH * VIDEO_HEIGHT;
-    for (int i = 0; i < n; i++) {
-        uint16_t b = c->bg[i], f = c->fg[i];
-        if (changed[b]) memcpy(bg_rgba + i * 4, c->pencol[b], 4);
-        if (changed[f]) memcpy(fg_rgba + i * 4, c->pencol[f], 4);
-    }
 }
 
 /* Colour line y's pixels [x0[y], x1[y]) from their pens. */
@@ -441,7 +439,6 @@ static inline bool tile_compose_cpu(tile_cpu_t *c, const memory_bus_t *bus, cons
                                     uint8_t *bg_rgba, uint8_t *fg_rgba) {
     static tile_dirty_t d;
     static int16_t x0[VIDEO_HEIGHT], x1[VIDEO_HEIGHT];
-    static uint8_t changed[TILE_PEN_NONE + 1];
     tile_cpu_snapshot(c, bus, &d, full, tile_changed);
 
     bool drawn = d.full || d.count;
@@ -449,20 +446,22 @@ static inline bool tile_compose_cpu(tile_cpu_t *c, const memory_bus_t *bus, cons
     if (drawn) tile_cpu_draw(c, bus->tmapgfx, x0, x1);
 
     int nchanged = 0;
-    if (pens_changed || !c->valid) nchanged = tile_cpu_pens(c, bus, chan, changed);
+    if (pens_changed || !c->valid) nchanged = tile_cpu_pens(c, bus, chan);
     c->valid = true;
 
+    /* Every output pixel already holds its pen's colour, so recolouring the
+     * pixels whose pen changed is colouring them all again: a store per pixel
+     * beats a test of the pen per pixel that the branch predictor misses. */
     int n = VIDEO_WIDTH * VIDEO_HEIGHT;
-    if (d.full) {
+    if (d.full || nchanged) {
         for (int i = 0; i < n; i++) {
             memcpy(bg_rgba + i * 4, c->pencol[c->bg[i]], 4);
             memcpy(fg_rgba + i * 4, c->pencol[c->fg[i]], 4);
         }
         return true;
     }
-    if (nchanged) tile_cpu_recolour(c, changed, bg_rgba, fg_rgba);
     if (drawn) tile_cpu_colour_lines(c, x0, x1, bg_rgba, fg_rgba);
-    return drawn || nchanged;
+    return drawn;
 }
 
 /* ---- Pen colour --------------------------------------------------------- */

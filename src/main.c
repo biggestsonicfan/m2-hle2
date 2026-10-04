@@ -1738,7 +1738,9 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             netplay_set_local_ip(argv[++i]);
         } else if (strcmp(argv[i], "--net-relay") == 0 && i + 1 < argc) {
             /* on | off | auto | a ws(s):// /gw/dgram URL: datagrams through the
-             * web gateway, for a player nobody outside can reach (Pinboard #366). */
+             * web gateway, for a player nobody outside can reach (Pinboard #366).
+             * auto:<URL> names the gateway a direct player joins a relayed
+             * owner through (#382). */
             netplay_set_relay(argv[++i]);
         } else if (strcmp(argv[i], "--net-host") == 0) {
             g_net_auto = 1;

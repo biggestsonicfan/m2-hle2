@@ -306,6 +306,10 @@ static uint32_t    *g_geodl_snap          = g_geodl_snaps[0];
 static uint32_t     g_geodl_snap_rstart   = 0;
 static volatile int g_geodl_snap_ready    = 0;
 static volatile int g_geodl_snap_seq      = 0;
+/* The profile reads its list in the homebrew format (quirks.geo_displaylist),
+ * which the GEO walk does not follow: publish all of bufferram. Set by the
+ * run loop each slice (emu_slice_body). */
+static bool         g_geodl_full_snap     = false;
 
 /* What a display list leaves behind in the geometrizer for later frames
  * (model2_v.cpp): texture RAM (command 4, addresses with bit 23), the two
@@ -323,37 +327,77 @@ static volatile int g_geodl_snap_seq      = 0;
  * mouths) into texture RAM from 0x805000 on, a different set every frame, so
  * a renderer still drawing list N from the live copy took list N+1's points.
  * *Symptom that surfaced this in STF:* in Tails' stage-clear close-up, some
- * frames drew a strip of stray texels under his closed eyes. Each part is
- * copied only when some list has written it since that buffer last had it. */
+ * frames drew a strip of stray texels under his closed eyes.
+ *
+ * Each buffer is brought up to date a 256-byte block at a time: a write marks
+ * its block in both buffers' masks, and a publish copies the blocks its
+ * buffer's mask names and clears it. STF rewrites the eyes' texture points and
+ * the material slots every frame, so copying a whole part when anything in it
+ * changed was ~290 KB a frame for a few hundred bytes of change. */
 typedef struct {
     uint16_t texram[0x10000];
     uint32_t polyram[2][0x8000];                   /* [0] slow, [1] fast */
     float    texparam[32][4];                      /* diffuse, ambient, specular scale, specular control */
     float    coef[32];                             /* distance coefficient, indexed by attribute >> 27 */
     uint8_t  logram[0x8000];
-    uint32_t gen[3];                               /* texram, polyram, the rest: bumped per write */
 } geo_raster_state_t;
 
 static geo_raster_state_t        g_geo_live;       /* emu thread: the lists applied so far */
 static geo_raster_state_t        g_geo_pub[2];     /* published beside g_geodl_snaps[0] / [1] */
 static const geo_raster_state_t *g_geo_rs = &g_geo_pub[0];   /* the renderer's: set with its list */
 
+/* Blocks of g_geo_live each g_geo_pub buffer does not have yet. */
+#define GEO_RS_BLOCK      256u
+#define GEO_RS_TEX_BLKS   (sizeof g_geo_live.texram  / GEO_RS_BLOCK)
+#define GEO_RS_POLY_BLKS  (sizeof g_geo_live.polyram / GEO_RS_BLOCK)
+#define GEO_RS_LOG_BLKS   (sizeof g_geo_live.logram  / GEO_RS_BLOCK)
+static struct {
+    uint64_t tex[GEO_RS_TEX_BLKS / 64];
+    uint64_t poly[GEO_RS_POLY_BLKS / 64];
+    uint64_t log[(GEO_RS_LOG_BLKS + 63) / 64];
+    bool     slots;                                /* texparam and coef */
+} g_geo_dirty[2];
+
+static inline void geo_dirty_mark(size_t field, size_t byte_off) {
+    size_t b = byte_off / GEO_RS_BLOCK;
+    uint64_t bit = 1ull << (b & 63);
+    for (int i = 0; i < 2; i++) {
+        uint64_t *m = field == 0 ? g_geo_dirty[i].tex : field == 1 ? g_geo_dirty[i].poly : g_geo_dirty[i].log;
+        m[b >> 6] |= bit;
+    }
+}
+
 /* The copy published with a list snapshot (a g_geodl_snaps entry). */
 static inline const geo_raster_state_t *geodl_raster_for(const uint32_t *snap) {
     return &g_geo_pub[snap == g_geodl_snaps[0] ? 0 : 1];
 }
 
-static inline void geo_raster_publish(geo_raster_state_t *dst) {
-    if (dst->gen[0] != g_geo_live.gen[0])
-        memcpy(dst->texram, g_geo_live.texram, sizeof dst->texram);
-    if (dst->gen[1] != g_geo_live.gen[1])
-        memcpy(dst->polyram, g_geo_live.polyram, sizeof dst->polyram);
-    if (dst->gen[2] != g_geo_live.gen[2]) {
+static inline void geo_dirty_copy(uint8_t *dst, const uint8_t *src, uint64_t *mask, size_t words) {
+    for (size_t w = 0; w < words; w++) {
+        uint64_t m = mask[w];
+        if (!m) continue;
+        mask[w] = 0;
+        for (unsigned lo = 0; lo < 64; ) {         /* runs of marked blocks, one memcpy each */
+            if (!((m >> lo) & 1u)) { lo++; continue; }
+            unsigned hi = lo + 1;
+            while (hi < 64 && ((m >> hi) & 1u)) hi++;
+            size_t off = (w * 64u + lo) * GEO_RS_BLOCK;
+            memcpy(dst + off, src + off, (hi - lo) * GEO_RS_BLOCK);
+            lo = hi;
+        }
+    }
+}
+
+static inline void geo_raster_publish(int i) {
+    geo_raster_state_t *dst = &g_geo_pub[i];
+    geo_dirty_copy((uint8_t *)dst->texram,  (const uint8_t *)g_geo_live.texram,  g_geo_dirty[i].tex,  GEO_RS_TEX_BLKS / 64);
+    geo_dirty_copy((uint8_t *)dst->polyram, (const uint8_t *)g_geo_live.polyram, g_geo_dirty[i].poly, GEO_RS_POLY_BLKS / 64);
+    geo_dirty_copy(dst->logram, g_geo_live.logram, g_geo_dirty[i].log, (GEO_RS_LOG_BLKS + 63) / 64);
+    if (g_geo_dirty[i].slots) {
         memcpy(dst->texparam, g_geo_live.texparam, sizeof dst->texparam);
         memcpy(dst->coef, g_geo_live.coef, sizeof dst->coef);
-        memcpy(dst->logram, g_geo_live.logram, sizeof dst->logram);
+        g_geo_dirty[i].slots = false;
     }
-    memcpy(dst->gen, g_geo_live.gen, sizeof dst->gen);
 }
 
 /* Words after a direct-data command (GEO 0x02/0x12, MAME geo_direct_data):
@@ -369,11 +413,26 @@ static inline uint32_t geodl_direct_len(const uint32_t *L, uint32_t nw, uint32_t
     return q - p - 1u;
 }
 
-static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart) {
+/* Walk the list in L from rstart, applying what it leaves behind, and copy
+ * every word the walk visits into snap (when not NULL) at the same offset.
+ * The renderer's walk (geo3d_scan_geo_list) takes the same steps and reads
+ * nothing else, so the rest of the snapshot may hold an older frame's words. */
+static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart,
+                                     uint32_t *snap) {
     uint32_t p = (rstart & 0x1FFFFu) >> 2;
+    uint32_t run_lo = 0, run_hi = 0;               /* words to copy, not yet copied */
+    #define GEODL_VISIT(lo, hi) do {                                              \
+        uint32_t lo_ = (lo), hi_ = (hi) < nw ? (hi) : nw;                         \
+        if (lo_ == run_hi && run_hi > run_lo) run_hi = hi_ > run_hi ? hi_ : run_hi; \
+        else {                                                                    \
+            if (snap && run_hi > run_lo)                                          \
+                memcpy(snap + run_lo, L + run_lo, (run_hi - run_lo) * 4u);        \
+            run_lo = lo_; run_hi = hi_;                                           \
+        }                                                                         \
+    } while (0)
     for (uint32_t guard = 0; guard < 0x8000u && p < nw; guard++) {
         uint32_t op = L[p];
-        if (op & 0x80000000u) { p = (op & 0x1FFFFu) >> 2; continue; }
+        if (op & 0x80000000u) { GEODL_VISIT(p, p + 1u); p = (op & 0x1FFFFu) >> 2; continue; }
         uint32_t cmd = (op >> 23) & 0x1F;
         #define LA(k) (p + 1u + (k) < nw ? L[p + 1u + (k)] : 0u)
         uint32_t len = 0;
@@ -383,36 +442,51 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             case 0x04: {
                 uint32_t addr = LA(0), cnt = LA(1);
                 len = 2 + cnt;
-                if (cnt) g_geo_live.gen[(addr & 0x800000u) ? 0 : 2]++;
                 for (uint32_t k = 0; k < cnt; k++) {
-                    if (addr & 0x800000u) g_geo_live.texram[(addr + k) & 0xFFFFu] = (uint16_t)LA(2 + k);
-                    else                  g_geo_live.logram[(addr + k) & 0x7FFFu] = (uint8_t)LA(2 + k);
+                    if (addr & 0x800000u) {
+                        uint32_t i = (addr + k) & 0xFFFFu;
+                        g_geo_live.texram[i] = (uint16_t)LA(2 + k);
+                        geo_dirty_mark(0, i * 2u);
+                    } else {
+                        uint32_t i = (addr + k) & 0x7FFFu;
+                        g_geo_live.logram[i] = (uint8_t)LA(2 + k);
+                        geo_dirty_mark(2, i);
+                    }
                 }
                 break;
             }
             case 0x14: {                    /* log data: a byte at a time, through command 4's write */
                 uint32_t addr = LA(0), cnt = LA(1);
                 len = 2 + cnt;
-                if (cnt) g_geo_live.gen[(addr & 0x800000u) ? 0 : 2]++;
                 for (uint32_t k = 0; k < 4u * cnt; k++) {
                     uint8_t b = (uint8_t)(LA(2 + k / 4u) >> (8u * (k % 4u)));
-                    if (addr & 0x800000u) g_geo_live.texram[(addr + k) & 0xFFFFu] = b;
-                    else                  g_geo_live.logram[(addr + k) & 0x7FFFu] = b;
+                    if (addr & 0x800000u) {
+                        uint32_t i = (addr + k) & 0xFFFFu;
+                        g_geo_live.texram[i] = b;
+                        geo_dirty_mark(0, i * 2u);
+                    } else {
+                        uint32_t i = (addr + k) & 0x7FFFu;
+                        g_geo_live.logram[i] = b;
+                        geo_dirty_mark(2, i);
+                    }
                 }
                 break;
             }
             case 0x05: case 0x15: {
                 uint32_t addr = LA(0), cnt = LA(1);
                 len = 2 + cnt;
-                uint32_t *ram = g_geo_live.polyram[(addr & 0x01000000u) ? 1 : 0];
-                if (cnt) g_geo_live.gen[1]++;
-                for (uint32_t k = 0; k < cnt; k++) ram[(addr + k) & 0x7FFFu] = LA(2 + k);
+                uint32_t bank = (addr & 0x01000000u) ? 1u : 0u;
+                for (uint32_t k = 0; k < cnt; k++) {
+                    uint32_t i = (addr + k) & 0x7FFFu;
+                    g_geo_live.polyram[bank][i] = LA(2 + k);
+                    geo_dirty_mark(1, (bank * 0x8000u + i) * 4u);
+                }
                 break;
             }
             case 0x06: {
                 uint32_t index = LA(0) >> 2, cnt = LA(1);
                 len = 2 + 2 * cnt;
-                if (cnt) g_geo_live.gen[2]++;
+                if (cnt) g_geo_dirty[0].slots = g_geo_dirty[1].slots = true;
                 for (uint32_t k = 0; k < cnt; k++, index++) {
                     uint32_t param = LA(2 + 2 * k), coef = LA(3 + 2 * k);
                     g_geo_live.texparam[index & 0x1F][0] = (float)(param & 0xFF);
@@ -429,12 +503,15 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             case 0x0B: case 0x1B: len = 12; break;
             case 0x1D: len = 2 + 3 * LA(1); break;
             case 0x02: case 0x12: len = geodl_direct_len(L, nw, p); break;
-            case 0x0F: case 0x1F: return;     /* END */
+            case 0x0F: case 0x1F: len = 0; guard = 0x8000u; break;   /* END */
             default: break;
         }
         #undef LA
+        GEODL_VISIT(p, p + 1u + len);
         p += 1u + len;
     }
+    GEODL_VISIT(0, 0);                             /* flush the last run */
+    #undef GEODL_VISIT
 }
 
 static inline void geo_push(uint32_t word) {
@@ -448,9 +525,15 @@ static inline void geo_push(uint32_t word) {
 static inline void geodl_publish(uint32_t rstart) {
     if (!g_geo.buff) return;
     uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[1] : g_geodl_snaps[0];
-    memcpy(back, g_geo.buff, sizeof g_geodl_snaps[0]);
-    geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart);
-    geo_raster_publish(&g_geo_pub[back == g_geodl_snaps[0] ? 0 : 1]);
+    const uint32_t *live = (const uint32_t *)(const void *)g_geo.buff;
+    if (g_geodl_full_snap) {
+        /* geo3d_scan_displaylist walks its own format: give it all of bufferram */
+        memcpy(back, live, sizeof g_geodl_snaps[0]);
+        geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart, NULL);
+    } else {
+        geodl_apply_state(live, BUFF_RAM_SIZE / 4, rstart, back);
+    }
+    geo_raster_publish(back == g_geodl_snaps[0] ? 0 : 1);
     g_geodl_snap_rstart = rstart;
     g_geodl_snap        = back;
     g_geodl_snap_seq++;

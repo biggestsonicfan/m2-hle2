@@ -1403,6 +1403,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `tests/i960_fuzz.c` | the i960 and its bus running random code: memory instructions of every width and addressing mode aimed at page, region and MMIO edges, real ROM words and random ones, after 300 real frames. One file to `cmp` between two builds or compilers; `det_digest` holds the game's own code, this the forms it never takes. `i960_fuzz <merged zip> <out> [scenarios] [steps]` |
 | `tests/tile_test.c` | the tile compositor against the pixel-by-pixel original it replaced, kept verbatim as the reference: 48 random boards, every pair control mode, and the pen table against `tile_pen_lut`. A ctest; `tile_test --bench` times both compositors on one frame |
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
+| `perf_inline.py` | a `perf record` of m2hle charged to the innermost INLINED function at each sample (addr2line -i), where `perf report` puts a third of the run on `emu_slice_body`; `--callers SYM` says which inlined code calls a libc memcpy. How to build for it and what it found: [PERF-PROFILE.md](../docs/PERF-PROFILE.md) |
 
 The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
 `boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`,
