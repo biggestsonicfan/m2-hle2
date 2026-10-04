@@ -33,7 +33,7 @@ AOT_COVER ?= 0.98
 # The block runner's pool: the AOT build hardly uses it, and the heap wants it.
 IB_POOL ?= $(if $(AOT),2048u,16384u)
 
-CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address \
+CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address -include dc_math.h \
           -DM2HLE_VERSION='"dc"' -DM2HLE_DEV_TOOLS=0 \
           -DGEO_CAPTURE_SIZE=4096 -DLOG_MAX_LINES=64 -DNDEBUG -DM2HLE_NO_ZIP \
           -DGEO3D_MAX_LINES=16 -DGEO3D_MAX_TRIS=4096 -DGEO3D_MESH_CACHE_SLOTS=256u \
@@ -58,7 +58,7 @@ $(OUT)/aot_gen.h: sfight.aotmap $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/boa
 	mkdir -p $(OUT)
 	python3 $(REPO)/tools/i960_aot.py --map sfight.aotmap --rom "$(AOT)" --hook 0x3F268 --cover $(AOT_COVER) --out $@
 
-$(OUT)/main_dc.o: main_dc.c dc_pager.h dc_layout.h dc_sound.h dc_pvr.h dc_jit_test.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN)
+$(OUT)/main_dc.o: main_dc.c dc_math.h dc_pager.h dc_layout.h dc_sound.h dc_pvr.h dc_jit_test.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN)
 	mkdir -p $(OUT)
 	kos-cc $(CFLAGS) -c $< -o $@
 

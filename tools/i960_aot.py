@@ -377,7 +377,8 @@ def main():
                 if dc is not None:
                     ndirect += 1
                     ea, test, code = dc
-                    b_(f'    {{ uint32_t ea_ = {ea}; if (M2_LIKELY({test})) {{ {code} }} else AOT_SLOW({k}); }}')
+                    slow = 'AOT_IO' if kind in ('ld', 'st') else 'AOT_SLOW'
+                    b_(f'    {{ uint32_t ea_ = {ea}; if (M2_LIKELY({test})) {{ {code} }} else {slow}({k}); }}')
                 elif kind in ('ld', 'st', 'ldn', 'stn'):
                     b_(f'    AOT_SLOW({k});')
                 elif kind == 'slow':

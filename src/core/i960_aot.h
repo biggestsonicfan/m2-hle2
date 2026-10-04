@@ -81,6 +81,42 @@ static __attribute__((noinline)) int aot_slow(i960_cpu_t *cpu, memory_bus_t *bus
     }
     return 0;
 }
+/* A load or store of one item off plain memory (an MMIO register, the COP's
+ * FIFO): aot_slow without the interpreter's decode. The words say which and
+ * to which register; the address is the compiled code's. What the bus sees
+ * is what i960_exec_word's MEM case does, in its order. */
+static __attribute__((noinline)) int aot_io(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
+                                            const aot_op_t *d, uint32_t ea) {
+    uint32_t k2 = d->kn >> 10, k1 = k2 + i960_cycle_cost(d->w1), w1 = d->w1, ip = d->ip;
+    uint32_t *r = (uint32_t *)&cpu->globals + ((((w1 >> 19) & 0x1Fu) + 16u) & 31u);
+    unsigned mode = (w1 >> 10) & 0xFu;
+    cpu->sfr.ip = ip; bus->cpu_ip = ip;
+    cpu->cycles = s->base + (uint32_t)(s->c0 - s->rc) - k1;
+    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
+    s_timer_cycles_seen = cpu->cycles;
+    cpu->cycles += k1 - k2;
+    switch (w1 >> 24) {
+    case 0x80: *r = mem_read8(bus, ea); break;
+    case 0x88: *r = mem_read16(bus, ea); break;
+    case 0x90: *r = mem_read32(bus, ea); break;
+    case 0xC0: *r = (uint32_t)(int32_t)(int8_t)mem_read8(bus, ea); break;
+    case 0xC8: *r = (uint32_t)(int32_t)(int16_t)mem_read16(bus, ea); break;
+    case 0x82: g_last_store_ip = ip; mem_write8(bus, ea, (uint8_t)*r); break;
+    case 0x8A: g_last_store_ip = ip; mem_write16(bus, ea, (uint16_t)*r); break;
+    case 0x92: g_last_store_ip = ip; mem_write32(bus, ea, *r); break;
+    case 0xC2: mem_write8(bus, ea, (uint8_t)*r); break;
+    default:   mem_write16(bus, ea, (uint16_t)*r); break;   /* 0xCA */
+    }
+    /* mem_ea's length: the MEMB modes with a displacement are two words */
+    cpu->sfr.ip = ip + ((mode == 5u || mode >= 0xCu) ? 8u : 4u);
+    if (M2_UNLIKELY(g_emu_attn != s->attn || (g_irqt.intreq & g_irqt.intena & 0x03FFu)
+                    || g_irqt.horizon != s->h0)) {
+        s->rn += d->kn & 1023u; s->rc += (int32_t)k2; s->ip = cpu->sfr.ip;
+        return 1;
+    }
+    return 0;
+}
+#define AOT_IO(I)   do { if (aot_io(cpu, bus, s, &K[I], ea_)) return AOT_STOP; } while (0)
 #define AOT_X(I)    do { if (M2_UNLIKELY(aot_x(cpu, bus, s, &K[I]))) return AOT_STOP; } while (0)
 #define AOT_SLOW(I) do { if (aot_slow(cpu, bus, s, &K[I])) return AOT_STOP; } while (0)
 
