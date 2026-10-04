@@ -186,17 +186,34 @@ numbers are used:
 - **Sound**: `sound_request_special` (`0x3F268`), as in the PC DLL, plus
   `sound_queue_output` and the sound init. The disc's music is ADX
   (`bgm00`–`bgm18.adx`), so no sound board is emulated.
-- **About 70 whole functions in C, translated from the i960** (traps
-  0x65–0x93 and others): `calc_unit_mat`, `get_frame_dat`,
+- **94 whole functions in C, translated from the i960.** 47 are trap
+  entries (0x65–0x93): `calc_unit_mat`, `get_frame_dat`,
   `calc_rob_angle_cont`, `set_coli_ball_data`, `rob_ball_data_make`,
   `coli_cont_cop`, `osage_dsp`, `area_check`, `ground_disp`, `cage_disp`,
   `mirror_rob_disp`, `rob_kage_disp_test`, `dented_cnt`, `doom_cnt`,
-  `pendulum_3axis_cnt`, `select_enemy_command`, `rand`, and the text and
-  number drawers. The C is mechanical: the i960 register file stays in
-  memory, condition codes are worked out as values, and every load and store
-  goes through the bus with a byte swap. That is a static recompiler's
-  output, applied only to the code that costs the most: the skeleton,
-  motion, collision and drawing.
+  `pendulum_3axis_cnt`, `select_enemy_command`, `rand`, the text and number
+  drawers, two blocks inside `rob_disp` and one inside `ring_tobitiri`. The
+  other 47 are what those call, translated too, so a whole call tree stays
+  in C: `calc_unit_1`; `get_fcurve_value_f`, `get_start_value`,
+  `get_end_value`, `set_mirror`, `rear_smooth_int`; the collision chain
+  (`calc_attack_flag`, `area_coli`, `decide_coli_kind`, `unit_to_ball`,
+  `decide_dir`, `coli_recalc_pos`); every `rob_disp` effect
+  (`spin_attack_cnt_*_dsp`, `efc_*`, `tails_tail_disp`, `kosi_nobi_put`);
+  the sway chains (`os_set_matrix`, `os_set_tsukene`, `os_set_coli`,
+  `os_set_osage`, `osage_copro`, `os_set_osage_after`, `calc_kaze`); the
+  ground and cage draws; and `set_obj` itself. The names were matched by
+  call order and callee counts against the i960 program in IDA.
+
+  The C is mechanical, a static recompiler's output. The i960 register file
+  stays in memory and every function works on it. Main RAM is read and
+  written directly (byte-swapped); anything else goes through the bus's page
+  table, so `rand` still reads the timers at `0xF00000`. COP words go
+  through the same FIFO calls the interpreter uses. Each function takes a
+  flag: a trap entry passes 1 and the function ends by popping the i960
+  frame, as `ret` would; a call from another translated function passes 0
+  and just returns. It covers only the code that costs the most: the
+  skeleton, motion, collision and drawing. The decompilation itself (and
+  the COP's, below) is kept off the repo.
 
 ### The COP
 
