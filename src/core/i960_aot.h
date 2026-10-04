@@ -185,6 +185,33 @@ static __attribute__((noinline)) int aot_io_st(i960_cpu_t *cpu, memory_bus_t *bu
     }
     return aot_io_x(cpu, bus, s, d, ea, 0);
 }
+/* stl / stt / stq off plain memory to the COP's FIFO or the GEO's function
+ * ports: ~1000 a fight frame. Neither bursts, so every word goes to the one
+ * address, and neither callback reads the cycles or the timers, so the cycles
+ * are left to the next sync as aot_io_st leaves them. */
+static __attribute__((noinline)) int aot_io_stn(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
+                                                const aot_op_t *d, uint32_t ea) {
+    if (!wp_armed() && !dl_active()) {
+        mem_region_t *g = mem_find_region(bus, ea);
+        if (g && (g->write_cb == coprogram_write_cb
+                  || (g->write_cb == geo_write_cb && ea - GEO_BASE < 0x1000u))) {
+            uint32_t ip = d->ip, w1 = d->w1, r0 = (w1 >> 19) & 0x1Fu;
+            uint32_t n = (w1 >> 24) == 0x9Au ? 2u : (w1 >> 24) == 0xA2u ? 3u : 4u;
+            cpu->sfr.ip = ip; bus->cpu_ip = ip;
+            g_last_store_ip = ip;
+            for (uint32_t k = 0; k < n; k++) {
+                MEM_TALLY(bus->writes, 1);
+                g_mem_last_write_ip = ip;
+                g->write_cb(g, ea, ((uint32_t *)&cpu->globals)[(r0 + k + 16u) & 31u], 4);
+            }
+            if (M2_UNLIKELY(g_emu_attn != s->attn)) return aot_io_x(cpu, bus, s, d, ea, 1);
+            unsigned mode = (w1 >> 10) & 0xFu;
+            cpu->sfr.ip = ip + ((mode == 5u || mode >= 0xCu) ? 8u : 4u);
+            return 0;
+        }
+    }
+    return aot_slow(cpu, bus, s, d);
+}
 /* K[I] is a constant: the test folds, and only a `st` site calls aot_io_st. */
 #define AOT_IO(I)   do { if ((K[I].w1 >> 24) == 0x92u                                                   \
                              ? aot_io_st(cpu, bus, s, &K[I], ea_, AR((((K[I].w1 >> 19) & 0x1Fu) + 16u) & 31u)) \
@@ -193,9 +220,13 @@ static __attribute__((noinline)) int aot_io_st(i960_cpu_t *cpu, memory_bus_t *bu
 #define AOT_CALL(I) do { if (M2_UNLIKELY(aot_call(cpu, bus, s, &K[I]))) return AOT_STOP; } while (0)
 #define AOT_RET(I)  do { if (M2_UNLIKELY(aot_ret(cpu, bus, s, &K[I]))) return AOT_STOP; } while (0)
 #define AOT_SLOW(I) do { if (aot_slow(cpu, bus, s, &K[I])) return AOT_STOP; } while (0)
+#define AOT_IOSTN(I) do { if (aot_io_stn(cpu, bus, s, &K[I], ea_)) return AOT_STOP; } while (0)
 
 /* Register i as reg_read indexes it (globals first), and the condition code. */
-#define AR(i)    (((uint32_t *)&cpu->globals)[i])
+/* r0-r15 sit past the 60 bytes an SH-4 load reaches from one base: a base of
+ * their own (gq_, rq_: each chunk's), opaque so the compiler keeps it. */
+#define AR(i)    (*((i) < 16 ? &gq_[(i)] : &rq_[(i) - 16]))
+#define AOT_REGS uint32_t *gq_ = (uint32_t *)&cpu->globals, *rq_ = gq_ + 16; __asm__("" : "+r"(rq_))
 #define AGETCC   (cpu->sfr.ac & AC_CC_MASK)
 #define ACC(v)   (cpu->sfr.ac = (cpu->sfr.ac & ~AC_CC_MASK) | ((v) & AC_CC_MASK))
 /* bbc / bbs: CC_E when taken, CC_NO when not. */
@@ -206,6 +237,11 @@ static inline bool aot_cmpb(i960_cpu_t *cpu, uint32_t cc, uint32_t mask) {
     ACC(cc); return mask ? (cc & mask) != 0 : cc == 0;
 }
 #define AOT_CMPB(cc, mask) aot_cmpb(cpu, (cc), (mask))
+/* i960_cmp_cc_o / _i without branches: L 4, E 2, G 1. */
+#define AOT_CC_O(a, b) aot_cc_o((a), (b))
+#define AOT_CC_I(a, b) aot_cc_i((a), (b))
+static inline uint32_t aot_cc_o(uint32_t a, uint32_t b) { return 1u + (uint32_t)(a == b) + 3u * (uint32_t)(a < b); }
+static inline uint32_t aot_cc_i(int32_t a, int32_t b)   { return 1u + (uint32_t)(a == b) + 3u * (uint32_t)(a < b); }
 
 /* Loads and stores straight to a page of plain memory, as mem_read32 /
  * mem_write32 make them when that is what they find; anything else is

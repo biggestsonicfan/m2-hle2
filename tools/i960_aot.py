@@ -138,6 +138,22 @@ REG_C = {
     0x58e: '~({s1} & {s2})', 0x701: '{s2} * {s1}', 0x741: '{s2} * {s1}', 0x5cc: '{s1}',
 }
 
+def fsrc(i, m):
+    """A real operand as i960_exec.h's FP_SRC reads it: a register's bits as a
+    single, or (m set) fp0-fp3 and the literals 0.0 and 1.0."""
+    if not m: return f'i960_single_to_double({R(i)})'
+    return {16: '0.0', 22: '1.0'}.get(i, f'cpu->fp_regs[{i & 3}]')
+
+def fdst(d, m, v):
+    return f'cpu->fp_regs[{d & 3}] = {v};' if m else f'{R(d)} = i960_double_to_single({v});'
+
+# The real ops as i960_exec.h runs them: (a_, b_) = (src1, src2), dst value.
+FP_C = {
+    0x78f: 'i960_nan_result(a_ + b_, a_, b_)', 0x78d: 'i960_nan_result(b_ - a_, b_, a_)',
+    0x78c: 'i960_nan_result(a_ * b_, a_, b_)',
+    0x78b: '(a_ != 0.0 ? i960_nan_result(b_ / a_, b_, a_) : 0.0)',
+}
+
 def direct(ip, w1, w2, kind):
     """C for a pure, ld, st, ldn or stn instruction, or None."""
     op = w1 >> 24
@@ -154,11 +170,11 @@ def direct(ip, w1, w2, kind):
             return ('{ ' + ' '.join(f'uint32_t v{k}_ = {src[k]};' for k in range(n)) + ' '
                     + ' '.join(f'{R(d + k)} = v{k}_;' for k in range(n)) + ' }')
         if opc in (0x5a0, 0x5a1):
-            f = 'i960_cmp_cc_o' if opc == 0x5a0 else 'i960_cmp_cc_i'
+            f = 'AOT_CC_O' if opc == 0x5a0 else 'AOT_CC_I'
             t = '' if opc == 0x5a0 else '(int32_t)'
             return f'ACC({f}({t}{s1}, {t}{s2}));'
         if opc in (0x5a4, 0x5a5, 0x5a6, 0x5a7):
-            f = 'i960_cmp_cc_o' if opc in (0x5a4, 0x5a6) else 'i960_cmp_cc_i'
+            f = 'AOT_CC_O' if opc in (0x5a4, 0x5a6) else 'AOT_CC_I'
             t = '' if opc in (0x5a4, 0x5a6) else '(int32_t)'
             pm = '+' if opc in (0x5a4, 0x5a5) else '-'
             return f'{{ uint32_t b_ = {s2}; ACC({f}({t}{s1}, {t}b_)); {R(d)} = b_ {pm} 1u; }}'
@@ -167,6 +183,28 @@ def direct(ip, w1, w2, kind):
             return f'if (!(AGETCC & CC_L)) ACC({t}{s1} <= {t}{s2} ? CC_E : CC_G);'
         if opc == 0x5ae:
             return f'ACC(({s2} & (1u << ({s1} & 31u))) ? CC_E : CC_NO);'
+        m1, m2, m3 = (w1 >> 11) & 1, (w1 >> 12) & 1, (w1 >> 13) & 1
+        if opc in FP_C:
+            return (f'{{ double a_ = {fsrc(s1i, m1)}, b_ = {fsrc(s2i, m2)}; '
+                    + fdst(d, m3, FP_C[opc]) + ' }')
+        if opc in (0x684, 0x685):
+            return (f'{{ double a_ = {fsrc(s1i, m1)}, b_ = {fsrc(s2i, m2)}; '
+                    'ACC(a_ < b_ ? CC_L : a_ == b_ ? CC_E : CC_G); }')
+        if opc == 0x6c9:
+            return '{ double a_ = ' + fsrc(s1i, m1) + '; ' + fdst(d, m3, 'a_') + ' }'
+        if opc in (0x6c0, 0x6c1):
+            return f'{R(d)} = i960_real_to_int32(i960_round_ac(cpu, {fsrc(s1i, m1)}));'
+        if opc in (0x6c2, 0x6c3):
+            return f'{R(d)} = i960_real_to_int32({fsrc(s1i, m1)});'
+        if opc in (0x674, 0x675):
+            i = f'(int32_t)i960_real_to_int32(cpu->fp_regs[{s1i & 3}])' if m1 else f'(int32_t){R(s1i)}'
+            return '{ double a_ = (double)' + i + '; ' + fdst(d, m3, 'a_') + ' }'
+        if opc == 0x641:
+            return (f'{{ uint32_t v_ = {s1}; if (v_) {{ {R(d)} = 31u - (uint32_t)__builtin_clz(v_); ACC(CC_E); }}'
+                    f' else {{ {R(d)} = 0xFFFFFFFFu; ACC(CC_NO); }} }}')
+        if opc == 0x5b0:
+            return (f'{{ uint64_t r_ = (uint64_t){s2} + (uint64_t){s1} + ((AGETCC & 2u) ? 1u : 0u); '
+                    f'{R(d)} = (uint32_t)r_; ACC((r_ >> 32) ? CC_E : CC_NO); }}')
         if opc == 0x58f:
             return (f'{R(d)} = (AGETCC & CC_E) ? ({s2} | (1u << ({s1} & 31u)))'
                     f' : ({s2} & ~(1u << ({s1} & 31u)));')
@@ -215,7 +253,7 @@ def branch_c(ip, w1):
         bit = f'({s2} & (1u << ({s1} & 31u)))'
         c = f'!{bit}' if op == 0x30 else bit
         return f'AOT_CCB({c})', t, ''
-    f, cast = ('i960_cmp_cc_o', '') if op < 0x38 else ('i960_cmp_cc_i', '(int32_t)')
+    f, cast = ('AOT_CC_O', '') if op < 0x38 else ('AOT_CC_I', '(int32_t)')
     return f'AOT_CMPB({f}({cast}{s1}, {cast}{s2}), {op & 7}u)', t, ''
 
 def main():
@@ -287,6 +325,18 @@ def main():
     for ip in ips:
         if ip not in prev_of: lead.add(ip)
     lead &= ips
+    # Where a block has to start: after a transfer or a slow op, after a gap,
+    # at a chunk's edge, after a hook. Any other leader (a branch's target, an
+    # address the interpreter arrived at) is entered mid-block, by a stub that
+    # checks the room left to the block's end: the code that falls into it
+    # pays no check.
+    split = set()
+    for ip, (w1, w2, n, kind, tg) in info.items():
+        if kind in ('call', 'ind', 'slow', 'br'): split.add(ip + n)
+        if ip + n in ips and (ip + n) >> a.shift != ip >> a.shift: split.add(ip + n)
+        if ip not in prev_of: split.add(ip)
+    for h in hooks: split.add(h + 4)
+    split &= ips
 
     chunks = {}
     for ip in sorted(ips):
@@ -328,7 +378,7 @@ def main():
             return len(K) - 1
         b_ = body.append
         b_(f'static int aot_c{c:04x}(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s) {{')
-        b_('    uint32_t ip_ = s->ip; uint8_t *p_; (void)p_;')
+        b_('    uint32_t ip_ = s->ip; uint8_t *p_; (void)p_; AOT_REGS;')
         b_('dispatch: __attribute__((unused));')
         b_('    switch (ip_) {')
         for ip in cips:
@@ -349,14 +399,18 @@ def main():
             while True:
                 w1, w2, n, kind, tg = info[blk[-1]]
                 nx = blk[-1] + n
-                if kind in ('br', 'call', 'ind') or nx not in ips or nx in lead: break
+                if kind in ('br', 'call', 'ind') or nx not in ips or nx in split: break
                 blk.append(nx)
             costs = [cost(info[x][0]) for x in blk]
             cb, nb = sum(costs), len(blk)
             nblocks += 1
             b_(f'L{ip:x}: AOT_LEAD(0x{ip:X}u, {nb}, {cb});')
+            stubs = []
             for j, x in enumerate(blk):
                 w1, w2, n, kind, tg = info[x]
+                if j and x in lead:
+                    b_(f'M{x:x}:')
+                    stubs.append(f'L{x:x}: AOT_LEAD(0x{x:X}u, {nb - j}, {sum(costs[j:])}); goto M{x:x};')
                 k2, nx_left = sum(costs[j + 1:]), nb - j - 1
                 dc = direct(x, w1, w2, kind) if kind in ('pure', 'ld', 'st', 'ldn', 'stn') else None
                 if kind == 'br':
@@ -377,7 +431,7 @@ def main():
                 if dc is not None:
                     ndirect += 1
                     ea, test, code = dc
-                    slow = 'AOT_IO' if kind in ('ld', 'st') else 'AOT_SLOW'
+                    slow = 'AOT_IO' if kind in ('ld', 'st') else 'AOT_IOSTN' if kind == 'stn' else 'AOT_SLOW'
                     b_(f'    {{ uint32_t ea_ = {ea}; if (M2_LIKELY({test})) {{ {code} }} else {slow}({k}); }}')
                 elif kind in ('ld', 'st', 'ldn', 'stn'):
                     b_(f'    AOT_SLOW({k});')
@@ -397,6 +451,7 @@ def main():
             last = blk[-1]
             if info[last][3] not in ('br', 'call', 'ind'):
                 b_(f'    {jump(last + info[last][2])}')
+            for t in stubs: b_(t)
             i = cips.index(blk[-1]) + 1
         b_('}')
         if K:

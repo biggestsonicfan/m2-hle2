@@ -94,6 +94,38 @@ static inline vec3_t apply_matrix(vec3_t v, const float *m) {
     return r;
 }
 
+#if defined(GEO3D_DC_SINK) && (defined(__SH4__) || defined(__SH4_SINGLE__) || defined(__SH4_SINGLE_ONLY__))
+/* The SH-4's FTRV: XMTRX (the back bank) times fv0 in one instruction, for the
+ * corners and the view planes. Nothing between the load and the last FTRV may
+ * call out: the drawing only, the board's state never sees these. */
+#define GEO3D_FTRV 1
+/* c: 16 floats, column by column, 8-byte aligned. */
+static inline void geo3d_xmtrx_load(const float *c) {
+    __asm__ __volatile__(
+        "fschg\n\t"
+        "fmov.d @%0+, xd0\n\t"  "fmov.d @%0+, xd2\n\t"  "fmov.d @%0+, xd4\n\t"  "fmov.d @%0+, xd6\n\t"
+        "fmov.d @%0+, xd8\n\t"  "fmov.d @%0+, xd10\n\t" "fmov.d @%0+, xd12\n\t" "fmov.d @%0+, xd14\n\t"
+        "fschg\n"
+        : "+r"(c) : : "memory");
+}
+/* XMTRX * (x, y, z, w) into o[0..3]. */
+static inline void geo3d_ftrv(float x, float y, float z, float w, float *o) {
+    register float f0 __asm__("fr0") = x;
+    register float f1 __asm__("fr1") = y;
+    register float f2 __asm__("fr2") = z;
+    register float f3 __asm__("fr3") = w;
+    __asm__ __volatile__("ftrv xmtrx, fv0" : "+f"(f0), "+f"(f1), "+f"(f2), "+f"(f3));
+    o[0] = f0; o[1] = f1; o[2] = f2; o[3] = f3;
+}
+/* A board matrix (3 rows of 4) as XMTRX. */
+static inline void geo3d_xmtrx_board(const float *m) {
+    float c[16] __attribute__((aligned(8))) = {
+        m[0], m[4], m[8],  0.0f,  m[1], m[5], m[9],  0.0f,
+        m[2], m[6], m[10], 0.0f,  m[3], m[7], m[11], 1.0f };
+    geo3d_xmtrx_load(c);
+}
+#endif
+
 /* ---- Decal quad cut ------------------------------------------------------
  * A decal on this board is not a face floating in front of a surface: it is
  * the surface's own faces emitted a second time with a cut-out texture, so the
@@ -417,6 +449,22 @@ static int   g_geo3d_view_cull = -1;   /* -1: read the environment once */
 static int   g_geo3d_cull_on;          /* planes set for the run being decoded */
 static float g_geo3d_cull_plane[5][4];
 static float g_geo3d_cull_nlen[5];       /* |xyz| of each plane */
+
+#ifdef GEO3D_FTRV
+/* geo3d_cull_code with planes 0-3's distances from FTRV (XMTRX: those planes,
+ * row by row), in d. */
+static inline uint8_t geo3d_cull_code_d(vec3_t p, const float *d4) {
+    uint8_t code = 0;
+    for (int k = 0; k < 5; k++) {
+        const float *q = g_geo3d_cull_plane[k];
+        float d = k < 4 ? d4[k] : q[0] * p.x + q[1] * p.y + q[2] * p.z + q[3];
+        if (!(d < 0.0f)) continue;
+        float m = 1.0e-5f * (fabsf(q[0] * p.x) + fabsf(q[1] * p.y) + fabsf(q[2] * p.z) + fabsf(q[3]));
+        if (d < -m) code |= (uint8_t)(1u << k);
+    }
+    return code;
+}
+#endif
 
 static inline uint8_t geo3d_cull_code(vec3_t p) {
     uint8_t code = 0;
@@ -2858,7 +2906,16 @@ static inline void geo3d_decode_model_cached(int model_idx,
     }
 
     static vec3_t tv[GEO3D_IA_MAX_VERTS];
+#ifdef GEO3D_FTRV
+    geo3d_xmtrx_board(matrix);
+    for (int i = 0; i < m->n_sv; i++) {
+        float o[4];
+        geo3d_ftrv(m->sv[i].x, m->sv[i].y, m->sv[i].z, 1.0f, o);
+        tv[i].x = o[0]; tv[i].y = o[1]; tv[i].z = o[2];
+    }
+#else
     for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
+#endif
     geo3d_split_reset();
     bool lines = g_geo_wireframe != 0;
     static uint8_t oc[GEO3D_IA_MAX_VERTS];
@@ -2886,7 +2943,22 @@ static inline void geo3d_decode_model_cached(int model_idx,
         }
         if (in == 5) cull = false;
         else if (all_out) memset(oc, all_out, (size_t)m->n_sv);
+#ifdef GEO3D_FTRV
+        else {
+            const float (*q)[4] = g_geo3d_cull_plane;
+            float c[16] __attribute__((aligned(8))) = {
+                q[0][0], q[1][0], q[2][0], q[3][0],  q[0][1], q[1][1], q[2][1], q[3][1],
+                q[0][2], q[1][2], q[2][2], q[3][2],  q[0][3], q[1][3], q[2][3], q[3][3] };
+            geo3d_xmtrx_load(c);
+            for (int i = 0; i < m->n_sv; i++) {
+                float d[4];
+                geo3d_ftrv(tv[i].x, tv[i].y, tv[i].z, 1.0f, d);
+                oc[i] = geo3d_cull_code_d(tv[i], d);
+            }
+        }
+#else
         else for (int i = 0; i < m->n_sv; i++) oc[i] = geo3d_cull_code(tv[i]);
+#endif
 #ifdef GEO3D_DC_SINK
         if (all_out) dcv_none = true;
 #endif
