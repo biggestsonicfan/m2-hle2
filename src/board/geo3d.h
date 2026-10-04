@@ -2933,9 +2933,6 @@ static inline void geo3d_cached_face(const geo3d_models_t *md, const geo3d_cface
      * records its diagonal below, if the board would have drawn it. */
     if (out && f->is_tri) return;
 
-    float fr = cr, fg = cg, fb = cb;
-    if (f->mat_ok && !out) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
-
     /* The board's lighting and culling, as geo3d_decode_model does them on
      * the display-list path (board luma with a matrix: always this branch).
      * Specular, the truncated luma and the texlod belong to the instance, so
@@ -2943,6 +2940,8 @@ static inline void geo3d_cached_face(const geo3d_models_t *md, const geo3d_cface
     geo3d_lit_t lt;
     if (geo3d_board_cull(matrix, f->qn, f->has_qn ? f->qa : 0u, f->has_c, A, B, C, &lt)) return;
     if (out) { geo3d_split_other_way(f->split_quad, f->split_cut); return; }
+    float fr = cr, fg = cg, fb = cb;   /* only a face that is drawn needs its colour */
+    if (f->mat_ok) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
     const float pl = geo3d_board_luma(&lt);
     const geo3d_paint_t paint = {
         .r = fr, .g = fg, .b = fb, .tx = f->tx, .ty = f->ty, .tw = f->tw, .th = f->th,

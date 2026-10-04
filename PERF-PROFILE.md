@@ -64,7 +64,7 @@ sound threads look like the bench's. Loading the zip (`tinfl_decompress`, `mz_cr
 
 ## Where to look, if something is to be made cheaper
 
-In order of what it would save. None of these was tried here; each has to stay bit-exact
+In order of what it would save, as #399 found it (#403 below took the first two); each has to stay bit-exact
 (`det_digest`, `ab-builds`, `arc_bench --draw-digest`).
 
 1. **The 3D's per-face work, every frame** (~12% of the bench, the largest of our own costs on the
@@ -80,6 +80,41 @@ In order of what it would save. None of these was tried here; each has to stay b
    "The SCSP makes its samples late"); STF's driver reads the monitor every ~5 samples.
 5. **Copies**: the GEO publish (`geodl_publish`, ~1-2%, texture/polygon RAM beside each list),
    the A/V capture (4%, streaming only).
+
+## What #403 did with it
+
+Measured with `arc_bench` on attract, the box's other load alternated out (base, new, base, new...,
+five runs each), and with `perf stat -e instructions:u,cycles:u` for a number that the load does
+not move. Every change is bit-exact: `tile_test`, `arc_bench --draw-digest` over 12,000 frames,
+and an FNV of the two tile layers' RGBA after every frame (12,000 frames, 4,525 different
+pictures), base against new.
+
+| Change | Where | Gain |
+|---|---|---|
+| `s24_draw_line` walks runs, not pixels: a run stays in one cell, one window-mask group and one side of the split, so the mask bit, the split and the cell key are looked at once per run | tiles | tiles −13% |
+| A non-opaque pass decides a cell of the other category is dead from its tile word and never reads its graphics (most cells of the four front passes) | tiles | −1.4G instructions per 4,000 frames |
+| A palette change recolours every pixel, with no test: each output pixel already holds its pen's colour, so that is the same bytes, and the per-pixel "did my pen change" branch was the mispredicted one | tiles | tiles −21% with the run walk |
+| `geo3d_cached_face` looks up a face's palette colour only once it is drawn, after the cull | 3D | the geo list −23% instructions |
+
+Together: tiles 0.36 → 0.26 ms a frame (−28%), 3D 0.136 → 0.128 ms, render 0.51 → 0.40 ms
+(−21%); the whole bench (ROM load included) 55.3G → 45.7G instructions, 16.7G → 14.9G cycles.
+On x86. The handheld runs the same CPU compositor, so it should gain there too; not measured.
+
+What was looked at and left:
+
+- **Skipping the SCSP DSP while its input is silent.** The input (`mixs`) is zero in nearly every
+  sample, but the reverb never settles: once the first sound has gone in, the delay line sits in a
+  limit cycle that neither decays nor repeats (about 10,000 of its 32,768 words change every
+  revolution, `efreg` stays at −1, −1). Only the samples before the first input are skippable
+  exactly: 30% of attract, 55% of a scripted fight, all of it in a session's first minutes.
+- **Idling the 68000.** STF's driver polls the slot monitor, which changes every sample, so its
+  wait loop is never idle. `--sound-hle` already runs that driver in C.
+- **The i960's per-instruction bookkeeping.** `i960_cycle_cost` is one table load and
+  `hle_check_synced` one bitmap test; what is left is the interpreter itself, which #187 and
+  #294 have been over. The texture loader and the spin skip read the cycle accounting, so a
+  change there is a board change, not a host one.
+- **The zkey of a culled face.** `geo3d_flat_depth` has to run for every face (a culled face
+  still sets the previous z), and the key itself is a few integer operations.
 
 ## How to take one
 
