@@ -1359,6 +1359,8 @@ static void mcp_cmd_set_geo_isolate(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"isolate\":%d}", g_geo3d_state->isolate_index);
 }
 
+/* The published snapshot: the list's own words are this frame's; the rest of
+ * bufferram may hold an older frame's (geodl_publish copies what it walks). */
 static void mcp_cmd_dump_geo_list(const char *req, char *resp, int cap) {
     char path[512] = {0};
     if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
