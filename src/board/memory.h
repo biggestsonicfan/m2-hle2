@@ -42,6 +42,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A word at a 4-aligned address in a byte buffer (bufferram, a region's
+ * backing). memcpy says the same, but for a pointer of unknown alignment the
+ * SH4's GCC calls the library for it: 4-byte copies were ~2% of a Dreamcast
+ * frame. */
+static inline uint32_t m2_ld32a(const void *p) {
+    uint32_t v; __builtin_memcpy(&v, __builtin_assume_aligned(p, 4), 4); return v;
+}
+static inline void m2_st32a(void *p, uint32_t v) {
+    __builtin_memcpy(__builtin_assume_aligned(p, 4), &v, 4);
+}
+
 #include "constants.h"
 #include "../core/build_features.h"
 #include "../core/log.h"
@@ -205,6 +216,9 @@ typedef struct memory_bus {
     /* Set by i960_step before each instruction dispatch — included in unmapped warnings. */
     uint32_t    cpu_ip;
 } memory_bus_t;
+/* m2_ld32a / m2_st32a index these at word offsets. */
+_Static_assert(offsetof(memory_bus_t, geo) % 4 == 0 && offsetof(memory_bus_t, geo_program) % 4 == 0
+               && offsetof(memory_bus_t, buff_ram) % 4 == 0, "word access to the bus buffers");
 
 /* ---- Region builder ------------------------------------------------------ */
 
@@ -404,10 +418,13 @@ static inline uint32_t geodl_direct_len(const uint32_t *L, uint32_t nw, uint32_t
     return q - p - 1u;
 }
 
-static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart) {
+/* S, when not NULL, gets a copy of every word the walk covers: the scan
+ * (geo3d_scan_geo_list) walks the list the same way, so it reads no other. */
+static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart, uint32_t *S) {
     uint32_t p = (rstart & 0x1FFFFu) >> 2;
     for (uint32_t guard = 0; guard < 0x8000u && p < nw; guard++) {
         uint32_t op = L[p];
+        if (S) S[p] = op;
         if (op & 0x80000000u) { p = (op & 0x1FFFFu) >> 2; continue; }
         uint32_t cmd = (op >> 23) & 0x1F;
         #define LA(k) (p + 1u + (k) < nw ? L[p + 1u + (k)] : 0u)
@@ -471,6 +488,10 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             default: break;
         }
         #undef LA
+        if (S) {
+            uint32_t e = len < nw - p - 1u ? p + 1u + len : nw;
+            if (e > p + 1u) memcpy(S + p + 1u, L + p + 1u, (e - p - 1u) * 4u);
+        }
         p += 1u + len;
     }
 }
@@ -478,7 +499,7 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
 static inline void geo_push(uint32_t word) {
     if (!g_geo.buff) return;
     uint32_t w = (g_geo.wstart >> 2) & (BUFF_RAM_SIZE / 4 - 1);
-    memcpy(g_geo.buff + w * 4u, &word, 4);
+    m2_st32a(g_geo.buff + w * 4u, word);
     g_geo.wstart = (g_geo.wstart + 4u) & 0xFFFFFu;
 }
 
@@ -486,8 +507,13 @@ static inline void geo_push(uint32_t word) {
 static inline void geodl_publish(uint32_t rstart) {
     if (!g_geo.buff) return;
     uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[GEO_PUB_COPIES - 1] : g_geodl_snaps[0];
+#if GEO_PUB_COPIES == 1
+    /* The list's own words only: a whole copy was 3.4% of a Dreamcast frame. */
+    geodl_apply_state((const uint32_t *)g_geo.buff, BUFF_RAM_SIZE / 4, rstart, back);
+#else
     memcpy(back, g_geo.buff, sizeof g_geodl_snaps[0]);
-    geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart);
+    geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart, NULL);
+#endif
     geo_raster_publish(&g_geo_pub[back == g_geodl_snaps[0] ? 0 : GEO_PUB_COPIES - 1]);
     g_geodl_snap_rstart = rstart;
     g_geodl_snap        = back;
@@ -498,8 +524,10 @@ static inline void geodl_publish(uint32_t rstart) {
 /* GEO base (0x800000). */
 static void geo_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - GEO_BASE;
-    if (r->data && off + 4 <= r->size)
-        memcpy(r->data + off, &val, 4);
+    if (r->data && off + 4 <= r->size) {
+        if (!(off & 3u)) m2_st32a(r->data + off, val);
+        else memcpy(r->data + off, &val, 4);
+    }
     if (size != 4) return;
     if (off < 0x1000) {
         uint32_t function = (off >> 4) & 0x3F;
@@ -531,8 +559,10 @@ static uint32_t geo_read_cb(mem_region_t *r, uint32_t addr, int size) {
 /* GEO_PROGRAM (0x804000): raw list words. */
 static void geo_program_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - GEO_PROGRAM_BASE;
-    if (r->data && off + 4 <= r->size)
-        memcpy(r->data + off, &val, 4);
+    if (r->data && off + 4 <= r->size) {
+        if (!(off & 3u)) m2_st32a(r->data + off, val);
+        else memcpy(r->data + off, &val, 4);
+    }
     if (size != 4) return;
     int uploading = g_geo.copro_ctl && (g_geo.copro_ctl[11] & 0x80);
     if (!uploading) geo_push(val);

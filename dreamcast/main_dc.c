@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
     /* The frame pool takes what the board leaves: texture RAM (2 MB), its
      * framebuffer (0.5 MB) and the heap's own use come out of what is free
      * now. The mesh cache has its own block (GEO3D_MESH_ARENA). */
-    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (768u << 10);
+    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10);
     uint32_t cache = 8u << 20;
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
         if ((p = memalign(16384, cache + keep))) { free(p); break; }
@@ -307,10 +307,11 @@ int main(int argc, char **argv) {
             STATS_PRINT(line);
             dp_text(18, line);
             unsigned d = shown ? shown : 1;
-            snprintf(line, sizeof line, "tiles %u scan %u sort %u ms | mesh %u built %u hit %u",
+            snprintf(line, sizeof line, "tl %u sc %u so %u | mesh %u b %u h %u c %u/%u %uK",
                      (unsigned)(g_dp.us_tiles / 1000 / d), (unsigned)(g_dp.us_scan / 1000 / d),
                      (unsigned)(g_dp.us_sort / 1000 / d), (unsigned)g_geo3d_mesh_count,
-                     (unsigned)(g_geo3d_mesh_builds - builds_last), (unsigned)(g_geo3d_mesh_hits - hits_last));
+                     (unsigned)(g_geo3d_mesh_builds - builds_last), (unsigned)(g_geo3d_mesh_hits - hits_last),
+                     g_geo3d_mesh_clears, g_geo3d_mesh_evicts, (unsigned)(g_geo3d_arena_used >> 10));
             STATS_PRINT(line);
             dp_text(17, line);
             unsigned sl = slices ? slices : 1;
