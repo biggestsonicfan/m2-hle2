@@ -42,17 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* A word at a 4-aligned address in a byte buffer (bufferram, a region's
- * backing). memcpy says the same, but for a pointer of unknown alignment the
- * SH4's GCC calls the library for it: 4-byte copies were ~2% of a Dreamcast
- * frame. */
-static inline uint32_t m2_ld32a(const void *p) {
-    uint32_t v; __builtin_memcpy(&v, __builtin_assume_aligned(p, 4), 4); return v;
-}
-static inline void m2_st32a(void *p, uint32_t v) {
-    __builtin_memcpy(__builtin_assume_aligned(p, 4), &v, 4);
-}
-
+#include "m2_word.h"
 #include "constants.h"
 #include "../core/build_features.h"
 #include "../core/log.h"

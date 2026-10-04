@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "constants.h"
+#include "m2_word.h"     /* m2_ld32a / m2_st32a, for the SHARC handlers */
 #include "emu_times.h"   /* host time spent in the handlers, for get_status */
 
 /* ---- Limits -------------------------------------------------------------- */
