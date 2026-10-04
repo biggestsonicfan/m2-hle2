@@ -155,6 +155,11 @@ typedef struct {
      * relay_required, when the start fails instead. */
     const char *relay_url;
     bool        relay_required;
+    /* A /gw/dgram URL kept in reserve when relay_url is empty: the session turns
+     * it on itself before joining a room whose owner is reached through it
+     * (rpcn_session_relay_on, netplay.h "Following a relayed owner"). Null/empty
+     * = never. */
+    const char *relay_standby_url;
     /* Cross-play with the PS3 port (ps3_link.h): its lobby space, its room
      * shape, and no m2hle datagrams (punches, introductions) sent to members,
      * since they are RPCS3 clients and speak RPCS3's P2P framing. */
@@ -267,6 +272,16 @@ typedef struct {
 
     uint64_t last_keepalive_ms;
     uint64_t last_intro_ms;
+
+    /* The gateway kept in reserve (rpcn_session_config_t.relay_standby_url), and
+     * a lookup of one player's address made before joining their room
+     * (rpcn_session_probe): `probe_done` once it has answered, with 0.0.0.0 when
+     * the server had no address for them. */
+    char     relay_standby[256];
+    uint64_t pending_probe;
+    bool     probe_done;
+    uint32_t probe_ip;
+    uint16_t probe_port;
 
     /* Round trips to the signaling helper, one per keepalive answered
      * (rpcn_session_relay_ms), and what we last published of them as a room's
@@ -576,6 +591,9 @@ static inline void rpcn_session_stop(rpcn_session_t *s) {
     s->login_error = RPCN_OK;
     s->pending_serverlist = s->pending_worldlist = s->pending_room = 0;
     s->pending_search = 0;
+    s->pending_probe = 0;
+    s->probe_done = false;
+    s->relay_standby[0] = 0;
     s->pending_foreign_serverlist = s->pending_foreign_worldlist = s->pending_foreign_search = 0;
     s->foreign_ready = false;
     s->room_count = 0;
@@ -706,6 +724,8 @@ static inline bool rpcn_session_open_relay(rpcn_session_t *s, const rpcn_session
             rpcn_session_note(s, "could not open the gateway relay %s (%s); sending datagrams directly",
                               cfg->relay_url, s->client.relay.error);
         }
+    } else if (cfg->relay_standby_url && cfg->relay_standby_url[0]) {
+        snprintf(s->relay_standby, sizeof(s->relay_standby), "%s", cfg->relay_standby_url);
     }
     return true;
 }
@@ -794,6 +814,60 @@ static inline void rpcn_session_pump_keepalive(rpcn_session_t *s) {
     if (now - s->last_keepalive_ms < RPCN_KEEPALIVE_MS) return;
     s->last_keepalive_ms = now;
     if (rpcn_send_signaling_ping(&s->client, 0)) s->keepalive_sent_us = net_now_us();
+}
+
+/* ---- The gateway in reserve ---------------------------------------------- */
+/*
+ * Asks the server where `npid` is, without being in a room with them: the
+ * answer lands in probe_ip / probe_port and raises probe_done. netplay.h asks
+ * about a room's owner before joining it.
+ */
+static inline bool rpcn_session_probe(rpcn_session_t *s, const char *npid) {
+    s->probe_done = false;
+    s->probe_ip   = 0;
+    s->probe_port = 0;
+    s->pending_probe = rpcn_request_signaling_infos(&s->client, npid);
+    return s->pending_probe != 0;
+}
+
+/* The public address of the gateway held in reserve, which is where the server
+ * says a player relayed through it is (its UDP socket is on the host its URL
+ * names). 0 when there is none, or the name does not resolve. */
+static inline uint32_t rpcn_session_standby_ip(const rpcn_session_t *s) {
+#ifndef __EMSCRIPTEN__
+    char host[128];
+    if (s->relay_standby[0] && !s->client.relay_on
+        && ws_relay_url_host(s->relay_standby, host, sizeof(host)))
+        return net_resolve_ipv4(host);
+#else
+    (void)s;
+#endif
+    return 0;
+}
+
+/* Sends every datagram from now on through the gateway in reserve. The server
+ * learns the new address from the next keepalive, which goes at once, and
+ * signaling_seen drops until it has answered: a room taken before that would
+ * be told the old address (see signaling_seen). True when the relay is on. */
+static inline bool rpcn_session_relay_on(rpcn_session_t *s) {
+#ifndef __EMSCRIPTEN__
+    if (s->client.relay_on) return true;
+    if (!s->relay_standby[0]) return false;
+    if (!ws_relay_open(&s->client.relay, s->relay_standby)) {
+        rpcn_session_note(s, "could not open the gateway relay %s (%s)", s->relay_standby,
+                          s->client.relay.error);
+        return false;
+    }
+    s->client.relay_on   = true;
+    s->signaling_seen    = false;
+    s->last_keepalive_ms = 0;
+    rpcn_session_note(s, "sending datagrams through the gateway relay %s", s->relay_standby);
+    rpcn_session_pump_keepalive(s);
+    return true;
+#else
+    (void)s;
+    return false;
+#endif
 }
 
 /*
@@ -1218,6 +1292,17 @@ static inline bool rpcn_session_on_room(rpcn_session_t *s, const rpcn_packet_t *
     return s->is_host || rpcn_session_on_join_members(s, pkt);
 }
 
+/* The probe of a room owner's address (rpcn_session_probe). */
+static inline void rpcn_session_on_probe(rpcn_session_t *s, const rpcn_packet_t *pkt) {
+    s->pending_probe = 0;
+    s->probe_done = true;
+    s->probe_ip = 0;
+    s->probe_port = 0;
+    if (pkt->error != RPCN_OK
+        || !rpcn_parse_signaling_addr(pkt->payload, pkt->payload_size, &s->probe_ip, &s->probe_port))
+        s->probe_ip = 0;
+}
+
 /* A signaling lookup answers whichever member it was asked about. */
 static inline void rpcn_session_on_signaling(rpcn_session_t *s, const rpcn_packet_t *pkt) {
     rpcn_peer_t *asked = NULL;
@@ -1261,6 +1346,7 @@ static inline bool rpcn_session_on_reply(rpcn_session_t *s, const rpcn_packet_t 
     else if (id == s->pending_search)            rpcn_session_on_search(s, pkt);
     else if (id == s->pending_room_data)         rpcn_session_on_room_data(s, pkt);
     else if (id == s->pending_room)              return rpcn_session_on_room(s, pkt);
+    else if (s->pending_probe && id == s->pending_probe) rpcn_session_on_probe(s, pkt);
     else                                         rpcn_session_on_signaling(s, pkt);
     return true;
 }

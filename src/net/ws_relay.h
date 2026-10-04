@@ -107,6 +107,19 @@ static inline bool ws_relay_url_for(const char *server, char *out, size_t cap) {
     return false;
 }
 
+/* The host a ws:// or wss:// URL names, or false. */
+static inline bool ws_relay_url_host(const char *url, char *out, size_t cap) {
+    if (!url) return false;
+    if (ws_relay__strnicmp(url, "wss://", 6) == 0)     url += 6;
+    else if (ws_relay__strnicmp(url, "ws://", 5) == 0) url += 5;
+    else return false;
+    size_t n = strcspn(url, ":/");
+    if (!n || n >= cap) return false;
+    memcpy(out, url, n);
+    out[n] = 0;
+    return true;
+}
+
 static inline void ws_relay_close(ws_relay_t *r) {
     if (!r->url[0]) return;   /* never opened: its sockets were never set to invalid */
     if (r->secure) tls_close(&r->tls);
