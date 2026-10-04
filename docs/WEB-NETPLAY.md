@@ -83,7 +83,7 @@ Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `page
   - Idle streams are closed after 15 minutes, and dead browsers are found by WebSocket ping (every 30 s; no pong by the next ping ends the socket).
   - *The heartbeat's pong handler has to be attached in the `handleUpgrade` callback,* not on the server's `connection` event, which `handleUpgrade` never emits. Registered there, no pong was ever recorded and the live gateway dropped every signed-in session 30-60 s after it opened ("the connection to the gateway closed"). A test now holds a connection through six heartbeats.
 - **It never logs a payload byte.** It sees RPCN's protocol in the clear, login tokens included.
-- `npm test`: the routing rules, plus an end-to-end run against a stand-in RPCN, signaling helper and desktop peer (15 tests). CI runs them before every deploy.
+- `npm test`: the routing rules, plus an end-to-end run against a stand-in RPCN, signaling helper and desktop peer (17 tests). CI runs them before every deploy.
 
 ---
 
@@ -97,7 +97,7 @@ Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `page
 - **`net_socket.h`**: in the web build, the UDP functions speak the datagram framing. `net_resolve_ipv4` answers the signaling tag, and `net_local_ipv4_towards` answers 0.
 - **`tls.h`** gains a third backend beside Schannel and the stub. It is not TLS at all: the browser encrypts to the gateway and checks its certificate.
 - **`netplay.h`**:
-  - Settings go to `localStorage` under the settings file's name.
+  - Settings go to `localStorage` under the key `m2hle_netplay.cfg` (`NETPLAY_CFG_PATH`).
   - The build family is added to the room word and to `netplay_room_reject_reason`.
 - **`main_web.c`**: `web_netplay_begin` / `_set` / `_post` stage a command a field at a time. A password can hold any character, and the minimal JSON reader cannot. Also added:
   - `web_netplay_status` (a JSON snapshot)
@@ -117,7 +117,7 @@ Running two web clients on one machine found two bugs that the desktop build sha
   - RPCN copies a member's address into the room when the room is created or joined. The address only reaches RPCN with the first keepalive after login. The test hosted 0.2 s after signing in and snapshotted zeros.
   - Two players on one public address were then told *different kinds* of address for each other: one got the other's public address from the room, the other got the local address from a lookup. Each discarded the other's datagrams as strays.
   - Fixes:
-    - Host and Join wait until the signaling helper has answered (`netplay_take_room`), for at most 4 s.
+    - Host and Join wait until the signaling helper has answered (`netplay_room_or_defer`), for at most 4 s.
     - An address the peer has actually been *heard* from is never replaced by one the server reports later (`rpcn_session_set_peer`).
 
 A third fix is web-only (`main_web.c`). When a slice waits on the other player, the web frontend drops that owed time instead of repaying it. Repaid, it put the waiting board straight back a fraction of a frame ahead, so it waited again every frame: ~40 waits a second, indefinitely, after a hidden tab came back.

@@ -16,7 +16,7 @@ Three things native builds rely on do not exist in a browser tab. Each one decid
 |---|---|---|
 | TCP/TLS to RPCN (`tls.h`, Schannel), UDP to the signaling helper and the peer (`net_socket.h`) | No sockets of any kind. WebSocket, WebTransport and WebRTC only. | **A gateway daemon has to exist**, on a host we control, or the web build cannot reach RPCN at all. §4. |
 | A process with its own threads; headers are whatever we like | GitHub Pages is static files and **cannot set HTTP response headers**. Threads in wasm need `SharedArrayBuffer`, which needs `COOP`/`COEP` headers. | **Single-threaded first.** §3.3. |
-| ROM zips on disk next to the exe; `m2hle_netplay.cfg`; `m2hle.log` | No filesystem. ROMs can never be hosted by us. | The player supplies one zip; it is read from memory and cached in the browser. Settings go to `localStorage`. §3.5, §3.6. |
+| ROM zips on disk next to the exe; the per-user `netplay.cfg`; `m2hle.log` | No filesystem. ROMs can never be hosted by us. | The player supplies one zip; it is read from memory and cached in the browser. Settings go to `localStorage`. §3.5, §3.6. |
 
 Two things work *better* than expected, and both were checked in the source rather than assumed:
 
@@ -67,7 +67,7 @@ What the port has to get right:
 
 `src/main_web.c`, built only under Emscripten. `sokol_app` (canvas, WebGL2 context, `requestAnimationFrame`; the page reads the keyboard itself, `m2hle-keys.js`) + `sokol_gfx` (GLES3) + `sokol_audio`, plus `game_frame.h`, `audio_out.h`, `input.h`, `netplay.h`. **No ImGui, no ImGuiFileDialog, no `mem_edit.cpp`, no MCP bridge, no kiosk, no SDL.** `sokol_app` over SDL3 because it is already in the tree and its Emscripten backend is a fraction of the size of SDL3's port (to be confirmed with a size report at M2); the one thing SDL3 would have given for free is gamepads. They are done in the page instead: `web/site/m2hle-pad.js` polls `navigator.getGamepads()` once per display frame and hands the emulator one bit per action (`web_pad_set`, which presses and releases only what changed, so a pad and the keyboard can hold the same direction), with the mapping edited in a Controls panel. The touch buttons (`web/site/m2hle-touch.js`) merge into the same mask.
 
-Only the `sfight` profile is registered in this build. `fvipers` and `m2snake` are left out, not hidden: a smaller binary, and no way to load a set that cannot be played online.
+Only the two STF profiles are registered in this build: `sfight_console` (the default) and `sfight` (`src/profiles/registry.h`). `fvipers` and `m2snake` are left out, not hidden: a smaller binary, and no way to load a set that cannot be played online.
 
 ### 3.2 The wizard and lobby are HTML, not ImGui
 
@@ -113,7 +113,7 @@ The cost, stated plainly: **`requestAnimationFrame` stops in a hidden tab**, so 
 | `net_resolve_ipv4`, `net_local_ipv4_towards` | `getaddrinfo`, routing table | No hello message. `net_resolve_ipv4` answers a fixed **signaling tag**, `100.127.255.254`, which the gateway maps to the real helper; `net_local_ipv4_towards` answers 0, and the gateway writes **this session's virtual local address** into each signaling keepalive instead (§4.2). |
 | `net_now_ms` | `GetTickCount64` | Unchanged: the POSIX `clock_gettime(CLOCK_MONOTONIC)` path, which Emscripten provides. |
 | `netplay_open_url` | `ShellExecute` | Never reached: `main_web.c` turns it off (`netplay_set_open_browser(false)`), and the page shows the link (§3.2). |
-| `netplay_settings_load/save` | `m2hle_netplay.cfg` | `localStorage`: the same text, under the file's name as the key. |
+| `netplay_settings_load/save` | the per-user `netplay.cfg` (`%APPDATA%\m2hle2\`, `~/.config/m2hle2/`) | `localStorage`: the same text, under the key `m2hle_netplay.cfg` (`NETPLAY_CFG_PATH`). |
 
 WebSocket is TCP, so a lost packet stalls everything behind it (head-of-line blocking) where UDP would simply have lost one datagram the lockstep's redundant re-sends already cover. That is the known price of v1. The seam is the datagram API, so WebTransport datagrams (no HOL blocking, but no Safari at the time of writing) or a WebRTC data channel can replace the transport later without touching `lockstep.h`.
 
@@ -132,7 +132,7 @@ The site ships the emulator and nothing else. The player picks (or drops) **one 
 
 - Drop ImGui, cimgui, ImGuiFileDialog, imgui_club, MCP bridge, kiosk, debug windows, the two unused profiles (§3.1, §3.2).
 - *Done, and measured (2026-09-22):* `-O3` (the board is an interpreter), `-flto` and `-sFILESYSTEM=0` — nothing in this build opens a file, and that is a third of the JS glue — plus `-sENVIRONMENT=web,worker`. Together **695 KB → 637 KB, and 242 KB → 227 KB over the wire**, almost all of it the glue. `-msimd128` changed neither size nor speed (LLVM vectorises nothing in the interpreters). `--closure 1` is **not** taken: it fails on this build's own JS library (`localStorage` is undeclared to it) and, being ADVANCED, would rename the `Module.m2hle*` hooks the page hangs off `EM_ASM` — two source changes for ~10 KB gzipped.
-- **Memory:** the ROM regions are 82.5 MB as loaded today (`main_data` alone is 32 MB, 15 MB of which is the same 1 MB image copied 15 times by `rom_region_copy`). Start with a fixed `INITIAL_MEMORY` sized from a measured peak rather than `ALLOW_MEMORY_GROWTH` (growth detaches JS views of the heap). Turning the `main_data` mirrors into region aliases is a board-layer change and is **deliberately not in the first pass**: measure, then decide, and if done it goes through `grade-models` and `match-replay` like any board change.
+- **Memory:** the ROM regions are 82.5 MB as loaded today (`main_data` alone is 32 MB, 15 MB of which is the same 1 MB image copied 15 times by `rom_region_copy`). The plan was a fixed `INITIAL_MEMORY` with no growth, because growth detaches JS views of the heap. The build went the other way: it starts at 256 MB (`-sINITIAL_MEMORY=268435456`) and keeps `-sALLOW_MEMORY_GROWTH=1` (CMakeLists.txt, the web link options). Turning the `main_data` mirrors into region aliases is a board-layer change and is **deliberately not in the first pass**: measure, then decide, and if done it goes through `grade-models` and `match-replay` like any board change.
 - `mem_init` clears in place on reset (`mem_region_fresh`) — already true, and it matters more here: no allocator churn at every session start.
 
 ---
@@ -174,7 +174,7 @@ Rooms whose `flagAttr` fails `netplay_room_reject_reason` are shown greyed with 
 
 `.github/workflows/pages.yml`, separate from `canary.yml`. **It exists and runs on every push to master** (and builds, without deploying, on pull requests to master).
 
-- **Build job:** `emscripten-core/setup-emsdk@v16` (the action's new home; `mymindstorm/` redirects) with `version` pinned to **6.0.9** (a toolchain bump can change float codegen; bump it deliberately), submodules `vendor/sokol vendor/miniz` only (no Python step, nothing generates cimgui), `emcmake cmake -DM2HLE_FRONTEND=web -DM2HLE_VERSION=rNNN-sha`, then `build_web/site/` is the whole website.
+- **Build job:** `emscripten-core/setup-emsdk@v16` (the action's new home; `mymindstorm/` redirects) with `version` pinned to **6.0.9** (a toolchain bump can change float codegen; bump it deliberately), submodules `vendor/sokol vendor/miniz vendor/stb` only (no Python step, nothing generates cimgui), `emcmake cmake -DM2HLE_FRONTEND=web -DM2HLE_VERSION=rNNN-sha`, then `build_web/site/` is the whole website.
 - **Gates before anything is published:** a tripwire that fails the run if a ROM-like file is in the site directory, and `tools/web-smoke.mjs` in headless Chrome with `--expect-log "game_render_init: complete"`. With no ROM the page stops at "add your game", which still proves WebGL2 came up, every shader compiled for GLSL ES 3.00, the audio path was chosen and nothing threw — the things that have actually broken.
 - **Deploy job:** `actions/upload-pages-artifact` → `actions/deploy-pages`, on pushes and `workflow_dispatch`, never on pull requests. No `gh-pages` branch. A `CNAME` file would be ignored: with an Actions deployment the custom domain lives in the repository settings.
 - **Branches:** master only. It was `wasm` only while master could not build `-DM2HLE_FRONTEND=web`; after PR #20 `wasm` became an ancestor of master and nothing deployed until the trigger moved (`ea7e806`).

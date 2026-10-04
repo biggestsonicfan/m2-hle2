@@ -107,9 +107,9 @@ Each of these was traced to its code on both sides unless marked **measured only
    - **The drivers reload inside the handler,** so the difference only shows if a handler is late or skipped.
 6. **SCIPD bit 10, the one-sample interrupt:** Mednafen sets it every sample. scsp.h never does. A driver that enables it gets an interrupt only from Mednafen.
 7. **MIDI status (0x404) bit 11, output empty:** set in Mednafen, always 0 in scsp.h. The data byte matches.
-8. **The slot monitor (0x408)** is timed differently.
+8. **The slot monitor (0x408)** was timed differently. *Resolved 2026-09-28.*
    - Mednafen latches CA/SGC/EG for the selected slot as it produces each sample, so a read straight after an MSLC write sees the old data.
-   - scsp.h works the value out at the read, then resets MSLC to slot 0 (MAME).
+   - scsp.h used to work the value out at the read, then reset MSLC to slot 0 (MAME of then). It now latches the monitor once a sample for the slot MSLC named at that boundary, as Mednafen does and as MAME has since `458507e06bc` (`scsp_latch`, `latch_slot`).
    - The probe re-selects the slot before every read and reads one sample later. What remains is mostly item 2 seen through the EG field.
 9. **Measured only, not traced yet:**
    - **Noise:** the same level, but an uncorrelated sequence (a different LFSR or seed).
@@ -313,7 +313,7 @@ that start, which no driver produces, was left there.
 
 ### Still open, as before
 
-Items 1-4 and 6-9 are MAME against Mednafen with scsp.h on MAME's side, and nothing in STF's
+Items 1-4, 6, 7 and 9 are MAME against Mednafen with scsp.h on MAME's side, and nothing in STF's
 driver decides between them. The attack curve (item 2) is the one most likely to be audible and
 most likely to be wrong in MAME (a linear attack, where Yamaha's chips run an exponential one),
 but the driver polls the slot monitor, whose EG field it changes, so it may move slot

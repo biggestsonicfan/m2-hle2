@@ -35,8 +35,8 @@ Take the zip for your platform from the canary release:
 
 Each zip holds the core, `m2hle_libretro.info` (so RetroArch knows the core's name and what it
 needs), the README, this guide and `VERSION.txt` (the build's number and commit). The ARM Linux
-zip also has `install-rocknix.sh` and the ROCKNIX updater, `m2hle-update.sh` with its
-`tool-update-m2hle.sh`.
+zip also has the ROCKNIX files: `install-rocknix.sh`, the updater `m2hle-update.sh`, and
+`es_systems_m2hle.cfg` with its launcher `m2hle-runemu.sh`.
 
 The canary release is rebuilt from every change to the code, so the zips there are always the
 newest build.
@@ -107,7 +107,10 @@ The first start takes a few seconds while the game loads its textures.
 Controller port 1 is player 1 and port 2 is player 2. Remap buttons in
 **Quick Menu > Controls** as with any other core.
 
-To play, press **Select** to insert a coin, then **Start**.
+The table is the Arcade version's. The Console version (the default) is on free play, so
+there is no coin: press **Start** to play, and **Select** opens the pause menu. Its punch, kick
+and guard buttons are set in **Help & Options > Controls** (see the README). In the Arcade
+version, press **Select** to insert a coin, then **Start**.
 
 ### Core options
 
@@ -123,7 +126,7 @@ Open **Quick Menu > Core Options** while the game runs.
 | Sound driver | 68000, In C | 68000 runs the game's sound driver on the board's own processor. In C runs a port of it through the same sound chip: about half the work, so cooler on a handheld. Sonic the Fighters only. | next time you load the game |
 | Sound board on its own core | enabled, disabled | Runs the sound board on a second CPU core. The game is the same either way; the sound comes out one frame later. | at once |
 | Online play | RetroArch, RPCN | Which netplay to use (see below). | next time you load the game |
-| Input delay (frames) | 1 to 8 | For matches you host. Higher hides more network lag. | the next match you host |
+| Input delay (frames) | 1 to 6, or 8 (default 2) | For matches you host. Higher hides more network lag. | the next match you host |
 
 The RPCN lobby is not in this menu: the core draws it in the game, as the PS3 release does (see
 below).
@@ -177,9 +180,10 @@ Keep in mind:
 
 ## Part 2: ROCKNIX
 
-The setup gives the core its own entry under **Sega Model 2** in EmulationStation. You can pick it
-per game, or make it the default for the whole system. The other Model 2 emulators stay
-available.
+The setup gives EmulationStation a **Sega Model 2** system with the core as its emulator.
+ROCKNIX 7.0.2 removed the system it used to ship, so the installer adds the whole system as a
+drop-in file that OS upgrades leave alone. You can pick the core per game, or make it the
+default for the whole system.
 
 ### Before you start
 
@@ -208,7 +212,8 @@ bash install-rocknix.sh --make-default
   EmulationStation**, or reboot) so it reads its new settings. With `--make-default` the script
   restarts it for you.
 
-The script does exactly the steps in the next section.
+The script does the steps in the next section. Run it again after an OS upgrade: the upgrade
+undoes step 3, and running the script puts it back.
 
 ### What the installer changes
 
@@ -227,11 +232,12 @@ really stored in `/storage/cores`, so it survives reboots and ROCKNIX updates. D
 `/usr/lib/libretro`, which is read-only.
 
 **1b. Install the updater.** Copy the updater, let it add the entry that runs it, and record
-which build this is:
+which build this is. Run `--install-entry` after step 2: it reads the Sega Model 2 system's
+folder and extensions.
 
 ```
 install -m 755 m2hle-update.sh /storage/.local/bin/
-bash /storage/.local/bin/m2hle-update.sh --install-entry
+bash /storage/.local/bin/m2hle-update.sh --install-entry    # after step 2
 mkdir -p /storage/.local/share/m2hle/libretro
 install -m 644 VERSION.txt /storage/.local/share/m2hle/libretro/
 mv /storage/cores/core_info.cache /storage/cores/core_info.cache.old
@@ -244,18 +250,23 @@ menu: ROCKNIX rsyncs `/usr/config/modules` over `/storage/.config/modules` with 
 every boot, so anything added there is gone after the next restart. The last line makes
 RetroArch read the new `.info`, so it shows the new version.
 
-**2. Add the emulator entry.** In `/storage/.emulationstation/es_systems.cfg`, find the system
-whose `<name>` is `segamodel2`, and add this block right after its `<emulators>` line:
+**2. Add the Sega Model 2 system.** Copy the drop-in and its launcher from the zip:
 
-```xml
-			<emulator name="retroarch">
-				<cores>
-					<core>m2hle</core>
-				</cores>
-			</emulator>
+```
+install -m 644 es_systems_m2hle.cfg /storage/.emulationstation/
+install -m 755 m2hle-runemu.sh      /storage/.local/bin/
 ```
 
-The core's name, `m2hle`, is its file name without `_libretro.so`.
+EmulationStation reads every `es_systems_*.cfg` beside `es_systems.cfg`. An OS upgrade puts
+the stock `es_systems.cfg` back, but leaves a file with another name alone. The drop-in
+defines the whole `segamodel2` system, with **RetroArch / m2hle** as its default emulator and
+the standalone emulator (`m2hle-sa`) as the other choice. Its games launch through
+`m2hle-runemu.sh`, because `/usr/bin/runemu.sh` only finds launchers in the read-only `/usr`.
+If the drop-in is already there, the script leaves it as it is. The core's name, `m2hle`, is
+its file name without `_libretro.so`.
+
+Do not edit `es_systems.cfg` itself. Older versions of this guide did, and the next OS upgrade
+undid it.
 
 **3. Allow netplay from EmulationStation.** In `/storage/.emulationstation/es_features.cfg`, find
 `<emulator name="retroarch" ...>` and add this right after the `<cores>` line that follows it:
@@ -266,6 +277,10 @@ The core's name, `m2hle`, is its file name without `_libretro.so`.
 
 This lets EmulationStation offer RetroArch's netplay for the core. Leave out `rewind` and
 `autosave`: they need savestates, which this core doesn't have.
+
+This one is still an edit to the OS's file, so an OS upgrade undoes it. Where
+`es_features.cfg` is a link to the OS's read-only copy, the script skips this step, and only
+EmulationStation's netplay option is missing; the core's own RPCN lobby still works.
 
 **4. Keep the core's files out of the ROM folder.** ROCKNIX's RetroArch saves into the ROM folder,
 which is usually shared on your network, and the core keeps its RPCN login with its saves.
@@ -369,7 +384,7 @@ for pixel instead of stretched.
   minutes with the sound board on and began to throttle; the guard eases the load before it gets
   hotter, and eases it further each time that wasn't enough: every second frame for good the
   second time, then the sound board off. A message on screen says which step it took.
-- **Sound board:** your choice. Off saves power and heat. An online match turns it on
+- **Sound board:** your choice; the handheld build starts with it off. Off saves power and heat. An online match turns it on
   automatically, because both players' games have to run the same hardware.
 - **Draw rate:** **30** if the device still runs hot.
 
@@ -400,7 +415,7 @@ there as well as `m2-hle.opt` beside it.
 | The game still starts in the old emulator | Restart EmulationStation. It only reads its settings at startup. |
 | It went back to the old emulator after a freeze or crash | ROCKNIX restored `system.cfg` from its backup. Set the emulator again and run `/usr/bin/chksysconfig backup` (or use the EmulationStation menus). |
 | Black screen, but the picture shows behind RetroArch's menu | Update the core. Early test builds left GL state behind that RetroArch then drew with. |
-| **RetroArch / m2hle** isn't in the emulator list | Check step 2, then restart EmulationStation. |
+| **Sega Model 2** or **RetroArch / m2hle** isn't listed | Check that `/storage/.emulationstation/es_systems_m2hle.cfg` exists (step 2), then restart EmulationStation. |
 | "Could not load" or the core is missing | Check that `/storage/cores/m2hle_libretro.so` exists, and that you installed the ARM Linux zip, not Android's. |
 | The device gets very hot | Keep Heat guard on: it drops to 30 by itself, stays there the second time and turns the sound board off after that. To start cooler, set Draw rate to 30 or turn the sound board off yourself. |
 | Update m2-hle says it couldn't reach GitHub | Turn Wi-Fi on. It needs to reach `api.github.com` and `github.com`. |
@@ -424,7 +439,10 @@ To remove the core completely, also:
 1. Delete `/storage/cores/m2hle_libretro.so` and `/storage/cores/m2hle_libretro.info`.
    If the standalone emulator isn't installed either, also delete
    `/storage/.local/bin/m2hle-update.sh` and `/storage/roms/segamodel2/Update m2-hle.sh`.
-2. Remove the two entries from steps 2 and 3, or restore the `.bak-` copies the installer made.
+2. Remove the netplay entry from step 3, or restore the `es_features.cfg.bak-` copy the
+   installer made. Leave `es_systems_m2hle.cfg` from step 2 if the standalone emulator is
+   installed: it lists that too. Otherwise delete it and `/storage/.local/bin/m2hle-runemu.sh`.
+   ROCKNIX 7.0.2 and later then have no Sega Model 2 system at all.
 3. Restart EmulationStation.
 
 ### Files on ROCKNIX
@@ -439,7 +457,8 @@ To remove the core completely, also:
 | `/storage/.local/share/m2hle/libretro/VERSION.txt` | the build installed |
 | `/storage/.local/share/m2hle/libretro/INSTALLED_SHA256` | the sha256 of the zip the updater installed last |
 | `/storage/.local/share/m2hle/update/` | the updater's downloads and last-check time |
-| `/storage/.emulationstation/es_systems.cfg` | holds the Sega Model 2 emulator entry (step 2) |
+| `/storage/.emulationstation/es_systems_m2hle.cfg` | the Sega Model 2 system, with the core as its emulator (step 2) |
+| `/storage/.local/bin/m2hle-runemu.sh` | launches the system's games (step 2) |
 | `/storage/.emulationstation/es_features.cfg` | lets ES offer netplay for the core (step 3) |
 | `/storage/.config/system/configs/system.cfg` | EmulationStation's per-system settings (step 5) |
 | `/storage/.config/retroarch/config/m2-hle/m2-hle.cfg` | keeps the core's saves out of the ROM folder (step 4) |

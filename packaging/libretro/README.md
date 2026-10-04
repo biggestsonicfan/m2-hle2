@@ -9,7 +9,7 @@ The first supported game is Sonic The Fighters.
 Step by step, for RetroArch and for ROCKNIX, with every setting and file: **INSTALL.md**.
 
 Every zip holds the core, `m2hle_libretro.info` (so RetroArch lists the core by name),
-`VERSION.txt` and this file. Put the core in RetroArch's cores folder and the `.info` in its info folder. **Settings >
+`VERSION.txt`, this file and INSTALL.md. Put the core in RetroArch's cores folder and the `.info` in its info folder. **Settings >
 Directory** in RetroArch shows where both are on your system.
 
 | Zip | For | Video driver |
@@ -29,8 +29,9 @@ itself; if it doesn't, pick `glcore` or `gl` in **Settings > Drivers**.
 - **macOS:** the core is unsigned. If macOS blocks it, allow it in **System Settings > Privacy &
   Security**.
 - **ROCKNIX:** unpack the zip on the device and run `bash install-rocknix.sh` as root, over ssh. It
-  installs the core, adds **RetroArch / m2hle** to Sega Model 2's emulator list in
-  EmulationStation, and keeps the core's files out of the ROM folder. Restart EmulationStation
+  installs the core, adds the Sega Model 2 system to EmulationStation (a drop-in,
+  `es_systems_m2hle.cfg`, with **RetroArch / m2hle** as its emulator), and keeps the core's
+  files out of the ROM folder. Restart EmulationStation
   afterwards. `bash install-rocknix.sh --make-default` also makes it Model 2's default emulator.
   It also adds **Update m2-hle** to the Sega Model 2 game list, which updates the core (and the
   standalone m2hle, if that is installed too) from the canary release, picking the zip for the
@@ -88,7 +89,7 @@ RetroArch's **Quick Menu > Controls** remaps on top, as with any core.
 | Sound driver | 68000 (the board), In C (lighter) | next load |
 | Sound board on its own core | enabled, disabled | at once |
 | Online play | RetroArch, RPCN | next load |
-| Input delay (frames) | 1 to 8 | the next session you host |
+| Input delay (frames) | 1 to 6, or 8 (default 2) | the next session you host |
 
 - **Full screen** draws the game at the size of the window or screen, fitted to its 496:384
   shape, so RetroArch has nothing left to scale. Where the core can't find the size, it uses
@@ -101,9 +102,11 @@ RetroArch's **Quick Menu > Controls** remaps on top, as with any core.
   None of this touches an online match: the draw rate is this machine's business only, and the
   sound board stays on while a match is being set up or played, because the other board runs it
   too. It goes off once the match is over. The guard reads Linux's thermal zones, so it does
-  nothing on Windows or macOS. The handheld build has it at 85 C by default.
-- **Sound board** off is silent and cheaper on a handheld. An online match turns it on anyway,
-  because the other player's board always runs it and the two games have to match.
+  nothing on Windows or macOS. The GLES builds (Android and the ARM Linux handhelds) have it at
+  85 C by default.
+- **Sound board** off is silent and cheaper on a handheld. The GLES builds start with it off,
+  and in Full screen; the desktop builds start with it on, at Double. An online match turns it
+  on anyway, because the other player's board always runs it and the two games have to match.
 
 No savestates, so no rewind or run-ahead either.
 

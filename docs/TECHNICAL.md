@@ -11,8 +11,9 @@ targets the wider Model 2 / 2A-CRX / 2B-CRX catalogue — *Fighting Vipers* boot
 code, and a homebrew ROM runs on it too.
 
 The emulator is **HLE** (high-level emulation): the i960 game code is interpreted for real,
-while the geometry coprocessor, parts of the frame loop, and the audio path are intercepted
-and reimplemented in C rather than simulated gate-for-gate.
+while the geometry coprocessor and a few hot game routines (STF's texture loader) are
+reimplemented in C rather than simulated gate-for-gate. The sound board runs the game's own
+68000 driver; a C port of STF's driver is optional (`--sound-hle`).
 
 ```
 git clone --recurse-submodules <this repo>       # or: git submodule update --init
@@ -81,11 +82,13 @@ the next game cheaper instead of being spent on a single ROM set.
 |---|---|
 | Intel i960 KB CPU core | Interpreted, boots STF and FV to gameplay |
 | Memory bus | 36 regions, MMIO callbacks, board + game address maps |
-| COP / ADSP-21060 SHARC | HLE math engine, ~90 commands, column-major post-multiply matrices |
+| COP / ADSP-21060 SHARC | HLE math engine, about a hundred commands, column-major post-multiply matrices |
 | 2D tiles | System 24 tile compositor, palettes, per-tile priority against the 3D layer |
 | 3D pipeline | Index-array polygon decoder (J = 1.0 vs. reference meshes), textures, flat + luma shading, backface cull, shadows |
 | MC68000 sound CPU | Full opcode core with Motorola cycle timing, unit tests |
 | SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
+| Sound driver in C | Optional for STF (`--sound-hle`): its driver ported to C, the same SCSP underneath, the i960 none the wiser |
+| Backup RAM | The board's SRAM kept between a player's own boots, as MAME's `backup1` (`--nvram-dir`, `--no-nvram`); detached during netplay |
 | Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
 | Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
 | Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
@@ -93,10 +96,11 @@ the next game cheaper instead of being spent on a single ROM set.
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
-| Picture filters | Lost Judgment's CRT scanlines, as [YAMP](https://github.com/biggestsonicfan/YAMP) ports them (every build), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
+| Picture filters | Lost Judgment's CRT scanlines, as [YAMP](https://github.com/biggestsonicfan/YAMP) ports them (desktop and web builds), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
 
 Game profiles live in [src/profiles/](../src/profiles/): `sfight_console`, `sfight`, `fvipers`,
-`m2snake` (the web build carries the two Sonic the Fighters profiles only).
+`m2snake`, and `sfight_homebrew` for homebrew run on STF's board (the web build carries the two
+Sonic the Fighters profiles only).
 
 ### Sonic the Fighters: Console and Arcade
 
@@ -123,18 +127,27 @@ pick the same one to see each other's rooms.
 - [src/board/](../src/board/) — everything shared by every Model 2 ROM set: CPU, bus, COP/SHARC,
   tile and 3D renderers, 68K, SCSP, IRQ/timers.
 - [src/core/](../src/core/) — ROM loading, profile resolution, HLE hook dispatch, emu thread,
-  breakpoints/watchpoints, logging.
+  breakpoints/watchpoints, logging, host audio out, the raw A/V stream, backup RAM, the
+  self-profiler, the heat guard and SKY EYE.
 - [src/net/](../src/net/) — netplay: the RPCN client (TLS, protocol, rooms, signaling), the
   lockstep engine, and the glue that gates the emulator's frame loop on it.
-- [src/ui/](../src/ui/) — ImGui debug windows, game render target, MCP bridge.
+- [src/ui/](../src/ui/) — ImGui debug windows, game render target, MCP bridge, the PS3-release
+  menus (`ps3ui*`), picture filters, capture mode and its tray icon, A/V capture, the overlay
+  host, and the handheld's pad lobby.
+- [src/libretro/](../src/libretro/) — the libretro API header the RetroArch core builds against.
 - [src/profiles/](../src/profiles/) — one `game_profile_t` per ROM set (hook addresses, input map,
   ROM list + CRC32s, quirks).
-- [tests/](../tests/) — seventeen CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input,
-  netplay, PS3 netplay, tiles, heat guard, SCSP DSP ×2, shader presets, PS3 menu settings), plus
-  `cop_replay`, `snd_replay`, `snd_bench`, `det_digest` and `ps3ui_render`, which the graders drive.
+- [tests/](../tests/) — nineteen CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input,
+  netplay, PS3 netplay, tiles, heat guard, host audio out, SCSP DSP ×2, SCSP lazy chip, shader
+  presets, PS3 menu settings), plus `cop_replay`, `snd_replay`, `snd_bench`, `det_digest` and
+  `ps3ui_render`, which the graders drive, and the fuzzers `scsp_fuzz`, `m68k_fuzz` and `i960_fuzz`.
 - [mcp_server/](../mcp_server/) — Python MCP server that drives a running emulator over the bridge.
 - [tools/](../tools/) — graders that measure this emulator against an independent implementation
   of the same ROM formats, with a MAME digest as the third point. See [tools/README.md](../tools/README.md).
+- [packaging/](../packaging/) — the handheld (ROCKNIX) and libretro packaging and notes.
+- [web/](../web/) — the browser build's page and the WebSocket gateway to RPCN.
+- [docs/](README.md) — the documents, listed with a line each in docs/README.md.
+- [licenses/](../licenses/) — licences of the bundled fonts.
 - [vendor/](../vendor/) — dependencies, all git submodules pinned to an exact upstream commit:
   Dear ImGui, dear_bindings (generates the `ig*` C bindings into the build tree at build
   time — nothing generated is committed), Sokol, ImGuiFileDialog, imgui_club (the hex editor
@@ -264,7 +277,8 @@ the picture a second time every frame, so they can cost frame rate on a weak GPU
 
 - **CRT (Lost Judgment's)** -- the CRT filter Lost Judgment's arcade cabinets put on Sonic the
   Fighters, as YAMP reverse-engineered it: one scanline per Model 2 line, a faint aperture
-  grille, a dithered scanline phase. Every build, Direct3D 11 included.
+  grille, a dithered scanline phase. The desktop and web builds, Direct3D 11 included; the
+  handheld build has no filter, and the libretro core leaves filtering to RetroArch's shaders.
 - **Your own shader** -- a libretro GLSL preset (`.glslp` with its `.glsl` files and textures, or
   one `.glsl`), from [libretro's glsl-shaders](https://github.com/libretro/glsl-shaders). The web
   and Linux builds; the Windows build draws with Direct3D 11 and offers the CRT only. Slang
@@ -346,10 +360,11 @@ them into an mp4 with ffmpeg; it is about a hundred lines, and reading it is the
 see the protocol.
 
 **With `--headless`** the emulator brings up a graphics device with no window and no swapchain,
-so no desktop session is needed — a server can stream. That path is D3D11 only for now; on a GL
-build use `--kiosk`, which streams just as well from a parked window.
+so no desktop session is needed — a server can stream. That is D3D11 on Windows and a
+surfaceless EGL / GL context on Linux. On Linux, stream with `--headless`, not `--kiosk`: capture
+mode is Windows-only, so there `--kiosk` is an ordinary window, and every swap costs a readback.
 
-A headless run still gets a **tray icon**, because it has no window and no console of its own
+On Windows a headless run still gets a **tray icon**, because it has no window and no console of its own
 once whatever launched it goes away — without one the only way to stop it is Task Manager, and
 an orphan sits there holding its ports, its ROM and its A/V socket. The menu has the two items
 that matter without a keyboard: restart the sound board, and exit. Exit does not kill the
@@ -369,7 +384,7 @@ A 32-byte header once on connect, then packets. Everything is little-endian.
 
 ```
 char magic[4] = "M2AV";  u16 version = 1;  u16 header_size = 32;
-u16 width, height;       u32 pixfmt;      // the bytes 'B','G','R','A'
+u16 width, height;       u32 pixfmt;      // 'B','G','R','A' or 'N','V','1','2'
 u32 fps_num, fps_den;                     // nominal board rate, informational
 u32 audio_rate = 44100;  u8 channels = 2;  u8 bits = 16;  u16 reserved;
 
@@ -382,10 +397,11 @@ u64 sample;             // A: index of the first sample in this packet
 `sample` is the shared clock: a video frame's pts is `sample / 44100`. Nothing assumes 735
 samples a frame or an exact 60 Hz — a game frame that takes two emulator slices really does
 carry two slices of audio, and the stamps say so. `flags` bit 0 means something of *that*
-stream was dropped before this packet. A video payload is `width*height*4` bytes of BGRA,
-packed, top row first; an audio payload is `size/4` interleaved L,R `int16` frames, raw board
-samples including the board's DC offset (about 5000 of 32768 — a real cabinet's amplifier is
-AC-coupled, so take it out downstream with `highpass=f=5`).
+stream was dropped before this packet. A BGRA video payload is `width*height*4` bytes, packed,
+top row first; an NV12 one is laid out as described under `--av-format` above. An audio payload
+is `size/4` interleaved L,R `int16` frames, raw board samples. STF's output has no DC offset
+since the DSP's MADRS fix; another game's DSP might leave one, so a high-pass downstream
+(`highpass=f=5`) does no harm.
 
 Video may be dropped and the timestamps make that harmless. Audio may not: the ring holds about
 six seconds, and only a client that has stopped reading for that long loses any.

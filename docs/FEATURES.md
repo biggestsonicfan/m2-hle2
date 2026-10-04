@@ -25,7 +25,7 @@ core's *Sonic the Fighters version* option.
 | `sfight_console` | Sonic the Fighters - Console | The default for `sfight.zip`. |
 | `sfight` | Sonic the Fighters - Arcade | The board exactly as it shipped. |
 | `fvipers` | Fighting Vipers | Boots to gameplay. |
-| `m2snake` | Snake | A homebrew game that runs on STF's data ROMs. |
+| `m2snake` | Snake (homebrew) | A homebrew game that runs on STF's data ROMs. |
 | `sfight_homebrew` | Homebrew on Sonic the Fighters' board | Chosen by itself. |
 
 **Sonic the Fighters - Console** plays the way Sega's console releases do:
@@ -49,7 +49,7 @@ core's *Sonic the Fighters version* option.
 - **The warning screen** is skipped unless you pass `--nowarnskip`.
 - **Settings and backup RAM:** the region, damage and free-play defaults apply only while the
   board's backup RAM is blank. Once your saved settings exist, change them in the test menu
-  (F3).
+  (F3 on the desktop, L3 in RetroArch; the browser has no Test key).
 
 **Homebrew.** Put a homebrew program in place of a stock set's program ROMs; [m2-pacman](https://github.com/biggestsonicfan/m2-pacman) is an
 example. The emulator notices that the program is not Sega's and runs it with no game-specific
@@ -117,8 +117,10 @@ rebuilt from every change to master.
   - Step 1, 10 or 100 instructions (F5, F6, F7).
   - Break on warning.
 - **F8** restarts the sound board.
-- **Windows tray icon:** Run/Pause, show or park the window, and Exit. Its tooltip shows the
-  frame rate. `--no-tray` turns it off.
+- **Windows tray icon:** only in capture mode and `--headless` runs, not the normal window.
+  - Capture mode: Show window, Run emulation, Restart sound board, Leave capture mode and Exit.
+    Its tooltip shows the frame rate.
+  - Headless: Restart sound board and Exit, with no pause item. `--no-tray` turns it off.
 
 ### Handheld (ROCKNIX)
 
@@ -136,14 +138,8 @@ rebuilt from every change to master.
   - button macros (X = P+K, Y = K+B, Z = all three)
   - online play
   - update check
-- **Heat guard:**
-  - When the device gets too hot, it draws every second frame until the device is 5 degrees
-    cooler.
-  - The second time it gets too hot, it stays at every second frame.
-  - The third time, or if the device has not cooled within a minute, it turns the sound board
-    off.
-  - It never acts during an online match.
-  - `--max-temp C` quits above C degrees.
+- **Heat:** `--max-temp C` quits above C degrees. The heat guard below is the RetroArch core's,
+  not this build's.
 
 ### RetroArch core
 
@@ -162,12 +158,19 @@ options are:
 | Online play | RetroArch, RPCN |
 | Input delay | 1-6, 8 frames |
 
+**Heat guard** (the core option; 85 °C by default on the GLES builds):
+- When the device gets too hot, it draws every second frame until the device is 5 degrees
+  cooler.
+- The second time it gets too hot, it stays at every second frame.
+- The third time, or if the device has not cooled within a minute, it turns the sound board off.
+- It never acts during an online match.
+
 Savestates, rewind and run-ahead are not supported. Online play needs every machine to start
 from the same cold boot (see [Online play](#online-play)).
 
 ## Controls
 
-The desktop's keyboard defaults are based on the Model 2 Emulator's (m2emulator), with changes. The browser starts with the same keys.
+The desktop's keyboard defaults are based on the Model 2 Emulator's (m2emulator), with changes. The browser starts with the same keys, except F2 and F3.
 
 | | Player 1 | Player 2 |
 |---|---|---|
@@ -179,7 +182,8 @@ The desktop's keyboard defaults are based on the Model 2 Emulator's (m2emulator)
 | Start | 1 | 2 |
 | Coin | 5 | 6 |
 
-F2 is Service and F3 is Test, which opens the operator menu.
+On the desktop, F2 is Service and F3 is Test, which opens the operator menu. The browser has
+neither.
 
 **Desktop**
 - Keyboard only.
@@ -266,7 +270,7 @@ it between the two.
 | Build | Where it is kept |
 |---|---|
 | Desktop, Windows | `%APPDATA%\m2hle2\nvram\<set>\backup1` |
-| Desktop and handheld, Linux | `~/.config/m2hle2/nvram/<set>/backup1` |
+| Desktop and handheld, Linux | `$XDG_CONFIG_HOME/m2hle2/nvram/<set>/backup1`, or `~/.config/m2hle2/...` without it |
 | Browser | localStorage |
 | RetroArch | the frontend's `.srm` |
 
@@ -382,7 +386,7 @@ RetroArch keeps `m2hle-rpcn.cfg` in its saves folder instead.
 | `--match-replay`, `--match-replay-stage N` | Go straight to attract's replay fight. |
 | `--sky-eye LINK` | Open a SKY EYE camera link. |
 | `--no-nvram`, `--nvram-dir DIR` | Backup RAM off, or kept in DIR. |
-| `--export-roms` | Write out the ROMs that were loaded. |
+| `--export-roms DIR` | Write the loaded ROM images to DIR, then quit. |
 | `--headless` | No window. |
 | `--no-tray` | No tray icon (Windows). |
 | `--kiosk`, `--kiosk-size WxH`, `--kiosk-show` | Capture mode (Windows). |
@@ -405,7 +409,8 @@ RetroArch keeps `m2hle-rpcn.cfg` in its saves folder instead.
 | `--net-ps3`, `--net-ps3-wire FILE` | PS3 cross-play on another server, and its wire log. |
 
 Options for development: `--texload-i960`, `--spin-i960`, `--no-mesh-cache`, `--cpu-tiles`,
-`--steps-per-slice N`. `--realirq` and `--live-timers` are accepted and do nothing.
+`--steps-per-slice N`, `--net-p2p-port N` (the peer-to-peer UDP port, for two clients on one
+machine in a loopback test). `--realirq` and `--live-timers` are accepted and do nothing.
 
 ### Handheld
 
@@ -428,8 +433,20 @@ Options for development: `--texload-i960`, `--spin-i960`, `--no-mesh-cache`, `--
 
 | Variable | Effect |
 |---|---|
-| `M2HLE_NO_SOUND_BOARD=1` | Sound board off. |
-| `M2HLE_SOUND_HLE=1` | STF's sound driver in C. |
+| `M2HLE_NO_SOUND_BOARD=1` | Sound board off (desktop only). |
+| `M2HLE_SOUND_HLE=1` | STF's sound driver in C (desktop only). |
 | `M2HLE_SOUND_THREAD=0` | Sound board on the main thread. |
 | `M2HLE_NET_RELAY`, `M2HLE_NET_LOCAL_IP` | As `--net-relay` and `--net-local-ip`. |
 | `M2HLE_HOSTPROF` | Start the profiler (Linux). |
+
+For testing and A/B:
+
+| Variable | Effect |
+|---|---|
+| `M2HLE_TEXLOAD_HLE=0` | STF's texture loader on the i960 instead of in C (desktop only). |
+| `M2HLE_SPIN_SKIP=0` | Run the idle vblank spin instead of skipping it (desktop only). |
+| `M2HLE_UNTHROTTLE=1` | No 60 Hz pacing. |
+| `M2HLE_VDEPTH=0\|1` | The sort key as vertex depth instead of fragment depth (on by default on GLES). |
+| `M2HLE_VIEW_CULL=0` | Draw faces outside the window instead of culling them. |
+| `M2HLE_SCRIPT=449:c,460:,...` | Player 1's inputs by frame, as the browser's `?script` (RetroArch core only). |
+| `M2HLE_RPCN_AUTOJOIN=1\|NAME` | Join any open room, or NAME's, once signed in (RetroArch core only). |

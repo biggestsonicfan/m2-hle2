@@ -55,7 +55,7 @@ The keyboard defaults are based on the Model 2 Emulator's (m2emulator), with cha
 | Start | 1 | 2 |
 | Coin | 5 | 6 |
 
-F2 is Service and F3 is Test (the operator menu). On the desktop F9 pauses. The browser and
+On the desktop F2 is Service, F3 is Test (the operator menu) and F9 pauses. The browser and
 RetroArch take gamepads and let you rebind every button.
 
 *Sonic the Fighters* starts as the **Console** version, the way Sega's own ports play it: free
