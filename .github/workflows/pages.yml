@@ -1,6 +1,6 @@
 name: pages
 
-# The web build (WEB-PORT.md) -> GitHub Pages -> https://play.sonicthefighte.rs
+# The web build (docs/WEB-PORT.md) -> GitHub Pages -> https://play.sonicthefighte.rs
 #
 # Every push builds the Emscripten frontend, runs it in headless Chrome, and only
 # then publishes build_web/site/ as the whole website. There is no gh-pages
@@ -57,7 +57,7 @@ jobs:
 
       # Pinned on purpose. A toolchain bump can change float code generation, and
       # netplay needs two players' builds to compute the same frames
-      # (WEB-PORT.md, "Determinism"). Bump it deliberately, with the smoke test
+      # (docs/WEB-PORT.md, "Determinism"). Bump it deliberately, with the smoke test
       # and a digest comparison, not by accident.
       #
       # The pin is `version`, not the action's tag: with `emsdk-version` unset the

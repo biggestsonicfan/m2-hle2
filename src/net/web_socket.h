@@ -2,7 +2,7 @@
  * web_socket.h — the browser's sockets, for the web build only (Emscripten).
  *
  * A browser tab can open no TCP and no UDP. The web build reaches RPCN through
- * the gateway (web/gateway/, WEB-NETPLAY.md section 4) over two kinds of
+ * the gateway (web/gateway/, docs/WEB-NETPLAY.md section 4) over two kinds of
  * WebSocket, and this file is the whole of the C side of that:
  *
  *   stream   <gateway>/stream: the bytes of one TLS session to RPCN. tls.h's web

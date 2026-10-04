@@ -2,7 +2,7 @@
   "name": "m2hle-gateway",
   "version": "1.0.0",
   "private": true,
-  "description": "WebSocket gateway between play.sonicthefighte.rs and RPCN (WEB-NETPLAY.md)",
+  "description": "WebSocket gateway between play.sonicthefighte.rs and RPCN (docs/WEB-NETPLAY.md)",
   "type": "module",
   "main": "gateway.mjs",
   "engines": { "node": ">=20" },

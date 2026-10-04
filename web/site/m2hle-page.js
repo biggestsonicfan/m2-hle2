@@ -2,7 +2,7 @@
  * The page's half of the web build. Loaded BEFORE m2hle.js, because Emscripten
  * reads the global `Module` as it starts.
  *
- * What is here today is step 1 of the wizard (WEB-PORT.md section 5): hand the
+ * What is here today is step 1 of the wizard (docs/WEB-PORT.md section 5): hand the
  * emulator the player's own game file. The file is read in this page and passed
  * to the wasm heap; it is never sent anywhere.
  */
@@ -87,7 +87,7 @@ function loadZip(bytes) {
  * hidden page's own timers -- ticks several times a frame, and the emulator runs
  * the board from it whenever frames have gone quiet (web_background_tick, which
  * does nothing while they arrive). The GPU work stops with the frames, the sound
- * with the AudioContext (audioStart). Measure per browser: WEB-NETPLAY.md 5.3. */
+ * with the AudioContext (audioStart). Measure per browser: docs/WEB-NETPLAY.md 5.3. */
 let runWorker = null;
 
 function keepRunning() {

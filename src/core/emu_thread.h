@@ -449,7 +449,7 @@ static inline void emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t 
  * The sound board is charged a frame of samples at each vblank, 735 at
  * 44.1 kHz. Mid-frame it still advances as far as the MIDI conversation needs:
  * sound_uart_make_room runs it early and `ahead` owes those samples back at the
- * edge. What it never does is gain time (SLICE-CLOCKS.md). */
+ * edge. What it never does is gain time (docs/SLICE-CLOCKS.md). */
 static inline bool emu_sound_slice_end(bool frame) {
     if (!frame) return false;
     sound_run_slice(EMU_SLICES_PER_SEC);

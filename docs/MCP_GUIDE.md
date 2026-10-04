@@ -1,16 +1,16 @@
-# m2-hle MCP Server Guide
+# m2-hle2 MCP Server Guide
 
-A new Claude instance reading this can fully operate the m2-hle Sega Model 2 emulator via the MCP tools listed below. No prior context is needed.
+A new Claude instance reading this can fully operate the m2-hle2 Sega Model 2 emulator via the MCP tools listed below. No prior context is needed.
 
 ---
 
 ## What this is
 
-**m2-hle** is a Sega Model 2 arcade board emulator written in C11 with an ImGui debug UI. The first game profile is *Sonic The Fighters* (STF); *Fighting Vipers* and the m2snake homebrew have profiles too (`src/profiles/`). The emulator runs an Intel i960KB CPU at 25 MHz with HLE (high-level emulation) hooks for timing and hardware stubs.
+**m2-hle2** is a Sega Model 2 arcade board emulator written in C11 with an ImGui debug UI. Its game profiles (`src/profiles/registry.h`) are *Sonic The Fighters* twice on the `sfight` set (Console, the default, and Arcade), *Fighting Vipers*, the m2snake homebrew, and "Homebrew on Sonic the Fighters' board", the profile a swapped program on the `sfight` set falls back to. The emulator runs the board's Intel i960KB at 25 MHz; the vblank and timers come on its own cycle clock. The coprocessor is emulated at its FIFOs, the sound board runs its 68000 and SCSP, and a few HLE hooks remain: STF's texture loader runs in C, and some hardware stubs.
 
-The **MCP bridge** is a local TCP JSON server built into the emulator (`src/ui/mcp_bridge.h`). When launched with `--mcp`, the emulator listens on `127.0.0.1:7172`. The protocol is newline-delimited JSON: one `{"cmd":"...", ...}` object per line in, one reply object per line out, always carrying `ok` (and `error` when it is false). It serves **one client at a time**, one request at a time; a request line is capped at 8 kB and a reply at 128 kB.
+The **MCP bridge** is a local TCP JSON server built into the emulator (`src/ui/mcp_bridge.h`). When launched with `--mcp`, the emulator listens on `127.0.0.1:7172`. The protocol is newline-delimited JSON (`\n` or `\r` ends a request): one `{"cmd":"...", ...}` object per line in, one reply object per line out, always carrying `ok`, and usually `error` when it is false (a few failures give only `ok:false`). An unknown command answers "unknown cmd: X", a line with no `cmd` "missing cmd". It serves **one client at a time**, one request at a time; a request line is cut at 8191 bytes (the rest is dropped, not refused) and a reply is capped at 128 kB.
 
-The Python MCP server (`mcp_server/server.py`) connects to that port and exposes a subset of the commands as MCP tools: `get_status`, `get_registers`, `read_memory`, `write_memory`, `emu_run`, `emu_stop`, `emu_step`, the six breakpoint tools, `set_break_on_unknown_cop`, `get_cop_diagnostics`, `wait_for_stop`, the five `objview_*` tools, `get_geo_captures`, `wait_frames`, `run_frames` and `set_input`. Every other command in this guide is reached by sending its JSON line to the bridge directly (the graders under `tools/` and the netplay examples below do exactly that).
+The Python MCP server (`mcp_server/server.py`) connects to that port and exposes a subset of the commands as MCP tools: `get_status`, `get_registers`, `read_memory`, `write_memory`, `sky_eye`, `sky_eye_link`, `emu_run`, `emu_stop`, `emu_step`, the six breakpoint tools, `set_break_on_unknown_cop`, `get_cop_diagnostics`, `wait_for_stop`, the five `objview_*` tools, `get_geo_captures`, `wait_frames`, `run_frames`, `set_input` and `overlay_swap`. Every other command in this guide is reached by sending its JSON line to the bridge directly (the graders under `tools/` and the netplay examples below do exactly that).
 
 ---
 
@@ -49,7 +49,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
 | `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
 | `--match-replay` | Arm `match_replay` (below) from boot |
-| `--sky-eye <link>` | Start `sky_eye` (below) from boot with a noclip view link |
+| `--sky-eye <link>` | Start `sky_eye` (below) from boot with a [noclip](https://github.com/biggestsonicfan/noclip) view link |
 | `--objview [N]` | Open the object viewer at boot, optionally on model N |
 | `--headless` | No window, GPU or audio device. The object-viewer tools do not work here |
 | `--no-tray` | `--headless` without its notification-area icon (a service, or a Session 0 run) |
@@ -79,10 +79,16 @@ Anything else answers `ok:false` with "… is not served on the read-only watch 
 
 **`get_status()`**
 Returns: `running` (bool), `halted` (bool), `ip` (hex string), `steps_per_second` (int),
-`profile` (string), `frames` (int), `rom_loaded` (bool), `match_replay`,
-`match_replay_frame`, and two objects: `av` (the `--av-port` server's state) and
+`steps` (instructions since boot), `profile` (string), `frames` (int), `rom_loaded` (bool),
+`match_replay`, `match_replay_frame`, `version` and `build`, and these objects:
+`idle_hold` (`on`, `holding`; see `idle_hold` below), `texload` (`hle`: the texture
+loader runs in C; `rows` it has run), `av` (the `--av-port` server's state),
 `overlay` (whether an `--overlay` plugin is loaded and running, its `path`, and
-the `swap` block that `overlay_swap` below moves along).
+the `swap` block that `overlay_swap` below moves along), `render` (the host's
+cumulative render times: `frames`, `compose_us`, `scan_us`, `upload_us`,
+`draw3d_us`, `tiles_us`) and `emu` (the emulation's cumulative times: i960, COP,
+sound and the waits, with `frame_max_us`, the worst frame since the last
+`get_status`).
 
 `frames` is a monotonic count of completed game frames — the emulator's own frame
 clock, which is what a capture should pace on rather than wall time or steps/s.
@@ -124,15 +130,18 @@ It does not set the debug menu's `debug_flag` bit 5, which would also stop the
 fighters, collision and the attract movie. Returns `phase`: `loading` (the stage
 is not up yet), `settling` (it is, the camera is held, textures still arriving),
 `ready` (texture RAM unchanged for two polls 15 frames apart) or `off`; the
-request (`stage`, `eye`, `ang`), `frames` since it, `camera_held` (the hook found
-the record last frame), `hook_calls` (times `camera_control` reached it), and `game`: what the board holds now. Run it with a
+request (`stage`, `eye`, `ang`, `from_explorer`), `frames` since it, `phase_frames`
+in this phase, `texram_stable_polls`, `camera_held` (the hook found
+the record last frame), `hook_calls` (times `camera_control` reached it), and `game`
+(`stage_num`, `camera`, `eye`, `ang`): what the board holds now. It refuses any
+profile but `sfight` and `sfight_console`. Run it with a
 fight on screen, e.g. `--match-replay`: in the attract's other scenes the fight
 camera is not drawn.
 
 **`sky_eye_link()`**
 The game's camera and stage now as a noclip link fragment (`#game=sfight&tab=stage&…`
 with `eye`/`ang`, and `pos`/`target`/`look` for a noclip without them). Append it to
-the explorer's page URL.
+the explorer's page URL. Returns `link`, or the error "no STF camera record".
 
 **`get_registers()`**
 Returns a full i960 CPU snapshot:
@@ -154,7 +163,7 @@ The **condition code** is in `ac` bits `[2:0]`:
 ### Memory
 
 **`read_memory(addr: str, size: int)`**
-Read up to 4096 bytes from the bus (a larger `size` is clamped). `addr` is a hex string (`"0x00500700"`). Returns `addr` and `data` as a hex string (`"DEADBEEF..."`). Decoding: every 2 hex chars = 1 byte, little-endian within each 32-bit word.
+Read up to 4096 bytes from the bus (a larger `size` is clamped). `addr` is a hex string (`"0x00500700"`). Returns `addr` and `data` as a hex string (`"DEADBEEF..."`). Decoding: every 2 hex chars = 1 byte, in address order (a 32-bit word reads back little-endian).
 
 **`read_many(ranges: [[addr, size], ...])`**
 Up to 64 ranges and 32 kB in all, in one round trip:
@@ -167,8 +176,10 @@ that samples a running game, and above all in a netplay session: a pause there s
 both machines. A bot that paused for each observation ran its rounds at ~28 fps against
 60 at character select on the same link.
 
-**`write_memory(addr: str, data: str)`**
+**`write_memory(addr: str, data: str, rom?)`**
 Write bytes to the bus. `data` is a hex string with no spaces. Returns `bytes_written`.
+`rom: 1` writes what the CPU reads instead, program ROM included (a grader's cheat,
+e.g. pinning `rand()`); the bus's own write map leaves ROM alone.
 Both are done under the emu mutex, so a write lands in one piece.
 
 **`dump_memory_file(addr: str, size: int, path: str)`**
@@ -208,7 +219,7 @@ table. Returns `first`, `count`, `nonempty`, `tris`.
 reads, so the board, the A/V server and the netplay session come down in the same order any
 other exit uses. The reply arrives first and then the socket closes because the process went
 away. A `--headless --no-tray` run has no other way out, which is what this is for; a windowed
-run in capture mode is allowed through the close it would otherwise swallow.
+run in capture mode is allowed through the close it would otherwise swallow. Returns `quitting: true`.
 
 **`emu_step(count: int = 1)`** — Step `count` instructions. Emulator must be stopped. Count range: 1–1 000 000. Returns `steps`.
 
@@ -257,8 +268,8 @@ with no session: re-installs the ROM set and resets both CPUs, the sound board,
 the interrupt controller, the input latch, the frame clock and the step count.
 The run state is left alone, so a stopped board stays stopped, at the reset
 vector. Returns `resets`, the number performed so far. Refused with no ROM set
-loaded, and while a netplay session is at the barrier or playing -- there it
-would reset one board of two. `tools/grade-reset.mjs` is built on it.
+loaded, and while a netplay session is at the barrier, playing or watching -- there it
+would reset one board of several. `tools/grade-reset.mjs` is built on it.
 
 **`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
 for an online opponent (`--idle-until-match` sets it at launch). While it is on
@@ -317,10 +328,12 @@ Returns `break_on_unknown_cop`. After `emu_run()`, `wait_for_stop()` reports
 `reason: "cop_unknown"` with `cop_cmd` and `cop_ip`.
 
 **`get_cop_diagnostics()`**
-COP counters and the unknown-command log: `writes`, `reads`, `transforms`,
+COP counters and the unknown-command log: `writes`, `reads`, `upload_words`
+(boot-image halfwords), `transforms`,
 `matrix_reads`, `unknown_cmds`, `unknown_unique`, `break_on_unknown`,
 `unknown_triggered`, `trigger_cmd`, `trigger_ip`, `cmd_ips` (the last IP to send
-each of a handful of common commands) and `unknown_log`, an array of
+each of `set_pos`, `set_ang_x`, `set_ang_y`, `set_ang_z`, `read_matrix`,
+`rot_transform`, `full_transform`, `sin_scale`, `cos_scale`, `atan2`) and `unknown_log`, an array of
 `{cmd, first_ip, count}` per distinct unknown opcode.
 
 ### Object viewer (screenshots of one model, from any angle)
@@ -342,7 +355,7 @@ Pass an absolute path to `objview_shot` or the write fails with `cannot open ...
 
 ---
 
-**`objview_wait_ready(timeout_ms=60000)`**
+**`objview_wait_ready(timeout_ms=60000)`** (capped at 600000)
 
 Block until the game has built the 3D state the viewer needs. The model table is ROM and
 readable the moment a set loads, but what the object is *made of* is not: the texture sheets
@@ -404,7 +417,7 @@ object's. `ok=False` means the object did not draw, and `last_error` says why.
   geometry one. `wireframe=True` overlays the decoder's edges, which is how you see seams and
   degenerate faces.
 
-**`objview_shot(path, ...)`** — render and write PNGs
+**`objview_shot(path, ..., timeout_ms=30000)`** — render and write PNGs
 
 `path` must be absolute. A single shot writes exactly that file; for several it is the stem
 and the shots land at `<stem>-000.png`, `<stem>-001.png` and so on. Angles come from one of
@@ -528,8 +541,8 @@ for the new one, and the game comes back `hold_s` after the card went up. Return
 or a swap is already running, and then nothing shows on the stream. Follow it with
 `get_status`: `overlay.swap.state` goes `queued` → `announce` → `standby` → `hold` → `idle`,
 then `overlay.swap.last` is `ok`, `rolled_back` (the new file would not load and the old one is
-running again) or `failed`. `README.md`, "Putting a new overlay build on a live stream", has
-the details. JSON-escape the path: `"C:\\fly\\flyoverlay.dll"`.
+running again) or `failed`. [TECHNICAL.md, "Putting a new overlay build on a live stream"](TECHNICAL.md#putting-a-new-overlay-build-on-a-live-stream-overlay_swap)
+has the details. JSON-escape the path: `"C:\\fly\\flyoverlay.dll"`.
 
 ### Netplay (RPCN)
 
@@ -553,13 +566,14 @@ m2hle --rom sfight.zip --run --netplay --net-server rpcn.sonicthefighte.rs --net
 **`netplay_status(log: int = 12, rooms: int = 0)`**
 Everything the published snapshot holds. `state` is the text
 (`off` / `connecting` / `online` / `in a room` / `waiting at the barrier` /
-`playing` / `failed`) with `state_num` beside it, plus `room_id` (a **string** —
+`playing` / `watching` / `failed`) with `state_num` beside it, plus `room_id` (a **string** —
 it is 64-bit), `com_id`, `frame`, `stalls`, `generation`, `seed`,
-`desync_frame` (null while the two boards agree), `error`, `stage`, `is_host`,
-`player`, `room_flags`, and a `twitch` object (`state`, `signed_in`, `npid`,
-`user_code`, `uri`, `error`). `rooms: 1` adds `search_pending` and `rooms`, the
-last search's results as `{room_id, owner, members, max, password, flags}`
-(`flags` bits 6-7 are the build family: 1 is a browser-build room, which this
+`desync_frame` (null while the two boards agree), `empty_room`, `error`, `stage`, `is_host`,
+`player`, `room_flags` (a hex string), and a `twitch` object (`state`, `signed_in`, `npid`,
+`user_code`, `uri`, `error`). On a PS3 link it adds a `ps3` object, the PS3 lockstep's
+state. `rooms: 1` adds `search_pending` and `rooms`, the
+last search's results as `{room_id, owner, members, max, password, flags, rules}`
+(`flags` is a hex string; bits 6-7 are the build family: 1 is a browser-build room, which this
 build can join now that cross-play is on); `log` is how many lines of
 the emulator's own netplay log to return, with `log_count` beside it so a
 poller can tell "nothing happened" from "I missed some".
@@ -573,6 +587,7 @@ poller can tell "nothing happened" from "I missed some".
 | `heard` | a datagram has actually arrived from them |
 | **`ready`** | **they have joined AND pressed Start — this is a challenge** |
 | `ready_gen` | the session generation they announced |
+| `rtt_ms` | the round trip to them |
 | `addr` | the address the server gave for them |
 
 `ready` is the whole reason these commands exist. RPCN has no "ready" message;
@@ -593,6 +608,14 @@ flow — which signs in *and connects itself*, so it replaces the connect rather
 than preceding it. Passing `pass` logs in with the password; the stored Twitch
 token is kept, not cleared.
 
+`netplay_host`, `netplay_join` and `netplay_search` take the same fields, and these
+too: `room_pass`, `max_players`, `vs` (VS mode for a room this hosts; unset, it
+follows `--vs-mode`), `entry`, `watch`, `ps3` and `wire` (the PS3 wire log's path),
+and the room's rules: `rounds` (0-3 = 2-5 wins), `time` (0-3 = 10/30/60/99 s),
+`type` (0-3 = A-D), `secret` (0/1), `range` (0 worldwide, 1 same area) and `players`
+(2-8, a PS3 search only). A host publishes the rules; a search matches on the ones
+named and takes any value for the rest.
+
 Every command from here down answers at once with `queued` (the verb) and the
 current `state`; poll `netplay_status` for the result.
 
@@ -601,7 +624,7 @@ In a room of more than two, two fight and the rest wait in line and watch; the
 winner stays on and the loser goes to the back (`net/room.h`). The room's owner
 starts the first match once every player has pressed `netplay_start`, and after
 that the room rolls on by itself on a countdown.
-**`netplay_join(room_id, room_pass)`** — join one. `room_id` is a string.
+**`netplay_join(room_id, room_pass)`** — join one. `room_id` is required, as a string or a bare number.
 Straight after sign-in, both wait until RPCN's signaling helper has answered
 (at most 4 s; the log says "waiting for the server to learn this machine's
 address"), because a room copies its members' addresses once, when it is
@@ -617,15 +640,16 @@ line for that side.
 **`netplay_watch(watch)`** — 1 sits out (never picked to fight), 0 comes back.
 **`netplay_force_start()`** — the room's owner only: start the next match now.
 
-`netplay_status` carries a `room` object: `phase` ("lobby"/"match"), `match`,
+`netplay_status` carries a `room` object: `known`, `phase` ("lobby"/"match"), `match`,
+`session`, `vs_mode`, `rules` (`rounds`, `time`, `type`, `secret`, `range`),
 `fighters` (member ids on 1P and 2P), `last_result` (0 = 1P won), `auto_start_s`,
-`max`, `me`, and `members` in line order, each with `id`, `npid`, `line`,
-`side` (0/1, -1 when not fighting), `ready`, `watch`, `entry`, `games`, `wins`,
-`points` and whether we hear them. `state` is "watching" while this board runs
+`max`, `me`, and `members` in line order, each with `id`, `npid`, `me`, `owner`, `line`,
+`side` (0/1, -1 when not fighting), `known`, `ready`, `watch`, `entry`, `playing`,
+`result_match`, `games`, `wins`, `points`, `addr_known`, `heard` and `rtt_ms`. `state` is "watching" while this board runs
 somebody else's match; `player` is then 2.
 
 **`netplay_start()`** — **accept.** Begin (or restart) a lockstepped session.
-Refused until this end is in a room.
+Refused with "take a room first" until this end is in a room, and after a failure.
 
 Two things it is important to have read before calling it:
 
@@ -659,7 +683,7 @@ A lobby that holds itself open, in full:
 {"cmd":"netplay_stop"}                     // match over — the room stays open
 ```
 
-`flystf/rpcn.py` in the [stf-fly](../stf-fly) sibling is that loop with a fruit
+`flystf/rpcn.py` in the [stf-fly](../../stf-fly) sibling is that loop with a fruit
 fly behind it.
 
 ### Captures and diagnostics
@@ -671,9 +695,9 @@ process, so pass absolute ones.
 **`get_geo_captures()`**
 The models the board drew in the last frame: `count` and `captures`, each with
 `idx` (what `objview_set`'s `capture` takes), `model`, `mesh`, `pos`, `ang`,
-`xyz`, per-column `scale`, `up`, `vs`, `win`, `vp`, `gp`, `tpa`, `tha`, `matptr` and `m`, the 12-word matrix.
+`have_pos`, `have_ang`, `have_mat`, `has_matrix`, `xyz`, per-column `scale`, `up`, `vs`, `win`, `vp`, `gp`, `tpa`, `tha`, `matptr` and `m`, the 12-word matrix.
 
-**`capture_dl(path, frames = 60, probes, max_words, timeout_ms = 120000, lo, hi, slots, unit, blocks, cop)`**
+**`capture_dl(path, frames = 60, probes, max_words, timeout_ms = 120000, lo, hi, slots, unit, blocks, cop, run)`**
 Record every write to the geometry processor and the coprocessor for `frames`
 whole frames (capped at 3600), in the explorer toolkit's MAME capture format:
 `<path>.bin` (u32 address, u32 value per write) and `<path>.json` (`words`,
@@ -682,27 +706,30 @@ each frame edge; `lo`/`hi` narrow the recorded window; `slots:1`,
 `unit:1` and `blocks:"hexaddr:hexlen,..."` add `<path>.slots.bin`,
 `.unit.bin` and `.blocks.bin` per mark; `cop:1` records the coprocessor
 conversation in a MAME SHARC-side capture's format with `.bufram.bin` and
-`.dm.bin` beside it (`tests/cop_replay`). Blocks until done. Returns `words`,
+`.dm.bin` beside it (`tests/cop_replay`). `run: 1` starts the emulator once the
+capture is armed. Blocks until done. Returns `words`,
 `frames`, `complete`, `overflow`.
 
 **`capture_snd(path, frames = 600, async = 0, timeout_ms = 600000)`**
 The sound board's side of the next `frames` game frames in
 `tools/mame/snd-capture.lua`'s format: `<path>.bin`, `.ram.bin`, `.regs.bin` and
-the `.json` index. With `async: 1` it only arms (returns `armed`), so a driver
+the `.json` index. With `async: 1` it only arms (returns `armed: true`), so a driver
 can arm before `emu_run` and catch power-on; **`capture_snd_finish(timeout_ms)`**
 then waits for it and writes the index. Returns `records`, `frames`.
 
 **`sound_codes(since = 0)`** — every command the i960 has sent the sound board,
-oldest first, framed, from command number `since` on (`codes`, with `next` to pass
-as `since` to read on and `lost` for any that left the ring). `sent` and `taken`
+oldest first, framed, from command number `since` on (`codes`, at most 400 a reply,
+each `[code, sample]` with the board's sample clock; `next` to pass as `since` to
+read on, `total`, and `lost` for any that left the ring). `sample` is the clock now. `sent` and `taken`
 are UART bytes the i960 wrote and bytes the 68000 read back out of the SCSP's MIDI
 buffer: a gap that stays is bytes lost. `queue_hi` is the high-water mark of the
-ROM's command queue, and `midi_hi` / `midi_holds` / `midi_drops` the MIDI buffer's.
+ROM's command queue, and `midi_hi` / `midi_holds` / `midi_drops` / `midi_drains` the MIDI buffer's.
 
 **`prof(on = 1)`**, **`prof_dump(path)`** — the i960 address profiler
 (`tools/prof-state.mjs`): `prof` arms it (clearing it) or disarms it with `on: 0`,
-and `prof_dump` writes `addr,count` to `path` with a `.frames.csv` companion. Only
-an `M2HLE_PROFILE` build counts anything; any other answers `ok: false`.
+and `prof_dump` writes `addr,count` to `path` with a `.frames.csv` companion. `prof`
+returns `on`; `prof_dump` returns `addresses`, `steps` and `frames`, or "nothing
+profiled". Only an `M2HLE_PROFILE` build counts anything; any other answers `ok: false`.
 
 **`dump_geo_list(path)`** — the GEO display list the renderer walks, as last
 published: u32 read pointer, u32 publish count, u16 H-sync, u16 V-sync, then
@@ -715,13 +742,20 @@ bufferram's words. Returns `read_start`, `seq`, `hsync`, `vsync`.
 object `index` (-1 for all), or only captures in `[from, to]` (`to < from` turns
 the range off). Returns `isolate`.
 
-**`set_camera(cam_x, cam_y, cam_z, rot_x, rot_y, fov, test, lines_only, zsort, zrecede)`**
+**`set_camera(cam_x, cam_y, cam_z, rot_x, rot_y, fov, test, lines_only, zflat, zkey0, zsort, zrecede, zlayers, zlayer_steps, texclamp, checker, nnormals)`**
 Live-tune the 3D renderer's camera and switches; values travel as strings and
-an omitted one keeps its value. `zsort: 0` turns off the board's polygon z-sort.
-Returns `cam`, `rot`, `fov`, `lines`, `tris`, `test`.
+an omitted one keeps its value. The switches are A/B toggles, each on by default:
+`zflat: 0` draws a game frame's faces by the half rule instead of the board's flat
+sort key; `zsort` / `zrecede` (the half rule's sort and its recede bound) and
+`zkey0` (key-0 polygons tie) act on a game frame only with `zflat: 0`;
+`zlayers` / `zlayer_steps` are the object viewer's coplanar layers; `texclamp: 0`
+wraps the texture filter at every tile edge; `checker: 0` brings back the old
+checker phase; `nnormals: 0` lights mode 2/3 lists with the ROM normals.
+Returns `cam`, `rot` (`[rot_y, rot_x]`), `fov`, `lines`, `tris`, `test`, `zflat`,
+`zlayers`, `layer_faces`, `zadjust`; "geo3d not ready" before the renderer is up.
 
-**`dump_bones()`** — the current position and a four-slot summary of P1's bone
-slots (`rot_cache_T`, `tgp_T`, `rot_cache_R`), at three decimals.
+**`dump_bones()`** — the current position (`cur_pos`) and a four-slot summary of P1's bone
+slots (`slots`, each `{slot, rot_cache_T, tgp_T, rot_cache_R}`), at three decimals.
 
 **`dump_tgp()`** — the whole 32-slot bone table as the coprocessor stored it in
 bufferram (`tgp`, P1 on 0..15 from 0x3A00, P2 on 16..31 from 0x3B00, each a
@@ -733,11 +767,13 @@ words (`words`: 8 hex chars each, no spaces) through the i960's own MMIO path,
 argument counting and all; `reset: 1` clears COP and SHARC state first. Read the
 result back with `dump_tgp`. Returns `words` (how many went in).
 
-**`sound_status()`** — the sound board at a glance: the 68000's `m68k_pc` /
-`m68k_sr` / `cycles`, `samples`, `irqs`, the SCSP interrupt state (`scieb`,
+**`sound_status()`** — the sound board at a glance: `rom_loaded`, `samples_size`,
+the 68000's `m68k_pc` / `m68k_sr` / `cycles`, `samples`, `irqs` (seven counts),
+the SCSP interrupt state (`scieb`,
 `scipd`, `lines`, `levels`, `timers`), the `keyed` and `active` slot masks,
-`dsp_steps`, the host ring (`out_fill`, `out_dropped`) and the MIDI input
-(`midi_writes`, `midi_fifo`, `midi_drops`, `midi_hi`, `midi_drains`).
+`dsp_steps`, the host ring (`out_fill`, `out_dropped`, `out_reader`), the MIDI input
+(`midi_writes`, `midi_fifo`, `midi_drops`, `midi_hi`, `midi_drains`, `midi_holds`),
+and `driver` (`"68000"`, or `"c"` under `--sound-hle`, with `hle_events` and `hle_keyons`).
 
 **`snd_watch(on)`** — the streaming watchdog: `on: 1` arms it and clears the
 counters, `on: 0` disarms, no `on` reads it. `late_up` of `refills` is the

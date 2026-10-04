@@ -45,7 +45,7 @@ git submodule update --init vendor/noclip
 
 No `npm install`: nothing here has a dependency, except `grade-carpet.mjs`, which
 drives a headless browser through `puppeteer-core` found outside this tree
-(`$M2_PUPPETEER`, a sibling `stf-tools`'s, the explorer's, or `../noclip`'s).
+(`$M2_PUPPETEER`, a sibling [`stf-tools`](https://github.com/biggestsonicfan/stf-tools)'s, the explorer's, or `../noclip`'s).
 Node 18 or newer, because the explorer's zip reader goes through
 `DecompressionStream`.
 
@@ -114,7 +114,7 @@ its built-in `WebSocket`.
 | `ab-builds.mjs` | whether two *builds* emulate the same board. Counts frames with a breakpoint on the frame hook so both stop on the same instruction, then hashes the registers and the same nine regions `grade-reset` uses. No oracle: it answers "is this optimisation, this merge, this other compiler free?" in about ten minutes, where reasoning about it does not. `--sound` adds the sound board (all of sound RAM, the SCSP registers, the 68000's PC/SR/clock). What it cannot see: pixels (headless has no GPU), the GEO's private RAM, and anything that differs between two machines rather than two builds |
 | `grade-all.mjs` | `grade-models`, `grade-texram` and `grade-colors` off one shared capture — driving the game to a scene is the slow part, and two captures minutes apart are two different moments of a running game |
 | `dump-board.mjs` | takes a capture on its own: texture RAM, palette RAM, luma RAM and colorxlat, plus a `capture.json` naming the scene |
-| `av-record.py` | not a grader: the reference client for `--av-port`, the emulator's raw A/V server. Reads the BGRA frames and the 16-bit samples off the socket, lays the irregular video cadence onto a constant 60 fps grid using each frame's board-sample stamp, and hands both to ffmpeg. About a hundred lines against a documented format (README.md, "Raw A/V out"); reading it is the fastest way to see how the format goes back together |
+| `av-record.py` | not a grader: the reference client for `--av-port`, the emulator's raw A/V server. Reads the BGRA frames and the 16-bit samples off the socket, lays the irregular video cadence onto a constant 60 fps grid using each frame's board-sample stamp, and hands both to ffmpeg. About a hundred lines against a documented format ([TECHNICAL.md](../docs/TECHNICAL.md), "Raw A/V out"); reading it is the fastest way to see how the format goes back together |
 | `av-nv12-check.py` | holds the tap's GPU NV12 (`--av-format nv12`) against ffmpeg's BT.709 limited-range conversion of the BGRA tap, on two headless emulators side by side. `--av-test-card` first: the BGRA tap must be the card exactly, pure red must be Y 63 Cb 102 Cr 240, and the ramp must be at the bottom. Then an attract frame both runs rendered, paired by board frame. Pass is every Y, Cb and Cr within ±1 of swscale's `area` (2×2 box) filter; its bicubic default is printed too and differs only at colour edges. Headless works on the Linux GL build too (surfaceless EGL); `--window` runs the emulators windowed instead (under `xvfb-run` on Linux). Run it after touching `ui/av_capture.h` |
 | `libretro/core-options.py` | not a grader: a fake libretro frontend, about a hundred lines of ctypes, that loads the built core and calls `retro_set_environment` alone -- no ROM, no GL context. It prints the table and checks what a frontend would quietly ignore instead of report: a `default_value` that is not one of the option's values (libretro.h: "this option will be ignored", and the row just never appears), a duplicated key, an option count that changed between two tables, and a row the update-display callback leaves visible with nothing behind it. Run it after touching the option table |
 | `watch-var.mjs` | who writes this address, and what do they write? A bus watchpoint that reports the value and the IP behind it, so a variable whose owner is unknown can be traced back to its routine |
@@ -528,7 +528,7 @@ What it found (2026-10-01): medians from 60 (stage 11) to 2,778 pixels of
 190,464, and the board key nearer MAME on every stage, by 539,225 changed
 pixels to 3,496. Every worst picture is animation phase: the rings' spin, water
 speckle, the Death Egg's floor scroll, the laser rails' blink, the stage card a
-frame apart. None of it is geometry. BUBBLEGUM.md §1 has the table.
+frame apart. None of it is geometry. docs/BUBBLEGUM.md §1 has the table.
 
 ## The Flying Carpet's rug (`grade-carpet`)
 
@@ -801,7 +801,7 @@ different slot; audio envelope correlation 0.992 and loudness within 1% in every
 notes of the first five seconds and held 25-32 voices keyed where MAME holds
 5-16.
 
-**Against current MAME (2026-09-28, claude_mame at `1d6dbfafe53`, a fresh 90 s
+**Against current MAME (2026-09-28, [claude_mame](https://github.com/biggestsonicfan/mame) at `1d6dbfafe53`, a fresh 90 s
 capture on the Linux build):** the MAME above was from before its 2026-09-23
 merge, which gave the sound 68000 a wait state on every sound RAM and SCSP
 access, put the i960's UART on a real serial line into the SCSP, and latched
@@ -1072,7 +1072,7 @@ inputs.
 ### The driver in C against the 68000 (`grade-sound-hle.py`)
 
 `--sound-hle` runs STF's sound driver ported to C (`src/board/sound_hle.h`,
-SCSP.md "The driver in C") in place of the 68000. It is not bit-exact by
+docs/SCSP.md "The driver in C") in place of the 68000. It is not bit-exact by
 design, so it is graded, not `cmp`ed: `grade-sound-hle.py` runs `snd_replay`
 twice on each input, the board as is and with `SND_HLE=1`, and reports the
 board's key-ons matched on what they play (not the slot), their timing, how
@@ -1089,7 +1089,7 @@ det_digest <merged zip> --frames 20000 --script "..." --sound-hle --out b.txt  #
 The first five columns of the two `det_digest` outputs (frame, check, work
 RAM, buffer RAM, COP) must be identical: the i960 only sees the UART, which
 board time clocks. `--pcm FILE` writes each run's audio, for a gameplay
-comparison. The numbers are in SCSP.md.
+comparison. The numbers are in docs/SCSP.md.
 
 ## The netplay reset
 
@@ -1138,8 +1138,8 @@ answers how fast: instructions a second over the same window, builds alternated,
 best of each.
 
     cmake -S . -B build_prof -G "Visual Studio 18 2026" -A x64 -DM2HLE_PROFILE=ON
-    node tools/prof-state.mjs --exe build_prof/Release/m2hle.exe --state round-mask
-    node tools/bench-state.mjs build_base/Release/m2hle.exe build_opt/Release/m2hle.exe \r
+    node tools/prof-state.mjs --exe build_prof/Release/m2hle.exe --from 0xB820 --to 0xC34C
+    node tools/bench-state.mjs build_base/Release/m2hle.exe build_opt/Release/m2hle.exe \
          --state round-mask --rounds 5
 
 It reports instructions a second and not milliseconds on purpose. The board has to
@@ -1184,7 +1184,7 @@ Before `emu_sound_slice_end` the sound board was charged a frame per *slice*, an
 VS screen's 65 frames spanned 80 slices: 904.6 samples a frame (802.8 with
 `--live-timers`), the music ~23% fast through the load. It is 735.0 now, at any
 `--steps-per-slice`. Since Pinboard #253 a slice is the board's own vblank and the
-timers are always live, so it holds by construction. See `SLICE-CLOCKS.md`.
+timers are always live, so it holds by construction. See `docs/SLICE-CLOCKS.md`.
 
 ## Two builds, one board
 
@@ -1194,8 +1194,8 @@ cheaper to measure than to argue about:
 
     node tools/ab-builds.mjs buildA/m2hle.exe buildB/m2hle.exe --marks 600,1800
 
-Both builds boot the same ROM (`--rom <zip>`; the default is a path on the
-development machine, so pass it anywhere else) in their own directory (so neither shares
+Both builds boot the same ROM (`--rom <zip>`; the default is the shared ROM
+lookup, `$ROMS_DIR` first) in their own directory (so neither shares
 `m2hle.log` with the other or with a running instance), and **frames are counted
 with a breakpoint on the frame hook**, not `wait_frames`: a poll stops wherever
 it landed and nothing would match. At each mark it hashes the registers and the
@@ -1343,7 +1343,7 @@ emu thread, so the same build holds the sound thread against itself.
 
 Measured 2026-09-21: identical over 12,000 frames of attract and a 10,000-frame
 two-player scripted match, after two fixes. Before them the builds split at
-frame 2948, on a NaN's sign and on strict aliasing (WEB-NETPLAY.md,
+frame 2948, on a NaN's sign and on strict aliasing (docs/WEB-NETPLAY.md,
 "Cross-play").
 ## The object viewer, in a browser
 
@@ -1359,7 +1359,7 @@ node tools/web-objview.mjs --url "http://localhost:8080/?rom=/dev-rom.zip"      
 
 `--list FIRST:COUNT` lists triangle counts instead; `--opts '{...}'` takes any field the
 viewer understands; `--show` screenshots the page with the viewer on the canvas. Full
-reference, and the same commands on the desktop, in MCP_GUIDE.md.
+reference, and the same commands on the desktop, in docs/MCP_GUIDE.md.
 
 Two things it waits for, and they are different questions. `waitReady` waits for the board to
 have *drawn* 3D, which is when the texture sheets and the palette are up. `--at-frame N`
@@ -1387,7 +1387,10 @@ is the yardstick: that capture lost nothing, never retransmitted, and its longes
 The MAME side runs under the sibling `claude_mame` checkout (its
 `mcp_server/.venv` Python and `mame.exe`), with `$MAME_ROMPATH` a directory
 holding only `sfight.zip`, `schamp.zip` and `segabill.zip`, and `-nodrc`:
-this MAME's SHARC recompiler fails the COP self-test.
+this MAME's SHARC recompiler fails the COP self-test. In the Linux dev container the
+oracle is the shared native build, `~/build/mame-bin/mame-shared/shared`: the
+defaults are the Windows paths, so point `$MAME_EXE` (the `.mjs` graders) or
+`$MAME_EXE_NAME` (`snd_capture.py`) at it.
 
 | file | what it does |
 |---|---|
@@ -1403,15 +1406,18 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `tests/i960_fuzz.c` | the i960 and its bus running random code: memory instructions of every width and addressing mode aimed at page, region and MMIO edges, real ROM words and random ones, after 300 real frames. One file to `cmp` between two builds or compilers; `det_digest` holds the game's own code, this the forms it never takes. `i960_fuzz <merged zip> <out> [scenarios] [steps]` |
 | `tests/tile_test.c` | the tile compositor against the pixel-by-pixel original it replaced, kept verbatim as the reference: 48 random boards, every pair control mode, and the pen table against `tile_pen_lut`. A ctest; `tile_test --bench` times both compositors on one frame |
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
-| `perf_inline.py` | a `perf record` of m2hle charged to the innermost INLINED function at each sample (addr2line -i), where `perf report` puts a third of the run on `emu_slice_body`; `--callers SYM` says which inlined code calls a libc memcpy. How to build for it and what it found: [PERF-PROFILE.md](../PERF-PROFILE.md) |
+| `perf_inline.py` | a `perf record` of m2hle charged to the innermost INLINED function at each sample (addr2line -i), where `perf report` puts a third of the run on `emu_slice_body`; `--callers SYM` says which inlined code calls a libc memcpy. How to build for it and what it found: [PERF-PROFILE.md](../docs/PERF-PROFILE.md) |
+| `spaghetti.py` | not a grader: how tangled `src/` is. Runs lizard (`pip install lizard`) and prints the share of hand-written function code too branchy to follow, leaving generated files and the instruction and command dispatchers out (`--threshold 20`, `--top 25`). The reading and the progress since: [SPAGHETTI.md](../docs/SPAGHETTI.md) |
 
 The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
 `boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`,
-`ps3net_test`, `heat_test`, `scsp_dsp_test`, `scsp_dsp_test_masks`,
-`retro_shader_test`, `sfight_settings_test`) are ctest unit tests, built with the
+`ps3net_test`, `tile_test`, `heat_test`, `audio_out_test`, `scsp_dsp_test`,
+`scsp_dsp_test_masks`, `scsp_lazy_test`, `retro_shader_test`,
+`sfight_settings_test`) are ctest unit tests, built with the
 emulator and run by `ctest -C Release` in the build directory (or
 `run_tests.ps1`). `rom_test`, `boot_test`, `geo_test` and `input_test` load the
-ROM set from a fixed path under the sibling `claude_mame` checkout. `det_digest`,
+ROM set from `$ROMDIR`, else `$ROMS_DIR`, else the owner's `claude_mame` ROM
+folder (`tests/test_rom_dir.h`). `det_digest`,
 `snd_bench`, `scsp_fuzz`, `m68k_fuzz`, `i960_fuzz` and `ps3ui_render` are built beside them but
 are tools, not ctests.
 

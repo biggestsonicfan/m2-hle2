@@ -201,7 +201,7 @@
  * another type. Clang used both and MSVC used neither. With NaNs written the
  * SHARC's way (sharc_float_to_bits) and the i960's (i960_nan_result), and with
  * -fno-strict-aliasing, tests/det_digest.c holds the two identical over 12,000
- * frames of attract and 10,000 of a two-player match (WEB-NETPLAY.md,
+ * frames of attract and 10,000 of a two-player match (docs/WEB-NETPLAY.md,
  * "Cross-play").
  *
  * The family stays in the room word, so a lobby can still tell the two apart
@@ -1056,7 +1056,7 @@ static inline void netplay_send_watchers(const void *pkt, uint32_t len) {
  * A fighter sends a watcher one record every this many frames, not every frame.
  * A record carries LOCKSTEP_REDUNDANCY frames, so this still delivers each frame
  * three times over. What it buys is the web gateway's per-player cap of 240
- * datagrams a second (WEB-NETPLAY.md): at one a frame a fighter in a full room
+ * datagrams a second (docs/WEB-NETPLAY.md): at one a frame a fighter in a full room
  * would need 60 x 7, and at one every three it needs 60 + 20 x 6.
  */
 #define NETPLAY_WATCH_STRIDE 3u

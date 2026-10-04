@@ -4,7 +4,7 @@ Netplay on **play.sonicthefighte.rs**: the WebAssembly build of *Sonic the Fight
 
 This expands [WEB-PORT.md](WEB-PORT.md) sections 3.4, 4, 5 and milestones M3–M4, and replaces them where the two disagree.
 
-**Status (2026-09-21): built, tested end to end locally, and deployed.** Two browsers, each with a new account, went through the page's own screens: sign-up, lobby, host, join, start and accept. They then played a 40-second match: about 2,400 frames each, random inputs on both sides, zero stalls, no desync. That run used a gateway on this machine against a local RPCN. The gateway now also runs on the RPCN droplet, in Docker behind the existing Caddy ([web/gateway/README.md](web/gateway/README.md), "As deployed"). What remains is in section 8, and the cross-play decision (section 3).
+**Status (2026-09-21): built, tested end to end locally, and deployed.** Two browsers, each with a new account, went through the page's own screens: sign-up, lobby, host, join, start and accept. They then played a 40-second match: about 2,400 frames each, random inputs on both sides, zero stalls, no desync. That run used a gateway on this machine against a local RPCN. The gateway now also runs on the RPCN droplet, in Docker behind the existing Caddy ([web/gateway/README.md](../web/gateway/README.md), "As deployed"). What remains is in section 8, and the cross-play decision (section 3).
 
 ---
 
@@ -62,7 +62,7 @@ The field sits in the top two bits of the protocol-revision byte. Bits 28–31, 
 
 ---
 
-## 4. The gateway ([web/gateway/](web/gateway/))
+## 4. The gateway ([web/gateway/](../web/gateway/))
 
 Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `pages.yml`.
 
@@ -83,7 +83,7 @@ Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `page
   - Idle streams are closed after 15 minutes, and dead browsers are found by WebSocket ping (every 30 s; no pong by the next ping ends the socket).
   - *The heartbeat's pong handler has to be attached in the `handleUpgrade` callback,* not on the server's `connection` event, which `handleUpgrade` never emits. Registered there, no pong was ever recorded and the live gateway dropped every signed-in session 30-60 s after it opened ("the connection to the gateway closed"). A test now holds a connection through six heartbeats.
 - **It never logs a payload byte.** It sees RPCN's protocol in the clear, login tokens included.
-- `npm test`: the routing rules, plus an end-to-end run against a stand-in RPCN, signaling helper and desktop peer (15 tests). CI runs them before every deploy.
+- `npm test`: the routing rules, plus an end-to-end run against a stand-in RPCN, signaling helper and desktop peer (17 tests). CI runs them before every deploy.
 
 ---
 
@@ -97,7 +97,7 @@ Node plus `ws`, about 400 lines, deployed by hand. It is never deployed by `page
 - **`net_socket.h`**: in the web build, the UDP functions speak the datagram framing. `net_resolve_ipv4` answers the signaling tag, and `net_local_ipv4_towards` answers 0.
 - **`tls.h`** gains a third backend beside Schannel and the stub. It is not TLS at all: the browser encrypts to the gateway and checks its certificate.
 - **`netplay.h`**:
-  - Settings go to `localStorage` under the settings file's name.
+  - Settings go to `localStorage` under the key `m2hle_netplay.cfg` (`NETPLAY_CFG_PATH`).
   - The build family is added to the room word and to `netplay_room_reject_reason`.
 - **`main_web.c`**: `web_netplay_begin` / `_set` / `_post` stage a command a field at a time. A password can hold any character, and the minimal JSON reader cannot. Also added:
   - `web_netplay_status` (a JSON snapshot)
@@ -117,7 +117,7 @@ Running two web clients on one machine found two bugs that the desktop build sha
   - RPCN copies a member's address into the room when the room is created or joined. The address only reaches RPCN with the first keepalive after login. The test hosted 0.2 s after signing in and snapshotted zeros.
   - Two players on one public address were then told *different kinds* of address for each other: one got the other's public address from the room, the other got the local address from a lookup. Each discarded the other's datagrams as strays.
   - Fixes:
-    - Host and Join wait until the signaling helper has answered (`netplay_take_room`), for at most 4 s.
+    - Host and Join wait until the signaling helper has answered (`netplay_room_or_defer`), for at most 4 s.
     - An address the peer has actually been *heard* from is never replaced by one the server reports later (`rpcn_session_set_peer`).
 
 A third fix is web-only (`main_web.c`). When a slice waits on the other player, the web frontend drops that owed time instead of repaying it. Repaid, it put the waiting board straight back a fraction of a frame ahead, so it waited again every frame: ~40 waits a second, indefinitely, after a hidden tab came back.
@@ -129,7 +129,7 @@ A hidden tab gets no animation frames, and a throttled window gets them late. Fr
 - *Measured in headless Chrome:* the hidden board kept ~57 fps, and the opponent never stalled out. Without a match (`tools/web-smoke.mjs --hide 12:12`, headless Edge): 60-61 fps for the 12 s hidden, sound back on return.
 - Not yet measured in Firefox or Safari.
 
-### 5.4 The panel ([web/site/m2hle-netplay.js](web/site/m2hle-netplay.js))
+### 5.4 The panel ([web/site/m2hle-netplay.js](../web/site/m2hle-netplay.js))
 
 The **Play online** button in the bar appears once the game is loaded.
 
@@ -161,7 +161,7 @@ The datagram seam in `net_socket.h` is narrow enough that either can replace the
 
 ## 8. What is not done
 
-- **Deploy:** the gateway is up on the droplet ([web/gateway/README.md](web/gateway/README.md), "As deployed", which also lists what was still open there: the certificate Caddy serves for `rpcn.`). Not recorded as done: the RPCN fork's `pick_free_npid` fix, without which a Twitch sign-up whose lowercase name collides with an existing account fails.
+- **Deploy:** the gateway is up on the droplet ([web/gateway/README.md](../web/gateway/README.md), "As deployed", which also lists what was still open there: the certificate Caddy serves for `rpcn.`). Not recorded as done: the RPCN fork's `pick_free_npid` fix, without which a Twitch sign-up whose lowercase name collides with an existing account fails.
 - **Twitch's success path** (the code and link screen) has not run: the local RPCN has no Twitch client ID. The failure path has run.
 - **A desktop client against a web room** has not been run. The refusal logic is in code, and the room word it depends on was checked (`0x41` low byte), but nothing has been held against a real desktop client.
 - **Firefox and Safari**, the hidden-tab worker there, and real distances for the automatic input delay.
@@ -171,7 +171,7 @@ The datagram seam in `net_socket.h` is narrow enough that either can replace the
 
 ## 9. Testing
 
-Details are in [web/gateway/README.md](web/gateway/README.md), "Testing locally".
+Details are in [web/gateway/README.md](../web/gateway/README.md), "Testing locally".
 
 - `cd web/gateway && npm test`: the gateway alone. `node web/gateway/test/probe-live.mjs`: the deployed one, from outside.
 - `node tools/web-netplay.mjs --seconds 40`: two headless browsers play a match through the real page, a local gateway and a local RPCN.

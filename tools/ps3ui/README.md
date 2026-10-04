@@ -34,7 +34,7 @@ drawn by the program into empty "placeholder" layers, and two bitmap fonts. Here
 
 | tool | what it does |
 |---|---|
-| `extract/extract.py <rom.psarc> <work>` | decodes your own copy of the PS3 data into `<work>` (outside the repo): AET JSON, sprite PNGs, font metrics, strings. `aetrender.py` composites a layout from the real sprites, `measure.py` profiles a sprite's pixels |
+| `extract/extract.py <rom.psarc> <work>` | decodes your own copy of the PS3 data into `<work>` (outside the repo): AET JSON, sprite PNGs, font metrics, strings. It runs its helpers in turn: `unpsarc.py` (the archive), `farc.py` (each `.farc`), `aetdump.py` (layouts to JSON) and `sprdump.py` (sprites to PNG). `aetrender.py` composites a layout from the real sprites, `measure.py` profiles a sprite's pixels |
 | `gen_layout.py <work>/aet/n_cmn.json <work>/sprites/sprites.json <work>/sprites/fontmap.json` | regenerates `src/ui/ps3ui_layout.h`. The compositions it keeps are listed in `WANT` at the top |
 | `bake_fonts.py --anybody ... --mplus ... --mcode ...` | regenerates `src/ui/ps3ui_fonts.h` from the OFL fonts (google/fonts) |
 | `ps3ui_render` (`tests/ps3ui_render.c`, built beside the tests) | renders on the CPU, no GPU: `sprites <dir>` every painted sprite; `vs <png> [w h frame]` the VS lobby as in the reference capture; `app <dir>` every online screen off a made-up netplay status; `shell <dir>` every offline screen |
