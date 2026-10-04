@@ -327,16 +327,35 @@ static inline const char *emu_state_save_now(emu_thread_ctx_t *ctx, const char *
     return savestate_save(path, ctx->cpu, ctx->bus, &e);
 }
 
-static inline const char *emu_state_load_now(emu_thread_ctx_t *ctx, const char *path) {
-    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
-    savestate_emu_t e;
-    const char *err = savestate_load(path, ctx->cpu, ctx->bus, &e);
+/* A load's last step, from a file or from memory: the run loop's latches, and
+ * what follows the board without being part of it. */
+static inline const char *emu_state_loaded(emu_thread_ctx_t *ctx, const char *err, const savestate_emu_t *e) {
     if (err) return err;
-    emu_state_put_latches(ctx, &e);
+    emu_state_put_latches(ctx, e);
     emu_attn_bump();
     ctx->cpu_prev_snapshot = *ctx->cpu;
     ctx->cpu_snapshot      = *ctx->cpu;
     return NULL;
+}
+
+static inline const char *emu_state_load_now(emu_thread_ctx_t *ctx, const char *path) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e;
+    return emu_state_loaded(ctx, savestate_load(path, ctx->cpu, ctx->bus, &e), &e);
+}
+
+/* The same in memory, for a host that keeps the state itself (libretro's
+ * retro_serialize). `buf` NULL asks only for the size. */
+static inline const char *emu_state_save_mem(emu_thread_ctx_t *ctx, void *buf, size_t cap, size_t *len) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e = emu_state_latches(ctx);
+    return savestate_save_mem(buf, cap, len, ctx->cpu, ctx->bus, &e);
+}
+
+static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *data, size_t size) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e;
+    return emu_state_loaded(ctx, savestate_load_mem(data, size, ctx->cpu, ctx->bus, &e), &e);
 }
 
 /* ---- The sound UART ---------------------------------------------------------

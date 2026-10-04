@@ -126,8 +126,9 @@ Open **Quick Menu > Core Options** while the game runs.
 The RPCN lobby is not in this menu: the core draws it in the game, as the PS3 release does (see
 below).
 
-Savestates, rewind and run-ahead don't work with this core. RetroArch says the core doesn't
-support save states if you try.
+Save and load state work, except that a state can't be loaded during an online match. Each
+state is about 16 MB and takes around a tenth of a second to save, so leave rewind and run-ahead
+off: they save one every frame.
 
 ### Online play
 
@@ -262,8 +263,8 @@ The core's name, `m2hle`, is its file name without `_libretro.so`.
       <core name="m2hle" features="netplay" />
 ```
 
-This lets EmulationStation offer RetroArch's netplay for the core. Leave out `rewind` and
-`autosave`: they need savestates, which this core doesn't have.
+This lets EmulationStation offer RetroArch's netplay for the core. Leave out `rewind`: a
+state is 16 MB, too big to save every frame.
 
 **4. Keep the core's files out of the ROM folder.** ROCKNIX's RetroArch saves into the ROM folder,
 which is usually shared on your network, and the core keeps its RPCN login with its saves.

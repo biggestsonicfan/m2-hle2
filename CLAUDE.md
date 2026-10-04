@@ -249,6 +249,7 @@ A savestate is a zip, as m2emulator's `.sta` is: one raw entry per board compone
 - **State outside the structs has to be registered.** A profile's own statics (`sfight_console`'s hidden-select latch) go through `savestate_extra` from its install; the run loop's latches are in `EMU`, the hooks' in `HLE`. A static that `grade-reset.mjs` needs cleared almost certainly needs saving too.
 - **The battery travels with the state** (`M2BACK`): a load puts the board's SRAM back as it was at the save, as MAME's does.
 - **No load inside a netplay session or SKY EYE**: one board of two, or a camera record the game did not write.
+- **The libretro core saves the same zip into RetroArch's buffer** (`savestate_save_mem`, `emu_state_save_mem`). It is stored, not deflated, so its size does not depend on the board's contents. `retro_serialize_size` measures it once per load and adds 4096 bytes, and the save zero-pads the rest, because RetroArch asks the size once and rewind and run-ahead expect it to stay put. A state is about 16 MB, which is why RetroArch's own netplay still cannot run the core (it sends states). The `.info` has to say `savestate = "true"`: RetroArch refuses a save outright on `false`, before it ever asks the core.
 
 ### Homebrew on a game's board (`profiles/sfight_homebrew.h`)
 
@@ -562,7 +563,7 @@ NPUB30927 -- room.h cites the addresses). The owner writes the room state to RPC
 new owner carries on from the server's copy. What bites:
 
 - **Every match is a cold board reset on EVERY member**, fighters and watchers alike, and a
-  lockstep generation of its own. The PS3 port never resets; this emulator has no savestates, so
+  lockstep generation of its own. The PS3 port never resets; a savestate never crosses machines, so
   the reset is the only shared state. **The room's owner also decides the region** (room state,
   `g_region`): members on another region boot another game from frame 0.
 - **Only the two fighters gate a frame.** Watchers (`LOCKSTEP_WATCHER`) run the fighters' two
