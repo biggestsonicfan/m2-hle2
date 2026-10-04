@@ -6,10 +6,9 @@ run on a 485 MHz PowerPC and a 295 MHz R5900, and what of that applies to the
 Dreamcast port (DREAMCAST-PORT.md, Pinboard #340).
 
 Measured on the 123 `.CMP` files the owner supplied
-(`ai/Sonic Gems Collection/CMP`, dated December 2004). The program itself
-(the GameCube's `main.dol`, the PS2's `SLES_*`/`SLPM_*` ELF) is **not** among
-them, so everything below comes from the data. The emulator's code is still to
-read: see "Next: the executables" for what is set up for that.
+(`ai/Sonic Gems Collection/CMP`, dated December 2004), and on the GameCube
+executable that runs them (`stf.elf`, Pinboard #451; "The GameCube
+executable" below). The PS2 build has not been read.
 
 ## The container format: CRI CMP
 
@@ -80,10 +79,12 @@ What this says about the interpreter:
   `ROM_CODE2`. That is why the decoder could convert data words blindly:
   roughly 52,000 words that are not instructions came out "as branches", and
   nothing ever executes them.
-- **Not a recompiler.** The program stays in i960 form, one record per
-  instruction. This is the same family as the PS3/X360 ports and the PC
+- **Mostly not a recompiler.** The program stays in i960 form, one record
+  per instruction. This is the same family as the PS3/X360 ports and the PC
   console DLL (an i960 interpreter with traps), with the decode moved from
-  run time to build time.
+  run time to build time. The exception is about 70 hot functions, which the
+  executable replaces with C translated from the i960 code ("The GameCube
+  executable").
 
 ## Models, textures, and memory
 
@@ -135,9 +136,113 @@ Gems confirms the plan more than it changes it. What it adds:
    the conversion to PVR twiddled format on the SH-4, so both are candidates.
 4. **No sound CPU, no TGP.** Both ports agree, and the port already does this.
 
-## Next: the executables
+## The GameCube executable
 
-This container is set up to read Sega's emulator once its code is here:
+`stf.elf`, loaded in the owner's Windows Ghidra with the GameCube loader
+(reachable from the container at `http://192.168.65.254:5678`, the
+GhidraMCP HTTP server). It has no symbols: about 3,280 functions, plus
+MetroTRK and CRI's ROFS, ADXT and sound libraries. The i960 names below come
+from the stfdecomp symbol table (`stfdecomp/temp/rom_code1.out`), which lines
+up with every trap address checked.
+
+### The interpreter
+
+- **One record, one handler.** The handler table at `0x8013AF10` has 4,096
+  entries, 16 per i960 opcode; 300 are distinct and the rest point at one
+  default (`0x8002C2B0`). A record's first halfword (`& ~3`) picks the entry.
+  The handler returns how far to move the record pointer, 8 for the next
+  instruction or a pre-scaled branch displacement, so a branch is an add.
+- **Memory ops are specialised by addressing mode**: the 16 entries of a MEM
+  opcode are 16 handlers, one per mode, so no handler decodes its mode.
+- **Only what STF uses is there.** No handler exists for opcode 0x66
+  (`calls`, `modpc`, ...) or for most floating-point ops.
+- **The loop runs in bursts of 12 instructions**, then reads the host clock
+  (`0x8002DD0C` / `0x8002DDAC`, picked at `0x8002DCD0`). The i960's four
+  timers advance by host time elapsed (`0x8002DBBC`). There is no cycle count.
+  The second loop also stops after a wall-clock budget.
+- **The bus is a page table** at `0x800F5850`: 0x40 bytes a page, 16 function
+  pointers (read and write, by width). Addresses under `0x3000000` index by
+  1 MB page; the rest by their top nibble.
+
+### The traps
+
+Opcode 0 is the trap. Its handler calls one switch of 161 cases
+(`0x80035ED8`). A table at `0x8013F6A8` (640 entries of
+`{i960 address, flags, trap × 4}`, ended by `0xFFFFFFFF`) patches them into
+the decoded program at load; `ROM_CODE2` on the disc has none. 158 trap
+numbers are used:
+
+- **Waits and the frame loop**: `main_loop`, `interrupt_wait`, `_idle`,
+  `mode_control`. The same places this emulator once hooked, and has since
+  taken out (CLAUDE.md, "HLE Hooks").
+- **Attract, select, continue and VS flow**: about 60 traps in `ADV_*`,
+  `SEL_*`, `player_entry`, `vs_game_continue_check_ex` (`0xE584`, the VS
+  rematch site the PC DLL also traps), and the select screen's hidden
+  characters. Most are console behaviour, not speed.
+- **`set_obj`, at every one of its 467 call sites** (trap 0x38). The native
+  code writes the object command into the GEO display list itself.
+  `set_obj_common`, `_go`, `_thd`, `_tpd`, `_fifo` and `set_window` are traps
+  too.
+- **Sound**: `sound_request_special` (`0x3F268`), as in the PC DLL, plus
+  `sound_queue_output` and the sound init. The disc's music is ADX
+  (`bgm00`–`bgm18.adx`), so no sound board is emulated.
+- **About 70 whole functions in C, translated from the i960** (traps
+  0x65–0x93 and others): `calc_unit_mat`, `get_frame_dat`,
+  `calc_rob_angle_cont`, `set_coli_ball_data`, `rob_ball_data_make`,
+  `coli_cont_cop`, `osage_dsp`, `area_check`, `ground_disp`, `cage_disp`,
+  `mirror_rob_disp`, `rob_kage_disp_test`, `dented_cnt`, `doom_cnt`,
+  `pendulum_3axis_cnt`, `select_enemy_command`, `rand`, and the text and
+  number drawers. The C is mechanical: the i960 register file stays in
+  memory, condition codes are worked out as values, and every load and store
+  goes through the bus with a byte swap. That is a static recompiler's
+  output, applied only to the code that costs the most: the skeleton,
+  motion, collision and drawing.
+
+### The COP
+
+The TGP is C, not an emulated SHARC. Its command table at `0x8013A690` holds
+16 bytes per opcode 0x00–0x87, `{args, reply bytes, name, handler}`, under
+Sega's own `Fn_*` names. The reply sizes agree with this emulator's
+(`Fn_area_coli` 88 bytes, `Fn_parts_oidasi` 36, `Fn_get_matrix` 48). The
+word feeder (`0x8002298C`) collects the arguments, calls the handler and
+copies the reply out, and is reached both from the i960 bus (writes to
+`0x880000`) and directly from the translated functions.
+
+31 handlers are a bare `blr`, among them `Fn_fcurve_spl` (0x32), `Fn_osage`
+(0x4A), `Fn_area_coli` (0x70), `Fn_calc_coli_flag` (0x3B) and
+`Fn_get_glo_ang` (0x51). STF's ROM sends 0x32 from `get_fcurve_value_f`, 0x4A
+from `osage_copro` and 0x70 from `area_coli`, all inside functions the traps
+replace. So the translated code does that work itself and never sends those
+commands, and the table keeps the entries only for the names. Which function
+does the Hermite or the sway chain was not traced.
+
+The handlers save paired-single registers (`psq_st`) in their prologues, so
+the build uses Gekko's paired singles. Neither the firmware's angle constant
+(`0x4622F983`) nor the spline's span/30 (`0x3D08882F`) is in the image, so
+its maths is not the firmware's bit for bit, as with the PS3 port's.
+
+### What it adds for the Dreamcast port
+
+1. **Translate the hot functions whole, not the hot blocks.** Gems
+   interprets the program and compiles about 70 functions, chosen by name,
+   with the COP work they call folded in. The port's AOT (`i960_aot.py`)
+   compiles by coverage; the Gems list is a cross-check of what is hot.
+2. **Draw from a trap at `set_obj`.** One trap at 467 call sites turns the
+   game's draw into a native call. On the Dreamcast that is the place to
+   hand an object to the PVR path without the i960 ever building the list.
+3. **Clock the timers from host time and run in short bursts.** Gems keeps no
+   cycle count. The port has to stay deterministic for netplay, so this only
+   fits an offline build.
+4. **Trap the VS rematch and the sound request** at the same addresses as the
+   PC DLL (`0xE584`, `0x3F268`). The port already does the sound one.
+
+Not yet read: the `TEX_STG` loader (the format string is at `0x8013F5D4`),
+how the GEO list becomes GX calls, and the PS2 build.
+
+## Tools in the container
+
+This container is set up to read the PS2 build, or to run the GameCube one
+under Dolphin:
 
 - **Ghidra** (`~/build/tools/ghidra`) has two user extensions in
   `~/.config/ghidra/ghidra_12.1.4_PUBLIC/Extensions/`: the GameCube loader
@@ -155,12 +260,3 @@ This container is set up to read Sega's emulator once its code is here:
   `target remote :<port>`. `dolphin-tool extract` pulls `main.dol` out of an
   ISO/RVZ.
 - **PS2** is static only (Ghidra). No PCSX2: it would need a PS2 BIOS dump.
-
-Things to find in the executable:
-
-- the dispatch loop and handler table that `w0` indexes, and how it reaches
-  data in `ROM_CODE1`
-- how the COP (TGP) commands are done in host code: the GameCube has paired
-  singles and the PS2 has VU0 macro mode
-- the `TEX_STG` format and its loader
-- the sound-cue table and the trap that feeds it
