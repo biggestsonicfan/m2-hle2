@@ -2424,6 +2424,48 @@ static void mcp_cmd_board_reset(char *resp, int cap) {
 }
 
 /*
+ * {"cmd":"save_state","path":"..."} / {"cmd":"load_state","path":"..."} -- the
+ * whole board to a file and back (core/savestate.h, Pinboard #423). The emu
+ * thread does it between slices, running or stopped, and this waits for it:
+ * a board that is paused, saved, and loaded in a new process after the machine
+ * went down runs on as it would have. A load needs the same ROM set, profile
+ * and build, and is refused while a netplay session owns the board. The run
+ * state is left alone, so a stopped board stays stopped on the loaded frame.
+ */
+static void mcp_cmd_state(const char *req, char *resp, int cap, int load) {
+    if (!g_mcp.emu || !g_mcp.romset || !g_mcp.romset->loaded) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no ROM set loaded\"}");
+        return;
+    }
+    emu_thread_ctx_t *e = g_mcp.emu;
+    char path[sizeof e->state_path];
+    if (json_get_str_unescaped(req, "path", path, (int)sizeof path) <= 0 || !path[0]) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"path required\"}");
+        return;
+    }
+    if (e->request_state) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"a savestate is already being made\"}");
+        return;
+    }
+    uint32_t before = e->state_count;
+    snprintf(e->state_path, sizeof e->state_path, "%s", path);
+    e->request_state = load ? 2 : 1;
+    for (int i = 0; i < 3000 && e->state_count == before; i++) emu_sleep_ms(10);
+    if (e->state_count == before) {
+        e->request_state = 0;
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"the emu thread did not answer\"}");
+        return;
+    }
+    if (e->state_error[0]) {
+        char esc[256];
+        json_escape(esc, (int)sizeof esc, e->state_error);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"%s\"}", esc);
+        return;
+    }
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"frame\":%u}", (unsigned)g_emu_frames);
+}
+
+/*
  * {"cmd":"idle_hold","on":1} -- the CPU saver (g_idle_hold, emu_thread.h,
  * --idle-until-match): while no netplay session owns the board, it is put back
  * to power-on and not stepped. "on":0 lets it run attract again; no "on" only
@@ -2636,6 +2678,8 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "netplay_leave")            == 0) mcp_cmd_netplay_leave(resp, cap);
     else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
     else if (strcmp(cmd, "board_reset")              == 0) mcp_cmd_board_reset(resp, cap);
+    else if (strcmp(cmd, "save_state")               == 0) mcp_cmd_state(req, resp, cap, 0);
+    else if (strcmp(cmd, "load_state")               == 0) mcp_cmd_state(req, resp, cap, 1);
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
 }

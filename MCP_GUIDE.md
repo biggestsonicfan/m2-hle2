@@ -260,6 +260,17 @@ vector. Returns `resets`, the number performed so far. Refused with no ROM set
 loaded, and while a netplay session is at the barrier or playing -- there it
 would reset one board of two. `tools/grade-reset.mjs` is built on it.
 
+**`save_state(path: str)`** / **`load_state(path: str)`** -- write the whole
+board to a savestate (a zip, one entry per component, like m2emulator's `.sta`;
+see `src/core/savestate.h`) or put it back. Both run at the next slice edge and
+reply `{"ok":true,"frame":N}` with the board's frame; the run state is left
+alone, so stop first if the board must not move between the save and what you
+do next. A load is refused for a file from another ROM set or another build's
+struct layout, inside a netplay session and under SKY EYE; the error comes back
+as `{"error":"..."}` and the board is untouched. `--load-state FILE` does the
+load at launch (headless: a failed load exits 1). Paths are on the emulator's
+machine.
+
 **`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
 for an online opponent (`--idle-until-match` sets it at launch). While it is on
 and no netplay session owns the board, the board is put back to power-on once

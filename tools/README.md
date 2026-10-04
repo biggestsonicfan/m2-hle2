@@ -1091,6 +1091,21 @@ RAM, buffer RAM, COP) must be identical: the i960 only sees the UART, which
 board time clocks. `--pcm FILE` writes each run's audio, for a gameplay
 comparison. The numbers are in SCSP.md.
 
+## Savestates
+
+`det_digest --save-at F:FILE` writes a savestate at the edge of frame F and
+`--load FILE` starts from one; both restart the sample hash there. A run that
+loads the state must print the same rows from frame F on as the run that saved
+it, and the same sample hash:
+
+```sh
+det_digest $ROMS_DIR/sfight.zip --frames 900 --save-at 400:s.sta --out a.txt
+det_digest $ROMS_DIR/sfight.zip --frames 900 --load s.sta --out b.txt
+diff <(awk '$1>400' a.txt) b.txt   # empty
+```
+
+Run it after adding state to the board that a save would have to carry.
+
 ## The netplay reset
 
 A netplay session is a cold boot on both machines, so the reset at the barrier

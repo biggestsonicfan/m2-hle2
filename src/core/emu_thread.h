@@ -127,6 +127,16 @@ typedef struct {
     volatile int      request_reset;
     volatile uint32_t reset_count;
 
+    /* A savestate asked for from outside the emu thread (the MCP bridge's
+     * `save_state` / `load_state`, the window's menu): 1 save, 2 load, to or
+     * from state_path. Serviced where request_reset is, between slices.
+     * state_count moves when it has been, and state_error says how
+     * ("" for done). */
+    volatile int      request_state;
+    char              state_path[1024];
+    volatile uint32_t state_count;
+    char              state_error[160];
+
     /* Frames left before the board stops itself (emu_run_frames), 0 for none.
      * Counted down at the frame edge in emu_slice_finish, so the stop lands
      * between frame N and frame N+1 however late the asker would have been
@@ -265,6 +275,68 @@ static inline void emu_board_reset_state(void) {
      * g_sound.out_total survives a reset, and an A/V client mid-stream would
      * hear the seam as a jump backwards in time. */
     g_frame_clock.frame  = 0;
+}
+
+/* ---- Savestates (Pinboard #423) ---------------------------------------------
+ *
+ * savestate.h writes the board; the run loop's latches above are passed to it
+ * here, since they are this file's statics. Serviced between slices, under the
+ * mutex (emu_netplay_pump), like a board reset. */
+#include "savestate.h"
+
+static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
+    savestate_emu_t e;
+    memset(&e, 0, sizeof e);
+    e.total_steps        = ctx->total_steps;
+    e.timer_cycles_seen  = s_timer_cycles_seen;
+    e.frame_clock_sample = g_frame_clock.sample;
+    e.frame_clock_frame  = g_frame_clock.frame;
+    e.irq_in_service     = s_irq_in_service;
+    e.irq_baseline_depth = s_irq_baseline_depth;
+    e.irq_from_table     = s_irq_from_table;
+    e.irq_slices         = s_irq_slices;
+    e.vblank_edge        = g_vblank_edge;
+    e.slice_capped       = ctx->slice_capped;
+    e.emu_frames         = g_emu_frames;
+    e.irqt_sound_kick    = g_irqt_sound_kick;
+    e.irqt_vblank        = g_irqt_vblank;
+    return e;
+}
+
+static inline void emu_state_put_latches(emu_thread_ctx_t *ctx, const savestate_emu_t *e) {
+    ctx->total_steps     = e->total_steps;
+    s_timer_cycles_seen  = e->timer_cycles_seen;
+    s_irq_in_service     = e->irq_in_service != 0;
+    s_irq_baseline_depth = e->irq_baseline_depth;
+    s_irq_from_table     = e->irq_from_table != 0;
+    s_irq_slices         = e->irq_slices;
+    g_vblank_edge        = e->vblank_edge;
+    ctx->slice_capped    = e->slice_capped;
+    g_emu_frames         = e->emu_frames;
+    g_irqt_sound_kick    = e->irqt_sound_kick;
+    g_irqt_vblank        = e->irqt_vblank;
+    g_frame_clock.sample = e->frame_clock_sample;
+    g_frame_clock.frame  = e->frame_clock_frame;
+}
+
+/* Save or load now. The caller holds the mutex (or has no other thread).
+ * NULL on success, else why not. */
+static inline const char *emu_state_save_now(emu_thread_ctx_t *ctx, const char *path) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e = emu_state_latches(ctx);
+    return savestate_save(path, ctx->cpu, ctx->bus, &e);
+}
+
+static inline const char *emu_state_load_now(emu_thread_ctx_t *ctx, const char *path) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e;
+    const char *err = savestate_load(path, ctx->cpu, ctx->bus, &e);
+    if (err) return err;
+    emu_state_put_latches(ctx, &e);
+    emu_attn_bump();
+    ctx->cpu_prev_snapshot = *ctx->cpu;
+    ctx->cpu_snapshot      = *ctx->cpu;
+    return NULL;
 }
 
 /* ---- The sound UART ---------------------------------------------------------
@@ -480,6 +552,21 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
     /* The player pressed a button at "nobody else is in the room": the same
      * reset, back in their own settings (netplay_empty_room_pump). */
     bool alone = step == NETPLAY_STEP_OFF && netplay_take_empty_restart();
+
+    /* A savestate. A load inside a session would change this board and not the
+     * peer's, so it is refused there; a save is only a read, and is not. */
+    int state = ctx->request_state;
+    if (state) {
+        ctx->request_state = 0;
+        const char *err;
+        emu_mutex_lock(&ctx->mutex);
+        if (state == 2 && step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
+        else if (state == 2) err = emu_state_load_now(ctx, ctx->state_path);
+        else                 err = emu_state_save_now(ctx, ctx->state_path);
+        snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
+        emu_mutex_unlock(&ctx->mutex);
+        ctx->state_count++;
+    }
 
     if (step == NETPLAY_STEP_RESET || asked || alone) {
         emu_mutex_lock(&ctx->mutex);

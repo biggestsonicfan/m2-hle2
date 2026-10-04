@@ -68,6 +68,7 @@ static char g_rom_path[512] = {0};
 static char g_export_roms[512] = {0};   /* --export-roms DIR: write the set's region images, then quit */
 static char g_profile_arg[64] = {0};   /* --profile <id>: e.g. sfight for STF's arcade game */
 static int  g_autorun = 0;
+static char g_load_state[1024];   /* --load-state FILE: start from a savestate */
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
 static int  g_objview_model = -1;  /* --objview N: and select model N */
@@ -299,6 +300,18 @@ static void load_active_profile(const char *primary_zip) {
  * reach: the interrupt controller, the sound board, the input latch and the run
  * loop's own per-boot flags.
  */
+/* --load-state FILE: put the board where a savestate left it, before it runs
+ * (core/savestate.h). False, logged, when the state does not fit this ROM set,
+ * profile or build; the board is then as the ROM load left it. */
+static bool load_state_arg(void) {
+    if (!g_load_state[0]) return true;
+    emu_mutex_lock(&state.emu.mutex);
+    const char *err = emu_state_load_now(&state.emu, g_load_state);
+    emu_mutex_unlock(&state.emu.mutex);
+    if (err) { LOG_ERROR("--load-state %s: %s", g_load_state, err); return false; }
+    return true;
+}
+
 static void netplay_reset_board_cb(void *ctx) {
     (void)ctx;
     if (!g_active_profile || !state.romset.loaded) return;
@@ -790,6 +803,7 @@ static void init(void) {
 
     if (g_rom_path[0]) {
         load_active_profile(g_rom_path);
+        if (state.romset.loaded) load_state_arg();   /* a failure is logged; the board boots fresh */
         if (g_autorun && state.romset.loaded) emu_run(&state.emu);
     }
 
@@ -1175,6 +1189,7 @@ static int headless_main(void) {
     emu_ensure_started();
     load_active_profile(g_rom_path);
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
+    if (!load_state_arg()) return 1;
     if (g_autorun) emu_run(&state.emu);
 
     if (!g_no_tray) headless_tray_start();
@@ -1567,6 +1582,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             else LOG_WARN("--damage %s: expected real or normal; keeping normal", d);
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
+        } else if (strcmp(argv[i], "--load-state") == 0 && i + 1 < argc) {
+            snprintf(g_load_state, sizeof g_load_state, "%s", argv[++i]);
         } else if (strcmp(argv[i], "--match-replay") == 0) {
             g_match_replay = 1;       /* attract mode straight to its replay fight */
         } else if (strcmp(argv[i], "--match-replay-stage") == 0 && i + 1 < argc) {

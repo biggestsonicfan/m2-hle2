@@ -239,6 +239,17 @@ The board's battery-backed SRAM at `0x01D00000` (settings, region, coin setup, b
 - **Homebrew on a stock set gets its own file**, `<set>-<fnv32 of the program>`, so it neither reads nor clobbers the game's.
 - The image is checked once a minute and written only when it changed, then flushed at exit. STF bumps a counter at `0x1D03319` every few seconds for as long as it runs, so a shorter check is a write every few seconds, which wears out a handheld's SD card.
 
+### Savestates (`core/savestate.h`, board-level)
+
+A savestate is a zip, as m2emulator's `.sta` is: one raw entry per board component (`I960`, `SHARC`, `COP`, each bus buffer under its region name, `GEO`, `IRQT`, `M68K`, `M2SCSP`, `SOUND`, `EMU`, `HLE`, a profile's `P.<name>`), plus `INFO`, `LAYOUT` and `ROM`. `save_state` / `load_state` over the bridge, `--load-state FILE` at launch, `det_digest --save-at F:FILE` / `--load FILE`.
+
+- **It is exact, and that is what to hold it to:** `det_digest` saved at frame 400 and loaded in a fresh process gives the same rows and sample hash from there on, the 68000 and `--sound-hle` alike; two processes that load the same file and run 300 frames save identical entries.
+- **A load is refused unless the file's `ROM` and `LAYOUT` match** (FNV-64 of every ROM; every struct's size). The structs are written raw, so a build that changes one cannot read an old file, and must not try.
+- **Host pointers are written as NULL and kept live on load**: `g_cop.ctl`, `sharc_dm_ext`, the SCSP's RAM, clock and sink. The SCSP's LFO table pointers go in as ids. A new pointer field in a saved struct needs the same, or the file differs between processes and the load writes a stale address.
+- **State outside the structs has to be registered.** A profile's own statics (`sfight_console`'s hidden-select latch) go through `savestate_extra` from its install; the run loop's latches are in `EMU`, the hooks' in `HLE`. A static that `grade-reset.mjs` needs cleared almost certainly needs saving too.
+- **The battery travels with the state** (`M2BACK`): a load puts the board's SRAM back as it was at the save, as MAME's does.
+- **No load inside a netplay session or SKY EYE**: one board of two, or a camera record the game did not write.
+
 ### Homebrew on a game's board (`profiles/sfight_homebrew.h`)
 
 Homebrew ships as a stock set with the program EPROMs swapped (m2-pacman: `sfight` with `epr-19001.15`, `epr-19002.16`, `epr-19021.31` replaced). The game's profile would plant its HLE hooks and interrupt handlers in the homebrew's code, so after a load `profile_adopt_program` reads the program's own interrupt table (ROM word 1 → PRCB → +0x14) and, if it does not name the profile's handlers, runs the set's `any_program` profile instead: no hooks, `irq_vectors`, `board_vblank`. A patched build of the game keeps its table and so its profile. Every profile's slice ends at the board's vblank (HLE Hooks, "Frame pacing"), so `board_vblank` only says the program has no frame hook: the run loop marks the capture's frame and makes the match_replay jump at the vblank instead. A handler still in service after 8 slices is taken to have switched task (m2-sdk's break-in does `flushreg` + `bx`).
@@ -355,8 +366,8 @@ Matchmaking is [RPCN](https://github.com/RipleyTom/rpcn); the design follows `ya
 are **silently wrong** rather than loudly wrong when you get them half right.
 
 - **A session is a COLD BOOT on both machines, not a savestate.** The barrier releases, both peers
-  reset the board, and every frame from power-on is lockstepped. There are no savestates here, so
-  this is the only state two copies are certain to share; it is also stronger than the PS3 port's
+  reset the board, and every frame from power-on is lockstepped. A savestate (below) is never sent
+  to a peer, so this is the only state two copies are certain to share; it is also stronger than the PS3 port's
   shared RNG seed, because no window exists in which the two were allowed to differ. The reset has
   to clear the run loop's own latches too (`emu_board_reset_state`) — an interrupt left in service
   across it swallows the first interrupt of the new boot, which is a divergence on frame 1.
