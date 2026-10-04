@@ -891,6 +891,88 @@ static inline overlay_swap_phase_t overlay_host__swap_step(double now) {
     return phase;
 }
 
+/* The swap's notices: upload any that went up since they were last sent. */
+static inline void overlay_host__upload_notices(void) {
+    for (int i = 0; i < 2; i++) {
+        overlay_layer_slot_t *L = &g_overlay.notice[i];
+        if (!L->visible) continue;
+        overlay_host__ensure_image(L);
+        if (L->img.id && !L->uploaded) {
+            sg_update_image(L->img, &(sg_image_data){
+                .mip_levels[0] = { .ptr = L->px, .size = L->bytes } });
+            L->uploaded = true;
+        }
+    }
+}
+
+/* Fit the layer slots to the n descriptors the plugin returned; true when any
+ * slot changed size. Slots the plugin has stopped using go back to nothing, so
+ * a plugin that drops a layer does not leave a megabyte and an image behind. */
+static inline bool overlay_host__fit_slots(const m2_overlay_layer_t *d, int n) {
+    bool resized = false;
+    for (int i = 0; i < n; i++) {
+        overlay_layer_slot_t *L = &g_overlay.layer[i];
+        if (d[i].w != L->w || d[i].h != L->h || (d[i].w > 0 && !L->px)) {
+            overlay_host__resize_slot(L, d[i].w, d[i].h);
+            resized = true;
+        }
+    }
+    for (int i = n; i < M2_OVERLAY_MAX_LAYERS; i++) {
+        overlay_layer_slot_t *L = &g_overlay.layer[i];
+        if (L->px || L->img.id) overlay_host__resize_slot(L, 0, 0);
+    }
+    return resized;
+}
+
+/* Call the plugin; the number of layers it painted, or -1 when it disabled
+ * itself (and has been unloaded).
+ *
+ * Up to two passes, and the second one only ever happens on a size change:
+ * the first tells the host what size the plugin wants, the second paints
+ * into the buffer the host then made. See the contract in
+ * overlay_plugin.h — a plugin with stable layer sizes is called once. */
+static inline int overlay_host__run_plugin(const m2_overlay_frame_t *f,
+                                           m2_overlay_layer_t *d) {
+    int n = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        overlay_host__fill_descs(d, M2_OVERLAY_MAX_LAYERS);
+        n = g_overlay.api->paint(g_overlay.ud, f, d, M2_OVERLAY_MAX_LAYERS);
+        if (n < 0) {
+            LOG_WARN("overlay: %s disabled itself",
+                     g_overlay.api->name ? g_overlay.api->name : g_overlay.path);
+            overlay_host__unload();
+            g_overlay.gave_up = true;
+            return -1;
+        }
+        if (n > M2_OVERLAY_MAX_LAYERS) n = M2_OVERLAY_MAX_LAYERS;
+        if (!overlay_host__fit_slots(d, n)) break;
+        if (pass == 1) break;
+        g_overlay.second_passes++;
+    }
+    return n;
+}
+
+/* Place the n painted layers and upload the ones that changed. */
+static inline void overlay_host__upload_layers(const m2_overlay_layer_t *d, int n) {
+    for (int i = 0; i < n; i++) {
+        overlay_layer_slot_t *L = &g_overlay.layer[i];
+        L->x       = d[i].x;
+        L->y       = d[i].y;
+        L->visible = d[i].visible != 0 && L->px && L->w > 0 && L->h > 0;
+        if (!L->visible) continue;
+        overlay_host__ensure_image(L);
+        /* Only on a frame the plugin marked dirty. sokol has no partial image
+         * update, which is exactly why the layer split matters: a repaint of
+         * one 262x1080 column is 1.1 MB, not the whole 8.3 MB canvas. An image
+         * that has just been (re)made has to be filled whatever it says. */
+        if (L->img.id && (d[i].dirty || !L->uploaded)) {
+            sg_update_image(L->img, &(sg_image_data){
+                .mip_levels[0] = { .ptr = L->px, .size = L->bytes } });
+            L->uploaded = true;
+        }
+    }
+}
+
 /*
  * Run the plugin for this composed frame and upload whatever it repainted.
  * MUST be called outside a render pass (sg_update_image says so).
@@ -908,16 +990,7 @@ static inline void overlay_host_paint(int canvas_w, int canvas_h,
     overlay_swap_phase_t phase = overlay_host__swap_step(overlay_host__now_s());
     overlay_host__notices(phase, &g_overlay_swap.cur, canvas_h,
                           game_x, game_y, game_w, game_h);
-    for (int i = 0; i < 2; i++) {
-        overlay_layer_slot_t *L = &g_overlay.notice[i];
-        if (!L->visible) continue;
-        overlay_host__ensure_image(L);
-        if (L->img.id && !L->uploaded) {
-            sg_update_image(L->img, &(sg_image_data){
-                .mip_levels[0] = { .ptr = L->px, .size = L->bytes } });
-            L->uploaded = true;
-        }
-    }
+    overlay_host__upload_notices();
 
     g_overlay.count = 0;
     if (!g_overlay.loaded) return;
@@ -937,60 +1010,9 @@ static inline void overlay_host_paint(int canvas_w, int canvas_h,
 
     m2_overlay_layer_t d[M2_OVERLAY_MAX_LAYERS];
     double t0 = f.time_s;
-    int n = 0;
-
-    /* Up to two passes, and the second one only ever happens on a size change:
-     * the first tells the host what size the plugin wants, the second paints
-     * into the buffer the host then made. See the contract in
-     * overlay_plugin.h — a plugin with stable layer sizes is called once. */
-    for (int pass = 0; pass < 2; pass++) {
-        overlay_host__fill_descs(d, M2_OVERLAY_MAX_LAYERS);
-        n = g_overlay.api->paint(g_overlay.ud, &f, d, M2_OVERLAY_MAX_LAYERS);
-        if (n < 0) {
-            LOG_WARN("overlay: %s disabled itself",
-                     g_overlay.api->name ? g_overlay.api->name : g_overlay.path);
-            overlay_host__unload();
-            g_overlay.gave_up = true;
-            return;
-        }
-        if (n > M2_OVERLAY_MAX_LAYERS) n = M2_OVERLAY_MAX_LAYERS;
-
-        bool resized = false;
-        for (int i = 0; i < n; i++) {
-            overlay_layer_slot_t *L = &g_overlay.layer[i];
-            if (d[i].w != L->w || d[i].h != L->h || (d[i].w > 0 && !L->px)) {
-                overlay_host__resize_slot(L, d[i].w, d[i].h);
-                resized = true;
-            }
-        }
-        /* Slots the plugin has stopped using go back to nothing, so a plugin
-         * that drops a layer does not leave a megabyte and an image behind. */
-        for (int i = n; i < M2_OVERLAY_MAX_LAYERS; i++) {
-            overlay_layer_slot_t *L = &g_overlay.layer[i];
-            if (L->px || L->img.id) overlay_host__resize_slot(L, 0, 0);
-        }
-        if (!resized) break;
-        if (pass == 1) break;
-        g_overlay.second_passes++;
-    }
-
-    for (int i = 0; i < n; i++) {
-        overlay_layer_slot_t *L = &g_overlay.layer[i];
-        L->x       = d[i].x;
-        L->y       = d[i].y;
-        L->visible = d[i].visible != 0 && L->px && L->w > 0 && L->h > 0;
-        if (!L->visible) continue;
-        overlay_host__ensure_image(L);
-        /* Only on a frame the plugin marked dirty. sokol has no partial image
-         * update, which is exactly why the layer split matters: a repaint of
-         * one 262x1080 column is 1.1 MB, not the whole 8.3 MB canvas. An image
-         * that has just been (re)made has to be filled whatever it says. */
-        if (L->img.id && (d[i].dirty || !L->uploaded)) {
-            sg_update_image(L->img, &(sg_image_data){
-                .mip_levels[0] = { .ptr = L->px, .size = L->bytes } });
-            L->uploaded = true;
-        }
-    }
+    int n = overlay_host__run_plugin(&f, d);
+    if (n < 0) return;
+    overlay_host__upload_layers(d, n);
 
     g_overlay.count = n;
     g_overlay.last_paint_us = (overlay_host__now_s() - t0) * 1e6;

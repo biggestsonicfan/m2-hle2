@@ -306,6 +306,10 @@ static uint32_t    *g_geodl_snap          = g_geodl_snaps[0];
 static uint32_t     g_geodl_snap_rstart   = 0;
 static volatile int g_geodl_snap_ready    = 0;
 static volatile int g_geodl_snap_seq      = 0;
+/* The profile reads its list in the homebrew format (quirks.geo_displaylist),
+ * which the GEO walk does not follow: publish all of bufferram. Set by the
+ * run loop each slice (emu_slice_body). */
+static bool         g_geodl_full_snap     = false;
 
 /* What a display list leaves behind in the geometrizer for later frames
  * (model2_v.cpp): texture RAM (command 4, addresses with bit 23), the two
@@ -323,37 +327,77 @@ static volatile int g_geodl_snap_seq      = 0;
  * mouths) into texture RAM from 0x805000 on, a different set every frame, so
  * a renderer still drawing list N from the live copy took list N+1's points.
  * *Symptom that surfaced this in STF:* in Tails' stage-clear close-up, some
- * frames drew a strip of stray texels under his closed eyes. Each part is
- * copied only when some list has written it since that buffer last had it. */
+ * frames drew a strip of stray texels under his closed eyes.
+ *
+ * Each buffer is brought up to date a 256-byte block at a time: a write marks
+ * its block in both buffers' masks, and a publish copies the blocks its
+ * buffer's mask names and clears it. STF rewrites the eyes' texture points and
+ * the material slots every frame, so copying a whole part when anything in it
+ * changed was ~290 KB a frame for a few hundred bytes of change. */
 typedef struct {
     uint16_t texram[0x10000];
     uint32_t polyram[2][0x8000];                   /* [0] slow, [1] fast */
     float    texparam[32][4];                      /* diffuse, ambient, specular scale, specular control */
     float    coef[32];                             /* distance coefficient, indexed by attribute >> 27 */
     uint8_t  logram[0x8000];
-    uint32_t gen[3];                               /* texram, polyram, the rest: bumped per write */
 } geo_raster_state_t;
 
 static geo_raster_state_t        g_geo_live;       /* emu thread: the lists applied so far */
 static geo_raster_state_t        g_geo_pub[2];     /* published beside g_geodl_snaps[0] / [1] */
 static const geo_raster_state_t *g_geo_rs = &g_geo_pub[0];   /* the renderer's: set with its list */
 
+/* Blocks of g_geo_live each g_geo_pub buffer does not have yet. */
+#define GEO_RS_BLOCK      256u
+#define GEO_RS_TEX_BLKS   (sizeof g_geo_live.texram  / GEO_RS_BLOCK)
+#define GEO_RS_POLY_BLKS  (sizeof g_geo_live.polyram / GEO_RS_BLOCK)
+#define GEO_RS_LOG_BLKS   (sizeof g_geo_live.logram  / GEO_RS_BLOCK)
+static struct {
+    uint64_t tex[GEO_RS_TEX_BLKS / 64];
+    uint64_t poly[GEO_RS_POLY_BLKS / 64];
+    uint64_t log[(GEO_RS_LOG_BLKS + 63) / 64];
+    bool     slots;                                /* texparam and coef */
+} g_geo_dirty[2];
+
+static inline void geo_dirty_mark(size_t field, size_t byte_off) {
+    size_t b = byte_off / GEO_RS_BLOCK;
+    uint64_t bit = 1ull << (b & 63);
+    for (int i = 0; i < 2; i++) {
+        uint64_t *m = field == 0 ? g_geo_dirty[i].tex : field == 1 ? g_geo_dirty[i].poly : g_geo_dirty[i].log;
+        m[b >> 6] |= bit;
+    }
+}
+
 /* The copy published with a list snapshot (a g_geodl_snaps entry). */
 static inline const geo_raster_state_t *geodl_raster_for(const uint32_t *snap) {
     return &g_geo_pub[snap == g_geodl_snaps[0] ? 0 : 1];
 }
 
-static inline void geo_raster_publish(geo_raster_state_t *dst) {
-    if (dst->gen[0] != g_geo_live.gen[0])
-        memcpy(dst->texram, g_geo_live.texram, sizeof dst->texram);
-    if (dst->gen[1] != g_geo_live.gen[1])
-        memcpy(dst->polyram, g_geo_live.polyram, sizeof dst->polyram);
-    if (dst->gen[2] != g_geo_live.gen[2]) {
+static inline void geo_dirty_copy(uint8_t *dst, const uint8_t *src, uint64_t *mask, size_t words) {
+    for (size_t w = 0; w < words; w++) {
+        uint64_t m = mask[w];
+        if (!m) continue;
+        mask[w] = 0;
+        for (unsigned lo = 0; lo < 64; ) {         /* runs of marked blocks, one memcpy each */
+            if (!((m >> lo) & 1u)) { lo++; continue; }
+            unsigned hi = lo + 1;
+            while (hi < 64 && ((m >> hi) & 1u)) hi++;
+            size_t off = (w * 64u + lo) * GEO_RS_BLOCK;
+            memcpy(dst + off, src + off, (hi - lo) * GEO_RS_BLOCK);
+            lo = hi;
+        }
+    }
+}
+
+static inline void geo_raster_publish(int i) {
+    geo_raster_state_t *dst = &g_geo_pub[i];
+    geo_dirty_copy((uint8_t *)dst->texram,  (const uint8_t *)g_geo_live.texram,  g_geo_dirty[i].tex,  GEO_RS_TEX_BLKS / 64);
+    geo_dirty_copy((uint8_t *)dst->polyram, (const uint8_t *)g_geo_live.polyram, g_geo_dirty[i].poly, GEO_RS_POLY_BLKS / 64);
+    geo_dirty_copy(dst->logram, g_geo_live.logram, g_geo_dirty[i].log, (GEO_RS_LOG_BLKS + 63) / 64);
+    if (g_geo_dirty[i].slots) {
         memcpy(dst->texparam, g_geo_live.texparam, sizeof dst->texparam);
         memcpy(dst->coef, g_geo_live.coef, sizeof dst->coef);
-        memcpy(dst->logram, g_geo_live.logram, sizeof dst->logram);
+        g_geo_dirty[i].slots = false;
     }
-    memcpy(dst->gen, g_geo_live.gen, sizeof dst->gen);
 }
 
 /* Words after a direct-data command (GEO 0x02/0x12, MAME geo_direct_data):
@@ -369,11 +413,26 @@ static inline uint32_t geodl_direct_len(const uint32_t *L, uint32_t nw, uint32_t
     return q - p - 1u;
 }
 
-static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart) {
+/* Walk the list in L from rstart, applying what it leaves behind, and copy
+ * every word the walk visits into snap (when not NULL) at the same offset.
+ * The renderer's walk (geo3d_scan_geo_list) takes the same steps and reads
+ * nothing else, so the rest of the snapshot may hold an older frame's words. */
+static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rstart,
+                                     uint32_t *snap) {
     uint32_t p = (rstart & 0x1FFFFu) >> 2;
+    uint32_t run_lo = 0, run_hi = 0;               /* words to copy, not yet copied */
+    #define GEODL_VISIT(lo, hi) do {                                              \
+        uint32_t lo_ = (lo), hi_ = (hi) < nw ? (hi) : nw;                         \
+        if (lo_ == run_hi && run_hi > run_lo) run_hi = hi_ > run_hi ? hi_ : run_hi; \
+        else {                                                                    \
+            if (snap && run_hi > run_lo)                                          \
+                memcpy(snap + run_lo, L + run_lo, (run_hi - run_lo) * 4u);        \
+            run_lo = lo_; run_hi = hi_;                                           \
+        }                                                                         \
+    } while (0)
     for (uint32_t guard = 0; guard < 0x8000u && p < nw; guard++) {
         uint32_t op = L[p];
-        if (op & 0x80000000u) { p = (op & 0x1FFFFu) >> 2; continue; }
+        if (op & 0x80000000u) { GEODL_VISIT(p, p + 1u); p = (op & 0x1FFFFu) >> 2; continue; }
         uint32_t cmd = (op >> 23) & 0x1F;
         #define LA(k) (p + 1u + (k) < nw ? L[p + 1u + (k)] : 0u)
         uint32_t len = 0;
@@ -383,36 +442,51 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             case 0x04: {
                 uint32_t addr = LA(0), cnt = LA(1);
                 len = 2 + cnt;
-                if (cnt) g_geo_live.gen[(addr & 0x800000u) ? 0 : 2]++;
                 for (uint32_t k = 0; k < cnt; k++) {
-                    if (addr & 0x800000u) g_geo_live.texram[(addr + k) & 0xFFFFu] = (uint16_t)LA(2 + k);
-                    else                  g_geo_live.logram[(addr + k) & 0x7FFFu] = (uint8_t)LA(2 + k);
+                    if (addr & 0x800000u) {
+                        uint32_t i = (addr + k) & 0xFFFFu;
+                        g_geo_live.texram[i] = (uint16_t)LA(2 + k);
+                        geo_dirty_mark(0, i * 2u);
+                    } else {
+                        uint32_t i = (addr + k) & 0x7FFFu;
+                        g_geo_live.logram[i] = (uint8_t)LA(2 + k);
+                        geo_dirty_mark(2, i);
+                    }
                 }
                 break;
             }
             case 0x14: {                    /* log data: a byte at a time, through command 4's write */
                 uint32_t addr = LA(0), cnt = LA(1);
                 len = 2 + cnt;
-                if (cnt) g_geo_live.gen[(addr & 0x800000u) ? 0 : 2]++;
                 for (uint32_t k = 0; k < 4u * cnt; k++) {
                     uint8_t b = (uint8_t)(LA(2 + k / 4u) >> (8u * (k % 4u)));
-                    if (addr & 0x800000u) g_geo_live.texram[(addr + k) & 0xFFFFu] = b;
-                    else                  g_geo_live.logram[(addr + k) & 0x7FFFu] = b;
+                    if (addr & 0x800000u) {
+                        uint32_t i = (addr + k) & 0xFFFFu;
+                        g_geo_live.texram[i] = b;
+                        geo_dirty_mark(0, i * 2u);
+                    } else {
+                        uint32_t i = (addr + k) & 0x7FFFu;
+                        g_geo_live.logram[i] = b;
+                        geo_dirty_mark(2, i);
+                    }
                 }
                 break;
             }
             case 0x05: case 0x15: {
                 uint32_t addr = LA(0), cnt = LA(1);
                 len = 2 + cnt;
-                uint32_t *ram = g_geo_live.polyram[(addr & 0x01000000u) ? 1 : 0];
-                if (cnt) g_geo_live.gen[1]++;
-                for (uint32_t k = 0; k < cnt; k++) ram[(addr + k) & 0x7FFFu] = LA(2 + k);
+                uint32_t bank = (addr & 0x01000000u) ? 1u : 0u;
+                for (uint32_t k = 0; k < cnt; k++) {
+                    uint32_t i = (addr + k) & 0x7FFFu;
+                    g_geo_live.polyram[bank][i] = LA(2 + k);
+                    geo_dirty_mark(1, (bank * 0x8000u + i) * 4u);
+                }
                 break;
             }
             case 0x06: {
                 uint32_t index = LA(0) >> 2, cnt = LA(1);
                 len = 2 + 2 * cnt;
-                if (cnt) g_geo_live.gen[2]++;
+                if (cnt) g_geo_dirty[0].slots = g_geo_dirty[1].slots = true;
                 for (uint32_t k = 0; k < cnt; k++, index++) {
                     uint32_t param = LA(2 + 2 * k), coef = LA(3 + 2 * k);
                     g_geo_live.texparam[index & 0x1F][0] = (float)(param & 0xFF);
@@ -429,12 +503,15 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             case 0x0B: case 0x1B: len = 12; break;
             case 0x1D: len = 2 + 3 * LA(1); break;
             case 0x02: case 0x12: len = geodl_direct_len(L, nw, p); break;
-            case 0x0F: case 0x1F: return;     /* END */
+            case 0x0F: case 0x1F: len = 0; guard = 0x8000u; break;   /* END */
             default: break;
         }
         #undef LA
+        GEODL_VISIT(p, p + 1u + len);
         p += 1u + len;
     }
+    GEODL_VISIT(0, 0);                             /* flush the last run */
+    #undef GEODL_VISIT
 }
 
 static inline void geo_push(uint32_t word) {
@@ -448,9 +525,15 @@ static inline void geo_push(uint32_t word) {
 static inline void geodl_publish(uint32_t rstart) {
     if (!g_geo.buff) return;
     uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[1] : g_geodl_snaps[0];
-    memcpy(back, g_geo.buff, sizeof g_geodl_snaps[0]);
-    geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart);
-    geo_raster_publish(&g_geo_pub[back == g_geodl_snaps[0] ? 0 : 1]);
+    const uint32_t *live = (const uint32_t *)(const void *)g_geo.buff;
+    if (g_geodl_full_snap) {
+        /* geo3d_scan_displaylist walks its own format: give it all of bufferram */
+        memcpy(back, live, sizeof g_geodl_snaps[0]);
+        geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart, NULL);
+    } else {
+        geodl_apply_state(live, BUFF_RAM_SIZE / 4, rstart, back);
+    }
+    geo_raster_publish(back == g_geodl_snaps[0] ? 0 : 1);
     g_geodl_snap_rstart = rstart;
     g_geodl_snap        = back;
     g_geodl_snap_seq++;
@@ -536,28 +619,9 @@ static inline uint8_t *mem_region_fresh(uint8_t *have, size_t size) {
     return have;
 }
 
-static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
-    /* Re-init KEEPS the heap regions and clears them in place. It never frees
-     * them, because a netplay session re-runs this on the emu thread while the
-     * process is live (the board reset at the barrier) and other threads hold
-     * these pointers across it: the frame callback loads texram0 / texram1 once
-     * and then decodes two million texels through them
-     * (game_render_upload_atlas), the MCP bridge reads the bus, a memory viewer
-     * may be open. Free a block one of them is walking and the read faults at
-     * once — a block this size is its own mapping, and free() hands the pages
-     * straight back to the OS rather than leaving stale bytes to read.
-     *
-     * The sizes are compile-time constants, so the old block always fits, and a
-     * cleared block is byte for byte what calloc returned, which is what two
-     * netplayed boards have to agree on. A reader caught mid-reset now sees a
-     * half-cleared sheet for one frame of a cold boot, not freed memory.
-     *   Symptom that surfaced this in STF: accepting a netplay challenge killed
-     *   any client that had a window, every time, between "barrier released ...
-     *   resetting the board" and the first frame. Access violation in the atlas
-     *   decode, 350,000 texels into a texram0 the bus no longer owned. Headless
-     *   clients have no frame callback and never saw it. 1c62bf0 put the MCP
-     *   bridge's reads under the emu mutex for the same reason; this removes the
-     *   reason, for every reader at once. */
+/* The bus zeroed, keeping the battery's contents and the heap regions' blocks
+ * (see mem_init), with the ROM in place and every change generation moved on. */
+static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
     uint8_t *main_data   = bus->main_data;
     uint8_t *xtra_data   = bus->xtra_data;
     uint8_t *vid_ext_ram = bus->vid_ext_ram;
@@ -582,13 +646,10 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
      * could have recorded from the previous bus. */
     static uint32_t s_init_count = 0;
     bus->gen_tile = bus->gen_gfx = bus->gen_pal = bus->gen_tex = bus->gen_lut = ++s_init_count << 20;
+}
 
-    /* IO idles HIGH on the Model 2 (hardware pull-ups). */
-    memset(bus->io, IO_IDLE_FILL, sizeof(bus->io));
-
-    cop_reset();   /* clears g_cop / g_sharc and resets rot[] to identity */
-    irqt_reset();  /* timers idle (0xFFFFF), no interrupt pending, vblank phase 0 */
-
+/* The heap regions for this boot (mem_region_fresh); 0 when one cannot be had. */
+static inline int mem_alloc_regions(memory_bus_t *bus) {
     bus->main_data   = mem_region_fresh(bus->main_data,   MAIN_DATA_SIZE);
     bus->xtra_data   = mem_region_fresh(bus->xtra_data,   XTRA_DATA_SIZE);
     bus->vid_ext_ram = mem_region_fresh(bus->vid_ext_ram, VID_EXT_RAM_SIZE);
@@ -599,7 +660,11 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
         LOG_ERROR("mem: heap allocation failed");
         return 0;
     }
+    return 1;
+}
 
+/* The region table, and the SHARC / GEO / COP views of the buffers it adds. */
+static inline void mem_add_regions(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
     /* Region table — ORDER MATTERS. TILE must precede H_SYNC/V_SYNC so the
      * overlapping sync addresses route to the TILE region (where the scroll
      * regs / sync flags actually live in our model). */
@@ -667,7 +732,10 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     mem_add_region(bus, "LUMA2",           LUMA2_BASE,           LUMA2_SIZE,           bus->luma2,         0);
     mem_add_region(bus, "FRAMEBUFFER",     FRAMEBUFFER_BASE,     FRAMEBUFFER_SIZE,     bus->framebuffer,   0);
     mem_add_region(bus, "IAC",             IAC_BASE,             IAC_SIZE,             bus->iac,           0);
+}
 
+/* Each region's burst flag and change tracking, by name. */
+static inline void mem_region_flags(memory_bus_t *bus) {
     /* MMIO the board does not burst (model2.cpp: no i960_cpu_device::BURST). */
     static const char *const no_burst[] = {
         "GEO", "GEO_PROGRAM", "GEO_CMD", "COPROGRAM", "COPRO_SHARC_IOP", "COPRO_CTL",
@@ -691,6 +759,42 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
         else if (!strcmp(r->name, "LUMA") || !strcmp(r->name, "COLORXLAT"))
             r->change_gen = &bus->gen_lut;
     }
+}
+
+static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
+    /* Re-init KEEPS the heap regions and clears them in place. It never frees
+     * them, because a netplay session re-runs this on the emu thread while the
+     * process is live (the board reset at the barrier) and other threads hold
+     * these pointers across it: the frame callback loads texram0 / texram1 once
+     * and then decodes two million texels through them
+     * (game_render_upload_atlas), the MCP bridge reads the bus, a memory viewer
+     * may be open. Free a block one of them is walking and the read faults at
+     * once — a block this size is its own mapping, and free() hands the pages
+     * straight back to the OS rather than leaving stale bytes to read.
+     *
+     * The sizes are compile-time constants, so the old block always fits, and a
+     * cleared block is byte for byte what calloc returned, which is what two
+     * netplayed boards have to agree on. A reader caught mid-reset now sees a
+     * half-cleared sheet for one frame of a cold boot, not freed memory.
+     *   Symptom that surfaced this in STF: accepting a netplay challenge killed
+     *   any client that had a window, every time, between "barrier released ...
+     *   resetting the board" and the first frame. Access violation in the atlas
+     *   decode, 350,000 texels into a texram0 the bus no longer owned. Headless
+     *   clients have no frame callback and never saw it. 1c62bf0 put the MCP
+     *   bridge's reads under the emu mutex for the same reason; this removes the
+     *   reason, for every reader at once. */
+    mem_bus_clear(bus, rom_data, rom_size);
+
+    /* IO idles HIGH on the Model 2 (hardware pull-ups). */
+    memset(bus->io, IO_IDLE_FILL, sizeof(bus->io));
+
+    cop_reset();   /* clears g_cop / g_sharc and resets rot[] to identity */
+    irqt_reset();  /* timers idle (0xFFFFF), no interrupt pending, vblank phase 0 */
+
+    if (!mem_alloc_regions(bus)) return 0;
+
+    mem_add_regions(bus, rom_data, rom_size);
+    mem_region_flags(bus);
 
     memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
     mem_regions_changed(bus);   /* callbacks and change tracking were set after the adds */
@@ -1133,44 +1237,52 @@ static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint3
     p[3] = (uint8_t)(val >> 24);
 }
 
+/* The capture starts: the COP's bufferram and DM as they stand. */
+static inline void dl_capture_start(const memory_bus_t *bus) {
+    g_dl.active = 1;
+    if (g_dl.cop_bufram) memcpy(g_dl.cop_bufram, bus->buff_ram, BUFF_RAM_SIZE);
+    if (g_dl.cop_dm)
+        for (uint32_t k = 0; k < 0x1000u; k++) g_dl.cop_dm[k] = sharc_dm_get(0x30000u + k);
+}
+
+/* Mark m's probes and copies, the frame's view of what the capture asked for. */
+static inline void dl_mark_fill(memory_bus_t *bus, dl_mark_t *m) {
+    for (int i = 0; i < g_dl.nprobes; i++) {
+        uint32_t a = g_dl.probe_addr[i];
+        m->probe[i] = g_dl.probe_size[i] == 1 ? mem_read8(bus, a)
+                    : g_dl.probe_size[i] == 2 ? mem_read16(bus, a)
+                    :                           mem_read32(bus, a);
+    }
+    /* The same slots as the i960 can see them — bufferram, which is SHARC
+     * DM 0x1400000: what op 0x67 stored, laid out the way a MAME capture
+     * reads them out of i960 0x90E800 / 0x90EC00. */
+    if (g_dl.slots)
+        memcpy(g_dl.slots + (g_dl.nmarks - 1) * DL_SLOT_WORDS,
+               bus->buff_ram + 0x3A00u * 4u, DL_SLOT_WORDS * 4u);
+    /* The coprocessor's unit-matrix cache (op 0x35 stores, 0x36/0x37 loads). */
+    if (g_dl.unit)
+        memcpy(g_dl.unit + (g_dl.nmarks - 1) * sizeof g_sharc.rot_cache / sizeof(float),
+               g_sharc.rot_cache, sizeof g_sharc.rot_cache);
+    /* Whole RAM ranges, byte for byte, in the order they were asked for. */
+    if (g_dl.blocks) {
+        uint8_t *dst = g_dl.blocks + (g_dl.nmarks - 1) * (size_t)g_dl.block_bytes;
+        for (int b = 0; b < g_dl.nblocks; b++)
+            for (uint32_t k = 0; k < g_dl.block_len[b]; k++) *dst++ = mem_read8(bus, g_dl.block_addr[b] + k);
+    }
+}
+
 /* A frame edge: called under the emu mutex when the game's frame has ended and
  * before the next instruction runs. A profile with a frame hook calls it from
  * there (dl_game_frame_edge), the run loop at the vblank for one without. */
 static inline void dl_frame_edge(memory_bus_t *bus, uint32_t frame) {
     if (!M2HLE_DEV_TOOLS) return;
-    if (g_dl.armed && !g_dl.active && !g_dl.done) {
-        g_dl.active = 1;
-        if (g_dl.cop_bufram) memcpy(g_dl.cop_bufram, bus->buff_ram, BUFF_RAM_SIZE);
-        if (g_dl.cop_dm)
-            for (uint32_t k = 0; k < 0x1000u; k++) g_dl.cop_dm[k] = sharc_dm_get(0x30000u + k);
-    }
+    if (g_dl.armed && !g_dl.active && !g_dl.done) dl_capture_start(bus);
     if (!g_dl.active) return;
     if (g_dl.nmarks < g_dl.capmarks) {
         dl_mark_t *m = &g_dl.marks[g_dl.nmarks++];
         m->frame = frame;
         m->index = (uint32_t)g_dl.n;
-        for (int i = 0; i < g_dl.nprobes; i++) {
-            uint32_t a = g_dl.probe_addr[i];
-            m->probe[i] = g_dl.probe_size[i] == 1 ? mem_read8(bus, a)
-                        : g_dl.probe_size[i] == 2 ? mem_read16(bus, a)
-                        :                           mem_read32(bus, a);
-        }
-        /* The same slots as the i960 can see them — bufferram, which is SHARC
-         * DM 0x1400000: what op 0x67 stored, laid out the way a MAME capture
-         * reads them out of i960 0x90E800 / 0x90EC00. */
-        if (g_dl.slots)
-            memcpy(g_dl.slots + (g_dl.nmarks - 1) * DL_SLOT_WORDS,
-                   bus->buff_ram + 0x3A00u * 4u, DL_SLOT_WORDS * 4u);
-        /* The coprocessor's unit-matrix cache (op 0x35 stores, 0x36/0x37 loads). */
-        if (g_dl.unit)
-            memcpy(g_dl.unit + (g_dl.nmarks - 1) * sizeof g_sharc.rot_cache / sizeof(float),
-                   g_sharc.rot_cache, sizeof g_sharc.rot_cache);
-        /* Whole RAM ranges, byte for byte, in the order they were asked for. */
-        if (g_dl.blocks) {
-            uint8_t *dst = g_dl.blocks + (g_dl.nmarks - 1) * (size_t)g_dl.block_bytes;
-            for (int b = 0; b < g_dl.nblocks; b++)
-                for (uint32_t k = 0; k < g_dl.block_len[b]; k++) *dst++ = mem_read8(bus, g_dl.block_addr[b] + k);
-        }
+        dl_mark_fill(bus, m);
     }
     if (g_dl.nmarks > g_dl.want || g_dl.nmarks >= g_dl.capmarks || g_dl.overflow) {
         g_dl.active = 0;

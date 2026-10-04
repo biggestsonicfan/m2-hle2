@@ -53,22 +53,24 @@ static inline bool gfx_readback_supported(void) {
 #endif
 }
 
-/*
- * Read `img` (w x h, a colour attachment of a pass that has already ended)
- * into `out` — w*h*4 bytes, RGBA, top row first.
- *
- * The call blocks until the GPU has finished with the attachment: both
- * backends' paths map or read straight after the copy, which is a full stall.
- * That is the point — a debug screenshot wants the pixels now, not next frame.
- */
-static inline bool gfx_readback_rgba8(sg_image img, int w, int h, uint8_t *out) {
-    g_gfx_readback_err[0] = '\0';
-    if (w <= 0 || h <= 0 || !out) {
-        snprintf(g_gfx_readback_err, sizeof g_gfx_readback_err, "bad readback size %dx%d", w, h);
-        return false;
-    }
-
 #if defined(SOKOL_D3D11)
+/* The mapped staging rows into `out`, RGBA with alpha forced opaque. */
+static inline void gfx_readback__d3d11_rows(const D3D11_MAPPED_SUBRESOURCE *map, bool bgra,
+                                            int w, int h, uint8_t *out) {
+    for (int y = 0; y < h; y++) {
+        const uint8_t *s = (const uint8_t *)map->pData + (size_t)y * map->RowPitch;
+        uint8_t       *d = out + (size_t)y * (size_t)w * 4;
+        for (int x = 0; x < w; x++) {
+            d[x * 4 + 0] = bgra ? s[x * 4 + 2] : s[x * 4 + 0];
+            d[x * 4 + 1] = s[x * 4 + 1];
+            d[x * 4 + 2] = bgra ? s[x * 4 + 0] : s[x * 4 + 2];
+            d[x * 4 + 3] = 255;
+        }
+    }
+}
+
+/* The D3D11 path: a staging copy of the texture, mapped and converted. */
+static inline bool gfx_readback__d3d11(sg_image img, int w, int h, uint8_t *out) {
     ID3D11Device        *dev = (ID3D11Device *)sg_d3d11_device();
     ID3D11DeviceContext *ctx = (ID3D11DeviceContext *)sg_d3d11_device_context();
     sg_d3d11_image_info  info = sg_d3d11_query_image_info(img);
@@ -106,21 +108,29 @@ static inline bool gfx_readback_rgba8(sg_image img, int w, int h, uint8_t *out) 
      * usually need swapping on the way out. */
     const bool bgra = (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
                        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
-    for (int y = 0; y < h; y++) {
-        const uint8_t *s = (const uint8_t *)map.pData + (size_t)y * map.RowPitch;
-        uint8_t       *d = out + (size_t)y * (size_t)w * 4;
-        for (int x = 0; x < w; x++) {
-            d[x * 4 + 0] = bgra ? s[x * 4 + 2] : s[x * 4 + 0];
-            d[x * 4 + 1] = s[x * 4 + 1];
-            d[x * 4 + 2] = bgra ? s[x * 4 + 0] : s[x * 4 + 2];
-            d[x * 4 + 3] = 255;
-        }
-    }
+    gfx_readback__d3d11_rows(&map, bgra, w, h, out);
     ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)stage, 0);
     ID3D11Texture2D_Release(stage);
     return true;
-
+}
 #elif defined(SOKOL_GLCORE) || defined(SOKOL_GLES3)
+/* GL hands back the bottom row first. Flip in place, row by row, and force
+ * alpha opaque. */
+static inline void gfx_readback__gl_flip(int w, int h, uint8_t *out) {
+    static uint8_t row[4 * 4096];
+    const size_t stride = (size_t)w * 4;
+    if (stride <= sizeof row) {
+        for (int y = 0; y < h / 2; y++) {
+            uint8_t *a = out + (size_t)y * stride;
+            uint8_t *b = out + (size_t)(h - 1 - y) * stride;
+            memcpy(row, a, stride); memcpy(a, b, stride); memcpy(b, row, stride);
+        }
+    }
+    for (size_t i = 3; i < (size_t)w * (size_t)h * 4; i += 4) out[i] = 255;
+}
+
+/* The GL path: the texture on a throwaway framebuffer, read with glReadPixels. */
+static inline bool gfx_readback__gl(sg_image img, int w, int h, uint8_t *out) {
     sg_gl_image_info gi = sg_gl_query_image_info(img);
     if (gi.tex[gi.active_slot] == 0) {
         snprintf(g_gfx_readback_err, sizeof g_gfx_readback_err, "no GL texture behind the image");
@@ -143,19 +153,30 @@ static inline bool gfx_readback_rgba8(sg_image img, int w, int h, uint8_t *out) 
     sg_reset_state_cache();     /* sokol caches GL state; we changed it behind its back */
     if (!ok) return false;
 
-    /* GL hands back the bottom row first. Flip in place, row by row. */
-    static uint8_t row[4 * 4096];
-    const size_t stride = (size_t)w * 4;
-    if (stride <= sizeof row) {
-        for (int y = 0; y < h / 2; y++) {
-            uint8_t *a = out + (size_t)y * stride;
-            uint8_t *b = out + (size_t)(h - 1 - y) * stride;
-            memcpy(row, a, stride); memcpy(a, b, stride); memcpy(b, row, stride);
-        }
-    }
-    for (size_t i = 3; i < (size_t)w * (size_t)h * 4; i += 4) out[i] = 255;
+    gfx_readback__gl_flip(w, h, out);
     return true;
+}
+#endif
 
+/*
+ * Read `img` (w x h, a colour attachment of a pass that has already ended)
+ * into `out` — w*h*4 bytes, RGBA, top row first.
+ *
+ * The call blocks until the GPU has finished with the attachment: both
+ * backends' paths map or read straight after the copy, which is a full stall.
+ * That is the point — a debug screenshot wants the pixels now, not next frame.
+ */
+static inline bool gfx_readback_rgba8(sg_image img, int w, int h, uint8_t *out) {
+    g_gfx_readback_err[0] = '\0';
+    if (w <= 0 || h <= 0 || !out) {
+        snprintf(g_gfx_readback_err, sizeof g_gfx_readback_err, "bad readback size %dx%d", w, h);
+        return false;
+    }
+
+#if defined(SOKOL_D3D11)
+    return gfx_readback__d3d11(img, w, h, out);
+#elif defined(SOKOL_GLCORE) || defined(SOKOL_GLES3)
+    return gfx_readback__gl(img, w, h, out);
 #else
     (void)img;
     snprintf(g_gfx_readback_err, sizeof g_gfx_readback_err,

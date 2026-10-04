@@ -302,11 +302,11 @@ static inline void objview_cmd_list(const char *req, const romset_t *rs, char *r
                  first, count);
     p += n; left -= n;
 
+    const geo3d_models_t md = geo3d_models_of(rs, q);
     uint32_t nonempty = 0, emitted = 0;
-    const geo3d_rom_t rom = geo3d_rom_of(rs, q);
     for (uint32_t m = first; m < first + count; m++) {
         list_buf.count = 0;
-        geo3d_decode_model((int)m, &rom, NULL, 1.0f, 1.0f, 1.0f);
+        geo3d_decode_model(&md, (int)m, NULL, 1.0f, 1.0f, 1.0f);
         int tris = list_buf.count;
         if (tris > 0) nonempty++;
         if (nonempty_only && tris == 0) continue;
