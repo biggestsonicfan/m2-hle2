@@ -669,6 +669,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     /* A slice runs the board to its next vblank (irq_timer.h), whatever the
      * program is doing then: the frame is the board's, not the game's. */
     g_vblank_edge = 0;
+    g_geodl_full_snap = g_active_profile && g_active_profile->quirks.geo_displaylist;
     emu_slice_irq_stale(ctx);
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);

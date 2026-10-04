@@ -98,7 +98,7 @@ pictures), base against new.
 
 Together: tiles 0.36 → 0.26 ms a frame (−28%), 3D 0.136 → 0.128 ms, render 0.51 → 0.40 ms
 (−21%); the whole bench (ROM load included) 55.3G → 45.7G instructions, 16.7G → 14.9G cycles.
-On x86. The handheld runs the same CPU compositor, so it should gain there too; not measured.
+On x86. On the handheld, see the next section: tiles 2.40 → 1.98 ms.
 
 What was looked at and left:
 
@@ -115,6 +115,38 @@ What was looked at and left:
   change there is a board change, not a host one.
 - **The zkey of a culled face.** `geo3d_flat_depth` has to run for every face (a culled face
   still sets the previous z), and the key itself is a few integer operations.
+
+## What #406/#408 did with it, and the handheld
+
+**The GEO publish copies only what changed** (`geodl_publish`, `geo_raster_publish` in
+`memory.h`). Each published list used to be a copy of all 512 KB of bufferram, and texture,
+polygon and log RAM were copied whole whenever a list had written any of them: STF rewrites the
+eyes' texture points and the material slots every frame, so that was ~290 KB a frame for a few
+hundred bytes of change. Now the list walk that applies the state copies the words it visits
+(the renderer's walk takes the same steps and reads nothing else), and a write marks its
+256-byte block dirty for each published copy. A profile in the homebrew list format
+(`quirks.geo_displaylist`) still gets all of bufferram. `dump_geo_list` writes the published
+snapshot, so outside the list's own words it now holds older frames' bytes.
+
+Exact: the published texture, polygon and log RAM against live after every publish, and the
+renderer's walk over the partial copy against a full one, 0 mismatches over 12,000 frames;
+`--draw-digest` identical over 12,000 frames of STF and 8,000 of Fighting Vipers; `det_digest
+--cpu` identical over 9,000. x86: 2.4% fewer cycles a frame.
+
+**On the RG ARC-S** (RK3566, Cortex-A55), `arc_bench` cross-built (`-mcpu=cortex-a55`), 3,000
+frames of attract, the clock pinned at 1416 MHz so throttling cannot pick a winner, the three
+builds alternated four times, each run started below 57 C. The four runs of a build agreed to
+0.02 ms:
+
+| Build | emu ms | render ms | tiles ms | 3D ms | frame ms |
+|---|---|---|---|---|---|
+| master before #403 (d641b75) | 3.36 | 3.86 | 2.40 | 1.35 | 7.22 |
+| #403 (3c0428e) | 3.36 | 3.42 | 1.98 | 1.34 | 6.78 |
+| #403 + GEO publish | 3.12 | 3.42 | 1.98 | 1.34 | 6.54 |
+
+So on the device #403's tile work is −17.5% tiles and −11% render (it was −28% / −21% on x86),
+its 3D change does not show, and the GEO publish is −7% of the emu thread. Together −9.4% of a
+frame's CPU, 138 → 152 frames a second flat out.
 
 ## How to take one
 
