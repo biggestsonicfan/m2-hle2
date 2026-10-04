@@ -280,9 +280,10 @@ static inline void tile_dirty_mark_cell(tile_dirty_t *d, const uint16_t *w, int 
  * scroll word redraws its line, a window mask word its 128-pixel span of the
  * line, a tilemap cell where it shows. Words the compositor never reads change
  * nothing. */
-static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const uint16_t *cur) {
-    for (int i = 0; i < TILE_SNAP_WORDS && !d->full; i += 64) {
-        int n = TILE_SNAP_WORDS - i < 64 ? TILE_SNAP_WORDS - i : 64;
+static inline void tile_dirty_find_range(tile_dirty_t *d, const uint16_t *old, const uint16_t *cur,
+                                         int i0, int i1) {
+    for (int i = i0; i < i1 && !d->full; i += 64) {
+        int n = i1 - i < 64 ? i1 - i : 64;
         if (!memcmp(old + i, cur + i, (size_t)n * sizeof *cur)) continue;
         for (int wi = i; wi < i + n; wi++) {
             if (old[wi] == cur[wi]) continue;
@@ -303,6 +304,10 @@ static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const u
             }
         }
     }
+}
+
+static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const uint16_t *cur) {
+    tile_dirty_find_range(d, old, cur, 0, TILE_SNAP_WORDS);
 }
 
 /* ---- The CPU compositor --------------------------------------------------- */

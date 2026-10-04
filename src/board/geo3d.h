@@ -453,16 +453,17 @@ static float g_geo3d_cull_nlen[5];       /* |xyz| of each plane */
 #ifdef GEO3D_FTRV
 /* geo3d_cull_code with planes 0-3's distances from FTRV (XMTRX: those planes,
  * row by row), in d. */
+static inline unsigned geo3d_cull_bit(const float *q, vec3_t p, float d, unsigned k) {
+    if (!(d < 0.0f)) return 0;
+    float m = 1.0e-5f * (fabsf(q[0] * p.x) + fabsf(q[1] * p.y) + fabsf(q[2] * p.z) + fabsf(q[3]));
+    return d < -m ? 1u << k : 0u;
+}
+/* Unrolled: the loop and its select were most of a corner's cost. */
 static inline uint8_t geo3d_cull_code_d(vec3_t p, const float *d4) {
-    uint8_t code = 0;
-    for (int k = 0; k < 5; k++) {
-        const float *q = g_geo3d_cull_plane[k];
-        float d = k < 4 ? d4[k] : q[0] * p.x + q[1] * p.y + q[2] * p.z + q[3];
-        if (!(d < 0.0f)) continue;
-        float m = 1.0e-5f * (fabsf(q[0] * p.x) + fabsf(q[1] * p.y) + fabsf(q[2] * p.z) + fabsf(q[3]));
-        if (d < -m) code |= (uint8_t)(1u << k);
-    }
-    return code;
+    const float (*q)[4] = g_geo3d_cull_plane;
+    return (uint8_t)(geo3d_cull_bit(q[0], p, d4[0], 0) | geo3d_cull_bit(q[1], p, d4[1], 1) |
+                     geo3d_cull_bit(q[2], p, d4[2], 2) | geo3d_cull_bit(q[3], p, d4[3], 3) |
+                     geo3d_cull_bit(q[4], p, q[4][0] * p.x + q[4][1] * p.y + q[4][2] * p.z + q[4][3], 4));
 }
 #endif
 
@@ -485,14 +486,11 @@ static inline float geo3d_flat_z(const vec3_t *sv, const int *zsrc, uint32_t zmo
     float z;
     if (zmode == 0u)      z = g_geo3d_flat_prev_z;
     else if (zmode == 3u) z = 1.0e10f;
-    else {
-        float lo = -sv[zsrc[0]].z, hi = lo;
-        for (int i = 1; i < 4; i++) {
-            float c = -sv[zsrc[i]].z;
-            if (c < lo) lo = c;
-            if (c > hi) hi = c;
-        }
-        z = zmode == 2u ? hi : lo;
+    else {   /* the nearest corner's -z (mode 2) or the farthest's */
+        float a = sv[zsrc[0]].z, b = sv[zsrc[1]].z, c = sv[zsrc[2]].z, d = sv[zsrc[3]].z;
+        if (zmode == 2u) { if (b < a) a = b; if (c < a) a = c; if (d < a) a = d; }
+        else             { if (b > a) a = b; if (c > a) a = c; if (d > a) a = d; }
+        z = -a;
     }
     g_geo3d_flat_prev_z = z;
     return z;
@@ -1142,6 +1140,9 @@ static int            g_geo3d_nn_normals  = 1;
  * flattens the fighter onto the floor. A ROM normal put through that matrix
  * says nothing about which way the flattened face points, so the rear test
  * dropped faces at random, most visibly Knuckles' dreadlocks at select. */
+#ifndef GEO3D_RSQRTF
+#define GEO3D_RSQRTF(x) (1.0f / sqrtf(x))
+#endif
 static inline vec3_t geo3d_board_normal(const float *matrix, vec3_t fn, bool has_c,
                                         vec3_t A, vec3_t B, vec3_t C) {
     vec3_t n;
@@ -1151,8 +1152,8 @@ static inline vec3_t geo3d_board_normal(const float *matrix, vec3_t fn, bool has
         n.x = -(e1y * e2z - e1z * e2y);
         n.y = -(e1z * e2x - e1x * e2z);
         n.z = -(e1x * e2y - e1y * e2x);
-        float len = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
-        if (len != 0.0f) { float k = 1.0f / len; n.x *= k; n.y *= k; n.z *= k; }
+        float l2 = n.x * n.x + n.y * n.y + n.z * n.z;
+        if (l2 != 0.0f) { float k = GEO3D_RSQRTF(l2); n.x *= k; n.y *= k; n.z *= k; }
         return n;
     }
     n.x = matrix[0]*fn.x + matrix[1]*fn.y + matrix[2]*fn.z;

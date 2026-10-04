@@ -481,6 +481,9 @@ static void dp_ls_rest(tile_cpu_t *c, const uint8_t *gfx, const int16_t *x0, con
     s24_draw_tilemap(c->words, gfx, 0, 1, false, c->fg, x0, x1);
 }
 
+_Static_assert(offsetof(memory_bus_t, tile) % 4 == 0, "dp_tiles reads tile RAM as words");
+_Static_assert(TILE_SNAP_WORDS % 512 == 0, "dp_tiles copies whole KBs");
+
 static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
     static uint32_t s_tile = ~0u, s_gfx = ~0u, s_pal = ~0u, s_lut = ~0u;
     static bool s_valid;
@@ -513,8 +516,7 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
         g_dp.pen1555[TILE_PEN_NONE] = 0;
     }
     if (redraw) {
-        uint16_t *n = tiles->next;
-        memcpy(n, bus->tile, sizeof tiles->next);
+        const uint16_t *n = (const uint16_t *)bus->tile;
         bool ls = dp_ls_ok(n);
         if (ls != g_ls.on) { d.full = ls_all = true; g_ls.on = ls; }
         if (ls) {
@@ -522,14 +524,19 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
             g_ls.vy = n[0x5006] & 0x1FF;
             dp_ls_draw(n + 0x2000, bus->tmapgfx, ls_all);
             ls_all = false;
-            /* Pair 2/3's cells, line scroll and mask stay as they were for the
-             * CPU's layers, which no longer draw them. */
-            memcpy(n + 0x2000, tiles->words + 0x2000, 0x2000 * sizeof *n);
-            memcpy(n + 0x4400, tiles->words + 0x4400, 0x400 * sizeof *n);
-            memcpy(n + 0x6800, tiles->words + 0x6800, 0x800 * sizeof *n);
         }
-        if (!d.full) tile_dirty_find(&d, tiles->words, n);
-        memcpy(tiles->words, n, sizeof tiles->words);
+        /* Only a KB written since the last redraw can differ (memory.h
+         * tile_dirty). Under line scroll, pair 2/3's cells, line scroll and
+         * mask (KBs 8-15, 17, 26-27) stay as they were for the CPU's layers,
+         * which no longer draw them. */
+        volatile uint8_t *dk = bus->tile_dirty;
+        for (int k = 0; k < TILE_SNAP_WORDS / 512; k++) {
+            if (!d.full && !dk[k]) continue;
+            dk[k] = 0;
+            if (ls && ((k >= 8 && k < 16) || k == 17 || k == 26 || k == 27)) continue;
+            if (!d.full) tile_dirty_find_range(&d, tiles->words, n, k * 512, k * 512 + 512);
+            memcpy(tiles->words + k * 512, n + k * 512, 1024);
+        }
         if (d.count > TILE_BLK_W * TILE_BLK_H * 3 / 4) d.full = true;
         for (int by = 0; by < TILE_BLK_H; by++) {
             int b0 = 0, b1 = TILE_BLK_W;
@@ -814,19 +821,19 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
 
 /* Far to near: slice, then key, descending; a tie goes to the later polygon
  * (the board's LEQUAL in submission order), so within a key the index runs
- * up. Four byte passes of a radix sort on the words geo3d_dc_tri made. */
+ * up. A radix sort on the words geo3d_dc_tri made: their low 13 bits are the
+ * index itself, already in order, so a stable sort of bits 13-31 is the
+ * whole sort: two passes (10 bits, then 9), both counts from one read. */
 static void dp_sort(int n) {
-    uint32_t *a = g_dcf_key, *b = g_dp_order[0], *c = g_dp_order[1];
-    for (int pass = 0; pass < 4; pass++) {
-        unsigned cnt[257] = { 0 };
-        int sh = pass * 8;
-        for (int t = 0; t < n; t++) cnt[((a[t] >> sh) & 255u) + 1]++;
-        for (int k = 0; k < 256; k++) cnt[k + 1] += cnt[k];
-        for (int t = 0; t < n; t++) b[cnt[(a[t] >> sh) & 255u]++] = a[t];
-        a = b; b = (a == g_dp_order[0]) ? c : g_dp_order[0];
-    }
-    /* four passes: a is g_dp_order[1]; the faces' order into g_dp_order[0] */
-    for (int t = 0; t < n; t++) g_dp_order[0][t] = 0x1FFFu - ((~a[t]) & 0x1FFFu);
+    static unsigned lo[1025], hi[513];
+    const uint32_t *a = g_dcf_key;
+    uint32_t *b = g_dp_order[1], *o = g_dp_order[0];
+    memset(lo, 0, sizeof lo); memset(hi, 0, sizeof hi);
+    for (int t = 0; t < n; t++) { uint32_t k = a[t]; lo[((k >> 13) & 1023u) + 1]++; hi[(k >> 23) + 1]++; }
+    for (int k = 0; k < 1024; k++) lo[k + 1] += lo[k];
+    for (int k = 0; k < 512; k++) hi[k + 1] += hi[k];
+    for (int t = 0; t < n; t++) { uint32_t k = a[t]; b[lo[(k >> 13) & 1023u]++] = k; }
+    for (int t = 0; t < n; t++) { uint32_t k = b[t]; o[hi[k >> 23]++] = k & 0x1FFFu; }
 }
 
 typedef struct { float x, y, z, u, v; } dp_ev_t;   /* eye space, uv in [0, 1] units */

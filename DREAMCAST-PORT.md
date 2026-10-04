@@ -468,6 +468,98 @@ submit 6.5 ms. 30 fps needs the two together under 33 ms, so neither half
 alone reaches it. The draw side is where assets converted ahead of time can
 help: meshes pre-decoded to strips, and textures pre-converted to `.pvr`.
 
+## Flycast charges the MMU a third of the frame (#394, part 12)
+
+Part 12's changes, each checked by the frame-1500 hash (88ddb134) and the
+picture:
+
+- **Tile RAM keeps a dirty bit per KB** (`memory.h` `tile_dirty`, set by the
+  TILE and TILE_MIRROR writes; `tile_dirty_find_range`). The tile layer's
+  redraw reads `bus->tile` directly and redraws only what changed, where it
+  used to copy and compare a 56 KB snapshot twice.
+- **MAIN_DATA loads in the AOT code read the window directly**
+  (`AOT_ROMD`, `s_aot_md`), as program ROM loads already did.
+- **COP FIFO writes in runs** (`cop_write_n`), a two-pass `dp_sort`, an
+  unrolled outcode test (`geo3d_cull_code_d`), and `FSRRA` for 1/sqrt
+  (`dc_math.h`).
+
+Measured over frames 3500-3900 of attract (the stage-0 fight), in Flycast's
+libretro core under RetroArch. `main_dc.c` draws the window's totals on
+screen: i960 slices (sl), drawing (dr), and inside the drawing the tile
+layers (ti), the scan and decode (sc), the sort (so) and the PVR submit (su).
+
+| build | 400 frames | fps | sl / dr | ti / sc / so / su |
+|---|---|---|---|---|
+| part 11 (b33) | 27386 ms | 14.6 | 13713 / 13518 | 2136 / 9076 / 529 / 1615 |
+| part 12 (b35) | 25194 ms | 15.9 | 12879 / 12162 | 688 / 9046 / 524 / 1753 |
+| b35, Flycast's MMU charge at 2 cycles | 16050 ms | 24.9 | 7832 / 8150 | 438 / 6017 / 336 / 1298 |
+
+**The last row is Flycast, not the Dreamcast.** Flycast's cycle model
+(`core/hw/sh4/sh4_cycles.cpp`, `countCycles`) charges the first three memory
+ops of every block 5 cycles while its full MMU is on, and 2 otherwise. A real
+SH-4 pays nothing extra for a UTLB hit. The full MMU is on only because
+`pg_mmu_on` plants Windows CE's "SH-4 Kernel" signature, so that Flycast
+translates at all. The row comes from a local Flycast patched to take the
+charge from `$FLYCAST_MMU_MEMCYC` (reverted since). Everything else is
+unchanged: the hash still matches, and screenshots every 40 s through
+attract, select, two fights and the ranking draw as they should. (A white
+frame in the first run was the title screen's flash.) The profile of b35
+puts 40% in the 3D (decode_model_cached 19%, dp_frame 5%, dp_face 4.5%,
+dp_tri_put 4%), 14% in AOT code, 10% in the interpreter, 9.5% in the COP and
+8% in the AOT runtime.
+
+So **in Flycast, a third of the measured time is the MMU**, on every memory
+op of every block, heap and stack included. Turning MMUCR.AT off around phases
+that never touch a window does not help: Flycast throws away all translated
+code on every AT change (`CCN_MMUCR_write` → `ResetCache`), and checks for the
+signature again.
+
+### Next: page in software, with the MMU off
+
+`tests/rom_touch.c` (now with a page-size override) over 4000 frames of
+attract, in 4 KB / 64 KB pages:
+
+| region | in 4000 frames | largest 60-frame window |
+|---|---|---|
+| bus MAIN_DATA | 2596 KB / 3840 KB | 1308 KB / 2176 KB |
+| bus XTRA_DATA | 892 KB / 1216 KB | 464 KB / 640 KB |
+| polygons | 3044 KB / 5376 KB | 768 KB / 1344 KB |
+| textures (UV streams) | 1980 KB / 4800 KB | 444 KB / 1920 KB |
+
+A steady fight window reads ~70 4 KB pages of MAIN_DATA, ~8 of XTRA_DATA
+and 10-30 each of polygons and textures. The frame pool on the Dreamcast is
+1792 KB, so 64 KB frames (28 of them) are too coarse. 16 KB frames would give
+~110.
+
+Who reads the windows (an audit of what `main_dc.c` compiles):
+
+- **The i960, through the bus.** `rd_page` / `wr_page` (64 KB entries),
+  the `mem_*_slow` paths, `mem_fetch2`, `ib_build`, `AOT_PG`, and `AOT_ROMD`'s
+  flat `s_aot_rom` / `s_aot_md` spans. These are the bulk, and the
+  page table already is a TLB: start a paged region's entries empty, let the
+  slow path fault the page in and fill the entry, and clear it on eviction. A
+  first write goes the slow way to mark the frame dirty and pinned. That needs
+  `MEM_PAGE_SHIFT` (16 everywhere else, 14 here; tables ~150 KB at
+  `MEM_PAGES` 0x13000000 >> 14) and the `& 0xFFFF` bounds tests made to follow
+  it. `AOT_ROMD` falls back to `AOT_PG` (spans 0) on the Dreamcast.
+- **geo3d, not through the bus.** The model table (`read_u32_le` at +0/+4/+8,
+  every object every frame), `geo3d_tex_word`, and the 40-byte polygon walk
+  in `geo3d_mesh_build` / `geo3d_decode_model`, which runs to an end marker in
+  the data (up to 160 KB). The walk is the hard part. The plan is a converted
+  asset: a tool run when the disc is built writes each model's polygon run and
+  UV stream to one file with an index (made from the player's ROM, so never
+  committed, like STF.AFS). A mesh build then reads one contiguous blob.
+- **Boot only:** `sfight_install`'s PRCB reads, `geo3d_lookup_build`.
+
+The disc reads stay `pg_read` (GD-ROM syscalls, polled). Without the MMU a
+miss is an ordinary call on the emulator's thread, not an exception.
+
+Expected: about the 24.9 fps of the last row, a little more without the UTLB
+refills (the overlay counts 450-2800 a second), less the software faults. That
+is still short of 30. The rest has to come from the 3D: per-face FTRV for the
+normal and light, FIPR for the dot products, and per-face attribute bits
+worked out once at mesh build.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
@@ -498,8 +590,7 @@ help: meshes pre-decoded to strips, and textures pre-converted to `.pvr`.
 - **The i960 slice (53-79 ms a frame after #370's blocks).** Not the COP /
   GEO stores (#392 measured ~4% for the bus and COP together). Keeping the hot
   `cpu` / `bus` state in the 8 KB operand-cache RAM mode.
-- **The tile layer's snapshot.** Each redraw copies and compares 56 KB of tile
-  RAM twice (`dc_pvr.h`); swapping two pointers would save one copy.
-- **UTLB reach.** Map the hot code pages with 64 KB pages.
+- **The MMU off: software paging** (see "Flycast charges the MMU a third of
+  the frame" above). The largest single item in Flycast.
 - **Optional:** modifier-volume shadows; dropping SDL2 and GLdc for KOS's
   `snd_stream` directly.

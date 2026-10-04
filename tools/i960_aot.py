@@ -219,22 +219,26 @@ def direct(ip, w1, w2, kind):
         d = (w1 >> 19) & 0x1F
         if op == 0x8C: return f'{R(d)} = {ea};'
         sz = {0x80: 1, 0x88: 2, 0x90: 4, 0xC0: 1, 0xC8: 2, 0x82: 1, 0x8A: 2, 0x92: 4, 0xC2: 1, 0xCA: 2}
-        rd = {0x80: 'AOT_L8(0)', 0x88: 'AOT_L16(0)', 0x90: 'AOT_L32(0)',
-              0xC0: '(uint32_t)(int32_t)(int8_t)AOT_L8(0)', 0xC8: '(uint32_t)(int32_t)(int16_t)AOT_L16(0)'}
-        wr = {0x82: 'AOT_S8', 0x8A: 'AOT_S16', 0x92: 'AOT_S32', 0xC2: 'AOT_S8', 0xCA: 'AOT_S16'}
-        if op in rd: return ea, f'AOT_PG(rd_page, {sz[op]}u)', f'{R(d)} = {rd[op]};'
+        # inline only the RAM (AOT_RAM); the helpers take the other pages
+        rd = {0x80: 'AOT_RL8(0)', 0x88: 'AOT_RL16(0)', 0x90: 'AOT_RL32(0)',
+              0xC0: '(uint32_t)(int32_t)(int8_t)AOT_RL8(0)', 0xC8: '(uint32_t)(int32_t)(int16_t)AOT_RL16(0)'}
+        wr = {0x82: 'AOT_RS8', 0x8A: 'AOT_RS16', 0x92: 'AOT_RS32', 0xC2: 'AOT_RS8', 0xCA: 'AOT_RS16'}
+        # a load off the ROMs (AOT_ROMD): the same, through q_
+        if op in rd: return (ea, f'AOT_RAM({sz[op]}u)', f'{R(d)} = {rd[op]};',
+                             f'AOT_ROMD({sz[op]}u)', f'{R(d)} = {rd[op].replace("AOT_RL", "AOT_OL")};')
         if op in wr:
             last = f'g_last_store_ip = 0x{ip:X}u; ' if op in (0x82, 0x8A, 0x92) else ''
-            return ea, f'AOT_PG(wr_page, {sz[op]}u)', f'{last}{wr[op]}(0x{ip:X}u, 0, {R(d)});'
+            return ea, f'AOT_RAM({sz[op]}u)', f'{last}{wr[op]}(0x{ip:X}u, 0, {R(d)});'
         if op in LOADN:
             n = LOADN[op]
             if d + n > 32: return None
-            return ea, f'AOT_PGN(rd_page, {4 * n}u)', ' '.join(f'{R(d + k)} = AOT_L32({4 * k}u);' for k in range(n))
+            return (ea, f'AOT_RAM({4 * n}u)', ' '.join(f'{R(d + k)} = AOT_RL32({4 * k}u);' for k in range(n)),
+                    f'AOT_ROMD({4 * n}u)', ' '.join(f'{R(d + k)} = AOT_OL32({4 * k}u);' for k in range(n)))
         if op in STOREN:
             n = STOREN[op]
             if d + n > 32: return None
-            return ea, f'AOT_PGN(wr_page, {4 * n}u)', (f'g_last_store_ip = 0x{ip:X}u; '
-                        + ' '.join(f'AOT_S32(0x{ip:X}u, {4 * k}u, {R(d + k)});' for k in range(n)))
+            return ea, f'AOT_RAM({4 * n}u)', (f'g_last_store_ip = 0x{ip:X}u; '
+                        + ' '.join(f'AOT_RS32(0x{ip:X}u, {4 * k}u, {R(d + k)});' for k in range(n)))
     return None
 
 def branch_c(ip, w1):
@@ -253,8 +257,8 @@ def branch_c(ip, w1):
         bit = f'({s2} & (1u << ({s1} & 31u)))'
         c = f'!{bit}' if op == 0x30 else bit
         return f'AOT_CCB({c})', t, ''
-    f, cast = ('AOT_CC_O', '') if op < 0x38 else ('AOT_CC_I', '(int32_t)')
-    return f'AOT_CMPB({f}({cast}{s1}, {cast}{s2}), {op & 7}u)', t, ''
+    f = 'AOT_CMPB_O' if op < 0x38 else 'AOT_CMPB_I'
+    return f'{f}({s1}, {s2}, {op & 7}u)', t, ''
 
 def main():
     ap = argparse.ArgumentParser()
@@ -430,9 +434,13 @@ def main():
                 k = op(x, w1, w2, k2, nx_left)
                 if dc is not None:
                     ndirect += 1
-                    ea, test, code = dc
-                    slow = 'AOT_IO' if kind in ('ld', 'st') else 'AOT_IOSTN' if kind == 'stn' else 'AOT_SLOW'
-                    b_(f'    {{ uint32_t ea_ = {ea}; if (M2_LIKELY({test})) {{ {code} }} else {slow}({k}); }}')
+                    ea, test, code = dc[:3]
+                    slow = 'AOT_IO' if kind in ('ld', 'st') else 'AOT_IOSTN' if kind == 'stn' else 'AOT_LDN'
+                    if len(dc) > 3:
+                        b_(f'    {{ uint32_t ea_ = {ea}; const uint8_t *q_; if (M2_LIKELY({test})) {{ {code} }}'
+                           f' else if ({dc[3]}) {{ {dc[4]} }} else {slow}({k}); }}')
+                    else:
+                        b_(f'    {{ uint32_t ea_ = {ea}; if (M2_LIKELY({test})) {{ {code} }} else {slow}({k}); }}')
                 elif kind in ('ld', 'st', 'ldn', 'stn'):
                     b_(f'    AOT_SLOW({k});')
                 elif kind == 'slow':

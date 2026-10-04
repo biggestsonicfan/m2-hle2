@@ -32,6 +32,10 @@
 #ifndef DC_STATS_DBGIO
 #define DC_STATS_DBGIO 0
 #endif
+#ifndef DC_BENCH_F0
+#define DC_BENCH_F0 3500u   /* the fight's frames the bench line times */
+#define DC_BENCH_F1 3900u
+#endif
 #define STATS_PRINT(l) do { if (DC_STATS_DBGIO) printf("%s\n", (l)); } while (0)
 
 #include "constants.h"
@@ -268,6 +272,26 @@ int main(int argc, char **argv) {
                      (unsigned long)(g_dp.tt_scan / 1000), (unsigned long)(g_dp.tt_sort / 1000),
                      (unsigned long)(g_dp.tt_submit / 1000), (unsigned long)(us_snd / 1000));
             dp_text(14, tt_line);
+        }
+        {   /* a fixed stretch of the fight (the same frames every run): all of it, its slices, its draws */
+            static uint64_t b_t0, b_d0, b_sl, b_p0[5]; static uint32_t b_n0; static char b_line[96];
+            const uint64_t b_p[5] = { g_dp.tt_tiles, g_dp.tt_scan, g_dp.tt_sort, g_dp.tt_submit, us_snd };
+            if (!b_t0 && g_emu_frames > DC_BENCH_F0) { b_t0 = t0; b_d0 = us_dall; b_n0 = (uint32_t)n_drawn; memcpy(b_p0, b_p, sizeof b_p); }
+            if (b_t0 && !b_line[0]) {
+                b_sl += t1 - t0;
+                if (g_emu_frames >= DC_BENCH_F1) {
+                    snprintf(b_line, sizeof b_line, "f%u-%u %lu ms: sl %lu dr %lu", DC_BENCH_F0, (unsigned)g_emu_frames,
+                             (unsigned long)((t1 - b_t0) / 1000), (unsigned long)(b_sl / 1000),
+                             (unsigned long)((us_dall - b_d0) / 1000));
+                    dp_text(3, b_line);
+                    static char b_line2[96];   /* the draws' parts in it, and how many were shown */
+                    snprintf(b_line2, sizeof b_line2, "ti %lu sc %lu so %lu su %lu snd %lu n %lu",
+                             (unsigned long)((b_p[0] - b_p0[0]) / 1000), (unsigned long)((b_p[1] - b_p0[1]) / 1000),
+                             (unsigned long)((b_p[2] - b_p0[2]) / 1000), (unsigned long)((b_p[3] - b_p0[3]) / 1000),
+                             (unsigned long)((b_p[4] - b_p0[4]) / 1000), (unsigned long)(n_drawn - b_n0));
+                    dp_text(4, b_line2);
+                }
+            }
         }
         uint64_t ts = timer_us_gettime64();
         ds_pump();

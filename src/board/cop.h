@@ -92,22 +92,9 @@ static inline void cop_tap_replies(void) {
     for (int k = 0; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
 }
 
-/* Called for every 32-bit write to the COPROGRAM region. */
-static inline void cop_write(uint32_t val) {
-    g_cop.writes++;
-
-    /* The boot image the i960 uploads before it lowers the bit: the HLE
-     * runs none of it, and none of it is a command. */
-    if (g_cop.ctl && (g_cop.ctl[3] & 0x80)) {
-        g_cop.upload_words++;
-        return;
-    }
-
-    g_cop.geo_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
-    g_cop.geo_capture_head++;
-    if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
-        g_cop.geo_capture_count++;
-
+/* A word cop_write's short path leaves: one that starts, ends or streams a
+ * command, or any word while the conversation is being tapped. */
+static __attribute__((noinline)) void cop_write_word(uint32_t val) {
     /* An argument of a fixed-length command: most words are one. */
     if (g_cop.args_needed > 0) {
         if (g_cop_tap) g_cop_tap(0x20000000u, val);
@@ -160,6 +147,61 @@ static inline void cop_write(uint32_t val) {
         emu_times_cop_end(t0);
         cop_tap_replies();
         g_cop.cur_cmd = 0;
+    }
+}
+
+/* Called for every 32-bit write to the COPROGRAM region. A command's middle
+ * words (most of them) stop here; the rest go on to cop_write_word. */
+static inline void cop_write(uint32_t val) {
+    g_cop.writes++;
+
+    /* The boot image the i960 uploads before it lowers the bit: the HLE
+     * runs none of it, and none of it is a command. */
+    if (__builtin_expect(g_cop.ctl && (g_cop.ctl[3] & 0x80), 0)) {
+        g_cop.upload_words++;
+        return;
+    }
+
+    /* The ring only the debug bridge reads: a build without one keeps the
+     * count, which marks the frames (GEO_CAPTURE_SIZE 1). */
+#if GEO_CAPTURE_SIZE > 1
+    g_cop.geo_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
+#endif
+    g_cop.geo_capture_head++;
+    if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
+        g_cop.geo_capture_count++;
+
+    if (__builtin_expect(g_cop.args_needed > 1 && !g_cop_tap, 1)) {
+        if (g_cop.args_received < COP_ARGS_MAX)
+            g_cop.args[g_cop.args_received++] = val;
+        g_cop.args_needed--;
+        return;
+    }
+    cop_write_word(val);
+}
+
+/* cop_write for n words in a row (the AOT's queue): a run of middle words
+ * goes into the arguments at once. */
+static inline void cop_write_n(const uint32_t *v, uint32_t n) {
+    uint32_t k = 0;
+    while (k < n) {
+        int m = g_cop.args_needed - 1;
+        if (GEO_CAPTURE_SIZE > 1 || m <= 0 || g_cop_tap || (g_cop.ctl && (g_cop.ctl[3] & 0x80))) {
+            cop_write(v[k++]);
+            continue;
+        }
+        if ((uint32_t)m > n - k) m = (int)(n - k);
+        int room = COP_ARGS_MAX - g_cop.args_received;
+        if (room > m) room = m;
+        if (room > 0) {
+            memcpy(&g_cop.args[g_cop.args_received], v + k, (size_t)room * sizeof *v);
+            g_cop.args_received += room;
+        }
+        g_cop.args_needed -= m;
+        g_cop.writes += (uint32_t)m;
+        g_cop.geo_capture_head += m;
+        if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE) g_cop.geo_capture_count = GEO_CAPTURE_SIZE;
+        k += (uint32_t)m;
     }
 }
 

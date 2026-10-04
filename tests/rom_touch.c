@@ -66,7 +66,9 @@ static geo3d_state_t    geo3d;
 
 /* ---- Tracked regions -------------------------------------------------------- */
 
+#ifndef PG                 /* -DPG=65536u: count in the bus's 64 KB pages */
 #define PG 4096u
+#endif
 #define MAX_TRACK 12
 
 typedef struct {

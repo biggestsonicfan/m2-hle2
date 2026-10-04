@@ -144,7 +144,7 @@ typedef struct memory_bus {
     uint8_t   timers[TIMERS_SIZE];
 
     /* Video */
-    uint8_t   tile[TILE_SIZE];          /* covers scroll regs + h/v sync overlap */
+    _Alignas(4) uint8_t tile[TILE_SIZE];   /* covers scroll regs + h/v sync overlap */
     uint8_t   tmapgfx[TMAPGFX_SIZE];
     uint8_t   palette[PALETTE_SIZE];
     uint8_t   colorxlat[COLORXLAT_SIZE];
@@ -205,6 +205,10 @@ typedef struct memory_bus {
      * dirty_kb). All set at init: nothing decoded matches the new bus yet. One
      * spare entry takes a multi-byte write that starts in the last byte. */
     volatile uint8_t  tex_dirty[2][(TEXRAM0_SIZE >> 10) + 1];
+    /* The same for tile RAM, mirror included, for a compositor that copies
+     * only what was written (the Dreamcast's dp_tiles). Nothing clears them
+     * but that reader. */
+    volatile uint8_t  tile_dirty[(TILE_SIZE >> 10) + 1];
 
     /* Bus stats */
     uint64_t    reads;
@@ -761,7 +765,10 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
         if (!strcmp(r->name, "TILE") || !strcmp(r->name, "TILE_MIRROR"))   /* one buffer */
+        {
             r->change_gen = &bus->gen_tile;
+            r->dirty_kb   = bus->tile_dirty;
+        }
         else if (!strcmp(r->name, "TMAPGFX"))
             r->change_gen = &bus->gen_gfx;
         else if (!strcmp(r->name, "PALETTE"))
@@ -775,6 +782,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     }
 
     memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
+    memset((uint8_t *)bus->tile_dirty, 1, sizeof bus->tile_dirty);
     mem_regions_changed(bus);   /* callbacks and change tracking were set after the adds */
 
     LOG_INFO("mem: bus initialized with %d regions, ROM=%zu bytes", bus->region_count, rom_size);
