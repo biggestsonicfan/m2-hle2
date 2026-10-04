@@ -155,10 +155,11 @@ done:
 
 /* Reads a little-endian u32 from a flat buffer. */
 static inline uint32_t sfight_read32(const uint8_t *buf, uint32_t off) {
-    return  (uint32_t)buf[off]
-         | ((uint32_t)buf[off + 1] << 8)
-         | ((uint32_t)buf[off + 2] << 16)
-         | ((uint32_t)buf[off + 3] << 24);
+    const uint8_t *p = MEM_HOST_AT(buf + off, 4);   /* the Dreamcast pages the ROM */
+    return  (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
 }
 
 /* A profile's own work at a VS-mode rematch (sfight_hook_vs_rematch), for host

@@ -1,61 +1,58 @@
 /*
- * dc_pager.h -- demand paging for the Dreamcast build (Pinboard #340).
+ * dc_pager.h -- demand paging for the Dreamcast build (Pinboard #340, #443).
  *
- * The board reads its ROM through plain pointers: the i960 bus through its page
- * table, the COP its tables, the 3D decoder its models, the 68000 its samples.
  * A Dreamcast has 16 MB and a set is ~60 MB, so the ROM stays on the disc and
- * the SH-4's MMU does the paging, the way an OS would: every region is a window
- * of P0 virtual addresses, a TLB miss lands in pg_map(), and a page that is not
- * resident is read off the disc into a 4 KB frame first. The board cannot tell,
- * and no reader had to change (tests/rom_touch.c measured what it reads).
+ * comes in 16 KB at a time. Every region is a window of addresses
+ * (dc_paged.h) that only names its pages; nothing dereferences them. The
+ * i960's bus is the TLB: its slow path asks pg_bus_in for the page, which
+ * reads it off the disc into a frame if it is not resident and puts the frame
+ * in the bus's direct page tables, so the next access to it is a plain load.
+ * The 3D decoder and the profile ask dc_rom_at. A frame that goes takes its
+ * entries out of the tables with it.
+ *
+ * It used to be the SH-4's MMU (4 KB pages, a TLB miss into pg_map), which
+ * the board could not tell from memory. Flycast emulates that MMU only for
+ * Windows CE, and with it on charges the first memory operations of every
+ * block extra: a third of a fight frame (DREAMCAST-PORT.md, #394 part 12).
  *
  * Windows:
  *   - ROM: every region of the layout (dc_layout.h), one after another. A page
- *     is two sectors of one of the ROM files on the disc, or a fill byte.
- *     Frames are evicted by a clock: a frame whose page took a TLB refill
- *     since the hand last passed is kept.
+ *     is eight sectors of one of the ROM files on the disc, or a fill byte.
+ *     Frames are evicted by a clock: a frame used since the hand last passed
+ *     is kept. A page the board writes (MAIN_DATA, XTRA_DATA) is pinned: it
+ *     would come back off the disc without the write.
  *   - anonymous: zero until first touched, then pinned (vid_ext_ram, 7 MB of
  *     which a game uses a little). pg_anon_clear() zeroes them for a reset.
  *
- * The cache: the SH-4's operand cache is indexed by virtual address bits 13:5
- * and tagged by physical address, so a 4 KB page seen at two addresses whose
- * bits 13:12 differ can sit in the cache twice. Frames are coloured: page v
- * only ever goes into a frame with the same bits 13:12 as its window address,
- * and the frame is written through its P1 address, which has them too. So
- * nothing ever needs flushing.
- *
- * The disc: the miss handler runs as an exception, where KOS's cdrom driver
- * (semaphores) may not be used. pg_read() talks to the GD-ROM syscalls directly
- * and polls. Nothing else may use the drive once the pager is up.
+ * The disc: pg_read() talks to the GD-ROM syscalls directly and polls (it was
+ * written for the miss handler, an exception, where KOS's cdrom driver may not
+ * be used). Nothing else may use the drive once the pager is up.
  */
 #ifndef DC_PAGER_H
 #define DC_PAGER_H
 
 #include <kos.h>
-#include <arch/mmu.h>
 #include <dc/cdrom.h>
 #include <dc/syscalls.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "dc_paged.h"
 #include "dc_layout.h"
 
-#define PG_VA_BASE    0x10000000u
-#define PG_SHIFT      12
+#define PG_SHIFT      14
+#define PG_SIZE       (1u << PG_SHIFT)
 #define PG_SRC_ANON   0xFFFFFFFEu    /* src: anonymous; below 0x100: a fill byte; else a FAD */
 #define PG_MAX_ANON   8
 #define PG_MAX_PART   32             /* pages a file ends inside */
+#define PG_SLOTS      4              /* bus pages a frame can be seen at (XTRA_DATA mirrors MAIN_DATA) */
+#define PG_RECENT     4              /* frames dc_rom_at handed out last: not evicted */
 
 typedef struct {
-    uint32_t pteh, ptel;             /* what gen_tlb_miss loads (mmupage_t's tail) */
-} pg_tlb_t;
-
-typedef struct {
-    mmupage_t pg;                    /* handed to KOS's miss handler */
-    uint32_t  vpage;                 /* window page it holds, or ~0 */
-    uint32_t  sum;                   /* a writable page's contents at load (pg_sum) */
-    uint8_t   ref, pinned, dirty;
+    uint32_t vpage;                  /* window page it holds, or ~0 */
+    uint8_t  ref, pinned, dirty, nslot;
+    uint16_t slot[PG_SLOTS];         /* the bus's direct pages that point at it */
 } pg_frame_t;
 
 typedef struct {
@@ -68,21 +65,24 @@ typedef struct {
     uint32_t          npages;        /* window pages (ROM + anonymous) */
     uint32_t          nrom;          /* the first nrom are the ROM's */
     pg_frame_t       *fr;
-    uint8_t          *pool;          /* P1 address of frame 0 (16 KB aligned) */
+    uint8_t          *pool;
     uint32_t          nframes;
-    uint32_t          hand[4];       /* clock hand per colour */
-    uint32_t          wr_lo, wr_hi;  /* window pages the board may write (main_data) */
-    mmucontext_t     *cxt;
+    uint32_t          hand;          /* the clock's */
+    uint32_t          recent[PG_RECENT], rhead;
+    memory_bus_t     *bus;           /* whose tables hold the frames' slots */
     struct { uint32_t va, size; } anon[PG_MAX_ANON];
     int               nanon;
     /* counters */
-    volatile uint32_t refills, loads, zero_fills, anon_fills, evictions, read_errors, rom_writes, flushes;
-    volatile uint64_t read_ns;
+    uint32_t refills, loads, zero_fills, anon_fills, evictions, read_errors, rom_writes, bounces;
+    uint64_t read_ns;
 } pager_t;
 
 static pager_t g_pg;
 
-/* ---- the drive, from the exception ------------------------------------------- */
+/* The bus hands its page tables' pages to pg_bus_in: they must be the same. */
+_Static_assert(MEM_PAGE_SHIFT == PG_SHIFT, "build with -DMEM_PAGE_SHIFT=14");
+
+/* ---- the drive -------------------------------------------------------------- */
 
 static int pg_read(void *dst, uint32_t fad, uint32_t nsec) {
     cd_read_params_t p = { .start_sec = fad, .num_sec = nsec, .buffer = dst, .is_test = 0 };
@@ -101,134 +101,143 @@ static int pg_read(void *dst, uint32_t fad, uint32_t nsec) {
     return -1;
 }
 
-/* ---- the miss handler ------------------------------------------------------- */
+/* ---- the frames --------------------------------------------------------------- */
 
-static inline void pg_tlb_drop(uint32_t vpage) {
-    /* Associative write to the UTLB address array: the entry for this VPN
-     * (ASID 0) loses its valid bit. KOS's mmu_page_uninstall does the same. */
-    *(volatile uint32_t *)(0xF6000000u | 0x80u) = (PG_VA_BASE + (vpage << PG_SHIFT));
+/* The bus's direct pages that point at frame f go. */
+static void pg_unslot(pg_frame_t *f) {
+    memory_bus_t *bus = g_pg.bus;
+    for (int i = 0; i < f->nslot; i++) {
+        bus->rd_page[f->slot[i]] = NULL;
+        bus->wr_page[f->slot[i]] = NULL;
+    }
+    f->nslot = 0;
 }
 
-/* Every TLB entry goes, and KOS's two wired store-queue entries come back.
- * The SH-4 can drop one entry (an associative write to the UTLB address
- * array), but Flycast's fast MMU keeps every entry it was ever given in a
- * table of its own and empties that only on MMUCR.TI: a page dropped one at a
- * time stayed mapped to its old frame, and read whatever page had moved in. */
-static void pg_tlb_flush(void) {
-    volatile uint32_t *mmucr = (volatile uint32_t *)0xFF000010u;
-    *mmucr = *mmucr | 0x04u;                         /* TI */
-    mmu_init_basic();
-    g_pg.flushes++;
-}
-
-static uint32_t pg_sum(const uint8_t *p) {
-    const uint32_t *w = (const uint32_t *)p;
-    uint32_t h = 0;
-    for (int i = 0; i < DC_PAGE / 4; i++) h = (h << 5 | h >> 27) ^ w[i];
-    return h;
-}
-
-/* A written page must not be evicted: it would come back off the disc without
- * the write. The first-write trap reports most (pg_first_write); Flycast's
- * fast MMU never raises it, so a page of the writable region is also summed
- * when it comes in and again before it goes. */
-static bool pg_written(pg_frame_t *f) {
+static int pg_victim(void) {
     pager_t *g = &g_pg;
-    if (f->dirty) return true;
-    if (f->vpage < g->wr_lo || f->vpage >= g->wr_hi) return false;
-    if (pg_sum(g->pool + (uint32_t)(f - g->fr) * DC_PAGE) == f->sum) return false;
-    f->dirty = f->pinned = 1;
-    g->rom_writes++;
-    return true;
-}
-
-static int pg_victim(uint32_t colour) {
-    pager_t *g = &g_pg;
-    uint32_t per = g->nframes / 4;
-    for (uint32_t step = 0; step < 2 * per + 1; step++) {
-        uint32_t i = g->hand[colour];
-        g->hand[colour] = (i + 1) % per;
-        pg_frame_t *f = &g->fr[i * 4 + colour];
+    for (uint32_t step = 0; step < 2 * g->nframes + 1; step++) {
+        uint32_t i = g->hand;
+        g->hand = i + 1 < g->nframes ? i + 1 : 0;
+        pg_frame_t *f = &g->fr[i];
         if (f->pinned) continue;
         if (f->ref) { f->ref = 0; continue; }
-        if (f->vpage != ~0u && pg_written(f)) continue;
-        return (int)(i * 4 + colour);
+        bool recent = false;
+        for (uint32_t k = 0; k < PG_RECENT; k++) recent |= g->recent[k] == i;
+        if (recent) continue;
+        return (int)i;
     }
     return -1;
 }
 
-static mmupage_t *pg_map(mmucontext_t *cxt, int virtpage) {
-    (void)cxt;
+/* Window page v, resident: its frame's index. */
+static uint32_t pg_fault(uint32_t v) {
     pager_t *g = &g_pg;
-    uint32_t v = (uint32_t)virtpage - (PG_VA_BASE >> PG_SHIFT);
-    if (v >= g->npages) return NULL;                 /* KOS reports it and panics */
-    if (g->frame[v]) {                               /* resident: a TLB refill */
-        pg_frame_t *f = &g->fr[g->frame[v] - 1];
-        f->ref = 1;
-        g->refills++;
-        return &f->pg;
+    if (g->frame[v]) {
+        uint32_t fi = g->frame[v] - 1u;
+        g->fr[fi].ref = 1;
+        return fi;
     }
-    int fi = pg_victim(v & 3u);
-    if (fi < 0) return NULL;                         /* every frame of the colour pinned */
+    int fi = pg_victim();
+    if (fi < 0) {                                    /* every frame pinned */
+        printf("pager: no frame for page %lu (%lu pinned)\n", (unsigned long)v, (unsigned long)g->nframes);
+        arch_abort();
+    }
     pg_frame_t *f = &g->fr[fi];
     if (f->vpage != ~0u) {
         g->frame[f->vpage] = 0;
-        pg_tlb_flush();
+        pg_unslot(f);
         g->evictions++;
     }
-    uint8_t *p1 = g->pool + (uint32_t)fi * DC_PAGE;
+    uint8_t *p = g->pool + (uint32_t)fi * PG_SIZE;
     uint32_t src = g->src[v];
+    f->dirty = f->pinned = 0;
     if (src < 0x100u) {
-        memset(p1, (int)src, DC_PAGE);
+        memset(p, (int)src, PG_SIZE);
         g->zero_fills++;
     } else if (src == PG_SRC_ANON) {
-        memset(p1, 0, DC_PAGE);
-        f->pinned = 1;
+        memset(p, 0, PG_SIZE);
+        f->dirty = f->pinned = 1;
         g->anon_fills++;
     } else {
         uint64_t t0 = timer_ns_gettime64();
-        if (pg_read(p1, src, DC_PAGE / DC_SECTOR) != 0) {
+        uint32_t valid = PG_SIZE;
+        int part = -1;
+        for (int i = 0; i < g->npart; i++)           /* a file's last page: the rest is fill */
+            if (g->part[i].v == v) { part = i; valid = g->part[i].valid; }
+        if (pg_read(p, src, (valid + DC_SECTOR - 1) / DC_SECTOR) != 0) {
             g->read_errors++;
-            memset(p1, 0xA5, DC_PAGE);
+            memset(p, 0xA5, PG_SIZE);
+        } else if (part >= 0) {
+            memset(p + valid, g->part[part].fill, PG_SIZE - valid);
         }
-        for (int i = 0; i < g->npart; i++)       /* a file's last page: the rest is fill */
-            if (g->part[i].v == v) memset(p1 + g->part[i].valid, g->part[i].fill, DC_PAGE - g->part[i].valid);
         g->read_ns += timer_ns_gettime64() - t0;
         g->loads++;
     }
-    if (v >= g->wr_lo && v < g->wr_hi) f->sum = pg_sum(p1);
     f->vpage = v;
     f->ref = 1;
-    f->dirty = src == PG_SRC_ANON;
     g->frame[v] = (uint16_t)(fi + 1);
-    uint32_t va = PG_VA_BASE + (v << PG_SHIFT);
-    uint32_t pa = ((uint32_t)(uintptr_t)p1) & 0x1FFFFFFFu;
-    f->pg.pteh = va & 0xFFFFFC00u;
-    /* V, 4 KB (SZ0), PR 3 (read/write), cached; D only for an anonymous page,
-     * so the first write to a ROM page traps (pg_first_write). */
-    f->pg.ptel = (pa & 0x1FFFFC00u) | 0x100u | 0x10u | (3u << 5) | 0x08u | (f->dirty ? 0x04u : 0);
-    return &f->pg;
+    return (uint32_t)fi;
 }
 
-/* The first write to a ROM page (initial page write exception). The board's
- * MAIN_DATA and XTRA_DATA are writable regions, and an evicted page would come
- * back off the disc without the write, so a written page stays in memory for
- * good. Its TLB entry goes; the write runs again, misses, and pg_map hands back
- * the frame with D set. */
-static void pg_first_write(irq_t code, irq_context_t *ctx, void *data) {
-    (void)code; (void)ctx; (void)data;
+/* MEM_HOST_PAGE_IN: the frame holding the bus address addr of region r, put
+ * in the direct page tables where they name only r. A write pins it. */
+static uint8_t *pg_bus_in(memory_bus_t *bus, mem_region_t *r, uint32_t addr, int write) {
     pager_t *g = &g_pg;
-    uint32_t tea = *(volatile uint32_t *)0xFF00000Cu;
-    uint32_t v = (tea - PG_VA_BASE) >> PG_SHIFT;
-    if (tea < PG_VA_BASE || v >= g->npages || !g->frame[v]) {
-        printf("pager: page write at %08lx outside the windows\n", (unsigned long)tea);
-        arch_abort();
+    uint32_t v = ((uint32_t)(uintptr_t)r->data - PG_VA_BASE + (addr - r->base)) >> PG_SHIFT;
+    if (v >= g->npages) return NULL;
+    g->bus = bus;
+    uint32_t fi = pg_fault(v);
+    pg_frame_t *f = &g->fr[fi];
+    uint8_t *p = g->pool + fi * PG_SIZE;
+    if (write && !f->dirty) {
+        f->dirty = f->pinned = 1;
+        g->rom_writes++;
     }
-    pg_frame_t *f = &g->fr[g->frame[v] - 1];
-    f->dirty = f->pinned = 1;
-    f->pg.ptel |= 0x04u;
-    g->rom_writes++;
-    pg_tlb_drop(v);
+    uint32_t slot = addr >> MEM_PAGE_SHIFT, e = bus->page[addr >> 16];
+    if (slot < MEM_PAGES && e != MEM_PAGE_NONE && e != MEM_PAGE_MIXED && &bus->regions[e - 1u] == r) {
+        int k = 0;
+        while (k < f->nslot && f->slot[k] != slot) k++;
+        if (k == f->nslot && k < PG_SLOTS) f->slot[f->nslot++] = (uint16_t)slot;
+        if (k < f->nslot) {
+            if (!r->read_cb) bus->rd_page[slot] = p;
+            /* Only a pinned frame takes writes straight: the first write to a
+             * page has to come through here. */
+            if (f->dirty && !r->write_cb && !r->readonly && !r->change_gen && !r->dirty_kb)
+                bus->wr_page[slot] = p;
+        }
+    }
+    g->refills++;
+    return p;
+}
+
+/* MEM_HOST_PAGES_RESET: the bus emptied its tables. */
+static void pg_slots_reset(void) {
+    for (uint32_t i = 0; i < g_pg.nframes; i++) g_pg.fr[i].nslot = 0;
+}
+
+/* The n bytes at p as plain memory: p itself outside the windows, else their
+ * place in a frame (good until the next PG_RECENT calls), or a copy when they
+ * straddle two pages. */
+static const uint8_t *dc_rom_at(const void *p, uint32_t n) {
+    uint32_t a = (uint32_t)(uintptr_t)p - PG_VA_BASE;
+    if (a >= PG_VA_SPAN) return (const uint8_t *)p;
+    pager_t *g = &g_pg;
+    uint32_t v = a >> PG_SHIFT, off = a & (PG_SIZE - 1u);
+    if (v >= g->npages) return (const uint8_t *)p;
+    if (off + n <= PG_SIZE) {
+        uint32_t fi = pg_fault(v);
+        g->recent[g->rhead++ % PG_RECENT] = fi;
+        return g->pool + fi * PG_SIZE + off;
+    }
+    static uint8_t bounce[PG_RECENT][64];
+    static uint32_t bi;
+    uint8_t *b = bounce[bi++ % PG_RECENT];
+    for (uint32_t i = 0; i < n && i < sizeof bounce[0]; i++) {
+        uint32_t ai = a + i;
+        b[i] = g->pool[pg_fault(ai >> PG_SHIFT) * PG_SIZE + (ai & (PG_SIZE - 1u))];
+    }
+    g->bounces++;
+    return b;
 }
 
 /* ---- set up -------------------------------------------------------------------- */
@@ -262,40 +271,6 @@ static uint32_t pg_find_file(const char *name, uint32_t *size) {
     return 0;
 }
 
-/* mmu_init, so that Flycast translates too. Flycast emulates the MMU only for
- * Windows CE: when MMUCR.AT goes up it looks for "SH-4 Kernel" (UTF-16) at
- * 0x8C0110A8 or 0x8C011118 (core/hw/sh4/modules/mmu.cpp, mmu_set_state), and
- * otherwise maps only the store queues, so every page here read as zeros. KOS
- * raises AT once, in mmu_init, and Flycast looks only then: the words go there
- * for the call and the code they cover (KOS's, or ours) comes back after. A
- * real Dreamcast never looks.
- *
- * Then a TLB miss has to reach us. Flycast's fast MMU (USE_WINCE_HACK,
- * fastmmu.cpp) first tries to answer it from Windows CE's own page tables,
- * found through TTB, and only raises the exception when that walk finds no
- * page. KOS never sets TTB, so the walk read whatever RAM it named and handed
- * back made-up pages: the board read zeros and the pager never heard of it.
- * TTB names a table here whose every group is a zeroed block, which the walk
- * reads as "not present". TTB is only a scratch register to the SH-4. */
-static uint32_t pg_ttb_group[512] __attribute__((aligned(32)));
-static uint32_t pg_ttb[128] __attribute__((aligned(32)));
-static void pg_mmu_on(void) {
-    static const char sig[] = { 'S',0,'H',0,'-',0,'4',0,' ',0,'K',0,'e',0,'r',0,'n',0,'e',0,'l',0 };
-    uint8_t *at = (uint8_t *)0x8C011118u, keep[sizeof sig];
-    int old = irq_disable();
-    memcpy(keep, at, sizeof sig);
-    memcpy(at, sig, sizeof sig);
-    dcache_wback_range((uintptr_t)at, sizeof sig);
-    mmu_init();
-    for (int i = 0; i < 128; i++) pg_ttb[i] = (uint32_t)(uintptr_t)pg_ttb_group;
-    dcache_wback_range((uintptr_t)pg_ttb, sizeof pg_ttb);
-    *(volatile uint32_t *)0xFF000008u = (uint32_t)(uintptr_t)pg_ttb;   /* TTB */
-    memcpy(at, keep, sizeof sig);
-    dcache_wback_range((uintptr_t)at, sizeof sig);
-    icache_sync_range((uintptr_t)at, sizeof sig);
-    irq_restore(old);
-}
-
 /* Lay the regions out as windows, every page pointing at its sectors, and
  * make the frame pool. anon_bytes reserves window space for pg_anon(). */
 static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_bytes) {
@@ -304,19 +279,24 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
     g->nrom = 0;
     for (int r = 0; r < DC_REGIONS; r++) {
         g->first[r] = g->nrom;
-        g->nrom += (lay->rg[r].size + DC_PAGE - 1) / DC_PAGE;
+        g->nrom += (lay->rg[r].size + PG_SIZE - 1) / PG_SIZE;
     }
-    g->npages = g->nrom + anon_bytes / DC_PAGE + PG_MAX_ANON * 4;
+    g->npages = g->nrom + anon_bytes / PG_SIZE + PG_MAX_ANON * 4;
+    if ((uint64_t)g->npages << PG_SHIFT > PG_VA_SPAN) { printf("pager: the windows overflow\n"); return -1; }
     g->src   = malloc(g->npages * 4u);
     g->frame = calloc(g->npages, 2);
     if (!g->src || !g->frame) return -1;
     for (uint32_t i = g->nrom; i < g->npages; i++) g->src[i] = PG_SRC_ANON;
     for (int r = 0; r < DC_REGIONS; r++) {
         const dc_region_t *rg = &lay->rg[r];
-        uint32_t n = (rg->size + DC_PAGE - 1) / DC_PAGE;
+        uint32_t n = (rg->size + PG_SIZE - 1) / PG_SIZE;
         for (uint32_t i = 0; i < n; i++) g->src[g->first[r] + i] = rg->fill;
         for (int k = 0; k < DC_MAX_SEGS && rg->seg[k].file; k++) {
             const dc_seg_t *sg = &rg->seg[k];
+            if ((sg->file_off | sg->reg_off | sg->period) & (PG_SIZE - 1u)) {
+                printf("pager: %s is not on a %u KB page\n", sg->file, (unsigned)(PG_SIZE >> 10));
+                return -1;
+            }
             uint32_t fsize = 0, fad = pg_find_file(sg->file, &fsize);
             if (!fad) { printf("pager: %s not on the disc\n", sg->file); return -1; }
             uint32_t len = sg->len;
@@ -324,12 +304,13 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
             else if (len > fsize - sg->file_off) len = fsize - sg->file_off;
             uint32_t reps = sg->count ? sg->count : 1;
             for (uint32_t c = 0; c < reps; c++)
-                for (uint32_t o = 0; o < len; o += DC_PAGE) {
+                for (uint32_t o = 0; o < len; o += PG_SIZE) {
                     uint32_t ro = sg->reg_off + c * sg->period + o;
                     if (ro >= rg->size) break;
-                    uint32_t v = g->first[r] + ro / DC_PAGE;
+                    uint32_t v = g->first[r] + ro / PG_SIZE;
                     g->src[v] = fad + (sg->file_off + o) / DC_SECTOR;
-                    if (len - o < DC_PAGE && g->npart < PG_MAX_PART) {
+                    if (len - o < PG_SIZE) {
+                        if (g->npart == PG_MAX_PART) { printf("pager: more than %d part pages\n", PG_MAX_PART); return -1; }
                         g->part[g->npart].v = v;
                         g->part[g->npart].valid = (uint16_t)(len - o);
                         g->part[g->npart].fill = rg->fill;
@@ -337,27 +318,16 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
                     }
                 }
         }
-        if (!strcmp(rg->name, "main_data")) {
-            g->wr_lo = g->first[r];
-            g->wr_hi = g->wr_lo + n;
-        }
     }
 
-    g->nframes = (cache_bytes / DC_PAGE) & ~3u;
-    g->pool = memalign(16384, g->nframes * DC_PAGE);
+    g->nframes = cache_bytes / PG_SIZE;
+    g->pool = memalign(32, g->nframes * PG_SIZE);
     g->fr   = calloc(g->nframes, sizeof *g->fr);
     if (!g->pool || !g->fr) return -1;
     for (uint32_t i = 0; i < g->nframes; i++) g->fr[i].vpage = ~0u;
-
-    /* The drive is the pager's from here: KOS's driver must not start a
-     * command the miss handler would interleave with. */
-    pg_mmu_on();
-    g->cxt = mmu_context_create(0);
-    mmu_use_table(g->cxt);
-    mmu_map_set_callback(pg_map);
-    irq_set_handler(EXC_INITIAL_PAGE_WRITE, pg_first_write, NULL);
+    for (int i = 0; i < PG_RECENT; i++) g->recent[i] = ~0u;
     printf("pager: %s, %u ROM pages, %u KB cache\n", lay->profile,
-           (unsigned)g->nrom, (unsigned)(g->nframes * 4));
+           (unsigned)g->nrom, (unsigned)(g->nframes * (PG_SIZE >> 10)));
     return 0;
 }
 
@@ -378,22 +348,22 @@ static uint8_t *pg_anon(int idx, uint32_t size) {
     if (idx < 0 || idx >= PG_MAX_ANON) return NULL;
     if (idx < g->nanon) return g->anon[idx].size == size ? (uint8_t *)(uintptr_t)g->anon[idx].va : NULL;
     uint32_t start = g->nrom;
-    for (int i = 0; i < g->nanon; i++) start += (g->anon[i].size + DC_PAGE - 1) / DC_PAGE + 4;
-    if (start + (size + DC_PAGE - 1) / DC_PAGE > g->npages) return NULL;
+    for (int i = 0; i < g->nanon; i++) start += (g->anon[i].size + PG_SIZE - 1) / PG_SIZE + 4;
+    if (start + (size + PG_SIZE - 1) / PG_SIZE > g->npages) return NULL;
     g->anon[idx].va = PG_VA_BASE + (start << PG_SHIFT);
     g->anon[idx].size = size;
     g->nanon = idx + 1;
     return (uint8_t *)(uintptr_t)g->anon[idx].va;
 }
 
-/* Zero what the anonymous window holds, for a board reset (through P1). */
+/* Zero what the anonymous window holds, for a board reset. */
 static void pg_anon_clear(int idx) {
     pager_t *g = &g_pg;
     if (idx < 0 || idx >= g->nanon) return;
     uint32_t v0 = (g->anon[idx].va - PG_VA_BASE) >> PG_SHIFT;
-    uint32_t n = (g->anon[idx].size + DC_PAGE - 1) / DC_PAGE;
+    uint32_t n = (g->anon[idx].size + PG_SIZE - 1) / PG_SIZE;
     for (uint32_t v = v0; v < v0 + n; v++)
-        if (g->frame[v]) memset(g->pool + (uint32_t)(g->frame[v] - 1) * DC_PAGE, 0, DC_PAGE);
+        if (g->frame[v]) memset(g->pool + (uint32_t)(g->frame[v] - 1) * PG_SIZE, 0, PG_SIZE);
 }
 
 /* Forget every write to a ROM page, for a board reset: elsewhere the install
@@ -402,14 +372,12 @@ static void pg_rom_revert(void) {
     pager_t *g = &g_pg;
     for (uint32_t i = 0; i < g->nframes; i++) {
         pg_frame_t *f = &g->fr[i];
-        if (f->vpage == ~0u || g->src[f->vpage] == PG_SRC_ANON || !pg_written(f)) continue;
+        if (f->vpage == ~0u || g->src[f->vpage] == PG_SRC_ANON || !f->dirty) continue;
+        if (g->bus) pg_unslot(f);
         g->frame[f->vpage] = 0;
         f->vpage = ~0u;
         f->dirty = f->pinned = f->ref = 0;
     }
-    int old = irq_disable();
-    pg_tlb_flush();
-    irq_restore(old);
 }
 
 static uint32_t pg_pinned(void) {

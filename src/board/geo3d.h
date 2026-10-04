@@ -79,6 +79,13 @@ static inline uint32_t read_u32_le(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* A host whose ROM is paged in software (the Dreamcast) maps a pointer into its
+ * window to the bytes there; the result is good until the next call. */
+#ifndef GEO3D_ROM
+#define GEO3D_ROM(p, n) ((const uint8_t *)(p))
+#endif
+static inline uint32_t geo3d_rom16(const uint8_t *p) { p = GEO3D_ROM(p, 2); return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
+
 static inline float u32_as_float(uint32_t u) {
     float f;
     memcpy(&f, &u, 4);
@@ -927,7 +934,7 @@ static inline void geo3d_lookup_build(const uint8_t *main_data, size_t main_data
 
     for (uint32_t m = 0; m < table_count && g_geo3d_lookup.count < MODEL_LOOKUP_SIZE; m++) {
         uint32_t toff = table_off + m * MODEL_ENTRY_SIZE;
-        uint32_t pol  = read_u32_le(main_data + toff + 8);
+        uint32_t pol  = read_u32_le(GEO3D_ROM(main_data + toff + 8, 4));
         if (pol != 0) {
             g_geo3d_lookup.pol_ptrs[g_geo3d_lookup.count]  = pol;
             g_geo3d_lookup.model_idx[g_geo3d_lookup.count] = (int)m;
@@ -1030,7 +1037,7 @@ static inline void geo3d_scan_displaylist(geo3d_state_t *geo,
                     captured_model_t *cm = &geo->captured[geo->captured_count];
                     memset(cm, 0, sizeof(*cm));
                     cm->model_idx    = model_idx;
-                    cm->material_ptr = read_u32_le(main_data + toff + 4);
+                    cm->material_ptr = read_u32_le(GEO3D_ROM(main_data + toff + 4, 4));
                     /* Per-object flat colour: the homebrew encodes the colorbase in
                      * the object_data `tha` (= GEO_TEXRAM_BIT 0x800000 | colorbase*4)
                      * and stores the hue at palram[colorbase + 0x1000] (BGR555), set
@@ -1174,7 +1181,7 @@ static inline bool geo3d_tex_word(const uint8_t *rom, size_t rom_size, uint32_t 
     if (addr & 0x800000u) { *out = g_geo_rs->texram[addr & 0xFFFFu]; return true; }
     size_t b = (size_t)addr * 2u;
     if (!rom || b + 2 > rom_size) return false;
-    *out = (uint16_t)(rom[b] | (rom[b + 1] << 8));
+    *out = (uint16_t)geo3d_rom16(rom + b);
     return true;
 }
 
@@ -1271,7 +1278,7 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
                 memset(cm, 0, sizeof *cm);
                 cm->model_idx    = model_idx;                  /* -1: polygon RAM, see oba */
                 if (model_idx >= 0) {
-                    cm->material_ptr = read_u32_le(main_data + table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE + 4);
+                    cm->material_ptr = read_u32_le(GEO3D_ROM(main_data + table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE + 4, 4));
                     material_ptr_to_color(cm->material_ptr, &cm->color[0], &cm->color[1], &cm->color[2]);
                 } else {
                     cm->color[0] = cm->color[1] = cm->color[2] = 0.7f;
@@ -1464,14 +1471,14 @@ static inline void geo3d_decode_model(int model_idx,
     {
         uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
         if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) return;
-        uint32_t mesh_ptr_raw = read_u32_le(main_data + toff + 8);
+        uint32_t mesh_ptr_raw = read_u32_le(GEO3D_ROM(main_data + toff + 8, 4));
         if (mesh_ptr_raw == 0) return;
         mesh_offset = mesh_ptr_raw * 4u - mesh_ptr_subtract;
         mesh_offset += mesh_ptr_add;
 
         if (materials) {
-            uint32_t mat_ptr_raw = read_u32_le(main_data + toff + 4);
-            uint32_t uv_ptr_raw  = read_u32_le(main_data + toff + 0);
+            uint32_t mat_ptr_raw = read_u32_le(GEO3D_ROM(main_data + toff + 4, 4));
+            uint32_t uv_ptr_raw  = read_u32_le(GEO3D_ROM(main_data + toff + 0, 4));
             if (g_geo3d_obj_tha != 0xFFFFFFFFu) mat_ptr_raw = g_geo3d_obj_tha;
             if (g_geo3d_obj_tpa != 0xFFFFFFFFu) uv_ptr_raw  = g_geo3d_obj_tpa;
             mat_word = mat_ptr_raw;        /* word address (bit 23: texture RAM) */
@@ -1502,7 +1509,7 @@ static inline void geo3d_decode_model(int model_idx,
         if ((size_t)mesh_offset + VERTEX_PAIR_SIZE > polygons_size) break;
         if (n_sv + 2 > GEO3D_IA_MAX_VERTS || n_idx + 4 > GEO3D_IA_MAX_IDX) break;
 
-        const uint8_t *vp = polygons + mesh_offset;
+        const uint8_t *vp = GEO3D_ROM(polygons + mesh_offset, VERTEX_PAIR_SIZE);
         bool is_end = (vp[24] == 0 && vp[25] == 0 && vp[26] == 0 && vp[27] == 0);
 
         vec3_t v1, v2;
@@ -1624,8 +1631,7 @@ static inline void geo3d_decode_model(int model_idx,
                     uint16_t cw = (uint16_t)(g_geo3d_palram[ram] | (g_geo3d_palram[ram + 1] << 8)) & 0x7FFF;
                     geo3d_bgr555(cw, &fr, &fg, &fb);
                 } else if (main_data && (size_t)pal + 2 <= main_data_size) {
-                    uint16_t cw = (uint16_t)main_data[pal] |
-                                  ((uint16_t)main_data[pal + 1] << 8);
+                    uint16_t cw = (uint16_t)geo3d_rom16(main_data + pal);
                     geo3d_bgr555(cw, &fr, &fg, &fb);
                 }
                 /* Debug dump of this model's per-face texture tiles. */
@@ -1641,8 +1647,8 @@ static inline void geo3d_decode_model(int model_idx,
                                 uint32_t te = table_off + (uint32_t)mi * MODEL_ENTRY_SIZE;
                                 if ((size_t)te + MODEL_ENTRY_SIZE > main_data_size) continue;
                                 fprintf(mtf, "# table[%d]: uv_ptr=%u mat_ptr=%u mesh_ptr=%u\n", mi,
-                                        read_u32_le(main_data + te + 0), read_u32_le(main_data + te + 4),
-                                        read_u32_le(main_data + te + 8));
+                                        read_u32_le(GEO3D_ROM(main_data + te + 0, 4)), read_u32_le(GEO3D_ROM(main_data + te + 4, 4)),
+                                        read_u32_le(GEO3D_ROM(main_data + te + 8, 4)));
                             }
                         } }
                     int _skip = (ai < 0 || ai >= n_sv || bi < 0 || bi >= n_sv);
@@ -1659,8 +1665,8 @@ static inline void geo3d_decode_model(int model_idx,
                             for (int w = 0; w < 48; w += 2) {
                                 long bo = ((long)uv_word + w) * 2;
                                 if (bo >= 0 && (size_t)bo + 4 <= materials_size) {
-                                    uint16_t v0 = (uint16_t)materials[bo]   | ((uint16_t)materials[bo+1] << 8);
-                                    uint16_t v1 = (uint16_t)materials[bo+2] | ((uint16_t)materials[bo+3] << 8);
+                                    uint16_t v0 = (uint16_t)geo3d_rom16(materials + bo);
+                                    uint16_t v1 = (uint16_t)geo3d_rom16(materials + bo + 2);
                                     fprintf(mtf, "  word %+3d (off %u): pv=%5u pu=%5u\n", w, uv_word + w, v0, v1);
                                 }
                             }
@@ -1954,7 +1960,7 @@ static inline void geo3d_decode_direct(const uint32_t *w, uint32_t n,
             if (g_geo3d_palram && (size_t)ram + 2 <= g_geo3d_palram_size)
                 geo3d_bgr555((uint16_t)(g_geo3d_palram[ram] | (g_geo3d_palram[ram + 1] << 8)) & 0x7FFF, &fr, &fg, &fb);
             else if (main_data && (size_t)pal + 2 <= main_data_size)
-                geo3d_bgr555((uint16_t)(main_data[pal] | (main_data[pal + 1] << 8)), &fr, &fg, &fb);
+                geo3d_bgr555((uint16_t)geo3d_rom16(main_data + pal), &fr, &fg, &fb);
             /* the untextured transparent renderer writes nothing */
             if (textured || !(th0 & 0x2000)) {
                 float uu[4], vv[4];
@@ -2578,7 +2584,7 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
     while (vcount < GEO3D_IA_MAX_VPS) {
         if ((size_t)mesh_offset + VERTEX_PAIR_SIZE > m->polygons_size) break;
         if (n_sv + 2 > GEO3D_IA_MAX_VERTS || n_idx + 4 > GEO3D_IA_MAX_IDX) break;
-        const uint8_t *vp = polygons + mesh_offset;
+        const uint8_t *vp = GEO3D_ROM(polygons + mesh_offset, VERTEX_PAIR_SIZE);
         bool is_end = (vp[24] == 0 && vp[25] == 0 && vp[26] == 0 && vp[27] == 0);
         vec3_t v1 = { read_float_le(vp + 0),  read_float_le(vp + 4),  -read_float_le(vp + 8) };
         vec3_t v2 = { read_float_le(vp + 12), read_float_le(vp + 16), -read_float_le(vp + 20) };
@@ -2866,13 +2872,13 @@ static int geo3d_mesh_for_draw(int model_idx,
     if (model_idx < 0 || (uint32_t)model_idx >= table_count) return GEO3D_DRAW_NONE;
     uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
     if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) return GEO3D_DRAW_NONE;
-    uint32_t mesh_ptr_raw = read_u32_le(main_data + toff + 8);
+    uint32_t mesh_ptr_raw = read_u32_le(GEO3D_ROM(main_data + toff + 8, 4));
     if (mesh_ptr_raw == 0) return GEO3D_DRAW_NONE;
     uint32_t mesh_offset = mesh_ptr_raw * 4u - mesh_ptr_subtract + mesh_ptr_add;
     uint32_t mat_ptr = 0, uv_ptr = 0;
     if (materials) {
-        mat_ptr = read_u32_le(main_data + toff + 4);
-        uv_ptr  = read_u32_le(main_data + toff + 0);
+        mat_ptr = read_u32_le(GEO3D_ROM(main_data + toff + 4, 4));
+        uv_ptr  = read_u32_le(GEO3D_ROM(main_data + toff + 0, 4));
         if (g_geo3d_obj_tha != 0xFFFFFFFFu) mat_ptr = g_geo3d_obj_tha;
         if (g_geo3d_obj_tpa != 0xFFFFFFFFu) uv_ptr  = g_geo3d_obj_tpa;
     }
@@ -2999,7 +3005,7 @@ static inline void geo3d_decode_model_cached(int model_idx,
                 uint16_t cw = (uint16_t)(g_geo3d_palram[ram] | (g_geo3d_palram[ram + 1] << 8)) & 0x7FFF;
                 geo3d_bgr555(cw, &fr, &fg, &fb);
             } else if ((size_t)pal + 2 <= main_data_size) {
-                uint16_t cw = (uint16_t)main_data[pal] | ((uint16_t)main_data[pal + 1] << 8);
+                uint16_t cw = (uint16_t)geo3d_rom16(main_data + pal);
                 geo3d_bgr555(cw, &fr, &fg, &fb);
             }
         }
@@ -3049,7 +3055,7 @@ static inline void geo3d_decode_model_cached(int model_idx,
                 uint16_t cw = (uint16_t)(g_geo3d_palram[ram] | (g_geo3d_palram[ram + 1] << 8)) & 0x7FFF;
                 geo3d_bgr555(cw, &fr, &fg, &fb);
             } else if ((size_t)pal + 2 <= main_data_size) {
-                uint16_t cw = (uint16_t)main_data[pal] | ((uint16_t)main_data[pal + 1] << 8);
+                uint16_t cw = (uint16_t)geo3d_rom16(main_data + pal);
                 geo3d_bgr555(cw, &fr, &fg, &fb);
             }
         }
@@ -3161,10 +3167,10 @@ static void geo3d_extract_model_texture(int model_idx,
         (uint32_t)(model_idx + 1) >= table_count) return;
     uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
     if ((size_t)toff + 2u * MODEL_ENTRY_SIZE > main_data_size) return;
-    uint32_t uv_ptr   = read_u32_le(main_data + toff + 0);
-    uint32_t mat_ptr  = read_u32_le(main_data + toff + 4);
-    uint32_t mesh_ptr = read_u32_le(main_data + toff + 8);
-    uint32_t mat_next = read_u32_le(main_data + toff + MODEL_ENTRY_SIZE + 4);
+    uint32_t uv_ptr   = read_u32_le(GEO3D_ROM(main_data + toff + 0, 4));
+    uint32_t mat_ptr  = read_u32_le(GEO3D_ROM(main_data + toff + 4, 4));
+    uint32_t mesh_ptr = read_u32_le(GEO3D_ROM(main_data + toff + 8, 4));
+    uint32_t mat_next = read_u32_le(GEO3D_ROM(main_data + toff + MODEL_ENTRY_SIZE + 4, 4));
     if (mat_next <= mat_ptr) return;
     uint32_t nfaces = (mat_next - mat_ptr) / 4u;   /* 8-byte (4 u16) records/face */
     if (nfaces > 8192u) nfaces = 8192u;
@@ -3180,9 +3186,9 @@ static void geo3d_extract_model_texture(int model_idx,
     for (uint32_t f = 0; f < nfaces; f++) {
         uint32_t rec = mat_base + f * 8u;
         if ((size_t)rec + 8 > materials_size) break;
-        uint16_t th0 = (uint16_t)materials[rec+0] | ((uint16_t)materials[rec+1] << 8);
-        uint16_t th2 = (uint16_t)materials[rec+4] | ((uint16_t)materials[rec+5] << 8);
-        uint16_t th3 = (uint16_t)materials[rec+6] | ((uint16_t)materials[rec+7] << 8);
+        uint16_t th0 = (uint16_t)geo3d_rom16(materials + rec + 0);
+        uint16_t th2 = (uint16_t)geo3d_rom16(materials + rec + 4);
+        uint16_t th3 = (uint16_t)geo3d_rom16(materials + rec + 6);
         int      textured = (th0 & 0x4000) != 0;
         uint32_t w  = 32u << (th0 & 7u), h = 32u << ((th0 >> 3) & 7u);
         uint32_t x  = 32u * (th2 & 0x3fu), y = 32u * ((th2 >> 6) & 0x1fu);
@@ -3190,7 +3196,7 @@ static void geo3d_extract_model_texture(int model_idx,
         uint32_t cb = (th3 >> 6) & 0x3ffu;       /* colorbase */
         uint32_t pal = GEO3D_PALETTE_OFF + cb * 2u;
         uint16_t col = ((size_t)pal + 2 <= main_data_size)
-                       ? ((uint16_t)main_data[pal] | ((uint16_t)main_data[pal+1] << 8)) : 0;
+                       ? (uint16_t)geo3d_rom16(main_data + pal) : 0;
         if (mf) fprintf(mf,
             "face %4u th0=%04X th2=%04X th3=%04X textured=%d bank=%u tile=(%u,%u) %ux%u colorbase=%u color=%04X\n",
             f, th0, th2, th3, textured, s, x, y, w, h, cb, col);
@@ -3325,7 +3331,7 @@ static inline void geo3d_build_wireframes(geo3d_state_t *geo,
         float cr = 0.0f, cg = 1.0f, cb = 0.0f;
         uint32_t toff = table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
         if (main_data && (size_t)toff + MODEL_ENTRY_SIZE <= main_data_size) {
-            uint32_t mat_ptr = read_u32_le(main_data + toff + 4);
+            uint32_t mat_ptr = read_u32_le(GEO3D_ROM(main_data + toff + 4, 4));
             material_ptr_to_color(mat_ptr, &cr, &cg, &cb);
         }
         geo3d_decode_model(geo->model_index,

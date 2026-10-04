@@ -122,27 +122,42 @@ from ~129 ms to 5-6 ms a frame.
   copy. The profile skips its memcpy when the window already is the ROM. That
   saves a 16 MB copy on any target.
 
-## Paging with the SH-4 MMU (dreamcast/dc_pager.h)
+## Paging in software (dreamcast/dc_pager.h, dc_paged.h)
 
-- The window is VA 0x10000000 + page × 4 KB. A UTLB miss goes through KOS's
-  `mmu_map_set_callback` to `pg_map`, which reads the page off the disc if it is
-  not resident.
-- **The UTLB has 64 entries, 256 KB of reach**, against a ~2 MB window. Refills
-  are cheap, but every one is an exception. Larger pages for hot code are an
-  open optimization.
-- **Colour the frames.** The operand cache is indexed by VA bits 13:5 and
-  tagged by PA. A page whose frame has the same bits 13:12 as its window address
-  is never aliased in the cache, so nothing is ever flushed. Each colour has its
-  own CLOCK hand.
-- **Read the disc from the exception with the GD-ROM syscalls, by PIO, and
-  poll.** KOS's cdrom driver takes semaphores and must not be called there.
-  Nothing else may touch the drive once the pager is up.
+The ROM windows are paged by the program, with the SH-4's MMU off (#394 part
+12, below, has why). Until then the pager ran on the MMU. That version, and
+the four Flycast traps it hit, are in the history (`b35`, `pg_mmu_on`).
+
+- **A paged region's `data` is an address that is never dereferenced**:
+  `PG_VA_BASE` (0x10000000) on, 128 MB of span, naming the region's pages.
+  `MEM_HOST_PAGED(data)` (dc_paged.h, put in front of every file by the
+  Makefile) tells the bus which regions those are.
+- **The bus page table is the TLB.** `MEM_PAGE_SHIFT` is 14 here (16 KB
+  pages, `MEM_PAGES` 0x4C00) and 16 everywhere else. `mem_build_pages` leaves a
+  paged region's entries empty, so the first access takes the slow path, which
+  calls `MEM_HOST_PAGE_IN` (`pg_bus_in`). That brings the page in and installs
+  `rd_page`, and `wr_page` only once the frame is dirty, so a first write
+  still goes the slow way to mark it. Each frame remembers up to four table
+  slots that point at it and clears them when it is evicted.
+- **Whatever reads ROM outside the bus asks for the bytes' place**:
+  `MEM_HOST_AT` / `GEO3D_ROM` → `dc_rom_at`. geo3d's model table,
+  palette, material and texture-word reads, the 40-byte polygon walk, and
+  `sfight_read32` at install all go through it. A pointer in a frame stays
+  good for the next four calls (a ring of recent frames the CLOCK hand
+  skips). Bytes that straddle two pages come back in a bounce copy.
+- **`ib_build` does not cache a block it could not read.** A block built
+  while its page was out comes out empty; it is built again next time.
+- CLOCK eviction over 16 KB frames. Anonymous pages and written ROM pages
+  are pinned (`pg_pinned`, `wr` on the overlay counts the second kind).
+- **Read the disc with the GD-ROM syscalls, by PIO, and poll.** KOS's cdrom
+  driver takes semaphores. Nothing else may touch the drive once the pager is
+  up. With the MMU off a miss is an ordinary call, but the rule stands.
 - **Find the data track through the high-density TOC.** The low-density TOC only
   names track 1, a stub. A CD-R has only the low one, so that is the fallback.
 
 ## Flycast's MMU: four things that fail without a word
 
-Real hardware was not available. Each of these made the board read zeros or
+These held while the pager ran on the MMU (up to b35). Real hardware was not available. Each of these made the board read zeros or
 stale pages, with no error anywhere.
 
 1. **Flycast enables full MMU emulation only if it recognizes WinCE.** It checks
@@ -493,6 +508,7 @@ layers (ti), the scan and decode (sc), the sort (so) and the PVR submit (su).
 | part 11 (b33) | 27386 ms | 14.6 | 13713 / 13518 | 2136 / 9076 / 529 / 1615 |
 | part 12 (b35) | 25194 ms | 15.9 | 12879 / 12162 | 688 / 9046 / 524 / 1753 |
 | b35, Flycast's MMU charge at 2 cycles | 16050 ms | 24.9 | 7832 / 8150 | 438 / 6017 / 336 / 1298 |
+| b36, MMU off, software paging | 17262 ms | 23.2 | 8595 / 8598 | 440 / 6438 / 344 / 1312 |
 
 **The last row is Flycast, not the Dreamcast.** Flycast's cycle model
 (`core/hw/sh4/sh4_cycles.cpp`, `countCycles`) charges the first three memory
@@ -514,7 +530,7 @@ that never touch a window does not help: Flycast throws away all translated
 code on every AT change (`CCN_MMUCR_write` → `ResetCache`), and checks for the
 signature again.
 
-### Next: page in software, with the MMU off
+### Page in software, with the MMU off
 
 `tests/rom_touch.c` (now with a page-size override) over 4000 frames of
 attract, in 4 KB / 64 KB pages:
@@ -554,11 +570,23 @@ Who reads the windows (an audit of what `main_dc.c` compiles):
 The disc reads stay `pg_read` (GD-ROM syscalls, polled). Without the MMU a
 miss is an ordinary call on the emulator's thread, not an exception.
 
-Expected: about the 24.9 fps of the last row, a little more without the UTLB
-refills (the overlay counts 450-2800 a second), less the software faults. That
-is still short of 30. The rest has to come from the 3D: per-face FTRV for the
-normal and light, FIPR for the dot products, and per-face attribute bits
-worked out once at mesh build.
+Expected: about the 24.9 fps of the b35 row with the charge at 2 cycles,
+less the software faults. **Measured (b36): 17262 ms for the 400 frames, 23.2
+fps, against 25194 ms with the MMU** (−31%). The frame-1500 hash is still
+88ddb134, and the slices to frame 1500 took 22049 ms against 33700.
+Screenshots every 40 s through attract (the Tails lab, select, the Death Egg,
+two fights) draw as before. The pager's counters over the run: 15 disc loads
+after boot, 6534 evictions, no pinned or written ROM pages, no read errors.
+The frame pool came out at 1536 KB (96 frames), not 1792, because the heap
+probe now leaves more free. It holds the fight's working set: the loads stop
+once the stage is in.
+
+The geo3d walk reads through `dc_rom_at`, not a converted asset. Its pages
+are hot enough within a frame that the ring of recent frames is all it needs.
+
+That is still short of 30. The rest has to come from the 3D (scan and decode
+is 6438 of the 17262 ms): per-face FTRV for the normal and light, FIPR for the
+dot products, and per-face attribute bits worked out once at mesh build.
 
 ## Toolchain and runtime traps
 
@@ -590,7 +618,5 @@ worked out once at mesh build.
 - **The i960 slice (53-79 ms a frame after #370's blocks).** Not the COP /
   GEO stores (#392 measured ~4% for the bus and COP together). Keeping the hot
   `cpu` / `bus` state in the 8 KB operand-cache RAM mode.
-- **The MMU off: software paging** (see "Flycast charges the MMU a third of
-  the frame" above). The largest single item in Flycast.
 - **Optional:** modifier-volume shadows; dropping SDL2 and GLdc for KOS's
   `snd_stream` directly.

@@ -65,13 +65,35 @@ static inline void m2_st32a(void *p, uint32_t v) {
 
 #define MEM_REGIONS_MAX 64
 /* The direct page tables (rd_page, wr_page) cover the address space below
- * MEM_PAGES << 16; an access above it goes the long way. 1 << 16, all of it,
- * costs no test. The Dreamcast's 16 MB wants the 470 KB that the pages above
- * the framebuffer (0x12C00000), where nothing is plain memory, cost. */
-#ifndef MEM_PAGES
-#define MEM_PAGES (1u << 16)
+ * MEM_PAGES << MEM_PAGE_SHIFT; an access above it goes the long way. 64 KB
+ * pages, all 4 GB of them, cost no test. The Dreamcast's 16 MB wants the
+ * 470 KB that the pages above the framebuffer (0x12C00000), where nothing is
+ * plain memory, cost, and pages in its ROM 16 KB at a time (MEM_HOST_PAGED). */
+#ifndef MEM_PAGE_SHIFT
+#define MEM_PAGE_SHIFT 16
 #endif
-#define MEM_PAGE(tab, a) ((uint32_t)(a) >> 16 < MEM_PAGES ? (tab)[(uint32_t)(a) >> 16] : NULL)
+#define MEM_PAGE_OFF (((uint32_t)1 << MEM_PAGE_SHIFT) - 1u)   /* an address's offset in its page */
+#ifndef MEM_PAGES
+#define MEM_PAGES (1u << (32 - MEM_PAGE_SHIFT))
+#endif
+#define MEM_PAGE(tab, a) ((uint32_t)(a) >> MEM_PAGE_SHIFT < MEM_PAGES ? (tab)[(uint32_t)(a) >> MEM_PAGE_SHIFT] : NULL)
+/* A host that pages a region in (the Dreamcast, dreamcast/dc_pager.h) gives it
+ * a data pointer that only names its pages: MEM_HOST_PAGED(data) says so. The
+ * build leaves such a region's direct pages empty, the slow path asks
+ * MEM_HOST_PAGE_IN(bus, r, addr, write) for the page holding addr (its first
+ * byte, at a page-aligned address; the host may fill the direct entry with it,
+ * and must empty that entry when the page goes), and MEM_HOST_PAGES_RESET()
+ * is told when the tables are emptied. */
+#ifndef MEM_HOST_PAGED
+#define MEM_HOST_PAGED(data) 0
+#define MEM_HOST_PAGE_IN(bus, r, addr, write) ((uint8_t *)NULL)
+#define MEM_HOST_PAGES_RESET() ((void)0)
+#endif
+/* The n bytes at p, which may be in such a region's buffer, as plain memory
+ * (good until the next page-in). */
+#ifndef MEM_HOST_AT
+#define MEM_HOST_AT(p, n) ((const uint8_t *)(p))
+#endif
 #define MEM_PAGE_NONE   0x00u
 #define MEM_PAGE_MIXED  0xFFu
 
@@ -237,6 +259,7 @@ static inline void mem_regions_changed(memory_bus_t *bus) {
     if (bus->maps_live) {
         memset(bus->rd_page, 0, sizeof bus->rd_page);
         memset(bus->wr_page, 0, sizeof bus->wr_page);
+        MEM_HOST_PAGES_RESET();
         bus->maps_live = 0;
     }
 }
@@ -890,12 +913,13 @@ static MEM_NOINLINE void mem_build_pages(memory_bus_t *bus) {
      * region, and only where that region's read (write) is a plain buffer access. */
     memset(bus->rd_page, 0, sizeof bus->rd_page);
     memset(bus->wr_page, 0, sizeof bus->wr_page);
+    MEM_HOST_PAGES_RESET();
     for (uint32_t p = 0; p < MEM_PAGES; p++) {
-        uint32_t e = bus->page[p];
+        uint32_t e = bus->page[p >> (16 - MEM_PAGE_SHIFT)];
         if (e == MEM_PAGE_NONE || e == MEM_PAGE_MIXED) continue;
         mem_region_t *r = &bus->regions[e - 1u];
-        if (!r->data) continue;
-        uint8_t *at = r->data + ((p << 16) - r->base);
+        if (!r->data || MEM_HOST_PAGED(r->data)) continue;
+        uint8_t *at = r->data + ((p << MEM_PAGE_SHIFT) - r->base);
         if (!r->read_cb) bus->rd_page[p] = at;
         if (!r->write_cb && !r->readonly && !r->change_gen && !r->dirty_kb) bus->wr_page[p] = at;
     }
@@ -976,6 +1000,23 @@ static struct { uint32_t t[2], n[2], rt[2][16]; } g_mslow;
 #define MSLOW_T0 (void)0
 #define MSLOW_T1(w, a) (void)0
 #endif
+/* A paged region's bytes (MEM_HOST_PAGED), a page at a time. Only its
+ * change tracking is not done: no paged region has any. */
+static MEM_NOINLINE uint32_t mem_paged_rw(memory_bus_t *bus, mem_region_t *r, uint32_t addr,
+                                          uint32_t n, int write, uint32_t val) {
+    uint32_t v = 0;
+    uint8_t *p = NULL;
+    (void)bus; (void)r; (void)write;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t a = addr + i;
+        if (!p || !(a & MEM_PAGE_OFF)) p = MEM_HOST_PAGE_IN(bus, r, a, write);
+        if (!p) return 0;
+        if (write) p[a & MEM_PAGE_OFF] = (uint8_t)(val >> (8u * i));
+        else v |= (uint32_t)p[a & MEM_PAGE_OFF] << (8u * i);
+    }
+    return v;
+}
+
 static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
     MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
@@ -987,6 +1028,7 @@ static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
     }
     if (r->read_cb) return r->read_cb(r, addr, 1) & 0xFF;
     if (!r->data)   return 0;
+    if (MEM_HOST_PAGED(r->data)) return mem_paged_rw(bus, r, addr, 1, 0, 0);
     return r->data[addr - r->base];
 }
 
@@ -1001,6 +1043,7 @@ static MEM_NOINLINE uint32_t mem_read16_slow(memory_bus_t *bus, uint32_t addr) {
     }
     if (r->read_cb) return r->read_cb(r, addr, 2) & 0xFFFF;
     if (!r->data)   return 0;
+    if (MEM_HOST_PAGED(r->data)) return mem_paged_rw(bus, r, addr, 2, 0, 0);
     uint32_t off = addr - r->base;
     return (uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8);
 }
@@ -1016,6 +1059,7 @@ static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
     }
     if (r->read_cb) return r->read_cb(r, addr, 4);
     if (!r->data)   return 0;
+    if (MEM_HOST_PAGED(r->data)) return mem_paged_rw(bus, r, addr, 4, 0, 0);
     uint32_t off = addr - r->base;
     return  (uint32_t)r->data[off]
          | ((uint32_t)r->data[off + 1] << 8)
@@ -1033,19 +1077,19 @@ static MEM_FORCE_INLINE uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
     if (M2_UNLIKELY(!p)) { MSLOW_T0; uint32_t v_ = mem_read8_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
-    return p[addr & 0xFFFFu];
+    return p[addr & MEM_PAGE_OFF];
 }
 static MEM_FORCE_INLINE uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { MSLOW_T0; uint32_t v_ = mem_read16_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 1u)) { MSLOW_T0; uint32_t v_ = mem_read16_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
-    return mem_le16(p + (addr & 0xFFFFu));
+    return mem_le16(p + (addr & MEM_PAGE_OFF));
 }
 static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
     const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { MSLOW_T0; uint32_t v_ = mem_read32_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 3u)) { MSLOW_T0; uint32_t v_ = mem_read32_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
     MEM_TALLY(bus->reads, 1);
-    return mem_le32(p + (addr & 0xFFFFu));
+    return mem_le32(p + (addr & MEM_PAGE_OFF));
 }
 
 /* The two words at addr, as mem_read32(addr) and mem_read32(addr + 4) return
@@ -1058,8 +1102,8 @@ static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
  * loads and stores started inlining) the A55 ran 5% more instructions. */
 static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32_t *w1, uint32_t *w2) {
     const uint8_t *d = MEM_PAGE(bus->rd_page, addr);
-    if (M2_LIKELY(d && (addr & 0xFFFFu) <= 0xFFF8u)) {  /* both words on one direct page */
-        d += addr & 0xFFFFu;
+    if (M2_LIKELY(d && (addr & MEM_PAGE_OFF) <= MEM_PAGE_OFF - 7u)) {  /* both words on one direct page */
+        d += addr & MEM_PAGE_OFF;
         MEM_TALLY(bus->reads, 2);
         *w1 = mem_le32(d);
         *w2 = mem_le32(d + 4);
@@ -1079,7 +1123,7 @@ static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32
     *w1 = mem_read32_slow(bus, addr);
     *w2 = mem_read32_slow(bus, addr + 4);
     r = mem_find_region(bus, addr);
-    if (r && !r->shadowed && !r->read_cb && r->data && (uint64_t)(addr - r->base) + 8u <= r->size)
+    if (r && !r->shadowed && !r->read_cb && r->data && !MEM_HOST_PAGED(r->data) && (uint64_t)(addr - r->base) + 8u <= r->size)
         bus->fetch = r;
 }
 
@@ -1191,6 +1235,7 @@ static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint3
         return;
     }
     if (!r->data)    return;
+    if (MEM_HOST_PAGED(r->data)) { mem_paged_rw(bus, r, addr, 1, 1, val); return; }
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && r->data[off] != (uint8_t)val;
     r->data[off] = (uint8_t)val;
@@ -1217,6 +1262,7 @@ static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint
         return;
     }
     if (!r->data)    return;
+    if (MEM_HOST_PAGED(r->data)) { mem_paged_rw(bus, r, addr, 2, 1, val); return; }
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && (r->data[off] | (r->data[off + 1] << 8)) != (val & 0xFFFF);
     r->data[off]     = (uint8_t)(val & 0xFF);
@@ -1245,6 +1291,7 @@ static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint
         return;
     }
     if (!r->data)    return;
+    if (MEM_HOST_PAGED(r->data)) { mem_paged_rw(bus, r, addr, 4, 1, val); return; }
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && ((uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8)
                                      | ((uint32_t)r->data[off + 2] << 16) | ((uint32_t)r->data[off + 3] << 24)) != val;
@@ -1266,26 +1313,26 @@ static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFF);
-    p[addr & 0xFFFFu] = (uint8_t)val;
+    p[addr & MEM_PAGE_OFF] = (uint8_t)val;
 }
 static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = MEM_PAGE(bus->wr_page, addr);
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { MSLOW_T0; mem_write16_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 1u)) { MSLOW_T0; mem_write16_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFFFF);
-    mem_le16_put(p + (addr & 0xFFFFu), val);
+    mem_le16_put(p + (addr & MEM_PAGE_OFF), val);
 }
 static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
     uint8_t *p = MEM_PAGE(bus->wr_page, addr);
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { MSLOW_T0; mem_write32_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 3u)) { MSLOW_T0; mem_write32_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
     MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
     if (M2_UNLIKELY(dl_active()) && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
-    mem_le32_put(p + (addr & 0xFFFFu), val);
+    mem_le32_put(p + (addr & MEM_PAGE_OFF), val);
 }
 
 /* A frame edge: called under the emu mutex when the game's frame has ended and

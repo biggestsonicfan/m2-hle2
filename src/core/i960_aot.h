@@ -337,12 +337,12 @@ static inline uint32_t aot_cc_i(int32_t a, int32_t b)   { return 1u + (uint32_t)
 /* Loads and stores straight to a page of plain memory, as mem_read32 /
  * mem_write32 make them when that is what they find; anything else is
  * AOT_SLOW. ea_ is the address and p_ its page. */
-#define AOT_PG(tab, sz) ((p_ = MEM_PAGE(bus->tab, ea_)) != NULL && (ea_ & 0xFFFFu) <= 0x10000u - (sz))
+#define AOT_PG(tab, sz) ((p_ = MEM_PAGE(bus->tab, ea_)) != NULL && (ea_ & MEM_PAGE_OFF) <= MEM_PAGE_OFF + 1u - (sz))
 /* ldl..ldq / stl..stq: and a region that bursts (mem_burst_step 4). */
 #define AOT_PGN(tab, sz) (AOT_PG(tab, sz) && !bus->regions[bus->page[ea_ >> 16] - 1u].no_burst)
-#define AOT_L8(o)  (MEM_TALLY(bus->reads, 1), (uint32_t)p_[(ea_ + (o)) & 0xFFFFu])
-#define AOT_L16(o) (MEM_TALLY(bus->reads, 1), mem_le16(p_ + ((ea_ + (o)) & 0xFFFFu)))
-#define AOT_L32(o) (MEM_TALLY(bus->reads, 1), mem_le32(p_ + ((ea_ + (o)) & 0xFFFFu)))
+#define AOT_L8(o)  (MEM_TALLY(bus->reads, 1), (uint32_t)p_[(ea_ + (o)) & MEM_PAGE_OFF])
+#define AOT_L16(o) (MEM_TALLY(bus->reads, 1), mem_le16(p_ + ((ea_ + (o)) & MEM_PAGE_OFF)))
+#define AOT_L32(o) (MEM_TALLY(bus->reads, 1), mem_le32(p_ + ((ea_ + (o)) & MEM_PAGE_OFF)))
 #if M2HLE_DEV_TOOLS
 /* the watchpoints and the display-list taps: the bus's own write */
 #define AOT_S8(IP, o, v)  do { bus->cpu_ip = (IP); mem_write8(bus, ea_ + (o), (uint8_t)(v)); } while (0)
@@ -350,11 +350,11 @@ static inline uint32_t aot_cc_i(int32_t a, int32_t b)   { return 1u + (uint32_t)
 #define AOT_S32(IP, o, v) do { bus->cpu_ip = (IP); mem_write32(bus, ea_ + (o), (v)); } while (0)
 #else
 #define AOT_S8(IP, o, v)  do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                               p_[(ea_ + (o)) & 0xFFFFu] = (uint8_t)(v); } while (0)
+                               p_[(ea_ + (o)) & MEM_PAGE_OFF] = (uint8_t)(v); } while (0)
 #define AOT_S16(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                               mem_le16_put(p_ + ((ea_ + (o)) & 0xFFFFu), (v)); } while (0)
+                               mem_le16_put(p_ + ((ea_ + (o)) & MEM_PAGE_OFF), (v)); } while (0)
 #define AOT_S32(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                               mem_le32_put(p_ + ((ea_ + (o)) & 0xFFFFu), (v)); } while (0)
+                               mem_le32_put(p_ + ((ea_ + (o)) & MEM_PAGE_OFF), (v)); } while (0)
 #endif
 
 /* What the compiled code does inline: the RAM (STF's ~45% of them; aot_check
@@ -484,8 +484,8 @@ static inline bool aot_check(memory_bus_t *bus) {
     }
     if (s_aot_on) {   /* the devices aot_run's helpers call straight (per slice: ~2% a run) */
         mem_region_t *g = mem_find_region(bus, COPROGRAM_BASE);
-        for (uint32_t pg = RAM_BASE >> 16; pg < (RAM_BASE + RAM_SIZE) >> 16; pg++) {   /* AOT_RAM's */
-            uint8_t *at = bus->ram + ((pg << 16) - RAM_BASE);
+        for (uint32_t pg = RAM_BASE >> MEM_PAGE_SHIFT; pg < (RAM_BASE + RAM_SIZE) >> MEM_PAGE_SHIFT; pg++) {   /* AOT_RAM's */
+            uint8_t *at = bus->ram + ((pg << MEM_PAGE_SHIFT) - RAM_BASE);
             if (bus->rd_page[pg] != at || (!M2HLE_DEV_TOOLS && bus->wr_page[pg] != at)) {
                 LOG_WARN("aot: the RAM is not plain memory, off"); s_aot_on = false; return false;
             }
@@ -493,13 +493,13 @@ static inline bool aot_check(memory_bus_t *bus) {
         {   /* AOT_ROMD's: how far each is plain pages of the one buffer */
             const mem_region_t *r = mem_find_region(bus, ROM_BASE);
             uint32_t n = 0;
-            s_aot_rom = r && r->base == ROM_BASE ? r->data : NULL;
-            while (s_aot_rom && n < r->size && bus->rd_page[(ROM_BASE + n) >> 16] == s_aot_rom + n) n += 0x10000u;
+            s_aot_rom = r && r->base == ROM_BASE && !MEM_HOST_PAGED(r->data) ? r->data : NULL;   /* paged: AOT_PG */
+            while (s_aot_rom && n < r->size && MEM_PAGE(bus->rd_page, ROM_BASE + n) == s_aot_rom + n) n += MEM_PAGE_OFF + 1u;
             s_aot_rom_n = n < (r ? r->size : 0u) ? n : (r ? r->size : 0u);
             r = mem_find_region(bus, MAIN_DATA_BASE);
-            s_aot_md = r && r->base == MAIN_DATA_BASE ? r->data : NULL;
+            s_aot_md = r && r->base == MAIN_DATA_BASE && !MEM_HOST_PAGED(r->data) ? r->data : NULL;
             n = 0;
-            while (s_aot_md && n < r->size && bus->rd_page[(MAIN_DATA_BASE + n) >> 16] == s_aot_md + n) n += 0x10000u;
+            while (s_aot_md && n < r->size && MEM_PAGE(bus->rd_page, MAIN_DATA_BASE + n) == s_aot_md + n) n += MEM_PAGE_OFF + 1u;
             s_aot_md_n = n < (r ? r->size : 0u) ? n : (r ? r->size : 0u);
         }
         s_aot_cop_ok = g && g->write_cb == coprogram_write_cb && g->read_cb == coprogram_read_cb
