@@ -109,6 +109,14 @@ static void snd_out_tap(int16_t l, int16_t r, uint64_t index, void *ud) {
 static struct { uint32_t frame, held; } script[SCRIPT_MAX];
 static int script_n;
 
+/* --save-at F:FILE writes a savestate at the end of frame F; --load FILE starts
+ * from one. A loaded run prints what the saving run would have printed after F,
+ * line for line, and its sample hash (the last lines) covers the samples after
+ * F in both. */
+static const char *load_path;
+static uint32_t    save_frame;
+static char        save_path[1024];
+
 static uint32_t keys_mask(const char *p, const char *end) {
     const game_input_map_t *in = &g_active_profile->input;
     uint32_t m = 0;
@@ -250,7 +258,7 @@ static void parse_script(const char *s) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
@@ -279,6 +287,13 @@ int main(int argc, char **argv) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
                 fprintf(stderr, "--trace F:FILE\n");
+                return 2;
+            }
+        }
+        else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%u:%1023s", &save_frame, save_path) != 2) {
+                fprintf(stderr, "--save-at F:FILE\n");
                 return 2;
             }
         }
@@ -342,6 +357,14 @@ int main(int argc, char **argv) {
     emu_ctx_init(&emu, &cpu, &bus);
     emu_run(&emu);
     sound_set_tap(snd_out_tap, NULL);
+    if (load_path) {
+        /* A board from a state: what it prints from here on has to be what
+         * the run that saved it printed. The sample hash starts here. */
+        const char *err = emu_state_load_now(&emu, load_path);
+        if (err) { fprintf(stderr, "--load %s: %s\n", load_path, err); return 2; }
+        snd_out_hash = FNV0; snd_out_n = 0;
+        fprintf(stderr, "loaded %s at frame %u\n", load_path, (unsigned)g_emu_frames);
+    }
 
     FILE *out = out_path ? fopen(out_path, "wb") : stdout;
     if (!out) { fprintf(stderr, "cannot write %s\n", out_path); return 2; }
@@ -371,6 +394,13 @@ int main(int argc, char **argv) {
                 }
                 mismatches++;
             }
+        }
+        if (r == EMU_SLICE_FRAME && save_frame && g_emu_frames == save_frame) {
+            /* ... and the samples from here on are what the loaded run's are. */
+            const char *err = emu_state_save_now(&emu, save_path);
+            if (err) { fprintf(stderr, "--save-at %s: %s\n", save_path, err); return 2; }
+            snd_out_hash = FNV0; snd_out_n = 0;
+            fprintf(stderr, "saved %s at frame %u\n", save_path, (unsigned)g_emu_frames);
         }
         if (r != EMU_SLICE_FRAME || g_emu_frames < from) continue;
         uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);

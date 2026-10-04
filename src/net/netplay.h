@@ -9,7 +9,8 @@
  *
  * yampnet starts a round inside an already-running emulator and re-seeds the
  * game's RNG so both machines agree. That works because its host can put two
- * emulators into the same state on demand. This emulator has no savestates, so
+ * emulators into the same state on demand. This emulator never sends a savestate
+ * to a peer (savestate.h is local), so
  * the only state two machines can be *certain* to share is the one the board is
  * in a microsecond after power-on.
  *

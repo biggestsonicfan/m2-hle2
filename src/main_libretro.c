@@ -1770,8 +1770,9 @@ RETRO_API void retro_run(void) {
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
-/* No savestates: the board's state is spread across headers that were never
- * written to be snapshotted (see pkt_lockstep.h for what netplay does instead). */
+/* Not offered yet: savestate.h writes a whole board to a file (a 16 MB zip),
+ * where RetroArch's rewind and run-ahead call these every frame. Netplay does
+ * not need them (see pkt_lockstep.h). */
 RETRO_API size_t retro_serialize_size(void) { return 0; }
 RETRO_API bool   retro_serialize(void *data, size_t size) { (void)data; (void)size; return false; }
 RETRO_API bool   retro_unserialize(const void *data, size_t size) { (void)data; (void)size; return false; }
