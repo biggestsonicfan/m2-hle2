@@ -200,32 +200,80 @@ numbers are used:
 
 ### The COP
 
-The TGP is C, not an emulated SHARC. Its command table at `0x8013A690` holds
-16 bytes per opcode 0x00–0x87, `{args, reply bytes, name, handler}`, under
-Sega's own `Fn_*` names. The reply sizes agree with this emulator's
-(`Fn_area_coli` 88 bytes, `Fn_parts_oidasi` 36, `Fn_get_matrix` 48). The
-word feeder (`0x8002298C`) collects the arguments, calls the handler and
-copies the reply out, and is reached both from the i960 bus (writes to
-`0x880000`) and directly from the translated functions.
+The TGP is C, not an emulated SHARC: Sega rewrote the coprocessor's command
+set as one C function per command and kept the firmware's own `Fn_*` names.
+Ghidra decompiles it cleanly. The handlers are now named in the Windows
+Ghidra project (`Fn_*`, `cop_stub_NN` for the empty ones, `cop_op_NN` where
+the table has no name).
 
-31 handlers are a bare `blr`, among them `Fn_fcurve_spl` (0x32), `Fn_osage`
-(0x4A), `Fn_area_coli` (0x70), `Fn_calc_coli_flag` (0x3B) and
-`Fn_get_glo_ang` (0x51). STF's ROM sends 0x32 from `get_fcurve_value_f`, 0x4A
-from `osage_copro` and 0x70 from `area_coli`, all inside functions the traps
-replace. So the translated code does that work itself and never sends those
-commands, and the table keeps the entries only for the names. Which function
-does the Hermite or the sway chain was not traced.
+**The command table** starts at `0x8013A68C`: 16 bytes per opcode
+0x00–0x87, `{handler, args, reply bytes, name}`. (Part 2 read it from
+`0x8013A690`, one word late, and so paired each name with the next opcode's
+handler. Its list of stubs was wrong.) The argument counts agree with the
+firmware's, and with this emulator's wherever the emulator knows the
+command. The word feeder (`0x8002298C`) collects the arguments, calls the
+handler and copies the reply out. Both the i960 bus (writes to `0x880000`)
+and the translated functions reach it.
 
-The handlers save paired-single registers (`psq_st`) in their prologues, so
-the build uses Gekko's paired singles. Neither the firmware's angle constant
-(`0x4622F983`) nor the spline's span/30 (`0x3D08882F`) is in the image, so
-its maths is not the firmware's bit for bit, as with the PS3 port's.
+**31 handlers are a bare `blr`:** `Fn_coli_dist` (0x33), `Fn_coli_sink`
+(0x3C), `Fn_calc_unit` (0x40), 0x4B–0x4E, `Fn_base_zy` / `_yz` / `_zyx_ang` /
+`_zyx` (0x4F–0x53, but not 0x51), 0x5F, `Fn_calc_unit_2` / `_1` (0x60, 0x61),
+`Fn_2d_coli_*` (0x64–0x66), `Fn_x/y/z_rot_e` and `Fn_trans_e` (0x6C–0x6F),
+`Fn_ball_to_unit` (0x71), `Fn_get_glo_ang_zyx` (0x76), `Fn_ziku_rot` (0x79),
+`Fn_mul_matrix3` (0x7A), `Fn_scrn_clip` (0x7B), `Fn_load_inner_3x3` /
+`Fn_store_inner_3x3` / `Fn_mul_matrix_inner3` (0x7C–0x7E), and
+`Fn_zanzou_load_matrix_inner` / `_get_matrix_inner` (0x83, 0x87). Most of
+these have zero arguments in Gems' table, so STF never sends them. Every
+command this emulator found STF using has a real handler:
+`Fn_fcurve_spl`, `Fn_osage` (it walks the record stream, echoes each type and
+dispatches through a type table at `0x8014FE48`, as the firmware does),
+`Fn_area_coli`, `Fn_calc_coli_flag`, `Fn_calc_unit_2_fast` (the two-bone IK),
+`Fn_get_glo_ang`, `Fn_get_sm_ang_f` / `_r`, `Fn_parts_oidasi` and the zanzou
+engine.
+
+**It keeps the firmware's memory map.** The matrix stack is the current
+slot plus a depth counter capped at 7. `Fn_parts_oidasi` reads the world
+balls at DM `0x3E80` / `0x7E80`, the addresses `sharc_coli.h` uses.
+
+**Its arithmetic is not the firmware's.** The constants are in `.sdata2`
+(`r2` = `0x801F0520`), which part 2 did not search. The spline's span/30,
+`0x3D08882F`, is there. What differs:
+
+| Operation | SHARC firmware (what `sharc.h` ports) | Gems |
+|---|---|---|
+| √ | `rsqrts` 8-bit seed, three Newton steps | Gekko `frsqrte`, three Newton steps in double, then rounded to single |
+| atan2 | Analog Devices' routine, two range reductions | its own rational P(x²)/Q(x²), constants `5.7310`, `0.17442`, `11.5545`, `22.9397`, `29.7767`, `20.5109` |
+| asin | `_L20332` | libm's double `asin` (`0x800AEA98`) |
+| angle word | `floor(rad · 0x4622F983) & 0xFFFF` | wrap to [0, 2π), then `fctiwz(65536 · a / 2π)` |
+| spline (`0x32`) | float Horner, plain multiply and add | the same Horner order, with fused `fmadds` / `fmsubs` |
+| `Fn_parts_oidasi` push | `1 − 2·d/(R+r)` (the `f11` bug) | `1 − d/(R+r)`, the intent, so half the arcade's push |
+
+So Gems' TGP is Sega's reading of what each command means, not a copy of the
+chip. It cannot replace the firmware as a reference. `stf-sharc` is the
+firmware itself, reassembled bit for bit, and `sharc_exec.h` is held to it
+and to MAME. A fight on Gems drifts from the arcade the way the PS3 port's
+does.
+
+**What it is good for:**
+- **A readable second opinion on what a command means.** Where the firmware
+  listing is hard to follow, the C handler with the same name says what Sega
+  meant it to do. When the two disagree (the push factor), the firmware wins.
+- **Arguments for commands STF never sends.** Gems' table and the firmware
+  agree on 10 commands that take arguments and that `sharc_args_for_cmd`
+  does not list, so it answers 0 for them: `Fn_sqr_r` 0x19 (1),
+  `Fn_put_c` / `_add_c` / `_sub_c` / `_mul_c` / `_div_c` 0x1B, 0x1D–0x20 (1 each),
+  `Fn_tri_shin` 0x28 (3), `Fn_get_inner` 0x2A (6), `Fn_mul_matrix_rev` 0x47 (12)
+  and `Fn_sub3` 0x5D (6). A game that sends one would desynchronise the FIFO
+  (the "unknown cmd" floats in CLAUDE.md). That is worth fixing before a
+  second game needs it.
+- **The shape of a fast COP for the Dreamcast** (below).
 
 ### What it adds for the Dreamcast port
 
 1. **Translate the hot functions whole, not the hot blocks.** Gems
-   interprets the program and compiles about 70 functions, chosen by name,
-   with the COP work they call folded in. The port's AOT (`i960_aot.py`)
+   interprets the program and compiles about 70 functions, chosen by name.
+   They still hand their COP commands to the C TGP, but through the word
+   feeder directly, not over the i960 bus. The port's AOT (`i960_aot.py`)
    compiles by coverage; the Gems list is a cross-check of what is hot.
 2. **Draw from a trap at `set_obj`.** One trap at 467 call sites turns the
    game's draw into a native call. On the Dreamcast that is the place to
@@ -235,6 +283,15 @@ its maths is not the firmware's bit for bit, as with the PS3 port's.
    fits an offline build.
 4. **Trap the VS rematch and the sound request** at the same addresses as the
    PC DLL (`0xE584`, `0x3F268`). The port already does the sound one.
+5. **Write the COP as one C function per command, as Gems does,** with
+   arguments read straight off the FIFO and no SHARC underneath. Sega's own
+   console port shows the command set fits that shape, and each handler is a
+   few dozen float operations. The SH-4 has the instructions for the same
+   shortcuts Gems takes: `fsrra` for 1/√, `fsca` for sine and cosine, `ftrv`
+   for the 4×4 multiply. The cost is the same as Gems': a fight then drifts
+   from the arcade's. If the port must play netplay against m2-hle2 or the
+   arcade, it has to keep `sharc.h`'s firmware arithmetic instead (single
+   precision, so it fits the SH-4's FPU, only slower than the shortcuts).
 
 Not yet read: the `TEX_STG` loader (the format string is at `0x8013F5D4`),
 how the GEO list becomes GX calls, and the PS2 build.
