@@ -1104,7 +1104,10 @@ det_digest $ROMS_DIR/sfight.zip --frames 900 --load s.sta --out b.txt
 diff <(awk '$1>400' a.txt) b.txt   # empty
 ```
 
-Run it after adding state to the board that a save would have to carry.
+Run it after adding state to the board that a save would have to carry. With
+`--mem` both go through the in-memory path the libretro core uses
+(`emu_state_save_mem` / `emu_state_load_mem`, a stored zip padded to the size
+the core reports), and the result must be the same.
 
 ## The netplay reset
 

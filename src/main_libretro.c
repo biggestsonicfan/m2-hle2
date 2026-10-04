@@ -19,9 +19,9 @@
  *   RetroArch  RetroArch hosts (with a password if one is set), lists the
  *              session in its lobby and connects the players; the core runs
  *              lockstep over that connection (net/pkt_lockstep.h, the
- *              netpacket interface). RetroArch's own netplay needs savestates,
- *              which this emulator does not have, so this is the only way it
- *              can carry a session.
+ *              netpacket interface). RetroArch's own netplay rolls back with
+ *              savestates, and this board's are 16 MB each, so this is the
+ *              only way it can carry a session.
  *   RPCN       the desktop's and the website's netplay (net/netplay.h), with
  *              the lobby the PS3 port of the game has: its menus, rebuilt from
  *              the PS3's own layouts and drawn by the core (ui/ps3ui_app.h),
@@ -322,6 +322,8 @@ static void lr_set_options(void) {
 static bool g_sound_on;
 static bool g_game_loaded;
 static bool g_halt_reported;
+static size_t g_lr_state_size;  /* retro_serialize_size, once a load */
+static bool g_lr_redraw;   /* a state was loaded: draw it even if the board did not run */
 
 static void lr_attach_sound(void) {
     sound_reset();
@@ -1684,6 +1686,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     emu_ctx_init(&state.emu, &state.cpu, &state.bus);
     emu_run(&state.emu);
     g_game_loaded = true;
+    g_lr_state_size = 0;   /* a state's size depends on the profile */
+    /* A state is the build's struct layouts: it does not cross to another
+     * architecture or byte order (savestate.h's LAYOUT refuses it). */
+    uint64_t quirks = RETRO_SERIALIZATION_QUIRK_PLATFORM_DEPENDENT | RETRO_SERIALIZATION_QUIRK_ENDIAN_DEPENDENT;
+    env_cb(RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS, &quirks);
     lr_log(RETRO_LOG_INFO, "m2-hle %s: %s, sound board %s, online play %s", M2HLE_VERSION,
            g_active_profile->display_name, g_sound_on ? "on" : "off",
            opt.online == LR_ONLINE_RPCN ? "RPCN" : "RetroArch");
@@ -1764,18 +1771,62 @@ RETRO_API void retro_run(void) {
     hprof_phase_set(6, g_emu_times.sound_wait_us - snd_wait0);
     lr_push_audio();
     hprof_phase(2);
-    lr_draw(ran);
+    lr_draw(ran || g_lr_redraw);
+    g_lr_redraw = false;
     hprof_frame_end(g_emu_frames);
 }
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
-/* Not offered yet: savestate.h writes a whole board to a file (a 16 MB zip),
- * where RetroArch's rewind and run-ahead call these every frame. Netplay does
- * not need them (see pkt_lockstep.h). */
-RETRO_API size_t retro_serialize_size(void) { return 0; }
-RETRO_API bool   retro_serialize(void *data, size_t size) { (void)data; (void)size; return false; }
-RETRO_API bool   retro_unserialize(const void *data, size_t size) { (void)data; (void)size; return false; }
+/* ---- Savestates ----------------------------------------------------------------------------
+ *
+ * The desktop's (core/savestate.h): one zip with an entry per part of the
+ * board, here in RetroArch's buffer instead of a file, its entries stored
+ * rather than deflated (RetroArch compresses the files it writes). About 16 MB,
+ * the same for every state of one build and profile, plus room for INFO's text
+ * to grow. A state loads only into the build, ROM set and profile that made it.
+ * Netplay does not use them (pkt_lockstep.h), and a load during a session
+ * would change this board and not the other's, so it is refused there. */
+#define LR_STATE_SLACK 4096
+
+/* Whether a session has the board, either kind (lr_sound_may_go's test). */
+static bool lr_session_owns_board(void) { return !lr_sound_may_go(); }
+
+RETRO_API size_t retro_serialize_size(void) {
+    if (!g_game_loaded) return 0;
+    if (!g_lr_state_size) {
+        size_t len = 0;
+        const char *err = emu_state_save_mem(&state.emu, NULL, 0, &len);
+        if (err) { lr_log(RETRO_LOG_WARN, "savestate: %s", err); return 0; }
+        g_lr_state_size = len + LR_STATE_SLACK;
+    }
+    return g_lr_state_size;
+}
+
+RETRO_API bool retro_serialize(void *data, size_t size) {
+    if (!g_game_loaded || !data) return false;
+    size_t len = 0;
+    const char *err = emu_state_save_mem(&state.emu, data, size, &len);
+    if (err) { lr_log(RETRO_LOG_WARN, "savestate: %s", err); return false; }
+    memset((uint8_t *)data + len, 0, size - len);   /* the same board, the same bytes */
+    return true;
+}
+
+RETRO_API bool retro_unserialize(const void *data, size_t size) {
+    if (!g_game_loaded) return false;
+    const char *err = lr_session_owns_board() ? "a netplay session owns the board"
+                    : emu_state_load_mem(&state.emu, data, size);
+    if (err) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "m2hle: state not loaded: %s", err);
+        lr_message(msg, 300);
+        lr_log(RETRO_LOG_WARN, "savestate: %s", err);
+        return false;
+    }
+    g_halt_reported = state.cpu.halted;
+    g_lr_redraw = true;
+    return true;
+}
 
 RETRO_API void   retro_cheat_reset(void) {}
 RETRO_API void   retro_cheat_set(unsigned index, bool enabled, const char *code) {

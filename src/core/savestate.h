@@ -335,33 +335,29 @@ static inline bool savestate_extra_mine(int i) {
 
 /* ---- Save ------------------------------------------------------------------------- */
 
-static inline bool savestate__add(mz_zip_archive *z, const char *name, const void *p, size_t n) {
-    return mz_zip_writer_add_mem(z, name, p, n, MZ_BEST_SPEED) != 0;
+/* A stored entry is an in-memory state (savestate_save_mem): it carries a fixed
+ * time, so the same board gives the same bytes whenever it is saved. */
+static inline bool savestate__add(mz_zip_archive *z, mz_uint level, const char *name, const void *p, size_t n) {
+    if (level != MZ_NO_COMPRESSION) return mz_zip_writer_add_mem(z, name, p, n, level) != 0;
+    MZ_TIME_T t = 1767225600; /* 2026-01-01 */
+    return mz_zip_writer_add_mem_ex_v2(z, name, p, n, NULL, 0, level, 0, 0, &t, NULL, 0, NULL, 0) != 0;
 }
 
-/* Write the board to `path`. Call between slices, with the emu mutex held
- * where there is one. NULL on success, else what went wrong. */
-static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu,
-                                         memory_bus_t *bus, const savestate_emu_t *emu) {
-    if (!path || !*path) return "no path";
-    if (!g_active_profile) return "no ROM is loaded";
-    sound_settle();
-
-    mz_zip_archive z;
-    memset(&z, 0, sizeof z);
-    if (!mz_zip_writer_init_heap(&z, 0, 64u << 20)) return "zip: cannot start an archive";
+/* Every entry, into an archive the caller has started. */
+static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i960_cpu_t *cpu,
+                                      memory_bus_t *bus, const savestate_emu_t *emu) {
     bool ok = true;
 
     char info[512];
     savestate_info_text(info, sizeof info, emu->frame_clock_frame);
     savestate_layout_t layout = savestate_layout();
     savestate_rom_t rom = savestate_rom_id(bus);
-    ok = ok && savestate__add(&z, "INFO",   info, strlen(info));
-    ok = ok && savestate__add(&z, "LAYOUT", &layout, sizeof layout);
-    ok = ok && savestate__add(&z, "ROM",    &rom, sizeof rom);
+    ok = ok && savestate__add(zp, level, "INFO",   info, strlen(info));
+    ok = ok && savestate__add(zp, level, "LAYOUT", &layout, sizeof layout);
+    ok = ok && savestate__add(zp, level, "ROM",    &rom, sizeof rom);
 
     /* the processors */
-    ok = ok && savestate__add(&z, "I960",  cpu, sizeof *cpu);
+    ok = ok && savestate__add(zp, level, "I960",  cpu, sizeof *cpu);
     /* Host pointers are written as 0 (a load keeps the live ones), so the
      * same board makes the same file in any process. */
     if (ok) {
@@ -373,15 +369,15 @@ static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu
             sh->sharc_dm_ext = NULL;
             memcpy(co, &g_cop, sizeof *co);
             co->ctl = NULL;
-            ok = savestate__add(&z, "SHARC", sh, sizeof *sh) && savestate__add(&z, "COP", co, sizeof *co);
+            ok = savestate__add(zp, level, "SHARC", sh, sizeof *sh) && savestate__add(zp, level, "COP", co, sizeof *co);
         }
         free(sh); free(co);
     }
-    ok = ok && savestate__add(&z, "ZANZOU", &g_zz, sizeof g_zz);
+    ok = ok && savestate__add(zp, level, "ZANZOU", &g_zz, sizeof g_zz);
 
     /* the bus */
     for (size_t i = 0; ok && i < SAVESTATE_NBUFS; i++)
-        ok = savestate__add(&z, SAVESTATE_BUFS[i].name, savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]),
+        ok = savestate__add(zp, level, SAVESTATE_BUFS[i].name, savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]),
                             SAVESTATE_BUFS[i].size);
 
     /* the GEO */
@@ -393,12 +389,12 @@ static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu
     geo.snap_rstart = g_geodl_snap_rstart;
     geo.snap_ready  = g_geodl_snap_ready;
     geo.full_snap   = g_geodl_full_snap;
-    ok = ok && savestate__add(&z, "GEO",      &geo, sizeof geo);
-    ok = ok && savestate__add(&z, "GEOLIST",  g_geodl_snaps, sizeof g_geodl_snaps);
-    ok = ok && savestate__add(&z, "GEOSTATE", &g_geo_live, sizeof g_geo_live);
+    ok = ok && savestate__add(zp, level, "GEO",      &geo, sizeof geo);
+    ok = ok && savestate__add(zp, level, "GEOLIST",  g_geodl_snaps, sizeof g_geodl_snaps);
+    ok = ok && savestate__add(zp, level, "GEOSTATE", &g_geo_live, sizeof g_geo_live);
 
     /* interrupts and timers */
-    ok = ok && savestate__add(&z, "IRQT", &g_irqt, sizeof g_irqt);
+    ok = ok && savestate__add(zp, level, "IRQT", &g_irqt, sizeof g_irqt);
 
     /* the sound board */
     if (ok) {
@@ -414,27 +410,42 @@ static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu
         else {
             memcpy(scsp, &g_sound.scsp, sizeof *scsp);
             savestate_scsp_pack(scsp);
-            ok = savestate__add(&z, "M68K",     &g_sound.m68k.cpu, sizeof g_sound.m68k.cpu)
-              && savestate__add(&z, "M2SNDRAM", g_sound.ram, sizeof g_sound.ram)
-              && savestate__add(&z, "M2SCSP",   scsp, sizeof *scsp)
-              && savestate__add(&z, "SOUND",    &snd, sizeof snd)
-              && savestate__add(&z, "SOUNDHLE", &g_shle, sizeof g_shle);
+            ok = savestate__add(zp, level, "M68K",     &g_sound.m68k.cpu, sizeof g_sound.m68k.cpu)
+              && savestate__add(zp, level, "M2SNDRAM", g_sound.ram, sizeof g_sound.ram)
+              && savestate__add(zp, level, "M2SCSP",   scsp, sizeof *scsp)
+              && savestate__add(zp, level, "SOUND",    &snd, sizeof snd)
+              && savestate__add(zp, level, "SOUNDHLE", &g_shle, sizeof g_shle);
             free(scsp);
         }
     }
 
     /* the run loop and the HLE layer */
     savestate_hle_t hle = savestate_hle_get();
-    ok = ok && savestate__add(&z, "EMU", emu, sizeof *emu);
-    ok = ok && savestate__add(&z, "HLE", &hle, sizeof hle);
+    ok = ok && savestate__add(zp, level, "EMU", emu, sizeof *emu);
+    ok = ok && savestate__add(zp, level, "HLE", &hle, sizeof hle);
 
     /* the profile's own */
     for (int i = 0; ok && i < g_savestate_extra_n; i++) {
         if (!savestate_extra_mine(i)) continue;
         char name[64];
         snprintf(name, sizeof name, "P.%s", g_savestate_extra[i].name);
-        ok = savestate__add(&z, name, g_savestate_extra[i].data, g_savestate_extra[i].size);
+        ok = savestate__add(zp, level, name, g_savestate_extra[i].data, g_savestate_extra[i].size);
     }
+    return ok;
+}
+
+/* Write the board to `path`. Call between slices, with the emu mutex held
+ * where there is one. NULL on success, else what went wrong. */
+static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu,
+                                         memory_bus_t *bus, const savestate_emu_t *emu) {
+    if (!path || !*path) return "no path";
+    if (!g_active_profile) return "no ROM is loaded";
+    sound_settle();
+
+    mz_zip_archive z;
+    memset(&z, 0, sizeof z);
+    if (!mz_zip_writer_init_heap(&z, 0, 64u << 20)) return "zip: cannot start an archive";
+    bool ok = savestate__entries(&z, MZ_BEST_SPEED, cpu, bus, emu);
 
     void *zbuf = NULL;
     size_t zlen = 0;
@@ -466,6 +477,48 @@ static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu
     return NULL;
 }
 
+/* The same archive into a caller's buffer (the libretro core's
+ * retro_serialize). Entries are STORED, not deflated: the frontend asks for a
+ * state far more often than a player saves one to disk (rewind, run-ahead),
+ * compresses the files it writes itself, and a stored archive's size depends
+ * only on the build and the profile, which retro_serialize_size has to give
+ * ahead of time. With `buf` NULL nothing is written and `*len` is the size. */
+typedef struct {
+    uint8_t *buf;
+    size_t   cap;
+    size_t   end;
+    bool     over;
+} savestate_mem_sink_t;
+
+static inline size_t savestate__mem_write(void *opaque, mz_uint64 ofs, const void *p, size_t n) {
+    savestate_mem_sink_t *m = (savestate_mem_sink_t *)opaque;
+    if (m->buf) {
+        if (ofs + n > m->cap) { m->over = true; return 0; }
+        memcpy(m->buf + ofs, p, n);
+    }
+    if (ofs + n > m->end) m->end = (size_t)(ofs + n);
+    return n;
+}
+
+static inline const char *savestate_save_mem(void *buf, size_t cap, size_t *len, const i960_cpu_t *cpu,
+                                             memory_bus_t *bus, const savestate_emu_t *emu) {
+    if (!g_active_profile) return "no ROM is loaded";
+    sound_settle();
+    savestate_mem_sink_t m = { (uint8_t *)buf, cap, 0, false };
+    mz_zip_archive z;
+    memset(&z, 0, sizeof z);
+    z.m_pWrite     = savestate__mem_write;
+    z.m_pIO_opaque = &m;
+    if (!mz_zip_writer_init(&z, 0)) return "zip: cannot start an archive";
+    bool ok = savestate__entries(&z, MZ_NO_COMPRESSION, cpu, bus, emu)
+           && mz_zip_writer_finalize_archive(&z);
+    mz_zip_writer_end(&z);
+    if (m.over) return "the state is larger than the buffer";
+    if (!ok) return "zip: could not write an entry";
+    if (len) *len = m.end;
+    return NULL;
+}
+
 /* ---- Load ------------------------------------------------------------------------- */
 
 /* One entry, which must be exactly `n` bytes, into `dst`. */
@@ -485,25 +538,17 @@ static inline bool savestate__get(mz_zip_archive *z, const char *name, void *dst
  * where there is one, over the same ROM set and profile the state was saved
  * from. Nothing is touched until every entry has been read and checked. On
  * success `emu` holds the run loop's latches for the caller to put back. */
-static inline const char *savestate_load(const char *path, i960_cpu_t *cpu,
-                                         memory_bus_t *bus, savestate_emu_t *emu) {
-    if (!path || !*path) return "no path";
-    if (!g_active_profile) return "no ROM is loaded";
-    sound_settle();
-
-    mz_zip_archive z;
-    memset(&z, 0, sizeof z);
-    if (!mz_zip_reader_init_file(&z, path, 0)) return "cannot open the state (not a zip?)";
-
+static inline const char *savestate__load_zip(mz_zip_archive *zp, const char *what, i960_cpu_t *cpu,
+                                              memory_bus_t *bus, savestate_emu_t *emu) {
     const char *err = NULL;
     char info[512];
     memset(info, 0, sizeof info);
     savestate_layout_t layout, want = savestate_layout();
     savestate_rom_t rom, have_rom;
     {
-        int i = mz_zip_reader_locate_file(&z, "INFO", NULL, 0);
+        int i = mz_zip_reader_locate_file(zp, "INFO", NULL, 0);
         size_t n = 0;
-        void *p = i >= 0 ? mz_zip_reader_extract_to_heap(&z, (mz_uint)i, &n, 0) : NULL;
+        void *p = i >= 0 ? mz_zip_reader_extract_to_heap(zp, (mz_uint)i, &n, 0) : NULL;
         if (!p) err = "no INFO entry: not an m2hle2 state";
         else { memcpy(info, p, n < sizeof info - 1 ? n : sizeof info - 1); mz_free(p); }
     }
@@ -512,10 +557,10 @@ static inline const char *savestate_load(const char *path, i960_cpu_t *cpu,
         snprintf(want_id, sizeof want_id, "\nprofile=%s\n", g_active_profile->id);
         if (!strstr(info, want_id)) err = "the state is from another profile";
     }
-    if (!err && !savestate__get(&z, "LAYOUT", &layout, sizeof layout)) err = "no LAYOUT entry";
+    if (!err && !savestate__get(zp, "LAYOUT", &layout, sizeof layout)) err = "no LAYOUT entry";
     if (!err && layout.version != SAVESTATE_VERSION) err = "the state is from another savestate version";
     if (!err && memcmp(&layout, &want, sizeof layout) != 0) err = "the state is from a build with another layout";
-    if (!err && !savestate__get(&z, "ROM", &rom, sizeof rom)) err = "no ROM entry";
+    if (!err && !savestate__get(zp, "ROM", &rom, sizeof rom)) err = "no ROM entry";
     if (!err) {
         have_rom = savestate_rom_id(bus);
         if (rom.program != have_rom.program || rom.program_size != have_rom.program_size)
@@ -563,33 +608,31 @@ static inline const char *savestate_load(const char *path, i960_cpu_t *cpu,
             if (savestate_extra_mine(i) && !(n_extra[i] = (uint8_t *)malloc(g_savestate_extra[i].size))) err = "out of memory";
     }
     if (!err) {
-        bool ok = savestate__get(&z, "I960",   n_cpu,   sizeof *n_cpu)
-               && savestate__get(&z, "SHARC",  n_sharc, sizeof *n_sharc)
-               && savestate__get(&z, "COP",    n_cop,   sizeof *n_cop)
-               && savestate__get(&z, "ZANZOU", &n_zz,   sizeof n_zz)
-               && savestate__get(&z, "IRQT",   &n_irqt, sizeof n_irqt)
-               && savestate__get(&z, "GEO",    &n_geo,  sizeof n_geo)
-               && savestate__get(&z, "GEOLIST",  n_snaps, sizeof g_geodl_snaps)
-               && savestate__get(&z, "GEOSTATE", n_glive, sizeof *n_glive)
-               && savestate__get(&z, "M68K",     &n_m68k, sizeof n_m68k)
-               && savestate__get(&z, "M2SNDRAM", n_sram,  sizeof g_sound.ram)
-               && savestate__get(&z, "M2SCSP",   n_scsp,  sizeof *n_scsp)
-               && savestate__get(&z, "SOUND",    &n_snd,  sizeof n_snd)
-               && savestate__get(&z, "SOUNDHLE", &n_shle, sizeof n_shle)
-               && savestate__get(&z, "EMU",      &n_emu,  sizeof n_emu)
-               && savestate__get(&z, "HLE",      &n_hle,  sizeof n_hle);
+        bool ok = savestate__get(zp, "I960",   n_cpu,   sizeof *n_cpu)
+               && savestate__get(zp, "SHARC",  n_sharc, sizeof *n_sharc)
+               && savestate__get(zp, "COP",    n_cop,   sizeof *n_cop)
+               && savestate__get(zp, "ZANZOU", &n_zz,   sizeof n_zz)
+               && savestate__get(zp, "IRQT",   &n_irqt, sizeof n_irqt)
+               && savestate__get(zp, "GEO",    &n_geo,  sizeof n_geo)
+               && savestate__get(zp, "GEOLIST",  n_snaps, sizeof g_geodl_snaps)
+               && savestate__get(zp, "GEOSTATE", n_glive, sizeof *n_glive)
+               && savestate__get(zp, "M68K",     &n_m68k, sizeof n_m68k)
+               && savestate__get(zp, "M2SNDRAM", n_sram,  sizeof g_sound.ram)
+               && savestate__get(zp, "M2SCSP",   n_scsp,  sizeof *n_scsp)
+               && savestate__get(zp, "SOUND",    &n_snd,  sizeof n_snd)
+               && savestate__get(zp, "SOUNDHLE", &n_shle, sizeof n_shle)
+               && savestate__get(zp, "EMU",      &n_emu,  sizeof n_emu)
+               && savestate__get(zp, "HLE",      &n_hle,  sizeof n_hle);
         for (size_t i = 0; ok && i < SAVESTATE_NBUFS; i++)
-            ok = savestate__get(&z, SAVESTATE_BUFS[i].name, n_bufs[i], SAVESTATE_BUFS[i].size);
+            ok = savestate__get(zp, SAVESTATE_BUFS[i].name, n_bufs[i], SAVESTATE_BUFS[i].size);
         for (int i = 0; ok && i < g_savestate_extra_n; i++) {
             if (!savestate_extra_mine(i)) continue;
             char name[64];
             snprintf(name, sizeof name, "P.%s", g_savestate_extra[i].name);
-            ok = savestate__get(&z, name, n_extra[i], g_savestate_extra[i].size);
+            ok = savestate__get(zp, name, n_extra[i], g_savestate_extra[i].size);
         }
         if (!ok) err = "an entry is missing or the wrong size (see the log)";
     }
-    mz_zip_reader_end(&z);
-
     if (!err) {
         /* ---- the commit: nothing below can fail ---- */
         *cpu = *n_cpu;
@@ -654,13 +697,41 @@ static inline const char *savestate_load(const char *path, i960_cpu_t *cpu,
         for (int i = 0; i < g_savestate_extra_n; i++)
             if (savestate_extra_mine(i)) memcpy(g_savestate_extra[i].data, n_extra[i], g_savestate_extra[i].size);
         *emu = n_emu;
-        LOG_INFO("savestate: loaded %s (frame %llu)", path, (unsigned long long)n_emu.frame_clock_frame);
+        LOG_INFO("savestate: loaded %s (frame %llu)", what, (unsigned long long)n_emu.frame_clock_frame);
     }
 
     free(n_cpu); free(n_sharc); free(n_cop); free(n_snaps); free(n_glive); free(n_sram); free(n_scsp);
     for (size_t i = 0; i < SAVESTATE_NBUFS; i++) free(n_bufs[i]);
     for (int i = 0; i < SAVESTATE_EXTRA_MAX; i++) free(n_extra[i]);
-    if (err) LOG_WARN("savestate: %s: %s", path, err);
+    if (err) LOG_WARN("savestate: %s: %s", what, err);
+    return err;
+}
+
+static inline const char *savestate_load(const char *path, i960_cpu_t *cpu,
+                                         memory_bus_t *bus, savestate_emu_t *emu) {
+    if (!path || !*path) return "no path";
+    if (!g_active_profile) return "no ROM is loaded";
+    sound_settle();
+    mz_zip_archive z;
+    memset(&z, 0, sizeof z);
+    if (!mz_zip_reader_init_file(&z, path, 0)) return "cannot open the state (not a zip?)";
+    const char *err = savestate__load_zip(&z, path, cpu, bus, emu);
+    mz_zip_reader_end(&z);
+    return err;
+}
+
+/* A state in memory (retro_unserialize). Bytes past the archive's end are
+ * allowed: the frontend hands back the whole buffer it sized, padding too. */
+static inline const char *savestate_load_mem(const void *data, size_t size, i960_cpu_t *cpu,
+                                             memory_bus_t *bus, savestate_emu_t *emu) {
+    if (!data || !size) return "no state";
+    if (!g_active_profile) return "no ROM is loaded";
+    sound_settle();
+    mz_zip_archive z;
+    memset(&z, 0, sizeof z);
+    if (!mz_zip_reader_init_mem(&z, data, size, 0)) return "not a state (not a zip?)";
+    const char *err = savestate__load_zip(&z, "(memory)", cpu, bus, emu);
+    mz_zip_reader_end(&z);
     return err;
 }
 

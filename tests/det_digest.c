@@ -112,10 +112,47 @@ static int script_n;
 /* --save-at F:FILE writes a savestate at the end of frame F; --load FILE starts
  * from one. A loaded run prints what the saving run would have printed after F,
  * line for line, and its sample hash (the last lines) covers the samples after
- * F in both. */
+ * F in both. With --mem the state goes through memory as the libretro core's
+ * retro_serialize / retro_unserialize take it (stored, padded to its size),
+ * and the file holds that buffer. */
 static const char *load_path;
 static uint32_t    save_frame;
 static char        save_path[1024];
+static bool        state_mem;
+
+static const char *mem_state_save(emu_thread_ctx_t *emu, const char *path) {
+    size_t size = 0;
+    const char *err = emu_state_save_mem(emu, NULL, 0, &size);
+    if (err) return err;
+    size += 4096;   /* as main_libretro.c's LR_STATE_SLACK */
+    uint8_t *buf = (uint8_t *)malloc(size);
+    if (!buf) return "out of memory";
+    size_t len = 0;
+    err = emu_state_save_mem(emu, buf, size, &len);
+    if (!err) {
+        memset(buf + len, 0, size - len);
+        FILE *f = fopen(path, "wb");
+        if (!f || fwrite(buf, 1, size, f) != size) err = "cannot write the file";
+        if (f) fclose(f);
+    }
+    free(buf);
+    return err;
+}
+
+static const char *mem_state_load(emu_thread_ctx_t *emu, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return "cannot open the file";
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = (uint8_t *)malloc(size > 0 ? (size_t)size : 1);
+    const char *err = NULL;
+    if (!buf || size <= 0 || fread(buf, 1, (size_t)size, f) != (size_t)size) err = "cannot read the file";
+    fclose(f);
+    if (!err) err = emu_state_load_mem(emu, buf, (size_t)size);
+    free(buf);
+    return err;
+}
 
 static uint32_t keys_mask(const char *p, const char *end) {
     const game_input_map_t *in = &g_active_profile->input;
@@ -258,7 +295,7 @@ static void parse_script(const char *s) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
@@ -291,6 +328,7 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--mem")) state_mem = true;
         else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
             if (sscanf(argv[++i], "%u:%1023s", &save_frame, save_path) != 2) {
                 fprintf(stderr, "--save-at F:FILE\n");
@@ -360,7 +398,7 @@ int main(int argc, char **argv) {
     if (load_path) {
         /* A board from a state: what it prints from here on has to be what
          * the run that saved it printed. The sample hash starts here. */
-        const char *err = emu_state_load_now(&emu, load_path);
+        const char *err = state_mem ? mem_state_load(&emu, load_path) : emu_state_load_now(&emu, load_path);
         if (err) { fprintf(stderr, "--load %s: %s\n", load_path, err); return 2; }
         snd_out_hash = FNV0; snd_out_n = 0;
         fprintf(stderr, "loaded %s at frame %u\n", load_path, (unsigned)g_emu_frames);
@@ -397,7 +435,7 @@ int main(int argc, char **argv) {
         }
         if (r == EMU_SLICE_FRAME && save_frame && g_emu_frames == save_frame) {
             /* ... and the samples from here on are what the loaded run's are. */
-            const char *err = emu_state_save_now(&emu, save_path);
+            const char *err = state_mem ? mem_state_save(&emu, save_path) : emu_state_save_now(&emu, save_path);
             if (err) { fprintf(stderr, "--save-at %s: %s\n", save_path, err); return 2; }
             snd_out_hash = FNV0; snd_out_n = 0;
             fprintf(stderr, "saved %s at frame %u\n", save_path, (unsigned)g_emu_frames);
