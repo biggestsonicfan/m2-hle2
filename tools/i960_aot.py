@@ -384,6 +384,10 @@ def main():
                 elif kind == 'slow':
                     b_(f'    AOT_SLOW({k});')
                     b_(f'    if (cpu->sfr.ip != 0x{x + n:X}u) {{ s->rn += {nx_left}; s->rc += {k2}; ip_ = cpu->sfr.ip; {redispatch} }}')
+                elif kind == 'call':
+                    b_(f'    AOT_CALL({k});')
+                elif w1 >> 24 == 0x0A:
+                    b_(f'    AOT_RET({k});')
                 else:
                     b_(f'    AOT_X({k});')
                 if kind == 'call':

@@ -62,6 +62,20 @@ static __attribute__((noinline)) int aot_x(i960_cpu_t *cpu, memory_bus_t *bus, a
     s->rn += (d->kn & 1023u) + 1u; s->rc += (int32_t)(d->kn >> 10); s->halt = 1; s->ip = d->ip;
     return 1;
 }
+/* aot_x for a call and a ret, the ops it is mostly given: the opcode a
+ * constant, so the interpreter's switch folds to the one case. */
+static __attribute__((noinline)) int aot_call(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
+                                              const aot_op_t *d) {
+    if (M2_LIKELY(!i960_exec_word(cpu, bus, d->ip, 0x09000000u | (d->w1 & 0x00FFFFFFu), 0))) return 0;
+    s->rn += (d->kn & 1023u) + 1u; s->rc += (int32_t)(d->kn >> 10); s->halt = 1; s->ip = d->ip;
+    return 1;
+}
+static __attribute__((noinline)) int aot_ret(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
+                                             const aot_op_t *d) {
+    if (M2_LIKELY(!i960_exec_word(cpu, bus, d->ip, 0x0A000000u, 0))) return 0;
+    s->rn += (d->kn & 1023u) + 1u; s->rc += (int32_t)(d->kn >> 10); s->halt = 1; s->ip = d->ip;
+    return 1;
+}
 /* The same with the interpreter's state brought up to date first (IB_SYNC):
  * an access off plain memory, or an instruction that talks to the board.
  * 1: stop after it, as the run loop has to see what it did. */
@@ -85,12 +99,33 @@ static __attribute__((noinline)) int aot_slow(i960_cpu_t *cpu, memory_bus_t *bus
  * FIFO): aot_slow without the interpreter's decode. The words say which and
  * to which register; the address is the compiled code's. What the bus sees
  * is what i960_exec_word's MEM case does, in its order. */
-static __attribute__((noinline)) int aot_io(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
-                                            const aot_op_t *d, uint32_t ea) {
+static __attribute__((noinline)) int aot_io_x(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
+                                              const aot_op_t *d, uint32_t ea, int cop_written) {
     uint32_t k2 = d->kn >> 10, k1 = k2 + i960_cycle_cost(d->w1), w1 = d->w1, ip = d->ip;
     uint32_t *r = (uint32_t *)&cpu->globals + ((((w1 >> 19) & 0x1Fu) + 16u) & 31u);
     unsigned mode = (w1 >> 10) & 0xFu;
     cpu->sfr.ip = ip; bus->cpu_ip = ip;
+    if (cop_written) goto cop_done;   /* aot_io_st wrote it, and attn moved */
+    /* The COP's FIFO, a word at a time: most of these calls (~4900 a fight
+     * frame). The HLE answers a command when its last word lands and reads
+     * neither the cycles nor the timers, and only its unknown-command trap
+     * moves attn, so the cycles are left to the next sync and the run goes
+     * on. What the bus would do besides is the tallies below. */
+    if (ea - COPROGRAM_BASE < COPROGRAM_SIZE && (w1 >> 24 == 0x92 || w1 >> 24 == 0x90)
+            && !wp_armed() && !dl_active()) {
+        const mem_region_t *g = mem_find_region(bus, ea);
+        if (g && w1 >> 24 == 0x92 && g->write_cb == coprogram_write_cb) {
+            MEM_TALLY(bus->writes, 1);
+            g_mem_last_write_ip = ip; g_last_store_ip = ip;
+            cop_write(*r);
+            goto cop_done;
+        }
+        if (g && w1 >> 24 == 0x90 && g->read_cb == coprogram_read_cb) {
+            MEM_TALLY(bus->reads, 1);
+            *r = cop_read();
+            goto cop_done;
+        }
+    }
     cpu->cycles = s->base + (uint32_t)(s->c0 - s->rc) - k1;
     g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
@@ -107,6 +142,17 @@ static __attribute__((noinline)) int aot_io(i960_cpu_t *cpu, memory_bus_t *bus, 
     case 0xC2: mem_write8(bus, ea, (uint8_t)*r); break;
     default:   mem_write16(bus, ea, (uint16_t)*r); break;   /* 0xCA */
     }
+    if (0) {
+cop_done:
+        if (M2_LIKELY(g_emu_attn == s->attn)) {
+            cpu->sfr.ip = ip + ((mode == 5u || mode >= 0xCu) ? 8u : 4u);
+            return 0;
+        }
+        cpu->cycles = s->base + (uint32_t)(s->c0 - s->rc) - k1;
+        g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
+        s_timer_cycles_seen = cpu->cycles;
+        cpu->cycles += k1 - k2;
+    }
     /* mem_ea's length: the MEMB modes with a displacement are two words */
     cpu->sfr.ip = ip + ((mode == 5u || mode >= 0xCu) ? 8u : 4u);
     if (M2_UNLIKELY(g_emu_attn != s->attn || (g_irqt.intreq & g_irqt.intena & 0x03FFu)
@@ -116,8 +162,36 @@ static __attribute__((noinline)) int aot_io(i960_cpu_t *cpu, memory_bus_t *bus, 
     }
     return 0;
 }
-#define AOT_IO(I)   do { if (aot_io(cpu, bus, s, &K[I], ea_)) return AOT_STOP; } while (0)
+static inline int aot_io(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s, const aot_op_t *d, uint32_t ea) {
+    return aot_io_x(cpu, bus, s, d, ea, 0);
+}
+/* A `st` off plain memory: aot_io's COP FIFO path without the rest of it (the
+ * cycle cost, the decode, the switch), for six in ten of its calls. */
+static __attribute__((noinline)) int aot_io_st(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
+                                               const aot_op_t *d, uint32_t ea, uint32_t v) {
+    if (ea - COPROGRAM_BASE < COPROGRAM_SIZE && !wp_armed() && !dl_active()) {
+        const mem_region_t *g = mem_find_region(bus, ea);
+        if (g && g->write_cb == coprogram_write_cb) {
+            uint32_t ip = d->ip;
+            unsigned mode = (d->w1 >> 10) & 0xFu;
+            cpu->sfr.ip = ip; bus->cpu_ip = ip;
+            MEM_TALLY(bus->writes, 1);
+            g_mem_last_write_ip = ip; g_last_store_ip = ip;
+            cop_write(v);
+            if (M2_UNLIKELY(g_emu_attn != s->attn)) return aot_io_x(cpu, bus, s, d, ea, 1);
+            cpu->sfr.ip = ip + ((mode == 5u || mode >= 0xCu) ? 8u : 4u);
+            return 0;
+        }
+    }
+    return aot_io_x(cpu, bus, s, d, ea, 0);
+}
+/* K[I] is a constant: the test folds, and only a `st` site calls aot_io_st. */
+#define AOT_IO(I)   do { if ((K[I].w1 >> 24) == 0x92u                                                   \
+                             ? aot_io_st(cpu, bus, s, &K[I], ea_, AR((((K[I].w1 >> 19) & 0x1Fu) + 16u) & 31u)) \
+                             : aot_io(cpu, bus, s, &K[I], ea_)) return AOT_STOP; } while (0)
 #define AOT_X(I)    do { if (M2_UNLIKELY(aot_x(cpu, bus, s, &K[I]))) return AOT_STOP; } while (0)
+#define AOT_CALL(I) do { if (M2_UNLIKELY(aot_call(cpu, bus, s, &K[I]))) return AOT_STOP; } while (0)
+#define AOT_RET(I)  do { if (M2_UNLIKELY(aot_ret(cpu, bus, s, &K[I]))) return AOT_STOP; } while (0)
 #define AOT_SLOW(I) do { if (aot_slow(cpu, bus, s, &K[I])) return AOT_STOP; } while (0)
 
 /* Register i as reg_read indexes it (globals first), and the condition code. */
