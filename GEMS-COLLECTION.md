@@ -8,7 +8,8 @@ Dreamcast port (DREAMCAST-PORT.md, Pinboard #340).
 Measured on the 123 `.CMP` files the owner supplied
 (`ai/Sonic Gems Collection/CMP`, dated December 2004), and on the GameCube
 executable that runs them (`stf.elf`, Pinboard #451; "The GameCube
-executable" below). The PS2 build has not been read.
+executable" below), and on the PS2 one (`SLPM-66074`, Pinboard #488; "The
+PS2 executable" below).
 
 ## The container format: CRI CMP
 
@@ -311,7 +312,187 @@ does.
    precision, so it fits the SH-4's FPU, only slower than the shortcuts).
 
 Not yet read: the `TEX_STG` loader (the format string is at `0x8013F5D4`),
-how the GEO list becomes GX calls, and the PS2 build.
+and how the GEO list becomes GX calls. The PS2 answers the first (below).
+
+## The PS2 executable
+
+`SLPM-66074` (the Japanese Gems Collection), loaded in the owner's Windows
+Ghidra with Emotion Engine Reloaded (Pinboard #488, same address as the
+GameCube one). No symbols: 3,155 functions in `0x100000`–`0x29067F`, only the
+SDK's syscalls named. Ghidra has no function at many of the addresses below
+(the COP handlers, the load callbacks); they were read with capstone (MIPS64,
+little-endian) on a dump of the section instead.
+
+### The same port, a different back end
+
+The interpreter, the traps and the COP are the GameCube's, compiled for the
+R5900. What changes is everything under them: the arithmetic, the drawing and
+what is loaded from disc.
+
+- **Handler table** at `0x2396B0`: 4,096 entries, 300 distinct, as on the
+  GameCube.
+- **Trap table** at `0x2882B0`: the same 12-byte
+  `{i960 address, flags, trap × 4}` records. 639 entries and 157 trap
+  numbers against the GameCube's 640 and 158; the one missing is trap 0x48
+  at `0x3B654` (`enemy_control`). The 47 translated functions are the same
+  traps (0x65–0x93) at the same i960 addresses.
+- **COP table** at `0x23F0A0`, the same `{handler, args, reply, name}` layout
+  with the `Fn_*` names at `0x23E700` on. The argument counts match, and the
+  same 31 handlers are empty (`jr ra`). The handler state sits off `$gp`:
+  argument pointer at `-0x7E2C`, reply pointer `-0x7E38`, reply count
+  `-0x7E3C`, current matrix `-0x7E54`.
+- **The i960 and the EE are both little-endian,** so main RAM needs none of
+  the GameCube's byte swapping. (Not checked in the interpreter itself.)
+
+### The COP on the R5900
+
+All single precision, using what the EE has:
+
+| Operation | GameCube | PS2 |
+|---|---|---|
+| √ (`Fn_sqr`, `0x15E140`) | `frsqrte`, three Newton steps in double | `sqrt.s` (`0x165300`), with a zero check |
+| 1/√ (`Fn_sqr_r`, `0x15E180`) | | one `rsqrt.s` (`0x165340`), no Newton step |
+| sin / cos (`0x165400` / `0x1653C0`) | | a 65,536-float table at `0x242360` (256 KB): `T[a & 0xFFFF]`, cos `T[(a + 0x4000) & 0xFFFF]` |
+| atan2 (`Fn_atan`, `0x165500` → `0x164D40`) | the rational P(x²)/Q(x²) | the same constants, in single, on the R5900's accumulator (`adda.s`, `madd.s`, `msub.s`) |
+| asin (`Fn_asin`, `0x165540`) | libm's double `asin` | ±1 special-cased, then libm (`0x1161C0`, single) |
+| tan (`Fn_tan`, `0x165680`) | | `0x4000` / `0xC000` special-cased, then libm (`0x116140`) |
+| angle word | wrap, `fctiwz(65536 · a / 2π)` | the same wrap, `cvt.w.s`, with a fix-up for results ≥ 2³¹ |
+| 4×4 multiply (`Fn_mul_matrix`, `0x15D480` → `0x164A00`) | FPU | VU0 macro mode: the current matrix lives in `vf4`–`vf7`, each row is one `vmulax` / `vmadday` / `vmaddz`, 12 VU0 instructions in all (`Fn_mul_matrix_rev` → `0x164980`) |
+
+The sine table is not the arcade's. The COP ROM's (`mpr-19015/19016`,
+interleaved; `sharc_sincos` reads sine at word `0x10000` + angle) matches it in
+1,773 of 65,536 entries. The PS2 table is within 6.5e-7 of the true sine but
+only 16,141 entries are its exact float32. And the R5900's FPU is not IEEE 754
+(no infinities or denormals, truncating rounding), so even the formulas the two
+consoles share give other bits. A fight on the PS2 drifts from the arcade and
+from the GameCube.
+
+Across the game code there are 526 VU0 macro instructions, 127 `lqc2`/`sqc2`,
+331 MMI and 5,368 FPU instructions. The densest functions are the COP's matrix
+code (`0x15C980`, `0x15E340` around `Fn_calc_unit_2_fast`, `0x15EDC0`,
+`0x164580`) and `glo_to_loc` (`0x1657C0`).
+
+### Drawing: a geometrizer on VU1
+
+The PS2 keeps the arcade's display list. `M2EPOL`, a native emulation of the
+Model 2 geometrizer, walks the GEO list the i960 builds (`0x18C780`, command
+`(w >> 23) & 0x1F`, list capped at 0x8000 words, bit 31 marks a jump):
+
+| Command | What the PS2 does |
+|---|---|
+| 1 / 0x11 object, 2 / 0x12 direct | draw (`0x18D180`) |
+| 3 window | up to 8 |
+| 4 `WRT_TEXTURE` | into a copy of texture-parameter RAM (16-bit, up to 0x10000 entries, address `0x80xxxx`) |
+| 5 `WRT_OBJECT` | into a copy of polygon RAM (up to 0x8000 words) |
+| 6 material, 10 light data | uploaded to VU1 memory (light data at 0x20) |
+| 0xB matrix, 0xC translate | uploaded to VU1 `0x3C4` (four quadwords, w = 1.0) and `0x3C7` |
+| 7 mode, 8 focal, 9 light, 0x16 LOD | state |
+| 0xE, 0x14 | skipped |
+| 0xF end | kicks the double-buffered DMA chain (`0x18D4C0`) |
+
+Uploads are a DMA tag plus a VIF `UNPACK V4-32` (`0x1FC7C0`); objects are
+DMA `call` tags into prebuilt packets (`0x1FCA00`). The VU1 microcode belongs
+to Sega's `GFX2 Ver.0.958R PS2MCW` library (27 May 2005): 1,664 instructions
+in MPG blocks at `0x22DD84`–`0x230DB4` (about 13 of VU1's 16 KB), plus a
+97-instruction program at `0x22D50C`, loaded through the chain at `0x22DCD0`.
+
+**Objects are converted once, at scene load, not per frame:**
+
+- The pack loader (`0x1922C0`) walks the scene's `obj_*` pack and converts
+  each object to a VU1 packet (`0x192400`), storing its address in a table at
+  `0x1A42680` indexed by object number (below 0x13F0). The converter carries
+  hand-written fixes for single objects by number (0x1C7, 0x1CC, 0x1CB, 0x244,
+  0x642, and 0xA65, which gets bits `0x7C0000` forced across 200 polygons).
+- The native `set_obj` (`0x192A80`, `0x192B80`, `0x192C80`) looks the object
+  up in that table and writes the GEO command with the packet's address in
+  place of the ROM address, so command 1 is a DMA call. Objects 0x22B, 0xA01,
+  0xA00, 0x9FF, 0x3B4 and 0x4A get flag 4.
+- Only objects in the copy of polygon RAM (bit 31) are converted per frame,
+  into a buffer per slot (`0x18DEC0`).
+- The next scene's pack is streamed over several frames (`0x1939C0`): it
+  clears the table entries the old pack set, then queues `tex_stg%02d.cmp` and
+  the pack with their callbacks.
+
+### Loading: no 16 MB ROMs
+
+The executable names `rom_code1.cmp`, `rom_code2.cmp`, `rom_ep.cmp`,
+`fixpage.cmp`, `tex_rob.cmp`, `tex_stg%02d.cmp` and 73 `obj_*` packs. It never
+names `ROM_DATA`, `ROM_POL`, `ROM_TEX` or `TEXPAGE`. The PS2 runs without
+them:
+
+- **The data ROM is `FIXPAGE`, mapped in 4 KB pages.** A table of 4,096 page
+  pointers at `0x1A3CE10` covers `0x2000000`–`0x2FFFFFF`. At load
+  (`0x199340`) the callback walks a range list at `0x28ABD0` and points each
+  page at its place in `FIXPAGE` (loaded at `0x1A78680`):
+
+  | i960 range | Size |
+  |---|---|
+  | `0x20C0000`–`0x20D7FFF` | 96 KB |
+  | `0x20E0000`–`0x20F3FFF` | 80 KB |
+  | `0x2100000`–`0x210EFFF` | 60 KB |
+  | `0x2120000`–`0x2120FFF` | 4 KB |
+  | `0x2300000`–`0x2359FFF` | 360 KB |
+  | `0x2800000`–`0x29F3FFF` | 2,000 KB |
+  | `0x2B00000`–`0x2B21FFF` | 136 KB |
+  | `0x2C00000`–`0x2D6FFFF` | 1,472 KB |
+
+  4,308,992 bytes, exactly `FIXPAGE`'s size. Decoded, `FIXPAGE` is those
+  ranges of `ROM_DATA` concatenated, byte for byte, except its last 3,710
+  bytes (`0x2D6F182`–`0x2D6FFFF`): floats in both, different ones, not yet
+  identified. So this is STF's whole data-ROM working set, 26% of the ROM,
+  fixed for the game and not per scene.
+- **Reads go through one lookup** (`0x187A00`, from six readers at
+  `0x1593C0`–`0x159640`; `0x187980` from `0x1990CC`). It first maps
+  `0x6400000`–`0x64FFFFF` and `0x6C00000`–`0x6CFFFFF` both onto the EPROM
+  (`ROM_EP`, at `0x1E94680`, `0x199400`), then the page table; an unmapped page
+  gives NULL.
+- **Textures are two prebuilt sheets.** `tex_stg%02d` and `tex_rob`
+  (192 KB each) are copied row by row (`0x1564C0`) into two 256 KB sheets at
+  `0x14D5CC0`, sheet 0 for the stage and 1 for the fighters, 0x180 bytes into
+  each 0x200-byte row for 0x200 rows. A flag at `0x14CBC8C` is then set,
+  presumably to upload them. There is no conversion in the copy, so the files
+  are already in the sheet's format. This settles "Models, textures, and
+  memory" above: they are generated texture sheets, and with no `ROM_TEX`
+  loaded the i960's texture decompressor has nothing to unpack. The texel format (depth, palette) is not yet read.
+
+Where it sits in the EE's 32 MB: the sheets at `0x14D5CC0` (512 KB), the
+page table at `0x1A3CE10` (16 KB), the object table at `0x1A42680`, the
+`tex_rob` buffer at `0x1A47680`, `FIXPAGE` at `0x1A78680`–`0x1E9467F`
+(4.1 MB) and `ROM_EP` right after it.
+
+### Everything else
+
+- **Sound**: IOP modules from `/STF/` (`sio2man`, `mcman`, `mcserv`,
+  `xpadman`, `libsd`, `modhsyn`, `modsesq` and Sega's own `soundstf.irx`),
+  banks `bgm_adx.sp2`, `voice_adx.sp2`, `se_1`–`se_3.sp2`,
+  `se_ps2_common.sp2`, music `bgm00`–`bgm18.adx`. CRI's ADX, ADXF, SJ and ROFS
+  libraries, as on the GameCube.
+- **Platform**: `CROS/PS2 Ver.0.726` (27 May 2005), `STF/XMODULES.MRG`, HDD
+  (pfs) support, and `cdrom0:\MC2.ELF` to return to the collection's menu.
+- **Its own options**: HYPERMODE, BARRIER, ENERGY MAX and others.
+
+### What it adds for the Dreamcast port
+
+1. **The data-ROM working set is known: 4.1 MB in eight ranges.** Sega
+   measured it and shipped only that. The port's pager can ship those pages
+   and nothing else of `ROM_DATA`, or keep the hottest ranges resident.
+   Before relying on it, check what the 3,710 changed bytes are.
+2. **Convert models at scene load into native packets, indexed by object
+   number,** as the PS2 does for VU1: on the Dreamcast, PVR vertex lists.
+   `set_obj` then costs a table lookup, and only polygon-RAM objects are
+   converted each frame. The PS2's converter also shows which objects need
+   fixes by hand.
+3. **Keep the GEO list and parse it natively** rather than trapping every
+   draw: the PS2 shows a geometrizer front end is cheap enough on a slower
+   CPU than the Gekko.
+4. **Textures as prebuilt sheets per stage**, as the GameCube files
+   suggested; the PS2 confirms it and that nothing runs the ROM decompressor.
+5. **The cheap COP arithmetic is what the SH-4 has too**: one `fsrra` like
+   `rsqrt.s`, `fsca` in place of the 256 KB sine table, `ftrv` like VU0's
+   multiply. The netplay caveat above applies the same way.
+
+Not yet read on the PS2: the interpreter's loop and bus (burst size, timers),
+the `TEX_STG` texel format and its GS upload, `soundstf.irx`, and the threads.
 
 ## Tools in the container
 
@@ -333,4 +514,5 @@ under Dolphin:
   `gdb-multiarch` with `set architecture powerpc:750`, `set endian big`,
   `target remote :<port>`. `dolphin-tool extract` pulls `main.dol` out of an
   ISO/RVZ.
-- **PS2** is static only (Ghidra). No PCSX2: it would need a PS2 BIOS dump.
+- **PS2** is static only (Ghidra, plus capstone for the code Ghidra has no
+  function for). No PCSX2: it would need a PS2 BIOS dump.
