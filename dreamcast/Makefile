@@ -46,6 +46,12 @@ HOST_MATH ?= $(if $(filter 1,$(LINK)),0,1)
 # the default draws the board centred in a 640x480 one (dc_pvr.h). Flycast
 # stretches a frame to fill its window, so check it on a Dreamcast.
 FRAME512 ?= 0
+# VIEW=x,y,w,h: show only that rectangle of the board's 496x384, scaled to fill
+# the frame (dc_pvr.h). m2-sonic's Mega Drive picture: VIEW=88,80,320,224 (2x).
+VIEW ?=
+comma := ,
+VIEW_N := $(subst $(comma), ,$(VIEW))
+VIEW_CFLAGS := $(if $(VIEW),-DDC_VIEW_X=$(word 1,$(VIEW_N)) -DDC_VIEW_Y=$(word 2,$(VIEW_N)) -DDC_VIEW_W=$(word 3,$(VIEW_N)) -DDC_VIEW_H=$(word 4,$(VIEW_N)))
 # OPTAB=1: the interpreter dispatches through a handler table (I960_OPTABLE).
 # Bit-exact, but with Gems on it saved 38 ms of 5874 over the bench's 400
 # frames and cost 72 KB of text, 64 KB of heap: off.
@@ -70,7 +76,7 @@ CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address -in
           -DM2HLE_VERSION='"dc"' -DM2HLE_DEV_TOOLS=0 \
           -DGEO_CAPTURE_SIZE=1 -DLOG_MAX_LINES=64 -DNDEBUG -DM2HLE_NO_ZIP \
           -DGEO3D_MAX_LINES=16 -DGEO3D_MAX_TRIS=4096 -DGEO3D_TRI_BUF=1 -DGEO3D_DC_SINK -DGEO3D_MESH_CACHE_SLOTS=256u \
-          -DGEO3D_MESH_ARENA=0x100000u -DMEM_COUNT=0 -DMEM_PAGE_SHIFT=14 -DMEM_PAGES=0x4C00u -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t -DI960_BLOCKS=1 -DIB_ENTRIES=2048u -DIB_POOL=$(IB_POOL) -DI960_JIT=$(JIT) -DIB_JIT_SELFTEST=$(JIT_TEST) -DIB_JIT_ON=$(JIT_ON) -DDC_HASH_FRAME=$(HASH_FRAME) -DDC_LINK=$(LINK) -DDC_LINK_GEMS=$(LINK_GEMS) -DI960_OPTABLE=$(OPTAB) -DDC_HOST_MATH=$(HOST_MATH) -DDC_FRAME512=$(FRAME512) -DDC_FPS_CAP=$(FPS_CAP) -DDC_HUD_MIN=$(if $(filter min none,$(HUD)),1,0) -DDC_HUD_NONE=$(if $(filter none,$(HUD)),1,0) $(LINK_CFLAGS) $(EXTRA) \
+          -DGEO3D_MESH_ARENA=0x100000u -DMEM_COUNT=0 -DMEM_PAGE_SHIFT=14 -DMEM_PAGES=0x4C00u -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t -DI960_BLOCKS=1 -DIB_ENTRIES=2048u -DIB_POOL=$(IB_POOL) -DI960_JIT=$(JIT) -DIB_JIT_SELFTEST=$(JIT_TEST) -DIB_JIT_ON=$(JIT_ON) -DDC_HASH_FRAME=$(HASH_FRAME) -DDC_LINK=$(LINK) -DDC_LINK_GEMS=$(LINK_GEMS) -DI960_OPTABLE=$(OPTAB) -DDC_HOST_MATH=$(HOST_MATH) -DDC_FRAME512=$(FRAME512) $(VIEW_CFLAGS) -DDC_FPS_CAP=$(FPS_CAP) -DDC_HUD_MIN=$(if $(filter min none,$(HUD)),1,0) -DDC_HUD_NONE=$(if $(filter none,$(HUD)),1,0) $(LINK_CFLAGS) $(EXTRA) \
           -DSOUND_RAM_SIZE=0x1000u -DSOUND_OUT_FRAMES=1024u -DM68K_ROM_SIZE=0x10000u -DGEO_PUB_COPIES=1 -DM2_NO_NETPLAY \
           -I$(REPO)/src -I$(REPO)/src/board -I$(REPO)/src/core -I$(REPO)/src/ui \
           -I$(REPO)/src/profiles -I$(REPO)/src/net -I. \

@@ -33,13 +33,14 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # out. OPTAB=1 dispatches the interpreter through a handler table (off: it
 # saves under 1% here and costs 136 KB).
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
-# (Flycast stretches it; DREAMCAST-PORT.md #471).
+# (Flycast stretches it; DREAMCAST-PORT.md #471). VIEW=x,y,w,h shows only that
+# rectangle of the board's 496x384, scaled to fill the frame (#479).
 # HUD=min drops the stats rows: only the board's frames a second, small, top
 # right (Pinboard #475's disc: HUD=min FRAME512=1). Under Flycast a FRAME512
 # picture is enlarged and that corner falls off the screen; Redream shows it.
-# HUD=none draws nothing over the game at all, not even that: with FRAME512=0
-# the board's 496x384 sits 1:1 at (72,48) of the frame, a picture to crop and
-# hold against MAME's pixel for pixel (Pinboard #478).
+# HUD=none draws nothing over the game at all, not even that, and (with no
+# VIEW, FRAME512=0) puts the whole board 1:1 at (72,48) of the frame, a
+# picture to crop and hold against MAME's pixel for pixel (Pinboard #478).
 # FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
 # whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
 
@@ -219,6 +220,9 @@ sh dreamcast/mkdisc.sh /tmp/dcpac /tmp/pac /tmp/dcpac/disc
 
 # m2-sonic, panel off: roms/sonic/game.bin (needs your cartridge, see its README)
 cmake -B /tmp/bson -S <m2-sonic> -DM2_SDK=<m2-sdk> -DSONIC_DEFS=SONIC_NO_PANEL && cmake --build /tmp/bson
+# the disc: only the Mega Drive's 320x224, doubled to 640x448 (VIEW, #479)
+make -C dreamcast OUT=/tmp/dcson HUD=min VIEW=88,80,320,224 AOT_MAP=sonic.aotmap AOT_COVER=0.95 AOT=/tmp/son/rom_code1.bin
+sh dreamcast/mkdisc.sh /tmp/dcson /tmp/son /tmp/dcson/disc
 ```
 
 m2-sonic keeps the Mega Drive cartridge in the two data EPROMs, so its disc's
@@ -251,6 +255,7 @@ the disc's own counter (the Dreamcast's timer):
 |---|---|
 | `pacman_geo`, AOT 0.95 | 28-31 |
 | m2-sonic, AOT 0.95 | 8-11 (the game drops Mega Drive frames to keep time) |
+| m2-sonic, `VIEW=88,80,320,224`, #481 | 21-25 (Green Hill, `HUD=min`) |
 
 Count by the Dreamcast's clock, not the host's. Under RetroArch on Xvfb
 the guest ran about 2.5 times faster than the host's clock: m2-sonic's frame count

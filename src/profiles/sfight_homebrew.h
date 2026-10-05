@@ -11,8 +11,9 @@
  *
  * So this profile runs any program on the set with none of them: no hooks,
  * interrupts through the program's own interrupt table (irq_vectors), and no
- * frame hook (board_vblank: the run loop marks its frames at the vblank). It is not picked by the set's
- * name; profile_for_program picks it when the program's interrupt table does
+ * frame hook (board_vblank: the run loop marks its frames at the vblank). Its
+ * idle loops are found in the program at install (m2_spin_find). It is not
+ * picked by the set's name; profile_for_program picks it when the program's interrupt table does
  * not name the handlers STF's profile does. `--profile sfight_homebrew` picks
  * it outright.
  */
@@ -22,6 +23,15 @@
 #include "game_profile.h"
 #include "sfight.h"
 
+static const game_profile_t sfight_homebrew_profile;
+
+/* STF's boot, then the program's own idle loops (m2_spin_find): the profile
+ * names no addresses, so the vblank waits are found in the program. */
+static inline void sfight_homebrew_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    sfight_install(rs, cpu, bus);
+    if (rs->loaded) m2_spin_find(bus, (uint32_t)rs->maincpu_size, &sfight_homebrew_profile);
+}
+
 static const game_profile_t sfight_homebrew_profile = {
     .id               = "sfight_homebrew",
     .display_name     = "Homebrew on Sonic the Fighters' board",
@@ -29,7 +39,7 @@ static const game_profile_t sfight_homebrew_profile = {
     .parent_zip_name  = "schamp.zip",
     .board            = BOARD_MODEL2B_CRX,
     .load_fn          = sfight_load,
-    .install_fn       = sfight_install,
+    .install_fn       = sfight_homebrew_install,
     .hook_count       = 0,
     .input            = { SFIGHT_INPUT_MAP },
     .any_program      = true,

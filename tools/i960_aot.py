@@ -319,7 +319,7 @@ def main():
             lead.add(ip + n)
     for ip, (w1, w2, n, kind, tg) in info.items():
         if ip + n in ips and (ip + n) >> a.shift != ip >> a.shift: lead.add(ip + n)
-    for h in hooks: lead.add(h + 4)
+    for h in hooks: lead.add(h + ilen(word(h)))
     for ip in ips:
         # first of a run: nothing compiled falls into it
         pass
@@ -339,7 +339,7 @@ def main():
         if kind in ('call', 'ind', 'slow', 'br'): split.add(ip + n)
         if ip + n in ips and (ip + n) >> a.shift != ip >> a.shift: split.add(ip + n)
         if ip not in prev_of: split.add(ip)
-    for h in hooks: split.add(h + 4)
+    for h in hooks: split.add(h + ilen(word(h)))
     split &= ips
 
     chunks = {}
