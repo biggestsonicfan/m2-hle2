@@ -54,6 +54,20 @@ the five ROM files as they ship, STF.AFS and MODELS.PAK. `dc_layout.h` says wher
 file lands in the board's regions; what the PS3 files lack (part of the texture
 ROM, the copro tables, the sound CPU's program and samples) is listed there.
 
+For an emulator or player that takes no GDI, `CDI=1` makes a self-booting CD-R
+image instead, `m2hle2.cdi` (DiscJuggler; Pinboard #480): one audio/data CD with
+the same files on its data track at LBA 11702 and 1ST_READ.BIN scrambled, as a
+MIL-CD boots. It needs KOS's `scramble` and `cdi4dc` from img4dc, which is
+written for Windows; `tools/build-cdi4dc.sh` builds a Linux one in
+`~/build/tools/dc/img4dc`. The program finds its files on either disc (the
+data track's TOC entry), so nothing else changes. Tested in Flycast's libretro
+core and Redream.
+
+```sh
+sh dreamcast/tools/build-cdi4dc.sh                                    # once
+CDI=1 sh dreamcast/mkdisc.sh /tmp/dc "<PS3>/stf_rom" /tmp/dc/disc /tmp/dc/STF.AFS   # -> m2hle2.cdi
+```
+
 MODELS.PAK is made by `mkdisc.sh` from `rom_pol.bin`, `rom_tex.bin` and
 `sfight.mdlmap` (`tools/dc_mdlpack.py`): the meshes and UV streams the game
 reads, laid out in the order it first reads them, so a scene comes off the disc
@@ -251,5 +265,6 @@ discs gave ~37 and ~30.
 | `dc_link.h` | `LINK=1`: the replay fight's frames, or from power-on the board's memory as CRCs, over the SCIF to `tools/dc-lockstep.py` |
 | `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |
-| `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI |
+| `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI (`CDI=1`: CDI) |
+| `tools/build-cdi4dc.sh` | a Linux cdi4dc (img4dc) for `CDI=1` |
 | `../tests/rom_touch.c` | host tool: which ROM pages a game reads |
