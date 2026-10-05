@@ -329,7 +329,7 @@ static inline void sharc_ik_store(uint32_t tgp_addr) {
     for (int k = 0; k < 3; k++) words[9 + k] = g_sharc.pos[k];
     if (g_sharc.sharc_dm_ext) {
         uint32_t bo = tgp_addr * 4u;
-        if (bo + 48u <= g_sharc.sharc_dm_ext_size)
+        if (g_sharc.sharc_dm_ext_size >= 48u && bo <= g_sharc.sharc_dm_ext_size - 48u)   /* bo + 48 can wrap */
             for (int k = 0; k < 12; k++) { uint32_t u = sharc_float_to_bits(words[k]); memcpy(g_sharc.sharc_dm_ext + bo + 4u * (uint32_t)k, &u, 4); }
     }
 }
@@ -1541,7 +1541,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
         case 0x34806969: {
             if (n >= 1 && g_sharc.sharc_dm_ext) {
                 uint32_t byte_off = args[0] * 4;
-                if (byte_off + 9 * 4 <= g_sharc.sharc_dm_ext_size) {
+                if (g_sharc.sharc_dm_ext_size >= 9 * 4 && byte_off <= g_sharc.sharc_dm_ext_size - 9 * 4) {
                     for (int _col = 0; _col < 3; _col++)
                         for (int _row = 0; _row < 3; _row++) {
                             uint32_t u;
@@ -1719,7 +1719,7 @@ static inline void sharc_exec(uint32_t cmd, const uint32_t *args, int n) {
 
                 if (g_sharc.sharc_dm_ext) {
                     uint32_t byte_off = addr * 4;
-                    if (byte_off + 12 * 4 <= g_sharc.sharc_dm_ext_size) {
+                    if (g_sharc.sharc_dm_ext_size >= 12 * 4 && byte_off <= g_sharc.sharc_dm_ext_size - 12 * 4) {
                         /* 9 col-major rotation words, then 3 translation words. */
                         for (int _k = 0; _k < 12; _k++) {
                             uint32_t u = sharc_float_to_bits(slot[_k]);
