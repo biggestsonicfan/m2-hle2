@@ -83,6 +83,7 @@ static struct {
     pvr_ptr_t checker;
     uint16_t  pen565[TILE_PEN_NONE + 1], pen1555[TILE_PEN_NONE + 1];
     uint32_t  text_rows;             /* bit r: screen row r has text */
+    unsigned  corner_w;              /* the corner counter's width in texels (0: none) */
     unsigned  tris, faces_dropped, runs;
     uint32_t  us_decode, us_submit;
     uint32_t  us_tiles, us_scan, us_sort;   /* parts of us_decode */
@@ -246,11 +247,49 @@ static inline uint32_t dp_argb(const int c[3]) {
 
 static inline int dp_clamp255(float v) { return v <= 0.0f ? 0 : v >= 1.0f ? 255 : (int)(v * 255.0f + 0.5f); }
 
+/* Faces whose ramp is no line at all get a palette bank of their own: m2-sdk's
+ * m2_sprite.h palette mode puts a sprite's 16 pens in a colorxlat row, one
+ * per texel, which base * texel + offset cannot show. Homebrew only (STF's
+ * ramps are near enough lines, and its discs stay as they were). The banks
+ * alternate between two halves frame by frame, so a frame the PVR is still
+ * drawing keeps its palettes. */
+#define DP_PAL_FIRST 3u
+#define DP_PAL_HALF  30u
+static bool     g_dp_pal_on;
+static unsigned g_dp_pal_half, g_dp_pal_n;
+static uint32_t g_dp_pal_key[DP_PAL_HALF];
+static uint16_t g_dp_pal_col[DP_PAL_HALF][16];
+
+static inline uint16_t dp_1555(const int c[3]) {
+    return (uint16_t)(0x8000u | (uint32_t)(c[0] >> 3) << 10 | (uint32_t)(c[1] >> 3) << 5 | (uint32_t)(c[2] >> 3));
+}
+
+/* The bank holding these 16 colours (texel 15 a hole when trans), 0 if none is left. */
+static unsigned dp_pal_bank(const int col[16][3], bool trans) {
+    uint16_t c[16];
+    uint32_t key = trans ? 0x9E3779B9u : 0x7F4A7C15u;
+    for (int t = 0; t < 16; t++) {
+        c[t] = trans && t == 15 ? 0 : dp_1555(col[t]);
+        key = (key ^ c[t]) * 16777619u;
+    }
+    for (unsigned i = 0; i < g_dp_pal_n; i++)
+        if (g_dp_pal_key[i] == key && !memcmp(g_dp_pal_col[i], c, sizeof c))
+            return DP_PAL_FIRST + g_dp_pal_half * DP_PAL_HALF + i;
+    if (g_dp_pal_n >= DP_PAL_HALF) return 0;
+    unsigned i = g_dp_pal_n++, bank = DP_PAL_FIRST + g_dp_pal_half * DP_PAL_HALF + i;
+    g_dp_pal_key[i] = key;
+    memcpy(g_dp_pal_col[i], c, sizeof c);
+    for (int t = 0; t < 16; t++) pvr_set_pal_entry(bank * 16u + (unsigned)t, c[t]);
+    return bank;
+}
+
 /* A face's colour (untextured), or its base and offset (textured): the fill
- * shader's chain at texel 0 and texel 15, joined by a line. */
+ * shader's chain at texel 0 and texel 15, joined by a line; or, when that
+ * line misses (homebrew), every texel's colour in a palette bank (*pal). */
 typedef struct { float r, g, b, lb, pl; } dp_col_in_t;
-static void dp_face_colour(const memory_bus_t *bus, const dp_col_in_t *T, bool tex,
-                           uint32_t *base, uint32_t *offset) {
+static void dp_face_colour(const memory_bus_t *bus, const dp_col_in_t *T, bool tex, bool trans,
+                           uint32_t *base, uint32_t *offset, uint8_t *pal) {
+    *pal = 0;
     int c5[3] = { (int)(T->r * 31.0f + 0.5f), (int)(T->g * 31.0f + 0.5f), (int)(T->b * 31.0f + 0.5f) };
     for (int k = 0; k < 3; k++) c5[k] = c5[k] < 0 ? 0 : c5[k] > 31 ? 31 : c5[k];
     float pl = T->pl < 0.0f ? 0.0f : T->pl > 1.0f ? 1.0f : T->pl;
@@ -283,6 +322,23 @@ static void dp_face_colour(const memory_bus_t *bus, const dp_col_in_t *T, bool t
     for (int k = 0; k < 3; k++) b[k] = ends[1][k] > ends[0][k] ? ends[1][k] - ends[0][k] : 0;
     *base = dp_argb(b);
     *offset = dp_argb(ends[0]);
+    if (!g_dp_pal_on) return;
+    int col[16][3], worst = 0;
+    for (int t = 0; t < 16; t++) {
+        uint32_t lbyte = 2u * ((uint32_t)T->lb + (uint32_t)t * 8u);
+        int lram = lbyte < LUMA_SIZE ? bus->luma[lbyte] : 0;
+        int li = (lram * poly) >> 8;
+        dp_shade(bus, c5, li > 63 ? 63 : li, col[t]);
+        for (int k = 0; k < 3; k++) {
+            int e = col[t][k] - (ends[0][k] + b[k] * t / 15);
+            e = e < 0 ? -e : e;
+            worst = e > worst ? e : worst;
+        }
+    }
+    if (worst > 24 && (*pal = (uint8_t)dp_pal_bank(col, trans))) {
+        *base = 0xFFFFFFFFu;
+        *offset = 0;
+    }
 }
 
 /* ---- Init ------------------------------------------------------------------------ */
@@ -335,7 +391,7 @@ static int dp_init(void) {
  * at the same place. */
 /* Video memory is slow to write: a row is redrawn only when its text changes,
    and only as wide as the old or new text (bfont's opaque cells clear behind). */
-static void dp_text(int row, const char *s) {
+static void dp_text_row(int row, const char *s) {
     static char last[20][88];
     if (row < 0 || row >= 20) return;
     if (!strncmp(last[row], s, sizeof last[row] - 1)) return;
@@ -349,6 +405,30 @@ static void dp_text(int row, const char *s) {
         for (int y = 0; y < 24; y++) memset(d + y * 1024 + 8 + n * 12, 0, (was - n) * 12 * 2);
     memcpy(last[row], buf, n + 1);
     g_dp.text_rows |= 1u << row;
+}
+
+/* The stats rows; the minimal HUD (DC_HUD_MIN) shows none of them. */
+#if DC_HUD_MIN
+#define dp_text(row, s) ((void)(row), (void)(s))
+#else
+#define dp_text dp_text_row
+#endif
+
+/* A short line at half size in the screen's top right corner (the minimal
+ * HUD's frame counter), kept in the text texture below the 20 rows. */
+static void dp_corner(const char *s) {
+    static char last[24];
+    if (!strncmp(last, s, sizeof last - 1)) return;
+    uint16_t *d = (uint16_t *)g_dp.text + 480 * 1024;
+    size_t n = strlen(s), was = strlen(last);
+    if (n > 20) n = 20;
+    char buf[24];
+    memcpy(buf, s, n); buf[n] = 0;
+    bfont_draw_str(d, 1024, true, buf);
+    if (was > n)
+        for (int y = 0; y < 24; y++) memset(d + y * 1024 + n * 12, 0, (was - n) * 12 * 2);
+    memcpy(last, buf, n + 1);
+    g_dp.corner_w = (unsigned)n * 12;
 }
 
 /* ---- Submission ------------------------------------------------------------------- */
@@ -418,6 +498,23 @@ static void dp_text_rect(int r) {
     dp_vertex(PVR_CMD_VERTEX,     DC_SCR_W, y,  1.0e3f, u1,   v0, 0xFFFFFFFFu, 0);
     dp_vertex(PVR_CMD_VERTEX,     0.0f,     y1, 1.0e3f, 0.0f, v1, 0xFFFFFFFFu, 0);
     dp_vertex(PVR_CMD_VERTEX_EOL, DC_SCR_W, y1, 1.0e3f, u1,   v1, 0xFFFFFFFFu, 0);
+}
+
+static void dp_corner_rect(void) {
+    if (!g_dp.corner_w) return;
+    pvr_poly_cxt_t cxt;
+    pvr_poly_hdr_t hdr;
+    pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED,
+                     1024, 512, g_dp.text, PVR_FILTER_BILINEAR);
+    cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+    pvr_poly_compile(&hdr, &cxt);
+    dp_hdr(&hdr);
+    float x1 = 628.0f, x0 = x1 - (float)g_dp.corner_w * 0.5f, y0 = 8.0f, y1 = 20.0f;
+    float u1 = (float)g_dp.corner_w / 1024.0f, v0 = 480.0f / 512.0f, v1 = 504.0f / 512.0f;
+    dp_vertex(PVR_CMD_VERTEX,     x0, y0, 1.0e3f, 0.0f, v0, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX,     x1, y0, 1.0e3f, u1,   v0, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX,     x0, y1, 1.0e3f, 0.0f, v1, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX_EOL, x1, y1, 1.0e3f, u1,   v1, 0xFFFFFFFFu, 0);
 }
 
 /* ---- The tile layers ------------------------------------------------------------- */
@@ -693,7 +790,8 @@ typedef struct { float sx, sy, w, x, y, z; } dcv_t;   /* screen x, y, 1/-z; eye 
 #define DCF_CLIP    4u   /* a corner is in front of the near plane */
 typedef struct {
     uint16_t  v[3];
-    uint8_t   run, kind, var, pad;   /* var: the header's variant, dp_hdr_compile's face bits << 1 */
+    uint8_t   run, kind, var, pal;   /* var: the header's variant, dp_hdr_compile's face bits << 1;
+                                        pal: the face's own palette bank (dp_pal_bank), 0: none */
     dc_tex_t *tex;
     uint32_t  base, off;
     float     u[3], t[3];            /* the corners' texture coordinates, in [0, 1] units */
@@ -711,7 +809,7 @@ static memory_bus_t *g_dp_bus;
  * one after the other, and a model's faces share textures. */
 static struct {
     float    tx, ty, tw, th, fl;  dc_tex_t *tex;              /* dp_tex_get */
-    dp_col_in_t c; bool ctex; uint32_t base, off;             /* dp_face_colour */
+    dp_col_in_t c; bool ctex, ctrans; uint32_t base, off; uint8_t pal;   /* dp_face_colour */
 } g_dp_memo;
 
 static inline void dp_memo_reset(void) {
@@ -747,12 +845,13 @@ static inline dc_tex_t *dp_face_tex(float tx, float ty, float tw, float th, floa
     return tex;
 }
 
-static inline void dp_face_col(float r, float g, float b, float lb, float pl, bool ctex) {
+static inline void dp_face_col(float r, float g, float b, float lb, float pl, bool ctex, bool ctrans) {
     if (r != g_dp_memo.c.r || g != g_dp_memo.c.g || b != g_dp_memo.c.b || pl != g_dp_memo.c.pl ||
-            lb != g_dp_memo.c.lb || ctex != g_dp_memo.ctex) {
+            lb != g_dp_memo.c.lb || ctex != g_dp_memo.ctex || ctrans != g_dp_memo.ctrans) {
         g_dp_memo.c = (dp_col_in_t){ r, g, b, lb, pl };
         g_dp_memo.ctex = ctex;
-        dp_face_colour(g_dp_bus, &g_dp_memo.c, ctex, &g_dp_memo.base, &g_dp_memo.off);
+        g_dp_memo.ctrans = ctrans;
+        dp_face_colour(g_dp_bus, &g_dp_memo.c, ctex, ctrans, &g_dp_memo.base, &g_dp_memo.off, &g_dp_memo.pal);
     }
 }
 
@@ -771,6 +870,7 @@ static inline void dp_tri_put(int a, int b, int c, const float *u, const float *
     F->var  = (uint8_t)var;
     F->tex  = tex;
     F->base = g_dp_memo.base; F->off = g_dp_memo.off;
+    F->pal  = tex ? g_dp_memo.pal : 0;
     float su = tex ? tex->su : 0.0f, sv = tex ? tex->sv : 0.0f;
     F->u[0] = u[i] * su; F->t[0] = v[i] * sv;
     F->u[1] = u[j] * su; F->t[1] = v[j] * sv;
@@ -788,14 +888,46 @@ static inline unsigned dp_kind(unsigned f, float tw) {
 }
 #define DP_VAR(f) (((f) & (GEO3D_FACE_TRANSPARENT | GEO3D_FACE_MIRROR_X | GEO3D_FACE_MIRROR_Y)) << 1)
 
+/* A tile wider or taller than the PVR's 256 (m2_sprite.h's 512x512 atlas):
+ * the square window of it the face's coordinates fall in, a power of two at
+ * most 256, with the coordinates moved into it. Aligned to its size when one
+ * holds them (faces near each other share it), else from the face's own
+ * corner (a sprite across a 256 line). False when they span more than 256
+ * or leave the tile (a repeat). */
+static bool dp_big_window(float *tx, float *ty, float *tw, float *th, float *u, float *v, int n) {
+    float u0 = u[0], u1 = u[0], v0 = v[0], v1 = v[0];
+    for (int i = 1; i < n; i++) {
+        u0 = u[i] < u0 ? u[i] : u0; u1 = u[i] > u1 ? u[i] : u1;
+        v0 = v[i] < v0 ? v[i] : v0; v1 = v[i] > v1 ? v[i] : v1;
+    }
+    if (u0 < 0.0f || v0 < 0.0f || u1 > *tw || v1 > *th) return false;
+    for (float m = 8.0f; m <= 256.0f; m *= 2.0f) {
+        float sx = floorf(u0 / m) * m, sy = floorf(v0 / m) * m;
+        if (u1 > sx + m || v1 > sy + m || sx + m > *tw || sy + m > *th) continue;
+        for (int i = 0; i < n; i++) { u[i] -= sx; v[i] -= sy; }
+        *tx += sx; *ty += sy; *tw = *th = m;
+        return true;
+    }
+    for (float m = 8.0f; m <= 256.0f; m *= 2.0f) {
+        if (u1 - u0 > m || v1 - v0 > m || m > *tw || m > *th) continue;
+        float sx = fminf(floorf(u0), *tw - m), sy = fminf(floorf(v0), *th - m);
+        for (int i = 0; i < n; i++) { u[i] -= sx; v[i] -= sy; }
+        *tx += sx; *ty += sy; *tw = *th = m;
+        return true;
+    }
+    return false;
+}
+
 static void geo3d_dc_tri(int a, int b, int c, float ua, float va, float ub, float vb, float uc, float vc,
                          float r, float g, float b_, float tx, float ty, float tw, float th,
                          float lb, float pl, float fl) {
     if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
     unsigned f = (unsigned)(fl + 0.5f);
+    float u[3] = { ua, ub, uc }, v[3] = { va, vb, vc };
+    if (tw > 256.0f || th > 256.0f) dp_big_window(&tx, &ty, &tw, &th, u, v, 3);
     dc_tex_t *tex = dp_face_tex(tx, ty, tw, th, fl, f);
-    dp_face_col(r, g, b_, lb, pl, tex != NULL || (tw > 0.0f && !(f & GEO3D_FACE_CHECKER)));
-    const float u[3] = { ua, ub, uc }, v[3] = { va, vb, vc };
+    dp_face_col(r, g, b_, lb, pl, tex != NULL || (tw > 0.0f && !(f & GEO3D_FACE_CHECKER)),
+                (f & GEO3D_FACE_TRANSPARENT) != 0);
     uint32_t key = g_geo3d_emit_flat >= 0.0f ? (uint32_t)(g_geo3d_emit_flat * 65536.0f) : 0u;
     dp_tri_put(a, b, c, u, v, 0, 1, 2, dp_kind(f, tw), DP_VAR(f), tex,
                g_geo3d_emit_flat >= 0.0f ? (int32_t)(key > 0xFFFFu ? 0xFFFFu : key) : -1);
@@ -804,18 +936,26 @@ static void geo3d_dc_tri(int a, int b, int c, float ua, float va, float ub, floa
 static void geo3d_dc_face(int v0, const geo3d_cface_t *F, int cut, float r, float g, float b, float pl, int32_t key) {
     if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
     unsigned f = (unsigned)(F->fl + 0.5f);
-    dc_tex_t *tex = dp_face_tex(F->tx, F->ty, F->tw, F->th, F->fl, f);
-    dp_face_col(r, g, b, F->lb, pl, tex != NULL || (F->tw > 0.0f && !(f & GEO3D_FACE_CHECKER)));
+    float tx = F->tx, ty = F->ty, tw = F->tw, th = F->th;
+    const float *uu = F->uvu, *vv = F->uvv;
+    float wu[4], wv[4];
+    if (tw > 256.0f || th > 256.0f) {
+        memcpy(wu, F->uvu, sizeof wu); memcpy(wv, F->uvv, sizeof wv);
+        if (dp_big_window(&tx, &ty, &tw, &th, wu, wv, F->is_tri ? 3 : 4)) { uu = wu; vv = wv; }
+    }
+    dc_tex_t *tex = dp_face_tex(tx, ty, tw, th, F->fl, f);
+    dp_face_col(r, g, b, F->lb, pl, tex != NULL || (F->tw > 0.0f && !(f & GEO3D_FACE_CHECKER)),
+                (f & GEO3D_FACE_TRANSPARENT) != 0);
     const unsigned kind = dp_kind(f, F->tw), var = DP_VAR(f);
     const int a = v0 + F->ai, bb = v0 + F->bi, c = v0 + F->ci, d = v0 + F->di;
     if (cut == 0) {
-        dp_tri_put(a, bb, c, F->uvu, F->uvv, 0, 1, 2, kind, var, tex, key);
+        dp_tri_put(a, bb, c, uu, vv, 0, 1, 2, kind, var, tex, key);
     } else if (cut == 1) {
-        dp_tri_put(a, bb, c, F->uvu, F->uvv, 0, 1, 2, kind, var, tex, key);
-        dp_tri_put(bb, d, c, F->uvu, F->uvv, 1, 3, 2, kind, var, tex, key);
+        dp_tri_put(a, bb, c, uu, vv, 0, 1, 2, kind, var, tex, key);
+        dp_tri_put(bb, d, c, uu, vv, 1, 3, 2, kind, var, tex, key);
     } else {
-        dp_tri_put(a, bb, d, F->uvu, F->uvv, 0, 1, 3, kind, var, tex, key);
-        dp_tri_put(a, d, c, F->uvu, F->uvv, 0, 3, 2, kind, var, tex, key);
+        dp_tri_put(a, bb, d, uu, vv, 0, 1, 3, kind, var, tex, key);
+        dp_tri_put(a, d, c, uu, vv, 0, 3, 2, kind, var, tex, key);
     }
 }
 
@@ -861,6 +1001,9 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
     g_dcv_n = g_dcf_n = 0;
     g_dp_bus = bus;
     dp_memo_reset();
+    g_dp_pal_on = g_active_profile && g_active_profile->any_program;
+    g_dp_pal_half ^= 1u;
+    g_dp_pal_n = 0;
     g_geo3d_mesh_epoch++;   /* the mesh cache keeps what this frame and the last drew */
     g_dp.runs = 0;
     g_dp.faces_dropped = 0;
@@ -953,10 +1096,11 @@ typedef struct { float x, y, z, u, v; } dp_ev_t;   /* eye space, uv in [0, 1] un
 static pvr_poly_hdr_t g_dp_hdr_plain[2][2];
 static uint8_t        g_dp_hdr_plain_ok;
 
-static void dp_hdr_compile(pvr_poly_hdr_t *hdr, pvr_list_t list, const dc_tex_t *tex, bool checker, unsigned fl) {
+static void dp_hdr_compile(pvr_poly_hdr_t *hdr, pvr_list_t list, const dc_tex_t *tex, bool checker, unsigned fl,
+                           unsigned pal) {
     pvr_poly_cxt_t cxt;
     if (tex) {
-        int bank = (fl & GEO3D_FACE_TRANSPARENT) ? 1 : 0;
+        int bank = pal ? (int)pal : (fl & GEO3D_FACE_TRANSPARENT) ? 1 : 0;
         pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(bank) | PVR_TXRFMT_TWIDDLED,
                          tex->w, tex->h, tex->ptr, PVR_FILTER_BILINEAR);
         cxt.gen.specular = true;
@@ -979,21 +1123,25 @@ static void dp_face(int t, pvr_list_t list, uint32_t *last_state) {
     const dcf_t *F = &g_dcf[t];
     const dc_tex_t *tex = F->tex;
     const bool checker = (F->kind & DCF_CHECKER) != 0;
-    uint32_t state = tex ? (uint32_t)(uintptr_t)tex->ptr ^ F->var : checker ? 2u : 4u;
+    uint32_t state = tex ? (uint32_t)(uintptr_t)tex->ptr ^ F->var ^ (uint32_t)F->pal << 24 : checker ? 2u : 4u;
     if (state != *last_state) {
         /* compiled once per texture and variant (or per list, untextured) */
         *last_state = state;
         const int li = list == PVR_LIST_OP_POLY ? 0 : 1;
-        if (tex) {
+        if (tex && F->pal) {   /* a bank of its own: compiled each time (homebrew sprites, a few) */
+            pvr_poly_hdr_t h;
+            dp_hdr_compile(&h, list, F->tex, false, F->var >> 1, F->pal);
+            dp_hdr(&h);
+        } else if (tex) {
             uint8_t want = (uint8_t)(0x80u | li << 6 | F->var);
             dc_tex_t *mt = F->tex;
-            if (mt->hdr_var != want) { dp_hdr_compile(&mt->hdr, list, mt, false, F->var >> 1); mt->hdr_var = want; }
+            if (mt->hdr_var != want) { dp_hdr_compile(&mt->hdr, list, mt, false, F->var >> 1, 0); mt->hdr_var = want; }
             dp_hdr(&mt->hdr);
         } else {
             if (!g_dp_hdr_plain_ok) {
                 for (int l = 0; l < 2; l++)
                     for (int c = 0; c < 2; c++)
-                        dp_hdr_compile(&g_dp_hdr_plain[l][c], l ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY, NULL, c != 0, 0);
+                        dp_hdr_compile(&g_dp_hdr_plain[l][c], l ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY, NULL, c != 0, 0, 0);
                 g_dp_hdr_plain_ok = 1;
             }
             dp_hdr(&g_dp_hdr_plain[li][checker ? 1 : 0]);
@@ -1112,6 +1260,7 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     }
     for (int r = 0; r < 20; r++)
         if (g_dp.text_rows & (1u << r)) dp_text_rect(r);
+    dp_corner_rect();
     pvr_list_finish();
     pvr_scene_finish();
     uint64_t t2 = timer_us_gettime64();
@@ -1128,6 +1277,7 @@ static void dp_text_frame(void) {
     pvr_list_begin(PVR_LIST_TR_POLY);
     for (int r = 0; r < 20; r++)
         if (g_dp.text_rows & (1u << r)) dp_text_rect(r);
+    dp_corner_rect();
     pvr_list_finish();
     pvr_scene_finish();
 }

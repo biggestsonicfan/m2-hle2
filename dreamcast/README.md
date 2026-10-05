@@ -171,6 +171,51 @@ the sprites into the chars, so char RAM changes in every frame anything moves.
 the chars of the KBs written (`gfx_dirty`, `memory.h`) and redraws the cells
 that show one that changed. The i960 is what is left.
 
+## Homebrew discs: pacman_geo and m2-sonic
+
+m2-pacman's `pacman_geo` and [m2-sonic](https://github.com/biggestsonicfan/m2-sonic)
+draw their sprites as polygons through the GEO, so they have discs of their own
+(Pinboard #469). Build the game with its debug panel off, and the disc with
+`HUD=min`: nothing on screen but the board's frame count, small, top right.
+
+```sh
+# m2-pacman, panel off: roms/pacman_geo/game.bin
+cmake -B /tmp/bpac -S <m2-pacman> -DM2_GAME=pacman_geo -DM2_SDK=<m2-sdk> -DPAC_DEFS=PAC_NO_PANEL && cmake --build /tmp/bpac
+ln -s <m2-pacman>/roms/pacman_geo/game.bin /tmp/pac/rom_code1.bin   # + the four PS3 files, as above
+make -C dreamcast OUT=/tmp/dcpac HUD=min AOT_MAP=pacman_geo.aotmap AOT=/tmp/pac/rom_code1.bin
+sh dreamcast/mkdisc.sh /tmp/dcpac /tmp/pac /tmp/dcpac/disc
+
+# m2-sonic, panel off: roms/sonic/game.bin (needs your cartridge, see its README)
+cmake -B /tmp/bson -S <m2-sonic> -DM2_SDK=<m2-sdk> -DSONIC_DEFS=SONIC_NO_PANEL && cmake --build /tmp/bson
+```
+
+m2-sonic keeps the Mega Drive cartridge in the two data EPROMs, so its disc's
+`rom_ep.bin` is those, not the PS3 file: `epr-19003.7` and `epr-19004.8`
+interleaved a 16-bit word at a time (1 MB; past the cartridge it is 0xFF, so
+the disc's layout is unchanged). The other three PS3 files stay. Its AOT map
+holds words of the recompiled cartridge, so it is not in the repo: record your
+own with the sound-less `det_digest` (`--aot-map 0:6000:sonic.aotmap`, the
+program from `roms/sonic`) and build with `AOT_MAP=sonic.aotmap AOT_COVER=0.95`.
+
+Two things in `dc_pvr.h` were needed for them:
+
+- `m2_sprite.h`'s atlas is a 512x512 tile, past the PVR's 256. `dp_big_window`
+  draws a face from the 256-or-smaller window of the tile its coordinates fall
+  in.
+- m2-sonic's palettes are the Mega Drive's, sixteen colours that no
+  base-times-grey-plus-offset line fits. For homebrew (`any_program`), a face
+  the line misses by more than 24 a channel gets a 16-colour PVR palette bank
+  of its own (banks 3-62, two halves used on alternate frames so a bank is not
+  rewritten while the last frame's list still reads it).
+
+Neither game has sound here: there is no sound board, so the ping goes
+unanswered (see above). Measured in Flycast's libretro core, attract:
+
+| | board fps |
+|---|---|
+| `pacman_geo`, AOT 0.95 | ~37 |
+| m2-sonic, AOT 0.95 | ~30 (the game drops Mega Drive frames to keep time) |
+
 ## Files
 
 | | |

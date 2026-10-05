@@ -45,6 +45,12 @@
 #ifndef DC_LINK_GEMS
 #define DC_LINK_GEMS 0
 #endif
+/* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frame
+ * count, small, in the top right corner (the homebrew discs). Boot errors
+ * still show. */
+#ifndef DC_HUD_MIN
+#define DC_HUD_MIN 0
+#endif
 
 #include "constants.h"
 #include "log.h"
@@ -189,7 +195,7 @@ static void dc_pad(void) {
 /* ---- Main ----------------------------------------------------------------------- */
 
 static void dc_text(int row, const char *s) {
-    dp_text(row, s);
+    dp_text_row(row, s);
     dp_text_frame();
 }
 
@@ -300,6 +306,7 @@ int main(int argc, char **argv) {
     emu_ctx_init(&ctx, &cpu, &bus);
     geo3d_init(&geo);
     ctx.run_state = EMU_RUNNING;
+    if (DC_HUD_MIN) g_dp.text_rows = 0;   /* the boot lines go */
 
     uint64_t t_last = timer_us_gettime64(), us_slice = 0, us_draw = 0;
     uint32_t f_last = g_emu_frames, slices = 0, loads_last = 0, refills_last = 0, shown = 0, drawn_f = 0;
@@ -316,6 +323,13 @@ int main(int argc, char **argv) {
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
+#if DC_HUD_MIN
+        {   /* the minimal HUD: the board's frame count, top right */
+            char fc[16];
+            snprintf(fc, sizeof fc, "%u", (unsigned)g_emu_frames);
+            dp_corner(fc);
+        }
+#endif
         if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
             uint32_t h = 2166136261u;
