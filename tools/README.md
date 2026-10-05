@@ -436,7 +436,9 @@ The Dreamcast build plays the same fight against MAME over its serial port
 (`tools/dc-lockstep.py`, DREAMCAST-PORT.md "Held against MAME over the serial
 port"). `--peer` holds it to a desktop run (`--out`'s `here`) as well. It parts
 from MAME in the same places as the desktop build, and from the desktop build
-first at +580, on a denormal the SH-4 flushes to zero.
+first at +580, on a denormal the SH-4 flushed to zero (fixed in #478). `--boot`
+holds it from power-on instead, against MAME (`tools/mame/boot-lockstep.lua`)
+and a desktop `det_digest --raw` at once: it is the desktop's for 12000 frames.
 
 ## Faces lying on faces (`grade-zsort`)
 

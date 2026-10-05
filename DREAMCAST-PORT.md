@@ -721,25 +721,39 @@ emulates in software. The guards are in the private Gems directory.
   357 ms against 539 (disc reads 162 against 273). Flycast's disc is fast; on
   a GD-ROM every load is a seek.
 
-## Tried and reverted: the board's picture at its own size (#471)
+## The board's picture at its own size (#471)
 
-The board's 496x384 drawn pixel for pixel, centred in the 640x480 frame, and a
-`FRAME512=1` build whose frame was 512x384 in the middle of the signal (192
-PVR tiles rendered instead of 300). Neither was faster over the bench's 400
-frames (f3500-3900, Flycast):
+The board's 496x384 is drawn pixel for pixel, centred, black around it
+(`dc_pvr.h`, `DC_X0` / `DC_Y0`). It used to be scaled by 1.25 to fill the
+640x480 frame's height. The commit (3af4093) was reverted once for want of
+speed (below), and came back with #475 / #476, whose STF disc is built on it.
+
+- **The default frame is still the cable's 640x480**, with the board at
+  (72, 48). The bars over the 3D past its screen go on all four sides. With
+  `HUD=none` (#478) nothing else is drawn, so a screenshot cropped at (72, 48)
+  is the board's 496x384 to hold against MAME's, pixel for pixel.
+- **`make FRAME512=1` makes the frame itself 512x384**, set in the middle of the
+  640x480 signal (`dc_video_mode`: `bitmapx` +64, `bitmapy` +48 lines, 24 a
+  field interlaced), with the board 8 pixels in: the PVR renders whole
+  32-pixel tiles, and 496 is not a multiple of 32. The signal and the picture
+  are the same on a Dreamcast, with 192 tiles rendered instead of 300 and
+  ~440 KB less framebuffer. That is not tested on hardware.
+- **Flycast does not show it that way.** Its renderer stretches the TA's
+  frame to fill its output (512x384 x 1.25) and then moves it by the change
+  in `VO_STARTX`/`VO_STARTY`, so the picture came out enlarged and cut off on
+  the right. Hence the default.
+- **No time either way in Flycast**, which does not charge PVR tile rendering
+  (`scheduleRenderDone`, `core/hw/pvr/spg.cpp`: 450,000 cycles a frame plus
+  100 a byte of polygon data, whatever the resolution). Over the bench's 400
+  frames (f3500-3900); repeat runs spread 15431-15435 ms:
 
 | build | total | i960 slices | draws |
 |---|---|---|---|
-| scaled 1.25 to 640x480 (kept) | 15431 ms | 6431 ms | 8929 ms |
+| scaled 1.25 to 640x480 | 15431 ms | 6431 ms | 8929 ms |
 | 496x384 centred in 640x480 | 15433 ms | 6439 ms | 8925 ms |
 | `FRAME512=1` | 15427 ms | 6436 ms | 8920 ms |
 
-Repeat runs spread 15431-15435 ms, so all three are noise. Flycast cannot show
-a difference: it charges every frame 450,000 cycles plus 100 a byte of polygon
-data, whatever the resolution (`scheduleRenderDone`, `core/hw/pvr/spg.cpp`), and
-the polygon data is the same. Only `FRAME512` could save time on a Dreamcast
-(fewer tiles), it is untested there, and Flycast draws it enlarged and pushed
-off to the right. The commit (3af4093) was reverted.
+The text rows are drawn at 0.8 in the 512x384 frame, so that 20 fit.
 
 ## Held against MAME over the serial port (#461)
 
@@ -785,7 +799,38 @@ whole fight state. The rest parts from MAME exactly where the desktop build does
 - **KOS runs the SH-4 with FPSCR.DN = 1** (`startup.S`: `0x00040000`), so a
   denormal result is flushed to zero. With DN = 0 the SH-4 traps on a denormal
   operand (the FPU error cause cannot be masked), so this is not a flag to
-  flip. It has not reached the fight in this replay.
+  flip. The i960's single/double conversions now do denormals on the bits on
+  the SH-4 (`I960_SOFT_DENORMAL`, `i960_exec.h`; #478, below).
+
+### From power-on (#478)
+
+`dc-lockstep.py --boot` runs the same LINK disc from power-on, with no replay
+jump: at every game frame edge the Dreamcast sends a CRC-32 for every 4 KB of
+work RAM, RAM, bufferram, tile RAM and palette (`dc_link_boot`). MAME
+(`tools/mame/boot-lockstep.lua`) and a desktop `det_digest --raw` of the same
+source stream those regions raw into pipes beside it. MAME has one more frame
+edge at power-on, which the host skips.
+
+- Without the fix below, the Dreamcast was the desktop's through +3656 and
+  parted at +3657, in the same word as the replay fight's +580 (P1 +0x1FB0,
+  decaying through the denormals).
+- **The i960 does its float↔double conversions in software on the SH-4**, for
+  a denormal only: `fcnvsd` reads one as 0 there and `fcnvds` flushes one.
+  The soft versions match x86's conversions bit for bit over 20 million
+  inputs, half of them denormal. Elsewhere the code is as before.
+- With it, **the Dreamcast is the desktop build, every block of every region,
+  for all 12000 frames** (~20 minutes in Flycast): attract, the replay fight
+  and on.
+- Against MAME both builds part in the same places: work RAM from +0, bufferram
+  from +836, tile RAM from +2491 (25 work RAM and 20 bufferram blocks by
+  +12000); RAM and palette stay MAME's. The desktop build has every one of
+  them, so they are the board's differences from MAME, not the Dreamcast's,
+  and are not chased here.
+
+```sh
+python3 tools/dc-lockstep.py --boot --frames 12000 --gdi <disc>/m2hle2.gdi \
+    --core <patched flycast_libretro.so> --retroarch-config <cfg> --det-digest <desk>/det_digest
+```
 
 ```sh
 cd dreamcast && make LINK=1 VENDOR=../vendor OUT=<dir>   # LINK_GEMS=1: Gems' C on

@@ -51,6 +51,12 @@
  * are the same frame for frame if the i960 cannot tell. --pcm FILE writes
  * every sample the board produced (16-bit stereo, 44.1 kHz, raw).
  *
+ * --raw RANGES:FILE writes, at every game frame edge (the frame hook, the
+ * instruction tools/mame/boot-lockstep.lua taps on MAME), a record of the board's
+ * memory: "M2BF", frame_counter, mode, sub-mode, 0, the IP, then the bytes of
+ * each range ("hexaddr:hexlen,...") in address order. The two files line up
+ * record for record, for tools/dc-lockstep.py --boot.
+ *
  * --region japan|usa|export powers up in that region (USA by default, as the
  * emulator does); --nowarnskip leaves the Japan warning screen in, ~640 game
  * frames, as MAME does. --peek HEXADDR adds that byte to each line (the mode
@@ -123,6 +129,34 @@ static void snd_out_tap(int16_t l, int16_t r, uint64_t index, void *ud) {
 #define SCRIPT_MAX 1024
 static struct { uint32_t frame, held; } script[SCRIPT_MAX];
 static int script_n;
+
+/* --raw: the board's memory at each game frame edge, as boot-lockstep.lua writes MAME's. */
+static FILE        *raw_out;
+static uint32_t     raw_rng[16][2];
+static int          raw_n;
+static memory_bus_t *raw_bus;
+static i960_cpu_t   *raw_cpu;
+
+static void raw_put32(uint32_t v) { uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) }; fwrite(b, 1, 4, raw_out); }
+
+static void raw_frame(memory_bus_t *bus) {
+    (void)bus;
+    fwrite("M2BF", 1, 4, raw_out);
+    raw_put32(mem_read32(raw_bus, 0x500020));
+    uint8_t ms[4] = { mem_read8(raw_bus, 0x50002A), mem_read8(raw_bus, 0x500030), 0, 0 };
+    fwrite(ms, 1, 4, raw_out);
+    raw_put32(raw_cpu->sfr.ip);
+    static uint8_t buf[0x100000];
+    for (int i = 0; i < raw_n; i++)
+        for (uint32_t o = 0; o < raw_rng[i][1]; o += sizeof buf) {
+            uint32_t n = raw_rng[i][1] - o < sizeof buf ? raw_rng[i][1] - o : (uint32_t)sizeof buf;
+            for (uint32_t k = 0; k < n; k += 4) {
+                uint32_t v = mem_read32(raw_bus, raw_rng[i][0] + o + k);
+                buf[k] = (uint8_t)v; buf[k + 1] = (uint8_t)(v >> 8); buf[k + 2] = (uint8_t)(v >> 16); buf[k + 3] = (uint8_t)(v >> 24);
+            }
+            fwrite(buf, 1, n, raw_out);
+        }
+}
 
 static uint32_t keys_mask(const char *p, const char *end) {
     const game_input_map_t *in = &g_active_profile->input;
@@ -574,6 +608,18 @@ int main(int argc, char **argv) {
             }
         }
 #endif
+        else if (!strcmp(argv[i], "--raw") && i + 1 < argc) {
+            char *a = argv[++i], *colon = strrchr(a, ':');
+            if (!colon || !(raw_out = fopen(colon + 1, "wb"))) { fprintf(stderr, "--raw wants RANGES:FILE\n"); return 2; }
+            for (char *p = a; p < colon && raw_n < 16; ) {
+                char *e;
+                raw_rng[raw_n][0] = (uint32_t)strtoul(p, &e, 16);
+                if (*e != ':') break;
+                raw_rng[raw_n][1] = (uint32_t)strtoul(e + 1, &e, 16) & ~3u;
+                raw_n++;
+                p = (*e == ',') ? e + 1 : colon;
+            }
+        }
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--gems"))   g_gems_i960 = g_gems_cop = true;
         else if (!strcmp(argv[i], "--gems-verify")) g_gems_verify = g_gems_cop = true;   /* each trap both ways */
@@ -654,6 +700,7 @@ int main(int argc, char **argv) {
     emu_board_reset_state();
     emu_ctx_init(&emu, &cpu, &bus);
     emu_run(&emu);
+    if (raw_out) { raw_bus = &bus; raw_cpu = &cpu; g_game_frame_edge_cb = raw_frame; }
     sound_set_tap(snd_out_tap, NULL);
 
     FILE *out = out_path ? fopen(out_path, "wb") : stdout;
@@ -719,6 +766,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);
+    if (raw_out) fclose(raw_out);
     if (trace_out) fclose(trace_out);
     if (aotmap_out) { aotmap_write(&bus, aotmap_path); fclose(aotmap_out); }
     if (mdlmap_out) { mdlmap_write(); fclose(mdlmap_out); }

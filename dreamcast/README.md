@@ -37,6 +37,9 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # HUD=min drops the stats rows: only the board's frames a second, small, top
 # right (Pinboard #475's disc: HUD=min FRAME512=1). Under Flycast a FRAME512
 # picture is enlarged and that corner falls off the screen; Redream shows it.
+# HUD=none draws nothing over the game at all, not even that: with FRAME512=0
+# the board's 496x384 sits 1:1 at (72,48) of the frame, a picture to crop and
+# hold against MAME's pixel for pixel (Pinboard #478).
 # FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
 # whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
 
@@ -130,7 +133,9 @@ Pad: D-pad, A/B/X/Y = B1-B4, Start, left trigger = coin.
 ## Linked to MAME
 
 `make LINK=1` builds the replay fight for `tools/dc-lockstep.py`, which holds it
-against MAME frame by frame over the serial port. The disc needs `SINCOS=`
+against MAME frame by frame over the serial port. The same disc, under
+`dc-lockstep.py --boot`, plays from power-on instead and is held to MAME and to
+the desktop build from the first frame. The disc needs `SINCOS=`
 (`tools/mksincos.py`), and Flycast needs `tools/flycast-scif.patch`.
 DREAMCAST-PORT.md, "Held against MAME over the serial port", has the commands
 and what it found.
@@ -243,7 +248,7 @@ discs gave ~37 and ~30.
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
 | `sfight.mdlmap` | the polygon and texture ROM lines STF draws, by first frame, for MODELS.PAK |
 | `../tools/dc_mdlpack.py` | host tool: map + ROM files → MODELS.PAK |
-| `dc_link.h` | `LINK=1`: the replay fight's frames over the SCIF to `tools/dc-lockstep.py` |
+| `dc_link.h` | `LINK=1`: the replay fight's frames, or from power-on the board's memory as CRCs, over the SCIF to `tools/dc-lockstep.py` |
 | `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |
 | `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI |
