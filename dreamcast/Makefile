@@ -44,6 +44,19 @@ CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address -in
           -I$(REPO)/src/profiles -I$(REPO)/src/net -I. \
           -I$(VENDOR)/sokol
 
+# GEMS=<dir> builds in Sega's C from Sonic Gems Collection (src/core/gems.h,
+# Pinboard #454), on by default: its trapped i960 functions and its COP
+# commands. That C is private and is never committed; the default is where it
+# sits beside this checkout, and GEMS= (empty) leaves it out. Its trap sites are
+# hooks, so the AOT must not compile over them.
+GEMS ?= $(shell d="$(HOME)/source/repos/ai/Sonic Gems Collection/m2hle"; [ -f "$$d/gems_impl.h" ] && echo "$$d")
+GEMS := $(GEMS)
+GEMS_HOOKS :=
+ifneq ($(GEMS),)
+CFLAGS     += -DM2HLE_GEMS -I"$(GEMS)"
+GEMS_HOOKS := $(shell grep -o '{ 0x[0-9A-Fa-f]*, gfn_' "$(GEMS)/gems_all.h" | sed 's/{ \(0x[0-9A-Fa-f]*\),.*/--hook \1/')
+endif
+
 AOT_GEN :=
 ifneq ($(AOT),)
 CFLAGS  += -DI960_AOT=1 -DI960_AOT_GEN='"aot_gen.h"' -I$(OUT)
@@ -55,10 +68,10 @@ OBJS   := $(OUT)/main_dc.o
 all: $(OUT)/1ST_READ.BIN
 
 # 0x3F268 is dc_sound's hook (main_dc.c), and 0x4BE58 / 0x4C008 the profile's
-# timed waits (m2_spin.h), on top of the hooks in the map.
+# timed waits (m2_spin.h), and the Gems trap sites, on top of the hooks in the map.
 $(OUT)/aot_gen.h: sfight.aotmap $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/board/i960_exec.h Makefile
 	mkdir -p $(OUT)
-	python3 $(REPO)/tools/i960_aot.py --map sfight.aotmap --rom "$(AOT)" --hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 --cover $(AOT_COVER) --out $@
+	python3 $(REPO)/tools/i960_aot.py --map sfight.aotmap --rom "$(AOT)" --hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 $(GEMS_HOOKS) --cover $(AOT_COVER) --out $@
 
 $(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_sound.h dc_pvr.h dc_jit_test.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN)
 	mkdir -p $(OUT)

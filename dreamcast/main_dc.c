@@ -48,6 +48,7 @@
 #include "input.h"
 #include "registry.h"
 #include "tile_renderer.h"
+#include "gems.h"
 
 #include "dc_pager.h"
 #include "dc_sound.h"
@@ -109,6 +110,7 @@ static int dc_hook_sound(i960_cpu_t *c, memory_bus_t *b) {
 }
 
 static game_profile_t dc_profile;
+static bool s_dc_gems;   /* gems.h is on */
 
 static void dc_add_sound_hook(void) {
     if (strncmp(g_active_profile->id, "sfight", 6) ||   /* sfight, sfight_console */
@@ -192,8 +194,13 @@ int main(int argc, char **argv) {
     }
     g_mem_window = dc_window;
     if (sound) dc_add_sound_hook();
+    /* Sega's own C for STF's hot functions and the COP (gems.h), on by
+     * default here: a build without it (no GEMS dir) runs the i960 and our
+     * COP. The Dreamcast plays no netplay, so nothing has to agree with it. */
+    g_gems_i960 = g_gems_cop = true;
+    s_dc_gems = gems_apply(profile_rom_set(g_active_profile));
     char line[128];
-    snprintf(line, sizeof line, "profile %s, cache %u KB", g_active_profile->id, (unsigned)(cache >> 10));
+    snprintf(line, sizeof line, "profile %s%s, cache %u KB", g_active_profile->id, s_dc_gems ? " +gems" : "", (unsigned)(cache >> 10));
     printf("%s\n", line);
     dp_text(2, line);
 
@@ -210,8 +217,8 @@ int main(int argc, char **argv) {
             if (!(p = malloc(left + (64u << 10)))) break;
             free(p);
         }
-        snprintf(line, sizeof line, "profile %s, cache %u KB, heap %u KB", g_active_profile->id,
-                 (unsigned)(cache >> 10), (unsigned)(left >> 10));
+        snprintf(line, sizeof line, "profile %s%s, cache %u KB, heap %u KB", g_active_profile->id,
+                 s_dc_gems ? " +gems" : "", (unsigned)(cache >> 10), (unsigned)(left >> 10));
         printf("%s\n", line);
         dp_text(2, line);
     }
