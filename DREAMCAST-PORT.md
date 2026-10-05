@@ -723,28 +723,27 @@ emulates in software. The guards are in the private Gems directory.
   357 ms against 539 (disc reads 162 against 273). Flycast's disc is fast; on
   a GD-ROM every load is a seek.
 
-## The board's picture at its own size (#471)
+## Tried and reverted: the board's picture at its own size (#471)
 
-The board's 496x384 is drawn pixel for pixel, centred, black around it
-(`dc_pvr.h`, `DC_X0` / `DC_Y0`). It used to be scaled by 1.25 to fill the
-640x480 frame's height, and is again since #479 (below), unless a
-VIEW is given.
+The board's 496x384 drawn pixel for pixel, centred in the 640x480 frame, and a
+`FRAME512=1` build whose frame was 512x384 in the middle of the signal (192
+PVR tiles rendered instead of 300). Neither was faster over the bench's 400
+frames (f3500-3900, Flycast):
 
-- **The default frame is still the cable's 640x480**, with the board at
-  (72, 48). The bars over the 3D past its screen go on all four sides.
-- **`make FRAME512=1` makes the frame itself 512x384**, set in the middle of the
-  640x480 signal (`dc_video_mode`: `bitmapx` +64, `bitmapy` +48 lines, 24 a
-  field interlaced), with the board 8 pixels in: the PVR renders whole
-  32-pixel tiles, and 496 is not a multiple of 32. The signal and the picture
-  are the same on a Dreamcast, with 192 tiles rendered instead of 300 and
-  ~440 KB less framebuffer. That is not tested on hardware.
-- **Flycast does not show it that way.** Its renderer stretches the TA's
-  frame to fill its output (512x384 x 1.25) and then moves it by the change
-  in `VO_STARTX`/`VO_STARTY`, so the picture came out enlarged and cut off on
-  the right. Hence the default.
-- **No time either way in Flycast**, which does not charge PVR tile rendering:
-  the bench is 15435 ms against 15431, the frame 1500 hash a5d21d21 as before.
-  The text rows are drawn at 0.8 in the 512x384 frame, so that 20 fit.
+| build | total | i960 slices | draws |
+|---|---|---|---|
+| scaled 1.25 to 640x480 (kept) | 15431 ms | 6431 ms | 8929 ms |
+| 496x384 centred in 640x480 | 15433 ms | 6439 ms | 8925 ms |
+| `FRAME512=1` | 15427 ms | 6436 ms | 8920 ms |
+
+Repeat runs spread 15431-15435 ms, so all three are noise. Flycast cannot show
+a difference: it charges every frame 450,000 cycles plus 100 a byte of polygon
+data, whatever the resolution (`scheduleRenderDone`, `core/hw/pvr/spg.cpp`), and
+the polygon data is the same. Only `FRAME512` could save time on a Dreamcast
+(fewer tiles), it is untested there, and Flycast draws it enlarged and pushed
+off to the right. The commit (3af4093) was reverted. `FRAME512=1` stays as an
+option (off by default) for STF's fps disc (#475); the default frame is the
+scaled 640x480 one, which #479's VIEW gives with no VIEW set.
 
 ## Only the part of the board a game uses (#479)
 
@@ -753,8 +752,7 @@ and leaves the rest black, so on the 640x480 frame the game was a small box
 (320x224 1:1 under #471's layout, 400x280 at 1.25). `make VIEW=x,y,w,h`
 (`DC_VIEW_X/Y/W/H`, `dc_pvr.h`) shows only that rectangle of the board,
 scaled to fill the frame, aspect kept, centred. With no VIEW it is the whole
-board: 1.25 at (10,0) in 640x480, as before #471, or 1.0 at (8,0) under
-FRAME512.
+board: 1.25 at (10,0) in 640x480, the layout #471's revert kept.
 
 - **m2-sonic's disc is `VIEW=88,80,320,224`**: 2.0, 640x448 at (0,16).
 - **At a whole-number scale the tile layers are point sampled**
