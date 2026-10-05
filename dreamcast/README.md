@@ -34,6 +34,9 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # saves under 1% here and costs 136 KB).
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
 # (Flycast stretches it; DREAMCAST-PORT.md #471).
+# HUD=min drops the stats rows: only the board's frames a second, small, top
+# right (Pinboard #475's disc: HUD=min FRAME512=1). Under Flycast a FRAME512
+# picture is enlarged and that corner falls off the screen.
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS
