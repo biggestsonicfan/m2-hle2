@@ -37,6 +37,7 @@ typedef struct {
     int32_t      c0;      /* rc at entry */
     int          halt;
     int          cop_ok;  /* the COP's FIFO is the plain callbacks: its stores queue */
+    int          floor;   /* a handler in service: stop once frame_depth is back to this */
     mem_region_t *geo_r, *geop_r;   /* GEO and GEO_PROGRAM, when they are the plain callbacks */
 } aot_state_t;
 
@@ -82,13 +83,21 @@ static __attribute__((noinline)) void aot_copq_flush(memory_bus_t *bus) {
 }
 #define AOT_COPQ_FLUSH() do { if (g_aot_copq_n) aot_copq_flush(bus); } while (0)
 
+/* After an instruction that can unwind a frame: 1, stop after it, when the
+ * handler in service has returned, so the run loop takes it from there as it
+ * would after an interpreted ret (emu_service_sound_again). */
+static inline int aot_unwound(i960_cpu_t *cpu, aot_state_t *s, const aot_op_t *d) {
+    if (M2_LIKELY(cpu->frame_depth > s->floor)) return 0;
+    s->rn += d->kn & 1023u; s->rc += (int32_t)(d->kn >> 10); s->ip = cpu->sfr.ip;
+    return 1;
+}
 /* The interpreter, out of line. Inlined at every instruction it took a
  * compiler over 6 GB. One that stops the CPU (a frame stack over- or
  * underflow) is not counted, as the run loop does not count it: 1, stop. */
 static __attribute__((noinline)) int aot_x(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
                                            const aot_op_t *d) {
     AOT_COPQ_FLUSH();
-    if (M2_LIKELY(!i960_exec_word(cpu, bus, d->ip, d->w1, d->w2))) return 0;
+    if (M2_LIKELY(!i960_exec_word(cpu, bus, d->ip, d->w1, d->w2))) return aot_unwound(cpu, s, d);
     s->rn += (d->kn & 1023u) + 1u; s->rc += (int32_t)(d->kn >> 10); s->halt = 1; s->ip = d->ip;
     return 1;
 }
@@ -104,7 +113,7 @@ static __attribute__((noinline)) int aot_call(i960_cpu_t *cpu, memory_bus_t *bus
 static __attribute__((noinline)) int aot_ret(i960_cpu_t *cpu, memory_bus_t *bus, aot_state_t *s,
                                              const aot_op_t *d) {
     AOT_COPQ_FLUSH();
-    if (M2_LIKELY(!i960_exec_word(cpu, bus, d->ip, 0x0A000000u, 0))) return 0;
+    if (M2_LIKELY(!i960_exec_word(cpu, bus, d->ip, 0x0A000000u, 0))) return aot_unwound(cpu, s, d);
     s->rn += (d->kn & 1023u) + 1u; s->rc += (int32_t)(d->kn >> 10); s->halt = 1; s->ip = d->ip;
     return 1;
 }
@@ -121,8 +130,8 @@ static __attribute__((noinline)) int aot_slow(i960_cpu_t *cpu, memory_bus_t *bus
     s_timer_cycles_seen = cpu->cycles;
     cpu->cycles += k1 - k2;
     if (aot_x(cpu, bus, s, d)) return 1;
-    if (M2_UNLIKELY(g_emu_attn != s->attn || (g_irqt.intreq & g_irqt.intena & 0x03FFu)
-                    || g_irqt.horizon != s->h0)) {
+    if (M2_UNLIKELY(g_emu_attn != s->attn || g_irqt.horizon != s->h0
+                    || (s->floor < 0 && (g_irqt.intreq & g_irqt.intena & 0x03FFu)))) {
         s->rn += d->kn & 1023u; s->rc += (int32_t)k2; s->ip = cpu->sfr.ip;
         return 1;
     }
@@ -191,8 +200,8 @@ cop_done:
     }
     /* mem_ea's length: the MEMB modes with a displacement are two words */
     cpu->sfr.ip = ip + ((mode == 5u || mode >= 0xCu) ? 8u : 4u);
-    if (M2_UNLIKELY(g_emu_attn != s->attn || (g_irqt.intreq & g_irqt.intena & 0x03FFu)
-                    || g_irqt.horizon != s->h0)) {
+    if (M2_UNLIKELY(g_emu_attn != s->attn || g_irqt.horizon != s->h0
+                    || (s->floor < 0 && (g_irqt.intreq & g_irqt.intena & 0x03FFu)))) {
         s->rn += d->kn & 1023u; s->rc += (int32_t)k2; s->ip = cpu->sfr.ip;
         return 1;
     }
@@ -380,7 +389,18 @@ static uint32_t s_aot_rom_n, s_aot_md_n;
 #define AOT_ROMD(sz) (!(ea_ & ((sz) >= 4u ? 3u : (sz) - 1u))                                       \
                       && ((ea_ < s_aot_rom_n && s_aot_rom_n - ea_ >= (sz)) ? (q_ = s_aot_rom + ea_, 1)  \
                        : (ea_ - MAIN_DATA_BASE < s_aot_md_n && s_aot_md_n - (ea_ - MAIN_DATA_BASE) >= (sz)) \
-                          ? (q_ = s_aot_md + (ea_ - MAIN_DATA_BASE), 1) : 0))
+                          ? (q_ = s_aot_md + (ea_ - MAIN_DATA_BASE), 1) : AOT_ROMP(sz)))
+/* A host that pages the two in (MEM_HOST_PAGING, the Dreamcast): the page
+ * the direct table holds, if it is in; one that is not goes to the helper,
+ * which pages it in (aot_pg, the bus's slow path). The items are aligned, so
+ * they do not cross a page. */
+#if MEM_HOST_PAGING
+static uint32_t s_aot_rp_n, s_aot_mp_n;
+#define AOT_ROMP(sz) ((ea_ < s_aot_rp_n || ea_ - MAIN_DATA_BASE < s_aot_mp_n)                           \
+                      && (q_ = MEM_PAGE(bus->rd_page, ea_)) != NULL && (q_ += ea_ & MEM_PAGE_OFF, 1))
+#else
+#define AOT_ROMP(sz) 0
+#endif
 #if MEM_LE_DIRECT
 #define AOT_OL16(o) (MEM_TALLY(bus->reads, 1), (uint32_t)*(const mem_u16_alias_t *)(q_ + (o)))
 #define AOT_OL32(o) (MEM_TALLY(bus->reads, 1), (uint32_t)*(const mem_u32_alias_t *)(q_ + (o)))
@@ -509,6 +529,12 @@ static inline bool aot_check(memory_bus_t *bus) {
             n = 0;
             while (s_aot_md && n < r->size && MEM_PAGE(bus->rd_page, MAIN_DATA_BASE + n) == s_aot_md + n) n += MEM_PAGE_OFF + 1u;
             s_aot_md_n = n < (r ? r->size : 0u) ? n : (r ? r->size : 0u);
+#if MEM_HOST_PAGING
+            r = mem_find_region(bus, ROM_BASE);
+            s_aot_rp_n = r && r->base == ROM_BASE && MEM_HOST_PAGED(r->data) && !r->read_cb ? r->size : 0u;
+            r = mem_find_region(bus, MAIN_DATA_BASE);
+            s_aot_mp_n = r && r->base == MAIN_DATA_BASE && MEM_HOST_PAGED(r->data) && !r->read_cb ? r->size : 0u;
+#endif
         }
         s_aot_cop_ok = g && g->write_cb == coprogram_write_cb && g->read_cb == coprogram_read_cb
                     && g == mem_find_region(bus, COPROGRAM_BASE + COPROGRAM_SIZE - 4u);
@@ -535,13 +561,14 @@ static inline bool aot_lead(uint32_t ip) {
  * before the timers' horizon. Returns how many ran (0: none here); *halt when
  * the instruction after them stopped the CPU. Called where ib_run is: no
  * interrupt pending, nothing the slow path watches. */
-static inline uint32_t aot_run(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t nmax, uint32_t attn, int *halt) {
+static inline uint32_t aot_run(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t nmax, uint32_t attn,
+                               int floor, int *halt) {
     int64_t room = (int64_t)g_irqt.horizon - (int64_t)g_irqt.pending - 1
                  - (int64_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
     if (room <= 0) return 0;
     aot_state_t s;
     s.ip = cpu->sfr.ip; s.rn = nmax; s.attn = attn; s.h0 = g_irqt.horizon;
-    s.base = cpu->cycles; s.halt = 0;
+    s.base = cpu->cycles; s.halt = 0; s.floor = floor;
     {   /* the devices' plain callbacks, unless a debug tool watches the bus */
         int plain = !wp_armed() && !dl_active();
         s.cop_ok = plain && s_aot_cop_ok;

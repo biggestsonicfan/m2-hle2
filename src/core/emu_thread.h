@@ -413,6 +413,16 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
     emu_offer_sound(ctx);
 }
 
+/* The slow path is only waiting for the handler in service to return: no
+ * vblank, sound kick, breakpoint, halt or debug trap to look at (the flags
+ * after the word, as the run loop's return to the fast path reads them). */
+static inline bool emu_aot_in_service(emu_thread_ctx_t *ctx, uint32_t *attn) {
+    *attn = g_emu_attn;
+    return !g_irqt_vblank && !g_irqt_sound_kick && !ctx->step_over_bp && !ctx->cpu->halted
+        && !bp_armed() && !g_log.warn_triggered && !wp_tripped() && !g_sharc.unknown_triggered
+        && ctx->cpu->frame_depth > s_irq_baseline_depth;
+}
+
 /* ---- The board's clock ------------------------------------------------------
  *
  * The board timers and the vblank both count the i960's cycles (irq_timer.h).
@@ -611,6 +621,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     memory_bus_t *const bus = ctx->bus;
 #if I960_AOT
     const bool aot = aot_check(bus);
+    uint32_t   svc_attn;
 #endif
     int i;
     for (i = 0; i < max_steps; i++) {
@@ -632,7 +643,16 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         if (aot && !slow && !bps && !g_pcprof_on && aot_lead(cpu->sfr.ip)
                 && !(g_irqt.intreq & g_irqt.intena & 0x03FFu)) {
             int halt;
-            uint32_t k = aot_run(cpu, bus, (uint32_t)(max_steps - i), attn, &halt);
+            uint32_t k = aot_run(cpu, bus, (uint32_t)(max_steps - i), attn, -1, &halt);
+            if (M2_UNLIKELY(halt)) { i += (int)k; steps += k; break; }
+            if (k) { g_aot_ops += k; i += (int)k - 1; steps += k - 1; goto ib_ran; }
+        } else if (aot && slow && profile && s_irq_in_service && !g_pcprof_on && aot_lead(cpu->sfr.ip)
+                && emu_aot_in_service(ctx, &svc_attn)) {
+            /* A handler in service, and nothing else the slow path is here
+             * for: until it returns no interrupt is taken, so the run is the
+             * fast path's, ending at the ret that unwinds it (aot_unwound). */
+            int halt;
+            uint32_t k = aot_run(cpu, bus, (uint32_t)(max_steps - i), svc_attn, s_irq_baseline_depth, &halt);
             if (M2_UNLIKELY(halt)) { i += (int)k; steps += k; break; }
             if (k) { g_aot_ops += k; i += (int)k - 1; steps += k - 1; goto ib_ran; }
         }

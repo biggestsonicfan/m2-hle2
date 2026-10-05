@@ -75,6 +75,7 @@
  * and must empty that entry when the page goes), and MEM_HOST_PAGES_RESET()
  * is told when the tables are emptied. */
 #ifndef MEM_HOST_PAGED
+#define MEM_HOST_PAGING 0
 #define MEM_HOST_PAGED(data) 0
 #define MEM_HOST_PAGE_IN(bus, r, addr, write) ((uint8_t *)NULL)
 #define MEM_HOST_PAGES_RESET() ((void)0)

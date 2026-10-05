@@ -23,6 +23,7 @@ static uint8_t *pg_bus_in(struct memory_bus *bus, struct mem_region *r, uint32_t
 static void pg_slots_reset(void);
 static const uint8_t *dc_rom_at(const void *p, uint32_t n);
 
+#define MEM_HOST_PAGING                       1
 #define MEM_HOST_PAGED(data)                  ((uint32_t)(uintptr_t)(data) - PG_VA_BASE < PG_VA_SPAN)
 #define MEM_HOST_PAGE_IN(bus, r, addr, write) pg_bus_in((bus), (r), (addr), (write))
 #define MEM_HOST_PAGES_RESET()                pg_slots_reset()

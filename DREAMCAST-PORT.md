@@ -485,6 +485,45 @@ submit 6.5 ms. 30 fps needs the two together under 33 ms, so neither half
 alone reaches it. The draw side is where assets converted ahead of time can
 help: meshes pre-decoded to strips, and textures pre-converted to `.pvr`.
 
+### Handlers in service, and paged ROM loads (#459)
+
+Two changes, each held by `det_digest --cpu` on the host (identical over 6000
+frames of attract, with and without `--gems`) and the Dreamcast's frame-1500
+hash (69890d7a since #458's audit, e746591c before it; unchanged either way):
+
+- **An interrupt handler runs compiled too.** While a handler is in service
+  the run loop took the slow path, which never entered the AOT code: 688 slow
+  iterations a frame on the host, mostly VsyncScr and the timer handler.
+  `aot_run` now takes a `floor`, the frame depth the handler returns to.
+  `aot_x` and `aot_ret` stop the run once `frame_depth` is back at it
+  (`aot_unwound`), so the run loop sees the return where it always has
+  (`emu_service_sound_again`), and with a floor set `aot_slow` does not stop
+  for a raised interrupt line, since none is taken in service.
+  `emu_aot_in_service` lets it in only with nothing armed: no breakpoint,
+  watchpoint, warn or unknown-COP trigger, no vblank or sound kick pending.
+  Slow iterations went from 688 to 89 a frame.
+- **A load from paged ROM is inline.** `AOT_ROMD` fell back to `aot_slow` for
+  any address outside the resident regions, and on the Dreamcast all of
+  program and data ROM is paged (`MEM_HOST_PAGED`). `AOT_ROMP` reads
+  `bus->rd_page` directly when the page is in; a miss still goes the slow way
+  and pages it in. `MEM_HOST_PAGING` is 0 on every other build, so the host's
+  code is unchanged.
+
+| f3500-3900 (400 frames) | total | i960 slices | draws |
+|---|---|---|---|
+| before #458 (b44) | 14948 ms | 5881 ms | 9007 ms |
+| before #458, with both (b46) | 14494 ms | 5453 ms | 8981 ms |
+| after #458 (b48) | 15995 ms | 6964 ms | 8963 ms |
+| after #458, with both (b47) | 15519 ms | 6506 ms | 8942 ms |
+
+The slice is 6.6-7.3% shorter. #458's audit made it ~1.1 s slower over these
+400 frames on its own (the cmpr NaN fix and the Gems trap checks). What the AOT still misses is small: per host frame
+~11.5k instructions compiled, 372 interpreted (a long tail, 0x19CD4 the most at
+32) and 1285 in the block runner. The i960 slice is now mostly Gems C, hooks
+and the COP, not interpretation. Two ideas were measured and dropped: inlining
+`call` / `ret` (a few percent of the slice, but code size the heap cannot
+spare) and a higher `AOT_COVER` (no memory for it).
+
 ## Flycast charges the MMU a third of the frame (#394, part 12)
 
 Part 12's changes, each checked by the frame-1500 hash (88ddb134) and the
@@ -684,8 +723,8 @@ e746591c in every build below).
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
   texture fields) would let the mesh arena (768 KB) hold more.
-- **The i960 slice (53-79 ms a frame after #370's blocks).** Not the COP /
-  GEO stores (#392 measured ~4% for the bus and COP together). Keeping the hot
-  `cpu` / `bus` state in the 8 KB operand-cache RAM mode.
+- **The i960 slice (~14 ms a frame after #459).** The AOT covers nearly all
+  of it; what is left is Gems C, hooks and the COP. Keeping the hot `cpu` /
+  `bus` state in the 8 KB operand-cache RAM mode.
 - **Optional:** modifier-volume shadows; dropping SDL2 and GLdc for KOS's
   `snd_stream` directly.
