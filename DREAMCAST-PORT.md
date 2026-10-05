@@ -721,6 +721,28 @@ emulates in software. The guards are in the private Gems directory.
   357 ms against 539 (disc reads 162 against 273). Flycast's disc is fast; on
   a GD-ROM every load is a seek.
 
+## The board's picture at its own size (#471)
+
+The board's 496x384 is drawn pixel for pixel, centred, black around it
+(`dc_pvr.h`, `DC_X0` / `DC_Y0`). It used to be scaled by 1.25 to fill the
+640x480 frame's height.
+
+- **The default frame is still the cable's 640x480**, with the board at
+  (72, 48). The bars over the 3D past its screen go on all four sides.
+- **`make FRAME512=1` makes the frame itself 512x384**, set in the middle of the
+  640x480 signal (`dc_video_mode`: `bitmapx` +64, `bitmapy` +48 lines, 24 a
+  field interlaced), with the board 8 pixels in: the PVR renders whole
+  32-pixel tiles, and 496 is not a multiple of 32. The signal and the picture
+  are the same on a Dreamcast, with 192 tiles rendered instead of 300 and
+  ~440 KB less framebuffer. That is not tested on hardware.
+- **Flycast does not show it that way.** Its renderer stretches the TA's
+  frame to fill its output (512x384 x 1.25) and then moves it by the change
+  in `VO_STARTX`/`VO_STARTY`, so the picture came out enlarged and cut off on
+  the right. Hence the default.
+- **No time either way in Flycast**, which does not charge PVR tile rendering:
+  the bench is 15435 ms against 15431, the frame 1500 hash a5d21d21 as before.
+  The text rows are drawn at 0.8 in the 512x384 frame, so that 20 fit.
+
 ## Held against MAME over the serial port (#461)
 
 `make LINK=1` builds a disc that plays attract's replay fight (tools/README.md,

@@ -32,6 +32,8 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # it is there) builds in Sega's C from Sonic Gems Collection; GEMS= leaves it
 # out. OPTAB=1 dispatches the interpreter through a handler table (off: it
 # saves under 1% here and costs 136 KB).
+# FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
+# (Flycast stretches it; DREAMCAST-PORT.md #471).
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS
