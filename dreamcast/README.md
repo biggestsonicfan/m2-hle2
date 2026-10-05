@@ -35,6 +35,8 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
 # (Flycast stretches it; DREAMCAST-PORT.md #471). VIEW=x,y,w,h shows only that
 # rectangle of the board's 496x384, scaled to fill the frame (#479).
+# FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
+# whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS
@@ -178,6 +180,8 @@ m2-pacman's `pacman_geo` and [m2-sonic](https://github.com/biggestsonicfan/m2-so
 draw their sprites as polygons through the GEO, so they have discs of their own
 (Pinboard #469). Build the game with its debug panel off, and the disc with
 `HUD=min`: nothing on screen but the board's frames a second, small, top right.
+`FPS_CAP=60` (the default) keeps them at 60 of those a second at most: under
+an emulator `pacman_geo` ran at 74 (Pinboard #490).
 
 ```sh
 # m2-pacman, panel off: roms/pacman_geo/game.bin
