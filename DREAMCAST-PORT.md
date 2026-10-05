@@ -696,6 +696,66 @@ e746591c in every build below).
   clock; here the board's timers feed `rand` and the loader's yield, so they
   stay on the i960's cycle clock, as on every other build.
 
+## Held against MAME over the serial port (#461)
+
+`make LINK=1` builds a disc that plays attract's replay fight (tools/README.md,
+"match_replay") with the arcade profile, region Japan, and sends both fighters
+over the SH-4's SCIF at every game frame edge (`dreamcast/dc_link.h`). Flycast's
+libretro core carries the port to a TCP socket (`dreamcast/tools/flycast-scif.patch`),
+and `tools/dc-lockstep.py` runs MAME's `match-replay.lua` on the other end. The
+Dreamcast waits for the host's word after every frame, so it never runs past a
+frame the host has not checked. At the first difference the host asks for the
+whole frame and names the words.
+
+A frame's record is the fight state (`+0..+0x1F8`) raw, plus a CRC-32 for every
+0x100 bytes of the rest of both work structures and of the bufferram the i960
+reads back: 1.4 KB, where the whole frame is 28 KB. 1299 frames take ~100 s.
+
+What it took for the Dreamcast to compute the desktop's fight:
+
+- **The COP's sin and cos come from the copro ROM's tables**
+  (`sharc_sincos`), which the disc does not have. `SINCOS.BIN`
+  (`dreamcast/tools/mksincos.py`, 512 KB from the player's arcade set) is
+  `g_sharc_sincos`. libm's `sinf` / `cosf` differ in the low bit, and 418 words
+  were off from the first frame.
+- **`-ffp-contract=off`, as on the desktop.** sh-elf gcc fuses `a*b+c` into
+  `fmac` at `-O2`, and the result is rounded once instead of twice. With the
+  tables alone, 309 words were still one ulp off at +0. `LINK=1` adds the flag.
+  The game build does not: on screen nobody sees an ulp, and the flag costs
+  time.
+
+With both, the fight is MAME's for all 1299 frames: motion, energy and the
+whole fight state. The rest parts from MAME exactly where the desktop build does
+(tools/README.md, "match_replay"):
+
+- `P1+0x1114` at +321;
+- the rig at +532;
+- the sign of zero at `0x90E804` from +0.
+
+`--peer` holds the Dreamcast to a desktop run of the same build
+(`match-replay.mjs --out`). Every word the two send matches through +579. At
++580 `P1+0x1FB0`, a value decaying toward zero, reaches the denormal
+`0x006047D0` on the desktop and in MAME, and 0 on the Dreamcast.
+
+- **KOS runs the SH-4 with FPSCR.DN = 1** (`startup.S`: `0x00040000`), so a
+  denormal result is flushed to zero. With DN = 0 the SH-4 traps on a denormal
+  operand (the FPU error cause cannot be masked), so this is not a flag to
+  flip. It has not reached the fight in this replay.
+
+```sh
+cd dreamcast && make LINK=1 VENDOR=../vendor OUT=<dir>   # LINK_GEMS=1: Gems' C on
+python3 tools/mksincos.py <sfight.zip> SINCOS.BIN
+SINCOS=SINCOS.BIN sh mkdisc.sh <dir> <stf_rom> <disc> STF.AFS
+python3 ../tools/dc-lockstep.py --gdi <disc>/m2hle2.gdi --core <patched flycast_libretro.so> \
+    --retroarch-config <cfg> [--ref mame.bin] [--peer <desk>/here]
+```
+
+Without a host on the line, the hello goes unanswered for 3 s and the disc runs
+the replay unlinked, so it boots on a plain emulator or a console with no cable.
+On a console, a serial cable to a PC at 1.5625 Mbaud carries the same protocol.
+`--listen PORT` already waits for a Dreamcast started by hand. A reader for the
+serial device has not been written.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
@@ -709,7 +769,9 @@ e746591c in every build below).
   reads costs (`scif_write`, ~2% of a fight), so `main_dc.c` points dbgio at
   `null` (#370).
 - **The libretro core has no serial console.** dbgio output is lost, so the
-  stats and the halt diagnostics are drawn on screen (`dc_text`).
+  stats and the halt diagnostics are drawn on screen (`dc_text`). With
+  `dreamcast/tools/flycast-scif.patch`, `FLYCAST_SCIF=host:port` carries the
+  SCIF to a TCP socket (#461).
 - **KOS's newlib has no `sched_yield` and no `FIONREAD`.** thread_mutex.h uses
   `thd_pass`, and net_socket.h stubs the ioctl.
 

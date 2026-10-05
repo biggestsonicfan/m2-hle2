@@ -175,6 +175,10 @@ static inline float sharc_angle_to_rad(int32_t fp) {
  * leaves it alone. NULL on a board/profile that did not load one. */
 static const uint8_t *g_sharc_copro_rom      = NULL;
 static size_t         g_sharc_copro_rom_size = 0;
+/* The same two tables alone, for a host with no copro ROM in memory (the
+ * Dreamcast's link disc, dreamcast/tools/mksincos.py): 0x10000 words of sin
+ * (ROM words 0x8000..0x17FFF), then 0x10000 of cos (0x28000..0x37FFF). */
+static const uint32_t *g_sharc_sincos = NULL;
 
 /* sin/cos of a signed 16-bit angle the way the firmware takes them (_L202C1):
  * straight out of the ROM, sin at DM 0x1C10000 + angle, cos 0x20000 further on.
@@ -187,6 +191,11 @@ static inline void sharc_sincos(int32_t angle, float *s, float *c) {
     if (g_sharc_copro_rom && g_sharc_copro_rom_size >= 0x38000u * 4u) {
         memcpy(s, g_sharc_copro_rom + (size_t)(0x10000 + a) * 4u, 4);
         memcpy(c, g_sharc_copro_rom + (size_t)(0x30000 + a) * 4u, 4);
+        return;
+    }
+    if (g_sharc_sincos) {
+        memcpy(s, &g_sharc_sincos[0x08000 + a], 4);
+        memcpy(c, &g_sharc_sincos[0x18000 + a], 4);
         return;
     }
     float r = sharc_angle_to_rad(angle);

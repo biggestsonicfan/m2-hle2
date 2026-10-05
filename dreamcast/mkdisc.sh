@@ -10,6 +10,8 @@
 # game runs silent. MODELS.PAK, the meshes and UV streams the game draws laid
 # out scene by scene (tools/dc_mdlpack.py, dc_pager.h), is made here from
 # rom_pol.bin and rom_tex.bin and dreamcast/sfight.mdlmap; NOPAK=1 leaves it out.
+# SINCOS=<file> adds the COP's sin/cos tables (tools/mksincos.py, from the
+# player's arcade set), which the link to MAME needs (dc_link.h).
 #
 # Three tracks, as a real GD-ROM: track 1 a small ISO in the low-density area
 # (an emulator reads none of it), track 2 an empty audio track, track 3 the
@@ -33,6 +35,7 @@ for f in rom_code1 rom_data rom_ep rom_pol rom_tex; do
     set -- "$@" "$(echo $f | tr a-z A-Z).BIN=$roms/$f.bin"
 done
 [ -z "$afs" ] || set -- "$@" "STF.AFS=$afs"
+[ -z "${SINCOS:-}" ] || set -- "$@" "SINCOS.BIN=$SINCOS"
 if [ -z "${NOPAK:-}" ]; then
     here=$(dirname "$0")
     python3 "$here/../tools/dc_mdlpack.py" --map "$here/sfight.mdlmap" --roms "$roms" --out "$disc/MODELS.PAK" >/dev/null
