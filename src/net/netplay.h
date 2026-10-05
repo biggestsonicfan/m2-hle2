@@ -189,8 +189,11 @@ static inline void netplay_board_stopped(uint32_t ip, bool halted) { (void)ip; (
  * 14: the room state's PLAYER MATCH rules (rounds, time, game type, secret
  *    character; room.h), which the cold boot applies; a board before it plays
  *    the factory rules whatever the room says (Pinboard #333).
+ * 15: Fn_area_coli no longer lets a NaN ball through the SHARC's compares the
+ *    wrong way, and the i960's cmpr sets 000 for an unordered compare. The
+ *    attract fight's push-out limits differed from frame +510 (Pinboard #454).
  */
-#define NETPLAY_PROTO_REV 14
+#define NETPLAY_PROTO_REV 15
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

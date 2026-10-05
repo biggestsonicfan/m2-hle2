@@ -1052,9 +1052,12 @@ static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, ui
                 {
                     double a = FP_SRC1;
                     double b = FP_SRC2;
+                    /* Unordered (a NaN) is 000, not greater (MAME cmp_d, the
+                     * i960 manual): `cmpr; bge` does not take it. */
                     if (a < b)       set_cc(cpu, CC_L);
                     else if (a == b) set_cc(cpu, CC_E);
-                    else             set_cc(cpu, CC_G);
+                    else if (a > b)  set_cc(cpu, CC_G);
+                    else             set_cc(cpu, CC_NO);
                     break;
                 }
 
