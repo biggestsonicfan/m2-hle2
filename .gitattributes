@@ -8,3 +8,4 @@ packaging/libretro/*.sh text eol=lf
 tools/*.sh text eol=lf
 # dreamcast/mkdisc.sh runs under bash in the dev container.
 dreamcast/*.sh text eol=lf
+dreamcast/tools/*.sh text eol=lf
