@@ -629,6 +629,19 @@ e746591c in every build below).
     nothing, so it shows no gain there (14.5 s → 15.1 s); on a GD-ROM every
     load is a seek. Not measured on hardware.
   - The 40 left are reads the map missed or that cross a run's end.
+- **Textures converted at build time do not pay here, so there is no texture
+  pack.** Gems' `TEX_STG*` files look like each stage's textures, already
+  decompressed and converted. The two costs that would remove, measured over
+  ~490 s of attract in Flycast:
+  - The decompressor: the 812 slices in which STF's loader ran took 20.8 s,
+    against ~11 s for as many ordinary slices. 7.4 s of that is its rows in C
+    (`m2_texload.h`), and they wrote 11.9 MB of texram. A pack of what each
+    request writes would be read off the disc instead, and at a GD-ROM's
+    ~1.5 MB/s 12 MB takes about as long as the rows. Trapping the request
+    would also change the board's timing (the loader yields on timer 4,
+    which `rand` reads).
+  - The conversion: cutting and twiddling tiles for the PVR (`dp_tex_get`)
+    took 2.2 s, under 0.5%.
 
 ## Toolchain and runtime traps
 
