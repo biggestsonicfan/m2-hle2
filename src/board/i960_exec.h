@@ -295,6 +295,22 @@ static inline unsigned i960_cycle_cost(uint32_t word1) {
 static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
                                           uint32_t word1, uint32_t word2);
 
+/* I960_OPTABLE: the interpreter dispatches through a table of handlers, one
+ * per opcode byte and one per REG opcode and function, each i960_exec_word
+ * with those bits constant, so its two switches fold away: one indexed call
+ * an instruction (GEMS-COLLECTION.md, "pre-decode the instructions the AOT
+ * leaves to the interpreter"). Sonic Gems Collection does it with a second,
+ * pre-decoded program image; here the index is three operations on the word,
+ * so the image would only cost the Dreamcast's pager a second megabyte. Off
+ * by default: it is the same instructions, in more code. */
+#ifndef I960_OPTABLE
+#define I960_OPTABLE 0
+#endif
+#if I960_OPTABLE
+static I960_HOT_INLINE int i960_exec_tab(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                         uint32_t word1, uint32_t word2);
+#endif
+
 static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t room) {
     // Check HLE hooks before executing
     if (M2_UNLIKELY(hle_check_synced(cpu, bus, room) == 0)) {
@@ -307,7 +323,11 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
     mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
     /* The board's clock: the timers and the vblank count these (irq_timer.h). */
     cpu->cycles += i960_cycle_cost(word1);
+#if I960_OPTABLE
+    return i960_exec_tab(cpu, bus, ip, word1, word2);
+#else
     return i960_exec_word(cpu, bus, ip, word1, word2);
+#endif
 }
 
 /* The instruction at `ip` whose words are word1, word2, after its fetch and
@@ -1205,6 +1225,48 @@ static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, ui
     cpu->sfr.ip = ip + instr_len;
     return 0;
 }
+
+#if I960_OPTABLE
+typedef int (*i960_op_fn_t)(i960_cpu_t *, memory_bus_t *, uint32_t, uint32_t, uint32_t);
+/* The opcode byte n, from CTRL, COBR and MEM (n < 0x40 or 0x80 <= n < 0xD0). */
+#define I960_OPB(n) \
+    static int i960_op_##n(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip, uint32_t w1, uint32_t w2) { \
+        return i960_exec_word(cpu, bus, ip, (w1 & 0x00FFFFFFu) | (uint32_t)(n) << 24, w2); }
+/* REG opcode byte 0x58 + (n >> 4), function n & 15. */
+#define I960_OPR(n) \
+    static int i960_opr_##n(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip, uint32_t w1, uint32_t w2) { \
+        return i960_exec_word(cpu, bus, ip, (w1 & 0x00FFF87Fu) | (uint32_t)(0x58 + ((n) >> 4)) << 24 \
+                                            | (uint32_t)((n) & 15) << 7, w2); }
+/* Octal-free spelling: n as 0x<hi><lo>, with the digits pasted. */
+#define I960_H16(M, h) M(0x##h##0) M(0x##h##1) M(0x##h##2) M(0x##h##3) M(0x##h##4) M(0x##h##5) M(0x##h##6) M(0x##h##7) \
+                       M(0x##h##8) M(0x##h##9) M(0x##h##A) M(0x##h##B) M(0x##h##C) M(0x##h##D) M(0x##h##E) M(0x##h##F)
+#define I960_BYTES(M) I960_H16(M, 0) I960_H16(M, 1) I960_H16(M, 2) I960_H16(M, 3) \
+                      I960_H16(M, 8) I960_H16(M, 9) I960_H16(M, A) I960_H16(M, B) I960_H16(M, C)
+#define I960_REGS(M)  I960_H16(M, 0) I960_H16(M, 1) I960_H16(M, 2) I960_H16(M, 3) I960_H16(M, 4) \
+                      I960_H16(M, 5) I960_H16(M, 6) I960_H16(M, 7) I960_H16(M, 8) I960_H16(M, 9) \
+                      I960_H16(M, A) I960_H16(M, B) I960_H16(M, C) I960_H16(M, D) I960_H16(M, E) \
+                      I960_H16(M, F) I960_H16(M, 10) I960_H16(M, 11) I960_H16(M, 12) I960_H16(M, 13) \
+                      I960_H16(M, 14) I960_H16(M, 15) I960_H16(M, 16) I960_H16(M, 17) I960_H16(M, 18) \
+                      I960_H16(M, 19) I960_H16(M, 1A) I960_H16(M, 1B) I960_H16(M, 1C) I960_H16(M, 1D) \
+                      I960_H16(M, 1E) I960_H16(M, 1F) I960_H16(M, 20) I960_H16(M, 21) I960_H16(M, 22) \
+                      I960_H16(M, 23) I960_H16(M, 24) I960_H16(M, 25) I960_H16(M, 26) I960_H16(M, 27)
+I960_BYTES(I960_OPB)
+I960_REGS(I960_OPR)
+static int i960_op_any(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip, uint32_t w1, uint32_t w2) {
+    return i960_exec_word(cpu, bus, ip, w1, w2);
+}
+#define I960_OPB_AT(n) [n] = i960_op_##n,
+#define I960_OPR_AT(n) [0x100 + (n)] = i960_opr_##n,
+/* [0, 0x100): by opcode byte; [0x100, 0x380): REG by (byte - 0x58) << 4 | function. */
+static const i960_op_fn_t g_i960_optab[0x380] = { I960_BYTES(I960_OPB_AT) I960_REGS(I960_OPR_AT) };
+
+static I960_HOT_INLINE int i960_exec_tab(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                         uint32_t word1, uint32_t word2) {
+    uint32_t op = word1 >> 24, r = op - 0x58u;
+    i960_op_fn_t f = g_i960_optab[r < 0x28u ? 0x100u + (r << 4 | ((word1 >> 7) & 0xFu)) : op];
+    return (f ? f : i960_op_any)(cpu, bus, ip, word1, word2);
+}
+#endif
 
 /* One instruction, from anywhere: syncs the hook filter itself. */
 static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
