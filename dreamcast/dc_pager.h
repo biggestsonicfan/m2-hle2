@@ -24,6 +24,13 @@
  *   - anonymous: zero until first touched, then pinned (vid_ext_ram, 7 MB of
  *     which a game uses a little). pg_anon_clear() zeroes them for a reset.
  *
+ * The model pack (MODELS.PAK, tools/dc_mdlpack.py): the polygon and texture
+ * ROM bytes the 3D decoder reads, scene by scene, in the order the game first
+ * reads them. In the ROM one scene's meshes and UV streams lie scattered over
+ * 32 MB, a page or two per model. dc_rom_at serves a read the pack holds from
+ * the pack's own window, after the ROM's; anything else comes from the ROM.
+ * Without the file on the disc everything does.
+ *
  * The disc: pg_read() talks to the GD-ROM syscalls directly and polls (it was
  * written for the miss handler, an exception, where KOS's cdrom driver may not
  * be used). Nothing else may use the drive once the pager is up.
@@ -75,6 +82,14 @@ typedef struct {
     /* counters */
     uint32_t refills, loads, zero_fills, anon_fills, evictions, read_errors, rom_writes, bounces;
     uint64_t read_ns;
+    uint32_t rg_loads[DC_REGIONS];   /* loads by the region the page is in */
+    uint32_t at_loads;               /* loads for dc_rom_at, not the bus */
+    uint32_t pak_loads;              /* of the model pack's pages */
+    uint8_t  in_at;
+    /* the model pack */
+    uint32_t          pak_first, pak_pages;    /* its window pages, after the ROM's */
+    const uint32_t   *pak;           /* npak entries: address (polygons, then textures), length, pack offset */
+    uint32_t          npak;
 } pager_t;
 
 static pager_t g_pg;
@@ -172,6 +187,13 @@ static uint32_t pg_fault(uint32_t v) {
         }
         g->read_ns += timer_ns_gettime64() - t0;
         g->loads++;
+        if (v - g->pak_first < g->pak_pages) g->pak_loads++;
+        else {
+            int r = DC_REGIONS - 1;
+            while (r > 0 && v < g->first[r]) r--;
+            g->rg_loads[r]++;
+        }
+        g->at_loads += g->in_at;
     }
     f->vpage = v;
     f->ref = 1;
@@ -215,6 +237,22 @@ static void pg_slots_reset(void) {
     for (uint32_t i = 0; i < g_pg.nframes; i++) g_pg.fr[i].nslot = 0;
 }
 
+/* Window address a of the polygons or textures, moved to the model pack's
+ * window if the pack holds its n bytes. */
+static uint32_t pg_pak_at(uint32_t a, uint32_t n) {
+    pager_t *g = &g_pg;
+    uint32_t pa = a - (g->first[3] << PG_SHIFT);
+    if (pa >= (g->first[5] - g->first[3]) << PG_SHIFT) return a;
+    uint32_t lo = 0, hi = g->npak;                   /* the last entry at or below pa */
+    while (hi - lo > 1) {
+        uint32_t mid = (lo + hi) / 2;
+        if (g->pak[mid * 3] <= pa) lo = mid; else hi = mid;
+    }
+    const uint32_t *e = &g->pak[lo * 3];
+    if (pa < e[0] || pa + n > e[0] + e[1]) return a;
+    return (g->pak_first << PG_SHIFT) + e[2] + (pa - e[0]);
+}
+
 /* The n bytes at p as plain memory: p itself outside the windows, else their
  * place in a frame (good until the next PG_RECENT calls), or a copy when they
  * straddle two pages. */
@@ -222,10 +260,13 @@ static const uint8_t *dc_rom_at(const void *p, uint32_t n) {
     uint32_t a = (uint32_t)(uintptr_t)p - PG_VA_BASE;
     if (a >= PG_VA_SPAN) return (const uint8_t *)p;
     pager_t *g = &g_pg;
+    if (g->npak) a = pg_pak_at(a, n ? n : 1);
     uint32_t v = a >> PG_SHIFT, off = a & (PG_SIZE - 1u);
     if (v >= g->npages) return (const uint8_t *)p;
     if (off + n <= PG_SIZE) {
+        g->in_at = 1;
         uint32_t fi = pg_fault(v);
+        g->in_at = 0;
         g->recent[g->rhead++ % PG_RECENT] = fi;
         return g->pool + fi * PG_SIZE + off;
     }
@@ -234,7 +275,9 @@ static const uint8_t *dc_rom_at(const void *p, uint32_t n) {
     uint8_t *b = bounce[bi++ % PG_RECENT];
     for (uint32_t i = 0; i < n && i < sizeof bounce[0]; i++) {
         uint32_t ai = a + i;
+        g->in_at = 1;
         b[i] = g->pool[pg_fault(ai >> PG_SHIFT) * PG_SIZE + (ai & (PG_SIZE - 1u))];
+        g->in_at = 0;
     }
     g->bounces++;
     return b;
@@ -271,6 +314,25 @@ static uint32_t pg_find_file(const char *name, uint32_t *size) {
     return 0;
 }
 
+/* The model pack's index, if the disc has one; its data's FAD and size. */
+static int pg_pak_open(uint32_t *fad, uint32_t *size) {
+    static uint8_t sec[2048] __attribute__((aligned(32)));
+    pager_t *g = &g_pg;
+    uint32_t fsize = 0, f = pg_find_file("MODELS.PAK", &fsize);
+    if (!f || pg_read(sec, f, 1) != 0 || memcmp(sec, "M2PK", 4)) return 0;
+    uint32_t n, off;
+    memcpy(&n, sec + 4, 4);
+    memcpy(&off, sec + 8, 4);
+    if (!n || off % DC_SECTOR || off < 12 + 12 * n || off >= fsize) return 0;
+    uint8_t *idx = memalign(32, off);
+    if (!idx || pg_read(idx, f, off / DC_SECTOR) != 0) { free(idx); return 0; }
+    g->pak = (const uint32_t *)(idx + 12);
+    g->npak = n;
+    *fad = f + off / DC_SECTOR;
+    *size = fsize - off;
+    return 1;
+}
+
 /* Lay the regions out as windows, every page pointing at its sectors, and
  * make the frame pool. anon_bytes reserves window space for pg_anon(). */
 static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_bytes) {
@@ -280,6 +342,12 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
     for (int r = 0; r < DC_REGIONS; r++) {
         g->first[r] = g->nrom;
         g->nrom += (lay->rg[r].size + PG_SIZE - 1) / PG_SIZE;
+    }
+    uint32_t pak_fad = 0, pak_size = 0;
+    if (pg_pak_open(&pak_fad, &pak_size)) {
+        g->pak_first = g->nrom;
+        g->pak_pages = (pak_size + PG_SIZE - 1) / PG_SIZE;
+        g->nrom += g->pak_pages;
     }
     g->npages = g->nrom + anon_bytes / PG_SIZE + PG_MAX_ANON * 4;
     if ((uint64_t)g->npages << PG_SHIFT > PG_VA_SPAN) { printf("pager: the windows overflow\n"); return -1; }
@@ -320,14 +388,26 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
         }
     }
 
+    for (uint32_t i = 0; i < g->pak_pages; i++) {
+        uint32_t v = g->pak_first + i;
+        g->src[v] = pak_fad + i * (PG_SIZE / DC_SECTOR);
+        if (pak_size - i * PG_SIZE < PG_SIZE) {
+            if (g->npart == PG_MAX_PART) { printf("pager: more than %d part pages\n", PG_MAX_PART); return -1; }
+            g->part[g->npart].v = v;
+            g->part[g->npart].valid = (uint16_t)(pak_size - i * PG_SIZE);
+            g->part[g->npart].fill = 0;
+            g->npart++;
+        }
+    }
+
     g->nframes = cache_bytes / PG_SIZE;
     g->pool = memalign(32, g->nframes * PG_SIZE);
     g->fr   = calloc(g->nframes, sizeof *g->fr);
     if (!g->pool || !g->fr) return -1;
     for (uint32_t i = 0; i < g->nframes; i++) g->fr[i].vpage = ~0u;
     for (int i = 0; i < PG_RECENT; i++) g->recent[i] = ~0u;
-    printf("pager: %s, %u ROM pages, %u KB cache\n", lay->profile,
-           (unsigned)g->nrom, (unsigned)(g->nframes * (PG_SIZE >> 10)));
+    printf("pager: %s, %u ROM pages, %u KB cache, model pack: %u runs\n", lay->profile,
+           (unsigned)g->nrom, (unsigned)(g->nframes * (PG_SIZE >> 10)), (unsigned)g->npak);
     return 0;
 }
 

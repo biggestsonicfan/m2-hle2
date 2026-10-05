@@ -56,6 +56,11 @@
  * frames, as MAME does. --peek HEXADDR adds that byte to each line (the mode
  * at 50002A, the sub-mode at 500030), to pair frames with a MAME log.
  *
+ * --model-map F0:F1:FILE decodes every display list of frames F0..F1 as the
+ * Dreamcast's renderer does, uncut, and writes each run of 64-byte lines of
+ * the polygon and texture ROMs it read with the frame that first read it
+ * (dreamcast/sfight.mdlmap, tools/dc_mdlpack.py).
+ *
  * Two builds of it, one from each configuration, so each has exactly its
  * frontend's compiler flags:
  *   native  --target det_digest in a desktop build tree (not a ctest: it needs a ROM)
@@ -81,6 +86,11 @@
 #include "sound.h"
 #include "input.h"
 #include "registry.h"
+
+/* --model-map: the 3D decoder's ROM reads come through mdlmap_rom. */
+static const uint8_t *mdlmap_rom(const void *p, uint32_t n);
+#define GEO3D_ROM(p, n) mdlmap_rom((p), (n))
+#include "geo3d.h"
 
 static memory_bus_t     bus;
 static i960_cpu_t       cpu;
@@ -255,6 +265,85 @@ static void aotmap_write(memory_bus_t *b, const char *path) {
                     aotmap_hits[k], aotmap_jump[k]);
     for (size_t i = 0; i < g_active_profile->hook_count; i++)
         fprintf(aotmap_out, "hook %08x\n", g_active_profile->hooks[i].addr);
+}
+
+/* --model-map F0:F1:FILE: the polygon and texture ROM bytes the 3D decoder
+ * reads for those game frames' display lists, for the Dreamcast's model pack
+ * (tools/dc_mdlpack.py). Each list is decoded as dc_pvr.h's dp_decode does,
+ * with nothing culled, so every face's mesh and UV words are read. Then a line
+ * per run of 64-byte lines first read in the same frame: region (po, tx),
+ * offset, length, that frame. Addresses only. */
+#define MDLMAP_LINE 64u
+static FILE     *mdlmap_out;
+static uint32_t  mdlmap_from, mdlmap_to;
+static uint32_t *mdlmap_first[2];      /* polygons, textures: per line, the first frame + 1 */
+static int       mdlmap_on;
+
+static const uint8_t *mdlmap_rom(const void *p, uint32_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    if (!mdlmap_on) return b;
+    const uint8_t *base[2] = { romset.polygons, romset.textures };
+    size_t size[2] = { romset.polygons_size, romset.textures_size };
+    for (int r = 0; r < 2; r++) {
+        if (!base[r] || b < base[r] || b >= base[r] + size[r]) continue;
+        uint32_t o = (uint32_t)(b - base[r]), e = o + (n ? n : 1u) - 1u;
+        for (uint32_t l = o / MDLMAP_LINE; l <= e / MDLMAP_LINE && l < size[r] / MDLMAP_LINE; l++)
+            if (!mdlmap_first[r][l]) mdlmap_first[r][l] = g_emu_frames + 1u;
+    }
+    return b;
+}
+
+static void mdlmap_frame(void) {
+    static geo3d_state_t geo;
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
+    for (int r = 0; r < 2; r++)
+        if (!mdlmap_first[r]) mdlmap_first[r] = calloc((r ? romset.textures_size : romset.polygons_size) / MDLMAP_LINE + 1, 4);
+    const uint32_t *snap = g_geodl_snap;
+    if (!geo3d_scan_geo_list(&geo, snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
+                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
+                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    g_geo_rs = geodl_raster_for(snap);
+    g_geo3d_palram = bus.palette;
+    g_geo3d_palram_size = PALETTE_SIZE;
+    g_geo3d_mesh_epoch++;
+    mdlmap_on = 1;
+    for (int k = 0; k < geo.captured_count; k++) {
+        const captured_model_t *cm = &geo.captured[k];
+        if (cm->direct_len || cm->model_idx < 0) continue;      /* polygon RAM: not ROM */
+        geo3d_tris_reset();
+        geo3d_lines_reset();
+        g_geo3d_obj_tpa = cm->tpa;
+        g_geo3d_obj_tha = cm->tha;
+        g_geo3d_mode = cm->geo_mode;
+        g_geo3d_zadjust = cm->zadjust;
+        g_geo3d_lod = cm->geo_lod;
+        geo3d_decode_model_cached(cm->model_idx, romset.main_data, romset.main_data_size,
+                                  romset.polygons, romset.polygons_size, romset.textures, romset.textures_size,
+                                  q->model_table_offset, q->model_table_count, q->mesh_ptr_subtract, q->mesh_ptr_add,
+                                  cm->matrix, cm->color[0], cm->color[1], cm->color[2]);
+        g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
+    }
+    mdlmap_on = 0;
+    g_geo3d_palram = NULL;
+}
+
+static void mdlmap_write(void) {
+    static const char *name[2] = { "po", "tx" };
+    size_t size[2] = { romset.polygons_size, romset.textures_size };
+    fprintf(mdlmap_out, "# The polygon (po) and texture (tx) ROM bytes STF's 3D decoder reads, by the\n"
+                        "# game frame that first reads them (det_digest --model-map), for\n"
+                        "# tools/dc_mdlpack.py: `region offset length frame`, addresses only.\n");
+    for (int r = 0; r < 2; r++) {
+        uint32_t nl = (uint32_t)(size[r] / MDLMAP_LINE);
+        for (uint32_t l = 0; mdlmap_first[r] && l < nl;) {
+            uint32_t f = mdlmap_first[r][l], e = l + 1;
+            if (!f) { l++; continue; }
+            while (e < nl && mdlmap_first[r][e] == f) e++;
+            fprintf(mdlmap_out, "%s %06x %x %u\n", name[r], l * MDLMAP_LINE, (e - l) * MDLMAP_LINE, f - 1u);
+            l = e;
+        }
+    }
 }
 
 #if I960_BLOCKS
@@ -488,6 +577,14 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (!strcmp(argv[i], "--model-map") && i + 1 < argc) {
+            char path[1024] = {0};
+            if (sscanf(argv[++i], "%u:%u:%1023s", &mdlmap_from, &mdlmap_to, path) != 3
+                    || !(mdlmap_out = fopen(path, "wb"))) {
+                fprintf(stderr, "--model-map F0:F1:FILE\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
@@ -586,6 +683,7 @@ int main(int argc, char **argv) {
                 mismatches++;
             }
         }
+        if (r == EMU_SLICE_FRAME && mdlmap_out && g_emu_frames >= mdlmap_from && g_emu_frames <= mdlmap_to) mdlmap_frame();
         if (r != EMU_SLICE_FRAME || g_emu_frames < from) continue;
         uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
         uint64_t ram  = fnv(fnv(FNV0, bus.ram, RAM_SIZE), bus.ram2, RAM2_SIZE);
@@ -614,6 +712,7 @@ int main(int argc, char **argv) {
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
     if (aotmap_out) { aotmap_write(&bus, aotmap_path); fclose(aotmap_out); }
+    if (mdlmap_out) { mdlmap_write(); fclose(mdlmap_out); }
 #if I960_BLOCKS
     if (census_out) { census_write(); fclose(census_out); }
 #endif

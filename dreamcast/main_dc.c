@@ -281,9 +281,12 @@ int main(int argc, char **argv) {
             dp_text(14, tt_line);
         }
         {   /* a fixed stretch of the fight (the same frames every run): all of it, its slices, its draws */
-            static uint64_t b_t0, b_d0, b_sl, b_p0[5]; static uint32_t b_n0; static char b_line[96];
+            static uint64_t b_t0, b_d0, b_sl, b_p0[5]; static uint32_t b_n0, b_g0[DC_REGIONS + 3]; static char b_line[96];
+            uint32_t b_g[DC_REGIONS + 3];   /* page loads: by region, then for dc_rom_at, of the model pack, all */
+            memcpy(b_g, g_pg.rg_loads, sizeof g_pg.rg_loads);
+            b_g[DC_REGIONS] = g_pg.at_loads; b_g[DC_REGIONS + 1] = g_pg.pak_loads; b_g[DC_REGIONS + 2] = g_pg.loads;
             const uint64_t b_p[5] = { g_dp.tt_tiles, g_dp.tt_scan, g_dp.tt_sort, g_dp.tt_submit, us_snd };
-            if (!b_t0 && g_emu_frames > DC_BENCH_F0) { b_t0 = t0; b_d0 = us_dall; b_n0 = (uint32_t)n_drawn; memcpy(b_p0, b_p, sizeof b_p); }
+            if (!b_t0 && g_emu_frames > DC_BENCH_F0) { b_t0 = t0; b_d0 = us_dall; b_n0 = (uint32_t)n_drawn; memcpy(b_p0, b_p, sizeof b_p); memcpy(b_g0, b_g, sizeof b_g); }
             if (b_t0 && !b_line[0]) {
                 b_sl += t1 - t0;
                 if (g_emu_frames >= DC_BENCH_F1) {
@@ -297,6 +300,13 @@ int main(int argc, char **argv) {
                              (unsigned long)((b_p[2] - b_p0[2]) / 1000), (unsigned long)((b_p[3] - b_p0[3]) / 1000),
                              (unsigned long)((b_p[4] - b_p0[4]) / 1000), (unsigned long)(n_drawn - b_n0));
                     dp_text(4, b_line2);
+                    static char b_line3[96];   /* the pager's loads in it: code, data, polygons, textures, pack, rom_at */
+                    snprintf(b_line3, sizeof b_line3, "ld %lu: cd %lu da %lu po %lu tx %lu pk %lu at %lu",
+                             (unsigned long)(b_g[DC_REGIONS + 2] - b_g0[DC_REGIONS + 2]), (unsigned long)(b_g[0] - b_g0[0]),
+                             (unsigned long)(b_g[1] - b_g0[1]), (unsigned long)(b_g[3] - b_g0[3]),
+                             (unsigned long)(b_g[4] - b_g0[4]), (unsigned long)(b_g[DC_REGIONS + 1] - b_g0[DC_REGIONS + 1]),
+                             (unsigned long)(b_g[DC_REGIONS] - b_g0[DC_REGIONS]));
+                    dp_text(5, b_line3);
                 }
             }
         }
@@ -322,7 +332,7 @@ int main(int argc, char **argv) {
             STATS_PRINT(line);
             dp_text(0, line);
             /* Per 2 s: loads (their read time), refills; since boot: the rest. */
-            snprintf(line, sizeof line, "ld %u (%u ms) tlb %u | ev %u pin %u wr %u err %u",
+            snprintf(line, sizeof line, "ld %u (%u ms) flt %u | ev %u pin %u wr %u err %u",
                      (unsigned)loads, (unsigned)read_ms, (unsigned)refills, (unsigned)g_pg.evictions,
                      (unsigned)pg_pinned(), (unsigned)g_pg.rom_writes, (unsigned)g_pg.read_errors);
             STATS_PRINT(line);

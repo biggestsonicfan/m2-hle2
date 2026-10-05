@@ -117,6 +117,8 @@ from ~129 ms to 5-6 ms a frame.
   read through the pager would still need their pages in RAM while drawn, so
   they save the build time (paid once per mesh) but not the memory, which was
   the real limit. Worth it only if build hitches show up when scenes change.
+  What the disc does carry is a pack of the raw ROM bytes, for locality
+  (#456, "Sonic Gems Collection's way", below).
 - **Let the host own the regions.** `g_mem_window` (memory.h) lets a host give
   the bus a window for MAIN_DATA / XTRA_DATA / VID_EXT_RAM instead of a heap
   copy. The profile skips its memcpy when the window already is the ROM. That
@@ -190,7 +192,7 @@ stale pages, with no error anywhere.
   Music is resampled 48 → 44.1 kHz so the mix needs no resampler for it.
   The host test of `dc_sound.h` decodes bit for bit what ffmpeg does.
 - **The audio callback must never read the disc.** The pager reads it with
-  the GD-ROM syscalls from the TLB miss exception; a second reader would
+  the GD-ROM syscalls from the board's slow path; a second reader would
   collide. Music is read in the main loop into a 128 KB ring (2.6 s); effects
   (1.1 MB) are loaded at boot, through KOS's driver, before the pager is up.
 - **SDL2 for KOS is GPF's fork** (`dreamcastSDL2`); kos-ports only has SDL
@@ -587,6 +589,46 @@ are hot enough within a frame that the ring of recent frames is all it needs.
 That is still short of 30. The rest has to come from the 3D (scan and decode
 is 6438 of the 17262 ms): per-face FTRV for the normal and light, FIPR for the
 dot products, and per-face attribute bits worked out once at mesh build.
+
+## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
+
+GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
+GameCube port does that this one did not. Measured on the bench (attract's
+fight, frames 3500-3900, in the Flycast libretro core; the frame 1500 hash
+e746591c in every build below).
+
+- **Gems' C is on by default** (`GEMS=`, the Makefile). Sega's C for STF's
+  trapped i960 functions and for the COP commands (`core/gems.h`) is private
+  and never committed; the Makefile builds it in when it finds the directory
+  beside the checkout. Its 47 trap sites are hooks the AOT must not compile
+  over. 17.4 s → 14.5 s (23.0 → 27.6 fps), the i960 slice 8.7 s → 5.9 s. Its
+  code and sine table take 650 KB, so the page cache is 1 MB, not 1.5 MB.
+  It is not the board (CLAUDE.md, "HLE Hooks"): a build that has to match
+  m2-hle2 frame for frame leaves it out.
+- **Pre-decoded dispatch is not worth it here** (`OPTAB=1`, `I960_OPTABLE`).
+  A handler per opcode byte and per REG opcode/function, indexed from the
+  instruction word: bit-exact, but with Gems and the AOT on, the interpreter
+  runs little, and it saved 38 ms of 5874 for 72 KB of text and 64 KB of heap.
+  Off.
+- **Sound stays Sega's console way** (ADX cues, `dc_sound.h`): no sound CPU,
+  no SCSP, as on the GameCube.
+- **The model pack** (`MODELS.PAK`, `tools/dc_mdlpack.py`, `dc_pager.h`).
+  Gems' `OBJ_*` files are raw polygon ROM, gathered per scene. The port does
+  the same from a map of what the 3D decoder reads: `det_digest --model-map`
+  decodes every display list uncut, as `dp_decode` would, and records each
+  64-byte line of the polygon and texture ROMs with the frame that first read
+  it (`dreamcast/sfight.mdlmap`: attract, 6000 frames, and a scripted fight;
+  addresses only). The tool groups lines into runs (contiguous in the ROM,
+  split where the first frame jumps by more than 30) and lays them out by
+  first frame: 607 runs, 4.7 MB. `dc_rom_at` finds a read in the index by
+  binary search and serves it from the pack's window when one run holds all
+  of it; anything else (and a disc without the file) reads the ROM.
+  - On the bench, page loads 1321 → 1063: code 800 → 658 (less of the cache
+    goes to scattered models, so less code is pushed out), polygons and
+    textures 381 → 40, plus 250 from the pack. Flycast's disc reads cost
+    nothing, so it shows no gain there (14.5 s → 15.1 s); on a GD-ROM every
+    load is a seek. Not measured on hardware.
+  - The 40 left are reads the map missed or that cross a run's end.
 
 ## Toolchain and runtime traps
 

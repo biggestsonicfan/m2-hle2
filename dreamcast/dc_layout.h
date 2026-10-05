@@ -22,7 +22,6 @@
 
 #include <stdint.h>
 
-#define DC_PAGE       4096u            /* the SH-4 MMU's small page */
 #define DC_SECTOR     2048u            /* a mode 1 sector */
 #define DC_REGIONS    7                /* the romset_t buffers, in its order */
 #define DC_MAX_SEGS   4
