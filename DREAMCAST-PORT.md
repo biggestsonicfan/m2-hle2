@@ -725,7 +725,8 @@ emulates in software. The guards are in the private Gems directory.
 
 The board's 496x384 is drawn pixel for pixel, centred, black around it
 (`dc_pvr.h`, `DC_X0` / `DC_Y0`). It used to be scaled by 1.25 to fill the
-640x480 frame's height.
+640x480 frame's height, and is again since #479 (below), unless a
+VIEW is given.
 
 - **The default frame is still the cable's 640x480**, with the board at
   (72, 48). The bars over the 3D past its screen go on all four sides.
@@ -742,6 +743,38 @@ The board's 496x384 is drawn pixel for pixel, centred, black around it
 - **No time either way in Flycast**, which does not charge PVR tile rendering:
   the bench is 15435 ms against 15431, the frame 1500 hash a5d21d21 as before.
   The text rows are drawn at 0.8 in the 512x384 frame, so that 20 fit.
+
+## Only the part of the board a game uses (#479)
+
+m2-sonic draws the Mega Drive's 320x224 at (88,80) of the board's 496x384
+and leaves the rest black, so on the 640x480 frame the game was a small box
+(320x224 1:1 under #471's layout, 400x280 at 1.25). `make VIEW=x,y,w,h`
+(`DC_VIEW_X/Y/W/H`, `dc_pvr.h`) shows only that rectangle of the board,
+scaled to fill the frame, aspect kept, centred. With no VIEW it is the whole
+board: 1.25 at (10,0) in 640x480, as before #471, or 1.0 at (8,0) under
+FRAME512.
+
+- **m2-sonic's disc is `VIEW=88,80,320,224`**: 2.0, 640x448 at (0,16).
+- **At a whole-number scale the tile layers are point sampled**
+  (`DC_FILTER`), so the Mega Drive's pixels stay square.
+- **Only the view is drawn**: the layer quads take the view's part of their
+  512x512 textures (`dp_layer`), the tile conversion skips lines and columns
+  outside it (`dp_tiles`), and the 3D is culled to it (`dp_decode`).
+
+**It is cheaper, not dearer.** The PVR renders the whole 640x480 tile grid
+whatever is in it, and STF's 1.25 already fills it, so the fill costs the
+PVR nothing new. The SH-4 does less: the bench (full HUD,
+`EXTRA=-DDC_BENCH_F0=300u -DDC_BENCH_F1=900u`, m2-sonic attract, AOT 0.95)
+over the same 600 frames:
+
+| | total ms | slice | draw | tiles |
+|---|---|---|---|---|
+| 1:1 (#471, the canary disc) | 34956 | 11068 | 23782 | 23364 |
+| `VIEW=88,80,320,224` | 26831 | 11065 | 15691 | 15275 |
+
+The tiles' conversion was most of the frame and the view is 38% of the
+board, so a frame went from 58 ms to 45. Measured in Flycast, which does not
+charge PVR fill.
 
 ## Held against MAME over the serial port (#461)
 

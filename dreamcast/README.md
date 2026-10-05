@@ -33,7 +33,8 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # out. OPTAB=1 dispatches the interpreter through a handler table (off: it
 # saves under 1% here and costs 136 KB).
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
-# (Flycast stretches it; DREAMCAST-PORT.md #471).
+# (Flycast stretches it; DREAMCAST-PORT.md #471). VIEW=x,y,w,h shows only that
+# rectangle of the board's 496x384, scaled to fill the frame (#479).
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS
@@ -187,6 +188,9 @@ sh dreamcast/mkdisc.sh /tmp/dcpac /tmp/pac /tmp/dcpac/disc
 
 # m2-sonic, panel off: roms/sonic/game.bin (needs your cartridge, see its README)
 cmake -B /tmp/bson -S <m2-sonic> -DM2_SDK=<m2-sdk> -DSONIC_DEFS=SONIC_NO_PANEL && cmake --build /tmp/bson
+# the disc: only the Mega Drive's 320x224, doubled to 640x448 (VIEW, #479)
+make -C dreamcast OUT=/tmp/dcson HUD=min VIEW=88,80,320,224 AOT_MAP=sonic.aotmap AOT_COVER=0.95 AOT=/tmp/son/rom_code1.bin
+sh dreamcast/mkdisc.sh /tmp/dcson /tmp/son /tmp/dcson/disc
 ```
 
 m2-sonic keeps the Mega Drive cartridge in the two data EPROMs, so its disc's
