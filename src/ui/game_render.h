@@ -1573,14 +1573,26 @@ static inline void game_render__atlas_send(void) {
 }
 
 /* True while both texture banks are still empty (early boot, before the i960
- * uploads textures): a probe of up to 16 non-zero bytes, one every 4 KB. */
+ * uploads textures). Every word is looked at, up to the first that is not 0:
+ * a sparse probe (one byte every 4 KB, all at x 0 of the sheet) missed
+ * m2_sprite.h's atlas, which a homebrew writes once at x 256, and the atlas
+ * was never decoded. Once anything has been seen the answer stays false; a
+ * decode of an emptied bank is only slower, never wrong. Only called when a
+ * write changed texture RAM (game_frame_draw's gen_tex). */
 static inline bool game_render__atlas_banks_empty(const uint8_t *texram0, const uint8_t *texram1,
                                                   size_t sheet_size) {
-    size_t probe = 0;
-    for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram0[k] ? 1 : 0;
-    if (texram1)
-        for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram1[k] ? 1 : 0;
-    return probe == 0;
+    static bool s_seen;
+    if (s_seen) return false;
+    const uint8_t *banks[2] = { texram0, texram1 };
+    for (int b = 0; b < 2; b++) {
+        if (!banks[b]) continue;
+        for (size_t k = 0; k + 8 <= sheet_size; k += 8) {
+            uint64_t w;
+            memcpy(&w, banks[b] + k, 8);
+            if (w) { s_seen = true; return false; }
+        }
+    }
+    return true;
 }
 
 /* Decode word row q of sheet s into its two atlas rows and mark them. */
