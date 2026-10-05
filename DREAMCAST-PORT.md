@@ -642,6 +642,20 @@ e746591c in every build below).
     which `rand` reads).
   - The conversion: cutting and twiddling tiles for the PVR (`dp_tex_get`)
     took 2.2 s, under 0.5%.
+- **Drawing from a trap at `set_obj` does not pay either.** Walking the display
+  list after the frame (`geo3d_scan_geo_list`) is 216 ms of the bench's 6828 ms
+  of scene; the rest is decoding and transforming each model
+  (`geo3d_decode_model_cached`), which a trap would do all the same. set_obj's
+  own i960 side already runs as Gems' C.
+- **The AOT map is recorded with Gems on** (`det_digest --gems`). The old map
+  was recorded without, so part of what it compiled was code Gems' C now runs
+  in its place. With the new one the bench is the same (14.95 s against
+  14.93 s, 10% of steps AOT) and `1ST_READ.BIN` is 1.75 MB instead of 2.34, so
+  the pager's cache gets the room. Compiling all of it (`AOT_COVER=1.0`,
+  4.1 MB) leaves too little memory to boot.
+- **Host-time timers do not apply.** Gems runs its game loop on the console's
+  clock; here the board's timers feed `rand` and the loader's yield, so they
+  stay on the i960's cycle clock, as on every other build.
 
 ## Toolchain and runtime traps
 

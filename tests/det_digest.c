@@ -61,6 +61,10 @@
  * the polygon and texture ROMs it read with the frame that first read it
  * (dreamcast/sfight.mdlmap, tools/dc_mdlpack.py).
  *
+ * --gems runs Sega's C from Sonic Gems Collection (core/gems.h, both
+ * --gems-i960 and --gems-cop), in a build configured with it, as the
+ * Dreamcast build does by default: record its --aot-map with this.
+ *
  * Two builds of it, one from each configuration, so each has exactly its
  * frontend's compiler flags:
  *   native  --target det_digest in a desktop build tree (not a ctest: it needs a ROM)
@@ -91,6 +95,7 @@
 static const uint8_t *mdlmap_rom(const void *p, uint32_t n);
 #define GEO3D_ROM(p, n) mdlmap_rom((p), (n))
 #include "geo3d.h"
+#include "gems.h"
 
 static memory_bus_t     bus;
 static i960_cpu_t       cpu;
@@ -570,6 +575,7 @@ int main(int argc, char **argv) {
         }
 #endif
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
+        else if (!strcmp(argv[i], "--gems"))   g_gems_i960 = g_gems_cop = true;
         else if (!strcmp(argv[i], "--aot-map") && i + 1 < argc) {
             if (sscanf(argv[++i], "%u:%u:%1023s", &aotmap_from, &aotmap_to, aotmap_path) != 3
                     || !(aotmap_out = fopen(aotmap_path, "wb"))) {
@@ -634,6 +640,7 @@ int main(int argc, char **argv) {
 
     /* main_web.c web_install_board, which is also what a netplay reset runs. */
     g_active_profile->install_fn(&romset, &cpu, &bus);
+    if (g_gems_i960 || g_gems_cop) gems_apply(profile_rom_set(g_active_profile));
     irqt_reset();
     if (g_active_profile->quirks.enable_68k_sound) {
         sound_reset();

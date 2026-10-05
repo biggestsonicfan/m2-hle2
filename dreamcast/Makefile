@@ -14,7 +14,9 @@
 # addresses sfight.aotmap lists out of the player's own program ROM, into
 # $(OUT)/aot_gen.h. That file holds ROM words: it stays in OUT, never committed.
 # AOT_COVER is the share of the map's counts compiled (the hottest code first):
-# all of it is 4.8 MB of SH-4 and leaves the pager no room.
+# all of it is 4.8 MB of SH-4 and leaves the pager no room. Recorded with Gems
+# on, 79% of the counts are the two instructions of `_idle`'s vblank spin, which
+# the spin hook skips, so 0.99 here is about what 0.95 of the rest would be.
 
 REPO   := ..
 VENDOR ?= $(REPO)/vendor
@@ -33,7 +35,7 @@ HASH_FRAME ?= 0
 # frames and cost 72 KB of text, 64 KB of heap: off.
 OPTAB ?= 0
 AOT ?=
-AOT_COVER ?= 0.98
+AOT_COVER ?= 0.99
 # The block runner's pool. The AOT build needs less of it, but at 4096 ops a
 # fight's blocks overflowed it and were rebuilt every frame (3.7% of the frame).
 IB_POOL ?= $(if $(AOT),8192u,16384u)

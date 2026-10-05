@@ -62,6 +62,17 @@ next of r1, l2, d3, u1, r2, 13, l, 4, r, with nothing held between them (the
 cycle's place is `(frame / 30) % 18`). `dc_mdlpack.py` starts a new run where
 the first frame jumps by more than 30.
 
+`sfight.aotmap`, the code `AOT=` compiles, is recorded the same way, with
+Sega's C on as the disc runs it (a `det_digest` built with `M2HLE_GEMS_DIR`):
+
+```sh
+det_digest sfight.zip --profile sfight_console --gems --frames 6000 --aot-map 0:6000:att.raw --out /dev/null
+det_digest sfight.zip --profile sfight_console --gems --frames 3200 --script "$S" --aot-map 0:3200:fit.raw --out /dev/null
+```
+
+then each instruction's weight is its count over its run's total, times
+10^9 / 2, summed over the two runs; the hooks of both are kept.
+
 ## Sound
 
 The i960 never reaches the sound board. A trap at `sound_request_special`
