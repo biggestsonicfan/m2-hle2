@@ -73,13 +73,21 @@ OBJS   := $(OUT)/main_dc.o
 
 all: $(OUT)/1ST_READ.BIN
 
+# The options a build was made with: a change (JIT=, OPTAB=, HASH_FRAME=, GEMS=,
+# AOT_COVER= ...) rebuilds, where the object used to be left as it was. A stamp
+# file is rewritten only when its text changes.
+AOT_ARGS := --hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 $(GEMS_HOOKS) --cover $(AOT_COVER)
+stamp = $(shell mkdir -p $(OUT); t='$(subst ','\'',$(2))'; [ "$$(cat $(1) 2>/dev/null)" = "$$t" ] || printf '%s' "$$t" > $(1))
+$(call stamp,$(OUT)/flags.stamp,$(CFLAGS))
+$(call stamp,$(OUT)/aot.stamp,$(AOT) $(AOT_ARGS))
+
 # 0x3F268 is dc_sound's hook (main_dc.c), and 0x4BE58 / 0x4C008 the profile's
 # timed waits (m2_spin.h), and the Gems trap sites, on top of the hooks in the map.
-$(OUT)/aot_gen.h: sfight.aotmap $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/board/i960_exec.h Makefile
+$(OUT)/aot_gen.h: sfight.aotmap $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/board/i960_exec.h Makefile $(OUT)/aot.stamp
 	mkdir -p $(OUT)
-	python3 $(REPO)/tools/i960_aot.py --map sfight.aotmap --rom "$(AOT)" --hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 $(GEMS_HOOKS) --cover $(AOT_COVER) --out $@
+	python3 $(REPO)/tools/i960_aot.py --map sfight.aotmap --rom "$(AOT)" $(AOT_ARGS) --out $@
 
-$(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_sound.h dc_pvr.h dc_jit_test.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN)
+$(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_sound.h dc_pvr.h dc_jit_test.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN) $(OUT)/flags.stamp
 	mkdir -p $(OUT)
 	kos-cc $(CFLAGS) -c $< -o $@
 
@@ -92,6 +100,6 @@ $(OUT)/1ST_READ.BIN: $(OUT)/m2hle2.elf
 	$(KOS_CC_BASE)/bin/$(KOS_CC_PREFIX)-size $<
 
 clean:
-	rm -f $(OBJS) $(OUT)/m2hle2.elf $(OUT)/1ST_READ.BIN $(OUT)/aot_gen.h
+	rm -f $(OBJS) $(OUT)/m2hle2.elf $(OUT)/1ST_READ.BIN $(OUT)/aot_gen.h $(OUT)/flags.stamp $(OUT)/aot.stamp
 
 .PHONY: all clean

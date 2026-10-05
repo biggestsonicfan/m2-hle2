@@ -576,6 +576,7 @@ int main(int argc, char **argv) {
 #endif
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--gems"))   g_gems_i960 = g_gems_cop = true;
+        else if (!strcmp(argv[i], "--gems-verify")) g_gems_verify = g_gems_cop = true;   /* each trap both ways */
         else if (!strcmp(argv[i], "--aot-map") && i + 1 < argc) {
             if (sscanf(argv[++i], "%u:%u:%1023s", &aotmap_from, &aotmap_to, aotmap_path) != 3
                     || !(aotmap_out = fopen(aotmap_path, "wb"))) {
@@ -714,6 +715,7 @@ int main(int argc, char **argv) {
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);
+    gems_verify_report();
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);

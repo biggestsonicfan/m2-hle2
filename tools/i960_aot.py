@@ -189,7 +189,7 @@ def direct(ip, w1, w2, kind):
                     + fdst(d, m3, FP_C[opc]) + ' }')
         if opc in (0x684, 0x685):
             return (f'{{ double a_ = {fsrc(s1i, m1)}, b_ = {fsrc(s2i, m2)}; '
-                    'ACC(a_ < b_ ? CC_L : a_ == b_ ? CC_E : CC_G); }')
+                    'ACC(a_ < b_ ? CC_L : a_ == b_ ? CC_E : a_ > b_ ? CC_G : CC_NO); }')  # unordered: 000, as cmpr
         if opc == 0x6c9:
             return '{ double a_ = ' + fsrc(s1i, m1) + '; ' + fdst(d, m3, 'a_') + ' }'
         if opc in (0x6c0, 0x6c1):

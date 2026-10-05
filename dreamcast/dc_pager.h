@@ -113,7 +113,22 @@ static int pg_read(void *dst, uint32_t fad, uint32_t nsec) {
         if (r == CD_CMD_COMPLETED) return 0;
         if (r == CD_CMD_FAILED || r == CD_CMD_NOT_FOUND) return -1;
     }
+    syscall_gdrom_abort_command(h);   /* or the drive is still busy with it at the next read */
+    syscall_gdrom_exec_server();
     return -1;
+}
+
+/* A page the board reads has to be the ROM's: a few tries, then stop, rather
+ * than run on with made-up bytes (the board would quietly be another game). */
+#define PG_READ_TRIES 4
+static void pg_read_page(void *dst, uint32_t fad, uint32_t nsec, uint32_t v) {
+    for (int t = 0; t < PG_READ_TRIES; t++) {
+        if (pg_read(dst, fad, nsec) == 0) return;
+        g_pg.read_errors++;
+    }
+    printf("pager: page %lu unreadable at FAD %lu after %d tries\n",
+           (unsigned long)v, (unsigned long)fad, PG_READ_TRIES);
+    arch_abort();
 }
 
 /* ---- the frames --------------------------------------------------------------- */
@@ -179,12 +194,8 @@ static uint32_t pg_fault(uint32_t v) {
         int part = -1;
         for (int i = 0; i < g->npart; i++)           /* a file's last page: the rest is fill */
             if (g->part[i].v == v) { part = i; valid = g->part[i].valid; }
-        if (pg_read(p, src, (valid + DC_SECTOR - 1) / DC_SECTOR) != 0) {
-            g->read_errors++;
-            memset(p, 0xA5, PG_SIZE);
-        } else if (part >= 0) {
-            memset(p + valid, g->part[part].fill, PG_SIZE - valid);
-        }
+        pg_read_page(p, src, (valid + DC_SECTOR - 1) / DC_SECTOR, v);
+        if (part >= 0) memset(p + valid, g->part[part].fill, PG_SIZE - valid);
         g->read_ns += timer_ns_gettime64() - t0;
         g->loads++;
         if (v - g->pak_first < g->pak_pages) g->pak_loads++;
@@ -272,13 +283,17 @@ static const uint8_t *dc_rom_at(const void *p, uint32_t n) {
     }
     static uint8_t bounce[PG_RECENT][64];
     static uint32_t bi;
-    uint8_t *b = bounce[bi++ % PG_RECENT];
-    for (uint32_t i = 0; i < n && i < sizeof bounce[0]; i++) {
-        uint32_t ai = a + i;
-        g->in_at = 1;
-        b[i] = g->pool[pg_fault(ai >> PG_SHIFT) * PG_SIZE + (ai & (PG_SIZE - 1u))];
-        g->in_at = 0;
+    if (n > sizeof bounce[0]) {   /* the callers read a word or a vertex pair; more would be cut short */
+        printf("pager: a %lu-byte read across pages\n", (unsigned long)n);
+        arch_abort();
     }
+    uint8_t *b = bounce[bi++ % PG_RECENT];
+    uint32_t n0 = PG_SIZE - off;                     /* the first page's part, then the next's */
+    g->in_at = 1;
+    memcpy(b, g->pool + pg_fault(v) * PG_SIZE + off, n0);
+    if (v + 1u < g->npages) memcpy(b + n0, g->pool + pg_fault(v + 1u) * PG_SIZE, n - n0);
+    else memset(b + n0, 0, n - n0);
+    g->in_at = 0;
     g->bounces++;
     return b;
 }
@@ -323,7 +338,7 @@ static int pg_pak_open(uint32_t *fad, uint32_t *size) {
     uint32_t n, off;
     memcpy(&n, sec + 4, 4);
     memcpy(&off, sec + 8, 4);
-    if (!n || off % DC_SECTOR || off < 12 + 12 * n || off >= fsize) return 0;
+    if (!n || n > fsize / 12u || off % DC_SECTOR || off < 12 + 12 * n || off >= fsize) return 0;   /* 12 * n must not wrap */
     uint8_t *idx = memalign(32, off);
     if (!idx || pg_read(idx, f, off / DC_SECTOR) != 0) { free(idx); return 0; }
     g->pak = (const uint32_t *)(idx + 12);

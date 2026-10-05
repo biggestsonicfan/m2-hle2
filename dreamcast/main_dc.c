@@ -255,13 +255,11 @@ int main(int argc, char **argv) {
     while (!cpu.halted) {
         dc_pad();
         uint64_t t0 = timer_us_gettime64();
-        uint32_t f = g_emu_frames;
         emu_slice_body(&ctx);
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
         if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }
-        (void)f;
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
             uint32_t h = 2166136261u;
             for (uint32_t a = 0x500000u; a < 0x600000u; a += 4) h = (h ^ mem_read32(&bus, a)) * 16777619u;
