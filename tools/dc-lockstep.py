@@ -38,8 +38,13 @@ MAME differ from the start in ways that are the board's (see DREAMCAST-PORT.md).
 
   tools/dc-lockstep.py --boot --gdi <disc>/m2hle2.gdi --core <flycast_libretro.so>
       --det-digest <build>/det_digest [--frames 3000] [--no-mame]
+
+--shots N (with --boot) also keeps the pictures (Pinboard #486): every N frames
+MAME saves its screen as WORK/m<frame>.png and RetroArch the Dreamcast's as
+WORK/d<frame>.png, while the Dreamcast waits on the link, so the two are of the
+same game frame. tools/picture-diff.py compares them. Build the disc HUD=none.
 """
-import argparse, os, socket, struct, subprocess, sys, signal, time, zlib
+import argparse, glob, os, socket, struct, subprocess, sys, signal, time, zlib
 
 ROBS = (0x510D00, 0x514100)
 ROB = 0x3400
@@ -242,7 +247,8 @@ def boot_launch(a, procs):
         log = open(os.path.join(a.work, who + '.log'), 'w')
         if who == 'mame':
             nv, cfg = os.path.join(a.work, 'nvram'), os.path.join(a.work, 'cfg')
-            env = dict(os.environ, BL_OUT=fifo, BL_RANGES=boot_spec(), BL_FRAMES=str(a.frames + 8))
+            env = dict(os.environ, BL_OUT=fifo, BL_RANGES=boot_spec(), BL_FRAMES=str(a.frames + 8),
+                       BL_SHOTS=str(a.shots))
             env.pop('DISPLAY', None)
             cmd = [a.mame, 'sfight', '-rompath', a.rompath, '-nvram_directory', nv, '-cfg_directory', cfg,
                    '-snapshot_directory', a.work, '-nodrc', '-video', 'none', '-sound', 'none', '-nothrottle',
@@ -268,6 +274,54 @@ def boot_words(addr, cols, names):
         if len(set(v for v in vs if v is not None)) > 1:
             out.append('%x %s' % (addr + w, ' '.join('%s %08x' % (n, v) for n, v in zip(names, vs) if v is not None)))
     return out
+
+
+def free_udp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def shots_config(a):
+    """RetroArch's network commands on a free port, its screenshots into
+    WORK/ra-shots: what dc_shot asks for and where it looks."""
+    a.ra_shots = os.path.join(a.work, 'ra-shots')
+    os.makedirs(a.ra_shots, exist_ok=True)
+    for f in glob.glob(os.path.join(a.ra_shots, '*')):
+        os.unlink(f)
+    a.ra_port = free_udp_port()
+    cfg = os.path.join(a.work, 'shots.cfg')
+    with open(cfg, 'w') as f:
+        f.write('network_cmd_enable = "true"\nnetwork_cmd_port = "%d"\nscreenshot_directory = "%s"\n'
+                'notification_show_screenshot = "false"\nvideo_font_enable = "false"\nvideo_gpu_screenshot = "false"\n'
+                % (a.ra_port, a.ra_shots))
+    return cfg
+
+
+def dc_shot(a, i):
+    """The Dreamcast's picture as RetroArch has it, while the Dreamcast waits
+    for our word after frame i: WORK/d<i>.png."""
+    time.sleep(0.3)                     # a few presents of the waiting frame
+    before = set(os.listdir(a.ra_shots))
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.sendto(b'SCREENSHOT', ('127.0.0.1', a.ra_port))
+    s.close()
+    end = time.time() + 20
+    while time.time() < end:
+        new = [f for f in os.listdir(a.ra_shots) if f not in before and f.endswith('.png')]
+        if new:
+            path = os.path.join(a.ra_shots, new[0])
+            size = -1
+            while size != os.path.getsize(path):
+                size = os.path.getsize(path)
+                time.sleep(0.1)
+            os.replace(path, os.path.join(a.work, 'd%05d.png' % i))
+            return True
+        time.sleep(0.05)
+    print('+%d: RetroArch took no screenshot' % i, flush=True)
+    return False
 
 
 def boot(a, link, fifos):
@@ -325,6 +379,8 @@ def boot(a, link, fifos):
                 for w in words[:a.words]:
                     print('    ' + w)
                 sys.stdout.flush()
+        if a.shots and i % a.shots == 0:
+            dc_shot(a, i)
         n = i + 1
         if n % 100 == 0:
             per = lambda bad: ' '.join('%s:%d' % (r, sum(1 for k in bad if boot_block(k)[0] == r))
@@ -357,6 +413,7 @@ def main():
     ap.add_argument('--no-mame', action='store_true', help='--boot without MAME')
     ap.add_argument('--blocks', type=int, default=1, help='--boot: blocks shown when a region first differs')
     ap.add_argument('--words', type=int, default=24, help='--boot: words shown per block')
+    ap.add_argument('--shots', type=int, default=0, help='--boot: keep both pictures every N frames')
     a = ap.parse_args()
     if a.boot and not a.det_digest:
         ap.error('--boot needs --det-digest')
@@ -393,6 +450,8 @@ def main():
             cmd = ['retroarch']
             if a.retroarch_config:
                 cmd += ['--config', a.retroarch_config]
+            if a.shots:
+                cmd += ['--appendconfig', shots_config(a)]
             cmd += ['-L', a.core, a.gdi]
             ra_log = open(os.path.join(a.work, 'retroarch.log'), 'w')
             procs.append(subprocess.Popen(['xvfb-run', '-a', '-s', '-screen 0 800x600x24'] + cmd, cwd=a.work,
