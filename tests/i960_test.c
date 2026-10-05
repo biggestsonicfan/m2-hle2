@@ -236,6 +236,16 @@ int main(void) {
     i960_step(&cpu, &bus);
     CHECK(cc() == CC_E, "cmpi + concmpi: x inside the range comes out CC_E");
 
+    /* cmpr against a NaN is unordered, 000, so bge does not take it (MAME
+     * cmp_d). coli_recalc_pos clamps a push-out to its limit that way. */
+    i960_reset(&cpu);
+    cpu.locals.r[15] = 0xFFFFFFFFu;        /* NaN */
+    cpu.locals.r[8]  = 0;
+    cpu.sfr.ip = CODE;
+    put(CODE, enc_reg(0x685, 0, L(8), 0, L(15), 0, 0));     /* cmpr r15, r8 */
+    i960_step(&cpu, &bus);
+    CHECK(cc() == CC_NO, "cmpr with a NaN sets CC 000 (unordered), not CC_G");
+
     /* ---- watchpoint fires on the bus write ------------------------------ */
     wp_init();
     g_wp.hit = 0;
