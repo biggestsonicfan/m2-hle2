@@ -438,7 +438,12 @@ port"). `--peer` holds it to a desktop run (`--out`'s `here`) as well. It parts
 from MAME in the same places as the desktop build, and from the desktop build
 first at +580, on a denormal the SH-4 flushed to zero (fixed in #478). `--boot`
 holds it from power-on instead, against MAME (`tools/mame/boot-lockstep.lua`)
-and a desktop `det_digest --raw` at once: it is the desktop's for 12000 frames.
+and a desktop `det_digest --raw` at once: it is the desktop's for 12000 frames. `--shots N`
+keeps both screens every N frames as well (`m<frame>.png`, `d<frame>.png`), and
+`tools/picture-diff.py DIR --out OUT` lays each pair side by side with the
+difference and prints, a frame each, the mean difference, the share of pixels
+off by more than 32, the colour histograms' intersection and the rows that are
+off (DREAMCAST-PORT.md, "The pictures, against MAME's").
 
 ## Faces lying on faces (`grade-zsort`)
 
