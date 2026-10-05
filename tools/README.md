@@ -432,6 +432,12 @@ Still differing, with no effect on the fight so far:
 - the rig from +382;
 - the sign of zero in TGP bufferram.
 
+The Dreamcast build plays the same fight against MAME over its serial port
+(`tools/dc-lockstep.py`, DREAMCAST-PORT.md "Held against MAME over the serial
+port"). `--peer` holds it to a desktop run (`--out`'s `here`) as well. It parts
+from MAME in the same places as the desktop build, and from the desktop build
+first at +580, on a denormal the SH-4 flushes to zero.
+
 ## Faces lying on faces (`grade-zsort`)
 
 A depth buffer cannot tell two faces in one plane apart; the board's polygon sort

@@ -120,6 +120,14 @@ log lines.
 
 Pad: D-pad, A/B/X/Y = B1-B4, Start, left trigger = coin.
 
+## Linked to MAME
+
+`make LINK=1` builds the replay fight for `tools/dc-lockstep.py`, which holds it
+against MAME frame by frame over the serial port. The disc needs `SINCOS=`
+(`tools/mksincos.py`), and Flycast needs `tools/flycast-scif.patch`.
+DREAMCAST-PORT.md, "Held against MAME over the serial port", has the commands
+and what it found.
+
 ## m2-pacman
 
 The disc also runs homebrew: put a program in place of `rom_code1.bin` and keep
@@ -174,5 +182,8 @@ that show one that changed. The i960 is what is left.
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
 | `sfight.mdlmap` | the polygon and texture ROM lines STF draws, by first frame, for MODELS.PAK |
 | `../tools/dc_mdlpack.py` | host tool: map + ROM files → MODELS.PAK |
+| `dc_link.h` | `LINK=1`: the replay fight's frames over the SCIF to `tools/dc-lockstep.py` |
+| `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
+| `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |
 | `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI |
 | `../tests/rom_touch.c` | host tool: which ROM pages a game reads |

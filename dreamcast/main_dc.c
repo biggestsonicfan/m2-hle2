@@ -37,6 +37,14 @@
 #define DC_BENCH_F1 3900u
 #endif
 #define STATS_PRINT(l) do { if (DC_STATS_DBGIO) printf("%s\n", (l)); } while (0)
+/* -DDC_LINK=1 (make LINK=1): attract's replay fight, held against MAME over
+ * the serial port (dc_link.h). LINK_GEMS=1 keeps Gems on in it. */
+#ifndef DC_LINK
+#define DC_LINK 0
+#endif
+#ifndef DC_LINK_GEMS
+#define DC_LINK_GEMS 0
+#endif
 
 #include "constants.h"
 #include "log.h"
@@ -53,6 +61,9 @@
 #include "dc_pager.h"
 #include "dc_sound.h"
 #include "dc_pvr.h"
+#if DC_LINK
+#include "dc_link.h"
+#endif
 
 KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM);
 
@@ -92,9 +103,11 @@ static int dc_romset(void) {
         *(size_t *)((char *)&rs + map[i].off_s)   = size;
     }
     rs.loaded = rs.maincpu != NULL;
+    /* The link plays match-replay's profile, the arcade game (dc_link.h). */
+    const char *want = DC_LINK && !strcmp(g_pg.lay->profile, "sfight_console") ? "sfight" : g_pg.lay->profile;
     for (size_t i = 0; i < g_profile_count; i++)
-        if (!strcmp(g_profiles[i]->id, g_pg.lay->profile)) g_active_profile = g_profiles[i];
-    if (!g_active_profile) { printf("no profile %s in this build\n", g_pg.lay->profile); return -1; }
+        if (!strcmp(g_profiles[i]->id, want)) g_active_profile = g_profiles[i];
+    if (!g_active_profile) { printf("no profile %s in this build\n", want); return -1; }
     /* Homebrew (m2-pacman) is a disc whose ROM_CODE1.BIN is another program:
      * the set's any_program profile runs it, as on the desktop. */
     if (rs.loaded) profile_adopt_program(rs.maincpu, rs.maincpu_size);
@@ -195,6 +208,16 @@ int main(int argc, char **argv) {
      * KOS's driver, which the pager forbids once it is up. */
     bool sound = ds_init() == 0;
 
+    /* The COP's sin and cos tables, when the disc has them (SINCOS.BIN,
+     * dreamcast/tools/mksincos.py; the link disc does): without them
+     * sharc_sincos takes libm's, which part from the board's in the low bits. */
+    {
+        uint32_t size = 0, fad = pg_find_file("SINCOS.BIN", &size);
+        uint32_t *t = fad && size == 0x20000u * 4u ? memalign(32, size) : NULL;
+        if (t && cdrom_read_sectors(t, fad, size / 2048) == ERR_OK) g_sharc_sincos = t;
+        else free(t);
+    }
+
     /* The frame pool takes what the board leaves: texture RAM (2 MB), its
      * framebuffer (0.5 MB) and the heap's own use come out of what is free
      * now. The mesh cache has its own block (GEO3D_MESH_ARENA). */
@@ -211,7 +234,7 @@ int main(int argc, char **argv) {
     /* Sega's own C for STF's hot functions and the COP (gems.h), on by
      * default here: a build without it (no GEMS dir) runs the i960 and our
      * COP. The Dreamcast plays no netplay, so nothing has to agree with it. */
-    g_gems_i960 = g_gems_cop = true;
+    g_gems_i960 = g_gems_cop = !DC_LINK || DC_LINK_GEMS;
     s_dc_gems = gems_apply(profile_rom_set(g_active_profile));
     char line[128];
     snprintf(line, sizeof line, "profile %s%s, cache %u KB", g_active_profile->id, s_dc_gems ? " +gems" : "", (unsigned)(cache >> 10));
@@ -223,6 +246,11 @@ int main(int argc, char **argv) {
         dc_text(1, "out of memory for the board's RAM (texture RAM, framebuffer)");
         for (;;) thd_sleep(1000);
     }
+#if DC_LINK
+    dc_text(1, "link: waiting for the host on the serial port");
+    dc_link_init(&bus, s_dc_gems ? "sfight japan gems" : "sfight japan");
+    dc_text(1, g_link.on ? "link: on, attract's replay fight against MAME" : "link: nobody answered, running unlinked");
+#endif
     i960_reset(&cpu);
     dc_install_board();
     {   /* what the heap has left once the board is up */
