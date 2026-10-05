@@ -143,6 +143,16 @@ int main(int argc, char **argv) {
     CHECK(w[0x13] == (0x40 | 0x10), "versus: type B flags 0x50");
     CHECK(mem_read8(&bus, SFIGHT_ROUND_TIME) == 99, "versus: time 99");
 
+    /* Extra 1 / 2: the cabinet keeps Hard, the AI table is ours. */
+    const uint8_t extra[8] = { 5, 1, 0, 1, 0, 1, 4, 0 };
+    load_block(f);
+    sfight_apply_menu_settings(&bus, extra, 0);
+    read_block(SFIGHT_SETTINGS_WORK, w);
+    CHECK(w[0x02] == 2 && g_enemy_rank == 5, "arcade: Extra 2 keeps rank Hard, table 5 (%d)", g_enemy_rank);
+    load_block(f);
+    sfight_apply_menu_settings(&bus, hard, 0);
+    CHECK(g_enemy_rank == -1, "arcade: Hardest gives the table back to the cabinet");
+
     /* Out of range falls back to index 0, as on the PS3. */
     const uint8_t junk[8] = { 9, 0, 0, 7, 7, 7, 77, 7 };
     load_block(f);

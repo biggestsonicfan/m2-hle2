@@ -597,6 +597,11 @@ static bool parse_args(int argc, char **argv) {
             g_region = r;
         }
         else if (!strcmp(a, "--vs-mode"))           g_vs_mode = 1;
+        else if (!strcmp(a, "--enemy-rank") && more) {  /* cabinet | easy..hardest | extra1 | extra2 */
+            int r = enemy_rank_parse(argv[++i]);
+            if (r < -1) return false;
+            g_enemy_rank = r;
+        }
         else if (!strcmp(a, "--no-nvram"))          g_backup_want = 0;
         else if (!strcmp(a, "--nvram-dir") && more) {
             snprintf(g_backup_dir, sizeof g_backup_dir, "%s", argv[++i]);
