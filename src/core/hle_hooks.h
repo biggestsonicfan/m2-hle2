@@ -309,18 +309,35 @@ static inline void hle_interrupt_on_stack(i960_cpu_t *cpu, memory_bus_t *bus, ui
 static const game_profile_t *s_hle_filter_profile = NULL;
 static uint8_t               s_hle_filter[65536 / 8];
 
+/* Hooks that do not belong to a profile: --gems-i960 (gems.h) puts the Sonic
+ * Gems Collection's C at its trap sites this way. g_hle_extra_sites lists the
+ * addresses for the filter; g_hle_extra_hook is asked first at any of them and
+ * declines (1) like a profile hook. Bump g_hle_filter_gen after a change. */
+static const uint32_t *g_hle_extra_sites = NULL;
+static size_t          g_hle_extra_count = 0;
+static int (*g_hle_extra_hook)(i960_cpu_t *cpu, memory_bus_t *bus) = NULL;
+static unsigned        g_hle_filter_gen  = 0;
+static unsigned        s_hle_filter_gen  = 0;
+/* Turns the above off for a netplay session (gems_off_for_session). */
+static void (*g_hle_extra_session_off)(void) = NULL;
+
 /* Rebuild the filter if the active profile changed. The run loop does this
  * once per slice (the profile cannot change inside one) and then calls
  * hle_check_synced per instruction; hle_check does both. */
 static inline void hle_filter_sync(void) {
     const game_profile_t *p = g_active_profile;
-    if (s_hle_filter_profile == p) return;
+    if (s_hle_filter_profile == p && s_hle_filter_gen == g_hle_filter_gen) return;
     memset(s_hle_filter, 0, sizeof(s_hle_filter));
     for (size_t i = 0; p && i < p->hook_count; i++) {
         uint32_t k = (p->hooks[i].addr >> 2) & 0xFFFFu;
         s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
     }
+    for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++) {
+        uint32_t k = (g_hle_extra_sites[i] >> 2) & 0xFFFFu;
+        s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
+    }
     s_hle_filter_profile = p;
+    s_hle_filter_gen     = g_hle_filter_gen;
 }
 
 /* A hook may stand in for a run of instructions rather than the one it sits
@@ -351,6 +368,8 @@ static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t 
     if (!(s_hle_filter[k >> 3] & (1u << (k & 7u))))
         return 1;
     g_hle_room = room;
+    if (g_hle_extra_hook && g_hle_extra_hook(cpu, bus) == 0) return 0;
+    if (!p) return 1;
     const hle_hook_entry_t *h = p->hooks;
     size_t n = p->hook_count;
     for (size_t i = 0; i < n; i++) {

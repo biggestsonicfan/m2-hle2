@@ -4222,6 +4222,7 @@ static inline void netplay_do_reset(void) {
     g_netplay.reset_pending = false;
     if (g_netplay.reset_board) {
         backup_ram_detach();   /* every board here is blank, and not the player's */
+        if (g_hle_extra_session_off) g_hle_extra_session_off();   /* --gems-*: not the ROM's board */
         g_netplay.reset_board(g_netplay.reset_ctx);
         input_reset();
         netplay_log("board reset; frame 0 of session %u", g_netplay.generation);
