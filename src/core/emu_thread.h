@@ -260,6 +260,9 @@ static inline void emu_board_reset_state(void) {
 #if I960_BLOCKS
     s_ib_valid           = 0;   /* new code, perhaps */
 #endif
+#if I960_AOT
+    aot_invalidate();
+#endif
     g_vblank_edge        = 0;
     g_versus_result      = 0;
     g_replay_stage_pin   = -1;

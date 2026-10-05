@@ -126,7 +126,9 @@ static inline uint32_t gems_in_w(void) {
 }
 static inline float gems_in_f(void) { return gems_u2f(gems_in_w()); }
 static inline void  gems_out_w(uint32_t v) { sharc_push_u(v); }
-static inline void  gems_out_f(float f)    { sharc_push_u(gems_f2u(f)); }
+/* A NaN goes out as the SHARC writes one (all ones), so a reply does not
+ * depend on the host's NaN sign: the wasm and native builds must agree. */
+static inline void  gems_out_f(float f)    { sharc_push_u(sharc_float_to_bits(f)); }
 
 /* The firmware's data memory. Gems keeps its COP state as an image of the
  * SHARC's DM from 0x30000 (its state pointer is DM 0x30000: +0xCFC is
@@ -136,10 +138,12 @@ static inline void  gems_out_f(float f)    { sharc_push_u(gems_f2u(f)); }
 static inline uint32_t *gems_dm(uint32_t addr) {
     uint32_t i = addr - GEMS_DM_BASE;
     if (i >= GEMS_DM_WORDS) {
-        static uint32_t junk;
+        /* Callers index a whole matrix or slot from what we hand back, so the
+         * stand-in is a span, not one word. */
+        static uint32_t junk[64];
         LOG_WARN("gems: DM 0x%X outside the image (cmd 0x%08X)", addr, g_gems.cmd);
-        junk = 0;
-        return &junk;
+        memset(junk, 0, sizeof junk);
+        return junk;
     }
     return &g_sharc.dm[i];
 }
@@ -157,7 +161,7 @@ static inline void gems_bram_wr(uint32_t idx, uint32_t v) {
         memcpy(g_sharc.sharc_dm_ext + ((idx * 4u) & (g_sharc.sharc_dm_ext_size - 1u)), &v, 4);
 }
 static inline float gems_bram_rdf(uint32_t idx)        { return gems_u2f(gems_bram_rd(idx)); }
-static inline void  gems_bram_wrf(uint32_t idx, float f) { gems_bram_wr(idx, gems_f2u(f)); }
+static inline void  gems_bram_wrf(uint32_t idx, float f) { gems_bram_wr(idx, sharc_float_to_bits(f)); }
 
 /* ---- What gems_impl.h supplies --------------------------------------------- */
 
@@ -252,6 +256,22 @@ static inline const gems_trap_t *gems_trap_at(uint32_t ip) {
     for (size_t i = 0; i < gems_trap_count; i++)
         if (gems_traps[i].site == ip) return &gems_traps[i];
     return NULL;
+}
+
+/* A trap whose function holds one of the active profile's own hooks stays
+ * with the i960: the C would run the whole function and skip the hook.
+ * sfight_console zeroes the head tilt at get_frame_dat+0x140 (0x30608,
+ * sfc_hook_head_tilt), so with Gems' get_frame_dat the Console profile played
+ * the Arcade's motion blend (--gems-verify: get_frame_dat differs at
+ * 0x514C30 on sfight_console only). */
+static bool gems_trap_left_to_i960(const gems_trap_t *t) {
+    static const struct { const char *profile; uint32_t site; } keep[] = {
+        { "sfight_console", 0x000304C8u },   /* get_frame_dat */
+    };
+    if (!g_active_profile) return false;
+    for (size_t k = 0; k < sizeof keep / sizeof keep[0]; k++)
+        if (t->site == keep[k].site && !strcmp(g_active_profile->id, keep[k].profile)) return true;
+    return false;
 }
 
 /* Run the C for the trap at the CPU's IP. */
@@ -475,8 +495,9 @@ static bool gems_apply(const char *set_name) {
     if ((g_gems_i960 || g_gems_cop || g_gems_verify) && !GEMS_AVAILABLE)
         LOG_WARN("gems: this build has no Gems code (configure with -DM2HLE_GEMS_DIR)");
 
-    size_t n = gems_trap_count < 256 ? gems_trap_count : 256;
-    for (size_t i = 0; i < n; i++) s_gems_sites[i] = gems_traps[i].site;
+    size_t n = 0;
+    for (size_t i = 0; i < gems_trap_count && n < 256; i++)
+        if (!gems_trap_left_to_i960(&gems_traps[i])) s_gems_sites[n++] = gems_traps[i].site;
     g_hle_extra_sites = s_gems_sites;
     g_hle_extra_count = n;
     g_hle_extra_hook  = want_i960 ? gems_hook : NULL;

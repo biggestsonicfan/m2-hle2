@@ -456,6 +456,7 @@ static int s_aot_cop_ok;
 static mem_region_t *s_aot_geo_r, *s_aot_geop_r;
 static uint64_t g_aot_ops;    /* instructions run compiled */
 static const game_profile_t *s_aot_prof;
+static unsigned s_aot_gen;   /* g_hle_filter_gen s_aot_on was decided under */
 static uint32_t s_aot_tick;
 
 /* Is the compiled code this board's? The profile's hooks must all be ones the
@@ -464,13 +465,20 @@ static uint32_t s_aot_tick;
 static inline bool aot_check(memory_bus_t *bus) {
     const game_profile_t *p = g_active_profile;
     if (!p) return false;
-    if (p != s_aot_prof) {
+    if (p != s_aot_prof || s_aot_gen != g_hle_filter_gen) {
         s_aot_prof = p;
+        s_aot_gen  = g_hle_filter_gen;
         s_aot_on = false;
         for (size_t i = 0; i < p->hook_count; i++) {
             size_t k = 0;
             while (k < AOT_NHOOKS && s_aot_hooks[k] != p->hooks[i].addr) k++;
             if (k == AOT_NHOOKS) { LOG_WARN("aot: hook 0x%08X not known to the code, off", p->hooks[i].addr); return false; }
+        }
+        /* --gems-i960's sites are hooks too: compiled code would run past one. */
+        for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++) {
+            size_t k = 0;
+            while (k < AOT_NHOOKS && s_aot_hooks[k] != g_hle_extra_sites[i]) k++;
+            if (k == AOT_NHOOKS) { LOG_WARN("aot: trap 0x%08X not known to the code, off", g_hle_extra_sites[i]); return false; }
         }
         uint32_t h = 2166136261u;
         for (uint32_t a = 0; a < AOT_ROM_BYTES; a += 4) h = (h ^ mem_read32(bus, a)) * 16777619u;
@@ -514,6 +522,10 @@ static inline bool aot_check(memory_bus_t *bus) {
     }
     return s_aot_on;
 }
+
+/* A reset or a ROM load may bring other code under the same profile: check
+ * it all again rather than a sampled word a slice. */
+static inline void aot_invalidate(void) { s_aot_prof = NULL; s_aot_on = false; }
 
 static inline bool aot_lead(uint32_t ip) {
     return ip < (AOT_NCHUNKS << AOT_SHIFT) && (s_aot_lead[ip >> 5] >> ((ip >> 2) & 7u) & 1u);

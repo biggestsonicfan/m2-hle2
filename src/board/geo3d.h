@@ -493,7 +493,7 @@ static inline float geo3d_flat_z(const vec3_t *sv, const int *zsrc, uint32_t zmo
     float z;
     if (zmode == 0u)      z = g_geo3d_flat_prev_z;
     else if (zmode == 3u) z = 1.0e10f;
-    else {   /* the nearest corner's -z (mode 2) or the farthest's */
+    else {   /* view z runs negative ahead: mode 2 takes the farthest corner, mode 1 the nearest */
         float a = sv[zsrc[0]].z, b = sv[zsrc[1]].z, c = sv[zsrc[2]].z, d = sv[zsrc[3]].z;
         if (zmode == 2u) { if (b < a) a = b; if (c < a) a = c; if (d < a) a = d; }
         else             { if (b > a) a = b; if (c > a) a = c; if (d > a) a = d; }

@@ -261,7 +261,7 @@ int main(int argc, char **argv) {
                 if (t->win_n > t->peak_win) t->peak_win = t->win_n;
                 win_kb += t->win_n * (PG / 1024);
                 if (t->win_n || t->ever_n)
-                    printf(" %s %zu/%zu", t->name + 3, t->win_n * (PG / 1024), t->ever_n * (PG / 1024));
+                    printf(" %s %zu/%zu", strchr(t->name, '.') + 1, t->win_n * (PG / 1024), t->ever_n * (PG / 1024));
                 if (csv) fprintf(csv, ",%zu,%zu", t->win_n, t->ever_n);
             }
             printf(" | window %zu KB\n", win_kb);

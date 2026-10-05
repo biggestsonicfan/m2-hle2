@@ -473,7 +473,7 @@ static int sfight_hook_idle_spin(i960_cpu_t *cpu, memory_bus_t *bus) {
     return m2_spin_skip(cpu, bus);
 }
 
-/* The texture-row senders' wait on timer 3, skipped the same way (m2_spin.h). */
+/* The texture-row senders' wait on timer 2 (0xF00008), skipped the same way (m2_spin.h). */
 static int sfight_hook_timed_spin(i960_cpu_t *cpu, memory_bus_t *bus) {
     return m2_spin_timed(cpu, bus);
 }

@@ -89,6 +89,7 @@ static uint8_t               s_ib_miss[IB_ENTRIES];  /* misses since the block's
 static const ib_block_t      s_ib_none = { 1, 0, 0, 0, NULL };  /* "step it" */
 static const game_profile_t *s_ib_profile = NULL;
 static int                   s_ib_valid   = 0;
+static unsigned              s_ib_gen     = 0;  /* g_hle_filter_gen the blocks were cut for */
 static const uint32_t        s_ib_lit[32] = {
     0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31 };
 static uint32_t              s_ib_sink;          /* a write to "register 32+" */
@@ -284,9 +285,12 @@ static inline void ib_build(i960_cpu_t *cpu, memory_bus_t *bus, ib_block_t *b, u
 }
 
 static inline const ib_block_t *ib_lookup(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip) {
-    if (M2_UNLIKELY(s_ib_profile != g_active_profile || !s_ib_valid)) {
+    /* --gems-i960 adds and removes trap sites without a profile change, so a
+     * block cut before it could run straight over a site it now owns. */
+    if (M2_UNLIKELY(s_ib_profile != g_active_profile || s_ib_gen != g_hle_filter_gen || !s_ib_valid)) {
         ib_flush();
         s_ib_profile = g_active_profile;
+        s_ib_gen     = g_hle_filter_gen;
     }
     uint32_t x = (ip >> 2) & (IB_ENTRIES - 1u);
     ib_block_t *b = &s_ib[x];
