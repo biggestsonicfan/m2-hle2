@@ -415,7 +415,7 @@ static void dp_text_row(int row, const char *s) {
 #endif
 
 /* A short line at half size in the screen's top right corner (the minimal
- * HUD's frame counter), kept in the text texture below the 20 rows. */
+ * HUD's fps counter), kept in the text texture below the 20 rows. */
 static void dp_corner(const char *s) {
     static char last[24];
     if (!strncmp(last, s, sizeof last - 1)) return;
@@ -1101,8 +1101,11 @@ static void dp_hdr_compile(pvr_poly_hdr_t *hdr, pvr_list_t list, const dc_tex_t 
     pvr_poly_cxt_t cxt;
     if (tex) {
         int bank = pal ? (int)pal : (fl & GEO3D_FACE_TRANSPARENT) ? 1 : 0;
+        /* A face with its own palette bank is a homebrew sprite (m2_sprite.h), drawn 1:1 on the
+         * board. Bilinear blends its edge texels with what lies past the quad in the atlas and with
+         * the hole's black: a dark border round every m2-sonic sprite (#473). */
         pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(bank) | PVR_TXRFMT_TWIDDLED,
-                         tex->w, tex->h, tex->ptr, PVR_FILTER_BILINEAR);
+                         tex->w, tex->h, tex->ptr, pal ? PVR_FILTER_NONE : PVR_FILTER_BILINEAR);
         cxt.gen.specular = true;
         cxt.txr.uv_flip = (pvr_uv_flip_t)(((fl & GEO3D_FACE_MIRROR_X) ? PVR_UVFLIP_U : 0) |
                                           ((fl & GEO3D_FACE_MIRROR_Y) ? PVR_UVFLIP_V : 0));

@@ -45,8 +45,8 @@
 #ifndef DC_LINK_GEMS
 #define DC_LINK_GEMS 0
 #endif
-/* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frame
- * count, small, in the top right corner (the homebrew discs). Boot errors
+/* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frames
+ * a second, small, in the top right corner (the homebrew discs). Boot errors
  * still show. */
 #ifndef DC_HUD_MIN
 #define DC_HUD_MIN 0
@@ -324,10 +324,17 @@ int main(int argc, char **argv) {
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
 #if DC_HUD_MIN
-        {   /* the minimal HUD: the board's frame count, top right */
-            char fc[16];
-            snprintf(fc, sizeof fc, "%u", (unsigned)g_emu_frames);
-            dp_corner(fc);
+        {   /* the minimal HUD: board frames a second, top right, over the last second */
+            static uint64_t fps_t0;
+            static uint32_t fps_f0;
+            if (!fps_t0) { fps_t0 = t1; fps_f0 = g_emu_frames; dp_corner("-- fps"); }
+            else if (t1 - fps_t0 >= 1000000) {
+                char fc[16];
+                uint32_t tenths = (uint32_t)(((uint64_t)(g_emu_frames - fps_f0) * 10000000u + (t1 - fps_t0) / 2) / (t1 - fps_t0));
+                snprintf(fc, sizeof fc, "%u.%u fps", (unsigned)(tenths / 10), (unsigned)(tenths % 10));
+                dp_corner(fc);
+                fps_t0 = t1; fps_f0 = g_emu_frames;
+            }
         }
 #endif
         if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }

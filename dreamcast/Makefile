@@ -51,7 +51,7 @@ FRAME512 ?= 0
 # frames and cost 72 KB of text, 64 KB of heap: off.
 OPTAB ?= 0
 AOT ?=
-# HUD=min: only a small frame counter on screen (DC_HUD_MIN, main_dc.c).
+# HUD=min: only a small frames-a-second counter on screen (DC_HUD_MIN, main_dc.c).
 HUD ?=
 # m2-pacman's map is flatter: 0.99 of it is 33,000 instructions and runs the
 # board out of RAM; 0.9 is 14,600 (2.4 MB of text).

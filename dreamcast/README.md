@@ -176,7 +176,7 @@ that show one that changed. The i960 is what is left.
 m2-pacman's `pacman_geo` and [m2-sonic](https://github.com/biggestsonicfan/m2-sonic)
 draw their sprites as polygons through the GEO, so they have discs of their own
 (Pinboard #469). Build the game with its debug panel off, and the disc with
-`HUD=min`: nothing on screen but the board's frame count, small, top right.
+`HUD=min`: nothing on screen but the board's frames a second, small, top right.
 
 ```sh
 # m2-pacman, panel off: roms/pacman_geo/game.bin
@@ -207,14 +207,23 @@ Two things in `dc_pvr.h` were needed for them:
   the line misses by more than 24 a channel gets a 16-colour PVR palette bank
   of its own (banks 3-62, two halves used on alternate frames so a bank is not
   rewritten while the last frame's list still reads it).
+- Those faces are point sampled. `m2_sprite.h` draws a sprite 1:1, and
+  bilinear filtering pulled in the texels past the quad's edge and the
+  hole's black: a dark border round every m2-sonic sprite.
 
 Neither game has sound here: there is no sound board, so the ping goes
-unanswered (see above). Measured in Flycast's libretro core, attract:
+unanswered (see above). Measured in Flycast's libretro core, attract, by
+the disc's own counter (the Dreamcast's timer):
 
 | | board fps |
 |---|---|
-| `pacman_geo`, AOT 0.95 | ~37 |
-| m2-sonic, AOT 0.95 | ~30 (the game drops Mega Drive frames to keep time) |
+| `pacman_geo`, AOT 0.95 | 28-31 |
+| m2-sonic, AOT 0.95 | 8-11 (the game drops Mega Drive frames to keep time) |
+
+Count by the Dreamcast's clock, not the host's. Under RetroArch on Xvfb
+the guest ran about 2.5 times faster than the host's clock: m2-sonic's frame count
+went up 28 a host second where the timer says 11, and read that way the two
+discs gave ~37 and ~30.
 
 ## Files
 
