@@ -938,6 +938,7 @@ first 50 s of attract, MAME against the Dreamcast:
 |---|---|---|
 | before | 13.1 | 0.813 |
 | after | 9.5 | 0.853 |
+| after, with #479's 1:1 board (HUD=none) | 8.5 | 0.872 |
 
 What it took:
 
