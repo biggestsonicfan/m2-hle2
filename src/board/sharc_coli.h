@@ -397,7 +397,10 @@ static inline void sharc_coli_calc_flag(uint32_t mode, uint32_t am0, uint32_t am
  *      ground/soko/low masks, the four wall clearances and penetrations, the
  *      nearer wall pair kept; 22 replies. */
 
-/* wall s of the arena (+X, -X, +Z, -Z, half-width A) against a ball at x/z, radius R */
+/* wall s of the arena (+X, -X, +Z, -Z, half-width A) against a ball at x/z, radius R.
+ * The SHARC's comp clears AN and AZ for a NaN, so its gt and ge are taken and
+ * its lt and le are not (MAME compute_fcomp): a NaN ball is clear of the wall
+ * and does not lower the clearance. */
 static inline void sharc_coli_area_wall(uint32_t s, float x, float z, float R, float A, uint32_t bit) {
     float p = (s & 2u) ? z : x;
     float f7 = p + R, g = A - f7;
@@ -406,7 +409,7 @@ static inline void sharc_coli_area_wall(uint32_t s, float x, float z, float R, f
     float pv = 0.0f;
     if ((sharc_float_to_bits(f7) >> 31) == (s & 1u)) {
         float af = fabsf(f7);
-        if (!(A > af)) {
+        if (A <= af) {                                   /* comp(f5,f4); if gt: clear */
             penetrating = 1;
             if (A < af) {
                 sharc_dm_set(0x30809u, sharc_dm_get(0x30809u) | bit);
@@ -419,7 +422,7 @@ static inline void sharc_coli_area_wall(uint32_t s, float x, float z, float R, f
     if (penetrating) {
         if (!(pv < sharc_dm_getf(0x3080Bu + s))) sharc_dm_setf(0x3080Bu + s, pv);
     } else {
-        if (!(g >= sharc_dm_getf(0x30813u + s))) sharc_dm_setf(0x30813u + s, g);
+        if (g < sharc_dm_getf(0x30813u + s)) sharc_dm_setf(0x30813u + s, g);   /* if ge: keep */
     }
 }
 
@@ -461,7 +464,7 @@ static inline void sharc_coli_area_walls(uint32_t low, uint32_t a4, float A) {
         uint32_t a = sharc_dm_get(p), b = sharc_dm_get(p + 1u);
         if (a & 0x80000000u) a = 0;
         if (b & 0x80000000u) b = 0;
-        if (sharc_bits_to_float(a) > sharc_bits_to_float(b)) a = 0; else b = 0;
+        if (!(sharc_bits_to_float(a) <= sharc_bits_to_float(b))) a = 0; else b = 0;   /* if gt */
         sharc_dm_set(p, a);
         sharc_dm_set(p + 1u, b);
     }
