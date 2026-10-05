@@ -45,8 +45,8 @@
 #ifndef DC_LINK_GEMS
 #define DC_LINK_GEMS 0
 #endif
-/* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frame
- * count, small, in the top right corner (the homebrew discs). Boot errors
+/* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frames
+ * a second, small, in the top right corner (the homebrew discs). Boot errors
  * still show. */
 #ifndef DC_HUD_MIN
 #define DC_HUD_MIN 0
@@ -204,9 +204,24 @@ static void dc_text(int row, const char *s) {
 static char g_calib[64];
 #endif
 
+/* The cable's 640x480 mode; with DC_FRAME512, a 512x384 frame in the middle of
+ * it: the same signal, the border black. 64 pixels in, and 48 lines (24 a
+ * field when interlaced). */
+static void dc_video_mode(void) {
+    vid_set_mode(DM_640x480, PM_RGB565);
+    if (!DC_FRAME512) return;
+    vid_mode_t m = *vid_mode;
+    m.width   = DC_SCR_W;
+    m.height  = DC_SCR_H;
+    m.bitmapx += (640 - DC_SCR_W) / 2;
+    m.bitmapy += (m.flags & VID_INTERLACE) ? (480 - DC_SCR_H) / 4 : (480 - DC_SCR_H) / 2;
+    m.fb_size = DC_SCR_W * DC_SCR_H * 2;
+    vid_set_mode_ex(&m);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
-    vid_set_mode(DM_640x480, PM_RGB565);
+    dc_video_mode();
     if (dp_init() != 0) { printf("pvr_init failed\n"); for (;;) thd_sleep(1000); }
     dc_text(0, "m2-hle2 for Dreamcast: finding the ROM files");
 
@@ -309,10 +324,17 @@ int main(int argc, char **argv) {
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
 #if DC_HUD_MIN
-        {   /* the minimal HUD: the board's frame count, top right */
-            char fc[16];
-            snprintf(fc, sizeof fc, "%u", (unsigned)g_emu_frames);
-            dp_corner(fc);
+        {   /* the minimal HUD: board frames a second, top right, over the last second */
+            static uint64_t fps_t0;
+            static uint32_t fps_f0;
+            if (!fps_t0) { fps_t0 = t1; fps_f0 = g_emu_frames; dp_corner("-- fps"); }
+            else if (t1 - fps_t0 >= 1000000) {
+                char fc[16];
+                uint32_t tenths = (uint32_t)(((uint64_t)(g_emu_frames - fps_f0) * 10000000u + (t1 - fps_t0) / 2) / (t1 - fps_t0));
+                snprintf(fc, sizeof fc, "%u.%u fps", (unsigned)(tenths / 10), (unsigned)(tenths % 10));
+                dp_corner(fc);
+                fps_t0 = t1; fps_f0 = g_emu_frames;
+            }
         }
 #endif
         if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }

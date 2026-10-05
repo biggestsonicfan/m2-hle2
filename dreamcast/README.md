@@ -32,6 +32,9 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # it is there) builds in Sega's C from Sonic Gems Collection; GEMS= leaves it
 # out. OPTAB=1 dispatches the interpreter through a handler table (off: it
 # saves under 1% here and costs 136 KB).
+# FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
+# (Flycast stretches it; DREAMCAST-PORT.md #471). VIEW=x,y,w,h shows only that
+# rectangle of the board's 496x384, scaled to fill the frame (#479).
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS
@@ -174,7 +177,7 @@ that show one that changed. The i960 is what is left.
 m2-pacman's `pacman_geo` and [m2-sonic](https://github.com/biggestsonicfan/m2-sonic)
 draw their sprites as polygons through the GEO, so they have discs of their own
 (Pinboard #469). Build the game with its debug panel off, and the disc with
-`HUD=min`: nothing on screen but the board's frame count, small, top right.
+`HUD=min`: nothing on screen but the board's frames a second, small, top right.
 
 ```sh
 # m2-pacman, panel off: roms/pacman_geo/game.bin
@@ -185,6 +188,9 @@ sh dreamcast/mkdisc.sh /tmp/dcpac /tmp/pac /tmp/dcpac/disc
 
 # m2-sonic, panel off: roms/sonic/game.bin (needs your cartridge, see its README)
 cmake -B /tmp/bson -S <m2-sonic> -DM2_SDK=<m2-sdk> -DSONIC_DEFS=SONIC_NO_PANEL && cmake --build /tmp/bson
+# the disc: only the Mega Drive's 320x224, doubled to 640x448 (VIEW, #479)
+make -C dreamcast OUT=/tmp/dcson HUD=min VIEW=88,80,320,224 AOT_MAP=sonic.aotmap AOT_COVER=0.95 AOT=/tmp/son/rom_code1.bin
+sh dreamcast/mkdisc.sh /tmp/dcson /tmp/son /tmp/dcson/disc
 ```
 
 m2-sonic keeps the Mega Drive cartridge in the two data EPROMs, so its disc's
@@ -205,14 +211,24 @@ Two things in `dc_pvr.h` were needed for them:
   the line misses by more than 24 a channel gets a 16-colour PVR palette bank
   of its own (banks 3-62, two halves used on alternate frames so a bank is not
   rewritten while the last frame's list still reads it).
+- Those faces are point sampled. `m2_sprite.h` draws a sprite 1:1, and
+  bilinear filtering pulled in the texels past the quad's edge and the
+  hole's black: a dark border round every m2-sonic sprite.
 
 Neither game has sound here: there is no sound board, so the ping goes
-unanswered (see above). Measured in Flycast's libretro core, attract:
+unanswered (see above). Measured in Flycast's libretro core, attract, by
+the disc's own counter (the Dreamcast's timer):
 
 | | board fps |
 |---|---|
-| `pacman_geo`, AOT 0.95 | ~37 |
-| m2-sonic, AOT 0.95 | ~30 (the game drops Mega Drive frames to keep time) |
+| `pacman_geo`, AOT 0.95 | 28-31 |
+| m2-sonic, AOT 0.95 | 8-11 (the game drops Mega Drive frames to keep time) |
+| m2-sonic, `VIEW=88,80,320,224`, #481 | 21-25 (Green Hill, `HUD=min`) |
+
+Count by the Dreamcast's clock, not the host's. Under RetroArch on Xvfb
+the guest ran about 2.5 times faster than the host's clock: m2-sonic's frame count
+went up 28 a host second where the timer says 11, and read that way the two
+discs gave ~37 and ~30.
 
 ## Files
 

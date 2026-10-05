@@ -500,6 +500,11 @@ static inline bool aot_check(memory_bus_t *bus) {
             while (k < AOT_NHOOKS && s_aot_hooks[k] != g_hle_extra_sites[i]) k++;
             if (k == AOT_NHOOKS) { LOG_WARN("aot: trap 0x%08X not known to the code, off", g_hle_extra_sites[i]); return false; }
         }
+        for (size_t i = 0; p == g_hle_spin_profile && i < g_hle_spin_count; i++) {
+            size_t k = 0;
+            while (k < AOT_NHOOKS && s_aot_hooks[k] != g_hle_spin_sites[i]) k++;
+            if (k == AOT_NHOOKS) { LOG_WARN("aot: idle loop 0x%08X not known to the code, off", g_hle_spin_sites[i]); return false; }
+        }
         uint32_t h = 2166136261u;
         for (uint32_t a = 0; a < AOT_ROM_BYTES; a += 4) h = (h ^ mem_read32(bus, a)) * 16777619u;
         if (h != AOT_FNV) { LOG_WARN("aot: the ROM is not the one compiled, off"); return false; }

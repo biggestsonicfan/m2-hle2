@@ -70,7 +70,9 @@ from ~129 ms to 5-6 ms a frame.
   them only if a bank they use changed. Tilemaps 1 and 0 stay on the CPU, in
   an ARGB1555 back layer that the translucent list draws first, at the
   strips' z with GEQUAL, so the 3D hides it. Any other layout falls back to
-  the full CPU layer.
+  the full CPU layer. Since #481 tilemap 0 goes the same way when pair 0/1 is
+  laid out alike (m2-sonic, below), and the window mask counts only on the
+  view.
 - **The 3D can draw past the board's 496 pixels.** Black bars cover x < 10 and
   x > 630 at the end of the translucent list.
 
@@ -739,7 +741,80 @@ a difference: it charges every frame 450,000 cycles plus 100 a byte of polygon
 data, whatever the resolution (`scheduleRenderDone`, `core/hw/pvr/spg.cpp`), and
 the polygon data is the same. Only `FRAME512` could save time on a Dreamcast
 (fewer tiles), it is untested there, and Flycast draws it enlarged and pushed
-off to the right. The commit (3af4093) was reverted.
+off to the right. The commit (3af4093) was reverted. `FRAME512=1` stays as an
+option (off by default) for STF's fps disc (#475); the default frame is the
+scaled 640x480 one, which #479's VIEW gives with no VIEW set.
+
+## Only the part of the board a game uses (#479)
+
+m2-sonic draws the Mega Drive's 320x224 at (88,80) of the board's 496x384
+and leaves the rest black, so on the 640x480 frame the game was a small box
+(320x224 1:1 under #471's layout, 400x280 at 1.25). `make VIEW=x,y,w,h`
+(`DC_VIEW_X/Y/W/H`, `dc_pvr.h`) shows only that rectangle of the board,
+scaled to fill the frame, aspect kept, centred. With no VIEW it is the whole
+board: 1.25 at (10,0) in 640x480, the layout #471's revert kept.
+
+- **m2-sonic's disc is `VIEW=88,80,320,224`**: 2.0, 640x448 at (0,16).
+- **At a whole-number scale the tile layers are point sampled**
+  (`DC_FILTER`), so the Mega Drive's pixels stay square.
+- **Only the view is drawn**: the layer quads take the view's part of their
+  512x512 textures (`dp_layer`), the tile conversion skips lines and columns
+  outside it (`dp_tiles`), and the 3D is culled to it (`dp_decode`).
+
+**It is cheaper, not dearer.** The PVR renders the whole 640x480 tile grid
+whatever is in it, and STF's 1.25 already fills it, so the fill costs the
+PVR nothing new. The SH-4 does less: the bench (full HUD,
+`EXTRA=-DDC_BENCH_F0=300u -DDC_BENCH_F1=900u`, m2-sonic attract, AOT 0.95)
+over the same 600 frames:
+
+| | total ms | slice | draw | tiles |
+|---|---|---|---|---|
+| 1:1 (#471, the canary disc) | 34956 | 11068 | 23782 | 23364 |
+| `VIEW=88,80,320,224` | 26831 | 11065 | 15691 | 15275 |
+
+The tiles' conversion was most of the frame and the view is 38% of the
+board, so a frame went from 58 ms to 45. Measured in Flycast, which does not
+charge PVR fill.
+
+## m2-sonic's planes on the PVR, and its idle loops skipped (#481)
+
+The view left two costs, found with the HUD's per-stage times and a
+per-instruction histogram of the i960 (`det_digest --trace` with a PC count):
+
+- **Both Mega Drive planes are line-scrolled, so the CPU redrew the whole
+  view every frame** (~25 ms of tiles). m2-sonic puts plane B in tilemap 2
+  and plane A in tilemap 0, each with a per-line H scroll, and its window
+  layers (tilemaps 1 and 3) only round the picture, which the masks keep
+  outside the view. `dp_ls_ok` now checks the mask on the view's lines and
+  columns only, and when both pairs qualify tilemap 0 gets textures of its
+  own too (category 0 pixels behind the 3D, ARGB1555, GEQUAL; category 1 in
+  front): the CPU then converts no tile at all. A Mega Drive game cycles a
+  few colours and animates a few patterns every few frames, so a cell is
+  redrawn only when its entry, its char (`g_dp_chr_new`) or its palette bank
+  changed; redrawing the whole tilemap on each cost another ~7 ms a frame.
+- **The i960 spent a quarter of its time in the program's own vblank
+  waits.** `m2_spin` knew only STF's `_idle`; a homebrew program
+  (`sfight_homebrew`) now has its ROM scanned at install for the same shape,
+  an absolute load and a compare-and-branch back (`m2_spin_find`), and each
+  loop found is skipped on the cycle clock. The AOT leaves those addresses
+  to the hook (they are in the AOT map). m2-sonic's waits are written as
+  that loop (its `vbl_wait`). `det_digest --cpu` against `--spin-i960` is
+  identical over 4000 frames. A `--trace` run steps one instruction at a
+  time, with no room for a skip, so its histogram still shows the waits.
+
+The same bench, 600 frames of attract:
+
+| | total ms | slice | draw | tiles |
+|---|---|---|---|---|
+| `VIEW=88,80,320,224` (#479) | 26831 | 11065 | 15691 | 15275 |
+| + idle loops skipped | 24085 | 8353 | 15654 | 15244 |
+| + both planes on the PVR | 13437 | 8364 | 5034 | 4597 |
+
+45 ms a frame to 22: in play the HUD reads about 20 fps (it was 15), the
+i960 33-35 ms a slice. What is left of the i960 is m2-sonic's own work: the
+68000 recompiler's output (`md_rc_run`, 41% of its instructions) and the
+sprite and tilemap conversion (`s24_sprites`, `s24_quad`, `s24_planes`,
+~14%).
 
 ## Held against MAME over the serial port (#461)
 
@@ -822,9 +897,10 @@ serial device has not been written.
 
 ## Next optimization targets
 
-- **Other line-scrolled screens.** The PVR strips cover only the title's
-  case: tilemap 2 alone behind. A per-line scroll on another tilemap, or
-  with a window mask, still redraws whole lines on the CPU. The attract's
+- **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
+  behind, and tilemap 0 too when its pair is laid out the same way (#481).
+  A per-line scroll on tilemap 1 or 3, or a window mask on the view, still
+  redraws whole lines on the CPU. The attract's
   "REVENGE OF DR. ROBOTONIC" banner costs ~18-27 ms a frame.
 - **The 3D decode (title: 46-76 ms).** Now mostly the cached path. The SH-4's
   `ftrv` for the vertex transform, and the store queues for the vertex
