@@ -7,9 +7,10 @@
 # rom_ep.bin, rom_pol.bin, rom_tex.bin); they go onto the disc as they are,
 # grafted in, never copied (dc_layout.h says where each one lands). STF.AFS,
 # the sound (tools/mksound.py), is grafted in the same way; without it the
-# game runs silent. MODELS.PAK, the meshes and UV streams the game draws laid
-# out scene by scene (tools/dc_mdlpack.py, dc_pager.h), is made here from
-# rom_pol.bin and rom_tex.bin and dreamcast/sfight.mdlmap; NOPAK=1 leaves it out.
+# game runs silent. MODELS.PAK, the meshes and UV streams laid out a stage and
+# a fighter at a time (tools/dc_mdlpack.py, dc_pager.h), is made here from
+# rom_pol.bin, rom_tex.bin and rom_data.bin's model table, by
+# dreamcast/sfight.mdlgroups and sfight.mdlmap; NOPAK=1 leaves it out.
 # SINCOS=<file> adds the COP's sin/cos tables (tools/mksincos.py, from the
 # player's arcade set), which the link to MAME needs (dc_link.h).
 #
@@ -38,7 +39,7 @@ done
 [ -z "${SINCOS:-}" ] || set -- "$@" "SINCOS.BIN=$SINCOS"
 if [ -z "${NOPAK:-}" ]; then
     here=$(dirname "$0")
-    python3 "$here/../tools/dc_mdlpack.py" --map "$here/sfight.mdlmap" --roms "$roms" --out "$disc/MODELS.PAK" >/dev/null
+    python3 "$here/../tools/dc_mdlpack.py" --map "$here/sfight.mdlmap" --groups "$here/sfight.mdlgroups" --roms "$roms" --out "$disc/MODELS.PAK" >/dev/null
     set -- "$@" "MODELS.PAK=$disc/MODELS.PAK"
 fi
 genisoimage -quiet -f -C 0,45000 -V M2HLE2 -G "$disc/IP.BIN" -l -graft-points \

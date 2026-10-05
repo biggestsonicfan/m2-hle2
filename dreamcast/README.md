@@ -47,10 +47,25 @@ the five ROM files as they ship, STF.AFS and MODELS.PAK. `dc_layout.h` says wher
 file lands in the board's regions; what the PS3 files lack (part of the texture
 ROM, the copro tables, the sound CPU's program and samples) is listed there.
 
-MODELS.PAK is made by `mkdisc.sh` from `rom_pol.bin`, `rom_tex.bin` and
-`sfight.mdlmap` (`tools/dc_mdlpack.py`): the meshes and UV streams the game
-reads, laid out in the order it first reads them, so a scene comes off the disc
-in a few pages. `NOPAK=1` leaves it out and everything is read from the ROM.
+MODELS.PAK is made by `mkdisc.sh` from `rom_pol.bin`, `rom_tex.bin`,
+`rom_data.bin`'s model table, `sfight.mdlgroups` and `sfight.mdlmap`
+(`tools/dc_mdlpack.py`): every object of a stage, of a fighter, of the select
+screen, side by side, as Sonic Gems Collection's `OBJ_*` files hold them, so a
+fight's stage and its two fighters come off the disc in a few pages whoever
+fights where. The groups are laid out in the order the map first reads them,
+and the map's lines that no group holds go last. `NOPAK=1` leaves the pack out
+and everything is read from the ROM. Without `--groups`, `dc_mdlpack.py`
+packs only the map's lines, by first frame (the pack before #489).
+
+`sfight.mdlgroups` is object numbers only, written by `tools/dc_mdlgroups.mjs`
+from the explorer (`vendor/noclip`: what each stage's display list draws, each
+fighter's parts and faces) and the decompressed `OBJ_*` files of a copy of
+Gems (the fighters' effects and props, the select screen, the story scenes):
+
+```sh
+node tools/dc_mdlgroups.mjs --gems <dir of OBJ_*.bin> > dreamcast/sfight.mdlgroups
+```
+
 The map holds addresses only. To record it again with a desktop `det_digest`:
 
 ```sh
@@ -244,7 +259,9 @@ discs gave ~37 and ~30.
 | `dc_sound.h` | STF.AFS, the ADX decoder, the music's ring, the SDL2 mix |
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
 | `sfight.mdlmap` | the polygon and texture ROM lines STF draws, by first frame, for MODELS.PAK |
-| `../tools/dc_mdlpack.py` | host tool: map + ROM files → MODELS.PAK |
+| `sfight.mdlgroups` | the objects of each stage and fighter, for MODELS.PAK (`tools/dc_mdlgroups.mjs`) |
+| `../tools/dc_mdlpack.py` | host tool: groups + map + ROM files → MODELS.PAK |
+| `../tools/dc_mdlgroups.mjs` | host tool: explorer + Gems' `OBJ_*` → `sfight.mdlgroups` |
 | `dc_link.h` | `LINK=1`: the replay fight's frames over the SCIF to `tools/dc-lockstep.py` |
 | `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |

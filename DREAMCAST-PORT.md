@@ -670,6 +670,35 @@ e746591c in every build below).
     nothing, so it shows no gain there (14.5 s → 15.1 s); on a GD-ROM every
     load is a seek. Not measured on hardware.
   - The 40 left are reads the map missed or that cross a run's end.
+  - **Like objects together** (#489). A map holds only what its runs saw, so
+    a matchup it never recorded read its fighters from the ROM. The pack is
+    now laid out by object groups, as Gems' `OBJ_*` files are: one per stage,
+    one per fighter (and the fighter's second-player colours), the select
+    screen, the story scenes (`dreamcast/sfight.mdlgroups`, written by
+    `tools/dc_mdlgroups.mjs`). The explorer says what each stage's display
+    list draws, at every frame of its animations, and each fighter's parts
+    and faces. Gems' files add the fighters' effects and props and the
+    scenes the explorer does not reach. Each group's objects go in whole:
+    10,943 runs, 20.3 MB. Its 133 KB index comes out of the frame pool
+    (`pg_init`), so the heap keeps its headroom.
+  - Measured by replaying the pager's model reads (`det_digest --model-map`
+    traces, an LRU over 16 KB pages; the code's share of the cache left
+    out), against the by-first-frame pack. The 1 MB pool is 64 frames for
+    that pack and 55 for this one:
+
+    | run | by first frame | by groups |
+    |---|---|---|
+    | attract, 6000 frames (in the map) | 619 | 945 |
+    | the scripted fight, 9000 (in the map) | 723 | 829 |
+    | another matchup, 9000 (not in the map) | 171,558 (64,891 from the ROM) | 9,146 (none) |
+
+    What the map recorded costs a third more loads, because a group's
+    pages hold objects the scene does not draw. What it did not record
+    stops thrashing. Two layouts were worse and were dropped: the map's
+    lines regrouped by object (3,771 / 1,266 / 106,000 + 65,000 from the
+    ROM), and the map's lines first with the groups' remaining lines after
+    them (753 / 920 / 185,281). Not run on a Dreamcast: the PS3 ROM files
+    are not in the container.
 - **Textures converted at build time do not pay here, so there is no texture
   pack.** Gems' `TEX_STG*` files look like each stage's textures, already
   decompressed and converted. The two costs that would remove, measured over
