@@ -285,6 +285,8 @@ few percent. What it would take:
 
 - **An i960 to SH-4 recompiler**, not a faster interpreter. #386 built a
   prototype and measured it: on its own it does not get there (below).
+  [I960-SH4-RECOMPILER.md](I960-SH4-RECOMPILER.md) (#491) sums up what a
+  real one would take and why the two CPUs make it hard.
 - **Skip the 3D on alternate frames** (render every other board frame): ~9 fps
   in a fight, and smoother play rather than more frames shown.
 - **The PVR face path**: the store queues for vertex submission, and `ftrv`
