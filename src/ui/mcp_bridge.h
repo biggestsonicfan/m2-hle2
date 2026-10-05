@@ -191,6 +191,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
              "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
              "\"texload\":{\"hle\":%s,\"rows\":%llu},"
+             "\"enemy_rank\":%d,"
              "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
@@ -201,6 +202,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              g_match_replay_frame,
              g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
              g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
+             (int)g_enemy_rank,
              av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
@@ -2480,6 +2482,40 @@ static void mcp_cmd_idle_hold(const char *req, char *resp, int cap) {
              g_idle_hold ? "true" : "false", holding ? "true" : "false");
 }
 
+/*
+ * {"cmd":"enemy_rank","rank":"extra1"} -- the CPU opponent's AI table
+ * (g_enemy_rank, sfight_hook_enemy_rank_table), as --enemy-rank sets it:
+ * "cabinet" (or -1) plays the cabinet's ENEMY RANK; "easy" .. "hardest",
+ * "extra1", "extra2" (or 0..5) play that table. No "rank" only reads. The
+ * table is loaded as each CPU fight sets up, so a change takes from the next
+ * fight. ok:false on a profile with no such hook, or a rank it does not know.
+ */
+static void mcp_cmd_enemy_rank(const char *req, char *resp, int cap) {
+    if (!g_active_profile || !g_active_profile->quirks.enemy_ranks) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"this profile has no CPU difficulty tables\"}");
+        return;
+    }
+    char v[24];
+    int r;
+    if (mcp_json_get_str(req, "rank", v, sizeof v)) {
+        r = enemy_rank_parse(v);
+    } else if (mcp_json_get_int(req, "rank", &r)) {
+        if (r < -1 || r >= ENEMY_RANKS) r = -2;
+    } else {
+        r = g_enemy_rank;
+    }
+    if (r < -1) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"rank: cabinet, easy, normal, hard, hardest, extra1 or extra2\"}");
+        return;
+    }
+    g_enemy_rank = r;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"rank\":%d,\"name\":\"%s\",\"netplay\":%s}",
+             r, r < 0 ? "Cabinet" : g_enemy_rank_names[r],
+             g_hle_netplay_board ? "true" : "false");
+}
+
 /* ---- The debug object viewer (objview_cmd.h) -----------------------------
  *
  * The commands themselves are in objview_cmd.h, shared with the browser build.
@@ -2681,6 +2717,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "save_state")               == 0) mcp_cmd_state(req, resp, cap, 0);
     else if (strcmp(cmd, "load_state")               == 0) mcp_cmd_state(req, resp, cap, 1);
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
+    else if (strcmp(cmd, "enemy_rank")               == 0) mcp_cmd_enemy_rank(req, resp, cap);
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
 }
 

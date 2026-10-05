@@ -282,6 +282,17 @@ power-on. `on: 0` lets attract run again; no `on` only reads. Returns `on` and
 `holding` (whether the run loop is holding the board right now); `get_status`
 carries the same pair as `idle_hold`. A `run_frames` still runs its frames.
 
+**`enemy_rank(rank: str | int)`** -- STF's CPU difficulty table, as
+`--enemy-rank` sets it: `"cabinet"` (or -1, the default) plays the table the
+cabinet's ENEMY RANK names; `"easy"`, `"normal"`, `"hard"`, `"hardest"`,
+`"extra1"`, `"extra2"` (or 0..5) play that one. Extra 1 and Extra 2 are the
+two tables the ROM carries and never points at (0x93428, 0x93728); the
+cabinet's byte must stay 0..3, so they are reachable only here. Only the AI
+table changes, as each CPU fight sets up; everything else ENEMY RANK decides
+follows the cabinet. A netplay session plays the cabinet's. No `rank` only
+reads. Returns `rank`, `name` and `netplay`; `get_status` carries `enemy_rank`.
+A profile without the hook answers `ok:false`.
+
 ### Input
 
 **`set_input(held: str = "0x0")`**

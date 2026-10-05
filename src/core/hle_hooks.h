@@ -139,7 +139,7 @@ static inline int enemy_rank_parse(const char *s) {
         "easy", "normal", "hard", "hardest", "extra1", "extra2"
     };
     if (!s) return -2;
-    if (!strcmp(s, "cabinet")) return -1;
+    if (!strcmp(s, "cabinet") || !strcmp(s, "-1")) return -1;
     if (s[0] >= '0' && s[0] < '0' + ENEMY_RANKS && !s[1]) return s[0] - '0';
     for (int i = 0; i < ENEMY_RANKS; i++)
         if (!strcmp(s, keys[i])) return i;
