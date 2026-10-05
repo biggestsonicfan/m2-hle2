@@ -183,7 +183,8 @@ draw their sprites as polygons through the GEO, so they have discs of their own
 # m2-pacman, panel off: roms/pacman_geo/game.bin
 cmake -B /tmp/bpac -S <m2-pacman> -DM2_GAME=pacman_geo -DM2_SDK=<m2-sdk> -DPAC_DEFS=PAC_NO_PANEL && cmake --build /tmp/bpac
 ln -s <m2-pacman>/roms/pacman_geo/game.bin /tmp/pac/rom_code1.bin   # + the four PS3 files, as above
-make -C dreamcast OUT=/tmp/dcpac HUD=min AOT_MAP=pacman_geo.aotmap AOT=/tmp/pac/rom_code1.bin
+# the disc: only Pac-Man's 224x288, 5/3 to the frame's full height (VIEW, #487)
+make -C dreamcast OUT=/tmp/dcpac HUD=min VIEW=136,48,224,288 AOT_MAP=pacman_geo.aotmap AOT=/tmp/pac/rom_code1.bin
 sh dreamcast/mkdisc.sh /tmp/dcpac /tmp/pac /tmp/dcpac/disc
 
 # m2-sonic, panel off: roms/sonic/game.bin (needs your cartridge, see its README)
@@ -222,6 +223,7 @@ the disc's own counter (the Dreamcast's timer):
 | | board fps |
 |---|---|
 | `pacman_geo`, AOT 0.95 | 28-31 |
+| `pacman_geo`, `VIEW=136,48,224,288`, #487 | 28-31 (maze, `HUD=min`) |
 | m2-sonic, AOT 0.95 | 8-11 (the game drops Mega Drive frames to keep time) |
 | m2-sonic, `VIEW=88,80,320,224`, #481 | 21-25 (Green Hill, `HUD=min`) |
 
