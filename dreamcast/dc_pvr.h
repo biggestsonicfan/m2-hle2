@@ -39,26 +39,43 @@
 #include "geo3d.h"
 #include "tile_renderer.h"
 
-/* The board's 496x384 pixel for pixel, centred, black around it. The frame is
- * the cable's 640x480; DC_FRAME512 (make FRAME512=1) makes it 512x384, the
- * board 8 pixels in (the PVR renders whole 32-pixel tiles), set in the middle
- * of the 640x480 signal (dc_video_mode). That is the same picture on a
- * Dreamcast, but Flycast scales a frame to fill the screen whatever its size. */
+/* The frame is the cable's 640x480; DC_FRAME512 (make FRAME512=1) makes it
+ * 512x384, set in the middle of the 640x480 signal (dc_video_mode). That is
+ * the same picture on a Dreamcast, but Flycast scales a frame to fill the
+ * screen whatever its size.
+ *
+ * What of the board's 496x384 shows is the view, DC_VIEW_X/Y/W/H (make
+ * VIEW=x,y,w,h; default the whole screen): scaled to fill the frame, aspect
+ * kept, centred, black around it. The whole board is 1.25 (620x480) in the
+ * 640x480 frame and 1.0 in the 512x384 one (8 pixels in: the PVR renders
+ * whole 32-pixel tiles). m2-sonic's Mega Drive picture, 320x224 at (88,80),
+ * is 2.0: 640x448. Only the view is drawn; at a whole-number scale the tile
+ * layers are point sampled. */
 #ifndef DC_FRAME512
 #define DC_FRAME512 0
 #endif
 #if DC_FRAME512
 #define DC_SCR_W 512
 #define DC_SCR_H 384
-#define DC_X0  8.0f
-#define DC_Y0  0.0f
 #else
 #define DC_SCR_W 640
 #define DC_SCR_H 480
-#define DC_X0  72.0f
-#define DC_Y0  48.0f
 #endif
-#define DC_S   1.0f
+#ifndef DC_VIEW_X
+#define DC_VIEW_X 0
+#define DC_VIEW_Y 0
+#define DC_VIEW_W 496
+#define DC_VIEW_H 384
+#endif
+#define DC_S   ((float)DC_SCR_W * DC_VIEW_H < (float)DC_SCR_H * DC_VIEW_W ? \
+                (float)DC_SCR_W / DC_VIEW_W : (float)DC_SCR_H / DC_VIEW_H)
+#define DC_VX0 ((float)(int)(((float)DC_SCR_W - DC_VIEW_W * DC_S) * 0.5f))   /* the view on screen */
+#define DC_VY0 ((float)(int)(((float)DC_SCR_H - DC_VIEW_H * DC_S) * 0.5f))
+#define DC_VX1 (DC_VX0 + DC_VIEW_W * DC_S)
+#define DC_VY1 (DC_VY0 + DC_VIEW_H * DC_S)
+#define DC_X0  (DC_VX0 - DC_VIEW_X * DC_S)                                  /* board pixel (0,0) */
+#define DC_Y0  (DC_VY0 - DC_VIEW_Y * DC_S)
+#define DC_FILTER (DC_S == (float)(int)DC_S ? PVR_FILTER_NONE : PVR_FILTER_BILINEAR)
 #define DC_NEAR GEO3D_NEAR
 
 /* ---- Textures cut from texture RAM ----------------------------------------- */
@@ -449,20 +466,22 @@ static inline void dp_hdr(const pvr_poly_hdr_t *h) {
     pvr_dr_commit(d);
 }
 
-/* A screen-aligned textured rectangle: (x0, y0)-(x1, y1) on screen, (u1, v1)
- * the far corner in the texture. */
-static void dp_rect(pvr_list_t list, pvr_ptr_t tex, int fmt, int tw, int th, bool depth_always,
-                    float x0, float y0, float x1, float y1, float u1, float v1, float z) {
+/* A board-sized layer texture (512x512, a texel a board pixel): the view's
+ * part of it, on the view. */
+static void dp_layer(pvr_list_t list, pvr_ptr_t tex, int fmt, bool depth_always, float z) {
+    const float k = 1.0f / 512.0f;
+    const float u0 = DC_VIEW_X * k, v0 = DC_VIEW_Y * k;
+    const float u1 = (DC_VIEW_X + DC_VIEW_W) * k, v1 = (DC_VIEW_Y + DC_VIEW_H) * k;
     pvr_poly_cxt_t cxt;
     pvr_poly_hdr_t hdr;
-    pvr_poly_cxt_txr(&cxt, list, fmt, tw, th, tex, PVR_FILTER_BILINEAR);
+    pvr_poly_cxt_txr(&cxt, list, fmt | PVR_TXRFMT_NONTWIDDLED, 512, 512, tex, DC_FILTER);
     cxt.depth.comparison = depth_always ? PVR_DEPTHCMP_ALWAYS : PVR_DEPTHCMP_GEQUAL;
     pvr_poly_compile(&hdr, &cxt);
     dp_hdr(&hdr);
-    dp_vertex(PVR_CMD_VERTEX,     x0, y0, z, 0.0f, 0.0f, 0xFFFFFFFFu, 0);
-    dp_vertex(PVR_CMD_VERTEX,     x1, y0, z, u1,   0.0f, 0xFFFFFFFFu, 0);
-    dp_vertex(PVR_CMD_VERTEX,     x0, y1, z, 0.0f, v1,   0xFFFFFFFFu, 0);
-    dp_vertex(PVR_CMD_VERTEX_EOL, x1, y1, z, u1,   v1,   0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX,     DC_VX0, DC_VY0, z, u0, v0, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX,     DC_VX1, DC_VY0, z, u1, v0, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX,     DC_VX0, DC_VY1, z, u0, v1, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX_EOL, DC_VX1, DC_VY1, z, u1, v1, 0xFFFFFFFFu, 0);
 }
 
 /* A black bar over everything drawn so far: the 3D past the board's screen. */
@@ -604,18 +623,19 @@ static void dp_ls_draw(const uint16_t *w, const uint8_t *gfx, bool all) {
 static void dp_ls_strips(pvr_list_t list, pvr_ptr_t tex, int fmt, float z) {
     pvr_poly_cxt_t cxt;
     pvr_poly_hdr_t hdr;
-    pvr_poly_cxt_txr(&cxt, list, fmt | PVR_TXRFMT_NONTWIDDLED, 512, 512, tex, PVR_FILTER_BILINEAR);
+    pvr_poly_cxt_txr(&cxt, list, fmt | PVR_TXRFMT_NONTWIDDLED, 512, 512, tex, DC_FILTER);
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
     pvr_poly_compile(&hdr, &cxt);
     dp_hdr(&hdr);
     const float k = 1.0f / 512.0f;
-    for (int y = 0; y < VIDEO_HEIGHT; ) {
+    const int vx0 = DC_VIEW_X, vx1 = DC_VIEW_X + DC_VIEW_W, vy1 = DC_VIEW_Y + DC_VIEW_H;
+    for (int y = DC_VIEW_Y; y < vy1; ) {
         int h = g_ls.h[y], ty = (y + g_ls.vy) & 511, e = y + 1;
-        while (e < VIDEO_HEIGHT && g_ls.h[e] == h && ((e + g_ls.vy) & 511)) e++;
+        while (e < vy1 && g_ls.h[e] == h && ((e + g_ls.vy) & 511)) e++;
         float sy0 = DC_Y0 + (float)y * DC_S, sy1 = DC_Y0 + (float)e * DC_S;
         float v0 = (float)ty * k, v1 = (float)(ty + e - y) * k;
         int u = (-h) & 511, xs = 512 - u;           /* screen x 0 samples u; xs wraps to 0 */
-        int cut[3] = { 0, xs < VIDEO_WIDTH ? xs : VIDEO_WIDTH, VIDEO_WIDTH };
+        int cut[3] = { vx0, xs < vx0 ? vx0 : xs < vx1 ? xs : vx1, vx1 };
         for (int q = 0; q < 2; q++) {
             if (cut[q] >= cut[q + 1]) continue;
             float ua = (float)((u + cut[q]) & 511) * k, ub = ua + (float)(cut[q + 1] - cut[q]) * k;
@@ -752,7 +772,12 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
                 while (b0 < TILE_BLK_W && !d.blk[by][b0]) b0++;
                 while (b1 > b0 && !d.blk[by][b1 - 1]) b1--;
             }
-            for (int y = by * 8; y < by * 8 + 8; y++) { x0[y] = (int16_t)(b0 * 8); x1[y] = (int16_t)(b1 * 8); }
+            int a = b0 * 8 < DC_VIEW_X ? DC_VIEW_X : b0 * 8;   /* nothing past the view */
+            int b = b1 * 8 > DC_VIEW_X + DC_VIEW_W ? DC_VIEW_X + DC_VIEW_W : b1 * 8;
+            for (int y = by * 8; y < by * 8 + 8; y++) {
+                bool in = y >= DC_VIEW_Y && y < DC_VIEW_Y + DC_VIEW_H;
+                x0[y] = (int16_t)a; x1[y] = (int16_t)(in ? b : a);
+            }
         }
         if (d.full || d.count) {
             if (g_ls.on) dp_ls_rest(tiles, bus->tmapgfx, x0, x1);
@@ -765,7 +790,8 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
     const uint16_t *bgpen = g_ls.on ? g_dp.pen1555 : g_dp.pen565;
     if (all) {
         memset(g_dp_pen_used, 0, sizeof g_dp_pen_used);
-        for (int y = 0; y < VIDEO_HEIGHT; y++) dp_tiles_convert(tiles, bgpen, y, 0, VIDEO_WIDTH);
+        for (int y = DC_VIEW_Y; y < DC_VIEW_Y + DC_VIEW_H; y++)
+            dp_tiles_convert(tiles, bgpen, y, DC_VIEW_X, DC_VIEW_X + DC_VIEW_W);
     } else if (redraw && d.count) {
         for (int y = 0; y < VIDEO_HEIGHT; y++)
             if (x0[y] < x1[y]) dp_tiles_convert(tiles, bgpen, y, x0[y], x1[y]);
@@ -1026,9 +1052,10 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
         while (j < count && geo->captured[j].window == c0->window &&
                !memcmp(geo->captured[j].gproj, c0->gproj, sizeof c0->gproj) &&
                !memcmp(geo->captured[j].vp, c0->vp, sizeof c0->vp)) j++;
-        int x0 = c0->vp[0] < 0 ? 0 : c0->vp[0], y0 = c0->vp[1] < 0 ? 0 : c0->vp[1];
-        int x1 = c0->vp[2] > VIDEO_WIDTH ? VIDEO_WIDTH : c0->vp[2];
-        int y1 = c0->vp[3] > VIDEO_HEIGHT ? VIDEO_HEIGHT : c0->vp[3];
+        int x0 = c0->vp[0] < DC_VIEW_X ? DC_VIEW_X : c0->vp[0];
+        int y0 = c0->vp[1] < DC_VIEW_Y ? DC_VIEW_Y : c0->vp[1];
+        int x1 = c0->vp[2] > DC_VIEW_X + DC_VIEW_W ? DC_VIEW_X + DC_VIEW_W : c0->vp[2];
+        int y1 = c0->vp[3] > DC_VIEW_Y + DC_VIEW_H ? DC_VIEW_Y + DC_VIEW_H : c0->vp[3];
         if (!(x1 > x0 && y1 > y0) || g_dp.runs >= DP_MAX_RUNS) { i = j; continue; }
         dp_cull_planes(c0->gproj, x0, y0, x1, y1);
         int run = (int)g_dp.runs++;
@@ -1228,15 +1255,12 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     g_dp.tt_tiles += ta - t0; g_dp.tt_scan += tb - ta; g_dp.tt_sort += t1 - tb;
     g_dp.tris = 0;
 
-    const float W = VIDEO_WIDTH * DC_S, H = VIDEO_HEIGHT * DC_S;
-    const float U = VIDEO_WIDTH / 512.0f, V = VIDEO_HEIGHT / 512.0f;
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
     if (g_ls.on)
         dp_ls_strips(PVR_LIST_OP_POLY, g_ls.back, PVR_TXRFMT_RGB565, 1.0e-4f);
     else
-        dp_rect(PVR_LIST_OP_POLY, g_dp.bg, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED, 512, 512, true,
-                DC_X0, DC_Y0, DC_X0 + W, DC_Y0 + H, U, V, 1.0e-4f);
+        dp_layer(PVR_LIST_OP_POLY, g_dp.bg, PVR_TXRFMT_RGB565, true, 1.0e-4f);
     uint32_t state = 0;
     for (int k = 0; k < n; k++) {
         int t = (int)g_dp_order[0][k];
@@ -1245,21 +1269,21 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     pvr_list_finish();
     pvr_list_begin(PVR_LIST_TR_POLY);
     if (g_ls.on)   /* tilemaps 1 and 0 behind the 3D: over the strips only */
-        dp_rect(PVR_LIST_TR_POLY, g_dp.bg, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, 512, 512, false,
-                DC_X0, DC_Y0, DC_X0 + W, DC_Y0 + H, U, V, 1.0e-4f);
+        dp_layer(PVR_LIST_TR_POLY, g_dp.bg, PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
     state = 0;
     for (int k = 0; k < n; k++) {
         int t = (int)g_dp_order[0][k];
         if (g_dcf[t].kind & DCF_TRANS) dp_face(t, PVR_LIST_TR_POLY, &state);
     }
     if (g_ls.on && g_ls.front_cells) dp_ls_strips(PVR_LIST_TR_POLY, g_ls.front, PVR_TXRFMT_ARGB1555, 1.0e3f);
-    dp_rect(PVR_LIST_TR_POLY, g_dp.fg, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, 512, 512, true,
-            DC_X0, DC_Y0, DC_X0 + W, DC_Y0 + H, U, V, 1.0e3f);
-    dp_bar(0.0f, 0.0f, DC_X0, DC_SCR_H);
-    dp_bar(DC_X0 + W, 0.0f, DC_SCR_W, DC_SCR_H);
-    if (DC_Y0 > 0.0f) {
-        dp_bar(DC_X0, 0.0f, DC_X0 + W, DC_Y0);
-        dp_bar(DC_X0, DC_Y0 + H, DC_X0 + W, DC_SCR_H);
+    dp_layer(PVR_LIST_TR_POLY, g_dp.fg, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
+    if (DC_VX0 > 0.0f) {
+        dp_bar(0.0f, 0.0f, DC_VX0, DC_SCR_H);
+        dp_bar(DC_VX1, 0.0f, DC_SCR_W, DC_SCR_H);
+    }
+    if (DC_VY0 > 0.0f) {
+        dp_bar(DC_VX0, 0.0f, DC_VX1, DC_VY0);
+        dp_bar(DC_VX0, DC_VY1, DC_VX1, DC_SCR_H);
     }
     for (int r = 0; r < 20; r++)
         if (g_dp.text_rows & (1u << r)) dp_text_rect(r);
