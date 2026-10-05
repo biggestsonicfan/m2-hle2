@@ -26,6 +26,12 @@
 #ifndef DC_DRAW_EVERY
 #define DC_DRAW_EVERY 1
 #endif
+/* At most this many board frames a second (0: as fast as it goes). A Dreamcast
+ * never gets there, but Redream's SH-4 runs faster than one and would run the
+ * game too fast. */
+#ifndef DC_FPS_CAP
+#define DC_FPS_CAP 60
+#endif
 #ifndef DC_HASH_FRAME
 #define DC_HASH_FRAME 0
 #endif
@@ -45,8 +51,8 @@
 #ifndef DC_LINK_GEMS
 #define DC_LINK_GEMS 0
 #endif
-/* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frame
- * count, small, in the top right corner (the homebrew discs). Boot errors
+/* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frames
+ * a second, small, in the top right corner (the homebrew discs). Boot errors
  * still show. */
 #ifndef DC_HUD_MIN
 #define DC_HUD_MIN 0
@@ -309,13 +315,30 @@ int main(int argc, char **argv) {
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
 #if DC_HUD_MIN
-        {   /* the minimal HUD: the board's frame count, top right */
-            char fc[16];
-            snprintf(fc, sizeof fc, "%u", (unsigned)g_emu_frames);
-            dp_corner(fc);
+        {   /* the minimal HUD: board frames a second, top right, over the last second */
+            static uint64_t fps_t0;
+            static uint32_t fps_f0;
+            if (!fps_t0) { fps_t0 = t1; fps_f0 = g_emu_frames; dp_corner("-- fps"); }
+            else if (t1 - fps_t0 >= 1000000) {
+                char fc[16];
+                uint32_t tenths = (uint32_t)(((uint64_t)(g_emu_frames - fps_f0) * 10000000u + (t1 - fps_t0) / 2) / (t1 - fps_t0));
+                snprintf(fc, sizeof fc, "%u.%u fps", (unsigned)(tenths / 10), (unsigned)(tenths % 10));
+                dp_corner(fc);
+                fps_t0 = t1; fps_f0 = g_emu_frames;
+            }
         }
 #endif
         if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }
+#if DC_FPS_CAP
+        {   /* wait while the board is ahead of the clock; behind by over 0.1 s, the clock starts again */
+            static uint64_t cap_t0;
+            static uint32_t cap_f0;
+            uint64_t now = timer_us_gettime64();
+            uint64_t due = cap_t0 + (uint64_t)(g_emu_frames - cap_f0) * 1000000u / DC_FPS_CAP;
+            if (!cap_t0 || now > due + 100000u) { cap_t0 = now; cap_f0 = g_emu_frames; }
+            else while (timer_us_gettime64() < due) thd_pass();
+        }
+#endif
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
             uint32_t h = 2166136261u;
             for (uint32_t a = 0x500000u; a < 0x600000u; a += 4) h = (h ^ mem_read32(&bus, a)) * 16777619u;
