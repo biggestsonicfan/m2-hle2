@@ -88,6 +88,24 @@ static cop_state_t g_cop = {0};
  * argument, 0x30000000 a word the command answered. NULL when not capturing. */
 static void (*g_cop_tap)(uint32_t tag, uint32_t val) = NULL;
 
+/* --gems-cop (gems.h) answers commands with the Sonic Gems Collection's C
+ * instead of sharc_exec. Each is NULL unless it is on: the argument count of a
+ * command word (GEMS_COP_NOT_MINE: sharc_exec takes it; COP_ARGS_STREAM
+ * for the afterimage stream), the command with
+ * its arguments, and the afterimage stream's begin / feed. */
+#define GEMS_COP_NOT_MINE (-2)
+static int  (*g_gems_cop_args)(uint32_t cmd) = NULL;
+static void (*g_gems_cop_exec)(uint32_t cmd, const uint32_t *args, int n) = NULL;
+static void (*g_gems_cop_stream_begin)(void) = NULL;
+static bool (*g_gems_cop_stream_feed)(uint32_t w) = NULL;
+static void (*g_gems_cop_reset)(void) = NULL;
+static bool g_cop_gems_cmd = false;   /* the command in flight is Gems' */
+
+static inline void cop_exec(uint32_t cmd, const uint32_t *args, int n) {
+    if (g_cop_gems_cmd) g_gems_cop_exec(cmd, args, n);
+    else                sharc_exec(cmd, args, n);
+}
+
 static inline void cop_tap_replies(void) {
     if (!g_cop_tap) return;
     for (int k = 0; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
@@ -104,7 +122,7 @@ static __attribute__((noinline)) void cop_write_word(uint32_t val) {
         if (--g_cop.args_needed == 0) {
             int64_t t0 = emu_times_cop_begin();
             int zone = hprof_enter(HPROF_COP);
-            sharc_exec(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
+            cop_exec(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
             hprof_leave(zone);
             emu_times_cop_end(t0);
             cop_tap_replies();
@@ -121,7 +139,7 @@ static __attribute__((noinline)) void cop_write_word(uint32_t val) {
         if (g_cop_tap) g_cop_tap(0x20000000u, val);
         int before = g_sharc.reply_count;
         int zone   = hprof_enter(HPROF_COP);
-        bool done  = sharc_zanzou_feed(val);
+        bool done  = g_cop_gems_cmd ? g_gems_cop_stream_feed(val) : sharc_zanzou_feed(val);
         hprof_leave(zone);
         if (g_cop_tap)
             for (int k = before; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
@@ -132,18 +150,21 @@ static __attribute__((noinline)) void cop_write_word(uint32_t val) {
     if (g_cop_tap) g_cop_tap(0x21000000u, val);
     g_cop.cur_cmd       = val;
     g_cop.last_cmd      = val;
-    g_cop.args_needed   = sharc_args_for_cmd(val);
+    int gems_n = g_gems_cop_args ? g_gems_cop_args(val) : GEMS_COP_NOT_MINE;
+    g_cop_gems_cmd      = gems_n != GEMS_COP_NOT_MINE;
+    g_cop.args_needed   = g_cop_gems_cmd ? gems_n : sharc_args_for_cmd(val);
     g_cop.args_received = 0;
     if (g_cop.args_needed == COP_ARGS_STREAM) {
         g_sharc.reply_count = 0;
         g_sharc.reply_idx   = 0;
-        sharc_zanzou_begin();
+        if (g_cop_gems_cmd) g_gems_cop_stream_begin();
+        else                sharc_zanzou_begin();
         return;
     }
     if (g_cop.args_needed == 0) {
         int64_t t0 = emu_times_cop_begin();
         int zone = hprof_enter(HPROF_COP);
-        sharc_exec(val, NULL, 0);
+        cop_exec(val, NULL, 0);
         hprof_leave(zone);
         emu_times_cop_end(t0);
         cop_tap_replies();
@@ -247,12 +268,14 @@ static inline void cop_reset(void) {
     const uint8_t *ctl = g_cop.ctl;       /* the bus's, not COP state */
     memset(&g_cop, 0, sizeof(g_cop));
     g_cop.ctl = ctl;
+    g_cop_gems_cmd = false;
     g_zz.phase = 4;                       /* no stream in flight */
     memset(&g_sharc, 0, sizeof(g_sharc));
     sharc_rot_identity();
     /* firmware init (cpres1 PM 0x20080..): DM[0x30300..2] = 0, 1.0, 2.0 */
     g_sharc.dm[0x301] = 0x3F800000u;
     g_sharc.dm[0x302] = 0x40000000u;
+    if (g_gems_cop_reset) g_gems_cop_reset();
 }
 
 #endif /* COP_H */

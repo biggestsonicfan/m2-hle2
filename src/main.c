@@ -35,6 +35,7 @@
 #include "watchpoint.h"
 #include "rom_loader.h"
 #include "emu_thread.h"
+#include "gems.h"          /* --gems-i960 / --gems-cop: Sega's own C from Sonic Gems Collection */
 #include "memview.h"
 #include "cpu_window.h"
 #include "breakpoint_window.h"
@@ -233,6 +234,7 @@ static void load_active_profile(const char *primary_zip) {
         /* The model lookup is built from the ROM's model table: a new set needs a new one. */
         geo3d_lookup_invalidate();
         g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
+        gems_apply(profile_rom_set(g_active_profile));
         /* Bring up the 68K sound block: attach the MIDI/SCSP bus callbacks, load
          * the 68K program ROM + PCM sample ROM. (install_fn re-inits the bus, so
          * this must run after it.) */
@@ -1091,6 +1093,7 @@ static int headless_main(void) {
     av_stream_shutdown();
     if (state.emu_started) emu_thread_shutdown(&state.emu);
     backup_ram_flush();
+    gems_verify_report();
     netplay_shutdown();
     overlay_host_shutdown();
     av_capture_shutdown();
@@ -1333,6 +1336,7 @@ static void cleanup(void) {
     av_stream_shutdown();
     if (state.emu_started) emu_thread_shutdown(&state.emu);
     backup_ram_flush();   /* the board has stopped: what it holds now is final */
+    gems_verify_report();
     netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
@@ -1512,6 +1516,12 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_no_sound_board = 1;
         } else if (strcmp(argv[i], "--sound-hle") == 0) {
             g_sound_hle_want = 1;
+        } else if (strcmp(argv[i], "--gems-i960") == 0) {
+            g_gems_i960 = true;     /* STF's trapped functions in Gems' C (core/gems.h) */
+        } else if (strcmp(argv[i], "--gems-cop") == 0) {
+            g_gems_cop = true;      /* the COP commands in Gems' C */
+        } else if (strcmp(argv[i], "--gems-verify") == 0) {
+            g_gems_verify = true;   /* each trapped function both ways, differences logged */
         } else if (strcmp(argv[i], "--texload-i960") == 0) {
             g_texload_hle = 0;   /* STF's texture loader on the i960, not in C (m2_texload.h) */
         } else if (strcmp(argv[i], "--spin-i960") == 0) {

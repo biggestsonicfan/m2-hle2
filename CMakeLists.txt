@@ -53,6 +53,18 @@ if(M2HLE_PROFILE)
     add_compile_definitions(M2HLE_PROFILE)
 endif()
 
+# Sega's own C for STF's hot i960 functions and the COP commands, from Sonic
+# Gems Collection (src/core/gems.h; --gems-i960, --gems-cop, --gems-verify).
+# It is not in this repository: point this at a directory holding gems_impl.h.
+set(M2HLE_GEMS_DIR "" CACHE PATH "Directory with gems_impl.h (Sonic Gems Collection C); empty: none")
+if(M2HLE_GEMS_DIR)
+    if(NOT EXISTS "${M2HLE_GEMS_DIR}/gems_impl.h")
+        message(FATAL_ERROR "M2HLE_GEMS_DIR: no gems_impl.h in ${M2HLE_GEMS_DIR}")
+    endif()
+    add_compile_definitions(M2HLE_GEMS)
+    include_directories("${M2HLE_GEMS_DIR}")
+endif()
+
 # A build to debug a running emulator with (tools/build-debug.sh). Debug and
 # RelWithDebInfo keep the frame pointer, so perf, gdb and the crash backtrace
 # (core/crash_trace.h) can walk the stack. M2HLE_SANITIZE adds sanitizers, e.g.
