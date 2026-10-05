@@ -15,7 +15,7 @@
  * decoded and written again as the AICA's 4-bit ADPCM into sound RAM, and a
  * cue starts it on a channel of its own. Nothing is mixed on the SH-4, and the
  * effects' 1.1 MB stay out of main RAM. A channel holds at most 65534
- * samples, so the four effects longer than that go at half their rate.
+ * samples, so the four effects longer than that go at half their rate (or less).
  *
  * The music stays ADX, decoded on the SH-4 into a KOS stream (S16 stereo at
  * the file's 44.1 kHz) that a thread of ours tops up. The stream's callback
@@ -45,6 +45,7 @@
 #define DS_AICA_MAX  65534u             /* samples a channel can play */
 #define DS_STREAM    (32u << 10)        /* the stream's buffer per channel, bytes */
 #define DS_RING      (128u << 10)       /* ~2.6 s of 44.1 kHz stereo ADX */
+_Static_assert((DS_RING & (DS_RING - 1u)) == 0, "DS_RING: a power of two");
 #define DS_STAGE_SEC 8                  /* sectors per music read */
 #define DS_CAT_STOP  0
 #define DS_CAT_SE    2
@@ -114,7 +115,10 @@ static int adx_next(adx_dec_t *d, adx_fetch_fn fetch, void *src) {
         lo = h->ls % 32;
     }
     const uint8_t *f = fetch(src, d);
-    if (!f) return 0;
+    if (!f) {   /* not read yet: at the seam, wrap again next time, or the loop start's offset is lost */
+        if (lo) d->frame = adx_frames_end(h);
+        return 0;
+    }
     for (uint32_t c = 0; c < h->ch; c++, f += 18) {
         int scale = ds_be16(f);
         int32_t s1 = d->s1[c], s2 = d->s2[c];
@@ -325,14 +329,17 @@ static void ds_play_bgm(uint16_t e) {
 static void ds_code(uint32_t code) {
     if (!g_ds.on) return;
     g_ds.codes++;
-    mutex_lock(&g_ds.mx);
-    if (code == 0xA00001) { ds_stop_bgm(); ds_stop_se(-1); }
-    else if (code == 0xA00002) ds_stop_bgm();
+    /* The lock is the music's (the stream's thread decodes it); the effects'
+     * voices are this thread's alone, and their AICA calls stay outside it. */
+    if (code == 0xA00001) { mutex_lock(&g_ds.mx); ds_stop_bgm(); mutex_unlock(&g_ds.mx); ds_stop_se(-1); }
+    else if (code == 0xA00002) { mutex_lock(&g_ds.mx); ds_stop_bgm(); mutex_unlock(&g_ds.mx); }
     else if (code == 0xA00003) ds_stop_se(-1);
     else if ((code & 0xFFFFFF00u) == 0xA00300) {
         uint32_t frames = code & 0xFF;
+        mutex_lock(&g_ds.mx);
         if (!frames) ds_stop_bgm();
         else if (g_ds.bgm != 0xFFFF) g_ds.bgm_fade = (int32_t)((1u << 16) / (frames * g_ds.bgm_hdr.rate / 60) + 1);
+        mutex_unlock(&g_ds.mx);
     } else {
         uint32_t lo = 0, hi = g_ds.ncue;
         while (lo < hi) {
@@ -342,12 +349,11 @@ static void ds_code(uint32_t code) {
         if (lo == g_ds.ncue || g_ds.cue[lo].code != code) g_ds.unknown++;
         else if (g_ds.cue[lo].entry != 0xFFFF) {
             const ds_cue_t *c = &g_ds.cue[lo];
-            if (c->cat == DS_CAT_BGM) ds_play_bgm(c->entry);
+            if (c->cat == DS_CAT_BGM) { mutex_lock(&g_ds.mx); ds_play_bgm(c->entry); mutex_unlock(&g_ds.mx); }
             else if (c->cat == DS_CAT_STOP) ds_stop_se(c->entry);
             else ds_play_se(c->entry);
         }
     }
-    mutex_unlock(&g_ds.mx);
 }
 
 /* ---- The music's reader (main loop) ------------------------------------------------- */
@@ -385,9 +391,10 @@ static void ds_pump(void) {
             continue;
         }
         mutex_lock(&g_ds.mx);
-        if (g_ds.bgm == e) {
-            for (uint32_t i = 0; i < k; i++)
-                g_ds.ring[(g_ds.r_head + i) % DS_RING] = g_ds.stage[o + i];
+        if (g_ds.bgm == e) {   /* two copies, across the ring's wrap: the stream waits on this lock */
+            uint32_t h0 = g_ds.r_head & (DS_RING - 1u), k0 = DS_RING - h0 < k ? DS_RING - h0 : k;
+            memcpy(g_ds.ring + h0, g_ds.stage + o, k0);
+            memcpy(g_ds.ring, g_ds.stage + o + k0, k - k0);
             g_ds.r_head += k;
             g_ds.rd_frame += k / fs;
         }
@@ -430,7 +437,7 @@ static int ds_load_se(uint16_t e, const uint8_t *buf) {
     while (k < n && d.frame < adx_frames_end(h) && adx_next(&d, ds_fetch_ram, (void *)buf))
         for (; d.pos < d.end && k < n; d.pos++) pcm[k++] = d.pcm[d.pos][0];
     n = k;
-    if (n > DS_AICA_MAX) {
+    while (n > DS_AICA_MAX) {   /* halve until it fits: one halving holds only twice the limit */
         for (uint32_t i = 0; i < n / 2; i++) pcm[i] = (int16_t)((pcm[2 * i] + pcm[2 * i + 1]) >> 1);
         n /= 2; rate /= 2; ls /= 2;
     }
@@ -444,6 +451,21 @@ static int ds_load_se(uint16_t e, const uint8_t *buf) {
     return 0;
 }
 
+/* ds_init gave up: give back what it took (main RAM is 16 MB). */
+static int ds_init_fail(void) {
+    if (g_ds.se)
+        for (uint32_t i = 0; i < g_ds.n; i++)
+            if (g_ds.se[i].h) snd_sfx_unload(g_ds.se[i].h);
+    for (int i = 0; i < DS_VOICES; i++)
+        if (g_ds.voice_chn[i] >= 0) snd_sfx_chn_free(g_ds.voice_chn[i]);
+    free(g_ds.off); free(g_ds.size); free(g_ds.se); free(g_ds.hdr); free(g_ds.cue);
+    free(g_ds.ring); free(g_ds.stage);
+    memset(&g_ds, 0, sizeof g_ds);
+    g_ds.bgm = 0xFFFF;
+    for (int i = 0; i < DS_VOICES; i++) g_ds.voice_chn[i] = -1;
+    return -1;
+}
+
 /* Before pg_init: reads the AFS's table and CUES.BIN, loads every effect into
  * RAM and every music header, and opens the audio device. Returns 0, or -1
  * with no sound (no STF.AFS, no audio device): the board runs either way. */
@@ -451,32 +473,40 @@ static int ds_init(void) {
     static uint8_t sec[2048] __attribute__((aligned(32)));
     uint32_t afs_size = 0;
     g_ds.bgm = 0xFFFF;
+    for (int i = 0; i < DS_VOICES; i++) g_ds.voice_chn[i] = -1;
     if (!(g_ds.fad = pg_find_file("STF.AFS", &afs_size))) return -1;
     g_ds.nsec = (afs_size + 2047) / 2048;
     if (ds_read_boot(sec, g_ds.fad, 1) || memcmp(sec, "AFS", 4)) return -1;
     g_ds.n = ds_le32(sec + 4);
-    if (g_ds.n < 2 || 8 + 8 * g_ds.n > 2048) return -1;
+    if (g_ds.n < 2 || g_ds.n > (2048 - 8) / 8) return -1;
     g_ds.off  = calloc(g_ds.n, 4);
     g_ds.size = calloc(g_ds.n, 4);
     g_ds.se   = calloc(g_ds.n, sizeof *g_ds.se);
     g_ds.hdr  = calloc(g_ds.n, sizeof *g_ds.hdr);
+    if (!g_ds.off || !g_ds.size || !g_ds.se || !g_ds.hdr) return ds_init_fail();
     for (uint32_t i = 0; i < g_ds.n; i++) {
         g_ds.off[i]  = ds_le32(sec + 8 + 8 * i);
         g_ds.size[i] = ds_le32(sec + 12 + 8 * i);
     }
     uint8_t *cues = malloc(g_ds.size[0] + 2048);
-    if (!cues || ds_read_entry(0, 0, g_ds.size[0], cues) || memcmp(cues, "STFC", 4)) return -1;
+    if (!cues || g_ds.size[0] < 8 || ds_read_entry(0, 0, g_ds.size[0], cues) || memcmp(cues, "STFC", 4)) {
+        free(cues);
+        return ds_init_fail();
+    }
     g_ds.ncue = ds_be32(cues + 4);
-    g_ds.cue = calloc(g_ds.ncue, sizeof *g_ds.cue);
+    if (g_ds.ncue > (g_ds.size[0] - 8) / 8 || !(g_ds.cue = calloc(g_ds.ncue ? g_ds.ncue : 1, sizeof *g_ds.cue))) {
+        free(cues);
+        return ds_init_fail();
+    }
     for (uint32_t i = 0; i < g_ds.ncue; i++) {
         const uint8_t *c = cues + 8 + 8 * i;
         g_ds.cue[i] = (ds_cue_t){ ds_be32(c), c[4], ds_be16(c + 6) };
     }
     free(cues);
     mutex_init(&g_ds.mx, MUTEX_TYPE_NORMAL);
-    if (snd_stream_init() < 0) return -1;
+    if (snd_stream_init() < 0) return ds_init_fail();
     for (int i = 0; i < DS_VOICES; i++)
-        if ((g_ds.voice_chn[i] = snd_sfx_chn_alloc()) < 0) return -1;
+        if ((g_ds.voice_chn[i] = snd_sfx_chn_alloc()) < 0) return ds_init_fail();
     uint32_t ram = 0;
     for (uint32_t i = 0; i < g_ds.ncue; i++) {
         uint16_t e = g_ds.cue[i].entry;
@@ -491,9 +521,9 @@ static int ds_init(void) {
     }
     g_ds.ring  = malloc(DS_RING);
     g_ds.stage = memalign(32, DS_STAGE_SEC * 2048);
-    if (!g_ds.ring || !g_ds.stage) return -1;
+    if (!g_ds.ring || !g_ds.stage) return ds_init_fail();
 
-    if ((g_ds.stream = snd_stream_alloc(ds_stream_cb, DS_STREAM)) < 0) return -1;
+    if ((g_ds.stream = snd_stream_alloc(ds_stream_cb, DS_STREAM)) < 0) return ds_init_fail();
     snd_stream_start(g_ds.stream, DS_RATE, 1);
     g_ds.on = 1;
     thd_create(1, ds_thread, NULL);

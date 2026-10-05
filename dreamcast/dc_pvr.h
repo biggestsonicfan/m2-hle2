@@ -97,14 +97,53 @@ static inline unsigned dp_texel(const uint32_t *sheet, unsigned x, unsigned y) {
     return (word >> sh) & 15u;
 }
 
+/* Video memory a dropped texture held is given back a frame later: the PVR
+ * may still be drawing the previous frame from it while this one is decoded,
+ * and a texture loaded over it would show there. */
+#define DC_TEX_LATE (DC_TEX_SLOTS * 2u)
+static pvr_ptr_t g_dp_late[DC_TEX_LATE];
+static unsigned  g_dp_late_n;
+static bool      g_dp_full;    /* the table or video memory ran out: drop all at the next frame */
+
+static void dp_tex_free(pvr_ptr_t p) {
+    if (g_dp_late_n < DC_TEX_LATE) g_dp_late[g_dp_late_n++] = p;
+    else pvr_mem_free(p);   /* cannot happen: drops come before the decode, each slot at most twice */
+}
+/* At a frame's start, the PVR ready for it: the frame drawn from what the last
+ * one dropped is done, so give the memory back. */
+static void dp_tex_free_late(void) {
+    for (unsigned i = 0; i < g_dp_late_n; i++) pvr_mem_free(g_dp_late[i]);
+    g_dp_late_n = 0;
+}
+
 static void dp_tex_drop_all(void) {
     for (unsigned i = 0; i < DC_TEX_SLOTS; i++)
-        if (g_dp.tex[i].key) { pvr_mem_free(g_dp.tex[i].ptr); g_dp.tex[i].key = 0; }
+        if (g_dp.tex[i].key) { dp_tex_free(g_dp.tex[i].ptr); g_dp.tex[i].key = 0; }
     g_dp.count = 0;
 }
 
-/* Texture RAM changed: drop every texture cut from a KB row the game wrote. */
+static inline uint32_t dp_tex_hash(uint32_t key) { return (key * 2654435761u) >> 22; }
+
+/* Open addressing has no holes: after a delete, put every live entry back
+ * where a lookup will find it (a probe stops at the first free slot). */
+static void dp_tex_rehash(void) {
+    static dc_tex_t old[DC_TEX_SLOTS];
+    memcpy(old, g_dp.tex, sizeof old);
+    for (unsigned i = 0; i < DC_TEX_SLOTS; i++) g_dp.tex[i].key = 0;
+    for (unsigned i = 0; i < DC_TEX_SLOTS; i++) {
+        if (!old[i].key) continue;
+        uint32_t h = dp_tex_hash(old[i].key);
+        unsigned p = 0;
+        while (g_dp.tex[(h + p) & (DC_TEX_SLOTS - 1u)].key) p++;
+        g_dp.tex[(h + p) & (DC_TEX_SLOTS - 1u)] = old[i];
+    }
+}
+
+/* Texture RAM changed: drop every texture cut from a KB row the game wrote.
+ * Called before a frame's decode, so no face holds a slot yet. */
 static void dp_tex_invalidate(memory_bus_t *bus) {
+    dp_tex_free_late();
+    if (g_dp_full || g_dp.count >= DC_TEX_SLOTS * 3 / 4) { dp_tex_drop_all(); g_dp_full = false; }
     if (bus->gen_tex == g_dp.gen_tex) return;
     g_dp.gen_tex = bus->gen_tex;
     static uint8_t dirty[2][1024];
@@ -113,18 +152,21 @@ static void dp_tex_invalidate(memory_bus_t *bus) {
             dirty[s][q] = bus->tex_dirty[s][q];
             bus->tex_dirty[s][q] = 0;
         }
+    unsigned gone = 0;
     for (unsigned i = 0; i < DC_TEX_SLOTS; i++) {
         dc_tex_t *t = &g_dp.tex[i];
         if (!t->key) continue;
         for (unsigned q = t->q0; q <= t->q1; q++)
             if (dirty[t->sheet][q]) {
-                pvr_mem_free(t->ptr);
+                dp_tex_free(t->ptr);
                 t->key = 0;
                 g_dp.count--;
                 g_dp.dropped++;
+                gone++;
                 break;
             }
     }
+    if (gone) dp_tex_rehash();
 }
 
 /* The PVR texture for a face's tile, cut and loaded on first use; NULL if it
@@ -136,14 +178,16 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
     if (tw > 256 || th > 256 || !tw || !th) return NULL;
     unsigned lw = dp_log2(tw), lh = dp_log2(th);
     uint32_t key = 0x80000000u | sheet << 29 | x0 << 18 | y0 << 8 | lw << 4 | lh;
-    uint32_t h = (key * 2654435761u) >> 22;
+    uint32_t h = dp_tex_hash(key);
     dc_tex_t *t = NULL;
     for (unsigned p = 0; p < DC_TEX_SLOTS; p++) {
         dc_tex_t *e = &g_dp.tex[(h + p) & (DC_TEX_SLOTS - 1u)];
         if (e->key == key) return e;
         if (!e->key) { t = e; break; }
     }
-    if (!t || g_dp.count >= DC_TEX_SLOTS * 3 / 4) { dp_tex_drop_all(); t = &g_dp.tex[h & (DC_TEX_SLOTS - 1u)]; }
+    /* Faces decoded earlier this frame hold their slots, so nothing is dropped
+     * now: this face goes untextured and the next frame starts afresh. */
+    if (!t || g_dp.count >= DC_TEX_SLOTS - 1u) { g_dp_full = true; g_dp.fails++; return NULL; }
 
     /* Twiddled: square blocks of the shorter side, Morton order with v the
      * low bit, laid one after another along the longer side. */
@@ -158,8 +202,7 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
             g_dp_cut[i >> 1] |= (uint8_t)(c << ((i & 1) * 4));
         }
     pvr_ptr_t p = pvr_mem_malloc(W * H / 2);
-    if (!p) { dp_tex_drop_all(); p = pvr_mem_malloc(W * H / 2); }
-    if (!p) { g_dp.fails++; return NULL; }
+    if (!p) { g_dp_full = true; g_dp.fails++; return NULL; }
     pvr_txr_load(g_dp_cut, p, W * H / 2);
     *t = (dc_tex_t){ key, p, (uint16_t)W, (uint16_t)H, 1.0f / (float)W, 1.0f / (float)H,
                      (uint16_t)((y0 >> 1) + (x0 >= 1024 ? 512 : 0)),

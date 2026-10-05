@@ -97,7 +97,7 @@ static void jt_take(jt_state_t *s, i960_cpu_t *cpu, memory_bus_t *bus, uint32_t 
 static void jt_put(const jt_state_t *s, i960_cpu_t *cpu, memory_bus_t *bus, uint32_t scr) {
     *cpu = s->cpu; g_irqt.pending = s->pending; s_timer_cycles_seen = s->seen;
     g_last_store_ip = s->last_store; g_mem_last_write_ip = s->last_write; bus->cpu_ip = s->bus_ip;
-    for (uint32_t i = 0; i < sizeof s->mem; i++) bus->wr_page[(scr - 0x40u + i) >> 16][(scr - 0x40u + i) & 0xFFFFu] = s->mem[i];
+    for (uint32_t i = 0; i < sizeof s->mem; i++) bus->wr_page[(scr - 0x40u + i) >> MEM_PAGE_SHIFT][(scr - 0x40u + i) & MEM_PAGE_OFF] = s->mem[i];
 }
 
 /* Which part differs, or NULL. */
@@ -126,16 +126,17 @@ static void jt_run(i960_cpu_t *cpu, memory_bus_t *bus, int cases, int row) {
     /* the scratch: 0x80 below the end of a work-RAM page whose next page is plain RAM too */
     uint32_t scr = 0;
     if (!bus->page_ok) mem_build_pages(bus);
-    for (uint32_t p = 0x50u; p < 0xFFFFu && !scr; p++)
+    /* pages of the bus's size (MEM_PAGE_SHIFT: 14 on the Dreamcast), from 0x500000 */
+    for (uint32_t p = 0x500000u >> MEM_PAGE_SHIFT; p + 1u < MEM_PAGES && !scr; p++)
         if (bus->wr_page[p] && bus->wr_page[p + 1] && bus->rd_page[p] == bus->wr_page[p]
                 && bus->rd_page[p + 1] == bus->wr_page[p + 1])
-            scr = (p << 16) + 0xFF80u;
+            scr = (p << MEM_PAGE_SHIFT) + MEM_PAGE_OFF + 1u - 0x80u;
     uint32_t rom = 0;
-    for (uint32_t p = 0; p < 0x40u && !rom; p++)
-        if (bus->rd_page[p] && !bus->wr_page[p]) rom = (p << 16) + 0x1000u;
+    for (uint32_t p = 0; p < (0x400000u >> MEM_PAGE_SHIFT) && !rom; p++)
+        if (bus->rd_page[p] && !bus->wr_page[p]) rom = (p << MEM_PAGE_SHIFT) + 0x1000u;
     if (!rom) rom = scr - 0x40u;   /* the pager maps ROM pages as they are touched */
     if (!scr) {
-        snprintf(line, sizeof line, "jit test: no scratch page (50: rd %p wr %p)", bus->rd_page[0x50], bus->wr_page[0x50]);
+        snprintf(line, sizeof line, "jit test: no scratch page (500000: rd %p wr %p)", MEM_PAGE(bus->rd_page, 0x500000u), MEM_PAGE(bus->wr_page, 0x500000u));
         dc_text(row, line);
         return;
     }
