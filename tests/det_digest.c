@@ -270,6 +270,8 @@ static void aotmap_write(memory_bus_t *b, const char *path) {
                     aotmap_hits[k], aotmap_jump[k]);
     for (size_t i = 0; i < g_active_profile->hook_count; i++)
         fprintf(aotmap_out, "hook %08x\n", g_active_profile->hooks[i].addr);
+    for (size_t i = 0; g_active_profile == g_hle_spin_profile && i < g_hle_spin_count; i++)
+        fprintf(aotmap_out, "hook %08x\n", g_hle_spin_sites[i]);
 }
 
 /* --model-map F0:F1:FILE: the polygon and texture ROM bytes the 3D decoder
