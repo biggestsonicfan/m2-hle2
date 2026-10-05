@@ -108,6 +108,9 @@ static int dc_romset(void) {
     for (size_t i = 0; i < g_profile_count; i++)
         if (!strcmp(g_profiles[i]->id, want)) g_active_profile = g_profiles[i];
     if (!g_active_profile) { printf("no profile %s in this build\n", want); return -1; }
+    /* Homebrew (m2-pacman) is a disc whose ROM_CODE1.BIN is another program:
+     * the set's any_program profile runs it, as on the desktop. */
+    if (rs.loaded) profile_adopt_program(rs.maincpu, rs.maincpu_size);
     return rs.loaded ? 0 : -1;
 }
 
@@ -126,7 +129,7 @@ static game_profile_t dc_profile;
 static bool s_dc_gems;   /* gems.h is on */
 
 static void dc_add_sound_hook(void) {
-    if (strncmp(g_active_profile->id, "sfight", 6) ||   /* sfight, sfight_console */
+    if (strncmp(g_active_profile->id, "sfight", 6) || g_active_profile->any_program ||   /* sfight, sfight_console */
          g_active_profile->hook_count >= HLE_HOOK_TABLE_MAX) return;
     dc_profile = *g_active_profile;
     dc_profile.hooks[dc_profile.hook_count++] =
@@ -134,11 +137,22 @@ static void dc_add_sound_hook(void) {
     g_active_profile = &dc_profile;
 }
 
-/* web_install_board, less the sound board. */
+/* No sound board: the i960's UART has nobody on the line. It can always take a
+ * byte (TxRDY, TxEMPTY) and never has one (RxRDY down). The plain region read
+ * back the 0x37 a program last wrote to the control register, and m2-pacman's
+ * sound probe drained "received" bytes forever. */
+static uint32_t dc_uart_read(mem_region_t *r, uint32_t addr, int size) {
+    (void)r; (void)size;
+    return addr - MIDI_BASE == 4 ? 0x05u : 0u;
+}
+
+/* web_install_board, less the sound board (dc_uart_read in its place). */
 static void dc_install_board(void) {
     pg_rom_revert();
     pg_anon_clear(0);
     g_active_profile->install_fn(&rs, &cpu, &bus);
+    for (int i = 0; i < bus.region_count; i++)
+        if (bus.regions[i].base == MIDI_BASE) { bus.regions[i].read_cb = dc_uart_read; mem_regions_changed(&bus); }
     irqt_reset();
     input_reset();
     input_attach(&bus);

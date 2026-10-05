@@ -524,7 +524,51 @@ static void dp_ls_rest(tile_cpu_t *c, const uint8_t *gfx, const int16_t *x0, con
     s24_draw_tilemap(c->words, gfx, 0, 1, false, c->fg, x0, x1);
 }
 
+/* m2-sdk's tile framebuffer (m2_tilefb.h) gives every screen cell a char of its
+ * own and draws the sprites into them, so char RAM changes in every frame that
+ * anything moves; m2-pacman redrew the whole screen for it (~70 ms a frame,
+ * Pinboard #463). The KBs written since the last redraw (memory.h gfx_dirty)
+ * are hashed a char at a time, and only the cells that show a char whose hash
+ * changed are drawn again. */
+static uint32_t g_dp_chr_hash[TMAPGFX_SIZE / 32];
+static uint8_t  g_dp_chr_new[TMAPGFX_SIZE / 32 / 8];
+
+static bool dp_tiles_chars(memory_bus_t *bus) {
+    bool any = false;
+    memset(g_dp_chr_new, 0, sizeof g_dp_chr_new);
+    volatile uint8_t *dk = bus->gfx_dirty;
+    for (unsigned k = 0; k < TMAPGFX_SIZE >> 10; k++) {
+        if (!dk[k]) continue;
+        dk[k] = 0;
+        const uint32_t *p = (const uint32_t *)(bus->tmapgfx + k * 1024u);
+        for (unsigned c = k * 32u; c < k * 32u + 32u; c++, p += 8) {
+            uint32_t h = 2166136261u;
+            for (int j = 0; j < 8; j++) h = (h ^ p[j]) * 16777619u;
+            if (h == g_dp_chr_hash[c]) continue;
+            g_dp_chr_hash[c] = h;
+            g_dp_chr_new[c >> 3] |= (uint8_t)(1u << (c & 7));
+            any = true;
+        }
+    }
+    return any;
+}
+
+/* The cells of tilemaps 0-3 that show a changed char, marked; true if tilemap 2
+ * shows one (its line scroll textures then need them). */
+static bool dp_tiles_mark_chars(tile_dirty_t *d, const uint16_t *w) {
+    bool tm2 = false;
+    for (int l = 0; l < 4; l++)
+        for (int i = 0; i < 0x1000; i++) {
+            unsigned c = w[l * 0x1000 + i] & 0x3FFFu;
+            if (!(g_dp_chr_new[c >> 3] >> (c & 7) & 1)) continue;
+            tile_dirty_mark_cell(d, w, l, i & 63, i >> 6);
+            tm2 |= l == 2;
+        }
+    return tm2;
+}
+
 _Static_assert(offsetof(memory_bus_t, tile) % 4 == 0, "dp_tiles reads tile RAM as words");
+_Static_assert(offsetof(memory_bus_t, tmapgfx) % 4 == 0, "dp_tiles_chars reads char RAM as words");
 _Static_assert(TILE_SNAP_WORDS % 512 == 0, "dp_tiles copies whole KBs");
 
 static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
@@ -536,7 +580,8 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
     bool recolour = bus->gen_pal != s_pal || bus->gen_lut != s_lut || !s_valid;
     if (!redraw && !recolour) return;
     memset(&d, 0, sizeof d);
-    d.full = !s_valid || bus->gen_gfx != s_gfx;
+    d.full = !s_valid;
+    bool chars = bus->gen_gfx != s_gfx && dp_tiles_chars(bus);
     bool ls_all = d.full, all = false;
     s_tile = bus->gen_tile; s_gfx = bus->gen_gfx; s_pal = bus->gen_pal; s_lut = bus->gen_lut;
     /* The pen colours first: tilemap 2's textures are drawn in them. */
@@ -562,6 +607,7 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
         const uint16_t *n = (const uint16_t *)bus->tile;
         bool ls = dp_ls_ok(n);
         if (ls != g_ls.on) { d.full = ls_all = true; g_ls.on = ls; }
+        if (chars && !d.full && dp_tiles_mark_chars(&d, n) && ls) ls_all = true;
         if (ls) {
             for (int y = 0; y < VIDEO_HEIGHT; y++) g_ls.h[y] = n[0x4400 + y] & 0x1FF;
             g_ls.vy = n[0x5006] & 0x1FF;
@@ -570,13 +616,16 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
         }
         /* Only a KB written since the last redraw can differ (memory.h
          * tile_dirty). Under line scroll, pair 2/3's cells, line scroll and
-         * mask (KBs 8-15, 17, 26-27) stay as they were for the CPU's layers,
-         * which no longer draw them. */
+         * mask (words 0x2000-0x3FFF, 0x4400-0x47FF, 0x6800-0x6FFF: KBs 16-31,
+         * 34-35, 52-55) stay as they were for the CPU's layers, which no longer
+         * draw them. These used to be counted in 2 KB units, so under a line
+         * scroll tilemap 1's changes never reached the CPU's copy (found
+         * reading this for Pinboard #463). */
         volatile uint8_t *dk = bus->tile_dirty;
         for (int k = 0; k < TILE_SNAP_WORDS / 512; k++) {
             if (!d.full && !dk[k]) continue;
             dk[k] = 0;
-            if (ls && ((k >= 8 && k < 16) || k == 17 || k == 26 || k == 27)) continue;
+            if (ls && ((k >= 16 && k < 32) || k == 34 || k == 35 || (k >= 52 && k < 56))) continue;
             if (!d.full) tile_dirty_find_range(&d, tiles->words, n, k * 512, k * 512 + 512);
             memcpy(tiles->words + k * 512, n + k * 512, 1024);
         }

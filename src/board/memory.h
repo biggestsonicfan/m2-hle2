@@ -222,6 +222,9 @@ typedef struct memory_bus {
      * only what was written (the Dreamcast's dp_tiles). Nothing clears them
      * but that reader. */
     volatile uint8_t  tile_dirty[(TILE_SIZE >> 10) + 1];
+    /* And for the tilemaps' char RAM: m2-sdk's tile framebuffer draws into it
+     * every frame something moves (Pinboard #463). */
+    volatile uint8_t  gfx_dirty[(TMAPGFX_SIZE >> 10) + 1];
 
     /* Bus stats */
     uint64_t    reads;
@@ -783,8 +786,10 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
             r->change_gen = &bus->gen_tile;
             r->dirty_kb   = bus->tile_dirty;
         }
-        else if (!strcmp(r->name, "TMAPGFX"))
+        else if (!strcmp(r->name, "TMAPGFX")) {
             r->change_gen = &bus->gen_gfx;
+            r->dirty_kb   = bus->gfx_dirty;
+        }
         else if (!strcmp(r->name, "PALETTE"))
             r->change_gen = &bus->gen_pal;
         else if (!strncmp(r->name, "TEXRAM", 6)) { /* both banks and all their aliases */
@@ -797,6 +802,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
 
     memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
     memset((uint8_t *)bus->tile_dirty, 1, sizeof bus->tile_dirty);
+    memset((uint8_t *)bus->gfx_dirty, 1, sizeof bus->gfx_dirty);
     mem_regions_changed(bus);   /* callbacks and change tracking were set after the adds */
 
     LOG_INFO("mem: bus initialized with %d regions, ROM=%zu bytes", bus->region_count, rom_size);

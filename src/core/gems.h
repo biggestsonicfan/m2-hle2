@@ -490,7 +490,10 @@ static void gems_off_for_session(void);
  * Only STF has Gems code; another set leaves both off. */
 static bool gems_apply(const char *set_name) {
     bool stf = set_name && (!strcmp(set_name, "sfight") || !strcmp(set_name, "sfight_console"));
-    bool want_i960 = (g_gems_i960 || g_gems_verify) && GEMS_AVAILABLE && stf;
+    /* The traps are addresses in STF's program, not in homebrew on its board
+     * (the any_program profile). The COP's commands are the set's firmware. */
+    bool stf_code = stf && !(g_active_profile && g_active_profile->any_program);
+    bool want_i960 = (g_gems_i960 || g_gems_verify) && GEMS_AVAILABLE && stf_code;
     bool want_cop  = g_gems_cop && GEMS_AVAILABLE && stf;
     if ((g_gems_i960 || g_gems_cop || g_gems_verify) && !GEMS_AVAILABLE)
         LOG_WARN("gems: this build has no Gems code (configure with -DM2HLE_GEMS_DIR)");

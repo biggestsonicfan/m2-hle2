@@ -128,6 +128,47 @@ against MAME frame by frame over the serial port. The disc needs `SINCOS=`
 DREAMCAST-PORT.md, "Held against MAME over the serial port", has the commands
 and what it found.
 
+## m2-pacman
+
+The disc also runs homebrew: put a program in place of `rom_code1.bin` and keep
+the other four files. [m2-pacman](https://github.com/biggestsonicfan/m2-pacman)'s
+`roms/pacman_web/game.bin` (the build with no SHARC and an idle `sinr`) is the
+one to use; the SHARC build runs too, slower.
+
+```sh
+mkdir /tmp/pac && for f in rom_data rom_ep rom_pol rom_tex; do ln -s "<PS3>/stf_rom/$f.bin" /tmp/pac/; done
+ln -s <m2-pacman>/roms/pacman_web/game.bin /tmp/pac/rom_code1.bin
+make -C dreamcast OUT=/tmp/dcpac AOT_MAP=pacman.aotmap AOT=<m2-pacman>/roms/pacman_web/game.bin
+sh dreamcast/mkdisc.sh /tmp/dcpac /tmp/pac /tmp/dcpac/disc
+```
+
+`main_dc.c` runs `profile_adopt_program` on the disc's program, as the desktop
+does, so homebrew gets `sfight_homebrew` and none of STF's hooks; Gems' traps
+are STF's code and stay off (`gems.h`). There is no sound board, so the UART's
+status reads TxRDY and TxEMPTY with nothing to receive (`dc_uart_read`): the
+game's ping goes unanswered, it says NO SOUND, and plays on.
+
+`pacman.aotmap` is 4000 frames of the game's attract, recorded like
+`sfight.aotmap` with a `det_digest` that leaves the sound board out, as the disc
+does. Its counts are flatter than STF's: `AOT_COVER` is 0.9 for it by default
+(14,600 instructions, 2.4 MB of text), since 0.99 (33,000) runs the board out
+of RAM.
+
+Measured in Flycast (Pinboard #463), attract, a frame's budget being 17 ms:
+
+| | fps | i960 / slice | tiles / frame |
+|---|---|---|---|
+| SHARC build, interpreted | 5.6 | 110 ms | |
+| `pacman_web`, interpreted | 6.4 | 85 ms | 69 ms |
+| `pacman_web`, AOT 0.9 | 9.3 | 37 ms | 69 ms |
+| `pacman_web`, AOT 0.9, tiles by char | 24.5 | 36 ms | 3 ms |
+
+m2-sdk's tile framebuffer gives every screen cell a char of its own and draws
+the sprites into the chars, so char RAM changes in every frame anything moves.
+`dp_tiles` used to redraw the whole screen for any such change; it now hashes
+the chars of the KBs written (`gfx_dirty`, `memory.h`) and redraws the cells
+that show one that changed. The i960 is what is left.
+
 ## Files
 
 | | |

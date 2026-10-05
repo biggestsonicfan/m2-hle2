@@ -41,7 +41,7 @@ if [ -z "${NOPAK:-}" ]; then
     python3 "$here/../tools/dc_mdlpack.py" --map "$here/sfight.mdlmap" --roms "$roms" --out "$disc/MODELS.PAK" >/dev/null
     set -- "$@" "MODELS.PAK=$disc/MODELS.PAK"
 fi
-genisoimage -quiet -C 0,45000 -V M2HLE2 -G "$disc/IP.BIN" -l -graft-points \
+genisoimage -quiet -f -C 0,45000 -V M2HLE2 -G "$disc/IP.BIN" -l -graft-points \
     -o "$disc/track03.iso" 1ST_READ.BIN="$out/1ST_READ.BIN" "$@"
 printf '3\n1 0 4 2048 track01.iso 0\n2 450 0 2352 track02.raw 0\n3 45000 4 2048 track03.iso 0\n' > "$disc/m2hle2.gdi"
 
