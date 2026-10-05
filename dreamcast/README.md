@@ -223,6 +223,7 @@ the disc's own counter (the Dreamcast's timer):
 |---|---|
 | `pacman_geo`, AOT 0.95 | 28-31 |
 | m2-sonic, AOT 0.95 | 8-11 (the game drops Mega Drive frames to keep time) |
+| m2-sonic, `VIEW=88,80,320,224`, #481 | 21-25 (Green Hill, `HUD=min`) |
 
 Count by the Dreamcast's clock, not the host's. Under RetroArch on Xvfb
 the guest ran about 2.5 times faster than the host's clock: m2-sonic's frame count
