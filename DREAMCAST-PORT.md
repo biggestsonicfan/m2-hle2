@@ -755,6 +755,10 @@ scaled to fill the frame, aspect kept, centred. With no VIEW it is the whole
 board: 1.25 at (10,0) in 640x480, the layout #471's revert kept.
 
 - **m2-sonic's disc is `VIEW=88,80,320,224`**: 2.0, 640x448 at (0,16).
+- **m2-pacman's disc is `VIEW=136,48,224,288`** (#487): Pac-Man's portrait
+  screen at cells (17,6) of the tile plane (`PAC_COL0/ROW0`, m2-pacman's
+  `pacman.c`), 5/3 to 373x480 at (133,0), the frame's full height. The scale
+  is not whole, so the tiles stay bilinear. 28-31 fps in the maze, as before.
 - **At a whole-number scale the tile layers are point sampled**
   (`DC_FILTER`), so the Mega Drive's pixels stay square.
 - **Only the view is drawn**: the layer quads take the view's part of their

@@ -47,7 +47,8 @@ HOST_MATH ?= $(if $(filter 1,$(LINK)),0,1)
 # stretches a frame to fill its window, so check it on a Dreamcast.
 FRAME512 ?= 0
 # VIEW=x,y,w,h: show only that rectangle of the board's 496x384, scaled to fill
-# the frame (dc_pvr.h). m2-sonic's Mega Drive picture: VIEW=88,80,320,224 (2x).
+# the frame (dc_pvr.h). m2-sonic's Mega Drive picture: VIEW=88,80,320,224 (2x);
+# m2-pacman's 224x288: VIEW=136,48,224,288 (5/3, the frame's full height).
 VIEW ?=
 comma := ,
 VIEW_N := $(subst $(comma), ,$(VIEW))
