@@ -17,6 +17,8 @@
 # all of it is 4.8 MB of SH-4 and leaves the pager no room. Recorded with Gems
 # on, 79% of the counts are the two instructions of `_idle`'s vblank spin, which
 # the spin hook skips, so 0.99 here is about what 0.95 of the rest would be.
+# AOT_MAP=pacman.aotmap compiles m2-pacman instead (AOT= its game.bin): homebrew
+# has none of STF's hooks, so only the map's are kept (Pinboard #463).
 
 REPO   := ..
 VENDOR ?= $(REPO)/vendor
@@ -35,7 +37,9 @@ HASH_FRAME ?= 0
 # frames and cost 72 KB of text, 64 KB of heap: off.
 OPTAB ?= 0
 AOT ?=
-AOT_COVER ?= 0.99
+# m2-pacman's map is flatter: 0.99 of it is 33,000 instructions and runs the
+# board out of RAM; 0.9 is 14,600 (2.4 MB of text).
+AOT_COVER ?= $(if $(filter pacman.aotmap,$(AOT_MAP)),0.9,0.99)
 # The block runner's pool. The AOT build needs less of it, but at 4096 ops a
 # fight's blocks overflowed it and were rebuilt every frame (3.7% of the frame).
 IB_POOL ?= $(if $(AOT),8192u,16384u)
@@ -76,16 +80,17 @@ all: $(OUT)/1ST_READ.BIN
 # The options a build was made with: a change (JIT=, OPTAB=, HASH_FRAME=, GEMS=,
 # AOT_COVER= ...) rebuilds, where the object used to be left as it was. A stamp
 # file is rewritten only when its text changes.
-AOT_ARGS := --hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 $(GEMS_HOOKS) --cover $(AOT_COVER)
+AOT_MAP  ?= sfight.aotmap
+AOT_ARGS := $(if $(filter sfight.aotmap,$(AOT_MAP)),--hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 $(GEMS_HOOKS)) --cover $(AOT_COVER)
 stamp = $(shell mkdir -p $(OUT); t='$(subst ','\'',$(2))'; [ "$$(cat $(1) 2>/dev/null)" = "$$t" ] || printf '%s' "$$t" > $(1))
 $(call stamp,$(OUT)/flags.stamp,$(CFLAGS))
-$(call stamp,$(OUT)/aot.stamp,$(AOT) $(AOT_ARGS))
+$(call stamp,$(OUT)/aot.stamp,$(AOT) $(AOT_MAP) $(AOT_ARGS))
 
 # 0x3F268 is dc_sound's hook (main_dc.c), and 0x4BE58 / 0x4C008 the profile's
 # timed waits (m2_spin.h), and the Gems trap sites, on top of the hooks in the map.
-$(OUT)/aot_gen.h: sfight.aotmap $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/board/i960_exec.h Makefile $(OUT)/aot.stamp
+$(OUT)/aot_gen.h: $(AOT_MAP) $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/board/i960_exec.h Makefile $(OUT)/aot.stamp
 	mkdir -p $(OUT)
-	python3 $(REPO)/tools/i960_aot.py --map sfight.aotmap --rom "$(AOT)" $(AOT_ARGS) --out $@
+	python3 $(REPO)/tools/i960_aot.py --map $(AOT_MAP) --rom "$(AOT)" $(AOT_ARGS) --out $@
 
 $(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_sound.h dc_pvr.h dc_jit_test.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN) $(OUT)/flags.stamp
 	mkdir -p $(OUT)

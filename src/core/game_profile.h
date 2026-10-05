@@ -234,11 +234,20 @@ static inline const game_profile_t *profile_for_rom_set(const char *set,
  * the handlers p names. True when there is nothing to go on: p names no
  * handlers, or the table is not in the ROM.
  */
+/* A little-endian word of the program; the Dreamcast pages the ROM (MEM_HOST_AT). */
+static inline uint32_t profile__rd32(const uint8_t *rom, uint32_t o) {
+#ifdef MEM_HOST_AT
+    const uint8_t *b = MEM_HOST_AT(rom + o, 4);
+#else
+    const uint8_t *b = rom + o;
+#endif
+    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+}
+
 static inline bool profile_program_matches(const game_profile_t *p, const uint8_t *rom, size_t size) {
     const uint32_t *h = p->quirks.irq_handler;
     if (!(h[0] | h[1] | h[2] | h[3]) || size < 8) return true;
-#define PFP_RD32(o) ((uint32_t)rom[(o)] | (uint32_t)rom[(o) + 1] << 8 | \
-                     (uint32_t)rom[(o) + 2] << 16 | (uint32_t)rom[(o) + 3] << 24)
+#define PFP_RD32(o) profile__rd32(rom, (o))
     uint32_t prcb = PFP_RD32(4);
     if ((uint64_t)prcb + 0x18 > size) return true;
     uint32_t table = PFP_RD32(prcb + 0x14);
