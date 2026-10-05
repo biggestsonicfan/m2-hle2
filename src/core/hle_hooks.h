@@ -62,11 +62,16 @@ static inline void hle_match_replay_edge(memory_bus_t *bus) {
     LOG_INFO("match_replay: attract step %u -> %u at frame %u", ar->from_step, ar->to_step, g_dl_frame_now);
 }
 
+/* A frontend's own look at the board at the game's frame edge, after the
+ * jump (the Dreamcast's serial link to MAME, dreamcast/dc_link.h). */
+static void (*g_game_frame_edge_cb)(memory_bus_t *bus);
+
 /* The game's frame hook: the display-list capture's frame mark and the
  * match_replay jump, both on the game's frame rather than the board's. */
 static inline void hle_game_frame_edge(memory_bus_t *bus) {
     dl_game_frame_edge(bus);
     hle_match_replay_edge(bus);
+    if (g_game_frame_edge_cb) g_game_frame_edge_cb(bus);
 }
 
 /* The region the board powers up as, for games whose region is a backup-RAM

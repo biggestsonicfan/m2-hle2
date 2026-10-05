@@ -1,0 +1,134 @@
+Flycast: carry the Dreamcast's SCIF (serial port) over TCP, for the link to
+MAME (m2-hle2 Pinboard #461, dreamcast/dc_link.h, tools/dc-lockstep.py).
+
+Against flycast 04669ebe4164bb589e6a2050aa1559724aa94291. Apply in a Flycast
+checkout with `git apply` (or `patch -p1`) and build the libretro core:
+
+    cmake -B build-lr -G Ninja -DLIBRETRO=ON -DCMAKE_BUILD_TYPE=Release -DUSE_VULKAN=OFF
+    ninja -C build-lr -j2        # build-lr/flycast_libretro.so
+
+Then FLYCAST_SCIF=127.0.0.1:<port> in the environment of the RetroArch that
+loads the core connects the SCIF to that port at boot. Unset, nothing changes.
+
+--- a/core/hw/sh4/modules/serial.cpp
++++ b/core/hw/sh4/modules/serial.cpp
+@@ -18,6 +18,8 @@
+ #include "modules.h"
+ #include "hw/sh4/sh4_sched.h"
+ #include "serialize.h"
++#include <deque>
++#include <string>
+ 
+ //#define DEBUG_SCIF
+ 
+@@ -526,8 +528,110 @@
+ 	int tty = 1;
+ };
+ 
++#if defined(__unix__) || defined(__APPLE__)
++#include <netdb.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <sys/socket.h>
++#include <vector>
++/* $FLYCAST_SCIF=HOST:PORT: the SCIF's bytes go both ways over one TCP
++ * connection (m2-hle2 Pinboard #461, a Dreamcast lockstepped against MAME).
++ * Connected once, at the first start; the libretro core has no other serial
++ * pipe. TX is buffered and flushed whenever the SCIF polls for RX, which it
++ * does every byte time. */
++struct TcpPipe : public SerialPort::Pipe
++{
++	int fd = -1;
++	std::vector<u8> out;
++	std::deque<u8> in;
++
++	bool open(const char *spec)
++	{
++		std::string s(spec);
++		auto c = s.find_last_of(':');
++		if (c == std::string::npos) return false;
++		addrinfo hints{}, *res = nullptr;
++		hints.ai_family = AF_INET;
++		hints.ai_socktype = SOCK_STREAM;
++		if (getaddrinfo(s.substr(0, c).c_str(), s.substr(c + 1).c_str(), &hints, &res) || !res) return false;
++		for (int tries = 0; tries < 100 && fd < 0; tries++) {
++			fd = socket(AF_INET, SOCK_STREAM, 0);
++			if (connect(fd, res->ai_addr, res->ai_addrlen) == 0) break;
++			::close(fd);
++			fd = -1;
++			usleep(100000);
++		}
++		freeaddrinfo(res);
++		if (fd < 0) return false;
++		int one = 1;
++		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
++		fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
++		NOTICE_LOG(BOOT, "SCIF: connected to %s", spec);
++		SCIFSerialPort::Instance().setPipe(this);
++		return true;
++	}
++	void flush()
++	{
++		size_t done = 0;
++		while (fd >= 0 && done < out.size()) {
++			ssize_t n = ::send(fd, out.data() + done, out.size() - done, MSG_NOSIGNAL);
++			if (n > 0) { done += n; continue; }
++			if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { usleep(100); continue; }
++			ERROR_LOG(BOOT, "SCIF: send failed, errno %d", errno);
++			::close(fd);
++			fd = -1;
++		}
++		out.clear();
++	}
++	void poll()
++	{
++		flush();
++		u8 buf[4096];
++		while (fd >= 0) {
++			ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
++			if (n > 0) { in.insert(in.end(), buf, buf + n); continue; }
++			if (n == 0) { ::close(fd); fd = -1; }
++			break;
++		}
++	}
++	void write(u8 data) override {
++		out.push_back(data);
++		if (out.size() >= 4096) flush();
++	}
++	unsigned polls = 0;
++	/* The SCIF asks every byte time (~6 us at 1.56 Mbaud): a syscall each
++	 * time would cost more than the SH-4. */
++	int available() override {
++		if (in.empty() && (out.size() || (++polls & 63) == 0)) poll();
++		return (int)in.size();
++	}
++	u8 read() override {
++		poll();
++		if (in.empty()) return 0;
++		u8 b = in.front();
++		in.pop_front();
++		return b;
++	}
++};
++#endif
++
+ void setupPtyPipe()
+ {
++#if defined(__unix__) || defined(__APPLE__)
++	static TcpPipe tcpPipe;
++	static bool tcpTried;
++	if (const char *spec = getenv("FLYCAST_SCIF")) {
++		if (!tcpTried) {
++			tcpTried = true;
++			if (!tcpPipe.open(spec))
++				ERROR_LOG(BOOT, "SCIF: cannot connect to %s", spec);
++		}
++		if (tcpPipe.fd >= 0) {
++			SCIFSerialPort::Instance().setPipe(&tcpPipe);
++			return;
++		}
++	}
++#endif
+ 	static PTYPipe ptyPipe;
+ 
+ 	if (config::SerialConsole || config::SerialPTY)
