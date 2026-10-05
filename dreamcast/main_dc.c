@@ -26,6 +26,12 @@
 #ifndef DC_DRAW_EVERY
 #define DC_DRAW_EVERY 1
 #endif
+/* At most this many board frames a second (0: as fast as it goes). A Dreamcast
+ * never gets there, but Redream's SH-4 runs faster than one and would run the
+ * game too fast. */
+#ifndef DC_FPS_CAP
+#define DC_FPS_CAP 60
+#endif
 #ifndef DC_HASH_FRAME
 #define DC_HASH_FRAME 0
 #endif
@@ -338,6 +344,16 @@ int main(int argc, char **argv) {
         }
 #endif
         if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }
+#if DC_FPS_CAP
+        {   /* wait while the board is ahead of the clock; behind by over 0.1 s, the clock starts again */
+            static uint64_t cap_t0;
+            static uint32_t cap_f0;
+            uint64_t now = timer_us_gettime64();
+            uint64_t due = cap_t0 + (uint64_t)(g_emu_frames - cap_f0) * 1000000u / DC_FPS_CAP;
+            if (!cap_t0 || now > due + 100000u) { cap_t0 = now; cap_f0 = g_emu_frames; }
+            else while (timer_us_gettime64() < due) thd_pass();
+        }
+#endif
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
             uint32_t h = 2166136261u;
             for (uint32_t a = 0x500000u; a < 0x600000u; a += 4) h = (h ^ mem_read32(&bus, a)) * 16777619u;
