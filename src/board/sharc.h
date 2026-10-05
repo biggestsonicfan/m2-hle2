@@ -198,6 +198,10 @@ static inline void sharc_sincos(int32_t angle, float *s, float *c) {
         memcpy(c, &g_sharc_sincos[0x18000 + a], 4);
         return;
     }
+#ifdef SHARC_HOST_SINCOS
+    SHARC_HOST_SINCOS(angle & 0xFFFF, s, c);   /* a host's own sin/cos of a binary angle */
+    return;
+#endif
     float r = sharc_angle_to_rad(angle);
     *s = sinf(r);
     *c = cosf(r);
@@ -300,6 +304,10 @@ static inline int32_t sharc_logb(float x) {
  * two = 2.0. *last gets the step register's final value, which atan2 goes on
  * to use. */
 static inline float sharc_fw_div_ex(float num, float d, float *last) {
+#ifdef SHARC_HOST_MATH   /* a host's divide; the last step's register has converged to 1 */
+    if (last) *last = 1.0f;
+    return num / d;
+#endif
     float f3 = sharc_recips(d), f4 = num, f12 = f3 * d;
     f4 = f3 * f4; f3 = 2.0f - f12;
     f12 = f3 * f12; f4 = f3 * f4; f3 = 2.0f - f12;
@@ -312,6 +320,9 @@ static inline float sharc_fw_div(float num, float d) { return sharc_fw_div_ex(nu
 /* _L2029B: 1/sqrt(x) by RSQRTS and three Newton steps; 0 for a zero input */
 static inline float sharc_fw_rsqrt(float x) {
     if (sharc_float_to_bits(x) == 0) return 0.0f;
+#ifdef SHARC_HOST_MATH
+    return 1.0f / SHARC_HOST_SQRTF(x);
+#endif
     float f4 = sharc_rsqrts(x), f12;
     for (int i = 0; i < 3; i++) {
         f12 = f4 * f4;
@@ -325,6 +336,9 @@ static inline float sharc_fw_rsqrt(float x) {
 /* _L202AE: sqrt(x) = x * the same 1/sqrt; a zero input comes back untouched */
 static inline float sharc_fw_sqrt(float x) {
     if (sharc_float_to_bits(x) == 0) return x;
+#ifdef SHARC_HOST_MATH
+    return SHARC_HOST_SQRTF(x);
+#endif
     float f4 = sharc_rsqrts(x), f15;
     for (int i = 0; i < 3; i++) {
         f15 = f4 * f4;

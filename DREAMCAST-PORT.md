@@ -696,6 +696,31 @@ e746591c in every build below).
   clock; here the board's timers feed `rand` and the loader's yield, so they
   stay on the i960's cycle clock, as on every other build.
 
+## The COP's maths on the SH-4's own instructions (#468)
+
+`HOST_MATH=1` (the default, except with `LINK=1`) hands the COP's sine,
+cosine, square root, reciprocal square root and divide to the SH-4
+(`dc_math.h`): FSCA takes the board's own angle (0x10000 = 2π) and gives sin
+and cos at once, FSQRT is correctly rounded, and a divide is a divide.
+`sharc.h` takes them through `SHARC_HOST_SINCOS` / `SHARC_HOST_SQRTF` in place
+of the firmware's table-seeded Newton steps. Gems' COP C takes them through
+`GEMS_HOST_SIN` / `_COS` / `_SQRTF` in place of its 256 KB sine table and its
+double-precision Newton square root, which the SH-4 (built `-m4-single`)
+emulates in software. The guards are in the private Gems directory.
+
+- **It is not the board.** The firmware's √ and ÷ differ in the low bits
+  (CLAUDE.md, "The COP's arithmetic is not libm"), so the fight drifts from
+  MAME's; the frame 1500 hash is a5d21d21 against 69890d7a. The picture plays
+  the same fight. The `LINK=1` build, held against MAME over the serial port,
+  keeps the firmware's arithmetic.
+- **It saves little time.** The bench: 15.50 s → 15.43 s (−0.4%), the slice
+  6.51 s → 6.46 s. The COP is 3-4 ms of the ~16 ms i960 slice, and most of
+  that is the commands' own work, not their maths.
+- **It saves memory.** The binary is 270 KB smaller (1.84 MB → 1.57 MB), so the
+  page cache grows from 1280 KB to 1536 KB, and the bench's page loads took
+  357 ms against 539 (disc reads 162 against 273). Flycast's disc is fast; on
+  a GD-ROM every load is a seek.
+
 ## Held against MAME over the serial port (#461)
 
 `make LINK=1` builds a disc that plays attract's replay fight (tools/README.md,
