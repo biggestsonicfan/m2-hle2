@@ -204,9 +204,24 @@ static void dc_text(int row, const char *s) {
 static char g_calib[64];
 #endif
 
+/* The cable's 640x480 mode; with DC_FRAME512, a 512x384 frame in the middle of
+ * it: the same signal, the border black. 64 pixels in, and 48 lines (24 a
+ * field when interlaced). */
+static void dc_video_mode(void) {
+    vid_set_mode(DM_640x480, PM_RGB565);
+    if (!DC_FRAME512) return;
+    vid_mode_t m = *vid_mode;
+    m.width   = DC_SCR_W;
+    m.height  = DC_SCR_H;
+    m.bitmapx += (640 - DC_SCR_W) / 2;
+    m.bitmapy += (m.flags & VID_INTERLACE) ? (480 - DC_SCR_H) / 4 : (480 - DC_SCR_H) / 2;
+    m.fb_size = DC_SCR_W * DC_SCR_H * 2;
+    vid_set_mode_ex(&m);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
-    vid_set_mode(DM_640x480, PM_RGB565);
+    dc_video_mode();
     if (dp_init() != 0) { printf("pvr_init failed\n"); for (;;) thd_sleep(1000); }
     dc_text(0, "m2-hle2 for Dreamcast: finding the ROM files");
 

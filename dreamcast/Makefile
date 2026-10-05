@@ -42,6 +42,10 @@ LINK_CFLAGS := $(if $(filter 1,$(LINK)),-ffp-contract=off)
 # HOST_MATH=1: the COP's sin, cos and square roots from the SH-4's FSCA and
 # FSQRT (dc_math.h), Gems' COP included. Off for LINK, which must be the board's.
 HOST_MATH ?= $(if $(filter 1,$(LINK)),0,1)
+# FRAME512=1: a 512x384 frame set in the middle of the 640x480 signal, where
+# the default draws the board centred in a 640x480 one (dc_pvr.h). Flycast
+# stretches a frame to fill its window, so check it on a Dreamcast.
+FRAME512 ?= 0
 # OPTAB=1: the interpreter dispatches through a handler table (I960_OPTABLE).
 # Bit-exact, but with Gems on it saved 38 ms of 5874 over the bench's 400
 # frames and cost 72 KB of text, 64 KB of heap: off.
@@ -61,7 +65,7 @@ CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address -in
           -DM2HLE_VERSION='"dc"' -DM2HLE_DEV_TOOLS=0 \
           -DGEO_CAPTURE_SIZE=1 -DLOG_MAX_LINES=64 -DNDEBUG -DM2HLE_NO_ZIP \
           -DGEO3D_MAX_LINES=16 -DGEO3D_MAX_TRIS=4096 -DGEO3D_TRI_BUF=1 -DGEO3D_DC_SINK -DGEO3D_MESH_CACHE_SLOTS=256u \
-          -DGEO3D_MESH_ARENA=0x100000u -DMEM_COUNT=0 -DMEM_PAGE_SHIFT=14 -DMEM_PAGES=0x4C00u -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t -DI960_BLOCKS=1 -DIB_ENTRIES=2048u -DIB_POOL=$(IB_POOL) -DI960_JIT=$(JIT) -DIB_JIT_SELFTEST=$(JIT_TEST) -DIB_JIT_ON=$(JIT_ON) -DDC_HASH_FRAME=$(HASH_FRAME) -DDC_LINK=$(LINK) -DDC_LINK_GEMS=$(LINK_GEMS) -DI960_OPTABLE=$(OPTAB) -DDC_HOST_MATH=$(HOST_MATH) -DDC_HUD_MIN=$(if $(filter min,$(HUD)),1,0) $(LINK_CFLAGS) $(EXTRA) \
+          -DGEO3D_MESH_ARENA=0x100000u -DMEM_COUNT=0 -DMEM_PAGE_SHIFT=14 -DMEM_PAGES=0x4C00u -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t -DI960_BLOCKS=1 -DIB_ENTRIES=2048u -DIB_POOL=$(IB_POOL) -DI960_JIT=$(JIT) -DIB_JIT_SELFTEST=$(JIT_TEST) -DIB_JIT_ON=$(JIT_ON) -DDC_HASH_FRAME=$(HASH_FRAME) -DDC_LINK=$(LINK) -DDC_LINK_GEMS=$(LINK_GEMS) -DI960_OPTABLE=$(OPTAB) -DDC_HOST_MATH=$(HOST_MATH) -DDC_FRAME512=$(FRAME512) -DDC_HUD_MIN=$(if $(filter min,$(HUD)),1,0) $(LINK_CFLAGS) $(EXTRA) \
           -DSOUND_RAM_SIZE=0x1000u -DSOUND_OUT_FRAMES=1024u -DM68K_ROM_SIZE=0x10000u -DGEO_PUB_COPIES=1 -DM2_NO_NETPLAY \
           -I$(REPO)/src -I$(REPO)/src/board -I$(REPO)/src/core -I$(REPO)/src/ui \
           -I$(REPO)/src/profiles -I$(REPO)/src/net -I. \
