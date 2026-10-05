@@ -36,7 +36,9 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # (Flycast stretches it; DREAMCAST-PORT.md #471).
 # HUD=min drops the stats rows: only the board's frames a second, small, top
 # right (Pinboard #475's disc: HUD=min FRAME512=1). Under Flycast a FRAME512
-# picture is enlarged and that corner falls off the screen.
+# picture is enlarged and that corner falls off the screen; Redream shows it.
+# FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
+# whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS

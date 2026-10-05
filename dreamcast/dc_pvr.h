@@ -414,7 +414,7 @@ static void dp_text_row(int row, const char *s) {
 #define dp_text dp_text_row
 #endif
 
-/* A short line at half size in the screen's top right corner (the minimal
+/* A short line at half size in the frame's top right corner (the minimal
  * HUD's fps counter), kept in the text texture below the 20 rows. */
 static void dp_corner(const char *s) {
     static char last[24];
@@ -509,7 +509,7 @@ static void dp_corner_rect(void) {
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
     pvr_poly_compile(&hdr, &cxt);
     dp_hdr(&hdr);
-    float x1 = 628.0f, x0 = x1 - (float)g_dp.corner_w * 0.5f, y0 = 8.0f, y1 = 20.0f;
+    float x1 = DC_SCR_W - 12.0f, x0 = x1 - (float)g_dp.corner_w * 0.5f, y0 = 8.0f, y1 = 20.0f;
     float u1 = (float)g_dp.corner_w / 1024.0f, v0 = 480.0f / 512.0f, v1 = 504.0f / 512.0f;
     dp_vertex(PVR_CMD_VERTEX,     x0, y0, 1.0e3f, 0.0f, v0, 0xFFFFFFFFu, 0);
     dp_vertex(PVR_CMD_VERTEX,     x1, y0, 1.0e3f, u1,   v0, 0xFFFFFFFFu, 0);
