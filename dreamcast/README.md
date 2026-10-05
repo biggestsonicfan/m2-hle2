@@ -54,17 +54,25 @@ the five ROM files as they ship, STF.AFS and MODELS.PAK. `dc_layout.h` says wher
 file lands in the board's regions; what the PS3 files lack (part of the texture
 ROM, the copro tables, the sound CPU's program and samples) is listed there.
 
-For an emulator or player that takes no GDI, `CDI=1` makes a self-booting CD-R
-image instead, `m2hle2.cdi` (DiscJuggler; Pinboard #480): one audio/data CD with
-the same files on its data track at LBA 11702 and 1ST_READ.BIN scrambled, as a
-MIL-CD boots. It needs KOS's `scramble` and `cdi4dc` from img4dc, which is
-written for Windows; `tools/build-cdi4dc.sh` builds a Linux one in
-`~/build/tools/dc/img4dc`. The program finds its files on either disc (the
-data track's TOC entry), so nothing else changes. Tested in Flycast's libretro
-core and Redream.
+For a burned CD-R, or an emulator or player that takes no GDI, `CDI=1` makes a
+self-booting CD-R image instead, `m2hle2.cdi` (DiscJuggler; Pinboard #480, #483).
+It follows Lazyboot (Conkwer's selfboot toolkit) for a KallistiOS game, its
+"mastering" preset for CD-Rs: one audio/data CD with the same files on its data
+track at LBA 11702, Joliet and Rock Ridge names, Lazyboot's KOS IP.BIN,
+1ST_READ.BIN scrambled as a MIL-CD boots it, and a hidden dummy file that fills
+the disc to 80 minutes ahead of the game's files, so they sit on the outer edge,
+where a drive reads fastest (an ~810 MB image). cdi4dc from img4dc writes it, with
+EDC/ECC; img4dc is written for Windows, and `tools/build-cdi4dc.sh` builds a
+Linux one in `~/build/tools/dc/img4dc`. `DUMMY=0` leaves the dummy out (~190 MB);
+`FAST=1` writes the CDI with Lazyboot's own `mkcdi.py`, without EDC/ECC (its
+"fast" preset: for emulators, not for burning). Lazyboot is Windows scripts;
+`tools/get-lazyboot.sh` fetches the two files used here (its KOS IP.BIN and
+`mkcdi.py`) into `~/build/tools/dc/lazyboot`. The program finds its files on
+either disc (the data track's TOC entry), so nothing else changes. Tested in
+Flycast's libretro core (HLE BIOS) and Redream, not yet on a Dreamcast.
 
 ```sh
-sh dreamcast/tools/build-cdi4dc.sh                                    # once
+sh dreamcast/tools/build-cdi4dc.sh; sh dreamcast/tools/get-lazyboot.sh   # once
 CDI=1 sh dreamcast/mkdisc.sh /tmp/dc "<PS3>/stf_rom" /tmp/dc/disc /tmp/dc/STF.AFS   # -> m2hle2.cdi
 ```
 
@@ -267,4 +275,5 @@ discs gave ~37 and ~30.
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |
 | `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI (`CDI=1`: CDI) |
 | `tools/build-cdi4dc.sh` | a Linux cdi4dc (img4dc) for `CDI=1` |
+| `tools/get-lazyboot.sh` | Lazyboot's KOS IP.BIN and `mkcdi.py`, for `CDI=1` |
 | `../tests/rom_touch.c` | host tool: which ROM pages a game reads |
