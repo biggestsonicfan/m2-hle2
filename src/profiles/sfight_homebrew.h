@@ -42,7 +42,10 @@ static const game_profile_t sfight_homebrew_profile = {
         .mesh_ptr_add       = 0x10,
         .model_table_offset = 0x000E0004,
         .model_table_count  = 5103,
-        .geo_displaylist    = true,
+        /* No geo_displaylist: the program's list is drawn by the board's GEO
+         * walk (geo3d_scan_geo_list), as STF's is. m2-snake's own format and
+         * its walker (geo3d_scan_displaylist) stop at direct data, which
+         * m2-sdk's m2_sprite.h draws every sprite with. */
     },
 };
 
