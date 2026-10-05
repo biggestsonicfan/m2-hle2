@@ -552,6 +552,17 @@ static void menu_profile(void) {
         if (igMenuItemBoolPtr(g_profiles[i]->display_name, NULL, &sel, true))
             g_active_profile = g_profiles[i];
     }
+    /* The CPU opponent's AI table, taken as each fight starts (sfight.h
+     * sfight_hook_enemy_rank_table); a netplay session plays the cabinet's. */
+    if (g_active_profile && g_active_profile->quirks.enemy_ranks) {
+        igSeparator();
+        if (igBeginMenu("CPU difficulty")) {
+            if (igMenuItemEx("Cabinet setting", NULL, g_enemy_rank < 0, true)) g_enemy_rank = -1;
+            for (int r = 0; r < ENEMY_RANKS; r++)
+                if (igMenuItemEx(g_enemy_rank_names[r], NULL, g_enemy_rank == r, true)) g_enemy_rank = r;
+            igEndMenu();
+        }
+    }
     igEndMenu();
 }
 
@@ -1584,6 +1595,12 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             if (!strcmp(d, "real"))        g_damage_real = 1;
             else if (!strcmp(d, "normal")) g_damage_real = 0;
             else LOG_WARN("--damage %s: expected real or normal; keeping normal", d);
+        } else if (strcmp(argv[i], "--enemy-rank") == 0 && i + 1 < argc) {
+            /* the CPU opponent's AI table (STF): cabinet, easy..hardest, extra1, extra2 */
+            const char *d = argv[++i];
+            int r = enemy_rank_parse(d);
+            if (r >= -1) g_enemy_rank = r;
+            else LOG_WARN("--enemy-rank %s: expected cabinet, easy, normal, hard, hardest, extra1 or extra2", d);
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--load-state") == 0 && i + 1 < argc) {

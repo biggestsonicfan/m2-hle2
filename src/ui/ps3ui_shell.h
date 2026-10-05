@@ -71,14 +71,14 @@ enum { PS3UI_SET_DIFFICULTY, PS3UI_SET_ROUNDS, PS3UI_SET_TIME, PS3UI_SET_ATTACK,
 static const char *const ps3ui_set_label[PS3UI_SETS] = { "Difficulty", "Round count", "Time limit",
                                                          "Attack power", "Number of barriers", "Game type" };
 static const char *const ps3ui_set_values[PS3UI_SETS][10] = {
-    { "Easy", "Normal", "Hard", "Hardest" },
+    { "Easy", "Normal", "Hard", "Hardest", "Extra 1", "Extra 2" },
     { "2", "3", "4", "5" },
     { "10", "30", "60", "99" },
     { "-1", "Normal", "+1", "+2", "+3" },
     { "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" },
     { "Type A", "Type B", "Type C", "Type D" },
 };
-static const uint8_t ps3ui_set_max[PS3UI_SETS] = { 3, 3, 3, 4, 9, 3 };
+static const uint8_t ps3ui_set_max[PS3UI_SETS] = { 5, 3, 3, 4, 9, 3 };
 static const uint8_t ps3ui_set_arcade_def[PS3UI_SETS] = { 1, 0, 1, 1, 4, 0 };
 static const uint8_t ps3ui_set_versus_def[PS3UI_SETS] = { 1, 1, 1, 1, 4, 0 };
 

@@ -201,12 +201,14 @@ typedef struct {
 
 /* The HLE layer's board-side settings and latches (hle_hooks.h). The settings
  * are in because the board was running under them: STF reads the VS mode, the
- * DAMAGE flag and the region mid-game, not only at boot. */
+ * DAMAGE flag and the region mid-game, not only at boot, and the AI table
+ * at the start of every fight. */
 typedef struct {
     int32_t  versus_result;
     int32_t  match_replay_stage, replay_stage_pin, match_replay;
     uint32_t match_replay_frame;
     int32_t  region, vs_mode, damage_real, rounds_to_win, round_time, game_type, hidden_chars;
+    int32_t  enemy_rank;
 } savestate_hle_t;
 
 static inline savestate_hle_t savestate_hle_get(void) {
@@ -224,6 +226,7 @@ static inline savestate_hle_t savestate_hle_get(void) {
     h.round_time         = g_round_time;
     h.game_type          = g_game_type;
     h.hidden_chars       = g_hidden_chars;
+    h.enemy_rank         = g_enemy_rank;
     return h;
 }
 
@@ -240,6 +243,7 @@ static inline void savestate_hle_set(const savestate_hle_t *h) {
     g_round_time         = h->round_time;
     g_game_type          = h->game_type;
     g_hidden_chars       = h->hidden_chars;
+    g_enemy_rank         = h->enemy_rank;
 }
 
 /* The sound board's own fields, beside the 68000 and the SCSP. out_total is

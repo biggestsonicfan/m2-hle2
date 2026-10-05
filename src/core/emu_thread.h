@@ -463,6 +463,8 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     i960_cpu_t          *cpu = ctx->cpu;
     const game_quirks_t *q   = &g_active_profile->quirks;
 
+    g_hle_netplay_board = netplay_active();
+
     /* Auto-skip the boot warning screen by holding its ack flag at 1. */
     if ((g_warning_skip || netplay_active()) && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
 
