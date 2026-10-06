@@ -12,7 +12,8 @@
 # rom_pol.bin and rom_tex.bin and dreamcast/sfight.mdlmap; NOPAK=1 leaves it out.
 # STRIPS.PAK, the same meshes already walked into Tile Accelerator strips
 # (tools/dc_strips.c, dc_strips.h), is made here too, from the ROM files and
-# dreamcast/sfight.strips, with the host's C compiler ($CC, else cc);
+# dreamcast/sfight.strips, laid out by dreamcast/sfight.mdlgroups, with the
+# host's C compiler ($CC, else cc);
 # NOSTRIPS=1 leaves it out.
 # TEXPAK=<file> adds TEXTURES.PAK, the PVR textures the recorded frames cut
 # (det_digest --tex-pack, dc_texpak.h); it is texture RAM as the game filled
@@ -73,7 +74,7 @@ if [ -z "${NOSTRIPS:-}" ]; then
     src=$(dirname "$0")/..
     ${CC:-cc} -O2 -w -o "$disc/dc_strips" "$src/tools/dc_strips.c" -I"$src/src" -I"$src/src/board" -I"$src/src/core" \
         -I"$src/src/net" -I"$src/src/ui" -I"$src/src/profiles" -I"$src/dreamcast" -lm
-    "$disc/dc_strips" --roms "$roms" --keys "$src/dreamcast/sfight.strips" --out "$disc/STRIPS.PAK"
+    "$disc/dc_strips" --roms "$roms" --keys "$src/dreamcast/sfight.strips" --groups "$src/dreamcast/sfight.mdlgroups" --out "$disc/STRIPS.PAK"
     set -- "$@" "STRIPS.PAK=$disc/STRIPS.PAK"
 fi
 if [ -n "${CDI:-}" ]; then

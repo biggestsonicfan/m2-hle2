@@ -392,11 +392,13 @@ int main(int argc, char **argv) {
         }
         {   /* a fixed stretch of the fight (the same frames every run): all of it, its slices, its draws */
             static uint64_t b_t0, b_d0, b_sl, b_p0[5], b_tx0; static uint32_t b_rd0; static uint32_t b_n0, b_g0[DC_REGIONS + 3]; static char b_line[96];
+            static uint32_t b_dr0, b_sk0, b_sp0;
             uint32_t b_g[DC_REGIONS + 3];   /* page loads: by region, then for dc_rom_at, of the model pack, all */
             memcpy(b_g, g_pg.rg_loads, sizeof g_pg.rg_loads);
             b_g[DC_REGIONS] = g_pg.at_loads; b_g[DC_REGIONS + 1] = g_pg.pak_loads; b_g[DC_REGIONS + 2] = g_pg.loads;
             const uint64_t b_p[5] = { g_dp.tt_tiles, g_dp.tt_scan, g_dp.tt_sort, g_dp.tt_submit, us_snd };
-            if (!b_t0 && g_emu_frames > DC_BENCH_F0) { b_t0 = t0; b_d0 = us_dall; b_n0 = (uint32_t)n_drawn; memcpy(b_p0, b_p, sizeof b_p); memcpy(b_g0, b_g, sizeof b_g); b_tx0 = g_dp.tt_tex; b_rd0 = g_pg.tx_reads; }
+            if (!b_t0 && g_emu_frames > DC_BENCH_F0) { b_t0 = t0; b_d0 = us_dall; b_n0 = (uint32_t)n_drawn; memcpy(b_p0, b_p, sizeof b_p); memcpy(b_g0, b_g, sizeof b_g); b_tx0 = g_dp.tt_tex; b_rd0 = g_pg.tx_reads;
+                b_dr0 = g_pg.reads; b_sk0 = g_pg.seeks; b_sp0 = g_pg.sp_loads; }
             if (b_t0 && !b_line[0]) {
                 b_sl += t1 - t0;
                 if (g_emu_frames >= DC_BENCH_F1) {
@@ -419,6 +421,11 @@ int main(int argc, char **argv) {
                              (unsigned long)(b_g[4] - b_g0[4]), (unsigned long)(b_g[DC_REGIONS + 1] - b_g0[DC_REGIONS + 1]),
                              (unsigned long)(b_g[DC_REGIONS] - b_g0[DC_REGIONS]));
                     dp_text(5, b_line3);
+                    static char b_line4[64];   /* commands to the drive, the seeks among them, strip pack pages */
+                    snprintf(b_line4, sizeof b_line4, "rd %lu sk %lu sp %lu", (unsigned long)(g_pg.reads - b_dr0),
+                             (unsigned long)(g_pg.seeks - b_sk0), (unsigned long)(g_pg.sp_loads - b_sp0));
+                    printf("%s | %s\n", b_line3, b_line4);
+                    dp_text(6, b_line4);
                 }
             }
         }
@@ -455,10 +462,10 @@ int main(int argc, char **argv) {
                      (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
             STATS_PRINT(line);
             dp_text(19, line);   /* the bottom row: the game draws over row 2 */
-            snprintf(line, sizeof line, "tris %u runs %u full %u | tex %u new %u drop %u fail %u pk %u/%u rd %u %ums",
-                     g_dp.tris, g_dp.runs, g_dp.faces_dropped, g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails,
+            snprintf(line, sizeof line, "pk %u/%u rd %u %ums | tex %u new %u drop %u fail %u | tris %u runs %u full %u",
                      (unsigned)g_dp.tx_hits, (unsigned)(g_dp.tx_hits + g_dp.tx_miss), (unsigned)g_pg.tx_reads,
-                     (unsigned)(g_pg.tx_read_ns / 1000000));
+                     (unsigned)(g_pg.tx_read_ns / 1000000), g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails,
+                     g_dp.tris, g_dp.runs, g_dp.faces_dropped);
             STATS_PRINT(line);
             dp_text(18, line);
             unsigned d = shown ? shown : 1;

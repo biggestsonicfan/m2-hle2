@@ -492,18 +492,51 @@ static void spkey_write(void) {
  * PVR textures the Dreamcast's draw would cut for those frames' ROM meshes,
  * each cut from texture RAM as it is that frame and keyed by the words it was
  * cut from. A FILE that exists is read first and added to, so attract and a
- * fight make one pack; BASE is added to the frames, which order the data. */
+ * fight make one pack; BASE is added to the frames, which order the data.
+ * --tex-groups GROUPS (sfight.mdlgroups) lays the textures out by object
+ * group (#508), each in the group of the model that first drew it. */
 #define TXP_SLOTS 65536u
+#define TXG_MAX   64
 static const char *txp_path;
 static uint32_t    txp_from, txp_to, txp_base;
-static struct { uint32_t key, hash, frame, off; uint8_t used; } *txp;
+static struct { uint32_t key, hash, frame, off; uint16_t model; uint8_t used; } *txp;
 static uint32_t    txp_n;
 static uint8_t    *txp_data;
 static size_t      txp_bytes, txp_cap;
 /* each mesh key's texture keys, made once */
 static struct { int32_t model; uint32_t mat, uv; uint32_t *keys; uint32_t nk; uint8_t used; } *txp_mesh;
 
-static void txp_add(uint32_t key, uint32_t hash, uint32_t frame, const uint8_t *tex) {
+static int      txg_n;                       /* groups read; 0: lay out by frame */
+static char     txg_name[TXG_MAX + 1][24];
+static uint8_t  txg_of[65536];               /* a model's group + 1, 0: none */
+
+/* sfight.mdlgroups: `group NAME`, then model table numbers (hex), each in the
+ * first group that names it (as tools/dc_strips.c reads it). */
+static int txg_read(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "--tex-groups: cannot read %s\n", path); return -1; }
+    char line[1024];
+    int cur = -1;
+    while (fgets(line, sizeof line, f)) {
+        char *c = strchr(line, '#');
+        if (c) *c = 0;
+        if (!strncmp(line, "group ", 6)) {
+            if (txg_n == TXG_MAX) { fprintf(stderr, "--tex-groups: over %d groups\n", TXG_MAX); fclose(f); return -1; }
+            cur = txg_n++;
+            sscanf(line + 6, "%23s", txg_name[cur]);
+            continue;
+        }
+        for (char *t = strtok(line, " \t\r\n"); t; t = strtok(NULL, " \t\r\n")) {
+            unsigned long m = strtoul(t, NULL, 16);
+            if (cur >= 0 && m < 65536 && !txg_of[m]) txg_of[m] = (uint8_t)(cur + 1);
+        }
+    }
+    fclose(f);
+    snprintf(txg_name[txg_n], sizeof txg_name[0], "other");
+    return 0;
+}
+
+static void txp_add(uint32_t key, uint32_t hash, uint32_t frame, uint16_t model, const uint8_t *tex) {
     uint32_t h = (key * 2654435761u) ^ hash;
     for (uint32_t p = 0; p < TXP_SLOTS; p++) {
         __typeof__(*txp) *e = &txp[(h + p) & (TXP_SLOTS - 1u)];
@@ -516,7 +549,7 @@ static void txp_add(uint32_t key, uint32_t hash, uint32_t frame, const uint8_t *
             txp_data = realloc(txp_data, txp_cap);
         }
         memcpy(txp_data + txp_bytes, tex, len);
-        *e = (__typeof__(*txp)){ key, hash, frame, (uint32_t)txp_bytes, 1 };
+        *e = (__typeof__(*txp)){ key, hash, frame, (uint32_t)txp_bytes, model, 1 };
         txp_bytes += len;
         txp_n++;
         return;
@@ -533,11 +566,17 @@ static void txp_load(void) {
     if (fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "M2TX", 4)) {
         dct_index_t *ix = malloc((size_t)h.n * sizeof *ix);
         uint8_t *d = malloc(h.bytes ? h.bytes : 1);
+        uint16_t *mo = malloc((size_t)h.n * sizeof *mo);
+        memset(mo, 0xFF, (size_t)h.n * sizeof *mo);
         if (fread(ix, sizeof *ix, h.n, f) == h.n && !fseek(f, (long)h.data_off, SEEK_SET) &&
-            fread(d, 1, h.bytes, f) == h.bytes)
-            for (uint32_t i = 0; i < h.n; i++) txp_add(ix[i].key, ix[i].hash, ix[i].frame, d + ix[i].off);
+            fread(d, 1, h.bytes, f) == h.bytes) {
+            if (h.models_off && !fseek(f, (long)h.models_off, SEEK_SET) && fread(mo, sizeof *mo, h.n, f) != h.n)
+                memset(mo, 0xFF, (size_t)h.n * sizeof *mo);
+            for (uint32_t i = 0; i < h.n; i++) txp_add(ix[i].key, ix[i].hash, ix[i].frame, mo[i], d + ix[i].off);
+        }
         free(ix);
         free(d);
+        free(mo);
     }
     fclose(f);
     fprintf(stderr, "tex-pack: %u textures from %s\n", txp_n, txp_path);
@@ -597,50 +636,82 @@ static void txp_frame(void) {
             const uint32_t t = e->keys[j];
             const uint32_t *sheet = (const uint32_t *)(DCT_SHEET(t) ? bus.texram1 : bus.texram0);
             dct_cut(sheet, t, 0, dct_bytes(t), cut);
-            txp_add(t, dct_src_hash(sheet, t), g_emu_frames + txp_base, cut);
+            txp_add(t, dct_src_hash(sheet, t), g_emu_frames + txp_base, (uint16_t)cm->model_idx, cut);
         }
     }
+}
+
+static uint32_t txg_rank[TXG_MAX + 1];   /* a group's place: the first frame that draws from it */
+
+static uint32_t txp_group(uint16_t model) {
+    return txg_of[model] ? txg_of[model] - 1u : (uint32_t)txg_n;
 }
 
 static int txp_cmp_frame(const void *a, const void *b) {
     const __typeof__(*txp) *x = a, *y = b;
     if (x->used != y->used) return x->used ? -1 : 1;
+    if (txg_n) {
+        uint32_t gx = txp_group(x->model), gy = txp_group(y->model);
+        if (txg_rank[gx] != txg_rank[gy]) return txg_rank[gx] < txg_rank[gy] ? -1 : 1;
+        if (gx != gy) return gx < gy ? -1 : 1;
+    }
     if (x->frame != y->frame) return x->frame < y->frame ? -1 : 1;
     return dct_cmp(x->key, x->hash, y->key, y->hash);
 }
 
+typedef struct { dct_index_t e; uint16_t model; } txp_ix_t;
+
 static int txp_cmp_index(const void *a, const void *b) {
-    const dct_index_t *x = a, *y = b;
-    return dct_cmp(x->key, x->hash, y->key, y->hash);
+    const txp_ix_t *x = a, *y = b;
+    return dct_cmp(x->e.key, x->e.hash, y->e.key, y->e.hash);
 }
 
 static int txp_write(void) {
+    if (txg_n) {
+        for (int g = 0; g <= txg_n; g++) txg_rank[g] = ~0u;
+        for (uint32_t i = 0; i < TXP_SLOTS; i++)
+            if (txp[i].used && txp[i].frame < txg_rank[txp_group(txp[i].model)])
+                txg_rank[txp_group(txp[i].model)] = txp[i].frame;
+    }
     qsort(txp, TXP_SLOTS, sizeof *txp, txp_cmp_frame);
-    dct_head_t h = { { 'M', '2', 'T', 'X' }, txp_n, 0, 0, { 0 } };
+    dct_head_t h = { { 'M', '2', 'T', 'X' }, txp_n, 0, 0, 0, { 0 } };
     h.data_off = (uint32_t)((sizeof h + (size_t)txp_n * sizeof(dct_index_t) + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR);
-    dct_index_t *ix = calloc(txp_n ? txp_n : 1, sizeof *ix);
-    uint8_t *d = calloc(1, txp_bytes + 32u * txp_n + 1);
-    uint32_t at = 0, frames[4] = { 0 };
+    txp_ix_t *ix = calloc(txp_n ? txp_n : 1, sizeof *ix);
+    uint8_t *d = calloc(1, txp_bytes + 32u * txp_n + (size_t)DC_SECTOR * (TXG_MAX + 1) + 1);
+    uint32_t at = 0, frames[4] = { 0 }, ng = 0;
     for (uint32_t i = 0; i < txp_n; i++) {
-        const uint32_t len = dct_bytes(txp[i].key);
+        const uint32_t len = dct_bytes(txp[i].key), g = txp_group(txp[i].model);
+        if (txg_n && (!i || g != txp_group(txp[i - 1].model))) {
+            if (i) fprintf(stderr, "  group %-24s %5u KB\n", txg_name[txp_group(txp[i - 1].model)], (at - ng) >> 10);
+            at = (at + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR;   /* every group from a sector */
+            ng = at;
+        }
         memcpy(d + at, txp_data + txp[i].off, len);
-        ix[i] = (dct_index_t){ txp[i].key, txp[i].hash, at, txp[i].frame };
+        ix[i] = (txp_ix_t){ { txp[i].key, txp[i].hash, at, txp[i].frame }, txp[i].model };
         at += (len + 31u) & ~31u;
         frames[txp[i].frame >= 100000u]++;
     }
+    if (txg_n && txp_n) fprintf(stderr, "  group %-24s %5u KB\n", txg_name[txp_group(txp[txp_n - 1].model)], (at - ng) >> 10);
     h.bytes = at;
+    h.models_off = h.data_off + at;
     qsort(ix, txp_n, sizeof *ix, txp_cmp_index);
     FILE *f = fopen(txp_path, "wb");
     if (!f) { fprintf(stderr, "tex-pack: cannot write %s\n", txp_path); return 2; }
     uint8_t *head = calloc(1, h.data_off);
+    uint16_t *mo = calloc(txp_n ? txp_n : 1, sizeof *mo);
     memcpy(head, &h, sizeof h);
-    memcpy(head + sizeof h, ix, (size_t)txp_n * sizeof *ix);
+    for (uint32_t i = 0; i < txp_n; i++) {
+        memcpy(head + sizeof h + (size_t)i * sizeof(dct_index_t), &ix[i].e, sizeof(dct_index_t));
+        mo[i] = ix[i].model;
+    }
     fwrite(head, 1, h.data_off, f);
     fwrite(d, 1, at, f);
+    fwrite(mo, sizeof *mo, txp_n, f);
     fclose(f);
-    fprintf(stderr, "tex-pack: %u textures (%u before frame 100000, %u after), %.2f MB in %s\n",
-            txp_n, frames[0], frames[1], (double)(h.data_off + at) / 1048576.0, txp_path);
-    free(head); free(d); free(ix);
+    fprintf(stderr, "tex-pack: %u textures (%u before frame 100000, %u after), %.2f MB in %s%s\n",
+            txp_n, frames[0], frames[1], (double)(h.models_off + 2u * txp_n) / 1048576.0, txp_path,
+            txg_n ? ", by group" : "");
+    free(head); free(d); free(ix); free(mo);
     return 0;
 }
 
@@ -967,6 +1038,9 @@ int main(int argc, char **argv) {
             if ((plus = strstr(path, ":+")) != NULL) { txp_base = (uint32_t)strtoul(plus + 2, NULL, 10); *plus = 0; }
             txp_path = path;
             txp_load();
+        }
+        else if (!strcmp(argv[i], "--tex-groups") && i + 1 < argc) {
+            if (txg_read(argv[++i]) != 0) return 2;
         }
         else if (!strcmp(argv[i], "--model-map") && i + 1 < argc) {
             char path[1024] = {0};

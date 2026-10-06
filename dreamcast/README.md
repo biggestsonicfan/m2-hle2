@@ -125,7 +125,10 @@ STRIPS.PAK is the same meshes walked offline (`tools/dc_strips.c`, built and
 run by `mkdisc.sh` from the ROM files and `sfight.strips`): per mesh its
 corners, its faces with the PVR texture each one cuts, and the corners' u, v
 in that texture's units, so the frame transforms and draws a mesh without
-walking its GEO stream (DREAMCAST-PORT.md #498). `NOSTRIPS=1` leaves it out;
+walking its GEO stream (DREAMCAST-PORT.md #498). Its meshes lie by object
+group (`sfight.mdlgroups`: a stage, a fighter, the select screen...), each
+group in the order the recorded frames first drew from it (#504), so a page
+the pager loads holds meshes of one scene. `NOSTRIPS=1` leaves it out;
 `make STRIPS=0` builds a program that never looks for it. `sfight.strips` is
 the mesh cache's keys, addresses only, recorded the same way with a
 `det_digest` that takes the PS3 release's ROM folder in place of the zip:
@@ -149,6 +152,9 @@ det_digest "<PS3>/stf_rom" --profile sfight_console --frames 9000 --script "$S" 
 ```
 
 The second run adds the fight's textures to the pack the first wrote.
+`--tex-groups dreamcast/sfight.mdlgroups` on both runs lays the textures out
+by object group instead of by the frame that first drew them; it was tried
+and lost (DREAMCAST-PORT.md #508), so the disc's pack is recorded without it.
 
 `sfight.aotmap`, the code `AOT=` compiles, is recorded the same way, with
 Sega's C on as the disc runs it (a `det_digest` built with `M2HLE_GEMS_DIR`):
@@ -342,12 +348,12 @@ discs gave ~37 and ~30.
 | `dc_sound.h` | STF.AFS, the ADX decoder, the music's ring, the SDL2 mix |
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
 | `sfight.mdlmap` | the polygon and texture ROM lines STF draws, by first frame, for MODELS.PAK |
-| `sfight.mdlgroups` | the objects of each stage and fighter, for MODELS.PAK (`tools/dc_mdlgroups.mjs`) |
+| `sfight.mdlgroups` | the objects of each stage and fighter, for STRIPS.PAK's layout (and MODELS.PAK's `--groups`; `tools/dc_mdlgroups.mjs`) |
 | `../tools/dc_mdlpack.py` | host tool: map (+ groups) + ROM files → MODELS.PAK |
 | `../tools/dc_mdlgroups.mjs` | host tool: explorer + Gems' `OBJ_*` → `sfight.mdlgroups` |
 | `sfight.strips` | the meshes STF draws (model, material and UV pointers), by first frame, for STRIPS.PAK |
 | `dc_strips.h` | STRIPS.PAK's records; the converter's writer (`DCS_WRITER`) |
-| `../tools/dc_strips.c` | host tool: keys + ROM files → STRIPS.PAK |
+| `../tools/dc_strips.c` | host tool: keys + groups + ROM files → STRIPS.PAK |
 | `dc_link.h` | `LINK=1`: the replay fight's frames, or from power-on the board's memory as CRCs, over the SCIF to `tools/dc-lockstep.py` |
 | `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |

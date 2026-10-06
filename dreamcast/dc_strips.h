@@ -25,11 +25,21 @@
  * of the arena, and the bench's page loads went from 357 to 908
  * (DREAMCAST-PORT.md #498).
  *
- * File: dcs_head_t; the index, dcs_index_t sorted by (model, mat, uv); at
- * data_off (a sector) the blobs, 32-byte aligned, in the order the recorded
- * frames first drew them. A blob is geo3d.h's geo3d_sp_head_t, sv padded to
- * 32, the faces, the corners' u, v. ROM-derived, so built by mkdisc.sh from the
- * ROM files (tools/dc_strips.c) and never committed.
+ * File: dcs_head_t; the index, dcs_index_t sorted by (model, mat, uv); the
+ * groups, dcs_group_t by offset; at data_off (a sector) the blobs, 32-byte
+ * aligned. A blob is geo3d.h's geo3d_sp_head_t, sv padded to 32, the faces,
+ * the corners' u, v. ROM-derived, so built by mkdisc.sh from the ROM files
+ * (tools/dc_strips.c) and never committed.
+ *
+ * Groups (#504): the blobs lie by object group, as Gems' OBJ_* files do (one
+ * per stage, per fighter, the select screen, the story scenes:
+ * dreamcast/sfight.mdlgroups), each group from a sector of its own and in the
+ * order the recorded frames first drew from it, its meshes in the order they
+ * were first drawn. A 16 KB page then holds meshes the same scene draws,
+ * so the pager loads fewer of them. The draw still reads blobs through the
+ * pager; the table says where each group lies, for a reader that wants a
+ * group whole. Reading groups whole into RAM of their own was tried and lost
+ * (DREAMCAST-PORT.md #504).
  *
  * Host-clean: the converter includes it too (DCS_WRITER).
  */
@@ -47,8 +57,14 @@ typedef struct {
     /* the ROM the meshes were walked from: the pack is used only if they match */
     uint32_t polygons_size, textures_size, table_off, table_count, mesh_ptr_subtract, mesh_ptr_add;
     uint32_t verts, faces, bytes;       /* totals, for the log */
-    uint32_t pad[4];
+    uint32_t ngroups, groups_off;       /* the group table: its entries, its offset in the file */
+    uint32_t pad[2];
 } dcs_head_t;
+
+typedef struct {
+    uint32_t off, len;                  /* from data_off, both whole sectors */
+    char     name[24];                  /* sfight.mdlgroups' name */
+} dcs_group_t;
 
 typedef struct {
     int32_t  model_idx;
@@ -56,7 +72,7 @@ typedef struct {
     uint32_t off, len;                  /* from data_off */
 } dcs_index_t;
 
-_Static_assert(sizeof(dcs_head_t) == 64 && sizeof(dcs_index_t) == 20, "STRIPS.PAK records");
+_Static_assert(sizeof(dcs_head_t) == 64 && sizeof(dcs_index_t) == 20 && sizeof(dcs_group_t) == 32, "STRIPS.PAK records");
 
 static inline int dcs_key_cmp(int32_t ma, uint32_t ta, uint32_t ua, int32_t mb, uint32_t tb, uint32_t ub) {
     if (ma != mb) return ma < mb ? -1 : 1;
