@@ -37,6 +37,10 @@
  * entry function is called with 1 and returns R. R != 0 resumes the i960 at
  * site + R / 2 (Gems decodes 8 bytes per i960 word); R == 0 means the C set
  * the IP itself, with i960_ret() (gems_i960_ret) or a branch (gems_branch).
+ *
+ * A profile's own hook inside a trapped function (sfight_console's head tilt
+ * in get_frame_dat) would be skipped by the C, so the C runs it: gems_inner()
+ * below. A trap whose C does not serve such a hook stays with the i960.
  */
 
 #include <stdint.h>
@@ -112,6 +116,29 @@ static inline float    gems_cop_rf(void)      { return gems_u2f(cop_read()); }
 /* Gems' cop_writeN_from / cop_readN_to. */
 static inline void gems_cop_wn(const uint32_t *src, int n) { for (int i = 0; i < n; i++) cop_write(src[i]); }
 static inline void gems_cop_rn(uint32_t *dst, int n)       { for (int i = 0; i < n; i++) dst[i] = cop_read(); }
+
+/* A hook of the active profile on an instruction inside a trapped function.
+ * The C asks for it by the instruction's address (NULL: this profile has none
+ * there, carry on as the ROM), puts the registers the instruction would hold
+ * into the CPU, calls it, and takes back what the hook wrote. Only a hook that
+ * edits registers or memory and lets its instruction run (returns 1) can be
+ * served this way. gems_impl.h names the addresses its C serves in
+ * GEMS_INNER_SITES (a comma list); GEMS_INNER tells it this header has these. */
+#define GEMS_INNER 1
+typedef hle_hook_fn gems_inner_fn;
+static inline gems_inner_fn gems_inner(uint32_t ip) {
+    const game_profile_t *p = g_active_profile;
+    for (size_t i = 0; p && i < p->hook_count; i++)
+        if (p->hooks[i].addr == ip) return p->hooks[i].fn;
+    return NULL;
+}
+static inline void gems_inner_call(gems_inner_fn f) {
+    if (f(g_gems.cpu, g_gems.bus) != 1) {
+        static bool said;
+        if (!said) LOG_WARN("gems: a profile hook inside a trapped function skipped its instruction; the C ran it");
+        said = true;
+    }
+}
 
 /* Gems' i960_ret(): pop the frame, as `ret`. */
 static inline void gems_i960_ret(void) { hle_ret(g_gems.cpu); g_gems.ip_set = true; }
@@ -259,18 +286,30 @@ static inline const gems_trap_t *gems_trap_at(uint32_t ip) {
 }
 
 /* A trap whose function holds one of the active profile's own hooks stays
- * with the i960: the C would run the whole function and skip the hook.
- * sfight_console zeroes the head tilt at get_frame_dat+0x140 (0x30608,
- * sfc_hook_head_tilt), so with Gems' get_frame_dat the Console profile played
- * the Arcade's motion blend (--gems-verify: get_frame_dat differs at
- * 0x514C30 on sfight_console only). */
+ * with the i960 unless the C runs that hook itself (gems_inner): the C would
+ * run the whole function and skip the hook. sfight_console zeroes the head
+ * tilt at get_frame_dat+0x140 (0x30608, sfc_hook_head_tilt), so with a Gems
+ * get_frame_dat that does not serve it the Console profile played the
+ * Arcade's motion blend (--gems-verify: get_frame_dat differs at 0x514C30 on
+ * sfight_console only). */
 static bool gems_trap_left_to_i960(const gems_trap_t *t) {
-    static const struct { const char *profile; uint32_t site; } keep[] = {
-        { "sfight_console", 0x000304C8u },   /* get_frame_dat */
+    static const struct { const char *profile; uint32_t site, hook; } inner[] = {
+        { "sfight_console", 0x000304C8u, 0x00030608u },   /* get_frame_dat */
     };
+#ifdef GEMS_INNER_SITES
+    static const uint32_t served[] = { GEMS_INNER_SITES };
+    const size_t served_n = sizeof served / sizeof served[0];
+#else
+    static const uint32_t served[1] = { 0 };
+    const size_t served_n = 0;
+#endif
     if (!g_active_profile) return false;
-    for (size_t k = 0; k < sizeof keep / sizeof keep[0]; k++)
-        if (t->site == keep[k].site && !strcmp(g_active_profile->id, keep[k].profile)) return true;
+    for (size_t k = 0; k < sizeof inner / sizeof inner[0]; k++) {
+        if (t->site != inner[k].site || strcmp(g_active_profile->id, inner[k].profile)) continue;
+        bool has = false;
+        for (size_t i = 0; i < served_n; i++) has |= served[i] == inner[k].hook;
+        if (!has) return true;
+    }
     return false;
 }
 

@@ -493,6 +493,12 @@ int main(int argc, char **argv) {
                 STATS_PRINT(line);
                 dp_text(16, line);
                 cop_last = cop; steps_last = g_emu_times.steps; ops_last = g_ib.ops; loop_last = g_emu_times.loop_us;
+#if I960_AOT && !I960_JIT
+                if (aot_off_why()[0]) {   /* the compiled code refused: say why (#509) */
+                    snprintf(line, sizeof line, "aot off: %s", aot_off_why());
+                    dp_text(14, line);
+                }
+#endif
             }
 #ifdef IB_WHY
             snprintf(line, sizeof line, "not blk: slow %u empty %u long %u hor %u irq %u",

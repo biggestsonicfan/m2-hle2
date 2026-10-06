@@ -227,7 +227,7 @@ def direct(ip, w1, w2, kind):
         if op in rd: return (ea, f'AOT_RAM({sz[op]}u)', f'{R(d)} = {rd[op]};',
                              f'AOT_ROMD({sz[op]}u)', f'{R(d)} = {rd[op].replace("AOT_RL", "AOT_OL")};')
         if op in wr:
-            last = f'g_last_store_ip = 0x{ip:X}u; ' if op in (0x82, 0x8A, 0x92) else ''
+            last = f'AOT_MARK(0x{ip:X}u); ' if op in (0x82, 0x8A, 0x92) else ''
             return ea, f'AOT_RAM({sz[op]}u)', f'{last}{wr[op]}(0x{ip:X}u, 0, {R(d)});'
         if op in LOADN:
             n = LOADN[op]
@@ -237,7 +237,7 @@ def direct(ip, w1, w2, kind):
         if op in STOREN:
             n = STOREN[op]
             if d + n > 32: return None
-            return ea, f'AOT_RAM({4 * n}u)', (f'g_last_store_ip = 0x{ip:X}u; '
+            return ea, f'AOT_RAM({4 * n}u)', (f'AOT_MARK(0x{ip:X}u); '
                         + ' '.join(f'AOT_RS32(0x{ip:X}u, {4 * k}u, {R(d + k)});' for k in range(n)))
     return None
 
