@@ -36,6 +36,9 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # (DREAMCAST-PORT.md #471; Flycast stretches it unless its libretro core has
 # tools/flycast-frame512.patch, #499). VIEW=x,y,w,h shows only that
 # rectangle of the board's 496x384, scaled to fill the frame (#479).
+# FILL=1 (the default with no VIEW) stretches the board over the whole frame,
+# 640x480 with no side bars, the shape a 4:3 arcade monitor gives it (#503);
+# FILL=0 keeps its own shape, 620x480 at 1.25.
 # HUD=min drops the stats rows: only the board's frames a second, small, top
 # right (Pinboard #475's disc: HUD=min FRAME512=1). Under an unpatched Flycast a
 # FRAME512 picture is enlarged and that corner falls off the screen; Redream

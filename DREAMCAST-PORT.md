@@ -869,6 +869,30 @@ The tiles' conversion was most of the frame and the view is 38% of the
 board, so a frame went from 58 ms to 45. Measured in Flycast, which does not
 charge PVR fill.
 
+## The whole frame (#503)
+
+With no VIEW, STF's 496x384 went onto the 640x480 frame at 1.25, aspect
+kept: 620x480 at (10,0), a 10-pixel black bar down each side. An arcade
+monitor is 4:3 and shows the board's 496x384 across all of it, 1.29 across
+and 1.25 down, and so does MAME. `make FILL=1` (`DC_FILL`, `dc_pvr.h`) does
+the same: `DC_SX` and `DC_SY` scale the two axes apart (the tile quads, the
+3D projection and its view clip, the checker's phase), and the board fills
+the frame edge to edge. It is the default when there is no VIEW; a VIEW keeps
+its shape unless FILL=1 is given with it (Pac-Man's portrait screen would
+otherwise be pulled sideways), and HUD=none stays 1:1.
+
+**It costs nothing.** The PVR renders the whole tile grid either way, and
+the SH-4's work does not depend on the scale. The bench (full HUD, AOT,
+Gems, fight frames 3500-3900, Flycast's libretro core):
+
+| | total ms | slice | draw |
+|---|---|---|---|
+| 1.25, aspect kept (`FILL=0`) | 18805 | 10047 | 8673 |
+| whole frame (`FILL=1`) | 18803 | 10000 | 8718 |
+
+The same within noise. #479's gain for m2-sonic came from converting less of
+the board, which STF cannot do: it uses all of it.
+
 ## m2-sonic's planes on the PVR, and its idle loops skipped (#481)
 
 The view left two costs, found with the HUD's per-stage times and a
