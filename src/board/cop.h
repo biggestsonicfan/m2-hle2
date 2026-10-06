@@ -113,7 +113,12 @@ static inline void cop_tap_replies(void) {
 
 /* A word cop_write's short path leaves: one that starts, ends or streams a
  * command, or any word while the conversation is being tapped. */
-static __attribute__((noinline)) void cop_write_word(uint32_t val) {
+#if defined(_MSC_VER)
+#define COP_NOINLINE __declspec(noinline)
+#else
+#define COP_NOINLINE __attribute__((noinline))
+#endif
+static COP_NOINLINE void cop_write_word(uint32_t val) {
     /* An argument of a fixed-length command: most words are one. */
     if (g_cop.args_needed > 0) {
         if (g_cop_tap) g_cop_tap(0x20000000u, val);
