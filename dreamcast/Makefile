@@ -44,7 +44,8 @@ LINK_CFLAGS := $(if $(filter 1,$(LINK)),-ffp-contract=off)
 HOST_MATH ?= $(if $(filter 1,$(LINK)),0,1)
 # FRAME512=1: a 512x384 frame set in the middle of the 640x480 signal, where
 # the default draws the board centred in a 640x480 one (dc_pvr.h). Flycast
-# stretches a frame to fill its window, so check it on a Dreamcast.
+# stretches a frame to fill its window unless its core has
+# tools/flycast-frame512.patch (#499); Redream shows it as a Dreamcast does.
 FRAME512 ?= 0
 # VIEW=x,y,w,h: show only that rectangle of the board's 496x384, scaled to fill
 # the frame (dc_pvr.h). m2-sonic's Mega Drive picture: VIEW=88,80,320,224 (2x);

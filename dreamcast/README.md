@@ -33,11 +33,13 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # out. OPTAB=1 dispatches the interpreter through a handler table (off: it
 # saves under 1% here and costs 136 KB).
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
-# (Flycast stretches it; DREAMCAST-PORT.md #471). VIEW=x,y,w,h shows only that
+# (DREAMCAST-PORT.md #471; Flycast stretches it unless its libretro core has
+# tools/flycast-frame512.patch, #499). VIEW=x,y,w,h shows only that
 # rectangle of the board's 496x384, scaled to fill the frame (#479).
 # HUD=min drops the stats rows: only the board's frames a second, small, top
-# right (Pinboard #475's disc: HUD=min FRAME512=1). Under Flycast a FRAME512
-# picture is enlarged and that corner falls off the screen; Redream shows it.
+# right (Pinboard #475's disc: HUD=min FRAME512=1). Under an unpatched Flycast a
+# FRAME512 picture is enlarged and that corner falls off the screen; Redream
+# and Flycast with tools/flycast-frame512.patch show it.
 # HUD=none draws nothing over the game at all, not even that, and (with no
 # VIEW, FRAME512=0) puts the whole board 1:1 at (72,48) of the frame, a
 # picture to crop and hold against MAME's pixel for pixel (Pinboard #478).

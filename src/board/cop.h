@@ -113,7 +113,14 @@ static inline void cop_tap_replies(void) {
 
 /* A word cop_write's short path leaves: one that starts, ends or streams a
  * command, or any word while the conversation is being tapped. */
-static __attribute__((noinline)) void cop_write_word(uint32_t val) {
+#if defined(_MSC_VER)
+#define COP_NOINLINE __declspec(noinline)
+#define COP_EXPECT(x, v) (x)
+#else
+#define COP_NOINLINE __attribute__((noinline))
+#define COP_EXPECT(x, v) __builtin_expect((x), (v))
+#endif
+static COP_NOINLINE void cop_write_word(uint32_t val) {
     /* An argument of a fixed-length command: most words are one. */
     if (g_cop.args_needed > 0) {
         if (g_cop_tap) g_cop_tap(0x20000000u, val);
@@ -179,7 +186,7 @@ static inline void cop_write(uint32_t val) {
 
     /* The boot image the i960 uploads before it lowers the bit: the HLE
      * runs none of it, and none of it is a command. */
-    if (__builtin_expect(g_cop.ctl && (g_cop.ctl[3] & 0x80), 0)) {
+    if (COP_EXPECT(g_cop.ctl && (g_cop.ctl[3] & 0x80), 0)) {
         g_cop.upload_words++;
         return;
     }
@@ -193,7 +200,7 @@ static inline void cop_write(uint32_t val) {
     if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
         g_cop.geo_capture_count++;
 
-    if (__builtin_expect(g_cop.args_needed > 1 && !g_cop_tap, 1)) {
+    if (COP_EXPECT(g_cop.args_needed > 1 && !g_cop_tap, 1)) {
         if (g_cop.args_received < COP_ARGS_MAX)
             g_cop.args[g_cop.args_received++] = val;
         g_cop.args_needed--;

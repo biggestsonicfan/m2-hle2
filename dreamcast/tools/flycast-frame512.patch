@@ -1,0 +1,262 @@
+Flycast: show a frame smaller than the screen at its own size (m2-hle2 Pinboard
+#499), e.g. the port's `make FRAME512=1` 512x384 frame in the middle of the
+640x480 signal (DREAMCAST-PORT.md #471). Libretro core, OpenGL renderer.
+
+Without it Flycast stretches the TA's frame to fill its output and then moves
+it by the change in VO_STARTX/VO_STARTY, so the picture comes out 1.25x too big
+and cut off on the right and at the bottom. Moving it back up and left is not
+enough: the size is wrong too. With it, when the framebuffer the PVR shows
+(FB_R_SIZE) is smaller than the screen (640 pixels, 320 pixel-doubled, by 480
+or 240 lines), the core's output is the whole screen and the frame goes in it
+1:1 at the video shift, the border color around it, as on a Dreamcast. Also,
+an interlaced mode's VO_STARTY counts field lines, so its shift is doubled.
+A full-screen frame (every retail game) shows as before. The full framebuffer
+emulation, widescreen and rotated modes and the Vulkan/DirectX renderers are
+unchanged.
+
+Against flycast 04669ebe4164bb589e6a2050aa1559724aa94291. Apply in a Flycast
+checkout with `git apply` (or `patch -p1`) and build the libretro core:
+
+    cmake -B build-lr -G Ninja -DLIBRETRO=ON -DCMAKE_BUILD_TYPE=Release -DUSE_VULKAN=OFF
+    ninja -C build-lr -j2        # build-lr/flycast_libretro.so
+
+diff --git a/core/hw/pvr/Renderer_if.cpp b/core/hw/pvr/Renderer_if.cpp
+index 49c3f720f..331f7c404 100644
+--- a/core/hw/pvr/Renderer_if.cpp
++++ b/core/hw/pvr/Renderer_if.cpp
+@@ -209,8 +209,12 @@ private:
+ 		bool renderToScreen = !taContext->rend.isRTT && !config::EmulateFramebuffer;
+ #ifdef LIBRETRO
+ 		if (renderToScreen)
+-			retro_resize_renderer(taContext->rend.framebufferWidth, taContext->rend.framebufferHeight,
+-					getOutputFramebufferAspectRatio());
++		{
++			// The OpenGL renderer shows a frame smaller than the screen at its own size
++			if (isOpenGL(config::RendererType))
++				getDisplayFramebufferSize(taContext->rend, width, height);
++			retro_resize_renderer(width, height, getOutputFramebufferAspectRatio());
++		}
+ #endif
+ 		{
+ 			FC_PROFILE_SCOPE_NAMED("Renderer::Process");
+diff --git a/core/rend/gles/postprocess.cpp b/core/rend/gles/postprocess.cpp
+index 357319a61..fff23ed20 100644
+--- a/core/rend/gles/postprocess.cpp
++++ b/core/rend/gles/postprocess.cpp
+@@ -168,12 +168,13 @@ void main()
+ class PostProcessShader
+ {
+ public:
+-	static void select(bool dither, bool interlaced, bool vga)
++	// shiftYPadding: the frame's height less the output's, which is taller when the frame is padded
++	static void select(bool dither, bool interlaced, bool vga, float shiftYPadding = 0.f)
+ 	{
+ 		u32 key = ((int)dither << 2) | ((int)interlaced << 1) | (int)vga;
+ 		if (shaders[key].program == 0)
+ 			shaders[key].compile(dither, interlaced, vga);
+-		shaders[key].select();
++		shaders[key].select(shiftYPadding);
+ 	}
+ 	static void term()
+ 	{
+@@ -212,11 +213,11 @@ private:
+ 		videoShiftUniform = glGetUniformLocation(program, "videoShift");
+ 	}
+ 
+-	void select()
++	void select(float shiftYPadding)
+ 	{
+ 		glcache.UseProgram(program);
+ 		glUniform1f(frameCountUniform, FrameCount);
+-		float shift[] = { -gl.ofbo.shiftX, gl.ofbo.shiftY };
++		float shift[] = { -gl.ofbo.shiftX, gl.ofbo.shiftY + shiftYPadding };
+ 		glUniform2fv(videoShiftUniform, 1, shift);
+ 	}
+ 
+@@ -282,13 +283,23 @@ void PostProcessor::render(GLuint output_fbo)
+ 	glcache.Disable(GL_CULL_FACE);
+ 	glcache.Disable(GL_BLEND);
+ 
++	// The output is larger than the frame when the frame is shown at its own size
++	// (getDisplayFramebufferSize): the frame goes at the video shift, border color around it
++	const int width = framebuffer->getWidth();
++	const int height = framebuffer->getHeight();
++	int outWidth = width;
++	int outHeight = height;
++	if (gl.rendContext != nullptr)
++		getDisplayFramebufferSize(*gl.rendContext, outWidth, outHeight);
++	const bool padded = outWidth != width || outHeight != height;
++
+ 	if (!config::PowerVR2Filter)
+ 	{
+ 		// Just handle shifting and Y flipping
+ 		if (gl.bogusBlitFramebuffer)
+ 		{
+ 			glBindFramebuffer(GL_FRAMEBUFFER, output_fbo);
+-			glViewport(0, 0, framebuffer->getWidth(), framebuffer->getHeight());
++			glViewport(0, 0, outWidth, outHeight);
+ 			glcache.ClearColor(VO_BORDER_COL.red(), VO_BORDER_COL.green(), VO_BORDER_COL.blue(), 1.f);
+ 			glClear(GL_COLOR_BUFFER_BIT);
+ 			glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+@@ -299,10 +310,10 @@ void PostProcessor::render(GLuint output_fbo)
+ 				 1.f, -1.f, 1.f, 1.f, 1.f,
+ 				 1.f,  1.f, 1.f, 1.f, 0.f,
+ 			};
+-			vertices[0] = vertices[5] = -1.f + gl.ofbo.shiftX * 2.f / framebuffer->getWidth();
+-			vertices[10] = vertices[15] = vertices[0] + 2;
+-			vertices[1] = vertices[11] = -1.f - gl.ofbo.shiftY * 2.f / framebuffer->getHeight();
+-			vertices[6] = vertices[16] = vertices[1] + 2;
++			vertices[0] = vertices[5] = -1.f + gl.ofbo.shiftX * 2.f / outWidth;
++			vertices[10] = vertices[15] = vertices[0] + 2.f * width / outWidth;
++			vertices[1] = vertices[11] = 1.f - (gl.ofbo.shiftY + height) * 2.f / outHeight;
++			vertices[6] = vertices[16] = vertices[1] + 2.f * height / outHeight;
+ 			glcache.Disable(GL_BLEND);
+ 			gl.quadDrawer->draw(framebuffer->getTexture(), false, false, vertices);
+ 		}
+@@ -313,8 +324,8 @@ void PostProcessor::render(GLuint output_fbo)
+ 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, output_fbo);
+ 			glcache.ClearColor(VO_BORDER_COL.red(), VO_BORDER_COL.green(), VO_BORDER_COL.blue(), 1.f);
+ 			glClear(GL_COLOR_BUFFER_BIT);
+-			glBlitFramebuffer(-gl.ofbo.shiftX, -gl.ofbo.shiftY, framebuffer->getWidth() - gl.ofbo.shiftX, framebuffer->getHeight() - gl.ofbo.shiftY,
+-					0, framebuffer->getHeight(), framebuffer->getWidth(), 0,
++			glBlitFramebuffer(0, 0, width, height,
++					gl.ofbo.shiftX, outHeight - gl.ofbo.shiftY, gl.ofbo.shiftX + width, outHeight - gl.ofbo.shiftY - height,
+ 					GL_COLOR_BUFFER_BIT, GL_NEAREST);
+ 	    	glBindFramebuffer(GL_FRAMEBUFFER, output_fbo);
+ #endif
+@@ -330,7 +341,8 @@ void PostProcessor::render(GLuint output_fbo)
+ 	else
+ 		PostProcessShader::select(gl.rendContext->fb_W_CTRL.fb_dither == 1 && gl.rendContext->fb_W_CTRL.fb_packmode <= 3 && !config::EmulateFramebuffer,
+ 				SPG_CONTROL.interlace,
+-				FB_R_CTRL.vclk_div == 1 && SPG_CONTROL.interlace == 0);
++				FB_R_CTRL.vclk_div == 1 && SPG_CONTROL.interlace == 0,
++				(float)(height - outHeight));
+ 	vertexArray.bind(vertexBuffer.get());
+ 
+ 	glBindFramebuffer(GL_FRAMEBUFFER, output_fbo);
+@@ -338,8 +350,17 @@ void PostProcessor::render(GLuint output_fbo)
+ 	glcache.BindTexture(GL_TEXTURE_2D, framebuffer->getTexture());
+ 
+ 	glcache.ClearColor(VO_BORDER_COL.red(), VO_BORDER_COL.green(), VO_BORDER_COL.blue(), 1.f);
+-	glClear(GL_COLOR_BUFFER_BIT);
++	if (padded)
++	{
++		glViewport(0, 0, outWidth, outHeight);
++		glClear(GL_COLOR_BUFFER_BIT);
++		glcache.Scissor(gl.ofbo.shiftX, outHeight - gl.ofbo.shiftY - height, width, height);
++		glcache.Enable(GL_SCISSOR_TEST);
++	}
++	else
++		glClear(GL_COLOR_BUFFER_BIT);
+ 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++	glcache.Disable(GL_SCISSOR_TEST);
+ 	GlVertexArray::unbind();
+ }
+ #endif // LIBRETRO
+diff --git a/core/rend/transform_matrix.cpp b/core/rend/transform_matrix.cpp
+index 847cbd3f9..14621150f 100644
+--- a/core/rend/transform_matrix.cpp
++++ b/core/rend/transform_matrix.cpp
+@@ -38,6 +38,23 @@ static void makePowerOf2Size(int width, int height, int& wpo2, int& hpo2)
+ 	}
+ }
+ 
++// The lines a frame rendered to screen can have
++static int getMaxScreenHeight(const rend_context& rendCtx)
++{
++	int maxHeight = FB_R_CTRL.vclk_div == 0 && SPG_CONTROL.interlace == 0 ? 240 : 480;
++	// we ignore vscalefactor when interlaced because it's used for Stretched PAL (factor in ]1, 1.3]),
++	// or Flicker-free interlace mode B (factor [0.5, 0.6]), which are only emulated in Full FB emu.
++	// In 240p, some games (Cho - Hatsumei Boy Kanipan) use a 1/2 factor from rendering at 480 to a 240-line framebuffer.
++	// So we render at 480 in that case.
++	if (rendCtx.scaler_ctl.vscalefactor != 0
++			&& (rendCtx.scaler_ctl.vscalefactor > 1025 || rendCtx.scaler_ctl.vscalefactor < 1024)
++			&& SPG_CONTROL.interlace == 0)
++		maxHeight /= 1024.f / rendCtx.scaler_ctl.vscalefactor;
++	if (FB_R_CTRL.fb_line_double)
++		maxHeight /= 2;
++	return maxHeight;
++}
++
+ void getPvrFramebufferSize(const rend_context& rendCtx, int& width, int& height)
+ {
+ 	if (!rendCtx.isRTT)
+@@ -45,20 +62,7 @@ void getPvrFramebufferSize(const rend_context& rendCtx, int& width, int& height)
+ 		// Render to screen
+ 		getTAViewport(rendCtx, width, height);
+ 		if (!config::EmulateFramebuffer)
+-		{
+-			int maxHeight = FB_R_CTRL.vclk_div == 0 && SPG_CONTROL.interlace == 0 ? 240 : 480;
+-			// we ignore vscalefactor when interlaced because it's used for Stretched PAL (factor in ]1, 1.3]),
+-			// or Flicker-free interlace mode B (factor [0.5, 0.6]), which are only emulated in Full FB emu.
+-			// In 240p, some games (Cho - Hatsumei Boy Kanipan) use a 1/2 factor from rendering at 480 to a 240-line framebuffer.
+-			// So we render at 480 in that case.
+-			if (rendCtx.scaler_ctl.vscalefactor != 0
+-					&& (rendCtx.scaler_ctl.vscalefactor > 1025 || rendCtx.scaler_ctl.vscalefactor < 1024)
+-					&& SPG_CONTROL.interlace == 0)
+-				maxHeight /= 1024.f / rendCtx.scaler_ctl.vscalefactor;
+-			if (FB_R_CTRL.fb_line_double)
+-				maxHeight /= 2;
+-			height = std::min(maxHeight, height);
+-		}
++			height = std::min(getMaxScreenHeight(rendCtx), height);
+ 	}
+ 	else
+ 	{
+@@ -303,6 +307,32 @@ void getScaledFramebufferSize(const rend_context& rendCtx, int& width, int& heig
+ 	}
+ }
+ 
++void getDisplayFramebufferSize(const rend_context& rendCtx, int& width, int& height)
++{
++	if (rendCtx.isRTT || config::EmulateFramebuffer || config::Widescreen || config::Rotate90)
++		return;
++	// The framebuffer the PVR shows (FB_R_SIZE), in pixels and lines
++	FramebufferInfo info;
++	info.update();
++	int fbWidth, fbHeight;
++	getDCFramebufferReadSize(info, fbWidth, fbHeight);
++	if (SPG_CONTROL.interlace && fbHeight * 2 <= 480)
++		fbHeight *= 2;
++	// The whole screen, in the same units as the frame
++	const int screenWidth = VO_CONTROL.pixel_double ? 320 : 640;
++	const int screenHeight = getMaxScreenHeight(rendCtx);
++	int pvrWidth, pvrHeight;
++	getPvrFramebufferSize(rendCtx, pvrWidth, pvrHeight);
++	// A frame that fills the screen, or that we can't place, is stretched to fill it
++	if ((fbWidth >= screenWidth && fbHeight >= screenHeight)
++			|| pvrWidth > screenWidth || pvrHeight > screenHeight)
++		return;
++	// A smaller one is shown at its own size, at the video shift, black around it
++	const float upscaling = config::RenderResolution / 480.f;
++	width = std::max(width, (int)std::round(screenWidth * upscaling / 2.f) * 2);
++	height = std::max(height, (int)std::round(screenHeight * upscaling));
++}
++
+ float getOutputFramebufferAspectRatio()
+ {
+ 	float aspectRatio;
+@@ -445,6 +475,9 @@ void getVideoShift(float& x, float& y)
+ 			INFO_LOG(RENDERER, "unknown video mode: vcount %d", SPG_LOAD.vcount);
+ 			break;
+ 	}
++	// VO_STARTY counts the lines of a field
++	if (SPG_CONTROL.interlace)
++		y *= 2;
+ 	if (!config::EmulateFramebuffer)
+ 	{
+ 		x *= config::RenderResolution / 480.f;
+diff --git a/core/rend/transform_matrix.h b/core/rend/transform_matrix.h
+index 085c1c43d..a0c7b5d67 100644
+--- a/core/rend/transform_matrix.h
++++ b/core/rend/transform_matrix.h
+@@ -84,6 +84,9 @@ private:
+ 
+ void getPvrFramebufferSize(const rend_context& rendCtx, int& width, int& height);
+ void getScaledFramebufferSize(const rend_context& rendCtx, int& width, int& height);
++// Grows width x height, the scaled frame size, to the whole screen's when the
++// frame shown (FB_R_SIZE) is smaller than the screen, e.g. 512x384 in 640x480
++void getDisplayFramebufferSize(const rend_context& rendCtx, int& width, int& height);
+ float getOutputFramebufferAspectRatio();
+ void getDCFramebufferReadSize(const FramebufferInfo& info, int& width, int& height);
+ void getWriteFBToVramParams(const rend_context& ctx, glm::ivec2& scaledSize, Rect& finalClip);
