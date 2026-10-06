@@ -46,9 +46,10 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # HUD=none draws nothing over the game at all, not even that, and (with no
 # VIEW, FRAME512=0) puts the whole board 1:1 at (72,48) of the frame, a
 # picture to crop and hold against MAME's pixel for pixel (Pinboard #478).
-# HUD=prof keeps the stats rows and adds the hardware profile (dc_prof.h,
-# Pinboard #495) on rows 6-10: the SH-4's cache-miss stalls, the PVR's times,
-# and where the program's time goes, sampled by symbol. Links twice: the
+# HUD=prof shows the stats and the hardware profile (dc_prof.h, Pinboard #495:
+# the SH-4's counters, the PVR's times, where the program's time goes, sampled
+# by symbol) as a panel of small checked lines to be read back out of a capture
+# of a real console (#518, "The HUD=prof panel" below). Links twice: the
 # sampler's symbol map (tools/dc_profmap.py) comes from the first link.
 # FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
 # whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
@@ -227,8 +228,62 @@ tried. On screen:
   `bio` the BIOS, where the GD-ROM syscalls run, `oth`); then the six hottest
   symbols. Flycast's counters read 0: it has none.
 
+With `HUD=prof` the screen is the panel below instead.
+
 If the board halts, the screen shows the IP, the pager's totals and the last
 log lines.
+
+### The HUD=prof panel
+
+Made to be filmed off a real Dreamcast and read back by a program (#518).
+Every line is in `tools/hud_font5x7.py`'s font: 5x7 glyphs, bold, every row
+twice (so each field of a 480i picture has all of it), in 8x16 cells, white on
+black, a texel a pixel, from column 1 of the 640x480 frame. A line's band is only
+as wide as its text. Each line is
+
+    TAG [nnnn] key=value ... XX
+
+`nnnn` is the 2-s window's number, on every line of the window; `XX` is the
+CRC-8 (polynomial 7) of all before its space, so a reader keeps only lines read
+right. `tools/hud_read.py` reads screenshots or a video (`ffmpeg`), finds the
+picture in the capture by itself, and writes a record per window (`--jsonl`)
+and a row per frame of the LV line (`--lv`):
+
+    python3 -I dreamcast/tools/hud_read.py capture.mp4 --jsonl windows.jsonl --lv frames.csv
+
+The right trigger cycles the panel: all of it, the top band only, none of it.
+
+The top band (rows 0-6):
+
+| tag | when | fields |
+|---|---|---|
+| `LV` | every frame drawn | `f` board frame, `d` frames handed to the PVR (this one included), `v` vblanks since boot, `t` ms since boot, `dt` ms between the last two frames handed over |
+| `ID` | once | `git` the commit built, `gems`, `aot`, `jit`, `cap` the fps cap; `cab` the cable (`vga`, `rgb`, `cmp`), `rg` the flash's region, `il` interlaced, `pal` 50 Hz |
+| `B0`-`B3` | after frame 3900 | the bench, frames 3500-3900 of attract: `ms` in all, `sl` in slices, `dr` in draws, `tx` making textures, `txr` texture-pack reads, `n` frames drawn; the draw's parts `ti` `sc` `so` `su`, `snd`; page loads `ld`, of code `cd`, data `da`, polygons `po`, textures `tx`, the model pack `pk`, `dc_rom_at` `at`; drive commands `rd`, seeks `sk`, strip-pack pages `sp` |
+| `AO`, `JT` | when there is one | why the AOT turned itself off; the JIT's blocks, KB, flushes, compile ms, slow exits |
+
+The bottom band (rows 14-29), a 2-s window:
+
+| tag | fields (per window unless said) |
+|---|---|
+| `WN` | `f` board frame, `fps` board frames a second, `sh` frames shown a second, `sl` ms a slice, `3d` ms a drawn frame's decode + submit |
+| `FT` | `ft` min/avg/max ms between frames handed to the PVR, `s33`/`s50` how many over 33.4/50.1 ms, `slx` the slowest slice's ms, `snd` the sound pump's ms |
+| `CP` | `i960` ms a slice in the i960's loop, `cop` of it the COP's, `blk` % of steps in blocks, `aot` % compiled ahead, `st` steps a slice |
+| `PG` | page loads `ld` and their `ms`, faults `flt`; since boot evictions `ev`, `pin` pinned frames, `wr` ROM pages written, `err` read errors; `c` the page cache's KB, `h` the heap's KB left at boot |
+| `LD` | page loads of code `cd`, data `da`, polygons `po`, textures `tx`, the model pack `pk`, for `dc_rom_at` `at`, of the strip pack `sp` |
+| `RD` | drive commands `rd`, seeks `sk` among them, `kb` read, their `ms`, the seeks' `skms`, the longest command's `max` ms; texture-pack reads `txr`, `txms` |
+| `DR` | ms a drawn frame: tiles `tl`, 3D scan `sc`, sort `so`; `tri` triangles, `run` projection runs, `full` frames that hit the triangle cap |
+| `MS` | the mesh cache: `n` meshes, built `b`, hit `h`; since boot clears `clr`, evictions `ev`; the arena's `kb` |
+| `TX` | `pk` texture-pack hits/lookups, `tex` slots, `new` made, `drop` dropped, `fail` failed |
+| `SN` | sound `on`, `codes` trapped, `unk` not in the table, `bgm` the music's entry, `ring` KB, `und` underruns |
+| `HW` | the SH-4's two counters, a pair of events a window, in turn (`p`): 0 `dc`/`ic` pipeline stalls on data-/instruction-cache misses, 1 `rm`/`wm` operand-cache read/write misses, 2 `is`/`pi` instructions issued / issued in pairs, 3 `br`/`rg` stalls on branches / registers, 4 `fp` stalls on the FPU, `fi` FPU instructions. Stalls are % of the window's cycles, events thousands a second. `smp` samples taken, `hz` the sampler's rate |
+| `PV` | the PVR's last frame: `rnd` render, `reg` registration, `fr` ready to ready, ms; `vbl` vblanks in the window; `tm` texture memory left and `hp` heap in use, KB |
+| `G0`, `G1` | the sampler's groups, % of the window's samples: `aot` the i960 compiled ahead, `gem` Gems' C, `hok` the profile's hooks, `960` the i960 interpreter and the bus, `cop`, `geo` the 3D decode, `drw` the PVR draw, `til` the tile layers, `snd`, `dsc` the pager and the drive, `kos`, `lib`, `bio` the BIOS (where the GD-ROM syscalls run), `oth` |
+| `S0`, `S1` | the six hottest symbols, % of the samples (names cut at 16) |
+
+Flycast has no performance counters (`HW` reads 0) and charges nothing for the
+drive (`RD`'s ms read 0): those are for the console. `tools/hud_ocr.py` reads
+the older 12x24 HUD of the videos in `stats/`.
 
 Pad: D-pad, A/B/X/Y = B1-B4, Start, left trigger = coin.
 

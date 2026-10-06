@@ -74,7 +74,9 @@ FPS_CAP ?= 60
 # (DC_HUD_NONE); boot errors still show.
 HUD ?=
 # HUD=prof: the full stats and the hardware profile (dc_prof.h, Pinboard #495):
-# cache-miss stalls, the PVR's times, a PC sampler by symbol and group. The
+# the SH-4's counters, the PVR's times, a PC sampler by symbol and group, as a
+# panel of small checked lines a capture of the video can be read back from
+# (#518: tools/hud_read.py, README.md). The
 # sampler's symbol map is made from the linked elf, so the program is linked
 # twice (tools/dc_profmap.py; the map is data, the code's addresses hold).
 PROF := $(if $(filter prof,$(HUD)),1,0)
@@ -109,6 +111,11 @@ CFLAGS     += -DM2HLE_GEMS -I"$(GEMS)"
 GEMS_HOOKS := $(shell grep -o '{ 0x[0-9A-Fa-f]*, gfn_' "$(GEMS)/gems_all.h" | sed 's/{ \(0x[0-9A-Fa-f]*\),.*/--hook \1/')
 endif
 
+# HUD=prof's ID line names the commit built (-dirty: with changes not in it).
+ifeq ($(PROF),1)
+CFLAGS += -DDC_GIT='"$(shell git -C $(REPO) describe --always --abbrev=7 --dirty 2>/dev/null || echo unknown)"'
+endif
+
 AOT_GEN :=
 ifneq ($(AOT),)
 CFLAGS  += -DI960_AOT=1 -DI960_AOT_GEN='"aot_gen.h"' -I$(OUT)
@@ -140,7 +147,7 @@ $(OUT)/aot_gen.h: $(AOT_MAP) $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/board/
 	mkdir -p $(OUT)
 	python3 $(REPO)/tools/i960_aot.py --map $(AOT_MAP) --rom "$(AOT)" $(AOT_ARGS) --out $@
 
-$(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_strips.h dc_sound.h dc_pvr.h dc_jit_test.h dc_link.h dc_prof.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN) $(OUT)/flags.stamp
+$(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_strips.h dc_sound.h dc_pvr.h dc_jit_test.h dc_link.h dc_prof.h dc_hudfont.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN) $(OUT)/flags.stamp
 	mkdir -p $(OUT)
 	kos-cc $(CFLAGS) -c $< -o $@
 

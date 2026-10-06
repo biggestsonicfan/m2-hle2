@@ -122,6 +122,8 @@ static struct {
     pvr_ptr_t checker;
     uint16_t  pen565[TILE_PEN_NONE + 1], pen1555[TILE_PEN_NONE + 1];
     uint32_t  text_rows;             /* bit r: screen row r has text */
+    uint32_t  text_hide;             /* bit r: row r is not drawn (HUD=prof's R trigger) */
+    uint8_t   text_w[32];            /* HUD=prof: row r's text, in cells */
     unsigned  corner_w;              /* the corner counter's width in texels (0: none) */
     unsigned  tris, faces_dropped, runs;
     uint32_t  us_decode, us_submit;
@@ -557,6 +559,54 @@ static int dp_init(void) {
 
 /* ---- Text --------------------------------------------------------------------------- */
 
+#if DC_HUD_PROF
+/* HUD=prof's panel (Pinboard #518): 30 rows of 78 characters from column 1
+ * (an 8x16 cell each, the first and last of a row's black), white on black
+ * at a texel a pixel, a row's band only as wide as its text, so that a capture of the
+ * console's video can be read back by a program (tools/hud_read.py). The
+ * font is tools/hud_font5x7.py's: each 5x7 glyph bold (two pixels a stroke,
+ * already in dc_hudfont.h) and each of its rows twice, at (1, 1) in its cell. */
+#include "dc_hudfont.h"
+#define DC_TEXT_ROWS 30
+#define DC_TEXT_H    16
+#define DC_TEXT_COLS 78
+
+static void dp_text_cell(uint16_t *d, char ch) {
+    const uint8_t *g = g_hudfont[(unsigned char)ch >= 32 && (unsigned char)ch < 127 ? ch - 32 : '?' - 32];
+    for (int y = 0; y < 7; y++) {
+        uint32_t on = (uint32_t)g[y] << 1;   /* the cell's 8 pixels, bit 7 the leftmost */
+        uint32_t *a = (uint32_t *)(d + (1 + 2 * y) * 1024), *b = (uint32_t *)(d + (2 + 2 * y) * 1024);
+        for (int x = 0; x < 4; x++) {   /* two pixels a word, the left one low */
+            uint32_t w = (on >> (7 - 2 * x) & 1 ? 0xFFFFu : 0) | (on >> (6 - 2 * x) & 1 ? 0xFFFF0000u : 0);
+            a[x] = b[x] = w;
+        }
+    }
+}
+
+/* Only the cells whose character changed are drawn again: video memory is
+ * slow to write, and the LV row changes every frame. A cell's top and bottom
+ * lines are always black (dp_init cleared the texture). */
+static void dp_text_row(int row, const char *s) {
+    static char last[DC_TEXT_ROWS][DC_TEXT_COLS + 1];
+    if (row < 0 || row >= DC_TEXT_ROWS) return;
+    uint16_t *d = (uint16_t *)g_dp.text + row * DC_TEXT_H * 1024;
+    char *was = last[row];
+    size_t n = strlen(s), m = strlen(was);
+    if (n > DC_TEXT_COLS) n = DC_TEXT_COLS;
+    for (size_t c = 0; c < n || c < m; c++) {
+        char ch = c < n ? s[c] : ' ', old = c < m ? was[c] : ' ';
+        if (ch != old) dp_text_cell(d + (c + 1) * 8, ch);
+    }
+    memcpy(was, s, n);
+    was[n] = 0;
+    g_dp.text_w[row] = (uint8_t)(n + 2);   /* a black cell either side */
+    if (n) g_dp.text_rows |= 1u << row;
+    else g_dp.text_rows &= ~(1u << row);
+}
+#else
+#define DC_TEXT_ROWS 20
+#define DC_TEXT_H    24
+
 /* A line of text on screen row `row` (24 px rows, 0-19), in the text texture
  * at the same place. */
 /* Video memory is slow to write: a row is redrawn only when its text changes,
@@ -576,6 +626,7 @@ static void dp_text_row(int row, const char *s) {
     memcpy(last[row], buf, n + 1);
     g_dp.text_rows |= 1u << row;
 }
+#endif
 
 /* The stats rows; the minimal HUD (DC_HUD_MIN) shows none of them. */
 #if DC_HUD_MIN
@@ -653,11 +704,11 @@ static void dp_bar(float x0, float y0, float x1, float y1) {
     dp_vertex(PVR_CMD_VERTEX_EOL, x1, y1, 1.0e3f, 0.0f, 0.0f, 0xFF000000u, 0);
 }
 
-/* Text row r: 640x24 texels, drawn across the frame (at 0.8 in a 512x384 one,
- * so that 20 rows fit). */
+/* Text row r: 640 texels by DC_TEXT_H (HUD=prof: as wide as its text), at
+ * the frame's left (at 0.8 in a 512x384 one, so that all the rows fit). */
 static void dp_text_rect(int r) {
-    const float k = DC_SCR_W / 640.0f;
-    float y = (float)r * 24.0f * k, v0 = (float)r * 24.0f / 512.0f;
+    const float k = DC_SCR_W / 640.0f, h = (float)DC_TEXT_H;
+    float y = (float)r * h * k, v0 = (float)r * h / 512.0f;
     pvr_poly_cxt_t cxt;
     pvr_poly_hdr_t hdr;
     pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED,
@@ -665,11 +716,16 @@ static void dp_text_rect(int r) {
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
     pvr_poly_compile(&hdr, &cxt);
     dp_hdr(&hdr);
-    float v1 = v0 + 24.0f / 512.0f, u1 = 640.0f / 1024.0f, y1 = y + 24.0f * k;
-    dp_vertex(PVR_CMD_VERTEX,     0.0f,     y,  1.0e3f, 0.0f, v0, 0xFFFFFFFFu, 0);
-    dp_vertex(PVR_CMD_VERTEX,     DC_SCR_W, y,  1.0e3f, u1,   v0, 0xFFFFFFFFu, 0);
-    dp_vertex(PVR_CMD_VERTEX,     0.0f,     y1, 1.0e3f, 0.0f, v1, 0xFFFFFFFFu, 0);
-    dp_vertex(PVR_CMD_VERTEX_EOL, DC_SCR_W, y1, 1.0e3f, u1,   v1, 0xFFFFFFFFu, 0);
+#if DC_HUD_PROF
+    const float w = (float)g_dp.text_w[r] * 8.0f;
+#else
+    const float w = 640.0f;
+#endif
+    float v1 = v0 + h / 512.0f, u1 = w / 1024.0f, y1 = y + h * k, x1 = w * k;
+    dp_vertex(PVR_CMD_VERTEX,     0.0f, y,  1.0e3f, 0.0f, v0, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX,     x1,   y,  1.0e3f, u1,   v0, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX,     0.0f, y1, 1.0e3f, 0.0f, v1, 0xFFFFFFFFu, 0);
+    dp_vertex(PVR_CMD_VERTEX_EOL, x1,   y1, 1.0e3f, u1,   v1, 0xFFFFFFFFu, 0);
 }
 
 static void dp_corner_rect(void) {
@@ -1610,8 +1666,8 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
         dp_bar(DC_VX0, 0.0f, DC_VX1, DC_VY0);
         dp_bar(DC_VX0, DC_VY1, DC_VX1, DC_SCR_H);
     }
-    for (int r = 0; r < 20; r++)
-        if (g_dp.text_rows & (1u << r)) dp_text_rect(r);
+    for (int r = 0; r < DC_TEXT_ROWS; r++)
+        if (g_dp.text_rows & ~g_dp.text_hide & (1u << r)) dp_text_rect(r);
     dp_corner_rect();
     pvr_list_finish();
     pvr_scene_finish();
@@ -1627,8 +1683,8 @@ static void dp_text_frame(void) {
     pvr_wait_ready();
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_TR_POLY);
-    for (int r = 0; r < 20; r++)
-        if (g_dp.text_rows & (1u << r)) dp_text_rect(r);
+    for (int r = 0; r < DC_TEXT_ROWS; r++)
+        if (g_dp.text_rows & ~g_dp.text_hide & (1u << r)) dp_text_rect(r);
     dp_corner_rect();
     pvr_list_finish();
     pvr_scene_finish();
