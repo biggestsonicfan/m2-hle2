@@ -39,8 +39,6 @@
 #include "geo3d.h"
 #include "dc_strips.h"
 
-_Static_assert(DCS_CMD_VERTEX == PVR_CMD_VERTEX && DCS_CMD_VERTEX_EOL == PVR_CMD_VERTEX_EOL &&
-               sizeof(geo3d_svert_t) == sizeof(pvr_vertex_t), "STRIPS.PAK vertices are pvr_vertex_t");
 #include "tile_renderer.h"
 
 /* The frame is the cable's 640x480; DC_FRAME512 (make FRAME512=1) makes it

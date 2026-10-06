@@ -2060,11 +2060,10 @@ static void geo3d_dc_face(int v0, const geo3d_cface_t *f, int cut, float r, floa
  * A cached mesh made offline (GEO3D_STRIPS; the Dreamcast's STRIPS.PAK, see
  * dreamcast/dc_strips.h): the corners as geo3d_mesh_build leaves them, a
  * smaller face per drawn face with its texture already found, and per face
- * its corners as Tile Accelerator vertices (pvr_vertex_t's layout) with the
- * texture coordinates already in the PVR texture's units. The draw still
- * transforms, culls, lights and sorts; it reads no GEO stream, attribute,
- * texture header or UV word. Blob: geo3d_sp_head_t, then sv (padded to 32),
- * the faces, the vertices; all 32-byte aligned. */
+ * its corners' texture coordinates, already in the PVR texture's units, in
+ * strip order (A B C D). The draw still transforms, culls, lights and sorts;
+ * it reads no GEO stream, attribute, texture header or UV word. Blob:
+ * geo3d_sp_head_t, then sv (padded to 32), the faces, the corners' u, v. */
 #define GEO3D_SF_TRI      1u
 #define GEO3D_SF_HAS_C    2u
 #define GEO3D_SF_HAS_QN   4u
@@ -2091,12 +2090,9 @@ typedef struct {
     uint8_t  pad[6];
 } geo3d_sface_t;
 typedef struct {
-    uint32_t flags;              /* PVR_CMD_VERTEX, _EOL on a face's last */
-    float    x, y, z;            /* model space, Z negated (the mesh's sv) */
     float    u, v;               /* in the texture's [0, 1] */
-    uint32_t argb, oargb;        /* 0: lit per frame */
 } geo3d_svert_t;
-_Static_assert(sizeof(geo3d_sp_head_t) == 32 && sizeof(geo3d_sface_t) == 64 && sizeof(geo3d_svert_t) == 32,
+_Static_assert(sizeof(geo3d_sp_head_t) == 32 && sizeof(geo3d_sface_t) == 64 && sizeof(geo3d_svert_t) == 8,
                "strip pack records");
 #if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
 struct geo3d_cmesh;

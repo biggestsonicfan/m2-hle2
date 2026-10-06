@@ -4,24 +4,31 @@
  *
  * The draw's mesh cache (geo3d_mesh_get) walks a model's GEO stream once per
  * key (model, material and UV pointers) and keeps the faces; on the Dreamcast
- * that walk runs whenever a mesh comes back into the 1 MB arena, a hundred
+ * that walk runs whenever a mesh comes back into the 1 MB arena, some 60
  * times a second in a fight. The pack holds each mesh the disc's recorded
  * frames draw (sfight.strips), already walked: geo3d_mesh_build's corners,
  * per face a geo3d_sface_t with the PVR texture's key found (and a tile over
- * 256 already windowed), and its corners as pvr_vertex_t with u, v in the
- * texture's units. The board's geometry is untouched: corners stay in model
- * space, and the frame still transforms them with the matrix the list gives
- * the model (calc_unit_mat's slot), culls, lights and sorts. What goes is the
+ * 256 already windowed), and its corners' u, v in the texture's units. The
+ * board's geometry is untouched: corners stay in model space, and the frame
+ * still transforms them with the matrix the list gives the model
+ * (calc_unit_mat's slot), culls, lights and sorts. What goes is the
  * stream walk, the attribute and texture header words, the UV words and the
  * window. A quad's four corners are one strip (A B C D; dp_face reorders them
  * to B A D C for the other diagonal); faces stay in the walk's order, as the
- * flat key and the diagonals carry from face to face, and the vertices are
+ * flat key and the diagonals carry from face to face, and the corners are
  * grouped opaque, punch-through, translucent.
+ *
+ * Why u, v and not whole pvr_vertex_t: the frame writes x, y, z, the colours
+ * and the command word of every vertex it submits (the corners move with the
+ * fighters' matrices), so only u, v survive from a stored one. As 32-byte
+ * pvr_vertex_t the pack was 14.4 MB instead of 8.3, a packed mesh took more
+ * of the arena, and the bench's page loads went from 357 to 908
+ * (DREAMCAST-PORT.md #498).
  *
  * File: dcs_head_t; the index, dcs_index_t sorted by (model, mat, uv); at
  * data_off (a sector) the blobs, 32-byte aligned, in the order the recorded
  * frames first drew them. A blob is geo3d.h's geo3d_sp_head_t, sv padded to
- * 32, the faces, the vertices. ROM-derived, so built by mkdisc.sh from the
+ * 32, the faces, the corners' u, v. ROM-derived, so built by mkdisc.sh from the
  * ROM files (tools/dc_strips.c) and never committed.
  *
  * Host-clean: the converter includes it too (DCS_WRITER).
@@ -33,9 +40,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-
-#define DCS_CMD_VERTEX     0xe0000000u   /* PVR_CMD_VERTEX */
-#define DCS_CMD_VERTEX_EOL 0xf0000000u   /* PVR_CMD_VERTEX_EOL */
 
 typedef struct {
     char     magic[4];                  /* "M2SP" */
@@ -174,18 +178,15 @@ static size_t dcs_blob(const geo3d_cmesh_t *m, uint8_t *out, size_t cap) {
         for (int k = 0; k < 4; k++) { fu[n][k] = wu[k] * su; fv[n][k] = wv[k] * svv; }
     }
 
-    /* the vertices, list by list */
+    /* the corners' u, v, list by list */
     size_t at = 0;
     for (int list = GEO3D_SL_OP; list <= GEO3D_SL_TR; list++)
         for (int n = 0; n < m->n_faces; n++) {
             geo3d_sface_t *o = &sf[n];
             if (o->list != list) continue;
             o->strip = (uint16_t)at;
-            const int c[4] = { o->ai, o->bi, o->ci, o->di };
             for (int k = 0; k < o->nv; k++) {
                 geo3d_svert_t *v = &sv[at++];
-                v->flags = k == o->nv - 1 ? DCS_CMD_VERTEX_EOL : DCS_CMD_VERTEX;
-                v->x = m->sv[c[k]].x; v->y = m->sv[c[k]].y; v->z = m->sv[c[k]].z;
                 v->u = fu[n][k]; v->v = fv[n][k];
             }
         }

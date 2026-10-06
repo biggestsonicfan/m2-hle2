@@ -45,7 +45,7 @@ sh dreamcast/mkdisc.sh /tmp/dc "<PS3>/stf_rom" /tmp/dc/disc /tmp/dc/STF.AFS   # 
 ```
 
 The disc is a three-track GDI. Track 3 holds IP.BIN, 1ST_READ.BIN (unscrambled),
-the five ROM files as they ship, STF.AFS and MODELS.PAK. `dc_layout.h` says where each ROM
+the five ROM files as they ship, STF.AFS, MODELS.PAK and STRIPS.PAK. `dc_layout.h` says where each ROM
 file lands in the board's regions; what the PS3 files lack (part of the texture
 ROM, the copro tables, the sound CPU's program and samples) is listed there.
 
@@ -66,6 +66,23 @@ confirm) and then, from frame 900 to 9000, a new input every 30 frames: the
 next of r1, l2, d3, u1, r2, 13, l, 4, r, with nothing held between them (the
 cycle's place is `(frame / 30) % 18`). `dc_mdlpack.py` starts a new run where
 the first frame jumps by more than 30.
+
+STRIPS.PAK is the same meshes walked offline (`tools/dc_strips.c`, built and
+run by `mkdisc.sh` from the ROM files and `sfight.strips`): per mesh its
+corners, its faces with the PVR texture each one cuts, and the corners' u, v
+in that texture's units, so the frame transforms and draws a mesh without
+walking its GEO stream (DREAMCAST-PORT.md #498). `NOSTRIPS=1` leaves it out;
+`make STRIPS=0` builds a program that never looks for it. `sfight.strips` is
+the mesh cache's keys, addresses only, recorded the same way with a
+`det_digest` that takes the PS3 release's ROM folder in place of the zip:
+
+```sh
+det_digest "<PS3>/stf_rom" --profile sfight_console --frames 6000 --strip-keys 0:6000:att.keys --out /dev/null
+det_digest "<PS3>/stf_rom" --profile sfight_console --frames 9000 --script "$S" --strip-keys 0:9000:fit.keys --out /dev/null
+```
+
+then keep attract's keys and add the fight's that attract did not draw, their
+frames +100000, under attract's `table` line.
 
 `sfight.aotmap`, the code `AOT=` compiles, is recorded the same way, with
 Sega's C on as the disc runs it (a `det_digest` built with `M2HLE_GEMS_DIR`):
@@ -249,8 +266,11 @@ discs gave ~37 and ~30.
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
 | `sfight.mdlmap` | the polygon and texture ROM lines STF draws, by first frame, for MODELS.PAK |
 | `../tools/dc_mdlpack.py` | host tool: map + ROM files → MODELS.PAK |
+| `sfight.strips` | the meshes STF draws (model, material and UV pointers), by first frame, for STRIPS.PAK |
+| `dc_strips.h` | STRIPS.PAK's records; the converter's writer (`DCS_WRITER`) |
+| `../tools/dc_strips.c` | host tool: keys + ROM files → STRIPS.PAK |
 | `dc_link.h` | `LINK=1`: the replay fight's frames over the SCIF to `tools/dc-lockstep.py` |
 | `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |
-| `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI |
+| `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK + STRIPS.PAK → GDI |
 | `../tests/rom_touch.c` | host tool: which ROM pages a game reads |
