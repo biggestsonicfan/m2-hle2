@@ -42,7 +42,7 @@
 /* The frame is the cable's 640x480; DC_FRAME512 (make FRAME512=1) makes it
  * 512x384, set in the middle of the 640x480 signal (dc_video_mode). That is
  * the same picture on a Dreamcast, but Flycast scales a frame to fill the
- * screen whatever its size.
+ * screen whatever its size, unless it has tools/flycast-frame512.patch.
  *
  * What of the board's 496x384 shows is the view, DC_VIEW_X/Y/W/H (make
  * VIEW=x,y,w,h; default the whole screen): scaled to fill the frame, aspect
