@@ -76,6 +76,7 @@
 #include "ps3ui_app.h"
 #include "ps3ui_gpu.h"
 #include "ps3ui_shell.h"
+#include "gems.h"          /* the Gems options: Sega's own C from Sonic Gems Collection */
 
 /* registry.h is the single TU that defines g_profiles[] / g_active_profile. */
 #include "registry.h"
@@ -205,6 +206,21 @@ static struct retro_core_option_v2_definition option_defs[] = {
       NULL, NULL,
       { { "68000", "68000 (the board)" }, { "c", "In C (lighter)" }, { NULL, NULL } },
       "68000" },
+    { "m2hle_gems_i960", "Gems C: main CPU functions", NULL,
+      "Run about 45 of the game's heaviest main-CPU functions as Sega's own C from Sonic Gems Collection, in "
+      "place of the arcade program. Lighter, but not the board: each counts as one instruction, so the game's "
+      "random numbers can go another way. Sonic the Fighters only; online matches turn it off. Takes effect "
+      "when the game is next loaded.",
+      NULL, NULL,
+      { { "disabled", NULL }, { "enabled", NULL }, { NULL, NULL } },
+      "disabled" },
+    { "m2hle_gems_cop", "Gems C: coprocessor", NULL,
+      "Answer the coprocessor's commands with Sega's own C from Sonic Gems Collection in place of the SHARC "
+      "firmware's port. Its arithmetic is the GameCube's, not the board's, so fights can come out differently. "
+      "Sonic the Fighters only; online matches turn it off. Takes effect when the game is next loaded.",
+      NULL, NULL,
+      { { "disabled", NULL }, { "enabled", NULL }, { NULL, NULL } },
+      "disabled" },
     { "m2hle_sound_thread", "Sound board on its own core", NULL,
       "Run the sound board on a second CPU core, alongside the main CPU, instead of after it on the same one. "
       "It does the same work in the same order, so the game and online play are exactly the same either way; "
@@ -282,6 +298,8 @@ static void lr_read_load_options(void) {
     const char *v;
     if ((v = lr_var("m2hle_sound")))  opt.sound  = strcmp(v, "disabled") != 0;
     if ((v = lr_var("m2hle_sound_driver"))) g_sound_hle_want = !strcmp(v, "c");   /* read at the next sound_reset */
+    if ((v = lr_var("m2hle_gems_i960"))) g_gems_i960 = !strcmp(v, "enabled");   /* gems_apply at load */
+    if ((v = lr_var("m2hle_gems_cop")))  g_gems_cop  = !strcmp(v, "enabled");
     if ((v = lr_var("m2hle_online"))) opt.online = strcmp(v, "rpcn") ? LR_ONLINE_RETROARCH : LR_ONLINE_RPCN;
     if ((v = lr_var("m2hle_stf_version"))) opt.profile = strcmp(v, "arcade") ? NULL : "sfight";
 }
@@ -293,7 +311,20 @@ static void lr_read_options(bool at_load) {
     lr_read_load_options();
 }
 
+/* The Gems options are offered only by a build that has the Gems code (gems.h). */
+static bool lr_option_offered(const char *key) {
+    return GEMS_AVAILABLE || strncmp(key, "m2hle_gems_", 11) != 0;
+}
+
 static void lr_set_options(void) {
+    static bool pruned;
+    if (!pruned) {
+        pruned = true;
+        size_t o = 0;
+        for (size_t i = 0; option_defs[i].key; i++)
+            if (lr_option_offered(option_defs[i].key)) option_defs[o++] = option_defs[i];
+        option_defs[o] = option_defs[sizeof option_defs / sizeof option_defs[0] - 1];
+    }
     unsigned version = 0;
     if (env_cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &version) && version >= 2) {
         /* Its answer says whether the frontend groups options into categories,
@@ -307,6 +338,8 @@ static void lr_set_options(void) {
         { "m2hle_stf_version", "Sonic the Fighters version; console|arcade" },
         { "m2hle_sound",      "Sound board; " LR_DEFAULT_SOUND "|enabled|disabled" },
         { "m2hle_sound_driver", "Sound driver; 68000|c" },
+        { "m2hle_gems_i960",  "Gems C: main CPU functions; disabled|enabled" },
+        { "m2hle_gems_cop",   "Gems C: coprocessor; disabled|enabled" },
         { "m2hle_sound_thread", "Sound board on its own core; enabled|disabled" },
         { "m2hle_draw_rate",  "Draw rate; 60|30" },
         { "m2hle_heat_guard", "Heat guard; " LR_DEFAULT_HEAT "|off|80|85|90" },
@@ -314,6 +347,10 @@ static void lr_set_options(void) {
         { "m2hle_net_delay",  "Input delay (frames); 2|1|3|4|5|6|8" },
         { NULL, NULL },
     };
+    size_t o = 0;
+    for (size_t i = 0; vars[i].key; i++)
+        if (lr_option_offered(vars[i].key)) vars[o++] = vars[i];
+    vars[o] = (struct retro_variable){ NULL, NULL };
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
 }
 
@@ -368,6 +405,7 @@ static void lr_netplay_reset_cb(void *ctx) {
  * step count is part of the board -- the frame check hashes it. */
 static void lr_pkt_reset(void) {
     backup_ram_detach();   /* a session's board is blank, and not the player's */
+    gems_off_for_session();   /* not the ROM's board (netplay_do_reset does the same for RPCN) */
     lr_sound_for_netplay();
     lr_install_board();
     state.emu.total_steps       = 0;
@@ -432,6 +470,9 @@ static bool lr_load_rom(const char *zip) {
     g_sound_on = opt.sound && g_active_profile->quirks.enable_68k_sound
               && state.romset.audiocpu && state.romset.audiocpu_size > 0;
     lr_install_board();
+    /* Once a load, not in lr_install_board: a session's reset turns Gems off first. */
+    if (gems_apply(profile_rom_set(g_active_profile)))
+        lr_notify("Gems C on: the board does not run the arcade program as it shipped", 4000);
     return true;
 }
 
