@@ -103,6 +103,9 @@ static const uint8_t *mdlmap_rom(const void *p, uint32_t n);
 #include "geo3d.h"
 #include "gems.h"
 #include "../dreamcast/dc_layout.h"
+#define DCS_WRITER
+#include "../dreamcast/dc_strips.h"
+#include "../dreamcast/dc_texpak.h"
 
 #include <ctype.h>
 #include <sys/stat.h>
@@ -485,6 +488,162 @@ static void spkey_write(void) {
         fprintf(spkey_out, "%d %x %x %u\n", spkey[i].model, spkey[i].mat, spkey[i].uv, spkey[i].frame);
 }
 
+/* --tex-pack F0:F1:FILE[:+BASE]: TEXTURES.PAK (dreamcast/dc_texpak.h), the
+ * PVR textures the Dreamcast's draw would cut for those frames' ROM meshes,
+ * each cut from texture RAM as it is that frame and keyed by the words it was
+ * cut from. A FILE that exists is read first and added to, so attract and a
+ * fight make one pack; BASE is added to the frames, which order the data. */
+#define TXP_SLOTS 65536u
+static const char *txp_path;
+static uint32_t    txp_from, txp_to, txp_base;
+static struct { uint32_t key, hash, frame, off; uint8_t used; } *txp;
+static uint32_t    txp_n;
+static uint8_t    *txp_data;
+static size_t      txp_bytes, txp_cap;
+/* each mesh key's texture keys, made once */
+static struct { int32_t model; uint32_t mat, uv; uint32_t *keys; uint32_t nk; uint8_t used; } *txp_mesh;
+
+static void txp_add(uint32_t key, uint32_t hash, uint32_t frame, const uint8_t *tex) {
+    uint32_t h = (key * 2654435761u) ^ hash;
+    for (uint32_t p = 0; p < TXP_SLOTS; p++) {
+        __typeof__(*txp) *e = &txp[(h + p) & (TXP_SLOTS - 1u)];
+        if (e->used && e->key == key && e->hash == hash) return;
+        if (e->used) continue;
+        if (txp_n >= TXP_SLOTS / 2) return;
+        const uint32_t len = dct_bytes(key);
+        if (txp_bytes + len > txp_cap) {
+            txp_cap = (txp_bytes + len) * 2;
+            txp_data = realloc(txp_data, txp_cap);
+        }
+        memcpy(txp_data + txp_bytes, tex, len);
+        *e = (__typeof__(*txp)){ key, hash, frame, (uint32_t)txp_bytes, 1 };
+        txp_bytes += len;
+        txp_n++;
+        return;
+    }
+}
+
+static void txp_load(void) {
+    txp = calloc(TXP_SLOTS, sizeof *txp);
+    txp_mesh = calloc(SPKEY_SLOTS, sizeof *txp_mesh);
+    dct_init();
+    FILE *f = fopen(txp_path, "rb");
+    if (!f) return;
+    dct_head_t h;
+    if (fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "M2TX", 4)) {
+        dct_index_t *ix = malloc((size_t)h.n * sizeof *ix);
+        uint8_t *d = malloc(h.bytes ? h.bytes : 1);
+        if (fread(ix, sizeof *ix, h.n, f) == h.n && !fseek(f, (long)h.data_off, SEEK_SET) &&
+            fread(d, 1, h.bytes, f) == h.bytes)
+            for (uint32_t i = 0; i < h.n; i++) txp_add(ix[i].key, ix[i].hash, ix[i].frame, d + ix[i].off);
+        free(ix);
+        free(d);
+    }
+    fclose(f);
+    fprintf(stderr, "tex-pack: %u textures from %s\n", txp_n, txp_path);
+}
+
+static void txp_frame(void) {
+    static geo3d_state_t geo;
+    static uint8_t blob[4u << 20], cut[32768];
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
+    if (!geo3d_scan_geo_list(&geo, g_geodl_snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
+                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
+                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    for (int k = 0; k < geo.captured_count; k++) {
+        const captured_model_t *cm = &geo.captured[k];
+        if (cm->direct_len || cm->model_idx < 0 || (uint32_t)cm->model_idx >= q->model_table_count) continue;
+        uint32_t toff = q->model_table_offset + (uint32_t)cm->model_idx * MODEL_ENTRY_SIZE;
+        if ((size_t)toff + MODEL_ENTRY_SIZE > romset.main_data_size) continue;
+        uint32_t raw = read_u32_le(romset.main_data + toff + 8);
+        if (!raw) continue;
+        uint32_t mat = read_u32_le(romset.main_data + toff + 4), uv = read_u32_le(romset.main_data + toff + 0);
+        if (cm->tha != 0xFFFFFFFFu) mat = cm->tha;
+        if (cm->tpa != 0xFFFFFFFFu) uv = cm->tpa;
+        if ((mat && (mat & 0x800000u)) || (uv && (uv & 0x800000u))) continue;   /* texture RAM: not in the strip pack */
+        uint32_t h = geo3d_mesh_hash(cm->model_idx, mat, uv);
+        __typeof__(*txp_mesh) *e = NULL;
+        for (uint32_t p = 0; p < SPKEY_SLOTS; p++) {
+            e = &txp_mesh[(h + p) & (SPKEY_SLOTS - 1u)];
+            if (!e->used || (e->model == cm->model_idx && e->mat == mat && e->uv == uv)) break;
+        }
+        if (!e->used) {
+            *e = (__typeof__(*txp_mesh)){ cm->model_idx, mat, uv, NULL, 0, 1 };
+            geo3d_cmesh_t m = { .model_idx = cm->model_idx, .mat_ptr = mat, .uv_ptr = uv,
+                                .md = { .polygons = romset.polygons, .materials = romset.textures,
+                                        .main_data = romset.main_data,
+                                        .polygons_size = romset.polygons_size, .materials_size = romset.textures_size,
+                                        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+                                        .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add } };
+            if (geo3d_mesh_build(&m, raw * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mat != 0, uv != 0) &&
+                dcs_blob(&m, blob, sizeof blob)) {
+                const geo3d_sp_head_t *bh = (const geo3d_sp_head_t *)blob;
+                const geo3d_sface_t *sf = (const geo3d_sface_t *)(blob + sizeof *bh +
+                                          (((size_t)bh->n_sv * sizeof(vec3_t) + 31u) & ~(size_t)31u));
+                e->keys = malloc((bh->n_faces + 1u) * sizeof *e->keys);
+                for (unsigned n = 0; n < bh->n_faces; n++) {
+                    uint32_t t = sf[n].tex;
+                    if (!dct_packable(t)) continue;
+                    unsigned j = 0;
+                    while (j < e->nk && e->keys[j] != t) j++;
+                    if (j == e->nk) e->keys[e->nk++] = t;
+                }
+            }
+            free(m.sv);
+            free(m.faces);
+        }
+        for (uint32_t j = 0; j < e->nk; j++) {
+            const uint32_t t = e->keys[j];
+            const uint32_t *sheet = (const uint32_t *)(DCT_SHEET(t) ? bus.texram1 : bus.texram0);
+            dct_cut(sheet, t, 0, dct_bytes(t), cut);
+            txp_add(t, dct_src_hash(sheet, t), g_emu_frames + txp_base, cut);
+        }
+    }
+}
+
+static int txp_cmp_frame(const void *a, const void *b) {
+    const __typeof__(*txp) *x = a, *y = b;
+    if (x->used != y->used) return x->used ? -1 : 1;
+    if (x->frame != y->frame) return x->frame < y->frame ? -1 : 1;
+    return dct_cmp(x->key, x->hash, y->key, y->hash);
+}
+
+static int txp_cmp_index(const void *a, const void *b) {
+    const dct_index_t *x = a, *y = b;
+    return dct_cmp(x->key, x->hash, y->key, y->hash);
+}
+
+static int txp_write(void) {
+    qsort(txp, TXP_SLOTS, sizeof *txp, txp_cmp_frame);
+    dct_head_t h = { { 'M', '2', 'T', 'X' }, txp_n, 0, 0, { 0 } };
+    h.data_off = (uint32_t)((sizeof h + (size_t)txp_n * sizeof(dct_index_t) + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR);
+    dct_index_t *ix = calloc(txp_n ? txp_n : 1, sizeof *ix);
+    uint8_t *d = calloc(1, txp_bytes + 32u * txp_n + 1);
+    uint32_t at = 0, frames[4] = { 0 };
+    for (uint32_t i = 0; i < txp_n; i++) {
+        const uint32_t len = dct_bytes(txp[i].key);
+        memcpy(d + at, txp_data + txp[i].off, len);
+        ix[i] = (dct_index_t){ txp[i].key, txp[i].hash, at, txp[i].frame };
+        at += (len + 31u) & ~31u;
+        frames[txp[i].frame >= 100000u]++;
+    }
+    h.bytes = at;
+    qsort(ix, txp_n, sizeof *ix, txp_cmp_index);
+    FILE *f = fopen(txp_path, "wb");
+    if (!f) { fprintf(stderr, "tex-pack: cannot write %s\n", txp_path); return 2; }
+    uint8_t *head = calloc(1, h.data_off);
+    memcpy(head, &h, sizeof h);
+    memcpy(head + sizeof h, ix, (size_t)txp_n * sizeof *ix);
+    fwrite(head, 1, h.data_off, f);
+    fwrite(d, 1, at, f);
+    fclose(f);
+    fprintf(stderr, "tex-pack: %u textures (%u before frame 100000, %u after), %.2f MB in %s\n",
+            txp_n, frames[0], frames[1], (double)(h.data_off + at) / 1048576.0, txp_path);
+    free(head); free(d); free(ix);
+    return 0;
+}
+
 static void mdlmap_write(void) {
     static const char *name[2] = { "po", "tx" };
     size_t size[2] = { romset.polygons_size, romset.textures_size };
@@ -798,6 +957,17 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (!strcmp(argv[i], "--tex-pack") && i + 1 < argc) {
+            static char path[1024];
+            char *plus;
+            if (sscanf(argv[++i], "%u:%u:%1023s", &txp_from, &txp_to, path) != 3) {
+                fprintf(stderr, "--tex-pack F0:F1:FILE[:+BASE]\n");
+                return 2;
+            }
+            if ((plus = strstr(path, ":+")) != NULL) { txp_base = (uint32_t)strtoul(plus + 2, NULL, 10); *plus = 0; }
+            txp_path = path;
+            txp_load();
+        }
         else if (!strcmp(argv[i], "--model-map") && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%u:%1023s", &mdlmap_from, &mdlmap_to, path) != 3
@@ -938,6 +1108,7 @@ int main(int argc, char **argv) {
         }
         if (r == EMU_SLICE_FRAME && mdlmap_out && g_emu_frames >= mdlmap_from && g_emu_frames <= mdlmap_to) mdlmap_frame();
         if (r == EMU_SLICE_FRAME && spkey_out && g_emu_frames >= spkey_from && g_emu_frames <= spkey_to) spkey_frame();
+        if (r == EMU_SLICE_FRAME && txp_path && g_emu_frames >= txp_from && g_emu_frames <= txp_to) txp_frame();
         if (r == EMU_SLICE_FRAME && save_frame && g_emu_frames == save_frame) {
             /* ... and the samples from here on are what the loaded run's are. */
             const char *err = state_mem ? mem_state_save(&emu, save_path) : emu_state_save_now(&emu, save_path);
@@ -977,6 +1148,7 @@ int main(int argc, char **argv) {
     if (aotmap_out) { aotmap_write(&bus, aotmap_path); fclose(aotmap_out); }
     if (mdlmap_out) { mdlmap_write(); fclose(mdlmap_out); }
     if (spkey_out) { spkey_write(); fclose(spkey_out); }
+    if (txp_path && txp_write()) return 2;
 #if I960_BLOCKS
     if (census_out) { census_write(); fclose(census_out); }
 #endif

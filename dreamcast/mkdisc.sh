@@ -14,6 +14,9 @@
 # (tools/dc_strips.c, dc_strips.h), is made here too, from the ROM files and
 # dreamcast/sfight.strips, with the host's C compiler ($CC, else cc);
 # NOSTRIPS=1 leaves it out.
+# TEXPAK=<file> adds TEXTURES.PAK, the PVR textures the recorded frames cut
+# (det_digest --tex-pack, dc_texpak.h); it is texture RAM as the game filled
+# it, so recorded from the ROM files on the host, not made here.
 # SINCOS=<file> adds the COP's sin/cos tables (tools/mksincos.py, from the
 # player's arcade set), which the link to MAME needs (dc_link.h).
 #
@@ -60,6 +63,7 @@ for f in rom_code1 rom_data rom_ep rom_pol rom_tex; do
 done
 [ -z "$afs" ] || set -- "$@" "STF.AFS=$afs"
 [ -z "${SINCOS:-}" ] || set -- "$@" "SINCOS.BIN=$SINCOS"
+[ -z "${TEXPAK:-}" ] || set -- "$@" "TEXTURES.PAK=$TEXPAK"
 if [ -z "${NOPAK:-}" ]; then
     here=$(dirname "$0")
     python3 "$here/../tools/dc_mdlpack.py" --map "$here/sfight.mdlmap" --roms "$roms" --out "$disc/MODELS.PAK" >/dev/null
