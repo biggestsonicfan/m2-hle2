@@ -697,8 +697,25 @@ e746591c in every build below).
     stops thrashing. Two layouts were worse and were dropped: the map's
     lines regrouped by object (3,771 / 1,266 / 106,000 + 65,000 from the
     ROM), and the map's lines first with the groups' remaining lines after
-    them (753 / 920 / 185,281). Not run on a Dreamcast: the PS3 ROM files
-    are not in the container.
+    them (753 / 920 / 185,281).
+  - **In Flycast it is worse** (#492). One program (Gems, AOT 0.99), three
+    discs: no pack, the by-first-frame pack, the grouped pack; the libretro
+    core, HLE BIOS, the pager's counters read off the screen. Page loads on
+    the bench (f3500-3900, in the map), then evictions since boot (each a
+    load once the cache is full):
+
+    | run | no pack | by first frame | by groups |
+    |---|---|---|---|
+    | bench loads (code / data / polygons / textures / pack) | 312 (115/25/91/81/0) | 184 (84/20/18/0/62) | 395 (145/30/90/0/130) |
+    | attract, evictions to frame ~9700 | 3,772 | 2,607 | 4,378 |
+    | a game, Espio vs Knuckles (not in attract), evictions over its fight, frames ~1160-3800 | 564 | 229 | 516 |
+
+    The grouped pack needs twice the pack pages for the same scene, and
+    they push code and the polygon pages the i960 reads out of the cache.
+    A matchup the map never recorded does not thrash with the old pack: the
+    3D decoder's mesh cache builds a mesh once (`b 0`, thousands of hits a
+    second in the fight), so its reads come from the ROM once, not every
+    frame as in the replay above, which decodes every display list uncut.
 - **Textures converted at build time do not pay here, so there is no texture
   pack.** Gems' `TEX_STG*` files look like each stage's textures, already
   decompressed and converted. The two costs that would remove, measured over
