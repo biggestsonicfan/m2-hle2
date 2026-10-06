@@ -1080,6 +1080,66 @@ and rows 3-5's bench (the same frames as every bench above) come along on
 the same disc, so a photograph of the console's screen during a fight
 gives the host's split and the console's side by side.
 
+## The models walked offline: STRIPS.PAK (#498)
+
+The mesh cache (`geo3d_mesh_get`) walks a model's GEO stream once per key
+(model, material and UV pointers) and keeps its faces in the 1 MB arena. In a
+fight the arena turns over: about 115 meshes are walked again every 2 s.
+STRIPS.PAK holds those meshes walked offline (`tools/dc_strips.c`, from the ROM
+files by `mkdisc.sh`; `dreamcast/dc_strips.h` has the format). Each mesh has
+the corners as `geo3d_mesh_build` leaves them and, per face, its corner
+indices, sort and light fields, list (opaque, punch-through, translucent) and
+the PVR texture key it cuts, with a tile over 256 already windowed. Each
+corner's u, v is in that texture's units, in strip order. `geo3d_mesh_get`
+copies a packed mesh into the arena in place of the walk; one not in the pack
+is walked as before. Nothing is baked: corners stay in model space under the
+matrix slot the list names, and the frame still transforms, culls, lights and
+sorts. A quad without a near clip or checker goes to the TA as one 4-vertex
+strip, cut ABCD or BADC as the view's diagonal says. A walked mesh's quad
+still goes as two triangles.
+
+The keys are `dreamcast/sfight.strips`, recorded like `sfight.mdlmap` with
+`det_digest --strip-keys` (attract, then the scripted fight): 920 meshes,
+71,923 faces, 268,614 corners, 8.3 MB. All the recorded frames draw from it;
+the HUD's `b` (meshes walked) stays 0 from boot to the fight.
+
+The bench (Flycast, PS3 files, frames 3500-3900; the frame-1500 hash is
+a5d21d21 in all three):
+
+| | all ms | slice | draw | scan | sort | submit | page loads | fight fps |
+|---|---|---|---|---|---|---|---|---|
+| walked (e126f7b) | 15609 | 6475 | 9074 | 6929 | 336 | 1353 | 357 | 24-26 |
+| pack, `pvr_vertex_t` corners | 14303 | 6466 | 7765 | 6117 | 214 | 981 | 908 | ~28 |
+| pack, u, v corners (the disc) | 14274 | 6467 | 7747 | 6110 | 211 | 980 | 428 | ~28 |
+
+- **The corners are u, v, not whole `pvr_vertex_t`.** The first version stored
+  each corner as a TA vertex, ready for a store-queue copy. That cannot be
+  copied as it is: the frame writes the command word, x, y, z and both colours
+  of every vertex it sends, because the corners move with the fighters'
+  matrices. Only u and v come from the stored one. The full vertices made the
+  pack 14.4 MB and a packed mesh larger in the arena than a walked one, which
+  meant more evictions (`c` 2/127 against 1/24). The pager then loaded 908 pages
+  against 357, and code pages rose from 162 to 360. Flycast's disc costs
+  nothing, but on a GD-ROM every load is a seek. At 8 bytes a corner the pack
+  is 8.3 MB, a packed mesh is smaller in the arena than a walked one (`c` 0/16),
+  and the pager loads 428 pages: 171 from the pack against 132 + 30 for
+  MODELS.PAK and the polygon ROM before. Code pages rose from 162 to 194. Not
+  measured on hardware.
+- **Where the time went:** scan −819 ms, the walks and the per-face attribute,
+  texture-header and UV work; submit −373 ms and sort −125 ms, from a quad
+  being one 4-vertex strip instead of two triangles. The slice (the board) is
+  unchanged.
+- **The textures stay converted at run time; there is no .pvr pack.** The PVR
+  textures are cut from texture RAM as the board draws, and the game's loader
+  fills it at run time (see "Textures converted at build time do not pay
+  here" under #456). The
+  conversion is under 0.5% of attract. The key of the texture each face cuts
+  is precomputed and a tile over 256 is windowed offline; one whose face
+  spans more than 256 keys the whole tile, at most 1024 on a side, as
+  `dp_tex_get` cuts it since #486. Each texture's
+  `pvr_poly_hdr_t` was already compiled once per texture and variant
+  (`dp_tex_t.hdr`), not per frame.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format

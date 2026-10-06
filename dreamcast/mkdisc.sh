@@ -10,6 +10,10 @@
 # game runs silent. MODELS.PAK, the meshes and UV streams the game draws laid
 # out scene by scene (tools/dc_mdlpack.py, dc_pager.h), is made here from
 # rom_pol.bin and rom_tex.bin and dreamcast/sfight.mdlmap; NOPAK=1 leaves it out.
+# STRIPS.PAK, the same meshes already walked into Tile Accelerator strips
+# (tools/dc_strips.c, dc_strips.h), is made here too, from the ROM files and
+# dreamcast/sfight.strips, with the host's C compiler ($CC, else cc);
+# NOSTRIPS=1 leaves it out.
 # SINCOS=<file> adds the COP's sin/cos tables (tools/mksincos.py, from the
 # player's arcade set), which the link to MAME needs (dc_link.h).
 #
@@ -61,6 +65,13 @@ if [ -z "${NOPAK:-}" ]; then
     python3 "$here/../tools/dc_mdlpack.py" --map "$here/sfight.mdlmap" --roms "$roms" --out "$disc/MODELS.PAK" >/dev/null
     set -- "$@" "MODELS.PAK=$disc/MODELS.PAK"
 fi
+if [ -z "${NOSTRIPS:-}" ]; then
+    src=$(dirname "$0")/..
+    ${CC:-cc} -O2 -w -o "$disc/dc_strips" "$src/tools/dc_strips.c" -I"$src/src" -I"$src/src/board" -I"$src/src/core" \
+        -I"$src/src/net" -I"$src/src/ui" -I"$src/src/profiles" -I"$src/dreamcast" -lm
+    "$disc/dc_strips" --roms "$roms" --keys "$src/dreamcast/sfight.strips" --out "$disc/STRIPS.PAK"
+    set -- "$@" "STRIPS.PAK=$disc/STRIPS.PAK"
+fi
 if [ -n "${CDI:-}" ]; then
     [ -f "$lazyboot/tools/boots3" ] || { echo "no $lazyboot/tools/boots3: run dreamcast/tools/get-lazyboot.sh" >&2; exit 1; }
     "$scramble" "$out/1ST_READ.BIN" "$disc/1ST_READ.SCR"
@@ -94,5 +105,5 @@ else
 fi
 
 find "$disc/low" -delete
-rm -f "$disc/IP.BIN" "$disc/MODELS.PAK"
+rm -f "$disc/IP.BIN" "$disc/MODELS.PAK" "$disc/STRIPS.PAK" "$disc/dc_strips"
 echo "$disc/$img"

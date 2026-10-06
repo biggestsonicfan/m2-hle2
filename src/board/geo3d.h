@@ -2334,7 +2334,54 @@ typedef struct {
 static void geo3d_dc_face(int v0, const geo3d_cface_t *f, int cut, float r, float g, float b, float pl, int32_t key);
 #endif
 
+/* ---- Strip pack ------------------------------------------------------------------
+ * A cached mesh made offline (GEO3D_STRIPS; the Dreamcast's STRIPS.PAK, see
+ * dreamcast/dc_strips.h): the corners as geo3d_mesh_build leaves them, a
+ * smaller face per drawn face with its texture already found, and per face
+ * its corners' texture coordinates, already in the PVR texture's units, in
+ * strip order (A B C D). The draw still transforms, culls, lights and sorts;
+ * it reads no GEO stream, attribute, texture header or UV word. Blob:
+ * geo3d_sp_head_t, then sv (padded to 32), the faces, the corners' u, v. */
+#define GEO3D_SF_TRI      1u
+#define GEO3D_SF_HAS_C    2u
+#define GEO3D_SF_HAS_QN   4u
+#define GEO3D_SF_MAT_OK   8u
+#define GEO3D_SF_TEXTURED 16u
+enum { GEO3D_SL_OP, GEO3D_SL_PT, GEO3D_SL_TR };   /* opaque, punch-through (texel holes), translucent */
 typedef struct {
+    int32_t  model_idx;
+    uint32_t mat_ptr, uv_ptr;
+    uint16_t n_sv, n_faces;
+    float    bc[3], br;
+} geo3d_sp_head_t;
+typedef struct {
+    uint16_t ai, bi, ci, di;
+    uint16_t zsrc[4];
+    vec3_t   qn;
+    uint32_t qa;
+    uint32_t split_quad, split_cut;
+    uint32_t tex;                /* the PVR texture's key (dp_tex_get), after any 256 window; 0: none */
+    float    lb;
+    uint16_t matidx, fl;
+    uint16_t strip;              /* its first vertex: A B C (D), the strip for cut 1 */
+    uint8_t  bits, zmode, list, nv;
+    uint8_t  pad[6];
+} geo3d_sface_t;
+typedef struct {
+    float    u, v;               /* in the texture's [0, 1] */
+} geo3d_svert_t;
+_Static_assert(sizeof(geo3d_sp_head_t) == 32 && sizeof(geo3d_sface_t) == 64 && sizeof(geo3d_svert_t) == 8,
+               "strip pack records");
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+struct geo3d_cmesh;
+/* The port's: the mesh m names from its pack, into the arena at *at (at most
+ * room bytes). 1: loaded; 0: not in the pack; -1: no room. */
+static int geo3d_strips_load(struct geo3d_cmesh *m, uint8_t *at, size_t room);
+static void geo3d_dc_sface(int v0, const geo3d_sface_t *f, const geo3d_svert_t *s, int cut,
+                           float r, float g, float b, float pl, int32_t key);
+#endif
+
+typedef struct geo3d_cmesh {
     bool           used;
     int            model_idx;
     uint32_t       mat_ptr, uv_ptr;
@@ -2344,6 +2391,8 @@ typedef struct {
     vec3_t         bc;           /* a sphere round sv: centre and radius */
     float          br;
     geo3d_cface_t *faces;        /* only the faces that emit, in decode order */
+    const geo3d_sface_t *sfaces; /* or these, from the strip pack (faces NULL) */
+    const geo3d_svert_t *strips; /* their vertices */
     bool           ranked;       /* geo3d_mesh_layers has run (the object viewer asks for it) */
     bool           failed;       /* out of memory when built: decoded in full until the cache starts over */
     uint32_t       used_at;      /* g_geo3d_mesh_epoch when last drawn (GEO3D_MESH_ARENA) */
@@ -2354,7 +2403,7 @@ static int           g_geo3d_mesh_cache = 1;   /* 0: always run the full decoder
 static geo3d_cmesh_t g_geo3d_meshes[GEO3D_MESH_CACHE_SLOTS];
 static unsigned      g_geo3d_mesh_count;
 static size_t        g_geo3d_mesh_bytes;
-static uint64_t      g_geo3d_mesh_hits, g_geo3d_mesh_builds;
+static uint64_t      g_geo3d_mesh_hits, g_geo3d_mesh_builds, g_geo3d_mesh_packed;
 #if GEO3D_MESH_ARENA
 static uint8_t       g_geo3d_arena[GEO3D_MESH_ARENA] __attribute__((aligned(32)));
 static size_t        g_geo3d_arena_used;
@@ -2414,12 +2463,14 @@ static bool geo3d_mesh_cache_evict(void) {
     for (unsigned k = 0; k < n; k++) {
         geo3d_cmesh_t *m = &keep[k];
         uint8_t *src = (uint8_t *)m->sv;
-        size_t faces_off = (size_t)((uint8_t *)m->faces - src);
-        if (src != g_geo3d_arena + at) memmove(g_geo3d_arena + at, src, m->arena_len);
+        ptrdiff_t d = (g_geo3d_arena + at) - src;
+        if (d) memmove(g_geo3d_arena + at, src, m->arena_len);
         m->sv = (vec3_t *)(g_geo3d_arena + at);
-        m->faces = (geo3d_cface_t *)(g_geo3d_arena + at + faces_off);
+        if (m->faces)  m->faces  = (geo3d_cface_t *)((uint8_t *)m->faces + d);
+        if (m->sfaces) m->sfaces = (const geo3d_sface_t *)((const uint8_t *)m->sfaces + d);
+        if (m->strips) m->strips = (const geo3d_svert_t *)((const uint8_t *)m->strips + d);
         at += m->arena_len;
-        bytes += (size_t)m->n_sv * sizeof(vec3_t) + (size_t)m->n_faces * sizeof(geo3d_cface_t);
+        bytes += m->sfaces ? m->arena_len : (size_t)m->n_sv * sizeof(vec3_t) + (size_t)m->n_faces * sizeof(geo3d_cface_t);
         *geo3d_mesh_free_slot(geo3d_mesh_hash(m->model_idx, m->mat_ptr, m->uv_ptr)) = *m;
     }
     g_geo3d_arena_used = at;
@@ -3082,7 +3133,19 @@ static geo3d_cmesh_t *geo3d_mesh_get(const geo3d_models_t *md, int model_idx,
         m->used = true;
         m->used_at = g_geo3d_mesh_epoch;
         g_geo3d_mesh_count++;
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+        /* made offline, if the pack has it: a copy, not a walk */
+        int packed = geo3d_strips_load(m, g_geo3d_arena + g_geo3d_arena_used, GEO3D_MESH_ARENA - g_geo3d_arena_used);
+        if (packed > 0) {
+            g_geo3d_arena_used += m->arena_len;
+            g_geo3d_mesh_bytes += m->arena_len;
+            g_geo3d_mesh_packed++;
+            return m;
+        }
+        if (packed == 0 && geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) break;
+#else
         if (geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) break;
+#endif
         /* Out of memory (or arena), which the cache's own meshes may be
          * holding: thin it, then start over. A mesh that still does not fit
          * stays a failed entry, not a build every frame: a failed build costs
@@ -3203,7 +3266,30 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
                                         const float *matrix, float cr, float cg, float cb) {
     const int dcv = gone ? -1 : geo3d_dc_verts(tv, m->n_sv);
     const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
-    for (int n = 0; n < m->n_faces; n++) {
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+    /* The same walk over a packed mesh's faces (geo3d_strips_load). */
+    for (int n = 0; m->sfaces && n < m->n_faces; n++) {
+        const geo3d_sface_t *f = &m->sfaces[n];
+        const bool is_tri = (f->bits & GEO3D_SF_TRI) != 0;
+        const int zsrc[4] = { f->zsrc[0], f->zsrc[1], f->zsrc[2], f->zsrc[3] };
+        const float z = flat ? geo3d_flat_z(tv, zsrc, f->zmode) : 0.0f;
+        if (is_tri && !(f->bits & GEO3D_SF_HAS_C)) continue;
+        bool out = false;
+        if (cull)
+            out = (oc[f->ai] & oc[f->bi] & oc[f->ci] & (is_tri ? 0xFFu : oc[f->di])) != 0;
+        if (out && is_tri) continue;
+        geo3d_lit_t lt;
+        if (geo3d_board_cull(matrix, f->qn, (f->bits & GEO3D_SF_HAS_QN) ? f->qa : 0u, true,
+                             tv[f->ai], tv[f->bi], tv[f->ci], &lt)) continue;
+        if (out || dcv < 0) { if (!is_tri) geo3d_split_other_way(f->split_quad, f->split_cut); continue; }
+        float fr = cr, fg = cg, fb = cb;
+        if (f->bits & GEO3D_SF_MAT_OK) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
+        const float pl = geo3d_board_luma(&lt);
+        const int cut = is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
+        geo3d_dc_sface(dcv, f, m->strips + f->strip, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
+    }
+#endif
+    for (int n = 0; m->faces && n < m->n_faces; n++) {
         const geo3d_cface_t *f = &m->faces[n];
         const float z = flat ? geo3d_flat_z(tv, f->zsrc, f->zmode) : 0.0f;
         if (f->is_tri && !f->has_c) continue;

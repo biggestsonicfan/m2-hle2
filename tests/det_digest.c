@@ -102,6 +102,10 @@ static const uint8_t *mdlmap_rom(const void *p, uint32_t n);
 #define GEO3D_ROM(p, n) mdlmap_rom((p), (n))
 #include "geo3d.h"
 #include "gems.h"
+#include "../dreamcast/dc_layout.h"
+
+#include <ctype.h>
+#include <sys/stat.h>
 
 static memory_bus_t     bus;
 static i960_cpu_t       cpu;
@@ -418,6 +422,69 @@ static void mdlmap_frame(void) {
     g_geo3d_palram = NULL;
 }
 
+/* --strip-keys F0:F1:FILE: the mesh cache's keys (model, material and UV
+ * pointers, geo3d_mesh_for_draw's) those frames' display lists draw from ROM,
+ * each with the frame that first draws it, for the Dreamcast's strip pack
+ * (tools/dc_strips.c). Addresses only. */
+#define SPKEY_SLOTS 65536u
+static FILE     *spkey_out;
+static uint32_t  spkey_from, spkey_to;
+static struct { int32_t model; uint32_t mat, uv, frame; uint8_t used; } *spkey;
+static uint32_t  spkey_n;
+
+static void spkey_frame(void) {
+    static geo3d_state_t geo;
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
+    if (!spkey) spkey = calloc(SPKEY_SLOTS, sizeof *spkey);
+    if (!geo3d_scan_geo_list(&geo, g_geodl_snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
+                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
+                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    for (int k = 0; k < geo.captured_count; k++) {
+        const captured_model_t *cm = &geo.captured[k];
+        if (cm->direct_len || cm->model_idx < 0 || (uint32_t)cm->model_idx >= q->model_table_count) continue;
+        uint32_t toff = q->model_table_offset + (uint32_t)cm->model_idx * MODEL_ENTRY_SIZE;
+        if ((size_t)toff + MODEL_ENTRY_SIZE > romset.main_data_size) continue;
+        if (!read_u32_le(romset.main_data + toff + 8)) continue;
+        uint32_t mat = read_u32_le(romset.main_data + toff + 4), uv = read_u32_le(romset.main_data + toff + 0);
+        if (cm->tha != 0xFFFFFFFFu) mat = cm->tha;
+        if (cm->tpa != 0xFFFFFFFFu) uv = cm->tpa;
+        if ((mat && (mat & 0x800000u)) || (uv && (uv & 0x800000u))) continue;   /* texture RAM: decoded every time */
+        uint32_t h = geo3d_mesh_hash(cm->model_idx, mat, uv);
+        for (uint32_t p = 0; p < SPKEY_SLOTS; p++) {
+            __typeof__(*spkey) *e = &spkey[(h + p) & (SPKEY_SLOTS - 1u)];
+            if (e->used && e->model == cm->model_idx && e->mat == mat && e->uv == uv) break;
+            if (e->used) continue;
+            if (spkey_n >= SPKEY_SLOTS / 2) break;
+            *e = (__typeof__(*spkey)){ cm->model_idx, mat, uv, g_emu_frames, 1 };
+            spkey_n++;
+            break;
+        }
+    }
+}
+
+static int spkey_cmp(const void *a, const void *b) {
+    const __typeof__(*spkey) *x = a, *y = b;
+    if (x->used != y->used) return x->used ? -1 : 1;
+    if (x->frame != y->frame) return x->frame < y->frame ? -1 : 1;
+    if (x->model != y->model) return x->model < y->model ? -1 : 1;
+    if (x->mat != y->mat) return x->mat < y->mat ? -1 : 1;
+    return x->uv < y->uv ? -1 : x->uv > y->uv;
+}
+
+static void spkey_write(void) {
+    const game_quirks_t *q = &g_active_profile->quirks;
+    fprintf(spkey_out, "# The mesh cache's keys STF's display lists draw from ROM (det_digest\n"
+                       "# --strip-keys), for tools/dc_strips.c: `model mat uv frame`, the frame\n"
+                       "# that first draws it. Addresses only.\n");
+    fprintf(spkey_out, "table %x %u %x %x\n", q->model_table_offset, q->model_table_count,
+            q->mesh_ptr_subtract, q->mesh_ptr_add);
+    if (!spkey) return;
+    qsort(spkey, SPKEY_SLOTS, sizeof *spkey, spkey_cmp);
+    for (uint32_t i = 0; i < spkey_n; i++)
+        fprintf(spkey_out, "%d %x %x %u\n", spkey[i].model, spkey[i].mat, spkey[i].uv, spkey[i].frame);
+}
+
 static void mdlmap_write(void) {
     static const char *name[2] = { "po", "tx" };
     size_t size[2] = { romset.polygons_size, romset.textures_size };
@@ -623,9 +690,51 @@ static void parse_script(const char *s) {
     }
 }
 
+/* A folder of the PS3 release's ROM files (StF - PS3/stf_rom) in place of
+ * the zip, placed as the Dreamcast disc places them (dreamcast/dc_layout.h). */
+static int load_rom_dir(const char *dir) {
+    const dc_layout_t *lay = &dc_layout_sfight;
+    uint8_t **ptr[DC_REGIONS] = { &romset.maincpu, &romset.main_data, &romset.copro_data, &romset.polygons,
+                                  &romset.textures, &romset.audiocpu, &romset.samples };
+    size_t *size[DC_REGIONS] = { &romset.maincpu_size, &romset.main_data_size, &romset.copro_data_size,
+                                 &romset.polygons_size, &romset.textures_size, &romset.audiocpu_size,
+                                 &romset.samples_size };
+    for (int r = 0; r < DC_REGIONS; r++) {
+        const dc_region_t *rg = &lay->rg[r];
+        *ptr[r] = NULL; *size[r] = rg->size;
+        if (!rg->size) continue;
+        uint8_t *b = malloc(rg->size);
+        if (!b) return -1;
+        memset(b, rg->fill, rg->size);
+        for (int k = 0; k < DC_MAX_SEGS && rg->seg[k].file; k++) {
+            const dc_seg_t *sg = &rg->seg[k];
+            char path[1024], low[64];
+            size_t n = strlen(sg->file);
+            for (size_t c = 0; c <= n && c < sizeof low; c++) low[c] = (char)tolower((unsigned char)sg->file[c]);
+            snprintf(path, sizeof path, "%s/%s", dir, sg->file);
+            FILE *f = fopen(path, "rb");
+            if (!f) { snprintf(path, sizeof path, "%s/%s", dir, low); f = fopen(path, "rb"); }
+            if (!f) { fprintf(stderr, "no %s in %s\n", sg->file, dir); return -1; }
+            uint32_t reps = sg->count ? sg->count : 1;
+            for (uint32_t c = 0; c < reps; c++) {
+                uint32_t at = sg->reg_off + c * sg->period, len = sg->len;
+                if (at >= rg->size) break;
+                if (len > rg->size - at) len = rg->size - at;
+                fseek(f, (long)sg->file_off, SEEK_SET);
+                if (!fread(b + at, 1, len, f)) { fclose(f); return -1; }
+            }
+            fclose(f);
+        }
+        *ptr[r] = b;
+    }
+    romset.loaded = true;
+    profile_adopt_program(romset.maincpu, romset.maincpu_size);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--profile ID] [--save-at F:FILE] [--load FILE] [--mem]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip, a folder of region images, or the PS3 stf_rom folder> [--frames N] [--script S] [--from F] [--out FILE] [--profile ID] [--save-at F:FILE] [--load FILE] [--mem]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
@@ -681,6 +790,14 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (!strcmp(argv[i], "--strip-keys") && i + 1 < argc) {
+            char path[1024] = {0};
+            if (sscanf(argv[++i], "%u:%u:%1023s", &spkey_from, &spkey_to, path) != 3
+                    || !(spkey_out = fopen(path, "wb"))) {
+                fprintf(stderr, "--strip-keys F0:F1:FILE\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--model-map") && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%u:%1023s", &mdlmap_from, &mdlmap_to, path) != 3
@@ -729,10 +846,19 @@ int main(int argc, char **argv) {
         fprintf(stderr, "replaying %u session frames from %s\n", (unsigned)in_n, inputs_path);
     }
 
-    /* A directory of region images (--export-roms) loads as it is. Otherwise
-     * the web build's load: one zip, read whole, strict by CRC. */
+    /* A directory of region images (--export-roms) loads as it is, and the PS3
+     * release's stf_rom folder as the Dreamcast disc places it. Otherwise the
+     * web build's load: one zip, read whole, strict by CRC. */
     if (romset_is_dir(argv[1])) {
-        if (romset_load_dir(&romset, argv[1]) != 0) return 2;
+        char probe[1024];
+        snprintf(probe, sizeof probe, "%s/%s", argv[1], k_romset_files[0]);
+        struct stat st;
+        if (!stat(probe, &st)) {
+            if (romset_load_dir(&romset, argv[1]) != 0) return 2;
+        } else if (load_rom_dir(argv[1]) != 0) {
+            fprintf(stderr, "ROM load from %s failed\n", argv[1]);
+            return 2;
+        }
     } else {
         FILE *f = fopen(argv[1], "rb");
         if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
@@ -811,6 +937,7 @@ int main(int argc, char **argv) {
             }
         }
         if (r == EMU_SLICE_FRAME && mdlmap_out && g_emu_frames >= mdlmap_from && g_emu_frames <= mdlmap_to) mdlmap_frame();
+        if (r == EMU_SLICE_FRAME && spkey_out && g_emu_frames >= spkey_from && g_emu_frames <= spkey_to) spkey_frame();
         if (r == EMU_SLICE_FRAME && save_frame && g_emu_frames == save_frame) {
             /* ... and the samples from here on are what the loaded run's are. */
             const char *err = state_mem ? mem_state_save(&emu, save_path) : emu_state_save_now(&emu, save_path);
@@ -849,6 +976,7 @@ int main(int argc, char **argv) {
     if (trace_out) fclose(trace_out);
     if (aotmap_out) { aotmap_write(&bus, aotmap_path); fclose(aotmap_out); }
     if (mdlmap_out) { mdlmap_write(); fclose(mdlmap_out); }
+    if (spkey_out) { spkey_write(); fclose(spkey_out); }
 #if I960_BLOCKS
     if (census_out) { census_write(); fclose(census_out); }
 #endif

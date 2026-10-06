@@ -47,6 +47,7 @@
 
 #include "dc_paged.h"
 #include "dc_layout.h"
+#include "dc_strips.h"
 
 #define PG_SHIFT      14
 #define PG_SIZE       (1u << PG_SHIFT)
@@ -90,6 +91,9 @@ typedef struct {
     uint32_t          pak_first, pak_pages;    /* its window pages, after the ROM's */
     const uint32_t   *pak;           /* npak entries: address (polygons, then textures), length, pack offset */
     uint32_t          npak;
+    /* the strip pack (dc_strips.h), read only by pg_sp_copy */
+    uint32_t          sp_first, sp_pages, sp_loads;
+    const dcs_head_t  *sp;           /* its header and, after it, its index */
 } pager_t;
 
 static pager_t g_pg;
@@ -199,6 +203,7 @@ static uint32_t pg_fault(uint32_t v) {
         g->read_ns += timer_ns_gettime64() - t0;
         g->loads++;
         if (v - g->pak_first < g->pak_pages) g->pak_loads++;
+        else if (v - g->sp_first < g->sp_pages) g->sp_loads++;
         else {
             int r = DC_REGIONS - 1;
             while (r > 0 && v < g->first[r]) r--;
@@ -350,6 +355,52 @@ static int pg_pak_open(uint32_t *fad, uint32_t *size, uint32_t *held) {
     return 1;
 }
 
+/* The strip pack's header and index, if the disc has one; its blobs' FAD and size. */
+static int pg_sp_open(uint32_t *fad, uint32_t *size) {
+    static uint8_t sec[2048] __attribute__((aligned(32)));
+    uint32_t fsize = 0, f = pg_find_file("STRIPS.PAK", &fsize);
+    if (!f || pg_read(sec, f, 1) != 0 || memcmp(sec, "M2SP", 4)) return 0;
+    const dcs_head_t *h = (const dcs_head_t *)sec;
+    uint32_t n = h->n, off = h->data_off;
+    if (!n || n > fsize / sizeof(dcs_index_t) || off % DC_SECTOR || off < sizeof *h + sizeof(dcs_index_t) * n ||
+            off >= fsize) return 0;
+    uint8_t *idx = memalign(32, off);
+    if (!idx || pg_read(idx, f, off / DC_SECTOR) != 0) { free(idx); return 0; }
+    g_pg.sp = (const dcs_head_t *)idx;
+    *fad = f + off / DC_SECTOR;
+    *size = fsize - off;
+    return 1;
+}
+
+/* Window pages first .. first + pages - 1 onto the file at fad (size bytes). */
+static int pg_map_file(uint32_t first, uint32_t pages, uint32_t fad, uint32_t size) {
+    pager_t *g = &g_pg;
+    for (uint32_t i = 0; i < pages; i++) {
+        uint32_t v = first + i;
+        g->src[v] = fad + i * (PG_SIZE / DC_SECTOR);
+        if (size - i * PG_SIZE < PG_SIZE) {
+            if (g->npart == PG_MAX_PART) { printf("pager: more than %d part pages\n", PG_MAX_PART); return -1; }
+            g->part[g->npart].v = v;
+            g->part[g->npart].valid = (uint16_t)(size - i * PG_SIZE);
+            g->part[g->npart].fill = 0;
+            g->npart++;
+        }
+    }
+    return 0;
+}
+
+/* len bytes of the strip pack's blobs from off, copied to dst. */
+static void pg_sp_copy(void *dst, uint32_t off, uint32_t len) {
+    pager_t *g = &g_pg;
+    uint8_t *d = dst;
+    while (len) {
+        uint32_t v = g->sp_first + (off >> PG_SHIFT), o = off & (PG_SIZE - 1u);
+        uint32_t n = PG_SIZE - o < len ? PG_SIZE - o : len;
+        memcpy(d, g->pool + pg_fault(v) * PG_SIZE + o, n);
+        d += n; off += n; len -= n;
+    }
+}
+
 /* Lay the regions out as windows, every page pointing at its sectors, and
  * make the frame pool. anon_bytes reserves window space for pg_anon(). */
 static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_bytes) {
@@ -370,6 +421,12 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
         g->pak_first = g->nrom;
         g->pak_pages = (pak_size + PG_SIZE - 1) / PG_SIZE;
         g->nrom += g->pak_pages;
+    }
+    uint32_t sp_fad = 0, sp_size = 0;
+    if (pg_sp_open(&sp_fad, &sp_size)) {
+        g->sp_first = g->nrom;
+        g->sp_pages = (sp_size + PG_SIZE - 1) / PG_SIZE;
+        g->nrom += g->sp_pages;
     }
     g->npages = g->nrom + anon_bytes / PG_SIZE + PG_MAX_ANON * 4;
     if ((uint64_t)g->npages << PG_SHIFT > PG_VA_SPAN) { printf("pager: the windows overflow\n"); return -1; }
@@ -410,17 +467,8 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
         }
     }
 
-    for (uint32_t i = 0; i < g->pak_pages; i++) {
-        uint32_t v = g->pak_first + i;
-        g->src[v] = pak_fad + i * (PG_SIZE / DC_SECTOR);
-        if (pak_size - i * PG_SIZE < PG_SIZE) {
-            if (g->npart == PG_MAX_PART) { printf("pager: more than %d part pages\n", PG_MAX_PART); return -1; }
-            g->part[g->npart].v = v;
-            g->part[g->npart].valid = (uint16_t)(pak_size - i * PG_SIZE);
-            g->part[g->npart].fill = 0;
-            g->npart++;
-        }
-    }
+    if (pg_map_file(g->pak_first, g->pak_pages, pak_fad, pak_size) != 0 ||
+            pg_map_file(g->sp_first, g->sp_pages, sp_fad, sp_size) != 0) return -1;
 
     g->nframes = cache_bytes / PG_SIZE;
     g->pool = memalign(32, g->nframes * PG_SIZE);
@@ -428,8 +476,9 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
     if (!g->pool || !g->fr) return -1;
     for (uint32_t i = 0; i < g->nframes; i++) g->fr[i].vpage = ~0u;
     for (int i = 0; i < PG_RECENT; i++) g->recent[i] = ~0u;
-    printf("pager: %s, %u ROM pages, %u KB cache, model pack: %u runs\n", lay->profile,
-           (unsigned)g->nrom, (unsigned)(g->nframes * (PG_SIZE >> 10)), (unsigned)g->npak);
+    printf("pager: %s, %u ROM pages, %u KB cache, model pack: %u runs, strip pack: %u meshes\n", lay->profile,
+           (unsigned)g->nrom, (unsigned)(g->nframes * (PG_SIZE >> 10)), (unsigned)g->npak,
+           (unsigned)(g->sp ? g->sp->n : 0));
     return 0;
 }
 

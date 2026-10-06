@@ -292,7 +292,9 @@ static inline void emu_board_reset_state(void) {
  *
  * savestate.h writes the board; the run loop's latches above are passed to it
  * here, since they are this file's statics. Serviced between slices, under the
- * mutex (emu_netplay_pump), like a board reset. */
+ * mutex (emu_netplay_pump), like a board reset. A build with no zip support
+ * (M2HLE_NO_ZIP, the Dreamcast) has none: a state is a zip. */
+#ifndef M2HLE_NO_ZIP
 #include "savestate.h"
 
 static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
@@ -368,6 +370,7 @@ static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *
     savestate_emu_t e;
     return emu_state_loaded(ctx, savestate_load_mem(data, size, ctx->cpu, ctx->bus, &e), &e);
 }
+#endif /* M2HLE_NO_ZIP */
 
 /* ---- The sound UART ---------------------------------------------------------
  *
@@ -605,8 +608,12 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         const char *err;
         emu_mutex_lock(&ctx->mutex);
         if (state == 2 && step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
+#ifdef M2HLE_NO_ZIP
+        else err = "this build has no savestates";
+#else
         else if (state == 2) err = emu_state_load_now(ctx, ctx->state_path);
         else                 err = emu_state_save_now(ctx, ctx->state_path);
+#endif
         snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
         emu_mutex_unlock(&ctx->mutex);
         ctx->state_count++;
