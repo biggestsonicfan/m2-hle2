@@ -20,6 +20,11 @@
 --
 -- -seconds_to_run is what skips MAME's "this system doesn't work" notice with no
 -- window; it stops a run at 299 s of emulated time (17,940 frames).
+--
+-- BL_SHOTS=N also saves the screen every N frames as m<frame>.png in the
+-- snapshot directory (Pinboard #486), the frame numbered as dc-lockstep.py
+-- numbers it: MAME's edges before the program's first (the boot code's clear
+-- of 0x50D000) and the one after it are not counted.
 
 local OUT    = assert(os.getenv("BL_OUT"), "set BL_OUT")
 local FRAMES = tonumber(os.getenv("BL_FRAMES") or "6000")
@@ -31,10 +36,25 @@ end
 local cpu = manager.machine.devices[":maincpu"]
 local sp = cpu.spaces["program"]
 local pc = cpu.state["PC"] or cpu.state["CURPC"] or cpu.state["IP"]
+local SHOTS  = tonumber(os.getenv("BL_SHOTS") or "0")
 local f = assert(io.open(OUT, "wb"))
 local n = 0
+local g                                 -- the frame as dc-lockstep.py counts it
+
+local function shoot(pcv)
+    if SHOTS <= 0 then return end
+    if g then
+        g = g + 1
+    elseif pcv >= 0x10000 then
+        g = -1
+    end
+    if g and g >= 0 and g % SHOTS == 0 then
+        manager.machine.screens[":screen"]:snapshot(string.format("m%05d.png", g))
+    end
+end
 
 local function record()
+    shoot(pc and pc.value or 0)
     f:write("M2BF", string.pack("<I4BBI2I4", sp:read_u32(0x500020), sp:read_u8(0x50002A), sp:read_u8(0x500030), 0,
                                 pc and pc.value or 0))
     for _, r in ipairs(RANGES) do f:write(sp:read_range(r[1], r[1] + r[2] - 1, 8)) end

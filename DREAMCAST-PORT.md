@@ -929,6 +929,55 @@ On a console, a serial cable to a PC at 1.5625 Mbaud carries the same protocol.
 `--listen PORT` already waits for a Dreamcast started by hand. A reader for the
 serial device has not been written.
 
+### The pictures, against MAME's (#486)
+
+The lockstep above holds the board's state, which the Dreamcast had right; the
+picture is drawn by `dc_pvr.h`, which no lockstep sees. `--boot --shots 60`
+keeps both screens of the same frame, once a second (MAME's snapshot, and
+RetroArch's screenshot while the Dreamcast waits on the link), and
+`tools/picture-diff.py` lays them side by side and measures them. Over the
+first 50 s of attract, MAME against the Dreamcast:
+
+| | mean abs. difference | colour histogram |
+|---|---|---|
+| before | 13.1 | 0.813 |
+| after | 9.5 | 0.853 |
+| after, with #479's 1:1 board (HUD=none) | 8.5 | 0.872 |
+
+What it took:
+
+- **Knee ramps.** A textured face's 16 pens rarely make a line: colorxlat's
+  ramps start near 88 and the shade takes 64 off first, so a dim face's dark
+  texels are black and its ramp rises from some texel on. The line from texel
+  0 to 15 lifted the dark half ~20 levels. Palette banks 3..54 hold the opaque
+  and see-through grey ramps again with a knee every half texel, and a face
+  takes the bank of its knee.
+- **Palette ramps.** A few ramps fall and rise (the hut's emblem, the lab
+  monitor's moon and the panel beside it): banks 55..63 are handed out by
+  colour, kept across frames, and never rewritten while the PVR may still draw
+  from them.
+- **Textures over 256x256** (the water, a monitor's picture) are cut and
+  loaded 32 KB at a time.
+- **The window clip.** The board draws nothing outside a list's window; the
+  PVR clipped only at the frame's edge, so at 22 s a quad meant for a small
+  window covered the screen white (difference 81 → 6). A face with a corner
+  outside its window is clipped in screen space; a window that is the whole
+  frame needs none, as the bars round the frame hide the rest.
+
+The cost, kept by a ramp cache keyed by the face's colours (cleared when
+luma or colorxlat changes) and one header per material with the bank patched
+into mode3: frames 3500-3900 of the fight take 19182 ms in Flycast against
+18641 before (+2.9%; it was +36% with the ramp walked per face).
+
+Still differing: the Tails-lab floor is grey where MAME's is pale cyan
+(29-31 s, the worst frames), and at 38 s the console's lid is purple.
+
+```sh
+python3 tools/dc-lockstep.py --boot --frames 3000 --shots 60 --work <dir> --gdi <HUD=none disc>/m2hle2.gdi \
+    --core <patched flycast_libretro.so> --retroarch-config <cfg> --det-digest <desk>/det_digest
+python3 tools/picture-diff.py <dir> --out <dir>/diff
+```
+
 ## What the console loses its time to (#495)
 
 Every number above is Flycast's clock. On a Dreamcast the same disc (#475's
