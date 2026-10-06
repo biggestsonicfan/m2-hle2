@@ -135,6 +135,18 @@ det_digest "<PS3>/stf_rom" --profile sfight_console --frames 9000 --script "$S" 
 then keep attract's keys and add the fight's that attract did not draw, their
 frames +100000, under attract's `table` line.
 
+TEXTURES.PAK, the PVR textures already cut (DREAMCAST-PORT.md #502), goes on
+the disc with `TEXPAK=<file>`; without it every texture is cut at run time.
+It is the game's texture data, so it is recorded from the ROM files and never
+committed:
+
+```sh
+det_digest "<PS3>/stf_rom" --profile sfight_console --frames 6000 --tex-pack 0:6000:TEXTURES.PAK --out /dev/null
+det_digest "<PS3>/stf_rom" --profile sfight_console --frames 9000 --script "$S" --tex-pack 0:9000:TEXTURES.PAK:+100000 --out /dev/null
+```
+
+The second run adds the fight's textures to the pack the first wrote.
+
 `sfight.aotmap`, the code `AOT=` compiles, is recorded the same way, with
 Sega's C on as the disc runs it (a `det_digest` built with `M2HLE_GEMS_DIR`):
 

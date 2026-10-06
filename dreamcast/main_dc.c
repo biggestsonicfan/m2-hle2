@@ -383,24 +383,28 @@ int main(int argc, char **argv) {
             hashed = 1;
             dp_text(15, hashed_line);
             static char tt_line[96];   /* the draws' parts and the sound, since boot */
-            snprintf(tt_line, sizeof tt_line, "ti %lu sc %lu so %lu su %lu snd %lu", (unsigned long)(g_dp.tt_tiles / 1000),
+            snprintf(tt_line, sizeof tt_line, "ti %lu sc %lu so %lu su %lu snd %lu tx %lu", (unsigned long)(g_dp.tt_tiles / 1000),
                      (unsigned long)(g_dp.tt_scan / 1000), (unsigned long)(g_dp.tt_sort / 1000),
-                     (unsigned long)(g_dp.tt_submit / 1000), (unsigned long)(us_snd / 1000));
+                     (unsigned long)(g_dp.tt_submit / 1000), (unsigned long)(us_snd / 1000),
+                     (unsigned long)(g_dp.tt_tex / 1000));
+            printf("%s\n", tt_line);
             dp_text(14, tt_line);
         }
         {   /* a fixed stretch of the fight (the same frames every run): all of it, its slices, its draws */
-            static uint64_t b_t0, b_d0, b_sl, b_p0[5]; static uint32_t b_n0, b_g0[DC_REGIONS + 3]; static char b_line[96];
+            static uint64_t b_t0, b_d0, b_sl, b_p0[5], b_tx0; static uint32_t b_rd0; static uint32_t b_n0, b_g0[DC_REGIONS + 3]; static char b_line[96];
             uint32_t b_g[DC_REGIONS + 3];   /* page loads: by region, then for dc_rom_at, of the model pack, all */
             memcpy(b_g, g_pg.rg_loads, sizeof g_pg.rg_loads);
             b_g[DC_REGIONS] = g_pg.at_loads; b_g[DC_REGIONS + 1] = g_pg.pak_loads; b_g[DC_REGIONS + 2] = g_pg.loads;
             const uint64_t b_p[5] = { g_dp.tt_tiles, g_dp.tt_scan, g_dp.tt_sort, g_dp.tt_submit, us_snd };
-            if (!b_t0 && g_emu_frames > DC_BENCH_F0) { b_t0 = t0; b_d0 = us_dall; b_n0 = (uint32_t)n_drawn; memcpy(b_p0, b_p, sizeof b_p); memcpy(b_g0, b_g, sizeof b_g); }
+            if (!b_t0 && g_emu_frames > DC_BENCH_F0) { b_t0 = t0; b_d0 = us_dall; b_n0 = (uint32_t)n_drawn; memcpy(b_p0, b_p, sizeof b_p); memcpy(b_g0, b_g, sizeof b_g); b_tx0 = g_dp.tt_tex; b_rd0 = g_pg.tx_reads; }
             if (b_t0 && !b_line[0]) {
                 b_sl += t1 - t0;
                 if (g_emu_frames >= DC_BENCH_F1) {
-                    snprintf(b_line, sizeof b_line, "f%u-%u %lu ms: sl %lu dr %lu", DC_BENCH_F0, (unsigned)g_emu_frames,
+                    snprintf(b_line, sizeof b_line, "f%u-%u %lu ms: sl %lu dr %lu tx %lu/%lu", DC_BENCH_F0, (unsigned)g_emu_frames,
                              (unsigned long)((t1 - b_t0) / 1000), (unsigned long)(b_sl / 1000),
-                             (unsigned long)((us_dall - b_d0) / 1000));
+                             (unsigned long)((us_dall - b_d0) / 1000), (unsigned long)((g_dp.tt_tex - b_tx0) / 1000),
+                             (unsigned long)(g_pg.tx_reads - b_rd0));
+                    printf("%s\n", b_line);
                     dp_text(3, b_line);
                     static char b_line2[96];   /* the draws' parts in it, and how many were shown */
                     snprintf(b_line2, sizeof b_line2, "ti %lu sc %lu so %lu su %lu snd %lu n %lu",
@@ -451,8 +455,10 @@ int main(int argc, char **argv) {
                      (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
             STATS_PRINT(line);
             dp_text(19, line);   /* the bottom row: the game draws over row 2 */
-            snprintf(line, sizeof line, "tris %u runs %u full %u | tex %u new %u drop %u fail %u",
-                     g_dp.tris, g_dp.runs, g_dp.faces_dropped, g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails);
+            snprintf(line, sizeof line, "tris %u runs %u full %u | tex %u new %u drop %u fail %u pk %u/%u rd %u %ums",
+                     g_dp.tris, g_dp.runs, g_dp.faces_dropped, g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails,
+                     (unsigned)g_dp.tx_hits, (unsigned)(g_dp.tx_hits + g_dp.tx_miss), (unsigned)g_pg.tx_reads,
+                     (unsigned)(g_pg.tx_read_ns / 1000000));
             STATS_PRINT(line);
             dp_text(18, line);
             unsigned d = shown ? shown : 1;

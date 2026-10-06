@@ -48,6 +48,7 @@
 #include "dc_paged.h"
 #include "dc_layout.h"
 #include "dc_strips.h"
+#include "dc_texpak.h"
 
 #define PG_SHIFT      14
 #define PG_SIZE       (1u << PG_SHIFT)
@@ -94,6 +95,13 @@ typedef struct {
     /* the strip pack (dc_strips.h), read only by pg_sp_copy */
     uint32_t          sp_first, sp_pages, sp_loads;
     const dcs_head_t  *sp;           /* its header and, after it, its index */
+    /* the texture pack (dc_texpak.h), read by pg_tx_at past the page cache */
+    const dct_head_t  *tx;           /* its header and, after it, its index */
+    uint32_t          tx_fad, tx_size;          /* its textures' first sector and bytes */
+    uint8_t          *tx_win;                   /* DC_TX_WINDOW bytes of them, from tx_win_off */
+    uint32_t          tx_win_off, tx_win_len;
+    uint32_t          tx_reads;
+    uint64_t          tx_read_ns;
 } pager_t;
 
 static pager_t g_pg;
@@ -372,6 +380,67 @@ static int pg_sp_open(uint32_t *fad, uint32_t *size) {
     return 1;
 }
 
+/* The texture pack's header and index, if the disc has one; the bytes they
+ * and the read-ahead window take. */
+#ifndef DC_TX_WINDOW
+#define DC_TX_WINDOW (64u << 10)
+#endif
+static uint32_t pg_tx_open(void) {
+    static uint8_t sec[2048] __attribute__((aligned(32)));
+    pager_t *g = &g_pg;
+    uint32_t fsize = 0, f = pg_find_file("TEXTURES.PAK", &fsize);
+    if (!f || pg_read(sec, f, 1) != 0 || memcmp(sec, "M2TX", 4)) return 0;
+    const dct_head_t *h = (const dct_head_t *)sec;
+    uint32_t n = h->n, off = h->data_off;
+    if (!n || n > fsize / sizeof(dct_index_t) || off % DC_SECTOR || off < sizeof *h + sizeof(dct_index_t) * n ||
+            off >= fsize) return 0;
+    uint8_t *idx = memalign(32, off), *win = memalign(32, DC_TX_WINDOW);
+    if (!idx || !win || pg_read(idx, f, off / DC_SECTOR) != 0) { free(idx); free(win); return 0; }
+    g->tx = (const dct_head_t *)idx;
+    g->tx_fad = f + off / DC_SECTOR;
+    g->tx_size = fsize - off;
+    g->tx_win = win;
+    g->tx_win_off = ~0u;
+    return off + DC_TX_WINDOW;
+}
+
+/* The pack's index entry for (key, hash), or NULL. */
+static const dct_index_t *pg_tx_find(uint32_t key, uint32_t hash) {
+    const dct_head_t *h = g_pg.tx;
+    const dct_index_t *ix = (const dct_index_t *)(h + 1);
+    uint32_t lo = 0, hi = h->n;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        int c = dct_cmp(ix[mid].key, ix[mid].hash, key, hash);
+        if (!c) return &ix[mid];
+        if (c < 0) lo = mid + 1; else hi = mid;
+    }
+    return NULL;
+}
+
+/* len bytes of the pack's textures from off (len <= DC_TX_WINDOW - DC_SECTOR),
+ * or NULL. A miss reads the window from off's sector on: the textures lie in
+ * the order the recorded frames drew them, so the next ones come with it. */
+static const uint8_t *pg_tx_at(uint32_t off, uint32_t len) {
+    pager_t *g = &g_pg;
+    if (off > g->tx_size || len > g->tx_size - off) return NULL;
+    if (g->tx_win_off == ~0u || off < g->tx_win_off || off + len > g->tx_win_off + g->tx_win_len) {
+        uint32_t at = off / DC_SECTOR * DC_SECTOR, n = g->tx_size - at;
+        if (n > DC_TX_WINDOW) n = DC_TX_WINDOW;
+        uint64_t t0 = timer_ns_gettime64();
+        g->tx_win_off = ~0u;
+        if (pg_read(g->tx_win, g->tx_fad + at / DC_SECTOR, (n + DC_SECTOR - 1) / DC_SECTOR) != 0) {
+            g->read_errors++;
+            return NULL;
+        }
+        g->tx_read_ns += timer_ns_gettime64() - t0;
+        g->tx_reads++;
+        g->tx_win_off = at;
+        g->tx_win_len = n;
+    }
+    return g->tx_win + (off - g->tx_win_off);
+}
+
 /* Window pages first .. first + pages - 1 onto the file at fad (size bytes). */
 static int pg_map_file(uint32_t first, uint32_t pages, uint32_t fad, uint32_t size) {
     pager_t *g = &g_pg;
@@ -428,6 +497,12 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
         g->sp_pages = (sp_size + PG_SIZE - 1) / PG_SIZE;
         g->nrom += g->sp_pages;
     }
+    uint32_t tx_held = pg_tx_open();
+    if (tx_held) {
+        /* as the model pack's index: out of the frame pool */
+        uint32_t pages = (tx_held + PG_SIZE - 1) / PG_SIZE;
+        if (cache_bytes > (pages + 16) * PG_SIZE) cache_bytes -= pages * PG_SIZE;
+    }
     g->npages = g->nrom + anon_bytes / PG_SIZE + PG_MAX_ANON * 4;
     if ((uint64_t)g->npages << PG_SHIFT > PG_VA_SPAN) { printf("pager: the windows overflow\n"); return -1; }
     g->src   = malloc(g->npages * 4u);
@@ -476,9 +551,9 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
     if (!g->pool || !g->fr) return -1;
     for (uint32_t i = 0; i < g->nframes; i++) g->fr[i].vpage = ~0u;
     for (int i = 0; i < PG_RECENT; i++) g->recent[i] = ~0u;
-    printf("pager: %s, %u ROM pages, %u KB cache, model pack: %u runs, strip pack: %u meshes\n", lay->profile,
+    printf("pager: %s, %u ROM pages, %u KB cache, model pack: %u runs, strip pack: %u meshes, texture pack: %u\n", lay->profile,
            (unsigned)g->nrom, (unsigned)(g->nframes * (PG_SIZE >> 10)), (unsigned)g->npak,
-           (unsigned)(g->sp ? g->sp->n : 0));
+           (unsigned)(g->sp ? g->sp->n : 0), (unsigned)(g->tx ? g->tx->n : 0));
     return 0;
 }
 

@@ -113,6 +113,8 @@ static struct {
     uint32_t  us_decode, us_submit;
     uint32_t  us_tiles, us_scan, us_sort;   /* parts of us_decode */
     uint64_t  tt_tiles, tt_scan, tt_sort, tt_submit;   /* the same, since boot (DC_HASH_FRAME) */
+    uint64_t  tt_tex;                /* us making textures (dp_tex_get's cut or pack read and load), since boot */
+    uint32_t  tx_hits, tx_miss;      /* textures the pack had, and packable ones it had not */
 } g_dp;
 
 /* Tilemaps 2 and 0 as strips (dp_ls_strips, below). */
@@ -129,24 +131,9 @@ static struct {
     dp_ls_t t2, t0;               /* t0's textures are the CPU layers' (unused while both) */
 } g_ls;
 
-static uint16_t g_dp_spread[1024];   /* i's bits at the even positions */
 static uint8_t  g_dp_cut[256 * 256 / 2];
 
 static inline uint32_t dp_log2(uint32_t v) { uint32_t l = 0; while ((1u << l) < v) l++; return l; }
-/* The even bits of v, packed: the inverse of g_dp_spread. */
-static inline unsigned dp_compact(uint32_t v) {
-    unsigned c = 0;
-    for (int b = 0; b < 10; b++) c |= ((v >> (2 * b)) & 1u) << b;
-    return c;
-}
-
-/* Texel (x, y) of a sheet: the layout game_render_upload_atlas decodes. */
-static inline unsigned dp_texel(const uint32_t *sheet, unsigned x, unsigned y) {
-    uint32_t q = (y >> 1) + (x >= 1024 ? 512u : 0u);
-    uint32_t word = sheet[q * 256u + ((x & 1023u) >> 2)] >> (((x >> 1) & 1u) * 16u);
-    unsigned sh = (y & 1u) ? ((x & 1u) ? 0 : 4) : ((x & 1u) ? 8 : 12);
-    return (word >> sh) & 15u;
-}
 
 /* Video memory a dropped texture held is given back a frame later: the PVR
  * may still be drawing the previous frame from it while this one is decoded,
@@ -240,33 +227,28 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
      * now: this face goes untextured and the next frame starts afresh. */
     if (!t || g_dp.count >= DC_TEX_SLOTS - 1u) { g_dp_full = true; g_dp.fails++; return NULL; }
 
-    /* Twiddled: square blocks of the shorter side, Morton order with v the
-     * low bit, laid one after another along the longer side. A texture over
-     * 256x256 (the water, a monitor's picture) is cut and loaded 32 KB at a
-     * time: each 32 KB of the twiddled texture is one rectangle of texels,
-     * 256x256 inside a bigger block, or whole blocks of a smaller one. */
-    unsigned W = tw < 8 ? 8 : tw, H = th < 8 ? 8 : th, m = W < H ? W : H, lm = dp_log2(m);
+    /* Cut from texture RAM (dct_cut), or from the texture pack when it holds
+     * this tile as the words are now (dc_texpak.h). A texture over 256x256
+     * (the water, a monitor's picture) is cut and loaded 32 KB at a time. */
+    unsigned W = tw < 8 ? 8 : tw, H = th < 8 ? 8 : th;
     const uint32_t bytes = W * H / 2, chunk = bytes < sizeof g_dp_cut ? bytes : (uint32_t)sizeof g_dp_cut;
     pvr_ptr_t p = pvr_mem_malloc(bytes);
     if (!p) { g_dp_full = true; g_dp.fails++; return NULL; }
     const uint32_t *src = (const uint32_t *)(sheet ? bus->texram1 : bus->texram0);
-    for (uint32_t at = 0; at < bytes; at += chunk) {
-        const uint32_t i0 = at * 2, r = i0 & ((1u << (2 * lm)) - 1u), blk = i0 >> (2 * lm);
-        unsigned rx = dp_compact(r >> 1), ry = dp_compact(r), rw, rh;
-        if (m > 256) { rw = rh = 256; }
-        else if (W > H) { rw = chunk * 2 / m; rh = m; }
-        else { rw = m; rh = chunk * 2 / m; }
-        if (W > H) rx += blk * m; else ry += blk * m;
-        memset(g_dp_cut, 0, chunk);
-        for (unsigned y = ry; y < ry + rh; y++)
-            for (unsigned x = rx; x < rx + rw; x++) {
-                unsigned c = dp_texel(src, (x0 + (x & (tw - 1))) & 2047u, (y0 + (y & (th - 1))) & 1023u);
-                unsigned bk = W > H ? x >> lm : y >> lm;
-                unsigned i = ((bk << (2 * lm)) | g_dp_spread[y & (m - 1)] | (unsigned)g_dp_spread[x & (m - 1)] << 1) - i0;
-                g_dp_cut[i >> 1] |= (uint8_t)(c << ((i & 1) * 4));
-            }
-        pvr_txr_load(g_dp_cut, (uint8_t *)p + at, chunk);
+    const uint64_t t0 = timer_us_gettime64();
+    const uint8_t *packed = NULL;
+    if (g_pg.tx && dct_packable(key)) {
+        const dct_index_t *e = pg_tx_find(key, dct_src_hash(src, key));
+        if (e) packed = pg_tx_at(e->off, bytes);
+        if (packed) g_dp.tx_hits++; else g_dp.tx_miss++;
     }
+    if (packed) pvr_txr_load((void *)packed, p, bytes);
+    else
+        for (uint32_t at = 0; at < bytes; at += chunk) {
+            dct_cut(src, key, at, chunk, g_dp_cut);
+            pvr_txr_load(g_dp_cut, (uint8_t *)p + at, chunk);
+        }
+    g_dp.tt_tex += timer_us_gettime64() - t0;
     *t = (dc_tex_t){ key, p, (uint16_t)W, (uint16_t)H, 1.0f / (float)W, 1.0f / (float)H,
                      (uint16_t)((y0 >> 1) + (x0 >= 1024 ? 512 : 0)),
                      (uint16_t)(((y0 + th - 1) >> 1) + (x0 >= 1024 ? 512 : 0)), (uint8_t)sheet };
@@ -534,11 +516,7 @@ static int dp_init(void) {
         pvr_set_pal_entry(32 + t, t == 0 ? 0xFFFFu : 0);
     }
     dp_knee_init();
-    for (unsigned i = 0; i < 1024; i++) {
-        unsigned s = 0;
-        for (int b = 0; b < 10; b++) s |= ((i >> b) & 1u) << (2 * b);
-        g_dp_spread[i] = (uint16_t)s;
-    }
+    dct_init();
     g_dp.bg   = pvr_mem_malloc(512 * 512 * 2);
     g_dp.fg   = pvr_mem_malloc(512 * 512 * 2);
     g_dp.text = pvr_mem_malloc(1024 * 512 * 2);
@@ -550,7 +528,7 @@ static int dp_init(void) {
     memset(g_dp_cut, 0, 32);
     for (unsigned y = 0; y < 8; y++)
         for (unsigned x = 0; x < 8; x++) {
-            unsigned i = g_dp_spread[y] | (unsigned)g_dp_spread[x] << 1;
+            unsigned i = g_dct_spread[y] | (unsigned)g_dct_spread[x] << 1;
             g_dp_cut[i >> 1] |= (uint8_t)((((x ^ y) & 1u) ? 1u : 0u) << ((i & 1) * 4));
         }
     g_dp.checker = pvr_mem_malloc(32);

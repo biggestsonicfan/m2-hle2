@@ -1133,7 +1133,8 @@ a5d21d21 in all three):
   texture-header and UV work; submit −373 ms and sort −125 ms, from a quad
   being one 4-vertex strip instead of two triangles. The slice (the board) is
   unchanged.
-- **The textures stay converted at run time; there is no .pvr pack.** The PVR
+- **The textures stay converted at run time** (but see #502, below, for a pack
+  that skips the cut when texture RAM holds what it recorded). The PVR
   textures are cut from texture RAM as the board draws, and the game's loader
   fills it at run time (see "Textures converted at build time do not pay
   here" under #456). The
@@ -1143,6 +1144,46 @@ a5d21d21 in all three):
   `dp_tex_get` cuts it since #486. Each texture's
   `pvr_poly_hdr_t` was already compiled once per texture and variant
   (`dp_tex_t.hdr`), not per frame.
+
+## Textures pre-converted: TEXTURES.PAK (#502)
+
+The pack holds the PVR textures attract and a scripted fight cut, already
+twiddled (`dreamcast/dc_texpak.h`). Texture RAM is filled by the game's loader
+at run time, so an entry is keyed by the texture's key and an FNV-1a hash of
+the texture-RAM words the cut reads (`dct_src_hash`). `dp_tex_get` hashes
+first; a hit is one `pvr_txr_load` from the pack, a miss or another hash is
+cut as before. Only textures up to 256 a side are packed. The data lies in
+the order the recorded frames first drew it, and is read past the page cache
+through a 64 KB window (`pg_tx_at`, `DC_TX_WINDOW`), so one read brings in
+the next textures of the same scene. `det_digest --tex-pack` records it from
+the ROM files; `TEXPAK=` puts it on the disc. Nothing in it is committed.
+
+- **What it holds:** 280 textures, 2.79 MB (248 from 6000 frames of attract,
+  32 more from 9000 of the scripted fight). 128x128 (62), 64x64 (50) and
+  256x256 (43) are the common sizes.
+- **Held against Sonic Gems Collection's banks** (`tex_banks`, Map1-Map5):
+  every one of the 241 textures that is not a single index matches a Gems
+  bank at the key's rectangle (correlation ratio of our 4-bit indices to the
+  bank's luminance above 0.9). Attract's come from Map1, 2, 4 and 5, the
+  fight's from Map3. The other 39 are one index throughout: tiles a face drew
+  while the loader had not reached their rows yet. They hash as such, so a
+  later frame with the real rows misses and cuts.
+- **A/B in Flycast** (the same 1ST_READ.BIN, the disc with and without the
+  pack, 330 s of attract from boot): the hash at f1500 is a5d21d21 on both,
+  #498's, so the cut moved into `dct_cut` unchanged and the pack draws the
+  same picture. Texture time up to f1500 (`tx` on the hash line) fell from
+  695 ms to 37 ms. The f3500-3900 bench did not move (18800 ms against
+  18791): attract cut only 5 ms of textures in that window. Both runs shared
+  the CPU with another session's Flycast, so the bench is slower than #498's
+  14274 ms on both sides.
+- **What it means for a console.** Flycast's disc is free, so the 658 ms are
+  the SH-4's cut alone. On a GD-ROM the pack only pays if its reads are
+  sequential with what the frame already reads or done at a load screen: a
+  seek is ~100 ms, so a texture read on demand mid-fight costs more than the
+  cut it saves. The frame-ordered layout and the 64 KB window are there for
+  that; reading a scene's run of the pack during the game's own load (with
+  the STRIPS.PAK run beside it) is the next step, and only hardware can say
+  what it is worth.
 
 ## Toolchain and runtime traps
 
