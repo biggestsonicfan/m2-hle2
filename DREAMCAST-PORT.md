@@ -793,10 +793,20 @@ as an option with #475 / #476, and `HUD=none` (#478) draws the board 1:1 again.
   are the same on a Dreamcast, with 192 tiles rendered instead of 300 and
   ~440 KB less framebuffer. That is not tested on hardware. The text rows are
   drawn at 0.8 in it, so that 20 fit.
-- **Flycast does not show it that way.** Its renderer stretches the TA's
-  frame to fill its output (512x384 x 1.25) and then moves it by the change
-  in `VO_STARTX`/`VO_STARTY`, so the picture came out enlarged and cut off on
-  the right. Hence the default.
+- **Flycast did not show it that way** until #499. Its renderer stretched the
+  TA's frame to fill its output (512x384 x 1.25) and then moved it by the
+  change in `VO_STARTX`/`VO_STARTY`, so the picture came out enlarged and cut
+  off on the right and at the bottom. Hence the default. Moving it back up and
+  left would not have been enough: its size was wrong too.
+  `dreamcast/tools/flycast-frame512.patch` (#499) fixes the libretro core's
+  OpenGL output: when the framebuffer the PVR shows (`FB_R_SIZE`) is smaller
+  than the screen, the output is the whole 640x480 screen and the frame goes in
+  it 1:1 at the video shift, black around it, as on a Dreamcast. The stats
+  rows and the fps counter all show. It also doubles an interlaced mode's
+  `VO_STARTY` shift (field lines). The core in `~/build/tools/dc/flycast` has
+  it, so the canary's Flycast launchers show a `FRAME512` disc whole. Composite
+  (480i) and VGA put the frame at the same place. A 640x480 disc looks as
+  before.
 - **No time either way in Flycast** over the bench's 400 frames (f3500-3900):
 
 | build | total | i960 slices | draws |
@@ -809,8 +819,8 @@ Repeat runs spread 15431-15435 ms, so all three are noise. Flycast cannot show
 a difference: it charges every frame 450,000 cycles plus 100 a byte of polygon
 data, whatever the resolution (`scheduleRenderDone`, `core/hw/pvr/spg.cpp`), and
 the polygon data is the same. Only `FRAME512` could save time on a Dreamcast
-(fewer tiles), it is untested there, and Flycast draws it enlarged and pushed
-off to the right. The commit (3af4093) was reverted. `FRAME512=1` stays as an
+(fewer tiles), it is untested there, and Flycast drew it enlarged and pushed
+off to the right (fixed by #499's patch). The commit (3af4093) was reverted. `FRAME512=1` stays as an
 option (off by default) for STF's fps disc (#475); the default frame is the
 scaled 640x480 one, which #479's VIEW gives with no VIEW set.
 
