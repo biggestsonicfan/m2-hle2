@@ -182,15 +182,16 @@ static inline uint32_t geo3d_corner_key(vec3_t p) {
     return h;
 }
 
+/* A slot's three words side by side: as three arrays 32 KB apart they fell on
+ * the same line of the SH-4's direct-mapped cache, three misses a lookup. */
+typedef struct { uint32_t stamp, quad, cut; } geo3d_split_slot_t;
 static uint32_t g_geo3d_split_gen;
-static uint32_t g_geo3d_split_stamp[GEO3D_SPLIT_SLOTS];
-static uint32_t g_geo3d_split_quad[GEO3D_SPLIT_SLOTS];
-static uint32_t g_geo3d_split_cut[GEO3D_SPLIT_SLOTS];
+static geo3d_split_slot_t g_geo3d_split[GEO3D_SPLIT_SLOTS];
 
 /* Forget every quad seen so far — once per model. */
 static inline void geo3d_split_reset(void) {
     if (++g_geo3d_split_gen == 0) {
-        memset(g_geo3d_split_stamp, 0, sizeof g_geo3d_split_stamp);
+        for (uint32_t i = 0; i < GEO3D_SPLIT_SLOTS; i++) g_geo3d_split[i].stamp = 0;
         g_geo3d_split_gen = 1;
     }
 }
@@ -199,13 +200,13 @@ static inline void geo3d_split_reset(void) {
  * The first sighting records its cut and answers false. */
 static inline bool geo3d_split_other_way(uint32_t quad, uint32_t cut) {
     uint32_t i = (quad * 2654435761u) & (GEO3D_SPLIT_SLOTS - 1u);
-    while (g_geo3d_split_stamp[i] == g_geo3d_split_gen) {
-        if (g_geo3d_split_quad[i] == quad) return g_geo3d_split_cut[i] != cut;
+    while (g_geo3d_split[i].stamp == g_geo3d_split_gen) {
+        if (g_geo3d_split[i].quad == quad) return g_geo3d_split[i].cut != cut;
         i = (i + 1u) & (GEO3D_SPLIT_SLOTS - 1u);
     }
-    g_geo3d_split_stamp[i] = g_geo3d_split_gen;
-    g_geo3d_split_quad[i]  = quad;
-    g_geo3d_split_cut[i]   = cut;
+    g_geo3d_split[i].stamp = g_geo3d_split_gen;
+    g_geo3d_split[i].quad  = quad;
+    g_geo3d_split[i].cut   = cut;
     return false;
 }
 
@@ -3210,17 +3211,11 @@ static int geo3d_mesh_for_draw(const geo3d_models_t *md, int model_idx,
     return *out ? GEO3D_DRAW_CACHED : GEO3D_DRAW_FULL;
 }
 
-/* The cached draw's window test. False when no face can be dropped: culling
- * off, or the model's sphere wholly inside every plane. Otherwise oc holds each
- * corner's codes: wholly outside one plane, every corner has that plane's, and
- * *gone is set. */
-static inline bool geo3d_cached_cull_codes(const geo3d_cmesh_t *m, const float *matrix,
-                                           const vec3_t *tv, uint8_t *oc, bool lines, bool *gone) {
-    *gone = false;
-    if (!g_geo3d_cull_on || lines) return false;
-    /* The model's sphere first: wholly inside every plane, nothing can be
-     * dropped; wholly outside one, everything is. Only a model across a
-     * side needs its corners' codes. */
+/* The model's sphere against the window, before any corner is moved: 0 when
+ * no face can be dropped (culling off, or wholly inside every plane), the bit of
+ * a plane it is wholly outside, or -1 across a side (its corners need codes). */
+static inline int geo3d_cached_sphere(const geo3d_cmesh_t *m, const float *matrix, bool lines) {
+    if (!g_geo3d_cull_on || lines) return 0;
     const float *mx = matrix;
     float s2 = fmaxf(fmaxf(mx[0] * mx[0] + mx[4] * mx[4] + mx[8] * mx[8],
                            mx[1] * mx[1] + mx[5] * mx[5] + mx[9] * mx[9]),
@@ -3235,8 +3230,17 @@ static inline bool geo3d_cached_cull_codes(const geo3d_cmesh_t *m, const float *
         if (d > e) in++;
         else if (d < -e && !all_out) all_out = (uint8_t)(1u << k);
     }
-    if (in == 5) return false;
-    if (all_out) { memset(oc, all_out, (size_t)m->n_sv); *gone = true; }
+    return in == 5 ? 0 : all_out ? all_out : -1;
+}
+
+/* The cached draw's window test, sph from geo3d_cached_sphere. False when no
+ * face can be dropped. Otherwise oc holds each corner's codes: wholly outside
+ * one plane, every corner has that plane's, and *gone is set. */
+static inline bool geo3d_cached_cull_codes(const geo3d_cmesh_t *m, int sph,
+                                           const vec3_t *tv, uint8_t *oc, bool *gone) {
+    *gone = false;
+    if (sph == 0) return false;
+    if (sph > 0) { memset(oc, sph, (size_t)m->n_sv); *gone = true; }
 #ifdef GEO3D_FTRV
     else {
         const float (*q)[4] = g_geo3d_cull_plane;
@@ -3257,6 +3261,40 @@ static inline bool geo3d_cached_cull_codes(const geo3d_cmesh_t *m, const float *
 }
 
 #ifdef GEO3D_DC_SINK
+/* A model wholly out of the window leaves only the flat key's carry behind:
+ * that of the last face (in order) with a mode other than "the previous". */
+static inline void geo3d_cached_gone_carry(const geo3d_cmesh_t *m, const float *matrix) {
+    if (!(g_geo3d_zflat && g_geo3d_flat_list)) return;
+    int zsrc[4];
+    uint32_t zmode = 0;
+    /* the walk takes the packed faces first */
+    for (int n = m->faces ? m->n_faces - 1 : -1; n >= 0 && !zmode; n--)
+        if ((zmode = m->faces[n].zmode) != 0u)
+            for (int k = 0; k < 4; k++) zsrc[k] = m->faces[n].zsrc[k];
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+    for (int n = m->sfaces ? m->n_faces - 1 : -1; n >= 0 && !zmode; n--)
+        if ((zmode = m->sfaces[n].zmode) != 0u)
+            for (int k = 0; k < 4; k++) zsrc[k] = m->sfaces[n].zsrc[k];
+#endif
+    if (!zmode) return;
+    vec3_t tv[4];
+    const int idx[4] = { 0, 1, 2, 3 };
+    if (zmode != 3u) {   /* moved as geo3d_decode_model_cached moves them, to the bit */
+#ifdef GEO3D_FTRV
+        geo3d_xmtrx_board(matrix);
+        for (int k = 0; k < 4; k++) {
+            const vec3_t p = m->sv[zsrc[k]];
+            float o[4];
+            geo3d_ftrv(p.x, p.y, p.z, 1.0f, o);
+            tv[k].x = o[0]; tv[k].y = o[1]; tv[k].z = o[2];
+        }
+#else
+        for (int k = 0; k < 4; k++) tv[k] = apply_matrix(m->sv[zsrc[k]], matrix);
+#endif
+    }
+    geo3d_flat_z(tv, idx, zmode);
+}
+
 /* The cached draw's walk in the order the Dreamcast needs: the flat key's carry
  * and the diagonals for every face, the colour and light only for one that is
  * drawn, and the key only as a number. gone: every face out, so its corners
@@ -3270,6 +3308,9 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
     /* The same walk over a packed mesh's faces (geo3d_strips_load). */
     for (int n = 0; m->sfaces && n < m->n_faces; n++) {
         const geo3d_sface_t *f = &m->sfaces[n];
+        /* every face missed the cache: ask for the one after next (two lines) */
+        __builtin_prefetch(f + 2);
+        __builtin_prefetch((const char *)(f + 2) + 32);
         const bool is_tri = (f->bits & GEO3D_SF_TRI) != 0;
         const int zsrc[4] = { f->zsrc[0], f->zsrc[1], f->zsrc[2], f->zsrc[3] };
         const float z = flat ? geo3d_flat_z(tv, zsrc, f->zmode) : 0.0f;
@@ -3358,11 +3399,26 @@ static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model
         return;
     }
 
+    bool lines = g_geo_wireframe != 0;
+    const int sph = geo3d_cached_sphere(m, matrix, lines);
+#ifdef GEO3D_DC_SINK
+    /* Wholly outside the window: no face is drawn, and of all the walk does
+     * only the flat key's carry outlives the model (the diagonals are the
+     * model's own). The carry is the last face's that sets one: move its
+     * corners alone. */
+    if (sph > 0) {
+        geo3d_cached_gone_carry(m, matrix);
+        geo3d_emit_state_reset();
+        return;
+    }
+#endif
+
     static vec3_t tv[GEO3D_IA_MAX_VERTS];
 #ifdef GEO3D_FTRV
     geo3d_xmtrx_board(matrix);
     for (int i = 0; i < m->n_sv; i++) {
         float o[4];
+        __builtin_prefetch(&m->sv[i + 8]);   /* the corners stream in: a line ahead */
         geo3d_ftrv(m->sv[i].x, m->sv[i].y, m->sv[i].z, 1.0f, o);
         tv[i].x = o[0]; tv[i].y = o[1]; tv[i].z = o[2];
     }
@@ -3370,10 +3426,9 @@ static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model
     for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
 #endif
     geo3d_split_reset();
-    bool lines = g_geo_wireframe != 0;
     static uint8_t oc[GEO3D_IA_MAX_VERTS];
     bool gone;
-    const bool cull = geo3d_cached_cull_codes(m, matrix, tv, oc, lines, &gone);
+    const bool cull = geo3d_cached_cull_codes(m, sph, tv, oc, &gone);
 #ifdef GEO3D_DC_SINK
     geo3d_cached_draw_dc(md, m, tv, oc, cull, gone, matrix, cr, cg, cb);
 #else

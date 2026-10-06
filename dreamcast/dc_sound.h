@@ -504,7 +504,12 @@ static int ds_init(void) {
     }
     free(cues);
     mutex_init(&g_ds.mx, MUTEX_TYPE_NORMAL);
-    if (snd_stream_init() < 0) return ds_init_fail();
+    /* KOS splits a stereo block into two buffers half its size apart: at its
+     * default 64 KB that is 32 KB, the same line of the SH-4's 16 KB direct-
+     * mapped cache, so every store of the split missed and wrote one back
+     * (Pinboard #513). 48 KB puts them half a cache apart and still holds the
+     * most a poll asks for, half of DS_STREAM a channel. */
+    if (snd_stream_init_ex(2, 48u << 10) < 0) return ds_init_fail();
     for (int i = 0; i < DS_VOICES; i++)
         if ((g_ds.voice_chn[i] = snd_sfx_chn_alloc()) < 0) return ds_init_fail();
     uint32_t ram = 0;

@@ -64,6 +64,41 @@ Number cells take only digits.
 - PVR: render 12.1 ms, registration 4.5 ms.
 - Draw: 2,400 triangles a frame, scan 34 ms.
 
+## Where the data-cache stall goes (Pinboard #513)
+
+The stall counters say 31% of the console's cycles wait on the data cache,
+but not where. Flycast has no cache model that runs this port (its
+STRICT_MODE one stops on a blocked exception after a few seconds), so the
+look was taken with a passive one: the interpreter's loads, stores, `pref`,
+`movca.l` and `ocb*` fed to a 16 KB direct-mapped, copy-back tag model with
+32-byte lines (and an 8 KB instruction cache), counting misses and
+write-backs by PC and by RAM line. It changes nothing the program sees.
+Over 383 attract-fight frames at idea-340-dreamcast a22cc69:
+
+- 139,000 data misses and 64,000 write-backs a frame. At the ~40 cycles a
+  miss costs, that is the counters' 30%.
+- The cached model decoder takes a quarter: 12.6 misses a face. Every
+  64-byte packed face missed. The quad-diagonal table
+  (`geo3d_split_other_way`) was three arrays exactly 32 KB apart, all on one
+  cache line, so each lookup missed three times.
+- KallistiOS's stereo stream split (`snd_pcm16_split`) missed on every store.
+  With `snd_stream_init()`'s 64 KB, the left and right buffers are 32 KB
+  apart: the same line again.
+
+The fix:
+- The split table is one array of slots.
+- The face walk and the corner transform `pref` ahead.
+- The sound stream's split buffers are half a cache apart.
+- A model wholly outside the window skips its transform and face walk. Only
+  its last flat key's carry is worked out. A check build ran both paths on
+  every off-screen draw for about 6 minutes of attract mode, fight included:
+  36,359 draws (the same few dozen models, frame after frame; 1.06 million
+  faces), and the carry came out the same every time.
+
+Over the same frames: data misses 139k -> 108k a frame (-23%), write-backs
+64k -> 44k (-31%), instructions -5%. The decoder's misses are 36% fewer. The
+console's stall % should show it.
+
 ## Re-reading another video
 
 The cell grid is fitted to this capture: (321.9, 87.0) with a pitch of
