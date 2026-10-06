@@ -807,6 +807,10 @@ as an option with #475 / #476, and `HUD=none` (#478) draws the board 1:1 again.
   it, so the canary's Flycast launchers show a `FRAME512` disc whole. Composite
   (480i) and VGA put the frame at the same place. A 640x480 disc looks as
   before.
+  For the RK3566 handheld (ROCKNIX's RetroArch, GLES 3),
+  `~/build/tools/dc/build-flycast-arm64.sh` (#501) cross-builds the same
+  patched tree as a linux-arm64 core, `build-lr-arm64/flycast_libretro.so`;
+  it needs only glibc 2.38, nothing else.
 - **No time either way in Flycast** over the bench's 400 frames (f3500-3900):
 
 | build | total | i960 slices | draws |
