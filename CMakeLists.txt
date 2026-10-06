@@ -664,7 +664,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(geo_test   PRIVATE miniz)
     # emu_test/input_test pull input.h -> sokol_app.h (and sokol_gfx through the
     # UI headers); linking sokol propagates the includes.
-    target_link_libraries(emu_test   PRIVATE sokol)
+    target_link_libraries(emu_test   PRIVATE miniz sokol)   # emu_thread.h -> savestate.h
     target_link_libraries(input_test PRIVATE miniz sokol)
     # audio_out.h calls into sokol_audio (its device path is not under test).
     target_link_libraries(audio_out_test PRIVATE sokol)

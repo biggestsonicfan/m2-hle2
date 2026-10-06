@@ -19,6 +19,7 @@
 #ifndef MCP_BRIDGE_H
 #define MCP_BRIDGE_H
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -190,6 +191,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
              "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
              "\"texload\":{\"hle\":%s,\"rows\":%llu},"
+             "\"enemy_rank\":%d,"
              "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
@@ -200,6 +202,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              g_match_replay_frame,
              g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
              g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
+             (int)g_enemy_rank,
              av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
@@ -262,11 +265,9 @@ static void mcp_cmd_set_input(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"held\":\"0x%08X\"}", held);
 }
 
-/* Live-tune the 3D camera (for the geo_displaylist render path) without rebuilding.
- * Any omitted field keeps its current value. e.g.
- *   {"cmd":"set_camera","cam_z":"0","fov":"65","rot_y":"0"} */
-static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
-    if (!g_geo3d_state) { snprintf(resp,(size_t)cap,"{\"ok\":false,\"error\":\"geo3d not ready\"}"); return; }
+/* set_camera's view fields: where the debug camera stands and looks, and the
+ * test triangle / lines-only switches. */
+static void mcp_set_camera_view(const char *req) {
     char v[32];
     if (mcp_json_get_str(req,"cam_x",v,sizeof v)) g_geo3d_state->cam_x   = (float)atof(v);
     if (mcp_json_get_str(req,"cam_y",v,sizeof v)) g_geo3d_state->cam_y   = (float)atof(v);
@@ -276,6 +277,11 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"fov",  v,sizeof v)) { g_geo3d_state->fov_deg = (float)atof(v); g_geo3d_state->fov_auto = false; }
     if (mcp_json_get_str(req,"test", v,sizeof v)) g_geo3d_state->test_triangle = (atoi(v) != 0);
     if (mcp_json_get_str(req,"lines_only",v,sizeof v)) g_geo3d_state->lines_only = (atoi(v) != 0);
+}
+
+/* set_camera's depth fields: the z-sort and its layers. */
+static void mcp_set_camera_depth(const char *req) {
+    char v[32];
     /* The board's polygon z-sort (geo3d.h geo3d_sort_z) — 0 leaves every face
      * at the depth the projection gives it, which is what a before/after on a
      * co-planar decal wants. */
@@ -289,11 +295,26 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     if (mcp_json_get_str(req,"zflat",   v,sizeof v)) g_geo3d_zflat = (atoi(v) != 0);
     /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
     if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
+}
+
+/* set_camera's fill fields: texture wrap, checker phase and corner normals. */
+static void mcp_set_camera_fill(const char *req) {
+    char v[32];
     /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
     if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
     if (mcp_json_get_str(req,"checker",v,sizeof v)) g_geo3d_checker_phase = (atoi(v) != 0);
     /* 0: a list in mode 2 or 3 is lit and culled with the ROM normals (geo3d_board_normal). */
     if (mcp_json_get_str(req,"nnormals",v,sizeof v)) g_geo3d_nn_normals = (atoi(v) != 0);
+}
+
+/* Live-tune the 3D camera (for the geo_displaylist render path) without rebuilding.
+ * Any omitted field keeps its current value. e.g.
+ *   {"cmd":"set_camera","cam_z":"0","fov":"65","rot_y":"0"} */
+static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
+    if (!g_geo3d_state) { snprintf(resp,(size_t)cap,"{\"ok\":false,\"error\":\"geo3d not ready\"}"); return; }
+    mcp_set_camera_view(req);
+    mcp_set_camera_depth(req);
+    mcp_set_camera_fill(req);
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
              "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zflat\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"zadjust\":\"0x%08X\"}",
@@ -408,15 +429,42 @@ static void mcp_cmd_read_memory(const char *req, char *resp, int cap, int peek) 
  * nesting; decimal or 0x hex, quoted or bare. */
 #define MCP_READ_MANY_RANGES 64
 #define MCP_READ_MANY_BYTES  32768   /* hex doubles it, inside the 128 kB reply */
-static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
-    uint8_t *buf;   /* per call: watchers read on threads of their own */
+/* The ranges as parsed: addresses, sizes, how many, and their bytes in all.
+ * half says whether the next number is a size. */
+typedef struct {
     uint32_t addr[MCP_READ_MANY_RANGES], size[MCP_READ_MANY_RANGES];
-    int n = 0, half = 0, depth = 0;
-    uint32_t total = 0;
+    int      n, half;
+    uint32_t total;
+} mcp_read_many_t;
 
+/* One number of the flat run: an address, or the size after it. False, with
+ * the refusal written, when the ranges go past a limit. */
+static bool mcp_read_many_take(mcp_read_many_t *rm, uint32_t v, char *resp, int cap) {
+    if (!rm->half) {
+        if (rm->n == MCP_READ_MANY_RANGES) {
+            snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d ranges\"}",
+                     MCP_READ_MANY_RANGES); return false;
+        }
+        rm->addr[rm->n] = v;
+    } else {
+        rm->size[rm->n] = v;
+        if (v > MCP_READ_MANY_BYTES - rm->total) {
+            snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d bytes in all\"}",
+                     MCP_READ_MANY_BYTES); return false;
+        }
+        rm->total += v;
+        rm->n++;
+    }
+    rm->half ^= 1;
+    return true;
+}
+
+/* `ranges` into rm. False, with the refusal written, when it is not usable. */
+static bool mcp_read_many_parse(const char *req, mcp_read_many_t *rm, char *resp, int cap) {
+    int depth = 0;
     const char *p = json_value_at(req, "ranges");
     if (!p || *p != '[') {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing ranges\"}"); return;
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing ranges\"}"); return false;
     }
     for (; *p; p++) {
         if (*p == '[') { depth++; continue; }
@@ -425,29 +473,42 @@ static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
             char *end;
             uint32_t v = (uint32_t)strtoul(p, &end, 0);
             p = end - 1;
-            if (!half) {
-                if (n == MCP_READ_MANY_RANGES) {
-                    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d ranges\"}",
-                             MCP_READ_MANY_RANGES); return;
-                }
-                addr[n] = v;
-            } else {
-                size[n] = v;
-                if (v > MCP_READ_MANY_BYTES - total) {
-                    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"more than %d bytes in all\"}",
-                             MCP_READ_MANY_BYTES); return;
-                }
-                total += v;
-                n++;
-            }
-            half ^= 1;
+            if (!mcp_read_many_take(rm, v, resp, cap)) return false;
         }
     }
-    if (half || n == 0) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"ranges must be [addr,size] pairs\"}"); return;
+    if (rm->half || rm->n == 0) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"ranges must be [addr,size] pairs\"}"); return false;
     }
+    return true;
+}
+
+/* The reply: every range's bytes as one hex string. */
+static void mcp_read_many_reply(char *resp, int cap, unsigned frame, const mcp_read_many_t *rm,
+                                const uint8_t *b) {
+    /* 32 kB of hex is 64 kB, well inside the bridge's 128 kB reply. */
+    static const char hex[] = "0123456789ABCDEF";
+    char *o = resp;
+    o += snprintf(o, (size_t)cap, "{\"ok\":true,\"frame\":%u,\"data\":[", frame);
+    for (int r = 0; r < rm->n; r++) {
+        if (r) *o++ = ',';
+        *o++ = '"';
+        for (uint32_t i = 0; i < rm->size[r]; i++, b++) {
+            *o++ = hex[*b >> 4];
+            *o++ = hex[*b & 15];
+        }
+        *o++ = '"';
+    }
+    *o++ = ']'; *o++ = '}'; *o = '\0';
+}
+
+static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
+    uint8_t *buf;   /* per call: watchers read on threads of their own */
+    mcp_read_many_t rm;
+    rm.n = 0; rm.half = 0; rm.total = 0;
+
+    if (!mcp_read_many_parse(req, &rm, resp, cap)) return;
     if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
-    if (!(buf = (uint8_t *)malloc(total ? total : 1))) {
+    if (!(buf = (uint8_t *)malloc(rm.total ? rm.total : 1))) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
     }
 
@@ -457,25 +518,11 @@ static void mcp_cmd_read_many(const char *req, char *resp, int cap, int peek) {
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     unsigned frame = g_emu_frames;
     uint8_t *b = buf;
-    for (int r = 0; r < n; r++)
-        for (uint32_t i = 0; i < size[r]; i++) *b++ = mcp_bus_byte(g_mcp.bus, addr[r] + i, peek);
+    for (int r = 0; r < rm.n; r++)
+        for (uint32_t i = 0; i < rm.size[r]; i++) *b++ = mcp_bus_byte(g_mcp.bus, rm.addr[r] + i, peek);
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 
-    /* 32 kB of hex is 64 kB, well inside the bridge's 128 kB reply. */
-    static const char hex[] = "0123456789ABCDEF";
-    char *o = resp;
-    o += snprintf(o, (size_t)cap, "{\"ok\":true,\"frame\":%u,\"data\":[", frame);
-    b = buf;
-    for (int r = 0; r < n; r++) {
-        if (r) *o++ = ',';
-        *o++ = '"';
-        for (uint32_t i = 0; i < size[r]; i++, b++) {
-            *o++ = hex[*b >> 4];
-            *o++ = hex[*b & 15];
-        }
-        *o++ = '"';
-    }
-    *o++ = ']'; *o++ = '}'; *o = '\0';
+    mcp_read_many_reply(resp, cap, frame, &rm, buf);
     free(buf);
 }
 
@@ -520,20 +567,43 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
  * {"off":1} ends it, and nothing at all asks how it is going. Every answer
  * carries the phase: "ready" means the stage is the one asked for, its textures
  * have stopped changing and the camera is where the link put it. */
+/* A link fragment from the request's stage, eye and ang, for a request that
+ * names no link. Empty when it names none of them either. */
+static void mcp_sky_eye_link_of(const char *req, char *link, size_t cap) {
+    char v[128];
+    size_t n = 0;
+    if (json_get_str(req, "eye", v, sizeof v))
+        n += (size_t)snprintf(link + n, cap - n, "&eye=%s", v);
+    if (json_get_str(req, "ang", v, sizeof v))
+        n += (size_t)snprintf(link + n, cap - n, "&ang=%s", v);
+    uint32_t st;
+    if (mcp_json_get_u32(req, "stage", &st))
+        n += (size_t)snprintf(link + n, cap - n, "&stage=%u", st);
+    if (n) link[0] = '#';
+}
+
+/* The phase, what was asked for and where the game's camera is now. */
+static void mcp_sky_eye_reply(char *resp, int cap) {
+    float p[3] = {0}; int a[3] = {0};
+    int have = sky_eye_read_camera(g_mcp.bus, p, a);
+    int stage_now = (int)mem_read8(g_mcp.bus, SKY_EYE_STAGE_NUM);
+    const sky_eye_req_t *q = &g_sky_eye.req;
+    snprintf(resp, (size_t)cap,
+        "{\"ok\":true,\"phase\":\"%s\",\"stage\":%d,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d],"
+        "\"from_explorer\":%s,\"frames\":%u,\"phase_frames\":%u,\"texram_stable_polls\":%d,"
+        "\"camera_held\":%s,\"hook_calls\":%u,\"game\":{\"stage_num\":%d,\"camera\":%s,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d]}}",
+        SKY_EYE_PHASE_NAME[g_sky_eye.phase], q->stage, q->pos[0], q->pos[1], q->pos[2],
+        q->xang, q->yang, q->zang, q->from_explorer ? "true" : "false",
+        g_sky_eye.total_frames, g_sky_eye.phase_frames, g_sky_eye.stable,
+        g_sky_eye.camera_held ? "true" : "false", g_sky_eye.hook_calls, stage_now, have ? "true" : "false",
+        p[0], p[1], p[2], a[0], a[1], a[2]);
+}
+
 static void mcp_cmd_sky_eye(const char *req, char *resp, int cap) {
     if (!g_mcp.bus) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"bus not ready\"}"); return; }
-    char link[1024] = {0}, v[128], err[160] = {0};
-    if (!json_get_str_unescaped(req, "link", link, sizeof link)) {
-        size_t n = 0;
-        if (json_get_str(req, "eye", v, sizeof v))
-            n += (size_t)snprintf(link + n, sizeof link - n, "&eye=%s", v);
-        if (json_get_str(req, "ang", v, sizeof v))
-            n += (size_t)snprintf(link + n, sizeof link - n, "&ang=%s", v);
-        uint32_t st;
-        if (mcp_json_get_u32(req, "stage", &st))
-            n += (size_t)snprintf(link + n, sizeof link - n, "&stage=%u", st);
-        if (n) link[0] = '#';
-    }
+    char link[1024] = {0}, err[160] = {0};
+    if (!json_get_str_unescaped(req, "link", link, sizeof link))
+        mcp_sky_eye_link_of(req, link, sizeof link);
     const char *ov = json_value_at(req, "off");     /* {"off":true} as well as 1 */
     int off = ov && (*ov == 't' || strtoul(ov, NULL, 0) != 0);
     sky_eye_req_t r;
@@ -551,19 +621,7 @@ static void mcp_cmd_sky_eye(const char *req, char *resp, int cap) {
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     if (off) sky_eye_stop();
     else if (link[0]) sky_eye_start(&r);
-    float p[3] = {0}; int a[3] = {0};
-    int have = sky_eye_read_camera(g_mcp.bus, p, a);
-    int stage_now = (int)mem_read8(g_mcp.bus, SKY_EYE_STAGE_NUM);
-    const sky_eye_req_t *q = &g_sky_eye.req;
-    snprintf(resp, (size_t)cap,
-        "{\"ok\":true,\"phase\":\"%s\",\"stage\":%d,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d],"
-        "\"from_explorer\":%s,\"frames\":%u,\"phase_frames\":%u,\"texram_stable_polls\":%d,"
-        "\"camera_held\":%s,\"hook_calls\":%u,\"game\":{\"stage_num\":%d,\"camera\":%s,\"eye\":[%.4f,%.4f,%.4f],\"ang\":[%d,%d,%d]}}",
-        SKY_EYE_PHASE_NAME[g_sky_eye.phase], q->stage, q->pos[0], q->pos[1], q->pos[2],
-        q->xang, q->yang, q->zang, q->from_explorer ? "true" : "false",
-        g_sky_eye.total_frames, g_sky_eye.phase_frames, g_sky_eye.stable,
-        g_sky_eye.camera_held ? "true" : "false", g_sky_eye.hook_calls, stage_now, have ? "true" : "false",
-        p[0], p[1], p[2], a[0], a[1], a[2]);
+    mcp_sky_eye_reply(resp, cap);
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 }
 
@@ -1303,6 +1361,8 @@ static void mcp_cmd_set_geo_isolate(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"isolate\":%d}", g_geo3d_state->isolate_index);
 }
 
+/* The published snapshot: the list's own words are this frame's; the rest of
+ * bufferram may hold an older frame's (geodl_publish copies what it walks). */
 static void mcp_cmd_dump_geo_list(const char *req, char *resp, int cap) {
     char path[512] = {0};
     if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
@@ -1526,16 +1586,11 @@ static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
     hdr[1] = 2; hdr[2] = first; hdr[3] = count;
     fwrite(hdr, 4, 4, f);
 
+    const geo3d_models_t md = geo3d_models_of(g_mcp.romset, q);
     uint32_t nonempty = 0, total_tris = 0;
     for (uint32_t m = first; m < first + count; m++) {
         dump_buf.count = 0;
-        geo3d_decode_model((int)m,
-                           g_mcp.romset->main_data, g_mcp.romset->main_data_size,
-                           g_mcp.romset->polygons,  g_mcp.romset->polygons_size,
-                           g_mcp.romset->textures,  g_mcp.romset->textures_size,
-                           q->model_table_offset, q->model_table_count,
-                           q->mesh_ptr_subtract, q->mesh_ptr_add,
-                           NULL, 1.0f, 1.0f, 1.0f);
+        geo3d_decode_model(&md, (int)m, NULL, 1.0f, 1.0f, 1.0f);
         uint32_t n = (uint32_t)dump_buf.count;
         uint32_t rec[2] = { m, n };
         fwrite(rec, 4, 2, f);
@@ -1647,92 +1702,122 @@ static void mcp_cmd_capture_snd(const char *req, char *resp, int cap) {
     mcp_cmd_capture_snd_finish(req, resp, cap);
 }
 
-static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
-    uint32_t frames = 60, max_words = 8u * 1024u * 1024u, timeout_ms = 120000;
-    uint32_t lo = DL_TAP_LO, hi = DL_TAP_HI, want_slots = 0, want_unit = 0, want_cop = 0;
-    char path[512] = {0}, probes[2048] = {0}, blockspec[512] = {0};
+/* A capture_dl request: its options and the buffers the capture fills. */
+typedef struct {
+    uint32_t frames, max_words, timeout_ms, lo, hi;
+    uint32_t want_slots, want_unit, want_cop, want_run;
+    char     path[512];
+    uint32_t paddr[DL_MAX_PROBES]; uint8_t psize[DL_MAX_PROBES]; int np;
+    uint32_t baddr[DL_MAX_BLOCKS], blen[DL_MAX_BLOCKS], bbytes; int nb;
+    dl_rec_t  *recs;
+    dl_mark_t *marks;
+    uint32_t  *slots;
+    float     *unit;
+    uint8_t   *blocks, *cop_bufram;
+    uint32_t  *cop_dm;
+} mcp_dl_req_t;
+
+#define MCP_DL_UNIT_PER_MARK (sizeof g_sharc.rot_cache / sizeof(float))
+
+/* The request's options, clamped. False when it names no path. */
+static bool mcp_dl_parse(const char *req, mcp_dl_req_t *q) {
+    char probes[2048] = {0}, blockspec[512] = {0};
+    q->frames = 60; q->max_words = 8u * 1024u * 1024u; q->timeout_ms = 120000;
+    q->lo = DL_TAP_LO; q->hi = DL_TAP_HI;
     mcp_json_get_str(req, "blocks", blockspec, sizeof(blockspec));
-    mcp_json_get_u32(req, "slots", &want_slots);
-    mcp_json_get_u32(req, "unit", &want_unit);
+    mcp_json_get_u32(req, "slots", &q->want_slots);
+    mcp_json_get_u32(req, "unit", &q->want_unit);
     /* cop: the coprocessor conversation in a MAME SHARC-side capture's format
      * (tests/cop_replay), with <path>.bufram.bin and <path>.dm.bin beside it. */
-    mcp_json_get_u32(req, "cop", &want_cop);
+    mcp_json_get_u32(req, "cop", &q->want_cop);
     /* run: start a stopped emulator once the capture is armed, so a grader
      * launched without --run captures from power-on instead of from whenever
      * this request happened to arrive. */
-    uint32_t want_run = 0;
-    mcp_json_get_u32(req, "run", &want_run);
-    mcp_json_get_u32(req, "lo", &lo);
-    mcp_json_get_u32(req, "hi", &hi);
-    if (lo < DL_TAP_LO) lo = DL_TAP_LO;
-    if (hi > DL_TAP_HI || hi <= lo) hi = DL_TAP_HI;
-    mcp_json_get_u32(req, "frames", &frames);
-    mcp_json_get_u32(req, "max_words", &max_words);
-    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    mcp_json_get_u32(req, "run", &q->want_run);
+    mcp_json_get_u32(req, "lo", &q->lo);
+    mcp_json_get_u32(req, "hi", &q->hi);
+    if (q->lo < DL_TAP_LO) q->lo = DL_TAP_LO;
+    if (q->hi > DL_TAP_HI || q->hi <= q->lo) q->hi = DL_TAP_HI;
+    mcp_json_get_u32(req, "frames", &q->frames);
+    mcp_json_get_u32(req, "max_words", &q->max_words);
+    mcp_json_get_u32(req, "timeout_ms", &q->timeout_ms);
     mcp_json_get_str(req, "probes", probes, sizeof(probes));
-    if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
-    }
-    if (!g_mcp.bus || !g_mcp.emu) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emulator not ready\"}"); return;
-    }
-    if (frames == 0 || frames > 3600) frames = frames ? 3600 : 1;
-    if (max_words > 64u * 1024u * 1024u) max_words = 64u * 1024u * 1024u;
+    if (!mcp_json_get_str(req, "path", q->path, sizeof(q->path))) return false;
+    if (q->frames == 0 || q->frames > 3600) q->frames = q->frames ? 3600 : 1;
+    if (q->max_words > 64u * 1024u * 1024u) q->max_words = 64u * 1024u * 1024u;
 
-    uint32_t paddr[DL_MAX_PROBES]; uint8_t psize[DL_MAX_PROBES]; int np = 0;
-    for (char *tok = strtok(probes, ","); tok && np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
+    for (char *tok = strtok(probes, ","); tok && q->np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
         char *colon = strchr(tok, ':');
-        paddr[np] = (uint32_t)strtoul(tok, NULL, 16);
+        q->paddr[q->np] = (uint32_t)strtoul(tok, NULL, 16);
         uint32_t sz = colon ? (uint32_t)strtoul(colon + 1, NULL, 10) : 4;
-        psize[np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
+        q->psize[q->np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
     }
 
     /* blocks: "hexaddr:hexlen,..." -- whole ranges copied at every mark into
      * <path>.blocks.bin, capmarks x (sum of lengths) bytes. */
-    uint32_t baddr[DL_MAX_BLOCKS], blen[DL_MAX_BLOCKS], bbytes = 0; int nb = 0;
-    for (char *tok = strtok(blockspec, ","); tok && nb < DL_MAX_BLOCKS; tok = strtok(NULL, ",")) {
+    for (char *tok = strtok(blockspec, ","); tok && q->nb < DL_MAX_BLOCKS; tok = strtok(NULL, ",")) {
         char *colon = strchr(tok, ':');
         if (!colon) continue;
         uint32_t len = (uint32_t)strtoul(colon + 1, NULL, 16);
-        if (!len || bbytes + len > DL_BLOCK_BYTES) continue;
-        baddr[nb] = (uint32_t)strtoul(tok, NULL, 16); blen[nb++] = len; bbytes += len;
+        if (!len || q->bbytes + len > DL_BLOCK_BYTES) continue;
+        q->baddr[q->nb] = (uint32_t)strtoul(tok, NULL, 16); q->blen[q->nb++] = len; q->bbytes += len;
     }
+    return true;
+}
 
-    dl_rec_t  *recs  = (dl_rec_t *)malloc((size_t)max_words * sizeof(dl_rec_t));
-    dl_mark_t *marks = (dl_mark_t *)calloc((size_t)frames + 2, sizeof(dl_mark_t));
-    uint32_t  *slots = want_slots ? (uint32_t *)calloc(((size_t)frames + 2) * DL_SLOT_WORDS, sizeof(uint32_t)) : NULL;
-    const size_t unit_per_mark = sizeof g_sharc.rot_cache / sizeof(float);
-    float     *unit  = want_unit ? (float *)calloc(((size_t)frames + 2) * unit_per_mark, sizeof(float)) : NULL;
-    uint8_t   *blocks = nb ? (uint8_t *)calloc(((size_t)frames + 2), bbytes) : NULL;
-    uint8_t   *cop_bufram = want_cop ? (uint8_t *)calloc(BUFF_RAM_SIZE, 1) : NULL;
-    uint32_t  *cop_dm = want_cop ? (uint32_t *)calloc(0x1000, sizeof(uint32_t)) : NULL;
-    if (!recs || !marks || (want_slots && !slots) || (want_unit && !unit) || (nb && !blocks)
-        || (want_cop && (!cop_bufram || !cop_dm))) {
-        free(recs); free(marks); free(slots); free(unit); free(blocks); free(cop_bufram); free(cop_dm);
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
+static void mcp_dl_free(mcp_dl_req_t *q) {
+    free(q->cop_bufram); free(q->cop_dm); free(q->recs); free(q->marks);
+    free(q->slots); free(q->unit); free(q->blocks);
+}
+
+/* The capture's buffers, the optional ones only when asked for. False (and
+ * nothing held) when memory runs out. */
+static bool mcp_dl_alloc(mcp_dl_req_t *q) {
+    const size_t nm = (size_t)q->frames + 2;
+    q->recs  = (dl_rec_t *)malloc((size_t)q->max_words * sizeof(dl_rec_t));
+    q->marks = (dl_mark_t *)calloc(nm, sizeof(dl_mark_t));
+    bool ok = q->recs && q->marks;
+    if (q->want_slots) ok &= (q->slots = (uint32_t *)calloc(nm * DL_SLOT_WORDS, sizeof(uint32_t))) != NULL;
+    if (q->want_unit)  ok &= (q->unit = (float *)calloc(nm * MCP_DL_UNIT_PER_MARK, sizeof(float))) != NULL;
+    if (q->nb)         ok &= (q->blocks = (uint8_t *)calloc(nm, q->bbytes)) != NULL;
+    if (q->want_cop) {
+        ok &= (q->cop_bufram = (uint8_t *)calloc(BUFF_RAM_SIZE, 1)) != NULL;
+        ok &= (q->cop_dm = (uint32_t *)calloc(0x1000, sizeof(uint32_t))) != NULL;
     }
+    if (!ok) { mcp_dl_free(q); memset(q, 0, sizeof *q); }
+    return ok;
+}
 
-    emu_mutex_lock(&g_mcp.emu->mutex);
+/* Hand the buffers to the display-list tap. Caller holds the emu mutex. */
+static void mcp_dl_arm(const mcp_dl_req_t *q) {
     memset(&g_dl, 0, sizeof g_dl);
-    g_dl.recs = recs;   g_dl.cap = max_words;
-    g_dl.marks = marks; g_dl.capmarks = (size_t)frames + 2;
-    g_dl.want = frames;
-    g_dl.lo = lo; g_dl.hi = hi;
-    g_dl.slots = slots;
-    g_dl.unit = unit;
-    g_dl.nblocks = nb; g_dl.block_bytes = bbytes; g_dl.blocks = blocks;
-    memcpy(g_dl.block_addr, baddr, sizeof(uint32_t) * (size_t)nb);
-    memcpy(g_dl.block_len, blen, sizeof(uint32_t) * (size_t)nb);
-    g_dl.cop = want_cop != 0; g_dl.cop_bufram = cop_bufram; g_dl.cop_dm = cop_dm;
-    g_cop_tap = want_cop ? dl_cop_tap : NULL;
-    g_dl.nprobes = np;
-    memcpy(g_dl.probe_addr, paddr, sizeof(uint32_t) * (size_t)np);
-    memcpy(g_dl.probe_size, psize, (size_t)np);
+    g_dl.recs = q->recs;   g_dl.cap = q->max_words;
+    g_dl.marks = q->marks; g_dl.capmarks = (size_t)q->frames + 2;
+    g_dl.want = q->frames;
+    g_dl.lo = q->lo; g_dl.hi = q->hi;
+    g_dl.slots = q->slots;
+    g_dl.unit = q->unit;
+    g_dl.nblocks = q->nb; g_dl.block_bytes = q->bbytes; g_dl.blocks = q->blocks;
+    memcpy(g_dl.block_addr, q->baddr, sizeof(uint32_t) * (size_t)q->nb);
+    memcpy(g_dl.block_len, q->blen, sizeof(uint32_t) * (size_t)q->nb);
+    g_dl.cop = q->want_cop != 0; g_dl.cop_bufram = q->cop_bufram; g_dl.cop_dm = q->cop_dm;
+    g_cop_tap = q->want_cop ? dl_cop_tap : NULL;
+    g_dl.nprobes = q->np;
+    memcpy(g_dl.probe_addr, q->paddr, sizeof(uint32_t) * (size_t)q->np);
+    memcpy(g_dl.probe_size, q->psize, (size_t)q->np);
     g_dl.armed = 1;
-    emu_mutex_unlock(&g_mcp.emu->mutex);
-    if (want_run && g_mcp.emu->thread_alive) emu_run(g_mcp.emu);
+}
 
-    /* Wait out the frames without holding the mutex, as wait_frames does. */
+/* Take the buffers back from the tap. Caller holds the emu mutex. */
+static void mcp_dl_disarm(void) {
+    g_dl.armed = 0; g_dl.active = 0;
+    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
+    g_dl.blocks = NULL; g_dl.nblocks = 0; g_dl.block_bytes = 0;
+    g_dl.cop = 0; g_dl.cop_bufram = NULL; g_dl.cop_dm = NULL; g_cop_tap = NULL;
+}
+
+/* Wait out the frames without holding the mutex, as wait_frames does. */
+static void mcp_dl_wait(uint32_t timeout_ms) {
     uint32_t elapsed = 0, idle_ms = 0;
     while (!g_dl.done && elapsed < timeout_ms) {
         if (!emu_is_running(g_mcp.emu)) {
@@ -1744,82 +1829,97 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
         emu_sleep_ms(2);
         elapsed += 2;
     }
+}
+
+/* <path><ext>: n items of size bytes. */
+static bool mcp_dl_dump(const char *path, const char *ext, const void *p, size_t size, size_t n) {
+    char file[600];
+    snprintf(file, sizeof file, "%s%s", path, ext);
+    FILE *f = fopen(file, "wb");
+    bool ok = f && fwrite(p, size, n, f) == n;
+    if (f) fclose(f);
+    return ok;
+}
+
+/* <path>.json: the word count, the probes and every mark. */
+static bool mcp_dl_write_index(const mcp_dl_req_t *q, size_t n, size_t nmarks, int overflow) {
+    char file[600];
+    snprintf(file, sizeof file, "%s.json", q->path);
+    FILE *f = fopen(file, "w");
+    if (!f) return false;
+    fprintf(f, "{\"words\":%zu,\"frames\":%zu,\"overflow\":%s,\"probes\":[",
+            n, nmarks ? nmarks - 1 : 0, overflow ? "true" : "false");
+    for (int i = 0; i < q->np; i++)
+        fprintf(f, "%s\"0x%06X:%u\"", i ? "," : "", q->paddr[i], q->psize[i]);
+    fprintf(f, "],\"marks\":[");
+    for (size_t m = 0; m < nmarks; m++) {
+        fprintf(f, "%s[%u,%u", m ? "," : "", q->marks[m].frame, q->marks[m].index);
+        for (int i = 0; i < q->np; i++) fprintf(f, ",%u", q->marks[m].probe[i]);
+        fprintf(f, "]");
+    }
+    fprintf(f, "]}\n");
+    fclose(f);
+    return true;
+}
+
+/* The capture's files, each only if every one before it was written:
+ * <path>.bin (address, value pairs), <path>.json, and those asked for --
+ * <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
+ * TGP layout); <path>.unit.bin: the unit-matrix cache, 32 × 12 f32 per mark;
+ * <path>.blocks.bin; <path>.bufram.bin and <path>.dm.bin. */
+static bool mcp_dl_write(const mcp_dl_req_t *q, size_t n, size_t nmarks, int overflow) {
+    char file[600];
+    snprintf(file, sizeof file, "%s.bin", q->path);
+    FILE *f = fopen(file, "wb");
+    if (!f) return false;
+    bool ok = true;
+    for (size_t i = 0; i < n && ok; i++) {
+        uint32_t pair[2] = { q->recs[i].addr, q->recs[i].val };
+        ok = fwrite(pair, 4, 2, f) == 2;
+    }
+    fclose(f);
+    if (!ok || !mcp_dl_write_index(q, n, nmarks, overflow)) return false;
+    if (q->slots && !mcp_dl_dump(q->path, ".slots.bin", q->slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks))
+        return false;
+    if (q->unit && !mcp_dl_dump(q->path, ".unit.bin", q->unit, sizeof(float) * MCP_DL_UNIT_PER_MARK, nmarks))
+        return false;
+    if (q->blocks && !mcp_dl_dump(q->path, ".blocks.bin", q->blocks, q->bbytes, nmarks))
+        return false;
+    if (q->cop_bufram) {
+        bool b = mcp_dl_dump(q->path, ".bufram.bin", q->cop_bufram, 1, BUFF_RAM_SIZE);
+        bool d = mcp_dl_dump(q->path, ".dm.bin", q->cop_dm, sizeof(uint32_t), 0x1000);
+        if (!b || !d) return false;
+    }
+    return true;
+}
+
+static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
+    mcp_dl_req_t q = {0};
+    if (!mcp_dl_parse(req, &q)) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
+    }
+    if (!g_mcp.bus || !g_mcp.emu) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emulator not ready\"}"); return;
+    }
+    if (!mcp_dl_alloc(&q)) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return;
+    }
 
     emu_mutex_lock(&g_mcp.emu->mutex);
-    g_dl.armed = 0; g_dl.active = 0;
+    mcp_dl_arm(&q);
+    emu_mutex_unlock(&g_mcp.emu->mutex);
+    if (q.want_run && g_mcp.emu->thread_alive) emu_run(g_mcp.emu);
+
+    mcp_dl_wait(q.timeout_ms);
+
+    emu_mutex_lock(&g_mcp.emu->mutex);
     size_t n = g_dl.n, nmarks = g_dl.nmarks;
     int overflow = g_dl.overflow, done = g_dl.done;
-    g_dl.recs = NULL; g_dl.marks = NULL; g_dl.slots = NULL; g_dl.unit = NULL; g_dl.cap = g_dl.capmarks = 0;
-    g_dl.blocks = NULL; g_dl.nblocks = 0; g_dl.block_bytes = 0;
-    g_dl.cop = 0; g_dl.cop_bufram = NULL; g_dl.cop_dm = NULL; g_cop_tap = NULL;
+    mcp_dl_disarm();
     emu_mutex_unlock(&g_mcp.emu->mutex);
 
-    char file[600];
-    snprintf(file, sizeof file, "%s.bin", path);
-    FILE *f = fopen(file, "wb");
-    int wrote_ok = f != NULL;
-    if (f) {
-        for (size_t i = 0; i < n; i++) {
-            uint32_t pair[2] = { recs[i].addr, recs[i].val };
-            if (fwrite(pair, 4, 2, f) != 2) { wrote_ok = 0; break; }
-        }
-        fclose(f);
-    }
-    snprintf(file, sizeof file, "%s.json", path);
-    f = wrote_ok ? fopen(file, "w") : NULL;
-    if (f) {
-        fprintf(f, "{\"words\":%zu,\"frames\":%zu,\"overflow\":%s,\"probes\":[",
-                n, nmarks ? nmarks - 1 : 0, overflow ? "true" : "false");
-        for (int i = 0; i < np; i++)
-            fprintf(f, "%s\"0x%06X:%u\"", i ? "," : "", paddr[i], psize[i]);
-        fprintf(f, "],\"marks\":[");
-        for (size_t m = 0; m < nmarks; m++) {
-            fprintf(f, "%s[%u,%u", m ? "," : "", marks[m].frame, marks[m].index);
-            for (int i = 0; i < np; i++) fprintf(f, ",%u", marks[m].probe[i]);
-            fprintf(f, "]");
-        }
-        fprintf(f, "]}\n");
-        fclose(f);
-    } else {
-        wrote_ok = 0;
-    }
-    /* <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
-     * TGP layout); <path>.unit.bin: the unit-matrix cache, 32 × 12 f32 per mark. */
-    if (slots && wrote_ok) {
-        snprintf(file, sizeof file, "%s.slots.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks, f) != nmarks) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    if (unit && wrote_ok) {
-        snprintf(file, sizeof file, "%s.unit.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(unit, sizeof(float) * unit_per_mark, nmarks, f) != nmarks) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    if (blocks && wrote_ok) {
-        snprintf(file, sizeof file, "%s.blocks.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(blocks, bbytes, nmarks, f) != nmarks) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    if (cop_bufram && wrote_ok) {
-        snprintf(file, sizeof file, "%s.bufram.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(cop_bufram, 1, BUFF_RAM_SIZE, f) != BUFF_RAM_SIZE) wrote_ok = 0;
-        if (f) fclose(f);
-        snprintf(file, sizeof file, "%s.dm.bin", path);
-        f = fopen(file, "wb");
-        if (!f || fwrite(cop_dm, sizeof(uint32_t), 0x1000, f) != 0x1000) wrote_ok = 0;
-        if (f) fclose(f);
-    }
-    free(cop_bufram);
-    free(cop_dm);
-    free(recs);
-    free(marks);
-    free(slots);
-    free(unit);
-    free(blocks);
+    const bool wrote_ok = mcp_dl_write(&q, n, nmarks, overflow);
+    mcp_dl_free(&q);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":%s,\"words\":%zu,\"frames\":%zu,\"complete\":%s,\"overflow\":%s%s}",
@@ -1863,17 +1963,9 @@ static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
  * arguments at all means "sign in as whoever signed in last", which is what a
  * scripted lobby wants -- the browser dance happens once, ever, by hand.
  */
-static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
-    uint32_t v = 0;
+/* The request's text fields of the config (mcp_netplay_cfg). */
+static void mcp_netplay_cfg_strings(const char *req, netplay_config_t *cfg) {
     char s[256];
-
-    memset(cfg, 0, sizeof(*cfg));
-    if (!netplay_stored_settings(cfg)) {
-        cfg->port        = RPCN_DEFAULT_PORT;
-        cfg->frame_delay = 2;
-    }
-    if (!cfg->frame_delay) cfg->frame_delay = 2;
-
     if (mcp_json_get_str(req, "server", s, sizeof(s)))
         snprintf(cfg->server, sizeof(cfg->server), "%s", s);
     if (mcp_json_get_str(req, "user", s, sizeof(s)))
@@ -1894,6 +1986,12 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
         snprintf(cfg->fingerprint, sizeof(cfg->fingerprint), "%s", s);
     if (mcp_json_get_str(req, "room_pass", s, sizeof(s)))
         snprintf(cfg->room_password, sizeof(cfg->room_password), "%s", s);
+}
+
+/* The request's numbers and switches (and the PS3 wire log's path). */
+static void mcp_netplay_cfg_numbers(const char *req, netplay_config_t *cfg) {
+    uint32_t v = 0;
+    char s[256];
     if (mcp_json_get_u32(req, "port", &v) && v)   cfg->port = (uint16_t)v;
     if (mcp_json_get_u32(req, "delay", &v))       cfg->frame_delay = v;
     if (mcp_json_get_u32(req, "p2p_port", &v))    cfg->local_p2p_port = (uint16_t)v;
@@ -1909,31 +2007,48 @@ static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
     if (mcp_json_get_u32(req, "vs", &v))          cfg->vs_mode = v != 0;
     if (mcp_json_get_u32(req, "entry", &v))       cfg->entry = (uint8_t)v;
     if (mcp_json_get_u32(req, "watch", &v))       cfg->watch_only = v != 0;
-    /* The room's rules (net/room.h match_rules_t; PS3 Player Match): rounds
-     * 0-3 = 2-5 to win, time 0-3 = 10/30/60/99 s, type 0-3 = A-D, secret 0/1,
-     * range 0 = Worldwide / 1 = same area. netplay_host publishes them (unset
-     * fields keep the PS3's defaults); netplay_search filters on them (unset
-     * fields match anything). players (2-8 seats) filters a PS3 search only:
-     * a community room's 0x4C is its relay time, so the lobby filters that
-     * list itself. */
-    {
-        static const char *const key[6] = { "rounds", "time", "type", "secret", "range", "players" };
-        match_rules_t host = match_rules_ps3(), want = match_rules_any();
-        uint8_t *hv[6] = { &host.rounds, &host.time, &host.type, &host.secret, &host.range, &host.players };
-        uint8_t *wv[6] = { &want.rounds, &want.time, &want.type, &want.secret, &want.range, &want.players };
-        bool any = false;
-        for (int i = 0; i < 6; i++) {
-            if (!mcp_json_get_u32(req, key[i], &v)) continue;
-            *hv[i] = *wv[i] = (uint8_t)v;
-            any = true;
-        }
-        if (any) {
-            cfg->has_rules = true;
-            cfg->rules     = host;
-            cfg->filter    = true;
-            cfg->want      = want;
-        }
+}
+
+/* The room's rules (net/room.h match_rules_t; PS3 Player Match): rounds
+ * 0-3 = 2-5 to win, time 0-3 = 10/30/60/99 s, type 0-3 = A-D, secret 0/1,
+ * range 0 = Worldwide / 1 = same area. netplay_host publishes them (unset
+ * fields keep the PS3's defaults); netplay_search filters on them (unset
+ * fields match anything). players (2-8 seats) filters a PS3 search only:
+ * a community room's 0x4C is its relay time, so the lobby filters that
+ * list itself. */
+static void mcp_netplay_cfg_rules(const char *req, netplay_config_t *cfg) {
+    uint32_t v = 0;
+    static const char *const key[6] = { "rounds", "time", "type", "secret", "range", "players" };
+    match_rules_t host = match_rules_ps3(), want = match_rules_any();
+    uint8_t *hv[6] = { &host.rounds, &host.time, &host.type, &host.secret, &host.range, &host.players };
+    uint8_t *wv[6] = { &want.rounds, &want.time, &want.type, &want.secret, &want.range, &want.players };
+    bool any = false;
+    for (int i = 0; i < 6; i++) {
+        if (!mcp_json_get_u32(req, key[i], &v)) continue;
+        *hv[i] = *wv[i] = (uint8_t)v;
+        any = true;
     }
+    if (any) {
+        cfg->has_rules = true;
+        cfg->rules     = host;
+        cfg->filter    = true;
+        cfg->want      = want;
+    }
+}
+
+static void mcp_netplay_cfg(const char *req, netplay_config_t *cfg) {
+    char s[256];
+
+    memset(cfg, 0, sizeof(*cfg));
+    if (!netplay_stored_settings(cfg)) {
+        cfg->port        = RPCN_DEFAULT_PORT;
+        cfg->frame_delay = 2;
+    }
+    if (!cfg->frame_delay) cfg->frame_delay = 2;
+
+    mcp_netplay_cfg_strings(req, cfg);
+    mcp_netplay_cfg_numbers(req, cfg);
+    mcp_netplay_cfg_rules(req, cfg);
     /* A room id is 64 bits and mcp_json_get_u32 is not, so it travels as a
      * string. Quoted or not: mcp_json_get_str finds the quoted form, and the
      * unquoted one is read straight out of the request. */
@@ -2086,151 +2201,194 @@ static void mcp_cmd_netplay_disconnect(char *resp, int cap) {
  * emulator's own netplay log with a total count beside it, so a poller can tell
  * "nothing happened" from "I missed some lines".
  */
+/* The reply's write head: what is left of the buffer, and where it goes on.
+ * A write that does not fit is cut at the end of the buffer, as snprintf
+ * cuts it, and the head stops there. */
+typedef struct {
+    char *p;
+    int   left;
+} mcp_np_out_t;
+
+static void mcp_np_append(mcp_np_out_t *o, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(o->p, (size_t)o->left, fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= o->left) n = o->left > 0 ? o->left - 1 : 0;
+    o->p += n; o->left -= n;
+}
+
+static const char *mcp_tf(bool b) { return b ? "true" : "false"; }
+
+/* The state, the ComId and the peer. */
+static void mcp_np_status_head(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_np_append(o, "{\"ok\":true,\"state\":\"%s\",\"state_num\":%d,\"stage\":%d,"
+              "\"is_host\":%s,\"player\":%d,\"room_id\":\"%llu\","
+              "\"room_flags\":\"0x%08X\"",
+              netplay_state_text(st->state), (int)st->state, (int)st->stage,
+              mcp_tf(st->is_host), st->local_player,
+              (unsigned long long)st->room_id, st->room_flags);
+
+    mcp_json_escape(esc, sizeof(esc), st->com_id);
+    mcp_np_append(o, ",\"com_id\":\"%s\"", esc);
+
+    mcp_json_escape(esc, sizeof(esc), st->peer_npid);
+    mcp_np_append(o, ",\"peer\":{\"npid\":\"%s\",\"known\":%s,\"heard\":%s,"
+              "\"ready\":%s,\"ready_gen\":%u,\"rtt_ms\":%d,\"addr\":\"",
+              esc, mcp_tf(st->peer_known),
+              mcp_tf(st->peer_heard),
+              mcp_tf(st->peer_ready), st->peer_ready_gen, (int)st->peer_rtt_ms);
+    mcp_json_escape(esc, sizeof(esc), st->peer_addr);
+    mcp_np_append(o, "%s\"}", esc);
+}
+
+/* One member of the room, in line order. */
+static void mcp_np_status_member(mcp_np_out_t *o, const netplay_member_status_t *m, uint32_t i) {
+    char esc[512];
+    mcp_json_escape(esc, sizeof(esc), m->npid);
+    mcp_np_append(o, "%s{\"id\":%u,\"npid\":\"%s\",\"me\":%s,\"owner\":%s,\"line\":%d,\"side\":%d,"
+              "\"known\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"playing\":%u,"
+              "\"result_match\":%u,\"games\":%u,\"wins\":%u,\"points\":%u,"
+              "\"addr_known\":%s,\"heard\":%s,\"rtt_ms\":%d}",
+              i ? "," : "", m->member_id, esc, mcp_tf(m->is_me),
+              mcp_tf(m->is_owner), m->line_pos, m->side,
+              mcp_tf(m->known),
+              mcp_tf(m->data.flags & ROOM_MEMBER_READY),
+              mcp_tf(m->data.flags & ROOM_MEMBER_WATCH),
+              m->data.entry, m->data.playing, m->data.result_match,
+              m->data.games, m->data.wins, m->data.points,
+              mcp_tf(m->addr_known), mcp_tf(m->heard), (int)m->rtt_ms);
+}
+
+/* The room (net/room.h): its phase, the match, and every member in line
+ * order with the side they are on and what they have published. */
+static void mcp_np_status_room(mcp_np_out_t *o, const netplay_status_t *st) {
+    mcp_np_append(o, ",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"session\":%u,"
+              "\"vs_mode\":%s,\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,"
+              "\"range\":%u},\"fighters\":[%u,%u],"
+              "\"last_result\":%d,\"auto_start_s\":%u,\"max\":%u,\"me\":%u,\"members\":[",
+              mcp_tf(st->room_known),
+              st->room.phase == ROOM_PHASE_MATCH ? "match" : "lobby",
+              st->room.match, st->room.session ? st->room.session : st->room.match,
+              mcp_tf(st->room.vs_mode),
+              st->room_rules.rounds, st->room_rules.time, st->room_rules.type, st->room_rules.secret,
+              st->room_rules.range,
+              st->room.fighter[0], st->room.fighter[1],
+              st->room.last_result <= 1 ? (int)st->room.last_result : -1,
+              st->auto_start_s, st->max_slot, st->my_member_id);
+    for (uint32_t i = 0; i < st->member_count && o->left > 256; i++)
+        mcp_np_status_member(o, &st->members[i], i);
+    mcp_np_append(o, "]}");
+}
+
+/* PS3 cross-play (net/ps3_link.h): the PS3 room's phase, our side, the
+ * lockstep's counters, and each member's signaling and RUDP channels
+ * (0 idle, 1 SYN sent, 2 SYN received, 3 open, 4 closed). */
+static void mcp_np_status_ps3(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_np_append(o, ",\"ps3\":{\"room_known\":%s,\"phase\":%u,\"side\":%d,\"match\":%s,"
+              "\"gen\":%u,\"rgen\":%u,\"gen_ok\":%s,\"resp_done\":%s,\"passed\":%s,"
+              "\"sample\":%d,\"play\":%d,\"newest\":%d,\"delay\":%d,\"stalled\":%u,"
+              "\"seed\":\"0x%08X\",\"me_flags\":\"0x%08X\",\"peers\":[",
+              mcp_tf(st->ps3_room_known), st->ps3_phase, st->ps3_side,
+              mcp_tf(st->ps3_match), st->ps3_gen, st->ps3_rgen,
+              mcp_tf(st->ps3_gen_ok), mcp_tf(st->ps3_resp_done),
+              mcp_tf(st->ps3_passed), st->ps3_sample, st->ps3_play, st->ps3_newest,
+              st->ps3_delay, st->ps3_stalled_frames, st->ps3_seed, st->ps3_me_flags);
+    for (uint32_t i = 0; i < st->ps3_peer_count && o->left > 256; i++) {
+        mcp_json_escape(esc, sizeof(esc), st->ps3_peers[i].npid);
+        mcp_np_append(o, "%s{\"id\":%u,\"npid\":\"%s\",\"sig\":%s,\"sig_peer\":%s,\"rtt_us\":%u,"
+                  "\"ch\":[%u,%u,%u],\"addr\":\"%s\"}",
+                  i ? "," : "", st->ps3_peers[i].member_id, esc,
+                  mcp_tf(st->ps3_peers[i].sig_active),
+                  mcp_tf(st->ps3_peers[i].sig_peer_active), st->ps3_peers[i].rtt_us,
+                  st->ps3_peers[i].ch_state[0], st->ps3_peers[i].ch_state[1],
+                  st->ps3_peers[i].ch_state[2], st->ps3_peers[i].addr);
+    }
+    mcp_np_append(o, "]}");
+}
+
+/* The Twitch sign-in: its state, and the code and page a player is sent to. */
+static void mcp_np_status_twitch(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_json_escape(esc, sizeof(esc), st->twitch_npid);
+    mcp_np_append(o, ",\"twitch\":{\"state\":%d,\"signed_in\":%s,\"npid\":\"%s\"",
+              (int)st->twitch_state, mcp_tf(st->twitch_signed_in), esc);
+    mcp_json_escape(esc, sizeof(esc), st->twitch_user_code);
+    mcp_np_append(o, ",\"user_code\":\"%s\"", esc);
+    mcp_json_escape(esc, sizeof(esc), st->twitch_uri);
+    mcp_np_append(o, ",\"uri\":\"%s\"", esc);
+    mcp_json_escape(esc, sizeof(esc), st->twitch_error);
+    mcp_np_append(o, ",\"error\":\"%s\"}", esc);
+}
+
+/* The rooms netplay_search found. */
+static void mcp_np_status_rooms(mcp_np_out_t *o, const netplay_status_t *st) {
+    char esc[512];
+    mcp_np_append(o, ",\"search_pending\":%s,\"rooms\":[",
+              mcp_tf(st->search_pending));
+    for (uint32_t i = 0; i < st->room_count && o->left > 128; i++) {
+        mcp_json_escape(esc, sizeof(esc), st->rooms[i].owner);
+        match_rules_t rr = netplay_rules_of_listing(&st->rooms[i], st->ps3);
+        mcp_np_append(o, "%s{\"room_id\":\"%llu\",\"owner\":\"%s\",\"members\":%u,"
+                  "\"max\":%u,\"password\":%s,\"flags\":\"0x%08X\","
+                  "\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,\"range\":%u}}",
+                  i ? "," : "", (unsigned long long)st->rooms[i].room_id, esc,
+                  st->rooms[i].cur_members, st->rooms[i].max_slots,
+                  mcp_tf(st->rooms[i].has_password),
+                  st->rooms[i].flag_attr, rr.rounds, rr.time, rr.type, rr.secret, rr.range);
+    }
+    mcp_np_append(o, "]");
+}
+
+/* The tail of the netplay log, the last want_log lines of it. */
+static void mcp_np_status_log(mcp_np_out_t *o, const netplay_status_t *st, uint32_t want_log) {
+    char esc[512];
+    mcp_np_append(o, ",\"log_count\":%u,\"log\":[", st->log_count);
+    if (want_log) {
+        uint32_t have  = st->log_count < NETPLAY_LOG_LINES ? st->log_count : NETPLAY_LOG_LINES;
+        uint32_t take  = want_log < have ? want_log : have;
+        uint32_t first = st->log_count - take;
+        for (uint32_t i = 0; i < take && o->left > 64; i++) {
+            mcp_json_escape(esc, sizeof(esc), st->log[(first + i) % NETPLAY_LOG_LINES]);
+            mcp_np_append(o, "%s\"%s\"", i ? "," : "", esc);
+        }
+    }
+    mcp_np_append(o, "]}");
+}
+
 static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
     netplay_status_t st;
     uint32_t want_log = 12, want_rooms = 0;
     char esc[512];
-    char *p = resp;
-    int left = cap, n;
+    mcp_np_out_t o = { resp, cap };
 
     mcp_json_get_u32(req, "log", &want_log);
     mcp_json_get_u32(req, "rooms", &want_rooms);
     if (want_log > NETPLAY_LOG_LINES) want_log = NETPLAY_LOG_LINES;
     netplay_get_status(&st);
 
-#define NP_APPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__);      \
-                            if (n < 0 || n >= left) n = left > 0 ? left - 1 : 0; \
-                            p += n; left -= n; } while (0)
+    mcp_np_status_head(&o, &st);
+    mcp_np_status_room(&o, &st);
 
-    NP_APPEND("{\"ok\":true,\"state\":\"%s\",\"state_num\":%d,\"stage\":%d,"
-              "\"is_host\":%s,\"player\":%d,\"room_id\":\"%llu\","
-              "\"room_flags\":\"0x%08X\"",
-              netplay_state_text(st.state), (int)st.state, (int)st.stage,
-              st.is_host ? "true" : "false", st.local_player,
-              (unsigned long long)st.room_id, st.room_flags);
-
-    mcp_json_escape(esc, sizeof(esc), st.com_id);
-    NP_APPEND(",\"com_id\":\"%s\"", esc);
-
-    mcp_json_escape(esc, sizeof(esc), st.peer_npid);
-    NP_APPEND(",\"peer\":{\"npid\":\"%s\",\"known\":%s,\"heard\":%s,"
-              "\"ready\":%s,\"ready_gen\":%u,\"rtt_ms\":%d,\"addr\":\"",
-              esc, st.peer_known ? "true" : "false",
-              st.peer_heard ? "true" : "false",
-              st.peer_ready ? "true" : "false", st.peer_ready_gen, (int)st.peer_rtt_ms);
-    mcp_json_escape(esc, sizeof(esc), st.peer_addr);
-    NP_APPEND("%s\"}", esc);
-
-    /* The room (net/room.h): its phase, the match, and every member in line
-     * order with the side they are on and what they have published. */
-    NP_APPEND(",\"room\":{\"known\":%s,\"phase\":\"%s\",\"match\":%u,\"session\":%u,"
-              "\"vs_mode\":%s,\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,"
-              "\"range\":%u},\"fighters\":[%u,%u],"
-              "\"last_result\":%d,\"auto_start_s\":%u,\"max\":%u,\"me\":%u,\"members\":[",
-              st.room_known ? "true" : "false",
-              st.room.phase == ROOM_PHASE_MATCH ? "match" : "lobby",
-              st.room.match, st.room.session ? st.room.session : st.room.match,
-              st.room.vs_mode ? "true" : "false",
-              st.room_rules.rounds, st.room_rules.time, st.room_rules.type, st.room_rules.secret,
-              st.room_rules.range,
-              st.room.fighter[0], st.room.fighter[1],
-              st.room.last_result <= 1 ? (int)st.room.last_result : -1,
-              st.auto_start_s, st.max_slot, st.my_member_id);
-    for (uint32_t i = 0; i < st.member_count && left > 256; i++) {
-        const netplay_member_status_t *m = &st.members[i];
-        mcp_json_escape(esc, sizeof(esc), m->npid);
-        NP_APPEND("%s{\"id\":%u,\"npid\":\"%s\",\"me\":%s,\"owner\":%s,\"line\":%d,\"side\":%d,"
-                  "\"known\":%s,\"ready\":%s,\"watch\":%s,\"entry\":%u,\"playing\":%u,"
-                  "\"result_match\":%u,\"games\":%u,\"wins\":%u,\"points\":%u,"
-                  "\"addr_known\":%s,\"heard\":%s,\"rtt_ms\":%d}",
-                  i ? "," : "", m->member_id, esc, m->is_me ? "true" : "false",
-                  m->is_owner ? "true" : "false", m->line_pos, m->side,
-                  m->known ? "true" : "false",
-                  (m->data.flags & ROOM_MEMBER_READY) ? "true" : "false",
-                  (m->data.flags & ROOM_MEMBER_WATCH) ? "true" : "false",
-                  m->data.entry, m->data.playing, m->data.result_match,
-                  m->data.games, m->data.wins, m->data.points,
-                  m->addr_known ? "true" : "false", m->heard ? "true" : "false", (int)m->rtt_ms);
-    }
-    NP_APPEND("]}");
-
-    NP_APPEND(",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
+    mcp_np_append(&o, ",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
               st.frame, st.stalls, st.generation, st.seed);
-    /* PS3 cross-play (net/ps3_link.h): the PS3 room's phase, our side, the
-     * lockstep's counters, and each member's signaling and RUDP channels
-     * (0 idle, 1 SYN sent, 2 SYN received, 3 open, 4 closed). */
-    if (st.ps3) {
-        NP_APPEND(",\"ps3\":{\"room_known\":%s,\"phase\":%u,\"side\":%d,\"match\":%s,"
-                  "\"gen\":%u,\"rgen\":%u,\"gen_ok\":%s,\"resp_done\":%s,\"passed\":%s,"
-                  "\"sample\":%d,\"play\":%d,\"newest\":%d,\"delay\":%d,\"stalled\":%u,"
-                  "\"seed\":\"0x%08X\",\"me_flags\":\"0x%08X\",\"peers\":[",
-                  st.ps3_room_known ? "true" : "false", st.ps3_phase, st.ps3_side,
-                  st.ps3_match ? "true" : "false", st.ps3_gen, st.ps3_rgen,
-                  st.ps3_gen_ok ? "true" : "false", st.ps3_resp_done ? "true" : "false",
-                  st.ps3_passed ? "true" : "false", st.ps3_sample, st.ps3_play, st.ps3_newest,
-                  st.ps3_delay, st.ps3_stalled_frames, st.ps3_seed, st.ps3_me_flags);
-        for (uint32_t i = 0; i < st.ps3_peer_count && left > 256; i++) {
-            mcp_json_escape(esc, sizeof(esc), st.ps3_peers[i].npid);
-            NP_APPEND("%s{\"id\":%u,\"npid\":\"%s\",\"sig\":%s,\"sig_peer\":%s,\"rtt_us\":%u,"
-                      "\"ch\":[%u,%u,%u],\"addr\":\"%s\"}",
-                      i ? "," : "", st.ps3_peers[i].member_id, esc,
-                      st.ps3_peers[i].sig_active ? "true" : "false",
-                      st.ps3_peers[i].sig_peer_active ? "true" : "false", st.ps3_peers[i].rtt_us,
-                      st.ps3_peers[i].ch_state[0], st.ps3_peers[i].ch_state[1],
-                      st.ps3_peers[i].ch_state[2], st.ps3_peers[i].addr);
-        }
-        NP_APPEND("]}");
-    }
+    if (st.ps3) mcp_np_status_ps3(&o, &st);
     /* The room emptied with the board still in its VS mode: any input restarts
      * the game (netplay_empty_room_pump). */
-    NP_APPEND(",\"empty_room\":%s", st.empty_room ? "true" : "false");
+    mcp_np_append(&o, ",\"empty_room\":%s", mcp_tf(st.empty_room));
     /* LOCKSTEP_NO_CHECK means the two boards have never disagreed. Reporting it
      * as a frame number would be a desync at frame 4294967295. */
-    if (st.desync_frame != LOCKSTEP_NO_CHECK) NP_APPEND(",\"desync_frame\":%u", st.desync_frame);
-    else                                      NP_APPEND(",\"desync_frame\":null");
+    if (st.desync_frame != LOCKSTEP_NO_CHECK) mcp_np_append(&o, ",\"desync_frame\":%u", st.desync_frame);
+    else                                      mcp_np_append(&o, ",\"desync_frame\":null");
 
     mcp_json_escape(esc, sizeof(esc), st.error);
-    NP_APPEND(",\"error\":\"%s\"", esc);
+    mcp_np_append(&o, ",\"error\":\"%s\"", esc);
 
-    mcp_json_escape(esc, sizeof(esc), st.twitch_npid);
-    NP_APPEND(",\"twitch\":{\"state\":%d,\"signed_in\":%s,\"npid\":\"%s\"",
-              (int)st.twitch_state, st.twitch_signed_in ? "true" : "false", esc);
-    mcp_json_escape(esc, sizeof(esc), st.twitch_user_code);
-    NP_APPEND(",\"user_code\":\"%s\"", esc);
-    mcp_json_escape(esc, sizeof(esc), st.twitch_uri);
-    NP_APPEND(",\"uri\":\"%s\"", esc);
-    mcp_json_escape(esc, sizeof(esc), st.twitch_error);
-    NP_APPEND(",\"error\":\"%s\"}", esc);
-
-    if (want_rooms) {
-        NP_APPEND(",\"search_pending\":%s,\"rooms\":[",
-                  st.search_pending ? "true" : "false");
-        for (uint32_t i = 0; i < st.room_count && left > 128; i++) {
-            mcp_json_escape(esc, sizeof(esc), st.rooms[i].owner);
-            match_rules_t rr = netplay_rules_of_listing(&st.rooms[i], st.ps3);
-            NP_APPEND("%s{\"room_id\":\"%llu\",\"owner\":\"%s\",\"members\":%u,"
-                      "\"max\":%u,\"password\":%s,\"flags\":\"0x%08X\","
-                      "\"rules\":{\"rounds\":%u,\"time\":%u,\"type\":%u,\"secret\":%u,\"range\":%u}}",
-                      i ? "," : "", (unsigned long long)st.rooms[i].room_id, esc,
-                      st.rooms[i].cur_members, st.rooms[i].max_slots,
-                      st.rooms[i].has_password ? "true" : "false",
-                      st.rooms[i].flag_attr, rr.rounds, rr.time, rr.type, rr.secret, rr.range);
-        }
-        NP_APPEND("]");
-    }
-
-    NP_APPEND(",\"log_count\":%u,\"log\":[", st.log_count);
-    if (want_log) {
-        uint32_t have  = st.log_count < NETPLAY_LOG_LINES ? st.log_count : NETPLAY_LOG_LINES;
-        uint32_t take  = want_log < have ? want_log : have;
-        uint32_t first = st.log_count - take;
-        for (uint32_t i = 0; i < take && left > 64; i++) {
-            mcp_json_escape(esc, sizeof(esc), st.log[(first + i) % NETPLAY_LOG_LINES]);
-            NP_APPEND("%s\"%s\"", i ? "," : "", esc);
-        }
-    }
-    NP_APPEND("]}");
-#undef NP_APPEND
+    mcp_np_status_twitch(&o, &st);
+    if (want_rooms) mcp_np_status_rooms(&o, &st);
+    mcp_np_status_log(&o, &st, want_log);
 }
 
 /*
@@ -2268,6 +2426,48 @@ static void mcp_cmd_board_reset(char *resp, int cap) {
 }
 
 /*
+ * {"cmd":"save_state","path":"..."} / {"cmd":"load_state","path":"..."} -- the
+ * whole board to a file and back (core/savestate.h, Pinboard #423). The emu
+ * thread does it between slices, running or stopped, and this waits for it:
+ * a board that is paused, saved, and loaded in a new process after the machine
+ * went down runs on as it would have. A load needs the same ROM set, profile
+ * and build, and is refused while a netplay session owns the board. The run
+ * state is left alone, so a stopped board stays stopped on the loaded frame.
+ */
+static void mcp_cmd_state(const char *req, char *resp, int cap, int load) {
+    if (!g_mcp.emu || !g_mcp.romset || !g_mcp.romset->loaded) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no ROM set loaded\"}");
+        return;
+    }
+    emu_thread_ctx_t *e = g_mcp.emu;
+    char path[sizeof e->state_path];
+    if (json_get_str_unescaped(req, "path", path, (int)sizeof path) <= 0 || !path[0]) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"path required\"}");
+        return;
+    }
+    if (e->request_state) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"a savestate is already being made\"}");
+        return;
+    }
+    uint32_t before = e->state_count;
+    snprintf(e->state_path, sizeof e->state_path, "%s", path);
+    e->request_state = load ? 2 : 1;
+    for (int i = 0; i < 3000 && e->state_count == before; i++) emu_sleep_ms(10);
+    if (e->state_count == before) {
+        e->request_state = 0;
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"the emu thread did not answer\"}");
+        return;
+    }
+    if (e->state_error[0]) {
+        char esc[256];
+        json_escape(esc, (int)sizeof esc, e->state_error);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"%s\"}", esc);
+        return;
+    }
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"frame\":%u}", (unsigned)g_emu_frames);
+}
+
+/*
  * {"cmd":"idle_hold","on":1} -- the CPU saver (g_idle_hold, emu_thread.h,
  * --idle-until-match): while no netplay session owns the board, it is put back
  * to power-on and not stepped. "on":0 lets it run attract again; no "on" only
@@ -2280,6 +2480,40 @@ static void mcp_cmd_idle_hold(const char *req, char *resp, int cap) {
     int holding = g_mcp.emu && g_mcp.emu->idle_holding;
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"on\":%s,\"holding\":%s}",
              g_idle_hold ? "true" : "false", holding ? "true" : "false");
+}
+
+/*
+ * {"cmd":"enemy_rank","rank":"extra1"} -- the CPU opponent's AI table
+ * (g_enemy_rank, sfight_hook_enemy_rank_table), as --enemy-rank sets it:
+ * "cabinet" (or -1) plays the cabinet's ENEMY RANK; "easy" .. "hardest",
+ * "extra1", "extra2" (or 0..5) play that table. No "rank" only reads. The
+ * table is loaded as each CPU fight sets up, so a change takes from the next
+ * fight. ok:false on a profile with no such hook, or a rank it does not know.
+ */
+static void mcp_cmd_enemy_rank(const char *req, char *resp, int cap) {
+    if (!g_active_profile || !g_active_profile->quirks.enemy_ranks) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"this profile has no CPU difficulty tables\"}");
+        return;
+    }
+    char v[24];
+    int r;
+    if (mcp_json_get_str(req, "rank", v, sizeof v)) {
+        r = enemy_rank_parse(v);
+    } else if (mcp_json_get_int(req, "rank", &r)) {
+        if (r < -1 || r >= ENEMY_RANKS) r = -2;
+    } else {
+        r = g_enemy_rank;
+    }
+    if (r < -1) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"rank: cabinet, easy, normal, hard, hardest, extra1 or extra2\"}");
+        return;
+    }
+    g_enemy_rank = r;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"rank\":%d,\"name\":\"%s\",\"netplay\":%s}",
+             r, r < 0 ? "Cabinet" : g_enemy_rank_names[r],
+             g_hle_netplay_board ? "true" : "false");
 }
 
 /* ---- The debug object viewer (objview_cmd.h) -----------------------------
@@ -2480,7 +2714,10 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "netplay_leave")            == 0) mcp_cmd_netplay_leave(resp, cap);
     else if (strcmp(cmd, "netplay_disconnect")       == 0) mcp_cmd_netplay_disconnect(resp, cap);
     else if (strcmp(cmd, "board_reset")              == 0) mcp_cmd_board_reset(resp, cap);
+    else if (strcmp(cmd, "save_state")               == 0) mcp_cmd_state(req, resp, cap, 0);
+    else if (strcmp(cmd, "load_state")               == 0) mcp_cmd_state(req, resp, cap, 1);
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
+    else if (strcmp(cmd, "enemy_rank")               == 0) mcp_cmd_enemy_rank(req, resp, cap);
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
 }
 

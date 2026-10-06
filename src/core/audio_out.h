@@ -94,105 +94,124 @@ typedef struct {
 
 static audio_out_t g_audio_out;
 
+/* Whether this output frame plays anything, and where the fade is headed.
+ * False is silence: a refill still short of its target, or a ring that ran
+ * dry. */
+static inline bool audio_out__gate(audio_out_t *a, uint32_t fill) {
+    if (a->refilling) {
+        if ((double)fill < a->target) return false;     /* silence, and consume nothing */
+        a->refilling = false;
+        a->reseed    = true;                            /* gain is 0: it fades in below */
+        a->pos       = 0.0;
+        a->fill_lp   = (double)fill;
+    }
+    if (fill < 2) {
+        /* Dry before the fade finished, which low_water is sized to prevent
+         * (the fill is read afresh every frame). There is nothing to play:
+         * cut to silence and refill. */
+        a->gain = 0.0f; a->fading = false; a->refilling = true;
+        a->underruns++;
+        return false;
+    }
+    if (!a->fading) {
+        if (fill > a->resync_above)   { a->fading = true; a->skip_after_fade = true;  }
+        else if (fill < a->low_water) { a->fading = true; a->skip_after_fade = false; }
+    } else if (!a->skip_after_fade && fill >= 2 * a->low_water) {
+        a->fading = false;          /* the board came back in time: fade back up */
+    }
+    return true;
+}
+
+/* One output frame read from the ring at r, through the DC blocker, and the
+ * read position moved on at the steered rate. */
+static inline void audio_out__sample(audio_out_t *a, uint32_t r, uint32_t fill, float *yl, float *yr) {
+    const uint32_t mask = SOUND_OUT_FRAMES - 1;
+    float f = (float)a->pos;
+    const int16_t *p0 = g_sound.out + r * 2, *p1 = g_sound.out + ((r + 1) & mask) * 2;
+    float l  = ((float)p0[0] + ((float)p1[0] - (float)p0[0]) * f) / 32768.0f;
+    float rr = ((float)p0[1] + ((float)p1[1] - (float)p0[1]) * f) / 32768.0f;
+    if (a->reseed) {
+        /* The blocker as though it had always sat at this level: its
+         * output starts at zero, not at the step from the old level. */
+        a->dc_xl = l; a->dc_xr = rr; a->dc_yl = 0.0f; a->dc_yr = 0.0f;
+        a->reseed = false;
+    }
+    const float R = 0.9993f;
+    *yl = l  - a->dc_xl + R * a->dc_yl;
+    *yr = rr - a->dc_xr + R * a->dc_yr;
+    a->dc_xl = l; a->dc_xr = rr; a->dc_yl = *yl; a->dc_yr = *yr;
+
+    /* The instantaneous fill saws up a slice at a time and down a callback
+     * at a time. Against a small target that swing is a large part of the
+     * error, and steering by it wobbles the pitch at the callback rate; a
+     * host with a small target steers by the average instead. The loop's
+     * own time constant (target / 1% of the rate: seconds) is far longer
+     * than the filter's, so it stays well damped. */
+    double level = (double)fill;
+    if (a->smooth_fill) {
+        a->fill_lp += (level - a->fill_lp) * a->fill_k;
+        level = a->fill_lp;
+    }
+    double adj = (level - a->target) / a->target;
+    adj = adj < -1.0 ? -1.0 : adj > 1.0 ? 1.0 : adj;
+    a->pos += (double)SOUND_RATE / (double)a->rate * (1.0 + 0.010 * adj);
+    uint32_t adv = (uint32_t)a->pos;
+    if (adv > fill - 1) adv = fill - 1;
+    a->pos -= adv;
+    g_sound.out_r = (r + adv) & mask;
+}
+
+/* A fade out that has reached zero: a stale ring skips to its target, a
+ * draining one waits for a refill. */
+static inline void audio_out__faded_out(audio_out_t *a) {
+    const uint32_t mask = SOUND_OUT_FRAMES - 1;
+    a->gain   = 0.0f;
+    a->fading = false;
+    if (a->skip_after_fade) {
+        /* Stale: at zero gain, drop the oldest audio down to the
+         * target and come back in on the new position. */
+        uint32_t r2 = g_sound.out_r, fill2 = (g_sound.out_w - r2) & mask;
+        if ((double)fill2 > a->target) {
+            g_sound.out_r = (r2 + (fill2 - (uint32_t)a->target)) & mask;
+            a->pos     = 0.0;
+            a->fill_lp = a->target;
+        }
+        a->reseed = true;
+        a->resyncs++;
+    } else {
+        a->refilling = true;
+        a->underruns++;
+    }
+}
+
+/* The fade's next step, and its gain (smoothstepped). */
+static inline float audio_out__fade(audio_out_t *a) {
+    const float fade_step = 1.0f / (float)AUDIO_FADE;
+    if (a->fading) {
+        a->gain -= fade_step;
+        if (a->gain <= 0.0f) audio_out__faded_out(a);
+    } else if (a->gain < 1.0f) {
+        a->gain += fade_step;
+        if (a->gain > 1.0f) a->gain = 1.0f;
+    }
+    return a->gain * a->gain * (3.0f - 2.0f * a->gain);
+}
+
 static void audio_out_cb(float *buf, int frames, int channels, void *ud) {
     (void)ud;
     audio_out_t *a = &g_audio_out;
     const uint32_t mask = SOUND_OUT_FRAMES - 1;
-    const float fade_step = 1.0f / (float)AUDIO_FADE;
     for (int i = 0; i < frames; i++) {
         /* acquire: the sound thread writes the samples, then out_w */
         uint32_t r = g_sound.out_r, w = SOUND_LOAD_ACQUIRE(g_sound.out_w);
         uint32_t fill = (w - r) & mask;
         float yl = 0.0f, yr = 0.0f;
 
-        if (a->refilling) {
-            if ((double)fill < a->target) goto out;     /* silence, and consume nothing */
-            a->refilling = false;
-            a->reseed    = true;                        /* gain is 0: it fades in below */
-            a->pos       = 0.0;
-            a->fill_lp   = (double)fill;
-        }
-        if (fill < 2) {
-            /* Dry before the fade finished, which low_water is sized to prevent
-             * (the fill is read afresh every frame). There is nothing to play:
-             * cut to silence and refill. */
-            a->gain = 0.0f; a->fading = false; a->refilling = true;
-            a->underruns++;
-            goto out;
-        }
-        if (!a->fading) {
-            if (fill > a->resync_above)   { a->fading = true; a->skip_after_fade = true;  }
-            else if (fill < a->low_water) { a->fading = true; a->skip_after_fade = false; }
-        } else if (!a->skip_after_fade && fill >= 2 * a->low_water) {
-            a->fading = false;          /* the board came back in time: fade back up */
-        }
-
-        {
-            float f = (float)a->pos;
-            const int16_t *p0 = g_sound.out + r * 2, *p1 = g_sound.out + ((r + 1) & mask) * 2;
-            float l  = ((float)p0[0] + ((float)p1[0] - (float)p0[0]) * f) / 32768.0f;
-            float rr = ((float)p0[1] + ((float)p1[1] - (float)p0[1]) * f) / 32768.0f;
-            if (a->reseed) {
-                /* The blocker as though it had always sat at this level: its
-                 * output starts at zero, not at the step from the old level. */
-                a->dc_xl = l; a->dc_xr = rr; a->dc_yl = 0.0f; a->dc_yr = 0.0f;
-                a->reseed = false;
-            }
-            const float R = 0.9993f;
-            yl = l  - a->dc_xl + R * a->dc_yl;
-            yr = rr - a->dc_xr + R * a->dc_yr;
-            a->dc_xl = l; a->dc_xr = rr; a->dc_yl = yl; a->dc_yr = yr;
-
-            /* The instantaneous fill saws up a slice at a time and down a callback
-             * at a time. Against a small target that swing is a large part of the
-             * error, and steering by it wobbles the pitch at the callback rate; a
-             * host with a small target steers by the average instead. The loop's
-             * own time constant (target / 1% of the rate: seconds) is far longer
-             * than the filter's, so it stays well damped. */
-            double level = (double)fill;
-            if (a->smooth_fill) {
-                a->fill_lp += (level - a->fill_lp) * a->fill_k;
-                level = a->fill_lp;
-            }
-            double adj = (level - a->target) / a->target;
-            adj = adj < -1.0 ? -1.0 : adj > 1.0 ? 1.0 : adj;
-            a->pos += (double)SOUND_RATE / (double)a->rate * (1.0 + 0.010 * adj);
-            uint32_t adv = (uint32_t)a->pos;
-            if (adv > fill - 1) adv = fill - 1;
-            a->pos -= adv;
-            g_sound.out_r = (r + adv) & mask;
-        }
-
-        if (a->fading) {
-            a->gain -= fade_step;
-            if (a->gain <= 0.0f) {
-                a->gain   = 0.0f;
-                a->fading = false;
-                if (a->skip_after_fade) {
-                    /* Stale: at zero gain, drop the oldest audio down to the
-                     * target and come back in on the new position. */
-                    uint32_t r2 = g_sound.out_r, fill2 = (g_sound.out_w - r2) & mask;
-                    if ((double)fill2 > a->target) {
-                        g_sound.out_r = (r2 + (fill2 - (uint32_t)a->target)) & mask;
-                        a->pos     = 0.0;
-                        a->fill_lp = a->target;
-                    }
-                    a->reseed = true;
-                    a->resyncs++;
-                } else {
-                    a->refilling = true;
-                    a->underruns++;
-                }
-            }
-        } else if (a->gain < 1.0f) {
-            a->gain += fade_step;
-            if (a->gain > 1.0f) a->gain = 1.0f;
-        }
-        {
-            float g = a->gain * a->gain * (3.0f - 2.0f * a->gain);
+        if (audio_out__gate(a, fill)) {
+            audio_out__sample(a, r, fill, &yl, &yr);
+            float g = audio_out__fade(a);
             yl *= g; yr *= g;
         }
-    out:
         buf[i * channels] = yl;
         if (channels > 1) buf[i * channels + 1] = yr;
     }

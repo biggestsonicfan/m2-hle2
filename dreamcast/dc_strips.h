@@ -97,12 +97,12 @@ static bool dp_big_window(float *tx, float *ty, float *tw, float *th, float *u, 
 
 static inline uint32_t dcs_log2(uint32_t v) { uint32_t l = 0; while ((1u << l) < v) l++; return l; }
 
-/* dp_tex_get's key for a tile, 0 when it cuts none (over 256, or empty). */
+/* dp_tex_get's key for a tile, 0 when it cuts none (over 1024, or empty). */
 static inline uint32_t dcs_tex_key(float ftx, float fty, float ftw, float fth, unsigned fl) {
     unsigned sheet = (fl & 4u /* GEO3D_FACE_SHEET1 */) ? 1 : 0;
     unsigned x0 = (unsigned)(int)ftx & 2047u, y0 = (unsigned)(int)fty & 1023u;
     unsigned tw = (unsigned)ftw, th = (unsigned)fth;
-    if (tw > 256 || th > 256 || !tw || !th) return 0;
+    if (tw > 1024 || th > 1024 || !tw || !th) return 0;
     return 0x80000000u | sheet << 29 | x0 << 18 | y0 << 8 | dcs_log2(tw) << 4 | dcs_log2(th);
 }
 

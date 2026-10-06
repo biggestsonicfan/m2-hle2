@@ -119,6 +119,11 @@ typedef struct {
      * that says so; any other board would keep the winner on against the CPU. */
     bool     vs_rematch;
 
+    /* The profile carries a hook that honours g_enemy_rank (hle_hooks.h): the
+     * CPU opponent's AI table, including STF's two unused ones. The desktop's
+     * Profile menu offers the choice only for a profile that says so. */
+    bool     enemy_ranks;
+
     /* match_replay (--match-replay / the bridge command): take attract mode
      * straight to its preprogrammed replay fight instead of playing the intro
      * movie first. At the first frame edge where the attract step byte holds

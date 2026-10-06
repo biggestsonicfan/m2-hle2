@@ -110,10 +110,10 @@ int main(int argc, char **argv) {
         uint32_t raw = read_u32_le(main_data + toff + 8);
         if (!raw) { skipped++; continue; }
         geo3d_cmesh_t m = { .model_idx = e->model, .mat_ptr = e->mat, .uv_ptr = e->uv,
-                            .polygons = polygons, .materials = textures, .main_data = main_data,
-                            .polygons_size = polygons_size, .materials_size = textures_size,
-                            .table_off = table_off, .table_count = table_count,
-                            .mesh_ptr_subtract = sub, .mesh_ptr_add = add };
+                            .md = { .polygons = polygons, .materials = textures, .main_data = main_data,
+                                    .polygons_size = polygons_size, .materials_size = textures_size,
+                                    .table_off = table_off, .table_count = table_count,
+                                    .mesh_ptr_subtract = sub, .mesh_ptr_add = add } };
         if (!geo3d_mesh_build(&m, raw * 4u - sub + add, e->mat != 0, e->uv != 0)) { skipped++; continue; }
         size_t len = dcs_blob(&m, one, sizeof one);
         if (len && at + len <= blob_cap) {

@@ -31,6 +31,7 @@
 #include "net_socket.h"
 #include "protobuf.h"
 #include "tls.h"
+#include "ws_relay.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -266,6 +267,13 @@ typedef struct {
      * (172.x) nobody on the LAN can reach, gives the container host's. 0 = say
      * local_ip. local_ip itself stays the socket's own, for rpcn_session_recv. */
     uint32_t     advertised_ip;
+#ifndef __EMSCRIPTEN__
+    /* When `relay_on`, every datagram goes through the web gateway's /gw/dgram
+     * instead of `udp` (ws_relay.h, Pinboard #366): for a client nobody outside
+     * can reach. The keepalive's address is then the gateway's. */
+    bool         relay_on;
+    ws_relay_t   relay;
+#endif
     int64_t      user_id;
     /* The protocol version from the server's ServerInfo greeting, the first
      * packet on every connection; 0 until it has been read. */
@@ -311,6 +319,10 @@ static inline int64_t rpcn_user_id(const rpcn_client_t *c) { return c->user_id; 
 static inline void rpcn_disconnect(rpcn_client_t *c) {
     tls_close(&c->tls);
     net_close(&c->udp);
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) ws_relay_close(&c->relay);
+    c->relay_on = false;
+#endif
     c->in_used = 0;
     c->in_consumed = 0;
 }
@@ -423,6 +435,21 @@ static inline uint64_t rpcn_resend_token(rpcn_client_t *c, const char *npid, con
     return rpcn_request(c, RPCN_CMD_SEND_TOKEN, p.buf, p.n);
 }
 
+/* The whitespace rpcn_normalize_token trims: what isspace() takes in the C locale. */
+static inline bool rpcn_token_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
+}
+
+/* True when [begin, end) is non-empty and every character of it is a hex digit. */
+static inline bool rpcn_token_all_hex(const char *begin, const char *end) {
+    bool all_hex = (begin != end);
+    for (const char *p = begin; p != end; p++) {
+        bool hex = (*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F');
+        if (!hex) { all_hex = false; break; }
+    }
+    return all_hex;
+}
+
 /*
  * Tidies a token as a PLAYER supplies it — which means pasted out of an e-mail,
  * with whatever whitespace came along. Trims both ends, and upper-cases a value
@@ -440,14 +467,9 @@ static inline bool rpcn_normalize_token(const char *in, char *out, uint32_t cap)
     if (!in) return true;
 
     const char *begin = in;
-    while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n'
-           || *begin == '\v' || *begin == '\f') begin++;
+    while (rpcn_token_space(*begin)) begin++;
     const char *end = begin + strlen(begin);
-    while (end > begin) {
-        char c = end[-1];
-        if (c != ' ' && c != '\t' && c != '\r' && c != '\n' && c != '\v' && c != '\f') break;
-        end--;
-    }
+    while (end > begin && rpcn_token_space(end[-1])) end--;
 
     uint32_t len = (uint32_t)(end - begin);
     if (len + 1 > cap) return false;
@@ -455,11 +477,7 @@ static inline bool rpcn_normalize_token(const char *in, char *out, uint32_t cap)
     /* Case is only ours to change where it cannot mean anything: an all-hex value
      * is the server's own "{:02X}" and folds safely, while anything else might be
      * a format that distinguishes case and is copied exactly. */
-    bool all_hex = (len != 0);
-    for (const char *p = begin; p != end; p++) {
-        bool hex = (*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F');
-        if (!hex) { all_hex = false; break; }
-    }
+    bool all_hex = rpcn_token_all_hex(begin, end);
 
     uint32_t n = 0;
     for (const char *p = begin; p != end; p++) {
@@ -1042,6 +1060,54 @@ static inline bool rpcn_strip_data_packet(const uint8_t **p, uint32_t *size) {
     return true;
 }
 
+/* A room's owner field: the npId out of its UserInfo. */
+static inline void rpcn_room_owner(pb_reader_t *room, rpcn_room_listing_t *row) {
+    /* UserInfo { npId = 1, onlineName = 2, avatarUrl = 3 } */
+    pb_reader_t owner = pb_sub(room);
+    while (pb_next(&owner)) {
+        if (owner.field == 1 && owner.wire == PB_WIRE_LEN) {
+            pb_copy_string(&owner, row->owner, sizeof(row->owner));
+            break;
+        }
+    }
+}
+
+/* One of a room's searchable int attributes. */
+static inline void rpcn_room_int_attr(pb_reader_t *room, rpcn_room_listing_t *row) {
+    /* IntAttr { uint16 id = 1 (wrapper); uint32 num = 2 } */
+    if (room->wire != PB_WIRE_LEN) return;
+    pb_reader_t attr = pb_sub(room);
+    uint32_t id = 0, num = 0;
+    while (pb_next(&attr)) {
+        if (attr.field == 1 && attr.wire == PB_WIRE_LEN) id = (uint32_t)pb_as_wrapped(&attr);
+        else if (attr.field == 2 && attr.wire == PB_WIRE_VARINT) num = (uint32_t)attr.varint;
+    }
+    if (id == RPCN_ROOM_INT_ATTR_RELAY) row->relay_ms = num;
+    if (id >= 0x4C && id <= 0x53) {
+        row->int_attr[id - 0x4C] = num;
+        row->int_mask |= (uint8_t)(1u << (id - 0x4C));
+    }
+}
+
+/* One RoomDataExternal into a listing row. */
+static inline void rpcn_parse_room_row(pb_reader_t *top, rpcn_room_listing_t *row) {
+    memset(row, 0, sizeof(*row));
+
+    pb_reader_t room = pb_sub(top);
+    while (pb_next(&room)) {
+        switch (room.field) {
+            case 4:  row->has_password = pb_as_wrapped(&room) != 0; break;
+            case 6:  row->room_id      = room.varint; break;
+            case 8:  row->max_slots    = (uint16_t)pb_as_wrapped(&room); break;
+            case 10: row->cur_members  = (uint16_t)pb_as_wrapped(&room); break;
+            case 12: rpcn_room_owner(&room, row); break;
+            case 14: row->flag_attr = (uint32_t)room.varint; break;
+            case 15: rpcn_room_int_attr(&room, row); break;
+            default: break;
+        }
+    }
+}
+
 /* SearchRoomResponse { startIndex = 1, total = 2, repeated RoomDataExternal = 3 }.
  * RoomDataExternal: privateSlotNum = 4, roomId = 6 (bare varint), maxSlot = 8,
  * curMemberNum = 10 (the numbered ones are uint16 WRAPPER submessages — see the
@@ -1057,46 +1123,7 @@ static inline uint32_t rpcn_parse_room_list(const uint8_t *payload, uint32_t siz
         if (top.field != 3 || top.wire != PB_WIRE_LEN) continue;
 
         rpcn_room_listing_t row;
-        memset(&row, 0, sizeof(row));
-
-        pb_reader_t room = pb_sub(&top);
-        while (pb_next(&room)) {
-            switch (room.field) {
-                case 4:  row.has_password = pb_as_wrapped(&room) != 0; break;
-                case 6:  row.room_id      = room.varint; break;
-                case 8:  row.max_slots    = (uint16_t)pb_as_wrapped(&room); break;
-                case 10: row.cur_members  = (uint16_t)pb_as_wrapped(&room); break;
-                case 12: {
-                    /* UserInfo { npId = 1, onlineName = 2, avatarUrl = 3 } */
-                    pb_reader_t owner = pb_sub(&room);
-                    while (pb_next(&owner)) {
-                        if (owner.field == 1 && owner.wire == PB_WIRE_LEN) {
-                            pb_copy_string(&owner, row.owner, sizeof(row.owner));
-                            break;
-                        }
-                    }
-                    break;
-                }
-                case 14: row.flag_attr = (uint32_t)room.varint; break;
-                case 15: {
-                    /* IntAttr { uint16 id = 1 (wrapper); uint32 num = 2 } */
-                    if (room.wire != PB_WIRE_LEN) break;
-                    pb_reader_t attr = pb_sub(&room);
-                    uint32_t id = 0, num = 0;
-                    while (pb_next(&attr)) {
-                        if (attr.field == 1 && attr.wire == PB_WIRE_LEN) id = (uint32_t)pb_as_wrapped(&attr);
-                        else if (attr.field == 2 && attr.wire == PB_WIRE_VARINT) num = (uint32_t)attr.varint;
-                    }
-                    if (id == RPCN_ROOM_INT_ATTR_RELAY) row.relay_ms = num;
-                    if (id >= 0x4C && id <= 0x53) {
-                        row.int_attr[id - 0x4C] = num;
-                        row.int_mask |= (uint8_t)(1u << (id - 0x4C));
-                    }
-                    break;
-                }
-                default: break;
-            }
-        }
+        rpcn_parse_room_row(&top, &row);
 
         if (row.room_id != 0) out[count++] = row;
     }
@@ -1126,6 +1153,28 @@ static inline bool rpcn_parse_signaling_addr(const uint8_t *payload, uint32_t si
     return rpcn_read_signaling_addr(pb_reader(payload, size), out_ip_be, out_port);
 }
 
+/* The npId inside a RoomMemberUpdateInfo; true when one was copied. */
+static inline bool rpcn_update_info_npid(pb_reader_t *top, char *out_npid, uint32_t npid_cap) {
+    bool got_npid = false;
+    /* RoomMemberUpdateInfo.roomMemberDataInternal = 1 -> .userInfo = 1 -> .npId = 1 */
+    pb_reader_t update = pb_sub(top);
+    while (pb_next(&update)) {
+        if (update.field != 1 || update.wire != PB_WIRE_LEN) continue;
+        pb_reader_t member = pb_sub(&update);
+        while (pb_next(&member)) {
+            if (member.field != 1 || member.wire != PB_WIRE_LEN) continue;
+            pb_reader_t ui = pb_sub(&member);
+            while (pb_next(&ui)) {
+                if (ui.field != 1 || ui.wire != PB_WIRE_LEN) continue;
+                pb_copy_string(&ui, out_npid, npid_cap);
+                got_npid = true;
+                break;
+            }
+        }
+    }
+    return got_npid;
+}
+
 /*
  * NotificationUserJoinedRoom { uint64 room_id = 1; RoomMemberUpdateInfo
  * update_info = 2; SignalingAddr signaling = 3; }. `out_has_addr` distinguishes
@@ -1151,22 +1200,7 @@ static inline bool rpcn_parse_joined_notification(const uint8_t *payload, uint32
         }
         if (top.field != 2 || top.wire != PB_WIRE_LEN) continue;
 
-        /* RoomMemberUpdateInfo.roomMemberDataInternal = 1 -> .userInfo = 1 -> .npId = 1 */
-        pb_reader_t update = pb_sub(&top);
-        while (pb_next(&update)) {
-            if (update.field != 1 || update.wire != PB_WIRE_LEN) continue;
-            pb_reader_t member = pb_sub(&update);
-            while (pb_next(&member)) {
-                if (member.field != 1 || member.wire != PB_WIRE_LEN) continue;
-                pb_reader_t ui = pb_sub(&member);
-                while (pb_next(&ui)) {
-                    if (ui.field != 1 || ui.wire != PB_WIRE_LEN) continue;
-                    pb_copy_string(&ui, out_npid, npid_cap);
-                    got_npid = true;
-                    break;
-                }
-            }
-        }
+        if (rpcn_update_info_npid(&top, out_npid, npid_cap)) got_npid = true;
     }
     return got_npid;
 }
@@ -1481,6 +1515,48 @@ static inline bool rpcn_parse_twitch_poll(const uint8_t *payload, uint32_t size,
 
 /* ---- Poll ---------------------------------------------------------------- */
 
+/* Snoop our own Login reply for the user_id. Doing it here means
+ * callers never have to remember to parse it, and signaling just
+ * works after login. Layout: online_name\0 avatar_url\0 then i64. */
+static inline void rpcn_snoop_login(rpcn_client_t *c, const rpcn_packet_t *out) {
+    if (out->type == 1 && out->command == (uint16_t)RPCN_CMD_LOGIN
+        && out->error == RPCN_OK) {
+        uint32_t at = 0;
+        int skipped = 0;
+        while (at < out->payload_size && skipped < 2) {
+            if (out->payload[at] == 0) skipped++;
+            at++;
+        }
+        if (skipped == 2 && at + 8 <= out->payload_size)
+            c->user_id = (int64_t)rpcn_get_u64(out->payload + at);
+    }
+}
+
+/* The whole packet of `size` bytes at the head of `in`, into `out`. */
+static inline void rpcn_decode_packet(rpcn_client_t *c, uint32_t size, rpcn_packet_t *out) {
+    out->type      = c->in[0];
+    out->command   = rpcn_get_u16(c->in + 1);
+    out->packet_id = rpcn_get_u64(c->in + 7);
+
+    /* Replies carry an error byte before their payload; notifications
+     * do not. */
+    if (out->type == 1 && size > RPCN_HEADER_SIZE) {
+        out->error        = (rpcn_error_t)c->in[RPCN_HEADER_SIZE];
+        out->payload      = c->in + RPCN_HEADER_SIZE + 1;
+        out->payload_size = size - RPCN_HEADER_SIZE - 1;
+    } else {
+        out->error        = RPCN_OK;
+        out->payload      = c->in + RPCN_HEADER_SIZE;
+        out->payload_size = size - RPCN_HEADER_SIZE;
+    }
+
+    /* ServerInfo: u32 LE protocol version. */
+    if (out->type == 3 && out->payload_size >= 4)
+        c->server_version = rpcn_get_u32(out->payload);
+
+    rpcn_snoop_login(c, out);
+}
+
 /* One decoded packet at a time; false when nothing more is pending. Never blocks. */
 static inline bool rpcn_poll(rpcn_client_t *c, rpcn_packet_t *out) {
     if (!out || !tls_is_connected(&c->tls)) return false;
@@ -1501,40 +1577,7 @@ static inline bool rpcn_poll(rpcn_client_t *c, rpcn_packet_t *out) {
                 return false;
             }
             if (c->in_used >= size) {
-                out->type      = c->in[0];
-                out->command   = rpcn_get_u16(c->in + 1);
-                out->packet_id = rpcn_get_u64(c->in + 7);
-
-                /* Replies carry an error byte before their payload; notifications
-                 * do not. */
-                if (out->type == 1 && size > RPCN_HEADER_SIZE) {
-                    out->error        = (rpcn_error_t)c->in[RPCN_HEADER_SIZE];
-                    out->payload      = c->in + RPCN_HEADER_SIZE + 1;
-                    out->payload_size = size - RPCN_HEADER_SIZE - 1;
-                } else {
-                    out->error        = RPCN_OK;
-                    out->payload      = c->in + RPCN_HEADER_SIZE;
-                    out->payload_size = size - RPCN_HEADER_SIZE;
-                }
-
-                /* ServerInfo: u32 LE protocol version. */
-                if (out->type == 3 && out->payload_size >= 4)
-                    c->server_version = rpcn_get_u32(out->payload);
-
-                /* Snoop our own Login reply for the user_id. Doing it here means
-                 * callers never have to remember to parse it, and signaling just
-                 * works after login. Layout: online_name\0 avatar_url\0 then i64. */
-                if (out->type == 1 && out->command == (uint16_t)RPCN_CMD_LOGIN
-                    && out->error == RPCN_OK) {
-                    uint32_t at = 0;
-                    int skipped = 0;
-                    while (at < out->payload_size && skipped < 2) {
-                        if (out->payload[at] == 0) skipped++;
-                        at++;
-                    }
-                    if (skipped == 2 && at + 8 <= out->payload_size)
-                        c->user_id = (int64_t)rpcn_get_u64(out->payload + at);
-                }
+                rpcn_decode_packet(c, size, out);
 
                 /* The caller's payload points into `in`, so the packet stays
                  * where it is until the NEXT poll slides it out. Sliding it here
@@ -1574,6 +1617,9 @@ static inline bool rpcn_poll(rpcn_client_t *c, rpcn_packet_t *out) {
  */
 static inline bool rpcn_open_signaling(rpcn_client_t *c, uint16_t local_port) {
     if (net_sock_valid(c->udp)) return true;
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) return true;
+#endif
     c->local_port = local_port ? local_port : RPCN_P2P_PORT;
     if (!net_udp_open(&c->udp, c->local_port)) {
         rpcn_fail(c, "could not bind UDP %u (%d)", (unsigned)c->local_port, net_errno());
@@ -1584,8 +1630,15 @@ static inline bool rpcn_open_signaling(rpcn_client_t *c, uint16_t local_port) {
 
 /* The 13-byte keepalive that records/refreshes our public address. Call every
  * couple of seconds while online; pass 0 to use the logged-in user id. */
+static inline bool rpcn_send_to(rpcn_client_t *c, uint32_t ip_be, uint16_t port,
+                                const void *data, uint32_t len);
+
 static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
+#ifndef __EMSCRIPTEN__
+    if (!net_sock_valid(c->udp) && !c->relay_on) return false;
+#else
     if (!net_sock_valid(c->udp)) return false;
+#endif
     if (user_id == 0) user_id = c->user_id;
     if (user_id == 0 || c->signaling_addr == 0) return false;
 
@@ -1599,7 +1652,7 @@ static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
 
     memcpy(pkt + 9, c->advertised_ip ? &c->advertised_ip : &c->local_ip, 4);
 
-    return net_udp_send(c->udp, c->signaling_addr, RPCN_SIGNALING_PORT, pkt, sizeof(pkt));
+    return rpcn_send_to(c, c->signaling_addr, RPCN_SIGNALING_PORT, pkt, sizeof(pkt));
 }
 
 /*
@@ -1610,11 +1663,40 @@ static inline bool rpcn_send_signaling_ping(rpcn_client_t *c, int64_t user_id) {
  */
 static inline bool rpcn_send_to(rpcn_client_t *c, uint32_t ip_be, uint16_t port,
                                 const void *data, uint32_t len) {
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) {
+        /* The gateway knows RPCN's helper by a tag, not by its address. */
+        if (ip_be == c->signaling_addr && port == RPCN_SIGNALING_PORT) {
+            static const uint8_t tag[4] = WS_RELAY_SIGNALING_TAG_BYTES;
+            memcpy(&ip_be, tag, 4);
+        }
+        return ws_relay_send(&c->relay, ip_be, port, data, len);
+    }
+#endif
     return net_udp_send(c->udp, ip_be, port, data, len);
 }
 
 static inline int rpcn_recv_from(rpcn_client_t *c, void *buf, uint32_t cap,
                                  uint32_t *out_ip_be, uint16_t *out_port) {
+#ifndef __EMSCRIPTEN__
+    if (c->relay_on) {
+        uint32_t ip = 0;
+        int got = ws_relay_recv(&c->relay, buf, cap, &ip, out_port);
+        if (got < 0) {
+            /* No datagrams without it: end the session the way a dropped RPCN
+             * link does, so the heal signs back in and opens a new relay. */
+            if (tls_is_connected(&c->tls)) {
+                rpcn_fail(c, "%s", c->relay.error);
+                rpcn_disconnect(c);
+            }
+            return 0;
+        }
+        static const uint8_t tag[4] = WS_RELAY_SIGNALING_TAG_BYTES;
+        if (got > 0 && memcmp(&ip, tag, 4) == 0) ip = c->signaling_addr;
+        if (out_ip_be) *out_ip_be = ip;
+        return got;
+    }
+#endif
     return net_udp_recv(c->udp, buf, cap, out_ip_be, out_port);
 }
 

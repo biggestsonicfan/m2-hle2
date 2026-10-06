@@ -352,7 +352,7 @@ static bool load_rom(const char *zip) {
         }
     }
     sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
-    if (g_active_profile->load_fn(&state.romset, zip, parent_ptr) != 0) {
+    if (romset_load(&state.romset, g_active_profile->load_fn, zip, parent_ptr) != 0) {
         fprintf(stderr, "m2hle: could not load '%s' as %s\n", zip, g_active_profile->display_name);
         return false;
     }
@@ -452,19 +452,20 @@ static void show_layer(sg_view pens, uint8_t *out) {
         memcpy(out + (size_t)y * VIDEO_WIDTH * 4, tmp + (size_t)(VIDEO_HEIGHT - 1 - y) * VIDEO_WIDTH * 4, (size_t)VIDEO_WIDTH * 4);
 }
 
-/* Compare the GPU layers against a CPU compose of the same RAM: the pens the
- * targets hold, turned into colours through the pen texture's texels, and the
- * colours the indexed quads actually put on screen. */
-static void verify_gpu_tiles(void) {
-    video_compose_cpu(&state.video, &state.bus);
-    read_layer(state.video.bg_image, g_vt.bg);
-    read_layer(state.video.fg_image, g_vt.fg);
+/* The pens read back from both layers, turned into colours in place through the
+ * pen texture's texels (the alpha byte is left as read). */
+static void verify_tiles_pens_to_colours(void) {
     for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++)
         for (int k = 0; k < 2; k++) {
             uint8_t *px = k ? &g_vt.fg[i * 4] : &g_vt.bg[i * 4];
             const uint8_t *c = &state.video.pal_texels[(px[0] | (px[1] << 8)) * 4];
             px[0] = c[0]; px[1] = c[1]; px[2] = c[2];
         }
+}
+
+/* How many pixels the indexed quads put on screen in another colour than the
+ * CPU's, over both layers (a clear foreground pixel is not counted). */
+static int verify_tiles_shown_bad(void) {
     int shown_bad = 0;
     for (int k = 0; k < 2; k++) {
         show_layer(k ? state.video.fg_view : state.video.bg_view, g_vt.shown);
@@ -474,28 +475,51 @@ static void verify_gpu_tiles(void) {
             if ((k == 0 || c[3]) && (s[0] != c[0] || s[1] != c[1] || s[2] != c[2])) shown_bad++;
         }
     }
-    if (shown_bad && g_vt.bad_frames < 5)
-        printf("verify-gpu-tiles: game frame %u, %d shown pixels differ from the CPU colours\n", g_emu_frames, shown_bad);
-    int bad = shown_bad, first = -1;
-    const char *what = "";
+    return shown_bad;
+}
+
+/* How many pixels of the GPU layers differ from the CPU's, and the first: its
+ * index in `*first` and its layer in `*what` (left alone when none differs). */
+static int verify_tiles_layers_bad(int *first, const char **what) {
+    int bad = 0;
     for (int i = 0; i < VIDEO_WIDTH * VIDEO_HEIGHT; i++) {
         const uint8_t *gb = &g_vt.bg[i * 4], *cb = &state.video.bg_pixels[i * 4];
         const uint8_t *gf = &g_vt.fg[i * 4], *cf = &state.video.fg_pixels[i * 4];
         bool bg_ok = gb[0] == cb[0] && gb[1] == cb[1] && gb[2] == cb[2] && gb[3] == cb[3];
         bool fg_ok = gf[3] == cf[3] && (cf[3] == 0 || (gf[0] == cf[0] && gf[1] == cf[1] && gf[2] == cf[2]));
         if (!bg_ok || !fg_ok) {
-            if (first < 0) { first = i; what = bg_ok ? "fg" : "bg"; }
+            if (*first < 0) { *first = i; *what = bg_ok ? "fg" : "bg"; }
             bad++;
         }
     }
+    return bad;
+}
+
+/* The first pixel that differed, GPU against CPU. */
+static void verify_tiles_report(int bad, int first, const char *what) {
+    int x = first % VIDEO_WIDTH, y = first / VIDEO_WIDTH;
+    const uint8_t *g = strcmp(what, "bg") ? &g_vt.fg[first * 4] : &g_vt.bg[first * 4];
+    const uint8_t *c = strcmp(what, "bg") ? &state.video.fg_pixels[first * 4] : &state.video.bg_pixels[first * 4];
+    printf("verify-gpu-tiles: game frame %u, %d pixels differ; first %s at (%d,%d) gpu %02x%02x%02x%02x cpu %02x%02x%02x%02x\n",
+           g_emu_frames, bad, what, x, y, g[0], g[1], g[2], g[3], c[0], c[1], c[2], c[3]);
+}
+
+/* Compare the GPU layers against a CPU compose of the same RAM: the pens the
+ * targets hold, turned into colours through the pen texture's texels, and the
+ * colours the indexed quads actually put on screen. */
+static void verify_gpu_tiles(void) {
+    video_compose_cpu(&state.video, &state.bus);
+    read_layer(state.video.bg_image, g_vt.bg);
+    read_layer(state.video.fg_image, g_vt.fg);
+    verify_tiles_pens_to_colours();
+    int shown_bad = verify_tiles_shown_bad();
+    if (shown_bad && g_vt.bad_frames < 5)
+        printf("verify-gpu-tiles: game frame %u, %d shown pixels differ from the CPU colours\n", g_emu_frames, shown_bad);
+    int first = -1;
+    const char *what = "";
+    int bad = shown_bad + verify_tiles_layers_bad(&first, &what);
     g_vt.frames++;
-    if (bad && g_vt.bad_frames++ < 5) {
-        int x = first % VIDEO_WIDTH, y = first / VIDEO_WIDTH;
-        const uint8_t *g = strcmp(what, "bg") ? &g_vt.fg[first * 4] : &g_vt.bg[first * 4];
-        const uint8_t *c = strcmp(what, "bg") ? &state.video.fg_pixels[first * 4] : &state.video.bg_pixels[first * 4];
-        printf("verify-gpu-tiles: game frame %u, %d pixels differ; first %s at (%d,%d) gpu %02x%02x%02x%02x cpu %02x%02x%02x%02x\n",
-               g_emu_frames, bad, what, x, y, g[0], g[1], g[2], g[3], c[0], c[1], c[2], c[3]);
-    }
+    if (bad && g_vt.bad_frames++ < 5) verify_tiles_report(bad, first, what);
 }
 
 /* ---- --verify-fill ------------------------------------------------------------ */
@@ -573,6 +597,11 @@ static bool parse_args(int argc, char **argv) {
             g_region = r;
         }
         else if (!strcmp(a, "--vs-mode"))           g_vs_mode = 1;
+        else if (!strcmp(a, "--enemy-rank") && more) {  /* cabinet | easy..hardest | extra1 | extra2 */
+            int r = enemy_rank_parse(argv[++i]);
+            if (r < -1) return false;
+            g_enemy_rank = r;
+        }
         else if (!strcmp(a, "--no-nvram"))          g_backup_want = 0;
         else if (!strcmp(a, "--nvram-dir") && more) {
             snprintf(g_backup_dir, sizeof g_backup_dir, "%s", argv[++i]);
@@ -750,6 +779,466 @@ static void sdl_netplay_reset_cb(void *ctx) {
 
 #include "pad_lobby.h"
 
+/* Before the emu thread: it pumps the session from its first slice. */
+static void netplay_start(void) {
+    g_lobby.net_host      = opt.net_host;
+    g_lobby.net_delay     = opt.net_delay;
+    g_lobby.net_room_pass = opt.net_room_pass;
+    g_lobby.take_pad      = lobby_pad_release;
+    lobby_init();
+    netplay_set_reset_hook(sdl_netplay_reset_cb, NULL);
+    if (lobby_can_sign_in()) lobby_sign_in();
+}
+
+/* The netplay lobby takes the pad and the keyboard while it is open: L1+R1,
+ * Guide or F1 toggle it; the d-pad moves, A picks and B closes, both on
+ * release, so the button is up again before the game resumes. True if the
+ * event was the lobby's and the game must not see it. */
+static bool lobby_event(const SDL_Event *ev, bool *pad_changed) {
+    bool toggle = false, used = false;
+    if (ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        SDL_Gamepad *pad = SDL_GetGamepadFromID(ev->gbutton.which);
+        int b = ev->gbutton.button;
+        if (b == SDL_GAMEPAD_BUTTON_GUIDE) toggle = true;
+        else if (pad && ((b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
+                          && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
+                      || (b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER
+                          && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))))
+            toggle = true;
+        else if (g_lobby.open) {
+            used = true;
+            if (b == SDL_GAMEPAD_BUTTON_DPAD_UP)   lobby_move(-1);
+            if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) lobby_move(+1);
+            if (b == SDL_GAMEPAD_BUTTON_SOUTH || b == SDL_GAMEPAD_BUTTON_EAST)
+                g_lobby.pressed = b;
+        }
+    } else if (ev->type == SDL_EVENT_GAMEPAD_BUTTON_UP && g_lobby.open) {
+        used = true;
+        if (ev->gbutton.button == g_lobby.pressed) {
+            g_lobby.pressed = -1;
+            if (ev->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) lobby_activate();
+            else lobby_show(false);
+        }
+    } else if (ev->type == SDL_EVENT_KEY_DOWN && !ev->key.repeat) {
+        if (ev->key.scancode == SDL_SCANCODE_F1) toggle = true;
+        else if (g_lobby.open && ev->key.scancode != SDL_SCANCODE_ESCAPE) {
+            used = true;
+            if (ev->key.scancode == SDL_SCANCODE_UP)        lobby_move(-1);
+            if (ev->key.scancode == SDL_SCANCODE_DOWN)      lobby_move(+1);
+            if (ev->key.scancode == SDL_SCANCODE_RETURN)    lobby_activate();
+            if (ev->key.scancode == SDL_SCANCODE_BACKSPACE) lobby_show(false);
+        }
+    } else if (ev->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && g_lobby.open) {
+        used = true;
+    }
+    if (toggle) {
+        g_lobby.pressed = -1;
+        lobby_show(!g_lobby.open);
+        *pad_changed = true;   /* closing: pick up what is still held */
+    }
+    return toggle || used;
+}
+
+/* Who holds the pad after this round of events. */
+static void lobby_pad_settle(bool *pad_changed) {
+    /* The board was reset under the pad (netplay's barrier): it holds nothing
+     * now, so press again whatever is still down. */
+    if (g_pad_resync) {
+        g_pad_resync = 0;
+        memset(g_pad_held, 0, sizeof g_pad_held);
+        *pad_changed = true;
+    }
+    static bool lobby_was_open;
+    if (lobby_was_open && !g_lobby.open) *pad_changed = true;
+    lobby_was_open = g_lobby.open;
+    if (g_lobby.open) *pad_changed = false;   /* the lobby has the pad */
+}
+
+/* Drain SDL's queue: the keyboard and gamepads into the board's inputs.
+ * False once the player asked to quit. */
+static bool poll_events(void) {
+    SDL_Event ev;
+    bool running = true, pad_changed = false;
+    while (SDL_PollEvent(&ev)) {
+        if (opt.netplay && lobby_event(&ev, &pad_changed)) continue;
+        switch (ev.type) {
+            case SDL_EVENT_QUIT: running = false; break;
+            case SDL_EVENT_KEY_DOWN:
+                if (ev.key.scancode == SDL_SCANCODE_ESCAPE) running = false;
+                else if (!ev.key.repeat) input_action_down(key_to_action(ev.key.scancode));
+                break;
+            case SDL_EVENT_KEY_UP:
+                input_action_up(key_to_action(ev.key.scancode));
+                break;
+            case SDL_EVENT_GAMEPAD_ADDED:
+                if (SDL_OpenGamepad(ev.gdevice.which))
+                    printf("m2hle: gamepad %s\n", SDL_GetGamepadNameForID(ev.gdevice.which));
+                pad_changed = true;
+                break;
+            case SDL_EVENT_GAMEPAD_REMOVED:
+                SDL_CloseGamepad(SDL_GetGamepadFromID(ev.gdevice.which));
+                pad_changed = true;
+                break;
+            case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            case SDL_EVENT_GAMEPAD_BUTTON_UP:
+            case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+                pad_changed = true;
+                break;
+            default: break;
+        }
+    }
+    if (opt.netplay) lobby_pad_settle(&pad_changed);
+    if (pad_changed) pad_refresh();
+    return running;
+}
+
+/* ---- The window and the game's target -------------------------------------- */
+
+static SDL_Window   *g_window;
+static SDL_GLContext g_gl;
+
+/* A GLES 3 context in a window, fullscreen unless --window. */
+static bool gl_window_open(void) {
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    /* No alpha channel: the tile layers leave alpha < 1, and a compositor
+     * would blend the frontend beneath the window through it. */
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+    bool fullscreen = opt.win_w <= 0 || opt.win_h <= 0;
+    g_window = SDL_CreateWindow("m2hle", fullscreen ? 640 : opt.win_w, fullscreen ? 480 : opt.win_h,
+                                SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+    g_gl = g_window ? SDL_GL_CreateContext(g_window) : NULL;
+    if (!g_gl) {
+        fprintf(stderr, "m2hle: GLES 3 window: %s\n", SDL_GetError());
+        return false;
+    }
+    SDL_GL_MakeCurrent(g_window, g_gl);
+    /* Paced by the render timer below; vsync on top would stall a skipped frame. */
+    SDL_GL_SetSwapInterval(opt.render_fps >= 59.0 ? 1 : 0);
+    SDL_HideCursor();
+    printf("m2hle %s: %s on %s (%s)\n", M2HLE_VERSION, g_active_profile->display_name,
+           (const char *)glGetString(GL_RENDERER), SDL_GetCurrentVideoDriver());
+    return true;
+}
+
+/* sokol and the renderers on the new context. 0, or the exit code. */
+static int gfx_start(void) {
+    sg_setup(&(sg_desc){
+        .environment.defaults = { .color_format = SG_PIXELFORMAT_RGBA8,
+                                  .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
+                                  .sample_count = 1 },
+        .logger.func = slog_func,
+    });
+    if (!sg_isvalid()) { fprintf(stderr, "m2hle: sokol_gfx setup failed\n"); return 1; }
+    if (opt.stats) { sg_enable_stats(); g_game_frame_gl_counts = true; }   /* the "gl per render" line */
+    if (opt.osd || opt.netplay)
+        sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_cpc(), .logger.func = slog_func });
+    g_video_force_cpu_tiles = opt.cpu_tiles;
+    if (opt.verify_fill && opt.render_scale <= 0) {
+        fprintf(stderr, "m2hle: --verify-fill needs the offscreen game pass (--render-scale 1 or more)\n");
+        return 2;
+    }
+    g_game_render_fill_verify = opt.verify_fill;
+    game_render_init();
+    video_init(&state.video);
+    printf("m2hle: tile layers composed on the %s\n", state.video.gpu ? "GPU" : "CPU");
+    geo3d_init(&state.geo3d);
+    g_geo3d_state = &state.geo3d;
+    return 0;
+}
+
+/* Offscreen target at the board's resolution (times --render-scale). */
+static struct {
+    int     w, h;
+    sg_image color, depth;
+    sg_view  color_att, depth_att, texture;
+} g_rt;
+
+static void game_target_make(void) {
+    g_rt.w = VIDEO_WIDTH * opt.render_scale;
+    g_rt.h = VIDEO_HEIGHT * opt.render_scale;
+    if (opt.render_scale <= 0) return;
+    g_rt.color = sg_make_image(&(sg_image_desc){
+        .usage = { .color_attachment = true }, .width = g_rt.w, .height = g_rt.h,
+        .pixel_format = SG_PIXELFORMAT_RGBA8, .sample_count = 1, .label = "game-target" });
+    g_rt.depth = sg_make_image(&(sg_image_desc){
+        .usage = { .depth_stencil_attachment = true }, .width = g_rt.w, .height = g_rt.h,
+        .pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL, .sample_count = 1, .label = "game-target-depth" });
+    g_rt.color_att = sg_make_view(&(sg_view_desc){ .color_attachment.image = g_rt.color });
+    g_rt.depth_att = sg_make_view(&(sg_view_desc){ .depth_stencil_attachment.image = g_rt.depth });
+    g_rt.texture   = sg_make_view(&(sg_view_desc){ .texture.image = g_rt.color });
+}
+
+static void game_target_destroy(void) {
+    if (opt.render_scale <= 0) return;
+    sg_destroy_view(g_rt.texture);
+    sg_destroy_view(g_rt.depth_att);
+    sg_destroy_view(g_rt.color_att);
+    sg_destroy_image(g_rt.depth);
+    sg_destroy_image(g_rt.color);
+}
+
+/* ---- Statistics (--stats, --gl-finish) --------------------------------------- */
+
+/* Sums over the current 5 s window; the video counters are where it began. */
+static struct {
+    Uint64   start, cpu_ns, gpu_ns, swap_ns, tile_gpu_ns, game_gpu_ns;
+    uint64_t comp0, uptile0, upgfx0, uppens0, part0, blk0;
+    unsigned renders, frames0;
+    sg_frame_stats gl;   /* sums of sokol's per-frame counts over the window */
+} g_st;
+
+/* Time a GL wait: what it blocked for. */
+static Uint64 gl_finish_ns(void) {
+    Uint64 f0 = SDL_GetTicksNS();
+    glFinish();
+    return SDL_GetTicksNS() - f0;
+}
+
+/* sg_commit just closed the frame: it is prev_frame now. */
+static void stats_add_gl(void) {
+    sg_stats st = sg_query_stats();
+    const sg_frame_stats *g = &st.prev_frame;
+    sg_frame_stats *s = &g_st.gl;
+    s->num_passes += g->num_passes;               s->num_apply_pipeline += g->num_apply_pipeline;
+    s->num_apply_bindings += g->num_apply_bindings; s->num_apply_uniforms += g->num_apply_uniforms;
+    s->num_draw += g->num_draw;
+    s->num_update_buffer += g->num_update_buffer; s->size_update_buffer += g->size_update_buffer;
+    s->num_append_buffer += g->num_append_buffer; s->size_append_buffer += g->size_append_buffer;
+    s->num_update_image += g->num_update_image;   s->size_update_image += g->size_update_image;
+    s->gl.num_bind_buffer += g->gl.num_bind_buffer;   s->gl.num_bind_texture += g->gl.num_bind_texture;
+    s->gl.num_use_program += g->gl.num_use_program;   s->gl.num_uniform += g->gl.num_uniform;
+    s->gl.num_render_state += g->gl.num_render_state;
+    s->gl.num_vertex_attrib_pointer += g->gl.num_vertex_attrib_pointer;
+}
+
+/* Every 5 s: print the window's rates and per-render costs, then start a new one. */
+static void stats_report(Uint64 now, bool audio) {
+    if (now - g_st.start < 5000000000ull) return;
+    double secs = (double)(now - g_st.start) / 1e9;
+    double n = g_st.renders ? (double)g_st.renders : 1.0;
+    const game_frame_times_t *t = &g_game_frame_times;
+    printf("m2hle: game %.1f fps, render %.1f fps | per render ms: cpu %.2f [compose %.2f scan %.2f "
+           "upload %.2f 3d %.2f tiles %.2f]%s%.2f swap %.2f | cpu %.1fC gpu %.1fC\n",
+           (g_emu_frames - g_st.frames0) / secs, g_st.renders / secs,
+           g_st.cpu_ns / 1e6 / n, t->compose_us / 1e3 / n, t->scan_us / 1e3 / n,
+           t->upload_us / 1e3 / n, t->draw3d_us / 1e3 / n, t->tiles_us / 1e3 / n,
+           opt.gl_finish ? " gpu " : " ", opt.gl_finish ? g_st.gpu_ns / 1e6 / n : 0.0,
+           g_st.swap_ns / 1e6 / n,
+           read_milli("/sys/class/thermal/thermal_zone0/temp") / 1000.0,
+           read_milli("/sys/class/thermal/thermal_zone1/temp") / 1000.0);
+    const video_state_t *v = &state.video;
+    uint64_t comps = v->gpu_composes - g_st.comp0;
+    printf("m2hle: tiles: %llu composes (%.0f%% of renders, %llu partial, %.0f%% of the screen drawn), "
+           "uploads tile %llu gfx %llu pens %llu",
+           (unsigned long long)comps, 100.0 * (double)comps / n,
+           (unsigned long long)(v->partial_composes - g_st.part0),
+           comps ? 100.0 * (double)(v->composed_blocks - g_st.blk0) / ((double)comps * VIDEO_BLK_W * VIDEO_BLK_H) : 0.0,
+           (unsigned long long)(v->up_tile - g_st.uptile0), (unsigned long long)(v->up_gfx - g_st.upgfx0),
+           (unsigned long long)(v->up_pens - g_st.uppens0));
+    if (opt.gl_finish && comps)
+        printf(" | gpu %.2f ms per compose", g_st.tile_gpu_ns / 1e6 / (double)comps);
+    if (opt.gl_finish && opt.render_scale > 0)
+        printf(" | game pass gpu %.2f ms per render", g_st.game_gpu_ns / 1e6 / n);
+    if (audio)
+        printf(" | sound: %llu underrun frames, %llu dropped total",
+               (unsigned long long)g_audio_out.underruns, (unsigned long long)g_sound.out_dropped);
+    printf("\n");
+    /* What the frame asks of the GL driver, per render (sokol's counts;
+     * all drawing goes through sokol). The Mali driver's CPU time is
+     * paid per call and per byte, so these are the baseline for it. */
+    const sg_frame_stats *g = &g_st.gl;
+    printf("m2hle: gl per render: %.0f passes, %.0f pipelines, %.0f bindings, %.0f uniform blocks, "
+           "%.0f draws (3d %.0f: %.0f pipelines, %.0f bindings, %.0f uniforms, %.0f buffer writes %.1f KB) | "
+           "buffer updates %.1f (%.1f KB), appends %.1f (%.1f KB), image updates %.2f (%.1f KB) | "
+           "gl calls: bind buffer %.0f, bind texture %.0f, use program %.0f, uniform %.0f, "
+           "render state %.0f, vertex attrib %.0f\n",
+           g->num_passes / n, g->num_apply_pipeline / n, g->num_apply_bindings / n, g->num_apply_uniforms / n,
+           g->num_draw / n, t->draw3d_draws / n, t->draw3d_pipelines / n, t->draw3d_bindings / n,
+           t->draw3d_uniforms / n, t->draw3d_buf_writes / n, t->draw3d_buf_bytes / 1024.0 / n,
+           g->num_update_buffer / n, g->size_update_buffer / 1024.0 / n,
+           g->num_append_buffer / n, g->size_append_buffer / 1024.0 / n,
+           g->num_update_image / n, g->size_update_image / 1024.0 / n,
+           g->gl.num_bind_buffer / n, g->gl.num_bind_texture / n, g->gl.num_use_program / n,
+           g->gl.num_uniform / n, g->gl.num_render_state / n, g->gl.num_vertex_attrib_pointer / n);
+    fflush(stdout);
+    memset(&g_st, 0, sizeof g_st);
+    g_st.comp0 = v->gpu_composes; g_st.uptile0 = v->up_tile; g_st.upgfx0 = v->up_gfx; g_st.uppens0 = v->up_pens;
+    g_st.part0 = v->partial_composes; g_st.blk0 = v->composed_blocks;
+    g_st.start = now; g_st.frames0 = g_emu_frames;
+    memset(&g_game_frame_times, 0, sizeof g_game_frame_times);
+}
+
+/* ---- One render ------------------------------------------------------------------ */
+
+/* Bring the tile layers and the 3D up to the board's latest frame. Returns how
+ * long it waited on the GPU, which is not CPU time. */
+static Uint64 frame_prepare(void) {
+    if (opt.gl_finish) {
+        /* Only the tile compose puts GPU work in prepare: the wait after it is
+         * that pass's GPU time (uploads included), kept out of the CPU time. */
+        uint64_t composes = state.video.gpu_composes;
+        game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+        if (state.video.gpu_composes == composes) return 0;
+        Uint64 waited = gl_finish_ns();
+        g_st.tile_gpu_ns += waited;
+        return waited;
+    }
+    if (opt.verify_gpu_tiles && state.video.gpu) {
+        /* Hold the emu thread so both composes see the same RAM. */
+        emu_mutex_lock(&state.emu.mutex);
+        uint64_t composes = state.video.gpu_composes + state.video.up_pens;
+        game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+        if (state.video.gpu_composes + state.video.up_pens != composes) verify_gpu_tiles();
+        emu_mutex_unlock(&state.emu.mutex);
+        return 0;
+    }
+    game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+    return 0;
+}
+
+/* Where the picture goes on a fb_w x fb_h screen: letterboxed to fit, or at
+ * --display-scale, centred, when that fits. */
+static void screen_rect(int fb_w, int fb_h, int *ox, int *oy, int *w, int *h) {
+    game_render_letterbox(fb_w, fb_h, VIDEO_WIDTH, VIDEO_HEIGHT, ox, oy, w, h);
+    if (opt.display_scale > 0 && VIDEO_WIDTH * opt.display_scale <= fb_w
+            && VIDEO_HEIGHT * opt.display_scale <= fb_h) {
+        *w  = VIDEO_WIDTH * opt.display_scale;
+        *h  = VIDEO_HEIGHT * opt.display_scale;
+        *ox = (fb_w - *w) / 2;
+        *oy = (fb_h - *h) / 2;
+    }
+}
+
+static const sg_pass_action g_pass_action = {
+    .colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0.0f, 0.0f, 0.0f, 1.0f } },
+    .depth     = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f },
+};
+
+/* Draw the board's latest frame, the OSD and the lobby, and present it. */
+static void render_frame(void) {
+    static int shots_done;
+    if (opt.gl_finish) glFinish();   /* the tile compose below starts on an idle GPU */
+    Uint64 cpu_start = SDL_GetTicksNS();
+    int fb_w, fb_h;
+    SDL_GetWindowSizeInPixels(g_window, &fb_w, &fb_h);
+    cpu_start += frame_prepare();
+    float lerp_t = game_frame_lerp();
+
+    int ox, oy, w, h;
+    screen_rect(fb_w, fb_h, &ox, &oy, &w, &h);
+    if (opt.render_scale > 0) {
+        g_fill_log.n = 0; g_fill_log.uploads = 0; g_fill_log.overflow = false;
+        sg_begin_pass(&(sg_pass){
+            .action = g_pass_action,
+            .attachments = { .colors[0] = g_rt.color_att, .depth_stencil = g_rt.depth_att },
+        });
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
+                        0, 0, g_rt.w, g_rt.h, lerp_t);
+        sg_end_pass();
+        if (opt.gl_finish) {
+            /* The game pass is the tile layer quads and the 3D fills: its GPU
+             * time, kept out of the CPU time. */
+            Uint64 waited = gl_finish_ns();
+            g_st.game_gpu_ns += waited;
+            cpu_start += waited;
+        }
+        if (opt.verify_fill) verify_fill(g_rt.w, g_rt.h);
+    }
+    sg_begin_pass(&(sg_pass){
+        .action = g_pass_action,
+        .swapchain = { .width = fb_w, .height = fb_h, .sample_count = 1,
+                       .color_format = SG_PIXELFORMAT_RGBA8,
+                       .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
+                       .gl.framebuffer = 0 },
+    });
+    /* The lobby is drawn on black, to be read; over a match, on the match. */
+    if (opt.netplay) lobby_update(SDL_GetTicksNS());
+    bool show_game = !(opt.netplay && g_lobby.open && !netplay_state_running(g_lobby.st.state));
+    if (show_game && opt.render_scale > 0)
+        game_render_draw_target(g_rt.texture, opt.linear, ox, oy, w, h);
+    else if (show_game)
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
+    if (opt.osd) {
+        osd_update(SDL_GetTicksNS());
+        osd_draw(fb_w, fb_h);
+    }
+    if (opt.netplay) lobby_draw(fb_w, fb_h, SDL_GetTicksNS());
+    if (opt.osd || opt.netplay) sdtx_draw();
+    int pzone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
+    sg_end_pass();
+    sg_commit();
+    Uint64 cpu_end = SDL_GetTicksNS();
+    g_st.cpu_ns += cpu_end - cpu_start;
+    if (opt.stats) stats_add_gl();
+    if (opt.gl_finish) {
+        glFinish();
+        g_st.gpu_ns += SDL_GetTicksNS() - cpu_end;
+    }
+
+    while (shots_done < opt.shot_count && g_emu_frames >= opt.shot_frame[shots_done])
+        save_png(opt.shot_path[shots_done++], fb_w, fb_h);
+    Uint64 swap_start = SDL_GetTicksNS();
+    SDL_GL_SwapWindow(g_window);
+    g_st.swap_ns += SDL_GetTicksNS() - swap_start;
+    hprof_leave(pzone);
+    g_st.renders++;
+}
+
+/* --max-temp: true once the CPU or GPU zone has reached it (checked every 0.5 s). */
+static bool too_hot(Uint64 now) {
+    static Uint64 next_check;
+    if (opt.max_temp <= 0.0 || now < next_check) return false;
+    next_check = now + 500000000ull;
+    int hot = read_milli("/sys/class/thermal/thermal_zone0/temp");
+    int gpu = read_milli("/sys/class/thermal/thermal_zone1/temp");
+    if (gpu > hot) hot = gpu;
+    if (hot < (int)(opt.max_temp * 1000.0)) return false;
+    printf("m2hle: %.1fC reached --max-temp %.0f, quitting\n", hot / 1000.0, opt.max_temp);
+    return true;
+}
+
+/* Events and renders until the player quits, the CPU halts, --exit-after or
+ * --max-temp. The exit code. */
+static int run_loop(bool audio) {
+    /* Render at the requested rate; the emu thread keeps its own 60 Hz. */
+    const Uint64 period_ns = opt.render_fps > 0.0 ? (Uint64)(1e9 / opt.render_fps) : 0;
+    Uint64 deadline = SDL_GetTicksNS();
+    g_st.start = deadline;
+    g_st.frames0 = g_emu_frames;
+
+    int rc = 0;
+    for (bool running = true; running; ) {
+        running = poll_events();
+        if (state.cpu.halted) {
+            fprintf(stderr, "m2hle: CPU halted at 0x%08X\n", state.cpu.sfr.ip);
+            dump_log_tail(12);
+            return 1;
+        }
+        if (opt.exit_after && g_emu_frames >= opt.exit_after) break;
+
+        if (period_ns) {
+            Uint64 now = SDL_GetTicksNS();
+            if (now < deadline) SDL_DelayPrecise(deadline - now);
+            deadline += period_ns;
+            now = SDL_GetTicksNS();
+            if (deadline + period_ns < now) deadline = now;   /* fell behind: don't burst */
+        }
+        render_frame();
+
+        Uint64 now = SDL_GetTicksNS();
+        if (too_hot(now)) { rc = 3; running = false; }
+        if (opt.stats) stats_report(now, audio);
+    }
+    return rc;
+}
 
 int main(int argc, char **argv) {
     if (!parse_args(argc, argv)) {
@@ -780,390 +1269,16 @@ int main(int argc, char **argv) {
         return 1;
     }
     SDL_AudioStream *audio = opt.sound ? sound_start() : NULL;
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
-    /* No alpha channel: the tile layers leave alpha < 1, and a compositor
-     * would blend the frontend beneath the window through it. */
-    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+    if (!gl_window_open()) { SDL_Quit(); return 1; }
+    int rc = gfx_start();
+    if (rc) return rc;
+    game_target_make();
 
-    bool fullscreen = opt.win_w <= 0 || opt.win_h <= 0;
-    SDL_Window *window = SDL_CreateWindow("m2hle", fullscreen ? 640 : opt.win_w, fullscreen ? 480 : opt.win_h,
-                                          SDL_WINDOW_OPENGL | (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
-    SDL_GLContext gl = window ? SDL_GL_CreateContext(window) : NULL;
-    if (!gl) {
-        fprintf(stderr, "m2hle: GLES 3 window: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
-    SDL_GL_MakeCurrent(window, gl);
-    /* Paced by the render timer below; vsync on top would stall a skipped frame. */
-    SDL_GL_SetSwapInterval(opt.render_fps >= 59.0 ? 1 : 0);
-    SDL_HideCursor();
-    printf("m2hle %s: %s on %s (%s)\n", M2HLE_VERSION, g_active_profile->display_name,
-           (const char *)glGetString(GL_RENDERER), SDL_GetCurrentVideoDriver());
-
-    sg_setup(&(sg_desc){
-        .environment.defaults = { .color_format = SG_PIXELFORMAT_RGBA8,
-                                  .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
-                                  .sample_count = 1 },
-        .logger.func = slog_func,
-    });
-    if (!sg_isvalid()) { fprintf(stderr, "m2hle: sokol_gfx setup failed\n"); return 1; }
-    if (opt.stats) { sg_enable_stats(); g_game_frame_gl_counts = true; }   /* the "gl per render" line */
-    if (opt.osd || opt.netplay)
-        sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_cpc(), .logger.func = slog_func });
-    g_video_force_cpu_tiles = opt.cpu_tiles;
-    if (opt.verify_fill && opt.render_scale <= 0) {
-        fprintf(stderr, "m2hle: --verify-fill needs the offscreen game pass (--render-scale 1 or more)\n");
-        return 2;
-    }
-    g_game_render_fill_verify = opt.verify_fill;
-    game_render_init();
-    video_init(&state.video);
-    printf("m2hle: tile layers composed on the %s\n", state.video.gpu ? "GPU" : "CPU");
-    geo3d_init(&state.geo3d);
-    g_geo3d_state = &state.geo3d;
-
-    /* Offscreen target at the board's resolution (times --render-scale). */
-    int rt_w = VIDEO_WIDTH * opt.render_scale, rt_h = VIDEO_HEIGHT * opt.render_scale;
-    sg_image rt_color = {0}, rt_depth = {0};
-    sg_view  rt_color_att = {0}, rt_depth_att = {0}, rt_texture = {0};
-    if (opt.render_scale > 0) {
-        rt_color = sg_make_image(&(sg_image_desc){
-            .usage = { .color_attachment = true }, .width = rt_w, .height = rt_h,
-            .pixel_format = SG_PIXELFORMAT_RGBA8, .sample_count = 1, .label = "game-target" });
-        rt_depth = sg_make_image(&(sg_image_desc){
-            .usage = { .depth_stencil_attachment = true }, .width = rt_w, .height = rt_h,
-            .pixel_format = SG_PIXELFORMAT_DEPTH_STENCIL, .sample_count = 1, .label = "game-target-depth" });
-        rt_color_att = sg_make_view(&(sg_view_desc){ .color_attachment.image = rt_color });
-        rt_depth_att = sg_make_view(&(sg_view_desc){ .depth_stencil_attachment.image = rt_depth });
-        rt_texture   = sg_make_view(&(sg_view_desc){ .texture.image = rt_color });
-    }
-
-    /* Before the emu thread: it pumps the session from its first slice. */
-    if (opt.netplay) {
-        g_lobby.net_host      = opt.net_host;
-        g_lobby.net_delay     = opt.net_delay;
-        g_lobby.net_room_pass = opt.net_room_pass;
-        g_lobby.take_pad      = lobby_pad_release;
-        lobby_init();
-        netplay_set_reset_hook(sdl_netplay_reset_cb, NULL);
-        if (lobby_can_sign_in()) lobby_sign_in();
-    }
+    if (opt.netplay) netplay_start();
     emu_thread_init(&state.emu, &state.cpu, &state.bus);
     emu_run(&state.emu);
 
-    sg_pass_action pass_action = {
-        .colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0.0f, 0.0f, 0.0f, 1.0f } },
-        .depth     = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f },
-    };
-
-    const Uint64 period_ns = opt.render_fps > 0.0 ? (Uint64)(1e9 / opt.render_fps) : 0;
-    Uint64 deadline = SDL_GetTicksNS();
-    Uint64 stat_start = deadline, stat_cpu_ns = 0, stat_gpu_ns = 0, stat_swap_ns = 0, stat_tile_gpu_ns = 0;
-    Uint64 stat_game_gpu_ns = 0;
-    uint64_t stat_comp0 = 0, stat_uptile0 = 0, stat_upgfx0 = 0, stat_uppens0 = 0, stat_part0 = 0, stat_blk0 = 0;
-    Uint64 next_temp_check = deadline;
-    unsigned stat_renders = 0, stat_frames0 = g_emu_frames;
-    sg_frame_stats stat_gl = {0};   /* sums of sokol's per-frame counts over the window */
-    int shots_done = 0;
-    bool running = true;
-    int rc = 0;
-
-    while (running) {
-        SDL_Event ev;
-        bool pad_changed = false;
-        while (SDL_PollEvent(&ev)) {
-            /* The netplay lobby takes the pad and the keyboard while it is open:
-             * L1+R1, Guide or F1 toggle it; the d-pad moves, A picks and B closes,
-             * both on release, so the button is up again before the game resumes. */
-            if (opt.netplay) {
-                bool toggle = false, used = false;
-                if (ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-                    SDL_Gamepad *pad = SDL_GetGamepadFromID(ev.gbutton.which);
-                    int b = ev.gbutton.button;
-                    if (b == SDL_GAMEPAD_BUTTON_GUIDE) toggle = true;
-                    else if (pad && ((b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
-                                      && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
-                                  || (b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER
-                                      && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))))
-                        toggle = true;
-                    else if (g_lobby.open) {
-                        used = true;
-                        if (b == SDL_GAMEPAD_BUTTON_DPAD_UP)   lobby_move(-1);
-                        if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) lobby_move(+1);
-                        if (b == SDL_GAMEPAD_BUTTON_SOUTH || b == SDL_GAMEPAD_BUTTON_EAST)
-                            g_lobby.pressed = b;
-                    }
-                } else if (ev.type == SDL_EVENT_GAMEPAD_BUTTON_UP && g_lobby.open) {
-                    used = true;
-                    if (ev.gbutton.button == g_lobby.pressed) {
-                        g_lobby.pressed = -1;
-                        if (ev.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) lobby_activate();
-                        else lobby_show(false);
-                    }
-                } else if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
-                    if (ev.key.scancode == SDL_SCANCODE_F1) toggle = true;
-                    else if (g_lobby.open && ev.key.scancode != SDL_SCANCODE_ESCAPE) {
-                        used = true;
-                        if (ev.key.scancode == SDL_SCANCODE_UP)        lobby_move(-1);
-                        if (ev.key.scancode == SDL_SCANCODE_DOWN)      lobby_move(+1);
-                        if (ev.key.scancode == SDL_SCANCODE_RETURN)    lobby_activate();
-                        if (ev.key.scancode == SDL_SCANCODE_BACKSPACE) lobby_show(false);
-                    }
-                } else if (ev.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && g_lobby.open) {
-                    used = true;
-                }
-                if (toggle) {
-                    g_lobby.pressed = -1;
-                    lobby_show(!g_lobby.open);
-                    pad_changed = true;   /* closing: pick up what is still held */
-                    continue;
-                }
-                if (used) continue;
-            }
-            switch (ev.type) {
-                case SDL_EVENT_QUIT: running = false; break;
-                case SDL_EVENT_KEY_DOWN:
-                    if (ev.key.scancode == SDL_SCANCODE_ESCAPE) running = false;
-                    else if (!ev.key.repeat) input_action_down(key_to_action(ev.key.scancode));
-                    break;
-                case SDL_EVENT_KEY_UP:
-                    input_action_up(key_to_action(ev.key.scancode));
-                    break;
-                case SDL_EVENT_GAMEPAD_ADDED:
-                    if (SDL_OpenGamepad(ev.gdevice.which))
-                        printf("m2hle: gamepad %s\n", SDL_GetGamepadNameForID(ev.gdevice.which));
-                    pad_changed = true;
-                    break;
-                case SDL_EVENT_GAMEPAD_REMOVED:
-                    SDL_CloseGamepad(SDL_GetGamepadFromID(ev.gdevice.which));
-                    pad_changed = true;
-                    break;
-                case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-                case SDL_EVENT_GAMEPAD_BUTTON_UP:
-                case SDL_EVENT_GAMEPAD_AXIS_MOTION:
-                    pad_changed = true;
-                    break;
-                default: break;
-            }
-        }
-        if (opt.netplay) {
-            /* The board was reset under the pad (netplay's barrier): it holds
-             * nothing now, so press again whatever is still down. */
-            if (g_pad_resync) {
-                g_pad_resync = 0;
-                memset(g_pad_held, 0, sizeof g_pad_held);
-                pad_changed = true;
-            }
-            static bool lobby_was_open;
-            if (lobby_was_open && !g_lobby.open) pad_changed = true;
-            lobby_was_open = g_lobby.open;
-            if (g_lobby.open) pad_changed = false;   /* the lobby has the pad */
-        }
-        if (pad_changed) pad_refresh();
-        if (state.cpu.halted) {
-            fprintf(stderr, "m2hle: CPU halted at 0x%08X\n", state.cpu.sfr.ip);
-            dump_log_tail(12);
-            rc = 1;
-            break;
-        }
-        if (opt.exit_after && g_emu_frames >= opt.exit_after) break;
-
-        /* Render at the requested rate; the emu thread keeps its own 60 Hz. */
-        if (period_ns) {
-            Uint64 now = SDL_GetTicksNS();
-            if (now < deadline) SDL_DelayPrecise(deadline - now);
-            deadline += period_ns;
-            now = SDL_GetTicksNS();
-            if (deadline + period_ns < now) deadline = now;   /* fell behind: don't burst */
-        }
-
-        if (opt.gl_finish) glFinish();   /* the tile compose below starts on an idle GPU */
-        Uint64 cpu_start = SDL_GetTicksNS();
-        int fb_w, fb_h;
-        SDL_GetWindowSizeInPixels(window, &fb_w, &fb_h);
-        if (opt.gl_finish) {
-            /* Only the tile compose puts GPU work in prepare: the wait after it is
-             * that pass's GPU time (uploads included), kept out of the CPU time. */
-            uint64_t composes = state.video.gpu_composes;
-            game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
-            if (state.video.gpu_composes != composes) {
-                Uint64 f0 = SDL_GetTicksNS();
-                glFinish();
-                Uint64 waited = SDL_GetTicksNS() - f0;
-                stat_tile_gpu_ns += waited;
-                cpu_start += waited;
-            }
-        } else if (opt.verify_gpu_tiles && state.video.gpu) {
-            /* Hold the emu thread so both composes see the same RAM. */
-            emu_mutex_lock(&state.emu.mutex);
-            uint64_t composes = state.video.gpu_composes + state.video.up_pens;
-            game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
-            if (state.video.gpu_composes + state.video.up_pens != composes) verify_gpu_tiles();
-            emu_mutex_unlock(&state.emu.mutex);
-        } else {
-            game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
-        }
-        float lerp_t = game_frame_lerp();
-
-        int ox, oy, w, h;
-        game_render_letterbox(fb_w, fb_h, VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
-        if (opt.display_scale > 0 && VIDEO_WIDTH * opt.display_scale <= fb_w
-                && VIDEO_HEIGHT * opt.display_scale <= fb_h) {
-            w  = VIDEO_WIDTH * opt.display_scale;
-            h  = VIDEO_HEIGHT * opt.display_scale;
-            ox = (fb_w - w) / 2;
-            oy = (fb_h - h) / 2;
-        }
-        if (opt.render_scale > 0) {
-            g_fill_log.n = 0; g_fill_log.uploads = 0; g_fill_log.overflow = false;
-            sg_begin_pass(&(sg_pass){
-                .action = pass_action,
-                .attachments = { .colors[0] = rt_color_att, .depth_stencil = rt_depth_att },
-            });
-            game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                            0, 0, rt_w, rt_h, lerp_t);
-            sg_end_pass();
-            if (opt.gl_finish) {
-                /* The game pass is the tile layer quads and the 3D fills: its GPU
-                 * time, kept out of the CPU time. */
-                Uint64 f0 = SDL_GetTicksNS();
-                glFinish();
-                Uint64 waited = SDL_GetTicksNS() - f0;
-                stat_game_gpu_ns += waited;
-                cpu_start += waited;
-            }
-            if (opt.verify_fill) verify_fill(rt_w, rt_h);
-        }
-        sg_begin_pass(&(sg_pass){
-            .action = pass_action,
-            .swapchain = { .width = fb_w, .height = fb_h, .sample_count = 1,
-                           .color_format = SG_PIXELFORMAT_RGBA8,
-                           .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
-                           .gl.framebuffer = 0 },
-        });
-        /* The lobby is drawn on black, to be read; over a match, on the match. */
-        if (opt.netplay) lobby_update(SDL_GetTicksNS());
-        bool show_game = !(opt.netplay && g_lobby.open && !netplay_state_running(g_lobby.st.state));
-        if (show_game && opt.render_scale > 0)
-            game_render_draw_target(rt_texture, opt.linear, ox, oy, w, h);
-        else if (show_game)
-            game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
-        if (opt.osd) {
-            osd_update(SDL_GetTicksNS());
-            osd_draw(fb_w, fb_h);
-        }
-        if (opt.netplay) lobby_draw(fb_w, fb_h, SDL_GetTicksNS());
-        if (opt.osd || opt.netplay) sdtx_draw();
-        int pzone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
-        sg_end_pass();
-        sg_commit();
-        Uint64 cpu_end = SDL_GetTicksNS();
-        stat_cpu_ns += cpu_end - cpu_start;
-        if (opt.stats) {                 /* sg_commit just closed the frame: it is prev_frame now */
-            sg_stats st = sg_query_stats();
-            const sg_frame_stats *g = &st.prev_frame;
-            stat_gl.num_passes += g->num_passes;               stat_gl.num_apply_pipeline += g->num_apply_pipeline;
-            stat_gl.num_apply_bindings += g->num_apply_bindings; stat_gl.num_apply_uniforms += g->num_apply_uniforms;
-            stat_gl.num_draw += g->num_draw;
-            stat_gl.num_update_buffer += g->num_update_buffer; stat_gl.size_update_buffer += g->size_update_buffer;
-            stat_gl.num_append_buffer += g->num_append_buffer; stat_gl.size_append_buffer += g->size_append_buffer;
-            stat_gl.num_update_image += g->num_update_image;   stat_gl.size_update_image += g->size_update_image;
-            stat_gl.gl.num_bind_buffer += g->gl.num_bind_buffer;   stat_gl.gl.num_bind_texture += g->gl.num_bind_texture;
-            stat_gl.gl.num_use_program += g->gl.num_use_program;   stat_gl.gl.num_uniform += g->gl.num_uniform;
-            stat_gl.gl.num_render_state += g->gl.num_render_state;
-            stat_gl.gl.num_vertex_attrib_pointer += g->gl.num_vertex_attrib_pointer;
-        }
-        if (opt.gl_finish) {
-            glFinish();
-            stat_gpu_ns += SDL_GetTicksNS() - cpu_end;
-        }
-
-        while (shots_done < opt.shot_count && g_emu_frames >= opt.shot_frame[shots_done])
-            save_png(opt.shot_path[shots_done++], fb_w, fb_h);
-        Uint64 swap_start = SDL_GetTicksNS();
-        SDL_GL_SwapWindow(window);
-        stat_swap_ns += SDL_GetTicksNS() - swap_start;
-        hprof_leave(pzone);
-        stat_renders++;
-
-        Uint64 now = SDL_GetTicksNS();
-        if (opt.max_temp > 0.0 && now >= next_temp_check) {
-            next_temp_check = now + 500000000ull;
-            int hot = read_milli("/sys/class/thermal/thermal_zone0/temp");
-            int gpu = read_milli("/sys/class/thermal/thermal_zone1/temp");
-            if (gpu > hot) hot = gpu;
-            if (hot >= (int)(opt.max_temp * 1000.0)) {
-                printf("m2hle: %.1fC reached --max-temp %.0f, quitting\n", hot / 1000.0, opt.max_temp);
-                rc = 3;
-                running = false;
-            }
-        }
-        if (opt.stats && now - stat_start >= 5000000000ull) {
-            double secs = (double)(now - stat_start) / 1e9;
-            double n = stat_renders ? (double)stat_renders : 1.0;
-            const game_frame_times_t *t = &g_game_frame_times;
-            printf("m2hle: game %.1f fps, render %.1f fps | per render ms: cpu %.2f [compose %.2f scan %.2f "
-                   "upload %.2f 3d %.2f tiles %.2f]%s%.2f swap %.2f | cpu %.1fC gpu %.1fC\n",
-                   (g_emu_frames - stat_frames0) / secs, stat_renders / secs,
-                   stat_cpu_ns / 1e6 / n, t->compose_us / 1e3 / n, t->scan_us / 1e3 / n,
-                   t->upload_us / 1e3 / n, t->draw3d_us / 1e3 / n, t->tiles_us / 1e3 / n,
-                   opt.gl_finish ? " gpu " : " ", opt.gl_finish ? stat_gpu_ns / 1e6 / n : 0.0,
-                   stat_swap_ns / 1e6 / n,
-                   read_milli("/sys/class/thermal/thermal_zone0/temp") / 1000.0,
-                   read_milli("/sys/class/thermal/thermal_zone1/temp") / 1000.0);
-            const video_state_t *v = &state.video;
-            uint64_t comps = v->gpu_composes - stat_comp0;
-            printf("m2hle: tiles: %llu composes (%.0f%% of renders, %llu partial, %.0f%% of the screen drawn), "
-                   "uploads tile %llu gfx %llu pens %llu",
-                   (unsigned long long)comps, 100.0 * (double)comps / n,
-                   (unsigned long long)(v->partial_composes - stat_part0),
-                   comps ? 100.0 * (double)(v->composed_blocks - stat_blk0) / ((double)comps * VIDEO_BLK_W * VIDEO_BLK_H) : 0.0,
-                   (unsigned long long)(v->up_tile - stat_uptile0), (unsigned long long)(v->up_gfx - stat_upgfx0),
-                   (unsigned long long)(v->up_pens - stat_uppens0));
-            if (opt.gl_finish && comps)
-                printf(" | gpu %.2f ms per compose", stat_tile_gpu_ns / 1e6 / (double)comps);
-            if (opt.gl_finish && opt.render_scale > 0)
-                printf(" | game pass gpu %.2f ms per render", stat_game_gpu_ns / 1e6 / n);
-            if (audio)
-                printf(" | sound: %llu underrun frames, %llu dropped total",
-                       (unsigned long long)g_audio_out.underruns, (unsigned long long)g_sound.out_dropped);
-            printf("\n");
-            /* What the frame asks of the GL driver, per render (sokol's counts;
-             * all drawing goes through sokol). The Mali driver's CPU time is
-             * paid per call and per byte, so these are the baseline for it. */
-            const sg_frame_stats *g = &stat_gl;
-            printf("m2hle: gl per render: %.0f passes, %.0f pipelines, %.0f bindings, %.0f uniform blocks, "
-                   "%.0f draws (3d %.0f: %.0f pipelines, %.0f bindings, %.0f uniforms, %.0f buffer writes %.1f KB) | "
-                   "buffer updates %.1f (%.1f KB), appends %.1f (%.1f KB), image updates %.2f (%.1f KB) | "
-                   "gl calls: bind buffer %.0f, bind texture %.0f, use program %.0f, uniform %.0f, "
-                   "render state %.0f, vertex attrib %.0f\n",
-                   g->num_passes / n, g->num_apply_pipeline / n, g->num_apply_bindings / n, g->num_apply_uniforms / n,
-                   g->num_draw / n, t->draw3d_draws / n, t->draw3d_pipelines / n, t->draw3d_bindings / n,
-                   t->draw3d_uniforms / n, t->draw3d_buf_writes / n, t->draw3d_buf_bytes / 1024.0 / n,
-                   g->num_update_buffer / n, g->size_update_buffer / 1024.0 / n,
-                   g->num_append_buffer / n, g->size_append_buffer / 1024.0 / n,
-                   g->num_update_image / n, g->size_update_image / 1024.0 / n,
-                   g->gl.num_bind_buffer / n, g->gl.num_bind_texture / n, g->gl.num_use_program / n,
-                   g->gl.num_uniform / n, g->gl.num_render_state / n, g->gl.num_vertex_attrib_pointer / n);
-            memset(&stat_gl, 0, sizeof stat_gl);
-            stat_game_gpu_ns = 0;
-            fflush(stdout);
-            stat_comp0 = v->gpu_composes; stat_uptile0 = v->up_tile; stat_upgfx0 = v->up_gfx; stat_uppens0 = v->up_pens;
-            stat_part0 = v->partial_composes; stat_blk0 = v->composed_blocks;
-            stat_tile_gpu_ns = 0;
-            stat_start = now; stat_cpu_ns = stat_gpu_ns = stat_swap_ns = 0;
-            stat_renders = 0; stat_frames0 = g_emu_frames;
-            memset(&g_game_frame_times, 0, sizeof g_game_frame_times);
-        }
-    }
+    rc = run_loop(audio != NULL);
 
     emu_thread_shutdown(&state.emu);
     backup_ram_flush();   /* the board has stopped: what it holds now is final */
@@ -1175,19 +1290,13 @@ int main(int argc, char **argv) {
     if (opt.verify_gpu_tiles)
         printf("verify-gpu-tiles: %llu composed frames checked, %llu differed\n",
                (unsigned long long)g_vt.frames, (unsigned long long)g_vt.bad_frames);
-    if (opt.render_scale > 0) {
-        sg_destroy_view(rt_texture);
-        sg_destroy_view(rt_depth_att);
-        sg_destroy_view(rt_color_att);
-        sg_destroy_image(rt_depth);
-        sg_destroy_image(rt_color);
-    }
+    game_target_destroy();
     if (opt.osd || opt.netplay) sdtx_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     sg_shutdown();
-    SDL_GL_DestroyContext(gl);
-    SDL_DestroyWindow(window);
+    SDL_GL_DestroyContext(g_gl);
+    SDL_DestroyWindow(g_window);
     SDL_Quit();
     romset_free(&state.romset);
     mem_shutdown(&state.bus);

@@ -334,8 +334,9 @@ static uint32_t pg_find_file(const char *name, uint32_t *size) {
     return 0;
 }
 
-/* The model pack's index, if the disc has one; its data's FAD and size. */
-static int pg_pak_open(uint32_t *fad, uint32_t *size) {
+/* The model pack's index, if the disc has one; its data's FAD and size, and
+ * the bytes the index takes in memory. */
+static int pg_pak_open(uint32_t *fad, uint32_t *size, uint32_t *held) {
     static uint8_t sec[2048] __attribute__((aligned(32)));
     pager_t *g = &g_pg;
     uint32_t fsize = 0, f = pg_find_file("MODELS.PAK", &fsize);
@@ -350,6 +351,7 @@ static int pg_pak_open(uint32_t *fad, uint32_t *size) {
     g->npak = n;
     *fad = f + off / DC_SECTOR;
     *size = fsize - off;
+    *held = off;
     return 1;
 }
 
@@ -409,8 +411,13 @@ static int pg_init(const dc_layout_t *lay, uint32_t cache_bytes, uint32_t anon_b
         g->first[r] = g->nrom;
         g->nrom += (lay->rg[r].size + PG_SIZE - 1) / PG_SIZE;
     }
-    uint32_t pak_fad = 0, pak_size = 0;
-    if (pg_pak_open(&pak_fad, &pak_size)) {
+    uint32_t pak_fad = 0, pak_size = 0, pak_held = 0;
+    if (pg_pak_open(&pak_fad, &pak_size, &pak_held)) {
+        /* The index comes out of the frame pool: the caller sized the pool
+         * with the heap's headroom kept, and the index (12 bytes a run, a
+         * whole-group pack has ~11000) must not eat that. */
+        uint32_t pages = (pak_held + PG_SIZE - 1) / PG_SIZE;
+        if (cache_bytes > (pages + 16) * PG_SIZE) cache_bytes -= pages * PG_SIZE;
         g->pak_first = g->nrom;
         g->pak_pages = (pak_size + PG_SIZE - 1) / PG_SIZE;
         g->nrom += g->pak_pages;

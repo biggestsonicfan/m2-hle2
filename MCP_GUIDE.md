@@ -43,7 +43,8 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--mcp-watch-port N` | Also listen on N for read-only watchers (with `--mcp`; off by default). See "The watch port" below |
 | `--log <path>` | Write the session log here instead of `m2hle.log`; `--log off` writes no file (the log window still has it) |
 | `--log-level SPEC` | Drop lines below a level: `warn`, or per channel (the `mem:` / `netplay:` / `sound:` tag a line starts with), e.g. `warn,mem=error,netplay=debug`. Levels are `debug`, `info`, `warn`, `error`, `off`. A dropped line is dropped everywhere: the file, the log window and the MCP log. The file takes 64 MB whatever the level, then only errors (1 MB more) |
-| `--rom <path>` | Auto-load this ROM zip on startup |
+| `--rom <path>` | Auto-load this ROM zip on startup. A directory of region images (`--export-roms`) loads too, with no zip, interleave or CRC pass; its name picks the profile as a zip's does |
+| `--export-roms DIR` | With `--rom <zip>`: write the set into DIR as one straight image per region (`maincpu.bin`, `main_data.bin`, `copro_data.bin`, `polygons.bin`, `textures.bin`, `audiocpu.bin`, `samples.bin`), exactly as they sit in memory after the load, then quit. Name DIR after the set (`sfight`) |
 | `--run` | Start executing immediately after ROM load |
 | `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
 | `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
@@ -259,6 +260,17 @@ vector. Returns `resets`, the number performed so far. Refused with no ROM set
 loaded, and while a netplay session is at the barrier or playing -- there it
 would reset one board of two. `tools/grade-reset.mjs` is built on it.
 
+**`save_state(path: str)`** / **`load_state(path: str)`** -- write the whole
+board to a savestate (a zip, one entry per component, like m2emulator's `.sta`;
+see `src/core/savestate.h`) or put it back. Both run at the next slice edge and
+reply `{"ok":true,"frame":N}` with the board's frame; the run state is left
+alone, so stop first if the board must not move between the save and what you
+do next. A load is refused for a file from another ROM set or another build's
+struct layout, inside a netplay session and under SKY EYE; the error comes back
+as `{"error":"..."}` and the board is untouched. `--load-state FILE` does the
+load at launch (headless: a failed load exits 1). Paths are on the emulator's
+machine.
+
 **`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
 for an online opponent (`--idle-until-match` sets it at launch). While it is on
 and no netplay session owns the board, the board is put back to power-on once
@@ -269,6 +281,17 @@ match exactly as it would have; when the session ends the board goes back to
 power-on. `on: 0` lets attract run again; no `on` only reads. Returns `on` and
 `holding` (whether the run loop is holding the board right now); `get_status`
 carries the same pair as `idle_hold`. A `run_frames` still runs its frames.
+
+**`enemy_rank(rank: str | int)`** -- STF's CPU difficulty table, as
+`--enemy-rank` sets it: `"cabinet"` (or -1, the default) plays the table the
+cabinet's ENEMY RANK names; `"easy"`, `"normal"`, `"hard"`, `"hardest"`,
+`"extra1"`, `"extra2"` (or 0..5) play that one. Extra 1 and Extra 2 are the
+two tables the ROM carries and never points at (0x93428, 0x93728); the
+cabinet's byte must stay 0..3, so they are reachable only here. Only the AI
+table changes, as each CPU fight sets up; everything else ENEMY RANK decides
+follows the cabinet. A netplay session plays the cabinet's. No `rank` only
+reads. Returns `rank`, `name` and `netplay`; `get_status` carries `enemy_rank`.
+A profile without the hook answers `ok:false`.
 
 ### Input
 

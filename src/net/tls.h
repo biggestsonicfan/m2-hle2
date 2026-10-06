@@ -168,75 +168,76 @@ static inline void tls_close(tls_client_t *t) {
     t->peer_closed = false;
 }
 
-static inline bool tls_handshake(tls_client_t *t, const char *host) {
+/* Read more of the server's flight into the handshake buffer. */
+static inline bool tls_handshake_fill(tls_client_t *t) {
+    if (t->enc_used == t->enc_cap) { tls_fail(t, "handshake buffer overflow"); return false; }
+    int got = net_tcp_recv_timeout(t->sock, t->enc + t->enc_used,
+                                   t->enc_cap - t->enc_used, 10000);
+    if (got <= 0) { tls_fail(t, "connection closed during the TLS handshake"); return false; }
+    t->enc_used += (uint32_t)got;
+    return true;
+}
+
+/* One call into Schannel: hand it what we hold, send what it answers, and keep
+ * what it did not consume. `*ss` gets its status; false on a failure. */
+static inline bool tls_handshake_round(tls_client_t *t, const char *host, bool first,
+                                       SECURITY_STATUS *ss) {
     CredHandle *cred = (CredHandle *)t->cred;
     CtxtHandle *ctx  = (CtxtHandle *)t->ctx;
 
     const DWORD req = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT
                     | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM;
 
-    SECURITY_STATUS ss = SEC_I_CONTINUE_NEEDED;
-    bool first = true;
-    t->enc_used = 0;
+    SecBuffer in[2];
+    memset(in, 0, sizeof(in));
+    in[0].BufferType = SECBUFFER_TOKEN;
+    in[0].pvBuffer   = t->enc;
+    in[0].cbBuffer   = t->enc_used;
+    in[1].BufferType = SECBUFFER_EMPTY;
+    SecBufferDesc in_desc = { SECBUFFER_VERSION, 2, in };
 
-    while (ss == SEC_I_CONTINUE_NEEDED || ss == SEC_E_INCOMPLETE_MESSAGE) {
-        /* Schannel asks for more bytes until it holds a complete flight. */
-        if (!first && (ss == SEC_E_INCOMPLETE_MESSAGE || t->enc_used == 0)) {
-            if (t->enc_used == t->enc_cap) { tls_fail(t, "handshake buffer overflow"); return false; }
-            int got = net_tcp_recv_timeout(t->sock, t->enc + t->enc_used,
-                                           t->enc_cap - t->enc_used, 10000);
-            if (got <= 0) { tls_fail(t, "connection closed during the TLS handshake"); return false; }
-            t->enc_used += (uint32_t)got;
-        }
+    SecBuffer out[1];
+    memset(out, 0, sizeof(out));
+    out[0].BufferType = SECBUFFER_TOKEN;
+    SecBufferDesc out_desc = { SECBUFFER_VERSION, 1, out };
 
-        SecBuffer in[2];
-        memset(in, 0, sizeof(in));
-        in[0].BufferType = SECBUFFER_TOKEN;
-        in[0].pvBuffer   = t->enc;
-        in[0].cbBuffer   = t->enc_used;
-        in[1].BufferType = SECBUFFER_EMPTY;
-        SecBufferDesc in_desc = { SECBUFFER_VERSION, 2, in };
+    DWORD attrs = 0;
+    TimeStamp expiry;
+    memset(&expiry, 0, sizeof(expiry));
+    *ss = InitializeSecurityContextA(cred,
+                                     first ? NULL : ctx,
+                                     first ? (SEC_CHAR *)host : NULL,
+                                     req, 0, 0,
+                                     first ? NULL : &in_desc,
+                                     0, ctx, &out_desc, &attrs, &expiry);
+    if (first) t->have_ctx = true;
 
-        SecBuffer out[1];
-        memset(out, 0, sizeof(out));
-        out[0].BufferType = SECBUFFER_TOKEN;
-        SecBufferDesc out_desc = { SECBUFFER_VERSION, 1, out };
-
-        DWORD attrs = 0;
-        TimeStamp expiry;
-        memset(&expiry, 0, sizeof(expiry));
-        ss = InitializeSecurityContextA(cred,
-                                        first ? NULL : ctx,
-                                        first ? (SEC_CHAR *)host : NULL,
-                                        req, 0, 0,
-                                        first ? NULL : &in_desc,
-                                        0, ctx, &out_desc, &attrs, &expiry);
-        if (first) { first = false; t->have_ctx = true; }
-
-        if (out[0].pvBuffer && out[0].cbBuffer) {
-            bool sent = net_tcp_send_all(t->sock, out[0].pvBuffer, out[0].cbBuffer);
-            FreeContextBuffer(out[0].pvBuffer);
-            if (!sent) { tls_fail(t, "send failed during the TLS handshake"); return false; }
-        }
-
-        if (ss == SEC_E_INCOMPLETE_MESSAGE) continue;   /* need more; keep what we have */
-
-        if (ss == SEC_E_OK || ss == SEC_I_CONTINUE_NEEDED) {
-            /* Anything Schannel did not consume starts the next flight (or the
-             * application data) and must be preserved. */
-            if (in[1].BufferType == SECBUFFER_EXTRA && in[1].cbBuffer) {
-                memmove(t->enc, t->enc + (t->enc_used - in[1].cbBuffer), in[1].cbBuffer);
-                t->enc_used = in[1].cbBuffer;
-            } else {
-                t->enc_used = 0;
-            }
-            if (ss == SEC_E_OK) break;
-        } else {
-            tls_fail(t, "TLS handshake failed (0x%08lX)", (unsigned long)ss);
-            return false;
-        }
+    if (out[0].pvBuffer && out[0].cbBuffer) {
+        bool sent = net_tcp_send_all(t->sock, out[0].pvBuffer, out[0].cbBuffer);
+        FreeContextBuffer(out[0].pvBuffer);
+        if (!sent) { tls_fail(t, "send failed during the TLS handshake"); return false; }
     }
 
+    if (*ss == SEC_E_INCOMPLETE_MESSAGE) return true;   /* need more; keep what we have */
+
+    if (*ss == SEC_E_OK || *ss == SEC_I_CONTINUE_NEEDED) {
+        /* Anything Schannel did not consume starts the next flight (or the
+         * application data) and must be preserved. */
+        if (in[1].BufferType == SECBUFFER_EXTRA && in[1].cbBuffer) {
+            memmove(t->enc, t->enc + (t->enc_used - in[1].cbBuffer), in[1].cbBuffer);
+            t->enc_used = in[1].cbBuffer;
+        } else {
+            t->enc_used = 0;
+        }
+        return true;
+    }
+    tls_fail(t, "TLS handshake failed (0x%08lX)", (unsigned long)*ss);
+    return false;
+}
+
+/* The stream sizes of a finished handshake, and the plaintext buffer they size. */
+static inline bool tls_handshake_sizes(tls_client_t *t) {
+    CtxtHandle *ctx = (CtxtHandle *)t->ctx;
     SecPkgContext_StreamSizes sizes;
     memset(&sizes, 0, sizeof(sizes));
     if (QueryContextAttributes(ctx, SECPKG_ATTR_STREAM_SIZES, &sizes) != SEC_E_OK) {
@@ -251,6 +252,23 @@ static inline bool tls_handshake(tls_client_t *t, const char *host) {
     t->plain     = (uint8_t *)malloc(t->plain_cap);
     if (!t->plain) { tls_fail(t, "out of memory"); return false; }
     return true;
+}
+
+static inline bool tls_handshake(tls_client_t *t, const char *host) {
+    SECURITY_STATUS ss = SEC_I_CONTINUE_NEEDED;
+    bool first = true;
+    t->enc_used = 0;
+
+    while (ss == SEC_I_CONTINUE_NEEDED || ss == SEC_E_INCOMPLETE_MESSAGE) {
+        /* Schannel asks for more bytes until it holds a complete flight. */
+        if (!first && (ss == SEC_E_INCOMPLETE_MESSAGE || t->enc_used == 0)) {
+            if (!tls_handshake_fill(t)) return false;
+        }
+        if (!tls_handshake_round(t, host, first, &ss)) return false;
+        first = false;
+        if (ss == SEC_E_OK) break;
+    }
+    return tls_handshake_sizes(t);
 }
 
 /* Schannel's policy errors are numbers nobody can act on. These are the ones a
@@ -836,6 +854,47 @@ static inline bool tls_ossl_verify(tls_client_t *t, const cert_fingerprint_t *pi
     return false;
 }
 
+/* The SSL_CTX and the SSL over the connected socket, with the host name for SNI
+ * and, unless `pin`, for OpenSSL's own check. False, with the reason set. */
+static inline bool tls_ossl_session(tls_client_t *t, const char *host, bool pin) {
+    tls_ossl_t *o = &g_tls_ossl;
+    o->err_clear();
+    t->cred = o->ctx_new(o->client_method());
+    if (!t->cred) { tls_ossl_fail(t, "SSL_CTX_new failed"); return false; }
+    o->ctx_set_verify(t->cred, 0 /* SSL_VERIFY_NONE: judged after the handshake */, NULL);
+    if (!pin) o->ctx_default_paths(t->cred);
+
+    t->ctx = o->ssl_new(t->cred);
+    if (!t->ctx || !o->set_fd(t->ctx, (int)t->sock)) {
+        tls_ossl_fail(t, "SSL_new failed");
+        return false;
+    }
+    if (tls_ossl_is_ip(host)) {
+        if (!pin) o->param_ip_asc(o->get0_param(t->ctx), host);
+    } else {
+        o->ctrl(t->ctx, TLS_OSSL_CTRL_SET_SNI, 0 /* TLSEXT_NAMETYPE_host_name */, (void *)host);
+        if (!pin) o->set1_host(t->ctx, host);
+    }
+    return true;
+}
+
+/* SSL_connect until it completes, waiting on the socket. False, with the reason
+ * set, on a failure or after TLS_OSSL_TIMEOUT_MS. */
+static inline bool tls_ossl_handshake(tls_client_t *t, const char *host, uint16_t port) {
+    tls_ossl_t *o = &g_tls_ossl;
+    uint64_t deadline = net_now_ms() + TLS_OSSL_TIMEOUT_MS;
+    for (;;) {
+        int rc = o->do_connect(t->ctx);
+        if (rc == 1) return true;
+        int err = o->get_error(t->ctx, rc);
+        bool again = err == TLS_OSSL_ERROR_WANT_READ || err == TLS_OSSL_ERROR_WANT_WRITE;
+        if (again && tls_ossl_wait(t, err, deadline)) continue;
+        if (again) tls_fail(t, "TLS handshake with %s:%u timed out", host, port);
+        else       tls_ossl_fail(t, "TLS handshake failed");
+        return false;
+    }
+}
+
 static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
                                const cert_fingerprint_t *pinned) {
     memset(t, 0, sizeof(*t));
@@ -843,7 +902,6 @@ static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
 
     if (!host || !*host) { tls_fail(t, "no server given"); return false; }
     if (!tls_ossl_load()) { tls_fail(t, "%s", g_tls_ossl.why); return false; }
-    tls_ossl_t *o = &g_tls_ossl;
     net_startup();
     t->lib_held = true;
     const bool pin = pinned && pinned->is_set;
@@ -853,39 +911,11 @@ static inline bool tls_connect(tls_client_t *t, const char *host, uint16_t port,
         tls_close(t);
         return false;
     }
-
-    o->err_clear();
-    t->cred = o->ctx_new(o->client_method());
-    if (!t->cred) { tls_ossl_fail(t, "SSL_CTX_new failed"); tls_close(t); return false; }
-    o->ctx_set_verify(t->cred, 0 /* SSL_VERIFY_NONE: judged after the handshake */, NULL);
-    if (!pin) o->ctx_default_paths(t->cred);
-
-    t->ctx = o->ssl_new(t->cred);
-    if (!t->ctx || !o->set_fd(t->ctx, (int)t->sock)) {
-        tls_ossl_fail(t, "SSL_new failed");
+    if (!tls_ossl_session(t, host, pin) || !tls_ossl_handshake(t, host, port)
+        || !tls_ossl_verify(t, pinned)) {
         tls_close(t);
         return false;
     }
-    if (tls_ossl_is_ip(host)) {
-        if (!pin) o->param_ip_asc(o->get0_param(t->ctx), host);
-    } else {
-        o->ctrl(t->ctx, TLS_OSSL_CTRL_SET_SNI, 0 /* TLSEXT_NAMETYPE_host_name */, (void *)host);
-        if (!pin) o->set1_host(t->ctx, host);
-    }
-
-    uint64_t deadline = net_now_ms() + TLS_OSSL_TIMEOUT_MS;
-    for (;;) {
-        int rc = o->do_connect(t->ctx);
-        if (rc == 1) break;
-        int err = o->get_error(t->ctx, rc);
-        bool again = err == TLS_OSSL_ERROR_WANT_READ || err == TLS_OSSL_ERROR_WANT_WRITE;
-        if (again && tls_ossl_wait(t, err, deadline)) continue;
-        if (again) tls_fail(t, "TLS handshake with %s:%u timed out", host, port);
-        else       tls_ossl_fail(t, "TLS handshake failed");
-        tls_close(t);
-        return false;
-    }
-    if (!tls_ossl_verify(t, pinned)) { tls_close(t); return false; }
 
     t->connected = true;
     return true;

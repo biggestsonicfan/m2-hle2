@@ -19,9 +19,9 @@
  *   RetroArch  RetroArch hosts (with a password if one is set), lists the
  *              session in its lobby and connects the players; the core runs
  *              lockstep over that connection (net/pkt_lockstep.h, the
- *              netpacket interface). RetroArch's own netplay needs savestates,
- *              which this emulator does not have, so this is the only way it
- *              can carry a session.
+ *              netpacket interface). RetroArch's own netplay rolls back with
+ *              savestates, and this board's are 16 MB each, so this is the
+ *              only way it can carry a session.
  *   RPCN       the desktop's and the website's netplay (net/netplay.h), with
  *              the lobby the PS3 port of the game has: its menus, rebuilt from
  *              the PS3's own layouts and drawn by the core (ui/ps3ui_app.h),
@@ -251,12 +251,17 @@ static const char *lr_var(const char *key) {
     return env_cb && env_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) ? v.value : NULL;
 }
 
-/* at_load: also the options that only take effect when a game is loaded. */
-static void lr_read_options(bool at_load) {
+/* The resolution option's scale; fullscreen is 0. */
+static int lr_option_scale(const char *v) {
+    return !strcmp(v, "native") ? 1 : !strcmp(v, "double") ? 2 : !strcmp(v, "triple") ? 3
+         : !strcmp(v, "quadruple") ? 4 : !strcmp(v, "fullscreen") ? 0 : 2;
+}
+
+/* The options that take effect as they change. */
+static void lr_read_live_options(void) {
     const char *v;
     if ((v = lr_var("m2hle_resolution"))) {
-        opt.scale = !strcmp(v, "native") ? 1 : !strcmp(v, "double") ? 2 : !strcmp(v, "triple") ? 3
-                  : !strcmp(v, "quadruple") ? 4 : !strcmp(v, "fullscreen") ? 0 : 2;
+        opt.scale = lr_option_scale(v);
         if (opt.scale > LR_MAX_SCALE) opt.scale = LR_MAX_SCALE;
     }
     if ((v = lr_var("m2hle_net_delay"))) {
@@ -270,11 +275,22 @@ static void lr_read_options(bool at_load) {
         opt.heat_limit = atoi(v);   /* "off" -> 0 */
         heat_guard_set_limit(&g_heat, opt.heat_limit);   /* a new limit starts its stages over */
     }
-    if (!at_load) return;
+}
+
+/* The options that only take effect when a game is loaded. */
+static void lr_read_load_options(void) {
+    const char *v;
     if ((v = lr_var("m2hle_sound")))  opt.sound  = strcmp(v, "disabled") != 0;
     if ((v = lr_var("m2hle_sound_driver"))) g_sound_hle_want = !strcmp(v, "c");   /* read at the next sound_reset */
     if ((v = lr_var("m2hle_online"))) opt.online = strcmp(v, "rpcn") ? LR_ONLINE_RETROARCH : LR_ONLINE_RPCN;
     if ((v = lr_var("m2hle_stf_version"))) opt.profile = strcmp(v, "arcade") ? NULL : "sfight";
+}
+
+/* at_load: also the options that only take effect when a game is loaded. */
+static void lr_read_options(bool at_load) {
+    lr_read_live_options();
+    if (!at_load) return;
+    lr_read_load_options();
 }
 
 static void lr_set_options(void) {
@@ -306,6 +322,8 @@ static void lr_set_options(void) {
 static bool g_sound_on;
 static bool g_game_loaded;
 static bool g_halt_reported;
+static size_t g_lr_state_size;  /* retro_serialize_size, once a load */
+static bool g_lr_redraw;   /* a state was loaded: draw it even if the board did not run */
 
 static void lr_attach_sound(void) {
     sound_reset();
@@ -392,7 +410,7 @@ static bool lr_load_rom(const char *zip) {
             parent_ptr = parent;
         }
     }
-    if (g_active_profile->load_fn(&state.romset, zip, parent_ptr) != 0) {
+    if (romset_load(&state.romset, g_active_profile->load_fn, zip, parent_ptr) != 0) {
         char msg[256];
         snprintf(msg, sizeof msg, "m2hle: could not load %s as %s", base, g_active_profile->display_name);
         lr_message(msg, 600);
@@ -675,44 +693,44 @@ static void lr_rpcn_config_path(void) {
     lr_log(RETRO_LOG_INFO, "RPCN: settings in %s", path);
 }
 
-/* What the session says while the lobby is not on screen -- a match, the room
- * emptying, a desync -- as the frontend's notifications, and the session's log
- * into the frontend's. Everything else is on the lobby's own screens. */
-static void lr_rpcn_report(void) {
-    static int last_state = -1;
+/* The session's own log (sign-in, rooms, barrier, stalls, desync) into
+ * RetroArch's, so a netplay problem can be read afterwards. */
+static void lr_rpcn_report_log(const netplay_status_t *st) {
     static uint32_t log_seen;
-    const netplay_status_t *st = &g_ps3ui_app.st;
-    if (!g_ps3ui_app.be.get_status) return;   /* no session behind the lobby yet */
-
-    /* The session's own log (sign-in, rooms, barrier, stalls, desync) into
-     * RetroArch's, so a netplay problem can be read afterwards. */
     if (st->log_count - log_seen > NETPLAY_LOG_LINES) log_seen = st->log_count - NETPLAY_LOG_LINES;
     for (; log_seen < st->log_count; log_seen++)
         lr_log(RETRO_LOG_INFO, "rpcn: %s", st->log[log_seen % NETPLAY_LOG_LINES]);
-    char msg[400];
+}
 
-    if ((int)st->state != last_state) {
-        last_state = (int)st->state;
-        if (st->state == NETPLAY_PLAYING) {
-            /* What the overlay used to put in a corner of the picture. A
-             * notification is the frontend's own, so it is in its font and
-             * fades the way every other message it shows does. */
-            snprintf(msg, sizeof msg, "%dP against %s", st->local_player + 1,
-                     st->peer_npid[0] ? st->peer_npid : "?");
-            lr_notify(msg, 5000);
-        } else if (st->state == NETPLAY_WATCHING) {
-            const char *n1 = "?", *n2 = "?";
-            for (uint32_t i = 0; i < st->member_count; i++) {
-                if (st->members[i].side == 0) n1 = st->members[i].npid;
-                if (st->members[i].side == 1) n2 = st->members[i].npid;
-            }
-            snprintf(msg, sizeof msg, "Watching %s against %s", n1, n2);
-            lr_notify(msg, 5000);
+/* A match starting, as a player or a watcher: said once, when the state
+ * changes to it. */
+static void lr_rpcn_report_state(const netplay_status_t *st) {
+    static int last_state = -1;
+    char msg[400];
+    if ((int)st->state == last_state) return;
+    last_state = (int)st->state;
+    if (st->state == NETPLAY_PLAYING) {
+        /* What the overlay used to put in a corner of the picture. A
+         * notification is the frontend's own, so it is in its font and
+         * fades the way every other message it shows does. */
+        snprintf(msg, sizeof msg, "%dP against %s", st->local_player + 1,
+                 st->peer_npid[0] ? st->peer_npid : "?");
+        lr_notify(msg, 5000);
+    } else if (st->state == NETPLAY_WATCHING) {
+        const char *n1 = "?", *n2 = "?";
+        for (uint32_t i = 0; i < st->member_count; i++) {
+            if (st->members[i].side == 0) n1 = st->members[i].npid;
+            if (st->members[i].side == 1) n2 = st->members[i].npid;
         }
+        snprintf(msg, sizeof msg, "Watching %s against %s", n1, n2);
+        lr_notify(msg, 5000);
     }
-    /* The room emptied with the board still in its VS mode
-     * (netplay_empty_room_pump). Said again every few seconds while it holds,
-     * short enough each time that it is gone soon after the restart. */
+}
+
+/* The room emptied with the board still in its VS mode
+ * (netplay_empty_room_pump). Said again every few seconds while it holds,
+ * short enough each time that it is gone soon after the restart. */
+static void lr_rpcn_report_empty(const netplay_status_t *st) {
     static int64_t empty_said_us;
     if (st->empty_room && (!empty_said_us || emu_now_us() - empty_said_us > 4000000)) {
         lr_notify("There are no other players in the lobby. Press any button to restart the game.", 5000);
@@ -720,9 +738,13 @@ static void lr_rpcn_report(void) {
     } else if (!st->empty_room) {
         empty_said_us = 0;
     }
-    /* A desync is the one thing the old overlay kept on screen for good; say it
-     * once, and the status row goes on saying the match is finished. */
+}
+
+/* A desync is the one thing the old overlay kept on screen for good; say it
+ * once, and the status row goes on saying the match is finished. */
+static void lr_rpcn_report_desync(const netplay_status_t *st) {
     static uint32_t desync_said = LOCKSTEP_NO_CHECK;
+    char msg[400];
     bool in_session = st->state >= NETPLAY_IN_ROOM && st->state != NETPLAY_FAILED;
     if (in_session && st->desync_frame != LOCKSTEP_NO_CHECK && st->desync_frame != desync_said) {
         desync_said = st->desync_frame;
@@ -734,6 +756,18 @@ static void lr_rpcn_report(void) {
     }
 }
 
+/* What the session says while the lobby is not on screen -- a match, the room
+ * emptying, a desync -- as the frontend's notifications, and the session's log
+ * into the frontend's. Everything else is on the lobby's own screens. */
+static void lr_rpcn_report(void) {
+    const netplay_status_t *st = &g_ps3ui_app.st;
+    if (!g_ps3ui_app.be.get_status) return;   /* no session behind the lobby yet */
+    lr_rpcn_report_log(st);
+    lr_rpcn_report_state(st);
+    lr_rpcn_report_empty(st);
+    lr_rpcn_report_desync(st);
+}
+
 /* How a toast names a server: the two the lobby offers by their short names. */
 static const char *lr_server_name(const char *server) {
     if (netplay_server_is_official(server))  return "RPCN";
@@ -741,16 +775,9 @@ static const char *lr_server_name(const char *server) {
     return server[0] ? server : "RPCN";
 }
 
-/* Signing in and out, and players coming into and leaving the room, as the
- * frontend's notifications: said whatever is on screen, the lobby or the game,
- * so a player who is fighting or sitting in a menu still hears that somebody
- * arrived. Once a retro_run, whether or not the board ran. */
-static void lr_rpcn_toasts(void) {
-    const netplay_status_t *st = &g_ps3ui_app.st;
-    if (!g_ps3ui_app.be.get_status) return;
+/* Signed in: logged in, in a room or not. */
+static void lr_rpcn_toast_sign_in(const netplay_status_t *st) {
     char msg[256];
-
-    /* Signed in: logged in, in a room or not. */
     static bool signed_in;
     static char as_npid[20], on_server[128];
     netplay_state_t s = st->state;
@@ -770,112 +797,155 @@ static void lr_rpcn_toasts(void) {
             snprintf(msg, sizeof msg, "Signed out of %s", lr_server_name(on_server));
         lr_notify(msg, 4000);
     }
+}
 
-    /* The room's other members. Entering a room takes its members as they are
-     * for a second (nobody "joined" a room we walked into); after that, a new member is a
-     * join, and one missing for a second is a departure -- a member row can
-     * drop out for a poll while the room is re-read, and that is not a leave. */
-    enum { LEAVE_FRAMES = 60 };
-    static struct { uint16_t id; char npid[20]; int missing; } seen[ROOM_MAX_MEMBERS];
-    static uint32_t seen_n;
-    static uint64_t seen_room;
-    static int room_frames;
-    bool in_room = s == NETPLAY_IN_ROOM || s == NETPLAY_SYNCING || s == NETPLAY_PLAYING || s == NETPLAY_WATCHING;
-    if (!in_room || !st->room_id) {
-        seen_n = 0;
-        seen_room = 0;
-        return;
-    }
-    if (st->room_id != seen_room) {
-        seen_n = 0;
-        seen_room = st->room_id;
-        room_frames = 0;
-    }
-    /* the room's rows can arrive a poll or two after we do */
-    bool fresh = room_frames < LEAVE_FRAMES;
-    if (fresh) room_frames++;
+/* The room's other members as last seen, and how long we have been in it. */
+enum { LR_LEAVE_FRAMES = 60 };
+static struct {
+    struct { uint16_t id; char npid[20]; int missing; } m[ROOM_MAX_MEMBERS];
+    uint32_t n;
+    uint64_t room;
+    int      frames;
+} lr_seen;
+
+/* A member not seen before is a join, unless we have only just come in. */
+static void lr_rpcn_toast_joins(const netplay_status_t *st, bool fresh) {
+    char msg[256];
     for (uint32_t i = 0; i < st->member_count; i++) {
         const netplay_member_status_t *m = &st->members[i];
         if (m->is_me || !m->member_id || !m->npid[0]) continue;
         uint32_t k = 0;
-        while (k < seen_n && seen[k].id != m->member_id) k++;
-        if (k < seen_n) { seen[k].missing = 0; continue; }
-        if (seen_n >= ROOM_MAX_MEMBERS) continue;
-        seen[seen_n].id = m->member_id;
-        snprintf(seen[seen_n].npid, sizeof seen[seen_n].npid, "%s", m->npid);
-        seen[seen_n].missing = 0;
-        seen_n++;
+        while (k < lr_seen.n && lr_seen.m[k].id != m->member_id) k++;
+        if (k < lr_seen.n) { lr_seen.m[k].missing = 0; continue; }
+        if (lr_seen.n >= ROOM_MAX_MEMBERS) continue;
+        lr_seen.m[lr_seen.n].id = m->member_id;
+        snprintf(lr_seen.m[lr_seen.n].npid, sizeof lr_seen.m[lr_seen.n].npid, "%s", m->npid);
+        lr_seen.m[lr_seen.n].missing = 0;
+        lr_seen.n++;
         if (!fresh) {
             snprintf(msg, sizeof msg, "%s joined the room", m->npid);
             lr_notify(msg, 4000);
         }
     }
-    for (uint32_t k = 0; k < seen_n;) {
+}
+
+/* A member missing for LR_LEAVE_FRAMES running is a departure. */
+static void lr_rpcn_toast_leaves(const netplay_status_t *st) {
+    char msg[256];
+    for (uint32_t k = 0; k < lr_seen.n;) {
         bool here = false;
         for (uint32_t i = 0; i < st->member_count; i++)
-            if (st->members[i].member_id == seen[k].id) here = true;
-        if (here || ++seen[k].missing < LEAVE_FRAMES) { k++; continue; }
-        snprintf(msg, sizeof msg, "%s left the room", seen[k].npid);
+            if (st->members[i].member_id == lr_seen.m[k].id) here = true;
+        if (here || ++lr_seen.m[k].missing < LR_LEAVE_FRAMES) { k++; continue; }
+        snprintf(msg, sizeof msg, "%s left the room", lr_seen.m[k].npid);
         lr_notify(msg, 4000);
-        seen[k] = seen[--seen_n];
+        lr_seen.m[k] = lr_seen.m[--lr_seen.n];
     }
+}
+
+/* Signing in and out, and players coming into and leaving the room, as the
+ * frontend's notifications: said whatever is on screen, the lobby or the game,
+ * so a player who is fighting or sitting in a menu still hears that somebody
+ * arrived. Once a retro_run, whether or not the board ran. */
+static void lr_rpcn_toasts(void) {
+    const netplay_status_t *st = &g_ps3ui_app.st;
+    if (!g_ps3ui_app.be.get_status) return;
+    lr_rpcn_toast_sign_in(st);
+
+    /* The room's other members. Entering a room takes its members as they are
+     * for a second (nobody "joined" a room we walked into); after that, a new member is a
+     * join, and one missing for a second is a departure -- a member row can
+     * drop out for a poll while the room is re-read, and that is not a leave. */
+    netplay_state_t s = st->state;
+    bool in_room = s == NETPLAY_IN_ROOM || s == NETPLAY_SYNCING || s == NETPLAY_PLAYING || s == NETPLAY_WATCHING;
+    if (!in_room || !st->room_id) {
+        lr_seen.n = 0;
+        lr_seen.room = 0;
+        return;
+    }
+    if (st->room_id != lr_seen.room) {
+        lr_seen.n = 0;
+        lr_seen.room = st->room_id;
+        lr_seen.frames = 0;
+    }
+    /* the room's rows can arrive a poll or two after we do */
+    bool fresh = lr_seen.frames < LR_LEAVE_FRAMES;
+    if (fresh) lr_seen.frames++;
+    lr_rpcn_toast_joins(st, fresh);
+    lr_rpcn_toast_leaves(st);
 }
 
 /* M2HLE_RPCN_AUTOJOIN=<owner> (or 1 for any open room): once signed in, join
  * that player's room and challenge them -- press Start, which the host sees as
  * a challenge to accept. What the lobby's own buttons do, for driving a session
  * from a shell (ssh) while somebody else holds the pad. Unset, nothing happens. */
-static void lr_rpcn_autojoin(void) {
-    static bool read, joined, started;
-    static const char *want;
-    static int64_t next_search_us, joined_us;
-    static uint32_t rooms_logged = 0xFFFFFFFFu;
-    if (!read) {
-        read = true;
-        want = getenv("M2HLE_RPCN_AUTOJOIN");
-        if (want && !want[0]) want = NULL;
-        if (want) lr_log(RETRO_LOG_INFO, "rpcn autojoin: looking for %s", strcmp(want, "1") ? want : "any open room");
+static struct {
+    bool        read, joined, started;
+    const char *want;
+    int64_t     next_search_us, joined_us;
+    uint32_t    rooms_logged;
+} lr_aj = { .rooms_logged = 0xFFFFFFFFu };
+
+/* The variable, read the first time through. */
+static void lr_rpcn_autojoin_read(void) {
+    if (lr_aj.read) return;
+    lr_aj.read = true;
+    lr_aj.want = getenv("M2HLE_RPCN_AUTOJOIN");
+    if (lr_aj.want && !lr_aj.want[0]) lr_aj.want = NULL;
+    if (lr_aj.want) lr_log(RETRO_LOG_INFO, "rpcn autojoin: looking for %s", strcmp(lr_aj.want, "1") ? lr_aj.want : "any open room");
+}
+
+/* The room list, into the log whenever its length changes. */
+static void lr_rpcn_autojoin_log_rooms(const netplay_status_t *st) {
+    if (!(st->state == NETPLAY_ONLINE && !st->search_pending && st->room_count != lr_aj.rooms_logged)) return;
+    lr_aj.rooms_logged = st->room_count;
+    char line[512];
+    int n = snprintf(line, sizeof line, "rpcn autojoin: %u room(s):", (unsigned)st->room_count);
+    for (uint32_t i = 0; i < st->room_count && n > 0 && (size_t)n < sizeof line; i++)
+        n += snprintf(line + n, sizeof line - (size_t)n, " %.16s(%u/%u%s%s)", st->rooms[i].owner,
+                      st->rooms[i].cur_members, st->rooms[i].max_slots,
+                      st->rooms[i].has_password ? ",locked" : "",
+                      netplay_room_reject_reason(st->rooms[i].flag_attr, g_active_profile) ? ",other version" : "");
+    lr_log(RETRO_LOG_INFO, "%s", line);
+}
+
+/* Joins the first room that will take us, or searches again; true once a
+ * join is sent. */
+static bool lr_rpcn_autojoin_join(const netplay_status_t *st, netplay_config_t *c, int64_t now) {
+    for (uint32_t i = 0; i < st->room_count; i++) {
+        const rpcn_room_listing_t *r = &st->rooms[i];
+        if (strcmp(lr_aj.want, "1") && strcmp(r->owner, lr_aj.want)) continue;
+        if (r->has_password || r->cur_members >= r->max_slots) continue;
+        if (netplay_room_reject_reason(r->flag_attr, g_active_profile)) continue;
+        c->room_id = r->room_id;
+        netplay_post(NETPLAY_CMD_JOIN, c);
+        lr_aj.joined = true;
+        lr_aj.joined_us = now;
+        lr_log(RETRO_LOG_INFO, "rpcn autojoin: joining %.16s's room %llu", r->owner, (unsigned long long)r->room_id);
+        return true;
     }
-    if (!want) return;
+    if (!st->search_pending && now >= lr_aj.next_search_us) {
+        netplay_post(NETPLAY_CMD_SEARCH, c);
+        lr_aj.next_search_us = now + 3000000;
+    }
+    return false;
+}
+
+static void lr_rpcn_autojoin(void) {
+    lr_rpcn_autojoin_read();
+    if (!lr_aj.want) return;
     const netplay_status_t *st = &g_ps3ui_app.st;
     netplay_config_t c = g_ps3ui_app.cfg;
     int64_t now = emu_now_us();
 
-    if (st->state == NETPLAY_ONLINE && !st->search_pending && st->room_count != rooms_logged) {
-        rooms_logged = st->room_count;
-        char line[512];
-        int n = snprintf(line, sizeof line, "rpcn autojoin: %u room(s):", (unsigned)st->room_count);
-        for (uint32_t i = 0; i < st->room_count && n > 0 && (size_t)n < sizeof line; i++)
-            n += snprintf(line + n, sizeof line - (size_t)n, " %.16s(%u/%u%s%s)", st->rooms[i].owner,
-                          st->rooms[i].cur_members, st->rooms[i].max_slots,
-                          st->rooms[i].has_password ? ",locked" : "",
-                          netplay_room_reject_reason(st->rooms[i].flag_attr, g_active_profile) ? ",other version" : "");
-        lr_log(RETRO_LOG_INFO, "%s", line);
-    }
+    lr_rpcn_autojoin_log_rooms(st);
     /* A join that did not take (the room went away, or filled) is tried again. */
-    if (joined && !started && st->state == NETPLAY_ONLINE && now - joined_us > 10000000) joined = false;
+    if (lr_aj.joined && !lr_aj.started && st->state == NETPLAY_ONLINE && now - lr_aj.joined_us > 10000000) lr_aj.joined = false;
 
-    if (st->state == NETPLAY_ONLINE && !joined) {
-        for (uint32_t i = 0; i < st->room_count; i++) {
-            const rpcn_room_listing_t *r = &st->rooms[i];
-            if (strcmp(want, "1") && strcmp(r->owner, want)) continue;
-            if (r->has_password || r->cur_members >= r->max_slots) continue;
-            if (netplay_room_reject_reason(r->flag_attr, g_active_profile)) continue;
-            c.room_id = r->room_id;
-            netplay_post(NETPLAY_CMD_JOIN, &c);
-            joined = true;
-            joined_us = now;
-            lr_log(RETRO_LOG_INFO, "rpcn autojoin: joining %.16s's room %llu", r->owner, (unsigned long long)r->room_id);
-            return;
-        }
-        if (!st->search_pending && now >= next_search_us) {
-            netplay_post(NETPLAY_CMD_SEARCH, &c);
-            next_search_us = now + 3000000;
-        }
-    }
-    if (st->state == NETPLAY_IN_ROOM && st->peer_known && !started) {
+    if (st->state == NETPLAY_ONLINE && !lr_aj.joined && lr_rpcn_autojoin_join(st, &c, now)) return;
+    if (st->state == NETPLAY_IN_ROOM && st->peer_known && !lr_aj.started) {
         netplay_post(NETPLAY_CMD_START, &c);
-        started = true;
+        lr_aj.started = true;
         lr_log(RETRO_LOG_INFO, "rpcn autojoin: in the room with %s - ready (Start)", st->peer_npid);
     }
 }
@@ -1321,39 +1391,38 @@ static void lr_lobby_size(int *w, int *h) {
     if (*h < 720) { *w = 1280; *h = 720; }
 }
 
-static void lr_draw(bool ran) {
-    int w, h;
-    ps3ui_view_t view = g_shell_on ? ps3ui_shell_view(&g_ps3ui_shell)
-                      : ps3ui_app_view(&g_ps3ui_app);
-    bool lobby = view == PS3UI_VIEW_FULL, overlay = view == PS3UI_VIEW_OVERLAY;
-    if (lobby) lr_lobby_size(&w, &h);
-    else       lr_render_size(&w, &h);
-    /* Show the last picture again, drawing nothing: when the board did not move
-     * (waiting on the other player), and on the frames the draw rate skips. */
+/* Shows the last picture again, drawing nothing: when the board did not move
+ * (waiting on the other player), and on the frames the draw rate skips. True
+ * when it did. */
+static bool lr_draw_dupe(bool ran, bool lobby, bool overlay, int w, int h) {
     static unsigned phase;
     bool skip = !lobby && !overlay && (!ran || (++phase % (unsigned)lr_draw_every()) != 0);
     if (skip && g_can_dupe && g_gfx_ready && g_geom_w == w && g_geom_h == h) {
         video_cb(NULL, (unsigned)w, (unsigned)h, 0);
-        return;
+        return true;
     }
-    if (w != g_geom_w || h != g_geom_h) {
-        g_geom_w = w;
-        g_geom_h = h;
-        struct retro_game_geometry geom = { (unsigned)w, (unsigned)h, VIDEO_WIDTH * LR_MAX_SCALE,
-                                            VIDEO_HEIGHT * LR_MAX_SCALE, lobby ? 16.0f / 9.0f : LR_ASPECT };
-        env_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
-    }
-    if (!g_gfx_ready) { video_cb(NULL, (unsigned)w, (unsigned)h, 0); return; }
-    sg_reset_state_cache();   /* the context is shared: RetroArch drew with it since */
-    if (ran && !lobby) game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
-    hprof_phase(3);
-    static ps3ui_canvas_t lobby_cv;
-    if (lobby || overlay) {
-        ps3ui_gpu_record(&lobby_cv, w, h);
-        if (g_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, &lobby_cv);
-        else            ps3ui_app_draw(&g_ps3ui_app, &lobby_cv);
-    }
+    return false;
+}
 
+/* A new frame size goes to the frontend before the frame does. */
+static void lr_draw_geometry(int w, int h, bool lobby) {
+    if (w == g_geom_w && h == g_geom_h) return;
+    g_geom_w = w;
+    g_geom_h = h;
+    struct retro_game_geometry geom = { (unsigned)w, (unsigned)h, VIDEO_WIDTH * LR_MAX_SCALE,
+                                        VIDEO_HEIGHT * LR_MAX_SCALE, lobby ? 16.0f / 9.0f : LR_ASPECT };
+    env_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+}
+
+/* The lobby's (or the shell's) draw list, recorded before the pass. */
+static void lr_draw_record_lobby(ps3ui_canvas_t *cv, int w, int h) {
+    ps3ui_gpu_record(cv, w, h);
+    if (g_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, cv);
+    else            ps3ui_app_draw(&g_ps3ui_app, cv);
+}
+
+/* The pass into the frontend's framebuffer: the game, then the lobby over it. */
+static void lr_draw_pass(int w, int h, bool lobby, bool overlay, ps3ui_canvas_t *cv) {
     sg_begin_pass(&(sg_pass){
         .action = {
             .colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0.0f, 0.0f, 0.0f, 1.0f } },
@@ -1367,9 +1436,28 @@ static void lr_draw(bool ran) {
     if (!lobby)
         game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, w, h, 1.0f);
     if (lobby || overlay) {
-        ps3ui_gpu_draw(&lobby_cv);   /* over the game, for the title prompt and the pause menu */
+        ps3ui_gpu_draw(cv);   /* over the game, for the title prompt and the pause menu */
         sgl_draw();
     }
+}
+
+static void lr_draw(bool ran) {
+    int w, h;
+    ps3ui_view_t view = g_shell_on ? ps3ui_shell_view(&g_ps3ui_shell)
+                      : ps3ui_app_view(&g_ps3ui_app);
+    bool lobby = view == PS3UI_VIEW_FULL, overlay = view == PS3UI_VIEW_OVERLAY;
+    if (lobby) lr_lobby_size(&w, &h);
+    else       lr_render_size(&w, &h);
+    if (lr_draw_dupe(ran, lobby, overlay, w, h)) return;
+    lr_draw_geometry(w, h, lobby);
+    if (!g_gfx_ready) { video_cb(NULL, (unsigned)w, (unsigned)h, 0); return; }
+    sg_reset_state_cache();   /* the context is shared: RetroArch drew with it since */
+    if (ran && !lobby) game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset, true);
+    hprof_phase(3);
+    static ps3ui_canvas_t lobby_cv;
+    if (lobby || overlay) lr_draw_record_lobby(&lobby_cv, w, h);
+
+    lr_draw_pass(w, h, lobby, overlay, &lobby_cv);
     hprof_phase(4);
     int zone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
     sg_end_pass();
@@ -1598,6 +1686,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     emu_ctx_init(&state.emu, &state.cpu, &state.bus);
     emu_run(&state.emu);
     g_game_loaded = true;
+    g_lr_state_size = 0;   /* a state's size depends on the profile */
+    /* A state is the build's struct layouts: it does not cross to another
+     * architecture or byte order (savestate.h's LAYOUT refuses it). */
+    uint64_t quirks = RETRO_SERIALIZATION_QUIRK_PLATFORM_DEPENDENT | RETRO_SERIALIZATION_QUIRK_ENDIAN_DEPENDENT;
+    env_cb(RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS, &quirks);
     lr_log(RETRO_LOG_INFO, "m2-hle %s: %s, sound board %s, online play %s", M2HLE_VERSION,
            g_active_profile->display_name, g_sound_on ? "on" : "off",
            opt.online == LR_ONLINE_RPCN ? "RPCN" : "RetroArch");
@@ -1678,17 +1771,62 @@ RETRO_API void retro_run(void) {
     hprof_phase_set(6, g_emu_times.sound_wait_us - snd_wait0);
     lr_push_audio();
     hprof_phase(2);
-    lr_draw(ran);
+    lr_draw(ran || g_lr_redraw);
+    g_lr_redraw = false;
     hprof_frame_end(g_emu_frames);
 }
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
-/* No savestates: the board's state is spread across headers that were never
- * written to be snapshotted (see pkt_lockstep.h for what netplay does instead). */
-RETRO_API size_t retro_serialize_size(void) { return 0; }
-RETRO_API bool   retro_serialize(void *data, size_t size) { (void)data; (void)size; return false; }
-RETRO_API bool   retro_unserialize(const void *data, size_t size) { (void)data; (void)size; return false; }
+/* ---- Savestates ----------------------------------------------------------------------------
+ *
+ * The desktop's (core/savestate.h): one zip with an entry per part of the
+ * board, here in RetroArch's buffer instead of a file, its entries stored
+ * rather than deflated (RetroArch compresses the files it writes). About 16 MB,
+ * the same for every state of one build and profile, plus room for INFO's text
+ * to grow. A state loads only into the build, ROM set and profile that made it.
+ * Netplay does not use them (pkt_lockstep.h), and a load during a session
+ * would change this board and not the other's, so it is refused there. */
+#define LR_STATE_SLACK 4096
+
+/* Whether a session has the board, either kind (lr_sound_may_go's test). */
+static bool lr_session_owns_board(void) { return !lr_sound_may_go(); }
+
+RETRO_API size_t retro_serialize_size(void) {
+    if (!g_game_loaded) return 0;
+    if (!g_lr_state_size) {
+        size_t len = 0;
+        const char *err = emu_state_save_mem(&state.emu, NULL, 0, &len);
+        if (err) { lr_log(RETRO_LOG_WARN, "savestate: %s", err); return 0; }
+        g_lr_state_size = len + LR_STATE_SLACK;
+    }
+    return g_lr_state_size;
+}
+
+RETRO_API bool retro_serialize(void *data, size_t size) {
+    if (!g_game_loaded || !data) return false;
+    size_t len = 0;
+    const char *err = emu_state_save_mem(&state.emu, data, size, &len);
+    if (err) { lr_log(RETRO_LOG_WARN, "savestate: %s", err); return false; }
+    memset((uint8_t *)data + len, 0, size - len);   /* the same board, the same bytes */
+    return true;
+}
+
+RETRO_API bool retro_unserialize(const void *data, size_t size) {
+    if (!g_game_loaded) return false;
+    const char *err = lr_session_owns_board() ? "a netplay session owns the board"
+                    : emu_state_load_mem(&state.emu, data, size);
+    if (err) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "m2hle: state not loaded: %s", err);
+        lr_message(msg, 300);
+        lr_log(RETRO_LOG_WARN, "savestate: %s", err);
+        return false;
+    }
+    g_halt_reported = state.cpu.halted;
+    g_lr_redraw = true;
+    return true;
+}
 
 RETRO_API void   retro_cheat_reset(void) {}
 RETRO_API void   retro_cheat_set(unsigned index, bool enabled, const char *code) {

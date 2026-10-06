@@ -436,7 +436,14 @@ The Dreamcast build plays the same fight against MAME over its serial port
 (`tools/dc-lockstep.py`, DREAMCAST-PORT.md "Held against MAME over the serial
 port"). `--peer` holds it to a desktop run (`--out`'s `here`) as well. It parts
 from MAME in the same places as the desktop build, and from the desktop build
-first at +580, on a denormal the SH-4 flushes to zero.
+first at +580, on a denormal the SH-4 flushed to zero (fixed in #478). `--boot`
+holds it from power-on instead, against MAME (`tools/mame/boot-lockstep.lua`)
+and a desktop `det_digest --raw` at once: it is the desktop's for 12000 frames. `--shots N`
+keeps both screens every N frames as well (`m<frame>.png`, `d<frame>.png`), and
+`tools/picture-diff.py DIR --out OUT` lays each pair side by side with the
+difference and prints, a frame each, the mean difference, the share of pixels
+off by more than 32, the colour histograms' intersection and the rows that are
+off (DREAMCAST-PORT.md, "The pictures, against MAME's").
 
 ## Faces lying on faces (`grade-zsort`)
 
@@ -1097,6 +1104,24 @@ RAM, buffer RAM, COP) must be identical: the i960 only sees the UART, which
 board time clocks. `--pcm FILE` writes each run's audio, for a gameplay
 comparison. The numbers are in SCSP.md.
 
+## Savestates
+
+`det_digest --save-at F:FILE` writes a savestate at the edge of frame F and
+`--load FILE` starts from one; both restart the sample hash there. A run that
+loads the state must print the same rows from frame F on as the run that saved
+it, and the same sample hash:
+
+```sh
+det_digest $ROMS_DIR/sfight.zip --frames 900 --save-at 400:s.sta --out a.txt
+det_digest $ROMS_DIR/sfight.zip --frames 900 --load s.sta --out b.txt
+diff <(awk '$1>400' a.txt) b.txt   # empty
+```
+
+Run it after adding state to the board that a save would have to carry. With
+`--mem` both go through the in-memory path the libretro core uses
+(`emu_state_save_mem` / `emu_state_load_mem`, a stored zip padded to the size
+the core reports), and the result must be the same.
+
 ## The netplay reset
 
 A netplay session is a cold boot on both machines, so the reset at the barrier
@@ -1409,6 +1434,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `tests/i960_fuzz.c` | the i960 and its bus running random code: memory instructions of every width and addressing mode aimed at page, region and MMIO edges, real ROM words and random ones, after 300 real frames. One file to `cmp` between two builds or compilers; `det_digest` holds the game's own code, this the forms it never takes. `i960_fuzz <merged zip> <out> [scenarios] [steps]` |
 | `tests/tile_test.c` | the tile compositor against the pixel-by-pixel original it replaced, kept verbatim as the reference: 48 random boards, every pair control mode, and the pen table against `tile_pen_lut`. A ctest; `tile_test --bench` times both compositors on one frame |
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
+| `perf_inline.py` | a `perf record` of m2hle charged to the innermost INLINED function at each sample (addr2line -i), where `perf report` puts a third of the run on `emu_slice_body`; `--callers SYM` says which inlined code calls a libc memcpy. How to build for it and what it found: [PERF-PROFILE.md](../PERF-PROFILE.md) |
 
 The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
 `boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`,

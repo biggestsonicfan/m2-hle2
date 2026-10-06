@@ -285,6 +285,8 @@ few percent. What it would take:
 
 - **An i960 to SH-4 recompiler**, not a faster interpreter. #386 built a
   prototype and measured it: on its own it does not get there (below).
+  [I960-SH4-RECOMPILER.md](I960-SH4-RECOMPILER.md) (#491) sums up what a
+  real one would take and why the two CPUs make it hard.
 - **Skip the 3D on alternate frames** (render every other board frame): ~9 fps
   in a fight, and smoother play rather than more frames shown.
 - **The PVR face path**: the store queues for vertex submission, and `ftrv`
@@ -670,6 +672,55 @@ e746591c in every build below).
     nothing, so it shows no gain there (14.5 s → 15.1 s); on a GD-ROM every
     load is a seek. Not measured on hardware.
   - The 40 left are reads the map missed or that cross a run's end.
+  - **Like objects together: tried and dropped** (#489, #492). A map holds
+    only what its runs saw, so a matchup it never recorded reads its fighters
+    from the ROM. `dc_mdlpack.py --groups` lays the pack out by object groups, as Gems' `OBJ_*` files are: one per stage,
+    one per fighter (and the fighter's second-player colours), the select
+    screen, the story scenes (`dreamcast/sfight.mdlgroups`, written by
+    `tools/dc_mdlgroups.mjs`). The explorer says what each stage's display
+    list draws, at every frame of its animations, and each fighter's parts
+    and faces. Gems' files add the fighters' effects and props and the
+    scenes the explorer does not reach. Each group's objects go in whole:
+    10,943 runs, 20.3 MB. Its 133 KB index comes out of the frame pool
+    (`pg_init`), so the heap keeps its headroom.
+  - Measured by replaying the pager's model reads (`det_digest --model-map`
+    traces, an LRU over 16 KB pages; the code's share of the cache left
+    out), against the by-first-frame pack. The 1 MB pool is 64 frames for
+    that pack and 55 for this one:
+
+    | run | by first frame | by groups |
+    |---|---|---|
+    | attract, 6000 frames (in the map) | 619 | 945 |
+    | the scripted fight, 9000 (in the map) | 723 | 829 |
+    | another matchup, 9000 (not in the map) | 171,558 (64,891 from the ROM) | 9,146 (none) |
+
+    What the map recorded costs a third more loads, because a group's
+    pages hold objects the scene does not draw. What it did not record
+    stops thrashing. Two layouts were worse and were dropped: the map's
+    lines regrouped by object (3,771 / 1,266 / 106,000 + 65,000 from the
+    ROM), and the map's lines first with the groups' remaining lines after
+    them (753 / 920 / 185,281).
+  - **In Flycast it is worse** (#492). One program (Gems, AOT 0.99), three
+    discs: no pack, the by-first-frame pack, the grouped pack; the libretro
+    core, HLE BIOS, the pager's counters read off the screen. Page loads on
+    the bench (f3500-3900, in the map), then evictions since boot (each a
+    load once the cache is full):
+
+    | run | no pack | by first frame | by groups |
+    |---|---|---|---|
+    | bench loads (code / data / polygons / textures / pack) | 312 (115/25/91/81/0) | 184 (84/20/18/0/62) | 395 (145/30/90/0/130) |
+    | attract, evictions to frame ~9700 | 3,772 | 2,607 | 4,378 |
+    | a game, Espio vs Knuckles (not in attract), evictions over its fight, frames ~1160-3800 | 564 | 229 | 516 |
+
+    The grouped pack needs twice the pack pages for the same scene, and
+    they push code and the polygon pages the i960 reads out of the cache.
+    A matchup the map never recorded does not thrash with the old pack: the
+    3D decoder's mesh cache builds a mesh once (`b 0`, thousands of hits a
+    second in the fight), so its reads come from the ROM once, not every
+    frame as in the replay above, which decodes every display list uncut.
+    So `mkdisc.sh` builds the pack by first frame; `--groups` stays in the
+    tool, and the pager takes any pack's index out of the frame pool (one
+    16 KB frame for the by-first-frame pack's 7 KB, as measured here).
 - **Textures converted at build time do not pay here, so there is no texture
   pack.** Gems' `TEX_STG*` files look like each stage's textures, already
   decompressed and converted. The two costs that would remove, measured over
@@ -723,12 +774,30 @@ emulates in software. The guards are in the private Gems directory.
   357 ms against 539 (disc reads 162 against 273). Flycast's disc is fast; on
   a GD-ROM every load is a seek.
 
-## Tried and reverted: the board's picture at its own size (#471)
+## The board's picture at its own size (#471)
 
 The board's 496x384 drawn pixel for pixel, centred in the 640x480 frame, and a
-`FRAME512=1` build whose frame was 512x384 in the middle of the signal (192
-PVR tiles rendered instead of 300). Neither was faster over the bench's 400
-frames (f3500-3900, Flycast):
+`FRAME512=1` build whose frame is 512x384 in the middle of the signal. The
+commit (3af4093) was reverted for want of speed (below); `FRAME512=1` came back
+as an option with #475 / #476, and `HUD=none` (#478) draws the board 1:1 again.
+
+- **The default frame is the cable's 640x480**, with the board scaled to
+  fill it (#479's VIEW with none set: 1.25 at (10,0)).
+- **`HUD=none` (#478) draws the whole board 1:1 at (72, 48)**, black bars on
+  all four sides and nothing else over it, so a screenshot cropped at
+  (72, 48) is the board's 496x384 to hold against MAME's, pixel for pixel.
+- **`make FRAME512=1` makes the frame itself 512x384**, set in the middle of the
+  640x480 signal (`dc_video_mode`: `bitmapx` +64, `bitmapy` +48 lines, 24 a
+  field interlaced), with the board 8 pixels in: the PVR renders whole
+  32-pixel tiles, and 496 is not a multiple of 32. The signal and the picture
+  are the same on a Dreamcast, with 192 tiles rendered instead of 300 and
+  ~440 KB less framebuffer. That is not tested on hardware. The text rows are
+  drawn at 0.8 in it, so that 20 fit.
+- **Flycast does not show it that way.** Its renderer stretches the TA's
+  frame to fill its output (512x384 x 1.25) and then moves it by the change
+  in `VO_STARTX`/`VO_STARTY`, so the picture came out enlarged and cut off on
+  the right. Hence the default.
+- **No time either way in Flycast** over the bench's 400 frames (f3500-3900):
 
 | build | total | i960 slices | draws |
 |---|---|---|---|
@@ -864,7 +933,38 @@ whole fight state. The rest parts from MAME exactly where the desktop build does
 - **KOS runs the SH-4 with FPSCR.DN = 1** (`startup.S`: `0x00040000`), so a
   denormal result is flushed to zero. With DN = 0 the SH-4 traps on a denormal
   operand (the FPU error cause cannot be masked), so this is not a flag to
-  flip. It has not reached the fight in this replay.
+  flip. The i960's single/double conversions now do denormals on the bits on
+  the SH-4 (`I960_SOFT_DENORMAL`, `i960_exec.h`; #478, below).
+
+### From power-on (#478)
+
+`dc-lockstep.py --boot` runs the same LINK disc from power-on, with no replay
+jump: at every game frame edge the Dreamcast sends a CRC-32 for every 4 KB of
+work RAM, RAM, bufferram, tile RAM and palette (`dc_link_boot`). MAME
+(`tools/mame/boot-lockstep.lua`) and a desktop `det_digest --raw` of the same
+source stream those regions raw into pipes beside it. MAME has one more frame
+edge at power-on, which the host skips.
+
+- Without the fix below, the Dreamcast was the desktop's through +3656 and
+  parted at +3657, in the same word as the replay fight's +580 (P1 +0x1FB0,
+  decaying through the denormals).
+- **The i960 does its float↔double conversions in software on the SH-4**, for
+  a denormal only: `fcnvsd` reads one as 0 there and `fcnvds` flushes one.
+  The soft versions match x86's conversions bit for bit over 20 million
+  inputs, half of them denormal. Elsewhere the code is as before.
+- With it, **the Dreamcast is the desktop build, every block of every region,
+  for all 12000 frames** (~20 minutes in Flycast): attract, the replay fight
+  and on.
+- Against MAME both builds part in the same places: work RAM from +0, bufferram
+  from +836, tile RAM from +2491 (25 work RAM and 20 bufferram blocks by
+  +12000); RAM and palette stay MAME's. The desktop build has every one of
+  them, so they are the board's differences from MAME, not the Dreamcast's,
+  and are not chased here.
+
+```sh
+python3 tools/dc-lockstep.py --boot --frames 12000 --gdi <disc>/m2hle2.gdi \
+    --core <patched flycast_libretro.so> --retroarch-config <cfg> --det-digest <desk>/det_digest
+```
 
 ```sh
 cd dreamcast && make LINK=1 VENDOR=../vendor OUT=<dir>   # LINK_GEMS=1: Gems' C on
@@ -879,6 +979,96 @@ the replay unlinked, so it boots on a plain emulator or a console with no cable.
 On a console, a serial cable to a PC at 1.5625 Mbaud carries the same protocol.
 `--listen PORT` already waits for a Dreamcast started by hand. A reader for the
 serial device has not been written.
+
+### The pictures, against MAME's (#486)
+
+The lockstep above holds the board's state, which the Dreamcast had right; the
+picture is drawn by `dc_pvr.h`, which no lockstep sees. `--boot --shots 60`
+keeps both screens of the same frame, once a second (MAME's snapshot, and
+RetroArch's screenshot while the Dreamcast waits on the link), and
+`tools/picture-diff.py` lays them side by side and measures them. Over the
+first 50 s of attract, MAME against the Dreamcast:
+
+| | mean abs. difference | colour histogram |
+|---|---|---|
+| before | 13.1 | 0.813 |
+| after | 9.5 | 0.853 |
+| after, with #479's 1:1 board (HUD=none) | 8.5 | 0.872 |
+
+What it took:
+
+- **Knee ramps.** A textured face's 16 pens rarely make a line: colorxlat's
+  ramps start near 88 and the shade takes 64 off first, so a dim face's dark
+  texels are black and its ramp rises from some texel on. The line from texel
+  0 to 15 lifted the dark half ~20 levels. Palette banks 3..54 hold the opaque
+  and see-through grey ramps again with a knee every half texel, and a face
+  takes the bank of its knee.
+- **Palette ramps.** A few ramps fall and rise (the hut's emblem, the lab
+  monitor's moon and the panel beside it): banks 55..63 are handed out by
+  colour, kept across frames, and never rewritten while the PVR may still draw
+  from them.
+- **Textures over 256x256** (the water, a monitor's picture) are cut and
+  loaded 32 KB at a time.
+- **The window clip.** The board draws nothing outside a list's window; the
+  PVR clipped only at the frame's edge, so at 22 s a quad meant for a small
+  window covered the screen white (difference 81 → 6). A face with a corner
+  outside its window is clipped in screen space; a window that is the whole
+  frame needs none, as the bars round the frame hide the rest.
+
+The cost, kept by a ramp cache keyed by the face's colours (cleared when
+luma or colorxlat changes) and one header per material with the bank patched
+into mode3: frames 3500-3900 of the fight take 19182 ms in Flycast against
+18641 before (+2.9%; it was +36% with the ramp walked per face).
+
+Still differing: the Tails-lab floor is grey where MAME's is pale cyan
+(29-31 s, the worst frames), and at 38 s the console's lid is purple.
+
+```sh
+python3 tools/dc-lockstep.py --boot --frames 3000 --shots 60 --work <dir> --gdi <HUD=none disc>/m2hle2.gdi \
+    --core <patched flycast_libretro.so> --retroarch-config <cfg> --det-digest <desk>/det_digest
+python3 tools/picture-diff.py <dir> --out <dir>/diff
+```
+
+## What the console loses its time to (#495)
+
+Every number above is Flycast's clock. On a Dreamcast the same disc (#475's
+`HUD=min FRAME512=1`, the Lazyboot CD-R of #483) runs a fight at 11-15 fps,
+a quarter of Flycast's 27, and Flycast's model says nothing about why: it
+charges a fixed 450,000 cycles a frame for the render, nothing for a cache
+miss, a store into video memory or a seek of the drive, and its disc reads
+are free. The candidates, in the order the code suggests them:
+
+- the page cache. A fight's 60-frame working set is ~3 MB at 4 KB
+  granularity and the cache is 1.3-1.5 MB, so pages come back from the disc
+  all through a fight (162 loads in the bench's 400 frames, 357 in Flycast's
+  3500-4000 here). Each is a synchronous PIO read (`pg_read`,
+  `CD_CMD_PIOREAD`, polled) and a seek on a CD-R is tens of ms. Flycast
+  counts it as 0 ms (row 1's `(0 ms)`).
+- stores straight into video memory: `dp_tiles_convert` writes the tile
+  layers a word at a time into the PVR's textures, and every face goes out
+  through the store queues.
+- the caches: the SH-4 has 16 KB of data cache and 8 KB of instruction
+  cache, direct mapped, and the board's state is 4 MB of bus plus 1 MB of
+  mesh arena plus 0.9 MB of tile snapshots. No bench so far has had a cache
+  model at all.
+
+`HUD=prof` (dc_prof.h) measures these on the console. The SH-4's two
+performance counters count the cycles the pipeline stood still for a
+data-cache miss (PRFC0) and for an instruction-cache miss (PRFC1), shown
+as a share of the window's cycles. KallistiOS's PVR stats give the TA's
+registration and the render time of the last frame, and the vblanks. And a
+sampler on TMU1 (2 kHz) takes the interrupt context's PC and looks it up in
+a table of the program's symbols, generated from the linked elf by
+`tools/dc_profmap.py`: the Makefile links the program twice, once with an
+empty table, then with the table made from that elf; the table is data,
+so the code sits at the same addresses, which the Makefile checks with `nm`.
+The HUD shows each group's share of the window and the six hottest symbols.
+Flycast's counters read 0 (it has none), and under it the sampler put the
+fight at geo 27%, drw 20%, 960 15%, gem 12%, aot 6% (`geo3d_decode_model`
+23% on its own), with the PVR rendering a frame in 7.5 ms. Row 1's disc ms
+and rows 3-5's bench (the same frames as every bench above) come along on
+the same disc, so a photograph of the console's screen during a fight
+gives the host's split and the console's side by side.
 
 ## The models walked offline: STRIPS.PAK (#498)
 
@@ -934,8 +1124,9 @@ a5d21d21 in all three):
   fills it at run time (see "Textures converted at build time do not pay
   here" under #456). The
   conversion is under 0.5% of attract. The key of the texture each face cuts
-  is precomputed, a tile over 256 is windowed offline, and tiles stay at most
-  256 on a side. A 512 tile does not get a 512 PVR. Each texture's
+  is precomputed and a tile over 256 is windowed offline; one whose face
+  spans more than 256 keys the whole tile, at most 1024 on a side, as
+  `dp_tex_get` cuts it since #486. Each texture's
   `pvr_poly_hdr_t` was already compiled once per texture and variant
   (`dp_tex_t.hdr`), not per frame.
 

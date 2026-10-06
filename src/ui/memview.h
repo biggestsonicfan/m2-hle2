@@ -61,17 +61,10 @@ typedef struct {
     char        f32_buf[24];
 } memview_panel_t;
 
-static inline void memview_panel_draw(memview_panel_t *p,
-                                      const memview_region_t *regions, int n_regions,
-                                      const memview_bus_t *bus,
-                                      int addr_digits) {
-    if (n_regions <= 0) { igTextDisabled("no regions mapped"); return; }
-    if (!p->edit) p->edit = mem_edit_create(addr_digits);
-    mem_edit_set_bus(p->edit, bus->read8, bus->write8, bus->user);
-
-    if (p->region < 0 || p->region >= n_regions) p->region = 0;
-    const memview_region_t *r = &regions[p->region];
-
+/* The region picker. */
+static inline void memview_region_combo(memview_panel_t *p, const memview_region_t *regions,
+                                        int n_regions, const memview_region_t *r,
+                                        int addr_digits) {
     igSetNextItemWidth(260);
     if (igBeginCombo("##region", r->name, 0)) {
         for (int i = 0; i < n_regions; i++) {
@@ -83,10 +76,14 @@ static inline void memview_panel_draw(memview_panel_t *p,
         }
         igEndCombo();
     }
+}
 
-    /* Jump anywhere in the space: the region that holds the address comes
-     * along with it. (MemoryEditor's own goto box, on the options line below,
-     * stays inside the region on show.) */
+/* Jump anywhere in the space: the region that holds the address comes
+ * along with it. (MemoryEditor's own goto box, on the options line below,
+ * stays inside the region on show.) */
+static inline bool memview_jump_box(memview_panel_t *p, const memview_region_t *regions,
+                                    int n_regions, int addr_digits) {
+    bool moved = false;
     igSameLine();
     igSetNextItemWidth(addr_digits * 10.0f + 16.0f);
     if (igInputText("##jump", p->jump_buf, sizeof(p->jump_buf),
@@ -98,8 +95,8 @@ static inline void memview_panel_draw(memview_panel_t *p,
                 if (addr >= regions[i].base && addr - regions[i].base < regions[i].size) hit = i;
             if (hit >= 0) {
                 p->region = hit;
-                r = &regions[hit];
                 mem_edit_goto(p->edit, addr);
+                moved = true;
             } else {
                 LOG_WARN("memview: 0x%08X is not in any mapped region", addr);
             }
@@ -107,8 +104,13 @@ static inline void memview_panel_draw(memview_panel_t *p,
     }
     igSameLine();
     igTextDisabled("jump (hex)");
+    return moved;
+}
 
-    /* Poke row. The grid edits bytes in place; this is for the widths the
+/* The poke row under the picker. */
+static inline void memview_poke_row(memview_panel_t *p, const memview_bus_t *bus,
+                                    int addr_digits) {
+    /* The grid edits bytes in place; this is for the widths the
      * board's own state is written in. */
     uint32_t sel;
     if (mem_edit_selected(p->edit, &sel)) {
@@ -147,6 +149,22 @@ static inline void memview_panel_draw(memview_panel_t *p,
     } else {
         igTextDisabled("click a byte to poke a u32 / f32 at its word");
     }
+}
+
+static inline void memview_panel_draw(memview_panel_t *p,
+                                      const memview_region_t *regions, int n_regions,
+                                      const memview_bus_t *bus,
+                                      int addr_digits) {
+    if (n_regions <= 0) { igTextDisabled("no regions mapped"); return; }
+    if (!p->edit) p->edit = mem_edit_create(addr_digits);
+    mem_edit_set_bus(p->edit, bus->read8, bus->write8, bus->user);
+
+    if (p->region < 0 || p->region >= n_regions) p->region = 0;
+    const memview_region_t *r = &regions[p->region];
+
+    memview_region_combo(p, regions, n_regions, r, addr_digits);
+    if (memview_jump_box(p, regions, n_regions, addr_digits)) r = &regions[p->region];
+    memview_poke_row(p, bus, addr_digits);
 
     igSeparator();
     mem_edit_draw(p->edit, r->base, r->size);

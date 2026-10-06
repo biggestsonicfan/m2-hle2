@@ -166,12 +166,8 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
         /* Faces take their colour from palette RAM, as the rasterizer does. */
         g_geo3d_palram      = bus->palette;
         g_geo3d_palram_size = PALETTE_SIZE;
-        game_render_draw_captured_models(geo3d,
-                                         rs->main_data, rs->main_data_size,
-                                         rs->polygons,  rs->polygons_size,
-                                         rs->textures,  rs->textures_size,
-                                         q->model_table_offset, q->model_table_count,
-                                         q->mesh_ptr_subtract, q->mesh_ptr_add,
+        const geo3d_models_t md = geo3d_models_of(rs, q);
+        game_render_draw_captured_models(geo3d, &md,
                                          ox, oy, w, h,
                                          geo3d->cam_x, geo3d->cam_y, geo3d->cam_z,
                                          geo3d->rot_y, geo3d->rot_x, geo3d->fov_deg,

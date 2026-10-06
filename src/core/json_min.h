@@ -45,6 +45,40 @@ static inline int json_get_str(const char *json, const char *key, char *out, int
     return 1;
 }
 
+/* One hex digit into the low four bits of v. 0 when h is not one. */
+static inline int json__hex_nibble(char h, unsigned *v) {
+    if      (h >= '0' && h <= '9') *v |= (unsigned)(h - '0');
+    else if (h >= 'a' && h <= 'f') *v |= (unsigned)(h - 'a' + 10);
+    else if (h >= 'A' && h <= 'F') *v |= (unsigned)(h - 'A' + 10);
+    else return 0;
+    return 1;
+}
+
+/* The XXXX of a \uXXXX at *pp, moved past what it used. */
+static inline char json__unescape_u(const char **pp) {
+    const char *p = *pp;
+    unsigned v = 0;
+    int k = 0;
+    for (; k < 4 && *p; k++, p++) {
+        v <<= 4;
+        if (!json__hex_nibble(*p, &v)) break;
+    }
+    *pp = p;
+    return (k == 4 && v > 0 && v < 0x80) ? (char)v : '?';
+}
+
+/* The character an escape stands for; *pp is just past the backslash. */
+static inline char json__unescape(const char **pp) {
+    char e = *(*pp)++;
+    switch (e) {
+        case 'n': return '\n';
+        case 't': return '\t';
+        case 'r': return '\r';
+        case 'u': return json__unescape_u(pp);
+        default:  return e;      /* \\ \" \/ and anything unknown */
+    }
+}
+
 /* json_get_str, but with the string's escapes undone: \\ \" \/ \n \t and
  * \uXXXX (below 0x80 only; anything else becomes '?'). For values a caller
  * serialised with a real JSON library -- a Windows path arrives as
@@ -58,29 +92,7 @@ static inline int json_get_str_unescaped(const char *json, const char *key,
     int i = 0;
     while (*p && *p != '"' && i < out_cap - 1) {
         char c = *p++;
-        if (c == '\\' && *p) {
-            char e = *p++;
-            switch (e) {
-                case 'n': c = '\n'; break;
-                case 't': c = '\t'; break;
-                case 'r': c = '\r'; break;
-                case 'u': {
-                    unsigned v = 0;
-                    int k = 0;
-                    for (; k < 4 && *p; k++, p++) {
-                        char h = *p;
-                        v <<= 4;
-                        if      (h >= '0' && h <= '9') v |= (unsigned)(h - '0');
-                        else if (h >= 'a' && h <= 'f') v |= (unsigned)(h - 'a' + 10);
-                        else if (h >= 'A' && h <= 'F') v |= (unsigned)(h - 'A' + 10);
-                        else break;
-                    }
-                    c = (k == 4 && v > 0 && v < 0x80) ? (char)v : '?';
-                    break;
-                }
-                default: c = e; break;      /* \\ \" \/ and anything unknown */
-            }
-        }
+        if (c == '\\' && *p) c = json__unescape(&p);
         out[i++] = c;
     }
     out[i] = '\0';

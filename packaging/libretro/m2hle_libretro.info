@@ -16,7 +16,8 @@ systemid = "sega_model_2"
 # Libretro Features
 database = "Sega - Model 2"
 supports_no_game = "false"
-savestate = "false"
+savestate = "true"
+savestate_features = "basic"
 # Not cheats: the code field is how an RPCN account is entered (rpcn:NAME:PASSWORD:TOKEN).
 cheats = "true"
 input_descriptors = "true"
@@ -31,4 +32,4 @@ needs_fullpath = "true"
 disk_control = "false"
 is_experimental = "true"
 
-description = "A high-level emulator of the Sega Model 2 arcade board, starting with Sonic The Fighters. Netplay runs as lockstep from a cold boot on both machines, either through RetroArch's own Netplay menu and lobby or through RPCN rooms shared with the desktop and web builds (core option \"Online play\"). No savestates, so no rewind, run-ahead or rollback netplay."
+description = "A high-level emulator of the Sega Model 2 arcade board, starting with Sonic The Fighters. Netplay runs as lockstep from a cold boot on both machines, either through RetroArch's own Netplay menu and lobby or through RPCN rooms shared with the desktop and web builds (core option \"Online play\"). Savestates work, but not during an online match."
