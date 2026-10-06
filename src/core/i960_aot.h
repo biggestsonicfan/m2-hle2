@@ -325,6 +325,7 @@ static __attribute__((noinline)) int aot_ldn(i960_cpu_t *cpu, memory_bus_t *bus,
  * their own (gq_, rq_: each chunk's), opaque so the compiler keeps it. */
 #define AR(i)    (*((i) < 16 ? &gq_[(i)] : &rq_[(i) - 16]))
 #define AOT_REGS uint32_t *gq_ = (uint32_t *)&cpu->globals, *rq_ = gq_ + 16; __asm__("" : "+r"(rq_)); \
+                 uint8_t *ram_ = bus->ram; (void)ram_;                                               \
                  uint32_t cc_ = cpu->sfr.ac & AC_CC_MASK
 #define AGETCC   cc_
 #define ACC(v)   (cc_ = (v) & AC_CC_MASK)
@@ -358,12 +359,20 @@ static inline uint32_t aot_cc_i(int32_t a, int32_t b)   { return 1u + (uint32_t)
 #define AOT_S16(IP, o, v) do { bus->cpu_ip = (IP); mem_write16(bus, ea_ + (o), (uint16_t)(v)); } while (0)
 #define AOT_S32(IP, o, v) do { bus->cpu_ip = (IP); mem_write32(bus, ea_ + (o), (v)); } while (0)
 #else
-#define AOT_S8(IP, o, v)  do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                               p_[(ea_ + (o)) & MEM_PAGE_OFF] = (uint8_t)(v); } while (0)
-#define AOT_S16(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                               mem_le16_put(p_ + ((ea_ + (o)) & MEM_PAGE_OFF), (v)); } while (0)
-#define AOT_S32(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                               mem_le32_put(p_ + ((ea_ + (o)) & MEM_PAGE_OFF), (v)); } while (0)
+#define AOT_S8(IP, o, v)  do { MEM_TALLY(bus->writes, 1); p_[(ea_ + (o)) & MEM_PAGE_OFF] = (uint8_t)(v); } while (0)
+#define AOT_S16(IP, o, v) do { MEM_TALLY(bus->writes, 1); mem_le16_put(p_ + ((ea_ + (o)) & MEM_PAGE_OFF), (v)); } while (0)
+#define AOT_S32(IP, o, v) do { MEM_TALLY(bus->writes, 1); mem_le32_put(p_ + ((ea_ + (o)) & MEM_PAGE_OFF), (v)); } while (0)
+#endif
+/* The marks a store leaves (which instruction stored last: g_last_store_ip,
+ * g_mem_last_write_ip). Only diagnostics read them: the COP's log lines and
+ * its ip_* fields, the MIDI log. Nothing the board computes with. A build
+ * without the tools does not write them from compiled code: on the SH-4 each
+ * was a literal-pool load or two and a store at every store site, 35 KB of
+ * the Dreamcast program (#509). */
+#if M2HLE_DEV_TOOLS
+#define AOT_MARK(IP) (g_last_store_ip = (IP))
+#else
+#define AOT_MARK(IP) ((void)0)
 #endif
 
 /* What the compiled code does inline: the RAM (STF's ~45% of them; aot_check
@@ -372,7 +381,7 @@ static inline uint32_t aot_cc_i(int32_t a, int32_t b)   { return 1u + (uint32_t)
  * (the ROM, the COP's FIFO) goes to a helper, aot_pg's page tables first. */
 #define AOT_RAM(sz) (!(((ea_ - RAM_BASE) | (ea_ + ((sz) > 4u ? (sz) - 4u : 0u) - RAM_BASE))           \
                        & ((uint32_t)~(RAM_SIZE - 1u) | ((sz) >= 4u ? 3u : (sz) - 1u))))
-#define AOT_RQ(o)   (bus->ram + (ea_ - RAM_BASE) + (o))
+#define AOT_RQ(o)   (ram_ + (ea_ - RAM_BASE) + (o))
 #if MEM_LE_DIRECT
 #define AOT_RL16(o) (MEM_TALLY(bus->reads, 1), (uint32_t)*(const mem_u16_alias_t *)AOT_RQ(o))
 #define AOT_RL32(o) (MEM_TALLY(bus->reads, 1), (uint32_t)*(const mem_u32_alias_t *)AOT_RQ(o))
@@ -414,15 +423,13 @@ static uint32_t s_aot_rp_n, s_aot_mp_n;
 #define AOT_RS16 AOT_S16
 #define AOT_RS32 AOT_S32
 #else
-#define AOT_RS8(IP, o, v)  do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); *AOT_RQ(o) = (uint8_t)(v); } while (0)
+#define AOT_RS8(IP, o, v)  do { MEM_TALLY(bus->writes, 1); *AOT_RQ(o) = (uint8_t)(v); } while (0)
 #if MEM_LE_DIRECT
-#define AOT_RS16(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                                *(mem_u16_alias_t *)AOT_RQ(o) = (uint16_t)(v); } while (0)
-#define AOT_RS32(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); \
-                                *(mem_u32_alias_t *)AOT_RQ(o) = (v); } while (0)
+#define AOT_RS16(IP, o, v) do { MEM_TALLY(bus->writes, 1); *(mem_u16_alias_t *)AOT_RQ(o) = (uint16_t)(v); } while (0)
+#define AOT_RS32(IP, o, v) do { MEM_TALLY(bus->writes, 1); *(mem_u32_alias_t *)AOT_RQ(o) = (v); } while (0)
 #else
-#define AOT_RS16(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); mem_le16_put(AOT_RQ(o), (v)); } while (0)
-#define AOT_RS32(IP, o, v) do { MEM_TALLY(bus->writes, 1); g_mem_last_write_ip = (IP); mem_le32_put(AOT_RQ(o), (v)); } while (0)
+#define AOT_RS16(IP, o, v) do { MEM_TALLY(bus->writes, 1); mem_le16_put(AOT_RQ(o), (v)); } while (0)
+#define AOT_RS32(IP, o, v) do { MEM_TALLY(bus->writes, 1); mem_le32_put(AOT_RQ(o), (v)); } while (0)
 #endif
 #endif
 
@@ -478,6 +485,8 @@ static uint64_t g_aot_ops;    /* instructions run compiled */
 static const game_profile_t *s_aot_prof;
 static unsigned s_aot_gen;   /* g_hle_filter_gen s_aot_on was decided under */
 static uint32_t s_aot_tick;
+static char     s_aot_why[48];   /* why the code is off, for a HUD with no log (the Dreamcast) */
+#define AOT_OFF(...) do { snprintf(s_aot_why, sizeof s_aot_why, __VA_ARGS__); LOG_WARN("aot: %s", s_aot_why); return false; } while (0)
 
 /* Is the compiled code this board's? The profile's hooks must all be ones the
  * generator kept out, and the ROM the code it compiled (all of it when the
@@ -492,35 +501,36 @@ static inline bool aot_check(memory_bus_t *bus) {
         for (size_t i = 0; i < p->hook_count; i++) {
             size_t k = 0;
             while (k < AOT_NHOOKS && s_aot_hooks[k] != p->hooks[i].addr) k++;
-            if (k == AOT_NHOOKS) { LOG_WARN("aot: hook 0x%08X not known to the code, off", p->hooks[i].addr); return false; }
+            if (k == AOT_NHOOKS) AOT_OFF("hook %05X not known to the code", p->hooks[i].addr);
         }
         /* --gems-i960's sites are hooks too: compiled code would run past one. */
         for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++) {
             size_t k = 0;
             while (k < AOT_NHOOKS && s_aot_hooks[k] != g_hle_extra_sites[i]) k++;
-            if (k == AOT_NHOOKS) { LOG_WARN("aot: trap 0x%08X not known to the code, off", g_hle_extra_sites[i]); return false; }
+            if (k == AOT_NHOOKS) AOT_OFF("trap %05X not known to the code", g_hle_extra_sites[i]);
         }
         for (size_t i = 0; p == g_hle_spin_profile && i < g_hle_spin_count; i++) {
             size_t k = 0;
             while (k < AOT_NHOOKS && s_aot_hooks[k] != g_hle_spin_sites[i]) k++;
-            if (k == AOT_NHOOKS) { LOG_WARN("aot: idle loop 0x%08X not known to the code, off", g_hle_spin_sites[i]); return false; }
+            if (k == AOT_NHOOKS) AOT_OFF("idle loop %05X not known to the code", g_hle_spin_sites[i]);
         }
         uint32_t h = 2166136261u;
         for (uint32_t a = 0; a < AOT_ROM_BYTES; a += 4) h = (h ^ mem_read32(bus, a)) * 16777619u;
-        if (h != AOT_FNV) { LOG_WARN("aot: the ROM is not the one compiled, off"); return false; }
+        if (h != AOT_FNV) AOT_OFF("the ROM is not the one compiled");
         s_aot_on = true;
+        s_aot_why[0] = 0;
         LOG_INFO("aot: on");
     }
     if (s_aot_on) {
         const uint32_t *w = s_aot_samp[s_aot_tick++ & 255u];
-        if (mem_read32(bus, w[0]) != w[1]) { LOG_WARN("aot: the ROM changed, off"); s_aot_on = false; }
+        if (mem_read32(bus, w[0]) != w[1]) { s_aot_on = false; AOT_OFF("the ROM changed"); }
     }
     if (s_aot_on) {   /* the devices aot_run's helpers call straight (per slice: ~2% a run) */
         mem_region_t *g = mem_find_region(bus, COPROGRAM_BASE);
         for (uint32_t pg = RAM_BASE >> MEM_PAGE_SHIFT; pg < (RAM_BASE + RAM_SIZE) >> MEM_PAGE_SHIFT; pg++) {   /* AOT_RAM's */
             uint8_t *at = bus->ram + ((pg << MEM_PAGE_SHIFT) - RAM_BASE);
             if (bus->rd_page[pg] != at || (!M2HLE_DEV_TOOLS && bus->wr_page[pg] != at)) {
-                LOG_WARN("aot: the RAM is not plain memory, off"); s_aot_on = false; return false;
+                s_aot_on = false; AOT_OFF("the RAM is not plain memory");
             }
         }
         {   /* AOT_ROMD's: how far each is plain pages of the one buffer */
@@ -557,6 +567,8 @@ static inline bool aot_check(memory_bus_t *bus) {
 /* A reset or a ROM load may bring other code under the same profile: check
  * it all again rather than a sampled word a slice. */
 static inline void aot_invalidate(void) { s_aot_prof = NULL; s_aot_on = false; }
+/* Why the code is off ("" while it is on, or before the first slice). */
+static inline const char *aot_off_why(void) { return s_aot_why; }
 
 static inline bool aot_lead(uint32_t ip) {
     return ip < (AOT_NCHUNKS << AOT_SHIFT) && (s_aot_lead[ip >> 5] >> ((ip >> 2) & 7u) & 1u);

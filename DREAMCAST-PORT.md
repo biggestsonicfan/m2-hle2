@@ -1203,9 +1203,10 @@ the ROM files; `TEXPAK=` puts it on the disc. Nothing in it is committed.
   #498's, so the cut moved into `dct_cut` unchanged and the pack draws the
   same picture. Texture time up to f1500 (`tx` on the hash line) fell from
   695 ms to 37 ms. The f3500-3900 bench did not move (18800 ms against
-  18791): attract cut only 5 ms of textures in that window. Both runs shared
-  the CPU with another session's Flycast, so the bench is slower than #498's
-  14274 ms on both sides.
+  18791): attract cut only 5 ms of textures in that window. The bench is
+  slower than #498's 14274 ms on both sides. That was put down to another
+  session's Flycast sharing the CPU; it was the AOT, which had turned itself
+  off (#509).
 - **What it means for a console.** Flycast's disc is free, so the 658 ms are
   the SH-4's cut alone. On a GD-ROM the pack only pays if its reads are
   sequential with what the frame already reads or done at a load screen: a
@@ -1332,6 +1333,100 @@ The f3500-3900 bench came out the same on all three (18809 ms, `rd 680 sk
   `det_digest` for a later try (a scene's textures read whole at its load
   screen, say, where whole groups are the unit).
 
+## The AOT was off, and its map was stale (#509)
+
+The ask was a faster ahead-of-time compiler. Two things stood before the
+compiler itself, and both failed without a word.
+
+**No disc since the master sync of #221 ran the compiled code.** `aot_check`
+refuses the whole AOT when the profile has a hook at an address the generated
+code compiled over, because a hook there would never run. The Makefile named
+the hooks by hand, and master's CPU difficulty hook at `0x3B274` was not among
+them. The refusal is a `LOG_WARN`, which a disc sends nowhere, so the program
+ran interpreted and looked fine. The benches of #502, #503, #504 and #508 (a
+slice of ~10000 ms) were taken that way. #498's was the last with the AOT on:
+its slice, 6467 ms, is the old-map row below. Now:
+
+- the Makefile reads the hook addresses out of the profiles' own tables
+  (`PROFILE_HOOKS`, from `src/profiles/sfight.h` and `sfight_console.h`), so a
+  new hook is a boundary in the next build without anyone naming it;
+- `aot_check` keeps its reason (`aot_off_why()`), and the HUD's stats show
+  `aot off: <reason>` when there is one. Read that row before a bench.
+
+**The map no longer listed the hottest code.** `sfight.aotmap` was recorded
+while Gems' C still ran `get_frame_dat` (`0x304C8`). Since the console profile
+leaves that function to the i960 (`gems_trap_left_to_i960`), it and
+`get_fcurve_value_f` (`0x30C28`-`0x30E04`) were three quarters of everything
+the interpreter ran in a fight, and none of it was in the map. Re-recorded
+(the recipe is in `dreamcast/README.md`), the scripted fight interprets
+2.7 million instructions on the host where it interpreted 20.3 million. The
+map has to be recorded again whenever the set of functions left to the i960
+changes: a Gems trap dropped or added, a hook removed.
+
+**Then the compiler, a little.** A store in compiled code wrote its own
+address to `g_last_store_ip` (and `g_mem_last_write_ip`), which only log
+lines and the COP's `ip_*` fields read. On the SH-4 each was a literal-pool
+load and a store at every store site. A build without the tools
+(`M2HLE_DEV_TOOLS` 0) no longer writes them (`AOT_MARK`), and a chunk keeps
+the RAM base in a local (`ram_`) instead of loading `bus->ram` at each access.
+That is 35 KB less code, which was worth one 256 KB step of the pager's cache.
+
+The bench (full HUD, Gems, fight frames 3500-3900, Flycast's libretro core,
+`FPS_CAP=0`); the hash at frame 1500 is a5d21d21 on every row:
+
+| | total ms | slice | draw | text |
+|---|---|---|---|---|
+| before (AOT refused) | 18789 | 10018 | 8691 | 1,576,348 |
+| hooks from the profiles (AOT on, old map) | 15216 | 6459 | 8693 | 1,576,036 |
+| + the map re-recorded | 14342 | 5581 | 8697 | 1,842,932 |
+| + no store marks, `ram_` | 14327 | 5552 | 8708 | 1,808,116 |
+| the same at `AOT_COVER=0.995` (not the default) | 14136 | 5354 | 8718 | 2,146,228 |
+
+The slice is 45% shorter and the 400 frames 24%. Against #498, the last
+bench with the AOT on, the slice is 14% shorter (5552 ms against 6467). The
+draw is not: 8.7 s here on every row where #498 measured 7.7 s. That came
+in between #498 and this branch's base, with the AOT on or off, and was not
+looked into here.
+
+**The board cannot tell.** `det_digest --cpu --gems --profile sfight_console`
+on the host is identical with and without the compiled code, 3000 frames of
+attract and the 3200-frame scripted fight, for the old map, the new one and
+the new one without the marks. The compiled share of the i960's instructions
+rose from 43.9 to 50.8 million in attract and from 51.5 to 69.1 million in
+the fight.
+
+**Where the i960's side stands** (`HUD=prof`, PC samples in attract's fight,
+frames 3572 and 4912):
+
+| | aot | interpreter | gems | cop | geo | draw | i960 ms/slice |
+|---|---|---|---|---|---|---|---|
+| old map | 6% | 13% | 12% | 4% | 36% | 17% | 16 |
+| new map | 11% | 7% | 14% | 4% | 35% | 16% | 13 |
+
+The interpreter's column is the run loop too (`emu_slice_body`, 3%). Compiled
+code is 774 KB for 7405 instructions, 104 bytes of SH-4 each.
+
+**What is left.**
+
+- **A wider cover costs memory.** The map's weight is 77% idle loop, which a
+  hook skips and nothing compiles, so 0.99 of it still leaves about 4% of the
+  real work to the interpreter. At 0.995 the generator compiles 8983
+  instructions instead of 7405 and the slice is 3.6% shorter again, for 338 KB
+  more code: the pager's cache falls a step, from 1280 KB to 1024 KB, and
+  448 KB of heap is left instead of 512. Flycast's disc is free, so the
+  smaller cache does not show there; on a GD-ROM it is seeks. 0.99 stays the
+  default. `AOT_COVER=0.995` kept the frame-1500 hash; it was not run through
+  the host's `det_digest`.
+- **Stores to tile and texture RAM** leave the compiled path through
+  `aot_io_x` to `mem_write16`. In a load scene that helper is 10% of the
+  samples and the interpreter 14%, beside the texture loader's rows (21%) and
+  the tile layer (15%). Flycast runs those scenes at 87 fps, so nothing was
+  done about it; an inline path for the two regions is the next thing to try
+  if hardware says loads are slow.
+- The i960's side is a third of a fight's frame: Gems' C 14%, compiled code
+  11%, the interpreter and the run loop 7%, the COP 4%. The 3D decode and the
+  draw are half of it.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
@@ -1362,8 +1457,11 @@ The f3500-3900 bench came out the same on all three (18809 ms, `rd 680 sk
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
   texture fields) would let the mesh arena (768 KB) hold more.
-- **The i960 slice (~14 ms a frame after #459).** The AOT covers nearly all
-  of it; what is left is Gems C, hooks and the COP. Keeping the hot `cpu` /
-  `bus` state in the 8 KB operand-cache RAM mode.
+- **The i960 slice (~14 ms a frame in the bench after #509).** A third of a
+  fight's frame: Gems' C, the compiled code, the COP, and 7% still
+  interpreted. A wider `AOT_COVER` needs memory the board does not have
+  (#509), so smaller compiled code (104 bytes of SH-4 an instruction) is what
+  would buy more of it. Keeping the hot `cpu` / `bus` state in the 8 KB
+  operand-cache RAM mode.
 - **Optional:** modifier-volume shadows; dropping SDL2 and GLdc for KOS's
   `snd_stream` directly.

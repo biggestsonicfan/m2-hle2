@@ -26,7 +26,7 @@ From the repo root:
 . $KOS_BASE/environ.sh
 make -C dreamcast OUT=/tmp/dc
 # or with STF's i960 code compiled ahead of time (~1.5x the i960's speed;
-# AOT_COVER=0.98 by default, DREAMCAST-PORT.md #394)
+# AOT_COVER=0.99 by default, DREAMCAST-PORT.md #394 and #509)
 make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # GEMS=<dir> (default: ../Sonic Gems Collection/m2hle beside this checkout, if
 # it is there) builds in Sega's C from Sonic Gems Collection; GEMS= leaves it
@@ -166,6 +166,14 @@ det_digest sfight.zip --profile sfight_console --gems --frames 3200 --script "$S
 
 then each instruction's weight is its count over its run's total, times
 10^9 / 2, summed over the two runs; the hooks of both are kept.
+
+Record it again whenever the set of functions left to the i960 changes: a
+Gems trap dropped or added, a hook removed. A stale map still builds and
+still runs right, only slower, because the code it does not list is
+interpreted (#509: `get_frame_dat` was three quarters of that). The profiles'
+own hooks need no care: the Makefile reads their addresses out of
+`src/profiles/sfight*.h`. If the compiled code and the profile's hooks still
+disagree, the AOT turns itself off and the HUD's stats say `aot off:` and why.
 
 ## Sound
 
