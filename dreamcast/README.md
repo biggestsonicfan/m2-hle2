@@ -35,6 +35,16 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
 # (Flycast stretches it; DREAMCAST-PORT.md #471). VIEW=x,y,w,h shows only that
 # rectangle of the board's 496x384, scaled to fill the frame (#479).
+# HUD=min drops the stats rows: only the board's frames a second, small, top
+# right (Pinboard #475's disc: HUD=min FRAME512=1). Under Flycast a FRAME512
+# picture is enlarged and that corner falls off the screen; Redream shows it.
+# HUD=none draws nothing over the game at all, not even that, and (with no
+# VIEW, FRAME512=0) puts the whole board 1:1 at (72,48) of the frame, a
+# picture to crop and hold against MAME's pixel for pixel (Pinboard #478).
+# HUD=prof keeps the stats rows and adds the hardware profile (dc_prof.h,
+# Pinboard #495) on rows 6-10: the SH-4's cache-miss stalls, the PVR's times,
+# and where the program's time goes, sampled by symbol. Links twice: the
+# sampler's symbol map (tools/dc_profmap.py) comes from the first link.
 # FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
 # whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
 
@@ -48,6 +58,28 @@ The disc is a three-track GDI. Track 3 holds IP.BIN, 1ST_READ.BIN (unscrambled),
 the five ROM files as they ship, STF.AFS and MODELS.PAK. `dc_layout.h` says where each ROM
 file lands in the board's regions; what the PS3 files lack (part of the texture
 ROM, the copro tables, the sound CPU's program and samples) is listed there.
+
+For a burned CD-R, or an emulator or player that takes no GDI, `CDI=1` makes a
+self-booting CD-R image instead, `m2hle2.cdi` (DiscJuggler; Pinboard #480, #483).
+It follows Lazyboot (Conkwer's selfboot toolkit) for a KallistiOS game, its
+"mastering" preset for CD-Rs: one audio/data CD with the same files on its data
+track at LBA 11702, Joliet and Rock Ridge names, Lazyboot's KOS IP.BIN,
+1ST_READ.BIN scrambled as a MIL-CD boots it, and a hidden dummy file that fills
+the disc to 80 minutes ahead of the game's files, so they sit on the outer edge,
+where a drive reads fastest (an ~810 MB image). cdi4dc from img4dc writes it, with
+EDC/ECC; img4dc is written for Windows, and `tools/build-cdi4dc.sh` builds a
+Linux one in `~/build/tools/dc/img4dc`. `DUMMY=0` leaves the dummy out (~190 MB);
+`FAST=1` writes the CDI with Lazyboot's own `mkcdi.py`, without EDC/ECC (its
+"fast" preset: for emulators, not for burning). Lazyboot is Windows scripts;
+`tools/get-lazyboot.sh` fetches the two files used here (its KOS IP.BIN and
+`mkcdi.py`) into `~/build/tools/dc/lazyboot`. The program finds its files on
+either disc (the data track's TOC entry), so nothing else changes. Tested in
+Flycast's libretro core (HLE BIOS) and Redream, not yet on a Dreamcast.
+
+```sh
+sh dreamcast/tools/build-cdi4dc.sh; sh dreamcast/tools/get-lazyboot.sh   # once
+CDI=1 sh dreamcast/mkdisc.sh /tmp/dc "<PS3>/stf_rom" /tmp/dc/disc /tmp/dc/STF.AFS   # -> m2hle2.cdi
+```
 
 MODELS.PAK is made by `mkdisc.sh` from `rom_pol.bin`, `rom_tex.bin` and
 `sfight.mdlmap` (`tools/dc_mdlpack.py`): the meshes and UV streams the game
@@ -119,6 +151,15 @@ tried. On screen:
   of attract: ms in all, in the slice and in the draw; the draw's parts; page
   loads in all, then of code, data, polygons, textures, the model pack, and
   those for `dc_rom_at`
+- rows 6-10 (`HUD=prof`, #495): the window's pipeline stalls on data- and
+  instruction-cache misses as a share of its cycles, the PVR's render and
+  registration time for the last frame, the vblanks seen and the samples
+  taken; then the sampler's groups as shares of the window (`aot` the i960
+  compiled ahead, `gem` Gems' C, `hok` the profile's hooks, `960` the i960
+  interpreter and the bus, `cop`, `geo` the 3D decode, `drw` the PVR draw,
+  `til` the tile layers, `snd`, `dsc` the pager and the drive, `kos`, `lib`,
+  `bio` the BIOS, where the GD-ROM syscalls run, `oth`); then the six hottest
+  symbols. Flycast's counters read 0: it has none.
 
 If the board halts, the screen shows the IP, the pager's totals and the last
 log lines.
@@ -128,7 +169,9 @@ Pad: D-pad, A/B/X/Y = B1-B4, Start, left trigger = coin.
 ## Linked to MAME
 
 `make LINK=1` builds the replay fight for `tools/dc-lockstep.py`, which holds it
-against MAME frame by frame over the serial port. The disc needs `SINCOS=`
+against MAME frame by frame over the serial port. The same disc, under
+`dc-lockstep.py --boot`, plays from power-on instead and is held to MAME and to
+the desktop build from the first frame. The disc needs `SINCOS=`
 (`tools/mksincos.py`), and Flycast needs `tools/flycast-scif.patch`.
 DREAMCAST-PORT.md, "Held against MAME over the serial port", has the commands
 and what it found.
@@ -249,8 +292,10 @@ discs gave ~37 and ~30.
 | `tools/mksound.py` | host tool: PS3 `stf_all.acb`/`.awb` (HCA) → STF.AFS (ADX) |
 | `sfight.mdlmap` | the polygon and texture ROM lines STF draws, by first frame, for MODELS.PAK |
 | `../tools/dc_mdlpack.py` | host tool: map + ROM files → MODELS.PAK |
-| `dc_link.h` | `LINK=1`: the replay fight's frames over the SCIF to `tools/dc-lockstep.py` |
+| `dc_link.h` | `LINK=1`: the replay fight's frames, or from power-on the board's memory as CRCs, over the SCIF to `tools/dc-lockstep.py` |
 | `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |
-| `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI |
+| `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK → GDI (`CDI=1`: CDI) |
+| `tools/build-cdi4dc.sh` | a Linux cdi4dc (img4dc) for `CDI=1` |
+| `tools/get-lazyboot.sh` | Lazyboot's KOS IP.BIN and `mkcdi.py`, for `CDI=1` |
 | `../tests/rom_touch.c` | host tool: which ROM pages a game reads |

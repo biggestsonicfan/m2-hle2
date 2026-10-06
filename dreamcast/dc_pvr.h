@@ -50,7 +50,9 @@
  * 640x480 frame and 1.0 in the 512x384 one (8 pixels in: the PVR renders
  * whole 32-pixel tiles). m2-sonic's Mega Drive picture, 320x224 at (88,80),
  * is 2.0: 640x448. Only the view is drawn; at a whole-number scale the tile
- * layers are point sampled. */
+ * layers are point sampled. DC_HUD_NONE (make HUD=none) draws the view 1:1,
+ * so with no VIEW the board sits at (72,48) of the 640x480 frame, a picture to
+ * crop and hold against MAME's pixel for pixel (#478). */
 #ifndef DC_FRAME512
 #define DC_FRAME512 0
 #endif
@@ -67,8 +69,12 @@
 #define DC_VIEW_W 496
 #define DC_VIEW_H 384
 #endif
+#if defined(DC_HUD_NONE) && DC_HUD_NONE
+#define DC_S   1.0f
+#else
 #define DC_S   ((float)DC_SCR_W * DC_VIEW_H < (float)DC_SCR_H * DC_VIEW_W ? \
                 (float)DC_SCR_W / DC_VIEW_W : (float)DC_SCR_H / DC_VIEW_H)
+#endif
 #define DC_VX0 ((float)(int)(((float)DC_SCR_W - DC_VIEW_W * DC_S) * 0.5f))   /* the view on screen */
 #define DC_VY0 ((float)(int)(((float)DC_SCR_H - DC_VIEW_H * DC_S) * 0.5f))
 #define DC_VX1 (DC_VX0 + DC_VIEW_W * DC_S)
@@ -125,6 +131,12 @@ static uint16_t g_dp_spread[1024];   /* i's bits at the even positions */
 static uint8_t  g_dp_cut[256 * 256 / 2];
 
 static inline uint32_t dp_log2(uint32_t v) { uint32_t l = 0; while ((1u << l) < v) l++; return l; }
+/* The even bits of v, packed: the inverse of g_dp_spread. */
+static inline unsigned dp_compact(uint32_t v) {
+    unsigned c = 0;
+    for (int b = 0; b < 10; b++) c |= ((v >> (2 * b)) & 1u) << b;
+    return c;
+}
 
 /* Texel (x, y) of a sheet: the layout game_render_upload_atlas decodes. */
 static inline unsigned dp_texel(const uint32_t *sheet, unsigned x, unsigned y) {
@@ -212,7 +224,7 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
     unsigned sheet = (fl & GEO3D_FACE_SHEET1) ? 1 : 0;
     unsigned x0 = (unsigned)(int)ftx & 2047u, y0 = (unsigned)(int)fty & 1023u;
     unsigned tw = (unsigned)ftw, th = (unsigned)fth;
-    if (tw > 256 || th > 256 || !tw || !th) return NULL;
+    if (tw > 1024 || th > 1024 || !tw || !th) return NULL;
     unsigned lw = dp_log2(tw), lh = dp_log2(th);
     uint32_t key = 0x80000000u | sheet << 29 | x0 << 18 | y0 << 8 | lw << 4 | lh;
     uint32_t h = dp_tex_hash(key);
@@ -227,20 +239,32 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
     if (!t || g_dp.count >= DC_TEX_SLOTS - 1u) { g_dp_full = true; g_dp.fails++; return NULL; }
 
     /* Twiddled: square blocks of the shorter side, Morton order with v the
-     * low bit, laid one after another along the longer side. */
+     * low bit, laid one after another along the longer side. A texture over
+     * 256x256 (the water, a monitor's picture) is cut and loaded 32 KB at a
+     * time: each 32 KB of the twiddled texture is one rectangle of texels,
+     * 256x256 inside a bigger block, or whole blocks of a smaller one. */
     unsigned W = tw < 8 ? 8 : tw, H = th < 8 ? 8 : th, m = W < H ? W : H, lm = dp_log2(m);
-    memset(g_dp_cut, 0, W * H / 2);
-    const uint32_t *src = (const uint32_t *)(sheet ? bus->texram1 : bus->texram0);
-    for (unsigned y = 0; y < H; y++)
-        for (unsigned x = 0; x < W; x++) {
-            unsigned c = dp_texel(src, (x0 + (x & (tw - 1))) & 2047u, (y0 + (y & (th - 1))) & 1023u);
-            unsigned blk = W > H ? x >> lm : y >> lm;
-            unsigned i = (blk << (2 * lm)) | g_dp_spread[y & (m - 1)] | (unsigned)g_dp_spread[x & (m - 1)] << 1;
-            g_dp_cut[i >> 1] |= (uint8_t)(c << ((i & 1) * 4));
-        }
-    pvr_ptr_t p = pvr_mem_malloc(W * H / 2);
+    const uint32_t bytes = W * H / 2, chunk = bytes < sizeof g_dp_cut ? bytes : (uint32_t)sizeof g_dp_cut;
+    pvr_ptr_t p = pvr_mem_malloc(bytes);
     if (!p) { g_dp_full = true; g_dp.fails++; return NULL; }
-    pvr_txr_load(g_dp_cut, p, W * H / 2);
+    const uint32_t *src = (const uint32_t *)(sheet ? bus->texram1 : bus->texram0);
+    for (uint32_t at = 0; at < bytes; at += chunk) {
+        const uint32_t i0 = at * 2, r = i0 & ((1u << (2 * lm)) - 1u), blk = i0 >> (2 * lm);
+        unsigned rx = dp_compact(r >> 1), ry = dp_compact(r), rw, rh;
+        if (m > 256) { rw = rh = 256; }
+        else if (W > H) { rw = chunk * 2 / m; rh = m; }
+        else { rw = m; rh = chunk * 2 / m; }
+        if (W > H) rx += blk * m; else ry += blk * m;
+        memset(g_dp_cut, 0, chunk);
+        for (unsigned y = ry; y < ry + rh; y++)
+            for (unsigned x = rx; x < rx + rw; x++) {
+                unsigned c = dp_texel(src, (x0 + (x & (tw - 1))) & 2047u, (y0 + (y & (th - 1))) & 1023u);
+                unsigned bk = W > H ? x >> lm : y >> lm;
+                unsigned i = ((bk << (2 * lm)) | g_dp_spread[y & (m - 1)] | (unsigned)g_dp_spread[x & (m - 1)] << 1) - i0;
+                g_dp_cut[i >> 1] |= (uint8_t)(c << ((i & 1) * 4));
+            }
+        pvr_txr_load(g_dp_cut, (uint8_t *)p + at, chunk);
+    }
     *t = (dc_tex_t){ key, p, (uint16_t)W, (uint16_t)H, 1.0f / (float)W, 1.0f / (float)H,
                      (uint16_t)((y0 >> 1) + (x0 >= 1024 ? 512 : 0)),
                      (uint16_t)(((y0 + th - 1) >> 1) + (x0 >= 1024 ? 512 : 0)), (uint8_t)sheet };
@@ -253,11 +277,11 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
 
 /* The screen colour of face colour c5 at luma index li: colorxlat, then
  * max(c - 64, 0) * 255 / 191 (game_render__shade_px). */
+static uint8_t g_dp_cx[256];   /* a colorxlat byte as a level: 0 to 64 black, then a line to 255 */
 static inline void dp_shade(const memory_bus_t *bus, const int c5[3], int li, int out[3]) {
-    for (int ch = 0; ch < 3; ch++) {
-        int v = bus->colorxlat[ch * 0x4000 + ((c5[ch] << 8) + li) * 2];
-        out[ch] = v > 64 ? (v - 64) * 255 / 191 : 0;
-    }
+    if (!g_dp_cx[255])
+        for (int v = 0; v < 256; v++) g_dp_cx[v] = (uint8_t)(v > 64 ? (v - 64) * 255 / 191 : 0);
+    for (int ch = 0; ch < 3; ch++) out[ch] = g_dp_cx[bus->colorxlat[ch * 0x4000 + ((c5[ch] << 8) + li) * 2]];
 }
 
 static inline uint32_t dp_argb(const int c[3]) {
@@ -302,10 +326,140 @@ static unsigned dp_pal_bank(const int col[16][3], bool trans) {
     return bank;
 }
 
+/* A face's ramp is seldom a line: colorxlat's ramps start at about 88 and
+ * the shade takes off 64 first (dp_shade), so the dark texels of a dim face
+ * are all black, and the ramp rises from some texel on. A line from texel 0
+ * to texel 15 lifts every texel below that knee; over an attract picture the
+ * dark half came out ~20 levels too bright against MAME's (#486). So the
+ * opaque and see-through grey ramps come again with a knee at every half
+ * texel, 0 up to texel k and a line from there to 15, and a face takes the
+ * bank of its own knee, found where the brightest channel's ramp, followed
+ * back from texel 15, meets texel 0's colour. The same base and offset. */
+typedef struct { float r, g, b, lb, pl; } dp_col_in_t;
+#define DP_KNEE_FIRST 3u
+#define DP_KNEES      26u   /* k = 0.5 .. 13 */
+static void dp_knee_init(void) {
+    for (unsigned n = 1; n <= DP_KNEES; n++) {
+        float k = 0.5f * (float)n;
+        for (int t = 0; t < 16; t++) {
+            float g = (float)t > k ? ((float)t - k) / (15.0f - k) : 0.0f;
+            uint32_t v = (uint32_t)(g * 31.0f + 0.5f);
+            uint16_t c = (uint16_t)(0x8000u | v << 10 | v << 5 | v);
+            pvr_set_pal_entry((DP_KNEE_FIRST + (n - 1) * 2) * 16u + (unsigned)t, c);
+            pvr_set_pal_entry((DP_KNEE_FIRST + (n - 1) * 2 + 1) * 16u + (unsigned)t, t == 15 ? 0 : c);
+        }
+    }
+}
+
+static unsigned dp_knee_bank(const int col[16][3], bool trans) {
+    int k = 0;   /* the channel that rises the most */
+    for (int c = 1; c < 3; c++)
+        if (col[15][c] - col[0][c] > col[15][k] - col[0][k]) k = c;
+    const int lo = col[0][k], hi = col[15][k];
+    if (hi - lo < 16) return 0;
+    /* The last texel still at texel 0's colour, then where the line from
+     * texel 15 through the next one comes down to it. */
+    int f = 0;
+    while (f < 14 && col[f + 1][k] <= lo + 2) f++;
+    if (f == 0) return 0;
+    if (f >= 14) return DP_KNEE_FIRST + (DP_KNEES - 1) * 2 + (trans ? 1u : 0u);
+    float slope = (float)(hi - col[f + 1][k]) / (float)(14 - f);
+    float knee = slope > 0.0f ? (float)(f + 1) - (float)(col[f + 1][k] - lo) / slope : (float)f;
+    int n = (int)(knee * 2.0f + 0.5f);
+    n = n < 1 ? 1 : n > (int)DP_KNEES ? (int)DP_KNEES : n;
+    return DP_KNEE_FIRST + (unsigned)(n - 1) * 2 + (trans ? 1u : 0u);
+}
+
+/* STF's few ramps that are palettes (#486): the hut's emblem, the moon on
+ * the lab monitor, the panel beside it. Their pens fall and rise again
+ * (orange, black, white), and no line or knee can show that: the emblem
+ * came out one flat grey. Such a face gets a bank of its own from the banks
+ * past the knees, kept from frame to frame by its colours, and a bank used
+ * this frame or the last (which the PVR may still be drawing) is never
+ * written over. Out of banks, the face keeps its knee. */
+#define DP_POOL_FIRST (DP_KNEE_FIRST + DP_KNEES * 2u)
+#define DP_POOL_N     (64u - DP_POOL_FIRST)
+#ifndef DP_POOL_DROP
+#define DP_POOL_DROP  16   /* the fall between two texels that makes a ramp a palette */
+#endif
+static uint32_t g_dp_frame;
+static struct { uint32_t key, used; uint16_t c[16]; } g_dp_pool[DP_POOL_N];
+
+static unsigned dp_pool_bank(const int col[16][3], bool trans) {
+    uint16_t c[16];
+    uint32_t key = trans ? 0x9E3779B9u : 0x7F4A7C15u;
+    for (int t = 0; t < 16; t++) {
+        c[t] = trans && t == 15 ? 0 : dp_1555(col[t]);
+        key = (key ^ c[t]) * 16777619u;
+    }
+    unsigned free_i = DP_POOL_N;
+    for (unsigned i = 0; i < DP_POOL_N; i++) {
+        if (g_dp_pool[i].used && g_dp_pool[i].key == key && !memcmp(g_dp_pool[i].c, c, sizeof c)) {
+            g_dp_pool[i].used = g_dp_frame;
+            return DP_POOL_FIRST + i;
+        }
+        if (free_i == DP_POOL_N && (!g_dp_pool[i].used || g_dp_pool[i].used + 1u < g_dp_frame)) free_i = i;
+    }
+    if (free_i == DP_POOL_N) return 0;
+    g_dp_pool[free_i].key = key;
+    g_dp_pool[free_i].used = g_dp_frame;
+    memcpy(g_dp_pool[free_i].c, c, sizeof c);
+    for (int t = 0; t < 16; t++) pvr_set_pal_entry((DP_POOL_FIRST + free_i) * 16u + (unsigned)t, c[t]);
+    return DP_POOL_FIRST + free_i;
+}
+
+/* A textured face's ramp, texel 0 to 15, as a knee bank or a pool bank, with
+ * the base and offset of the line from texel 0 to 15 (#486). Faces share
+ * their colour, luma ramp and light within a frame and from frame to frame,
+ * so the answer is kept by those inputs until luma or colorxlat changes
+ * (gen_lut). A pool bank is taken again only while it still holds the same
+ * pens, and is stamped as used this frame. Walking the ramp for every face
+ * cost the bench (frames 3500-3900) 5 s of the decode. */
+#define DP_RAMP_CACHE 1024u
+static struct { uint32_t lut, k0, k1, base, off, pkey; uint8_t pal; } g_dp_ramp[DP_RAMP_CACHE];
+
+static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const int c5[3], int poly, bool trans,
+                         uint32_t *base, uint32_t *offset, uint8_t *pal) {
+    const uint32_t k0 = (uint32_t)c5[0] | (uint32_t)c5[1] << 5 | (uint32_t)c5[2] << 10 | (uint32_t)poly << 15 |
+                        (trans ? 1u << 23 : 0u) | 1u << 24, k1 = (uint32_t)T->lb;
+    const uint32_t h = ((k0 * 2654435761u) ^ (k1 * 40503u)) >> 22 & (DP_RAMP_CACHE - 1u);
+    const uint32_t lut = bus->gen_lut | 1u;
+    if (g_dp_ramp[h].lut == lut && g_dp_ramp[h].k0 == k0 && g_dp_ramp[h].k1 == k1) {
+        const uint8_t pb = g_dp_ramp[h].pal;
+        if (pb < DP_POOL_FIRST || (g_dp_pool[pb - DP_POOL_FIRST].key == g_dp_ramp[h].pkey &&
+                                   g_dp_pool[pb - DP_POOL_FIRST].used + 1u >= g_dp_frame)) {
+            if (pb >= DP_POOL_FIRST) g_dp_pool[pb - DP_POOL_FIRST].used = g_dp_frame;
+            *base = g_dp_ramp[h].base; *offset = g_dp_ramp[h].off; *pal = pb;
+            return;
+        }
+    }
+    int col[16][3], drop = 0;
+    for (int t = 0; t < 16; t++) {
+        uint32_t lbyte = 2u * ((uint32_t)T->lb + (uint32_t)t * 8u);
+        int lram = lbyte < LUMA_SIZE ? bus->luma[lbyte] : 0;
+        int li = (lram * poly) >> 8;
+        dp_shade(bus, c5, li > 63 ? 63 : li, col[t]);
+        for (int k = 0; t && k < 3; k++)
+            drop = col[t - 1][k] - col[t][k] > drop ? col[t - 1][k] - col[t][k] : drop;
+    }
+    if (drop > DP_POOL_DROP && (*pal = (uint8_t)dp_pool_bank(col, trans))) {
+        *base = 0xFFFFFFFFu;
+        *offset = 0;
+    } else {
+        int b[3];
+        for (int k = 0; k < 3; k++) b[k] = col[15][k] > col[0][k] ? col[15][k] - col[0][k] : 0;
+        *base = dp_argb(b);
+        *offset = dp_argb(col[0]);
+        *pal = (uint8_t)dp_knee_bank(col, trans);
+    }
+    g_dp_ramp[h].lut = lut; g_dp_ramp[h].k0 = k0; g_dp_ramp[h].k1 = k1;
+    g_dp_ramp[h].pkey = *pal >= DP_POOL_FIRST ? g_dp_pool[*pal - DP_POOL_FIRST].key : 0;
+    g_dp_ramp[h].base = *base; g_dp_ramp[h].off = *offset; g_dp_ramp[h].pal = *pal;
+}
+
 /* A face's colour (untextured), or its base and offset (textured): the fill
  * shader's chain at texel 0 and texel 15, joined by a line; or, when that
  * line misses (homebrew), every texel's colour in a palette bank (*pal). */
-typedef struct { float r, g, b, lb, pl; } dp_col_in_t;
 static void dp_face_colour(const memory_bus_t *bus, const dp_col_in_t *T, bool tex, bool trans,
                            uint32_t *base, uint32_t *offset, uint8_t *pal) {
     *pal = 0;
@@ -330,6 +484,7 @@ static void dp_face_colour(const memory_bus_t *bus, const dp_col_in_t *T, bool t
         *base = dp_argb(c);
         return;
     }
+    if (!g_dp_pal_on) { dp_face_ramp(bus, T, c5, poly, trans, base, offset, pal); return; }
     int ends[2][3];
     for (int e = 0; e < 2; e++) {
         uint32_t lbyte = 2u * ((uint32_t)T->lb + (e ? 120u : 0u));
@@ -341,7 +496,6 @@ static void dp_face_colour(const memory_bus_t *bus, const dp_col_in_t *T, bool t
     for (int k = 0; k < 3; k++) b[k] = ends[1][k] > ends[0][k] ? ends[1][k] - ends[0][k] : 0;
     *base = dp_argb(b);
     *offset = dp_argb(ends[0]);
-    if (!g_dp_pal_on) return;
     int col[16][3], worst = 0;
     for (int t = 0; t < 16; t++) {
         uint32_t lbyte = 2u * ((uint32_t)T->lb + (uint32_t)t * 8u);
@@ -377,6 +531,7 @@ static int dp_init(void) {
         pvr_set_pal_entry(16 + t, t == 15 ? 0 : c);
         pvr_set_pal_entry(32 + t, t == 0 ? 0xFFFFu : 0);
     }
+    dp_knee_init();
     for (unsigned i = 0; i < 1024; i++) {
         unsigned s = 0;
         for (int b = 0; b < 10; b++) s |= ((i >> b) & 1u) << (2 * b);
@@ -833,7 +988,10 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
 
 /* ---- The 3D scene ------------------------------------------------------------------ */
 
-typedef struct { float ax, bx, ay, by; } dp_proj_t;   /* screen x = bx + ax * x / -z, y = by + ay * y / -z */
+typedef struct {
+    float ax, bx, ay, by;     /* screen x = bx + ax * x / -z, y = by + ay * y / -z */
+    float x0, y0, x1, y1;     /* the window, in screen pixels: the board draws nothing outside it */
+} dp_proj_t;
 #define DP_MAX_RUNS 256
 static dp_proj_t g_dp_proj[DP_MAX_RUNS];
 static uint32_t  g_dp_order[2][GEO3D_MAX_TRIS];
@@ -846,7 +1004,10 @@ typedef struct { float sx, sy, w, x, y, z; } dcv_t;   /* screen x, y, 1/-z; eye 
 #define DC_MAX_VERTS 8192
 #define DCF_TRANS   1u   /* the translucent list */
 #define DCF_CHECKER 2u
-#define DCF_CLIP    4u   /* a corner is in front of the near plane */
+#ifndef DP_WCLIP
+#define DP_WCLIP    1    /* clip a face to its window (0: the PVR's frame edge only) */
+#endif
+#define DCF_CLIP    4u   /* a corner is in front of the near plane or outside the window */
 typedef struct {
     uint16_t  v[3];
     uint8_t   run, kind, var, pal;   /* var: the header's variant, dp_hdr_compile's face bits << 1;
@@ -925,7 +1086,11 @@ static inline void dp_tri_put(int a, int b, int c, const float *u, const float *
     const dcv_t *A = &g_dcv[a], *B = &g_dcv[b], *C = &g_dcv[c];
     F->v[0] = (uint16_t)a; F->v[1] = (uint16_t)b; F->v[2] = (uint16_t)c;
     F->run  = (uint8_t)g_dp_cur_run;
-    F->kind = (uint8_t)(kind | (A->z <= -DC_NEAR && B->z <= -DC_NEAR && C->z <= -DC_NEAR ? 0u : DCF_CLIP));
+    const dp_proj_t *P = &g_dp_proj[g_dp_cur_run];
+    bool in = A->z <= -DC_NEAR && B->z <= -DC_NEAR && C->z <= -DC_NEAR && (!DP_WCLIP || P->x0 < -1.0e29f ||
+              (fminf(fminf(A->sx, B->sx), C->sx) >= P->x0 && fmaxf(fmaxf(A->sx, B->sx), C->sx) <= P->x1 &&
+               fminf(fminf(A->sy, B->sy), C->sy) >= P->y0 && fmaxf(fmaxf(A->sy, B->sy), C->sy) <= P->y1));
+    F->kind = (uint8_t)(kind | (in ? 0u : DCF_CLIP));
     F->var  = (uint8_t)var;
     F->tex  = tex;
     F->base = g_dp_memo.base; F->off = g_dp_memo.off;
@@ -1063,6 +1228,7 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
     g_dp_pal_on = g_active_profile && g_active_profile->any_program;
     g_dp_pal_half ^= 1u;
     g_dp_pal_n = 0;
+    g_dp_frame++;
     g_geo3d_mesh_epoch++;   /* the mesh cache keeps what this frame and the last drew */
     g_dp.runs = 0;
     g_dp.faces_dropped = 0;
@@ -1092,7 +1258,13 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
         if (!(x1 > x0 && y1 > y0) || g_dp.runs >= DP_MAX_RUNS) { i = j; continue; }
         dp_cull_planes(c0->gproj, x0, y0, x1, y1);
         int run = (int)g_dp.runs++;
-        g_dp_proj[run] = (dp_proj_t){ c0->gproj[0] * DC_S, DC_X0 + c0->gproj[2] * DC_S, -c0->gproj[1] * DC_S, DC_Y0 + c0->gproj[3] * DC_S };
+        g_dp_proj[run] = (dp_proj_t){ c0->gproj[0] * DC_S, DC_X0 + c0->gproj[2] * DC_S, -c0->gproj[1] * DC_S, DC_Y0 + c0->gproj[3] * DC_S,
+                                      DC_X0 + (float)x0 * DC_S, DC_Y0 + (float)y0 * DC_S,
+                                      DC_X0 + (float)x1 * DC_S, DC_Y0 + (float)y1 * DC_S };
+        if (!x0 && !y0 && x1 == VIDEO_WIDTH && y1 == VIDEO_HEIGHT) {   /* the whole frame: the bars round it hide the rest */
+            g_dp_proj[run].x0 = g_dp_proj[run].y0 = -1.0e30f;
+            g_dp_proj[run].x1 = g_dp_proj[run].y1 = 1.0e30f;
+        }
         int slice = windows - 1 - (int)c0->window;
         g_dp_cur = &g_dp_proj[run];
         g_dp_cur_run = run;
@@ -1165,7 +1337,7 @@ static void dp_hdr_compile(pvr_poly_hdr_t *hdr, pvr_list_t list, const dc_tex_t 
          * board. Bilinear blends its edge texels with what lies past the quad in the atlas and with
          * the hole's black: a dark border round every m2-sonic sprite (#473). */
         pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_PAL4BPP | PVR_TXRFMT_4BPP_PAL(bank) | PVR_TXRFMT_TWIDDLED,
-                         tex->w, tex->h, tex->ptr, pal ? PVR_FILTER_NONE : PVR_FILTER_BILINEAR);
+                         tex->w, tex->h, tex->ptr, pal && g_dp_pal_on ? PVR_FILTER_NONE : PVR_FILTER_BILINEAR);
         cxt.gen.specular = true;
         cxt.txr.uv_flip = (pvr_uv_flip_t)(((fl & GEO3D_FACE_MIRROR_X) ? PVR_UVFLIP_U : 0) |
                                           ((fl & GEO3D_FACE_MIRROR_Y) ? PVR_UVFLIP_V : 0));
@@ -1191,15 +1363,24 @@ static void dp_face(int t, pvr_list_t list, uint32_t *last_state) {
         /* compiled once per texture and variant (or per list, untextured) */
         *last_state = state;
         const int li = list == PVR_LIST_OP_POLY ? 0 : 1;
-        if (tex && F->pal) {   /* a bank of its own: compiled each time (homebrew sprites, a few) */
+        if (tex && F->pal && g_dp_pal_on) {   /* a bank of its own: compiled each time (homebrew sprites, a few) */
             pvr_poly_hdr_t h;
             dp_hdr_compile(&h, list, F->tex, false, F->var >> 1, F->pal);
             dp_hdr(&h);
         } else if (tex) {
             uint8_t want = (uint8_t)(0x80u | li << 6 | F->var);
             dc_tex_t *mt = F->tex;
-            if (mt->hdr_var != want) { dp_hdr_compile(&mt->hdr, list, mt, false, F->var >> 1, 0); mt->hdr_var = want; }
-            dp_hdr(&mt->hdr);
+            if (mt->hdr_var != want) {
+                dp_hdr_compile(&mt->hdr, list, mt, false, F->var >> 1, 0);
+                mt->hdr_var = want;
+            }
+            if (F->pal) {   /* a knee or pool bank: the same header with its palette bits (mode3 26:21) */
+                pvr_poly_hdr_t h = mt->hdr;
+                h.mode3 = (h.mode3 & ~PVR_TXRFMT_4BPP_PAL(0x3Fu)) | PVR_TXRFMT_4BPP_PAL((uint32_t)F->pal);
+                dp_hdr(&h);
+            } else {
+                dp_hdr(&mt->hdr);
+            }
         } else {
             if (!g_dp_hdr_plain_ok) {
                 for (int l = 0; l < 2; l++)
@@ -1247,25 +1428,47 @@ static void dp_face(int t, pvr_list_t list, uint32_t *last_state) {
         }
     }
     if (n < 3) return;
-    float sx[4], sy[4], sz[4], tu[4], tv[4];
+    /* Then the window's four sides, in screen space (#486): a face the board
+     * clips to a small window, the white flash on the lab monitor's inset
+     * picture, otherwise covered the whole frame. 1/z, u/z and v/z run
+     * straight across the screen, so the cut corner's texture is in place. */
+    typedef struct { float x, y, w, u, v; } dp_sv_t;   /* u, v times w */
+    dp_sv_t pa[10], pb[10], *src = pa, *dst = pb;
     for (int k = 0; k < n; k++) {
         float iw = -1.0f / out[k].z;
-        sx[k] = P->bx + P->ax * out[k].x * iw;
-        sy[k] = P->by + P->ay * out[k].y * iw;
-        sz[k] = iw;
-        if (checker) { tu[k] = (sx[k] - DC_X0) * ck; tv[k] = (sy[k] - DC_Y0) * ck; }
-        else         { tu[k] = out[k].u; tv[k] = out[k].v; }
+        float x = P->bx + P->ax * out[k].x * iw, y = P->by + P->ay * out[k].y * iw;
+        src[k] = (dp_sv_t){ x, y, iw, out[k].u * iw, out[k].v * iw };
     }
-    if (checker) {
-        float z = fmaxf(fmaxf(sz[0], sz[1]), sz[2]);
-        for (int k = 0; k < n; k++) sz[k] = z;
+    for (int e = 0; e < 4 && n >= 3; e++) {
+        const float lim = e == 0 ? P->x0 : e == 1 ? P->x1 : e == 2 ? P->y0 : P->y1;
+        const float sg = e & 1 ? -1.0f : 1.0f;   /* inside: sg * (coordinate - lim) >= 0 */
+        int m = 0;
+        for (int k = 0; k < n; k++) {
+            const dp_sv_t *a = &src[k], *b = &src[(k + 1) % n];
+            float da = sg * ((e < 2 ? a->x : a->y) - lim), db = sg * ((e < 2 ? b->x : b->y) - lim);
+            if (da >= 0.0f) dst[m++] = *a;
+            if ((da >= 0.0f) != (db >= 0.0f)) {
+                float t = da / (da - db);
+                dst[m++] = (dp_sv_t){ a->x + t * (b->x - a->x), a->y + t * (b->y - a->y), a->w + t * (b->w - a->w),
+                                      a->u + t * (b->u - a->u), a->v + t * (b->v - a->v) };
+            }
+        }
+        dp_sv_t *sw = src; src = dst; dst = sw;
+        n = m;
     }
-    /* A strip: 0 1 2 for a triangle, 0 1 3 2 for the clipped quad. */
-    static const int strip3[3] = { 0, 1, 2 }, strip4[4] = { 0, 1, 3, 2 };
-    const int *o = n == 3 ? strip3 : strip4;
-    for (int k = 0; k < n; k++) {
-        int v = o[k];
-        dp_vertex(k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, sx[v], sy[v], sz[v], tu[v], tv[v], base, off);
+    if (n < 3) return;
+    float zc = 0.0f;
+    if (checker) for (int k = 0; k < n; k++) zc = fmaxf(zc, src[k].w);
+    /* A convex polygon as a strip: 0, 1, n-1, 2, n-2, ... */
+    for (int k = 0, lo = 1, hi = n - 1; k < n; k++) {
+        int v = k == 0 ? 0 : (k & 1) ? lo++ : hi--;
+        const dp_sv_t *q = &src[v];
+        if (checker)   /* the checker's texels lie on the screen, not the face */
+            dp_vertex(k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, q->x, q->y, zc,
+                      (q->x - DC_X0) * ck, (q->y - DC_Y0) * ck, base, off);
+        else
+            dp_vertex(k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, q->x, q->y, q->w,
+                      q->u / q->w, q->v / q->w, base, off);
     }
     g_dp.tris++;
 }
