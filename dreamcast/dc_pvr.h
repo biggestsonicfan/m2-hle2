@@ -54,7 +54,11 @@
  * is 2.0: 640x448. Only the view is drawn; at a whole-number scale the tile
  * layers are point sampled. DC_HUD_NONE (make HUD=none) draws the view 1:1,
  * so with no VIEW the board sits at (72,48) of the 640x480 frame, a picture to
- * crop and hold against MAME's pixel for pixel (#478). */
+ * crop and hold against MAME's pixel for pixel (#478).
+ *
+ * DC_FILL (make FILL=1, #503) stretches the view over the whole frame instead,
+ * DC_SX across and DC_SY down: the board 1.29 x 1.25 to 640x480. That is the
+ * shape an arcade monitor gives it (496x384 on a 4:3 tube), and MAME's. */
 #ifndef DC_FRAME512
 #define DC_FRAME512 0
 #endif
@@ -77,13 +81,23 @@
 #define DC_S   ((float)DC_SCR_W * DC_VIEW_H < (float)DC_SCR_H * DC_VIEW_W ? \
                 (float)DC_SCR_W / DC_VIEW_W : (float)DC_SCR_H / DC_VIEW_H)
 #endif
-#define DC_VX0 ((float)(int)(((float)DC_SCR_W - DC_VIEW_W * DC_S) * 0.5f))   /* the view on screen */
-#define DC_VY0 ((float)(int)(((float)DC_SCR_H - DC_VIEW_H * DC_S) * 0.5f))
-#define DC_VX1 (DC_VX0 + DC_VIEW_W * DC_S)
-#define DC_VY1 (DC_VY0 + DC_VIEW_H * DC_S)
-#define DC_X0  (DC_VX0 - DC_VIEW_X * DC_S)                                  /* board pixel (0,0) */
-#define DC_Y0  (DC_VY0 - DC_VIEW_Y * DC_S)
-#define DC_FILTER (DC_S == (float)(int)DC_S ? PVR_FILTER_NONE : PVR_FILTER_BILINEAR)
+#ifndef DC_FILL
+#define DC_FILL 0
+#endif
+#if DC_FILL && !(defined(DC_HUD_NONE) && DC_HUD_NONE)
+#define DC_SX  ((float)DC_SCR_W / DC_VIEW_W)
+#define DC_SY  ((float)DC_SCR_H / DC_VIEW_H)
+#else
+#define DC_SX  DC_S
+#define DC_SY  DC_S
+#endif
+#define DC_VX0 ((float)(int)(((float)DC_SCR_W - DC_VIEW_W * DC_SX) * 0.5f))  /* the view on screen */
+#define DC_VY0 ((float)(int)(((float)DC_SCR_H - DC_VIEW_H * DC_SY) * 0.5f))
+#define DC_VX1 (DC_VX0 + DC_VIEW_W * DC_SX)
+#define DC_VY1 (DC_VY0 + DC_VIEW_H * DC_SY)
+#define DC_X0  (DC_VX0 - DC_VIEW_X * DC_SX)                                 /* board pixel (0,0) */
+#define DC_Y0  (DC_VY0 - DC_VIEW_Y * DC_SY)
+#define DC_FILTER (DC_SX == (float)(int)DC_SX && DC_SY == (float)(int)DC_SY ? PVR_FILTER_NONE : PVR_FILTER_BILINEAR)
 #define DC_NEAR GEO3D_NEAR
 
 /* ---- Textures cut from texture RAM ----------------------------------------- */
@@ -792,14 +806,14 @@ static void dp_ls_strips(const dp_ls_t *ls, pvr_list_t list, pvr_ptr_t tex, int 
     for (int y = DC_VIEW_Y; y < vy1; ) {
         int h = ls->h[y], ty = (y + ls->vy) & 511, e = y + 1;
         while (e < vy1 && ls->h[e] == h && ((e + ls->vy) & 511)) e++;
-        float sy0 = DC_Y0 + (float)y * DC_S, sy1 = DC_Y0 + (float)e * DC_S;
+        float sy0 = DC_Y0 + (float)y * DC_SY, sy1 = DC_Y0 + (float)e * DC_SY;
         float v0 = (float)ty * k, v1 = (float)(ty + e - y) * k;
         int u = (-h) & 511, xs = 512 - u;           /* screen x 0 samples u; xs wraps to 0 */
         int cut[3] = { vx0, xs < vx0 ? vx0 : xs < vx1 ? xs : vx1, vx1 };
         for (int q = 0; q < 2; q++) {
             if (cut[q] >= cut[q + 1]) continue;
             float ua = (float)((u + cut[q]) & 511) * k, ub = ua + (float)(cut[q + 1] - cut[q]) * k;
-            float xa = DC_X0 + (float)cut[q] * DC_S, xb = DC_X0 + (float)cut[q + 1] * DC_S;
+            float xa = DC_X0 + (float)cut[q] * DC_SX, xb = DC_X0 + (float)cut[q + 1] * DC_SX;
             dp_vertex(PVR_CMD_VERTEX,     xa, sy0, z, ua, v0, 0xFFFFFFFFu, 0);
             dp_vertex(PVR_CMD_VERTEX,     xb, sy0, z, ub, v0, 0xFFFFFFFFu, 0);
             dp_vertex(PVR_CMD_VERTEX,     xa, sy1, z, ua, v1, 0xFFFFFFFFu, 0);
@@ -1311,9 +1325,9 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
         if (!(x1 > x0 && y1 > y0) || g_dp.runs >= DP_MAX_RUNS) { i = j; continue; }
         dp_cull_planes(c0->gproj, x0, y0, x1, y1);
         int run = (int)g_dp.runs++;
-        g_dp_proj[run] = (dp_proj_t){ c0->gproj[0] * DC_S, DC_X0 + c0->gproj[2] * DC_S, -c0->gproj[1] * DC_S, DC_Y0 + c0->gproj[3] * DC_S,
-                                      DC_X0 + (float)x0 * DC_S, DC_Y0 + (float)y0 * DC_S,
-                                      DC_X0 + (float)x1 * DC_S, DC_Y0 + (float)y1 * DC_S };
+        g_dp_proj[run] = (dp_proj_t){ c0->gproj[0] * DC_SX, DC_X0 + c0->gproj[2] * DC_SX, -c0->gproj[1] * DC_SY, DC_Y0 + c0->gproj[3] * DC_SY,
+                                      DC_X0 + (float)x0 * DC_SX, DC_Y0 + (float)y0 * DC_SY,
+                                      DC_X0 + (float)x1 * DC_SX, DC_Y0 + (float)y1 * DC_SY };
         if (!x0 && !y0 && x1 == VIDEO_WIDTH && y1 == VIDEO_HEIGHT) {   /* the whole frame: the bars round it hide the rest */
             g_dp_proj[run].x0 = g_dp_proj[run].y0 = -1.0e30f;
             g_dp_proj[run].x1 = g_dp_proj[run].y1 = 1.0e30f;
@@ -1408,15 +1422,15 @@ static void dp_hdr_compile(pvr_poly_hdr_t *hdr, pvr_list_t list, const dc_tex_t 
  * one is in front of the plane, and clipped to the run's window. */
 static void dp_tri_out(const dcf_t *F, int i, int j, int k, bool checker) {
     const uint32_t base = F->base, off = F->off;
-    const float ck = 0.125f / DC_S;   /* the checker's texel: two board pixels */
+    const float ck = 0.125f / DC_SX, cky = 0.125f / DC_SY;   /* the checker's texel: two board pixels */
     const dcv_t *V0 = &g_dcv[F->v[i]], *V1 = &g_dcv[F->v[j]], *V2 = &g_dcv[F->v[k]];
     if (!(F->kind & DCF_CLIP)) {
         /* Nothing to clip, the usual case: three corners straight out. */
         if (checker) {   /* screen-space checker: one z, so the PVR maps it affinely */
             float z = fmaxf(fmaxf(V0->w, V1->w), V2->w);
-            dp_vertex(PVR_CMD_VERTEX,     V0->sx, V0->sy, z, (V0->sx - DC_X0) * ck, (V0->sy - DC_Y0) * ck, base, off);
-            dp_vertex(PVR_CMD_VERTEX,     V1->sx, V1->sy, z, (V1->sx - DC_X0) * ck, (V1->sy - DC_Y0) * ck, base, off);
-            dp_vertex(PVR_CMD_VERTEX_EOL, V2->sx, V2->sy, z, (V2->sx - DC_X0) * ck, (V2->sy - DC_Y0) * ck, base, off);
+            dp_vertex(PVR_CMD_VERTEX,     V0->sx, V0->sy, z, (V0->sx - DC_X0) * ck, (V0->sy - DC_Y0) * cky, base, off);
+            dp_vertex(PVR_CMD_VERTEX,     V1->sx, V1->sy, z, (V1->sx - DC_X0) * ck, (V1->sy - DC_Y0) * cky, base, off);
+            dp_vertex(PVR_CMD_VERTEX_EOL, V2->sx, V2->sy, z, (V2->sx - DC_X0) * ck, (V2->sy - DC_Y0) * cky, base, off);
         } else {
             dp_vertex(PVR_CMD_VERTEX,     V0->sx, V0->sy, V0->w, F->u[i], F->t[i], base, off);
             dp_vertex(PVR_CMD_VERTEX,     V1->sx, V1->sy, V1->w, F->u[j], F->t[j], base, off);
@@ -1480,7 +1494,7 @@ static void dp_tri_out(const dcf_t *F, int i, int j, int k, bool checker) {
         const dp_sv_t *q = &src[v];
         if (checker)   /* the checker's texels lie on the screen, not the face */
             dp_vertex(k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, q->x, q->y, zc,
-                      (q->x - DC_X0) * ck, (q->y - DC_Y0) * ck, base, off);
+                      (q->x - DC_X0) * ck, (q->y - DC_Y0) * cky, base, off);
         else
             dp_vertex(k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, q->x, q->y, q->w,
                       q->u / q->w, q->v / q->w, base, off);
