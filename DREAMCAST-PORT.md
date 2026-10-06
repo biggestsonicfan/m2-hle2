@@ -810,7 +810,13 @@ as an option with #475 / #476, and `HUD=none` (#478) draws the board 1:1 again.
   For the RK3566 handheld (ROCKNIX's RetroArch, GLES 3),
   `~/build/tools/dc/build-flycast-arm64.sh` (#501) cross-builds the same
   patched tree as a linux-arm64 core, `build-lr-arm64/flycast_libretro.so`;
-  it needs only glibc 2.38, nothing else.
+  it needs only glibc 2.38, nothing else. On the device, copy it into
+  `/tmp/cores` (ROCKNIX's overlay of `/usr/lib/libretro` and `/storage/cores`):
+  a file changed in `/storage/cores` directly is not seen, and the overlay then
+  has to be remounted. The patch also fixes the PowerVR2 filter's VGA shader,
+  which GLSL ES refused (int and float mixed): on the RK3566 a VGA disc with the
+  filter on stopped at boot. This core's options are still named
+  `reicast_*`; the `flycast_*` lines (ROCKNIX's own build's) are not read.
 - **No time either way in Flycast** over the bench's 400 frames (f3500-3900):
 
 | build | total | i960 slices | draws |
