@@ -441,6 +441,29 @@ static inline void kiosk__menu(int x, int y) {
     }
 }
 
+/* The tray icon's message: a right click opens the menu, a left click or the
+ * keyboard's select shows or hides the window. */
+static inline void kiosk__tray_event(WPARAM wp, LPARAM lp) {
+    const UINT ev = LOWORD(lp);
+    if (ev == WM_CONTEXTMENU || ev == WM_RBUTTONUP)
+        kiosk__menu(GET_X_LPARAM(wp), GET_Y_LPARAM(wp));
+    else if (ev == NIN_SELECT || ev == NIN_KEYSELECT ||
+             ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK)
+        kiosk_show_window(!g_kiosk.shown);
+}
+
+/* True for a system command capture mode swallows: anything that would
+ * minimise, resize, move or close the window. */
+static inline bool kiosk__syscommand_blocked(WPARAM wp) {
+    if (!g_kiosk.on || g_kiosk.quit_ok) return false;
+    switch (wp & 0xFFF0) {
+        case SC_MINIMIZE: case SC_MAXIMIZE: case SC_RESTORE:
+        case SC_SIZE:     case SC_MOVE:     case SC_CLOSE:
+            return true;      /* the whole point of capture mode */
+        default: return false;
+    }
+}
+
 static inline LRESULT CALLBACK kiosk__wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_kioskw.taskbar_created && msg == g_kioskw.taskbar_created && g_kiosk.on) {
         g_kioskw.tray_added = false;      /* Explorer restarted; put it back */
@@ -448,15 +471,9 @@ static inline LRESULT CALLBACK kiosk__wndproc(HWND h, UINT msg, WPARAM wp, LPARA
         return 0;
     }
     switch (msg) {
-        case KIOSK_WM_TRAY: {
-            const UINT ev = LOWORD(lp);
-            if (ev == WM_CONTEXTMENU || ev == WM_RBUTTONUP)
-                kiosk__menu(GET_X_LPARAM(wp), GET_Y_LPARAM(wp));
-            else if (ev == NIN_SELECT || ev == NIN_KEYSELECT ||
-                     ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK)
-                kiosk_show_window(!g_kiosk.shown);
+        case KIOSK_WM_TRAY:
+            kiosk__tray_event(wp, lp);
             return 0;
-        }
         case KIOSK_WM_UNMIN:
             if (g_kiosk.on) {
                 ShowWindow(h, SW_SHOWNOACTIVATE);
@@ -477,14 +494,7 @@ static inline LRESULT CALLBACK kiosk__wndproc(HWND h, UINT msg, WPARAM wp, LPARA
             }
             break;
         case WM_SYSCOMMAND:
-            if (g_kiosk.on && !g_kiosk.quit_ok) {
-                switch (wp & 0xFFF0) {
-                    case SC_MINIMIZE: case SC_MAXIMIZE: case SC_RESTORE:
-                    case SC_SIZE:     case SC_MOVE:     case SC_CLOSE:
-                        return 0;      /* the whole point of capture mode */
-                    default: break;
-                }
-            }
+            if (kiosk__syscommand_blocked(wp)) return 0;
             break;
         case WM_CLOSE:
             /* Alt+F4, the taskbar's Close: only the tray's Exit gets through. */

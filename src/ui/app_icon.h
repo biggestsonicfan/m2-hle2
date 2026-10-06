@@ -60,12 +60,22 @@ static inline uint8_t app_icon__u8(float v) {
     return (uint8_t)v;
 }
 
-/*
- * Render the icon at `size` x `size` into `rgba`, R,G,B,A bytes per pixel
- * (what sapp_image_desc wants; kiosk.h swizzles to BGRA for the DIB).
- */
-static inline void app_icon_render(int size, uint8_t *rgba) {
-    if (size < 8) return;
+/* How many of a pixel's 4x4 subsamples fall on the plate (*in) and how many
+ * of those on its rim (*on_rim). */
+static inline void app_icon__coverage(int x, int y, float x0, float y0, float x1, float y1,
+                                      float rad, float rim, int *in, int *on_rim) {
+    for (int sy = 0; sy < 4; sy++) {
+        for (int sx = 0; sx < 4; sx++) {
+            const float px = (float)x + ((float)sx + 0.5f) * 0.25f;
+            const float py = (float)y + ((float)sy + 0.5f) * 0.25f;
+            const float d  = app_icon__sdf(px, py, x0, y0, x1, y1, rad);
+            if (d <= 0.0f) { (*in)++; if (d >= -rim) (*on_rim)++; }
+        }
+    }
+}
+
+/* The supersampled plate: every pixel of the icon, rim and body. */
+static inline void app_icon__plate(int size, uint8_t *rgba) {
     const float fs    = (float)size;
     const float inset = fs * 0.025f;          /* leave the outermost pixel clear */
     const float rad   = fs * 0.20f;
@@ -80,14 +90,7 @@ static inline void app_icon_render(int size, uint8_t *rgba) {
         const float bb = 0.260f + (0.105f - 0.260f) * t;
         for (int x = 0; x < size; x++) {
             int in = 0, on_rim = 0;
-            for (int sy = 0; sy < 4; sy++) {
-                for (int sx = 0; sx < 4; sx++) {
-                    const float px = (float)x + ((float)sx + 0.5f) * 0.25f;
-                    const float py = (float)y + ((float)sy + 0.5f) * 0.25f;
-                    const float d  = app_icon__sdf(px, py, x0, y0, x1, y1, rad);
-                    if (d <= 0.0f) { in++; if (d >= -rim) on_rim++; }
-                }
-            }
+            app_icon__coverage(x, y, x0, y0, x1, y1, rad, rim, &in, &on_rim);
             const float a  = (float)in / 16.0f;
             const float rf = (a > 0.0f) ? ((float)on_rim / 16.0f) / a : 0.0f;
             /* Rim cyan mixed over the body by how much of the pixel it covers. */
@@ -101,8 +104,24 @@ static inline void app_icon_render(int size, uint8_t *rgba) {
             p[3] = app_icon__u8(a);
         }
     }
+}
 
-    /* "M2" in whole pixels, centred on the plate. */
+/* One glyph cell, a k x k block at (cx, cy), clipped to the icon. */
+static inline void app_icon__block(int size, uint8_t *rgba, int cx, int cy, int k) {
+    for (int dy = 0; dy < k; dy++) {
+        const int py = cy + dy;
+        if (py < 0 || py >= size) continue;
+        for (int dx = 0; dx < k; dx++) {
+            const int px = cx + dx;
+            if (px < 0 || px >= size) continue;
+            uint8_t *p = rgba + ((size_t)py * (size_t)size + (size_t)px) * 4;
+            p[0] = 232; p[1] = 252; p[2] = 255; p[3] = 255;
+        }
+    }
+}
+
+/* "M2" in whole pixels, centred on the plate. */
+static inline void app_icon__glyphs(int size, uint8_t *rgba) {
     int k = size / 16;
     if (k < 1) k = 1;
     const int block_w = (APP_ICON_GLYPH_W * 2 + 2) * k;   /* M, 2-wide gap, 2 */
@@ -115,19 +134,20 @@ static inline void app_icon_render(int size, uint8_t *rgba) {
         for (int row = 0; row < APP_ICON_GLYPH_H; row++) {
             for (int col = 0; col < APP_ICON_GLYPH_W; col++) {
                 if (glyph[row][col] != 'X') continue;
-                for (int dy = 0; dy < k; dy++) {
-                    const int py = gy + row * k + dy;
-                    if (py < 0 || py >= size) continue;
-                    for (int dx = 0; dx < k; dx++) {
-                        const int px = ox + col * k + dx;
-                        if (px < 0 || px >= size) continue;
-                        uint8_t *p = rgba + ((size_t)py * (size_t)size + (size_t)px) * 4;
-                        p[0] = 232; p[1] = 252; p[2] = 255; p[3] = 255;
-                    }
-                }
+                app_icon__block(size, rgba, ox + col * k, gy + row * k, k);
             }
         }
     }
+}
+
+/*
+ * Render the icon at `size` x `size` into `rgba`, R,G,B,A bytes per pixel
+ * (what sapp_image_desc wants; kiosk.h swizzles to BGRA for the DIB).
+ */
+static inline void app_icon_render(int size, uint8_t *rgba) {
+    if (size < 8) return;
+    app_icon__plate(size, rgba);
+    app_icon__glyphs(size, rgba);
 }
 
 #endif /* APP_ICON_H */

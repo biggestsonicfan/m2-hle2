@@ -10,6 +10,10 @@ opens two WebSockets here instead:
 | `/gw/stream` | One TLS connection to RPCN: the default upstream, or `/gw/stream/<name>` for another the config names. The page cannot name a host. |
 | `/gw/dgram` (`/gw/dgram/<name>`) | One UDP socket on the droplet's public address, plus a virtual address from a private pool. One WebSocket message is one datagram: `[ip: 4][port: u16 BE][payload]`. |
 
+The desktop build in a container uses `/gw/dgram` too (`src/net/ws_relay.h`): behind
+Docker Desktop's NAT nobody outside can reach it directly. It sends the play site's
+`Origin`.
+
 Browser-to-browser traffic is routed inside the gateway through the virtual
 addresses; browser-to-desktop goes out of the session's real UDP socket. The
 design, and why each rule exists, is in [WEB-NETPLAY.md](../../WEB-NETPLAY.md),

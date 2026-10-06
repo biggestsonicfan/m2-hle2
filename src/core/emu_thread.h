@@ -127,6 +127,16 @@ typedef struct {
     volatile int      request_reset;
     volatile uint32_t reset_count;
 
+    /* A savestate asked for from outside the emu thread (the MCP bridge's
+     * `save_state` / `load_state`, the window's menu): 1 save, 2 load, to or
+     * from state_path. Serviced where request_reset is, between slices.
+     * state_count moves when it has been, and state_error says how
+     * ("" for done). */
+    volatile int      request_state;
+    char              state_path[1024];
+    volatile uint32_t state_count;
+    char              state_error[160];
+
     /* Frames left before the board stops itself (emu_run_frames), 0 for none.
      * Counted down at the frame edge in emu_slice_finish, so the stop lands
      * between frame N and frame N+1 however late the asker would have been
@@ -278,6 +288,87 @@ static inline void emu_board_reset_state(void) {
     g_frame_clock.frame  = 0;
 }
 
+/* ---- Savestates (Pinboard #423) ---------------------------------------------
+ *
+ * savestate.h writes the board; the run loop's latches above are passed to it
+ * here, since they are this file's statics. Serviced between slices, under the
+ * mutex (emu_netplay_pump), like a board reset. */
+#include "savestate.h"
+
+static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
+    savestate_emu_t e;
+    memset(&e, 0, sizeof e);
+    e.total_steps        = ctx->total_steps;
+    e.timer_cycles_seen  = s_timer_cycles_seen;
+    e.frame_clock_sample = g_frame_clock.sample;
+    e.frame_clock_frame  = g_frame_clock.frame;
+    e.irq_in_service     = s_irq_in_service;
+    e.irq_baseline_depth = s_irq_baseline_depth;
+    e.irq_from_table     = s_irq_from_table;
+    e.irq_slices         = s_irq_slices;
+    e.vblank_edge        = g_vblank_edge;
+    e.slice_capped       = ctx->slice_capped;
+    e.emu_frames         = g_emu_frames;
+    e.irqt_sound_kick    = g_irqt_sound_kick;
+    e.irqt_vblank        = g_irqt_vblank;
+    return e;
+}
+
+static inline void emu_state_put_latches(emu_thread_ctx_t *ctx, const savestate_emu_t *e) {
+    ctx->total_steps     = e->total_steps;
+    s_timer_cycles_seen  = e->timer_cycles_seen;
+    s_irq_in_service     = e->irq_in_service != 0;
+    s_irq_baseline_depth = e->irq_baseline_depth;
+    s_irq_from_table     = e->irq_from_table != 0;
+    s_irq_slices         = e->irq_slices;
+    g_vblank_edge        = e->vblank_edge;
+    ctx->slice_capped    = e->slice_capped;
+    g_emu_frames         = e->emu_frames;
+    g_irqt_sound_kick    = e->irqt_sound_kick;
+    g_irqt_vblank        = e->irqt_vblank;
+    g_frame_clock.sample = e->frame_clock_sample;
+    g_frame_clock.frame  = e->frame_clock_frame;
+}
+
+/* Save or load now. The caller holds the mutex (or has no other thread).
+ * NULL on success, else why not. */
+static inline const char *emu_state_save_now(emu_thread_ctx_t *ctx, const char *path) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e = emu_state_latches(ctx);
+    return savestate_save(path, ctx->cpu, ctx->bus, &e);
+}
+
+/* A load's last step, from a file or from memory: the run loop's latches, and
+ * what follows the board without being part of it. */
+static inline const char *emu_state_loaded(emu_thread_ctx_t *ctx, const char *err, const savestate_emu_t *e) {
+    if (err) return err;
+    emu_state_put_latches(ctx, e);
+    emu_attn_bump();
+    ctx->cpu_prev_snapshot = *ctx->cpu;
+    ctx->cpu_snapshot      = *ctx->cpu;
+    return NULL;
+}
+
+static inline const char *emu_state_load_now(emu_thread_ctx_t *ctx, const char *path) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e;
+    return emu_state_loaded(ctx, savestate_load(path, ctx->cpu, ctx->bus, &e), &e);
+}
+
+/* The same in memory, for a host that keeps the state itself (libretro's
+ * retro_serialize). `buf` NULL asks only for the size. */
+static inline const char *emu_state_save_mem(emu_thread_ctx_t *ctx, void *buf, size_t cap, size_t *len) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e = emu_state_latches(ctx);
+    return savestate_save_mem(buf, cap, len, ctx->cpu, ctx->bus, &e);
+}
+
+static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *data, size_t size) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e;
+    return emu_state_loaded(ctx, savestate_load_mem(data, size, ctx->cpu, ctx->bus, &e), &e);
+}
+
 /* ---- The sound UART ---------------------------------------------------------
  *
  * The game's sound handler (STF send_sound_code) sends ONE byte of a queued
@@ -382,6 +473,8 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     if (!g_active_profile) return;
     i960_cpu_t          *cpu = ctx->cpu;
     const game_quirks_t *q   = &g_active_profile->quirks;
+
+    g_hle_netplay_board = netplay_active();
 
     /* Auto-skip the boot warning screen by holding its ack flag at 1. */
     if ((g_warning_skip || netplay_active()) && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
@@ -504,6 +597,21 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
      * reset, back in their own settings (netplay_empty_room_pump). */
     bool alone = step == NETPLAY_STEP_OFF && netplay_take_empty_restart();
 
+    /* A savestate. A load inside a session would change this board and not the
+     * peer's, so it is refused there; a save is only a read, and is not. */
+    int state = ctx->request_state;
+    if (state) {
+        ctx->request_state = 0;
+        const char *err;
+        emu_mutex_lock(&ctx->mutex);
+        if (state == 2 && step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
+        else if (state == 2) err = emu_state_load_now(ctx, ctx->state_path);
+        else                 err = emu_state_save_now(ctx, ctx->state_path);
+        snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
+        emu_mutex_unlock(&ctx->mutex);
+        ctx->state_count++;
+    }
+
     if (step == NETPLAY_STEP_RESET || asked || alone) {
         emu_mutex_lock(&ctx->mutex);
         if (alone)      netplay_restart_alone();
@@ -560,16 +668,140 @@ static inline bool emu_slice_should_stop(emu_thread_ctx_t *ctx) {
     return true;
 }
 
+/* A handler from the program's own table that has not returned for this many
+ * slices has switched task (m2-sdk's break-in): stop waiting for its return. */
+static inline void emu_slice_irq_stale(emu_thread_ctx_t *ctx) {
+    if (s_irq_in_service && s_irq_from_table && ++s_irq_slices > EMU_IRQ_TABLE_MAX_SLICES) {
+        LOG_WARN("emu: interrupt handler never returned (task switch?) -- IP=0x%08X", ctx->cpu->sfr.ip);
+        s_irq_in_service = false;
+    }
+}
+
+/* Whether a slice starts on the slow path (see the loop in emu_slice_body):
+ * any of the rare flags already up, or a step over a breakpoint to make. */
+static inline bool emu_slice_starts_slow(emu_thread_ctx_t *ctx, bool profile) {
+    return ctx->step_over_bp || g_irqt_vblank || g_irqt_sound_kick
+        || g_log.warn_triggered || wp_tripped() || g_sharc.unknown_triggered || (profile && s_irq_in_service)
+        || ctx->cpu->halted;
+}
+
+/* The flags that end a slice after the instruction that raised them. */
+static I960_HOT_INLINE bool emu_slice_break_flag(void) {
+    if (g_log.warn_triggered) return true;
+    if (wp_tripped()) return true;   /* data watchpoint tripped mid-instruction */
+    if (g_sharc.unknown_triggered) return true;  /* break-on-unknown COP cmd */
+    return false;
+}
+
+/* The slow path's checks before an instruction. True when the slice ends here. */
+static I960_HOT_INLINE bool emu_slice_slow_gate(emu_thread_ctx_t *ctx, i960_cpu_t *cpu) {
+    if (cpu->halted) return true;
+    /* The vblank came on the instruction before (its interrupt, if
+     * the program enabled one, is taken already): the frame ends. */
+    if (g_irqt_vblank) { g_irqt_vblank = 0; g_vblank_edge = 1; return true; }
+    if (ctx->step_over_bp) {
+        ctx->step_over_bp = 0;
+    } else if (bp_check(cpu->sfr.ip)) {
+        return true;
+    }
+    return false;
+}
+
+/* The loop's own state, which the slow path's helpers move along. The loop
+ * keeps it in locals and hands the slow path a copy: with the struct itself
+ * as the loop's state, its address taken, GCC kept the fields in memory and
+ * the slice ran 4% more host instructions (Pinboard #387). */
+typedef struct {
+    int      i;        /* instructions charged to the slice */
+    uint32_t steps;    /* instructions run, written back once (see emu_slice_body) */
+    uint32_t attn;     /* g_emu_attn as the fast path last saw it */
+    bool     bps;      /* a breakpoint is armed */
+    bool     slow;     /* every check runs on this instruction */
+} emu_slice_loop_t;
+
+/* The slow path's work after an instruction. True when the slice ends here. */
+static I960_HOT_INLINE bool emu_slice_slow_after(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, bool profile,
+                                                 emu_slice_loop_t *l) {
+    l->slow = true;
+    if (g_hle_extra) {          /* the hook's run, counted as the i960's */
+        l->i     += (int)g_hle_extra;
+        l->steps += g_hle_extra;
+        g_hle_extra = 0;
+    }
+    if (profile) {
+        if (s_irq_in_service) emu_service_sound_again(ctx);
+        else if (g_irqt_sound_kick) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+    }
+    emu_timers_after_step(ctx);
+    if (emu_slice_break_flag()) return true;
+    /* Back to the fast path once nothing it was sent here for is still
+     * up. STF writes the interrupt registers a few times a frame (the
+     * sound kick), and staying slow for the rest of the slice put ~30%
+     * of its instructions through every check above. The word is read
+     * before the flags: a setter raises its flag and then bumps it, so
+     * one that lands after the read is seen at the next instruction.
+     * A handler in service stays here until it returns (0.06% of
+     * STF's instructions), so the fast path never looks for one. */
+    uint32_t now = g_emu_attn;
+    if (!g_irqt_vblank && !g_irqt_sound_kick
+            && !ctx->step_over_bp && !(profile && s_irq_in_service) && !cpu->halted) {
+        l->attn = now;
+        l->bps  = bp_armed();
+        l->slow = false;
+    }
+    return false;
+}
+
+/* The end of a slice that reached the vblank. A profile with no frame hook
+ * marks the geo capture's frame boundary and a capture's frame here, at the
+ * vblank, as the profiles' frame hooks do at the end of the game's main loop.
+ * Without it geo3d falls back to scanning the WHOLE capture ring (the 24K-word
+ * COP boot firmware + every accumulated frame) instead of just this frame's
+ * draws, so a homebrew object draw never isolates / renders. */
+static inline void emu_slice_frame_edge(emu_thread_ctx_t *ctx) {
+    if (g_active_profile && g_active_profile->quirks.board_vblank) {
+        cop_geo_frame_edge();
+        dl_frame_edge(ctx->bus, g_emu_frames);
+        hle_match_replay_edge(ctx->bus);
+    }
+    sky_eye_edge(ctx->bus);
+}
+
+/* After the i960's part of a slice: the sound board's frame, the display
+ * list's snapshot, the CPU snapshots and the profiler's sample. */
+static inline void emu_slice_after(emu_thread_ctx_t *ctx, bool frame, int64_t prof_t0, uint64_t steps) {
+    /* The sound board runs on its own sample clock: a frame's worth of
+     * 44.1 kHz samples when the frame ends, the 68000 in lockstep with the
+     * SCSP (see emu_sound_slice_end). They run on the sound thread while the
+     * next slice's i960 does (sound.h, "The sound thread"). */
+#ifdef M2HLE_PROFILE
+    int64_t snd_t0 = g_pcprof_on ? emu_now_us() : 0;
+#endif
+    emu_sound_slice_end(frame);
+#ifdef M2HLE_PROFILE
+    if (g_pcprof_on) g_pcprof.sound_us += emu_now_us() - snd_t0;
+#endif
+
+    /* Snapshot the GEO display list while the i960 is idle (mutex held) — the
+     * homebrew is vblank-waiting just past geo_flush, so bufferram holds the
+     * intact list before the next frame's SHARC math clobbers it. */
+    if (g_active_profile && g_active_profile->quirks.geo_displaylist)
+        geodl_capture(ctx->bus);
+
+    ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+    ctx->cpu_snapshot      = *ctx->cpu;
+    if (g_pcprof_on)
+        pcprof_frame((int32_t)(emu_now_us() - prof_t0), (uint32_t)steps, g_emu_frames);
+}
+
 static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     int64_t  prof_t0 = g_pcprof_on ? emu_now_us() : 0;
     int      hzone   = hprof_enter(HPROF_I960);   /* host_prof.h; COP and sound tag themselves */
     /* A slice runs the board to its next vblank (irq_timer.h), whatever the
      * program is doing then: the frame is the board's, not the game's. */
     g_vblank_edge = 0;
-    if (s_irq_in_service && s_irq_from_table && ++s_irq_slices > EMU_IRQ_TABLE_MAX_SLICES) {
-        LOG_WARN("emu: interrupt handler never returned (task switch?) -- IP=0x%08X", ctx->cpu->sfr.ip);
-        s_irq_in_service = false;
-    }
+    g_geodl_full_snap = g_active_profile && g_active_profile->quirks.geo_displaylist;
+    emu_slice_irq_stale(ctx);
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
@@ -580,7 +812,6 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * to memory per instruction that the compiler was not allowed to keep
      * in a register. The write-back is before anything reads it: the frame
      * edge and netplay_end_frame are both past the loop. */
-    uint32_t steps = 0;   /* at most max_steps; 32-bit for the SH-4 */
     /* NOT `!ctx->request_stop`. A slice charges a whole frame to the timers
      * above and to the sound board below whatever the i960 does in between,
      * so a stop that cut the i960 short left that frame to be run again on
@@ -600,12 +831,12 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * i960_step_hot is force-inlined, and a second copy of it pushed GCC past
      * its inlining limits on the handheld -- mem_fetch2 became a call per
      * instruction, and the two-loop version ran 5% MORE instructions. */
-    uint32_t       attn    = g_emu_attn;
     const bool     profile = g_active_profile != NULL;
-    bool           bps     = bp_armed();
-    bool slow = ctx->step_over_bp || g_irqt_vblank || g_irqt_sound_kick
-             || g_log.warn_triggered || wp_tripped() || g_sharc.unknown_triggered || (profile && s_irq_in_service)
-             || ctx->cpu->halted;
+    int      i;
+    uint32_t steps = 0;   /* at most max_steps; 32-bit for the SH-4 */
+    uint32_t attn  = g_emu_attn;
+    bool     bps   = bp_armed();
+    bool     slow  = emu_slice_starts_slow(ctx, profile);
     hle_filter_sync();
     /* The loop's host time, less the sound board it ran early inside it
      * (sound_uart_make_room) or waited on (sound_settle): the i960 and the
@@ -623,18 +854,9 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     const bool aot = aot_check(bus);
     uint32_t   svc_attn;
 #endif
-    int i;
     for (i = 0; i < max_steps; i++) {
         if (M2_UNLIKELY(slow)) {
-            if (cpu->halted) break;
-            /* The vblank came on the instruction before (its interrupt, if
-             * the program enabled one, is taken already): the frame ends. */
-            if (g_irqt_vblank) { g_irqt_vblank = 0; g_vblank_edge = 1; break; }
-            if (ctx->step_over_bp) {
-                ctx->step_over_bp = 0;
-            } else if (bp_check(cpu->sfr.ip)) {
-                break;
-            }
+            if (emu_slice_slow_gate(ctx, cpu)) break;
         } else if (M2_UNLIKELY(bps) && bp_check(cpu->sfr.ip)) {
             break;
         }
@@ -706,43 +928,16 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
 #endif
         steps++;
         if (M2_UNLIKELY(slow || g_emu_attn != attn)) {
-            slow = true;
-            if (g_hle_extra) {          /* the hook's run, counted as the i960's */
-                i     += (int)g_hle_extra;
-                steps += g_hle_extra;
-                g_hle_extra = 0;
-            }
-            if (profile) {
-                if (s_irq_in_service) emu_service_sound_again(ctx);
-                else if (g_irqt_sound_kick) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
-            }
-            emu_timers_after_step(ctx);
-            if (g_log.warn_triggered) break;
-            if (wp_tripped()) break;   /* data watchpoint tripped mid-instruction */
-            if (g_sharc.unknown_triggered) break;  /* break-on-unknown COP cmd */
-            /* Back to the fast path once nothing it was sent here for is still
-             * up. STF writes the interrupt registers a few times a frame (the
-             * sound kick), and staying slow for the rest of the slice put ~30%
-             * of its instructions through every check above. The word is read
-             * before the flags: a setter raises its flag and then bumps it, so
-             * one that lands after the read is seen at the next instruction.
-             * A handler in service stays here until it returns (0.06% of
-             * STF's instructions), so the fast path never looks for one. */
-            uint32_t now = g_emu_attn;
-            if (!g_irqt_vblank && !g_irqt_sound_kick
-                    && !ctx->step_over_bp && !(profile && s_irq_in_service) && !cpu->halted) {
-                attn = now;
-                bps  = bp_armed();
-                slow = false;
-            }
+            emu_slice_loop_t l = { i, steps, attn, bps, slow };
+            bool stop = emu_slice_slow_after(ctx, cpu, profile, &l);
+            i = l.i; steps = l.steps; attn = l.attn; bps = l.bps; slow = l.slow;
+            if (stop) break;
         } else {
             /* Fast: no handler in service (entering one bumps the word). */
             emu_timers_after_step_fast(ctx, cpu, profile);
             if (g_emu_attn != attn) {      /* flagged by the timer service */
                 slow = true;
-                if (g_log.warn_triggered) break;
-                if (wp_tripped()) break;
-                if (g_sharc.unknown_triggered) break;
+                if (emu_slice_break_flag()) break;
             }
         }
     }
@@ -752,44 +947,79 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->total_steps += steps;
     ctx->slice_capped = (i >= max_steps);
     bool frame = g_vblank_edge != 0;
-    if (frame) {
-        /* A profile with no frame hook marks the geo capture's frame boundary
-         * and a capture's frame here, at the vblank, as the profiles' frame
-         * hooks do at the end of the game's main loop. Without it geo3d falls
-         * back to scanning the WHOLE capture ring (the 24K-word COP boot
-         * firmware + every accumulated frame) instead of just this frame's
-         * draws, so a homebrew object draw never isolates / renders. */
-        if (g_active_profile && g_active_profile->quirks.board_vblank) {
-            cop_geo_frame_edge();
-            dl_frame_edge(ctx->bus, g_emu_frames);
-            hle_match_replay_edge(ctx->bus);
-        }
-        sky_eye_edge(ctx->bus);
-    }
-
-    /* The sound board runs on its own sample clock: a frame's worth of
-     * 44.1 kHz samples when the frame ends, the 68000 in lockstep with the
-     * SCSP (see emu_sound_slice_end). They run on the sound thread while the
-     * next slice's i960 does (sound.h, "The sound thread"). */
-#ifdef M2HLE_PROFILE
-    int64_t snd_t0 = g_pcprof_on ? emu_now_us() : 0;
-#endif
-    emu_sound_slice_end(frame);
-#ifdef M2HLE_PROFILE
-    if (g_pcprof_on) g_pcprof.sound_us += emu_now_us() - snd_t0;
-#endif
-
-    /* Snapshot the GEO display list while the i960 is idle (mutex held) — the
-     * homebrew is vblank-waiting just past geo_flush, so bufferram holds the
-     * intact list before the next frame's SHARC math clobbers it. */
-    if (g_active_profile && g_active_profile->quirks.geo_displaylist)
-        geodl_capture(ctx->bus);
-
-    ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
-    ctx->cpu_snapshot      = *ctx->cpu;
-    if (g_pcprof_on)
-        pcprof_frame((int32_t)(emu_now_us() - prof_t0), (uint32_t)steps, g_emu_frames);
+    if (frame) emu_slice_frame_edge(ctx);
+    emu_slice_after(ctx, frame, prof_t0, steps);
     hprof_leave(hzone);
+}
+
+/* A slice that reached the board's vblank: count the frame and do its
+ * bookkeeping. */
+static inline void emu_slice_count_frame(emu_thread_ctx_t *ctx) {
+    g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
+    g_dl_frame_now = g_emu_frames;
+    /* Stamp the frame with the board audio produced up to its end: the
+     * slice's own samples, which sound_run_slice handed out in the body
+     * above and the sound thread may still be making (out_due is where
+     * they end). sample first, frame second (see g_frame_clock). */
+    g_frame_clock.sample = g_sound.out_due;
+    g_frame_clock.frame  = g_emu_frames;
+    /* The netplay frame clock and this frame's state check. Fed the
+     * snapshot rather than the live CPU: it was taken under the mutex
+     * a few lines up and is the same state, without racing the UI. */
+    /* The versus hook's verdict belongs to the frame it happened in: taken
+     * here, at the frame boundary every board in a room shares. */
+    int versus_result = g_versus_result;
+    g_versus_result = 0;
+    netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
+    if (sndcap_on()) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
+    /* A PS3 match plays on the board as it is, with no reset: from here on
+     * it is the match's, not the player's (core/backup_ram.h). */
+    if (g_xplay_match) backup_ram_detach();
+    backup_ram_frame(ctx->bus->back);
+    /* The last frame of an emu_run_frames: stop here, after the frame's
+     * bookkeeping and before another slice can begin frame N+1. The
+     * frame is still a FRAME to the caller. */
+    if (ctx->frame_budget && --ctx->frame_budget == 0) {
+        ctx->run_state = EMU_STOPPED;
+        ctx->frame_budget_hit = 1;
+    }
+}
+
+/* Does the slice end in a stop: a breakpoint, a watchpoint, a break-on-warn,
+ * an unknown COP command, a request or a halt? */
+static inline bool emu_slice_stop_wanted(const emu_thread_ctx_t *ctx) {
+    return bp_hit() || wp_tripped() || g_log.warn_triggered || g_sharc.unknown_triggered
+        || ctx->request_stop || ctx->cpu->halted;
+}
+
+/* Stop the board, saying why, and clear the one-shot triggers. */
+static inline void emu_slice_stop(emu_thread_ctx_t *ctx) {
+    if (bp_hit()) {
+        LOG_INFO("emu: breakpoint hit @ 0x%08X", g_bp.hit_addr);
+        g_bp.hit = 0;
+    }
+    if (wp_tripped()) {
+        LOG_INFO("emu: watchpoint %s @ 0x%08X = 0x%08X (IP=0x%08X)",
+                 g_wp.hit_write ? "write" : "read",
+                 g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip);
+        /* leave g_wp.hit set so a poller can report it; cleared on next run */
+    }
+    if (g_log.warn_triggered) {
+        g_log.warn_triggered = 0;
+        LOG_INFO("emu: break-on-warn @ IP=0x%08X", ctx->cpu->sfr.ip);
+    }
+    if (g_sharc.unknown_triggered) {
+        LOG_INFO("emu: unknown COP cmd 0x%08X @ IP=0x%08X",
+                 g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip);
+        g_sharc.unknown_triggered = 0;
+    }
+    ctx->request_stop = 0;
+    ctx->frame_budget = 0;   /* a stop for any other reason ends a run_frames */
+    ctx->run_state = EMU_STOPPED;
+    if (ctx->cpu->halted) {
+        LOG_WARN("emu: CPU halted @ IP=0x%08X (steps=%llu)",
+                 ctx->cpu->sfr.ip, (unsigned long long)ctx->total_steps);
+    }
 }
 
 static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
@@ -801,63 +1031,9 @@ static inline emu_slice_result_t emu_slice_finish(emu_thread_ctx_t *ctx) {
      * 770 samples to the counted frame instead of 735, and a stream whose
      * playout overflowed and jumped every few seconds. */
     bool frame = g_vblank_edge != 0;
-    if (frame) {
-        g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
-        g_dl_frame_now = g_emu_frames;
-        /* Stamp the frame with the board audio produced up to its end: the
-         * slice's own samples, which sound_run_slice handed out in the body
-         * above and the sound thread may still be making (out_due is where
-         * they end). sample first, frame second (see g_frame_clock). */
-        g_frame_clock.sample = g_sound.out_due;
-        g_frame_clock.frame  = g_emu_frames;
-        /* The netplay frame clock and this frame's state check. Fed the
-         * snapshot rather than the live CPU: it was taken under the mutex
-         * a few lines up and is the same state, without racing the UI. */
-        /* The versus hook's verdict belongs to the frame it happened in: taken
-         * here, at the frame boundary every board in a room shares. */
-        int versus_result = g_versus_result;
-        g_versus_result = 0;
-        netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
-        if (sndcap_on()) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
-        /* A PS3 match plays on the board as it is, with no reset: from here on
-         * it is the match's, not the player's (core/backup_ram.h). */
-        if (g_xplay_match) backup_ram_detach();
-        backup_ram_frame(ctx->bus->back);
-        /* The last frame of an emu_run_frames: stop here, after the frame's
-         * bookkeeping and before another slice can begin frame N+1. The
-         * frame is still a FRAME to the caller. */
-        if (ctx->frame_budget && --ctx->frame_budget == 0) {
-            ctx->run_state = EMU_STOPPED;
-            ctx->frame_budget_hit = 1;
-        }
-    }
-    if (bp_hit() || wp_tripped() || g_log.warn_triggered || g_sharc.unknown_triggered || ctx->request_stop || ctx->cpu->halted) {
-        if (bp_hit()) {
-            LOG_INFO("emu: breakpoint hit @ 0x%08X", g_bp.hit_addr);
-            g_bp.hit = 0;
-        }
-        if (wp_tripped()) {
-            LOG_INFO("emu: watchpoint %s @ 0x%08X = 0x%08X (IP=0x%08X)",
-                     g_wp.hit_write ? "write" : "read",
-                     g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip);
-            /* leave g_wp.hit set so a poller can report it; cleared on next run */
-        }
-        if (g_log.warn_triggered) {
-            g_log.warn_triggered = 0;
-            LOG_INFO("emu: break-on-warn @ IP=0x%08X", ctx->cpu->sfr.ip);
-        }
-        if (g_sharc.unknown_triggered) {
-            LOG_INFO("emu: unknown COP cmd 0x%08X @ IP=0x%08X",
-                     g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip);
-            g_sharc.unknown_triggered = 0;
-        }
-        ctx->request_stop = 0;
-        ctx->frame_budget = 0;   /* a stop for any other reason ends a run_frames */
-        ctx->run_state = EMU_STOPPED;
-        if (ctx->cpu->halted) {
-            LOG_WARN("emu: CPU halted @ IP=0x%08X (steps=%llu)",
-                     ctx->cpu->sfr.ip, (unsigned long long)ctx->total_steps);
-        }
+    if (frame) emu_slice_count_frame(ctx);
+    if (emu_slice_stop_wanted(ctx)) {
+        emu_slice_stop(ctx);
         return frame ? EMU_SLICE_FRAME : EMU_SLICE_STOPPED;
     }
     return frame ? EMU_SLICE_FRAME : EMU_SLICE_NO_FRAME;
@@ -884,6 +1060,130 @@ static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
     emu_nap_us(EMU_IDLE_POLL_US);
 }
 
+/* Pace the board to 60 Hz after a slice that reached its vblank: sleep out to
+ * the next 16.67ms tick, measured from work_t1, where the slice's work ended. */
+static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
+    int64_t now = emu_now_us();
+    if (ctx->frame_deadline_us == 0) {
+        ctx->frame_deadline_us = now + EMU_SLICE_US;
+    } else {
+        ctx->frame_deadline_us += EMU_SLICE_US;
+        /* Catch-up clamp: if we've fallen >1 frame behind (paused
+         * in debugger, heavy host load), reset rather than spin. */
+        if (ctx->frame_deadline_us < now - (int64_t)EMU_SLICE_US) {
+            ctx->frame_deadline_us = now + EMU_SLICE_US;
+        }
+    }
+    /* M2HLE_UNTHROTTLE=1: no 60 Hz pacing, for automated runs that
+     * have to reach rare states (the UI still gets the mutex, since
+     * every frame boundary unlocks it). */
+    static int unthrottled = -1;
+    if (unthrottled < 0) { const char *e = getenv("M2HLE_UNTHROTTLE"); unthrottled = e && e[0] == '1'; }
+    int64_t sleep_us = ctx->frame_deadline_us - emu_now_us();
+    /* A netplay watcher behind the fighters runs flat out until it
+     * has caught up (netplay_catching_up). */
+    /* The frame that ended an emu_run_frames is not slept out here:
+     * the asker is waiting on the stop. The deadline stands, so the
+     * first frame of the next run waits out both ticks and the
+     * board still keeps 60 Hz. A client that answers within the
+     * tick thinks for free, where sleeping first would add a
+     * frame per call. */
+    bool budget_hit = ctx->frame_budget_hit != 0;
+    ctx->frame_budget_hit = 0;
+    if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
+    else if (sleep_us > 0 && !budget_hit) {
+        emu_sleep_us(sleep_us);
+        g_emu_times.pace_us += emu_now_us() - work_t1;
+    }
+}
+
+/* Netplay's say over the slice about to run (emu_run_running). True when it
+ * runs; false when the loop goes round again without one. */
+static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice_start) {
+    /* Netplay decides what this slice may do. STEP_OFF — one predictable
+     * branch — whenever no session is running. */
+    netplay_step_t np_step = emu_netplay_pump(ctx);
+    if (np_step == NETPLAY_STEP_WAIT) {
+        /* Stalled waiting for the peer's input, or waiting at the barrier:
+         * the board must not advance. Sleep a tick so the UI and the
+         * network both get the host CPU, and come back to re-poll. */
+        emu_sleep_ms(1);
+        g_emu_times.net_us += emu_now_us() - slice_start;
+        return false;
+    }
+    if (np_step == NETPLAY_STEP_RESET) {           /* done above; re-enter */
+        g_emu_times.net_us += emu_now_us() - slice_start;
+        return false;
+    }
+    if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget) {
+        emu_idle_hold(ctx);
+        g_emu_times.net_us += emu_now_us() - slice_start;
+        return false;
+    }
+    return true;
+}
+
+/* The run loop's RUNNING state: one slice, then its pacing. False when no
+ * slice ran and the loop goes straight round again. */
+static inline bool emu_run_running(emu_thread_ctx_t *ctx) {
+    if (emu_slice_should_stop(ctx)) return false;
+    int64_t slice_start = emu_now_us();
+
+    if (!emu_netplay_allows_slice(ctx, slice_start)) return false;
+    ctx->idle_holding = 0;
+    int64_t work_t0 = emu_now_us();
+    g_emu_times.net_us += work_t0 - slice_start;
+
+    emu_mutex_lock(&ctx->mutex);
+    emu_slice_body(ctx);
+    emu_mutex_unlock(&ctx->mutex);
+
+    emu_slice_result_t slice = emu_slice_finish(ctx);
+    int64_t work_t1 = emu_now_us();
+    emu_times_slice(work_t1 - work_t0, slice == EMU_SLICE_FRAME);
+    if (slice == EMU_SLICE_STOPPED) {
+        /* nothing to pace: the run state is STOPPED now */
+    } else if (slice == EMU_SLICE_FRAME) {
+        /* The vblank: pace to the next 16.67ms tick. */
+        emu_pace_frame(ctx, work_t1);
+    } else {
+        /* The step cap ended the slice short of the vblank: a program
+         * whose instructions cost less than a cycle each on average,
+         * which only hooks standing in for many do. The frame is not
+         * over; go straight back in, and let the UI have the mutex the
+         * next slice releases. */
+        emu_yield();
+    }
+    return true;
+}
+
+/* The run loop's STEPPING state: the asked-for instructions, then STOPPED. */
+static inline void emu_run_stepping(emu_thread_ctx_t *ctx) {
+    emu_mutex_lock(&ctx->mutex);
+    int n = ctx->step_count;
+    for (int i = 0; i < n && !ctx->cpu->halted; i++) {
+        if (i960_step(ctx->cpu, ctx->bus) != 0) break;
+        ctx->total_steps++;
+    }
+    ctx->cpu_snapshot = *ctx->cpu;
+    ctx->run_state = EMU_STOPPED;
+    emu_mutex_unlock(&ctx->mutex);
+}
+
+/* The run loop's STOPPED state. Netplay still has to breathe: the login, the
+ * room and the peer handshake all happen before anybody presses Run. */
+static inline void emu_run_stopped(emu_thread_ctx_t *ctx) {
+    ctx->idle_holding = 0;
+    emu_netplay_pump(ctx);
+    /* ...and a session that is PLAYING cannot, from here: the pump keeps
+     * answering "run the frame" and nothing runs it. Say so where the
+     * player is looking, and say whether it was a pause or a halt. */
+    if (netplay_active()) netplay_board_stopped(ctx->cpu->sfr.ip, ctx->cpu->halted != 0);
+    /* A real millisecond, not Sleep(1): a bridge client stepping the
+     * board with run_frames waits this long for every run to start. */
+    emu_nap_us(1000);
+}
+
 static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
     uint64_t sps_steps_start = ctx->total_steps;
     int64_t  last_sps_time   = emu_now_us();
@@ -894,108 +1194,13 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
         hprof_tick();                   /* the in-process profiler's start / stop (host_prof.h) */
 
         if (s == EMU_RUNNING) {
-            if (emu_slice_should_stop(ctx)) continue;
-            int64_t slice_start = emu_now_us();
-
-            /* Netplay decides what this slice may do. STEP_OFF — one predictable
-             * branch — whenever no session is running. */
-            netplay_step_t np_step = emu_netplay_pump(ctx);
-            if (np_step == NETPLAY_STEP_WAIT) {
-                /* Stalled waiting for the peer's input, or waiting at the barrier:
-                 * the board must not advance. Sleep a tick so the UI and the
-                 * network both get the host CPU, and come back to re-poll. */
-                emu_sleep_ms(1);
-                g_emu_times.net_us += emu_now_us() - slice_start;
-                continue;
-            }
-            if (np_step == NETPLAY_STEP_RESET) {           /* done above; re-enter */
-                g_emu_times.net_us += emu_now_us() - slice_start;
-                continue;
-            }
-            if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget) {
-                emu_idle_hold(ctx);
-                g_emu_times.net_us += emu_now_us() - slice_start;
-                continue;
-            }
-            ctx->idle_holding = 0;
-            int64_t work_t0 = emu_now_us();
-            g_emu_times.net_us += work_t0 - slice_start;
-
-            emu_mutex_lock(&ctx->mutex);
-            emu_slice_body(ctx);
-            emu_mutex_unlock(&ctx->mutex);
-
-            emu_slice_result_t slice = emu_slice_finish(ctx);
-            int64_t work_t1 = emu_now_us();
-            emu_times_slice(work_t1 - work_t0, slice == EMU_SLICE_FRAME);
-            if (slice == EMU_SLICE_STOPPED) {
-                /* nothing to pace: the run state is STOPPED now */
-            } else if (slice == EMU_SLICE_FRAME) {
-                /* The vblank: pace to the next 16.67ms tick. */
-                int64_t now = emu_now_us();
-                if (ctx->frame_deadline_us == 0) {
-                    ctx->frame_deadline_us = now + EMU_SLICE_US;
-                } else {
-                    ctx->frame_deadline_us += EMU_SLICE_US;
-                    /* Catch-up clamp: if we've fallen >1 frame behind (paused
-                     * in debugger, heavy host load), reset rather than spin. */
-                    if (ctx->frame_deadline_us < now - (int64_t)EMU_SLICE_US) {
-                        ctx->frame_deadline_us = now + EMU_SLICE_US;
-                    }
-                }
-                /* M2HLE_UNTHROTTLE=1: no 60 Hz pacing, for automated runs that
-                 * have to reach rare states (the UI still gets the mutex, since
-                 * every frame boundary unlocks it). */
-                static int unthrottled = -1;
-                if (unthrottled < 0) { const char *e = getenv("M2HLE_UNTHROTTLE"); unthrottled = e && e[0] == '1'; }
-                int64_t sleep_us = ctx->frame_deadline_us - emu_now_us();
-                /* A netplay watcher behind the fighters runs flat out until it
-                 * has caught up (netplay_catching_up). */
-                /* The frame that ended an emu_run_frames is not slept out here:
-                 * the asker is waiting on the stop. The deadline stands, so the
-                 * first frame of the next run waits out both ticks and the
-                 * board still keeps 60 Hz. A client that answers within the
-                 * tick thinks for free, where sleeping first would add a
-                 * frame per call. */
-                bool budget_hit = ctx->frame_budget_hit != 0;
-                ctx->frame_budget_hit = 0;
-                if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
-                else if (sleep_us > 0 && !budget_hit) {
-                    emu_sleep_us(sleep_us);
-                    g_emu_times.pace_us += emu_now_us() - work_t1;
-                }
-            } else {
-                /* The step cap ended the slice short of the vblank: a program
-                 * whose instructions cost less than a cycle each on average,
-                 * which only hooks standing in for many do. The frame is not
-                 * over; go straight back in, and let the UI have the mutex the
-                 * next slice releases. */
-                emu_yield();
-            }
+            if (!emu_run_running(ctx)) continue;
         }
         else if (s == EMU_STEPPING) {
-            emu_mutex_lock(&ctx->mutex);
-            int n = ctx->step_count;
-            for (int i = 0; i < n && !ctx->cpu->halted; i++) {
-                if (i960_step(ctx->cpu, ctx->bus) != 0) break;
-                ctx->total_steps++;
-            }
-            ctx->cpu_snapshot = *ctx->cpu;
-            ctx->run_state = EMU_STOPPED;
-            emu_mutex_unlock(&ctx->mutex);
+            emu_run_stepping(ctx);
         }
         else {
-            /* STOPPED. Netplay still has to breathe: the login, the room and the
-             * peer handshake all happen before anybody presses Run. */
-            ctx->idle_holding = 0;
-            emu_netplay_pump(ctx);
-            /* ...and a session that is PLAYING cannot, from here: the pump keeps
-             * answering "run the frame" and nothing runs it. Say so where the
-             * player is looking, and say whether it was a pause or a halt. */
-            if (netplay_active()) netplay_board_stopped(ctx->cpu->sfr.ip, ctx->cpu->halted != 0);
-            /* A real millisecond, not Sleep(1): a bridge client stepping the
-             * board with run_frames waits this long for every run to start. */
-            emu_nap_us(1000);
+            emu_run_stopped(ctx);
         }
 
         int64_t now = emu_now_us();

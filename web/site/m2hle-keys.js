@@ -46,6 +46,8 @@ const m2hleKeys = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* The page's Pause (m2hle-page.js), not a game button: it holds nothing. */
+    { id: 'pause', label: 'Pause',     acts: [],        page: true },
   ];
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   const P2_OFFSET = 10;
@@ -54,10 +56,10 @@ const m2hleKeys = (() => {
   const DEFAULTS = {
     p1: { up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'],
           b1: ['KeyZ'], b2: ['KeyX'], b3: ['KeyC'], b4: ['KeyV'], start: ['Digit1'], coin: ['Digit5'],
-          pk: [], pb: [], kb: [], pkb: [] },
+          pk: [], pb: [], kb: [], pkb: [], pause: ['KeyP', 'Pause'] },
     p2: { up: ['KeyI'], down: ['KeyK'], left: ['KeyJ'], right: ['KeyL'],
           b1: ['Delete'], b2: ['End'], b3: ['PageDown'], b4: ['Home'], start: ['Digit2'], coin: ['Digit6'],
-          pk: [], pb: [], kb: [], pkb: [] },
+          pk: [], pb: [], kb: [], pkb: [], pause: [] },
   };
 
   const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -78,6 +80,9 @@ const m2hleKeys = (() => {
           if (Array.isArray(list)) binds[p][a.id] = list.filter((c) => typeof c === 'string' && c.length < 32).slice(0, MAX_BINDS);
         }
       }
+      /* Settings from before Pause was a row: a key the player gave the game keeps
+       * that job rather than also pausing (P on Punch, say). */
+      for (const code of Object.values(binds).flatMap((b) => b.pause)) if (bitsOf(code)) unbindPause(code);
     } catch (e) { /* private mode, or a value from somewhere else: keep the defaults */ }
   }
 
@@ -112,6 +117,17 @@ const m2hleKeys = (() => {
     return m >>> 0;
   }
 
+  const isPause = (code) => binds.p1.pause.includes(code) || binds.p2.pause.includes(code);
+
+  /* A key is the game's or Pause's, not both: binding it to one takes it off the
+   * other, for both players, so a key never pauses and punches at once. */
+  function unbindPause(code) {
+    for (const p of ['p1', 'p2']) binds[p].pause = binds[p].pause.filter((c) => c !== code);
+  }
+  function unbindGame(code) {
+    for (const p of ['p1', 'p2']) for (const a of ACTIONS) if (!a.page) binds[p][a.id] = binds[p][a.id].filter((c) => c !== code);
+  }
+
   function recompute() {
     let m = 0;
     for (const c of down) m |= bitsOf(c);
@@ -138,6 +154,8 @@ const m2hleKeys = (() => {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (e.code === 'Escape' || !e.code) { stopListening(); return; }
+      if (listening.id === 'pause') unbindGame(e.code);
+      else unbindPause(e.code);
       const list = binds[listening.player][listening.id];
       if (!list.includes(e.code)) {
         if (list.length >= MAX_BINDS) list.shift();
@@ -155,6 +173,11 @@ const m2hleKeys = (() => {
       return;
     }
     if (inPanel(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (isPause(e.code)) {
+      e.preventDefault();
+      if (!e.repeat) window.dispatchEvent(new Event('m2hle-pause'));
+      return;
+    }
     if (!bitsOf(e.code)) return;
     /* A game key: the game has it and the page does not (arrows would scroll it). */
     e.preventDefault();
@@ -190,6 +213,12 @@ const m2hleKeys = (() => {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
         sub.textContent = 'Macros: one press holds several buttons';
+        rows.appendChild(sub);
+      }
+      if (a.page) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = 'The page: offline only, as the button beside the menu';
         rows.appendChild(sub);
       }
       const tr = document.createElement('li');

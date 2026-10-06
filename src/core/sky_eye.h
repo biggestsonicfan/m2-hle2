@@ -265,13 +265,10 @@ static int sky_eye_nums(const char *s, double *v, int max) {
     return *s ? -1 : n;
 }
 
-/* A noclip view link into a request. 0 and a reason in `err` when it is not
- * one this can use. */
-static int sky_eye_parse_link(const char *link, sky_eye_req_t *r, char *err, size_t errcap) {
+/* The link's game and stage, when it names them. 0 and a reason in `err` when
+ * either is not one this can use. */
+static int sky_eye_link_game_stage(const char *link, sky_eye_req_t *r, char *err, size_t errcap) {
     char buf[256];
-    double v[3], t[3];
-    memset(r, 0, sizeof *r);
-    r->stage = -1;
     if (sky_eye_param(link, "game", buf, sizeof buf) && strcmp(buf, "sfight")) {
         snprintf(err, errcap, "the link is for game '%s', not sfight", buf);
         return 0;
@@ -282,21 +279,33 @@ static int sky_eye_parse_link(const char *link, sky_eye_req_t *r, char *err, siz
         if (*end || s < 0 || s >= SKY_EYE_STAGES) { snprintf(err, errcap, "bad stage '%s'", buf); return 0; }
         r->stage = (int)s;
     }
-    if (sky_eye_param(link, "eye", buf, sizeof buf)) {
-        if (sky_eye_nums(buf, v, 3) != 3) { snprintf(err, errcap, "bad eye '%s'", buf); return 0; }
-        int n;
-        if (!sky_eye_param(link, "ang", buf, sizeof buf) || (n = sky_eye_nums(buf, t, 3)) < 2) {
-            snprintf(err, errcap, "eye without a usable ang");
-            return 0;
-        }
-        for (int i = 0; i < 3; i++) r->pos[i] = (float)v[i];
-        r->xang = (int16_t)(long)t[0];
-        r->yang = (int16_t)(long)t[1];
-        r->zang = n > 2 ? (int16_t)(long)t[2] : 0;
-        return 1;
+    return 1;
+}
+
+/* The board's own camera, `eye` (in `eyebuf`) and `ang`. 0 and a reason in
+ * `err` when they are not usable. */
+static int sky_eye_link_eye(const char *link, const char *eyebuf, sky_eye_req_t *r,
+                            char *err, size_t errcap) {
+    char buf[256];
+    double v[3], t[3];
+    if (sky_eye_nums(eyebuf, v, 3) != 3) { snprintf(err, errcap, "bad eye '%s'", eyebuf); return 0; }
+    int n;
+    if (!sky_eye_param(link, "ang", buf, sizeof buf) || (n = sky_eye_nums(buf, t, 3)) < 2) {
+        snprintf(err, errcap, "eye without a usable ang");
+        return 0;
     }
-    /* The explorer's own camera: the board's, Z negated, on a stage that does
-     * not fly. */
+    for (int i = 0; i < 3; i++) r->pos[i] = (float)v[i];
+    r->xang = (int16_t)(long)t[0];
+    r->yang = (int16_t)(long)t[1];
+    r->zang = n > 2 ? (int16_t)(long)t[2] : 0;
+    return 1;
+}
+
+/* The explorer's own camera: the board's, Z negated, on a stage that does
+ * not fly. 0 and a reason in `err` when the link has none. */
+static int sky_eye_link_explorer(const char *link, sky_eye_req_t *r, char *err, size_t errcap) {
+    char buf[256];
+    double v[3], t[3];
     if (!sky_eye_param(link, "pos", buf, sizeof buf) || sky_eye_nums(buf, v, 3) != 3) {
         snprintf(err, errcap, "no camera in the link (eye/ang or pos)");
         return 0;
@@ -318,6 +327,17 @@ static int sky_eye_parse_link(const char *link, sky_eye_req_t *r, char *err, siz
     }
     snprintf(err, errcap, "pos without look or target");
     return 0;
+}
+
+/* A noclip view link into a request. 0 and a reason in `err` when it is not
+ * one this can use. */
+static int sky_eye_parse_link(const char *link, sky_eye_req_t *r, char *err, size_t errcap) {
+    char buf[256];
+    memset(r, 0, sizeof *r);
+    r->stage = -1;
+    if (!sky_eye_link_game_stage(link, r, err, errcap)) return 0;
+    if (sky_eye_param(link, "eye", buf, sizeof buf)) return sky_eye_link_eye(link, buf, r, err, errcap);
+    return sky_eye_link_explorer(link, r, err, errcap);
 }
 
 /* The game's camera as a noclip link (a fragment; noclip's page goes before

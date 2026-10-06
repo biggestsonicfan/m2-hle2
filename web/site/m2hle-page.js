@@ -76,6 +76,7 @@ function loadZip(bytes) {
     addEventListener('pagehide', () => Module._web_backup_flush());
     m2hleNetplay.onGame();
     m2hleTouch.onGame();
+    pauseOnGame();
     $('canvas').focus();
   }, 0));
 }
@@ -359,7 +360,7 @@ window.addEventListener('drop', (e) => {
 
 /* ---- The menu ----------------------------------------------------------------
  *
- * The bar holds two buttons -- the source link and this menu -- and the menu holds
+ * The bar holds the source link, Pause and this menu, and the menu holds
  * everything else. Its items keep the ids and the handlers they had in the bar, so
  * the panels (m2hle-netplay.js, m2hle-pad.js, m2hle-tools.js) and the test scripts
  * press them by id whether or not the menu is open. */
@@ -417,4 +418,47 @@ if (fsRequest && (document.fullscreenEnabled || document.webkitFullscreenEnabled
   };
   document.addEventListener('fullscreenchange', label);
   document.addEventListener('webkitfullscreenchange', label);
+}
+
+/* ---- Pause -------------------------------------------------------------------
+ *
+ * Offline play only: the board stands still (main_web.c, web_set_paused) and the
+ * sound with it, until Pause is pressed again. In a Console game it opens the
+ * PS3's own pause menu (the shell's SELECT) instead, and Pause again resumes. In a room the other boards run on,
+ * so the button goes away there, and a pause still on when a room starts is let
+ * go by the emulator itself. P does the same, unless the player has bound P to
+ * the game; so does the keyboard's Pause key. */
+function pauseRender() {
+  const btn = $('btn-pause');
+  const how = Module._web_paused();   /* 1 the page's freeze, 2 the Console's own pause menu */
+  const on = how !== 0;
+  btn.hidden = !Module._web_pause_allowed();
+  btn.setAttribute('aria-pressed', String(on));
+  const key = m2hleKeys.binds.p1.pause[0];
+  btn.title = (on ? 'Resume' : 'Pause') + (key ? ' (' + m2hleKeys.keyName(key) + ')' : '');
+  btn.setAttribute('aria-label', on ? 'Resume' : 'Pause');
+  $('paused').hidden = how !== 1;   /* the PS3's menu says so itself */
+}
+
+function pauseToggle() {
+  if (!Module._web_pause_allowed()) return;
+  const on = !!Module._web_set_paused(Module._web_paused() ? 0 : 1);   /* the Console's menu opens a frame later */
+  m2hleTools.print(on ? 'paused' : 'resumed');
+  pauseRender();
+}
+
+function pauseOnGame() {
+  if (pauseOnGame.done) return;
+  pauseOnGame.done = true;
+  $('btn-pause').addEventListener('click', () => { pauseToggle(); leaveBar(); });
+  /* The keys and pad buttons bound to Pause in the Controls panel (P and the Pause
+   * key unless the player changes them; m2hle-keys.js, m2hle-pad.js). */
+  window.addEventListener('m2hle-pause', pauseToggle);
+  /* The PS3 pauses by itself when a player's pad goes (TaskPause_WaitTrigger), so a
+   * pad that drops out mid-game stops the board here too. */
+  window.addEventListener('gamepaddisconnected', () => {
+    if (Module._web_pause_allowed() && !Module._web_paused()) pauseToggle();
+  });
+  setInterval(pauseRender, 250);   /* a room can start, or end, at any time */
+  pauseRender();
 }

@@ -242,6 +242,18 @@ The board's battery-backed SRAM at `0x01D00000` (settings, region, coin setup, b
 - **Homebrew on a stock set gets its own file**, `<set>-<fnv32 of the program>`, so it neither reads nor clobbers the game's.
 - The image is checked once a minute and written only when it changed, then flushed at exit. STF bumps a counter at `0x1D03319` every few seconds for as long as it runs, so a shorter check is a write every few seconds, which wears out a handheld's SD card.
 
+### Savestates (`core/savestate.h`, board-level)
+
+A savestate is a zip, as m2emulator's `.sta` is: one raw entry per board component (`I960`, `SHARC`, `COP`, each bus buffer under its region name, `GEO`, `IRQT`, `M68K`, `M2SCSP`, `SOUND`, `EMU`, `HLE`, a profile's `P.<name>`), plus `INFO`, `LAYOUT` and `ROM`. `save_state` / `load_state` over the bridge, `--load-state FILE` at launch, `det_digest --save-at F:FILE` / `--load FILE`.
+
+- **It is exact, and that is what to hold it to:** `det_digest` saved at frame 400 and loaded in a fresh process gives the same rows and sample hash from there on, the 68000 and `--sound-hle` alike; two processes that load the same file and run 300 frames save identical entries.
+- **A load is refused unless the file's `ROM` and `LAYOUT` match** (FNV-64 of every ROM; every struct's size). The structs are written raw, so a build that changes one cannot read an old file, and must not try.
+- **Host pointers are written as NULL and kept live on load**: `g_cop.ctl`, `sharc_dm_ext`, the SCSP's RAM, clock and sink. The SCSP's LFO table pointers go in as ids. A new pointer field in a saved struct needs the same, or the file differs between processes and the load writes a stale address.
+- **State outside the structs has to be registered.** A profile's own statics (`sfight_console`'s hidden-select latch) go through `savestate_extra` from its install; the run loop's latches are in `EMU`, the hooks' in `HLE`. A static that `grade-reset.mjs` needs cleared almost certainly needs saving too.
+- **The battery travels with the state** (`M2BACK`): a load puts the board's SRAM back as it was at the save, as MAME's does.
+- **No load inside a netplay session or SKY EYE**: one board of two, or a camera record the game did not write.
+- **The libretro core saves the same zip into RetroArch's buffer** (`savestate_save_mem`, `emu_state_save_mem`). It is stored, not deflated, so its size does not depend on the board's contents. `retro_serialize_size` measures it once per load and adds 4096 bytes, and the save zero-pads the rest, because RetroArch asks the size once and rewind and run-ahead expect it to stay put. A state is about 16 MB, which is why RetroArch's own netplay still cannot run the core (it sends states). The `.info` has to say `savestate = "true"`: RetroArch refuses a save outright on `false`, before it ever asks the core.
+
 ### Homebrew on a game's board (`profiles/sfight_homebrew.h`)
 
 Homebrew ships as a stock set with the program EPROMs swapped (m2-pacman: `sfight` with `epr-19001.15`, `epr-19002.16`, `epr-19021.31` replaced). The game's profile would plant its HLE hooks and interrupt handlers in the homebrew's code, so after a load `profile_adopt_program` reads the program's own interrupt table (ROM word 1 → PRCB → +0x14) and, if it does not name the profile's handlers, runs the set's `any_program` profile instead: no hooks, `irq_vectors`, `board_vblank`. A patched build of the game keeps its table and so its profile. Every profile's slice ends at the board's vblank (HLE Hooks, "Frame pacing"), so `board_vblank` only says the program has no frame hook: the run loop marks the capture's frame and makes the match_replay jump at the vblank instead. A handler still in service after 8 slices is taken to have switched task (m2-sdk's break-in does `flushreg` + `bx`).
@@ -276,6 +288,7 @@ These addresses are STF-specific. The **patterns** repeat across the catalogue �
   - The console build's ROM images (YAMP's loose `rom/stf_rom/*.bin`) are byte-identical to the arcade set's code, data, EPROM and polygon ROMs; only the texture ROM's layout differs. Every console difference is in the DLL's traps, none in data. Honey's VS portrait (sprite `0x96`) is her silhouette over a "???" plate, and that is correct, not a missing asset.
   - **The Console profile boots on FREE PLAY**: `sfc_hook_free_play` at `0x62754` (`sram_clear_for_coin_assign`) stores 26 in CREDITS_REQUIRED (`0x1D03324` and its RAM copy `0x59C324`), where the factory default is 0. The ROM itself tests for 26 (`26:FREE PLAY`). The Arcade profile still boots on coins. Coins do nothing on free play, which is harmless for a script that inserts them anyway.
   - **DAMAGE** (`g_damage_real`, `--damage real|normal`) is the GAME ASSIGNMENTS flag byte's bit 7 (`0x59C353`), put in by `damage_default` at `0x62674` in `init_game_assignments`, like the region. The ROM's labels run the other way from what you might guess: the test menu's `DAMAGE_TYPE` is {NORMAL, REAL} by the bit, and `ketchup` (`0x19740`, called by `damage_calculation`; `ACT_RC_DOWN_ATTACK` too) scales a hit by the energy gap only when the bit is CLEAR. So **NORMAL (0, the factory default) is the catch-up damage and REAL turns it off.** Only a room on our server sets it (the owner's `damage_real` in the room state, NORMAL unless the host picks REAL, as the console plays); everything else boots NORMAL too, so the graders are untouched.
+  - **CPU difficulty** (`g_enemy_rank`, `--enemy-rank`, the desktop's Profile menu, the PS3 menus' Difficulty) swaps only the AI table: `sub_3B22C` loads `match_enemy_rank_data[rank & 3]` at `0x3B274`, and the hook there (`SFIGHT_BASE_HOOKS`, both profiles) hands it Easy..Hardest or one of the two tables the ROM carries and never points at, `0x93428` and `0x93728` (Extra 1 / 2; each 0x300 bytes, 32 a stage). **Never store 4 or 5 in the cabinet's ENEMY RANK byte** (`0x59C342`): `var_diff` at `0x11AC8` indexes `byte_11BD4[rank*8 + n]` unmasked, and past row 3 that is float data. The PS3 menus' Extra choices keep the cabinet on Hard. A netplay session plays the cabinet's table (`g_hle_netplay_board`).
   - **VS mode** (`g_vs_mode`, `--vs-mode`, off by default) is the DLL's trap at `0xE584` (`next_round+0x1A4`), in `SFIGHT_BASE_HOOKS` for both profiles. A decided versus match jumps to `0xF524`, the ROM's own "both continue" path, so both players go back to character select. Off, the winner stays on against the CPU and the loser is out. The DLL's VS stage pick (`0xAF84`) draws from host RNG and is not ported, and neither is its `vs_match_count = 3`.
 
 ### Threading
@@ -362,8 +375,8 @@ Matchmaking is [RPCN](https://github.com/RipleyTom/rpcn); the design follows `ya
 are **silently wrong** rather than loudly wrong when you get them half right.
 
 - **A session is a COLD BOOT on both machines, not a savestate.** The barrier releases, both peers
-  reset the board, and every frame from power-on is lockstepped. There are no savestates here, so
-  this is the only state two copies are certain to share; it is also stronger than the PS3 port's
+  reset the board, and every frame from power-on is lockstepped. A savestate (below) is never sent
+  to a peer, so this is the only state two copies are certain to share; it is also stronger than the PS3 port's
   shared RNG seed, because no window exists in which the two were allowed to differ. The reset has
   to clear the run loop's own latches too (`emu_board_reset_state`) — an interrupt left in service
   across it swallows the first interrupt of the new boot, which is a divergence on frame 1.
@@ -407,6 +420,29 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   instead (`rpcn_client_t.advertised_ip`; `local_ip` stays the socket's own for the self filter).
   It is a process setting, not a `netplay_config_t` field, so the wholesale config copies (file,
   window, MCP) cannot drop it. `tests/net_test.c` part (G) holds both over loopback.
+- **Behind Docker Desktop nobody outside the house can reach us at all, so a container relays
+  through the web gateway** (`ws_relay.h`, `--net-relay` / `$M2HLE_NET_RELAY`, Pinboard #366).
+  Docker Desktop's NAT gives the keepalive a random port that forwards nothing back (only the
+  published 3658 does), and RPCN tells guests to punch that port: they punched forever. Now every
+  datagram rides the gateway's `/gw/dgram` WebSocket (`[ip][port BE][payload]`, as the web build's
+  do), so RPCN and guests see the gateway's public address. It is decided once at session start,
+  never mid-room: a room keeps the address it saw at the join. `auto` is on in a container
+  (`/.dockerenv`) for the servers `ws_relay_url_for` knows; a process setting, like `local_ip`.
+  - The gateway refuses a WebSocket without an `Origin` it lists, so the relay sends the play
+    site's. It answers the gateway's pings (30 s) or is dropped.
+  - A lost relay drops the RPCN link too (`rpcn_recv_from`), so the heal signs back in and
+    reopens it. A heal attempt must not fall back to direct (`relay_required`, all but the last
+    try): the gateway shares the droplet with RPCN and came back a second after it in the test,
+    and a direct sign-in then left the room unreachable for good.
+  - **A guest outside joins a relayed owner through the gateway too** (Pinboard #382). The
+    gateway's UDP port is not reachable from every network: a guest behind a carrier-grade NAT
+    punched the fly at `143.198.49.181:40xxx` for the whole match and was never heard. So a client
+    sending directly keeps the gateway in reserve (`relay_standby_url`), asks where a room's owner
+    is before joining (`rpcn_session_probe`, RequestSignalingInfos), and when the server places
+    the owner at the gateway's address it turns the relay on, waits for the helper to see the new
+    address, and only then joins. Both members then hold the gateway's virtual addresses and it
+    carries the match inside itself. Turning the relay on is before the room, so "never mid-room"
+    still holds. `auto:ws://...` names the reserve gateway (the tests'); `off` keeps none.
 - **A room copies each member's address when it is created or joined, and never refreshes it.**
   The address reaches RPCN only with the first UDP keepalive after login, so a Host or Join sent
   straight after sign-in snapshots nothing — for the life of the room — and two players on one
@@ -535,7 +571,7 @@ NPUB30927 -- room.h cites the addresses). The owner writes the room state to RPC
 new owner carries on from the server's copy. What bites:
 
 - **Every match is a cold board reset on EVERY member**, fighters and watchers alike, and a
-  lockstep generation of its own. The PS3 port never resets; this emulator has no savestates, so
+  lockstep generation of its own. The PS3 port never resets; a savestate never crosses machines, so
   the reset is the only shared state. **The room's owner also decides the region** (room state,
   `g_region`): members on another region boot another game from frame 0.
 - **Only the two fighters gate a frame.** Watchers (`LOCKSTEP_WATCHER`) run the fighters' two

@@ -109,14 +109,18 @@ static inline int input_keycode_to_action(int kc) {
     }
 }
 
-/* A sokol key code by name, for --macro: a-z, 0-9, f1-f12, kp0-kp9, space,
- * tab, insert, pageup, pagedown, home, end, delete. -1 if unknown. */
-static inline int input_keycode_by_name(const char *s) {
-    char n[16];
+/* input_keycode_by_name's lower-cased copy of s in n (16 bytes): its length,
+ * or -1 when s is too long to be a key's name. */
+static inline int input_keycode_lower(const char *s, char *n) {
     size_t len = 0;
-    for (; s[len] && len < sizeof n - 1; len++) n[len] = (char)(s[len] | 0x20);
+    for (; s[len] && len < 15; len++) n[len] = (char)(s[len] | 0x20);
     n[len] = '\0';
     if (s[len]) return -1;
+    return (int)len;
+}
+
+/* The keys named by a letter or digit, f1-f12 and kp0-kp9; -1 for the rest. */
+static inline int input_keycode_short(const char *n, size_t len) {
     if (len == 1 && n[0] >= 'a' && n[0] <= 'z') return SAPP_KEYCODE_A + (n[0] - 'a');
     if (len == 1 && n[0] >= '0' && n[0] <= '9') return SAPP_KEYCODE_0 + (n[0] - '0');
     if (n[0] == 'f' && len >= 2 && len <= 3) {
@@ -124,6 +128,17 @@ static inline int input_keycode_by_name(const char *s) {
         if (f >= 1 && f <= 12) return SAPP_KEYCODE_F1 + (f - 1);
     }
     if (len == 3 && n[0] == 'k' && n[1] == 'p' && n[2] >= '0' && n[2] <= '9') return SAPP_KEYCODE_KP_0 + (n[2] - '0');
+    return -1;
+}
+
+/* A sokol key code by name, for --macro: a-z, 0-9, f1-f12, kp0-kp9, space,
+ * tab, insert, pageup, pagedown, home, end, delete. -1 if unknown. */
+static inline int input_keycode_by_name(const char *s) {
+    char n[16];
+    int len = input_keycode_lower(s, n);
+    if (len < 0) return -1;
+    int kc = input_keycode_short(n, (size_t)len);
+    if (kc >= 0) return kc;
     static const struct { const char *name; int kc; } named[] = {
         { "space", SAPP_KEYCODE_SPACE }, { "tab", SAPP_KEYCODE_TAB }, { "insert", SAPP_KEYCODE_INSERT },
         { "pageup", SAPP_KEYCODE_PAGE_UP }, { "pagedown", SAPP_KEYCODE_PAGE_DOWN }, { "home", SAPP_KEYCODE_HOME },

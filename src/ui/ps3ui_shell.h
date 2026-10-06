@@ -71,14 +71,14 @@ enum { PS3UI_SET_DIFFICULTY, PS3UI_SET_ROUNDS, PS3UI_SET_TIME, PS3UI_SET_ATTACK,
 static const char *const ps3ui_set_label[PS3UI_SETS] = { "Difficulty", "Round count", "Time limit",
                                                          "Attack power", "Number of barriers", "Game type" };
 static const char *const ps3ui_set_values[PS3UI_SETS][10] = {
-    { "Easy", "Normal", "Hard", "Hardest" },
+    { "Easy", "Normal", "Hard", "Hardest", "Extra 1", "Extra 2" },
     { "2", "3", "4", "5" },
     { "10", "30", "60", "99" },
     { "-1", "Normal", "+1", "+2", "+3" },
     { "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" },
     { "Type A", "Type B", "Type C", "Type D" },
 };
-static const uint8_t ps3ui_set_max[PS3UI_SETS] = { 3, 3, 3, 4, 9, 3 };
+static const uint8_t ps3ui_set_max[PS3UI_SETS] = { 5, 3, 3, 4, 9, 3 };
 static const uint8_t ps3ui_set_arcade_def[PS3UI_SETS] = { 1, 0, 1, 1, 4, 0 };
 static const uint8_t ps3ui_set_versus_def[PS3UI_SETS] = { 1, 1, 1, 1, 4, 0 };
 
@@ -353,17 +353,70 @@ static void ps3ui_sh_update_credits(ps3ui_shell_t *sh)
         ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
 }
 
-static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, int netplay_session)
+static void ps3ui_sh_update_main(ps3ui_shell_t *sh)
 {
-    sh->frame++;
-    sh->netplay = netplay_session;
-    ps3ui_shell_pad(sh, pad, pad2);
-    sh->t += 1.0f;
-    sh->cursor_t = sh->cursor_t + 1.0f >= 180.0f ? 0.0f : sh->cursor_t + 1.0f;
+    ps3ui_sh_move(sh, 4);                    /* no wrap; o does nothing here */
+    if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS)) {
+        if (sh->cursor == 0) ps3ui_shell_go(sh, PS3UI_SH_ARCADE);
+        if (sh->cursor == 1) ps3ui_shell_go(sh, PS3UI_SH_VERSUS);
+        if (sh->cursor == 2) {
+            ps3ui_shell_go(sh, PS3UI_SH_ONLINE);
+            ps3ui_app_open(sh->online);
+        }
+        if (sh->cursor == 3) {
+            sh->options_from_pause = 0;
+            ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
+        }
+    }
+}
 
+static void ps3ui_sh_update_options(ps3ui_shell_t *sh)
+{
+    static const ps3ui_sh_screen_t to[3] = { PS3UI_SH_CONTROLS, PS3UI_SH_SETTINGS, PS3UI_SH_CREDITS };
+    int first = sh->no_controls ? 1 : 0;     /* the web page has no Controls row */
+    ps3ui_sh_move(sh, 3 - first);
+    if (ps3ui_sh_hit(sh, PS3UI_PAD_CIRCLE))
+        ps3ui_shell_go(sh, sh->options_from_pause ? PS3UI_SH_PAUSE : PS3UI_SH_MAIN);
+    else if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS))
+        ps3ui_shell_go(sh, to[sh->cursor + first]);
+}
+
+static void ps3ui_sh_update_pause(ps3ui_shell_t *sh)
+{
+    if (sh->resume_wait) {
+        if (--sh->resume_wait == 0)
+            ps3ui_shell_go(sh, PS3UI_SH_GAME);
+        return;
+    }
+    sh->cursor = sh->pause_cursor;
+    ps3ui_sh_move(sh, 4);
+    if (sh->cursor == 2)                     /* the blank row above Exit Game is skipped */
+        sh->cursor = ps3ui_sh_hit(sh, PS3UI_PAD_UP) ? 1 : 3;
+    sh->pause_cursor = sh->cursor;
+    if (ps3ui_sh_hit(sh, PS3UI_PAD_SELECT)) {
+        sh->pause_cursor = 0;                /* SELECT again: Resume */
+        sh->resume_wait = 10;
+        ps3ui_win_close(&sh->main);
+    } else if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS)) {
+        if (sh->cursor == 0) {
+            sh->resume_wait = 10;
+            ps3ui_win_close(&sh->main);
+        } else if (sh->cursor == 1) {
+            sh->options_from_pause = 1;
+            ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
+        } else {
+            sh->dlg_kind = PS3UI_SHDLG_EXIT_GAME;
+            ps3ui_dialog_ask(&sh->dlg, "Do you want to end the game? Game progress will be lost.", 1);
+        }
+    }
+}
+
+/* The pad this frame: the dialog's if one is up, else the screen's. */
+static void ps3ui_sh_update(ps3ui_shell_t *sh)
+{
     /* the online task's VS prompt is on screen and has the pad */
     if (sh->scr != PS3UI_SH_ONLINE && ps3ui_app_view(sh->online) == PS3UI_VIEW_OVERLAY)
-        goto windows;
+        return;
 
     if (ps3ui_dialog_showing(&sh->dlg)) {
         int r = ps3ui_dialog_update(&sh->dlg, sh->pressed);
@@ -372,7 +425,7 @@ static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, in
                 sh->host.reset_board(sh->host.user);
             ps3ui_shell_go(sh, PS3UI_SH_MAIN);
         }
-        goto windows;
+        return;
     }
 
     switch (sh->scr) {
@@ -380,33 +433,10 @@ static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, in
         if (ps3ui_sh_hit(sh, PS3UI_PAD_START | PS3UI_PAD_CROSS))
             ps3ui_shell_go(sh, PS3UI_SH_MAIN);
         break;
-    case PS3UI_SH_MAIN:
-        ps3ui_sh_move(sh, 4);                    /* no wrap; o does nothing here */
-        if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS)) {
-            if (sh->cursor == 0) ps3ui_shell_go(sh, PS3UI_SH_ARCADE);
-            if (sh->cursor == 1) ps3ui_shell_go(sh, PS3UI_SH_VERSUS);
-            if (sh->cursor == 2) {
-                ps3ui_shell_go(sh, PS3UI_SH_ONLINE);
-                ps3ui_app_open(sh->online);
-            }
-            if (sh->cursor == 3) {
-                sh->options_from_pause = 0;
-                ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
-            }
-        }
-        break;
+    case PS3UI_SH_MAIN: ps3ui_sh_update_main(sh); break;
     case PS3UI_SH_ARCADE: ps3ui_sh_update_settings_menu(sh, 0); break;
     case PS3UI_SH_VERSUS: ps3ui_sh_update_settings_menu(sh, 1); break;
-    case PS3UI_SH_OPTIONS: {
-        static const ps3ui_sh_screen_t to[3] = { PS3UI_SH_CONTROLS, PS3UI_SH_SETTINGS, PS3UI_SH_CREDITS };
-        int first = sh->no_controls ? 1 : 0;     /* the web page has no Controls row */
-        ps3ui_sh_move(sh, 3 - first);
-        if (ps3ui_sh_hit(sh, PS3UI_PAD_CIRCLE))
-            ps3ui_shell_go(sh, sh->options_from_pause ? PS3UI_SH_PAUSE : PS3UI_SH_MAIN);
-        else if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS))
-            ps3ui_shell_go(sh, to[sh->cursor + first]);
-        break;
-    }
+    case PS3UI_SH_OPTIONS: ps3ui_sh_update_options(sh); break;
     case PS3UI_SH_CONTROLS: ps3ui_sh_update_controls(sh); break;
     case PS3UI_SH_SETTINGS: ps3ui_sh_update_volume(sh); break;
     case PS3UI_SH_CREDITS: ps3ui_sh_update_credits(sh); break;
@@ -420,38 +450,13 @@ static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, in
             sh->pause_cursor = 0;
         }
         break;
-    case PS3UI_SH_PAUSE:
-        if (sh->resume_wait) {
-            if (--sh->resume_wait == 0)
-                ps3ui_shell_go(sh, PS3UI_SH_GAME);
-            break;
-        }
-        sh->cursor = sh->pause_cursor;
-        ps3ui_sh_move(sh, 4);
-        if (sh->cursor == 2)                     /* the blank row above Exit Game is skipped */
-            sh->cursor = ps3ui_sh_hit(sh, PS3UI_PAD_UP) ? 1 : 3;
-        sh->pause_cursor = sh->cursor;
-        if (ps3ui_sh_hit(sh, PS3UI_PAD_SELECT)) {
-            sh->pause_cursor = 0;                /* SELECT again: Resume */
-            sh->resume_wait = 10;
-            ps3ui_win_close(&sh->main);
-        } else if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS)) {
-            if (sh->cursor == 0) {
-                sh->resume_wait = 10;
-                ps3ui_win_close(&sh->main);
-            } else if (sh->cursor == 1) {
-                sh->options_from_pause = 1;
-                ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
-            } else {
-                sh->dlg_kind = PS3UI_SHDLG_EXIT_GAME;
-                ps3ui_dialog_ask(&sh->dlg, "Do you want to end the game? Game progress will be lost.", 1);
-            }
-        }
-        break;
+    case PS3UI_SH_PAUSE: ps3ui_sh_update_pause(sh); break;
     }
+}
 
-windows:
-    /* the windows each screen shows */
+/* the windows each screen shows */
+static void ps3ui_sh_windows(ps3ui_shell_t *sh)
+{
     switch (sh->scr) {
     case PS3UI_SH_MAIN: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_04");
         ps3ui_win_open(&sh->msg, &ps3ui_n_cmn_base, "cmn_win_b_01"); break;
@@ -472,6 +477,17 @@ windows:
     ps3ui_win_tick(&sh->main);
     ps3ui_win_tick(&sh->msg);
     ps3ui_win_tick(&sh->bar);
+}
+
+static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, int netplay_session)
+{
+    sh->frame++;
+    sh->netplay = netplay_session;
+    ps3ui_shell_pad(sh, pad, pad2);
+    sh->t += 1.0f;
+    sh->cursor_t = sh->cursor_t + 1.0f >= 180.0f ? 0.0f : sh->cursor_t + 1.0f;
+    ps3ui_sh_update(sh);
+    ps3ui_sh_windows(sh);
 }
 
 /* ---- draw ------------------------------------------------------------------------- */
