@@ -41,6 +41,10 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # HUD=none draws nothing over the game at all, not even that, and (with no
 # VIEW, FRAME512=0) puts the whole board 1:1 at (72,48) of the frame, a
 # picture to crop and hold against MAME's pixel for pixel (Pinboard #478).
+# HUD=prof keeps the stats rows and adds the hardware profile (dc_prof.h,
+# Pinboard #495) on rows 6-10: the SH-4's cache-miss stalls, the PVR's times,
+# and where the program's time goes, sampled by symbol. Links twice: the
+# sampler's symbol map (tools/dc_profmap.py) comes from the first link.
 # FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
 # whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
 
@@ -147,6 +151,15 @@ tried. On screen:
   of attract: ms in all, in the slice and in the draw; the draw's parts; page
   loads in all, then of code, data, polygons, textures, the model pack, and
   those for `dc_rom_at`
+- rows 6-10 (`HUD=prof`, #495): the window's pipeline stalls on data- and
+  instruction-cache misses as a share of its cycles, the PVR's render and
+  registration time for the last frame, the vblanks seen and the samples
+  taken; then the sampler's groups as shares of the window (`aot` the i960
+  compiled ahead, `gem` Gems' C, `hok` the profile's hooks, `960` the i960
+  interpreter and the bus, `cop`, `geo` the 3D decode, `drw` the PVR draw,
+  `til` the tile layers, `snd`, `dsc` the pager and the drive, `kos`, `lib`,
+  `bio` the BIOS, where the GD-ROM syscalls run, `oth`); then the six hottest
+  symbols. Flycast's counters read 0: it has none.
 
 If the board halts, the screen shows the IP, the pager's totals and the last
 log lines.
@@ -210,12 +223,15 @@ m2-pacman's `pacman_geo` and [m2-sonic](https://github.com/biggestsonicfan/m2-so
 draw their sprites as polygons through the GEO, so they have discs of their own
 (Pinboard #469). Build the game with its debug panel off, and the disc with
 `HUD=min`: nothing on screen but the board's frames a second, small, top right.
+`FPS_CAP=60` (the default) keeps them at 60 of those a second at most: under
+an emulator `pacman_geo` ran at 74 (Pinboard #490).
 
 ```sh
 # m2-pacman, panel off: roms/pacman_geo/game.bin
 cmake -B /tmp/bpac -S <m2-pacman> -DM2_GAME=pacman_geo -DM2_SDK=<m2-sdk> -DPAC_DEFS=PAC_NO_PANEL && cmake --build /tmp/bpac
 ln -s <m2-pacman>/roms/pacman_geo/game.bin /tmp/pac/rom_code1.bin   # + the four PS3 files, as above
-make -C dreamcast OUT=/tmp/dcpac HUD=min AOT_MAP=pacman_geo.aotmap AOT=/tmp/pac/rom_code1.bin
+# the disc: only Pac-Man's 224x288, 5/3 to the frame's full height (VIEW, #487)
+make -C dreamcast OUT=/tmp/dcpac HUD=min VIEW=136,48,224,288 AOT_MAP=pacman_geo.aotmap AOT=/tmp/pac/rom_code1.bin
 sh dreamcast/mkdisc.sh /tmp/dcpac /tmp/pac /tmp/dcpac/disc
 
 # m2-sonic, panel off: roms/sonic/game.bin (needs your cartridge, see its README)
@@ -254,6 +270,7 @@ the disc's own counter (the Dreamcast's timer):
 | | board fps |
 |---|---|
 | `pacman_geo`, AOT 0.95 | 28-31 |
+| `pacman_geo`, `VIEW=136,48,224,288`, #487 | 28-31 (maze, `HUD=min`) |
 | m2-sonic, AOT 0.95 | 8-11 (the game drops Mega Drive frames to keep time) |
 | m2-sonic, `VIEW=88,80,320,224`, #481 | 21-25 (Green Hill, `HUD=min`) |
 
