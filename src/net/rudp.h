@@ -407,94 +407,140 @@ static inline void rudp_on_data(rudp_peer_t *p, rudp_chan_t *c, uint16_t seq, co
     if (len && p->deliver) p->deliver(p->deliver_ctx, c->vport, pl, len);
 }
 
+/* A sub-packet's RUDP header, as rudp_parse_header reads it. `o` is where the
+ * payload starts. */
+typedef struct {
+    uint8_t  type, flags;
+    uint16_t seq;
+    bool     has_ack;
+    uint16_t ack;
+    uint32_t id;
+    uint32_t o;
+} rudp_hdr_t;
+
+/* The options after the header. False if they run past the end. */
+static inline bool rudp_skip_options(const uint8_t *r, uint32_t len, uint32_t *at) {
+    uint32_t o = *at;
+    /* TLV: a type byte (bit 7 = last); type 0 is a lone pad byte, the rest
+     * carry a length. SACK, timestamps and retransmit info: all skipped. */
+    while (o < len) {
+        uint8_t t = r[o++];
+        if ((t & 0x7Fu) != 0) {
+            if (o >= len) return false;
+            uint8_t l = r[o++];
+            o += l;
+        }
+        if (t & 0x80u) break;
+    }
+    if (o > len) return false;
+    *at = o;
+    return true;
+}
+
+/* The SYN or RST body after the header. False if the segment is to be
+ * dropped (a SYN of a version we do not speak is answered with RST 4). */
+static inline bool rudp_parse_body(rudp_peer_t *p, rudp_chan_t *c, const uint8_t *r, uint32_t len,
+                                   rudp_hdr_t *h) {
+    uint32_t o = h->o;
+    uint16_t syn_flags = 0;
+    if (h->type == RUDP_TYPE_SYN) {
+        if (o + 12 > len) return false;
+        syn_flags = rudp_get16(r + o);
+        uint16_t vmax = rudp_get16(r + o + 2), vmin = rudp_get16(r + o + 4);
+        h->id = rudp_get32(r + o + 6);
+        o += 12;
+        if (vmin > 0x100 || vmax < 0x100) { rudp_send_rst(p, c, 4); return false; }
+        (void)syn_flags;
+    } else if (h->type == RUDP_TYPE_RST) {
+        if (o + 6 > len) return false;
+        h->id = rudp_get32(r + o + 2);
+        o += 6;
+    }
+    h->o = o;
+    return true;
+}
+
+/* The whole header, options skipped. False if the segment is to be dropped. */
+static inline bool rudp_parse_header(rudp_peer_t *p, rudp_chan_t *c, const uint8_t *r, uint32_t len,
+                                     rudp_hdr_t *h) {
+    if (len < 4) return false;
+    memset(h, 0, sizeof(*h));
+    h->type  = (uint8_t)(r[0] >> 6);
+    h->flags = (uint8_t)(r[0] & 0x3Fu);
+    h->seq   = rudp_get16(r + 2);
+    h->o = 4;
+    h->has_ack = (h->flags & RUDP_F_ACK) != 0;
+    if (h->has_ack) { if (h->o + 2 > len) return false; h->ack = rudp_get16(r + h->o); h->o += 2; }
+    if (h->flags & RUDP_F_ACK_DELAY) { if (!h->has_ack || h->o + 2 > len) return false; h->o += 2; }
+    if (!rudp_parse_body(p, c, r, len, h)) return false;
+    if (h->flags & RUDP_F_OPTIONS) return rudp_skip_options(r, len, &h->o);
+    return true;
+}
+
+static inline void rudp_on_syn(rudp_peer_t *p, rudp_chan_t *c, const rudp_hdr_t *h, uint64_t now) {
+    if (!h->has_ack) {
+        /* Their opening SYN. In IDLE or SYN_SENT that makes us SYN_RCVD;
+         * in SYN_RCVD it is a retry; once ESTABLISHED a SYN with a new id
+         * is the peer starting over. */
+        if (c->state == RUDP_ESTABLISHED && h->id == c->peer_id) { rudp_send_ack(p, c, now); return; }
+        if (c->state == RUDP_SYN_RCVD && h->id == c->peer_id) { rudp_send_syn(p, c, true); return; }
+        if (c->state == RUDP_IDLE || c->state == RUDP_CLOSED) c->syn_start_ms = now;
+        rudp_accept_syn(p, c, h->seq, h->id);
+        c->syn_next_ms = now + RUDP_SYN_RETRY_MS;
+        return;
+    }
+    /* SYN-ACK: they have our SYN. */
+    if (h->ack != (uint16_t)(c->isn + 1u)) { rudp_send_rst(p, c, 2); return; }
+    if (c->state == RUDP_SYN_SENT) {
+        c->peer_id  = h->id;
+        c->peer_isn = h->seq;
+        c->rcv_nxt  = (uint16_t)(h->seq + 1u);
+        c->rcv_mask = 0;
+    }
+    if (c->state == RUDP_SYN_SENT || c->state == RUDP_SYN_RCVD) rudp_established(c);
+    if (c->state == RUDP_ESTABLISHED) rudp_send_ack(p, c, now);
+}
+
+static inline void rudp_on_keepalive(rudp_peer_t *p, rudp_chan_t *c, const rudp_hdr_t *h) {
+    if (h->has_ack) return;
+    uint8_t b[6];
+    b[0] = (uint8_t)((RUDP_TYPE_KEEPALIVE << 6) | RUDP_F_ACK);
+    b[1] = RUDP_WINDOW_BYTE;
+    rudp_be16(b + 2, c->snd_nxt);
+    rudp_be16(b + 4, c->rcv_nxt);
+    rudp_emit(p, c, b, 6);
+}
+
+static inline void rudp_on_data_segment(rudp_peer_t *p, rudp_chan_t *c, const rudp_hdr_t *h,
+                                        const uint8_t *r, uint32_t len, uint64_t now) {
+    if (c->state == RUDP_SYN_RCVD && h->has_ack && h->ack == (uint16_t)(c->isn + 1u)) rudp_established(c);
+    if (c->state != RUDP_ESTABLISHED) return;
+    if (h->has_ack && c->reliable) rudp_on_ack(c, h->ack);
+    if (len > h->o) rudp_on_data(p, c, h->seq, r + h->o, len - h->o, now);
+}
+
 /* One RUDP sub-packet (after the mux header) on channel `c`. */
 static inline void rudp_on_segment(rudp_peer_t *p, rudp_chan_t *c, const uint8_t *r, uint32_t len,
                                    uint64_t now) {
-    if (len < 4) return;
-    uint8_t  type  = (uint8_t)(r[0] >> 6);
-    uint8_t  flags = (uint8_t)(r[0] & 0x3Fu);
-    uint16_t seq   = rudp_get16(r + 2);
-    uint32_t o = 4;
-    bool     has_ack = (flags & RUDP_F_ACK) != 0;
-    uint16_t ack = 0;
-    if (has_ack) { if (o + 2 > len) return; ack = rudp_get16(r + o); o += 2; }
-    if (flags & RUDP_F_ACK_DELAY) { if (!has_ack || o + 2 > len) return; o += 2; }
+    rudp_hdr_t h;
+    if (!rudp_parse_header(p, c, r, len, &h)) return;
 
-    uint16_t syn_flags = 0; uint32_t id = 0;
-    if (type == RUDP_TYPE_SYN) {
-        if (o + 12 > len) return;
-        syn_flags = rudp_get16(r + o);
-        uint16_t vmax = rudp_get16(r + o + 2), vmin = rudp_get16(r + o + 4);
-        id = rudp_get32(r + o + 6);
-        o += 12;
-        if (vmin > 0x100 || vmax < 0x100) { rudp_send_rst(p, c, 4); return; }
-        (void)syn_flags;
-    } else if (type == RUDP_TYPE_RST) {
-        if (o + 6 > len) return;
-        id = rudp_get32(r + o + 2);
-        o += 6;
-    }
-    if (flags & RUDP_F_OPTIONS) {
-        /* TLV: a type byte (bit 7 = last); type 0 is a lone pad byte, the rest
-         * carry a length. SACK, timestamps and retransmit info: all skipped. */
-        while (o < len) {
-            uint8_t t = r[o++];
-            if ((t & 0x7Fu) != 0) {
-                if (o >= len) return;
-                uint8_t l = r[o++];
-                o += l;
-            }
-            if (t & 0x80u) break;
-        }
-        if (o > len) return;
-    }
-
-    switch (type) {
+    switch (h.type) {
         case RUDP_TYPE_SYN:
-            if (!has_ack) {
-                /* Their opening SYN. In IDLE or SYN_SENT that makes us SYN_RCVD;
-                 * in SYN_RCVD it is a retry; once ESTABLISHED a SYN with a new id
-                 * is the peer starting over. */
-                if (c->state == RUDP_ESTABLISHED && id == c->peer_id) { rudp_send_ack(p, c, now); break; }
-                if (c->state == RUDP_SYN_RCVD && id == c->peer_id) { rudp_send_syn(p, c, true); break; }
-                if (c->state == RUDP_IDLE || c->state == RUDP_CLOSED) c->syn_start_ms = now;
-                rudp_accept_syn(p, c, seq, id);
-                c->syn_next_ms = now + RUDP_SYN_RETRY_MS;
-            } else {
-                /* SYN-ACK: they have our SYN. */
-                if (ack != (uint16_t)(c->isn + 1u)) { rudp_send_rst(p, c, 2); break; }
-                if (c->state == RUDP_SYN_SENT) {
-                    c->peer_id  = id;
-                    c->peer_isn = seq;
-                    c->rcv_nxt  = (uint16_t)(seq + 1u);
-                    c->rcv_mask = 0;
-                }
-                if (c->state == RUDP_SYN_SENT || c->state == RUDP_SYN_RCVD) rudp_established(c);
-                if (c->state == RUDP_ESTABLISHED) rudp_send_ack(p, c, now);
-            }
+            rudp_on_syn(p, c, &h, now);
             break;
 
         case RUDP_TYPE_RST:
-            if (c->peer_id && id == c->peer_id) c->state = RUDP_CLOSED;
+            if (c->peer_id && h.id == c->peer_id) c->state = RUDP_CLOSED;
             break;
 
         case RUDP_TYPE_KEEPALIVE:
-            if (!has_ack) {
-                uint8_t b[6];
-                b[0] = (uint8_t)((RUDP_TYPE_KEEPALIVE << 6) | RUDP_F_ACK);
-                b[1] = RUDP_WINDOW_BYTE;
-                rudp_be16(b + 2, c->snd_nxt);
-                rudp_be16(b + 4, c->rcv_nxt);
-                rudp_emit(p, c, b, 6);
-            }
+            rudp_on_keepalive(p, c, &h);
             break;
 
         case RUDP_TYPE_DATA:
         default:
-            if (c->state == RUDP_SYN_RCVD && has_ack && ack == (uint16_t)(c->isn + 1u)) rudp_established(c);
-            if (c->state != RUDP_ESTABLISHED) break;
-            if (has_ack && c->reliable) rudp_on_ack(c, ack);
-            if (len > o) rudp_on_data(p, c, seq, r + o, len - o, now);
+            rudp_on_data_segment(p, c, &h, r, len, now);
             break;
     }
 }

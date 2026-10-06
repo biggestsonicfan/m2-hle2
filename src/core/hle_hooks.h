@@ -123,6 +123,38 @@ static volatile int g_game_type     = 0;
  * with it Off the PS3 offers no hidden fighter online. */
 static volatile int g_hidden_chars = 1;
 
+/* The CPU opponent's AI table (STF's match_enemy_rank_data, picked per fight by
+ * sub_3B22C from the cabinet's ENEMY RANK). -1, the default, plays the
+ * cabinet's; 0..5 plays that table instead: Easy, Normal, Hard, Hardest, and
+ * the two the ROM carries but never points at, Extra 1 (0x93428) and Extra 2
+ * (0x93728). Only the AI table changes (sfight.h enemy_rank_table); the rest
+ * of what ENEMY RANK decides still follows the cabinet's setting. A netplay
+ * session plays the cabinet's (g_hle_netplay_board), so it cannot split two
+ * boards; --enemy-rank, the Profile menu and the PS3 menus' Difficulty set it. */
+static volatile int g_enemy_rank = -1;
+#define ENEMY_RANKS 6
+static const char *const g_enemy_rank_names[ENEMY_RANKS] = {
+    "Easy", "Normal", "Hard", "Hardest", "Extra 1", "Extra 2"
+};
+
+/* "easy", "normal", "hard", "hardest", "extra1" or "extra2" (or 0..5);
+ * "cabinet" is -1. -2 for anything else. */
+static inline int enemy_rank_parse(const char *s) {
+    static const char *const keys[ENEMY_RANKS] = {
+        "easy", "normal", "hard", "hardest", "extra1", "extra2"
+    };
+    if (!s) return -2;
+    if (!strcmp(s, "cabinet") || !strcmp(s, "-1")) return -1;
+    if (s[0] >= '0' && s[0] < '0' + ENEMY_RANKS && !s[1]) return s[0] - '0';
+    for (int i = 0; i < ENEMY_RANKS; i++)
+        if (!strcmp(s, keys[i])) return i;
+    return -2;
+}
+
+/* Up while a netplay session owns the board (netplay_active, set by the run
+ * loop each slice): host-side play settings that no room carries stand down. */
+static volatile int g_hle_netplay_board = 0;
+
 /* The flag byte's game-type bits for Type A..D (0..3). */
 static inline uint8_t game_type_flag_bits(int type) {
     static const uint8_t bits[4] = { 0x00, 0x40, 0x08, 0x48 };

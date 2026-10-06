@@ -12,7 +12,7 @@ cases). Generated files are left out, and so are the instruction
 interpreters and command dispatchers, whose size is the size of the thing
 they decode (DISPATCH below); both are reported on their own lines.
 """
-import argparse, csv, io, os, subprocess, sys
+import argparse, csv, io, os, re, shutil, subprocess, sys, tempfile
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -28,10 +28,59 @@ DISPATCH = {
 }
 
 
+def blank_static_asserts(text):
+    """Blank every _Static_assert(...);, keeping its newlines.
+
+    lizard reads a file-scope _Static_assert as the head of a function and,
+    depending on what is inside it, never finds its way out: from #325's
+    assert in geo3d.h on, every function to the end of the file went
+    unmeasured (geo3d_mesh_layers among them). An assert has no branches,
+    so blanking it costs the count nothing."""
+    out, i = [], 0
+    for m in re.finditer(r'\b_Static_assert\s*\(', text):
+        if m.start() < i:
+            continue
+        depth, j = 0, m.end() - 1
+        while j < len(text):
+            depth += {'(': 1, ')': -1}.get(text[j], 0)
+            j += 1
+            if depth == 0:
+                break
+        if text[j:j + 1] == ';':
+            j += 1
+        out.append(text[i:m.start()])
+        out.append(re.sub(r'[^\n]', ' ', text[m.start():j]))
+        i = j
+    out.append(text[i:])
+    return ''.join(out)
+
+
+_tree = None
+
+
+def source_tree():
+    """A copy of src/ that lizard can parse, under the same relative paths."""
+    global _tree
+    if _tree is None:
+        _tree = tempfile.TemporaryDirectory(prefix='spaghetti-')
+        for d, _, files in os.walk(os.path.join(ROOT, 'src')):
+            rel = os.path.relpath(d, ROOT)
+            os.makedirs(os.path.join(_tree.name, rel), exist_ok=True)
+            for f in files:
+                src, dst = os.path.join(d, f), os.path.join(_tree.name, rel, f)
+                if f.endswith(('.c', '.h', '.cpp')):
+                    with open(src, encoding='utf-8', errors='replace', newline='') as fi, \
+                         open(dst, 'w', encoding='utf-8', newline='') as fo:
+                        fo.write(blank_static_asserts(fi.read()))
+                else:
+                    shutil.copyfile(src, dst)
+    return _tree.name
+
+
 def lizard(*extra):
     cmd = [sys.executable, '-m', 'lizard', '-l', 'c', '-l', 'cpp', *extra, 'src']
     try:
-        out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True).stdout
+        out = subprocess.run(cmd, cwd=source_tree(), capture_output=True, text=True, check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         sys.exit('lizard failed; install it with: python3 -m pip install lizard')
     return out

@@ -491,46 +491,47 @@ static void hprof__write_frames(FILE *f) {
     free(work);
 }
 
-static void hprof__write(void) {
-    unsigned taken = atomic_load(&g_hprof.n);
-    unsigned n = taken < g_hprof.cap ? taken : g_hprof.cap;
-    double wall = (double)(g_hprof.t1_us - g_hprof.t0_us) / 1e6;
-    FILE *f = fopen(g_hprof.out, "w");
-    if (!f) { fprintf(stderr, "hostprof: cannot write %s: %s\n", g_hprof.out, strerror(errno)); return; }
+/* What every section of the report shares. */
+typedef struct {
+    FILE    *f;
+    unsigned n;          /* samples kept */
+    uint64_t wtot;       /* periods they stand for */
+    double   wall, cpu;  /* seconds */
+} hprof_report_t;
 
+/* The process's CPU seconds since the profile started, user and system. */
+static double hprof__cpu_s(void) {
     struct rusage ru1;
     getrusage(RUSAGE_SELF, &ru1);
-    double cpu = (double)(ru1.ru_utime.tv_sec - g_hprof.ru0.ru_utime.tv_sec)
-               + (double)(ru1.ru_utime.tv_usec - g_hprof.ru0.ru_utime.tv_usec) / 1e6
-               + (double)(ru1.ru_stime.tv_sec - g_hprof.ru0.ru_stime.tv_sec)
-               + (double)(ru1.ru_stime.tv_usec - g_hprof.ru0.ru_stime.tv_usec) / 1e6;
+    return (double)(ru1.ru_utime.tv_sec - g_hprof.ru0.ru_utime.tv_sec)
+         + (double)(ru1.ru_utime.tv_usec - g_hprof.ru0.ru_utime.tv_usec) / 1e6
+         + (double)(ru1.ru_stime.tv_sec - g_hprof.ru0.ru_stime.tv_sec)
+         + (double)(ru1.ru_stime.tv_usec - g_hprof.ru0.ru_stime.tv_usec) / 1e6;
+}
+
+static void hprof__write_header(const hprof_report_t *r, unsigned taken, const char *exe, const char *self_mod) {
+    FILE *f = r->f;
     struct utsname un;
     uname(&un);
-    char exe[256] = "";
-    ssize_t el = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (el > 0) exe[el] = 0;
-    Dl_info self;
-    memset(&self, 0, sizeof self);
-    const char *self_mod = dladdr((void *)hprof__write, &self) && self.dli_fname ? self.dli_fname : exe;
-
-    qsort(g_hprof.buf, n, sizeof *g_hprof.buf, hprof__cmp_sample);
-    uint64_t wtot = 0;
-    for (unsigned i = 0; i < n; i++) wtot += g_hprof.buf[i].weight;
-
     fprintf(f, "# m2hle host profile (src/core/host_prof.h; names: tools/hostprof.py)\n");
     fprintf(f, "wall_s %.3f\ncpu_s %.3f\nhz %d\nsamples %u\nperiods %llu\ndropped %u\nkernel %s %s\nexe %s\nmodule %s\n",
-            wall, cpu, g_hprof.hz, n, (unsigned long long)wtot, taken - n, un.release, un.machine, exe, self_mod);
+            r->wall, r->cpu, g_hprof.hz, r->n, (unsigned long long)r->wtot, taken - r->n, un.release, un.machine,
+            exe, self_mod);
     fprintf(f, "# CPU %.2f s over %.2f s wall = %.2f cores busy. A period is %.3f ms of one thread's CPU;\n"
                "# a sample stands for 1 + its timer's overrun periods. %% below is of all periods.\n\n",
-            cpu, wall, wall > 0 ? cpu / wall : 0.0, 1000.0 / g_hprof.hz);
+            r->cpu, r->wall, r->wall > 0 ? r->cpu / r->wall : 0.0, 1000.0 / g_hprof.hz);
+}
 
-    /* Threads: measured CPU time, and the zones within each by sample weight. */
+/* Threads: measured CPU time, and the zones within each by sample weight. */
+static void hprof__write_threads(const hprof_report_t *r) {
+    FILE *f = r->f;
+    double cpu = r->cpu, wall = r->wall;
     fprintf(f, "## threads (ms = CPU time measured on the thread's clock; ~ = estimated, it ended)\n");
     fprintf(f, "%-8s %-16s %9s %6s %6s  zones\n", "tid", "name", "ms", "%cpu", "cores");
     for (int k = 0; k < g_hprof.nthr; k++) {
         const hprof_thread_t *t = &g_hprof.thr[k];
         uint64_t zc[HPROF_ZONES] = {0}, tw = 0;
-        for (unsigned i = 0; i < n; i++)
+        for (unsigned i = 0; i < r->n; i++)
             if (g_hprof.buf[i].tid == t->tid) { zc[g_hprof.buf[i].zone % HPROF_ZONES] += g_hprof.buf[i].weight; tw += g_hprof.buf[i].weight; }
         double ms = t->ended ? 1000.0 * (double)tw / g_hprof.hz : (double)(t->cpu1_ns - t->cpu0_ns) / 1e6;
         if (ms < 0.05 && !tw) continue;
@@ -540,19 +541,24 @@ static void hprof__write(void) {
             if (zc[z]) fprintf(f, " %s %.1f%%", k_hprof_zone_names[z], 100.0 * (double)zc[z] / (double)tw);
         fprintf(f, "\n");
     }
+}
 
-    /* Zones over the whole process. */
+/* Zones over the whole process. */
+static void hprof__write_zones(const hprof_report_t *r) {
     uint64_t zall[HPROF_ZONES] = {0};
-    for (unsigned i = 0; i < n; i++) zall[g_hprof.buf[i].zone % HPROF_ZONES] += g_hprof.buf[i].weight;
-    fprintf(f, "\n## zones (all threads; ms = share of the process's CPU time)\n");
+    for (unsigned i = 0; i < r->n; i++) zall[g_hprof.buf[i].zone % HPROF_ZONES] += g_hprof.buf[i].weight;
+    fprintf(r->f, "\n## zones (all threads; ms = share of the process's CPU time)\n");
     for (int z = 0; z < HPROF_ZONES; z++)
         if (zall[z]) {
-            double share = (double)zall[z] / (double)(wtot ? wtot : 1);
-            fprintf(f, "%-8s %5.1f%% %9.1f ms %6.3f cores\n", k_hprof_zone_names[z], 100.0 * share,
-                    1000.0 * cpu * share, wall > 0 ? cpu * share / wall : 0.0);
+            double share = (double)zall[z] / (double)(r->wtot ? r->wtot : 1);
+            fprintf(r->f, "%-8s %5.1f%% %9.1f ms %6.3f cores\n", k_hprof_zone_names[z], 100.0 * share,
+                    1000.0 * r->cpu * share, r->wall > 0 ? r->cpu * share / r->wall : 0.0);
         }
+}
 
-    /* Aggregate identical (tid, zone, pc): the raw section and the symbol table. */
+/* Aggregate identical (tid, zone, pc) of the sorted buffer: the raw section
+ * and the symbol table. The caller frees the result. */
+static hprof_agg_t *hprof__aggregate(unsigned n, unsigned *na_out) {
     hprof_agg_t *agg = (hprof_agg_t *)malloc((n ? n : 1) * sizeof *agg);
     unsigned na = 0;
     for (unsigned i = 0; i < n; i++) {
@@ -561,10 +567,15 @@ static void hprof__write(void) {
             agg[na - 1].count += s->weight;
         else agg[na++] = (hprof_agg_t){ s->pc, s->tid, s->zone, s->weight };
     }
+    *na_out = na;
+    return agg;
+}
 
-    /* By module + dynamic symbol. The board's own code has no dynamic symbols
-     * (it is static and inlined), so it rolls up as one line per module;
-     * tools/hostprof.py names it. */
+/* By module + dynamic symbol. The board's own code has no dynamic symbols
+ * (it is static and inlined), so it rolls up as one line per module;
+ * tools/hostprof.py names it. */
+static void hprof__write_symbols(const hprof_report_t *r, const hprof_agg_t *agg, unsigned na) {
+    FILE *f = r->f;
     hprof_sym_t *syms = (hprof_sym_t *)calloc(na ? na : 1, sizeof *syms);
     unsigned ns = 0;
     for (unsigned i = 0; i < na; i++) {
@@ -581,7 +592,7 @@ static void hprof__write(void) {
     qsort(syms, ns, sizeof *syms, hprof__cmp_sym_count);
     fprintf(f, "\n## module:symbol (leaf, periods; top 40)\n");
     for (unsigned k = 0; k < ns && k < 40; k++) {
-        fprintf(f, "%7u %5.1f%%  %s  [", syms[k].count, 100.0 * syms[k].count / (double)(wtot ? wtot : 1), syms[k].key);
+        fprintf(f, "%7u %5.1f%%  %s  [", syms[k].count, 100.0 * syms[k].count / (double)(r->wtot ? r->wtot : 1), syms[k].key);
         int first = 1;
         for (int z = 0; z < HPROF_ZONES; z++)
             if (syms[k].zone_count[z]) {
@@ -591,9 +602,10 @@ static void hprof__write(void) {
         fprintf(f, "]\n");
     }
     free(syms);
+}
 
-    /* The executable mappings, for tools/hostprof.py. */
-    hprof__write_frames(f);
+/* The executable mappings, for tools/hostprof.py. */
+static void hprof__write_maps(FILE *f) {
     fprintf(f, "\n## maps\n");
     FILE *m = fopen("/proc/self/maps", "r");
     if (m) {
@@ -602,17 +614,18 @@ static void hprof__write(void) {
             if (strstr(line, " r-xp ") || strstr(line, " r-xs ")) fputs(line, f);
         fclose(m);
     }
-    fprintf(f, "\n## raw tid zone pc periods\n");
-    for (unsigned i = 0; i < na; i++)
-        fprintf(f, "%d %s %lx %u\n", agg[i].tid, k_hprof_zone_names[agg[i].zone % HPROF_ZONES],
-                (unsigned long)agg[i].pc, agg[i].count);
-    /* Samples outside our module (libc, the GL driver) by their link register:
-     * for a leaf function that is the return address, which usually names the
-     * code of ours that called into the library. */
+}
+
+/* Samples outside our module (libc, the GL driver) by their link register:
+ * for a leaf function that is the return address, which usually names the
+ * code of ours that called into the library. The buffer is spent after this. */
+static void hprof__write_raw_lr(const hprof_report_t *r, const void *self_base) {
+    FILE *f = r->f;
+    unsigned n = r->n;
     fprintf(f, "\n## raw-lr tid zone lr periods\n");
-    for (unsigned i = 0; i < n; i++) {                  /* the buffer is spent after this */
+    for (unsigned i = 0; i < n; i++) {
         Dl_info di;
-        bool ours = dladdr((void *)g_hprof.buf[i].pc, &di) && di.dli_fbase == self.dli_fbase;
+        bool ours = dladdr((void *)g_hprof.buf[i].pc, &di) && di.dli_fbase == self_base;
         g_hprof.buf[i].pc = ours ? 0 : g_hprof.buf[i].lr;
     }
     qsort(g_hprof.buf, n, sizeof *g_hprof.buf, hprof__cmp_sample);
@@ -625,10 +638,44 @@ static void hprof__write(void) {
                     k_hprof_zone_names[g_hprof.buf[i].zone % HPROF_ZONES], (unsigned long)g_hprof.buf[i].pc, w);
         i = j;
     }
+}
+
+static void hprof__write(void) {
+    unsigned taken = atomic_load(&g_hprof.n);
+    hprof_report_t r = { 0 };
+    r.n    = taken < g_hprof.cap ? taken : g_hprof.cap;
+    r.wall = (double)(g_hprof.t1_us - g_hprof.t0_us) / 1e6;
+    r.f    = fopen(g_hprof.out, "w");
+    if (!r.f) { fprintf(stderr, "hostprof: cannot write %s: %s\n", g_hprof.out, strerror(errno)); return; }
+    r.cpu  = hprof__cpu_s();
+
+    char exe[256] = "";
+    ssize_t el = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (el > 0) exe[el] = 0;
+    Dl_info self;
+    memset(&self, 0, sizeof self);
+    const char *self_mod = dladdr((void *)hprof__write, &self) && self.dli_fname ? self.dli_fname : exe;
+
+    qsort(g_hprof.buf, r.n, sizeof *g_hprof.buf, hprof__cmp_sample);
+    for (unsigned i = 0; i < r.n; i++) r.wtot += g_hprof.buf[i].weight;
+
+    hprof__write_header(&r, taken, exe, self_mod);
+    hprof__write_threads(&r);
+    hprof__write_zones(&r);
+    unsigned na;
+    hprof_agg_t *agg = hprof__aggregate(r.n, &na);
+    hprof__write_symbols(&r, agg, na);
+    hprof__write_frames(r.f);
+    hprof__write_maps(r.f);
+    fprintf(r.f, "\n## raw tid zone pc periods\n");
+    for (unsigned i = 0; i < na; i++)
+        fprintf(r.f, "%d %s %lx %u\n", agg[i].tid, k_hprof_zone_names[agg[i].zone % HPROF_ZONES],
+                (unsigned long)agg[i].pc, agg[i].count);
+    hprof__write_raw_lr(&r, self.dli_fbase);
     free(agg);
-    fclose(f);
+    fclose(r.f);
     fprintf(stderr, "hostprof: %u samples, %llu periods (%.2f cores over %.1f s) -> %s\n",
-            n, (unsigned long long)wtot, wall > 0 ? cpu / wall : 0.0, wall, g_hprof.out);
+            r.n, (unsigned long long)r.wtot, r.wall > 0 ? r.cpu / r.wall : 0.0, r.wall, g_hprof.out);
 }
 
 static void hprof__stop(void) {

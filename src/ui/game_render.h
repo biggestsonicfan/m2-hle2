@@ -21,8 +21,10 @@
 #include "sokol_gfx.h"
 
 #include "constants.h"
+#include "game_profile.h"
 #include "geo3d.h"
 #include "log.h"
+#include "rom_loader.h"
 
 typedef struct {
     float x, y;
@@ -928,219 +930,189 @@ static inline const char *game_render_glsl(sg_backend backend, const char *src, 
 
 /* ---- Init ---------------------------------------------------------------- */
 
-static inline void game_render_init(void) {
-    if (g_game_render.initialized) return;
+static inline void game_render__init_tile_shader(sg_backend backend) {
+    sg_shader_desc d;
+    memset(&d, 0, sizeof(d));
+    d.attrs[0].hlsl_sem_name  = "POSITION";
+    d.attrs[0].hlsl_sem_index = 0;
+    d.attrs[0].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
+    d.attrs[1].hlsl_sem_name  = "TEXCOORD";
+    d.attrs[1].hlsl_sem_index = 0;
+    d.attrs[1].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
 
-    sg_backend backend = sg_query_backend();
-    LOG_INFO("game_render_init: backend=%d", (int)backend);
+    d.views[0].texture.stage              = SG_SHADERSTAGE_FRAGMENT;
+    d.views[0].texture.image_type         = SG_IMAGETYPE_2D;
+    d.views[0].texture.sample_type        = SG_IMAGESAMPLETYPE_FLOAT;
+    d.views[0].texture.hlsl_register_t_n  = 0;
+    d.views[0].texture.msl_texture_n      = 0;
+    d.views[0].texture.wgsl_group1_binding_n = 0;
 
-    /* Fullscreen quad in clip space (-1..1), UV flipped on V so the top-left
-     * of the texture lands at the top-left of the quad. */
-    game_render_quad_vertex_t quad[6] = {
-        { -1.0f, -1.0f, 0.0f, 1.0f },
-        {  1.0f, -1.0f, 1.0f, 1.0f },
-        {  1.0f,  1.0f, 1.0f, 0.0f },
-        { -1.0f, -1.0f, 0.0f, 1.0f },
-        {  1.0f,  1.0f, 1.0f, 0.0f },
-        { -1.0f,  1.0f, 0.0f, 0.0f },
-    };
-    g_game_render.quad_vbuf = sg_make_buffer(&(sg_buffer_desc){
-        .usage = { .vertex_buffer = true, .immutable = true },
-        .data  = SG_RANGE(quad),
-        .label = "game-render-quad-vbuf",
-    });
+    d.samplers[0].stage             = SG_SHADERSTAGE_FRAGMENT;
+    d.samplers[0].sampler_type      = SG_SAMPLERTYPE_FILTERING;
+    d.samplers[0].hlsl_register_s_n = 0;
+    d.samplers[0].msl_sampler_n     = 0;
+    d.samplers[0].wgsl_group1_binding_n = 0;
 
-    {
+    d.texture_sampler_pairs[0].stage        = SG_SHADERSTAGE_FRAGMENT;
+    d.texture_sampler_pairs[0].view_slot    = 0;
+    d.texture_sampler_pairs[0].sampler_slot = 0;
+    d.texture_sampler_pairs[0].glsl_name    = "tex_smp";
+
+    d.label = "game-render-tile-shader";
+    if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+        d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
+        d.fragment_func.source = game_render_glsl(backend, game_render_tile_fs_glsl, 1);
+    } else if (backend == SG_BACKEND_D3D11) {
+        d.vertex_func.source       = game_render_tile_vs_hlsl;
+        d.vertex_func.d3d11_target = "vs_4_0";
+        d.fragment_func.source     = game_render_tile_fs_hlsl;
+        d.fragment_func.d3d11_target = "ps_4_0";
+    }
+    g_game_render.tile_shader = sg_make_shader(&d);
+}
+
+static inline void game_render__init_tile_pipelines(sg_backend backend) {
+    sg_pipeline_desc p;
+    memset(&p, 0, sizeof(p));
+    p.shader                  = g_game_render.tile_shader;
+    p.primitive_type          = SG_PRIMITIVETYPE_TRIANGLES;
+    p.layout.attrs[0].format  = SG_VERTEXFORMAT_FLOAT2;
+    p.layout.attrs[0].offset  = offsetof(game_render_quad_vertex_t, x);
+    p.layout.attrs[1].format  = SG_VERTEXFORMAT_FLOAT2;
+    p.layout.attrs[1].offset  = offsetof(game_render_quad_vertex_t, u);
+    p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
+    /* Alpha blend so the FG layer (alpha-keyed) composites over the 3D scene.
+     * BG has alpha=255 everywhere, so blending leaves it fully opaque. */
+    p.colors[0].blend.enabled        = true;
+    p.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
+    p.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    p.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
+    p.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ZERO;
+    p.label = "game-render-tile-pipeline";
+    g_game_render.tile_pipeline = sg_make_pipeline(&p);
+
+    if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
         sg_shader_desc d;
-        memset(&d, 0, sizeof(d));
-        d.attrs[0].hlsl_sem_name  = "POSITION";
-        d.attrs[0].hlsl_sem_index = 0;
-        d.attrs[0].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[1].hlsl_sem_name  = "TEXCOORD";
-        d.attrs[1].hlsl_sem_index = 0;
-        d.attrs[1].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
-
-        d.views[0].texture.stage              = SG_SHADERSTAGE_FRAGMENT;
-        d.views[0].texture.image_type         = SG_IMAGETYPE_2D;
-        d.views[0].texture.sample_type        = SG_IMAGESAMPLETYPE_FLOAT;
-        d.views[0].texture.hlsl_register_t_n  = 0;
-        d.views[0].texture.msl_texture_n      = 0;
-        d.views[0].texture.wgsl_group1_binding_n = 0;
-
-        d.samplers[0].stage             = SG_SHADERSTAGE_FRAGMENT;
-        d.samplers[0].sampler_type      = SG_SAMPLERTYPE_FILTERING;
-        d.samplers[0].hlsl_register_s_n = 0;
-        d.samplers[0].msl_sampler_n     = 0;
-        d.samplers[0].wgsl_group1_binding_n = 0;
-
-        d.texture_sampler_pairs[0].stage        = SG_SHADERSTAGE_FRAGMENT;
-        d.texture_sampler_pairs[0].view_slot    = 0;
-        d.texture_sampler_pairs[0].sampler_slot = 0;
-        d.texture_sampler_pairs[0].glsl_name    = "tex_smp";
-
-        d.label = "game-render-tile-shader";
-        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
-            d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
-            d.fragment_func.source = game_render_glsl(backend, game_render_tile_fs_glsl, 1);
-        } else if (backend == SG_BACKEND_D3D11) {
-            d.vertex_func.source       = game_render_tile_vs_hlsl;
-            d.vertex_func.d3d11_target = "vs_4_0";
-            d.fragment_func.source     = game_render_tile_fs_hlsl;
-            d.fragment_func.d3d11_target = "ps_4_0";
+        memset(&d, 0, sizeof d);
+        d.attrs[0].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+        d.attrs[1].base_type = SG_SHADERATTRBASETYPE_FLOAT;
+        static const char *const names[2] = { "tex_smp", "pal_smp" };
+        for (int i = 0; i < 2; i++) {
+            d.views[i].texture.stage       = SG_SHADERSTAGE_FRAGMENT;
+            d.views[i].texture.image_type  = SG_IMAGETYPE_2D;
+            d.views[i].texture.sample_type = SG_IMAGESAMPLETYPE_FLOAT;
+            d.texture_sampler_pairs[i].stage        = SG_SHADERSTAGE_FRAGMENT;
+            d.texture_sampler_pairs[i].view_slot    = i;
+            d.texture_sampler_pairs[i].sampler_slot = 0;
+            d.texture_sampler_pairs[i].glsl_name    = names[i];
         }
-        g_game_render.tile_shader = sg_make_shader(&d);
+        d.samplers[0].stage        = SG_SHADERSTAGE_FRAGMENT;
+        d.samplers[0].sampler_type = SG_SAMPLERTYPE_FILTERING;
+        d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
+        d.fragment_func.source = game_render_glsl(backend, game_render_indexed_fs_glsl, 1);
+        d.label = "game-render-indexed-shader";
+        g_game_render.indexed_shader = sg_make_shader(&d);
+        p.shader = g_game_render.indexed_shader;
+        p.label  = "game-render-indexed-pipeline";
+        g_game_render.indexed_pipeline = sg_make_pipeline(&p);
+        p.colors[0].blend.enabled = false;
+        p.label  = "game-render-indexed-opaque";
+        g_game_render.indexed_opaque = sg_make_pipeline(&p);
+        p.colors[0].blend.enabled = true;
     }
+}
 
-    {
-        sg_pipeline_desc p;
-        memset(&p, 0, sizeof(p));
-        p.shader                  = g_game_render.tile_shader;
-        p.primitive_type          = SG_PRIMITIVETYPE_TRIANGLES;
-        p.layout.attrs[0].format  = SG_VERTEXFORMAT_FLOAT2;
-        p.layout.attrs[0].offset  = offsetof(game_render_quad_vertex_t, x);
-        p.layout.attrs[1].format  = SG_VERTEXFORMAT_FLOAT2;
-        p.layout.attrs[1].offset  = offsetof(game_render_quad_vertex_t, u);
-        p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
-        /* Alpha blend so the FG layer (alpha-keyed) composites over the 3D scene.
-         * BG has alpha=255 everywhere, so blending leaves it fully opaque. */
-        p.colors[0].blend.enabled        = true;
-        p.colors[0].blend.src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA;
-        p.colors[0].blend.dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        p.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
-        p.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ZERO;
-        p.label = "game-render-tile-pipeline";
-        g_game_render.tile_pipeline = sg_make_pipeline(&p);
-
-        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
-            sg_shader_desc d;
-            memset(&d, 0, sizeof d);
-            d.attrs[0].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-            d.attrs[1].base_type = SG_SHADERATTRBASETYPE_FLOAT;
-            static const char *const names[2] = { "tex_smp", "pal_smp" };
-            for (int i = 0; i < 2; i++) {
-                d.views[i].texture.stage       = SG_SHADERSTAGE_FRAGMENT;
-                d.views[i].texture.image_type  = SG_IMAGETYPE_2D;
-                d.views[i].texture.sample_type = SG_IMAGESAMPLETYPE_FLOAT;
-                d.texture_sampler_pairs[i].stage        = SG_SHADERSTAGE_FRAGMENT;
-                d.texture_sampler_pairs[i].view_slot    = i;
-                d.texture_sampler_pairs[i].sampler_slot = 0;
-                d.texture_sampler_pairs[i].glsl_name    = names[i];
-            }
-            d.samplers[0].stage        = SG_SHADERSTAGE_FRAGMENT;
-            d.samplers[0].sampler_type = SG_SAMPLERTYPE_FILTERING;
-            d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
-            d.fragment_func.source = game_render_glsl(backend, game_render_indexed_fs_glsl, 1);
-            d.label = "game-render-indexed-shader";
-            g_game_render.indexed_shader = sg_make_shader(&d);
-            p.shader = g_game_render.indexed_shader;
-            p.label  = "game-render-indexed-pipeline";
-            g_game_render.indexed_pipeline = sg_make_pipeline(&p);
-            p.colors[0].blend.enabled = false;
-            p.label  = "game-render-indexed-opaque";
-            g_game_render.indexed_opaque = sg_make_pipeline(&p);
-            p.colors[0].blend.enabled = true;
-        }
-    }
-
-    g_game_render.tile_sampler = sg_make_sampler(&(sg_sampler_desc){
-        .min_filter = SG_FILTER_NEAREST,
-        .mag_filter = SG_FILTER_NEAREST,
+/* ---- Render-target blit ----------------------------------------------- */
+static inline void game_render__init_target(sg_backend backend, const game_render_quad_vertex_t quad[6]) {
+    /* GL render targets store their bottom row first, so the blit quad
+     * samples v=0 at the bottom; D3D's top row first, like the tile quads. */
+    bool gl = backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3;
+    game_render_quad_vertex_t tq[6];
+    memcpy(tq, quad, sizeof tq);
+    if (gl) for (int i = 0; i < 6; i++) tq[i].v = 1.0f - tq[i].v;
+    g_game_render.target_vbuf = sg_make_buffer(&(sg_buffer_desc){
+        .usage = { .vertex_buffer = true, .immutable = true },
+        .data  = SG_RANGE(tq),
+        .label = "game-render-target-vbuf",
+    });
+    sg_pipeline_desc p;
+    memset(&p, 0, sizeof(p));
+    p.shader                   = g_game_render.tile_shader;
+    p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
+    p.layout.attrs[0].format   = SG_VERTEXFORMAT_FLOAT2;
+    p.layout.attrs[0].offset   = offsetof(game_render_quad_vertex_t, x);
+    p.layout.attrs[1].format   = SG_VERTEXFORMAT_FLOAT2;
+    p.layout.attrs[1].offset   = offsetof(game_render_quad_vertex_t, u);
+    p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
+    p.label = "game-render-target-pipeline";
+    g_game_render.target_pipeline = sg_make_pipeline(&p);
+    g_game_render.target_sampler_linear = sg_make_sampler(&(sg_sampler_desc){
+        .min_filter = SG_FILTER_LINEAR,
+        .mag_filter = SG_FILTER_LINEAR,
         .wrap_u     = SG_WRAP_CLAMP_TO_EDGE,
         .wrap_v     = SG_WRAP_CLAMP_TO_EDGE,
-        .label      = "game-render-tile-sampler",
+        .label      = "game-render-target-sampler",
     });
+}
 
-    /* ---- Render-target blit ----------------------------------------------- */
-    {
-        /* GL render targets store their bottom row first, so the blit quad
-         * samples v=0 at the bottom; D3D's top row first, like the tile quads. */
-        bool gl = backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3;
-        game_render_quad_vertex_t tq[6];
-        memcpy(tq, quad, sizeof tq);
-        if (gl) for (int i = 0; i < 6; i++) tq[i].v = 1.0f - tq[i].v;
-        g_game_render.target_vbuf = sg_make_buffer(&(sg_buffer_desc){
-            .usage = { .vertex_buffer = true, .immutable = true },
-            .data  = SG_RANGE(tq),
-            .label = "game-render-target-vbuf",
-        });
-        sg_pipeline_desc p;
-        memset(&p, 0, sizeof(p));
-        p.shader                   = g_game_render.tile_shader;
-        p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
-        p.layout.attrs[0].format   = SG_VERTEXFORMAT_FLOAT2;
-        p.layout.attrs[0].offset   = offsetof(game_render_quad_vertex_t, x);
-        p.layout.attrs[1].format   = SG_VERTEXFORMAT_FLOAT2;
-        p.layout.attrs[1].offset   = offsetof(game_render_quad_vertex_t, u);
-        p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
-        p.label = "game-render-target-pipeline";
-        g_game_render.target_pipeline = sg_make_pipeline(&p);
-        g_game_render.target_sampler_linear = sg_make_sampler(&(sg_sampler_desc){
-            .min_filter = SG_FILTER_LINEAR,
-            .mag_filter = SG_FILTER_LINEAR,
-            .wrap_u     = SG_WRAP_CLAMP_TO_EDGE,
-            .wrap_v     = SG_WRAP_CLAMP_TO_EDGE,
-            .label      = "game-render-target-sampler",
-        });
+/* ---- Overlay layer blit ----------------------------------------------- */
+static inline void game_render__init_overlay(sg_backend backend) {
+    sg_shader_desc d;
+    memset(&d, 0, sizeof(d));
+    d.attrs[0].hlsl_sem_name  = "POSITION";
+    d.attrs[0].hlsl_sem_index = 0;
+    d.attrs[0].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
+    d.attrs[1].hlsl_sem_name  = "TEXCOORD";
+    d.attrs[1].hlsl_sem_index = 0;
+    d.attrs[1].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
+    d.views[0].texture.stage                 = SG_SHADERSTAGE_FRAGMENT;
+    d.views[0].texture.image_type            = SG_IMAGETYPE_2D;
+    d.views[0].texture.sample_type           = SG_IMAGESAMPLETYPE_FLOAT;
+    d.views[0].texture.hlsl_register_t_n     = 0;
+    d.views[0].texture.msl_texture_n         = 0;
+    d.views[0].texture.wgsl_group1_binding_n = 0;
+    d.samplers[0].stage                 = SG_SHADERSTAGE_FRAGMENT;
+    d.samplers[0].sampler_type          = SG_SAMPLERTYPE_FILTERING;
+    d.samplers[0].hlsl_register_s_n     = 0;
+    d.samplers[0].msl_sampler_n         = 0;
+    d.samplers[0].wgsl_group1_binding_n = 0;
+    d.texture_sampler_pairs[0].stage        = SG_SHADERSTAGE_FRAGMENT;
+    d.texture_sampler_pairs[0].view_slot    = 0;
+    d.texture_sampler_pairs[0].sampler_slot = 0;
+    d.texture_sampler_pairs[0].glsl_name    = "tex_smp";
+    d.label = "game-render-overlay-shader";
+    if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
+        d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
+        d.fragment_func.source = game_render_glsl(backend, game_render_overlay_fs_glsl, 1);
+    } else if (backend == SG_BACKEND_D3D11) {
+        d.vertex_func.source         = game_render_tile_vs_hlsl;
+        d.vertex_func.d3d11_target   = "vs_4_0";
+        d.fragment_func.source       = game_render_overlay_fs_hlsl;
+        d.fragment_func.d3d11_target = "ps_4_0";
     }
+    g_game_render.overlay_shader = sg_make_shader(&d);
 
-    /* ---- Overlay layer blit ----------------------------------------------- */
-    {
-        sg_shader_desc d;
-        memset(&d, 0, sizeof(d));
-        d.attrs[0].hlsl_sem_name  = "POSITION";
-        d.attrs[0].hlsl_sem_index = 0;
-        d.attrs[0].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
-        d.attrs[1].hlsl_sem_name  = "TEXCOORD";
-        d.attrs[1].hlsl_sem_index = 0;
-        d.attrs[1].base_type      = SG_SHADERATTRBASETYPE_FLOAT;
-        d.views[0].texture.stage                 = SG_SHADERSTAGE_FRAGMENT;
-        d.views[0].texture.image_type            = SG_IMAGETYPE_2D;
-        d.views[0].texture.sample_type           = SG_IMAGESAMPLETYPE_FLOAT;
-        d.views[0].texture.hlsl_register_t_n     = 0;
-        d.views[0].texture.msl_texture_n         = 0;
-        d.views[0].texture.wgsl_group1_binding_n = 0;
-        d.samplers[0].stage                 = SG_SHADERSTAGE_FRAGMENT;
-        d.samplers[0].sampler_type          = SG_SAMPLERTYPE_FILTERING;
-        d.samplers[0].hlsl_register_s_n     = 0;
-        d.samplers[0].msl_sampler_n         = 0;
-        d.samplers[0].wgsl_group1_binding_n = 0;
-        d.texture_sampler_pairs[0].stage        = SG_SHADERSTAGE_FRAGMENT;
-        d.texture_sampler_pairs[0].view_slot    = 0;
-        d.texture_sampler_pairs[0].sampler_slot = 0;
-        d.texture_sampler_pairs[0].glsl_name    = "tex_smp";
-        d.label = "game-render-overlay-shader";
-        if (backend == SG_BACKEND_GLCORE || backend == SG_BACKEND_GLES3) {
-            d.vertex_func.source   = game_render_glsl(backend, game_render_tile_vs_glsl, 0);
-            d.fragment_func.source = game_render_glsl(backend, game_render_overlay_fs_glsl, 1);
-        } else if (backend == SG_BACKEND_D3D11) {
-            d.vertex_func.source         = game_render_tile_vs_hlsl;
-            d.vertex_func.d3d11_target   = "vs_4_0";
-            d.fragment_func.source       = game_render_overlay_fs_hlsl;
-            d.fragment_func.d3d11_target = "ps_4_0";
-        }
-        g_game_render.overlay_shader = sg_make_shader(&d);
+    sg_pipeline_desc p;
+    memset(&p, 0, sizeof(p));
+    p.shader                   = g_game_render.overlay_shader;
+    p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
+    p.layout.attrs[0].format   = SG_VERTEXFORMAT_FLOAT2;
+    p.layout.attrs[0].offset   = offsetof(game_render_quad_vertex_t, x);
+    p.layout.attrs[1].format   = SG_VERTEXFORMAT_FLOAT2;
+    p.layout.attrs[1].offset   = offsetof(game_render_quad_vertex_t, u);
+    p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
+    /* Premultiplied source-over: ONE / ONE_MINUS_SRC_ALPHA on both. */
+    p.colors[0].blend.enabled          = true;
+    p.colors[0].blend.src_factor_rgb   = SG_BLENDFACTOR_ONE;
+    p.colors[0].blend.dst_factor_rgb   = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    p.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
+    p.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    p.label = "game-render-overlay-pipeline";
+    g_game_render.overlay_pipeline = sg_make_pipeline(&p);
+}
 
-        sg_pipeline_desc p;
-        memset(&p, 0, sizeof(p));
-        p.shader                   = g_game_render.overlay_shader;
-        p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
-        p.layout.attrs[0].format   = SG_VERTEXFORMAT_FLOAT2;
-        p.layout.attrs[0].offset   = offsetof(game_render_quad_vertex_t, x);
-        p.layout.attrs[1].format   = SG_VERTEXFORMAT_FLOAT2;
-        p.layout.attrs[1].offset   = offsetof(game_render_quad_vertex_t, u);
-        p.layout.buffers[0].stride = sizeof(game_render_quad_vertex_t);
-        /* Premultiplied source-over: ONE / ONE_MINUS_SRC_ALPHA on both. */
-        p.colors[0].blend.enabled          = true;
-        p.colors[0].blend.src_factor_rgb   = SG_BLENDFACTOR_ONE;
-        p.colors[0].blend.dst_factor_rgb   = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        p.colors[0].blend.src_factor_alpha = SG_BLENDFACTOR_ONE;
-        p.colors[0].blend.dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        p.label = "game-render-overlay-pipeline";
-        g_game_render.overlay_pipeline = sg_make_pipeline(&p);
-    }
-
-    /* ---- Line pipeline ---------------------------------------------------- */
-
+/* ---- Line pipeline ---------------------------------------------------- */
+static inline void game_render__init_lines(sg_backend backend) {
     g_game_render.line_vbuf = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .vertex_buffer = true, .dynamic_update = true },
         .size  = sizeof(g_game_render.line_verts),
@@ -1192,8 +1164,10 @@ static inline void game_render_init(void) {
         p.label = "game-render-line-pipeline";
         g_game_render.line_pipeline = sg_make_pipeline(&p);
     }
+}
 
-    /* ---- Fill (solid/textured triangle) pipeline -------------------------- */
+/* ---- Fill (solid/textured triangle) pipeline -------------------------- */
+static inline void game_render__init_fill_shaders(sg_backend backend) {
     g_game_render.fill_vbuf = sg_make_buffer(&(sg_buffer_desc){
         .usage = { .vertex_buffer = true, .dynamic_update = true },
         .size  = GEO3D_MAX_TRIS * sizeof(game_render_fill_tri_t),
@@ -1293,60 +1267,63 @@ static inline void game_render_init(void) {
             g_game_render.fill_shader_ref = sg_make_shader(&d);
         }
     }
-    {
-        sg_pipeline_desc p;
-        memset(&p, 0, sizeof(p));
-        p.shader                   = g_game_render.fill_shader;
-        p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
-        /* One instance a triangle, three vertices an instance. */
-        for (int c = 0; c < 3; c++) {
-            p.layout.attrs[c].format = SG_VERTEXFORMAT_FLOAT4;
-            p.layout.attrs[c].offset = (int)(offsetof(game_render_fill_tri_t, p) + (size_t)c * sizeof(float[4]));
-        }
-        p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
-        p.layout.attrs[3].offset   = offsetof(game_render_fill_tri_t, uv01);
-        p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT3;   /* u2, v2, zl */
-        p.layout.attrs[4].offset   = offsetof(game_render_fill_tri_t, u2);
-        p.layout.attrs[5].format   = SG_VERTEXFORMAT_FLOAT4;
-        p.layout.attrs[5].offset   = offsetof(game_render_fill_tri_t, r);
-        p.layout.attrs[6].format   = SG_VERTEXFORMAT_FLOAT4;
-        p.layout.attrs[6].offset   = offsetof(game_render_fill_tri_t, tx);
-        p.layout.attrs[7].format   = SG_VERTEXFORMAT_FLOAT4;
-        p.layout.attrs[7].offset   = offsetof(game_render_fill_tri_t, lb);
-        p.layout.buffers[0].stride    = sizeof(game_render_fill_tri_t);
-        p.layout.buffers[0].step_func = SG_VERTEXSTEP_PER_INSTANCE;
-        p.layout.buffers[0].step_rate = 1;
-        p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
-        p.depth.write_enabled      = true;
-        p.label = "game-render-fill-pipeline";
-        p.cull_mode = SG_CULLMODE_NONE;
-        g_game_render.fill_pipeline = sg_make_pipeline(&p);
-        p.cull_mode = SG_CULLMODE_BACK;
-        p.face_winding = SG_FACEWINDING_CW;   p.label = "fill-cull-cw";
-        g_game_render.fill_pipeline_cw = sg_make_pipeline(&p);
-        p.face_winding = SG_FACEWINDING_CCW;  p.label = "fill-cull-ccw";
-        g_game_render.fill_pipeline_ccw = sg_make_pipeline(&p);
-        if (g_game_render.fill_shader_opaque.id) {
-            p.shader = g_game_render.fill_shader_opaque;
-            p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-opaque";
-            g_game_render.fill_opaque[0] = sg_make_pipeline(&p);
-            p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-opaque-cw";
-            g_game_render.fill_opaque[1] = sg_make_pipeline(&p);
-            p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-opaque-ccw";
-            g_game_render.fill_opaque[2] = sg_make_pipeline(&p);
-        }
-        if (g_game_render.fill_shader_ref.id) {
-            p.shader = g_game_render.fill_shader_ref;
-            p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-ref";
-            g_game_render.fill_ref[0] = sg_make_pipeline(&p);
-            p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-ref-cw";
-            g_game_render.fill_ref[1] = sg_make_pipeline(&p);
-            p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-ref-ccw";
-            g_game_render.fill_ref[2] = sg_make_pipeline(&p);
-        }
-    }
+}
 
-    /* ---- Texture luma atlas ---------------------------------------------- */
+static inline void game_render__init_fill_pipelines(void) {
+    sg_pipeline_desc p;
+    memset(&p, 0, sizeof(p));
+    p.shader                   = g_game_render.fill_shader;
+    p.primitive_type           = SG_PRIMITIVETYPE_TRIANGLES;
+    /* One instance a triangle, three vertices an instance. */
+    for (int c = 0; c < 3; c++) {
+        p.layout.attrs[c].format = SG_VERTEXFORMAT_FLOAT4;
+        p.layout.attrs[c].offset = (int)(offsetof(game_render_fill_tri_t, p) + (size_t)c * sizeof(float[4]));
+    }
+    p.layout.attrs[3].format   = SG_VERTEXFORMAT_FLOAT4;
+    p.layout.attrs[3].offset   = offsetof(game_render_fill_tri_t, uv01);
+    p.layout.attrs[4].format   = SG_VERTEXFORMAT_FLOAT3;   /* u2, v2, zl */
+    p.layout.attrs[4].offset   = offsetof(game_render_fill_tri_t, u2);
+    p.layout.attrs[5].format   = SG_VERTEXFORMAT_FLOAT4;
+    p.layout.attrs[5].offset   = offsetof(game_render_fill_tri_t, r);
+    p.layout.attrs[6].format   = SG_VERTEXFORMAT_FLOAT4;
+    p.layout.attrs[6].offset   = offsetof(game_render_fill_tri_t, tx);
+    p.layout.attrs[7].format   = SG_VERTEXFORMAT_FLOAT4;
+    p.layout.attrs[7].offset   = offsetof(game_render_fill_tri_t, lb);
+    p.layout.buffers[0].stride    = sizeof(game_render_fill_tri_t);
+    p.layout.buffers[0].step_func = SG_VERTEXSTEP_PER_INSTANCE;
+    p.layout.buffers[0].step_rate = 1;
+    p.depth.compare            = SG_COMPAREFUNC_LESS_EQUAL;
+    p.depth.write_enabled      = true;
+    p.label = "game-render-fill-pipeline";
+    p.cull_mode = SG_CULLMODE_NONE;
+    g_game_render.fill_pipeline = sg_make_pipeline(&p);
+    p.cull_mode = SG_CULLMODE_BACK;
+    p.face_winding = SG_FACEWINDING_CW;   p.label = "fill-cull-cw";
+    g_game_render.fill_pipeline_cw = sg_make_pipeline(&p);
+    p.face_winding = SG_FACEWINDING_CCW;  p.label = "fill-cull-ccw";
+    g_game_render.fill_pipeline_ccw = sg_make_pipeline(&p);
+    if (g_game_render.fill_shader_opaque.id) {
+        p.shader = g_game_render.fill_shader_opaque;
+        p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-opaque";
+        g_game_render.fill_opaque[0] = sg_make_pipeline(&p);
+        p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-opaque-cw";
+        g_game_render.fill_opaque[1] = sg_make_pipeline(&p);
+        p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-opaque-ccw";
+        g_game_render.fill_opaque[2] = sg_make_pipeline(&p);
+    }
+    if (g_game_render.fill_shader_ref.id) {
+        p.shader = g_game_render.fill_shader_ref;
+        p.cull_mode = SG_CULLMODE_NONE;                                      p.label = "fill-ref";
+        g_game_render.fill_ref[0] = sg_make_pipeline(&p);
+        p.cull_mode = SG_CULLMODE_BACK; p.face_winding = SG_FACEWINDING_CW;  p.label = "fill-ref-cw";
+        g_game_render.fill_ref[1] = sg_make_pipeline(&p);
+        p.face_winding = SG_FACEWINDING_CCW;                                 p.label = "fill-ref-ccw";
+        g_game_render.fill_ref[2] = sg_make_pipeline(&p);
+    }
+}
+
+/* ---- Texture luma atlas ---------------------------------------------- */
+static inline void game_render__init_textures(sg_backend backend) {
     g_game_render.atlas_image = sg_make_image(&(sg_image_desc){
         .width        = GEO3D_ATLAS_W,
         .height       = GEO3D_ATLAS_H,
@@ -1392,6 +1369,47 @@ static inline void game_render_init(void) {
     g_game_render.ramp_count = 0;
     memset(g_ramp_row_of, 0, sizeof g_ramp_row_of);
     sg_add_commit_listener((sg_commit_listener){ .func = game_render__ramp_commit });
+}
+
+static inline void game_render_init(void) {
+    if (g_game_render.initialized) return;
+
+    sg_backend backend = sg_query_backend();
+    LOG_INFO("game_render_init: backend=%d", (int)backend);
+
+    /* Fullscreen quad in clip space (-1..1), UV flipped on V so the top-left
+     * of the texture lands at the top-left of the quad. */
+    game_render_quad_vertex_t quad[6] = {
+        { -1.0f, -1.0f, 0.0f, 1.0f },
+        {  1.0f, -1.0f, 1.0f, 1.0f },
+        {  1.0f,  1.0f, 1.0f, 0.0f },
+        { -1.0f, -1.0f, 0.0f, 1.0f },
+        {  1.0f,  1.0f, 1.0f, 0.0f },
+        { -1.0f,  1.0f, 0.0f, 0.0f },
+    };
+    g_game_render.quad_vbuf = sg_make_buffer(&(sg_buffer_desc){
+        .usage = { .vertex_buffer = true, .immutable = true },
+        .data  = SG_RANGE(quad),
+        .label = "game-render-quad-vbuf",
+    });
+
+    game_render__init_tile_shader(backend);
+    game_render__init_tile_pipelines(backend);
+
+    g_game_render.tile_sampler = sg_make_sampler(&(sg_sampler_desc){
+        .min_filter = SG_FILTER_NEAREST,
+        .mag_filter = SG_FILTER_NEAREST,
+        .wrap_u     = SG_WRAP_CLAMP_TO_EDGE,
+        .wrap_v     = SG_WRAP_CLAMP_TO_EDGE,
+        .label      = "game-render-tile-sampler",
+    });
+
+    game_render__init_target(backend, quad);
+    game_render__init_overlay(backend);
+    game_render__init_lines(backend);
+    game_render__init_fill_shaders(backend);
+    game_render__init_fill_pipelines();
+    game_render__init_textures(backend);
 
     g_game_render.initialized = true;
     LOG_INFO("game_render_init: complete");
@@ -1554,6 +1572,48 @@ static inline void game_render__atlas_send(void) {
     });
 }
 
+/* True while both texture banks are still empty (early boot, before the i960
+ * uploads textures). Every word is looked at, up to the first that is not 0:
+ * a sparse probe (one byte every 4 KB, all at x 0 of the sheet) missed
+ * m2_sprite.h's atlas, which a homebrew writes once at x 256, and the atlas
+ * was never decoded. Once anything has been seen the answer stays false; a
+ * decode of an emptied bank is only slower, never wrong. Only called when a
+ * write changed texture RAM (game_frame_draw's gen_tex). */
+static inline bool game_render__atlas_banks_empty(const uint8_t *texram0, const uint8_t *texram1,
+                                                  size_t sheet_size) {
+    static bool s_seen;
+    if (s_seen) return false;
+    const uint8_t *banks[2] = { texram0, texram1 };
+    for (int b = 0; b < 2; b++) {
+        if (!banks[b]) continue;
+        for (size_t k = 0; k + 8 <= sheet_size; k += 8) {
+            uint64_t w;
+            memcpy(&w, banks[b] + k, 8);
+            if (w) { s_seen = true; return false; }
+        }
+    }
+    return true;
+}
+
+/* Decode word row q of sheet s into its two atlas rows and mark them. */
+static inline void game_render__atlas_decode_row(uint8_t *atlas, const uint32_t *sheet, int s, uint32_t q) {
+    uint32_t y0 = (uint32_t)s * GEO3D_SHEET_H + (q & 511u) * 2u;
+    uint8_t *even = atlas + (size_t)y0 * GEO3D_ATLAS_W + (q < 512u ? 0 : 1024);
+    uint8_t *odd  = even + GEO3D_ATLAS_W;
+    const uint32_t *src = sheet + (size_t)q * 256u;
+    for (int w = 0; w < 256; w++) {
+        uint32_t word = src[w];
+        for (int h = 0; h < 2; h++, word >>= 16) {
+            uint8_t *e = even + 4 * w + 2 * h, *o = odd + 4 * w + 2 * h;
+            e[0] = (uint8_t)(((word >> 12) & 0xf) * 17u);   /* 0..15 → 0..255 */
+            e[1] = (uint8_t)(((word >>  8) & 0xf) * 17u);
+            o[0] = (uint8_t)(((word >>  4) & 0xf) * 17u);
+            o[1] = (uint8_t)(( word        & 0xf) * 17u);
+        }
+    }
+    g_game_render_atlas_row[y0] = g_game_render_atlas_row[y0 + 1] = 1;
+}
+
 /*
  * Decode the 4-bit luma texture sheet (texram0) into the R8 atlas and upload.
  * Logical layout 2048×1024 (per MAME model2rd.ipp get_texel): the sheet is
@@ -1585,13 +1645,7 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
     /* Skip the multi-megatexel decode while both texture banks are empty (early
      * boot, before the i960 uploads textures) — fills fall back to flat color.
      * The flags stay set, so the first decode covers everything written. */
-    {
-        size_t probe = 0;
-        for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram0[k] ? 1 : 0;
-        if (texram1)
-            for (size_t k = 0; k < sheet_size && probe < 16; k += 0x1000) probe += texram1[k] ? 1 : 0;
-        if (probe == 0) return;
-    }
+    if (game_render__atlas_banks_empty(texram0, texram1, sheet_size)) return;
     uint8_t *atlas = g_game_render_atlas_px;
     const uint32_t *sheets[2] = { (const uint32_t *)texram0, (const uint32_t *)texram1 };
     volatile uint8_t *dirty[2] = { dirty0, dirty1 };
@@ -1607,21 +1661,7 @@ static inline void game_render_upload_atlas(const uint8_t *texram0,
                 dirty[s][q] = 0;
             }
             any = true;
-            uint32_t y0 = (uint32_t)s * GEO3D_SHEET_H + (q & 511u) * 2u;
-            uint8_t *even = atlas + (size_t)y0 * GEO3D_ATLAS_W + (q < 512u ? 0 : 1024);
-            uint8_t *odd  = even + GEO3D_ATLAS_W;
-            const uint32_t *src = sheet + (size_t)q * 256u;
-            for (int w = 0; w < 256; w++) {
-                uint32_t word = src[w];
-                for (int h = 0; h < 2; h++, word >>= 16) {
-                    uint8_t *e = even + 4 * w + 2 * h, *o = odd + 4 * w + 2 * h;
-                    e[0] = (uint8_t)(((word >> 12) & 0xf) * 17u);   /* 0..15 → 0..255 */
-                    e[1] = (uint8_t)(((word >>  8) & 0xf) * 17u);
-                    o[0] = (uint8_t)(((word >>  4) & 0xf) * 17u);
-                    o[1] = (uint8_t)(( word        & 0xf) * 17u);
-                }
-            }
-            g_game_render_atlas_row[y0] = g_game_render_atlas_row[y0 + 1] = 1;
+            game_render__atlas_decode_row(atlas, sheet, s, q);
         }
     }
     if (!any) return;
@@ -2052,6 +2092,93 @@ static struct {
     int               count;
 } g_render_batch;
 
+/* Triangle i of the batch into the fill buffer: its corners, colour, ramp or
+ * shade row, texture and flags; can_discard[i] says whether its face can
+ * discard (transparent or checkered). */
+static inline void game_render__batch_fill_tri(int i, uint8_t *can_discard) {
+    const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
+    can_discard[i] = ((int)(T->fl + 0.5f) & (int)(GEO3D_FACE_TRANSPARENT | GEO3D_FACE_CHECKER)) != 0;
+    game_render_fill_tri_t *f = &g_game_render.fill_tris[i];
+    game_render_fill_tri_corners(f, T, T->zs0, T->zs1, T->zs2);
+    float lb = g_luma_ramp ? T->lb : -1.0f;
+    /* colour alpha: the face's row + 2 (1.0, as before, without one). A
+     * textured face with a luma band takes a shade row where there is
+     * one — the whole colour chain in a single fetch, flagged 128 — and
+     * a colour ramp row otherwise. */
+    float ramp = 1.0f, fl = geo3d_face_fill_flags(T->fl);
+    int row = -1;
+    if (g_game_render.shade_enabled && T->tw > 0.0f)
+        row = game_render__shade_row(lb, T->pl, T->r, T->g, T->b);
+    if (row >= 0) {
+        fl += 128.0f;
+    } else if (g_game_render.ramp_enabled) {
+        row = game_render__ramp_row(T->r, T->g, T->b);
+    }
+    if (row >= 0) ramp = (float)(row + 2);
+    f->r=T->r; f->g=T->g; f->b=T->b; f->a=ramp;
+    f->tx=T->tx; f->ty=T->ty; f->tw=T->tw; f->th=T->th;
+    f->lb=lb;    f->pl=T->pl; f->fl=fl;    f->texlod=T->texlod;
+    f->zl=T->zl;
+}
+
+/* The batch's nt triangles into the fill buffer, uploaded once. */
+static inline void game_render__batch_fills(int nt, uint8_t *can_discard) {
+    game_render__ramp_begin();
+    for (int i = 0; i < nt; i++) game_render__batch_fill_tri(i, can_discard);
+    sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
+        .ptr = g_game_render.fill_tris, .size = (size_t)nt * sizeof(game_render_fill_tri_t) });
+    game_render__ramp_upload();
+    g_fill_log.uploads++;
+}
+
+/* The batch's nl lines into the line buffer, uploaded once. */
+static inline void game_render__batch_lines(int nl) {
+    for (int i = 0; i < nl; i++) {
+        const geo3d_line_t *L = &g_geo3d_lines.lines[i];
+        game_render_line_vertex_t *v = &g_game_render.line_verts[i * 2];
+        v[0].x = L->x0; v[0].y = L->y0; v[0].z = L->z0; v[0].r = L->r; v[0].g = L->g; v[0].b = L->b; v[0].a = 1.0f;
+        v[1].x = L->x1; v[1].y = L->y1; v[1].z = L->z1; v[1].r = L->r; v[1].g = L->g; v[1].b = L->b; v[1].a = 1.0f;
+    }
+    sg_update_buffer(g_game_render.line_vbuf, &(sg_range){
+        .ptr = g_game_render.line_verts, .size = (size_t)nl * 2 * sizeof(game_render_line_vertex_t) });
+}
+
+/* With fill verification on, note a fill draw for the reference pass. */
+static inline void game_render__batch_log_fill(const game_render_run_t *run, const game_render_vs_params_t *vs,
+                                               int first, int count, int k) {
+    if (g_fill_log.n == GAME_RENDER_FILL_LOG_MAX) {
+        g_fill_log.overflow = true;
+    } else {
+        game_render_fill_draw_t *e = &g_fill_log.d[g_fill_log.n++];
+        e->vx = g_fill_log.vx; e->vy = g_fill_log.vy; e->vw = g_fill_log.vw; e->vh = g_fill_log.vh;
+        e->sx = run->sx; e->sy = run->sy; e->sw = run->sw; e->sh = run->sh;
+        memcpy(e->mvp, vs->mvp, sizeof e->mvp);
+        e->cull = g_backface_cull; e->first = first; e->count = count; e->can_discard = k;
+    }
+}
+
+/* Draw one run: its fills as stretches of alike triangles, then its lines. */
+static inline void game_render__batch_run(const game_render_run_t *run, int nt, int nl, bool fills, bool lines,
+                                          const uint8_t *can_discard) {
+    game_render_vs_params_t vs;
+    memcpy(vs.mvp, run->mvp_t, sizeof vs.mvp);
+    sg_apply_scissor_rect(run->sx, run->sy, run->sw, run->sh, true);
+    int tc = run->tri_first + run->tri_count > nt ? nt - run->tri_first : run->tri_count;
+    bool split = g_game_render_fill_split && g_game_render.fill_opaque[0].id != 0;
+    for (int s = run->tri_first, end = run->tri_first + (fills ? tc : 0); s < end; ) {
+        int k = can_discard[s], e0 = s;
+        if (split) while (e0 < end && can_discard[e0] == k) e0++;
+        else       { e0 = end; k = 1; }
+        game_render_submit_fills_as(&vs, s, e0 - s, k);
+        if (g_game_render_fill_verify) game_render__batch_log_fill(run, &vs, s, e0 - s, k);
+        s = e0;
+    }
+    int lc = run->line_first + run->line_count > nl ? nl - run->line_first : run->line_count;
+    if (lines && lc > 0) {
+        game_render_submit_lines(&vs, run->line_first * 2, lc * 2);
+    }
+}
+
 /* Upload the batch's geometry once and draw its runs in order, then empty it. */
 static inline void game_render_batch_flush(bool lines_only) {
     const int nt = g_geo3d_tris.count  > GEO3D_MAX_TRIS  ? GEO3D_MAX_TRIS  : g_geo3d_tris.count;
@@ -2063,79 +2190,11 @@ static inline void game_render_batch_flush(bool lines_only) {
      * drawn as consecutive stretches of alike triangles, in order, so the ones
      * that cannot go through the discard-free shader. */
     static uint8_t can_discard[GEO3D_MAX_TRIS];
-    if (fills) {
-        game_render__ramp_begin();
-        for (int i = 0; i < nt; i++) {
-            const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
-            can_discard[i] = ((int)(T->fl + 0.5f) & (int)(GEO3D_FACE_TRANSPARENT | GEO3D_FACE_CHECKER)) != 0;
-            game_render_fill_tri_t *f = &g_game_render.fill_tris[i];
-            game_render_fill_tri_corners(f, T, T->zs0, T->zs1, T->zs2);
-            float lb = g_luma_ramp ? T->lb : -1.0f;
-            /* colour alpha: the face's row + 2 (1.0, as before, without one). A
-             * textured face with a luma band takes a shade row where there is
-             * one — the whole colour chain in a single fetch, flagged 128 — and
-             * a colour ramp row otherwise. */
-            float ramp = 1.0f, fl = geo3d_face_fill_flags(T->fl);
-            int row = -1;
-            if (g_game_render.shade_enabled && T->tw > 0.0f)
-                row = game_render__shade_row(lb, T->pl, T->r, T->g, T->b);
-            if (row >= 0) {
-                fl += 128.0f;
-            } else if (g_game_render.ramp_enabled) {
-                row = game_render__ramp_row(T->r, T->g, T->b);
-            }
-            if (row >= 0) ramp = (float)(row + 2);
-            f->r=T->r; f->g=T->g; f->b=T->b; f->a=ramp;
-            f->tx=T->tx; f->ty=T->ty; f->tw=T->tw; f->th=T->th;
-            f->lb=lb;    f->pl=T->pl; f->fl=fl;    f->texlod=T->texlod;
-            f->zl=T->zl;
-        }
-        sg_update_buffer(g_game_render.fill_vbuf, &(sg_range){
-            .ptr = g_game_render.fill_tris, .size = (size_t)nt * sizeof(game_render_fill_tri_t) });
-        game_render__ramp_upload();
-        g_fill_log.uploads++;
-    }
-    if (lines) {
-        for (int i = 0; i < nl; i++) {
-            const geo3d_line_t *L = &g_geo3d_lines.lines[i];
-            game_render_line_vertex_t *v = &g_game_render.line_verts[i * 2];
-            v[0].x = L->x0; v[0].y = L->y0; v[0].z = L->z0; v[0].r = L->r; v[0].g = L->g; v[0].b = L->b; v[0].a = 1.0f;
-            v[1].x = L->x1; v[1].y = L->y1; v[1].z = L->z1; v[1].r = L->r; v[1].g = L->g; v[1].b = L->b; v[1].a = 1.0f;
-        }
-        sg_update_buffer(g_game_render.line_vbuf, &(sg_range){
-            .ptr = g_game_render.line_verts, .size = (size_t)nl * 2 * sizeof(game_render_line_vertex_t) });
-    }
+    if (fills) game_render__batch_fills(nt, can_discard);
+    if (lines) game_render__batch_lines(nl);
 
-    for (int r = 0; r < g_render_batch.count; r++) {
-        const game_render_run_t *run = &g_render_batch.runs[r];
-        game_render_vs_params_t vs;
-        memcpy(vs.mvp, run->mvp_t, sizeof vs.mvp);
-        sg_apply_scissor_rect(run->sx, run->sy, run->sw, run->sh, true);
-        int tc = run->tri_first + run->tri_count > nt ? nt - run->tri_first : run->tri_count;
-        bool split = g_game_render_fill_split && g_game_render.fill_opaque[0].id != 0;
-        for (int s = run->tri_first, end = run->tri_first + (fills ? tc : 0); s < end; ) {
-            int k = can_discard[s], e0 = s;
-            if (split) while (e0 < end && can_discard[e0] == k) e0++;
-            else       { e0 = end; k = 1; }
-            game_render_submit_fills_as(&vs, s, e0 - s, k);
-            if (g_game_render_fill_verify) {
-                if (g_fill_log.n == GAME_RENDER_FILL_LOG_MAX) {
-                    g_fill_log.overflow = true;
-                } else {
-                    game_render_fill_draw_t *e = &g_fill_log.d[g_fill_log.n++];
-                    e->vx = g_fill_log.vx; e->vy = g_fill_log.vy; e->vw = g_fill_log.vw; e->vh = g_fill_log.vh;
-                    e->sx = run->sx; e->sy = run->sy; e->sw = run->sw; e->sh = run->sh;
-                    memcpy(e->mvp, vs.mvp, sizeof e->mvp);
-                    e->cull = g_backface_cull; e->first = s; e->count = e0 - s; e->can_discard = k;
-                }
-            }
-            s = e0;
-        }
-        int lc = run->line_first + run->line_count > nl ? nl - run->line_first : run->line_count;
-        if (lines && lc > 0) {
-            game_render_submit_lines(&vs, run->line_first * 2, lc * 2);
-        }
-    }
+    for (int r = 0; r < g_render_batch.count; r++)
+        game_render__batch_run(&g_render_batch.runs[r], nt, nl, fills, lines, can_discard);
     g_render_batch.count = 0;
     geo3d_tris_reset();
     geo3d_lines_reset();
@@ -2208,16 +2267,99 @@ static inline void game_render__view_cull_planes(const float *mvp, int x0, int y
     }
 }
 
+/* What the ROM set's models are decoded from: its ROMs and the profile's
+ * model table. */
+static inline geo3d_models_t geo3d_models_of(const romset_t *rs, const game_quirks_t *q) {
+    return (geo3d_models_t){
+        .main_data = rs->main_data, .main_data_size = rs->main_data_size,
+        .polygons  = rs->polygons,  .polygons_size  = rs->polygons_size,
+        .materials = rs->textures,  .materials_size = rs->textures_size,
+        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+        .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add,
+    };
+}
+
+/* The end of the run of captures from i that share a window, a projection and
+ * a viewport. */
+static inline int game_render__geo_run_end(const geo3d_state_t *geo, int i, int count) {
+    const captured_model_t *c0 = &geo->captured[i];
+    int j = i;
+    while (j < count) {
+        const captured_model_t *cm = &geo->captured[j];
+        if (cm->window != c0->window || memcmp(cm->gproj, c0->gproj, sizeof cm->gproj) != 0
+                || memcmp(cm->vp, c0->vp, sizeof cm->vp) != 0)
+            break;
+        j++;
+    }
+    return j;
+}
+
+/* Decode capture k into the shared buffers, unless the isolate or the index
+ * filter leaves it out. */
+static inline void game_render__geo_decode_one(geo3d_state_t *geo, const geo3d_models_t *md, int k) {
+    const captured_model_t *cm = &geo->captured[k];
+    if (geo->isolate_index >= 0 && k != geo->isolate_index) return;
+    if (geo->filter_enabled && (k < geo->filter_min || k > geo->filter_max)) return;
+    g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
+    g_geo3d_obj_tpa = cm->tpa;
+    g_geo3d_obj_tha = cm->tha;
+    g_geo3d_board_luma = 1;
+    g_geo3d_mode = cm->geo_mode;
+    g_geo3d_zadjust = cm->zadjust;
+    g_geo3d_lod  = cm->geo_lod;
+    if (cm->direct_len) {           /* direct data: the polygons are in the list */
+        geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len,
+                            md->materials, md->materials_size, md->main_data, md->main_data_size,
+                            cm->gproj[0], cm->gproj[1]);
+    } else {
+        geo3d_models_t from = *md;
+        if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
+            uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
+            from.obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
+            from.obj_mesh_size = (0x8000u - word) * 4u;
+        }
+        geo3d_decode_model_cached(&from, cm->model_idx,
+                                  geo->use_matrix ? cm->matrix : NULL,
+                                  cm->color[0], cm->color[1], cm->color[2]);
+    }
+    g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
+    g_geo3d_board_luma = 0;
+}
+
+/* Decode captures i..j-1 into the batch as one run (geometry only; the caller
+ * sets its scissor and matrix) and return it. */
+static inline game_render_run_t *game_render__geo_decode_run(geo3d_state_t *geo, const geo3d_models_t *md,
+                                                             int i, int j) {
+    const float flat_prev_z = g_geo3d_flat_prev_z;
+    for (int attempt = 0; ; attempt++) {
+        const int tri_first = g_geo3d_tris.count, line_first = g_geo3d_lines.count;
+        g_geo3d_flat_prev_z = flat_prev_z;
+        for (int k = i; k < j; k++) game_render__geo_decode_one(geo, md, k);
+        /* The run filled the shared buffer after earlier runs: draw those and
+         * decode it again into an empty buffer, where it gets the whole
+         * capacity — exactly what drawing each run on its own gave it. */
+        bool full = g_geo3d_tris.count >= GEO3D_MAX_TRIS || g_geo3d_lines.count >= GEO3D_MAX_LINES;
+        if (full && attempt == 0 && (tri_first > 0 || line_first > 0)) {
+            g_geo3d_tris.count  = tri_first;
+            g_geo3d_lines.count = line_first;
+            game_render_batch_flush(geo->lines_only);
+            continue;
+        }
+        game_render_run_t *run = &g_render_batch.runs[g_render_batch.count++];
+        run->tri_first  = tri_first;
+        run->tri_count  = g_geo3d_tris.count - tri_first;
+        run->line_first = line_first;
+        run->line_count = g_geo3d_lines.count - line_first;
+        break;
+    }
+    return &g_render_batch.runs[g_render_batch.count - 1];
+}
+
 /*
  * Draw the frame's GEO display list: runs of objects that share a projection
  * and window are decoded together and drawn with that window's scissor.
  */
-static inline void game_render_draw_geo_list(geo3d_state_t *geo,
-                                              const uint8_t *main_data, size_t main_data_size,
-                                              const uint8_t *polygons,  size_t polygons_size,
-                                              const uint8_t *materials, size_t materials_size,
-                                              uint32_t table_off, uint32_t table_count,
-                                              uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline void game_render_draw_geo_list(geo3d_state_t *geo, const geo3d_models_t *md,
                                               int ox, int oy, int w, int h) {
     if (g_geo3d_dump_busy) return;
     const int count = geo->captured_count;
@@ -2231,14 +2373,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
     g_geo3d_flat_list = 1;
     for (int i = 0; i < count; ) {
         const captured_model_t *c0 = &geo->captured[i];
-        int j = i;
-        while (j < count) {
-            const captured_model_t *cm = &geo->captured[j];
-            if (cm->window != c0->window || memcmp(cm->gproj, c0->gproj, sizeof cm->gproj) != 0
-                    || memcmp(cm->vp, c0->vp, sizeof cm->vp) != 0)
-                break;
-            j++;
-        }
+        int j = game_render__geo_run_end(geo, i, count);
         int x0 = c0->vp[0] < 0 ? 0 : c0->vp[0], y0 = c0->vp[1] < 0 ? 0 : c0->vp[1];
         int x1 = c0->vp[2] > VIDEO_WIDTH ? VIDEO_WIDTH : c0->vp[2];
         int y1 = c0->vp[3] > VIDEO_HEIGHT ? VIDEO_HEIGHT : c0->vp[3];
@@ -2248,59 +2383,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
         float mvp[16];
         gm_mat4_geo_projection(mvp, c0->gproj, c0->window, geo->geo_windows);
         game_render__view_cull_planes(mvp, x0, y0, x1, y1);
-        const float flat_prev_z = g_geo3d_flat_prev_z;
-        for (int attempt = 0; ; attempt++) {
-            const int tri_first = g_geo3d_tris.count, line_first = g_geo3d_lines.count;
-            g_geo3d_flat_prev_z = flat_prev_z;
-            for (int k = i; k < j; k++) {
-                const captured_model_t *cm = &geo->captured[k];
-                if (geo->isolate_index >= 0 && k != geo->isolate_index) continue;
-                if (geo->filter_enabled && (k < geo->filter_min || k > geo->filter_max)) continue;
-                g_light_dir[0] = cm->light[0]; g_light_dir[1] = cm->light[1]; g_light_dir[2] = cm->light[2];
-                g_geo3d_obj_tpa = cm->tpa;
-                g_geo3d_obj_tha = cm->tha;
-                g_geo3d_board_luma = 1;
-                g_geo3d_mode = cm->geo_mode;
-                g_geo3d_zadjust = cm->zadjust;
-                g_geo3d_lod  = cm->geo_lod;
-                if (cm->direct_len) {           /* direct data: the polygons are in the list */
-                    geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len,
-                                        materials, materials_size, main_data, main_data_size,
-                                        cm->gproj[0], cm->gproj[1]);
-                } else {
-                    if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
-                        uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
-                        g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
-                        g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
-                    }
-                    geo3d_decode_model_cached(cm->model_idx, main_data, main_data_size, polygons, polygons_size,
-                                              materials, materials_size, table_off, table_count,
-                                              mesh_ptr_subtract, mesh_ptr_add,
-                                              geo->use_matrix ? cm->matrix : NULL,
-                                              cm->color[0], cm->color[1], cm->color[2]);
-                }
-                g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
-                g_geo3d_board_luma = 0;
-                g_geo3d_obj_mesh = NULL;
-            }
-            /* The run filled the shared buffer after earlier runs: draw those and
-             * decode it again into an empty buffer, where it gets the whole
-             * capacity — exactly what drawing each run on its own gave it. */
-            bool full = g_geo3d_tris.count >= GEO3D_MAX_TRIS || g_geo3d_lines.count >= GEO3D_MAX_LINES;
-            if (full && attempt == 0 && (tri_first > 0 || line_first > 0)) {
-                g_geo3d_tris.count  = tri_first;
-                g_geo3d_lines.count = line_first;
-                game_render_batch_flush(geo->lines_only);
-                continue;
-            }
-            game_render_run_t *run = &g_render_batch.runs[g_render_batch.count++];
-            run->tri_first  = tri_first;
-            run->tri_count  = g_geo3d_tris.count - tri_first;
-            run->line_first = line_first;
-            run->line_count = g_geo3d_lines.count - line_first;
-            break;
-        }
-        game_render_run_t *run = &g_render_batch.runs[g_render_batch.count - 1];
+        game_render_run_t *run = game_render__geo_decode_run(geo, md, i, j);
         run->sx = ox + x0 * w / VIDEO_WIDTH;
         run->sy = oy + y0 * h / VIDEO_HEIGHT;
         run->sw = (x1 - x0) * w / VIDEO_WIDTH;
@@ -2321,12 +2404,7 @@ static inline void game_render_draw_geo_list(geo3d_state_t *geo,
  *
  * ox/oy/w/h are the letterbox rect in framebuffer pixels (from game_render_letterbox).
  */
-static inline void game_render_draw_captured_models(geo3d_state_t *geo,
-                                                     const uint8_t *main_data, size_t main_data_size,
-                                                     const uint8_t *polygons,  size_t polygons_size,
-                                                     const uint8_t *materials, size_t materials_size,
-                                                     uint32_t table_off, uint32_t table_count,
-                                                     uint32_t mesh_ptr_subtract, uint32_t mesh_ptr_add,
+static inline void game_render_draw_captured_models(geo3d_state_t *geo, const geo3d_models_t *md,
                                                      int ox, int oy, int w, int h,
                                                      float cam_x, float cam_y, float cam_z,
                                                      float rot_y, float rot_x, float fov_deg,
@@ -2335,20 +2413,13 @@ static inline void game_render_draw_captured_models(geo3d_state_t *geo,
     if (!geo->enabled) { geo3d_lines_reset(); return; }
 
     if (geo->use_captures && geo->captured_count > 0 && geo->captured[0].view_space && !geo->test_triangle) {
-        game_render_draw_geo_list(geo, main_data, main_data_size, polygons, polygons_size,
-                                  materials, materials_size, table_off, table_count,
-                                  mesh_ptr_subtract, mesh_ptr_add, ox, oy, w, h);
+        game_render_draw_geo_list(geo, md, ox, oy, w, h);
         return;
     }
 
     /* Homebrew lists (geo3d_scan_displaylist), the test triangle and the
      * free camera: one batch through the host camera. */
-    geo3d_build_wireframes(geo, main_data, main_data_size,
-                           polygons, polygons_size,
-                           materials, materials_size,
-                           table_off, table_count,
-                           mesh_ptr_subtract, mesh_ptr_add, lerp_t,
-                           cam_x, cam_y, cam_z);
+    geo3d_build_wireframes(geo, md, lerp_t, cam_x, cam_y, cam_z);
     if (!geo->lines_only)
         game_render_draw_fills(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);
     game_render_draw_lines(cam_x, cam_y, cam_z, rot_y, rot_x, fov_deg, 0.0f);

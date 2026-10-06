@@ -371,6 +371,39 @@ static int sfight_hook_rounds_default(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /*
+ * enemy_rank_table (0x3B274, sub_3B22C+0x48): the CPU opponent's AI table.
+ * sub_3B22C, called as each fight sets up a CPU fighter, reads the cabinet's
+ * ENEMY RANK (match_enemy_rank, +0x3342 of the settings block), masks it to
+ * 0..3 and loads `ld match_enemy_rank_data[r15*4], r5` from the four pointers
+ * at 0x3EF60 (Easy 0x92828, Normal 0x92B28, Hard 0x92E28, Hardest 0x93128).
+ * Each table is 0x300 bytes, 32 a stage (stage_num & 15): two floats, two
+ * shorts and eleven bytes the routine copies into the robot at +0x44..+0x5E.
+ *
+ * The ROM carries two more tables of the same shape right after them, which
+ * nothing points at: 0x93428 and 0x93728 (Extra 1 and Extra 2 here). Both are
+ * close to Hard on the early stages and part from it later: Extra 1 runs
+ * hotter in the last bytes of the late stages, Extra 2 keeps the early
+ * stages' floats and is gentler in places. With g_enemy_rank set the load
+ * takes the named table instead and goes on at the next instruction (the
+ * `ld` is a two-word MEM instruction). Everything else ENEMY RANK decides
+ * (var_diff at 0x11AC8, the continue penalty at 0x3B31C, the Easy checks at
+ * 0x3BDCC and 0x3BF84) still reads the cabinet's byte.
+ *
+ * A netplay session plays the cabinet's table: no room carries the setting.
+ */
+#define SFIGHT_ENEMY_RANK_DATA 0x00092828u   /* match_enemy_rank_data_easy */
+#define SFIGHT_ENEMY_RANK_SIZE 0x300u
+
+static int sfight_hook_enemy_rank_table(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)bus;
+    int r = g_enemy_rank;
+    if (r < 0 || r >= ENEMY_RANKS || g_hle_netplay_board) return 1;
+    cpu->locals.r[5] = SFIGHT_ENEMY_RANK_DATA + (uint32_t)r * SFIGHT_ENEMY_RANK_SIZE;
+    cpu->sfr.ip = 0x0003B27C;
+    return 0;
+}
+
+/*
  * Cross-play with the PS3 port (net/ps3_link.h, hle_hooks.h g_xplay_*). The PS3
  * build's emulator runs a network match through traps on these three
  * instructions, and a board playing against it has to reach the same points:
@@ -622,7 +655,7 @@ static int sfight_hook_xplay_vic_dsp(i960_cpu_t *cpu, memory_bus_t *bus) {
 /* The eight bytes the PS3 menus hand NetGameMode_Set, in that order. Indices
  * are menu rows; out of range falls back to index 0, as the PS3 does. */
 typedef struct {
-    uint8_t difficulty;   /* s[0] Easy/Normal/Hard/Hardest, 0..3 (arcade only)  */
+    uint8_t difficulty;   /* s[0] Easy/Normal/Hard/Hardest/Extra 1/Extra 2 (arcade only) */
     uint8_t not_trial;    /* s[1] !trial -- not read by the apply functions     */
     uint8_t reserved;     /* s[2] always 0                                      */
     uint8_t time_idx;     /* s[3] 10/30/60/99 s                                 */
@@ -682,7 +715,12 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 
     if (!versus) {
         blk[0x00] = rounds[r];
-        blk[0x02] = s[0] < 4 ? s[0] : 1;  /* the PS3 stores it unchecked */
+        /* The PS3 stores it unchecked. Extra 1 / 2 (4, 5) are ours: the AI
+         * table comes from sfight_hook_enemy_rank_table, and the cabinet
+         * keeps Hard, the table nearest them, for everything else ENEMY
+         * RANK decides (the byte must stay 0..3: var_diff indexes by it). */
+        blk[0x02] = s[0] < 4 ? s[0] : s[0] < ENEMY_RANKS ? 2 : 1;
+        g_enemy_rank = s[0] >= 4 && s[0] < ENEMY_RANKS ? s[0] : -1;
         blk[0x03] = attack[a][1];
     }
     blk[0x01] = rounds[r];
@@ -711,7 +749,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 24
+#define SFIGHT_BASE_HOOK_COUNT 25
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
@@ -720,6 +758,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x00062688, sfight_hook_country_default,    "country_default"         }, \
     { 0x00062674, sfight_hook_damage_default,     "damage_default"          }, \
     { 0x000624F8, sfight_hook_rounds_default,     "rounds_default"          }, \
+    { 0x0003B274, sfight_hook_enemy_rank_table,   "enemy_rank_table"        }, \
     { 0x000083F4, sfight_hook_xplay_force_start,  "xplay_force_start"       }, \
     { 0x0000A218, sfight_hook_xplay_barrier,      "xplay_sel_int_barrier"   }, \
     { 0x0000E6EC, sfight_hook_xplay_match_over,   "xplay_vic_int"           }, \
@@ -794,6 +833,7 @@ _Static_assert(sizeof((hle_hook_entry_t[]){ SFIGHT_BASE_HOOKS }) ==
     .sound_queue_count_addr = 0x00504001,   /* byte_504001 */                         \
     .warning_skip_addr      = 0x00500410,   /* SKIP_WARNING; see g_warning_skip */   \
     .vs_rematch             = true,         /* sfight_hook_vs_rematch */             \
+    .enemy_ranks            = true,         /* sfight_hook_enemy_rank_table */       \
     .attract_replay = {                                                             \
         .step_addr   = 0x00500030,           /* _sub_mode */                          \
         .from_step   = 5,                                                             \

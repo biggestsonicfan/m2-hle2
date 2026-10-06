@@ -24,7 +24,8 @@
  *     new one.
  *
  * WHAT A "ROUND" IS HERE. In yampnet a round is one match inside a running
- * emulator. This emulator has no savestates, so a netplay session instead starts
+ * emulator. This emulator's savestates (savestate.h) are files on one machine and
+ * are never traded between peers, so a netplay session instead starts
  * from a COLD BOARD RESET on both machines (netplay.h drives that) and every
  * frame from boot is lockstepped. A generation is therefore one whole session
  * from reset, and bumping it is how a session is restarted without leaving the

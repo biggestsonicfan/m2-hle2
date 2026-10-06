@@ -222,7 +222,7 @@ static int load_rom(const char *zip, bool sound) {
             parent_ptr = parent;
         }
     }
-    if (g_active_profile->load_fn(&romset, zip, parent_ptr) != 0) return -1;
+    if (romset_load(&romset, g_active_profile->load_fn, zip, parent_ptr) != 0) return -1;
     g_active_profile->install_fn(&romset, &cpu, &bus);
 
     if (sound && g_active_profile->quirks.enable_68k_sound) {

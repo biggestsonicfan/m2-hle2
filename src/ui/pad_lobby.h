@@ -128,31 +128,29 @@ static void lobby_row(lobby_act_t act, bool enabled, uint64_t room, const char *
     va_end(args);
 }
 
-/* Once per rendered frame: take a snapshot, react to state changes and rebuild
- * the menu for the state the session is in. */
-static void lobby_update(uint64_t now) {
-    netplay_get_status(&g_lobby.st);
-    const netplay_status_t *st = &g_lobby.st;
-
-    if ((int)st->state != g_lobby.last_state) {
-        int was = g_lobby.last_state;
-        g_lobby.last_state = (int)st->state;
-        g_lobby.sel = 0;
-        if (netplay_state_running(st->state)) {
-            g_lobby.match_start = now;
-            lobby_show(false);
-        } else if (was == NETPLAY_PLAYING || was == NETPLAY_WATCHING) {
-            lobby_show(true);   /* the match ended: say why, and what next */
-        }
-        g_lobby.again = false;
-        if (st->state == NETPLAY_ONLINE) g_lobby.next_search = 0;   /* list the rooms now */
-        if (st->state == NETPLAY_ONLINE && g_lobby.net_host) {
-            g_lobby.net_host = false;   /* once: a later sign-in is the player's */
-            netplay_post(NETPLAY_CMD_HOST, &g_lobby.cfg);
-        }
+/* The session moved to another state: the menu starts at its top, a match
+ * closes the lobby and its end opens it again. */
+static void lobby_on_state(const netplay_status_t *st, uint64_t now) {
+    int was = g_lobby.last_state;
+    g_lobby.last_state = (int)st->state;
+    g_lobby.sel = 0;
+    if (netplay_state_running(st->state)) {
+        g_lobby.match_start = now;
+        lobby_show(false);
+    } else if (was == NETPLAY_PLAYING || was == NETPLAY_WATCHING) {
+        lobby_show(true);   /* the match ended: say why, and what next */
     }
-    /* A VS-mode result: the boards go back to character select on their own,
-     * so ask whether to go again, with leaving one button away. */
+    g_lobby.again = false;
+    if (st->state == NETPLAY_ONLINE) g_lobby.next_search = 0;   /* list the rooms now */
+    if (st->state == NETPLAY_ONLINE && g_lobby.net_host) {
+        g_lobby.net_host = false;   /* once: a later sign-in is the player's */
+        netplay_post(NETPLAY_CMD_HOST, &g_lobby.cfg);
+    }
+}
+
+/* A VS-mode result: the boards go back to character select on their own,
+ * so ask whether to go again, with leaving one button away. */
+static void lobby_vs_result(const netplay_status_t *st) {
     if (st->state != NETPLAY_PLAYING) {
         g_lobby.vs_seen = st->results;
     } else if (st->results != g_lobby.vs_seen) {
@@ -163,71 +161,83 @@ static void lobby_update(uint64_t now) {
         }
     }
     if (!g_lobby.open) g_lobby.again = false;
-    if (st->state == NETPLAY_ONLINE && g_lobby.open && !st->search_pending
-            && now >= g_lobby.next_search) {
-        netplay_post(NETPLAY_CMD_SEARCH, &g_lobby.cfg);
-        g_lobby.next_search = now + 5000000000ull;
-    }
+}
 
+/* Signed out: sign in with what is stored, with Twitch, or play offline. */
+static void lobby_rows_signed_out(const netplay_status_t *st, const netplay_config_t *c) {
+    bool twitch_busy = st->twitch_state == RPCN_TWITCH_STARTING || st->twitch_state == RPCN_TWITCH_WAITING;
+    if (g_lobby.external_login) {
+        lobby_row(LB_CLOSE, false, 0, "%s", g_lobby.login_hint ? g_lobby.login_hint : "Not signed in");
+    } else if (twitch_busy) {
+        lobby_row(LB_TWITCH_CANCEL, true, 0, "Cancel the Twitch sign-in");
+    } else {
+        if (c->twitch_token[0])
+            lobby_row(LB_SIGN_IN, true, 0, "Sign in as %s (Twitch)",
+                      c->twitch_npid[0] ? c->twitch_npid : c->npid);
+        else if (c->npid[0] && c->password[0])
+            lobby_row(LB_SIGN_IN, true, 0, "Sign in as %s", c->npid);
+        if (!c->twitch_token[0])
+            lobby_row(LB_TWITCH, true, 0, "Sign in with Twitch");
+    }
+    lobby_row(LB_CLOSE, true, 0, "Play offline");
+}
+
+/* One room of the search: a Join row, or the reason it cannot be joined. */
+static void lobby_room_row(const rpcn_room_listing_t *r) {
+    const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
+    if (why)                              lobby_row(LB_JOIN, false, 0, "%.16s: other version", r->owner);
+    else if (r->has_password)             lobby_row(LB_JOIN, false, 0, "%.16s: locked", r->owner);
+    else if (r->cur_members >= r->max_slots) lobby_row(LB_JOIN, false, 0, "%.16s: full", r->owner);
+    else lobby_row(LB_JOIN, true, r->room_id, "Join %.16s (%u/%u, delay %u)", r->owner,
+                   (unsigned)r->cur_members, (unsigned)r->max_slots,
+                   (unsigned)((r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK));
+}
+
+static void lobby_rows_online(const netplay_status_t *st, const netplay_config_t *c) {
+    lobby_row(LB_HOST, true, 0, "Host a room for %u (delay %u)",
+              (unsigned)c->max_players, (unsigned)c->frame_delay);
+    lobby_row(LB_SIZE, true, 0, "Room size: %u players", (unsigned)c->max_players);
+    for (uint32_t i = 0; i < st->room_count; i++) lobby_room_row(&st->rooms[i]);
+    lobby_row(LB_REFRESH, !st->search_pending, 0, st->search_pending ? "Searching..." : "Refresh the list");
+    if (!g_lobby.external_login) lobby_row(LB_DISCONNECT, true, 0, "Sign out");
+    lobby_row(LB_CLOSE, true, 0, "Back to the game");
+}
+
+static void lobby_rows_in_room(const netplay_status_t *st) {
+    /* Start is "ready": the owner starts once every player in the room is,
+     * and after the first match the room keeps going on its own. */
+    bool watching = (st->me.flags & ROOM_MEMBER_WATCH) != 0;
+    if (st->me.flags & ROOM_MEMBER_READY)
+        lobby_row(LB_STOP, true, 0, "Not ready");
+    else if (!watching)
+        lobby_row(LB_START, st->member_count >= 2, 0, st->peer_ready ? "Ready - they are waiting" : "Ready");
+    static const char *const side_text[] = { "either side", "1P", "2P" };
+    lobby_row(LB_ENTRY, !watching, 0, "Side: %s", side_text[st->me.entry <= 2 ? st->me.entry : 0]);
+    lobby_row(LB_WATCH, true, 0, watching ? "Play again (stop sitting out)" : "Sit out (watch only)");
+    if (st->is_host && st->room.phase == ROOM_PHASE_LOBBY)
+        lobby_row(LB_FORCE, st->member_count >= 2, 0, "Start the next match now");
+    lobby_row(LB_LEAVE_ROOM, true, 0, "Leave the room");
+    lobby_row(LB_CLOSE, true, 0, "Back to the game");
+}
+
+/* The menu for the state the session is in. */
+static void lobby_rows_build(const netplay_status_t *st) {
     g_lobby.nrows = 0;
     const netplay_config_t *c = &g_lobby.cfg;
-    bool twitch_busy = st->twitch_state == RPCN_TWITCH_STARTING || st->twitch_state == RPCN_TWITCH_WAITING;
     switch (st->state) {
         case NETPLAY_OFF:
         case NETPLAY_FAILED:
-            if (g_lobby.external_login) {
-                lobby_row(LB_CLOSE, false, 0, "%s", g_lobby.login_hint ? g_lobby.login_hint : "Not signed in");
-            } else if (twitch_busy) {
-                lobby_row(LB_TWITCH_CANCEL, true, 0, "Cancel the Twitch sign-in");
-            } else {
-                if (c->twitch_token[0])
-                    lobby_row(LB_SIGN_IN, true, 0, "Sign in as %s (Twitch)",
-                              c->twitch_npid[0] ? c->twitch_npid : c->npid);
-                else if (c->npid[0] && c->password[0])
-                    lobby_row(LB_SIGN_IN, true, 0, "Sign in as %s", c->npid);
-                if (!c->twitch_token[0])
-                    lobby_row(LB_TWITCH, true, 0, "Sign in with Twitch");
-            }
-            lobby_row(LB_CLOSE, true, 0, "Play offline");
+            lobby_rows_signed_out(st, c);
             break;
         case NETPLAY_CONNECTING:
             lobby_row(LB_DISCONNECT, true, 0, "Cancel");
             break;
         case NETPLAY_ONLINE:
-            lobby_row(LB_HOST, true, 0, "Host a room for %u (delay %u)",
-                      (unsigned)c->max_players, (unsigned)c->frame_delay);
-            lobby_row(LB_SIZE, true, 0, "Room size: %u players", (unsigned)c->max_players);
-            for (uint32_t i = 0; i < st->room_count; i++) {
-                const rpcn_room_listing_t *r = &st->rooms[i];
-                const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
-                if (why)                              lobby_row(LB_JOIN, false, 0, "%.16s: other version", r->owner);
-                else if (r->has_password)             lobby_row(LB_JOIN, false, 0, "%.16s: locked", r->owner);
-                else if (r->cur_members >= r->max_slots) lobby_row(LB_JOIN, false, 0, "%.16s: full", r->owner);
-                else lobby_row(LB_JOIN, true, r->room_id, "Join %.16s (%u/%u, delay %u)", r->owner,
-                               (unsigned)r->cur_members, (unsigned)r->max_slots,
-                               (unsigned)((r->flag_attr >> NETPLAY_ROOM_DELAY_SHIFT) & NETPLAY_ROOM_DELAY_MASK));
-            }
-            lobby_row(LB_REFRESH, !st->search_pending, 0, st->search_pending ? "Searching..." : "Refresh the list");
-            if (!g_lobby.external_login) lobby_row(LB_DISCONNECT, true, 0, "Sign out");
-            lobby_row(LB_CLOSE, true, 0, "Back to the game");
+            lobby_rows_online(st, c);
             break;
-        case NETPLAY_IN_ROOM: {
-            /* Start is "ready": the owner starts once every player in the room is,
-             * and after the first match the room keeps going on its own. */
-            bool watching = (st->me.flags & ROOM_MEMBER_WATCH) != 0;
-            if (st->me.flags & ROOM_MEMBER_READY)
-                lobby_row(LB_STOP, true, 0, "Not ready");
-            else if (!watching)
-                lobby_row(LB_START, st->member_count >= 2, 0, st->peer_ready ? "Ready - they are waiting" : "Ready");
-            static const char *const side_text[] = { "either side", "1P", "2P" };
-            lobby_row(LB_ENTRY, !watching, 0, "Side: %s", side_text[st->me.entry <= 2 ? st->me.entry : 0]);
-            lobby_row(LB_WATCH, true, 0, watching ? "Play again (stop sitting out)" : "Sit out (watch only)");
-            if (st->is_host && st->room.phase == ROOM_PHASE_LOBBY)
-                lobby_row(LB_FORCE, st->member_count >= 2, 0, "Start the next match now");
-            lobby_row(LB_LEAVE_ROOM, true, 0, "Leave the room");
-            lobby_row(LB_CLOSE, true, 0, "Back to the game");
+        case NETPLAY_IN_ROOM:
+            lobby_rows_in_room(st);
             break;
-        }
         case NETPLAY_SYNCING:
             lobby_row(LB_STOP, true, 0, "Cancel");
             lobby_row(LB_CLOSE, true, 0, "Back to the game");
@@ -246,6 +256,23 @@ static void lobby_update(uint64_t now) {
             lobby_row(LB_STOP, true, 0, "Stop watching");
             break;
     }
+}
+
+/* Once per rendered frame: take a snapshot, react to state changes and rebuild
+ * the menu for the state the session is in. */
+static void lobby_update(uint64_t now) {
+    netplay_get_status(&g_lobby.st);
+    const netplay_status_t *st = &g_lobby.st;
+
+    if ((int)st->state != g_lobby.last_state) lobby_on_state(st, now);
+    lobby_vs_result(st);
+    if (st->state == NETPLAY_ONLINE && g_lobby.open && !st->search_pending
+            && now >= g_lobby.next_search) {
+        netplay_post(NETPLAY_CMD_SEARCH, &g_lobby.cfg);
+        g_lobby.next_search = now + 5000000000ull;
+    }
+
+    lobby_rows_build(st);
     if (g_lobby.sel >= g_lobby.nrows) g_lobby.sel = g_lobby.nrows - 1;
     if (g_lobby.sel < 0) g_lobby.sel = 0;
     /* Never rest on a row that cannot be picked ("Start" before anyone joins). */
@@ -326,46 +353,40 @@ static float lobby_text(float x, float y, int cols, uint8_t r, uint8_t g, uint8_
     return lobby_text_ex(x, y, cols, r, g, b, s, true);
 }
 
-static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
-    const netplay_status_t *st = &g_lobby.st;
-    float scale = fb_h >= 720 ? 3.0f : 2.0f;
-    int   cols  = (int)((float)fb_w / scale / 8.0f);
-    char  buf[640];
-    sg_apply_viewport(0, 0, fb_w, fb_h, true);
-    sg_apply_scissor_rect(0, 0, fb_w, fb_h, true);
-    sdtx_canvas((float)fb_w / scale, (float)fb_h / scale);
-    sdtx_origin(0.0f, 0.0f);
-
-    if (!g_lobby.open) {
-        /* In a match: who against, for a few seconds, and a desync for good. */
-        if (st->state == NETPLAY_PLAYING && now_ns - g_lobby.match_start < 5000000000ull) {
-            snprintf(buf, sizeof buf, "P%d vs %s", st->local_player + 1, st->peer_npid);
-            lobby_text(1.0f, 0.25f, cols, 120, 220, 255, buf);
-        }
-        if (st->state == NETPLAY_WATCHING && now_ns - g_lobby.match_start < 5000000000ull) {
-            const char *n1 = "?", *n2 = "?";
-            for (uint32_t i = 0; i < st->member_count; i++) {
-                if (st->members[i].side == 0) n1 = st->members[i].npid;
-                if (st->members[i].side == 1) n2 = st->members[i].npid;
-            }
-            snprintf(buf, sizeof buf, "Watching %s vs %s", n1, n2);
-            lobby_text(1.0f, 0.25f, cols, 120, 220, 255, buf);
-        }
-        if (netplay_state_running(st->state) && st->desync_frame != LOCKSTEP_NO_CHECK) {
-            snprintf(buf, sizeof buf, "DESYNC at frame %u", st->desync_frame);
-            lobby_text(1.0f, 1.25f, cols, 255, 90, 90, buf);
-        }
-        /* The room emptied with the board still in its VS mode: in the middle,
-         * until a button restarts the game (netplay_empty_room_pump). */
-        if (st->empty_room) {
-            float y = (float)fb_h / scale / 8.0f * 0.5f - 2.0f;
-            y = lobby_text(1.0f, y, cols, 255, 255, 140, "There are no other players in the lobby.");
-            lobby_text(1.0f, y + 0.5f, cols, 255, 255, 255, "Press any button to restart the game.");
-        }
-        return;
+/* In a match, with the lobby closed: who against, for a few seconds, a desync
+ * for good, and an emptied room in the middle. */
+static void lobby_draw_closed(const netplay_status_t *st, float scale, int fb_h, int cols, uint64_t now_ns) {
+    char buf[640];
+    /* In a match: who against, for a few seconds, and a desync for good. */
+    if (st->state == NETPLAY_PLAYING && now_ns - g_lobby.match_start < 5000000000ull) {
+        snprintf(buf, sizeof buf, "P%d vs %s", st->local_player + 1, st->peer_npid);
+        lobby_text(1.0f, 0.25f, cols, 120, 220, 255, buf);
     }
+    if (st->state == NETPLAY_WATCHING && now_ns - g_lobby.match_start < 5000000000ull) {
+        const char *n1 = "?", *n2 = "?";
+        for (uint32_t i = 0; i < st->member_count; i++) {
+            if (st->members[i].side == 0) n1 = st->members[i].npid;
+            if (st->members[i].side == 1) n2 = st->members[i].npid;
+        }
+        snprintf(buf, sizeof buf, "Watching %s vs %s", n1, n2);
+        lobby_text(1.0f, 0.25f, cols, 120, 220, 255, buf);
+    }
+    if (netplay_state_running(st->state) && st->desync_frame != LOCKSTEP_NO_CHECK) {
+        snprintf(buf, sizeof buf, "DESYNC at frame %u", st->desync_frame);
+        lobby_text(1.0f, 1.25f, cols, 255, 90, 90, buf);
+    }
+    /* The room emptied with the board still in its VS mode: in the middle,
+     * until a button restarts the game (netplay_empty_room_pump). */
+    if (st->empty_room) {
+        float y = (float)fb_h / scale / 8.0f * 0.5f - 2.0f;
+        y = lobby_text(1.0f, y, cols, 255, 255, 140, "There are no other players in the lobby.");
+        lobby_text(1.0f, y + 0.5f, cols, 255, 255, 255, "Press any button to restart the game.");
+    }
+}
 
-    float y = 1.0f;
+/* The state, who is signed in, and how to sign in when nothing says. */
+static float lobby_draw_header(const netplay_status_t *st, int cols, float y) {
+    char buf[640];
     snprintf(buf, sizeof buf, "NETPLAY - %s", netplay_state_text(st->state));
     y = lobby_text(1.0f, y, cols, 255, 220, 120, buf);
     if (st->state >= NETPLAY_ONLINE && st->state != NETPLAY_FAILED) {
@@ -380,6 +401,11 @@ static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
                  netplay_cfg_path());
         y = lobby_text(1.0f, y, cols, 255, 255, 255, buf) + 0.5f;
     }
+    return y;
+}
+
+static float lobby_draw_twitch(const netplay_status_t *st, int cols, float y) {
+    char buf[640];
     if (st->twitch_state == RPCN_TWITCH_WAITING) {
         snprintf(buf, sizeof buf, "Twitch code: %s", st->twitch_user_code);
         y = lobby_text(1.0f, y, cols, 255, 255, 140, buf);
@@ -390,43 +416,48 @@ static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
     } else if (st->twitch_state == RPCN_TWITCH_STARTING) {
         y = lobby_text(1.0f, y, cols, 255, 255, 255, "Asking the server for a Twitch code...") + 0.5f;
     }
-    if (st->state == NETPLAY_IN_ROOM || st->state == NETPLAY_SYNCING) {
-        snprintf(buf, sizeof buf, "Room %llu - %u of %u%s", (unsigned long long)st->room_id,
-                 st->member_count, st->max_slot, st->is_host ? " (you run it)" : "");
-        y = lobby_text(1.0f, y, cols, 255, 255, 255, buf);
-        /* The line, front first: who is up next, and who is on which side. The
-         * winner stays on; the loser goes to the back. */
-        for (uint32_t i = 0; i < st->member_count; i++) {
-            const netplay_member_status_t *m = &st->members[i];
-            const char *role = m->side == 0 ? "1P" : m->side == 1 ? "2P"
-                             : (m->data.flags & ROOM_MEMBER_WATCH) ? "watching"
-                             : (m->data.flags & ROOM_MEMBER_READY) ? "ready"
-                             : (!m->is_me && !m->heard) ? "connecting..." : "";
-            snprintf(buf, sizeof buf, "%d. %.16s%s  %s  %u-%u", m->line_pos + 1, m->npid,
-                     m->is_me ? " (you)" : "", role,
-                     (unsigned)m->data.wins, (unsigned)(m->data.games - m->data.wins));
-            y = lobby_text(1.0f, y, cols, m->is_me ? 255 : 220, 255, m->is_me ? 140 : 220, buf);
-        }
-        buf[0] = '\0';
-        if (st->auto_start_s)
-            snprintf(buf, sizeof buf, "Next match in %u s", st->auto_start_s);
-        else if (st->room.phase == ROOM_PHASE_MATCH)
-            snprintf(buf, sizeof buf, "Match %u is being played", (unsigned)st->room.match);
-        else if (st->peer_ready && st->state == NETPLAY_IN_ROOM)
-            snprintf(buf, sizeof buf, "Others are ready - say Ready to start");
-        if (buf[0]) y = lobby_text(1.0f, y, cols, 120, 255, 140, buf);
-        if (st->state == NETPLAY_SYNCING)
-            y = lobby_text(1.0f, y, cols, 255, 255, 140, "Waiting for the opponent to start...");
-        y += 0.5f;
-    }
-    if (st->state == NETPLAY_PLAYING && g_lobby.again) {
-        const char *w = st->last_winner == st->last_side ? "You won." : "You lost.";
-        snprintf(buf, sizeof buf, "%s Play again against %.16s?", w, st->peer_npid);
-        y = lobby_text(1.0f, y, cols, 255, 255, 140, buf) + 0.5f;
-    }
-    if (st->state == NETPLAY_ONLINE && st->room_count == 0 && !st->search_pending)
-        y = lobby_text(1.0f, y, cols, 170, 170, 170, "No rooms yet - host one.") + 0.5f;
+    return y;
+}
 
+/* A member's place in the room: their side, or what they are doing. */
+static const char *lobby_member_role(const netplay_member_status_t *m) {
+    return m->side == 0 ? "1P" : m->side == 1 ? "2P"
+         : (m->data.flags & ROOM_MEMBER_WATCH) ? "watching"
+         : (m->data.flags & ROOM_MEMBER_READY) ? "ready"
+         : (!m->is_me && !m->heard) ? "connecting..." : "";
+}
+
+static float lobby_draw_room(const netplay_status_t *st, int cols, float y) {
+    char buf[640];
+    snprintf(buf, sizeof buf, "Room %llu - %u of %u%s", (unsigned long long)st->room_id,
+             st->member_count, st->max_slot, st->is_host ? " (you run it)" : "");
+    y = lobby_text(1.0f, y, cols, 255, 255, 255, buf);
+    /* The line, front first: who is up next, and who is on which side. The
+     * winner stays on; the loser goes to the back. */
+    for (uint32_t i = 0; i < st->member_count; i++) {
+        const netplay_member_status_t *m = &st->members[i];
+        const char *role = lobby_member_role(m);
+        snprintf(buf, sizeof buf, "%d. %.16s%s  %s  %u-%u", m->line_pos + 1, m->npid,
+                 m->is_me ? " (you)" : "", role,
+                 (unsigned)m->data.wins, (unsigned)(m->data.games - m->data.wins));
+        y = lobby_text(1.0f, y, cols, m->is_me ? 255 : 220, 255, m->is_me ? 140 : 220, buf);
+    }
+    buf[0] = '\0';
+    if (st->auto_start_s)
+        snprintf(buf, sizeof buf, "Next match in %u s", st->auto_start_s);
+    else if (st->room.phase == ROOM_PHASE_MATCH)
+        snprintf(buf, sizeof buf, "Match %u is being played", (unsigned)st->room.match);
+    else if (st->peer_ready && st->state == NETPLAY_IN_ROOM)
+        snprintf(buf, sizeof buf, "Others are ready - say Ready to start");
+    if (buf[0]) y = lobby_text(1.0f, y, cols, 120, 255, 140, buf);
+    if (st->state == NETPLAY_SYNCING)
+        y = lobby_text(1.0f, y, cols, 255, 255, 140, "Waiting for the opponent to start...");
+    y += 0.5f;
+    return y;
+}
+
+static float lobby_draw_rows(int cols, float y) {
+    char buf[640];
     for (int i = 0; i < g_lobby.nrows; i++) {
         const lobby_row_t *r = &g_lobby.rows[i];
         snprintf(buf, sizeof buf, "%s %s", i == g_lobby.sel ? ">" : " ", r->text);
@@ -435,9 +466,12 @@ static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
         else                        lobby_text(1.0f, y, cols, 230, 230, 230, buf);
         y += 1.0f;
     }
+    return y;
+}
 
-    /* The reason, when there is one, or the session's last word, just above the
-     * key hint on the bottom row. */
+/* The reason, when there is one, or the session's last word, just above the
+ * key hint on the bottom row. */
+static void lobby_draw_footer(const netplay_status_t *st, float scale, int fb_h, int cols, float y) {
     float rows_total = (float)fb_h / scale / 8.0f;
     float hint = rows_total - 1.5f;
     bool  failed = st->error[0] && (st->state == NETPLAY_FAILED || st->state == NETPLAY_OFF);
@@ -448,6 +482,37 @@ static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
     if (failed) lobby_text(1.0f, foot, cols, 255, 110, 110, last);
     else        lobby_text(1.0f, foot, cols, 150, 150, 150, last);
     lobby_text(1.0f, hint, cols, 150, 150, 150, "A select  B close  L1+R1 lobby");
+}
+
+static void lobby_draw(int fb_w, int fb_h, uint64_t now_ns) {
+    const netplay_status_t *st = &g_lobby.st;
+    float scale = fb_h >= 720 ? 3.0f : 2.0f;
+    int   cols  = (int)((float)fb_w / scale / 8.0f);
+    char  buf[640];
+    sg_apply_viewport(0, 0, fb_w, fb_h, true);
+    sg_apply_scissor_rect(0, 0, fb_w, fb_h, true);
+    sdtx_canvas((float)fb_w / scale, (float)fb_h / scale);
+    sdtx_origin(0.0f, 0.0f);
+
+    if (!g_lobby.open) {
+        lobby_draw_closed(st, scale, fb_h, cols, now_ns);
+        return;
+    }
+
+    float y = lobby_draw_header(st, cols, 1.0f);
+    y = lobby_draw_twitch(st, cols, y);
+    if (st->state == NETPLAY_IN_ROOM || st->state == NETPLAY_SYNCING)
+        y = lobby_draw_room(st, cols, y);
+    if (st->state == NETPLAY_PLAYING && g_lobby.again) {
+        const char *w = st->last_winner == st->last_side ? "You won." : "You lost.";
+        snprintf(buf, sizeof buf, "%s Play again against %.16s?", w, st->peer_npid);
+        y = lobby_text(1.0f, y, cols, 255, 255, 140, buf) + 0.5f;
+    }
+    if (st->state == NETPLAY_ONLINE && st->room_count == 0 && !st->search_pending)
+        y = lobby_text(1.0f, y, cols, 170, 170, 170, "No rooms yet - host one.") + 0.5f;
+
+    y = lobby_draw_rows(cols, y);
+    lobby_draw_footer(st, scale, fb_h, cols, y);
 }
 
 #endif /* PAD_LOBBY_H */

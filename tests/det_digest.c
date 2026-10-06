@@ -158,6 +158,51 @@ static void raw_frame(memory_bus_t *bus) {
         }
 }
 
+/* --save-at F:FILE writes a savestate at the end of frame F; --load FILE starts
+ * from one. A loaded run prints what the saving run would have printed after F,
+ * line for line, and its sample hash (the last lines) covers the samples after
+ * F in both. With --mem the state goes through memory as the libretro core's
+ * retro_serialize / retro_unserialize take it (stored, padded to its size),
+ * and the file holds that buffer. */
+static const char *load_path;
+static uint32_t    save_frame;
+static char        save_path[1024];
+static bool        state_mem;
+
+static const char *mem_state_save(emu_thread_ctx_t *emu, const char *path) {
+    size_t size = 0;
+    const char *err = emu_state_save_mem(emu, NULL, 0, &size);
+    if (err) return err;
+    size += 4096;   /* as main_libretro.c's LR_STATE_SLACK */
+    uint8_t *buf = (uint8_t *)malloc(size);
+    if (!buf) return "out of memory";
+    size_t len = 0;
+    err = emu_state_save_mem(emu, buf, size, &len);
+    if (!err) {
+        memset(buf + len, 0, size - len);
+        FILE *f = fopen(path, "wb");
+        if (!f || fwrite(buf, 1, size, f) != size) err = "cannot write the file";
+        if (f) fclose(f);
+    }
+    free(buf);
+    return err;
+}
+
+static const char *mem_state_load(emu_thread_ctx_t *emu, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return "cannot open the file";
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = (uint8_t *)malloc(size > 0 ? (size_t)size : 1);
+    const char *err = NULL;
+    if (!buf || size <= 0 || fread(buf, 1, (size_t)size, f) != (size_t)size) err = "cannot read the file";
+    fclose(f);
+    if (!err) err = emu_state_load_mem(emu, buf, (size_t)size);
+    free(buf);
+    return err;
+}
+
 static uint32_t keys_mask(const char *p, const char *end) {
     const game_input_map_t *in = &g_active_profile->input;
     uint32_t m = 0;
@@ -349,6 +394,13 @@ static void mdlmap_frame(void) {
     g_geo3d_palram_size = PALETTE_SIZE;
     g_geo3d_mesh_epoch++;
     mdlmap_on = 1;
+    const geo3d_models_t md = {
+        .main_data = romset.main_data, .main_data_size = romset.main_data_size,
+        .polygons  = romset.polygons,  .polygons_size  = romset.polygons_size,
+        .materials = romset.textures,  .materials_size = romset.textures_size,
+        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+        .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add,
+    };
     for (int k = 0; k < geo.captured_count; k++) {
         const captured_model_t *cm = &geo.captured[k];
         if (cm->direct_len || cm->model_idx < 0) continue;      /* polygon RAM: not ROM */
@@ -359,10 +411,7 @@ static void mdlmap_frame(void) {
         g_geo3d_mode = cm->geo_mode;
         g_geo3d_zadjust = cm->zadjust;
         g_geo3d_lod = cm->geo_lod;
-        geo3d_decode_model_cached(cm->model_idx, romset.main_data, romset.main_data_size,
-                                  romset.polygons, romset.polygons_size, romset.textures, romset.textures_size,
-                                  q->model_table_offset, q->model_table_count, q->mesh_ptr_subtract, q->mesh_ptr_add,
-                                  cm->matrix, cm->color[0], cm->color[1], cm->color[2]);
+        geo3d_decode_model_cached(&md, cm->model_idx, cm->matrix, cm->color[0], cm->color[1], cm->color[2]);
         g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
     }
     mdlmap_on = 0;
@@ -576,7 +625,7 @@ static void parse_script(const char *s) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--profile ID]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--profile ID] [--save-at F:FILE] [--load FILE] [--mem]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
@@ -647,6 +696,14 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--mem")) state_mem = true;
+        else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%u:%1023s", &save_frame, save_path) != 2) {
+                fprintf(stderr, "--save-at F:FILE\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--cop")    && i + 1 < argc) {
             char path[1024] = {0};
             if (sscanf(argv[++i], "%u:%u:%1023s", &cop_from, &cop_to, path) != 3 || !(cop_out = fopen(path, "wb"))) {
@@ -672,20 +729,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "replaying %u session frames from %s\n", (unsigned)in_n, inputs_path);
     }
 
-    /* The web build's load: one zip, read whole, strict by CRC. */
-    FILE *f = fopen(argv[1], "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *zip = (uint8_t *)malloc((size_t)len);
-    if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", argv[1]); return 2; }
-    fclose(f);
-    rl_mem_zip_set(zip, (size_t)len, true);
-    int rc = g_active_profile->load_fn(&romset, NULL, NULL);
-    rl_mem_zip_clear();
-    free(zip);
-    if (rc != 0) { fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names); return 2; }
+    /* A directory of region images (--export-roms) loads as it is. Otherwise
+     * the web build's load: one zip, read whole, strict by CRC. */
+    if (romset_is_dir(argv[1])) {
+        if (romset_load_dir(&romset, argv[1]) != 0) return 2;
+    } else {
+        FILE *f = fopen(argv[1], "rb");
+        if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        uint8_t *zip = (uint8_t *)malloc((size_t)len);
+        if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", argv[1]); return 2; }
+        fclose(f);
+        rl_mem_zip_set(zip, (size_t)len, true);
+        int rc = g_active_profile->load_fn(&romset, NULL, NULL);
+        rl_mem_zip_clear();
+        free(zip);
+        if (rc != 0) { fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names); return 2; }
+    }
 
     /* main_web.c web_install_board, which is also what a netplay reset runs. */
     g_active_profile->install_fn(&romset, &cpu, &bus);
@@ -704,6 +766,14 @@ int main(int argc, char **argv) {
     emu_run(&emu);
     if (raw_out) { raw_bus = &bus; raw_cpu = &cpu; g_game_frame_edge_cb = raw_frame; }
     sound_set_tap(snd_out_tap, NULL);
+    if (load_path) {
+        /* A board from a state: what it prints from here on has to be what
+         * the run that saved it printed. The sample hash starts here. */
+        const char *err = state_mem ? mem_state_load(&emu, load_path) : emu_state_load_now(&emu, load_path);
+        if (err) { fprintf(stderr, "--load %s: %s\n", load_path, err); return 2; }
+        snd_out_hash = FNV0; snd_out_n = 0;
+        fprintf(stderr, "loaded %s at frame %u\n", load_path, (unsigned)g_emu_frames);
+    }
 
     FILE *out = out_path ? fopen(out_path, "wb") : stdout;
     if (!out) { fprintf(stderr, "cannot write %s\n", out_path); return 2; }
@@ -741,6 +811,13 @@ int main(int argc, char **argv) {
             }
         }
         if (r == EMU_SLICE_FRAME && mdlmap_out && g_emu_frames >= mdlmap_from && g_emu_frames <= mdlmap_to) mdlmap_frame();
+        if (r == EMU_SLICE_FRAME && save_frame && g_emu_frames == save_frame) {
+            /* ... and the samples from here on are what the loaded run's are. */
+            const char *err = state_mem ? mem_state_save(&emu, save_path) : emu_state_save_now(&emu, save_path);
+            if (err) { fprintf(stderr, "--save-at %s: %s\n", save_path, err); return 2; }
+            snd_out_hash = FNV0; snd_out_n = 0;
+            fprintf(stderr, "saved %s at frame %u\n", save_path, (unsigned)g_emu_frames);
+        }
         if (r != EMU_SLICE_FRAME || g_emu_frames < from) continue;
         uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
         uint64_t ram  = fnv(fnv(FNV0, bus.ram, RAM_SIZE), bus.ram2, RAM2_SIZE);

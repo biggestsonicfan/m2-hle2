@@ -266,42 +266,32 @@ static inline void rpcs3_sig_finish_all(rpcs3_sig_t *s) {
         if (s->peers[i].used) rpcs3_sig_finish(s, s->peers[i].npid);
 }
 
-/*
- * A datagram from ip:port. True if it was signaling (whatever became of it), so
- * the caller does not pass it on as game traffic.
- */
-static inline bool rpcs3_sig_on_datagram(rpcs3_sig_t *s, uint32_t ip, uint16_t port,
-                                         const uint8_t *buf, uint32_t len, uint64_t now) {
-    if (len < 3 || buf[0] != 0 || buf[1] != 0 || buf[2] != 1) return false;
-    if (len != RPCS3_SIG_WIRE_SIZE) return true;          /* RPCS3's own rule */
+/* A signaling packet's fields, once rpcs3_sig_parse has checked them. */
+typedef struct {
+    char     npid[17];
+    uint64_t ts_sender, ts_receiver;
+    uint32_t cmd;
+} rpcs3_sig_msg_t;
+
+/* The 72 bytes after `00 00 01`. False if RPCS3 would drop the packet. */
+static inline bool rpcs3_sig_parse(const uint8_t *buf, uint32_t len, rpcs3_sig_msg_t *m) {
+    if (len != RPCS3_SIG_WIRE_SIZE) return false;         /* RPCS3's own rule */
     const uint8_t *k = buf + 3;
-    if (k[0] != 'S' || k[1] != 'I' || k[2] != 'G' || k[3] != 'N') return true;
-    if (rpcs3_sig_get_u32(k + 4) != RPCS3_SIG_VERSION) return true;
-    if (!rpcs3_sig_valid_npid(k + 34)) return true;
+    if (k[0] != 'S' || k[1] != 'I' || k[2] != 'G' || k[3] != 'N') return false;
+    if (rpcs3_sig_get_u32(k + 4) != RPCS3_SIG_VERSION) return false;
+    if (!rpcs3_sig_valid_npid(k + 34)) return false;
 
-    char npid[17];
-    memcpy(npid, k + 34, 16);
-    npid[16] = '\0';
-    uint64_t ts_sender   = rpcs3_sig_get_u64(k + 8);
-    uint64_t ts_receiver = rpcs3_sig_get_u64(k + 16);
-    uint32_t cmd         = rpcs3_sig_get_u32(k + 24);
+    memcpy(m->npid, k + 34, 16);
+    m->npid[16] = '\0';
+    m->ts_sender   = rpcs3_sig_get_u64(k + 8);
+    m->ts_receiver = rpcs3_sig_get_u64(k + 16);
+    m->cmd         = rpcs3_sig_get_u32(k + 24);
+    return true;
+}
 
-    rpcs3_sig_peer_t *p = rpcs3_sig_find(s, npid);
-    /* RPCS3 creates a peer for an unknown CONNECT or INFO, and answers FINISHED
-     * even without one. We do the same for CONNECT: a member the room has not
-     * told us about yet is still one we will want. */
-    if (!p && (cmd == RPCS3_SIG_CONNECT || cmd == RPCS3_SIG_INFO)) p = rpcs3_sig_add(s, npid);
-    if (!p) {
-        if (cmd == RPCS3_SIG_FINISHED) {
-            rpcs3_sig_peer_t tmp;
-            memset(&tmp, 0, sizeof(tmp));
-            tmp.ip = ip; tmp.port = port;
-            rpcs3_sig_send(s, &tmp, RPCS3_SIG_FINISHED_ACK, now, ts_sender);
-        }
-        return true;
-    }
-
-    p->last_rx_us = now;
+/* CONNECT, CONNECT_ACK, CONFIRM and INFO move the peer to where they came from. */
+static inline void rpcs3_sig_follow(rpcs3_sig_t *s, rpcs3_sig_peer_t *p, uint32_t cmd,
+                                    uint32_t ip, uint16_t port) {
     bool moves = cmd == RPCS3_SIG_CONNECT || cmd == RPCS3_SIG_CONNECT_ACK
               || cmd == RPCS3_SIG_CONFIRM || cmd == RPCS3_SIG_INFO;
     if (moves && (p->ip != ip || p->port != port)) {
@@ -310,18 +300,22 @@ static inline bool rpcs3_sig_on_datagram(rpcs3_sig_t *s, uint32_t ip, uint16_t p
         p->ip = ip;
         p->port = port;
     }
+}
 
-    switch (cmd) {
+/* What each command does to a peer we know. */
+static inline void rpcs3_sig_on_cmd(rpcs3_sig_t *s, rpcs3_sig_peer_t *p, const rpcs3_sig_msg_t *m,
+                                    uint64_t now) {
+    switch (m->cmd) {
         case RPCS3_SIG_CONNECT:
             /* The answer that makes THEIR game see us. */
-            rpcs3_sig_send(s, p, RPCS3_SIG_CONNECT_ACK, ts_sender, now);
+            rpcs3_sig_send(s, p, RPCS3_SIG_CONNECT_ACK, m->ts_sender, now);
             if (!p->peer_active) rpcs3_sig_note(s, "signaling: %s is connecting; acknowledged", p->npid);
             p->peer_active = true;
             p->dead = false;
             break;
         case RPCS3_SIG_CONNECT_ACK:
-            rpcs3_sig_add_rtt(p, now, ts_sender);
-            rpcs3_sig_send(s, p, RPCS3_SIG_CONFIRM, now, ts_receiver);
+            rpcs3_sig_add_rtt(p, now, m->ts_sender);
+            rpcs3_sig_send(s, p, RPCS3_SIG_CONFIRM, now, m->ts_receiver);
             if (!p->active) {
                 rpcs3_sig_note(s, "signaling: connected to %s (%u us)", p->npid, rpcs3_sig_rtt_us(p));
                 p->next_ping_us = now + RPCS3_SIG_PING_FAST_US;
@@ -334,14 +328,14 @@ static inline bool rpcs3_sig_on_datagram(rpcs3_sig_t *s, uint32_t ip, uint16_t p
             p->peer_active = true;
             break;
         case RPCS3_SIG_PING:
-            rpcs3_sig_send(s, p, RPCS3_SIG_PONG, ts_sender, now);
+            rpcs3_sig_send(s, p, RPCS3_SIG_PONG, m->ts_sender, now);
             break;
         case RPCS3_SIG_PONG:
-            rpcs3_sig_add_rtt(p, now, ts_sender);
+            rpcs3_sig_add_rtt(p, now, m->ts_sender);
             p->got_pong = true;
             break;
         case RPCS3_SIG_FINISHED:
-            rpcs3_sig_send(s, p, RPCS3_SIG_FINISHED_ACK, now, ts_sender);
+            rpcs3_sig_send(s, p, RPCS3_SIG_FINISHED_ACK, now, m->ts_sender);
             rpcs3_sig_note(s, "signaling: %s finished", p->npid);
             p->active = p->peer_active = p->connecting = false;
             p->dead = true;
@@ -354,6 +348,36 @@ static inline bool rpcs3_sig_on_datagram(rpcs3_sig_t *s, uint32_t ip, uint16_t p
         default:
             break;
     }
+}
+
+/*
+ * A datagram from ip:port. True if it was signaling (whatever became of it), so
+ * the caller does not pass it on as game traffic.
+ */
+static inline bool rpcs3_sig_on_datagram(rpcs3_sig_t *s, uint32_t ip, uint16_t port,
+                                         const uint8_t *buf, uint32_t len, uint64_t now) {
+    if (len < 3 || buf[0] != 0 || buf[1] != 0 || buf[2] != 1) return false;
+    rpcs3_sig_msg_t m;
+    if (!rpcs3_sig_parse(buf, len, &m)) return true;
+
+    rpcs3_sig_peer_t *p = rpcs3_sig_find(s, m.npid);
+    /* RPCS3 creates a peer for an unknown CONNECT or INFO, and answers FINISHED
+     * even without one. We do the same for CONNECT: a member the room has not
+     * told us about yet is still one we will want. */
+    if (!p && (m.cmd == RPCS3_SIG_CONNECT || m.cmd == RPCS3_SIG_INFO)) p = rpcs3_sig_add(s, m.npid);
+    if (!p) {
+        if (m.cmd == RPCS3_SIG_FINISHED) {
+            rpcs3_sig_peer_t tmp;
+            memset(&tmp, 0, sizeof(tmp));
+            tmp.ip = ip; tmp.port = port;
+            rpcs3_sig_send(s, &tmp, RPCS3_SIG_FINISHED_ACK, now, m.ts_sender);
+        }
+        return true;
+    }
+
+    p->last_rx_us = now;
+    rpcs3_sig_follow(s, p, m.cmd, ip, port);
+    rpcs3_sig_on_cmd(s, p, &m, now);
     return true;
 }
 

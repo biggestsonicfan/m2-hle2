@@ -48,6 +48,7 @@
 #define PROFILES_SFIGHT_CONSOLE_H
 
 #include "sfight.h"
+#include "savestate_reg.h"
 
 /* ---- Shared helpers ------------------------------------------------------ */
 
@@ -320,6 +321,7 @@ static inline void sfight_console_install(const romset_t *rs, i960_cpu_t *cpu, m
     s_sfc_hidden[0] = s_sfc_hidden[1] = 0;
     sfight_install(rs, cpu, bus);
     s_sfight_on_vs_rematch = sfc_on_vs_rematch;
+    savestate_extra("sfight_console", "SFC_HIDDEN", s_sfc_hidden, sizeof s_sfc_hidden);   /* core/savestate.h */
 }
 
 static const game_profile_t sfight_console_profile = {

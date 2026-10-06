@@ -264,46 +264,45 @@ static const float SCSP_SDL_DB[8]      = { -1000000.0f, -36.0f, -30.0f, -24.0f, 
 
 static inline uint32_t scsp_lcg(uint32_t *s) { *s = *s * 1103515245u + 12345u; return *s >> 8; }
 
-static void scsp_tables_init(void) {
-    if (scsp_tables_ready) return;
-    for (int i = 0; i < 0x400; i++) {
-        float db = (float)(3 * (i - 0x3FF)) / 32.0f;
-        scsp_eg_table[i] = (int32_t)(powf(10.0f, db / 20.0f) * (float)(1 << SCSP_SHIFT));
-    }
-    /* level/pan: index = TL | PAN << 8 | SDL << 13 */
+/* the TL attenuation: one step of dB per bit */
+static float scsp_tl_gain(int itl) {
+    float db = 0.0f;
+    if (itl & 0x01) db -= 0.4f;
+    if (itl & 0x02) db -= 0.8f;
+    if (itl & 0x04) db -= 1.5f;
+    if (itl & 0x08) db -= 3.0f;
+    if (itl & 0x10) db -= 6.0f;
+    if (itl & 0x20) db -= 12.0f;
+    if (itl & 0x40) db -= 24.0f;
+    if (itl & 0x80) db -= 48.0f;
+    return powf(10.0f, db / 20.0f);
+}
+
+/* the pan attenuation of the quieter side (0xF in the low bits mutes it) */
+static float scsp_pan_gain(int ipan) {
+    float db = 0.0f;
+    if (ipan & 0x1) db -= 3.0f;
+    if (ipan & 0x2) db -= 6.0f;
+    if (ipan & 0x4) db -= 12.0f;
+    if (ipan & 0x8) db -= 24.0f;
+    return ((ipan & 0xF) == 0xF) ? 0.0f : powf(10.0f, db / 20.0f);
+}
+
+/* level/pan: index = TL | PAN << 8 | SDL << 13 */
+static void scsp_tables_level(void) {
     for (int i = 0; i < 0x10000; i++) {
         int itl = i & 0xFF, ipan = (i >> 8) & 0x1F, isdl = (i >> 13) & 7;
-        float db = 0.0f;
-        if (itl & 0x01) db -= 0.4f;
-        if (itl & 0x02) db -= 0.8f;
-        if (itl & 0x04) db -= 1.5f;
-        if (itl & 0x08) db -= 3.0f;
-        if (itl & 0x10) db -= 6.0f;
-        if (itl & 0x20) db -= 12.0f;
-        if (itl & 0x40) db -= 24.0f;
-        if (itl & 0x80) db -= 48.0f;
-        float tl = powf(10.0f, db / 20.0f);
-        db = 0.0f;
-        if (ipan & 0x1) db -= 3.0f;
-        if (ipan & 0x2) db -= 6.0f;
-        if (ipan & 0x4) db -= 12.0f;
-        if (ipan & 0x8) db -= 24.0f;
-        float pan = ((ipan & 0xF) == 0xF) ? 0.0f : powf(10.0f, db / 20.0f);
+        float tl = scsp_tl_gain(itl);
+        float pan = scsp_pan_gain(ipan);
         float lpan = ipan < 0x10 ? pan : 1.0f;
         float rpan = ipan < 0x10 ? 1.0f : pan;
         float sdl = isdl ? powf(10.0f, SCSP_SDL_DB[isdl] / 20.0f) : 0.0f;
         scsp_lpan[i] = (int32_t)(uint32_t)((float)(1 << SCSP_SHIFT) * (4.0f * lpan * tl * sdl));
         scsp_rpan[i] = (int32_t)(uint32_t)((float)(1 << SCSP_SHIFT) * (4.0f * rpan * tl * sdl));
     }
-    scsp_ar_table[0] = scsp_dr_table[0] = 0;
-    scsp_ar_table[1] = scsp_dr_table[1] = 0;
-    for (int i = 2; i < 64; i++) {
-        double scale = (double)(1 << SCSP_EG_SHIFT);
-        scsp_ar_table[i] = SCSP_AR_MS[i] != 0.0
-            ? (int32_t)((1023 * 1000.0) / (44100.0 * SCSP_AR_MS[i]) * scale)
-            : (int32_t)(1024 << SCSP_EG_SHIFT);
-        scsp_dr_table[i] = (int32_t)((1023 * 1000.0) / (44100.0 * SCSP_DR_MS[i]) * scale);
-    }
+}
+
+static void scsp_tables_lfo(void) {
     uint32_t seed = 0x5C5Bu;
     for (int i = 0; i < 256; i++) {
         scsp_alfo_saw[i] = 255 - i;
@@ -326,6 +325,25 @@ static void scsp_tables_init(void) {
             scsp_ascale[s][i] = (int32_t)(uint32_t)((float)(1 << SCSP_LFO_SHIFT) * powf(10.0f, db / 20.0f));
         }
     }
+}
+
+static void scsp_tables_init(void) {
+    if (scsp_tables_ready) return;
+    for (int i = 0; i < 0x400; i++) {
+        float db = (float)(3 * (i - 0x3FF)) / 32.0f;
+        scsp_eg_table[i] = (int32_t)(powf(10.0f, db / 20.0f) * (float)(1 << SCSP_SHIFT));
+    }
+    scsp_tables_level();
+    scsp_ar_table[0] = scsp_dr_table[0] = 0;
+    scsp_ar_table[1] = scsp_dr_table[1] = 0;
+    for (int i = 2; i < 64; i++) {
+        double scale = (double)(1 << SCSP_EG_SHIFT);
+        scsp_ar_table[i] = SCSP_AR_MS[i] != 0.0
+            ? (int32_t)((1023 * 1000.0) / (44100.0 * SCSP_AR_MS[i]) * scale)
+            : (int32_t)(1024 << SCSP_EG_SHIFT);
+        scsp_dr_table[i] = (int32_t)((1023 * 1000.0) / (44100.0 * SCSP_DR_MS[i]) * scale);
+    }
+    scsp_tables_lfo();
     scsp_tables_ready = 1;
 }
 
@@ -495,15 +513,17 @@ static inline int32_t scsp_lfo_a(scsp_lfo_t *l) {
     return l->scale[l->table[l->phase >> SCSP_LFO_SHIFT]] << (SCSP_SHIFT - SCSP_LFO_SHIFT);
 }
 
-/* one sample of one active slot; writes the sound stack entry at *sous, which
- * is s->sous[ptr] (the stack position this slot's FM reads are relative to) */
-static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous, unsigned ptr) {
-    if (SCSP_SSCTL(sl) == 3) return 0;                 /* "cannot be used" */
-
-    int32_t  sample = 0;
+/* the slot's pitch step for this sample, through the pitch LFO */
+static inline uint32_t scsp_slot_pitch(scsp_slot_t *sl) {
     uint32_t step = sl->step;
     if (SCSP_PLFOS(sl)) step = (uint32_t)(((int64_t)step * scsp_lfo_p(&sl->plfo)) >> SCSP_SHIFT);
+    return step;
+}
 
+/* the slot's waveform where it stands: PCM out of sound RAM (FM moving the
+ * read), or the noise source; then SBCTL's bit flips */
+static inline int32_t scsp_slot_wave(scsp_t *s, scsp_slot_t *sl, unsigned ptr) {
+    int32_t  sample = 0;
     uint32_t a1, a2;
     if (SCSP_PCM8B(sl)) { a1 = sl->cur >> SCSP_SHIFT; a2 = sl->nxt >> SCSP_SHIFT; }
     else { a1 = (sl->cur >> (SCSP_SHIFT - 1)) & ~1u; a2 = (sl->nxt >> (SCSP_SHIFT - 1)) & ~1u; }
@@ -531,7 +551,49 @@ static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous, unsig
     }
     if (SCSP_SBCTL(sl) & 1) sample ^= 0x7FFF;
     if (SCSP_SBCTL(sl) & 2) sample = (int16_t)(sample ^ 0x8000);
+    return sample;
+}
 
+/* one of the slot's two positions (cur or nxt, at address addr) against the
+ * loop, by LPCTL */
+static inline void scsp_slot_loop(scsp_slot_t *sl, uint32_t addr, uint32_t *pos, uint32_t lsa, uint32_t lea) {
+    int32_t rem;
+    switch (SCSP_LPCTL(sl)) {
+    case 0:                                         /* no loop */
+        if (addr >= lsa && addr >= lea) scsp_slot_stop(sl, 0);
+        break;
+    case 1:                                         /* forward loop */
+        if (addr >= lea) {
+            rem = (int32_t)(*pos - (lea << SCSP_SHIFT));
+            *pos = (lsa << SCSP_SHIFT) + (uint32_t)rem;
+        }
+        break;
+    case 2:                                         /* reverse loop */
+        if (addr >= lsa && !sl->backwards) {
+            rem = (int32_t)(*pos - (lsa << SCSP_SHIFT));
+            *pos = (lea << SCSP_SHIFT) - (uint32_t)rem;
+            sl->backwards = 1;
+        } else if ((addr < lsa || (*pos & 0x80000000u)) && sl->backwards) {
+            rem = (int32_t)((lsa << SCSP_SHIFT) - *pos);
+            *pos = (lea << SCSP_SHIFT) - (uint32_t)rem;
+        }
+        break;
+    case 3:                                         /* alternating */
+        if (addr >= lea) {
+            rem = (int32_t)(*pos - (lea << SCSP_SHIFT));
+            *pos = (lea << SCSP_SHIFT) - (uint32_t)rem;
+            sl->backwards = 1;
+        } else if ((addr < lsa || (*pos & 0x80000000u)) && sl->backwards) {
+            rem = (int32_t)((lsa << SCSP_SHIFT) - *pos);
+            *pos = (lsa << SCSP_SHIFT) + (uint32_t)rem;
+            sl->backwards = 0;
+        }
+        break;
+    }
+}
+
+/* the slot steps on, and both positions meet the loop */
+static inline void scsp_slot_advance(scsp_slot_t *sl, uint32_t step) {
     if (sl->backwards) sl->cur -= step;
     else               sl->cur += step;
     sl->nxt = sl->cur + (1u << SCSP_SHIFT);
@@ -541,49 +603,29 @@ static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous, unsig
     uint32_t *pos[2] = { &sl->cur, &sl->nxt };
     if (addr[0] >= lsa && !sl->backwards && SCSP_LPSLNK(sl) && sl->state == SCSP_ATTACK)
         sl->state = SCSP_DECAY1;
-    for (int k = 0; k < 2; k++) {
-        int32_t rem;
-        switch (SCSP_LPCTL(sl)) {
-        case 0:                                         /* no loop */
-            if (addr[k] >= lsa && addr[k] >= lea) scsp_slot_stop(sl, 0);
-            break;
-        case 1:                                         /* forward loop */
-            if (addr[k] >= lea) {
-                rem = (int32_t)(*pos[k] - (lea << SCSP_SHIFT));
-                *pos[k] = (lsa << SCSP_SHIFT) + (uint32_t)rem;
-            }
-            break;
-        case 2:                                         /* reverse loop */
-            if (addr[k] >= lsa && !sl->backwards) {
-                rem = (int32_t)(*pos[k] - (lsa << SCSP_SHIFT));
-                *pos[k] = (lea << SCSP_SHIFT) - (uint32_t)rem;
-                sl->backwards = 1;
-            } else if ((addr[k] < lsa || (*pos[k] & 0x80000000u)) && sl->backwards) {
-                rem = (int32_t)((lsa << SCSP_SHIFT) - *pos[k]);
-                *pos[k] = (lea << SCSP_SHIFT) - (uint32_t)rem;
-            }
-            break;
-        case 3:                                         /* alternating */
-            if (addr[k] >= lea) {
-                rem = (int32_t)(*pos[k] - (lea << SCSP_SHIFT));
-                *pos[k] = (lea << SCSP_SHIFT) - (uint32_t)rem;
-                sl->backwards = 1;
-            } else if ((addr[k] < lsa || (*pos[k] & 0x80000000u)) && sl->backwards) {
-                rem = (int32_t)((lsa << SCSP_SHIFT) - *pos[k]);
-                *pos[k] = (lsa << SCSP_SHIFT) + (uint32_t)rem;
-                sl->backwards = 0;
-            }
-            break;
-        }
-    }
+    for (int k = 0; k < 2; k++) scsp_slot_loop(sl, addr[k], pos[k], lsa, lea);
+}
 
-    if (!SCSP_SDIR(sl)) {
-        if (SCSP_ALFOS(sl)) sample = (int32_t)(((int64_t)sample * scsp_lfo_a(&sl->alfo)) >> SCSP_SHIFT);
-        if (sl->state == SCSP_ATTACK)
-            sample = (int32_t)(((int64_t)sample * scsp_eg_update(sl)) >> SCSP_SHIFT);
-        else
-            sample = (int32_t)(((int64_t)sample * scsp_eg_table[scsp_eg_update(sl) >> (SCSP_SHIFT - 10)]) >> SCSP_SHIFT);
-    }
+/* the amplitude LFO (when alfo) and the envelope on a sample that is not SDIR */
+static inline int32_t scsp_slot_env(scsp_slot_t *sl, int alfo, int32_t sample) {
+    if (alfo) sample = (int32_t)(((int64_t)sample * scsp_lfo_a(&sl->alfo)) >> SCSP_SHIFT);
+    if (sl->state == SCSP_ATTACK)
+        sample = (int32_t)(((int64_t)sample * scsp_eg_update(sl)) >> SCSP_SHIFT);
+    else
+        sample = (int32_t)(((int64_t)sample * scsp_eg_table[scsp_eg_update(sl) >> (SCSP_SHIFT - 10)]) >> SCSP_SHIFT);
+    return sample;
+}
+
+/* one sample of one active slot; writes the sound stack entry at *sous, which
+ * is s->sous[ptr] (the stack position this slot's FM reads are relative to) */
+static int32_t scsp_slot_sample(scsp_t *s, scsp_slot_t *sl, int16_t *sous, unsigned ptr) {
+    if (SCSP_SSCTL(sl) == 3) return 0;                 /* "cannot be used" */
+
+    uint32_t step = scsp_slot_pitch(sl);
+    int32_t  sample = scsp_slot_wave(s, sl, ptr);
+    scsp_slot_advance(sl, step);
+
+    if (!SCSP_SDIR(sl)) sample = scsp_slot_env(sl, SCSP_ALFOS(sl) != 0, sample);
     if (!SCSP_STWINH(sl)) *sous = (int16_t)((sample * sl->g_sous) >> (SCSP_SHIFT + 1));
     return sample;
 }
@@ -943,6 +985,35 @@ static inline void scsp_latch(scsp_t *s) {                /* the slot monitor's 
     s->mslc_data = (uint16_t)((ca << 7) | (sgc << 5) | eg);
 }
 
+/* scsp_slot_wave for scsp_slot_run_pcm: PCM only, no FM, RAM read in place */
+static inline int32_t scsp_pcm_wave(const scsp_t *s, const uint8_t *ram, uint32_t ram_size, uint32_t sa,
+                                    uint32_t cur, uint32_t nxt, int pcm8) {
+    int32_t frac = (int32_t)(cur & ((1u << SCSP_SHIFT) - 1)), sample;
+    if (pcm8) {
+        uint32_t a1 = (sa + (cur >> SCSP_SHIFT)) & 0xFFFFFu, a2 = (sa + (nxt >> SCSP_SHIFT)) & 0xFFFFFu;
+        int32_t p1 = (int8_t)(a1 < ram_size ? ram[a1] : 0), p2 = (int8_t)(a2 < ram_size ? ram[a2] : 0);
+        sample = ((p1 * 256) * ((1 << SCSP_SHIFT) - frac) + (p2 * 256) * frac) >> SCSP_SHIFT;
+    } else {
+        uint32_t a1 = (sa + ((cur >> (SCSP_SHIFT - 1)) & ~1u)) & 0xFFFFFu;
+        uint32_t a2 = (sa + ((nxt >> (SCSP_SHIFT - 1)) & ~1u)) & 0xFFFFFu;
+        int32_t p1 = (int16_t)(a1 + 1 < ram_size ? (uint16_t)(ram[a1] << 8 | ram[a1 + 1]) : scsp_ram_w(s, a1));
+        int32_t p2 = (int16_t)(a2 + 1 < ram_size ? (uint16_t)(ram[a2] << 8 | ram[a2 + 1]) : scsp_ram_w(s, a2));
+        sample = (p1 * ((1 << SCSP_SHIFT) - frac) + p2 * frac) >> SCSP_SHIFT;
+    }
+    return sample;
+}
+
+/* scsp_slot_loop for scsp_slot_run_pcm: no loop or a forward one, both positions */
+static inline void scsp_pcm_loop(scsp_slot_t *sl, int lpctl, uint32_t ad0, uint32_t ad1,
+                                 uint32_t *cur, uint32_t *nxt, uint32_t lsa, uint32_t lea) {
+    if (lpctl == 0) {
+        if ((ad0 >= lsa && ad0 >= lea) || (ad1 >= lsa && ad1 >= lea)) scsp_slot_stop(sl, 0);
+    } else {
+        if (ad0 >= lea) *cur = (lsa << SCSP_SHIFT) + (*cur - (lea << SCSP_SHIFT));
+        if (ad1 >= lea) *nxt = (lsa << SCSP_SHIFT) + (*nxt - (lea << SCSP_SHIFT));
+    }
+}
+
 /* The common voice run alone for a stretch: PCM out of sound RAM, played
  * forwards with no loop or a forward loop, no FM. The same arithmetic as
  * scsp_slot_sample, in the same order, with the slot's registers read once
@@ -961,18 +1032,7 @@ static uint32_t scsp_slot_run_pcm(scsp_t *s, scsp_slot_t *sl, unsigned i, uint32
     for (; k < to; k++) {
         uint32_t step = base_step;
         if (plfo) step = (uint32_t)(((int64_t)step * scsp_lfo_p(&sl->plfo)) >> SCSP_SHIFT);
-        int32_t frac = (int32_t)(cur & ((1u << SCSP_SHIFT) - 1)), sample;
-        if (pcm8) {
-            uint32_t a1 = (sa + (cur >> SCSP_SHIFT)) & 0xFFFFFu, a2 = (sa + (nxt >> SCSP_SHIFT)) & 0xFFFFFu;
-            int32_t p1 = (int8_t)(a1 < ram_size ? ram[a1] : 0), p2 = (int8_t)(a2 < ram_size ? ram[a2] : 0);
-            sample = ((p1 * 256) * ((1 << SCSP_SHIFT) - frac) + (p2 * 256) * frac) >> SCSP_SHIFT;
-        } else {
-            uint32_t a1 = (sa + ((cur >> (SCSP_SHIFT - 1)) & ~1u)) & 0xFFFFFu;
-            uint32_t a2 = (sa + ((nxt >> (SCSP_SHIFT - 1)) & ~1u)) & 0xFFFFFu;
-            int32_t p1 = (int16_t)(a1 + 1 < ram_size ? (uint16_t)(ram[a1] << 8 | ram[a1 + 1]) : scsp_ram_w(s, a1));
-            int32_t p2 = (int16_t)(a2 + 1 < ram_size ? (uint16_t)(ram[a2] << 8 | ram[a2 + 1]) : scsp_ram_w(s, a2));
-            sample = (p1 * ((1 << SCSP_SHIFT) - frac) + p2 * frac) >> SCSP_SHIFT;
-        }
+        int32_t sample = scsp_pcm_wave(s, ram, ram_size, sa, cur, nxt, pcm8);
         if (sbctl & 1) sample ^= 0x7FFF;
         if (sbctl & 2) sample = (int16_t)(sample ^ 0x8000);
 
@@ -980,20 +1040,9 @@ static uint32_t scsp_slot_run_pcm(scsp_t *s, scsp_slot_t *sl, unsigned i, uint32
         nxt = cur + (1u << SCSP_SHIFT);
         uint32_t ad0 = cur >> SCSP_SHIFT, ad1 = nxt >> SCSP_SHIFT;
         if (ad0 >= lsa && lpslnk && sl->state == SCSP_ATTACK) sl->state = SCSP_DECAY1;
-        if (lpctl == 0) {
-            if ((ad0 >= lsa && ad0 >= lea) || (ad1 >= lsa && ad1 >= lea)) scsp_slot_stop(sl, 0);
-        } else {
-            if (ad0 >= lea) cur = (lsa << SCSP_SHIFT) + (cur - (lea << SCSP_SHIFT));
-            if (ad1 >= lea) nxt = (lsa << SCSP_SHIFT) + (nxt - (lea << SCSP_SHIFT));
-        }
+        scsp_pcm_loop(sl, lpctl, ad0, ad1, &cur, &nxt, lsa, lea);
 
-        if (!sdir) {
-            if (alfo) sample = (int32_t)(((int64_t)sample * scsp_lfo_a(&sl->alfo)) >> SCSP_SHIFT);
-            if (sl->state == SCSP_ATTACK)
-                sample = (int32_t)(((int64_t)sample * scsp_eg_update(sl)) >> SCSP_SHIFT);
-            else
-                sample = (int32_t)(((int64_t)sample * scsp_eg_table[scsp_eg_update(sl) >> (SCSP_SHIFT - 10)]) >> SCSP_SHIFT);
-        }
+        if (!sdir) sample = scsp_slot_env(sl, alfo, sample);
         if (!stwinh) s->sous[((s->sous_ptr ^ ((k & 1u) << 5)) + i) & 63] = (int16_t)((sample * gs) >> (SCSP_SHIFT + 1));
         s->acc_mixs[k][isel] += (sample * gm) >> (SCSP_SHIFT - 2);
         s->acc_l[k] += (sample * gl) >> SCSP_SHIFT;
@@ -1084,6 +1133,39 @@ static inline void scsp_latch_now(scsp_t *s) {
     s->latch_fresh = 1;
 }
 
+/* The largest step the pitch LFO can make of the base step, into *step; false
+ * when it has no table to say. */
+static inline int scsp_slot_max_step(const scsp_slot_t *sl, uint64_t *step) {
+    if (SCSP_PLFOS(sl)) {
+        if (!sl->plfo.scale) return 0;
+        int32_t mx = 0;
+        for (int k = 0; k < 256; k++) if (sl->plfo.scale[k] > mx) mx = sl->plfo.scale[k];
+        *step = (*step * ((uint64_t)mx << (SCSP_SHIFT - SCSP_LFO_SHIFT))) >> SCSP_SHIFT;
+    }
+    return 1;
+}
+
+/* The loop sends the position back from LSA / LEA by less than a step,
+ * and it only ever starts at 0 (key-on) and moves by a step, so it stays
+ * inside [0, LEA + 2 steps] when:
+ *   - LSA <= LEA and the loop is longer than a step (a shorter one lands
+ *     past its end again, and creeps on through RAM);
+ *   - played backwards (LPCTL 2, 3), LSA is at least a step, so a step down
+ *     from LSA does not go below 0: MAME's alternating loop reads a
+ *     position that wrapped below 0 as past LEA and reflects it off LEA,
+ *     far beyond the loop. So a voice going backwards must also be at LSA
+ *     or above now, which the loop keeps it.
+ *   - a voice going backwards with no reverse loop never turns round.
+ * A no-loop voice stops at the later of the two. */
+static inline int scsp_slot_loop_bounded(const scsp_slot_t *sl, uint32_t lsa, uint32_t lea, uint32_t top0, uint64_t adv) {
+    const int lp = (int)SCSP_LPCTL(sl);
+    if (lp != 0 && (lsa > lea || lea - lsa <= adv)) return 0;
+    if (lp >= 2 && (lsa < adv || (sl->backwards && (sl->cur >> SCSP_SHIFT) < lsa))) return 0;
+    if (sl->backwards && lp < 2) return 0;
+    if ((sl->cur >> SCSP_SHIFT) > top0 || (sl->nxt >> SCSP_SHIFT) > top0 + 1) return 0;
+    return 1;
+}
+
 /* The sound RAM a running slot may read before its registers change, [lo, hi);
  * all of it when that is not simple to bound. */
 static void scsp_slot_range(const scsp_t *s, const scsp_slot_t *sl, uint32_t *lo, uint32_t *hi) {
@@ -1095,31 +1177,10 @@ static void scsp_slot_range(const scsp_t *s, const scsp_slot_t *sl, uint32_t *lo
     /* A step is at most the pitch LFO's largest factor on the base step; adv
      * is that in whole samples, and the fraction's carry. */
     uint64_t step = sl->step;
-    if (SCSP_PLFOS(sl)) {
-        if (!sl->plfo.scale) return;
-        int32_t mx = 0;
-        for (int k = 0; k < 256; k++) if (sl->plfo.scale[k] > mx) mx = sl->plfo.scale[k];
-        step = (step * ((uint64_t)mx << (SCSP_SHIFT - SCSP_LFO_SHIFT))) >> SCSP_SHIFT;
-    }
+    if (!scsp_slot_max_step(sl, &step)) return;
     uint64_t adv = (step >> SCSP_SHIFT) + 1;
-    /* The loop sends the position back from LSA / LEA by less than a step,
-     * and it only ever starts at 0 (key-on) and moves by a step, so it stays
-     * inside [0, LEA + 2 steps] when:
-     *   - LSA <= LEA and the loop is longer than a step (a shorter one lands
-     *     past its end again, and creeps on through RAM);
-     *   - played backwards (LPCTL 2, 3), LSA is at least a step, so a step down
-     *     from LSA does not go below 0: MAME's alternating loop reads a
-     *     position that wrapped below 0 as past LEA and reflects it off LEA,
-     *     far beyond the loop. So a voice going backwards must also be at LSA
-     *     or above now, which the loop keeps it.
-     *   - a voice going backwards with no reverse loop never turns round.
-     * A no-loop voice stops at the later of the two. */
     uint32_t top0 = lsa > lea ? lsa : lea;
-    const int lp = (int)SCSP_LPCTL(sl);
-    if (lp != 0 && (lsa > lea || lea - lsa <= adv)) return;
-    if (lp >= 2 && (lsa < adv || (sl->backwards && (sl->cur >> SCSP_SHIFT) < lsa))) return;
-    if (sl->backwards && lp < 2) return;
-    if ((sl->cur >> SCSP_SHIFT) > top0 || (sl->nxt >> SCSP_SHIFT) > top0 + 1) return;
+    if (!scsp_slot_loop_bounded(sl, lsa, lea, top0, adv)) return;
     uint64_t top = (uint64_t)top0 + 2 * adv + 3;
     uint64_t end = (uint64_t)SCSP_SA(sl) + (SCSP_PCM8B(sl) ? top : top * 2 + 2);
     if (end > 0xFFFFFu) return;                            /* wraps */
@@ -1244,81 +1305,87 @@ static void scsp_w16(scsp_t *s, uint32_t addr, uint16_t v) {
     if (sy) scsp_recouple(s);
 }
 
+static void scsp_w16_slot(scsp_t *s, uint32_t addr, uint16_t v) {
+    scsp_slot_t *sl = &s->slot[addr / 0x20];
+    unsigned r = (addr & 0x1F) >> 1;
+    sl->r[r] = v;
+    switch (r) {
+    case 0x0:
+        if (SCSP_KYONEX(sl)) {                      /* one strobe commits every slot's KYONB */
+            for (int i = 0; i < 32; i++) {
+                scsp_slot_t *s2 = &s->slot[i];
+                if (SCSP_KYONB(s2) && s2->state == SCSP_RELEASE) scsp_slot_start(s2);
+                if (!SCSP_KYONB(s2)) scsp_slot_stop(s2, 1);
+            }
+            sl->r[0] &= (uint16_t)~0x1000;
+        }
+        break;
+    case 0x8: sl->step = scsp_slot_step(sl); break;
+    case 0x5: sl->rr = scsp_rate(scsp_dr_table, 0, SCSP_RR(sl)); sl->dl = 0x1F - (int32_t)SCSP_DL(sl); break;
+    case 0x9: scsp_slot_lfo(sl); break;
+    case 0x6: case 0xA: case 0xB: scsp_slot_gains(sl); break;
+    }
+}
+
+/* timers A, B, C */
+static void scsp_w16_timer(scsp_t *s, unsigned r, uint16_t v) {
+    int t = (int)r - 0x0C;
+    uint32_t reload = v & 0xFF;
+    s->tim_cnt[t] = (uint16_t)(reload << 8);
+    /* Timed from the write, to the clock period: the driver reloads its
+     * timers inside the interrupt handler, a few hundred periods after
+     * they fire, and that delay is part of every period (MAME measures
+     * 49.9 samples fire to fire for a 49-sample timer). Rounding to whole
+     * samples plays the music 2% fast. MAME: 255 leaves a running timer
+     * running. */
+    if (reload != 255) {
+        s->tim_due[t] = *s->clock + (((uint64_t)(255u - reload) << ((v >> 8) & 7)) << 8);
+        scsp_timer_next(s);
+    }
+}
+
+/* SCIRE */
+static void scsp_w16_scire(scsp_t *s, uint16_t v) {
+    s->c[0x10] &= (uint16_t)~s->c[0x11];
+    if (v & 0x040) s->lines &= (uint8_t)~(1u << s->lvl_ta);
+    if (v & 0x180) s->lines &= (uint8_t)~(1u << s->lvl_tbc);
+    if (v & 0x008) s->lines &= (uint8_t)~(1u << s->lvl_midi);
+    scsp_check_irq(s);
+    /* MAME, from hardware: an acknowledged timer that has expired pends again */
+    for (int t = 0; t < 3; t++) if (s->tim_cnt[t] == 0xFFFF) s->c[0x10] |= (uint16_t)(0x40u << t);
+}
+
+static void scsp_w16_common(scsp_t *s, uint32_t addr, uint16_t v) {
+    unsigned r = (addr - 0x400) >> 1;
+    s->c[r] = v;
+    switch (r) {
+    case 0x01:
+        s->dsp.rbl = (8u * 1024u) << ((v >> 7) & 3);
+        s->dsp.rbp = v & 0x3F;
+        break;
+    case 0x03:                                      /* MIDI out */
+        s->mo[s->mo_w++ & 31] = (uint8_t)v;
+        s->mo_w &= 31;
+        break;
+    case 0x04: s->mslc = (uint8_t)((v >> 11) & 0x1F); break;   /* only MSLC is writable */
+    case 0x0B: if (v & 0x1000) scsp_dma(s); break;
+    case 0x0C: case 0x0D: case 0x0E: scsp_w16_timer(s, r, v); break;   /* timers A, B, C */
+    case 0x0F: scsp_check_irq(s); break;            /* SCIEB */
+    case 0x11: scsp_w16_scire(s, v); break;         /* SCIRE */
+    case 0x12: case 0x13: case 0x14:                /* SCILV0-2 */
+        s->lvl_ta   = scsp_level(s, SCSP_INT_TIMER_A);
+        s->lvl_tbc  = scsp_level(s, SCSP_INT_TIMER_B);
+        s->lvl_midi = scsp_level(s, SCSP_INT_MIDI_IN);
+        break;
+    case 0x15: s->mcieb = v; break;
+    case 0x16: if (v & 0x20) s->mcipd |= 0x20; break;
+    case 0x17: s->mcipd &= (uint16_t)~v; break;
+    }
+}
+
 static void scsp_w16_now(scsp_t *s, uint32_t addr, uint16_t v) {
-    if (addr < 0x400) {
-        scsp_slot_t *sl = &s->slot[addr / 0x20];
-        unsigned r = (addr & 0x1F) >> 1;
-        sl->r[r] = v;
-        switch (r) {
-        case 0x0:
-            if (SCSP_KYONEX(sl)) {                      /* one strobe commits every slot's KYONB */
-                for (int i = 0; i < 32; i++) {
-                    scsp_slot_t *s2 = &s->slot[i];
-                    if (SCSP_KYONB(s2) && s2->state == SCSP_RELEASE) scsp_slot_start(s2);
-                    if (!SCSP_KYONB(s2)) scsp_slot_stop(s2, 1);
-                }
-                sl->r[0] &= (uint16_t)~0x1000;
-            }
-            break;
-        case 0x8: sl->step = scsp_slot_step(sl); break;
-        case 0x5: sl->rr = scsp_rate(scsp_dr_table, 0, SCSP_RR(sl)); sl->dl = 0x1F - (int32_t)SCSP_DL(sl); break;
-        case 0x9: scsp_slot_lfo(sl); break;
-        case 0x6: case 0xA: case 0xB: scsp_slot_gains(sl); break;
-        }
-        return;
-    }
-    if (addr < 0x430) {
-        unsigned r = (addr - 0x400) >> 1;
-        s->c[r] = v;
-        switch (r) {
-        case 0x01:
-            s->dsp.rbl = (8u * 1024u) << ((v >> 7) & 3);
-            s->dsp.rbp = v & 0x3F;
-            break;
-        case 0x03:                                      /* MIDI out */
-            s->mo[s->mo_w++ & 31] = (uint8_t)v;
-            s->mo_w &= 31;
-            break;
-        case 0x04: s->mslc = (uint8_t)((v >> 11) & 0x1F); break;   /* only MSLC is writable */
-        case 0x0B: if (v & 0x1000) scsp_dma(s); break;
-        case 0x0C: case 0x0D: case 0x0E: {              /* timers A, B, C */
-            int t = (int)r - 0x0C;
-            uint32_t reload = v & 0xFF;
-            s->tim_cnt[t] = (uint16_t)(reload << 8);
-            /* Timed from the write, to the clock period: the driver reloads its
-             * timers inside the interrupt handler, a few hundred periods after
-             * they fire, and that delay is part of every period (MAME measures
-             * 49.9 samples fire to fire for a 49-sample timer). Rounding to whole
-             * samples plays the music 2% fast. MAME: 255 leaves a running timer
-             * running. */
-            if (reload != 255) {
-                s->tim_due[t] = *s->clock + (((uint64_t)(255u - reload) << ((v >> 8) & 7)) << 8);
-                scsp_timer_next(s);
-            }
-            break;
-        }
-        case 0x0F: scsp_check_irq(s); break;            /* SCIEB */
-        case 0x11: {                                    /* SCIRE */
-            s->c[0x10] &= (uint16_t)~s->c[0x11];
-            if (v & 0x040) s->lines &= (uint8_t)~(1u << s->lvl_ta);
-            if (v & 0x180) s->lines &= (uint8_t)~(1u << s->lvl_tbc);
-            if (v & 0x008) s->lines &= (uint8_t)~(1u << s->lvl_midi);
-            scsp_check_irq(s);
-            /* MAME, from hardware: an acknowledged timer that has expired pends again */
-            for (int t = 0; t < 3; t++) if (s->tim_cnt[t] == 0xFFFF) s->c[0x10] |= (uint16_t)(0x40u << t);
-            break;
-        }
-        case 0x12: case 0x13: case 0x14:                /* SCILV0-2 */
-            s->lvl_ta   = scsp_level(s, SCSP_INT_TIMER_A);
-            s->lvl_tbc  = scsp_level(s, SCSP_INT_TIMER_B);
-            s->lvl_midi = scsp_level(s, SCSP_INT_MIDI_IN);
-            break;
-        case 0x15: s->mcieb = v; break;
-        case 0x16: if (v & 0x20) s->mcipd |= 0x20; break;
-        case 0x17: s->mcipd &= (uint16_t)~v; break;
-        }
-        return;
-    }
+    if (addr < 0x400) { scsp_w16_slot(s, addr, v); return; }
+    if (addr < 0x430) { scsp_w16_common(s, addr, v); return; }
     if (addr < 0x600) return;
     if (addr < 0x700) { s->sous[(addr - 0x600) >> 1] = (int16_t)v; return; }
     if (addr < 0x780) { s->dsp.coef[(addr - 0x700) >> 1] = (int16_t)v; return; }
@@ -1339,48 +1406,47 @@ static void scsp_w16_now(scsp_t *s, uint32_t addr, uint16_t v) {
     }
 }
 
-/* a read with the side effects the 68000's own reads have (MIDI buffer, monitor) */
-static uint16_t scsp_r16(scsp_t *s, uint32_t addr) {
-    addr &= 0xFFFF;
-    if (s->owed) {                                      /* what the owed samples change */
-        if (addr < 0x400) {
-            if (!(addr & 0x1F) && s->done[addr / 0x20] < s->owed) {    /* KYONB */
-                scsp_slot_run(s, addr / 0x20, s->owed);
-                s->catches++;
-            }
-        } else if ((addr >= 0x600 && addr < 0x700) || addr >= 0xC00) {
-            scsp_sync(s);                               /* the sound stack, the DSP's state */
+/* what the owed samples change, made before a read sees it */
+static inline void scsp_r16_catch_up(scsp_t *s, uint32_t addr) {
+    if (addr < 0x400) {
+        if (!(addr & 0x1F) && s->done[addr / 0x20] < s->owed) {    /* KYONB */
+            scsp_slot_run(s, addr / 0x20, s->owed);
+            s->catches++;
         }
+    } else if ((addr >= 0x600 && addr < 0x700) || addr >= 0xC00) {
+        scsp_sync(s);                               /* the sound stack, the DSP's state */
     }
-    if (addr < 0x400) return s->slot[addr / 0x20].r[(addr & 0x1F) >> 1];
-    if (addr < 0x430) {
-        unsigned r = (addr - 0x400) >> 1;
-        switch (r) {
-        case 0x02: {                                    /* MIDI in */
-            uint16_t v = (uint16_t)((s->c[0x02] & 0xFF00) | s->mi[s->mi_r]);
-            if (s->mi_r != s->mi_w) { s->mi_r = (uint8_t)((s->mi_r + 1) & 31); s->mi_taken++; }
-            if (s->mi_r == s->mi_w) {
-                s->lines &= (uint8_t)~(1u << s->lvl_midi);
-                s->c[0x10] &= (uint16_t)~0x08;
-            }
-            s->c[0x02] = v;
-            break;
+}
+
+static inline uint16_t scsp_r16_common(scsp_t *s, uint32_t addr) {
+    unsigned r = (addr - 0x400) >> 1;
+    switch (r) {
+    case 0x02: {                                    /* MIDI in */
+        uint16_t v = (uint16_t)((s->c[0x02] & 0xFF00) | s->mi[s->mi_r]);
+        if (s->mi_r != s->mi_w) { s->mi_r = (uint8_t)((s->mi_r + 1) & 31); s->mi_taken++; }
+        if (s->mi_r == s->mi_w) {
+            s->lines &= (uint8_t)~(1u << s->lvl_midi);
+            s->c[0x10] &= (uint16_t)~0x08;
         }
-        case 0x04:                                      /* slot monitor */
-            /* The value latched at the end of the last sample (scsp_sample),
-             * for the slot MSLC named then: a read right after a new MSLC still
-             * sees the old slot. MAME 458507e06bc, from hardware (vstriker,
-             * srallyc); it used to be worked out at the read. */
-            scsp_latch_now(s);
-            s->c[0x04] = s->mslc_data;
-            break;
-        case 0x15: s->c[0x15] = s->mcieb; break;
-        case 0x16: s->c[0x16] = s->mcipd; break;
-        }
-        return s->c[r];
+        s->c[0x02] = v;
+        break;
     }
-    if (addr < 0x600) return 0;
-    if (addr < 0x700) return (uint16_t)s->sous[(addr - 0x600) >> 1];
+    case 0x04:                                      /* slot monitor */
+        /* The value latched at the end of the last sample (scsp_sample),
+         * for the slot MSLC named then: a read right after a new MSLC still
+         * sees the old slot. MAME 458507e06bc, from hardware (vstriker,
+         * srallyc); it used to be worked out at the read. */
+        scsp_latch_now(s);
+        s->c[0x04] = s->mslc_data;
+        break;
+    case 0x15: s->c[0x15] = s->mcieb; break;
+    case 0x16: s->c[0x16] = s->mcipd; break;
+    }
+    return s->c[r];
+}
+
+/* the DSP's registers and state, from 0x700 */
+static inline uint16_t scsp_r16_dsp(const scsp_t *s, uint32_t addr) {
     if (addr < 0x780) return (uint16_t)s->dsp.coef[(addr - 0x700) >> 1];
     if (addr < 0x7C0) return s->dsp.madrs[(addr - 0x780) >> 1];
     if (addr < 0x800) return 0;
@@ -1391,6 +1457,17 @@ static uint16_t scsp_r16(scsp_t *s, uint32_t addr) {
     if (addr < 0xEE0) return (uint16_t)s->dsp.efreg[(addr - 0xEC0) >> 1];
     if (addr < 0xEE4) return (uint16_t)s->dsp.exts[(addr - 0xEE0) >> 1];
     return 0;
+}
+
+/* a read with the side effects the 68000's own reads have (MIDI buffer, monitor) */
+static uint16_t scsp_r16(scsp_t *s, uint32_t addr) {
+    addr &= 0xFFFF;
+    if (s->owed) scsp_r16_catch_up(s, addr);        /* what the owed samples change */
+    if (addr < 0x400) return s->slot[addr / 0x20].r[(addr & 0x1F) >> 1];
+    if (addr < 0x430) return scsp_r16_common(s, addr);
+    if (addr < 0x600) return 0;
+    if (addr < 0x700) return (uint16_t)s->sous[(addr - 0x600) >> 1];
+    return scsp_r16_dsp(s, addr);
 }
 
 /* a debugger's read: no side effects */
