@@ -672,6 +672,55 @@ e746591c in every build below).
     nothing, so it shows no gain there (14.5 s → 15.1 s); on a GD-ROM every
     load is a seek. Not measured on hardware.
   - The 40 left are reads the map missed or that cross a run's end.
+  - **Like objects together: tried and dropped** (#489, #492). A map holds
+    only what its runs saw, so a matchup it never recorded reads its fighters
+    from the ROM. `dc_mdlpack.py --groups` lays the pack out by object groups, as Gems' `OBJ_*` files are: one per stage,
+    one per fighter (and the fighter's second-player colours), the select
+    screen, the story scenes (`dreamcast/sfight.mdlgroups`, written by
+    `tools/dc_mdlgroups.mjs`). The explorer says what each stage's display
+    list draws, at every frame of its animations, and each fighter's parts
+    and faces. Gems' files add the fighters' effects and props and the
+    scenes the explorer does not reach. Each group's objects go in whole:
+    10,943 runs, 20.3 MB. Its 133 KB index comes out of the frame pool
+    (`pg_init`), so the heap keeps its headroom.
+  - Measured by replaying the pager's model reads (`det_digest --model-map`
+    traces, an LRU over 16 KB pages; the code's share of the cache left
+    out), against the by-first-frame pack. The 1 MB pool is 64 frames for
+    that pack and 55 for this one:
+
+    | run | by first frame | by groups |
+    |---|---|---|
+    | attract, 6000 frames (in the map) | 619 | 945 |
+    | the scripted fight, 9000 (in the map) | 723 | 829 |
+    | another matchup, 9000 (not in the map) | 171,558 (64,891 from the ROM) | 9,146 (none) |
+
+    What the map recorded costs a third more loads, because a group's
+    pages hold objects the scene does not draw. What it did not record
+    stops thrashing. Two layouts were worse and were dropped: the map's
+    lines regrouped by object (3,771 / 1,266 / 106,000 + 65,000 from the
+    ROM), and the map's lines first with the groups' remaining lines after
+    them (753 / 920 / 185,281).
+  - **In Flycast it is worse** (#492). One program (Gems, AOT 0.99), three
+    discs: no pack, the by-first-frame pack, the grouped pack; the libretro
+    core, HLE BIOS, the pager's counters read off the screen. Page loads on
+    the bench (f3500-3900, in the map), then evictions since boot (each a
+    load once the cache is full):
+
+    | run | no pack | by first frame | by groups |
+    |---|---|---|---|
+    | bench loads (code / data / polygons / textures / pack) | 312 (115/25/91/81/0) | 184 (84/20/18/0/62) | 395 (145/30/90/0/130) |
+    | attract, evictions to frame ~9700 | 3,772 | 2,607 | 4,378 |
+    | a game, Espio vs Knuckles (not in attract), evictions over its fight, frames ~1160-3800 | 564 | 229 | 516 |
+
+    The grouped pack needs twice the pack pages for the same scene, and
+    they push code and the polygon pages the i960 reads out of the cache.
+    A matchup the map never recorded does not thrash with the old pack: the
+    3D decoder's mesh cache builds a mesh once (`b 0`, thousands of hits a
+    second in the fight), so its reads come from the ROM once, not every
+    frame as in the replay above, which decodes every display list uncut.
+    So `mkdisc.sh` builds the pack by first frame; `--groups` stays in the
+    tool, and the pager takes any pack's index out of the frame pool (one
+    16 KB frame for the by-first-frame pack's 7 KB, as measured here).
 - **Textures converted at build time do not pay here, so there is no texture
   pack.** Gems' `TEX_STG*` files look like each stage's textures, already
   decompressed and converted. The two costs that would remove, measured over
