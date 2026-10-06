@@ -62,8 +62,9 @@
 #define DC_HUD_NONE 0
 #endif
 /* -DDC_HUD_PROF=1 (make HUD=prof): the full stats and the hardware profile
- * (dc_prof.h): cache-miss stalls, the PVR's times, where the program's time
- * goes by symbol. Rows 6-10. */
+ * (dc_prof.h): the SH-4's counters, the PVR's times, where the program's time
+ * goes by symbol. As a panel to be read back out of a capture of the video
+ * (#518): small, tagged, checked lines (hud_line; dreamcast/README.md). */
 #ifndef DC_HUD_PROF
 #define DC_HUD_PROF 0
 #endif
@@ -88,6 +89,45 @@
 #endif
 
 KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM);
+
+#if DC_HUD_PROF
+/* HUD=prof's panel, rows of dc_pvr.h's 8x16 font. A line is a two-letter
+ * tag, for the window's lines the window's number (four digits), then
+ * key=value fields, then a space and the CRC-8 of all that before it in two
+ * hex digits (tools/hud_font5x7.py crc8): a reader of the video keeps only
+ * lines whose check holds. The top band: LV, every frame drawn; ID, once; the bench (B0-B3) and AO when they come. The bottom band: a 2-s
+ * window's numbers, its lines all the same window's. R on the pad shows the
+ * top band only, then nothing, then all of it again. Tools/hud_read.py
+ * reads it; dreamcast/README.md says what each field is. */
+#define HUD_TOP_ROWS 7
+enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO,
+       HUD_WN = 14, HUD_FT, HUD_CP, HUD_PG, HUD_LD, HUD_RD, HUD_DR, HUD_MS, HUD_TX, HUD_SN,
+       HUD_HW, HUD_PV, HUD_G0, HUD_G1, HUD_S0, HUD_S1 };
+static uint32_t s_hud_win;   /* the window's number */
+
+static uint8_t hud_crc8(const char *s, int n) {
+    uint8_t c = 0;
+    for (int i = 0; i < n; i++) {
+        c ^= (uint8_t)s[i];
+        for (int b = 0; b < 8; b++) c = c & 0x80 ? (uint8_t)(c << 1 ^ 0x07) : (uint8_t)(c << 1);
+    }
+    return c;
+}
+
+/* A panel line: at most 74 characters of text (a longer one ends in '>'),
+ * then its check. win: the window's number goes after the tag. */
+static void hud_line(int row, const char *tag, int win, const char *body) {
+    char l[80];
+    int n = win ? snprintf(l, 75, "%s %04u %s", tag, (unsigned)(s_hud_win % 10000u), body)
+                : snprintf(l, 75, "%s %s", tag, body);
+    if (n > 74) { n = 74; l[73] = '>'; }
+    sprintf(l + n, " %02X", hud_crc8(l, n));
+    dp_text_row(row, l);
+}
+
+/* ms to a tenth, as "%u.%u" */
+#define HUD_MS10(us) (unsigned)((us) / 1000u), (unsigned)((us) / 100u % 10u)
+#endif
 
 static memory_bus_t     bus;
 static i960_cpu_t       cpu;
@@ -199,6 +239,17 @@ static void dc_pad(void) {
         for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
             if (st->buttons & map[i].mask) now |= 1u << map[i].act;
         if (st->ltrig > 128) now |= 1u << GAME_INPUT_P1_COIN;
+#if DC_HUD_PROF
+        {   /* R: the whole panel, its top band only, none of it, in turn */
+            static int r_was, mode;
+            int r = st->rtrig > 128;
+            if (r && !r_was) {
+                mode = (mode + 1) % 3;
+                g_dp.text_hide = mode == 0 ? 0 : mode == 1 ? ~((1u << HUD_TOP_ROWS) - 1) : ~0u;
+            }
+            r_was = r;
+        }
+#endif
     }
     for (int a = 0; a < GAME_INPUT_COUNT; a++) {
         uint32_t b = 1u << a;
@@ -293,8 +344,8 @@ int main(int argc, char **argv) {
 #endif
     i960_reset(&cpu);
     dc_install_board();
+    uint32_t left = 0;
     {   /* what the heap has left once the board is up */
-        uint32_t left = 0;
         for (void *p; left < (16u << 20); left += 64u << 10) {
             if (!(p = malloc(left + (64u << 10)))) break;
             free(p);
@@ -327,7 +378,31 @@ int main(int argc, char **argv) {
     ctx.run_state = EMU_RUNNING;
     if (DC_HUD_MIN) g_dp.text_rows = 0;   /* the boot lines go */
 #if DC_HUD_PROF
-    if (dc_prof_init() != 0) dp_text(6, "prof: off (no symbol map, or no memory)");
+    dc_prof_init();   /* off: the HW line says so */
+    for (int r = 0; r < DC_TEXT_ROWS; r++) dp_text_row(r, "");   /* the boot lines go */
+    {   /* the build and the console, once */
+#if defined(I960_AOT) && I960_AOT
+        const int aot = 1;
+#else
+        const int aot = 0;
+#endif
+#ifndef DC_GIT
+#define DC_GIT "unknown"
+#endif
+        static const char *const cable[] = { "vga", "none", "rgb", "cmp" };
+        static const char *const region[] = { "unk", "jp", "us", "eu" };
+        int cab = vid_check_cable(), rg = flashrom_get_region();
+        snprintf(line, sizeof line, "git=%.13s gems=%d aot=%d jit=%d cap=%d cab=%s rg=%s il=%d pal=%d",
+                 DC_GIT, s_dc_gems, aot, I960_JIT, DC_FPS_CAP,
+                 cab >= 0 && cab < 4 ? cable[cab] : "?", rg >= 0 && rg < 4 ? region[rg] : "?",
+                 (vid_mode->flags & VID_INTERLACE) != 0, (vid_mode->flags & VID_PAL) != 0);
+        hud_line(HUD_ID, "ID", 0, line);
+    }
+    uint64_t ft_last = 0, ft_min = ~0ull, ft_max = 0, ft_sum = 0, sl_max = 0, snd_last = 0;
+    uint32_t ft_n = 0, ft_33 = 0, ft_50 = 0, ft_dt = 0;
+    uint32_t sk_last = 0, rds_last = 0, sec_last = 0, sp_last = 0, at_last = 0, pak_last = 0, txr_last = 0;
+    uint64_t dns_last = 0, sns_last = 0, txns_last = 0;
+    uint32_t rg_last[DC_REGIONS] = { 0 };
 #endif
 
     uint64_t t_last = timer_us_gettime64(), us_slice = 0, us_draw = 0;
@@ -359,7 +434,30 @@ int main(int argc, char **argv) {
             }
         }
 #endif
-        if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }
+#if DC_HUD_PROF
+        if (g_emu_frames - drawn_f >= DC_DRAW_EVERY) {   /* this frame's numbers, in it */
+            snprintf(line, sizeof line, "f=%u d=%u v=%u t=%u dt=%u.%u", (unsigned)g_emu_frames, (unsigned)(n_drawn + 1),
+                     (unsigned)pvr_get_vbl_count(), (unsigned)((t1 - t_boot) / 1000), HUD_MS10(ft_dt));
+            hud_line(HUD_LV, "LV", 0, line);
+        }
+#endif
+        if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) {
+            drawn_f = g_emu_frames; shown++; n_drawn++;
+#if DC_HUD_PROF
+            {   /* the time from the last frame handed to the PVR to this one */
+                uint64_t now = timer_us_gettime64();
+                if (ft_last) {
+                    uint64_t dt = now - ft_last;
+                    ft_dt = (uint32_t)dt;
+                    if (dt < ft_min) ft_min = dt;
+                    if (dt > ft_max) ft_max = dt;
+                    ft_sum += dt; ft_n++;
+                    ft_33 += dt > 33400; ft_50 += dt > 50100;
+                }
+                ft_last = now;
+            }
+#endif
+        }
 #if DC_FPS_CAP
         {   /* wait while the board is ahead of the clock; behind by over 0.1 s, the clock starts again */
             static uint64_t cap_t0;
@@ -407,6 +505,27 @@ int main(int argc, char **argv) {
                              (unsigned long)((us_dall - b_d0) / 1000), (unsigned long)((g_dp.tt_tex - b_tx0) / 1000),
                              (unsigned long)(g_pg.tx_reads - b_rd0));
                     printf("%s\n", b_line);
+#if DC_HUD_PROF
+                    snprintf(line, sizeof line, "f=%u-%u ms=%lu sl=%lu dr=%lu tx=%lu txr=%lu n=%lu", DC_BENCH_F0, (unsigned)g_emu_frames,
+                             (unsigned long)((t1 - b_t0) / 1000), (unsigned long)(b_sl / 1000),
+                             (unsigned long)((us_dall - b_d0) / 1000), (unsigned long)((g_dp.tt_tex - b_tx0) / 1000),
+                             (unsigned long)(g_pg.tx_reads - b_rd0), (unsigned long)(n_drawn - b_n0));
+                    hud_line(HUD_B0, "B0", 0, line);
+                    snprintf(line, sizeof line, "ti=%lu sc=%lu so=%lu su=%lu snd=%lu",
+                             (unsigned long)((b_p[0] - b_p0[0]) / 1000), (unsigned long)((b_p[1] - b_p0[1]) / 1000),
+                             (unsigned long)((b_p[2] - b_p0[2]) / 1000), (unsigned long)((b_p[3] - b_p0[3]) / 1000),
+                             (unsigned long)((b_p[4] - b_p0[4]) / 1000));
+                    hud_line(HUD_B1, "B1", 0, line);
+                    snprintf(line, sizeof line, "ld=%lu cd=%lu da=%lu po=%lu tx=%lu pk=%lu at=%lu",
+                             (unsigned long)(b_g[DC_REGIONS + 2] - b_g0[DC_REGIONS + 2]), (unsigned long)(b_g[0] - b_g0[0]),
+                             (unsigned long)(b_g[1] - b_g0[1]), (unsigned long)(b_g[3] - b_g0[3]),
+                             (unsigned long)(b_g[4] - b_g0[4]), (unsigned long)(b_g[DC_REGIONS + 1] - b_g0[DC_REGIONS + 1]),
+                             (unsigned long)(b_g[DC_REGIONS] - b_g0[DC_REGIONS]));
+                    hud_line(HUD_B2, "B2", 0, line);
+                    snprintf(line, sizeof line, "rd=%lu sk=%lu sp=%lu", (unsigned long)(g_pg.reads - b_dr0),
+                             (unsigned long)(g_pg.seeks - b_sk0), (unsigned long)(g_pg.sp_loads - b_sp0));
+                    hud_line(HUD_B3, "B3", 0, line);
+#else
                     dp_text(3, b_line);
                     static char b_line2[96];   /* the draws' parts in it, and how many were shown */
                     snprintf(b_line2, sizeof b_line2, "ti %lu sc %lu so %lu su %lu snd %lu n %lu",
@@ -426,6 +545,7 @@ int main(int argc, char **argv) {
                              (unsigned long)(g_pg.seeks - b_sk0), (unsigned long)(g_pg.sp_loads - b_sp0));
                     printf("%s | %s\n", b_line3, b_line4);
                     dp_text(6, b_line4);
+#endif
                 }
             }
         }
@@ -435,14 +555,119 @@ int main(int argc, char **argv) {
         uint64_t t2 = timer_us_gettime64();
         us_slice += t1 - t0;
         us_all += t1 - t0;
+#if DC_HUD_PROF
+        if (t1 - t0 > sl_max) sl_max = t1 - t0;
+#endif
         us_draw  += t2 - t1;
         us_dall  += t2 - t1;
         slices++;
         if (t2 - t_last >= 2000000) {
             uint32_t fr = g_emu_frames - f_last;
             double sec = (double)(t2 - t_last) / 1e6;
+            (void)sec;
             uint32_t loads = g_pg.loads - loads_last, refills = g_pg.refills - refills_last;
             uint32_t read_ms = (uint32_t)((g_pg.read_ns - read_last) / 1000000);
+#if DC_HUD_PROF
+            {   /* the window's lines (HUD_WN on), all of the same window */
+                s_hud_win++;
+                uint64_t us = t2 - t_last;
+                unsigned d = shown ? shown : 1, sl = slices ? slices : 1;
+                unsigned fps10 = (unsigned)((uint64_t)fr * 10000000u / us), sh10 = (unsigned)((uint64_t)shown * 10000000u / us);
+                snprintf(line, sizeof line, "f=%u fps=%u.%u sh=%u.%u sl=%u 3d=%u+%u",
+                         (unsigned)g_emu_frames, fps10 / 10, fps10 % 10, sh10 / 10, sh10 % 10,
+                         (unsigned)(us_slice / 1000 / sl), (unsigned)(g_dp.us_decode / 1000 / d),
+                         (unsigned)(g_dp.us_submit / 1000 / d));
+                hud_line(HUD_WN, "WN", 1, line);
+                /* frames to the PVR: their spacing, those late by a field or two; the slowest slice; the sound's pump */
+                uint64_t ft_avg = ft_n ? ft_sum / ft_n : 0;
+                snprintf(line, sizeof line, "ft=%u.%u/%u.%u/%u.%u s33=%u s50=%u slx=%u snd=%u",
+                         HUD_MS10(ft_n ? ft_min : 0), HUD_MS10(ft_avg), HUD_MS10(ft_max), (unsigned)ft_33, (unsigned)ft_50,
+                         (unsigned)(sl_max / 1000), (unsigned)((us_snd - snd_last) / 1000));
+                hud_line(HUD_FT, "FT", 1, line);
+                ft_min = ~0ull; ft_max = ft_sum = 0; ft_n = ft_33 = ft_50 = 0; sl_max = 0; snd_last = us_snd;
+                {   /* the i960's loop (the COP's commands inside it), per slice; blocks' and AOT's share of its steps */
+                    uint64_t st = g_emu_times.steps - steps_last, ops = g_ib.ops - ops_last;
+                    const emu_times_t *et = &g_emu_times;
+                    uint64_t cop = et->cop_timed ? (uint64_t)((double)et->cop_timed_us * (double)et->cop_cmds / (double)et->cop_timed) : 0;
+                    uint64_t aot = 0;
+#if I960_AOT
+                    aot = g_aot_ops - aot_last; aot_last = g_aot_ops;
+#else
+                    (void)aot_last;
+#endif
+                    snprintf(line, sizeof line, "i960=%u cop=%u blk=%u aot=%u st=%u",
+                             (unsigned)((g_emu_times.loop_us - loop_last) / 1000 / sl), (unsigned)((cop - cop_last) / 1000 / sl),
+                             (unsigned)(st ? ops * 100 / st : 0), (unsigned)(st ? aot * 100 / st : 0), (unsigned)(st / sl));
+                    hud_line(HUD_CP, "CP", 1, line);
+                    cop_last = cop; steps_last = g_emu_times.steps; ops_last = g_ib.ops; loop_last = g_emu_times.loop_us;
+#if I960_AOT && !I960_JIT
+                    if (aot_off_why()[0]) {   /* the compiled code refused: say why (#509) */
+                        snprintf(line, sizeof line, "off=%s", aot_off_why());
+                        hud_line(HUD_AO, "AO", 0, line);
+                    }
+#endif
+#if I960_JIT
+                    snprintf(line, sizeof line, "jit=%u kb=%u fl=%u ms=%u slow=%u",
+                             (unsigned)g_ibj.blocks, (unsigned)(g_ibj.bytes >> 10), (unsigned)g_ibj.flushes,
+                             (unsigned)(g_ibj.us_compile / 1000), (unsigned)g_ibj.slow);
+                    hud_line(HUD_AO, "JT", 0, line);
+#endif
+                }
+                /* the pager: page loads (their time), faults; since boot, evictions, pinned, ROM writes,
+                 * errors; its cache's KB, the heap's left at boot */
+                snprintf(line, sizeof line, "ld=%u ms=%u flt=%u ev=%u pin=%u wr=%u err=%u c=%u h=%u",
+                         (unsigned)loads, (unsigned)read_ms, (unsigned)refills, (unsigned)g_pg.evictions,
+                         (unsigned)pg_pinned(), (unsigned)g_pg.rom_writes, (unsigned)g_pg.read_errors,
+                         (unsigned)(cache >> 10), (unsigned)(left >> 10));
+                hud_line(HUD_PG, "PG", 1, line);
+                /* the loads by what they were for: code, data, polygons, textures, model pack, dc_rom_at, strip pack */
+                snprintf(line, sizeof line, "cd=%u da=%u po=%u tx=%u pk=%u at=%u sp=%u",
+                         (unsigned)(g_pg.rg_loads[0] - rg_last[0]), (unsigned)(g_pg.rg_loads[1] - rg_last[1]),
+                         (unsigned)(g_pg.rg_loads[3] - rg_last[3]), (unsigned)(g_pg.rg_loads[4] - rg_last[4]),
+                         (unsigned)(g_pg.pak_loads - pak_last), (unsigned)(g_pg.at_loads - at_last),
+                         (unsigned)(g_pg.sp_loads - sp_last));
+                hud_line(HUD_LD, "LD", 1, line);
+                memcpy(rg_last, g_pg.rg_loads, sizeof rg_last);
+                pak_last = g_pg.pak_loads; at_last = g_pg.at_loads; sp_last = g_pg.sp_loads;
+                /* the drive: commands, seeks, KB; their ms, the seeks' ms, the longest; the texture pack's reads, ms */
+                snprintf(line, sizeof line, "rd=%u sk=%u kb=%u ms=%u skms=%u max=%u.%u txr=%u txms=%u",
+                         (unsigned)(g_pg.reads - rds_last), (unsigned)(g_pg.seeks - sk_last),
+                         (unsigned)((g_pg.sectors - sec_last) * 2u), (unsigned)((g_pg.drive_ns - dns_last) / 1000000u),
+                         (unsigned)((g_pg.seek_ns - sns_last) / 1000000u), HUD_MS10(g_pg.drive_max_ns / 1000u),
+                         (unsigned)(g_pg.tx_reads - txr_last), (unsigned)((g_pg.tx_read_ns - txns_last) / 1000000u));
+                hud_line(HUD_RD, "RD", 1, line);
+                rds_last = g_pg.reads; sk_last = g_pg.seeks; sec_last = g_pg.sectors; dns_last = g_pg.drive_ns;
+                sns_last = g_pg.seek_ns; g_pg.drive_max_ns = 0; txr_last = g_pg.tx_reads; txns_last = g_pg.tx_read_ns;
+                /* a drawn frame's parts (ms): tiles, scan, sort; its triangles, runs, faces dropped for a full list */
+                snprintf(line, sizeof line, "tl=%u sc=%u so=%u tri=%u run=%u full=%u",
+                         (unsigned)(g_dp.us_tiles / 1000 / d), (unsigned)(g_dp.us_scan / 1000 / d),
+                         (unsigned)(g_dp.us_sort / 1000 / d), g_dp.tris, g_dp.runs, g_dp.faces_dropped);
+                hud_line(HUD_DR, "DR", 1, line);
+                /* the mesh cache: meshes, built and hit in the window, clears/evictions, arena KB */
+                snprintf(line, sizeof line, "n=%u b=%u h=%u clr=%u ev=%u kb=%u",
+                         (unsigned)g_geo3d_mesh_count, (unsigned)(g_geo3d_mesh_builds - builds_last),
+                         (unsigned)(g_geo3d_mesh_hits - hits_last), (unsigned)g_geo3d_mesh_clears,
+                         (unsigned)g_geo3d_mesh_evicts, (unsigned)(g_geo3d_arena_used >> 10));
+                hud_line(HUD_MS, "MS", 1, line);
+                /* textures: the pack's hits of all lookups; slots, made, dropped, failed */
+                snprintf(line, sizeof line, "pk=%u/%u tex=%u new=%u drop=%u fail=%u",
+                         (unsigned)g_dp.tx_hits, (unsigned)(g_dp.tx_hits + g_dp.tx_miss), g_dp.count, g_dp.made,
+                         g_dp.dropped, g_dp.fails);
+                hud_line(HUD_TX, "TX", 1, line);
+                snprintf(line, sizeof line, "on=%d codes=%u unk=%u bgm=%d ring=%u und=%u",
+                         g_ds.on, (unsigned)g_ds.codes, (unsigned)g_ds.unknown, g_ds.bgm == 0xFFFF ? -1 : (int)g_ds.bgm,
+                         (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
+                hud_line(HUD_SN, "SN", 1, line);
+                static char pl[DC_PROF_LINES][80];
+                static const char *const tag[DC_PROF_LINES] = { "HW", "PV", "G0", "G1", "S0", "S1" };
+                dc_prof_report(us, pl);
+                for (int i = 0; i < DC_PROF_LINES; i++) {
+                    STATS_PRINT(pl[i]);
+                    if (pl[i][0]) hud_line(HUD_HW + i, tag[i], 1, pl[i]);
+                    else dp_text_row(HUD_HW + i, "");
+                }
+            }
+#else
             snprintf(line, sizeof line, "frame %u %.1f fps (shown %.1f) slice %u ms 3d %u+%u ms",
                      (unsigned)g_emu_frames, fr / sec, shown / sec,
                      (unsigned)(us_slice / 1000 / (slices ? slices : 1)),
@@ -544,13 +769,7 @@ int main(int argc, char **argv) {
             STATS_PRINT(line);
             dp_text(14, line);
 #endif
-#if DC_HUD_PROF
-            {   /* the hardware profile's window: stalls and the PVR, the groups, the hottest symbols */
-                static char pl[5][96];
-                dc_prof_report(t2 - t_last, pl);
-                for (int i = 0; i < 5; i++) { STATS_PRINT(pl[i]); dp_text(6 + i, pl[i]); }
-            }
-#endif
+#endif   /* DC_HUD_PROF */
             builds_last = g_geo3d_mesh_builds; hits_last = g_geo3d_mesh_hits;
             g_dp.us_tiles = g_dp.us_scan = g_dp.us_sort = 0;
             t_last = t2; f_last = g_emu_frames; us_slice = us_draw = 0; slices = 0; shown = 0;
