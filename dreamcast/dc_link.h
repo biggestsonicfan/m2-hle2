@@ -22,7 +22,16 @@
  *   'Q'  stop sending and run on.
  *
  * So the Dreamcast never runs past a frame the host has not seen, and stops
- * where it parted from MAME. With nobody on the line (no FLYCAST_SCIF, a plain
+ * where it parted from MAME.
+ *
+ * Answered 'B' instead of 'G', the link holds the board from power-on (Pinboard
+ * #478): no replay jump, the warning screen kept (MAME's boot, as det_digest
+ * --nowarnskip), and at every game frame edge a 'B' record of a CRC-32 per
+ * DC_LINK_BBLOCK of the ranges in dc_link_boot (work RAM, RAM, bufferram, tile
+ * RAM, the palette), the ranges tools/mame/boot-lockstep.lua and det_digest
+ * --raw dump. After it the host's word is 'G', 'Q', or 'D' + address + length
+ * (u32 each), which sends that memory raw in a 'D' record and waits again: the
+ * host asks for the blocks whose CRC differs. With nobody on the line (no FLYCAST_SCIF, a plain
  * emulator or a real console with no cable), the hello goes unanswered for
  * DC_LINK_WAIT_MS and the board runs on unlinked.
  *
@@ -52,8 +61,19 @@ static const struct { uint32_t addr, len; } dc_link_extra[] = {
     { 0x90F600u, 0x100u },
 };
 
+/* The boot mode's ranges, in the host's order (tools/dc-lockstep.py BOOT_RANGES). */
+#define DC_LINK_BBLOCK 0x1000u
+static const struct { uint32_t addr, len; } dc_link_boot[] = {
+    { 0x500000u, 0x100000u },    /* work RAM */
+    { 0x200000u, 0x40000u },     /* RAM */
+    { 0x900000u, 0x20000u },     /* bufferram */
+    { 0x1000000u, 0x10000u },    /* tile RAM */
+    { 0x1800000u, 0x4000u },     /* palette */
+};
+
 static struct {
     int      on;                 /* 1: a host answered the hello */
+    int      boot;               /* 1: answered 'B', held from power-on */
     int      seen_jump;
     uint32_t frames, crc[256];
     memory_bus_t *bus;
@@ -119,9 +139,61 @@ static void dc_link_header(char kind, uint32_t len) {
     dc_link_u32(len);
 }
 
+/* The host's word after a record: 'G' on, 'Q' stop, 'F' (replay) or 'D' (boot) answered and waited on. */
+static void dc_link_wait(void (*full)(void)) {
+    for (;;) {
+        int c = dc_link_getc(0);
+        if (c == 'G') return;
+        if (c == 'Q') { g_link.on = 0; return; }
+        if (c == 'F' && full) full();
+        if (c == 'D') {
+            uint8_t b[8];
+            for (int i = 0; i < 8; i++) b[i] = (uint8_t)dc_link_getc(0);
+            uint32_t a = b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;
+            uint32_t n = (b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24) & ~3u;
+            dc_link_header('D', n + 4);
+            dc_link_u32(a);
+            dc_link_raw(a, n);
+        }
+    }
+}
+
+/* Boot mode: every game frame edge from the first. */
+static void dc_link_boot_frame(void) {
+    uint32_t n = 0;
+    for (size_t i = 0; i < sizeof dc_link_boot / sizeof dc_link_boot[0]; i++)
+        n += (dc_link_boot[i].len + DC_LINK_BBLOCK - 1) / DC_LINK_BBLOCK;
+    dc_link_header('B', 4 * n + 4);
+    dc_link_u32(mem_read8(g_link.bus, 0x50002Au));                /* mode */
+    for (size_t i = 0; i < sizeof dc_link_boot / sizeof dc_link_boot[0]; i++)
+        for (uint32_t o = 0; o < dc_link_boot[i].len; o += DC_LINK_BBLOCK) {
+            uint32_t c = 0xFFFFFFFFu;
+            for (uint32_t k = 0; k < DC_LINK_BBLOCK; k += 4) {
+                uint32_t w = mem_read32(g_link.bus, dc_link_boot[i].addr + o + k);
+                c = dc_link_crc(c, (uint8_t)w);         c = dc_link_crc(c, (uint8_t)(w >> 8));
+                c = dc_link_crc(c, (uint8_t)(w >> 16)); c = dc_link_crc(c, (uint8_t)(w >> 24));
+            }
+            dc_link_u32(~c);
+        }
+    g_link.frames++;
+    dc_link_wait(NULL);
+}
+
+static void dc_link_full(void) {
+    const uint32_t robs[2] = { DC_LINK_ROB0, DC_LINK_ROB1 };
+    uint32_t len = 2 * DC_LINK_ROB;
+    for (size_t i = 0; i < sizeof dc_link_extra / sizeof dc_link_extra[0]; i++) len += dc_link_extra[i].len;
+    dc_link_header('F', len);
+    for (int r = 0; r < 2; r++) dc_link_raw(robs[r], DC_LINK_ROB);
+    for (size_t i = 0; i < sizeof dc_link_extra / sizeof dc_link_extra[0]; i++)
+        dc_link_raw(dc_link_extra[i].addr, dc_link_extra[i].len);
+}
+
 static void dc_link_frame(memory_bus_t *bus) {
-    if (!g_link.on || g_match_replay != 2) return;
+    if (!g_link.on) return;
     g_link.bus = bus;
+    if (g_link.boot) { dc_link_boot_frame(); return; }
+    if (g_match_replay != 2) return;
     if (!g_link.seen_jump) { g_link.seen_jump = 1; return; }    /* MAME records from the edge after the jump */
     const uint32_t robs[2] = { DC_LINK_ROB0, DC_LINK_ROB1 };
     uint32_t nb = (DC_LINK_ROB - DC_LINK_FIGHT + DC_LINK_BLOCK - 1) / DC_LINK_BLOCK, ne = 0;
@@ -133,19 +205,7 @@ static void dc_link_frame(memory_bus_t *bus) {
     for (size_t i = 0; i < sizeof dc_link_extra / sizeof dc_link_extra[0]; i++)
         dc_link_crcs(dc_link_extra[i].addr, dc_link_extra[i].len);
     g_link.frames++;
-    for (;;) {
-        int c = dc_link_getc(0);
-        if (c == 'G') return;
-        if (c == 'Q') { g_link.on = 0; return; }
-        if (c == 'F') {
-            uint32_t len = 2 * DC_LINK_ROB;
-            for (size_t i = 0; i < sizeof dc_link_extra / sizeof dc_link_extra[0]; i++) len += dc_link_extra[i].len;
-            dc_link_header('F', len);
-            for (int r = 0; r < 2; r++) dc_link_raw(robs[r], DC_LINK_ROB);
-            for (size_t i = 0; i < sizeof dc_link_extra / sizeof dc_link_extra[0]; i++)
-                dc_link_raw(dc_link_extra[i].addr, dc_link_extra[i].len);
-        }
-    }
+    dc_link_wait(dc_link_full);
 }
 
 /* Before the board's install: the profile and region match-replay plays, and
@@ -163,7 +223,13 @@ static void dc_link_init(memory_bus_t *bus, const char *build) {
     dc_link_u32(0); dc_link_u32(0); dc_link_u32(0);
     dc_link_u32(n);
     dc_link_put(build, n);
-    g_link.on = dc_link_getc(DC_LINK_WAIT_MS) == 'G';
+    int c = dc_link_getc(DC_LINK_WAIT_MS);
+    g_link.on = c == 'G' || c == 'B';
+    if (c == 'B') {             /* from power-on, MAME's boot */
+        g_link.boot = 1;
+        g_match_replay = 0;
+        g_warning_skip = 0;
+    }
 }
 
 #endif

@@ -100,10 +100,31 @@ static inline double i960_nan_result(double r, double a, double b) {
     return i960_bits_to_double(I960_REAL_INDEF);
 }
 
+/* A denormal single has to survive both conversions. The SH-4 runs with
+ * FPSCR.DN = 1 (KOS), so its fcnvsd reads one as 0 and its fcnvds flushes one
+ * to 0; the board, MAME and every other host keep it. There the two are done
+ * on the bits (Pinboard #478: STF decays P1 +0x1FB0 through the denormals,
+ * and the Dreamcast parted from MAME there). Elsewhere the hardware does it. */
+#ifndef I960_SOFT_DENORMAL
+#if defined(__sh__)
+#define I960_SOFT_DENORMAL 1
+#else
+#define I960_SOFT_DENORMAL 0
+#endif
+#endif
+
 static inline double i960_single_to_double(uint32_t u) {
     if ((u & 0x7F800000u) == 0x7F800000u && (u & 0x007FFFFFu))
         return i960_bits_to_double(((uint64_t)(u >> 31) << 63) | 0x7FF0000000000000ull | I960_QNAN_BIT
                                    | ((uint64_t)(u & 0x007FFFFFu) << 29));
+#if I960_SOFT_DENORMAL
+    if (!(u & 0x7F800000u) && (u & 0x007FFFFFu)) {
+        uint64_t m = u & 0x007FFFFFu;
+        int e = 1023 - 126;                     /* m * 2^-149 = 1.f * 2^(e - 1023) */
+        while (!(m & 0x00800000u)) { m <<= 1; e--; }
+        return i960_bits_to_double(((uint64_t)(u >> 31) << 63) | (uint64_t)e << 52 | (m & 0x007FFFFFu) << 29);
+    }
+#endif
     float f;
     memcpy(&f, &u, 4);
     return (double)f;
@@ -114,6 +135,21 @@ static inline uint32_t i960_double_to_single(double d) {
         uint64_t u = i960_double_to_bits(d);
         return (uint32_t)(u >> 63) << 31 | 0x7FC00000u | (uint32_t)((u >> 29) & 0x003FFFFFu);
     }
+#if I960_SOFT_DENORMAL
+    {
+        uint64_t u = i960_double_to_bits(d);
+        int e = (int)((u >> 52) & 0x7FF);
+        if (e < 1023 - 126 && (u << 1)) {       /* below FLT_MIN, not zero: round to a denormal */
+            uint32_t s = (uint32_t)(u >> 63) << 31;
+            int sh = 1075 - 149 - e;            /* value / 2^-149 = m >> sh */
+            if (!e || sh > 54) return s;
+            uint64_t m = (u & 0x000FFFFFFFFFFFFFull) | 0x0010000000000000ull;
+            uint64_t q = m >> sh, r = m & ((1ull << sh) - 1), h = 1ull << (sh - 1);
+            if (r > h || (r == h && (q & 1))) q++;
+            return s | (uint32_t)q;             /* 0x00800000 if it rounds up to FLT_MIN */
+        }
+    }
+#endif
     float f = (float)d;
     uint32_t u;
     memcpy(&u, &f, 4);

@@ -26,6 +26,12 @@
 #ifndef DC_DRAW_EVERY
 #define DC_DRAW_EVERY 1
 #endif
+/* At most this many board frames a second (0: as fast as it goes). A Dreamcast
+ * never gets there, but Redream's SH-4 runs faster than one and would run the
+ * game too fast. */
+#ifndef DC_FPS_CAP
+#define DC_FPS_CAP 60
+#endif
 #ifndef DC_HASH_FRAME
 #define DC_HASH_FRAME 0
 #endif
@@ -47,9 +53,19 @@
 #endif
 /* -DDC_HUD_MIN=1 (make HUD=min): no stats on screen, only the board's frames
  * a second, small, in the top right corner (the homebrew discs). Boot errors
- * still show. */
+ * still show. -DDC_HUD_NONE=1 (make HUD=none) drops the counter too: a clean
+ * picture to hold against MAME's. */
 #ifndef DC_HUD_MIN
 #define DC_HUD_MIN 0
+#endif
+#ifndef DC_HUD_NONE
+#define DC_HUD_NONE 0
+#endif
+/* -DDC_HUD_PROF=1 (make HUD=prof): the full stats and the hardware profile
+ * (dc_prof.h): cache-miss stalls, the PVR's times, where the program's time
+ * goes by symbol. Rows 6-10. */
+#ifndef DC_HUD_PROF
+#define DC_HUD_PROF 0
 #endif
 
 #include "constants.h"
@@ -200,6 +216,9 @@ static void dc_text(int row, const char *s) {
 }
 
 #include "dc_jit_test.h"
+#if DC_HUD_PROF
+#include "dc_prof.h"
+#endif
 #ifdef IB_WHY
 static char g_calib[64];
 #endif
@@ -307,6 +326,9 @@ int main(int argc, char **argv) {
     geo3d_init(&geo);
     ctx.run_state = EMU_RUNNING;
     if (DC_HUD_MIN) g_dp.text_rows = 0;   /* the boot lines go */
+#if DC_HUD_PROF
+    if (dc_prof_init() != 0) dp_text(6, "prof: off (no symbol map, or no memory)");
+#endif
 
     uint64_t t_last = timer_us_gettime64(), us_slice = 0, us_draw = 0;
     uint32_t f_last = g_emu_frames, slices = 0, loads_last = 0, refills_last = 0, shown = 0, drawn_f = 0;
@@ -323,7 +345,7 @@ int main(int argc, char **argv) {
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
         /* A board frame not yet shown goes to the PVR when it can take one. */
-#if DC_HUD_MIN
+#if DC_HUD_MIN && !DC_HUD_NONE
         {   /* the minimal HUD: board frames a second, top right, over the last second */
             static uint64_t fps_t0;
             static uint32_t fps_f0;
@@ -338,6 +360,16 @@ int main(int argc, char **argv) {
         }
 #endif
         if (g_emu_frames - drawn_f >= DC_DRAW_EVERY && dp_frame(&geo, &bus, &rs, &tiles)) { drawn_f = g_emu_frames; shown++; n_drawn++; }
+#if DC_FPS_CAP
+        {   /* wait while the board is ahead of the clock; behind by over 0.1 s, the clock starts again */
+            static uint64_t cap_t0;
+            static uint32_t cap_f0;
+            uint64_t now = timer_us_gettime64();
+            uint64_t due = cap_t0 + (uint64_t)(g_emu_frames - cap_f0) * 1000000u / DC_FPS_CAP;
+            if (!cap_t0 || now > due + 100000u) { cap_t0 = now; cap_f0 = g_emu_frames; }
+            else while (timer_us_gettime64() < due) thd_pass();
+        }
+#endif
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
             uint32_t h = 2166136261u;
             for (uint32_t a = 0x500000u; a < 0x600000u; a += 4) h = (h ^ mem_read32(&bus, a)) * 16777619u;
@@ -492,6 +524,13 @@ int main(int argc, char **argv) {
                      (unsigned)(g_ibj.us_compile / 1000), (unsigned)g_ibj.slow);
             STATS_PRINT(line);
             dp_text(14, line);
+#endif
+#if DC_HUD_PROF
+            {   /* the hardware profile's window: stalls and the PVR, the groups, the hottest symbols */
+                static char pl[5][96];
+                dc_prof_report(t2 - t_last, pl);
+                for (int i = 0; i < 5; i++) { STATS_PRINT(pl[i]); dp_text(6 + i, pl[i]); }
+            }
 #endif
             builds_last = g_geo3d_mesh_builds; hits_last = g_geo3d_mesh_hits;
             g_dp.us_tiles = g_dp.us_scan = g_dp.us_sort = 0;

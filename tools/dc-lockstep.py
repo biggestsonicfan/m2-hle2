@@ -25,8 +25,26 @@ or a mame.bin-format file. MAME's differences that the desktop build shares are
 the board's, not the port's. --listen PORT waits for
 a Dreamcast started by hand instead of launching RetroArch (FLYCAST_SCIF must
 then be 127.0.0.1:PORT in its environment).
+
+--boot holds the board from power-on instead (Pinboard #478): the Dreamcast is
+answered 'B', keeps the warning screen and plays no replay, and at every game
+frame edge sends a CRC-32 per 4 KB of work RAM, RAM, bufferram, tile RAM and the
+palette. The desktop build (--det-digest, run --nowarnskip --raw) and MAME
+(tools/mame/boot-lockstep.lua) play the same boot into named pipes beside it.
+The first frame each region of the Dreamcast parts from the desktop build is
+reported, with the words of its first differing block (fetched with 'D') beside
+the desktop build's and MAME's. The desktop build is the one to match: it and
+MAME differ from the start in ways that are the board's (see DREAMCAST-PORT.md).
+
+  tools/dc-lockstep.py --boot --gdi <disc>/m2hle2.gdi --core <flycast_libretro.so>
+      --det-digest <build>/det_digest [--frames 3000] [--no-mame]
+
+--shots N (with --boot) also keeps the pictures (Pinboard #486): every N frames
+MAME saves its screen as WORK/m<frame>.png and RetroArch the Dreamcast's as
+WORK/d<frame>.png, while the Dreamcast waits on the link, so the two are of the
+same game frame. tools/picture-diff.py compares them. Build the disc HUD=none.
 """
-import argparse, os, socket, struct, subprocess, sys, signal, time, zlib
+import argparse, glob, os, socket, struct, subprocess, sys, signal, time, zlib
 
 ROBS = (0x510D00, 0x514100)
 ROB = 0x3400
@@ -160,6 +178,225 @@ def run_mame(a, ref):
                             start_new_session=True)
 
 
+# ---- --boot: from power-on (Pinboard #478) ------------------------------------
+
+BOOT_RANGES = (('work RAM', 0x500000, 0x100000), ('RAM', 0x200000, 0x40000), ('bufferram', 0x900000, 0x20000),
+               ('tile RAM', 0x1000000, 0x10000), ('palette', 0x1800000, 0x4000))   # dc_link.h dc_link_boot
+BBLOCK = 0x1000
+BREC = 16 + sum(l for _, _, l in BOOT_RANGES)
+
+
+def boot_spec():
+    return ','.join('%x:%x' % (a, l) for _, a, l in BOOT_RANGES)
+
+
+def boot_block(k):
+    """Block k of a 'B' record: (region name, address)."""
+    for name, a, l in BOOT_RANGES:
+        n = (l + BBLOCK - 1) // BBLOCK
+        if k < n:
+            return name, a + k * BBLOCK
+        k -= n
+    raise IndexError(k)
+
+
+class BootStream:
+    """boot-lockstep.lua's or det_digest --raw's records, one per game frame edge."""
+
+    def __init__(self, path, mame):
+        self.f = open(path, 'rb')
+        if mame:
+            # MAME's tap also sees the boot code's clear of 0x50D000 (PC 0xF8),
+            # and its first game edge comes one frame before ours: both go.
+            r = self.next()
+            while r and r['pc'] < 0x10000:
+                r = self.next()
+
+    def next(self):
+        d = self.f.read(BREC)
+        if len(d) < BREC:
+            return None
+        fc, mode, sub, pc = struct.unpack_from('<4xIBBxxI', d, 0)
+        return dict(fc=fc, mode=mode, sub=sub, pc=pc, mem=d[16:])
+
+
+def boot_offset(addr):
+    """Where addr sits in a record's memory."""
+    o = 0
+    for _, ra, rl in BOOT_RANGES:
+        if ra <= addr < ra + rl:
+            return o + addr - ra
+        o += rl
+    raise ValueError(addr)
+
+
+def boot_crcs(mem):
+    return [zlib.crc32(mem[o:o + BBLOCK]) & 0xFFFFFFFF for o in range(0, len(mem), BBLOCK)]
+
+
+def boot_launch(a, procs):
+    """MAME and the desktop build from power-on, each into a named pipe."""
+    out = {}
+    for who in ('mame', 'desktop'):
+        if who == 'mame' and a.no_mame or who == 'desktop' and not a.det_digest:
+            continue
+        fifo = os.path.join(a.work, who + '.fifo')
+        if os.path.exists(fifo):
+            os.unlink(fifo)
+        os.mkfifo(fifo)
+        log = open(os.path.join(a.work, who + '.log'), 'w')
+        if who == 'mame':
+            nv, cfg = os.path.join(a.work, 'nvram'), os.path.join(a.work, 'cfg')
+            env = dict(os.environ, BL_OUT=fifo, BL_RANGES=boot_spec(), BL_FRAMES=str(a.frames + 8),
+                       BL_SHOTS=str(a.shots))
+            env.pop('DISPLAY', None)
+            cmd = [a.mame, 'sfight', '-rompath', a.rompath, '-nvram_directory', nv, '-cfg_directory', cfg,
+                   '-snapshot_directory', a.work, '-nodrc', '-video', 'none', '-sound', 'none', '-nothrottle',
+                   '-skip_gameinfo', '-seconds_to_run', '299',
+                   '-autoboot_script', os.path.join(REPO, 'tools', 'mame', 'boot-lockstep.lua')]
+        else:
+            env = dict(os.environ)
+            # --frames counts vblanks, and the first game frame edge is ~70 in
+            cmd = [a.det_digest, os.path.join(a.rompath, 'sfight.zip'), '--frames', str(2 * a.frames + 400),
+                   '--nowarnskip', '--region', 'japan', '--profile', 'sfight', '--out', os.devnull,
+                   '--raw', '%s:%s' % (boot_spec(), fifo)]
+        procs.append(subprocess.Popen(cmd, cwd=a.work, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                      start_new_session=True))
+        out[who] = fifo
+    return out
+
+
+def boot_words(addr, cols, names):
+    """The words of one block that are not the same in every column."""
+    out = []
+    for w in range(0, BBLOCK, 4):
+        vs = [struct.unpack_from('<I', c, w)[0] if c is not None else None for c in cols]
+        if len(set(v for v in vs if v is not None)) > 1:
+            out.append('%x %s' % (addr + w, ' '.join('%s %08x' % (n, v) for n, v in zip(names, vs) if v is not None)))
+    return out
+
+
+def free_udp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def shots_config(a):
+    """RetroArch's network commands on a free port, its screenshots into
+    WORK/ra-shots: what dc_shot asks for and where it looks."""
+    a.ra_shots = os.path.join(a.work, 'ra-shots')
+    os.makedirs(a.ra_shots, exist_ok=True)
+    for f in glob.glob(os.path.join(a.ra_shots, '*')):
+        os.unlink(f)
+    a.ra_port = free_udp_port()
+    cfg = os.path.join(a.work, 'shots.cfg')
+    with open(cfg, 'w') as f:
+        f.write('network_cmd_enable = "true"\nnetwork_cmd_port = "%d"\nscreenshot_directory = "%s"\n'
+                'notification_show_screenshot = "false"\nvideo_font_enable = "false"\nvideo_gpu_screenshot = "false"\n'
+                % (a.ra_port, a.ra_shots))
+    return cfg
+
+
+def dc_shot(a, i):
+    """The Dreamcast's picture as RetroArch has it, while the Dreamcast waits
+    for our word after frame i: WORK/d<i>.png."""
+    time.sleep(0.3)                     # a few presents of the waiting frame
+    before = set(os.listdir(a.ra_shots))
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.sendto(b'SCREENSHOT', ('127.0.0.1', a.ra_port))
+    s.close()
+    end = time.time() + 20
+    while time.time() < end:
+        new = [f for f in os.listdir(a.ra_shots) if f not in before and f.endswith('.png')]
+        if new:
+            path = os.path.join(a.ra_shots, new[0])
+            size = -1
+            while size != os.path.getsize(path):
+                size = os.path.getsize(path)
+                time.sleep(0.1)
+            os.replace(path, os.path.join(a.work, 'd%05d.png' % i))
+            return True
+        time.sleep(0.05)
+    print('+%d: RetroArch took no screenshot' % i, flush=True)
+    return False
+
+
+def boot(a, link, fifos):
+    """Every game frame from the first: the Dreamcast's CRC per 4 KB block
+    against the desktop build's and MAME's. A block that parts from the desktop
+    build is fetched ('D') and its words named, with MAME's beside them."""
+    desk = BootStream(fifos['desktop'], False) if 'desktop' in fifos else None
+    mame = BootStream(fifos['mame'], True) if 'mame' in fifos else None
+    first_d, first_m = {}, {}          # region -> first frame the Dreamcast differs from desktop / MAME
+    t0 = time.time()
+    n = 0
+    for i in range(a.frames):
+        kind, h, body = link.record()
+        if kind != 'B':
+            raise ValueError('expected a boot record, got %r' % kind)
+        dmode = struct.unpack_from('<I', body, 0)[0]
+        dc = struct.unpack_from('<%dI' % ((len(body) - 4) // 4), body, 4)
+        dr = desk.next() if desk else None
+        mr = mame.next() if mame else None
+        if (desk and dr is None) or (mame and mr is None):
+            print('+%d: a reference ended' % i)
+            break
+        if dr and (dr['fc'], dr['mode'], dr['sub']) != (h['fc'], dmode, h['step']) and 'frame' not in first_d:
+            first_d['frame'] = i
+            print('+%d: frame_counter/mode/sub Dreamcast %d/%d/%d, desktop %d/%d/%d' %
+                  (i, h['fc'], dmode, h['step'], dr['fc'], dr['mode'], dr['sub']), flush=True)
+        dcrc = boot_crcs(dr['mem']) if dr else None
+        mcrc = boot_crcs(mr['mem']) if mr else None
+        bad_d = [k for k in range(len(dc)) if dcrc and dc[k] != dcrc[k]]
+        bad_m = [k for k in range(len(dc)) if mcrc and dc[k] != mcrc[k]]
+        new = []
+        for k in bad_d:
+            r = boot_block(k)[0]
+            if r not in first_d:
+                first_d[r] = i
+                new.append(r)
+        for k in bad_m:
+            r = boot_block(k)[0]
+            if r not in first_m:
+                first_m[r] = i
+        if new:
+            print('+%d (frame_counter %d, mode %d sub %d): the Dreamcast first differs from the desktop build in %s' %
+                  (i, h['fc'], dmode, h['step'], ', '.join(new)), flush=True)
+        for r in new:
+            for k in [k for k in bad_d if boot_block(k)[0] == r][:a.blocks]:
+                name, addr = boot_block(k)
+                link.say(b'D' + struct.pack('<II', addr, BBLOCK))
+                kd, _, raw = link.record()
+                if kd != 'D' or struct.unpack_from('<I', raw, 0)[0] != addr:
+                    raise ValueError('expected memory at %x, got %r' % (addr, kd))
+                o = boot_offset(addr)
+                cols = [raw[4:], dr['mem'][o:o + BBLOCK], mr['mem'][o:o + BBLOCK] if mr else None]
+                words = boot_words(addr, cols, ('DC', 'desk', 'MAME'))
+                print('  %s %x: %d words' % (name, addr, len(words)))
+                for w in words[:a.words]:
+                    print('    ' + w)
+                sys.stdout.flush()
+        if a.shots and i % a.shots == 0:
+            dc_shot(a, i)
+        n = i + 1
+        if n % 100 == 0:
+            per = lambda bad: ' '.join('%s:%d' % (r, sum(1 for k in bad if boot_block(k)[0] == r))
+                                       for r, _, _ in BOOT_RANGES if any(boot_block(k)[0] == r for k in bad))
+            print('%d frames (%.0f s), fc %d mode %d: blocks off the desktop %s; off MAME %s' %
+                  (n, time.time() - t0, h['fc'], dmode, per(bad_d) or 'none', per(bad_m) or 'none'), flush=True)
+        link.say(b'G')
+    link.say(b'Q')
+    print('\n%d frames from power-on compared' % n)
+    for r, _, _ in (('frame',) * 3,) + BOOT_RANGES:
+        print('  %-10s desktop: %-24s MAME: %s' % (
+            r, 'first differs at +%d' % first_d[r] if r in first_d else 'identical' if desk else '-',
+            'first differs at +%d' % first_m[r] if r in first_m else 'identical' if mame and r != 'frame' else '-'))
+    return 0 if not first_d else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--gdi'), ap.add_argument('--core')
@@ -171,7 +408,15 @@ def main():
     ap.add_argument('--rompath', default=os.environ.get('ROMS_DIR', os.path.expanduser('~/build/mameroms')))
     ap.add_argument('--retroarch-config', help='a RetroArch config (audio off, Flycast HLE BIOS)')
     ap.add_argument('--timeout', type=float, default=1800)
+    ap.add_argument('--boot', action='store_true', help='from power-on, against det_digest and MAME')
+    ap.add_argument('--det-digest', help='the desktop build\'s det_digest (--boot)')
+    ap.add_argument('--no-mame', action='store_true', help='--boot without MAME')
+    ap.add_argument('--blocks', type=int, default=1, help='--boot: blocks shown when a region first differs')
+    ap.add_argument('--words', type=int, default=24, help='--boot: words shown per block')
+    ap.add_argument('--shots', type=int, default=0, help='--boot: keep both pictures every N frames')
     a = ap.parse_args()
+    if a.boot and not a.det_digest:
+        ap.error('--boot needs --det-digest')
     deadline = time.time() + a.timeout
     os.makedirs(a.work, exist_ok=True)
     procs = []
@@ -187,7 +432,8 @@ def main():
     try:
         ref = a.ref
         mame = None
-        if not ref:
+        fifos = boot_launch(a, procs) if a.boot else None
+        if not ref and not a.boot:
             ref = os.path.join(a.work, 'mame.bin')
             mame = run_mame(a, ref)
             procs.append(mame)
@@ -204,6 +450,8 @@ def main():
             cmd = ['retroarch']
             if a.retroarch_config:
                 cmd += ['--config', a.retroarch_config]
+            if a.shots:
+                cmd += ['--appendconfig', shots_config(a)]
             cmd += ['-L', a.core, a.gdi]
             ra_log = open(os.path.join(a.work, 'retroarch.log'), 'w')
             procs.append(subprocess.Popen(['xvfb-run', '-a', '-s', '-screen 0 800x600x24'] + cmd, cwd=a.work,
@@ -222,6 +470,9 @@ def main():
         if kind != 'H':
             raise ValueError('expected the hello, got %r' % kind)
         print('Dreamcast: %s' % build.decode(errors='replace'), flush=True)
+        if a.boot:
+            link.say(b'B')
+            return boot(a, link, fifos)
         link.say(b'G')
 
         mref = None
