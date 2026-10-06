@@ -462,10 +462,10 @@ int main(int argc, char **argv) {
                      (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
             STATS_PRINT(line);
             dp_text(19, line);   /* the bottom row: the game draws over row 2 */
-            snprintf(line, sizeof line, "tris %u runs %u full %u | tex %u new %u drop %u fail %u pk %u/%u rd %u %ums",
-                     g_dp.tris, g_dp.runs, g_dp.faces_dropped, g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails,
+            snprintf(line, sizeof line, "pk %u/%u rd %u %ums | tex %u new %u drop %u fail %u | tris %u runs %u full %u",
                      (unsigned)g_dp.tx_hits, (unsigned)(g_dp.tx_hits + g_dp.tx_miss), (unsigned)g_pg.tx_reads,
-                     (unsigned)(g_pg.tx_read_ns / 1000000));
+                     (unsigned)(g_pg.tx_read_ns / 1000000), g_dp.count, g_dp.made, g_dp.dropped, g_dp.fails,
+                     g_dp.tris, g_dp.runs, g_dp.faces_dropped);
             STATS_PRINT(line);
             dp_text(18, line);
             unsigned d = shown ? shown : 1;
