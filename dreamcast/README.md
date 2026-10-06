@@ -53,6 +53,8 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # sampler's symbol map (tools/dc_profmap.py) comes from the first link.
 # FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
 # whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
+# SDLOG=1 writes everything printed (the stats, the board's log) to an SD card
+# on the serial port ("SD log" below); not with LINK=1.
 
 # the sound: the PS3 ADX2 bank -> STF.AFS (~114 MB, ~2 minutes)
 python3 dreamcast/tools/mksound.py "<PS3>/sound" /tmp/dc/STF.AFS
@@ -297,6 +299,58 @@ the desktop build from the first frame. The disc needs `SINCOS=`
 DREAMCAST-PORT.md, "Held against MAME over the serial port", has the commands
 and what it found.
 
+## SD log
+
+`make SDLOG=1` writes the console's log to an SD card in an SD adapter on the
+serial port (the kind KallistiOS's `hardware/sd.c` drives: SPI over the port's
+pins), for analysis off the console (Pinboard #519). The card wants an MBR and a
+FAT first partition, as a PC formats one; each boot makes the next free
+`M2LOG000.TXT` .. `M2LOG999.TXT` in its root. In it, each line starts with the ms
+since boot:
+
+```
+     19 m2-hle2 sdlog M2LOG007.TXT (partition type 0c, 64 MB)
+     21 pager: sfight_console, 5059 ROM pages, 2288 KB cache, ...
+     83 [INFO] sfight_install: initial IP = 0x000000B0
+   2223 frame 10 4.7 fps (shown 4.7) slice 202 ms 3d 11+0 ms
+   ...
+   2231 sd M2LOG007.TXT in=1 kb=0 wr=1 ms=1 max=1 drop=0 err=0
+```
+
+What goes in: the boot's lines, the board's log (`[INFO]`, `[WARN]`, ...), every
+2 s the stats rows (with `HUD=prof` the panel's lines, tag and window number
+first, whole and without their check; not the per-frame `LV`), and the halt
+message with the log's last lines. It all goes through a dbgio device
+(`dc_sdlog.h`) into 32 KB of RAM; a thread writes that to the card once a
+second and syncs the FAT, so a pulled card or power loses about a second.
+
+The `sd` line (in the log, and on screen in row 15 without `HUD=prof`) is the
+log's own cost: KB printed `in`, KB written `kb`, writes `wr`, their total `ms`
+and longest `max`, bytes lost to a full buffer `drop`, write errors `err`. The
+SPI is the SH-4 setting the port's pins a bit at a time, so on a console that
+time is the game's; Flycast charges almost nothing for it, so measure on the
+console. No card, or one KallistiOS cannot mount, and the game runs as it would
+without; the line says why (`sd off: no SD card on the serial port`).
+
+The serial port is the card's: `SDLOG=1` refuses `LINK=1`. A dcload-serial
+console also uses the port (KallistiOS's SPI driver will not start under it);
+dcload-ip is fine.
+
+Flycast with `tools/flycast-sdcard.patch` has a card: `FLYCAST_SDCARD=<image>`
+plugs a raw image in at boot. Make one, and read the logs back, with fdisk and
+mtools:
+
+```sh
+dd if=/dev/zero of=/tmp/sd.img bs=1M count=64
+echo 'start=2048, type=0c' | sfdisk /tmp/sd.img
+mformat -i /tmp/sd.img@@1M -F ::          # FAT32 in the partition
+FLYCAST_SDCARD=/tmp/sd.img retroarch -L flycast_libretro.so m2hle2.gdi
+mdir -i /tmp/sd.img@@1M ::; mtype -i /tmp/sd.img@@1M ::M2LOG000.TXT
+```
+
+Setting `SDLOG` (or `DC_STATS_DBGIO`) also opens KallistiOS's console pty
+(`INIT_FS_PTY`), which the port did not, so printf went nowhere before.
+
 ## m2-pacman
 
 The disc also runs homebrew: put a program in place of `rom_code1.bin` and keep
@@ -421,6 +475,8 @@ discs gave ~37 and ~30.
 | `dc_link.h` | `LINK=1`: the replay fight's frames, or from power-on the board's memory as CRCs, over the SCIF to `tools/dc-lockstep.py` |
 | `tools/mksincos.py` | host tool: the arcade set's copro ROM → SINCOS.BIN, the COP's sin/cos for the link |
 | `tools/flycast-scif.patch` | Flycast: the SCIF over TCP (`FLYCAST_SCIF=host:port`) |
+| `dc_sdlog.h` | `SDLOG=1`: everything printed to `M2LOGnnn.TXT` on an SD card on the serial port |
+| `tools/flycast-sdcard.patch` | Flycast: an SD card on the serial port (`FLYCAST_SDCARD=<image>`) |
 | `mkdisc.sh` | program + ROM files + STF.AFS + MODELS.PAK + STRIPS.PAK → GDI (`CDI=1`: CDI) |
 | `tools/build-cdi4dc.sh` | a Linux cdi4dc (img4dc) for `CDI=1` |
 | `tools/get-lazyboot.sh` | Lazyboot's KOS IP.BIN and `mkcdi.py`, for `CDI=1` |
