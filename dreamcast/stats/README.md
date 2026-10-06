@@ -90,8 +90,10 @@ The fix:
 - The face walk and the corner transform `pref` ahead.
 - The sound stream's split buffers are half a cache apart.
 - A model wholly outside the window skips its transform and face walk. Only
-  its last flat key's carry is worked out. A check build ran both paths over
-  36,000 such models with no difference.
+  its last flat key's carry is worked out. A check build ran both paths on
+  every off-screen draw for about 6 minutes of attract mode, fight included:
+  36,359 draws (the same few dozen models, frame after frame; 1.06 million
+  faces), and the carry came out the same every time.
 
 Over the same frames: data misses 139k -> 108k a frame (-23%), write-backs
 64k -> 44k (-31%), instructions -5%. The decoder's misses are 36% fewer. The
