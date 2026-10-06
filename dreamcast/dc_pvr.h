@@ -37,6 +37,10 @@
 #include <dc/biosfont.h>
 
 #include "geo3d.h"
+#include "dc_strips.h"
+
+_Static_assert(DCS_CMD_VERTEX == PVR_CMD_VERTEX && DCS_CMD_VERTEX_EOL == PVR_CMD_VERTEX_EOL &&
+               sizeof(geo3d_svert_t) == sizeof(pvr_vertex_t), "STRIPS.PAK vertices are pvr_vertex_t");
 #include "tile_renderer.h"
 
 /* The frame is the cable's 640x480; DC_FRAME512 (make FRAME512=1) makes it
@@ -847,13 +851,14 @@ typedef struct { float sx, sy, w, x, y, z; } dcv_t;   /* screen x, y, 1/-z; eye 
 #define DCF_TRANS   1u   /* the translucent list */
 #define DCF_CHECKER 2u
 #define DCF_CLIP    4u   /* a corner is in front of the near plane */
+#define DCF_QUAD    8u   /* four corners, a strip (a packed mesh's quad, geo3d_dc_sface) */
 typedef struct {
-    uint16_t  v[3];
+    uint16_t  v[4];
     uint8_t   run, kind, var, pal;   /* var: the header's variant, dp_hdr_compile's face bits << 1;
                                         pal: the face's own palette bank (dp_pal_bank), 0: none */
     dc_tex_t *tex;
     uint32_t  base, off;
-    float     u[3], t[3];            /* the corners' texture coordinates, in [0, 1] units */
+    float     u[4], t[4];            /* the corners' texture coordinates, in [0, 1] units */
 } dcf_t;
 static dcv_t    g_dcv[DC_MAX_VERTS];
 static int      g_dcv_n;
@@ -863,11 +868,13 @@ static uint32_t g_dcf_key[GEO3D_MAX_TRIS];
 static const dp_proj_t *g_dp_cur;    /* the run being decoded */
 static int      g_dp_cur_run, g_dp_cur_slice;
 static memory_bus_t *g_dp_bus;
+static const uint8_t *g_dp_rs_textures;   /* the romset's: the strip pack's meshes read only it */
 
 /* The last face's inputs and what came of them: the two halves of a quad come
  * one after the other, and a model's faces share textures. */
 static struct {
     float    tx, ty, tw, th, fl;  dc_tex_t *tex;              /* dp_tex_get */
+    uint32_t skey; dc_tex_t *stex;                            /* dp_tex_key */
     dp_col_in_t c; bool ctex, ctrans; uint32_t base, off; uint8_t pal;   /* dp_face_colour */
 } g_dp_memo;
 
@@ -947,36 +954,6 @@ static inline unsigned dp_kind(unsigned f, float tw) {
 }
 #define DP_VAR(f) (((f) & (GEO3D_FACE_TRANSPARENT | GEO3D_FACE_MIRROR_X | GEO3D_FACE_MIRROR_Y)) << 1)
 
-/* A tile wider or taller than the PVR's 256 (m2_sprite.h's 512x512 atlas):
- * the square window of it the face's coordinates fall in, a power of two at
- * most 256, with the coordinates moved into it. Aligned to its size when one
- * holds them (faces near each other share it), else from the face's own
- * corner (a sprite across a 256 line). False when they span more than 256
- * or leave the tile (a repeat). */
-static bool dp_big_window(float *tx, float *ty, float *tw, float *th, float *u, float *v, int n) {
-    float u0 = u[0], u1 = u[0], v0 = v[0], v1 = v[0];
-    for (int i = 1; i < n; i++) {
-        u0 = u[i] < u0 ? u[i] : u0; u1 = u[i] > u1 ? u[i] : u1;
-        v0 = v[i] < v0 ? v[i] : v0; v1 = v[i] > v1 ? v[i] : v1;
-    }
-    if (u0 < 0.0f || v0 < 0.0f || u1 > *tw || v1 > *th) return false;
-    for (float m = 8.0f; m <= 256.0f; m *= 2.0f) {
-        float sx = floorf(u0 / m) * m, sy = floorf(v0 / m) * m;
-        if (u1 > sx + m || v1 > sy + m || sx + m > *tw || sy + m > *th) continue;
-        for (int i = 0; i < n; i++) { u[i] -= sx; v[i] -= sy; }
-        *tx += sx; *ty += sy; *tw = *th = m;
-        return true;
-    }
-    for (float m = 8.0f; m <= 256.0f; m *= 2.0f) {
-        if (u1 - u0 > m || v1 - v0 > m || m > *tw || m > *th) continue;
-        float sx = fminf(floorf(u0), *tw - m), sy = fminf(floorf(v0), *th - m);
-        for (int i = 0; i < n; i++) { u[i] -= sx; v[i] -= sy; }
-        *tx += sx; *ty += sy; *tw = *th = m;
-        return true;
-    }
-    return false;
-}
-
 static void geo3d_dc_tri(int a, int b, int c, float ua, float va, float ub, float vb, float uc, float vc,
                          float r, float g, float b_, float tx, float ty, float tw, float th,
                          float lb, float pl, float fl) {
@@ -1016,6 +993,100 @@ static void geo3d_dc_face(int v0, const geo3d_cface_t *F, int cut, float r, floa
         dp_tri_put(a, bb, d, uu, vv, 0, 1, 3, kind, var, tex, key);
         dp_tri_put(a, d, c, uu, vv, 0, 3, 2, kind, var, tex, key);
     }
+}
+
+/* ---- Packed meshes (STRIPS.PAK, dc_strips.h) ------------------------------------- */
+
+/* The texture a packed face names by its key (dcs_tex_key), cut as dp_tex_get
+ * cuts it; the memo holds the last. */
+static inline dc_tex_t *dp_tex_key(uint32_t key) {
+    if (key == g_dp_memo.skey) return g_dp_memo.stex;
+    dc_tex_t *tex = dp_tex_get(g_dp_bus, (float)((key >> 18) & 2047u), (float)((key >> 8) & 1023u),
+                               (float)(1u << ((key >> 4) & 15u)), (float)(1u << (key & 15u)),
+                               (key >> 29) & 1u ? GEO3D_FACE_SHEET1 : 0u);
+    g_dp_memo.skey = key;
+    g_dp_memo.stex = tex;
+    return tex;
+}
+
+/* A packed face's record, dp_tri_put's for its n corners in strip order (o:
+ * indexes into the face's A B C D) with their u, v as packed; a quad is one
+ * record, its key the nearest of the four. */
+static inline void dp_strip_put(int v0, const geo3d_sface_t *F, const geo3d_svert_t *s, const int *o, int n,
+                                unsigned kind, unsigned var, dc_tex_t *tex, int32_t key) {
+    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
+    const int t = g_dcf_n++;
+    dcf_t *R = &g_dcf[t];
+    const int c[4] = { v0 + F->ai, v0 + F->bi, v0 + F->ci, v0 + F->di };
+    float zn = 1.0e30f;
+    bool in = true;
+    for (int k = 0; k < n; k++) {
+        const dcv_t *V = &g_dcv[c[o[k]]];
+        R->v[k] = (uint16_t)c[o[k]];
+        R->u[k] = s[o[k]].u; R->t[k] = s[o[k]].v;
+        zn = fminf(zn, -V->z);
+        in = in && V->z <= -DC_NEAR;
+    }
+    R->run  = (uint8_t)g_dp_cur_run;
+    R->kind = (uint8_t)(kind | (n == 4 ? DCF_QUAD : 0u) | (in ? 0u : DCF_CLIP));
+    R->var  = (uint8_t)var;
+    R->tex  = tex;
+    R->base = g_dp_memo.base; R->off = g_dp_memo.off;
+    R->pal  = tex ? g_dp_memo.pal : 0;
+    uint32_t q = key >= 0 ? (uint32_t)key : geo3d_board_zkey(zn);
+    q = q > 0xFFFFu ? 0xFFFFu : q;
+    g_dcf_key[t] = ~(((uint32_t)g_dp_cur_slice << 29) | q << 13 | (0x1FFFu - (uint32_t)t));
+}
+
+/* geo3d_dc_face for a packed face: its texture by key, its corners' u, v as
+ * packed, a quad one record (cut 1: A B C D, cut 2: B A D C). */
+static void geo3d_dc_sface(int v0, const geo3d_sface_t *F, const geo3d_svert_t *s, int cut,
+                           float r, float g, float b, float pl, int32_t key) {
+    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
+    const unsigned f = F->fl;
+    const bool textured = (F->bits & GEO3D_SF_TEXTURED) != 0;
+    dc_tex_t *tex = F->tex ? dp_tex_key(F->tex) : NULL;
+    dp_face_col(r, g, b, F->lb, pl, tex != NULL || (textured && !(f & GEO3D_FACE_CHECKER)),
+                (f & GEO3D_FACE_TRANSPARENT) != 0);
+    const unsigned kind = dp_kind(f, textured ? 1.0f : 0.0f), var = DP_VAR(f);
+    static const int o1[4] = { 0, 1, 2, 3 }, o2[4] = { 1, 0, 3, 2 };
+    dp_strip_put(v0, F, s, cut == 2 ? o2 : o1, cut == 0 ? 3 : 4, kind, var, tex, key);
+}
+
+/* geo3d_mesh_get's: the packed mesh m names, if STRIPS.PAK has it, copied
+ * into the arena at at (room bytes). */
+static int geo3d_strips_load(struct geo3d_cmesh *m, uint8_t *at, size_t room) {
+    const dcs_head_t *h = g_pg.sp;
+    if (!h || m->materials != g_dp_rs_textures || m->polygons_size != h->polygons_size ||
+            m->materials_size != h->textures_size || m->table_off != h->table_off ||
+            m->table_count != h->table_count || m->mesh_ptr_subtract != h->mesh_ptr_subtract ||
+            m->mesh_ptr_add != h->mesh_ptr_add) return 0;
+    const dcs_index_t *ix = (const dcs_index_t *)(h + 1), *e = NULL;
+    uint32_t lo = 0, hi = h->n;
+    while (lo < hi && !e) {
+        uint32_t mid = (lo + hi) / 2;
+        int c = dcs_key_cmp(ix[mid].model_idx, ix[mid].mat_ptr, ix[mid].uv_ptr, m->model_idx, m->mat_ptr, m->uv_ptr);
+        if (!c) e = &ix[mid];
+        else if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (!e) return 0;
+    geo3d_sp_head_t sh;
+    pg_sp_copy(&sh, e->off, sizeof sh);
+    const uint32_t body = e->len - (uint32_t)sizeof sh;
+    if (body > room) return -1;
+    pg_sp_copy(at, e->off + (uint32_t)sizeof sh, body);
+    const size_t sv_bytes = ((size_t)sh.n_sv * sizeof(vec3_t) + 31u) & ~(size_t)31u;
+    m->sv      = (vec3_t *)at;
+    m->faces   = NULL;
+    m->sfaces  = (const geo3d_sface_t *)(at + sv_bytes);
+    m->strips  = (const geo3d_svert_t *)(m->sfaces + sh.n_faces);
+    m->n_sv    = sh.n_sv;
+    m->n_faces = sh.n_faces;
+    m->bc      = (vec3_t){ sh.bc[0], sh.bc[1], sh.bc[2] };
+    m->br      = sh.br;
+    m->arena_len = body;
+    return 1;
 }
 
 static void geo3d_dc_tri_xyz(float x0, float y0, float z0, float u0, float v0,
@@ -1059,6 +1130,7 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
     geo3d_lines_reset();
     g_dcv_n = g_dcf_n = 0;
     g_dp_bus = bus;
+    g_dp_rs_textures = rs->textures;
     dp_memo_reset();
     g_dp_pal_on = g_active_profile && g_active_profile->any_program;
     g_dp_pal_half ^= 1u;
@@ -1180,6 +1252,68 @@ static void dp_hdr_compile(pvr_poly_hdr_t *hdr, pvr_list_t list, const dc_tex_t 
     pvr_poly_compile(hdr, &cxt);
 }
 
+/* Corners i, j, k of record F as a triangle, near-clipped in eye space when
+ * one is in front of the plane. */
+static void dp_tri_out(const dcf_t *F, int i, int j, int k, bool checker) {
+    const uint32_t base = F->base, off = F->off;
+    const float ck = 0.125f / DC_S;   /* the checker's texel: two board pixels */
+    const dcv_t *V0 = &g_dcv[F->v[i]], *V1 = &g_dcv[F->v[j]], *V2 = &g_dcv[F->v[k]];
+    if (!(F->kind & DCF_CLIP)) {
+        /* Nothing to clip, the usual case: three corners straight out. */
+        if (checker) {   /* screen-space checker: one z, so the PVR maps it affinely */
+            float z = fmaxf(fmaxf(V0->w, V1->w), V2->w);
+            dp_vertex(PVR_CMD_VERTEX,     V0->sx, V0->sy, z, (V0->sx - DC_X0) * ck, (V0->sy - DC_Y0) * ck, base, off);
+            dp_vertex(PVR_CMD_VERTEX,     V1->sx, V1->sy, z, (V1->sx - DC_X0) * ck, (V1->sy - DC_Y0) * ck, base, off);
+            dp_vertex(PVR_CMD_VERTEX_EOL, V2->sx, V2->sy, z, (V2->sx - DC_X0) * ck, (V2->sy - DC_Y0) * ck, base, off);
+        } else {
+            dp_vertex(PVR_CMD_VERTEX,     V0->sx, V0->sy, V0->w, F->u[i], F->t[i], base, off);
+            dp_vertex(PVR_CMD_VERTEX,     V1->sx, V1->sy, V1->w, F->u[j], F->t[j], base, off);
+            dp_vertex(PVR_CMD_VERTEX_EOL, V2->sx, V2->sy, V2->w, F->u[k], F->t[k], base, off);
+        }
+        g_dp.tris++;
+        return;
+    }
+
+    /* Near clip (Sutherland-Hodgman against z = -DC_NEAR): 3 corners in, 4 out at most. */
+    const dp_proj_t *P = &g_dp_proj[F->run];
+    dp_ev_t in[3] = { { V0->x, V0->y, V0->z, F->u[i], F->t[i] }, { V1->x, V1->y, V1->z, F->u[j], F->t[j] },
+                      { V2->x, V2->y, V2->z, F->u[k], F->t[k] } };
+    dp_ev_t out[4];
+    int n = 0;
+    for (int e = 0; e < 3; e++) {
+        const dp_ev_t *a = &in[e], *b = &in[(e + 1) % 3];
+        bool ain = a->z <= -DC_NEAR, bin = b->z <= -DC_NEAR;
+        if (ain) out[n++] = *a;
+        if (ain != bin) {
+            float s = (-DC_NEAR - a->z) / (b->z - a->z);
+            out[n++] = (dp_ev_t){ a->x + s * (b->x - a->x), a->y + s * (b->y - a->y), -DC_NEAR,
+                                  a->u + s * (b->u - a->u), a->v + s * (b->v - a->v) };
+        }
+    }
+    if (n < 3) return;
+    float sx[4], sy[4], sz[4], tu[4], tv[4];
+    for (int k = 0; k < n; k++) {
+        float iw = -1.0f / out[k].z;
+        sx[k] = P->bx + P->ax * out[k].x * iw;
+        sy[k] = P->by + P->ay * out[k].y * iw;
+        sz[k] = iw;
+        if (checker) { tu[k] = (sx[k] - DC_X0) * ck; tv[k] = (sy[k] - DC_Y0) * ck; }
+        else         { tu[k] = out[k].u; tv[k] = out[k].v; }
+    }
+    if (checker) {
+        float z = fmaxf(fmaxf(sz[0], sz[1]), sz[2]);
+        for (int k = 0; k < n; k++) sz[k] = z;
+    }
+    /* A strip: 0 1 2 for a triangle, 0 1 3 2 for the clipped quad. */
+    static const int strip3[3] = { 0, 1, 2 }, strip4[4] = { 0, 1, 3, 2 };
+    const int *o = n == 3 ? strip3 : strip4;
+    for (int k = 0; k < n; k++) {
+        int v = o[k];
+        dp_vertex(k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, sx[v], sy[v], sz[v], tu[v], tv[v], base, off);
+    }
+    g_dp.tris++;
+}
+
 /* One face: its header if it differs from the last face's, then its corners,
  * near-clipped in eye space when one is in front of the plane. */
 static void dp_face(int t, pvr_list_t list, uint32_t *last_state) {
@@ -1211,63 +1345,18 @@ static void dp_face(int t, pvr_list_t list, uint32_t *last_state) {
         }
     }
 
-    const uint32_t base = F->base, off = F->off;
-    const float ck = 0.125f / DC_S;   /* the checker's texel: two board pixels */
-    const dcv_t *V0 = &g_dcv[F->v[0]], *V1 = &g_dcv[F->v[1]], *V2 = &g_dcv[F->v[2]];
-    if (!(F->kind & DCF_CLIP)) {
-        /* Nothing to clip, the usual case: three corners straight out. */
-        if (checker) {   /* screen-space checker: one z, so the PVR maps it affinely */
-            float z = fmaxf(fmaxf(V0->w, V1->w), V2->w);
-            dp_vertex(PVR_CMD_VERTEX,     V0->sx, V0->sy, z, (V0->sx - DC_X0) * ck, (V0->sy - DC_Y0) * ck, base, off);
-            dp_vertex(PVR_CMD_VERTEX,     V1->sx, V1->sy, z, (V1->sx - DC_X0) * ck, (V1->sy - DC_Y0) * ck, base, off);
-            dp_vertex(PVR_CMD_VERTEX_EOL, V2->sx, V2->sy, z, (V2->sx - DC_X0) * ck, (V2->sy - DC_Y0) * ck, base, off);
-        } else {
-            dp_vertex(PVR_CMD_VERTEX,     V0->sx, V0->sy, V0->w, F->u[0], F->t[0], base, off);
-            dp_vertex(PVR_CMD_VERTEX,     V1->sx, V1->sy, V1->w, F->u[1], F->t[1], base, off);
-            dp_vertex(PVR_CMD_VERTEX_EOL, V2->sx, V2->sy, V2->w, F->u[2], F->t[2], base, off);
+    if ((F->kind & (DCF_QUAD | DCF_CLIP | DCF_CHECKER)) == DCF_QUAD) {
+        /* a packed quad, nothing to clip: one strip, its corners as dp_strip_put ordered them */
+        const uint32_t base = F->base, off = F->off;
+        for (int k = 0; k < 4; k++) {
+            const dcv_t *V = &g_dcv[F->v[k]];
+            dp_vertex(k == 3 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, V->sx, V->sy, V->w, F->u[k], F->t[k], base, off);
         }
-        g_dp.tris++;
+        g_dp.tris += 2;
         return;
     }
-
-    /* Near clip (Sutherland-Hodgman against z = -DC_NEAR): 3 corners in, 4 out at most. */
-    const dp_proj_t *P = &g_dp_proj[F->run];
-    dp_ev_t in[3] = { { V0->x, V0->y, V0->z, F->u[0], F->t[0] }, { V1->x, V1->y, V1->z, F->u[1], F->t[1] },
-                      { V2->x, V2->y, V2->z, F->u[2], F->t[2] } };
-    dp_ev_t out[4];
-    int n = 0;
-    for (int k = 0; k < 3; k++) {
-        const dp_ev_t *a = &in[k], *b = &in[(k + 1) % 3];
-        bool ain = a->z <= -DC_NEAR, bin = b->z <= -DC_NEAR;
-        if (ain) out[n++] = *a;
-        if (ain != bin) {
-            float s = (-DC_NEAR - a->z) / (b->z - a->z);
-            out[n++] = (dp_ev_t){ a->x + s * (b->x - a->x), a->y + s * (b->y - a->y), -DC_NEAR,
-                                  a->u + s * (b->u - a->u), a->v + s * (b->v - a->v) };
-        }
-    }
-    if (n < 3) return;
-    float sx[4], sy[4], sz[4], tu[4], tv[4];
-    for (int k = 0; k < n; k++) {
-        float iw = -1.0f / out[k].z;
-        sx[k] = P->bx + P->ax * out[k].x * iw;
-        sy[k] = P->by + P->ay * out[k].y * iw;
-        sz[k] = iw;
-        if (checker) { tu[k] = (sx[k] - DC_X0) * ck; tv[k] = (sy[k] - DC_Y0) * ck; }
-        else         { tu[k] = out[k].u; tv[k] = out[k].v; }
-    }
-    if (checker) {
-        float z = fmaxf(fmaxf(sz[0], sz[1]), sz[2]);
-        for (int k = 0; k < n; k++) sz[k] = z;
-    }
-    /* A strip: 0 1 2 for a triangle, 0 1 3 2 for the clipped quad. */
-    static const int strip3[3] = { 0, 1, 2 }, strip4[4] = { 0, 1, 3, 2 };
-    const int *o = n == 3 ? strip3 : strip4;
-    for (int k = 0; k < n; k++) {
-        int v = o[k];
-        dp_vertex(k == n - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX, sx[v], sy[v], sz[v], tu[v], tv[v], base, off);
-    }
-    g_dp.tris++;
+    dp_tri_out(F, 0, 1, 2, checker);
+    if (F->kind & DCF_QUAD) dp_tri_out(F, 1, 3, 2, checker);   /* the strip's second triangle */
 }
 
 /* One frame, if the PVR is ready for it; false if it was dropped. */
