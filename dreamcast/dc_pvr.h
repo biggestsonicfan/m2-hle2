@@ -1283,20 +1283,22 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
                                     rs->textures, rs->textures_size, rs->main_data, rs->main_data_size,
                                     cm->gproj[0], cm->gproj[1]);
             } else {
-                if (cm->model_idx < 0) {
+                geo3d_models_t from = {
+                    .main_data = rs->main_data, .main_data_size = rs->main_data_size,
+                    .polygons  = rs->polygons,  .polygons_size  = rs->polygons_size,
+                    .materials = rs->textures,  .materials_size = rs->textures_size,
+                    .table_off = q->model_table_offset, .table_count = q->model_table_count,
+                    .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add,
+                };
+                if (cm->model_idx < 0) {        /* polygon RAM: the mesh sits at the object address */
                     uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
-                    g_geo3d_obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
-                    g_geo3d_obj_mesh_size = (0x8000u - word) * 4u;
+                    from.obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];
+                    from.obj_mesh_size = (0x8000u - word) * 4u;
                 }
-                geo3d_decode_model_cached(cm->model_idx, rs->main_data, rs->main_data_size,
-                                          rs->polygons, rs->polygons_size, rs->textures, rs->textures_size,
-                                          q->model_table_offset, q->model_table_count,
-                                          q->mesh_ptr_subtract, q->mesh_ptr_add,
-                                          cm->matrix, cm->color[0], cm->color[1], cm->color[2]);
+                geo3d_decode_model_cached(&from, cm->model_idx, cm->matrix, cm->color[0], cm->color[1], cm->color[2]);
             }
             g_geo3d_obj_tpa = g_geo3d_obj_tha = 0xFFFFFFFFu;
             g_geo3d_board_luma = 0;
-            g_geo3d_obj_mesh = NULL;
         }
         i = j;
     }

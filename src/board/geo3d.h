@@ -1518,6 +1518,21 @@ typedef struct {
     int      n_sv, n_qt, n_idx;
 } geo3d_ia_t;
 
+/* The walks' scratch, 272 KB each: the full decoder's (0) and the mesh
+ * builder's (1). The desktop's decoder asks the mesh cache for layers in the
+ * middle of its walk (geo3d_decode_layers), so it needs both; the Dreamcast's
+ * never does (geo3d_mesh_layers_for), and shares one. */
+static inline geo3d_ia_t *geo3d_ia_scratch(int which) {
+#ifdef GEO3D_DC_SINK
+    static geo3d_ia_t one;
+    (void)which;
+    return &one;
+#else
+    static geo3d_ia_t two[2];
+    return &two[which];
+#endif
+}
+
 static inline void geo3d_ia_walk(geo3d_ia_t *ia, const uint8_t *polygons, size_t polygons_size,
                                  uint32_t mesh_offset, const float *matrix) {
     vec3_t *sv = ia->sv;
@@ -2124,25 +2139,29 @@ static inline void geo3d_decode_face(geo3d_decode_walk_t *w, int i) {
 static inline void geo3d_decode_model(const geo3d_models_t *md, int model_idx,
                                        const float *matrix,
                                        float cr, float cg, float cb) {
-    static geo3d_ia_t ia;
+    geo3d_ia_t *const ia = geo3d_ia_scratch(0);
     geo3d_decode_walk_t w = { .md = md, .model_idx = model_idx, .matrix = matrix,
-                              .cr = cr, .cg = cg, .cb = cb, .ia = &ia };
+                              .cr = cr, .cg = cg, .cb = cb, .ia = ia };
     if (!geo3d_decode_streams(&w)) return;
 
+#ifdef GEO3D_DC_SINK
+    static geo3d_face_layer_t lay[1];   /* never filled: geo3d_mesh_layers_for answers false */
+#else
     static geo3d_face_layer_t lay[GEO3D_IA_MAX_IDX / 4];
+#endif
     const bool game_draw = g_geo3d_flat_list && matrix;
     w.flat = g_geo3d_zflat && game_draw;
     w.lay = lay;
     w.have_lay = geo3d_decode_layers(&w, game_draw, lay);
 
-    geo3d_ia_walk(&ia, w.polygons, w.polygons_size, w.mesh_offset, matrix);
+    geo3d_ia_walk(ia, w.polygons, w.polygons_size, w.mesh_offset, matrix);
 
     /* Face loop, stopping 2 groups before the tail. The header stream moves by
      * each polygon's own step; the UV stream by NumVerts pairs every iteration,
      * sentinels included, exactly like MAME advances command_buffer[0]. */
     w.mat_rec = w.mat_word;
     geo3d_split_reset();
-    for (int i = 0; i < ia.n_idx - 8; i += 4) geo3d_decode_face(&w, i);
+    for (int i = 0; i < ia->n_idx - 8; i += 4) geo3d_decode_face(&w, i);
     geo3d_emit_state_reset();
 }
 
@@ -2967,17 +2986,17 @@ static inline bool geo3d_mesh_keep(geo3d_cmesh_t *m, const vec3_t *sv, int n_sv,
  * walk, same face loop, no matrix. Returns false if out of memory. */
 static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
                                     bool have_mat, bool have_uv) {
-    static geo3d_ia_t ia;
+    geo3d_ia_t *const ia = geo3d_ia_scratch(1);
     const uint8_t *materials = m->md.materials;
     const size_t   materials_size = m->md.materials_size;
 
-    geo3d_ia_walk(&ia, m->md.polygons, m->md.polygons_size, mesh_offset, NULL);
-    const int n_sv = ia.n_sv;
+    geo3d_ia_walk(ia, m->md.polygons, m->md.polygons_size, mesh_offset, NULL);
+    const int n_sv = ia->n_sv;
 
     /* The faces go straight to the heap, a block for one per index quad, cut
      * to the ones that emit below: no 4096-face scratch in BSS (600 KB, which
      * the Dreamcast's heap needs more). */
-    const int max_faces = ia.n_idx > 8 ? (ia.n_idx - 8 + 3) / 4 : 0;
+    const int max_faces = ia->n_idx > 8 ? (ia->n_idx - 8 + 3) / 4 : 0;
 #if GEO3D_MESH_ARENA
     /* the faces last, so that cutting them to the ones that emit gives the rest back */
     const size_t sv_bytes = ((size_t)n_sv * sizeof(vec3_t) + 31u) & ~(size_t)31u;
@@ -2993,11 +3012,11 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
     uint32_t mat_word = m->mat_ptr, uv_word = m->uv_ptr, mat_rec = mat_word;
     int n_faces = 0;
     int zsrc[4] = {0,0,0,0}; uint32_t zmode = 0u; bool zset = false;
-    for (int i = 0; i < ia.n_idx - 8; i += 4) {
+    for (int i = 0; i < ia->n_idx - 8; i += 4) {
         int fi = i / 4;
-        int ai = ia.idx[i], bi = ia.idx[i + 1], ci = ia.idx[i + 2], di = ia.idx[i + 3];
-        const uint32_t at = geo3d_ia_attr(&ia, fi);
-        bool tri_cnt = (fi < ia.n_qt && ia.qt[fi] == 2);
+        int ai = ia->idx[i], bi = ia->idx[i + 1], ci = ia->idx[i + 2], di = ia->idx[i + 3];
+        const uint32_t at = geo3d_ia_attr(ia, fi);
+        bool tri_cnt = (fi < ia->n_qt && ia->qt[fi] == 2);
         int  nv = tri_cnt ? 3 : 4;
 
         geo3d_texhdr_t h = GEO3D_TEXHDR_NONE;
@@ -3024,7 +3043,7 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
                          ai, bi, ci, di, zsrc, &zmode, &zset);
         if (h.untex_trans) continue;   /* the board draws nothing for it */
 
-        geo3d_cface_fill(&faces[n_faces++], &ia, fi, tri_cnt, ai, bi, ci, di, has_c, has_d,
+        geo3d_cface_fill(&faces[n_faces++], ia, fi, tri_cnt, ai, bi, ci, di, has_c, has_d,
                          zsrc, zmode, mat_ok, &h, uvu, uvv);
     }
 #if GEO3D_MESH_ARENA
@@ -3034,7 +3053,7 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
     geo3d_cface_t *fit = n_faces < max_faces ? realloc(faces, (size_t)(n_faces ? n_faces : 1) * sizeof(geo3d_cface_t)) : NULL;
     if (fit) faces = fit;
 #endif
-    return geo3d_mesh_keep(m, ia.sv, n_sv, faces, n_faces);
+    return geo3d_mesh_keep(m, ia->sv, n_sv, faces, n_faces);
 }
 
 /* A model's static mesh from the cache, built on first sight. mesh_offset,
