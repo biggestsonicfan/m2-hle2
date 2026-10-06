@@ -41,6 +41,10 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # HUD=none draws nothing over the game at all, not even that, and (with no
 # VIEW, FRAME512=0) puts the whole board 1:1 at (72,48) of the frame, a
 # picture to crop and hold against MAME's pixel for pixel (Pinboard #478).
+# HUD=prof keeps the stats rows and adds the hardware profile (dc_prof.h,
+# Pinboard #495) on rows 6-10: the SH-4's cache-miss stalls, the PVR's times,
+# and where the program's time goes, sampled by symbol. Links twice: the
+# sampler's symbol map (tools/dc_profmap.py) comes from the first link.
 # FPS_CAP=60 (the default) holds the board to 60 frames a second, for Redream,
 # whose SH-4 is faster than a Dreamcast's; FPS_CAP=0 takes the cap off.
 
@@ -147,6 +151,15 @@ tried. On screen:
   of attract: ms in all, in the slice and in the draw; the draw's parts; page
   loads in all, then of code, data, polygons, textures, the model pack, and
   those for `dc_rom_at`
+- rows 6-10 (`HUD=prof`, #495): the window's pipeline stalls on data- and
+  instruction-cache misses as a share of its cycles, the PVR's render and
+  registration time for the last frame, the vblanks seen and the samples
+  taken; then the sampler's groups as shares of the window (`aot` the i960
+  compiled ahead, `gem` Gems' C, `hok` the profile's hooks, `960` the i960
+  interpreter and the bus, `cop`, `geo` the 3D decode, `drw` the PVR draw,
+  `til` the tile layers, `snd`, `dsc` the pager and the drive, `kos`, `lib`,
+  `bio` the BIOS, where the GD-ROM syscalls run, `oth`); then the six hottest
+  symbols. Flycast's counters read 0: it has none.
 
 If the board halts, the screen shows the IP, the pager's totals and the last
 log lines.

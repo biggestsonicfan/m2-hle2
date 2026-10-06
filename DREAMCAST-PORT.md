@@ -929,6 +929,47 @@ On a console, a serial cable to a PC at 1.5625 Mbaud carries the same protocol.
 `--listen PORT` already waits for a Dreamcast started by hand. A reader for the
 serial device has not been written.
 
+## What the console loses its time to (#495)
+
+Every number above is Flycast's clock. On a Dreamcast the same disc (#475's
+`HUD=min FRAME512=1`, the Lazyboot CD-R of #483) runs a fight at 11-15 fps,
+a quarter of Flycast's 27, and Flycast's model says nothing about why: it
+charges a fixed 450,000 cycles a frame for the render, nothing for a cache
+miss, a store into video memory or a seek of the drive, and its disc reads
+are free. The candidates, in the order the code suggests them:
+
+- the page cache. A fight's 60-frame working set is ~3 MB at 4 KB
+  granularity and the cache is 1.3-1.5 MB, so pages come back from the disc
+  all through a fight (162 loads in the bench's 400 frames, 357 in Flycast's
+  3500-4000 here). Each is a synchronous PIO read (`pg_read`,
+  `CD_CMD_PIOREAD`, polled) and a seek on a CD-R is tens of ms. Flycast
+  counts it as 0 ms (row 1's `(0 ms)`).
+- stores straight into video memory: `dp_tiles_convert` writes the tile
+  layers a word at a time into the PVR's textures, and every face goes out
+  through the store queues.
+- the caches: the SH-4 has 16 KB of data cache and 8 KB of instruction
+  cache, direct mapped, and the board's state is 4 MB of bus plus 1 MB of
+  mesh arena plus 0.9 MB of tile snapshots. No bench so far has had a cache
+  model at all.
+
+`HUD=prof` (dc_prof.h) measures these on the console. The SH-4's two
+performance counters count the cycles the pipeline stood still for a
+data-cache miss (PRFC0) and for an instruction-cache miss (PRFC1), shown
+as a share of the window's cycles. KallistiOS's PVR stats give the TA's
+registration and the render time of the last frame, and the vblanks. And a
+sampler on TMU1 (2 kHz) takes the interrupt context's PC and looks it up in
+a table of the program's symbols, generated from the linked elf by
+`tools/dc_profmap.py`: the Makefile links the program twice, once with an
+empty table, then with the table made from that elf; the table is data,
+so the code sits at the same addresses, which the Makefile checks with `nm`.
+The HUD shows each group's share of the window and the six hottest symbols.
+Flycast's counters read 0 (it has none), and under it the sampler put the
+fight at geo 27%, drw 20%, 960 15%, gem 12%, aot 6% (`geo3d_decode_model`
+23% on its own), with the PVR rendering a frame in 7.5 ms. Row 1's disc ms
+and rows 3-5's bench (the same frames as every bench above) come along on
+the same disc, so a photograph of the console's screen during a fight
+gives the host's split and the console's side by side.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
