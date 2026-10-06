@@ -22,6 +22,15 @@
  * File: dct_head_t; the index, dct_index_t sorted by (key, hash); at data_off
  * (a sector) the textures, each 32-byte aligned, in the order the recorded
  * frames first drew them, so one scene's textures lie together on the disc.
+ * Recorded with det_digest --tex-groups (#508), they lie by object group
+ * instead (sfight.mdlgroups: a stage, a fighter, common...), as STRIPS.PAK's
+ * meshes do: each group from a sector, the groups in the order of the first
+ * frame that draws from them, within one by frame. A texture is in the group
+ * of the model that first drew it. That took more window reads than the
+ * frame order (DREAMCAST-PORT.md), so the disc's pack is recorded without
+ * it. At models_off, past the textures, each
+ * index entry's model (uint16_t, 0xFFFF: not known), for det_digest alone:
+ * the Dreamcast reads the file only up to data_off and the textures it finds.
  * ROM-derived (it is the game's decompressed texture data), so recorded by
  * det_digest --tex-pack from the ROM files and never committed.
  *
@@ -37,7 +46,8 @@ typedef struct {
     char     magic[4];                  /* "M2TX" */
     uint32_t n, data_off;               /* index entries; the textures' offset, a sector multiple */
     uint32_t bytes;                     /* the textures' bytes, for the log */
-    uint32_t pad[4];
+    uint32_t models_off;                /* the entries' models, or 0 */
+    uint32_t pad[3];
 } dct_head_t;
 
 typedef struct {

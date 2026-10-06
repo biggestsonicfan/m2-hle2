@@ -1290,6 +1290,48 @@ the frame-1500 hash is a5d21d21 on all of them):
   On hardware a seek is ~100 ms; the counters say where they go (code
   first), not what they cost, and only hardware can say that.
 
+## TEXTURES.PAK by group (#508)
+
+The question: STRIPS.PAK by group took fewer pages (#504), so would
+TEXTURES.PAK by group take fewer reads? `det_digest --tex-groups
+dreamcast/sfight.mdlgroups` lays the textures out the way `dc_strips
+--groups` lays the meshes: a texture goes in the group of the model that
+first drew it, each group from a sector, the groups in the order of the
+first frame that draws from them, and by frame within a group. The pack
+keeps each entry's model past the textures (`models_off`, which the
+Dreamcast never reads), so the fight's run that adds to attract's pack
+knows the groups of the textures it loaded. The same 280 textures go in:
+South Island 980 KB, adv 399, Flying Carpet 510, Tails' Lab 415, Aurora
+Icefield 238, common 88, the fighters 8-52 KB each.
+
+**Measured in Flycast** (one 1ST_READ.BIN, three discs that differ only in
+TEXTURES.PAK, attract from boot). The window reads are `rd` on the `pk` line,
+which now leads its HUD row (it ran off the screen's edge before):
+
+| pack | window reads to f6300 (243 of 247 hits) | f3500-3900 texture reads | f1500 hash |
+|---|---|---|---|
+| f: by frame (#502's layout) | 160 | 0 | a5d21d21 |
+| g: by group | 166 | 1 | a5d21d21 |
+| h: by group, no sector per group | 166 | 1 | a5d21d21 |
+
+The f3500-3900 bench came out the same on all three (18809 ms, `rd 680 sk
+605`; this Flycast shared the CPU, as in #502).
+
+- **By group lost, by 4%.** A scene draws the textures of its stage, two
+  fighters and common together. By frame, the ones a scene draws first lie
+  together, whatever group they are in: one 64 KB window holds the
+  scene's next ones. By group, the scene's textures are split among its
+  groups, so a scene that brings in new ones from three groups reads three
+  windows where frame order read one or two. The mesh pages won by group
+  because a mesh is drawn again and again from the pager's cache, so what
+  counts is which meshes share a 16 KB page; a texture is read once, into
+  video memory, so what counts is the order of first use.
+- **The padding was not the cause:** without the sector per group (h) the
+  count is the same.
+- **So the disc's pack stays by frame;** `--tex-groups` stays in
+  `det_digest` for a later try (a scene's textures read whole at its load
+  screen, say, where whole groups are the unit).
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format

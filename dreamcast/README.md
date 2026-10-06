@@ -152,6 +152,9 @@ det_digest "<PS3>/stf_rom" --profile sfight_console --frames 9000 --script "$S" 
 ```
 
 The second run adds the fight's textures to the pack the first wrote.
+`--tex-groups dreamcast/sfight.mdlgroups` on both runs lays the textures out
+by object group instead of by the frame that first drew them; it was tried
+and lost (DREAMCAST-PORT.md #508), so the disc's pack is recorded without it.
 
 `sfight.aotmap`, the code `AOT=` compiles, is recorded the same way, with
 Sega's C on as the disc runs it (a `det_digest` built with `M2HLE_GEMS_DIR`):
