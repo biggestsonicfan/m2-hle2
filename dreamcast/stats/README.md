@@ -108,3 +108,7 @@ The cell grid is fitted to this capture: (321.9, 87.0) with a pitch of
 `--learn`, starting from a hand-read frame. A capture at another scale may need
 its own atlas, made by running `--learn` once. If the HUD's formats change,
 `FORMATS` in the tool must follow them.
+
+The HUD has since become a panel of small checked lines (#518, the
+README's "The HUD=prof panel"), read by `tools/hud_read.py`; `hud_ocr.py`
+stays for this video and others of the old HUD.
