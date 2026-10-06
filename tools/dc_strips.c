@@ -7,7 +7,11 @@
  *
  *   cc -O2 -o dc_strips tools/dc_strips.c -Isrc -Isrc/board -Isrc/core \
  *      -Isrc/net -Isrc/ui -Isrc/profiles -Idreamcast -lm
- *   dc_strips --roms <stf_rom> --keys dreamcast/sfight.strips --out STRIPS.PAK
+ *   dc_strips --roms <stf_rom> --keys dreamcast/sfight.strips --out STRIPS.PAK \
+ *             [--groups dreamcast/sfight.mdlgroups]
+ *
+ * With --groups the blobs are laid out by object group (dc_strips.h, #504);
+ * a model no group names goes in a group "other".
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -55,24 +59,65 @@ static int load_region(const char *dir, int r) {
     return 0;
 }
 
-typedef struct { int32_t model; uint32_t mat, uv, frame, off, len; } key_t_;
+typedef struct { int32_t model; uint32_t mat, uv, frame, off, len, group, order; } key_t_;
 
 static int key_cmp(const void *a, const void *b) {
     const key_t_ *x = a, *y = b;
     return dcs_key_cmp(x->model, x->mat, x->uv, y->model, y->mat, y->uv);
 }
 
+/* sfight.mdlgroups: `group NAME`, then model table numbers (hex), each in the
+ * first group that names it. */
+#define MAX_GROUPS 64
+static char     g_gname[MAX_GROUPS + 1][24];
+static int      g_ngroups;
+static uint8_t  g_model_group[65536];   /* group + 1, 0: none */
+
+static int read_groups(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "dc_strips: cannot read %s\n", path); return -1; }
+    char line[1024];
+    int cur = -1;
+    while (fgets(line, sizeof line, f)) {
+        char *h = strchr(line, '#');
+        if (h) *h = 0;
+        if (!strncmp(line, "group ", 6)) {
+            if (g_ngroups == MAX_GROUPS) { fprintf(stderr, "dc_strips: over %d groups\n", MAX_GROUPS); fclose(f); return -1; }
+            cur = g_ngroups++;
+            sscanf(line + 6, "%23s", g_gname[cur]);
+            continue;
+        }
+        for (char *t = strtok(line, " \t\r\n"); t; t = strtok(NULL, " \t\r\n")) {
+            unsigned long m = strtoul(t, NULL, 16);
+            if (cur >= 0 && m < 65536 && !g_model_group[m]) g_model_group[m] = (uint8_t)(cur + 1);
+        }
+    }
+    fclose(f);
+    snprintf(g_gname[g_ngroups], sizeof g_gname[0], "other");
+    return 0;
+}
+
+static uint32_t g_rank[MAX_GROUPS + 1];   /* a group's place: by the first frame that draws from it */
+
+static int layout_cmp(const void *a, const void *b) {
+    const key_t_ *x = a, *y = b;
+    if (g_rank[x->group] != g_rank[y->group]) return g_rank[x->group] < g_rank[y->group] ? -1 : 1;
+    return x->order < y->order ? -1 : x->order > y->order;
+}
+
 int main(int argc, char **argv) {
-    const char *roms = NULL, *keys = NULL, *out = NULL;
+    const char *roms = NULL, *keys = NULL, *out = NULL, *groups = NULL;
     for (int i = 1; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--roms")) roms = argv[i + 1];
         else if (!strcmp(argv[i], "--keys")) keys = argv[i + 1];
         else if (!strcmp(argv[i], "--out")) out = argv[i + 1];
+        else if (!strcmp(argv[i], "--groups")) groups = argv[i + 1];
     }
     if (!roms || !keys || !out) {
-        fprintf(stderr, "usage: dc_strips --roms <stf_rom> --keys <sfight.strips> --out <STRIPS.PAK>\n");
+        fprintf(stderr, "usage: dc_strips --roms <stf_rom> --keys <sfight.strips> --out <STRIPS.PAK> [--groups <sfight.mdlgroups>]\n");
         return 2;
     }
+    if (groups && read_groups(groups) != 0) return 1;
     for (int r = 0; r < DC_REGIONS; r++)
         if (load_region(roms, r) != 0) return 1;
     const dc_region_t *rg = dc_layout_sfight.rg;
@@ -91,12 +136,23 @@ int main(int argc, char **argv) {
         key_t_ e = { 0 };
         if (sscanf(line, "%d %x %x %u", &e.model, &e.mat, &e.uv, &e.frame) != 4) continue;
         if (nk == cap) { cap = cap ? cap * 2 : 1024; k = realloc(k, cap * sizeof *k); }
+        e.order = (uint32_t)nk;
+        e.group = e.model >= 0 && e.model < 65536 && g_model_group[e.model] ? g_model_group[e.model] - 1u : (uint32_t)g_ngroups;
         k[nk++] = e;
     }
     fclose(kf);
     if (!table_count) { fprintf(stderr, "dc_strips: %s has no table line\n", keys); return 1; }
 
-    /* the blobs, in the keys' order (the frame that first draws them) */
+    /* the blobs, in the keys' order (the frame that first draws them); with
+     * groups, group by group, each from a sector, in the order of the first
+     * frame that draws from it */
+    if (groups) {
+        for (int g = 0; g <= g_ngroups; g++) g_rank[g] = ~0u;
+        for (size_t i = 0; i < nk; i++) if (k[i].order < g_rank[k[i].group]) g_rank[k[i].group] = k[i].order;
+        qsort(k, nk, sizeof *k, layout_cmp);
+    }
+    static dcs_group_t grp[MAX_GROUPS + 1];
+    uint32_t ng = 0;
     size_t blob_cap = 64u << 20, at = 0;
     uint8_t *blobs = calloc(1, blob_cap);
     static uint8_t one[4u << 20];
@@ -104,6 +160,13 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < nk; i++) {
         key_t_ *e = &k[i];
         e->len = 0;
+        if (groups && (!i || e->group != k[i - 1].group)) {
+            at = (at + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR;
+            grp[ng].off = (uint32_t)at;
+            snprintf(grp[ng].name, sizeof grp[ng].name, "%s", g_gname[e->group]);
+            if (ng) grp[ng - 1].len = (uint32_t)at - grp[ng - 1].off;
+            ng++;
+        }
         if (e->model < 0 || (uint32_t)e->model >= table_count) { skipped++; continue; }
         uint32_t toff = table_off + (uint32_t)e->model * MODEL_ENTRY_SIZE;
         if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) { skipped++; continue; }
@@ -130,6 +193,10 @@ int main(int argc, char **argv) {
         free(m.sv);
         free(m.faces);
     }
+    if (ng) {
+        at = (at + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR;   /* every group whole sectors */
+        grp[ng - 1].len = (uint32_t)at - grp[ng - 1].off;
+    }
 
     /* the index, by key */
     qsort(k, nk, sizeof *k, key_cmp);
@@ -137,8 +204,9 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < nk; i++) if (k[i].len) ni++;
     dcs_head_t h = { { 'M', '2', 'S', 'P' }, (uint32_t)ni, 0,
                      (uint32_t)polygons_size, (uint32_t)textures_size, table_off, table_count, sub, add,
-                     verts, faces, (uint32_t)at, { 0 } };
-    h.data_off = (uint32_t)((sizeof h + ni * sizeof(dcs_index_t) + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR);
+                     verts, faces, (uint32_t)at, ng, 0, { 0 } };
+    h.groups_off = (uint32_t)(sizeof h + ni * sizeof(dcs_index_t));
+    h.data_off = (uint32_t)((h.groups_off + ng * sizeof(dcs_group_t) + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR);
     FILE *of = fopen(out, "wb");
     if (!of) { fprintf(stderr, "dc_strips: cannot write %s\n", out); return 1; }
     uint8_t *head = calloc(1, h.data_off);
@@ -146,10 +214,13 @@ int main(int argc, char **argv) {
     dcs_index_t *ix = (dcs_index_t *)(head + sizeof h);
     for (size_t i = 0, j = 0; i < nk; i++)
         if (k[i].len) ix[j++] = (dcs_index_t){ k[i].model, k[i].mat, k[i].uv, k[i].off, k[i].len };
+    memcpy(head + h.groups_off, grp, ng * sizeof(dcs_group_t));
     fwrite(head, 1, h.data_off, of);
     fwrite(blobs, 1, at, of);
     fclose(of);
     printf("dc_strips: %u meshes (%u skipped), %u faces, %u vertices, %.1f MB\n",
            kept, skipped, faces, verts, (double)(h.data_off + at) / 1048576.0);
+    for (uint32_t g = 0; g < ng; g++)
+        printf("  group %-24s %5u KB\n", grp[g].name, (unsigned)(grp[g].len >> 10));
     return 0;
 }

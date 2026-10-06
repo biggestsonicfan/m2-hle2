@@ -83,6 +83,7 @@ typedef struct {
     int               nanon;
     /* counters */
     uint32_t refills, loads, zero_fills, anon_fills, evictions, read_errors, rom_writes, bounces;
+    uint32_t reads, seeks, next_fad; /* commands to the drive; those not starting where the last ended */
     uint64_t read_ns;
     uint32_t rg_loads[DC_REGIONS];   /* loads by the region the page is in */
     uint32_t at_loads;               /* loads for dc_rom_at, not the bus */
@@ -115,6 +116,9 @@ static int pg_read(void *dst, uint32_t fad, uint32_t nsec) {
     cd_read_params_t p = { .start_sec = fad, .num_sec = nsec, .buffer = dst, .is_test = 0 };
     cd_cmd_chk_status_t st;
     gdc_cmd_hnd_t h;
+    g_pg.reads++;
+    if (fad != g_pg.next_fad) g_pg.seeks++;   /* on a GD-ROM, the head moves */
+    g_pg.next_fad = fad + nsec;
     for (int tries = 0; (h = syscall_gdrom_send_command(CD_CMD_PIOREAD, &p)) <= 0; tries++) {
         syscall_gdrom_exec_server();
         if (tries > 1000000) return -1;

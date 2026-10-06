@@ -1215,6 +1215,81 @@ the ROM files; `TEXPAK=` puts it on the disc. Nothing in it is committed.
   the STRIPS.PAK run beside it) is the next step, and only hardware can say
   what it is worth.
 
+## STRIPS.PAK by scene: groups (#504)
+
+The question: a fight shows a stage and two fighters, so if the pack lay
+by stage and by fighter, could the port read "Sonic and Bean" whole, in
+one read each, and keep them in RAM while they are on screen? Fewer reads
+mean fewer seeks on a GD-ROM.
+
+`tools/dc_strips.c --groups dreamcast/sfight.mdlgroups` lays the blobs out
+by object group, the same groups as MODELS.PAK's tried `--groups` (#489):
+a stage, a fighter, common, the select screen, the story scenes, "other"
+for a model no group names. Each group starts on a sector, the groups lie
+in the order of the first frame that draws from them, and within a group
+the meshes lie in the order they were first drawn. A table after the index
+gives each group's place (`dcs_group_t`); `mkdisc.sh` passes `--groups`.
+The bench line under the pager's loads now counts the commands sent to the
+drive (`rd`), the seeks among them (`sk`: a read that does not start where
+the last one ended) and the strip pack's page loads (`sp`).
+
+**What a scene draws** (`det_digest` with every frame's mesh keys logged,
+against the grouped pack):
+
+| stretch | strip bytes drawn | their groups whole |
+|---|---|---|
+| attract's Sonic vs Bean, Flying Carpet (the bench, f3500-3900) | 1481 KB | 2654 KB |
+| the scripted fight, Sonic vs Knuckles, South Island, per 1000 frames | 1207-1390 KB | 2380 KB |
+| the scripted fight, all 9000 frames | 2697 KB | 3412 KB |
+
+In strips the fighters are not small. In the scripted fight Sonic draws
+417 KB, Knuckles 226, Amy 213; Bean draws 84 KB on the bench. A stage
+draws 421 KB (South Island) to 734 KB (Flying Carpet). Another 256-491 KB of a
+fight comes from the "select" group, which holds models the fight draws
+too, and 86-191 KB from common. Their textures in TEXTURES.PAK (#502) are
+another 50-96 KB a fighter and 640-1350 KB a stage. The port has no RAM
+for that: the board's memory takes most of the 16 MB. What is left is the
+frame pool (1184 KB), the mesh cache's 1 MB arena and ~700 KB of heap
+headroom. The meshes a fight draws in 100 frames already fill the arena.
+
+**Measured in Flycast** (PS3 files, the same attract from boot, f3500-3900;
+the frame-1500 hash is a5d21d21 on all of them):
+
+| disc | page loads | code | data | strip pages | drive reads | seeks |
+|---|---|---|---|---|---|---|
+| A: base (082fac4), pack by first frame | 686 | 340 | 74 | 259 | 749 | 671 |
+| B: groups read whole into a 1 MB block, arena 256 KB | 1452 | 890 | 168 | 363 | 1530 | |
+| X: pack by groups, read through the pager | 612 | 310 | 67 | 222 | 675 | 594 |
+| Y: X, and a missing strip page brings in the next 3 of its group | 721 | 355 | 76 | 277 | 784 | 615 |
+| the disc (X without the groups' 512 KB parts) | 616 | 305 | 69 | 229 | 679 | 605 |
+
+- **B, whole groups in RAM, lost.** The first mesh a scene asked of a group
+  read the whole group (cut into 512 KB parts) into a block of its own with
+  one read; its meshes were drawn from there, and the least recently drawn
+  group that neither this frame nor the last drew made room. The block came
+  out of the frame pool and the arena shrank to 256 KB to pay for it. The
+  bench's groups did not fit: 14 groups read (1558 KB) and 14 dropped in
+  400 frames, and 1782 meshes fell back to the pager because the block was
+  full of groups in use. The smaller pool doubled the code's page loads
+  (890 against 340). Seeks were not counted yet, but reads doubled.
+- **X, the layout alone, won.** Through the pager the same scene now takes
+  fewer 16 KB pages: a page holds meshes of one group, which the scene
+  draws together, not whatever the frame order put next to them. Strip
+  pages fell by 14%, and with less of the pool taken, code pages fell by
+  9%; seeks by 11%. The disc's pack has no parts (only the block needed
+  them), which moves pages a little: 10% fewer loads and seeks than A. The difference from MODELS.PAK's groups (#489, #492),
+  which lost, is what goes in: MODELS.PAK's groups held every object of a
+  group (20.3 MB), STRIPS.PAK holds only meshes the recorded frames drew
+  (8.3 MB), so a group's pages hold little the scene does not draw.
+- **Y, read-ahead, lost.** Reading the next pages of the group in the same
+  pass makes one seek of several reads, but the group's next pages are not
+  what this stretch draws next; they push code out (355 against 310).
+- **So the disc lays STRIPS.PAK out by groups and reads it as before.**
+  Whole fighters in RAM would need the board to leave more room, and
+  reading a scene's groups at a load screen into the page cache the same.
+  On hardware a seek is ~100 ms; the counters say where they go (code
+  first), not what they cost, and only hardware can say that.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
