@@ -1355,7 +1355,8 @@ its slice, 6467 ms, is the old-map row below. Now:
 
 **The map no longer listed the hottest code.** `sfight.aotmap` was recorded
 while Gems' C still ran `get_frame_dat` (`0x304C8`). Since the console profile
-leaves that function to the i960 (`gems_trap_left_to_i960`), it and
+left that function to the i960 (`gems_trap_left_to_i960`; no longer, see
+below), it and
 `get_fcurve_value_f` (`0x30C28`-`0x30E04`) were three quarters of everything
 the interpreter ran in a fight, and none of it was in the map. Re-recorded
 (the recipe is in `dreamcast/README.md`), the scripted fight interprets
@@ -1405,6 +1406,36 @@ frames 3572 and 4912):
 
 The interpreter's column is the run loop too (`emu_slice_body`, 3%). Compiled
 code is 774 KB for 7405 instructions, 104 bytes of SH-4 each.
+
+**Then `get_frame_dat` went back to Gems' C.** The console profile left it
+to the i960 because its head-tilt hook (`0x30608`) is inside the function and
+Gems' C would have skipped it. Now the C runs the hook: its fade-out loop
+loads r10-r12 as the ROM's loop holds them and calls the profile's handler
+(`gems_inner`, `core/gems.h`), so all 47 traps are on for the console profile
+too. The private Gems folder needs its matching `get_frame_dat.h`; one from
+before does not name the hook (`GEMS_INNER_SITES`) and the function stays
+with the i960, as it did.
+
+- `--gems-verify` on every call (`M2HLE_GEMS_VERIFY_ALL=1`, `--profile
+  sfight_console`) holds the C against the i960 with the hook: 5220 of 5220
+  `get_frame_dat` calls exact in the scripted fight, 4618 of 4618 in 3000
+  frames of attract. With the hook call taken out of a copy of the C, 278 of
+  the fight's 5220 differ, so those runs do reach the head tilt.
+- The map was recorded again. `get_frame_dat` and `get_fcurve_value_f` are
+  gone from it, and the generator compiles 7025 instructions where it
+  compiled 7405.
+- A trapped function is charged as one instruction, so the timers and `rand`
+  see less time: the frame-1500 hash is 634d853f now, with the compiled code
+  and in a build without it. On the host, `det_digest` with and without the
+  compiled code is identical again over the same two runs.
+
+| | total ms | slice | draw | text |
+|---|---|---|---|---|
+| `get_frame_dat` compiled (the fourth row above) | 14327 | 5552 | 8708 | 1,808,116 |
+| `get_frame_dat` in Gems' C | 13970 | 5208 | 8698 | 1,738,404 |
+
+The slice is 6% shorter again, 48% against the refused AOT, and the code is
+70 KB smaller. The profile table above was not taken again.
 
 **What is left.**
 
@@ -1457,7 +1488,7 @@ code is 774 KB for 7405 instructions, 104 bytes of SH-4 each.
   `ftrv` for the vertex transform, and the store queues for the vertex
   submission. A smaller `geo3d_cface_t` (~150 bytes; u16 indices, integer
   texture fields) would let the mesh arena (768 KB) hold more.
-- **The i960 slice (~14 ms a frame in the bench after #509).** A third of a
+- **The i960 slice (~13 ms a frame in the bench after #509).** A third of a
   fight's frame: Gems' C, the compiled code, the COP, and 7% still
   interpreted. A wider `AOT_COVER` needs memory the board does not have
   (#509), so smaller compiled code (104 bytes of SH-4 an instruction) is what

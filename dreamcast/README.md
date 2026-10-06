@@ -170,7 +170,8 @@ then each instruction's weight is its count over its run's total, times
 Record it again whenever the set of functions left to the i960 changes: a
 Gems trap dropped or added, a hook removed. A stale map still builds and
 still runs right, only slower, because the code it does not list is
-interpreted (#509: `get_frame_dat` was three quarters of that). The profiles'
+interpreted (#509: `get_frame_dat` was three quarters of that, until Gems' C
+took it back by running the console profile's head-tilt hook itself). The profiles'
 own hooks need no care: the Makefile reads their addresses out of
 `src/profiles/sfight*.h`. If the compiled code and the profile's hooks still
 disagree, the AOT turns itself off and the HUD's stats say `aot off:` and why.
