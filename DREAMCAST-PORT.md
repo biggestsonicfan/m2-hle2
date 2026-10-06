@@ -670,9 +670,9 @@ e746591c in every build below).
     nothing, so it shows no gain there (14.5 s → 15.1 s); on a GD-ROM every
     load is a seek. Not measured on hardware.
   - The 40 left are reads the map missed or that cross a run's end.
-  - **Like objects together** (#489). A map holds only what its runs saw, so
-    a matchup it never recorded read its fighters from the ROM. The pack is
-    now laid out by object groups, as Gems' `OBJ_*` files are: one per stage,
+  - **Like objects together: tried and dropped** (#489, #492). A map holds
+    only what its runs saw, so a matchup it never recorded reads its fighters
+    from the ROM. `dc_mdlpack.py --groups` lays the pack out by object groups, as Gems' `OBJ_*` files are: one per stage,
     one per fighter (and the fighter's second-player colours), the select
     screen, the story scenes (`dreamcast/sfight.mdlgroups`, written by
     `tools/dc_mdlgroups.mjs`). The explorer says what each stage's display
@@ -716,6 +716,9 @@ e746591c in every build below).
     3D decoder's mesh cache builds a mesh once (`b 0`, thousands of hits a
     second in the fight), so its reads come from the ROM once, not every
     frame as in the replay above, which decodes every display list uncut.
+    So `mkdisc.sh` builds the pack by first frame; `--groups` stays in the
+    tool, and the pager takes any pack's index out of the frame pool (one
+    16 KB frame for the by-first-frame pack's 7 KB, as measured here).
 - **Textures converted at build time do not pay here, so there is no texture
   pack.** Gems' `TEX_STG*` files look like each stage's textures, already
   decompressed and converted. The two costs that would remove, measured over

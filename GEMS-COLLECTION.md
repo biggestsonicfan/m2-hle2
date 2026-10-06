@@ -129,9 +129,11 @@ Gems confirms the plan more than it changes it. What it adds:
    prebuilt meshes still need their pages in RAM while drawn. Gems' packs are
    the raw ROM strips, not prebuilt meshes: their gain is locality (one read,
    pages that sit together) rather than build time. With the pager's ~1 MB
-   cache that matters more than it did on a 24 MB GameCube. Done: MODELS.PAK
-   is grouped as the `OBJ_*` files are, a stage and a fighter at a time
-   (#489, DREAMCAST-PORT.md "Like objects together").
+   cache that matters more than it did on a 24 MB GameCube. Tried: a
+   MODELS.PAK grouped as the `OBJ_*` files are, a stage and a fighter at a
+   time, loaded more pages in Flycast than the pack by first frame, even for
+   a matchup the map never recorded, so the disc keeps the latter (#489,
+   #492, DREAMCAST-PORT.md "Like objects together").
 3. **Convert textures at build time, per stage.** If `TEX_STG*` is what it
    appears to be, Sega paid the i960 decompressor and the format conversion
    offline. On the Dreamcast the decompressor runs on the emulated i960 and
