@@ -251,15 +251,16 @@ and a row per frame of the LV line (`--lv`):
 
     python3 -I dreamcast/tools/hud_read.py capture.mp4 --jsonl windows.jsonl --lv frames.csv
 
-The right trigger cycles the panel: all of it, the top band only, none of it.
+The panel starts hidden; the right trigger shows it and hides it again (#526).
 
-The top band (rows 0-6):
+The top band (rows 0-7):
 
 | tag | when | fields |
 |---|---|---|
 | `LV` | every frame drawn | `f` board frame, `d` frames handed to the PVR (this one included), `v` vblanks since boot, `t` ms since boot, `dt` ms between the last two frames handed over |
 | `ID` | once | `git` the commit built, `gems`, `aot`, `jit`, `cap` the fps cap; `cab` the cable (`vga`, `rgb`, `cmp`), `rg` the flash's region, `il` interlaced, `pal` 50 Hz |
 | `B0`-`B3` | after frame 3900 | the bench, frames 3500-3900 of attract: `ms` in all, `sl` in slices, `dr` in draws, `tx` making textures, `txr` texture-pack reads, `n` frames drawn; the draw's parts `ti` `sc` `so` `su`, `snd`; page loads `ld`, of code `cd`, data `da`, polygons `po`, textures `tx`, the model pack `pk`, `dc_rom_at` `at`; drive commands `rd`, seeks `sk`, strip-pack pages `sp` |
+| `VR` | once | the release (`RELEASE=`, e.g. `Alpha 0.3`; `dev` without one), `build` the build number (`r` + the commits up to it) and the commit |
 | `AO`, `JT` | when there is one | why the AOT turned itself off; the JIT's blocks, KB, flushes, compile ms, slow exits |
 
 The bottom band (rows 14-29), a 2-s window:

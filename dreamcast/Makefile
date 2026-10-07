@@ -112,8 +112,13 @@ GEMS_HOOKS := $(shell grep -o '{ 0x[0-9A-Fa-f]*, gfn_' "$(GEMS)/gems_all.h" | se
 endif
 
 # The commit built (-dirty: with changes not in it), for HUD=prof's ID line
-# and the assertion screen.
+# and the assertion screen; the build number (r + the commits up to it, as the
+# canary's desktop builds count) and RELEASE="Alpha 0.3", the release's name,
+# for HUD=prof's VR line (#526).
 CFLAGS += -DDC_GIT='"$(shell git -C $(REPO) describe --always --abbrev=7 --dirty 2>/dev/null || echo unknown)"'
+CFLAGS += -DDC_BUILD='"r$(shell git -C $(REPO) rev-list --count HEAD 2>/dev/null || echo 0)"'
+RELEASE ?=
+CFLAGS += $(if $(RELEASE),-DDC_RELEASE='"$(RELEASE)"')
 
 AOT_GEN :=
 ifneq ($(AOT),)
