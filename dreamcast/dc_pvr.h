@@ -992,104 +992,151 @@ _Static_assert(offsetof(memory_bus_t, tile) % 4 == 0, "dp_tiles reads tile RAM a
 _Static_assert(offsetof(memory_bus_t, tmapgfx) % 4 == 0, "dp_tiles_chars reads char RAM as words");
 _Static_assert(TILE_SNAP_WORDS % 512 == 0, "dp_tiles copies whole KBs");
 
-static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
-    static uint32_t s_tile = ~0u, s_gfx = ~0u, s_pal = ~0u, s_lut = ~0u;
-    static bool s_valid;
-    static tile_dirty_t d;
-    static int16_t x0[VIDEO_HEIGHT], x1[VIDEO_HEIGHT];
-    bool redraw = bus->gen_tile != s_tile || bus->gen_gfx != s_gfx || !s_valid;
-    bool recolour = bus->gen_pal != s_pal || bus->gen_lut != s_lut || !s_valid;
-    if (!redraw && !recolour) return;
-    memset(&d, 0, sizeof d);
-    d.full = !s_valid;
-    bool chars = bus->gen_gfx != s_gfx && dp_tiles_chars(bus);
-    bool ls_all = d.full, all = false;
-    static uint8_t banks[256];   /* the palette banks whose colours changed */
+/* What dp_tiles keeps between frames: the bus generations it last drew, the
+ * blocks that changed this time and each row's span of them. */
+typedef struct {
+    uint32_t tile, gfx, pal, lut;   /* bus->gen_* as of the last draw */
+    bool     valid;                 /* a draw has happened */
+    tile_dirty_t d;
+    int16_t  x0[VIDEO_HEIGHT], x1[VIDEO_HEIGHT];   /* each row's changed span, x0 >= x1: none */
+    uint8_t  banks[256];            /* the palette banks whose colours changed */
+} dp_tiles_state_t;
+static dp_tiles_state_t s_tl;   /* zero, so bss; the first draw puts the sentinels in */
+
+/* The pen colours: tilemap 2's textures are drawn in them. Marks the banks
+ * whose colours changed and returns whether any did; *all when a pen the
+ * CPU layers use did. */
+static bool dp_tiles_pens(memory_bus_t *bus, uint8_t *banks, bool *all) {
     bool bank_any = false;
-    s_tile = bus->gen_tile; s_gfx = bus->gen_gfx; s_pal = bus->gen_pal; s_lut = bus->gen_lut;
+    memset(banks, 0, 256);
+    uint8_t chan[3][32];
+    video_pen_channels(bus, chan);
+    for (int p = 0; p < TILE_PEN_NONE; p++) {
+        uint16_t c = pal_read16(bus, p);
+        uint8_t r = chan[0][c & 31], g = chan[1][(c >> 5) & 31], b = chan[2][(c >> 10) & 31];
+        uint16_t c565  = (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
+        uint16_t c1555 = (uint16_t)(0x8000u | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3));
+        if (c565 != g_dp.pen565[p] || c1555 != g_dp.pen1555[p]) {
+            if (g_dp_pen_used[p]) *all = true;
+            banks[p >> 4] = 1;
+            bank_any = true;
+            g_dp.pen565[p] = c565;
+            g_dp.pen1555[p] = c1555;
+        }
+    }
+    g_dp.pen565[TILE_PEN_NONE] = 0;
+    g_dp.pen1555[TILE_PEN_NONE] = 0;
+    return bank_any;
+}
+
+/* The line-scroll layers: decide which tilemaps the PVR draws (g_ls.on, .both;
+ * a change is a full redraw) and draw them. banks: the recoloured palette
+ * banks, NULL when no colour changed. */
+static void dp_tiles_ls(memory_bus_t *bus, const uint16_t *n, tile_dirty_t *d, bool chars, const uint8_t *banks) {
+    bool ls = dp_ls_ok(n, 2), both = ls && dp_ls_ok(n, 0), ls_all = d->full;
+    if (ls != g_ls.on || both != g_ls.both) { d->full = ls_all = true; g_ls.on = ls; g_ls.both = both; }
+    if (chars && !d->full && !both) dp_tiles_mark_chars(d, n);
+    if (ls) {
+        for (int y = 0; y < VIDEO_HEIGHT; y++) g_ls.t2.h[y] = n[0x4400 + y] & 0x1FF;
+        g_ls.t2.vy = n[0x5006] & 0x1FF;
+        dp_ls_draw(&g_ls.t2, n + 0x2000, bus->tmapgfx, ls_all, true, chars, banks);
+    }
+    if (both) {
+        for (int y = 0; y < VIDEO_HEIGHT; y++) g_ls.t0.h[y] = n[0x4000 + y] & 0x1FF;
+        g_ls.t0.vy = n[0x5004] & 0x1FF;
+        dp_ls_draw(&g_ls.t0, n, bus->tmapgfx, ls_all, false, chars, banks);
+    }
+}
+
+/* Bring the CPU layers' copy of tile RAM up to date and mark the blocks that
+ * changed. Only a KB written since the last redraw can differ (memory.h
+ * tile_dirty). Under line scroll, pair 2/3's cells, line scroll and mask
+ * (words 0x2000-0x3FFF, 0x4400-0x47FF, 0x6800-0x6FFF: KBs 16-31, 34-35,
+ * 52-55) stay as they were for the CPU's layers, which no longer draw them.
+ * These used to be counted in 2 KB units, so under a line scroll tilemap 1's
+ * changes never reached the CPU's copy (found reading this for Pinboard
+ * #463). */
+static void dp_tiles_copy(memory_bus_t *bus, tile_cpu_t *tiles, const uint16_t *n, tile_dirty_t *d) {
+    bool ls = g_ls.on, both = g_ls.both;
+    volatile uint8_t *dk = bus->tile_dirty;
+    for (int k = 0; k < TILE_SNAP_WORDS / 512 && both; k++) dk[k] = 0;   /* the CPU's copy waits for d.full */
+    for (int k = 0; k < TILE_SNAP_WORDS / 512 && !both; k++) {
+        if (!d->full && !dk[k]) continue;
+        dk[k] = 0;
+        if (ls && ((k >= 16 && k < 32) || k == 34 || k == 35 || (k >= 52 && k < 56))) continue;
+        if (!d->full) tile_dirty_find_range(d, tiles->words, n, k * 512, k * 512 + 512);
+        memcpy(tiles->words + k * 512, n + k * 512, 1024);
+    }
+    if (d->count > TILE_BLK_W * TILE_BLK_H * 3 / 4) d->full = true;
+}
+
+/* Each row's span of changed blocks, in pixels and clipped to the view (the
+ * whole view when d->full; x0 >= x1 for a row with nothing). */
+static void dp_tiles_extents(const tile_dirty_t *d, int16_t *x0, int16_t *x1) {
+    for (int by = 0; by < TILE_BLK_H; by++) {
+        int b0 = 0, b1 = TILE_BLK_W;
+        if (!d->full) {
+            while (b0 < TILE_BLK_W && !d->blk[by][b0]) b0++;
+            while (b1 > b0 && !d->blk[by][b1 - 1]) b1--;
+        }
+        int a = b0 * 8 < DC_VIEW_X ? DC_VIEW_X : b0 * 8;   /* nothing past the view */
+        int b = b1 * 8 > DC_VIEW_X + DC_VIEW_W ? DC_VIEW_X + DC_VIEW_W : b1 * 8;
+        for (int y = by * 8; y < by * 8 + 8; y++) {
+            bool in = y >= DC_VIEW_Y && y < DC_VIEW_Y + DC_VIEW_H;
+            x0[y] = (int16_t)a; x1[y] = (int16_t)(in ? b : a);
+        }
+    }
+}
+
+/* The CPU layers' pixels to the PVR's: the whole view (all) or the changed
+ * spans (dirty), into the pair the PVR is not reading (dp_tiles_send). */
+static void dp_tiles_show(tile_cpu_t *tiles, const dp_tiles_state_t *s, bool all, bool dirty) {
+    const uint16_t *bgpen = g_ls.on ? g_dp.pen1555 : g_dp.pen565;
+    if (all || dirty) dp_tiles_send(tiles, bgpen, all, s->x0, s->x1);
+}
+
+/* Tile RAM or the characters changed: the dirty cells, their rows' extents,
+ * and the CPU layer's draw of them. */
+static void dp_tiles_redraw(memory_bus_t *bus, tile_cpu_t *tiles, dp_tiles_state_t *s, bool chars, const uint8_t *banks) {
+    tile_dirty_t *d = &s->d;
+    const uint16_t *n = (const uint16_t *)bus->tile;
+    dp_tiles_ls(bus, n, d, chars, banks);
+    dp_tiles_copy(bus, tiles, n, d);
+    dp_tiles_extents(d, s->x0, s->x1);
+    if (g_ls.both || !(d->full || d->count)) return;
+    if (g_ls.on) dp_ls_rest(tiles, bus->tmapgfx, s->x0, s->x1);
+    else         tile_cpu_draw(tiles, bus->tmapgfx, s->x0, s->x1);
+}
+
+/* Only colours changed: the textured layers take the new pens. */
+static void dp_tiles_recolour(memory_bus_t *bus, const uint8_t *banks) {
+    if (g_ls.on)   dp_ls_draw(&g_ls.t2, g_ls.t2.cells, bus->tmapgfx, false, true, false, banks);
+    if (g_ls.both) dp_ls_draw(&g_ls.t0, g_ls.t0.cells, bus->tmapgfx, false, false, false, banks);
+}
+
+static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
+    dp_tiles_state_t *s = &s_tl;
+    tile_dirty_t *d = &s->d;
+    if (!s->valid) s->tile = s->gfx = s->pal = s->lut = ~0u;   /* no generation matches the first draw */
+    bool redraw = bus->gen_tile != s->tile || bus->gen_gfx != s->gfx || !s->valid;
+    bool recolour = bus->gen_pal != s->pal || bus->gen_lut != s->lut || !s->valid;
+    if (!redraw && !recolour) return;
+    memset(d, 0, sizeof *d);
+    d->full = !s->valid;
+    bool chars = bus->gen_gfx != s->gfx && dp_tiles_chars(bus);
+    bool all = false, bank_any = false;
+    s->tile = bus->gen_tile; s->gfx = bus->gen_gfx; s->pal = bus->gen_pal; s->lut = bus->gen_lut;
     /* The pen colours first: tilemap 2's textures are drawn in them. */
-    if (recolour) {
-        memset(banks, 0, sizeof banks);
-        uint8_t chan[3][32];
-        video_pen_channels(bus, chan);
-        for (int p = 0; p < TILE_PEN_NONE; p++) {
-            uint16_t c = pal_read16(bus, p);
-            uint8_t r = chan[0][c & 31], g = chan[1][(c >> 5) & 31], b = chan[2][(c >> 10) & 31];
-            uint16_t c565  = (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
-            uint16_t c1555 = (uint16_t)(0x8000u | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3));
-            if (c565 != g_dp.pen565[p] || c1555 != g_dp.pen1555[p]) {
-                if (g_dp_pen_used[p]) all = true;
-                banks[p >> 4] = 1;
-                bank_any = true;
-                g_dp.pen565[p] = c565;
-                g_dp.pen1555[p] = c1555;
-            }
-        }
-        g_dp.pen565[TILE_PEN_NONE] = 0;
-        g_dp.pen1555[TILE_PEN_NONE] = 0;
-    }
-    if (redraw) {
-        const uint16_t *n = (const uint16_t *)bus->tile;
-        bool ls = dp_ls_ok(n, 2), both = ls && dp_ls_ok(n, 0);
-        if (ls != g_ls.on || both != g_ls.both) { d.full = ls_all = true; g_ls.on = ls; g_ls.both = both; }
-        if (chars && !d.full && !both) dp_tiles_mark_chars(&d, n);
-        if (ls) {
-            for (int y = 0; y < VIDEO_HEIGHT; y++) g_ls.t2.h[y] = n[0x4400 + y] & 0x1FF;
-            g_ls.t2.vy = n[0x5006] & 0x1FF;
-            dp_ls_draw(&g_ls.t2, n + 0x2000, bus->tmapgfx, ls_all, true, chars, bank_any ? banks : NULL);
-        }
-        if (both) {
-            for (int y = 0; y < VIDEO_HEIGHT; y++) g_ls.t0.h[y] = n[0x4000 + y] & 0x1FF;
-            g_ls.t0.vy = n[0x5004] & 0x1FF;
-            dp_ls_draw(&g_ls.t0, n, bus->tmapgfx, ls_all, false, chars, bank_any ? banks : NULL);
-        }
-        /* Only a KB written since the last redraw can differ (memory.h
-         * tile_dirty). Under line scroll, pair 2/3's cells, line scroll and
-         * mask (words 0x2000-0x3FFF, 0x4400-0x47FF, 0x6800-0x6FFF: KBs 16-31,
-         * 34-35, 52-55) stay as they were for the CPU's layers, which no longer
-         * draw them. These used to be counted in 2 KB units, so under a line
-         * scroll tilemap 1's changes never reached the CPU's copy (found
-         * reading this for Pinboard #463). */
-        volatile uint8_t *dk = bus->tile_dirty;
-        for (int k = 0; k < TILE_SNAP_WORDS / 512 && both; k++) dk[k] = 0;   /* the CPU's copy waits for d.full */
-        for (int k = 0; k < TILE_SNAP_WORDS / 512 && !both; k++) {
-            if (!d.full && !dk[k]) continue;
-            dk[k] = 0;
-            if (ls && ((k >= 16 && k < 32) || k == 34 || k == 35 || (k >= 52 && k < 56))) continue;
-            if (!d.full) tile_dirty_find_range(&d, tiles->words, n, k * 512, k * 512 + 512);
-            memcpy(tiles->words + k * 512, n + k * 512, 1024);
-        }
-        if (d.count > TILE_BLK_W * TILE_BLK_H * 3 / 4) d.full = true;
-        for (int by = 0; by < TILE_BLK_H; by++) {
-            int b0 = 0, b1 = TILE_BLK_W;
-            if (!d.full) {
-                while (b0 < TILE_BLK_W && !d.blk[by][b0]) b0++;
-                while (b1 > b0 && !d.blk[by][b1 - 1]) b1--;
-            }
-            int a = b0 * 8 < DC_VIEW_X ? DC_VIEW_X : b0 * 8;   /* nothing past the view */
-            int b = b1 * 8 > DC_VIEW_X + DC_VIEW_W ? DC_VIEW_X + DC_VIEW_W : b1 * 8;
-            for (int y = by * 8; y < by * 8 + 8; y++) {
-                bool in = y >= DC_VIEW_Y && y < DC_VIEW_Y + DC_VIEW_H;
-                x0[y] = (int16_t)a; x1[y] = (int16_t)(in ? b : a);
-            }
-        }
-        if (!both && (d.full || d.count)) {
-            if (g_ls.on) dp_ls_rest(tiles, bus->tmapgfx, x0, x1);
-            else         tile_cpu_draw(tiles, bus->tmapgfx, x0, x1);
-        }
-    }
-    if (!redraw && bank_any) {   /* only colours changed */
-        if (g_ls.on)   dp_ls_draw(&g_ls.t2, g_ls.t2.cells, bus->tmapgfx, false, true, false, banks);
-        if (g_ls.both) dp_ls_draw(&g_ls.t0, g_ls.t0.cells, bus->tmapgfx, false, false, false, banks);
-    }
-    if (d.full || !s_valid) all = true;
-    s_valid = true;
+    if (recolour) bank_any = dp_tiles_pens(bus, s->banks, &all);
+    if (redraw) dp_tiles_redraw(bus, tiles, s, chars, bank_any ? s->banks : NULL);
+    else if (bank_any) dp_tiles_recolour(bus, s->banks);
+    if (d->full || !s->valid) all = true;
+    s->valid = true;
     if (g_ls.both) {   /* the CPU layers are tilemap 0's textures, pair 0: the next CPU frame goes into pair 1 */
         g_dp.lcur = 0;
         return;
     }
-    const uint16_t *bgpen = g_ls.on ? g_dp.pen1555 : g_dp.pen565;
-    if (all || (redraw && d.count)) dp_tiles_send(tiles, bgpen, all, x0, x1);
+    dp_tiles_show(tiles, s, all, redraw && d->count);
 }
 
 /* ---- The 3D scene ------------------------------------------------------------------ */
