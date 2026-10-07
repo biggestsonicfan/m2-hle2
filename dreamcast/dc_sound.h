@@ -531,7 +531,10 @@ static int ds_init(void) {
     if ((g_ds.stream = snd_stream_alloc(ds_stream_cb, DS_STREAM)) < 0) return ds_init_fail();
     snd_stream_start(g_ds.stream, DS_RATE, 1);
     g_ds.on = 1;
-    thd_create(1, ds_thread, NULL);
+    /* above the board's thread, so the stream is fed when its sleep ends, not
+       when the board next yields; labelled for the HUD and a crash's thread list */
+    kthread_attr_t attr = { .create_detached = true, .prio = PRIO_DEFAULT - 1, .label = "sound" };
+    thd_create_ex(&attr, ds_thread, NULL);
     printf("sound: %u cues, %u ADX, effects %u KB in sound RAM\n", (unsigned)g_ds.ncue,
            (unsigned)g_ds.n - 1, (unsigned)(ram >> 10));
     return 0;

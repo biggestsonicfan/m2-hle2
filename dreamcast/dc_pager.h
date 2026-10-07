@@ -41,6 +41,8 @@
 #include <kos.h>
 #include <dc/cdrom.h>
 #include <dc/syscalls.h>
+#include <dc/wdt.h>
+#include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,8 +125,11 @@ static int pg_read_cmd(void *dst, uint32_t fad, uint32_t nsec) {
         syscall_gdrom_exec_server();
         if (tries > 1000000) return -1;
     }
+    /* A read takes milliseconds (a seek, tens): let the sound thread run meanwhile */
     for (uint32_t spin = 0; spin < 100000000u; spin++) {
         syscall_gdrom_exec_server();
+        wdt_pet();   /* a slow read is not a hang (main_dc.c) */
+        if (!irq_inside_int()) thd_pass();
         int r = syscall_gdrom_check_command(h, &st);
         if (r == CD_CMD_COMPLETED) return 0;
         if (r == CD_CMD_FAILED || r == CD_CMD_NOT_FOUND) return -1;
@@ -161,7 +166,7 @@ static void pg_read_page(void *dst, uint32_t fad, uint32_t nsec, uint32_t v) {
     }
     printf("pager: page %lu unreadable at FAD %lu after %d tries\n",
            (unsigned long)v, (unsigned long)fad, PG_READ_TRIES);
-    arch_abort();
+    __assert(__FILE__, __LINE__, "page readable", "pager: a ROM page is unreadable", __func__);   /* main_dc.c shows it */
 }
 
 /* ---- the frames --------------------------------------------------------------- */

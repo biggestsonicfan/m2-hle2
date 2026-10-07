@@ -118,7 +118,9 @@ static struct {
     dc_tex_t  tex[DC_TEX_SLOTS];
     unsigned  count, made, dropped, fails;
     uint32_t  gen_tex;
-    pvr_ptr_t bg, fg, text;          /* the two tile layers, the stats text */
+    pvr_ptr_t bg, fg, text;          /* the two tile layers (pair 0, tilemap 0's line-scroll textures too), the stats text */
+    pvr_ptr_t lbg[2], lfg[2];        /* the tile layers, double-buffered: pair 0 is bg/fg (dp_tiles_send) */
+    uint8_t   lcur;                  /* the pair the last frame drew */
     pvr_ptr_t checker;
     uint16_t  pen565[TILE_PEN_NONE + 1], pen1555[TILE_PEN_NONE + 1];
     uint32_t  text_rows;             /* bit r: screen row r has text */
@@ -516,6 +518,12 @@ static void dp_face_colour(const memory_bus_t *bus, const dp_col_in_t *T, bool t
 
 /* ---- Init ------------------------------------------------------------------------ */
 
+/* The second pair of layer textures holds the board's rows and a few more,
+ * which the filter may touch below the last: declared 512x512 to the PVR,
+ * it is never drawn past the view. */
+#define DP_LAYER_ROWS (VIDEO_HEIGHT + 8)
+_Static_assert(DC_VIEW_Y + DC_VIEW_H <= VIDEO_HEIGHT, "the layers' second pair holds the board's rows");
+
 static int dp_init(void) {
     pvr_init_params_t params = {
         { PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_0 },
@@ -535,6 +543,9 @@ static int dp_init(void) {
     dct_init();
     g_dp.bg   = pvr_mem_malloc(512 * 512 * 2);
     g_dp.fg   = pvr_mem_malloc(512 * 512 * 2);
+    g_dp.lbg[0] = g_dp.bg; g_dp.lfg[0] = g_dp.fg;
+    g_dp.lbg[1] = pvr_mem_malloc(512 * DP_LAYER_ROWS * 2);   /* the view's rows only: it never wraps */
+    g_dp.lfg[1] = pvr_mem_malloc(512 * DP_LAYER_ROWS * 2);
     g_dp.text = pvr_mem_malloc(1024 * 512 * 2);
     g_ls.t2.back  = pvr_mem_malloc(512 * 512 * 2);
     g_ls.t2.front = pvr_mem_malloc(512 * 512 * 2);
@@ -548,10 +559,12 @@ static int dp_init(void) {
             g_dp_cut[i >> 1] |= (uint8_t)((((x ^ y) & 1u) ? 1u : 0u) << ((i & 1) * 4));
         }
     g_dp.checker = pvr_mem_malloc(32);
-    if (!g_dp.bg || !g_dp.fg || !g_dp.text || !g_dp.checker || !g_ls.t2.back || !g_ls.t2.front) return -1;
+    if (!g_dp.bg || !g_dp.fg || !g_dp.lbg[1] || !g_dp.lfg[1] || !g_dp.text || !g_dp.checker || !g_ls.t2.back || !g_ls.t2.front) return -1;
     pvr_txr_load(g_dp_cut, g_dp.checker, 32);
     memset((void *)g_dp.bg, 0, 512 * 512 * 2);
     memset((void *)g_dp.fg, 0, 512 * 512 * 2);
+    memset((void *)g_dp.lbg[1], 0, 512 * DP_LAYER_ROWS * 2);
+    memset((void *)g_dp.lfg[1], 0, 512 * DP_LAYER_ROWS * 2);
     memset((void *)g_dp.text, 0, 1024 * 512 * 2);
     g_dp.gen_tex = ~0u;
     return 0;
@@ -755,15 +768,62 @@ static void dp_corner_rect(void) {
  * the pens on screen changed: most of STF's palette writes are 3D colours. */
 static uint8_t g_dp_pen_used[TILE_PEN_NONE + 1];   /* a superset of the pens on screen */
 
-static void dp_tiles_convert(const tile_cpu_t *tiles, const uint16_t *bgpen, int y, int xs, int xe) {
+/* A row's pixels xs..xe (multiples of 16) into pair `pair`: converted in RAM,
+ * then sent by the store queues, 32 bytes a burst, where 32-bit stores into
+ * video memory each waited on the bus. */
+static void dp_tiles_convert(const tile_cpu_t *tiles, const uint16_t *bgpen, int pair, int y, int xs, int xe) {
+    static uint32_t rb[256] __attribute__((aligned(32))), rf[256] __attribute__((aligned(32)));
     const uint16_t *bg = tiles->bg + y * VIDEO_WIDTH, *fg = tiles->fg + y * VIDEO_WIDTH;
-    uint32_t *db = (uint32_t *)g_dp.bg + y * 256, *df = (uint32_t *)g_dp.fg + y * 256;
     for (int x = xs; x < xe; x += 2) {
         g_dp_pen_used[bg[x]] = g_dp_pen_used[bg[x + 1]] = 1;
         g_dp_pen_used[fg[x]] = g_dp_pen_used[fg[x + 1]] = 1;
-        db[x >> 1] = bgpen[bg[x]] | (uint32_t)bgpen[bg[x + 1]] << 16;
-        df[x >> 1] = g_dp.pen1555[fg[x]] | (uint32_t)g_dp.pen1555[fg[x + 1]] << 16;
+        rb[x >> 1] = bgpen[bg[x]] | (uint32_t)bgpen[bg[x + 1]] << 16;
+        rf[x >> 1] = g_dp.pen1555[fg[x]] | (uint32_t)g_dp.pen1555[fg[x + 1]] << 16;
     }
+    pvr_txr_load(rb + (xs >> 1), (uint16_t *)g_dp.lbg[pair] + y * 512 + xs, (size_t)(xe - xs) * 2);
+    pvr_txr_load(rf + (xs >> 1), (uint16_t *)g_dp.lfg[pair] + y * 512 + xs, (size_t)(xe - xs) * 2);
+}
+
+/* The CPU layers are double-buffered: the PVR may still be drawing the last
+ * frame from one pair while this frame is decoded (pvr_check_ready says the
+ * last scene was taken, not that it is drawn), so a frame's changes go into
+ * the other pair, and the frame draws that. Each pair keeps the rows it has
+ * not had yet: a pair gets the last frame's changes along with this one's.
+ * Tilemap 0's line-scroll textures (pair 0) and tilemap 2's stay single. */
+static struct {
+    bool    all[2];                          /* the pair needs every row of the view */
+    int16_t x0[2][VIDEO_HEIGHT], x1[2][VIDEO_HEIGHT];   /* else row y's pixels x0..x1 (none: x0 >= x1) */
+} g_dp_owe;
+
+static void dp_owe_add(int pair, bool all, const int16_t *x0, const int16_t *x1) {
+    if (g_dp_owe.all[pair]) return;
+    if (all) { g_dp_owe.all[pair] = true; return; }
+    int16_t *o0 = g_dp_owe.x0[pair], *o1 = g_dp_owe.x1[pair];
+    for (int y = 0; y < VIDEO_HEIGHT; y++) {
+        if (x0[y] >= x1[y]) continue;
+        if (o0[y] >= o1[y]) { o0[y] = x0[y]; o1[y] = x1[y]; continue; }
+        if (x0[y] < o0[y]) o0[y] = x0[y];
+        if (x1[y] > o1[y]) o1[y] = x1[y];
+    }
+}
+
+/* This frame's changes (all, or rows x0..x1): into the pair the PVR is not
+ * reading, with what that pair still owed; the other pair now owes them. */
+static void dp_tiles_send(const tile_cpu_t *tiles, const uint16_t *bgpen, bool all, const int16_t *x0, const int16_t *x1) {
+    int pair = g_dp.lcur ^ 1;
+    dp_owe_add(pair, all, x0, x1);
+    dp_owe_add(pair ^ 1, all, x0, x1);
+    if (g_dp_owe.all[pair]) memset(g_dp_pen_used, 0, sizeof g_dp_pen_used);
+    for (int y = DC_VIEW_Y; y < DC_VIEW_Y + DC_VIEW_H; y++) {
+        int a = DC_VIEW_X, b = DC_VIEW_X + DC_VIEW_W;
+        if (!g_dp_owe.all[pair]) { a = g_dp_owe.x0[pair][y]; b = g_dp_owe.x1[pair][y]; }
+        if (a >= b) continue;
+        a &= ~15; b = (b + 15) & ~15;   /* the store queues' 32-byte bursts; VIDEO_WIDTH is a multiple of 16 */
+        dp_tiles_convert(tiles, bgpen, pair, y, a, b);
+    }
+    g_dp_owe.all[pair] = false;
+    for (int y = 0; y < VIDEO_HEIGHT; y++) g_dp_owe.x0[pair][y] = g_dp_owe.x1[pair][y] = 0;
+    g_dp.lcur = (uint8_t)pair;
 }
 
 /* Tilemap 2 with a per-line H scroll (the title's starfield, #358): redrawn on
@@ -1024,16 +1084,12 @@ static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {
     }
     if (d.full || !s_valid) all = true;
     s_valid = true;
-    if (g_ls.both) return;   /* the CPU layers are tilemap 0's textures */
-    const uint16_t *bgpen = g_ls.on ? g_dp.pen1555 : g_dp.pen565;
-    if (all) {
-        memset(g_dp_pen_used, 0, sizeof g_dp_pen_used);
-        for (int y = DC_VIEW_Y; y < DC_VIEW_Y + DC_VIEW_H; y++)
-            dp_tiles_convert(tiles, bgpen, y, DC_VIEW_X, DC_VIEW_X + DC_VIEW_W);
-    } else if (redraw && d.count) {
-        for (int y = 0; y < VIDEO_HEIGHT; y++)
-            if (x0[y] < x1[y]) dp_tiles_convert(tiles, bgpen, y, x0[y], x1[y]);
+    if (g_ls.both) {   /* the CPU layers are tilemap 0's textures, pair 0: the next CPU frame goes into pair 1 */
+        g_dp.lcur = 0;
+        return;
     }
+    const uint16_t *bgpen = g_ls.on ? g_dp.pen1555 : g_dp.pen565;
+    if (all || (redraw && d.count)) dp_tiles_send(tiles, bgpen, all, x0, x1);
 }
 
 /* ---- The 3D scene ------------------------------------------------------------------ */
@@ -1635,7 +1691,7 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     if (g_ls.on)
         dp_ls_strips(&g_ls.t2, PVR_LIST_OP_POLY, g_ls.t2.back, PVR_TXRFMT_RGB565, true, 1.0e-4f);
     else
-        dp_layer(PVR_LIST_OP_POLY, g_dp.bg, PVR_TXRFMT_RGB565, true, 1.0e-4f);
+        dp_layer(PVR_LIST_OP_POLY, g_dp.lbg[g_dp.lcur], PVR_TXRFMT_RGB565, true, 1.0e-4f);
     uint32_t state = 0;
     for (int k = 0; k < n; k++) {
         int t = (int)g_dp_order[0][k];
@@ -1646,7 +1702,7 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     if (g_ls.both)   /* tilemap 0 behind the 3D: over the strips only */
         dp_ls_strips(&g_ls.t0, PVR_LIST_TR_POLY, g_ls.t0.back, PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
     else if (g_ls.on)   /* tilemaps 1 and 0 */
-        dp_layer(PVR_LIST_TR_POLY, g_dp.bg, PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
+        dp_layer(PVR_LIST_TR_POLY, g_dp.lbg[g_dp.lcur], PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
     state = 0;
     for (int k = 0; k < n; k++) {
         int t = (int)g_dp_order[0][k];
@@ -1655,7 +1711,7 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     if (g_ls.on && g_ls.t2.front_cells)
         dp_ls_strips(&g_ls.t2, PVR_LIST_TR_POLY, g_ls.t2.front, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
     if (!g_ls.both)
-        dp_layer(PVR_LIST_TR_POLY, g_dp.fg, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
+        dp_layer(PVR_LIST_TR_POLY, g_dp.lfg[g_dp.lcur], PVR_TXRFMT_ARGB1555, true, 1.0e3f);
     else if (g_ls.t0.front_cells)
         dp_ls_strips(&g_ls.t0, PVR_LIST_TR_POLY, g_ls.t0.front, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
     if (DC_VX0 > 0.0f) {
