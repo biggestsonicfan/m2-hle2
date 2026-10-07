@@ -1185,6 +1185,64 @@ that. Nothing was implemented, and the picture is unchanged: the default
 build with the switch present matches 940211b in `.text` and `.data`,
 and `.rodata` differs only in the version string.
 
+### g_dp_ramp's misses by kind (#549, at 797dd49)
+
+HEAD had not moved from #547's 797dd49. The default baseline, every switch
+off, matched: 14060 | 5226 / 8769 | 453 / 7040 / 217 / 1046 | 634d853f.
+
+The layout is as recorded: `g_dp_ramp` is 1024 entries of 28 bytes (28 KB),
+direct-mapped, slot `((k0 * 2654435761) ^ (k1 * 40503)) >> 22 & 1023`, key
+(`gen_lut | 1`, k0 = colour | level << 15 | trans << 23 | 1 << 24, k1 = luma
+base). A hit also needs a pool bank to still hold its pens (`pkey`, used
+this frame or the last), so a slot that still has the key can miss too.
+
+`make RAMPCOUNT=1` (`DC_RAMP_COUNT`, off by default and compiled out, not
+combined with a stop switch) counts frames 3500-3900: every lookup, and on
+each miss, before the walk, which kind it is. A 96 KB set of every key
+missed since F0 (calloc'd at F0, after the frame-1500 hash and the boot's
+cache sizing) tells a compulsory miss (key new to the window) from a
+replacement (key seen, its slot since taken by another). A seen key under
+an older `gen_lut` counts as stale-lut; a slot that still holds the key
+counts as pool. The walk runs as ever and the picture is untouched. The
+default build matches 797dd49 in `.text`, `.data` and `.bss`, and `.rodata`
+differs only in the 7-character version string.
+
+| frames 3500-3900 | total | sl / dr | ti / sc / so / su | hash |
+|---|---|---|---|---|
+| 797dd49, default | 14060 | 5226 / 8769 | 453 / 7040 / 217 / 1046 | 634d853f |
+| RAMPCOUNT=1 | 14094 | 5202 / 8828 | 449 / 7117 / 208 / 1040 | 634d853f |
+
+The count build is 34 ms (0.24%) slower, which is the counter's own cost.
+That cost is not taken off the 738. (A first version probed its set by the
+products' low bits, built long chains and cost 269 ms. It gave the same
+counts, but it was over the 1% line, so it was not used.)
+
+| lookups | hits | misses | unique keys | compulsory | replacement | stale-lut | pool |
+|---|---|---|---|---|---|---|---|
+| 360,427 | 296,385 (82.2%) | 64,042 | 2,094 | 2,094 | **61,948** (96.7%) | 0 | 0 |
+
+| the 738 ms walk, by miss kind | ms |
+|---|---|
+| replacement, 738 × 61,948 / 64,042 | **714** |
+| compulsory, 738 × 2,094 / 64,042 | 24 |
+
+**Verdict: the misses are evictions, not new keys.** The window uses 2,094
+distinct keys, all new to it once, against `g_dp_ramp`'s 1,024 slots: twice
+what the cache can hold, so no layout of 1,024 entries keeps them. Each key
+is missed again about 30 times. `gen_lut` never changed inside the window,
+and no pool bank went stale under a key still in its slot. A RAM cache that
+holds all 2,094 without conflict, built in the frame from luma RAM and
+colorxlat as this one is and not read from GD-ROM, would replace the walk
+for the 61,948 replacements (714 ms) and leave the 2,094 compulsory walks
+(24 ms). That means set-associative at 4,096 entries (112 KB at 28 bytes), or
+a direct map big enough that 2,094 keys rarely share a slot. A
+4,096-entry direct map at half load would still evict, by an amount this
+pin did not count. Two things this count cannot say: how many of those keys
+point at a pool bank, which a longer-lived entry could find taken (counted
+as pool, with a walk), and what the bigger table's BSS does to the page
+cache, whose size `dc_boot_cache_size` picks from free heap at boot.
+Nothing was implemented.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's

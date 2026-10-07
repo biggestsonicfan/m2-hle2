@@ -432,11 +432,13 @@ static struct { uint32_t lut, k0, k1, base, off, pkey; uint8_t pal; } g_dp_ramp[
  * pool miss (the slot still holds the key, its pool bank was taken). The walk
  * runs as ever; nothing here reaches the picture. */
 enum { DC_RC_LOOK, DC_RC_MISS, DC_RC_COMP, DC_RC_REPL, DC_RC_LUT, DC_RC_POOL, DC_RC_FULL, DC_RCS };
-static struct { uint32_t on, cap, n[DC_RCS]; uint32_t (*set)[3]; } g_rc;
+static struct { uint32_t on, cap, shift, n[DC_RCS]; uint32_t (*set)[3]; } g_rc;
 
 static void dc_rc_start(void) {
-    for (uint32_t cap = 1u << 17; cap >= 1u << 12 && !g_rc.set; cap >>= 1)
-        if ((g_rc.set = calloc(cap, sizeof *g_rc.set))) g_rc.cap = cap;
+    /* 8192 entries (96 KB) hold 6144 keys, three times what the bench has; a
+     * bigger set only spreads the probes over more cache lines. */
+    for (uint32_t cap = 1u << 13, sh = 19; cap >= 1u << 12 && !g_rc.set; cap >>= 1, sh++)
+        if ((g_rc.set = calloc(cap, sizeof *g_rc.set))) g_rc.cap = cap, g_rc.shift = sh;
     memset(g_rc.n, 0, sizeof g_rc.n);
     g_rc.on = g_rc.set != NULL;
 }
@@ -445,7 +447,7 @@ static void dc_rc_start(void) {
 static void dc_rc_miss(uint32_t lut, uint32_t k0, uint32_t k1, bool same) {
     g_rc.n[DC_RC_MISS]++;
     if (same) { g_rc.n[DC_RC_POOL]++; return; }
-    uint32_t i = ((k0 * 2654435761u) ^ (k1 * 2246822519u)) & (g_rc.cap - 1u);
+    uint32_t i = ((k0 * 2654435761u) ^ (k1 * 2246822519u)) >> g_rc.shift;  /* the product's high bits */
     for (uint32_t probe = 0; probe < g_rc.cap; probe++, i = (i + 1u) & (g_rc.cap - 1u)) {
         uint32_t *e = g_rc.set[i];
         if (!e[0]) {   /* lut is odd (| 1), so 0 is an empty entry */
