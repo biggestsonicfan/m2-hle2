@@ -633,6 +633,37 @@ That is still short of 30. The rest has to come from the 3D (scan and decode
 is 6438 of the 17262 ms): per-face FTRV for the normal and light, FIPR for the
 dot products, and per-face attribute bits worked out once at mesh build.
 
+### Where the software pager stands (#533, at ef71553)
+
+Pin #533 asked for this section's plan again, from b35 (bbd7f8f). It was
+already on the branch: the pager has run with the MMU off since cf18d60 (#443,
+b36 above), and the 3D has read each mesh's polygon data from a file built with
+the disc since STRIPS.PAK (#498). Nothing in `dreamcast/` sets MMUCR.AT any
+more, so the bench was taken again and nothing was changed.
+
+| build | 400 frames | fps | sl / dr | ti / sc / so / su | page loads |
+|---|---|---|---|---|---|
+| b35, MMU on, Flycast's default charge | 25194 ms | 15.9 | 12879 / 12162 | 688 / 9046 / 524 / 1753 | |
+| b35, MMU on, charge at 2 cycles | 16050 ms | 24.9 | 7832 / 8150 | 438 / 6017 / 336 / 1298 | |
+| ef71553, MMU off | 14049 ms | 28.5 | 5196 / 8798 | 459 / 7061 / 208 / 1056 | 567 (cd 280, da 56, sp 218) |
+
+The ef71553 disc: full HUD, `FPS_CAP=0`, `HASH_FRAME=1500`, AOT 0.99, Gems C,
+`HOST_MATH=1`, STRIPS.PAK, TEXTURES.PAK, STF.AFS, PS3 files; Flycast's libretro
+core under RetroArch. The frame-1500 hash is 634d853f, as #509 and #530 had it
+(b35's 88ddb134 predates the `HOST_MATH` and audit changes). With the MMU off
+the two clocks the pin asked for are one number: Flycast charges a block's
+first memory ops `mmu_enabled() ? 5 : 2` cycles (`sh4_cycles.cpp`), so the
+penalty is never applied. The figures are Flycast's, which bills polygon bytes
+(`scheduleRenderDone`), not pixels: not a Dreamcast's fps.
+
+**What is left to 30** (13333 ms for the 400 frames, 716 ms off this run):
+the draw is 8798 ms against the slice's 5196, and the 3D scan alone is 7061 ms,
+half the frame. That is the transform, cull, light and per-face work over the
+packed meshes, then the sort and the TA submit (1264 ms together). The pager
+costs little here (567 loads, the strip pack's 218 among them), and the slice
+is mostly Gems' C, the hooks and the COP. So the remainder is the 3D path's
+per-face arithmetic, the next pin's work.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
