@@ -38,6 +38,14 @@
 #define GEO3D_LAP_N(p, cnt) ((void)0)
 #endif
 #define GEO3D_LAP(p) GEO3D_LAP_N(p, 1)
+/* Counters of the Dreamcast's face loop's branches (dc_scansplit.h, make FACECOUNT=1). */
+#ifndef GEO3D_FC
+#define GEO3D_FC(k)        ((void)0)
+#define GEO3D_FC_IF(k, c)  ((void)0)
+#define GEO3D_FCI(k)       ((void)0)
+#define GEO3D_FCI_N(k, c)  ((void)0)
+#define GEO3D_FC_ON(v)     ((void)0)
+#endif
 
 /* ---- Capacities ---------------------------------------------------------- */
 
@@ -3314,6 +3322,8 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
     const int dcv = gone ? -1 : geo3d_dc_verts(tv, m->n_sv);
     GEO3D_LAP(PROJ);
     const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
+    GEO3D_FC(MODELS);
+    GEO3D_FC_ON(1u);
 #if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
     /* The same walk over a packed mesh's faces (geo3d_strips_load). */
     for (int n = 0; m->sfaces && n < m->n_faces; n++) {
@@ -3323,41 +3333,60 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         __builtin_prefetch((const char *)(f + 2) + 32);
         const bool is_tri = (f->bits & GEO3D_SF_TRI) != 0;
         const int zsrc[4] = { f->zsrc[0], f->zsrc[1], f->zsrc[2], f->zsrc[3] };
+        GEO3D_FC(IN);
+        GEO3D_FC_IF(ZC, flat && (f->zmode == 1u || f->zmode == 2u));
         const float z = flat ? geo3d_flat_z(tv, zsrc, f->zmode) : 0.0f;
-        if (is_tri && !(f->bits & GEO3D_SF_HAS_C)) continue;
+        if (is_tri && !(f->bits & GEO3D_SF_HAS_C)) { GEO3D_FC(NOC); continue; }
         bool out = false;
         if (cull)
             out = (oc[f->ai] & oc[f->bi] & oc[f->ci] & (is_tri ? 0xFFu : oc[f->di])) != 0;
-        if (out && is_tri) continue;
+        if (out && is_tri) { GEO3D_FC(OTRI); continue; }
         geo3d_lit_t lt;
         if (geo3d_board_cull(matrix, f->qn, (f->bits & GEO3D_SF_HAS_QN) ? f->qa : 0u, true,
-                             tv[f->ai], tv[f->bi], tv[f->ci], &lt)) continue;
-        if (out || dcv < 0) { if (!is_tri) geo3d_split_other_way(f->split_quad, f->split_cut); continue; }
+                             tv[f->ai], tv[f->bi], tv[f->ci], &lt)) { GEO3D_FC(REAR); continue; }
+        if (out || dcv < 0) {
+            GEO3D_FC_IF(GONE, dcv < 0); GEO3D_FC_IF(OUTQ, dcv >= 0);
+            if (!is_tri) geo3d_split_other_way(f->split_quad, f->split_cut);
+            continue;
+        }
         float fr = cr, fg = cg, fb = cb;
+        GEO3D_FC_IF(MAT, f->bits & GEO3D_SF_MAT_OK);
         if (f->bits & GEO3D_SF_MAT_OK) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
+        GEO3D_FC_IF(SPEC, g_geo3d_mode & 1u);
         const float pl = geo3d_board_luma(&lt);
         const int cut = is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
+        GEO3D_FC(SUB); GEO3D_FC_IF(TRI, is_tri); GEO3D_FC_IF(CUT1, cut == 1);
         geo3d_dc_sface(dcv, f, m->strips + f->strip, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
 #endif
     for (int n = 0; m->faces && n < m->n_faces; n++) {
         const geo3d_cface_t *f = &m->faces[n];
+        GEO3D_FC(IN); GEO3D_FC(UNP);
+        GEO3D_FC_IF(ZC, flat && (f->zmode == 1u || f->zmode == 2u));
         const float z = flat ? geo3d_flat_z(tv, f->zsrc, f->zmode) : 0.0f;
-        if (f->is_tri && !f->has_c) continue;
+        if (f->is_tri && !f->has_c) { GEO3D_FC(NOC); continue; }
         bool out = false;
         if (cull)
             out = (oc[f->ai] & oc[f->bi] & oc[f->ci] & (f->is_tri ? 0xFFu : oc[f->di])) != 0;
-        if (out && f->is_tri) continue;
+        if (out && f->is_tri) { GEO3D_FC(OTRI); continue; }
         geo3d_lit_t lt;
         if (geo3d_board_cull(matrix, f->qn, f->has_qn ? f->qa : 0u, true,
-                             tv[f->ai], tv[f->bi], tv[f->ci], &lt)) continue;
-        if (out || dcv < 0) { if (!f->is_tri) geo3d_split_other_way(f->split_quad, f->split_cut); continue; }
+                             tv[f->ai], tv[f->bi], tv[f->ci], &lt)) { GEO3D_FC(REAR); continue; }
+        if (out || dcv < 0) {
+            GEO3D_FC_IF(GONE, dcv < 0); GEO3D_FC_IF(OUTQ, dcv >= 0);
+            if (!f->is_tri) geo3d_split_other_way(f->split_quad, f->split_cut);
+            continue;
+        }
         float fr = cr, fg = cg, fb = cb;
+        GEO3D_FC_IF(MAT, f->mat_ok);
         if (f->mat_ok) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
+        GEO3D_FC_IF(SPEC, g_geo3d_mode & 1u);
         const float pl = geo3d_board_luma(&lt);
         const int cut = f->is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
+        GEO3D_FC(SUB); GEO3D_FC_IF(TRI, f->is_tri); GEO3D_FC_IF(CUT1, cut == 1);
         geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
+    GEO3D_FC_ON(0u);
     GEO3D_LAP_N(FACES, m->n_faces);
 }
 #endif

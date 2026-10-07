@@ -1228,6 +1228,11 @@ static inline void dp_face_col(float r, float g, float b, float lb, float pl, bo
         g_dp_memo.c = (dp_col_in_t){ r, g, b, lb, pl };
         g_dp_memo.ctex = ctex;
         g_dp_memo.ctrans = ctrans;
+        GEO3D_FCI(CMISS);
+        if (!ctex) { if (lb < 0.0f) GEO3D_FCI(C_UL); else GEO3D_FCI(C_US); }
+        else if (lb < 0.0f) GEO3D_FCI(C_TL);
+        else if (!g_dp_pal_on) GEO3D_FCI(C_RAMP);
+        else GEO3D_FCI(C_PAL);
         dp_face_colour(g_dp_bus, &g_dp_memo.c, ctex, ctrans, &g_dp_memo.base, &g_dp_memo.off, &g_dp_memo.pal);
     }
 }
@@ -1237,7 +1242,7 @@ static inline void dp_face_col(float r, float g, float b, float lb, float pl, bo
  * key the board's flat key or < 0 for the nearest corner's. */
 static inline void dp_tri_put(int a, int b, int c, const float *u, const float *v, int i, int j, int k,
                               unsigned kind, unsigned var, dc_tex_t *tex, int32_t key) {
-    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
+    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; GEO3D_FCI(DROP); return; }
     const int t = g_dcf_n++;
     dcf_t *F = &g_dcf[t];
     const dcv_t *A = &g_dcv[a], *B = &g_dcv[b], *C = &g_dcv[c];
@@ -1247,6 +1252,7 @@ static inline void dp_tri_put(int a, int b, int c, const float *u, const float *
     bool in = A->z <= -DC_NEAR && B->z <= -DC_NEAR && C->z <= -DC_NEAR && (!DP_WCLIP || P->x0 < -1.0e29f ||
               (fminf(fminf(A->sx, B->sx), C->sx) >= P->x0 && fmaxf(fmaxf(A->sx, B->sx), C->sx) <= P->x1 &&
                fminf(fminf(A->sy, B->sy), C->sy) >= P->y0 && fmaxf(fmaxf(A->sy, B->sy), C->sy) <= P->y1));
+    GEO3D_FCI_N(CLIP, !in);
     F->kind = (uint8_t)(kind | (in ? 0u : DCF_CLIP));
     F->var  = (uint8_t)var;
     F->tex  = tex;
@@ -1285,7 +1291,7 @@ static void geo3d_dc_tri(int a, int b, int c, float ua, float va, float ub, floa
 }
 
 static void geo3d_dc_face(int v0, const geo3d_cface_t *F, int cut, float r, float g, float b, float pl, int32_t key) {
-    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
+    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; GEO3D_FCI(DROP); return; }
     unsigned f = (unsigned)(F->fl + 0.5f);
     float tx = F->tx, ty = F->ty, tw = F->tw, th = F->th;
     const float *uu = F->uvu, *vv = F->uvv;
@@ -1316,6 +1322,7 @@ static void geo3d_dc_face(int v0, const geo3d_cface_t *F, int cut, float r, floa
  * cuts it; the memo holds the last. */
 static inline dc_tex_t *dp_tex_key(uint32_t key) {
     if (key == g_dp_memo.skey) return g_dp_memo.stex;
+    GEO3D_FCI(TMISS);
     dc_tex_t *tex = dp_tex_get(g_dp_bus, (float)((key >> 18) & 2047u), (float)((key >> 8) & 1023u),
                                (float)(1u << ((key >> 4) & 15u)), (float)(1u << (key & 15u)),
                                (key >> 29) & 1u ? GEO3D_FACE_SHEET1 : 0u);
@@ -1329,7 +1336,7 @@ static inline dc_tex_t *dp_tex_key(uint32_t key) {
  * record, its key the nearest of the four. */
 static inline void dp_strip_put(int v0, const geo3d_sface_t *F, const geo3d_svert_t *s, const int *o, int n,
                                 unsigned kind, unsigned var, dc_tex_t *tex, int32_t key) {
-    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
+    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; GEO3D_FCI(DROP); return; }
     const int t = g_dcf_n++;
     dcf_t *R = &g_dcf[t];
     const int c[4] = { v0 + F->ai, v0 + F->bi, v0 + F->ci, v0 + F->di };
@@ -1346,6 +1353,7 @@ static inline void dp_strip_put(int v0, const geo3d_sface_t *F, const geo3d_sver
         y0 = fminf(y0, V->sy); y1 = fmaxf(y1, V->sy);
     }
     in = in && (!DP_WCLIP || P->x0 < -1.0e29f || (x0 >= P->x0 && x1 <= P->x1 && y0 >= P->y0 && y1 <= P->y1));
+    GEO3D_FCI_N(CLIP, !in);
     R->run  = (uint8_t)g_dp_cur_run;
     R->kind = (uint8_t)(kind | (n == 4 ? DCF_QUAD : 0u) | (in ? 0u : DCF_CLIP));
     R->var  = (uint8_t)var;
@@ -1361,7 +1369,7 @@ static inline void dp_strip_put(int v0, const geo3d_sface_t *F, const geo3d_sver
  * packed, a quad one record (cut 1: A B C D, cut 2: B A D C). */
 static void geo3d_dc_sface(int v0, const geo3d_sface_t *F, const geo3d_svert_t *s, int cut,
                            float r, float g, float b, float pl, int32_t key) {
-    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; return; }
+    if (g_dcf_n >= GEO3D_MAX_TRIS) { g_dp.faces_dropped++; GEO3D_FCI(DROP); return; }
     const unsigned f = F->fl;
     const bool textured = (F->bits & GEO3D_SF_TEXTURED) != 0;
     dc_tex_t *tex = F->tex ? dp_tex_key(F->tex) : NULL;

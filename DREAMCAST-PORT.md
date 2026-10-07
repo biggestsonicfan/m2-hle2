@@ -699,6 +699,86 @@ about 4.1 µs of Dreamcast time a face). A later cut of about 700 ms would be
 14% of it. The face loop is the only part over 700 ms. The next largest
 are 448 ms each.
 
+### The face loop by branch (#537, at 938f675)
+
+938f675 is #535's 3e042a1 plus the SCANSPLIT marks (PR #242, off by default).
+A fresh baseline of the unmodified 938f675 disc (SCANSPLIT=0) on frames
+3500-3900 is #535's to the millisecond: 14049 ms, sl 5196 / dr 8798,
+ti 459 / sc 7061 / so 208 / su 1056, 567 page loads, frame-1500 hash 634d853f.
+
+The face loop of `geo3d_cached_draw_dc` is one fused iteration, not several
+passes. Each face goes through the flat key, the window test, the board cull,
+the light, the diagonal and the submit in one pass, then the loop moves to the
+next face. A lap mark between passes is therefore not possible, and a TMU2 read
+per face would cost more than the ~800 ms being looked for. So this split is
+counters only: `make FACECOUNT=1` (`dreamcast/dc_scansplit.h`, off by default)
+adds one to a counter at each branch the loop already has, and prints the
+totals over frames 3500-3900 on the HUD.
+
+The default build (`FACECOUNT=0`) has the same instructions as 938f675; only
+the version string in .rodata differs, and it benches the same, every number
+and the hash alike. The counted build keeps hash 634d853f.
+It reads 14314 ms (+265 ms, sc 7307, +246): that is the cost of the
+increments. The counts do not depend on timing. Every face the loop enters
+is counted in exactly one of drop-before-cull, rear, out-of-window quad and
+submitted, and those four add up to the faces entered.
+
+| counter | over 400 frames | a frame | of faces entered | of faces submitted |
+|---|---|---|---|---|
+| models drawn by the loop | 32,723 | 81.8 | | |
+| faces entered | 1,216,211 | 3040.5 | 100% | |
+| ...through the unpacked loop | 0 | 0 | 0% | |
+| ...whose flat key compares corners (z mode 1/2) | 1,216,211 | 3040.5 | 100% | |
+| triangle without C, skipped | 0 | 0 | 0% | |
+| triangle out of the window, skipped before the cull | 47,699 | 119.2 | 3.9% | |
+| dropped by the board cull (rear or link type 0) | 373,009 | 932.5 | 30.7% | |
+| quad out of the window, dropped after the cull | 141,684 | 354.2 | 11.6% | |
+| model wholly out (`gone`), dropped after the cull | 0 | 0 | 0% | |
+| **submitted** | **653,819** | **1634.5** | **53.8%** | 100% |
+| ...triangles | 156,931 | 392.3 | 12.9% | 24.0% |
+| ...palette colour (`geo3d_palette_color`) | 653,819 | 1634.5 | 53.8% | 100% |
+| ...specular (mode bit 0) | 509,802 | 1274.5 | 41.9% | 78.0% |
+| ...quad cut the other way | 1,636 | 4.1 | 0.1% | 0.3% |
+| ...colour memo missed (`dp_face_colour`, out of line) | 351,830 | 879.6 | 28.9% | 53.8% |
+| ......untextured, shaded | 951 | 2.4 | | 0.1% |
+| ......ramp | 350,879 | 877.2 | 28.9% | 53.7% |
+| ......untextured lb<0, textured lb<0, palette | 0 | 0 | | 0% |
+| ...texture key missed (`dp_tex_get`) | 32,586 | 81.5 | 2.7% | 5.0% |
+| ...strip clipped by the window | 772 | 1.9 | 0.1% | 0.1% |
+| ...dropped at `GEO3D_MAX_TRIS` | 0 | 0 | 0% | 0% |
+
+The loop's steps in source order (packed loop; every face went through it):
+
+1. prefetch the face two ahead;
+2. triangle or quad, the four z sources;
+3. the flat key, `geo3d_flat_z` (z mode 1/2 compares corners);
+4. a triangle without C is skipped;
+5. the window test, the AND of the corners' outcodes;
+6. a triangle out of the window is skipped;
+7. `geo3d_board_cull`: the normal (`geo3d_board_normal`), N·L and N·P, and
+   the rear / link-type-0 drop;
+8. out of the window or `gone`: a quad records its diagonal
+   (`geo3d_split_other_way`) and is skipped;
+9. `geo3d_palette_color`;
+10. `geo3d_board_luma`, with specular when mode bit 0 is set;
+11. the diagonal, `geo3d_split_other_way`;
+12. `geo3d_dc_sface`: `dp_tex_key` (memo, else `dp_tex_get`), `dp_face_col`
+    (memo, else `dp_face_colour`), `dp_strip_put` (min z, bounding box,
+    clip flag, sort key);
+13. the key, `geo3d_board_zkey`.
+
+The submitted branch (steps 9-13) is the one large enough. It runs for 653,819
+faces, 53.8% of those entered, and it is the only branch that does any work
+after the cull. ~800 ms from it is 1.22 µs a submitted face. The average face
+in the loop takes 4.13 µs. The faces the loop throws away (562,392) stop at or
+before the cull. To give 800 ms they would have to cost 1.42 µs each, and rear
+faces alone 2.14 µs each. These are counts, not timings: no time was read
+inside the loop. Within the submitted branch, the largest sub-branch by count
+is the colour memo's miss: 351,830 out-of-line calls to `dp_face_colour`, all
+but 951 by the ramp path. No rare branch is large. The unpacked loop, a
+triangle without C, `gone`, palette colour misses and `GEO3D_MAX_TRIS` drops
+never happen, and only 772 faces are clipped.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's

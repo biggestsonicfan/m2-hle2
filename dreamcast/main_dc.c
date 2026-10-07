@@ -774,6 +774,26 @@ static void dc_split_bench(bool f0) {
 static inline void dc_split_bench(bool f0) { (void)f0; }
 #endif
 
+#if DC_FACE_COUNT
+/* The face loop's branch counts over the bench (dc_scansplit.h): f0 snapshots
+ * them at F0, then the report puts each branch's count over the picture, five
+ * a row (rows 7-11), in the enum's order. */
+static void dc_fc_bench(bool f0) {
+    static uint32_t n0[DC_FCS];
+    static char rows[5][80];
+    if (f0) { memcpy(n0, g_fc.n, sizeof n0); return; }
+    for (int r = 0; r < 5; r++) {
+        int at = 0;
+        for (int i = r * 5; i < r * 5 + 5 && i < DC_FCS; i++)
+            at += snprintf(rows[r] + at, sizeof rows[r] - (size_t)at, "%d:%lu ", i, (unsigned long)(g_fc.n[i] - n0[i]));
+        printf("%s\n", rows[r]);
+        dp_text(7 + r, rows[r]);
+    }
+}
+#else
+static inline void dc_fc_bench(bool f0) { (void)f0; }
+#endif
+
 /* A slice ran t0..t1: start the bench at F0, count its slices, report at F1. */
 static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
     static dc_bench_t b;
@@ -785,10 +805,11 @@ static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
         b.t0 = t0; b.d0 = s->us_dall; b.n0 = (uint32_t)s->n_drawn; memcpy(b.p0, p, sizeof p); memcpy(b.g0, g, sizeof g);
         b.tx0 = g_dp.tt_tex; b.rd0 = g_pg.tx_reads; b.dr0 = g_pg.reads; b.sk0 = g_pg.seeks; b.sp0 = g_pg.sp_loads;
         dc_split_bench(true);
+        dc_fc_bench(true);
     }
     if (!b.t0 || b.line[0]) return;
     b.sl += t1 - t0;
-    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); }
+    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); dc_fc_bench(false); }
 }
 
 /* ---- The 2-s stats --------------------------------------------------------------- */
