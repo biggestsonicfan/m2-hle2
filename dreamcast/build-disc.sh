@@ -341,7 +341,7 @@ zip_disc() {
 
 # test_disc IMAGE: Flycast's libretro core on a private Xvfb, a screenshot at the end.
 test_disc() {
-    local img=$1 r port pid
+    local img=$1 r port pid xpid disp
     r=$(dirname "$img")/../run-$(basename "$(dirname "$img")")
     wipe "$r"; mkdir -p "$r/sys" "$r/snap"
     port=$(python3 -c 'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
@@ -351,13 +351,15 @@ test_disc() {
         'network_cmd_enable = "true"' "network_cmd_port = \"$port\"" > "$r/retroarch.cfg"
     echo 'reicast_hle_bios = "enabled"' > "$r/opts.cfg"
     say "Booting $(basename "$img") in Flycast for $DCB_TEST_SECS s"
-    (cd "$r" && exec xvfb-run -a -s "-screen 0 1024x768x24" retroarch --config "$r/retroarch.cfg" \
-        -L "$FLYCAST_CORE" "$img" > "$r/ra.log" 2>&1) &
+    # Xvfb of our own (xvfb-run leaves its server behind when retroarch is killed).
+    exec 3< <(exec Xvfb -displayfd 1 -screen 0 1024x768x24 -nolisten tcp 2>/dev/null)
+    xpid=$!; read -r disp <&3; exec 3<&-
+    (cd "$r" && DISPLAY=:$disp exec retroarch --config "$r/retroarch.cfg" -L "$FLYCAST_CORE" "$img" > "$r/ra.log" 2>&1) &
     pid=$!
     sleep "$DCB_TEST_SECS"
     echo -n SCREENSHOT | python3 -c "import socket,sys;socket.socket(socket.AF_INET,socket.SOCK_DGRAM).sendto(sys.stdin.buffer.read(),('127.0.0.1',$port))"
     sleep 3
-    pkill -f "retroarch --config $r/" || true; wait "$pid" 2>/dev/null || true
+    kill "$pid" "$xpid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
     SHOT=$(ls "$r"/snap/*.png 2>/dev/null | head -1)
     [ -n "$SHOT" ] || { warn "no screenshot from Flycast ($r/ra.log)"; return 0; }
     cp "$SHOT" "$OUT/$(basename "$(dirname "$img")").png"; SHOT="$OUT/$(basename "$(dirname "$img")").png"
