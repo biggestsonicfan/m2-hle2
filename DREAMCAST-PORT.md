@@ -983,6 +983,68 @@ the z-key. It was not opened here. The lookups (1426 ms, #541) can be split
 by a skip; a fused strip put cannot. So the next pin splits the lookups, not
 the strip put.
 
+### Step 12's lookups: texture against colour (#544, at f52431b)
+
+HEAD was f52431b (#542's ZKEYSTOP doc commit, PR #248), unmoved. The default
+baseline, every switch off, matched the default row in every number and the
+hash.
+
+The two lookups are separate in the source. `geo3d_dc_sface` calls
+`dp_tex_key(F->tex)` first, which returns the memo on a hit and calls
+`dp_tex_get` on a miss. It then calls `dp_face_col`, the colour memo compare,
+which calls `dp_face_colour` on a miss, and then `dp_strip_put`. `dp_face_col`
+takes only whether a texture was found, not the pointer, and no colour is
+worked out inside the texture call.
+
+`make COLOURSTOP=1` (`GEO3D_COLOURSTOP`, geo3d.h, off by default, not combined
+with the other switches) runs a drawn face through the texture lookup alone:
+`dp_tex_key` for a packed face, and `dp_big_window` + `dp_face_tex` for an
+unpacked one. It then stops: no `dp_face_col` / `dp_face_colour`, strip put or
+`geo3d_board_zkey`. The face's colour, luma, texture LOD, cut and the texture
+pointer the lookup returned (hit or miss) go into the running xor, which is
+stored to the volatile once per model. Proof from `dp_decode`'s disassembly
+against the default build:
+
+- `dp_tex_get` is still called twice, once in each loop. The packed loop's
+  memo compare (`cmp/eq` against `g_dp_memo` +24, `8c0402a2`) reads +28 on a
+  hit and calls `dp_tex_get` on a miss, storing both words back. The unpacked
+  loop keeps its float compares against the memo ahead of its call.
+- `dp_face_colour` is not referenced in `dp_decode`, against twice in the
+  default build. The one reference left in the binary is in
+  `geo3d_emit_tri_uv`, which the uncached decoders call
+  (`geo3d_decode_direct` / `_model`), as in the default build.
+- `dp_decode` has no reference to `g_dcf` or `g_dcf_key`, against one each in
+  the default build.
+- The colour (r, g, b) and luma words, the LOD, the cut and the texture
+  pointer are xored into the running word at `8c03f7fc`-`8c03f810`.
+- The function goes from 13652 to 12864 bytes.
+
+| frames 3500-3900, SH-4 timer time | total | sl / dr | ti / **sc** / so / su | hash |
+|---|---|---|---|---|
+| f52431b, default | 14060 | 5226 / 8769 | 453 / **7040** / 217 / 1046 | 634d853f |
+| f52431b, COLOURSTOP=1 | 9813 | 5201 / 4563 | 461 / **3996** / 41 / 57 | 634d853f |
+| a351476, STRIPSTOP=1 (#541) | 11164 | 5235 / 5871 | 453 / **5311** / 41 / 57 | 634d853f |
+| 3a45608, TAILHALF=1 (#540) | 9705 | 5207 / 4454 | 463 / **3885** / 41 / 59 | 634d853f |
+
+- **Texture lookup** (`dp_tex_key`, `dp_tex_get` on a miss) =
+  3996 − 3885 = **111 ms**
+- **Colour lookup** (`dp_face_col`, `dp_face_colour` on a miss) =
+  5311 − 3996 = **1315 ms**
+- The sum is 1426 ms, #541's lookups. Both halves are taken from the same
+  COLOURSTOP figure, so the sum is exact by construction. What it does show
+  is that sc landed between the bounds. 3996 is above TAILHALF's 3885, so the
+  texture lookup ran and steps 9-11 were not deleted. It is below STRIPSTOP's
+  5311, so neither the colour lookup, the strip put nor the z-key ran.
+
+so / su fell to 41 / 57, as in any build that queues nothing. They are not in
+the subtraction. Nothing is drawn, so the picture is wrong, as intended. The
+frame-1500 hash stays 634d853f because it is board state, and it proves
+nothing here.
+
+**Verdict: the colour lookup is the half over 800 ms.** It is 1315 ms, against
+111 ms for the texture lookup. It was not opened here. The next pin can skip
+`dp_face_colour` and keep the memo hit.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
