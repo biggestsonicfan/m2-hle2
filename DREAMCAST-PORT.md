@@ -1110,6 +1110,81 @@ the memo hit 284 ms. `dp_face_colour` was not opened here. The next pin may
 split it only if the source already has a tail a skip can cut. The ramp is
 not named from this count.
 
+### Inside dp_face_colour: the ramp walk (#547, at 940211b)
+
+HEAD had not moved from #546's 940211b. The default baseline, every switch
+off, matched in every number and in the hash: 14060 | 5226 / 8769 |
+453 / 7040 / 217 / 1046 | 634d853f.
+
+On STF a miss in `dp_face_col` is nearly always a textured face with a luma
+band. `g_dp_pal_on` is set only for `any_program` homebrew, so
+`dp_face_colour` gives that face to `dp_face_ramp` (dc_pvr.h). #537 counted
+350,879 of the 351,830 misses on that path. `dp_face_ramp` keeps its own RAM
+cache, `g_dp_ramp`: 1024 entries, direct-mapped, keyed by `gen_lut`, the
+face's 5-bit colour, palette level, the trans flag and the luma base. On a
+hit it reads base, offset and bank back. On a miss it walks the ramp: for
+each of 16 texels it reads one luma byte and three colorxlat bytes through
+`g_dp_cx` (`dp_shade`), keeps the largest drop, and picks a bank (`dp_pool_bank`
+for a drop over 16, otherwise `dp_argb` ×2 and `dp_knee_bank`). Then it stores
+the entry.
+
+`make RAMPSTOP=1` (`GEO3D_RAMPSTOP`, off by default, not combined with the
+other switches) runs as STRIPSTOP does: texture and colour lookups, then no
+strip put and no z key. The only difference is that a `g_dp_ramp` miss does
+no walk and picks no bank. It still stores the entry, with the key standing
+in for base and offset and bank 0, so the same faces hit afterwards. Those
+words reach the running xor through the colour memo, as STRIPSTOP's do. A
+pool bank in the default build can fail its validity check later and walk
+again. A stand-in never does, so that small difference lands in the piece.
+Proof from the disassembly against a STRIPSTOP build from the same commit:
+
+- `dp_decode` is instruction-identical: 0x3328 bytes in both builds. The
+  only differing words are literal-pool addresses, and one of them is
+  `dp_face_colour`'s own (8c023ae0 → 8c020160), which the face loop still
+  calls on a memo miss. Palette, luma, light and `g_geo_rs` loads are
+  untouched.
+- `dp_face_colour`, with `dp_face_ramp` inlined, shrinks from 3764 to 2320
+  bytes. It has 21 byte loads against 27 and 10 `shll8` against 14. The
+  `g_dp_ramp` compare and store, and the `!tex` and homebrew palette paths,
+  are still there. `geo3d_emit_tri_uv`'s reference is not in this path.
+
+| frames 3500-3900 | total | sl / dr | ti / **sc** / so / su | hash |
+|---|---|---|---|---|
+| 940211b, default | 14060 | 5226 / 8769 | 453 / **7040** / 217 / 1046 | 634d853f |
+| STRIPSTOP=1, rebuilt here | 11164 | 5235 / 5871 | 453 / **5311** / 41 / 57 | 634d853f |
+| RAMPSTOP=1 | 10385 | 5197 / 5142 | 461 / **4573** / 41 / 58 | 634d853f |
+| FACECOLSTOP=1 (#546) | 10102 | 5200 / 4853 | 467 / **4280** / 41 / 56 | 634d853f |
+
+| piece skipped | ms (sc) | left of the 1031 |
+|---|---|---|
+| `dp_face_ramp`'s walk and bank pick on a `g_dp_ramp` miss | 5311 − 4573 = **738** | 4573 − 4280 = **293** |
+
+The 293 ms that is left covers the call itself, `dp_face_colour`'s prelude
+(c5, poly), the `g_dp_ramp` hash, compare and hit read, and the store.
+
+sc is SH-4 time in the decode, measured on the SH-4's own timer. It is a CPU
+saving, and it shows. The outer check agrees: total falls by 779 ms, dr by
+729 ms, sl by 38 ms and ti rises by 8. so and su are what Flycast bills for
+polygon bytes (scheduleRenderDone). Both STOP builds queue nothing, so those
+stay at 41 / 57 and are not in the subtraction. A PVR or pixel saving would
+not show in any of these numbers.
+
+**Verdict: the ramp walk is 738 ms**, 72% of the 1031 and 5.2% of the
+frame's 14060. That is just over the ~700 ms line. The function is
+`dp_face_ramp`'s miss path. It reads luma RAM (16 bytes from the face's
+luma base, a stride of 8), colorxlat (48 bytes, three channels per texel)
+through the 256-byte `g_dp_cx` level table, and the pool bank table when a
+drop is over 16. The result depends on luma RAM and colorxlat, which the
+game writes as it plays (`gen_lut`), and on the face's colour and its
+per-frame light. So a table made offline and read from GD-ROM cannot
+replace it. A RAM cache of its result already exists, `g_dp_ramp`, and the
+738 ms is spent on its misses. Whether a bigger or set-associative one
+would replace the walk depends on whether the misses are new keys (the
+light moves every frame) or conflict evictions. This pin did not count
+that. Nothing was implemented, and the picture is unchanged: the default
+build with the switch present matches 940211b in `.text` and `.data`,
+and `.rodata` differs only in the version string.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
