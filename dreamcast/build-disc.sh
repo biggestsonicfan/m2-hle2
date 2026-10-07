@@ -11,7 +11,8 @@
 # with KallistiOS (make -C dreamcast), make the GDI and/or the CDI
 # (mkdisc.sh), zip each for burning, boot each in Flycast for a screenshot and
 # put them in the canary folder. Nothing it needs comes from the network but
-# the optional `git fetch`.
+# the optional `git fetch` and, with Gems C on, the first checkout of the
+# vendor/gems-c submodule and its decomp/ (or a new commit of them).
 #
 # Every option is a DCB_<KEY> variable: preset one in the environment to
 # change its default (DCB_FPS_CAP=0 dreamcast/build-disc.sh). The answers are
@@ -143,7 +144,7 @@ ask_program() {
     yes AOT "AOT: the i960 code compiled to SH-4 ahead of time" y
     [ "$DCB_AOT" = 1 ] && ask AOT_COVER "  share of the map compiled (AOT_COVER)" 0.99
     yes GEMS "Gems C: Sega's C from Sonic Gems Collection for the trapped functions and the COP" y
-    [ "$DCB_GEMS" = 1 ] && ask GEMS_DIR "  its folder" "$HOME/source/repos/ai/Sonic Gems Collection/m2hle"
+    [ "$DCB_GEMS" = 1 ] && ask GEMS_PATH "  its folder (empty: the tree's vendor/gems-c submodule)" ""
     yes FRAME512 "FRAME512: a 512x384 frame in the middle of the 640x480 signal" y
     yes FILL "FILL: stretch the board over the whole frame (shape not kept)" n
     ask VIEW "VIEW x,y,w,h: show only that part of the board (empty: all of it)" ""
@@ -194,7 +195,7 @@ ask_dev() {
     ask EXTRA "EXTRA: more compiler flags" ""
 }
 
-ALL_KEYS="REPO REF FETCH RELEASE DISCS GDI_NAME GDI_CANARY CDI_NAME CDI_CANARY AOT AOT_COVER GEMS GEMS_DIR
+ALL_KEYS="REPO REF FETCH RELEASE DISCS GDI_NAME GDI_CANARY CDI_NAME CDI_CANARY AOT AOT_COVER GEMS GEMS_PATH
 FRAME512 FILL VIEW FPS PANEL FPS_CAP HOST_MATH STRIPS PS3 SOUND MODELS TEXPAK REDO_ASSETS DUMMY FAST ZIP
 TEST TEST_SECS CANARY JOBS DEV OPTAB JIT JIT_ON JIT_TEST HASH_FRAME LINK LINK_GEMS SINCOS AOT_MAP IB_POOL EXTRA"
 
@@ -221,7 +222,7 @@ make_args() {
         HUD="$(HUD_ARG)" FPS="$DCB_FPS" HOST_MATH="$DCB_HOST_MATH" STRIPS="$DCB_STRIPS"
         RELEASE="$DCB_RELEASE")
     if [ "$DCB_AOT" = 1 ]; then MAKE_ARGS+=(AOT="$ROMS/rom_code1.bin" AOT_COVER="$DCB_AOT_COVER"); else MAKE_ARGS+=(AOT=); fi
-    if [ "$DCB_GEMS" = 1 ]; then MAKE_ARGS+=(GEMS="$DCB_GEMS_DIR"); else MAKE_ARGS+=(GEMS=); fi
+    if [ "$DCB_GEMS" = 1 ]; then MAKE_ARGS+=(GEMS="$GEMS_DIR"); else MAKE_ARGS+=(GEMS=); fi
     [ "${DCB_DEV:-0}" = 1 ] || return 0
     MAKE_ARGS+=(OPTAB="$DCB_OPTAB" JIT="$DCB_JIT" HASH_FRAME="$DCB_HASH_FRAME" LINK="$DCB_LINK" EXTRA="$DCB_EXTRA")
     [ "$DCB_JIT" = 1 ] && MAKE_ARGS+=(JIT_ON="$DCB_JIT_ON" JIT_TEST="$DCB_JIT_TEST")
@@ -232,11 +233,26 @@ make_args() {
 }
 
 # ---- The steps -------------------------------------------------------------------
+# Gems C: the folder asked for, else the tree's vendor/gems-c submodule (and
+# its own submodule decomp/, which gen_all.py reads), checked out at the
+# commits the tree pins ("here": as they are, if they are there).
+# Sets GEMS_DIR.
+gems_source() {
+    GEMS_DIR=
+    [ "$DCB_GEMS" = 1 ] || return 0
+    GEMS_DIR=${DCB_GEMS_PATH:-$SRC/vendor/gems-c}
+    if [ -z "${DCB_GEMS_PATH:-}" ] && ! { [ "$DCB_REF" = here ] && [ -f "$GEMS_DIR/gems_impl.h" ] &&
+            [ -f "$GEMS_DIR/decomp/SHARC/INDEX.md" ]; }; then
+        git -C "$SRC" submodule update --init --recursive -q vendor/gems-c ||
+            die "could not check out the vendor/gems-c submodule (Gems C) in $SRC"
+    fi
+    [ -f "$GEMS_DIR/gems_impl.h" ] || die "no $GEMS_DIR/gems_impl.h (Gems C)"
+}
+
 check_tools() {
     [ -f "$KOS_ENV" ] || die "no KallistiOS at $KOS_ENV (KOS_ENV=)"
     [ -f "$ROMS/rom_code1.bin" ] || die "no $ROMS/rom_code1.bin (the PS3 release's stf_rom)"
     [ -f "$VENDOR/sokol/sokol_gfx.h" ] || die "no $VENDOR/sokol: VENDOR= a checkout's vendor/ with its submodules"
-    if [ "$DCB_GEMS" = 1 ] && [ ! -f "$DCB_GEMS_DIR/gems_impl.h" ]; then die "no $DCB_GEMS_DIR/gems_impl.h (Gems C)"; fi
     if [ "$DCB_DISCS" != gdi ] && [ ! -f "$HOME/build/tools/dc/lazyboot/tools/boots3" ]; then
         say "Fetching Lazyboot's files for the CDI (once)"; sh "$SRC/dreamcast/tools/get-lazyboot.sh"
     fi
@@ -440,7 +456,7 @@ main() {
     ln -sfn "$DCB_PS3/stf_rom" "$DCB_WORK/stf_rom"; ROMS=$DCB_WORK/stf_rom
     GIT_DESC=$(git -C "$SRC" describe --always --abbrev=7 --dirty)
     BUILD=r$(git -C "$SRC" rev-list --count HEAD)
-    check_tools; assets
+    gems_source; check_tools; assets
     OUT=$DCB_WORK/out/dc; build_program
     RESULTS=()
     [ "$DCB_DISCS" != cdi ] && one_disc gdi "$DCB_GDI_NAME" "$DCB_GDI_CANARY"

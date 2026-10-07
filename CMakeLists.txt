@@ -55,12 +55,31 @@ endif()
 
 # Sega's own C for STF's hot i960 functions and the COP commands, from Sonic
 # Gems Collection (src/core/gems.h; --gems-i960, --gems-cop, --gems-verify).
-# It is not in this repository: point this at a directory holding gems_impl.h.
-set(M2HLE_GEMS_DIR "" CACHE PATH "Directory with gems_impl.h (Sonic Gems Collection C); empty: none")
+# It is the submodule vendor/gems-c (Pinboard #532; it carries gems-decomp as
+# its own submodule, so init it with --recursive), not part of this tree: on
+# when that is checked out, or point this at another directory holding
+# gems_impl.h. Empty: none. Its gems_all.h is generated, not tracked:
+# gen_all.py writes it beside itself, here and whenever its inputs change.
+set(M2HLE_GEMS_DEFAULT "")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/gems-c/gems_impl.h")
+    set(M2HLE_GEMS_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/vendor/gems-c")
+endif()
+set(M2HLE_GEMS_DIR "${M2HLE_GEMS_DEFAULT}" CACHE PATH "Directory with gems_impl.h (Sonic Gems Collection C); empty: none")
 if(M2HLE_GEMS_DIR)
     if(NOT EXISTS "${M2HLE_GEMS_DIR}/gems_impl.h")
         message(FATAL_ERROR "M2HLE_GEMS_DIR: no gems_impl.h in ${M2HLE_GEMS_DIR}")
     endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${M2HLE_GEMS_DIR}/gen_all.py"
+                    RESULT_VARIABLE _gems_rc OUTPUT_QUIET ERROR_VARIABLE _gems_err)
+    if(NOT _gems_rc EQUAL 0)
+        message(FATAL_ERROR "M2HLE_GEMS_DIR: gen_all.py failed: ${_gems_err}"
+                "(a submodule checkout needs: git submodule update --init --recursive vendor/gems-c)")
+    endif()
+    file(GLOB _gems_inputs CONFIGURE_DEPENDS "${M2HLE_GEMS_DIR}/fn/*.h" "${M2HLE_GEMS_DIR}/sharc/*.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_gems_inputs}
+                 "${M2HLE_GEMS_DIR}/gen_all.py" "${M2HLE_GEMS_DIR}/traps.txt"
+                 "${M2HLE_GEMS_DIR}/decomp/SHARC/INDEX.md")
     add_compile_definitions(M2HLE_GEMS)
     include_directories("${M2HLE_GEMS_DIR}")
 endif()

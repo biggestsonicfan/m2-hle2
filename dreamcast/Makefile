@@ -103,14 +103,20 @@ CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address -in
 
 # GEMS=<dir> builds in Sega's C from Sonic Gems Collection (src/core/gems.h,
 # Pinboard #454), on by default: its trapped i960 functions and its COP
-# commands. That C is private and is never committed; the default is where it
-# sits beside this checkout, and GEMS= (empty) leaves it out. Its trap sites are
-# hooks, so the AOT must not compile over them.
-GEMS ?= $(shell d="$(HOME)/source/repos/ai/Sonic Gems Collection/m2hle"; [ -f "$$d/gems_impl.h" ] && echo "$$d")
+# commands. That C is the submodule vendor/gems-c (#532, init it with
+# --recursive); the default is this checkout's copy, else VENDOR's, and GEMS=
+# (empty) leaves it out (as does a tree without the submodule). Its gems_all.h
+# is generated: gen_all.py writes it here, before the hook list is read from it.
+# Its trap sites are hooks, so the AOT must not compile over them.
+GEMS ?= $(firstword $(foreach d,$(REPO)/vendor/gems-c $(VENDOR)/gems-c,$(if $(wildcard $(d)/gems_impl.h),$(abspath $(d)))))
 GEMS := $(GEMS)
 GEMS_HOOKS :=
 ifneq ($(GEMS),)
 CFLAGS     += -DM2HLE_GEMS -I"$(GEMS)"
+GEMS_GEN   := $(shell python3 "$(GEMS)/gen_all.py" >/dev/null 2>&1 || echo failed)
+ifneq ($(GEMS_GEN),)
+$(error $(GEMS)/gen_all.py failed (a submodule checkout needs: git submodule update --init --recursive vendor/gems-c))
+endif
 GEMS_HOOKS := $(shell grep -o '{ 0x[0-9A-Fa-f]*, gfn_' "$(GEMS)/gems_all.h" | sed 's/{ \(0x[0-9A-Fa-f]*\),.*/--hook \1/')
 endif
 
