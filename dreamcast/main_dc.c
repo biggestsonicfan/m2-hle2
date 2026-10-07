@@ -64,6 +64,11 @@
 #ifndef DC_HUD_NONE
 #define DC_HUD_NONE 0
 #endif
+/* -DDC_HUD_FPS=1 (make FPS=1): that counter beside any other HUD but none,
+ * HUD=prof's panel included (it stays up when R hides the panel). */
+#ifndef DC_HUD_FPS
+#define DC_HUD_FPS (DC_HUD_MIN && !DC_HUD_NONE)
+#endif
 /* -DDC_HUD_PROF=1 (make HUD=prof): the full stats and the hardware profile
  * (dc_prof.h): the SH-4's counters, the PVR's times, where the program's time
  * goes by symbol. As a panel to be read back out of a capture of the video
@@ -570,7 +575,7 @@ static dc_cpu_stats_t dc_stats_cpu(dc_stats_t *s, unsigned sl) {
     return r;
 }
 
-#if DC_HUD_MIN && !DC_HUD_NONE
+#if DC_HUD_FPS
 /* The minimal HUD: board frames a second, top right, over the last second. */
 static void dc_hud_fps_corner(uint64_t t1) {
     static uint64_t fps_t0;
@@ -990,7 +995,7 @@ int main(int argc, char **argv) {
         emu_slice_body(&ctx);
         emu_slice_finish(&ctx);
         uint64_t t1 = timer_us_gettime64();
-#if DC_HUD_MIN && !DC_HUD_NONE
+#if DC_HUD_FPS
         dc_hud_fps_corner(t1);
 #endif
         /* A board frame not yet shown goes to the PVR when it can take one. */
