@@ -304,7 +304,7 @@ build_program() {
     make_args
     say "make -C dreamcast ${MAKE_ARGS[*]}"
     # shellcheck disable=SC1090
-    if ! (. "$KOS_ENV" && make -C "$SRC/dreamcast" "${MAKE_ARGS[@]}") > "$OUT/build.log" 2>&1; then
+    if ! (set +u; . "$KOS_ENV" && make -C "$SRC/dreamcast" "${MAKE_ARGS[@]}") > "$OUT/build.log" 2>&1; then
         grep -E 'error|Error' "$OUT/build.log" | head -20; die "the build failed: $OUT/build.log"
     fi
     tail -2 "$OUT/build.log"
@@ -316,7 +316,7 @@ mkdisc() {
     wipe "$dir"; mkdir -p "$dir"
     [ "$DCB_SOUND" = 1 ] && afs=$DCB_WORK/assets/STF.AFS
     # shellcheck disable=SC1090
-    (. "$KOS_ENV"
+    (set +u; . "$KOS_ENV"
      export TEXPAK=""; [ "$DCB_TEXPAK" = 1 ] && TEXPAK=$DCB_WORK/assets/TEXTURES.PAK
      [ "$DCB_MODELS" = 1 ] || export NOPAK=1
      [ "$DCB_STRIPS" = 1 ] || export NOSTRIPS=1
