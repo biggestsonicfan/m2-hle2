@@ -714,6 +714,42 @@ static void dc_bench_report(dc_bench_t *b, const dc_stats_t *s, uint64_t t1, con
 #endif
 }
 
+#if DC_REUP
+/* The re-upload counters (dc_pvr.h g_ru) over the bench's frames: sums, each
+ * field's largest frame and the frames that had any, on rows 7-10 at F1. */
+static struct { dp_reup_t sum, max; uint32_t fr_chunks, fr_xkb, fr_cuts, fr_ls; } s_ru;
+
+static void dc_reup_fold(bool in) {
+    if (in) {
+        const uint32_t *a = (const uint32_t *)&g_ru;
+        uint32_t *sm = (uint32_t *)&s_ru.sum, *mx = (uint32_t *)&s_ru.max;
+        for (unsigned i = 0; i < sizeof g_ru / 4; i++) { sm[i] += a[i]; if (a[i] > mx[i]) mx[i] = a[i]; }
+        s_ru.fr_chunks += g_ru.chunks != 0; s_ru.fr_xkb += g_ru.xkb != 0;
+        s_ru.fr_cuts += g_ru.cuts != 0; s_ru.fr_ls += g_ru.ls_cells != 0;
+    }
+    memset(&g_ru, 0, sizeof g_ru);
+}
+
+static void dc_reup_report(void) {
+    static char r[4][96];
+    const dp_reup_t *S = &s_ru.sum, *M = &s_ru.max;
+    snprintf(r[0], sizeof r[0], "ch %lu same %lu max %lu/%lu fr %lu blk %lu",
+             (unsigned long)S->chunks, (unsigned long)S->same, (unsigned long)M->chunks, (unsigned long)M->same,
+             (unsigned long)s_ru.fr_chunks, (unsigned long)S->blocks);
+    snprintf(r[1], sizeof r[1], "chr %lu new %lu tkb %lu ls %lu/%lu max %lu",
+             (unsigned long)(S->chr_kb * 32u), (unsigned long)S->chr_new, (unsigned long)S->tkb,
+             (unsigned long)S->ls_cells, (unsigned long)s_ru.fr_ls, (unsigned long)M->ls_cells);
+    snprintf(r[2], sizeof r[2], "xkb %lu new %lu fr %lu cut %lu same %lu fr %lu max %lu",
+             (unsigned long)S->xkb, (unsigned long)S->xkb_new, (unsigned long)s_ru.fr_xkb,
+             (unsigned long)S->cuts, (unsigned long)S->cuts_same, (unsigned long)s_ru.fr_cuts, (unsigned long)M->cuts);
+    snprintf(r[3], sizeof r[3], "ms cv %lu/%lu dw %lu cut %lu/%lu meas %lu",
+             (unsigned long)(S->us_conv / 1000), (unsigned long)(S->us_conv_same / 1000),
+             (unsigned long)(S->us_draw / 1000), (unsigned long)(S->us_cut / 1000),
+             (unsigned long)(S->us_cut_same / 1000), (unsigned long)(S->us_meas / 1000));
+    for (int i = 0; i < 4; i++) { printf("%s\n", r[i]); dp_text(7 + i, r[i]); }
+}
+#endif
+
 /* A slice ran t0..t1: start the bench at F0, count its slices, report at F1. */
 static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
     static dc_bench_t b;
@@ -725,9 +761,17 @@ static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
         b.t0 = t0; b.d0 = s->us_dall; b.n0 = (uint32_t)s->n_drawn; memcpy(b.p0, p, sizeof p); memcpy(b.g0, g, sizeof g);
         b.tx0 = g_dp.tt_tex; b.rd0 = g_pg.tx_reads; b.dr0 = g_pg.reads; b.sk0 = g_pg.seeks; b.sp0 = g_pg.sp_loads;
     }
+#if DC_REUP
+    dc_reup_fold(b.t0 && !b.line[0]);
+#endif
     if (!b.t0 || b.line[0]) return;
     b.sl += t1 - t0;
-    if (g_emu_frames >= DC_BENCH_F1) dc_bench_report(&b, s, t1, p, g);
+    if (g_emu_frames >= DC_BENCH_F1) {
+        dc_bench_report(&b, s, t1, p, g);
+#if DC_REUP
+        dc_reup_report();
+#endif
+    }
 }
 
 /* ---- The 2-s stats --------------------------------------------------------------- */

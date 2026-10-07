@@ -151,6 +151,81 @@ static struct {
 
 static uint8_t  g_dp_cut[256 * 256 / 2];
 
+/* Measurement only (EXTRA=-DDC_REUP=1, Pinboard #530): how much of the tile
+ * and texture work sends bytes the PVR already holds. The counters are this
+ * frame's; main_dc.c's bench folds them over its window. The hashing is timed
+ * on its own (us_meas), outside the times it is set against. */
+#ifndef DC_REUP
+#define DC_REUP 0
+#endif
+#if DC_REUP
+typedef struct {
+    uint32_t chunks, same;          /* tile layers' 16-px chunks converted and sent; those the pair already held */
+    uint32_t chr_kb, chr_new;       /* char KBs written (32 chars each); chars whose bytes changed */
+    uint32_t tkb, blocks;           /* tile RAM KBs written; 8x8 blocks they changed (all 2976 when full) */
+    uint32_t xkb, xkb_new;          /* texture RAM KBs written; those whose bytes changed */
+    uint32_t cuts, cuts_same;       /* textures cut and loaded; those the same bytes as the key's last cut */
+    uint32_t ls_cells;              /* line-scroll cells redrawn into their textures */
+    uint32_t us_conv, us_conv_same; /* us converting and sending chunks; the unchanged chunks' share of it */
+    uint32_t us_draw;               /* us drawing tiles on the CPU and line-scroll cells */
+    uint32_t us_cut, us_cut_same;   /* us cutting and loading textures; the unchanged cuts' part */
+    uint32_t us_meas;               /* us the hashing took */
+} dp_reup_t;
+static dp_reup_t g_ru;
+static uint16_t  g_ru_chunk[2][VIDEO_HEIGHT][VIDEO_WIDTH / 16];   /* each pair's chunk hashes */
+static uint32_t  g_ru_xkb[2][1024];                                /* each texture RAM KB's hash */
+static struct { uint32_t key, h; } g_ru_cut[4096];                 /* each key's last cut */
+
+#define RU_T0() uint64_t ru_t0 = timer_us_gettime64()
+#define RU_ADD(f) (g_ru.f += (uint32_t)(timer_us_gettime64() - ru_t0))
+/* dp_tex_get's bytes as they are loaded, into its ru_h; the hashing's time into its ru_us */
+#define RU_CUT_VARS() uint32_t ru_h = 2166136261u, ru_us = 0
+#define RU_CUT(buf, n) do { RU_T0(); ru_h = ru_hash(ru_h, (const uint32_t *)(buf), (n) / 4u); \
+                            ru_us += (uint32_t)(timer_us_gettime64() - ru_t0); } while (0)
+/* the hashing is not the texture's */
+#define RU_CUT_END(key, t0) (g_dp.tt_tex -= ru_us, ru_cut_done(key, ru_h, (uint32_t)(timer_us_gettime64() - (t0)), ru_us))
+#define RU_TKB(dirty) (g_ru.tkb += (dirty) != 0)
+
+static inline uint32_t ru_hash(uint32_t h, const uint32_t *p, unsigned words) {
+    for (unsigned i = 0; i < words; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+/* The texture RAM KBs written since the last frame: hashed, and counted as
+ * changed or not. */
+static void ru_tex_kbs(memory_bus_t *bus, uint8_t dirty[2][1024]) {
+    RU_T0();
+    for (int s = 0; s < 2; s++)
+        for (int q = 0; q < 1024; q++) {
+            if (!dirty[s][q]) continue;
+            uint32_t h = ru_hash(2166136261u, (const uint32_t *)((s ? bus->texram1 : bus->texram0) + q * 1024u), 256);
+            g_ru.xkb++;
+            if (h != g_ru_xkb[s][q]) { g_ru.xkb_new++; g_ru_xkb[s][q] = h; }
+        }
+    RU_ADD(us_meas);
+}
+
+/* A texture's cut against the key's last one. us: its cut, load and hashing;
+ * meas: the hashing's part. */
+static void ru_cut_done(uint32_t key, uint32_t h, uint32_t us, uint32_t meas) {
+    us -= meas;
+    g_ru.us_meas += meas;
+    unsigned i = (key * 2654435761u) >> 20;
+    while (g_ru_cut[i].key && g_ru_cut[i].key != key) i = (i + 1) & 4095u;
+    bool same = g_ru_cut[i].key == key && g_ru_cut[i].h == h;
+    g_ru_cut[i].key = key; g_ru_cut[i].h = h;
+    g_ru.cuts++; g_ru.us_cut += us;
+    if (same) { g_ru.cuts_same++; g_ru.us_cut_same += us; }
+}
+#else
+#define RU_CUT_VARS() (void)0
+#define RU_CUT_END(key, t0) (void)0
+#define RU_TKB(dirty) (void)0
+#define RU_CUT(buf, n) (void)0
+#define RU_T0() (void)0
+#define RU_ADD(f) (void)0
+#endif
+
 static inline uint32_t dp_log2(uint32_t v) { uint32_t l = 0; while ((1u << l) < v) l++; return l; }
 
 /* Video memory a dropped texture held is given back a frame later: the PVR
@@ -208,6 +283,9 @@ static void dp_tex_invalidate(memory_bus_t *bus) {
             dirty[s][q] = bus->tex_dirty[s][q];
             bus->tex_dirty[s][q] = 0;
         }
+#if DC_REUP
+    ru_tex_kbs(bus, dirty);
+#endif
     unsigned gone = 0;
     for (unsigned i = 0; i < DC_TEX_SLOTS; i++) {
         dc_tex_t *t = &g_dp.tex[i];
@@ -260,12 +338,15 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
         if (e) packed = pg_tx_at(e->off, bytes);
         if (packed) g_dp.tx_hits++; else g_dp.tx_miss++;
     }
-    if (packed) pvr_txr_load((void *)packed, p, bytes);
+    RU_CUT_VARS();
+    if (packed) { pvr_txr_load((void *)packed, p, bytes); RU_CUT(packed, bytes); }
     else
         for (uint32_t at = 0; at < bytes; at += chunk) {
             dct_cut(src, key, at, chunk, g_dp_cut);
             pvr_txr_load(g_dp_cut, (uint8_t *)p + at, chunk);
+            RU_CUT(g_dp_cut, chunk);
         }
+    RU_CUT_END(key, t0);
     g_dp.tt_tex += timer_us_gettime64() - t0;
     *t = (dc_tex_t){ key, p, (uint16_t)W, (uint16_t)H, 1.0f / (float)W, 1.0f / (float)H,
                      (uint16_t)((y0 >> 1) + (x0 >= 1024 ? 512 : 0)),
@@ -773,6 +854,7 @@ static uint8_t g_dp_pen_used[TILE_PEN_NONE + 1];   /* a superset of the pens on 
  * video memory each waited on the bus. */
 static void dp_tiles_convert(const tile_cpu_t *tiles, const uint16_t *bgpen, int pair, int y, int xs, int xe) {
     static uint32_t rb[256] __attribute__((aligned(32))), rf[256] __attribute__((aligned(32)));
+    RU_T0();
     const uint16_t *bg = tiles->bg + y * VIDEO_WIDTH, *fg = tiles->fg + y * VIDEO_WIDTH;
     for (int x = xs; x < xe; x += 2) {
         g_dp_pen_used[bg[x]] = g_dp_pen_used[bg[x + 1]] = 1;
@@ -782,6 +864,21 @@ static void dp_tiles_convert(const tile_cpu_t *tiles, const uint16_t *bgpen, int
     }
     pvr_txr_load(rb + (xs >> 1), (uint16_t *)g_dp.lbg[pair] + y * 512 + xs, (size_t)(xe - xs) * 2);
     pvr_txr_load(rf + (xs >> 1), (uint16_t *)g_dp.lfg[pair] + y * 512 + xs, (size_t)(xe - xs) * 2);
+#if DC_REUP
+    uint64_t ru_t1 = timer_us_gettime64();
+    uint32_t us = (uint32_t)(ru_t1 - ru_t0);
+    unsigned n = 0, same = 0;
+    for (int x = xs; x < xe; x += 16, n++) {
+        uint32_t h = ru_hash(ru_hash(2166136261u, rb + (x >> 1), 8), rf + (x >> 1), 8);
+        uint16_t h16 = (uint16_t)(h ^ h >> 16);
+        if (h16 == g_ru_chunk[pair][y][x >> 4]) same++;
+        g_ru_chunk[pair][y][x >> 4] = h16;
+    }
+    g_ru.chunks += n; g_ru.same += same;
+    g_ru.us_conv += us;
+    g_ru.us_conv_same += n ? us * same / n : 0;
+    g_ru.us_meas += (uint32_t)(timer_us_gettime64() - ru_t1);
+#endif
 }
 
 /* The CPU layers are double-buffered: the PVR may still be drawing the last
@@ -902,6 +999,9 @@ static void dp_ls_draw(dp_ls_t *ls, const uint16_t *w, const uint8_t *gfx, bool 
                 ls->front_cells -= ls->front_set[k];
             }
             ls->cells[k] = e;
+#if DC_REUP
+            g_ru.ls_cells++;
+#endif
             ls->front_set[k] = dp_ls_cell(ls, gfx, k, e, opaque);
             ls->front_cells += ls->front_set[k];
         }
@@ -965,6 +1065,9 @@ static bool dp_tiles_chars(memory_bus_t *bus) {
     for (unsigned k = 0; k < TMAPGFX_SIZE >> 10; k++) {
         if (!dk[k]) continue;
         dk[k] = 0;
+#if DC_REUP
+        g_ru.chr_kb++;
+#endif
         const uint32_t *p = (const uint32_t *)(bus->tmapgfx + k * 1024u);
         for (unsigned c = k * 32u; c < k * 32u + 32u; c++, p += 8) {
             uint32_t h = 2166136261u;
@@ -972,6 +1075,9 @@ static bool dp_tiles_chars(memory_bus_t *bus) {
             if (h == g_dp_chr_hash[c]) continue;
             g_dp_chr_hash[c] = h;
             g_dp_chr_new[c >> 3] |= (uint8_t)(1u << (c & 7));
+#if DC_REUP
+            g_ru.chr_new++;
+#endif
             any = true;
         }
     }
@@ -1033,6 +1139,7 @@ static bool dp_tiles_pens(memory_bus_t *bus, uint8_t *banks, bool *all) {
  * a change is a full redraw) and draw them. banks: the recoloured palette
  * banks, NULL when no colour changed. */
 static void dp_tiles_ls(memory_bus_t *bus, const uint16_t *n, tile_dirty_t *d, bool chars, const uint8_t *banks) {
+    RU_T0();
     bool ls = dp_ls_ok(n, 2), both = ls && dp_ls_ok(n, 0), ls_all = d->full;
     if (ls != g_ls.on || both != g_ls.both) { d->full = ls_all = true; g_ls.on = ls; g_ls.both = both; }
     if (chars && !d->full && !both) dp_tiles_mark_chars(d, n);
@@ -1046,6 +1153,7 @@ static void dp_tiles_ls(memory_bus_t *bus, const uint16_t *n, tile_dirty_t *d, b
         g_ls.t0.vy = n[0x5004] & 0x1FF;
         dp_ls_draw(&g_ls.t0, n, bus->tmapgfx, ls_all, false, chars, banks);
     }
+    RU_ADD(us_draw);
 }
 
 /* Bring the CPU layers' copy of tile RAM up to date and mark the blocks that
@@ -1062,6 +1170,7 @@ static void dp_tiles_copy(memory_bus_t *bus, tile_cpu_t *tiles, const uint16_t *
     for (int k = 0; k < TILE_SNAP_WORDS / 512 && both; k++) dk[k] = 0;   /* the CPU's copy waits for d.full */
     for (int k = 0; k < TILE_SNAP_WORDS / 512 && !both; k++) {
         if (!d->full && !dk[k]) continue;
+        RU_TKB(dk[k]);
         dk[k] = 0;
         if (ls && ((k >= 16 && k < 32) || k == 34 || k == 35 || (k >= 52 && k < 56))) continue;
         if (!d->full) tile_dirty_find_range(d, tiles->words, n, k * 512, k * 512 + 512);
@@ -1104,14 +1213,21 @@ static void dp_tiles_redraw(memory_bus_t *bus, tile_cpu_t *tiles, dp_tiles_state
     dp_tiles_copy(bus, tiles, n, d);
     dp_tiles_extents(d, s->x0, s->x1);
     if (g_ls.both || !(d->full || d->count)) return;
+#if DC_REUP
+    g_ru.blocks += d->full ? (uint32_t)(TILE_BLK_W * TILE_BLK_H) : d->count;
+#endif
+    RU_T0();
     if (g_ls.on) dp_ls_rest(tiles, bus->tmapgfx, s->x0, s->x1);
     else         tile_cpu_draw(tiles, bus->tmapgfx, s->x0, s->x1);
+    RU_ADD(us_draw);
 }
 
 /* Only colours changed: the textured layers take the new pens. */
 static void dp_tiles_recolour(memory_bus_t *bus, const uint8_t *banks) {
+    RU_T0();
     if (g_ls.on)   dp_ls_draw(&g_ls.t2, g_ls.t2.cells, bus->tmapgfx, false, true, false, banks);
     if (g_ls.both) dp_ls_draw(&g_ls.t0, g_ls.t0.cells, bus->tmapgfx, false, false, false, banks);
+    RU_ADD(us_draw);
 }
 
 static void dp_tiles(memory_bus_t *bus, tile_cpu_t *tiles) {

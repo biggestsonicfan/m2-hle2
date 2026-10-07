@@ -1517,6 +1517,51 @@ How it was checked, on `LINK=1` builds of the tree before and after:
   warnings, line for line (`-Wall -Wextra`); the text is 1.4 KB smaller
   (1,699,280 against 1,700,704) and `.data` and `.bss` are within 200 bytes.
 
+## Texels sent again unchanged (#530)
+
+A measurement, nothing changed: in attract f3500-3900, how much of the frame
+goes to decoding or uploading texels that did not change? `make
+EXTRA=-DDC_REUP=1` builds the counters (`dc_pvr.h`, `g_ru`); at the bench's
+end HUD rows 7-10 (and stdout) report them. Off, the text is byte for byte the
+default build's. Every time below is a **port timer on the SH-4 side** (the
+same `tick` clock as the bench). Flycast bills the PVR by polygon bytes, not
+pixels, so none of it says what the PVR itself would save on a console.
+
+Outer line, tip of `idea-340-dreamcast` (36eae6c), 400 frames: **14053 ms
+total, 5214 ms i960 slices, 8785 ms draws** (ti 456, sc 7056, so 216, su
+1043). #471's 15431 / 6431 / 8929 is older than the AOT fixes. f1500
+`634d853f` with and without the counters, so they do not move the board; the
+counted build reads 14112 ms (the hashing, 24 ms, is taken out of `tx` and the
+tile times but not out of the total).
+
+The three parts:
+
+1. **Tile cells.** `dp_tiles_convert` sends 16-pixel chunks into the
+   double-buffered pair; a chunk is "unchanged" when its bytes hash the same as
+   the copy it replaces. The CPU tile draw (`dp_tiles_redraw` / `_ls` /
+   `_recolour`) runs only on dirty 8x8 blocks.
+2. **CG / texture RAM.** The game's loader writes texture RAM through the bus,
+   which marks `tex_dirty` per KB (`dp_tex_invalidate`); `dp_tex_get` is the
+   one place a cut is decoded and `pvr_txr_load`ed.
+3. **Polygon submit** (`dp_face`, `su`) calls neither: it sends vertices for
+   textures already in VRAM, so it uploads no texels by construction.
+
+| per frame (400 frames) | ids touched | bytes changed | re-sent unchanged | time |
+|---|---|---|---|---|
+| tile chunks (16 px) | 57.1 (max 440) | 40.5 | 16.6 (29%, max 190) | convert 73 ms, 23 of it unchanged |
+| tile blocks redrawn (8x8) | 5.8 | 5.8 (dirty only) | 0 | CPU draw 268 ms |
+| tile KBs written / char KBs / line-scroll cells | 1.07 / 0 / 0 | | | |
+| texture RAM KBs | 0 | 0 | 0 | |
+| texture cuts decoded | 0.0025 (1 in 400) | 1 | 0 | 5 ms |
+| polygon submit | | | no texels | su 1043 ms |
+
+The attract scene's textures are all in VRAM before f3500: the game writes no
+texture RAM in those 400 frames and one cut is decoded, new. What is sent again
+unchanged is a third of the tile chunks: 23 ms of conversion, plus at most a
+third of the 268 ms tile draw if every redrawn block fed one of them. That is
+**at most ~100 ms of 8785 ms of draws, ~1.1% (0.7% of the frame)**, under the
+5% bar, so nothing was implemented: no hook, no scene-start atlas.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
