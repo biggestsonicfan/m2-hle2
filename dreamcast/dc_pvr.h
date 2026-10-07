@@ -36,6 +36,7 @@
 #include <dc/pvr.h>
 #include <dc/biosfont.h>
 
+#include "dc_scansplit.h"   /* before geo3d.h: its lap marks */
 #include "geo3d.h"
 #include "dc_strips.h"
 
@@ -1458,12 +1459,14 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
     g_geo3d_mesh_epoch++;   /* the mesh cache keeps what this frame and the last drew */
     g_dp.runs = 0;
     g_dp.faces_dropped = 0;
+    GEO3D_LAP_START();
     if (!g_geodl_snap_ready || !rs->main_data || !rs->polygons) { geo->captured_count = 0; return; }
     const uint32_t *snap = g_geodl_snap;
     g_geo_rs = geodl_raster_for(snap);
     bool walked = geo3d_scan_geo_list(geo, snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
                                       (int16_t)mem_read16(bus, H_SYNC_BASE), (int16_t)mem_read16(bus, V_SYNC_BASE),
                                       rs->main_data, rs->main_data_size, q->model_table_offset, q->model_table_count);
+    GEO3D_LAP(WALK);
     if (!walked) { geo->captured_count = 0; return; }
     g_geo3d_palram = bus->palette;
     g_geo3d_palram_size = PALETTE_SIZE;
@@ -1504,10 +1507,12 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
             g_geo3d_mode = cm->geo_mode;
             g_geo3d_zadjust = cm->zadjust;
             g_geo3d_lod = cm->geo_lod;
+            GEO3D_LAP(RUN);
             if (cm->direct_len) {
                 geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len,
                                     rs->textures, rs->textures_size, rs->main_data, rs->main_data_size,
                                     cm->gproj[0], cm->gproj[1]);
+                GEO3D_LAP(DIRECT);
             } else {
                 geo3d_models_t from = {
                     rs->main_data, rs->main_data_size, rs->polygons, rs->polygons_size,
@@ -1528,6 +1533,7 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
     g_geo3d_flat_list = 0;
     g_geo3d_cull_on = 0;
     g_geo3d_palram = NULL;
+    GEO3D_LAP(RUN);
 }
 
 /* Far to near: slice, then key, descending; a tie goes to the later polygon
