@@ -1039,7 +1039,9 @@ against the default build:
 so / su fell to 41 / 57, as in any build that queues nothing. They are not in
 the subtraction. Nothing is drawn, so the picture is wrong, as intended. The
 frame-1500 hash stays 634d853f because it is board state, and it proves
-nothing here.
+nothing here. The default build with the switch present (67611ab) matches
+f52431b's byte for byte in every section except `.rodata`. There, 6 bytes
+differ: the version string.
 
 **Verdict: the colour lookup is the half over 800 ms.** It is 1315 ms, against
 111 ms for the texture lookup. It was not opened here. The next pin can skip
