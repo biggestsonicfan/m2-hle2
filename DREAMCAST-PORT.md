@@ -779,6 +779,60 @@ but 951 by the ramp path. No rare branch is large. The unpacked loop, a
 triangle without C, `gone`, palette colour misses and `GEO3D_MAX_TRIS` drops
 never happen, and only 772 faces are clipped.
 
+### The face loop's tail against its prefix (#539, at 3a45608)
+
+HEAD had moved to 3a45608: 938f675 plus #537's FACECOUNT counters (off by
+default) and #244, which moves `vendor/gems-c` to the PS2 build's
+`Fn_area_table_gen` (0x3A) and `Fn_outside_ball` (0x72). Those two are in the
+fight's collision chain, so the attract fight plays out differently after
+frame 1500 and the bench moved a little. The frame-1500 hash did not:
+
+| build, frames 3500-3900 | total | sl / dr | ti / sc / so / su | page loads | hash |
+|---|---|---|---|---|---|
+| #537's table (938f675) | 14049 | 5196 / 8798 | 459 / 7061 / 208 / 1056 | 567 | 634d853f |
+| 3a45608, unmodified | 14060 | 5226 / 8769 | 453 / 7040 / 217 / 1046 | 567 | 634d853f |
+| 3a45608 with the gems-c of 938f675 | 14049 | 5196 / 8798 | 459 / 7061 / 208 / 1056 | 567 | 634d853f |
+
+The second row is the baseline for the subtraction below. The third row shows
+that #244 accounts for the whole move.
+
+`make FACESTOP=1` (`GEO3D_FACESTOP`, geo3d.h, off by default) runs steps 1-8
+of the loop (above) for every face, as the default build does, then stops a
+face that would have gone on to step 9. No palette, luma, specular, diagonal,
+`geo3d_dc_sface` (texture key, colour, strip put) or z-key. The
+prefix is kept alive by a running xor of the flat key's z and the cull's N·L
+and N·P, taken for every face that passes the cull, and stored to a volatile
+once per model (`g_geo3d_facestop_sink`). Whether a face reaches the xor
+depends on the window test and the cull, so neither can be dropped. Proof
+from the disassembly (everything is inlined into `dp_decode`): the FACESTOP
+build keeps the light vector's three loads and the cull's arithmetic (61
+fmul, 57 fmac against the default's 63 and 48) and the `flat_prev_z` stores,
+and its calls to `dp_face_colour` and `dp_tex_get` are gone. Neither build
+has a timer mark (SCANSPLIT=0), so no mark cost is in either number.
+
+| frames 3500-3900, SH-4 timer time | total | sl / dr | ti / **sc** / so / su | hash |
+|---|---|---|---|---|
+| 3a45608, default | 14060 | 5226 / 8769 | 453 / **7040** / 217 / 1046 | 634d853f |
+| 3a45608, FACESTOP=1 | 9099 | 5216 / 3838 | 456 / **3277** / 41 / 57 | 634d853f |
+
+**Tail (steps 9-13) = 7040 − 3277 = 3763 ms** of scan time. The fall in sort
+(217 → 41) and TA submit (1046 → 57) is outside the scan: nothing was queued.
+It is not counted in the tail. The FACESTOP picture is wrong, as intended. Its
+frame-1500 hash stays 634d853f because that hash is board state, which the
+draw never writes.
+The default build with the switch present has the same instructions as
+3a45608 and benches the same, every number and the hash.
+
+The prefix is then about 1.26 s of the loop: #537's 5026 ms face loop
+less 3763. That is ~1.0 µs a face for steps 1-8 over 1,216,211 faces, against
+5.8 µs a submitted face for steps 9-13 over 653,819. The subtraction may
+overstate the tail by a little, since a loop without the tail also leaves the
+cache to the prefix. That cannot move a 3.8 s answer across the 1200 ms line.
+
+**Verdict: the tail holds it** (3763 ms, over 1200). The prefix cannot buy 30
+fps alone. The next suspect is `dp_face_colour`'s ramp miss (350,879 out-of-line
+calls over these 400 frames, #537). It was not instrumented here.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's

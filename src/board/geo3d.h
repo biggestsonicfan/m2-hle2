@@ -46,6 +46,17 @@
 #define GEO3D_FCI_N(k, c)  ((void)0)
 #define GEO3D_FC_ON(v)     ((void)0)
 #endif
+/* FACESTOP=1 (the Dreamcast's make FACESTOP=1, Pinboard #539): the face loop runs
+ * up to and through the board cull for every face and then stops, before the
+ * colour, light, diagonal and submit. A measurement, not a picture: the cull's
+ * result and the flat key's z are folded into a running xor that goes out to a
+ * volatile once per model, so the compiler cannot drop them. */
+#ifndef GEO3D_FACESTOP
+#define GEO3D_FACESTOP 0
+#endif
+#if GEO3D_FACESTOP
+static volatile uint32_t g_geo3d_facestop_sink;
+#endif
 
 /* ---- Capacities ---------------------------------------------------------- */
 
@@ -3316,6 +3327,14 @@ static inline void geo3d_cached_gone_carry(const geo3d_cmesh_t *m, const float *
  * and the diagonals for every face, the colour and light only for one that is
  * drawn, and the key only as a number. gone: every face out, so its corners
  * need no projecting. */
+#if GEO3D_FACESTOP
+/* The words FACESTOP keeps alive: the flat key's z and the cull's N·L and N·P. */
+static inline uint32_t geo3d_facestop_bits(float z, const geo3d_lit_t *lt) {
+    uint32_t a, b, c;
+    memcpy(&a, &z, 4); memcpy(&b, &lt->dotl, 4); memcpy(&c, &lt->dotp, 4);
+    return a ^ b ^ c;
+}
+#endif
 static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cmesh_t *m,
                                         const vec3_t *tv, const uint8_t *oc, bool cull, bool gone,
                                         const float *matrix, float cr, float cg, float cb) {
@@ -3324,6 +3343,9 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
     const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
     GEO3D_FC(MODELS);
     GEO3D_FC_ON(1u);
+#if GEO3D_FACESTOP
+    uint32_t fs = 0;
+#endif
 #if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
     /* The same walk over a packed mesh's faces (geo3d_strips_load). */
     for (int n = 0; m->sfaces && n < m->n_faces; n++) {
@@ -3349,6 +3371,10 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
             if (!is_tri) geo3d_split_other_way(f->split_quad, f->split_cut);
             continue;
         }
+#if GEO3D_FACESTOP
+        fs ^= geo3d_facestop_bits(z, &lt);
+        continue;
+#endif
         float fr = cr, fg = cg, fb = cb;
         GEO3D_FC_IF(MAT, f->bits & GEO3D_SF_MAT_OK);
         if (f->bits & GEO3D_SF_MAT_OK) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
@@ -3377,6 +3403,10 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
             if (!f->is_tri) geo3d_split_other_way(f->split_quad, f->split_cut);
             continue;
         }
+#if GEO3D_FACESTOP
+        fs ^= geo3d_facestop_bits(z, &lt);
+        continue;
+#endif
         float fr = cr, fg = cg, fb = cb;
         GEO3D_FC_IF(MAT, f->mat_ok);
         if (f->mat_ok) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
@@ -3387,6 +3417,9 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
     GEO3D_FC_ON(0u);
+#if GEO3D_FACESTOP
+    g_geo3d_facestop_sink ^= fs;
+#endif
     GEO3D_LAP_N(FACES, m->n_faces);
 }
 #endif
