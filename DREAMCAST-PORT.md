@@ -664,6 +664,41 @@ costs little here (567 loads, the strip pack's 218 among them), and the slice
 is mostly Gems' C, the hooks and the COP. So the remainder is the 3D path's
 per-face arithmetic, the next pin's work.
 
+### The scan by function (#535, at 3e042a1)
+
+3e042a1 is ef71553 plus a doc-only commit. The baseline of the unmodified
+ef71553 disc on frames 3500-3900 was #533's to the millisecond: 14049 ms,
+sl 5196 / dr 8798, ti 459 / sc 7061 / so 208 / su 1056, 567 page loads,
+frame-1500 hash 634d853f. Flycast is deterministic here, so run-to-run noise
+is 0 ms.
+
+`make SCANSPLIT=1` (`dreamcast/dc_scansplit.h`, off by default) puts lap marks
+at the ends of the functions inside `dp_decode`, the "sc" timer, and of the
+steps of `geo3d_decode_model_cached`. A mark is one read of TMU2's count, the
+clock KOS's timer runs on, and it is placed per model, never per face. The
+default build (`SCANSPLIT=0`) runs the bench identically, every number and the
+hash alike. The split build reads 14066 ms total (+17), sc 7057 (-4), hash
+634d853f. That +17 ms is the marks' own cost. Its parts add up to 7057 ms,
+the whole of its sc.
+
+| function | ms | of the 7061 ms scan | of the 14049 ms frame |
+|---|---|---|---|
+| `geo3d_cached_draw_dc`'s face loop (1,216,211 faces) | 5026 | 71.2% | 35.8% |
+| `geo3d_dc_verts` (projection) | 448 | 6.3% | 3.2% |
+| `geo3d_decode_model` (1130 uncached draws) | 447 | 6.3% | 3.2% |
+| `geo3d_cached_cull_codes` | 322 | 4.6% | 2.3% |
+| the corners through the matrix (`ftrv`, 32,723 models) | 290 | 4.1% | 2.1% |
+| `geo3d_mesh_for_draw` (42,401 draws) | 221 | 3.1% | 1.6% |
+| `geo3d_scan_geo_list` and `dp_decode`'s setup | 210 | 3.0% | 1.5% |
+| `geo3d_cached_sphere` / `_gone_carry` | 61 | 0.9% | 0.4% |
+| `dp_decode`'s runs (grouping, `dp_cull_planes`) | 32 | 0.5% | 0.2% |
+| `geo3d_decode_direct` | 0 | 0% | 0% |
+
+One function is large enough: the face loop of `geo3d_cached_draw_dc` (5026 ms,
+about 4.1 µs of Dreamcast time a face). A later cut of about 700 ms would be
+14% of it. The face loop is the only part over 700 ms. The next largest
+are 448 ms each.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's

@@ -30,6 +30,15 @@
 #include "log.h"
 #include "memory.h"         /* mem_read8 / mem_read32 */
 
+/* Lap marks for a target's own timing of the cached draw (the Dreamcast's
+ * dreamcast/dc_scansplit.h, make SCANSPLIT=1): each charges the time since
+ * the last to its part. Nothing unless the target defines them. */
+#ifndef GEO3D_LAP_N
+#define GEO3D_LAP_START()   ((void)0)
+#define GEO3D_LAP_N(p, cnt) ((void)0)
+#endif
+#define GEO3D_LAP(p) GEO3D_LAP_N(p, 1)
+
 /* ---- Capacities ---------------------------------------------------------- */
 
 #define MAX_GEO_MODELS     512
@@ -3303,6 +3312,7 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
                                         const vec3_t *tv, const uint8_t *oc, bool cull, bool gone,
                                         const float *matrix, float cr, float cg, float cb) {
     const int dcv = gone ? -1 : geo3d_dc_verts(tv, m->n_sv);
+    GEO3D_LAP(PROJ);
     const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
 #if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
     /* The same walk over a packed mesh's faces (geo3d_strips_load). */
@@ -3348,6 +3358,7 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         const int cut = f->is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
         geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
+    GEO3D_LAP_N(FACES, m->n_faces);
 }
 #endif
 
@@ -3393,9 +3404,11 @@ static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model
                                              float cr, float cg, float cb) {
     geo3d_cmesh_t *m;
     const int how = geo3d_mesh_for_draw(md, model_idx, matrix, &m);
+    GEO3D_LAP(MESH);
     if (how == GEO3D_DRAW_NONE) return;
     if (how == GEO3D_DRAW_FULL) {
         geo3d_decode_model(md, model_idx, matrix, cr, cg, cb);
+        GEO3D_LAP(FULL);
         return;
     }
 
@@ -3409,9 +3422,11 @@ static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model
     if (sph > 0) {
         geo3d_cached_gone_carry(m, matrix);
         geo3d_emit_state_reset();
+        GEO3D_LAP(SPHERE);
         return;
     }
 #endif
+    GEO3D_LAP(SPHERE);
 
     static vec3_t tv[GEO3D_IA_MAX_VERTS];
 #ifdef GEO3D_FTRV
@@ -3425,10 +3440,12 @@ static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model
 #else
     for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
 #endif
+    GEO3D_LAP(XFORM);
     geo3d_split_reset();
     static uint8_t oc[GEO3D_IA_MAX_VERTS];
     bool gone;
     const bool cull = geo3d_cached_cull_codes(m, sph, tv, oc, &gone);
+    GEO3D_LAP(CODES);
 #ifdef GEO3D_DC_SINK
     geo3d_cached_draw_dc(md, m, tv, oc, cull, gone, matrix, cr, cg, cb);
 #else
@@ -3436,6 +3453,7 @@ static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model
         geo3d_cached_face(md, &m->faces[n], tv, oc, cull, lines, matrix, cr, cg, cb);
 #endif
     geo3d_emit_state_reset();
+    GEO3D_LAP_N(FACES, 0);
 }
 
 #ifdef M2HLE_DEBUG_DUMPS   /* desktop only; see GEO3D_DUMP_TEX */

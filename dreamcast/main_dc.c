@@ -748,6 +748,32 @@ static void dc_bench_report(dc_bench_t *b, const dc_stats_t *s, uint64_t t1, con
 #endif
 }
 
+#if DC_SCAN_SPLIT
+/* The scan's parts over the bench (dc_scansplit.h): f0 snapshots them at F0,
+ * then the report puts ms by part and the calls over the picture (rows 7-9). */
+static void dc_split_bench(bool f0) {
+    static dc_split_t s0;
+    static char l7[64], l8[64], l9[64];
+    if (f0) { s0 = g_split; return; }
+    uint32_t ms[DC_LAPS], n[DC_LAPS], sum = 0;
+    for (int i = 0; i < DC_LAPS; i++) {
+        ms[i] = dc_split_ms(g_split.t[i] - s0.t[i]); n[i] = g_split.n[i] - s0.n[i]; sum += ms[i];
+    }
+    snprintf(l7, sizeof l7, "wk %lu rn %lu me %lu fu %lu di %lu", (unsigned long)ms[DC_LAP_WALK],
+             (unsigned long)ms[DC_LAP_RUN], (unsigned long)ms[DC_LAP_MESH], (unsigned long)ms[DC_LAP_FULL],
+             (unsigned long)ms[DC_LAP_DIRECT]);
+    snprintf(l8, sizeof l8, "sp %lu xf %lu cc %lu pj %lu fa %lu", (unsigned long)ms[DC_LAP_SPHERE],
+             (unsigned long)ms[DC_LAP_XFORM], (unsigned long)ms[DC_LAP_CODES], (unsigned long)ms[DC_LAP_PROJ],
+             (unsigned long)ms[DC_LAP_FACES]);
+    snprintf(l9, sizeof l9, "sum %lu n %lu/%lu/%lu f %lu", (unsigned long)sum, (unsigned long)n[DC_LAP_MESH],
+             (unsigned long)n[DC_LAP_FULL], (unsigned long)n[DC_LAP_XFORM], (unsigned long)n[DC_LAP_FACES]);
+    printf("%s | %s | %s\n", l7, l8, l9);
+    dp_text(7, l7); dp_text(8, l8); dp_text(9, l9);
+}
+#else
+static inline void dc_split_bench(bool f0) { (void)f0; }
+#endif
+
 /* A slice ran t0..t1: start the bench at F0, count its slices, report at F1. */
 static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
     static dc_bench_t b;
@@ -758,10 +784,11 @@ static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
     if (!b.t0 && g_emu_frames > DC_BENCH_F0) {
         b.t0 = t0; b.d0 = s->us_dall; b.n0 = (uint32_t)s->n_drawn; memcpy(b.p0, p, sizeof p); memcpy(b.g0, g, sizeof g);
         b.tx0 = g_dp.tt_tex; b.rd0 = g_pg.tx_reads; b.dr0 = g_pg.reads; b.sk0 = g_pg.seeks; b.sp0 = g_pg.sp_loads;
+        dc_split_bench(true);
     }
     if (!b.t0 || b.line[0]) return;
     b.sl += t1 - t0;
-    if (g_emu_frames >= DC_BENCH_F1) dc_bench_report(&b, s, t1, p, g);
+    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); }
 }
 
 /* ---- The 2-s stats --------------------------------------------------------------- */
