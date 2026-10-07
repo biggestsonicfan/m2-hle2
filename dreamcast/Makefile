@@ -111,10 +111,9 @@ CFLAGS     += -DM2HLE_GEMS -I"$(GEMS)"
 GEMS_HOOKS := $(shell grep -o '{ 0x[0-9A-Fa-f]*, gfn_' "$(GEMS)/gems_all.h" | sed 's/{ \(0x[0-9A-Fa-f]*\),.*/--hook \1/')
 endif
 
-# HUD=prof's ID line names the commit built (-dirty: with changes not in it).
-ifeq ($(PROF),1)
+# The commit built (-dirty: with changes not in it), for HUD=prof's ID line
+# and the assertion screen.
 CFLAGS += -DDC_GIT='"$(shell git -C $(REPO) describe --always --abbrev=7 --dirty 2>/dev/null || echo unknown)"'
-endif
 
 AOT_GEN :=
 ifneq ($(AOT),)
