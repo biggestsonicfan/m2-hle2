@@ -18,6 +18,22 @@ is built this way.
 - Your own copy of the PS3 release's `stf_rom` and `sound` folders.
   Neither its files nor anything made from them is ever committed.
 
+## The discs in one go: build-disc.sh
+
+`dreamcast/build-disc.sh` asks for every option below and for mkdisc.sh's,
+Enter taking the default (AOT, Gems C, FRAME512, the fps counter and HUD=prof's
+panel on R all on), then builds a clean worktree of the commit asked for
+(`~/build/dc-build/src`), makes the GDI and/or the CDI, zips each, boots each in
+Flycast for a screenshot and puts them in the canary folder. STF.AFS and
+TEXTURES.PAK are made once from the PS3 files and kept in
+`~/build/dc-build/assets`. `-y` takes the defaults (a `DCB_<KEY>` variable
+presets one), `--last` repeats the last build, `--install` puts a "Build
+Dreamcast disc" launcher on the desktop. A new Makefile or mkdisc.sh option
+gets its question there too.
+
+FPS=1 (on with HUD=min, off otherwise) draws the fps counter, top right, beside
+any HUD but none; with HUD=prof it stays when R hides the panel.
+
 ## Build
 
 From the repo root:
