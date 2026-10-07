@@ -61,4 +61,48 @@ static inline uint32_t dc_split_ms(uint32_t ticks) {
 #define GEO3D_LAP_N(p, cnt)  dc_lap(DC_LAP_##p, (uint32_t)(cnt))
 #endif
 
+/* The face loop's branches (make FACECOUNT=1, Pinboard #537): geo3d_cached_draw_dc
+ * is one fused walk over the faces, so it is counted, never timed per face.
+ * Each GEO3D_FC(k) adds one to its branch; GEO3D_FCI(k) is for the functions
+ * the loop calls that other paths call too, and counts only inside the loop. */
+#ifndef DC_FACE_COUNT
+#define DC_FACE_COUNT 0
+#endif
+
+enum {
+    DC_FC_MODELS,   /* geo3d_cached_draw_dc calls */
+    DC_FC_IN,       /* faces entered */
+    DC_FC_UNP,      /* of them, an unpacked mesh's (m->faces, not STRIPS.PAK) */
+    DC_FC_ZC,       /* the flat key from the corners (z mode 1 or 2) */
+    DC_FC_NOC,      /* a triangle without C: skipped */
+    DC_FC_OTRI,     /* a triangle out of the window: skipped */
+    DC_FC_REAR,     /* geo3d_board_cull: the rear, or link type 0 */
+    DC_FC_GONE,     /* the model's corners not projected (every face out) */
+    DC_FC_OUTQ,     /* a quad out of the window: its diagonal kept */
+    DC_FC_SUB,      /* submitted (geo3d_dc_sface / geo3d_dc_face) */
+    DC_FC_TRI,      /* of them, triangles */
+    DC_FC_MAT,      /* geo3d_palette_color */
+    DC_FC_SPEC,     /* geo3d_board_luma with specular (mode bit 0) */
+    DC_FC_CUT1,     /* a quad cut the other way (geo3d_split_other_way) */
+    DC_FC_CMISS,    /* dp_face_col's memo missed: dp_face_colour ran */
+    DC_FC_C_UL,     /* ... untextured, lb < 0 */
+    DC_FC_C_US,     /* ... untextured, shaded (dp_shade) */
+    DC_FC_C_TL,     /* ... textured, lb < 0 */
+    DC_FC_C_RAMP,   /* ... textured, the ramp (dp_face_ramp) */
+    DC_FC_C_PAL,    /* ... textured, the palette path */
+    DC_FC_TMISS,    /* dp_tex_key's memo missed: dp_tex_get */
+    DC_FC_CLIP,     /* the record needs clipping (DCF_CLIP) */
+    DC_FC_DROP,     /* GEO3D_MAX_TRIS full: dropped */
+    DC_FCS
+};
+
+#if DC_FACE_COUNT
+static struct { uint32_t on; uint32_t n[DC_FCS]; } g_fc;
+#define GEO3D_FC(k)        (g_fc.n[DC_FC_##k]++)
+#define GEO3D_FC_IF(k, c)  (g_fc.n[DC_FC_##k] += (c) ? 1u : 0u)
+#define GEO3D_FCI(k)       (g_fc.n[DC_FC_##k] += g_fc.on)
+#define GEO3D_FCI_N(k, c)  (g_fc.n[DC_FC_##k] += g_fc.on & (uint32_t)(c))
+#define GEO3D_FC_ON(v)     (g_fc.on = (v))
+#endif
+
 #endif
