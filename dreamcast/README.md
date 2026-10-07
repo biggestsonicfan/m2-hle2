@@ -44,9 +44,10 @@ make -C dreamcast OUT=/tmp/dc
 # or with STF's i960 code compiled ahead of time (~1.5x the i960's speed;
 # AOT_COVER=0.99 by default, DREAMCAST-PORT.md #394 and #509)
 make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
-# GEMS=<dir> (default: ../Sonic Gems Collection/m2hle beside this checkout, if
-# it is there) builds in Sega's C from Sonic Gems Collection; GEMS= leaves it
-# out. OPTAB=1 dispatches the interpreter through a handler table (off: it
+# GEMS=<dir> (default: vendor/gems-c, the submodule, if it is checked out:
+# git submodule update --init --recursive vendor/gems-c) builds in Sega's
+# C from Sonic Gems Collection; GEMS= leaves it out. Its gems_all.h is made by
+# its gen_all.py (python3) when make starts. OPTAB=1 dispatches the interpreter through a handler table (off: it
 # saves under 1% here and costs 136 KB).
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
 # (DREAMCAST-PORT.md #471; Flycast stretches it unless its libretro core has
@@ -176,7 +177,8 @@ by object group instead of by the frame that first drew them; it was tried
 and lost (DREAMCAST-PORT.md #508), so the disc's pack is recorded without it.
 
 `sfight.aotmap`, the code `AOT=` compiles, is recorded the same way, with
-Sega's C on as the disc runs it (a `det_digest` built with `M2HLE_GEMS_DIR`):
+Sega's C on as the disc runs it (a `det_digest` built with `M2HLE_GEMS_DIR`,
+which defaults to the `vendor/gems-c` submodule):
 
 ```sh
 det_digest sfight.zip --profile sfight_console --gems --frames 6000 --aot-map 0:6000:att.raw --out /dev/null
