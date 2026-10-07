@@ -1338,6 +1338,20 @@ static uint32_t geo3d_dc_face_look(const geo3d_cface_t *F, float r, float g, flo
 }
 #endif
 
+#if GEO3D_COLOURSTOP
+/* geo3d_dc_face's texture lookup alone (COLOURSTOP): the texture it found. */
+static uint32_t geo3d_dc_face_tex(const geo3d_cface_t *F) {
+    unsigned f = (unsigned)(F->fl + 0.5f);
+    float tx = F->tx, ty = F->ty, tw = F->tw, th = F->th;
+    float wu[4], wv[4];
+    if (tw > 256.0f || th > 256.0f) {
+        memcpy(wu, F->uvu, sizeof wu); memcpy(wv, F->uvv, sizeof wv);
+        dp_big_window(&tx, &ty, &tw, &th, wu, wv, F->is_tri ? 3 : 4);
+    }
+    return (uint32_t)(uintptr_t)dp_face_tex(tx, ty, tw, th, F->fl, f);
+}
+#endif
+
 /* ---- Packed meshes (STRIPS.PAK, dc_strips.h) ------------------------------------- */
 
 /* The texture a packed face names by its key (dcs_tex_key), cut as dp_tex_get
@@ -1410,6 +1424,12 @@ static uint32_t geo3d_dc_sface_look(const geo3d_sface_t *F, float r, float g, fl
     dp_face_col(r, g, b, F->lb, pl, tex != NULL || (textured && !(f & GEO3D_FACE_CHECKER)),
                 (f & GEO3D_FACE_TRANSPARENT) != 0);
     return dp_look_bits(tex);
+}
+#endif
+
+#if GEO3D_COLOURSTOP
+static uint32_t geo3d_dc_sface_tex(const geo3d_sface_t *F) {
+    return (uint32_t)(uintptr_t)(F->tex ? dp_tex_key(F->tex) : NULL);
 }
 #endif
 
