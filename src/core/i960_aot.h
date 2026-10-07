@@ -488,6 +488,74 @@ static uint32_t s_aot_tick;
 static char     s_aot_why[48];   /* why the code is off, for a HUD with no log (the Dreamcast) */
 #define AOT_OFF(...) do { snprintf(s_aot_why, sizeof s_aot_why, __VA_ARGS__); LOG_WARN("aot: %s", s_aot_why); return false; } while (0)
 
+/* Is addr one of the sites the generator kept out of the compiled code? */
+static inline bool aot_hook_known(uint32_t addr) {
+    size_t k = 0;
+    while (k < AOT_NHOOKS && s_aot_hooks[k] != addr) k++;
+    return k < AOT_NHOOKS;
+}
+
+/* The profile's hooks must all be ones the generator kept out, and the ROM
+ * the code it compiled (all of it: this runs when the profile changes). */
+static inline bool aot_check_profile(memory_bus_t *bus, const game_profile_t *p) {
+    for (size_t i = 0; i < p->hook_count; i++)
+        if (!aot_hook_known(p->hooks[i].addr)) AOT_OFF("hook %05X not known to the code", p->hooks[i].addr);
+    /* --gems-i960's sites are hooks too: compiled code would run past one. */
+    for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++)
+        if (!aot_hook_known(g_hle_extra_sites[i])) AOT_OFF("trap %05X not known to the code", g_hle_extra_sites[i]);
+    for (size_t i = 0; p == g_hle_spin_profile && i < g_hle_spin_count; i++)
+        if (!aot_hook_known(g_hle_spin_sites[i])) AOT_OFF("idle loop %05X not known to the code", g_hle_spin_sites[i]);
+    uint32_t h = 2166136261u;
+    for (uint32_t a = 0; a < AOT_ROM_BYTES; a += 4) h = (h ^ mem_read32(bus, a)) * 16777619u;
+    if (h != AOT_FNV) AOT_OFF("the ROM is not the one compiled");
+    return true;
+}
+
+/* How far the region at base is plain pages of the one buffer (AOT_ROMD's):
+ * *data its buffer, NULL when it is paged (AOT_PG) or not there. */
+static inline uint32_t aot_plain_extent(memory_bus_t *bus, uint32_t base, const uint8_t **data) {
+    const mem_region_t *r = mem_find_region(bus, base);
+    uint32_t n = 0;
+    *data = r && r->base == base && !MEM_HOST_PAGED(r->data) ? r->data : NULL;
+    while (*data && n < r->size && MEM_PAGE(bus->rd_page, base + n) == *data + n) n += MEM_PAGE_OFF + 1u;
+    return n < (r ? r->size : 0u) ? n : (r ? r->size : 0u);
+}
+
+#if MEM_HOST_PAGING
+/* The region's size when it is host-paged with no read callback, else 0. */
+static inline uint32_t aot_paged_extent(memory_bus_t *bus, uint32_t base) {
+    const mem_region_t *r = mem_find_region(bus, base);
+    return r && r->base == base && MEM_HOST_PAGED(r->data) && !r->read_cb ? r->size : 0u;
+}
+#endif
+
+/* The devices aot_run's helpers call straight (per slice: ~2% a run). False
+ * when the RAM is not plain memory; the region facts go into the statics. */
+static inline bool aot_check_devices(memory_bus_t *bus) {
+    mem_region_t *g = mem_find_region(bus, COPROGRAM_BASE);
+    for (uint32_t pg = RAM_BASE >> MEM_PAGE_SHIFT; pg < (RAM_BASE + RAM_SIZE) >> MEM_PAGE_SHIFT; pg++) {   /* AOT_RAM's */
+        uint8_t *at = bus->ram + ((pg << MEM_PAGE_SHIFT) - RAM_BASE);
+        if (bus->rd_page[pg] != at || (!M2HLE_DEV_TOOLS && bus->wr_page[pg] != at))
+            AOT_OFF("the RAM is not plain memory");
+    }
+    s_aot_rom_n = aot_plain_extent(bus, ROM_BASE, &s_aot_rom);
+    s_aot_md_n  = aot_plain_extent(bus, MAIN_DATA_BASE, &s_aot_md);
+#if MEM_HOST_PAGING
+    s_aot_rp_n = aot_paged_extent(bus, ROM_BASE);
+    s_aot_mp_n = aot_paged_extent(bus, MAIN_DATA_BASE);
+#endif
+    s_aot_cop_ok = g && g->write_cb == coprogram_write_cb && g->read_cb == coprogram_read_cb
+                && g == mem_find_region(bus, COPROGRAM_BASE + COPROGRAM_SIZE - 4u);
+    g = mem_find_region(bus, GEO_BASE);
+    s_aot_geo_r = g && g->base == GEO_BASE && g->size >= GEO_SIZE && g->write_cb == geo_write_cb
+                && g->read_cb == geo_read_cb && g == mem_find_region(bus, GEO_BASE + GEO_SIZE - 4u) ? g : NULL;
+    g = mem_find_region(bus, GEO_PROGRAM_BASE);
+    s_aot_geop_r = g && g->base == GEO_PROGRAM_BASE && g->size >= GEO_PROGRAM_SIZE
+                && g->write_cb == geo_program_write_cb
+                && g == mem_find_region(bus, GEO_PROGRAM_BASE + GEO_PROGRAM_SIZE - 4u) ? g : NULL;
+    return true;
+}
+
 /* Is the compiled code this board's? The profile's hooks must all be ones the
  * generator kept out, and the ROM the code it compiled (all of it when the
  * profile changes, a few words each slice after that). */
@@ -498,25 +566,7 @@ static inline bool aot_check(memory_bus_t *bus) {
         s_aot_prof = p;
         s_aot_gen  = g_hle_filter_gen;
         s_aot_on = false;
-        for (size_t i = 0; i < p->hook_count; i++) {
-            size_t k = 0;
-            while (k < AOT_NHOOKS && s_aot_hooks[k] != p->hooks[i].addr) k++;
-            if (k == AOT_NHOOKS) AOT_OFF("hook %05X not known to the code", p->hooks[i].addr);
-        }
-        /* --gems-i960's sites are hooks too: compiled code would run past one. */
-        for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++) {
-            size_t k = 0;
-            while (k < AOT_NHOOKS && s_aot_hooks[k] != g_hle_extra_sites[i]) k++;
-            if (k == AOT_NHOOKS) AOT_OFF("trap %05X not known to the code", g_hle_extra_sites[i]);
-        }
-        for (size_t i = 0; p == g_hle_spin_profile && i < g_hle_spin_count; i++) {
-            size_t k = 0;
-            while (k < AOT_NHOOKS && s_aot_hooks[k] != g_hle_spin_sites[i]) k++;
-            if (k == AOT_NHOOKS) AOT_OFF("idle loop %05X not known to the code", g_hle_spin_sites[i]);
-        }
-        uint32_t h = 2166136261u;
-        for (uint32_t a = 0; a < AOT_ROM_BYTES; a += 4) h = (h ^ mem_read32(bus, a)) * 16777619u;
-        if (h != AOT_FNV) AOT_OFF("the ROM is not the one compiled");
+        if (!aot_check_profile(bus, p)) return false;
         s_aot_on = true;
         s_aot_why[0] = 0;
         LOG_INFO("aot: on");
@@ -525,42 +575,7 @@ static inline bool aot_check(memory_bus_t *bus) {
         const uint32_t *w = s_aot_samp[s_aot_tick++ & 255u];
         if (mem_read32(bus, w[0]) != w[1]) { s_aot_on = false; AOT_OFF("the ROM changed"); }
     }
-    if (s_aot_on) {   /* the devices aot_run's helpers call straight (per slice: ~2% a run) */
-        mem_region_t *g = mem_find_region(bus, COPROGRAM_BASE);
-        for (uint32_t pg = RAM_BASE >> MEM_PAGE_SHIFT; pg < (RAM_BASE + RAM_SIZE) >> MEM_PAGE_SHIFT; pg++) {   /* AOT_RAM's */
-            uint8_t *at = bus->ram + ((pg << MEM_PAGE_SHIFT) - RAM_BASE);
-            if (bus->rd_page[pg] != at || (!M2HLE_DEV_TOOLS && bus->wr_page[pg] != at)) {
-                s_aot_on = false; AOT_OFF("the RAM is not plain memory");
-            }
-        }
-        {   /* AOT_ROMD's: how far each is plain pages of the one buffer */
-            const mem_region_t *r = mem_find_region(bus, ROM_BASE);
-            uint32_t n = 0;
-            s_aot_rom = r && r->base == ROM_BASE && !MEM_HOST_PAGED(r->data) ? r->data : NULL;   /* paged: AOT_PG */
-            while (s_aot_rom && n < r->size && MEM_PAGE(bus->rd_page, ROM_BASE + n) == s_aot_rom + n) n += MEM_PAGE_OFF + 1u;
-            s_aot_rom_n = n < (r ? r->size : 0u) ? n : (r ? r->size : 0u);
-            r = mem_find_region(bus, MAIN_DATA_BASE);
-            s_aot_md = r && r->base == MAIN_DATA_BASE && !MEM_HOST_PAGED(r->data) ? r->data : NULL;
-            n = 0;
-            while (s_aot_md && n < r->size && MEM_PAGE(bus->rd_page, MAIN_DATA_BASE + n) == s_aot_md + n) n += MEM_PAGE_OFF + 1u;
-            s_aot_md_n = n < (r ? r->size : 0u) ? n : (r ? r->size : 0u);
-#if MEM_HOST_PAGING
-            r = mem_find_region(bus, ROM_BASE);
-            s_aot_rp_n = r && r->base == ROM_BASE && MEM_HOST_PAGED(r->data) && !r->read_cb ? r->size : 0u;
-            r = mem_find_region(bus, MAIN_DATA_BASE);
-            s_aot_mp_n = r && r->base == MAIN_DATA_BASE && MEM_HOST_PAGED(r->data) && !r->read_cb ? r->size : 0u;
-#endif
-        }
-        s_aot_cop_ok = g && g->write_cb == coprogram_write_cb && g->read_cb == coprogram_read_cb
-                    && g == mem_find_region(bus, COPROGRAM_BASE + COPROGRAM_SIZE - 4u);
-        g = mem_find_region(bus, GEO_BASE);
-        s_aot_geo_r = g && g->base == GEO_BASE && g->size >= GEO_SIZE && g->write_cb == geo_write_cb
-                    && g->read_cb == geo_read_cb && g == mem_find_region(bus, GEO_BASE + GEO_SIZE - 4u) ? g : NULL;
-        g = mem_find_region(bus, GEO_PROGRAM_BASE);
-        s_aot_geop_r = g && g->base == GEO_PROGRAM_BASE && g->size >= GEO_PROGRAM_SIZE
-                    && g->write_cb == geo_program_write_cb
-                    && g == mem_find_region(bus, GEO_PROGRAM_BASE + GEO_PROGRAM_SIZE - 4u) ? g : NULL;
-    }
+    if (s_aot_on && !aot_check_devices(bus)) { s_aot_on = false; return false; }
     return s_aot_on;
 }
 

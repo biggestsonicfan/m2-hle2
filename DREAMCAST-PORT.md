@@ -1458,6 +1458,65 @@ The slice is 6% shorter again, 48% against the refused AOT, and the code is
   11%, the interpreter and the run loop 7%, the COP 4%. The 3D decode and the
   draw are half of it.
 
+## Spaghetti in the port (#522)
+
+SPAGHETTI.md's measure (lizard's modified cyclomatic complexity, the share of
+function code in functions over 20 paths) applied to the port: `tools/spaghetti.py
+--tree dreamcast` measures `dreamcast/` on its own, since the port is not under
+`src/`. At `cfe6b54` (the trunk after #236) the port was 169 functions over
+3,249 lines, and 12 functions over 20 paths held 1,206 of them, **37.1%**
+(against 4.1% in `src/`). The worst: `main` (112 paths over 438 lines),
+`dp_tiles` (67 / 91), `dcs_blob` (45 / 76), `jt_run` (38 / 127), `ds_init`
+(36 / 62), `pg_init` (33 / 78), and in `src/` the port's own `aot_check`
+(68 / 69), which only the Dreamcast build compiles.
+
+Three were untangled, each into named steps called in the old order:
+
+- **`main_dc.c`'s `main`** was the boot, forty locals for the statistics, the
+  run loop, the HUD's three variants, the FPS cap, the frame hash, the bench,
+  the 2 s stats window and the halt screen in one body. The boot is `dc_boot`
+  (with `dc_boot_sincos`, `_cache_size`, `_heap_left`, `_line`, `_calib`), the
+  locals are `dc_stats_t` and the window's `dc_window_t`, and the loop calls
+  `dc_hud_fps_corner`, `dc_hud_live`, `dc_fps_cap`, `dc_hash_frame`,
+  `dc_bench`, `dc_stats_slice` and `dc_stats_window`, which draws the window
+  through `dc_hud_cpu` / `dc_hud_window` (`DC_HUD_PROF`) or `dc_stats_ib_why` /
+  `dc_stats_rows`. 112 paths to 9; the largest piece is `dc_boot` (17). Every
+  row string, row number and reset is where it was, and so are the watchdog
+  (`wdt_pet` first in the loop, off before the halt screen) and `dc_assert`.
+- **`dp_tiles`** (dc_pvr.h) kept its last-seen generations and dirty state in
+  statics and did the pen table, the line-scroll strips, the tile copy, the
+  dirty extents, the CPU redraw, the recolour and the PVR show inline. That is
+  `dp_tiles_state_t` and `dp_tiles_pens`, `_ls`, `_copy`, `_extents`,
+  `_redraw`, `_recolour`, `_show` (which calls `dp_tiles_send`): 67 paths to
+  17 over 23 lines. The state is zero-initialised and the first draw puts the
+  `~0u` sentinels in: a designated initializer put the whole 4.7 KB struct
+  (the dirty blocks, the row spans) into `.data`, and so into 1ST_READ.BIN.
+- **`aot_check`** (src/core/i960_aot.h) is `aot_hook_known`,
+  `aot_check_profile`, `aot_plain_extent`, `aot_paged_extent` and
+  `aot_check_devices`: 68 paths to 9, the largest piece `aot_check_devices`
+  (20). The same `AOT_OFF` messages in the same order, and `s_aot_on` is
+  false before every one.
+
+After: 200 functions over 3,306 lines; 10 over 20 paths hold 677, **20.5%**,
+and nothing is over 50 (`dcs_blob` 45, `jt_run` 38, `ds_init` 36, `pg_init`
+33 are the next candidates). `src/` went from 4.1% to 3.9%.
+
+How it was checked, on `LINK=1` builds of the tree before and after:
+
+- **The board is identical.** `tools/dc-lockstep.py --boot --no-mame --frames
+  500` (Flycast against the desktop `det_digest`, every frame's CRC of work
+  RAM, RAM, bufferram, tile RAM and the palette) on a disc of each build:
+  `desktop: identical` in every region for all 500 frames, before and after.
+- **The pictures are identical but for the HUD's own numbers.** `--shots 50`'s
+  ten frames from each disc differ only in the text rows (the frame counter,
+  fps and ms the host happened to measure); the heap row reads 640 KB on both.
+  The first version reported 16384 KB: inlined into `dc_boot`, the probe's
+  `malloc` / `free` pair was removed by gcc together with the failure test, so
+  `dc_boot_heap_left` now uses the pointer in an `asm volatile`.
+- **The compiler says the same things.** Both builds give the same 1,044
+  warnings, line for line (`-Wall -Wextra`); the text is 1.4 KB smaller
+  (1,699,280 against 1,700,704) and `.data` and `.bss` are within 200 bytes.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format

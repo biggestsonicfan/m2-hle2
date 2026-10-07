@@ -4,7 +4,10 @@
 Runs lizard (pip install lizard) over src/ and prints the share of
 hand-written function code that sits in functions too branchy to follow.
 
-  python3 tools/spaghetti.py [--threshold 20] [--top 25]
+  python3 tools/spaghetti.py [--threshold 20] [--top 25] [--tree src]
+
+--tree names another directory of the repo to measure instead of src/:
+`--tree dreamcast` is the Dreamcast port (#522).
 
 Branchiness is lizard's *modified* cyclomatic complexity (-m: a whole switch
 counts as one decision, so a flat dispatch table is not penalised for its
@@ -56,14 +59,15 @@ def blank_static_asserts(text):
 
 
 _tree = None
+TREE = 'src'   # the directory measured, relative to the repo (--tree)
 
 
 def source_tree():
-    """A copy of src/ that lizard can parse, under the same relative paths."""
+    """A copy of TREE that lizard can parse, under the same relative paths."""
     global _tree
     if _tree is None:
         _tree = tempfile.TemporaryDirectory(prefix='spaghetti-')
-        for d, _, files in os.walk(os.path.join(ROOT, 'src')):
+        for d, _, files in os.walk(os.path.join(ROOT, TREE)):
             rel = os.path.relpath(d, ROOT)
             os.makedirs(os.path.join(_tree.name, rel), exist_ok=True)
             for f in files:
@@ -78,7 +82,7 @@ def source_tree():
 
 
 def lizard(*extra):
-    cmd = [sys.executable, '-m', 'lizard', '-l', 'c', '-l', 'cpp', *extra, 'src']
+    cmd = [sys.executable, '-m', 'lizard', '-l', 'c', '-l', 'cpp', *extra, TREE]
     try:
         out = subprocess.run(cmd, cwd=source_tree(), capture_output=True, text=True, check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -98,7 +102,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--threshold', type=int, default=20, help='modified CCN above which a function counts (20)')
     ap.add_argument('--top', type=int, default=25, help='list this many of the worst')
+    ap.add_argument('--tree', default='src', help='the directory to measure, relative to the repo (src)')
     a = ap.parse_args()
+    global TREE
+    TREE = a.tree
 
     every = list(functions())
     gen = [f for f in every if f['file'].endswith(GENERATED)]
@@ -110,7 +117,7 @@ def main():
         n = sum(f['nloc'] for f in fs)
         return f'{len(fs):5d} functions {n:7d} lines {100 * n / total:5.1f}%'
 
-    print(f'hand-written: {len(hand)} functions, {total} lines of code in functions '
+    print(f'{TREE}/ hand-written: {len(hand)} functions, {total} lines of code in functions '
           f'(generated, left out: {sum(f["nloc"] for f in gen)} lines)')
     print(f'dispatchers           {share(disp)}')
     for th in sorted({15, 20, 30, 50, a.threshold}):

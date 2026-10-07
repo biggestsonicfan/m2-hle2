@@ -119,10 +119,14 @@ CFLAGS     += -DM2HLE_GEMS -I"$(GEMS)"
 GEMS_HOOKS := $(shell grep -o '{ 0x[0-9A-Fa-f]*, gfn_' "$(GEMS)/gems_all.h" | sed 's/{ \(0x[0-9A-Fa-f]*\),.*/--hook \1/')
 endif
 
-# HUD=prof's ID line names the commit built (-dirty: with changes not in it).
-ifeq ($(PROF),1)
+# The commit built (-dirty: with changes not in it), for HUD=prof's ID line
+# and the assertion screen; the build number (r + the commits up to it, as the
+# canary's desktop builds count) and RELEASE="Alpha 0.3", the release's name,
+# for HUD=prof's VR line (#526).
 CFLAGS += -DDC_GIT='"$(shell git -C $(REPO) describe --always --abbrev=7 --dirty 2>/dev/null || echo unknown)"'
-endif
+CFLAGS += -DDC_BUILD='"r$(shell git -C $(REPO) rev-list --count HEAD 2>/dev/null || echo 0)"'
+RELEASE ?=
+CFLAGS += $(if $(RELEASE),-DDC_RELEASE='"$(RELEASE)"')
 
 AOT_GEN :=
 ifneq ($(AOT),)
@@ -167,17 +171,17 @@ $(OUT)/dc_prof_stub.c: tools/dc_profmap.py
 $(OUT)/dc_prof_stub.o $(OUT)/dc_prof_map.o: $(OUT)/%.o: $(OUT)/%.c
 	kos-cc -O1 -c $< -o $@
 $(OUT)/m2hle2_pass1.elf: $(OBJS) $(OUT)/dc_prof_stub.o
-	kos-cc -o $@ $^ $(SDLOG_LIBS) -lGL -lpthread -lm
+	kos-cc -o $@ $^ -lpthread -lm
 $(OUT)/dc_prof_map.c: $(OUT)/m2hle2_pass1.elf tools/dc_profmap.py
 	$(NM) -n -S $< | python3 tools/dc_profmap.py > $@
 $(OUT)/m2hle2.elf: $(OBJS) $(OUT)/dc_prof_map.o
-	kos-cc -o $@ $^ $(SDLOG_LIBS) -lGL -lpthread -lm
+	kos-cc -o $@ $^ -lpthread -lm
 	$(NM) -n $(OUT)/m2hle2_pass1.elf | grep ' [tTW] ' > $(OUT)/pass1.syms
 	$(NM) -n $@ | grep ' [tTW] ' > $(OUT)/pass2.syms
 	cmp -s $(OUT)/pass1.syms $(OUT)/pass2.syms || { echo "HUD=prof: the code moved between the two links"; rm -f $@; exit 1; }
 else
 $(OUT)/m2hle2.elf: $(OBJS)
-	kos-cc -o $@ $(OBJS) $(SDLOG_LIBS) -lGL -lpthread -lm
+	kos-cc -o $@ $(OBJS) -lpthread -lm
 endif
 
 # A GD-ROM image boots its program unscrambled (a CD-R would need scramble).
