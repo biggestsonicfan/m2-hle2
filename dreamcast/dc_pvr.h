@@ -1237,6 +1237,25 @@ static inline void dp_face_col(float r, float g, float b, float lb, float pl, bo
     }
 }
 
+#if GEO3D_FACECOLSTOP
+/* dp_face_col's memo compare alone (FACECOLSTOP): a hit answers the memo's
+ * colour words, a miss keeps the memo's inputs as dp_face_col does (so the
+ * same faces hit) and answers the key that missed, with no dp_face_colour. */
+static inline uint32_t dp_face_col_memo(float r, float g, float b, float lb, float pl, bool ctex, bool ctrans) {
+    if (r != g_dp_memo.c.r || g != g_dp_memo.c.g || b != g_dp_memo.c.b || pl != g_dp_memo.c.pl ||
+            lb != g_dp_memo.c.lb || ctex != g_dp_memo.ctex || ctrans != g_dp_memo.ctrans) {
+        g_dp_memo.c = (dp_col_in_t){ r, g, b, lb, pl };
+        g_dp_memo.ctex = ctex;
+        g_dp_memo.ctrans = ctrans;
+        uint32_t w[5];
+        memcpy(&w[0], &r, 4); memcpy(&w[1], &g, 4); memcpy(&w[2], &b, 4);
+        memcpy(&w[3], &lb, 4); memcpy(&w[4], &pl, 4);
+        return w[0] ^ (w[1] << 1) ^ (w[2] << 2) ^ (w[3] << 3) ^ w[4] ^ (uint32_t)ctex << 30 ^ (uint32_t)ctrans << 31;
+    }
+    return g_dp_memo.base ^ (g_dp_memo.off << 1) ^ ((uint32_t)g_dp_memo.pal << 24);
+}
+#endif
+
 /* One triangle's record: corners a, b, c of the pool, texture coordinates in
  * texels (u[i], v[i]: corner i), the face's kind bits and header variant, and
  * key the board's flat key or < 0 for the nearest corner's. */
@@ -1352,6 +1371,23 @@ static uint32_t geo3d_dc_face_tex(const geo3d_cface_t *F) {
 }
 #endif
 
+#if GEO3D_FACECOLSTOP
+/* geo3d_dc_face's texture lookup and colour memo compare (FACECOLSTOP). */
+static uint32_t geo3d_dc_face_memo(const geo3d_cface_t *F, float r, float g, float b, float pl) {
+    unsigned f = (unsigned)(F->fl + 0.5f);
+    float tx = F->tx, ty = F->ty, tw = F->tw, th = F->th;
+    float wu[4], wv[4];
+    if (tw > 256.0f || th > 256.0f) {
+        memcpy(wu, F->uvu, sizeof wu); memcpy(wv, F->uvv, sizeof wv);
+        dp_big_window(&tx, &ty, &tw, &th, wu, wv, F->is_tri ? 3 : 4);
+    }
+    dc_tex_t *tex = dp_face_tex(tx, ty, tw, th, F->fl, f);
+    return (uint32_t)(uintptr_t)tex ^
+           dp_face_col_memo(r, g, b, F->lb, pl, tex != NULL || (F->tw > 0.0f && !(f & GEO3D_FACE_CHECKER)),
+                            (f & GEO3D_FACE_TRANSPARENT) != 0);
+}
+#endif
+
 /* ---- Packed meshes (STRIPS.PAK, dc_strips.h) ------------------------------------- */
 
 /* The texture a packed face names by its key (dcs_tex_key), cut as dp_tex_get
@@ -1430,6 +1466,17 @@ static uint32_t geo3d_dc_sface_look(const geo3d_sface_t *F, float r, float g, fl
 #if GEO3D_COLOURSTOP
 static uint32_t geo3d_dc_sface_tex(const geo3d_sface_t *F) {
     return (uint32_t)(uintptr_t)(F->tex ? dp_tex_key(F->tex) : NULL);
+}
+#endif
+
+#if GEO3D_FACECOLSTOP
+static uint32_t geo3d_dc_sface_memo(const geo3d_sface_t *F, float r, float g, float b, float pl) {
+    const unsigned f = F->fl;
+    const bool textured = (F->bits & GEO3D_SF_TEXTURED) != 0;
+    dc_tex_t *tex = F->tex ? dp_tex_key(F->tex) : NULL;
+    return (uint32_t)(uintptr_t)tex ^
+           dp_face_col_memo(r, g, b, F->lb, pl, tex != NULL || (textured && !(f & GEO3D_FACE_CHECKER)),
+                            (f & GEO3D_FACE_TRANSPARENT) != 0);
 }
 #endif
 

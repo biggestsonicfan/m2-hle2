@@ -82,7 +82,15 @@
 #ifndef GEO3D_COLOURSTOP
 #define GEO3D_COLOURSTOP 0
 #endif
-#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP
+/* FACECOLSTOP=1 (make FACECOLSTOP=1, Pinboard #546): COLOURSTOP plus dp_face_col's
+ * memo compare. A drawn face gets its texture and the compare; a hit reads the
+ * memo's colour, a miss keeps the memo's inputs but calls no dp_face_colour.
+ * No strip put or z key. The texture and what the compare gave (the memo's
+ * colour, or the key that missed) go into the running xor with TAILHALF's words. */
+#ifndef GEO3D_FACECOLSTOP
+#define GEO3D_FACECOLSTOP 0
+#endif
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP
 static volatile uint32_t g_geo3d_facestop_sink;
 #endif
 
@@ -2397,6 +2405,10 @@ static uint32_t geo3d_dc_face_look(const geo3d_cface_t *f, float r, float g, flo
 /* geo3d_dc_face's texture lookup alone; returns the texture it found. */
 static uint32_t geo3d_dc_face_tex(const geo3d_cface_t *f);
 #endif
+#if GEO3D_FACECOLSTOP
+/* geo3d_dc_face's texture lookup and colour memo compare; returns what they gave. */
+static uint32_t geo3d_dc_face_memo(const geo3d_cface_t *f, float r, float g, float b, float pl);
+#endif
 #endif
 
 /* ---- Strip pack ------------------------------------------------------------------
@@ -2451,6 +2463,10 @@ static uint32_t geo3d_dc_sface_look(const geo3d_sface_t *f, float r, float g, fl
 #if GEO3D_COLOURSTOP
 /* geo3d_dc_sface's texture lookup alone; returns the texture it found. */
 static uint32_t geo3d_dc_sface_tex(const geo3d_sface_t *f);
+#endif
+#if GEO3D_FACECOLSTOP
+/* geo3d_dc_sface's texture lookup and colour memo compare; returns what they gave. */
+static uint32_t geo3d_dc_sface_memo(const geo3d_sface_t *f, float r, float g, float b, float pl);
 #endif
 #endif
 
@@ -3387,7 +3403,7 @@ static inline uint32_t geo3d_zkeystop_bits(float z) {
     return a;
 }
 #endif
-#if GEO3D_TAILHALF || GEO3D_COLOURSTOP
+#if GEO3D_TAILHALF || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP
 /* The words TAILHALF (and COLOURSTOP) keeps alive: the face's colour, luma, texture LOD and cut. */
 static inline uint32_t geo3d_tailhalf_bits(float r, float g, float b, float pl, int cut) {
     uint32_t w[5];
@@ -3404,7 +3420,7 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
     const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
     GEO3D_FC(MODELS);
     GEO3D_FC_ON(1u);
-#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP
     uint32_t fs = 0;
 #endif
 #if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
@@ -3453,6 +3469,10 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
 #endif
 #if GEO3D_COLOURSTOP
         fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_sface_tex(f);
+        continue;
+#endif
+#if GEO3D_FACECOLSTOP
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_sface_memo(f, fr, fg, fb, pl);
         continue;
 #endif
 #if GEO3D_ZKEYSTOP
@@ -3504,6 +3524,10 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_face_tex(f);
         continue;
 #endif
+#if GEO3D_FACECOLSTOP
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_face_memo(f, fr, fg, fb, pl);
+        continue;
+#endif
 #if GEO3D_ZKEYSTOP
         fs ^= geo3d_zkeystop_bits(z);
         geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? 0 : -1);
@@ -3512,7 +3536,7 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
     GEO3D_FC_ON(0u);
-#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP
     g_geo3d_facestop_sink ^= fs;
 #endif
     GEO3D_LAP_N(FACES, m->n_faces);
