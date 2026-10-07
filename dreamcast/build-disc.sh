@@ -203,6 +203,7 @@ export_answers() { local k; for k in $ALL_KEYS; do v="DCB_$k"; [ -n "${!v+x}" ] 
 save_answers() {
     local k v
     for k in $ALL_KEYS; do v="DCB_$k"; [ -n "${!v+x}" ] && printf 'DCB_%s=%q\n' "$k" "${!v}"; done > "$DCB_WORK/last.conf"
+    return 0
 }
 
 # ---- Make's command line --------------------------------------------------------
