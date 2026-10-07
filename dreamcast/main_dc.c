@@ -99,11 +99,10 @@ KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM);
  * key=value fields, then a space and the CRC-8 of all that before it in two
  * hex digits (tools/hud_font5x7.py crc8): a reader of the video keeps only
  * lines whose check holds. The top band: LV, every frame drawn; ID, once; the bench (B0-B3) and AO when they come. The bottom band: a 2-s
- * window's numbers, its lines all the same window's. R on the pad shows the
- * top band only, then nothing, then all of it again. Tools/hud_read.py
- * reads it; dreamcast/README.md says what each field is. */
-#define HUD_TOP_ROWS 7
-enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO,
+ * window's numbers, its lines all the same window's. The panel starts hidden
+ * and R on the pad shows or hides it (#526). Tools/hud_read.py reads it;
+ * dreamcast/README.md says what each field is. */
+enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO, HUD_VR,
        HUD_WN = 14, HUD_FT, HUD_CP, HUD_PG, HUD_LD, HUD_RD, HUD_DR, HUD_MS, HUD_TX, HUD_SN,
        HUD_HW, HUD_PV, HUD_G0, HUD_G1, HUD_S0, HUD_S1 };
 static uint32_t s_hud_win;   /* the window's number */
@@ -243,13 +242,10 @@ static void dc_pad(void) {
             if (st->buttons & map[i].mask) now |= 1u << map[i].act;
         if (st->ltrig > 128) now |= 1u << GAME_INPUT_P1_COIN;
 #if DC_HUD_PROF
-        {   /* R: the whole panel, its top band only, none of it, in turn */
-            static int r_was, mode;
+        {   /* R: the panel on or off (off at boot, dc_boot) */
+            static int r_was;
             int r = st->rtrig > 128;
-            if (r && !r_was) {
-                mode = (mode + 1) % 3;
-                g_dp.text_hide = mode == 0 ? 0 : mode == 1 ? ~((1u << HUD_TOP_ROWS) - 1) : ~0u;
-            }
+            if (r && !r_was) g_dp.text_hide = g_dp.text_hide ? 0 : ~0u;
             r_was = r;
         }
 #endif
@@ -429,6 +425,19 @@ static void dc_hud_id(void) {
              (vid_mode->flags & VID_INTERLACE) != 0, (vid_mode->flags & VID_PAL) != 0);
     hud_line(HUD_ID, "ID", 0, line);
 }
+
+/* The release and the build number, once: the VR line. */
+static void dc_hud_version(void) {
+#ifndef DC_RELEASE
+#define DC_RELEASE "dev"
+#endif
+#ifndef DC_BUILD
+#define DC_BUILD "r0"
+#endif
+    char line[96];
+    snprintf(line, sizeof line, "%s build=%s-%.7s", DC_RELEASE, DC_BUILD, DC_GIT);
+    hud_line(HUD_VR, "VR", 0, line);
+}
 #endif
 
 /* The board up and running: the picture, the sound, the ROM off the disc, the
@@ -483,6 +492,8 @@ static void dc_boot(uint32_t *cache, uint32_t *left) {
     dc_prof_init();   /* off: the HW line says so */
     for (int r = 0; r < DC_TEXT_ROWS; r++) dp_text_row(r, "");   /* the boot lines go */
     dc_hud_id();
+    dc_hud_version();
+    g_dp.text_hide = ~0u;   /* the panel starts hidden: R shows it */
 #endif
 }
 
