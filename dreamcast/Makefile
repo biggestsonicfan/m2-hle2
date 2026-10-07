@@ -171,17 +171,17 @@ $(OUT)/dc_prof_stub.c: tools/dc_profmap.py
 $(OUT)/dc_prof_stub.o $(OUT)/dc_prof_map.o: $(OUT)/%.o: $(OUT)/%.c
 	kos-cc -O1 -c $< -o $@
 $(OUT)/m2hle2_pass1.elf: $(OBJS) $(OUT)/dc_prof_stub.o
-	kos-cc -o $@ $^ -lpthread -lm
+	kos-cc -o $@ $^ $(SDLOG_LIBS) -lpthread -lm
 $(OUT)/dc_prof_map.c: $(OUT)/m2hle2_pass1.elf tools/dc_profmap.py
 	$(NM) -n -S $< | python3 tools/dc_profmap.py > $@
 $(OUT)/m2hle2.elf: $(OBJS) $(OUT)/dc_prof_map.o
-	kos-cc -o $@ $^ -lpthread -lm
+	kos-cc -o $@ $^ $(SDLOG_LIBS) -lpthread -lm
 	$(NM) -n $(OUT)/m2hle2_pass1.elf | grep ' [tTW] ' > $(OUT)/pass1.syms
 	$(NM) -n $@ | grep ' [tTW] ' > $(OUT)/pass2.syms
 	cmp -s $(OUT)/pass1.syms $(OUT)/pass2.syms || { echo "HUD=prof: the code moved between the two links"; rm -f $@; exit 1; }
 else
 $(OUT)/m2hle2.elf: $(OBJS)
-	kos-cc -o $@ $(OBJS) -lpthread -lm
+	kos-cc -o $@ $(OBJS) $(SDLOG_LIBS) -lpthread -lm
 endif
 
 # A GD-ROM image boots its program unscrambled (a CD-R would need scramble).
