@@ -1316,6 +1316,28 @@ static void geo3d_dc_face(int v0, const geo3d_cface_t *F, int cut, float r, floa
     }
 }
 
+#if GEO3D_STRIPSTOP
+/* What a face's lookups found (STRIPSTOP): its texture and the colour memo's
+ * words, which dp_strip_put / dp_tri_put would have copied into the record. */
+static inline uint32_t dp_look_bits(const dc_tex_t *tex) {
+    return (uint32_t)(uintptr_t)tex ^ g_dp_memo.base ^ (g_dp_memo.off << 1) ^ ((uint32_t)g_dp_memo.pal << 24);
+}
+
+static uint32_t geo3d_dc_face_look(const geo3d_cface_t *F, float r, float g, float b, float pl) {
+    unsigned f = (unsigned)(F->fl + 0.5f);
+    float tx = F->tx, ty = F->ty, tw = F->tw, th = F->th;
+    float wu[4], wv[4];
+    if (tw > 256.0f || th > 256.0f) {
+        memcpy(wu, F->uvu, sizeof wu); memcpy(wv, F->uvv, sizeof wv);
+        dp_big_window(&tx, &ty, &tw, &th, wu, wv, F->is_tri ? 3 : 4);
+    }
+    dc_tex_t *tex = dp_face_tex(tx, ty, tw, th, F->fl, f);
+    dp_face_col(r, g, b, F->lb, pl, tex != NULL || (F->tw > 0.0f && !(f & GEO3D_FACE_CHECKER)),
+                (f & GEO3D_FACE_TRANSPARENT) != 0);
+    return dp_look_bits(tex);
+}
+#endif
+
 /* ---- Packed meshes (STRIPS.PAK, dc_strips.h) ------------------------------------- */
 
 /* The texture a packed face names by its key (dcs_tex_key), cut as dp_tex_get
@@ -1379,6 +1401,17 @@ static void geo3d_dc_sface(int v0, const geo3d_sface_t *F, const geo3d_svert_t *
     static const int o1[4] = { 0, 1, 2, 3 }, o2[4] = { 1, 0, 3, 2 };
     dp_strip_put(v0, F, s, cut == 2 ? o2 : o1, cut == 0 ? 3 : 4, kind, var, tex, key);
 }
+
+#if GEO3D_STRIPSTOP
+static uint32_t geo3d_dc_sface_look(const geo3d_sface_t *F, float r, float g, float b, float pl) {
+    const unsigned f = F->fl;
+    const bool textured = (F->bits & GEO3D_SF_TEXTURED) != 0;
+    dc_tex_t *tex = F->tex ? dp_tex_key(F->tex) : NULL;
+    dp_face_col(r, g, b, F->lb, pl, tex != NULL || (textured && !(f & GEO3D_FACE_CHECKER)),
+                (f & GEO3D_FACE_TRANSPARENT) != 0);
+    return dp_look_bits(tex);
+}
+#endif
 
 /* geo3d_mesh_get's: the packed mesh m names, if STRIPS.PAK has it, copied
  * into the arena at at (room bytes). */

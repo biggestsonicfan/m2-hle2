@@ -876,6 +876,51 @@ steps 9-11 608 ms (under 700). The next pin's target is
 `geo3d_dc_sface` and what it calls (colour, texture, strip put, z-key) as a
 whole; nothing inside it was opened here. Lighting cannot buy 30 fps alone.
 
+### Step 12's lookups against strip put + z-key (#541, at b98a3f0)
+
+HEAD was b98a3f0 (#540's TAILHALF commit, PR #246), unmoved. The default
+baseline, every switch off, matched #540's default row in every number and
+the hash.
+
+`make STRIPSTOP=1` (`GEO3D_STRIPSTOP`, geo3d.h, off by default, not combined
+with FACESTOP or TAILHALF) runs the face loop through steps 1-11 and step 12's
+lookups: `dp_tex_key` (`dp_face_tex` unpacked), with `dp_tex_get` on a miss,
+and `dp_face_col`, with `dp_face_colour` on a miss, ramp included
+(`geo3d_dc_sface_look` / `geo3d_dc_face_look`, dc_pvr.h). It then calls no
+`dp_strip_put` / `dp_tri_put` and does not run step 13 (`geo3d_board_zkey`).
+Faces that returned before step 12 still do. The sink is the same running
+xor: the texture pointer the key returns, the colour memo `dp_face_col` leaves
+(base, offset, palette) and the cut. It is stored to the volatile once per
+model. Proof from `dp_decode`'s disassembly against the default build:
+`dp_face_colour` and `dp_tex_get` are still called (2 references each, as in
+the default). `dp_tri_put` has no symbol at all, and the inlined
+`dp_strip_put`'s stores are gone (`g_dcf_key` and `g_dcf` 1 → 0, `g_dcf_n`
+5 → 1). The function goes from 13652 to 13096 bytes.
+
+| frames 3500-3900, SH-4 timer time | total | sl / dr | ti / **sc** / so / su | hash |
+|---|---|---|---|---|
+| b98a3f0, default | 14060 | 5226 / 8769 | 453 / **7040** / 217 / 1046 | 634d853f |
+| b98a3f0, STRIPSTOP=1 | 11164 | 5235 / 5871 | 453 / **5311** / 41 / 57 | 634d853f |
+| 3a45608, TAILHALF=1 (#540) | 9705 | 5207 / 4454 | 463 / **3885** / 41 / 59 | 634d853f |
+
+- **Lookups** (colour and texture: `dp_face_col` / `dp_face_colour`,
+  `dp_tex_key` / `dp_tex_get`) = 5311 − 3885 = **1426 ms**
+- **Strip put + z-key** (`dp_strip_put`, `geo3d_board_zkey`) =
+  7040 − 5311 = **1729 ms**
+- Sum 3155 ms, #540's steps 12-13 to the millisecond. STRIPSTOP's sc is above
+  TAILHALF's, so steps 9-11 still ran, and below the default's, so the skip
+  happened.
+
+So and su fall because nothing was queued; that is outside the scan and in
+neither half. The STRIPSTOP picture is wrong, as intended; the frame-1500
+hash stays 634d853f because that is board state, and it proves nothing here.
+The default build with the switch present is 8 bytes longer than b98a3f0's
+(the layout shifts), and benches the same, every number and the hash.
+
+**Verdict: both halves are over 700 ms.** Strip put + z-key is 1729 ms,
+the lookups 1426 ms. The larger, strip put + z-key, is the next pin's target;
+no function inside either half was opened here.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
