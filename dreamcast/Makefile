@@ -36,6 +36,14 @@ HASH_FRAME ?= 0
 # tools/dc-lockstep.py). LINK_GEMS=1 keeps Gems on in it.
 LINK ?= 0
 LINK_GEMS ?= 0
+# SDLOG=1: everything printed, stats rows and the board's log included, to
+# M2LOGnnn.TXT on a FAT SD card on the serial port (dc_sdlog.h). The port is
+# the card's: no LINK with it.
+SDLOG ?= 0
+ifeq ($(SDLOG)$(LINK),11)
+$(error SDLOG=1 and LINK=1 both want the serial port)
+endif
+SDLOG_LIBS := $(if $(filter 1,$(SDLOG)),-lkosfat)
 # The link's floats have to be the board's, so no a*b+c is fused into the
 # SH-4's FMAC (the desktop builds' -ffp-contract=off, CMakeLists.txt).
 LINK_CFLAGS := $(if $(filter 1,$(LINK)),-ffp-contract=off)
@@ -92,7 +100,7 @@ CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address -in
           -DM2HLE_VERSION='"dc"' -DM2HLE_DEV_TOOLS=0 \
           -DGEO_CAPTURE_SIZE=1 -DLOG_MAX_LINES=64 -DNDEBUG -DM2HLE_NO_ZIP \
           -DGEO3D_MAX_LINES=16 -DGEO3D_MAX_TRIS=4096 -DGEO3D_TRI_BUF=1 -DGEO3D_DC_SINK -DGEO3D_MESH_CACHE_SLOTS=256u \
-          -DGEO3D_MESH_ARENA=0x100000u $(if $(filter 1,$(STRIPS)),-DGEO3D_STRIPS) -DMEM_COUNT=0 -DMEM_PAGE_SHIFT=14 -DMEM_PAGES=0x4C00u -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t -DI960_BLOCKS=1 -DIB_ENTRIES=2048u -DIB_POOL=$(IB_POOL) -DI960_JIT=$(JIT) -DIB_JIT_SELFTEST=$(JIT_TEST) -DIB_JIT_ON=$(JIT_ON) -DDC_HASH_FRAME=$(HASH_FRAME) -DDC_LINK=$(LINK) -DDC_LINK_GEMS=$(LINK_GEMS) -DI960_OPTABLE=$(OPTAB) -DDC_HOST_MATH=$(HOST_MATH) -DDC_FRAME512=$(FRAME512) $(VIEW_CFLAGS) -DDC_FILL=$(FILL) -DDC_FPS_CAP=$(FPS_CAP) -DDC_HUD_MIN=$(if $(filter min none,$(HUD)),1,0) -DDC_HUD_NONE=$(if $(filter none,$(HUD)),1,0) -DDC_HUD_PROF=$(PROF) $(LINK_CFLAGS) $(EXTRA) \
+          -DGEO3D_MESH_ARENA=0x100000u $(if $(filter 1,$(STRIPS)),-DGEO3D_STRIPS) -DMEM_COUNT=0 -DMEM_PAGE_SHIFT=14 -DMEM_PAGES=0x4C00u -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t -DI960_BLOCKS=1 -DIB_ENTRIES=2048u -DIB_POOL=$(IB_POOL) -DI960_JIT=$(JIT) -DIB_JIT_SELFTEST=$(JIT_TEST) -DIB_JIT_ON=$(JIT_ON) -DDC_HASH_FRAME=$(HASH_FRAME) -DDC_LINK=$(LINK) -DDC_SDLOG=$(SDLOG) -DDC_LINK_GEMS=$(LINK_GEMS) -DI960_OPTABLE=$(OPTAB) -DDC_HOST_MATH=$(HOST_MATH) -DDC_FRAME512=$(FRAME512) $(VIEW_CFLAGS) -DDC_FILL=$(FILL) -DDC_FPS_CAP=$(FPS_CAP) -DDC_HUD_MIN=$(if $(filter min none,$(HUD)),1,0) -DDC_HUD_NONE=$(if $(filter none,$(HUD)),1,0) -DDC_HUD_PROF=$(PROF) $(LINK_CFLAGS) $(EXTRA) \
           -DSOUND_RAM_SIZE=0x1000u -DSOUND_OUT_FRAMES=1024u -DM68K_ROM_SIZE=0x10000u -DGEO_PUB_COPIES=1 -DM2_NO_NETPLAY \
           -I$(REPO)/src -I$(REPO)/src/board -I$(REPO)/src/core -I$(REPO)/src/ui \
           -I$(REPO)/src/profiles -I$(REPO)/src/net -I. \
@@ -151,7 +159,7 @@ $(OUT)/aot_gen.h: $(AOT_MAP) $(AOT) $(REPO)/tools/i960_aot.py $(REPO)/src/board/
 	mkdir -p $(OUT)
 	python3 $(REPO)/tools/i960_aot.py --map $(AOT_MAP) --rom "$(AOT)" $(AOT_ARGS) --out $@
 
-$(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_strips.h dc_sound.h dc_pvr.h dc_jit_test.h dc_link.h dc_prof.h dc_hudfont.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN) $(OUT)/flags.stamp
+$(OUT)/main_dc.o: main_dc.c dc_math.h dc_paged.h dc_pager.h dc_layout.h dc_strips.h dc_sound.h dc_pvr.h dc_jit_test.h dc_link.h dc_sdlog.h dc_prof.h dc_hudfont.h $(wildcard $(REPO)/src/*/*.h) $(AOT_GEN) $(OUT)/flags.stamp
 	mkdir -p $(OUT)
 	kos-cc $(CFLAGS) -c $< -o $@
 

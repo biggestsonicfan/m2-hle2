@@ -38,8 +38,14 @@
 #ifndef DC_HASH_FRAME
 #define DC_HASH_FRAME 0
 #endif
+/* -DDC_SDLOG=1 (make SDLOG=1): everything printed, the stats rows and the
+ * board's log included, to a file on an SD card on the serial port
+ * (dc_sdlog.h, #519). It prints the stats as DC_STATS_DBGIO does. */
+#ifndef DC_SDLOG
+#define DC_SDLOG 0
+#endif
 #ifndef DC_STATS_DBGIO
-#define DC_STATS_DBGIO 0
+#define DC_STATS_DBGIO DC_SDLOG
 #endif
 #ifndef DC_BENCH_F0
 #define DC_BENCH_F0 3500u   /* the fight's frames the bench line times */
@@ -91,7 +97,8 @@
 #include "dc_link.h"
 #endif
 
-KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM);
+/* printf needs KOS's console pty: without it stdout is no file at all. */
+KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM | (DC_STATS_DBGIO ? INIT_FS_PTY : 0));
 
 #if DC_HUD_PROF
 /* HUD=prof's panel, rows of dc_pvr.h's 8x16 font. A line is a two-letter
@@ -125,6 +132,10 @@ static void hud_line(int row, const char *tag, int win, const char *body) {
     if (n > 74) { n = 74; l[73] = '>'; }
     sprintf(l + n, " %02X", hud_crc8(l, n));
     dp_text_row(row, l);
+    if (DC_SDLOG && row != HUD_LV) {   /* the whole line, no check; LV (every frame) left out */
+        if (win) printf("%s %04u %s\n", tag, (unsigned)(s_hud_win % 10000u), body);
+        else printf("%s %s\n", tag, body);
+    }
 }
 
 /* ms to a tenth, as "%u.%u" */
@@ -320,6 +331,9 @@ static void dc_stop(const char *why) {
 #if DC_HUD_PROF
 #include "dc_prof.h"
 #endif
+#if DC_SDLOG
+#include "dc_sdlog.h"
+#endif
 #ifdef IB_WHY
 static char g_calib[64];
 #endif
@@ -357,14 +371,17 @@ static void dc_boot_sincos(void) {
 static uint32_t dc_boot_cache_size(void) {
     const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10);
     uint32_t cache = 8u << 20;
+    if (DC_STATS_DBGIO) dbgio_disable();   /* KOS says "Out of memory" at every miss, which is the point */
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
         if ((p = memalign(16384, cache + keep))) { free(p); break; }
+    if (DC_STATS_DBGIO) dbgio_enable();
     return cache;
 }
 
 /* What the heap has left once the board is up, in bytes (to 16 MB). */
 static uint32_t dc_boot_heap_left(void) {
     uint32_t left = 0;
+    if (DC_STATS_DBGIO) dbgio_disable();
     for (void *p; left < (16u << 20); left += 64u << 10) {
         if (!(p = malloc(left + (64u << 10)))) break;
         /* The pointer is used, or gcc drops the malloc/free pair and with it
@@ -372,6 +389,7 @@ static uint32_t dc_boot_heap_left(void) {
         __asm__ __volatile__("" : : "r"(p) : "memory");
         free(p);
     }
+    if (DC_STATS_DBGIO) dbgio_enable();
     return left;
 }
 
@@ -448,6 +466,17 @@ static void dc_boot(uint32_t *cache, uint32_t *left) {
     dc_video_mode();
     if (dp_init() != 0) { printf("pvr_init failed\n"); for (;;) thd_sleep(1000); }
     dc_text(0, "m2-hle2 for Dreamcast: finding the ROM files");
+#if DC_SDLOG
+    if (sl_init() == 0) {   /* first, so the boot's lines are in the file */
+        g_log.file = stdout;   /* the board's log_msg lines too */
+        g_log.file_open_attempted = 1;
+    } else dbgio_dev_select("null");
+    {   /* the SD line, here and every 2 s with the stats */
+        char sd[96];
+        sl_stats(sd, sizeof sd);
+        dc_text(1, sd);
+    }
+#endif
 
     /* Sound first: its effects stay in RAM, and it reads the disc through
      * KOS's driver, which the pager forbids once it is up. */
@@ -822,7 +851,7 @@ static void dc_hud_window(dc_stats_t *s, uint64_t t2, const dc_window_t *w) {
     static const char *const tag[DC_PROF_LINES] = { "HW", "PV", "G0", "G1", "S0", "S1" };
     dc_prof_report(us, pl);
     for (int i = 0; i < DC_PROF_LINES; i++) {
-        STATS_PRINT(pl[i]);
+        if (!DC_SDLOG) STATS_PRINT(pl[i]);   /* SDLOG has it from hud_line */
         if (pl[i][0]) hud_line(HUD_HW + i, tag[i], 1, pl[i]);
         else dp_text_row(HUD_HW + i, "");
     }
@@ -943,6 +972,16 @@ static void dc_stats_window(dc_stats_t *s, uint64_t t2) {
     dc_hud_window(s, t2, &w);
 #else
     dc_stats_rows(s, t2, &w);
+#endif
+#if DC_SDLOG
+    {   /* the log's own cost, in the log */
+        char line[96];
+        sl_stats(line, sizeof line);
+        STATS_PRINT(line);
+#if !DC_HUD_PROF && !DC_HASH_FRAME
+        dp_text(15, line);
+#endif
+    }
 #endif
     s->builds_last = g_geo3d_mesh_builds; s->hits_last = g_geo3d_mesh_hits;
     g_dp.us_tiles = g_dp.us_scan = g_dp.us_sort = 0;
