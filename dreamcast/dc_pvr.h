@@ -436,6 +436,10 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
             return;
         }
     }
+#if GEO3D_RAMPSTOP
+    /* RAMPSTOP (#547): no walk or bank; the key stands in for base and offset. */
+    *base = k0; *offset = k1; *pal = 0;
+#else
     int col[16][3], drop = 0;
     for (int t = 0; t < 16; t++) {
         uint32_t lbyte = 2u * ((uint32_t)T->lb + (uint32_t)t * 8u);
@@ -455,6 +459,7 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
         *offset = dp_argb(col[0]);
         *pal = (uint8_t)dp_knee_bank(col, trans);
     }
+#endif
     g_dp_ramp[h].lut = lut; g_dp_ramp[h].k0 = k0; g_dp_ramp[h].k1 = k1;
     g_dp_ramp[h].pkey = *pal >= DP_POOL_FIRST ? g_dp_pool[*pal - DP_POOL_FIRST].key : 0;
     g_dp_ramp[h].base = *base; g_dp_ramp[h].off = *offset; g_dp_ramp[h].pal = *pal;
@@ -1335,7 +1340,7 @@ static void geo3d_dc_face(int v0, const geo3d_cface_t *F, int cut, float r, floa
     }
 }
 
-#if GEO3D_STRIPSTOP
+#if GEO3D_STRIPSTOP || GEO3D_RAMPSTOP
 /* What a face's lookups found (STRIPSTOP): its texture and the colour memo's
  * words, which dp_strip_put / dp_tri_put would have copied into the record. */
 static inline uint32_t dp_look_bits(const dc_tex_t *tex) {
@@ -1452,7 +1457,7 @@ static void geo3d_dc_sface(int v0, const geo3d_sface_t *F, const geo3d_svert_t *
     dp_strip_put(v0, F, s, cut == 2 ? o2 : o1, cut == 0 ? 3 : 4, kind, var, tex, key);
 }
 
-#if GEO3D_STRIPSTOP
+#if GEO3D_STRIPSTOP || GEO3D_RAMPSTOP
 static uint32_t geo3d_dc_sface_look(const geo3d_sface_t *F, float r, float g, float b, float pl) {
     const unsigned f = F->fl;
     const bool textured = (F->bits & GEO3D_SF_TEXTURED) != 0;
