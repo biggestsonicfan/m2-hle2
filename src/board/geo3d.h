@@ -68,7 +68,14 @@
 #ifndef GEO3D_STRIPSTOP
 #define GEO3D_STRIPSTOP 0
 #endif
-#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP
+/* ZKEYSTOP=1 (make ZKEYSTOP=1, Pinboard #542): the drawn face goes through
+ * geo3d_dc_sface whole, lookups and strip put included, with key 0 where
+ * geo3d_board_zkey's key went. The record and its sort word are still stored;
+ * the flat key's z, which only the z key read, goes into the running xor. */
+#ifndef GEO3D_ZKEYSTOP
+#define GEO3D_ZKEYSTOP 0
+#endif
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP
 static volatile uint32_t g_geo3d_facestop_sink;
 #endif
 
@@ -3357,6 +3364,14 @@ static inline uint32_t geo3d_facestop_bits(float z, const geo3d_lit_t *lt) {
     return a ^ b ^ c;
 }
 #endif
+#if GEO3D_ZKEYSTOP
+/* The word ZKEYSTOP keeps alive: the flat key's z, the z key's only input. */
+static inline uint32_t geo3d_zkeystop_bits(float z) {
+    uint32_t a;
+    memcpy(&a, &z, 4);
+    return a;
+}
+#endif
 #if GEO3D_TAILHALF
 /* The words TAILHALF keeps alive: the face's colour, luma, texture LOD and cut. */
 static inline uint32_t geo3d_tailhalf_bits(float r, float g, float b, float pl, int cut) {
@@ -3374,7 +3389,7 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
     const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
     GEO3D_FC(MODELS);
     GEO3D_FC_ON(1u);
-#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP
     uint32_t fs = 0;
 #endif
 #if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
@@ -3421,6 +3436,11 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         fs ^= geo3d_dc_sface_look(f, fr, fg, fb, pl) ^ (uint32_t)cut;
         continue;
 #endif
+#if GEO3D_ZKEYSTOP
+        fs ^= geo3d_zkeystop_bits(z);
+        geo3d_dc_sface(dcv, f, m->strips + f->strip, cut, fr, fg, fb, pl, flat ? 0 : -1);
+        continue;
+#endif
         geo3d_dc_sface(dcv, f, m->strips + f->strip, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
 #endif
@@ -3461,10 +3481,15 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         fs ^= geo3d_dc_face_look(f, fr, fg, fb, pl) ^ (uint32_t)cut;
         continue;
 #endif
+#if GEO3D_ZKEYSTOP
+        fs ^= geo3d_zkeystop_bits(z);
+        geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? 0 : -1);
+        continue;
+#endif
         geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
     GEO3D_FC_ON(0u);
-#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP
     g_geo3d_facestop_sink ^= fs;
 #endif
     GEO3D_LAP_N(FACES, m->n_faces);
