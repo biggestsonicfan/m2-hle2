@@ -1047,6 +1047,69 @@ differ: the version string.
 111 ms for the texture lookup. It was not opened here. The next pin can skip
 `dp_face_colour` and keep the memo hit.
 
+### The colour lookup: memo hit against dp_face_colour (#546, at 84c31a0)
+
+HEAD had moved from f52431b to 84c31a0: #544's COLOURSTOP commit and its two
+doc commits on top. The default baseline, every switch off and built from
+84c31a0, matched the default row in every number and the hash.
+
+The memo is outside `dp_face_colour`. `dp_face_col` (dc_pvr.h) compares the
+face's r, g, b, luma, palette level and two flags against `g_dp_memo` and
+calls `dp_face_colour` only on a miss, before `dp_strip_put`. No function was
+split for this.
+
+`make FACECOLSTOP=1` (`GEO3D_FACECOLSTOP`, geo3d.h, off by default, not
+combined with the other switches) runs a drawn face as COLOURSTOP does
+(`dp_tex_key`, `dp_tex_get` on a miss) and then through the colour memo
+compare (`dp_face_col_memo`, dc_pvr.h). On a hit it reads the memo's colour
+(base, offset, palette). On a miss it stores the key into the memo, as
+`dp_face_col` does, so the same faces hit as in the default build. It calls
+no `dp_face_colour`, and so answers the key that missed. There is no strip
+put or `geo3d_board_zkey`. That word, the texture pointer and TAILHALF's
+colour, luma, LOD and cut words go into the running xor, which is stored to
+the volatile once per model. Proof from `dp_decode`'s disassembly against the
+default build:
+
+- `dp_face_colour` is not referenced in `dp_decode`, against twice in the
+  default build, and its body is not inlined: `dp_decode` shrinks from 13652
+  to 12908 bytes. The one reference left in the binary is
+  `geo3d_emit_tri_uv`'s, as in every build.
+- The colour memo compare is in the loop: `fcmp/eq` on the four floats and
+  `cmp/eq` on the two flags at `8c04005a`-`8c040086`. A hit falls through to
+  `8c040088`, which reads the memo's base (+56), offset (+60) and palette byte.
+  A miss branches to `8c0400d0`, which stores the key and xors its words.
+- `dp_tex_get` is still referenced twice, once in each loop.
+- `dp_decode` has no reference to `g_dcf` or `g_dcf_key`. Its one `g_dcf_n`
+  reference is the reset at the head of the list.
+- Palette and luma are still there: `g_geo_rs`, `g_light_dir`,
+  `g_geo3d_emit_texlod` and `g_geo3d_board_luma` are all loaded. There are 77
+  fmul and 63 fmac, against 63 and 48 in the default build.
+
+| frames 3500-3900, SH-4 timer time | total | sl / dr | ti / **sc** / so / su | hash |
+|---|---|---|---|---|
+| 84c31a0, default | 14060 | 5226 / 8769 | 453 / **7040** / 217 / 1046 | 634d853f |
+| FACECOLSTOP=1 | 10102 | 5200 / 4853 | 467 / **4280** / 41 / 56 | 634d853f |
+| f52431b, COLOURSTOP=1 (#544) | 9813 | 5201 / 4563 | 461 / **3996** / 41 / 57 | 634d853f |
+| a351476, STRIPSTOP=1 (#541) | 11164 | 5235 / 5871 | 453 / **5311** / 41 / 57 | 634d853f |
+
+- **Memo hit** (the compare, the memo's colour read back) =
+  4280 − 3996 = **284 ms**
+- **Miss** (`dp_face_colour`) = 5311 − 4280 = **1031 ms**
+- The halves sum to 1315 ms, #544's colour lookup. As before, they share one
+  middle figure, so the sum is exact by construction. What it shows is that
+  sc landed inside the bounds. 4280 is above COLOURSTOP's 3996, so the
+  compare ran, and below STRIPSTOP's 5311, so `dp_face_colour` did not.
+
+so / su fell to 41 / 56, as in any build that queues nothing. They are not in
+the subtraction. The frame-1500 hash stays 634d853f because it is board state
+and proves nothing here. The default build with the switch present matches
+84c31a0's byte for byte in every section except `.rodata`'s version string.
+
+**Verdict: `dp_face_colour` holds the colour lookup.** The miss is 1031 ms and
+the memo hit 284 ms. `dp_face_colour` was not opened here. The next pin may
+split it only if the source already has a tail a skip can cut. The ramp is
+not named from this count.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
