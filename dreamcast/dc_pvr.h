@@ -421,12 +421,58 @@ static unsigned dp_pool_bank(const int col[16][3], bool trans) {
 #define DP_RAMP_CACHE 1024u
 static struct { uint32_t lut, k0, k1, base, off, pkey; uint8_t pal; } g_dp_ramp[DP_RAMP_CACHE];
 
+#ifndef DC_RAMP_COUNT
+#define DC_RAMP_COUNT 0
+#endif
+#if DC_RAMP_COUNT
+/* RAMPCOUNT=1 (make RAMPCOUNT=1, Pinboard #549): g_dp_ramp's misses over the
+ * bench, by kind. dc_rc_start (at F0) allocates a set of every key missed since,
+ * so a miss is compulsory (key new to the window), a replacement (key seen, its
+ * slot now holds another), stale-lut (key seen under an older gen_lut) or a
+ * pool miss (the slot still holds the key, its pool bank was taken). The walk
+ * runs as ever; nothing here reaches the picture. */
+enum { DC_RC_LOOK, DC_RC_MISS, DC_RC_COMP, DC_RC_REPL, DC_RC_LUT, DC_RC_POOL, DC_RC_FULL, DC_RCS };
+static struct { uint32_t on, cap, n[DC_RCS]; uint32_t (*set)[3]; } g_rc;
+
+static void dc_rc_start(void) {
+    for (uint32_t cap = 1u << 17; cap >= 1u << 12 && !g_rc.set; cap >>= 1)
+        if ((g_rc.set = calloc(cap, sizeof *g_rc.set))) g_rc.cap = cap;
+    memset(g_rc.n, 0, sizeof g_rc.n);
+    g_rc.on = g_rc.set != NULL;
+}
+
+/* A miss on slot h, (lut, k0, k1) wanted; the slot held `same` when it had this key. */
+static void dc_rc_miss(uint32_t lut, uint32_t k0, uint32_t k1, bool same) {
+    g_rc.n[DC_RC_MISS]++;
+    if (same) { g_rc.n[DC_RC_POOL]++; return; }
+    uint32_t i = ((k0 * 2654435761u) ^ (k1 * 2246822519u)) & (g_rc.cap - 1u);
+    for (uint32_t probe = 0; probe < g_rc.cap; probe++, i = (i + 1u) & (g_rc.cap - 1u)) {
+        uint32_t *e = g_rc.set[i];
+        if (!e[0]) {   /* lut is odd (| 1), so 0 is an empty entry */
+            if (g_rc.n[DC_RC_COMP] + 1u > g_rc.cap / 4u * 3u) { g_rc.n[DC_RC_FULL]++; return; }
+            e[0] = lut; e[1] = k0; e[2] = k1;
+            g_rc.n[DC_RC_COMP]++;
+            return;
+        }
+        if (e[1] == k0 && e[2] == k1) {
+            if (e[0] == lut) g_rc.n[DC_RC_REPL]++;
+            else { e[0] = lut; g_rc.n[DC_RC_LUT]++; }
+            return;
+        }
+    }
+    g_rc.n[DC_RC_FULL]++;
+}
+#endif
+
 static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const int c5[3], int poly, bool trans,
                          uint32_t *base, uint32_t *offset, uint8_t *pal) {
     const uint32_t k0 = (uint32_t)c5[0] | (uint32_t)c5[1] << 5 | (uint32_t)c5[2] << 10 | (uint32_t)poly << 15 |
                         (trans ? 1u << 23 : 0u) | 1u << 24, k1 = (uint32_t)T->lb;
     const uint32_t h = ((k0 * 2654435761u) ^ (k1 * 40503u)) >> 22 & (DP_RAMP_CACHE - 1u);
     const uint32_t lut = bus->gen_lut | 1u;
+#if DC_RAMP_COUNT
+    g_rc.n[DC_RC_LOOK] += g_rc.on;
+#endif
     if (g_dp_ramp[h].lut == lut && g_dp_ramp[h].k0 == k0 && g_dp_ramp[h].k1 == k1) {
         const uint8_t pb = g_dp_ramp[h].pal;
         if (pb < DP_POOL_FIRST || (g_dp_pool[pb - DP_POOL_FIRST].key == g_dp_ramp[h].pkey &&
@@ -436,6 +482,9 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
             return;
         }
     }
+#if DC_RAMP_COUNT
+    if (g_rc.on) dc_rc_miss(lut, k0, k1, g_dp_ramp[h].lut == lut && g_dp_ramp[h].k0 == k0 && g_dp_ramp[h].k1 == k1);
+#endif
 #if GEO3D_RAMPSTOP
     /* RAMPSTOP (#547): no walk or bank; the key stands in for base and offset. */
     *base = k0; *offset = k1; *pal = 0;

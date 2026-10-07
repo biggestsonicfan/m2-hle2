@@ -794,6 +794,26 @@ static void dc_fc_bench(bool f0) {
 static inline void dc_fc_bench(bool f0) { (void)f0; }
 #endif
 
+#if DC_RAMP_COUNT
+/* g_dp_ramp's misses over the bench (dc_pvr.h, #549): the set opens at F0, and
+ * the report puts the counts over the picture (rows 7-8). */
+static void dc_rc_bench(bool f0) {
+    static char rows[2][80];
+    if (f0) { dc_rc_start(); return; }
+    g_rc.on = 0;
+    const uint32_t *n = g_rc.n;
+    snprintf(rows[0], sizeof rows[0], "RC look %lu miss %lu hit %lu cap %lu", (unsigned long)n[DC_RC_LOOK],
+             (unsigned long)n[DC_RC_MISS], (unsigned long)(n[DC_RC_LOOK] - n[DC_RC_MISS]), (unsigned long)g_rc.cap);
+    snprintf(rows[1], sizeof rows[1], "comp %lu repl %lu lut %lu pool %lu full %lu", (unsigned long)n[DC_RC_COMP],
+             (unsigned long)n[DC_RC_REPL], (unsigned long)n[DC_RC_LUT], (unsigned long)n[DC_RC_POOL],
+             (unsigned long)n[DC_RC_FULL]);
+    printf("%s | %s\n", rows[0], rows[1]);
+    dp_text(7, rows[0]); dp_text(8, rows[1]);
+}
+#else
+static inline void dc_rc_bench(bool f0) { (void)f0; }
+#endif
+
 /* A slice ran t0..t1: start the bench at F0, count its slices, report at F1. */
 static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
     static dc_bench_t b;
@@ -806,10 +826,11 @@ static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
         b.tx0 = g_dp.tt_tex; b.rd0 = g_pg.tx_reads; b.dr0 = g_pg.reads; b.sk0 = g_pg.seeks; b.sp0 = g_pg.sp_loads;
         dc_split_bench(true);
         dc_fc_bench(true);
+        dc_rc_bench(true);
     }
     if (!b.t0 || b.line[0]) return;
     b.sl += t1 - t0;
-    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); dc_fc_bench(false); }
+    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); dc_fc_bench(false); dc_rc_bench(false); }
 }
 
 /* ---- The 2-s stats --------------------------------------------------------------- */
