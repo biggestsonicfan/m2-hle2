@@ -18,6 +18,9 @@
 #include <kos.h>
 #include <dc/maple/controller.h>
 #include <dc/biosfont.h>
+#include <dc/wdt.h>
+#include <arch/stack.h>
+#include <assert.h>
 
 /* -DDC_HASH_FRAME=n: at board frame n, a hash of work RAM, the i960's
  * registers and its cycle count goes on row 15 (an A/B of two builds). */
@@ -266,6 +269,51 @@ static void dc_text(int row, const char *s) {
     dp_text_frame();
 }
 
+/* A failed assert, KOS's or ours (dc_fatal), on screen: no serial console in
+ * the field. The PVR may be in any state, so the frame buffer is drawn into
+ * directly once the last render has had time to land; the watchdog goes off,
+ * or it would reset the message away. The return addresses are what KOS's
+ * stack walk finds (saved PRs after a call); out/pass2.syms or addr2line on
+ * m2hle2.elf names them. */
+static void dc_assert(const char *file, int line, const char *expr, const char *msg, const char *func) {
+    irq_disable();
+    wdt_disable();
+    spu_disable();
+    for (volatile uint32_t i = 0; i < 20000000u; i++) {}   /* a render in flight lands (~0.1 s) */
+    vid_set_mode(DM_640x480, PM_RGB565);
+    vid_clear(0, 0, 96);
+    char l[64];
+    int y = 24;
+#define DC_ASSERT_LINE(...) do { snprintf(l, sizeof l, __VA_ARGS__); \
+        bfont_draw_str(vram_s + y * 640 + 20, 640, false, l); y += 24; } while (0)
+    DC_ASSERT_LINE("m2-hle2 stopped: an assertion failed");
+#ifdef DC_GIT
+    DC_ASSERT_LINE("build %.13s, board frame %u", DC_GIT, (unsigned)g_emu_frames);
+#else
+    DC_ASSERT_LINE("board frame %u", (unsigned)g_emu_frames);
+#endif
+    y += 12;
+    DC_ASSERT_LINE("%.50s", expr ? expr : "?");
+    if (msg) DC_ASSERT_LINE("%.50s", msg);
+    const char *f = file ? strrchr(file, '/') : NULL;
+    DC_ASSERT_LINE("%.30s:%d", f ? f + 1 : file ? file : "?", line);
+    if (func) DC_ASSERT_LINE("in %.46s", func);
+    y += 12;
+    DC_ASSERT_LINE("called from:");
+    uintptr_t sp, ra[24];
+    int n = 0;
+    __asm__ volatile("mov r15, %0" : "=r"(sp));
+    while (n < 24 && arch_stk_unwind_step(sp, &ra[n], &sp)) n++;
+    for (int i = 0; i < n; i += 4) {
+        int k = 0;
+        for (int j = i; j < n && j < i + 4; j++) k += snprintf(l + k, sizeof l - k, "%08lx ", (unsigned long)ra[j]);
+        bfont_draw_str(vram_s + y * 640 + 20, 640, false, l);
+        y += 24;
+    }
+#undef DC_ASSERT_LINE
+    for (;;) {}
+}
+
 #include "dc_jit_test.h"
 #if DC_HUD_PROF
 #include "dc_prof.h"
@@ -413,7 +461,13 @@ int main(int argc, char **argv) {
     uint64_t steps_last = 0, ops_last = 0, loop_last = 0, cop_last = 0, aot_last = 0;
     uint64_t us_all = 0, us_dall = 0, n_drawn = 0, us_snd = 0, t_boot = timer_us_gettime64();   /* since boot: slices, draws, sound */
     static char hashed_line[96];
+    /* A hang resets the console: the watchdog is petted once a loop (a board
+     * frame and its draw) and by the pager's drive poll, and wraps after
+     * 256 ticks of 5.25 ms, 1.34 s. Flycast does not emulate it. */
+    assert_set_handler(dc_assert);
+    wdt_enable_watchdog(0, WDT_CLK_DIV_4096, WDT_RST_POWER_ON);
     while (!cpu.halted) {
+        wdt_pet();
         dc_pad();
         uint64_t t0 = timer_us_gettime64();
         emu_slice_body(&ctx);
@@ -465,7 +519,10 @@ int main(int argc, char **argv) {
             uint64_t now = timer_us_gettime64();
             uint64_t due = cap_t0 + (uint64_t)(g_emu_frames - cap_f0) * 1000000u / DC_FPS_CAP;
             if (!cap_t0 || now > due + 100000u) { cap_t0 = now; cap_f0 = g_emu_frames; }
-            else while (timer_us_gettime64() < due) thd_pass();
+            else {   /* asleep for all but the last millisecond, which a wake-up can overshoot */
+                if (due > now + 2000u) thd_sleep((unsigned)((due - now) / 1000u) - 1u);
+                while (timer_us_gettime64() < due) thd_pass();
+            }
         }
 #endif
         if (DC_HASH_FRAME && g_emu_frames >= DC_HASH_FRAME && !hashed) {
@@ -777,6 +834,7 @@ int main(int argc, char **argv) {
             loads_last = g_pg.loads; refills_last = g_pg.refills; read_last = g_pg.read_ns;
         }
     }
+    wdt_disable();   /* the reason stays on screen */
     /* No serial console in Flycast's libretro core: the reason goes on screen,
      * with the last lines of the board's log. */
     snprintf(line, sizeof line, "the i960 halted at %08lx, frame %u", (unsigned long)cpu.sfr.ip,
