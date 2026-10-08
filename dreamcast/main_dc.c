@@ -863,6 +863,23 @@ static void dc_rk_bench(bool f0) {
 static inline void dc_rk_bench(bool f0) { (void)f0; }
 #endif
 
+#if DC_RAMP_WALK
+/* dp_face_ramp's time over the bench (dc_pvr.h, #555): on at F0, its one
+ * total at F1 goes over the picture (row 7). */
+static void dc_rw_bench(bool f0) {
+    static char row[64];
+    g_rw.on = f0;
+    if (f0) { g_rw.ticks = 0; return; }
+    const uint64_t tps = *(volatile uint32_t *)0xFFD80020u + 1u;
+    snprintf(row, sizeof row, "RW walk %lu ms (%lu ticks)", (unsigned long)(g_rw.ticks * 1000u / tps),
+             (unsigned long)g_rw.ticks);
+    printf("%s\n", row);
+    dp_text(7, row);
+}
+#else
+static inline void dc_rw_bench(bool f0) { (void)f0; }
+#endif
+
 /* A slice ran t0..t1: start the bench at F0, count its slices, report at F1. */
 static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
     static dc_bench_t b;
@@ -877,10 +894,11 @@ static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
         dc_fc_bench(true);
         dc_rc_bench(true);
         dc_rk_bench(true);
+        dc_rw_bench(true);
     }
     if (!b.t0 || b.line[0]) return;
     b.sl += t1 - t0;
-    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); dc_fc_bench(false); dc_rc_bench(false); dc_rk_bench(false); }
+    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); dc_fc_bench(false); dc_rc_bench(false); dc_rk_bench(false); dc_rw_bench(false); }
 }
 
 /* ---- The 2-s stats --------------------------------------------------------------- */
