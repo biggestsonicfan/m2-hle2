@@ -7,8 +7,8 @@ on:
   push:
     branches: [master]
     # tools/ is the Node grading harness — it never changes the binary.
-    # '*.md' and not '**.md': packaging/rocknix/README.md is inside the ARC-S
-    # zip, so a change to it is a change to the download.
+    # '*.md' and not '**.md': packaging/libretro/README.md and INSTALL.md are
+    # inside the libretro zips, so a change to them is a change to the download.
     paths-ignore: ['*.md', 'tools/**']
   # A PR to master builds and tests without publishing anything (the publish job
   # skips itself). Without this the first run of a build change is the one that
@@ -130,92 +130,6 @@ jobs:
           retention-days: 14   # per-commit history, independent of the rolling release
 
 
-  # The handheld build: the sdl3 frontend (src/main_sdl.c) cross-compiled for the
-  # RK3566, for ROCKNIX on the Anbernic RG ARC-S. packaging/rocknix/README.md is
-  # the install side; this job is why there is a download to install.
-  #
-  # debian:trixie, not the runner's Ubuntu, because trixie is the distribution
-  # that has libsdl3-dev for arm64 AND a glibc (2.41) that matches ROCKNIX's, so
-  # the binary links against the device's own libSDL3 / libGLESv2 / libc and
-  # carries none of them. Cross-compiled rather than built on an arm64 runner for
-  # the same reason: what matters is the sysroot, not the machine.
-  rocknix:
-    runs-on: ubuntu-latest
-    container: debian:trixie
-    steps:
-      - name: Install the cross toolchain and the arm64 sysroot
-        run: |
-          dpkg --add-architecture arm64
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            crossbuild-essential-arm64 cmake ninja-build git ca-certificates file zip \
-            libsdl3-dev:arm64 libgles-dev:arm64 libegl-dev:arm64
-
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: false
-
-      # The sdl3 frontend's whole submodule list (CMakeLists.txt
-      # M2HLE_SUBMODULE_PATHS on the M2HLE_SDL3 path): no ImGui, so no
-      # dear_bindings and no Python.
-      - name: Fetch build submodules
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git submodule update --init vendor/sokol vendor/miniz vendor/stb
-
-      - name: Stamp version
-        id: ver
-        run: echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
-      # CMAKE_TOOLCHAIN_FILE must be absolute: a relative one is looked for
-      # from the BUILD directory, so "packaging/rocknix/aarch64.cmake" is not
-      # found and the configure silently falls back to the host compiler.
-      - name: Configure
-        run: >
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DM2HLE_FRONTEND=sdl3
-          -DM2HLE_VERSION="${{ steps.ver.outputs.version }}"
-          -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/packaging/rocknix/aarch64.cmake"
-
-      - name: Build
-        run: cmake --build build -j 4
-
-      # A cross build cannot be run here, so check what can be checked without
-      # running it: that it is an aarch64 ELF, and that it asks for exactly the
-      # four libraries ROCKNIX has. A fifth NEEDED entry is a dependency the
-      # device may not carry, and is worth failing the build over.
-      - name: Check the binary
-        run: |
-          aarch64-linux-gnu-strip build/m2hle
-          file build/m2hle | grep -q 'ELF 64-bit LSB .*ARM aarch64' || { file build/m2hle; exit 1; }
-          aarch64-linux-gnu-objdump -p build/m2hle | awk '/NEEDED/ { print $2 }' | sort > /tmp/needed
-          cat /tmp/needed
-          for so in libGLESv2.so.2 libSDL3.so.0 libc.so.6 libm.so.6; do echo "$so"; done > /tmp/want
-          diff /tmp/want /tmp/needed
-
-      - name: Package
-        run: |
-          mkdir -p dist/stage
-          cp build/m2hle dist/stage/
-          cp packaging/rocknix/start_m2hle.sh packaging/rocknix/install-es.sh dist/stage/
-          cp packaging/rocknix/m2hle-update.sh packaging/rocknix/m2hle-runemu.sh dist/stage/
-          # The EmulationStation drop-ins install-es.sh installs; without these the
-          # Sega Model 2 tile is whatever the OS happens to ship, which since
-          # ROCKNIX 7.0.2 is nothing at all.
-          cp packaging/rocknix/es_systems_m2hle.cfg packaging/rocknix/es_features_m2hle.cfg dist/stage/
-          cp packaging/rocknix/README.md dist/stage/
-          chmod +x dist/stage/m2hle dist/stage/*.sh
-          echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > dist/stage/VERSION.txt
-          cd dist/stage && zip -r ../m2hle-rocknix-arm64.zip ./*
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: m2hle-rocknix-arm64
-          path: dist/*.zip
-          retention-days: 14
-
   # The libretro core (src/main_libretro.c, -DM2HLE_FRONTEND=libretro) for every
   # RetroArch there is: desktop GL 4.1 core on Windows, Linux and macOS, GLES 3 on
   # Android. The ARM Linux handhelds are the next job, which needs a container.
@@ -330,7 +244,7 @@ jobs:
   #
   # debian:bullseye, for its glibc (2.31): a core asks for the newest glibc it
   # was built against, and the handheld distributions ship anything from 2.31
-  # up, where the sdl3 job's trixie (2.41) would only load on the newest. CMake
+  # up, where debian:trixie's (2.41) would only load on the newest. CMake
   # comes from pip because bullseye's (3.18) predates CMakeLists.txt's 3.20.
   # packaging/libretro/aarch64-generic.cmake targets plain ARMv8-A, so the
   # Cortex-A53 / A35 handhelds run it too.
@@ -375,7 +289,9 @@ jobs:
         id: ver
         run: echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      # CMAKE_TOOLCHAIN_FILE absolute, for the reason the rocknix job gives.
+      # CMAKE_TOOLCHAIN_FILE must be absolute: a relative one is looked for
+      # from the BUILD directory, so it is not found and the configure silently
+      # falls back to the host compiler.
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja
@@ -424,11 +340,10 @@ jobs:
           retention-days: 14
 
   publish:
-    needs: [build, rocknix, libretro, libretro-linux-arm64]
-    # A handheld build that fails must not hold back the Windows canary.
-    # It does leave the previous m2hle-rocknix-arm64.zip on the release, so
-    # the notes below say which archives this run actually produced. The same
-    # goes for every libretro zip.
+    needs: [build, libretro, libretro-linux-arm64]
+    # A libretro build that fails must not hold back the Windows canary.
+    # It does leave that zip's previous build on the release, so the notes
+    # below say which archives this run actually produced.
     if: always() && github.event_name != 'pull_request' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
