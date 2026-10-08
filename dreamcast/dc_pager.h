@@ -41,7 +41,6 @@
 #include <kos.h>
 #include <dc/cdrom.h>
 #include <dc/syscalls.h>
-#include <dc/wdt.h>
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -51,6 +50,7 @@
 #include "dc_layout.h"
 #include "dc_strips.h"
 #include "dc_texpak.h"
+#include "dc_watchdog.h"
 
 #define PG_SHIFT      14
 #define PG_SIZE       (1u << PG_SHIFT)
@@ -123,12 +123,13 @@ static int pg_read_cmd(void *dst, uint32_t fad, uint32_t nsec) {
     gdc_cmd_hnd_t h;
     for (int tries = 0; (h = syscall_gdrom_send_command(CD_CMD_PIOREAD, &p)) <= 0; tries++) {
         syscall_gdrom_exec_server();
+        dc_wd_pet();
         if (tries > 1000000) return -1;
     }
     /* A read takes milliseconds (a seek, tens): let the sound thread run meanwhile */
     for (uint32_t spin = 0; spin < 100000000u; spin++) {
         syscall_gdrom_exec_server();
-        wdt_pet();   /* a slow read is not a hang (main_dc.c) */
+        dc_wd_pet();   /* a slow read is not a hang (dc_watchdog.h) */
         if (!irq_inside_int()) thd_pass();
         int r = syscall_gdrom_check_command(h, &st);
         if (r == CD_CMD_COMPLETED) return 0;
