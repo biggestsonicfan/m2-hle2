@@ -13,10 +13,10 @@
  *     bank's 16 colours in both formats and the char's 32 bytes. No flip: the
  *     board has none. The scroll is the strips' and is not drawn.
  *   - the CPU layers (dp_ls_rest / tile_cpu_draw), drawn by 8x8 screen block
- *     over each row's span. A block's request is, per line and per tilemap
- *     drawn: the H scroll (or that line's row scroll), the V scroll, the pair's
- *     control word, the line's window-mask word, and the entry of each cell
- *     its first and last pixel sample (both tilemaps of a pair under a split).
+ *     over each row's span. A block's request is, per tilemap drawn, its 9-bit
+ *     V scroll, and per line, at its first and last pixel: the column in the
+ *     cell (the 9-bit H scroll), the tilemap the split picks, whether the mask
+ *     hides the pixel, and the entry sampled there.
  *     A block draws pens, so colours are not part of it; the source is each
  *     sampled cell's 4 bytes of the line.
  * The request and the source are each held as an FNV hash: with the char ids
@@ -63,29 +63,33 @@ static void dc_tc_ls(int which, const uint8_t *gfx, int i, uint16_t e, bool opaq
     dc_tc_tally(0, &g_tc.ls[which][i], k);
 }
 
-/* Tilemap t's part of block (bx, by)'s key. */
+/* Tilemap t's part of block (bx, by)'s key: what s24_draw_tilemap and
+ * s24_draw_line read, and nothing they skip. A tilemap the blit returns from
+ * adds nothing; per line, the 9-bit scroll, and per sampled pixel the tilemap
+ * the split picks, whether the mask hides it, and that cell's entry. */
 static void dc_tc_blk_layer(dc_tc_key_t *k, const uint16_t *w, const uint8_t *gfx, int t, int bx, int by) {
     uint16_t hscr = w[0x5000 + t], vscr = w[0x5004 + t], ctrl = w[0x5004 + (t & 2)];
-    uint32_t head = hscr | (uint32_t)vscr << 16;
-    k->req = dc_tc_mix(dc_tc_mix(k->req, head), ctrl);
-    k->src = dc_tc_mix(dc_tc_mix(k->src, head), ctrl);
     int mode = (ctrl & 0x6000) >> 13;
     if ((vscr & 0x8000) || (mode && (t & 1))) return;
     const uint16_t *maskw = w + ((t & 2) ? 0x6800 : 0x6000);
+    int vy = vscr & 0x1FF;
+    k->req = dc_tc_mix(dc_tc_mix(k->req, t), vy);
+    k->src = dc_tc_mix(dc_tc_mix(k->src, t), vy);
     for (int y = by * 8; y < by * 8 + 8; y++) {
         uint16_t row = (hscr & 0x8000) ? w[0x4000 + 0x200 * t + y] : hscr;
-        uint32_t line = row | (uint32_t)maskw[y * 4 + (bx >> 4)] << 16;
-        k->req = dc_tc_mix(k->req, line);
-        k->src = dc_tc_mix(k->src, line);
-        int ty = (y + (vscr & 0x1FF)) & 511;
+        int h = row & 0x1FF, ty = (y + vy) & 511;
+        s24_line_t ln;
+        s24_line_split(&ln, maskw, t, mode, vscr, row, h, y);
         for (int x = bx * 8; x < bx * 8 + 8; x += 7) {
-            int tx = (x - (row & 0x1FF)) & 511;
-            for (int j = 0; j < (mode ? 2 : 1); j++) {   /* under a split, both of the pair */
-                uint16_t e = w[0x1000 * (t ^ j) + (ty >> 3) * 64 + (tx >> 3)];
-                const uint8_t *g = gfx + (uint32_t)(e & 0x3FFF) * 32u + (uint32_t)(ty & 7) * 4u;
-                k->req = dc_tc_mix(k->req, e);
-                k->src = dc_tc_mix(dc_tc_mix(k->src, e & ~0x3FFFu), (uint32_t)g[0] | g[1] << 8 | g[2] << 16 | (uint32_t)g[3] << 24);
-            }
+            int l = x < ln.split_x ? ln.split_l : ln.split_l ^ 1;
+            bool hid = !mode && (ln.mask[x >> 7] & (0x8000 >> ((x & 127) >> 3)));
+            int tx = (x - h) & 511;
+            uint16_t e = hid ? 0 : w[0x1000 * l + (ty >> 3) * 64 + (tx >> 3)];
+            const uint8_t *g = gfx + (uint32_t)(e & 0x3FFF) * 32u + (uint32_t)(ty & 7) * 4u;
+            uint32_t pos = (uint32_t)(tx & 7) | (uint32_t)l << 3 | (uint32_t)hid << 5;
+            k->req = dc_tc_mix(dc_tc_mix(k->req, pos), e);
+            k->src = dc_tc_mix(dc_tc_mix(dc_tc_mix(k->src, pos), e & ~0x3FFFu),
+                               hid ? 0u : (uint32_t)g[0] | g[1] << 8 | g[2] << 16 | (uint32_t)g[3] << 24);
         }
     }
 }

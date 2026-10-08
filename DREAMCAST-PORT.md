@@ -2239,11 +2239,16 @@ b = the char id changed but its source bytes match, and c = new.
   the bank's 16 colours in both formats, and the char's 32 bytes. The board
   has no flip bits, and the scroll belongs to the strips, not the cell.
 - **The CPU key** (`dp_ls_rest` / `tile_cpu_draw`, per 8x8 block over each
-  row's span) is, per tilemap drawn: the H and V scroll and the pair's
-  control word, then per line the row's scroll and the window-mask word,
-  plus the entry and the 4 bytes of every cell the block's first and last
-  pixel sample (both tilemaps of a pair under a split). A block writes
-  pens, so colours are not part of it.
+  row's span) holds only what `s24_draw_tilemap` and `s24_draw_line` read.
+  A tilemap they return from (`vscr & 0x8000`, or the odd one of a split
+  pair) adds nothing. The rest add their 9-bit V scroll (`vscr & 0x1FF`),
+  then, per line, at the block's first and last pixel: the column in the
+  cell (`(x - (row & 0x1FF)) & 511`), the tilemap `s24_line_split` picks,
+  whether its mask bit hides the pixel, and the entry and 4 bytes sampled
+  there. A block writes pens (`bank16 + nibble`), so colours are not part of
+  it. The first version also hashed a disabled tilemap's scroll, the scroll
+  and control words' high bits and the whole mask word; the recount below
+  drops them.
 
 Both runs used #463's protocol: Flycast's libretro core, power-on, a shot
 every 20 s, with the Makefile defaults plus `AOT`, `RAMP4096=0` and
@@ -2254,14 +2259,24 @@ byte for byte. Only the version string differs.
 |---|---|---|---|---|---|
 | off (TILECOUNT=0) | f3127, 120 s | 8.4 | 110 | | |
 | on (TILECOUNT=1) | f2966, 140 s | 4.1 | 165 | 0 / 0 / 0 | 0 / 0 / 26784 |
+| recount, trimmed key | f3214, the starfield | 5.0 | 192 | 0 / 0 / 0 | 0 / 0 / 29760 |
+
+The first on run's window was not the one behind the 110 ms: it was before
+the starfield. The recount's window is the starfield title, the same scene
+as the off run's f3127, and its `TC` and `tl` are reset together
+(`dc_stats_window`, every 2 s, both counted only in `dp_frame`). 29760 is
+10 x 2976 at 5.0 shown fps, the whole view on every frame. Not one block
+repeats its request. The same build's fight window reads cpu 207/0/300, so
+the key does match when the request repeats.
 
 - **Under half, so no skip.** On the title, no cell matches its last request
   (0%), and none differs only by a char id with identical bytes. Two attract
   windows of the same run do no better: the flight reads ls 0/0/9624 and
   cpu 480/0/3592 (12%), and GET 8 EMERALDS reads cpu 350/0/4734 (7%). A request skip on
   the title would skip nothing, so it was not built. The counter stays off.
-- **26784 is 9 x 2976, every block of the screen on each of the window's 9
-  frames**, and the line-scroll column is empty. On the title at this tip,
+- **29760 is 10 x 2976, every block of the screen on each of the window's 10
+  frames** (5.0 shown fps over 2 s; the first run's 26784 was taken to be
+  9 x 2976, uncounted), and the line-scroll column is empty. On the title at this tip,
   the CPU redraws the whole tile layer every frame, and every block's
   request is new. #358 measured 5-6 ms here with the starfield on the
   strips. The 110 ms (114 ms in #463) says the title no longer takes that
