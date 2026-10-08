@@ -418,7 +418,19 @@ static unsigned dp_pool_bank(const int col[16][3], bool trans) {
  * (gen_lut). A pool bank is taken again only while it still holds the same
  * pens, and is stamped as used this frame. Walking the ramp for every face
  * cost the bench (frames 3500-3900) 5 s of the decode. */
+#ifndef DC_RAMP_4096
+#define DC_RAMP_4096 0
+#endif
+#if DC_RAMP_4096
+/* RAMP4096=1 (#553): the 4,096 slots #550 named, which hold every key of the
+ * bench window with no eviction. Same entry, same hash, its top 12 bits for
+ * the index rather than 10; the page cache pays for it (main_dc.c). */
+#define DP_RAMP_CACHE 4096u
+#define DP_RAMP_SHIFT 20
+#else
 #define DP_RAMP_CACHE 1024u
+#define DP_RAMP_SHIFT 22
+#endif
 static struct { uint32_t lut, k0, k1, base, off, pkey; uint8_t pal; } g_dp_ramp[DP_RAMP_CACHE];
 
 #ifndef DC_RAMP_COUNT
@@ -549,7 +561,7 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
                          uint32_t *base, uint32_t *offset, uint8_t *pal) {
     const uint32_t k0 = (uint32_t)c5[0] | (uint32_t)c5[1] << 5 | (uint32_t)c5[2] << 10 | (uint32_t)poly << 15 |
                         (trans ? 1u << 23 : 0u) | 1u << 24, k1 = (uint32_t)T->lb;
-    const uint32_t h = ((k0 * 2654435761u) ^ (k1 * 40503u)) >> 22 & (DP_RAMP_CACHE - 1u);
+    const uint32_t h = ((k0 * 2654435761u) ^ (k1 * 40503u)) >> DP_RAMP_SHIFT & (DP_RAMP_CACHE - 1u);
     const uint32_t lut = bus->gen_lut | 1u;
 #if DC_RAMP_COUNT
     g_rc.n[DC_RC_LOOK] += g_rc.on;
