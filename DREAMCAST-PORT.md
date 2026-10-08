@@ -921,6 +921,68 @@ The default build with the switch present is 8 bytes longer than b98a3f0's
 the lookups 1426 ms. The larger, strip put + z-key, is the next pin's target;
 no function inside either half was opened here.
 
+### Step 12's strip put against step 13's z-key (#542, at a351476)
+
+HEAD was a351476 (#541's STRIPSTOP commit, PR #247), unmoved. The default
+baseline, every switch off, matched #541's default row in every number and
+the hash.
+
+The z-key is not computed inside `dp_strip_put`. The face loop calls
+`geo3d_board_zkey(z)` itself, as the key argument of `geo3d_dc_sface` /
+`geo3d_dc_face`, so it runs just before the strip put rather than after it.
+`dp_strip_put` (and `dp_tri_put`) only computes a key of its own when handed
+a negative one, which happens only when `flat` is off. On the Dreamcast
+`flat` is always on, because dc_pvr.h sets `g_geo3d_flat_list` around the
+whole draw.
+
+`make ZKEYSTOP=1` (`GEO3D_ZKEYSTOP`, geo3d.h, off by default, not combined
+with the other switches) runs the face loop through `geo3d_dc_sface` /
+`geo3d_dc_face` whole: the lookups, the strip put and its stores to `g_dcf` and
+`g_dcf_key`. It hands them key 0 where `geo3d_board_zkey`'s key went. Faces
+that returned before step 12 still do. The flat z, which only the key read,
+goes into the running xor and is stored to the volatile once per model.
+Proof from `dp_decode`'s disassembly against the default build:
+
+- The `g_dcf_key` / `g_dcf` / `g_dcf_n` references are the default's, 7 and
+  7. The pack `~(slice << 29 | q << 13 | 0x1FFF − t)` is stored to
+  `g_dcf_key` at `8c03fd5c`, where STRIPSTOP had no store at all.
+- `g_geo3d_zadjust` is touched 4 times in the default build: the per-model
+  store and three inlined `geo3d_board_zkey` bodies (the packed and unpacked
+  loops, and `dp_strip_put`'s fallback). ZKEYSTOP touches it twice: the store,
+  and one body that sets `q = 0`, tests `flat` and branches into the body
+  only when it is off. That is the fallback, never taken here. Neither loop's
+  z-key is left.
+- The function goes from 13652 to 13272 bytes.
+
+`geo3d_flat_z` runs in both builds (and in STRIPSTOP's, where nothing sank
+z): it stores `g_geo3d_flat_prev_z` for the next face.
+
+| frames 3500-3900, SH-4 timer time | total | sl / dr | ti / **sc** / so / su | hash |
+|---|---|---|---|---|
+| a351476, default | 14060 | 5226 / 8769 | 453 / **7040** / 217 / 1046 | 634d853f |
+| a351476, ZKEYSTOP=1 | 13828 | 5194 / 8568 | 456 / **6845** / 214 / 1042 | 634d853f |
+| a351476, STRIPSTOP=1 (#541) | 11164 | 5235 / 5871 | 453 / **5311** / 41 / 57 | 634d853f |
+
+- **Strip put** (`dp_strip_put` / `dp_tri_put`, with `geo3d_dc_sface`'s
+  call around it) = 6845 − 5311 = **1534 ms**
+- **Z-key** (`geo3d_board_zkey`) = 7040 − 6845 = **195 ms**
+- Sum 1729 ms, #541's strip put + z-key to the millisecond. ZKEYSTOP's sc is
+  above STRIPSTOP's, so the strip put ran (and the lookups were not deleted),
+  and below the default's, so the skip happened.
+
+The strips were queued: so / su are 214 / 1042, not the 41 / 57 of a build
+that queues nothing. They are not in the subtraction. The keys are all 0, so
+the picture's order is wrong, as intended. The frame-1500 hash stays 634d853f
+because it is board state, and it proves nothing here.
+The default build with the switch present (286b0d4) has `.text` and `.data`
+byte-identical to a351476's; only the version string differs. It benches the
+same, every number and the hash.
+
+**Verdict: strip put is the larger time.** It is 1534 ms, against 195 ms for
+the z-key. It was not opened here. The lookups (1426 ms, #541) can be split
+by a skip; a fused strip put cannot. So the next pin splits the lookups, not
+the strip put.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
