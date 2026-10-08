@@ -2453,6 +2453,49 @@ in mode 0. To put it on the PVR, the strip path would have to take a mode-1
 pair: tilemap 3 as well, cut at the split line. That is not done here.
 Nothing was built or benched for this, and nothing in the build changed.
 
+### Can the strips draw that split? No: the reject is required (#574)
+
+The line-scroll blit cannot express a mode-1 split. Read from the code at
+28e54c3; nothing built, benched or dumped.
+
+**What mode 1 asks for** (`s24_line_split`, tile_renderer.h:146): on each
+line, one tilemap of the pair draws on one side of `v = -vscroll` and the
+other tilemap on the other side. Both use tilemap 2's scroll registers, since
+"the even tilemap draws both" (:239). So the picture needs tilemap 3's cells
+on the lines on its side of the split.
+
+**What the blit has.** Two things are missing:
+
+- **No texture holds tilemap 3.** The blit keeps one texture pair per
+  tilemap it draws, `dp_ls_t t2, t0;` (dc_pvr.h:150). Pair 2/3 gets only
+  tilemap 2's 0x1000 entries:
+
+      dp_ls_draw(&g_ls.t2, n + 0x2000, bus->tmapgfx, ls_all, true, chars, banks);   /* :1266 */
+
+  While the strips are on, the CPU side does not draw tilemap 3 either.
+  `dp_ls_rest` is "tile_cpu_draw less tilemaps 2 and 3" (:1166), and
+  `dp_tiles_copy` stops copying KBs 16-31, which hold both tilemaps' cells
+  (:1290).
+- **A strip has no line range.** `dp_ls_strips` covers every line of the
+  view with the one texture it is given:
+
+      for (int y = DC_VIEW_Y; y < vy1; ) {   /* :1146 */
+
+  Nothing in `dp_ls_t` (`h[]`, `vy`) stops a run at the split line or swaps
+  textures there.
+
+If `dp_ls_ok` passed mode 1, the strips would draw tilemap 2 on tilemap 3's
+side as well. At board frame 3127, where the split is below the view, that is
+the whole view, and nothing would draw tilemap 3. So the check at :1071 is
+required for a correct picture. It is not a guard that could be relaxed.
+
+**So the ~110 ms is the cost of a required CPU wipe**, under the PVR path as
+it stands. This line of work (title tile skip #571, line-scroll reason #573,
+this) is closed. A PVR split would be a new path, not a missing check on this
+one. It would need a third texture pair filled from `n + 0x3000`, kept on the
+CPU-copy side too, and strips cut at the split line, choosing tilemap 2's or
+tilemap 3's texture on each side. It is not proposed or built here.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
@@ -2479,7 +2522,8 @@ Nothing was built or benched for this, and nothing in the build changed.
   A per-line scroll on tilemap 1 or 3, or a window mask on the view, still
   redraws whole lines on the CPU, and so does a pair in a split mode: the
   title's exit (board frames 2931-3253, ~110 ms of tiles) puts pair 2/3 in
-  mode 1 (#573, above). The attract's
+  mode 1 (#573; #574: the strips cannot draw a split, so that is a required
+  CPU wipe). The attract's
   "REVENGE OF DR. ROBOTONIC" banner costs ~18-27 ms a frame.
 - **The 3D decode (title: 46-76 ms).** Now mostly the cached path. The SH-4's
   `ftrv` for the vertex transform, and the store queues for the vertex
