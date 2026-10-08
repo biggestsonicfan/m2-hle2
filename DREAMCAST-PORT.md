@@ -833,6 +833,49 @@ cache to the prefix. That cannot move a 3.8 s answer across the 1200 ms line.
 fps alone. The next suspect is `dp_face_colour`'s ramp miss (350,879 out-of-line
 calls over these 400 frames, #537). It was not instrumented here.
 
+### The tail split at `geo3d_dc_sface` (#540, at 3a45608)
+
+HEAD was still 3a45608. The default baseline matched #539's default row in
+every number and the hash, so the FACESTOP row below is #539's, not re-run.
+
+`make TAILHALF=1` (`GEO3D_TAILHALF`, geo3d.h, off by default, not combined
+with FACESTOP) runs steps 1-11 for every face that reaches them: the prefix,
+then `geo3d_palette_color`, `geo3d_board_luma` (specular and texture LOD
+included) and the diagonal (`geo3d_split_other_way`). It then stops before
+step 12: no `geo3d_dc_sface` / `geo3d_dc_face`, so no colour memo or
+`dp_face_colour`, texture key, strip put or z-key. The sink is FACESTOP's
+running xor, now fed with the face's palette r, g, b, its luma, the texture
+LOD `geo3d_board_luma` leaves in `g_geo3d_emit_texlod`, and the cut. It is
+stored to the same volatile once per model, never per face. Proof from
+`dp_decode`'s disassembly: the TAILHALF build still loads palette RAM,
+`g_geo_rs` (texparam, coef, logram) and the light vector, and has more FP
+work than the default (75 fmul, 61 fmac, against 63 and 48: the default
+calls its colour and texture work out of line). Its calls to
+`dp_face_colour` and `dp_tex_get` are gone. No build here has timer marks.
+
+| frames 3500-3900, SH-4 timer time | total | sl / dr | ti / **sc** / so / su | hash |
+|---|---|---|---|---|
+| 3a45608, default | 14060 | 5226 / 8769 | 453 / **7040** / 217 / 1046 | 634d853f |
+| 3a45608, TAILHALF=1 | 9705 | 5207 / 4454 | 463 / **3885** / 41 / 59 | 634d853f |
+| 3a45608, FACESTOP=1 (#539) | 9099 | 5216 / 3838 | 456 / **3277** / 41 / 57 | 634d853f |
+
+- **Steps 9-11** (palette, luma, specular, diagonal) = 3885 − 3277 = **608 ms**
+- **Steps 12-13** (`geo3d_dc_sface`: colour, texture, strip put, z-key) =
+  7040 − 3885 = **3155 ms**
+- Sum 3763 ms, #539's tail to the millisecond. TAILHALF's sc is above
+  FACESTOP's, so the prefix still ran.
+
+So and su fall as with FACESTOP, because nothing was queued; that is outside
+the scan and not in either half. The TAILHALF picture is wrong, as intended;
+its frame-1500 hash stays 634d853f because that is board state. The default
+build with the switch present has the same instructions as 3a45608 and benches
+the same, every number and the hash.
+
+**Verdict: the submit side holds it.** Steps 12-13 are 3155 ms (over 1200),
+steps 9-11 608 ms (under 700). The next pin's target is
+`geo3d_dc_sface` and what it calls (colour, texture, strip put, z-key) as a
+whole; nothing inside it was opened here. Lighting cannot buy 30 fps alone.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's

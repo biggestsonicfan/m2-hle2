@@ -54,7 +54,14 @@
 #ifndef GEO3D_FACESTOP
 #define GEO3D_FACESTOP 0
 #endif
-#if GEO3D_FACESTOP
+/* TAILHALF=1 (make TAILHALF=1, Pinboard #540): the same, one step on. A face
+ * that is drawn still gets its palette colour, luma (specular and texture LOD
+ * included) and diagonal, and then stops before geo3d_dc_sface: no colour
+ * memo, texture, strip put or z key. Those results go into the running xor. */
+#ifndef GEO3D_TAILHALF
+#define GEO3D_TAILHALF 0
+#endif
+#if GEO3D_FACESTOP || GEO3D_TAILHALF
 static volatile uint32_t g_geo3d_facestop_sink;
 #endif
 
@@ -3335,6 +3342,15 @@ static inline uint32_t geo3d_facestop_bits(float z, const geo3d_lit_t *lt) {
     return a ^ b ^ c;
 }
 #endif
+#if GEO3D_TAILHALF
+/* The words TAILHALF keeps alive: the face's colour, luma, texture LOD and cut. */
+static inline uint32_t geo3d_tailhalf_bits(float r, float g, float b, float pl, int cut) {
+    uint32_t w[5];
+    memcpy(&w[0], &r, 4); memcpy(&w[1], &g, 4); memcpy(&w[2], &b, 4);
+    memcpy(&w[3], &pl, 4); memcpy(&w[4], &g_geo3d_emit_texlod, 4);
+    return w[0] ^ (w[1] << 1) ^ (w[2] << 2) ^ w[3] ^ w[4] ^ (uint32_t)cut;
+}
+#endif
 static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cmesh_t *m,
                                         const vec3_t *tv, const uint8_t *oc, bool cull, bool gone,
                                         const float *matrix, float cr, float cg, float cb) {
@@ -3343,7 +3359,7 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
     const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
     GEO3D_FC(MODELS);
     GEO3D_FC_ON(1u);
-#if GEO3D_FACESTOP
+#if GEO3D_FACESTOP || GEO3D_TAILHALF
     uint32_t fs = 0;
 #endif
 #if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
@@ -3382,6 +3398,10 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         const float pl = geo3d_board_luma(&lt);
         const int cut = is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
         GEO3D_FC(SUB); GEO3D_FC_IF(TRI, is_tri); GEO3D_FC_IF(CUT1, cut == 1);
+#if GEO3D_TAILHALF
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut);
+        continue;
+#endif
         geo3d_dc_sface(dcv, f, m->strips + f->strip, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
 #endif
@@ -3414,10 +3434,14 @@ static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cm
         const float pl = geo3d_board_luma(&lt);
         const int cut = f->is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
         GEO3D_FC(SUB); GEO3D_FC_IF(TRI, f->is_tri); GEO3D_FC_IF(CUT1, cut == 1);
+#if GEO3D_TAILHALF
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut);
+        continue;
+#endif
         geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
     }
     GEO3D_FC_ON(0u);
-#if GEO3D_FACESTOP
+#if GEO3D_FACESTOP || GEO3D_TAILHALF
     g_geo3d_facestop_sink ^= fs;
 #endif
     GEO3D_LAP_N(FACES, m->n_faces);
