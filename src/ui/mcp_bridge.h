@@ -543,6 +543,7 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
     char rom_s[8] = {0};
     const bool rom = mcp_json_get_str(req, "rom", rom_s, sizeof rom_s) && atoi(rom_s) != 0;
     int count = 0;
+    static uint8_t wrote[sizeof hexdata / 2];
     int locked = g_mcp.emu && g_mcp.emu->thread_alive;
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     for (int i = 0; hexdata[i*2] && hexdata[i*2+1]; i++) {
@@ -556,8 +557,9 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
         } else {
             mem_write8(g_mcp.bus, a, b);
         }
-        count++;
+        wrote[count++] = b;
     }
+    follow_lead_write(addr, rom, wrote, (uint32_t)count);   /* follow.h: a follower makes it too */
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"bytes_written\":%d}", count);
 }
@@ -2616,6 +2618,57 @@ static void mcp_cmd_objview_list(const char *req, char *resp, int cap) {
     objview_cmd_list(req, g_mcp.romset, resp, cap);
 }
 
+/*
+ * {"cmd":"follow_lead","dir":"..."} -- lead a one-way follow (core/follow.h,
+ * Pinboard #568): from the next slice the board writes its join points and
+ * its feed into `dir`, which a follower (the web build's ?follow=) reads.
+ * "every":N frames between join points (default five minutes); "join":1 starts
+ * a new one at the next slice; "off":1 stops. No arguments only reads.
+ */
+/* The follow_lead reply: where the leader is. */
+static void mcp_follow_lead_reply(const char *err, char *resp, int cap) {
+    const follow_lead_t *L = &g_follow_lead;
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":%s%s%s%s,\"on\":%s,\"dir\":\"%s\",\"seg\":%u,\"frame\":%u,\"every\":%u,"
+             "\"feed_bytes\":%llu,\"join_ms\":%u,\"join_due\":%s,\"last_error\":\"%s\"}",
+             err ? "false" : "true", err ? ",\"error\":\"" : "", err ? err : "", err ? "\"" : "",
+             L->on ? "true" : "false", L->dir, L->seg, L->frame, L->every,
+             (unsigned long long)L->bytes, L->join_ms, L->join_due ? "true" : "false", L->error);
+}
+
+static void mcp_cmd_follow_lead(const char *req, char *resp, int cap) {
+    char dir[512] = {0};
+    uint32_t every = 0, v = 0;
+    const char *err = NULL;
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    mcp_json_get_u32(req, "every", &every);
+    if (mcp_json_get_u32(req, "off", &v) && v)        follow_lead_stop();
+    else if (mcp_json_get_str(req, "dir", dir, sizeof dir)) err = follow_lead_start(dir, every);
+    else if (mcp_json_get_u32(req, "join", &v) && v)  follow_lead_break("asked for");
+    if (every && g_follow_lead.on) g_follow_lead.every = every;
+    mcp_follow_lead_reply(err, resp, cap);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+}
+
+/* Commands that change the board in a way a follow feed cannot carry: the
+ * segment ends, and the next slice starts another (core/follow.h). */
+static void mcp_follow_break_after(const char *cmd) {
+    static const char *const changes[] = {
+        "sky_eye", "match_replay", "emu_step", "cop_exec", "reset_sound",
+        "netplay_host", "netplay_join", "netplay_start", "netplay_force_start", "netplay_watch",
+    };
+    if (!g_follow_lead.on) return;
+    for (size_t i = 0; i < sizeof changes / sizeof changes[0]; i++) {
+        if (strcmp(cmd, changes[i])) continue;
+        int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+        if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+        follow_lead_break(cmd);
+        if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+        return;
+    }
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -2718,7 +2771,9 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "load_state")               == 0) mcp_cmd_state(req, resp, cap, 1);
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
     else if (strcmp(cmd, "enemy_rank")               == 0) mcp_cmd_enemy_rank(req, resp, cap);
+    else if (strcmp(cmd, "follow_lead")              == 0) mcp_cmd_follow_lead(req, resp, cap);
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
+    mcp_follow_break_after(cmd);
 }
 
 /* The read-only port's commands: looks that neither pause the board nor

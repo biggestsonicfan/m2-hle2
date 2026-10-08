@@ -52,6 +52,14 @@
  * are the same frame for frame if the i960 cannot tell. --pcm FILE writes
  * every sample the board produced (16-bit stereo, 44.1 kHz, raw).
  *
+ * --follow-out DIR leads a one-way follow (core/follow.h) from the first frame:
+ * DIR gets seg-N.sta / seg-N.feed, a segment every --follow-every frames, all
+ * of them kept. --poke F:ADDR:HEX writes those bytes at the start of frame F as
+ * the MCP bridge's write_memory does (recorded in the feed). --follow DIR:N
+ * follows from segment N on, into the next segment at each END, feeding the
+ * feed a few hundred bytes at a time; its lines from the join on are the
+ * leader's, and the last line on stderr says how many frame checks held.
+ *
  * --region japan|usa|export powers up in that region (USA by default, as the
  * emulator does); --nowarnskip leaves the Japan warning screen in, ~640 game
  * frames, as MAME does. --peek HEXADDR adds that byte to each line (the mode
@@ -116,6 +124,79 @@ static int script_n;
  * F in both. With --mem the state goes through memory as the libretro core's
  * retro_serialize / retro_unserialize take it (stored, padded to its size),
  * and the file holds that buffer. */
+static const char *follow_out, *follow_in;
+static uint32_t    follow_every;
+#define POKE_MAX 16
+static struct { uint32_t frame, addr, n; uint8_t b[64]; } pokes[POKE_MAX];
+static int poke_n;
+
+static bool parse_poke(const char *a) {
+    char hex[129] = {0};
+    if (poke_n >= POKE_MAX || sscanf(a, "%u:%x:%128s", &pokes[poke_n].frame, &pokes[poke_n].addr, hex) != 3)
+        return false;
+    uint32_t n = 0;
+    for (; hex[n * 2] && hex[n * 2 + 1] && n < 64; n++) {
+        char b[3] = { hex[n * 2], hex[n * 2 + 1], 0 };
+        pokes[poke_n].b[n] = (uint8_t)strtoul(b, NULL, 16);
+    }
+    pokes[poke_n++].n = n;
+    return n > 0;
+}
+
+static uint8_t *read_file(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *p = (uint8_t *)malloc(n > 0 ? (size_t)n : 1);
+    if (p && fread(p, 1, (size_t)n, f) != (size_t)n) { free(p); p = NULL; }
+    fclose(f);
+    *len = (size_t)n;
+    return p;
+}
+
+/* The follower's side: one segment's state and feed, the feed handed over a
+ * piece at a time as a page would fetch it. */
+static struct { char dir[900]; uint32_t seg; uint8_t *feed; size_t len, at; uint32_t segs, checks; } fol;
+
+static bool follow_open_seg(emu_thread_ctx_t *emu) {
+    char path[1024];
+    size_t n;
+    snprintf(path, sizeof path, "%s/seg-%u.sta", fol.dir, fol.seg);
+    uint8_t *st = read_file(path, &n);
+    if (!st) return false;
+    fol.checks += g_follow.checks;
+    const char *err = follow_join(emu, st, n);
+    free(st);
+    if (err) { fprintf(stderr, "follow: %s: %s\n", path, err); return false; }
+    free(fol.feed);
+    snprintf(path, sizeof path, "%s/seg-%u.feed", fol.dir, fol.seg);
+    fol.feed = read_file(path, &fol.len);
+    fol.at = 0;
+    fol.segs++;
+    fprintf(stderr, "follow: joined segment %u at frame %u\n", fol.seg, (unsigned)g_emu_frames);
+    return fol.feed != NULL;
+}
+
+/* True when the next slice may run: feed more, or move on to the next segment. */
+static bool follow_next_ready(emu_thread_ctx_t *emu) {
+    for (;;) {
+        if (follow_slice_ready()) return true;
+        if (g_follow.split) return false;
+        if (g_follow.ended) {
+            fol.seg++;
+            if (!follow_open_seg(emu)) return false;
+            continue;
+        }
+        if (fol.at >= fol.len) return false;
+        size_t n = fol.len - fol.at < 333 ? fol.len - fol.at : 333;
+        const char *err = follow_feed(fol.feed + fol.at, n);
+        if (err) { fprintf(stderr, "follow: %s\n", err); return false; }
+        fol.at += n;
+    }
+}
+
 static const char *load_path;
 static uint32_t    save_frame;
 static char        save_path[1024];
@@ -329,6 +410,12 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--follow-out")   && i + 1 < argc) follow_out = argv[++i];
+        else if (!strcmp(argv[i], "--follow-every") && i + 1 < argc) follow_every = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--follow") && i + 1 < argc) follow_in = argv[++i];
+        else if (!strcmp(argv[i], "--poke") && i + 1 < argc) {
+            if (!parse_poke(argv[++i])) { fprintf(stderr, "--poke F:ADDR:HEX\n"); return 2; }
+        }
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--mem")) state_mem = true;
         else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
@@ -408,6 +495,18 @@ int main(int argc, char **argv) {
 
     FILE *out = out_path ? fopen(out_path, "wb") : stdout;
     if (!out) { fprintf(stderr, "cannot write %s\n", out_path); return 2; }
+    if (follow_out) {
+        const char *err = follow_lead_start(follow_out, follow_every ? follow_every : 1000000000u);
+        if (err) { fprintf(stderr, "--follow-out %s: %s\n", follow_out, err); return 2; }
+        g_follow_lead.keep = 0;
+    }
+    if (follow_in) {
+        const char *c = strrchr(follow_in, ':');
+        if (!c) { fprintf(stderr, "--follow DIR:SEG\n"); return 2; }
+        snprintf(fol.dir, sizeof fol.dir, "%.*s", (int)(c - follow_in), follow_in);
+        fol.seg = (uint32_t)atoi(c + 1);
+        if (!follow_open_seg(&emu)) { fprintf(stderr, "--follow: no segment %u in %s\n", fol.seg, fol.dir); return 2; }
+    }
 
     int at = 0;
     uint64_t slices = 0;
@@ -416,6 +515,13 @@ int main(int argc, char **argv) {
         /* Inputs change only on a frame boundary, as the lockstep's do. */
         while (at < script_n && script[at].frame <= g_emu_frames) g_input.held = script[at++].held;
         if (in_n && g_emu_frames < in_n) g_input.held = words_mask(in_w0[g_emu_frames], in_w1[g_emu_frames]);
+        for (int p = 0; p < poke_n; p++) {
+            if (pokes[p].frame != g_emu_frames || !pokes[p].n) continue;
+            follow_bus_write(&bus, pokes[p].addr, false, pokes[p].b, pokes[p].n);
+            follow_lead_write(pokes[p].addr, false, pokes[p].b, pokes[p].n);
+            pokes[p].n = 0;
+        }
+        if (follow_in && !follow_next_ready(&emu)) break;
         if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
         else                                              emu_slice_body(&emu);
         emu_slice_result_t r = emu_slice_finish(&emu);
@@ -465,6 +571,16 @@ int main(int argc, char **argv) {
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);
+    if (follow_out) {
+        fprintf(stderr, "follow: led %u segments, the last join point took %u ms\n", g_follow_lead.seg, g_follow_lead.join_ms);
+        follow_lead_stop();
+    }
+    if (follow_in) {
+        fprintf(stderr, "follow: %u segments, %u frame checks held%s%s%s\n", fol.segs, fol.checks + g_follow.checks,
+                g_follow.split ? "; SPLIT: " : "", g_follow.split ? g_follow.why : "",
+                g_follow.ended ? "; the feed ended" : "");
+        if (g_follow.split) return 1;
+    }
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);

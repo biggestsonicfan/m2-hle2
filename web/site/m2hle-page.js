@@ -48,6 +48,11 @@ function explainMissing(missing) {
 
 function loadZip(bytes) {
   show('step-busy');
+  /* ?follow= names the leader's profile before the game loads (m2hle-follow.js). */
+  followReady.then(() => loadZipNow(bytes), (e) => romError('Cannot follow: ' + e.message));
+}
+
+function loadZipNow(bytes) {
   /* Let the "reading" text paint before the (synchronous) extraction runs. */
   requestAnimationFrame(() => setTimeout(() => {
     /* ?script= and ?pause= : a run whose inputs are keyed to game frames, so it is
@@ -74,7 +79,8 @@ function loadZip(bytes) {
     /* Backup RAM (the test menu's settings, rankings) is kept once a minute;
      * this keeps the last of it when the tab goes. */
     addEventListener('pagehide', () => Module._web_backup_flush());
-    m2hleNetplay.onGame();
+    if (m2hleFollow.active) m2hleFollow.onGame();   /* no netplay: the board is the leader's */
+    else m2hleNetplay.onGame();
     m2hleTouch.onGame();
     pauseOnGame();
     $('canvas').focus();
@@ -89,6 +95,8 @@ function loadZip(bytes) {
  * does nothing while they arrive). The GPU work stops with the frames, the sound
  * with the AudioContext (audioStart). Measure per browser: WEB-NETPLAY.md 5.3. */
 let runWorker = null;
+/* Settled once ?follow='s profile is in (at once without one). */
+let followReady = Promise.resolve();
 
 function keepRunning() {
   if (runWorker) return;
@@ -315,6 +323,8 @@ var Module = {
 
   /* Called from main_web.c's init(), once the exports can be used. */
   onM2hleReady() {
+    followReady = m2hleFollow.prepare(Module);
+    if (m2hleFollow.refused) m2hleTools.add('?follow= names another site: not followed', 'warning');
     show('step-rom');
     buildLine();
     m2hleTools.onReady();
