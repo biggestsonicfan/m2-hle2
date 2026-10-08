@@ -153,6 +153,8 @@ ask_program() {
     ask FPS_CAP "FPS_CAP: at most this many board frames a second (0: no cap)" 60
     yes HOST_MATH "HOST_MATH: the COP's sin, cos and square roots from the SH-4's own instructions" y
     yes STRIPS "STRIPS: meshes pre-walked into strips (STRIPS.PAK on the disc)" y
+    yes RAMP4096 "RAMP4096: a 4096-slot colour-ramp cache, paid for by a smaller page cache (#556: 603 ms faster over the bench, same picture)" y
+    yes SDLOG "SDLOG: the log and stats to M2LOGnnn.TXT on an SD card on the serial port" n
 }
 
 ask_disc() {
@@ -179,25 +181,36 @@ ask_after() {
     ask JOBS "make -j" 2
 }
 
+# The Makefile's measurement switches (#535-#555): each changes what the bench
+# counts or times, or stops the face loop early. One at a time.
+MEASURES="SCANSPLIT FACECOUNT FACESTOP TAILHALF STRIPSTOP ZKEYSTOP COLOURSTOP FACECOLSTOP RAMPSTOP RAMPCOUNT RAMPKEEP RAMPWALK"
+
 # Options only the tests and the benches use.
 ask_dev() {
     echo
-    yes DEV "Developer options (JIT, LINK, OPTAB, HASH_FRAME, AOT map...)" n
+    yes DEV "Developer options (JIT, LINK, OPTAB, HASH_FRAME, AOT map, the bench's measurement switches...)" n
     [ "$DCB_DEV" = 1 ] || return 0
     yes OPTAB "OPTAB: dispatch through a handler table" n
     yes JIT "JIT: the SH-4 block JIT" n
     [ "$DCB_JIT" = 1 ] && { yes JIT_ON "  JIT_ON: on at boot" y; yes JIT_TEST "  JIT_TEST: its self-test" n; }
     ask HASH_FRAME "HASH_FRAME: show the board's hash at this frame (0: none)" 0
-    yes LINK "LINK: lockstep against MAME over the serial port" n
+    if [ "$DCB_SDLOG" = 1 ]; then DCB_LINK=0; echo "  (no LINK: SDLOG has the serial port)"
+    else yes LINK "LINK: lockstep against MAME over the serial port" n; fi
     [ "$DCB_LINK" = 1 ] && { yes LINK_GEMS "  LINK_GEMS: Gems kept on in it" n; ask SINCOS "  SINCOS.BIN for the disc (tools/mksincos.py)" ""; }
     [ "$DCB_AOT" = 1 ] && ask AOT_MAP "AOT_MAP" sfight.aotmap
+    pick MEASURE "A bench measurement switch, one at a time (the picture may be wrong)" none none $MEASURES
+    [ "$DCB_MEASURE" = RAMPWALK ] || [ "$DCB_MEASURE" = none ] || [ "$DCB_RAMP4096" = 0 ] ||
+        warn "$DCB_MEASURE was measured alone; RAMP4096 is on (DCB_RAMP4096=0 for the old cache)"
+    if [ "$DCB_RAMP4096" = 0 ]; then
+        yes CACHESHRINK "CACHESHRINK: the page cache 86016 bytes smaller, with the old ramp cache" n
+    else DCB_CACHESHRINK=0; fi
     ask IB_POOL "IB_POOL: the block runner's pool (empty: the Makefile's)" ""
     ask EXTRA "EXTRA: more compiler flags" ""
 }
 
 ALL_KEYS="REPO REF FETCH RELEASE DISCS GDI_NAME GDI_CANARY CDI_NAME CDI_CANARY AOT AOT_COVER GEMS GEMS_PATH
-FRAME512 FILL VIEW FPS PANEL FPS_CAP HOST_MATH STRIPS PS3 SOUND MODELS TEXPAK REDO_ASSETS DUMMY FAST ZIP
-TEST TEST_SECS CANARY JOBS DEV OPTAB JIT JIT_ON JIT_TEST HASH_FRAME LINK LINK_GEMS SINCOS AOT_MAP IB_POOL EXTRA"
+FRAME512 FILL VIEW FPS PANEL FPS_CAP HOST_MATH STRIPS RAMP4096 SDLOG PS3 SOUND MODELS TEXPAK REDO_ASSETS DUMMY FAST ZIP
+TEST TEST_SECS CANARY JOBS DEV OPTAB JIT JIT_ON JIT_TEST HASH_FRAME LINK LINK_GEMS SINCOS MEASURE CACHESHRINK AOT_MAP IB_POOL EXTRA"
 
 export_answers() { local k; for k in $ALL_KEYS; do v="DCB_$k"; [ -n "${!v+x}" ] && export "$v"; done; return 0; }
 
@@ -220,11 +233,13 @@ make_args() {
     MAKE_ARGS=(OUT="$OUT" VENDOR="$VENDOR" -j"$DCB_JOBS"
         FRAME512="$DCB_FRAME512" FILL="$DCB_FILL" VIEW="$DCB_VIEW" FPS_CAP="$DCB_FPS_CAP"
         HUD="$(HUD_ARG)" FPS="$DCB_FPS" HOST_MATH="$DCB_HOST_MATH" STRIPS="$DCB_STRIPS"
-        RELEASE="$DCB_RELEASE")
+        RAMP4096="$DCB_RAMP4096" SDLOG="$DCB_SDLOG" RELEASE="$DCB_RELEASE")
     if [ "$DCB_AOT" = 1 ]; then MAKE_ARGS+=(AOT="$ROMS/rom_code1.bin" AOT_COVER="$DCB_AOT_COVER"); else MAKE_ARGS+=(AOT=); fi
     if [ "$DCB_GEMS" = 1 ]; then MAKE_ARGS+=(GEMS="$GEMS_DIR"); else MAKE_ARGS+=(GEMS=); fi
     [ "${DCB_DEV:-0}" = 1 ] || return 0
     MAKE_ARGS+=(OPTAB="$DCB_OPTAB" JIT="$DCB_JIT" HASH_FRAME="$DCB_HASH_FRAME" LINK="$DCB_LINK" EXTRA="$DCB_EXTRA")
+    [ "$DCB_MEASURE" != none ] && MAKE_ARGS+=("$DCB_MEASURE=1")
+    [ "$DCB_CACHESHRINK" = 1 ] && MAKE_ARGS+=(CACHESHRINK=1)
     [ "$DCB_JIT" = 1 ] && MAKE_ARGS+=(JIT_ON="$DCB_JIT_ON" JIT_TEST="$DCB_JIT_TEST")
     [ "$DCB_LINK" = 1 ] && MAKE_ARGS+=(LINK_GEMS="$DCB_LINK_GEMS")
     [ -n "${DCB_AOT_MAP:-}" ] && MAKE_ARGS+=(AOT_MAP="$DCB_AOT_MAP")
@@ -388,7 +403,10 @@ describe() {
     [ -n "$DCB_RELEASE" ] && d+=" $DCB_RELEASE"
     d+=" at $GIT_DESC $BUILD: HUD=$(HUD_ARG) FPS=$DCB_FPS FRAME512=$DCB_FRAME512 FILL=$DCB_FILL"
     [ -n "$DCB_VIEW" ] && d+=" VIEW=$DCB_VIEW"
-    d+=" FPS_CAP=$DCB_FPS_CAP"
+    d+=" FPS_CAP=$DCB_FPS_CAP RAMP4096=$DCB_RAMP4096"
+    [ "$DCB_SDLOG" = 1 ] && d+=" SDLOG=1"
+    [ "${DCB_DEV:-0}" = 1 ] && [ "$DCB_MEASURE" != none ] && d+=" $DCB_MEASURE=1"
+    [ "${DCB_DEV:-0}" = 1 ] && [ "$DCB_CACHESHRINK" = 1 ] && d+=" CACHESHRINK=1"
     [ "$DCB_AOT" = 1 ] && d+=", AOT $DCB_AOT_COVER"; [ "$DCB_GEMS" = 1 ] && d+=", Gems C"
     [ "$DCB_PANEL" = prof ] && d+=", PROF panel hidden at boot - R shows/hides it"
     [ "$DCB_STRIPS" = 1 ] && d+=", STRIPS.PAK"; [ "$DCB_TEXPAK" = 1 ] && d+=", TEXTURES.PAK"
