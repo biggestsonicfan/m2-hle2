@@ -66,9 +66,11 @@ RAMPKEEP ?= 0
 # CACHESHRINK=1: the pager's cache budget 86016 bytes smaller (a 4096-entry
 # g_dp_ramp's extra RAM), so its frame pool 6 frames smaller (main_dc.c, #552). Alone.
 CACHESHRINK ?= 0
-# RAMP4096=1: g_dp_ramp 4096 entries, not 1024, paid for by a page-cache budget
-# 86016 bytes smaller (dc_pvr.h, main_dc.c, #553). Not with CACHESHRINK.
-RAMP4096 ?= 0
+# RAMP4096=1 (the default since #556): g_dp_ramp 4096 entries, not 1024, paid for
+# by a page-cache budget 86016 bytes smaller, 1196 KB (dc_pvr.h, main_dc.c, #553,
+# #554). 603 ms faster over the bench, same picture. RAMP4096=0 is the old cache.
+# Not with CACHESHRINK.
+RAMP4096 ?= 1
 # RAMPWALK=1: TMU2 time inside dp_face_ramp, hit or miss, over the bench, one
 # total (dc_pvr.h, main_dc.c, #555). A timer; the walk still runs. Alone or with RAMP4096.
 RAMPWALK ?= 0
