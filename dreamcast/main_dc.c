@@ -297,8 +297,8 @@ static void dc_assert_stack(int y) {
 
 /* A failed assert, KOS's or ours (dc_fatal), on screen: no serial console in
  * the field. The PVR may be in any state, so the frame buffer is drawn into
- * directly once the last render has had time to land; the watchdog goes off,
- * or a hang would be reported over it. The return addresses are what KOS's
+ * directly once the last render has had time to land; the watchdog stands
+ * down, or a hang would be reported over it. The return addresses are what KOS's
  * stack walk finds (saved PRs after a call); out/pass2.syms or addr2line on
  * m2hle2.elf names them. */
 static void dc_assert(const char *file, int line, const char *expr, const char *msg, const char *func) {
