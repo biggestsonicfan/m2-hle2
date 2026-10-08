@@ -806,6 +806,14 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
 .shader-param output { font-variant-numeric: tabular-nums; text-align: right; color: var(--text); }
 .shader-param input[type=range] { width: 100%; min-width: 0; }
 .picture code { font: 0.8125rem var(--font-mono); }
+
+/* The Replay tab (m2hle-replay.js). */
+.replay { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0.2rem 16px 0.8rem; max-width: 46rem; }
+.replay p { margin: 0.25rem 0; }
+.replay-label { margin: 0.4rem 0; padding: 0.4rem 0.6rem; border-left: 2px solid var(--text); }
+.replay-time-row input[type=range] { flex: 1 1 auto; min-width: 10rem; }
+.replay-list { list-style: none; margin: 0; padding: 0; }
+.replay-list li { padding: 0.35rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.12); }
 @media (max-width: 520px) {
   .shader-param { grid-template-columns: 1fr 3rem; }
   .shader-param span { grid-column: 1 / -1; }

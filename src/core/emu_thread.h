@@ -361,6 +361,7 @@ static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *
 /* A board followed one way from another (Pinboard #568): the leader writes its
  * inputs and writes to a feed, a follower runs on them. Hooked into the slice. */
 #include "follow.h"
+#include "replay.h"   /* recorded online matches, and their playback (Pinboard #572) */
 
 /* ---- The sound UART ---------------------------------------------------------
  *
@@ -467,10 +468,13 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     i960_cpu_t          *cpu = ctx->cpu;
     const game_quirks_t *q   = &g_active_profile->quirks;
 
-    g_hle_netplay_board = netplay_active();
+    /* A board following a feed (a replay, core/replay.h) goes by the flags
+     * its leader went by. */
+    uint32_t board = follow_board_flags();
+    g_hle_netplay_board = (board & FOLLOW_BOARD_SESSION) != 0;
 
     /* Auto-skip the boot warning screen by holding its ack flag at 1. */
-    if ((g_warning_skip || netplay_active()) && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
+    if ((board & FOLLOW_BOARD_WARNING) && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
 
     /* Did the in-service handler return? (frame unwound to/below baseline) */
     if (s_irq_in_service && cpu->frame_depth <= s_irq_baseline_depth)
@@ -555,6 +559,28 @@ static inline bool emu_sound_slice_end(bool frame) {
 
 /* ---- Run loop ------------------------------------------------------------ */
 
+/* A savestate the UI asked for. A load inside a session would change this board
+ * and not the peer's, so it is refused there; a save is only a read, and is not.
+ * A loaded state ends a follow lead and a recording: neither saw it coming. */
+static inline void emu_state_request_pump(emu_thread_ctx_t *ctx, netplay_step_t step) {
+    int state = ctx->request_state;
+    if (!state) return;
+    ctx->request_state = 0;
+    const char *err;
+    emu_mutex_lock(&ctx->mutex);
+    if (state == 2) {
+        if (step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
+        else if (replay_playing())    err = "a replay is playing";
+        else                          err = emu_state_load_now(ctx, ctx->state_path);
+        if (!err) { follow_lead_break("state loaded"); replay_rec_break("state loaded"); }
+    } else {
+        err = emu_state_save_now(ctx, ctx->state_path);
+    }
+    snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
+    emu_mutex_unlock(&ctx->mutex);
+    ctx->state_count++;
+}
+
 /* Pump netplay and hand back what this slice may do.
  *
  * OUTSIDE the emu mutex on purpose: a TLS connect blocks for seconds, and
@@ -578,24 +604,12 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
      * reset, back in their own settings (netplay_empty_room_pump). */
     bool alone = step == NETPLAY_STEP_OFF && netplay_take_empty_restart();
 
-    /* A savestate. A load inside a session would change this board and not the
-     * peer's, so it is refused there; a save is only a read, and is not. */
-    int state = ctx->request_state;
-    if (state) {
-        ctx->request_state = 0;
-        const char *err;
-        emu_mutex_lock(&ctx->mutex);
-        if (state == 2 && step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
-        else if (state == 2) err = emu_state_load_now(ctx, ctx->state_path);
-        if (state == 2 && !err) follow_lead_break("state loaded");
-        else                 err = emu_state_save_now(ctx, ctx->state_path);
-        snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
-        emu_mutex_unlock(&ctx->mutex);
-        ctx->state_count++;
-    }
+    emu_state_request_pump(ctx, step);
 
     if (step == NETPLAY_STEP_RESET || asked || alone) {
         emu_mutex_lock(&ctx->mutex);
+        replay_rec_break("board reset");
+        replay_play_yield();   /* a session takes the board from a replay */
         if (alone)      netplay_restart_alone();
         else if (asked) asked = netplay_reset_board_now();
         else            netplay_do_reset();
@@ -611,6 +625,9 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         ctx->total_steps       = 0;
         ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
         ctx->cpu_snapshot      = *ctx->cpu;
+        /* After the step count is zeroed: the replay's state carries it, and
+         * every frame check of the feed hashes it. */
+        if (step == NETPLAY_STEP_RESET && !asked && !alone) replay_session_reset(ctx);
         emu_mutex_unlock(&ctx->mutex);
         if (asked) ctx->reset_count++;
     }
@@ -785,6 +802,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     g_vblank_edge = 0;
     g_geodl_full_snap = g_active_profile && g_active_profile->quirks.geo_displaylist;
     follow_slice_begin(ctx);   /* follow.h: latch or replay this slice's inputs */
+    replay_slice_begin(ctx);   /* replay.h: record a netplay match's */
     emu_slice_irq_stale(ctx);
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);
@@ -868,6 +886,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->slice_capped = (i >= max_steps);
     bool frame = g_vblank_edge != 0;
     follow_slice_end(ctx, frame);
+    replay_slice_end(ctx, frame);
     if (frame) emu_slice_frame_edge(ctx);
     emu_slice_after(ctx, frame, prof_t0, steps);
     hprof_leave(hzone);
@@ -891,6 +910,7 @@ static inline void emu_slice_count_frame(emu_thread_ctx_t *ctx) {
      * here, at the frame boundary every board in a room shares. */
     int versus_result = g_versus_result;
     g_versus_result = 0;
+    replay_frame_result(ctx, versus_result);
     netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
     if (sndcap_on()) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
     /* A PS3 match plays on the board as it is, with no reset: from here on
@@ -970,6 +990,7 @@ static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
         if (reset) {
             ctx->total_steps       = 0;    /* as the barrier's reset: see emu_netplay_pump */
             follow_lead_break("idle hold");
+            replay_rec_break("idle hold");
             ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
             ctx->cpu_snapshot      = *ctx->cpu;
             ctx->frame_deadline_us = 0;
@@ -1012,7 +1033,7 @@ static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
      * frame per call. */
     bool budget_hit = ctx->frame_budget_hit != 0;
     ctx->frame_budget_hit = 0;
-    if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
+    if (unthrottled || netplay_catching_up() || replay_play_unpaced()) ctx->frame_deadline_us = 0;
     else if (sleep_us > 0 && !budget_hit) {
         emu_sleep_us(sleep_us);
         g_emu_times.pace_us += emu_now_us() - work_t1;
@@ -1037,7 +1058,13 @@ static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice
         g_emu_times.net_us += emu_now_us() - slice_start;
         return false;
     }
-    if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget) {
+    /* A replay holds the board where its feed ends (or splits), still. */
+    if (np_step == NETPLAY_STEP_OFF && replay_playing() && !follow_slice_ready()) {
+        emu_sleep_ms(2);
+        g_emu_times.net_us += emu_now_us() - slice_start;
+        return false;
+    }
+    if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget && !replay_playing()) {
         emu_idle_hold(ctx);
         g_emu_times.net_us += emu_now_us() - slice_start;
         return false;
@@ -1193,6 +1220,7 @@ static inline void emu_thread_shutdown(emu_thread_ctx_t *ctx) {
     /* The sound thread stays parked for the life of the process, but must not
      * be mid-run when the host frees the sample ROMs it reads. */
     sound_settle();
+    replay_rec_shutdown();   /* keep a match being recorded, and wait for its writer */
     emu_mutex_destroy(&ctx->mutex);
     LOG_INFO("emu: thread stopped");
 }

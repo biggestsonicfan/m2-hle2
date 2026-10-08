@@ -330,6 +330,7 @@ var Module = {
     m2hleTools.onReady();
     m2hleObjview.onReady();
     m2hleShader.onReady();
+    m2hleReplay.onReady(Module);
     m2hleNetplay.onReady(Module);
     m2hlePad.onReady();
     debugStart();

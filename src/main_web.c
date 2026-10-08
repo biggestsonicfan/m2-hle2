@@ -194,6 +194,10 @@ static void web_install_board(void) {
 /* ---- The PS3 shell (Console version): its host hooks ----------------------- */
 
 static bool  g_web_shell_on;       /* the Console version: the PS3's interface */
+
+/* The shell stands aside while a replay plays (core/replay.h): its menus would
+ * hold the board, and its pad is not the one the replay reads. */
+static bool web_shell_live(void) { return g_web_shell_on && !replay_playing(); }
 static bool  g_web_hold;           /* the shell's menus hold the board still */
 static float g_web_volume = 1.0f;  /* the shell's Settings */
 
@@ -288,7 +292,7 @@ static bool web_slice(void) {
     netplay_step_t np = emu_netplay_pump(&state.emu);
     g_web_waited = (np == NETPLAY_STEP_WAIT);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
-    if (g_web_follow && !follow_slice_ready()) { g_web_waited = true; return false; }
+    if ((g_web_follow || replay_playing()) && !follow_slice_ready()) { g_web_waited = true; return false; }
     if (state.emu.run_state != EMU_RUNNING) return false;
     if (emu_slice_should_stop(&state.emu)) return false;
     while (g_web_script_at < g_web_script_n && g_web_script[g_web_script_at].frame <= g_emu_frames)
@@ -327,18 +331,18 @@ static bool web_pause_refused(void) { return netplay_in_room() || netplay_active
  * the Console shell is not in one of its own menus (which hold the board). */
 EMSCRIPTEN_KEEPALIVE int web_pause_allowed(void) {
     if (!state.romset.loaded || web_pause_refused()) return 0;
-    if (!g_web_shell_on || g_web_paused) return 1;
+    if (!web_shell_live() || g_web_paused) return 1;
     ps3ui_sh_screen_t scr = g_ps3ui_shell.scr;
     return scr == PS3UI_SH_TITLE || scr == PS3UI_SH_GAME || scr == PS3UI_SH_PAUSE;
 }
 /* 0 running, 1 the page's freeze ("Paused" over the picture), 2 the PS3 pause menu. */
 EMSCRIPTEN_KEEPALIVE int web_paused(void) {
-    return g_web_paused ? 1 : g_web_shell_on && g_ps3ui_shell.scr == PS3UI_SH_PAUSE ? 2 : 0;
+    return g_web_paused ? 1 : web_shell_live() && g_ps3ui_shell.scr == PS3UI_SH_PAUSE ? 2 : 0;
 }
 /* Returns web_paused() as it will be. */
 EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
     if (on && !web_pause_allowed()) return web_paused();
-    if (g_web_shell_on && !g_web_paused && g_ps3ui_shell.scr != PS3UI_SH_TITLE) {
+    if (web_shell_live() && !g_web_paused && g_ps3ui_shell.scr != PS3UI_SH_TITLE) {
         bool menu = g_ps3ui_shell.scr == PS3UI_SH_PAUSE;
         if (!!on != menu) g_web_select_tap = true;   /* SELECT opens it, and SELECT again resumes */
         return on ? 2 : 0;
@@ -351,7 +355,8 @@ EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
  * owed them or not, until it has caught up (netplay_catching_up); so does a
  * follower with more than WEB_FOLLOW_AHEAD frames of feed in hand. */
 static bool web_catching_up(void) {
-    return netplay_catching_up() || (g_web_follow && follow_buffered() > WEB_FOLLOW_AHEAD);
+    return netplay_catching_up() || replay_play_unpaced()
+        || (g_web_follow && follow_buffered() > WEB_FOLLOW_AHEAD);
 }
 
 static void web_run_owed_slices(void) {
@@ -606,12 +611,12 @@ static uint32_t web_lobby_pad2(void) {
 
 /* What the menus want on screen this callback. */
 static ps3ui_view_t web_view(void) {
-    if (g_web_shell_on) return ps3ui_shell_view(&g_ps3ui_shell);
+    if (web_shell_live()) return ps3ui_shell_view(&g_ps3ui_shell);
     return ps3ui_app_view(&g_ps3ui_app);
 }
 
 static bool web_game_pad(void) {
-    return g_web_shell_on ? ps3ui_shell_game_pad(&g_ps3ui_shell) != 0 : !ps3ui_app_visible(&g_ps3ui_app);
+    return web_shell_live() ? ps3ui_shell_game_pad(&g_ps3ui_shell) != 0 : !ps3ui_app_visible(&g_ps3ui_app);
 }
 
 /* The menus run at 60 Hz whatever the display's rate: their windows, cursors
@@ -623,7 +628,7 @@ static ps3ui_view_t web_lobby_tick(void) {
     bool had = web_game_pad();
     if (!next_us || now - next_us > 250000) next_us = now;
     while (now >= next_us) {
-        if (g_web_shell_on) {
+        if (web_shell_live()) {
             /* the page's Pause: a SELECT for one frame, then let go, so the shell sees a press */
             uint32_t tap = g_web_select_tap ? PS3UI_PAD_SELECT : 0;
             g_web_select_tap = false;
@@ -636,7 +641,7 @@ static ps3ui_view_t web_lobby_tick(void) {
         }
         next_us += 1000000 / EMU_SLICES_PER_SEC;
     }
-    g_web_hold = g_web_shell_on && ps3ui_shell_board_paused(&g_ps3ui_shell);
+    g_web_hold = web_shell_live() && ps3ui_shell_board_paused(&g_ps3ui_shell);
     if (had && !web_game_pad()) input_release_all();   /* the game lets go of what the menus now hold */
     return web_view();
 }
@@ -688,7 +693,7 @@ static void web_record_menus(ps3ui_canvas_t *cv, bool overlay) {
     } else {
         ps3ui_gpu_record(cv, sapp_width(), sapp_height());
     }
-    if (g_web_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, cv);
+    if (web_shell_live()) ps3ui_shell_draw(&g_ps3ui_shell, cv);
     else                ps3ui_app_draw(&g_ps3ui_app, cv);
 }
 
@@ -900,6 +905,7 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     if (!g_active_profile) { free(zip); return -2; }
 
     state.emu.run_state = EMU_STOPPED;
+    replay_game_loaded();   /* a recording ends; a replay lets go of the board */
     rl_mem_zip_set(zip, (size_t)len, true);
     int rc = g_active_profile->load_fn(&state.romset, NULL, NULL);
     /* Drop the pointer, keep the report: the page reads it after a failed load. */
@@ -988,6 +994,91 @@ EMSCRIPTEN_KEEPALIVE const char *web_follow_status(void) {
     return buf;
 }
 
+/* ---- Replays (core/replay.h, Pinboard #572) -----------------------------------
+ *
+ * The page keeps the files (m2hle-replay.js, in IndexedDB); the board only
+ * records and plays. With the switch on, each online match the board plays ends
+ * as a zip in a slot the page polls (web_replay_ready_len), takes and frees.
+ * PLAYBACK hands a file's bytes to web_replay_open, shows its label
+ * (web_replay_info) and asks; Play takes the board over until Stop, which boots
+ * the player's own game again. */
+static char g_web_replay_err[200];
+
+static int web_replay_result(const char *err) {
+    snprintf(g_web_replay_err, sizeof g_web_replay_err, "%s", err ? err : "");
+    return err ? -1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE void web_replay_set_record(int on) { g_replay_rec.want = on != 0; }
+EMSCRIPTEN_KEEPALIVE int  web_replay_record(void)       { return g_replay_rec.want ? 1 : 0; }
+
+/* The finished match's zip: its length (0 when none waits), bytes and name.
+ * web_replay_ready_free once the page has copied it out. */
+EMSCRIPTEN_KEEPALIVE int         web_replay_ready_len(void)  { return (int)g_replay_rec.ready_len; }
+EMSCRIPTEN_KEEPALIVE uint8_t    *web_replay_ready_data(void) { return g_replay_rec.ready; }
+EMSCRIPTEN_KEEPALIVE const char *web_replay_ready_name(void) { return g_replay_rec.ready_name; }
+EMSCRIPTEN_KEEPALIVE void web_replay_ready_free(void) {
+    free(g_replay_rec.ready);
+    g_replay_rec.ready = NULL;
+    g_replay_rec.ready_len = 0;
+    g_replay_rec.ready_name[0] = '\0';
+}
+
+/* Open a file's bytes (a malloc'd buffer, freed here): 0, or -1 with
+ * web_replay_error saying why. Nothing plays yet. */
+EMSCRIPTEN_KEEPALIVE int web_replay_open(uint8_t *data, int len) {
+    const char *err = data && len > 0 ? replay_open(data, (size_t)len) : "an empty file";
+    free(data);
+    return web_replay_result(err);
+}
+
+/* The open replay's label, replay.json as it was saved ("" when none is open). */
+EMSCRIPTEN_KEEPALIVE const char *web_replay_info(void) {
+    return g_replay_play.loaded ? g_replay_play.json : "";
+}
+
+EMSCRIPTEN_KEEPALIVE int web_replay_play(void) {
+    if (!state.romset.loaded) return web_replay_result("load the game first");
+    if (g_replay_play.loaded) replay__check_playable();   /* the game may have changed since it opened */
+    g_web_paused = false;
+    int rc = web_replay_result(replay_play_start(&state.emu));
+    if (rc == 0) {
+        input_release_all();
+        if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+        state.owed_us = 0;
+    }
+    return rc;
+}
+
+EMSCRIPTEN_KEEPALIVE void web_replay_stop(void) {
+    replay_play_stop();
+    if (state.romset.loaded && state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+}
+
+EMSCRIPTEN_KEEPALIVE int web_replay_seek(unsigned frame) {
+    return web_replay_result(replay_play_seek(&state.emu, frame));
+}
+
+EMSCRIPTEN_KEEPALIVE void web_replay_fast(int on) { g_replay_play.fast = on != 0; }
+
+EMSCRIPTEN_KEEPALIVE const char *web_replay_error(void) { return g_web_replay_err; }
+
+/* replay_play_status's object, plus "unplayable" (why the open one cannot
+ * play here), "recording" and "saved" (matches recorded since the page opened). */
+EMSCRIPTEN_KEEPALIVE const char *web_replay_status(void) {
+    static char buf[800];
+    char play[400], why[200], rec_err[200];
+    replay_play_status(play, sizeof play);
+    json_escape(why, sizeof why, g_replay_play.unplayable);
+    json_escape(rec_err, sizeof rec_err, g_replay_rec.error);
+    size_t n = strlen(play);
+    if (n) play[n - 1] = '\0';   /* reopen the object */
+    snprintf(buf, sizeof buf, "%s,\"unplayable\":\"%s\",\"record\":%d,\"recording\":%d,\"saved\":%u,"
+             "\"rec_error\":\"%s\"}", play, why, g_replay_rec.want ? 1 : 0,
+             replay_recording() ? 1 : 0, (unsigned)g_replay_rec.saved, rec_err);
+    return buf;
+}
+
 /* The files the last web_rom_load did not find, space separated ("" if none). */
 /* The page is going (pagehide): keep the newest backup RAM. */
 EMSCRIPTEN_KEEPALIVE void web_backup_flush(void) { backup_ram_flush(); }
@@ -1025,7 +1116,7 @@ EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
     /* SELECT is the pause menu's (free play needs no coin). Only the board goes
      * without it: g_web_pad keeps it, because web_lobby_pad reads SELECT from
      * there, and a pad that never held it could never open the pause menu. */
-    if (g_web_shell_on)
+    if (web_shell_live())
         changed &= ~(1u << GAME_INPUT_P1_COIN);
     for (int a = 0; a < GAME_INPUT_COUNT; a++) {
         if (!(changed & (1u << a))) continue;
@@ -1038,7 +1129,7 @@ EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
 /* The page's "Online" button: the lobby, as the PS3's Online Battle opens it. */
 EMSCRIPTEN_KEEPALIVE void web_lobby_open(void) {
     g_ps3ui_app.default_delay = g_ps3ui_app.default_delay > 0 ? g_ps3ui_app.default_delay : 2;
-    if (g_web_shell_on) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_ONLINE);
+    if (web_shell_live()) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_ONLINE);
     ps3ui_app_open(&g_ps3ui_app);
 }
 EMSCRIPTEN_KEEPALIVE void web_lobby_close(void) { ps3ui_app_close(&g_ps3ui_app); }

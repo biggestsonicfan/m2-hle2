@@ -56,6 +56,7 @@
 #include "av_capture.h"    /* ...and its offscreen target + async GPU readback */
 #include "mcp_bridge.h"    /* --mcp TCP debug server (ported from m2-hle) */
 #include "netplay_window.h"  /* the RPCN netplay front-end */
+#include "replay_window.h"   /* the Replays menu and the playback window */
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
 #include "overlay_host.h"    /* --overlay: a plugin paints layers over the picture */
 #include "post_shader.h"     /* the CRT filter and libretro presets over the picture */
@@ -72,6 +73,8 @@ static int  g_autorun = 0;
 static char g_load_state[1024];   /* --load-state FILE: start from a savestate */
 static char     g_follow_out[512];   /* --follow-out DIR: lead a one-way follow (core/follow.h) */
 static uint32_t g_follow_every;      /* --follow-every FRAMES between its join points */
+static bool     g_replay_cli_set;    /* --record-replays / --no-record-replays override the saved switch */
+static char     g_replay_open_arg[512];   /* --replay FILE: open it once a game is loaded */
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
 static int  g_objview_model = -1;  /* --objview N: and select model N */
@@ -251,6 +254,9 @@ static void load_active_profile(const char *primary_zip) {
      * bus and resets the CPU, which must not race the run loop. */
     if (state.emu_started) { emu_stop(&state.emu); emu_sleep_ms(10); }
     sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
+    emu_mutex_lock(&state.emu.mutex);
+    replay_game_loaded();   /* a recording ends; a replay lets go of the board */
+    emu_mutex_unlock(&state.emu.mutex);
 
     g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
     if (romset_load(&state.romset, g_active_profile->load_fn, primary_zip, parent_zip_ptr) == 0) {
@@ -330,6 +336,39 @@ static bool load_state_arg(void) {
     emu_mutex_unlock(&state.emu.mutex);
     if (err) { LOG_ERROR("--load-state %s: %s", g_load_state, err); return false; }
     return true;
+}
+
+/* The replay flags (core/replay.h); true when argv[*i] was one. */
+static bool replay_cli_arg(int argc, char **argv, int *i) {
+    const char *a = argv[*i];
+    bool more = *i + 1 < argc;
+    if (!strcmp(a, "--record-replays") || !strcmp(a, "--no-record-replays")) {
+        g_replay_rec.want = a[2] == 'r';   /* save every online match */
+        g_replay_cli_set  = true;
+    } else if (!strcmp(a, "--replay-dir") && more) {
+        snprintf(g_replay_rec.dir, sizeof g_replay_rec.dir, "%s", argv[++*i]);
+    } else if (!strcmp(a, "--replay") && more) {
+        snprintf(g_replay_open_arg, sizeof g_replay_open_arg, "%s", argv[++*i]);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* --replay FILE: open it and play it, once, as soon as a game is loaded. */
+static void replay_open_arg(void) {
+    if (!g_replay_open_arg[0]) return;
+    const char *err = replay_open_file(g_replay_open_arg);
+    if (!err) {
+        emu_mutex_lock(&state.emu.mutex);
+        err = replay_play_start(&state.emu);
+        emu_mutex_unlock(&state.emu.mutex);
+    }
+    if (err) LOG_ERROR("--replay %s: %s", g_replay_open_arg, err);
+    else     LOG_INFO("replay: playing %s", g_replay_open_arg);
+    snprintf(g_replay_ui.path, sizeof g_replay_ui.path, "%s", g_replay_open_arg);
+    g_replay_ui.show = !err;
+    g_replay_open_arg[0] = '\0';
 }
 
 static void netplay_reset_board_cb(void *ctx) {
@@ -679,6 +718,7 @@ static void draw_menu_bar(void) {
     menu_debug();
     shader_ui_menu(state.file_dialog);
     menu_netplay();
+    replay_ui_menu(&state.emu, state.file_dialog);
     menu_bar_status();
     igEndMainMenuBar();
 }
@@ -835,6 +875,7 @@ static void init(void) {
     if (g_rom_path[0]) {
         load_active_profile(g_rom_path);
         if (state.romset.loaded) load_state_arg();   /* a failure is logged; the board boots fresh */
+        if (state.romset.loaded) replay_open_arg();
         if (g_autorun && state.romset.loaded) emu_run(&state.emu);
     }
 
@@ -1222,6 +1263,7 @@ static int headless_main(void) {
     load_active_profile(g_rom_path);
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
     if (!load_state_arg()) return 1;
+    replay_open_arg();
     if (g_autorun) emu_run(&state.emu);
 
     if (!g_no_tray) headless_tray_start();
@@ -1253,6 +1295,8 @@ static void draw_windows(void) {
     draw_menu_bar();
     draw_file_dialog();
     shader_ui_draw(state.file_dialog);
+    replay_ui_dialog(&state.emu, state.file_dialog);
+    replay_ui_window(&state.emu, state.file_dialog);
 
     if (state.show_cpu)
         cpu_window_draw(&state.emu.cpu_snapshot, &state.emu.cpu_prev_snapshot, &state.show_cpu);
@@ -1625,6 +1669,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             snprintf(g_load_state, sizeof g_load_state, "%s", argv[++i]);
         } else if (strcmp(argv[i], "--follow-out") == 0 && i + 1 < argc) {
             snprintf(g_follow_out, sizeof g_follow_out, "%s", argv[++i]);
+        } else if (replay_cli_arg(argc, argv, &i)) {
         } else if (strcmp(argv[i], "--follow-every") == 0 && i + 1 < argc) {
             g_follow_every = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--match-replay") == 0) {
@@ -1861,6 +1906,9 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             snprintf(g_net_cli.ps3_wire, sizeof(g_net_cli.ps3_wire), "%s", argv[++i]);
         }
     }
+    /* The record switch is the player's (replay.cfg); a headless run keeps
+     * only what its command line says, as the graders boot blank. */
+    if (!g_headless && !g_replay_cli_set) replay_settings_load();
     if (g_headless) exit(headless_main());
     /* Capture mode wants the game moving, not a first frame held on pause. */
     if (g_kiosk_on) g_autorun = 1;
