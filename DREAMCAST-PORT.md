@@ -1243,6 +1243,76 @@ as pool, with a walk), and what the bigger table's BSS does to the page
 cache, whose size `dc_boot_cache_size` picks from free heap at boot.
 Nothing was implemented.
 
+### Would a retained g_dp_ramp entry have been right? (#550, at 97c1f7c)
+
+HEAD had not moved from #549's 97c1f7c. The default baseline, every switch
+off, matched: 14060 | 5226 / 8769 | 453 / 7040 / 217 / 1046 | 634d853f.
+
+**What a hit returns** (`dp_face_ramp`): the 28-byte entry is `lut, k0, k1`
+(key), `base, off` (the ramp line's base and offset, the result) and `pal`
+(knee bank, pool bank or 0), plus `pkey` for a pool bank. The walk reads luma
+RAM (16 texels at the luma base), colorxlat through `dp_shade` (`g_dp_cx` is
+a constant table) and, for a drop over `DP_POOL_DROP`, the pool. The colour,
+the face's light level and trans are in k0, and the luma base is k1, so a
+change in any of them is a new key. A changed key cannot make an entry stale.
+A retained entry goes stale only two ways:
+
+- `gen_lut` moved. That is any changing write to luma RAM or to colorxlat;
+  the two share one counter, so the entry cannot tell which.
+- Its pool bank was taken by other pens (`key` ≠ `pkey`), or went unused for
+  two frames.
+
+`make RAMPKEEP=1` (`DC_RAMP_KEEP`, off by default and compiled out, not
+combined with another switch) keeps every key's last entry from F0 on, in a
+4,096-entry side set (112 KB, calloc'd at F0, after the frame-1500 hash), as
+a cache with no evictions would. On a miss whose key it has seen (and whose
+slot does not still hold it), it judges the kept entry before the walk by the
+hit test's rules: lut, then pool bank. After the walk it checks that the
+kept entry's `base, off, pal` equal what the walk gave. Then it keeps the
+walk's entry. It does not stamp the pool and does not touch `g_dp_ramp`, the
+walk or the picture. The default build matches 97c1f7c in `.text`, `.data`
+and `.bss`; `.rodata` differs only in the 7-character version string.
+
+| frames 3500-3900 | total | sl / dr | ti / sc / so / su | hash |
+|---|---|---|---|---|
+| 97c1f7c, default | 14060 | 5226 / 8769 | 453 / 7040 / 217 / 1046 | 634d853f |
+| RAMPKEEP=1 | 14120 | 5216 / 8836 | 454 / 7103 / 211 / 1053 | 634d853f |
+
+The count build is 60 ms (0.43%) slower, which is the counter's own cost. It
+reproduces #549's mix exactly: 360,427 lookups, 296,385 hits, 64,042 misses,
+2,094 compulsory (= unique keys), 61,948 replacement, stale-lut 0, pool 0,
+and the set was never full.
+
+| the 61,948 replacement misses | count | ms of the 738 |
+|---|---|---|
+| **retained-valid** (kept entry passes the hit test and equals the walk) | **61,946** | **714** |
+| retained-stale, total | 2 | 0 |
+| — stale-lut (`gen_lut` moved) | 0 | 0 |
+| — stale-pool (bank taken or cold; the hit test refuses it) | 2 | 0 |
+| — passes the hit test but gives a different result, pool involved | 0 | 0 |
+| — passes the hit test but gives a different result, luma / colorxlat | 0 | 0 |
+
+Time is 738 × count / 64,042. **Verdict: a retained entry is right in
+61,946 of 61,948 cases (714 ms), above the ~700 ms line.** The two stale ones
+are pool banks re-taken while the key was out of the cache; the hit test's
+`pkey` check already catches them, so a bigger cache must keep that check.
+Nothing passes the test with a wrong answer. Not built, as the pin says:
+
+- **What the entry stores:** the result bytes as now, `base` and `off`
+  (8 bytes), plus the bank index `pal` and `pkey`, since a pool bank can be
+  re-taken. With the key that is the same 28-byte entry, not a pointer into
+  the walk.
+- **Slots:** 4,096. The side set is 4,096 entries, open-addressed with linear
+  probing, and it held all 2,094 keys at 51% load with no eviction, so
+  every replacement found its entry. A 4,096-entry direct map would still
+  evict at that load. This pin did not count how many 4-way sets of 1,024
+  would overflow.
+- **RAM:** 4,096 × 28 = 112 KB, which is 84 KB more than `g_dp_ramp`'s 28 KB.
+  What that BSS takes from the page cache (`dc_boot_cache_size`) was not
+  measured.
+
+Nothing was implemented.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
