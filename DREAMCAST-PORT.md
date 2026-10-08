@@ -1339,6 +1339,48 @@ the 714 ms from #550 stands, and the net is 714 − 0. The 96 KB is not the
 expensive part of a bigger ramp cache. The cache was not written, as the pin
 says.
 
+### The 4,096-slot ramp cache does not fit the budget #552 priced (#553, at 7b7ec42)
+
+`RAMP4096=1` (`DC_RAMP_4096`, `dc_pvr.h` and `main_dc.c`; off by default and
+compiled out, not with `CACHESHRINK`) makes `g_dp_ramp` 4,096 entries, not
+1,024. The entry is the same 28 bytes. The hash is the same, and the index
+takes its top 12 bits, not 10 (`>> 20 & 4095`). The stale-pool hit test is
+unchanged. The switch also subtracts 86,016 from the budget `dc_boot` passes
+to `pg_init`, as `CACHESHRINK` does. The default build's `.text` and `.data`
+are byte-identical to 7b7ec42's, and `.rodata` differs only in the 7-character
+version string. `g_dp_ramp` is 0x7000 bytes in the default build and 0x1C000
+in the switch-on build. Both include Gems (83 `gfn_`).
+
+| frames 3500-3900 | total | i960 slice | draw | ti / sc / so / su | page loads (cd / da) | f1500 hash | ramp slots | cache budget |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 14060 ms | 5226 | 8769 | 453 / 7040 / 217 / 1046 | 567 (280 / 56) | 634d853f | 1024 | 1280 KB |
+| `RAMP4096=1` | 13464 ms | 5220 | 8188 | 456 / 6463 / 211 / 1045 | 1309 (850 / 154) | 634d853f | 4096 | **940 KB** |
+
+**Verdict: the table does not fit with the 86 KB shrink alone, so the switch
+stays off.** One run each. The boot line reads 940 KB, not the 1196 KB the
+pin required. The table adds 84 KB to the BSS. That is enough to push
+`dc_boot_cache_size`, which probes the heap from 8 MB down in 256 KB steps,
+one step lower: it finds 1024 KB where it found 1280. Then the switch takes
+its 84 KB off that, leaving 940 KB. The memory still exists: the heap left
+after boot went from 57x KB to 832 KB (the HUD row is cut off). But the
+probe's 256 KB step does not hand it to the pager, and the pin forbids taking
+bytes from another pool. So this run is not the configuration #552 priced.
+Page loads more than doubled (1309 against #552's 664).
+
+The run still shows where the ramp walk's time is. The total fell by 596 ms
+and the draw by 581 ms, almost all of it in `sc` (−577 ms), the scene
+decode, where `dp_face_ramp` runs. The i960 slice did not move (−6 ms). The
+pin's skip check says a drop of hundreds of ms in draw means work was
+skipped. Here the hash holds, and the drop is in the stage that does the
+ramp walk, which is what the cache saves (#550's 714 ms estimate). So it
+reads as a real saving, not a skip, but it is not proven to be one. The run
+also paid for 742 extra page faults, so the saving and the fault cost are
+mixed in this number. The gap to 13,333 ms (30 fps) would be 131 ms, but the
+number is from the wrong budget and is not the result. To measure what the
+pin asked, the probe has to return 1280 KB with the table in the BSS. Either
+probe in finer steps, or reserve the 84 KB ahead of the probe. Either is
+another pin.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
