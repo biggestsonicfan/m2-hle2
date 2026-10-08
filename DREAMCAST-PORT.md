@@ -1447,6 +1447,27 @@ figure at 1024 slots needs the counter, and the gate run has to stay all off.
 
 Both switches stay off by default.
 
+### RAMP4096 on by default (#556)
+
+The chain #549-#555 found one change that saves time without costing the
+picture: the 4,096-slot ramp cache at #554's 1196 KB page-cache budget.
+Every other switch it added measures something (`SCANSPLIT`, `FACECOUNT`,
+the `*STOP` switches, `RAMPCOUNT`, `RAMPKEEP`, `RAMPWALK`) or trades one
+cost for another (`CACHESHRINK`), and `JIT=1` was shown not to be faster.
+So `RAMP4096` now defaults to 1 in the Makefile; `RAMP4096=0` builds the
+old 1024-slot table and the 1280 KB budget. The bench disc's `.bss` grows
+by the table's 86016 bytes, and `.text` and `.data` keep their sizes.
+
+| frames 3500-3900 | total | i960 slice | draw | ti / sc / so / su | page loads (cd / da) | f1500 hash | cache budget |
+|---|---|---|---|---|---|---|---|
+| `RAMP4096=0` | 14060 ms | 5226 | 8769 | 453 / 7040 / 217 / 1046 | 567 (280 / 56) | 634d853f | 1280 KB |
+| default (`RAMP4096=1`) | **13457 ms** | 5199 | 8203 | 466 / 6464 / 211 / 1048 | 664 (349 / 68) | 634d853f | 1196 KB |
+
+One run each, at the branch's head with Gems (vendor/gems-c a7459d4,
+decomp 38466be). Both match #554 to the millisecond. The cost is still the
+97 extra page loads, which Flycast reads for free and a GD-ROM would not.
+Measure them on hardware before trusting the 603 ms there.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
