@@ -21,8 +21,9 @@ is built this way.
 ## The discs in one go: build-disc.sh
 
 `dreamcast/build-disc.sh` asks for every option below and for mkdisc.sh's,
-Enter taking the default (AOT, Gems C, FRAME512, the fps counter and HUD=prof's
-panel on R all on), then builds a clean worktree of the commit asked for
+Enter taking the default (AOT, Gems C, FRAME512, STRIPS, RAMP4096, the fps
+counter and HUD=prof's panel on R all on; SDLOG off, and the bench's
+measurement switches only among the developer options, one at a time), then builds a clean worktree of the commit asked for
 (`~/build/dc-build/src`), makes the GDI and/or the CDI, zips each, boots each in
 Flycast for a screenshot and puts them in the canary folder. STF.AFS and
 TEXTURES.PAK are made once from the PS3 files and kept in
