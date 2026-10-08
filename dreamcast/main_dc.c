@@ -361,6 +361,12 @@ static void dc_video_mode(void) {
 #ifndef DC_CACHE_SHRINK
 #define DC_CACHE_SHRINK 0
 #endif
+#ifndef DC_RAMP_4096
+#define DC_RAMP_4096 0
+#endif
+#if DC_CACHE_SHRINK && DC_RAMP_4096
+#error "RAMP4096 takes its own 86016 bytes from the page cache; leave CACHESHRINK off"
+#endif
 
 /* ---- Boot ----------------------------------------------------------------------- */
 
@@ -495,6 +501,11 @@ static void dc_boot(uint32_t *cache, uint32_t *left) {
 #if DC_CACHE_SHRINK
     /* What a 4096-entry g_dp_ramp would add (86016 bytes, #552), taken from the
      * budget only: the pool is whole frames, so it is 6 frames (96 KB) smaller. */
+    *cache -= 86016u;
+#endif
+#if DC_RAMP_4096
+    /* g_dp_ramp's 4096 slots (dc_pvr.h, #553) are 86016 bytes more than its
+     * 1024: taken from the page cache, the tradeoff #552 measured. */
     *cache -= 86016u;
 #endif
     if (pg_init(&dc_layout_sfight, *cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0)
