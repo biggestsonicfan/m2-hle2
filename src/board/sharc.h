@@ -99,7 +99,7 @@ typedef struct {
      * Set by mem_init after BUFF_RAM is allocated; zeroed by cop_reset (set again by
      * mem_init afterwards).  Command 0x25004A4A (read_anim_data) streams typed blocks
      * from here: type 1 loads a 12-word col-major matrix into the current slot. */
-    uint8_t *sharc_dm_ext;       /* points to memory_bus_t::buff_ram */
+    union { uint8_t *sharc_dm_ext; uint64_t sharc_dm_ext_w; };   /* points to memory_bus_t::buff_ram; 8 bytes on every host (savestate.h) */
     uint32_t sharc_dm_ext_size;  /* bytes (BUFF_RAM_SIZE) */
 
     /* The firmware's own data memory, DM 0x30000..0x32FFF, one word each —

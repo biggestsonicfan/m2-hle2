@@ -64,7 +64,7 @@ typedef struct {
     /* COPRO_CTL1 (0x980000), for its upload bit; set by mem_init. While bit 31
      * is up, a FIFO word is a halfword of the SHARC's boot image, not a
      * command (MAME model2b_state::copro_fifo_w). */
-    const uint8_t *ctl;
+    union { const uint8_t *ctl; uint64_t ctl_w; };   /* 8 bytes on every host (savestate.h) */
     uint32_t       upload_words;
 
     /* Reads of an empty reply FIFO. On the board the i960 would stall there
