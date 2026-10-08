@@ -154,6 +154,7 @@ ask_program() {
     yes HOST_MATH "HOST_MATH: the COP's sin, cos and square roots from the SH-4's own instructions" y
     yes STRIPS "STRIPS: meshes pre-walked into strips (STRIPS.PAK on the disc)" y
     yes RAMP4096 "RAMP4096: a 4096-slot colour-ramp cache, paid for by a smaller page cache (#556: 603 ms faster over the bench, same picture)" y
+    pick SCENE "SCENE: at a change of scene, load its textures whole (1) and its meshes too (2), as Gems does (#567: more disc seeks, so off)" 0 0 1 2
     yes SDLOG "SDLOG: the log and stats to M2LOGnnn.TXT on an SD card on the serial port" n
 }
 
@@ -209,7 +210,7 @@ ask_dev() {
 }
 
 ALL_KEYS="REPO REF FETCH RELEASE DISCS GDI_NAME GDI_CANARY CDI_NAME CDI_CANARY AOT AOT_COVER GEMS GEMS_PATH
-FRAME512 FILL VIEW FPS PANEL FPS_CAP HOST_MATH STRIPS RAMP4096 SDLOG PS3 SOUND MODELS TEXPAK REDO_ASSETS DUMMY FAST ZIP
+FRAME512 FILL VIEW FPS PANEL FPS_CAP HOST_MATH STRIPS RAMP4096 SCENE SDLOG PS3 SOUND MODELS TEXPAK REDO_ASSETS DUMMY FAST ZIP
 TEST TEST_SECS CANARY JOBS DEV OPTAB JIT JIT_ON JIT_TEST HASH_FRAME LINK LINK_GEMS SINCOS MEASURE CACHESHRINK AOT_MAP IB_POOL EXTRA"
 
 export_answers() { local k; for k in $ALL_KEYS; do v="DCB_$k"; [ -n "${!v+x}" ] && export "$v"; done; return 0; }
@@ -233,7 +234,7 @@ make_args() {
     MAKE_ARGS=(OUT="$OUT" VENDOR="$VENDOR" -j"$DCB_JOBS"
         FRAME512="$DCB_FRAME512" FILL="$DCB_FILL" VIEW="$DCB_VIEW" FPS_CAP="$DCB_FPS_CAP"
         HUD="$(HUD_ARG)" FPS="$DCB_FPS" HOST_MATH="$DCB_HOST_MATH" STRIPS="$DCB_STRIPS"
-        RAMP4096="$DCB_RAMP4096" SDLOG="$DCB_SDLOG" RELEASE="$DCB_RELEASE")
+        RAMP4096="$DCB_RAMP4096" SCENE="${DCB_SCENE:-0}" SDLOG="$DCB_SDLOG" RELEASE="$DCB_RELEASE")
     if [ "$DCB_AOT" = 1 ]; then MAKE_ARGS+=(AOT="$ROMS/rom_code1.bin" AOT_COVER="$DCB_AOT_COVER"); else MAKE_ARGS+=(AOT=); fi
     if [ "$DCB_GEMS" = 1 ]; then MAKE_ARGS+=(GEMS="$GEMS_DIR"); else MAKE_ARGS+=(GEMS=); fi
     [ "${DCB_DEV:-0}" = 1 ] || return 0
@@ -301,17 +302,23 @@ fight_script() {
     echo "$s"
 }
 
+# texpak_name: the cached TEXTURES.PAK the options want. SCENE needs one laid
+# out by group (det_digest --tex-groups), kept beside the by-frame one.
+texpak_name() { [ "${DCB_SCENE:-0}" = 0 ] && echo TEXTURES.PAK || echo TEXTURES-GROUPS.PAK; }
+
 make_texpak() {
-    local a=$DCB_WORK/assets d=$DCB_WORK/host/det_digest
+    local a=$DCB_WORK/assets d=$DCB_WORK/host/det_digest n g=()
+    n=$(texpak_name)
+    [ "$n" = TEXTURES.PAK ] || g=(--tex-groups "$SRC/dreamcast/sfight.mdlgroups")
     host_det_digest
-    say "Recording TEXTURES.PAK: attract, then a fight (~2 minutes)"
-    rm -f "$a/TEXTURES.PAK.new"
-    (cd "$DCB_WORK/host" && "$d" "$ROMS" --profile sfight_console --frames 6000 \
-            --tex-pack "0:6000:$a/TEXTURES.PAK.new" --out /dev/null &&
-        "$d" "$ROMS" --profile sfight_console --frames 9000 --script "$(fight_script)" \
-            --tex-pack "0:9000:$a/TEXTURES.PAK.new:+100000" --out /dev/null) > "$a/texpak.log" 2>&1 ||
-        { tail "$a/texpak.log"; die "TEXTURES.PAK: det_digest failed"; }
-    mv "$a/TEXTURES.PAK.new" "$a/TEXTURES.PAK"
+    say "Recording $n: attract, then a fight (~2 minutes)"
+    rm -f "$a/$n.new"
+    (cd "$DCB_WORK/host" && "$d" "$ROMS" --profile sfight_console --frames 6000 "${g[@]}" \
+            --tex-pack "0:6000:$a/$n.new" --out /dev/null &&
+        "$d" "$ROMS" --profile sfight_console --frames 9000 --script "$(fight_script)" "${g[@]}" \
+            --tex-pack "0:9000:$a/$n.new:+100000" --out /dev/null) > "$a/texpak.log" 2>&1 ||
+        { tail "$a/texpak.log"; die "$n: det_digest failed"; }
+    mv "$a/$n.new" "$a/$n"
     grep 'tex-pack:' "$a/texpak.log" | tail -1
 }
 
@@ -327,7 +334,7 @@ make_sound() {
 assets() {
     mkdir -p "$DCB_WORK/assets"
     if [ "$DCB_SOUND" = 1 ] && { [ "$DCB_REDO_ASSETS" = 1 ] || [ ! -f "$DCB_WORK/assets/STF.AFS" ]; }; then make_sound; fi
-    if [ "$DCB_TEXPAK" = 1 ] && { [ "$DCB_REDO_ASSETS" = 1 ] || [ ! -f "$DCB_WORK/assets/TEXTURES.PAK" ]; }; then make_texpak; fi
+    if [ "$DCB_TEXPAK" = 1 ] && { [ "$DCB_REDO_ASSETS" = 1 ] || [ ! -f "$DCB_WORK/assets/$(texpak_name)" ]; }; then make_texpak; fi
     return 0
 }
 
@@ -348,7 +355,7 @@ mkdisc() {
     [ "$DCB_SOUND" = 1 ] && afs=$DCB_WORK/assets/STF.AFS
     # shellcheck disable=SC1090
     (set +u; . "$KOS_ENV"
-     export TEXPAK=""; [ "$DCB_TEXPAK" = 1 ] && TEXPAK=$DCB_WORK/assets/TEXTURES.PAK
+     export TEXPAK=""; [ "$DCB_TEXPAK" = 1 ] && TEXPAK=$DCB_WORK/assets/$(texpak_name)
      [ "$DCB_MODELS" = 1 ] || export NOPAK=1
      [ "$DCB_STRIPS" = 1 ] || export NOSTRIPS=1
      [ -n "${DCB_SINCOS:-}" ] && export SINCOS=$DCB_SINCOS
@@ -404,12 +411,13 @@ describe() {
     d+=" at $GIT_DESC $BUILD: HUD=$(HUD_ARG) FPS=$DCB_FPS FRAME512=$DCB_FRAME512 FILL=$DCB_FILL"
     [ -n "$DCB_VIEW" ] && d+=" VIEW=$DCB_VIEW"
     d+=" FPS_CAP=$DCB_FPS_CAP RAMP4096=$DCB_RAMP4096"
+    [ "${DCB_SCENE:-0}" != 0 ] && d+=" SCENE=$DCB_SCENE"
     [ "$DCB_SDLOG" = 1 ] && d+=" SDLOG=1"
     [ "${DCB_DEV:-0}" = 1 ] && [ "$DCB_MEASURE" != none ] && d+=" $DCB_MEASURE=1"
     [ "${DCB_DEV:-0}" = 1 ] && [ "$DCB_CACHESHRINK" = 1 ] && d+=" CACHESHRINK=1"
     [ "$DCB_AOT" = 1 ] && d+=", AOT $DCB_AOT_COVER"; [ "$DCB_GEMS" = 1 ] && d+=", Gems C"
     [ "$DCB_PANEL" = prof ] && d+=", PROF panel hidden at boot - R shows/hides it"
-    [ "$DCB_STRIPS" = 1 ] && d+=", STRIPS.PAK"; [ "$DCB_TEXPAK" = 1 ] && d+=", TEXTURES.PAK"
+    [ "$DCB_STRIPS" = 1 ] && d+=", STRIPS.PAK"; [ "$DCB_TEXPAK" = 1 ] && d+=", $(texpak_name)"
     [ "$DCB_SOUND" = 1 ] && d+=", STF.AFS sound"
     d+=". Made by dreamcast/build-disc.sh"
     [ "$DCB_TEST" = 1 ] && d+=", booted in Flycast"
