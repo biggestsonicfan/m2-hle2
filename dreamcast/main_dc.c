@@ -384,7 +384,14 @@ static void dc_boot_sincos(void) {
  * Texture RAM (2 MB), its framebuffer (0.5 MB) and the heap's own use come
  * out of what is free now. The mesh cache has its own block (GEO3D_MESH_ARENA). */
 static uint32_t dc_boot_cache_size(void) {
+#if DC_RAMP_4096
+    /* RAMP4096 (#554): the table's extra 86016 bytes of BSS are already out of
+     * the heap, and the cache pays for them below. Probe as if they were still
+     * free, or the 256 KB step takes another 256 KB on top (1024 - 84, #553). */
+    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10) - 86016u;
+#else
     const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10);
+#endif
     uint32_t cache = 8u << 20;
     if (DC_STATS_DBGIO) dbgio_disable();   /* KOS says "Out of memory" at every miss, which is the point */
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
