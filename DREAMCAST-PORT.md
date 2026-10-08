@@ -1308,10 +1308,36 @@ Nothing passes the test with a wrong answer. Not built, as the pin says:
   evict at that load. This pin did not count how many 4-way sets of 1,024
   would overflow.
 - **RAM:** 4,096 × 28 = 112 KB, which is 84 KB more than `g_dp_ramp`'s 28 KB.
-  What that BSS takes from the page cache (`dc_boot_cache_size`) was not
-  measured.
+  What that BSS takes from the page cache (`dc_boot_cache_size`): #552,
+  below; nothing measurable.
 
 Nothing was implemented.
+
+### What 86 KB less page cache costs (#552, at d29a411)
+
+#550's 4,096-slot table would take 86,016 bytes more than `g_dp_ramp`. This
+pin took the same RAM from the page cache and changed nothing else.
+`CACHESHRINK=1` (`DC_CACHE_SHRINK`, `main_dc.c`; off by default and compiled
+out) subtracts 86,016 from the budget `dc_boot` passes to `pg_init`. The pager
+allocates its frame pool from that budget and nothing else. The pool is whole
+16 KB frames, so it shrinks by 6 frames (96 KB). No ramp table was allocated.
+`g_dp_ramp`, the walk and the picture are untouched. HEAD was still d29a411.
+The default build's `.text` and `.data` are byte-identical to d29a411's, and
+`.rodata` differs only in the version string. Both builds include Gems (the
+`+gems` row, 83 `gfn_` symbols).
+
+| frames 3500-3900 | total | i960 slice | draw | ti / sc / so / su | page loads (cd / da) | f1500 hash | cache budget |
+|---|---|---|---|---|---|---|---|
+| baseline | 14060 ms | 5226 | 8769 | 453 / 7040 / 217 / 1046 | 567 (280 / 56) | 634d853f | 1280 KB (80 frames) |
+| `CACHESHRINK=1` | 14061 ms | 5205 | 8792 | 464 / 7040 / 208 / 1064 | 664 (349 / 68) | 634d853f | 1196 KB (74 frames) |
+
+**Verdict: no measurable cost.** One run each, and +1 ms against a 1% band of
+~140 ms. The pool loses 6 frames and loads 97 more pages in the window (+17%,
+mostly code), but the total does not move. The i960 slice and the draw shift
+by about 20 ms in opposite directions, which is noise. The hash holds. So
+the 714 ms from #550 stands, and the net is 714 − 0. The 96 KB is not the
+expensive part of a bigger ramp cache. The cache was not written, as the pin
+says.
 
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 

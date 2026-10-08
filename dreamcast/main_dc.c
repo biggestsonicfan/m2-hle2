@@ -358,6 +358,10 @@ static void dc_video_mode(void) {
     vid_set_mode_ex(&m);
 }
 
+#ifndef DC_CACHE_SHRINK
+#define DC_CACHE_SHRINK 0
+#endif
+
 /* ---- Boot ----------------------------------------------------------------------- */
 
 /* The COP's sin and cos tables, when the disc has them (SINCOS.BIN,
@@ -488,6 +492,11 @@ static void dc_boot(uint32_t *cache, uint32_t *left) {
     bool sound = ds_init() == 0;
     dc_boot_sincos();
     *cache = dc_boot_cache_size();
+#if DC_CACHE_SHRINK
+    /* What a 4096-entry g_dp_ramp would add (86016 bytes, #552), taken from the
+     * budget only: the pool is whole frames, so it is 6 frames (96 KB) smaller. */
+    *cache -= 86016u;
+#endif
     if (pg_init(&dc_layout_sfight, *cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0)
         dc_stop("the disc lacks a ROM file (dc_layout.h)");
     g_mem_window = dc_window;
