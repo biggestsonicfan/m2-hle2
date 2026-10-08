@@ -100,10 +100,31 @@ static inline double i960_nan_result(double r, double a, double b) {
     return i960_bits_to_double(I960_REAL_INDEF);
 }
 
+/* A denormal single has to survive both conversions. The SH-4 runs with
+ * FPSCR.DN = 1 (KOS), so its fcnvsd reads one as 0 and its fcnvds flushes one
+ * to 0; the board, MAME and every other host keep it. There the two are done
+ * on the bits (Pinboard #478: STF decays P1 +0x1FB0 through the denormals,
+ * and the Dreamcast parted from MAME there). Elsewhere the hardware does it. */
+#ifndef I960_SOFT_DENORMAL
+#if defined(__sh__)
+#define I960_SOFT_DENORMAL 1
+#else
+#define I960_SOFT_DENORMAL 0
+#endif
+#endif
+
 static inline double i960_single_to_double(uint32_t u) {
     if ((u & 0x7F800000u) == 0x7F800000u && (u & 0x007FFFFFu))
         return i960_bits_to_double(((uint64_t)(u >> 31) << 63) | 0x7FF0000000000000ull | I960_QNAN_BIT
                                    | ((uint64_t)(u & 0x007FFFFFu) << 29));
+#if I960_SOFT_DENORMAL
+    if (!(u & 0x7F800000u) && (u & 0x007FFFFFu)) {
+        uint64_t m = u & 0x007FFFFFu;
+        int e = 1023 - 126;                     /* m * 2^-149 = 1.f * 2^(e - 1023) */
+        while (!(m & 0x00800000u)) { m <<= 1; e--; }
+        return i960_bits_to_double(((uint64_t)(u >> 31) << 63) | (uint64_t)e << 52 | (m & 0x007FFFFFu) << 29);
+    }
+#endif
     float f;
     memcpy(&f, &u, 4);
     return (double)f;
@@ -114,6 +135,21 @@ static inline uint32_t i960_double_to_single(double d) {
         uint64_t u = i960_double_to_bits(d);
         return (uint32_t)(u >> 63) << 31 | 0x7FC00000u | (uint32_t)((u >> 29) & 0x003FFFFFu);
     }
+#if I960_SOFT_DENORMAL
+    {
+        uint64_t u = i960_double_to_bits(d);
+        int e = (int)((u >> 52) & 0x7FF);
+        if (e < 1023 - 126 && (u << 1)) {       /* below FLT_MIN, not zero: round to a denormal */
+            uint32_t s = (uint32_t)(u >> 63) << 31;
+            int sh = 1075 - 149 - e;            /* value / 2^-149 = m >> sh */
+            if (!e || sh > 54) return s;
+            uint64_t m = (u & 0x000FFFFFFFFFFFFFull) | 0x0010000000000000ull;
+            uint64_t q = m >> sh, r = m & ((1ull << sh) - 1), h = 1ull << (sh - 1);
+            if (r > h || (r == h && (q & 1))) q++;
+            return s | (uint32_t)q;             /* 0x00800000 if it rounds up to FLT_MIN */
+        }
+    }
+#endif
     float f = (float)d;
     uint32_t u;
     memcpy(&u, &f, 4);
@@ -157,7 +193,7 @@ static inline double i960_round_ac(i960_cpu_t *cpu, double v) {
 
 //--- MEM format effective address calculation ---------------------------------
 
-static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t word1, uint32_t word2, int *len) {
+static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t ip, uint32_t word1, uint32_t word2, int *len) {
     uint32_t abase_val = reg_read(cpu, MEM_ABASE(word1));
 
     *len = 4;
@@ -187,7 +223,7 @@ static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t word1, uint32_t word2, i
                 return abase_val;
             case 0x5:  // IP + displacement + 8
                 *len = 8;
-                return cpu->sfr.ip + 8 + word2;
+                return ip + 8 + word2;
             case 0x7:  // (abase)[index*scale]
                 return abase_val + index_val * scale;
             case 0xC:  // displacement
@@ -203,7 +239,7 @@ static inline uint32_t mem_ea(i960_cpu_t *cpu, uint32_t word1, uint32_t word2, i
                 *len = 8;
                 return word2 + abase_val + index_val * scale;
             default:
-                LOG_WARN("mem_ea: unhandled MEMB mode 0x%X at IP=0x%08X", mode, cpu->sfr.ip);
+                LOG_WARN("mem_ea: unhandled MEMB mode 0x%X at IP=0x%08X", mode, ip);
                 return 0;
         }
     }
@@ -292,6 +328,25 @@ static inline unsigned i960_cycle_cost(uint32_t word1) {
  * reload it per instruction. `room` is the
  * slice's instructions left, this one included, for a hook that stands in for
  * several (g_hle_room, hle_hooks.h). */
+static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                          uint32_t word1, uint32_t word2);
+
+/* I960_OPTABLE: the interpreter dispatches through a table of handlers, one
+ * per opcode byte and one per REG opcode and function, each i960_exec_word
+ * with those bits constant, so its two switches fold away: one indexed call
+ * an instruction (GEMS-COLLECTION.md, "pre-decode the instructions the AOT
+ * leaves to the interpreter"). Sonic Gems Collection does it with a second,
+ * pre-decoded program image; here the index is three operations on the word,
+ * so the image would only cost the Dreamcast's pager a second megabyte. Off
+ * by default: it is the same instructions, in more code. */
+#ifndef I960_OPTABLE
+#define I960_OPTABLE 0
+#endif
+#if I960_OPTABLE
+static I960_HOT_INLINE int i960_exec_tab(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                         uint32_t word1, uint32_t word2);
+#endif
+
 static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t room) {
     // Check HLE hooks before executing
     if (M2_UNLIKELY(hle_check_synced(cpu, bus, room) == 0)) {
@@ -302,10 +357,22 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
     bus->cpu_ip = ip;
     uint32_t word1, word2;
     mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
-    int instr_len = 4;
     /* The board's clock: the timers and the vblank count these (irq_timer.h). */
     cpu->cycles += i960_cycle_cost(word1);
+#if I960_OPTABLE
+    return i960_exec_tab(cpu, bus, ip, word1, word2);
+#else
+    return i960_exec_word(cpu, bus, ip, word1, word2);
+#endif
+}
 
+/* The instruction at `ip` whose words are word1, word2, after its fetch and
+ * its cycles: leaves the next IP in cpu->sfr.ip. Forced inline, so the static
+ * recompiler (i960_aot.h), which calls it with constant words, gets one
+ * instruction's code out of it and not the switch. */
+static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                          uint32_t word1, uint32_t word2) {
+    int instr_len = 4;
     uint32_t class = (word1 >> 28) & 0xF;
 
     switch (class) {
@@ -810,7 +877,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                                 LOG_DEBUG("IAC Purge instruction cache (noop)");
                                 break;
                             default:
-                                LOG_WARN("IAC unknown message type 0x%02X at 0x%08X", msg_type, cpu->sfr.ip);
+                                LOG_WARN("IAC unknown message type 0x%02X at 0x%08X", msg_type, ip);
                                 break;
                         }
                     } else {
@@ -1081,21 +1148,21 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
         case 0xC: {
             int opcode = (word1 >> 24) & 0xFF;
             int dst_idx = MEM_SRCDST(word1);
-            uint32_t ea = mem_ea(cpu, word1, word2, &instr_len);
+            uint32_t ea = mem_ea(cpu, ip, word1, word2, &instr_len);
 
             switch (opcode) {
                 case 0x80: // ldob (load ordinal byte)
                     reg_write(cpu, dst_idx, mem_read8(bus, ea));
                     break;
                 case 0x82: // stob (store ordinal byte)
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     mem_write8(bus, ea, (uint8_t)reg_read(cpu, dst_idx));
                     break;
                 case 0x88: // ldos (load ordinal short)
                     reg_write(cpu, dst_idx, mem_read16(bus, ea));
                     break;
                 case 0x8a: // stos (store ordinal short)
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     mem_write16(bus, ea, (uint16_t)reg_read(cpu, dst_idx));
                     break;
                 case 0x8C: // lda (load address)
@@ -1105,7 +1172,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                     reg_write(cpu, dst_idx, mem_read32(bus, ea));
                     break;
                 case 0x92: // st (store)
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     mem_write32(bus, ea, reg_read(cpu, dst_idx));
                     break;
                 // Multi-word loads/stores walk +4 a word only on burst devices;
@@ -1126,7 +1193,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                 case 0xA2: // stt (store triple - 3 regs)
                 case 0xB2: // stq (store quad - 4 regs)
                 {
-                    g_last_store_ip = cpu->sfr.ip;
+                    g_last_store_ip = ip;
                     int n = opcode == 0x9a ? 2 : opcode == 0xA2 ? 3 : 4;
                     uint32_t a = ea;
                     for (int k = 0; k < n; k++) {
@@ -1194,6 +1261,48 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
     cpu->sfr.ip = ip + instr_len;
     return 0;
 }
+
+#if I960_OPTABLE
+typedef int (*i960_op_fn_t)(i960_cpu_t *, memory_bus_t *, uint32_t, uint32_t, uint32_t);
+/* The opcode byte n, from CTRL, COBR and MEM (n < 0x40 or 0x80 <= n < 0xD0). */
+#define I960_OPB(n) \
+    static int i960_op_##n(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip, uint32_t w1, uint32_t w2) { \
+        return i960_exec_word(cpu, bus, ip, (w1 & 0x00FFFFFFu) | (uint32_t)(n) << 24, w2); }
+/* REG opcode byte 0x58 + (n >> 4), function n & 15. */
+#define I960_OPR(n) \
+    static int i960_opr_##n(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip, uint32_t w1, uint32_t w2) { \
+        return i960_exec_word(cpu, bus, ip, (w1 & 0x00FFF87Fu) | (uint32_t)(0x58 + ((n) >> 4)) << 24 \
+                                            | (uint32_t)((n) & 15) << 7, w2); }
+/* Octal-free spelling: n as 0x<hi><lo>, with the digits pasted. */
+#define I960_H16(M, h) M(0x##h##0) M(0x##h##1) M(0x##h##2) M(0x##h##3) M(0x##h##4) M(0x##h##5) M(0x##h##6) M(0x##h##7) \
+                       M(0x##h##8) M(0x##h##9) M(0x##h##A) M(0x##h##B) M(0x##h##C) M(0x##h##D) M(0x##h##E) M(0x##h##F)
+#define I960_BYTES(M) I960_H16(M, 0) I960_H16(M, 1) I960_H16(M, 2) I960_H16(M, 3) \
+                      I960_H16(M, 8) I960_H16(M, 9) I960_H16(M, A) I960_H16(M, B) I960_H16(M, C)
+#define I960_REGS(M)  I960_H16(M, 0) I960_H16(M, 1) I960_H16(M, 2) I960_H16(M, 3) I960_H16(M, 4) \
+                      I960_H16(M, 5) I960_H16(M, 6) I960_H16(M, 7) I960_H16(M, 8) I960_H16(M, 9) \
+                      I960_H16(M, A) I960_H16(M, B) I960_H16(M, C) I960_H16(M, D) I960_H16(M, E) \
+                      I960_H16(M, F) I960_H16(M, 10) I960_H16(M, 11) I960_H16(M, 12) I960_H16(M, 13) \
+                      I960_H16(M, 14) I960_H16(M, 15) I960_H16(M, 16) I960_H16(M, 17) I960_H16(M, 18) \
+                      I960_H16(M, 19) I960_H16(M, 1A) I960_H16(M, 1B) I960_H16(M, 1C) I960_H16(M, 1D) \
+                      I960_H16(M, 1E) I960_H16(M, 1F) I960_H16(M, 20) I960_H16(M, 21) I960_H16(M, 22) \
+                      I960_H16(M, 23) I960_H16(M, 24) I960_H16(M, 25) I960_H16(M, 26) I960_H16(M, 27)
+I960_BYTES(I960_OPB)
+I960_REGS(I960_OPR)
+static int i960_op_any(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip, uint32_t w1, uint32_t w2) {
+    return i960_exec_word(cpu, bus, ip, w1, w2);
+}
+#define I960_OPB_AT(n) [n] = i960_op_##n,
+#define I960_OPR_AT(n) [0x100 + (n)] = i960_opr_##n,
+/* [0, 0x100): by opcode byte; [0x100, 0x380): REG by (byte - 0x58) << 4 | function. */
+static const i960_op_fn_t g_i960_optab[0x380] = { I960_BYTES(I960_OPB_AT) I960_REGS(I960_OPR_AT) };
+
+static I960_HOT_INLINE int i960_exec_tab(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
+                                         uint32_t word1, uint32_t word2) {
+    uint32_t op = word1 >> 24, r = op - 0x58u;
+    i960_op_fn_t f = g_i960_optab[r < 0x28u ? 0x100u + (r << 4 | ((word1 >> 7) & 0xFu)) : op];
+    return (f ? f : i960_op_any)(cpu, bus, ip, word1, word2);
+}
+#endif
 
 /* One instruction, from anywhere: syncs the hook filter itself. */
 static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {

@@ -155,10 +155,11 @@ done:
 
 /* Reads a little-endian u32 from a flat buffer. */
 static inline uint32_t sfight_read32(const uint8_t *buf, uint32_t off) {
-    return  (uint32_t)buf[off]
-         | ((uint32_t)buf[off + 1] << 8)
-         | ((uint32_t)buf[off + 2] << 16)
-         | ((uint32_t)buf[off + 3] << 24);
+    const uint8_t *p = MEM_HOST_AT(buf + off, 4);   /* the Dreamcast pages the ROM */
+    return  (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
 }
 
 /* A profile's own work at a VS-mode rematch (sfight_hook_vs_rematch), for host
@@ -180,7 +181,8 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
     g_sharc_copro_rom      = rs->copro_data;
     g_sharc_copro_rom_size = rs->copro_data_size;
 
-    if (rs->main_data && bus->main_data) {
+    /* A host window (g_mem_window) already is the ROM: nothing to copy. */
+    if (rs->main_data && bus->main_data && bus->main_data != rs->main_data) {
         size_t n = rs->main_data_size < MAIN_DATA_SIZE ? rs->main_data_size : MAIN_DATA_SIZE;
         memcpy(bus->main_data, rs->main_data, n);
         LOG_INFO("sfight_install: copied %zu bytes to MAIN_DATA", n);
@@ -191,7 +193,7 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
      * ROM[0x01000000+0x4012FB]. */
     if (rs->main_data && bus->xtra_data) {
         const uint32_t src_off = 0x01000000;
-        if (src_off < rs->main_data_size) {
+        if (src_off < rs->main_data_size && bus->xtra_data != rs->main_data + src_off) {
             size_t avail = rs->main_data_size - src_off;
             size_t n = avail < XTRA_DATA_SIZE ? avail : XTRA_DATA_SIZE;
             memcpy(bus->xtra_data, rs->main_data + src_off, n);
@@ -504,6 +506,11 @@ static int sfight_hook_idle_spin(i960_cpu_t *cpu, memory_bus_t *bus) {
     return m2_spin_skip(cpu, bus);
 }
 
+/* The texture-row senders' wait on timer 2 (0xF00008), skipped the same way (m2_spin.h). */
+static int sfight_hook_timed_spin(i960_cpu_t *cpu, memory_bus_t *bus) {
+    return m2_spin_timed(cpu, bus);
+}
+
 static int sfight_hook_replay_stage(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu;
     if (g_replay_stage_pin < 0) return 1;
@@ -742,7 +749,7 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 23
+#define SFIGHT_BASE_HOOK_COUNT 25
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
@@ -766,7 +773,9 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0004C1F8, sfight_hook_tex_q_norm,        "send_lod_data_q_sub_norm row" }, \
     { SKY_EYE_HOOK_PC, sky_eye_hook_camera,       "camera_control sky_eye" }, \
     { 0x0004C334, sfight_hook_tex_q_anim,        "send_lod_data_q_sub_anim row" }, \
-    { 0x00011610, sfight_hook_idle_spin,          "_idle spin"              },
+    { 0x00011610, sfight_hook_idle_spin,          "_idle spin"              }, \
+    { 0x0004BE58, sfight_hook_timed_spin,         "send_beta_data timer wait" }, \
+    { 0x0004C008, sfight_hook_timed_spin,         "send_lod_data timer wait" },
 
 /* hook_count stops the scan, so a count one short drops the last hook without
  * a word: the merge of #151 left it at 25 over 26 entries, and the console

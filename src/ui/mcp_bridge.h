@@ -550,7 +550,7 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
         uint8_t b = (uint8_t)strtoul(byte_str, NULL, 16);
         const uint32_t a = addr + (uint32_t)i;
         if (rom) {
-            uint8_t *pg = g_mcp.bus->rd_page[a >> 16];
+            uint8_t *pg = MEM_PAGE(g_mcp.bus->rd_page, a);
             if (!pg) break;
             pg[a & 0xFFFFu] = b;
         } else {

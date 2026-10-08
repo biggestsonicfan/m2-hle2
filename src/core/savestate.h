@@ -389,7 +389,7 @@ static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i
     memset(&geo, 0, sizeof geo);
     geo.wstart      = g_geo.wstart;
     geo.rstart      = g_geo.rstart;
-    geo.snap_index  = g_geodl_snap == g_geodl_snaps[1] ? 1u : 0u;
+    geo.snap_index  = g_geodl_snap == g_geodl_snaps[GEO_PUB_COPIES - 1] ? 1u : 0u;
     geo.snap_rstart = g_geodl_snap_rstart;
     geo.snap_ready  = g_geodl_snap_ready;
     geo.full_snap   = g_geodl_full_snap;
@@ -664,10 +664,10 @@ static inline const char *savestate__load_zip(mz_zip_archive *zp, const char *wh
         memcpy(g_geodl_snaps, n_snaps, sizeof g_geodl_snaps);
         memcpy(&g_geo_live, n_glive, sizeof g_geo_live);
         memcpy(&g_geo_pub[0], &g_geo_live, sizeof g_geo_live);
-        memcpy(&g_geo_pub[1], &g_geo_live, sizeof g_geo_live);
+        memcpy(&g_geo_pub[GEO_PUB_COPIES - 1], &g_geo_live, sizeof g_geo_live);
         memset(g_geo_dirty, 0, sizeof g_geo_dirty);
-        g_geodl_snap        = g_geodl_snaps[n_geo.snap_index ? 1 : 0];
-        g_geo_rs            = &g_geo_pub[n_geo.snap_index ? 1 : 0];
+        g_geodl_snap        = g_geodl_snaps[n_geo.snap_index ? GEO_PUB_COPIES - 1 : 0];
+        g_geo_rs            = &g_geo_pub[n_geo.snap_index ? GEO_PUB_COPIES - 1 : 0];
         g_geodl_snap_rstart = n_geo.snap_rstart;
         g_geodl_full_snap   = n_geo.full_snap != 0;
         g_geodl_snap_ready  = n_geo.snap_ready;

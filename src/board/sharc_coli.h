@@ -51,7 +51,7 @@ static inline uint32_t sharc_dm_get(uint32_t a) {
     if (a >= 0x30000u && a < 0x37800u) return g_sharc.dm[a - 0x30000u];
     if (a >= 0x1400000u && g_sharc.sharc_dm_ext) {        /* BUFF_RAM, shared with the i960 */
         uint64_t o = (uint64_t)(a - 0x1400000u) * 4u;
-        if (o + 4u <= g_sharc.sharc_dm_ext_size) { uint32_t v; memcpy(&v, g_sharc.sharc_dm_ext + o, 4); return v; }
+        if (o + 4u <= g_sharc.sharc_dm_ext_size) return m2_ld32a(g_sharc.sharc_dm_ext + o);
     }
     return 0;
 }
@@ -65,7 +65,7 @@ static inline void sharc_dm_set(uint32_t a, uint32_t v) {
     if (a >= 0x30000u && a < 0x37800u) { g_sharc.dm[a - 0x30000u] = v; return; }
     if (a >= 0x1400000u && g_sharc.sharc_dm_ext) {
         uint64_t o = (uint64_t)(a - 0x1400000u) * 4u;
-        if (o + 4u <= g_sharc.sharc_dm_ext_size) memcpy(g_sharc.sharc_dm_ext + o, &v, 4);
+        if (o + 4u <= g_sharc.sharc_dm_ext_size) m2_st32a(g_sharc.sharc_dm_ext + o, v);
     }
 }
 

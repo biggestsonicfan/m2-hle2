@@ -219,6 +219,11 @@ static int  s_irq_baseline_depth = 0;
 static bool s_irq_from_table     = false;
 static int  s_irq_slices         = 0;
 static uint64_t s_timer_cycles_seen = 0;   /* cpu->cycles the board's clock has been given */
+#include "i960_blocks.h"     /* the decoded-block cache (I960_BLOCKS builds) */
+#ifndef I960_AOT
+#define I960_AOT 0
+#endif
+#include "i960_aot.h"        /* the ROM compiled to C (I960_AOT builds) */
 /* The slice ended on a vblank: one video frame of the board ran. */
 static volatile int g_vblank_edge = 0;
 
@@ -262,6 +267,12 @@ static inline void emu_board_reset_state(void) {
     s_irq_from_table     = false;
     s_irq_slices         = 0;
     s_timer_cycles_seen  = 0;   /* install_fn put cpu->cycles back to 0 */
+#if I960_BLOCKS
+    s_ib_valid           = 0;   /* new code, perhaps */
+#endif
+#if I960_AOT
+    aot_invalidate();
+#endif
     g_vblank_edge        = 0;
     g_versus_result      = 0;
     g_replay_stage_pin   = -1;
@@ -281,7 +292,9 @@ static inline void emu_board_reset_state(void) {
  *
  * savestate.h writes the board; the run loop's latches above are passed to it
  * here, since they are this file's statics. Serviced between slices, under the
- * mutex (emu_netplay_pump), like a board reset. */
+ * mutex (emu_netplay_pump), like a board reset. A build with no zip support
+ * (M2HLE_NO_ZIP, the Dreamcast) has none: a state is a zip. */
+#ifndef M2HLE_NO_ZIP
 #include "savestate.h"
 
 static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
@@ -357,6 +370,7 @@ static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *
     savestate_emu_t e;
     return emu_state_loaded(ctx, savestate_load_mem(data, size, ctx->cpu, ctx->bus, &e), &e);
 }
+#endif /* M2HLE_NO_ZIP */
 
 /* ---- The sound UART ---------------------------------------------------------
  *
@@ -495,6 +509,16 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
     emu_offer_sound(ctx);
 }
 
+/* The slow path is only waiting for the handler in service to return: no
+ * vblank, sound kick, breakpoint, halt or debug trap to look at (the flags
+ * after the word, as the run loop's return to the fast path reads them). */
+static inline bool emu_aot_in_service(emu_thread_ctx_t *ctx, uint32_t *attn) {
+    *attn = g_emu_attn;
+    return !g_irqt_vblank && !g_irqt_sound_kick && !ctx->step_over_bp && !ctx->cpu->halted
+        && !bp_armed() && !g_log.warn_triggered && !wp_tripped() && !g_sharc.unknown_triggered
+        && ctx->cpu->frame_depth > s_irq_baseline_depth;
+}
+
 /* ---- The board's clock ------------------------------------------------------
  *
  * The board timers and the vblank both count the i960's cycles (irq_timer.h).
@@ -516,10 +540,12 @@ static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
 
 /* After each instruction: count its cycles, and take an interrupt as soon as
  * one is pending and none is in service. The sound pin has its own rules
- * (emu_offer_sound) and is left to them. */
+ * (emu_offer_sound) and is left to them. The cycles since the last step are
+ * one instruction's, or a hook's run that ends before the horizon, so their
+ * difference is taken in 32 bits (irqt_count_t). */
 static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
     i960_cpu_t *cpu = ctx->cpu;
-    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
     if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FFu) && g_active_profile)
@@ -530,7 +556,7 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
  * (entering one bumps the attention word, which sends the loop slow) and the
  * profile is the slice's: two loads an instruction fewer. */
 static inline void emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, bool profile) {
-    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
+    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
     s_timer_cycles_seen = cpu->cycles;
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
     if ((g_irqt.intreq & g_irqt.intena & 0x03FFu) && profile)
@@ -582,8 +608,12 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         const char *err;
         emu_mutex_lock(&ctx->mutex);
         if (state == 2 && step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
+#ifdef M2HLE_NO_ZIP
+        else err = "this build has no savestates";
+#else
         else if (state == 2) err = emu_state_load_now(ctx, ctx->state_path);
         else                 err = emu_state_save_now(ctx, ctx->state_path);
+#endif
         snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
         emu_mutex_unlock(&ctx->mutex);
         ctx->state_count++;
@@ -690,7 +720,7 @@ static I960_HOT_INLINE bool emu_slice_slow_gate(emu_thread_ctx_t *ctx, i960_cpu_
  * the slice ran 4% more host instructions (Pinboard #387). */
 typedef struct {
     int      i;        /* instructions charged to the slice */
-    uint64_t steps;    /* instructions run, written back once (see emu_slice_body) */
+    uint32_t steps;    /* instructions run, written back once (see emu_slice_body) */
     uint32_t attn;     /* g_emu_attn as the fast path last saw it */
     bool     bps;      /* a breakpoint is armed */
     bool     slow;     /* every check runs on this instruction */
@@ -810,7 +840,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * instruction, and the two-loop version ran 5% MORE instructions. */
     const bool     profile = g_active_profile != NULL;
     int      i;
-    uint64_t steps = 0;
+    uint32_t steps = 0;   /* at most max_steps; 32-bit for the SH-4 */
     uint32_t attn  = g_emu_attn;
     bool     bps   = bp_armed();
     bool     slow  = emu_slice_starts_slow(ctx, profile);
@@ -827,18 +857,82 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * reloaded after every store. */
     i960_cpu_t   *const cpu = ctx->cpu;
     memory_bus_t *const bus = ctx->bus;
+#if I960_AOT
+    const bool aot = aot_check(bus);
+    uint32_t   svc_attn;
+#endif
     for (i = 0; i < max_steps; i++) {
         if (M2_UNLIKELY(slow)) {
             if (emu_slice_slow_gate(ctx, cpu)) break;
         } else if (M2_UNLIKELY(bps) && bp_check(cpu->sfr.ip)) {
             break;
         }
+#if I960_AOT
+        /* The compiled code (i960_aot.h), on the same terms as a block. */
+        if (aot && !slow && !bps && !g_pcprof_on && aot_lead(cpu->sfr.ip)
+                && !(g_irqt.intreq & g_irqt.intena & 0x03FFu)) {
+            int halt;
+            uint32_t k = aot_run(cpu, bus, (uint32_t)(max_steps - i), attn, -1, &halt);
+            if (M2_UNLIKELY(halt)) { i += (int)k; steps += k; break; }
+            if (k) { g_aot_ops += k; i += (int)k - 1; steps += k - 1; goto ib_ran; }
+        } else if (aot && slow && profile && s_irq_in_service && !g_pcprof_on && aot_lead(cpu->sfr.ip)
+                && emu_aot_in_service(ctx, &svc_attn)) {
+            /* A handler in service, and nothing else the slow path is here
+             * for: until it returns no interrupt is taken, so the run is the
+             * fast path's, ending at the ret that unwinds it (aot_unwound). */
+            int halt;
+            uint32_t k = aot_run(cpu, bus, (uint32_t)(max_steps - i), svc_attn, s_irq_baseline_depth, &halt);
+            if (M2_UNLIKELY(halt)) { i += (int)k; steps += k; break; }
+            if (k) { g_aot_ops += k; i += (int)k - 1; steps += k - 1; goto ib_ran; }
+        }
+#endif
+#if I960_BLOCKS
+        /* A decoded block, when nothing can come between its instructions that
+         * this path would have to see (i960_blocks.h): it counts as the steps
+         * it ran, and the checks after a step follow its last. */
+        if (!slow && !bps && !g_pcprof_on) {
+            const ib_block_t *b = ib_lookup(cpu, bus, cpu->sfr.ip);
+            if (b->n && b->n <= (uint32_t)(max_steps - i)
+                    && g_irqt.pending + (irqt_count_t)b->cyc < g_irqt.horizon
+                    && !(g_irqt.intreq & g_irqt.intena & 0x03FFu)) {
+#ifdef IB_WHY
+                uint32_t t0 = IBW_T();
+                uint32_t k = ib_run(cpu, bus, b, attn);
+                { uint32_t d = IBW_D(t0); g_ib.ns[0] += d; ((ib_block_t *)b)->t += d; ((ib_block_t *)b)->r++; }
+#else
+                uint32_t k = ib_run(cpu, bus, b, attn);
+#endif
+                g_ib.ops += k; g_ib.runs++;
+                i += (int)k - 1; steps += k - 1;
+                goto ib_ran;
+            }
+#ifdef IB_WHY
+            g_ib.why[!b->n ? 1 : b->n > (uint32_t)(max_steps - i) ? 2
+                     : !(g_irqt.pending + (irqt_count_t)b->cyc < g_irqt.horizon) ? 3 : 4]++;
+        } else {
+            g_ib.why[0]++;
+#endif
+        }
+#endif
         PCPROF_TICK(cpu->sfr.ip);
         /* A hook may stand in for several instructions (g_hle_room); on the
          * slow path, or with a breakpoint armed, it is offered only this one,
          * so every check below still sees each instruction. */
+#ifdef IB_WHY
+        {
+            uint32_t t0 = IBW_T();
+            int r = i960_step_core(cpu, bus, (slow || bps) ? 1u : (uint32_t)(max_steps - i));
+            uint32_t dt = IBW_D(t0);
+            if (g_hle_extra) { g_ib.ns[2] += dt; g_ib.why[5] += g_hle_extra; } else g_ib.ns[1] += dt;
+            if (M2_UNLIKELY(r != 0)) break;
+        }
+#else
         if (M2_UNLIKELY(i960_step_core(cpu, bus,
                                        (slow || bps) ? 1u : (uint32_t)(max_steps - i)) != 0)) break;
+#endif
+#if I960_BLOCKS || I960_AOT
+    ib_ran:
+#endif
         steps++;
         if (M2_UNLIKELY(slow || g_emu_attn != attn)) {
             emu_slice_loop_t l = { i, steps, attn, bps, slow };

@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "m2_word.h"
 #include "constants.h"
 #include "../core/build_features.h"
 #include "../core/log.h"
@@ -53,6 +54,37 @@
 /* ---- Region descriptor --------------------------------------------------- */
 
 #define MEM_REGIONS_MAX 64
+/* The direct page tables (rd_page, wr_page) cover the address space below
+ * MEM_PAGES << MEM_PAGE_SHIFT; an access above it goes the long way. 64 KB
+ * pages, all 4 GB of them, cost no test. The Dreamcast's 16 MB wants the
+ * 470 KB that the pages above the framebuffer (0x12C00000), where nothing is
+ * plain memory, cost, and pages in its ROM 16 KB at a time (MEM_HOST_PAGED). */
+#ifndef MEM_PAGE_SHIFT
+#define MEM_PAGE_SHIFT 16
+#endif
+#define MEM_PAGE_OFF (((uint32_t)1 << MEM_PAGE_SHIFT) - 1u)   /* an address's offset in its page */
+#ifndef MEM_PAGES
+#define MEM_PAGES (1u << (32 - MEM_PAGE_SHIFT))
+#endif
+#define MEM_PAGE(tab, a) ((uint32_t)(a) >> MEM_PAGE_SHIFT < MEM_PAGES ? (tab)[(uint32_t)(a) >> MEM_PAGE_SHIFT] : NULL)
+/* A host that pages a region in (the Dreamcast, dreamcast/dc_pager.h) gives it
+ * a data pointer that only names its pages: MEM_HOST_PAGED(data) says so. The
+ * build leaves such a region's direct pages empty, the slow path asks
+ * MEM_HOST_PAGE_IN(bus, r, addr, write) for the page holding addr (its first
+ * byte, at a page-aligned address; the host may fill the direct entry with it,
+ * and must empty that entry when the page goes), and MEM_HOST_PAGES_RESET()
+ * is told when the tables are emptied. */
+#ifndef MEM_HOST_PAGED
+#define MEM_HOST_PAGING 0
+#define MEM_HOST_PAGED(data) 0
+#define MEM_HOST_PAGE_IN(bus, r, addr, write) ((uint8_t *)NULL)
+#define MEM_HOST_PAGES_RESET() ((void)0)
+#endif
+/* The n bytes at p, which may be in such a region's buffer, as plain memory
+ * (good until the next page-in). */
+#ifndef MEM_HOST_AT
+#define MEM_HOST_AT(p, n) ((const uint8_t *)(p))
+#endif
 #define MEM_PAGE_NONE   0x00u
 #define MEM_PAGE_MIXED  0xFFu
 
@@ -125,7 +157,7 @@ typedef struct memory_bus {
     uint8_t   timers[TIMERS_SIZE];
 
     /* Video */
-    uint8_t   tile[TILE_SIZE];          /* covers scroll regs + h/v sync overlap */
+    _Alignas(4) uint8_t tile[TILE_SIZE];   /* covers scroll regs + h/v sync overlap */
     uint8_t   tmapgfx[TMAPGFX_SIZE];
     uint8_t   palette[PALETTE_SIZE];
     uint8_t   colorxlat[COLORXLAT_SIZE];
@@ -175,8 +207,8 @@ typedef struct memory_bus {
      * bounds test through these; everything that is not plain memory still
      * goes through mem_find_region and its callbacks. Zeroed whenever the
      * region table or a region's callbacks change (mem_regions_changed). */
-    uint8_t      *rd_page[1u << 16];
-    uint8_t      *wr_page[1u << 16];
+    uint8_t      *rd_page[MEM_PAGES];
+    uint8_t      *wr_page[MEM_PAGES];
     int           maps_live;
 
     /* Bumped by every write that changes a tracked region (see change_gen):
@@ -186,6 +218,13 @@ typedef struct memory_bus {
      * dirty_kb). All set at init: nothing decoded matches the new bus yet. One
      * spare entry takes a multi-byte write that starts in the last byte. */
     volatile uint8_t  tex_dirty[2][(TEXRAM0_SIZE >> 10) + 1];
+    /* The same for tile RAM, mirror included, for a compositor that copies
+     * only what was written (the Dreamcast's dp_tiles). Nothing clears them
+     * but that reader. */
+    volatile uint8_t  tile_dirty[(TILE_SIZE >> 10) + 1];
+    /* And for the tilemaps' char RAM: m2-sdk's tile framebuffer draws into it
+     * every frame something moves (Pinboard #463). */
+    volatile uint8_t  gfx_dirty[(TMAPGFX_SIZE >> 10) + 1];
 
     /* Bus stats */
     uint64_t    reads;
@@ -197,6 +236,9 @@ typedef struct memory_bus {
     /* Set by i960_step before each instruction dispatch — included in unmapped warnings. */
     uint32_t    cpu_ip;
 } memory_bus_t;
+/* m2_ld32a / m2_st32a index these at word offsets. */
+_Static_assert(offsetof(memory_bus_t, geo) % 4 == 0 && offsetof(memory_bus_t, geo_program) % 4 == 0
+               && offsetof(memory_bus_t, buff_ram) % 4 == 0, "word access to the bus buffers");
 
 /* ---- Region builder ------------------------------------------------------ */
 
@@ -211,6 +253,7 @@ static inline void mem_regions_changed(memory_bus_t *bus) {
     if (bus->maps_live) {
         memset(bus->rd_page, 0, sizeof bus->rd_page);
         memset(bus->wr_page, 0, sizeof bus->wr_page);
+        MEM_HOST_PAGES_RESET();
         bus->maps_live = 0;
     }
 }
@@ -301,7 +344,12 @@ static struct {
     const uint8_t *copro_ctl;             /* for geo_ctl1's upload bit */
 } g_geo;
 
-static uint32_t     g_geodl_snaps[2][BUFF_RAM_SIZE / 4];
+/* A host that draws each list on the emulator's own thread before the next
+ * slice (the Dreamcast) needs one copy, not two. */
+#ifndef GEO_PUB_COPIES
+#define GEO_PUB_COPIES 2
+#endif
+static uint32_t     g_geodl_snaps[GEO_PUB_COPIES][BUFF_RAM_SIZE / 4];
 static uint32_t    *g_geodl_snap          = g_geodl_snaps[0];
 static uint32_t     g_geodl_snap_rstart   = 0;
 static volatile int g_geodl_snap_ready    = 0;
@@ -343,7 +391,7 @@ typedef struct {
 } geo_raster_state_t;
 
 static geo_raster_state_t        g_geo_live;       /* emu thread: the lists applied so far */
-static geo_raster_state_t        g_geo_pub[2];     /* published beside g_geodl_snaps[0] / [1] */
+static geo_raster_state_t        g_geo_pub[GEO_PUB_COPIES]; /* published beside g_geodl_snaps[0] / [1] */
 static const geo_raster_state_t *g_geo_rs = &g_geo_pub[0];   /* the renderer's: set with its list */
 
 /* Blocks of g_geo_live each g_geo_pub buffer does not have yet. */
@@ -356,12 +404,12 @@ static struct {
     uint64_t poly[GEO_RS_POLY_BLKS / 64];
     uint64_t log[(GEO_RS_LOG_BLKS + 63) / 64];
     bool     slots;                                /* texparam and coef */
-} g_geo_dirty[2];
+} g_geo_dirty[GEO_PUB_COPIES];
 
 static inline void geo_dirty_mark(size_t field, size_t byte_off) {
     size_t b = byte_off / GEO_RS_BLOCK;
     uint64_t bit = 1ull << (b & 63);
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < GEO_PUB_COPIES; i++) {
         uint64_t *m = field == 0 ? g_geo_dirty[i].tex : field == 1 ? g_geo_dirty[i].poly : g_geo_dirty[i].log;
         m[b >> 6] |= bit;
     }
@@ -369,7 +417,7 @@ static inline void geo_dirty_mark(size_t field, size_t byte_off) {
 
 /* The copy published with a list snapshot (a g_geodl_snaps entry). */
 static inline const geo_raster_state_t *geodl_raster_for(const uint32_t *snap) {
-    return &g_geo_pub[snap == g_geodl_snaps[0] ? 0 : 1];
+    return &g_geo_pub[snap == g_geodl_snaps[0] ? 0 : GEO_PUB_COPIES - 1];
 }
 
 static inline void geo_dirty_copy(uint8_t *dst, const uint8_t *src, uint64_t *mask, size_t words) {
@@ -486,7 +534,7 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
             case 0x06: {
                 uint32_t index = LA(0) >> 2, cnt = LA(1);
                 len = 2 + 2 * cnt;
-                if (cnt) g_geo_dirty[0].slots = g_geo_dirty[1].slots = true;
+                for (int c = 0; cnt && c < GEO_PUB_COPIES; c++) g_geo_dirty[c].slots = true;
                 for (uint32_t k = 0; k < cnt; k++, index++) {
                     uint32_t param = LA(2 + 2 * k), coef = LA(3 + 2 * k);
                     g_geo_live.texparam[index & 0x1F][0] = (float)(param & 0xFF);
@@ -517,23 +565,24 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
 static inline void geo_push(uint32_t word) {
     if (!g_geo.buff) return;
     uint32_t w = (g_geo.wstart >> 2) & (BUFF_RAM_SIZE / 4 - 1);
-    memcpy(g_geo.buff + w * 4u, &word, 4);
+    m2_st32a(g_geo.buff + w * 4u, word);
     g_geo.wstart = (g_geo.wstart + 4u) & 0xFFFFFu;
 }
 
 /* Copy bufferram out as the list the next frame draws, starting at rstart. */
 static inline void geodl_publish(uint32_t rstart) {
     if (!g_geo.buff) return;
-    uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[1] : g_geodl_snaps[0];
+    uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[GEO_PUB_COPIES - 1] : g_geodl_snaps[0];
     const uint32_t *live = (const uint32_t *)(const void *)g_geo.buff;
     if (g_geodl_full_snap) {
         /* geo3d_scan_displaylist walks its own format: give it all of bufferram */
         memcpy(back, live, sizeof g_geodl_snaps[0]);
         geodl_apply_state(back, BUFF_RAM_SIZE / 4, rstart, NULL);
     } else {
+        /* The list's own words only: a whole copy was 3.4% of a Dreamcast frame. */
         geodl_apply_state(live, BUFF_RAM_SIZE / 4, rstart, back);
     }
-    geo_raster_publish(back == g_geodl_snaps[0] ? 0 : 1);
+    geo_raster_publish(back == g_geodl_snaps[0] ? 0 : GEO_PUB_COPIES - 1);
     g_geodl_snap_rstart = rstart;
     g_geodl_snap        = back;
     g_geodl_snap_seq++;
@@ -543,8 +592,10 @@ static inline void geodl_publish(uint32_t rstart) {
 /* GEO base (0x800000). */
 static void geo_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - GEO_BASE;
-    if (r->data && off + 4 <= r->size)
-        memcpy(r->data + off, &val, 4);
+    if (r->data && off + 4 <= r->size) {
+        if (!(off & 3u)) m2_st32a(r->data + off, val);
+        else memcpy(r->data + off, &val, 4);
+    }
     if (size != 4) return;
     if (off < 0x1000) {
         uint32_t function = (off >> 4) & 0x3F;
@@ -576,8 +627,10 @@ static uint32_t geo_read_cb(mem_region_t *r, uint32_t addr, int size) {
 /* GEO_PROGRAM (0x804000): raw list words. */
 static void geo_program_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - GEO_PROGRAM_BASE;
-    if (r->data && off + 4 <= r->size)
-        memcpy(r->data + off, &val, 4);
+    if (r->data && off + 4 <= r->size) {
+        if (!(off & 3u)) m2_st32a(r->data + off, val);
+        else memcpy(r->data + off, &val, 4);
+    }
     if (size != 4) return;
     int uploading = g_geo.copro_ctl && (g_geo.copro_ctl[11] & 0x80);
     if (!uploading) geo_push(val);
@@ -619,6 +672,20 @@ static inline uint8_t *mem_region_fresh(uint8_t *have, size_t size) {
     return have;
 }
 
+/* A host that cannot hold a region in RAM can hand the bus a window instead
+ * (the Dreamcast: 16 MB for a board whose ROM and work regions are ~80 MB;
+ * DREAMCAST-PORT.md). The window comes back holding what the board would put
+ * there -- zeros for a work region, the ROM for MAIN_DATA / XTRA_DATA -- and
+ * the host pages it in as it is read, so the board neither clears it nor copies
+ * into it. NULL from the hook (or no hook) keeps the heap block. */
+typedef uint8_t *(*mem_window_fn)(const char *name, size_t size);
+static mem_window_fn g_mem_window;
+
+static inline uint8_t *mem_region_get(const char *name, uint8_t *have, size_t size) {
+    uint8_t *w = g_mem_window ? g_mem_window(name, size) : NULL;
+    return w ? w : mem_region_fresh(have, size);
+}
+
 /* The bus zeroed, keeping the battery's contents and the heap regions' blocks
  * (see mem_init), with the ROM in place and every change generation moved on. */
 static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
@@ -648,11 +715,12 @@ static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t ro
     bus->gen_tile = bus->gen_gfx = bus->gen_pal = bus->gen_tex = bus->gen_lut = ++s_init_count << 20;
 }
 
-/* The heap regions for this boot (mem_region_fresh); 0 when one cannot be had. */
+/* The heap regions for this boot (mem_region_fresh, or the host's window:
+ * mem_region_get); 0 when one cannot be had. */
 static inline int mem_alloc_regions(memory_bus_t *bus) {
-    bus->main_data   = mem_region_fresh(bus->main_data,   MAIN_DATA_SIZE);
-    bus->xtra_data   = mem_region_fresh(bus->xtra_data,   XTRA_DATA_SIZE);
-    bus->vid_ext_ram = mem_region_fresh(bus->vid_ext_ram, VID_EXT_RAM_SIZE);
+    bus->main_data   = mem_region_get("MAIN_DATA", bus->main_data,   MAIN_DATA_SIZE);
+    bus->xtra_data   = mem_region_get("XTRA_DATA", bus->xtra_data,   XTRA_DATA_SIZE);
+    bus->vid_ext_ram = mem_region_get("VID_EXT_RAM", bus->vid_ext_ram, VID_EXT_RAM_SIZE);
     bus->texram0     = mem_region_fresh(bus->texram0,     TEXRAM0_SIZE);
     bus->texram1     = mem_region_fresh(bus->texram1,     TEXRAM1_SIZE);
     bus->framebuffer = mem_region_fresh(bus->framebuffer, FRAMEBUFFER_SIZE);
@@ -747,9 +815,14 @@ static inline void mem_region_flags(memory_bus_t *bus) {
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
         if (!strcmp(r->name, "TILE") || !strcmp(r->name, "TILE_MIRROR"))   /* one buffer */
+        {
             r->change_gen = &bus->gen_tile;
-        else if (!strcmp(r->name, "TMAPGFX"))
+            r->dirty_kb   = bus->tile_dirty;
+        }
+        else if (!strcmp(r->name, "TMAPGFX")) {
             r->change_gen = &bus->gen_gfx;
+            r->dirty_kb   = bus->gfx_dirty;
+        }
         else if (!strcmp(r->name, "PALETTE"))
             r->change_gen = &bus->gen_pal;
         else if (!strncmp(r->name, "TEXRAM", 6)) { /* both banks and all their aliases */
@@ -797,6 +870,8 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     mem_region_flags(bus);
 
     memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
+    memset((uint8_t *)bus->tile_dirty, 1, sizeof bus->tile_dirty);
+    memset((uint8_t *)bus->gfx_dirty, 1, sizeof bus->gfx_dirty);
     mem_regions_changed(bus);   /* callbacks and change tracking were set after the adds */
 
     LOG_INFO("mem: bus initialized with %d regions, ROM=%zu bytes", bus->region_count, rom_size);
@@ -804,6 +879,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
 }
 
 static inline void mem_shutdown(memory_bus_t *bus) {
+    if (g_mem_window) return;   /* the host's windows are its own */
     free(bus->main_data);   bus->main_data   = NULL;
     free(bus->xtra_data);   bus->xtra_data   = NULL;
     free(bus->vid_ext_ram); bus->vid_ext_ram = NULL;
@@ -821,6 +897,67 @@ static inline void mem_shutdown(memory_bus_t *bus) {
 #define MEM_NOINLINE __attribute__((noinline))
 #define MEM_FORCE_INLINE inline __attribute__((always_inline))
 #endif
+
+/* ---- Small-target switches (both default to the desktop's behaviour) ------
+ *
+ * MEM_COUNT: the bus's reads/writes tallies, which only the CLI's summary
+ * prints. They are 64-bit, and on a 32-bit CPU without 64-bit adds (the
+ * Dreamcast's SH-4) each bump was a load, two adds and a store of two words on
+ * every access, ~10% of an instruction fetch. A build may set it to 0.
+ *
+ * MEM_LE_DIRECT: the board's words are little-endian and read byte by byte,
+ * which GCC and clang fold into one load on x86 and ARM. GCC for the SH-4
+ * does not (it cannot know the address is aligned): an instruction fetch was
+ * 40 SH-4 instructions. On a little-endian host with strict alignment, 1
+ * reads and writes an aligned word as one access, and falls back to bytes
+ * when it is not aligned. */
+#ifndef MEM_COUNT
+#define MEM_COUNT 1
+#endif
+#if MEM_COUNT
+#define MEM_TALLY(field, n) ((field) += (n))
+#else
+#define MEM_TALLY(field, n) ((void)0)
+#endif
+#ifndef MEM_LE_DIRECT
+#define MEM_LE_DIRECT 0
+#endif
+#if MEM_LE_DIRECT
+typedef uint32_t __attribute__((may_alias)) mem_u32_alias_t;
+typedef uint16_t __attribute__((may_alias)) mem_u16_alias_t;
+/* GCC sees that the byte path computes the same value as the word load, merges
+ * the two and keeps the bytes. Hiding the pointer from it keeps the load. */
+#define MEM_OPAQUE(ptr) __asm__("" : "+r"(ptr))
+#endif
+
+static MEM_FORCE_INLINE uint32_t mem_le32(const uint8_t *p) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 3u))) { const mem_u32_alias_t *q = (const mem_u32_alias_t *)p; MEM_OPAQUE(q); return *q; }
+#endif
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static MEM_FORCE_INLINE uint32_t mem_le16(const uint8_t *p) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 1u))) { const mem_u16_alias_t *q = (const mem_u16_alias_t *)p; MEM_OPAQUE(q); return *q; }
+#endif
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+static MEM_FORCE_INLINE void mem_le32_put(uint8_t *p, uint32_t val) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 3u))) { mem_u32_alias_t *q = (mem_u32_alias_t *)p; MEM_OPAQUE(q); *q = val; return; }
+#endif
+    p[0] = (uint8_t)val;
+    p[1] = (uint8_t)(val >> 8);
+    p[2] = (uint8_t)(val >> 16);
+    p[3] = (uint8_t)(val >> 24);
+}
+static MEM_FORCE_INLINE void mem_le16_put(uint8_t *p, uint32_t val) {
+#if MEM_LE_DIRECT
+    if (M2_LIKELY(!((uintptr_t)p & 1u))) { mem_u16_alias_t *q = (mem_u16_alias_t *)p; MEM_OPAQUE(q); *q = (uint16_t)val; return; }
+#endif
+    p[0] = (uint8_t)val;
+    p[1] = (uint8_t)(val >> 8);
+}
 
 /* The scan returns the earliest region containing an address. Walking the table
  * backwards and letting each region overwrite the pages it reaches leaves every
@@ -842,12 +979,13 @@ static MEM_NOINLINE void mem_build_pages(memory_bus_t *bus) {
      * region, and only where that region's read (write) is a plain buffer access. */
     memset(bus->rd_page, 0, sizeof bus->rd_page);
     memset(bus->wr_page, 0, sizeof bus->wr_page);
-    for (uint32_t p = 0; p < (1u << 16); p++) {
-        uint32_t e = bus->page[p];
+    MEM_HOST_PAGES_RESET();
+    for (uint32_t p = 0; p < MEM_PAGES; p++) {
+        uint32_t e = bus->page[p >> (16 - MEM_PAGE_SHIFT)];
         if (e == MEM_PAGE_NONE || e == MEM_PAGE_MIXED) continue;
         mem_region_t *r = &bus->regions[e - 1u];
-        if (!r->data) continue;
-        uint8_t *at = r->data + ((p << 16) - r->base);
+        if (!r->data || MEM_HOST_PAGED(r->data)) continue;
+        uint8_t *at = r->data + ((p << MEM_PAGE_SHIFT) - r->base);
         if (!r->read_cb) bus->rd_page[p] = at;
         if (!r->write_cb && !r->readonly && !r->change_gen && !r->dirty_kb) bus->wr_page[p] = at;
     }
@@ -917,8 +1055,36 @@ static inline bool mem__warn_due(uint64_t n) {
     return n <= MEM_WARN_FIRST || (n & (n - 1)) == 0;
 }
 
+#if defined(IB_WHY) && defined(_arch_dreamcast)
+/* main_dc's census: TMU2 ticks and calls in the bus's slow path, loads [0] and stores [1], by 16 MB region. */
+static struct { uint32_t t[2], n[2], rt[2][16]; } g_mslow;
+#define MSLOW_T0 uint32_t mt0_ = *(volatile uint32_t *)0xFFD80024u
+#define MSLOW_T1(w, a) do { uint32_t mt1_ = *(volatile uint32_t *)0xFFD80024u; \
+    uint32_t d_ = mt0_ >= mt1_ ? mt0_ - mt1_ : mt0_ + *(volatile uint32_t *)0xFFD80020u - mt1_; \
+    g_mslow.t[w] += d_; g_mslow.n[w]++; g_mslow.rt[w][((a) >> 24) & 15u] += d_; } while (0)
+#else
+#define MSLOW_T0 (void)0
+#define MSLOW_T1(w, a) (void)0
+#endif
+/* A paged region's bytes (MEM_HOST_PAGED), a page at a time. Only its
+ * change tracking is not done: no paged region has any. */
+static MEM_NOINLINE uint32_t mem_paged_rw(memory_bus_t *bus, mem_region_t *r, uint32_t addr,
+                                          uint32_t n, int write, uint32_t val) {
+    uint32_t v = 0;
+    uint8_t *p = NULL;
+    (void)bus; (void)r; (void)write;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t a = addr + i;
+        if (!p || !(a & MEM_PAGE_OFF)) p = MEM_HOST_PAGE_IN(bus, r, a, write);
+        if (!p) return 0;
+        if (write) p[a & MEM_PAGE_OFF] = (uint8_t)(val >> (8u * i));
+        else v |= (uint32_t)p[a & MEM_PAGE_OFF] << (8u * i);
+    }
+    return v;
+}
+
 static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
-    bus->reads++;
+    MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         if (mem__warn_due(++bus->unmapped_reads))
@@ -928,11 +1094,12 @@ static MEM_NOINLINE uint32_t mem_read8_slow(memory_bus_t *bus, uint32_t addr) {
     }
     if (r->read_cb) return r->read_cb(r, addr, 1) & 0xFF;
     if (!r->data)   return 0;
+    if (MEM_HOST_PAGED(r->data)) return mem_paged_rw(bus, r, addr, 1, 0, 0);
     return r->data[addr - r->base];
 }
 
 static MEM_NOINLINE uint32_t mem_read16_slow(memory_bus_t *bus, uint32_t addr) {
-    bus->reads++;
+    MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         if (mem__warn_due(++bus->unmapped_reads))
@@ -942,12 +1109,13 @@ static MEM_NOINLINE uint32_t mem_read16_slow(memory_bus_t *bus, uint32_t addr) {
     }
     if (r->read_cb) return r->read_cb(r, addr, 2) & 0xFFFF;
     if (!r->data)   return 0;
+    if (MEM_HOST_PAGED(r->data)) return mem_paged_rw(bus, r, addr, 2, 0, 0);
     uint32_t off = addr - r->base;
     return (uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8);
 }
 
 static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
-    bus->reads++;
+    MEM_TALLY(bus->reads, 1);
     mem_region_t *r = mem_find_region(bus, addr);
     if (!r) {
         if (mem__warn_due(++bus->unmapped_reads))
@@ -957,6 +1125,7 @@ static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
     }
     if (r->read_cb) return r->read_cb(r, addr, 4);
     if (!r->data)   return 0;
+    if (MEM_HOST_PAGED(r->data)) return mem_paged_rw(bus, r, addr, 4, 0, 0);
     uint32_t off = addr - r->base;
     return  (uint32_t)r->data[off]
          | ((uint32_t)r->data[off + 1] << 8)
@@ -971,24 +1140,22 @@ static MEM_NOINLINE uint32_t mem_read32_slow(memory_bus_t *bus, uint32_t addr) {
  * Forced: GCC 13 for the A55 still made every `ld` and `st` of the step a call
  * to these, a quarter of STF's instructions. */
 static MEM_FORCE_INLINE uint32_t mem_read8(memory_bus_t *bus, uint32_t addr) {
-    const uint8_t *p = bus->rd_page[addr >> 16];
-    if (M2_UNLIKELY(!p)) return mem_read8_slow(bus, addr);
-    bus->reads++;
-    return p[addr & 0xFFFFu];
+    const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
+    if (M2_UNLIKELY(!p)) { MSLOW_T0; uint32_t v_ = mem_read8_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
+    MEM_TALLY(bus->reads, 1);
+    return p[addr & MEM_PAGE_OFF];
 }
 static MEM_FORCE_INLINE uint32_t mem_read16(memory_bus_t *bus, uint32_t addr) {
-    const uint8_t *p = bus->rd_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) return mem_read16_slow(bus, addr);
-    bus->reads++;
-    p += addr & 0xFFFFu;
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+    const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 1u)) { MSLOW_T0; uint32_t v_ = mem_read16_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
+    MEM_TALLY(bus->reads, 1);
+    return mem_le16(p + (addr & MEM_PAGE_OFF));
 }
 static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
-    const uint8_t *p = bus->rd_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) return mem_read32_slow(bus, addr);
-    bus->reads++;
-    p += addr & 0xFFFFu;
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    const uint8_t *p = MEM_PAGE(bus->rd_page, addr);
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 3u)) { MSLOW_T0; uint32_t v_ = mem_read32_slow(bus, addr); MSLOW_T1(0, addr); return v_; }
+    MEM_TALLY(bus->reads, 1);
+    return mem_le32(p + (addr & MEM_PAGE_OFF));
 }
 
 /* The two words at addr, as mem_read32(addr) and mem_read32(addr + 4) return
@@ -1000,12 +1167,12 @@ static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
 /* Forced inline: once per instruction, and when GCC outlined it (after the
  * loads and stores started inlining) the A55 ran 5% more instructions. */
 static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32_t *w1, uint32_t *w2) {
-    const uint8_t *d = bus->rd_page[addr >> 16];
-    if (M2_LIKELY(d && (addr & 0xFFFFu) <= 0xFFF8u)) {  /* both words on one direct page */
-        d += addr & 0xFFFFu;
-        bus->reads += 2;
-        *w1 = (uint32_t)d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
-        *w2 = (uint32_t)d[4] | ((uint32_t)d[5] << 8) | ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
+    const uint8_t *d = MEM_PAGE(bus->rd_page, addr);
+    if (M2_LIKELY(d && (addr & MEM_PAGE_OFF) <= MEM_PAGE_OFF - 7u)) {  /* both words on one direct page */
+        d += addr & MEM_PAGE_OFF;
+        MEM_TALLY(bus->reads, 2);
+        *w1 = mem_le32(d);
+        *w2 = mem_le32(d + 4);
         return;
     }
     mem_region_t *r = bus->fetch;
@@ -1013,16 +1180,16 @@ static MEM_FORCE_INLINE void mem_fetch2(memory_bus_t *bus, uint32_t addr, uint32
         uint32_t off = addr - r->base;
         if ((uint64_t)off + 8u <= r->size && !r->read_cb) {
             const uint8_t *p = r->data + off;
-            bus->reads += 2;
-            *w1 = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-            *w2 = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+            MEM_TALLY(bus->reads, 2);
+            *w1 = mem_le32(p);
+            *w2 = mem_le32(p + 4);
             return;
         }
     }
     *w1 = mem_read32_slow(bus, addr);
     *w2 = mem_read32_slow(bus, addr + 4);
     r = mem_find_region(bus, addr);
-    if (r && !r->shadowed && !r->read_cb && r->data && (uint64_t)(addr - r->base) + 8u <= r->size)
+    if (r && !r->shadowed && !r->read_cb && r->data && !MEM_HOST_PAGED(r->data) && (uint64_t)(addr - r->base) + 8u <= r->size)
         bus->fetch = r;
 }
 
@@ -1115,7 +1282,7 @@ static inline void mem__note_change(mem_region_t *r, uint32_t off, uint32_t len)
 }
 
 static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFF);
@@ -1134,6 +1301,7 @@ static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint3
         return;
     }
     if (!r->data)    return;
+    if (MEM_HOST_PAGED(r->data)) { mem_paged_rw(bus, r, addr, 1, 1, val); return; }
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && r->data[off] != (uint8_t)val;
     r->data[off] = (uint8_t)val;
@@ -1141,7 +1309,7 @@ static MEM_NOINLINE void mem_write8_slow(memory_bus_t *bus, uint32_t addr, uint3
 }
 
 static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFFFF);
@@ -1160,6 +1328,7 @@ static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint
         return;
     }
     if (!r->data)    return;
+    if (MEM_HOST_PAGED(r->data)) { mem_paged_rw(bus, r, addr, 2, 1, val); return; }
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && (r->data[off] | (r->data[off + 1] << 8)) != (val & 0xFFFF);
     r->data[off]     = (uint8_t)(val & 0xFF);
@@ -1168,7 +1337,7 @@ static MEM_NOINLINE void mem_write16_slow(memory_bus_t *bus, uint32_t addr, uint
 }
 
 static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    bus->writes++;
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
@@ -1188,6 +1357,7 @@ static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint
         return;
     }
     if (!r->data)    return;
+    if (MEM_HOST_PAGED(r->data)) { mem_paged_rw(bus, r, addr, 4, 1, val); return; }
     uint32_t off = addr - r->base;
     bool changed = r->change_gen && ((uint32_t)r->data[off] | ((uint32_t)r->data[off + 1] << 8)
                                      | ((uint32_t)r->data[off + 2] << 16) | ((uint32_t)r->data[off + 3] << 24)) != val;
@@ -1203,38 +1373,32 @@ static MEM_NOINLINE void mem_write32_slow(memory_bus_t *bus, uint32_t addr, uint
  * and a plain store to a direct page then skips the lookup (the long versions
  * above for the rest, which these were before). */
 static MEM_FORCE_INLINE void mem_write8(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    uint8_t *p = bus->wr_page[addr >> 16];
-    if (M2_UNLIKELY(!p)) { mem_write8_slow(bus, addr, val); return; }
-    bus->writes++;
+    uint8_t *p = MEM_PAGE(bus->wr_page, addr);
+    if (M2_UNLIKELY(!p)) { MSLOW_T0; mem_write8_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFF);
-    p[addr & 0xFFFFu] = (uint8_t)val;
+    p[addr & MEM_PAGE_OFF] = (uint8_t)val;
 }
 static MEM_FORCE_INLINE void mem_write16(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    uint8_t *p = bus->wr_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFEu)) { mem_write16_slow(bus, addr, val); return; }
-    bus->writes++;
+    uint8_t *p = MEM_PAGE(bus->wr_page, addr);
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 1u)) { MSLOW_T0; mem_write16_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val & 0xFFFF);
-    p += addr & 0xFFFFu;
-    p[0] = (uint8_t)val;
-    p[1] = (uint8_t)(val >> 8);
+    mem_le16_put(p + (addr & MEM_PAGE_OFF), val);
 }
 static MEM_FORCE_INLINE void mem_write32(memory_bus_t *bus, uint32_t addr, uint32_t val) {
-    uint8_t *p = bus->wr_page[addr >> 16];
-    if (M2_UNLIKELY(!p || (addr & 0xFFFFu) > 0xFFFCu)) { mem_write32_slow(bus, addr, val); return; }
-    bus->writes++;
+    uint8_t *p = MEM_PAGE(bus->wr_page, addr);
+    if (M2_UNLIKELY(!p || (addr & MEM_PAGE_OFF) > MEM_PAGE_OFF - 3u)) { MSLOW_T0; mem_write32_slow(bus, addr, val); MSLOW_T1(1, addr); return; }
+    MEM_TALLY(bus->writes, 1);
     g_mem_last_write_ip = bus->cpu_ip;
     if (M2_UNLIKELY(wp_armed())) wp_check(addr, val, true, bus->cpu_ip);
     dl_tap(addr, val);
     if (M2_UNLIKELY(dl_active()) && g_dl.cop && addr - BUFF_RAM_BASE < BUFF_RAM_SIZE) dl_record(addr, val);
-    p += addr & 0xFFFFu;
-    p[0] = (uint8_t)val;
-    p[1] = (uint8_t)(val >> 8);
-    p[2] = (uint8_t)(val >> 16);
-    p[3] = (uint8_t)(val >> 24);
+    mem_le32_put(p + (addr & MEM_PAGE_OFF), val);
 }
 
 /* The capture starts: the COP's bufferram and DM as they stand. */

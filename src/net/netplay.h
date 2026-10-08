@@ -92,6 +92,26 @@
 #ifndef NETPLAY_H
 #define NETPLAY_H
 
+#ifdef M2_NO_NETPLAY
+/* A build without netplay (the Dreamcast's: g_netplay is ~675 KB of its 16 MB
+ * of RAM). The board loop's calls, as they are with no session up. */
+#include <stdbool.h>
+#include <stdint.h>
+#include "i960.h"
+
+typedef enum { NETPLAY_STEP_OFF, NETPLAY_STEP_READY, NETPLAY_STEP_WAIT, NETPLAY_STEP_RESET } netplay_step_t;
+
+static inline bool netplay_active(void) { return false; }
+static inline bool netplay_catching_up(void) { return false; }
+static inline netplay_step_t netplay_begin_frame(void) { return NETPLAY_STEP_OFF; }
+static inline void netplay_end_frame(const i960_cpu_t *cpu, uint64_t total_steps, int versus_result) { (void)cpu; (void)total_steps; (void)versus_result; }
+static inline bool netplay_take_empty_restart(void) { return false; }
+static inline bool netplay_reset_board_now(void) { return false; }
+static inline void netplay_do_reset(void) {}
+static inline void netplay_restart_alone(void) {}
+static inline void netplay_board_stopped(uint32_t ip, bool halted) { (void)ip; (void)halted; }
+#else
+
 /* net_socket.h first, and this header first in main.c: it owns the winsock
  * include order. See the note at the top of net_socket.h. */
 #include "net_socket.h"
@@ -4311,5 +4331,7 @@ static inline void netplay_shutdown(void) {
     g_netplay.mutex_ready = false;
     emu_mutex_destroy(&g_netplay.mutex);
 }
+
+#endif /* M2_NO_NETPLAY */
 
 #endif /* NETPLAY_H */

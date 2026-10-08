@@ -1,0 +1,388 @@
+# The model groups of tools/dc_mdlpack.py: `group NAME`, then its objects (model
+# table numbers, hex), each in the first group that names it. Written by
+# tools/dc_mdlgroups.mjs --gems from the explorer's stages and fighters and Sonic
+# Gems Collection's OBJ_* files; `# from` says which.
+
+group common
+# from Gems OBJ_COMMON
+021 0d3 195 2c3 2c4 2c5 2c6 2c7 2c8 2c9 2ca 2cb 2cc 2cd 2ce 2cf
+2d0 2d1 319 323 324 327 328 329 32a 330 331 394 395 3ed 3ee 3ef
+3f0 3f1 3f2 3f3 3f4 508 525 637 638 639 63a 63b 63c 63d 63e 63f
+640 736 892 893 8ac 8ad 8ae 8f9 907 908 909 90a 90b 90c 90d 90e
+967 a49 a4a a4b a4c a4d a4e a4f a50 a51 a7a a7b a7c b0e b0f b10
+b1f b20 b21 b24 b59 b5a b5b b5c b5d b5e b8e b8f b90 b91 b92 b93
+b94 b95 b96 b97 b98 b99 b9a b9b b9c b9d bc1 bc3 bc4 bc6 ce4 ce5
+d14 d1a d92 d93 d94 d95 d96 d97 d98 d9b da7 da8 da9 daa dab dac
+dad dae daf db0 10df 10e0 10e1 10e2 10e3 10e4 10e5 10e6 10e7 10e8 10ea 10ec
+10ed 10ee 10ef 10f0 10f1 10f2 10f4
+
+group name
+# from Gems OBJ_NAME
+002 3b3 3b4 3b5 3b6 be3 be4 be5 be6 be7 be8 be9 bea beb bec bed
+bee bef bf0 bf1 bf2 bf3 bf4 bf5 bf6 bf7 bf8 bf9 bfa bfb bfc bfd
+bfe bff c00 c01 c02
+
+group select
+# from Gems OBJ_SELECT
+008 00a 00b 00c 00d 00f 010 012 013 014 015 016 017 019 01a 01b
+01c 01d 01e 01f 020 022 023 024 025 026 027 029 02a 02b 02c 02d
+02e 02f 030 031 032 033 034 035 036 037 039 03a 03b 03c 03d 03e
+03f 040 041 042 043 044 045 046 047 06c 06d 06e 06f 070 071 072
+073 074 075 076 077 078 079 07a 07b 07c 07d 07e 07f 080 081 082
+083 084 085 086 087 088 089 08a 08b 08c 08d 08e 08f 090 091 092
+093 094 095 096 097 098 099 09a 09b 09c 09d 09e 09f 0a0 0a1 0a2
+0a3 0a4 0a5 0a6 0a7 0a8 0a9 0aa 0ab 0d1 0d2 0d9 0da 171 172 173
+174 176 177 178 179 17a 17b 17c 17d 17e 17f 180 19d 19e 19f 1a0
+1a2 1a3 1a7 1a8 1a9 1aa 1ab 1ac 1ad 1ae 1af 1b0 1b1 1b2 230 231
+232 233 292 293 294 295 297 298 299 29a 29b 29c 29d 29e 29f 2a0
+2a1 2d2 2d3 2d4 2d5 2d6 2d7 2d8 2d9 2da 2db 2dc 2dd 2de 2df 2e0
+2e1 2e3 2e4 2e5 2e6 2e7 2e8 2e9 2eb 2ec 2ed 2ee 3bf 3c0 3c1 3c2
+3c4 3c5 3c6 3c7 3c8 3c9 3ca 3cb 3cd 3cf 3d0 3d1 3d2 3d3 3d4 3d5
+3d6 3d7 3d8 3d9 3da 3db 3dc 3dd 3de 3df 3e0 3e1 3e2 3e3 3e4 3e5
+3e6 3e7 3e8 3e9 3ea 3eb 3ec 494 495 498 499 49c 49d 49e 49f 4a0
+4a1 4a2 4a8 4a9 4aa 4ab 4ac 52e 52f 530 531 533 534 535 536 537
+538 539 53a 544 54e 54f 574 575 576 577 578 579 57a 57b 57c 57d
+57e 57f 580 581 582 583 584 585 586 587 588 589 58a 58b 58c 58d
+58e 58f 590 591 592 593 594 595 596 597 598 599 59a 59b 59c 59d
+59e 59f 5a0 5a1 5a2 5a3 5a4 5a5 5a6 5a7 5a8 5a9 5aa 5ab 5ac 5ad
+5ae 5af 5b0 5b1 5b2 5b3 5ba 5bb 5be 5bf 5c3 5c4 5c5 5c6 5c7 5c8
+5c9 5cf 5d0 5d1 5d2 5d3 5d4 5d5 5d6 5d7 5de 5df 5e3 5e4 5e5 5e6
+5e7 5ea 5ef 5f4 5fb 5fe 601 602 68f 690 691 692 693 694 695 696
+69a 69b 69c 6a0 6a1 6a2 6a3 6a4 705 706 707 708 709 70b 70c 70d
+70e 70f 710 711 712 713 714 715 71a 71f 720 747 772 773 774 775
+776 778 779 77a 77b 77c 77d 77e 77f 780 781 782 787 78c 78d 89f
+8a0 8a1 8a2 8a3 8a4 8a5 8a6 8a7 8a8 8a9 8aa 8ab 8b2 8b3 8b4 8b5
+8b6 8b8 8b9 8ba 8bb 8bc 8bd 8be 8bf 8c0 8c1 8c2 8c3 910 911 912
+913 914 916 917 918 919 91a 91b 91c 91d 91e 91f 920 921 93d 93e
+93f 940 941 942 943 944 945 946 948 949 94a 94b 96a 96b 96c 96d
+96e 96f 970 971 972 973 974 975 976 977 b03 b07 b0a b0d bbd bbe
+bd3 bd4 c44 c45 c58 c59 c6d c6e c7b c7c c92 c93 c99 c9a c9b d0a
+d0b d63 d66 d6a d6d d70 d74 d77 d7a d7e e9f ea0 eb2 eb3 f0e f11
+f15 f18 f1b f1f f22 f25 f29 f2c f39 f3d f40 f45 f49 f4c f4f f53
+f56 f59 f5d f60 f65 f69 f6c f74 f78 f7b f83 f87 f8a f92 f96 f99
+100a 100b
+
+group stage-south-island
+# from stage slots 0 13 14, Gems OBJ_STAGE1
+1ed 1f5 1f6 1f7 1f8 1f9 1fa 1fb 1fc 1fd 1fe 1ff 200 201 202 203
+204 205 206 207 208 209 20a 20b 20c 20d 20e 20f 210 211 212 213
+214 215 216 217 218 219 21a 21b 21c 21d 21e 21f 220 221 222 223
+224 225 226 227 228 229 22a 22b 22c 436 437 4c7 616 617 618 619
+61a 61b 61c 61d 61e 61f 620 621 622 623 624 625 626 627 628 629
+62a 62b 62c 62d 62e 62f 630 631 632 633 634 635 b11 ec8 fa9
+
+group stage-flying-carpet
+# from stage slots 1, Gems OBJ_STAGE2
+142 234 235 236 237 238 239 23a 23b 23c 23d 23e 23f 240 241 242
+243 244 245 246 247 248 249 252 253 254 255 256 257 258 259 25a
+25b 25c 25d 25e 25f 260 261 262 263 264 265 266 267 268 269 26a
+26b 26c 26d 26e 26f 270 271 272 273 274 275 276 277 278 279 27a
+27b 27c 27d 27e 27f 280 281 282 283 284 285 286 287 288 289 28a
+28b 28c 28d 28e 28f 290 291 2a3 2a4 2a5 2a6 2a7 2a8 2a9 2aa 2ab
+2ac 2ad 2ae 2af 2b0 2b1 2b2 2b3 2b4 2b5 2b6 2b7 2b8 2b9 2ba 2bb
+2bc 2bd 2be 2bf 2c0 2c1 2c2 3f6 3f7 3f8 3f9 3fa 3fb 3fc 3fd 3fe
+3ff 400 401 402 403 404 405 406 407 408 409 40a 40b 40c 40d 40e
+40f 410 411 412 413 414 415 416 417 418 419 41a 41b 41c 41d 41e
+41f 420 421 422 423 424 425 426 427 428 429 42a 42b 42c 42d 42e
+42f 430 431 432 433 434 435 4bb 507 94c 94d c73 c74 d04 ec6 fa8
+
+group stage-aurora-icefield
+# from stage slots 2, Gems OBJ_STAGE3
+0af 0b0 101 164 165 166 1e0 1e1 1e2 1e3 1e4 1e5 1e6 1e7 1e8 22d
+22e 22f 332 333 334 335 336 337 338 339 33a 35b 35c 3aa 3ab 3ac
+3ad 465 466 467 469 641 642 643 644 90f c80 cfb d19 d9c ecc fab
+106b 106c 106d 106e 106f 1070 1071 1072 1073 1074 1075 1076 1077 1078 1079 107a
+107b 107c 107d 107e 107f 1080 1081 1092 1093 1094 1095 1096 1097 1098 1099 109a
+109b 109c 109d 109e 109f 10a0 10a1 10a2 10a3 10a4 10a5 10a6 10a7 10a8 10a9 10aa
+10ab 10ac 10ad 10ae 10af 10b0 10b1 10b2 10b3 10b4 10b5 10b6 10b7 10b8 10b9 10d9
+10da 10db 10dc 10dd 10de
+
+group stage-mushroom-hill
+# from stage slots 3 12, Gems OBJ_STAGE4
+144 145 147 1cb 1cc 1ce 1cf 1d0 1d1 1d2 1d3 1d4 1d5 1d6 1d7 1d8
+1d9 1da 1db 1dc 1dd 1de 1df 6b1 6b2 6b3 6b4 6b5 6b6 6b7 6b8 6b9
+6ba 6bb 6bc 6bd 6be 6bf 6c0 6c1 6c2 6c3 6c4 6c5 6c6 6c7 6c8 6c9
+6ca 6cb 6cc 6cd 6ce 6cf 6d0 94e 95f 960 961 962 d16 eca faa
+
+group stage-canyon-cruise
+# from stage slots 4, Gems OBJ_STAGE5
+8d6 8d7 902 903 904 905 9f2 9f3 9f4 9f5 9f6 9f7 9f8 9f9 9fa 9fb
+9fc 9fd 9fe 9ff a00 a01 a02 b82 bc7 bc8 c7f c9f ca0 ca1 ca2 ca3
+ca4 ca5 ca6 ca7 ca8 ca9 caa cab cac cad cae caf cb0 cb1 cb2 cb3
+cb4 cb5 cb6 cb7 cb8 cb9 cba cbb cbc cbd cbe cbf cc0 cc1 cc2 cc3
+cc4 cc5 cc6 cc7 cc8 cc9 cca ccb ccc ccd cce ccf cd0 cd1 cd2 cd3
+cd4 cd5 cd6 cd7 cd8 cd9 cda cdb cdc cdd ec4 fa7
+
+group stage-casino-night
+# from stage slots 5, Gems OBJ_STAGE6
+0b1 0b2 0b3 0b4 0b5 0b6 0b7 0b8 0b9 0ba 0bb 0bc 0bd 0be 0bf 0c0
+0c1 0c2 0d4 143 146 148 4cc 4cd 4ce 6b0 a6e a6f abe abf ac0 ac1
+ac2 ac3 ac4 ac5 ac6 ac7 ac8 ac9 aca acb acc acd ace acf ad0 ad1
+ad2 ad3 ad4 ad5 ad6 ad7 ad8 ad9 ada adb adc add ebe fa5
+
+group stage-dynamite-plant
+# from stage slots 6, Gems OBJ_STAGE7
+1b3 1b4 1b5 1b6 1b7 1b8 1b9 1ba 1bb 1bc 1bd 1be 1bf 1c0 1c1 1c2
+1c3 1c4 1c5 1c7 1c8 1c9 1ca 344 345 346 347 746 8d9 a03 a04 a05
+a06 a07 a08 a09 a0a a0b a0c a0d a0e a0f a10 a11 a12 a39 a3a a3b
+a3c a3d a3e a3f a40 a41 a42 a43 a44 a45 a46 a47 a48 ec2 fa6
+
+group stage-giant-wing
+# from stage slots 7, Gems OBJ_STAGE8
+102 103 360 503 a54 a55 a56 a57 a58 a59 a5a a5b a5c a5d a5e a5f
+a60 a61 a62 a63 a64 a65 b1c b1d b1e b2f b83 b84 b85 b86 b87 b88
+b89 c0e c0f cf9 cfa d01 e59 e60 e7a ebc f30 f31 fa3 102d 102e 1066
+1067 1068 1069
+
+group stage-death-egg
+# from stage slots 8 9 10, Gems OBJ_STAGE10, Gems OBJ_STAGE9
+462 463 464 46a 46b 46c 46d 46e 46f 470 471 472 473 474 475 476
+477 478 479 48d 48e 48f 490 491 492 493 4b5 4b6 4b7 4b8 4b9 4ba
+979 97a 97c 97d 97e 97f 980 983 984 985 986 987 988 989 98a 98b
+98d 98e 98f 990 991 992 99e 99f 9a0 9a1 9a2 9a3 9a4 9a5 9a6 9a7
+9a8 9a9 9aa 9ab 9ac 9ad 9ae 9af 9b0 9b1 9b2 9b3 9b4 9b5 9b6 9b7
+9b8 9b9 9ba 9bb 9bc 9bd 9be 9bf 9c0 9c1 9c2 9c3 9c4 9c5 9c6 9c7
+9c8 9c9 9ca 9cb 9cc 9cd 9ce 9cf 9d0 9d1 9d2 9d3 9d4 9d5 9d6 9d7
+9d8 9d9 9da 9db 9dc 9dd a94 a95 c16 c17 c75 d2d d2e d9d d9e d9f
+da0 fe8
+
+group stage-tails-lab
+# from stage slots 15, Gems OBJ_STAGE15
+04a 04e 050 051 052 053 054 0e0 0e1 0e2 0e3 0e6 0e7 504 52c 52d
+745 7a2 7a3 7a4 7a5 7a6 7a7 7a8 7a9 7aa 7ab 7ac 7ad 7ae 7af 7b0
+7b1 7b2 7b3 7b4 7b5 7b6 7b7 7b8 7b9 7ba 7bb 7bc 7bd b01 b81 d91
+d99 d9a da1 da2 da3 ed6
+
+group char-sonic
+# from character 0, Gems OBJ_SNC1
+00e 011 018 028 0c4 0c6 0c7 0c8 0c9 0db 169 16a 16b 16c 181 393
+47a 47b 47c 47d 47e 47f 480 481 482 483 484 485 486 487 488 489
+48a 48b 48c 6ee 6ef 6f0 6f1 964 a52 a53 a8f a90 b45 b46 b47 bc9
+bca bcb bcc bcd bce bcf bd0 bd1 bd2 bd5 bd6 bd7 bd8 c7d c7e d02
+d03 dd7 dd8 ea5 ea6 ea7 ea8 ea9 eaa eab eac f05 f06 f07 f1a f1c
+f1d f1e f20 f21 f23 102c 102f
+
+group char-tails
+# from character 1, Gems OBJ_TEI1
+038 048 0ac 0ca 0cb 0cc 0cd 0ce 0cf 0d0 149 14a 14b 14c 14d 14e
+14f 150 151 152 153 154 155 156 157 158 159 15a 15b 15c 15d 15e
+15f 16d 16e 16f 170 196 197 19c 1cd 396 4bc 4bd 4be 4bf 4c0 4c1
+4c2 4c3 4c5 4c6 4c8 4c9 4ca 4cb 4d0 4d1 4d2 4d3 4d4 4d5 4d6 4d7
+4d8 4d9 4da 4db 4dc 4dd 4de 4df 4e0 4e1 4e2 4e3 4e4 4e5 4e6 4e7
+4e8 4e9 4ea 4eb 4ec 4ed 4ee 4ef 4f0 4f1 4f2 4f3 4f4 4f5 4f6 4f7
+4f8 4f9 4fa 4fb 4fc 4fd 4fe 4ff 500 6f2 6f3 6f4 6f5 6f6 735 965
+966 a7d a91 a92 b18 b19 b1a b1b b49 b4a ce1 ce2 f24 f26 f27 f28
+f2a f2b f2d f37
+
+group char-amy
+# from character 2, Gems OBJ_AMY1
+009 05b 35a 381 3c3 3cc 3ce 438 439 43a 43b 43c 43d 43e 43f 440
+441 442 443 444 445 446 447 502 509 50a 50b 50c 50d 50e 50f 510
+511 512 513 514 515 516 517 550 555 556 557 558 68a 6a5 6a6 6a8
+6a9 6aa 6ab 6ad 6d1 6d2 6d3 6d4 6d5 6d6 6d7 6d8 6e9 963 aa6 aa7
+af4 af5 b02 b04 b05 b06 b08 b09 b0b b30 b31 b32 c76 c77 c78 cde
+d06 d07 d08 d09 d0c d0d d0e d0f d10 d11 d12 e3e e51 e52 e53 e54
+e55 e56 e57 e58 ed9 eda edb 1009 100c 100d 103a
+
+group char-metal-sonic
+# from character 3, Gems OBJ_MTS1
+0dc 0dd 0de 182 183 184 185 186 187 188 189 18a 18b 18c 18d 18e
+18f 190 191 193 194 669 66a 66b 66c 66d 66e 66f 670 671 672 673
+674 675 676 677 678 68e 6f7 6f8 6f9 6fa 6fb 6fc 6fd 6fe 6ff 700
+701 702 703 704 993 994 995 996 997 998 999 99a 99b 99c 99d 9e6
+9e7 9e8 9e9 b42 b43 b44 cf5 cf6 cf7 cf8 f02 f03 f04 10f5 10f6 10f8
+10fa 10fc 10fe 1100 1102
+
+group char-fang
+# from character 4, Gems OBJ_FNG1
+04c 04d 05c 05d 12f 130 131 132 1a4 1a5 1a6 2ef 2f0 2f1 2f2 2f3
+303 304 305 306 384 385 386 387 3bc 3bd 3be 448 449 44a 44b 44c
+44d 44e 44f 450 451 452 453 49a 49b 4c4 518 551 552 67a 67b 67c
+67d 67e 67f 680 681 682 683 684 685 686 687 688 689 68c 697 698
+699 69d 69e 69f 950 951 952 953 954 955 956 a8b a8c b16 b17 b3f
+b40 b41 b5f b60 b61 b62 b63 b64 b65 b66 b67 b68 b69 b6a b6b b6c
+b6d b6e b6f b70 b71 b72 b73 b74 b75 b76 b77 b78 b79 b7a b7b b7c
+b7d b7e bb1 bb2 bb3 bb4 bb5 bb6 bb7 bb8 bb9 bba bbb bbc bbf bc0
+d79 d7b d7c d7d d7f d80 e31 e32 e33 e34 ee8 ee9 eea f0f 1029 102a
+
+group char-bark
+# from character 5, Gems OBJ_KMA1
+104 105 106 107 108 109 10a 10b 10c 10d 10e 10f 110 111 112 113
+114 115 116 117 118 119 382 3b7 454 455 456 457 458 459 45a 45b
+45c 45d 45e 45f 460 461 6ac 8b7 8c4 8c5 8c6 8c7 8c8 8c9 8ca 8cb
+8cc 8cd 8ce 8cf 8d0 8d1 8d2 8d3 8d4 8d5 947 b33 b34 b35 ce3 d65
+d67 d68 d69 d6b d6c d6e e5a e5b e5c edc edd ede 100f
+
+group char-knuckles
+# from character 6, Gems OBJ_KCS1
+06b 0d5 133 134 167 168 175 192 390 391 392 553 656 657 658 659
+65a 65b 65c 65d 65e 65f 660 661 662 663 664 665 666 667 668 68d
+6ea 6eb 6ec 6ed 8da 8db 8dc 8dd 901 9ea 9eb 9ec 9ed 9ee 9ef 9f0
+9f1 a8d a8e c10 c11 c12 c13 c14 c15 dcd dce dcf dd0 dd1 dd2 dd3
+dd4 dd5 dd6 efd efe eff f10 f12 f13 f14 f16 f17 f19 102b
+
+group char-espio
+# from character 7, Gems OBJ_ESP1
+12b 12c 12d 12e 383 3b8 3b9 3ba 3bb 496 497 4a3 4a4 4a5 4a6 4a7
+645 646 647 648 649 64a 64b 64c 64d 64e 64f 650 651 652 653 679
+68b 6e1 6e2 6e3 6e4 6e5 6e6 6e7 6e8 94f 978 b14 b15 b3c b3d b3e
+c5e c5f c60 c61 c62 c63 c64 c65 c66 c67 c68 c69 c6a c6b c6c c6f
+c70 c71 c72 d6f d71 d72 d73 d75 d76 d78 e29 e2a e2b e2c ee5 ee6
+ee7 1027 1028
+
+group char-eggman
+# from character 8
+315 316 317 318 31a 31b 31c 31d 31e 31f 320 321 322 559 55a 55b
+55c 55d 55e 55f 560 561 562 563 564 565 636 d13 d15
+
+group char-eggman-b
+# from character 9
+307 308 309 30a 30b 30c 30d 30e 30f 310 311 312 313 314
+
+group char-bean
+# from character 10, Gems OBJ_BIN1
+0c5 1a1 296 6a7 6ae 6af 70a 716 717 718 719 71b 71c 71d 71e 721
+722 723 724 725 726 727 728 729 72a 72b 72c 72d 72e 72f 730 731
+732 733 734 898 899 89a 89b 89c 89d 8af 8b0 8b1 9de 9df 9e0 9e1
+9e2 9e3 9e4 9e5 b0c b12 b13 b36 b37 b38 c79 c7a c98 cdf ce0 d18
+d62 d64 ea3 edf ee0 ee1 f32 f33 100e
+
+group char-eggman-boss
+# from character 11, Gems OBJ_BOSS
+11a 11b 11c 11d 11e 11f 120 121 122 123 124 125 126 127 128 129
+12a 32e 32f 361 362 363 364 365 366 367 7be 7bf 7c0 8df 8e0 8e1
+8e2 8e3 8e4 ba2 ba3 ce6 ce7 ce8 ce9 cea ceb cec ced cee cef cf0
+cf1 cf2 cf3 cf4 e3f e40 e41 e42 e43 e44 e5d e5e e5f 101e 101f 1020
+1021 1022 1023 1024 1025 1026
+
+group char-egg-ufo
+# from character 12
+b22 b23
+
+group char-egg-minion
+# from character 13
+135 136 137 138 139 13a 13b 13c 13d 13e 13f 140 141 b4b b4c b4d
+b4e b4f b51 b52 b53 b54 b55 b56 b58 bb0
+
+group char-rocket-metal
+# from character 14
+1ef 1f0 1f1 1f3 1f4 33b 33c 33d 33e 33f 340 d1b d1c d1d d1e d1f
+d20 d21 d22 d23 d24 d25 d26 d27 d29 d2b d2c
+
+group char-honey
+# from character 15
+a99 db9 dba dbb dbc dbd dbe dbf dc0 dc1 dc2 dc3 dc4 dc9 dca dcb
+dcc df7 df8 df9 dfa dfc dfd e08 e09
+
+group char-sonic-mirror
+# from character 26, Gems OBJ_SNC2
+4ad 4ae 4af 505 506 519 51a 51b 51c 51d 51e 51f 520 521 522 523
+524 7fa 7fb 7fc 7fd 7fe 7ff 800 801 802 803 804 805 806 807 808
+809 80a 80b 80c 88d 88e 88f 890 afe c4e c4f c50 c51 c52 c53 c54
+c55 c56 c57 c5a c5b c5c c5d c9c c9d e61 e62 e63 e64 e65 e66 e67
+e68 e69 e6a ead eae ed7 ed8 f81 f82 f84 f85 f86 f88 f89 f8b f8c
+f8d f8e f8f 106a
+
+group char-tails-mirror
+# from character 27, Gems OBJ_TEI2
+4b0 554 566 567 568 569 56a 56b 56c 56d 56e 56f 570 571 572 573
+5b4 5b5 5b6 5b7 5b8 5b9 80d 80e 80f 810 811 812 813 814 815 816
+817 818 819 81a 81b 81c 81d 81e 81f 820 821 822 823 824 825 826
+827 828 829 82a 82b 82c 82d 82e 82f 830 831 832 833 834 835 836
+837 838 839 83a 83b 83c 83d 83e 83f 840 841 842 843 844 845 846
+847 848 849 84a 84b 84c 84d 84e 84f 850 851 852 853 854 855 856
+857 858 859 85a 85b 85c 85d 888 889 88a 88b 88c 968 969 aff b2b
+b2c b2d b2e cff d00 e6c e6d e6e e6f e70 e71 e72 e73 e74 e75 e76
+e77 e78 e79 e7b e7c e7d eaf eb0 f90 f91 f93 f94 f95 f97 f98 f9a
+
+group char-amy-mirror
+# from character 28, Gems OBJ_AMY2
+397 532 53b 53c 53d 53e 53f 540 541 542 543 545 546 547 548 549
+54a 54b 54c 54d 615 761 762 763 764 765 766 767 768 769 76a 76b
+76c 76d 76e 76f 770 771 85e 85f 860 861 862 863 864 865 866 867
+868 869 86a 86b 86c 86d 86e 86f 870 871 872 873 874 875 876 95e
+a38 af6 af7 af8 af9 c81 c82 c9e cfc ddd dde ddf de0 e0a e0b e9e
+ea1 ea2 eb1 eb4 eb5 eb6 eb7 eb8 f38 f3a f3b f3c f3e f3f f41 10ba
+
+group char-metal-sonic-mirror
+# from character 29, Gems OBJ_MTS2
+7d7 7d8 7d9 7da 7db 7dc 7dd 7de 7df 7e0 7e1 7e2 7e3 7e4 7e5 7e6
+7e7 7e8 7e9 7ea 7eb 7ec 7ed 7ee 7ef 7f0 7f1 7f2 7f3 7f4 7f5 7f6
+7f7 7f8 7f9 a29 a2a a2b a2c a2d a2e a2f a30 a31 a32 a33 a34 a35
+a36 a37
+
+group char-fang-mirror
+# from character 30, Gems OBJ_FNG2
+39b 39c 3ae 3af 5d8 5d9 5da 5db 5e0 5e1 5e2 5e8 5e9 5eb 5ec 5ed
+5ee 5f0 5f1 5f2 5f3 5f5 5f6 5f7 5f8 5f9 5fa 5fc 5fd 5ff 600 877
+878 879 87a 87b 87c 87d 87e 87f 880 881 882 883 884 885 886 887
+957 958 959 95a 95b 95c 95d afc b29 b2a c18 c19 c1a c1b c1c c1d
+c1e c1f c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c2a c2b c2c c2d
+c2e c2f c30 c31 c32 c33 c34 c35 c36 c37 c38 c39 c3a c3b c3c c3d
+c3e c3f c40 c41 c42 c43 c46 c47 e0c e0d e0e e0f e10 e1d e2d e2e
+e2f e30 f64 f66 f67 f68 f6a f6b f6d f6e f6f f70 f71 f72 1082 1083
+1084 1085 1086 1087 1088 1089 108a 108b 108c 108d 108e 108f 1090 1091
+
+group char-bark-mirror
+# from character 31, Gems OBJ_KMA2
+399 607 608 609 60a 60b 60c 60d 60e 60f 610 611 612 613 614 915
+922 923 924 925 926 927 928 929 92a 92b 92c 92d 92e 92f 930 931
+932 933 a80 a81 a82 a83 a84 a85 a86 a87 de1 de2 de3 de4 de5 de6
+de7 de8 de9 dea ece ecf ed0 ed1 ed2 ed3 ed4 ed5 f4e f50 f51 f52
+f54 f55 f57 10bf
+
+group char-knuckles-mirror
+# from character 32, Gems OBJ_KCS2
+2e2 2ea 3b0 3b1 3b2 603 604 605 606 7c6 7c7 7c8 7c9 7ca 7cb 7cc
+7cd 7ce 7cf 7d0 7d1 7d2 7d3 7d4 7d5 7d6 891 894 895 896 897 a21
+a22 a23 a24 a25 a26 a27 a28 afd c48 c49 c4a c4b c4c c4d e11 e12
+e13 e14 e15 e16 e17 e18 e19 e1a e1b e1c f73 f75 f76 f77 f79 f7a
+f7c f7d f7e f7f f80 10d1 10d2 10d3 10d4 10d5
+
+group char-espio-mirror
+# from character 33, Gems OBJ_ESP2
+39a 5bc 5bd 5ca 5cb 5cc 5cd 5ce 748 749 74a 74b 74c 74d 74e 74f
+750 751 752 753 754 755 756 757 758 759 75a 75b 75c 75d 75e 75f
+760 98c afb b27 b28 c83 c84 c85 c86 c87 c88 c89 c8a c8b c8c c8d
+c8e c8f c90 c91 c94 c95 c96 c97 f58 f5a f5b f5c f5e f5f f61 f62
+f63 10c0 10c1 10c2 10c3 10c4 10c5 10c6 10c7 10c8 10c9 10ca 10cb 10cc 10cd 10ce
+10cf 10d0
+
+group char-bean-mirror
+# from character 36, Gems OBJ_BIN2
+398 777 783 784 785 786 788 789 78a 78b 78e 78f 790 791 792 793
+794 795 796 797 798 799 79a 79b 79c 79d 79e 79f 7a0 7a1 a13 a14
+a15 a16 a17 a18 a19 a1a a1b a1c a1d a1e a1f a20 a7e a7f afa b25
+b26 cfd cfe f42 f43 f44 f46 f47 f48 f4a f4b f4d 10bb 10bc 10bd 10be
+10d6
+
+group char-honey-mirror
+# from character 41
+7c1 7c2 7c3 7c4 8d8 8de aa8 aa9 aaa aab aac aad aae aaf ab0 ab1
+ab2 ab3 ab8 abc ae0 ae1 ae2 ae3 ae4 ae5 ae6 ae7 ae8 ae9 aea aeb
+af0 af1 af2 af3 ded dee
+
+group adv
+# from Gems OBJ_ADV
+04f 055 056 057 058 0df 0e8 0e9 0ea 0eb 0ec 0f2 0f3 0f4 0f5 0f6
+0f7 0f8 0f9 0fa 0fb 348 349 34a 34b 34c 34d 34e 34f 350 351 352
+353 354 355 4b1 6da 6de 737 738 739 73a 73b 73c 73d 73e 73f 740
+741 742 743 744 a79 b7f b80 ba5 ba6 ba7 ba8 ba9 baa bab bac bad
+bae baf d05 d17 d2f d30 d31 d32 d33 d34 d35 d36 d37 d38 d39 d3a
+d3b d3c d3d d3e d3f d40 d41 d42 d43 d44 d45 d46 d47 d48 d49 d4a
+d4b d4c d4d d81 d82 d83 d84 d85 d86 d87 d88 d89 d8a d8b d8c d8d
+d8e d8f d90 dd9 eb9 eba ebb f0b f0c f0d f9b f9c f9d f9e f9f fa0
+fa1 fa2
+
+group demo1
+# from Gems OBJ_DEMO1
+325 326 8fc 8fd 8fe 8ff 900 906 934 935 936 937 938 939 93a 93b
+93c a66 a67 a68 a69 a6a a6b a6c a6d a70 a71 a72 a73 a74 a75 a76
+a77 a78
+
+group ending1
+# from Gems OBJ_ENDING1
+356 357 358 359 138a 138b 138c 138d 138e 138f 1390 1391 1392 1393 1394 1395
+1396 1397 1398 1399 139a 139b 139c 139d 139e 139f 13a0 13a1 13a2 13a3 13a4 13a5
+13a6 13a7 13a8 13a9 13aa 13ab 13ac 13ad 13ae 13af 13b0 13b1 13b2 13b3 13b4 13b5
+13b6 13b7 13b8 13b9 13d7

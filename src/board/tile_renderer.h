@@ -225,7 +225,8 @@ static inline void s24_draw_line(const uint16_t *w, const uint8_t *gfx, int t, i
  * A pixel of tilemap l at (x - h, y + vy) & 511 is cell ((y + vy) >> 3, (x - h)
  * >> 3)'s pixel ((x - h) & 7, (y + vy) & 7). The line's window-mask words and
  * split are fixed per line; a cell's row of eight pixels is decoded once when
- * the pixel walk enters the cell, and a cell that cannot draw in this pass
+ * the walk enters the cell, the walk goes a run at a time (to the next cell
+ * edge, mask group or split), and a cell that cannot draw in this pass
  * (wrong category, or blank -- most of a HUD layer) is stepped over whole.
  * tests/tile_test.c holds it to the pixel-by-pixel original. */
 static inline void s24_draw_tilemap(const uint16_t *w, const uint8_t *gfx, int t, int cat, bool opaque,
@@ -310,9 +311,10 @@ static inline void tile_dirty_mark_cell(tile_dirty_t *d, const uint16_t *w, int 
  * scroll word redraws its line, a window mask word its 128-pixel span of the
  * line, a tilemap cell where it shows. Words the compositor never reads change
  * nothing. */
-static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const uint16_t *cur) {
-    for (int i = 0; i < TILE_SNAP_WORDS && !d->full; i += 64) {
-        int n = TILE_SNAP_WORDS - i < 64 ? TILE_SNAP_WORDS - i : 64;
+static inline void tile_dirty_find_range(tile_dirty_t *d, const uint16_t *old, const uint16_t *cur,
+                                         int i0, int i1) {
+    for (int i = i0; i < i1 && !d->full; i += 64) {
+        int n = i1 - i < 64 ? i1 - i : 64;
         if (!memcmp(old + i, cur + i, (size_t)n * sizeof *cur)) continue;
         for (int wi = i; wi < i + n; wi++) {
             if (old[wi] == cur[wi]) continue;
@@ -333,6 +335,10 @@ static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const u
             }
         }
     }
+}
+
+static inline void tile_dirty_find(tile_dirty_t *d, const uint16_t *old, const uint16_t *cur) {
+    tile_dirty_find_range(d, old, cur, 0, TILE_SNAP_WORDS);
 }
 
 /* ---- The CPU compositor --------------------------------------------------- */

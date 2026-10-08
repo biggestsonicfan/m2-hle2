@@ -269,7 +269,10 @@ static int sfc_hook_honey_eyes(i960_cpu_t *cpu, memory_bus_t *bus) {
 /* [45] get_frame_dat+0x140 (0x30608): the motion blend, r11 the delta the
  * weight multiplies, r12 the loop count down from 24. The head tilt is the
  * delta at counts 7..9 (elements 15-17); it is zeroed, then the multiply runs.
- * The DLL does this for every character, and so does this profile. */
+ * The DLL does this for every character, and so does this profile.
+ * Gems' C for get_frame_dat calls this too, with r10-r12 as the loop holds
+ * them (gems_inner, core/gems.h): keep it to those registers, or the trap
+ * has to go back to the i960 for this profile. */
 static int sfc_hook_head_tilt(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)bus;
     if (cpu->locals.r[12] - 7u < 3u) cpu->locals.r[11] = 0;

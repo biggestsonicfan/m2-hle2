@@ -31,7 +31,11 @@
 #endif
 
 #include "log.h"
+/* M2HLE_NO_ZIP: a build that never opens a zip (the Dreamcast reads straight
+ * ROM files off its disc) leaves miniz out; the zip readers then find nothing. */
+#ifndef M2HLE_NO_ZIP
 #include "miniz.h"
+#endif
 
 /* ---- File / zip extraction ---------------------------------------------- */
 
@@ -97,6 +101,10 @@ static inline void rl_mem_zip_note_missing(const char *filename) {
 }
 
 static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, uint32_t expected_crc) {
+#ifdef M2HLE_NO_ZIP
+    (void)filename; (void)out_size; (void)expected_crc;
+    return NULL;
+#else
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_mem(&zip, g_rl_mem_zip.data, g_rl_mem_zip.size, 0)) return NULL;
@@ -113,6 +121,7 @@ static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, u
         data = mz_zip_reader_extract_file_to_heap(&zip, filename, out_size, MZ_ZIP_FLAG_IGNORE_PATH);
     mz_zip_reader_end(&zip);
     return (uint8_t *)data;
+#endif
 }
 
 /* crc (optional) gets the file's CRC-32 as the zip's directory records it. That
@@ -123,6 +132,10 @@ static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, u
  * time a desktop build took to load STF. */
 static inline uint8_t *zip_extract(const char *zippath, const char *filename,
                                    size_t *out_size, uint32_t *crc) {
+#ifdef M2HLE_NO_ZIP
+    (void)zippath; (void)filename; (void)out_size; (void)crc;
+    return NULL;
+#else
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_file(&zip, zippath, 0)) return NULL;
@@ -135,6 +148,7 @@ static inline uint8_t *zip_extract(const char *zippath, const char *filename,
     }
     mz_zip_reader_end(&zip);
     return (uint8_t *)data;
+#endif
 }
 
 /* Try the child zip first (e.g. sfight.zip), fall back to the parent

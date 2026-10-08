@@ -30,11 +30,86 @@
 #include "log.h"
 #include "memory.h"         /* mem_read8 / mem_read32 */
 
+/* Lap marks for a target's own timing of the cached draw (the Dreamcast's
+ * dreamcast/dc_scansplit.h, make SCANSPLIT=1): each charges the time since
+ * the last to its part. Nothing unless the target defines them. */
+#ifndef GEO3D_LAP_N
+#define GEO3D_LAP_START()   ((void)0)
+#define GEO3D_LAP_N(p, cnt) ((void)0)
+#endif
+#define GEO3D_LAP(p) GEO3D_LAP_N(p, 1)
+/* Counters of the Dreamcast's face loop's branches (dc_scansplit.h, make FACECOUNT=1). */
+#ifndef GEO3D_FC
+#define GEO3D_FC(k)        ((void)0)
+#define GEO3D_FC_IF(k, c)  ((void)0)
+#define GEO3D_FCI(k)       ((void)0)
+#define GEO3D_FCI_N(k, c)  ((void)0)
+#define GEO3D_FC_ON(v)     ((void)0)
+#endif
+/* FACESTOP=1 (the Dreamcast's make FACESTOP=1, Pinboard #539): the face loop runs
+ * up to and through the board cull for every face and then stops, before the
+ * colour, light, diagonal and submit. A measurement, not a picture: the cull's
+ * result and the flat key's z are folded into a running xor that goes out to a
+ * volatile once per model, so the compiler cannot drop them. */
+#ifndef GEO3D_FACESTOP
+#define GEO3D_FACESTOP 0
+#endif
+/* TAILHALF=1 (make TAILHALF=1, Pinboard #540): the same, one step on. A face
+ * that is drawn still gets its palette colour, luma (specular and texture LOD
+ * included) and diagonal, and then stops before geo3d_dc_sface: no colour
+ * memo, texture, strip put or z key. Those results go into the running xor. */
+#ifndef GEO3D_TAILHALF
+#define GEO3D_TAILHALF 0
+#endif
+/* STRIPSTOP=1 (make STRIPSTOP=1, Pinboard #541): one step further. A drawn face
+ * also gets its texture (dp_tex_key, dp_tex_get on a miss) and its colour
+ * (dp_face_col, dp_face_colour on a miss), and then stops: no strip put, no z
+ * key. What the two found goes into the running xor. */
+#ifndef GEO3D_STRIPSTOP
+#define GEO3D_STRIPSTOP 0
+#endif
+/* ZKEYSTOP=1 (make ZKEYSTOP=1, Pinboard #542): the drawn face goes through
+ * geo3d_dc_sface whole, lookups and strip put included, with key 0 where
+ * geo3d_board_zkey's key went. The record and its sort word are still stored;
+ * the flat key's z, which only the z key read, goes into the running xor. */
+#ifndef GEO3D_ZKEYSTOP
+#define GEO3D_ZKEYSTOP 0
+#endif
+/* COLOURSTOP=1 (make COLOURSTOP=1, Pinboard #544): STRIPSTOP without the colour.
+ * A drawn face gets its texture (dp_tex_key, dp_tex_get on a miss) and stops:
+ * no dp_face_col, strip put or z key. The texture it found goes into the
+ * running xor with TAILHALF's words. */
+#ifndef GEO3D_COLOURSTOP
+#define GEO3D_COLOURSTOP 0
+#endif
+/* FACECOLSTOP=1 (make FACECOLSTOP=1, Pinboard #546): COLOURSTOP plus dp_face_col's
+ * memo compare. A drawn face gets its texture and the compare; a hit reads the
+ * memo's colour, a miss keeps the memo's inputs but calls no dp_face_colour.
+ * No strip put or z key. The texture and what the compare gave (the memo's
+ * colour, or the key that missed) go into the running xor with TAILHALF's words. */
+#ifndef GEO3D_FACECOLSTOP
+#define GEO3D_FACECOLSTOP 0
+#endif
+/* RAMPSTOP=1 (make RAMPSTOP=1, Pinboard #547): STRIPSTOP, but a miss in
+ * dp_face_ramp's cache (dc_pvr.h) walks no ramp and picks no bank: it stores
+ * the key with the key as its base and offset, so the same faces hit, and those
+ * reach the running xor through the colour memo's words. */
+#ifndef GEO3D_RAMPSTOP
+#define GEO3D_RAMPSTOP 0
+#endif
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP || GEO3D_RAMPSTOP
+static volatile uint32_t g_geo3d_facestop_sink;
+#endif
+
 /* ---- Capacities ---------------------------------------------------------- */
 
 #define MAX_GEO_MODELS     512
 #define GEO3D_DIRECT_WORDS 16384u
+/* The line and triangle buffers a frame is decoded into. A small target sets
+ * both lower (the Dreamcast draws no lines and flushes per run). */
+#ifndef GEO3D_MAX_LINES
 #define GEO3D_MAX_LINES    32768
+#endif
 #define MODEL_LOOKUP_SIZE  8192
 #define MODEL_ENTRY_SIZE   16
 #define VERTEX_PAIR_SIZE   40
@@ -75,6 +150,13 @@ static inline uint32_t read_u32_le(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* A host whose ROM is paged in software (the Dreamcast) maps a pointer into its
+ * window to the bytes there; the result is good until the next call. */
+#ifndef GEO3D_ROM
+#define GEO3D_ROM(p, n) ((const uint8_t *)(p))
+#endif
+static inline uint32_t geo3d_rom16(const uint8_t *p) { p = GEO3D_ROM(p, 2); return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
+
 static inline float u32_as_float(uint32_t u) {
     float f;
     memcpy(&f, &u, 4);
@@ -89,6 +171,38 @@ static inline vec3_t apply_matrix(vec3_t v, const float *m) {
     r.z = m[8]*v.x + m[9]*v.y + m[10]*v.z + m[11];
     return r;
 }
+
+#if defined(GEO3D_DC_SINK) && (defined(__SH4__) || defined(__SH4_SINGLE__) || defined(__SH4_SINGLE_ONLY__))
+/* The SH-4's FTRV: XMTRX (the back bank) times fv0 in one instruction, for the
+ * corners and the view planes. Nothing between the load and the last FTRV may
+ * call out: the drawing only, the board's state never sees these. */
+#define GEO3D_FTRV 1
+/* c: 16 floats, column by column, 8-byte aligned. */
+static inline void geo3d_xmtrx_load(const float *c) {
+    __asm__ __volatile__(
+        "fschg\n\t"
+        "fmov.d @%0+, xd0\n\t"  "fmov.d @%0+, xd2\n\t"  "fmov.d @%0+, xd4\n\t"  "fmov.d @%0+, xd6\n\t"
+        "fmov.d @%0+, xd8\n\t"  "fmov.d @%0+, xd10\n\t" "fmov.d @%0+, xd12\n\t" "fmov.d @%0+, xd14\n\t"
+        "fschg\n"
+        : "+r"(c) : : "memory");
+}
+/* XMTRX * (x, y, z, w) into o[0..3]. */
+static inline void geo3d_ftrv(float x, float y, float z, float w, float *o) {
+    register float f0 __asm__("fr0") = x;
+    register float f1 __asm__("fr1") = y;
+    register float f2 __asm__("fr2") = z;
+    register float f3 __asm__("fr3") = w;
+    __asm__ __volatile__("ftrv xmtrx, fv0" : "+f"(f0), "+f"(f1), "+f"(f2), "+f"(f3));
+    o[0] = f0; o[1] = f1; o[2] = f2; o[3] = f3;
+}
+/* A board matrix (3 rows of 4) as XMTRX. */
+static inline void geo3d_xmtrx_board(const float *m) {
+    float c[16] __attribute__((aligned(8))) = {
+        m[0], m[4], m[8],  0.0f,  m[1], m[5], m[9],  0.0f,
+        m[2], m[6], m[10], 0.0f,  m[3], m[7], m[11], 1.0f };
+    geo3d_xmtrx_load(c);
+}
+#endif
 
 /* ---- Decal quad cut ------------------------------------------------------
  * A decal on this board is not a face floating in front of a surface: it is
@@ -113,26 +227,42 @@ static inline vec3_t apply_matrix(vec3_t v, const float *m) {
  * the J = 0.990 that tool first measured was this rule and nothing else. */
 #define GEO3D_SPLIT_SLOTS 8192u   /* power of two, > 2 × GEO3D_IA_MAX_VPS */
 
+/* floor(c * 4096 + 0.5) as int32, without the double floor (a library call on
+ * the SH-4, a tenth of its frame there). c * 4096 is exact in float; its
+ * integer part truncates and the fraction left is exact, so rounding half up
+ * from those two is the double expression's value. Out of int32's range (and
+ * NaN) it takes the double path as before. */
+static inline int32_t geo3d_round4096(float c) {
+    const float y = c * 4096.0f;
+    if (fabsf(y) < 1073741824.0f) {
+        const int32_t i = (int32_t)y;
+        const float fr = y - (float)i;
+        return i + (fr >= 0.5f) - (fr < -0.5f);
+    }
+    return (int32_t)floor((double)c * 4096.0 + 0.5);
+}
+
 static inline uint32_t geo3d_corner_key(vec3_t p) {
     const float c[3] = { p.x, p.y, p.z };
     uint32_t h = 2166136261u;
     for (int a = 0; a < 3; a++) {
-        uint32_t q = (uint32_t)(int32_t)floor((double)c[a] * 4096.0 + 0.5);
+        uint32_t q = (uint32_t)geo3d_round4096(c[a]);
         h = (h ^ (q & 0xffffu)) * 16777619u;
         h = (h ^ ((q >> 16) & 0xffffu)) * 16777619u;
     }
     return h;
 }
 
+/* A slot's three words side by side: as three arrays 32 KB apart they fell on
+ * the same line of the SH-4's direct-mapped cache, three misses a lookup. */
+typedef struct { uint32_t stamp, quad, cut; } geo3d_split_slot_t;
 static uint32_t g_geo3d_split_gen;
-static uint32_t g_geo3d_split_stamp[GEO3D_SPLIT_SLOTS];
-static uint32_t g_geo3d_split_quad[GEO3D_SPLIT_SLOTS];
-static uint32_t g_geo3d_split_cut[GEO3D_SPLIT_SLOTS];
+static geo3d_split_slot_t g_geo3d_split[GEO3D_SPLIT_SLOTS];
 
 /* Forget every quad seen so far — once per model. */
 static inline void geo3d_split_reset(void) {
     if (++g_geo3d_split_gen == 0) {
-        memset(g_geo3d_split_stamp, 0, sizeof g_geo3d_split_stamp);
+        for (uint32_t i = 0; i < GEO3D_SPLIT_SLOTS; i++) g_geo3d_split[i].stamp = 0;
         g_geo3d_split_gen = 1;
     }
 }
@@ -141,13 +271,13 @@ static inline void geo3d_split_reset(void) {
  * The first sighting records its cut and answers false. */
 static inline bool geo3d_split_other_way(uint32_t quad, uint32_t cut) {
     uint32_t i = (quad * 2654435761u) & (GEO3D_SPLIT_SLOTS - 1u);
-    while (g_geo3d_split_stamp[i] == g_geo3d_split_gen) {
-        if (g_geo3d_split_quad[i] == quad) return g_geo3d_split_cut[i] != cut;
+    while (g_geo3d_split[i].stamp == g_geo3d_split_gen) {
+        if (g_geo3d_split[i].quad == quad) return g_geo3d_split[i].cut != cut;
         i = (i + 1u) & (GEO3D_SPLIT_SLOTS - 1u);
     }
-    g_geo3d_split_stamp[i] = g_geo3d_split_gen;
-    g_geo3d_split_quad[i]  = quad;
-    g_geo3d_split_cut[i]   = cut;
+    g_geo3d_split[i].stamp = g_geo3d_split_gen;
+    g_geo3d_split[i].quad  = quad;
+    g_geo3d_split[i].cut   = cut;
     return false;
 }
 
@@ -247,7 +377,9 @@ static inline void geo3d_lines_reset(void) { g_geo3d_lines.count = 0; }
 
 /* ---- Solid triangle buffer ----------------------------------------------- */
 
+#ifndef GEO3D_MAX_TRIS
 #define GEO3D_MAX_TRIS GEO3D_MAX_LINES
+#endif
 
 typedef struct {
     float x0, y0, z0,  u0, v0;   /* u,v = tile-relative texel (may run past the tile) */
@@ -397,11 +529,29 @@ static int   g_geo3d_cull_on;          /* planes set for the run being decoded *
 static float g_geo3d_cull_plane[5][4];
 static float g_geo3d_cull_nlen[5];       /* |xyz| of each plane */
 
+#ifdef GEO3D_FTRV
+/* geo3d_cull_code with planes 0-3's distances from FTRV (XMTRX: those planes,
+ * row by row), in d. */
+static inline unsigned geo3d_cull_bit(const float *q, vec3_t p, float d, unsigned k) {
+    if (!(d < 0.0f)) return 0;
+    float m = 1.0e-5f * (fabsf(q[0] * p.x) + fabsf(q[1] * p.y) + fabsf(q[2] * p.z) + fabsf(q[3]));
+    return d < -m ? 1u << k : 0u;
+}
+/* Unrolled: the loop and its select were most of a corner's cost. */
+static inline uint8_t geo3d_cull_code_d(vec3_t p, const float *d4) {
+    const float (*q)[4] = g_geo3d_cull_plane;
+    return (uint8_t)(geo3d_cull_bit(q[0], p, d4[0], 0) | geo3d_cull_bit(q[1], p, d4[1], 1) |
+                     geo3d_cull_bit(q[2], p, d4[2], 2) | geo3d_cull_bit(q[3], p, d4[3], 3) |
+                     geo3d_cull_bit(q[4], p, q[4][0] * p.x + q[4][1] * p.y + q[4][2] * p.z + q[4][3], 4));
+}
+#endif
+
 static inline uint8_t geo3d_cull_code(vec3_t p) {
     uint8_t code = 0;
     for (int k = 0; k < 5; k++) {
         const float *q = g_geo3d_cull_plane[k];
         float d = q[0] * p.x + q[1] * p.y + q[2] * p.z + q[3];
+        if (!(d < 0.0f)) continue;   /* m >= 0, so only a negative d can be out */
         float m = 1.0e-5f * (fabsf(q[0] * p.x) + fabsf(q[1] * p.y) + fabsf(q[2] * p.z) + fabsf(q[3]));
         if (d < -m) code |= (uint8_t)(1u << k);
     }
@@ -409,21 +559,23 @@ static inline uint8_t geo3d_cull_code(vec3_t p) {
 }
 
 static inline uint32_t geo3d_board_zkey(float z);
-static inline float geo3d_flat_depth(const vec3_t *sv, const int *zsrc, uint32_t zmode) {
+/* The depth the board keys the face by, carried in g_geo3d_flat_prev_z: every
+ * face in order must pass through here, drawn or not. */
+static inline float geo3d_flat_z(const vec3_t *sv, const int *zsrc, uint32_t zmode) {
     float z;
     if (zmode == 0u)      z = g_geo3d_flat_prev_z;
     else if (zmode == 3u) z = 1.0e10f;
-    else {
-        float lo = -sv[zsrc[0]].z, hi = lo;
-        for (int i = 1; i < 4; i++) {
-            float c = -sv[zsrc[i]].z;
-            if (c < lo) lo = c;
-            if (c > hi) hi = c;
-        }
-        z = zmode == 2u ? hi : lo;
+    else {   /* view z runs negative ahead: mode 2 takes the farthest corner, mode 1 the nearest */
+        float a = sv[zsrc[0]].z, b = sv[zsrc[1]].z, c = sv[zsrc[2]].z, d = sv[zsrc[3]].z;
+        if (zmode == 2u) { if (b < a) a = b; if (c < a) a = c; if (d < a) a = d; }
+        else             { if (b > a) a = b; if (c > a) a = c; if (d > a) a = d; }
+        z = -a;
     }
     g_geo3d_flat_prev_z = z;
-    return ((float)geo3d_board_zkey(z) + 0.5f) * (1.0f / 65536.0f);
+    return z;
+}
+static inline float geo3d_flat_depth(const vec3_t *sv, const int *zsrc, uint32_t zmode) {
+    return ((float)geo3d_board_zkey(geo3d_flat_z(sv, zsrc, zmode)) + 0.5f) * (1.0f / 65536.0f);
 }
 
 /* The bound, applied per vertex so the slope of a polygon lying along the view
@@ -567,8 +719,14 @@ static inline float geo3d_face_fill_flags(float fl) {
     return (float)f;
 }
 
+/* The buffer's size, GEO3D_MAX_TRIS unless a port takes its faces elsewhere
+ * (GEO3D_DC_SINK) and needs none of it. */
+#ifndef GEO3D_TRI_BUF
+#define GEO3D_TRI_BUF GEO3D_MAX_TRIS
+#endif
+
 typedef struct {
-    geo3d_tri_t tris[GEO3D_MAX_TRIS];
+    geo3d_tri_t tris[GEO3D_TRI_BUF];
     int         count;
 } geo3d_tri_buf_t;
 
@@ -603,6 +761,22 @@ static float g_geo_flat_boost = 2.0f;
 
 static inline void geo3d_tris_reset(void) { g_geo3d_tri_sink->count = 0; }
 
+#ifdef GEO3D_DC_SINK
+/* The Dreamcast's faces go straight into its own compact records
+ * (dreamcast/dc_pvr.h), not geo3d_tri_t: a mesh's corners are projected once
+ * into a pool (geo3d_dc_verts, -1 when it is full) and a face is three of
+ * them (geo3d_dc_tri); geo3d_dc_tri_xyz is a face with corners of its own. */
+static int  geo3d_dc_verts(const vec3_t *tv, int n);
+static void geo3d_dc_tri(int a, int b, int c, float ua, float va, float ub, float vb, float uc, float vc,
+                         float r, float g, float b_, float tx, float ty, float tw, float th,
+                         float lb, float pl, float fl);
+static void geo3d_dc_tri_xyz(float x0, float y0, float z0, float u0, float v0,
+                             float x1, float y1, float z1, float u1, float v1,
+                             float x2, float y2, float z2, float u2, float v2,
+                             float r, float g, float b, float tx, float ty, float tw, float th,
+                             float lb, float pl, float fl);
+#endif
+
 /* Emit a textured triangle: per-vertex position + tile-relative texel UV, the
  * atlas tile rect (tx,ty,tw,th in pixels), plus a flat color.  The shader wraps
  * the interpolated UV within [0,tw)x[0,th) per-pixel before sampling the atlas;
@@ -613,7 +787,7 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
                                       float r,  float g,  float b,
                                       float tx, float ty, float tw, float th,
                                       float lb, float pl, float fl) {
-    if (g_geo3d_tri_sink->count >= GEO3D_MAX_TRIS) return;
+    if (g_geo3d_tri_sink->count >= GEO3D_TRI_BUF) return;
     /* Homebrew (camera-space) near-plane reject: a face with any vertex closer than
      * GEO3D_NEAR_CULL blows up into a huge filled wedge across the screen.  Drop it —
      * legitimate scene geometry sits well in front (claw at z≈−9). Gated to the
@@ -633,6 +807,13 @@ static inline void geo3d_emit_tri_uv(float x0, float y0, float z0, float u0, flo
             if ((mxx - mnx) > 1.5f || (mxy - mny) > 1.5f) return;
         }
     }
+#ifdef GEO3D_DC_SINK
+    if (g_geo3d_tri_sink == &g_geo3d_tris) {
+        geo3d_dc_tri_xyz(x0, y0, z0, u0, v0, x1, y1, z1, u1, v1, x2, y2, z2, u2, v2,
+                         r, g, b, tx, ty, tw, th, lb, pl, fl);
+        return;
+    }
+#endif
     geo3d_tri_t *T = &g_geo3d_tri_sink->tris[g_geo3d_tri_sink->count++];
     T->x0=x0; T->y0=y0; T->z0=z0; T->u0=u0; T->v0=v0;
     T->x1=x1; T->y1=y1; T->z1=z1; T->u1=u1; T->v1=v1;
@@ -825,7 +1006,7 @@ static inline void geo3d_lookup_build(const uint8_t *main_data, size_t main_data
 
     for (uint32_t m = 0; m < table_count && g_geo3d_lookup.count < MODEL_LOOKUP_SIZE; m++) {
         uint32_t toff = table_off + m * MODEL_ENTRY_SIZE;
-        uint32_t pol  = read_u32_le(main_data + toff + 8);
+        uint32_t pol  = read_u32_le(GEO3D_ROM(main_data + toff + 8, 4));
         if (pol != 0) {
             g_geo3d_lookup.pol_ptrs[g_geo3d_lookup.count]  = pol;
             g_geo3d_lookup.model_idx[g_geo3d_lookup.count] = (int)m;
@@ -947,7 +1128,7 @@ static inline void geo3d__dl_object(geo3d_dl_walk_t *w, uint32_t p) {
     captured_model_t *cm = &geo->captured[geo->captured_count];
     memset(cm, 0, sizeof(*cm));
     cm->model_idx    = model_idx;
-    cm->material_ptr = read_u32_le(w->main_data + toff + 4);
+    cm->material_ptr = read_u32_le(GEO3D_ROM(w->main_data + toff + 4, 4));
     geo3d__dl_object_color(w, p, cm);
     cm->dbg_mesh_ptr = oba;
     if (w->have_mat) {
@@ -1085,6 +1266,9 @@ static int            g_geo3d_nn_normals  = 1;
  * flattens the fighter onto the floor. A ROM normal put through that matrix
  * says nothing about which way the flattened face points, so the rear test
  * dropped faces at random, most visibly Knuckles' dreadlocks at select. */
+#ifndef GEO3D_RSQRTF
+#define GEO3D_RSQRTF(x) (1.0f / sqrtf(x))
+#endif
 static inline vec3_t geo3d_board_normal(const float *matrix, vec3_t fn, bool has_c,
                                         vec3_t A, vec3_t B, vec3_t C) {
     vec3_t n;
@@ -1094,8 +1278,8 @@ static inline vec3_t geo3d_board_normal(const float *matrix, vec3_t fn, bool has
         n.x = -(e1y * e2z - e1z * e2y);
         n.y = -(e1z * e2x - e1x * e2z);
         n.z = -(e1x * e2y - e1y * e2x);
-        float len = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
-        if (len != 0.0f) { float k = 1.0f / len; n.x *= k; n.y *= k; n.z *= k; }
+        float l2 = n.x * n.x + n.y * n.y + n.z * n.z;
+        if (l2 != 0.0f) { float k = GEO3D_RSQRTF(l2); n.x *= k; n.y *= k; n.z *= k; }
         return n;
     }
     n.x = matrix[0]*fn.x + matrix[1]*fn.y + matrix[2]*fn.z;
@@ -1114,7 +1298,7 @@ static inline bool geo3d_tex_word(const uint8_t *rom, size_t rom_size, uint32_t 
     if (addr & 0x800000u) { *out = g_geo_rs->texram[addr & 0xFFFFu]; return true; }
     size_t b = (size_t)addr * 2u;
     if (!rom || b + 2 > rom_size) return false;
-    *out = (uint16_t)(rom[b] | (rom[b + 1] << 8));
+    *out = (uint16_t)geo3d_rom16(rom + b);
     return true;
 }
 
@@ -1143,12 +1327,14 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
     if (!main_data || !words) return false;
     geo3d_lookup_build(main_data, main_data_size, table_off, table_count);
 
+#ifndef GEO3D_DC_SINK   /* the Dreamcast draws no in-between frames */
     if (g_cop.geo_frame_end != geo->last_frame_end) {
         memcpy(geo->captured_prev, geo->captured,
                (size_t)geo->captured_count * sizeof(captured_model_t));
         geo->captured_prev_count = geo->captured_count;
         geo->last_frame_end      = g_cop.geo_frame_end;
     }
+#endif
 
     #define GEOL_S12(v) ((int16_t)(((v) & 0x800) ? (int)(v) - 0x1000 : (int)(v)))
     float    raw[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };   /* column-major, as the COP wrote it */
@@ -1209,7 +1395,7 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo,
                 memset(cm, 0, sizeof *cm);
                 cm->model_idx    = model_idx;                  /* -1: polygon RAM, see oba */
                 if (model_idx >= 0) {
-                    cm->material_ptr = read_u32_le(main_data + table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE + 4);
+                    cm->material_ptr = read_u32_le(GEO3D_ROM(main_data + table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE + 4, 4));
                     material_ptr_to_color(cm->material_ptr, &cm->color[0], &cm->color[1], &cm->color[2]);
                 } else {
                     cm->color[0] = cm->color[1] = cm->color[2] = 0.7f;
@@ -1344,13 +1530,13 @@ static inline bool geo3d_model_streams(const geo3d_models_t *md, int model_idx,
     if (model_idx < 0 || (uint32_t)model_idx >= md->table_count) return false;
     uint32_t toff = md->table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
     if ((size_t)toff + MODEL_ENTRY_SIZE > md->main_data_size) return false;
-    uint32_t mesh_ptr_raw = read_u32_le(md->main_data + toff + 8);
+    uint32_t mesh_ptr_raw = read_u32_le(GEO3D_ROM(md->main_data + toff + 8, 4));
     if (mesh_ptr_raw == 0) return false;
     *mesh_offset = mesh_ptr_raw * 4u - md->mesh_ptr_subtract + md->mesh_ptr_add;
     *mat_ptr = *uv_ptr = 0;
     if (md->materials) {
-        *mat_ptr = read_u32_le(md->main_data + toff + 4);   /* word address (bit 23: texture RAM) */
-        *uv_ptr  = read_u32_le(md->main_data + toff + 0);   /* word index; byte = *2 */
+        *mat_ptr = read_u32_le(GEO3D_ROM(md->main_data + toff + 4, 4));   /* word address (bit 23: texture RAM) */
+        *uv_ptr  = read_u32_le(GEO3D_ROM(md->main_data + toff + 0, 4));   /* word index; byte = *2 */
         if (g_geo3d_obj_tha != 0xFFFFFFFFu) *mat_ptr = g_geo3d_obj_tha;
         if (g_geo3d_obj_tpa != 0xFFFFFFFFu) *uv_ptr  = g_geo3d_obj_tpa;
     }
@@ -1418,7 +1604,7 @@ static inline void geo3d_ia_walk(geo3d_ia_t *ia, const uint8_t *polygons, size_t
         if ((size_t)mesh_offset + VERTEX_PAIR_SIZE > polygons_size) break;
         if (n_sv + 2 > GEO3D_IA_MAX_VERTS || n_idx + 4 > GEO3D_IA_MAX_IDX) break;
 
-        const uint8_t *vp = polygons + mesh_offset;
+        const uint8_t *vp = GEO3D_ROM(polygons + mesh_offset, VERTEX_PAIR_SIZE);
         bool is_end = (vp[24] == 0 && vp[25] == 0 && vp[26] == 0 && vp[27] == 0);
 
         vec3_t v1 = { read_float_le(vp + 0),  read_float_le(vp + 4),  -read_float_le(vp + 8) };
@@ -1546,7 +1732,7 @@ static inline void geo3d_palette_color(uint32_t matidx, const uint8_t *main_data
         uint16_t cw = (uint16_t)(g_geo3d_palram[ram] | (g_geo3d_palram[ram + 1] << 8)) & 0x7FFF;
         geo3d_bgr555(cw, r, g, b);
     } else if (main_data && (size_t)pal + 2 <= main_data_size) {
-        uint16_t cw = (uint16_t)main_data[pal] | ((uint16_t)main_data[pal + 1] << 8);
+        uint16_t cw = (uint16_t)geo3d_rom16(main_data + pal);
         geo3d_bgr555(cw, r, g, b);
     }
 }
@@ -1739,8 +1925,8 @@ static inline void geo3d_dump_tex_head(FILE *mtf, const geo3d_models_t *md, int 
         uint32_t te = md->table_off + (uint32_t)mi * MODEL_ENTRY_SIZE;
         if ((size_t)te + MODEL_ENTRY_SIZE > md->main_data_size) continue;
         fprintf(mtf, "# table[%d]: uv_ptr=%u mat_ptr=%u mesh_ptr=%u\n", mi,
-                read_u32_le(md->main_data + te + 0), read_u32_le(md->main_data + te + 4),
-                read_u32_le(md->main_data + te + 8));
+                read_u32_le(GEO3D_ROM(md->main_data + te + 0, 4)), read_u32_le(GEO3D_ROM(md->main_data + te + 4, 4)),
+                read_u32_le(GEO3D_ROM(md->main_data + te + 8, 4)));
     }
 }
 
@@ -1752,8 +1938,8 @@ static inline void geo3d_dump_tex_raw(FILE *mtf, const geo3d_models_t *md, uint3
     for (int w = 0; w < 48; w += 2) {
         long bo = ((long)uv_word + w) * 2;
         if (bo >= 0 && (size_t)bo + 4 <= md->materials_size) {
-            uint16_t v0 = (uint16_t)materials[bo]   | ((uint16_t)materials[bo+1] << 8);
-            uint16_t v1 = (uint16_t)materials[bo+2] | ((uint16_t)materials[bo+3] << 8);
+            uint16_t v0 = (uint16_t)geo3d_rom16(materials + bo);
+            uint16_t v1 = (uint16_t)geo3d_rom16(materials + bo + 2);
             fprintf(mtf, "  word %+3d (off %u): pv=%5u pu=%5u\n", w, uv_word + w, v0, v1);
         }
     }
@@ -2177,13 +2363,28 @@ static inline void geo3d_decode_direct(const uint32_t *w, uint32_t n,
  * dials and the texture dump. The wireframe lines are only built when they
  * will be drawn. */
 
+#ifndef GEO3D_MESH_CACHE_SLOTS
 #define GEO3D_MESH_CACHE_SLOTS 4096u   /* power of two */
+#endif
+/* The heap the cached meshes may hold before the cache starts over; 0: no
+ * bound but the slots. A desktop never reaches it; the Dreamcast's 16 MB does. */
+#ifndef GEO3D_MESH_CACHE_BYTES
+#define GEO3D_MESH_CACHE_BYTES 0u
+#endif
+/* Bytes of a block of its own that the cached meshes live in, in place of the
+ * heap; 0: the heap. A full block starts the cache over. On the Dreamcast the
+ * heap is what the ROM pager leaves, and a mesh cache on it ran out: the
+ * meshes that did not fit were decoded in full every draw, and the draws took
+ * twice as long (Pinboard #394). */
+#ifndef GEO3D_MESH_ARENA
+#define GEO3D_MESH_ARENA 0u
+#endif
 
 typedef struct {
     int32_t  ai, bi, ci, di;
     uint8_t  is_tri, has_c, has_qn, mat_ok;
     uint32_t qa;                 /* attribute word: texparam slot in bits 18..22 */
-    int32_t  zsrc[4];            /* the corners the board sorts this polygon by */
+    int      zsrc[4];            /* the corners the board sorts this polygon by */
     uint32_t zmode;              /* attribute bits 10..11, carried (geo3d_sort_z) */
     uint32_t split_quad, split_cut;
     uint32_t matidx;             /* colorbase, when mat_ok */
@@ -2191,12 +2392,92 @@ typedef struct {
     float    tx, ty, tw, th, lb, fl;
     float    uvu[4], uvv[4];
     uint16_t fi;                 /* its index in the face loop */
+#ifndef GEO3D_DC_SINK            /* the Dreamcast has no object viewer: 24 bytes a face less in its arena */
     uint16_t layer;              /* faces lying under this one in its plane (geo3d_mesh_layers) */
     uint8_t  has_plane;          /* plane is set: the face takes its depth from it */
     float    plane[4];           /* its group's plane in model space, n.p = d, |n| = 1 */
+#endif
 } geo3d_cface_t;
 
+#ifdef GEO3D_DC_SINK
+/* A cached face's triangles from the corner pool at v0 (cut 0: ABC; 1: ABC and
+ * BDC; 2: ABD and ADC), sharing one texture and colour; key: the board's flat
+ * key, or < 0 for each triangle's nearest corner. */
+static void geo3d_dc_face(int v0, const geo3d_cface_t *f, int cut, float r, float g, float b, float pl, int32_t key);
+#if GEO3D_STRIPSTOP || GEO3D_RAMPSTOP
+/* geo3d_dc_face's texture and colour lookups alone; returns what they found. */
+static uint32_t geo3d_dc_face_look(const geo3d_cface_t *f, float r, float g, float b, float pl);
+#endif
+#if GEO3D_COLOURSTOP
+/* geo3d_dc_face's texture lookup alone; returns the texture it found. */
+static uint32_t geo3d_dc_face_tex(const geo3d_cface_t *f);
+#endif
+#if GEO3D_FACECOLSTOP
+/* geo3d_dc_face's texture lookup and colour memo compare; returns what they gave. */
+static uint32_t geo3d_dc_face_memo(const geo3d_cface_t *f, float r, float g, float b, float pl);
+#endif
+#endif
+
+/* ---- Strip pack ------------------------------------------------------------------
+ * A cached mesh made offline (GEO3D_STRIPS; the Dreamcast's STRIPS.PAK, see
+ * dreamcast/dc_strips.h): the corners as geo3d_mesh_build leaves them, a
+ * smaller face per drawn face with its texture already found, and per face
+ * its corners' texture coordinates, already in the PVR texture's units, in
+ * strip order (A B C D). The draw still transforms, culls, lights and sorts;
+ * it reads no GEO stream, attribute, texture header or UV word. Blob:
+ * geo3d_sp_head_t, then sv (padded to 32), the faces, the corners' u, v. */
+#define GEO3D_SF_TRI      1u
+#define GEO3D_SF_HAS_C    2u
+#define GEO3D_SF_HAS_QN   4u
+#define GEO3D_SF_MAT_OK   8u
+#define GEO3D_SF_TEXTURED 16u
+enum { GEO3D_SL_OP, GEO3D_SL_PT, GEO3D_SL_TR };   /* opaque, punch-through (texel holes), translucent */
 typedef struct {
+    int32_t  model_idx;
+    uint32_t mat_ptr, uv_ptr;
+    uint16_t n_sv, n_faces;
+    float    bc[3], br;
+} geo3d_sp_head_t;
+typedef struct {
+    uint16_t ai, bi, ci, di;
+    uint16_t zsrc[4];
+    vec3_t   qn;
+    uint32_t qa;
+    uint32_t split_quad, split_cut;
+    uint32_t tex;                /* the PVR texture's key (dp_tex_get), after any 256 window; 0: none */
+    float    lb;
+    uint16_t matidx, fl;
+    uint16_t strip;              /* its first vertex: A B C (D), the strip for cut 1 */
+    uint8_t  bits, zmode, list, nv;
+    uint8_t  pad[6];
+} geo3d_sface_t;
+typedef struct {
+    float    u, v;               /* in the texture's [0, 1] */
+} geo3d_svert_t;
+_Static_assert(sizeof(geo3d_sp_head_t) == 32 && sizeof(geo3d_sface_t) == 64 && sizeof(geo3d_svert_t) == 8,
+               "strip pack records");
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+struct geo3d_cmesh;
+/* The port's: the mesh m names from its pack, into the arena at *at (at most
+ * room bytes). 1: loaded; 0: not in the pack; -1: no room. */
+static int geo3d_strips_load(struct geo3d_cmesh *m, uint8_t *at, size_t room);
+static void geo3d_dc_sface(int v0, const geo3d_sface_t *f, const geo3d_svert_t *s, int cut,
+                           float r, float g, float b, float pl, int32_t key);
+#if GEO3D_STRIPSTOP || GEO3D_RAMPSTOP
+/* geo3d_dc_sface's texture and colour lookups alone; returns what they found. */
+static uint32_t geo3d_dc_sface_look(const geo3d_sface_t *f, float r, float g, float b, float pl);
+#endif
+#if GEO3D_COLOURSTOP
+/* geo3d_dc_sface's texture lookup alone; returns the texture it found. */
+static uint32_t geo3d_dc_sface_tex(const geo3d_sface_t *f);
+#endif
+#if GEO3D_FACECOLSTOP
+/* geo3d_dc_sface's texture lookup and colour memo compare; returns what they gave. */
+static uint32_t geo3d_dc_sface_memo(const geo3d_sface_t *f, float r, float g, float b, float pl);
+#endif
+#endif
+
+typedef struct geo3d_cmesh {
     bool           used;
     int            model_idx;
     uint32_t       mat_ptr, uv_ptr;
@@ -2206,21 +2487,96 @@ typedef struct {
     vec3_t         bc;           /* a sphere round sv: centre and radius */
     float          br;
     geo3d_cface_t *faces;        /* only the faces that emit, in decode order */
+    const geo3d_sface_t *sfaces; /* or these, from the strip pack (faces NULL) */
+    const geo3d_svert_t *strips; /* their vertices */
     bool           ranked;       /* geo3d_mesh_layers has run (the object viewer asks for it) */
+    bool           failed;       /* out of memory when built: decoded in full until the cache starts over */
+    uint32_t       used_at;      /* g_geo3d_mesh_epoch when last drawn (GEO3D_MESH_ARENA) */
+    uint32_t       arena_len;    /* its bytes in the arena, sv first */
 } geo3d_cmesh_t;
 
 static int           g_geo3d_mesh_cache = 1;   /* 0: always run the full decoder */
 static geo3d_cmesh_t g_geo3d_meshes[GEO3D_MESH_CACHE_SLOTS];
 static unsigned      g_geo3d_mesh_count;
-static uint64_t      g_geo3d_mesh_hits, g_geo3d_mesh_builds;
+static size_t        g_geo3d_mesh_bytes;
+static uint64_t      g_geo3d_mesh_hits, g_geo3d_mesh_builds, g_geo3d_mesh_packed;
+#if GEO3D_MESH_ARENA
+static uint8_t       g_geo3d_arena[GEO3D_MESH_ARENA] __attribute__((aligned(32)));
+static size_t        g_geo3d_arena_used;
+#endif
 
+static unsigned g_geo3d_mesh_clears, g_geo3d_mesh_evicts;   /* times the cache started over, was thinned */
+static uint32_t g_geo3d_mesh_epoch;    /* a frame count, if the port keeps one (geo3d_mesh_cache_evict) */
 static inline void geo3d_mesh_cache_clear(void) {
+    g_geo3d_mesh_clears++;
+#if GEO3D_MESH_ARENA
+    g_geo3d_arena_used = 0;
+#else
     for (unsigned i = 0; i < GEO3D_MESH_CACHE_SLOTS; i++) {
         free(g_geo3d_meshes[i].sv);
         free(g_geo3d_meshes[i].faces);
     }
+#endif
     memset(g_geo3d_meshes, 0, sizeof g_geo3d_meshes);
     g_geo3d_mesh_count = 0;
+    g_geo3d_mesh_bytes = 0;
+}
+
+static inline uint32_t geo3d_mesh_hash(int model_idx, uint32_t mat_ptr, uint32_t uv_ptr) {
+    return ((uint32_t)model_idx * 2654435761u) ^ (mat_ptr * 40503u) ^ (uv_ptr * 2246822519u);
+}
+
+static inline geo3d_cmesh_t *geo3d_mesh_free_slot(uint32_t h) {
+    for (uint32_t probe = 0; probe < GEO3D_MESH_CACHE_SLOTS; probe++) {
+        geo3d_cmesh_t *e = &g_geo3d_meshes[(h + probe) & (GEO3D_MESH_CACHE_SLOTS - 1u)];
+        if (!e->used) return e;
+    }
+    return NULL;
+}
+
+/* A full arena (or table) drops the meshes not drawn this frame or the last
+ * and slides the rest down, rather than starting over: the frame's own meshes
+ * stay built. Needs the port to count frames (g_geo3d_mesh_epoch); false when
+ * nothing could go, and the caller starts over. */
+static bool geo3d_mesh_cache_evict(void) {
+#if GEO3D_MESH_ARENA
+    static geo3d_cmesh_t keep[GEO3D_MESH_CACHE_SLOTS];
+    unsigned n = 0, total = 0;
+    for (unsigned i = 0; i < GEO3D_MESH_CACHE_SLOTS; i++) {
+        const geo3d_cmesh_t *e = &g_geo3d_meshes[i];
+        if (!e->used) continue;
+        total++;
+        if (!e->failed && e->sv && e->used_at + 1u >= g_geo3d_mesh_epoch) {
+            /* in arena order (insertion, a few hundred at most) */
+            unsigned k = n++;
+            while (k && keep[k - 1].sv > e->sv) { keep[k] = keep[k - 1]; k--; }
+            keep[k] = *e;
+        }
+    }
+    if (n == total) return false;
+    memset(g_geo3d_meshes, 0, sizeof g_geo3d_meshes);
+    size_t at = 0, bytes = 0;
+    for (unsigned k = 0; k < n; k++) {
+        geo3d_cmesh_t *m = &keep[k];
+        uint8_t *src = (uint8_t *)m->sv;
+        ptrdiff_t d = (g_geo3d_arena + at) - src;
+        if (d) memmove(g_geo3d_arena + at, src, m->arena_len);
+        m->sv = (vec3_t *)(g_geo3d_arena + at);
+        if (m->faces)  m->faces  = (geo3d_cface_t *)((uint8_t *)m->faces + d);
+        if (m->sfaces) m->sfaces = (const geo3d_sface_t *)((const uint8_t *)m->sfaces + d);
+        if (m->strips) m->strips = (const geo3d_svert_t *)((const uint8_t *)m->strips + d);
+        at += m->arena_len;
+        bytes += m->sfaces ? m->arena_len : (size_t)m->n_sv * sizeof(vec3_t) + (size_t)m->n_faces * sizeof(geo3d_cface_t);
+        *geo3d_mesh_free_slot(geo3d_mesh_hash(m->model_idx, m->mat_ptr, m->uv_ptr)) = *m;
+    }
+    g_geo3d_arena_used = at;
+    g_geo3d_mesh_count = n;
+    g_geo3d_mesh_bytes = bytes;
+    g_geo3d_mesh_evicts++;
+    return true;
+#else
+    return false;
+#endif
 }
 
 /* ---- Faces lying on faces ---------------------------------------------------
@@ -2269,6 +2625,7 @@ typedef struct {
 
 static const int g_geo3d_layer_other[3][2] = { {1, 2}, {0, 2}, {0, 1} };
 
+#ifndef GEO3D_DC_SINK   /* the ranking below: the object viewer's, not the Dreamcast's */
 /* Andrew's monotone chain, counter-clockwise, as layers.js hull(). */
 static int geo3d_layer_hull(double (*p)[2], int n, double (*out)[2]) {
     for (int i = 1; i < n; i++) {                /* insertion sort: n <= 4 */
@@ -2675,6 +3032,7 @@ done:
     free(scratch);
     free(L); free(ord); free(ordered); free(E.bottom); free(E.top);
 }
+#endif
 
 /* The z-sort mode in force for the object being drawn (the display list's
  * command 08, captured_model_t.zadjust); set by the draw loop like g_geo3d_mode. */
@@ -2729,15 +3087,12 @@ static inline void geo3d_cface_fill(geo3d_cface_t *f, const geo3d_ia_t *ia, int 
     memcpy(f->uvv, uvv, 4 * sizeof *uvv);
 }
 
-/* The mesh's corners and faces into their own allocations, and its bounding
- * sphere. False when out of memory. */
+/* The mesh's corners into m->sv (already allocated, as m->faces is), and its
+ * bounding sphere. */
 static inline bool geo3d_mesh_keep(geo3d_cmesh_t *m, const vec3_t *sv, int n_sv,
-                                   const geo3d_cface_t *faces, int n_faces) {
-    m->sv    = malloc((size_t)(n_sv ? n_sv : 1) * sizeof(vec3_t));
-    m->faces = malloc((size_t)(n_faces ? n_faces : 1) * sizeof(geo3d_cface_t));
-    if (!m->sv || !m->faces) { free(m->sv); free(m->faces); m->sv = NULL; m->faces = NULL; return false; }
+                                   geo3d_cface_t *faces, int n_faces) {
     memcpy(m->sv, sv, (size_t)n_sv * sizeof(vec3_t));
-    memcpy(m->faces, faces, (size_t)n_faces * sizeof(geo3d_cface_t));
+    m->faces = faces;
     m->n_sv = n_sv;
     m->n_faces = n_faces;
     vec3_t lo = n_sv ? sv[0] : (vec3_t){ 0 }, hi = lo;
@@ -2760,12 +3115,27 @@ static inline bool geo3d_mesh_keep(geo3d_cmesh_t *m, const vec3_t *sv, int n_sv,
 static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
                                     bool have_mat, bool have_uv) {
     static geo3d_ia_t ia;
-    static geo3d_cface_t faces[GEO3D_IA_MAX_IDX / 4];
     const uint8_t *materials = m->md.materials;
     const size_t   materials_size = m->md.materials_size;
 
     geo3d_ia_walk(&ia, m->md.polygons, m->md.polygons_size, mesh_offset, NULL);
     const int n_sv = ia.n_sv;
+
+    /* The faces go straight to the heap, a block for one per index quad, cut
+     * to the ones that emit below: no 4096-face scratch in BSS (600 KB, which
+     * the Dreamcast's heap needs more). */
+    const int max_faces = ia.n_idx > 8 ? (ia.n_idx - 8 + 3) / 4 : 0;
+#if GEO3D_MESH_ARENA
+    /* the faces last, so that cutting them to the ones that emit gives the rest back */
+    const size_t sv_bytes = ((size_t)n_sv * sizeof(vec3_t) + 31u) & ~(size_t)31u;
+    if (g_geo3d_arena_used + sv_bytes + (size_t)max_faces * sizeof(geo3d_cface_t) > GEO3D_MESH_ARENA) return false;
+    m->sv = (vec3_t *)(g_geo3d_arena + g_geo3d_arena_used);
+    geo3d_cface_t *faces = (geo3d_cface_t *)(g_geo3d_arena + g_geo3d_arena_used + sv_bytes);
+#else
+    m->sv = malloc((size_t)(n_sv ? n_sv : 1) * sizeof(vec3_t));
+    geo3d_cface_t *faces = malloc((size_t)(max_faces ? max_faces : 1) * sizeof(geo3d_cface_t));
+    if (!m->sv || !faces) { free(m->sv); free(faces); m->sv = NULL; return false; }
+#endif
 
     uint32_t mat_word = m->mat_ptr, uv_word = m->uv_ptr, mat_rec = mat_word;
     int n_faces = 0;
@@ -2804,6 +3174,13 @@ static inline bool geo3d_mesh_build(geo3d_cmesh_t *m, uint32_t mesh_offset,
         geo3d_cface_fill(&faces[n_faces++], &ia, fi, tri_cnt, ai, bi, ci, di, has_c, has_d,
                          zsrc, zmode, mat_ok, &h, uvu, uvv);
     }
+#if GEO3D_MESH_ARENA
+    m->arena_len = (uint32_t)(sv_bytes + (((size_t)n_faces * sizeof(geo3d_cface_t) + 31u) & ~(size_t)31u));
+    g_geo3d_arena_used += m->arena_len;
+#else
+    geo3d_cface_t *fit = n_faces < max_faces ? realloc(faces, (size_t)(n_faces ? n_faces : 1) * sizeof(geo3d_cface_t)) : NULL;
+    if (fit) faces = fit;
+#endif
     return geo3d_mesh_keep(m, ia.sv, n_sv, faces, n_faces);
 }
 
@@ -2819,7 +3196,7 @@ static inline bool geo3d_models_same(const geo3d_models_t *a, const geo3d_models
 
 static geo3d_cmesh_t *geo3d_mesh_get(const geo3d_models_t *md, int model_idx,
                                      uint32_t mat_ptr, uint32_t uv_ptr, uint32_t mesh_offset) {
-    uint32_t h = ((uint32_t)model_idx * 2654435761u) ^ (mat_ptr * 40503u) ^ (uv_ptr * 2246822519u);
+    uint32_t h = geo3d_mesh_hash(model_idx, mat_ptr, uv_ptr);
     geo3d_cmesh_t *m = NULL;
     for (uint32_t probe = 0; probe < GEO3D_MESH_CACHE_SLOTS; probe++) {
         geo3d_cmesh_t *e = &g_geo3d_meshes[(h + probe) & (GEO3D_MESH_CACHE_SLOTS - 1u)];
@@ -2830,17 +3207,57 @@ static geo3d_cmesh_t *geo3d_mesh_get(const geo3d_models_t *md, int model_idx,
             break;
         }
     }
-    if (m && m->used) { g_geo3d_mesh_hits++; return m; }
-    if (!m || g_geo3d_mesh_count >= GEO3D_MESH_CACHE_SLOTS * 3u / 4u) {
-        geo3d_mesh_cache_clear();
-        m = &g_geo3d_meshes[h & (GEO3D_MESH_CACHE_SLOTS - 1u)];
+    if (m && m->used) {
+        if (m->failed) return NULL;
+        g_geo3d_mesh_hits++;
+        m->used_at = g_geo3d_mesh_epoch;
+        return m;
     }
-    *m = (geo3d_cmesh_t){ .model_idx = model_idx, .mat_ptr = mat_ptr, .uv_ptr = uv_ptr, .md = *md };
-    m->md.obj_mesh = NULL;
-    m->md.obj_mesh_size = 0;
-    if (!geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) { m->used = false; return NULL; }
-    m->used = true;
-    g_geo3d_mesh_count++;
+    if (!m || g_geo3d_mesh_count >= GEO3D_MESH_CACHE_SLOTS * 3u / 4u ||
+            (GEO3D_MESH_CACHE_BYTES && g_geo3d_mesh_bytes >= GEO3D_MESH_CACHE_BYTES)) {
+        if (geo3d_mesh_cache_evict() && g_geo3d_mesh_count < GEO3D_MESH_CACHE_SLOTS * 3u / 4u) {
+            m = geo3d_mesh_free_slot(h);
+        } else {
+            geo3d_mesh_cache_clear();
+            m = &g_geo3d_meshes[h & (GEO3D_MESH_CACHE_SLOTS - 1u)];
+        }
+    }
+    for (int retry = 0;; retry++) {
+        *m = (geo3d_cmesh_t){ .model_idx = model_idx, .mat_ptr = mat_ptr, .uv_ptr = uv_ptr, .md = *md };
+        m->md.obj_mesh = NULL;
+        m->md.obj_mesh_size = 0;
+        m->used = true;
+        m->used_at = g_geo3d_mesh_epoch;
+        g_geo3d_mesh_count++;
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+        /* made offline, if the pack has it: a copy, not a walk */
+        int packed = geo3d_strips_load(m, g_geo3d_arena + g_geo3d_arena_used, GEO3D_MESH_ARENA - g_geo3d_arena_used);
+        if (packed > 0) {
+            g_geo3d_arena_used += m->arena_len;
+            g_geo3d_mesh_bytes += m->arena_len;
+            g_geo3d_mesh_packed++;
+            return m;
+        }
+        if (packed == 0 && geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) break;
+#else
+        if (geo3d_mesh_build(m, mesh_offset, mat_ptr != 0, uv_ptr != 0)) break;
+#endif
+        /* Out of memory (or arena), which the cache's own meshes may be
+         * holding: thin it, then start over. A mesh that still does not fit
+         * stays a failed entry, not a build every frame: a failed build costs
+         * most of a full decode, which the draw runs too. */
+        if (retry == 2 || g_geo3d_mesh_count <= 1) { m->failed = true; return NULL; }
+        m->used = false;
+        g_geo3d_mesh_count--;
+        if (retry == 0 && geo3d_mesh_cache_evict()) {
+            m = geo3d_mesh_free_slot(h);
+        } else {
+            retry = 1;
+            geo3d_mesh_cache_clear();
+            m = &g_geo3d_meshes[h & (GEO3D_MESH_CACHE_SLOTS - 1u)];
+        }
+    }
+    g_geo3d_mesh_bytes += (size_t)m->n_sv * sizeof(vec3_t) + (size_t)m->n_faces * sizeof(geo3d_cface_t);
     g_geo3d_mesh_builds++;
     return m;
 }
@@ -2850,6 +3267,10 @@ static geo3d_cmesh_t *geo3d_mesh_get(const geo3d_models_t *md, int model_idx,
 static bool geo3d_mesh_layers_for(const geo3d_models_t *md, int model_idx,
                                   uint32_t mat_ptr, uint32_t uv_ptr, uint32_t mesh_offset,
                                   geo3d_face_layer_t *out, int cap) {
+#ifdef GEO3D_DC_SINK
+    (void)md; (void)model_idx; (void)mat_ptr; (void)uv_ptr; (void)mesh_offset; (void)out; (void)cap;
+    return false;
+#else
     geo3d_cmesh_t *m = geo3d_mesh_get(md, model_idx, mat_ptr, uv_ptr, mesh_offset);
     if (!m) return false;
     if (!m->ranked) { geo3d_mesh_layers(m); m->ranked = true; }
@@ -2862,6 +3283,7 @@ static bool geo3d_mesh_layers_for(const geo3d_models_t *md, int model_idx,
         memcpy(out[f->fi].plane, f->plane, sizeof f->plane);
     }
     return true;
+#endif
 }
 
 /* Whether a draw goes through the mesh cache, and its mesh if so: NONE draws
@@ -2884,15 +3306,11 @@ static int geo3d_mesh_for_draw(const geo3d_models_t *md, int model_idx,
     return *out ? GEO3D_DRAW_CACHED : GEO3D_DRAW_FULL;
 }
 
-/* The cached draw's window test. False when no face can be dropped: culling
- * off, or the model's sphere wholly inside every plane. Otherwise oc holds each
- * corner's codes: wholly outside one plane, every corner has that plane's. */
-static inline bool geo3d_cached_cull_codes(const geo3d_cmesh_t *m, const float *matrix,
-                                           const vec3_t *tv, uint8_t *oc, bool lines) {
-    if (!g_geo3d_cull_on || lines) return false;
-    /* The model's sphere first: wholly inside every plane, nothing can be
-     * dropped; wholly outside one, everything is. Only a model across a
-     * side needs its corners' codes. */
+/* The model's sphere against the window, before any corner is moved: 0 when
+ * no face can be dropped (culling off, or wholly inside every plane), the bit of
+ * a plane it is wholly outside, or -1 across a side (its corners need codes). */
+static inline int geo3d_cached_sphere(const geo3d_cmesh_t *m, const float *matrix, bool lines) {
+    if (!g_geo3d_cull_on || lines) return 0;
     const float *mx = matrix;
     float s2 = fmaxf(fmaxf(mx[0] * mx[0] + mx[4] * mx[4] + mx[8] * mx[8],
                            mx[1] * mx[1] + mx[5] * mx[5] + mx[9] * mx[9]),
@@ -2907,11 +3325,230 @@ static inline bool geo3d_cached_cull_codes(const geo3d_cmesh_t *m, const float *
         if (d > e) in++;
         else if (d < -e && !all_out) all_out = (uint8_t)(1u << k);
     }
-    if (in == 5) return false;
-    if (all_out) memset(oc, all_out, (size_t)m->n_sv);
+    return in == 5 ? 0 : all_out ? all_out : -1;
+}
+
+/* The cached draw's window test, sph from geo3d_cached_sphere. False when no
+ * face can be dropped. Otherwise oc holds each corner's codes: wholly outside
+ * one plane, every corner has that plane's, and *gone is set. */
+static inline bool geo3d_cached_cull_codes(const geo3d_cmesh_t *m, int sph,
+                                           const vec3_t *tv, uint8_t *oc, bool *gone) {
+    *gone = false;
+    if (sph == 0) return false;
+    if (sph > 0) { memset(oc, sph, (size_t)m->n_sv); *gone = true; }
+#ifdef GEO3D_FTRV
+    else {
+        const float (*q)[4] = g_geo3d_cull_plane;
+        float c[16] __attribute__((aligned(8))) = {
+            q[0][0], q[1][0], q[2][0], q[3][0],  q[0][1], q[1][1], q[2][1], q[3][1],
+            q[0][2], q[1][2], q[2][2], q[3][2],  q[0][3], q[1][3], q[2][3], q[3][3] };
+        geo3d_xmtrx_load(c);
+        for (int i = 0; i < m->n_sv; i++) {
+            float d[4];
+            geo3d_ftrv(tv[i].x, tv[i].y, tv[i].z, 1.0f, d);
+            oc[i] = geo3d_cull_code_d(tv[i], d);
+        }
+    }
+#else
     else for (int i = 0; i < m->n_sv; i++) oc[i] = geo3d_cull_code(tv[i]);
+#endif
     return true;
 }
+
+#ifdef GEO3D_DC_SINK
+/* A model wholly out of the window leaves only the flat key's carry behind:
+ * that of the last face (in order) with a mode other than "the previous". */
+static inline void geo3d_cached_gone_carry(const geo3d_cmesh_t *m, const float *matrix) {
+    if (!(g_geo3d_zflat && g_geo3d_flat_list)) return;
+    int zsrc[4];
+    uint32_t zmode = 0;
+    /* the walk takes the packed faces first */
+    for (int n = m->faces ? m->n_faces - 1 : -1; n >= 0 && !zmode; n--)
+        if ((zmode = m->faces[n].zmode) != 0u)
+            for (int k = 0; k < 4; k++) zsrc[k] = m->faces[n].zsrc[k];
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+    for (int n = m->sfaces ? m->n_faces - 1 : -1; n >= 0 && !zmode; n--)
+        if ((zmode = m->sfaces[n].zmode) != 0u)
+            for (int k = 0; k < 4; k++) zsrc[k] = m->sfaces[n].zsrc[k];
+#endif
+    if (!zmode) return;
+    vec3_t tv[4];
+    const int idx[4] = { 0, 1, 2, 3 };
+    if (zmode != 3u) {   /* moved as geo3d_decode_model_cached moves them, to the bit */
+#ifdef GEO3D_FTRV
+        geo3d_xmtrx_board(matrix);
+        for (int k = 0; k < 4; k++) {
+            const vec3_t p = m->sv[zsrc[k]];
+            float o[4];
+            geo3d_ftrv(p.x, p.y, p.z, 1.0f, o);
+            tv[k].x = o[0]; tv[k].y = o[1]; tv[k].z = o[2];
+        }
+#else
+        for (int k = 0; k < 4; k++) tv[k] = apply_matrix(m->sv[zsrc[k]], matrix);
+#endif
+    }
+    geo3d_flat_z(tv, idx, zmode);
+}
+
+/* The cached draw's walk in the order the Dreamcast needs: the flat key's carry
+ * and the diagonals for every face, the colour and light only for one that is
+ * drawn, and the key only as a number. gone: every face out, so its corners
+ * need no projecting. */
+#if GEO3D_FACESTOP
+/* The words FACESTOP keeps alive: the flat key's z and the cull's N·L and N·P. */
+static inline uint32_t geo3d_facestop_bits(float z, const geo3d_lit_t *lt) {
+    uint32_t a, b, c;
+    memcpy(&a, &z, 4); memcpy(&b, &lt->dotl, 4); memcpy(&c, &lt->dotp, 4);
+    return a ^ b ^ c;
+}
+#endif
+#if GEO3D_ZKEYSTOP
+/* The word ZKEYSTOP keeps alive: the flat key's z, the z key's only input. */
+static inline uint32_t geo3d_zkeystop_bits(float z) {
+    uint32_t a;
+    memcpy(&a, &z, 4);
+    return a;
+}
+#endif
+#if GEO3D_TAILHALF || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP
+/* The words TAILHALF (and COLOURSTOP) keeps alive: the face's colour, luma, texture LOD and cut. */
+static inline uint32_t geo3d_tailhalf_bits(float r, float g, float b, float pl, int cut) {
+    uint32_t w[5];
+    memcpy(&w[0], &r, 4); memcpy(&w[1], &g, 4); memcpy(&w[2], &b, 4);
+    memcpy(&w[3], &pl, 4); memcpy(&w[4], &g_geo3d_emit_texlod, 4);
+    return w[0] ^ (w[1] << 1) ^ (w[2] << 2) ^ w[3] ^ w[4] ^ (uint32_t)cut;
+}
+#endif
+static inline void geo3d_cached_draw_dc(const geo3d_models_t *md, const geo3d_cmesh_t *m,
+                                        const vec3_t *tv, const uint8_t *oc, bool cull, bool gone,
+                                        const float *matrix, float cr, float cg, float cb) {
+    const int dcv = gone ? -1 : geo3d_dc_verts(tv, m->n_sv);
+    GEO3D_LAP(PROJ);
+    const bool flat = g_geo3d_zflat && g_geo3d_flat_list;
+    GEO3D_FC(MODELS);
+    GEO3D_FC_ON(1u);
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP || GEO3D_RAMPSTOP
+    uint32_t fs = 0;
+#endif
+#if defined(GEO3D_STRIPS) && GEO3D_MESH_ARENA
+    /* The same walk over a packed mesh's faces (geo3d_strips_load). */
+    for (int n = 0; m->sfaces && n < m->n_faces; n++) {
+        const geo3d_sface_t *f = &m->sfaces[n];
+        /* every face missed the cache: ask for the one after next (two lines) */
+        __builtin_prefetch(f + 2);
+        __builtin_prefetch((const char *)(f + 2) + 32);
+        const bool is_tri = (f->bits & GEO3D_SF_TRI) != 0;
+        const int zsrc[4] = { f->zsrc[0], f->zsrc[1], f->zsrc[2], f->zsrc[3] };
+        GEO3D_FC(IN);
+        GEO3D_FC_IF(ZC, flat && (f->zmode == 1u || f->zmode == 2u));
+        const float z = flat ? geo3d_flat_z(tv, zsrc, f->zmode) : 0.0f;
+        if (is_tri && !(f->bits & GEO3D_SF_HAS_C)) { GEO3D_FC(NOC); continue; }
+        bool out = false;
+        if (cull)
+            out = (oc[f->ai] & oc[f->bi] & oc[f->ci] & (is_tri ? 0xFFu : oc[f->di])) != 0;
+        if (out && is_tri) { GEO3D_FC(OTRI); continue; }
+        geo3d_lit_t lt;
+        if (geo3d_board_cull(matrix, f->qn, (f->bits & GEO3D_SF_HAS_QN) ? f->qa : 0u, true,
+                             tv[f->ai], tv[f->bi], tv[f->ci], &lt)) { GEO3D_FC(REAR); continue; }
+        if (out || dcv < 0) {
+            GEO3D_FC_IF(GONE, dcv < 0); GEO3D_FC_IF(OUTQ, dcv >= 0);
+            if (!is_tri) geo3d_split_other_way(f->split_quad, f->split_cut);
+            continue;
+        }
+#if GEO3D_FACESTOP
+        fs ^= geo3d_facestop_bits(z, &lt);
+        continue;
+#endif
+        float fr = cr, fg = cg, fb = cb;
+        GEO3D_FC_IF(MAT, f->bits & GEO3D_SF_MAT_OK);
+        if (f->bits & GEO3D_SF_MAT_OK) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
+        GEO3D_FC_IF(SPEC, g_geo3d_mode & 1u);
+        const float pl = geo3d_board_luma(&lt);
+        const int cut = is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
+        GEO3D_FC(SUB); GEO3D_FC_IF(TRI, is_tri); GEO3D_FC_IF(CUT1, cut == 1);
+#if GEO3D_TAILHALF
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut);
+        continue;
+#endif
+#if GEO3D_STRIPSTOP || GEO3D_RAMPSTOP
+        fs ^= geo3d_dc_sface_look(f, fr, fg, fb, pl) ^ (uint32_t)cut;
+        continue;
+#endif
+#if GEO3D_COLOURSTOP
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_sface_tex(f);
+        continue;
+#endif
+#if GEO3D_FACECOLSTOP
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_sface_memo(f, fr, fg, fb, pl);
+        continue;
+#endif
+#if GEO3D_ZKEYSTOP
+        fs ^= geo3d_zkeystop_bits(z);
+        geo3d_dc_sface(dcv, f, m->strips + f->strip, cut, fr, fg, fb, pl, flat ? 0 : -1);
+        continue;
+#endif
+        geo3d_dc_sface(dcv, f, m->strips + f->strip, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
+    }
+#endif
+    for (int n = 0; m->faces && n < m->n_faces; n++) {
+        const geo3d_cface_t *f = &m->faces[n];
+        GEO3D_FC(IN); GEO3D_FC(UNP);
+        GEO3D_FC_IF(ZC, flat && (f->zmode == 1u || f->zmode == 2u));
+        const float z = flat ? geo3d_flat_z(tv, f->zsrc, f->zmode) : 0.0f;
+        if (f->is_tri && !f->has_c) { GEO3D_FC(NOC); continue; }
+        bool out = false;
+        if (cull)
+            out = (oc[f->ai] & oc[f->bi] & oc[f->ci] & (f->is_tri ? 0xFFu : oc[f->di])) != 0;
+        if (out && f->is_tri) { GEO3D_FC(OTRI); continue; }
+        geo3d_lit_t lt;
+        if (geo3d_board_cull(matrix, f->qn, f->has_qn ? f->qa : 0u, true,
+                             tv[f->ai], tv[f->bi], tv[f->ci], &lt)) { GEO3D_FC(REAR); continue; }
+        if (out || dcv < 0) {
+            GEO3D_FC_IF(GONE, dcv < 0); GEO3D_FC_IF(OUTQ, dcv >= 0);
+            if (!f->is_tri) geo3d_split_other_way(f->split_quad, f->split_cut);
+            continue;
+        }
+#if GEO3D_FACESTOP
+        fs ^= geo3d_facestop_bits(z, &lt);
+        continue;
+#endif
+        float fr = cr, fg = cg, fb = cb;
+        GEO3D_FC_IF(MAT, f->mat_ok);
+        if (f->mat_ok) geo3d_palette_color(f->matidx, md->main_data, md->main_data_size, &fr, &fg, &fb);
+        GEO3D_FC_IF(SPEC, g_geo3d_mode & 1u);
+        const float pl = geo3d_board_luma(&lt);
+        const int cut = f->is_tri ? 0 : geo3d_split_other_way(f->split_quad, f->split_cut) ? 1 : 2;
+        GEO3D_FC(SUB); GEO3D_FC_IF(TRI, f->is_tri); GEO3D_FC_IF(CUT1, cut == 1);
+#if GEO3D_TAILHALF
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut);
+        continue;
+#endif
+#if GEO3D_STRIPSTOP || GEO3D_RAMPSTOP
+        fs ^= geo3d_dc_face_look(f, fr, fg, fb, pl) ^ (uint32_t)cut;
+        continue;
+#endif
+#if GEO3D_COLOURSTOP
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_face_tex(f);
+        continue;
+#endif
+#if GEO3D_FACECOLSTOP
+        fs ^= geo3d_tailhalf_bits(fr, fg, fb, pl, cut) ^ geo3d_dc_face_memo(f, fr, fg, fb, pl);
+        continue;
+#endif
+#if GEO3D_ZKEYSTOP
+        fs ^= geo3d_zkeystop_bits(z);
+        geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? 0 : -1);
+        continue;
+#endif
+        geo3d_dc_face(dcv, f, cut, fr, fg, fb, pl, flat ? (int32_t)geo3d_board_zkey(z) : -1);
+    }
+    GEO3D_FC_ON(0u);
+#if GEO3D_FACESTOP || GEO3D_TAILHALF || GEO3D_STRIPSTOP || GEO3D_ZKEYSTOP || GEO3D_COLOURSTOP || GEO3D_FACECOLSTOP || GEO3D_RAMPSTOP
+    g_geo3d_facestop_sink ^= fs;
+#endif
+    GEO3D_LAP_N(FACES, m->n_faces);
+}
+#endif
 
 /* One face of a cached mesh, drawn at the instance's matrix. */
 static inline void geo3d_cached_face(const geo3d_models_t *md, const geo3d_cface_t *f,
@@ -2955,21 +3592,56 @@ static inline void geo3d_decode_model_cached(const geo3d_models_t *md, int model
                                              float cr, float cg, float cb) {
     geo3d_cmesh_t *m;
     const int how = geo3d_mesh_for_draw(md, model_idx, matrix, &m);
+    GEO3D_LAP(MESH);
     if (how == GEO3D_DRAW_NONE) return;
     if (how == GEO3D_DRAW_FULL) {
         geo3d_decode_model(md, model_idx, matrix, cr, cg, cb);
+        GEO3D_LAP(FULL);
         return;
     }
 
-    static vec3_t tv[GEO3D_IA_MAX_VERTS];
-    for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
-    geo3d_split_reset();
     bool lines = g_geo_wireframe != 0;
+    const int sph = geo3d_cached_sphere(m, matrix, lines);
+#ifdef GEO3D_DC_SINK
+    /* Wholly outside the window: no face is drawn, and of all the walk does
+     * only the flat key's carry outlives the model (the diagonals are the
+     * model's own). The carry is the last face's that sets one: move its
+     * corners alone. */
+    if (sph > 0) {
+        geo3d_cached_gone_carry(m, matrix);
+        geo3d_emit_state_reset();
+        GEO3D_LAP(SPHERE);
+        return;
+    }
+#endif
+    GEO3D_LAP(SPHERE);
+
+    static vec3_t tv[GEO3D_IA_MAX_VERTS];
+#ifdef GEO3D_FTRV
+    geo3d_xmtrx_board(matrix);
+    for (int i = 0; i < m->n_sv; i++) {
+        float o[4];
+        __builtin_prefetch(&m->sv[i + 8]);   /* the corners stream in: a line ahead */
+        geo3d_ftrv(m->sv[i].x, m->sv[i].y, m->sv[i].z, 1.0f, o);
+        tv[i].x = o[0]; tv[i].y = o[1]; tv[i].z = o[2];
+    }
+#else
+    for (int i = 0; i < m->n_sv; i++) tv[i] = apply_matrix(m->sv[i], matrix);
+#endif
+    GEO3D_LAP(XFORM);
+    geo3d_split_reset();
     static uint8_t oc[GEO3D_IA_MAX_VERTS];
-    const bool cull = geo3d_cached_cull_codes(m, matrix, tv, oc, lines);
+    bool gone;
+    const bool cull = geo3d_cached_cull_codes(m, sph, tv, oc, &gone);
+    GEO3D_LAP(CODES);
+#ifdef GEO3D_DC_SINK
+    geo3d_cached_draw_dc(md, m, tv, oc, cull, gone, matrix, cr, cg, cb);
+#else
     for (int n = 0; n < m->n_faces; n++)
         geo3d_cached_face(md, &m->faces[n], tv, oc, cull, lines, matrix, cr, cg, cb);
+#endif
     geo3d_emit_state_reset();
+    GEO3D_LAP_N(FACES, 0);
 }
 
 #ifdef M2HLE_DEBUG_DUMPS   /* desktop only; see GEO3D_DUMP_TEX */
@@ -2998,9 +3670,9 @@ typedef struct { uint32_t s, x, y, w, h; } geo3d_extract_tile_t;
 static void geo3d_extract_face(FILE *mf, uint32_t f, const uint8_t *rp,
                                const uint8_t *main_data, size_t main_data_size,
                                geo3d_extract_tile_t *tiles, int *nt) {
-    uint16_t th0 = (uint16_t)rp[0] | ((uint16_t)rp[1] << 8);
-    uint16_t th2 = (uint16_t)rp[4] | ((uint16_t)rp[5] << 8);
-    uint16_t th3 = (uint16_t)rp[6] | ((uint16_t)rp[7] << 8);
+    uint16_t th0 = (uint16_t)geo3d_rom16(rp + 0);
+    uint16_t th2 = (uint16_t)geo3d_rom16(rp + 4);
+    uint16_t th3 = (uint16_t)geo3d_rom16(rp + 6);
     int      textured = (th0 & 0x4000) != 0;
     uint32_t w  = 32u << (th0 & 7u), h = 32u << ((th0 >> 3) & 7u);
     uint32_t x  = 32u * (th2 & 0x3fu), y = 32u * ((th2 >> 6) & 0x1fu);
@@ -3008,7 +3680,7 @@ static void geo3d_extract_face(FILE *mf, uint32_t f, const uint8_t *rp,
     uint32_t cb = (th3 >> 6) & 0x3ffu;       /* colorbase */
     uint32_t pal = GEO3D_PALETTE_OFF + cb * 2u;
     uint16_t col = ((size_t)pal + 2 <= main_data_size)
-                   ? ((uint16_t)main_data[pal] | ((uint16_t)main_data[pal+1] << 8)) : 0;
+                   ? (uint16_t)geo3d_rom16(main_data + pal) : 0;
     if (mf) fprintf(mf,
         "face %4u th0=%04X th2=%04X th3=%04X textured=%d bank=%u tile=(%u,%u) %ux%u colorbase=%u color=%04X\n",
         f, th0, th2, th3, textured, s, x, y, w, h, cb, col);
@@ -3079,10 +3751,10 @@ static void geo3d_extract_model_texture(int model_idx,
         (uint32_t)(model_idx + 1) >= table_count) return;
     uint32_t toff = table_off + (uint32_t)model_idx * MODEL_ENTRY_SIZE;
     if ((size_t)toff + 2u * MODEL_ENTRY_SIZE > main_data_size) return;
-    uint32_t uv_ptr   = read_u32_le(main_data + toff + 0);
-    uint32_t mat_ptr  = read_u32_le(main_data + toff + 4);
-    uint32_t mesh_ptr = read_u32_le(main_data + toff + 8);
-    uint32_t mat_next = read_u32_le(main_data + toff + MODEL_ENTRY_SIZE + 4);
+    uint32_t uv_ptr   = read_u32_le(GEO3D_ROM(main_data + toff + 0, 4));
+    uint32_t mat_ptr  = read_u32_le(GEO3D_ROM(main_data + toff + 4, 4));
+    uint32_t mesh_ptr = read_u32_le(GEO3D_ROM(main_data + toff + 8, 4));
+    uint32_t mat_next = read_u32_le(GEO3D_ROM(main_data + toff + MODEL_ENTRY_SIZE + 4, 4));
     if (mat_next <= mat_ptr) return;
     uint32_t nfaces = (mat_next - mat_ptr) / 4u;   /* 8-byte (4 u16) records/face */
     if (nfaces > 8192u) nfaces = 8192u;
@@ -3158,7 +3830,7 @@ static inline void geo3d_wire_browser(const geo3d_state_t *geo, const geo3d_mode
     float cr = 0.0f, cg = 1.0f, cb = 0.0f;
     uint32_t toff = md->table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
     if (md->main_data && (size_t)toff + MODEL_ENTRY_SIZE <= md->main_data_size) {
-        uint32_t mat_ptr = read_u32_le(md->main_data + toff + 4);
+        uint32_t mat_ptr = read_u32_le(GEO3D_ROM(md->main_data + toff + 4, 4));
         material_ptr_to_color(mat_ptr, &cr, &cg, &cb);
     }
     geo3d_decode_model(md, geo->model_index, NULL, cr, cg, cb);
