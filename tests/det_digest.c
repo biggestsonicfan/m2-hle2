@@ -13,6 +13,7 @@
  *
  *   det_digest <merged sfight zip> [--frames N] [--script "449:c,460:,..."]
  *              [--from F] [--out FILE] [--cop FROM:TO:FILE] [--trace F:FILE]
+ *              [--profile ID]
  *
  * Script keys are the web build's ?script= (main_web.c): at frame N hold exactly
  * these; u d l r, 1-4 the buttons, s start, c coin; an uppercase letter is the
@@ -295,13 +296,13 @@ static void parse_script(const char *s) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem] [--profile ID]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
     uint32_t peek_addr = 0;
     bool frames_given = false, sound_cols = false, cpu_cols = false;
-    const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL;
+    const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL, *profile_id = "sfight";
     for (int i = 2; i < argc; i++) {
         if      (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = (uint32_t)strtoul(argv[++i], NULL, 10); frames_given = true; }
         else if (!strcmp(argv[i], "--inputs") && i + 1 < argc) inputs_path = argv[++i];
@@ -328,6 +329,7 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--mem")) state_mem = true;
         else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
             if (sscanf(argv[++i], "%u:%1023s", &save_frame, save_path) != 2) {
@@ -351,8 +353,8 @@ int main(int argc, char **argv) {
     bp_init();
     wp_init();
     for (size_t i = 0; i < g_profile_count; i++)
-        if (!strcmp(g_profiles[i]->id, "sfight")) g_active_profile = g_profiles[i];
-    if (!g_active_profile) { fprintf(stderr, "no sfight profile\n"); return 2; }
+        if (!strcmp(g_profiles[i]->id, profile_id)) g_active_profile = g_profiles[i];
+    if (!g_active_profile) { fprintf(stderr, "no %s profile\n", profile_id); return 2; }
     if (script_text) parse_script(script_text);
     if (inputs_path) {
         if (!load_inputs(inputs_path)) { fprintf(stderr, "cannot read an input log from %s\n", inputs_path); return 2; }
