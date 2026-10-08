@@ -322,7 +322,7 @@ What it does:
    a backup and also updates the updater. It won't replace the core while RetroArch is running.
 
 If the standalone m2-hle emulator (the `m2hle-rocknix-arm64.zip` build) is installed too, the
-same entry updates that as well. Each one is checked and installed separately.
+same entry updates that as well, though CI no longer builds a new one. Each one is checked and installed separately.
 
 Over ssh:
 
