@@ -150,7 +150,10 @@ walking its GEO stream (DREAMCAST-PORT.md #498). Its meshes lie by object
 group (`sfight.mdlgroups`: a stage, a fighter, the select screen...), each
 group in the order the recorded frames first drew from it (#504), so a page
 the pager loads holds meshes of one scene. `NOSTRIPS=1` leaves it out;
-`make STRIPS=0` builds a program that never looks for it. `sfight.strips` is
+`make STRIPS=0` builds a program that never looks for it. `make SCENE=1` loads a
+scene's texture groups whole when the scene changes, and `SCENE=2` its mesh
+groups too (`dc_scene.h`); both need a TEXTURES.PAK recorded by group, and
+both lost on disc seeks (DREAMCAST-PORT.md #567), so the release leaves it 0. `sfight.strips` is
 the mesh cache's keys, addresses only, recorded the same way with a
 `det_digest` that takes the PS3 release's ROM folder in place of the zip:
 
@@ -280,7 +283,7 @@ The top band (rows 0-7):
 |---|---|---|
 | `LV` | every frame drawn | `f` board frame, `d` frames handed to the PVR (this one included), `v` vblanks since boot, `t` ms since boot, `dt` ms between the last two frames handed over |
 | `ID` | once | `git` the commit built, `gems`, `aot`, `jit`, `cap` the fps cap; `cab` the cable (`vga`, `rgb`, `cmp`), `rg` the flash's region, `il` interlaced, `pal` 50 Hz |
-| `B0`-`B3` | after frame 3900 | the bench, frames 3500-3900 of attract: `ms` in all, `sl` in slices, `dr` in draws, `tx` making textures, `txr` texture-pack reads, `n` frames drawn; the draw's parts `ti` `sc` `so` `su`, `snd`; page loads `ld`, of code `cd`, data `da`, polygons `po`, textures `tx`, the model pack `pk`, `dc_rom_at` `at`; drive commands `rd`, seeks `sk`, strip-pack pages `sp` |
+| `B0`-`B3` | after frame 3900 | the bench, frames 3500-3900 of attract: `ms` in all, `sl` in slices, `dr` in draws, `tx` making textures, `txr` texture-pack reads, `n` frames drawn; the draw's parts `ti` `sc` `so` `su`, `snd`; page loads `ld`, of code `cd`, data `da`, polygons `po`, textures `tx`, the model pack `pk`, `dc_rom_at` `at`; drive commands `rd`, seeks `sk`, strip-pack pages `sp`; from boot to frame 3500, drive commands `brd`, seeks `bsk`, texture-pack reads `btx` |
 | `VR` | once | the release (`RELEASE=`, e.g. `Alpha 0.3`; `dev` without one), `build` the build number (`r` + the commits up to it) and the commit |
 | `AO`, `JT` | when there is one | why the AOT turned itself off; the JIT's blocks, KB, flushes, compile ms, slow exits |
 
@@ -302,6 +305,7 @@ The bottom band (rows 14-29), a 2-s window:
 | `PV` | the PVR's last frame: `rnd` render, `reg` registration, `fr` ready to ready, ms; `vbl` vblanks in the window; `tm` texture memory left and `hp` heap in use, KB |
 | `G0`, `G1` | the sampler's groups, % of the window's samples: `aot` the i960 compiled ahead, `gem` Gems' C, `hok` the profile's hooks, `960` the i960 interpreter and the bus, `cop`, `geo` the 3D decode, `drw` the PVR draw, `til` the tile layers, `snd`, `dsc` the pager and the drive, `kos`, `lib`, `bio` the BIOS (where the GD-ROM syscalls run), `oth` |
 | `S0`, `S1` | the six hottest symbols, % of the samples (names cut at 16) |
+| `SC` | `SCENE=` builds only (dc_scene.h), since boot: `sc` scenes loaded, `st` textures staged, `ad` adopted by the draw, `kb` read, `ms` spent, `me` meshes preloaded |
 
 Flycast has no performance counters (`HW` reads 0) and charges nothing for the
 drive (`RD`'s ms read 0): those are for the console. `tools/hud_ocr.py` reads

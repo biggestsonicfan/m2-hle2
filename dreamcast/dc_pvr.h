@@ -226,8 +226,80 @@ static void dp_tex_invalidate(memory_bus_t *bus) {
     if (gone) dp_tex_rehash();
 }
 
+/* A strip pack blob's body (body_len bytes after its head sh) copied to at in
+ * the mesh arena, and m pointed at it: geo3d_strips_load's, and the scene
+ * loader's (dc_scene.h). */
+static void geo3d_strips_fill(struct geo3d_cmesh *m, const geo3d_sp_head_t *sh, uint8_t *at,
+                              const uint8_t *body, uint32_t body_len) {
+    if (body) memcpy(at, body, body_len);
+    const size_t sv_bytes = ((size_t)sh->n_sv * sizeof(vec3_t) + 31u) & ~(size_t)31u;
+    m->sv      = (vec3_t *)at;
+    m->faces   = NULL;
+    m->sfaces  = (const geo3d_sface_t *)(at + sv_bytes);
+    m->strips  = (const geo3d_svert_t *)(m->sfaces + sh->n_faces);
+    m->n_sv    = sh->n_sv;
+    m->n_faces = sh->n_faces;
+    m->bc      = (vec3_t){ sh->bc[0], sh->bc[1], sh->bc[2] };
+    m->br      = sh->br;
+    m->arena_len = body_len;
+}
+
+#include "dc_scene.h"
+
+/* Video memory holding the texture key names (bytes of it), made: staged by
+ * the scene loader, read from the texture pack when it holds the tile as the
+ * words are now (dc_texpak.h), else cut from texture RAM (dct_cut). A texture
+ * over 256x256 (the water, a monitor's picture) is cut and loaded 32 KB at a
+ * time. NULL if there is no video memory. */
+static pvr_ptr_t dp_tex_make(const uint8_t *sheet, uint32_t key, uint32_t bytes) {
+    const uint32_t *src = (const uint32_t *)sheet;
+    const bool packable = g_pg.tx && dct_packable(key);
+    const uint32_t hash = packable ? dct_src_hash(src, key) : 0;
+    pvr_ptr_t p = packable ? dsc_tex_adopt(key, hash) : NULL;
+    if (p) { g_dp.tx_hits++; return p; }
+    if (!(p = pvr_mem_malloc(bytes)) && g_dsc.ntex) { dsc_tex_release(); p = pvr_mem_malloc(bytes); }
+    if (!p) return NULL;
+    const uint8_t *packed = NULL;
+    if (packable) {
+        const dct_index_t *e = pg_tx_find(key, hash);
+        if (e) packed = pg_tx_at(e->off, bytes);
+        if (packed) g_dp.tx_hits++; else g_dp.tx_miss++;
+    }
+    if (packed) { pvr_txr_load((void *)packed, p, bytes); return p; }
+    const uint32_t chunk = bytes < sizeof g_dp_cut ? bytes : (uint32_t)sizeof g_dp_cut;
+    for (uint32_t at = 0; at < bytes; at += chunk) {
+        dct_cut(src, key, at, chunk, g_dp_cut);
+        pvr_txr_load(g_dp_cut, (uint8_t *)p + at, chunk);
+    }
+    return p;
+}
+
 /* The PVR texture for a face's tile, cut and loaded on first use; NULL if it
  * cannot be (too big, no video memory). */
+/* Makes key's texture (x0, y0, tw x th of sheet) into slot t; false if it could not. */
+static bool dp_tex_fill(dc_tex_t *t, memory_bus_t *bus, uint32_t key, unsigned x0, unsigned y0,
+                        unsigned tw, unsigned th, unsigned sheet) {
+    unsigned W = tw < 8 ? 8 : tw, H = th < 8 ? 8 : th;
+    const uint64_t t0 = timer_us_gettime64();
+    pvr_ptr_t p = dp_tex_make(sheet ? bus->texram1 : bus->texram0, key, W * H / 2);
+    if (!p) return false;
+    g_dp.tt_tex += timer_us_gettime64() - t0;
+    const unsigned half = x0 >= 1024 ? 512 : 0;
+    *t = (dc_tex_t){ key, p, (uint16_t)W, (uint16_t)H, 1.0f / (float)W, 1.0f / (float)H,
+                     (uint16_t)((y0 >> 1) + half), (uint16_t)(((y0 + th - 1) >> 1) + half), (uint8_t)sheet };
+    return true;
+}
+
+/* key's slot if it is made, else the free slot it would take; NULL if full. */
+static dc_tex_t *dp_tex_slot(uint32_t key) {
+    uint32_t h = dp_tex_hash(key);
+    for (unsigned p = 0; p < DC_TEX_SLOTS; p++) {
+        dc_tex_t *e = &g_dp.tex[(h + p) & (DC_TEX_SLOTS - 1u)];
+        if (e->key == key || !e->key) return e;
+    }
+    return NULL;
+}
+
 static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, float fth, unsigned fl) {
     unsigned sheet = (fl & GEO3D_FACE_SHEET1) ? 1 : 0;
     unsigned x0 = (unsigned)(int)ftx & 2047u, y0 = (unsigned)(int)fty & 1023u;
@@ -235,42 +307,13 @@ static dc_tex_t *dp_tex_get(memory_bus_t *bus, float ftx, float fty, float ftw, 
     if (tw > 1024 || th > 1024 || !tw || !th) return NULL;
     unsigned lw = dp_log2(tw), lh = dp_log2(th);
     uint32_t key = 0x80000000u | sheet << 29 | x0 << 18 | y0 << 8 | lw << 4 | lh;
-    uint32_t h = dp_tex_hash(key);
-    dc_tex_t *t = NULL;
-    for (unsigned p = 0; p < DC_TEX_SLOTS; p++) {
-        dc_tex_t *e = &g_dp.tex[(h + p) & (DC_TEX_SLOTS - 1u)];
-        if (e->key == key) return e;
-        if (!e->key) { t = e; break; }
-    }
+    dc_tex_t *t = dp_tex_slot(key);
+    if (t && t->key) return t;
     /* Faces decoded earlier this frame hold their slots, so nothing is dropped
      * now: this face goes untextured and the next frame starts afresh. */
     if (!t || g_dp.count >= DC_TEX_SLOTS - 1u) { g_dp_full = true; g_dp.fails++; return NULL; }
 
-    /* Cut from texture RAM (dct_cut), or from the texture pack when it holds
-     * this tile as the words are now (dc_texpak.h). A texture over 256x256
-     * (the water, a monitor's picture) is cut and loaded 32 KB at a time. */
-    unsigned W = tw < 8 ? 8 : tw, H = th < 8 ? 8 : th;
-    const uint32_t bytes = W * H / 2, chunk = bytes < sizeof g_dp_cut ? bytes : (uint32_t)sizeof g_dp_cut;
-    pvr_ptr_t p = pvr_mem_malloc(bytes);
-    if (!p) { g_dp_full = true; g_dp.fails++; return NULL; }
-    const uint32_t *src = (const uint32_t *)(sheet ? bus->texram1 : bus->texram0);
-    const uint64_t t0 = timer_us_gettime64();
-    const uint8_t *packed = NULL;
-    if (g_pg.tx && dct_packable(key)) {
-        const dct_index_t *e = pg_tx_find(key, dct_src_hash(src, key));
-        if (e) packed = pg_tx_at(e->off, bytes);
-        if (packed) g_dp.tx_hits++; else g_dp.tx_miss++;
-    }
-    if (packed) pvr_txr_load((void *)packed, p, bytes);
-    else
-        for (uint32_t at = 0; at < bytes; at += chunk) {
-            dct_cut(src, key, at, chunk, g_dp_cut);
-            pvr_txr_load(g_dp_cut, (uint8_t *)p + at, chunk);
-        }
-    g_dp.tt_tex += timer_us_gettime64() - t0;
-    *t = (dc_tex_t){ key, p, (uint16_t)W, (uint16_t)H, 1.0f / (float)W, 1.0f / (float)H,
-                     (uint16_t)((y0 >> 1) + (x0 >= 1024 ? 512 : 0)),
-                     (uint16_t)(((y0 + th - 1) >> 1) + (x0 >= 1024 ? 512 : 0)), (uint8_t)sheet };
+    if (!dp_tex_fill(t, bus, key, x0, y0, tw, th, sheet)) { g_dp_full = true; g_dp.fails++; return NULL; }
     g_dp.count++;
     g_dp.made++;
     return t;
@@ -1662,38 +1705,40 @@ static uint32_t geo3d_dc_sface_memo(const geo3d_sface_t *F, float r, float g, fl
 
 /* geo3d_mesh_get's: the packed mesh m names, if STRIPS.PAK has it, copied
  * into the arena at at (room bytes). */
-static int geo3d_strips_load(struct geo3d_cmesh *m, uint8_t *at, size_t room) {
-    const dcs_head_t *h = g_pg.sp;
-    const geo3d_models_t *md = &m->md;
-    if (!h || md->materials != g_dp_rs_textures || md->polygons_size != h->polygons_size ||
-            md->materials_size != h->textures_size || md->table_off != h->table_off ||
-            md->table_count != h->table_count || md->mesh_ptr_subtract != h->mesh_ptr_subtract ||
-            md->mesh_ptr_add != h->mesh_ptr_add) return 0;
-    const dcs_index_t *ix = (const dcs_index_t *)(h + 1), *e = NULL;
+/* Whether the strip pack was recorded from the models md names. */
+static bool geo3d_strips_match(const dcs_head_t *h, const geo3d_models_t *md) {
+    return h && md->materials == g_dp_rs_textures && md->polygons_size == h->polygons_size &&
+           md->materials_size == h->textures_size && md->table_off == h->table_off &&
+           md->table_count == h->table_count && md->mesh_ptr_subtract == h->mesh_ptr_subtract &&
+           md->mesh_ptr_add == h->mesh_ptr_add;
+}
+
+/* The pack's index entry for m's key, or NULL. */
+static const dcs_index_t *geo3d_strips_find(const dcs_head_t *h, const struct geo3d_cmesh *m) {
+    const dcs_index_t *ix = (const dcs_index_t *)(h + 1);
     uint32_t lo = 0, hi = h->n;
-    while (lo < hi && !e) {
+    while (lo < hi) {
         uint32_t mid = (lo + hi) / 2;
         int c = dcs_key_cmp(ix[mid].model_idx, ix[mid].mat_ptr, ix[mid].uv_ptr, m->model_idx, m->mat_ptr, m->uv_ptr);
-        if (!c) e = &ix[mid];
-        else if (c < 0) lo = mid + 1;
+        if (!c) return &ix[mid];
+        if (c < 0) lo = mid + 1;
         else hi = mid;
     }
+    return NULL;
+}
+
+static int geo3d_strips_load(struct geo3d_cmesh *m, uint8_t *at, size_t room) {
+    const dcs_head_t *h = g_pg.sp;
+    if (!geo3d_strips_match(h, &m->md)) return 0;
+    const dcs_index_t *e = geo3d_strips_find(h, m);
+    if (!g_dsc.md_ok) { g_dsc.md = m->md; g_dsc.md_ok = 1; }   /* what the scene loader's meshes name */
     if (!e) return 0;
     geo3d_sp_head_t sh;
     pg_sp_copy(&sh, e->off, sizeof sh);
     const uint32_t body = e->len - (uint32_t)sizeof sh;
     if (body > room) return -1;
     pg_sp_copy(at, e->off + (uint32_t)sizeof sh, body);
-    const size_t sv_bytes = ((size_t)sh.n_sv * sizeof(vec3_t) + 31u) & ~(size_t)31u;
-    m->sv      = (vec3_t *)at;
-    m->faces   = NULL;
-    m->sfaces  = (const geo3d_sface_t *)(at + sv_bytes);
-    m->strips  = (const geo3d_svert_t *)(m->sfaces + sh.n_faces);
-    m->n_sv    = sh.n_sv;
-    m->n_faces = sh.n_faces;
-    m->bc      = (vec3_t){ sh.bc[0], sh.bc[1], sh.bc[2] };
-    m->br      = sh.br;
-    m->arena_len = body;
+    geo3d_strips_fill(m, &sh, at, NULL, body);
     return 1;
 }
 
@@ -2009,12 +2054,47 @@ static void dp_face(int t, pvr_list_t list, uint32_t *last_state) {
     if (F->kind & DCF_QUAD) dp_tri_out(F, 1, 3, 2, checker);   /* the strip's second triangle */
 }
 
+/* The opaque list: the tiles behind, then the sorted opaque faces. */
+static void dp_list_op(int n) {
+    pvr_list_begin(PVR_LIST_OP_POLY);
+    if (g_ls.on)
+        dp_ls_strips(&g_ls.t2, PVR_LIST_OP_POLY, g_ls.t2.back, PVR_TXRFMT_RGB565, true, 1.0e-4f);
+    else
+        dp_layer(PVR_LIST_OP_POLY, g_dp.lbg[g_dp.lcur], PVR_TXRFMT_RGB565, true, 1.0e-4f);
+    uint32_t state = 0;
+    for (int k = 0; k < n; k++) {
+        int t = (int)g_dp_order[0][k];
+        if (!(g_dcf[t].kind & DCF_TRANS)) dp_face(t, PVR_LIST_OP_POLY, &state);
+    }
+    pvr_list_finish();
+}
+
+/* The translucent list's tiles behind, translucent faces and tiles in front. */
+static void dp_list_tr(int n) {
+    if (g_ls.both)   /* tilemap 0 behind the 3D: over the strips only */
+        dp_ls_strips(&g_ls.t0, PVR_LIST_TR_POLY, g_ls.t0.back, PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
+    else if (g_ls.on)   /* tilemaps 1 and 0 */
+        dp_layer(PVR_LIST_TR_POLY, g_dp.lbg[g_dp.lcur], PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
+    uint32_t state = 0;
+    for (int k = 0; k < n; k++) {
+        int t = (int)g_dp_order[0][k];
+        if (g_dcf[t].kind & DCF_TRANS) dp_face(t, PVR_LIST_TR_POLY, &state);
+    }
+    if (g_ls.on && g_ls.t2.front_cells)
+        dp_ls_strips(&g_ls.t2, PVR_LIST_TR_POLY, g_ls.t2.front, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
+    if (!g_ls.both)
+        dp_layer(PVR_LIST_TR_POLY, g_dp.lfg[g_dp.lcur], PVR_TXRFMT_ARGB1555, true, 1.0e3f);
+    else if (g_ls.t0.front_cells)
+        dp_ls_strips(&g_ls.t0, PVR_LIST_TR_POLY, g_ls.t0.front, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
+}
+
 /* One frame, if the PVR is ready for it; false if it was dropped. */
 static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, tile_cpu_t *tiles) {
     if (pvr_check_ready() != 0) return false;
     uint64_t t0 = timer_us_gettime64();
     dp_tiles(bus, tiles);
     dp_tex_invalidate(bus);
+    dsc_frame(bus);
     uint64_t ta = timer_us_gettime64();
     dp_decode(geo, bus, rs);
     uint64_t tb = timer_us_gettime64();
@@ -2028,33 +2108,9 @@ static bool dp_frame(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs, 
     g_dp.tris = 0;
 
     pvr_scene_begin();
-    pvr_list_begin(PVR_LIST_OP_POLY);
-    if (g_ls.on)
-        dp_ls_strips(&g_ls.t2, PVR_LIST_OP_POLY, g_ls.t2.back, PVR_TXRFMT_RGB565, true, 1.0e-4f);
-    else
-        dp_layer(PVR_LIST_OP_POLY, g_dp.lbg[g_dp.lcur], PVR_TXRFMT_RGB565, true, 1.0e-4f);
-    uint32_t state = 0;
-    for (int k = 0; k < n; k++) {
-        int t = (int)g_dp_order[0][k];
-        if (!(g_dcf[t].kind & DCF_TRANS)) dp_face(t, PVR_LIST_OP_POLY, &state);
-    }
-    pvr_list_finish();
+    dp_list_op(n);
     pvr_list_begin(PVR_LIST_TR_POLY);
-    if (g_ls.both)   /* tilemap 0 behind the 3D: over the strips only */
-        dp_ls_strips(&g_ls.t0, PVR_LIST_TR_POLY, g_ls.t0.back, PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
-    else if (g_ls.on)   /* tilemaps 1 and 0 */
-        dp_layer(PVR_LIST_TR_POLY, g_dp.lbg[g_dp.lcur], PVR_TXRFMT_ARGB1555, false, 1.0e-4f);
-    state = 0;
-    for (int k = 0; k < n; k++) {
-        int t = (int)g_dp_order[0][k];
-        if (g_dcf[t].kind & DCF_TRANS) dp_face(t, PVR_LIST_TR_POLY, &state);
-    }
-    if (g_ls.on && g_ls.t2.front_cells)
-        dp_ls_strips(&g_ls.t2, PVR_LIST_TR_POLY, g_ls.t2.front, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
-    if (!g_ls.both)
-        dp_layer(PVR_LIST_TR_POLY, g_dp.lfg[g_dp.lcur], PVR_TXRFMT_ARGB1555, true, 1.0e3f);
-    else if (g_ls.t0.front_cells)
-        dp_ls_strips(&g_ls.t0, PVR_LIST_TR_POLY, g_ls.t0.front, PVR_TXRFMT_ARGB1555, true, 1.0e3f);
+    dp_list_tr(n);
     if (DC_VX0 > 0.0f) {
         dp_bar(0.0f, 0.0f, DC_VX0, DC_SCR_H);
         dp_bar(DC_VX1, 0.0f, DC_SCR_W, DC_SCR_H);

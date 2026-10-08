@@ -113,10 +113,13 @@ KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM | (DC_STATS_DBGIO ? INIT_
  * window's numbers, its lines all the same window's. The panel starts hidden
  * and R on the pad shows or hides it (#526). Tools/hud_read.py reads it;
  * dreamcast/README.md says what each field is. */
-enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO, HUD_VR,
+enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO, HUD_VR, HUD_SC = 13,
        HUD_WN = 14, HUD_FT, HUD_CP, HUD_PG, HUD_LD, HUD_RD, HUD_DR, HUD_MS, HUD_TX, HUD_SN,
        HUD_HW, HUD_PV, HUD_G0, HUD_G1, HUD_S0, HUD_S1 };
 static uint32_t s_hud_win;   /* the window's number */
+#ifndef DC_HUD_SHOWN
+#define DC_HUD_SHOWN 0   /* EXTRA=-DDC_HUD_SHOWN=1: the panel shown from boot, for a bench in an emulator */
+#endif
 
 static uint8_t hud_crc8(const char *s, int n) {
     uint8_t c = 0;
@@ -401,10 +404,13 @@ static uint32_t dc_boot_cache_size(void) {
     /* RAMP4096 (#554): the table's extra 86016 bytes of BSS are already out of
      * the heap, and the cache pays for them below. Probe as if they were still
      * free, or the 256 KB step takes another 256 KB on top (1024 - 84, #553). */
-    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10) - 86016u;
+    const uint32_t keep_ = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10) - 86016u;
 #else
-    const uint32_t keep = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10);
+    const uint32_t keep_ = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10);
 #endif
+    /* SCENE= (#567): its tables and code (25-48 KB) are out of the heap the same
+     * way, and took a whole step of cache with them, so a fight faulted twice as often. */
+    const uint32_t keep = keep_ - (DC_SCENE ? (64u << 10) : 0u);
     uint32_t cache = 8u << 20;
     if (DC_STATS_DBGIO) dbgio_disable();   /* KOS says "Out of memory" at every miss, which is the point */
     for (void *p; cache > (1u << 20); cache -= 256u << 10)
@@ -493,14 +499,8 @@ static void dc_hud_version(void) {
 }
 #endif
 
-/* The board up and running: the picture, the sound, the ROM off the disc, the
- * profile with its traps, the board installed. *cache and *left are the pager's
- * cache and what the heap had left, for the stats. A boot that fails stops
- * here with its reason on screen. */
-static void dc_boot(uint32_t *cache, uint32_t *left) {
-    dc_video_mode();
-    if (dp_init() != 0) { printf("pvr_init failed\n"); for (;;) thd_sleep(1000); }
-    dc_text(0, "m2-hle2 for Dreamcast: finding the ROM files");
+/* The SD card's log, first, so the boot's lines are in the file. */
+static void dc_boot_sdlog(void) {
 #if DC_SDLOG
     if (sl_init() == 0) {   /* first, so the boot's lines are in the file */
         g_log.file = stdout;   /* the board's log_msg lines too */
@@ -512,22 +512,51 @@ static void dc_boot(uint32_t *cache, uint32_t *left) {
         dc_text(1, sd);
     }
 #endif
+}
+
+/* The pager's cache, less what the ramp cache options take from it. */
+static uint32_t dc_boot_cache(void) {
+    uint32_t cache = dc_boot_cache_size();
+#if DC_CACHE_SHRINK
+    /* What a 4096-entry g_dp_ramp would add (86016 bytes, #552), taken from the
+     * budget only: the pool is whole frames, so it is 6 frames (96 KB) smaller. */
+    cache -= 86016u;
+#endif
+#if DC_RAMP_4096
+    /* g_dp_ramp's 4096 slots (dc_pvr.h, #553) are 86016 bytes more than its
+     * 1024: taken from the page cache, the tradeoff #552 measured. */
+    cache -= 86016u;
+#endif
+    return cache;
+}
+
+/* The boot lines go, and the panel takes their place. */
+static void dc_boot_panel(void) {
+    if (DC_HUD_MIN) g_dp.text_rows = 0;
+#if DC_HUD_PROF
+    dc_prof_init();   /* off: the HW line says so */
+    for (int r = 0; r < DC_TEXT_ROWS; r++) dp_text_row(r, "");
+    dc_hud_id();
+    dc_hud_version();
+    g_dp.text_hide = DC_HUD_SHOWN ? 0u : ~0u;   /* the panel starts hidden: R shows it */
+#endif
+}
+
+/* The board up and running: the picture, the sound, the ROM off the disc, the
+ * profile with its traps, the board installed. *cache and *left are the pager's
+ * cache and what the heap had left, for the stats. A boot that fails stops
+ * here with its reason on screen. */
+static void dc_boot(uint32_t *cache, uint32_t *left) {
+    dc_video_mode();
+    if (dp_init() != 0) { printf("pvr_init failed\n"); for (;;) thd_sleep(1000); }
+    dc_text(0, "m2-hle2 for Dreamcast: finding the ROM files");
+    dc_boot_sdlog();
 
     /* Sound first: its effects stay in RAM, and it reads the disc through
      * KOS's driver, which the pager forbids once it is up. */
     bool sound = ds_init() == 0;
     dc_boot_sincos();
-    *cache = dc_boot_cache_size();
-#if DC_CACHE_SHRINK
-    /* What a 4096-entry g_dp_ramp would add (86016 bytes, #552), taken from the
-     * budget only: the pool is whole frames, so it is 6 frames (96 KB) smaller. */
-    *cache -= 86016u;
-#endif
-#if DC_RAMP_4096
-    /* g_dp_ramp's 4096 slots (dc_pvr.h, #553) are 86016 bytes more than its
-     * 1024: taken from the page cache, the tradeoff #552 measured. */
-    *cache -= 86016u;
-#endif
+    *cache = dc_boot_cache();
     if (pg_init(&dc_layout_sfight, *cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0)
         dc_stop("the disc lacks a ROM file (dc_layout.h)");
     g_mem_window = dc_window;
@@ -561,14 +590,7 @@ static void dc_boot(uint32_t *cache, uint32_t *left) {
     emu_ctx_init(&ctx, &cpu, &bus);
     geo3d_init(&geo);
     ctx.run_state = EMU_RUNNING;
-    if (DC_HUD_MIN) g_dp.text_rows = 0;   /* the boot lines go */
-#if DC_HUD_PROF
-    dc_prof_init();   /* off: the HW line says so */
-    for (int r = 0; r < DC_TEXT_ROWS; r++) dp_text_row(r, "");   /* the boot lines go */
-    dc_hud_id();
-    dc_hud_version();
-    g_dp.text_hide = ~0u;   /* the panel starts hidden: R shows it */
-#endif
+    dc_boot_panel();
 }
 
 /* ---- The run loop's numbers ------------------------------------------------------ */
@@ -762,8 +784,10 @@ static void dc_bench_report(dc_bench_t *b, const dc_stats_t *s, uint64_t t1, con
              (unsigned long)(g[4] - b->g0[4]), (unsigned long)(g[DC_REGIONS + 1] - b->g0[DC_REGIONS + 1]),
              (unsigned long)(g[DC_REGIONS] - b->g0[DC_REGIONS]));
     hud_line(HUD_B2, "B2", 0, line);
-    snprintf(line, sizeof line, "rd=%lu sk=%lu sp=%lu", (unsigned long)(g_pg.reads - b->dr0),
-             (unsigned long)(g_pg.seeks - b->sk0), (unsigned long)(g_pg.sp_loads - b->sp0));
+    /* and boot to F0's: drive commands, seeks, texture pack reads (a scene's load is among them) */
+    snprintf(line, sizeof line, "rd=%lu sk=%lu sp=%lu brd=%lu bsk=%lu btx=%lu", (unsigned long)(g_pg.reads - b->dr0),
+             (unsigned long)(g_pg.seeks - b->sk0), (unsigned long)(g_pg.sp_loads - b->sp0),
+             (unsigned long)b->dr0, (unsigned long)b->sk0, (unsigned long)b->rd0);
     hud_line(HUD_B3, "B3", 0, line);
 #else
     dp_text(3, b->line);
@@ -780,9 +804,10 @@ static void dc_bench_report(dc_bench_t *b, const dc_stats_t *s, uint64_t t1, con
              (unsigned long)(g[4] - b->g0[4]), (unsigned long)(g[DC_REGIONS + 1] - b->g0[DC_REGIONS + 1]),
              (unsigned long)(g[DC_REGIONS] - b->g0[DC_REGIONS]));
     dp_text(5, b_line3);
-    static char b_line4[64];   /* commands to the drive, the seeks among them, strip pack pages */
-    snprintf(b_line4, sizeof b_line4, "rd %lu sk %lu sp %lu", (unsigned long)(g_pg.reads - b->dr0),
-             (unsigned long)(g_pg.seeks - b->sk0), (unsigned long)(g_pg.sp_loads - b->sp0));
+    static char b_line4[96];   /* drive commands, seeks, strip pack pages; scene loads since boot */
+    snprintf(b_line4, sizeof b_line4, "rd %lu sk %lu sp %lu sc %u st %u ad %u %ums", (unsigned long)(g_pg.reads - b->dr0),
+             (unsigned long)(g_pg.seeks - b->sk0), (unsigned long)(g_pg.sp_loads - b->sp0),
+             g_dsc.scenes, g_dsc.staged, g_dsc.adopted, g_dsc.ms);
     printf("%s | %s\n", b_line3, b_line4);
     dp_text(6, b_line4);
 #endif
@@ -998,6 +1023,11 @@ static void dc_hud_window(dc_stats_t *s, uint64_t t2, const dc_window_t *w) {
              (unsigned)g_dp.tx_hits, (unsigned)(g_dp.tx_hits + g_dp.tx_miss), g_dp.count, g_dp.made,
              g_dp.dropped, g_dp.fails);
     hud_line(HUD_TX, "TX", 1, line);
+    if (DC_SCENE) {   /* scene loads since boot (dc_scene.h): scenes, textures staged and adopted, KB, ms, meshes */
+        snprintf(line, sizeof line, "sc=%u st=%u ad=%u kb=%u ms=%u me=%u",
+                 g_dsc.scenes, g_dsc.staged, g_dsc.adopted, g_dsc.kb, g_dsc.ms, g_dsc.meshes);
+        hud_line(HUD_SC, "SC", 1, line);
+    }
     snprintf(line, sizeof line, "on=%d codes=%u unk=%u bgm=%d ring=%u und=%u",
              g_ds.on, (unsigned)g_ds.codes, (unsigned)g_ds.unknown, g_ds.bgm == 0xFFFF ? -1 : (int)g_ds.bgm,
              (unsigned)((g_ds.r_head - g_ds.r_tail) >> 10), (unsigned)g_ds.underruns);
