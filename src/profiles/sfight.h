@@ -287,6 +287,36 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /*
+ * The versus match on the board, for a replay's label (core/replay.h). The
+ * same two facts as the result hook above say a two-player match is on; each
+ * fighter's character is its rob's byte +0x1B0 (rob 1P 0x510D00, 2P 0x514100;
+ * tools/lib/board.mjs ROB_CHAR), the stage is stage_num, the rounds won are
+ * byte_50004F / byte_500051 and the rounds to win byte_500052.
+ */
+static const char *const s_sfight_chara_names[16] = {
+    "Sonic", "Tails", "Amy", "Metal Sonic", "Fang", "Bark", "Knuckles", "Espio",
+    "Robotnik", "Robotnik", "Bean", NULL, NULL, NULL, NULL, "Honey",
+};
+static const char *const s_sfight_stage_names[15] = {
+    "South Island", "Flying Carpet", "Aurora Icefield", "Mushroom Hill", "Canyon Cruise",
+    "Casino Night", "Dynamite Plant", "Giant Wing", "Death Egg", "Death Egg's Eye",
+    "Final Eggman Boss", NULL, NULL, "South Island", "South Island",
+};
+
+static void sfight_match_info(memory_bus_t *bus, game_match_info_t *out) {
+    out->fighting = (mem_read8(bus, 0x00500068) & 2u) && mem_read8(bus, 0x0050004C) == 2u;
+    for (int side = 0; side < 2; side++) {
+        int c = mem_read8(bus, (side ? 0x00514100u : 0x00510D00u) + 0x1B0u);
+        out->chara[side]      = c;
+        out->chara_name[side] = c < 16 ? s_sfight_chara_names[c] : NULL;
+        out->rounds[side]     = mem_read8(bus, side ? 0x00500051u : 0x0050004Fu);
+    }
+    out->stage         = mem_read8(bus, 0x00500064);
+    out->stage_name    = out->stage < 15 ? s_sfight_stage_names[out->stage] : NULL;
+    out->rounds_to_win = mem_read8(bus, 0x00500052);
+}
+
+/*
  * vs_rematch (0xE584, next_round+0x1A4): VS mode's rematch. Sega's console
  * emulator traps this instruction (its table index 26, handler RVA 0x52EC0).
  *
@@ -848,6 +878,7 @@ static const game_profile_t sfight_profile = {
     .hooks        = { SFIGHT_BASE_HOOKS },
     .input        = { SFIGHT_INPUT_MAP },
     .quirks       = { SFIGHT_QUIRKS },
+    .match_info   = sfight_match_info,
 };
 
 #endif /* PROFILES_SFIGHT_H */

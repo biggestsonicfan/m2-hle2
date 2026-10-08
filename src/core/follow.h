@@ -25,6 +25,10 @@
  *          the frame's slice count, and every FOLLOW_RAM_EVERY frames a hash
  *          of work RAM
  *   END    the segment stops here, its payload says why
+ *   BOARD  u32 what the run loop decides beside the inputs (follow_board_live):
+ *          bit 0 a netplay session owns the board (the cabinet's CPU table),
+ *          bit 1 the warning skip is held. A feed without one keeps the
+ *          follower's own warning skip, as before the record existed.
  * Anything else that changes the board from outside -- a reset, a state load,
  * a single step, a COP command, SKY EYE, a netplay session -- cannot be put in
  * the feed. It ends the segment (follow_lead_break) and the next slice starts a
@@ -66,7 +70,17 @@
 #define FOLLOW_ROM_MAX     65536u          /* ROM patch bytes carried into each segment */
 #define FOLLOW_EVERY_DEF   (60u * 60u * 5u) /* a new segment every five minutes */
 
-enum { FOLLOW_INPUT = 1, FOLLOW_WRITE, FOLLOW_SET, FOLLOW_CHECK, FOLLOW_END };
+enum { FOLLOW_INPUT = 1, FOLLOW_WRITE, FOLLOW_SET, FOLLOW_CHECK, FOLLOW_END, FOLLOW_BOARD };
+
+/* What the run loop decides beside the inputs (emu_service_irq), for a board
+ * that is not following: bit 0 a netplay session owns it, bit 1 the warning
+ * skip is held. */
+#define FOLLOW_BOARD_SESSION 1u
+#define FOLLOW_BOARD_WARNING 2u
+static inline uint32_t follow_board_live(void) {
+    bool session = netplay_active();
+    return (session ? FOLLOW_BOARD_SESSION : 0u) | ((g_warning_skip || session) ? FOLLOW_BOARD_WARNING : 0u);
+}
 
 static inline uint64_t follow_key(uint32_t frame, uint32_t slice) {
     return ((uint64_t)frame << 16) | (slice & 0xFFFFu);
@@ -127,8 +141,8 @@ typedef struct {
     uint32_t seg_frames;     /* frames into this segment */
     bool     join_due;
     char     why[64];        /* why the last segment ended */
-    bool     held_known, set_known;
-    uint32_t held;
+    bool     held_known, set_known, board_known;
+    uint32_t held, board;
     int32_t  set[FOLLOW_SET_WORDS];
     int      use_net_was;    /* the netplay latch, put back after the slice */
     bool     latched;
@@ -345,7 +359,7 @@ static inline bool follow__lead_join(emu_thread_ctx_t *ctx) {
     follow__lead_write_start();
     L->join_due = false;
     L->why[0] = 0;
-    L->held_known = L->set_known = false;
+    L->held_known = L->set_known = L->board_known = false;
     L->seg_frames = 0;
     LOG_INFO("follow: segment %u at frame %u slice %u", seg, L->frame, L->slice);
     return true;
@@ -429,6 +443,14 @@ static inline void follow__lead_begin(emu_thread_ctx_t *ctx) {
         memcpy(L->set, set, sizeof set);
         L->set_known = true;
     }
+    uint32_t board = follow_board_live();
+    if (!L->board_known || board != L->board) {
+        uint8_t p[4];
+        follow_put32(p, board);
+        follow__lead_rec(FOLLOW_BOARD, L->slice, p, 4);
+        L->board = board;
+        L->board_known = true;
+    }
     /* The board reads one word for the whole slice: the host's keys can move
      * under it on another thread, and the follower has to see what it saw. */
     uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
@@ -487,6 +509,7 @@ typedef struct {
     uint32_t seg, frame, slice, frame_slices;
     uint32_t checks, rams;
     uint32_t held;         /* the leader's composed word, put in at every slice */
+    uint32_t board;        /* the leader's FOLLOW_BOARD flags */
     char     why[128];
 } follow_sub_t;
 
@@ -538,6 +561,7 @@ static inline const char *follow_join(emu_thread_ctx_t *ctx, const void *state, 
     g_follow.joined  = true;
     g_follow.newest  = UINT64_MAX;
     g_follow.end_key = UINT64_MAX;
+    g_follow.board   = g_warning_skip ? FOLLOW_BOARD_WARNING : 0u;   /* a feed with no BOARD */
     g_input.use_net  = 1;
     return NULL;
 }
@@ -608,6 +632,9 @@ static inline bool follow__apply(emu_thread_ctx_t *ctx, const uint8_t *r, uint32
             follow_settings_put(s);
         }
         return true;
+    case FOLLOW_BOARD:
+        if (n >= 4) g_follow.board = follow_get32(r + FOLLOW_REC_BYTES);
+        return true;
     case FOLLOW_END:
         g_follow.ended = true;
         return false;
@@ -676,6 +703,11 @@ static inline void follow__sub_end(emu_thread_ctx_t *ctx, bool frame_end) {
     F->frame++;
     F->slice = 0;
     F->frame_slices = 0;
+}
+
+/* The flags the run loop goes by this slice: the leader's while following. */
+static inline uint32_t follow_board_flags(void) {
+    return g_follow.on ? g_follow.board : follow_board_live();
 }
 
 /* ---- The slice's hooks (emu_slice_body, under the mutex) ------------------- */

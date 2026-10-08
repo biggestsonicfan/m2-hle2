@@ -169,6 +169,20 @@ typedef void (*game_install_fn)(const struct romset *rs,
                                 struct i960_cpu *cpu,
                                 struct memory_bus *bus);
 
+/* Who fights whom, and where, as a replay labels it (core/replay.h). Read off
+ * the board by the profile; -1 / NULL where it does not know. */
+typedef struct {
+    bool        fighting;        /* a two-player versus fight is on the board */
+    int         chara[2];        /* each side's character */
+    const char *chara_name[2];
+    int         stage;
+    const char *stage_name;
+    int         rounds[2];       /* rounds each side has won */
+    int         rounds_to_win;
+} game_match_info_t;
+
+typedef void (*game_match_info_fn)(struct memory_bus *bus, game_match_info_t *out);
+
 /* ---- Profile ------------------------------------------------------------- */
 
 typedef struct game_profile {
@@ -195,6 +209,9 @@ typedef struct game_profile {
      * set's default: profile_for_program picks it for a program that is not
      * the set's game. */
     bool              any_program;
+
+    /* The versus match on the board, for a replay's label. NULL: unknown. */
+    game_match_info_fn match_info;
 } game_profile_t;
 
 /* ---- Registry ------------------------------------------------------------ */

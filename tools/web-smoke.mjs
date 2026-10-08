@@ -5,7 +5,7 @@
  *   node tools/web-smoke.mjs --url http://localhost:8080/?rom=/dev-rom.zip
  *        [--seconds 30] [--shot out.png] [--shot-at 10,20] [--browser path/to/chrome-or-edge]
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
- *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console]
+ *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console|picture|replay]
  *        [--cpu-throttle N] [--eval JS] [--mobile] [--taps "coin@12,b1@20:300,dpad-right@22:500"]
  *        [--hide 20:10]
  *
@@ -280,7 +280,7 @@ try {
     console.log(`\n${report}\n`);
   }
   const drawer = opt('--drawer', null);
-  if (drawer) { await evaluate(`m2hleTools.openDrawer('${drawer === 'console' ? 'console' : 'lag'}')`); await sleep(400); }
+  if (drawer) { await evaluate(`m2hleTools.openDrawer(${JSON.stringify(drawer)})`); await sleep(400); }
   if (shot) await screenshot(shot);
 
   if (expectLog && !sawExpected) {

@@ -560,6 +560,7 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
         wrote[count++] = b;
     }
     follow_lead_write(addr, rom, wrote, (uint32_t)count);   /* follow.h: a follower makes it too */
+    replay_rec_write(addr, rom, wrote, (uint32_t)count);    /* replay.h: and a replay plays it back */
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"bytes_written\":%d}", count);
 }
@@ -2651,6 +2652,46 @@ static void mcp_cmd_follow_lead(const char *req, char *resp, int cap) {
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 }
 
+/*
+ * {"cmd":"replay", ...} -- recorded online matches (core/replay.h, Pinboard #572).
+ * "record":0|1 turns recording on or off ("dir" sets the folder); "open":PATH
+ * opens a replay file and answers its label in "info"; "play":1 plays it from
+ * the start, "stop":1 gives the board back; "seek":FRAME, "fast":0|1. No
+ * arguments only reads.
+ */
+static const char *mcp_replay_do(const char *req) {
+    emu_thread_ctx_t *ctx = g_mcp.emu;
+    char path[512] = {0};
+    uint32_t v = 0;
+    if (mcp_json_get_str(req, "dir", path, sizeof path))
+        snprintf(g_replay_rec.dir, sizeof g_replay_rec.dir, "%s", path);
+    if (mcp_json_get_u32(req, "record", &v)) g_replay_rec.want = v != 0;
+    if (mcp_json_get_u32(req, "fast", &v))   g_replay_play.fast = v != 0;
+    if (mcp_json_get_str(req, "open", path, sizeof path)) return replay_open_file(path);
+    if (mcp_json_get_u32(req, "stop", &v) && v) { replay_play_stop(); return NULL; }
+    if (mcp_json_get_u32(req, "play", &v) && v) return ctx ? replay_play_start(ctx) : "no board";
+    if (mcp_json_get_u32(req, "seek", &v)) return ctx ? replay_play_seek(ctx, v) : "no board";
+    return NULL;
+}
+
+static void mcp_cmd_replay(const char *req, char *resp, int cap) {
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    const char *err = mcp_replay_do(req);
+    char play[512], last[700], rerr[200], unplayable[200];
+    replay_play_status(play, sizeof play);
+    json_escape(last, sizeof last, g_replay_rec.last);
+    json_escape(rerr, sizeof rerr, g_replay_rec.error);
+    json_escape(unplayable, sizeof unplayable, g_replay_play.unplayable);
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":%s%s%s%s,\"record\":%d,\"recording\":%d,\"saved\":%u,\"last\":\"%s\","
+             "\"record_error\":\"%s\",\"playback\":%s,\"unplayable\":\"%s\",\"info\":%s}",
+             err ? "false" : "true", err ? ",\"error\":\"" : "", err ? err : "", err ? "\"" : "",
+             g_replay_rec.want ? 1 : 0, replay_recording() ? 1 : 0, g_replay_rec.saved, last, rerr,
+             play, unplayable, g_replay_play.json[0] ? g_replay_play.json : "null");
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+}
+
 /* Commands that change the board in a way a follow feed cannot carry: the
  * segment ends, and the next slice starts another (core/follow.h). */
 static void mcp_follow_break_after(const char *cmd) {
@@ -2772,6 +2813,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
     else if (strcmp(cmd, "enemy_rank")               == 0) mcp_cmd_enemy_rank(req, resp, cap);
     else if (strcmp(cmd, "follow_lead")              == 0) mcp_cmd_follow_lead(req, resp, cap);
+    else if (strcmp(cmd, "replay")                   == 0) mcp_cmd_replay(req, resp, cap);
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
     mcp_follow_break_after(cmd);
 }

@@ -549,7 +549,7 @@ const m2hleTools = (() => {
     const same = !drawer.hidden && !$('pane-' + tab).hidden;
     if (same) { closeDrawer(); return; }
     drawer.hidden = false;
-    for (const t of ['lag', 'console', 'picture']) {
+    for (const t of ['lag', 'console', 'picture', 'replay']) {
       $('pane-' + t).hidden = t !== tab;
       $('tab-' + t).setAttribute('aria-selected', String(t === tab));
       $('btn-' + t).setAttribute('aria-expanded', String(t === tab));
@@ -561,7 +561,7 @@ const m2hleTools = (() => {
 
   function closeDrawer() {
     $('drawer').hidden = true;
-    for (const t of ['lag', 'console', 'picture']) $('btn-' + t).setAttribute('aria-expanded', 'false');
+    for (const t of ['lag', 'console', 'picture', 'replay']) $('btn-' + t).setAttribute('aria-expanded', 'false');
     $('canvas').focus();
   }
 
@@ -572,6 +572,8 @@ const m2hleTools = (() => {
     $('tab-console').addEventListener('click', () => openDrawer('console'));
     $('btn-picture').addEventListener('click', () => openDrawer('picture'));
     $('tab-picture').addEventListener('click', () => openDrawer('picture'));
+    $('btn-replay').addEventListener('click', () => openDrawer('replay'));
+    $('tab-replay').addEventListener('click', () => openDrawer('replay'));
     $('drawer-close').addEventListener('click', closeDrawer);
     $('lag-start').addEventListener('click', () => diagnose(5));
     $('lag-copy').addEventListener('click', (e) => copy(lastReport, e.currentTarget));

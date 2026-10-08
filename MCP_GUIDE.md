@@ -285,6 +285,17 @@ the last join point (~50 ms: the state is snapshotted stored, and a thread
 deflates it to disk beside the board). The leader keeps the newest two segments.
 `--follow-out DIR` / `--follow-every N` do the same at launch.
 
+**`replay(record: int, dir: str, open: str, play: int, stop: int, seek: int, fast: int)`**
+-- online match replays (`src/core/replay.h`, Pinboard #572). `record:1` saves
+every netplay match to `dir` (default `<user dir>/replays`) as
+`<p1>-vs-<p2>-<date>-<time>.m2replay`; `open` reads a file and returns its label
+in `info` without touching the board; `play:1` plays it (the board is reset to
+the replay's start), `seek` jumps to a frame, `fast:1` runs unpaced, `stop:1`
+gives the board back from power-on. No argument only reads: `recording`,
+`saved`, `last` (the newest file), `playback` (`frame`, `frames`, `ended`,
+`split`, `why`) and `unplayable` (why this build cannot play the open file).
+`--record-replays`, `--replay-dir DIR` and `--replay FILE` do the same at launch.
+
 **`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
 for an online opponent (`--idle-until-match` sets it at launch). While it is on
 and no netplay session owns the board, the board is put back to power-on once
