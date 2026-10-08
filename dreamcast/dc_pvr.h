@@ -557,6 +557,17 @@ static void dc_rk_done(uint32_t lut, uint32_t base, uint32_t off, uint8_t pal) {
 }
 #endif
 
+#ifndef DC_RAMP_WALK
+#define DC_RAMP_WALK 0
+#endif
+#if DC_RAMP_WALK
+/* RAMPWALK=1 (make RAMPWALK=1, Pinboard #555): TMU2 ticks inside dp_face_ramp,
+ * hit or miss, over the bench (on from F0 to F1, main_dc.c). One total; the
+ * function runs as ever, so nothing here reaches the picture. */
+static struct { uint32_t on; uint64_t ticks; } g_rw;
+#define dp_face_ramp dp_face_ramp_body
+#endif
+
 static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const int c5[3], int poly, bool trans,
                          uint32_t *base, uint32_t *offset, uint8_t *pal) {
     const uint32_t k0 = (uint32_t)c5[0] | (uint32_t)c5[1] << 5 | (uint32_t)c5[2] << 10 | (uint32_t)poly << 15 |
@@ -615,6 +626,19 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
     if (g_rk.on) dc_rk_done(lut, *base, *offset, *pal);
 #endif
 }
+
+#if DC_RAMP_WALK
+#undef dp_face_ramp
+static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const int c5[3], int poly, bool trans,
+                         uint32_t *base, uint32_t *offset, uint8_t *pal) {
+    const uint32_t t0 = *(volatile uint32_t *)0xFFD80024u;   /* TMU2 counts down */
+    dp_face_ramp_body(bus, T, c5, poly, trans, base, offset, pal);
+    const uint32_t t1 = *(volatile uint32_t *)0xFFD80024u;
+    uint32_t d = t0 - t1;
+    if (t1 > t0) d += *(volatile uint32_t *)0xFFD80020u + 1u;   /* reloaded since */
+    if (g_rw.on) g_rw.ticks += d;
+}
+#endif
 
 /* A face's colour (untextured), or its base and offset (textured): the fill
  * shader's chain at texel 0 and texel 15, joined by a line; or, when that
