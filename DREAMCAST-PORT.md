@@ -1413,6 +1413,40 @@ saved its time too, so the expectation in the pin was wrong, not the run.
 The 97 extra page loads cost little here: Flycast's disc reads are free, so
 on a GD-ROM they would weigh more than this bench shows.
 
+### The ramp walk, timed: 840 ms at 1024 slots, 234 ms at 4096 (#555, at 117ebe6)
+
+`RAMPWALK=1` (`DC_RAMP_WALK`, off by default and compiled out) reads TMU2
+on entry to `dp_face_ramp` and on return, hit or miss, and adds the
+difference only between F0 and F1 (frames 3500-3900); at F1 it prints the
+one total (`RW walk`, row 7). Nothing else is timed: not `dp_decode`, not
+`dp_face_colour`, not the face builders. The default build's `.text` and
+`.data` are byte-identical to 51df018's; `.rodata` differs only in the
+version string. All three builds include Gems (vendor/gems-c a7459d4,
+decomp 38466be).
+
+| frames 3500-3900 | total | i960 slice | draw | ti / sc / so / su | page loads (cd / da) | f1500 hash | cache budget | ramp slots | walk |
+|---|---|---|---|---|---|---|---|---|---|
+| all switches off | 14060 ms | 5226 | 8769 | 453 / 7040 / 217 / 1046 | 567 (280 / 56) | 634d853f | 1280 KB | 1024 | - |
+| `RAMPWALK=1` | 14119 ms | 5221 | 8833 | 459 / 7100 / 220 / 1040 | 567 (280 / 56) | 634d853f | 1280 KB | 1024 | **840 ms** |
+| `RAMP4096=1 RAMPWALK=1` | 13526 ms | 5209 | 8252 | 456 / 6519 / 208 / 1057 | 664 (349 / 68) | 634d853f | **1196 KB** | 4096 | **234 ms** |
+
+One run each. The all-off run matched #554's baseline to the millisecond.
+The middle run is the counter alone. It is there because the walk's
+figure at 1024 slots needs the counter, and the gate run has to stay all off.
+
+- **Walk delta: 606 ms** (840 → 234). That is inside the 140-800 ms band.
+  The HUD between the two counter runs agrees: total −593 ms, draw −581 ms,
+  `sc` −581 ms. The hash holds on every run, so the cache answers right.
+- **i960 slice:** 5221 → 5209 (−12 ms; −17 against the all-off run).
+- **Page loads:** 567 → 664, as in #554.
+- **The counter's own cost:** +59 ms total and +64 ms draw at 1024 slots;
+  at 4096 the run is 69 ms above #554's 13457, and the draw 49 ms above
+  its 8203. That is two TMU2 reads per call.
+- **Gap to 13,333 ms (30 fps):** 193 ms with the counter in. #554's line
+  without it is 13457, 124 ms.
+
+Both switches stay off by default.
+
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
