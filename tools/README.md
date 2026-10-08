@@ -1109,6 +1109,26 @@ Run it after adding state to the board that a save would have to carry. With
 (`emu_state_save_mem` / `emu_state_load_mem`, a stored zip padded to the size
 the core reports), and the result must be the same.
 
+## Following a board one way
+
+`det_digest --follow-out DIR` leads a follow (`src/core/follow.h`, issue #228)
+from the first frame, a segment every `--follow-every N` frames, all kept;
+`--poke F:ADDR:HEX` writes bytes at frame F the way the bridge's `write_memory`
+does, so they go into the feed. `--follow DIR:N` follows from segment N to the
+end of the last one, holding every frame check, and exits 1 on a split. Its rows
+must equal the leader's from the join on, natively and in the wasm build:
+
+```sh
+det_digest $ROMS_DIR/sfight.zip --frames 2400 --script "..." --follow-out f --follow-every 500 \
+    --poke 520:500100:01020304 --poke 1750:59C342:02 --out lead.txt
+det_digest $ROMS_DIR/sfight.zip --frames 2400 --follow f:1 --out fol.txt   # 5 segments, 2400 checks held
+node build_web/det_digest.js $ROMS_DIR/sfight.zip --frames 2400 --follow f:1 --out folw.txt
+cmp fol.txt folw.txt
+```
+
+Run it after adding a way for the bridge or the host to change the board: if
+the feed cannot carry it, it has to end the segment (`follow_lead_break`).
+
 ## The netplay reset
 
 A netplay session is a cold boot on both machines, so the reset at the barrier

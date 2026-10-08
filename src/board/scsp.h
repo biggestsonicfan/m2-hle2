@@ -78,11 +78,14 @@ enum { SCSP_ATTACK, SCSP_DECAY1, SCSP_DECAY2, SCSP_RELEASE };
 #define SCSP_INT_TIMER_A  6
 #define SCSP_INT_TIMER_B  7      /* timer C shares timer B's SCILV bit */
 
+/* The pointers here and in scsp_t are each in a union with a uint64_t, so the
+ * struct is laid out the same on a 32-bit host (wasm) as on a 64-bit one and a
+ * savestate crosses between them (savestate.h, "Portable"). */
 typedef struct {
     uint16_t       phase;
     uint32_t       step;
-    const int32_t *table;
-    const int32_t *scale;
+    union { const int32_t *table; uint64_t table_w; };
+    union { const int32_t *scale; uint64_t scale_w; };
 } scsp_lfo_t;
 
 typedef struct {
@@ -193,12 +196,12 @@ typedef struct {
     uint16_t    tim_cnt[3];      /* MAME: 0xFFFF once expired, reload << 8 after a write */
     uint64_t    tim_due[3];      /* expiry, in clock periods of *clock; 0 = not running */
     uint64_t    tim_next;        /* the earliest tim_due, UINT64_MAX when none */
-    const uint64_t *clock;       /* the driving CPU's clock-period count (256 per sample) */
+    union { const uint64_t *clock; uint64_t clock_w; };   /* the driving CPU's clock-period count (256 per sample) */
     uint8_t     lvl_ta, lvl_tbc, lvl_midi;
     uint8_t     lines;           /* 68000 interrupt lines held asserted, bit n = level n */
     uint16_t    mcieb, mcipd;
     scsp_dsp_t  dsp;
-    uint8_t    *ram;             /* sound RAM, shared with the 68000 (big-endian) */
+    union { uint8_t *ram; uint64_t ram_w; };   /* sound RAM, shared with the 68000 (big-endian) */
     uint32_t    ram_size;
     uint32_t    noise;
     uint64_t    samples;         /* output samples produced since reset */
@@ -215,8 +218,8 @@ typedef struct {
     uint32_t    slot_lo[32], slot_hi[32];   /* sound RAM each running slot may read, [lo, hi) */
     uint32_t    dsp_lo, dsp_hi;             /* sound RAM the DSP reads and writes, [lo, hi) */
     uint32_t    own[0x80000 / 256];         /* per 256-byte granule: the slots whose range covers it */
-    void      (*sink)(void *ud, int16_t l, int16_t r);   /* where made samples go, in order */
-    void       *sink_ud;
+    union { void (*sink)(void *ud, int16_t l, int16_t r); uint64_t sink_w; };   /* where made samples go, in order */
+    union { void *sink_ud; uint64_t sink_ud_w; };
     uint64_t    syncs, catches;             /* full syncs, and single slots run ahead */
     int32_t     acc_l[1024], acc_r[1024];   /* SCSP_OWED_MAX; the owed samples' direct mix so far */
     int32_t     acc_mixs[1024][16];         /* and their DSP inputs */

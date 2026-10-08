@@ -292,26 +292,28 @@ static inline void savestate_scsp_pack(scsp_t *s) {
     for (int i = 0; i < 32; i++) {
         scsp_lfo_t *l[2] = { &s->slot[i].plfo, &s->slot[i].alfo };
         for (int k = 0; k < 2; k++) {
-            uintptr_t t = savestate_lfo_table_id(l[k]->table);
-            uintptr_t c = savestate_lfo_scale_id(l[k]->scale);
-            l[k]->table = (const int32_t *)t;
-            l[k]->scale = (const int32_t *)c;
+            uint64_t t = savestate_lfo_table_id(l[k]->table);
+            uint64_t c = savestate_lfo_scale_id(l[k]->scale);
+            l[k]->table_w = t;
+            l[k]->scale_w = c;
         }
     }
-    s->clock = NULL; s->ram = NULL; s->sink = NULL; s->sink_ud = NULL;
+    s->clock_w = 0; s->ram_w = 0; s->sink_w = 0; s->sink_ud_w = 0;
 }
 
 static inline void savestate_scsp_unpack(scsp_t *s, const scsp_t *live) {
     for (int i = 0; i < 32; i++) {
         scsp_lfo_t *l[2] = { &s->slot[i].plfo, &s->slot[i].alfo };
         for (int k = 0; k < 2; k++) {
-            uint32_t t = (uint32_t)(uintptr_t)l[k]->table;
-            uint32_t c = (uint32_t)(uintptr_t)l[k]->scale;
+            uint32_t t = (uint32_t)l[k]->table_w;
+            uint32_t c = (uint32_t)l[k]->scale_w;
+            l[k]->table_w = 0;
+            l[k]->scale_w = 0;
             l[k]->table = savestate_lfo_table(t);
             l[k]->scale = c >= 1 && c <= 16 ? scsp_lfo_scale[c - 1] : NULL;
         }
     }
-    s->clock = live->clock; s->ram = live->ram; s->sink = live->sink; s->sink_ud = live->sink_ud;
+    s->clock_w = live->clock_w; s->ram_w = live->ram_w; s->sink_w = live->sink_w; s->sink_ud_w = live->sink_ud_w;
 }
 
 /* ---- Info ------------------------------------------------------------------------ */
@@ -370,9 +372,9 @@ static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i
         if (!sh || !co) ok = false;
         else {
             memcpy(sh, &g_sharc, sizeof *sh);
-            sh->sharc_dm_ext = NULL;
+            sh->sharc_dm_ext_w = 0;
             memcpy(co, &g_cop, sizeof *co);
-            co->ctl = NULL;
+            co->ctl_w = 0;
             ok = savestate__add(zp, level, "SHARC", sh, sizeof *sh) && savestate__add(zp, level, "COP", co, sizeof *co);
         }
         free(sh); free(co);
@@ -641,15 +643,15 @@ static inline const char *savestate__load_zip(mz_zip_archive *zp, const char *wh
         /* ---- the commit: nothing below can fail ---- */
         *cpu = *n_cpu;
 
-        uint8_t *dm_ext = g_sharc.sharc_dm_ext;
+        uint64_t dm_ext = g_sharc.sharc_dm_ext_w;
         uint32_t dm_ext_size = g_sharc.sharc_dm_ext_size;
         g_sharc = *n_sharc;
-        g_sharc.sharc_dm_ext      = dm_ext;
+        g_sharc.sharc_dm_ext_w    = dm_ext;
         g_sharc.sharc_dm_ext_size = dm_ext_size;
 
-        const uint8_t *ctl = g_cop.ctl;
+        uint64_t ctl = g_cop.ctl_w;
         memcpy(&g_cop, n_cop, sizeof g_cop);
-        g_cop.ctl = ctl;
+        g_cop.ctl_w = ctl;
         g_zz   = n_zz;
         g_irqt = n_irqt;
 

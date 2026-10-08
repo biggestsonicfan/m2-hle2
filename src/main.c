@@ -70,6 +70,8 @@ static char g_export_roms[512] = {0};   /* --export-roms DIR: write the set's re
 static char g_profile_arg[64] = {0};   /* --profile <id>: e.g. sfight for STF's arcade game */
 static int  g_autorun = 0;
 static char g_load_state[1024];   /* --load-state FILE: start from a savestate */
+static char     g_follow_out[512];   /* --follow-out DIR: lead a one-way follow (core/follow.h) */
+static uint32_t g_follow_every;      /* --follow-every FRAMES between its join points */
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
 static int  g_objview_model = -1;  /* --objview N: and select model N */
@@ -302,13 +304,29 @@ static void load_active_profile(const char *primary_zip) {
  * reach: the interrupt controller, the sound board, the input latch and the run
  * loop's own per-boot flags.
  */
+/* --follow-out DIR: lead from the first slice of a loaded game; a game loaded
+ * later starts a new segment (its board is a new one). */
+static void follow_out_arg(void) {
+    if (!g_follow_out[0]) return;
+    emu_mutex_lock(&state.emu.mutex);
+    if (follow_leading()) {
+        follow_lead_break("game loaded");
+    } else {
+        const char *err = follow_lead_start(g_follow_out, g_follow_every);
+        if (err) LOG_ERROR("--follow-out %s: %s", g_follow_out, err);
+    }
+    emu_mutex_unlock(&state.emu.mutex);
+}
+
 /* --load-state FILE: put the board where a savestate left it, before it runs
  * (core/savestate.h). False, logged, when the state does not fit this ROM set,
  * profile or build; the board is then as the ROM load left it. */
 static bool load_state_arg(void) {
+    follow_out_arg();
     if (!g_load_state[0]) return true;
     emu_mutex_lock(&state.emu.mutex);
     const char *err = emu_state_load_now(&state.emu, g_load_state);
+    if (!err) follow_lead_break("state loaded");
     emu_mutex_unlock(&state.emu.mutex);
     if (err) { LOG_ERROR("--load-state %s: %s", g_load_state, err); return false; }
     return true;
@@ -1605,6 +1623,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--load-state") == 0 && i + 1 < argc) {
             snprintf(g_load_state, sizeof g_load_state, "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--follow-out") == 0 && i + 1 < argc) {
+            snprintf(g_follow_out, sizeof g_follow_out, "%s", argv[++i]);
+        } else if (strcmp(argv[i], "--follow-every") == 0 && i + 1 < argc) {
+            g_follow_every = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--match-replay") == 0) {
             g_match_replay = 1;       /* attract mode straight to its replay fight */
         } else if (strcmp(argv[i], "--match-replay-stage") == 0 && i + 1 < argc) {

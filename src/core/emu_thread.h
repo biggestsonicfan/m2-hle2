@@ -358,6 +358,10 @@ static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *
     return emu_state_loaded(ctx, savestate_load_mem(data, size, ctx->cpu, ctx->bus, &e), &e);
 }
 
+/* A board followed one way from another (Pinboard #568): the leader writes its
+ * inputs and writes to a feed, a follower runs on them. Hooked into the slice. */
+#include "follow.h"
+
 /* ---- The sound UART ---------------------------------------------------------
  *
  * The game's sound handler (STF send_sound_code) sends ONE byte of a queued
@@ -583,6 +587,7 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         emu_mutex_lock(&ctx->mutex);
         if (state == 2 && step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
         else if (state == 2) err = emu_state_load_now(ctx, ctx->state_path);
+        if (state == 2 && !err) follow_lead_break("state loaded");
         else                 err = emu_state_save_now(ctx, ctx->state_path);
         snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
         emu_mutex_unlock(&ctx->mutex);
@@ -594,6 +599,7 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         if (alone)      netplay_restart_alone();
         else if (asked) asked = netplay_reset_board_now();
         else            netplay_do_reset();
+        follow_lead_break("board reset");
         /* THE STEP COUNT IS PART OF THE BOARD, because the frame check hashes
          * it -- `netplay_frame_check` calls it "the instruction count since
          * reset" and it has to actually be one. Left running, it carries the
@@ -778,6 +784,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * program is doing then: the frame is the board's, not the game's. */
     g_vblank_edge = 0;
     g_geodl_full_snap = g_active_profile && g_active_profile->quirks.geo_displaylist;
+    follow_slice_begin(ctx);   /* follow.h: latch or replay this slice's inputs */
     emu_slice_irq_stale(ctx);
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);
@@ -860,6 +867,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->total_steps += steps;
     ctx->slice_capped = (i >= max_steps);
     bool frame = g_vblank_edge != 0;
+    follow_slice_end(ctx, frame);
     if (frame) emu_slice_frame_edge(ctx);
     emu_slice_after(ctx, frame, prof_t0, steps);
     hprof_leave(hzone);
@@ -961,6 +969,7 @@ static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
         bool reset = netplay_reset_board_now();
         if (reset) {
             ctx->total_steps       = 0;    /* as the barrier's reset: see emu_netplay_pump */
+            follow_lead_break("idle hold");
             ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
             ctx->cpu_snapshot      = *ctx->cpu;
             ctx->frame_deadline_us = 0;

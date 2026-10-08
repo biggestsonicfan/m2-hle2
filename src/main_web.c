@@ -277,12 +277,18 @@ EMSCRIPTEN_KEEPALIVE void web_pause_at(unsigned frame) { g_web_pause_frame = fra
 /* The last slice waited on the other player rather than running. */
 static bool g_web_waited;
 
+/* ?follow= : the board follows another one way (core/follow.h, Pinboard #568).
+ * It sends nothing and takes no input; a slice runs only once the feed holds it. */
+static bool g_web_follow;
+#define WEB_FOLLOW_AHEAD 20u   /* frames held past the board before it runs unpaced */
+
 /* One slice, if netplay allows it. Returns false when the board did not advance
  * (stalled on the peer, or the slice went to the barrier's reset). */
 static bool web_slice(void) {
     netplay_step_t np = emu_netplay_pump(&state.emu);
     g_web_waited = (np == NETPLAY_STEP_WAIT);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
+    if (g_web_follow && !follow_slice_ready()) { g_web_waited = true; return false; }
     if (state.emu.run_state != EMU_RUNNING) return false;
     if (emu_slice_should_stop(&state.emu)) return false;
     while (g_web_script_at < g_web_script_n && g_web_script[g_web_script_at].frame <= g_emu_frames)
@@ -341,6 +347,13 @@ EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
     return web_paused();
 }
 
+/* A netplay watcher behind the fighters takes the extra slices whether it is
+ * owed them or not, until it has caught up (netplay_catching_up); so does a
+ * follower with more than WEB_FOLLOW_AHEAD frames of feed in hand. */
+static bool web_catching_up(void) {
+    return netplay_catching_up() || (g_web_follow && follow_buffered() > WEB_FOLLOW_AHEAD);
+}
+
 static void web_run_owed_slices(void) {
     int64_t now = emu_now_us();
     if (state.last_us == 0) state.last_us = now;
@@ -362,10 +375,8 @@ static void web_run_owed_slices(void) {
         state.owed_us = 0;
         return;
     }
-    /* A netplay watcher behind the fighters takes the extra slices whether it is
-     * owed them or not, until it has caught up (netplay_catching_up). */
     for (int n = 0; n < WEB_MAX_SLICES_PER_FRAME
-                    && (state.owed_us >= WEB_SLICE_DUE_US || netplay_catching_up()); n++) {
+                    && (state.owed_us >= WEB_SLICE_DUE_US || web_catching_up()); n++) {
         bool owed = state.owed_us >= WEB_SLICE_DUE_US;
         if (!web_slice()) {
             /* Waiting on the other player: let the time go rather than owe it.
@@ -900,7 +911,7 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
 
     /* The set's backup RAM, kept in this browser's localStorage. A scripted run
      * (?script=) boots blank, so that two runs of a script are the same run. */
-    if (g_backup_want != 0 && g_web_script_n == 0)
+    if (g_backup_want != 0 && g_web_script_n == 0 && !g_web_follow)
         backup_ram_open(profile_rom_set(g_active_profile), true);
     web_install_board();
     emu_run(&state.emu);
@@ -908,7 +919,7 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     state.owed_us = 0;
     LOG_INFO("web: '%s' loaded; reset IP = 0x%08X", g_active_profile->id, state.cpu.sfr.ip);
     /* The Console version is the PS3 port as a player meets it: its menus. */
-    g_web_shell_on = !strcmp(g_active_profile->id, "sfight_console");
+    g_web_shell_on = !g_web_follow && !strcmp(g_active_profile->id, "sfight_console");
     if (g_web_shell_on) {
         ps3ui_shell_init(&g_ps3ui_shell, (ps3ui_host_t){ web_shell_reset, web_shell_apply, web_shell_volume, NULL },
                          &g_ps3ui_app);
@@ -916,6 +927,65 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     }
     g_web_volume = 1.0f;
     return 0;
+}
+
+/* ---- ?follow= (core/follow.h) ------------------------------------------------
+ *
+ * The page fetches the leader's follow.json, calls web_follow_begin with its
+ * profile BEFORE web_rom_load (the profile picks the ROM files and the hooks),
+ * then hands over the join point and the feed as they arrive. The board waits
+ * for each slice's records, runs unpaced while it holds many, and never takes the
+ * page's input: what it reads is the leader's. No backup RAM (the state carries
+ * the leader's), no shell. A split or an END is the page's cue to join again. */
+static char g_web_follow_err[160];
+
+/* 0, or -1 when there is no such profile. */
+EMSCRIPTEN_KEEPALIVE int web_follow_begin(const char *profile) {
+    const game_profile_t *p = profile && *profile ? profile_by_id(profile) : NULL;
+    if (profile && *profile && !p) return -1;
+    if (p) g_active_profile = p;
+    g_web_follow = true;
+    return 0;
+}
+
+/* Join at a segment's state (a malloc'd buffer, freed here). 0, or -1 with
+ * web_follow_error saying why. */
+EMSCRIPTEN_KEEPALIVE int web_follow_join(uint8_t *data, int len) {
+    const char *err = !g_web_follow ? "not following" : !state.romset.loaded ? "no game loaded"
+                    : data && len > 0 ? follow_join(&state.emu, data, (size_t)len) : "no state";
+    free(data);
+    snprintf(g_web_follow_err, sizeof g_web_follow_err, "%s", err ? err : "");
+    if (err) return -1;
+    if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+    state.owed_us = 0;
+    return 0;
+}
+
+/* The next bytes of the joined segment's feed (a malloc'd buffer, freed here). */
+EMSCRIPTEN_KEEPALIVE int web_follow_feed(uint8_t *data, int len) {
+    const char *err = data && len > 0 ? follow_feed(data, (size_t)len) : NULL;
+    free(data);
+    if (err) { snprintf(g_web_follow_err, sizeof g_web_follow_err, "%s", err); return -1; }
+    return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE const char *web_follow_error(void) { return g_web_follow_err; }
+
+/* {"joined","ended","split","why","frame","buffered","checks","rams","bytes"} */
+EMSCRIPTEN_KEEPALIVE const char *web_follow_status(void) {
+    static char buf[400];
+    const follow_sub_t *F = &g_follow;
+    char why[160];
+    size_t w = 0;
+    for (const char *c = F->why; *c && w + 2 < sizeof why; c++)
+        if (*c != '"' && *c != '\\' && (unsigned char)*c >= 0x20) why[w++] = *c;
+    why[w] = 0;
+    snprintf(buf, sizeof buf,
+             "{\"joined\":%d,\"ended\":%d,\"split\":%d,\"why\":\"%s\",\"frame\":%u,"
+             "\"buffered\":%u,\"checks\":%u,\"rams\":%u}",
+             F->joined ? 1 : 0, F->ended ? 1 : 0, F->split ? 1 : 0, why, (unsigned)g_emu_frames,
+             follow_buffered(), F->checks, F->rams);
+    return buf;
 }
 
 /* The files the last web_rom_load did not find, space separated ("" if none). */

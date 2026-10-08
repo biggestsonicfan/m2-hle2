@@ -271,6 +271,20 @@ as `{"error":"..."}` and the board is untouched. `--load-state FILE` does the
 load at launch (headless: a failed load exits 1). Paths are on the emulator's
 machine.
 
+**`follow_lead(dir: str, every: int, join: int, off: int)`** -- lead a one-way
+follow (`src/core/follow.h`, issue #228): from the next slice the board writes
+`follow.json`, a join point `seg-N.sta` and a feed `seg-N.feed` into `dir`, and
+any number of followers (the web build's `?follow=`) replay it. The feed carries
+the input word each slice read, every `write_memory`, the HLE settings and a
+frame check per frame. `every` is frames between join points (default five
+minutes); a reset, a state load, a single step, a COP command or SKY EYE end the
+segment and start the next at once, since a feed cannot carry them. `join:1`
+starts a new segment now, `off:1` stops, and no argument only reads. The reply
+says the segment, the feed's size and `join_ms`, how long the board waited for
+the last join point (~50 ms: the state is snapshotted stored, and a thread
+deflates it to disk beside the board). The leader keeps the newest two segments.
+`--follow-out DIR` / `--follow-every N` do the same at launch.
+
 **`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
 for an online opponent (`--idle-until-match` sets it at launch). While it is on
 and no netplay session owns the board, the board is put back to power-on once
