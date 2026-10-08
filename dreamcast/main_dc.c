@@ -814,6 +814,28 @@ static void dc_rc_bench(bool f0) {
 static inline void dc_rc_bench(bool f0) { (void)f0; }
 #endif
 
+#if DC_RAMP_KEEP
+/* Would an evicted g_dp_ramp entry still have been right (dc_pvr.h, #550)?
+ * The set opens at F0; the report goes over the picture (rows 7-9). */
+static void dc_rk_bench(bool f0) {
+    static char rows[3][80];
+    if (f0) { dc_rk_start(); return; }
+    g_rk.on = 0;
+    const uint32_t *n = g_rk.n;
+    snprintf(rows[0], sizeof rows[0], "RK look %lu miss %lu hit %lu cap %lu", (unsigned long)n[DC_RK_LOOK],
+             (unsigned long)n[DC_RK_MISS], (unsigned long)(n[DC_RK_LOOK] - n[DC_RK_MISS]), (unsigned long)g_rk.cap);
+    snprintf(rows[1], sizeof rows[1], "comp %lu repl %lu lut %lu slot %lu full %lu", (unsigned long)n[DC_RK_COMP],
+             (unsigned long)n[DC_RK_REPL], (unsigned long)n[DC_RK_LUT], (unsigned long)n[DC_RK_INSLOT],
+             (unsigned long)n[DC_RK_FULL]);
+    snprintf(rows[2], sizeof rows[2], "valid %lu spool %lu wpool %lu woth %lu", (unsigned long)n[DC_RK_VALID],
+             (unsigned long)n[DC_RK_SPOOL], (unsigned long)n[DC_RK_WPOOL], (unsigned long)n[DC_RK_WOTHER]);
+    printf("%s | %s | %s\n", rows[0], rows[1], rows[2]);
+    dp_text(7, rows[0]); dp_text(8, rows[1]); dp_text(9, rows[2]);
+}
+#else
+static inline void dc_rk_bench(bool f0) { (void)f0; }
+#endif
+
 /* A slice ran t0..t1: start the bench at F0, count its slices, report at F1. */
 static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
     static dc_bench_t b;
@@ -827,10 +849,11 @@ static void dc_bench(const dc_stats_t *s, uint64_t t0, uint64_t t1) {
         dc_split_bench(true);
         dc_fc_bench(true);
         dc_rc_bench(true);
+        dc_rk_bench(true);
     }
     if (!b.t0 || b.line[0]) return;
     b.sl += t1 - t0;
-    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); dc_fc_bench(false); dc_rc_bench(false); }
+    if (g_emu_frames >= DC_BENCH_F1) { dc_bench_report(&b, s, t1, p, g); dc_split_bench(false); dc_fc_bench(false); dc_rc_bench(false); dc_rk_bench(false); }
 }
 
 /* ---- The 2-s stats --------------------------------------------------------------- */
