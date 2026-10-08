@@ -22,3 +22,6 @@
 [submodule "vendor/stb"]
 	path = vendor/stb
 	url = https://github.com/nothings/stb.git
+[submodule "vendor/gems-c"]
+	path = vendor/gems-c
+	url = https://github.com/biggestsonicfan/gems-c.git

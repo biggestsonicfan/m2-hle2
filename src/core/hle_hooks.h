@@ -350,6 +350,16 @@ static size_t          g_hle_extra_count = 0;
 static int (*g_hle_extra_hook)(i960_cpu_t *cpu, memory_bus_t *bus) = NULL;
 static unsigned        g_hle_filter_gen  = 0;
 static unsigned        s_hle_filter_gen  = 0;
+/* Idle loops found in the program rather than named by a profile: homebrew on
+ * a game's board runs the any_program profile, which has no addresses of its
+ * own, so m2_spin_find (m2_spin.h) scans the program at install for the loops
+ * m2_spin_skip can skip and lists them here. They count only while the profile
+ * they were found for is the active one. Bump g_hle_filter_gen after a change. */
+#define HLE_SPIN_SITES_MAX 64
+static uint32_t              g_hle_spin_sites[HLE_SPIN_SITES_MAX];
+static size_t                g_hle_spin_count   = 0;
+static const game_profile_t *g_hle_spin_profile = NULL;
+static int (*g_hle_spin_hook)(i960_cpu_t *cpu, memory_bus_t *bus) = NULL;
 /* Turns the above off for a netplay session (gems_off_for_session). */
 static void (*g_hle_extra_session_off)(void) = NULL;
 
@@ -366,6 +376,10 @@ static inline void hle_filter_sync(void) {
     }
     for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++) {
         uint32_t k = (g_hle_extra_sites[i] >> 2) & 0xFFFFu;
+        s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
+    }
+    for (size_t i = 0; p && p == g_hle_spin_profile && i < g_hle_spin_count; i++) {
+        uint32_t k = (g_hle_spin_sites[i] >> 2) & 0xFFFFu;
         s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
     }
     s_hle_filter_profile = p;
@@ -402,6 +416,9 @@ static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t 
     g_hle_room = room;
     if (g_hle_extra_hook && g_hle_extra_hook(cpu, bus) == 0) return 0;
     if (!p) return 1;
+    if (p == g_hle_spin_profile)
+        for (size_t i = 0; i < g_hle_spin_count; i++)
+            if (g_hle_spin_sites[i] == ip) return g_hle_spin_hook(cpu, bus);
     const hle_hook_entry_t *h = p->hooks;
     size_t n = p->hook_count;
     for (size_t i = 0; i < n; i++) {
