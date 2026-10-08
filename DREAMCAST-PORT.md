@@ -1381,38 +1381,6 @@ pin asked, the probe has to return 1280 KB with the table in the BSS. Either
 probe in finer steps, or reserve the 84 KB ahead of the probe. Either is
 another pin.
 
-### RAMP4096 at the budget #552 priced: 13457 ms (#554, at 81bd16f)
-
-#553's boot probe left the pager 940 KB because the table's 84 KB of BSS
-pushed `dc_boot_cache_size` one 256 KB step lower. With `RAMP4096=1` the
-probe now keeps back 86,016 bytes less (`keep` in `dc_boot_cache_size`), so it
-sees the same free heap as the default build and finds 1280 KB again; the
-switch's existing cut then hands `pg_init` 1196 KB (74 frames), as #552
-priced it. Nothing else changed: same 28-byte entry, index mask, key and
-stale-pool test, no `CACHESHRINK`, no bytes from another pool. The default
-build's `.text` and `.data` are byte-identical to 9f2c50e's, `.rodata`
-differs only in the version string, and `g_dp_ramp` is 0x7000 bytes there
-(0x1C000 with the switch). Both include Gems (83 `gfn_`).
-
-| frames 3500-3900 | total | i960 slice | draw | ti / sc / so / su | page loads (cd / da) | f1500 hash | ramp slots | cache budget |
-|---|---|---|---|---|---|---|---|---|
-| baseline (9f2c50e's code) | 14060 ms | 5226 | 8769 | 453 / 7040 / 217 / 1046 | 567 (280 / 56) | 634d853f | 1024 | 1280 KB |
-| `RAMP4096=1` | 13457 ms | 5199 | 8203 | 466 / 6464 / 211 / 1048 | 664 (349 / 68) | 634d853f | 4096 | **1196 KB** |
-
-**Verdict: 603 ms faster, beyond the ~140 ms noise band and under the
-~800 ms skip line; the hash holds. The switch stays off by default.** One run
-each. The baseline matched #553's to the millisecond. Page loads came out at
-664, exactly `CACHESHRINK`'s count at the same budget. The gap to 13,333 ms
-(30 fps) is 124 ms.
-
-The pin expected the saving in the i960 slice with the draw near 8769. It
-is the other way round: the slice moved 27 ms, and the draw fell 566 ms,
-576 of it in `sc`, the scene decode where `dp_face_ramp` walks the cache.
-That is where the ramp walk runs (#550), and it is where #553's 940 KB run
-saved its time too, so the expectation in the pin was wrong, not the run.
-The 97 extra page loads cost little here: Flycast's disc reads are free, so
-on a GD-ROM they would weigh more than this bench shows.
-
 ## Sonic Gems Collection's way (#456, GEMS-COLLECTION.md)
 
 GEMS-COLLECTION.md, "What it means for the Dreamcast port", lists what Sega's
