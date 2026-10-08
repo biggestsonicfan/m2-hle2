@@ -22,12 +22,19 @@
  * The request and the source are each held as an FNV hash: with the char ids
  * in it (req), and with the char ids replaced by their bytes (src). Group 0 is
  * both the same, group 1 src the same and req not, group 2 src different. One
- * total per HUD window (dc_tc_row). */
+ * total per HUD window (dc_tc_row), or, with DC_TC_TO set (EXTRA=
+ * "-DDC_TC_FROM=a -DDC_TC_TO=b"), one total over board frames a..b only, kept
+ * on the HUD after b; every draw still updates the last request. */
 #ifndef DC_TILECOUNT_H
 #define DC_TILECOUNT_H
 
 #ifndef DC_TILE_COUNT
 #define DC_TILE_COUNT 0
+#endif
+
+#ifndef DC_TC_TO
+#define DC_TC_FROM 0u
+#define DC_TC_TO   0u
 #endif
 
 #if DC_TILE_COUNT
@@ -37,13 +44,19 @@ static struct {
     dc_tc_key_t ls[2][0x1000];                   /* tilemap 2's cells, tilemap 0's */
     dc_tc_key_t blk[TILE_BLK_H][TILE_BLK_W];
     uint32_t    n[2][3];                         /* [ls, cpu][group] this window */
+    uint32_t    draws;                           /* CPU redraws counted */
 } g_tc;
+
+/* Whether this draw is counted: always, or inside board frames DC_TC_FROM..TO. */
+static inline bool dc_tc_on(void) {
+    return !DC_TC_TO || (g_emu_frames >= DC_TC_FROM && g_emu_frames <= DC_TC_TO);
+}
 
 static inline uint32_t dc_tc_mix(uint32_t h, uint32_t v) { return (h ^ v) * 16777619u; }
 
 static inline void dc_tc_tally(int gen, dc_tc_key_t *last, dc_tc_key_t now) {
     int g = now.src != last->src ? 2 : now.req != last->req ? 1 : 0;
-    g_tc.n[gen][g]++;
+    if (dc_tc_on()) g_tc.n[gen][g]++;
     *last = now;
 }
 
@@ -96,6 +109,7 @@ static void dc_tc_blk_layer(dc_tc_key_t *k, const uint16_t *w, const uint8_t *gf
 
 /* The blocks the CPU layers draw this time: each row's span [x0, x1), by block. */
 static void dc_tc_cpu(const uint16_t *w, const uint8_t *gfx, const int16_t *x0, const int16_t *x1, bool ls) {
+    if (dc_tc_on()) g_tc.draws++;
     for (int by = 0; by < TILE_BLK_H; by++) {
         int a = x0[by * 8], b = x1[by * 8];
         for (int bx = a >> 3; bx < (b + 7) >> 3 && a < b; bx++) {
@@ -106,12 +120,13 @@ static void dc_tc_cpu(const uint16_t *w, const uint8_t *gfx, const int16_t *x0, 
     }
 }
 
-/* The window's totals as one HUD row, and the next window starts at zero. */
+/* The totals as one HUD row; per window, the next one starts at zero. */
 static void dc_tc_row(char *line, size_t n) {
-    snprintf(line, n, "TC ls %lu/%lu/%lu cpu %lu/%lu/%lu",
+    snprintf(line, n, "TC%s ls %lu/%lu/%lu cpu %lu/%lu/%lu d%lu", DC_TC_TO ? " f" : "",
              (unsigned long)g_tc.n[0][0], (unsigned long)g_tc.n[0][1], (unsigned long)g_tc.n[0][2],
-             (unsigned long)g_tc.n[1][0], (unsigned long)g_tc.n[1][1], (unsigned long)g_tc.n[1][2]);
-    memset(g_tc.n, 0, sizeof g_tc.n);
+             (unsigned long)g_tc.n[1][0], (unsigned long)g_tc.n[1][1], (unsigned long)g_tc.n[1][2],
+             (unsigned long)g_tc.draws);
+    if (!DC_TC_TO) { memset(g_tc.n, 0, sizeof g_tc.n); g_tc.draws = 0; }
 }
 
 #define DC_TC_LS(ls, gfx, i, e, opaque) \

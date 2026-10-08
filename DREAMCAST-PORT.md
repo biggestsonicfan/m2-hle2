@@ -2260,6 +2260,7 @@ byte for byte. Only the version string differs.
 | off (TILECOUNT=0) | f3127, 120 s | 8.4 | 110 | | |
 | on (TILECOUNT=1) | f2966, 140 s | 4.1 | 165 | 0 / 0 / 0 | 0 / 0 / 26784 |
 | recount, trimmed key | f3214, the starfield | 5.0 | 192 | 0 / 0 / 0 | 0 / 0 / 29760 |
+| recount, board frames 3094-3127 | the 110 ms window | | | 0 / 0 / 0 | 0 / 0 / 101184 |
 
 The first on run's window was not the one behind the 110 ms: it was before
 the starfield. The recount's window is the starfield title, the same scene
@@ -2268,6 +2269,14 @@ as the off run's f3127, and its `TC` and `tl` are reset together
 10 x 2976 at 5.0 shown fps, the whole view on every frame. Not one block
 repeats its request. The same build's fight window reads cpu 207/0/300, so
 the key does match when the request repeats.
+
+f3214 is still a later window than the 110 ms one. A second off run, with a
+shot every 2 s, puts the 110 ms window (8.4 fps, `tl 110`) between the HUD's
+f3093 and f3127. The last row counts only board frames 3094-3127
+(`EXTRA="-DDC_TC_FROM=3094u -DDC_TC_TO=3127u"`; every draw still updates the
+last request, so the first counted frame is held against the frame before).
+It reads `TC f ls 0/0/0 cpu 0/0/101184 d34`: 34 redraws, every block of the
+view on each (34 x 2976), and not one repeats its request.
 
 - **Under half, so no skip.** On the title, no cell matches its last request
   (0%), and none differs only by a char id with identical bytes. Two attract
