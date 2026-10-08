@@ -2224,6 +2224,57 @@ B's `SC` row: 6 scenes, 167 textures staged, 49 adopted, 1212 KB read.
   stf-lolo for a console to price; only a real drive can say what the extra
   seeks cost against the draw's own reads.
 
+## Title tiles against the last request: nothing repeats (#571, at 216bf2d)
+
+The question was whether the tile generators redraw cells they drew the
+frame before with the same request, so that a skip could pay for the title's
+tile time. `make TILECOUNT=1` (`dreamcast/dc_tilecount.h`, off by default and
+compiled out) hashes each cell's request before its generator runs and
+compares it with the same cell's last one. The HUD's row 13 gives one total
+per 2 s window: `TC ls a/b/c cpu a/b/c`, where a = the request matches,
+b = the char id changed but its source bytes match, and c = new.
+
+- **The line-scroll key** (`dp_ls_cell`, tilemap 2 or 0 into the strips'
+  textures) is the entry (char id, palette bank, category bit), `opaque`,
+  the bank's 16 colours in both formats, and the char's 32 bytes. The board
+  has no flip bits, and the scroll belongs to the strips, not the cell.
+- **The CPU key** (`dp_ls_rest` / `tile_cpu_draw`, per 8x8 block over each
+  row's span) is, per tilemap drawn: the H and V scroll and the pair's
+  control word, then per line the row's scroll and the window-mask word,
+  plus the entry and the 4 bytes of every cell the block's first and last
+  pixel sample (both tilemaps of a pair under a split). A block writes
+  pens, so colours are not part of it.
+
+Both runs used #463's protocol: Flycast's libretro core, power-on, a shot
+every 20 s, with the Makefile defaults plus `AOT`, `RAMP4096=0` and
+`HASH_FRAME=1500`. The default build's `.text` and `.data` match 216bf2d's
+byte for byte. Only the version string differs.
+
+| run | title shot | fps | `tl` (ms/frame) | `TC ls` | `TC cpu` |
+|---|---|---|---|---|---|
+| off (TILECOUNT=0) | f3127, 120 s | 8.4 | 110 | | |
+| on (TILECOUNT=1) | f2966, 140 s | 4.1 | 165 | 0 / 0 / 0 | 0 / 0 / 26784 |
+
+- **Under half, so no skip.** On the title, no cell matches its last request
+  (0%), and none differs only by a char id with identical bytes. Two attract
+  windows of the same run do no better: the flight reads ls 0/0/9624 and
+  cpu 480/0/3592 (12%), and GET 8 EMERALDS reads cpu 350/0/4734 (7%). A request skip on
+  the title would skip nothing, so it was not built. The counter stays off.
+- **26784 is 9 x 2976, every block of the screen on each of the window's 9
+  frames**, and the line-scroll column is empty. On the title at this tip,
+  the CPU redraws the whole tile layer every frame, and every block's
+  request is new. #358 measured 5-6 ms here with the starfield on the
+  strips. The 110 ms (114 ms in #463) says the title no longer takes that
+  path. Why was not chased here.
+- **The counter's cost** is its own hashing: 55 ms a frame more on the
+  title, which is why the on run reached the title later and at half the
+  fps. Its shot shows the title before the starfield is drawn in.
+- **The frame-1500 hash at 216bf2d is 109e8406, not 634d853f.** The same
+  source built against gems-c a7459d4 (the pointer before f20ba86) gives
+  634d853f. So f20ba86, the COP's float arithmetic under the SHARC's
+  rounding (#565), moved it. That is a change to the board, not to the
+  tiles. 109e8406 is the hash to hold from f20ba86 on.
+
 ## The AOT was off, and its map was stale (#509)
 
 The ask was a faster ahead-of-time compiler. Two things stood before the
