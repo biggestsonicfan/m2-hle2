@@ -368,7 +368,7 @@ mkdisc() {
     tail -1 "$dir.log"
 }
 
-version() { echo "$DCB_RELEASE" | grep -oE '[0-9][0-9.]*[a-z]?$' || echo "r$BUILD"; }
+version() { echo "$DCB_RELEASE" | grep -oE '[0-9][0-9.]*[a-z]?$' || echo "$BUILD"; }
 
 zip_disc() {
     local dir=$1 name=$2 z
