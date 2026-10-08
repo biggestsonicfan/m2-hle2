@@ -466,6 +466,85 @@ static void dc_rc_miss(uint32_t lut, uint32_t k0, uint32_t k1, bool same) {
 }
 #endif
 
+#ifndef DC_RAMP_KEEP
+#define DC_RAMP_KEEP 0
+#endif
+#if DC_RAMP_KEEP
+/* RAMPKEEP=1 (make RAMPKEEP=1, Pinboard #550): would a g_dp_ramp entry that
+ * was evicted still have been right when its key came back? A side set keeps
+ * every key's last entry (28 bytes, as the slot has it) from F0 on, as a cache
+ * with no evictions would. On a replacement miss the kept entry is judged by
+ * the hit test's own rules before the walk (stale-lut: gen_lut moved; stale-
+ * pool: its pool bank was taken or went cold), then held against what the walk
+ * gives (valid, or wrong: pool-involved or not). The walk, the slot and the
+ * picture are as ever; the counts reproduce RAMPCOUNT's. */
+enum { DC_RK_LOOK, DC_RK_MISS, DC_RK_COMP, DC_RK_REPL, DC_RK_LUT, DC_RK_INSLOT, DC_RK_FULL,
+       DC_RK_VALID, DC_RK_SPOOL, DC_RK_WPOOL, DC_RK_WOTHER, DC_RKS };
+typedef struct { uint32_t lut, k0, k1, base, off, pkey; uint8_t pal; } dc_rk_e_t;
+static struct { uint32_t on, cap, shift, n[DC_RKS]; dc_rk_e_t *set, *cur; bool judge; } g_rk;
+
+static void dc_rk_start(void) {
+    /* 4096 entries (112 KB) hold 3072 keys, half again what the bench has. */
+    if (!g_rk.set && (g_rk.set = calloc(1u << 12, sizeof *g_rk.set))) g_rk.cap = 1u << 12, g_rk.shift = 20;
+    memset(g_rk.n, 0, sizeof g_rk.n);
+    g_rk.on = g_rk.set != NULL;
+}
+
+/* The kept entry for (k0, k1), or a new one (*fresh); NULL when the set is full. */
+static dc_rk_e_t *dc_rk_find(uint32_t k0, uint32_t k1, bool *fresh) {
+    uint32_t i = ((k0 * 2654435761u) ^ (k1 * 2246822519u)) >> g_rk.shift;
+    for (uint32_t probe = 0; probe < g_rk.cap; probe++, i = (i + 1u) & (g_rk.cap - 1u)) {
+        dc_rk_e_t *e = &g_rk.set[i];
+        if (!e->lut) {   /* lut is odd (| 1), so 0 is an empty entry */
+            if (g_rk.n[DC_RK_COMP] + 1u > g_rk.cap / 4u * 3u) return NULL;
+            e->k0 = k0; e->k1 = k1;
+            *fresh = true;
+            return e;
+        }
+        if (e->k0 == k0 && e->k1 == k1) { *fresh = false; return e; }
+    }
+    return NULL;
+}
+
+/* A miss, before the walk: its kind, and for a replacement the kept entry's
+ * fate by the hit test's rules (pool state as it is now, before the walk). */
+static void dc_rk_miss(uint32_t lut, uint32_t k0, uint32_t k1, uint32_t h) {
+    /* The slot holds this key under this lut, but its pool bank went: a pool miss. */
+    const bool inslot = g_dp_ramp[h].lut == lut && g_dp_ramp[h].k0 == k0 && g_dp_ramp[h].k1 == k1;
+    g_rk.n[DC_RK_MISS]++;
+    g_rk.judge = false;
+    bool fresh = false;
+    dc_rk_e_t *e = g_rk.cur = dc_rk_find(k0, k1, &fresh);
+    if (!e) { g_rk.n[DC_RK_FULL]++; return; }
+    if (inslot) { g_rk.n[DC_RK_INSLOT]++; return; }
+    if (fresh) { g_rk.n[DC_RK_COMP]++; return; }
+    if (e->lut != lut) { g_rk.n[DC_RK_LUT]++; return; }
+    g_rk.n[DC_RK_REPL]++;
+    const uint8_t pb = e->pal;
+    if (pb >= DP_POOL_FIRST && (g_dp_pool[pb - DP_POOL_FIRST].key != e->pkey ||
+                                g_dp_pool[pb - DP_POOL_FIRST].used + 1u < g_dp_frame)) {
+        g_rk.n[DC_RK_SPOOL]++;
+        return;
+    }
+    g_rk.judge = true;
+}
+
+/* After the walk: a kept entry that passed the rules is right if it gives
+ * what the walk gave. The set then keeps the walk's entry. */
+static void dc_rk_done(uint32_t lut, uint32_t base, uint32_t off, uint8_t pal) {
+    dc_rk_e_t *e = g_rk.cur;
+    if (!e) return;
+    if (g_rk.judge) {
+        if (e->base == base && e->off == off && e->pal == pal) g_rk.n[DC_RK_VALID]++;
+        else if (e->pal >= DP_POOL_FIRST || pal >= DP_POOL_FIRST) g_rk.n[DC_RK_WPOOL]++;
+        else g_rk.n[DC_RK_WOTHER]++;
+    }
+    e->lut = lut; e->base = base; e->off = off; e->pal = pal;
+    e->pkey = pal >= DP_POOL_FIRST ? g_dp_pool[pal - DP_POOL_FIRST].key : 0;
+    g_rk.cur = NULL; g_rk.judge = false;
+}
+#endif
+
 static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const int c5[3], int poly, bool trans,
                          uint32_t *base, uint32_t *offset, uint8_t *pal) {
     const uint32_t k0 = (uint32_t)c5[0] | (uint32_t)c5[1] << 5 | (uint32_t)c5[2] << 10 | (uint32_t)poly << 15 |
@@ -474,6 +553,9 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
     const uint32_t lut = bus->gen_lut | 1u;
 #if DC_RAMP_COUNT
     g_rc.n[DC_RC_LOOK] += g_rc.on;
+#endif
+#if DC_RAMP_KEEP
+    g_rk.n[DC_RK_LOOK] += g_rk.on;
 #endif
     if (g_dp_ramp[h].lut == lut && g_dp_ramp[h].k0 == k0 && g_dp_ramp[h].k1 == k1) {
         const uint8_t pb = g_dp_ramp[h].pal;
@@ -486,6 +568,9 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
     }
 #if DC_RAMP_COUNT
     if (g_rc.on) dc_rc_miss(lut, k0, k1, g_dp_ramp[h].lut == lut && g_dp_ramp[h].k0 == k0 && g_dp_ramp[h].k1 == k1);
+#endif
+#if DC_RAMP_KEEP
+    if (g_rk.on) dc_rk_miss(lut, k0, k1, h);
 #endif
 #if GEO3D_RAMPSTOP
     /* RAMPSTOP (#547): no walk or bank; the key stands in for base and offset. */
@@ -514,6 +599,9 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
     g_dp_ramp[h].lut = lut; g_dp_ramp[h].k0 = k0; g_dp_ramp[h].k1 = k1;
     g_dp_ramp[h].pkey = *pal >= DP_POOL_FIRST ? g_dp_pool[*pal - DP_POOL_FIRST].key : 0;
     g_dp_ramp[h].base = *base; g_dp_ramp[h].off = *offset; g_dp_ramp[h].pal = *pal;
+#if DC_RAMP_KEEP
+    if (g_rk.on) dc_rk_done(lut, *base, *offset, *pal);
+#endif
 }
 
 /* A face's colour (untextured), or its base and offset (textured): the fill
