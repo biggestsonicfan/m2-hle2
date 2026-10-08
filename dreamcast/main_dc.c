@@ -1124,6 +1124,11 @@ static void dc_stats_rows(dc_stats_t *s, uint64_t t2, const dc_window_t *w) {
              g_geo3d_mesh_clears, g_geo3d_mesh_evicts, (unsigned)(g_geo3d_arena_used >> 10));
     STATS_PRINT(line);
     dp_text(17, line);
+#if DC_TILE_COUNT
+    dc_tc_row(line, sizeof line);
+    STATS_PRINT(line);
+    dp_text(13, line);
+#endif
     unsigned sl = s->slices ? s->slices : 1;
     dc_cpu_stats_t c = dc_stats_cpu(s, sl);
     snprintf(line, sizeof line, "i960 %u ms (cop %u) /slice, %u%% blk %u%% aot, %u steps", c.i960, c.cop, c.blk, c.aot, c.steps);
