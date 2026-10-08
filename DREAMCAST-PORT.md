@@ -2168,6 +2168,62 @@ The f3500-3900 bench came out the same on all three (18809 ms, `rd 680 sk
   `det_digest` for a later try (a scene's textures read whole at its load
   screen, say, where whole groups are the unit).
 
+## Scenes loaded whole, as Gems loads them (#567)
+
+Sonic Gems Collection splits STF's models and textures into a file per
+group (`OBJ_*`, `TEX_*`) and loads the ones a scene needs at its start.
+`make SCENE=1` (`dc_scene.h`) tries the same here. Once every drawn frame it
+reads the scene off the board: the mode byte at `0x50002A` (3 attract, 9 a
+game), `stage_num` at `0x500064`, and the two fighters' ids at rob `+0x1B0`
+through `fa_rob0` / `fa_rob1` (`0x500804` / `0x500808`). When the scene
+changes and has held for 3 frames, it drops every texture the draw held and
+reads the new scene's groups from TEXTURES.PAK, one pass a group: the
+fighters', the stage's, then common. The textures are staged in video memory,
+and `dp_tex_get` adopts one with no read when the texture RAM's hash matches.
+`SCENE=2` also preloads the scene's mesh groups from STRIPS.PAK into the
+mesh cache. It needs a TEXTURES.PAK recorded by group (`det_digest
+--tex-groups`, #508), which now carries the group table (`pad[0]` the count,
+`pad[1]` its offset; `dct_group_t`). The HUD's `SC` row counts what it did,
+and the `B3` row now adds drive commands, seeks and texture-pack reads from
+boot to the bench's first frame (`brd`, `bsk`, `btx`), where the loads are.
+
+**Judged by the drive, not by Flycast.** Flycast reads a disc for free, so
+its fps cannot see a load. On a console a seek is about 100 ms, so what
+counts is how many reads and seeks a build makes. Attract from boot, the
+same 1ST_READ.BIN options as the release:
+
+| build | f3500-3900: `rd` | `sk` | `sp` | boot to f3500: `brd` | `bsk` | `btx` |
+|---|---|---|---|---|---|---|
+| A: SCENE=0, the release's pack (by frame) | 738 | 646 | 246 | 2620 | 2010 | 139 |
+| G: SCENE=0, the pack by group | 739 | 650 | | | | |
+| B: SCENE=1, the pack by group | 738 | 646 | 246 | 2680 | 2061 | 205 |
+| C: SCENE=2, the pack by group | 739 | 659 | 243 | 2687 | 2084 | 220 |
+
+B's `SC` row: 6 scenes, 167 textures staged, 49 adopted, 1212 KB read.
+
+- **It loses.** In the fight it changes nothing: the fight's textures are
+  all in video memory by f3500 either way, and the meshes come from the
+  pager's cache. Before the fight it costs 51 more seeks (B) or 74 (C),
+  about 5-7 s on a console, and 66-81 more pack reads.
+- **Most of what a scene stages is never drawn.** Only 49 of the 167 staged
+  textures (30%) were adopted. A group holds every texture its models can
+  use (all of South Island's, both of a fighter's colours), while attract
+  draws a few of them before the scene changes. The rest were read for
+  nothing, and the textures the draw needed outside the scene's groups were
+  read by the draw anyway. Gems can load groups whole because its scenes sit
+  behind a loading screen; STF's attract and select change scene with no
+  pause.
+- **A trap in measuring it:** the pager's cache is sized by what the heap has
+  left, in 256 KB steps. SCENE's tables and code (25-48 KB) took a whole
+  step, the cache fell from 1196 to 940 pages, and a fight faulted twice as
+  often. `dc_boot_cache_size` discounts a fixed 64 KB for SCENE builds, as
+  RAMP4096 discounts its 86016 bytes; the table holds the same `c=1196` on
+  all four. Read the `PG` row's `c` before trusting an A/B of anything that
+  grows the program.
+- **So SCENE stays 0** in the release. The canary has a SCENE=1 disc beside
+  stf-lolo for a console to price; only a real drive can say what the extra
+  seeks cost against the draw's own reads.
+
 ## The AOT was off, and its map was stale (#509)
 
 The ask was a faster ahead-of-time compiler. Two things stood before the

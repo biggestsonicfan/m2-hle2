@@ -666,32 +666,56 @@ static int txp_cmp_index(const void *a, const void *b) {
     return dct_cmp(x->e.key, x->e.hash, y->e.key, y->e.hash);
 }
 
-static int txp_write(void) {
-    if (txg_n) {
-        for (int g = 0; g <= txg_n; g++) txg_rank[g] = ~0u;
-        for (uint32_t i = 0; i < TXP_SLOTS; i++)
-            if (txp[i].used && txp[i].frame < txg_rank[txp_group(txp[i].model)])
-                txg_rank[txp_group(txp[i].model)] = txp[i].frame;
-    }
-    qsort(txp, TXP_SLOTS, sizeof *txp, txp_cmp_frame);
-    dct_head_t h = { { 'M', '2', 'T', 'X' }, txp_n, 0, 0, 0, { 0 } };
-    h.data_off = (uint32_t)((sizeof h + (size_t)txp_n * sizeof(dct_index_t) + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR);
-    txp_ix_t *ix = calloc(txp_n ? txp_n : 1, sizeof *ix);
-    uint8_t *d = calloc(1, txp_bytes + 32u * txp_n + (size_t)DC_SECTOR * (TXG_MAX + 1) + 1);
-    uint32_t at = 0, frames[4] = { 0 }, ng = 0;
+/* A group's table entry ends at at (a sector): its length, and its line in the log. */
+static void txp_group_end(dct_group_t *g, uint32_t at) {
+    g->len = at - g->off;
+    fprintf(stderr, "  group %-24s %5u KB\n", g->name, g->len >> 10);
+}
+
+/* Each group's rank: the first frame any of its textures was drawn in. */
+static void txp_rank_groups(void) {
+    for (int g = 0; g <= txg_n; g++) txg_rank[g] = ~0u;
+    for (uint32_t i = 0; i < TXP_SLOTS; i++)
+        if (txp[i].used && txp[i].frame < txg_rank[txp_group(txp[i].model)])
+            txg_rank[txp_group(txp[i].model)] = txp[i].frame;
+}
+
+/* Lays the sorted textures out in d, every group from a sector, filling ix,
+ * grp (*ngrp) and frames; returns the bytes laid. */
+static uint32_t txp_lay_out(uint8_t *d, txp_ix_t *ix, dct_group_t *grp, uint32_t *ngrp, uint32_t *frames) {
+    uint32_t at = 0;
     for (uint32_t i = 0; i < txp_n; i++) {
         const uint32_t len = dct_bytes(txp[i].key), g = txp_group(txp[i].model);
         if (txg_n && (!i || g != txp_group(txp[i - 1].model))) {
-            if (i) fprintf(stderr, "  group %-24s %5u KB\n", txg_name[txp_group(txp[i - 1].model)], (at - ng) >> 10);
-            at = (at + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR;   /* every group from a sector */
-            ng = at;
+            at = (at + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR;
+            if (*ngrp) txp_group_end(&grp[*ngrp - 1], at);
+            grp[*ngrp].off = at;
+            snprintf(grp[(*ngrp)++].name, sizeof grp[0].name, "%s", txg_name[g]);
         }
         memcpy(d + at, txp_data + txp[i].off, len);
         ix[i] = (txp_ix_t){ { txp[i].key, txp[i].hash, at, txp[i].frame }, txp[i].model };
         at += (len + 31u) & ~31u;
         frames[txp[i].frame >= 100000u]++;
     }
-    if (txg_n && txp_n) fprintf(stderr, "  group %-24s %5u KB\n", txg_name[txp_group(txp[txp_n - 1].model)], (at - ng) >> 10);
+    if (*ngrp) {
+        at = (at + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR;
+        txp_group_end(&grp[*ngrp - 1], at);
+    }
+    return at;
+}
+
+static int txp_write(void) {
+    if (txg_n) txp_rank_groups();
+    qsort(txp, TXP_SLOTS, sizeof *txp, txp_cmp_frame);
+    dct_head_t h = { { 'M', '2', 'T', 'X' }, txp_n, 0, 0, 0, { 0 } };
+    static dct_group_t grp[TXG_MAX + 1];
+    uint32_t ngrp = 0, frames[4] = { 0 };
+    txp_ix_t *ix = calloc(txp_n ? txp_n : 1, sizeof *ix);
+    uint8_t *d = calloc(1, txp_bytes + 32u * txp_n + (size_t)DC_SECTOR * (TXG_MAX + 2) + 1);
+    const uint32_t at = txp_lay_out(d, ix, grp, &ngrp, frames);
+    h.pad[0] = ngrp;   /* the group table (dc_texpak.h), after the index */
+    h.pad[1] = (uint32_t)(sizeof h + (size_t)txp_n * sizeof(dct_index_t));
+    h.data_off = (uint32_t)((h.pad[1] + ngrp * sizeof(dct_group_t) + DC_SECTOR - 1) / DC_SECTOR * DC_SECTOR);
     h.bytes = at;
     h.models_off = h.data_off + at;
     qsort(ix, txp_n, sizeof *ix, txp_cmp_index);
@@ -704,6 +728,7 @@ static int txp_write(void) {
         memcpy(head + sizeof h + (size_t)i * sizeof(dct_index_t), &ix[i].e, sizeof(dct_index_t));
         mo[i] = ix[i].model;
     }
+    memcpy(head + h.pad[1], grp, ngrp * sizeof(dct_group_t));
     fwrite(head, 1, h.data_off, f);
     fwrite(d, 1, at, f);
     fwrite(mo, sizeof *mo, txp_n, f);

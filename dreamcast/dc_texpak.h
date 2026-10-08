@@ -28,7 +28,9 @@
  * frame that draws from them, within one by frame. A texture is in the group
  * of the model that first drew it. That took more window reads than the
  * frame order (DREAMCAST-PORT.md), so the disc's pack is recorded without
- * it. At models_off, past the textures, each
+ * it. A pack by group has a table of them after the index, dct_group_t
+ * by offset (pad[0] entries at pad[1]), as STRIPS.PAK has: the scene loader
+ * (dc_scene.h, #567) reads a group whole. At models_off, past the textures, each
  * index entry's model (uint16_t, 0xFFFF: not known), for det_digest alone:
  * the Dreamcast reads the file only up to data_off and the textures it finds.
  * ROM-derived (it is the game's decompressed texture data), so recorded by
@@ -47,8 +49,13 @@ typedef struct {
     uint32_t n, data_off;               /* index entries; the textures' offset, a sector multiple */
     uint32_t bytes;                     /* the textures' bytes, for the log */
     uint32_t models_off;                /* the entries' models, or 0 */
-    uint32_t pad[3];
+    uint32_t pad[3];                    /* by group: [0] the groups, [1] their table's offset in the file */
 } dct_head_t;
+
+typedef struct {
+    uint32_t off, len;                  /* from data_off, both whole sectors */
+    char     name[24];                  /* sfight.mdlgroups' name */
+} dct_group_t;
 
 typedef struct {
     uint32_t key, hash;                 /* dp_tex_get's key; dct_src_hash of the words it was cut from */
@@ -56,7 +63,8 @@ typedef struct {
     uint32_t frame;                     /* the recorded frame that first drew it */
 } dct_index_t;
 
-_Static_assert(sizeof(dct_head_t) == 32 && sizeof(dct_index_t) == 16, "TEXTURES.PAK records");
+_Static_assert(sizeof(dct_head_t) == 32 && sizeof(dct_index_t) == 16 && sizeof(dct_group_t) == 32,
+               "TEXTURES.PAK records");
 
 static inline int dct_cmp(uint32_t ka, uint32_t ha, uint32_t kb, uint32_t hb) {
     if (ka != kb) return ka < kb ? -1 : 1;

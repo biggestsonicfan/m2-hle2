@@ -100,11 +100,12 @@ typedef struct {
     uint32_t          npak;
     /* the strip pack (dc_strips.h), read only by pg_sp_copy */
     uint32_t          sp_first, sp_pages, sp_loads;
+    uint32_t          sp_fad, sp_size;          /* its blobs' first sector and bytes (pg_win_at) */
     const dcs_head_t  *sp;           /* its header and, after it, its index */
     /* the texture pack (dc_texpak.h), read by pg_tx_at past the page cache */
     const dct_head_t  *tx;           /* its header and, after it, its index */
     uint32_t          tx_fad, tx_size;          /* its textures' first sector and bytes */
-    uint8_t          *tx_win;                   /* DC_TX_WINDOW bytes of them, from tx_win_off */
+    uint8_t          *tx_win;                   /* DC_TX_WINDOW bytes of a pack, from the disc's byte tx_win_off */
     uint32_t          tx_win_off, tx_win_len;
     uint32_t          tx_reads;
     uint64_t          tx_read_ns;
@@ -402,8 +403,8 @@ static int pg_sp_open(uint32_t *fad, uint32_t *size) {
     uint8_t *idx = memalign(32, off);
     if (!idx || pg_read(idx, f, off / DC_SECTOR) != 0) { free(idx); return 0; }
     g_pg.sp = (const dcs_head_t *)idx;
-    *fad = f + off / DC_SECTOR;
-    *size = fsize - off;
+    *fad = g_pg.sp_fad = f + off / DC_SECTOR;
+    *size = g_pg.sp_size = fsize - off;
     return 1;
 }
 
@@ -445,27 +446,36 @@ static const dct_index_t *pg_tx_find(uint32_t key, uint32_t hash) {
     return NULL;
 }
 
-/* len bytes of the pack's textures from off (len <= DC_TX_WINDOW - DC_SECTOR),
- * or NULL. A miss reads the window from off's sector on: the textures lie in
- * the order the recorded frames drew them, so the next ones come with it. */
-static const uint8_t *pg_tx_at(uint32_t off, uint32_t len) {
+/* len bytes from off of a pack's data at sector fad (size bytes; len <=
+ * DC_TX_WINDOW - DC_SECTOR), through the window, or NULL. A miss reads the
+ * window from off's sector on, so what lies next on the disc comes with it.
+ * The window is tagged by the disc byte it starts at, so the texture and strip
+ * packs share it (the scene loader reads both, #567). */
+static const uint8_t *pg_win_at(uint32_t fad, uint32_t size, uint32_t off, uint32_t len) {
     pager_t *g = &g_pg;
-    if (off > g->tx_size || len > g->tx_size - off) return NULL;
-    if (g->tx_win_off == ~0u || off < g->tx_win_off || off + len > g->tx_win_off + g->tx_win_len) {
-        uint32_t at = off / DC_SECTOR * DC_SECTOR, n = g->tx_size - at;
+    if (off > size || len > size - off) return NULL;
+    const uint32_t base = fad * DC_SECTOR, pos = base + off;
+    if (g->tx_win_off == ~0u || pos < g->tx_win_off || pos + len > g->tx_win_off + g->tx_win_len) {
+        uint32_t at = off / DC_SECTOR * DC_SECTOR, n = size - at;
         if (n > DC_TX_WINDOW) n = DC_TX_WINDOW;
         uint64_t t0 = timer_ns_gettime64();
         g->tx_win_off = ~0u;
-        if (pg_read(g->tx_win, g->tx_fad + at / DC_SECTOR, (n + DC_SECTOR - 1) / DC_SECTOR) != 0) {
+        if (pg_read(g->tx_win, fad + at / DC_SECTOR, (n + DC_SECTOR - 1) / DC_SECTOR) != 0) {
             g->read_errors++;
             return NULL;
         }
         g->tx_read_ns += timer_ns_gettime64() - t0;
         g->tx_reads++;
-        g->tx_win_off = at;
+        g->tx_win_off = base + at;
         g->tx_win_len = n;
     }
-    return g->tx_win + (off - g->tx_win_off);
+    return g->tx_win + (pos - g->tx_win_off);
+}
+
+/* len bytes of the pack's textures from off, or NULL: the textures lie in the
+ * order the recorded frames drew them, so the window brings the next ones. */
+static const uint8_t *pg_tx_at(uint32_t off, uint32_t len) {
+    return pg_win_at(g_pg.tx_fad, g_pg.tx_size, off, len);
 }
 
 /* Window pages first .. first + pages - 1 onto the file at fad (size bytes). */

@@ -53,7 +53,7 @@ CHARS = [chr(c) for c in range(32, 127)]
 TPL = np.array([np.array(font.cell(c), dtype=np.float32).ravel() for c in CHARS])   # (95, 128)
 TPL_SQ = (TPL * TPL).sum(1)
 LINE = re.compile(r"^([A-Z][A-Z0-9]) (.*) ([0-9A-F]{2})$")
-WINDOW_TAGS = {"WN", "FT", "CP", "PG", "LD", "RD", "DR", "MS", "TX", "SN", "HW", "PV", "G0", "G1", "S0", "S1"}
+WINDOW_TAGS = {"WN", "FT", "CP", "PG", "LD", "RD", "DR", "MS", "TX", "SN", "HW", "PV", "G0", "G1", "S0", "S1", "SC"}
 
 
 def read_cells(pic):
