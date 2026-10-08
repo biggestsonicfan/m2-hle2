@@ -1078,6 +1078,7 @@ static bool dp_ls_ok(const uint16_t *w, int t) {
 }
 
 static uint8_t g_dp_chr_new[TMAPGFX_SIZE / 32 / 8];   /* chars changed since the last redraw (dp_tiles_chars) */
+#include "dc_tilecount.h"   /* make TILECOUNT=1 (#571) */
 
 /* Cell i of a tilemap into both its textures; true if it shows in front. The
  * back texture has every pixel (tilemap 2, `opaque`, RGB565) or the category 0
@@ -1126,6 +1127,7 @@ static void dp_ls_draw(dp_ls_t *ls, const uint16_t *w, const uint8_t *gfx, bool 
                 ls->front_cells -= ls->front_set[k];
             }
             ls->cells[k] = e;
+            DC_TC_LS(ls, gfx, k, e, opaque);
             ls->front_set[k] = dp_ls_cell(ls, gfx, k, e, opaque);
             ls->front_cells += ls->front_set[k];
         }
@@ -1328,6 +1330,7 @@ static void dp_tiles_redraw(memory_bus_t *bus, tile_cpu_t *tiles, dp_tiles_state
     dp_tiles_copy(bus, tiles, n, d);
     dp_tiles_extents(d, s->x0, s->x1);
     if (g_ls.both || !(d->full || d->count)) return;
+    DC_TC_CPU(tiles->words, bus->tmapgfx, s->x0, s->x1, g_ls.on);
     if (g_ls.on) dp_ls_rest(tiles, bus->tmapgfx, s->x0, s->x1);
     else         tile_cpu_draw(tiles, bus->tmapgfx, s->x0, s->x1);
 }
