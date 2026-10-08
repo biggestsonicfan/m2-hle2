@@ -472,9 +472,10 @@ main() {
     VENDOR=$DCB_REPO/vendor
     # AOT= takes no path with spaces: the ROM folder through a link.
     ln -sfn "$DCB_PS3/stf_rom" "$DCB_WORK/stf_rom"; ROMS=$DCB_WORK/stf_rom
+    # After gems_source: a submodule it has yet to move reads as -dirty.
+    gems_source; check_tools; assets
     GIT_DESC=$(git -C "$SRC" describe --always --abbrev=7 --dirty)
     BUILD=r$(git -C "$SRC" rev-list --count HEAD)
-    gems_source; check_tools; assets
     OUT=$DCB_WORK/out/dc; build_program
     RESULTS=()
     [ "$DCB_DISCS" != cdi ] && one_disc gdi "$DCB_GDI_NAME" "$DCB_GDI_CANARY"
