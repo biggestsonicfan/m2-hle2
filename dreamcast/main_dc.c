@@ -18,7 +18,6 @@
 #include <kos.h>
 #include <dc/maple/controller.h>
 #include <dc/biosfont.h>
-#include <dc/wdt.h>
 #include <arch/stack.h>
 #include <assert.h>
 
@@ -281,37 +280,9 @@ static void dc_text(int row, const char *s) {
     dp_text_frame();
 }
 
-/* A failed assert, KOS's or ours (dc_fatal), on screen: no serial console in
- * the field. The PVR may be in any state, so the frame buffer is drawn into
- * directly once the last render has had time to land; the watchdog goes off,
- * or it would reset the message away. The return addresses are what KOS's
- * stack walk finds (saved PRs after a call); out/pass2.syms or addr2line on
- * m2hle2.elf names them. */
-static void dc_assert(const char *file, int line, const char *expr, const char *msg, const char *func) {
-    irq_disable();
-    wdt_disable();
-    spu_disable();
-    for (volatile uint32_t i = 0; i < 20000000u; i++) {}   /* a render in flight lands (~0.1 s) */
-    vid_set_mode(DM_640x480, PM_RGB565);
-    vid_clear(0, 0, 96);
+/* dc_assert's return addresses, four to a row from row y. */
+static void dc_assert_stack(int y) {
     char l[64];
-    int y = 24;
-#define DC_ASSERT_LINE(...) do { snprintf(l, sizeof l, __VA_ARGS__); \
-        bfont_draw_str(vram_s + y * 640 + 20, 640, false, l); y += 24; } while (0)
-    DC_ASSERT_LINE("m2-hle2 stopped: an assertion failed");
-#ifdef DC_GIT
-    DC_ASSERT_LINE("build %.13s, board frame %u", DC_GIT, (unsigned)g_emu_frames);
-#else
-    DC_ASSERT_LINE("board frame %u", (unsigned)g_emu_frames);
-#endif
-    y += 12;
-    DC_ASSERT_LINE("%.50s", expr ? expr : "?");
-    if (msg) DC_ASSERT_LINE("%.50s", msg);
-    const char *f = file ? strrchr(file, '/') : NULL;
-    DC_ASSERT_LINE("%.30s:%d", f ? f + 1 : file ? file : "?", line);
-    if (func) DC_ASSERT_LINE("in %.46s", func);
-    y += 12;
-    DC_ASSERT_LINE("called from:");
     uintptr_t sp, ra[24];
     int n = 0;
     __asm__ volatile("mov r15, %0" : "=r"(sp));
@@ -322,8 +293,50 @@ static void dc_assert(const char *file, int line, const char *expr, const char *
         bfont_draw_str(vram_s + y * 640 + 20, 640, false, l);
         y += 24;
     }
+}
+
+/* A failed assert, KOS's or ours (dc_fatal), on screen: no serial console in
+ * the field. The PVR may be in any state, so the frame buffer is drawn into
+ * directly once the last render has had time to land; the watchdog stands
+ * down, or a hang would be reported over it. The return addresses are what KOS's
+ * stack walk finds (saved PRs after a call); out/pass2.syms or addr2line on
+ * m2hle2.elf names them. */
+static void dc_assert(const char *file, int line, const char *expr, const char *msg, const char *func) {
+    irq_disable();
+    dc_wd_stop();
+    spu_disable();
+    for (volatile uint32_t i = 0; i < 20000000u; i++) {}   /* a render in flight lands (~0.1 s) */
+    vid_set_mode(DM_640x480, PM_RGB565);
+    vid_clear(0, 0, 96);
+    char l[64];
+    int y = 24;
+#define DC_ASSERT_LINE(...) do { snprintf(l, sizeof l, __VA_ARGS__); \
+        bfont_draw_str(vram_s + y * 640 + 20, 640, false, l); y += 24; } while (0)
+    DC_ASSERT_LINE("m2-hle2 stopped: %s", line ? "an assertion failed" : "a hang");
+#ifdef DC_GIT
+    DC_ASSERT_LINE("build %.13s, board frame %u", DC_GIT, (unsigned)g_emu_frames);
+#else
+    DC_ASSERT_LINE("board frame %u", (unsigned)g_emu_frames);
+#endif
+    y += 12;
+    DC_ASSERT_LINE("%.50s", expr ? expr : "?");
+    if (msg) DC_ASSERT_LINE("%.50s", msg);
+    const char *f = file ? strrchr(file, '/') : NULL;
+    if (line) DC_ASSERT_LINE("%.30s:%d", f ? f + 1 : file ? file : "?", line);
+    if (func) DC_ASSERT_LINE("in %.46s", func);
+    y += 12;
+    DC_ASSERT_LINE("called from:");
 #undef DC_ASSERT_LINE
+    dc_assert_stack(y);
     for (;;) {}
+}
+
+/* The watchdog's limit (dc_watchdog.h) passed without a pet: where the CPU
+ * was when it fired, on the assertion screen. */
+static void dc_hang(uint32_t pc, uint32_t pr) {
+    char m[48];
+    snprintf(m, sizeof m, "pc %08lx pr %08lx", (unsigned long)pc, (unsigned long)pr);
+    dc_assert(NULL, 0, "no board frame for 2 s", m, NULL);
 }
 
 /* A boot that cannot go on: why, on row 1, for good. */
@@ -1159,13 +1172,12 @@ int main(int argc, char **argv) {
     uint32_t cache, left;
     dc_boot(&cache, &left);
     dc_stats_init(s, cache, left);
-    /* A hang resets the console: the watchdog is petted once a loop (a board
-     * frame and its draw) and by the pager's drive poll, and wraps after
-     * 256 ticks of 5.25 ms, 1.34 s. Flycast does not emulate it. */
+    /* A hang stops on screen: the watchdog is petted once a loop (a board
+     * frame and its draw) and by the pager's drive poll (dc_watchdog.h). */
     assert_set_handler(dc_assert);
-    wdt_enable_watchdog(0, WDT_CLK_DIV_4096, WDT_RST_POWER_ON);
+    dc_wd_start(dc_hang);
     while (!cpu.halted) {
-        wdt_pet();
+        dc_wd_pet();
         dc_pad();
         uint64_t t0 = timer_us_gettime64();
         emu_slice_body(&ctx);
@@ -1196,7 +1208,7 @@ int main(int argc, char **argv) {
         dc_stats_slice(s, t0, t1, t2);
         dc_stats_window(s, t2);
     }
-    wdt_disable();   /* the reason stays on screen */
+    dc_wd_stop();   /* the reason stays on screen */
     dc_halt_screen();
     return 0;
 }
