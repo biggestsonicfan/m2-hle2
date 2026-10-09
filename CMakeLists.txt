@@ -306,6 +306,10 @@ if(M2HLE_LIBRETRO)
     # RetroArch loads it. Make it a link error instead, where the linker can.
     if(NOT WIN32 AND NOT APPLE)
         target_link_options(m2hle_libretro PRIVATE -Wl,-z,defs)
+        # Nothing a static library brings in leaves the core either: the
+        # NDK links libc++ statically for GGPO, and its std:: symbols keep
+        # default visibility. retro_* are in main_libretro.c, not a library.
+        target_link_options(m2hle_libretro PRIVATE -Wl,--exclude-libs,ALL)
     endif()
     target_link_libraries(m2hle_libretro PRIVATE sokol_gfx miniz)
     target_compile_definitions(m2hle_libretro PRIVATE M2HLE_DEV_TOOLS=0)   # src/core/build_features.h
