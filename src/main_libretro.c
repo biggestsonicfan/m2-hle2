@@ -362,6 +362,7 @@ static bool g_sound_on;
 static bool g_game_loaded;
 static bool g_halt_reported;
 static size_t g_lr_state_size;  /* retro_serialize_size, once a load */
+static savestate_rom_t g_lr_state_rom;  /* the loaded ROM's id, with g_lr_state_size */
 static bool g_lr_redraw;   /* a state was loaded: draw it even if the board did not run */
 
 static void lr_attach_sound(void) {
@@ -1421,9 +1422,25 @@ static void lr_heat_tick(void) {
     lr_log(RETRO_LOG_WARN, "heat guard: %d C with every second frame drawn; sound board detached", c);
 }
 
+/* Fast-forward (Pinboard #585). The core never paces itself, so RetroArch's
+ * fast-forward runs the board as fast as the host goes, and what holds it back
+ * is the draw. While the frontend says it is fast-forwarding, only one board
+ * frame in LR_FF_DRAW_EVERY is drawn. */
+#define LR_FF_DRAW_EVERY 4
+static bool g_lr_ff;
+
+static void lr_ff_poll(void) {
+    bool ff = false;
+    ff = env_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &ff) && ff;
+    if (ff != g_lr_ff) lr_log(RETRO_LOG_INFO, "fast-forward %s at board frame %llu", ff ? "on" : "off",
+                              (unsigned long long)g_emu_frames);
+    g_lr_ff = ff;
+}
+
 /* How many board frames each drawn frame covers, this frame. */
 static int lr_draw_every(void) {
-    return heat_guard_draw_every(&g_heat) == 2 ? 2 : opt.draw_every;
+    int every = heat_guard_draw_every(&g_heat) == 2 ? 2 : opt.draw_every;
+    return g_lr_ff && every < LR_FF_DRAW_EVERY ? LR_FF_DRAW_EVERY : every;
 }
 
 /* The lobby's frame: 16:9, the largest the output holds within the frontend's
@@ -2070,6 +2087,7 @@ RETRO_API void retro_run(void) {
     g_lr_runs++;
     if (!ran) g_lr_skips++;
     lr_heat_tick();
+    lr_ff_poll();
     hprof_phase(1);
     hprof_phase_set(6, g_emu_times.sound_wait_us - snd_wait0);
     lr_push_audio();
@@ -2081,15 +2099,17 @@ RETRO_API void retro_run(void) {
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
-/* ---- Savestates ----------------------------------------------------------------------------
+/* ---- Savestates and rewind -----------------------------------------------------------------
  *
- * The desktop's (core/savestate.h): one zip with an entry per part of the
- * board, here in RetroArch's buffer instead of a file, its entries stored
- * rather than deflated (RetroArch compresses the files it writes). About 16 MB,
- * the same for every state of one build and profile, plus room for INFO's text
- * to grow. A state loads only into the build, ROM set and profile that made it.
- * Netplay does not use them (pkt_lockstep.h), and a load during a session
- * would change this board and not the other's, so it is refused there. */
+ * The board as rollback.h lays it out for GGPO, behind a header that checks
+ * build, ROM set and profile as the desktop's zip does (rollback_flat_*), with
+ * the host pointers packed. RetroArch's rewind serialises every frame, and the
+ * zip's CRC and ROM hash over its 16 MB took longer than the frame; this is a
+ * copy (Pinboard #585). About 16 MB, the same for every state of one build and
+ * profile. A load takes the flat state or, from before it, the zip. A state
+ * loads only into the build, ROM set and profile that made it. Netplay does
+ * not use them (pkt_lockstep.h), and a load during a session would change this
+ * board and not the other's, so it is refused there. */
 #define LR_STATE_SLACK 4096
 
 /* Whether a session has the board, either kind (lr_sound_may_go's test). */
@@ -2098,19 +2118,17 @@ static bool lr_session_owns_board(void) { return !lr_sound_may_go(); }
 RETRO_API size_t retro_serialize_size(void) {
     if (!g_game_loaded) return 0;
     if (!g_lr_state_size) {
-        size_t len = 0;
-        const char *err = emu_state_save_mem(&state.emu, NULL, 0, &len);
-        if (err) { lr_log(RETRO_LOG_WARN, "savestate: %s", err); return 0; }
-        g_lr_state_size = len + LR_STATE_SLACK;
+        g_lr_state_rom  = savestate_rom_id(&state.bus);
+        g_lr_state_size = emu_state_flat_size(&state.emu) + LR_STATE_SLACK;
     }
     return g_lr_state_size;
 }
 
 RETRO_API bool retro_serialize(void *data, size_t size) {
-    if (!g_game_loaded || !data) return false;
-    size_t len = 0;
-    const char *err = emu_state_save_mem(&state.emu, data, size, &len);
+    if (!g_game_loaded || !data || size < retro_serialize_size()) return false;
+    const char *err = emu_state_flat_save(&state.emu, data, &g_lr_state_rom);
     if (err) { lr_log(RETRO_LOG_WARN, "savestate: %s", err); return false; }
+    size_t len = rollback_flat_size();
     memset((uint8_t *)data + len, 0, size - len);   /* the same board, the same bytes */
     return true;
 }
@@ -2118,6 +2136,9 @@ RETRO_API bool retro_serialize(void *data, size_t size) {
 RETRO_API bool retro_unserialize(const void *data, size_t size) {
     if (!g_game_loaded) return false;
     const char *err = lr_session_owns_board() ? "a netplay session owns the board"
+                    : !data ? "no state"
+                    : rollback_flat_is(data, size) && retro_serialize_size()
+                    ? emu_state_flat_load(&state.emu, data, size, &g_lr_state_rom)
                     : emu_state_load_mem(&state.emu, data, size);
     if (err) {
         char msg[160];
