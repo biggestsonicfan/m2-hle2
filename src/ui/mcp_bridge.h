@@ -1973,7 +1973,7 @@ static void mcp_netplay_cfg_strings(const char *req, netplay_config_t *cfg) {
         snprintf(cfg->server, sizeof(cfg->server), "%s", s);
     if (mcp_json_get_str(req, "user", s, sizeof(s)))
         snprintf(cfg->npid, sizeof(cfg->npid), "%s", s);
-    if (mcp_json_get_str(req, "pass", s, sizeof(s))) {
+    if (json_get_str_unescaped(req, "pass", s, sizeof(s))) {
         snprintf(cfg->password, sizeof(cfg->password), "%s", s);
         /* The token is NOT dropped here any more. It used to be, so that a
          * password login did not go out carrying somebody's Twitch token --
@@ -2395,6 +2395,96 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
 }
 
 /*
+ * {"cmd":"ggpo_lobby"} -- the GGPO lobby (net/ggpo_lobby.h, Pinboard #575):
+ * its stage, the channel's players, challenges, the match and its path.
+ * "do" posts a step first: connect (url, or the default server), login /
+ * signup (user, pass), twitch, join (game, else the profile's id), challenge
+ * (user), accept, decline, cancel, chat (text), end, disconnect. The emu
+ * thread runs it at its next pump, so a reply shows the stage before it.
+ */
+#ifdef M2HLE_GGPO
+static ggl_cmd_kind_t mcp_ggl_kind(const char *v, bool *ok) {
+    static const struct { const char *name; ggl_cmd_kind_t kind; } k[] = {
+        { "connect", GGL_CMD_CONNECT }, { "login", GGL_CMD_LOGIN }, { "signup", GGL_CMD_SIGNUP },
+        { "twitch", GGL_CMD_TWITCH }, { "join", GGL_CMD_JOIN }, { "challenge", GGL_CMD_CHALLENGE },
+        { "accept", GGL_CMD_ACCEPT }, { "decline", GGL_CMD_DECLINE }, { "cancel", GGL_CMD_CANCEL },
+        { "chat", GGL_CMD_CHAT }, { "end", GGL_CMD_END }, { "disconnect", GGL_CMD_DISCONNECT },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
+        if (strcmp(v, k[i].name) == 0) { *ok = true; return k[i].kind; }
+    *ok = false;
+    return GGL_CMD_CONNECT;
+}
+
+/* The step's two strings, by what that step reads. */
+static void mcp_ggl_args(const char *req, ggl_cmd_kind_t kind, char *a, int na, char *b, int nb) {
+    a[0] = b[0] = '\0';
+    switch (kind) {
+    case GGL_CMD_CONNECT:
+        if (!mcp_json_get_str(req, "url", a, na)) snprintf(a, (size_t)na, "%s", GGL_DEFAULT_URL);
+        break;
+    case GGL_CMD_LOGIN: case GGL_CMD_SIGNUP:
+        mcp_json_get_str(req, "user", a, na);
+        json_get_str_unescaped(req, "pass", b, nb);
+        break;
+    case GGL_CMD_JOIN:
+        if (!mcp_json_get_str(req, "game", a, na))
+            snprintf(a, (size_t)na, "%s", g_active_profile ? g_active_profile->id : "m2");
+        break;
+    case GGL_CMD_CHALLENGE: mcp_json_get_str(req, "user", a, na); break;
+    case GGL_CMD_CHAT:      json_get_str_unescaped(req, "text", a, na); break;
+    default: break;
+    }
+}
+
+static void mcp_ggl_status_json(mcp_np_out_t *o, const ggl_status_t *st) {
+    char esc[512];
+    mcp_np_append(o, "{\"ok\":true,\"stage\":\"%s\"", ggl_stage_name(st->stage));
+    mcp_json_escape(esc, sizeof esc, st->url);   mcp_np_append(o, ",\"url\":\"%s\"", esc);
+    mcp_np_append(o, ",\"user\":\"%s\",\"game\":\"%s\"", st->user, st->game);
+    mcp_json_escape(esc, sizeof esc, st->error); mcp_np_append(o, ",\"error\":\"%s\"", esc);
+    mcp_np_append(o, ",\"twitch\":%s,\"twitch_code\":\"%s\"", mcp_tf(st->twitch), st->twitch_code);
+    mcp_json_escape(esc, sizeof esc, st->twitch_uri); mcp_np_append(o, ",\"twitch_uri\":\"%s\"", esc);
+    mcp_np_append(o, ",\"users\":[");
+    for (int i = 0; i < st->n_users; i++)
+        mcp_np_append(o, "%s{\"name\":\"%s\",\"state\":\"%s\"}", i ? "," : "", st->users[i].name, st->users[i].state);
+    mcp_np_append(o, "],\"challenged_by\":\"%s\",\"challenging\":\"%s\"", st->in_from, st->out_to);
+    mcp_np_append(o, ",\"match\":\"%s\",\"opponent\":\"%s\",\"side\":%d", st->match, st->opponent, st->side);
+    mcp_np_append(o, ",\"peer_known\":%s,\"direct\":%s", mcp_tf(st->peer_known), mcp_tf(st->direct));
+    mcp_np_append(o, ",\"sent_direct\":%u,\"sent_relay\":%u,\"got_direct\":%u,\"got_relay\":%u",
+                  st->sent_direct, st->sent_relay, st->got_direct, st->got_relay);
+    mcp_np_append(o, ",\"chat\":[");
+    for (int i = 0; i < st->chat_n; i++) {
+        mcp_json_escape(esc, sizeof esc, st->chat[i]);
+        mcp_np_append(o, "%s\"%s\"", i ? "," : "", esc);
+    }
+    mcp_np_append(o, "]}");
+}
+#endif
+
+static void mcp_cmd_ggpo_lobby(const char *req, char *resp, int cap) {
+#ifdef M2HLE_GGPO
+    char what[16], a[256], b[128];
+    if (mcp_json_get_str(req, "do", what, sizeof what)) {
+        bool ok;
+        ggl_cmd_kind_t kind = mcp_ggl_kind(what, &ok);
+        if (!ok) {
+            snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown step\"}");
+            return;
+        }
+        mcp_ggl_args(req, kind, a, sizeof a, b, sizeof b);
+        ggl_post(kind, a, b);
+    }
+    ggl_status_t st = ggl_status();
+    mcp_np_out_t o = { resp, cap };
+    mcp_ggl_status_json(&o, &st);
+#else
+    (void)req;
+    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"this build has no GGPO\"}");
+#endif
+}
+
+/*
  * {"cmd":"board_reset"} -- the cold boot a netplay session performs at the
  * barrier, with no session: re-install the ROM set, reset both CPUs, the sound
  * board, the interrupt controller, the input latch and the run loop's own
@@ -2796,6 +2886,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     }
     else if (strcmp(cmd, "dump_geo_stream")          == 0) mcp_cmd_dump_geo_stream(resp, cap);
     else if (strcmp(cmd, "netplay_status")           == 0) mcp_cmd_netplay_status(req, resp, cap);
+    else if (strcmp(cmd, "ggpo_lobby")               == 0) mcp_cmd_ggpo_lobby(req, resp, cap);
     else if (strcmp(cmd, "netplay_connect")          == 0) mcp_cmd_netplay_connect(req, resp, cap);
     else if (strcmp(cmd, "netplay_host")             == 0) mcp_cmd_netplay_host(req, resp, cap);
     else if (strcmp(cmd, "netplay_join")             == 0) mcp_cmd_netplay_join(req, resp, cap);

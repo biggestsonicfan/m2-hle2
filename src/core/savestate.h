@@ -259,6 +259,33 @@ typedef struct {
     sound_uart_t uart;
 } savestate_sound_t;
 
+static inline savestate_sound_t savestate_sound_get(void) {
+    savestate_sound_t snd;
+    memset(&snd, 0, sizeof snd);
+    snd.bank4 = g_sound.bank4;      snd.bank5      = g_sound.bank5;
+    snd.budget = g_sound.budget;    snd.slice_frac = g_sound.slice_frac;
+    snd.ahead = g_sound.ahead;      snd.out_total  = g_sound.out_total;
+    memcpy(snd.irqs, g_sound.irqs, sizeof snd.irqs);
+    snd.uart = g_sound.uart;
+    return snd;
+}
+
+/* After the 68000, its RAM and the chip are in: the board's own fields. The
+ * host ring and what reads it stay as they are; the sample clock is the
+ * board's. */
+static inline void savestate_sound_put(const savestate_sound_t *snd) {
+    g_sound.bank4      = snd->bank4;
+    g_sound.bank5      = snd->bank5;
+    g_sound.budget     = snd->budget;
+    g_sound.slice_frac = snd->slice_frac;
+    g_sound.ahead      = snd->ahead;
+    memcpy(g_sound.irqs, snd->irqs, sizeof g_sound.irqs);
+    g_sound.uart       = snd->uart;
+    g_sound.out_total  = snd->out_total;
+    g_sound.out_due    = snd->out_total;
+    sound_map_pages(&g_sound);   /* the 68000's direct reads leave out the DSP's range */
+}
+
 /* The GEO's list pointers and the last published list. */
 typedef struct {
     uint32_t wstart, rstart;
@@ -266,6 +293,43 @@ typedef struct {
     int32_t  snap_ready;
     int32_t  full_snap;
 } savestate_geo_t;
+
+static inline savestate_geo_t savestate_geo_get(void) {
+    savestate_geo_t geo;
+    memset(&geo, 0, sizeof geo);
+    geo.wstart      = g_geo.wstart;
+    geo.rstart      = g_geo.rstart;
+    geo.snap_index  = g_geodl_snap == g_geodl_snaps[1] ? 1u : 0u;
+    geo.snap_rstart = g_geodl_snap_rstart;
+    geo.snap_ready  = g_geodl_snap_ready;
+    geo.full_snap   = g_geodl_full_snap;
+    return geo;
+}
+
+/* After g_geodl_snaps and g_geo_live are in: the list pointers, the last list
+ * published and the state the lists so far left behind. Both published copies
+ * take the live one, so the renderer's next frame draws from what the board
+ * has. */
+static inline void savestate_geo_put(const savestate_geo_t *geo) {
+    g_geo.wstart = geo->wstart;
+    g_geo.rstart = geo->rstart;
+    memcpy(&g_geo_pub[0], &g_geo_live, sizeof g_geo_live);
+    memcpy(&g_geo_pub[1], &g_geo_live, sizeof g_geo_live);
+    memset(g_geo_dirty, 0, sizeof g_geo_dirty);
+    g_geodl_snap        = g_geodl_snaps[geo->snap_index ? 1 : 0];
+    g_geo_rs            = &g_geo_pub[geo->snap_index ? 1 : 0];
+    g_geodl_snap_rstart = geo->snap_rstart;
+    g_geodl_full_snap   = geo->full_snap != 0;
+    g_geodl_snap_ready  = geo->snap_ready;
+    g_geodl_snap_seq++;
+}
+
+/* Every cache keyed on the bus's contents starts over. */
+static inline void savestate_bus_changed(memory_bus_t *bus) {
+    bus->gen_tile += 1u << 20; bus->gen_gfx += 1u << 20; bus->gen_pal += 1u << 20;
+    bus->gen_tex  += 1u << 20; bus->gen_lut += 1u << 20;
+    memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
+}
 
 /* ---- SCSP LFO pointers ---------------------------------------------------------- */
 
@@ -387,14 +451,7 @@ static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i
                             SAVESTATE_BUFS[i].size);
 
     /* the GEO */
-    savestate_geo_t geo;
-    memset(&geo, 0, sizeof geo);
-    geo.wstart      = g_geo.wstart;
-    geo.rstart      = g_geo.rstart;
-    geo.snap_index  = g_geodl_snap == g_geodl_snaps[1] ? 1u : 0u;
-    geo.snap_rstart = g_geodl_snap_rstart;
-    geo.snap_ready  = g_geodl_snap_ready;
-    geo.full_snap   = g_geodl_full_snap;
+    savestate_geo_t geo = savestate_geo_get();
     ok = ok && savestate__add(zp, level, "GEO",      &geo, sizeof geo);
     ok = ok && savestate__add(zp, level, "GEOLIST",  g_geodl_snaps, sizeof g_geodl_snaps);
     ok = ok && savestate__add(zp, level, "GEOSTATE", &g_geo_live, sizeof g_geo_live);
@@ -404,13 +461,7 @@ static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i
 
     /* the sound board */
     if (ok) {
-        savestate_sound_t snd;
-        memset(&snd, 0, sizeof snd);
-        snd.bank4 = g_sound.bank4;      snd.bank5      = g_sound.bank5;
-        snd.budget = g_sound.budget;    snd.slice_frac = g_sound.slice_frac;
-        snd.ahead = g_sound.ahead;      snd.out_total  = g_sound.out_total;
-        memcpy(snd.irqs, g_sound.irqs, sizeof snd.irqs);
-        snd.uart = g_sound.uart;
+        savestate_sound_t snd = savestate_sound_get();
         scsp_t *scsp = (scsp_t *)malloc(sizeof *scsp);
         if (!scsp) ok = false;
         else {
@@ -658,46 +709,19 @@ static inline const char *savestate__load_zip(mz_zip_archive *zp, const char *wh
         for (size_t i = 0; i < SAVESTATE_NBUFS; i++)
             memcpy(savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]), n_bufs[i], SAVESTATE_BUFS[i].size);
 
-        /* GEO: the list pointers, the last list published and the state the
-         * lists so far left behind. Both published copies take the live one,
-         * so the renderer's next frame draws from what the board has. */
-        g_geo.wstart = n_geo.wstart;
-        g_geo.rstart = n_geo.rstart;
         memcpy(g_geodl_snaps, n_snaps, sizeof g_geodl_snaps);
         memcpy(&g_geo_live, n_glive, sizeof g_geo_live);
-        memcpy(&g_geo_pub[0], &g_geo_live, sizeof g_geo_live);
-        memcpy(&g_geo_pub[1], &g_geo_live, sizeof g_geo_live);
-        memset(g_geo_dirty, 0, sizeof g_geo_dirty);
-        g_geodl_snap        = g_geodl_snaps[n_geo.snap_index ? 1 : 0];
-        g_geo_rs            = &g_geo_pub[n_geo.snap_index ? 1 : 0];
-        g_geodl_snap_rstart = n_geo.snap_rstart;
-        g_geodl_full_snap   = n_geo.full_snap != 0;
-        g_geodl_snap_ready  = n_geo.snap_ready;
-        g_geodl_snap_seq++;
-
-        /* Every cache keyed on the bus's contents starts over. */
-        bus->gen_tile += 1u << 20; bus->gen_gfx += 1u << 20; bus->gen_pal += 1u << 20;
-        bus->gen_tex  += 1u << 20; bus->gen_lut += 1u << 20;
-        memset((uint8_t *)bus->tex_dirty, 1, sizeof bus->tex_dirty);
+        savestate_geo_put(&n_geo);
+        savestate_bus_changed(bus);
 
         /* the sound board: the 68000's registers, its RAM, the chip with its
-         * live pointers, and the board's own fields. The host ring and what
-         * reads it stay as they are; the sample clock is the board's. */
+         * live pointers, and the board's own fields. */
         g_sound.m68k.cpu = n_m68k;
         memcpy(g_sound.ram, n_sram, sizeof g_sound.ram);
         savestate_scsp_unpack(n_scsp, &g_sound.scsp);
         memcpy(&g_sound.scsp, n_scsp, sizeof g_sound.scsp);
-        g_sound.bank4      = n_snd.bank4;
-        g_sound.bank5      = n_snd.bank5;
-        g_sound.budget     = n_snd.budget;
-        g_sound.slice_frac = n_snd.slice_frac;
-        g_sound.ahead      = n_snd.ahead;
-        memcpy(g_sound.irqs, n_snd.irqs, sizeof g_sound.irqs);
-        g_sound.uart       = n_snd.uart;
-        g_sound.out_total  = n_snd.out_total;
-        g_sound.out_due    = n_snd.out_total;
         g_shle = n_shle;
-        sound_map_pages(&g_sound);   /* the 68000's direct reads leave out the DSP's range */
+        savestate_sound_put(&n_snd);
 
         savestate_hle_set(&n_hle);
         for (int i = 0; i < g_savestate_extra_n; i++)

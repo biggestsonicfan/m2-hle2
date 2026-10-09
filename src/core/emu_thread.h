@@ -283,6 +283,7 @@ static inline void emu_board_reset_state(void) {
  * here, since they are this file's statics. Serviced between slices, under the
  * mutex (emu_netplay_pump), like a board reset. */
 #include "savestate.h"
+#include "rollback.h"
 
 static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
     savestate_emu_t e;
@@ -313,6 +314,7 @@ static inline void emu_state_put_latches(emu_thread_ctx_t *ctx, const savestate_
     g_vblank_edge        = e->vblank_edge;
     ctx->slice_capped    = e->slice_capped;
     g_emu_frames         = e->emu_frames;
+    g_dl_frame_now       = e->emu_frames;   /* its mirror, which the match_replay jump stamps */
     g_irqt_sound_kick    = e->irqt_sound_kick;
     g_irqt_vblank        = e->irqt_vblank;
     g_frame_clock.sample = e->frame_clock_sample;
@@ -1072,9 +1074,14 @@ static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice
     return true;
 }
 
+/* Rollback netplay (Pinboard #575): its step stands in for the one below. */
+#include "emu_ggpo.h"
+
 /* The run loop's RUNNING state: one slice, then its pacing. False when no
  * slice ran and the loop goes straight round again. */
 static inline bool emu_run_running(emu_thread_ctx_t *ctx) {
+    emu_ggpo_lobby_pump();
+    if (emu_ggpo_wanted()) return emu_ggpo_step(ctx);
     if (emu_slice_should_stop(ctx)) return false;
     int64_t slice_start = emu_now_us();
 
@@ -1122,6 +1129,7 @@ static inline void emu_run_stepping(emu_thread_ctx_t *ctx) {
 /* The run loop's STOPPED state. Netplay still has to breathe: the login, the
  * room and the peer handshake all happen before anybody presses Run. */
 static inline void emu_run_stopped(emu_thread_ctx_t *ctx) {
+    emu_ggpo_lobby_pump();
     ctx->idle_holding = 0;
     emu_netplay_pump(ctx);
     /* ...and a session that is PLAYING cannot, from here: the pump keeps
@@ -1165,6 +1173,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             last_sps_time   = now;
         }
     }
+    emu_ggpo_shutdown(ctx);
     hprof_shutdown();                   /* a run cut short still writes its report */
 }
 

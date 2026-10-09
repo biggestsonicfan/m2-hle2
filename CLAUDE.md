@@ -682,6 +682,18 @@ EBOOT (Ghidra) and checked against a PS3-vs-PS3 match captured through RPCS3's `
   before ours: the member's post-match update (flags 0xE0, place in line) has to follow our own result
   whichever order they arrive in.
 
+### Rollback netplay: GGPO (`core/emu_ggpo.h`, `core/rollback.h`, `net/ggpo_lobby.h`, Pinboard #575)
+
+The second way to play online, beside RPCN lockstep: [GGPO](https://github.com/pond3r/ggpo) (MIT, `vendor/ggpo`, built by `cmake/ggpo.cmake`) runs a frame at once on a guess of the peer's input and, when the real input differs, loads the last frame both agreed on and runs forward again. The desktop frontend only (`M2HLE_GGPO`, and only when `vendor/ggpo` is checked out; the desktop canary fetches it). The web build has none yet: a browser would need the gateway as a transport.
+
+- **A session is a cold boot on both machines, as an RPCN session is** (`emu_ggpo_cold_boot`: the battery detached, `g_hle_extra_session_off`, netplay's reset). One GGPO frame is one board frame (a slice to the vblank), and each player's input is netplay's canonical word.
+- **A rollback snapshot is the savestate's parts copied raw** (`rollback.h`, ~16 MB, pooled: GGPO keeps about ten). No zip and no pointer packing: a snapshot never leaves the process, so its host pointers are still the live ones. What a savestate load does around the copy (the GEO's published state, the bus's generations, the sound board's page map) a rollback does too, through the same savestate.h helpers. A new part of the board goes in `savestate.h` and is then in both.
+- **The checksum masks the host pointers** (`rollback__pack_*`: the SHARC's bufferram link, the COP's `ctl`, the SCSP's RAM and LFO pointers), as `savestate_save` does. Without it two processes' checksums never agree, and GGPO's desync check and the logged check lines are noise.
+- **Frames run again are muted** (`g_sound_mute`, `sound.h`): the host heard them the first time. The sound board's clock still moves, so the UART and everything the i960 reads are unchanged.
+- **Proving it:** `--ggpo-synctest N` rolls every frame back N frames and checks the snapshot's checksum against the first run (`--ggpo-synclog DIR` writes both sides part by part on a mismatch). In a session each side logs `ggpo: frame N board XXXXXXXX` every 600 frames, and the two logs have to be identical; `--ggpo-delay 0` makes a local pair roll back constantly.
+- **The lobby is ggpo-server** (`ggpo.sonicthefighte.rs`, its own repository): JSON over a WebSocket (`/ws`) for accounts, a channel per game (the profile's id) and challenges; then UDP on one socket of ours: HELLO to the server until it answers PEER, punches to the peer, RELAY through the server until a punch says the peer hears us. GGPO is told its peer is `169.254.0.1:1` and gets the lobby's transport (`ggpo_port_set_transport`), which reports every peer packet, direct or relayed, as coming from there. So a match starts on the relay and moves to the direct path without GGPO noticing.
+- **Test against a local ggpo-server only** (`GGPO_PUBLIC_HOST=127.0.0.1`, free ports), never the live one. Two headless clients: `--ggpo-lobby ws://127.0.0.1:PORT/ws --ggpo-signup --ggpo-user A --ggpo-pass PW --ggpo-challenge B` and the same with `--ggpo-user B --ggpo-accept any`; `--ggpo-relay` keeps a side off the direct path. Over the bridge, `{"cmd":"ggpo_lobby"}` reports the lobby and `"do"` drives it (connect, login, signup, join, challenge, accept, ...). Without a lobby, `--ggpo-remote IP:PORT --ggpo-player 1|2 --ggpo-local PORT` plays straight to an address.
+
 ## STF Disassembly Reference
 
 Authoritative IDA disassembly: `C:\m2\ida72\asm-check\`.
@@ -726,6 +738,7 @@ Output: `build\Release\m2hle.exe`. The unit tests in `tests/` build alongside it
 
 - All modules except the entry points (`main.c`, `main_sdl.c`, `main_web.c`, `main_libretro.c`), the sokol implementation units (`sokol_*impl.c`, `sokol_impl.m`) and the vendored `miniz.c` are **header-only `.h` files**. This is intentional — do not split into `.c`/`.h` pairs.
   - The one deliberate exception is `src/ui/mem_edit.cpp`, the single C++ translation unit: `vendor/imgui_club`'s `MemoryEditor` is a C++ struct against the ImGui C++ API, and C11 sources cannot include it. It hands out the C handle declared in `mem_edit.h`; keep C++ from spreading past that file.
+  - `src/net/ggpo_port/ggpo_port.cpp` is the other: GGPO is a C++ library, and that file is its platform layer and the C API (`ggpo_port.h`) the rest of the tree calls.
 - Default new code to the **board layer**; only move to a `game_profile_t` quirk when there's positive evidence of game-specific behaviour.
 - **Desktop-only debugger hooks in the board go behind `M2HLE_DEV_TOOLS`** (`core/build_features.h`): 1 for the desktop and the tests, 0 for sdl3, libretro and web (CMakeLists.txt). Test an "is it armed" helper (`bp_armed`, `wp_armed`, `dl_active`, `sndcap_on`), never the raw field, so the check is a constant false where nothing can arm it. Keep the state and functions defined either way: det_digest is built in the web tree. Platform code is gated where it is used by the compiler's macros (`_WIN32`, `__linux__`, `__EMSCRIPTEN__`).
 - Memory addresses and sizes use `uint32_t`. Sign-extension is handled per-instruction.

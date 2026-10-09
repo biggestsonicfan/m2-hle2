@@ -187,6 +187,19 @@ if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     endif()
 endif()
 
+# Rollback netplay (cmake/ggpo.cmake). The desktop frontend only: its command
+# line and the MCP bridge are the way in. The submodule is optional, so a
+# checkout without vendor/ggpo still builds, without --ggpo-*.
+option(M2HLE_GGPO "Build GGPO rollback netplay into the desktop frontend" ON)
+if(M2HLE_GGPO AND M2HLE_FRONTEND STREQUAL "sokol")
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/vendor/ggpo/src/lib/ggpo/main.cpp)
+        include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ggpo.cmake)
+    else()
+        message(STATUS "vendor/ggpo is not checked out: building without GGPO "
+                       "(git submodule update --init vendor/ggpo)")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # miniz (C)
 # miniz's normal CMake build generates miniz_export.h via
@@ -525,6 +538,9 @@ else()
     add_executable(m2hle ${SRC}/main.c ${SRC}/ui/mem_edit.cpp)
 endif()
 target_link_libraries(m2hle PRIVATE sokol miniz imguifiledialog)
+if(TARGET ggpo)
+    target_link_libraries(m2hle PRIVATE ggpo)   # --ggpo-* (core/emu_ggpo.h)
+endif()
 # The debug dumps (model_tex.txt, cam_ours.csv, the texture extractor, the COP
 # stream) are this build's alone: the handheld, libretro and web builds write no
 # debug files (geo3d.h, GEO3D_DUMP_TEX).

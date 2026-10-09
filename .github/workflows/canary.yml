@@ -62,7 +62,7 @@ jobs:
         run: >
           git submodule update --init
           vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/stb vendor/ImGuiFileDialog
-          vendor/imgui_club
+          vendor/imgui_club vendor/ggpo
 
       # cimgui is generated from vendor/imgui by vendor/dear_bindings at build time.
       # One pinned interpreter for both pip and CMake: left to itself,
