@@ -25,11 +25,15 @@
  * mismatch is counted (ggpo_port_sync_errors) and, with --ggpo-synclog DIR,
  * both snapshots are written there part by part (rollback_log).
  *
- * Desktop only: GGPO is the ggpo CMake target, which defines M2HLE_GGPO. The
- * web, libretro and handheld builds, the tests and det_digest get the stubs
- * at the bottom.
+ * GGPO is the ggpo CMake target, which defines M2HLE_GGPO: the desktop, the
+ * web build and the libretro core. The desktop's emu thread runs a session
+ * through emu_ggpo_step; the web build and the libretro core, which step the
+ * board from the host's frame callback, through emu_ggpo_tick, and pace
+ * themselves. The handheld, the tests and det_digest get the stubs at the
+ * bottom.
  *
- * Header-only. Included from emu_thread.h; emu thread.
+ * Header-only. Included from emu_thread.h; emu thread (the host's one thread
+ * where there is no emu thread).
  */
 #ifndef M2HLE_EMU_GGPO_H
 #define M2HLE_EMU_GGPO_H
@@ -122,6 +126,8 @@ static struct {
     uint32_t          logged_errors;
     int               check_frame; /* the last check frame saved, -1 none */
     uint32_t          check_sum;
+    char              check_line[96]; /* the last check logged, for a host with its own log */
+    uint32_t          check_seq;   /* bumped with each one */
 } g_ggpo;
 
 /* Every EMU_GGPO_CHECK_EVERY frames a session logs the board's checksum, taken
@@ -270,6 +276,7 @@ static inline bool emu_ggpo_cold_boot(emu_thread_ctx_t *ctx) {
     backup_ram_detach();
     if (g_hle_extra_session_off) g_hle_extra_session_off();
     g_netplay.reset_board(g_netplay.reset_ctx);
+    geodl_snaps_clear();
     input_reset();
     ctx->total_steps       = 0;
     ctx->cpu_prev_snapshot = *ctx->cpu;
@@ -361,8 +368,10 @@ static inline void emu_ggpo_report_errors(void) {
 
 static inline void emu_ggpo_report_check(void) {
     if (g_ggpo.check_frame < 0 || g_ggpo.frames < (uint32_t)g_ggpo.check_frame + EMU_GGPO_CHECK_LAG) return;
-    LOG_INFO("ggpo: frame %d board %08x (%u rollbacks, %u frames again)", g_ggpo.check_frame,
-             g_ggpo.check_sum, g_ggpo.rollbacks, g_ggpo.resim_frames);
+    snprintf(g_ggpo.check_line, sizeof g_ggpo.check_line, "ggpo: frame %d board %08x (%u rollbacks, %u frames again)",
+             g_ggpo.check_frame, g_ggpo.check_sum, g_ggpo.rollbacks, g_ggpo.resim_frames);
+    LOG_INFO("%s", g_ggpo.check_line);
+    g_ggpo.check_seq++;
     g_ggpo.check_frame = -1;
 }
 
@@ -394,11 +403,13 @@ static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
     return ran;
 }
 
-/* The run loop's RUNNING state while a session is wanted or open, in place of
- * emu_run_running. False when no frame ran and the loop goes straight round. */
-static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) {
-    if (emu_slice_should_stop(ctx)) return false;
-    int64_t t0 = emu_now_us();
+/* One pass of a session for a host that paces itself (the web build, the
+ * libretro core): opened or closed as wanted, then this frame run, unless a
+ * timesync holds it. Takes the emu mutex. */
+typedef enum { EMU_GGPO_TICK_IDLE, EMU_GGPO_TICK_HELD, EMU_GGPO_TICK_RAN } emu_ggpo_tick_t;
+
+static inline emu_ggpo_tick_t emu_ggpo_tick(emu_thread_ctx_t *ctx) {
+    emu_ggpo_tick_t r = EMU_GGPO_TICK_HELD;
     emu_mutex_lock(&ctx->mutex);
     if (g_ggpo_cfg.mode == EMU_GGPO_OFF || !g_ggpo.on) {
         bool go = g_ggpo_cfg.mode != EMU_GGPO_OFF && emu_ggpo_start(ctx);
@@ -406,14 +417,24 @@ static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) {
             emu_ggpo_stop();
             g_ggpo_cfg.mode = EMU_GGPO_OFF;
         }
-        emu_mutex_unlock(&ctx->mutex);
-        return false;
+        r = EMU_GGPO_TICK_IDLE;
+    } else if (g_ggpo.skip > 0) {
+        g_ggpo.skip--;                         /* ahead of the peer: hold a frame */
+    } else if (emu_ggpo_frame(ctx)) {
+        r = EMU_GGPO_TICK_RAN;
     }
-    bool ran = false;
-    if (g_ggpo.skip > 0) g_ggpo.skip--;        /* ahead of the peer: hold a frame */
-    else ran = emu_ggpo_frame(ctx);
     emu_mutex_unlock(&ctx->mutex);
+    return r;
+}
 
+/* The run loop's RUNNING state while a session is wanted or open, in place of
+ * emu_run_running. False when no frame ran and the loop goes straight round. */
+static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) {
+    if (emu_slice_should_stop(ctx)) return false;
+    int64_t t0 = emu_now_us();
+    emu_ggpo_tick_t r = emu_ggpo_tick(ctx);
+    if (r == EMU_GGPO_TICK_IDLE) return false;
+    bool ran = r == EMU_GGPO_TICK_RAN;
     int64_t t1 = emu_now_us();
     emu_times_slice(t1 - t0, ran);
     if (ran && emu_slice_stop_wanted(ctx)) {
@@ -447,6 +468,8 @@ static inline bool emu_ggpo_active(void) { return false; }
 static inline bool emu_ggpo_wanted(void) { return false; }
 static inline void emu_ggpo_lobby_pump(void) {}
 static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) { (void)ctx; return false; }
+typedef enum { EMU_GGPO_TICK_IDLE, EMU_GGPO_TICK_HELD, EMU_GGPO_TICK_RAN } emu_ggpo_tick_t;
+static inline emu_ggpo_tick_t emu_ggpo_tick(emu_thread_ctx_t *ctx) { (void)ctx; return EMU_GGPO_TICK_IDLE; }
 static inline void emu_ggpo_shutdown(emu_thread_ctx_t *ctx) { (void)ctx; }
 
 #endif

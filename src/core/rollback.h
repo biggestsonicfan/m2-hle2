@@ -50,6 +50,15 @@ typedef struct {
     savestate_emu_t   emu;
 } rollback_meta_t;
 
+/* The two host sample clocks survive a board reset on purpose (an A/V client
+ * would hear the seam), so two machines carry whatever they had run before
+ * the cold boot. Nothing on the board reads them. */
+static inline void rollback__pack_meta(void *p) {
+    rollback_meta_t *m = (rollback_meta_t *)p;
+    m->snd.out_total = 0;
+    m->emu.frame_clock_sample = 0;
+}
+
 static struct {
     rollback_part_t part[ROLLBACK_PARTS_MAX];
     int             n;
@@ -94,7 +103,7 @@ static inline void rollback_layout(i960_cpu_t *cpu, memory_bus_t *bus) {
     rollback__add("SHLE", &g_shle, sizeof g_shle, NULL);
     for (int i = 0; i < g_savestate_extra_n; i++)
         if (savestate_extra_mine(i)) rollback__add(g_savestate_extra[i].name, g_savestate_extra[i].data, g_savestate_extra[i].size, NULL);
-    rollback__add("META", &g_rollback.meta, sizeof g_rollback.meta, NULL);
+    rollback__add("META", &g_rollback.meta, sizeof g_rollback.meta, rollback__pack_meta);
 }
 
 static inline void *rollback__take(void) {
@@ -174,7 +183,10 @@ static inline void rollback_log(FILE *f, const void *data) {
         off += g_rollback.part[i].n;
     }
     /* The built structs one by one: META is the part that says least. */
-    const uint8_t *meta = buf + off - sizeof(rollback_meta_t);
+    rollback_meta_t meta_c;
+    memcpy(&meta_c, buf + off - sizeof meta_c, sizeof meta_c);
+    rollback__pack_meta(&meta_c);
+    const uint8_t *meta = (const uint8_t *)&meta_c;
     static const struct { const char *name; size_t off, n; } m[] = {
         { "META.geo", offsetof(rollback_meta_t, geo), sizeof(savestate_geo_t) },
         { "META.snd", offsetof(rollback_meta_t, snd), sizeof(savestate_sound_t) },

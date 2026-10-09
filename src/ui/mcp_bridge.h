@@ -2403,19 +2403,6 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
  * thread runs it at its next pump, so a reply shows the stage before it.
  */
 #ifdef M2HLE_GGPO
-static ggl_cmd_kind_t mcp_ggl_kind(const char *v, bool *ok) {
-    static const struct { const char *name; ggl_cmd_kind_t kind; } k[] = {
-        { "connect", GGL_CMD_CONNECT }, { "login", GGL_CMD_LOGIN }, { "signup", GGL_CMD_SIGNUP },
-        { "twitch", GGL_CMD_TWITCH }, { "join", GGL_CMD_JOIN }, { "challenge", GGL_CMD_CHALLENGE },
-        { "accept", GGL_CMD_ACCEPT }, { "decline", GGL_CMD_DECLINE }, { "cancel", GGL_CMD_CANCEL },
-        { "chat", GGL_CMD_CHAT }, { "end", GGL_CMD_END }, { "disconnect", GGL_CMD_DISCONNECT },
-    };
-    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
-        if (strcmp(v, k[i].name) == 0) { *ok = true; return k[i].kind; }
-    *ok = false;
-    return GGL_CMD_CONNECT;
-}
-
 /* The step's two strings, by what that step reads. */
 static void mcp_ggl_args(const char *req, ggl_cmd_kind_t kind, char *a, int na, char *b, int nb) {
     a[0] = b[0] = '\0';
@@ -2437,38 +2424,14 @@ static void mcp_ggl_args(const char *req, ggl_cmd_kind_t kind, char *a, int na, 
     }
 }
 
-static void mcp_ggl_status_json(mcp_np_out_t *o, const ggl_status_t *st) {
-    char esc[512];
-    mcp_np_append(o, "{\"ok\":true,\"stage\":\"%s\"", ggl_stage_name(st->stage));
-    mcp_json_escape(esc, sizeof esc, st->url);   mcp_np_append(o, ",\"url\":\"%s\"", esc);
-    mcp_np_append(o, ",\"user\":\"%s\",\"game\":\"%s\"", st->user, st->game);
-    mcp_json_escape(esc, sizeof esc, st->error); mcp_np_append(o, ",\"error\":\"%s\"", esc);
-    mcp_np_append(o, ",\"twitch\":%s,\"twitch_code\":\"%s\"", mcp_tf(st->twitch), st->twitch_code);
-    mcp_json_escape(esc, sizeof esc, st->twitch_uri); mcp_np_append(o, ",\"twitch_uri\":\"%s\"", esc);
-    mcp_np_append(o, ",\"users\":[");
-    for (int i = 0; i < st->n_users; i++)
-        mcp_np_append(o, "%s{\"name\":\"%s\",\"state\":\"%s\"}", i ? "," : "", st->users[i].name, st->users[i].state);
-    mcp_np_append(o, "],\"challenged_by\":\"%s\",\"challenging\":\"%s\"", st->in_from, st->out_to);
-    mcp_np_append(o, ",\"match\":\"%s\",\"opponent\":\"%s\",\"side\":%d", st->match, st->opponent, st->side);
-    mcp_np_append(o, ",\"peer_known\":%s,\"direct\":%s", mcp_tf(st->peer_known), mcp_tf(st->direct));
-    mcp_np_append(o, ",\"sent_direct\":%u,\"sent_relay\":%u,\"got_direct\":%u,\"got_relay\":%u",
-                  st->sent_direct, st->sent_relay, st->got_direct, st->got_relay);
-    mcp_np_append(o, ",\"chat\":[");
-    for (int i = 0; i < st->chat_n; i++) {
-        mcp_json_escape(esc, sizeof esc, st->chat[i]);
-        mcp_np_append(o, "%s\"%s\"", i ? "," : "", esc);
-    }
-    mcp_np_append(o, "]}");
-}
 #endif
 
 static void mcp_cmd_ggpo_lobby(const char *req, char *resp, int cap) {
 #ifdef M2HLE_GGPO
     char what[16], a[256], b[128];
     if (mcp_json_get_str(req, "do", what, sizeof what)) {
-        bool ok;
-        ggl_cmd_kind_t kind = mcp_ggl_kind(what, &ok);
-        if (!ok) {
+        ggl_cmd_kind_t kind;
+        if (!ggl_cmd_kind_named(what, &kind)) {
             snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown step\"}");
             return;
         }
@@ -2476,8 +2439,7 @@ static void mcp_cmd_ggpo_lobby(const char *req, char *resp, int cap) {
         ggl_post(kind, a, b);
     }
     ggl_status_t st = ggl_status();
-    mcp_np_out_t o = { resp, cap };
-    mcp_ggl_status_json(&o, &st);
+    ggl_status_json(resp, cap, &st);
 #else
     (void)req;
     snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"this build has no GGPO\"}");

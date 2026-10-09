@@ -37,6 +37,7 @@ typedef void          *HANDLE;
 typedef void          *HINSTANCE;
 typedef void          *LPVOID;
 typedef int            SOCKET;
+typedef unsigned short u_short;   /* BSD's; strict C++11 (Emscripten) leaves it out */
 #  define WINAPI
 #  define FALSE 0
 #  define TRUE  1

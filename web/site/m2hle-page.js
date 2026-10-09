@@ -80,7 +80,7 @@ function loadZipNow(bytes) {
      * this keeps the last of it when the tab goes. */
     addEventListener('pagehide', () => Module._web_backup_flush());
     if (m2hleFollow.active) m2hleFollow.onGame();   /* no netplay: the board is the leader's */
-    else m2hleNetplay.onGame();
+    else { m2hleNetplay.onGame(); m2hleGgpo.onGame(); }
     m2hleTouch.onGame();
     pauseOnGame();
     $('canvas').focus();
@@ -332,6 +332,7 @@ var Module = {
     m2hleShader.onReady();
     m2hleReplay.onReady(Module);
     m2hleNetplay.onReady(Module);
+    m2hleGgpo.onReady(Module);
     m2hlePad.onReady();
     debugStart();
     /* Development only: ?rom=<path> loads a zip from THIS site, so a headless

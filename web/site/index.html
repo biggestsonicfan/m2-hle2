@@ -266,6 +266,66 @@
   </section>
 </aside>
 
+<!-- GGPO (m2hle-ggpo.js, Pinboard #575): the other way to play online. Its own
+     lobby server, a channel per game, challenges by name, and rollback netplay. -->
+<aside id="ggpo" class="online ps-win" hidden aria-label="GGPO lobby">
+  <div class="online-head ps-head">
+    <h2 class="ps-title">GGPO lobby</h2>
+    <button id="gg-close" class="tool ps-back" aria-label="Close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
+  </div>
+  <p id="gg-error" class="error" hidden></p>
+
+  <section id="gg-off">
+    <p class="lead">Rollback netplay on ggpo.sonicthefighte.rs: a separate lobby and accounts from RPCN.</p>
+    <button id="gg-connect" class="tool primary big">Connect</button>
+  </section>
+
+  <section id="gg-busy" hidden>
+    <p class="status">Connecting...</p>
+  </section>
+
+  <section id="gg-signin" hidden>
+    <label>Name <input id="gg-user" maxlength="31" autocomplete="username"></label>
+    <label>Password <input id="gg-pass" type="password" maxlength="63" autocomplete="current-password"></label>
+    <label class="check"><input id="gg-remember" type="checkbox" checked> Remember me in this browser</label>
+    <p class="np-row">
+      <button id="gg-login" class="tool primary">Sign in</button>
+      <button id="gg-signup" class="tool">Create account</button>
+      <button id="gg-twitch-start" class="tool" hidden>Sign in with Twitch</button>
+    </p>
+  </section>
+
+  <section id="gg-twitch" hidden>
+    <p class="lead">Enter <strong id="gg-twitch-code"></strong> at
+      <a id="gg-twitch-link" href="https://www.twitch.tv/activate" target="_blank" rel="noopener noreferrer">twitch.tv/activate</a>.</p>
+  </section>
+
+  <section id="gg-channel" hidden>
+    <p class="np-me">Signed in as <strong id="gg-me"></strong> in <span id="gg-game"></span> · <button id="gg-signout" class="linkish">Sign out</button></p>
+    <div id="gg-incoming" class="np-row" hidden>
+      <span id="gg-incoming-text"></span>
+      <button id="gg-accept" class="tool primary">Accept</button>
+      <button id="gg-decline" class="tool">Decline</button>
+    </div>
+    <div id="gg-outgoing" class="np-row" hidden>
+      <span id="gg-outgoing-text"></span>
+      <button id="gg-cancel" class="tool">Cancel</button>
+    </div>
+    <h3>Players here</h3>
+    <ul id="gg-users" class="np-rooms"></ul>
+    <p id="gg-users-empty" class="status">Nobody else is here yet.</p>
+    <pre id="gg-chat" class="log gg-chat"></pre>
+    <input id="gg-say" maxlength="200" placeholder="Say something (Enter)" autocomplete="off">
+    <p class="fine left">A match restarts both games together. The web version's match goes through the server.</p>
+  </section>
+
+  <section id="gg-match" hidden>
+    <p class="lead">Playing <strong id="gg-opponent"></strong>.</p>
+    <p id="gg-link" class="status"></p>
+    <p class="np-row"><button id="gg-end" class="tool">End match</button></p>
+  </section>
+</aside>
+
 <!-- Controller mapping (m2hle-pad.js) and the touch buttons (m2hle-touch.js). Kept in
      this browser's localStorage. On a touch screen the touch section is moved first. -->
 <aside id="controls" class="online controls ps-win" hidden aria-label="Controls">
@@ -508,6 +568,7 @@
     <p class="ps-title menu-title" aria-hidden="true">Menu</p>
     <button id="btn-lobby" class="tool online-btn" hidden><span id="btn-lobby-label">Online Battle</span></button>
     <button id="btn-online" class="tool account-btn" aria-expanded="false" aria-controls="online" hidden><span id="btn-online-label">RPCN account</span></button>
+    <button id="btn-ggpo" class="tool account-btn" aria-expanded="false" aria-controls="ggpo" hidden><span id="btn-ggpo-label">GGPO lobby</span></button>
     <button id="btn-fullscreen" class="tool" hidden>Fullscreen</button>
     <button id="btn-controls" class="tool" aria-expanded="false" aria-controls="controls">Controls</button>
     <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>
@@ -525,6 +586,7 @@
 <script src="m2hle-objview.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-shader.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-netplay.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-ggpo.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-pad.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-touch.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-follow.js?v=@M2HLE_VERSION@"></script>

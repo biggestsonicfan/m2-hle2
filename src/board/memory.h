@@ -540,6 +540,22 @@ static inline void geodl_publish(uint32_t rstart) {
     g_geodl_snap_ready  = 1;
 }
 
+/* Both published lists empty, list 0 in front: what a fresh process has. A
+ * board reset leaves them as the last lists drawn, so two processes that ran
+ * differently before a GGPO cold boot would hash them differently ever after
+ * (which buffer is in front is the parity of every list published since the
+ * process began). Emu mutex held; the renderer copes as it does with a load. */
+static inline void geodl_snaps_clear(void) {
+    memset(g_geodl_snaps, 0, sizeof g_geodl_snaps);
+    memcpy(&g_geo_pub[0], &g_geo_live, sizeof g_geo_live);
+    memcpy(&g_geo_pub[1], &g_geo_live, sizeof g_geo_live);
+    g_geodl_snap        = g_geodl_snaps[0];
+    g_geo_rs            = &g_geo_pub[0];
+    g_geodl_snap_rstart = 0;
+    g_geodl_snap_ready  = 0;
+    g_geodl_snap_seq++;
+}
+
 /* GEO base (0x800000). */
 static void geo_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - GEO_BASE;

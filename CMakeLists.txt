@@ -187,11 +187,12 @@ if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     endif()
 endif()
 
-# Rollback netplay (cmake/ggpo.cmake). The desktop frontend only: its command
-# line and the MCP bridge are the way in. The submodule is optional, so a
-# checkout without vendor/ggpo still builds, without --ggpo-*.
-option(M2HLE_GGPO "Build GGPO rollback netplay into the desktop frontend" ON)
-if(M2HLE_GGPO AND M2HLE_FRONTEND STREQUAL "sokol")
+# Rollback netplay (cmake/ggpo.cmake): the desktop (its command line and the
+# MCP bridge), the web build (its GGPO panel) and the libretro core (the
+# "ggpo" online option). Not the handheld. The submodule is optional, so a
+# checkout without vendor/ggpo still builds, without GGPO.
+option(M2HLE_GGPO "Build GGPO rollback netplay into the desktop, web and libretro frontends" ON)
+if(M2HLE_GGPO AND NOT M2HLE_FRONTEND STREQUAL "sdl3")
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/vendor/ggpo/src/lib/ggpo/main.cpp)
         include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ggpo.cmake)
     else()
@@ -290,6 +291,10 @@ if(M2HLE_LIBRETRO)
     endif()
 
     add_library(m2hle_libretro SHARED ${SRC}/main_libretro.c)
+    if(TARGET ggpo)
+        set_target_properties(ggpo PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden)
+        target_link_libraries(m2hle_libretro PRIVATE ggpo)   # the "ggpo" online option
+    endif()
     set_target_properties(m2hle_libretro PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden)
     # RetroArch's names: m2hle_libretro.dll / .so / .dylib, and on Android
     # m2hle_libretro_android.so.
@@ -343,6 +348,9 @@ if(M2HLE_WEB)
     add_executable(m2hle ${SRC}/main_web.c)
     target_compile_definitions(m2hle PRIVATE M2HLE_WEB M2HLE_DEV_TOOLS=0)   # src/core/build_features.h
     target_link_libraries(m2hle PRIVATE sokol miniz)
+    if(TARGET ggpo)
+        target_link_libraries(m2hle PRIVATE ggpo)   # the GGPO panel (core/emu_ggpo.h)
+    endif()
     target_include_directories(m2hle PRIVATE
         ${VENDOR}/stb
         ${SRC}

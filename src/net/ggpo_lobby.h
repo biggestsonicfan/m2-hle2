@@ -16,6 +16,13 @@
  *   peer to peer    "GGPO" | PUNCH (0x10) | heard, every 250 ms for 10 s;
  *                   anything else is GGPO's own
  *
+ * A browser has no UDP, so the web build sends the same datagrams to the
+ * server as binary messages on its lobby WebSocket instead, and the server
+ * relays the whole match (`via_ws`; natively --ggpo-ws, to test it). It
+ * answers SEEN as "ws" port 0 and sends neither side a PEER, so there is no
+ * punching and no direct path: GGPO's packets go up as RELAY and come down as
+ * DATA, which the read side queues for GGPO's next receive (ggl__ring_*).
+ *
  * GGPO itself is told its peer is GGL_VIRTUAL_IP:GGL_VIRTUAL_PORT and gets
  * this file's transport (ggpo_port_set_transport): every packet from the
  * peer, direct or relayed, is reported as coming from there, so a match can
@@ -24,8 +31,9 @@
  * packet arrives straight from the peer, who only sends so once it does.
  *
  * Threads. The pump (ggl_pump) runs on the emu thread outside the emu mutex,
- * like emu_netplay_pump: the WebSocket connect blocks. The transport runs on
- * the emu thread inside GGPO, under the mutex. Everyone else (the window, the
+ * like emu_netplay_pump: the WebSocket connect blocks (natively; the web
+ * build's never does). The transport runs on the emu thread inside GGPO, under
+ * the mutex; the web build and the libretro core have one thread for both. Everyone else (the window, the
  * MCP bridge, the command line) posts commands (ggl_post) and reads a copy of
  * the status (ggl_status), both under g_ggl_lock, which nothing holds while
  * taking another lock.
@@ -35,6 +43,7 @@
 #ifndef M2HLE_GGPO_LOBBY_H
 #define M2HLE_GGPO_LOBBY_H
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -43,6 +52,9 @@
 
 #include "net_socket.h"
 #include "ws_relay.h"
+#ifdef __EMSCRIPTEN__
+#include "web_socket.h"
+#endif
 #include "../core/json_min.h"
 #include "../core/thread_mutex.h"
 #include "ggpo_port/ggpo_port.h"
@@ -60,6 +72,8 @@
 #define GGL_PUNCH_FOR_MS  10000
 #define GGL_PING_MS       30000
 #define GGL_RETRY_MS      3000            /* --ggpo-challenge: between tries */
+#define GGL_RING          32              /* relayed packets waiting for GGPO (via_ws) */
+#define GGL_PACKET_MAX    1400
 
 enum { GGL_HELLO = 1, GGL_SEEN = 2, GGL_PEER = 3, GGL_RELAY = 4, GGL_DATA = 5, GGL_PUNCH = 0x10 };
 
@@ -114,6 +128,7 @@ typedef struct {
     char challenge[GGL_NAME_MAX];   /* challenge this player when they are idle */
     char accept[GGL_NAME_MAX];      /* accept from this player, or "any" */
     bool force_relay;               /* never go direct (tests the relay) */
+    bool ws_match;                  /* the match over the lobby's WebSocket, as a browser */
 } ggl_auto_t;
 
 typedef struct { ggl_cmd_kind_t kind; char a[256]; char b[128]; } ggl_cmd_t;
@@ -130,7 +145,12 @@ static struct {
 
     /* The emu thread's own. */
     ggl_status_t st;
+#ifdef __EMSCRIPTEN__
+    int          ws_id;             /* web_socket.h's; 0 none */
+    char         ws_error[192];
+#else
     ws_relay_t   ws;
+#endif
     char         pass[128];         /* what the last sign-in used (a token after Twitch) */
     char         flow[64];          /* a Twitch device flow */
     int64_t      twitch_next, twitch_every;
@@ -139,9 +159,15 @@ static struct {
     char         udp_host[128];
     uint16_t     udp_port;
     bool         autologin_done, autojoin_done;
-    /* The match's UDP side. */
+    /* The match's transport: a UDP socket, or the WebSocket (via_ws). */
+    bool         transport_on;
+    bool         via_ws;
+    bool         seen;              /* the server has answered a HELLO */
     net_sock_t   sock;
     bool         sock_open;
+    uint8_t      ring[GGL_RING][GGL_PACKET_MAX];
+    uint16_t     ring_len[GGL_RING];
+    int          ring_head, ring_n;
     uint8_t      key[16];
     uint32_t     srv_ip, peer_ip;
     uint16_t     srv_port, peer_port;
@@ -186,22 +212,112 @@ static inline const char *ggl_stage_name(ggl_stage_t s) {
 
 /* ---- The WebSocket ------------------------------------------------------- */
 
+/* Natively ws_relay.h's client, which blocks to connect; in the browser
+ * web_socket.h's, which never blocks: sends made while it connects are queued,
+ * and the stage stays CONNECTING until the server's welcome. */
+#ifdef __EMSCRIPTEN__
+
+static inline bool ggl__ws_open(const char *url) {
+    g_ggl.ws_error[0] = '\0';
+    g_ggl.ws_id = m2ws_open(url, M2WS_LOBBY);
+    return g_ggl.ws_id > 0;
+}
+static inline bool ggl__ws_is_open(void) { return g_ggl.ws_id > 0 && m2ws_state(g_ggl.ws_id) != M2WS_CLOSED; }
+static inline void ggl__ws_close(void) {
+    if (g_ggl.ws_id > 0) m2ws_close(g_ggl.ws_id);
+    g_ggl.ws_id = 0;
+}
+static inline const char *ggl__ws_error(void) {
+    if (g_ggl.ws_id > 0) m2ws_error(g_ggl.ws_id, g_ggl.ws_error, (int)sizeof g_ggl.ws_error);
+    return g_ggl.ws_error;
+}
+static inline bool ggl__ws_send(bool binary, const void *data, uint32_t len) {
+    if (g_ggl.ws_id <= 0) return false;
+    return binary ? m2ws_send(g_ggl.ws_id, data, (int)len) != 0
+                  : m2ws_send_text(g_ggl.ws_id, (const char *)data, (int)len) != 0;
+}
+/* The next message into out (text NUL-terminated): its length, 0 for none
+ * waiting, -1 when the connection is gone. */
+static inline int ggl__ws_recv(uint8_t *out, uint32_t cap, bool *binary) {
+    if (g_ggl.ws_id <= 0) return -1;
+    int n = m2ws_recv_lobby(g_ggl.ws_id, out, (int)cap - 1, binary);
+    if (n > 0) out[n] = '\0';
+    return n;
+}
+
+#else
+
+static inline bool ggl__ws_open(const char *url) { return net_startup() && ws_relay_open(&g_ggl.ws, url); }
+static inline bool ggl__ws_is_open(void) { return g_ggl.ws.open; }
+static inline void ggl__ws_close(void) { ws_relay_close(&g_ggl.ws); }
+static inline const char *ggl__ws_error(void) { return g_ggl.ws.error; }
+static inline bool ggl__ws_send(bool binary, const void *data, uint32_t len) {
+    return ws_relay_send_frame(&g_ggl.ws, binary ? 0x2 : 0x1, (const uint8_t *)data, len, NULL, 0);
+}
+
+/* The next text or binary message into out (NUL-terminated): its length, 0
+ * for none waiting or a control frame, -1 when the connection is gone. */
+static inline int ggl__ws_frame(uint8_t *out, uint32_t cap, bool *binary) {
+    ws_relay_t *r = &g_ggl.ws;
+    uint32_t h;
+    uint64_t len;
+    if (!ws_relay_frame_head(r, &h, &len)) return WS_RELAY_MORE;
+    bool masked = (r->in[1] & 0x80) != 0;
+    if (len > sizeof r->in - 14) { ws_relay_fail(r, "the lobby sent a message too large"); return -1; }
+    if (r->in_used < h + (masked ? 4 : 0) + len) return WS_RELAY_MORE;
+    uint8_t b0 = r->in[0];
+    uint8_t op = b0 & 0x0F;
+    uint8_t *pl = r->in + h + (masked ? 4 : 0);
+    if (masked)
+        for (uint32_t i = 0; i < (uint32_t)len; i++) pl[i] ^= r->in[h + (i & 3)];
+    uint32_t total = (uint32_t)(pl - r->in) + (uint32_t)len;
+    int got = 0;
+    if ((op == 0x1 || op == 0x2) && (b0 & 0x80)) {
+        *binary = op == 0x2;
+        got = len < cap ? (int)len : (int)cap - 1;
+        memcpy(out, pl, (size_t)got);
+        out[got] = '\0';
+    } else if (ws_relay_control(r, b0, pl, len) < 0) {
+        return -1;
+    }
+    memmove(r->in, r->in + total, r->in_used - total);
+    r->in_used -= total;
+    return got;
+}
+
+static inline int ggl__ws_recv(uint8_t *out, uint32_t cap, bool *binary) {
+    ws_relay_t *r = &g_ggl.ws;
+    if (!r->open) return -1;
+    for (int pass = 0; pass < 64; pass++) {
+        int got = ggl__ws_frame(out, cap, binary);
+        if (got == -1) return -1;
+        if (got > 0) return got;
+        if (got == 0) continue;
+        int n = ws_relay_read(r, r->in + r->in_used, (uint32_t)sizeof r->in - r->in_used);
+        if (n < 0) { ws_relay_fail(r, "the connection to the lobby was lost"); return -1; }
+        if (n == 0) return 0;
+        r->in_used += (uint32_t)n;
+    }
+    return 0;
+}
+
+#endif
+
 static inline void ggl__fail(const char *why) {
     snprintf(g_ggl.st.error, sizeof g_ggl.st.error, "%s", why);
     LOG_WARN("ggpo lobby: %s", why);
-    ws_relay_close(&g_ggl.ws);
+    ggl__ws_close();
     g_ggl.st.stage = GGL_FAILED;
 }
 
 /* One JSON message; `body` is what goes after {"t":"...", without the brace. */
 static inline void ggl__send(const char *t, const char *body) {
-    if (!g_ggl.ws.open) return;
+    if (!ggl__ws_is_open()) return;
     char msg[1024];
     int n = snprintf(msg, sizeof msg, "{\"t\":\"%s\",\"id\":%u%s%s}", t, ++g_ggl.req,
                      body && body[0] ? "," : "", body ? body : "");
     if (n <= 0 || n >= (int)sizeof msg) return;
-    if (!ws_relay_send_frame(&g_ggl.ws, 0x1, (const uint8_t *)msg, (uint32_t)n, NULL, 0))
-        ggl__fail("the connection to the lobby was lost");
+    if (!ggl__ws_send(false, msg, (uint32_t)n)) ggl__fail("the connection to the lobby was lost");
 }
 
 /* body = "key":"escaped value" */
@@ -220,52 +336,7 @@ static inline void ggl__send_login(const char *t, const char *user, const char *
     ggl__send(t, body);
 }
 
-/* The next text message into out (NUL-terminated): its length, 0 for none
- * waiting or a control frame, -1 when the connection is gone. */
-static inline int ggl__ws_frame(char *out, uint32_t cap) {
-    ws_relay_t *r = &g_ggl.ws;
-    uint32_t h;
-    uint64_t len;
-    if (!ws_relay_frame_head(r, &h, &len)) return WS_RELAY_MORE;
-    bool masked = (r->in[1] & 0x80) != 0;
-    if (len > sizeof r->in - 14) { ws_relay_fail(r, "the lobby sent a message too large"); return -1; }
-    if (r->in_used < h + (masked ? 4 : 0) + len) return WS_RELAY_MORE;
-    uint8_t b0 = r->in[0];
-    uint8_t *pl = r->in + h + (masked ? 4 : 0);
-    if (masked)
-        for (uint32_t i = 0; i < (uint32_t)len; i++) pl[i] ^= r->in[h + (i & 3)];
-    uint32_t total = (uint32_t)(pl - r->in) + (uint32_t)len;
-    int got = 0;
-    if ((b0 & 0x0F) == 0x1 && (b0 & 0x80)) {
-        got = len < cap ? (int)len : (int)cap - 1;
-        memcpy(out, pl, (size_t)got);
-        out[got] = '\0';
-    } else if (ws_relay_control(r, b0, pl, len) < 0) {
-        return -1;
-    }
-    memmove(r->in, r->in + total, r->in_used - total);
-    r->in_used -= total;
-    return got;
-}
-
-/* The next text message, reading the socket when the buffer has none. */
-static inline int ggl__ws_recv(char *out, uint32_t cap) {
-    ws_relay_t *r = &g_ggl.ws;
-    if (!r->open) return -1;
-    for (int pass = 0; pass < 64; pass++) {
-        int got = ggl__ws_frame(out, cap);
-        if (got == -1) return -1;
-        if (got > 0) return got;
-        if (got == 0) continue;
-        int n = ws_relay_read(r, r->in + r->in_used, (uint32_t)sizeof r->in - r->in_used);
-        if (n < 0) { ws_relay_fail(r, "the connection to the lobby was lost"); return -1; }
-        if (n == 0) return 0;
-        r->in_used += (uint32_t)n;
-    }
-    return 0;
-}
-
-/* ---- The match's UDP ------------------------------------------------------ */
+/* ---- The match's datagrams ----------------------------------------------- */
 
 static inline void ggl__udp_head(uint8_t *b, uint8_t type) {
     memcpy(b, "GGPO", 4);
@@ -273,10 +344,16 @@ static inline void ggl__udp_head(uint8_t *b, uint8_t type) {
     memcpy(b + 5, g_ggl.key, 16);
 }
 
+/* A datagram for the server's rendezvous: UDP, or a binary message (via_ws). */
+static inline bool ggl__to_server(const uint8_t *b, uint32_t len) {
+    if (g_ggl.via_ws) return ggl__ws_send(true, b, len);
+    return net_udp_send(g_ggl.sock, g_ggl.srv_ip, g_ggl.srv_port, b, len);
+}
+
 static inline void ggl__hello(void) {
     uint8_t b[21];
     ggl__udp_head(b, GGL_HELLO);
-    net_udp_send(g_ggl.sock, g_ggl.srv_ip, g_ggl.srv_port, b, sizeof b);
+    ggl__to_server(b, sizeof b);
 }
 
 static inline void ggl__punch(void) {
@@ -290,12 +367,12 @@ static inline bool ggl__send_cb(void *ctx, uint32_t ip_be, uint16_t port, const 
         g_ggl.st.sent_direct++;
         return net_udp_send(g_ggl.sock, g_ggl.peer_ip, g_ggl.peer_port, data, len);
     }
-    uint8_t b[21 + 1400];
-    if (len > 1400) return false;
+    uint8_t b[21 + GGL_PACKET_MAX];
+    if (len > GGL_PACKET_MAX) return false;
     ggl__udp_head(b, GGL_RELAY);
     memcpy(b + 21, data, len);
     g_ggl.st.sent_relay++;
-    return net_udp_send(g_ggl.sock, g_ggl.srv_ip, g_ggl.srv_port, b, 21 + len);
+    return ggl__to_server(b, 21 + len);
 }
 
 /* SEEN / PEER: [len][ip ascii][port BE] after the type byte. */
@@ -318,8 +395,9 @@ static inline int ggl__from_server(uint8_t *buf, int n) {
         g_ggl.st.got_relay++;
         return n - 5;
     }
+    if (buf[4] == GGL_SEEN) g_ggl.seen = true;
     uint32_t ip; uint16_t port;
-    if (buf[4] == GGL_PEER && !g_ggl.st.peer_known && ggl__addr(buf, n, &ip, &port)) {
+    if (buf[4] == GGL_PEER && !g_ggl.via_ws && !g_ggl.st.peer_known && ggl__addr(buf, n, &ip, &port)) {
         g_ggl.peer_ip = ip;
         g_ggl.peer_port = port;
         g_ggl.st.peer_known = true;
@@ -348,30 +426,66 @@ static inline int ggl__from_peer(const uint8_t *buf, int n) {
     return n;
 }
 
-static inline int ggl__recv_cb(void *ctx, void *out, uint32_t cap, uint32_t *ip_be, uint16_t *port) {
-    (void)ctx;
-    uint8_t buf[1600];
-    for (int pass = 0; pass < 64; pass++) {
-        uint32_t ip; uint16_t p;
-        int n = net_udp_recv(g_ggl.sock, buf, sizeof buf, &ip, &p);
-        if (n <= 0) return 0;
-        int got = 0;
-        if (ip == g_ggl.srv_ip && p == g_ggl.srv_port) got = ggl__from_server(buf, n);
-        else if (g_ggl.st.peer_known && ip == g_ggl.peer_ip && p == g_ggl.peer_port) got = ggl__from_peer(buf, n);
-        if (got <= 0 || (uint32_t)got > cap) continue;
-        memcpy(out, buf, (size_t)got);
-        *ip_be = g_ggl.virt_ip;
-        *port = GGL_VIRTUAL_PORT;
-        return got;
+/* via_ws: what the server relayed waits here for GGPO's next receive. Both
+ * ends run on the emu thread. A full ring drops, as a socket's buffer would. */
+static inline void ggl__ring_push(const uint8_t *b, int n) {
+    if (n <= 0 || n > GGL_PACKET_MAX || g_ggl.ring_n == GGL_RING) return;
+    int i = (g_ggl.ring_head + g_ggl.ring_n++) % GGL_RING;
+    memcpy(g_ggl.ring[i], b, (size_t)n);
+    g_ggl.ring_len[i] = (uint16_t)n;
+}
+
+static inline int ggl__ring_pop(void *out, uint32_t cap) {
+    while (g_ggl.ring_n > 0) {
+        int i = g_ggl.ring_head;
+        g_ggl.ring_head = (i + 1) % GGL_RING;
+        g_ggl.ring_n--;
+        if (g_ggl.ring_len[i] <= cap) {
+            memcpy(out, g_ggl.ring[i], g_ggl.ring_len[i]);
+            return g_ggl.ring_len[i];
+        }
     }
     return 0;
 }
 
-/* Hellos until the server pairs us, then keepalives; punches for a while. */
+/* A binary message on the lobby socket: the rendezvous, for a via_ws match. */
+static inline void ggl__on_datagram(uint8_t *b, int n) {
+    if (!g_ggl.via_ws || g_ggl.st.stage != GGL_MATCH) return;
+    ggl__ring_push(b, ggl__from_server(b, n));
+}
+
+/* The next UDP datagram for GGPO, 0 for none. */
+static inline int ggl__recv_udp(uint8_t *buf, uint32_t cap) {
+    for (int pass = 0; pass < 64; pass++) {
+        uint32_t ip; uint16_t p;
+        int n = net_udp_recv(g_ggl.sock, buf, cap, &ip, &p);
+        if (n <= 0) return 0;
+        int got = 0;
+        if (ip == g_ggl.srv_ip && p == g_ggl.srv_port) got = ggl__from_server(buf, n);
+        else if (g_ggl.st.peer_known && ip == g_ggl.peer_ip && p == g_ggl.peer_port) got = ggl__from_peer(buf, n);
+        if (got > 0) return got;
+    }
+    return 0;
+}
+
+static inline int ggl__recv_cb(void *ctx, void *out, uint32_t cap, uint32_t *ip_be, uint16_t *port) {
+    (void)ctx;
+    uint8_t buf[1600];
+    int got = g_ggl.via_ws ? ggl__ring_pop(buf, sizeof buf) : ggl__recv_udp(buf, sizeof buf);
+    if (got <= 0 || (uint32_t)got > cap) return 0;
+    memcpy(out, buf, (size_t)got);
+    *ip_be = g_ggl.virt_ip;
+    *port = GGL_VIRTUAL_PORT;
+    return got;
+}
+
+/* Hellos until the server pairs us (via_ws: until it has seen us), then
+ * keepalives; punches for a while. */
 static inline void ggl__udp_tick(int64_t now) {
     if (now >= g_ggl.hello_next) {
         ggl__hello();
-        g_ggl.hello_next = now + (g_ggl.st.peer_known ? GGL_KEEPALIVE_MS : GGL_HELLO_MS);
+        bool paired = g_ggl.st.peer_known || (g_ggl.via_ws && g_ggl.seen);
+        g_ggl.hello_next = now + (paired ? GGL_KEEPALIVE_MS : GGL_HELLO_MS);
     }
     if (g_ggl.st.peer_known && now < g_ggl.punch_until && now >= g_ggl.punch_next && !g_ggl_auto.force_relay) {
         ggl__punch();
@@ -379,9 +493,10 @@ static inline void ggl__udp_tick(int64_t now) {
     }
 }
 
-static inline void ggl__udp_close(void) {
+static inline void ggl__transport_close(void) {
     if (g_ggl.sock_open) net_close(&g_ggl.sock);
-    g_ggl.sock_open = false;
+    g_ggl.sock_open = g_ggl.transport_on = false;
+    g_ggl.ring_n = g_ggl.ring_head = 0;
     ggpo_port_set_transport(NULL);
 }
 
@@ -513,14 +628,38 @@ static inline void ggl__on_welcome(const char *m) {
     g_ggl.st.stage = GGL_CONNECTED;
 }
 
-/* The match: a UDP socket, the server's address, and GGPO told to start. */
-static inline bool ggl__open_match(const char *host, uint32_t port) {
+/* GGL_VIRTUAL_IP in network order, as GGPO's inet_pton reads it. Not
+ * net_resolve_ipv4: the web build's answers every name with the gateway's tag. */
+static inline uint32_t ggl__virtual_ip(void) {
+    static const uint8_t b[4] = { 169, 254, 0, 1 };
+    uint32_t ip;
+    memcpy(&ip, b, 4);
+    return ip;
+}
+
+/* The match's transport: a UDP socket and the server's address, or (via_ws)
+ * the lobby's own WebSocket. */
+static inline bool ggl__open_transport(const char *host, uint32_t port) {
+#ifdef __EMSCRIPTEN__
+    g_ggl.via_ws = true;
+#else
+    g_ggl.via_ws = g_ggl_auto.ws_match;
+#endif
+    if (g_ggl.via_ws) return true;
     g_ggl.srv_ip = net_resolve_ipv4(host);
     g_ggl.srv_port = (uint16_t)port;
     if (!g_ggl.srv_ip || !port) { ggl__fail("the lobby's UDP address does not resolve"); return false; }
     if (!net_udp_open(&g_ggl.sock, 0)) { ggl__fail("could not open a UDP socket for the match"); return false; }
     g_ggl.sock_open = true;
-    g_ggl.virt_ip = net_resolve_ipv4(GGL_VIRTUAL_IP);
+    return true;
+}
+
+/* The match: its transport, and GGPO told to start. */
+static inline bool ggl__open_match(const char *host, uint32_t port) {
+    if (!ggl__open_transport(host, port)) return false;
+    g_ggl.transport_on = true;
+    g_ggl.ring_n = g_ggl.ring_head = 0;
+    g_ggl.virt_ip = ggl__virtual_ip();
     ggpo_transport_t t = { NULL, ggl__send_cb, ggl__recv_cb };
     ggpo_port_set_transport(&t);
     g_ggpo_cfg.mode = EMU_GGPO_P2P;
@@ -555,7 +694,7 @@ static inline void ggl__on_match(const char *m) {
     if (strlen(key) != 32) { ggl__fail("the match came without a key"); return; }
     ggl__hex16(key, g_ggl.key);
     s->side = side;
-    s->peer_known = s->direct = g_ggl.heard = g_ggl.ggpo_seen = false;
+    s->peer_known = s->direct = g_ggl.heard = g_ggl.ggpo_seen = g_ggl.seen = false;
     s->sent_direct = s->sent_relay = s->got_direct = s->got_relay = 0;
     s->in_id[0] = s->in_from[0] = s->out_id[0] = s->out_to[0] = '\0';
     g_ggl.hello_next = g_ggl.punch_next = 0;
@@ -611,18 +750,21 @@ static inline void ggl__on_message(const char *m) {
 /* ---- Commands ------------------------------------------------------------ */
 
 static inline void ggl__connect(const char *url) {
-    ws_relay_close(&g_ggl.ws);
+    ggl__ws_close();
     bool dflt = !url[0] || strcmp(url, "default") == 0;
     snprintf(g_ggl.st.url, sizeof g_ggl.st.url, "%s", dflt ? GGL_DEFAULT_URL : url);
     g_ggl.st.error[0] = '\0';
     g_ggl.st.stage = GGL_CONNECTING;
+    g_ggl.autologin_done = g_ggl.autojoin_done = false;
     g_ggl.ping_next = net_now_ms() + GGL_PING_MS;
-    /* Blocks for the connect and the upgrade: the pump holds no lock here. */
-    if (!net_startup() || !ws_relay_open(&g_ggl.ws, g_ggl.st.url)) {
-        ggl__fail(g_ggl.ws.error[0] ? g_ggl.ws.error : "could not reach the lobby");
+    /* Natively this blocks for the connect and the upgrade: the pump holds no
+     * lock here. */
+    if (!ggl__ws_open(g_ggl.st.url)) {
+        const char *e = ggl__ws_error();
+        ggl__fail(e[0] ? e : "could not reach the lobby");
         return;
     }
-    LOG_INFO("ggpo lobby: connected to %s", g_ggl.st.url);
+    LOG_INFO("ggpo lobby: connecting to %s", g_ggl.st.url);
 }
 
 static inline void ggl__challenge(const char *name) {
@@ -648,7 +790,7 @@ static inline void ggl__run_cmd(const ggl_cmd_t *c) {
     case GGL_CMD_END:        ggl__match_done("ended here"); break;
     case GGL_CMD_DISCONNECT:
         ggl__match_done("disconnected");
-        ws_relay_close(&g_ggl.ws);
+        ggl__ws_close();
         g_ggl.st.stage = GGL_OFF;
         break;
     }
@@ -694,16 +836,22 @@ static inline void ggl__match_tick(int64_t now, bool ggpo_on) {
             ggl__match_done("the session ended");
         }
     }
-    if (g_ggl.st.stage != GGL_MATCH && g_ggl.sock_open && !ggpo_on) ggl__udp_close();
+    if (g_ggl.st.stage != GGL_MATCH && g_ggl.transport_on && !ggpo_on) ggl__transport_close();
 }
 
 static inline void ggl__read_ws(void) {
-    static char msg[16384];
-    for (int i = 0; i < 32 && g_ggl.ws.open; i++) {
-        int n = ggl__ws_recv(msg, sizeof msg);
-        if (n < 0) { ggl__fail(g_ggl.ws.error[0] ? g_ggl.ws.error : "the lobby closed the connection"); return; }
+    static uint8_t msg[16384];
+    for (int i = 0; i < 64 && ggl__ws_is_open(); i++) {
+        bool binary = false;
+        int n = ggl__ws_recv(msg, sizeof msg, &binary);
+        if (n < 0) {
+            const char *e = ggl__ws_error();
+            ggl__fail(e[0] ? e : "the lobby closed the connection");
+            return;
+        }
         if (n == 0) return;
-        ggl__on_message(msg);
+        if (binary) ggl__on_datagram(msg, n);
+        else ggl__on_message((const char *)msg);
     }
 }
 
@@ -712,7 +860,7 @@ static inline void ggl__timers(int64_t now) {
         ggl__send_str("twitch_poll", "flow", g_ggl.flow);
         g_ggl.twitch_next = now + g_ggl.twitch_every;
     }
-    if (g_ggl.ws.open && now >= g_ggl.ping_next) {
+    if (ggl__ws_is_open() && now >= g_ggl.ping_next) {
         ggl__send("ping", "");
         g_ggl.ping_next = now + GGL_PING_MS;
     }
@@ -732,7 +880,7 @@ static inline void ggl_pump(bool ggpo_on, const char *rom_set) {
     ggl__lock_init();
     ggl_cmd_t cmds[GGL_CMDS_MAX];
     int n = ggl__take_cmds(cmds);
-    if (n == 0 && g_ggl.st.stage == GGL_OFF && !g_ggl.sock_open) return;
+    if (n == 0 && g_ggl.st.stage == GGL_OFF && !g_ggl.transport_on) return;
     for (int i = 0; i < n; i++) ggl__run_cmd(&cmds[i]);
     int64_t now = net_now_ms();
     ggl__read_ws();
@@ -744,10 +892,86 @@ static inline void ggl_pump(bool ggpo_on, const char *rom_set) {
     emu_mutex_unlock(&g_ggl.lock);
 }
 
+/* ---- For the bridge and the page ----------------------------------------- */
+
+/* A step's name ("connect", "login", ...) as ggl_post takes it; false for none. */
+static inline bool ggl_cmd_kind_named(const char *v, ggl_cmd_kind_t *out) {
+    static const struct { const char *name; ggl_cmd_kind_t kind; } k[] = {
+        { "connect", GGL_CMD_CONNECT }, { "login", GGL_CMD_LOGIN }, { "signup", GGL_CMD_SIGNUP },
+        { "twitch", GGL_CMD_TWITCH }, { "join", GGL_CMD_JOIN }, { "challenge", GGL_CMD_CHALLENGE },
+        { "accept", GGL_CMD_ACCEPT }, { "decline", GGL_CMD_DECLINE }, { "cancel", GGL_CMD_CANCEL },
+        { "chat", GGL_CMD_CHAT }, { "end", GGL_CMD_END }, { "disconnect", GGL_CMD_DISCONNECT },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
+        if (strcmp(v, k[i].name) == 0) { *out = k[i].kind; return true; }
+    return false;
+}
+
+typedef struct { char *p; int cap, n; } ggl_out_t;
+
+static inline void ggl__put(ggl_out_t *o, const char *fmt, ...) {
+    if (o->n >= o->cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(o->p + o->n, (size_t)(o->cap - o->n), fmt, ap);
+    va_end(ap);
+    if (k > 0) o->n = o->n + k < o->cap ? o->n + k : o->cap - 1;
+}
+
+/* ,"key":"escaped value" */
+static inline void ggl__put_str(ggl_out_t *o, const char *key, const char *v) {
+    char esc[512];
+    json_escape(esc, sizeof esc, v);
+    ggl__put(o, ",\"%s\":\"%s\"", key, esc);
+}
+
+static inline void ggl__put_lists(ggl_out_t *o, const ggl_status_t *st) {
+    char a[96], b[64];
+    ggl__put(o, ",\"users\":[");
+    for (int i = 0; i < st->n_users; i++) {
+        json_escape(a, sizeof a, st->users[i].name);
+        json_escape(b, sizeof b, st->users[i].state);
+        ggl__put(o, "%s{\"name\":\"%s\",\"state\":\"%s\"}", i ? "," : "", a, b);
+    }
+    ggl__put(o, "],\"chat\":[");
+    for (int i = 0; i < st->chat_n; i++) {
+        char esc[400];
+        json_escape(esc, sizeof esc, st->chat[i]);
+        ggl__put(o, "%s\"%s\"", i ? "," : "", esc);
+    }
+    ggl__put(o, "]");
+}
+
+/* The status as one JSON object: the bridge's ggpo_lobby reply, the page's. */
+static inline void ggl_status_json(char *out, int cap, const ggl_status_t *st) {
+    ggl_out_t o = { out, cap, 0 };
+    if (cap <= 0) return;
+    out[0] = '\0';
+    ggl__put(&o, "{\"ok\":true,\"stage\":\"%s\"", ggl_stage_name(st->stage));
+    ggl__put_str(&o, "url", st->url);
+    ggl__put_str(&o, "user", st->user);
+    ggl__put_str(&o, "game", st->game);
+    ggl__put_str(&o, "error", st->error);
+    ggl__put(&o, ",\"twitch\":%s", st->twitch ? "true" : "false");
+    ggl__put_str(&o, "twitch_code", st->twitch_code);
+    ggl__put_str(&o, "twitch_uri", st->twitch_uri);
+    ggl__put_str(&o, "challenged_by", st->in_from);
+    ggl__put_str(&o, "challenging", st->out_to);
+    ggl__put_str(&o, "match", st->match);
+    ggl__put_str(&o, "opponent", st->opponent);
+    ggl__put(&o, ",\"side\":%d,\"peer_known\":%s,\"direct\":%s", st->side,
+             st->peer_known ? "true" : "false", st->direct ? "true" : "false");
+    ggl__put(&o, ",\"sent_direct\":%u,\"sent_relay\":%u,\"got_direct\":%u,\"got_relay\":%u",
+             st->sent_direct, st->sent_relay, st->got_direct, st->got_relay);
+    ggl__put_lists(&o, st);
+    ggl__put(&o, "}");
+}
+
 /* The command line's --ggpo-lobby* flags; true when argv[*i] was one. */
 static inline bool ggl_cli_arg(int argc, char **argv, int *i) {
     const char *a = argv[*i];
     if (strcmp(a, "--ggpo-relay") == 0) { g_ggl_auto.force_relay = true; return true; }
+    if (strcmp(a, "--ggpo-ws") == 0) { g_ggl_auto.ws_match = true; return true; }
     if (strcmp(a, "--ggpo-signup") == 0) { g_ggl_auto.signup = true; return true; }
     if (strncmp(a, "--ggpo-", 7) != 0 || *i + 1 >= argc) return false;
     static const struct { const char *flag; size_t off, cap; } f[] = {

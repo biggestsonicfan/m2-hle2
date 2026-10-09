@@ -155,7 +155,7 @@ static void lr_notify(const char *msg, unsigned ms) {
 
 /* ---- Core options ------------------------------------------------------------ */
 
-typedef enum { LR_ONLINE_RETROARCH, LR_ONLINE_RPCN } lr_online_t;
+typedef enum { LR_ONLINE_RETROARCH, LR_ONLINE_RPCN, LR_ONLINE_GGPO } lr_online_t;
 
 static struct {
     int         scale;          /* the game drawn at N x 496x384; 0 = at the output's size */
@@ -244,10 +244,11 @@ static struct retro_core_option_v2_definition option_defs[] = {
     { "m2hle_online", "Online play", NULL,
       "RetroArch: host and join through RetroArch's Netplay menu and lobby (password, player list and all). "
       "RPCN: the same rooms as the PC and the website, in the game's own online lobby, which opens at load and "
-      "with L + R together, and is driven with the pad (sign in with Twitch or an RPCN account). Takes effect "
-      "when the game is next loaded.",
+      "with L + R together, and is driven with the pad (sign in with Twitch or an RPCN account). GGPO: "
+      "rollback netplay through the GGPO lobby (ggpo.sonicthefighte.rs), set up in m2hle-ggpo.cfg in the saves "
+      "folder; L + R lists who to challenge. Takes effect when the game is next loaded.",
       NULL, "online",
-      { { "retroarch", "RetroArch" }, { "rpcn", "RPCN" }, { NULL, NULL } },
+      { { "retroarch", "RetroArch" }, { "rpcn", "RPCN" }, { "ggpo", "GGPO" }, { NULL, NULL } },
       "retroarch" },
     { "m2hle_net_delay", "Input delay (frames)", NULL,
       "Frames between a button press and the board seeing it in a session this machine hosts. More hides more "
@@ -300,7 +301,8 @@ static void lr_read_load_options(void) {
     if ((v = lr_var("m2hle_sound_driver"))) g_sound_hle_want = !strcmp(v, "c");   /* read at the next sound_reset */
     if ((v = lr_var("m2hle_gems_i960"))) g_gems_i960 = !strcmp(v, "enabled");   /* gems_apply at load */
     if ((v = lr_var("m2hle_gems_cop")))  g_gems_cop  = !strcmp(v, "enabled");
-    if ((v = lr_var("m2hle_online"))) opt.online = strcmp(v, "rpcn") ? LR_ONLINE_RETROARCH : LR_ONLINE_RPCN;
+    if ((v = lr_var("m2hle_online")))
+        opt.online = !strcmp(v, "rpcn") ? LR_ONLINE_RPCN : !strcmp(v, "ggpo") ? LR_ONLINE_GGPO : LR_ONLINE_RETROARCH;
     if ((v = lr_var("m2hle_stf_version"))) opt.profile = strcmp(v, "arcade") ? NULL : "sfight";
 }
 
@@ -343,7 +345,7 @@ static void lr_set_options(void) {
         { "m2hle_sound_thread", "Sound board on its own core; enabled|disabled" },
         { "m2hle_draw_rate",  "Draw rate; 60|30" },
         { "m2hle_heat_guard", "Heat guard; " LR_DEFAULT_HEAT "|off|80|85|90" },
-        { "m2hle_online",     "Online play; retroarch|rpcn" },
+        { "m2hle_online",     "Online play; retroarch|rpcn|ggpo" },
         { "m2hle_net_delay",  "Input delay (frames); 2|1|3|4|5|6|8" },
         { NULL, NULL },
     };
@@ -506,7 +508,7 @@ static void lr_set_input_descriptors(void) {
             if (port == 1 && lr_binds[i].p2 < 0) continue;
             desc[n++] = (struct retro_input_descriptor){ port, RETRO_DEVICE_JOYPAD, 0, lr_binds[i].id, names[i] };
         }
-    if (opt.online == LR_ONLINE_RPCN) {
+    if (opt.online != LR_ONLINE_RETROARCH) {
         desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "Online lobby (with R)" };
         desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Online lobby (with L)" };
     }
@@ -1077,14 +1079,18 @@ static uint32_t lr_port_held_shell(unsigned port) {
 /* The shell's frame; true when the game gets the pad. *board_paused: the
  * shell holds the board still (its offline menus). */
 static bool lr_shell_input(bool *board_paused) {
-    bool session = pkt_lockstep_playing(&g_pkt) || netplay_active();
+    bool session = pkt_lockstep_playing(&g_pkt) || netplay_active() || emu_ggpo_wanted();
+    if (emu_ggpo_wanted() && g_ps3ui_shell.scr != PS3UI_SH_GAME) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_GAME);
     ps3ui_shell_frame(&g_ps3ui_shell, lr_lobby_pad(), lr_lobby_pad_port(1), session);
     /* Online Battle in RetroArch's own netplay mode: say where it lives */
     if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE && opt.online != LR_ONLINE_RPCN) {
         ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_MAIN);
         g_ps3ui_shell.dlg_kind = PS3UI_SHDLG_NONE;
-        ps3ui_dialog_ask(&g_ps3ui_shell.dlg, "Online play is set to RetroArch's netplay. Host or join from "
-                         "RetroArch's Netplay menu, or set Online play to RPCN in the core's options.", 0);
+        ps3ui_dialog_ask(&g_ps3ui_shell.dlg, opt.online == LR_ONLINE_GGPO
+                         ? "Online play is set to GGPO. Press L + R together in the game to challenge a player "
+                           "in the GGPO lobby, or set Online play to RPCN in the core's options."
+                         : "Online play is set to RetroArch's netplay. Host or join from "
+                           "RetroArch's Netplay menu, or set Online play to RPCN in the core's options.", 0);
     }
     *board_paused = ps3ui_shell_board_paused(&g_ps3ui_shell);
     return ps3ui_shell_game_pad(&g_ps3ui_shell);
@@ -1358,7 +1364,7 @@ static int lr_hottest_c(void) {
 static bool lr_sound_may_go(void) {
     if (g_pkt.state != PKT_OFF && g_pkt.state != PKT_ENDED) return false;
     if (g_netplay.enabled && (g_netplay.state == NETPLAY_SYNCING || netplay_running_match())) return false;
-    return true;
+    return !emu_ggpo_wanted();
 }
 
 /* Once a retro_run: the guard's stages on the hottest zone, its messages, and
@@ -1632,6 +1638,235 @@ static bool lr_run_rpcn(uint32_t local_held) {
     }
 }
 
+/* ---- GGPO (Pinboard #575) -----------------------------------------------------------------
+ *
+ * Online play "GGPO": rollback netplay (core/emu_ggpo.h) through the GGPO lobby
+ * (net/ggpo_lobby.h). The lobby has no screen of its own here; it is driven
+ * from <saves>/m2hle-ggpo.cfg and the pad, and talks through notifications:
+ *
+ *   url=wss://ggpo.sonicthefighte.rs/ws   the lobby (this is the default)
+ *   user=NAME / pass=PASSWORD             sign in; with no user, Twitch (the code is shown)
+ *   challenge=NAME                        challenge this player whenever they are free
+ *   accept=NAME|any                       accept a challenge from them without asking
+ *   ws=1                                  the match over the lobby's WebSocket, not UDP
+ *   synclog=DIR                           each check frame's board, part by part (desync hunts)
+ *
+ * A Twitch sign-in writes the account and its token back to the file, so the
+ * next load signs straight in. In the game, L + R lists who is free: Left /
+ * Right pick, B challenges, A closes. A challenge to us asks: B accepts, A
+ * declines. While a prompt is up the game gets no pad.
+ *
+ * A match is a cold boot of both boards (emu_ggpo_tick runs it, one frame a
+ * retro_run); each machine is one player, so port 2 is not read, and reset and
+ * state loads are refused, as in an RPCN session. */
+#ifdef M2HLE_GGPO
+
+static struct {
+    char   cfg[512];             /* the file's path; "" = no save directory */
+    bool   twitch_asked, saved;
+    char   code_said[16];        /* the Twitch code last shown */
+    char   in_said[GGL_NAME_MAX];
+    ggl_stage_t stage_said;
+    bool   picking;              /* L + R's list is up */
+    int    pick;                 /* its cursor, an index into the free players */
+    uint32_t pad_was;
+    bool   lr_was;
+} g_lrg;
+
+static void lr_ggpo_cfg_line(const char *k, const char *v) {
+    ggl_auto_t *a = &g_ggl_auto;
+    if (!strcmp(k, "url"))            snprintf(a->url, sizeof a->url, "%s", v);
+    else if (!strcmp(k, "user"))      snprintf(a->user, sizeof a->user, "%s", v);
+    else if (!strcmp(k, "pass"))      snprintf(a->pass, sizeof a->pass, "%s", v);
+    else if (!strcmp(k, "challenge")) snprintf(a->challenge, sizeof a->challenge, "%s", v);
+    else if (!strcmp(k, "accept"))    snprintf(a->accept, sizeof a->accept, "%s", v);
+    else if (!strcmp(k, "ws"))        a->ws_match = atoi(v) != 0;
+    else if (!strcmp(k, "synclog"))   snprintf(g_ggpo_cfg.synclog_dir, sizeof g_ggpo_cfg.synclog_dir, "%s", v);
+}
+
+static void lr_ggpo_cfg_read(void) {
+    FILE *f = g_lrg.cfg[0] ? fopen(g_lrg.cfg, "rb") : NULL;
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        char *eq = strchr(line, '=');
+        if (line[0] == '#' || !eq) continue;
+        *eq = '\0';
+        lr_ggpo_cfg_line(line, eq + 1);
+    }
+    fclose(f);
+}
+
+/* The file as it stands now: the sign-in a Twitch flow got us included. */
+static void lr_ggpo_cfg_write(const char *user, const char *pass) {
+    FILE *f = g_lrg.cfg[0] ? fopen(g_lrg.cfg, "wb") : NULL;
+    if (!f) return;
+    const ggl_auto_t *a = &g_ggl_auto;
+    fprintf(f, "# m2-hle's GGPO lobby (online play \"GGPO\"). Lines are key=value.\n"
+               "# With no user, the core signs in with Twitch and writes the account here.\n");
+    fprintf(f, "url=%s\nuser=%s\npass=%s\nchallenge=%s\naccept=%s\nws=%d\n",
+            a->url[0] ? a->url : GGL_DEFAULT_URL, user, pass, a->challenge, a->accept, a->ws_match ? 1 : 0);
+    fclose(f);
+}
+
+static void lr_ggpo_init(void) {
+    const char *saves = NULL;
+    g_lrg.cfg[0] = '\0';
+    if (env_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &saves) && saves && saves[0]) {
+        lr_mkdirs(saves);
+        snprintf(g_lrg.cfg, sizeof g_lrg.cfg, "%s/m2hle-ggpo.cfg", saves);
+    }
+    memset(&g_ggl_auto, 0, sizeof g_ggl_auto);
+    lr_ggpo_cfg_read();
+    snprintf(g_ggl_auto.game, sizeof g_ggl_auto.game, "%s", g_active_profile ? g_active_profile->id : "m2");
+    netplay_set_reset_hook(lr_netplay_reset_cb, NULL);   /* the cold boot: lr_install_board */
+    ggl_post(GGL_CMD_CONNECT, g_ggl_auto.url[0] ? g_ggl_auto.url : GGL_DEFAULT_URL, "");
+    lr_log(RETRO_LOG_INFO, "ggpo: settings %s", g_lrg.cfg[0] ? g_lrg.cfg : "(no save directory)");
+}
+
+/* What the lobby has to say, once each. */
+static void lr_ggpo_say(const ggl_status_t *st) {
+    char msg[256];
+    if (st->twitch_code[0] && strcmp(st->twitch_code, g_lrg.code_said)) {
+        snprintf(g_lrg.code_said, sizeof g_lrg.code_said, "%s", st->twitch_code);
+        snprintf(msg, sizeof msg, "GGPO: sign in with Twitch: enter %s at %s", st->twitch_code, st->twitch_uri);
+        lr_notify(msg, 60000);
+    }
+    if (st->stage == g_lrg.stage_said) return;
+    g_lrg.stage_said = st->stage;
+    if (st->stage == GGL_CHANNEL)
+        snprintf(msg, sizeof msg, "GGPO: %s in %s, %d here. L + R: challenge someone", st->user, st->game, st->n_users);
+    else if (st->stage == GGL_MATCH)
+        snprintf(msg, sizeof msg, "GGPO: match against %s", st->opponent);
+    else if (st->stage == GGL_FAILED)
+        snprintf(msg, sizeof msg, "GGPO: %s", st->error[0] ? st->error : "the lobby is gone");
+    else return;
+    lr_notify(msg, 5000);
+}
+
+/* Sign-in that the file does not settle: Twitch when it names nobody, and the
+ * account a flow got us saved. The join is the lobby's own: g_ggl_auto.game. */
+static void lr_ggpo_signin(const ggl_status_t *st) {
+    if (st->stage == GGL_CONNECTED && !g_ggl_auto.user[0] && !g_lrg.twitch_asked) {
+        g_lrg.twitch_asked = true;
+        if (st->twitch) ggl_post(GGL_CMD_TWITCH, "", "");
+        else lr_notify("GGPO: put user= and pass= in m2hle-ggpo.cfg (saves folder) to sign in", 10000);
+    }
+    if (st->stage >= GGL_SIGNED_IN && st->stage != GGL_FAILED && !g_ggl_auto.user[0] && !g_lrg.saved) {
+        g_lrg.saved = true;
+        lr_ggpo_cfg_write(st->user, g_ggl.pass);   /* the token, after Twitch */
+    }
+}
+
+/* The n-th player who is free to challenge, or NULL. */
+static const char *lr_ggpo_free(const ggl_status_t *st, int n, int *count) {
+    const char *found = NULL;
+    int k = 0;
+    for (int i = 0; i < st->n_users; i++) {
+        if (!strcmp(st->users[i].name, st->user) || strcmp(st->users[i].state, "idle")) continue;
+        if (k == n) found = st->users[i].name;
+        k++;
+    }
+    *count = k;
+    return found;
+}
+
+static void lr_ggpo_show_pick(const ggl_status_t *st) {
+    int n = 0;
+    const char *who = lr_ggpo_free(st, g_lrg.pick, &n);
+    char msg[160];
+    if (!who) snprintf(msg, sizeof msg, "GGPO: nobody is free to challenge (A: close)");
+    else snprintf(msg, sizeof msg, "GGPO: challenge %s? (%d of %d; Left/Right, B: challenge, A: close)",
+                  who, g_lrg.pick + 1, n);
+    lr_notify(msg, 4000);
+}
+
+/* A challenge to us: B accepts, A declines. */
+static void lr_ggpo_pad_incoming(const ggl_status_t *st, uint32_t hit) {
+    if (strcmp(st->in_from, g_lrg.in_said)) {
+        snprintf(g_lrg.in_said, sizeof g_lrg.in_said, "%s", st->in_from);
+        char msg[160];
+        snprintf(msg, sizeof msg, "GGPO: %s challenges you (B: accept, A: decline)", st->in_from);
+        lr_notify(msg, 10000);
+    }
+    if (hit & PS3UI_PAD_CROSS) ggl_post(GGL_CMD_ACCEPT, "", "");
+    else if (hit & PS3UI_PAD_CIRCLE) ggl_post(GGL_CMD_DECLINE, "", "");
+}
+
+/* The open picker: Left/Right walk the idle players, B challenges, A or L+R close. */
+static void lr_ggpo_pad_picker(const ggl_status_t *st, uint32_t hit, bool lr_hit) {
+    int n = 0;
+    const char *who = lr_ggpo_free(st, g_lrg.pick, &n);
+    if (hit & (PS3UI_PAD_LEFT | PS3UI_PAD_RIGHT)) {
+        g_lrg.pick = n ? (g_lrg.pick + ((hit & PS3UI_PAD_RIGHT) ? 1 : n - 1)) % n : 0;
+        lr_ggpo_show_pick(st);
+    } else if ((hit & PS3UI_PAD_CROSS) && who) {
+        ggl_post(GGL_CMD_CHALLENGE, who, "");
+        g_lrg.picking = false;
+    } else if (hit & PS3UI_PAD_CIRCLE || lr_hit) {
+        g_lrg.picking = false;
+    }
+}
+
+/* The pad in the channel. True while a prompt has it, so the game does not. */
+static bool lr_ggpo_pad(const ggl_status_t *st) {
+    uint32_t pad = lr_lobby_pad();
+    uint32_t hit = pad & ~g_lrg.pad_was;
+    g_lrg.pad_was = pad;
+    bool lr = lr_btn(0, RETRO_DEVICE_ID_JOYPAD_L) && lr_btn(0, RETRO_DEVICE_ID_JOYPAD_R);
+    bool lr_hit = lr && !g_lrg.lr_was;
+    g_lrg.lr_was = lr;
+    if (st->in_from[0]) {
+        lr_ggpo_pad_incoming(st, hit);
+        return true;
+    }
+    g_lrg.in_said[0] = '\0';
+    if (st->stage != GGL_CHANNEL) { g_lrg.picking = false; return false; }
+    if (g_lrg.picking) {
+        lr_ggpo_pad_picker(st, hit, lr_hit);
+        return true;
+    }
+    if (!lr_hit) return false;
+    g_lrg.picking = true;
+    g_lrg.pick = 0;
+    lr_ggpo_show_pick(st);
+    return true;
+}
+
+/* Once a retro_run: the lobby, then a frame of the session if one is wanted.
+ * *ran: a frame ran. False when no session is wanted and the board runs alone. */
+static bool lr_ggpo_run(uint32_t *held, bool *ran) {
+    emu_ggpo_lobby_pump();
+    ggl_status_t st = ggl_status();
+    lr_ggpo_say(&st);
+    lr_ggpo_signin(&st);
+    if (!emu_ggpo_active() && lr_ggpo_pad(&st)) *held = 0;
+    if (!emu_ggpo_wanted()) return false;
+    g_input.held = *held;   /* emu_ggpo_sample_local reads it */
+    if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+    emu_ggpo_tick_t r = emu_ggpo_tick(&state.emu);
+    *ran = r == EMU_GGPO_TICK_RAN;
+    static uint32_t check_said;
+    if (g_ggpo.check_seq != check_said) {   /* both machines log the same line, or they have split */
+        check_said = g_ggpo.check_seq;
+        lr_log(RETRO_LOG_INFO, "%s", g_ggpo.check_line);
+    }
+    return true;
+}
+
+static void lr_ggpo_unload(void) {
+    emu_ggpo_shutdown(&state.emu);
+    ggl_post(GGL_CMD_DISCONNECT, "", "");
+    emu_ggpo_lobby_pump();
+}
+
+#else
+static void lr_ggpo_init(void) { lr_log(RETRO_LOG_WARN, "this core was built without GGPO"); }
+static bool lr_ggpo_run(uint32_t *held, bool *ran) { (void)held; (void)ran; return false; }
+static void lr_ggpo_unload(void) {}
+#endif
+
 /* ---- libretro API ---------------------------------------------------------------------------- */
 
 RETRO_API unsigned retro_api_version(void) { return RETRO_API_VERSION; }
@@ -1720,6 +1955,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     if (opt.online == LR_ONLINE_RETROARCH) {
         if (!env_cb(RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE, &lr_netpacket))
             lr_log(RETRO_LOG_WARN, "this frontend has no netpacket interface: no RetroArch netplay");
+    } else if (opt.online == LR_ONLINE_GGPO) {
+        lr_ggpo_init();
     } else {
         lr_rpcn_init();
     }
@@ -1734,7 +1971,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     env_cb(RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS, &quirks);
     lr_log(RETRO_LOG_INFO, "m2-hle %s: %s, sound board %s, online play %s", M2HLE_VERSION,
            g_active_profile->display_name, g_sound_on ? "on" : "off",
-           opt.online == LR_ONLINE_RPCN ? "RPCN" : "RetroArch");
+           opt.online == LR_ONLINE_RPCN ? "RPCN" : opt.online == LR_ONLINE_GGPO ? "GGPO" : "RetroArch");
     return true;
 }
 
@@ -1746,6 +1983,7 @@ RETRO_API bool retro_load_game_special(unsigned type, const struct retro_game_in
 RETRO_API void retro_unload_game(void) {
     hprof_shutdown();
     if (opt.online == LR_ONLINE_RPCN) netplay_shutdown();
+    if (opt.online == LR_ONLINE_GGPO) lr_ggpo_unload();
     ps3ui_app_close(&g_ps3ui_app);
     netplay_release_inputs();
     sound_settle();   /* the sound thread reads the sample ROMs */
@@ -1755,9 +1993,30 @@ RETRO_API void retro_unload_game(void) {
 
 RETRO_API void retro_reset(void) {
     /* Inside a session a reset on one machine is a desync by definition. */
-    if (pkt_lockstep_playing(&g_pkt) || netplay_active()) return;
+    if (pkt_lockstep_playing(&g_pkt) || netplay_active() || emu_ggpo_wanted()) return;
     lr_install_board();
     if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+}
+
+/* The shell's menus hold the board, but a GGPO challenge still finds us. */
+static void lr_ggpo_paused(void) {
+    if (opt.online == LR_ONLINE_GGPO) emu_ggpo_lobby_pump();
+}
+
+/* A session of any kind: each machine is one player. */
+static bool lr_in_session(void) {
+    return pkt_lockstep_playing(&g_pkt) || netplay_active() || emu_ggpo_wanted();
+}
+
+/* A retro_run's board with GGPO chosen: a session's frame (or its wait), or,
+ * with none wanted, the board alone. True when a frame ran. */
+static bool lr_run_ggpo(uint32_t held) {
+    bool ran = false;
+    if (lr_ggpo_run(&held, &ran)) return ran;
+    netplay_release_inputs();
+    g_input.held = held;
+    lr_slice();
+    return true;
 }
 
 RETRO_API void retro_run(void) {
@@ -1776,7 +2035,7 @@ RETRO_API void retro_run(void) {
     uint32_t held = g_shell_on ? lr_port_held_shell(0) : lr_port_held(0);
     /* Port 2 is the second player on this machine -- not in a session, where
      * each machine is one player. */
-    bool in_session = pkt_lockstep_playing(&g_pkt) || netplay_active();
+    bool in_session = lr_in_session();
     if (!in_session) held |= g_shell_on ? lr_port_held_shell(1) : lr_port_held(1);
     bool board_paused = false;
     if (g_shell_on && !lr_shell_input(&board_paused)) held = 0;
@@ -1789,6 +2048,9 @@ RETRO_API void retro_run(void) {
     bool ran;
     if (board_paused) {
         ran = false;   /* the shell's menus: the board waits, as the PS3 suspends it */
+        lr_ggpo_paused();
+    } else if (opt.online == LR_ONLINE_GGPO) {
+        ran = lr_run_ggpo(held);
     } else if (opt.online == LR_ONLINE_RPCN) {
         /* The lobby on screen has the pad; the game gets none of it. With the
          * shell, the shell has already run the lobby (Online Battle). */

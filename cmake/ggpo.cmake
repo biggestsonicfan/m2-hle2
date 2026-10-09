@@ -11,8 +11,9 @@
 #     build tree (an extra qualifier on a constructor, in_addr.S_un). Those
 #     copies come first on the include path, so every file sees the same ones.
 #
-# Desktop frontend only. Not in the web build: a browser has no UDP of its own (the gateway would be a
-# transport, ggpo_port.h; not done yet).
+# The desktop, the web build and the libretro core. A browser has no UDP, so
+# the web build's match rides the lobby's WebSocket (net/ggpo_lobby.h, through
+# ggpo_port_set_transport); the others use UDP, or the WebSocket on --ggpo-ws.
 # ---------------------------------------------------------------------------
 set(GGPO_SRC ${VENDOR}/ggpo/src/lib/ggpo)
 set(GGPO_PATCHED ${CMAKE_BINARY_DIR}/ggpo-patched)
