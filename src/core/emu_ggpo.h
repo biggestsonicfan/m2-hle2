@@ -215,6 +215,7 @@ static void *emu_ggpo_cb_save(void *ud, int *len, int *checksum, int frame) {
     g_ggpo.cur_frame = frame;
     g_ggpo.saved[frame & 15].buf   = buf;
     g_ggpo.saved[frame & 15].frame = frame;
+    replay_ggpo_mark(frame);
     /* Only synctest reads it, and it is a pass over 16 MB. */
     *checksum = (buf && g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST) ? (int)rollback_checksum(buf) : 0;
     if (buf && g_ggpo_cfg.mode == EMU_GGPO_P2P && frame > 0 && frame % EMU_GGPO_CHECK_EVERY == 0) {
@@ -239,10 +240,18 @@ static bool emu_ggpo_cb_load(void *ud, const void *buf, int len) {
     for (int i = 0; i < 16; i++)
         if (g_ggpo.saved[i].buf == buf) g_ggpo.cur_frame = g_ggpo.saved[i].frame;
     if (g_ggpo.pend_frame >= g_ggpo.cur_frame) g_ggpo.pend_frame = -1;   /* run again, or not */
+    replay_ggpo_rewind(g_ggpo.cur_frame);   /* the recording goes back with it */
     return true;
 }
 
-static void emu_ggpo_cb_free(void *ud, void *buf) { (void)ud; rollback_free(buf); }
+/* A freed buffer's address comes back for a later frame's save, so its entry
+ * goes with it: a stale one would give a load the frame it held ten frames ago. */
+static void emu_ggpo_cb_free(void *ud, void *buf) {
+    (void)ud;
+    for (int i = 0; i < 16; i++)
+        if (g_ggpo.saved[i].buf == buf) g_ggpo.saved[i].buf = NULL;
+    rollback_free(buf);
+}
 
 static bool emu_ggpo_cb_advance(void *ud) {
     emu_thread_ctx_t *ctx = (emu_thread_ctx_t *)ud;
@@ -296,6 +305,7 @@ static void emu_ggpo_cb_event(void *ud, int code, int handle, int a, int b) {
 static inline bool emu_ggpo_cold_boot(emu_thread_ctx_t *ctx) {
     if (!g_netplay.reset_board) return false;
     replay_rec_break("ggpo session");
+    replay_play_yield();   /* a session takes the board from a replay */
     follow_lead_break("ggpo session");
     backup_ram_detach();
     if (g_hle_extra_session_off) g_hle_extra_session_off();
@@ -326,6 +336,20 @@ static inline int emu_ggpo_open(emu_thread_ctx_t *ctx) {
     return err;
 }
 
+/* A session's replay (core/replay.h) starts at its cold boot, named by the
+ * lobby's match, or 1P / 2P for a match straight to an address. */
+static inline void emu_ggpo_replay_begin(emu_thread_ctx_t *ctx) {
+    const ggl_status_t *st = &g_ggl.st;
+    int side = g_ggpo_cfg.player == 2 ? 1 : 0;
+    if (st->match[0] && st->user[0] && st->opponent[0]) {
+        replay_ggpo_begin(ctx, side ? st->opponent : st->user, side ? st->user : st->opponent, side, st->url);
+    } else {
+        char peer[96];
+        snprintf(peer, sizeof peer, "%s:%u", g_ggpo_cfg.remote_ip, (unsigned)g_ggpo_cfg.remote_port);
+        replay_ggpo_begin(ctx, "1P", "2P", side, peer);
+    }
+}
+
 /* Mutex held. */
 static inline bool emu_ggpo_start(emu_thread_ctx_t *ctx) {
     memset(&g_ggpo, 0, sizeof g_ggpo);
@@ -349,6 +373,7 @@ static inline bool emu_ggpo_start(emu_thread_ctx_t *ctx) {
         return false;
     }
     g_ggpo.on = true;
+    if (g_ggpo_cfg.mode == EMU_GGPO_P2P) emu_ggpo_replay_begin(ctx);
     if (g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST)
         LOG_INFO("ggpo: synctest, rolling back %d frame(s) every frame; snapshot %zu bytes",
                  g_ggpo_cfg.synctest_frames, g_rollback.size);
@@ -365,6 +390,7 @@ static inline bool emu_ggpo_start(emu_thread_ctx_t *ctx) {
 /* Mutex held. The board goes back to the keyboard and the player's battery. */
 static inline void emu_ggpo_stop(void) {
     if (!g_ggpo.on) return;
+    replay_ggpo_end();      /* before GGPO frees its frames: nothing rolls back now */
     ggpo_port_close();      /* hands GGPO's saved frames back through free_buf */
     rollback_drain();
     sound_settle();

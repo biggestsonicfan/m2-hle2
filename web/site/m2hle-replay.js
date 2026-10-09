@@ -1,7 +1,7 @@
 /* Replays of online matches (core/replay.h, Pinboard #572).
  *
  * With "Save a replay of every online match" on, each match this board plays on
- * RPCN ends as a .m2replay file (a zip: the board's state at the match's cold
+ * RPCN or GGPO ends as a .m2replay file (a zip: the board's state at the match's cold
  * boot, both players' inputs, and replay.json, its label). The board leaves it in
  * a slot; this script takes it, keeps it in the browser (IndexedDB) and, if asked,
  * downloads it too. PLAYBACK opens a file from the computer, or one kept here,
@@ -137,7 +137,8 @@ function replayShowLabel() {
   $r('replay-who').textContent = replayHeadline(j);
   $r('replay-stage').textContent = 'Stage: ' + (j.stage || '?');
   $r('replay-when').textContent = 'Played ' + replayWhen(j) + ', ' + replayClock(j.frames || 0) + ' long';
-  $r('replay-by').textContent = 'recorded by ' + (j.recorded_by || '?') + '; ' + j.romset + ', ' + j.profile;
+  $r('replay-by').textContent = 'recorded by ' + (j.recorded_by || '?') + (j.netcode === 'ggpo' ? ' over GGPO' : '')
+    + '; ' + j.romset + ', ' + j.profile;
   $r('replay-result').textContent = replayResult(j);
   $r('replay-label').hidden = false;
   replayRefresh();

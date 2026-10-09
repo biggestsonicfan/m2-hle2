@@ -287,7 +287,7 @@ deflates it to disk beside the board). The leader keeps the newest two segments.
 
 **`replay(record: int, dir: str, open: str, play: int, stop: int, seek: int, fast: int)`**
 -- online match replays (`src/core/replay.h`, Pinboard #572). `record:1` saves
-every netplay match to `dir` (default `<user dir>/replays`) as
+every netplay match, RPCN or GGPO (#584), to `dir` (default `<user dir>/replays`) as
 `<p1>-vs-<p2>-<date>-<time>.m2replay`; `open` reads a file and returns its label
 in `info` without touching the board; `play:1` plays it (the board is reset to
 the replay's start), `seek` jumps to a frame, `fast:1` runs unpaced, `stop:1`

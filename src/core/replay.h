@@ -20,6 +20,16 @@
  * shorter than REPLAY_MIN_FRAMES. A PS3 match is not recorded: its board is
  * not run on our lockstep.
  *
+ * A GGPO session (core/emu_ggpo.h, Pinboard #584) is recorded the same way:
+ * its cold boot starts one (replay_ggpo_begin), its frames are board frames on
+ * both players' words. GGPO runs a frame on a guess of the peer's input and
+ * runs it again when the guess was wrong, so the recorder goes back with the
+ * board: each frame GGPO saves keeps where the feed stood (replay_ggpo_mark),
+ * and a load cuts the feed back to it (replay_ggpo_rewind). What is written is
+ * then the frames as they were settled. Only the last few frames of a replay's
+ * tail, after the result, can still have been a guess when it is written; the
+ * file plays them as they ran, frame checks and all.
+ *
  * The zip is made beside the board (a writer thread; the web build has none and
  * makes it at once) and saved as <p1>-vs-<p2>-<local date>-<time>.m2replay, in
  * the replay folder (native) or handed to the page (web_replay_take).
@@ -46,6 +56,7 @@
 typedef struct {
     char     p1[REPLAY_NAME_MAX], p2[REPLAY_NAME_MAX], recorded_by[REPLAY_NAME_MAX];
     char     server[128], profile[32], romset[32], why[48];
+    const char *netcode;        /* "rpcn" or "ggpo" */
     int      side;              /* the recorder's: 0 1P, 1 2P, 2 watching */
     uint32_t session, match;
     int64_t  when;              /* time(NULL) at the match's first frame */
@@ -83,6 +94,7 @@ typedef struct {
     size_t   snap_cap, snap_len;
     replay_job_t job;
     bool     writing;
+    uint32_t id;                /* bumped by each replay__begin */
 #ifdef _WIN32
     HANDLE   writer;
 #elif !defined(__EMSCRIPTEN__)
@@ -102,14 +114,45 @@ static replay_rec_t g_replay_rec;
 
 static inline bool replay_recording(void) { return g_replay_rec.on; }
 
+/* Where the recorder stood when GGPO saved a frame. */
+#define REPLAY_MARKS 32         /* GGPO keeps about ten frames */
+typedef struct {
+    int      at;                /* GGPO's frame number, -1 none */
+    uint32_t id;                /* the replay it belongs to, 0 none */
+    size_t   len;
+    bool     full, held_known, set_known, board_known;
+    uint32_t frame, slice, held, board, tail;
+    int32_t  set[FOLLOW_SET_WORDS];
+    replay_meta_t meta;
+} replay_mark_t;
+
+/* A GGPO session, as its start (emu_ggpo_start) names it. */
+static struct {
+    bool          on;
+    char          p1[REPLAY_NAME_MAX], p2[REPLAY_NAME_MAX], me[REPLAY_NAME_MAX];
+    char          server[128];
+    int           side;         /* ours: 0 1P, 1 2P */
+    uint32_t      matches;      /* replays begun in this session */
+    replay_mark_t marks[REPLAY_MARKS];
+} g_replay_ggpo;
+
+/* An online session whose matches are recorded: RPCN's lockstep or GGPO. */
+static inline bool replay__session_live(void) { return netplay_active() || g_replay_ggpo.on; }
+
 /* ---- The label ------------------------------------------------------------ */
 
 static inline void replay__copy_name(char *out, const char *in) {
-    snprintf(out, REPLAY_NAME_MAX, "%s", in && in[0] ? in : "?");
+    snprintf(out, REPLAY_NAME_MAX, "%.*s", REPLAY_NAME_MAX - 1, in && in[0] ? in : "?");
 }
 
-/* The two fighters and the recorder, from the room. */
+/* The two fighters and the recorder, from the room (or GGPO's lobby). */
 static inline void replay__names(replay_meta_t *m) {
+    if (g_replay_ggpo.on) {
+        replay__copy_name(m->p1, g_replay_ggpo.p1);
+        replay__copy_name(m->p2, g_replay_ggpo.p2);
+        replay__copy_name(m->recorded_by, g_replay_ggpo.me);
+        return;
+    }
     for (int side = 0; side < 2; side++) {
         uint16_t id = g_netplay.room.fighter[side];
         if (id) replay__copy_name(side ? m->p2 : m->p1, netplay_member_name(id));
@@ -132,7 +175,8 @@ static inline void replay__meta_begin(replay_meta_t *m) {
     replay__copy_name(m->p1, "1P");
     replay__copy_name(m->p2, "2P");
     replay__names(m);
-    snprintf(m->server, sizeof m->server, "%s", g_netplay.cfg.server);
+    snprintf(m->server, sizeof m->server, "%s", g_replay_ggpo.on ? g_replay_ggpo.server : g_netplay.cfg.server);
+    m->netcode = g_replay_ggpo.on ? "ggpo" : "rpcn";
     if (g_active_profile) {
         snprintf(m->profile, sizeof m->profile, "%s", g_active_profile->id);
         snprintf(m->romset, sizeof m->romset, "%s", profile_rom_set(g_active_profile));
@@ -141,6 +185,11 @@ static inline void replay__meta_begin(replay_meta_t *m) {
     m->side    = lp == 0 || lp == 1 ? lp : 2;
     m->session = g_netplay.generation;
     m->match   = g_netplay.match_started;
+    if (g_replay_ggpo.on) {
+        m->side    = g_replay_ggpo.side;
+        m->session = 0;
+        m->match   = g_replay_ggpo.matches++;
+    }
     m->when    = (int64_t)time(NULL);
     m->winner  = -1;
     follow_settings(m->settings);
@@ -215,6 +264,7 @@ static inline size_t replay__json(const replay_meta_t *m, char *out, size_t cap)
     replay__json_str(out, cap, &n, "date", date);
     replay__json_int(out, cap, &n, "timestamp", m->when);
     replay__json_str(out, cap, &n, "server", m->server);
+    replay__json_str(out, cap, &n, "netcode", m->netcode);
     replay__json_int(out, cap, &n, "session", m->session);
     replay__json_int(out, cap, &n, "match", m->match);
     replay__json_str(out, cap, &n, "recorded_by", m->recorded_by);
@@ -415,6 +465,7 @@ static inline void replay__begin(emu_thread_ctx_t *ctx) {
     R->frame = R->slice = 0;
     R->held_known = R->set_known = R->board_known = false;
     R->tail = 0;
+    R->id++;
     replay__meta_begin(&R->meta);
     uint8_t h[FOLLOW_HDR_BYTES] = {0};
     memcpy(h, FOLLOW_MAGIC, 8);
@@ -520,12 +571,12 @@ static inline void replay__rec_state(void) {
 static inline void replay_slice_begin(emu_thread_ctx_t *ctx) {
     replay_rec_t *R = &g_replay_rec;
     if (R->due && !R->on) {
-        if (R->want && netplay_active()) replay__begin(ctx);
+        if (R->want && replay__session_live()) replay__begin(ctx);
         else R->due = false;
     }
     if (!R->on) return;
     /* The session went before a result: a peer left, a desync, a stall. */
-    if (!R->tail && !netplay_active()) { replay_rec_finish("the session ended"); return; }
+    if (!R->tail && !replay__session_live()) { replay_rec_finish("the session ended"); return; }
     if (R->full) { replay_rec_finish("too long"); return; }
     replay__rec_state();
 }
@@ -547,7 +598,7 @@ static inline void replay_slice_end(emu_thread_ctx_t *ctx, bool frame_end) {
     if (!R->tail) { replay__sample(ctx, &R->meta); return; }
     if (--R->tail) return;
     replay_rec_finish("result");
-    R->due = netplay_active();   /* a VS session plays on: the next match is a new replay */
+    R->due = replay__session_live();   /* a VS session plays on: the next match is a new replay */
 }
 
 /* The frame's versus verdict (emu_slice_count_frame): 1 = 1P won, 2 = 2P. */
@@ -567,11 +618,82 @@ static inline void replay_rec_shutdown(void) {
     replay__wait();
 }
 
+/* ---- GGPO ------------------------------------------------------------------ */
+
+/* A GGPO session's cold boot has run (emu_ggpo_start, mutex held): its first
+ * match is recorded from here, if the player wants it. */
+static inline void replay_ggpo_begin(emu_thread_ctx_t *ctx, const char *p1, const char *p2,
+                                     int side, const char *server) {
+    replay_rec_t *R = &g_replay_rec;
+    g_replay_ggpo.on = true;
+    replay__copy_name(g_replay_ggpo.p1, p1);
+    replay__copy_name(g_replay_ggpo.p2, p2);
+    replay__copy_name(g_replay_ggpo.me, side ? g_replay_ggpo.p2 : g_replay_ggpo.p1);
+    snprintf(g_replay_ggpo.server, sizeof g_replay_ggpo.server, "%.*s",
+             (int)sizeof g_replay_ggpo.server - 1, server ? server : "");
+    g_replay_ggpo.side    = side ? 1 : 0;
+    g_replay_ggpo.matches = 0;
+    for (int i = 0; i < REPLAY_MARKS; i++) g_replay_ggpo.marks[i].at = -1;
+    R->due = false;
+    if (R->want) replay__begin(ctx);
+}
+
+/* The session is over (emu_ggpo_stop, mutex held): keep what it has. */
+static inline void replay_ggpo_end(void) {
+    if (!g_replay_ggpo.on) return;
+    g_replay_ggpo.on = false;
+    g_replay_rec.due = false;
+    replay_rec_finish("the session ended");
+}
+
+/* GGPO has saved frame `at`, between frames: where the feed stands. */
+static inline void replay_ggpo_mark(int at) {
+    const replay_rec_t *R = &g_replay_rec;
+    if (!g_replay_ggpo.on || at < 0) return;
+    replay_mark_t *m = &g_replay_ggpo.marks[at % REPLAY_MARKS];
+    m->at = at;
+    m->id = R->on ? R->id : 0;
+    if (!R->on) return;
+    m->len  = R->len;   m->full = R->full;
+    m->frame = R->frame; m->slice = R->slice; m->tail = R->tail;
+    m->held = R->held;  m->held_known = R->held_known;
+    m->board = R->board; m->board_known = R->board_known;
+    memcpy(m->set, R->set, sizeof m->set);
+    m->set_known = R->set_known;
+    m->meta = R->meta;
+}
+
+/* GGPO has loaded frame `at` and will run on from it: the feed goes back to
+ * where it stood then. A replay begun after that frame (a VS rematch's) starts
+ * again at the next slice, from the board as it now is. */
+static inline void replay_ggpo_rewind(int at) {
+    replay_rec_t *R = &g_replay_rec;
+    if (!g_replay_ggpo.on || !R->on || at < 0) return;
+    const replay_mark_t *m = &g_replay_ggpo.marks[at % REPLAY_MARKS];
+    if (m->at == at && m->id == R->id) {
+        R->len  = m->len;   R->full = m->full;
+        R->frame = m->frame; R->slice = m->slice; R->tail = m->tail;
+        R->held = m->held;  R->held_known = m->held_known;
+        R->board = m->board; R->board_known = m->board_known;
+        memcpy(R->set, m->set, sizeof R->set);
+        R->set_known = m->set_known;
+        R->meta = m->meta;
+        return;
+    }
+    R->on = false;
+    free(R->feed);
+    R->feed = NULL;
+    R->len = R->cap = 0;
+    R->due = true;
+    g_replay_ggpo.matches--;
+}
+
 /* ---- A replay's label, read back ------------------------------------------- */
 
 typedef struct {
     char     p1[32], p2[32], c1[32], c2[32], stage[32], romset[32], profile[32];
     char     winner_name[32], loser_name[32], recorded_by[32], ended[64];
+    char     netcode[8];        /* "rpcn", "ggpo"; "" in a replay from before GGPO */
     int      winner;            /* 0 = 1P, 1 = 2P, -1 none */
     uint32_t r1, r2, frames, seconds, timestamp, finished;
 } replay_label_t;
@@ -590,6 +712,7 @@ static inline void replay_label_get(const char *json, replay_label_t *l) {
     json_get_str(json, "loser_name", l->loser_name, sizeof l->loser_name);
     json_get_str(json, "recorded_by", l->recorded_by, sizeof l->recorded_by);
     json_get_str(json, "ended", l->ended, sizeof l->ended);
+    json_get_str(json, "netcode", l->netcode, sizeof l->netcode);
     json_get_int(json, "winner", &l->winner);
     json_get_u32(json, "p1_rounds", &l->r1);
     json_get_u32(json, "p2_rounds", &l->r2);
@@ -739,6 +862,7 @@ static inline const char *replay_play_start(emu_thread_ctx_t *ctx) {
     if (!P->loaded) return "no replay is open";
     if (P->unplayable[0]) return P->unplayable;
     if (netplay_in_room() || netplay_active()) return "leave the netplay room first";
+    if (g_replay_ggpo.on) return "a GGPO match owns the board";
     if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
     if (follow_following() && !P->on) return "the board is following another";
     char profile[32] = "";

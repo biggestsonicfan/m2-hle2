@@ -105,7 +105,8 @@ static inline void replay_ui_label(const replay_label_t *l) {
     igText("%s (%s)  vs  %s (%s)", l->p1, l->c1[0] ? l->c1 : "?", l->p2, l->c2[0] ? l->c2 : "?");
     igText("Stage: %s", l->stage[0] ? l->stage : "?");
     igText("Played %s, %u:%02u long", when, l->seconds / 60, l->seconds % 60);
-    igTextDisabled("recorded by %s; %s, %s", l->recorded_by, l->romset, l->profile);
+    igTextDisabled("recorded by %s%s; %s, %s", l->recorded_by,
+                   strcmp(l->netcode, "ggpo") == 0 ? " over GGPO" : "", l->romset, l->profile);
     igCheckbox("Hide the result", &g_replay_ui.hide_result);
     if (g_replay_ui.hide_result) return;
     if (l->winner == 0 || l->winner == 1)
