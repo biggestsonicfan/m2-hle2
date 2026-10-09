@@ -65,6 +65,7 @@
 #include "rom_loader.h"
 #include "emu_thread.h"
 #include "heat_guard.h"
+#include "ra_info_cache.h"
 #include "geo3d.h"
 #include "game_render.h"
 #include "video_window.h"
@@ -2040,6 +2041,51 @@ RETRO_API void retro_deinit(void) {
     mem_shutdown(&state.bus);
 }
 
+/* RetroArch's core info cache can still hold what an older .info said (no
+ * rewind), and it never reads a cached core's .info again (ra_info_cache.h).
+ * Its folder is the core's own (ROCKNIX, a portable folder) or ../info beside
+ * it (the Windows and macOS layouts). RetroArch 1.18 reads its core info again
+ * after a game loads, so the marker usually takes effect at once. The notice
+ * waits for the game: one posted during the load is lost under RetroArch's own. */
+static char g_info_cache_msg[1200];
+static uint32_t g_info_cache_at;
+
+static void lr_check_info_cache(void) {
+    const char *core = NULL;
+    if (!env_cb(RETRO_ENVIRONMENT_GET_LIBRETRO_PATH, &core) || !core || !*core) return;
+    char dir[900], id[96], cand[2][1000];
+    snprintf(dir, sizeof dir, "%s", core);
+    char *slash = strrchr(dir, '/'), *bslash = strrchr(dir, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    if (!slash) return;
+    *slash = 0;
+    snprintf(id, sizeof id, "%s", slash + 1);
+    char *dot = strrchr(id, '.');
+    if (dot) *dot = 0;
+    snprintf(cand[0], sizeof cand[0], "%s", dir);
+    snprintf(cand[1], sizeof cand[1], "%s/../info", dir);
+    for (int i = 0; i < 2; i++) {
+        int level = ra_info_cache_dir_level(cand[i], id);
+        if (level < 0 || level >= RA_SAVESTATE_SERIALIZED) continue;
+        char *msg = g_info_cache_msg;
+        if (ra_info_cache_mark_refresh(cand[i]))
+            snprintf(msg, sizeof g_info_cache_msg, "Refreshed RetroArch's core info cache (it was from an older m2hle). If "
+                     "Rewind is still missing, restart RetroArch");
+        else
+            snprintf(msg, sizeof g_info_cache_msg, "RetroArch's core info cache is from an older m2hle: delete %s/%s and "
+                     "restart RetroArch to turn on rewind", cand[i], RA_INFO_CACHE_FILE);
+        lr_log(RETRO_LOG_WARN, "%s (%s/%s gives level %d)", msg, cand[i], RA_INFO_CACHE_FILE, level);
+        g_info_cache_at = g_lr_runs + 180;
+        return;
+    }
+}
+
+static void lr_info_cache_tick(void) {
+    if (!g_info_cache_msg[0] || g_lr_runs < g_info_cache_at) return;
+    lr_notify(g_info_cache_msg, 10000);
+    g_info_cache_msg[0] = 0;
+}
+
 RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     if (!game || !game->path) return false;
     lr_read_options(true);
@@ -2059,6 +2105,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
                          &g_ps3ui_app);
     g_volume = 1.0f;
     lr_set_input_descriptors();
+    lr_check_info_cache();
 
     if (opt.online == LR_ONLINE_RETROARCH) {
         if (!env_cb(RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE, &lr_netpacket))
@@ -2177,6 +2224,7 @@ RETRO_API void retro_run(void) {
 
     g_lr_runs++;
     if (!ran) g_lr_skips++;
+    lr_info_cache_tick();
     lr_heat_tick();
     lr_ff_poll();
     hprof_phase(1);

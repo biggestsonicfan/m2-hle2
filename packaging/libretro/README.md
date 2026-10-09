@@ -106,7 +106,8 @@ Savestates, rewind and fast-forward work. A state is about 16 MB and takes a few
 save, few enough for RetroArch to take one every frame for rewind; give rewind a buffer of a few
 hundred MB. While RetroArch fast-forwards, the core draws one frame in four, since the drawing is
 what holds it back. A state cannot be loaded, nor a match rewound, during an online match: the
-other player's board would not have it.
+other player's board would not have it. A RetroArch that cached an older core's `.info` hides
+Rewind until it reads the new one; the core has it read the new one when a game loads.
 
 ## Online play
 

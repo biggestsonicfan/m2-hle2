@@ -133,6 +133,12 @@ to go back more than a few seconds. Run-ahead is still best left off: it saves a
 every frame and runs the board twice. While fast-forwarding, the core draws only one frame in
 four.
 
+If Settings > Frame Throttle has no Rewind entry, or the Rewind hotkey says the core lacks
+serialized save state support, RetroArch is still reading its cache of an older core's `.info`
+(`core_info.cache`, beside the `.info` files). The core notices this when a game loads and leaves a
+`core_info.refresh` marker there, which RetroArch takes up at once; if Rewind is still missing,
+restart RetroArch. If the core cannot write the marker, it names the cache file to delete.
+
 ### Online play
 
 Two ways to play online. Both start both players' games from power-on at the same moment, then

@@ -643,6 +643,9 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(audio_out_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_out_test.c)
     # libretro GLSL presets (ui/retro_shader.h): parsing, paths, parameters, LUTs. No GL.
     add_executable(retro_shader_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/retro_shader_test.c)
+    # RetroArch's core info cache (core/ra_info_cache.h): the stale-rewind check, rzip and JSON.
+    add_executable(ra_info_cache_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/ra_info_cache_test.c)
+    target_link_libraries(ra_info_cache_test PRIVATE miniz)
     # The PS3 release's game settings (profiles/sfight.h sfight_apply_menu_settings) on a bus:
     # the bytes, the backup RAM CRC, the defaults. No ROM.
     add_executable(sfight_settings_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/sfight_settings_test.c)
@@ -717,7 +720,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_link_libraries(audio_out_test PRIVATE sokol)
 
     foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test audio_out_test
-              scsp_dsp_test scsp_dsp_test_masks scsp_lazy_test sfight_settings_test retro_shader_test)
+              scsp_dsp_test scsp_dsp_test_masks scsp_lazy_test sfight_settings_test retro_shader_test ra_info_cache_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -730,7 +733,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test audio_out_test scsp_dsp_test scsp_dsp_test_masks
-                  scsp_lazy_test retro_shader_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test ps3ui_render)
+                  scsp_lazy_test retro_shader_test ra_info_cache_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test ps3ui_render)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()
