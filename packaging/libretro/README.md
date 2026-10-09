@@ -102,8 +102,11 @@ RetroArch's **Quick Menu > Controls** remaps on top, as with any core.
 - **Sound board** off is silent and cheaper on a handheld. An online match turns it on anyway,
   because the other player's board always runs it and the two games have to match.
 
-Savestates work (RetroArch's save and load state, about 16 MB each). A state cannot be loaded
-during an online match: the other player's board would not have it.
+Savestates, rewind and fast-forward work. A state is about 16 MB and takes a few milliseconds to
+save, few enough for RetroArch to take one every frame for rewind; give rewind a buffer of a few
+hundred MB. While RetroArch fast-forwards, the core draws one frame in four, since the drawing is
+what holds it back. A state cannot be loaded, nor a match rewound, during an online match: the
+other player's board would not have it.
 
 ## Online play
 

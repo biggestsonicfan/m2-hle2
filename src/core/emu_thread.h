@@ -360,6 +360,34 @@ static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *
     return emu_state_loaded(ctx, savestate_load_mem(data, size, ctx->cpu, ctx->bus, &e), &e);
 }
 
+/* The flat state (rollback.h) in memory: libretro's serialize, which
+ * RetroArch's rewind calls every frame (Pinboard #585). `rom` is the loaded
+ * ROM's savestate_rom_id, worked out once by the caller. The part list is
+ * rebuilt each time (a few dozen pointers): it is the running profile's, and
+ * a GGPO session builds the same one. */
+static inline size_t emu_state_flat_size(emu_thread_ctx_t *ctx) {
+    rollback_layout(ctx->cpu, ctx->bus);
+    return rollback_flat_size();
+}
+
+static inline const char *emu_state_flat_save(emu_thread_ctx_t *ctx, void *buf, const savestate_rom_t *rom) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    rollback_layout(ctx->cpu, ctx->bus);
+    savestate_emu_t e = emu_state_latches(ctx);
+    rollback_flat_save(buf, rom, &e);
+    return NULL;
+}
+
+static inline const char *emu_state_flat_load(emu_thread_ctx_t *ctx, const void *data, size_t size,
+                                              const savestate_rom_t *rom) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    rollback_layout(ctx->cpu, ctx->bus);
+    savestate_emu_t e;
+    const char *err = rollback_flat_check(data, size, rom);
+    if (!err) rollback_flat_load(data, ctx->bus, &e);
+    return emu_state_loaded(ctx, err, &e);
+}
+
 /* A board followed one way from another (Pinboard #568): the leader writes its
  * inputs and writes to a feed, a follower runs on them. Hooked into the slice. */
 #include "follow.h"

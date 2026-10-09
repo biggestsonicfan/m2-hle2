@@ -106,8 +106,11 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 /* Every sample the board makes, folded in as it is made (on the sound thread). */
 static uint64_t snd_out_hash = FNV0, snd_out_n;
 static FILE *snd_pcm;          /* --pcm FILE */
+static bool snd_replaying;   /* --rewind: frames run a second time are not hashed */
+
 static void snd_out_tap(int16_t l, int16_t r, uint64_t index, void *ud) {
     (void)index; (void)ud;
+    if (snd_replaying) return;
     int16_t lr[2] = { l, r };
     snd_out_hash = fnv(snd_out_hash, lr, sizeof lr);
     if (snd_pcm) fwrite(lr, sizeof lr, 1, snd_pcm);
@@ -122,8 +125,15 @@ static int script_n;
  * from one. A loaded run prints what the saving run would have printed after F,
  * line for line, and its sample hash (the last lines) covers the samples after
  * F in both. With --mem the state goes through memory as the libretro core's
- * retro_serialize / retro_unserialize take it (stored, padded to its size),
- * and the file holds that buffer. */
+ * retro_serialize / retro_unserialize take it (rollback.h's flat state, padded
+ * to its size), and the file holds that buffer; a zip state loads that way too.
+ *
+ * --rewind K does what RetroArch's rewind does to the core (Pinboard #585): a
+ * flat state every frame, and at every K-th frame, the first time it is
+ * reached, the state from K frames back loaded and the K frames run again.
+ * Frames are printed and samples hashed only the first time, so the output has
+ * to be the plain run's (the samples with --no-sound-thread, which makes them
+ * inside their own slice). */
 static const char *follow_out, *follow_in;
 static uint32_t    follow_every;
 #define POKE_MAX 16
@@ -203,14 +213,12 @@ static char        save_path[1024];
 static bool        state_mem;
 
 static const char *mem_state_save(emu_thread_ctx_t *emu, const char *path) {
-    size_t size = 0;
-    const char *err = emu_state_save_mem(emu, NULL, 0, &size);
-    if (err) return err;
-    size += 4096;   /* as main_libretro.c's LR_STATE_SLACK */
+    size_t len = emu_state_flat_size(emu);
+    size_t size = len + 4096;   /* as main_libretro.c's LR_STATE_SLACK */
     uint8_t *buf = (uint8_t *)malloc(size);
     if (!buf) return "out of memory";
-    size_t len = 0;
-    err = emu_state_save_mem(emu, buf, size, &len);
+    savestate_rom_t rom = savestate_rom_id(emu->bus);
+    const char *err = emu_state_flat_save(emu, buf, &rom);
     if (!err) {
         memset(buf + len, 0, size - len);
         FILE *f = fopen(path, "wb");
@@ -231,9 +239,82 @@ static const char *mem_state_load(emu_thread_ctx_t *emu, const char *path) {
     const char *err = NULL;
     if (!buf || size <= 0 || fread(buf, 1, (size_t)size, f) != (size_t)size) err = "cannot read the file";
     fclose(f);
-    if (!err) err = emu_state_load_mem(emu, buf, (size_t)size);
+    if (!err && rollback_flat_is(buf, (size_t)size)) {
+        savestate_rom_t rom = savestate_rom_id(emu->bus);
+        (void)emu_state_flat_size(emu);
+        err = emu_state_flat_load(emu, buf, (size_t)size, &rom);
+    } else if (!err) err = emu_state_load_mem(emu, buf, (size_t)size);
     free(buf);
     return err;
+}
+
+/* --rewind K: a ring of K + 1 flat states, one a frame. */
+static uint32_t rewind_k;
+static struct {
+    uint8_t        *buf;
+    size_t          size;
+    savestate_rom_t rom;
+    uint32_t        top;       /* the furthest frame reached */
+    uint32_t        jump_to;   /* a frame to go back to before the next one, or 0 */
+    uint32_t        loads;
+    int64_t         save_us, load_us;
+    uint32_t        saves;
+} rw;
+
+static bool rewind_init(emu_thread_ctx_t *emu) {
+    rw.size = emu_state_flat_size(emu);
+    rw.rom  = savestate_rom_id(emu->bus);
+    rw.buf  = (uint8_t *)malloc(rw.size * (rewind_k + 1));
+    return rw.buf != NULL;
+}
+
+/* After frame f: keep its state, and go back K frames before the next one if
+ * f is a K-th frame reached for the first time. Returns whether f is new. */
+static bool rewind_frame(emu_thread_ctx_t *emu, uint32_t f) {
+    int64_t t0 = emu_now_us();
+    const char *err = emu_state_flat_save(emu, rw.buf + rw.size * (f % (rewind_k + 1)), &rw.rom);
+    rw.save_us += emu_now_us() - t0;
+    rw.saves++;
+    if (err) { fprintf(stderr, "--rewind: %s\n", err); exit(2); }
+    bool fresh = f > rw.top;
+    if (fresh) rw.top = f;
+    if (fresh && f > rewind_k && f % rewind_k == 0) rw.jump_to = f - rewind_k;
+    return fresh;
+}
+
+static void rewind_jump(emu_thread_ctx_t *emu) {
+    if (!rw.jump_to) return;
+    int64_t t0 = emu_now_us();
+    const char *err = emu_state_flat_load(emu, rw.buf + rw.size * (rw.jump_to % (rewind_k + 1)), rw.size, &rw.rom);
+    rw.load_us += emu_now_us() - t0;
+    rw.loads++;
+    if (err) { fprintf(stderr, "--rewind: %s\n", err); exit(2); }
+    if (g_emu_frames != rw.jump_to) { fprintf(stderr, "--rewind: loaded frame %u for %u\n", g_emu_frames, rw.jump_to); exit(2); }
+    rw.jump_to = 0;
+}
+
+/* The top of each slice: goes back if a jump is due, and says whether the
+ * frame about to run has run before. True when it went back. */
+static bool rewind_slice(emu_thread_ctx_t *emu) {
+    bool back = rewind_k && rw.jump_to;
+    if (back) rewind_jump(emu);
+    snd_replaying = rewind_k && g_emu_frames < rw.top;
+    return back;
+}
+
+/* "--rewind K": K + 1 states of ~16 MB each are kept, so K is capped. */
+static bool rewind_arg(const char *v) {
+    rewind_k = (uint32_t)atoi(v);
+    if (rewind_k >= 1 && rewind_k <= 60) return true;
+    fprintf(stderr, "--rewind K: 1..60\n");
+    return false;
+}
+
+static void rewind_report(void) {
+    if (!rewind_k) return;
+    fprintf(stderr, "rewind: %u states of %zu bytes, %.0f us a save; %u loads, %.0f us a load\n",
+            rw.saves, rw.size, rw.saves ? (double)rw.save_us / rw.saves : 0.0,
+            rw.loads, rw.loads ? (double)rw.load_us / rw.loads : 0.0);
 }
 
 static uint32_t keys_mask(const char *p, const char *end) {
@@ -418,6 +499,9 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--mem")) state_mem = true;
+        else if (!strcmp(argv[i], "--rewind") && i + 1 < argc) {
+            if (!rewind_arg(argv[++i])) return 2;
+        }
         else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
             if (sscanf(argv[++i], "%u:%1023s", &save_frame, save_path) != 2) {
                 fprintf(stderr, "--save-at F:FILE\n");
@@ -508,10 +592,12 @@ int main(int argc, char **argv) {
         if (!follow_open_seg(&emu)) { fprintf(stderr, "--follow: no segment %u in %s\n", fol.seg, fol.dir); return 2; }
     }
 
+    if (rewind_k && !rewind_init(&emu)) { fprintf(stderr, "--rewind: out of memory\n"); return 2; }
     int at = 0;
     uint64_t slices = 0;
     uint32_t mismatches = 0, first_mismatch = UINT32_MAX;
     while (g_emu_frames < frames) {
+        if (rewind_slice(&emu)) at = 0;   /* the script again from its start, up to the frame gone back to */
         /* Inputs change only on a frame boundary, as the lockstep's do. */
         while (at < script_n && script[at].frame <= g_emu_frames) g_input.held = script[at++].held;
         if (in_n && g_emu_frames < in_n) g_input.held = words_mask(in_w0[g_emu_frames], in_w1[g_emu_frames]);
@@ -548,6 +634,7 @@ int main(int argc, char **argv) {
             snd_out_hash = FNV0; snd_out_n = 0;
             fprintf(stderr, "saved %s at frame %u\n", save_path, (unsigned)g_emu_frames);
         }
+        if (r == EMU_SLICE_FRAME && rewind_k && !rewind_frame(&emu, g_emu_frames)) continue;
         if (r != EMU_SLICE_FRAME || g_emu_frames < from) continue;
         uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
         uint64_t ram  = fnv(fnv(FNV0, bus.ram, RAM_SIZE), bus.ram2, RAM2_SIZE);
@@ -581,6 +668,7 @@ int main(int argc, char **argv) {
                 g_follow.ended ? "; the feed ended" : "");
         if (g_follow.split) return 1;
     }
+    rewind_report();
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);

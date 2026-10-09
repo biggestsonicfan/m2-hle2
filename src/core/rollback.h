@@ -23,6 +23,7 @@
 #ifndef M2HLE_ROLLBACK_H
 #define M2HLE_ROLLBACK_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,8 +36,11 @@
 #define ROLLBACK_POOL_MAX  16
 
 /* pack: a part that holds host pointers zeroes them (in a copy) before it is
- * hashed, as savestate_save writes it, so two processes' hashes agree. */
-typedef struct { const char *name; void *p; size_t n; void (*pack)(void *); } rollback_part_t;
+ * hashed, as savestate_save writes it, so two processes' hashes agree. ptrs:
+ * those pointers are the only thing pack changes, so a packed copy is a
+ * portable one (rollback_save_portable); META's pack drops host clocks a
+ * state has to keep. */
+typedef struct { const char *name; void *p; size_t n; void (*pack)(void *); bool ptrs; } rollback_part_t;
 
 static inline void rollback__pack_sharc(void *p) { ((sharc_state_t *)p)->sharc_dm_ext_w = 0; }
 static inline void rollback__pack_cop(void *p)   { ((cop_state_t *)p)->ctl_w = 0; }
@@ -69,7 +73,7 @@ static struct {
     uint32_t        live;               /* buffers handed out and not yet back */
 } g_rollback;
 
-static inline void rollback__add(const char *name, void *p, size_t n, void (*pack)(void *)) {
+static inline void rollback__add(const char *name, void *p, size_t n, void (*pack)(void *), bool ptrs) {
     if (g_rollback.n >= ROLLBACK_PARTS_MAX) {
         LOG_ERROR("rollback: more parts than ROLLBACK_PARTS_MAX");
         return;
@@ -78,6 +82,7 @@ static inline void rollback__add(const char *name, void *p, size_t n, void (*pac
     g_rollback.part[g_rollback.n].p = p;
     g_rollback.part[g_rollback.n].n = n;
     g_rollback.part[g_rollback.n].pack = pack;
+    g_rollback.part[g_rollback.n].ptrs = ptrs;
     g_rollback.n++;
     g_rollback.size += n;
 }
@@ -88,22 +93,22 @@ static inline void rollback__add(const char *name, void *p, size_t n, void (*pac
 static inline void rollback_layout(i960_cpu_t *cpu, memory_bus_t *bus) {
     g_rollback.n = 0;
     g_rollback.size = 0;
-    rollback__add("I960", cpu, sizeof *cpu, NULL);
-    rollback__add("SHARC", &g_sharc, sizeof g_sharc, rollback__pack_sharc);
-    rollback__add("COP", &g_cop, sizeof g_cop, rollback__pack_cop);
-    rollback__add("ZANZOU", &g_zz, sizeof g_zz, NULL);
+    rollback__add("I960", cpu, sizeof *cpu, NULL, false);
+    rollback__add("SHARC", &g_sharc, sizeof g_sharc, rollback__pack_sharc, true);
+    rollback__add("COP", &g_cop, sizeof g_cop, rollback__pack_cop, true);
+    rollback__add("ZANZOU", &g_zz, sizeof g_zz, NULL, false);
     for (size_t i = 0; i < SAVESTATE_NBUFS; i++)
-        rollback__add(SAVESTATE_BUFS[i].name, savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]), SAVESTATE_BUFS[i].size, NULL);
-    rollback__add("GEO.snaps", g_geodl_snaps, sizeof g_geodl_snaps, NULL);
-    rollback__add("GEO.live", &g_geo_live, sizeof g_geo_live, NULL);
-    rollback__add("IRQT", &g_irqt, sizeof g_irqt, NULL);
-    rollback__add("M68K", &g_sound.m68k.cpu, sizeof g_sound.m68k.cpu, NULL);
-    rollback__add("SOUND.ram", g_sound.ram, sizeof g_sound.ram, NULL);
-    rollback__add("M2SCSP", &g_sound.scsp, sizeof g_sound.scsp, rollback__pack_scsp);
-    rollback__add("SHLE", &g_shle, sizeof g_shle, NULL);
+        rollback__add(SAVESTATE_BUFS[i].name, savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]), SAVESTATE_BUFS[i].size, NULL, false);
+    rollback__add("GEO.snaps", g_geodl_snaps, sizeof g_geodl_snaps, NULL, false);
+    rollback__add("GEO.live", &g_geo_live, sizeof g_geo_live, NULL, false);
+    rollback__add("IRQT", &g_irqt, sizeof g_irqt, NULL, false);
+    rollback__add("M68K", &g_sound.m68k.cpu, sizeof g_sound.m68k.cpu, NULL, false);
+    rollback__add("SOUND.ram", g_sound.ram, sizeof g_sound.ram, NULL, false);
+    rollback__add("M2SCSP", &g_sound.scsp, sizeof g_sound.scsp, rollback__pack_scsp, true);
+    rollback__add("SHLE", &g_shle, sizeof g_shle, NULL, false);
     for (int i = 0; i < g_savestate_extra_n; i++)
-        if (savestate_extra_mine(i)) rollback__add(g_savestate_extra[i].name, g_savestate_extra[i].data, g_savestate_extra[i].size, NULL);
-    rollback__add("META", &g_rollback.meta, sizeof g_rollback.meta, rollback__pack_meta);
+        if (savestate_extra_mine(i)) rollback__add(g_savestate_extra[i].name, g_savestate_extra[i].data, g_savestate_extra[i].size, NULL, false);
+    rollback__add("META", &g_rollback.meta, sizeof g_rollback.meta, rollback__pack_meta, false);
 }
 
 static inline void *rollback__take(void) {
@@ -126,11 +131,11 @@ static inline void rollback_drain(void) {
     while (g_rollback.pool_n > 0) free(g_rollback.pool[--g_rollback.pool_n]);
 }
 
-/* The board into a buffer of g_rollback.size bytes, or NULL. */
-static inline void *rollback_save(const savestate_emu_t *emu) {
+/* The board into `buf`, g_rollback.size bytes the caller owns (libretro's
+ * rewind buffer, Pinboard #585). */
+static inline void rollback_save_to(void *dst, const savestate_emu_t *emu) {
     sound_settle();
-    uint8_t *buf = (uint8_t *)rollback__take();
-    if (!buf) return NULL;
+    uint8_t *buf = (uint8_t *)dst;
     g_rollback.meta.geo = savestate_geo_get();
     g_rollback.meta.snd = savestate_sound_get();
     g_rollback.meta.hle = savestate_hle_get();
@@ -140,6 +145,12 @@ static inline void *rollback_save(const savestate_emu_t *emu) {
         memcpy(buf + off, g_rollback.part[i].p, g_rollback.part[i].n);
         off += g_rollback.part[i].n;
     }
+}
+
+/* The board into a pooled buffer of g_rollback.size bytes, or NULL. */
+static inline void *rollback_save(const savestate_emu_t *emu) {
+    void *buf = rollback__take();
+    if (buf) rollback_save_to(buf, emu);
     return buf;
 }
 
@@ -157,6 +168,129 @@ static inline void rollback_load(const void *data, memory_bus_t *bus, savestate_
     savestate_sound_put(&g_rollback.meta.snd);
     savestate_hle_set(&g_rollback.meta.hle);
     *emu = g_rollback.meta.emu;
+}
+
+/* ---- A flat state that leaves the process (libretro, Pinboard #585) ------------- */
+
+/* The same parts behind a header, the host pointers packed as savestate.h
+ * packs them, so a state from one process loads in another. RetroArch's rewind
+ * serialises every frame, and the zip's CRC and ROM hash over 16 MB cost more
+ * than the frame; this is a copy. The header carries the checks the zip's
+ * INFO, LAYOUT and ROM entries do, plus the part list itself. */
+#define ROLLBACK_FLAT_MAGIC   0x524C324Du    /* "M2LR" */
+#define ROLLBACK_FLAT_VERSION 1u
+
+typedef struct {
+    uint32_t           magic, version;
+    savestate_layout_t layout;
+    savestate_rom_t    rom;
+    char               profile[64];
+    uint64_t           parts;               /* FNV-64 of the part names and sizes */
+    uint64_t           size;                /* the parts' bytes after the header */
+} rollback_flat_head_t;
+
+#define ROLLBACK_FLAT_HEAD ((sizeof(rollback_flat_head_t) + 63) & ~(size_t)63)
+
+static inline uint64_t rollback__parts_id(void) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (int i = 0; i < g_rollback.n; i++) {
+        uint64_t n = g_rollback.part[i].n;
+        h = (h ^ savestate_fnv64(g_rollback.part[i].name, strlen(g_rollback.part[i].name))) * 0x100000001B3ull;
+        h = (h ^ savestate_fnv64(&n, sizeof n)) * 0x100000001B3ull;
+    }
+    return h;
+}
+
+/* The bytes a flat state takes, for the layout rollback_layout built. */
+static inline size_t rollback_flat_size(void) { return ROLLBACK_FLAT_HEAD + g_rollback.size; }
+
+static inline void rollback__flat_head(rollback_flat_head_t *h, const savestate_rom_t *rom) {
+    memset(h, 0, sizeof *h);
+    h->magic   = ROLLBACK_FLAT_MAGIC;
+    h->version = ROLLBACK_FLAT_VERSION;
+    h->layout  = savestate_layout();
+    h->rom     = *rom;
+    snprintf(h->profile, sizeof h->profile, "%s", g_active_profile ? g_active_profile->id : "");
+    h->parts   = rollback__parts_id();
+    h->size    = g_rollback.size;
+}
+
+/* Packs the pointer parts of a flat state in place. The buffer is the
+ * caller's and need not be aligned, so each goes through an aligned copy. */
+static inline void rollback__flat_pack(uint8_t *buf) {
+    static void *tmp;
+    static size_t tmp_n;
+    size_t off = 0;
+    for (int i = 0; i < g_rollback.n; i++) {
+        const rollback_part_t *r = &g_rollback.part[i];
+        if (r->ptrs && r->pack) {
+            if (tmp_n < r->n) {
+                free(tmp);
+                tmp = malloc(r->n);
+                tmp_n = tmp ? r->n : 0;
+            }
+            if (!tmp) return;
+            memcpy(tmp, buf + off, r->n);
+            r->pack(tmp);
+            memcpy(buf + off, tmp, r->n);
+        }
+        off += r->n;
+    }
+}
+
+/* The board into `dst`, rollback_flat_size() bytes. `rom` is the loaded ROM's
+ * savestate_rom_id, which the caller works out once per load: hashing 48 MB
+ * every frame is what this format is for avoiding. */
+static inline void rollback_flat_save(void *dst, const savestate_rom_t *rom, const savestate_emu_t *emu) {
+    rollback_flat_head_t h;
+    rollback__flat_head(&h, rom);
+    memset(dst, 0, ROLLBACK_FLAT_HEAD);
+    memcpy(dst, &h, sizeof h);
+    uint8_t *body = (uint8_t *)dst + ROLLBACK_FLAT_HEAD;
+    rollback_save_to(body, emu);
+    rollback__flat_pack(body);
+}
+
+static inline bool rollback_flat_is(const void *src, size_t n) {
+    uint32_t magic;
+    if (n < sizeof magic) return false;
+    memcpy(&magic, src, sizeof magic);
+    return magic == ROLLBACK_FLAT_MAGIC;
+}
+
+/* Why `src` cannot be loaded over this board, or NULL. */
+static inline const char *rollback_flat_check(const void *src, size_t n, const savestate_rom_t *rom) {
+    rollback_flat_head_t h, want;
+    if (n < ROLLBACK_FLAT_HEAD) return "the state is too short";
+    memcpy(&h, src, sizeof h);
+    rollback__flat_head(&want, rom);
+    if (h.magic != want.magic || h.version != want.version) return "the state is from another flat-state version";
+    if (strncmp(h.profile, want.profile, sizeof h.profile) != 0) return "the state is from another profile";
+    if (memcmp(&h.layout, &want.layout, sizeof h.layout) != 0 || h.parts != want.parts || h.size != want.size)
+        return "the state is from a build with another layout";
+    if (h.rom.program != rom->program || h.rom.program_size != rom->program_size)
+        return "the state is from another program ROM";
+    if (h.rom.data != rom->data) return "the state's data ROM differs from the one loaded";
+    if (h.rom.sound_loaded != rom->sound_loaded || h.rom.sound_rom != rom->sound_rom)
+        return "the state's sound board differs from this one";
+    if (n - ROLLBACK_FLAT_HEAD < h.size) return "the state is too short";
+    return NULL;
+}
+
+/* The board back from a state rollback_flat_check passed; the latches into
+ * *emu. The live host pointers stay, as savestate.h's load keeps them. */
+static inline void rollback_flat_load(const void *src, memory_bus_t *bus, savestate_emu_t *emu) {
+    static scsp_t live;
+    uint64_t dm_ext = g_sharc.sharc_dm_ext_w;
+    uint32_t dm_ext_size = g_sharc.sharc_dm_ext_size;
+    uint64_t ctl = g_cop.ctl_w;
+    live.clock_w = g_sound.scsp.clock_w; live.ram_w = g_sound.scsp.ram_w;
+    live.sink_w = g_sound.scsp.sink_w;   live.sink_ud_w = g_sound.scsp.sink_ud_w;
+    rollback_load((const uint8_t *)src + ROLLBACK_FLAT_HEAD, bus, emu);
+    g_sharc.sharc_dm_ext_w    = dm_ext;
+    g_sharc.sharc_dm_ext_size = dm_ext_size;
+    g_cop.ctl_w = ctl;
+    savestate_scsp_unpack(&g_sound.scsp, &live);
 }
 
 /* Part i of a snapshot, its host pointers zeroed. */

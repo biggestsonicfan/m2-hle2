@@ -126,9 +126,12 @@ Open **Quick Menu > Core Options** while the game runs.
 The RPCN lobby is not in this menu: the core draws it in the game, as the PS3 release does (see
 below).
 
-Save and load state work, except that a state can't be loaded during an online match. Each
-state is about 16 MB and takes around a tenth of a second to save, so leave rewind and run-ahead
-off: they save one every frame.
+Save and load state, rewind and fast-forward work, except that a state can't be loaded (or the
+game rewound) during an online match. Each state is about 16 MB and takes a few milliseconds to
+save on a PC, so rewind can save one every frame; RetroArch's rewind buffer needs a few hundred MB
+to go back more than a few seconds. Run-ahead is still best left off: it saves and loads a state
+every frame and runs the board twice. While fast-forwarding, the core draws only one frame in
+four.
 
 ### Online play
 
@@ -263,8 +266,9 @@ The core's name, `m2hle`, is its file name without `_libretro.so`.
       <core name="m2hle" features="netplay" />
 ```
 
-This lets EmulationStation offer RetroArch's netplay for the core. Leave out `rewind`: a
-state is 16 MB, too big to save every frame.
+This lets EmulationStation offer RetroArch's netplay for the core. `rewind` works too
+(`features="netplay rewind"`), but it saves a 16 MB state every frame, which a handheld feels
+more than a PC does, and the handheld's memory limits how far back it can go.
 
 **4. Keep the core's files out of the ROM folder.** ROCKNIX's RetroArch saves into the ROM folder,
 which is usually shared on your network, and the core keeps its RPCN login with its saves.
