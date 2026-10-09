@@ -2445,11 +2445,19 @@ static void mcp_cmd_ggpo_lobby(const char *req, char *resp, int cap) {
      * driver like the fly's follows it; Pinboard #579). */
     int winner = 0;
     uint32_t n = emu_ggpo_results(&winner);
+    /* And whether GGPO has the board yet. The lobby says "match" a pass
+     * before the cold boot, which zeroes get_status's "frames"; a driver
+     * that waits for frames to move from a reading taken in between waits
+     * for ever (Pinboard #588). "running" is GGPO's own word, and "frames"
+     * the session's, from 0 at the cold boot. */
     size_t len = strlen(resp);
     if (len && resp[len - 1] == '}')
         snprintf(resp + len - 1, (size_t)cap - (len - 1),
-                 ",\"vs_mode\":%s,\"results\":%u,\"winner\":%d}",
-                 g_vs_mode ? "true" : "false", (unsigned)n, winner);
+                 ",\"vs_mode\":%s,\"results\":%u,\"winner\":%d,"
+                 "\"session\":{\"on\":%s,\"running\":%s,\"frames\":%u}}",
+                 g_vs_mode ? "true" : "false", (unsigned)n, winner,
+                 g_ggpo.on ? "true" : "false", g_ggpo.on && g_ggpo.running ? "true" : "false",
+                 g_ggpo.on ? (unsigned)g_ggpo.frames : 0u);
 #else
     (void)req;
     snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"this build has no GGPO\"}");

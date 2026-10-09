@@ -711,7 +711,7 @@ fly behind it.
 
 ### Rollback netplay (the GGPO lobby)
 
-`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (off, connecting, connected, signed in, channel, match, failed), the account, the channel's `users` with their states, a challenge to us (`challenged_by`) or ours (`challenging`), the `match` and `opponent`, whether the match has gone `direct` or still rides the relay, packet counts each way, `error` and the last chat lines. The desktop build only; a build without GGPO answers `ok: false`.
+`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (off, connecting, connected, signed in, channel, match, failed), the account, the channel's `users` with their states, a challenge to us (`challenged_by`) or ours (`challenging`), the `match` and `opponent`, whether the match has gone `direct` or still rides the relay, packet counts each way, `error` and the last chat lines, then the board's side: `vs_mode`, `results`, `winner` and `session` (`on`, `running`, `frames`: GGPO's session, its frames counted from the cold boot). The lobby reaches `match` before the cold boot, which zeroes get_status's `frames`, so a driver waiting for the match to run waits on `session.running`, not on get_status (Pinboard #588). The desktop build only; a build without GGPO answers `ok: false`.
 
 `"do"` posts a step first, which the emu thread runs at its next pump, so the reply still shows the stage before it:
 
