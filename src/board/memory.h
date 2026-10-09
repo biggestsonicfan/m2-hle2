@@ -2,7 +2,7 @@
  * memory.h — board-level memory bus.
  *
  * The Model 2 address space is ~48 named regions: ROM, work RAM, geometry
- * RAM, COP buffer RAM, tile RAM, palette, texture RAM, framebuffer, plus
+ * RAM, COP buffer RAM, tile RAM, palette, texture RAM, plus
  * a handful of MMIO blocks (IRQ, timers, IO, IAC).
  *
  * Dispatch model: a linear-scanned region table. Each region has a backing
@@ -143,12 +143,10 @@ typedef struct memory_bus {
     /* Heap-allocated large regions */
     uint8_t  *main_data;
     uint8_t  *xtra_data;
-    uint8_t  *vid_ext_ram;  /* 0x01100000–0x017FFFFF: collision tables, display lists */
     uint8_t  *texram0;
     uint8_t  *texram1;
     uint8_t   luma[LUMA_SIZE];
     uint8_t   luma2[LUMA2_SIZE];
-    uint8_t  *framebuffer;
 
     /* Region table — linear-scanned in declaration order. */
     mem_region_t regions[MEM_REGIONS_MAX];
@@ -640,10 +638,8 @@ static inline uint8_t *mem_region_fresh(uint8_t *have, size_t size) {
 static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
     uint8_t *main_data   = bus->main_data;
     uint8_t *xtra_data   = bus->xtra_data;
-    uint8_t *vid_ext_ram = bus->vid_ext_ram;
     uint8_t *texram0     = bus->texram0;
     uint8_t *texram1     = bus->texram1;
-    uint8_t *framebuffer = bus->framebuffer;
 
     backup_ram_before_reset(bus->back);   /* a reset keeps the battery's contents */
     memset(bus, 0, sizeof(*bus));
@@ -652,10 +648,8 @@ static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t ro
      * these read as NULL, which the atlas upload already treats as "no sheet". */
     bus->main_data   = main_data;
     bus->xtra_data   = xtra_data;
-    bus->vid_ext_ram = vid_ext_ram;
     bus->texram0     = texram0;
     bus->texram1     = texram1;
-    bus->framebuffer = framebuffer;
     bus->rom = rom_data;
     bus->rom_size = rom_size;
     /* Every (re)init is new content: start past any generation a consumer
@@ -668,11 +662,9 @@ static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t ro
 static inline int mem_alloc_regions(memory_bus_t *bus) {
     bus->main_data   = mem_region_fresh(bus->main_data,   MAIN_DATA_SIZE);
     bus->xtra_data   = mem_region_fresh(bus->xtra_data,   XTRA_DATA_SIZE);
-    bus->vid_ext_ram = mem_region_fresh(bus->vid_ext_ram, VID_EXT_RAM_SIZE);
     bus->texram0     = mem_region_fresh(bus->texram0,     TEXRAM0_SIZE);
     bus->texram1     = mem_region_fresh(bus->texram1,     TEXRAM1_SIZE);
-    bus->framebuffer = mem_region_fresh(bus->framebuffer, FRAMEBUFFER_SIZE);
-    if (!bus->main_data || !bus->xtra_data || !bus->vid_ext_ram || !bus->texram0 || !bus->texram1 || !bus->framebuffer) {
+    if (!bus->main_data || !bus->xtra_data || !bus->texram0 || !bus->texram1) {
         LOG_ERROR("mem: heap allocation failed");
         return 0;
     }
@@ -729,7 +721,14 @@ static inline void mem_add_regions(memory_bus_t *bus, uint8_t *rom_data, size_t 
     mem_add_region(bus, "TILE_MIRROR",     TILE_BASE + 0x10000u, 0x10000u,             bus->tile,          0);
     mem_add_region(bus, "TILE",            TILE_BASE,            TILE_SIZE,            bus->tile,          0);
     mem_add_region(bus, "TMAPGFX",         TMAPGFX_BASE,         TMAPGFX_SIZE,         bus->tmapgfx,       0);
-    mem_add_region(bus, "VID_EXT_RAM",     VID_EXT_RAM_BASE,     VID_EXT_RAM_SIZE,     bus->vid_ext_ram,   0);
+    /* The whole tile block repeats at 0x01100000 (MAME: tile RAM mirror
+     * 0x110000, the sync registers and the character RAM mirror 0x100000), and
+     * nothing answers from 0x01200000 to the palette. This span used to be 7 MB
+     * of RAM that no game was seen to touch, and every rewind and rollback
+     * snapshot copied it (Pinboard #590). */
+    mem_add_region(bus, "TILE_MIRROR",     TILE_HI_BASE + 0x10000u, 0x10000u,          bus->tile,          0);
+    mem_add_region(bus, "TILE",            TILE_HI_BASE,         TILE_SIZE,            bus->tile,          0);
+    mem_add_region(bus, "TMAPGFX",         TMAPGFX_HI_BASE,      TMAPGFX_SIZE,         bus->tmapgfx,       0);
     mem_add_region(bus, "PALETTE",         PALETTE_BASE,         PALETTE_SIZE,         bus->palette,       0);
     mem_add_region(bus, "COLORXLAT",       COLORXLAT_BASE,       COLORXLAT_SIZE,       bus->colorxlat,     0);
     mem_add_region(bus, "ZCLIP_3D",        ZCLIP_3D_BASE,        ZCLIP_3D_SIZE,        bus->zclip_3d,      0);
@@ -746,7 +745,6 @@ static inline void mem_add_regions(memory_bus_t *bus, uint8_t *rom_data, size_t 
     mem_add_region(bus, "TEXRAM1_M",       TEXRAM1_MIRROR_BASE,  TEXRAM1_SIZE,         bus->texram1,       0);
     mem_add_region(bus, "LUMA",            LUMA_BASE,            LUMA_SIZE,            bus->luma,          0);
     mem_add_region(bus, "LUMA2",           LUMA2_BASE,           LUMA2_SIZE,           bus->luma2,         0);
-    mem_add_region(bus, "FRAMEBUFFER",     FRAMEBUFFER_BASE,     FRAMEBUFFER_SIZE,     bus->framebuffer,   0);
     mem_add_region(bus, "IAC",             IAC_BASE,             IAC_SIZE,             bus->iac,           0);
 }
 
@@ -822,10 +820,8 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
 static inline void mem_shutdown(memory_bus_t *bus) {
     free(bus->main_data);   bus->main_data   = NULL;
     free(bus->xtra_data);   bus->xtra_data   = NULL;
-    free(bus->vid_ext_ram); bus->vid_ext_ram = NULL;
     free(bus->texram0);     bus->texram0     = NULL;
     free(bus->texram1);     bus->texram1     = NULL;
-    free(bus->framebuffer); bus->framebuffer = NULL;
 }
 
 /* ---- Lookup -------------------------------------------------------------- */
