@@ -2440,6 +2440,16 @@ static void mcp_cmd_ggpo_lobby(const char *req, char *resp, int cap) {
     }
     ggl_status_t st = ggl_status();
     ggl_status_json(resp, cap, &st);
+    /* The board's own say: a match plays in VS mode, so after a result both
+     * go back to select, and `results` counting on is the rematch (a
+     * driver like the fly's follows it; Pinboard #579). */
+    int winner = 0;
+    uint32_t n = emu_ggpo_results(&winner);
+    size_t len = strlen(resp);
+    if (len && resp[len - 1] == '}')
+        snprintf(resp + len - 1, (size_t)cap - (len - 1),
+                 ",\"vs_mode\":%s,\"results\":%u,\"winner\":%d}",
+                 g_vs_mode ? "true" : "false", (unsigned)n, winner);
 #else
     (void)req;
     snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"this build has no GGPO\"}");
