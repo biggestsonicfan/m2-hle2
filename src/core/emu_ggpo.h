@@ -128,7 +128,20 @@ static struct {
     uint32_t          check_sum;
     char              check_line[96]; /* the last check logged, for a host with its own log */
     uint32_t          check_seq;   /* bumped with each one */
+    /* Versus results. A rollback can run a result again or take it back, so
+     * one counts once no rollback can reach its frame. */
+    int               cur_frame;   /* GGPO's number for the board's frame */
+    struct { const void *buf; int frame; } saved[16];  /* a load's frame */
+    int               pend_frame;  /* a result not yet beyond rollback, -1 none */
+    int               pend_winner;
+    int               done_frame;  /* the last result counted */
+    uint32_t          results;     /* counted, from the session's start */
+    int               last_winner; /* 1 = 1P, 2 = 2P */
+    int               vs_mode_was; /* the player's own g_vs_mode */
 } g_ggpo;
+
+/* GGPO predicts at most 8 frames, so a frame 10 behind is settled. */
+#define EMU_GGPO_RESULT_SETTLE 10
 
 /* Every EMU_GGPO_CHECK_EVERY frames a session logs the board's checksum, taken
  * when that frame was last saved; by EMU_GGPO_CHECK_LAG frames later no
@@ -167,6 +180,11 @@ static inline bool emu_ggpo_run_frame(emu_thread_ctx_t *ctx, const uint32_t in[2
         if (g_vblank_edge || ctx->cpu->halted) break;
     }
     if (!g_vblank_edge) return false;
+    if (g_versus_result && g_ggpo.cur_frame > g_ggpo.done_frame) {
+        g_ggpo.pend_frame  = g_ggpo.cur_frame;
+        g_ggpo.pend_winner = g_versus_result;
+    }
+    g_ggpo.cur_frame++;
     uint32_t budget = ctx->frame_budget;
     if (g_ggpo.resim) ctx->frame_budget = 0;   /* a run_frames counts frames once */
     emu_slice_count_frame(ctx);
@@ -194,6 +212,9 @@ static void *emu_ggpo_cb_save(void *ud, int *len, int *checksum, int frame) {
     savestate_emu_t e = emu_state_latches(ctx);
     void *buf = rollback_save(&e);
     *len = buf ? (int)g_rollback.size : 0;
+    g_ggpo.cur_frame = frame;
+    g_ggpo.saved[frame & 15].buf   = buf;
+    g_ggpo.saved[frame & 15].frame = frame;
     /* Only synctest reads it, and it is a pass over 16 MB. */
     *checksum = (buf && g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST) ? (int)rollback_checksum(buf) : 0;
     if (buf && g_ggpo_cfg.mode == EMU_GGPO_P2P && frame > 0 && frame % EMU_GGPO_CHECK_EVERY == 0) {
@@ -215,6 +236,9 @@ static bool emu_ggpo_cb_load(void *ud, const void *buf, int len) {
     ctx->cpu_snapshot      = *ctx->cpu;
     g_sound_mute = 1;                          /* until the frames again are run */
     g_ggpo.rollbacks++;
+    for (int i = 0; i < 16; i++)
+        if (g_ggpo.saved[i].buf == buf) g_ggpo.cur_frame = g_ggpo.saved[i].frame;
+    if (g_ggpo.pend_frame >= g_ggpo.cur_frame) g_ggpo.pend_frame = -1;   /* run again, or not */
     return true;
 }
 
@@ -307,6 +331,11 @@ static inline bool emu_ggpo_start(emu_thread_ctx_t *ctx) {
     memset(&g_ggpo, 0, sizeof g_ggpo);
     g_ggpo.ctx = ctx;
     g_ggpo.check_frame = -1;
+    g_ggpo.pend_frame = g_ggpo.done_frame = -1;
+    g_ggpo.vs_mode_was = g_vs_mode;
+    /* Both boards play the same rules, and a decided match goes back to
+     * select: the players choose to go again or leave (ps3ui's prompt). */
+    if (g_ggpo_cfg.mode == EMU_GGPO_P2P) g_vs_mode = 1;
     netplay_build_masks(g_active_profile);
     if (!emu_ggpo_cold_boot(ctx)) {
         LOG_ERROR("ggpo: no board-reset hook; not starting");
@@ -342,6 +371,7 @@ static inline void emu_ggpo_stop(void) {
     g_sound_mute = 0;
     netplay_release_inputs();
     backup_ram_reattach();
+    g_vs_mode = g_ggpo.vs_mode_was;
     LOG_INFO("ggpo: session over: %u frames, %u rollbacks, %u frames run again, %u sync errors",
              g_ggpo.frames, g_ggpo.rollbacks, g_ggpo.resim_frames, ggpo_port_sync_errors());
     g_ggpo.on = false;
@@ -375,6 +405,24 @@ static inline void emu_ggpo_report_check(void) {
     g_ggpo.check_frame = -1;
 }
 
+/* A result no rollback can take back any more is counted. */
+static inline void emu_ggpo_settle_result(void) {
+    if (g_ggpo.pend_frame < 0 || g_ggpo.cur_frame < g_ggpo.pend_frame + EMU_GGPO_RESULT_SETTLE) return;
+    g_ggpo.done_frame  = g_ggpo.pend_frame;
+    g_ggpo.last_winner = g_ggpo.pend_winner;
+    g_ggpo.results++;
+    g_ggpo.pend_frame  = -1;
+    LOG_INFO("ggpo: match %u decided at frame %d: %s won", g_ggpo.results, g_ggpo.done_frame,
+             g_ggpo.last_winner == 1 ? "1P" : "2P");
+}
+
+/* Versus results counted this session, and the last one's winner (1 or 2);
+ * read by a host's go-again prompt. */
+static inline uint32_t emu_ggpo_results(int *winner) {
+    if (winner) *winner = g_ggpo.last_winner;
+    return g_ggpo.on ? g_ggpo.results : 0;
+}
+
 /* This frame's inputs in, and the frame run. Mutex held. True when it ran. */
 static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
     ggpo_port_idle(0);
@@ -400,6 +448,7 @@ static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
     g_ggpo.frames++;
     emu_ggpo_report_errors();
     emu_ggpo_report_check();
+    emu_ggpo_settle_result();
     return ran;
 }
 
@@ -470,6 +519,7 @@ static inline void emu_ggpo_lobby_pump(void) {}
 static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) { (void)ctx; return false; }
 typedef enum { EMU_GGPO_TICK_IDLE, EMU_GGPO_TICK_HELD, EMU_GGPO_TICK_RAN } emu_ggpo_tick_t;
 static inline emu_ggpo_tick_t emu_ggpo_tick(emu_thread_ctx_t *ctx) { (void)ctx; return EMU_GGPO_TICK_IDLE; }
+static inline uint32_t emu_ggpo_results(int *winner) { if (winner) *winner = 0; return 0; }
 static inline void emu_ggpo_shutdown(emu_thread_ctx_t *ctx) { (void)ctx; }
 
 #endif

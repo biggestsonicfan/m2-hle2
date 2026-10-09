@@ -102,6 +102,7 @@ static const ps3ui_credit_t ps3ui_credits[] = {
       "https://github.com/aiekick/ImGuiFileDialog" },
     { "miniz", "MIT", "Copyright 2013-2014 RAD Game Tools and Valve Software; 2010-2014 Rich Geldreich",
       "https://github.com/richgel999/miniz" },
+    { "GGPO", "MIT", "Copyright (c) 2009-2019 GroundStorm Studios, LLC.", "https://github.com/pond3r/ggpo" },
     { "stb_truetype", "MIT / Public Domain", "Copyright (c) 2017 Sean Barrett", "https://github.com/nothings/stb" },
     { "libretro API", "MIT", "Copyright (C) 2010-2024 The RetroArch team", "https://github.com/libretro/RetroArch" },
     { "SDL 3", "zlib", "Copyright (C) 1997-2025 Sam Lantinga", "https://github.com/libsdl-org/SDL" },

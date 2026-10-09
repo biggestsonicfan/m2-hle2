@@ -76,6 +76,7 @@
 #include "ps3ui_app.h"
 #include "ps3ui_gpu.h"
 #include "ps3ui_shell.h"
+#include "ps3ui_ggpo.h"
 #include "gems.h"          /* the Gems options: Sega's own C from Sonic Gems Collection */
 
 /* registry.h is the single TU that defines g_profiles[] / g_active_profile. */
@@ -149,6 +150,22 @@ static void lr_notify(const char *msg, unsigned ms) {
         env_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &m);
         lr_log(RETRO_LOG_INFO, "%s", msg);
     } else {
+        lr_message(msg, ms * 60 / 1000);
+    }
+}
+
+/* A line that stays until it is taken down: the frontend's status line, which
+ * an empty message clears (a queued notification cannot be called back, so a
+ * sign-in code shown as one stayed up after the sign-in). Without the newer
+ * interface it is an ordinary message, and msg NULL does nothing. */
+static void lr_status(const char *msg, unsigned ms) {
+    unsigned version = 0;
+    if (env_cb && env_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &version) && version >= 1) {
+        struct retro_message_ext m = { msg ? msg : "", ms, 3, RETRO_LOG_INFO, RETRO_MESSAGE_TARGET_OSD,
+                                       RETRO_MESSAGE_TYPE_STATUS, -1 };
+        env_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &m);
+        if (msg) lr_log(RETRO_LOG_INFO, "%s", msg);
+    } else if (msg) {
         lr_message(msg, ms * 60 / 1000);
     }
 }
@@ -1649,10 +1666,13 @@ static bool lr_run_rpcn(uint32_t local_held) {
  *   challenge=NAME                        challenge this player whenever they are free
  *   accept=NAME|any                       accept a challenge from them without asking
  *   ws=1                                  the match over the lobby's WebSocket, not UDP
+ *   twitch=1                              pass is a Twitch flow's token (the core writes it)
  *   synclog=DIR                           each check frame's board, part by part (desync hunts)
  *
  * A Twitch sign-in writes the account and its token back to the file, so the
- * next load signs straight in. In the game, L + R lists who is free: Left /
+ * next load signs straight in. Every later Twitch sign-in to the account (the
+ * web page, another device) retires that token, so a refused token starts the
+ * flow again; a refused password is the player's to fix. In the game, L + R lists who is free: Left /
  * Right pick, B challenges, A closes. A challenge to us asks: B accepts, A
  * declines. While a prompt is up the game gets no pad.
  *
@@ -1664,6 +1684,9 @@ static bool lr_run_rpcn(uint32_t local_held) {
 static struct {
     char   cfg[512];             /* the file's path; "" = no save directory */
     bool   twitch_asked, saved;
+    bool   from_twitch;          /* the file's pass is a Twitch token */
+    bool   refusal_said;
+    char   err_said[192];        /* the lobby's error last shown */
     char   code_said[16];        /* the Twitch code last shown */
     char   in_said[GGL_NAME_MAX];
     ggl_stage_t stage_said;
@@ -1681,6 +1704,7 @@ static void lr_ggpo_cfg_line(const char *k, const char *v) {
     else if (!strcmp(k, "challenge")) snprintf(a->challenge, sizeof a->challenge, "%s", v);
     else if (!strcmp(k, "accept"))    snprintf(a->accept, sizeof a->accept, "%s", v);
     else if (!strcmp(k, "ws"))        a->ws_match = atoi(v) != 0;
+    else if (!strcmp(k, "twitch"))    g_lrg.from_twitch = atoi(v) != 0;
     else if (!strcmp(k, "synclog"))   snprintf(g_ggpo_cfg.synclog_dir, sizeof g_ggpo_cfg.synclog_dir, "%s", v);
 }
 
@@ -1705,14 +1729,14 @@ static void lr_ggpo_cfg_write(const char *user, const char *pass) {
     const ggl_auto_t *a = &g_ggl_auto;
     fprintf(f, "# m2-hle's GGPO lobby (online play \"GGPO\"). Lines are key=value.\n"
                "# With no user, the core signs in with Twitch and writes the account here.\n");
-    fprintf(f, "url=%s\nuser=%s\npass=%s\nchallenge=%s\naccept=%s\nws=%d\n",
+    fprintf(f, "url=%s\nuser=%s\npass=%s\ntwitch=1\nchallenge=%s\naccept=%s\nws=%d\n",
             a->url[0] ? a->url : GGL_DEFAULT_URL, user, pass, a->challenge, a->accept, a->ws_match ? 1 : 0);
     fclose(f);
 }
 
 static void lr_ggpo_init(void) {
     const char *saves = NULL;
-    g_lrg.cfg[0] = '\0';
+    memset(&g_lrg, 0, sizeof g_lrg);   /* a reload starts over */
     if (env_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &saves) && saves && saves[0]) {
         lr_mkdirs(saves);
         snprintf(g_lrg.cfg, sizeof g_lrg.cfg, "%s/m2hle-ggpo.cfg", saves);
@@ -1725,13 +1749,35 @@ static void lr_ggpo_init(void) {
     lr_log(RETRO_LOG_INFO, "ggpo: settings %s", g_lrg.cfg[0] ? g_lrg.cfg : "(no save directory)");
 }
 
-/* What the lobby has to say, once each. */
-static void lr_ggpo_say(const ggl_status_t *st) {
+/* The Twitch code, for as long as the flow waits on it. */
+static void lr_ggpo_say_code(const ggl_status_t *st) {
     char msg[256];
     if (st->twitch_code[0] && strcmp(st->twitch_code, g_lrg.code_said)) {
         snprintf(g_lrg.code_said, sizeof g_lrg.code_said, "%s", st->twitch_code);
-        snprintf(msg, sizeof msg, "GGPO: sign in with Twitch: enter %s at %s", st->twitch_code, st->twitch_uri);
-        lr_notify(msg, 60000);
+        /* The status line is one line and is not wrapped: the address without
+         * its scheme, www. or the query that only fills in the code again. */
+        const char *at = st->twitch_uri;
+        if (!strncmp(at, "https://", 8)) at += 8;
+        if (!strncmp(at, "www.", 4)) at += 4;
+        int len = (int)strcspn(at, "?");
+        snprintf(msg, sizeof msg, "GGPO: enter %s at %.*s to sign in with Twitch", st->twitch_code, len, at);
+        lr_status(msg, 30 * 60 * 1000);   /* Twitch's codes last 30 minutes */
+    } else if (!st->twitch_code[0] && g_lrg.code_said[0]) {
+        g_lrg.code_said[0] = 0;           /* signed in, or the flow ended */
+        lr_status(NULL, 0);
+    }
+}
+
+/* What the lobby has to say, once each. */
+static void lr_ggpo_say(const ggl_status_t *st) {
+    char msg[256];
+    lr_ggpo_say_code(st);
+    if (strcmp(st->error, g_lrg.err_said)) {   /* a step the lobby refused, the stage unchanged */
+        snprintf(g_lrg.err_said, sizeof g_lrg.err_said, "%s", st->error);
+        if (st->error[0] && !st->login_refused && st->stage != GGL_FAILED) {
+            snprintf(msg, sizeof msg, "GGPO: %s", st->error);
+            lr_notify(msg, 5000);
+        }
     }
     if (st->stage == g_lrg.stage_said) return;
     g_lrg.stage_said = st->stage;
@@ -1745,9 +1791,33 @@ static void lr_ggpo_say(const ggl_status_t *st) {
     lr_notify(msg, 5000);
 }
 
+/* A file from before twitch=1: a flow's token is 32 hex digits. */
+static bool lr_ggpo_token_like(const char *pass) {
+    return strlen(pass) == 32 && strspn(pass, "0123456789abcdef") == 32;
+}
+
+/* The server said no. Its token retired, a Twitch account signs in again; a
+ * password from the file is the player's to fix. Once a load. */
+static void lr_ggpo_refused(const ggl_status_t *st) {
+    char msg[256];
+    g_lrg.refusal_said = true;
+    if (st->twitch && (g_lrg.from_twitch || lr_ggpo_token_like(g_ggl_auto.pass))) {
+        snprintf(msg, sizeof msg, "GGPO: %s's saved Twitch sign-in has expired (a newer one replaced it). "
+                 "Sign in with Twitch again", g_ggl_auto.user);
+        g_ggl_auto.user[0] = g_ggl_auto.pass[0] = '\0';
+        g_lrg.saved = false;   /* the new token goes back into the file */
+        ggl_post(GGL_CMD_TWITCH, "", "");
+    } else {
+        snprintf(msg, sizeof msg, "GGPO: the lobby refused %s's sign-in: check user= and pass= in "
+                 "m2hle-ggpo.cfg (saves folder)", g_ggl_auto.user);
+    }
+    lr_notify(msg, 10000);
+}
+
 /* Sign-in that the file does not settle: Twitch when it names nobody, and the
  * account a flow got us saved. The join is the lobby's own: g_ggl_auto.game. */
 static void lr_ggpo_signin(const ggl_status_t *st) {
+    if (st->login_refused && !g_lrg.refusal_said) lr_ggpo_refused(st);
     if (st->stage == GGL_CONNECTED && !g_ggl_auto.user[0] && !g_lrg.twitch_asked) {
         g_lrg.twitch_asked = true;
         if (st->twitch) ggl_post(GGL_CMD_TWITCH, "", "");
@@ -1809,6 +1879,19 @@ static void lr_ggpo_pad_picker(const ggl_status_t *st, uint32_t hit, bool lr_hit
     }
 }
 
+/* L + R before the channel: say why there is nobody to list. */
+static void lr_ggpo_not_in(const ggl_status_t *st) {
+    const char *why = st->twitch_code[0]        ? "finish the Twitch sign-in first"
+                    : st->login_refused         ? "the sign-in was refused"
+                    : st->stage == GGL_FAILED   ? (st->error[0] ? st->error : "the lobby is gone")
+                    : st->stage == GGL_OFF      ? "not connected"
+                    : st->stage < GGL_SIGNED_IN ? "still signing in"
+                                                : "still joining the game's channel";
+    char msg[256];
+    snprintf(msg, sizeof msg, "GGPO: not in the lobby yet: %s", why);
+    lr_notify(msg, 4000);
+}
+
 /* The pad in the channel. True while a prompt has it, so the game does not. */
 static bool lr_ggpo_pad(const ggl_status_t *st) {
     uint32_t pad = lr_lobby_pad();
@@ -1822,7 +1905,11 @@ static bool lr_ggpo_pad(const ggl_status_t *st) {
         return true;
     }
     g_lrg.in_said[0] = '\0';
-    if (st->stage != GGL_CHANNEL) { g_lrg.picking = false; return false; }
+    if (st->stage != GGL_CHANNEL) {
+        if (lr_hit && st->stage != GGL_MATCH) lr_ggpo_not_in(st);
+        g_lrg.picking = false;
+        return false;
+    }
     if (g_lrg.picking) {
         lr_ggpo_pad_picker(st, hit, lr_hit);
         return true;
@@ -1842,6 +1929,8 @@ static bool lr_ggpo_run(uint32_t *held, bool *ran) {
     lr_ggpo_say(&st);
     lr_ggpo_signin(&st);
     if (!emu_ggpo_active() && lr_ggpo_pad(&st)) *held = 0;
+    /* After a result: go again or leave, over the game, with the pad */
+    if (ps3ui_ggpo_prompt(&g_ps3ui_app, lr_lobby_pad())) *held = 0;
     if (!emu_ggpo_wanted()) return false;
     g_input.held = *held;   /* emu_ggpo_sample_local reads it */
     if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
@@ -1859,6 +1948,8 @@ static void lr_ggpo_unload(void) {
     emu_ggpo_shutdown(&state.emu);
     ggl_post(GGL_CMD_DISCONNECT, "", "");
     emu_ggpo_lobby_pump();
+    if (g_lrg.code_said[0]) lr_status(NULL, 0);
+    g_lrg.code_said[0] = '\0';
 }
 
 #else

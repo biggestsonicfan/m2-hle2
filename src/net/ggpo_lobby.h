@@ -102,6 +102,7 @@ typedef struct {
     char        user[GGL_NAME_MAX];
     char        game[GGL_NAME_MAX];
     char        error[192];
+    bool        login_refused;              /* the server said no to user + secret */
     bool        twitch;                     /* the server offers Twitch sign-in */
     char        twitch_code[16];            /* a device flow is waiting on this code */
     char        twitch_uri[128];
@@ -565,6 +566,7 @@ static inline void ggl__on_signed_in(const char *m) {
     char token[128];
     if (json_get_str(m, "token", token, sizeof token)) snprintf(g_ggl.pass, sizeof g_ggl.pass, "%s", token);
     g_ggl.st.twitch_code[0] = g_ggl.flow[0] = '\0';
+    g_ggl.st.login_refused = false;
     g_ggl.st.stage = GGL_SIGNED_IN;
     LOG_INFO("ggpo lobby: signed in as %s", g_ggl.st.user);
 }
@@ -611,6 +613,7 @@ static inline void ggl__on_error(const char *m) {
         if (strcmp(err, "slow_down") == 0) { g_ggl.twitch_every += 5000; return; }
         g_ggl.flow[0] = g_ggl.st.twitch_code[0] = '\0';
     }
+    if (strcmp(what, "login") == 0) g_ggl.st.login_refused = true;   /* a stale token, too */
     snprintf(g_ggl.st.error, sizeof g_ggl.st.error, "%s: %s", what, err);
     LOG_WARN("ggpo lobby: %s failed: %s", what, err);
 }
@@ -754,6 +757,7 @@ static inline void ggl__connect(const char *url) {
     bool dflt = !url[0] || strcmp(url, "default") == 0;
     snprintf(g_ggl.st.url, sizeof g_ggl.st.url, "%s", dflt ? GGL_DEFAULT_URL : url);
     g_ggl.st.error[0] = '\0';
+    g_ggl.st.login_refused = false;
     g_ggl.st.stage = GGL_CONNECTING;
     g_ggl.autologin_done = g_ggl.autojoin_done = false;
     g_ggl.ping_next = net_now_ms() + GGL_PING_MS;
@@ -787,7 +791,10 @@ static inline void ggl__run_cmd(const ggl_cmd_t *c) {
     case GGL_CMD_DECLINE:    ggl__send_str("decline", "challenge", g_ggl.st.in_id); break;
     case GGL_CMD_CANCEL:     ggl__send_str("cancel", "challenge", g_ggl.st.out_id); break;
     case GGL_CMD_CHAT:       ggl__send_str("chat", "text", c->a); break;
-    case GGL_CMD_END:        ggl__match_done("ended here"); break;
+    case GGL_CMD_END:        /* the lobby tells the other end (match_over) */
+        if (g_ggl.st.stage == GGL_MATCH) ggl__send_str("match_end", "match", g_ggl.st.match);
+        ggl__match_done("ended here");
+        break;
     case GGL_CMD_DISCONNECT:
         ggl__match_done("disconnected");
         ggl__ws_close();

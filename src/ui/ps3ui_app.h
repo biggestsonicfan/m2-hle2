@@ -459,6 +459,9 @@ typedef struct {
     uint32_t res_seen;          /* st.results already asked about */
     int prompt_only;            /* opened by a result alone (the session came from elsewhere):
                                    the answer closes the task again */
+    int ext;                    /* the prompt is a host's (GGPO), not the room's: */
+    char ext_name[2][33];       /*   the two sides' names, */
+    int ext_pick;               /*   and the answer: -1 none yet, 0 play again, 1 exit */
 
     /* the on-screen keyboard (ours) */
     int osk_field;              /* 0 = name, 1 = password, 2 = e-mail token */
@@ -628,6 +631,7 @@ static void ps3ui_app_close(ps3ui_app_t *a)
 {
     a->open = 0;
     a->prompt_only = 0;
+    a->ext = 0;
     a->scr = PS3UI_SCR_NONE;
 }
 
@@ -1060,7 +1064,8 @@ static void ps3ui_update_result(ps3ui_app_t *a)
 #define PS3UI_AGAIN_SETTLE 60.0f
 #define PS3UI_AGAIN_QUIET  30
 
-static void ps3ui_update_again(ps3ui_app_t *a)
+/* 0 Play again (or the time ran out), 1 Exit, -1 not yet. */
+static int ps3ui_again_pick(ps3ui_app_t *a)
 {
     a->result_t += 1.0f;
     if (!a->again_live && a->result_t > PS3UI_AGAIN_SETTLE && a->again_quiet >= PS3UI_AGAIN_QUIET)
@@ -1071,9 +1076,16 @@ static void ps3ui_update_again(ps3ui_app_t *a)
         ps3ui_move(a, &a->cursor, 2, 0);
         pick = ps3ui_hit(a, PS3UI_PAD_CROSS) ? a->cursor : ps3ui_hit(a, PS3UI_PAD_CIRCLE) ? 0 : -1;
     }
-    if (a->result_t >= PS3UI_AGAIN_FRAMES)
-        pick = 0;
-    if (pick == 1) {
+    return a->result_t >= PS3UI_AGAIN_FRAMES ? 0 : pick;
+}
+
+static void ps3ui_update_again(ps3ui_app_t *a)
+{
+    int pick = ps3ui_again_pick(a);
+    if (pick >= 0 && a->ext) {
+        a->ext_pick = pick;             /* the host acts on it (ps3ui_app_ext_answer) */
+        ps3ui_app_close(a);
+    } else if (pick == 1) {
         ps3ui_post(a, NETPLAY_CMD_LEAVE_ROOM);
         if (a->prompt_only)
             ps3ui_app_close(a);
@@ -1140,6 +1152,37 @@ static void ps3ui_app_ask_again(ps3ui_app_t *a)
     a->pressed = 0;
     a->scr = PS3UI_SCR_NONE;
     ps3ui_app_go(a, PS3UI_SCR_AGAIN);
+}
+
+/* The same prompt for a session that is not netplay.h's (GGPO's lobby): the
+ * host says who won and who played, and reads the answer back. */
+static void ps3ui_app_ask_ext(ps3ui_app_t *a, int winner_side, const char *name_1p, const char *name_2p)
+{
+    if (!a->open)
+        ps3ui_app_open(a);
+    a->prompt_only = 1;
+    a->ext = 1;
+    a->ext_pick = -1;
+    snprintf(a->ext_name[0], sizeof a->ext_name[0], "%s", name_1p ? name_1p : "");
+    snprintf(a->ext_name[1], sizeof a->ext_name[1], "%s", name_2p ? name_2p : "");
+    ps3ui_app_ask_again(a);
+    a->result_side = winner_side;
+}
+
+/* The answer to ps3ui_app_ask_ext, once: -1 while there is none. */
+static int ps3ui_app_ext_answer(ps3ui_app_t *a)
+{
+    int pick = a->ext_pick;
+    a->ext_pick = -1;
+    return pick;
+}
+
+/* The host's session ended under the prompt: it goes, unanswered. */
+static void ps3ui_app_ext_cancel(ps3ui_app_t *a)
+{
+    if (a->ext)
+        ps3ui_app_close(a);
+    a->ext_pick = -1;
 }
 
 /* The session moved to another state. */
@@ -1409,13 +1452,10 @@ static void ps3ui_app_ready_fx(ps3ui_app_t *a)
     }
 }
 
-/* One frame of the task. `held` is the pad in PS3UI_PAD_* bits. */
-static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
+/* The room's part of a frame: the result prompt, or the lobby's screens.
+ * Returns 0 when the task is closed. */
+static int ps3ui_app_room_frame(ps3ui_app_t *a)
 {
-    a->frame++;
-    ps3ui_app_pad(a, held);
-    if (a->be.get_status)
-        a->be.get_status(&a->st);       /* read even while closed: the host reports from it */
     /* The prompt does not wait for the lobby to have been opened: a session
      * joined from the web page's panel, or by RetroArch's autojoin, never
      * opened it, and those players need the way out as much as anyone. So
@@ -1425,22 +1465,37 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
     if (!a->open) {
         a->res_seen = a->st.results;
         if (!res_new)
-            return;
+            return 0;
         ps3ui_app_open(a);
         a->prompt_only = 1;
         ps3ui_app_ask_again(a);
     }
-    if (a->prompt_only) {
-        if (!ps3ui_app_prompt(a, in_room, res_new))
+    if (a->prompt_only)
+        return ps3ui_app_prompt(a, in_room, res_new);
+    /* The lobby is open. A VS result comes while still PLAYING and is
+     * asked about there (ps3ui_follow); any other result ends the match,
+     * and the room screens show it (PS3UI_SCR_RESULT), the way out on them. */
+    if (a->st.state != NETPLAY_PLAYING)
+        a->res_seen = a->st.results;
+    ps3ui_follow(a);
+    ps3ui_app_update_screen(a);
+    return 1;
+}
+
+/* One frame of the task. `held` is the pad in PS3UI_PAD_* bits. */
+static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
+{
+    a->frame++;
+    ps3ui_app_pad(a, held);
+    if (a->be.get_status)
+        a->be.get_status(&a->st);       /* read even while closed: the host reports from it */
+    if (a->ext) {
+        if (a->scr == PS3UI_SCR_AGAIN)
+            ps3ui_update_again(a);
+        if (!a->open)
             return;
-    } else {
-        /* The lobby is open. A VS result comes while still PLAYING and is
-         * asked about there (ps3ui_follow); any other result ends the match,
-         * and the room screens show it (PS3UI_SCR_RESULT), the way out on them. */
-        if (a->st.state != NETPLAY_PLAYING)
-            a->res_seen = a->st.results;
-        ps3ui_follow(a);
-        ps3ui_app_update_screen(a);
+    } else if (!ps3ui_app_room_frame(a)) {
+        return;
     }
     /* READY effects start when a fighter's flag goes up */
     if (a->scr == PS3UI_SCR_VS)
@@ -1843,9 +1898,10 @@ static void ps3ui_draw_result(ps3ui_canvas_t *cv, ps3ui_app_t *a)
             t.rgb = a->result_side == i ? 0x792323 : 0x0A4A84;
             ps3ui_text(cv, &t, x - tw * 0.5f, y + 47.0f, w, al);
         }
-        if (f[i] >= 0 && ps3ui_slot_xy(&s, txt[i], 0, 0, &x, &y)) {
+        const char *name = a->ext ? a->ext_name[i] : f[i] >= 0 ? a->st.members[f[i]].npid : NULL;
+        if (name && ps3ui_slot_xy(&s, txt[i], 0, 0, &x, &y)) {
             ps3ui_text_style_t n = ps3ui_style_name();
-            ps3ui_text(cv, &n, x + 84.0f, y + 42.0f, a->st.members[f[i]].npid, ps3ui_slot_alpha(&s, txt[i]));
+            ps3ui_text(cv, &n, x + 84.0f, y + 42.0f, name, ps3ui_slot_alpha(&s, txt[i]));
         }
     }
     float x, y;

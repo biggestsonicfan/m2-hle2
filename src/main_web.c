@@ -62,6 +62,7 @@
 #include "ps3ui_app.h"    /* the online lobby, as the PS3 port draws it */
 #include "ps3ui_gpu.h"
 #include "ps3ui_shell.h"   /* the PS3's menus around the board (the Console version) */
+#include "ps3ui_ggpo.h"    /* a GGPO match's go-again prompt, in the lobby's window */
 #include "post_shader.h"   /* the CRT filter and libretro presets over the picture */
 #include "json_min.h"
 
@@ -653,8 +654,9 @@ static void web_shell_frame(ps3ui_app_t *a) {
     if (emu_ggpo_active() && g_ps3ui_shell.scr != PS3UI_SH_GAME) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_GAME);
     ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad() | tap, web_lobby_pad2(),
                       netplay_active() || emu_ggpo_active());
-    /* in a room too: the go-again prompt comes up over any shell screen */
-    if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room())
+    /* in a room too: the go-again prompt comes up over any shell screen
+     * (a GGPO match's is ps3ui_ggpo_prompt's) */
+    if (!a->ext && (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room()))
         ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
 }
 
@@ -667,8 +669,9 @@ static ps3ui_view_t web_lobby_tick(void) {
     bool had = web_game_pad();
     if (!next_us || now - next_us > 250000) next_us = now;
     while (now >= next_us) {
+        bool ggpo_asks = ps3ui_ggpo_prompt(a, web_lobby_pad());
         if (web_shell_live()) web_shell_frame(a);
-        else                  ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
+        else if (!ggpo_asks)  ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
         next_us += 1000000 / EMU_SLICES_PER_SEC;
     }
     g_web_hold = web_shell_live() && ps3ui_shell_board_paused(&g_ps3ui_shell);
