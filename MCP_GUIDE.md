@@ -709,6 +709,25 @@ A lobby that holds itself open, in full:
 `flystf/rpcn.py` in the [stf-fly](../stf-fly) sibling is that loop with a fruit
 fly behind it.
 
+### Rollback netplay (the GGPO lobby)
+
+`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (off, connecting, connected, signed in, channel, match, failed), the account, the channel's `users` with their states, a challenge to us (`challenged_by`) or ours (`challenging`), the `match` and `opponent`, whether the match has gone `direct` or still rides the relay, packet counts each way, `error` and the last chat lines. The desktop build only; a build without GGPO answers `ok: false`.
+
+`"do"` posts a step first, which the emu thread runs at its next pump, so the reply still shows the stage before it:
+
+| `do` | arguments |
+|---|---|
+| `connect` | `url` (default `wss://ggpo.sonicthefighte.rs/ws`) |
+| `login`, `signup` | `user`, `pass` |
+| `twitch` | starts Twitch sign-in; `twitch_code` / `twitch_uri` then say where to approve it |
+| `join` | `game` (default: the profile's id, e.g. `sfight`) |
+| `challenge` | `user` |
+| `accept`, `decline`, `cancel` | the pending challenge |
+| `chat` | `text` |
+| `end`, `disconnect` | end the match; leave the lobby |
+
+Test against a local ggpo-server, never the live one.
+
 ### Captures and diagnostics
 
 `get_geo_captures` is an MCP tool; the rest are bridge-only JSON commands, used

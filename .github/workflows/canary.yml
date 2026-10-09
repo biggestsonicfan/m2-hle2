@@ -62,7 +62,7 @@ jobs:
         run: >
           git submodule update --init
           vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/stb vendor/ImGuiFileDialog
-          vendor/imgui_club
+          vendor/imgui_club vendor/ggpo
 
       # cimgui is generated from vendor/imgui by vendor/dear_bindings at build time.
       # One pinned interpreter for both pip and CMake: left to itself,
@@ -165,7 +165,7 @@ jobs:
       # The libretro frontend's submodule list: no ImGui, so no dear_bindings
       # and no Python.
       - name: Fetch build submodules
-        run: git submodule update --init vendor/sokol vendor/miniz vendor/stb
+        run: git submodule update --init vendor/sokol vendor/miniz vendor/stb vendor/ggpo
 
       - name: Install Linux deps
         if: matrix.name == 'linux-x64'
@@ -283,7 +283,7 @@ jobs:
       - name: Fetch build submodules
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git submodule update --init vendor/sokol vendor/miniz vendor/stb
+          git submodule update --init vendor/sokol vendor/miniz vendor/stb vendor/ggpo
 
       - name: Stamp version
         id: ver

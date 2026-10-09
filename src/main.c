@@ -1670,6 +1670,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--follow-out") == 0 && i + 1 < argc) {
             snprintf(g_follow_out, sizeof g_follow_out, "%s", argv[++i]);
         } else if (replay_cli_arg(argc, argv, &i)) {
+        } else if (emu_ggpo_cli_arg(argc, argv, &i)) {   /* rollback netplay (core/emu_ggpo.h) */
         } else if (strcmp(argv[i], "--follow-every") == 0 && i + 1 < argc) {
             g_follow_every = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--match-replay") == 0) {

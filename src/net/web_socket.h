@@ -44,10 +44,32 @@ static char g_web_gateway_url[256] = "wss://rpcn.sonicthefighte.rs/gw";
 
 enum { M2WS_CONNECTING = 0, M2WS_OPEN = 1, M2WS_CLOSED = 2 };
 
+/* m2ws_open's kinds: a byte stream, datagrams, or a lobby (GGPO's,
+ * net/ggpo_lobby.h) that speaks JSON text and binary datagrams on one socket. */
+enum { M2WS_STREAM = 0, M2WS_DATAGRAM = 1, M2WS_LOBBY = 2 };
+
+/* The JavaScript is defined once, by the C build (main_web.c). The GGPO
+ * library's C++ files reach this header through net_socket.h, and an EM_JS
+ * there would define every function again. */
+#ifdef __cplusplus
+extern "C" {
+int  m2ws_open(const char *url_ptr, int datagram);
+int  m2ws_state(int id);
+int  m2ws_send(int id, const void *ptr, int len);
+int  m2ws_send_text(int id, const char *ptr, int len);
+int  m2ws_recv_stream(int id, void *ptr, int cap);
+int  m2ws_recv_msg(int id, void *ptr, int cap);
+int  m2ws_recv_lobby(int id, void *ptr, int cap, bool *binary);
+void m2ws_error(int id, char *out, int cap);
+void m2ws_close(int id);
+}
+#else
+
 /*
  * Opens a socket and returns its id (>= 1). `datagram` selects message framing
  * for the receive side and caps the queue, since a datagram channel that nobody
- * reads should drop, not grow.
+ * reads should drop, not grow. M2WS_LOBBY keeps text messages too, as UTF-8
+ * with a leading 1 (binary ones get a 2), for m2ws_recv_lobby.
  *
  * A datagram socket also answers the page's round-trip probe: a frame addressed
  * to 0.0.0.0:0 comes straight back from the gateway, and is consumed here rather
@@ -58,7 +80,7 @@ EM_JS(int, m2ws_open, (const char *url_ptr, int datagram), {
     if (!M.m2ws) M.m2ws = { next: 1, socks: {} };
     const id = M.m2ws.next++;
     const s = { ws: null, q: [], off: 0, state: 0, opened: false, error: "", out: [], outBytes: 0,
-                dgram: !!datagram, rtt: [] };
+                dgram: datagram === 1, lobby: datagram === 2, rtt: [] };
     M.m2ws.socks[id] = s;
     const url = UTF8ToString(url_ptr);
     try {
@@ -77,6 +99,15 @@ EM_JS(int, m2ws_open, (const char *url_ptr, int datagram), {
         s.outBytes = 0;
     };
     s.ws.onmessage = (e) => {
+        if (s.lobby) {
+            if (s.q.length >= 1024) return;
+            const body = typeof e.data === 'string' ? new TextEncoder().encode(e.data) : new Uint8Array(e.data);
+            const b = new Uint8Array(body.length + 1);
+            b[0] = typeof e.data === 'string' ? 1 : 2;
+            b.set(body, 1);
+            s.q.push(b);
+            return;
+        }
         if (!(e.data instanceof ArrayBuffer)) return;
         const b = new Uint8Array(e.data);
         if (s.dgram) {
@@ -125,6 +156,21 @@ EM_JS(int, m2ws_send, (int id, const void *ptr, int len), {
     return 1;
 });
 
+/* Queues or sends one text message: `len` bytes of UTF-8. As m2ws_send. */
+EM_JS(int, m2ws_send_text, (int id, const char *ptr, int len), {
+    const s = Module.m2ws && Module.m2ws.socks[id];
+    if (!s || s.state === 2) return 0;
+    const t = UTF8ToString(ptr, len);
+    if (s.state === 0) {
+        if (s.outBytes + len > 262144) return 0;
+        s.out.push(t);
+        s.outBytes += len;
+        return 1;
+    }
+    try { s.ws.send(t); } catch (e) { return 0; }
+    return 1;
+});
+
 /* Stream read: up to `cap` bytes across message boundaries. Returns the count,
  * 0 for nothing yet, -1 once the socket has closed and everything that arrived
  * before the close has been read. */
@@ -158,6 +204,22 @@ EM_JS(int, m2ws_recv_msg, (int id, void *ptr, int cap), {
     return 0;
 });
 
+/* Lobby read: one whole message into ptr, *binary set from its kind. Returns
+ * its length, 0 for none, -1 once the socket has closed and the queue is
+ * empty. A message larger than `cap` is dropped. */
+EM_JS(int, m2ws_recv_lobby, (int id, void *ptr, int cap, bool *binary), {
+    const s = Module.m2ws && Module.m2ws.socks[id];
+    if (!s) return -1;
+    while (s.q.length) {
+        const b = s.q.shift();
+        if (b.length - 1 > cap) continue;
+        HEAPU8.set(b.subarray(1), ptr);
+        HEAPU8[binary] = b[0] === 2 ? 1 : 0;
+        return b.length - 1;
+    }
+    return s.state === 2 ? -1 : 0;
+});
+
 EM_JS(void, m2ws_error, (int id, char *out, int cap), {
     const s = Module.m2ws && Module.m2ws.socks[id];
     stringToUTF8(s ? (s.error || "") : 'no such connection', out, cap);
@@ -172,6 +234,7 @@ EM_JS(void, m2ws_close, (int id), {
         try { s.ws.close(1000); } catch (e) {}
     }
 });
+#endif /* __cplusplus */
 
 /*
  * Which RPCN the gateway should relay to: the server name the last TLS connect

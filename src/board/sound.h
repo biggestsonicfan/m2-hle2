@@ -835,8 +835,14 @@ static inline void sound_set_tap(void (*fn)(int16_t, int16_t, uint64_t, void *),
     g_sound_tap    = fn;      /* last: ud has to be in place before the first call */
 }
 
+/* Set while rollback netplay runs frames again (core/emu_ggpo.h): the host
+ * heard those samples the first time, so the clock moves on and nothing goes
+ * out. Set and cleared with the sound thread settled. */
+static int g_sound_mute;
+
 static inline void sound_out_push(int16_t l, int16_t r) {
     uint64_t index = g_sound.out_total++;
+    if (g_sound_mute) return;
     if (g_sound_tap) g_sound_tap(l, r, index, g_sound_tap_ud);
     uint32_t w = g_sound.out_w;
     if (((w + 1) & (SOUND_OUT_FRAMES - 1)) == g_sound.out_r) { g_sound.out_dropped++; return; }

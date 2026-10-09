@@ -948,3 +948,7 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
   .ps-strip { font-size: 0.72rem; }
   .te-what { flex-basis: 100%; }
 }
+
+/* The GGPO lobby's chat (m2hle-ggpo.js): a few lines, then it scrolls. */
+.gg-chat { max-height: 8rem; min-height: 3rem; margin: 0.5rem 0; white-space: pre-wrap; }
+#gg-say { width: 100%; }

@@ -21,6 +21,11 @@
  * Netplay is pumped from the same place the native run loop pumps it
  * (emu_netplay_pump). With no second thread the emu mutex is never contended;
  * it is still taken, so the shared code does not need to know.
+ *
+ * GGPO (core/emu_ggpo.h, Pinboard #575) is the other way online: the page's
+ * GGPO panel drives the lobby (web_ggpo_post / web_ggpo_status), and its match
+ * rides the lobby's WebSocket, since a page has no UDP. While a session is
+ * wanted, a slice is emu_ggpo_tick's frame instead.
  */
 
 /* net/ first, as in main.c: net_socket.h owns the socket include order. */
@@ -288,7 +293,10 @@ static bool g_web_follow;
 
 /* One slice, if netplay allows it. Returns false when the board did not advance
  * (stalled on the peer, or the slice went to the barrier's reset). */
+static bool web_ggpo_slice(void);
+
 static bool web_slice(void) {
+    if (emu_ggpo_wanted()) return web_ggpo_slice();
     netplay_step_t np = emu_netplay_pump(&state.emu);
     g_web_waited = (np == NETPLAY_STEP_WAIT);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
@@ -311,6 +319,22 @@ static bool web_slice(void) {
     return true;
 }
 
+/* A GGPO session's slice: one frame, or a frame held while the peer catches
+ * up, which still takes its tick (GGPO's clock is frames). False only while
+ * the session opens or closes. */
+static bool web_ggpo_slice(void) {
+    g_web_waited = false;
+    if (state.emu.run_state != EMU_RUNNING || emu_slice_should_stop(&state.emu)) return false;
+    int64_t t0 = emu_now_us();
+    emu_ggpo_tick_t r = emu_ggpo_tick(&state.emu);
+    if (r == EMU_GGPO_TICK_IDLE) { g_web_waited = true; return false; }
+    uint32_t took = (uint32_t)(emu_now_us() - t0);
+    if (r == EMU_GGPO_TICK_RAN) g_web_perf.slices++;
+    g_web_perf.slice_us += took;
+    if (took > g_web_perf.slice_us_max) g_web_perf.slice_us_max = took;
+    return true;
+}
+
 /* The page's Pause button: the board stands still, picture and all, until it is
  * pressed again. Offline only. In a room or a match the other boards run on, so
  * it is refused there, and a pause that a room catches up with is let go. It is
@@ -325,7 +349,7 @@ static bool web_slice(void) {
 static bool g_web_paused;
 static bool g_web_select_tap;   /* one shell frame of SELECT, from the page */
 
-static bool web_pause_refused(void) { return netplay_in_room() || netplay_active(); }
+static bool web_pause_refused(void) { return netplay_in_room() || netplay_active() || emu_ggpo_wanted(); }
 
 /* 1 when the page may offer the button: a game is loaded, no room has us, and
  * the Console shell is not in one of its own menus (which hold the board). */
@@ -371,6 +395,7 @@ static void web_run_owed_slices(void) {
         state.owed_us = cap;
     }
 
+    emu_ggpo_lobby_pump();   /* the GGPO lobby, running or not */
     if (g_web_paused && web_pause_refused()) g_web_paused = false;   /* a room or a match took over */
     if (state.emu.run_state != EMU_RUNNING || g_web_hold || g_web_paused) {
         /* Not running yet (or held under the shell's menus, or paused), and netplay still
@@ -619,6 +644,20 @@ static bool web_game_pad(void) {
     return web_shell_live() ? ps3ui_shell_game_pad(&g_ps3ui_shell) != 0 : !ps3ui_app_visible(&g_ps3ui_app);
 }
 
+/* One 60 Hz frame of the Console shell, and of the lobby over it. */
+static void web_shell_frame(ps3ui_app_t *a) {
+    /* the page's Pause: a SELECT for one frame, then let go, so the shell sees a press */
+    uint32_t tap = g_web_select_tap ? PS3UI_PAD_SELECT : 0;
+    g_web_select_tap = false;
+    /* a GGPO match is played from the game screen, as an RPCN one is */
+    if (emu_ggpo_active() && g_ps3ui_shell.scr != PS3UI_SH_GAME) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_GAME);
+    ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad() | tap, web_lobby_pad2(),
+                      netplay_active() || emu_ggpo_active());
+    /* in a room too: the go-again prompt comes up over any shell screen */
+    if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room())
+        ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
+}
+
 /* The menus run at 60 Hz whatever the display's rate: their windows, cursors
  * and countdowns are counted in the PS3's frames. */
 static ps3ui_view_t web_lobby_tick(void) {
@@ -628,17 +667,8 @@ static ps3ui_view_t web_lobby_tick(void) {
     bool had = web_game_pad();
     if (!next_us || now - next_us > 250000) next_us = now;
     while (now >= next_us) {
-        if (web_shell_live()) {
-            /* the page's Pause: a SELECT for one frame, then let go, so the shell sees a press */
-            uint32_t tap = g_web_select_tap ? PS3UI_PAD_SELECT : 0;
-            g_web_select_tap = false;
-            ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad() | tap, web_lobby_pad2(), netplay_active());
-            /* in a room too: the go-again prompt comes up over any shell screen */
-            if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room())
-                ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
-        } else {
-            ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
-        }
+        if (web_shell_live()) web_shell_frame(a);
+        else                  ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
         next_us += 1000000 / EMU_SLICES_PER_SEC;
     }
     g_web_hold = web_shell_live() && ps3ui_shell_board_paused(&g_ps3ui_shell);
@@ -1134,6 +1164,36 @@ EMSCRIPTEN_KEEPALIVE void web_lobby_open(void) {
 }
 EMSCRIPTEN_KEEPALIVE void web_lobby_close(void) { ps3ui_app_close(&g_ps3ui_app); }
 EMSCRIPTEN_KEEPALIVE int  web_lobby_visible(void) { return web_view() != PS3UI_VIEW_GAME; }
+
+/* The GGPO panel (net/ggpo_lobby.h). A step by name ("connect", "login",
+ * "challenge", ...: ggl_cmd_kind_named) and its two strings; 0 for no such
+ * step. The lobby runs it at its next pump. */
+EMSCRIPTEN_KEEPALIVE int web_ggpo_post(const char *kind, const char *a, const char *b) {
+#ifdef M2HLE_GGPO
+    ggl_cmd_kind_t k;
+    if (!ggl_cmd_kind_named(kind, &k)) return 0;
+    if (k == GGL_CMD_CONNECT && (!a || !a[0])) a = GGL_DEFAULT_URL;
+    if (k == GGL_CMD_JOIN && (!a || !a[0])) a = g_active_profile ? g_active_profile->id : "m2";
+    ggl_post(k, a ? a : "", b ? b : "");
+    return 1;
+#else
+    (void)kind; (void)a; (void)b;
+    return 0;
+#endif
+}
+
+/* The lobby's status as JSON (ggl_status_json), or {"ok":false} in a build
+ * without GGPO. */
+EMSCRIPTEN_KEEPALIVE const char *web_ggpo_status(void) {
+#ifdef M2HLE_GGPO
+    static char out[12288];
+    ggl_status_t st = ggl_status();
+    ggl_status_json(out, (int)sizeof out, &st);
+    return out;
+#else
+    return "{\"ok\":false,\"error\":\"this build has no GGPO\"}";
+#endif
+}
 
 /* Game frames since the last board reset. */
 EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {

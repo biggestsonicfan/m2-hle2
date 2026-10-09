@@ -83,7 +83,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
 | Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
 | Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
-| Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
+| Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); GGPO rollback through its own lobby (desktop, web and libretro builds); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
 | PS3-release menus | The Console profile's title, main menu, Arcade / Offline Versus settings and online lobby, redrawn after the PS3 release (libretro core and web build) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
@@ -251,6 +251,35 @@ fight a PS3 running in RPCS3 ([ROOM-MATCH.md](ROOM-MATCH.md)). The browser build
 RPCN through a WebSocket gateway on the RPCN host ([web/gateway/](web/gateway/)). The design follows
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
 worked the RPCN protocol out first.
+
+### Rollback netplay (GGPO)
+
+Every build can also play with rollback instead of lockstep, through
+[GGPO](https://github.com/pond3r/ggpo): the board runs on at once, guessing the other player's
+input, and rewinds and runs again when the real input differs. Matches are found on the GGPO
+lobby, `ggpo.sonicthefighte.rs`: sign in, join the game's
+channel and challenge a player. The match goes peer to peer when the two machines can reach each
+other, and through the lobby's relay when they cannot.
+
+```
+m2hle --rom sfight.zip --ggpo-lobby default --ggpo-user NAME --ggpo-pass PASSWORD --ggpo-challenge FRIEND
+m2hle --rom sfight.zip --ggpo-lobby default --ggpo-user FRIEND --ggpo-pass PASSWORD --ggpo-accept NAME
+```
+
+`--ggpo-signup` creates the account first, and `--ggpo-delay N` sets the local input delay
+(2 frames by default). `--ggpo-remote IP:PORT --ggpo-player 1|2 --ggpo-local PORT` plays straight
+to an address with no lobby. Over the MCP bridge, `{"cmd":"ggpo_lobby"}` reports and drives the
+lobby.
+
+On the website, the menu's GGPO lobby button opens a panel to sign in (or sign up, or with
+Twitch), see who is in the game's channel, challenge them and chat. A browser has no UDP, so its
+matches always go through the lobby's server; a browser plays desktop players and other browsers
+alike.
+
+In RetroArch, set the core option Online play to GGPO and fill `m2hle-ggpo.cfg` in the saves folder
+(written on the first load): `user=` / `pass=` (no user signs in with Twitch and writes the account
+back), `challenge=NAME` and `accept=NAME|any`, and optionally `url=`. In the game, L + R lists who is
+free to challenge.
 
 ## Picture filters
 
