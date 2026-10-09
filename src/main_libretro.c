@@ -153,6 +153,22 @@ static void lr_notify(const char *msg, unsigned ms) {
     }
 }
 
+/* A line that stays until it is taken down: the frontend's status line, which
+ * an empty message clears (a queued notification cannot be called back, so a
+ * sign-in code shown as one stayed up after the sign-in). Without the newer
+ * interface it is an ordinary message, and msg NULL does nothing. */
+static void lr_status(const char *msg, unsigned ms) {
+    unsigned version = 0;
+    if (env_cb && env_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &version) && version >= 1) {
+        struct retro_message_ext m = { msg ? msg : "", ms, 3, RETRO_LOG_INFO, RETRO_MESSAGE_TARGET_OSD,
+                                       RETRO_MESSAGE_TYPE_STATUS, -1 };
+        env_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &m);
+        if (msg) lr_log(RETRO_LOG_INFO, "%s", msg);
+    } else if (msg) {
+        lr_message(msg, ms * 60 / 1000);
+    }
+}
+
 /* ---- Core options ------------------------------------------------------------ */
 
 typedef enum { LR_ONLINE_RETROARCH, LR_ONLINE_RPCN, LR_ONLINE_GGPO } lr_online_t;
@@ -1730,8 +1746,17 @@ static void lr_ggpo_say(const ggl_status_t *st) {
     char msg[256];
     if (st->twitch_code[0] && strcmp(st->twitch_code, g_lrg.code_said)) {
         snprintf(g_lrg.code_said, sizeof g_lrg.code_said, "%s", st->twitch_code);
-        snprintf(msg, sizeof msg, "GGPO: sign in with Twitch: enter %s at %s", st->twitch_code, st->twitch_uri);
-        lr_notify(msg, 60000);
+        /* The status line is one line and is not wrapped: the address without
+         * its scheme, www. or the query that only fills in the code again. */
+        const char *at = st->twitch_uri;
+        if (!strncmp(at, "https://", 8)) at += 8;
+        if (!strncmp(at, "www.", 4)) at += 4;
+        int len = (int)strcspn(at, "?");
+        snprintf(msg, sizeof msg, "GGPO: enter %s at %.*s to sign in with Twitch", st->twitch_code, len, at);
+        lr_status(msg, 30 * 60 * 1000);   /* Twitch's codes last 30 minutes */
+    } else if (!st->twitch_code[0] && g_lrg.code_said[0]) {
+        g_lrg.code_said[0] = 0;           /* signed in, or the flow ended */
+        lr_status(NULL, 0);
     }
     if (st->stage == g_lrg.stage_said) return;
     g_lrg.stage_said = st->stage;
@@ -1859,6 +1884,8 @@ static void lr_ggpo_unload(void) {
     emu_ggpo_shutdown(&state.emu);
     ggl_post(GGL_CMD_DISCONNECT, "", "");
     emu_ggpo_lobby_pump();
+    if (g_lrg.code_said[0]) lr_status(NULL, 0);
+    g_lrg.code_said[0] = '\0';
 }
 
 #else
