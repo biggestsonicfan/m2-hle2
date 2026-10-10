@@ -1057,12 +1057,12 @@ static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
     int first = 1;
     for (int i = 0; i < total && left > 96; ) {
         int idx = (head - total + i + GEO_CAPTURE_SIZE) & (GEO_CAPTURE_SIZE - 1);
-        uint32_t cmd = g_cop.geo_capture[idx];
+        uint32_t cmd = g_cop_capture[idx];
         int na = sharc_args_for_cmd(cmd);
         if (na < 0) na = 0;
         DAPPEND("%s{\"c\":\"0x%08X\",\"a\":[", first ? "" : ",", cmd); first = 0;
         for (int j = 0; j < na && j < 8; j++) {
-            uint32_t a = g_cop.geo_capture[(idx + 1 + j) & (GEO_CAPTURE_SIZE - 1)];
+            uint32_t a = g_cop_capture[(idx + 1 + j) & (GEO_CAPTURE_SIZE - 1)];
             float f; memcpy(&f, &a, 4);
             if (f == f && fabsf(f) > 1e-5f && fabsf(f) < 1e6f) DAPPEND("%s%.3f", j ? "," : "", f);
             else DAPPEND("%s\"0x%X\"", j ? "," : "", a);

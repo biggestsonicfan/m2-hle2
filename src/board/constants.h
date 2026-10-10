@@ -41,7 +41,7 @@
 
 /* Work RAM */
 #define RAM2_BASE                  0x00200000
-#define RAM2_SIZE                  0x000CF218
+#define RAM2_SIZE                  0x00040000   /* MAME: 0x00200000-0x0023ffff */
 #define RAM_BASE                   0x00500000
 #define RAM_SIZE                   0x00100000
 
@@ -95,11 +95,9 @@
 #define V_SYNC_SIZE                0x00000001
 #define TMAPGFX_BASE               0x01080000
 #define TMAPGFX_SIZE               0x00080000
-/* Extended video/work RAM — fills the gap between TMAPGFX and PALETTE.
- * Used by fvipers (and likely all Model 2B titles) for collision tables,
- * display lists, and other per-frame scratch data. */
-#define VID_EXT_RAM_BASE           0x01100000
-#define VID_EXT_RAM_SIZE           0x00700000
+/* TILE .. TMAPGFX again, a mirror (MAME: mirror 0x100000 / 0x110000). */
+#define TILE_HI_BASE               0x01100000
+#define TMAPGFX_HI_BASE            0x01180000
 
 #define PALETTE_BASE               0x01800000
 #define PALETTE_SIZE               0x00004000
@@ -162,10 +160,6 @@
 #define LUMA_SIZE                  0x00020000
 #define LUMA2_BASE                 0x12800000
 #define LUMA2_SIZE                 0x00020000
-
-/* Framebuffer */
-#define FRAMEBUFFER_BASE           0x12C00000
-#define FRAMEBUFFER_SIZE           0x00080000
 
 /* IAC */
 #define IAC_BASE                   0xFF000000

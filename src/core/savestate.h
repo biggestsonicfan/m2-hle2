@@ -4,7 +4,7 @@
  * The layout follows m2emulator's .sta: a zip with one entry per part of the
  * board, each the part's own bytes. Its names are kept where the part is the
  * same (I960, SHARC, M2RAM, M2RAM2, M2BUFRAM, M2TILE, M2CG, M2PAL, M2XLAT,
- * M2LUMA, M2BACK, M2FB, M2TEX0, M2TEX1, M2COPRORAM), so `unzip -l` on either
+ * M2LUMA, M2BACK, M2TEX0, M2TEX1, M2COPRORAM), so `unzip -l` on either
  * reads the same way and a part can be pulled out and diffed on its own. What
  * m2emulator keeps in its own structures and this emulator keeps elsewhere
  * gets an entry of its own: the 68000 and the SCSP, the COP's FIFO and the
@@ -120,10 +120,8 @@ static const savestate_buf_t SAVESTATE_BUFS[] = {
     SS_BUF("M2SERIAL",     serial),
     SS_BUF("M2UNKVID",     unknown_vid),
     SS_BUF("M2IAC",        iac),
-    SS_HEAP("M2VIDEXT",    vid_ext_ram, VID_EXT_RAM_SIZE),
     SS_HEAP("M2TEX0",      texram0,     TEXRAM0_SIZE),
     SS_HEAP("M2TEX1",      texram1,     TEXRAM1_SIZE),
-    SS_HEAP("M2FB",        framebuffer, FRAMEBUFFER_SIZE),
 };
 #define SAVESTATE_NBUFS (sizeof SAVESTATE_BUFS / sizeof SAVESTATE_BUFS[0])
 

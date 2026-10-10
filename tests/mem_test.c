@@ -39,6 +39,14 @@ int main(void) {
     mem_write16(&bus, TILE_BASE + 0x11442, 0xA5A5);
     CHECK(mem_read16(&bus, TILE_BASE + 0x1442) == 0xA5A5, "tile RAM mirrors at 0x01010000");
 
+    /* The whole tile block repeats at 0x01100000, and nothing answers above
+     * 0x011FFFFF until the palette (MAME model2.cpp). */
+    CHECK(mem_read16(&bus, TILE_HI_BASE + 0x1442) == 0xA5A5, "tile RAM mirrors at 0x01100000");
+    CHECK(mem_read16(&bus, TILE_HI_BASE + 0x11442) == 0xA5A5, "tile RAM mirrors at 0x01110000");
+    mem_write32(&bus, TMAPGFX_HI_BASE + 0x40, 0x5A5A1234);
+    CHECK(mem_read32(&bus, TMAPGFX_BASE + 0x40) == 0x5A5A1234, "character RAM mirrors at 0x01180000");
+    CHECK(mem_find_region(&bus, 0x01200000) == NULL, "0x01200000 is unmapped");
+
     /* Round-trips at each width in work RAM. */
     mem_write8(&bus, RAM_BASE + 0x10, 0xAB);
     CHECK(mem_read8(&bus, RAM_BASE + 0x10) == 0xAB, "write8/read8 round-trip");
@@ -136,13 +144,11 @@ int main(void) {
      * mem_init on the emu thread while the frame callback is decoding texture
      * RAM through a pointer it loaded earlier; a block that moved is a block
      * that was freed under it. Cleared in place is the whole contract. */
-    uint8_t *before[6] = { bus.main_data, bus.xtra_data, bus.vid_ext_ram,
-                           bus.texram0,   bus.texram1,   bus.framebuffer };
+    uint8_t *before[4] = { bus.main_data, bus.xtra_data, bus.texram0, bus.texram1 };
     ok = mem_init(&bus, NULL, 0);
-    uint8_t *after[6]  = { bus.main_data, bus.xtra_data, bus.vid_ext_ram,
-                           bus.texram0,   bus.texram1,   bus.framebuffer };
+    uint8_t *after[4]  = { bus.main_data, bus.xtra_data, bus.texram0, bus.texram1 };
     CHECK(ok, "mem_init succeeds a second time");
-    CHECK(memcmp(before, after, sizeof(before)) == 0, "re-init keeps all six heap regions where they were");
+    CHECK(memcmp(before, after, sizeof(before)) == 0, "re-init keeps all four heap regions where they were");
     CHECK(mem_read32(&bus, TEXRAM0_BASE + 0x100) == 0, "re-init clears TEXRAM0");
     CHECK(mem_read32(&bus, MAIN_DATA_BASE + 0x4000) == 0, "re-init clears MAIN_DATA");
     CHECK(mem_read8(&bus, IO_BASE) == 0xFF, "IO region is 0xFF again after re-init");

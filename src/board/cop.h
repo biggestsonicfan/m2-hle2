@@ -44,9 +44,7 @@ typedef struct {
     uint32_t args[COP_ARGS_MAX];
     int      args_received;
 
-    /* Raw command-stream ring buffer for the polygon decoder (geo3d.h).
-     * Size must be a power of 2 and ≥ GEO_CAPTURE_SIZE. */
-    uint32_t geo_capture[GEO_CAPTURE_SIZE];
+    /* Where the raw command-stream ring (g_cop_capture, below) is. */
     int      geo_capture_head;
     int      geo_capture_count;
 
@@ -74,6 +72,13 @@ typedef struct {
 } cop_state_t;
 
 static cop_state_t g_cop = {0};
+
+/* The raw COPROGRAM write stream, for the bridge's get_geo_captures and
+ * dump_geo_stream. It is a debugging record, not board state, so it lives
+ * outside g_cop: a savestate and every rollback / rewind snapshot copies g_cop,
+ * and this 1 MB ring was most of what changed from one frame to the next
+ * (Pinboard #590). Power of 2 (the ring is masked with SIZE-1). */
+static uint32_t g_cop_capture[GEO_CAPTURE_SIZE];
 
 /* sharc_exec.h defines sharc_args_for_cmd / sharc_exec; it transitively
  * includes sharc.h which defines g_sharc and the reply FIFO. */
@@ -121,7 +126,7 @@ static inline void cop_write(uint32_t val) {
         return;
     }
 
-    g_cop.geo_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
+    g_cop_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
     g_cop.geo_capture_head++;
     if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
         g_cop.geo_capture_count++;
