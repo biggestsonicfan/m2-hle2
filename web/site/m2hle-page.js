@@ -28,6 +28,23 @@ function fatal(text) {
   show('step-fatal');
 }
 
+/* A browser may take the WebGL context away (a phone's GPU reset, memory pressure).
+ * sokol cannot build its resources again, so the picture went black while the
+ * board and the sound ran on (Pinboard #601). A follower reloads and joins again;
+ * a player is told, since a reload ends the game. One reload a minute at most, so
+ * a context lost at every start does not reload for ever. */
+$('canvas').addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  m2hleTools.add('the browser took the graphics away (WebGL context lost)', 'error');
+  if (new URLSearchParams(location.search).has('follow') && performance.now() > 60000) {
+    location.reload();
+    return;
+  }
+  $('fatal-reload').hidden = false;
+  $('fatal-reload').onclick = () => location.reload();
+  fatal('The browser took the graphics away (the WebGL context was lost). Reload the page to carry on.');
+});
+
 /* What a failed load means, in words a player can act on. The emulator matches
  * files by checksum, so it knows exactly which ones the zip does not hold. */
 function explainMissing(missing) {

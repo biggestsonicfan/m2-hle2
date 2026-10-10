@@ -608,6 +608,9 @@ static inline bool follow_slice_ready(void) {
     return F->newest != UINT64_MAX && F->newest > cur;
 }
 
+/* The feed holds the segment's END: no more of it is coming. */
+static inline bool follow_end_seen(void) { return g_follow.end_key != UINT64_MAX; }
+
 /* Frames the feed holds past the board: run unpaced while there are many. */
 static inline uint32_t follow_buffered(void) {
     const follow_sub_t *F = &g_follow;
