@@ -8,11 +8,13 @@ cycles m2-hle2's i960 table charges for it.
 
 Packet, after the 28-byte RNG packet: 5A A6, slot, then TIMER_04 before the
 bench less TIMER_04 after it (3 bytes, little-endian). Slot = frame_counter
-& 31: bench slot >> 1, run n times for an even slot and 2n for an odd one.
+& 63 (& 31 before the probe had 32 benches; the first 16 did not change):
+bench slot >> 1, run n times for an even slot and 2n for an odd one.
 The two sizes share every fixed cost, so (count at 2n - count at n) / n is one
 turn of the loop alone, and count at n - n x turn is what is left over: the
 second timer read, the loop's entry and exit, and the first pass's cache
-misses. In m2-hle2 a count is exactly 4 + n x the table's turn.
+misses. In m2-hle2 a count is exactly 4 + n x the table's turn (5 for the
+jumps, which branch into their aligned loop after the first read).
 """
 import argparse
 import os
@@ -40,7 +42,28 @@ BENCHES = (
     ('ram stq', 64, 15, '2 stq to the stack'),
     ('far ld', 32, 37, '8 ld from work RAM 512 bytes apart'),
     ('none', 8, 0, 'the two timer reads alone'),
+    ('buf ld', 32, 37, '8 ld from bufferram 0x91FF00'),
+    ('buf st', 32, 21, '8 st to bufferram 0x91FF00 (what is there)'),
+    ('tile st', 8, 21, '8 st to tile RAM 0x100E000 (what is there)'),
+    ('cop', 4, 18, 'Fn_get_3d_len through the COP FIFO and its reply, used'),
+    ('cop x2', 4, 30, 'two Fn_get_3d_len back to back, then both replies'),
+    ('cop stat', 16, 37, '8 ld of the COP FIFO status 0x980004'),
+    ('jump', 4, 36, '32 jumps to line starts 128 bytes apart (4 KB)'),
+    ('jump end', 4, 36, 'the same to the last word of each line'),
+    ('jump in', 64, 12, '8 jumps 32 bytes apart over 256 bytes (cached)'),
+    ('st+3', 32, 45, '8 x (st to the stack, 3 addo)'),
+    ('ld+1+use', 48, 25, '4 x (ld, ld, addo, addo): a use one later'),
+    ('line 436', 8, 112, '436 bytes of straight-line addo a pass'),
+    ('line 1012', 2, 256, '1012 bytes of straight-line addo a pass'),
+    ('buf stq', 32, 15, '2 stq to bufferram 0x91FF00 (what is there)'),
+    ('tile stq', 8, 15, '2 stq to tile RAM 0x100E000 (what is there)'),
+    ('none', 8, 0, 'the two timer reads alone, again'),
 )
+
+
+# Benches that branch into their aligned loop between the two timer reads
+# count one cycle more in m2-hle2.
+ENTRY_B = ('jump', 'jump end', 'jump in')
 
 
 def bench_packets(stream):
@@ -49,7 +72,7 @@ def bench_packets(stream):
     while i + 6 <= len(stream):
         if stream[i] == 0x5A and stream[i + 1] == 0xA5:
             i += A.PKT_LEN
-        elif stream[i] == 0x5A and stream[i + 1] == 0xA6 and stream[i + 2] < 32:
+        elif stream[i] == 0x5A and stream[i + 1] == 0xA6 and stream[i + 2] < 2 * len(BENCHES):
             yield stream[i + 2], stream[i + 3] | stream[i + 4] << 8 | stream[i + 5] << 16
             i += 6
         else:
@@ -91,11 +114,11 @@ def report(name, slots, out=sys.stdout):
 
 
 def check_trace(slots, out=sys.stdout):
-    """m2-hle2 must count exactly 4 + n x table for every packet."""
+    """m2-hle2 must count exactly 4 + n x table (+ 1 for ENTRY_B) for every packet."""
     bad = 0
     for slot, counts in sorted(slots.items()):
         bn, n, cyc, _ = BENCHES[slot >> 1]
-        want = 4 + (n << (slot & 1)) * cyc
+        want = 4 + (n << (slot & 1)) * cyc + (bn in ENTRY_B)
         for c in counts:
             if c != want:
                 bad += 1
