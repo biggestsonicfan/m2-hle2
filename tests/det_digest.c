@@ -259,7 +259,25 @@ static struct {
     uint32_t        loads;
     int64_t         save_us, load_us;
     uint32_t        saves;
+    uint64_t        moved[ROLLBACK_PARTS_MAX];   /* --rewind-census: 64-byte lines that changed */
+    uint32_t        compared;
 } rw;
+static bool rewind_census;
+
+/* What RetroArch's rewind sees of a frame: per part, the 64-byte lines that
+ * differ from the frame before. */
+static void rewind_count(const uint8_t *now, const uint8_t *prev) {
+    size_t off = ROLLBACK_FLAT_HEAD;
+    for (int i = 0; i < g_rollback.n; i++) {
+        size_t n = g_rollback.part[i].n;
+        for (size_t o = 0; o < n; o += 64) {
+            size_t len = n - o < 64 ? n - o : 64;
+            if (memcmp(now + off + o, prev + off + o, len)) rw.moved[i]++;
+        }
+        off += n;
+    }
+    rw.compared++;
+}
 
 static bool rewind_init(emu_thread_ctx_t *emu) {
     rw.size = emu_state_flat_size(emu);
@@ -276,6 +294,8 @@ static bool rewind_frame(emu_thread_ctx_t *emu, uint32_t f) {
     rw.save_us += emu_now_us() - t0;
     rw.saves++;
     if (err) { fprintf(stderr, "--rewind: %s\n", err); exit(2); }
+    if (rewind_census && f > 1)
+        rewind_count(rw.buf + rw.size * (f % (rewind_k + 1)), rw.buf + rw.size * ((f - 1) % (rewind_k + 1)));
     bool fresh = f > rw.top;
     if (fresh) rw.top = f;
     if (fresh && f > rewind_k && f % rewind_k == 0) rw.jump_to = f - rewind_k;
@@ -315,6 +335,11 @@ static void rewind_report(void) {
     fprintf(stderr, "rewind: %u states of %zu bytes, %.0f us a save; %u loads, %.0f us a load\n",
             rw.saves, rw.size, rw.saves ? (double)rw.save_us / rw.saves : 0.0,
             rw.loads, rw.loads ? (double)rw.load_us / rw.loads : 0.0);
+    if (!rewind_census || !rw.compared) return;
+    fprintf(stderr, "%-14s %9s %12s\n", "part", "bytes", "lines/frame");
+    for (int i = 0; i < g_rollback.n; i++)
+        fprintf(stderr, "%-14s %9zu %12.1f\n", g_rollback.part[i].name, g_rollback.part[i].n,
+                (double)rw.moved[i] / rw.compared);
 }
 
 static uint32_t keys_mask(const char *p, const char *end) {
@@ -499,6 +524,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--mem")) state_mem = true;
+        else if (!strcmp(argv[i], "--rewind-census")) rewind_census = true;
         else if (!strcmp(argv[i], "--rewind") && i + 1 < argc) {
             if (!rewind_arg(argv[++i])) return 2;
         }
