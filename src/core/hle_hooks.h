@@ -362,6 +362,14 @@ static const game_profile_t *g_hle_spin_profile = NULL;
 static int (*g_hle_spin_hook)(i960_cpu_t *cpu, memory_bus_t *bus) = NULL;
 /* Turns the above off for a netplay session (gems_off_for_session). */
 static void (*g_hle_extra_session_off)(void) = NULL;
+/* Observers: g_hle_watch_hook is called at every g_hle_watch_sites address
+ * (and at any address sharing its filter bit, so it checks cpu->sfr.ip itself)
+ * before any hook, and the instruction then runs as it would have. It must not
+ * change the board. sfight_ai_trace.h logs STF's rand and CPU AI this way.
+ * Bump g_hle_filter_gen after a change. */
+static const uint32_t *g_hle_watch_sites = NULL;
+static size_t          g_hle_watch_count = 0;
+static void (*g_hle_watch_hook)(i960_cpu_t *cpu, memory_bus_t *bus) = NULL;
 
 /* Rebuild the filter if the active profile changed. The run loop does this
  * once per slice (the profile cannot change inside one) and then calls
@@ -376,6 +384,10 @@ static inline void hle_filter_sync(void) {
     }
     for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++) {
         uint32_t k = (g_hle_extra_sites[i] >> 2) & 0xFFFFu;
+        s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
+    }
+    for (size_t i = 0; g_hle_watch_hook && i < g_hle_watch_count; i++) {
+        uint32_t k = (g_hle_watch_sites[i] >> 2) & 0xFFFFu;
         s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
     }
     for (size_t i = 0; p && p == g_hle_spin_profile && i < g_hle_spin_count; i++) {
@@ -414,6 +426,7 @@ static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t 
     if (!(s_hle_filter[k >> 3] & (1u << (k & 7u))))
         return 1;
     g_hle_room = room;
+    if (g_hle_watch_hook) g_hle_watch_hook(cpu, bus);
     if (g_hle_extra_hook && g_hle_extra_hook(cpu, bus) == 0) return 0;
     if (!p) return 1;
     if (p == g_hle_spin_profile)
