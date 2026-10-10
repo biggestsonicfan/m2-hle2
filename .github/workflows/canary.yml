@@ -339,8 +339,55 @@ jobs:
           path: dist/*.zip
           retention-days: 14
 
+  # The web build, the same site pages.yml deploys, zipped beside the exes so
+  # that a host following its own emulator one way (the fly's dashboard,
+  # core/follow.h) can serve a page of the same build: a follower whose board
+  # is not the leader's splits at its first frame check (Pinboard #601).
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      # Tracks pages.yml, which tracks M2HLE_SUBMODULE_PATHS for M2HLE_WEB.
+      - name: Fetch build submodules
+        run: git submodule update --init vendor/sokol vendor/miniz vendor/stb vendor/ggpo
+
+      # The same pin as pages.yml, for the same reason (WEB-PORT.md, "Determinism").
+      - uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 6.0.9
+          actions-cache-folder: emsdk-cache
+
+      - name: Stamp version
+        id: ver
+        run: echo "version=r$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          emcmake cmake -S . -B build_web -DM2HLE_FRONTEND=web \
+            -DCMAKE_BUILD_TYPE=Release -DM2HLE_VERSION="${{ steps.ver.outputs.version }}"
+          cmake --build build_web -j 4
+
+      - name: Package
+        run: |
+          if find build_web/site -type f \( -iname '*.zip' -o -iname '*.bin' -o -iname 'epr-*' -o -iname 'mpr-*' \) | grep .; then
+            echo "::error::a ROM-like file is in the site directory"; exit 1
+          fi
+          mkdir -p dist
+          echo "${{ steps.ver.outputs.version }} (${{ github.sha }})" > build_web/site/VERSION.txt
+          cd build_web/site && zip -r ../../dist/m2hle-web.zip ./*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m2hle-web
+          path: dist/*.zip
+          retention-days: 14
+
   publish:
-    needs: [build, libretro, libretro-linux-arm64]
+    needs: [build, libretro, libretro-linux-arm64, web]
     # A libretro build that fails must not hold back the Windows canary.
     # It does leave that zip's previous build on the release, so the notes
     # below say which archives this run actually produced.
