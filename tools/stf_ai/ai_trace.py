@@ -9,8 +9,9 @@ the random number generator from what it logged, without being told it.
              the trace's own I and R lines
   frames   : per frame, the draws and what each CPU fighter did with them
 
-Packet (stfdisasm rng-serial, all little-endian): 5A A5, frame_counter & 0xFF,
-random (4), TIMERS_START, TIMER_02, TIMER_03, TIMER_04 (3 each) = 19 bytes.
+Packet (stfdisasm rng-serial, all little-endian): 5A A5, frame_counter (4),
+random (4), TIMERS_START, TIMER_02, TIMER_03, TIMER_04 (3 each), game_timer (2),
+CTRL_TIMER (4) = 28 bytes.
 The probe loads TIMER_04 16 cycles after _idle's entry and the other three at
 28, 32 and 36; a timer counts down a cycle at a time, so on the board each one
 reads that much less than the I line's.
@@ -19,7 +20,7 @@ import argparse
 import itertools
 import sys
 
-PKT_LEN = 19
+PKT_LEN = 28
 PROBE_LAG = (28, 32, 36, 16)   # cycles from _idle's entry to each timer's load
 
 
@@ -32,7 +33,8 @@ def parse(path):
             p = line.rstrip().split(',')
             kind, frame = p[0], int(p[1])
             if kind == 'I':
-                vals = [int(x, 16) for x in p[2:6]] + [int(p[6])]
+                # t0..t3, vbl, then (newer traces) frame_counter, game_timer, CTRL_TIMER
+                vals = [int(x, 16) for x in p[2:6]] + [int(p[6])] + [int(x, 16) for x in p[8:11]]
             else:
                 vals = [int(x, 16) for x in p[2:]]
             ev.append((kind, frame, vals))
@@ -93,7 +95,7 @@ def capture_bytes(path):
 
 
 def packets(stream):
-    """Yield (index, frame, random, [t0, t1, t2, t3]) from a byte stream."""
+    """Yield (index, frame, random, [t0, t1, t2, t3], game_timer, CTRL_TIMER)."""
     i, n = 0, 0
     while i + PKT_LEN <= len(stream):
         if stream[i] != 0x5A or stream[i + 1] != 0xA5:
@@ -101,13 +103,15 @@ def packets(stream):
             continue
         b = stream[i:i + PKT_LEN]
         le = lambda o, w: sum(b[o + j] << (8 * j) for j in range(w))
-        yield n, b[2], le(3, 4), [le(7, 3), le(10, 3), le(13, 3), le(16, 3)]
+        yield (n, le(2, 4), le(6, 4), [le(10, 3), le(13, 3), le(16, 3), le(19, 3)],
+               le(22, 2), le(24, 4))
         n += 1
         i += PKT_LEN
 
 
 def trace_probes(ev):
-    """For each I line, the random the probe would read and its frame."""
+    """For each I line: frame, the random the probe would read, the timers and
+    (frame_counter, game_timer, CTRL_TIMER) when the trace has them."""
     rnd, res = 0, []
     for k, frame, v in ev:
         if k == 'S':
@@ -115,7 +119,7 @@ def trace_probes(ev):
         elif k == 'R':
             rnd = v[2]
         elif k == 'I':
-            res.append((frame, rnd, v[:4]))
+            res.append((frame, rnd, v[:4], tuple(v[5:8])))
     return res
 
 
@@ -124,25 +128,27 @@ def check_packets(ev, stream, out=sys.stdout):
     tp = trace_probes(ev)
     print(f'packets: {len(pk)} decoded, {len(tp)} idle entries in the trace', file=out)
     # The probe skips an entry when TIMER_04 is close; line them up on random
-    # and the frame byte, walking forward.
+    # and the timers, walking forward; frame_counter, game_timer and CTRL_TIMER
+    # must agree too when the trace carries them.
     j, bad, skipped = 0, 0, 0
-    for _, fb, rnd, tim in pk:
+    for _, fb, rnd, tim, gt, ct in pk:
         while j < len(tp):
-            frame, trnd, ttim = tp[j]
+            frame, trnd, ttim, vars_ = tp[j]
             want = [(t - lag) & 0xFFFFF if t != 0xFFFFF else t for t, lag in zip(ttim, PROBE_LAG)]
-            if trnd == rnd and want == tim:
+            if trnd == rnd and want == tim and vars_ in ((), (fb, gt, ct)):
                 break
             j += 1
             skipped += 1
         if j == len(tp):
             bad += 1
             if bad <= 5:
-                print(f'  no idle entry matches packet frame byte {fb:02X} random {rnd:08X}'
+                print(f'  no idle entry matches packet frame {fb:X} random {rnd:08X}'
+                      f' game_timer {gt:X} CTRL_TIMER {ct:X}'
                       f' timers {" ".join(f"{t:05X}" for t in tim)}', file=out)
             j = 0
             continue
         j += 1
-    print(f'  {len(pk) - bad} packets match an idle entry exactly (timers and random),'
+    print(f'  {len(pk) - bad} packets match an idle entry exactly,'
           f' {skipped} entries had none (probe skipped), {bad} unmatched', file=out)
     return bad == 0
 

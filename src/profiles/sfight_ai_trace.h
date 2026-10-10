@@ -28,8 +28,15 @@
  *   C,frame,player,pc,op                 command fetched at script pc
  *   F,frame,player,push                  a condition failed; push = 0x114(g4)
  *   A,frame,player,waza,level,rnd,status,chara   stick_ctrl entered
- *   I,frame,t0,t1,t2,t3,vbl              _idle entered (0x11608): the timers
- *                                        and the cycles left to the vblank
+ *   I,frame,t0,t1,t2,t3,vbl,cycle,fc,gt,ct   _idle entered (0x11608): the
+ *                                        timers, the cycles left to the vblank,
+ *                                        the i960's cycle count, frame_counter,
+ *                                        game_timer and CTRL_TIMER
+ *   L,frame,cycle,addr,word,model        one of rand's four timer loads: the
+ *                                        i960's cycle count as the ld starts,
+ *                                        the address, the word the ld returned
+ *                                        (r13 after it) and the count the timer
+ *                                        model held at the ld's start
  *   T,frame,byte                         a byte sent on the RS-422 link: the
  *                                        m2-sdk strobe (0x07 to TXD1) after a
  *                                        data byte in TXD2. A patched program
@@ -49,6 +56,13 @@
 #include "hle_hooks.h"
 #include "game_profile.h"
 
+#define SAT_FRAME_COUNTER 0x00500020u /* frame_counter (word) */
+#define SAT_CTRL_TIMER    0x00500024u /* CTRL_TIMER (word) */
+#define SAT_GAME_TIMER    0x00500028u /* game_timer (short) */
+#define SAT_RAND_LD_T0   0x000066BCu   /* ld (r14), r13: T0 */
+#define SAT_RAND_LD_T1   0x000066C8u   /* ld 4(r14), r13 */
+#define SAT_RAND_LD_T2   0x000066D4u   /* ld 8(r14), r13 */
+#define SAT_RAND_LD_T3   0x000066E0u   /* ld 0xC(r14), r13 */
 #define SAT_RAND_LOAD_T0 0x000066C0u   /* r13 = T0 */
 #define SAT_RAND_LOAD_T1 0x000066CCu   /* r13 = T1 */
 #define SAT_RAND_LOAD_T2 0x000066D8u   /* r13 = T2 */
@@ -61,6 +75,7 @@
 #define SAT_RANDOM       0x00500098u
 
 static const uint32_t s_sat_sites[] = {
+    SAT_RAND_LD_T0, SAT_RAND_LD_T1, SAT_RAND_LD_T2, SAT_RAND_LD_T3,
     SAT_RAND_LOAD_T0, SAT_RAND_LOAD_T1, SAT_RAND_LOAD_T2, SAT_RAND_LOAD_T3,
     SAT_RAND_STORE, SAT_CC_NEXT, SAT_CC_FAULT, SAT_STICK_CTRL, SAT_IDLE,
 };
@@ -71,6 +86,8 @@ static struct {
     uint32_t frame;
     int      started;     /* an S line went out for frame */
     uint32_t t[4];
+    uint64_t ld_cycle;    /* cpu->cycles as the last timer ld started */
+    uint32_t ld_model;    /* the model's count for that timer then */
     mem_region_t *io;     /* the I/O region whose writes the trace taps */
 } s_sat;
 
@@ -89,21 +106,34 @@ static inline uint32_t sat_timer(int t) {
     return (uint32_t)(c < 0 ? 0 : c) & 0xFFFFFu;
 }
 
-static void sat_watch(i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (!s_sat.out || !s_sat.on) return;
-    uint32_t ip = cpu->sfr.ip, g4 = cpu->globals.g[4], g7 = cpu->globals.g[7];
-    switch (ip) {
-    case SAT_RAND_LOAD_T0: case SAT_RAND_LOAD_T1:
-    case SAT_RAND_LOAD_T2: case SAT_RAND_LOAD_T3:
-        s_sat.t[(ip - SAT_RAND_LOAD_T0) / 12u] = cpu->locals.r[13];
-        break;
-    case SAT_RAND_STORE: {
+/* rand's four timer loads and its store. Returns false for any other site. */
+static bool sat_rand_site(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip) {
+    if (ip >= SAT_RAND_LD_T0 && ip <= SAT_RAND_LD_T3 && (ip - SAT_RAND_LD_T0) % 12u == 0) {
+        s_sat.ld_cycle = cpu->cycles;
+        s_sat.ld_model = sat_timer((int)((ip - SAT_RAND_LD_T0) / 12u));
+    } else if (ip >= SAT_RAND_LOAD_T0 && ip <= SAT_RAND_LOAD_T3
+               && (ip - SAT_RAND_LOAD_T0) % 12u == 0) {
+        uint32_t t = (ip - SAT_RAND_LOAD_T0) / 12u;
+        s_sat.t[t] = cpu->locals.r[13];
+        fprintf(s_sat.out, "L,%u,%llu,%X,%X,%X\n", s_sat.frame,
+                (unsigned long long)s_sat.ld_cycle, 0xF00000u + 4u * t,
+                cpu->locals.r[13], s_sat.ld_model);
+    } else if (ip == SAT_RAND_STORE) {
         uint32_t nw = cpu->locals.r[15];
         fprintf(s_sat.out, "R,%u,%X,%X,%X,%X,%X,%X,%X,%X\n", s_sat.frame,
                 cpu->locals.r[2] - 4u, mem_read32(bus, SAT_RANDOM), nw, (nw >> 4) & 0xFFFFu,
                 s_sat.t[0], s_sat.t[1], s_sat.t[2], s_sat.t[3]);
-        break;
+    } else {
+        return false;
     }
+    return true;
+}
+
+static void sat_watch(i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!s_sat.out || !s_sat.on) return;
+    uint32_t ip = cpu->sfr.ip, g4 = cpu->globals.g[4], g7 = cpu->globals.g[7];
+    if (sat_rand_site(cpu, bus, ip)) return;
+    switch (ip) {
     case SAT_CC_NEXT: {
         uint32_t g6 = cpu->globals.g[6];
         fprintf(s_sat.out, "C,%u,%u,%X,%X\n", s_sat.frame, sat_player(cpu, bus), g6,
@@ -121,9 +151,11 @@ static void sat_watch(i960_cpu_t *cpu, memory_bus_t *bus) {
                 mem_read8(bus, g4 + 0xC9u));
         break;
     case SAT_IDLE:
-        fprintf(s_sat.out, "I,%u,%X,%X,%X,%X,%lld\n", s_sat.frame, sat_timer(0),
-                sat_timer(1), sat_timer(2), sat_timer(3),
-                (long long)(irqt__vbl_left() - g_irqt.pending));
+        fprintf(s_sat.out, "I,%u,%X,%X,%X,%X,%lld,%llu,%X,%X,%X\n", s_sat.frame,
+                sat_timer(0), sat_timer(1), sat_timer(2), sat_timer(3),
+                (long long)(irqt__vbl_left() - g_irqt.pending),
+                (unsigned long long)cpu->cycles, mem_read32(bus, SAT_FRAME_COUNTER),
+                mem_read16(bus, SAT_GAME_TIMER), mem_read32(bus, SAT_CTRL_TIMER));
         break;
     default:
         break;   /* another address on a site's filter bit */
