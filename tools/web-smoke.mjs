@@ -7,7 +7,7 @@
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
  *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console|picture|replay]
  *        [--cpu-throttle N] [--eval JS] [--mobile] [--taps "coin@12,b1@20:300,dpad-right@22:500"]
- *        [--hide 20:10]
+ *        [--hide 20:10] [--watch JS] [--headed]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -57,6 +57,12 @@
  * line should keep counting ~60 frames a second; it adds `hidden` and how many
  * worker ticks ran the board.
  *
+ * --watch JS evaluates an expression in the page with each per-second line and
+ * prints its value after it (e.g. a follower's status, or the wasm heap's size).
+ * --headed opens a window (on $DISPLAY): headless Chrome runs requestAnimationFrame
+ * at whatever rate it likes (8 Hz on a busy Linux box), so pacing and sound are
+ * only worth reading from a window, an Xvfb one will do.
+ *
  * No dependencies: Node 22+ has WebSocket and fetch built in.
  */
 import { spawn } from 'node:child_process';
@@ -85,6 +91,7 @@ const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((k) => {
 
 const [hideAt, hideFor] = (opt('--hide', '0:0')).split(':').map(Number);
 const mobile = args.includes('--mobile');
+const watch = opt('--watch', null);
 const taps = (opt('--taps', '') || '').split(',').filter(Boolean).map((t) => {
   const m = /^([a-z0-9-]+)@([\d.]+)(?::(\d+))?$/.exec(t);
   if (!m) { console.error(`--taps: cannot read "${t}"`); process.exit(2); }
@@ -112,7 +119,7 @@ const port = 9300 + Math.floor(Math.random() * 500);
 const profile = path.join(os.tmpdir(), 'm2hle-web-smoke-profile');
 fs.mkdirSync(profile, { recursive: true });
 const child = spawn(browser, [
-  '--headless=new', '--no-first-run', '--disable-extensions', '--mute-audio',
+  ...(args.includes('--headed') ? [] : ['--headless=new']), '--no-first-run', '--disable-extensions', '--mute-audio',
   `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`,
   `--window-size=${width},${height}`,
   /* A machine with no usable GPU (CI, a remote session) still gets WebGL2. */
@@ -265,7 +272,8 @@ try {
         ? `  snd voices=${bits(b.active)} midi w=${b.midi_writes} drops=${b.midi_drops} hi=${b.midi_hi} drains=${b.midi_drains} pc=${b.m68k_pc}`
         : '';
       const hid = bg ? `  hidden=${bg[0]} bg_ticks=${bg[1]}` : '';
-      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${args.includes('--sound') ? '' : audio}${board}${hid}`);
+      const w = watch ? `  ${JSON.stringify(await evaluate(watch))}` : '';
+      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${args.includes('--sound') ? '' : audio}${board}${hid}${w}`);
       lastFrames = frames;
     }
     for (const k of keys) if (!k.done && s >= k.at) { k.done = true; await press(k.key); }

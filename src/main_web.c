@@ -290,7 +290,33 @@ static bool g_web_waited;
 /* ?follow= : the board follows another one way (core/follow.h, Pinboard #568).
  * It sends nothing and takes no input; a slice runs only once the feed holds it. */
 static bool g_web_follow;
-#define WEB_FOLLOW_AHEAD 20u   /* frames held past the board before it runs unpaced */
+/* The feed comes in bursts: the leader flushes it every few frames and the page
+ * polls it every 250 ms (m2hle-follow.js). A follower that ran each frame the
+ * moment it landed sat at the live edge and ran dry several times a second, and
+ * every wait starved the sound: garbled music, a dropout eight times a second
+ * (Pinboard #601). So it plays out of a buffer, as a stream does: run dry, it
+ * waits for WEB_FOLLOW_PREROLL frames before it runs on at the board's rate, and
+ * it runs unpaced only when more than WEB_FOLLOW_AHEAD are in hand, back down to
+ * the preroll. */
+#define WEB_FOLLOW_PREROLL 36u   /* 0.6 s: a poll and a flush, with room over */
+#define WEB_FOLLOW_AHEAD 120u    /* 2 s behind the leader before it hurries */
+static bool g_web_follow_fill;   /* ran dry: waiting for the preroll */
+static bool g_web_follow_rush;   /* far behind: running unpaced to the preroll */
+/* How long one callback may spend catching up. Three slices a callback took 25 s
+ * to catch up from a join two thousand frames behind, garbling the sound all the
+ * way; a budget catches up as fast as the machine can and still draws. */
+#define WEB_FOLLOW_RUSH_US 10000
+
+/* The feed holds the follower's next slice, and enough after it to play on. */
+static bool web_follow_ready(void) {
+    if (!follow_slice_ready()) {
+        g_web_follow_fill = g_web_follow;
+        return false;
+    }
+    if (g_web_follow_fill && follow_buffered() < WEB_FOLLOW_PREROLL && !follow_end_seen()) return false;
+    g_web_follow_fill = false;
+    return true;
+}
 
 /* One slice, if netplay allows it. Returns false when the board did not advance
  * (stalled on the peer, or the slice went to the barrier's reset). */
@@ -301,7 +327,7 @@ static bool web_slice(void) {
     netplay_step_t np = emu_netplay_pump(&state.emu);
     g_web_waited = (np == NETPLAY_STEP_WAIT);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
-    if ((g_web_follow || replay_playing()) && !follow_slice_ready()) { g_web_waited = true; return false; }
+    if ((g_web_follow || replay_playing()) && !web_follow_ready()) { g_web_waited = true; return false; }
     if (state.emu.run_state != EMU_RUNNING) return false;
     if (emu_slice_should_stop(&state.emu)) return false;
     while (g_web_script_at < g_web_script_n && g_web_script[g_web_script_at].frame <= g_emu_frames)
@@ -376,12 +402,51 @@ EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
     return web_paused();
 }
 
+/* A machine that cannot run much faster than the board would rush for ever, in
+ * silence: one that gains less than WEB_FOLLOW_GAIN frames in WEB_FOLLOW_TRIAL_US
+ * stays behind the leader and plays at the board's rate instead. */
+#define WEB_FOLLOW_TRIAL_US 5000000
+#define WEB_FOLLOW_GAIN 30u
+static bool g_web_follow_slow;
+
+static bool web_follow_rushing(void) {
+    static int64_t  trial_us;
+    static uint32_t trial_held;
+    if (!g_web_follow || g_web_follow_slow) return false;
+    uint32_t held = follow_buffered();
+    int64_t now = emu_now_us();
+    if (held > WEB_FOLLOW_AHEAD && !g_web_follow_rush) {
+        g_web_follow_rush = true;
+        trial_us = now;
+        trial_held = held;
+    } else if (held <= WEB_FOLLOW_PREROLL) {
+        g_web_follow_rush = false;
+    }
+    if (g_web_follow_rush && now - trial_us > WEB_FOLLOW_TRIAL_US) {
+        if (held + WEB_FOLLOW_GAIN > trial_held) {
+            LOG_WARN("follow: %u frames behind and not catching up; playing on behind the leader", held);
+            g_web_follow_slow = true;
+            g_web_follow_rush = false;
+        }
+        trial_us = now;
+        trial_held = held;
+    }
+    return g_web_follow_rush;
+}
+
 /* A netplay watcher behind the fighters takes the extra slices whether it is
  * owed them or not, until it has caught up (netplay_catching_up); so does a
- * follower with more than WEB_FOLLOW_AHEAD frames of feed in hand. */
+ * follower with more than WEB_FOLLOW_AHEAD frames of feed in hand, until it is
+ * back to WEB_FOLLOW_PREROLL. */
 static bool web_catching_up(void) {
-    return netplay_catching_up() || replay_play_unpaced()
-        || (g_web_follow && follow_buffered() > WEB_FOLLOW_AHEAD);
+    return netplay_catching_up() || replay_play_unpaced() || web_follow_rushing();
+}
+
+/* Slice n of this callback, which began at `start`, may run. */
+static bool web_slice_due(int n, int64_t start) {
+    bool room = n < WEB_MAX_SLICES_PER_FRAME
+             || (g_web_follow_rush && emu_now_us() - start < WEB_FOLLOW_RUSH_US);
+    return room && (state.owed_us >= WEB_SLICE_DUE_US || web_catching_up());
 }
 
 static void web_run_owed_slices(void) {
@@ -406,8 +471,7 @@ static void web_run_owed_slices(void) {
         state.owed_us = 0;
         return;
     }
-    for (int n = 0; n < WEB_MAX_SLICES_PER_FRAME
-                    && (state.owed_us >= WEB_SLICE_DUE_US || web_catching_up()); n++) {
+    for (int n = 0; web_slice_due(n, now); n++) {
         bool owed = state.owed_us >= WEB_SLICE_DUE_US;
         if (!web_slice()) {
             /* Waiting on the other player: let the time go rather than owe it.
@@ -485,6 +549,10 @@ EMSCRIPTEN_KEEPALIVE int web_sound_driver(void) { return g_shle.on ? 1 : 0; }
 /* What the board produced since the last call goes to the worklet in one chunk. */
 static void web_push_audio(void) {
     if (g_web_audio != WEB_AUDIO_WORKLET) return;
+    if (g_web_follow_rush) {   /* a follower catching up: silence, not the sound sped up */
+        g_sound.out_r = SOUND_LOAD_ACQUIRE(g_sound.out_w);
+        return;
+    }
     int frames = audio_out_drain(g_web_audio_chunk, WEB_AUDIO_CHUNK_FRAMES, g_web_audio_nudge);
     if (g_web_volume != 1.0f)
         for (int i = 0; i < frames * 2; i++) g_web_audio_chunk[i] *= g_web_volume;
