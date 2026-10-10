@@ -26,7 +26,7 @@
 #include <string.h>
 
 #include "constants.h"
-#include "cop.h"            /* g_cop.geo_capture[] */
+#include "cop.h"            /* g_cop, g_cop_capture[] */
 #include "log.h"
 #include "memory.h"         /* mem_read8 / mem_read32 */
 
