@@ -2020,7 +2020,7 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info) {
     info->geometry.max_width    = VIDEO_WIDTH * LR_MAX_SCALE;
     info->geometry.max_height   = VIDEO_HEIGHT * LR_MAX_SCALE;
     info->geometry.aspect_ratio = LR_ASPECT;
-    info->timing.fps            = (double)EMU_SLICES_PER_SEC;
+    info->timing.fps            = (double)IRQT_CPU_HZ * (double)g_irqt_frame.den / (double)g_irqt_frame.num;
     info->timing.sample_rate    = (double)SOUND_RATE;
 }
 

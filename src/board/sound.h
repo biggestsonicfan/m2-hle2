@@ -1104,15 +1104,16 @@ static inline bool sound_uart_make_room(bool for_game) {
     }
 }
 
-/* One emu slice (1/60 s) of sound, less what was run early inside it, handed
+/* One emu slice (a video frame: num / den samples, 735 / 1 at 60 Hz) of sound,
+ * less what was run early inside it, handed
  * to the sound thread (see above): the samples are there once sound_settle
  * returns, and g_sound.out_due is the clock they end on. The
  * remainder carries from slice to slice and is reset with the board: two
  * boards cold-booted together have to put the same samples in every slice. */
-static inline void sound_run_slice(uint32_t slices_per_sec) {
-    g_sound.slice_frac += SOUND_RATE;
-    uint32_t n = g_sound.slice_frac / slices_per_sec;
-    g_sound.slice_frac -= n * slices_per_sec;
+static inline void sound_run_slice(uint32_t num, uint32_t den) {
+    g_sound.slice_frac += num;
+    uint32_t n = g_sound.slice_frac / den;
+    g_sound.slice_frac -= n * den;
     uint32_t early = (uint32_t)g_sound.ahead < n ? (uint32_t)g_sound.ahead : n;
     g_sound.ahead -= (int32_t)early;
     sound_advance(n - early, true);

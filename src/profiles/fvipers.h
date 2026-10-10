@@ -152,6 +152,7 @@ static inline void fvipers_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
+    irqt_set_frame(IRQT_CPU_HZ, IRQT_VBLANK_HZ);
 
     /* The COP reads its sine/cosine tables straight out of this ROM. */
     g_sharc_copro_rom      = rs->copro_data;

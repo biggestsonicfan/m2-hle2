@@ -578,12 +578,14 @@ static inline void emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t 
 /* ---- The sound board against the board's clock ---------------------------
  *
  * The sound board is charged a frame of samples at each vblank, 735 at
- * 44.1 kHz. Mid-frame it still advances as far as the MIDI conversation needs:
+ * 44.1 kHz and 60 Hz (irqt_frame_samples: a profile may lengthen the frame). Mid-frame it still advances as far as the MIDI conversation needs:
  * sound_uart_make_room runs it early and `ahead` owes those samples back at the
  * edge. What it never does is gain time (SLICE-CLOCKS.md). */
 static inline bool emu_sound_slice_end(bool frame) {
     if (!frame) return false;
-    sound_run_slice(EMU_SLICES_PER_SEC);
+    int64_t num, den;
+    irqt_frame_samples(SOUND_RATE, &num, &den);
+    sound_run_slice((uint32_t)num, (uint32_t)den);
     return true;
 }
 
@@ -1033,18 +1035,19 @@ static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
     emu_nap_us(EMU_IDLE_POLL_US);
 }
 
-/* Pace the board to 60 Hz after a slice that reached its vblank: sleep out to
- * the next 16.67ms tick, measured from work_t1, where the slice's work ended. */
+/* Pace the board to its frame rate (60 Hz unless the profile set another)
+ * after a slice that reached its vblank: sleep out to the next tick, measured
+ * from work_t1, where the slice's work ended. */
 static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
-    int64_t now = emu_now_us();
+    int64_t now = emu_now_us(), slice_us = irqt_frame_us();
     if (ctx->frame_deadline_us == 0) {
-        ctx->frame_deadline_us = now + EMU_SLICE_US;
+        ctx->frame_deadline_us = now + slice_us;
     } else {
-        ctx->frame_deadline_us += EMU_SLICE_US;
+        ctx->frame_deadline_us += slice_us;
         /* Catch-up clamp: if we've fallen >1 frame behind (paused
          * in debugger, heavy host load), reset rather than spin. */
-        if (ctx->frame_deadline_us < now - (int64_t)EMU_SLICE_US) {
-            ctx->frame_deadline_us = now + EMU_SLICE_US;
+        if (ctx->frame_deadline_us < now - slice_us) {
+            ctx->frame_deadline_us = now + slice_us;
         }
     }
     /* M2HLE_UNTHROTTLE=1: no 60 Hz pacing, for automated runs that

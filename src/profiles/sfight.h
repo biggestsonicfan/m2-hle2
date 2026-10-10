@@ -175,6 +175,7 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
+    irqt_set_frame(IRQT_CPU_HZ, IRQT_VBLANK_HZ);   /* 60 Hz; sfight_rng.h sets the board's */
 
     /* The COP reads its sine/cosine tables straight out of this ROM. */
     g_sharc_copro_rom      = rs->copro_data;

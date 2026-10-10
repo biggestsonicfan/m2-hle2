@@ -18,6 +18,7 @@
  * profiles are there, since each is its own lobby space. */
 #ifndef M2HLE_WEB
 #include "fvipers.h"
+#include "sfight_rng.h"
 #include "m2snake.h"
 #include "sfight_homebrew.h"
 #endif
@@ -29,6 +30,7 @@ const game_profile_t *const g_profiles[] = {
     &sfight_console_profile,
     &sfight_profile,
 #ifndef M2HLE_WEB
+    &sfight_rng_profile,
     &fvipers_profile,
     &m2snake_profile,
     &sfight_homebrew_profile,

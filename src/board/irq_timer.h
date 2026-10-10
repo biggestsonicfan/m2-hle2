@@ -49,9 +49,9 @@ typedef struct {
     int64_t  horizon;
 
     /* The vblank, on the same clock: where the i960 is in the current video
-     * frame, in 1/IRQT_VBLANK_HZ-ths of a cycle (a frame is IRQT_CPU_HZ of
-     * them, so 25e6/60 cycles come out exact over any number of frames), and
-     * the vblanks since reset. */
+     * frame, in 1/g_irqt_frame.den-ths of a cycle (a frame is
+     * g_irqt_frame.num of them, so 25e6/60 cycles come out exact over any
+     * number of frames), and the vblanks since reset. */
     int64_t  vbl_phase;
     uint64_t vbl_count;
 } irq_timer_t;
@@ -63,6 +63,14 @@ typedef struct {
 #define IRQT_VBLANK_HZ 60
 
 static irq_timer_t g_irqt = {0};
+
+/* The frame's length in cycles, num / den. A profile picks it at install and
+ * a board reset keeps it; it is not in irq_timer_t, so a savestate's layout
+ * does not depend on it. sfight_rng sets the board's own frame, 16 MHz /
+ * (656 x 424) = 57.5241 Hz, 434,600 cycles (Pinboard #603/#604: a real
+ * Model 2B measures 434,557 +- 71). */
+typedef struct { int64_t num, den; } irqt_frame_t;
+static irqt_frame_t g_irqt_frame = { IRQT_CPU_HZ, IRQT_VBLANK_HZ };
 
 /* ---- IRQ controller register access (called from memory.h) -------------- */
 
@@ -102,8 +110,8 @@ static volatile int g_irqt_vblank = 0;
 
 /* Cycles from now to the next vblank. */
 static inline int64_t irqt__vbl_left(void) {
-    int64_t per = (int64_t)IRQT_VBLANK_HZ;
-    return ((int64_t)IRQT_CPU_HZ - g_irqt.vbl_phase + per - 1) / per;
+    int64_t per = g_irqt_frame.den;
+    return (g_irqt_frame.num - g_irqt.vbl_phase + per - 1) / per;
 }
 
 static inline void irqt__horizon(void) {
@@ -128,9 +136,9 @@ static inline void irqt_tick(int64_t cycles) {
     }
     /* MAME screen_vblank: the line is raised only while it is enabled. No
      * instruction costs more than a frame, so one tick crosses at most one. */
-    g_irqt.vbl_phase += cycles * IRQT_VBLANK_HZ;
-    if (g_irqt.vbl_phase >= IRQT_CPU_HZ) {
-        g_irqt.vbl_phase -= IRQT_CPU_HZ;
+    g_irqt.vbl_phase += cycles * g_irqt_frame.den;
+    if (g_irqt.vbl_phase >= g_irqt_frame.num) {
+        g_irqt.vbl_phase -= g_irqt_frame.num;
         g_irqt.vbl_count++;
         if (g_irqt.intena & 1u) g_irqt.intreq |= 1u;
         g_irqt_vblank = 1;
@@ -176,6 +184,30 @@ static inline int irqt_pending_pin(void) {
     if (act & 0x03FCu) return 2;   /* board timers (bits 2..9) */
     if (act & 0x0C00u) return 3;   /* sound UART (bits 10..11) */
     return -1;
+}
+
+/* Set the frame to num / den cycles (60 Hz: IRQT_CPU_HZ, IRQT_VBLANK_HZ).
+ * vbl_phase is in 1/den-ths of a cycle, so the frame starts again. */
+static inline void irqt_set_frame(int64_t num, int64_t den) {
+    g_irqt_frame.num = num;
+    g_irqt_frame.den = den;
+    g_irqt.vbl_phase = 0;
+    irqt__horizon();
+}
+
+/* A frame in host microseconds, rounded down (60 Hz: 16,666). */
+static inline int64_t irqt_frame_us(void) {
+    return 1000000ll * g_irqt_frame.num / ((int64_t)IRQT_CPU_HZ * g_irqt_frame.den);
+}
+
+/* A frame in sound samples at `rate`, as a fraction *num / *den in lowest terms
+ * (60 Hz at 44,100: 735 / 1). */
+static inline void irqt_frame_samples(int64_t rate, int64_t *num, int64_t *den) {
+    int64_t a = rate * g_irqt_frame.num, b = (int64_t)IRQT_CPU_HZ * g_irqt_frame.den;
+    int64_t x = a, y = b;
+    while (y) { int64_t t = x % y; x = y; y = t; }
+    *num = a / x;
+    *den = b / x;
 }
 
 static inline void irqt_reset(void) {

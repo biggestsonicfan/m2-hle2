@@ -194,7 +194,7 @@ int main(void) {
         CHECK(g_sound.ahead > ahead0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
               g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
               "backpressure: the poll's samples are run early too, within the slice");
-        sound_run_slice(60);
+        sound_run_slice(735, 1);
         CHECK(g_sound.ahead == 0 && g_sound.out_due == t0 + 735,
               "backpressure: the frame clock knows where the slice ends before it has run");
         sound_settle();   /* the rest of the slice ran on the sound thread */
@@ -204,7 +204,7 @@ int main(void) {
               g_sound.scsp.mi_drops == 2,
               "backpressure: the line carried all 33 in the slice; the ring took 31 and dropped two");
         CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "backpressure: TxRDY and TxEMPTY are up again");
-        sound_run_slice(60);
+        sound_run_slice(735, 1);
         sound_settle();
         CHECK(g_sound.out_total == t0 + 1470, "backpressure: the next slice is a whole one");
         sound_reset();
@@ -224,7 +224,7 @@ int main(void) {
             for (int sl = 0; sl < 12; sl++) {
                 for (int b = 0; b < 3 + sl % 5; b++) mem_write8(&bus, MIDI_BASE, (uint8_t)(0x90 + sl + b));
                 (void)mem_read8(&bus, MIDI_BASE + 4);
-                sound_run_slice(60);
+                sound_run_slice(735, 1);
             }
             sound_settle();
             uint64_t h = 0xcbf29ce484222325ull;
