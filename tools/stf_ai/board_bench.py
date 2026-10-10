@@ -6,8 +6,9 @@ cycles m2-hle2's i960 table charges for it.
 
   board_bench.py [--capture CAPTURE] [--trace TRACE]
 
-Packet, after the 28-byte RNG packet: 5A A6, slot, then TIMER_04 before the
-bench less TIMER_04 after it (3 bytes, little-endian). Slot = frame_counter
+Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
+(3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
+packet (5A A5 ...); from 03e8189 (Pinboard #610) it is all the probe sends. Slot = frame_counter
 & 63 (& 31 before the probe had 32 benches; the first 16 did not change):
 bench slot >> 1, run n times for an even slot and 2n for an odd one.
 The two sizes share every fixed cost, so (count at 2n - count at n) / n is one
