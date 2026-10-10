@@ -90,6 +90,7 @@
 #include "sound.h"
 #include "input.h"
 #include "registry.h"
+#include "sfight_ai_trace.h"
 
 static memory_bus_t     bus;
 static i960_cpu_t       cpu;
@@ -490,6 +491,9 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (!strcmp(argv[i], "--ai-trace") && i + 1 < argc) {
+            if (sfight_ai_trace_open(argv[++i]) != 0) { fprintf(stderr, "--ai-trace: cannot write %s\n", argv[i]); return 2; }
+        }
         else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
         else if (!strcmp(argv[i], "--follow-out")   && i + 1 < argc) follow_out = argv[++i];
         else if (!strcmp(argv[i], "--follow-every") && i + 1 < argc) follow_every = (uint32_t)atoi(argv[++i]);
@@ -608,6 +612,7 @@ int main(int argc, char **argv) {
             pokes[p].n = 0;
         }
         if (follow_in && !follow_next_ready(&emu)) break;
+        sfight_ai_trace_frame(&bus, g_emu_frames);
         if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
         else                                              emu_slice_body(&emu);
         emu_slice_result_t r = emu_slice_finish(&emu);
@@ -673,6 +678,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
+    sfight_ai_trace_close();
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
             (unsigned long long)slices, (unsigned long long)emu.total_steps);
     sound_settle();
