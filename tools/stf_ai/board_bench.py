@@ -9,13 +9,15 @@ cycles m2-hle2's i960 table charges for it.
 Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
 (3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
 packet (5A A5 ...); from 03e8189 (Pinboard #610) it is all the probe sends. Slot = frame_counter
-& 63 (& 31 before the probe had 32 benches; the first 16 did not change):
+& 127 from Pinboard #611's second probe (& 63 with 32 benches, & 31 with 16;
+the benches already there never changed):
 bench slot >> 1, run n times for an even slot and 2n for an odd one.
 The two sizes share every fixed cost, so (count at 2n - count at n) / n is one
 turn of the loop alone, and count at n - n x turn is what is left over: the
 second timer read, the loop's entry and exit, and the first pass's cache
 misses. In m2-hle2 a count is exactly 4 + n x the table's turn (5 for the
-jumps, which branch into their aligned loop after the first read).
+jumps and the cache-way benches, which branch into their aligned loop after
+the first read).
 """
 import argparse
 import os
@@ -59,12 +61,45 @@ BENCHES = (
     ('buf stq', 32, 15, '2 stq to bufferram 0x91FF00 (what is there)'),
     ('tile stq', 8, 15, '2 stq to tile RAM 0x100E000 (what is there)'),
     ('none', 8, 0, 'the two timer reads alone, again'),
+    ('drom ld', 32, 37, '8 ld from data ROM 0x20E0000, in order'),
+    ('drom2 ld', 32, 37, '8 ld from data ROM 0x2CE0000, in order'),
+    ('drom far', 32, 37, '8 ld from data ROM 512 bytes apart'),
+    ('drom 4k', 32, 37, '8 ld from data ROM 4 KB apart'),
+    ('drom ldob', 32, 37, '8 ldob from data ROM'),
+    ('drom ldq', 64, 19, '2 ldq from data ROM'),
+    ('drom use', 48, 25, '4 x (ld from data ROM, then addo of it)'),
+    ('rom far', 32, 37, '8 ld from program ROM 512 bytes apart'),
+    ('geo ld', 16, 37, '8 ld of the GEO read pointer 0x803008'),
+    ('tile far', 32, 37, '8 ld from tile RAM 512 bytes apart'),
+    ('ram 4k', 32, 37, '8 ld from work RAM 4 KB apart'),
+    ('ram ldl', 64, 25, '4 ldl from work RAM'),
+    ('ram ldt', 64, 29, '4 ldt from work RAM'),
+    ('ram stl', 64, 17, '4 stl to the stack'),
+    ('ram stt', 64, 13, '2 stt to the stack'),
+    ('ram ldos', 32, 37, '8 ldos from work RAM'),
+    ('ld idx', 32, 37, '8 ld (r6)[r9*4] from work RAM'),
+    ('ld abs', 32, 37, '8 ld from absolute work RAM addresses (2 words each)'),
+    ('st+ld', 32, 29, '4 x (st to the stack, ld it straight back)'),
+    ('ram/drom', 32, 37, '8 ld from work RAM and data ROM in turn'),
+    ('assoc', 32, 66, '2 x 128 bytes of code 512 apart (one set if direct-mapped)'),
+    ('assoc ctl', 32, 66, 'the same 256 apart'),
+    ('assoc 3', 32, 98, '3 x 128 bytes of code 512 apart'),
+    ('jump mid', 4, 36, 'the jumps to the third word of each line'),
+    ('cobr nt', 32, 37, '8 cmpobe not taken'),
+    ('bcc t', 64, 13, '4 x (cmpo, be taken)'),
+    ('bcc nt', 64, 13, '4 x (cmpo, bne not taken)'),
+    ('buf far', 32, 37, '8 ld from bufferram 0x900000 512 bytes apart'),
+    ('drom 16', 32, 37, '8 ld from data ROM 16 bytes apart (a line each)'),
+    ('ram 16', 32, 37, '8 ld from work RAM 16 bytes apart'),
+    ('none', 8, 0, 'the two timer reads alone, a third time'),
+    ('reg', 64, 12, 'the reg bench again'),
 )
 
 
 # Benches that branch into their aligned loop between the two timer reads
 # count one cycle more in m2-hle2.
-ENTRY_B = ('jump', 'jump end', 'jump in')
+ENTRY_B = ('jump', 'jump end', 'jump in', 'assoc', 'assoc ctl', 'assoc 3',
+           'jump mid')
 
 
 def bench_packets(stream):
