@@ -26,6 +26,10 @@ except ImportError:
 
 PACKET = b'\x5a\xa6'
 PACKET_LEN = 6
+# The owner's adapter puts 0x07 before every byte (ai_trace.capture_bytes drops
+# it); the live count looks for the packet both ways.
+PACKET_07 = b'\x5a\x07\xa6'
+PACKET_07_LEN = 12
 
 
 def default_out():
@@ -75,12 +79,17 @@ class Counter:
         i = 0
         while True:
             j = buf.find(PACKET, i)
-            if j < 0 or j + PACKET_LEN > len(buf):
+            k = buf.find(PACKET_07, i)
+            if k >= 0 and (j < 0 or k < j):
+                j, size, slot_at = k, PACKET_07_LEN, k + 4
+            else:
+                size, slot_at = PACKET_LEN, j + 2
+            if j < 0 or j + size > len(buf):
                 break
             self.packets += 1
-            self.last_slot = buf[j + 2]
-            i = j + PACKET_LEN
-        self.tail = buf[max(i, len(buf) - PACKET_LEN + 1):]
+            self.last_slot = buf[slot_at]
+            i = j + size
+        self.tail = buf[max(i, len(buf) - PACKET_07_LEN + 1):]
 
 
 def capture(ser, out, seconds):
