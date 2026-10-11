@@ -4,7 +4,7 @@
 ROM, or both, and say what each benchmark costs in timer counts against the
 cycles m2-hle2's i960 table charges for it.
 
-  board_bench.py [--capture CAPTURE] [--trace TRACE]
+  board_bench.py [--probe 611|613] [--capture CAPTURE] [--trace TRACE]
 
 Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
 (3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
@@ -18,6 +18,12 @@ second timer read, the loop's entry and exit, and the first pass's cache
 misses. In m2-hle2 a count is exactly 4 + n x the table's turn (5 for the
 jumps and the cache-way benches, which branch into their aligned loop after
 the first read).
+
+--probe 613 reads Pinboard #613's probe instead: eight benches, slot =
+frame_counter & 15 (PROBE_613). Its COP benches run once and twice, and its
+tile benches only on frames whose TIMER_03 says the store lands in the
+active picture or in the vblank; a frame that fails its bench's gate sends
+nothing. Benches that share a name are pooled.
 """
 import argparse
 import os
@@ -96,50 +102,73 @@ BENCHES = (
 )
 
 
+# Pinboard #613: the fight frame's COP round trips, TIMER_02's GEO stores and
+# tile RAM in and out of the vblank, with two controls.
+PROBE_613 = (
+    ('reg', 64, 12, '7 addo + subo + cmpobne, in the instruction cache'),
+    ('ram st', 64, 21, '8 st to the stack, in order'),
+    ('cop 70', 1, 112, 'Fn_area_coli round trip: 6 st, 22 ld, use the last'),
+    ('cop 3b', 1, 40, 'Fn_calc_coli_flag round trip: 8 st, 4 ld, use the last'),
+    ('geo wb', 8, 29, '4 x (ld 0x802008, st 0x801008): the GEO write pointer'),
+    ('tile act', 8, 21, '8 st to tile RAM 0x100E000, 45,000+ counts past vblank'),
+    ('tile vbl', 8, 21, 'the same inside the vblank (< 24,000 counts)'),
+    ('tile vbl', 8, 21, 'the same, its second pair of slots'),
+)
+PROBES = {611: BENCHES, 613: PROBE_613}
+
+
 # Benches that branch into their aligned loop between the two timer reads
 # count one cycle more in m2-hle2.
 ENTRY_B = ('jump', 'jump end', 'jump in', 'assoc', 'assoc ctl', 'assoc 3',
            'jump mid')
 
 
-def bench_packets(stream):
+def bench_packets(stream, benches=BENCHES):
     """Yield (slot, count) for every 5A A6 packet in the byte stream."""
     i = 0
     while i + 6 <= len(stream):
         if stream[i] == 0x5A and stream[i + 1] == 0xA5:
             i += A.PKT_LEN
-        elif stream[i] == 0x5A and stream[i + 1] == 0xA6 and stream[i + 2] < 2 * len(BENCHES):
+        elif stream[i] == 0x5A and stream[i + 1] == 0xA6 and stream[i + 2] < 2 * len(benches):
             yield stream[i + 2], stream[i + 3] | stream[i + 4] << 8 | stream[i + 5] << 16
             i += 6
         else:
             i += 1
 
 
-def by_slot(stream):
+def by_slot(stream, benches=BENCHES):
     res = {}
-    for slot, count in bench_packets(stream):
+    for slot, count in bench_packets(stream, benches):
         res.setdefault(slot, []).append(count)
     return res
 
 
-def fit(slots, b):
-    """Median count at n and 2n, the turn and the rest, for bench b."""
-    lo, hi = slots.get(2 * b), slots.get(2 * b + 1)
+def pooled(slots, benches):
+    """(name, n, cycles, counts at n, counts at 2n) for each bench name."""
+    out = {}
+    for b, (bn, n, cyc, _) in enumerate(benches):
+        row = out.setdefault(bn, (bn, n, cyc, [], []))
+        row[3].extend(slots.get(2 * b, ()))
+        row[4].extend(slots.get(2 * b + 1, ()))
+    return list(out.values())
+
+
+def fit(n, lo, hi):
+    """Median count at n and 2n, the turn and the rest."""
     if not lo or not hi:
         return None
-    n = BENCHES[b][1]
     m1, m2 = statistics.median(lo), statistics.median(hi)
     turn = (m2 - m1) / n
     spread = max(max(lo) - min(lo), max(hi) - min(hi))
     return m1, m2, turn, m1 - n * turn, spread, len(lo) + len(hi)
 
 
-def report(name, slots, out=sys.stdout):
+def report(name, slots, benches=BENCHES, out=sys.stdout):
     print(f'{name}: {sum(len(v) for v in slots.values())} bench packets', file=out)
     print(f'  {"bench":9} {"n":>4} {"table":>5} {"at n":>9} {"at 2n":>9} {"turn":>9}'
           f' {"x table":>7} {"rest":>7} {"spread":>6} {"pkts":>5}', file=out)
-    for b, (bn, n, cyc, _) in enumerate(BENCHES):
-        f = fit(slots, b)
+    for bn, n, cyc, lo, hi in pooled(slots, benches):
+        f = fit(n, lo, hi)
         if f is None:
             print(f'  {bn:9} {n:4d} {cyc:5d}  (no packets at both sizes)', file=out)
             continue
@@ -149,11 +178,11 @@ def report(name, slots, out=sys.stdout):
               f' {rest:7.1f} {spread:6d} {k:5d}', file=out)
 
 
-def check_trace(slots, out=sys.stdout):
+def check_trace(slots, benches=BENCHES, out=sys.stdout):
     """m2-hle2 must count exactly 4 + n x table (+ 1 for ENTRY_B) for every packet."""
     bad = 0
     for slot, counts in sorted(slots.items()):
-        bn, n, cyc, _ = BENCHES[slot >> 1]
+        bn, n, cyc, _ = benches[slot >> 1]
         want = 4 + (n << (slot & 1)) * cyc + (bn in ENTRY_B)
         for c in counts:
             if c != want:
@@ -169,18 +198,21 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--capture', help="raw byte capture off a board's RS-422 link")
     ap.add_argument('--trace', help='det_digest --ai-trace of the rng-bench build')
+    ap.add_argument('--probe', type=int, choices=sorted(PROBES), default=611,
+                    help="which probe ROM's bench table (default 611)")
     a = ap.parse_args()
+    benches = PROBES[a.probe]
     if not a.capture and not a.trace:
         ap.error('give --capture, --trace or both')
     ok = True
     if a.trace:
         ev = A.parse(a.trace)
-        slots = by_slot([v[0] for k, _, v in ev if k == 'T'])
-        report('m2-hle2', slots)
-        ok = check_trace(slots)
+        slots = by_slot([v[0] for k, _, v in ev if k == 'T'], benches)
+        report('m2-hle2', slots, benches)
+        ok = check_trace(slots, benches)
     if a.capture:
-        report('board', by_slot(A.capture_bytes(a.capture)))
-    for b, (bn, _, _, what) in enumerate(BENCHES):
+        report('board', by_slot(A.capture_bytes(a.capture), benches), benches)
+    for b, (bn, _, _, what) in enumerate(benches):
         print(f'  {b:2d} {bn:9} {what}')
     return 0 if ok else 1
 
