@@ -4,7 +4,7 @@
 ROM, or both, and say what each benchmark costs in timer counts against the
 cycles m2-hle2's i960 table charges for it.
 
-  board_bench.py [--probe 611|613] [--capture CAPTURE] [--trace TRACE]
+  board_bench.py [--probe 611|613|634|656|670] [--capture CAPTURE] [--trace TRACE]
 
 Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
 (3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
@@ -27,6 +27,11 @@ nothing. Benches that share a name are pooled.
 
 --probe 656 is #634's probe with bench 4 reading 0x802008 only (no GEO
 stores).
+
+--probe 670 is the same table: the COP benches' TIMER_03 limit went from
+300,000 to 385,000 counts, because the board's attract fight reaches the
+probe 370,000-420,000 counts past the vblank and the 656 capture had no COP
+packets.
 
 --probe 634 is the same table on Pinboard #634's build of that probe, which
 sends a packet's head (5A A6 slot) before its bench and the count after it,
@@ -128,7 +133,8 @@ PROBE_613 = (
 PROBE_656 = PROBE_613[:4] + (
     ('geo rd', 8, 21, '4 x ld 0x802008: the GEO write position, nothing stored'),
 ) + PROBE_613[5:]
-PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656}
+PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656,
+          670: PROBE_656}
 
 
 # Benches that branch into their aligned loop between the two timer reads
