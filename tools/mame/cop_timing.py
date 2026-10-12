@@ -97,18 +97,25 @@ class I960Walk:
 
 
 def walk(recs):
-    """i960 events, SHARC events (kind, t, op, extra) and frames, in order."""
+    """i960 events, SHARC events (kind, t, op, extra), frames, and the geometry
+    SHARC's (list, polygon ROM) reads since the previous command word, one per
+    command word."""
     cpu = I960Walk()
-    sh, frames = [], []
+    sh, frames, geo = [], [], []
+    gl = gp = 0
     in_q = out_q = 0
     halted = False
     op = None
     for kind, t, w, x in recs:
         if kind == 6:
             frames.append((t, w, x >> 8))
+        elif kind == 7:
+            gl, gp = gl + w, gp + x
         elif kind in (1, 2):
             if kind == 1:
                 op = w & 0xff
+                geo.append((gl, gp))
+                gl = gp = 0
             sh.append((kind, t, op, x))
             in_q -= 1
             if halted:
@@ -122,7 +129,7 @@ def walk(recs):
             if kind == 4:
                 in_q += 1
                 halted = in_q > FIFO_DEPTH
-    return cpu.ev, sh, frames
+    return cpu.ev, sh, frames, geo
 
 
 def write_shift(recs):
@@ -239,15 +246,18 @@ def mame_waits(i9, sh):
     return per_frame, per_op
 
 
-def commands(sh, work, lo, hi):
-    """Per command: op, input and output times, SHARC busy, bufferram words."""
-    cmds, cur = [], None
+def commands(sh, work, geo, lo, hi):
+    """Per command: op, input and output times, SHARC busy, bufferram words,
+    and the geometry SHARC's display-list reads while it ran."""
+    cmds, cur, n = [], None, 0
     for (kind, t, op, x), wk in zip(sh, work):
         if kind == 1:
             if cur is not None:
                 cur['busy'] += wk       # the handler ran until the SHARC read this
                 cur['bufr'], cur['bufw'] = x >> 16, x & 0xffff
+                cur['geol'] = geo[n][0] if n < len(geo) else 0
                 cmds.append(cur)
+            n += 1
             cur = {'op': op, 't': t, 'ins': [t], 'outs': [], 'busy': 0.0}
             continue
         if cur is None:
@@ -268,13 +278,14 @@ def per_op_table(cmds, names, nframes, waits):
         by[c['op']].append(c)
     head = ' '.join(f'{lbl:>9}' for lbl, _ in waits)
     print(f'{"op":>4} {"name":<26} {"calls/fr":>8} {"in":>3} {"out":>3} {"busy":>6} {"reply":>6} '
-          f'{"bufr":>5} {"bufw":>5} {head}')
+          f'{"bufr":>5} {"bufw":>5} {"geo":>5} {head}')
     for op, cs in sorted(by.items(), key=lambda kv: -sum(c['busy'] for c in kv[1])):
         reply = med([c['outs'][-1] - c['ins'][-1] for c in cs if c['outs']])
         ws = ' '.join(f'{w.get(op, 0.0) / nframes:9.0f}' for _, w in waits)
         print(f'{op:#04x} {names.get(op, "?")[:26]:<26} {len(cs) / nframes:8.2f} {len(cs[0]["ins"]) - 1:3d} '
               f'{len(cs[0]["outs"]):3d} {med([c["busy"] for c in cs]):6.0f} {reply or 0:6.0f} '
-              f'{med([c["bufr"] for c in cs]):5d} {med([c["bufw"] for c in cs]):5d} {ws}')
+              f'{med([c["bufr"] for c in cs]):5d} {med([c["bufw"] for c in cs]):5d} '
+              f'{sum(c["geol"] for c in cs) / len(cs):5.1f} {ws}')
 
 
 def floats(text):
@@ -333,6 +344,26 @@ def wait_summary(waits, frames, keep):
                                                for _, (pf, pop) in waits))
 
 
+def geo_frames(recs, frames, keep):
+    """The geometry SHARC's display-list and polygon ROM words a frame."""
+    starts = [fr[0] for fr in frames]
+    rows = defaultdict(lambda: [0, 0])
+    for kind, t, w, x in recs:
+        if kind == 7:
+            r = rows[bisect.bisect_right(starts, t) - 1]
+            r[0] += w
+            r[1] += x
+    if not rows:
+        print('no geometry SHARC records (a capture from before record 7)')
+        return
+    modes = defaultdict(list)
+    for f in keep:
+        modes[frames[f][2]].append(rows[f])
+    print('geometry SHARC a frame (median): display-list words, polygon ROM words')
+    for sub, rs in sorted(modes.items()):
+        print(f'{sub:#5x} {len(rs):6d} {med([r[0] for r in rs]):8d} {med([r[1] for r in rs]):8d}')
+
+
 def kept_frames(a, frames):
     def wanted(sub):
         return not (a.fight and sub != 0x0A) and not (a.not_fight and sub == 0x0A)
@@ -352,14 +383,14 @@ def print_per_frame(waits, frames, keep):
 def main():
     a = parse_args()
     recs = load(a.capture)
-    i9, sh, frames = walk(recs)
+    i9, sh, frames, geo = walk(recs)
     shift = write_shift(recs)
     work = sharc_work(recs, sh, shift)
     keep = kept_frames(a, frames)
     waits = all_waits(a, i9, sh, work, shift)
     sel = set(keep)
     starts = [fr[0] for fr in frames]
-    cmds = [c for c in commands(sh, work, starts[0], starts[-1])
+    cmds = [c for c in commands(sh, work, geo, starts[0], starts[-1])
             if bisect.bisect_right(starts, c['t']) - 1 in sel]
     print(f'{len(keep)} frames (fc {frames[keep[0]][1]:#x}..{frames[keep[-1]][1]:#x}), {len(cmds)} commands, '
           f'shift {shift}')
@@ -369,6 +400,7 @@ def main():
     print(f'MAME i960 work between COP accesses: median {med([work_fr[f] for f in keep]):.0f} a frame')
     per_op_table(cmds, op_names(a.cpres1), len(keep), op_totals(waits, sel))
     wait_summary(waits, frames, keep)
+    geo_frames(recs, frames, keep)
     if a.per_frame:
         print_per_frame(waits, frames, keep)
 

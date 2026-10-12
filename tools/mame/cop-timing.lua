@@ -15,8 +15,18 @@
 --      (i960_stall), so a wait shows as a run of reads from one address
 --   6  a frame edge; word = the game's frame counter (0x500020), extra =
 --      also_sub_mode (0x500031) << 8 | screen frame & 0xff
+--   7  the geometry SHARC's reads since the last record 7, written before each
+--      record 1 and 6 when there are any: word = display-list words (its
+--      bufferram FIFO, 0x400000), extra = polygon ROM words (0x800000)
 --
---   SDL_VIDEODRIVER=dummy shared sfight -rompath <dir> -nodrc -video none \
+-- Run it with the geometry SHARC drawing (M2_HLE_GEO_OFF=1 turns off MAME's
+-- HLE geo_parse; the shared build's cpres2 SHARC runs either way). Nothing in
+-- MAME ties it to the i960 or the COP, so the other records come out the same
+-- with it on or off. In a fight it mostly sits in cpres2's error loop
+-- (_L2014B: a command word whose three opcode copies differ), so record 7 is
+-- zero there.
+--
+--   M2_HLE_GEO_OFF=1 SDL_VIDEODRIVER=dummy shared sfight -rompath <dir> -nodrc -video none \
 --     -sound none -nothrottle -skip_gameinfo -autoboot_script cop-timing.lua
 -- with $COP_TIMING_OUT (file, default /dev/shm/cop-timing.bin) and
 -- $COP_TIMING_FROM / $COP_TIMING_TO (game frame counter, default 0x900-0xD00).
@@ -29,11 +39,16 @@ local state = "armed"
 local taps, f
 local buf, nb = {}, 0
 local bufr, bufw = 0, 0
+local geol, geop = 0, 0
 
 local function rec(kind, word, extra)
     nb = nb + 1
     buf[nb] = pack("<BdI4I4", kind, manager.machine.time:as_double() * CLK, word & 0xffffffff, extra)
     if nb == 8192 then f:write(table.concat(buf)); buf = {}; nb = 0 end
+end
+
+local function geo_flush()
+    if geol + geop > 0 then rec(7, geol, geop); geol, geop = 0, 0 end
 end
 
 local function start()
@@ -42,9 +57,11 @@ local function start()
     local cop = manager.machine.devices[":copro_adsp"].spaces["data"]
     local pcst = manager.machine.devices[":copro_adsp"].state["PC"]
     local ipst = manager.machine.devices[":maincpu"].state["pip"]
+    local geo = manager.machine.devices[":geo_adsp"].spaces["data"]
     taps = {
         cop:install_read_tap(0x0400000, 0x0bfffff, "ctin", function(offset, data, mask)
             if pcst.value == 0x20141 then
+                geo_flush()
                 rec(1, data, (bufr << 16) | (bufw & 0xffff)); bufr, bufw = 0, 0
             else
                 rec(2, data, 0)
@@ -53,6 +70,8 @@ local function start()
         cop:install_write_tap(0x0c00000, 0x13fffff, "ctout", function(offset, data, mask) rec(3, data, 0) end),
         cop:install_read_tap(0x1400000, 0x1bfffff, "ctbr", function(offset, data, mask) bufr = bufr + 1; return data end),
         cop:install_write_tap(0x1400000, 0x1bfffff, "ctbw", function(offset, data, mask) bufw = bufw + 1 end),
+        geo:install_read_tap(0x0400000, 0x0407fff, "gtl", function(offset, data, mask) geol = geol + 1; return data end),
+        geo:install_read_tap(0x0800000, 0x0ffffff, "gtp", function(offset, data, mask) geop = geop + 1; return data end),
         i960:install_write_tap(0x884000, 0x887fff, "ctw", function(offset, data, mask) rec(4, data, ipst.value) end),
         i960:install_read_tap(0x884000, 0x887fff, "ctr", function(offset, data, mask) rec(5, data, ipst.value); return data end),
     }
@@ -78,6 +97,7 @@ local function tick()
     local fc = sp:read_u32(0x500020)
     if state == "armed" and fc >= from_f and fc < to_f then start(); print("cop-timing: on at fc " .. fc) end
     if state == "on" then
+        geo_flush()
         rec(6, fc, (sp:read_u8(0x500031) << 8) | (scr:frame_number() & 0xff))
         if fc >= to_f then stop() end
     end
