@@ -24,6 +24,11 @@ frame_counter & 15 (PROBE_613). Its COP benches run once and twice, and its
 tile benches only on frames whose TIMER_03 says the store lands in the
 active picture or in the vblank; a frame that fails its bench's gate sends
 nothing. Benches that share a name are pooled.
+
+--probe 634 is the same table on Pinboard #634's build of that probe, which
+sends a packet's head (5A A6 slot) before its bench and the count after it,
+and runs the COP benches only in a fight. A capture that ends on a head
+with no count stopped inside that bench, and the report says which.
 """
 import argparse
 import os
@@ -114,7 +119,7 @@ PROBE_613 = (
     ('tile vbl', 8, 21, 'the same inside the vblank (< 24,000 counts)'),
     ('tile vbl', 8, 21, 'the same, its second pair of slots'),
 )
-PROBES = {611: BENCHES, 613: PROBE_613}
+PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613}
 
 
 # Benches that branch into their aligned loop between the two timer reads
@@ -134,6 +139,14 @@ def bench_packets(stream, benches=BENCHES):
             i += 6
         else:
             i += 1
+
+
+def trailing_head(stream, benches=BENCHES):
+    """The slot of a 5A A6 head the stream ends on with no full count, else None."""
+    for i in range(max(0, len(stream) - 5), len(stream) - 2):
+        if stream[i] == 0x5A and stream[i + 1] == 0xA6 and stream[i + 2] < 2 * len(benches):
+            return stream[i + 2]
+    return None
 
 
 def by_slot(stream, benches=BENCHES):
@@ -211,7 +224,12 @@ def main():
         report('m2-hle2', slots, benches)
         ok = check_trace(slots, benches)
     if a.capture:
-        report('board', by_slot(A.capture_bytes(a.capture), benches), benches)
+        cap = A.capture_bytes(a.capture)
+        report('board', by_slot(cap, benches), benches)
+        slot = trailing_head(cap, benches)
+        if slot is not None:
+            print(f'  the board stopped inside slot {slot} ({benches[slot >> 1][0]}):'
+                  ' its head went out and its count never did')
     for b, (bn, _, _, what) in enumerate(benches):
         print(f'  {b:2d} {bn:9} {what}')
     return 0 if ok else 1
