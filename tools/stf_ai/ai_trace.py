@@ -87,10 +87,13 @@ def solve(ev, out=sys.stdout):
 
 def capture_bytes(path):
     """A board capture: raw bytes as read off the link. The m2-sdk sends each
-    byte as 07 xx; strip the strobes if every other byte is one."""
+    byte as 07 xx; strip the strobes if every other byte is one. A capture
+    can open on a stray byte (the 670 capture's first byte is 00), so the
+    strobes are looked for at both phases."""
     data = open(path, 'rb').read()
-    if len(data) >= 4 and all(b == 0x07 for b in data[0::2][:64]):
-        data = data[1::2]
+    for phase in (0, 1):
+        if len(data) >= 4 + phase and all(b == 0x07 for b in data[phase::2][:64]):
+            return list(data[phase + 1::2])
     return list(data)
 
 
