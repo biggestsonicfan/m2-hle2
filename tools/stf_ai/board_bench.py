@@ -25,6 +25,9 @@ tile benches only on frames whose TIMER_03 says the store lands in the
 active picture or in the vblank; a frame that fails its bench's gate sends
 nothing. Benches that share a name are pooled.
 
+--probe 656 is #634's probe with bench 4 reading 0x802008 only (no GEO
+stores).
+
 --probe 634 is the same table on Pinboard #634's build of that probe, which
 sends a packet's head (5A A6 slot) before its bench and the count after it,
 and runs the COP benches only in a fight. A capture that ends on a head
@@ -119,7 +122,13 @@ PROBE_613 = (
     ('tile vbl', 8, 21, 'the same inside the vblank (< 24,000 counts)'),
     ('tile vbl', 8, 21, 'the same, its second pair of slots'),
 )
-PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613}
+# Pinboard #656: bench 4 only reads the GEO's write position. On the board
+# 0x802008 is where the GEO has got to, not the start register MAME answers,
+# so #613's write-back moved the next list's start and the board stopped.
+PROBE_656 = PROBE_613[:4] + (
+    ('geo rd', 8, 21, '4 x ld 0x802008: the GEO write position, nothing stored'),
+) + PROBE_613[5:]
+PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656}
 
 
 # Benches that branch into their aligned loop between the two timer reads
