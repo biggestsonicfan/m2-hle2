@@ -777,6 +777,7 @@ static void mcp_cmd_get_cop_diagnostics(char *resp, int cap) {
 
     APPEND("{\"ok\":true,"
            "\"writes\":%u,\"reads\":%u,\"upload_words\":%u,"
+           "\"cop_timing\":%s,\"stall_cycles\":%llu,"
            "\"transforms\":%u,\"matrix_reads\":%u,"
            "\"unknown_cmds\":%u,\"unknown_unique\":%d,"
            "\"break_on_unknown\":%s,\"unknown_triggered\":%s,"
@@ -795,6 +796,7 @@ static void mcp_cmd_get_cop_diagnostics(char *resp, int cap) {
            "},"
            "\"unknown_log\":[",
            g_cop.writes, g_cop.reads, g_cop.upload_words,
+           cop_timing_on() ? "true" : "false", (unsigned long long)g_cop.tm.stall,
            g_sharc.transform_count, g_sharc.matrix_read_count,
            g_sharc.unknown_cmds, g_sharc.unknown_log_count,
            g_sharc.break_on_unknown  ? "true" : "false",

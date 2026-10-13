@@ -157,8 +157,13 @@ typedef struct {
 
 static zanzou_stream_t g_zz = { 4, 0, 0, 0, 0, 0, 0, { 0, 0, 0 }, 0 };
 
+/* The parts and copies the terminator laid, for the COP's timing model
+ * (cop_timing.h). Host-only: begun at 0 with each stream, read at its end. */
+static uint32_t g_zz_parts = 0, g_zz_copies = 0;
+
 static inline void sharc_zanzou_begin(void) {
     memset(&g_zz, 0, sizeof g_zz);
+    g_zz_parts = g_zz_copies = 0;
 }
 
 /* One part's run of copies (PM 0x20A17).  t walks 0 → 1 in steps of stepf, and
@@ -184,7 +189,9 @@ static inline void zz_spawn(int part, float stepf, int p1, uint32_t angle) {
     uint32_t flag = angle != 0 ? 0x80000000u : 0u;
     float    t    = 0.0f;
     float    one  = sharc_dm_getf(0x30301u);               /* the firmware's own 1.0 */
+    g_zz_parts++;
     for (;;) {
+        g_zz_copies++;
         uint32_t base = ZZ_RING + ring * ZZ_SLOT_WORDS;
         sharc_dm_set(base + 0, (uint32_t)part);
         sharc_dm_set(base + 1, g_zz.player | flag);

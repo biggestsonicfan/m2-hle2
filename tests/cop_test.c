@@ -28,6 +28,35 @@ static float    b2f(uint32_t u){ float f; memcpy(&f,&u,4); return f; }
 static int      feq(float a, float b){ return fabsf(a-b) < 1e-4f; }
 static int      ang_near(uint32_t w, uint32_t want){ uint32_t d = (w - want) & 0xFFFFu; return w <= 0xFFFFu && (d <= 2u || d >= 0xFFFEu); }
 
+/* --cop-timing: the i960 waits for the SHARC (Pinboard #710). */
+static void test_cop_timing(void) {
+    cop_reset();
+    uint64_t clk = 0;
+    g_cop_timing = 1; g_cop_clock = &clk;
+    cop_write(0x07800F0F);   /* read_world_pos: 0 args, 3 replies */
+    const cop_cost_t *rc = cop_cost(0x0F);
+    uint64_t ready = cop_t_board((uint64_t)rc->r1);
+    CHECK(clk == 0 && cop_fifo_status() == 1, "a reply the SHARC has not pushed yet reads as empty");
+    (void)cop_read();
+    CHECK(clk == (ready + COP_TQ - 1) / COP_TQ && g_cop.tm.stall == clk,
+          "reading it moves the i960 on to when the SHARC pushes it");
+    clk += 100000;
+    CHECK(cop_fifo_status() == 0, "once the SHARC has pushed the rest, the FIFO is not empty");
+    uint64_t before = clk; (void)cop_read(); (void)cop_read();
+    CHECK(clk == before, "a reply already there costs no wait");
+
+    cop_reset(); clk = 0;
+    for (int k = 0; k < 4; k++) {   /* set_pos x4: 16 words, none answered */
+        cop_write(0x03000606); cop_write(f2b(1.0f)); cop_write(f2b(2.0f)); cop_write(f2b(3.0f));
+    }
+    CHECK(clk == 0, "sixteen words fit in the input FIFO");
+    uint64_t second = g_cop.tm.pop_t[1];   /* the first, a command word, went at once */
+    cop_write(0x03000606); cop_write(f2b(1.0f));
+    CHECK(second > 0 && clk == (second + COP_TQ - 1) / COP_TQ,
+          "an eighteenth halts the i960 until the SHARC takes the second");
+    g_cop_timing = 0; g_cop_clock = NULL;
+}
+
 int main(void) {
     cop_reset();
 
@@ -184,6 +213,8 @@ int main(void) {
     CHECK(g_sharc.stack_top == 0 && g_sharc.unknown_cmds == unk1,
           "Fn_initialize empties the matrix stack");
     g_cop.ctl = NULL;
+
+    test_cop_timing();
 
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);
     return g_fail ? 1 : 0;
