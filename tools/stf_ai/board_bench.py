@@ -4,7 +4,7 @@
 ROM, or both, and say what each benchmark costs in timer counts against the
 cycles m2-hle2's i960 table charges for it.
 
-  board_bench.py [--probe 611|613|634|656|670|754] [--capture CAPTURE] [--trace TRACE]
+  board_bench.py [--probe 611|613|634|656|670|754|766] [--capture CAPTURE] [--trace TRACE]
 
 Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
 (3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
@@ -40,6 +40,12 @@ with no count stopped inside that bench, and the report says which.
 
 --probe 754 is Pinboard #754's: #738's fetch benches (A1, A2, B1-B3) with
 #611's jump, line 1012 and branch as controls, on that packet.
+
+--probe 766 is Pinboard #766's wait-bench (stfdisasm wait-bench-766): each
+bench writes one word of the wait table at 0xE00000 (ROM, download RAM or
+work RAM) for its own length, slot = frame_counter & 63. After the table
+the report prints what one wait costs a ROM or RAM access, the DRAM bit's
+cost, stores against loads, and code fetched from RAM against ROM.
 """
 import argparse
 import os
@@ -150,14 +156,77 @@ PROBE_754 = (
     ('line 1012', 2, 256, "#611's 1012 bytes of straight-line addo a pass"),
     ('branch', 64, 13, "#611's 8 taken b"),
 )
+# Pinboard #766: the wait table at 0xE00000. A bench's name says the access,
+# the area (rom, wram = work RAM 0x580000, which the game sets 1 wait + DRAM,
+# dram = download RAM 0x210000, 1 wait, no DRAM bit) and the waits it runs
+# at. The data loops are cached, so only their accesses go to the bus.
+PROBE_766 = (
+    ('ld rom2', 32, 37, '8 ld from program ROM, 2 waits (the game\'s)'),
+    ('ld rom3', 32, 37, 'the same at 3 waits'),
+    ('ld rom4', 32, 37, 'the same at 4 waits'),
+    ('ldq rom2', 32, 19, '2 ldq from program ROM, 2 waits'),
+    ('ldq rom4', 32, 19, 'the same at 4 waits'),
+    ('ld wram1', 32, 37, '8 ld from work RAM, 1 wait + DRAM (the game\'s)'),
+    ('ld wram2', 32, 37, 'the same at 2 waits + DRAM'),
+    ('ld wram3', 32, 37, 'the same at 3 waits + DRAM'),
+    ('ldq wram1', 32, 19, '2 ldq from work RAM, 1 wait + DRAM'),
+    ('ldq wram3', 32, 19, 'the same at 3 waits'),
+    ('st wram1', 32, 21, '8 st to work RAM, 1 wait + DRAM'),
+    ('st wram3', 32, 21, 'the same at 3 waits'),
+    ('stq wram1', 32, 15, '2 stq to work RAM, 1 wait + DRAM'),
+    ('stq wram3', 32, 15, 'the same at 3 waits'),
+    ('ld dram1', 32, 37, '8 ld from download RAM, 1 wait, no DRAM bit (the game\'s)'),
+    ('ld dram3', 32, 37, 'the same at 3 waits'),
+    ('ldq dram1', 32, 19, '2 ldq from download RAM, 1 wait'),
+    ('st dram1', 32, 21, '8 st to download RAM, 1 wait'),
+    ('st dram3', 32, 21, 'the same at 3 waits'),
+    ('stq dram1', 32, 15, '2 stq to download RAM, 1 wait'),
+    ('line rom2', 2, 256, "#611's line 1012 in ROM, 2 waits"),
+    ('line rom3', 2, 256, 'the same at 3 waits'),
+    ('line rom4', 2, 256, 'the same at 4 waits'),
+    ('line wram1', 2, 256, 'the same code copied into work RAM, 1 wait + DRAM'),
+    ('line wram3', 2, 256, 'in work RAM at 3 waits'),
+    ('line dram1', 2, 256, 'copied into download RAM, 1 wait'),
+    ('line dram3', 2, 256, 'in download RAM at 3 waits'),
+    ('jump rom2', 4, 36, "#611's jumps, ROM at 2 waits"),
+    ('jump rom4', 4, 36, 'the same at 4 waits'),
+    ('reg rom2', 64, 21, '16 addo + subo + cmpobne, cached; ROM at 2 waits'),
+    ('reg rom4', 64, 21, 'the same at 4 waits: must not move'),
+    ('st wram2', 32, 21, '8 st to work RAM, 2 waits + DRAM'),
+)
+# (what, bench at fewer waits, bench at more, accesses a turn, waits apart)
+WAITS_766 = (
+    ('ld ROM, a wait', 'ld rom2', 'ld rom4', 8, 2),
+    ('ld ROM, 2 to 3', 'ld rom2', 'ld rom3', 8, 1),
+    ('ldq ROM, a wait', 'ldq rom2', 'ldq rom4', 2, 2),
+    ('ld work RAM, a wait', 'ld wram1', 'ld wram3', 8, 2),
+    ('ld work RAM, 1 to 2', 'ld wram1', 'ld wram2', 8, 1),
+    ('ldq work RAM, a wait', 'ldq wram1', 'ldq wram3', 2, 2),
+    ('st work RAM, a wait', 'st wram1', 'st wram3', 8, 2),
+    ('st work RAM, 1 to 2', 'st wram1', 'st wram2', 8, 1),
+    ('stq work RAM, a wait', 'stq wram1', 'stq wram3', 2, 2),
+    ('ld download RAM, a wait', 'ld dram1', 'ld dram3', 8, 2),
+    ('st download RAM, a wait', 'st dram1', 'st dram3', 8, 2),
+    ('DRAM bit, ld (wram1 - dram1)', 'ld dram1', 'ld wram1', 8, 1),
+    ('DRAM bit, ldq', 'ldq dram1', 'ldq wram1', 2, 1),
+    ('DRAM bit, st', 'st dram1', 'st wram1', 8, 1),
+    ('DRAM bit, stq', 'stq dram1', 'stq wram1', 2, 1),
+    ('line in ROM, a wait (a pass)', 'line rom2', 'line rom4', 1, 2),
+    ('line in work RAM, a wait', 'line wram1', 'line wram3', 1, 2),
+    ('line in download RAM, a wait', 'line dram1', 'line dram3', 1, 2),
+    ('line, work RAM 1 against ROM 2', 'line wram1', 'line rom2', 1, 1),
+    ('line, download RAM 1 against ROM 2', 'line dram1', 'line rom2', 1, 1),
+    ('jump, a ROM wait', 'jump rom2', 'jump rom4', 1, 2),
+    ('reg, a ROM wait (cached: 0)', 'reg rom2', 'reg rom4', 1, 2),
+)
 PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656,
-          670: PROBE_656, 754: PROBE_754}
+          670: PROBE_656, 754: PROBE_754, 766: PROBE_766}
 
 
 # Benches that branch into their aligned loop between the two timer reads
 # count one cycle more in m2-hle2.
 ENTRY_B = ('jump', 'jump end', 'jump in', 'assoc', 'assoc ctl', 'assoc 3',
-           'jump mid', 'A1', 'A2', 'B1', 'B2', 'B3')
+           'jump mid', 'A1', 'A2', 'B1', 'B2', 'B3', 'jump rom2', 'jump rom4')
 
 
 def bench_packets(stream, benches=BENCHES):
@@ -223,6 +292,18 @@ def report(name, slots, benches=BENCHES, out=sys.stdout):
               f' {rest:7.1f} {spread:6d} {k:5d}', file=out)
 
 
+def waits_report(slots, benches, out=sys.stdout):
+    """Pinboard #766: each pair's turn difference per access per wait."""
+    turns = {bn: fit(n, lo, hi) for bn, n, _, lo, hi in pooled(slots, benches)}
+    print('  per access, counts (line: a pass; jump, reg: a turn):', file=out)
+    for what, a, b, acc, w in WAITS_766:
+        fa, fb = turns.get(a), turns.get(b)
+        if fa is None or fb is None:
+            print(f'    {what:36} (no packets)', file=out)
+            continue
+        print(f'    {what:36} {(fb[2] - fa[2]) / acc / w:8.3f}', file=out)
+
+
 def check_trace(slots, benches=BENCHES, out=sys.stdout):
     """m2-hle2 must count exactly 4 + n x table (+ 1 for ENTRY_B) for every packet."""
     bad = 0
@@ -254,10 +335,14 @@ def main():
         ev = A.parse(a.trace)
         slots = by_slot([v[0] for k, _, v in ev if k == 'T'], benches)
         report('m2-hle2', slots, benches)
+        if a.probe == 766:
+            waits_report(slots, benches)
         ok = check_trace(slots, benches)
     if a.capture:
         cap = A.capture_bytes(a.capture)
         report('board', by_slot(cap, benches), benches)
+        if a.probe == 766:
+            waits_report(by_slot(cap, benches), benches)
         slot = trailing_head(cap, benches)
         if slot is not None:
             print(f'  the board stopped inside slot {slot} ({benches[slot >> 1][0]}):'
