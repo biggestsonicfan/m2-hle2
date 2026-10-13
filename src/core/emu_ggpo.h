@@ -309,6 +309,7 @@ static inline bool emu_ggpo_cold_boot(emu_thread_ctx_t *ctx) {
     follow_lead_break("ggpo session");
     backup_ram_detach();
     if (g_hle_extra_session_off) g_hle_extra_session_off();
+    g_cop_timing = 0;      /* --cop-timing: not yet both boards' */
     g_netplay.reset_board(g_netplay.reset_ctx);
     geodl_snaps_clear();
     input_reset();

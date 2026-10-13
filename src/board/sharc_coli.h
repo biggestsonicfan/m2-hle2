@@ -43,6 +43,12 @@
 
 /* ---- the firmware's address space ----------------------------------------- */
 
+/* Bufferram words the command in flight has touched through these two, for
+ * the COP's timing model (cop.h): the board's SHARC pays for each one, and
+ * Fn_calc_coli_flag's and Fn_parts_oidasi's time follows them. Host-only:
+ * cop.h zeroes it at each command and reads it when the command is done. */
+static uint32_t g_sharc_ext_words = 0;
+
 static inline uint32_t sharc_dm_get(uint32_t a) {
     if (a >= 0x30420u && a < 0x305A0u) {                 /* unit-matrix cache */
         uint32_t o = a - 0x30420u;
@@ -51,6 +57,7 @@ static inline uint32_t sharc_dm_get(uint32_t a) {
     if (a >= 0x30000u && a < 0x37800u) return g_sharc.dm[a - 0x30000u];
     if (a >= 0x1400000u && g_sharc.sharc_dm_ext) {        /* BUFF_RAM, shared with the i960 */
         uint64_t o = (uint64_t)(a - 0x1400000u) * 4u;
+        g_sharc_ext_words++;
         if (o + 4u <= g_sharc.sharc_dm_ext_size) { uint32_t v; memcpy(&v, g_sharc.sharc_dm_ext + o, 4); return v; }
     }
     return 0;
@@ -65,6 +72,7 @@ static inline void sharc_dm_set(uint32_t a, uint32_t v) {
     if (a >= 0x30000u && a < 0x37800u) { g_sharc.dm[a - 0x30000u] = v; return; }
     if (a >= 0x1400000u && g_sharc.sharc_dm_ext) {
         uint64_t o = (uint64_t)(a - 0x1400000u) * 4u;
+        g_sharc_ext_words++;
         if (o + 4u <= g_sharc.sharc_dm_ext_size) memcpy(g_sharc.sharc_dm_ext + o, &v, 4);
     }
 }

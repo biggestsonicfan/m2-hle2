@@ -1222,6 +1222,7 @@ static inline const char *replay_play_start(emu_thread_ctx_t *ctx) {
     replay__native_end();   /* a restart from either view */
     g_active_profile = profile_by_id(profile);
     if (g_hle_extra_session_off) g_hle_extra_session_off();   /* --gems-*: not the board it was */
+    g_cop_timing = 0;      /* a recording is of the board without it */
     P->on = true;
     const char *err;
     if (replay__view_native(g_active_profile)) {

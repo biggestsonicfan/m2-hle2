@@ -1764,6 +1764,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_texload_hle = 0;   /* STF's texture loader on the i960, not in C (m2_texload.h) */
         } else if (strcmp(argv[i], "--spin-i960") == 0) {
             g_spin_skip = 0;     /* idle loops on the i960, not skipped (m2_spin.h) */
+        } else if (strcmp(argv[i], "--cop-timing") == 0) {
+            g_cop_timing = 1;    /* the i960 waits on the SHARC as the board's does (cop_timing.h) */
         } else if (strcmp(argv[i], "--no-tray") == 0) {
             /* For a service or a Session 0 run, where there is no shell to put
              * an icon in and the process is stopped some other way. */

@@ -26,6 +26,7 @@
 
 #include "constants.h"
 #include "emu_times.h"   /* host time spent in the handlers, for get_status */
+#include "cop_timing.h"  /* the SHARC's time and the i960's waits on it (--cop-timing) */
 
 /* ---- Limits -------------------------------------------------------------- */
 
@@ -69,6 +70,9 @@ typedef struct {
      * until the SHARC answered, so each one is a reply the HLE owes. */
     uint64_t       underflows;
     uint32_t       last_cmd;      /* the newest command word, for that warning */
+
+    /* The SHARC's clock, when --cop-timing is on (cop_timing.h). */
+    cop_timing_t   tm;
 } cop_state_t;
 
 static cop_state_t g_cop = {0};
@@ -115,6 +119,67 @@ static inline void cop_tap_replies(void) {
     for (int k = 0; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
 }
 
+/* Run a fixed-length command whose arguments are all in. */
+static inline void cop_run(uint32_t cmd, const uint32_t *args, int n) {
+    int64_t t0 = emu_times_cop_begin();
+    int zone = hprof_enter(HPROF_COP);
+    cop_exec(cmd, args, n);
+    hprof_leave(zone);
+    emu_times_cop_end(t0);
+    cop_tap_replies();
+    if (cop_timing_on()) cop_t_done(&g_cop.tm, g_sharc.reply_count, g_sharc_ext_words);
+    g_cop.cur_cmd = 0;
+}
+
+/* An argument of a fixed-length command: most words are one. */
+static inline void cop_write_arg(uint32_t val) {
+    if (g_cop_tap) g_cop_tap(0x20000000u, val);
+    if (cop_timing_on()) cop_t_arg(&g_cop.tm);
+    if (g_cop.args_received < COP_ARGS_MAX)
+        g_cop.args[g_cop.args_received++] = val;
+    if (--g_cop.args_needed == 0) {
+        cop_run(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
+        g_cop.args_received = 0;
+    }
+}
+
+/* A word of a variable-length command: the handler consumes words until it
+ * says it is done, pushing its answers as it goes so the i960's loop finds
+ * each one waiting where the board would have left it. */
+static inline void cop_write_stream(uint32_t val) {
+    if (g_cop_tap) g_cop_tap(0x20000000u, val);
+    if (cop_timing_on()) cop_t_arg(&g_cop.tm);
+    int before = g_sharc.reply_count;
+    int zone   = hprof_enter(HPROF_COP);
+    bool done  = g_cop_gems_cmd ? g_gems_cop_stream_feed(val) : sharc_zanzou_feed(val);
+    hprof_leave(zone);
+    if (g_cop_tap)
+        for (int k = before; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
+    if (cop_timing_on())
+        cop_t_stream(&g_cop.tm, before, g_sharc.reply_count, done, g_zz_parts, g_zz_copies);
+    if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
+}
+
+/* A command word. */
+static inline void cop_write_command(uint32_t val) {
+    if (g_cop_tap) g_cop_tap(0x21000000u, val);
+    if (cop_timing_on()) { cop_t_command(&g_cop.tm, val); g_sharc_ext_words = 0; }
+    g_cop.cur_cmd       = val;
+    g_cop.last_cmd      = val;
+    int gems_n = g_gems_cop_args ? g_gems_cop_args(val) : GEMS_COP_NOT_MINE;
+    g_cop_gems_cmd      = gems_n != GEMS_COP_NOT_MINE;
+    g_cop.args_needed   = g_cop_gems_cmd ? gems_n : sharc_args_for_cmd(val);
+    g_cop.args_received = 0;
+    if (g_cop.args_needed == COP_ARGS_STREAM) {
+        g_sharc.reply_count = 0;
+        g_sharc.reply_idx   = 0;
+        if (g_cop_gems_cmd) g_gems_cop_stream_begin();
+        else                sharc_zanzou_begin();
+        return;
+    }
+    if (g_cop.args_needed == 0) cop_run(val, NULL, 0);
+}
+
 /* Called for every 32-bit write to the COPROGRAM region. */
 static inline void cop_write(uint32_t val) {
     g_cop.writes++;
@@ -131,62 +196,9 @@ static inline void cop_write(uint32_t val) {
     if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
         g_cop.geo_capture_count++;
 
-    /* An argument of a fixed-length command: most words are one. */
-    if (g_cop.args_needed > 0) {
-        if (g_cop_tap) g_cop_tap(0x20000000u, val);
-        if (g_cop.args_received < COP_ARGS_MAX)
-            g_cop.args[g_cop.args_received++] = val;
-        if (--g_cop.args_needed == 0) {
-            int64_t t0 = emu_times_cop_begin();
-            int zone = hprof_enter(HPROF_COP);
-            cop_exec(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
-            hprof_leave(zone);
-            emu_times_cop_end(t0);
-            cop_tap_replies();
-            g_cop.cur_cmd       = 0;
-            g_cop.args_received = 0;
-        }
-        return;
-    }
-
-    /* A variable-length command: the handler consumes words until it says it
-     * is done, pushing its answers as it goes so the i960's loop finds each
-     * one waiting where the board would have left it. */
-    if (g_cop.args_needed == COP_ARGS_STREAM) {
-        if (g_cop_tap) g_cop_tap(0x20000000u, val);
-        int before = g_sharc.reply_count;
-        int zone   = hprof_enter(HPROF_COP);
-        bool done  = g_cop_gems_cmd ? g_gems_cop_stream_feed(val) : sharc_zanzou_feed(val);
-        hprof_leave(zone);
-        if (g_cop_tap)
-            for (int k = before; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
-        if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
-        return;
-    }
-
-    if (g_cop_tap) g_cop_tap(0x21000000u, val);
-    g_cop.cur_cmd       = val;
-    g_cop.last_cmd      = val;
-    int gems_n = g_gems_cop_args ? g_gems_cop_args(val) : GEMS_COP_NOT_MINE;
-    g_cop_gems_cmd      = gems_n != GEMS_COP_NOT_MINE;
-    g_cop.args_needed   = g_cop_gems_cmd ? gems_n : sharc_args_for_cmd(val);
-    g_cop.args_received = 0;
-    if (g_cop.args_needed == COP_ARGS_STREAM) {
-        g_sharc.reply_count = 0;
-        g_sharc.reply_idx   = 0;
-        if (g_cop_gems_cmd) g_gems_cop_stream_begin();
-        else                sharc_zanzou_begin();
-        return;
-    }
-    if (g_cop.args_needed == 0) {
-        int64_t t0 = emu_times_cop_begin();
-        int zone = hprof_enter(HPROF_COP);
-        cop_exec(val, NULL, 0);
-        hprof_leave(zone);
-        emu_times_cop_end(t0);
-        cop_tap_replies();
-        g_cop.cur_cmd = 0;
-    }
+    if (g_cop.args_needed == COP_ARGS_STREAM) cop_write_stream(val);
+    else if (g_cop.args_needed > 0)           cop_write_arg(val);
+    else                                      cop_write_command(val);
 }
 
 /* A game frame ended: the words captured since the last edge are that frame's
@@ -201,6 +213,8 @@ static inline void cop_geo_frame_edge(void) {
 static inline uint32_t cop_read(void) {
     g_cop.reads++;
     if (g_sharc.reply_idx < g_sharc.reply_count) {
+        /* On the board the read holds the i960 until the SHARC has pushed it. */
+        if (cop_timing_on()) cop_t_wait(&g_cop.tm, cop_t_ready(&g_cop.tm, g_sharc.reply_idx));
         uint32_t v = g_sharc.reply[g_sharc.reply_idx++];
         if (g_sharc.reply_idx >= g_sharc.reply_count) {
             g_sharc.reply_idx   = 0;
@@ -220,9 +234,12 @@ static inline uint32_t cop_read(void) {
 /* 0x980004 bit 0: the reply FIFO is empty (MAME model2_state::fifo_control_r).
  * Boot code waits on it after lowering the upload bit (STF cop_initialize_l1
  * 0xF3C, FV 0x190C). The HLE answers each command at once, so it is up
- * whenever no reply is waiting. */
+ * whenever no reply is waiting; with --cop-timing, until the SHARC's time for
+ * the next one has come. */
 static inline uint32_t cop_fifo_status(void) {
-    return g_sharc.reply_idx < g_sharc.reply_count ? 0u : 1u;
+    if (g_sharc.reply_idx >= g_sharc.reply_count) return 1u;
+    if (cop_timing_on() && cop_t_ready(&g_cop.tm, g_sharc.reply_idx) > cop_t_now()) return 1u;
+    return 0u;
 }
 
 /* Reset all COP/SHARC state. Call when a new ROM is installed. */

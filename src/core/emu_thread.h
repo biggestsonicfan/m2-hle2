@@ -1231,6 +1231,7 @@ static inline void emu_ctx_init(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, memory_b
     ctx->run_state = EMU_STOPPED;
     ctx->cpu_snapshot = *cpu;
     ctx->cpu_prev_snapshot = *cpu;
+    g_cop_clock = &cpu->cycles;   /* the COP's timing model stalls the i960 (cop_timing.h) */
     emu_mutex_init(&ctx->mutex);
 }
 

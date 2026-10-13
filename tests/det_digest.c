@@ -503,6 +503,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
         else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
         else if (!strcmp(argv[i], "--spin-i960"))               g_spin_skip = 0;
+        else if (!strcmp(argv[i], "--cop-timing"))              g_cop_timing = 1;
         else if (!strcmp(argv[i], "--live-timers"))             ;   /* always on now */
         else if (!strcmp(argv[i], "--nowarnskip"))              g_warning_skip = 0;
         else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
@@ -683,6 +684,7 @@ int main(int argc, char **argv) {
                     (unsigned long long)g_sound.out_total);
         }
         if (peek_addr) fprintf(out, " %02x", mem_read8(&bus, peek_addr));
+        if (g_cop_timing) fprintf(out, " cop %llu", (unsigned long long)g_cop.tm.stall);
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);
@@ -699,6 +701,8 @@ int main(int argc, char **argv) {
     rewind_report();
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
+    if (g_cop_timing)
+        fprintf(stderr, "cop timing: the i960 waited %llu cycles on the SHARC\n", (unsigned long long)g_cop.tm.stall);
     if (cop_out) fclose(cop_out);
     if (trace_out) fclose(trace_out);
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
