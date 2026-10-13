@@ -4,7 +4,7 @@
 ROM, or both, and say what each benchmark costs in timer counts against the
 cycles m2-hle2's i960 table charges for it.
 
-  board_bench.py [--probe 611|613|634|656|670] [--capture CAPTURE] [--trace TRACE]
+  board_bench.py [--probe 611|613|634|656|670|754] [--capture CAPTURE] [--trace TRACE]
 
 Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
 (3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
@@ -37,6 +37,9 @@ packets.
 sends a packet's head (5A A6 slot) before its bench and the count after it,
 and runs the COP benches only in a fight. A capture that ends on a head
 with no count stopped inside that bench, and the report says which.
+
+--probe 754 is Pinboard #754's: #738's fetch benches (A1, A2, B1-B3) with
+#611's jump, line 1012 and branch as controls, on that packet.
 """
 import argparse
 import os
@@ -133,14 +136,28 @@ PROBE_613 = (
 PROBE_656 = PROBE_613[:4] + (
     ('geo rd', 8, 21, '4 x ld 0x802008: the GEO write position, nothing stored'),
 ) + PROBE_613[5:]
+# Pinboard #754: #738's instruction fetch benches (PR #318 comment
+# 6140364322) and three of #611's as controls. Every landing in A1 and A2
+# is on a 32-byte boundary of a 4 KB footprint, so it misses; a 16-byte
+# fill reads A1's 32 bytes in two fills, A2's 64 in four.
+PROBE_754 = (
+    ('A1', 8, 259, '32 blocks 128 B apart, 32 B straight each (4 KB)'),
+    ('A2', 8, 259, '16 blocks 256 B apart, 64 B straight each (4 KB)'),
+    ('B1', 32, 67, '256 B straight: 62 addo + subo + cmpobne'),
+    ('B2', 32, 67, 'the same 256 B, a b .+4 every 16 B'),
+    ('B3', 32, 52, '15 x (addo, b .+8 over one word, addo), 2 addo'),
+    ('jump', 4, 36, "#611's 32 jumps to line starts 128 bytes apart (4 KB)"),
+    ('line 1012', 2, 256, "#611's 1012 bytes of straight-line addo a pass"),
+    ('branch', 64, 13, "#611's 8 taken b"),
+)
 PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656,
-          670: PROBE_656}
+          670: PROBE_656, 754: PROBE_754}
 
 
 # Benches that branch into their aligned loop between the two timer reads
 # count one cycle more in m2-hle2.
 ENTRY_B = ('jump', 'jump end', 'jump in', 'assoc', 'assoc ctl', 'assoc 3',
-           'jump mid')
+           'jump mid', 'A1', 'A2', 'B1', 'B2', 'B3')
 
 
 def bench_packets(stream, benches=BENCHES):
