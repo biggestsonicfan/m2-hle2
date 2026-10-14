@@ -55,6 +55,9 @@ on the game's own arguments, slot = frame_counter & 15, every COP bench
 only in a fight. Fn_read_ram (0x48) is benched alone and also ends every
 turn of the commands that answer nothing, so take its turn off theirs.
 0x82 and 0x86 run only while no afterimage is alive or being laid.
+The report then reads each command on its own (Pinboard #817): its round
+trip, and what a collision frame's sends of it cost over the table and the
+analysis model's 12 counts a FIFO write.
 
 --probe 766 is Pinboard #766's wait-bench (stfdisasm wait-bench-766): each
 bench writes one word of the wait table at 0xE00000 (ROM, download RAM or
@@ -266,6 +269,20 @@ WAITS_766 = (
     ('jump, a ROM wait', 'jump rom2', 'jump rom4', 1, 2),
     ('reg, a ROM wait (cached: 0)', 'reg rom2', 'reg rom4', 1, 2),
 )
+# Pinboard #817: reading #796's benches as single commands. (bench, trips a
+# turn, whether a 0x48 ends each turn, FIFO words a trip, sends in a
+# collision frame (#792's count of the 55 chain frames)). A command's own
+# board time is its turn, less the 0x48 where one ends it, over its trips.
+CHAIN_796 = (
+    ('cop 48', 1, False, 2, 16),
+    ('cop 72', 2, False, 4, 2),
+    ('cop 82', 1, False, 1, 1),
+    ('cop 86', 1, True, 2, 2),
+    ('cop 3d', 1, True, 7, 1),
+    ('cop 3e', 1, True, 6, 1),
+    ('cop 3a', 1, True, 5, 1),
+)
+ST_FIFO = 12  # the analysis model's charge for a FIFO write (#611)
 PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656,
           670: PROBE_656, 754: PROBE_754, 766: PROBE_766,
           773: PROBE_773, 782: PROBE_782, 796: PROBE_796}
@@ -353,6 +370,27 @@ def waits_report(slots, benches, out=sys.stdout):
         print(f'    {what:36} {(fb[2] - fa[2]) / acc / w:8.3f}', file=out)
 
 
+def chain_report(slots, benches, out=sys.stdout):
+    """Pinboard #817: each #796 command's round trip on its own, and what it
+    adds to a collision frame over its table cycles and the model's FIFO
+    charge (the figure #792 booked 0x70 and 0x3B by)."""
+    rows = {bn: (n, cyc, fit(n, lo, hi)) for bn, n, cyc, lo, hi in pooled(slots, benches)}
+    if any(rows.get(bn, (0, 0, None))[2] is None for bn, *_ in CHAIN_796):
+        print('  chain: not every COP bench has packets at both sizes', file=out)
+        return
+    t48 = rows['cop 48'][2][2]
+    print(f'  {"command":9} {"trip":>8} {"table":>6} {"over":>8} {"a frame":>7} {"counts":>8}', file=out)
+    total = 0.0
+    for bn, trips, ends48, words, per_frame in CHAIN_796:
+        _, cyc, f = rows[bn]
+        trip = (f[2] - (t48 if ends48 else 0)) / trips
+        table = (cyc - (13 if ends48 else 0)) / trips
+        over = trip - table - ST_FIFO * words
+        total += over * per_frame
+        print(f'  {bn:9} {trip:8.1f} {table:6.1f} {over:8.1f} {per_frame:7d} {over * per_frame:8.0f}', file=out)
+    print(f'  chain: {total:.0f} counts a collision frame over table + {ST_FIFO}/FIFO word', file=out)
+
+
 def check_trace(slots, benches=BENCHES, out=sys.stdout):
     """m2-hle2 must count exactly 4 + n x table (+ 1 for ENTRY_B) for every packet."""
     bad = 0
@@ -392,6 +430,8 @@ def main():
         report('board', by_slot(cap, benches), benches)
         if a.probe == 766:
             waits_report(by_slot(cap, benches), benches)
+        if a.probe == 796:
+            chain_report(by_slot(cap, benches), benches)
         slot = trailing_head(cap, benches)
         if slot is not None:
             print(f'  the board stopped inside slot {slot} ({benches[slot >> 1][0]}):'
