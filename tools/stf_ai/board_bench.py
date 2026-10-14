@@ -4,7 +4,7 @@
 ROM, or both, and say what each benchmark costs in timer counts against the
 cycles m2-hle2's i960 table charges for it.
 
-  board_bench.py [--probe 611|613|634|656|670|754|766|773|782] [--capture CAPTURE] [--trace TRACE]
+  board_bench.py [--probe 611|613|634|656|670|754|766|773|782|796] [--capture CAPTURE] [--trace TRACE]
 
 Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
 (3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
@@ -49,6 +49,12 @@ to fetch, with no branch just before them.
 --probe 782 is Pinboard #782's: #754's eight benches in slots 0-15, and
 D2, D3, D4 and D6 twice each in slots 16-31: C2 with cached heads of 2, 3,
 4 and 6 lines in front of the same 48-byte tail.
+
+--probe 796 is Pinboard #796's: the rest of the fight's collision chain
+on the game's own arguments, slot = frame_counter & 15, every COP bench
+only in a fight. Fn_read_ram (0x48) is benched alone and also ends every
+turn of the commands that answer nothing, so take its turn off theirs.
+0x82 and 0x86 run only while no afterimage is alive or being laid.
 
 --probe 766 is Pinboard #766's wait-bench (stfdisasm wait-bench-766): each
 bench writes one word of the wait table at 0xE00000 (ROM, download RAM or
@@ -184,6 +190,19 @@ PROBE_782 = PROBE_754 + (
     ('D4', 4, 802, 'the same with a 64 B head'),
     ('D6', 4, 1058, 'the same with a 96 B head'),
 ) * 2
+# Pinboard #796: the COP commands of the collision frames that #688 did
+# not time (PR #318 comment on #794). Turns are table cycles of the i960's
+# own part; on the board the rest is the SHARC's.
+PROBE_796 = (
+    ('reg', 64, 12, '7 addo + subo + cmpobne, in the instruction cache'),
+    ('cop 48', 8, 13, 'Fn_read_ram 0x3033F: 2 st, 1 ld'),
+    ('cop 72', 8, 29, 'Fn_outside_ball for each fighter: 2 x (4 st, 1 ld)'),
+    ('cop 82', 8, 11, 'Fn_zanzou_inc, no afterimage: 1 st, 1 ld'),
+    ('cop 86', 8, 17, 'Fn_zanzou_kill_timer_buffer 0, then 0x48: 4 st, 1 ld'),
+    ('cop 3d', 8, 27, 'Fn_coli_trans_mat by -0.0, then 0x48: 9 st, 1 ld'),
+    ('cop 3e', 1, 32, 'Fn_coli_trans_xz on rob +0x1F4, then 0x48: 8 st, 1 ld'),
+    ('cop 3a', 1, 24, 'Fn_area_table_gen on rob +0x768/+0x821, then 0x48: 7 st, 1 ld'),
+)
 # Pinboard #766: the wait table at 0xE00000. A bench's name says the access,
 # the area (rom, wram = work RAM 0x580000, which the game sets 1 wait + DRAM,
 # dram = download RAM 0x210000, 1 wait, no DRAM bit) and the waits it runs
@@ -249,7 +268,7 @@ WAITS_766 = (
 )
 PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656,
           670: PROBE_656, 754: PROBE_754, 766: PROBE_766,
-          773: PROBE_773, 782: PROBE_782}
+          773: PROBE_773, 782: PROBE_782, 796: PROBE_796}
 
 
 # Benches that branch into their aligned loop between the two timer reads
