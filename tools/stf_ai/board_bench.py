@@ -4,7 +4,7 @@
 ROM, or both, and say what each benchmark costs in timer counts against the
 cycles m2-hle2's i960 table charges for it.
 
-  board_bench.py [--probe 611|613|634|656|670|754|766|773] [--capture CAPTURE] [--trace TRACE]
+  board_bench.py [--probe 611|613|634|656|670|754|766|773|782] [--capture CAPTURE] [--trace TRACE]
 
 Packet: 5A A6, slot, then TIMER_04 before the bench less TIMER_04 after it
 (3 bytes, little-endian). Up to rng-bench 9ed4ef2 it followed the 28-byte RNG
@@ -45,6 +45,10 @@ with no count stopped inside that bench, and the report says which.
 frame_counter & 31, with two more in slots 16-31: C1, landings that run
 48 bytes, and C2, a cached landing that runs on into three lines it has
 to fetch, with no branch just before them.
+
+--probe 782 is Pinboard #782's: #754's eight benches in slots 0-15, and
+D2, D3, D4 and D6 twice each in slots 16-31: C2 with cached heads of 2, 3,
+4 and 6 lines in front of the same 48-byte tail.
 
 --probe 766 is Pinboard #766's wait-bench (stfdisasm wait-bench-766): each
 bench writes one word of the wait table at 0xE00000 (ROM, download RAM or
@@ -170,6 +174,16 @@ PROBE_773 = PROBE_754 + (
     ('C1', 8, 195, '16 blocks 256 B apart, 48 B straight each (4 KB)'),
     ('C2', 8, 546, '16 blocks 256 B apart: 32 B run twice, then 48 B'),
 ) * 4
+# Pinboard #782: C2 with cached heads of 2, 3, 4 and 6 lines, to split the
+# two readings of C2's tail (PR #318 comment 6157871712). If the line after
+# the head is fetched during pass 1, the tail costs the same at every head;
+# if its fetch runs under pass 2's cached head, a longer head hides more of it.
+PROBE_782 = PROBE_754 + (
+    ('D2', 8, 546, '16 blocks 256 B apart: 32 B head run twice, then 48 B'),
+    ('D3', 8, 674, 'the same with a 48 B head'),
+    ('D4', 4, 802, 'the same with a 64 B head'),
+    ('D6', 4, 1058, 'the same with a 96 B head'),
+) * 2
 # Pinboard #766: the wait table at 0xE00000. A bench's name says the access,
 # the area (rom, wram = work RAM 0x580000, which the game sets 1 wait + DRAM,
 # dram = download RAM 0x210000, 1 wait, no DRAM bit) and the waits it runs
@@ -235,14 +249,14 @@ WAITS_766 = (
 )
 PROBES = {611: BENCHES, 613: PROBE_613, 634: PROBE_613, 656: PROBE_656,
           670: PROBE_656, 754: PROBE_754, 766: PROBE_766,
-          773: PROBE_773}
+          773: PROBE_773, 782: PROBE_782}
 
 
 # Benches that branch into their aligned loop between the two timer reads
 # count one cycle more in m2-hle2.
 ENTRY_B = ('jump', 'jump end', 'jump in', 'assoc', 'assoc ctl', 'assoc 3',
            'jump mid', 'A1', 'A2', 'B1', 'B2', 'B3', 'jump rom2', 'jump rom4',
-           'C1', 'C2')
+           'C1', 'C2', 'D2', 'D3', 'D4', 'D6')
 
 
 def bench_packets(stream, benches=BENCHES):
