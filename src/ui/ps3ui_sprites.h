@@ -747,18 +747,27 @@ static int ps3ui__sel_top(ps3ui__c4 *c, int x, int y)
     return 1;
 }
 
+/* The bottom corner's inner 3x3 (x and b 3..5): the dark band's diagonal. */
+static ps3ui__c4 ps3ui__sel_bottom_inner(int x, int b)
+{
+    if (b - 3 < 5 - x) return ps3ui__hex4(0x003F62, b == 5 && x == 4 ? 0x81 : 0x65);
+    if (b == 4 && x == 3) return ps3ui__hex4(0x002439, 0xBA);
+    return ps3ui__hex4(0x002439, 0xF3);
+}
+
+/* The bottom corner's outer 3x3 (x and b 0..2): the edge's last rows. */
+static void ps3ui__sel_bottom_outer(ps3ui__c4 *c, int x, int b)
+{
+    if (b == 2) *c = ps3ui__hex4(x == 2 ? 0x005A8B : ps3ui__sel_edge[x], 255);
+    else if (b == 1 && x == 1) *c = ps3ui__hex4(0x005DA2, 255);
+    else if (b == 1 && x == 0) *c = ps3ui__hex4(0x0061A5, 255);
+}
+
 /* The bottom-left corner, `b` rows from the bottom. */
 static void ps3ui__sel_bottom(ps3ui__c4 *c, int x, int b)
 {
-    if (b >= 3 && b <= 5 && x >= 3 && x < 6) {
-        if (b - 3 < 5 - x) *c = ps3ui__hex4(0x003F62, b == 5 && x == 4 ? 0x81 : 0x65);
-        else if (b == 4 && x == 3) *c = ps3ui__hex4(0x002439, 0xBA);
-        else *c = ps3ui__hex4(0x002439, 0xF3);
-    } else if (b < 3 && x < 3) {
-        if (b == 2) *c = ps3ui__hex4(x == 2 ? 0x005A8B : ps3ui__sel_edge[x], 255);
-        else if (b == 1 && x == 1) *c = ps3ui__hex4(0x005DA2, 255);
-        else if (b == 1 && x == 0) *c = ps3ui__hex4(0x0061A5, 255);
-    }
+    if (b >= 3 && b <= 5 && x >= 3 && x < 6) *c = ps3ui__sel_bottom_inner(x, b);
+    else if (b < 3 && x < 3) ps3ui__sel_bottom_outer(c, x, b);
 }
 
 static void ps3ui__paint_sel(ps3ui_image_t *im, int side)
