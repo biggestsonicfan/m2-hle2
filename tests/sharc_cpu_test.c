@@ -297,9 +297,9 @@ static void test_von(void)
         CHECK(r >= 8191 && r <= 8193, "angle of (1, 1) is 0x2000 (45 degrees)");
     }
 
-    /* 0x1f takes six floats and ends in x * 1/sqrt(x); all zeros is NaN on the board and
-     * in MAME (RSQRTS(0) = inf, inf * 0), and Virtual-On's tutorial shadow
-     * relies on it (Pinboard #946) */
+    /* 0x1f takes six floats and ends in x * 1/sqrt(x); all zeros is NaN in
+     * MAME (RSQRTS(0) seeds 2^63, the Newton step's square overflows to inf,
+     * inf * 0), and Virtual-On's tutorial shadow relies on it (Pinboard #946) */
     uint32_t const zero6[6] = { 0 };
     CHECK(von_cmd(0x1f, 6, zero6) == 0xFFFFFFFFu, "cmd 0x1f of zeros is NaN 0xFFFFFFFF, as in MAME");
 
@@ -311,19 +311,43 @@ static void test_rsqrts(void)
 {
     g_shc.r[1] = 0;
     shc_op_rsqrts(0, 1, 0);
-    CHECK(g_shc.r[0] == 0x7F800000u && (g_shc.astat & SHC_AV), "RSQRTS +0 = +inf, AV");
+    CHECK(g_shc.r[0] == 0x5F350000u && (g_shc.astat & SHC_AV), "RSQRTS +0 seeds 2^63 * 1.41 (MAME's table), AV");
     g_shc.r[1] = 0x80000000u;
     shc_op_rsqrts(0, 1, 0);
-    CHECK(g_shc.r[0] == 0xFF800000u, "RSQRTS -0 = -inf");
+    CHECK(g_shc.r[0] == 0xDF350000u && (g_shc.astat & SHC_AI), "RSQRTS -0 seeds -2^63 * 1.41, AI");
     g_shc.r[1] = f2u(4.0f);
     shc_op_rsqrts(0, 1, 0);
     CHECK(g_shc.r[0] == 0x3EFF8000u, "RSQRTS 4 seeds 0.4995 (MAME's table)");
+}
+
+/* MODE1.TRUNC as MAME runs it (Pinboard #949): float add, multiply and
+ * FLOAT round to nearest, FIX rounds down, the multifunction FIX toward zero,
+ * and a multiply that overflows is infinity */
+static void test_trunc_rounding(void)
+{
+    uint32_t const mode1 = g_shc.mode1;
+    g_shc.mode1 |= SHC_M1_TRUNC;
+    g_shc.r[1] = 16777219u;
+    shc_op_float(0, 1, 0);
+    CHECK(g_shc.r[0] == f2u(16777220.0f), "TRUNC: FLOAT 16777219 rounds to nearest (16777220)");
+    g_shc.r[1] = f2u(1.0f);
+    g_shc.r[2] = f2u(0x1.8p-24f);
+    shc_op_fadd(0, 1, 2);
+    CHECK(g_shc.r[0] == 0x3F800001u, "TRUNC: 1 + 1.5 ulp/2 rounds to nearest (1 + 1 ulp)");
+    CHECK(shc_fmul_bits(f2u(0x1p100f), f2u(0x1p100f)) == 0x7F800000u && (g_shc.astat & SHC_MV),
+          "TRUNC: fmul overflow is +inf, MV");
+    CHECK(shc_fmul_bits(f2u(0x1p-70f), f2u(0x1p-70f)) == 0x00000001u << 9 && (g_shc.astat & SHC_MU),
+          "TRUNC: fmul keeps a denormal product, MU");
+    CHECK(shc_fix_bits(f2u(-1.5f), false) == (uint32_t)-2, "TRUNC: FIX -1.5 = -2 (down)");
+    CHECK(shc_fix_bits(f2u(-1.5f), true) == (uint32_t)-1, "TRUNC: multifunction FIX -1.5 = -1 (toward zero)");
+    g_shc.mode1 = mode1;
 }
 
 int main(void)
 {
     test_mini();
     test_rsqrts();
+    test_trunc_rounding();
     test_von();
     printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;

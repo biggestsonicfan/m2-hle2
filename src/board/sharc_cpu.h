@@ -19,7 +19,14 @@
  *   - FADD/FSUB pairs of infinities store the integer pattern converted to
  *     float, (float)(sign | 0x7F7FFFFF or 0x7F800000), not the pattern itself;
  *   - Rn = Rn OR LSHIFT Rx BY Ry shifts right arithmetically (the immediate
- *     form logically); BIT TST ASTAT loses the BTF it sets (SET_UREG after).
+ *     form logically); BIT TST ASTAT loses the BTF it sets (SET_UREG after);
+ *   - MODE1.TRUNC only reaches FIX (floorf; the multifunction FIX BY truncates
+ *     toward zero): float add, subtract, multiply and FLOAT round to nearest,
+ *     as host floats do. FMUL neither flushes denormals nor saturates: an
+ *     overflow is infinity, a denormal product stays (MU). RSQRTS of +-0
+ *     seeds +-2^63 from the table. Pinboard #949 replayed 4200 frames of
+ *     Virtual-On's COP traffic from MAME (tests/sharc_replay.c) to every
+ *     output word identical.
  * MAME's fatal errors (unknown registers, stack over/underflow, unimplemented
  * opcodes) log a WARN and set `fault`; shc_run stops with SHC_STOP_FAULT.
  * Not implemented: DMA transfers (a start logs a WARN), bit-reverse, the
@@ -964,49 +971,13 @@ static bool shc_nan_mul(uint32_t a, uint32_t b)
            (shc_emax(b) && ((b & SHC_F_MANT) || shc_is_zero(a)));
 }
 
-/* MODE1.TRUNC: round toward zero from the exact result s + e */
-static float shc_rtz(double s, double e)
-{
-    if (fabs(s) >= 0x1p128)
-        return (float)s;
-    float const f = (float)s;
-    double const af = fabs((double)f);
-    double const as = fabs(s);
-    if (af > as || (af == as && e != 0.0 && ((e < 0.0) != (s < 0.0))))
-        return nextafterf(f, 0.0f);
-    return f;
-}
-
-static float shc_add_rounded(float x, float y, bool trunc)
-{
-    if (!trunc)
-        return x + y;
-    double const s = (double)x + (double)y;
-    double const t = s - x;
-    double const u = s - t;
-    double const ex = x - u;
-    double const ey = y - t;
-    return shc_rtz(s, ex + ey);
-}
-
-static float shc_mul_rounded(float x, float y, bool trunc)
-{
-    if (!trunc)
-        return x * y;
-    double const p = (double)x * (double)y;     /* exact */
-    return shc_rtz(p, 0.0);
-}
-
-static float shc_from_int(int32_t x, bool trunc)
-{
-    return trunc ? shc_rtz((double)x, 0.0) : (float)x;
-}
-
-/* int32_t(floorf / nearbyintf): NaN and out of range give 0x80000000, as on x86 */
-static uint32_t shc_fix_bits(uint32_t r)
+/* int32_t(floorf / nearbyintf), or int32_t(f) for `toward_zero` under TRUNC
+ * (MAME's FIX rounds down, its Fm = Fxm * Fym, Ra = FIX Fxa BY Rya toward
+ * zero); NaN and out of range give 0x80000000, as on x86 */
+static uint32_t shc_fix_bits(uint32_t r, bool toward_zero)
 {
     float const f = shc_u2f(r);
-    float const v = shc_trunc() ? floorf(f) : nearbyintf(f);
+    float const v = !shc_trunc() ? nearbyintf(f) : toward_zero ? truncf(f) : floorf(f);
     if (v != v || v >= 2147483648.0f || v < -2147483648.0f)
         return 0x80000000u;
     return (uint32_t)(int32_t)v;
@@ -1087,7 +1058,7 @@ static uint32_t shc_faddsub(uint32_t a, uint32_t b, int kind)
     } else {
         float const x = shc_u2f(shc_flush(a));
         float const y = shc_u2f(shc_flush(b) ^ (kind == 1 ? SHC_F_SIGN : 0));
-        float f = shc_add_rounded(x, y, shc_trunc());
+        float f = x + y;
         if (kind == 2)
             f = f * 0.5f;
         r = shc_falu_result(shc_f2u(f));
@@ -1155,8 +1126,8 @@ static void shc_faddfsub(uint32_t a, uint32_t b, uint32_t *ra, uint32_t *rs)
         float const x = shc_u2f(shc_flush(a));
         float const y = shc_u2f(shc_flush(b));
         bool const t = shc_trunc();
-        *ra = shc_falu_result(shc_f2u(shc_add_rounded(x, y, t)));
-        *rs = shc_falu_result(shc_f2u(shc_add_rounded(x, -y, t)));
+        *ra = shc_falu_result(shc_f2u(x + y));
+        *rs = shc_falu_result(shc_f2u(x - y));
         shc_set_an(*ra | *rs);
     } else {
         if ((a ^ b) & SHC_F_SIGN) {
@@ -1196,19 +1167,15 @@ static uint32_t shc_fmul_bits(uint32_t a, uint32_t b)
         g_shc.s.stky |= SHC_MIS;
         return SHC_F_NAN;
     }
-    uint32_t const x = shc_flush(a), y = shc_flush(b);
-    r = shc_f2u(shc_mul_rounded(shc_u2f(x), shc_u2f(y), shc_trunc()));
+    r = shc_f2u(shc_u2f(a) * shc_u2f(b));
+    shc_set_mn(r);
     if (shc_is_inf(r)) {
         g_shc.astat |= SHC_MV;
         g_shc.s.stky |= SHC_MVS;
-        if (shc_trunc() && !shc_is_inf(x) && !shc_is_inf(y))
-            r = (r & SHC_F_SIGN) | SHC_F_MAXT;
-    } else if (shc_is_doz(r) && !shc_is_zero(x) && !shc_is_zero(y)) {
+    } else if (shc_is_denorm(r)) {
         g_shc.astat |= SHC_MU;
         g_shc.s.stky |= SHC_MUS;
-        r &= SHC_F_SIGN;
     }
-    shc_set_mn(r);
     return r;
 }
 
@@ -1416,7 +1383,7 @@ static void shc_fabs_addsub(int rn, uint32_t a, uint32_t b, bool sub)
     } else {
         float const x = shc_u2f(shc_flush(a));
         float const y = shc_u2f(shc_flush(b) ^ (sub ? SHC_F_SIGN : 0));
-        r = shc_f2u(shc_add_rounded(x, y, shc_trunc())) & ~SHC_F_SIGN;
+        r = shc_f2u(x + y) & ~SHC_F_SIGN;
         if (r == SHC_F_EXP) {
             g_shc.astat |= SHC_AV;
             g_shc.s.stky |= SHC_AVS;
@@ -1523,10 +1490,11 @@ static void shc_op_logb(int rn, int rx, int ry)
     g_shc.astat |= SHC_AF;
 }
 
-/* FIX Fx [BY Ry]: r_alu is the (scaled) float the integer comes from */
+/* FIX Fx [BY Ry]: r_alu is the (scaled) float the integer comes from; the
+ * multifunction FIX (`clear` false) truncates toward zero, as in MAME */
 static void shc_fix_out(int rn, uint32_t r_alu, uint32_t src, bool clear)
 {
-    uint32_t const i = shc_fix_bits(r_alu);
+    uint32_t const i = shc_fix_bits(r_alu, !clear);
     if (clear)
         shc_alu_clear();
     shc_set_an(i);
@@ -1564,14 +1532,14 @@ static void shc_float_flags(uint32_t r)
 static void shc_op_float(int rn, int rx, int ry)
 {
     (void)ry;
-    g_shc.r[rn] = shc_f2u(shc_from_int((int32_t)SHC_X, shc_trunc()));
+    g_shc.r[rn] = shc_f2u((float)(int32_t)SHC_X);
     shc_alu_clear();
     shc_float_flags(g_shc.r[rn]);
 }
 
 static void shc_op_float_scaled(int rn, int rx, int ry)
 {
-    uint32_t const x = shc_f2u(shc_from_int((int32_t)SHC_X, shc_trunc()));
+    uint32_t const x = shc_f2u((float)(int32_t)SHC_X);
     shc_alu_clear();
     g_shc.r[rn] = shc_scalb(x, ry);
     shc_float_flags(g_shc.r[rn]);
@@ -1614,11 +1582,6 @@ static void shc_op_rsqrts(int rn, int rx, int ry)
     uint32_t r;
     if (x > 0x80000000u || shc_is_nan(x)) {
         r = SHC_F_NAN;
-    } else if (shc_is_zero(x)) {
-        /* +-0 is +-infinity (the chip's manual; MAME's table gives 2^62,
-         * whose square overflows to inf on the host but saturates in our
-         * TRUNCATE fmul: Virtual-On's sqrt(0) is then 0 here, NaN there) */
-        r = x | SHC_F_INF;
     } else {
         int const u = shc_unbiased(x);
         int const half = u >= 0 ? (u >> 1) : ~((~u) >> 1);    /* arithmetic >> 1 */
@@ -2190,7 +2153,7 @@ static void shc_mf_fmul_float_scaled(uint32_t op)
     shc_mul_clear();
     shc_alu_clear();
     uint32_t const r_mul = shc_fmul_bits(g_shc.r[f.fxm], g_shc.r[f.fym]);
-    uint32_t const x = shc_f2u(shc_from_int((int32_t)g_shc.r[f.fxa], shc_trunc()));
+    uint32_t const x = shc_f2u((float)(int32_t)g_shc.r[f.fxa]);
     uint32_t const r_alu = shc_scalb(x, f.fya);
     if (shc_u2f(r_alu) < 0.0f)
         g_shc.astat |= SHC_AN;
