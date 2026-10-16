@@ -184,8 +184,11 @@
  * 20: the sound UART's TxRDY interrupt is the board's for every game, not only
  *    one with STF's queue address, so Fighting Vipers takes it too (and
  *    Virtual-On sends its sound commands; Pinboard #935).
+ * 21: the SHARC's RSQRTS of +-0 is +-infinity, so Virtual-On's COP gives NaN
+ *    for the length of a zero vector, as MAME and the board do, not 0; its
+ *    tutorial shadow read that 0 and streaked (Pinboard #946).
  */
-#define NETPLAY_PROTO_REV 20
+#define NETPLAY_PROTO_REV 21
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.

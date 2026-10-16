@@ -297,13 +297,33 @@ static void test_von(void)
         CHECK(r >= 8191 && r <= 8193, "angle of (1, 1) is 0x2000 (45 degrees)");
     }
 
+    /* 0x1f takes six floats and ends in x * 1/sqrt(x); all zeros is NaN on the board and
+     * in MAME (RSQRTS(0) = inf, inf * 0), and Virtual-On's tutorial shadow
+     * relies on it (Pinboard #946) */
+    uint32_t const zero6[6] = { 0 };
+    CHECK(von_cmd(0x1f, 6, zero6) == 0xFFFFFFFFu, "cmd 0x1f of zeros is NaN 0xFFFFFFFF, as in MAME");
+
     test_von_matrix();
     CHECK(g_shc.stop == SHC_STOP_SPIN && !g_shc.fault, "back in the command loop, no fault");
+}
+
+static void test_rsqrts(void)
+{
+    g_shc.r[1] = 0;
+    shc_op_rsqrts(0, 1, 0);
+    CHECK(g_shc.r[0] == 0x7F800000u && (g_shc.astat & SHC_AV), "RSQRTS +0 = +inf, AV");
+    g_shc.r[1] = 0x80000000u;
+    shc_op_rsqrts(0, 1, 0);
+    CHECK(g_shc.r[0] == 0xFF800000u, "RSQRTS -0 = -inf");
+    g_shc.r[1] = f2u(4.0f);
+    shc_op_rsqrts(0, 1, 0);
+    CHECK(g_shc.r[0] == 0x3EFF8000u, "RSQRTS 4 seeds 0.4995 (MAME's table)");
 }
 
 int main(void)
 {
     test_mini();
+    test_rsqrts();
     test_von();
     printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;

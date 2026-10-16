@@ -1614,6 +1614,11 @@ static void shc_op_rsqrts(int rn, int rx, int ry)
     uint32_t r;
     if (x > 0x80000000u || shc_is_nan(x)) {
         r = SHC_F_NAN;
+    } else if (shc_is_zero(x)) {
+        /* +-0 is +-infinity (the chip's manual; MAME's table gives 2^62,
+         * whose square overflows to inf on the host but saturates in our
+         * TRUNCATE fmul: Virtual-On's sqrt(0) is then 0 here, NaN there) */
+        r = x | SHC_F_INF;
     } else {
         int const u = shc_unbiased(x);
         int const half = u >= 0 ? (u >> 1) : ~((~u) >> 1);    /* arithmetic >> 1 */
