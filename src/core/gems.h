@@ -385,6 +385,10 @@ static void gems_snap_load(const gems_snap_t *s, i960_cpu_t *cpu, memory_bus_t *
 static inline bool gems_float_close(uint32_t a, uint32_t b) {
     float fa = gems_u2f(a), fb = gems_u2f(b);
     if (!isfinite(fa) || !isfinite(fb)) return false;
+    /* A denormal is a small integer in the word (a face number, a count, a
+     * flag), not a float: close only to itself. Without this a wrong slot
+     * holding 3 for 5 passed as float-close (ages.h's efc_face_change_cont). */
+    if ((fa != 0.0f && !isnormal(fa)) || (fb != 0.0f && !isnormal(fb))) return false;
     float d = fabsf(fa - fb), m = fmaxf(fabsf(fa), fabsf(fb));
     return d <= 1e-4f * m || d < 1e-6f;
 }
@@ -467,35 +471,38 @@ static void gems_compare(gems_cmp_t *c, const gems_snap_t *c_run, const i960_cpu
     }
 }
 
-static void gems_verify_log(const gems_trap_t *t, const gems_cmp_t *c, const gems_snap_t *c_run,
-                            const i960_cpu_t *cpu) {
+/* tag: the log's prefix, "gems" or "ages" (ages.h runs FV's patched
+ * functions through this verifier too). */
+static void gems_verify_log(const char *tag, const gems_trap_t *t, const gems_cmp_t *c,
+                            const gems_snap_t *c_run, const i960_cpu_t *cpu) {
     const gems_diff_t *d = c->d;
-    LOG_WARN("gems-verify: %s (0x%08X) differs: regs g%04X r%04X; words ram %d ram2 %d "
+    LOG_WARN("%s-verify: %s (0x%08X) differs: regs g%04X r%04X; words ram %d ram2 %d "
              "buff %d tile %d pal %d back %d dm %d (+%d float-close)",
-             t->name, t->site, c->gmask >> 16, c->gmask & 0xFFFF, d[GEMS_RAM].words, d[GEMS_RAM2].words,
+             tag, t->name, t->site, c->gmask >> 16, c->gmask & 0xFFFF, d[GEMS_RAM].words, d[GEMS_RAM2].words,
              d[GEMS_BUFF].words, d[GEMS_TILE].words, d[GEMS_PAL].words, d[GEMS_BACK].words,
              d[GEMS_DM].words, c->close);
     for (int k = 0; k < GEMS_REGIONS; k++)
         if (d[k].words)
-            LOG_WARN("gems-verify:   first at 0x%08X: C 0x%08X, i960 0x%08X", d[k].first, d[k].a, d[k].b);
+            LOG_WARN("%s-verify:   first at 0x%08X: C 0x%08X, i960 0x%08X", tag, d[k].first, d[k].a, d[k].b);
     for (int i = 0; i < 16; i++)
         if (c->gmask & (1u << i))
-            LOG_WARN("gems-verify:   r%d: C 0x%08X, i960 0x%08X", i, c_run->cpu.locals.r[i], cpu->locals.r[i]);
+            LOG_WARN("%s-verify:   r%d: C 0x%08X, i960 0x%08X", tag, i, c_run->cpu.locals.r[i], cpu->locals.r[i]);
     for (int i = 0; i < 16; i++)
         if (c->gmask & (1u << (16 + i)))
-            LOG_WARN("gems-verify:   g%d: C 0x%08X, i960 0x%08X", i, c_run->cpu.globals.g[i], cpu->globals.g[i]);
+            LOG_WARN("%s-verify:   g%d: C 0x%08X, i960 0x%08X", tag, i, c_run->cpu.globals.g[i], cpu->globals.g[i]);
 }
 
-/* Run the trap both ways (see the top of the file). Returns 0: the board
- * carries on from the i960's run; 1 for a call it lets the i960 run alone. */
-static int gems_verify(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t) {
+/* Run the trap both ways (see the top of the file), counting into st and
+ * logging under tag. Returns 0: the board carries on from the i960's run; 1
+ * for a call it lets the i960 run alone. */
+static int gems_verify_in(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t,
+                          gems_verify_stat_t *st, const char *tag) {
     for (int k = 0; k < 2; k++)
         if (!s_gems_snap[k] && !(s_gems_snap[k] = (gems_snap_t *)malloc(sizeof(gems_snap_t)))) {
             gems_run(cpu, bus, t);
             return 0;
         }
     gems_snap_t *before = s_gems_snap[0], *c_run = s_gems_snap[1];
-    gems_verify_stat_t *st = &s_gems_stat[t - gems_traps];
     if (!gems_verify_this_call(st)) return 1;
     st->calls++;
 
@@ -508,8 +515,8 @@ static int gems_verify(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t)
 
     if (!gems_verify_i960_to(cpu, bus, stop_ip, stop_d)) {
         if (++st->lost <= 3)
-            LOG_WARN("gems-verify: %s: the i960 never reached 0x%08X (depth %d) from 0x%08X",
-                     t->name, stop_ip, stop_d, t->site);
+            LOG_WARN("%s-verify: %s: the i960 never reached 0x%08X (depth %d) from 0x%08X",
+                     tag, t->name, stop_ip, stop_d, t->site);
         return 0;
     }
 
@@ -521,21 +528,30 @@ static int gems_verify(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t)
     }
     /* Registers alone: often a scratch register the C never needed. */
     if (!c.words) st->regs++; else st->differ++;
-    if (st->logged++ < 4) gems_verify_log(t, &c, c_run, cpu);
+    if (st->logged++ < 4) gems_verify_log(tag, t, &c, c_run, cpu);
     return 0;
 }
 
-static void gems_verify_report(void) {
-    if (!g_gems_verify) return;
-    for (size_t i = 0; i < gems_trap_count; i++) {
-        const gems_verify_stat_t *s = &s_gems_stat[i];
+static int gems_verify(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t) {
+    return gems_verify_in(cpu, bus, t, &s_gems_stat[t - gems_traps], "gems");
+}
+
+/* One row per function that ran: traps[i] counted into stats[i]. */
+static void gems_verify_report_rows(const char *tag, const gems_trap_t *traps, size_t n,
+                                    const gems_verify_stat_t *stats) {
+    for (size_t i = 0; i < n; i++) {
+        const gems_verify_stat_t *s = &stats[i];
         if (!s->calls) continue;
-        LOG_INFO("gems-verify: %-28s calls %llu  exact %llu  float-close %llu  regs-only %llu  "
+        LOG_INFO("%s-verify: %-28s calls %llu  exact %llu  float-close %llu  regs-only %llu  "
                  "differ %llu  lost %llu",
-                 gems_traps[i].name, (unsigned long long)s->calls, (unsigned long long)s->exact,
+                 tag, traps[i].name, (unsigned long long)s->calls, (unsigned long long)s->exact,
                  (unsigned long long)s->close, (unsigned long long)s->regs,
                  (unsigned long long)s->differ, (unsigned long long)s->lost);
     }
+}
+
+static void gems_verify_report(void) {
+    if (g_gems_verify) gems_verify_report_rows("gems", gems_traps, gems_trap_count, s_gems_stat);
 }
 
 static int gems_hook(i960_cpu_t *cpu, memory_bus_t *bus) {

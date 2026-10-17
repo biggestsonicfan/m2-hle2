@@ -84,6 +84,30 @@ if(M2HLE_GEMS_DIR)
     include_directories("${M2HLE_GEMS_DIR}")
 endif()
 
+# Sega's own C for Fighting Vipers' patched i960 functions, from Sega Ages 2500
+# Vol. 19 (src/core/ages.h; --ages-i960, --ages-verify). The owner's ages-c
+# repository, which carries ages-decomp as its submodule decomp/: point this
+# at a checkout holding ages_impl.h. Empty (the default): none. As with Gems,
+# its ages_all.h is generated, not tracked: gen_all.py writes it beside itself.
+set(M2HLE_AGES_DIR "" CACHE PATH "Directory with ages_impl.h (Sega Ages 2500 Fighting Vipers C); empty: none")
+if(M2HLE_AGES_DIR)
+    if(NOT EXISTS "${M2HLE_AGES_DIR}/ages_impl.h")
+        message(FATAL_ERROR "M2HLE_AGES_DIR: no ages_impl.h in ${M2HLE_AGES_DIR}")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${M2HLE_AGES_DIR}/gen_all.py"
+                    RESULT_VARIABLE _ages_rc OUTPUT_QUIET ERROR_VARIABLE _ages_err)
+    if(NOT _ages_rc EQUAL 0)
+        message(FATAL_ERROR "M2HLE_AGES_DIR: gen_all.py failed: ${_ages_err}"
+                "(it needs the decomp/ submodule: git submodule update --init decomp)")
+    endif()
+    file(GLOB _ages_inputs CONFIGURE_DEPENDS "${M2HLE_AGES_DIR}/fn/*.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ages_inputs}
+                 "${M2HLE_AGES_DIR}/gen_all.py" "${M2HLE_AGES_DIR}/decomp/FV/FN/INDEX.md")
+    add_compile_definitions(M2HLE_AGES)
+    include_directories("${M2HLE_AGES_DIR}")
+endif()
+
 # A build to debug a running emulator with (tools/build-debug.sh). Debug and
 # RelWithDebInfo keep the frame pointer, so perf, gdb and the crash backtrace
 # (core/crash_trace.h) can walk the stack. M2HLE_SANITIZE adds sanitizers, e.g.

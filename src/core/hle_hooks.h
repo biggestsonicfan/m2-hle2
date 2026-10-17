@@ -369,7 +369,8 @@ static const game_profile_t *s_hle_filter_profile = NULL;
 static uint8_t               s_hle_filter[65536 / 8];
 
 /* Hooks that do not belong to a profile: --gems-i960 (gems.h) puts the Sonic
- * Gems Collection's C at its trap sites this way. g_hle_extra_sites lists the
+ * Gems Collection's C at its trap sites this way, and --ages-i960 (ages.h)
+ * Sega Ages' at FV's patch sites (ages_apply after gems_apply). g_hle_extra_sites lists the
  * addresses for the filter; g_hle_extra_hook is asked first at any of them and
  * declines (1) like a profile hook. Bump g_hle_filter_gen after a change. */
 static const uint32_t *g_hle_extra_sites = NULL;

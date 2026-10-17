@@ -37,6 +37,7 @@
 #include "rom_loader.h"
 #include "emu_thread.h"
 #include "gems.h"          /* --gems-i960 / --gems-cop: Sega's own C from Sonic Gems Collection */
+#include "ages.h"          /* --ages-i960: Sega's own C from Sega Ages 2500 Fighting Vipers */
 #include "memview.h"
 #include "cpu_window.h"
 #include "breakpoint_window.h"
@@ -336,6 +337,7 @@ static void load_active_profile(const char *primary_zip) {
         geo3d_lookup_invalidate();
         g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
         gems_apply(profile_rom_set(g_active_profile));
+        ages_apply(profile_rom_set(g_active_profile));   /* after gems_apply: they share the extra-hook slot */
         load_sound_board();
         /* Inputs are delivered via the I/O ports (read by the game's vblank
          * interrupt), so attach the I/O read callback after the bus re-init. */
@@ -1334,6 +1336,7 @@ static void headless_shutdown(void) {
     scripts_shutdown();
     backup_ram_flush();
     gems_verify_report();
+    ages_verify_report();
     netplay_shutdown();
     overlay_host_shutdown();
     av_capture_shutdown();
@@ -1668,6 +1671,7 @@ static void cleanup(void) {
     scripts_shutdown();
     backup_ram_flush();   /* the board has stopped: what it holds now is final */
     gems_verify_report();
+    ages_verify_report();
     netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
@@ -1879,6 +1883,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_gems_cop = true;      /* the COP commands in Gems' C */
         } else if (strcmp(argv[i], "--gems-verify") == 0) {
             g_gems_verify = true;   /* each trapped function both ways, differences logged */
+        } else if (strcmp(argv[i], "--ages-i960") == 0) {
+            g_ages_i960 = true;     /* FV's patched functions in Sega Ages' C (core/ages.h) */
+        } else if (strcmp(argv[i], "--ages-verify") == 0) {
+            g_ages_verify = true;   /* each patched function both ways, differences logged */
         } else if (strcmp(argv[i], "--texload-i960") == 0) {
             g_texload_hle = 0;   /* STF's texture loader on the i960, not in C (m2_texload.h) */
         } else if (strcmp(argv[i], "--i960-timing") == 0 && i + 1 < argc) {
