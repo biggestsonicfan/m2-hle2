@@ -686,21 +686,30 @@ enum {
 };
 static uint8_t m68k_fast[65536];
 
+/* A group 6 opcode's fast form: BRA or Bcc, .W or .B; none for BSR (c = 1) or
+ * the 68020's .L (displacement 0xFF). */
+static uint8_t m68k_fast_branch(uint32_t op) {
+    uint32_t disp = op & 0xFF, cc = (op >> 8) & 0xF;
+    if (cc == 1 || disp == 0xFF) return M68K_F_NONE;
+    if (cc == 0) return disp == 0 ? M68K_F_BRA_W : M68K_F_BRA_B;
+    return disp == 0 ? M68K_F_BCC_W : M68K_F_BCC_B;
+}
+
+/* The fast form an opcode takes, or M68K_F_NONE for the general decode. */
+static uint8_t m68k_fast_kind(uint32_t op) {
+    if (op == 0x4EFA)                   return M68K_F_JMP_PCD16;
+    if ((op & 0xF000) == 0x6000)        return m68k_fast_branch(op);
+    if ((op & 0xF1F8) == 0x1010)        return M68K_F_MOVEB_AI_DN;
+    if ((op & 0xF1F8) == 0x1168)        return M68K_F_MOVEB_D16_D16;
+    if ((op & 0xF1FF) == 0xD0FC)        return M68K_F_ADDAW_IMM;
+    if ((op & 0xF1F8) == 0xE098)        return M68K_F_RORL_IMM;
+    return M68K_F_NONE;
+}
+
 static void m68k_fast_init(void) {
     memset(m68k_fast, 0, sizeof m68k_fast);
     if (!M68K_FAST) return;
-    for (uint32_t op = 0; op < 65536; op++) {
-        uint8_t k = M68K_F_NONE;
-        uint32_t disp = op & 0xFF, cc = (op >> 8) & 0xF;
-        if (op == 0x4EFA)                                   k = M68K_F_JMP_PCD16;
-        else if ((op & 0xF000) == 0x6000 && cc == 0)        k = disp == 0 ? M68K_F_BRA_W : disp == 0xFF ? M68K_F_NONE : M68K_F_BRA_B;
-        else if ((op & 0xF000) == 0x6000 && cc >= 2)        k = disp == 0 ? M68K_F_BCC_W : disp == 0xFF ? M68K_F_NONE : M68K_F_BCC_B;
-        else if ((op & 0xF1F8) == 0x1010)                   k = M68K_F_MOVEB_AI_DN;
-        else if ((op & 0xF1F8) == 0x1168)                   k = M68K_F_MOVEB_D16_D16;
-        else if ((op & 0xF1FF) == 0xD0FC)                   k = M68K_F_ADDAW_IMM;
-        else if ((op & 0xF1F8) == 0xE098)                   k = M68K_F_RORL_IMM;
-        m68k_fast[op] = k;
-    }
+    for (uint32_t op = 0; op < 65536; op++) m68k_fast[op] = m68k_fast_kind(op);
 }
 
 /* One instruction, with the timing and fast-form tables already built
