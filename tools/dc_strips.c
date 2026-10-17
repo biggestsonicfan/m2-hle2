@@ -142,6 +142,8 @@ int main(int argc, char **argv) {
     }
     fclose(kf);
     if (!table_count) { fprintf(stderr, "dc_strips: %s has no table line\n", keys); return 1; }
+    /* the keys' table line gives where and how many; STF's entries are the 1995 layout (model_table.h) */
+    const model_table_t table = model_table_make(table_off, table_count, (model_layout_t)MODEL_LAYOUT_1995);
 
     /* the blobs, in the keys' order (the frame that first draws them); with
      * groups, group by group, each from a sector, in the order of the first
@@ -167,15 +169,14 @@ int main(int argc, char **argv) {
             if (ng) grp[ng - 1].len = (uint32_t)at - grp[ng - 1].off;
             ng++;
         }
-        if (e->model < 0 || (uint32_t)e->model >= table_count) { skipped++; continue; }
-        uint32_t toff = table_off + (uint32_t)e->model * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE > main_data_size) { skipped++; continue; }
-        uint32_t raw = read_u32_le(main_data + toff + 8);
+        model_entry_t ent;
+        if (e->model < 0 || !model_entry_read(&table, main_data, main_data_size, (uint32_t)e->model, &ent)) { skipped++; continue; }
+        uint32_t raw = ent.mesh_ptr;
         if (!raw) { skipped++; continue; }
         geo3d_cmesh_t m = { .model_idx = e->model, .mat_ptr = e->mat, .uv_ptr = e->uv,
                             .md = { .polygons = polygons, .materials = textures, .main_data = main_data,
                                     .polygons_size = polygons_size, .materials_size = textures_size,
-                                    .table_off = table_off, .table_count = table_count,
+                                    .table = table,
                                     .mesh_ptr_subtract = sub, .mesh_ptr_add = add } };
         if (!geo3d_mesh_build(&m, raw * 4u - sub + add, e->mat != 0, e->uv != 0)) { skipped++; continue; }
         size_t len = dcs_blob(&m, one, sizeof one);
