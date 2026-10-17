@@ -48,6 +48,18 @@
 
 /* ---- where things are ---------------------------------------------------- */
 
+#if defined(SOUND_RAM_SIZE) && SOUND_RAM_SIZE < 0x80000u
+/* A board built with less than the 512 KB of sound RAM (the Dreamcast's 4 KB,
+ * dreamcast/Makefile: its sound is dc_sound.h) never runs the driver: its
+ * entry points, inert, and the driver's 20 KB out of the build (Pinboard #1038). */
+typedef struct { bool on; } shle_t;
+static shle_t g_shle;
+static int g_sound_hle_want;   /* the front ends' flag; nothing to switch here */
+static inline bool shle_driver_known(void) { (void)g_sound_hle_want; return false; }
+static inline void shle_run(uint32_t n) { (void)n; }
+static inline void shle_reset(void) {}
+#else
+
 #define SHLE_A6(o)        (0x1000u + (uint32_t)(o))   /* the driver's a6-relative RAM */
 #define SHLE_QUEUE        SHLE_A6(0x100)              /* 256 queued MIDI events, 4 bytes each */
 #define SHLE_VOICES       SHLE_A6(0x1800)             /* 32 x 16: one per SCSP slot */
@@ -1898,4 +1910,5 @@ static inline void shle_reset(void) {
 #undef SG16
 #undef SG32
 
+#endif /* SOUND_RAM_SIZE */
 #endif /* SOUND_HLE_H */

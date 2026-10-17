@@ -91,6 +91,27 @@
 #include "hle_hooks.h"
 #include "savestate_reg.h"
 
+/* Is a player's game on the board? The main mode (0x50002A): 0-3 the warning
+ * and attract, 16-17 the test menu; the rest is a game, from INFO_INT to the
+ * name entry and the ranking. */
+static bool sfight_in_play(memory_bus_t *bus) {
+    uint8_t mode = mem_read8(bus, 0x0050002A);
+    return mode >= 4 && mode <= 19 && mode != 16 && mode != 17;
+}
+
+#ifdef M2HLE_NO_ZIP
+/* A build with no replays (replay.h: the Dreamcast) takes no rounds, so the
+ * recorders' hooks and their 316 KB of statics stay out of it (Pinboard #1038).
+ * The hooks record and never touch the board unless a native replay is playing,
+ * so the board runs the same without them. */
+static inline void sfight_native_install(const char *profile_id) { (void)profile_id; (void)g_native_play; }
+static bool sfight_native_take(game_native_round_t *out) { (void)out; return false; }
+static const char *sfight_native_put(memory_bus_t *bus, const game_native_round_t *in) { (void)bus; (void)in; return "this build keeps no replays"; }
+static const char *sfight_native_play(const game_native_round_t *rounds, int n) { (void)rounds; (void)n; return "this build keeps no replays"; }
+#define SFIGHT_NATIVE_HOOK_COUNT 0
+#define SFIGHT_NATIVE_HOOKS
+#else
+
 #define SFN_BANK_PTR      0x00500168u   /* replay_bank_adr */
 #define SFN_BANK          0x00531000u
 #define SFN_BANK_LEN      0x1014u
@@ -658,14 +679,6 @@ static int sfight_hook_native_adv_pic2(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 1;
 }
 
-/* Is a player's game on the board? The main mode (0x50002A): 0-3 the warning
- * and attract, 16-17 the test menu; the rest is a game, from INFO_INT to the
- * name entry and the ranking. */
-static bool sfight_in_play(memory_bus_t *bus) {
-    uint8_t mode = mem_read8(bus, 0x0050002A);
-    return mode >= 4 && mode <= 19 && mode != 16 && mode != 17;
-}
-
 /* The recorder's counters ride in savestates and GGPO's rollback. */
 static inline void sfight_native_install(const char *profile_id) {
     memset(&s_sfr, 0, sizeof s_sfr);
@@ -685,4 +698,5 @@ static inline void sfight_native_install(const char *profile_id) {
     { SFN_CAM_VIEW_TAKE, sfight_hook_native_view_rec,  "camera view (native replay)" }, \
     { SFN_CAM_VIEW,   sfight_hook_native_view_play, "camera view play (native replay)" }, \
 
+#endif /* M2HLE_NO_ZIP */
 #endif /* M2HLE_SFIGHT_NATIVE_H */
