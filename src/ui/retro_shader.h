@@ -256,18 +256,29 @@ static inline const char *rs_vfs_used(void) {
     return out;
 }
 
+/* Where the path component ending at e starts (just after a '/', or at p). */
+static inline const char *rs_path_comp_start(const char *p, const char *e) {
+    while (e > p && e[-1] != '/') e--;
+    return e;
+}
+
+/* Whether components [sa, ea) and [sb, eb) are the same name (case-insensitive);
+ * an empty one, or a ".." in b, never is. */
+static inline bool rs_path_comp_same(const char *sa, const char *ea, const char *sb, const char *eb) {
+    size_t la = (size_t)(ea - sa), lb = (size_t)(eb - sb);
+    if (la != lb || la == 0 || (lb == 2 && sb[0] == '.' && sb[1] == '.')) return false;
+    for (size_t k = 0; k < la; k++)
+        if (tolower((unsigned char)sa[k]) != tolower((unsigned char)sb[k])) return false;
+    return true;
+}
+
 /* How many trailing path components two paths share (case-insensitive). */
 static inline int rs_path_suffix_match(const char *a, const char *b) {
     const char *ea = a + strlen(a), *eb = b + strlen(b);
     int comps = 0;
     while (ea > a && eb > b) {
-        const char *sa = ea, *sb = eb;
-        while (sa > a && sa[-1] != '/') sa--;
-        while (sb > b && sb[-1] != '/') sb--;
-        size_t la = (size_t)(ea - sa), lb = (size_t)(eb - sb);
-        if (la != lb || la == 0 || (lb == 2 && sb[0] == '.' && sb[1] == '.')) break;
-        for (size_t k = 0; k < la; k++)
-            if (tolower((unsigned char)sa[k]) != tolower((unsigned char)sb[k])) return comps;
+        const char *sa = rs_path_comp_start(a, ea), *sb = rs_path_comp_start(b, eb);
+        if (!rs_path_comp_same(sa, ea, sb, eb)) break;
         comps++;
         if (sa == a || sb == b) break;
         ea = sa - 1; eb = sb - 1;
