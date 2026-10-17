@@ -686,25 +686,33 @@ static void ps3ui__paint_cursor(ps3ui_image_t *im, int top, int bottom, int left
 
 /* ---- the info window's translucent navy frame (match_sel_info_*) ----------- */
 
+/* The fill, under the two-pixel left edge and top rim (the top wins). */
+static ps3ui__c4 ps3ui__sel_info_edges(int x, int y, int top, int left)
+{
+    if (top && y < 2) return ps3ui__hex4(0x002145, 0xE6);
+    if (left && x < 2) return x == 0 ? ps3ui__hex4(0x001F41, 0xD7) : ps3ui__hex4(0x001A3C, 0xBF);
+    return ps3ui__hex4(0x011937, 0xB3);
+}
+
+/* The bottom rim's two rows, b up from the bottom. */
+static ps3ui__c4 ps3ui__sel_info_rim(int x, int b, int left)
+{
+    if (left && x < 2) {
+        /* the rim rounds into the left edge */
+        if (x == 0 && b == 1) return ps3ui__hex4(0x082442, 0xD1);
+        if (x == b) return ps3ui__hex4(0x1E3552, 0xB9);
+        return ps3ui__hex4(0x4A5973, 0xC5);
+    }
+    return b == 1 ? ps3ui__hex4(0x3A4E6C, 0xBF) : ps3ui__hex4(0x425573, 0xC2);
+}
+
 static void ps3ui__paint_sel_info(ps3ui_image_t *im, int top, int bottom, int left)
 {
     int h = im->h;
     for (int y = 0; y < h; y++)
         for (int x = 0; x < im->w; x++) {
-            ps3ui__c4 c = ps3ui__hex4(0x011937, 0xB3);
             int b = h - 1 - y;
-            if (left && x < 2) c = x == 0 ? ps3ui__hex4(0x001F41, 0xD7) : ps3ui__hex4(0x001A3C, 0xBF);
-            if (top && y < 2) c = ps3ui__hex4(0x002145, 0xE6);
-            if (bottom && b < 2) {
-                ps3ui__c4 r = b == 1 ? ps3ui__hex4(0x3A4E6C, 0xBF) : ps3ui__hex4(0x425573, 0xC2);
-                if (left && x < 2) {
-                    /* the rim rounds into the left edge */
-                    if (x == 0 && b == 1) r = ps3ui__hex4(0x082442, 0xD1);
-                    else if (x == b) r = ps3ui__hex4(0x1E3552, 0xB9);
-                    else r = ps3ui__hex4(0x4A5973, 0xC5);
-                }
-                c = r;
-            }
+            ps3ui__c4 c = bottom && b < 2 ? ps3ui__sel_info_rim(x, b, left) : ps3ui__sel_info_edges(x, y, top, left);
             ps3ui__put(im, x, y, c);
         }
 }
