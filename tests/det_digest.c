@@ -828,16 +828,29 @@ static const uint8_t *mdlmap_rom(const void *p, uint32_t n) {
     return b;
 }
 
+/* The display list walked as game_frame.h walks it, on the profile's model
+ * table (the Dreamcast's recorders below). */
+static bool dc_scan_list(geo3d_state_t *geo, const uint32_t *snap, const model_table_t *table) {
+    const geo3d_rom_t rom = { romset.main_data, romset.main_data_size, table };
+    return geo3d_scan_geo_list(geo, &(const geo3d_list_t){ snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart },
+                               (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE), &rom);
+}
+
+/* Entry idx of the model table, as the board reads it; false when it is
+ * past the table or holds no mesh. */
+static bool dc_model_entry(const model_table_t *table, int32_t idx, model_entry_t *e) {
+    return idx >= 0 && model_entry_read(table, romset.main_data, romset.main_data_size, (uint32_t)idx, e) && e->mesh_ptr;
+}
+
 static void mdlmap_frame(void) {
     static geo3d_state_t geo;
     const game_quirks_t *q = &g_active_profile->quirks;
+    const model_table_t table = profile_model_table(q);
     if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
     for (int r = 0; r < 2; r++)
         if (!mdlmap_first[r]) mdlmap_first[r] = calloc((r ? romset.textures_size : romset.polygons_size) / MDLMAP_LINE + 1, 4);
     const uint32_t *snap = g_geodl_snap;
-    if (!geo3d_scan_geo_list(&geo, snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
-                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
-                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    if (!dc_scan_list(&geo, snap, &table)) return;
     g_geo_rs = geodl_raster_for(snap);
     g_geo3d_palram = bus.palette;
     g_geo3d_palram_size = PALETTE_SIZE;
@@ -847,7 +860,7 @@ static void mdlmap_frame(void) {
         .main_data = romset.main_data, .main_data_size = romset.main_data_size,
         .polygons  = romset.polygons,  .polygons_size  = romset.polygons_size,
         .materials = romset.textures,  .materials_size = romset.textures_size,
-        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+        .table = table,
         .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add,
     };
     for (int k = 0; k < geo.captured_count; k++) {
@@ -880,18 +893,15 @@ static uint32_t  spkey_n;
 static void spkey_frame(void) {
     static geo3d_state_t geo;
     const game_quirks_t *q = &g_active_profile->quirks;
+    const model_table_t table = profile_model_table(q);
     if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
     if (!spkey) spkey = calloc(SPKEY_SLOTS, sizeof *spkey);
-    if (!geo3d_scan_geo_list(&geo, g_geodl_snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
-                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
-                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    if (!dc_scan_list(&geo, g_geodl_snap, &table)) return;
     for (int k = 0; k < geo.captured_count; k++) {
         const captured_model_t *cm = &geo.captured[k];
-        if (cm->direct_len || cm->model_idx < 0 || (uint32_t)cm->model_idx >= q->model_table_count) continue;
-        uint32_t toff = q->model_table_offset + (uint32_t)cm->model_idx * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE > romset.main_data_size) continue;
-        if (!read_u32_le(romset.main_data + toff + 8)) continue;
-        uint32_t mat = read_u32_le(romset.main_data + toff + 4), uv = read_u32_le(romset.main_data + toff + 0);
+        model_entry_t ent;
+        if (cm->direct_len || !dc_model_entry(&table, cm->model_idx, &ent)) continue;
+        uint32_t mat = ent.mat_ptr, uv = ent.uv_ptr;
         if (cm->tha != 0xFFFFFFFFu) mat = cm->tha;
         if (cm->tpa != 0xFFFFFFFFu) uv = cm->tpa;
         if ((mat && (mat & 0x800000u)) || (uv && (uv & 0x800000u))) continue;   /* texture RAM: decoded every time */
@@ -1028,18 +1038,14 @@ static void txp_frame(void) {
     static geo3d_state_t geo;
     static uint8_t blob[4u << 20], cut[32768];
     const game_quirks_t *q = &g_active_profile->quirks;
+    const model_table_t table = profile_model_table(q);
     if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
-    if (!geo3d_scan_geo_list(&geo, g_geodl_snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
-                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
-                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    if (!dc_scan_list(&geo, g_geodl_snap, &table)) return;
     for (int k = 0; k < geo.captured_count; k++) {
         const captured_model_t *cm = &geo.captured[k];
-        if (cm->direct_len || cm->model_idx < 0 || (uint32_t)cm->model_idx >= q->model_table_count) continue;
-        uint32_t toff = q->model_table_offset + (uint32_t)cm->model_idx * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE > romset.main_data_size) continue;
-        uint32_t raw = read_u32_le(romset.main_data + toff + 8);
-        if (!raw) continue;
-        uint32_t mat = read_u32_le(romset.main_data + toff + 4), uv = read_u32_le(romset.main_data + toff + 0);
+        model_entry_t ent;
+        if (cm->direct_len || !dc_model_entry(&table, cm->model_idx, &ent)) continue;
+        uint32_t raw = ent.mesh_ptr, mat = ent.mat_ptr, uv = ent.uv_ptr;
         if (cm->tha != 0xFFFFFFFFu) mat = cm->tha;
         if (cm->tpa != 0xFFFFFFFFu) uv = cm->tpa;
         if ((mat && (mat & 0x800000u)) || (uv && (uv & 0x800000u))) continue;   /* texture RAM: not in the strip pack */
@@ -1055,7 +1061,7 @@ static void txp_frame(void) {
                                 .md = { .polygons = romset.polygons, .materials = romset.textures,
                                         .main_data = romset.main_data,
                                         .polygons_size = romset.polygons_size, .materials_size = romset.textures_size,
-                                        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+                                        .table = table,
                                         .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add } };
             if (geo3d_mesh_build(&m, raw * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mat != 0, uv != 0) &&
                 dcs_blob(&m, blob, sizeof blob)) {
