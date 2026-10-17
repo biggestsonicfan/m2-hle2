@@ -733,24 +733,31 @@ static ps3ui__c4 ps3ui__sel_row(int y, int h)
 
 static const uint32_t ps3ui__sel_edge[3] = { 0x0162A6, 0x0768AB, 0x0473B0 };
 
+/* The top corner's outer 3x3 (x and y 0..2): the bevel. */
+static ps3ui__c4 ps3ui__sel_top_outer(int x, int y)
+{
+    if (x > y) return ps3ui__hex4(0x005B9E, 255);
+    if (x == 0 && y == 2) return ps3ui__hex4(0x0065A5, 255);
+    /* the bevel's highlight runs in along the diagonal */
+    return ps3ui__hex4(x == y && y < 2 ? 0x067FBD : 0x0892CE, 255);
+}
+
+/* The top corner's inner 3x3 (x and y 3..5): the dark band, cut back along
+ * the diagonal. */
+static void ps3ui__sel_top_inner(ps3ui__c4 *c, int x, int y)
+{
+    if (y > x) *c = ps3ui__hex4(0x0572AC, 0x65);
+    else if (y == x && x > 3) *c = ps3ui__hex4(0x00244A, 0xD3);
+    else if (x == 3) *c = ps3ui__hex4(0x00244A, 0xB7);
+}
+
 /* The side plate's top-left corner and the dark band under it. Returns 1 if
  * (x, y) is one of its pixels. */
 static int ps3ui__sel_top(ps3ui__c4 *c, int x, int y)
 {
-    if (y < 3 && x <= y) {
-        /* the bevel's highlight runs in along the diagonal */
-        *c = ps3ui__hex4(x == y && y < 2 ? 0x067FBD : 0x0892CE, 255);
-        if (x == 0 && y == 2) *c = ps3ui__hex4(0x0065A5, 255);
-    } else if (y < 3 && x < 3) {
-        *c = ps3ui__hex4(0x005B9E, 255);
-    } else if (y >= 3 && y <= 5 && x >= 3 && x < 6) {
-        /* the dark band is cut back along the diagonal */
-        if (y - 3 > x - 3) *c = ps3ui__hex4(0x0572AC, 0x65);
-        else if (y - 3 == x - 3 && x > 3) *c = ps3ui__hex4(0x00244A, 0xD3);
-        else if (x == 3) *c = ps3ui__hex4(0x00244A, 0xB7);
-    } else {
-        return 0;
-    }
+    if (y < 3 && x < 3) *c = ps3ui__sel_top_outer(x, y);
+    else if (y >= 3 && y <= 5 && x >= 3 && x < 6) ps3ui__sel_top_inner(c, x, y);
+    else return 0;
     return 1;
 }
 
