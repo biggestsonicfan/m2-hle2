@@ -197,11 +197,12 @@ all: $(OUT)/1ST_READ.BIN
 # AOT_COVER= ...) rebuilds, where the object used to be left as it was. A stamp
 # file is rewritten only when its text changes.
 AOT_MAP  ?= sfight.aotmap
-# The STF profiles' hooks, read out of their tables (the `{ 0x..., *_hook` rows
-# of sfight.h and sfight_console.h): aot_check turns the whole AOT off when the
-# profile has a hook the code was not told about, and a hook added after the
-# map was recorded (enemy_rank_table, #509) did just that, silently.
-PROFILE_HOOKS := $(shell grep -hoE '\{ *0x[0-9A-Fa-f]+u?, *[A-Za-z0-9_]*hook' $(REPO)/src/profiles/sfight.h $(REPO)/src/profiles/sfight_console.h | sed -E 's/\{ *(0x[0-9A-Fa-f]+).*/--hook \1/' | sort -u)
+# The STF profiles' hooks, read out of their tables (the `{ ADDR, *_hook` rows
+# of sfight.h, sfight_console.h and sfight_native.h, a macro ADDR resolved by
+# tools/aot_hooks.py): aot_check turns the whole AOT off when the profile has a
+# hook the code was not told about, and a hook added after the map was recorded
+# (enemy_rank_table, #509; the native replay's ten, #1038) did just that, silently.
+PROFILE_HOOKS := $(shell python3 $(REPO)/tools/aot_hooks.py $(REPO)/src/profiles/sfight.h $(REPO)/src/profiles/sfight_console.h $(REPO)/src/profiles/sfight_native.h)
 AOT_ARGS := $(if $(filter sfight.aotmap,$(AOT_MAP)),--hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 $(PROFILE_HOOKS) $(GEMS_HOOKS)) --cover $(AOT_COVER)
 stamp = $(shell mkdir -p $(OUT); t='$(subst ','\'',$(2))'; [ "$$(cat $(1) 2>/dev/null)" = "$$t" ] || printf '%s' "$$t" > $(1))
 $(call stamp,$(OUT)/flags.stamp,$(CFLAGS))

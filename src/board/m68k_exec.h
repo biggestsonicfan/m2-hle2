@@ -12,10 +12,10 @@
  *                 BCC/BRA/BSR/JMP/JSR/RTS/RTE/RTR, LINK/UNLK,
  *                 Scc/DBcc, BTST/BCHG/BCLR/BSET (imm + reg),
  *                 LSL/LSR/ASL/ASR/ROL/ROR/ROXL/ROXR,
- *                 MULU/MULS, DIVU/DIVS, EXG,
+ *                 MULU/MULS, DIVU/DIVS, EXG, ABCD/SBCD/NBCD, TAS, CHK,
  *                 NOP/RESET/STOP/ILLEGAL/TRAP/TRAPV,
  *                 MOVE CCR/SR, MOVE to CCR/SR, MOVE USP.
- *   Stubbed:      ABCD/SBCD/NBCD, PACK/UNPK, CHK, TAS.
+ *   Stubbed:      PACK/UNPK (68020); CHK and TRAP warn, no exception.
  */
 #ifndef M68K_EXEC_H
 #define M68K_EXEC_H
@@ -686,21 +686,107 @@ enum {
 };
 static uint8_t m68k_fast[65536];
 
+/* A group 6 opcode's fast form: BRA or Bcc, .W or .B; none for BSR (c = 1) or
+ * the 68020's .L (displacement 0xFF). */
+static uint8_t m68k_fast_branch(uint32_t op) {
+    uint32_t disp = op & 0xFF, cc = (op >> 8) & 0xF;
+    if (cc == 1 || disp == 0xFF) return M68K_F_NONE;
+    if (cc == 0) return disp == 0 ? M68K_F_BRA_W : M68K_F_BRA_B;
+    return disp == 0 ? M68K_F_BCC_W : M68K_F_BCC_B;
+}
+
+/* The fast form an opcode takes, or M68K_F_NONE for the general decode. */
+static uint8_t m68k_fast_kind(uint32_t op) {
+    if (op == 0x4EFA)                   return M68K_F_JMP_PCD16;
+    if ((op & 0xF000) == 0x6000)        return m68k_fast_branch(op);
+    if ((op & 0xF1F8) == 0x1010)        return M68K_F_MOVEB_AI_DN;
+    if ((op & 0xF1F8) == 0x1168)        return M68K_F_MOVEB_D16_D16;
+    if ((op & 0xF1FF) == 0xD0FC)        return M68K_F_ADDAW_IMM;
+    if ((op & 0xF1F8) == 0xE098)        return M68K_F_RORL_IMM;
+    return M68K_F_NONE;
+}
+
 static void m68k_fast_init(void) {
     memset(m68k_fast, 0, sizeof m68k_fast);
     if (!M68K_FAST) return;
-    for (uint32_t op = 0; op < 65536; op++) {
-        uint8_t k = M68K_F_NONE;
-        uint32_t disp = op & 0xFF, cc = (op >> 8) & 0xF;
-        if (op == 0x4EFA)                                   k = M68K_F_JMP_PCD16;
-        else if ((op & 0xF000) == 0x6000 && cc == 0)        k = disp == 0 ? M68K_F_BRA_W : disp == 0xFF ? M68K_F_NONE : M68K_F_BRA_B;
-        else if ((op & 0xF000) == 0x6000 && cc >= 2)        k = disp == 0 ? M68K_F_BCC_W : disp == 0xFF ? M68K_F_NONE : M68K_F_BCC_B;
-        else if ((op & 0xF1F8) == 0x1010)                   k = M68K_F_MOVEB_AI_DN;
-        else if ((op & 0xF1F8) == 0x1168)                   k = M68K_F_MOVEB_D16_D16;
-        else if ((op & 0xF1FF) == 0xD0FC)                   k = M68K_F_ADDAW_IMM;
-        else if ((op & 0xF1F8) == 0xE098)                   k = M68K_F_RORL_IMM;
-        m68k_fast[op] = k;
+    for (uint32_t op = 0; op < 65536; op++) m68k_fast[op] = m68k_fast_kind(op);
+}
+
+/* ================================================================ BCD, TAS, CHK */
+
+/* The flags every BCD op leaves, as Musashi (MAME's 68000 before its cycle-level
+ * core) sets them: C and X are the decimal carry, Z is cleared by a non-zero
+ * result and otherwise kept, and N and V are the chip's undefined ones. */
+static inline uint32_t m68k_bcd_flags(m68k_cpu_t *c, uint32_t pre, uint32_t res, int carry) {
+    res &= 0xFF;
+    c->sr &= ~(M68K_SR_N | M68K_SR_V | M68K_SR_C | M68K_SR_X);
+    if (carry)             c->sr |= M68K_SR_C | M68K_SR_X;
+    if (~pre & res & 0x80) c->sr |= M68K_SR_V;
+    if (res & 0x80)        c->sr |= M68K_SR_N;
+    if (res)               c->sr &= ~M68K_SR_Z;
+    return res;
+}
+static inline uint32_t m68k_abcd(m68k_cpu_t *c, uint32_t src, uint32_t dst) {
+    uint32_t res = (src & 0x0F) + (dst & 0x0F) + ((c->sr & M68K_SR_X) != 0), pre = res;
+    if (res > 9) res += 6;
+    res += (src & 0xF0) + (dst & 0xF0);
+    int carry = res > 0x99;
+    if (carry) res -= 0xA0;
+    return m68k_bcd_flags(c, pre, res, carry);
+}
+static inline uint32_t m68k_sbcd(m68k_cpu_t *c, uint32_t src, uint32_t dst) {
+    uint32_t res = (dst & 0x0F) - (src & 0x0F) - ((c->sr & M68K_SR_X) != 0), pre = res;
+    if (res > 9) res -= 6;
+    res += (dst & 0xF0) - (src & 0xF0);
+    int carry = res > 0x99;
+    if (carry) res += 0xA0;
+    return m68k_bcd_flags(c, pre, res, carry);
+}
+
+/* ABCD / SBCD: 1100 (1000) Rx 10000 m Ry, m = 0 Dy,Dx, m = 1 -(Ay),-(Ax). */
+static inline void m68k_op_xbcd(m68k_state_t *s, uint16_t op, int add) {
+    m68k_cpu_t *c = &s->cpu;
+    int rx = (op >> 9) & 7, ry = op & 7;
+    if (!(op & 0x0008)) {
+        uint32_t src = c->d[ry] & 0xFF, dst = c->d[rx] & 0xFF;
+        m68k_dn_write(c, rx, add ? m68k_abcd(c, src, dst) : m68k_sbcd(c, src, dst), SZ_B);
+        return;
     }
+    c->a[ry] -= ry == 7 ? 2 : 1;
+    uint32_t src = m68k_rb(s, c->a[ry]);
+    c->a[rx] -= rx == 7 ? 2 : 1;
+    uint32_t dst = m68k_rb(s, c->a[rx]);
+    m68k_wb(s, c->a[rx], (uint8_t)(add ? m68k_abcd(c, src, dst) : m68k_sbcd(c, src, dst)));
+}
+
+/* NBCD, TAS and CHK, group 4. Returns 0 for an opcode that is none of them.
+ * They come first in the group: CHK.W Dn,D4 (0x4980) also matches EXT's mask.
+ * CHK warns where it would trap, as TRAP and TRAPV do: no exception is taken. */
+static inline int m68k_op_grp4_misc(m68k_state_t *s, uint16_t op, uint32_t op_pc) {
+    m68k_cpu_t *c = &s->cpu;
+    int mode = (op >> 3) & 7, reg = op & 7;
+    uint32_t a;
+    if ((op & 0xFFC0) == 0x4800 && mode != 1) {                     /* NBCD <ea> */
+        uint32_t dst = m68k_rmr(s, mode, reg, SZ_B, &a);
+        m68k_rmw(s, mode, reg, SZ_B, a, m68k_sbcd(c, dst, 0));
+        return 1;
+    }
+    if ((op & 0xFFC0) == 0x4AC0 && mode != 1 && op != 0x4AFC) {     /* TAS <ea> */
+        uint32_t v = m68k_rmr(s, mode, reg, SZ_B, &a);
+        m68k_flags_logic(c, v, SZ_B);
+        m68k_rmw(s, mode, reg, SZ_B, a, v | 0x80);
+        return 1;
+    }
+    if ((op & 0xF1C0) == 0x4180 && mode != 1) {                     /* CHK.W <ea>,Dn */
+        int16_t bound = (int16_t)m68k_ea_read(s, mode, reg, SZ_W);
+        int16_t v = (int16_t)c->d[(op >> 9) & 7];
+        if (v < 0 || v > bound) {
+            if (v < 0) c->sr |= M68K_SR_N; else c->sr &= ~M68K_SR_N;
+            LOG_WARN("m68k: CHK out of bounds at 0x%06X", op_pc);
+        }
+        return 1;
+    }
+    return 0;
 }
 
 /* One instruction, with the timing and fast-form tables already built
@@ -915,6 +1001,7 @@ static inline int m68k_step_core(m68k_state_t *s) {
     /* ---- group 4: misc ---- */
     case 0x4: {
         int mode = (op >> 3) & 7, reg = op & 7;
+        if (m68k_op_grp4_misc(s, op, op_pc)) break;
 
         /* 0100 1110 0111 0001: NOP */
         if (op == 0x4E71) break;
@@ -1182,7 +1269,6 @@ static inline int m68k_step_core(m68k_state_t *s) {
             m68k_push_l(s, m68k_ea_addr(s, (op>>3)&7, op&7));
             break;
         }
-        /* CHK, TAS, ABCD, NBCD — stub */
         LOG_WARN("m68k: unimplemented group4 op=0x%04X pc=0x%06X", op, op_pc);
         break;
     }
@@ -1309,6 +1395,7 @@ static inline int m68k_step_core(m68k_state_t *s) {
             }
             break;
         }
+        if ((op & 0x01F0) == 0x0100) { m68k_op_xbcd(s, op, 0); break; }   /* SBCD, not OR */
 
         int isz = (sz_bits==0)?SZ_B:(sz_bits==1)?SZ_W:SZ_L;
         uint32_t src, dst, r;
@@ -1435,18 +1522,15 @@ static inline int m68k_step_core(m68k_state_t *s) {
             }
             break;
         }
-        /* EXG: 1100 Dn 1 op 0 Rn */
-        if (dir && (sz_bits == 1 || sz_bits == 2)) {
-            if (sz_bits == 1) { /* EXG Dm,Dn */
-                uint32_t tmp = c->d[dn]; c->d[dn] = c->d[reg]; c->d[reg] = tmp;
-            } else { /* EXG Am,An */
-                uint32_t tmp = c->a[dn]; c->a[dn] = c->a[reg]; c->a[reg] = tmp;
-            }
-            break;
-        }
-        if (dir && sz_bits == 3) {
-            /* EXG Dn, An: 1100 Dn 1 01000 An */
-            uint32_t tmp = c->d[dn]; c->d[dn] = c->a[reg]; c->a[reg] = tmp;
+        if ((op & 0x01F0) == 0x0100) { m68k_op_xbcd(s, op, 1); break; }   /* ABCD, not AND */
+        /* EXG: 1100 Rx 1 opmode Ry, opmode 01000 Dx,Dy / 01001 Ax,Ay / 10001 Dx,Ay.
+         * Every other dir=1 word or long is AND Dn,<ea> to memory, so the mode
+         * decides: without it Dynamite Cop's and.l d6,(abs).w swapped registers
+         * and ran its extension word as an opcode. */
+        if (dir && ((sz_bits == 1 && mode <= 1) || (sz_bits == 2 && mode == 1))) {
+            uint32_t *x = (sz_bits == 1 && mode == 1) ? &c->a[dn] : &c->d[dn];
+            uint32_t *y = mode == 1 ? &c->a[reg] : &c->d[reg];
+            uint32_t tmp = *x; *x = *y; *y = tmp;
             break;
         }
         int isz = (sz_bits==0)?SZ_B:(sz_bits==1)?SZ_W:SZ_L;

@@ -495,78 +495,103 @@ static void shle_stream_hw_loop(uint32_t slot, uint32_t rec, uint32_t lr) {
     shle_wb(rec, shle_rb(rec) & 0x7F);
 }
 
+/* one slot's step, as loc_6041EA holds it in registers */
+typedef struct {
+    unsigned i;
+    uint32_t slot, rec, lr;  /* the SCSP slot, its stream record and its loop record */
+    uint32_t a1, a2, d5;     /* the next chunk's source and ring destination, the bytes left */
+    uint16_t d0;             /* the pacing, with this step's speed added */
+    uint8_t f, d2;           /* the record's flags and its place in the ring */
+} shle_chunk_t;
+
+/* where in the ring the next chunk goes; false while the chip is still
+ * playing the half it would land in */
+static bool shle_stream_dest(shle_chunk_t *c) {
+    if (c->d2 == 0) {                                   /* the lower half: once the chip has left it */
+        if (!shle_ca_upper(c->i)) return false;
+        shle_wl(c->lr, shle_rl(c->lr) - 0x2000);
+        shle_wl(c->lr + 4, shle_rl(c->lr + 4) - 0x2000);
+        c->a2 = shle_rl(c->rec + 0xE);
+    } else if (c->d2 == 0x80) {                         /* the upper half: likewise */
+        if (shle_ca_upper(c->i)) return false;
+        c->a2 = shle_rl(c->rec + 6);
+    } else c->a2 = shle_rl(c->rec + 6);
+    return true;
+}
+
+/* loc_604376: the end of a looped sample */
+static void shle_stream_loop_end(const shle_chunk_t *c) {
+    uint32_t rec = c->rec, lr = c->lr;
+    uint32_t x = (0x200u - c->d5) & 0xFFFF;
+    uint32_t d4 = (shle_rl(rec + 0x12) & 0xFFFFFFu) + x;
+    int32_t d3 = (int32_t)((shle_rl(rec + 0x16) & 0xFFFFFFu) - x);
+    if (d3 < 0) d3 = (int32_t)(shle_rl(rec + 0x16) & 0xFFFFFFu);
+    shle_wb(rec + 1, c->d2 + 0x10);
+    shle_ww(rec + 0x1C, c->d0 & 0x7FFF);
+    shle_wl(rec + 2, d4);
+    shle_wl(rec + 0xA, (uint32_t)d3);
+    shle_copy(c->a2, c->a1, 0x200);                     /* the tail, and the bytes after it, which repeat the loop's start */
+    shle_wl(rec + 6, c->a2 + 0x200);
+    if (!(c->f & 0x02)) return;
+    if ((int32_t)shle_rl(lr) < 0) {
+        shle_wl(lr, shle_rl(lr + 4));
+        shle_ww(lr + 6, shle_rw(lr + 6) + shle_rw(rec + 0x18));
+        shle_wl(rec + 2, shle_rl(rec + 0x12));
+        shle_wl(rec + 6, shle_rl(lr) + shle_rl(rec + 0xE));
+        return;
+    }
+    if ((uint8_t)(shle_rb(rec + 1) - 0x10) & 0x80) { shle_stream_hw_loop(c->slot, rec, lr); return; }
+    if (shle_rb(lr + 0x10) & 1) { shle_stream_hw_loop(c->slot, rec, lr); return; }
+    shle_wb(rec, (shle_rb(rec) | 0x04) & ~0x01u);
+}
+
+/* loc_6045D8: the last chunk */
+static void shle_stream_last(const shle_chunk_t *c) {
+    shle_ww(c->rec + 0x1E, (uint16_t)((c->a2 - shle_rl(c->rec + 0xE)) + c->d5));
+    shle_copy(c->a2, c->a1, 0x200);
+    if (!(c->d2 & 0x80)) {
+        shle_wb(c->rec, shle_rb(c->rec) | 0x08);
+        shle_wb(c->rec + 1, c->d2 + 0x10);
+        return;
+    }
+    shle_stream_done(c->i, c->rec);                     /* loc_6046C2: in the upper half, at once */
+}
+
 static void shle_stream_step(unsigned i) {
-    uint32_t slot = i * 0x20u, rec = SHLE_A6(0x1000) + slot, lr = SHLE_A6(0x1A00) + slot;
-    uint8_t f = shle_rb(rec);
-    if (!(f & 0x80)) return;
-    uint16_t d0 = (uint16_t)(shle_rw(rec + 0x1C) + shle_rw(rec + 0x1A));
-    if (d0 & 0x8000) { shle_ww(rec + 0x1C, d0); return; }    /* not yet: the pacing */
-    uint8_t d2 = shle_rb(rec + 1);
-    uint32_t a2;
-    if (d2 == 0) {                                      /* the lower half: once the chip has left it */
-        if (!shle_ca_upper(i)) return;
-        shle_wl(lr, shle_rl(lr) - 0x2000);
-        shle_wl(lr + 4, shle_rl(lr + 4) - 0x2000);
-        a2 = shle_rl(rec + 0xE);
-    } else if (d2 == 0x80) {                            /* the upper half: likewise */
-        if (shle_ca_upper(i)) return;
-        a2 = shle_rl(rec + 6);
-    } else a2 = shle_rl(rec + 6);
-    uint32_t a1 = shle_rl(rec + 2), d5 = shle_rl(rec + 0xA);
+    shle_chunk_t c = { .i = i, .slot = i * 0x20u };
+    c.rec = SHLE_A6(0x1000) + c.slot;
+    c.lr = SHLE_A6(0x1A00) + c.slot;
+    c.f = shle_rb(c.rec);
+    if (!(c.f & 0x80)) return;
+    c.d0 = (uint16_t)(shle_rw(c.rec + 0x1C) + shle_rw(c.rec + 0x1A));
+    if (c.d0 & 0x8000) { shle_ww(c.rec + 0x1C, c.d0); return; }    /* not yet: the pacing */
+    c.d2 = shle_rb(c.rec + 1);
+    if (!shle_stream_dest(&c)) return;
+    c.a1 = shle_rl(c.rec + 2);
+    c.d5 = shle_rl(c.rec + 0xA);
     g_shle.chunks++;
     g_shle.chunks_total++;
-    if (d5 > 0x200) {                                   /* a whole chunk */
-        shle_wl(rec + 0xA, d5 - 0x200);
-        shle_wb(rec + 1, d2 + 0x10);
-        shle_ww(rec + 0x1C, d0 & 0x7FFF);
-        shle_copy(a2, a1, 0x200);
-        shle_wl(rec + 2, a1 + 0x200);
-        shle_wl(rec + 6, a2 + 0x200);
+    if (c.d5 > 0x200) {                                 /* a whole chunk */
+        shle_wl(c.rec + 0xA, c.d5 - 0x200);
+        shle_wb(c.rec + 1, c.d2 + 0x10);
+        shle_ww(c.rec + 0x1C, c.d0 & 0x7FFF);
+        shle_copy(c.a2, c.a1, 0x200);
+        shle_wl(c.rec + 2, c.a1 + 0x200);
+        shle_wl(c.rec + 6, c.a2 + 0x200);
         return;
     }
-    if (f & 0x01) {                                     /* loc_604376: the end of a looped sample */
-        uint32_t x = (0x200u - d5) & 0xFFFF;
-        uint32_t d4 = (shle_rl(rec + 0x12) & 0xFFFFFFu) + x;
-        int32_t d3 = (int32_t)((shle_rl(rec + 0x16) & 0xFFFFFFu) - x);
-        if (d3 < 0) d3 = (int32_t)(shle_rl(rec + 0x16) & 0xFFFFFFu);
-        shle_wb(rec + 1, d2 + 0x10);
-        shle_ww(rec + 0x1C, d0 & 0x7FFF);
-        shle_wl(rec + 2, d4);
-        shle_wl(rec + 0xA, (uint32_t)d3);
-        shle_copy(a2, a1, 0x200);                       /* the tail, and the bytes after it, which repeat the loop's start */
-        shle_wl(rec + 6, a2 + 0x200);
-        if (!(f & 0x02)) return;
-        if ((int32_t)shle_rl(lr) < 0) {
-            shle_wl(lr, shle_rl(lr + 4));
-            shle_ww(lr + 6, shle_rw(lr + 6) + shle_rw(rec + 0x18));
-            shle_wl(rec + 2, shle_rl(rec + 0x12));
-            shle_wl(rec + 6, shle_rl(lr) + shle_rl(rec + 0xE));
-            return;
-        }
-        if ((uint8_t)(shle_rb(rec + 1) - 0x10) & 0x80) { shle_stream_hw_loop(slot, rec, lr); return; }
-        if (shle_rb(lr + 0x10) & 1) { shle_stream_hw_loop(slot, rec, lr); return; }
-        shle_wb(rec, (shle_rb(rec) | 0x04) & ~0x01u);
-        return;
-    }
-    if (f & 0x04) {                                     /* loc_604522: waiting to hand a loop to the chip */
+    if (c.f & 0x01) { shle_stream_loop_end(&c); return; }
+    if (c.f & 0x04) {                                   /* loc_604522: waiting to hand a loop to the chip */
         if (shle_ca_upper(i)) return;
-        shle_stream_hw_loop(slot, rec, lr);
+        shle_stream_hw_loop(c.slot, c.rec, c.lr);
         return;
     }
-    if (f & 0x08) {                                     /* loc_60453A: the end is in the lower half */
+    if (c.f & 0x08) {                                   /* loc_60453A: the end is in the lower half */
         if (shle_ca_upper(i)) return;
-        shle_stream_done(i, rec);
+        shle_stream_done(i, c.rec);
         return;
     }
-    /* loc_6045D8: the last chunk */
-    shle_ww(rec + 0x1E, (uint16_t)((a2 - shle_rl(rec + 0xE)) + d5));
-    shle_copy(a2, a1, 0x200);
-    if (!(d2 & 0x80)) {
-        shle_wb(rec, shle_rb(rec) | 0x08);
-        shle_wb(rec + 1, d2 + 0x10);
-        return;
-    }
-    shle_stream_done(i, rec);                           /* loc_6046C2: in the upper half, at once */
+    shle_stream_last(&c);
 }
 
 /* ---- note on (MidEvt_NoteOn) ------------------------------------------------------ */
@@ -1347,6 +1372,41 @@ static void shle_sound_cmd(uint32_t p) {
 /* what a step of the sequencer leaves it to do */
 enum { SHLE_SEQ_NEXT, SHLE_SEQ_WAIT, SHLE_SEQ_END, SHLE_SEQ_STOP, SHLE_SEQ_STUCK };
 
+/* an event's last data byte with its top bit set means the next event follows
+ * at once, with no delta time between */
+static void shle_seq_chain(uint32_t s, uint8_t b) {
+    if (b & 0x80) shle_wb(s, shle_rb(s) | 1);
+}
+
+/* An (polyphonic aftertouch), which the driver also reads as its own marks:
+ * key 0 with a 2 after it sets the track's bit 6, and key 1, on a track that
+ * is fading, is a level (0x1421 when the track has bit 4) and sends nothing */
+static uint32_t shle_seq_poly(uint32_t s, uint8_t st, uint32_t a3) {
+    uint8_t b1 = shle_mb(a3++);
+    if (b1 == 0) {
+        if ((shle_mb(a3) & 0x7F) == 2) shle_wb(s, shle_rb(s) | 0x40);
+    } else if (b1 == 1 && shle_rb(s + 0xC)) {
+        uint8_t b2 = shle_mb(a3++);
+        if (shle_rb(s) & 0x10) SG8(0x1421, b2 & 0x7F);
+        shle_seq_chain(s, b2);
+        return a3;
+    }
+    uint8_t b2 = shle_mb(a3++);
+    shle_seq_chain(s, b2);
+    shle_enqueue3(st, b1, b2 & 0x7F);
+    return a3;
+}
+
+/* Fx: a sysex is skipped, a meta event too unless it is the end of the
+ * track (FF 2F), which ends the segment, as does any other Fx */
+static uint32_t shle_seq_system(uint8_t st, uint32_t a3, bool *end) {
+    if (st == 0xF7) return a3 + 1u + shle_mb(a3);
+    if (st == 0xF0) { while (shle_mb(a3++) != 0xF7) {} return a3; }
+    if (st == 0xFF && shle_mb(a3++) != 0x2F) return a3 + 1u + shle_mb(a3);
+    *end = true;
+    return a3;
+}
+
 /* one MIDI event of the segment at *pa3, sent on; true at the segment's end */
 static bool shle_seq_parse(uint32_t s, uint32_t *pa3) {
     uint32_t a3 = *pa3;
@@ -1359,40 +1419,20 @@ static bool shle_seq_parse(uint32_t s, uint32_t *pa3) {
     switch (st >> 4) {
     case 0x8:
         b1 = shle_mb(a3++);
-        if (b1 & 0x80) shle_wb(s, shle_rb(s) | 1);
+        shle_seq_chain(s, b1);
         shle_enqueue3(st, b1 & 0x7F, 0x7F);
         break;
-    case 0xA:
-        b1 = shle_mb(a3++);
-        if (b1 == 0) {
-            if ((shle_mb(a3) & 0x7F) == 2) shle_wb(s, shle_rb(s) | 0x40);
-        } else if (b1 == 1 && shle_rb(s + 0xC)) {
-            b2 = shle_mb(a3++);
-            if (shle_rb(s) & 0x10) SG8(0x1421, b2 & 0x7F);
-            if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
-            break;
-        }
-        b2 = shle_mb(a3++);
-        if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
-        shle_enqueue3(st, b1, b2 & 0x7F);
-        break;
+    case 0xA: a3 = shle_seq_poly(s, st, a3); break;
     case 0xC: case 0xD:
         b1 = shle_mb(a3++);
-        if (b1 & 0x80) shle_wb(s, shle_rb(s) | 1);
+        shle_seq_chain(s, b1);
         shle_enqueue3(st, b1 & 0x7F, 0);
         break;
-    case 0xF:
-        if (st == 0xF7) { a3 += 1u + shle_mb(a3); break; }
-        if (st == 0xF0) { while (shle_mb(a3++) != 0xF7) {} break; }
-        if (st == 0xFF) {
-            if (shle_mb(a3++) != 0x2F) { a3 += 1u + shle_mb(a3); break; }
-        }
-        end = true;
-        break;
+    case 0xF: a3 = shle_seq_system(st, a3, &end); break;
     default:                                    /* 9x, Bx, Ex (and 0x-7x, which never come) */
         b1 = shle_mb(a3++);
         b2 = shle_mb(a3++);
-        if (b2 & 0x80) shle_wb(s, shle_rb(s) | 1);
+        shle_seq_chain(s, b2);
         shle_enqueue3(st, b1, b2 & 0x7F);
         break;
     }
@@ -1686,25 +1726,27 @@ static inline uint64_t shle_entry(uint64_t d) {
     return e > g_shle.l2_free ? e : g_shle.l2_free;
 }
 
-/* The board at clock period `now`: MIDI bytes, then any timer handler whose
- * turn has come, then the main loop's dispatch. */
-static void shle_events(uint64_t now) {
-    if (!g_shle.booted) {
-        if (g_shle.restart_at && now >= g_shle.restart_at) {
-            uint64_t boot_at = g_shle.boot_at;
-            shle_boot();
-            g_shle.boot_at = boot_at;
-        }
-        if (now < g_shle.boot_at) return;
-        g_shle.booted = true;
-        shle_sw8(0x401, 0x0F);                          /* master volume 15, the last thing before the interrupts */
-        /* all three expired long ago; the board takes them A, B, C, a few
-         * hundred clock periods apart, and that is their phase from then on */
-        g_shle.due_a = (now - SHLE_IRQ_LAT) * SHLE_T16;
-        g_shle.due_b = (now + 225u - SHLE_IRQ_LAT) * SHLE_T16;
-        g_shle.due_c = (now + 828u - SHLE_IRQ_LAT) * SHLE_T16;
-        g_shle.l2_free = now;
+/* The driver's boot, at clock period `now`: false until it has come. */
+static bool shle_events_boot(uint64_t now) {
+    if (g_shle.restart_at && now >= g_shle.restart_at) {
+        uint64_t boot_at = g_shle.boot_at;
+        shle_boot();
+        g_shle.boot_at = boot_at;
     }
+    if (now < g_shle.boot_at) return false;
+    g_shle.booted = true;
+    shle_sw8(0x401, 0x0F);                          /* master volume 15, the last thing before the interrupts */
+    /* all three expired long ago; the board takes them A, B, C, a few
+     * hundred clock periods apart, and that is their phase from then on */
+    g_shle.due_a = (now - SHLE_IRQ_LAT) * SHLE_T16;
+    g_shle.due_b = (now + 225u - SHLE_IRQ_LAT) * SHLE_T16;
+    g_shle.due_c = (now + 828u - SHLE_IRQ_LAT) * SHLE_T16;
+    g_shle.l2_free = now;
+    return true;
+}
+
+/* The MIDI bytes waiting at `now`: false when one restarts the driver. */
+static bool shle_events_midi(uint64_t now) {
     scsp_t *s = &g_sound.scsp;
     while (s->mi_r != s->mi_w) {
         uint8_t b = s->mi[s->mi_r];
@@ -1718,37 +1760,62 @@ static void shle_events(uint64_t now) {
             g_shle.clear_at = now + SHLE_CLEAR_DELAY;
             g_shle.cleared = 0;
             g_shle.boot_at = now + SHLE_BOOT_CYCLES;
-            return;
+            return false;
         }
     }
-    for (int guard = 0; guard < 16; guard++) {
-        uint64_t eb = shle_entry(g_shle.due_b), ec = shle_entry(g_shle.due_c), ea = shle_entry(g_shle.due_a);
-        uint64_t e = eb;
-        int which = 1;                                  /* B's bit is tested first */
-        if (ec < e) { e = ec; which = 2; }
-        if (ea < e) { e = ea; which = 0; }
-        if (e > now) break;
-        g_shle.enq = 0;
-        if (which == 1) {                               /* Int2_Timer, timer B: the music */
-            g_shle.due_b = (e + SHLE_RELOAD_AT + shle_period(G8(0x1440), 0)) * SHLE_T16;
-            if (G8(0x1406) != 0xFF) { shle_fade(); shle_seq(SHLE_SEQS); }
-            uint32_t dur = SHLE_DUR_B + g_shle.enq * SHLE_DUR_EVENT;
-            g_shle.l2_free = e + dur;
-            shle_suspend(e, dur);
-        } else if (which == 2) {                        /* timer C: the effects */
-            g_shle.due_c = (e + SHLE_RELOAD_AT + shle_period(G8(0x1441), 0)) * SHLE_T16;
-            if (G8(0x1406) != 0xFF)
-                for (uint32_t k = 1; k < 8; k++) shle_seq(SHLE_SEQS + k * 16u);
-            uint32_t dur = SHLE_DUR_C + g_shle.enq * SHLE_DUR_EVENT;
-            g_shle.l2_free = e + dur;
-            shle_suspend(e, dur);
-        } else {                                        /* Interrupt1, timer A: releases */
-            g_shle.due_a = (e + SHLE_RELOAD_AT_A + shle_period(0xC0, 3)) * SHLE_T16;
-            shle_timer_a();
-            shle_suspend(e, SHLE_DUR_A);
-        }
-        shle_dispatch(now);
+    return true;
+}
+
+/* The end of timer B or C's handler, entered at e: the main loop was
+ * suspended for it, longer for every event it queued. */
+static void shle_timer_done(uint64_t e, uint32_t base_dur) {
+    uint32_t dur = base_dur + g_shle.enq * SHLE_DUR_EVENT;
+    g_shle.l2_free = e + dur;
+    shle_suspend(e, dur);
+}
+
+/* Int2_Timer, timer B: the music. */
+static void shle_timer_b(uint64_t e) {
+    g_shle.due_b = (e + SHLE_RELOAD_AT + shle_period(G8(0x1440), 0)) * SHLE_T16;
+    if (G8(0x1406) != 0xFF) { shle_fade(); shle_seq(SHLE_SEQS); }
+    shle_timer_done(e, SHLE_DUR_B);
+}
+
+/* Timer C: the effects. */
+static void shle_timer_c(uint64_t e) {
+    g_shle.due_c = (e + SHLE_RELOAD_AT + shle_period(G8(0x1441), 0)) * SHLE_T16;
+    if (G8(0x1406) != 0xFF)
+        for (uint32_t k = 1; k < 8; k++) shle_seq(SHLE_SEQS + k * 16u);
+    shle_timer_done(e, SHLE_DUR_C);
+}
+
+/* The timer handler whose turn has come by `now`, then the main loop's
+ * dispatch: false when none has. */
+static bool shle_events_timer(uint64_t now) {
+    uint64_t eb = shle_entry(g_shle.due_b), ec = shle_entry(g_shle.due_c), ea = shle_entry(g_shle.due_a);
+    uint64_t e = eb;
+    int which = 1;                                  /* B's bit is tested first */
+    if (ec < e) { e = ec; which = 2; }
+    if (ea < e) { e = ea; which = 0; }
+    if (e > now) return false;
+    g_shle.enq = 0;
+    if (which == 1) shle_timer_b(e);
+    else if (which == 2) shle_timer_c(e);
+    else {                                          /* Interrupt1, timer A: releases */
+        g_shle.due_a = (e + SHLE_RELOAD_AT_A + shle_period(0xC0, 3)) * SHLE_T16;
+        shle_timer_a();
+        shle_suspend(e, SHLE_DUR_A);
     }
+    shle_dispatch(now);
+    return true;
+}
+
+/* The board at clock period `now`: MIDI bytes, then any timer handler whose
+ * turn has come, then the main loop's dispatch. */
+static void shle_events(uint64_t now) {
+    if (!g_shle.booted && !shle_events_boot(now)) return;
+    if (!shle_events_midi(now)) return;
+    for (int guard = 0; guard < 16 && shle_events_timer(now); guard++) {}
     shle_dispatch(now);
 }
 
@@ -1759,6 +1826,34 @@ static inline uint64_t shle_next_due(void) {
     if (y < d) d = y;
     if (G8(0x1406) && g_shle.busy_until < d) d = g_shle.busy_until;
     return d;
+}
+
+/* EntryPoint's clear of sound RAM, as far as it has got by `now`. */
+static void shle_clear_step(scsp_t *s, uint64_t now) {
+    if (!g_shle.restart_at || now <= g_shle.clear_at || g_shle.cleared >= SOUND_RAM_SIZE) return;
+    uint64_t to = (now - g_shle.clear_at) / SHLE_CLEAR_BYTE;
+    if (to > SOUND_RAM_SIZE) to = SOUND_RAM_SIZE;
+    if (to <= g_shle.cleared) return;
+    scsp_ram_touch(s, g_shle.cleared, (uint32_t)to - g_shle.cleared, 1);
+    memset(g_sound.ram + g_shle.cleared, 0, (uint32_t)to - g_shle.cleared);
+    g_shle.cleared = (uint32_t)to;
+}
+
+/* The main loop's stream refills over the 32 slots, and their share of it. */
+static void shle_refill_pass(void) {
+    g_shle.chunks = 0;
+    for (unsigned k = 0; k < 32; k++) shle_stream_step(k);
+    /* this pass's share of the main loop in refills, into a running average */
+    uint64_t f = ((uint64_t)g_shle.chunks * SHLE_CHUNK_CYCLES << 16) / (SHLE_PASS_SAMPLES * SOUND_CYCLES_PER_SAMPLE);
+    if (f > 0x10000u) f = 0x10000u;
+    g_shle.refill_frac = (uint32_t)((g_shle.refill_frac * 15u + f) / 16u);
+}
+
+/* The main loop's pass over the slots, every SHLE_PASS_SAMPLES samples. */
+static void shle_pass(scsp_t *s, uint64_t now) {
+    g_shle.pass_left = SHLE_PASS_SAMPLES;
+    shle_clear_step(s, now);
+    if (g_shle.booted && now >= g_shle.stall_until) shle_refill_pass();
 }
 
 /* sound_run for the HLE: n samples of board time. The chip makes them as it
@@ -1775,26 +1870,7 @@ static void shle_run(uint32_t n) {
             shle_events(now);
             next = shle_next_due();
         }
-        if (--g_shle.pass_left == 0) {                  /* the main loop's pass over the slots */
-            g_shle.pass_left = SHLE_PASS_SAMPLES;
-            if (g_shle.restart_at && now > g_shle.clear_at && g_shle.cleared < SOUND_RAM_SIZE) {   /* EntryPoint's clear */
-                uint64_t to = (now - g_shle.clear_at) / SHLE_CLEAR_BYTE;
-                if (to > SOUND_RAM_SIZE) to = SOUND_RAM_SIZE;
-                if (to > g_shle.cleared) {
-                    scsp_ram_touch(s, g_shle.cleared, (uint32_t)to - g_shle.cleared, 1);
-                    memset(g_sound.ram + g_shle.cleared, 0, (uint32_t)to - g_shle.cleared);
-                    g_shle.cleared = (uint32_t)to;
-                }
-            }
-            if (g_shle.booted && now >= g_shle.stall_until) {
-                g_shle.chunks = 0;
-                for (unsigned k = 0; k < 32; k++) shle_stream_step(k);
-                /* this pass's share of the main loop in refills, into a running average */
-                uint64_t f = ((uint64_t)g_shle.chunks * SHLE_CHUNK_CYCLES << 16) / (SHLE_PASS_SAMPLES * SOUND_CYCLES_PER_SAMPLE);
-                if (f > 0x10000u) f = 0x10000u;
-                g_shle.refill_frac = (uint32_t)((g_shle.refill_frac * 15u + f) / 16u);
-            }
-        }
+        if (--g_shle.pass_left == 0) shle_pass(s, now);
         scsp_tick(s);
     }
     scsp_sync(s);

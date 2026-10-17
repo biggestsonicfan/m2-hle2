@@ -126,9 +126,18 @@ Open **Quick Menu > Core Options** while the game runs.
 The RPCN lobby is not in this menu: the core draws it in the game, as the PS3 release does (see
 below).
 
-Save and load state work, except that a state can't be loaded during an online match. Each
-state is about 16 MB and takes around a tenth of a second to save, so leave rewind and run-ahead
-off: they save one every frame.
+Save and load state, rewind and fast-forward work, except that a state can't be loaded (or the
+game rewound) during an online match. Each state is about 16 MB and takes a few milliseconds to
+save on a PC, so rewind can save one every frame; RetroArch's rewind buffer needs a few hundred MB
+to go back more than a few seconds. Run-ahead is still best left off: it saves and loads a state
+every frame and runs the board twice. While fast-forwarding, the core draws only one frame in
+four.
+
+If Settings > Frame Throttle has no Rewind entry, or the Rewind hotkey says the core lacks
+serialized save state support, RetroArch is still reading its cache of an older core's `.info`
+(`core_info.cache`, beside the `.info` files). The core notices this when a game loads and leaves a
+`core_info.refresh` marker there, which RetroArch takes up at once; if Rewind is still missing,
+restart RetroArch. If the core cannot write the marker, it names the cache file to delete.
 
 ### Online play
 
@@ -146,7 +155,7 @@ Use RetroArch's own **Netplay** menu:
 The host is player 1 and the first player to join is player 2. Both games restart when player 2
 joins. Both players need **the same build** of the core; RetroArch refuses a mismatch.
 
-**RPCN** (plays against the m2-hle desktop emulator and play.sonicthefighte.rs)
+**RPCN** (plays against the m2-hle desktop emulator and arcade.sonicthefighte.rs)
 
 1. Set **Online play** to **RPCN**, then close and reload the game.
 2. Choose **Online Battle** from the game's main menu. (The Arcade version opens the lobby at
@@ -263,8 +272,9 @@ The core's name, `m2hle`, is its file name without `_libretro.so`.
       <core name="m2hle" features="netplay" />
 ```
 
-This lets EmulationStation offer RetroArch's netplay for the core. Leave out `rewind`: a
-state is 16 MB, too big to save every frame.
+This lets EmulationStation offer RetroArch's netplay for the core. `rewind` works too
+(`features="netplay rewind"`), but it saves a 16 MB state every frame, which a handheld feels
+more than a PC does, and the handheld's memory limits how far back it can go.
 
 **4. Keep the core's files out of the ROM folder.** ROCKNIX's RetroArch saves into the ROM folder,
 which is usually shared on your network, and the core keeps its RPCN login with its saves.
@@ -322,7 +332,7 @@ What it does:
    a backup and also updates the updater. It won't replace the core while RetroArch is running.
 
 If the standalone m2-hle emulator (the `m2hle-rocknix-arm64.zip` build) is installed too, the
-same entry updates that as well. Each one is checked and installed separately.
+same entry updates that as well, though CI no longer builds a new one. Each one is checked and installed separately.
 
 Over ssh:
 

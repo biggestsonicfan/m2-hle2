@@ -52,6 +52,13 @@
  * they need no plugin and survive the gap between the two. If the new file
  * will not load, the old one -- still on disk, because it is a different
  * file -- is loaded back, and get_status says "rolled_back".
+ *
+ * ANNOUNCEMENTS (overlay_host_announce, the bridge's {"cmd":"announce"}): the
+ * same toast in green, a few seconds each, one after another -- "WELCOME,
+ * <npid> came into the room" when somebody joins the room we are in. Unlike
+ * the swap, an announcement does not move the board: with no plugin loaded it
+ * sits on whatever game box the caller already drew, and the window paints it
+ * only while one is up (overlay_host_announcing).
  */
 #ifndef OVERLAY_HOST_H
 #define OVERLAY_HOST_H
@@ -131,8 +138,8 @@ typedef struct {
     int   count;                      /* layers in use this frame            */
 
     /* The host's own layers, drawn over the plugin's during a swap. */
-    overlay_layer_slot_t notice[2];   /* OVERLAY_NOTICE_*                    */
-    bool  notice_painted[2];          /* px holds the current text           */
+    overlay_layer_slot_t notice[3];   /* OVERLAY_NOTICE_*                    */
+    bool  notice_painted[3];          /* px holds the current text           */
 
     /* reload watch */
     uint64_t mtime;                   /* of the DLL we are running           */
@@ -150,7 +157,7 @@ static overlay_host_t g_overlay;
 
 /* ---- swap: the request, and where it has got to --------------------------- */
 
-enum { OVERLAY_NOTICE_TOAST, OVERLAY_NOTICE_CARD };
+enum { OVERLAY_NOTICE_TOAST, OVERLAY_NOTICE_CARD, OVERLAY_NOTICE_ROOM, OVERLAY_NOTICES };
 
 typedef enum {
     OVERLAY_SWAP_IDLE,
@@ -197,6 +204,33 @@ typedef struct {
 
 static overlay_swap_t g_overlay_swap = { .last = "none" };
 
+/* ---- announcements: the queue, and the one up now ------------------------- */
+
+#define OVERLAY_ANNOUNCE_TITLE  "WELCOME"
+#define OVERLAY_ANNOUNCE_S      4.0
+#define OVERLAY_ANNOUNCE_STALE_S 20.0   /* not up by then: nobody is watching */
+enum { OVERLAY_ANNOUNCE_QUEUE = 8 };
+
+typedef struct {
+    char title[64];
+    char note[256];
+    double posted;
+} overlay_announce_msg_t;
+
+/* The bridge thread and the frame both post (under the swap lock); the render
+ * thread takes them off one at a time. A full queue drops the oldest. */
+typedef struct {
+    overlay_announce_msg_t q[OVERLAY_ANNOUNCE_QUEUE];
+    int    head, n;
+    int    shown;                     /* taken off the queue, ever            */
+
+    overlay_announce_msg_t cur;       /* render thread                         */
+    bool   up;
+    double until;
+} overlay_announce_t;
+
+static overlay_announce_t g_overlay_announce;
+
 #if defined(_WIN32)
 static SRWLOCK g_overlay_swap_lock = SRWLOCK_INIT;
 #  define overlay_swap__lock()   AcquireSRWLockExclusive(&g_overlay_swap_lock)
@@ -213,6 +247,34 @@ static pthread_mutex_t g_overlay_swap_lock = PTHREAD_MUTEX_INITIALIZER;
 static inline bool overlay_host_swapping(void) {
     overlay_swap__lock();
     bool busy = g_overlay_swap.queued || g_overlay_swap.phase != OVERLAY_SWAP_IDLE;
+    overlay_swap__unlock();
+    return busy;
+}
+
+static inline double overlay_host__now_s(void);
+
+/* Toast an announcement: title in green (empty: WELCOME) and a note. Any
+ * thread; it goes up after the ones already waiting. */
+static inline void overlay_host_announce(const char *title, const char *note) {
+    overlay_announce_t *a = &g_overlay_announce;
+    overlay_swap__lock();
+    if (a->n == OVERLAY_ANNOUNCE_QUEUE) {
+        a->head = (a->head + 1) % OVERLAY_ANNOUNCE_QUEUE;
+        a->n--;
+    }
+    overlay_announce_msg_t *m = &a->q[(a->head + a->n) % OVERLAY_ANNOUNCE_QUEUE];
+    snprintf(m->title, sizeof m->title, "%s", title && title[0] ? title : OVERLAY_ANNOUNCE_TITLE);
+    snprintf(m->note,  sizeof m->note,  "%s", note ? note : "");
+    m->posted = overlay_host__now_s();
+    a->n++;
+    overlay_swap__unlock();
+}
+
+/* An announcement is up or waiting: the frame has to run overlay_host_paint()
+ * even with no plugin, over the game box it already has. */
+static inline bool overlay_host_announcing(void) {
+    overlay_swap__lock();
+    bool busy = g_overlay_announce.up || g_overlay_announce.n > 0;
     overlay_swap__unlock();
     return busy;
 }
@@ -430,7 +492,7 @@ static inline void overlay_host_init(void) {
 
 static inline void overlay_host_shutdown(void) {
     if (g_overlay.loaded) overlay_host__unload();
-    for (int i = 0; i < M2_OVERLAY_MAX_LAYERS + 2; i++) {
+    for (int i = 0; i < M2_OVERLAY_MAX_LAYERS + OVERLAY_NOTICES; i++) {
         overlay_layer_slot_t *L = i < M2_OVERLAY_MAX_LAYERS
                                 ? &g_overlay.layer[i]
                                 : &g_overlay.notice[i - M2_OVERLAY_MAX_LAYERS];
@@ -509,8 +571,8 @@ static inline bool overlay_host_game_rect(int canvas_w, int canvas_h, int top,
     }
     int avail = canvas_h - top;
     if (avail < 1) avail = 1;
-    game_render_letterbox(canvas_w, avail, VIDEO_WIDTH, VIDEO_HEIGHT, ox, oy, w, h);
-    *oy += top;
+    game_rect_t r = game_render_letterbox(canvas_w, avail, VIDEO_WIDTH, VIDEO_HEIGHT);
+    *ox = r.x; *oy = r.y + top; *w = r.w; *h = r.h;
     return true;
 }
 
@@ -709,32 +771,72 @@ static inline void overlay_host__paint_card(overlay_layer_slot_t *L, const char 
     }
 }
 
-/* The toast: the fly's own banner (stf-fly plugin/src/layout.c layout_banner)
- * in its "Updating the fly" colours -- navy plate, white rail, amber bar and
- * label, pale note. `U` is the banner's unit. */
-static inline void overlay_host__toast_size(const overlay_swap_req_t *r, float U, int max_w,
-                                            int *w, int *h) {
-    float tw = 4 + 14 + overlay_host__text_w(OVERLAY_FONT_TITLE, 9.0f * U, r->title) / U
-                  + 10 + overlay_host__text_w(OVERLAY_FONT_TEXT, 8.0f * U, r->note) / U + 14;
+/* The toast: the fly's own banner (stf-fly plugin/src/layout.c layout_banner,
+ * and its layout_toast, the "Stream ending" one) -- a plate, a white rail, an
+ * accent bar and label, a pale note. The swap's are its "Updating the fly"
+ * colours, navy and amber; an announcement's are green. `U` is the banner's
+ * unit. */
+typedef struct { uint32_t plate, accent, note; } overlay_toast_look_t;
+
+static const overlay_toast_look_t OVERLAY_LOOK_SWAP = { 0x132241, 0xFFD166, 0xB9C5DE };
+static const overlay_toast_look_t OVERLAY_LOOK_ROOM = { 0x0E3322, 0x5FE39A, 0xBCE3CB };
+
+static inline void overlay_host__toast_size(const char *title, const char *note, float U,
+                                            int max_w, int *w, int *h) {
+    float tw = 4 + 14 + overlay_host__text_w(OVERLAY_FONT_TITLE, 9.0f * U, title) / U
+                  + 10 + overlay_host__text_w(OVERLAY_FONT_TEXT, 8.0f * U, note) / U + 14;
     *w = (int)ceilf(tw * U);
     if (*w > max_w) *w = max_w;
     *h = (int)ceilf(30 * U);
 }
 
-static inline void overlay_host__paint_toast(overlay_layer_slot_t *L, const overlay_swap_req_t *r,
+static inline void overlay_host__paint_toast(overlay_layer_slot_t *L, const char *title,
+                                             const char *note, const overlay_toast_look_t *k,
                                              float U) {
     memset(L->px, 0, L->bytes);
-    overlay_host__rect(L, 0, 0, L->w, L->h, 0x132241, 0.92f);
+    overlay_host__rect(L, 0, 0, L->w, L->h, k->plate, 0.92f);
     overlay_host__rect(L, 0, 0, L->w, (int)lroundf(6 * U), 0x595959, 1.0f);
     overlay_host__rect(L, 0, (int)lroundf(1.5f * U), L->w, (int)lroundf(3 * U), 0xFFFFFF, 1.0f);
-    overlay_host__rect(L, 0, 0, (int)lroundf(4 * U), L->h, 0xFFD166, 1.0f);
+    overlay_host__rect(L, 0, 0, (int)lroundf(4 * U), L->h, k->accent, 1.0f);
     float base = (6 + 12) * U + 4.5f * U;              /* middle of the plate body */
     float x = (4 + 14) * U;
     overlay_host__text(L, OVERLAY_FONT_TITLE, 9.0f * U, x, base, (float)L->w,
-                       r->title, 0xFFD166);
-    x += overlay_host__text_w(OVERLAY_FONT_TITLE, 9.0f * U, r->title) + 10 * U;
+                       title, k->accent);
+    x += overlay_host__text_w(OVERLAY_FONT_TITLE, 9.0f * U, title) + 10 * U;
     overlay_host__text(L, OVERLAY_FONT_TEXT, 8.0f * U, x, base, (float)L->w - 10 * U,
-                       r->note, 0xB9C5DE);
+                       note, k->note);
+}
+
+/* 1.6 units a pixel at 1080 lines: a 48-pixel plate, a little larger than
+ * the fly's own banner, because this one is for the viewers. */
+static inline float overlay_host__toast_unit(int canvas_h) {
+    float U = (float)canvas_h / 1080.0f * 1.6f;
+    return U < 0.5f ? 0.5f : U;
+}
+
+/* Size, place and (when that changed) repaint toast slot `slot`, along the
+ * bottom of the game box. */
+static inline void overlay_host__place_toast(int slot, const char *title, const char *note,
+                                             const overlay_toast_look_t *look, int canvas_h,
+                                             int game_x, int game_y, int game_w, int game_h) {
+    overlay_layer_slot_t *toast = &g_overlay.notice[slot];
+    float U = overlay_host__toast_unit(canvas_h);
+    int tw, th;
+    overlay_host__toast_size(title, note, U, game_w - (int)(32 * U), &tw, &th);
+    if (tw <= 0 || th <= 0) return;
+    if (toast->w != tw || toast->h != th || !toast->px) {
+        overlay_host__resize_slot(toast, tw, th);
+        g_overlay.notice_painted[slot] = false;
+    }
+    if (!toast->px) return;
+    if (!g_overlay.notice_painted[slot]) {
+        overlay_host__paint_toast(toast, title, note, look, U);
+        g_overlay.notice_painted[slot] = true;
+        toast->uploaded = false;
+    }
+    toast->x = game_x + (game_w - tw) / 2;
+    toast->y = game_y + game_h - th - (int)(24 * U);
+    toast->visible = true;
 }
 
 /* Size, place and (when that changed) repaint the notices for this phase. */
@@ -763,26 +865,41 @@ static inline void overlay_host__notices(overlay_swap_phase_t phase, const overl
         }
     }
 
-    /* 1.6 units a pixel at 1080 lines: a 48-pixel plate, a little larger than
-     * the fly's own banner, because this one is for the viewers. */
-    float U = (float)canvas_h / 1080.0f * 1.6f;
-    if (U < 0.5f) U = 0.5f;
-    int tw, th;
-    overlay_host__toast_size(r, U, game_w - (int)(32 * U), &tw, &th);
-    if (tw <= 0 || th <= 0) return;
-    if (toast->w != tw || toast->h != th || !toast->px) {
-        overlay_host__resize_slot(toast, tw, th);
-        g_overlay.notice_painted[OVERLAY_NOTICE_TOAST] = false;
+    overlay_host__place_toast(OVERLAY_NOTICE_TOAST, r->title, r->note, &OVERLAY_LOOK_SWAP,
+                              canvas_h, game_x, game_y, game_w, game_h);
+}
+
+/* The announcement up now: the next one off the queue once its time is over.
+ * Its clock runs during a swap, but a swap's notices hide it. */
+static inline void overlay_host__announce_step(double now) {
+    overlay_announce_t *a = &g_overlay_announce;
+    if (a->up && now < a->until) return;
+    overlay_swap__lock();
+    while (a->n > 0 && now - a->q[a->head].posted > OVERLAY_ANNOUNCE_STALE_S) {
+        a->head = (a->head + 1) % OVERLAY_ANNOUNCE_QUEUE;
+        a->n--;
     }
-    if (!toast->px) return;
-    if (!g_overlay.notice_painted[OVERLAY_NOTICE_TOAST]) {
-        overlay_host__paint_toast(toast, r, U);
-        g_overlay.notice_painted[OVERLAY_NOTICE_TOAST] = true;
-        toast->uploaded = false;
+    a->up = a->n > 0;
+    if (a->up) {
+        a->cur  = a->q[a->head];
+        a->head = (a->head + 1) % OVERLAY_ANNOUNCE_QUEUE;
+        a->n--;
+        a->shown++;
+        a->until = now + OVERLAY_ANNOUNCE_S;
+        g_overlay.notice_painted[OVERLAY_NOTICE_ROOM] = false;
     }
-    toast->x = game_x + (game_w - tw) / 2;
-    toast->y = game_y + game_h - th - (int)(24 * U);
-    toast->visible = true;
+    overlay_swap__unlock();
+}
+
+static inline void overlay_host__announce_notice(overlay_swap_phase_t phase, int canvas_h,
+                                                 int game_x, int game_y,
+                                                 int game_w, int game_h) {
+    g_overlay.notice[OVERLAY_NOTICE_ROOM].visible = false;
+    overlay_host__announce_step(overlay_host__now_s());
+    if (!g_overlay_announce.up || phase != OVERLAY_SWAP_IDLE) return;
+    overlay_host__place_toast(OVERLAY_NOTICE_ROOM, g_overlay_announce.cur.title,
+                              g_overlay_announce.cur.note, &OVERLAY_LOOK_ROOM,
+                              canvas_h, game_x, game_y, game_w, game_h);
 }
 
 /* ---- swap: the phases ----------------------------------------------------- */
@@ -893,7 +1010,7 @@ static inline overlay_swap_phase_t overlay_host__swap_step(double now) {
 
 /* The swap's notices: upload any that went up since they were last sent. */
 static inline void overlay_host__upload_notices(void) {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < OVERLAY_NOTICES; i++) {
         overlay_layer_slot_t *L = &g_overlay.notice[i];
         if (!L->visible) continue;
         overlay_host__ensure_image(L);
@@ -990,6 +1107,7 @@ static inline void overlay_host_paint(int canvas_w, int canvas_h,
     overlay_swap_phase_t phase = overlay_host__swap_step(overlay_host__now_s());
     overlay_host__notices(phase, &g_overlay_swap.cur, canvas_h,
                           game_x, game_y, game_w, game_h);
+    overlay_host__announce_notice(phase, canvas_h, game_x, game_y, game_w, game_h);
     overlay_host__upload_notices();
 
     g_overlay.count = 0;
@@ -1029,8 +1147,9 @@ static inline void overlay_host_draw(void) {
         if (!L->visible || !L->view.id) continue;
         game_render_draw_overlay(L->view, L->x, L->y, L->w, L->h);
     }
-    /* The swap's notices last: the card over the game box, the toast over it. */
-    for (int i = OVERLAY_NOTICE_CARD; i >= OVERLAY_NOTICE_TOAST; i--) {
+    /* The notices last: an announcement, the swap's card over the game box,
+     * the swap's toast over it. */
+    for (int i = OVERLAY_NOTICES - 1; i >= OVERLAY_NOTICE_TOAST; i--) {
         const overlay_layer_slot_t *L = &g_overlay.notice[i];
         if (!L->visible || !L->view.id) continue;
         game_render_draw_overlay(L->view, L->x, L->y, L->w, L->h);
@@ -1055,10 +1174,19 @@ static inline void overlay_host_status_json(char *out, int cap) {
     snprintf(err,  sizeof err,  "%s", g_overlay_swap.error);
     overlay_swap__unlock();
     json_escape(err_js, (int)sizeof err_js, err);
-    char swap[800];
+    char swap[1600];
     snprintf(swap, sizeof swap,
              "{\"state\":\"%s\",\"swaps\":%d,\"last\":\"%s\",\"error\":\"%s\"}",
              state, swaps, last, err_js);
+    overlay_swap__lock();
+    char note_js[600];
+    json_escape(note_js, (int)sizeof note_js,
+                g_overlay_announce.up ? g_overlay_announce.cur.note : "");
+    snprintf(swap + strlen(swap), sizeof swap - strlen(swap),
+             ",\"announce\":{\"up\":%s,\"queued\":%d,\"shown\":%d,\"note\":\"%s\"}",
+             g_overlay_announce.up ? "true" : "false", g_overlay_announce.n,
+             g_overlay_announce.shown, note_js);
+    overlay_swap__unlock();
 
     if (!g_overlay.want) {
         snprintf(out, (size_t)cap, "{\"loaded\":false,\"swap\":%s}", swap);

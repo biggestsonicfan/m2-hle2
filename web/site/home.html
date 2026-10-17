@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en" data-version="@M2HLE_VERSION@">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model 2 Arcade</title>
+<meta name="description" content="Play Sega Model 2 arcade games in your browser, with your own copy of the game.">
+<meta name="theme-color" content="#001735">
+<!-- The arcade's front page (Pinboard #881): a box per game, as noclip.website
+     shows its games. index.html sends a visit that names no game here; a box
+     links back to it with ?game= and ?profile= filled in (m2hle-games.js). No
+     game art: the site holds no Sega asset (CLAUDE.md), so a box is its colours
+     and its words. -->
+<style>
+@font-face {
+  font-family: "PS3 Title";
+  src: url("fonts/title.woff2?v=@M2HLE_VERSION@") format("woff2");
+  font-weight: 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "PS3 Text";
+  src: url("fonts/text.woff2?v=@M2HLE_VERSION@") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+:root { color-scheme: dark; --text: #ffffff; --dim: #B9C5DE; --edge: #303a55; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; color: var(--text);
+  font: 500 1rem/1.45 "PS3 Text", system-ui, sans-serif;
+  background: linear-gradient(#122868, #001735) fixed;
+}
+header, main, footer { max-width: 1100px; margin: 0 auto; padding: 0 1.25rem; }
+header { padding-top: 2.5rem; padding-bottom: 1.5rem; }
+h1 { margin: 0; font: 900 2.4rem/1.1 "PS3 Title", system-ui, sans-serif; letter-spacing: 0.02em; }
+header p { margin: 0.4rem 0 0; color: var(--dim); }
+#games {
+  display: grid; gap: 1.25rem; padding: 0; margin: 0; list-style: none;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+.game {
+  display: flex; flex-direction: column; overflow: hidden;
+  background: rgba(19, 34, 65, 0.85); border: 1px solid var(--edge); border-radius: 10px;
+  transition: transform 0.12s, border-color 0.12s;
+}
+.game:hover, .game:focus-within { transform: translateY(-3px); border-color: #7aa7ff; }
+.game > a { color: inherit; text-decoration: none; display: block; }
+.marquee {
+  aspect-ratio: 16 / 9; display: flex; align-items: flex-end; padding: 0.9rem 1rem;
+  background: linear-gradient(135deg, var(--c0), var(--c1));
+  font: 900 1.35rem/1.1 "PS3 Title", system-ui, sans-serif; text-shadow: 0 2px 6px #0008;
+  overflow-wrap: anywhere;
+}
+.about { padding: 0.75rem 1rem 0; }
+.about .meta { color: var(--dim); font-size: 0.85rem; }
+.about p { margin: 0.35rem 0 0; font-size: 0.92rem; }
+.profiles { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.85rem 1rem 1rem; margin-top: auto; }
+.profiles a, .profiles .soon {
+  color: var(--text); text-decoration: none; font-size: 0.88rem;
+  padding: 0.3rem 0.7rem; border: 1px solid #5c6f9c; border-radius: 999px;
+}
+.profiles .soon { color: #7d89a6; border-style: dashed; border-color: #3d4a6b; cursor: default; }
+.profiles a:hover, .profiles a:focus { background: #2a4a8f; border-color: #9fbfff; }
+footer { padding-top: 2rem; padding-bottom: 2rem; color: var(--dim); font-size: 0.8rem; }
+footer a { color: #CFF3FF; }
+</style>
+</head>
+<body>
+<header>
+  <h1 data-i18n="home.title">Model 2 Arcade</h1>
+  <p data-i18n="home.lead">Sega Model 2 games in your browser, run by m2-hle2. Bring your own copy of the game: it stays on your computer.</p>
+</header>
+<main>
+  <ul id="games"></ul>
+  <noscript><p>This page needs JavaScript to run the games.</p></noscript>
+</main>
+<footer>
+  <span id="build">@M2HLE_VERSION@</span> &middot;
+  <a href="https://github.com/biggestsonicfan/m2-hle2" target="_blank" rel="noopener noreferrer" data-i18n="site.source">Source on GitHub</a> &middot;
+  <span id="langs"><span data-i18n="site.language">Language</span>:</span>
+</footer>
+<script src="m2hle-lang.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-games.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-home.js?v=@M2HLE_VERSION@"></script>
+</body>
+</html>

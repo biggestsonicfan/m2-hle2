@@ -25,3 +25,9 @@
 [submodule "vendor/gems-c"]
 	path = vendor/gems-c
 	url = https://github.com/biggestsonicfan/gems-c.git
+[submodule "vendor/ggpo"]
+	path = vendor/ggpo
+	url = https://github.com/pond3r/ggpo.git
+[submodule "vendor/lua"]
+	path = vendor/lua
+	url = https://github.com/lua/lua.git

@@ -152,6 +152,7 @@ static const game_profile_t m2snake_profile = {
         /* The homebrew drives the GEO directly (builds a display list in
          * bufferram), so decode that list instead of the STF COP bone stream. */
         .geo_displaylist    = true,
+        .region = { .kind = REGION_HOMEBREW, .why = "homebrew: no country setting" },
     },
 };
 

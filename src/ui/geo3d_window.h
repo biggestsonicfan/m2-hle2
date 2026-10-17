@@ -75,34 +75,28 @@ static inline void geo3d_window__captures(geo3d_state_t *geo) {
     }
 }
 
-/* Live model table entry readout */
-static inline void geo3d_window__table_entry(const geo3d_state_t *geo,
-                                             const uint8_t *main_data, size_t main_data_size,
-                                             uint32_t table_off, uint32_t table_count,
-                                             uint32_t mesh_ptr_subtract) {
-    if (main_data && table_count > 0 && (uint32_t)geo->model_index < table_count) {
-        uint32_t toff = table_off + (uint32_t)geo->model_index * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE <= main_data_size) {
-            uint32_t f1  = read_u32_le(main_data + toff + 0);
-            uint32_t tex = read_u32_le(main_data + toff + 4);
-            uint32_t pol = read_u32_le(main_data + toff + 8);
-            uint32_t f4  = read_u32_le(main_data + toff + 12);
-            uint32_t mesh_off = (pol >= (mesh_ptr_subtract >> 2)) ?
-                                pol * 4u - mesh_ptr_subtract : 0;
-            igText("  f1=0x%08X  tex=0x%08X", f1, tex);
+/* Live model table entry readout, the mesh found as noclip finds it
+ * (model_mesh_resolve). */
+static inline void geo3d_window__table_entry(const geo3d_state_t *geo, const geo3d_models_t *md) {
+    model_entry_t e;
+    if (md->main_data && geo->model_index >= 0 &&
+        model_entry_read(&md->table, md->main_data, md->main_data_size, (uint32_t)geo->model_index, &e)) {
+        uint32_t pol = e.mesh_ptr, mesh_off;
+        igText("  uv=0x%08X  tex=0x%08X", e.uv_ptr, e.mat_ptr);
+        if (model_mesh_resolve(pol, md->mesh_ptr_subtract, md->mesh_ptr_add, md->polygons_size, &mesh_off))
             igText("  pol=0x%08X -> mesh@0x%08X", pol, mesh_off);
-            igText("  f4=0x%08X  Lines: %d", f4, g_geo3d_lines.count);
-        }
-    } else if (!main_data) {
+        else
+            igText("  pol=0x%08X -> %s", pol, !pol ? "no mesh" : !model_mesh_in_rom(pol) ? "polygon RAM"
+                                                                                       : "past the polygon ROM");
+        igText("  Lines: %d", g_geo3d_lines.count);
+    } else if (!md->main_data) {
         igText("  (no ROM loaded)");
     }
 }
 
 /* ---- Single-model browser ---- */
-static inline void geo3d_window__browser(geo3d_state_t *geo,
-                                         const uint8_t *main_data, size_t main_data_size,
-                                         uint32_t table_off, uint32_t table_count,
-                                         uint32_t mesh_ptr_subtract) {
+static inline void geo3d_window__browser(geo3d_state_t *geo, const geo3d_models_t *md) {
+    uint32_t table_count = md->table.count;
     igText("Single-model browser:");
     igSetNextItemWidth(120);
     int mi = geo->model_index;
@@ -119,8 +113,7 @@ static inline void geo3d_window__browser(geo3d_state_t *geo,
             geo->model_index++;
     }
 
-    geo3d_window__table_entry(geo, main_data, main_data_size, table_off, table_count,
-                              mesh_ptr_subtract);
+    geo3d_window__table_entry(geo, md);
 }
 
 /* The camera: read out under the game's view, dragged by hand otherwise. */
@@ -161,9 +154,7 @@ static inline void geo3d_window__shading(void) {
 }
 
 static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
-                                      const uint8_t *main_data, size_t main_data_size,
-                                      uint32_t table_off, uint32_t table_count,
-                                      uint32_t mesh_ptr_subtract) {
+                                      const geo3d_models_t *md) {
     igSetNextWindowPos((ImVec2){10, 460}, ImGuiCond_Once);
     igSetNextWindowSize((ImVec2){360, 420}, ImGuiCond_Once);
 
@@ -180,8 +171,7 @@ static inline void geo3d_window_draw(geo3d_state_t *geo, bool *p_open,
     if (geo->use_captures)
         geo3d_window__captures(geo);
     else
-        geo3d_window__browser(geo, main_data, main_data_size, table_off, table_count,
-                              mesh_ptr_subtract);
+        geo3d_window__browser(geo, md);
 
     igSeparator();
     geo3d_window__camera(geo);
