@@ -5,7 +5,7 @@
  * the format in full.
  *
  * The game records a clip of every course it races into a buffer of its own,
- * 0x9AB0 bytes at 0x556420 + course * 0x9AB0 (forest, desert, mountain,
+ * 0x9AB0 bytes at 0x556420 + course * 0x9AB0 (desert, forest, mountain,
  * lakeside), with the frames recorded in 0x217260[course]. Each record is the
  * 0x58-byte car block (0x213B40 is the player's) taken every 4 frames: records
  * 0..224 are the player's car, 225..449 the nearest rival's. 0x5E50E8 clears
@@ -17,15 +17,20 @@
  *
  * The championship's ending (sub-state 5's states 5 and 6, 0x5E7CB0 and
  * 0x5E78B0, after the lakeside is won) is the game's replay: the podium, then
- * the staff credits over each course's clip, forest to lakeside, from
+ * the staff credits over each course's clip, desert to lakeside, from
  * 0x5E7E80. A course never raced plays as an empty road, as on the board.
  *
  * Recording: at the championship's race end (0x5BAE40, sub-state 5 state 4,
  * which every race reaches, won or timed out) the course's buffer and count
- * are taken. A round is a race; "keyed" when the clip has frames.
+ * are taken. A round is a race; "keyed" when the clip has frames. Practice
+ * (sub-state 7, Pinboard #1002) records the same clip but has no such race
+ * end: a timed-out run goes from its race (state 5) straight to the game over
+ * (state 12, 0x5BAF50), a finished one to state 6 (0x5B2820). It is taken at
+ * the mode dispatch on the first frame its race state is left, either way,
+ * and marked "practice".
  *
  * Playback (srallyc_native_play): rounds are grouped into championships,
- * each a run of rounds whose courses climb. At the main loop's mode dispatch
+ * each a run of rounds whose courses climb; a practice round is one alone. At the main loop's mode dispatch
  * (0x5A2200), once attract is up, a championship's clips go back into their
  * buffers (the other courses' counts zeroed) and the game is put where the
  * lakeside's race end puts it: a player's game (mode 3), championship
@@ -34,7 +39,7 @@
  * board is sent back to its boot (mode 0) either way, and no name is asked
  * for. g_native_play counts the frames the credits play a recorded course.
  *
- * The recording hook only reads, and keeps what it read outside the board.
+ * The recording hooks only read, and keep what they read outside the board.
  */
 #ifndef M2HLE_SRALLYC_NATIVE_H
 #define M2HLE_SRALLYC_NATIVE_H
@@ -51,16 +56,18 @@
 #include "memory.h"
 
 #define SRN_MODE       0x00202098u   /* 2 attract, 3 a player's game */
-#define SRN_SUB        0x0020209Cu   /* 5 the championship */
+#define SRN_SUB        0x0020209Cu   /* 5 the championship, 7 practice */
 #define SRN_STATE      0x002020ACu   /* the sub-state's state */
 #define SRN_PASSED     0x002020B0u   /* the race was won */
-#define SRN_COURSE     0x00214354u   /* 0 forest .. 3 lakeside */
+#define SRN_COURSE     0x00214354u   /* 0 desert .. 3 lakeside */
 #define SRN_CAR        0x0020A8C4u
 #define SRN_CLIP       0x00556420u
 #define SRN_CLIP_LEN   0x9AB0u
 #define SRN_COUNT      0x00217260u
 #define SRN_END_STATE  0x00218C50u   /* the ending's own state; 3 the credits */
 #define SRN_COURSES    4
+#define SRN_SUB_PRACTICE   7u
+#define SRN_PRACTICE_RACE  5u        /* practice's race state */
 #define SRN_CLIP_MAX   750u          /* three clips of 250 frames */
 /* The credits play each course for 679 frames (measured: 847, 1526, 2205,
  * 2884 and 3563 from a cold-boot playback). */
@@ -74,18 +81,18 @@ static inline uint32_t srn_clip_addr(uint32_t course) { return SRN_CLIP + course
 /* ---- Recording ----------------------------------------------------------- */
 
 static struct {
-    bool     pending;
+    bool     pending, practice;
+    bool     in_practice_race;   /* last frame was practice's race */
     uint32_t course, count, passed, car;
     uint8_t  clip[SRN_CLIP_LEN];
     uint8_t  count_le[4];
 } s_srn;
 
-/* 0x5BAE40, the championship's race end: the course's clip as it stands. */
-static int srallyc_hook_native_race_end(i960_cpu_t *cpu, memory_bus_t *bus) {
-    (void)cpu;
-    if (g_native_play.on) return 1;
+/* The course's clip as it stands, as the round to take. */
+static void srn_take(memory_bus_t *bus, bool practice) {
     uint32_t course = mem_read32(bus, SRN_COURSE);
-    if (course >= SRN_COURSES) return 1;
+    if (course >= SRN_COURSES) return;
+    s_srn.practice = practice;
     s_srn.course = course;
     s_srn.count  = mem_read32(bus, SRN_COUNT + 4u * course);
     s_srn.passed = mem_read32(bus, SRN_PASSED);
@@ -93,9 +100,23 @@ static int srallyc_hook_native_race_end(i960_cpu_t *cpu, memory_bus_t *bus) {
     for (uint32_t i = 0; i < SRN_CLIP_LEN; i++) s_srn.clip[i] = mem_read8(bus, srn_clip_addr(course) + i);
     for (int i = 0; i < 4; i++) s_srn.count_le[i] = (uint8_t)(s_srn.count >> (8 * i));
     s_srn.pending = true;
-    LOG_INFO("native replay: course %u %s, a clip of %u frames", course,
-             s_srn.passed ? "won" : "not won", s_srn.count);
+    LOG_INFO("native replay: %s course %u %s, a clip of %u frames", practice ? "practice" : "championship",
+             course, s_srn.passed ? "won" : "not won", s_srn.count);
+}
+
+/* 0x5BAE40, the championship's race end. */
+static int srallyc_hook_native_race_end(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if (!g_native_play.on) srn_take(bus, false);
     return 1;
+}
+
+/* A frame's mode dispatch: practice's race just left, finished or timed out. */
+static inline void srn_watch_practice(memory_bus_t *bus) {
+    bool racing = mem_read32(bus, SRN_MODE) == 3 && mem_read32(bus, SRN_SUB) == SRN_SUB_PRACTICE &&
+                  mem_read32(bus, SRN_STATE) == SRN_PRACTICE_RACE;
+    if (s_srn.in_practice_race && !racing && mem_read32(bus, SRN_SUB) == SRN_SUB_PRACTICE) srn_take(bus, true);
+    s_srn.in_practice_race = racing;
 }
 
 static bool srallyc_native_take(game_native_round_t *out) {
@@ -106,9 +127,9 @@ static bool srallyc_native_take(game_native_round_t *out) {
     out->part[0] = (game_native_part_t){ "clip.bin", srn_clip_addr(s_srn.course), s_srn.clip, SRN_CLIP_LEN };
     out->part[1] = (game_native_part_t){ "count.bin", SRN_COUNT + 4u * s_srn.course, s_srn.count_le, 4 };
     snprintf(out->json, sizeof out->json,
-             "{\"game\":\"srallyc\",\"course\":%u,\"passed\":%d,\"car\":%u,\"clip_frames\":%u,"
-             "\"keyed\":%d,\"key_frames\":%u}",
-             s_srn.course, s_srn.passed ? 1 : 0, s_srn.car, s_srn.count, keyed ? 1 : 0,
+             "{\"game\":\"srallyc\",\"practice\":%d,\"course\":%u,\"passed\":%d,\"car\":%u,"
+             "\"clip_frames\":%u,\"keyed\":%d,\"key_frames\":%u}",
+             s_srn.practice ? 1 : 0, s_srn.course, s_srn.passed ? 1 : 0, s_srn.car, s_srn.count, keyed ? 1 : 0,
              keyed ? SRN_REEL_FRAMES + 1 : 0);
     return true;
 }
@@ -156,11 +177,16 @@ static struct {
     int  reel_course;              /* the course the credits are on */
 } s_srp;
 
+static inline bool srn_practice(const game_native_round_t *in) {
+    return strstr(in->json, "\"practice\":1") != NULL;
+}
+
 /* One past the last round of the championship that starts at `first`: the
- * rounds while their courses climb. */
+ * rounds while their courses climb. A practice round is one alone. */
 static inline int srn_pass_end(const game_native_round_t *rounds, int n, int first) {
     int k = first + 1;
-    while (k < n && srn_course(&rounds[k]) > srn_course(&rounds[k - 1])) k++;
+    if (srn_practice(&rounds[first])) return k;
+    while (k < n && !srn_practice(&rounds[k]) && srn_course(&rounds[k]) > srn_course(&rounds[k - 1])) k++;
     return k;
 }
 
@@ -228,7 +254,10 @@ static inline bool srn_ending_frame(memory_bus_t *bus) {
 /* 0x5A2200, the main loop's mode dispatch, once a frame. */
 static int srallyc_hook_native_dispatch(i960_cpu_t *cpu, memory_bus_t *bus) {
     (void)cpu;
-    if (!g_native_play.on) return 1;
+    if (!g_native_play.on) {
+        srn_watch_practice(bus);
+        return 1;
+    }
     if (!s_srp.in_ending) {
         if (mem_read32(bus, SRN_MODE) == 2) srn_begin_ending(bus);
         return 1;
