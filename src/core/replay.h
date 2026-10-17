@@ -44,8 +44,8 @@
  *                        rounds the game kept is not saved.
  *   REPLAY_SAVE_INPUTS   the above plus state.sta and inputs.feed, #572's
  *                        frame-exact record of the whole match.
- * A game with no format of its own (no native_take: Sega Rally, Pinboard #877)
- * is always saved the second way (replay__saves_inputs).
+ * A game with no format of its own (no native_take, Pinboard #877) is always
+ * saved the second way (replay__saves_inputs).
  * A local game is recorded too, when the player asks for replays: from the
  * moment the profile says a game is on (game_profile_t.in_play) to its return
  * to attract, every match and the CPU's rounds included. It ends no sooner

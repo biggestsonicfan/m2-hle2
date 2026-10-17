@@ -302,3 +302,55 @@ To put a single round back for attract to play on its own, use `replay_native_in
 - It is not the board, and cannot be made to be. Attract runs a different set of tasks,
   timers and sound from a game, so the frame counts and everything outside the fight
   differ. The inputs record is the exact one.
+
+## Sega Rally
+
+Sega Rally (`srallyc`, Pinboard #997, `profiles/srallyc_native.h`) has a replay of its own
+too: the championship ending's staff credits play a clip of each course the player raced.
+Its native rounds are those clips.
+
+### What the game keeps
+
+- **The clips.** Each course has a buffer of `0x9AB0` bytes at `0x556420 + course * 0x9AB0`
+  (forest, desert, mountain, lakeside), and its count of frames at `0x217260[course]`.
+  - A record is the `0x58`-byte car block (`0x213B40` is the player's), taken every 4 frames.
+    Records 0-224 are the player's car, 225-449 the nearest rival's.
+  - `0x5E50E8` clears the count at the race start. At each of the course's three points
+    (the table at `0x5E5010`) the game picks the nearest car and records 250 frames of both,
+    so a course holds up to 750 frames.
+  - `0x5E53C0` (course, frame, side) reads a clip back, the player's frames from 0 and the
+    rival's from 900, interpolating between records.
+- **The ending.** Sub-state 5 (the championship) states 5 and 6 (`0x5E7CB0`, `0x5E78B0`),
+  reached when the lakeside is won. Its own state is `0x218C50`: the podium, then state 3,
+  the credits over each course's clip, forest to lakeside (`0x5E7E40`, which moves the course
+  on), then the name entry. Each course plays for 679 frames. A course never raced plays as
+  an empty road, as on the board.
+
+### The parts of a round
+
+A round is a race, taken at the championship's race end (`0x5BAE40`, sub-state 5 state 4),
+which every race reaches, won or timed out. Practice (sub-state 7) is not recorded.
+
+| Part | Board address | |
+|------|---------------|-|
+| `clip.bin` | `0x556420 + course * 0x9AB0` | the course's buffer, `0x9AB0` bytes |
+| `count.bin` | `0x217260 + course * 4` | its count of frames |
+
+`round.json` is `{"game":"srallyc","course","passed","car","clip_frames","keyed","key_frames"}`.
+A round is keyed when its clip has 1-750 frames; `key_frames` is then 680, so a round plays
+for 679 frames of the credits.
+
+### Playback
+
+The rounds are grouped into championships, each a run of rounds whose courses climb (a new
+game starts again at the forest). The board cold-boots; at the main loop's mode dispatch
+(`0x5A2200`), on attract's first frame:
+
+1. The four counts are zeroed and the championship's clips and counts go back in.
+2. The game is put where the lakeside's race end puts it: mode 3 (a player's game), sub-state
+   5, state 5, course 3. The ending runs from there on the game's own code.
+3. When the ending reaches its name entry, the board is sent back to its boot (mode 0, no name
+   asked), and at attract the next championship goes in. After the last one the replay ends.
+
+`g_native_play` counts the credits' frames over a recorded course. The recording hook only
+reads, and playback writes only while a replay plays, so a board not playing one is unchanged.

@@ -10,7 +10,8 @@
  * textures loaded. Interrupts go through the program's own table (irq_vectors):
  * the vblank handler at 0x5A0490 clears the texture-upload budget flag at
  * 0x202004 and arms timer 2, and without it the course and title textures were
- * never uploaded. Two hooks, both the region (srallyc_hook_country_default).
+ * never uploaded. Hooks: the region (srallyc_hook_country_default) and the
+ * native replay's two (srallyc_native.h).
  *
  * Controls: the 315-5649 I/O board's wheel, pedals and four-speed lever
  * (board/io_5649.h). LEFT / RIGHT turn the wheel, B1 is the accelerator, B2
@@ -18,8 +19,10 @@
  * wheel's pot is adjustable (--wheel-center / --wheel-range / --wheel-speed);
  * the default is the owner's manual's spec.
  *
- * Replays: a player's game is recorded as the state and the inputs, labelled
- * with the car and the course (srallyc_match_info below).
+ * Replays: each course raced is kept as the clip the game records of it, and
+ * played back by the game's own ending (srallyc_native.h); --replay-format
+ * inputs keeps the state and the inputs too. Labelled with the car and the
+ * course (srallyc_match_info below).
  */
 #ifndef PROFILES_SRALLYC_H
 #define PROFILES_SRALLYC_H
@@ -39,6 +42,7 @@
 #include "hle_hooks.h"
 #include "io_5649.h"
 #include "savestate_reg.h"
+#include "srallyc_native.h" /* each course's clip in the game's replay format (Pinboard #997) */
 
 #define SRALLYC_PAIR_32(dest, dest_sz, lo, crc_lo, hi, crc_hi, half_sz, offset) \
     do { \
@@ -184,8 +188,7 @@ static inline void srallyc_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
  *             and the first championship race)
  *   0x20A8C4  the car-select cursor, kept into the race: 0 Celica MT,
  *             1 Celica AT, 2 Delta AT, 3 Delta MT (left to right on the wheel)
- * The game keeps no replay of its own, so a replay is always the state and the
- * input feed. */
+ * The game's own replay, each course's highlight clip, is srallyc_native.h's. */
 #define SRALLYC_MODE   0x00202098u
 #define SRALLYC_COURSE 0x0020A7DCu
 #define SRALLYC_CAR    0x0020A8C4u
@@ -259,12 +262,16 @@ static const game_profile_t srallyc_profile = {
     .board           = BOARD_MODEL2A_CRX,
     .load_fn         = srallyc_load,
     .install_fn      = srallyc_install,
-    .hook_count      = 2,
+    .hook_count      = 2 + SRALLYC_NATIVE_HOOK_COUNT,
     .hooks = {
         { 0x005A19A4, srallyc_hook_country_default,  "country_default" },
         { 0x005A1CD0, srallyc_hook_settings_checked, "settings_checked" },
+        SRALLYC_NATIVE_HOOKS
     },
     .match_info      = srallyc_match_info,
+    .native_take     = srallyc_native_take,
+    .native_put      = srallyc_native_put,
+    .native_play     = srallyc_native_play,
     .in_play         = srallyc_in_play,
     .input = {
         /* IN0 is the cabinet's: COIN1 0x01, TEST 0x04, SERVICE 0x08, VR 0x20,
