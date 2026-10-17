@@ -21,6 +21,8 @@ static float ps3ui__fall(float d, float s, float p)
     return d <= 0.0f ? 1.0f : expf(-powf(d / s, p));
 }
 
+static float ps3ui__clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+
 static float ps3ui__smooth(float e0, float e1, float x)
 {
     float t = (x - e0) / (e1 - e0);
@@ -212,27 +214,34 @@ static void ps3ui__paint_plate(ps3ui_image_t *im, float mid, int top, int bottom
 
 /* ---- the header tab: a white plate whose lower edge curves up to the right -- */
 
+/* The tab's outer lower edge at column centre fx: flat at 49, then an arc
+ * curving up to the right of cx. */
+static float ps3ui__tab_edge(float fx)
+{
+    const float cx = 87.0f, cy = -126.1f, r = 175.1f;
+    if (fx <= cx)
+        return 49.0f;
+    float q = r * r - (fx - cx) * (fx - cx);
+    return q > 0.0f ? cy + sqrtf(q) : 0.0f;
+}
+
+/* One pixel of the stem below the tab, where the rail joins. */
+static ps3ui__c4 ps3ui__tab_stem_px(int x, ps3ui__c4 grey)
+{
+    if (x < 3 || (x >= 13 && x < 16)) return grey;
+    if (x < 13) return ps3ui__hex4(0xFFFFFF, 0xFF);
+    return ps3ui__hex4(0xF8FAFF, 0);
+}
+
 /* One pixel of the tab, above the dots. */
 static ps3ui__c4 ps3ui__tab_px(int x, int y, ps3ui__c4 grey)
 {
-    const float cx = 87.0f, cy = -126.1f, r = 175.1f;   /* outer lower edge, right of cx */
-    float fx = (float)x + 0.5f;
-    float edge = 49.0f;                          /* outer lower edge at this x */
-    if (fx > cx) {
-        float q = r * r - (fx - cx) * (fx - cx);
-        edge = q > 0.0f ? cy + sqrtf(q) : 0.0f;
-    }
-    /* the stem below the tab, where the rail joins */
-    if (y >= 49) {
-        if (x < 3 || (x >= 13 && x < 16)) return grey;
-        else if (x < 13) return ps3ui__hex4(0xFFFFFF, 0xFF);
-        else return ps3ui__hex4(0xF8FAFF, 0);
-    }
+    float edge = ps3ui__tab_edge((float)x + 0.5f);   /* outer lower edge at this x */
+    if (y >= 49)
+        return ps3ui__tab_stem_px(x, grey);
     float fy = (float)y + 0.5f;
     /* coverage of the area above the edge, and above edge-3 (inside the border) */
-    float cov = edge - fy + 0.5f, inner = edge - 3.0f - fy + 0.5f;
-    cov = cov < 0.0f ? 0.0f : cov > 1.0f ? 1.0f : cov;
-    inner = inner < 0.0f ? 0.0f : inner > 1.0f ? 1.0f : inner;
+    float cov = ps3ui__clamp01(edge - fy + 0.5f), inner = ps3ui__clamp01(edge - 3.0f - fy + 0.5f);
     if (cov <= 0.0f)
         return ps3ui__hex4(0xF8FAFF, 0);
     if (y < 3 || x < 3 || inner <= 0.0f) {
@@ -585,8 +594,6 @@ static ps3ui__c4 ps3ui__ramp(const ps3ui__stop_t *s, int n, float v)
                               (v - s[i].pos) / (s[i + 1].pos - s[i].pos));
     return ps3ui__hex4(s[n - 1].rgb, s[n - 1].a);
 }
-
-static float ps3ui__clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
 
 /* ---- the small header tab (hw_ovr_line_cnr_s) ------------------------------ */
 
