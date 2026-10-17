@@ -1128,13 +1128,9 @@ static inline void ps3_after_result(ps3_link_t *L) {
     if (win) ps3_rotate(L, win);
 }
 
-static inline void ps3_read_room(ps3_link_t *L) {
-    rpcn_session_t *s = L->session;
-    if (s->room_rev == L->room_rev_seen) return;
-    L->room_rev_seen = s->room_rev;
-    if (s->room_bin_len < 0x20) return;
-    const uint8_t *b = s->room_bin;
-    uint32_t phase = ps3_be32(b + 0x10);
+/* The room blob's match fields: the seed, the flags, the fighters and our
+ * side among them. Notes the phase when it is new. */
+static inline void ps3_take_room_bin(ps3_link_t *L, const uint8_t *b, uint32_t phase) {
     L->seed          = ps3_be32(b + 0x00);
     L->match_flags   = b[0x05];
     L->fighter_count = ps3_be32(b + 0x14);
@@ -1146,15 +1142,13 @@ static inline void ps3_read_room(ps3_link_t *L) {
                  (unsigned)L->fighter_count, L->fighters[0], L->fighters[1], L->seed, L->room_rtt_ms,
                  L->match_flags);
     }
-    uint32_t was = L->room_known ? L->phase : 0xFFFFFFFFu;
-    L->room_known = true;
-    L->phase = phase;
-
     L->my_side = -1;
     for (uint32_t k = 0; k < 2 && k < L->fighter_count; k++)
-        if (L->fighters[k] == s->my_member_id) L->my_side = (int32_t)k;
+        if (L->fighters[k] == L->session->my_member_id) L->my_side = (int32_t)k;
+}
 
-    if (phase == was) return;
+/* The room has moved to a new phase. */
+static inline void ps3_enter_phase(ps3_link_t *L, uint32_t phase) {
     L->seen_since_us = net_now_us();
     /* The owner moved on without us finishing: the PS3 gave up on the match
      * (its lockstep timed out, or somebody left). */
@@ -1192,6 +1186,19 @@ static inline void ps3_read_room(ps3_link_t *L) {
         default:
             break;
     }
+}
+
+static inline void ps3_read_room(ps3_link_t *L) {
+    rpcn_session_t *s = L->session;
+    if (s->room_rev == L->room_rev_seen) return;
+    L->room_rev_seen = s->room_rev;
+    if (s->room_bin_len < 0x20) return;
+    uint32_t phase = ps3_be32(s->room_bin + 0x10);
+    uint32_t was = L->room_known ? L->phase : 0xFFFFFFFFu;
+    ps3_take_room_bin(L, s->room_bin, phase);
+    L->room_known = true;
+    L->phase = phase;
+    if (phase != was) ps3_enter_phase(L, phase);
 }
 
 /* ---- The owner ----------------------------------------------------------- */
@@ -1582,7 +1589,7 @@ static inline void ps3_peer_open_rudp(ps3_link_t *L, ps3_peer_t *p, const rpcs3_
                                       uint64_t now_us) {
     rpcn_session_t *s = L->session;
     rudp_peer_init(&p->rudp, sp->ip, sp->port, now_us ^ ((uint64_t)p->member_id << 40),
-                   ps3_link_send_udp, s, ps3_deliver_cb, p);
+                   (rudp_io_t){ ps3_link_send_udp, s, ps3_deliver_cb, p });
     p->rudp_up = true;
     /* Channel 1 exists only between the owner and each member; 2 and 3
      * between every pair (the PS3's FUN_000b6884 connect loop). */

@@ -67,28 +67,27 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
 
     if (geo3d->enabled && g_active_profile && rs->main_data && rs->polygons) {
         const game_quirks_t *q = &g_active_profile->quirks;
+        const model_table_t table = profile_model_table(q);
+        const geo3d_rom_t rom = { rs->main_data, rs->main_data_size, &table };
         /* One snapshot for the walk and the decode: the texture points and
          * polygon RAM it reads are the ones published with it (memory.h). */
         const uint32_t *snap = g_geodl_snap;
         g_geo_rs = geodl_raster_for(snap);
+        /* Set each frame, both ways: a game loaded after m2-snake in the same
+         * process used to keep the homebrew's flat colours. */
+        g_geo_flat_color = q->geo_displaylist ? 1 : 0;
         if (q->geo_displaylist) {
             /* Authentic hardware path: decode the GEO display list the i960 built
              * in bufferram. Scan the snapshot captured at geo_flush (g_geodl_snap),
              * not live bufferram — the SHARC HLE aliases bufferram and clobbers the
              * list between flushes. Every m2-snake homebrew uses read_start 0x10000. */
+            const geo3d_list_t list = { snap, BUFF_RAM_SIZE / 4, 0x10000 };
             if (g_geodl_snap_ready)
-                geo3d_scan_displaylist(geo3d,
-                                       snap,         BUFF_RAM_SIZE / 4, 0x10000,
-                                       rs->main_data, rs->main_data_size,
-                                       q->model_table_offset, q->model_table_count,
-                                       bus->palette, PALETTE_SIZE);
+                geo3d_scan_displaylist(geo3d, &list, &rom, bus->palette, PALETTE_SIZE);
         } else if (!(g_geodl_snap_ready &&
-                     geo3d_scan_geo_list(geo3d, snap, BUFF_RAM_SIZE / 4,
-                                         g_geodl_snap_rstart,
+                     geo3d_scan_geo_list(geo3d, &(const geo3d_list_t){ snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart },
                                          (int16_t)mem_read16(bus, H_SYNC_BASE),
-                                         (int16_t)mem_read16(bus, V_SYNC_BASE),
-                                         rs->main_data, rs->main_data_size,
-                                         q->model_table_offset, q->model_table_count))) {
+                                         (int16_t)mem_read16(bus, V_SYNC_BASE), &rom))) {
             /* No display list yet, or it did not reach END (only the first two
              * frames after boot): no 3D this frame. */
             geo3d->captured_count = 0;
@@ -100,11 +99,12 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
     hprof_leave(zone);
 }
 
-/* Draw the game into the viewport (ox, oy, w, h) of the current pass.
+/* Draw the game into the viewport vp of the current pass.
  * Layer order: back colour → background tiles → 3D scene → foreground/HUD. */
 static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
                                    memory_bus_t *bus, const romset_t *rs,
-                                   int ox, int oy, int w, int h, float lerp_t) {
+                                   game_rect_t vp, float lerp_t) {
+    const int ox = vp.x, oy = vp.y, w = vp.w, h = vp.h;
     int64_t t0 = emu_now_us();
     int zone = hprof_enter(HPROF_UPLOAD);   /* host_prof.h */
     /* Decode both 4-bit luma texture banks → GPU atlas for textured fills, and
@@ -134,11 +134,12 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
      * back layer there is opaque everywhere (the backdrop is its pen 0), so the
      * back colour quad under it would be drawn over whole: it is left out, and
      * the layer drawn without blending (alpha 1 blends to the source exactly). */
+    const game_rect_t bg = game_render_tile_rect(vp, g_game_wide.stretch_low);
     if (video->gpu) {
-        game_render_draw_indexed(video->bg_view, video->pal_rgba_view, true, ox, oy, w, h);
+        game_render_draw_indexed(video->bg_view, video->pal_rgba_view, true, bg.x, bg.y, bg.w, bg.h);
     } else {
-        game_render_draw_game(video->back_view, ox, oy, w, h);
-        game_render_draw_game(video->bg_view, ox, oy, w, h);
+        game_render_draw_game(video->back_view, bg.x, bg.y, bg.w, bg.h);
+        game_render_draw_game(video->bg_view, bg.x, bg.y, bg.w, bg.h);
     }
     int64_t t2 = emu_now_us();
     hprof_enter(HPROF_DRAW3D);
@@ -156,7 +157,6 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
         geo3d->lines_only = false;
         if (q->geo_displaylist) {
             g_geo_wireframe  = 0;
-            g_geo_flat_color = 1;
             g_backface_cull  = 0;
         }
         /* The homebrew's display-list object order changes every frame (stars
@@ -167,11 +167,7 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
         g_geo3d_palram      = bus->palette;
         g_geo3d_palram_size = PALETTE_SIZE;
         const geo3d_models_t md = geo3d_models_of(rs, q);
-        game_render_draw_captured_models(geo3d, &md,
-                                         ox, oy, w, h,
-                                         geo3d->cam_x, geo3d->cam_y, geo3d->cam_z,
-                                         geo3d->rot_y, geo3d->rot_x, geo3d->fov_deg,
-                                         dl_lerp);
+        game_render_draw_captured_models(geo3d, &md, ox, oy, w, h, dl_lerp);
         g_geo3d_palram = NULL;
     }
     int64_t t3 = emu_now_us();
@@ -188,8 +184,9 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
                                - (gl0.size_update_buffer + gl0.size_append_buffer);
     }
     hprof_enter(HPROF_TILES);
-    if (video->gpu) game_render_draw_indexed(video->fg_view, video->pal_rgba_view, false, ox, oy, w, h);
-    else            game_render_draw_game(video->fg_view, ox, oy, w, h);
+    const game_rect_t fg = game_render_tile_rect(vp, g_game_wide.stretch_high);
+    if (video->gpu) game_render_draw_indexed(video->fg_view, video->pal_rgba_view, false, fg.x, fg.y, fg.w, fg.h);
+    else            game_render_draw_game(video->fg_view, fg.x, fg.y, fg.w, fg.h);
     g_game_frame_times.draw3d_us += t3 - t2;
     g_game_frame_times.tiles_us  += (t2 - t1) + (emu_now_us() - t3);
     g_game_frame_times.frames++;

@@ -5,9 +5,9 @@
  *   node tools/web-smoke.mjs --url http://localhost:8080/?rom=/dev-rom.zip
  *        [--seconds 30] [--shot out.png] [--shot-at 10,20] [--browser path/to/chrome-or-edge]
  *        [--size 992x768] [--expect-frames N] [--keys "5@12,1@14"] [--gesture-audio]
- *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console]
+ *        [--expect-log TEXT] [--fail-on-log REGEX] [--sound] [--diagnose] [--drawer lag|console|picture|replay|cheats]
  *        [--cpu-throttle N] [--eval JS] [--mobile] [--taps "coin@12,b1@20:300,dpad-right@22:500"]
- *        [--hide 20:10]
+ *        [--hide 20:10] [--watch JS] [--headed]
  *
  * Drives Chrome or Edge over the DevTools protocol in REAL time. Headless
  * "virtual time" is useless here: the game is paced by the wall clock, and
@@ -47,8 +47,9 @@
  * touch buttons (web/site/m2hle-touch.js). --taps then presses them by name at
  * given seconds, with real touch events on the page: "b1@20:300" holds Punch
  * for 300 ms at t=20 s (120 ms if no hold is given). The names are the controls'
- * ids -- dpad, b1..b4, start, coin -- and dpad-up/-down/-left/-right/-up-left/...
- * press the d-pad two thirds of the way out that way. Each tap prints the mask
+ * ids -- dpad, b1..b4, start, coin; a twin-stick game's rpad, rshot, rdash -- and
+ * dpad-up/-down/-left/-right/-up-left/... (rpad-...) press a d-pad two thirds of
+ * the way out that way. Each tap prints the mask
  * the touch layer held, so a tap that missed says so.
  *
  * --hide T:N covers the game with a new foreground tab at t=T s for N s, which
@@ -56,6 +57,12 @@
  * running (web_background_tick, from m2hle-page.js's worker), so the per-second
  * line should keep counting ~60 frames a second; it adds `hidden` and how many
  * worker ticks ran the board.
+ *
+ * --watch JS evaluates an expression in the page with each per-second line and
+ * prints its value after it (e.g. a follower's status, or the wasm heap's size).
+ * --headed opens a window (on $DISPLAY): headless Chrome runs requestAnimationFrame
+ * at whatever rate it likes (8 Hz on a busy Linux box), so pacing and sound are
+ * only worth reading from a window, an Xvfb one will do.
  *
  * No dependencies: Node 22+ has WebSocket and fetch built in.
  */
@@ -69,7 +76,7 @@ const opt = (name, fallback) => {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : fallback;
 };
-const url = opt('--url', 'http://localhost:8080/');
+const url = opt('--url', 'http://localhost:8080/?game=sfight');   /* bare / is the front page */
 const seconds = Number(opt('--seconds', '30'));
 const shot = opt('--shot', null);
 const shotAt = (opt('--shot-at', '') || '').split(',').filter(Boolean).map(Number);
@@ -85,6 +92,7 @@ const keys = (opt('--keys', '') || '').split(',').filter(Boolean).map((k) => {
 
 const [hideAt, hideFor] = (opt('--hide', '0:0')).split(':').map(Number);
 const mobile = args.includes('--mobile');
+const watch = opt('--watch', null);
 const taps = (opt('--taps', '') || '').split(',').filter(Boolean).map((t) => {
   const m = /^([a-z0-9-]+)@([\d.]+)(?::(\d+))?$/.exec(t);
   if (!m) { console.error(`--taps: cannot read "${t}"`); process.exit(2); }
@@ -112,7 +120,7 @@ const port = 9300 + Math.floor(Math.random() * 500);
 const profile = path.join(os.tmpdir(), 'm2hle-web-smoke-profile');
 fs.mkdirSync(profile, { recursive: true });
 const child = spawn(browser, [
-  '--headless=new', '--no-first-run', '--disable-extensions', '--mute-audio',
+  ...(args.includes('--headed') ? [] : ['--headless=new']), '--no-first-run', '--disable-extensions', '--mute-audio',
   `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`,
   `--window-size=${width},${height}`,
   /* A machine with no usable GPU (CI, a remote session) still gets WebGL2. */
@@ -265,7 +273,8 @@ try {
         ? `  snd voices=${bits(b.active)} midi w=${b.midi_writes} drops=${b.midi_drops} hi=${b.midi_hi} drains=${b.midi_drains} pc=${b.m68k_pc}`
         : '';
       const hid = bg ? `  hidden=${bg[0]} bg_ticks=${bg[1]}` : '';
-      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${args.includes('--sound') ? '' : audio}${board}${hid}`);
+      const w = watch ? `  ${JSON.stringify(await evaluate(watch))}` : '';
+      console.log(`${stamp()}s  state=${st[0]} frames=${frames} (+${frames - lastFrames}/s)${args.includes('--sound') ? '' : audio}${board}${hid}${w}`);
       lastFrames = frames;
     }
     for (const k of keys) if (!k.done && s >= k.at) { k.done = true; await press(k.key); }
@@ -280,7 +289,7 @@ try {
     console.log(`\n${report}\n`);
   }
   const drawer = opt('--drawer', null);
-  if (drawer) { await evaluate(`m2hleTools.openDrawer('${drawer === 'console' ? 'console' : 'lag'}')`); await sleep(400); }
+  if (drawer) { await evaluate(`m2hleTools.openDrawer(${JSON.stringify(drawer)})`); await sleep(400); }
   if (shot) await screenshot(shot);
 
   if (expectLog && !sawExpected) {

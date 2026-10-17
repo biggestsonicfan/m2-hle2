@@ -32,6 +32,8 @@
 
 #include "constants.h"
 #include "game_profile.h"
+#include "eeprom_93c46.h"
+#include "io_5649.h"
 #include "log.h"
 #include "memory.h"
 
@@ -164,17 +166,33 @@ static inline void input_action_up(int act) {
     if (act < 0 || act >= GAME_INPUT_COUNT || !g_active_profile) return;
     uint32_t bit = g_active_profile->input.bits[act];
     if (g_input_holds[act] > 0 && --g_input_holds[act] > 0) return;
-    if (bit) g_input.held &= ~bit;
+    if (!bit) return;
+    g_input.held &= ~bit;
+    /* An action whose mask shares a bit with this one (Virtual-On's B3 is
+     * both triggers, B1 the left one) keeps it while still held. */
+    for (int a = 0; a < GAME_INPUT_COUNT; a++)
+        if (g_input_holds[a]) g_input.held |= g_active_profile->input.bits[a] & bit;
 }
 
 /* ---- Combos ---------------------------------------------------------------- */
+
+/* The n characters at s as a combo button (any case): its index among up,
+ * down, left, right, b1-b4, start, coin, or -1. */
+static inline int input_combo_name(const char *s, size_t n) {
+    static const char *const names[] = { "up", "down", "left", "right", "b1", "b2", "b3", "b4", "start", "coin" };
+    for (int i = 0; i < (int)(sizeof names / sizeof names[0]); i++) {
+        if (strlen(names[i]) != n) continue;
+        size_t c = 0;
+        while (c < n && (s[c] | 0x20) == names[i][c]) c++;
+        if (c == n) return i;
+    }
+    return -1;
+}
 
 /* Parse a combo: '+'-separated b1 b2 b3 b4 up down left right start coin,
  * optionally after "p2:" for player 2 -- "b1+b2", "p2:b1+b2+b3". Returns the
  * action mask, or 0 if the text is not one. */
 static inline uint32_t input_combo_parse(const char *s) {
-    static const char *const names[] = { "up", "down", "left", "right", "b1", "b2", "b3", "b4", "start", "coin" };
-    const int per_player = GAME_INPUT_P2_UP - GAME_INPUT_P1_UP;
     int base = GAME_INPUT_P1_UP;
     if ((s[0] == 'p' || s[0] == 'P') && (s[1] == '1' || s[1] == '2') && s[2] == ':') {
         if (s[1] == '2') base = GAME_INPUT_P2_UP;
@@ -182,16 +200,8 @@ static inline uint32_t input_combo_parse(const char *s) {
     }
     uint32_t acts = 0;
     while (*s) {
-        size_t n = 0;
-        while (s[n] && s[n] != '+') n++;
-        int found = -1;
-        for (int i = 0; i < per_player; i++) {
-            size_t len = 0;
-            while (names[i][len]) len++;
-            bool eq = len == n;
-            for (size_t c = 0; eq && c < n; c++) eq = (s[c] | 0x20) == names[i][c];
-            if (eq) { found = i; break; }
-        }
+        size_t n = strcspn(s, "+");
+        int found = input_combo_name(s, n);
         if (found < 0) return 0;
         acts |= 1u << (base + found);
         s += n;
@@ -245,11 +255,35 @@ static uint32_t input_io_read_cb(mem_region_t *r, uint32_t addr, int size) {
     uint32_t off  = addr - r->base;
     uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
     switch (off) {
-        case 0x02: return (uint8_t)~(held         & 0xFFu);  /* IN0 system */
+        case 0x02: return eeprom_in0((uint8_t)~(held & 0xFFu));  /* IN0 system */
         case 0x04: return (uint8_t)~((held >> 8)  & 0xFFu);  /* IN1 P1     */
         case 0x06: return (uint8_t)~((held >> 16) & 0xFFu);  /* IN2 P2     */
         default:   return r->data ? r->data[off] : 0xFFu;    /* DIPs / idle */
     }
+}
+
+/* Port A (IO+0x00) is the EEPROM's; the rest keep the plain buffer. */
+static void input_io_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
+    uint32_t off = addr - r->base;
+    for (int i = 0; i < size; i++) {
+        uint8_t b = (uint8_t)(val >> (8 * i));
+        if (off + (uint32_t)i == 0x00) eeprom_port_a(b);
+        if (r->data && off + (uint32_t)i < r->size) r->data[off + (uint32_t)i] = b;
+    }
+}
+
+static uint32_t input_board_held(void) { return g_input.use_net ? g_input.net_held : g_input.held; }
+static int      input_board_from_net(void) { return g_input.use_net; }
+
+/* A 315-5649 board (a wheel): io_5649.h serves the ports and takes the writes. */
+static inline void input_attach_5649(mem_region_t *r) {
+    const game_quirks_t *q = &g_active_profile->quirks;
+    g_io5649_controls = (io5649_controls_t){ q->wheel.left, q->wheel.right, q->wheel.accel,
+                                             q->wheel.brake, q->wheel.shift_up, q->wheel.shift_down };
+    g_io5649_held_fn     = input_board_held;
+    g_io5649_from_net_fn = input_board_from_net;
+    r->read_cb  = io5649_read_cb;
+    r->write_cb = io5649_write_cb;
 }
 
 /* Install the I/O read callback on the bus's I/O region. Call after the ROM is
@@ -258,7 +292,8 @@ static uint32_t input_io_read_cb(mem_region_t *r, uint32_t addr, int size) {
 static inline void input_attach(memory_bus_t *bus) {
     for (int i = 0; i < bus->region_count; i++) {
         if (bus->regions[i].base == IO_BASE) {
-            bus->regions[i].read_cb = input_io_read_cb;
+            if (g_active_profile && g_active_profile->quirks.io_5649) input_attach_5649(&bus->regions[i]);
+            else { bus->regions[i].read_cb = input_io_read_cb; bus->regions[i].write_cb = input_io_write_cb; }
             mem_regions_changed(bus);
             LOG_INFO("input: I/O port read callback attached @ 0x%08X", IO_BASE);
             return;

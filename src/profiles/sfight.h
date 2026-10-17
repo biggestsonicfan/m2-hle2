@@ -38,6 +38,7 @@
 #include "m2_texload.h"
 #include "m2_spin.h"
 #include "sky_eye.h"     /* noclip view links -> the camera record (Pinboard #265) */
+#include "sfight_native.h" /* each round in the game's replay formats (Pinboard #602) */
 
 /* ---- Loader ------------------------------------------------------------- */
 
@@ -173,6 +174,7 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
     if (!rs->loaded) { LOG_ERROR("sfight_install: romset not loaded"); return; }
     s_sfight_on_vs_rematch = NULL;
     m2_texload_forget();   /* a new program: check its texture loader again */
+    sfight_native_install("sfight");
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
@@ -289,6 +291,51 @@ static int sfight_hook_versus_result(i960_cpu_t *cpu, memory_bus_t *bus) {
 }
 
 /*
+ * The versus match on the board, for a replay's label (core/replay.h). The
+ * same two facts as the result hook above say a two-player match is on; each
+ * fighter's character is its rob's byte +0x1B0 (rob 1P 0x510D00, 2P 0x514100;
+ * tools/lib/board.mjs ROB_CHAR), the stage is stage_num, the rounds won are
+ * byte_50004F / byte_500051 and the rounds to win byte_500052.
+ *
+ * A one-player game (Pinboard #875): gameprogram is 0 with 1P in, 1 with 2P
+ * in, and the side in has bit 2 of its flag word (0x500248 / 0x50024C) up; the
+ * other side is the CPU. Its fight is on once stage_num leaves 15 (select).
+ * The CPU's difficulty is ENEMY RANK (settings +2, 0..3), or the AI table
+ * g_enemy_rank plays instead when one is set (sfight_hook_enemy_rank_table).
+ */
+static const char *const s_sfight_chara_names[16] = {
+    "Sonic", "Tails", "Amy", "Metal Sonic", "Fang", "Bark", "Knuckles", "Espio",
+    "Robotnik", "Robotnik", "Bean", NULL, NULL, NULL, NULL, "Honey",
+};
+static const char *const s_sfight_stage_names[15] = {
+    "South Island", "Flying Carpet", "Aurora Icefield", "Mushroom Hill", "Canyon Cruise",
+    "Casino Night", "Dynamite Plant", "Giant Wing", "Death Egg", "Death Egg's Eye",
+    "Final Eggman Boss", NULL, NULL, "South Island", "South Island",
+};
+
+static void sfight_match_difficulty(memory_bus_t *bus, game_match_info_t *out);   /* below the settings block */
+
+static void sfight_match_info(memory_bus_t *bus, game_match_info_t *out) {
+    uint8_t gp = mem_read8(bus, 0x0050004C);
+    bool versus = (mem_read8(bus, 0x00500068) & 2u) && gp == 2u;
+    bool solo   = gp < 2u && (mem_read8(bus, gp ? 0x0050024Cu : 0x00500248u) & 4u)
+               && mem_read8(bus, 0x00500064) != 15u;
+    out->fighting = versus || solo;
+    out->cpu[0] = solo && gp == 1u;
+    out->cpu[1] = solo && gp == 0u;
+    sfight_match_difficulty(bus, out);
+    for (int side = 0; side < 2; side++) {
+        int c = mem_read8(bus, (side ? 0x00514100u : 0x00510D00u) + 0x1B0u);
+        out->chara[side]      = c;
+        out->chara_name[side] = c < 16 ? s_sfight_chara_names[c] : NULL;
+        out->rounds[side]     = mem_read8(bus, side ? 0x00500051u : 0x0050004Fu);
+    }
+    out->stage         = mem_read8(bus, 0x00500064);
+    out->stage_name    = out->stage < 15 ? s_sfight_stage_names[out->stage] : NULL;
+    out->rounds_to_win = mem_read8(bus, 0x00500052);
+}
+
+/*
  * vs_rematch (0xE584, next_round+0x1A4): VS mode's rematch. Sega's console
  * emulator traps this instruction (its table index 26, handler RVA 0x52EC0).
  *
@@ -324,7 +371,8 @@ static int sfight_hook_vs_rematch(i960_cpu_t *cpu, memory_bus_t *bus) {
  * both stores run. The game takes this path on a cold boot whose backup RAM
  * is blank or fails its checksum -- every boot of a graded, scripted or netplay
  * run, which keep no backup RAM (core/backup_ram.h) -- and from the test menu's
- * INITIALIZE. A player's saved backup RAM keeps the region it was saved with. Japan (0) shows the "only in Japan" warning; USA (1) skips it,
+ * INITIALIZE. A player's saved backup RAM keeps the region it was saved with,
+ * but on the web (settings_loaded, below). Japan (0) shows the "only in Japan" warning; USA (1) skips it,
  * shows the FBI picture before the Sega logo in attract, and uses the US
  * names and credit limit.
  */
@@ -652,6 +700,39 @@ static int sfight_hook_xplay_vic_dsp(i960_cpu_t *cpu, memory_bus_t *bus) {
 #define SFIGHT_BARRIER_DEFAULT   0x0050A424u  /* barrier_default_num (.long)    */
 #define SFIGHT_ROUND_TIME        0x00500090u  /* time, seconds (.byte)          */
 
+/*
+ * settings_loaded (0x6974, the instruction after main's `call 0x3634`): the
+ * game has loaded its settings. 0x3634 checks backup RAM's block and copies it
+ * to the working one (the stq loop at 0x38D0 into 0x59C340), or, when it fails
+ * its checksum, writes the factory block (init_game_assignments, where
+ * country_default puts g_region). With g_region_over_saved up (the web page's
+ * --region, hle_hooks.h) the region goes in country_val, the working copy
+ * (block +0x12, 0x59C352), here too, so a saved board plays in the page's
+ * region. The saved block and its checksum are left as they are: the next boot
+ * still accepts them. Nothing reads country_val before this point.
+ */
+static uint32_t sfight_country(memory_bus_t *bus) {
+    uint32_t base = mem_read32(bus, SFIGHT_SETTINGS_PTR);
+    uint32_t blk  = (base == 0x00599000u || base == 0x01D00000u) ? base + 0x3340u : SFIGHT_SETTINGS_WORK;
+    return blk + 0x12u;
+}
+
+static int sfight_hook_settings_loaded(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if (g_region_over_saved) mem_write8(bus, sfight_country(bus), (uint8_t)g_region);
+    return 1;
+}
+
+/* The CPU's difficulty for a replay's label (sfight_match_info). */
+static void sfight_match_difficulty(memory_bus_t *bus, game_match_info_t *out) {
+    uint32_t base = mem_read32(bus, SFIGHT_SETTINGS_PTR);
+    uint32_t blk  = (base == 0x00599000u || base == 0x01D00000u) ? base + 0x3340u : SFIGHT_SETTINGS_WORK;
+    int r = g_enemy_rank;
+    if (r < 0 || r >= ENEMY_RANKS || g_hle_netplay_board) r = mem_read8(bus, blk + 2u) & 3;
+    out->difficulty      = r;
+    out->difficulty_name = g_enemy_rank_names[r];
+}
+
 /* The eight bytes the PS3 menus hand NetGameMode_Set, in that order. Indices
  * are menu rows; out of range falls back to index 0, as the PS3 does. */
 typedef struct {
@@ -749,13 +830,14 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
 /* The hooks every STF profile needs to boot and pace frames, the versus hook
  * netplay rooms read the result from, VS mode's rematch, and the region
  * default. */
-#define SFIGHT_BASE_HOOK_COUNT 25
+#define SFIGHT_BASE_HOOK_COUNT (26 + SFIGHT_NATIVE_HOOK_COUNT)
 #define SFIGHT_BASE_HOOKS                                                      \
     { 0x00011A04, sfight_hook_frame_pace,         "frame_pace"              }, \
     { 0x000077F8, sfight_hook_cop_err_hang,       "co_processor_error_hang" }, \
     { 0x0000DC3C, sfight_hook_versus_result,      "versus_result"           }, \
     { 0x0000E584, sfight_hook_vs_rematch,         "next_round+0x1a4"        }, \
     { 0x00062688, sfight_hook_country_default,    "country_default"         }, \
+    { 0x00006974, sfight_hook_settings_loaded,    "settings_loaded"         }, \
     { 0x00062674, sfight_hook_damage_default,     "damage_default"          }, \
     { 0x000624F8, sfight_hook_rounds_default,     "rounds_default"          }, \
     { 0x0003B274, sfight_hook_enemy_rank_table,   "enemy_rank_table"        }, \
@@ -775,7 +857,8 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     { 0x0004C334, sfight_hook_tex_q_anim,        "send_lod_data_q_sub_anim row" }, \
     { 0x00011610, sfight_hook_idle_spin,          "_idle spin"              }, \
     { 0x0004BE58, sfight_hook_timed_spin,         "send_beta_data timer wait" }, \
-    { 0x0004C008, sfight_hook_timed_spin,         "send_lod_data timer wait" },
+    { 0x0004C008, sfight_hook_timed_spin,         "send_lod_data timer wait" }, \
+    SFIGHT_NATIVE_HOOKS
 
 /* hook_count stops the scan, so a count one short drops the last hook without
  * a word: the merge of #151 left it at 25 over 26 entries, and the console
@@ -834,6 +917,8 @@ _Static_assert(sizeof((hle_hook_entry_t[]){ SFIGHT_BASE_HOOKS }) ==
     .warning_skip_addr      = 0x00500410,   /* SKIP_WARNING; see g_warning_skip */   \
     .vs_rematch             = true,         /* sfight_hook_vs_rematch */             \
     .enemy_ranks            = true,         /* sfight_hook_enemy_rank_table */       \
+    .region = { .kind = REGION_HOOKED, .factory_default = "country_default",        \
+                .over_saved = "settings_loaded", .country = sfight_country },         \
     .attract_replay = {                                                             \
         .step_addr   = 0x00500030,           /* _sub_mode */                          \
         .from_step   = 5,                                                             \
@@ -857,6 +942,11 @@ static const game_profile_t sfight_profile = {
     .hooks        = { SFIGHT_BASE_HOOKS },
     .input        = { SFIGHT_INPUT_MAP },
     .quirks       = { SFIGHT_QUIRKS },
+    .match_info   = sfight_match_info,
+    .native_take  = sfight_native_take,
+    .native_play  = sfight_native_play,
+    .in_play      = sfight_in_play,
+    .native_put   = sfight_native_put,
 };
 
 #endif /* PROFILES_SFIGHT_H */

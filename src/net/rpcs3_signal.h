@@ -381,32 +381,39 @@ static inline bool rpcs3_sig_on_datagram(rpcs3_sig_t *s, uint32_t ip, uint16_t p
     return true;
 }
 
+/* A peer we are leaving: send FINISHED again when it is due, and give the peer up
+ * once it has gone unacknowledged too many times. */
+static inline void rpcs3_sig_pump_finish(rpcs3_sig_t *s, rpcs3_sig_peer_t *p, uint64_t now) {
+    if (now < p->next_finish_us) return;
+    if (p->finish_tries++ >= RPCS3_SIG_FINISH_TRIES) { p->finishing = false; p->dead = true; return; }
+    rpcs3_sig_send(s, p, RPCS3_SIG_FINISHED, now, 0);
+    p->next_finish_us = now + RPCS3_SIG_FINISH_US;
+}
+
+/* A live peer: CONNECT again while connecting, PING while connected, and call it
+ * dead after 60 s with nothing from it. */
+static inline void rpcs3_sig_pump_live(rpcs3_sig_t *s, rpcs3_sig_peer_t *p, uint64_t now) {
+    if (p->connecting && now >= p->next_connect_us) {
+        rpcs3_sig_send(s, p, RPCS3_SIG_CONNECT, now, 0);
+        p->next_connect_us = now + RPCS3_SIG_CONNECT_US;
+    }
+    if (p->active && now >= p->next_ping_us) {
+        rpcs3_sig_send(s, p, RPCS3_SIG_PING, now, 0);
+        p->next_ping_us = now + (p->got_pong ? RPCS3_SIG_PING_US : RPCS3_SIG_PING_FAST_US);
+    }
+    if ((p->active || p->peer_active) && p->last_rx_us && now - p->last_rx_us > RPCS3_SIG_DEAD_US) {
+        rpcs3_sig_note(s, "signaling: nothing from %s for 60 s; dead", p->npid);
+        p->active = p->peer_active = false;
+        p->dead = true;
+    }
+}
+
 static inline void rpcs3_sig_pump(rpcs3_sig_t *s, uint64_t now) {
     for (uint32_t i = 0; i < RPCS3_SIG_MAX_PEERS; i++) {
         rpcs3_sig_peer_t *p = &s->peers[i];
         if (!p->used) continue;
-        if (p->finishing) {
-            if (now >= p->next_finish_us) {
-                if (p->finish_tries++ >= RPCS3_SIG_FINISH_TRIES) { p->finishing = false; p->dead = true; continue; }
-                rpcs3_sig_send(s, p, RPCS3_SIG_FINISHED, now, 0);
-                p->next_finish_us = now + RPCS3_SIG_FINISH_US;
-            }
-            continue;
-        }
-        if (p->dead) continue;
-        if (p->connecting && now >= p->next_connect_us) {
-            rpcs3_sig_send(s, p, RPCS3_SIG_CONNECT, now, 0);
-            p->next_connect_us = now + RPCS3_SIG_CONNECT_US;
-        }
-        if (p->active && now >= p->next_ping_us) {
-            rpcs3_sig_send(s, p, RPCS3_SIG_PING, now, 0);
-            p->next_ping_us = now + (p->got_pong ? RPCS3_SIG_PING_US : RPCS3_SIG_PING_FAST_US);
-        }
-        if ((p->active || p->peer_active) && p->last_rx_us && now - p->last_rx_us > RPCS3_SIG_DEAD_US) {
-            rpcs3_sig_note(s, "signaling: nothing from %s for 60 s; dead", p->npid);
-            p->active = p->peer_active = false;
-            p->dead = true;
-        }
+        if (p->finishing) rpcs3_sig_pump_finish(s, p, now);
+        else if (!p->dead) rpcs3_sig_pump_live(s, p, now);
     }
 }
 

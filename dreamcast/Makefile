@@ -17,6 +17,8 @@
 # all of it is 4.8 MB of SH-4 and leaves the pager no room. Recorded with Gems
 # on, 79% of the counts are the two instructions of `_idle`'s vblank spin, which
 # the spin hook skips, so 0.99 here is about what 0.95 of the rest would be.
+# 0.995 (306 KB more text, slice -3%) fits since the STF-only build gave the
+# page cache 934 KB back (Pinboard #1038, DREAMCAST-PORT.md).
 # AOT_MAP=pacman.aotmap compiles m2-pacman instead (AOT= its game.bin): homebrew
 # has none of STF's hooks, so only the map's are kept (Pinboard #463).
 
@@ -140,7 +142,7 @@ PROF := $(if $(filter prof,$(HUD)),1,0)
 # m2-pacman's map is flatter: 0.99 of it is 33,000 instructions and runs the
 # board out of RAM; 0.9 is 14,600 (2.4 MB of text).
 # pacman_geo's (the GEO-sprite build) at 0.95 is 16,300.
-AOT_COVER ?= $(if $(filter pacman.aotmap,$(AOT_MAP)),0.9,$(if $(filter pacman_geo.aotmap,$(AOT_MAP)),0.95,0.99))
+AOT_COVER ?= $(if $(filter pacman.aotmap,$(AOT_MAP)),0.9,$(if $(filter pacman_geo.aotmap,$(AOT_MAP)),0.95,0.995))
 # The block runner's pool. The AOT build needs less of it, but at 4096 ops a
 # fight's blocks overflowed it and were rebuilt every frame (3.7% of the frame).
 IB_POOL ?= $(if $(AOT),8192u,16384u)
@@ -150,7 +152,7 @@ CFLAGS := -std=gnu11 -O2 -fno-strict-aliasing -Wall -Wno-format -Wno-address -in
           -DGEO_CAPTURE_SIZE=1 -DLOG_MAX_LINES=64 -DNDEBUG -DM2HLE_NO_ZIP \
           -DGEO3D_MAX_LINES=16 -DGEO3D_MAX_TRIS=4096 -DGEO3D_TRI_BUF=1 -DGEO3D_DC_SINK -DGEO3D_MESH_CACHE_SLOTS=256u \
           -DGEO3D_MESH_ARENA=0x100000u $(if $(filter 1,$(STRIPS)),-DGEO3D_STRIPS) -DMEM_COUNT=0 -DMEM_PAGE_SHIFT=14 -DMEM_PAGES=0x4C00u -DMEM_LE_DIRECT=1 -DIRQT_COUNT_T=int32_t -DI960_BLOCKS=1 -DIB_ENTRIES=2048u -DIB_POOL=$(IB_POOL) -DI960_JIT=$(JIT) -DIB_JIT_SELFTEST=$(JIT_TEST) -DIB_JIT_ON=$(JIT_ON) -DDC_HASH_FRAME=$(HASH_FRAME) -DDC_SCENE=$(SCENE) -DDC_SCAN_SPLIT=$(SCANSPLIT) -DDC_FACE_COUNT=$(FACECOUNT) -DGEO3D_FACESTOP=$(FACESTOP) -DGEO3D_TAILHALF=$(TAILHALF) -DGEO3D_STRIPSTOP=$(STRIPSTOP) -DGEO3D_ZKEYSTOP=$(ZKEYSTOP) -DGEO3D_COLOURSTOP=$(COLOURSTOP) -DGEO3D_FACECOLSTOP=$(FACECOLSTOP) -DGEO3D_RAMPSTOP=$(RAMPSTOP) -DDC_RAMP_COUNT=$(RAMPCOUNT) -DDC_RAMP_KEEP=$(RAMPKEEP) -DDC_CACHE_SHRINK=$(CACHESHRINK) -DDC_RAMP_4096=$(RAMP4096) -DDC_RAMP_WALK=$(RAMPWALK) -DDC_LINK=$(LINK) -DDC_SDLOG=$(SDLOG) -DDC_LINK_GEMS=$(LINK_GEMS) -DI960_OPTABLE=$(OPTAB) -DDC_HOST_MATH=$(HOST_MATH) -DDC_FRAME512=$(FRAME512) $(VIEW_CFLAGS) -DDC_FILL=$(FILL) -DDC_FPS_CAP=$(FPS_CAP) -DDC_HUD_MIN=$(if $(filter min none,$(HUD)),1,0) -DDC_HUD_NONE=$(if $(filter none,$(HUD)),1,0) -DDC_HUD_PROF=$(PROF) -DDC_HUD_FPS=$(if $(filter none,$(HUD)),0,$(FPS)) $(LINK_CFLAGS) $(EXTRA) \
-          -DSOUND_RAM_SIZE=0x1000u -DSOUND_OUT_FRAMES=1024u -DM68K_ROM_SIZE=0x10000u -DGEO_PUB_COPIES=1 -DM2_NO_NETPLAY \
+          -DSOUND_RAM_SIZE=0x1000u -DSOUND_OUT_FRAMES=1024u -DM68K_ROM_SIZE=0x10000u -DGEO_PUB_COPIES=1 -DM2_NO_NETPLAY -DM2HLE_STF_ONLY \
           -I$(REPO)/src -I$(REPO)/src/board -I$(REPO)/src/core -I$(REPO)/src/ui \
           -I$(REPO)/src/profiles -I$(REPO)/src/net -I. \
           -I$(VENDOR)/sokol
@@ -197,11 +199,13 @@ all: $(OUT)/1ST_READ.BIN
 # AOT_COVER= ...) rebuilds, where the object used to be left as it was. A stamp
 # file is rewritten only when its text changes.
 AOT_MAP  ?= sfight.aotmap
-# The STF profiles' hooks, read out of their tables (the `{ 0x..., *_hook` rows
-# of sfight.h and sfight_console.h): aot_check turns the whole AOT off when the
-# profile has a hook the code was not told about, and a hook added after the
-# map was recorded (enemy_rank_table, #509) did just that, silently.
-PROFILE_HOOKS := $(shell grep -hoE '\{ *0x[0-9A-Fa-f]+u?, *[A-Za-z0-9_]*hook' $(REPO)/src/profiles/sfight.h $(REPO)/src/profiles/sfight_console.h | sed -E 's/\{ *(0x[0-9A-Fa-f]+).*/--hook \1/' | sort -u)
+# The STF profiles' hooks, read out of their tables (the `{ ADDR, *_hook` rows
+# of sfight.h and sfight_console.h, a macro ADDR resolved by tools/aot_hooks.py):
+# aot_check turns the whole AOT off when the profile has a hook the code was not
+# told about, and a hook added after the map was recorded (enemy_rank_table,
+# #509) did just that, silently. sfight_native.h's ten are not in this build
+# (M2HLE_NO_ZIP keeps no replays, #1038), so the compiled code runs through them.
+PROFILE_HOOKS := $(shell python3 $(REPO)/tools/aot_hooks.py $(REPO)/src/profiles/sfight.h $(REPO)/src/profiles/sfight_console.h)
 AOT_ARGS := $(if $(filter sfight.aotmap,$(AOT_MAP)),--hook 0x3F268 --hook 0x4BE58 --hook 0x4C008 $(PROFILE_HOOKS) $(GEMS_HOOKS)) --cover $(AOT_COVER)
 stamp = $(shell mkdir -p $(OUT); t='$(subst ','\'',$(2))'; [ "$$(cat $(1) 2>/dev/null)" = "$$t" ] || printf '%s' "$$t" > $(1))
 $(call stamp,$(OUT)/flags.stamp,$(CFLAGS))

@@ -1,0 +1,5 @@
+# Homebrew on a game's board (`profiles/sfight_homebrew.h`)
+
+Part of m2-hle2's load-bearing invariants, indexed in [CLAUDE.md](../../CLAUDE.md): facts reverse-engineered or debugged into the emulator, in no datasheet. Do not re-derive them.
+
+Homebrew ships as a stock set with the program EPROMs swapped (m2-pacman: `sfight` with `epr-19001.15`, `epr-19002.16`, `epr-19021.31` replaced). The game's profile would plant its HLE hooks and interrupt handlers in the homebrew's code, so after a load `profile_adopt_program` reads the program's own interrupt table (ROM word 1 → PRCB → +0x14) and, if it does not name the profile's handlers, runs the set's `any_program` profile instead: no hooks, `irq_vectors`, `board_vblank`. A patched build of the game keeps its table and so its profile. Every profile's slice ends at the board's vblank (HLE Hooks, "Frame pacing"), so `board_vblank` only says the program has no frame hook: the run loop marks the capture's frame and makes the match_replay jump at the vblank instead. A handler still in service after 8 slices is taken to have switched task (m2-sdk's break-in does `flushreg` + `bx`).

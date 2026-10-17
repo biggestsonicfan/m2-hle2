@@ -11,6 +11,171 @@
  */
 'use strict';
 
+m2hleLang.add({
+  en: {
+    'np.server.official': 'the official RPCN server',
+    'np.pace.good': 'good',
+    'np.pace.lag': 'will probably lag',
+    'np.pace.bad': 'too far to play',
+    'np.quality.measuring': 'measuring…',
+    'np.quality.good': 'good ({ms} ms)',
+    'np.quality.okay': 'okay ({ms} ms)',
+    'np.quality.far': 'far ({ms} ms) — expect some delay',
+    'np.copy': 'Copy code',
+    'np.copied': 'Copied',
+    'np.pill.playing': 'Online: playing {peer}',
+    'np.pill.playing.ping': 'Online: playing {peer} · {ms} ms',
+    'np.pill.watching': 'Online: watching',
+    'np.pill.starting': 'Online: starting…',
+    'np.pill.here': 'Online: {peer} is here',
+    'np.pill.waiting': 'Online: waiting',
+    'np.pill.online': 'Online',
+    'np.btn.match': 'Match controls',
+    'np.btn.account': 'RPCN account',
+    'np.btn.lobby': 'Online Battle',
+    'np.menu': 'Menu',
+    'np.twitch.waiting': 'Almost there. Open Twitch, check the code matches this one, and approve it.',
+    'np.twitch.asking': 'Asking Twitch for a sign-in code…',
+    'np.twitch.error': 'Twitch sign-in did not finish: {error}',
+    'np.busy': 'Signing in…',
+    'np.busy.as': 'Signing in as {name}…',
+    'np.failed': 'The connection failed.',
+    'np.failed.email': 'This server checks new accounts by e-mail. It has sent a code to the address you signed up with: ' +
+                       'go Back, enter it under "The server e-mailed me a code", and sign in again.',
+    'np.failed.code': 'That code was not accepted. Check it against the e-mail, or go Back and have it sent again.',
+    'np.creating': 'Creating your account…',
+    'np.created': 'Account created. If an e-mail with a code arrives, enter the code below.',
+    'np.sent': 'Sent. Check your e-mail (and its spam folder) for the code.',
+    'np.quality': 'Connection: {quality}',
+    'np.delay.auto': 'Automatic ({n} frames)',
+    'np.rooms.empty': 'Nobody is waiting right now. Create a match and someone can join you.',
+    'np.rooms.count': '{n} waiting',
+    'np.room.someone': 'Someone',
+    'np.room.full': 'is already playing',
+    'np.room.private': 'is waiting (private match)',
+    'np.room.waiting': 'is waiting',
+    'np.room.ping.unknown': 'ping ?',
+    'np.room.ping.unknown.title': 'This room does not say how far away its host is.',
+    'np.room.host': 'the host',
+    'np.room.ping.title': 'Estimated round trip to {owner}: {pace} with this room’s input delay of {delay} frames. Measured exactly once you join.',
+    'np.room.play': 'Play',
+    'np.peer': 'your opponent',
+    'np.lead.playing': 'Playing {peer}.',
+    'np.lead.watching': 'Watching {a} vs {b}.',
+    'np.lead.syncing': 'Starting the match with {peer}…',
+    'np.lead.starting': 'Starting…',
+    'np.lead.waiting': 'Waiting for players to join…',
+    'np.lead.joining': 'Joining…',
+    'np.lead.next': 'Next match in {s} s.',
+    'np.lead.match': 'A match is being played.',
+    'np.lead.ready': 'Others are ready to play.',
+    'np.lead.count': '{n} in the room (up to {max}).',
+    'np.member.you': '{name} (you)',
+    'np.member.watching': 'watching',
+    'np.member.ready': 'ready',
+    'np.member.waiting': 'waiting',
+    'np.member.connecting': 'connecting…',
+    'np.member.ping.title': 'Round trip between you and {name}, measured directly: {pace} with this room’s input delay of {delay} frames',
+    'np.ready': 'Ready',
+    'np.unready': 'Not ready',
+    'np.stop.watching': 'Stop watching',
+    'np.stop.match': 'End match',
+    'np.room.ping': 'Ping to {peer}: {ms} ms, {pace}',
+    'np.status.delay': 'input delay {n} frames',
+    'np.status.stalls': '{n} waits for the other player',
+    'np.rtt.warn': 'The round trip to {peer} needs about {need} frames of input delay and this room uses {delay}, ' +
+                   'so the game will pause now and then to wait. A room made with a longer delay plays smoother.',
+    'np.desync': 'The two games stopped matching at frame {frame}. What you see from here on may differ from ' +
+                 'what {peer} sees. Leave and start a new match.',
+    'np.join.password': 'That is a private match. Password:',
+    'np.resend.missing': 'Fill in your name and password first.',
+    'np.resend.asking': 'Asking the server to send the e-mail again…',
+    'np.create.name': 'Names are 3 to 16 letters, digits, - or _.',
+    'np.create.password': 'Choose a longer password.',
+  },
+  ja: {
+    'np.server.official': '公式RPCNサーバー',
+    'np.pace.good': '良好',
+    'np.pace.lag': '遅延が出そうです',
+    'np.pace.bad': '遠すぎて対戦できません',
+    'np.quality.measuring': '測定中…',
+    'np.quality.good': '良好（{ms} ms）',
+    'np.quality.okay': 'まずまず（{ms} ms）',
+    'np.quality.far': '遠い（{ms} ms）：多少の遅延があります',
+    'np.copy': 'コードをコピー',
+    'np.copied': 'コピーしました',
+    'np.pill.playing': 'オンライン：{peer}と対戦中',
+    'np.pill.playing.ping': 'オンライン：{peer}と対戦中 · {ms} ms',
+    'np.pill.watching': 'オンライン：観戦中',
+    'np.pill.starting': 'オンライン：開始中…',
+    'np.pill.here': 'オンライン：{peer}が入室中',
+    'np.pill.waiting': 'オンライン：待機中',
+    'np.pill.online': 'オンライン',
+    'np.btn.match': '対戦の操作',
+    'np.btn.account': 'RPCNアカウント',
+    'np.btn.lobby': 'オンライン対戦',
+    'np.menu': 'メニュー',
+    'np.twitch.waiting': 'あと少しです。Twitchを開き、コードがこれと同じか確認して承認してください。',
+    'np.twitch.asking': 'Twitchにサインインコードを要求しています…',
+    'np.twitch.error': 'Twitchのサインインが完了しませんでした：{error}',
+    'np.busy': 'サインイン中…',
+    'np.busy.as': '{name}としてサインイン中…',
+    'np.failed': '接続に失敗しました。',
+    'np.failed.email': 'このサーバーは新しいアカウントをメールで確認します。登録したアドレスにコードを送りました。' +
+                       '「戻る」で戻り、「サーバーからコードがメールで届いた」にコードを入力して、もう一度サインインしてください。',
+    'np.failed.code': 'そのコードは受け付けられませんでした。メールと見比べるか、「戻る」で戻って再送してください。',
+    'np.creating': 'アカウントを作成中…',
+    'np.created': 'アカウントを作成しました。コード付きのメールが届いたら、下にコードを入力してください。',
+    'np.sent': '送信しました。メール（迷惑メールフォルダーも）にコードが届いていないか確認してください。',
+    'np.quality': '接続：{quality}',
+    'np.delay.auto': '自動（{n}フレーム）',
+    'np.rooms.empty': '今は誰も待っていません。対戦を作成すれば、誰かが参加できます。',
+    'np.rooms.count': '{n}件待機中',
+    'np.room.someone': '誰か',
+    'np.room.full': '対戦中',
+    'np.room.private': '待機中（プライベート対戦）',
+    'np.room.waiting': '待機中',
+    'np.room.ping.unknown': 'ping ？',
+    'np.room.ping.unknown.title': 'このルームはホストまでの距離を示していません。',
+    'np.room.host': 'ホスト',
+    'np.room.ping.title': '{owner}までの推定往復時間：{pace}（このルームの入力遅延 {delay}フレームの場合）。参加すると正確に測定します。',
+    'np.room.play': '対戦する',
+    'np.peer': '対戦相手',
+    'np.lead.playing': '{peer}と対戦中です。',
+    'np.lead.watching': '{a} 対 {b} を観戦中です。',
+    'np.lead.syncing': '{peer}との対戦を開始しています…',
+    'np.lead.starting': '開始中…',
+    'np.lead.waiting': 'プレイヤーの参加を待っています…',
+    'np.lead.joining': '参加中…',
+    'np.lead.next': '次の対戦まであと{s}秒です。',
+    'np.lead.match': '対戦が行われています。',
+    'np.lead.ready': 'ほかのプレイヤーは準備完了です。',
+    'np.lead.count': 'ルームに{n}人（最大{max}人）。',
+    'np.member.you': '{name}（あなた）',
+    'np.member.watching': '観戦中',
+    'np.member.ready': '準備完了',
+    'np.member.waiting': '待機中',
+    'np.member.connecting': '接続中…',
+    'np.member.ping.title': 'あなたと{name}の往復時間（直接測定）：{pace}（このルームの入力遅延 {delay}フレームの場合）',
+    'np.ready': '準備完了',
+    'np.unready': '準備を取り消す',
+    'np.stop.watching': '観戦をやめる',
+    'np.stop.match': '対戦終了',
+    'np.room.ping': '{peer}へのping：{ms} ms、{pace}',
+    'np.status.delay': '入力遅延 {n}フレーム',
+    'np.status.stalls': '相手待ち {n}回',
+    'np.rtt.warn': '{peer}との往復には約{need}フレームの入力遅延が必要ですが、このルームは{delay}フレームです。' +
+                   'そのため、ときどきゲームが止まって相手を待ちます。入力遅延を長くして作ったルームのほうが滑らかに遊べます。',
+    'np.desync': '2つのゲームがフレーム{frame}で一致しなくなりました。ここから先の画面は{peer}の画面と' +
+                 '異なる可能性があります。退出して新しい対戦を始めてください。',
+    'np.join.password': 'プライベート対戦です。パスワード：',
+    'np.resend.missing': '先に名前とパスワードを入力してください。',
+    'np.resend.asking': 'メールの再送をサーバーに依頼しています…',
+    'np.create.name': '名前は3〜16文字の英数字、- または _ です。',
+    'np.create.password': 'もっと長いパスワードにしてください。',
+  },
+});
+
 const m2hleNetplay = (() => {
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
@@ -30,9 +195,11 @@ const m2hleNetplay = (() => {
   let lastState = '';           /* the state at the previous poll */
   let serverPicked = false;     /* the player has chosen a server this visit */
 
+  const t = m2hleLang.t;
+
   const OFFICIAL = 'np.rpcs3.net', COMMUNITY = 'rpcn.sonicthefighte.rs';
   const serverName = (s) => (String(s || '').toLowerCase() === COMMUNITY ? 'sonicthefighte.rs'
-                           : String(s || '').toLowerCase() === OFFICIAL ? 'the official RPCN server' : s || '?');
+                           : String(s || '').toLowerCase() === OFFICIAL ? t('np.server.official') : s || '?');
   const onCommunity = () => !!st && String(st.server || '').toLowerCase() === COMMUNITY;
 
   /* ---- Calling into the emulator ----------------------------------------------- */
@@ -117,7 +284,7 @@ const m2hleNetplay = (() => {
     const speed = Math.min(1, (Math.max(1, delay) * 2 * FRAME_MS) / Math.max(1, rtt));
     return speed >= 1 ? 'good' : speed >= 0.6 ? 'lag' : 'bad';
   }
-  const PACE_TEXT = { good: 'good', lag: 'will probably lag', bad: 'too far to play' };
+  const paceText = (p) => t('np.pace.' + p);
 
   /*
    * The round trip to a room's owner, estimated before joining: our trip to the
@@ -134,11 +301,9 @@ const m2hleNetplay = (() => {
   }
 
   function quality(rtt) {
-    if (rtt === null) return 'measuring…';
-    const ms = Math.round(rtt) + ' ms';
-    if (rtt < 60) return 'good (' + ms + ')';
-    if (rtt < 120) return 'okay (' + ms + ')';
-    return 'far (' + ms + ') — expect some delay';
+    if (rtt === null) return t('np.quality.measuring');
+    const how = rtt >= 120 ? 'far' : rtt >= 60 ? 'okay' : 'good';
+    return t('np.quality.' + how, { ms: Math.round(rtt) });
   }
 
   /* ---- Drawing ---------------------------------------------------------------- */
@@ -160,7 +325,7 @@ const m2hleNetplay = (() => {
   /* The code, its copy button and the Twitch link, in the panel ('np-twitch') or
    * over the game ('np-twitch-float'). A new code puts the button back to Copy. */
   function twitchCode(prefix, tw) {
-    if ($(prefix + '-code').textContent !== tw.code) setText(prefix + '-copy', 'Copy code');
+    if ($(prefix + '-code').textContent !== tw.code) setText(prefix + '-copy', t('np.copy'));
     setText(prefix + '-code', tw.code);
     const a = $(prefix + '-link');
     if (tw.uri && a.getAttribute('href') !== tw.uri) a.setAttribute('href', tw.uri);
@@ -178,7 +343,7 @@ const m2hleNetplay = (() => {
 
   function copyCode(prefix) {
     navigator.clipboard.writeText($(prefix + '-code').textContent).then(
-      () => setText(prefix + '-copy', 'Copied'), () => {});
+      () => setText(prefix + '-copy', t('np.copied')), () => {});
   }
 
   function render() {
@@ -194,35 +359,35 @@ const m2hleNetplay = (() => {
      * (btn-online, this panel) says what the panel will show. */
     let pill = '';
     const peerRtt = peerMs(st.room && st.room.peer_rtt_ms);
-    if (state === 'playing') pill = 'Online: playing ' + (st.room.peer || '') + (peerRtt === null ? '' : ' · ' + peerRtt + ' ms');
-    else if (state === 'watching') pill = 'Online: watching';
-    else if (state === 'waiting at the barrier') pill = 'Online: starting…';
-    else if (state === 'in a room') pill = st.room.peer_heard ? 'Online: ' + st.room.peer + ' is here' : 'Online: waiting';
-    else if (state === 'online') pill = 'Online';
+    if (state === 'playing') {
+      pill = t(peerRtt === null ? 'np.pill.playing' : 'np.pill.playing.ping', { peer: st.room.peer || '', ms: peerRtt });
+    } else if (state === 'watching') pill = t('np.pill.watching');
+    else if (state === 'waiting at the barrier') pill = t('np.pill.starting');
+    else if (state === 'in a room') pill = st.room.peer_heard ? t('np.pill.here', { peer: st.room.peer }) : t('np.pill.waiting');
+    else if (state === 'online') pill = t('np.pill.online');
     const inRoom = state === 'in a room' || state === 'waiting at the barrier' || state === 'playing' || state === 'watching';
-    setText('btn-online-label', inRoom ? 'Match controls' : 'RPCN account');
-    setText('btn-lobby-label', pill || 'Online Battle');
+    setText('btn-online-label', t(inRoom ? 'np.btn.match' : 'np.btn.account'));
+    setText('btn-lobby-label', pill || t('np.btn.lobby'));
     $('btn-lobby').classList.toggle('live', !!pill);
-    if ($('btn-menu')) $('btn-menu').title = pill || 'Menu';
+    if ($('btn-menu')) $('btn-menu').title = pill || t('np.menu');
 
     if (tw.state === TWITCH_STARTING || tw.state === TWITCH_WAITING) {
       show('np-twitch');
       const waiting = tw.state === TWITCH_WAITING && tw.code;
       $('np-twitch-code-box').hidden = !waiting;
-      setText('np-twitch-lead', waiting ? 'Almost there. Open Twitch, check the code matches this one, and approve it.'
-                                        : 'Asking Twitch for a sign-in code…');
+      setText('np-twitch-lead', t(waiting ? 'np.twitch.waiting' : 'np.twitch.asking'));
       if (waiting) twitchCode('np-twitch', tw);
       return;
     }
 
     if (state === 'connecting') {
       show('np-busy');
-      setText('np-busy-text', 'Signing in' + (st.npid ? ' as ' + st.npid : '') + '…');
+      setText('np-busy-text', st.npid ? t('np.busy.as', { name: st.npid }) : t('np.busy'));
       return;
     }
 
     if (state === 'failed') {
-      const why = st.error || 'The connection failed.';
+      const why = st.error || t('np.failed');
       if (dismissedFailure !== why) {
         show('np-failed');
         setText('np-failed-text', friendly(why));
@@ -250,19 +415,18 @@ const m2hleNetplay = (() => {
    * calls the e-mail code a "token". Say it the way this page does. */
   function friendly(why) {
     if (/verifies accounts by e-mail and no token/.test(why)) {
-      return 'This server checks new accounts by e-mail. It has sent a code to the address you signed up with: ' +
-             'go Back, enter it under "The server e-mailed me a code", and sign in again.';
+      return t('np.failed.email');
     }
     if (/verification token was refused/.test(why)) {
-      return 'That code was not accepted. Check it against the e-mail, or go Back and have it sent again.';
+      return t('np.failed.code');
     }
     return why;
   }
 
-  function selectTab(t) {
+  function selectTab(tab) {
     for (const u of ['signin', 'create']) {
-      $('np-tab-' + u).setAttribute('aria-selected', String(u === t));
-      $('np-form-' + u).hidden = u !== t;
+      $('np-tab-' + u).setAttribute('aria-selected', String(u === tab));
+      $('np-form-' + u).hidden = u !== tab;
     }
   }
 
@@ -279,13 +443,13 @@ const m2hleNetplay = (() => {
       const want = String(st.server).toLowerCase() === COMMUNITY ? COMMUNITY : OFFICIAL;
       if ($('np-server').value !== want) $('np-server').value = want;
     }
-    errorText('np-twitch-error', tw.state === 4 /* failed */ ? 'Twitch sign-in did not finish: ' + tw.error : '');
+    errorText('np-twitch-error', tw.state === 4 /* failed */ ? t('np.twitch.error', { error: tw.error }) : '');
 
     /* A resend is only answered once it has been seen running: until the queued
      * command reaches the emulator, the state is still the sign-up's DONE. */
     if (resending === 1 && acct.state === ACCOUNT_WORKING) resending = 2;
     if (acct.state === ACCOUNT_WORKING) {
-      setText('np-create-status', 'Creating your account…');
+      setText('np-create-status', t('np.creating'));
     } else if (acct.state === ACCOUNT_FAILED) {
       setText('np-create-status', '');
       errorText('np-create-error', acct.error);
@@ -301,12 +465,12 @@ const m2hleNetplay = (() => {
       $('np-signin-password').value = c.password;
       $('np-code-box').open = true;
       selectTab('signin');
-      setText('np-signin-note', 'Account created. If an e-mail with a code arrives, enter the code below.');
+      setText('np-signin-note', t('np.created'));
       $('np-signin-note').hidden = false;
       post('connect', { npid: c.npid, password: c.password, server: c.server });
     } else if (acct.state === ACCOUNT_DONE && resending === 2) {
       resending = false;
-      setText('np-signin-note', 'Sent. Check your e-mail (and its spam folder) for the code.');
+      setText('np-signin-note', t('np.sent'));
       $('np-signin-note').hidden = false;
     } else if (acct.state === ACCOUNT_FAILED && resending === 2) {
       resending = false;
@@ -320,16 +484,16 @@ const m2hleNetplay = (() => {
     setText('np-me-server', serverName(st.server));
     $('np-damage-row').hidden = !onCommunity();   /* a rule of that server's rooms */
     const rtt = rttMs();
-    setText('np-quality', 'Connection: ' + quality(rtt));
+    setText('np-quality', t('np.quality', { quality: quality(rtt) }));
     const auto = autoDelay();
-    setText('np-delay-auto', 'Automatic (' + auto + ' frames)');
+    setText('np-delay-auto', t('np.delay.auto', { n: auto }));
 
     const list = $('np-rooms');
     const rows = st.rooms || [];
     const playable = rows.filter((r) => !r.why && r.members < r.slots);
-    setText('np-rooms-empty-text', rows.length ? '' : 'Nobody is waiting right now. Create a match and someone can join you.');
+    setText('np-rooms-empty-text', rows.length ? '' : t('np.rooms.empty'));
     $('np-rooms-empty').hidden = rows.length > 0;
-    setText('np-rooms-count', playable.length ? playable.length + ' waiting' : '');
+    setText('np-rooms-count', playable.length ? t('np.rooms.count', { n: playable.length }) : '');
 
     /* Rebuild only when the rows changed, so a button is not replaced under a click. */
     const key = JSON.stringify(rows.map((r) => [r.id, r.owner, r.members, r.why, r.password, estimateMs(r)]));
@@ -341,26 +505,24 @@ const m2hleNetplay = (() => {
       li.className = 'np-room' + (r.why ? ' np-room-off' : '');
       const who = document.createElement('span');
       who.className = 'np-who';
-      who.textContent = r.owner || 'Someone';
+      who.textContent = r.owner || t('np.room.someone');
       const what = document.createElement('span');
       what.className = 'np-what';
       what.textContent = r.why ? r.why
-                       : r.members >= r.slots ? 'is already playing'
-                       : r.password ? 'is waiting (private match)' : 'is waiting';
+                       : t(r.members >= r.slots ? 'np.room.full' : r.password ? 'np.room.private' : 'np.room.waiting');
       if (!r.why) {
         /* The estimated ping, coloured by how this room's input delay copes with it. */
         const est = estimateMs(r);
         const ping = document.createElement('span');
         if (est === null) {
           ping.className = 'np-ping';
-          ping.textContent = 'ping ?';
-          ping.title = 'This room does not say how far away its host is.';
+          ping.textContent = t('np.room.ping.unknown');
+          ping.title = t('np.room.ping.unknown.title');
         } else {
           const p = pace(est, r.delay);
           ping.className = 'np-ping np-ping-' + p;
           ping.textContent = '~' + est + ' ms';
-          ping.title = 'Estimated round trip to ' + (r.owner || 'the host') + ': ' + PACE_TEXT[p] +
-                       ' with this room’s input delay of ' + r.delay + ' frames. Measured exactly once you join.';
+          ping.title = t('np.room.ping.title', { owner: r.owner || t('np.room.host'), pace: paceText(p), delay: r.delay });
         }
         what.append(' · ', ping);
       }
@@ -368,7 +530,7 @@ const m2hleNetplay = (() => {
       if (!r.why && r.members < r.slots) {
         const b = document.createElement('button');
         b.className = 'tool primary';
-        b.textContent = 'Play';
+        b.textContent = t('np.room.play');
         b.addEventListener('click', () => join(r));
         li.append(b);
       }
@@ -379,20 +541,20 @@ const m2hleNetplay = (() => {
   function renderRoom() {
     const r = st.room;
     const members = r.members || [];
-    const peer = r.peer || 'your opponent';
+    const peer = r.peer || t('np.peer');
     const playing = st.state === 'playing';
     const watching = st.state === 'watching';
     const syncing = st.state === 'waiting at the barrier';
     const nameOf = (side) => (members.find((m) => m.side === side) || {}).npid || '?';
     let lead;
-    if (playing) lead = 'Playing ' + peer + '.';
-    else if (watching) lead = 'Watching ' + nameOf(0) + ' vs ' + nameOf(1) + '.';
-    else if (syncing) lead = r.peer_heard ? 'Starting the match with ' + peer + '…' : 'Starting…';
-    else if (members.length < 2) lead = r.host ? 'Waiting for players to join…' : 'Joining…';
-    else if (r.auto_start_s) lead = 'Next match in ' + r.auto_start_s + ' s.';
-    else if (r.phase === 'match') lead = 'A match is being played.';
-    else if (r.peer_ready && !r.ready) lead = 'Others are ready to play.';
-    else lead = members.length + ' in the room (up to ' + r.max + ').';
+    if (playing) lead = t('np.lead.playing', { peer });
+    else if (watching) lead = t('np.lead.watching', { a: nameOf(0), b: nameOf(1) });
+    else if (syncing) lead = r.peer_heard ? t('np.lead.syncing', { peer }) : t('np.lead.starting');
+    else if (members.length < 2) lead = t(r.host ? 'np.lead.waiting' : 'np.lead.joining');
+    else if (r.auto_start_s) lead = t('np.lead.next', { s: r.auto_start_s });
+    else if (r.phase === 'match') lead = t('np.lead.match');
+    else if (r.peer_ready && !r.ready) lead = t('np.lead.ready');
+    else lead = t('np.lead.count', { n: members.length, max: r.max });
     setText('np-room-lead', lead);
 
     /* The line, front first: who is up, who is on which side. */
@@ -403,19 +565,18 @@ const m2hleNetplay = (() => {
       li.className = 'np-room' + (m.me ? ' np-me' : '');
       const who = document.createElement('span');
       who.className = 'np-who';
-      who.textContent = (m.line >= 0 ? (m.line + 1) + '. ' : '') + m.npid + (m.me ? ' (you)' : '');
+      who.textContent = (m.line >= 0 ? (m.line + 1) + '. ' : '') + (m.me ? t('np.member.you', { name: m.npid }) : m.npid);
       const what = document.createElement('span');
       what.className = 'np-what';
       what.textContent = (m.side === 0 ? '1P' : m.side === 1 ? '2P'
-                         : m.watch ? 'watching' : m.ready ? 'ready' : m.heard ? 'waiting' : 'connecting…')
+                         : t('np.member.' + (m.watch ? 'watching' : m.ready ? 'ready' : m.heard ? 'waiting' : 'connecting')))
                        + ' · ' + m.wins + '-' + (m.games - m.wins);
       if (!m.me && peerMs(m.rtt_ms) !== null) {
         const p = pace(m.rtt_ms, st.delay);
         const ping = document.createElement('span');
         ping.className = 'np-ping np-ping-' + p;
         ping.textContent = m.rtt_ms + ' ms';
-        ping.title = 'Round trip between you and ' + m.npid + ', measured directly: ' + PACE_TEXT[p] +
-                     ' with this room’s input delay of ' + st.delay + ' frames';
+        ping.title = t('np.member.ping.title', { name: m.npid, pace: paceText(p), delay: st.delay });
         what.append(' · ', ping);
       }
       li.append(who, what);
@@ -423,37 +584,35 @@ const m2hleNetplay = (() => {
     }
 
     $('np-start').hidden = playing || watching || syncing || members.length < 2;
-    setText('np-start', r.ready ? 'Not ready' : 'Ready');
+    setText('np-start', t(r.ready ? 'np.unready' : 'np.ready'));
     $('np-room-hint').hidden = playing || watching;
     $('np-stop').hidden = !playing && !syncing && !watching;
-    setText('np-stop', watching ? 'Stop watching' : 'End match');
+    setText('np-stop', t(watching ? 'np.stop.watching' : 'np.stop.match'));
 
     const bits = [];
     const rtt = peerMs(r.peer_rtt_ms);
     const ping = $('np-room-ping');
     if (rtt !== null && !watching) {
       const p = pace(rtt, st.delay);
-      setText('np-room-ping', 'Ping to ' + peer + ': ' + rtt + ' ms, ' + PACE_TEXT[p]);
+      setText('np-room-ping', t('np.room.ping', { peer, ms: rtt, pace: paceText(p) }));
       ping.className = 'np-ping np-ping-' + p;
       ping.hidden = false;
     } else {
       ping.hidden = true;
     }
     if (playing || syncing) {
-      bits.push('input delay ' + st.delay + ' frames');
-      if (st.stalls) bits.push(st.stalls + ' waits for the other player');
+      bits.push(t('np.status.delay', { n: st.delay }));
+      if (st.stalls) bits.push(t('np.status.stalls', { n: st.stalls }));
     }
     setText('np-room-status', bits.join(' · '));
     /* The delay was fixed when the room was made, before anyone's distance was
      * known. Say so when the trip turns out longer than it covers. */
     const short = rtt !== null && !watching && st.delay > 0 && pace(rtt, st.delay) !== 'good';
     errorText('np-rtt-warn', short
-      ? 'The round trip to ' + peer + ' needs about ' + framesFor(rtt) + ' frames of input delay and this room uses ' +
-        st.delay + ', so the game will pause now and then to wait. A room made with a longer delay plays smoother.'
+      ? t('np.rtt.warn', { peer, need: framesFor(rtt), delay: st.delay })
       : '');
     errorText('np-desync', st.desync === null ? ''
-      : 'The two games stopped matching at frame ' + st.desync + '. What you see from here on may differ from ' +
-        'what ' + peer + ' sees. Leave and start a new match.');
+      : t('np.desync', { frame: st.desync, peer }));
   }
 
   /* ---- Actions ---------------------------------------------------------------- */
@@ -461,7 +620,7 @@ const m2hleNetplay = (() => {
   function join(room) {
     let pw = '';
     if (room.password) {
-      pw = window.prompt('That is a private match. Password:') || '';
+      pw = window.prompt(t('np.join.password')) || '';
       if (!pw) return;
     }
     post('join', { room_id: room.id, room_password: pw });
@@ -493,17 +652,17 @@ const m2hleNetplay = (() => {
     });
     $('np-not-me').addEventListener('click', signOut);
 
-    for (const t of ['signin', 'create']) $('np-tab-' + t).addEventListener('click', () => selectTab(t));
+    for (const tab of ['signin', 'create']) $('np-tab-' + tab).addEventListener('click', () => selectTab(tab));
 
     $('np-resend').addEventListener('click', () => {
       const npid = $('np-signin-name').value.trim(), password = $('np-signin-password').value;
       if (!npid || !password) {
-        setText('np-signin-note', 'Fill in your name and password first.');
+        setText('np-signin-note', t('np.resend.missing'));
         $('np-signin-note').hidden = false;
         return;
       }
       resending = 1;
-      setText('np-signin-note', 'Asking the server to send the e-mail again…');
+      setText('np-signin-note', t('np.resend.asking'));
       $('np-signin-note').hidden = false;
       post('resend_token', { npid, password, server: $('np-server').value });
     });
@@ -526,10 +685,10 @@ const m2hleNetplay = (() => {
       const password = $('np-create-password').value;
       const email = $('np-create-email').value.trim();
       if (!/^[A-Za-z0-9_-]{3,16}$/.test(npid)) {
-        errorText('np-create-error', 'Names are 3 to 16 letters, digits, - or _.');
+        errorText('np-create-error', t('np.create.name'));
         return;
       }
-      if (password.length < 4) { errorText('np-create-error', 'Choose a longer password.'); return; }
+      if (password.length < 4) { errorText('np-create-error', t('np.create.password')); return; }
       dismissedFailure = '';
       pendingCreate = { npid, password, server: $('np-server').value };
       post('create_account', { npid, password, email, server: pendingCreate.server });
@@ -553,7 +712,7 @@ const m2hleNetplay = (() => {
     $('np-leave').addEventListener('click', () => post('leave'));
 
     $('np-failed-back').addEventListener('click', () => {
-      const why = st ? (st.error || 'The connection failed.') : '';
+      const why = st ? (st.error || t('np.failed')) : '';
       dismissedFailure = why;
       if (/token/.test(why)) {
         /* Back to where the code goes: the sign-in form, box open, cursor in it. */
