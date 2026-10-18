@@ -19,6 +19,12 @@
  * frames' samples were heard the first time, so the sound board runs muted
  * through them (g_sound_mute), its clock still moving.
  *
+ * A linked game (game_profile_t.link_twin: Virtual-On, Power Sled) is two
+ * cabinets, one player on each: a match runs both on each machine
+ * (core/emu_twin.h), and a
+ * GGPO frame is both boards' frame. Each player's word is then a whole
+ * cabinet's controls, and their screen is their own cabinet's.
+ *
  * --ggpo-synctest N runs GGPO's own determinism test instead of a session:
  * both players are this machine's, and every frame is rolled back N frames
  * and run again, the snapshot's checksum held against the first run. A
@@ -110,6 +116,7 @@ static inline bool emu_ggpo_cli_arg(int argc, char **argv, int *i) {
 
 #include "../net/ggpo_port/ggpo_port.h"
 #include "rollback.h"
+#include "emu_twin.h"   /* a linked game's two cabinets (Pinboard #1080) */
 
 #define EMU_GGPO_INPUT_SIZE  ((int)sizeof(uint32_t))   /* one word a player */
 #define EMU_GGPO_SKIP_MAX    8                         /* frames a timesync may hold us */
@@ -146,7 +153,9 @@ static struct {
 /* Every EMU_GGPO_CHECK_EVERY frames a session logs the board's checksum, taken
  * when that frame was last saved; by EMU_GGPO_CHECK_LAG frames later no
  * rollback can reach it, so both machines' lines must agree. */
+#ifndef EMU_GGPO_CHECK_EVERY
 #define EMU_GGPO_CHECK_EVERY 600
+#endif
 #define EMU_GGPO_CHECK_LAG   30
 
 static inline bool emu_ggpo_active(void) { return g_ggpo.on; }
@@ -165,31 +174,59 @@ static inline uint32_t emu_ggpo__word(uint32_t held, const uint32_t *bits, bool 
     return word;
 }
 
-/* This machine's player: either key set plays our side (netplay_sample_local). */
+/* This machine's player: either key set plays our side (netplay_sample_local).
+ * A twin's player has a cabinet of their own, both key sets. */
 static inline uint32_t emu_ggpo_sample_local(void) {
     uint32_t held = g_input.held;
+    if (g_twin.on) return emu_twin_word(held);
     bool cabinet = g_ggpo_cfg.player == 1;
     return emu_ggpo__word(held, g_netplay.bit_p1, cabinet) | emu_ggpo__word(held, g_netplay.bit_p2, false);
 }
 
-/* One board frame on these two words: slices to the vblank, then its count. */
+/* A frame's count, once per frame however often a rollback runs it. */
+static inline void emu_ggpo__count(emu_thread_ctx_t *ctx) {
+    uint32_t budget = ctx->frame_budget;
+    if (g_ggpo.resim) ctx->frame_budget = 0;   /* a run_frames counts frames once */
+    emu_slice_count_frame(ctx);
+    if (g_ggpo.resim) ctx->frame_budget = budget;
+}
+
+static inline void emu_ggpo__result(int result) {
+    if (result && g_ggpo.cur_frame > g_ggpo.done_frame) {
+        g_ggpo.pend_frame  = g_ggpo.cur_frame;
+        g_ggpo.pend_winner = result;
+    }
+    g_ggpo.cur_frame++;
+}
+
+/* One board frame on these two words: slices to the vblank, then its count.
+ * A twin's: both boards' frame (emu_twin_frame), the result board A's. */
 static inline bool emu_ggpo_run_frame(emu_thread_ctx_t *ctx, const uint32_t in[2]) {
+    if (g_twin.on) {
+        int result = 0;
+        bool ran = emu_twin_frame(ctx, in, emu_ggpo__count, &result);
+        if (ran) emu_ggpo__result(result);
+        return ran;
+    }
     netplay_apply_inputs(in[0], in[1]);
     for (int n = 0; n < 64; n++) {
         emu_slice_body(ctx);
         if (g_vblank_edge || ctx->cpu->halted) break;
     }
     if (!g_vblank_edge) return false;
-    if (g_versus_result && g_ggpo.cur_frame > g_ggpo.done_frame) {
-        g_ggpo.pend_frame  = g_ggpo.cur_frame;
-        g_ggpo.pend_winner = g_versus_result;
-    }
-    g_ggpo.cur_frame++;
-    uint32_t budget = ctx->frame_budget;
-    if (g_ggpo.resim) ctx->frame_budget = 0;   /* a run_frames counts frames once */
-    emu_slice_count_frame(ctx);
-    if (g_ggpo.resim) ctx->frame_budget = budget;
+    emu_ggpo__result(g_versus_result);
+    emu_ggpo__count(ctx);
     return true;
+}
+
+/* A GGPO buffer's bytes, its checksum and its parts: one board's, or a twin's. */
+static inline size_t emu_ggpo__size(void) { return g_twin.on ? g_twin.size : g_rollback.size; }
+static inline uint32_t emu_ggpo__checksum(const void *buf) {
+    return g_twin.on ? emu_twin_checksum(buf) : rollback_checksum(buf);
+}
+static inline void emu_ggpo__log(FILE *f, const void *buf) {
+    if (g_twin.on) emu_twin_log(f, buf);
+    else rollback_log(f, buf);
 }
 
 /* ---- GGPO's callbacks ---------------------------------------------------- */
@@ -202,25 +239,30 @@ static inline void emu_ggpo_check_file(int frame, const void *buf) {
     snprintf(path, sizeof path, "%s/check-%05d.log", g_ggpo_cfg.synclog_dir, frame);
     FILE *f = fopen(path, "w");
     if (!f) return;
-    rollback_log(f, buf);
+    emu_ggpo__log(f, buf);
     fclose(f);
 }
 
 static void *emu_ggpo_cb_save(void *ud, int *len, int *checksum, int frame) {
     emu_thread_ctx_t *ctx = (emu_thread_ctx_t *)ud;
     (void)frame;
-    savestate_emu_t e = emu_state_latches(ctx);
-    void *buf = rollback_save(&e);
-    *len = buf ? (int)g_rollback.size : 0;
+    void *buf;
+    if (g_twin.on) {
+        buf = emu_twin_save(ctx);
+    } else {
+        savestate_emu_t e = emu_state_latches(ctx);
+        buf = rollback_save(&e);
+    }
+    *len = buf ? (int)emu_ggpo__size() : 0;
     g_ggpo.cur_frame = frame;
     g_ggpo.saved[frame & 15].buf   = buf;
     g_ggpo.saved[frame & 15].frame = frame;
     replay_ggpo_mark(frame);
     /* Only synctest reads it, and it is a pass over 16 MB. */
-    *checksum = (buf && g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST) ? (int)rollback_checksum(buf) : 0;
+    *checksum = (buf && g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST) ? (int)emu_ggpo__checksum(buf) : 0;
     if (buf && g_ggpo_cfg.mode == EMU_GGPO_P2P && frame > 0 && frame % EMU_GGPO_CHECK_EVERY == 0) {
         g_ggpo.check_frame = frame;
-        g_ggpo.check_sum = rollback_checksum(buf);
+        g_ggpo.check_sum = emu_ggpo__checksum(buf);
         emu_ggpo_check_file(frame, buf);
     }
     return buf;
@@ -228,10 +270,14 @@ static void *emu_ggpo_cb_save(void *ud, int *len, int *checksum, int frame) {
 
 static bool emu_ggpo_cb_load(void *ud, const void *buf, int len) {
     emu_thread_ctx_t *ctx = (emu_thread_ctx_t *)ud;
-    if ((size_t)len != g_rollback.size) return false;
-    savestate_emu_t e;
-    rollback_load(buf, ctx->bus, &e);          /* settles the sound thread first */
-    emu_state_put_latches(ctx, &e);
+    if ((size_t)len != emu_ggpo__size()) return false;
+    if (g_twin.on) {
+        emu_twin_load(ctx, buf);
+    } else {
+        savestate_emu_t e;
+        rollback_load(buf, ctx->bus, &e);      /* settles the sound thread first */
+        emu_state_put_latches(ctx, &e);
+    }
     emu_attn_bump();
     ctx->cpu_prev_snapshot = *ctx->cpu;
     ctx->cpu_snapshot      = *ctx->cpu;
@@ -250,7 +296,8 @@ static void emu_ggpo_cb_free(void *ud, void *buf) {
     (void)ud;
     for (int i = 0; i < 16; i++)
         if (g_ggpo.saved[i].buf == buf) g_ggpo.saved[i].buf = NULL;
-    rollback_free(buf);
+    if (g_twin.on) emu_twin_free(buf);
+    else rollback_free(buf);
 }
 
 static bool emu_ggpo_cb_advance(void *ud) {
@@ -269,8 +316,8 @@ static bool emu_ggpo_cb_advance(void *ud) {
 static void emu_ggpo_cb_log(void *ud, const char *filename, const void *buf, int len) {
     (void)ud;
     FILE *f = NULL;
-    if ((size_t)len != g_rollback.size || ggpo_port_fopen(&f, filename, "w") != 0 || !f) return;
-    rollback_log(f, buf);
+    if ((size_t)len != emu_ggpo__size() || ggpo_port_fopen(&f, filename, "w") != 0 || !f) return;
+    emu_ggpo__log(f, buf);
     fclose(f);
 }
 
@@ -366,24 +413,32 @@ static inline bool emu_ggpo_start(emu_thread_ctx_t *ctx) {
         return false;
     }
     rollback_layout(ctx->cpu, ctx->bus);
+    /* A linked game's two cabinets, made before GGPO's first save: the same
+     * boot on both machines, so before the session is fine. */
+    if (emu_twin_wanted(g_active_profile)) {
+        int local = g_ggpo_cfg.mode == EMU_GGPO_P2P && g_ggpo_cfg.player == 2 ? 1 : 0;
+        if (!emu_twin_start(ctx, g_active_profile, local)) return false;
+    }
     int err = emu_ggpo_open(ctx);
     if (err != GGPO_PORT_OK) {
         LOG_ERROR("ggpo: could not start the session (GGPO error %d)", err);
+        emu_twin_stop();
         rollback_drain();
         return false;
     }
     g_ggpo.on = true;
-    if (g_ggpo_cfg.mode == EMU_GGPO_P2P) emu_ggpo_replay_begin(ctx);
+    /* A replay is one board's inputs: not a twin's yet. */
+    if (g_ggpo_cfg.mode == EMU_GGPO_P2P && !g_twin.on) emu_ggpo_replay_begin(ctx);
     if (g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST)
         LOG_INFO("ggpo: synctest, rolling back %d frame(s) every frame; snapshot %zu bytes",
-                 g_ggpo_cfg.synctest_frames, g_rollback.size);
+                 g_ggpo_cfg.synctest_frames, emu_ggpo__size());
     else if (!ggpo_port_bound())
         LOG_INFO("ggpo: player %d through the lobby's transport, delay %d; snapshot %zu bytes",
-                 g_ggpo_cfg.player, g_ggpo_cfg.delay, g_rollback.size);
+                 g_ggpo_cfg.player, g_ggpo_cfg.delay, emu_ggpo__size());
     else
         LOG_INFO("ggpo: player %d on UDP %u, peer %s:%u, delay %d; snapshot %zu bytes",
                  g_ggpo_cfg.player, (unsigned)g_ggpo_cfg.local_port, g_ggpo_cfg.remote_ip,
-                 (unsigned)g_ggpo_cfg.remote_port, g_ggpo_cfg.delay, g_rollback.size);
+                 (unsigned)g_ggpo_cfg.remote_port, g_ggpo_cfg.delay, emu_ggpo__size());
     return true;
 }
 
@@ -392,6 +447,7 @@ static inline void emu_ggpo_stop(void) {
     if (!g_ggpo.on) return;
     replay_ggpo_end();      /* before GGPO frees its frames: nothing rolls back now */
     ggpo_port_close();      /* hands GGPO's saved frames back through free_buf */
+    emu_twin_stop();        /* the local cabinet stays, alone */
     rollback_drain();
     sound_settle();
     g_sound_mute = 0;
@@ -458,6 +514,7 @@ static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
         uint32_t held = g_input.held;
         uint32_t w0 = emu_ggpo__word(held, g_netplay.bit_p1, true);
         uint32_t w1 = emu_ggpo__word(held, g_netplay.bit_p2, false);
+        if (g_twin.on) w0 = w1 = emu_twin_word(held);   /* both cabinets the keys' */
         err = ggpo_port_add_local_input(0, &w0, EMU_GGPO_INPUT_SIZE);
         if (err == GGPO_PORT_OK) err = ggpo_port_add_local_input(1, &w1, EMU_GGPO_INPUT_SIZE);
     } else {
@@ -472,6 +529,7 @@ static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
     ggpo_port_advance_frame();
     emu_ggpo_unmute();
     g_ggpo.frames++;
+    if (g_twin.on && g_ggpo.frames % EMU_GGPO_CHECK_EVERY == 0) emu_twin_say(g_ggpo.frames);
     emu_ggpo_report_errors();
     emu_ggpo_report_check();
     emu_ggpo_settle_result();
@@ -508,6 +566,8 @@ static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) {
     if (emu_slice_should_stop(ctx)) return false;
     int64_t t0 = emu_now_us();
     emu_ggpo_tick_t r = emu_ggpo_tick(ctx);
+    /* The UI thread draws from the bus: not while the hidden cabinet is in it. */
+    g_twin.ui_lock = g_twin.on ? &ctx->mutex : NULL;
     if (r == EMU_GGPO_TICK_IDLE) return false;
     bool ran = r == EMU_GGPO_TICK_RAN;
     int64_t t1 = emu_now_us();
@@ -537,7 +597,18 @@ static inline void emu_ggpo_shutdown(emu_thread_ctx_t *ctx) {
     emu_mutex_unlock(&ctx->mutex);
 }
 
+/* Around the renderer's reads of the bus (game_frame.h), on the UI thread. */
+static inline emu_mutex_t *emu_twin_ui_enter(void) {
+    emu_mutex_t *m = g_twin.ui_lock;
+    if (m) emu_mutex_lock(m);
+    return m;
+}
+static inline void emu_twin_ui_leave(emu_mutex_t *m) { if (m) emu_mutex_unlock(m); }
+
 #else  /* !M2HLE_GGPO */
+
+static inline emu_mutex_t *emu_twin_ui_enter(void) { return NULL; }
+static inline void emu_twin_ui_leave(emu_mutex_t *m) { (void)m; }
 
 static inline bool emu_ggpo_active(void) { return false; }
 static inline bool emu_ggpo_wanted(void) { return false; }

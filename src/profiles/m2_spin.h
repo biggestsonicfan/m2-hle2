@@ -26,7 +26,8 @@
  *   - an interrupt is pending, or not one whole iteration ends before the
  *     horizon;
  *   - the slice has fewer instructions left than two (g_hle_room);
- *   - a data watchpoint is armed, or the debugger steps.
+ *   - a data watchpoint is armed, or the debugger steps;
+ *   - the i960 is charged the board's timing, not MAME's table (i960_timing.h).
  *
  * `--spin-i960` turns it off, and det_digest --cpu holds the two against each
  * other frame by frame.
@@ -75,7 +76,7 @@ static inline bool m2_spin_match(memory_bus_t *bus, uint32_t ip, uint32_t *ld, u
 /* Skip the idle iterations of the load + compare-and-branch loop at the IP;
  * 1 leaves it to the i960. */
 static inline int m2_spin_skip(i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (!g_spin_skip || g_hle_room < 2 || wp_armed()) return 1;
+    if (!g_spin_skip || g_hle_room < 2 || wp_armed() || g_i960_bt_on) return 1;
     if (g_irqt.intreq & g_irqt.intena & 0x03FFu) return 1;
 
     uint32_t ip = cpu->sfr.ip, ld, ea, cb;

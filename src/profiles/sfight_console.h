@@ -324,6 +324,7 @@ static inline void sfight_console_install(const romset_t *rs, i960_cpu_t *cpu, m
     s_sfc_hidden[0] = s_sfc_hidden[1] = 0;
     sfight_install(rs, cpu, bus);
     s_sfight_on_vs_rematch = sfc_on_vs_rematch;
+    sfight_native_install("sfight_console");
     savestate_extra("sfight_console", "SFC_HIDDEN", s_sfc_hidden, sizeof s_sfc_hidden);   /* core/savestate.h */
 }
 
@@ -370,6 +371,10 @@ static const game_profile_t sfight_console_profile = {
     .input        = { SFIGHT_INPUT_MAP },
     .quirks       = { SFIGHT_QUIRKS },
     .match_info   = sfight_match_info,
+    .native_take  = sfight_native_take,
+    .native_play  = sfight_native_play,
+    .in_play      = sfight_in_play,
+    .native_put   = sfight_native_put,
 };
 
 #endif /* PROFILES_SFIGHT_CONSOLE_H */

@@ -56,6 +56,7 @@ static const game_profile_t sfight_homebrew_profile = {
          * walk (geo3d_scan_geo_list), as STF's is. m2-snake's own format and
          * its walker (geo3d_scan_displaylist) stop at direct data, which
          * m2-sdk's m2_sprite.h draws every sprite with. */
+        .region             = { .kind = REGION_HOMEBREW, .why = "homebrew: no country setting" },
     },
 };
 

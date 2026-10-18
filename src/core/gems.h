@@ -51,6 +51,7 @@
 #include "../board/i960_exec.h"
 #include "../board/memory.h"
 #include "../board/cop.h"
+#include "../board/tgp.h"
 #include "hle_hooks.h"
 #include "log.h"
 
@@ -338,6 +339,7 @@ typedef struct {
     uint8_t        back[BACK_SIZE];
     sharc_state_t  sharc;
     cop_state_t    cop;
+    tgp_state_t    tgp;             /* a Model 2A board's coprocessor (ages.h's VF2) */
     uint32_t       geo_w, geo_r;    /* the GEO port's list pointers (memory.h) */
 } gems_snap_t;
 
@@ -362,6 +364,7 @@ static void gems_snap_save(gems_snap_t *s, const i960_cpu_t *cpu, const memory_b
     memcpy(s->back, bus->back,     sizeof s->back);
     s->sharc = g_sharc;
     s->cop   = g_cop;
+    s->tgp   = g_tgp;
     s->geo_w = g_geo.wstart;
     s->geo_r = g_geo.rstart;
 }
@@ -376,6 +379,7 @@ static void gems_snap_load(const gems_snap_t *s, i960_cpu_t *cpu, memory_bus_t *
     memcpy(bus->back,     s->back, sizeof s->back);
     g_sharc = s->sharc;
     g_cop   = s->cop;
+    g_tgp   = s->tgp;
     g_geo.wstart = s->geo_w;
     g_geo.rstart = s->geo_r;
 }
@@ -385,6 +389,10 @@ static void gems_snap_load(const gems_snap_t *s, i960_cpu_t *cpu, memory_bus_t *
 static inline bool gems_float_close(uint32_t a, uint32_t b) {
     float fa = gems_u2f(a), fb = gems_u2f(b);
     if (!isfinite(fa) || !isfinite(fb)) return false;
+    /* A denormal is a small integer in the word (a face number, a count, a
+     * flag), not a float: close only to itself. Without this a wrong slot
+     * holding 3 for 5 passed as float-close (ages.h's efc_face_change_cont). */
+    if ((fa != 0.0f && !isnormal(fa)) || (fb != 0.0f && !isnormal(fb))) return false;
     float d = fabsf(fa - fb), m = fmaxf(fabsf(fa), fabsf(fb));
     return d <= 1e-4f * m || d < 1e-6f;
 }
@@ -410,21 +418,101 @@ static void gems_diff_mem(gems_diff_t *d, const uint8_t *a, const uint8_t *b, si
     }
 }
 
-/* Run the trap both ways (see the top of the file). Returns 0: the board
- * carries on from the i960's run; 1 for a call it lets the i960 run alone. */
-static int gems_verify(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t) {
+/* Every call to start with, then one in GEMS_VERIFY_STRIDE: a whole-board
+ * snapshot per call is slow, and a hot trap runs hundreds of times a frame. */
+static bool gems_verify_this_call(gems_verify_stat_t *st) {
+    static int every = -1;   /* M2HLE_GEMS_VERIFY_ALL=1: every call, however slow */
+    if (every < 0) every = getenv("M2HLE_GEMS_VERIFY_ALL") != NULL;
+    return every || st->seen++ < GEMS_VERIFY_ALL || st->seen % GEMS_VERIFY_STRIDE == 0;
+}
+
+/* The i960 from the trap site to where the C resumed: false if it never gets there. */
+static bool gems_verify_i960_to(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t stop_ip, int stop_d) {
+    s_gems_suspend++;
+    uint64_t n = 0;
+    const uint64_t cap = 20u * 1000u * 1000u;
+    i960_step(cpu, bus);   /* the trap site itself, so a loop back to it stops */
+    while (!(cpu->sfr.ip == stop_ip && cpu->frame_depth == stop_d) && !cpu->halted && ++n < cap)
+        i960_step(cpu, bus);
+    s_gems_suspend--;
+    return n < cap && !cpu->halted;
+}
+
+/* What the C's run left against the i960's: memory, by region, and registers. */
+enum { GEMS_RAM, GEMS_RAM2, GEMS_BUFF, GEMS_TILE, GEMS_PAL, GEMS_BACK, GEMS_DM, GEMS_TGP, GEMS_REGIONS };
+typedef struct {
+    gems_diff_t d[GEMS_REGIONS];
+    uint32_t    gmask;          /* bit 16 + i: g[i]; bit i: r[i] */
+    int         words, close;
+} gems_cmp_t;
+
+static void gems_compare(gems_cmp_t *c, const gems_snap_t *c_run, const i960_cpu_t *cpu, const memory_bus_t *bus) {
+    memset(c, 0, sizeof *c);
+    /* The i960's dead frames above SP are where its callees kept their
+     * locals, which the C keeps on the host. */
+    const gems_skip_t skip[1] = { { cpu->locals.sp, cpu->locals.sp + 0x4000u } };
+    gems_diff_mem(&c->d[GEMS_RAM],  c_run->ram,  bus->ram,      RAM_SIZE,       0x00500000u, skip, 1);
+    gems_diff_mem(&c->d[GEMS_RAM2], c_run->ram2, bus->ram2,     RAM2_SIZE,      0x00200000u, skip, 1);
+    gems_diff_mem(&c->d[GEMS_BUFF], c_run->buff, bus->buff_ram, BUFF_RAM_SIZE,  0x00900000u, NULL, 0);
+    gems_diff_mem(&c->d[GEMS_TILE], c_run->tile, bus->tile,     TILE_SIZE,      0x01000000u, NULL, 0);
+    gems_diff_mem(&c->d[GEMS_PAL],  c_run->pal,  bus->palette,  PALETTE_SIZE,   0x01800000u, NULL, 0);
+    gems_diff_mem(&c->d[GEMS_BACK], c_run->back, bus->back,     BACK_SIZE,      0x01D00000u, NULL, 0);
+    gems_diff_mem(&c->d[GEMS_DM], (const uint8_t *)c_run->sharc.dm, (const uint8_t *)g_sharc.dm,
+                  sizeof g_sharc.dm, GEMS_DM_BASE, NULL, 0);
+    /* The TGP's whole state (its RAM, FIFOs, PC): a 2A function talks to it
+     * over the bus, so a word sent or read differently shows here. Offsets
+     * into tgp_state_t; zero on a 2B board, where both runs leave it alone. */
+    gems_diff_mem(&c->d[GEMS_TGP], (const uint8_t *)&c_run->tgp, (const uint8_t *)&g_tgp,
+                  sizeof g_tgp, 0, NULL, 0);
+    for (int i = 0; i < 16; i++) {
+        if (c_run->cpu.globals.g[i] != cpu->globals.g[i]) c->gmask |= 1u << (16 + i);
+        if (c_run->cpu.locals.r[i]  != cpu->locals.r[i])  c->gmask |= 1u << i;
+    }
+    /* The display-list pointers: a run that laid a different amount moved them. */
+    gems_diff_t *buff = &c->d[GEMS_BUFF];
+    if (c_run->geo_w != g_geo.wstart || c_run->geo_r != g_geo.rstart) {
+        if (!buff->words) { buff->first = 0x00801008u; buff->a = c_run->geo_w; buff->b = g_geo.wstart; }
+        buff->words++;
+    }
+    for (int k = 0; k < GEMS_REGIONS; k++) {
+        c->words += c->d[k].words;
+        c->close += c->d[k].close;
+    }
+}
+
+/* tag: the log's prefix, "gems" or "ages" (ages.h runs FV's patched
+ * functions through this verifier too). */
+static void gems_verify_log(const char *tag, const gems_trap_t *t, const gems_cmp_t *c,
+                            const gems_snap_t *c_run, const i960_cpu_t *cpu) {
+    const gems_diff_t *d = c->d;
+    LOG_WARN("%s-verify: %s (0x%08X) differs: regs g%04X r%04X; words ram %d ram2 %d "
+             "buff %d tile %d pal %d back %d dm %d tgp %d (+%d float-close)",
+             tag, t->name, t->site, c->gmask >> 16, c->gmask & 0xFFFF, d[GEMS_RAM].words, d[GEMS_RAM2].words,
+             d[GEMS_BUFF].words, d[GEMS_TILE].words, d[GEMS_PAL].words, d[GEMS_BACK].words,
+             d[GEMS_DM].words, d[GEMS_TGP].words, c->close);
+    for (int k = 0; k < GEMS_REGIONS; k++)
+        if (d[k].words)
+            LOG_WARN("%s-verify:   first at 0x%08X: C 0x%08X, i960 0x%08X", tag, d[k].first, d[k].a, d[k].b);
+    for (int i = 0; i < 16; i++)
+        if (c->gmask & (1u << i))
+            LOG_WARN("%s-verify:   r%d: C 0x%08X, i960 0x%08X", tag, i, c_run->cpu.locals.r[i], cpu->locals.r[i]);
+    for (int i = 0; i < 16; i++)
+        if (c->gmask & (1u << (16 + i)))
+            LOG_WARN("%s-verify:   g%d: C 0x%08X, i960 0x%08X", tag, i, c_run->cpu.globals.g[i], cpu->globals.g[i]);
+}
+
+/* Run the trap both ways (see the top of the file), counting into st and
+ * logging under tag. Returns 0: the board carries on from the i960's run; 1
+ * for a call it lets the i960 run alone. */
+static int gems_verify_in(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t,
+                          gems_verify_stat_t *st, const char *tag) {
     for (int k = 0; k < 2; k++)
         if (!s_gems_snap[k] && !(s_gems_snap[k] = (gems_snap_t *)malloc(sizeof(gems_snap_t)))) {
             gems_run(cpu, bus, t);
             return 0;
         }
     gems_snap_t *before = s_gems_snap[0], *c_run = s_gems_snap[1];
-    gems_verify_stat_t *st = &s_gems_stat[t - gems_traps];
-    /* Every call to start with, then one in GEMS_VERIFY_STRIDE: a whole-board
-     * snapshot per call is slow, and a hot trap runs hundreds of times a frame. */
-    static int every = -1;   /* M2HLE_GEMS_VERIFY_ALL=1: every call, however slow */
-    if (every < 0) every = getenv("M2HLE_GEMS_VERIFY_ALL") != NULL;
-    if (!every && st->seen++ >= GEMS_VERIFY_ALL && st->seen % GEMS_VERIFY_STRIDE) return 1;
+    if (!gems_verify_this_call(st)) return 1;
     st->calls++;
 
     gems_snap_save(before, cpu, bus);
@@ -434,82 +522,45 @@ static int gems_verify(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t)
     gems_snap_save(c_run, cpu, bus);
     gems_snap_load(before, cpu, bus);
 
-    /* The i960 from the same state, to where the C resumed. */
-    s_gems_suspend++;
-    uint64_t n = 0;
-    const uint64_t cap = 20u * 1000u * 1000u;
-    i960_step(cpu, bus);   /* the trap site itself, so a loop back to it stops */
-    while (!(cpu->sfr.ip == stop_ip && cpu->frame_depth == stop_d) && !cpu->halted && ++n < cap)
-        i960_step(cpu, bus);
-    s_gems_suspend--;
-    if (n >= cap || cpu->halted) {
-        st->lost++;
-        if (st->lost <= 3)
-            LOG_WARN("gems-verify: %s: the i960 never reached 0x%08X (depth %d) from 0x%08X",
-                     t->name, stop_ip, stop_d, t->site);
+    if (!gems_verify_i960_to(cpu, bus, stop_ip, stop_d)) {
+        if (++st->lost <= 3)
+            LOG_WARN("%s-verify: %s: the i960 never reached 0x%08X (depth %d) from 0x%08X",
+                     tag, t->name, stop_ip, stop_d, t->site);
         return 0;
     }
 
-    gems_diff_t ram = {0}, ram2 = {0}, buff = {0}, tile = {0}, pal = {0}, back = {0}, dm = {0};
-    /* The i960's dead frames above SP are where its callees kept their
-     * locals, which the C keeps on the host. */
-    const gems_skip_t skip[1] = { { cpu->locals.sp, cpu->locals.sp + 0x4000u } };
-    gems_diff_mem(&ram,  c_run->ram,  bus->ram,      RAM_SIZE,       0x00500000u, skip, 1);
-    gems_diff_mem(&ram2, c_run->ram2, bus->ram2,     RAM2_SIZE,      0x00200000u, skip, 1);
-    gems_diff_mem(&buff, c_run->buff, bus->buff_ram, BUFF_RAM_SIZE,  0x00900000u, NULL, 0);
-    gems_diff_mem(&tile, c_run->tile, bus->tile,     TILE_SIZE,      0x01000000u, NULL, 0);
-    gems_diff_mem(&pal,  c_run->pal,  bus->palette,  PALETTE_SIZE,   0x01800000u, NULL, 0);
-    gems_diff_mem(&back, c_run->back, bus->back,     BACK_SIZE,      0x01D00000u, NULL, 0);
-    gems_diff_mem(&dm, (const uint8_t *)c_run->sharc.dm, (const uint8_t *)g_sharc.dm,
-                  sizeof g_sharc.dm, GEMS_DM_BASE, NULL, 0);
-    uint32_t gmask = 0;
-    for (int i = 0; i < 16; i++) {
-        if (c_run->cpu.globals.g[i] != cpu->globals.g[i]) gmask |= 1u << (16 + i);
-        if (c_run->cpu.locals.r[i]  != cpu->locals.r[i])  gmask |= 1u << i;
-    }
-    /* The display-list pointers: a run that laid a different amount moved them. */
-    if (c_run->geo_w != g_geo.wstart || c_run->geo_r != g_geo.rstart) {
-        if (!buff.words) { buff.first = 0x00801008u; buff.a = c_run->geo_w; buff.b = g_geo.wstart; }
-        buff.words++;
-    }
-    int words = ram.words + ram2.words + buff.words + tile.words + pal.words + back.words + dm.words;
-    int close = ram.close + ram2.close + buff.close + tile.close + pal.close + back.close + dm.close;
-    if (!words && !gmask) {
-        if (close) st->close++; else st->exact++;
+    gems_cmp_t c;
+    gems_compare(&c, c_run, cpu, bus);
+    if (!c.words && !c.gmask) {
+        if (c.close) st->close++; else st->exact++;
         return 0;
     }
     /* Registers alone: often a scratch register the C never needed. */
-    if (!words) st->regs++; else st->differ++;
-    if (st->logged++ < 4) {
-        LOG_WARN("gems-verify: %s (0x%08X) differs: regs g%04X r%04X; words ram %d ram2 %d "
-                 "buff %d tile %d pal %d back %d dm %d (+%d float-close)",
-                 t->name, t->site, gmask >> 16, gmask & 0xFFFF, ram.words, ram2.words,
-                 buff.words, tile.words, pal.words, back.words, dm.words, close);
-        const gems_diff_t *all[] = { &ram, &ram2, &buff, &tile, &pal, &back, &dm };
-        for (int k = 0; k < 7; k++)
-            if (all[k]->words)
-                LOG_WARN("gems-verify:   first at 0x%08X: C 0x%08X, i960 0x%08X",
-                         all[k]->first, all[k]->a, all[k]->b);
-        for (int i = 0; i < 32; i++)
-            if (gmask & (1u << i))
-                LOG_WARN("gems-verify:   %c%d: C 0x%08X, i960 0x%08X", i < 16 ? 'r' : 'g', i & 15,
-                         i < 16 ? c_run->cpu.locals.r[i] : c_run->cpu.globals.g[i - 16],
-                         i < 16 ? cpu->locals.r[i] : cpu->globals.g[i - 16]);
-    }
+    if (!c.words) st->regs++; else st->differ++;
+    if (st->logged++ < 4) gems_verify_log(tag, t, &c, c_run, cpu);
     return 0;
 }
 
-static void gems_verify_report(void) {
-    if (!g_gems_verify) return;
-    for (size_t i = 0; i < gems_trap_count; i++) {
-        const gems_verify_stat_t *s = &s_gems_stat[i];
+static int gems_verify(i960_cpu_t *cpu, memory_bus_t *bus, const gems_trap_t *t) {
+    return gems_verify_in(cpu, bus, t, &s_gems_stat[t - gems_traps], "gems");
+}
+
+/* One row per function that ran: traps[i] counted into stats[i]. */
+static void gems_verify_report_rows(const char *tag, const gems_trap_t *traps, size_t n,
+                                    const gems_verify_stat_t *stats) {
+    for (size_t i = 0; i < n; i++) {
+        const gems_verify_stat_t *s = &stats[i];
         if (!s->calls) continue;
-        LOG_INFO("gems-verify: %-28s calls %llu  exact %llu  float-close %llu  regs-only %llu  "
+        LOG_INFO("%s-verify: %-28s calls %llu  exact %llu  float-close %llu  regs-only %llu  "
                  "differ %llu  lost %llu",
-                 gems_traps[i].name, (unsigned long long)s->calls, (unsigned long long)s->exact,
+                 tag, traps[i].name, (unsigned long long)s->calls, (unsigned long long)s->exact,
                  (unsigned long long)s->close, (unsigned long long)s->regs,
                  (unsigned long long)s->differ, (unsigned long long)s->lost);
     }
+}
+
+static void gems_verify_report(void) {
+    if (g_gems_verify) gems_verify_report_rows("gems", gems_traps, gems_trap_count, s_gems_stat);
 }
 
 static int gems_hook(i960_cpu_t *cpu, memory_bus_t *bus) {
@@ -525,37 +576,60 @@ static void gems_off_for_session(void);
 
 /* ---- Switching ------------------------------------------------------------------- */
 
-/* Apply the flags. Call after the ROM is loaded, and again when they change.
- * Only STF has Gems code; another set leaves both off. */
-static bool gems_apply(const char *set_name) {
-    bool stf = set_name && (!strcmp(set_name, "sfight") || !strcmp(set_name, "sfight_console"));
-    /* The traps are addresses in STF's program, not in homebrew on its board
-     * (the any_program profile). The COP's commands are the set's firmware. */
-    bool stf_code = stf && !(g_active_profile && g_active_profile->any_program);
-    bool want_i960 = (g_gems_i960 || g_gems_verify) && GEMS_AVAILABLE && stf_code;
-    bool want_cop  = g_gems_cop && GEMS_AVAILABLE && stf;
-    if ((g_gems_i960 || g_gems_cop || g_gems_verify) && !GEMS_AVAILABLE)
-        LOG_WARN("gems: this build has no Gems code (configure with -DM2HLE_GEMS_DIR)");
+/* The COP's Gems callbacks in, or out. */
+static void gems_cop_hooks(bool on) {
+    if (on) {
+        g_gems_cop_args         = gems_cop_args_cb;
+        g_gems_cop_exec         = gems_cop_exec_cb;
+        g_gems_cop_stream_begin = gems_cop_stream_begin_cb;
+        g_gems_cop_stream_feed  = gems_cop_stream_feed_cb;
+        g_gems_cop_reset        = gems_cop_impl_reset;
+        gems_cop_impl_reset();   /* cop_reset ran before this was set */
+    } else {
+        g_gems_cop_args         = NULL;
+        g_gems_cop_exec         = NULL;
+        g_gems_cop_stream_begin = NULL;
+        g_gems_cop_stream_feed  = NULL;
+        g_gems_cop_reset        = NULL;
+    }
+}
 
+/* The trap sites the hook layer filters on: every trap the profile does not
+ * leave to the i960. */
+static void gems_publish_sites(bool hook) {
     size_t n = 0;
     for (size_t i = 0; i < gems_trap_count && n < 256; i++)
         if (!gems_trap_left_to_i960(&gems_traps[i])) s_gems_sites[n++] = gems_traps[i].site;
     g_hle_extra_sites = s_gems_sites;
     g_hle_extra_count = n;
-    g_hle_extra_hook  = want_i960 ? gems_hook : NULL;
+    g_hle_extra_hook  = hook ? gems_hook : NULL;
     g_hle_filter_gen++;
+}
 
-    g_gems_cop_args         = want_cop ? gems_cop_args_cb : NULL;
-    g_gems_cop_exec         = want_cop ? gems_cop_exec_cb : NULL;
-    g_gems_cop_stream_begin = want_cop ? gems_cop_stream_begin_cb : NULL;
-    g_gems_cop_stream_feed  = want_cop ? gems_cop_stream_feed_cb : NULL;
-    g_gems_cop_reset        = want_cop ? gems_cop_impl_reset : NULL;
-    if (want_cop) gems_cop_impl_reset();   /* cop_reset ran before this was set */
+/* Only STF has Gems code: its traps and COP commands. */
+static bool gems_for_set(const char *set_name) {
+    return GEMS_AVAILABLE && set_name && (!strcmp(set_name, "sfight") || !strcmp(set_name, "sfight_console"));
+}
+
+/* Apply the flags. Call after the ROM is loaded, and again when they change.
+ * Only STF has Gems code; another set leaves both off. */
+static bool gems_apply(const char *set_name) {
+    if ((g_gems_i960 || g_gems_cop || g_gems_verify) && !GEMS_AVAILABLE)
+        LOG_WARN("gems: this build has no Gems code (configure with -DM2HLE_GEMS_DIR)");
+    bool stf = gems_for_set(set_name);
+    /* The traps are addresses in STF's program, not in homebrew on its board
+     * (the any_program profile). The COP's commands are the set's firmware. */
+    bool homebrew  = g_active_profile && g_active_profile->any_program;
+    bool want_i960 = stf && !homebrew && (g_gems_i960 || g_gems_verify);
+    bool want_cop  = stf && g_gems_cop;
+
+    gems_publish_sites(want_i960);
+    gems_cop_hooks(want_cop);
     g_hle_extra_session_off = gems_off_for_session;
-    if (want_i960 || want_cop)
-        LOG_INFO("gems: %s%s%s", want_i960 ? "i960 functions" : "",
-                 want_i960 && want_cop ? " + " : "", want_cop ? "COP commands" : "");
-    return want_i960 || want_cop;
+    static const char *const what[4] = { NULL, "i960 functions", "COP commands", "i960 functions + COP commands" };
+    int k = (want_i960 ? 1 : 0) | (want_cop ? 2 : 0);
+    if (k) LOG_INFO("gems: %s", what[k]);
+    return k != 0;
 }
 
 /* A netplay session needs the board as the ROM runs it on both machines. */
@@ -564,11 +638,7 @@ static void gems_off_for_session(void) {
     LOG_INFO("gems: off for the netplay session");
     g_hle_extra_hook = NULL;
     g_hle_filter_gen++;
-    g_gems_cop_args = NULL;
-    g_gems_cop_exec = NULL;
-    g_gems_cop_stream_begin = NULL;
-    g_gems_cop_stream_feed  = NULL;
-    g_gems_cop_reset        = NULL;
+    gems_cop_hooks(false);
 }
 
 #endif /* GEMS_H */

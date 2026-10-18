@@ -247,7 +247,7 @@ EM_JS(void, m2ws_close, (int id), {
  */
 static char g_web_upstream[128];
 
-/* The gateway's default upstream: ours, on play.sonicthefighte.rs. */
+/* The gateway's default upstream: ours, rpcn.sonicthefighte.rs. */
 #define WEB_GATEWAY_DEFAULT_UPSTREAM "rpcn.sonicthefighte.rs"
 
 /*

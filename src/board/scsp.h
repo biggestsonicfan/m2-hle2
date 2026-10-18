@@ -1007,8 +1007,9 @@ static inline int32_t scsp_pcm_wave(const scsp_t *s, const uint8_t *ram, uint32_
 }
 
 /* scsp_slot_loop for scsp_slot_run_pcm: no loop or a forward one, both positions */
-static inline void scsp_pcm_loop(scsp_slot_t *sl, int lpctl, uint32_t ad0, uint32_t ad1,
-                                 uint32_t *cur, uint32_t *nxt, uint32_t lsa, uint32_t lea) {
+static inline void scsp_pcm_loop(scsp_slot_t *sl, int lpctl, uint32_t *cur, uint32_t *nxt,
+                                 uint32_t lsa, uint32_t lea) {
+    const uint32_t ad0 = *cur >> SCSP_SHIFT, ad1 = *nxt >> SCSP_SHIFT;
     if (lpctl == 0) {
         if ((ad0 >= lsa && ad0 >= lea) || (ad1 >= lsa && ad1 >= lea)) scsp_slot_stop(sl, 0);
     } else {
@@ -1041,9 +1042,8 @@ static uint32_t scsp_slot_run_pcm(scsp_t *s, scsp_slot_t *sl, unsigned i, uint32
 
         cur += step;
         nxt = cur + (1u << SCSP_SHIFT);
-        uint32_t ad0 = cur >> SCSP_SHIFT, ad1 = nxt >> SCSP_SHIFT;
-        if (ad0 >= lsa && lpslnk && sl->state == SCSP_ATTACK) sl->state = SCSP_DECAY1;
-        scsp_pcm_loop(sl, lpctl, ad0, ad1, &cur, &nxt, lsa, lea);
+        if ((cur >> SCSP_SHIFT) >= lsa && lpslnk && sl->state == SCSP_ATTACK) sl->state = SCSP_DECAY1;
+        scsp_pcm_loop(sl, lpctl, &cur, &nxt, lsa, lea);
 
         if (!sdir) sample = scsp_slot_env(sl, alfo, sample);
         if (!stwinh) s->sous[((s->sous_ptr ^ ((k & 1u) << 5)) + i) & 63] = (int16_t)((sample * gs) >> (SCSP_SHIFT + 1));
@@ -1088,6 +1088,41 @@ static inline void scsp_slot_run(scsp_t *s, unsigned i, uint32_t to) {
     hprof_leave(zone);
 }
 
+static inline int32_t scsp_clamp(int32_t v, int32_t lo, int32_t hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+/* One sample to the DAC: 18-bit or 16-bit, the master volume, the sink. */
+static inline void scsp_sample_out(scsp_t *s, int32_t l, int32_t r) {
+    if (SCSP_C_DAC18B(s)) {
+        l = scsp_clamp(l, -131072, 131071) >> 2;
+        r = scsp_clamp(r, -131072, 131071) >> 2;
+    } else {
+        l = scsp_clamp(l >> 2, -32768, 32767);
+        r = scsp_clamp(r >> 2, -32768, 32767);
+    }
+    int mvol = (int)SCSP_C_MVOL(s);                   /* MAME: output gain MVOL / 15 */
+    s->samples++;
+    if (s->sink) s->sink(s->sink_ud, (int16_t)(l * mvol / 15), (int16_t)(r * mvol / 15));
+}
+
+/* Owed sample k: the slots' sends into the DSP, a DSP step, its effect
+ * outputs onto the direct mix, then out. */
+static inline void scsp_sample_mix(scsp_t *s, uint32_t k) {
+    int32_t *mx = s->acc_mixs[k];
+    for (int j = 0; j < 16; j++) { s->dsp.mixs[j] += mx[j]; mx[j] = 0; }
+    int32_t l = s->acc_l[k], r = s->acc_r[k];
+    s->acc_l[k] = s->acc_r[k] = 0;
+    scsp_dsp_step(s);
+    for (int i = 0; i < 16; i++) {
+        const scsp_slot_t *sl = &s->slot[i];
+        if (!SCSP_EFSDL(sl)) continue;
+        l += (s->dsp.efreg[i] * sl->g_el) >> SCSP_SHIFT;
+        r += (s->dsp.efreg[i] * sl->g_er) >> SCSP_SHIFT;
+    }
+    scsp_sample_out(s, l, r);
+}
+
 /* Make every owed sample: the slots, then the DSP and the mix, in order. */
 static void scsp_sync(scsp_t *s) {
     const uint32_t n = s->owed;
@@ -1095,31 +1130,7 @@ static void scsp_sync(scsp_t *s) {
     int zone = hprof_enter(HPROF_SCSP);
     for (unsigned i = 0; i < 32; i++) scsp_slot_run(s, i, n);
     if (!s->latch_fresh) { scsp_latch(s); s->latch_fresh = 1; }
-    for (uint32_t k = 0; k < n; k++) {
-        int32_t *mx = s->acc_mixs[k];
-        for (int j = 0; j < 16; j++) { s->dsp.mixs[j] += mx[j]; mx[j] = 0; }
-        int32_t l = s->acc_l[k], r = s->acc_r[k];
-        s->acc_l[k] = s->acc_r[k] = 0;
-        scsp_dsp_step(s);
-        for (int i = 0; i < 16; i++) {
-            const scsp_slot_t *sl = &s->slot[i];
-            if (!SCSP_EFSDL(sl)) continue;
-            l += (s->dsp.efreg[i] * sl->g_el) >> SCSP_SHIFT;
-            r += (s->dsp.efreg[i] * sl->g_er) >> SCSP_SHIFT;
-        }
-        if (SCSP_C_DAC18B(s)) {
-            l = l < -131072 ? -131072 : l > 131071 ? 131071 : l;
-            r = r < -131072 ? -131072 : r > 131071 ? 131071 : r;
-            l >>= 2; r >>= 2;
-        } else {
-            l >>= 2; r >>= 2;
-            l = l < -32768 ? -32768 : l > 32767 ? 32767 : l;
-            r = r < -32768 ? -32768 : r > 32767 ? 32767 : r;
-        }
-        int mvol = (int)SCSP_C_MVOL(s);                   /* MAME: output gain MVOL / 15 */
-        s->samples++;
-        if (s->sink) s->sink(s->sink_ud, (int16_t)(l * mvol / 15), (int16_t)(r * mvol / 15));
-    }
+    for (uint32_t k = 0; k < n; k++) scsp_sample_mix(s, k);
     s->sous_ptr = (uint8_t)(s->sous_ptr ^ ((n & 1u) << 5));
     s->owed = 0;
     memset(s->done, 0, sizeof s->done);
@@ -1202,57 +1213,67 @@ static inline int scsp_ctz32(uint32_t v) {
 #endif
 }
 
+/* The sound RAM the DSP's delay line reads and writes, [lo, hi); none while
+ * it is stopped. */
+static void scsp_dsp_range(const scsp_t *s, uint32_t *lo, uint32_t *hi) {
+    const scsp_dsp_t *d = &s->dsp;
+    *lo = *hi = 0;
+    if (d->stopped) return;
+    uint32_t span = 0;
+    for (int st = 1; st < d->last_step; st += 2) {         /* only odd steps touch it (MAME) */
+        const uint16_t *p = d->mpro + st * 4;
+        if (!((p[2] >> 13) & 3)) continue;                 /* no MRD, no MWT */
+        if (p[2] >> 15 & 1) span = 0x10000;                /* TABLE: MADRS + ADRS, not the ring */
+        else if (span < d->rbl) span = d->rbl;
+    }
+    *lo = d->rbp << 13;
+    uint64_t e = (uint64_t)*lo + 2u * span;
+    *hi = e < s->ram_size ? (uint32_t)e : s->ram_size;
+    if (*lo > *hi) *lo = *hi;
+}
+
+/* Work out slot i's sound RAM range again, and whether it couples the chip:
+ * FM, the noise source, or a read of the DSP's delay line at [lo, hi). */
+static int scsp_slot_recouple(scsp_t *s, int i, uint32_t lo, uint32_t hi) {
+    scsp_slot_t *sl = &s->slot[i];
+    uint32_t a, b;
+    scsp_slot_range(s, sl, &a, &b);
+    if (a != s->slot_lo[i] || b != s->slot_hi[i]) {
+        s->slot_lo[i] = a; s->slot_hi[i] = b;
+        s->hot_dirty = 1;
+    }
+    if (!sl->active) return 0;
+    if (SCSP_SSCTL(sl) == 1 || SCSP_MDL(sl) || SCSP_MDXSL(sl) || SCSP_MDYSL(sl)) return 1;
+    return s->slot_lo[i] < hi && lo < s->slot_hi[i];       /* reads the delay line */
+}
+
 /* Work out again, after a register write, whether the slots can run apart
  * and which sound RAM somebody inside the chip reads. */
 static void scsp_recouple(scsp_t *s) {
-    uint32_t lo = 0, hi = 0;
-    scsp_dsp_t *d = &s->dsp;
-    if (!d->stopped) {
-        uint32_t span = 0;
-        for (int st = 1; st < d->last_step; st += 2) {     /* only odd steps touch it (MAME) */
-            const uint16_t *p = d->mpro + st * 4;
-            if (!((p[2] >> 13) & 3)) continue;             /* no MRD, no MWT */
-            if (p[2] >> 15 & 1) span = 0x10000;            /* TABLE: MADRS + ADRS, not the ring */
-            else if (span < d->rbl) span = d->rbl;
-        }
-        lo = d->rbp << 13;
-        uint64_t e = (uint64_t)lo + 2u * span;
-        hi = e < s->ram_size ? (uint32_t)e : s->ram_size;
-        if (lo > hi) lo = hi;
-    }
+    uint32_t lo, hi;
+    scsp_dsp_range(s, &lo, &hi);
     if (lo != s->dsp_lo || hi != s->dsp_hi) s->dsp_moved = 1;
     s->dsp_lo = lo; s->dsp_hi = hi;
     uint8_t c = 0;
-    for (int i = 0; i < 32; i++) {
-        scsp_slot_t *sl = &s->slot[i];
-        uint32_t a, b;
-        scsp_slot_range(s, sl, &a, &b);
-        if (a != s->slot_lo[i] || b != s->slot_hi[i]) {
-            s->slot_lo[i] = a; s->slot_hi[i] = b;
-            s->hot_dirty = 1;
-        }
-        if (!sl->active) continue;
-        if (SCSP_SSCTL(sl) == 1 || SCSP_MDL(sl) || SCSP_MDXSL(sl) || SCSP_MDYSL(sl)) c = 1;
-        if (s->slot_lo[i] < hi && lo < s->slot_hi[i]) c = 1;   /* reads the delay line */
-    }
+    for (int i = 0; i < 32; i++)
+        if (scsp_slot_recouple(s, i, lo, hi)) c = 1;
     s->coupled = c;
 }
 
-/* The 68000 is about to touch sz bytes of sound RAM at addr: make whatever the
- * chip owes that depends on the bytes there now. */
-static inline void scsp_ram_touch(scsp_t *s, uint32_t addr, uint32_t sz, int write) {
-    if (!s->owed) return;
-    uint32_t end = addr + sz;
-    if (addr < s->dsp_hi && s->dsp_lo < end) { scsp_sync(s); return; }
-    if (!write) return;                                    /* slots only read */
-    if (s->hot_dirty) {
-        memset(s->own, 0, sizeof s->own);
-        for (int i = 0; i < 32; i++)
-            if (s->slot_lo[i] < s->slot_hi[i])
-                for (uint32_t g = s->slot_lo[i] >> 8; g <= (s->slot_hi[i] - 1) >> 8 && g < 0x80000u / 256; g++)
-                    s->own[g] |= 1u << i;
-        s->hot_dirty = 0;
-    }
+/* Which slots read each 256-byte granule of sound RAM, made again from the
+ * slots' ranges after one of them moved. */
+static void scsp_own_rebuild(scsp_t *s) {
+    memset(s->own, 0, sizeof s->own);
+    for (int i = 0; i < 32; i++)
+        if (s->slot_lo[i] < s->slot_hi[i])
+            for (uint32_t g = s->slot_lo[i] >> 8; g <= (s->slot_hi[i] - 1) >> 8 && g < 0x80000u / 256; g++)
+                s->own[g] |= 1u << i;
+    s->hot_dirty = 0;
+}
+
+/* A write to [addr, end): run on every slot that owes samples and reads
+ * there, so they read the old bytes. */
+static inline void scsp_ram_touch_slots(scsp_t *s, uint32_t addr, uint32_t end) {
     uint32_t g0 = addr >> 8, g1 = (end - 1) >> 8;
     if (g1 >= 0x80000u / 256) { g1 = 0x80000u / 256 - 1; if (g0 > g1) return; }
     for (uint32_t m = s->own[g0] | s->own[g1]; m; m &= m - 1) {
@@ -1262,6 +1283,17 @@ static inline void scsp_ram_touch(scsp_t *s, uint32_t addr, uint32_t sz, int wri
             s->catches++;
         }
     }
+}
+
+/* The 68000 is about to touch sz bytes of sound RAM at addr: make whatever the
+ * chip owes that depends on the bytes there now. */
+static inline void scsp_ram_touch(scsp_t *s, uint32_t addr, uint32_t sz, int write) {
+    if (!s->owed) return;
+    uint32_t end = addr + sz;
+    if (addr < s->dsp_hi && s->dsp_lo < end) { scsp_sync(s); return; }
+    if (!write) return;                                    /* slots only read */
+    if (s->hot_dirty) scsp_own_rebuild(s);
+    scsp_ram_touch_slots(s, addr, end);
 }
 
 /* Whether a register write changes what the chip makes (and so has to find it

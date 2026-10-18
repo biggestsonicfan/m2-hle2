@@ -15,6 +15,7 @@
  * the winsock include order and <winsock2.h> has to precede it. See the note at
  * the top of that header. */
 #include "net/netplay.h"
+#include "net/room_watch.h"
 
 #include "sokol_app.h"
 #include "sokol_gfx.h"
@@ -36,6 +37,7 @@
 #include "rom_loader.h"
 #include "emu_thread.h"
 #include "gems.h"          /* --gems-i960 / --gems-cop: Sega's own C from Sonic Gems Collection */
+#include "ages.h"          /* --ages-i960: Sega's own C from Sega Ages 2500 Fighting Vipers */
 #include "memview.h"
 #include "cpu_window.h"
 #include "breakpoint_window.h"
@@ -61,27 +63,42 @@
 #include "overlay_host.h"    /* --overlay: a plugin paints layers over the picture */
 #include "post_shader.h"     /* the CRT filter and libretro presets over the picture */
 #include "shader_window.h"   /* ...and the Video menu that picks one */
+#include "m2lua_ui.h"        /* M2emulator's game scripts: their drawing, keys and menu */
+#include "m2lua_mcp.h"       /* ...and the bridge's script_* commands */
+#include "lightgun_ui.h"      /* the mouse as a light gun, and its crosshairs */
+#include "net/comm_local.h"   /* --comm-master / --comm-slave: two boards linked on 127.0.0.1 */
+#if M2HLE_PADS
+#include "sdl_pads.h"         /* gamepads, racing wheels and force feedback through SDL3 (#1082) */
+#endif
+#if defined(__linux__)
+#include <unistd.h>          /* readlink: scripts/ beside the executable */
+#endif
+#include <sys/stat.h>
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
  * g_active_profile and pulls in every per-game profile header. */
 #include "registry.h"
 
 static char g_rom_path[512] = {0};
+static char g_scripts_dir[512] = {0};  /* --scripts DIR: the game scripts' folder */
+static int  g_no_scripts = 0;          /* --no-scripts: run none */
 static char g_export_roms[512] = {0};   /* --export-roms DIR: write the set's region images, then quit */
 static char g_profile_arg[64] = {0};   /* --profile <id>: e.g. sfight for STF's arcade game */
 static int  g_autorun = 0;
 static char g_load_state[1024];   /* --load-state FILE: start from a savestate */
 static char     g_follow_out[512];   /* --follow-out DIR: lead a one-way follow (core/follow.h) */
 static uint32_t g_follow_every;      /* --follow-every FRAMES between its join points */
-static bool     g_replay_cli_set;    /* --record-replays / --no-record-replays override the saved switch */
+static bool     g_replay_cli_set;    /* --record-replays / --replay-format: the command line, not replay.cfg */
 static char     g_replay_open_arg[512];   /* --replay FILE: open it once a game is loaded */
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
 static int  g_objview_model = -1;  /* --objview N: and select model N */
 static int  g_mcp_enable = 0;      /* --mcp: start the TCP debug server */
-/* --crt / --shader <preset> / --no-shader / --shader-scale N: the Video menu's
- * filter for this run, over what video.cfg remembers (shader_window.h). */
+/* --crt / --shader <preset> / --no-shader / --shader-scale N, --arcade / --no-arcade: the
+ * Video menu's filter and Arcade for this run, over what video.cfg remembers (shader_window.h). */
 static int  g_shader_arg = -1;    /* -1 as remembered, else a post_shader_mode_t */
+static int  g_arcade_arg = -1;    /* -1 as remembered, else 0 or 1 */
+static int  g_pixdepth_arg = -1;  /* --pixel-depth / --no-pixel-depth, the same */
 static char g_shader_preset[512] = {0};
 static int  g_shader_scale = -1;
 static int  g_mcp_port   = 7172;   /* --mcp-port N */
@@ -90,6 +107,7 @@ static int  g_headless   = 0;      /* --headless: no window, GPU or audio device
 static int  g_net_window = 0;      /* --netplay: open the netplay window at startup */
 static int  g_kiosk_on   = 0;      /* --kiosk: capture mode from startup */
 static int  g_no_tray    = 0;      /* --no-tray: --headless without its icon */
+static int  g_no_pads    = 0;      /* --no-pads: no gamepads or wheels (and no SDL) */
 /* --no-sound-board (or M2HLE_NO_SOUND_BOARD=1): boot with the 68000 and SCSP
  * detached, for training runs that want frames, not sound. The sound board is
  * a third to a half of the emu thread. It is board state, not only audio: its
@@ -112,6 +130,12 @@ static int  g_av_port    = 0;      /* --av-port N: raw A/V server, 0 = off */
 static int  g_av_w       = AV_DEFAULT_WIDTH;
 static int  g_av_h       = AV_DEFAULT_HEIGHT;
 static int  g_av_mute    = 0;      /* --av-mute: stream the sound, do not play it */
+/* --comm-master / --comm-slave PORT:TOKEN: this board's comm board linked to
+ * another m2hle's over 127.0.0.1 (net/comm_local.h), as SDL3's --versus. */
+static int      g_comm_master = 0;
+static uint16_t g_comm_port   = 0;
+static uint32_t g_comm_token  = 0;
+static bool comm_link_arg(void);
 
 /*
  * Headless netplay (--net-*). The GUI is the normal way in, but a session that
@@ -176,9 +200,10 @@ static const game_profile_t *startup_profile(void) {
 /* Pick the profile that runs the zip's ROM set, by basename (e.g. "fvipers.zip"
  * → fvipers). The active profile is kept when it runs that set, so --profile or
  * a Game-menu choice between STF's Console and Arcade survives the load; else
- * the set's default. Falls back to leaving g_active_profile unchanged if no
- * profile runs the set. */
-static void select_profile_for_zip(const char *path) {
+ * the set's default. False when no profile runs the set, or it is a prepared
+ * one (registry.h) that no board can run yet: nothing is loaded then, as the
+ * handheld and the libretro core refuse it (profile_missing_message). */
+static bool select_profile_for_zip(const char *path) {
     const char *sep_f = strrchr(path, '/');
     const char *sep_b = strrchr(path, '\\');
     const char *base  = (sep_f > sep_b ? sep_f : sep_b);
@@ -189,10 +214,16 @@ static void select_profile_for_zip(const char *path) {
     if (n >= sizeof(id)) n = sizeof(id) - 1;
     memcpy(id, base, n);
     const game_profile_t *p = profile_for_rom_set(id, g_active_profile);
-    if (!p) return;
+    if (!p) {
+        char why[256];
+        profile_missing_message(id, why, sizeof why);
+        LOG_ERROR("%s", why);
+        return false;
+    }
     if (g_active_profile != p)
         LOG_INFO("auto-selected profile: %s", p->display_name);
     g_active_profile = p;
+    return true;
 }
 
 /* MAME clone fall-through: the parent zip's path (same directory as the picked
@@ -231,6 +262,7 @@ static void open_backup_ram(bool homebrew) {
  * this must run after it.) */
 static void load_sound_board(void) {
     if (!g_active_profile->quirks.enable_68k_sound) return;
+    sound_select_board(g_active_profile->quirks.model1_sound);
     sound_reset();
     sound_attach(&state.bus);
     if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
@@ -243,8 +275,52 @@ static void load_sound_board(void) {
     }
 }
 
+/* ---- Game scripts (core/m2lua.h, Pinboard #958) ---------------------------- */
+
+static bool scripts_is_dir(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && (st.st_mode & S_IFDIR);
+}
+
+/* scripts/ in the working directory, else beside the executable. */
+static void scripts_default_dir(char *out, size_t cap) {
+    snprintf(out, cap, "scripts");
+    if (scripts_is_dir(out)) return;
+    char exe[512] = "";
+#if defined(_WIN32)
+    long n = (long)GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
+#elif defined(__linux__)
+    long n = (long)readlink("/proc/self/exe", exe, sizeof exe - 1);
+#else
+    long n = 0;
+#endif
+    if (n <= 0 || n >= (long)sizeof exe) return;
+    exe[n] = 0;
+    char *slash = strrchr(exe, '/'), *back = strrchr(exe, '\\');
+    if (back > slash) slash = back;
+    if (slash) snprintf(out, cap, "%.*s/scripts", (int)(slash - exe), exe);
+}
+
+/* The folder, the switch, and the emu thread's and the bridge's hooks. */
+static void scripts_setup(void) {
+    char dir[512];
+    if (g_scripts_dir[0]) snprintf(dir, sizeof dir, "%s", g_scripts_dir);
+    else                  scripts_default_dir(dir, sizeof dir);
+    m2lua_set_dir(dir);
+    g_m2lua.disabled   = g_no_scripts != 0;
+    g_emu_script_frame = m2lua_frame_hook;
+    g_emu_script_reset = m2lua_reset_hook;
+    g_mcp_script_cmd   = m2lua_mcp_cmd;
+    g_m2lua_decode_image = m2lua_ui_decode;
+}
+
+/* End(), once the emu thread has gone (its mutex with it). */
+static void scripts_shutdown(void) {
+    m2lua_unload();
+}
+
 static void load_active_profile(const char *primary_zip) {
-    select_profile_for_zip(primary_zip);
+    if (!select_profile_for_zip(primary_zip)) return;
     if (!g_active_profile) { LOG_ERROR("no active profile selected"); return; }
 
     char parent_zip[512] = {0};
@@ -256,6 +332,7 @@ static void load_active_profile(const char *primary_zip) {
     sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
     emu_mutex_lock(&state.emu.mutex);
     replay_game_loaded();   /* a recording ends; a replay lets go of the board */
+    m2lua_unload();         /* the script's ROM patches come off the set going */
     emu_mutex_unlock(&state.emu.mutex);
 
     g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
@@ -273,6 +350,7 @@ static void load_active_profile(const char *primary_zip) {
         geo3d_lookup_invalidate();
         g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
         gems_apply(profile_rom_set(g_active_profile));
+        ages_apply(profile_rom_set(g_active_profile));   /* after gems_apply: they share the extra-hook slot */
         load_sound_board();
         /* Inputs are delivered via the I/O ports (read by the game's vblank
          * interrupt), so attach the I/O read callback after the bus re-init. */
@@ -288,6 +366,9 @@ static void load_active_profile(const char *primary_zip) {
             state.geo3d.fov_auto = true;
         }
         emu_ensure_started();
+        emu_mutex_lock(&state.emu.mutex);
+        m2lua_load(profile_rom_set(g_active_profile), &state.bus, &state.romset);
+        emu_mutex_unlock(&state.emu.mutex);
         emu_update_snapshots(&state.emu);
         kiosk_set_label(g_active_profile->display_name);
         LOG_INFO("profile '%s' loaded; reset IP = 0x%08X",
@@ -345,6 +426,12 @@ static bool replay_cli_arg(int argc, char **argv, int *i) {
     if (!strcmp(a, "--record-replays") || !strcmp(a, "--no-record-replays")) {
         g_replay_rec.want = a[2] == 'r';   /* save every online match */
         g_replay_cli_set  = true;
+    } else if ((!strcmp(a, "--replay-format") || !strcmp(a, "--replay-view")) && more) {
+        bool view = a[9] == 'v';
+        int pick = replay_format_parse(argv[++*i], view);
+        if (pick < 0) LOG_WARN("%s %s: native or inputs", a, argv[*i]);
+        else if (view) g_replay_play.view = pick;
+        else { g_replay_rec.format = pick; g_replay_cli_set = true; }
     } else if (!strcmp(a, "--replay-dir") && more) {
         snprintf(g_replay_rec.dir, sizeof g_replay_rec.dir, "%s", argv[++*i]);
     } else if (!strcmp(a, "--replay") && more) {
@@ -379,6 +466,7 @@ static void netplay_reset_board_cb(void *ctx) {
     irqt_reset();
 
     if (g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&state.bus);
         if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
@@ -404,6 +492,41 @@ static void netplay_cli_log_twitch(const netplay_status_t *st) {
         LOG_INFO("netplay: Twitch signed in as %s", st->twitch_npid);
     else if (st->twitch_state == RPCN_TWITCH_FAILED)
         LOG_INFO("netplay: Twitch failed: %s", st->twitch_error);
+}
+
+/* Somebody came into the room we are in: a toast over the bottom of the game
+ * box (overlay_host_announce), in the window and on the A/V stream alike. */
+static void netplay_room_toast(room_watch_event_t ev, const char *npid, void *ud) {
+    (void)ud;
+    if (ev != ROOM_WATCH_JOIN) return;
+    char note[96];
+    snprintf(note, sizeof note, "%s came into the room.", npid);
+    LOG_INFO("netplay: %s joined the room", npid);
+    overlay_host_announce(OVERLAY_ANNOUNCE_TITLE, note);
+}
+
+/* Called every frame from both loops, whatever started the session. */
+static void netplay_room_announce(void) {
+    static room_watch_t seen;
+    netplay_status_t st;
+    netplay_get_status(&st);
+    room_watch_step(&seen, &st, netplay_room_toast, NULL);
+}
+
+/* The GGPO lobby has no room: its opponent comes in with the match, once per
+ * match id. */
+static void netplay_ggpo_announce(void) {
+#ifdef M2HLE_GGPO
+    static char said[24];
+    ggl_status_t st = ggl_status();
+    if (st.stage != GGL_MATCH || !st.match[0]) { said[0] = '\0'; return; }
+    if (strcmp(st.match, said) == 0) return;
+    snprintf(said, sizeof said, "%s", st.match);
+    char note[96];
+    snprintf(note, sizeof note, "%s came into the match.", st.opponent[0] ? st.opponent : "A player");
+    LOG_INFO("ggpo: %s joined the match", st.opponent);
+    overlay_host_announce(OVERLAY_ANNOUNCE_TITLE, note);
+#endif
 }
 
 /*
@@ -719,6 +842,7 @@ static void draw_menu_bar(void) {
     shader_ui_menu(state.file_dialog);
     menu_netplay();
     replay_ui_menu(&state.emu, state.file_dialog);
+    m2lua_ui_menu(&state.emu.mutex);
     menu_bar_status();
     igEndMainMenuBar();
 }
@@ -761,6 +885,8 @@ static void init_renderer(void) {
     if (g_shader_preset[0] && !post_shader_load(g_shader_preset))
         LOG_WARN("--shader %s: %s", g_shader_preset, post_shader_error());
     if (g_shader_arg >= 0) post_shader_set_mode((post_shader_mode_t)g_shader_arg);
+    if (g_arcade_arg >= 0) post_shader_set_arcade(g_arcade_arg);
+    if (g_pixdepth_arg >= 0) g_geo3d_pixel_depth = g_pixdepth_arg;
     if (g_shader_scale >= 0) post_shader_set_input_scale(g_shader_scale);
     geo3d_init(&state.geo3d);
     g_geo3d_state = &state.geo3d;
@@ -826,6 +952,41 @@ static void init_take_focus(void) {
 #endif
 }
 
+#if M2HLE_PADS
+/* Gamepads and racing wheels (Pinboard #1082): SDL3 for its joysticks and
+ * haptics only, sokol keeps the window. They play while the window has the
+ * focus (a second m2hle on the same desktop, a netplay test, keeps its own);
+ * capture mode and --no-pads take none. */
+static bool g_pads_on, g_pads_focused = true;
+
+static void pads_init(void) {
+    if (g_no_pads || g_kiosk_on) return;
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_HAPTIC)) {
+        LOG_WARN("pads: SDL_Init: %s; no gamepads or wheels", SDL_GetError());
+        return;
+    }
+    g_pads_on = true;
+}
+
+static void pads_frame(void) {
+    if (!g_pads_on) return;
+    SDL_Event ev;
+    bool changed = false;
+    while (SDL_PollEvent(&ev)) sdl_pads_event(&ev, &changed);
+    if (!g_pads_focused) return;
+    if (changed) pad_refresh();
+    ffb_update();
+}
+
+static void pads_focus(bool focused) {
+    if (!g_pads_on || focused == g_pads_focused) return;
+    g_pads_focused = focused;
+    if (focused) pad_refresh();
+    else { lobby_pad_release(); ffb_stop_all(); }
+}
+#endif
+
 static void init(void) {
     log_init();
     crash_trace_install();
@@ -876,6 +1037,7 @@ static void init(void) {
         load_active_profile(g_rom_path);
         if (state.romset.loaded) load_state_arg();   /* a failure is logged; the board boots fresh */
         if (state.romset.loaded) replay_open_arg();
+        if (state.romset.loaded) comm_link_arg();     /* a failure is logged; the board runs unlinked */
         if (g_autorun && state.romset.loaded) emu_run(&state.emu);
     }
 
@@ -1204,7 +1366,7 @@ static void headless_av_frame(void) {
                          .depth_stencil = av_capture_depth_att() },
     });
     game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                    ox, oy, gw, gh, 1.0f);
+                    (game_rect_t){ox, oy, gw, gh}, 1.0f);
     overlay_host_draw();
     sg_end_pass();
     av_capture_submit(av_frame, av_sample);
@@ -1221,8 +1383,10 @@ static void headless_shutdown(void) {
     LOG_INFO("headless: shutting down");
     av_stream_shutdown();
     if (state.emu_started) emu_thread_shutdown(&state.emu);
+    scripts_shutdown();
     backup_ram_flush();
     gems_verify_report();
+    ages_verify_report();
     netplay_shutdown();
     overlay_host_shutdown();
     av_capture_shutdown();
@@ -1243,6 +1407,24 @@ static void headless_shutdown(void) {
  * into the capture target, so a machine with no desktop session can stream.
  * The A/V tap sits at the sound producer, so the samples come through with or
  * without an audio device. */
+/* --comm-master / --comm-slave: the link, before the board runs. False if
+ * there is no socket. */
+static bool comm_link_arg(void) {
+    if (!g_comm_master && !g_comm_port) return true;
+    uint16_t epoch = (uint16_t)(rand() | 1);
+    bool ok = g_comm_master ? comm_local_listen(&g_comm_local, (uint32_t)rand() ^ (uint32_t)time(NULL), epoch)
+                            : comm_local_connect(&g_comm_local, g_comm_port, g_comm_token, epoch);
+    if (!ok) { LOG_ERROR("--comm-%s: no UDP socket on 127.0.0.1", g_comm_master ? "master" : "slave"); return false; }
+    emu_mutex_lock(&state.emu.mutex);
+    comm_local_begin(&g_comm_local);
+    emu_mutex_unlock(&state.emu.mutex);
+    LOG_INFO("comm link: this board is the %s, link on 127.0.0.1:%u (--comm-slave %u:%u)",
+             comm_role_name(g_comm_local.role), g_comm_local.port, g_comm_local.port, g_comm_local.token);
+    printf("comm-link %u:%u\n", g_comm_local.port, g_comm_local.token);
+    fflush(stdout);
+    return true;
+}
+
 static int headless_main(void) {
     log_init();
     crash_trace_install();
@@ -1264,6 +1446,7 @@ static int headless_main(void) {
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
     if (!load_state_arg()) return 1;
     replay_open_arg();
+    if (!comm_link_arg()) return 1;
     if (g_autorun) emu_run(&state.emu);
 
     if (!g_no_tray) headless_tray_start();
@@ -1276,6 +1459,8 @@ static int headless_main(void) {
     while (!tray_exit_requested() && !mcp_quit_requested()) {
         emu_update_snapshots(&state.emu);
         netplay_cli_pump();
+        netplay_room_announce();
+        netplay_ggpo_announce();
         tray_headless_pump();
         tray_headless_tick(g_emu_frames);
         if (av_on) {
@@ -1305,11 +1490,9 @@ static void draw_windows(void) {
     if (state.show_cop)         cop_window_draw(&state.show_cop);
     if (state.show_geo3d) {
         const game_quirks_t *gq = g_active_profile ? &g_active_profile->quirks : NULL;
-        geo3d_window_draw(&state.geo3d, &state.show_geo3d,
-                          state.romset.main_data, state.romset.main_data_size,
-                          gq ? gq->model_table_offset : 0,
-                          gq ? gq->model_table_count  : 0,
-                          gq ? gq->mesh_ptr_subtract  : 0);
+        geo3d_models_t md = { .table = profile_model_table(gq) };
+        if (gq) md = geo3d_models_of(&state.romset, gq);
+        geo3d_window_draw(&state.geo3d, &state.show_geo3d, &md);
     }
     objview_window_draw(&state.show_objview, &state.romset, &state.bus);
     if (state.show_bus_stats)   draw_bus_stats_window();
@@ -1360,7 +1543,7 @@ static void av_stream_pass(void) {
                              .depth_stencil = av_capture_depth_att() },
         });
         game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                        ox, oy, gw, gh, 1.0f);
+                        (game_rect_t){ox, oy, gw, gh}, 1.0f);
         overlay_host_draw();
         sg_end_pass();
         av_capture_submit(av_frame, av_sample);
@@ -1396,10 +1579,10 @@ static void window_game_rect(int *ox, int *oy, int *w, int *h) {
     if (avail_h < 1) avail_h = 1;
     /* Letterbox against whatever is actually being shown: the stream's
      * target has its own aspect, chosen by --av-size. */
-    int src_w = s_av_mirror ? av_stream_width()  : VIDEO_WIDTH;
+    int src_w = s_av_mirror ? av_stream_width()  : post_shader_picture_width();
     int src_h = s_av_mirror ? av_stream_height() : VIDEO_HEIGHT;
-    game_render_letterbox(sapp_width(), avail_h, src_w, src_h, ox, oy, w, h);
-    *oy += menu_h;
+    game_rect_t r = game_render_letterbox(sapp_width(), avail_h, src_w, src_h);
+    *ox = r.x; *oy = r.y + menu_h; *w = r.w; *h = r.h;
 }
 
 /* Programmatic per-model texture extractor (--extract N). Re-runs ~once/
@@ -1409,12 +1592,12 @@ static void extract_model_tick(void) {
     if (g_extract_model >= 0 && g_active_profile && state.romset.main_data) {
         static int _ec = 0;
         if ((_ec++ % 60) == 0) {
-            const game_quirks_t *q = &g_active_profile->quirks;
-            geo3d_extract_model_texture(g_extract_model,
-                state.romset.main_data, state.romset.main_data_size,
-                state.romset.textures,  state.romset.textures_size,
-                state.bus.texram0, state.bus.texram1,
-                q->model_table_offset, q->model_table_count);
+            const geo3d_models_t md = {
+                .main_data = state.romset.main_data, .main_data_size = state.romset.main_data_size,
+                .materials = state.romset.textures,  .materials_size = state.romset.textures_size,
+                .table     = profile_model_table(&g_active_profile->quirks),
+            };
+            geo3d_extract_model_texture(g_extract_model, &md, state.bus.texram0, state.bus.texram1);
             if (g_extract_seq >= 0) g_extract_seq++;
         }
     }
@@ -1424,6 +1607,9 @@ static void frame(void) {
     /* `quit` over the bridge. Capture mode would otherwise swallow the close,
      * which is the point of capture mode -- so say we mean it. */
     if (mcp_quit_requested()) { kiosk_allow_quit(); sapp_request_quit(); }
+#if M2HLE_PADS
+    pads_frame();
+#endif
 
     simgui_new_frame(&(simgui_frame_desc_t){
         .width       = sapp_width(),
@@ -1442,6 +1628,8 @@ static void frame(void) {
     float lerp_t = state.emu_started ? game_frame_lerp() : 1.0f;
 
     netplay_cli_pump();
+    netplay_room_announce();
+    netplay_ggpo_announce();
 
     /* Capture mode draws the game and nothing else: no menu bar, no debug
      * windows, nothing for a recording to pick up. */
@@ -1474,6 +1662,13 @@ static void frame(void) {
      * was told it would be, so the window and the stream show the identical
      * composition rather than two letterboxes of the same picture. */
     if (win_overlay) { ox = win_ox; oy = win_oy; w = win_gw; h = win_gh; }
+    /* With no plugin, an announcement still goes up, over the window's own
+     * game box. */
+    else if (!s_av_mirror && overlay_host_announcing()) {
+        int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
+        overlay_host_paint(sapp_width(), sapp_height(), ox, oy, w, h, menu_h, g_emu_frames);
+        win_overlay = true;
+    }
     /* The filter reads the game from a target of its own and covers only the
      * game's rectangle. Not while the window mirrors the A/V stream: that
      * target is the stream's composition, overlay and all. */
@@ -1482,7 +1677,7 @@ static void frame(void) {
         int sw, sh;
         post_shader_source_size(VIDEO_WIDTH, VIDEO_HEIGHT, w, h, &sw, &sh);
         post_shader_begin_source(sw, sh, &state.pass_action);
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, sw, sh, lerp_t);
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, (game_rect_t){0, 0, sw, sh}, lerp_t);
         post_shader_end_source();
         post_shader_prepare(w, h);
     }
@@ -1504,12 +1699,18 @@ static void frame(void) {
             post_shader_draw(ox, oy, w, h, sapp_width(), sapp_height());
         else
             game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                            ox, oy, w, h, lerp_t);
+                            (game_rect_t){ox, oy, w, h}, lerp_t);
 
         /* The overlay goes UNDER any debug window that is open, which is right:
          * those are for the person at the keyboard and the overlay is for the
          * stream. simgui_render() is below, outside this block. */
         if (win_overlay) overlay_host_draw();
+
+        /* What the game's script drew (PostDraw), over the game and under the
+         * debug windows. Not on the A/V stream: that is the board's picture. */
+        if (!win_overlay) m2lua_ui_draw(ox, oy, w, h);
+        lightgun_ui_set_rect(ox, oy, w, h);
+        lightgun_ui_draw(ox, oy, w, h);
 
         extract_model_tick();
     }
@@ -1534,6 +1735,9 @@ static void frame(void) {
 
 static void cleanup(void) {
     kiosk_shutdown();      /* take the tray icon down before the window goes */
+#if M2HLE_PADS
+    if (g_pads_on) { lobby_pad_release(); ffb_stop_all(); SDL_Quit(); g_pads_on = false; }
+#endif
     /* First: the writer thread is still sending out of slots the renderer owns
      * and the target below is about to go. It keeps both rings — the audio tap
      * runs on the emu thread, which is still going at this point, and that is
@@ -1541,13 +1745,16 @@ static void cleanup(void) {
      * target goes with the rest of the GPU resources further down. */
     av_stream_shutdown();
     if (state.emu_started) emu_thread_shutdown(&state.emu);
+    scripts_shutdown();
     backup_ram_flush();   /* the board has stopped: what it holds now is final */
     gems_verify_report();
+    ages_verify_report();
     netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     audio_out_shutdown();  /* stop audio after the emu thread (no more ring writes) */
     if (state.file_dialog) { IGFD_Destroy(state.file_dialog); state.file_dialog = NULL; }
     romset_free(&state.romset);
     objview_shutdown();
+    m2lua_ui_shutdown();
     overlay_host_shutdown();   /* before game_render_shutdown: it owns sg images */
     av_capture_shutdown();
     post_shader_shutdown();
@@ -1575,6 +1782,12 @@ static void event(const sapp_event* ev) {
      * focus so arcade muscle-memory isn't eaten by a debug window. */
     if (ev->type == SAPP_EVENTTYPE_KEY_DOWN && !ev->key_repeat) input_key_down((int)ev->key_code);
     if (ev->type == SAPP_EVENTTYPE_KEY_UP)                      input_key_up((int)ev->key_code);
+    m2lua_ui_event(ev);
+    lightgun_ui_event(ev);
+#if M2HLE_PADS
+    if (ev->type == SAPP_EVENTTYPE_FOCUSED)   pads_focus(true);
+    if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) pads_focus(false);
+#endif
 
     if (ev->type != SAPP_EVENTTYPE_KEY_DOWN) return;
     switch (ev->key_code) {
@@ -1639,6 +1852,8 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             int r = game_region_parse(argv[++i]);   /* japan | usa | export */
             if (r < 0) LOG_WARN("--region %s: expected japan, usa or export; keeping usa", argv[i]);
             else       g_region = r;
+        } else if (strcmp(argv[i], "--region-over-saved") == 0) {
+            g_region_over_saved = 1;  /* the region wins over saved settings too, as on the web */
         } else if (strcmp(argv[i], "--export-roms") == 0 && i + 1 < argc) {
             strncpy(g_export_roms, argv[++i], sizeof(g_export_roms) - 1);
         } else if (strcmp(argv[i], "--no-nvram") == 0) {
@@ -1663,6 +1878,26 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             int r = enemy_rank_parse(d);
             if (r >= -1) g_enemy_rank = r;
             else LOG_WARN("--enemy-rank %s: expected cabinet, easy, normal, hard, hardest, extra1 or extra2", d);
+        } else if (i + 1 < argc && io5649_wheel_option(argv[i], argv[i + 1])) {
+            i++;                      /* a 315-5649 wheel's pot: centre, range, speed (io_5649.h) */
+        } else if (strcmp(argv[i], "--comm-master") == 0) {
+            g_comm_master = 1;
+        } else if (strcmp(argv[i], "--comm-slave") == 0 && i + 1 < argc) {
+            unsigned port = 0, token = 0;
+            if (sscanf(argv[++i], "%u:%u", &port, &token) == 2 && port && port <= 65535u) {
+                g_comm_port  = (uint16_t)port;
+                g_comm_token = token;
+            } else LOG_WARN("--comm-slave %s: expected PORT:TOKEN", argv[i]);
+        } else if (i + 1 < argc && lightgun_host_option(argv[i], argv[i + 1])) {
+            i++;                      /* a light gun's flash on the trigger (lightgun_host.h) */
+        } else if (strcmp(argv[i], "--no-pads") == 0) {
+            g_no_pads = 1;            /* no gamepads or wheels */
+#if M2HLE_PADS
+        } else if (i + 1 < argc && sdl_pads_option(argv[i], argv[i + 1])) {
+            /* --pad-map, --pad N, --wheel-axes, --wheel-buttons, --ffb-gain (sdl_pads.h) */
+            if (sdl_pads_option(argv[i], argv[i + 1]) < 0) LOG_WARN("%s %s: not understood", argv[i], argv[i + 1]);
+            i++;
+#endif
         } else if (strcmp(argv[i], "--run") == 0) {
             g_autorun = 1;
         } else if (strcmp(argv[i], "--load-state") == 0 && i + 1 < argc) {
@@ -1734,6 +1969,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             i++;                                /* taken above, before anything logged */
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+        } else if (strcmp(argv[i], "--scripts") == 0 && i + 1 < argc) {
+            snprintf(g_scripts_dir, sizeof g_scripts_dir, "%s", argv[++i]);  /* <set>.lua's folder */
+        } else if (strcmp(argv[i], "--no-scripts") == 0) {
+            g_no_scripts = 1;
         } else if (strcmp(argv[i], "--no-sound-board") == 0) {
             g_no_sound_board = 1;
         } else if (strcmp(argv[i], "--sound-hle") == 0) {
@@ -1744,8 +1983,17 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             g_gems_cop = true;      /* the COP commands in Gems' C */
         } else if (strcmp(argv[i], "--gems-verify") == 0) {
             g_gems_verify = true;   /* each trapped function both ways, differences logged */
+        } else if (strcmp(argv[i], "--ages-i960") == 0) {
+            g_ages_i960 = true;     /* FV's patched functions in Sega Ages' C (core/ages.h) */
+        } else if (strcmp(argv[i], "--ages-verify") == 0) {
+            g_ages_verify = true;   /* each patched function both ways, differences logged */
         } else if (strcmp(argv[i], "--texload-i960") == 0) {
             g_texload_hle = 0;   /* STF's texture loader on the i960, not in C (m2_texload.h) */
+        } else if (strcmp(argv[i], "--i960-timing") == 0 && i + 1 < argc) {
+            /* table (MAME's per-opcode costs) or board (i960_timing.h); the
+             * profile picks when it is not given */
+            const char *v = argv[++i];
+            g_i960_timing_force = !strcmp(v, "board") ? 1 : !strcmp(v, "table") ? 0 : -1;
         } else if (strcmp(argv[i], "--spin-i960") == 0) {
             g_spin_skip = 0;     /* idle loops on the i960, not skipped (m2_spin.h) */
         } else if (strcmp(argv[i], "--no-tray") == 0) {
@@ -1811,6 +2059,14 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             overlay_host_set_watch(true);
         } else if (strcmp(argv[i], "--crt") == 0) {
             g_shader_arg = POST_SHADER_CRT;
+        } else if (strcmp(argv[i], "--arcade") == 0) {
+            g_arcade_arg = 1;
+        } else if (strcmp(argv[i], "--no-arcade") == 0) {
+            g_arcade_arg = 0;
+        } else if (strcmp(argv[i], "--pixel-depth") == 0) {
+            g_pixdepth_arg = g_geo3d_pixel_depth = 1;
+        } else if (strcmp(argv[i], "--no-pixel-depth") == 0) {
+            g_pixdepth_arg = g_geo3d_pixel_depth = 0;
         } else if (strcmp(argv[i], "--no-shader") == 0) {
             g_shader_arg = POST_SHADER_OFF;
         } else if (strcmp(argv[i], "--shader") == 0 && i + 1 < argc) {
@@ -1875,7 +2131,9 @@ sapp_desc sokol_main(int argc, char* argv[]) {
             netplay_set_config_path(argv[++i]);
         } else if (strcmp(argv[i], "--macro") == 0 && i + 1 < argc) {
             /* One key that presses several buttons at once: --macro a=b1+b2,
-             * --macro kp1=p2:b1+b2+b3. Repeatable; see input_combo_parse. */
+             * --macro kp1=p2:b1+b2+b3. Repeatable; see input_combo_parse.
+             * Players 3 and 4 of a four-player cabinet have keys only this
+             * way: --macro t=p3:up, --macro kp8=p4:up. */
             char spec[64];
             snprintf(spec, sizeof spec, "%s", argv[++i]);
             char *eq = strchr(spec, '=');
@@ -1910,6 +2168,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     /* The record switch is the player's (replay.cfg); a headless run keeps
      * only what its command line says, as the graders boot blank. */
     if (!g_headless && !g_replay_cli_set) replay_settings_load();
+    scripts_setup();
     if (g_headless) exit(headless_main());
     /* Capture mode wants the game moving, not a first frame held on pause. */
     if (g_kiosk_on) g_autorun = 1;

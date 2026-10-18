@@ -140,6 +140,14 @@ static const comid_entry_t g_comid_registry[] = {
     { "DYNAMCOP",           "DYNCOP", NULL },
     { "TOPSKATR",           "TOPSKT", NULL },
 
+    /* Data East's shooter on the 2A (Pinboard #1063). */
+    { "AIRWLKRS",           "ARWLKR", NULL },
+    { "AIRWALKERS",         "ARWLKR", NULL },
+
+    /* Sega's linked sled racer on the 2B (Pinboard #1089). */
+    { "POWSLED",            "PWRSLD", NULL },
+    { "POWERSLED",          "PWRSLD", NULL },
+
     /* The homebrew that runs on this board layer. */
     { "M2SNAKE",            "M2SNAK", NULL },
 };

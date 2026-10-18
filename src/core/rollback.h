@@ -32,7 +32,11 @@
 
 #include "savestate.h"
 
-#define ROLLBACK_PARTS_MAX (32 + SAVESTATE_EXTRA_MAX)
+/* Every part rollback_layout can add: its fixed ones (16 is room to spare),
+ * the bus's buffers and every profile extra. A part past the end is dropped,
+ * and META is the last: a load then kept the newest save's sound budget and
+ * latches, and every rollback of Power Sled split (Pinboard #1095). */
+#define ROLLBACK_PARTS_MAX (16 + SAVESTATE_NBUFS + SAVESTATE_EXTRA_MAX)
 #define ROLLBACK_POOL_MAX  16
 
 /* pack: a part that holds host pointers zeroes them (in a copy) before it is
@@ -40,7 +44,7 @@
  * those pointers are the only thing pack changes, so a packed copy is a
  * portable one (rollback_save_portable); META's pack drops host clocks a
  * state has to keep. */
-typedef struct { const char *name; void *p; size_t n; void (*pack)(void *); bool ptrs; } rollback_part_t;
+typedef struct { const char *name; void *p; size_t n; void (*pack)(void *); bool ptrs; bool late; } rollback_part_t;
 
 static inline void rollback__pack_sharc(void *p) { ((sharc_state_t *)p)->sharc_dm_ext_w = 0; }
 static inline void rollback__pack_cop(void *p)   { ((cop_state_t *)p)->ctl_w = 0; }
@@ -71,7 +75,26 @@ static struct {
     void           *pool[ROLLBACK_POOL_MAX];
     int             pool_n;
     uint32_t        live;               /* buffers handed out and not yet back */
+    bool            diff;               /* copy only the chunks that differ (emu_twin.h) */
 } g_rollback;
+
+/* A part's copy. With diff set, 4 KB at a time and only where the bytes differ:
+ * the same bytes either way. Twin sessions copy four boards a frame, between
+ * two cabinets of one game and frames a few apart, and most of a board (the
+ * texture RAM, CG, the sound RAM, the programs) is the same in both; reading
+ * both sides costs less than writing one. */
+#define ROLLBACK_DIFF_CHUNK 4096u
+
+static inline void rollback__copy(void *dst, const void *src, size_t n) {
+    if (!g_rollback.diff) { memcpy(dst, src, n); return; }
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    while (n) {
+        size_t k = n < ROLLBACK_DIFF_CHUNK ? n : ROLLBACK_DIFF_CHUNK;
+        if (memcmp(d, s, k)) memcpy(d, s, k);
+        d += k; s += k; n -= k;
+    }
+}
 
 static inline void rollback__add(const char *name, void *p, size_t n, void (*pack)(void *), bool ptrs) {
     if (g_rollback.n >= ROLLBACK_PARTS_MAX) {
@@ -83,6 +106,11 @@ static inline void rollback__add(const char *name, void *p, size_t n, void (*pac
     g_rollback.part[g_rollback.n].n = n;
     g_rollback.part[g_rollback.n].pack = pack;
     g_rollback.part[g_rollback.n].ptrs = ptrs;
+    /* The sound board's parts, and META (it holds the sound board's latches),
+     * are copied once the sound thread's run is over; see rollback_save_to. */
+    g_rollback.part[g_rollback.n].late =
+        ((uint8_t *)p >= (uint8_t *)&g_sound && (uint8_t *)p < (uint8_t *)(&g_sound + 1)) ||
+        p == (void *)&g_shle || p == (void *)&g_rollback.meta;
     g_rollback.n++;
     g_rollback.size += n;
 }
@@ -101,7 +129,9 @@ static inline void rollback_layout(i960_cpu_t *cpu, memory_bus_t *bus) {
         rollback__add(SAVESTATE_BUFS[i].name, savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]), SAVESTATE_BUFS[i].size, NULL, false);
     rollback__add("GEO.snaps", g_geodl_snaps, sizeof g_geodl_snaps, NULL, false);
     rollback__add("GEO.live", &g_geo_live, sizeof g_geo_live, NULL, false);
+    rollback__add("GEO.held", &g_geo_held, sizeof g_geo_held, NULL, false);
     rollback__add("IRQT", &g_irqt, sizeof g_irqt, NULL, false);
+    rollback__add("EEPROM", &g_eeprom, sizeof g_eeprom, NULL, false);
     rollback__add("M68K", &g_sound.m68k.cpu, sizeof g_sound.m68k.cpu, NULL, false);
     rollback__add("SOUND.ram", g_sound.ram, sizeof g_sound.ram, NULL, false);
     rollback__add("M2SCSP", &g_sound.scsp, sizeof g_sound.scsp, rollback__pack_scsp, true);
@@ -134,15 +164,24 @@ static inline void rollback_drain(void) {
 /* The board into `buf`, g_rollback.size bytes the caller owns (libretro's
  * rewind buffer, Pinboard #585). */
 static inline void rollback_save_to(void *dst, const savestate_emu_t *emu) {
-    sound_settle();
     uint8_t *buf = (uint8_t *)dst;
+    size_t off = 0;
+    /* Everything but the sound board first, while the sound thread may still
+     * be running the frame just handed to it: it writes nothing else. A save
+     * that waited first lost the whole overlap with the sound thread whenever
+     * one followed every frame, as RetroArch's rewind does (Pinboard #594). */
+    for (int i = 0; i < g_rollback.n; i++) {
+        if (!g_rollback.part[i].late) rollback__copy(buf + off, g_rollback.part[i].p, g_rollback.part[i].n);
+        off += g_rollback.part[i].n;
+    }
+    sound_settle();
     g_rollback.meta.geo = savestate_geo_get();
     g_rollback.meta.snd = savestate_sound_get();
     g_rollback.meta.hle = savestate_hle_get();
     g_rollback.meta.emu = *emu;
-    size_t off = 0;
+    off = 0;
     for (int i = 0; i < g_rollback.n; i++) {
-        memcpy(buf + off, g_rollback.part[i].p, g_rollback.part[i].n);
+        if (g_rollback.part[i].late) rollback__copy(buf + off, g_rollback.part[i].p, g_rollback.part[i].n);
         off += g_rollback.part[i].n;
     }
 }
@@ -160,7 +199,7 @@ static inline void rollback_load(const void *data, memory_bus_t *bus, savestate_
     const uint8_t *buf = (const uint8_t *)data;
     size_t off = 0;
     for (int i = 0; i < g_rollback.n; i++) {
-        memcpy(g_rollback.part[i].p, buf + off, g_rollback.part[i].n);
+        rollback__copy(g_rollback.part[i].p, buf + off, g_rollback.part[i].n);
         off += g_rollback.part[i].n;
     }
     savestate_geo_put(&g_rollback.meta.geo);
@@ -215,25 +254,50 @@ static inline void rollback__flat_head(rollback_flat_head_t *h, const savestate_
     h->size    = g_rollback.size;
 }
 
-/* Packs the pointer parts of a flat state in place. The buffer is the
- * caller's and need not be aligned, so each goes through an aligned copy. */
+/* A word of a flat state, at `field`'s offset in the live struct `base`. The
+ * buffer is the caller's and need not be aligned. */
+static inline void rollback__put64(uint8_t *dst, const void *base, const void *field, uint64_t v) {
+    memcpy(dst + ((const uint8_t *)field - (const uint8_t *)base), &v, sizeof v);
+}
+
+/* The pointer parts' pack, straight into a flat state's copy of the part:
+ * the ids are worked out from the live struct the copy was just taken from.
+ * Packing an aligned copy and copying it back moved 0.45 MB a frame for the
+ * few hundred bytes that change (Pinboard #594). */
+static inline void rollback__flat_pack_part(uint8_t *dst, const rollback_part_t *r) {
+    if (r->p == (void *)&g_sharc) {
+        rollback__put64(dst, &g_sharc, &g_sharc.sharc_dm_ext_w, 0);
+    } else if (r->p == (void *)&g_cop) {
+        rollback__put64(dst, &g_cop, &g_cop.ctl_w, 0);
+    } else if (r->p == (void *)&g_sound.scsp) {
+        const scsp_t *s = &g_sound.scsp;
+        for (int i = 0; i < 32; i++) {
+            const scsp_lfo_t *l[2] = { &s->slot[i].plfo, &s->slot[i].alfo };
+            for (int k = 0; k < 2; k++) {
+                rollback__put64(dst, s, &l[k]->table_w, savestate_lfo_table_id(l[k]->table));
+                rollback__put64(dst, s, &l[k]->scale_w, savestate_lfo_scale_id(l[k]->scale));
+            }
+        }
+        rollback__put64(dst, s, &s->clock_w, 0);
+        rollback__put64(dst, s, &s->ram_w, 0);
+        rollback__put64(dst, s, &s->sink_w, 0);
+        rollback__put64(dst, s, &s->sink_ud_w, 0);
+    } else {                            /* a part named nowhere above: through a copy */
+        void *tmp = malloc(r->n);
+        if (!tmp) return;
+        memcpy(tmp, dst, r->n);
+        r->pack(tmp);
+        memcpy(dst, tmp, r->n);
+        free(tmp);
+    }
+}
+
+/* Packs the pointer parts of a flat state rollback_save_to has just written. */
 static inline void rollback__flat_pack(uint8_t *buf) {
-    static void *tmp;
-    static size_t tmp_n;
     size_t off = 0;
     for (int i = 0; i < g_rollback.n; i++) {
         const rollback_part_t *r = &g_rollback.part[i];
-        if (r->ptrs && r->pack) {
-            if (tmp_n < r->n) {
-                free(tmp);
-                tmp = malloc(r->n);
-                tmp_n = tmp ? r->n : 0;
-            }
-            if (!tmp) return;
-            memcpy(tmp, buf + off, r->n);
-            r->pack(tmp);
-            memcpy(buf + off, tmp, r->n);
-        }
+        if (r->ptrs && r->pack) rollback__flat_pack_part(buf + off, r);
         off += r->n;
     }
 }

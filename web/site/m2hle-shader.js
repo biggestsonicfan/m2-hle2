@@ -1,7 +1,9 @@
 /*
  * m2hle-shader.js -- the Picture tab: a filter over the game's 4:3 picture
- * (src/ui/post_shader.h). Either the built-in CRT (Lost Judgment's, as YAMP
- * ports it) or a libretro GLSL shader the player supplies.
+ * (src/ui/post_shader.h). First the Arcade, a switch: a real board's picture
+ * (its tone, ghosting, noise and 4:3 shape). Then the filter over it: none, the
+ * built-in CRT (Lost Judgment's, as YAMP ports it) or a libretro GLSL shader the
+ * player supplies.
  *
  * The emulator has no file system, so a custom shader arrives as files: the
  * player picks a preset with its shaders and textures (or a whole folder), this
@@ -11,16 +13,63 @@
  * because a preset's textures are too big for localStorage -- so the shader is
  * back on the next visit without the whole folder being stored.
  *
- * Stored, per browser: the filter (localStorage m2hle.shaderMode), the custom
+ * Beside them, Depth per pixel (geo3d.h): not the board's one sort key a polygon.
+ *
+ * Stored, per browser: the Arcade (localStorage m2hle.arcade, 0 or 1), Depth per
+ * pixel (m2hle.pixelDepth, 0 or 1), the
+ * filter (m2hle.shaderMode; an old 3 was the CRT with the Arcade), the custom
  * shader's files (IndexedDB m2hle-shader), its parameter values
  * (localStorage m2hle.shaderParams, by preset name).
  */
 'use strict';
 
+/* The words (m2hle-lang.js). What the emulator says about a shader that will not
+ * load (web_shader_error) stays as it says it. */
+m2hleLang.add({
+  en: {
+    'shader.custom.on': 'Your shader: {name}',
+    'shader.custom.off': 'Your shader (load one below)',
+    'shader.loading': 'Loading {file}…',
+    'shader.unreadable': 'Could not read the files: {error}',
+    'shader.on': '{name} is on.',
+    'shader.unkept': '{name} is on, but this browser would not keep it for next time ({error}).',
+    'shader.slang': 'Those are slang shaders (.slangp), which need a compiler a browser does not have. '
+                    + 'Pick the GLSL version (.glslp or .glsl) from libretro\'s glsl-shaders.',
+    'shader.none': 'No .glslp or .glsl file in what you picked.',
+    'shader.choose': 'Choose one of {n} shaders…',
+    'shader.pick': 'Pick which shader to use.',
+    'shader.forgotten': 'Forgotten.',
+    'shader.restore.bad': 'Your saved shader did not load: {error}',
+    'shader.restore.ok': '{name} is loaded.',
+  },
+  ja: {
+    'shader.custom.on': 'カスタムシェーダー：{name}',
+    'shader.custom.off': 'カスタムシェーダー（下で読み込み）',
+    'shader.loading': '{file} を読み込み中…',
+    'shader.unreadable': 'ファイルを読み込めませんでした：{error}',
+    'shader.on': '{name} を適用しました。',
+    'shader.unkept': '{name} を適用しましたが、このブラウザでは次回のために保存できませんでした（{error}）。',
+    'shader.slang': 'これは slang シェーダー（.slangp）で、ブラウザにはないコンパイラーが必要です。'
+                    + 'libretro の glsl-shaders から GLSL 版（.glslp または .glsl）を選んでください。',
+    'shader.none': '選んだファイルに .glslp も .glsl もありません。',
+    'shader.choose': '{n} 個のシェーダーから選んでください…',
+    'shader.pick': '使うシェーダーを選んでください。',
+    'shader.forgotten': '削除しました。',
+    'shader.restore.bad': '保存したシェーダーを読み込めませんでした：{error}',
+    'shader.restore.ok': '{name} を読み込みました。',
+  },
+});
+
 const m2hleShader = (() => {
   const $ = (id) => document.getElementById(id);
   const MODE_OFF = 0, MODE_CRT = 1, MODE_CUSTOM = 2;
-  const KEY_MODE = 'm2hle.shaderMode', KEY_PARAMS = 'm2hle.shaderParams';
+  const MODE_OLD_ARCADE = 3;
+  const KEY_MODE = 'm2hle.shaderMode', KEY_PARAMS = 'm2hle.shaderParams', KEY_ARCADE = 'm2hle.arcade';
+  /* Depth per pixel is kept per game (issue #421): it was made for Sonic the
+   * Fighters' Tornado (Pinboard #668), and one key for the whole site carried it
+   * into The House of the Dead, where it cuts Sophie open on the mansion doors. */
+  const KEY_PIXDEPTH_OLD = 'm2hle.pixelDepth';
+  const KEY_PIXDEPTH = 'm2hle.pixelDepth.' + m2hleGame.id;
   const DB_NAME = 'm2hle-shader', DB_STORE = 'preset', DB_KEY = 'current';
   const TEXT = /\.(glslp|glsl|inc|h)$/i;
   const IMAGE = /\.(png|jpe?g|bmp|tga)$/i;
@@ -37,6 +86,7 @@ const m2hleShader = (() => {
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } },
+    remove(k) { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } },
   };
 
   function withString(s, fn) {
@@ -108,10 +158,22 @@ const m2hleShader = (() => {
     $('shader-params-box').hidden = !(mode === MODE_CUSTOM && $('shader-params').childElementCount > 0);
   }
 
+  function setArcade(on, remember = true) {
+    Module._web_shader_set_arcade(on ? 1 : 0);
+    $('shader-arcade').checked = on;
+    if (remember) store.set(KEY_ARCADE, on ? '1' : '0');
+  }
+
+  function setPixelDepth(on, remember = true) {
+    Module._web_set_pixel_depth(on ? 1 : 0);
+    $('shader-pixdepth').checked = on;
+    if (remember) store.set(KEY_PIXDEPTH, on ? '1' : '0');
+  }
+
   function refreshCustom() {
     const opt = $('shader-mode-custom');
     opt.disabled = !loadedName;
-    opt.textContent = loadedName ? 'Your shader: ' + loadedName : 'Your shader (load one below)';
+    opt.textContent = loadedName ? m2hleLang.t('shader.custom.on', { name: loadedName }) : m2hleLang.t('shader.custom.off');
     $('shader-forget').hidden = !loadedName;
   }
 
@@ -242,24 +304,24 @@ const m2hleShader = (() => {
 
   async function usePreset(presetPath) {
     if (!presetPath) return;
-    status('Loading ' + base(presetPath) + '…');
+    status(m2hleLang.t('shader.loading', { file: base(presetPath) }));
     let files;
     try {
       files = await filesFor(presetPath);
     } catch (e) {
-      status('Could not read the files: ' + e.message, 'bad');
+      status(m2hleLang.t('shader.unreadable', { error: e.message }), 'bad');
       return;
     }
     if (!loadInto(presetPath, files)) return;
     setMode(MODE_CUSTOM);
-    status(loadedName + ' is on.', 'good');
+    status(m2hleLang.t('shader.on', { name: loadedName }), 'good');
     /* Keep what it read, and nothing else the pick carried. */
     const used = new Set(Module.UTF8ToString(Module._web_shader_used()).split('\n').filter(Boolean));
     const keep = files.filter((f) => used.has(f.path.replace(/\\/g, '/')) || used.has(normalize(f.path)));
     try {
       await idbPut({ preset: presetPath, name: loadedName, files: keep });
     } catch (e) {
-      status(loadedName + ' is on, but this browser would not keep it for next time (' + e.message + ').', 'warn');
+      status(m2hleLang.t('shader.unkept', { name: loadedName, error: e.message }), 'warn');
     }
   }
 
@@ -288,9 +350,7 @@ const m2hleShader = (() => {
     sel.textContent = '';
     if (!presets.length) {
       sel.hidden = true;
-      status(slang ? 'Those are slang shaders (.slangp), which need a compiler a browser does not have. '
-                     + 'Pick the GLSL version (.glslp or .glsl) from libretro\'s glsl-shaders.'
-                   : 'No .glslp or .glsl file in what you picked.', 'bad');
+      status(m2hleLang.t(slang ? 'shader.slang' : 'shader.none'), 'bad');
       return;
     }
     /* One preset, or one .glsl and nothing else to choose between: use it. */
@@ -302,7 +362,7 @@ const m2hleShader = (() => {
     }
     const hint = document.createElement('option');
     hint.value = '';
-    hint.textContent = 'Choose one of ' + presets.length + ' shaders…';
+    hint.textContent = m2hleLang.t('shader.choose', { n: presets.length });
     sel.appendChild(hint);
     for (const f of presets) {
       const o = document.createElement('option');
@@ -312,7 +372,7 @@ const m2hleShader = (() => {
     }
     sel.hidden = false;
     sel.focus();
-    status('Pick which shader to use.');
+    status(m2hleLang.t('shader.pick'));
   }
 
   async function forget() {
@@ -323,18 +383,33 @@ const m2hleShader = (() => {
     buildParams();
     if (Number($('shader-mode').value) === MODE_CUSTOM) setMode(MODE_OFF);
     try { await idbDelete(); } catch (e) { /* nothing kept */ }
-    status('Forgotten.');
+    status(m2hleLang.t('shader.forgotten'));
   }
 
-  /* On the next visit: the kept shader, then the filter that was on. */
+  /* On the next visit: the kept shader, then the Arcade and the filter that were on. */
   async function restore() {
-    const mode = Number(store.get(KEY_MODE)) || MODE_OFF;
+    let mode = Number(store.get(KEY_MODE)) || MODE_OFF;
+    let arcade = store.get(KEY_ARCADE) === '1';
+    if (mode === MODE_OLD_ARCADE) {
+      mode = MODE_CRT;
+      arcade = true;
+      store.set(KEY_MODE, String(mode));
+      store.set(KEY_ARCADE, '1');
+    }
     let rec = null;
     try { rec = await idbGet(); } catch (e) { /* no IndexedDB here */ }
     if (rec && rec.preset && Array.isArray(rec.files)) {
-      if (!loadInto(rec.preset, rec.files)) status('Your saved shader did not load: ' + $('shader-status').textContent, 'bad');
-      else status(loadedName + ' is loaded.');
+      if (!loadInto(rec.preset, rec.files)) status(m2hleLang.t('shader.restore.bad', { error: $('shader-status').textContent }), 'bad');
+      else status(m2hleLang.t('shader.restore.ok', { name: loadedName }));
     }
+    /* The site-wide key from before goes to Sonic the Fighters, the game it was for. */
+    const old = store.get(KEY_PIXDEPTH_OLD);
+    if (old !== null) {
+      if (store.get('m2hle.pixelDepth.sfight') === null) store.set('m2hle.pixelDepth.sfight', old);
+      store.remove(KEY_PIXDEPTH_OLD);
+    }
+    setArcade(arcade, false);
+    setPixelDepth(store.get(KEY_PIXDEPTH) === '1', false);
     setMode(mode === MODE_CUSTOM && !loadedName ? MODE_OFF : mode, false);
   }
 
@@ -342,6 +417,8 @@ const m2hleShader = (() => {
 
   function init() {
     $('shader-mode').addEventListener('change', (e) => setMode(Number(e.target.value)));
+    $('shader-arcade').addEventListener('change', (e) => { if (ready) setArcade(e.target.checked); });
+    $('shader-pixdepth').addEventListener('change', (e) => { if (ready) setPixelDepth(e.target.checked); });
     $('shader-files').addEventListener('click', () => $('shader-file-input').click());
     $('shader-folder').addEventListener('click', () => $('shader-folder-input').click());
     for (const id of ['shader-file-input', 'shader-folder-input']) {
@@ -367,5 +444,14 @@ const m2hleShader = (() => {
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { onReady, setMode };
+  /* One line for a bug report (m2hle-tools.js systemInfo): what is drawn over the
+   * board's own picture. Depth per pixel is not the board, so a report says so. */
+  function summary() {
+    const mode = Number($('shader-mode').value);
+    const filter = mode === MODE_CRT ? 'CRT' : mode === MODE_CUSTOM ? 'custom (' + loadedName + ')' : 'none';
+    return 'filter ' + filter + ', Arcade ' + ($('shader-arcade').checked ? 'on' : 'off') +
+      ', depth per pixel ' + ($('shader-pixdepth').checked ? 'ON (not the board)' : 'off');
+  }
+
+  return { onReady, setMode, setArcade, setPixelDepth, summary };
 })();

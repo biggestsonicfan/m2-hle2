@@ -4,7 +4,7 @@
  * The layout follows m2emulator's .sta: a zip with one entry per part of the
  * board, each the part's own bytes. Its names are kept where the part is the
  * same (I960, SHARC, M2RAM, M2RAM2, M2BUFRAM, M2TILE, M2CG, M2PAL, M2XLAT,
- * M2LUMA, M2BACK, M2FB, M2TEX0, M2TEX1, M2COPRORAM), so `unzip -l` on either
+ * M2LUMA, M2BACK, M2TEX0, M2TEX1, M2COPRORAM), so `unzip -l` on either
  * reads the same way and a part can be pulled out and diffed on its own. What
  * m2emulator keeps in its own structures and this emulator keeps elsewhere
  * gets an entry of its own: the 68000 and the SCSP, the COP's FIFO and the
@@ -120,10 +120,8 @@ static const savestate_buf_t SAVESTATE_BUFS[] = {
     SS_BUF("M2SERIAL",     serial),
     SS_BUF("M2UNKVID",     unknown_vid),
     SS_BUF("M2IAC",        iac),
-    SS_HEAP("M2VIDEXT",    vid_ext_ram, VID_EXT_RAM_SIZE),
     SS_HEAP("M2TEX0",      texram0,     TEXRAM0_SIZE),
     SS_HEAP("M2TEX1",      texram1,     TEXRAM1_SIZE),
-    SS_HEAP("M2FB",        framebuffer, FRAMEBUFFER_SIZE),
 };
 #define SAVESTATE_NBUFS (sizeof SAVESTATE_BUFS / sizeof SAVESTATE_BUFS[0])
 
@@ -138,7 +136,7 @@ static inline uint8_t *savestate_buf_ptr(memory_bus_t *bus, const savestate_buf_
 /* The struct sizes a state was written with. */
 typedef struct {
     uint32_t version;
-    uint32_t cpu, cop, sharc, zanzou, irqt, m68k, scsp, uart, shle, geo_live, snaps;
+    uint32_t cpu, cop, sharc, zanzou, irqt, m68k, scsp, uart, shle, geo_live, snaps, eeprom;
 } savestate_layout_t;
 
 static inline savestate_layout_t savestate_layout(void) {
@@ -156,6 +154,7 @@ static inline savestate_layout_t savestate_layout(void) {
     l.shle     = (uint32_t)sizeof g_shle;
     l.geo_live = (uint32_t)sizeof g_geo_live;
     l.snaps    = (uint32_t)sizeof g_geodl_snaps;
+    l.eeprom   = (uint32_t)sizeof g_eeprom;
     return l;
 }
 
@@ -413,75 +412,69 @@ static inline bool savestate__add(mz_zip_archive *z, mz_uint level, const char *
     return mz_zip_writer_add_mem_ex_v2(z, name, p, n, NULL, 0, level, 0, 0, &t, NULL, 0, NULL, 0) != 0;
 }
 
-/* Every entry, into an archive the caller has started. */
-static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i960_cpu_t *cpu,
-                                      memory_bus_t *bus, const savestate_emu_t *emu) {
-    bool ok = true;
-
+/* INFO, LAYOUT and ROM: whose board this is. */
+static inline bool savestate__add_ids(mz_zip_archive *zp, mz_uint level, memory_bus_t *bus, uint64_t frame) {
     char info[512];
-    savestate_info_text(info, sizeof info, emu->frame_clock_frame);
+    savestate_info_text(info, sizeof info, frame);
     savestate_layout_t layout = savestate_layout();
     savestate_rom_t rom = savestate_rom_id(bus);
-    ok = ok && savestate__add(zp, level, "INFO",   info, strlen(info));
-    ok = ok && savestate__add(zp, level, "LAYOUT", &layout, sizeof layout);
-    ok = ok && savestate__add(zp, level, "ROM",    &rom, sizeof rom);
+    return savestate__add(zp, level, "INFO",   info, strlen(info))
+        && savestate__add(zp, level, "LAYOUT", &layout, sizeof layout)
+        && savestate__add(zp, level, "ROM",    &rom, sizeof rom);
+}
 
-    /* the processors */
-    ok = ok && savestate__add(zp, level, "I960",  cpu, sizeof *cpu);
-    /* Host pointers are written as 0 (a load keeps the live ones), so the
-     * same board makes the same file in any process. */
+/* The SHARC and the COP. Host pointers are written as 0 (a load keeps the
+ * live ones), so the same board makes the same file in any process. */
+static inline bool savestate__add_cop(mz_zip_archive *zp, mz_uint level) {
+    sharc_state_t *sh = (sharc_state_t *)malloc(sizeof *sh);
+    cop_state_t   *co = (cop_state_t *)malloc(sizeof *co);
+    bool ok = sh && co;
     if (ok) {
-        sharc_state_t *sh = (sharc_state_t *)malloc(sizeof *sh);
-        cop_state_t   *co = (cop_state_t *)malloc(sizeof *co);
-        if (!sh || !co) ok = false;
-        else {
-            memcpy(sh, &g_sharc, sizeof *sh);
-            sh->sharc_dm_ext_w = 0;
-            memcpy(co, &g_cop, sizeof *co);
-            co->ctl_w = 0;
-            ok = savestate__add(zp, level, "SHARC", sh, sizeof *sh) && savestate__add(zp, level, "COP", co, sizeof *co);
-        }
-        free(sh); free(co);
+        memcpy(sh, &g_sharc, sizeof *sh);
+        sh->sharc_dm_ext_w = 0;
+        memcpy(co, &g_cop, sizeof *co);
+        co->ctl_w = 0;
+        ok = savestate__add(zp, level, "SHARC", sh, sizeof *sh) && savestate__add(zp, level, "COP", co, sizeof *co);
     }
-    ok = ok && savestate__add(zp, level, "ZANZOU", &g_zz, sizeof g_zz);
+    free(sh); free(co);
+    return ok;
+}
 
-    /* the bus */
+/* The sound board, with the chip's pointers made into numbers. */
+static inline bool savestate__add_sound(mz_zip_archive *zp, mz_uint level) {
+    savestate_sound_t snd = savestate_sound_get();
+    scsp_t *scsp = (scsp_t *)malloc(sizeof *scsp);
+    if (!scsp) return false;
+    memcpy(scsp, &g_sound.scsp, sizeof *scsp);
+    savestate_scsp_pack(scsp);
+    bool ok = savestate__add(zp, level, "M68K",     &g_sound.m68k.cpu, sizeof g_sound.m68k.cpu)
+           && savestate__add(zp, level, "M2SNDRAM", g_sound.ram, sizeof g_sound.ram)
+           && savestate__add(zp, level, "M2SCSP",   scsp, sizeof *scsp)
+           && savestate__add(zp, level, "SOUND",    &snd, sizeof snd)
+           && savestate__add(zp, level, "SOUNDHLE", &g_shle, sizeof g_shle);
+    free(scsp);
+    return ok;
+}
+
+/* The bus buffers, then the GEO and the interrupts and timers. */
+static inline bool savestate__add_board(mz_zip_archive *zp, mz_uint level, memory_bus_t *bus) {
+    bool ok = true;
     for (size_t i = 0; ok && i < SAVESTATE_NBUFS; i++)
         ok = savestate__add(zp, level, SAVESTATE_BUFS[i].name, savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]),
                             SAVESTATE_BUFS[i].size);
-
-    /* the GEO */
     savestate_geo_t geo = savestate_geo_get();
-    ok = ok && savestate__add(zp, level, "GEO",      &geo, sizeof geo);
-    ok = ok && savestate__add(zp, level, "GEOLIST",  g_geodl_snaps, sizeof g_geodl_snaps);
-    ok = ok && savestate__add(zp, level, "GEOSTATE", &g_geo_live, sizeof g_geo_live);
+    return ok
+        && savestate__add(zp, level, "GEO",      &geo, sizeof geo)
+        && savestate__add(zp, level, "GEOLIST",  g_geodl_snaps, sizeof g_geodl_snaps)
+        && savestate__add(zp, level, "GEOSTATE", &g_geo_live, sizeof g_geo_live)
+        && savestate__add(zp, level, "GEOHELD",  &g_geo_held, sizeof g_geo_held)
+        && savestate__add(zp, level, "IRQT",     &g_irqt, sizeof g_irqt)
+        && savestate__add(zp, level, "EEPROM",   &g_eeprom, sizeof g_eeprom);
+}
 
-    /* interrupts and timers */
-    ok = ok && savestate__add(zp, level, "IRQT", &g_irqt, sizeof g_irqt);
-
-    /* the sound board */
-    if (ok) {
-        savestate_sound_t snd = savestate_sound_get();
-        scsp_t *scsp = (scsp_t *)malloc(sizeof *scsp);
-        if (!scsp) ok = false;
-        else {
-            memcpy(scsp, &g_sound.scsp, sizeof *scsp);
-            savestate_scsp_pack(scsp);
-            ok = savestate__add(zp, level, "M68K",     &g_sound.m68k.cpu, sizeof g_sound.m68k.cpu)
-              && savestate__add(zp, level, "M2SNDRAM", g_sound.ram, sizeof g_sound.ram)
-              && savestate__add(zp, level, "M2SCSP",   scsp, sizeof *scsp)
-              && savestate__add(zp, level, "SOUND",    &snd, sizeof snd)
-              && savestate__add(zp, level, "SOUNDHLE", &g_shle, sizeof g_shle);
-            free(scsp);
-        }
-    }
-
-    /* the run loop and the HLE layer */
-    savestate_hle_t hle = savestate_hle_get();
-    ok = ok && savestate__add(zp, level, "EMU", emu, sizeof *emu);
-    ok = ok && savestate__add(zp, level, "HLE", &hle, sizeof hle);
-
-    /* the profile's own */
+/* The profile's own entries (savestate_reg.h). */
+static inline bool savestate__add_extra(mz_zip_archive *zp, mz_uint level) {
+    bool ok = true;
     for (int i = 0; ok && i < g_savestate_extra_n; i++) {
         if (!savestate_extra_mine(i)) continue;
         char name[64];
@@ -489,6 +482,21 @@ static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i
         ok = savestate__add(zp, level, name, g_savestate_extra[i].data, g_savestate_extra[i].size);
     }
     return ok;
+}
+
+/* Every entry, into an archive the caller has started, in this order. */
+static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i960_cpu_t *cpu,
+                                      memory_bus_t *bus, const savestate_emu_t *emu) {
+    savestate_hle_t hle = savestate_hle_get();
+    return savestate__add_ids(zp, level, bus, emu->frame_clock_frame)
+        && savestate__add(zp, level, "I960", cpu, sizeof *cpu)
+        && savestate__add_cop(zp, level)
+        && savestate__add(zp, level, "ZANZOU", &g_zz, sizeof g_zz)
+        && savestate__add_board(zp, level, bus)
+        && savestate__add_sound(zp, level)
+        && savestate__add(zp, level, "EMU", emu, sizeof *emu)
+        && savestate__add(zp, level, "HLE", &hle, sizeof hle)
+        && savestate__add_extra(zp, level);
 }
 
 /* Write the board to `path`. Call between slices, with the emu mutex held
@@ -591,148 +599,177 @@ static inline bool savestate__get(mz_zip_archive *z, const char *name, void *dst
     return mz_zip_reader_extract_to_mem(z, (mz_uint)i, dst, n, 0) != 0;
 }
 
+/* The entries that say whose board this is: the profile, the struct layout
+ * and the ROMs. NULL if they are this one's, else why not. */
+static inline const char *savestate__check(mz_zip_archive *zp, memory_bus_t *bus) {
+    char info[512];
+    memset(info, 0, sizeof info);
+    int i = mz_zip_reader_locate_file(zp, "INFO", NULL, 0);
+    size_t n = 0;
+    void *p = i >= 0 ? mz_zip_reader_extract_to_heap(zp, (mz_uint)i, &n, 0) : NULL;
+    if (!p) return "no INFO entry: not an m2hle2 state";
+    memcpy(info, p, n < sizeof info - 1 ? n : sizeof info - 1);
+    mz_free(p);
+
+    char want_id[96];
+    snprintf(want_id, sizeof want_id, "\nprofile=%s\n", g_active_profile->id);
+    if (!strstr(info, want_id)) return "the state is from another profile";
+
+    savestate_layout_t layout, want = savestate_layout();
+    if (!savestate__get(zp, "LAYOUT", &layout, sizeof layout)) return "no LAYOUT entry";
+    if (layout.version != SAVESTATE_VERSION) return "the state is from another savestate version";
+    if (memcmp(&layout, &want, sizeof layout) != 0) return "the state is from a build with another layout";
+
+    savestate_rom_t rom, have = savestate_rom_id(bus);
+    if (!savestate__get(zp, "ROM", &rom, sizeof rom)) return "no ROM entry";
+    if (rom.program != have.program || rom.program_size != have.program_size)
+        return "the state is from another program ROM";
+    if (rom.data != have.data) return "the state's data ROM differs from the one loaded";
+    if (rom.sound_loaded != have.sound_loaded || rom.sound_rom != have.sound_rom)
+        return "the state's sound board differs from this one";
+    return NULL;
+}
+
+/* A loaded board in scratch: a state that fails halfway must leave the
+ * running board as it was. The large parts are on the heap. */
+typedef struct {
+    i960_cpu_t        *cpu;
+    sharc_state_t     *sharc;
+    cop_state_t       *cop;
+    zanzou_stream_t    zz;
+    irq_timer_t        irqt;
+    eeprom_t           eeprom;
+    savestate_geo_t    geo;
+    void              *snaps;
+    geo_raster_state_t *glive;
+    uint8_t            held[sizeof g_geo_held];
+    bool               have_held;          /* GEOHELD: a state from before it has none */
+    uint8_t           *bufs[SAVESTATE_NBUFS];
+    m68k_cpu_t         m68k;
+    uint8_t           *sram;
+    scsp_t            *scsp;
+    savestate_sound_t  snd;
+    shle_t             shle;
+    savestate_emu_t    emu;
+    savestate_hle_t    hle;
+    uint8_t           *extra[SAVESTATE_EXTRA_MAX];
+} savestate_scratch_t;
+
+static inline bool savestate__scratch_alloc(savestate_scratch_t *n) {
+    n->cpu   = (i960_cpu_t *)malloc(sizeof *n->cpu);
+    n->sharc = (sharc_state_t *)malloc(sizeof *n->sharc);
+    n->cop   = (cop_state_t *)malloc(sizeof *n->cop);
+    n->snaps = malloc(sizeof g_geodl_snaps);
+    n->glive = (geo_raster_state_t *)malloc(sizeof *n->glive);
+    n->sram  = (uint8_t *)malloc(sizeof g_sound.ram);
+    n->scsp  = (scsp_t *)malloc(sizeof *n->scsp);
+    if (!n->cpu || !n->sharc || !n->cop || !n->snaps || !n->glive || !n->sram || !n->scsp) return false;
+    for (size_t i = 0; i < SAVESTATE_NBUFS; i++)
+        if (!(n->bufs[i] = (uint8_t *)malloc(SAVESTATE_BUFS[i].size))) return false;
+    for (int i = 0; i < g_savestate_extra_n; i++)
+        if (savestate_extra_mine(i) && !(n->extra[i] = (uint8_t *)malloc(g_savestate_extra[i].size))) return false;
+    return true;
+}
+
+static inline void savestate__scratch_free(savestate_scratch_t *n) {
+    free(n->cpu); free(n->sharc); free(n->cop); free(n->snaps); free(n->glive); free(n->sram); free(n->scsp);
+    for (size_t i = 0; i < SAVESTATE_NBUFS; i++) free(n->bufs[i]);
+    for (int i = 0; i < SAVESTATE_EXTRA_MAX; i++) free(n->extra[i]);
+}
+
+/* Every board entry into scratch; false if one is missing or the wrong size. */
+static inline bool savestate__scratch_read(mz_zip_archive *zp, savestate_scratch_t *n) {
+    const struct { const char *name; void *dst; size_t size; } e[] = {
+        { "I960",     n->cpu,   sizeof *n->cpu },
+        { "SHARC",    n->sharc, sizeof *n->sharc },
+        { "COP",      n->cop,   sizeof *n->cop },
+        { "ZANZOU",   &n->zz,   sizeof n->zz },
+        { "IRQT",     &n->irqt, sizeof n->irqt },
+        { "EEPROM",   &n->eeprom, sizeof n->eeprom },
+        { "GEO",      &n->geo,  sizeof n->geo },
+        { "GEOLIST",  n->snaps, sizeof g_geodl_snaps },
+        { "GEOSTATE", n->glive, sizeof *n->glive },
+        { "M68K",     &n->m68k, sizeof n->m68k },
+        { "M2SNDRAM", n->sram,  sizeof g_sound.ram },
+        { "M2SCSP",   n->scsp,  sizeof *n->scsp },
+        { "SOUND",    &n->snd,  sizeof n->snd },
+        { "SOUNDHLE", &n->shle, sizeof n->shle },
+        { "EMU",      &n->emu,  sizeof n->emu },
+        { "HLE",      &n->hle,  sizeof n->hle },
+    };
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof e / sizeof e[0]; i++)
+        ok = savestate__get(zp, e[i].name, e[i].dst, e[i].size);
+    for (size_t i = 0; ok && i < SAVESTATE_NBUFS; i++)
+        ok = savestate__get(zp, SAVESTATE_BUFS[i].name, n->bufs[i], SAVESTATE_BUFS[i].size);
+    n->have_held = ok && mz_zip_reader_locate_file(zp, "GEOHELD", NULL, 0) >= 0
+                && savestate__get(zp, "GEOHELD", n->held, sizeof n->held);
+    for (int i = 0; ok && i < g_savestate_extra_n; i++) {
+        if (!savestate_extra_mine(i)) continue;
+        char name[64];
+        snprintf(name, sizeof name, "P.%s", g_savestate_extra[i].name);
+        ok = savestate__get(zp, name, n->extra[i], g_savestate_extra[i].size);
+    }
+    return ok;
+}
+
+/* Scratch onto the board, keeping the live host pointers. Nothing here can fail. */
+static inline void savestate__scratch_commit(const savestate_scratch_t *n, i960_cpu_t *cpu, memory_bus_t *bus) {
+    *cpu = *n->cpu;
+
+    uint64_t dm_ext = g_sharc.sharc_dm_ext_w;
+    uint32_t dm_ext_size = g_sharc.sharc_dm_ext_size;
+    g_sharc = *n->sharc;
+    g_sharc.sharc_dm_ext_w    = dm_ext;
+    g_sharc.sharc_dm_ext_size = dm_ext_size;
+
+    uint64_t ctl = g_cop.ctl_w;
+    memcpy(&g_cop, n->cop, sizeof g_cop);
+    g_cop.ctl_w = ctl;
+    g_zz   = n->zz;
+    g_irqt = n->irqt;
+    g_eeprom = n->eeprom;
+
+    for (size_t i = 0; i < SAVESTATE_NBUFS; i++)
+        memcpy(savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]), n->bufs[i], SAVESTATE_BUFS[i].size);
+
+    memcpy(g_geodl_snaps, n->snaps, sizeof g_geodl_snaps);
+    memcpy(&g_geo_live, n->glive, sizeof g_geo_live);
+    savestate_geo_put(&n->geo);
+    if (n->have_held) memcpy(&g_geo_held, n->held, sizeof g_geo_held);
+    savestate_bus_changed(bus);
+
+    /* the sound board: the 68000's registers, its RAM, the chip with its
+     * live pointers, and the board's own fields. */
+    g_sound.m68k.cpu = n->m68k;
+    memcpy(g_sound.ram, n->sram, sizeof g_sound.ram);
+    savestate_scsp_unpack(n->scsp, &g_sound.scsp);
+    memcpy(&g_sound.scsp, n->scsp, sizeof g_sound.scsp);
+    g_shle = n->shle;
+    savestate_sound_put(&n->snd);
+
+    savestate_hle_set(&n->hle);
+    for (int i = 0; i < g_savestate_extra_n; i++)
+        if (savestate_extra_mine(i)) memcpy(g_savestate_extra[i].data, n->extra[i], g_savestate_extra[i].size);
+}
+
 /* Read the board from `path`. Call between slices, with the emu mutex held
  * where there is one, over the same ROM set and profile the state was saved
  * from. Nothing is touched until every entry has been read and checked. On
  * success `emu` holds the run loop's latches for the caller to put back. */
 static inline const char *savestate__load_zip(mz_zip_archive *zp, const char *what, i960_cpu_t *cpu,
                                               memory_bus_t *bus, savestate_emu_t *emu) {
-    const char *err = NULL;
-    char info[512];
-    memset(info, 0, sizeof info);
-    savestate_layout_t layout, want = savestate_layout();
-    savestate_rom_t rom, have_rom;
-    {
-        int i = mz_zip_reader_locate_file(zp, "INFO", NULL, 0);
-        size_t n = 0;
-        void *p = i >= 0 ? mz_zip_reader_extract_to_heap(zp, (mz_uint)i, &n, 0) : NULL;
-        if (!p) err = "no INFO entry: not an m2hle2 state";
-        else { memcpy(info, p, n < sizeof info - 1 ? n : sizeof info - 1); mz_free(p); }
-    }
+    const char *err = savestate__check(zp, bus);
+    savestate_scratch_t n;
+    memset(&n, 0, sizeof n);
+    if (!err && !savestate__scratch_alloc(&n)) err = "out of memory";
+    if (!err && !savestate__scratch_read(zp, &n)) err = "an entry is missing or the wrong size (see the log)";
     if (!err) {
-        char want_id[96];
-        snprintf(want_id, sizeof want_id, "\nprofile=%s\n", g_active_profile->id);
-        if (!strstr(info, want_id)) err = "the state is from another profile";
+        savestate__scratch_commit(&n, cpu, bus);
+        *emu = n.emu;
+        LOG_INFO("savestate: loaded %s (frame %llu)", what, (unsigned long long)n.emu.frame_clock_frame);
     }
-    if (!err && !savestate__get(zp, "LAYOUT", &layout, sizeof layout)) err = "no LAYOUT entry";
-    if (!err && layout.version != SAVESTATE_VERSION) err = "the state is from another savestate version";
-    if (!err && memcmp(&layout, &want, sizeof layout) != 0) err = "the state is from a build with another layout";
-    if (!err && !savestate__get(zp, "ROM", &rom, sizeof rom)) err = "no ROM entry";
-    if (!err) {
-        have_rom = savestate_rom_id(bus);
-        if (rom.program != have_rom.program || rom.program_size != have_rom.program_size)
-            err = "the state is from another program ROM";
-        else if (rom.data != have_rom.data)
-            err = "the state's data ROM differs from the one loaded";
-        else if (rom.sound_loaded != have_rom.sound_loaded || rom.sound_rom != have_rom.sound_rom)
-            err = "the state's sound board differs from this one";
-    }
-
-    /* Everything into scratch first: a state that fails halfway must leave
-     * the running board as it was. */
-    i960_cpu_t     *n_cpu   = NULL;
-    sharc_state_t  *n_sharc = NULL;
-    cop_state_t    *n_cop   = NULL;
-    zanzou_stream_t n_zz;
-    irq_timer_t     n_irqt;
-    savestate_geo_t n_geo;
-    void           *n_snaps = NULL;
-    geo_raster_state_t *n_glive = NULL;
-    uint8_t        *n_bufs[SAVESTATE_NBUFS];
-    m68k_cpu_t      n_m68k;
-    uint8_t        *n_sram = NULL;
-    scsp_t         *n_scsp = NULL;
-    savestate_sound_t n_snd;
-    shle_t          n_shle;
-    savestate_emu_t n_emu;
-    savestate_hle_t n_hle;
-    uint8_t        *n_extra[SAVESTATE_EXTRA_MAX];
-    memset(n_bufs, 0, sizeof n_bufs);
-    memset(n_extra, 0, sizeof n_extra);
-
-    if (!err) {
-        n_cpu   = (i960_cpu_t *)malloc(sizeof *n_cpu);
-        n_sharc = (sharc_state_t *)malloc(sizeof *n_sharc);
-        n_cop   = (cop_state_t *)malloc(sizeof *n_cop);
-        n_snaps = malloc(sizeof g_geodl_snaps);
-        n_glive = (geo_raster_state_t *)malloc(sizeof *n_glive);
-        n_sram  = (uint8_t *)malloc(sizeof g_sound.ram);
-        n_scsp  = (scsp_t *)malloc(sizeof *n_scsp);
-        if (!n_cpu || !n_sharc || !n_cop || !n_snaps || !n_glive || !n_sram || !n_scsp) err = "out of memory";
-        for (size_t i = 0; !err && i < SAVESTATE_NBUFS; i++)
-            if (!(n_bufs[i] = (uint8_t *)malloc(SAVESTATE_BUFS[i].size))) err = "out of memory";
-        for (int i = 0; !err && i < g_savestate_extra_n; i++)
-            if (savestate_extra_mine(i) && !(n_extra[i] = (uint8_t *)malloc(g_savestate_extra[i].size))) err = "out of memory";
-    }
-    if (!err) {
-        bool ok = savestate__get(zp, "I960",   n_cpu,   sizeof *n_cpu)
-               && savestate__get(zp, "SHARC",  n_sharc, sizeof *n_sharc)
-               && savestate__get(zp, "COP",    n_cop,   sizeof *n_cop)
-               && savestate__get(zp, "ZANZOU", &n_zz,   sizeof n_zz)
-               && savestate__get(zp, "IRQT",   &n_irqt, sizeof n_irqt)
-               && savestate__get(zp, "GEO",    &n_geo,  sizeof n_geo)
-               && savestate__get(zp, "GEOLIST",  n_snaps, sizeof g_geodl_snaps)
-               && savestate__get(zp, "GEOSTATE", n_glive, sizeof *n_glive)
-               && savestate__get(zp, "M68K",     &n_m68k, sizeof n_m68k)
-               && savestate__get(zp, "M2SNDRAM", n_sram,  sizeof g_sound.ram)
-               && savestate__get(zp, "M2SCSP",   n_scsp,  sizeof *n_scsp)
-               && savestate__get(zp, "SOUND",    &n_snd,  sizeof n_snd)
-               && savestate__get(zp, "SOUNDHLE", &n_shle, sizeof n_shle)
-               && savestate__get(zp, "EMU",      &n_emu,  sizeof n_emu)
-               && savestate__get(zp, "HLE",      &n_hle,  sizeof n_hle);
-        for (size_t i = 0; ok && i < SAVESTATE_NBUFS; i++)
-            ok = savestate__get(zp, SAVESTATE_BUFS[i].name, n_bufs[i], SAVESTATE_BUFS[i].size);
-        for (int i = 0; ok && i < g_savestate_extra_n; i++) {
-            if (!savestate_extra_mine(i)) continue;
-            char name[64];
-            snprintf(name, sizeof name, "P.%s", g_savestate_extra[i].name);
-            ok = savestate__get(zp, name, n_extra[i], g_savestate_extra[i].size);
-        }
-        if (!ok) err = "an entry is missing or the wrong size (see the log)";
-    }
-    if (!err) {
-        /* ---- the commit: nothing below can fail ---- */
-        *cpu = *n_cpu;
-
-        uint64_t dm_ext = g_sharc.sharc_dm_ext_w;
-        uint32_t dm_ext_size = g_sharc.sharc_dm_ext_size;
-        g_sharc = *n_sharc;
-        g_sharc.sharc_dm_ext_w    = dm_ext;
-        g_sharc.sharc_dm_ext_size = dm_ext_size;
-
-        uint64_t ctl = g_cop.ctl_w;
-        memcpy(&g_cop, n_cop, sizeof g_cop);
-        g_cop.ctl_w = ctl;
-        g_zz   = n_zz;
-        g_irqt = n_irqt;
-
-        for (size_t i = 0; i < SAVESTATE_NBUFS; i++)
-            memcpy(savestate_buf_ptr(bus, &SAVESTATE_BUFS[i]), n_bufs[i], SAVESTATE_BUFS[i].size);
-
-        memcpy(g_geodl_snaps, n_snaps, sizeof g_geodl_snaps);
-        memcpy(&g_geo_live, n_glive, sizeof g_geo_live);
-        savestate_geo_put(&n_geo);
-        savestate_bus_changed(bus);
-
-        /* the sound board: the 68000's registers, its RAM, the chip with its
-         * live pointers, and the board's own fields. */
-        g_sound.m68k.cpu = n_m68k;
-        memcpy(g_sound.ram, n_sram, sizeof g_sound.ram);
-        savestate_scsp_unpack(n_scsp, &g_sound.scsp);
-        memcpy(&g_sound.scsp, n_scsp, sizeof g_sound.scsp);
-        g_shle = n_shle;
-        savestate_sound_put(&n_snd);
-
-        savestate_hle_set(&n_hle);
-        for (int i = 0; i < g_savestate_extra_n; i++)
-            if (savestate_extra_mine(i)) memcpy(g_savestate_extra[i].data, n_extra[i], g_savestate_extra[i].size);
-        *emu = n_emu;
-        LOG_INFO("savestate: loaded %s (frame %llu)", what, (unsigned long long)n_emu.frame_clock_frame);
-    }
-
-    free(n_cpu); free(n_sharc); free(n_cop); free(n_snaps); free(n_glive); free(n_sram); free(n_scsp);
-    for (size_t i = 0; i < SAVESTATE_NBUFS; i++) free(n_bufs[i]);
-    for (int i = 0; i < SAVESTATE_EXTRA_MAX; i++) free(n_extra[i]);
+    savestate__scratch_free(&n);
     if (err) LOG_WARN("savestate: %s: %s", what, err);
     return err;
 }

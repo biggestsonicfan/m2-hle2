@@ -132,6 +132,7 @@ int main(int argc, char **argv) {
     g_active_profile->install_fn(&romset, &cpu, &bus);
     irqt_reset();
     if (g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&bus);
         if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);

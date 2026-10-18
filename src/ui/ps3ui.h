@@ -162,11 +162,12 @@ static inline int ps3ui_path_winding(const ps3ui_path_t *p, float sx, float sy)
     return w;
 }
 
-/* Coverage of the path into mask (w*h floats, 0..1, max-combined). */
-static inline void ps3ui_path_cover(const ps3ui_path_t *p, float *mask, int w, int h)
+/* The pixels a path's points reach, [x0, x1) x [y0, y1). */
+typedef struct { int x0, y0, x1, y1; } ps3ui_span_t;
+
+/* The pixels a path (of at least one point) spans, clipped to a w x h mask. */
+static inline ps3ui_span_t ps3ui_path_span(const ps3ui_path_t *p, int w, int h)
 {
-    if (p->n == 0)
-        return;
     float minx = p->x[0], maxx = p->x[0], miny = p->y[0], maxy = p->y[0];
     for (int i = 1; i < p->n; i++) {
         if (p->x[i] < minx) minx = p->x[i];
@@ -174,19 +175,34 @@ static inline void ps3ui_path_cover(const ps3ui_path_t *p, float *mask, int w, i
         if (p->y[i] < miny) miny = p->y[i];
         if (p->y[i] > maxy) maxy = p->y[i];
     }
-    int x0 = (int)floorf(minx), x1 = (int)ceilf(maxx), y0 = (int)floorf(miny), y1 = (int)ceilf(maxy);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > w) x1 = w;
-    if (y1 > h) y1 = h;
-    for (int y = y0; y < y1; y++)
-        for (int x = x0; x < x1; x++) {
-            int hit = 0;
-            for (int sy = 0; sy < 4; sy++)
-                for (int sx = 0; sx < 4; sx++)
-                    hit += ps3ui_path_winding(p, (float)x + 0.125f + 0.25f * (float)sx,
-                                              (float)y + 0.125f + 0.25f * (float)sy) != 0;
-            float c = (float)hit / 16.0f;
+    ps3ui_span_t r = { (int)floorf(minx), (int)floorf(miny), (int)ceilf(maxx), (int)ceilf(maxy) };
+    if (r.x0 < 0) r.x0 = 0;
+    if (r.y0 < 0) r.y0 = 0;
+    if (r.x1 > w) r.x1 = w;
+    if (r.y1 > h) r.y1 = h;
+    return r;
+}
+
+/* How many of pixel (x, y)'s 4x4 subsamples lie inside the path, 0..16. */
+static inline int ps3ui_path_hits(const ps3ui_path_t *p, int x, int y)
+{
+    int hit = 0;
+    for (int sy = 0; sy < 4; sy++)
+        for (int sx = 0; sx < 4; sx++)
+            hit += ps3ui_path_winding(p, (float)x + 0.125f + 0.25f * (float)sx,
+                                      (float)y + 0.125f + 0.25f * (float)sy) != 0;
+    return hit;
+}
+
+/* Coverage of the path into mask (w*h floats, 0..1, max-combined). */
+static inline void ps3ui_path_cover(const ps3ui_path_t *p, float *mask, int w, int h)
+{
+    if (p->n == 0)
+        return;
+    ps3ui_span_t r = ps3ui_path_span(p, w, h);
+    for (int y = r.y0; y < r.y1; y++)
+        for (int x = r.x0; x < r.x1; x++) {
+            float c = (float)ps3ui_path_hits(p, x, y) / 16.0f;
             if (c > mask[y * w + x])
                 mask[y * w + x] = c;
         }
@@ -551,14 +567,17 @@ static inline void ps3ui_clear(ps3ui_canvas_t *cv, uint32_t hex)
     ps3ui_fill_px(cv, 0, 0, cv->w, cv->h, c, 1.0f, PS3UI_BLEND_NORMAL);
 }
 
+/* A box in layout units: x0, y0 the top left, x1, y1 the bottom right (a text
+ * box between two slots' corners, a filled rectangle, a glyph's fitted ink). */
+typedef struct { float x0, y0, x1, y1; } ps3ui_box_t;
+
 /* A solid rectangle in layout units, snapped to pixel centres. */
-static inline void ps3ui_fill_rect(ps3ui_canvas_t *cv, float x0, float y0, float x1, float y1,
-                                   uint32_t hex, float a, int blend)
+static inline void ps3ui_fill_rect(ps3ui_canvas_t *cv, ps3ui_box_t b, uint32_t hex, float a, int blend)
 {
     float c[3];
     ps3ui_rgb_hex(hex, c);
-    int px0 = (int)ceilf(x0 * cv->k + cv->ox - 0.5f), px1 = (int)ceilf(x1 * cv->k + cv->ox - 0.5f);
-    int py0 = (int)ceilf(y0 * cv->k + cv->oy - 0.5f), py1 = (int)ceilf(y1 * cv->k + cv->oy - 0.5f);
+    int px0 = (int)ceilf(b.x0 * cv->k + cv->ox - 0.5f), px1 = (int)ceilf(b.x1 * cv->k + cv->ox - 0.5f);
+    int py0 = (int)ceilf(b.y0 * cv->k + cv->oy - 0.5f), py1 = (int)ceilf(b.y1 * cv->k + cv->oy - 0.5f);
     if (px0 < cv->clip_x0) px0 = cv->clip_x0;
     if (py0 < cv->clip_y0) py0 = cv->clip_y0;
     if (px1 > cv->clip_x1) px1 = cv->clip_x1;
@@ -687,6 +706,29 @@ static inline int ps3ui_layer_src(const ps3ui_layer_t *l, float f)
     return si;
 }
 
+/* A video layer at frame f, already placed (m) and faded (op): the sprite its
+ * source names fills the video's box, or the hook draws one with no source. */
+static inline void ps3ui_play_video(const ps3ui_play_t *p, ps3ui_canvas_t *cv, const ps3ui_layer_t *l,
+                                    float f, ps3ui_mat_t m, float op, int b)
+{
+    if (l->nsrc == 0) {
+        if (p->hook)
+            p->hook(p->user, cv, l->name, m, op, l->w, l->h);
+        return;
+    }
+    int spr = p->scene->srcs[l->item + ps3ui_layer_src(l, f)];
+    if (p->filter && !p->filter(p->user, l->name, &spr))
+        return;
+    const ps3ui_image_t *im = ps3ui_sprite(spr);
+    if (!im || !im->px)
+        return;
+    /* The sprite fills the video's box. */
+    ps3ui_mat_t fit = m;
+    if (im->w != l->w || im->h != l->h)
+        fit = ps3ui_mat_mul(m, ps3ui_mat_scale((float)l->w / (float)im->w, (float)l->h / (float)im->h));
+    ps3ui_draw_image(cv, im, fit, op, b, NULL);
+}
+
 static inline void ps3ui_play_layer(const ps3ui_play_t *p, ps3ui_canvas_t *cv, const ps3ui_layer_t *l,
                                     float f, ps3ui_mat_t parent, float opacity, int blend)
 {
@@ -702,24 +744,8 @@ static inline void ps3ui_play_layer(const ps3ui_play_t *p, ps3ui_canvas_t *cv, c
         ps3ui_play_comp(p, cv, l->item, (f - l->start) * l->tscale + l->offset, m, op, b);
         return;
     }
-    if (l->type != PS3UI_LAYER_VIDEO)
-        return;
-    if (l->nsrc == 0) {
-        if (p->hook)
-            p->hook(p->user, cv, l->name, m, op, l->w, l->h);
-        return;
-    }
-    int spr = s->srcs[l->item + ps3ui_layer_src(l, f)];
-    if (p->filter && !p->filter(p->user, l->name, &spr))
-        return;
-    const ps3ui_image_t *im = ps3ui_sprite(spr);
-    if (!im || !im->px)
-        return;
-    /* The sprite fills the video's box. */
-    ps3ui_mat_t fit = m;
-    if (im->w != l->w || im->h != l->h)
-        fit = ps3ui_mat_mul(m, ps3ui_mat_scale((float)l->w / (float)im->w, (float)l->h / (float)im->h));
-    ps3ui_draw_image(cv, im, fit, op, b, NULL);
+    if (l->type == PS3UI_LAYER_VIDEO)
+        ps3ui_play_video(p, cv, l, f, m, op, b);
 }
 
 static void ps3ui_play_comp(const ps3ui_play_t *p, ps3ui_canvas_t *cv, int comp, float f,
