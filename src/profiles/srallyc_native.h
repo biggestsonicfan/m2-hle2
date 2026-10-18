@@ -1,7 +1,7 @@
 /*
  * srallyc_native.h -- Sega Rally's own replay: each course's highlight clip,
  * kept in the game's format and played back by the game's own replay, the
- * championship ending (Pinboard #997). NATIVE-REPLAY.md, "Sega Rally", has
+ * championship ending (Pinboard #997). docs/NATIVE-REPLAY.md, "Sega Rally", has
  * the format in full.
  *
  * The game records a clip of every course it races into a buffer of its own,

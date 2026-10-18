@@ -1,5 +1,5 @@
 /*
- * m2lua_mcp.h -- the bridge's script_* commands (MCP_GUIDE.md, "Game
+ * m2lua_mcp.h -- the bridge's script_* commands (docs/MCP_GUIDE.md, "Game
  * scripts"; Pinboard #958), for the hosts that run core/m2lua.h. The bridge
  * hands them over through g_mcp_script_cmd, so a host without Lua answers
  * "unknown cmd".

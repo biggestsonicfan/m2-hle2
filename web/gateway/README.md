@@ -17,7 +17,7 @@ name next to arcade.sonicthefighte.rs).
 
 Browser-to-browser traffic is routed inside the gateway through the virtual
 addresses; browser-to-desktop goes out of the session's real UDP socket. The
-design, and why each rule exists, is in [WEB-NETPLAY.md](../../WEB-NETPLAY.md),
+design, and why each rule exists, is in [WEB-NETPLAY.md](../../docs/WEB-NETPLAY.md),
 section 4. Nothing in RPCN changes, and the desktop build needs no change.
 
 **It never logs payload bytes.** It sees the RPCN protocol in the clear, login

@@ -1,6 +1,6 @@
 /*
  * comm_link.h — a linked comm board's datagrams over the room's P2P socket
- * (Pinboard #964, step 2 of VIRTUAL-ON-PS3.md's RPCN plan).
+ * (Pinboard #964, step 2 of docs/VIRTUAL-ON-PS3.md's RPCN plan).
  *
  * board/m2comm.h runs MAME's two-node ring over a peer: a send/recv pair of
  * datagrams, each a frame type byte and its payload (the master's token and

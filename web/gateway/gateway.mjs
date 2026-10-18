@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * gateway.mjs -- lets the browser build reach RPCN (WEB-NETPLAY.md, section 4).
+ * gateway.mjs -- lets the browser build reach RPCN (docs/WEB-NETPLAY.md, section 4).
  *
  * A browser tab can open neither TCP nor UDP. RPCN is TLS over TCP plus a UDP
  * signaling helper, and a match is UDP between the two players. So each browser

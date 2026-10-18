@@ -5,7 +5,7 @@
  * m2-hle2's own netplay (lockstep.h, room.h) is ours to define; this is not. A
  * PS3 in RPCS3 only accepts a peer that behaves exactly like another PS3, so
  * every rule here was read out of the game (its EBOOT, in the Ghidra database
- * the ROOM-MATCH.md notes come from) and checked against a real PS3-vs-PS3 match
+ * the docs/ROOM-MATCH.md notes come from) and checked against a real PS3-vs-PS3 match
  * captured through RPCS3's packet log. Names in parentheses are the PS3
  * functions a rule was ported from.
  *

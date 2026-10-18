@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * von-rpcn-pair.mjs — two Virtual-On cabinets linked over a room on RPCN
- * (VIRTUAL-ON-PS3.md, step 5 of the RPCN plan; Pinboard #983).
+ * (docs/VIRTUAL-ON-PS3.md, step 5 of the RPCN plan; Pinboard #983).
  *
  * Two headless emulators, one board each, sign in to the container's own RPCN
  * (127.0.0.1:31313; `python3 /opt/scripts/rpcn-test.py`), one hosts a room, the

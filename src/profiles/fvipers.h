@@ -332,7 +332,7 @@ static const game_profile_t fvipers_profile = {
         /* Read off the FV ROMs (Pinboard #254). The model table sits where
          * STF's does, at 0xE0004 in mpr-18614/18615, 16 bytes an entry, and the
          * word before it is its last index: 0x1524, so 5413 entries (noclip's
-         * count; NOCLIP-SYNC.md). The mesh word is the polygon ROM's word address on the bus
+         * count; docs/NOCLIP-SYNC.md). The mesh word is the polygon ROM's word address on the bus
          * (0x02000000 up), as in STF: all 3711 non-zero ones decode to offsets
          * 0x10-0x9E6104, ascending, inside the 12 MB polygon ROM. */
         .mesh_ptr_subtract  = 0x02000010,

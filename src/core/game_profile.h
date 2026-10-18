@@ -299,7 +299,7 @@ typedef const char *(*game_native_play_fn)(const game_native_round_t *rounds, in
 typedef bool (*game_in_play_fn)(struct memory_bus *bus);
 
 /* A linked cabinet's role (Pinboard #969): what the room makes this machine's
- * board on a comm-board link (VIRTUAL-ON-PS3.md, "RPCN"). */
+ * board on a comm-board link (docs/VIRTUAL-ON-PS3.md, "RPCN"). */
 typedef enum { GAME_LINK_ALONE, GAME_LINK_MASTER, GAME_LINK_SLAVE } game_link_role_t;
 /* Write the role where the ROM reads it when it next boots. False while the
  * board cannot hold one yet: Virtual-On's lives in a backup block the ROM

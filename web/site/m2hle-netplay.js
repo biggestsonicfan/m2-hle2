@@ -1,5 +1,5 @@
 /*
- * Playing online: the sign-in, the lobby and the room (WEB-NETPLAY.md, section
+ * Playing online: the sign-in, the lobby and the room (docs/WEB-NETPLAY.md, section
  * 5). Drawn from a snapshot the emulator hands over a few times a second
  * (web_netplay_status in main_web.c); every button posts a command and nothing
  * here touches netplay state directly, which is how the desktop's netplay

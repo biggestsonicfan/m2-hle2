@@ -16,7 +16,7 @@
  * It passes when both boards reach "playing", both keep advancing, and neither
  * latches a desync (the per-frame check values the two boards exchange). The
  * two players must be on the same build: this is the web-vs-web gate of
- * WEB-NETPLAY.md, N2. Each board must also have timed a round trip to the
+ * docs/WEB-NETPLAY.md, N2. Each board must also have timed a round trip to the
  * other (the room's "N ms", netplay_rtt_t in netplay.h).
  *
  * --ui-shots DIR saves a screenshot of the online panel at each step (sign-in,
@@ -24,7 +24,7 @@
  *
  * --hide-a N opens a second tab in browser A for N seconds, which hides the
  * game's tab: the board is then driven by the page's background worker, and the
- * run shows whether B had to wait (WEB-NETPLAY.md 5.3).
+ * run shows whether B had to wait (docs/WEB-NETPLAY.md 5.3).
  *
  * Needs a gateway and an RPCN server to talk to: see web/gateway/README.md,
  * "Testing locally". The web server must serve --rom (tools/web-serve.mjs).

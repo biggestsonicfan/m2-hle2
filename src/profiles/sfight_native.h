@@ -1,7 +1,7 @@
 /*
  * sfight_native.h -- Sonic the Fighters' own replay formats: each round kept
  * in them (Pinboard #602), and played back with the game's own replay code
- * (Pinboard #617). NATIVE-REPLAY.md has the formats in full.
+ * (Pinboard #617). docs/NATIVE-REPLAY.md has the formats in full.
  *
  * STF keeps three kinds of replay, and a .m2replay (core/replay.h) carries all
  * three for every round it records, byte for byte as the game lays them out:

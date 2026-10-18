@@ -15,7 +15,7 @@
 /* The web build (M2HLE_WEB) registers Sonic the Fighters, which it exists to
  * play over RPCN, Sega Rally, Virtual-On, Dynamite Cop, Fighting Vipers and
  * The House of the Dead (the page's ?game=, web/site/m2hle-games.js). Any other set is only
- * download size: left out, not hidden. See WEB-PORT.md. Both STF profiles are there, since
+ * download size: left out, not hidden. See docs/WEB-PORT.md. Both STF profiles are there, since
  * each is its own lobby space. Dead or Alive is here too, but not on the page yet:
  * det_digest builds with this list, and one 32 KB chip is no download size. */
 #include "srallyc.h"

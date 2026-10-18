@@ -2,7 +2,7 @@
 
 m2-hle2 is a **Sega Model 2 arcade emulator** in C11 (Dear ImGui via cimgui, Sokol). *Sonic The Fighters* (STF) is the first target, where most of the reverse engineering was done, but it is built for the whole Model 2 catalogue: most "STF bugs" are board bugs (i960, COP, tiles) that every game shares.
 
-Every session and subagent reads this file in full, so it holds only the rules and where to look. **Keep it short: add new findings to the topic files below, never here.** The reference prior project is `ai\m2-hle` (read from it, don't import wholesale); `stf-hle` is outdated. [PROPOSAL.md](PROPOSAL.md) is the original plan, historical.
+Every session and subagent reads this file in full, so it holds only the rules and where to look. **Keep it short: add new findings to the topic files below, never here.** The reference prior project is `ai\m2-hle` (read from it, don't import wholesale); `stf-hle` is outdated. [PROPOSAL.md](docs/PROPOSAL.md) is the original plan, historical.
 
 ## Board vs. game layering (critical)
 
@@ -41,7 +41,7 @@ The load-bearing invariants (reverse-engineered, in no datasheet, do not re-deri
 | Picture filters | [picture-filters.md](docs/invariants/picture-filters.md) | `post_shader.h`, `retro_shader.h` |
 | Game scripts (Lua) | [scripts.md](docs/invariants/scripts.md) | `m2lua*.h`, `m2hle-cheats.js` |
 
-Building, the tests, the graders and the STF disassembly: [docs/build.md](docs/build.md). Grader details: [tools/README.md](tools/README.md). The other top-level `*.md` files are per-topic notes (WEB-PORT, SCSP, ROOM-MATCH, MCP_GUIDE, ...); open them when the topic comes up.
+Building, the tests, the graders and the STF disassembly: [docs/build.md](docs/build.md). Grader details: [tools/README.md](tools/README.md). The other notes are in [docs/](docs/README.md), one per topic (WEB-PORT, SCSP, ROOM-MATCH, MCP_GUIDE, ...); open them when the topic comes up. [README.md](README.md) is for players, [docs/FEATURES.md](docs/FEATURES.md) lists every feature and option.
 
 ## Rules that cut across subsystems
 

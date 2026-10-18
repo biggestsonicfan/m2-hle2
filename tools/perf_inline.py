@@ -6,7 +6,7 @@ a handful of real functions: `perf report` puts ~30% of a run on
 emu_slice_body, which is the i960, its bus, the timers and the HLE hook check
 all at once. This charges each sample to the innermost inlined function at its
 address instead (addr2line -i), which is what a reader of the source means by
-"function". See PERF-PROFILE.md.
+"function". See docs/PERF-PROFILE.md.
 
     perf record -F 2000 --call-graph fp -o run.data -- <exe> ...
     python3 tools/perf_inline.py run.data <exe> [--top N] [--chain] [--callers SYM]

@@ -5,7 +5,7 @@
  *
  * The board reads the three from the object command, so the table's shape is
  * the game's. Three are known, the same three noclip reads (js/romset.js
- * readModelEntry, js/games.js modelTable.stride / fields; NOCLIP-SYNC.md §6.3):
+ * readModelEntry, js/games.js modelTable.stride / fields; docs/NOCLIP-SYNC.md §6.3):
  *
  *   1995 (STF, FV, HOTD, the homebrew)  16 bytes: uv +0, mat +4, mesh +8
  *   Virtua Cop                          16 bytes: mesh +0, uv +4, mat +8, count
@@ -109,7 +109,7 @@ static inline uint32_t model_mesh_offset(uint32_t mesh_ptr, uint32_t subtract, u
  * finds it (js/model.js): false for no mesh, and for a first 40-byte record
  * not wholly inside the polygon ROM. A polygon-RAM pointer is false too, never
  * read as ROM; noclip gets there by its offset wrapping past the ROM's end
- * (pointer * 4 < 0x02000000). NOCLIP-SYNC.md §6.4. */
+ * (pointer * 4 < 0x02000000). docs/NOCLIP-SYNC.md §6.4. */
 static inline bool model_mesh_resolve(uint32_t mesh_ptr, uint32_t subtract, uint32_t add,
                                       size_t polygons_size, uint32_t *off) {
     *off = 0;

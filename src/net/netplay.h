@@ -246,7 +246,7 @@
  * another type. Clang used both and MSVC used neither. With NaNs written the
  * SHARC's way (sharc_float_to_bits) and the i960's (i960_nan_result), and with
  * -fno-strict-aliasing, tests/det_digest.c holds the two identical over 12,000
- * frames of attract and 10,000 of a two-player match (WEB-NETPLAY.md,
+ * frames of attract and 10,000 of a two-player match (docs/WEB-NETPLAY.md,
  * "Cross-play").
  *
  * The family stays in the room word, so a lobby can still tell the two apart
@@ -1113,7 +1113,7 @@ static inline void netplay_send_watchers(const void *pkt, uint32_t len) {
  * A fighter sends a watcher one record every this many frames, not every frame.
  * A record carries LOCKSTEP_REDUNDANCY frames, so this still delivers each frame
  * three times over. What it buys is the web gateway's per-player cap of 240
- * datagrams a second (WEB-NETPLAY.md): at one a frame a fighter in a full room
+ * datagrams a second (docs/WEB-NETPLAY.md): at one a frame a fighter in a full room
  * would need 60 x 7, and at one every three it needs 60 + 20 x 6.
  */
 #define NETPLAY_WATCH_STRIDE 3u
@@ -1413,7 +1413,7 @@ static inline void netplay_on_bye_packet(uint16_t from, const lockstep_announce_
  * each runs its own board at its own pace, and the ROM's link traffic goes to
  * the opponent as LOCKSTEP_PACKET_COMM datagrams on the room's socket. It is
  * not a lockstep match: no barrier, no frame gate, no desync check; what the
- * i960 reads there is the other cabinet's (VIRTUAL-ON-PS3.md, "RPCN").
+ * i960 reads there is the other cabinet's (docs/VIRTUAL-ON-PS3.md, "RPCN").
  * Emu thread only, like the rest of this file: m2comm.h sends from inside the
  * board's slice and the drain below feeds the inbox between slices. Opened
  * with the opponent known. The room gives the role (Pinboard #969): its owner's
@@ -3908,7 +3908,7 @@ static inline void netplay_adopt_room_settings(const room_state_t *r) {
 /* A fighter's match in a game whose cabinets link their comm boards (Virtual-On,
  * the profile's link_role): no lockstep, no barrier. Each cabinet runs its own
  * board, which boots into the room's role and then talks to the other's over
- * the room's socket (netplay_comm_open; VIRTUAL-ON-PS3.md, "RPCN"). The match
+ * the room's socket (netplay_comm_open; docs/VIRTUAL-ON-PS3.md, "RPCN"). The match
  * stays IN_ROOM: the board is the player's to drive, at the link's 60 Hz. */
 static inline void netplay_member_start_link(const room_state_t *r, int side, uint16_t session) {
     g_netplay.generation   = session & 0x1F;

@@ -2178,7 +2178,7 @@ static inline void geo3d_decode_model(const geo3d_models_t *md, int model_idx,
  * holds them. Each header read is kept as the decoder takes it
  * (geo3d_texhdr_decode, geo3d_texhdr_tile), and each triangle as the decoder
  * fills it (geo3d_face_tris, geo3d_zsort_step), from the untransformed walk.
- * NOCLIP-SYNC.md §6.5 to §6.7; tests/prepared_test.c checks it. */
+ * docs/NOCLIP-SYNC.md §6.5 to §6.7; tests/prepared_test.c checks it. */
 typedef struct {
     int            face;          /* face-loop index (index-array position / 4) */
     geo3d_texhdr_t h;

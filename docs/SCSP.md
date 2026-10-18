@@ -153,7 +153,7 @@ not done here.
 68000 when the host asks for it (`--sound-hle`, `M2HLE_SOUND_HLE=1`, the
 libretro option "Sound driver"; Pinboard #173). Off by default: the 68000 stays
 the board, the oracle, and the only path for any other program ROM (it takes
-only STF's, by a hash of its code) -- m2-pacman talks back over MIDI out, and
+only STF's, by a hash of its code) -- [m2-pacman](https://github.com/biggestsonicfan/m2-pacman) talks back over MIDI out, and
 nothing but the 68000 answers that.
 
 **What it is.** The driver, routine by routine, from the IDA listing in

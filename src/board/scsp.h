@@ -21,7 +21,7 @@
  * the moment the driver asks, and the driver's voice allocation drifts away
  * from the board's (tools/mame/snd-capture.lua measures it). The late chip
  * answers each of them exactly, because each one makes the chip catch up
- * first. SCSP.md has what the chip does and what STF's driver uses of it.
+ * first. docs/SCSP.md has what the chip does and what STF's driver uses of it.
  *
  * Behaviour follows MAME's scsp.cpp / scspdsp.cpp, which is the oracle the
  * capture tools record. Where that is a MAME choice rather than known hardware

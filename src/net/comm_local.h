@@ -1,7 +1,7 @@
 /*
  * comm_local.h — Versus on one machine: two cabinets, one per process, their
  * comm boards linked over 127.0.0.1 (Pinboard #987, step 7 of
- * VIRTUAL-ON-PS3.md).
+ * docs/VIRTUAL-ON-PS3.md).
  *
  * The PS3 runs both boards of a Versus in one process. m2-hle2's board is one
  * set of globals, so a Versus here is two emulators, each one cabinet, linked

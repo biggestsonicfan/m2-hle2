@@ -1,6 +1,6 @@
 /*
  * link_pace.h — the board's clock while its comm board is linked (Pinboard
- * #978, step 4 of the RPCN plan in VIRTUAL-ON-PS3.md).
+ * #978, step 4 of the RPCN plan in docs/VIRTUAL-ON-PS3.md).
  *
  * Two cabinets on a link each run their own board; neither waits for the
  * other. What keeps them together is that both run at 60 Hz of wall time and

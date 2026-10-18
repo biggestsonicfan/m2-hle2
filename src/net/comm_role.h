@@ -1,6 +1,6 @@
 /*
  * comm_role.h — the room's role for a linked comm board (Pinboard #969, step 3
- * of the RPCN plan in VIRTUAL-ON-PS3.md).
+ * of the RPCN plan in docs/VIRTUAL-ON-PS3.md).
  *
  * The room makes its owner the MASTER cabinet and the other player the SLAVE.
  * A Virtual-On ROM learns its role only at boot: InitNetwork reads it from

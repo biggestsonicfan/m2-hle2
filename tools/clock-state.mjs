@@ -2,7 +2,7 @@
  * clock-state.mjs — does the sound board keep time with the game's frames
  * through ONE game state?
  *
- * SLICE-CLOCKS.md's acceptance test. The board is driven to a state's entry
+ * docs/SLICE-CLOCKS.md's acceptance test. The board is driven to a state's entry
  * (`--from`) and run to whatever the ROM hands over to (`--to`), and the frame
  * counter and the SCSP's sample counter are read either side. The ratio is the
  * number that matters: 44100 / 60 = 735 samples a game frame everywhere, or the

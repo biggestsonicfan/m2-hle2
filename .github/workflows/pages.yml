@@ -1,6 +1,6 @@
 name: pages
 
-# The web build (WEB-PORT.md) -> GitHub Pages -> https://arcade.sonicthefighte.rs
+# The web build (docs/WEB-PORT.md) -> GitHub Pages -> https://arcade.sonicthefighte.rs
 # Every game is on that one site: the front page (home.html) has a box per game,
 # and ?game=ID&profile=PROFILE plays one (web/site/m2hle-games.js, Pinboard #881).
 # play.sonicthefighte.rs and srally.sonicthefighte.rs are aliases that redirect
@@ -61,7 +61,7 @@ jobs:
 
       # Pinned on purpose. A toolchain bump can change float code generation, and
       # netplay needs two players' builds to compute the same frames
-      # (WEB-PORT.md, "Determinism"). Bump it deliberately, with the smoke test
+      # (docs/WEB-PORT.md, "Determinism"). Bump it deliberately, with the smoke test
       # and a digest comparison, not by accident.
       #
       # The pin is `version`, not the action's tag: with `emsdk-version` unset the

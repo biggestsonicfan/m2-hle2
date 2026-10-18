@@ -27,7 +27,7 @@
  *
  * Linked (m2comm_set_peer), the passes are MAME's ring for two nodes, over
  * datagrams to and from the other cabinet's board (Pinboard #959, the first
- * RPCN step in VIRTUAL-ON-PS3.md; the other side runs the same code):
+ * RPCN step in docs/VIRTUAL-ON-PS3.md; the other side runs the same code):
  *   - Role. The ROM writes its cabinet's role into [1] (Virtual-On's link
  *     check 0xC5870, step 10): 1 is the master, 2 the slave (the board's own
  *     reset value). FG bit 0 set also makes a master (EPR-16726's way).

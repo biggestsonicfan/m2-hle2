@@ -12,7 +12,7 @@ dead code taken out and the board proven unchanged. This file is the record.
 | `grade-all --stage 0` (models, texram, colors) | explorer + MAME colorxlat | models J = 1.000000; texram 10 pass; colorxlat byte-exact |
 | `match-replay` | MAME | same fight over 1299 frames; fighter state bit-identical to +321, rig from +382 (the known baseline) |
 | `grade-motion` | MAME capture | 12 pass |
-| `grade-pose` | MAME capture (`stf-tools`) | 8 pass |
+| `grade-pose` | MAME capture ([`stf-tools`](https://github.com/biggestsonicfan/stf-tools)) | 8 pass |
 | `grade-osage` | MAME, select screen | 14 pass, after the fix below |
 | `grade-cull` | the ROM's `area_clip` | 4 pass, 14 toggles, as the ROM's rule |
 | `grade-stages` | explorer | 53 pass, 1 skipped |

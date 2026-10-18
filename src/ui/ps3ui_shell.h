@@ -109,7 +109,7 @@ static const ps3ui_rules_t ps3ui_rules_stf = {
  * PS3's versus mode runs two boards in one process (its board API at
  * 0x4550E0, init(board_count)); this emulator runs one. Online Battle opens
  * the lobby: a room's match links this cabinet's comm board to the other
- * player's (netplay_member_start_link, VIRTUAL-ON-PS3.md "RPCN"). */
+ * player's (netplay_member_start_link, docs/VIRTUAL-ON-PS3.md "RPCN"). */
 static const char *const ps3ui_von_label[3] = { "Difficulty", "Rounds to win", "Time limit" };
 static const char *const ps3ui_von_values[3][10] = {
     { "Easy", "Normal", "Hard", "Very Hard" },

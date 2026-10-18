@@ -6,7 +6,7 @@
  * same way, so it is emulated as a CPU running the game's own program, not as a
  * handler per command: the program differs per game (Sega Rally's rotations are
  * ops 0x29-0x2B, STF's SHARC ones 0x08-0x0A), and its arithmetic comes from the
- * CPU board's table ROMs, not from libm. See MODEL2A-TGP.md.
+ * CPU board's table ROMs, not from libm. See docs/MODEL2A-TGP.md.
  *
  * The instruction set, the register file, the table lookups and the FIFO wiring
  * follow MAME (devices/cpu/mb86233/mb86233.cpp, BSD-3-Clause, Olivier Galibert;

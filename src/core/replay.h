@@ -38,7 +38,7 @@
  * replay.json says how many rounds there are ("native_rounds"). An open
  * replay's round goes back into the board with replay_native_install.
  *
- * Two ways to save (g_replay_rec.format, Pinboard #617; NATIVE-REPLAY.md):
+ * Two ways to save (g_replay_rec.format, Pinboard #617; docs/NATIVE-REPLAY.md):
  *   REPLAY_SAVE_NATIVE   the default: replay.json and the native rounds only.
  *                        No snapshot is taken, and a match none of whose
  *                        rounds the game kept is not saved.

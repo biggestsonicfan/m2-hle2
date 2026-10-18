@@ -3,7 +3,7 @@
  *
  * The game as the arcade board runs it. It shares its ROM set with Sonic the
  * Fighters - Console (sfight_console.h), which is the default for sfight.zip;
- * pick this one with --profile sfight or from the Game menu. MAME runs the
+ * pick this one with --profile sfight or from the Profile menu. MAME runs the
  * arcade game, so every grader in tools/ asks for this profile.
  *
  * MAME-equivalent ROM set: sfight (clone of schamp). load_fn extracts files
