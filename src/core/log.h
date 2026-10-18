@@ -23,7 +23,9 @@
 #  define log__strnicmp strncasecmp
 #endif
 
+#ifndef LOG_MAX_LINES            /* a build may keep fewer (the Dreamcast's 16 MB) */
 #define LOG_MAX_LINES   1024
+#endif
 #define LOG_MAX_LINE    256
 #define LOG_FILE_PATH   "m2hle.log"
 /* The most one session writes to its log file. Past it the file gets one

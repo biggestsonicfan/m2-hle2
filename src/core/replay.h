@@ -70,6 +70,21 @@
 #ifndef REPLAY_H
 #define REPLAY_H
 
+#ifdef M2HLE_NO_ZIP
+/* A build with no zip support (the Dreamcast) records and plays nothing: a
+ * replay is a zip of a feed (follow.h). The run loop's calls, inert. */
+static inline bool replay_playing(void) { return false; }
+static inline bool replay_play_follows(void) { return false; }
+static inline bool replay_play_unpaced(void) { return false; }
+static inline void replay_play_yield(void) {}
+static inline void replay_rec_break(const char *why) { (void)why; }
+static inline void replay_rec_shutdown(void) {}
+static inline void replay_session_reset(emu_thread_ctx_t *ctx) { (void)ctx; }
+static inline void replay_slice_begin(emu_thread_ctx_t *ctx) { (void)ctx; }
+static inline void replay_slice_end(emu_thread_ctx_t *ctx, bool frame_end) { (void)ctx; (void)frame_end; }
+static inline void replay_frame_result(emu_thread_ctx_t *ctx, int versus_result) { (void)ctx; (void)versus_result; }
+#else
+
 #include <time.h>
 #include "json_min.h"
 
@@ -1487,4 +1502,5 @@ static inline void replay_play_status(char *out, size_t cap) {
              nat ? g_native_play.rounds : 0, P->feed ? 1 : 0);
 }
 
+#endif /* M2HLE_NO_ZIP */
 #endif /* REPLAY_H */

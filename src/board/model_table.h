@@ -22,6 +22,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* A host whose ROM is paged in software (the Dreamcast) maps a pointer into its
+ * window to the bytes there (geo3d.h has the same fallback). */
+#ifndef GEO3D_ROM
+#define GEO3D_ROM(p, n) ((const uint8_t *)(p))
+#endif
+
 /* Byte offsets within an entry, and the entry's size. mat_at_zero: a header
  * address of 0 is the textures ROM's first record, not "no headers" (Virtua
  * Cop's model 0; noclip's modelTable.matAtZero, js/model.js). */
@@ -83,7 +89,7 @@ static inline bool model_entry_read(const model_table_t *t, const uint8_t *main_
     if (!main_data || idx >= t->count) return false;
     uint64_t at = model_entry_offset(t, idx);
     if (at + t->layout.stride > main_data_size) return false;
-    const uint8_t *p = main_data + at;
+    const uint8_t *p = GEO3D_ROM(main_data + at, t->layout.stride);
     e->uv_ptr   = model_table__rd32(p + t->layout.uv);
     e->mat_ptr  = model_table__rd32(p + t->layout.mat);
     e->mesh_ptr = model_table__rd32(p + t->layout.mesh);

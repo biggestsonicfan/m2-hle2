@@ -1,0 +1,253 @@
+Flycast: an SD card on the Dreamcast's serial port, the SD adapters' SPI over
+the port's pins (KallistiOS hardware/scif-spi.c, sd.c), for the port's SD log
+(m2-hle2 Pinboard #519, dreamcast/dc_sdlog.h, make SDLOG=1).
+
+Against flycast 04669ebe4164bb589e6a2050aa1559724aa94291; goes on with or
+without flycast-scif.patch. Apply in a Flycast checkout with `git apply` (or
+`patch -p1`) and build the libretro core:
+
+    cmake -B build-lr -G Ninja -DLIBRETRO=ON -DCMAKE_BUILD_TYPE=Release -DUSE_VULKAN=OFF
+    ninja -C build-lr -j2        # build-lr/flycast_libretro.so
+
+Then FLYCAST_SDCARD=<image> in the environment of the RetroArch that loads
+the core plugs a card in at boot: a raw image with an MBR and a FAT partition
+(dreamcast/README.md, "SD log", makes one). Unset, nothing changes.
+
+diff --git a/core/hw/sh4/modules/serial.cpp b/core/hw/sh4/modules/serial.cpp
+index a36d95b8e..d93e57138 100644
+--- a/core/hw/sh4/modules/serial.cpp
++++ b/core/hw/sh4/modules/serial.cpp
+@@ -265,10 +265,222 @@ void SCIFSerialPort::SCSCR2_write(u16 data)
+ 			SCIF_SCSCR2.REIE ? "REIE" : "");
+ }
+ 
++// An SD card on the serial port, as the SD adapters for it wire one (KallistiOS
++// hardware/scif-spi.c): the port's pins driven by hand through SCSPTR2, RTS
++// the card's chip select (low: selected), CTS its clock, TXD (SPB2DT written)
++// the card's data in and RXD (SPB2DT read) its data out. The card speaks SPI
++// mode: an SDHC card (block addressed) over a raw image file with an MBR, e.g.
++// one made with mkfs.vfat and sfdisk. FLYCAST_SDCARD=<image> in the environment
++// plugs it in at boot; unset, the port is the serial port it always was.
++// (m2-hle2 Pinboard #519, dreamcast/tools/flycast-sdcard.patch)
++#include <cstdio>
++#include <deque>
++#include <vector>
++
++class SdSpiCard
++{
++public:
++	static SdSpiCard& Instance() {
++		static SdSpiCard card;
++		return card;
++	}
++	bool plugged() const { return file != nullptr; }
++
++	// a write to SCSPTR2, the pins as the program drives them
++	void pins(u16 v)
++	{
++		bool cs = (v & 0x40) == 0;	// RTSDT low
++		bool clk = (v & 0x10) != 0;	// CTSDT
++		if (!cs) {
++			if (selected) { bitn = 0; out.clear(); readMulti = false; }
++			selected = false;
++			lastClk = clk;
++			miso = 1;
++			return;
++		}
++		selected = true;
++		if (clk && !lastClk)
++		{
++			if (bitn == 0) {
++				if (out.empty() && readMulti)
++					queueBlock(readAddr++);
++				outByte = 0xff;
++				if (!out.empty()) { outByte = out.front(); out.pop_front(); }
++			}
++			miso = (outByte >> (7 - bitn)) & 1;
++			inByte = (inByte << 1) | (v & 1);
++			if (++bitn == 8) {
++				bitn = 0;
++				byteIn(inByte);
++			}
++		}
++		lastClk = clk;
++	}
++	int dataOut() const { return selected ? miso : 1; }
++
++private:
++	SdSpiCard()
++	{
++		const char *path = getenv("FLYCAST_SDCARD");
++		if (path == nullptr || *path == 0)
++			return;
++		file = fopen(path, "r+b");
++		if (file == nullptr) {
++			WARN_LOG(SH4, "FLYCAST_SDCARD: can't open %s", path);
++			return;
++		}
++		fseek(file, 0, SEEK_END);
++		blocks = (u64)ftell(file) / 512;
++		INFO_LOG(SH4, "FLYCAST_SDCARD: %s, %u blocks, on the serial port", path, (u32)blocks);
++	}
++
++	static u16 crc16(const u8 *p, size_t n)
++	{
++		u16 crc = 0;
++		while (n--) {
++			crc ^= (u16)*p++ << 8;
++			for (int i = 0; i < 8; i++)
++				crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
++		}
++		return crc;
++	}
++	void queueData(const u8 *p, size_t n)
++	{
++		out.push_back(0xff);
++		out.push_back(0xfe);
++		out.insert(out.end(), p, p + n);
++		u16 crc = crc16(p, n);
++		out.push_back(crc >> 8);
++		out.push_back(crc & 0xff);
++	}
++	void queueBlock(u32 lba)
++	{
++		u8 buf[512] {};
++		if (lba < blocks) {
++			fseek(file, (long)lba * 512, SEEK_SET);
++			if (fread(buf, 1, 512, file) != 512)
++				memset(buf, 0, sizeof(buf));
++		}
++		queueData(buf, 512);
++	}
++	u8 r1() const { return idle ? 0x01 : 0x00; }
++
++	void command(u8 cmd, u32 arg)
++	{
++		bool app = appCmd;
++		appCmd = false;
++		out.push_back(0xff);	// NCR
++		switch (cmd)
++		{
++		case 0: idle = true; readMulti = false; out.push_back(0x01); break;
++		case 8:
++			out.push_back(r1());
++			out.push_back(0); out.push_back(0);
++			out.push_back((arg >> 8) & 0x0f); out.push_back(arg & 0xff);
++			break;
++		case 55: appCmd = true; out.push_back(r1()); break;
++		case 41: if (app) idle = false; out.push_back(app ? r1() : 0x05); break;
++		case 58:
++			out.push_back(r1());
++			out.push_back(0xc0); out.push_back(0xff); out.push_back(0x80); out.push_back(0x00);	// powered up, CCS
++			break;
++		case 9: {	// CSD version 2.0
++			u32 csize = (u32)(blocks / 1024) - 1;
++			u8 csd[16] = { 0x40, 0x0e, 0x00, 0x32, 0x5b, 0x59, 0x00, (u8)((csize >> 16) & 0x3f),
++				(u8)(csize >> 8), (u8)csize, 0x7f, 0x80, 0x0a, 0x40, 0x00, 0x01 };
++			out.push_back(0x00);
++			queueData(csd, 16);
++			break;
++		}
++		case 10: {
++			u8 cid[16] = { 0x00, 'F', 'C', 'F', 'L', 'Y', 'S', 'D', 0x10, 0, 0, 0, 1, 0x01, 0x9a, 0x01 };
++			out.push_back(0x00);
++			queueData(cid, 16);
++			break;
++		}
++		case 12:
++			readMulti = false;
++			out.clear();
++			out.push_back(0xff);	// the stuff byte the host skips
++			out.push_back(0x00);
++			break;
++		case 13: out.push_back(r1()); out.push_back(0x00); break;
++		case 16: case 59: out.push_back(r1()); break;
++		case 23: out.push_back(0x00); break;
++		case 17: out.push_back(0x00); queueBlock(arg); break;
++		case 18: out.push_back(0x00); readMulti = true; readAddr = arg; break;
++		case 24: out.push_back(0x00); writeAddr = arg; writeMulti = false; state = WaitToken; break;
++		case 25: out.push_back(0x00); writeAddr = arg; writeMulti = true; state = WaitToken; break;
++		default: out.push_back(r1() | 0x04); break;
++		}
++	}
++
++	void byteIn(u8 b)
++	{
++		switch (state)
++		{
++		case Command:
++			if (cmdLen == 0 && (b & 0xc0) != 0x40)
++				return;
++			cmdBuf[cmdLen++] = b;
++			if (cmdLen == 6) {
++				cmdLen = 0;
++				command(cmdBuf[0] & 0x3f, (u32)cmdBuf[1] << 24 | cmdBuf[2] << 16 | cmdBuf[3] << 8 | cmdBuf[4]);
++			}
++			return;
++		case WaitToken:
++			if (b == 0xfe || (writeMulti && b == 0xfc)) {
++				data.clear();
++				state = Data;
++			}
++			else if (writeMulti && b == 0xfd) {
++				out.push_back(0xff);
++				out.push_back(0x00);	// busy a moment
++				state = Command;
++			}
++			else if ((b & 0xc0) == 0x40) {	// a command after all
++				state = Command;
++				byteIn(b);
++			}
++			return;
++		case Data:
++			data.push_back(b);
++			if (data.size() == 514) {
++				if (writeAddr < blocks) {
++					fseek(file, (long)writeAddr * 512, SEEK_SET);
++					fwrite(data.data(), 1, 512, file);
++					fflush(file);
++				}
++				writeAddr++;
++				out.clear();
++				out.push_back(0xe5);	// data accepted
++				out.push_back(0x00);	// busy, then ready
++				state = writeMulti ? WaitToken : Command;
++			}
++			return;
++		}
++	}
++
++	FILE *file = nullptr;
++	u64 blocks = 0;
++	bool selected = false, lastClk = false, idle = true, appCmd = false;
++	bool readMulti = false, writeMulti = false;
++	u32 readAddr = 0, writeAddr = 0;
++	int bitn = 0, miso = 1;
++	u8 inByte = 0, outByte = 0xff;
++	u8 cmdBuf[6] {};
++	int cmdLen = 0;
++	enum { Command, WaitToken, Data } state = Command;
++	std::deque<u8> out;
++	std::vector<u8> data;
++};
++
+ // SCSPTR2 - Serial Port Register
+ static u16 SCSPTR2_read(u32 addr)
+ {
+ 	SCIF_LOG("SCIF_SCSPTR2.read %x", SCIF_SCSPTR2.full);
++	if (SdSpiCard::Instance().plugged())
++		return (SCIF_SCSPTR2.full & ~0x11) | SdSpiCard::Instance().dataOut();
+ 	return SCIF_SCSPTR2.full & ~0x10; // CTS active/low
+ }
+ 
+@@ -288,6 +500,10 @@ void SCIFSerialPort::setBreak(bool on)
+ void SCIFSerialPort::SCSPTR2_write(u16 data)
+ {
+ 	SCIF_SCSPTR2.full = data & 0x00f3;
++	if (SdSpiCard::Instance().plugged()) {
++		SdSpiCard::Instance().pins(data);
++		return;
++	}
+ 	if (SCIF_SCSPTR2.SPB2IO == 1)
+ 		setBreak(SCIF_SCSPTR2.SPB2DT == 0 && SCIF_SCSCR2.TE == 0);
+ 	else

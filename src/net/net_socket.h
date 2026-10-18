@@ -148,6 +148,9 @@ static inline bool net_pending(net_sock_t s, uint32_t *out) {
 #ifdef _WIN32
     u_long n = 0;
     if (ioctlsocket(s, FIONREAD, &n) != 0) return false;
+#elif !defined(FIONREAD)
+    /* KallistiOS has none, and the Dreamcast build plays no netplay. */
+    (void)s; int n = 0;
 #else
     int n = 0;
     if (ioctl(s, FIONREAD, &n) != 0) return false;

@@ -31,7 +31,11 @@
 #endif
 
 #include "log.h"
+/* M2HLE_NO_ZIP: a build that never opens a zip (the Dreamcast reads straight
+ * ROM files off its disc) leaves miniz out; the zip readers then find nothing. */
+#ifndef M2HLE_NO_ZIP
 #include "miniz.h"
+#endif
 
 /* ---- File / zip extraction ---------------------------------------------- */
 
@@ -117,6 +121,10 @@ static inline void rl_mem_zip_note_missing(const char *filename) {
 /* The file out of in-memory zip `z`, by CRC (by name too, when not strict). */
 static inline uint8_t *zip_extract_mem_one(int z, const char *filename, size_t *out_size,
                                            uint32_t expected_crc) {
+#ifdef M2HLE_NO_ZIP
+    (void)z; (void)filename; (void)out_size; (void)expected_crc;
+    return NULL;
+#else
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_mem(&zip, g_rl_mem_zip.data[z], g_rl_mem_zip.size[z], 0)) return NULL;
@@ -133,6 +141,7 @@ static inline uint8_t *zip_extract_mem_one(int z, const char *filename, size_t *
         data = mz_zip_reader_extract_file_to_heap(&zip, filename, out_size, MZ_ZIP_FLAG_IGNORE_PATH);
     mz_zip_reader_end(&zip);
     return (uint8_t *)data;
+#endif
 }
 
 static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, uint32_t expected_crc) {
@@ -150,6 +159,10 @@ static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, u
  * time a desktop build took to load STF. */
 static inline uint8_t *zip_extract(const char *zippath, const char *filename,
                                    size_t *out_size, uint32_t *crc) {
+#ifdef M2HLE_NO_ZIP
+    (void)zippath; (void)filename; (void)out_size; (void)crc;
+    return NULL;
+#else
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_file(&zip, zippath, 0)) return NULL;
@@ -162,6 +175,7 @@ static inline uint8_t *zip_extract(const char *zippath, const char *filename,
     }
     mz_zip_reader_end(&zip);
     return (uint8_t *)data;
+#endif
 }
 
 /* The file in the zip whose CRC-32 is `crc`, whatever it is called. MAME finds
@@ -169,6 +183,10 @@ static inline uint8_t *zip_extract(const char *zippath, const char *filename,
  * (Sega Rally's srallyc.zip from 2010 has "epr-17888.12" for MAME's
  * "epr-17888c.12", and the two copro_data ROMs' IC numbers swapped). */
 static inline uint8_t *zip_extract_by_crc(const char *zippath, uint32_t crc, size_t *out_size) {
+#ifdef M2HLE_NO_ZIP
+    (void)zippath; (void)crc; (void)out_size;
+    return NULL;
+#else
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
     if (!mz_zip_reader_init_file(&zip, zippath, 0)) return NULL;
@@ -181,6 +199,7 @@ static inline uint8_t *zip_extract_by_crc(const char *zippath, uint32_t crc, siz
     }
     mz_zip_reader_end(&zip);
     return (uint8_t *)data;
+#endif
 }
 
 /* While > 0, a file not found is no error: a caller trying a chip that has a

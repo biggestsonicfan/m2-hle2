@@ -47,7 +47,12 @@
 #  define emu_mutex_lock(m)     pthread_mutex_lock(m)
 #  define emu_mutex_unlock(m)   pthread_mutex_unlock(m)
 #  define emu_sleep_ms(ms)      usleep((useconds_t)((ms) * 1000))
-#  define emu_yield()           ((void)sched_yield())
+#  ifdef _arch_dreamcast
+#    include <kos/thread.h>
+#    define emu_yield()         thd_pass()        /* KallistiOS: newlib hides sched_yield */
+#  else
+#    define emu_yield()         ((void)sched_yield())
+#  endif
    typedef pthread_cond_t  emu_cond_t;
 #  define emu_cond_init(c)      pthread_cond_init(c, NULL)
 #  define emu_cond_wait(c, m)   pthread_cond_wait(c, m)

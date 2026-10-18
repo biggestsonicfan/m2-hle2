@@ -18,6 +18,11 @@
  * Air Walkers (the page's ?game=, web/site/m2hle-games.js). Any other set is only
  * download size: left out, not hidden. See WEB-PORT.md. Both STF profiles are there, since
  * each is its own lobby space. */
+/* The Dreamcast (M2HLE_STF_ONLY, dreamcast/Makefile) plays Sonic the Fighters
+ * alone, from a disc made for it: the other games' profiles are 430 KB of its
+ * 16 MB (the 2B COP's SHARC interpreter, the TGP and TGPx4 cores, the 315-5881)
+ * that the page cache has instead (Pinboard #1038). */
+#ifndef M2HLE_STF_ONLY
 #include "srallyc.h"
 #include "vonj.h"
 #include "dynamcop.h"
@@ -32,6 +37,7 @@
 #include "m2snake.h"
 #include "sfight_homebrew.h"
 #endif
+#endif
 /* Prepared, not runnable (Pinboard #660): the sets noclip reads that the
  * board cannot run yet. A few hundred bytes of chip lists, so the web build
  * has them too. */
@@ -42,6 +48,7 @@
 const game_profile_t *const g_profiles[] = {
     &sfight_console_profile,
     &sfight_profile,
+#ifndef M2HLE_STF_ONLY
     &srallyc_profile,
     &vonj_profile,
     &dynamcopb_profile,
@@ -66,6 +73,7 @@ const game_profile_t *const g_profiles[] = {
     &powsled_profile,
     &m2snake_profile,
     &sfight_homebrew_profile,
+#endif
 #endif
 };
 

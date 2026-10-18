@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "constants.h"
+#include "m2_word.h"     /* m2_ld32a / m2_st32a, for the SHARC handlers */
 #include "emu_times.h"   /* host time spent in the handlers, for get_status */
 
 /* ---- Limits -------------------------------------------------------------- */
@@ -115,6 +116,16 @@ static inline void cop_tap_replies(void) {
     for (int k = 0; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
 }
 
+/* cop_write keeps a short path for a command's middle words (most of them);
+ * the rest go on to cop_write_word, out of line so the short path stays small. */
+#if defined(_MSC_VER)
+#define COP_NOINLINE __declspec(noinline)
+#define COP_EXPECT(x, v) (x)
+#else
+#define COP_NOINLINE __attribute__((noinline))
+#define COP_EXPECT(x, v) __builtin_expect((x), (v))
+#endif
+
 /* Run a command whose arguments are all in, timed and tapped. */
 static inline void cop_run(uint32_t cmd, const uint32_t *args, int n) {
     int64_t t0 = emu_times_cop_begin();
@@ -125,8 +136,14 @@ static inline void cop_run(uint32_t cmd, const uint32_t *args, int n) {
     cop_tap_replies();
 }
 
+/* The ring only the debug bridge reads: a build without one keeps the
+ * count, which marks the frames (GEO_CAPTURE_SIZE 1). */
 static inline void cop_capture(uint32_t val) {
+#if GEO_CAPTURE_SIZE > 1
     g_cop_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
+#else
+    (void)val;
+#endif
     g_cop.geo_capture_head++;
     if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
         g_cop.geo_capture_count++;
@@ -180,23 +197,60 @@ static inline void cop_take_cmd(uint32_t val) {
     }
 }
 
-/* Called for every 32-bit write to the COPROGRAM region. */
+/* A word cop_write's short path leaves: one that starts, ends or streams a
+ * command, or any word while the conversation is being tapped. */
+static COP_NOINLINE void cop_write_word(uint32_t val) {
+    if (g_cop.args_needed > 0)                     cop_take_arg(val);
+    else if (g_cop.args_needed == COP_ARGS_STREAM) cop_take_stream(val);
+    else                                           cop_take_cmd(val);
+}
+
+/* Called for every 32-bit write to the COPROGRAM region. A command's middle
+ * words (most of them) stop here; the rest go on to cop_write_word. */
 static inline void cop_write(uint32_t val) {
     g_cop.writes++;
 
     /* The boot image the i960 uploads before it lowers the bit: the HLE
      * runs none of it, and none of it is a command. */
-    if (g_cop.ctl && (g_cop.ctl[3] & 0x80)) {
+    if (COP_EXPECT(g_cop.ctl && (g_cop.ctl[3] & 0x80), 0)) {
         g_cop.upload_words++;
         return;
     }
 
     cop_capture(val);
-    if (g_cop.args_needed > 0)                    cop_take_arg(val);
-    else if (g_cop.args_needed == COP_ARGS_STREAM) cop_take_stream(val);
-    else                                          cop_take_cmd(val);
+    if (COP_EXPECT(g_cop.args_needed > 1 && !g_cop_tap, 1)) {
+        if (g_cop.args_received < COP_ARGS_MAX)
+            g_cop.args[g_cop.args_received++] = val;
+        g_cop.args_needed--;
+        return;
+    }
+    cop_write_word(val);
 }
 
+/* cop_write for n words in a row (the AOT's queue): a run of middle words
+ * goes into the arguments at once. */
+static inline void cop_write_n(const uint32_t *v, uint32_t n) {
+    uint32_t k = 0;
+    while (k < n) {
+        int m = g_cop.args_needed - 1;
+        if (GEO_CAPTURE_SIZE > 1 || m <= 0 || g_cop_tap || (g_cop.ctl && (g_cop.ctl[3] & 0x80))) {
+            cop_write(v[k++]);
+            continue;
+        }
+        if ((uint32_t)m > n - k) m = (int)(n - k);
+        int room = COP_ARGS_MAX - g_cop.args_received;
+        if (room > m) room = m;
+        if (room > 0) {
+            memcpy(&g_cop.args[g_cop.args_received], v + k, (size_t)room * sizeof *v);
+            g_cop.args_received += room;
+        }
+        g_cop.args_needed -= m;
+        g_cop.writes += (uint32_t)m;
+        g_cop.geo_capture_head += m;
+        if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE) g_cop.geo_capture_count = GEO_CAPTURE_SIZE;
+        k += (uint32_t)m;
+    }
+}
 /* A game frame ended: the words captured since the last edge are that frame's
  * draw commands, and the scanner reads exactly those (geo3d.h). The profile's
  * frame-pace hook calls this; so does the run loop for a board_vblank homebrew. */

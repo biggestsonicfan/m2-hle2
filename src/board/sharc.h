@@ -175,6 +175,10 @@ static inline float sharc_angle_to_rad(int32_t fp) {
  * leaves it alone. NULL on a board/profile that did not load one. */
 static const uint8_t *g_sharc_copro_rom      = NULL;
 static size_t         g_sharc_copro_rom_size = 0;
+/* The same two tables alone, for a host with no copro ROM in memory (the
+ * Dreamcast's link disc, dreamcast/tools/mksincos.py): 0x10000 words of sin
+ * (ROM words 0x8000..0x17FFF), then 0x10000 of cos (0x28000..0x37FFF). */
+static const uint32_t *g_sharc_sincos = NULL;
 
 /* sin/cos of a signed 16-bit angle the way the firmware takes them (_L202C1):
  * straight out of the ROM, sin at DM 0x1C10000 + angle, cos 0x20000 further on.
@@ -189,6 +193,15 @@ static inline void sharc_sincos(int32_t angle, float *s, float *c) {
         memcpy(c, g_sharc_copro_rom + (size_t)(0x30000 + a) * 4u, 4);
         return;
     }
+    if (g_sharc_sincos) {
+        memcpy(s, &g_sharc_sincos[0x08000 + a], 4);
+        memcpy(c, &g_sharc_sincos[0x18000 + a], 4);
+        return;
+    }
+#ifdef SHARC_HOST_SINCOS
+    SHARC_HOST_SINCOS(angle & 0xFFFF, s, c);   /* a host's own sin/cos of a binary angle */
+    return;
+#endif
     float r = sharc_angle_to_rad(angle);
     *s = sinf(r);
     *c = cosf(r);
@@ -291,6 +304,10 @@ static inline int32_t sharc_logb(float x) {
  * two = 2.0. *last gets the step register's final value, which atan2 goes on
  * to use. */
 static inline float sharc_fw_div_ex(float num, float d, float *last) {
+#ifdef SHARC_HOST_MATH   /* a host's divide; the last step's register has converged to 1 */
+    if (last) *last = 1.0f;
+    return num / d;
+#endif
     float f3 = sharc_recips(d), f4 = num, f12 = f3 * d;
     f4 = f3 * f4; f3 = 2.0f - f12;
     f12 = f3 * f12; f4 = f3 * f4; f3 = 2.0f - f12;
@@ -303,6 +320,9 @@ static inline float sharc_fw_div(float num, float d) { return sharc_fw_div_ex(nu
 /* _L2029B: 1/sqrt(x) by RSQRTS and three Newton steps; 0 for a zero input */
 static inline float sharc_fw_rsqrt(float x) {
     if (sharc_float_to_bits(x) == 0) return 0.0f;
+#ifdef SHARC_HOST_MATH
+    return 1.0f / SHARC_HOST_SQRTF(x);
+#endif
     float f4 = sharc_rsqrts(x), f12;
     for (int i = 0; i < 3; i++) {
         f12 = f4 * f4;
@@ -316,6 +336,9 @@ static inline float sharc_fw_rsqrt(float x) {
 /* _L202AE: sqrt(x) = x * the same 1/sqrt; a zero input comes back untouched */
 static inline float sharc_fw_sqrt(float x) {
     if (sharc_float_to_bits(x) == 0) return x;
+#ifdef SHARC_HOST_MATH
+    return SHARC_HOST_SQRTF(x);
+#endif
     float f4 = sharc_rsqrts(x), f15;
     for (int i = 0; i < 3; i++) {
         f15 = f4 * f4;

@@ -379,7 +379,7 @@ static inline int32_t i960_bt_count(uint32_t m) {
 }
 
 /* The load scoreboard, and this instruction's own load or store. */
-static inline int32_t i960_bt_data(i960_bt_t *t, i960_cpu_t *cpu, uint32_t w1, uint32_t w2) {
+static inline int32_t i960_bt_data(i960_bt_t *t, i960_cpu_t *cpu, uint32_t ip, uint32_t w1, uint32_t w2) {
     uint32_t op = w1 >> 24;
     uint32_t src = i960_bt_sources(w1);
     int32_t e = I960_BT_USE0 * i960_bt_count(src & t->pend0)
@@ -393,7 +393,7 @@ static inline int32_t i960_bt_data(i960_bt_t *t, i960_cpu_t *cpu, uint32_t w1, u
     uint32_t m = (w1 >> 10) & 15;
     if (((w1 >> 12) & 1) && (m == 7 || m == 14 || m == 15)) e += I960_BT_INDEX;
     int len;
-    int r = i960_bt_region(mem_ea(cpu, w1, w2, &len));
+    int r = i960_bt_region(mem_ea(cpu, ip, w1, w2, &len));
     if (op & 2) return e + g_i960_bt_st[r][n];
     uint32_t mask = i960_bt_block((w1 >> 19) & 31, n);
     t->pend0 = mask;
@@ -411,7 +411,7 @@ static inline void i960_bt_charge(i960_cpu_t *cpu, uint32_t ip, uint32_t w1, uin
     bool branched;
     int32_t e = i960_bt_branch(t, ip, &branched);
     e += i960_bt_fetch(t, ip, len, branched, op, cost);
-    e += i960_bt_data(t, cpu, w1, w2);
+    e += i960_bt_data(t, cpu, ip, w1, w2);
     int64_t a = (int64_t)cost * I960_CYC_ONE + e + g_i960_cyc_frac;
     if (a < 0) a = 0;
     cpu->cycles += (uint64_t)a >> 10;

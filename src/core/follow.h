@@ -46,6 +46,27 @@
 #ifndef FOLLOW_H
 #define FOLLOW_H
 
+#ifdef M2HLE_NO_ZIP
+/* A build with no zip support (the Dreamcast) has no feed: a segment is a
+ * zip, and the follower's checks are savestates. The run loop's calls, as
+ * they are with nothing led or followed. */
+#include <stdbool.h>
+#include <stdint.h>
+
+#define FOLLOW_BOARD_SESSION 1u
+#define FOLLOW_BOARD_WARNING 2u
+static inline bool     follow_leading(void) { return false; }
+static inline bool     follow_following(void) { return false; }
+static inline bool     follow_slice_ready(void) { return false; }
+static inline void     follow_lead_break(const char *why) { (void)why; }
+static inline uint32_t follow_board_flags(void) {
+    bool session = netplay_active();
+    return (session ? FOLLOW_BOARD_SESSION : 0u) | ((g_warning_skip || session) ? FOLLOW_BOARD_WARNING : 0u);
+}
+static inline void follow_slice_begin(emu_thread_ctx_t *ctx) { (void)ctx; }
+static inline void follow_slice_end(emu_thread_ctx_t *ctx, bool frame_end) { (void)ctx; (void)frame_end; }
+#else
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -725,4 +746,5 @@ static inline void follow_slice_end(emu_thread_ctx_t *ctx, bool frame_end) {
     else if (g_follow_lead.on) follow__lead_end(ctx, frame_end);
 }
 
+#endif /* M2HLE_NO_ZIP */
 #endif /* FOLLOW_H */
