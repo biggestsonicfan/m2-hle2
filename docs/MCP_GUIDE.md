@@ -6,7 +6,7 @@ A new Claude instance reading this can fully operate the m2-hle2 Sega Model 2 em
 
 ## What this is
 
-**m2-hle2** is a Sega Model 2 arcade board emulator written in C11 with an ImGui debug UI. Its game profiles (`src/profiles/registry.h`) are *Sonic The Fighters* twice on the `sfight` set (Console, the default, and Arcade), *Fighting Vipers*, the m2snake homebrew, and "Homebrew on Sonic the Fighters' board", the profile a swapped program on the `sfight` set falls back to. The emulator runs the board's Intel i960KB at 25 MHz; the vblank and timers come on its own cycle clock. The coprocessor is emulated at its FIFOs, the sound board runs its 68000 and SCSP, and a few HLE hooks remain: STF's texture loader runs in C, and some hardware stubs.
+**m2-hle2** is a Sega Model 2 arcade board emulator written in C11 with an ImGui debug UI. Its game profiles (`src/profiles/registry.h`) are *Sonic The Fighters* twice on the `sfight` set (Console, the default, and Arcade), *Sega Rally Championship* (`srallyc`), *Cyber Troopers Virtual-On* (`vonj`), *Dynamite Cop* / *Dynamite Deka 2* (`dynamcop`, `dyndeka2`, `dynamcopb`, `dyndeka2b`, `dynamcopc`), *Fighting Vipers*, *The House of the Dead* (`hotd`), *Daytona USA* (`daytona`), *Dead or Alive* (`doa`, `doab`, `doaa`, `doaab`, `doaae`), the m2snake homebrew, and "Homebrew on Sonic the Fighters' board", the profile a swapped program on the `sfight` set falls back to. `--profile` picks one by id. The emulator runs the board's Intel i960KB at 25 MHz; the vblank and timers come on its own cycle clock. The coprocessor is emulated at its FIFOs, the sound board runs its 68000 and SCSP, and a few HLE hooks remain: STF's texture loader runs in C, and some hardware stubs.
 
 The **MCP bridge** is a local TCP JSON server built into the emulator (`src/ui/mcp_bridge.h`). When launched with `--mcp`, the emulator listens on `127.0.0.1:7172`. The protocol is newline-delimited JSON (`\n` or `\r` ends a request): one `{"cmd":"...", ...}` object per line in, one reply object per line out, always carrying `ok`, and usually `error` when it is false (a few failures give only `ok:false`). An unknown command answers "unknown cmd: X", a line with no `cmd` "missing cmd". It serves **one client at a time**, one request at a time; a request line is cut at 8191 bytes (the rest is dropped, not refused) and a reply is capped at 128 kB.
 
@@ -46,6 +46,10 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--rom <path>` | Auto-load this ROM zip on startup. A directory of region images (`--export-roms`) loads too, with no zip, interleave or CRC pass; its name picks the profile as a zip's does |
 | `--export-roms DIR` | With `--rom <zip>`: write the set into DIR as one straight image per region (`maincpu.bin`, `main_data.bin`, `copro_data.bin`, `polygons.bin`, `textures.bin`, `audiocpu.bin`, `samples.bin`, and `tgp_tables.bin` for a Model 2A set), exactly as they sit in memory after the load, then quit. Name DIR after the set (`sfight`) |
 | `--run` | Start executing immediately after ROM load |
+| `--profile ID` | Play the set with this profile instead of the one its name picks, e.g. `sfight` for the Arcade STF (the `sfight` set defaults to `sfight_console`) |
+| `--region R` | `japan`, `usa` (the default) or `export`; `--region-over-saved` lets it win over the saved settings too |
+| `--load-state FILE` | Load a savestate at launch (see `load_state` below) |
+| `--scripts DIR` / `--no-scripts` | The folder `<set>.lua` is read from; run no game script (see "Game scripts" below) |
 | `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
 | `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
 | `--match-replay` | Arm `match_replay` (below) from boot |
@@ -88,7 +92,11 @@ the `swap` block that `overlay_swap` below moves along), `render` (the host's
 cumulative render times: `frames`, `compose_us`, `scan_us`, `upload_us`,
 `draw3d_us`, `tiles_us`) and `emu` (the emulation's cumulative times: i960, COP,
 sound and the waits, with `frame_max_us`, the worst frame since the last
-`get_status`).
+`get_status`, and `hist`, eight counts of frames by the emulation work each
+took, split at the `hist_ms` edges). It also carries `enemy_rank` (below), `link_pace`
+(`linked`, `frames`, `dropped`, `trims`: the 60 Hz clock of a linked comm board,
+`src/core/link_pace.h`) and `drive` (`cmd`, `kind`, `level`, `dir`, `strong`,
+`weak`: Daytona's drive board, the force feedback the game is asking for).
 
 `frames` is a monotonic count of completed game frames — the emulator's own frame
 clock, which is what a capture should pace on rather than wall time or steps/s.
@@ -180,7 +188,8 @@ both machines. A bot that paused for each observation ran its rounds at ~28 fps 
 Write bytes to the bus. `data` is a hex string with no spaces. Returns `bytes_written`.
 `rom: 1` writes what the CPU reads instead, program ROM included (a grader's cheat,
 e.g. pinning `rand()`); the bus's own write map leaves ROM alone.
-Both are done under the emu mutex, so a write lands in one piece.
+Both are done under the emu mutex, so a write lands in one piece. A `follow_lead`
+feed and a replay being recorded carry the write, so their boards make it too.
 
 **`dump_memory_file(addr: str, size: int, path: str)`**
 Copy a bus range straight to a file, up to 32 MB in one call. `read_memory` caps
@@ -278,7 +287,9 @@ reply `{"ok":true,"frame":N}` with the board's frame; the run state is left
 alone, so stop first if the board must not move between the save and what you
 do next. A load is refused for a file from another ROM set or another build's
 struct layout, inside a netplay session and under SKY EYE; the error comes back
-as `{"error":"..."}` and the board is untouched. `--load-state FILE` does the
+as `{"ok":false,"error":"..."}` and the board is untouched. Either also fails
+with no `path`, with no ROM set loaded, while another savestate is being made,
+or if the emu thread does not answer. `--load-state FILE` does the
 load at launch (headless: a failed load exits 1). Paths are on the emulator's
 machine.
 
@@ -291,21 +302,39 @@ frame check per frame. `every` is frames between join points (default five
 minutes); a reset, a state load, a single step, a COP command or SKY EYE end the
 segment and start the next at once, since a feed cannot carry them. `join:1`
 starts a new segment now, `off:1` stops, and no argument only reads. The reply
-says the segment, the feed's size and `join_ms`, how long the board waited for
+has `on`, `dir`, `seg` (the segment), `frame`, `every`, `feed_bytes`,
+`join_due`, `last_error` and `join_ms`, how long the board waited for
 the last join point (~50 ms: the state is snapshotted stored, and a thread
 deflates it to disk beside the board). The leader keeps the newest two segments.
 `--follow-out DIR` / `--follow-every N` do the same at launch.
 
-**`replay(record: int, dir: str, open: str, play: int, stop: int, seek: int, fast: int)`**
--- online match replays (`src/core/replay.h`, Pinboard #572). `record:1` saves
-every netplay match, RPCN or GGPO (#584), to `dir` (default `<user dir>/replays`) as
-`<p1>-vs-<p2>-<date>-<time>.m2replay`; `open` reads a file and returns its label
-in `info` without touching the board; `play:1` plays it (the board is reset to
-the replay's start), `seek` jumps to a frame, `fast:1` runs unpaced, `stop:1`
-gives the board back from power-on. No argument only reads: `recording`,
-`saved`, `last` (the newest file), `playback` (`frame`, `frames`, `ended`,
-`split`, `why`) and `unplayable` (why this build cannot play the open file).
-`--record-replays`, `--replay-dir DIR` and `--replay FILE` do the same at launch.
+**`replay(record: int, dir: str, format: str, view: str, open: str, play: int, stop: int, seek: int, fast: int, native: int, finish: int)`**
+-- match replays (`src/core/replay.h`, Pinboard #572, #617; the formats are in
+[NATIVE-REPLAY.md](NATIVE-REPLAY.md)). `record:1` saves every netplay match, RPCN
+or GGPO (#584), and every local game from the moment play starts until the board
+is back in attract, to `dir` (default `<user dir>/replays`) as
+`<p1>-vs-<p2>-<date>-<time>.m2replay` (`<set>-<date>-<time>.m2replay` for a
+one-player game). `format` picks what a recording saves: `"native"` (the
+default: `replay.json` and the rounds in the game's own replay format) or
+`"inputs"` (also `state.sta` and `inputs.feed`). `view` (`"native"`, `"inputs"`
+or `"auto"`) is the way the next `play` plays a file. `open` reads a file and
+returns its label in `info` without touching the board; `play:1` plays it (the
+board is reset to the replay's start), `seek` jumps to a frame, `fast:1` runs
+unpaced, `stop:1` gives the board back from power-on. `native:N` puts round N of
+the open replay into the board in the game's own replay format (Pinboard #602).
+`finish:1` saves the local game being recorded now, as the page's Finish replay
+does (#861), and fails with "no local game is being recorded"; `finished` says
+what became of it. A bad `format` or `view` answers "format is native or inputs"
+/ "view is native, inputs or auto".
+
+Every reply, including one with no argument, carries `record` (recording is
+on), `format`, `recording` (a game is being recorded now), `local` (it is a
+local game), `finished`, `saved`, `last` (the newest file), `record_error`,
+`playback` (`on`, `loaded`, `frame`, `frames`, `ended`, `split`, `why`, `fast`,
+`seeking`, `native_rounds`, `view`, `keyed_rounds`, `round`, `rounds`,
+`has_inputs`), `unplayable` (why this build cannot play the open file) and
+`info`. `--record-replays` / `--no-record-replays`, `--replay-format`,
+`--replay-view`, `--replay-dir DIR` and `--replay FILE` do the same at launch.
 
 **`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
 for an online opponent (`--idle-until-match` sets it at launch). While it is on
@@ -344,8 +373,9 @@ mouse would: `x` and `y` run 0..1 across and down the picture, `offscreen: 1`
 points it off the picture (a shot there reloads), `on: 0` hands it back to the
 pad's walk. Fire with `set_input` (P1 trigger `0x100`, reload `0x400`; P2
 `0x200` / `0x800`). Ignored by a board in a session, a follow or a replay,
-whose guns follow the pad word. Returns `ad_x` / `ad_y`, where the board's gun
-pointed at its last read (the A/D values the game sees).
+whose guns follow the pad word. Returns `player` and `ad_x` / `ad_y`, where the
+board's gun pointed at its last read (the A/D values the game sees). Any other
+`player` answers "player is 0 or 1".
 
 ### Breakpoints
 
@@ -454,10 +484,10 @@ object's. `ok=False` means the object did not draw, and `last_error` says why.
 
 | Group | Arguments |
 |-------|-----------|
-| Object | `model` (model-table index) **or** `capture` (an index from `get_geo_captures`), `use_capture_matrix` |
+| Object | `model` (model-table index) **or** `capture` (an index from `get_geo_captures`), `source` (`"model"` / `"capture"`, which of the two to draw; overrides the one naming an index implies), `use_capture_matrix` |
 | Placement | `pos_x/y/z` world units, `rot_x/y/z` degrees (Rz·Ry·Rx), `scale` |
 | Camera | `yaw`, `pitch`, `dist`, `fov` (vertical degrees), `autofit`, `fit_margin`, `target_x/y/z` |
-| Image | `width`, `height` (32–2048), `bg_r/g/b` (0–1), `wireframe`, `textured`, `cull` (0 none / 1 CW / 2 CCW) |
+| Image | `width`, `height` (32–2048), `bg_r/g/b` (0–1), `wireframe`, `textured`, `cull` (0 none / 1 CW / 2 CCW), `layers` (faces lying on faces drawn over them) |
 | UI | `active` (render at all), `window` (open the viewer's panel in the emulator's window) |
 
 - The camera is an **orbit about a target**. At yaw 0 / pitch 0 it stands on +Z looking down
@@ -482,14 +512,17 @@ three spellings, checked in this order:
 | Spelling | Angles |
 |----------|--------|
 | `six=True` | the six camera stations: +Z, +X, −Z, −X, +Y (looking down), −Y (looking up) |
-| `count=N` | a turntable from `yaw0` in steps of `yaw_step`; with no step named, the shots spread evenly over a full turn |
+| `count=N` | a turntable from `yaw0` / `pitch0` in steps of `yaw_step` / `pitch_step`; with neither step named, the shots spread evenly over a full turn of yaw |
 | neither | one shot at the viewer's current yaw and pitch |
 
 `N` is capped at 64, and a whole batch renders inside one host frame — six 384×384 angles of a
 3400-triangle model take about 5 ms.
 
 Any setting `objview_set` takes may be passed here too, so one call can select the object,
-place it and shoot it.
+place it and shoot it. `keep=1` also keeps each encoded PNG in memory (what the browser
+build reads them out of); with no `path` that is implied. A build that cannot read the GPU
+back answers "this build cannot read the GPU back (Metal / WebGPU)", and a shot asked for
+while the last batch is still rendering "a shot batch is already in flight".
 
 Each shot reports `coverage` (the fraction of the image that is not the background) and `box`
 (the pixel rectangle the object drew into). That is enough to tell an off-screen or hair-thin
@@ -605,7 +638,7 @@ box for 4 s, after any already waiting; the one the emulator raises by itself wh
 comes into the room it is in ("WELCOME  test1 came into the room.") or a GGPO lobby match
 starts ("WELCOME  flychallenger came into the match."). It needs no plugin and does
 not move the board. One not up within 20 s (nothing composing frames: headless with no A/V
-client) is dropped. `get_status`'s `overlay.announce` has `up`, `queued`, `shown` and `note`.
+client) is dropped. Returns `{"ok":true,"queued":true}`. `get_status`'s `overlay.announce` has `up`, `queued`, `shown` and `note`.
 
 ### Netplay (RPCN)
 
@@ -634,7 +667,10 @@ it is 64-bit), `com_id`, `frame`, `stalls`, `generation`, `seed`,
 `desync_frame` (null while the two boards agree), `empty_room`, `error`, `stage`, `is_host`,
 `player`, `room_flags` (a hex string), and a `twitch` object (`state`, `signed_in`, `npid`,
 `user_code`, `uri`, `error`). On a PS3 link it adds a `ps3` object, the PS3 lockstep's
-state. `rooms: 1` adds `search_pending` and `rooms`, the
+state. With a comm link open (Virtual-On's two linked boards) it adds a `comm`
+object: `open`, `linked`, `role`, `waited`, `cn_frame` and `first_send` (-1 until
+they happen), `early`, `ring` (`up`, `node`, `nodes`, `sent`, `taken`), `sent`,
+`taken`, `stale`, `torn`, `too_big`, `overflow`, `packed_peak` and `pending`. `rooms: 1` adds `search_pending` and `rooms`, the
 last search's results as `{room_id, owner, members, max, password, flags, rules}`
 (`flags` is a hex string; bits 6-7 are the build family: 1 is a browser-build room, which this
 build can join now that cross-play is on); `log` is how many lines of
@@ -751,9 +787,9 @@ fly behind it.
 
 ### Rollback netplay (the GGPO lobby)
 
-`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (off, connecting, connected, signed in, channel, match, failed), the account, the channel's `users` with their states, a challenge to us (`challenged_by`) or ours (`challenging`), the `match` and `opponent`, whether the match has gone `direct` or still rides the relay, packet counts each way, `error` and the last chat lines, then the board's side: `vs_mode`, `results`, `winner` and `session` (`on`, `running`, `frames`: GGPO's session, its frames counted from the cold boot). The lobby reaches `match` before the cold boot, which zeroes get_status's `frames`, so a driver waiting for the match to run waits on `session.running`, not on get_status (Pinboard #588). The desktop build only; a build without GGPO answers `ok: false`.
+`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (`off`, `connecting`, `connected`, `signed_in`, `channel`, `match`, `failed`), the `url`, `user` and `game`, `twitch` with `twitch_code` / `twitch_uri`, the channel's `users` (`name`, `state`), a challenge to us (`challenged_by`) or ours (`challenging`), the `match`, `opponent`, `side` and `peer_known`, whether the match has gone `direct` or still rides the relay, packet counts each way (`sent_direct`, `sent_relay`, `got_direct`, `got_relay`), `error` and the last `chat` lines, then the board's side: `vs_mode`, `results`, `winner` and `session` (`on`, `running`, `frames`: GGPO's session, its frames counted from the cold boot). The lobby reaches `match` before the cold boot, which zeroes get_status's `frames`, so a driver waiting for the match to run waits on `session.running`, not on get_status (Pinboard #588). The desktop build only; a build without GGPO answers `ok: false`, "this build has no GGPO".
 
-`"do"` posts a step first, which the emu thread runs at its next pump, so the reply still shows the stage before it:
+`"do"` posts a step first, which the emu thread runs at its next pump, so the reply still shows the stage before it. Any other `do` answers "unknown step":
 
 | `do` | arguments |
 |---|---|
@@ -771,15 +807,16 @@ Test against a local ggpo-server, never the live one.
 ### Game scripts (M2emulator's Lua)
 
 Bridge-only JSON commands for the game's script, `<scripts>/<set>.lua`
-(docs/invariants/scripts.md). The last three are refused while a session
-(netplay, GGPO, a replay, a follow) owns the board.
+([invariants/scripts.md](invariants/scripts.md)). The last three are refused
+with "a session owns the board" while a session (netplay, GGPO, a replay, a
+follow) owns the board. A build without Lua answers "unknown cmd" to all four.
 
 | cmd | fields | does |
 |---|---|---|
-| `script_status` | | `loaded`, `running`, `frames`, `path`, `error`, `options` (`key`, `name`, `value`, `values`) |
-| `script_option` | `key`, `value` | sets an option to its `value`th value; `changefunc` runs |
-| `script_eval` | `code` | runs a chunk in the script's state; `result` is its return values, tab-joined |
-| `script_reload` | | reads the script again and runs it from the start |
+| `script_status` | | `lua` (the Lua release), `loaded`, `running`, `frames`, `draws`, `set`, `path`, `error`, `options` (`key`, `name`, `value`, `values`) |
+| `script_option` | `key`, `value` | sets an option to its `value`th value; `changefunc` runs. Replies with the status; "missing key or value", "no such option or value" |
+| `script_eval` | `code` | runs a chunk in the script's state; `result` is its return values, tab-joined, or `error` |
+| `script_reload` | | reads the script again and runs it from the start; replies with the status |
 
 ### Captures and diagnostics
 
@@ -835,9 +872,9 @@ bufferram's words. Returns `read_start`, `seq`, `hsync`, `vsync`.
 
 **`set_geo_isolate(index = -1, from, to, dump_tex)`** — draw only captured
 object `index` (-1 for all), or only captures in `[from, to]` (`to < from` turns
-the range off). Returns `isolate`.
+the range off). Returns `isolate`; a bare `ok:false` before the renderer is up.
 
-**`set_camera(cam_x, cam_y, cam_z, rot_x, rot_y, fov, test, lines_only, zflat, zkey0, zsort, zrecede, zlayers, zlayer_steps, texclamp, checker, nnormals)`**
+**`set_camera(cam_x, cam_y, cam_z, rot_x, rot_y, fov, test, lines_only, zflat, zkey0, zsort, zrecede, zlayers, zlayer_steps, texclamp, checker, nnormals, pixdepth)`**
 Live-tune the 3D renderer's camera and switches; values travel as strings and
 an omitted one keeps its value. The switches are A/B toggles, each on by default:
 `zflat: 0` draws a game frame's faces by the half rule instead of the board's flat
@@ -846,8 +883,11 @@ sort key; `zsort` / `zrecede` (the half rule's sort and its recede bound) and
 `zlayers` / `zlayer_steps` are the object viewer's coplanar layers; `texclamp: 0`
 wraps the texture filter at every tile edge; `checker: 0` brings back the old
 checker phase; `nnormals: 0` lights mode 2/3 lists with the ROM normals.
+`pixdepth` is the one off by default: `pixdepth: 1` takes the board's sort key of
+each pixel's own depth instead of the face's (MAME's `float_to_zval`), as
+`--pixel-depth` / `--no-pixel-depth` set it at launch.
 Returns `cam`, `rot` (`[rot_y, rot_x]`), `fov`, `lines`, `tris`, `test`, `zflat`,
-`zlayers`, `layer_faces`, `zadjust`; "geo3d not ready" before the renderer is up.
+`zlayers`, `layer_faces`, `zadjust`, `pixdepth`; "geo3d not ready" before the renderer is up.
 
 **`dump_bones()`** — the current position (`cur_pos`) and a four-slot summary of P1's bone
 slots (`slots`, each `{slot, rot_cache_T, tgp_T, rot_cache_R}`), at three decimals.

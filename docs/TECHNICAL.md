@@ -7,12 +7,15 @@ emulator can do, see [FEATURES.md](FEATURES.md); the other documents are listed 
 
 A cross-platform **Sega Model 2 arcade emulator** written in C11, with a Dear ImGui debug
 front-end on top of Sokol. *Sonic The Fighters* is the reference title, but the board layer
-targets the wider Model 2 / 2A-CRX / 2B-CRX catalogue — *Fighting Vipers* boots on the same
-code, and a homebrew ROM runs on it too.
+targets the whole Model 2 / 2A-CRX / 2B-CRX / 2C-CRX catalogue: *Fighting Vipers*,
+*Virtual-On*, *Sega Rally*, *Dynamite Cop*, *The House of the Dead*, *Daytona USA* and
+*Dead or Alive* run on the same code, and a homebrew ROM runs on it too.
 
 The emulator is **HLE** (high-level emulation): the i960 game code is interpreted for real,
-while the geometry coprocessor and a few hot game routines (STF's texture loader) are
-reimplemented in C rather than simulated gate-for-gate. The sound board runs the game's own
+while STF's geometry coprocessor program and a few hot game routines (STF's texture loader) are
+reimplemented in C rather than simulated gate-for-gate. A game that uploads its own coprocessor
+program has it run on an interpreter of the board's chip instead: the SHARC on Model 2B, the TGP
+on Model 2A and the original Model 2, the TGPx4 on Model 2C. The sound board runs the game's own
 68000 driver; a C port of STF's driver is optional (`--sound-hle`).
 
 ```
@@ -25,15 +28,17 @@ build/Release/m2hle.exe --rom <romset>.zip --run   # build/m2hle on Linux
 
 Dependencies are git submodules under [vendor/](../vendor/); `vendor/noclip` is only needed by
 [tools/](../tools/), so `git submodule update --init vendor/imgui vendor/dear_bindings vendor/sokol
-vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb` is enough to build.
+vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb vendor/lua` is enough to build.
+`vendor/ggpo` adds rollback netplay and `vendor/gems-c` Sonic Gems Collection's C; a build
+without them leaves those out. [build.md](build.md) has the rest.
 
 That is the default frontend, the ImGui debugger (D3D11 on Windows, GL core on Linux, Metal on
 macOS). `-DM2HLE_FRONTEND=sdl3` builds a fullscreen SDL3 / GLES 3 host with no ImGui for
 handhelds (see [packaging/rocknix/](../packaging/rocknix/)), and `-DM2HLE_FRONTEND=web` the
-Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, remappable keys, gamepads and
+Emscripten browser build that deploys to arcade.sonicthefighte.rs, with online play, remappable keys, gamepads and
 touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)).
 `-DM2HLE_FRONTEND=libretro` builds a RetroArch core (see [packaging/libretro/](../packaging/libretro/)).
-These three need only `vendor/sokol`, `vendor/miniz` and `vendor/stb`.
+These three need only `vendor/sokol`, `vendor/miniz`, `vendor/stb` and `vendor/lua`.
 
 No ROMs, ROM-derived data, or other copyrighted material is included in this repository, and
 none will be accepted into it. You must supply your own dumps.
@@ -70,8 +75,9 @@ account of how the game actually works, end to end.
 
 The standard for anything entering that map is the same as everywhere else here: it is mapped when
 it has been *measured*, not when it is plausible. Pieces that are named but not yet understood stay
-labelled as such — [CLAUDE.md](../CLAUDE.md) holds the confirmed invariants, and several of its
-entries exist precisely because an earlier confident guess turned out to be wrong.
+labelled as such — [invariants/](invariants/) holds the confirmed invariants, one file per
+subsystem, and several of its entries exist precisely because an earlier confident guess turned
+out to be wrong.
 
 Anything general enough to be shared belongs in the board layer, so mapping one game's engine makes
 the next game cheaper instead of being spent on a single ROM set.
@@ -80,27 +86,38 @@ the next game cheaper instead of being spent on a single ROM set.
 
 | Subsystem | State |
 |---|---|
-| Intel i960 KB CPU core | Interpreted, boots STF and FV to gameplay |
-| Memory bus | 36 regions, MMIO callbacks, board + game address maps |
-| COP / ADSP-21060 SHARC | HLE math engine, about a hundred commands, column-major post-multiply matrices |
+| Intel i960 KB CPU core | Interpreted, runs every game profile below |
+| Memory bus | MMIO callbacks, the Model 2B map plus what a 2A, 2C or original Model 2 board changes (`model2a.h`, `model2c_cop.h`, a game's install), and each game's address map |
+| COP / ADSP-21060 SHARC | Sonic the Fighters' COP program as an HLE math engine, about a hundred commands, column-major post-multiply matrices; a 2B game that uploads its own program (Virtual-On, Dynamite Cop, Dead or Alive) runs it on a SHARC interpreter (`sharc_cpu.h`) |
+| TGP / TGPx4 | The Model 2A and original Model 2 coprocessor, an MB86234 running the uploaded program (`tgp.h`: Sega Rally, Daytona USA, the 2A Dynamite Cop and Dead or Alive), and the Model 2C's MB86235 (`tgpx4.h`: The House of the Dead, the 2C Dynamite Cop) |
 | 2D tiles | System 24 tile compositor, palettes, per-tile priority against the 3D layer |
 | 3D pipeline | Index-array polygon decoder (J = 1.0 vs. reference meshes), textures, flat + luma shading, backface cull, shadows |
 | MC68000 sound CPU | Full opcode core with Motorola cycle timing, unit tests |
 | SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
+| Model 1 boards | The original Model 2's Model 1 I/O board, its Z80 running its own program (`model1io.h`, `z80.h`), and Model 1 sound board, a 68000 with two MultiPCMs and a YM3438's timers (`model1_sound.h`): Daytona USA |
 | Sound driver in C | Optional for STF (`--sound-hle`): its driver ported to C, the same SCSP underneath, the i960 none the wiser |
+| Board chips | The 93C46 EEPROM, the 315-5881 decryption chip (Dynamite Cop), the 317-0229 compression chip (Dead or Alive), the comm board alone or linked to a second cabinet (`m2comm.h`) |
 | Backup RAM | The board's SRAM kept between a player's own boots, as MAME's `backup1` (`--nvram-dir`, `--no-nvram`); detached during netplay |
-| Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
+| Savestates | The whole board in one zip, as m2emulator's `.sta` (`savestate.h`); the libretro core saves a flat copy and has rewind |
+| Replays | Matches recorded and played back (`--record-replays`, `--replay FILE`, the Replays menu); Sonic the Fighters and Sega Rally keep them in the game's own replay format and play them through the game's own code ([NATIVE-REPLAY.md](NATIVE-REPLAY.md)) |
+| Input | Interrupt-driven, through the real 315-5649 I/O ports; the wheel, pedals and lever of the driving games; the House of the Dead light guns, aimed with a host's pointer (`lightgun.h`); the wheel's force feedback played on a pad or wheel (`ffb.h`); optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
 | Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
-| Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
+| Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); GGPO rollback through its own lobby (desktop, web and libretro builds); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server; Virtual-On's two cabinets linked over a room |
 | PS3-release menus | The Console profile's title, main menu, Arcade / Offline Versus settings and online lobby, redrawn after the PS3 release (libretro core and web build) |
+| Game scripts | M2emulator's Lua scripts (`<set>.lua`), in Lua 5.5 (`m2lua.h`) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
-| Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
-| Picture filters | Lost Judgment's CRT scanlines, as [YAMP](https://github.com/biggestsonicfan/YAMP) ports them (desktop and web builds), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
+| Streaming | Raw board video and audio on one socket and one clock (`--av-port`), a plugin that paints over the picture (`--overlay`), and a board followed one way by viewers (`--follow-out`, the web page's `?follow=`) |
+| Picture filters | The Arcade switch (a real board's tone curve, ghosting, noise and 4:3 shape), and over it Lost Judgment's CRT scanlines, as [YAMP](https://github.com/biggestsonicfan/YAMP) ports them (both desktop and web builds), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--arcade`, `--crt`, `--shader`; the browser's Picture tab. Depth per pixel (`--pixel-depth`, off by default; desktop, web and libretro builds) draws each pixel at its own depth instead of the board's one sort key a polygon |
 
-Game profiles live in [src/profiles/](../src/profiles/): `sfight_console`, `sfight`, `fvipers`,
-`m2snake`, and `sfight_homebrew` for homebrew run on STF's board (the web build carries the two
-Sonic the Fighters profiles only).
+Game profiles live in [src/profiles/](../src/profiles/), listed in
+[registry.h](../src/profiles/registry.h): `sfight_console`, `sfight`, `srallyc`, `vonj`, the
+five Dynamite Cop / Dynamite Deka 2 sets (`dynamcop` and `dyndeka2` on Model 2A, `dynamcopb`
+and `dyndeka2b` on 2B, `dynamcopc` on 2C), `fvipers`, `hotd`, `daytona`, the five Dead or Alive
+sets (`doa` and `doab` on 2B, `doaa`, `doaab` and `doaae` on 2A), `m2snake`, and
+`sfight_homebrew` for homebrew run on STF's board. `vcop` is prepared, not runnable: its ROMs
+and model table load, for the decoder tests, but the board cannot run it yet. The web build
+leaves out the two homebrew profiles, and its page offers every game but Dead or Alive.
 
 ### Sonic the Fighters: Console and Arcade
 
@@ -124,23 +141,33 @@ pick the same one to see each other's rooms.
 
 ## Layout
 
-- [src/board/](../src/board/) — everything shared by every Model 2 ROM set: CPU, bus, COP/SHARC,
-  tile and 3D renderers, 68K, SCSP, IRQ/timers.
+- [src/board/](../src/board/) — everything shared by every Model 2 ROM set: CPU, bus, COP/SHARC
+  (STF's program in C, and a SHARC interpreter for the programs games upload), the 2A TGP and
+  2C TGPx4, tile and 3D renderers, 68K, SCSP, IRQ/timers, the Model 1 I/O and sound boards
+  with their Z80, the comm board, the light guns, the drive board, the EEPROM and the security
+  chips.
 - [src/core/](../src/core/) — ROM loading, profile resolution, HLE hook dispatch, emu thread,
-  breakpoints/watchpoints, logging, host audio out, the raw A/V stream, backup RAM, the
+  breakpoints/watchpoints, logging, host audio out, the raw A/V stream, backup RAM, savestates
+  and rollback, GGPO, replays, the one-way follow, game scripts (`m2lua.h`), force feedback, the
+  linked board's pace, the Sonic Gems Collection and Sega Ages hooks (`gems.h`, `ages.h`), the
   self-profiler, the heat guard and SKY EYE.
 - [src/net/](../src/net/) — netplay: the RPCN client (TLS, protocol, rooms, signaling), the
-  lockstep engine, and the glue that gates the emulator's frame loop on it.
+  lockstep engine, the glue that gates the emulator's frame loop on it, the gateway relay, the
+  comm board's link over a room or 127.0.0.1, the GGPO lobby, and GGPO's C API
+  (`ggpo_port/`).
 - [src/ui/](../src/ui/) — ImGui debug windows, game render target, MCP bridge, the PS3-release
   menus (`ps3ui*`), picture filters, capture mode and its tray icon, A/V capture, the overlay
-  host, and the handheld's pad lobby.
+  host, the replay and script menus, the light-gun pointer, and the handheld's pad lobby.
 - [src/libretro/](../src/libretro/) — the libretro API header the RetroArch core builds against.
 - [src/profiles/](../src/profiles/) — one `game_profile_t` per ROM set (hook addresses, input map,
-  ROM list + CRC32s, quirks).
-- [tests/](../tests/) — nineteen CTest targets (bus, i960, ROM, emu, boot, COP, GEO, 68K, input,
-  netplay, PS3 netplay, tiles, heat guard, host audio out, SCSP DSP ×2, SCSP lazy chip, shader
-  presets, PS3 menu settings), plus `cop_replay`, `snd_replay`, `snd_bench`, `det_digest` and
-  `ps3ui_render`, which the graders drive, and the fuzzers `scsp_fuzz`, `m68k_fuzz` and `i960_fuzz`.
+  ROM list + CRC32s, quirks), listed in `registry.h`.
+- [tests/](../tests/) — thirty-four CTest targets (bus, i960, ROM, prepared profiles, emu, boot,
+  COP, GEO, 68K, input, netplay, PS3 netplay, tiles, heat guard, host audio out, SCSP DSP ×2,
+  SCSP lazy chip, TGP, TGPx4, Z80, SHARC, PS3 menu settings, region, Sega Rally's replays,
+  comm board, comm link, comm role, local Versus, link pace, force feedback, Lua scripts, shader
+  presets, RetroArch's info cache), plus `cop_replay`, `sharc_replay`, `snd_replay`,
+  `snd_bench`, `det_digest` and `ps3ui_render`, which the graders drive, and the fuzzers
+  `scsp_fuzz`, `m68k_fuzz` and `i960_fuzz`.
 - [mcp_server/](../mcp_server/) — Python MCP server that drives a running emulator over the bridge.
 - [tools/](../tools/) — graders that measure this emulator against an independent implementation
   of the same ROM formats, with a MAME digest as the third point. See [tools/README.md](../tools/README.md).
@@ -151,9 +178,14 @@ pick the same one to see each other's rooms.
 - [vendor/](../vendor/) — dependencies, all git submodules pinned to an exact upstream commit:
   Dear ImGui, dear_bindings (generates the `ig*` C bindings into the build tree at build
   time — nothing generated is committed), Sokol, ImGuiFileDialog, imgui_club (the hex editor
-  behind the memory viewers), miniz, stb (stb_truetype, for the PS3-menu fonts), and [noclip](https://github.com/biggestsonicfan/noclip).
+  behind the memory viewers), miniz, stb (stb_truetype, for the PS3-menu fonts), Lua (game
+  scripts), [GGPO](https://github.com/pond3r/ggpo) (rollback netplay; optional),
+  [noclip](https://github.com/biggestsonicfan/noclip), and gems-c (Sonic Gems Collection's C,
+  which is Sega's and so lives outside this repository; optional).
+- [cmake/](../cmake/) — `ggpo.cmake`, which builds GGPO from its submodule.
 
-Everything except the frontends' `main*.c` and `sokol_*impl.c/.m`, `ui/mem_edit.cpp`, and the submodules' `.c` files
+Everything except the frontends' `main*.c` and `sokol_*impl.c/.m`, `ui/mem_edit.cpp`,
+`net/ggpo_port/ggpo_port.cpp` (GGPO's C API), and the submodules' `.c` and `.cpp` files
 is a header-only `.h` module. That is deliberate — see [CLAUDE.md](../CLAUDE.md).
 
 ## The menu bar
@@ -192,10 +224,10 @@ on the same machine. An `m2hle_netplay.cfg` left in the working directory by an 
 copied over the first time.
 
 **A session is a cold boot, not a savestate.** When both players are ready, *both machines reset
-the board* and every frame from power-on is played in lockstep. This emulator has no savestates,
-and the only state two copies can be certain to share is the one a board is in a microsecond
-after the power comes on — so that is where a match starts, exactly as two arcade cabinets
-would. You watch the SEGA logo together, and from there the two boards are the same machine.
+the board* and every frame from power-on is played in lockstep. A savestate is never sent to a
+peer, so the only state two copies can be certain to share is the one a board is in a
+microsecond after the power comes on — so that is where a match starts, exactly as two arcade
+cabinets would. You watch the SEGA logo together, and from there the two boards are the same machine.
 
 What makes that sound is the same property [tools/](../tools/) already measures: identical inputs
 from a reset produce identical state, frame for frame. Every packet also carries a hash of the
@@ -226,6 +258,14 @@ lobby with people next door is worth telling apart from an empty one. Rooms made
 build can be joined too: the web and desktop builds compute the same frames
 ([WEB-NETPLAY.md](WEB-NETPLAY.md), "Cross-play"), though joining a web room needs a desktop build
 from after that.
+
+**Virtual-On links two cabinets instead.** Its Twin cabinet is two boards joined by their comm
+boards, so for a game whose profile has a link role a room match opens that link rather than a
+lockstep session: the room's owner boots as the MASTER cabinet and the other player as the
+SLAVE, each board runs on its own at 60 Hz of wall time, and only the comm board's datagrams
+cross ([invariants/netplay.md](invariants/netplay.md); the plan is in
+[VIRTUAL-ON-PS3.md](VIRTUAL-ON-PS3.md)). The handheld build's `--versus` does the same on one
+machine: a second m2hle as the other cabinet, linked over 127.0.0.1.
 
 Scriptable without the GUI, which is how it gets tested:
 
@@ -270,10 +310,72 @@ RPCN through a WebSocket gateway on the RPCN host ([web/gateway/](../web/gateway
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
 worked the RPCN protocol out first.
 
+### Rollback netplay (GGPO)
+
+The desktop, web and libretro builds can also play with rollback instead of lockstep, through
+[GGPO](https://github.com/pond3r/ggpo): the board runs on at once, guessing the other player's
+input, and rewinds and runs again when the real input differs. Matches are found on the GGPO
+lobby, `ggpo.sonicthefighte.rs`: sign in, join the game's
+channel and challenge a player. The match goes peer to peer when the two machines can reach each
+other, and through the lobby's relay when they cannot. A match is a cold boot on both machines,
+as an RPCN session is ([invariants/ggpo.md](invariants/ggpo.md)).
+
+```
+m2hle --rom sfight.zip --ggpo-lobby default --ggpo-user NAME --ggpo-pass PASSWORD --ggpo-challenge FRIEND
+m2hle --rom sfight.zip --ggpo-lobby default --ggpo-user FRIEND --ggpo-pass PASSWORD --ggpo-accept NAME
+```
+
+`--ggpo-signup` creates the account first, and `--ggpo-delay N` sets the local input delay
+(2 frames by default). `--ggpo-remote IP:PORT --ggpo-player 1|2 --ggpo-local PORT` plays straight
+to an address with no lobby. Over the MCP bridge, `{"cmd":"ggpo_lobby"}` reports and drives the
+lobby.
+
+On the website, the menu's GGPO lobby button opens a panel to sign in (or sign up, or with
+Twitch), see who is in the game's channel, challenge them and chat. A browser has no UDP, so its
+matches always go through the lobby's server; a browser plays desktop players and other browsers
+alike.
+
+In RetroArch, set the core option Online play to GGPO and fill `m2hle-ggpo.cfg` in the saves folder
+(written on the first load): `user=` / `pass=` (no user signs in with Twitch and writes the account
+back), `challenge=NAME` and `accept=NAME|any`, and optionally `url=`. In the game, L + R lists who is
+free to challenge.
+
+## Game scripts (Lua)
+
+M2emulator's scripts run here too, in Lua 5.5: put `<set>.lua` (`sfight.lua`, `vonj.lua`, ...)
+in a `scripts` folder in the working directory or beside the executable, or name another with
+`--scripts DIR` (`--no-scripts` turns them off). `Init`, `Reset`, `Frame`, `PostDraw`, `End`, the
+`Options` table (the **Script** menu), `I960_Read*/Write*`, `Romset_Read*/Patch*`, `Video_DrawText`
+and `Input_IsKeyPressed` work as they did there, and Lua 5.5's own `& | ~ << >>` work beside
+`AND`/`OR`/`SHL`. On the web the drawer's **Cheats** tab is the script: type it in, press Run, and
+it is kept in that browser for the game. A script never runs during an online match, a replay
+or a follow; its ROM patches come off and it starts again when that ends.
+[invariants/scripts.md](invariants/scripts.md) has the details.
+
 ## Picture filters
 
 A filter goes over the game's 4:3 picture only, never over the rest of the window. Filters draw
 the picture a second time every frame, so they can cost frame rate on a weak GPU.
+
+The **Arcade** is a switch of its own, not one of the filters: it makes the game's picture a
+real Model 2B board's first, and whichever filter is chosen then goes over it (#646). Each
+colour goes through c^0.76, which is what the owner's board does to this emulator's picture
+(measured from its captured video against the same frames here). The colours and their balance
+stay as they are; the mid-tones get brighter. It also has the board's signal and monitor (#643):
+the ghost every edge trails to its right (+7%, then a ripple of 2-3% fading over ~25 pixels), the
+capture's noise (0.5-1.5% of white, new every frame), and the picture shown 4:3, as the cabinet's
+monitor shows it, instead of with square pixels. The desktop and web builds.
+
+**Depth per pixel** is another switch, off by default, and it is not the board (#668). The board
+sorts each polygon by one key, so where faces cross, the whole of one wins: in the attract
+intro the Tornado's wing hides the backs of Sonic's shoes, on the real board as here. With the
+switch each pixel is drawn at its own depth, so the shoes come in front of the wing. It works
+both ways: a part the board shows only through its sort is hidden too (the dark wedge at the
+wing's tip in the same shot lies behind the wing). On a GLES device (the handhelds) it costs
+frame rate, since the fill then writes its depth and the GPU's early depth test is lost. The
+desktop, web and libretro builds: the Video menu, `--pixel-depth`, the libretro core's Depth option, the browser's Picture tab.
+
+The filters:
 
 - **CRT (Lost Judgment's)** -- the CRT filter Lost Judgment's arcade cabinets put on Sonic the
   Fighters, as YAMP reverse-engineered it: one scanline per Model 2 line, a faint aperture
@@ -288,11 +390,14 @@ the picture a second time every frame, so they can cost frame rate on a weak GPU
 
 ```
 m2hle --rom sfight.zip --crt                            # the CRT filter
+m2hle --rom sfight.zip --arcade                         # the real board's picture (--no-arcade: off)
+m2hle --rom sfight.zip --arcade --crt                   # the board's picture, the CRT over it
 m2hle --rom sfight.zip --shader crt/crt-geom.glslp      # a libretro preset (GL builds)
 m2hle --rom sfight.zip --shader-scale 2                 # the picture the filter reads: 1-4 x 496x384
+m2hle --rom sfight.zip --pixel-depth                    # depth per pixel, not the board (--no-pixel-depth: off)
 ```
 
-On the desktop the **Video** menu picks the filter, loads a preset, sets its parameters and is
+On the desktop the **Video** menu switches the Arcade and depth per pixel, picks the filter, loads a preset, sets its parameters and is
 remembered in `video.cfg` beside the netplay settings (`%APPDATA%\m2hle2`, `~/.config/m2hle2`);
 the command line applies over it for one run. In the browser it is the menu's **Picture** tab:
 choose a preset's files or a whole folder, and only the files the preset uses are kept (in the
@@ -518,12 +623,26 @@ host side is [src/ui/overlay_host.h](../src/ui/overlay_host.h).
 [docs/README.md](README.md) lists every document in the repository with a line on each. The ones
 to read first:
 
-- [CLAUDE.md](../CLAUDE.md) — the load-bearing invariants: facts that were reverse-engineered or
-  debugged out of the hardware and appear in no datasheet. Read this before changing the CPU,
-  COP, or polygon decoder.
+- [CLAUDE.md](../CLAUDE.md) — the rules for working on the code, and a table of where the facts
+  are.
+- [invariants/](invariants/) — the load-bearing invariants, one file per subsystem: facts that
+  were reverse-engineered or debugged out of the hardware and appear in no datasheet. Read a
+  subsystem's file before changing it.
+- [build.md](build.md) — building every frontend, the unit tests, the graders and the STF
+  disassembly.
 - [MCP_GUIDE.md](MCP_GUIDE.md) — the emulator's automation protocol and tool reference.
 - [tools/README.md](../tools/README.md) — the grading harness: what it measures, what it cannot,
   and the numbers it currently reports.
+- [ROOM-MATCH.md](ROOM-MATCH.md) — the PS3 release's Room Match and online protocol, read out of
+  its EBOOT: the rules the rooms of eight and the PS3 cross-play follow.
+- [VIRTUAL-ON-PS3.md](VIRTUAL-ON-PS3.md) — the PS3 release of Virtual-On, and the plan that
+  links two cabinets over RPCN.
+- [NATIVE-REPLAY.md](NATIVE-REPLAY.md) — Sonic the Fighters' and Sega Rally's own replay
+  formats, and how the emulator saves and plays its replays through the game's own code.
+- [MODEL2A-TGP.md](MODEL2A-TGP.md) and [SEGA-RALLY-PS2.md](SEGA-RALLY-PS2.md) — what the Sega
+  Rally recomp and the PS2 port say about Model 2A and `srallyc`: maps, not oracles.
+- [GEMS-COLLECTION.md](GEMS-COLLECTION.md) — how Sonic Gems Collection (GameCube, PS2) runs
+  Sonic the Fighters: its file format and its executables.
 
 ---
 
@@ -578,6 +697,12 @@ forward and leaving the dead ends behind. It opened at feature parity — STF an
   collision, motion and sway-chain COP chains ported from the firmware and held against MAME
   frame by frame; netplay over RPCN, rooms of eight and cross-play with the PS3 release; the
   browser build, the handheld build and the libretro core.
+- *October* — savestates, rewind and GGPO rollback netplay; replays and the one-way follow;
+  M2emulator's Lua scripts; and the rest of the board revisions, game by game: Sega Rally on
+  Model 2A's TGP, Virtual-On on a SHARC running its own program and its two cabinets linked
+  over RPCN, Dynamite Cop on 2A, 2B and 2C (the TGPx4), The House of the Dead with its light
+  guns, Daytona USA on the original Model 2 with Model 1's I/O and sound boards, and Dead or
+  Alive.
 
 The through-line is the working method, not the feature list: **build the oracle before the
 thing it judges.** Reference meshes for the polygon decoder, a scripted MAME session for the CPU
@@ -617,14 +742,16 @@ What made that work is that the model was given **instruments, not just a prompt
   coprocessor firmware were read directly, annotated, and committed — several COP handlers were
   corrected by reading the firmware's dispatch table rather than by inference.
 - **A durable invariants file.** [CLAUDE.md](../CLAUDE.md) exists because the expensive facts kept
-  getting re-derived — and re-derived *wrong* — across sessions. It is deliberately written as
-  "things that cost days and are in no datasheet," including corrections to its own earlier
+  getting re-derived — and re-derived *wrong* — across sessions. Every session reads it in full,
+  so it now holds only the rules and a table of where to look, and the facts are in
+  [invariants/](invariants/), one file per subsystem. They are deliberately written as
+  "things that cost days and are in no datasheet," including corrections to their own earlier
   entries, so each new session starts from the current best understanding rather than from the
   most plausible one.
 
 The honest limits are worth stating too. The model was fast at breadth — porting a subsystem,
 sweeping a parameter space, writing the harness that tests the thing — and reliably wrong when
-it reasoned from plausibility instead of measurement. Every load-bearing invariant in CLAUDE.md
+it reasoned from plausibility instead of measurement. Every load-bearing invariant in invariants/
 that had to be *corrected* was originally a confident guess. The workflow that worked was to make
 guessing expensive and measurement cheap: stand up the oracle first, then let the model iterate
 against it.
