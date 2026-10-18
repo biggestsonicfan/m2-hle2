@@ -61,8 +61,9 @@ Fighters version* option.
 **Settings for the games:**
 - **Region:** `--region japan|usa|export`, on a blank backup RAM. `--region-over-saved` makes it
   win over saved settings too, as the browser does. It works for STF, Fighting Vipers, Sega Rally
-  and The House of the Dead. Virtual-On's country is in its program ROM; the other games have no
-  region switch yet.
+  and The House of the Dead. Virtual-On's country, and Dead or Alive's Export set's, is in the
+  program ROM. Dynamite Cop, Daytona USA and Dead or Alive's other sets ignore it: where they keep
+  their country has not been looked for yet.
 - **CPU difficulty** (STF): `--enemy-rank cabinet|easy|normal|hard|hardest|extra1|extra2`, or
   the desktop's *Profile → CPU difficulty*. `cabinet` keeps the test menu's setting.
 - **Damage** (STF): `--damage normal|real`. NORMAL, the factory default, gives the player who is
@@ -390,8 +391,13 @@ RetroArch keeps `m2hle-rpcn.cfg` and `m2hle-ggpo.cfg` in its saves folder instea
   folder (or `--replay-dir DIR`). `--no-record-replays` turns that off.
 - Two formats: **the game's own replay** (STF and Sega Rally) or **inputs from power-on**, which
   plays back exactly. Other games save the inputs. `--replay-format` and `--replay-view` choose.
+- A replay is a zip named `<p1>-vs-<p2>-<date>-<time>.m2replay`, or
+  `<set>-<date>-<time>.m2replay` for a one-player game such as Sega Rally.
 - Desktop: the **Replays** menu (Record matches, Save as, Play as, Play a replay..., the Replay
-  window, Stop, Finish the replay) or `--replay FILE`. Browser: the **Replay** drawer.
+  window, Stop, Finish the replay) or `--replay FILE`. Browser: the **Replay** drawer, which keeps
+  the same `.m2replay` files in the browser and can download them. The page hides the format
+  choice for Sega Rally, so it saves the game's own format (each course's clip) unless the
+  inputs format was picked earlier for STF in that browser.
 - [NATIVE-REPLAY.md](NATIVE-REPLAY.md) has the details.
 
 **Savestates:** a zip like m2emulator's `.sta`.
