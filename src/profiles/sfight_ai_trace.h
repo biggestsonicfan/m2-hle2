@@ -89,6 +89,7 @@ static struct {
     uint64_t ld_cycle;    /* cpu->cycles as the last timer ld started */
     uint32_t ld_model;    /* the model's count for that timer then */
     mem_region_t *io;     /* the I/O region whose writes the trace taps */
+    mem_write_cb   io_prev; /* the callback that had them (input.h's), or NULL */
 } s_sat;
 
 #define SAT_TXD1 0x12u    /* IO_BASE + 0x12: the strobe (command 0x07 = send) */
@@ -166,6 +167,12 @@ static void sat_watch(i960_cpu_t *cpu, memory_bus_t *bus) {
  * them; a strobe also logs the byte latched in TXD2. */
 static void sat_io_write(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     uint32_t off = addr - r->base;
+    if (s_sat.io_prev) {
+        s_sat.io_prev(r, addr, val, size);
+        if (off == SAT_TXD1 && (val & 0xFF) == 0x07 && s_sat.out && s_sat.on && r->data)
+            fprintf(s_sat.out, "T,%u,%X\n", s_sat.frame, r->data[SAT_TXD2]);
+        return;
+    }
     if (!r->data || off + (uint32_t)size > r->size) return;
     uint32_t old = 0;
     for (int i = 0; i < size; i++) old |= (uint32_t)r->data[off + i] << (8 * i);
@@ -182,7 +189,7 @@ static void sat_tap_io(memory_bus_t *bus) {
         mem_region_t *r = &bus->regions[i];
         if (r->base != IO_BASE) continue;
         if (r->write_cb == sat_io_write) return;
-        if (r->write_cb) return;   /* someone else owns its writes: leave it */
+        s_sat.io_prev = r->write_cb;   /* input.h's port writes: chain them */
         r->write_cb = sat_io_write;
         s_sat.io = r;
         mem_regions_changed(bus);
@@ -208,7 +215,8 @@ static void sfight_ai_trace_close(void) {
     if (!s_sat.out) return;
     g_hle_watch_hook = NULL;
     g_hle_watch_count = 0;
-    if (s_sat.io && s_sat.io->write_cb == sat_io_write) s_sat.io->write_cb = NULL;
+    if (s_sat.io && s_sat.io->write_cb == sat_io_write) s_sat.io->write_cb = s_sat.io_prev;
+    s_sat.io_prev = NULL;
     s_sat.io = NULL;
     g_hle_filter_gen++;
     if (s_sat.out != stdout) fclose(s_sat.out); else fflush(stdout);
