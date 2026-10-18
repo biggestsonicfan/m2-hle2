@@ -24,7 +24,7 @@ vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb` is enough to b
 That is the default frontend, the ImGui debugger (D3D11 on Windows, GL core on Linux, Metal on
 macOS). `-DM2HLE_FRONTEND=sdl3` builds a fullscreen SDL3 / GLES 3 host with no ImGui for
 handhelds (see [packaging/rocknix/](packaging/rocknix/)), and `-DM2HLE_FRONTEND=web` the
-Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, remappable keys, gamepads and
+Emscripten browser build that deploys to arcade.sonicthefighte.rs, with online play, remappable keys, gamepads and
 touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)).
 `-DM2HLE_FRONTEND=libretro` builds a RetroArch core (see [packaging/libretro/](packaging/libretro/)).
 These three need only `vendor/sokol`, `vendor/miniz` and `vendor/stb`.
@@ -81,14 +81,14 @@ the next game cheaper instead of being spent on a single ROM set.
 | 3D pipeline | Index-array polygon decoder (J = 1.0 vs. reference meshes), textures, flat + luma shading, backface cull, shadows |
 | MC68000 sound CPU | Full opcode core with Motorola cycle timing, unit tests |
 | SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
-| Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
+| Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser). Air Walkers' players 3 and 4 play from the third and fourth pad, or `--macro t=p3:up` |
 | Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
 | Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); GGPO rollback through its own lobby (desktop, web and libretro builds); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
 | PS3-release menus | The Console profile's title, main menu, Arcade / Offline Versus settings and online lobby, redrawn after the PS3 release (libretro core and web build) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
-| Picture filters | Lost Judgment's CRT scanlines, as YAMP ports them (every build), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
+| Picture filters | The Arcade switch (a real board's tone curve, ghosting, noise and 4:3 shape; every build), and over it Lost Judgment's CRT scanlines, as YAMP ports them, or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--arcade`, `--crt`, `--shader`; the browser's Picture tab. Depth per pixel (`--pixel-depth`, off by default) draws each pixel at its own depth instead of the board's one sort key a polygon |
 
 Game profiles live in [src/profiles/](src/profiles/): `sfight_console`, `sfight`, `fvipers`,
 `m2snake` (the web build carries the two Sonic the Fighters profiles only).
@@ -112,6 +112,33 @@ Game profiles live in [src/profiles/](src/profiles/): `sfight_console`, `sfight`
 
 The two profiles behave differently, so each has its own netplay lobby: two players have to
 pick the same one to see each other's rooms.
+
+### Power Sled
+
+`powsled.zip` is a ride, the Slave unit. A ride races only on a comm-board ring with a Main
+unit, which runs the same program in another mode (MAME patches the Relay's program into a
+Main; here the ride's program is patched the same way). Run two copies, the Main first:
+
+```bash
+m2hle --rom powsled.zip --run --comm-master                    # the Main; prints comm-link PORT:TOKEN
+m2hle --rom powsled.zip --run --comm-slave PORT:TOKEN           # the ride
+```
+
+The race starts from the Main's operator panel: on the Main, **P1 Call** (`P1 B2`) opens
+entry, then on the ride **P1 Entry** (`P1 B1`), then on the Main **P2 Call** (`P2 B2`) twice
+and **P2 B3** (the Main's IN1 bit 4) for the race. The ride steers with its two pedals, **P1
+Left** and **P1 Right**. The Main shows the race
+from the Relay's camera, behind the riders.
+
+Over the internet the two boards meet in a Room Match on RPCN (desktop or the website's
+`powsled.html`, Pinboard #1089): the room's owner runs the Main and the guest rides. The match
+runs no lockstep; each board keeps its own 60 Hz and the room carries the comm ring.
+`tools/powsled-rpcn-pair.mjs` races two headless copies that way on a local RPCN.
+
+A GGPO match (Pinboard #1095) runs both boards on each machine: the challenger, player 1,
+is the Main and the one who accepts, player 2, rides; only the two players' inputs cross the
+network. A race of two riders (three boards) is not a GGPO match. `tools/powsled-ggpo-pair.mjs`
+races two headless copies that way through a local ggpo-server.
 
 ## Layout
 
@@ -281,10 +308,42 @@ In RetroArch, set the core option Online play to GGPO and fill `m2hle-ggpo.cfg` 
 back), `challenge=NAME` and `accept=NAME|any`, and optionally `url=`. In the game, L + R lists who is
 free to challenge.
 
+## Game scripts (Lua)
+
+M2emulator's scripts run here too, in Lua 5.5: put `<set>.lua` (`sfight.lua`, `vonj.lua`, ...)
+in a `scripts` folder in the working directory or beside the executable, or name another with
+`--scripts DIR` (`--no-scripts` turns them off). `Init`, `Reset`, `Frame`, `PostDraw`, `End`, the
+`Options` table (the **Script** menu), `I960_Read*/Write*`, `Romset_Read*/Patch*`, `Video_DrawText`
+and `Input_IsKeyPressed` work as they did there, and Lua 5.5's own `& | ~ << >>` work beside
+`AND`/`OR`/`SHL`. On the web the drawer's **Cheats** tab is the script: type it in, press Run, and
+it is kept in that browser for the game. A script never runs during an online match, a replay
+or a follow; its ROM patches come off and it starts again when that ends.
+[docs/invariants/scripts.md](docs/invariants/scripts.md) has the details.
+
 ## Picture filters
 
 A filter goes over the game's 4:3 picture only, never over the rest of the window. Filters draw
 the picture a second time every frame, so they can cost frame rate on a weak GPU.
+
+The **Arcade** is a switch of its own, not one of the filters: it makes the game's picture a
+real Model 2B board's first, and whichever filter is chosen then goes over it (#646). Each
+colour goes through c^0.76, which is what the owner's board does to this emulator's picture
+(measured from its captured video against the same frames here). The colours and their balance
+stay as they are; the mid-tones get brighter. It also has the board's signal and monitor (#643):
+the ghost every edge trails to its right (+7%, then a ripple of 2-3% fading over ~25 pixels), the
+capture's noise (0.5-1.5% of white, new every frame), and the picture shown 4:3, as the cabinet's
+monitor shows it, instead of with square pixels. Every build.
+
+**Depth per pixel** is another switch, off by default, and it is not the board (#668). The board
+sorts each polygon by one key, so where faces cross, the whole of one wins: in the attract
+intro the Tornado's wing hides the backs of Sonic's shoes, on the real board as here. With the
+switch each pixel is drawn at its own depth, so the shoes come in front of the wing. It works
+both ways: a part the board shows only through its sort is hidden too (the dark wedge at the
+wing's tip in the same shot lies behind the wing). On a GLES device (the handhelds) it costs
+frame rate, since the fill then writes its depth and the GPU's early depth test is lost. Every
+build: the Video menu, `--pixel-depth`, the libretro core's Depth option, the browser's Picture tab.
+
+The filters:
 
 - **CRT (Lost Judgment's)** -- the CRT filter Lost Judgment's arcade cabinets put on Sonic the
   Fighters, as YAMP reverse-engineered it: one scanline per Model 2 line, a faint aperture
@@ -298,11 +357,14 @@ the picture a second time every frame, so they can cost frame rate on a weak GPU
 
 ```
 m2hle --rom sfight.zip --crt                            # the CRT filter
+m2hle --rom sfight.zip --arcade                         # the real board's picture (--no-arcade: off)
+m2hle --rom sfight.zip --arcade --crt                   # the board's picture, the CRT over it
 m2hle --rom sfight.zip --shader crt/crt-geom.glslp      # a libretro preset (GL builds)
 m2hle --rom sfight.zip --shader-scale 2                 # the picture the filter reads: 1-4 x 496x384
+m2hle --rom sfight.zip --pixel-depth                    # depth per pixel, not the board (--no-pixel-depth: off)
 ```
 
-On the desktop the **Video** menu picks the filter, loads a preset, sets its parameters and is
+On the desktop the **Video** menu switches the Arcade and depth per pixel, picks the filter, loads a preset, sets its parameters and is
 remembered in `video.cfg` beside the netplay settings (`%APPDATA%\m2hle2`, `~/.config/m2hle2`);
 the command line applies over it for one run. In the browser it is the menu's **Picture** tab:
 choose a preset's files or a whole folder, and only the files the preset uses are kept (in the
@@ -533,6 +595,8 @@ host side is [src/ui/overlay_host.h](src/ui/overlay_host.h).
   its EBOOT: the rules the rooms of eight and the PS3 cross-play follow.
 - [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md) — the browser build and its
   netplay gateway; the gateway itself is [web/gateway/](web/gateway/README.md).
+- [MODEL2A-TGP.md](MODEL2A-TGP.md) and [SEGA-RALLY-PS2.md](SEGA-RALLY-PS2.md) — what the Sega
+  Rally recomp and the PS2 port say about Model 2A and `srallyc`: maps, not oracles.
 - [SLICE-CLOCKS.md](SLICE-CLOCKS.md) — how the sound board is charged against the i960's
   frame, and the alternatives not taken.
 - [packaging/libretro/](packaging/libretro/README.md) and [packaging/rocknix/](packaging/rocknix/README.md)

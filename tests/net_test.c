@@ -358,6 +358,12 @@ int main(void) {
               "a different game gets a different lobby");
         CHECK(comid_for_game("sfight_console", b) && strcmp(b, "M2HSNCFTC_00") == 0,
               "STF's console profile has a lobby of its own, apart from the arcade game's");
+        CHECK(comid_for_game("airwlkrs", b) && strcmp(b, "M2HARWLKR_00") == 0
+              && comid_for_game("Air Walkers", c) && strcmp(b, c) == 0,
+              "Air Walkers has its listed lobby, by profile id and by title");
+        CHECK(comid_for_game("powsled", b) && strcmp(b, "M2HPWRSLD_00") == 0
+              && comid_for_game("Power Sled", c) && strcmp(b, c) == 0,
+              "Power Sled has its listed lobby, by profile id and by title");
         CHECK(comid_yamp_for_game("sfight_console", b) && strcmp(b, "YMPSNCFTR_00") == 0,
               "…and browses YAMP's STF rooms, since YAMP runs the console emulator");
 

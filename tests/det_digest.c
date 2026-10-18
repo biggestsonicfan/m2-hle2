@@ -25,7 +25,8 @@
  *
  * --cop FROM:TO:FILE writes every word of the COP conversation during those
  * frames (g_cop_tap: command/argument words in, replies out), one per line with
- * its frame, so the first differing reply names the command that split.
+ * its frame, so the first differing reply names the command that split. On a
+ * Model 2A board it is the TGP's conversation (g_tgp_tap), tagged the same way.
  *
  * --inputs FILE replays a netplay session's input log (netplay.h, "The session
  * input log"): each frame gets the two players' words the session ran on, and
@@ -64,6 +65,28 @@
  * emulator does); --nowarnskip leaves the Japan warning screen in, ~640 game
  * frames, as MAME does. --peek HEXADDR adds that byte to each line (the mode
  * at 50002A, the sub-mode at 500030), to pair frames with a MAME log.
+ * --peek32 HEXADDR adds that word, signed (Sega Rally's LOD budget at
+ * 20AAC0). --i960-timing table|board charges the i960 MAME's table or the
+ * board's timing (i960_timing.h) whatever the profile says.
+ *
+ * --m2comm-phantom links the comm board (board/m2comm.h) to a second cabinet
+ * in this process that answers with the board's own window, so a linked
+ * game's ring comes up and its packets come back; a split set (vonj) takes
+ * its parent zip from beside the one named. --m2comm-udp is the same phantom
+ * with the two cabinets on either end of a pair of UDP sockets on 127.0.0.1,
+ * their datagrams packed and sent as the room's channel sends them
+ * (src/net/comm_link.h); the link's counts go to stderr at the end.
+ * --room-role host|guest (with one of those) stands in for the room's role
+ * (Pinboard #969): the board boots alone, then net/comm_role.h resets it into
+ * the role -- host MASTER, guest SLAVE, the phantom the other -- through the
+ * same emu_comm_role_pump the emulator runs, and only then plugs it in;
+ * stderr says when, and what the game made of it.
+ * --link-host-hz HZ (with one of those) runs the board on a host called HZ
+ * times a second of virtual time: one frame a call alone, and linked what
+ * core/link_pace.h says is due (Pinboard #978), a master phantom passing on
+ * its own 60 Hz clock; --link-host-jitter US moves each call up to US early
+ * or late, --link-unpaced runs one frame a call linked too. stderr: board
+ * frames per linked second, and how many of the phantom's messages were lost.
  *
  * Two builds of it, one from each configuration, so each has exactly its
  * frontend's compiler flags:
@@ -91,6 +114,11 @@
 #include "input.h"
 #include "registry.h"
 #include "sfight_ai_trace.h"
+#include "gems.h"
+#include "m2comm_loop.h"
+#ifndef __EMSCRIPTEN__
+#include "comm_link_loop.h"
+#endif
 
 static memory_bus_t     bus;
 static i960_cpu_t       cpu;
@@ -134,7 +162,12 @@ static int script_n;
  * reached, the state from K frames back loaded and the K frames run again.
  * Frames are printed and samples hashed only the first time, so the output has
  * to be the plain run's (the samples with --no-sound-thread, which makes them
- * inside their own slice). */
+ * inside their own slice). *
+ *
+ * --gems-i960 / --gems-cop / --gems-verify are m2hle's (core/gems.h): Sega's C
+ * from Gems Collection in place of the trapped i960 functions and the COP
+ * firmware, or each trap run both ways. A build without vendor/gems-c logs
+ * that they do nothing. --gems-verify's tallies go to the log at the end. */
 static const char *follow_out, *follow_in;
 static uint32_t    follow_every;
 #define POKE_MAX 16
@@ -165,6 +198,27 @@ static uint8_t *read_file(const char *path, size_t *len) {
     fclose(f);
     *len = (size_t)n;
     return p;
+}
+
+/* The web build's load: the zip read whole, strict by CRC, and a split set's
+ * parent (vonj's von.zip) from the same folder, as the page fetches both. */
+static int load_zip_set(const char *path) {
+    size_t len = 0, plen = 0;
+    uint8_t *zip = read_file(path, &len), *pzip = NULL;
+    if (!zip) { fprintf(stderr, "cannot read %s\n", path); return -1; }
+    rl_mem_zip_set(zip, len, true);
+    const char *parent = g_active_profile->parent_zip_name, *slash = strrchr(path, '/');
+    if (parent && parent[0]) {
+        char ppath[1024];
+        snprintf(ppath, sizeof ppath, "%.*s%s", slash ? (int)(slash - path + 1) : 0, path, parent);
+        if ((pzip = read_file(ppath, &plen)) != NULL) rl_mem_zip_add(pzip, plen);
+    }
+    int rc = g_active_profile->load_fn(&romset, NULL, NULL);
+    rl_mem_zip_clear();
+    free(zip);
+    free(pzip);
+    if (rc != 0) fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names);
+    return rc;
 }
 
 /* The follower's side: one segment's state and feed, the feed handed over a
@@ -206,6 +260,207 @@ static bool follow_next_ready(emu_thread_ctx_t *emu) {
         if (err) { fprintf(stderr, "follow: %s\n", err); return false; }
         fol.at += n;
     }
+}
+
+/* --m2comm-phantom: the comm board linked to a second cabinet that sends the
+ * board's own window back (m2comm_loop.h). The game's cabinet role has to say
+ * MASTER (Virtual-On: --poke F:1D00028:01). */
+static bool m2comm_phantom, m2comm_udp;
+
+/* --room-role: the role the room would give this machine (GAME_LINK_ALONE:
+ * none, the phantom plugged in at once). The board's end of the link counts
+ * what the board sends, and when. */
+static game_link_role_t     room_role = GAME_LINK_ALONE;
+static const m2comm_peer_t *room_board_peer;
+static uint32_t room_first_send = UINT32_MAX, room_cn = UINT32_MAX, room_sends, room_early;
+
+static void room_board_send(void *ctx, const uint8_t *msg, uint32_t len) {
+    (void)ctx;
+    if (!room_sends++) room_first_send = g_emu_frames;
+    if (!g_m2comm.enabled) room_early++;   /* before its ROM started the comm board: never */
+    room_board_peer->send(room_board_peer->ctx, msg, len);
+}
+
+static uint32_t room_board_recv(void *ctx, uint8_t *msg, uint32_t cap) {
+    (void)ctx;
+    return room_board_peer->recv(room_board_peer->ctx, msg, cap);
+}
+
+static uint32_t room_board_pending(void *ctx) {
+    (void)ctx;
+    return room_board_peer->pending ? room_board_peer->pending(room_board_peer->ctx) : 0u;
+}
+
+static const m2comm_peer_t room_board = { NULL, room_board_send, room_board_recv, room_board_pending };
+
+/* The phantom on the board's comm link, over UDP if asked (and built for it):
+ * plugged in now, or, with --room-role, at the reset into the role. */
+static void m2comm_phantom_link(void) {
+    if (!m2comm_phantom && !m2comm_udp) return;
+    uint8_t other = room_role == GAME_LINK_SLAVE ? 1 : 2;   /* the phantom's role byte */
+    const m2comm_peer_t *peer = NULL;
+#ifndef __EMSCRIPTEN__
+    if (m2comm_udp && !(peer = comm_udp_phantom_open(other, 0x700u))) {
+        fprintf(stderr, "m2comm-udp: no sockets\n");
+        return;
+    }
+#endif
+    if (!peer) peer = m2comm_phantom_open(other, 0x700u);
+    if (room_role == GAME_LINK_ALONE) { m2comm_set_peer(peer); return; }
+    room_board_peer = peer;
+    comm_role_begin(room_role, &room_board);
+}
+
+/* A board frame: the phantom's own pass if it is the master, and while the
+ * board waits for its role, the emulator's frame-edge reset into it. */
+static bool link_host_on(void);
+
+static void m2comm_phantom_pass(void) {
+#ifndef __EMSCRIPTEN__
+    if (m2comm_udp) comm_udp_phantom_frame();
+    else
+#endif
+    if (m2comm_phantom) m2comm_phantom_frame();
+}
+
+static void m2comm_phantom_frame_edge(emu_thread_ctx_t *ctx) {
+    if (!link_host_on() || !m2comm_linked()) m2comm_phantom_pass();   /* linked: on its own clock */
+    if (comm_role_linked() && g_m2comm.enabled && room_cn == UINT32_MAX) room_cn = g_emu_frames - 1u;
+    emu_comm_role_pump(ctx, NETPLAY_STEP_OFF);
+}
+
+static void m2comm_phantom_report(void) {
+    if (room_role != GAME_LINK_ALONE) {
+        fprintf(stderr, "room role: %s; %s", comm_role_name(room_role),
+                comm_role_linked() ? "" : "never reset into it\n");
+        if (comm_role_linked())
+            fprintf(stderr, "reset into it after %u frames alone (frames count from it); the ROM started its comm "
+                    "board in frame %u, first send in frame %u (%u sends, %u before the start); ring %s, "
+                    "node %u of %u, took %u sent %u\n",
+                    g_comm_role.waited, room_cn, room_first_send, room_sends, room_early,
+                    g_m2comm_link.alive == M2COMM_LINK_UP ? "up" : "down",
+                    g_m2comm_link.id, g_m2comm_link.count, g_m2comm_link.taken, g_m2comm_link.sent);
+        if (!strncmp(g_active_profile->id, "von", 3))
+            fprintf(stderr, "vonj: role byte %u, link_ID %u, 503A08 %u, net_flag %u, packets in (cRecn+4) %u\n",
+                    mem_read8(&bus, 0x01D00028u), mem_read8(&bus, 0x005770B1u), mem_read32(&bus, 0x00503A08u),
+                    mem_read8(&bus, 0x005770B0u), mem_read32(&bus, 0x005024F4u));
+    }
+#ifndef __EMSCRIPTEN__
+    if (!m2comm_udp) return;
+    const comm_link_t *b = &g_comm_udp_board.link, *p = &g_comm_udp_phantom.link;
+    fprintf(stderr, "m2comm-udp: board sent %u took %u (stale %u torn %u too big %u overflow %u), "
+            "largest packed %u B, %u datagrams %u B; phantom sent %u took %u\n",
+            b->sent, b->taken, b->stale, b->torn, b->too_big, b->overflow, b->packed_peak,
+            g_comm_udp_board.wire_dgrams, g_comm_udp_board.wire_bytes, p->sent, p->taken);
+#endif
+}
+
+/* --link-host-hz HZ: the board on a host that is called HZ times a second of
+ * virtual time (retro_run, the page's frame callback), each call up to
+ * --link-host-jitter US early or late. Alone it runs one frame a call, as
+ * the frontends do; linked, the frames core/link_pace.h says are due
+ * (Pinboard #978), and a master phantom passes on its own 60 Hz clock, a
+ * cabinet whose host keeps time. --link-unpaced runs one a call linked too,
+ * as before #978. stderr: the board's frames per linked second, and what the
+ * link lost. */
+static double   link_host_hz;
+static int32_t  link_host_jitter_us;
+static bool     link_unpaced;
+static uint64_t link_host_call;            /* calls so far */
+static int64_t  link_host_now;             /* this call's time, us */
+static uint32_t link_host_in_call;         /* frames run in it */
+static int64_t  link_phantom_next;         /* the phantom master's next pass */
+static uint32_t link_rng = 0x9E3779B9u;
+static link_pace_t link_host_pace;
+static struct {
+    int64_t  t0, t1;
+    uint64_t frames, calls, multi;
+    uint32_t most, f0;
+} link_stat = { -1, 0, 0, 0, 0, 0, 0 };
+
+static bool link_host_on(void) { return link_host_hz > 0.0; }
+
+static void link_host__next_call(void) {
+    if (link_host_in_call > link_stat.most) link_stat.most = link_host_in_call;
+    if (link_host_in_call > 1) link_stat.multi++;
+    link_host_call++;
+    link_host_in_call = 0;
+    int32_t j = 0;
+    if (link_host_jitter_us) {
+        link_rng = link_rng * 1664525u + 1013904223u;
+        j = (int32_t)((link_rng >> 8) % (uint32_t)(2 * link_host_jitter_us + 1)) - link_host_jitter_us;
+    }
+    link_host_now = (int64_t)((double)link_host_call * 1e6 / link_host_hz) + j;
+    if (m2comm_linked() && link_stat.t0 >= 0) link_stat.calls++;
+}
+
+/* Before a board frame: the host call it runs in. */
+static void link_host_frame_start(void) {
+    if (!m2comm_linked()) {
+        link_pace_stop(&link_host_pace);
+        link_host__next_call();
+        return;
+    }
+    if (link_stat.t0 < 0) {   /* the link came up: its clock starts at this call */
+        link_host__next_call();
+        link_stat.t0 = link_host_now;
+        link_stat.f0 = g_emu_frames;
+        link_phantom_next = link_host_now;
+    }
+    if (link_unpaced) { if (link_host_in_call) link_host__next_call(); }
+    else {
+        link_pace_owed(&link_host_pace, link_host_now);
+        while (!link_pace_due(&link_host_pace, link_host_now)) {
+            link_host__next_call();
+            link_pace_owed(&link_host_pace, link_host_now);
+        }
+    }
+    for (; link_phantom_next <= link_host_now; link_phantom_next += LINK_PACE_FRAME_US) m2comm_phantom_pass();
+    link_host_in_call++;
+}
+
+/* After a board frame. */
+static void link_host_frame_end(void) {
+    if (!m2comm_linked() || link_stat.t0 < 0) return;
+    if (!link_unpaced) link_pace_ran(&link_host_pace, m2comm_backlog());
+    link_stat.frames++;
+    link_stat.t1 = link_host_now;
+}
+
+static void link_host_report(void) {
+    if (!link_host_on()) return;
+    if (link_stat.t0 < 0) { fprintf(stderr, "link host: %.2f Hz, never linked\n", link_host_hz); return; }
+    double secs = (double)(link_stat.t1 - link_stat.t0) / 1e6;
+    uint32_t lost = g_m2comm_board_in.dropped;
+#ifndef __EMSCRIPTEN__
+    if (m2comm_udp) lost = g_comm_udp_board.link.overflow;
+#endif
+    fprintf(stderr, "link host: %.2f Hz (+-%d us)%s; linked from frame %u, %.2f s: %llu board frames, "
+            "%.2f a second, at most %u a call (%llu calls with two or more), %llu dropped, %u trims; "
+            "the board lost %u of the phantom's messages, took %u\n",
+            link_host_hz, link_host_jitter_us, link_unpaced ? ", unpaced" : "", link_stat.f0, secs,
+            (unsigned long long)link_stat.frames, secs > 0 ? (double)link_stat.frames / secs : 0.0,
+            link_stat.most, (unsigned long long)link_stat.multi, (unsigned long long)link_host_pace.dropped,
+            link_host_pace.trims, lost, g_m2comm_link.taken);
+}
+
+/* main_web.c web_install_board, which is also what a netplay reset runs (and
+ * net/comm_role.h's, through the reset hook). */
+static void install_board(void *ctx) {
+    (void)ctx;
+    g_active_profile->install_fn(&romset, &cpu, &bus);
+    if (g_gems_i960 || g_gems_cop || g_gems_verify) gems_apply(profile_rom_set(g_active_profile));
+    irqt_reset();
+    if (g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
+        sound_reset();
+        sound_attach(&bus);
+        if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
+        if (romset.samples && romset.samples_size > 0)   sound_load_samples(romset.samples, (uint32_t)romset.samples_size);
+    }
+    input_reset();
+    input_attach(&bus);
+    emu_board_reset_state();
 }
 
 static const char *load_path;
@@ -260,7 +515,25 @@ static struct {
     uint32_t        loads;
     int64_t         save_us, load_us;
     uint32_t        saves;
+    uint64_t        moved[ROLLBACK_PARTS_MAX];   /* --rewind-census: 64-byte lines that changed */
+    uint32_t        compared;
 } rw;
+static bool rewind_census;
+
+/* What RetroArch's rewind sees of a frame: per part, the 64-byte lines that
+ * differ from the frame before. */
+static void rewind_count(const uint8_t *now, const uint8_t *prev) {
+    size_t off = ROLLBACK_FLAT_HEAD;
+    for (int i = 0; i < g_rollback.n; i++) {
+        size_t n = g_rollback.part[i].n;
+        for (size_t o = 0; o < n; o += 64) {
+            size_t len = n - o < 64 ? n - o : 64;
+            if (memcmp(now + off + o, prev + off + o, len)) rw.moved[i]++;
+        }
+        off += n;
+    }
+    rw.compared++;
+}
 
 static bool rewind_init(emu_thread_ctx_t *emu) {
     rw.size = emu_state_flat_size(emu);
@@ -277,6 +550,8 @@ static bool rewind_frame(emu_thread_ctx_t *emu, uint32_t f) {
     rw.save_us += emu_now_us() - t0;
     rw.saves++;
     if (err) { fprintf(stderr, "--rewind: %s\n", err); exit(2); }
+    if (rewind_census && f > 1)
+        rewind_count(rw.buf + rw.size * (f % (rewind_k + 1)), rw.buf + rw.size * ((f - 1) % (rewind_k + 1)));
     bool fresh = f > rw.top;
     if (fresh) rw.top = f;
     if (fresh && f > rewind_k && f % rewind_k == 0) rw.jump_to = f - rewind_k;
@@ -316,6 +591,11 @@ static void rewind_report(void) {
     fprintf(stderr, "rewind: %u states of %zu bytes, %.0f us a save; %u loads, %.0f us a load\n",
             rw.saves, rw.size, rw.saves ? (double)rw.save_us / rw.saves : 0.0,
             rw.loads, rw.loads ? (double)rw.load_us / rw.loads : 0.0);
+    if (!rewind_census || !rw.compared) return;
+    fprintf(stderr, "%-14s %9s %12s\n", "part", "bytes", "lines/frame");
+    for (int i = 0; i < g_rollback.n; i++)
+        fprintf(stderr, "%-14s %9zu %12.1f\n", g_rollback.part[i].name, g_rollback.part[i].n,
+                (double)rw.moved[i] / rw.compared);
 }
 
 static uint32_t keys_mask(const char *p, const char *end) {
@@ -459,11 +739,11 @@ static void parse_script(const char *s) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem] [--profile ID]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem] [--profile ID] [--gems-i960] [--gems-cop] [--gems-verify]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
-    uint32_t peek_addr = 0;
+    uint32_t peek_addr = 0, peek32_addr = 0;
     bool frames_given = false, sound_cols = false, cpu_cols = false;
     const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL, *profile_id = "sfight";
     for (int i = 2; i < argc; i++) {
@@ -478,11 +758,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
         else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
         else if (!strcmp(argv[i], "--spin-i960"))               g_spin_skip = 0;
+        else if (!strcmp(argv[i], "--i960-timing") && i + 1 < argc)
+            g_i960_timing_force = !strcmp(argv[++i], "board") ? 1 : !strcmp(argv[i], "table") ? 0 : -1;
         else if (!strcmp(argv[i], "--live-timers"))             ;   /* always on now */
         else if (!strcmp(argv[i], "--nowarnskip"))              g_warning_skip = 0;
         else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--region") && i + 1 < argc) { const char *r = argv[++i]; g_region = !strcmp(r, "japan") ? GAME_REGION_JAPAN : !strcmp(r, "export") ? GAME_REGION_EXPORT : GAME_REGION_USA; }
         else if (!strcmp(argv[i], "--peek")   && i + 1 < argc) peek_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
+        else if (!strcmp(argv[i], "--peek32") && i + 1 < argc) peek32_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
         else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
             char path[1024] = {0};
@@ -503,6 +786,20 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--mem")) state_mem = true;
+        else if (!strcmp(argv[i], "--m2comm-phantom")) m2comm_phantom = true;
+        else if (!strcmp(argv[i], "--m2comm-udp")) m2comm_udp = true;
+        else if (!strcmp(argv[i], "--link-host-hz") && i + 1 < argc) link_host_hz = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--link-host-jitter") && i + 1 < argc) link_host_jitter_us = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--link-unpaced")) link_unpaced = true;
+        else if (!strcmp(argv[i], "--room-role") && i + 1 < argc) {
+            const char *r = argv[++i];
+            room_role = !strcmp(r, "host") ? GAME_LINK_MASTER : !strcmp(r, "guest") ? GAME_LINK_SLAVE : GAME_LINK_ALONE;
+            if (room_role == GAME_LINK_ALONE) { fprintf(stderr, "--room-role host|guest\n"); return 2; }
+        }
+        else if (!strcmp(argv[i], "--gems-i960"))   g_gems_i960 = true;
+        else if (!strcmp(argv[i], "--gems-cop"))    g_gems_cop = true;
+        else if (!strcmp(argv[i], "--gems-verify")) g_gems_verify = true;
+        else if (!strcmp(argv[i], "--rewind-census")) rewind_census = true;
         else if (!strcmp(argv[i], "--rewind") && i + 1 < argc) {
             if (!rewind_arg(argv[++i])) return 2;
         }
@@ -519,6 +816,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
             g_cop_tap = cop_tap;
+            g_tgp_tap = cop_tap;
         }
     }
 
@@ -541,34 +839,17 @@ int main(int argc, char **argv) {
      * the web build's load: one zip, read whole, strict by CRC. */
     if (romset_is_dir(argv[1])) {
         if (romset_load_dir(&romset, argv[1]) != 0) return 2;
-    } else {
-        FILE *f = fopen(argv[1], "rb");
-        if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        uint8_t *zip = (uint8_t *)malloc((size_t)len);
-        if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", argv[1]); return 2; }
-        fclose(f);
-        rl_mem_zip_set(zip, (size_t)len, true);
-        int rc = g_active_profile->load_fn(&romset, NULL, NULL);
-        rl_mem_zip_clear();
-        free(zip);
-        if (rc != 0) { fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names); return 2; }
+    } else if (load_zip_set(argv[1]) != 0) {
+        return 2;
     }
 
-    /* main_web.c web_install_board, which is also what a netplay reset runs. */
-    g_active_profile->install_fn(&romset, &cpu, &bus);
-    irqt_reset();
-    if (g_active_profile->quirks.enable_68k_sound) {
-        sound_reset();
-        sound_attach(&bus);
-        if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
-        if (romset.samples && romset.samples_size > 0)   sound_load_samples(romset.samples, (uint32_t)romset.samples_size);
+    if (room_role != GAME_LINK_ALONE && !m2comm_phantom && !m2comm_udp) {
+        fprintf(stderr, "--room-role needs --m2comm-phantom or --m2comm-udp\n");
+        return 2;
     }
-    input_reset();
-    input_attach(&bus);
-    emu_board_reset_state();
+    install_board(NULL);
+    netplay_set_reset_hook(install_board, NULL);
+    m2comm_phantom_link();
     emu_ctx_init(&emu, &cpu, &bus);
     emu_run(&emu);
     sound_set_tap(snd_out_tap, NULL);
@@ -598,6 +879,7 @@ int main(int argc, char **argv) {
 
     if (rewind_k && !rewind_init(&emu)) { fprintf(stderr, "--rewind: out of memory\n"); return 2; }
     int at = 0;
+    bool frame_edge = true;
     uint64_t slices = 0;
     uint32_t mismatches = 0, first_mismatch = UINT32_MAX;
     while (g_emu_frames < frames) {
@@ -613,10 +895,14 @@ int main(int argc, char **argv) {
         }
         if (follow_in && !follow_next_ready(&emu)) break;
         sfight_ai_trace_frame(&bus, g_emu_frames);
+        if (frame_edge && link_host_on()) link_host_frame_start();
         if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
         else                                              emu_slice_body(&emu);
         emu_slice_result_t r = emu_slice_finish(&emu);
         slices++;
+        frame_edge = r == EMU_SLICE_FRAME;
+        if (r == EMU_SLICE_FRAME && link_host_on()) link_host_frame_end();
+        if (r == EMU_SLICE_FRAME) m2comm_phantom_frame_edge(&emu);
         if (r == EMU_SLICE_STOPPED) {
             fprintf(stderr, "board stopped at frame %u, IP 0x%08X\n", (unsigned)g_emu_frames, cpu.sfr.ip);
             break;
@@ -660,6 +946,7 @@ int main(int argc, char **argv) {
                     (unsigned long long)g_sound.out_total);
         }
         if (peek_addr) fprintf(out, " %02x", mem_read8(&bus, peek_addr));
+        if (peek32_addr) fprintf(out, " %d", (int32_t)mem_read32(&bus, peek32_addr));
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);
@@ -674,6 +961,8 @@ int main(int argc, char **argv) {
         if (g_follow.split) return 1;
     }
     rewind_report();
+    m2comm_phantom_report();
+    link_host_report();
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);
@@ -689,6 +978,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "sound: %s; i960 commands %u, bytes that waited a slice %llu, midi drops %u\n",
             g_shle.on ? "driver in C (--sound-hle)" : "68000", g_sound.code_n,
             (unsigned long long)g_sound.midi_holds, g_sound.scsp.mi_drops);
+    gems_verify_report();
     if (in_n) {
         if (mismatches) fprintf(stderr, "input log: %u of %u frames' checks differ, the first at session frame %u\n",
                                 (unsigned)mismatches, (unsigned)g_emu_frames, (unsigned)first_mismatch);

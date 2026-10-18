@@ -40,6 +40,18 @@ static volatile int g_replay_stage_pin   = -1;
 static volatile int      g_match_replay = 0;
 static volatile uint32_t g_match_replay_frame = 0;
 
+/* A replay played with the game's own replay code (game_profile_t.native_play,
+ * Pinboard #617): which round of how many, and how far into it, in the frames
+ * the game's key player ran. Written by the profile's hooks; core/replay.h
+ * reads it for its status and seeks. `ended`: the last round has played. */
+typedef struct {
+    bool     on, ended;
+    int      round, rounds;
+    uint32_t frame, frames;     /* in this round */
+    uint32_t total, total_frames;
+} native_play_t;
+static native_play_t g_native_play;
+
 /* At a game frame's end: if armed and attract mode is at the profile's movie
  * step with the movie set up, write the movie state a natural boot has when the
  * replay starts and move on to the replay step. It runs where the game's frame
@@ -78,6 +90,21 @@ static inline void hle_game_frame_edge(memory_bus_t *bus) {
  * boards in a netplay session have to agree on it. */
 typedef enum { GAME_REGION_JAPAN = 0, GAME_REGION_USA = 1, GAME_REGION_EXPORT = 2 } game_region_t;
 static volatile int g_region = GAME_REGION_USA;
+
+/* The region wins over saved backup RAM too: a profile that keeps its settings
+ * there (STF) puts g_region in the working copy once the game has loaded them,
+ * so the board plays in that region whatever the save says, and leaves the
+ * saved block itself alone. The web page sets it with --region (from ?lang=,
+ * Pinboard #942): the arcade's shared board and a player's kept save play in
+ * the page's language's region. Off everywhere else, where a saved region is
+ * the player's choice. A netplay session's board has no backup RAM, so the
+ * default hook has put g_region there already and this changes nothing.
+ *
+ * Every profile says what it does with g_region (game_quirks_t.region,
+ * game_region_use_t); a hooked one names the hook that honours this flag
+ * (region.over_saved), and
+ * region_test runs it. */
+static volatile int g_region_over_saved = 0;
 
 /* Versus mode: the cabinet setting Sega's console emulator calls VS mode. When
  * a two-player match is decided the board goes straight back to character
@@ -227,6 +254,7 @@ static inline void hle_ret(i960_cpu_t *cpu) {
     if (cpu->frame_depth > 0) {
         uint32_t ret_ip = cpu->locals.rip;
         cpu->frame_depth--;
+        if (cpu->frame_flushed > cpu->frame_depth) cpu->frame_flushed = cpu->frame_depth;
         cpu->locals = cpu->frame_stack[cpu->frame_depth];
         if (cpu->frame_irq[cpu->frame_depth]) {   /* interrupt return, as `ret` */
             cpu->sfr.ac = cpu->frame_irq_ac[cpu->frame_depth];
@@ -245,11 +273,12 @@ static inline void hle_ret(i960_cpu_t *cpu) {
 /* Inject a call to target: push current frame with rip = ret_ip, redirect IP.
  * When target executes `ret`, it returns to ret_ip and the saved frame is restored. */
 static inline void hle_call(i960_cpu_t *cpu, uint32_t target, uint32_t ret_ip) {
-    if (cpu->frame_depth < FRAME_STACK_DEPTH) {
+    if (i960_frame_room(cpu)) {
         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
         cpu->frame_irq[cpu->frame_depth] = 0;
         cpu->frame_fp[cpu->frame_depth] = cpu->globals.fp;
         cpu->locals.rip = ret_ip;
+        cpu->locals.pfp = cpu->globals.fp;   /* same FP: a flushed ret finds it */
         cpu->frame_depth++;
     } else {
         LOG_WARN("hle_call: frame stack full at IP=0x%08X", cpu->sfr.ip);
@@ -342,7 +371,8 @@ static const game_profile_t *s_hle_filter_profile = NULL;
 static uint8_t               s_hle_filter[65536 / 8];
 
 /* Hooks that do not belong to a profile: --gems-i960 (gems.h) puts the Sonic
- * Gems Collection's C at its trap sites this way. g_hle_extra_sites lists the
+ * Gems Collection's C at its trap sites this way, and --ages-i960 (ages.h)
+ * Sega Ages' at FV's patch sites (ages_apply after gems_apply). g_hle_extra_sites lists the
  * addresses for the filter; g_hle_extra_hook is asked first at any of them and
  * declines (1) like a profile hook. Bump g_hle_filter_gen after a change. */
 static const uint32_t *g_hle_extra_sites = NULL;

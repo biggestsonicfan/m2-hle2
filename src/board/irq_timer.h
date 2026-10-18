@@ -49,18 +49,30 @@ typedef struct {
     int64_t  horizon;
 
     /* The vblank, on the same clock: where the i960 is in the current video
-     * frame, in 1/IRQT_VBLANK_HZ-ths of a cycle (a frame is IRQT_CPU_HZ of
-     * them, so 25e6/60 cycles come out exact over any number of frames), and
-     * the vblanks since reset. */
+     * frame, in board units (IRQT_UNIT a cycle; a frame is IRQT_FRAME_UNITS),
+     * and the vblanks since reset. */
     int64_t  vbl_phase;
     uint64_t vbl_count;
 } irq_timer_t;
 
-/* The video frame: 60 Hz of the i960's 25 MHz clock, 416,666.67 cycles.
- * MAME's model2 screen is 16 MHz / (656 x 424), 57.52 Hz; the sound board,
- * netplay and every host here run at 60, so the vblank does too. */
-#define IRQT_CPU_HZ   25000000
-#define IRQT_VBLANK_HZ 60
+/* The video frame is the board's: a 16 MHz dot clock over 656 x 424, 57.52 Hz
+ * (MAME's model2 screen), which is 434,600 cycles of the i960's 25 MHz. The
+ * hosts still show a frame each 1/60 s and the sound board is charged 735
+ * samples a vblank (emu_sound_slice_end), so only the i960 side keeps the
+ * board's rate: what it can do between two vblanks. That is what games budget
+ * against. Fighting Vipers' texture loader starts a block only once 405,000
+ * cycles of the frame have gone; a 60 Hz frame of 416,667 left it 11,667
+ * cycles to do so where the board leaves 29,600, so it loaded 2.5 times
+ * slower and Grace's ponytail drew from a sheet not loaded yet (Pinboard
+ * #1075). Virtual-On's attract ran 12 frames behind MAME's on it (#955).
+ *
+ * Board time elsewhere (the 93C46's write times, the Model 1 I/O board's Z80)
+ * is in IRQT_UNIT-ths of a cycle, so a microsecond and a 4 MHz T-state are
+ * whole units. */
+#define IRQT_CPU_HZ       25000000
+#define IRQT_FRAME_CYCLES 434600
+#define IRQT_UNIT         60
+#define IRQT_FRAME_UNITS  ((int64_t)IRQT_FRAME_CYCLES * IRQT_UNIT)
 
 static irq_timer_t g_irqt = {0};
 
@@ -84,7 +96,7 @@ static inline void irqt_raise(uint32_t bit) { g_irqt.intreq |= bit; }
 /* The board's clock is the i960's: the timers count down by what each
  * instruction costs as it runs (i960.cycles), a timer interrupt is taken
  * between the instructions where it expires, and the vblank comes every
- * 1/60 s of those cycles, whatever the program is doing. The run loop ends a
+ * IRQT_FRAME_CYCLES of those cycles, whatever the program is doing. The run loop ends a
  * slice on it (emu_thread.h).
  *
  * Games budget work against these timers and wait for the vblank in their own
@@ -102,8 +114,7 @@ static volatile int g_irqt_vblank = 0;
 
 /* Cycles from now to the next vblank. */
 static inline int64_t irqt__vbl_left(void) {
-    int64_t per = (int64_t)IRQT_VBLANK_HZ;
-    return ((int64_t)IRQT_CPU_HZ - g_irqt.vbl_phase + per - 1) / per;
+    return (IRQT_FRAME_UNITS - g_irqt.vbl_phase + IRQT_UNIT - 1) / IRQT_UNIT;
 }
 
 static inline void irqt__horizon(void) {
@@ -128,9 +139,9 @@ static inline void irqt_tick(int64_t cycles) {
     }
     /* MAME screen_vblank: the line is raised only while it is enabled. No
      * instruction costs more than a frame, so one tick crosses at most one. */
-    g_irqt.vbl_phase += cycles * IRQT_VBLANK_HZ;
-    if (g_irqt.vbl_phase >= IRQT_CPU_HZ) {
-        g_irqt.vbl_phase -= IRQT_CPU_HZ;
+    g_irqt.vbl_phase += cycles * IRQT_UNIT;
+    if (g_irqt.vbl_phase >= IRQT_FRAME_UNITS) {
+        g_irqt.vbl_phase -= IRQT_FRAME_UNITS;
         g_irqt.vbl_count++;
         if (g_irqt.intena & 1u) g_irqt.intreq |= 1u;
         g_irqt_vblank = 1;
@@ -191,6 +202,17 @@ static inline void irqt_reset(void) {
     g_irqt.vbl_count = 0;
     g_irqt_vblank = 0;
     irqt__horizon();
+}
+
+/* 0x98000C read (MAME videoctl_r, on every Model 2 board): a frame-number bit
+ * over the low two bits the game wrote. In 30 Hz render mode (0x10000000 bit 2
+ * clear) bit 2 is frame bit 1, so it flips every other vblank; at 60 Hz, every
+ * vblank. Sega Rally polls it at boot to wait out frames, Virtual-On before it
+ * starts its COP. */
+static inline uint32_t irqt_videoctl(bool mode60, uint8_t written) {
+    irqt_flush();
+    uint32_t fn = (uint32_t)g_irqt.vbl_count;
+    return (mode60 ? (fn & 1u) << 2 : (fn & 2u) << 1) | (written & 3u);
 }
 
 #endif /* IRQ_TIMER_H */

@@ -5,6 +5,7 @@
  *   node tools/web-netplay.mjs [--url http://localhost:8080/] [--gw ws://127.0.0.1:8787/gw]
  *        [--seconds 40] [--shot out.png] [--hide-a 10] [--browser path]
  *        [--a name:password] [--b name:password] [--ui-shots DIR] [--keep]
+ *        [--linked] [--script "A:KeyX@2,B:KeyZ@7,..."]
  *
  * Starts two headless browsers, each with a profile of its own (so each has its
  * own localStorage, i.e. its own stored sign-in), loads the game in both, and
@@ -21,6 +22,23 @@
  *
  * --ui-shots DIR saves a screenshot of the online panel at each step (sign-in,
  * lobby, a room waiting, a room with the opponent in it) for looking at.
+ *
+ * --linked is for a game whose cabinets link their comm boards (the profile's
+ * link_role: Virtual-On, Power Sled). Its match is no lockstep: each board runs
+ * on its own and the room's socket carries the comm ring (netplay.h,
+ * netplay_member_start_link). So it passes when both links open, both rings
+ * come up as node 1 and 2 of 2 (A the owner, the MASTER), both boards keep
+ * running at 60 frames a second, the rings keep taking packets and none is
+ * lost; there is no desync to watch. In this container, with two headless
+ * browsers drawing in software GL on shared cores, the 60 Hz check fails once
+ * a board draws its 3D (Pinboard #1089: the page gets ~12 callbacks a second
+ * there, a lone unlinked Sega Rally tab too); the board itself needs ~5 ms a
+ * frame, so the link's checks are the ones to read.
+ *
+ * --script replaces the random keys with these: "A:KeyX@2" holds KeyX (a
+ * KeyboardEvent.code, m2hle-keys.js) on A for 200 ms at 2 s into the match,
+ * "A:ArrowLeft@30:3000" for 3 s. With --shot, each board is also shot at the
+ * end of every 10 s.
  *
  * --hide-a N opens a second tab in browser A for N seconds, which hides the
  * game's tab: the board is then driven by the page's background worker, and the
@@ -46,6 +64,13 @@ const seconds = Number(opt('--seconds', '40'));
 const shot = opt('--shot', null);
 const hideA = Number(opt('--hide-a', '0'));
 const uiShots = opt('--ui-shots', null);
+const linked = args.includes('--linked');
+/* "A:KeyX@2:200,..." -> [{ who, code, at, hold }], in time order. */
+const script = (opt('--script', '') || '').split(',').filter(Boolean).map((x) => {
+  const m = /^(?:([AB]):)?([A-Za-z0-9]+)@([\d.]+)(?::(\d+))?$/.exec(x.trim());
+  if (!m) throw new Error(`--script: cannot read "${x}"`);
+  return { who: m[1] || null, code: m[2], at: Number(m[3]), hold: Number(m[4] || 200) };
+}).sort((a, b) => a.at - b.at);
 const suffix = Math.random().toString(36).slice(2, 7);
 const cred = (flag, who) => {
   const v = opt(flag, null);
@@ -129,6 +154,12 @@ async function launch(who) {
   b.status = () => b.eval('m2hleNetplay.status()');
   b.key = async (key, down) => {
     const code = /^[0-9]$/.test(key) ? `Digit${key}` : /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : key;
+    if (/^(Key[A-Z]|Digit[0-9]|End|Home|PageUp|PageDown|Delete|Insert)$/.test(key)) {
+      /* A code from --script: the event carries the code, which is what the page binds. */
+      const k = key.startsWith('Key') || key.startsWith('Digit') ? key.slice(-1).toLowerCase() : key;
+      await b.send('Input.dispatchKeyEvent', { type: down ? 'keyDown' : 'keyUp', key: k, code: key });
+      return;
+    }
     const vk = key.length === 1 ? key.toUpperCase().charCodeAt(0) : ({ ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 })[key] || 0;
     await b.send('Input.dispatchKeyEvent', { type: down ? 'keyDown' : 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
   };
@@ -240,21 +271,50 @@ try {
   await until(B, 'A\'s challenge', (s) => s.room.peer_ready || s.state !== 'in a room', 10000);
   await uiShot(B, '6-room-challenged');
   await click(B, 'np-start');
-  for (const b of browsers) await until(b, 'playing', (s) => s.state === 'playing', 30000);
-  log('both', 'playing');
+  if (linked) {
+    /* No lockstep: the boards boot into their roles and the comm rings come up. */
+    for (const b of browsers) {
+      const s = await until(b, 'the comm link', (s) => s.comm && s.comm.open && s.comm.ring_up, 120000);
+      log(b.who, `comm link: role ${s.comm.role}, node ${s.comm.node} of ${s.comm.nodes}`);
+      const want = b.who === 'A' ? 1 : 2;
+      if (s.comm.node !== want || s.comm.nodes !== 2) { failed = true; log(b.who, `FAIL: node ${s.comm.node} of ${s.comm.nodes}, wanted ${want} of 2`); }
+    }
+  } else {
+    for (const b of browsers) await until(b, 'playing', (s) => s.state === 'playing', 30000);
+    log('both', 'playing');
+  }
 
   /* ---- Play: both mash keys; watch both boards ---- */
   const KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'z', 'x', 'c', '5', '1'];
   let hidden = null;
   let last = { A: null, B: null };
+  const byWho = { A, B };
+  const boardFrames = (b) => b.eval('Module._web_frames()');
+  const t1 = Date.now();
+  let next = 0;
   for (let s = 1; s <= seconds; s++) {
-    for (const b of browsers) {
-      const k = KEYS[Math.floor(Math.random() * KEYS.length)];
-      await b.send('Runtime.evaluate', { expression: "document.getElementById('canvas').focus()" });
-      await b.key(k, true);
-      setTimeout(() => b.key(k, false), 150);
+    if (script.length) {
+      /* Every scripted key due before the end of this second. */
+      for (; next < script.length && script[next].at < s; next++) {
+        const k = script[next];
+        for (const b of k.who ? [byWho[k.who]] : browsers) {
+          const wait = t1 + k.at * 1000 - Date.now();
+          if (wait > 0) await sleep(wait);
+          await b.send('Runtime.evaluate', { expression: "document.getElementById('canvas').focus()" });
+          await b.key(k.code, true);
+          setTimeout(() => b.key(k.code, false), k.hold);
+          log(b.who, `key ${k.code} for ${k.hold} ms`);
+        }
+      }
+    } else {
+      for (const b of browsers) {
+        const k = KEYS[Math.floor(Math.random() * KEYS.length)];
+        await b.send('Runtime.evaluate', { expression: "document.getElementById('canvas').focus()" });
+        await b.key(k, true);
+        setTimeout(() => b.key(k, false), 150);
+      }
     }
-    if (s === 3) {
+    if (s === 3 && !linked) {
       /* The panel folds away when the match starts; opening it again mid-match
        * (to end the match or leave) must keep it open. It used to shut itself
        * a quarter of a second later, on every status poll. */
@@ -276,11 +336,28 @@ try {
       hidden = null;
       log('A', 'game tab visible again');
     }
-    await sleep(1000);
+    const due = t1 + s * 1000 - Date.now();
+    if (due > 0) await sleep(due);
     const line = [];
     for (const b of browsers) {
       const st = await b.status();
       const prev = last[b.who];
+      if (linked) {
+        /* The board's own frame count: a linked match has no lockstep frame. */
+        st.board = await boardFrames(b);
+        st.t = Date.now();
+        const c = st.comm;
+        line.push(`${b.who}: board=${st.board} (+${prev ? st.board - prev.board : 0}) ring ${c.ring_up ? 'up' : 'DOWN'}` +
+                  ` ${c.node}/${c.nodes} took ${c.ring_taken} lost ${c.lost}`);
+        if (!c.ring_up || c.lost) failed = true;
+        if (!b.first) { b.first = st; b.perf0 = JSON.parse(await b.eval('Module.UTF8ToString(Module._web_perf(1))')); }
+        last[b.who] = st;
+        if (shot && s % 10 === 0) {
+          const r = await b.send('Page.captureScreenshot', { format: 'png' });
+          if (r?.data) fs.writeFileSync(shot.replace(/\.png$/, `-${b.who}-${String(s).padStart(3, '0')}s.png`), Buffer.from(r.data, 'base64'));
+        }
+        continue;
+      }
       line.push(`${b.who}: ${st.state} frame=${st.frame} (+${prev ? st.frame - prev.frame : 0}) stalls=${st.stalls}` +
                 ` peer=${st.room.peer_rtt_ms ?? '?'}ms${st.desync !== null ? ' DESYNC@' + st.desync : ''}`);
       if (st.desync !== null) failed = true;
@@ -293,7 +370,23 @@ try {
    * (the emulators' own ping, netplay_rtt_t). The second has to have been
    * measured by the end of a match. */
   const rtts = [];
+  if (linked) {
+    for (const b of browsers) {
+      const f = b.first, l = last[b.who];
+      const fps = f && l && l.t > f.t ? (l.board - f.board) * 1000 / (l.t - f.t) : 0;
+      const took = f && l ? l.comm.ring_taken - f.comm.ring_taken : 0;
+      console.log(`${stamp()}s  ${b.who}: ${fps.toFixed(2)} board frames/s, ring took ${took} in the match`);
+      /* Where a slow board's time went: the board's slices and the picture, per callback. */
+      const p1 = JSON.parse(await b.eval('Module.UTF8ToString(Module._web_perf(0))')), p0 = b.perf0 || p1;
+      const cb = Math.max(1, p1.callbacks - p0.callbacks), wall = (p1.now_us - p0.now_us) / 1e6;
+      console.log(`${stamp()}s  ${b.who}: ${(cb / wall).toFixed(1)} callbacks/s, board ${((p1.slice_us - p0.slice_us) / cb / 1000).toFixed(1)} ms` +
+                  ` + picture ${((p1.render_us - p0.render_us) / cb / 1000).toFixed(1)} ms a callback, longest gap ${(p1.gap_us_max / 1000).toFixed(0)} ms`);
+      if (Math.abs(fps - 60) > 1.5) { failed = true; console.log(`FAIL: ${b.who} did not run at 60 Hz`); }
+      if (took <= 0) { failed = true; console.log(`FAIL: ${b.who}'s ring took nothing`); }
+    }
+  }
   for (const b of browsers) {
+    if (linked) continue;
     const peer = last[b.who] ? last[b.who].room.peer_rtt_ms : null;
     rtts.push(`${b.who} gateway ${Math.round((await b.eval('m2hleNetplay.rtt()')) || 0)} ms, peer ${peer ?? '?'} ms`);
     if (typeof peer !== 'number') { failed = true; console.log(`FAIL: ${b.who} never measured the round trip to the other player`); }
@@ -308,7 +401,7 @@ try {
     }
   }
   const need = Math.min(600, seconds * 30);
-  const moved = browsers.every((b) => last[b.who] && last[b.who].frame > need);
+  const moved = linked || browsers.every((b) => last[b.who] && last[b.who].frame > need);
   if (!moved) { failed = true; console.log(`FAIL: a board did not get past frame ${need}`); }
   if (browsers.some((b) => b.errors)) failed = true;
 } catch (e) {

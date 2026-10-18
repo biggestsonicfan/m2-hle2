@@ -137,8 +137,20 @@ typedef struct {
     uint16_t mask[4];
 } s24_line_t;
 
-static inline void s24_line_split(s24_line_t *ln, const uint16_t *maskw, int t, int mode,
-                                  uint16_t vscr, uint16_t row, int h, int y) {
+/* One pass of s24_draw_tilemap: tilemap t of the tile RAM words w over the
+ * cell graphics gfx, category cat only or every pixel when opaque; mode is
+ * the pair's control (0 mask, 1 line split, 2/3 column split). */
+typedef struct {
+    const uint16_t *w;
+    const uint8_t  *gfx;
+    int             t, cat;
+    bool            opaque;
+    int             mode;
+} s24_pass_t;
+
+static inline void s24_line_split(s24_line_t *ln, const s24_pass_t *p, uint16_t vscr, uint16_t row, int h, int y) {
+    int t = p->t, mode = p->mode;
+    const uint16_t *maskw = p->w + ((t & 2) ? 0x6800 : 0x6000);
     ln->split_l = t; ln->split_x = 0x7FFF;   /* x < split_x: split_l, else split_l ^ 1 */
     ln->mask[0] = ln->mask[1] = ln->mask[2] = ln->mask[3] = 0;
     if (mode == 1) {
@@ -164,16 +176,16 @@ typedef struct {
     uint8_t pc, nib[8];
 } s24_cell_t;
 
-static inline void s24_cell_load(s24_cell_t *cl, const uint16_t *w, const uint8_t *gfx, int l, int cell,
-                                 int tx, int ty, int cat, bool opaque) {
-    uint16_t entry = w[0x1000 * l + cell + (tx >> 3)];
+static inline void s24_cell_load(s24_cell_t *cl, const s24_pass_t *p, int l, int cell, int tx, int ty) {
+    bool     opaque = p->opaque;
+    uint16_t entry  = p->w[0x1000 * l + cell + (tx >> 3)];
     cl->bank16 = ((entry >> 7) & 0xFF) * 16;
     cl->pc     = (uint8_t)((entry >> 15) & 1);
     /* the other category's cell draws nothing: its graphics are not read */
-    cl->dead   = !opaque && cl->pc != (uint8_t)cat;
+    cl->dead   = !opaque && cl->pc != (uint8_t)p->cat;
     if (cl->dead) return;
     /* 16-bit byteswap: bytes 1, 0, 3, 2; high nibble first */
-    const uint8_t *g = gfx + (uint32_t)(entry & 0x3FFF) * 32u + (uint32_t)(ty & 7) * 4u;
+    const uint8_t *g = p->gfx + (uint32_t)(entry & 0x3FFF) * 32u + (uint32_t)(ty & 7) * 4u;
     cl->nib[0] = g[1] >> 4; cl->nib[1] = g[1] & 15; cl->nib[2] = g[0] >> 4; cl->nib[3] = g[0] & 15;
     cl->nib[4] = g[3] >> 4; cl->nib[5] = g[3] & 15; cl->nib[6] = g[2] >> 4; cl->nib[7] = g[2] & 15;
     cl->dead = !opaque && !(g[0] | g[1] | g[2] | g[3]);
@@ -183,8 +195,10 @@ static inline void s24_cell_load(s24_cell_t *cl, const uint16_t *w, const uint8_
  * a run stays in one cell, one window-mask group (8 screen pixels) and one
  * side of the split, so the cell, the mask bit and the tilemap are looked at
  * once per run, not once per pixel. */
-static inline void s24_draw_line(const uint16_t *w, const uint8_t *gfx, int t, int cat, bool opaque, int mode,
-                                 const s24_line_t *ln, int h, int ty, uint16_t *drow, int xs, int xe) {
+static inline void s24_draw_line(const s24_pass_t *p, const s24_line_t *ln, int h, int ty,
+                                 uint16_t *drow, int xs, int xe) {
+    int        t = p->t, mode = p->mode;
+    bool       opaque = p->opaque;
     int        cell = (ty >> 3) * 64;        /* the tilemap row's first cell */
     s24_cell_t cl = { .cur = -1 };
     for (int x = xs, run; x < xe; x += run) {
@@ -205,7 +219,7 @@ static inline void s24_draw_line(const uint16_t *w, const uint8_t *gfx, int t, i
         int key = (l << 6) | (tx >> 3);
         if (key != cl.cur) {
             cl.cur = key;
-            s24_cell_load(&cl, w, gfx, l, cell, tx, ty, cat, opaque);
+            s24_cell_load(&cl, p, l, cell, tx, ty);
         }
         /* a non-opaque draw writes a pixel only where ci != 0 and the category
          * matches: none in a dead cell */
@@ -219,8 +233,8 @@ static inline void s24_draw_line(const uint16_t *w, const uint8_t *gfx, int t, i
 
 /* Draw tilemap t of the tile RAM words w into the pen layer dst, line y over
  * [x0[y], x1[y]): category `cat` only (non-transparent pixels), or every pixel
- * when `opaque`. The layers hold pens, not colours, so a palette write needs
- * no redraw (tile_compose_cpu).
+ * when `opaque` (the pass p, whose mode is read here). The layers hold pens,
+ * not colours, so a palette write needs no redraw (tile_compose_cpu).
  *
  * A pixel of tilemap l at (x - h, y + vy) & 511 is cell ((y + vy) >> 3, (x - h)
  * >> 3)'s pixel ((x - h) & 7, (y + vy) & 7). The line's window-mask words and
@@ -228,16 +242,16 @@ static inline void s24_draw_line(const uint16_t *w, const uint8_t *gfx, int t, i
  * the pixel walk enters the cell, and a cell that cannot draw in this pass
  * (wrong category, or blank -- most of a HUD layer) is stepped over whole.
  * tests/tile_test.c holds it to the pixel-by-pixel original. */
-static inline void s24_draw_tilemap(const uint16_t *w, const uint8_t *gfx, int t, int cat, bool opaque,
-                                    uint16_t *dst, const int16_t *x0, const int16_t *x1) {
+static inline void s24_draw_tilemap(s24_pass_t p, uint16_t *dst, const int16_t *x0, const int16_t *x1) {
+    const uint16_t *w = p.w;
+    int t = p.t;
     uint16_t hscr = w[0x5000 + t];
     uint16_t vscr = w[0x5004 + t];
     uint16_t ctrl = w[0x5004 + (t & 2)];
     if (vscr & 0x8000) return;
-    int mode = (ctrl & 0x6000) >> 13;
-    if (mode && (t & 1)) return;                 /* split modes: the even tilemap draws both */
+    p.mode = (ctrl & 0x6000) >> 13;
+    if (p.mode && (t & 1)) return;               /* split modes: the even tilemap draws both */
     const uint16_t *hscrtb = w + 0x4000 + 0x200 * t;
-    const uint16_t *maskw  = w + ((t & 2) ? 0x6800 : 0x6000);
     int vy = vscr & 0x1FF;
 
     for (int y = 0; y < VIDEO_HEIGHT; y++) {
@@ -246,8 +260,8 @@ static inline void s24_draw_tilemap(const uint16_t *w, const uint8_t *gfx, int t
         uint16_t row = (hscr & 0x8000) ? hscrtb[y] : hscr;
         int h = row & 0x1FF;
         s24_line_t ln;
-        s24_line_split(&ln, maskw, t, mode, vscr, row, h, y);
-        s24_draw_line(w, gfx, t, cat, opaque, mode, &ln, h, (y + vy) & 511, dst + y * VIDEO_WIDTH, xs, xe);
+        s24_line_split(&ln, &p, vscr, row, h, y);
+        s24_draw_line(&p, &ln, h, (y + vy) & 511, dst + y * VIDEO_WIDTH, xs, xe);
     }
 }
 
@@ -369,11 +383,11 @@ static inline void tile_cpu_draw(tile_cpu_t *c, const uint8_t *gfx, const int16_
             c->bg[y * VIDEO_WIDTH + x] = 0;
             c->fg[y * VIDEO_WIDTH + x] = TILE_PEN_NONE;
         }
-    s24_draw_tilemap(c->words, gfx, 3, 0, true,  c->bg, x0, x1);
-    s24_draw_tilemap(c->words, gfx, 2, 0, true,  c->bg, x0, x1);
-    s24_draw_tilemap(c->words, gfx, 1, 0, false, c->bg, x0, x1);
-    s24_draw_tilemap(c->words, gfx, 0, 0, false, c->bg, x0, x1);
-    for (int k = 3; k >= 0; k--) s24_draw_tilemap(c->words, gfx, k, 1, false, c->fg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 3, 0, true  }, c->bg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 2, 0, true  }, c->bg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 1, 0, false }, c->bg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 0, 0, false }, c->bg, x0, x1);
+    for (int k = 3; k >= 0; k--) s24_draw_tilemap((s24_pass_t){ c->words, gfx, k, 1, false }, c->fg, x0, x1);
 }
 
 /* The tile RAM snapshot brought up to date, and the blocks it changed marked

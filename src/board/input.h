@@ -32,8 +32,13 @@
 
 #include "constants.h"
 #include "game_profile.h"
+#include "eeprom_93c46.h"
+#include "model1io.h"
+#include "io_5649.h"
+#include "lightgun.h"
 #include "log.h"
 #include "memory.h"
+#include "savestate_reg.h"
 
 typedef struct {
     volatile uint32_t held;   /* active-high, 0x500700 bit layout; the host keyboard */
@@ -49,6 +54,14 @@ typedef struct {
      * `use_net` is set, and hands the board back to the keyboard when it is not. */
     volatile uint32_t net_held;
     volatile int      use_net;
+
+    /* Players 3 and 4 of a four-player cabinet (quirks.four_player_sides), in
+     * `held`'s layout with player 3 on player 1's bits and player 4 on player
+     * 2's (input_far_down). Only the host's own pads fill it, and the board
+     * reads it only while nothing has taken the input (use_net: netplay,
+     * GGPO, a replay, a follow), so every session stays two players and
+     * plays the same frames everywhere. */
+    volatile uint32_t far_held;
 } input_state_t;
 
 static input_state_t g_input = {0};
@@ -57,6 +70,7 @@ static input_state_t g_input = {0};
  * (below) can all hold Punch at once, and letting go of one must not release
  * the others. Only the host's input thread touches this. */
 static uint8_t g_input_holds[GAME_INPUT_COUNT];
+static uint8_t g_input_far_holds[GAME_INPUT_COUNT];   /* far_held's, the same way */
 
 /* Combos ("macros", as the Gems Collection and HD ports call them): one host key
  * that holds several actions at once, e.g. B1+B2. Host-side only -- the board
@@ -66,13 +80,17 @@ static uint8_t g_input_holds[GAME_INPUT_COUNT];
  * page composes combos itself (web/site/m2hle-keys.js, m2hle-pad.js). */
 #define INPUT_COMBO_MAX 16
 typedef struct { int key; uint32_t acts; } input_combo_t;   /* acts: 1 << GAME_INPUT_* */
+/* In a combo's acts: the actions are player 3's (player 1's) or 4's (player
+ * 2's) of a four-player cabinet, pressed with input_far_down. */
+#define INPUT_COMBO_FAR (1u << 31)
 static input_combo_t g_input_combos[INPUT_COMBO_MAX];
 static int           g_input_combo_count;
 
 /* Let go of everything the host holds; the netplay override is left alone. */
 static inline void input_release_all(void) {
     g_input.held = 0;
-    for (int a = 0; a < GAME_INPUT_COUNT; a++) g_input_holds[a] = 0;
+    g_input.far_held = 0;
+    for (int a = 0; a < GAME_INPUT_COUNT; a++) g_input_holds[a] = g_input_far_holds[a] = 0;
 }
 
 static inline void input_reset(void) { input_release_all(); g_input.net_held = 0; }
@@ -164,40 +182,73 @@ static inline void input_action_up(int act) {
     if (act < 0 || act >= GAME_INPUT_COUNT || !g_active_profile) return;
     uint32_t bit = g_active_profile->input.bits[act];
     if (g_input_holds[act] > 0 && --g_input_holds[act] > 0) return;
-    if (bit) g_input.held &= ~bit;
+    if (!bit) return;
+    g_input.held &= ~bit;
+    /* An action whose mask shares a bit with this one (Virtual-On's B3 is
+     * both triggers, B1 the left one) keeps it while still held. */
+    for (int a = 0; a < GAME_INPUT_COUNT; a++)
+        if (g_input_holds[a]) g_input.held |= g_active_profile->input.bits[a] & bit;
+}
+
+/* Does the profile's cabinet seat four (players 3 and 4 have controls)? */
+static inline bool input_four_players(void) {
+    return g_active_profile && g_active_profile->quirks.four_player_sides;
+}
+
+/* Player 3 or 4 presses or lets go of an action: a player-1 action
+ * (GAME_INPUT_P1_*) is player 3's, a player-2 one player 4's, as the cabinet
+ * wires them (input_sides_read_cb). Nothing on a two-player profile. */
+static inline void input_far_down(int act) {
+    if (act < 0 || act >= GAME_INPUT_COUNT || !input_four_players()) return;
+    if (g_input_far_holds[act] < 255) g_input_far_holds[act]++;
+    g_input.far_held |= g_active_profile->input.bits[act];
+}
+
+static inline void input_far_up(int act) {
+    if (act < 0 || act >= GAME_INPUT_COUNT || !input_four_players()) return;
+    uint32_t bit = g_active_profile->input.bits[act];
+    if (g_input_far_holds[act] > 0 && --g_input_far_holds[act] > 0) return;
+    g_input.far_held &= ~bit;
+    for (int a = 0; a < GAME_INPUT_COUNT; a++)
+        if (g_input_far_holds[a]) g_input.far_held |= g_active_profile->input.bits[a] & bit;
 }
 
 /* ---- Combos ---------------------------------------------------------------- */
 
-/* Parse a combo: '+'-separated b1 b2 b3 b4 up down left right start coin,
- * optionally after "p2:" for player 2 -- "b1+b2", "p2:b1+b2+b3". Returns the
- * action mask, or 0 if the text is not one. */
-static inline uint32_t input_combo_parse(const char *s) {
+/* The n characters at s as a combo button (any case): its index among up,
+ * down, left, right, b1-b4, start, coin, or -1. */
+static inline int input_combo_name(const char *s, size_t n) {
     static const char *const names[] = { "up", "down", "left", "right", "b1", "b2", "b3", "b4", "start", "coin" };
-    const int per_player = GAME_INPUT_P2_UP - GAME_INPUT_P1_UP;
+    for (int i = 0; i < (int)(sizeof names / sizeof names[0]); i++) {
+        if (strlen(names[i]) != n) continue;
+        size_t c = 0;
+        while (c < n && (s[c] | 0x20) == names[i][c]) c++;
+        if (c == n) return i;
+    }
+    return -1;
+}
+
+/* Parse a combo: '+'-separated b1 b2 b3 b4 up down left right start coin,
+ * optionally after "p2:" for player 2, or "p3:" / "p4:" for players 3 and 4
+ * of a four-player cabinet (INPUT_COMBO_FAR) -- "b1+b2", "p2:b1+b2+b3",
+ * "p3:up". Returns the action mask, or 0 if the text is not one. */
+static inline uint32_t input_combo_parse(const char *s) {
     int base = GAME_INPUT_P1_UP;
-    if ((s[0] == 'p' || s[0] == 'P') && (s[1] == '1' || s[1] == '2') && s[2] == ':') {
-        if (s[1] == '2') base = GAME_INPUT_P2_UP;
+    uint32_t acts = 0;
+    if ((s[0] == 'p' || s[0] == 'P') && s[1] >= '1' && s[1] <= '4' && s[2] == ':') {
+        if (s[1] == '2' || s[1] == '4') base = GAME_INPUT_P2_UP;
+        if (s[1] >= '3') acts = INPUT_COMBO_FAR;
         s += 3;
     }
-    uint32_t acts = 0;
     while (*s) {
-        size_t n = 0;
-        while (s[n] && s[n] != '+') n++;
-        int found = -1;
-        for (int i = 0; i < per_player; i++) {
-            size_t len = 0;
-            while (names[i][len]) len++;
-            bool eq = len == n;
-            for (size_t c = 0; eq && c < n; c++) eq = (s[c] | 0x20) == names[i][c];
-            if (eq) { found = i; break; }
-        }
+        size_t n = strcspn(s, "+");
+        int found = input_combo_name(s, n);
         if (found < 0) return 0;
         acts |= 1u << (base + found);
         s += n;
         if (*s == '+') s++;
     }
-    return acts;
+    return acts & ~INPUT_COMBO_FAR ? acts : 0;
 }
 
 /* Bind `key` to a combo; binding the same key again replaces it. */
@@ -210,11 +261,13 @@ static inline bool input_combo_bind(int key, uint32_t acts) {
 }
 
 static inline void input_actions_down(uint32_t acts) {
-    for (int a = 0; a < GAME_INPUT_COUNT; a++) if (acts & (1u << a)) input_action_down(a);
+    for (int a = 0; a < GAME_INPUT_COUNT; a++)
+        if (acts & (1u << a)) { if (acts & INPUT_COMBO_FAR) input_far_down(a); else input_action_down(a); }
 }
 
 static inline void input_actions_up(uint32_t acts) {
-    for (int a = 0; a < GAME_INPUT_COUNT; a++) if (acts & (1u << a)) input_action_up(a);
+    for (int a = 0; a < GAME_INPUT_COUNT; a++)
+        if (acts & (1u << a)) { if (acts & INPUT_COMBO_FAR) input_far_up(a); else input_action_up(a); }
 }
 
 /* The combo `key` is bound to, or 0. */
@@ -245,20 +298,200 @@ static uint32_t input_io_read_cb(mem_region_t *r, uint32_t addr, int size) {
     uint32_t off  = addr - r->base;
     uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
     switch (off) {
-        case 0x02: return (uint8_t)~(held         & 0xFFu);  /* IN0 system */
+        case 0x02: return eeprom_in0((uint8_t)~(held & 0xFFu));  /* IN0 system */
         case 0x04: return (uint8_t)~((held >> 8)  & 0xFFu);  /* IN1 P1     */
         case 0x06: return (uint8_t)~((held >> 16) & 0xFFu);  /* IN2 P2     */
-        default:   return r->data ? r->data[off] : 0xFFu;    /* DIPs / idle */
+        default:   if (off >= IO_BOARD_SPAN) return 0;           /* no device there */
+                   return r->data ? r->data[off] : 0xFFu;    /* DIPs / idle */
     }
+}
+
+/* Port A (IO+0x00) is the EEPROM's; the rest keep the plain buffer. */
+static void input_io_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
+    uint32_t off = addr - r->base;
+    for (int i = 0; i < size; i++) {
+        uint8_t b = (uint8_t)(val >> (8 * i));
+        if (off + (uint32_t)i == 0x00) eeprom_port_a(b);
+        if (r->data && off + (uint32_t)i < r->size) r->data[off + (uint32_t)i] = b;
+    }
+}
+
+static uint32_t input_board_held(void) { return g_input.use_net ? g_input.net_held : g_input.held; }
+static int      input_board_from_net(void) { return g_input.use_net; }
+
+/* A 315-5649 board (a wheel): io_5649.h serves the ports and takes the writes. */
+static inline void input_attach_5649(mem_region_t *r) {
+    const game_quirks_t *q = &g_active_profile->quirks;
+    g_io5649_controls = (io5649_controls_t){ q->wheel.left, q->wheel.right, q->wheel.accel,
+                                             q->wheel.brake, q->wheel.shift_up, q->wheel.shift_down };
+    g_io5649_held_fn     = input_board_held;
+    g_io5649_from_net_fn = input_board_from_net;
+    g_io5649_regs        = r->data;      /* port E: the drive board's command (ffb.h) */
+    r->read_cb  = io5649_read_cb;
+    r->write_cb = io5649_write_cb;
+}
+
+/* A board with light guns (lightgun.h): the triggers on IN1, the guns on the
+ * second serial channel; IN0 and the rest as input_io_read_cb serves them. */
+static uint32_t input_gun_read_cb(mem_region_t *r, uint32_t addr, int size) {
+    uint32_t off = addr - r->base, v = 0;
+    uint32_t held = input_board_held();
+    for (int i = 0; i < size; i++) {
+        uint8_t b;
+        switch (off + (uint32_t)i) {
+            case 0x02: b = eeprom_in0((uint8_t)~(held & 0xFFu)); break;
+            case 0x04: b = lightgun_in1(held); break;
+            case 0x06: b = 0xFF; break;
+            case 0x18: b = lightgun_data(); break;
+            case 0x1A: b = 0x0C; break;
+            default:   b = off + (uint32_t)i >= IO_BOARD_SPAN ? 0
+                             : r->data && off + (uint32_t)i < r->size ? r->data[off + (uint32_t)i] : 0xFFu; break;
+        }
+        v |= (uint32_t)b << (8 * i);
+    }
+    return v;
+}
+
+static void input_gun_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
+    uint32_t off = addr - r->base;
+    for (int i = 0; i < size; i++) {
+        uint8_t b = (uint8_t)(val >> (8 * i));
+        if (off + (uint32_t)i == 0x14) g_lightgun.mux = b;
+        if (off + (uint32_t)i == 0x00) eeprom_port_a(b);
+        if (r->data && off + (uint32_t)i < r->size) r->data[off + (uint32_t)i] = b;
+    }
+}
+
+static inline void input_attach_lightgun(mem_region_t *r) {
+    const game_quirks_t *q = &g_active_profile->quirks;
+    for (int p = 0; p < LIGHTGUN_PLAYERS; p++) {
+        g_lightgun_controls[p] = (lightgun_controls_t){ q->gun[p].up, q->gun[p].down, q->gun[p].left,
+                                                        q->gun[p].right, q->gun[p].trigger, q->gun[p].reload };
+        g_lightgun_range[p] = (lightgun_range_t){ q->gun[p].x_min, q->gun[p].x_max, q->gun[p].x_rest,
+                                                  q->gun[p].y_min, q->gun[p].y_max, q->gun[p].y_rest };
+    }
+    g_lightgun_held_fn     = input_board_held;
+    lightgun_reset();
+    r->read_cb  = input_gun_read_cb;
+    r->write_cb = input_gun_write_cb;
+}
+
+/* A four-player cabinet (quirks.four_player_sides; Air Walkers): the program
+ * writes the side it reads into port F bit 7 (the 315-5649's register 5,
+ * IO+0x0A), and while it is up IN1 / IN2 answer players 3 and 4 and IN0's
+ * START bits (0x10, 0x20) START3 and START4 (MAME model2a_airwlkrs_state).
+ * COIN3 and COIN4 are IN0's 0x40 and 0x80 on either side. Players 3 and 4
+ * are g_input.far_held, read only when no session has the input: under
+ * use_net the far side reads released. The switch itself is the board's, so
+ * player 1 never presses player 3's buttons. A two-player cabinet setting
+ * leaves the bit down. */
+static uint8_t g_io_side;
+
+#define IO_PORT_F 0x0Au   /* register 5: (5 / 2) * 4 + (5 & 1) * 2 */
+
+static uint32_t input_sides_read_cb(mem_region_t *r, uint32_t addr, int size) {
+    uint32_t off = addr - r->base, v = 0;
+    uint32_t held = input_board_held();
+    uint32_t far_bits = input_board_from_net() ? 0u : g_input.far_held;
+    uint32_t side = g_io_side ? far_bits : held;
+    const uint32_t *bits = g_active_profile->input.bits;
+    uint32_t coins = ((far_bits & bits[GAME_INPUT_P1_COIN]) ? 0x40u : 0u) | ((far_bits & bits[GAME_INPUT_P2_COIN]) ? 0x80u : 0u);
+    for (int i = 0; i < size; i++) {
+        uint8_t b;
+        switch (off + (uint32_t)i) {
+            case 0x02: b = eeprom_in0((uint8_t)~((held & 0xCFu) | (side & 0x30u) | coins)); break;
+            case 0x04: b = (uint8_t)~((side >> 8)  & 0xFFu); break;
+            case 0x06: b = (uint8_t)~((side >> 16) & 0xFFu); break;
+            default:   b = r->data && off + (uint32_t)i < r->size ? r->data[off + (uint32_t)i] : 0xFFu; break;
+        }
+        v |= (uint32_t)b << (8 * i);
+    }
+    return v;
+}
+
+static void input_sides_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
+    uint32_t off = addr - r->base;
+    for (int i = 0; i < size; i++) {
+        uint8_t b = (uint8_t)(val >> (8 * i));
+        if (off + (uint32_t)i == 0x00) eeprom_port_a(b);
+        if (off + (uint32_t)i == IO_PORT_F) g_io_side = (uint8_t)(b >> 7);
+        if (r->data && off + (uint32_t)i < r->size) r->data[off + (uint32_t)i] = b;
+    }
+}
+
+/* Power-on: players 1 and 2. The side is board state (savestates, rollback). */
+static inline void input_attach_sides(mem_region_t *r) {
+    g_io_side = 0;
+    savestate_extra(g_active_profile->id, "IOSIDE", &g_io_side, sizeof g_io_side);
+    r->read_cb  = input_sides_read_cb;
+    r->write_cb = input_sides_write_cb;
+}
+
+/* Power Sled's board (quirks.sled): IN0 and IN1's four rider buttons as
+ * input_io_read_cb serves them, port E (+0x08) the Cancel Network Check
+ * switch, and the pedals on the analog mux io_5649.h keeps (its write
+ * callback picks the channel and serves port A). */
+static uint8_t input_sled_analog(uint32_t held, int ch) {
+    const game_quirks_t *q = &g_active_profile->quirks;
+    switch (ch) {
+        case 1: return held & q->pedal.p1_right ? q->pedal.right_down : q->pedal.right_up;
+        case 3: return held & q->pedal.p1_left  ? q->pedal.left_down  : q->pedal.left_up;
+        case 5: return held & q->pedal.p2_right ? q->pedal.right_down : q->pedal.right_up;
+        case 7: return held & q->pedal.p2_left  ? q->pedal.left_down  : q->pedal.left_up;
+        default: return 0x00;
+    }
+}
+
+static uint32_t input_sled_read_cb(mem_region_t *r, uint32_t addr, int size) {
+    uint32_t off = addr - r->base, v = 0;
+    uint32_t held = input_board_held();
+    for (int i = 0; i < size; i++) {
+        uint8_t b;
+        switch (off + (uint32_t)i) {
+            case 0x02: b = eeprom_in0((uint8_t)~(held & 0xFFu)); break;
+            case 0x04: b = (uint8_t)~(((held >> 8) & 0x0Fu) | ((held >> 13) & 0xF0u)); break;
+            case 0x06: b = 0xFF; break;
+            case 0x08: b = (held & g_active_profile->quirks.pedal.cancel_net) ? 0xFD : 0xFF; break;
+            case 0x1E:
+                b = input_sled_analog(held, g_io5649.channel);
+                g_io5649.channel = (g_io5649.channel + 1) & 7;
+                break;
+            default:   b = r->data && off + (uint32_t)i < r->size ? r->data[off + (uint32_t)i] : 0xFFu; break;
+        }
+        v |= (uint32_t)b << (8 * i);
+    }
+    return v;
+}
+
+static inline void input_attach_sled(mem_region_t *r) {
+    r->read_cb  = input_sled_read_cb;
+    r->write_cb = io5649_write_cb;
 }
 
 /* Install the I/O read callback on the bus's I/O region. Call after the ROM is
  * installed (install_fn re-inits the bus). Writes (coin-meter strobe at IO+0x00,
  * IO+0x40) keep hitting the plain buffer — harmless. */
 static inline void input_attach(memory_bus_t *bus) {
+    g_io5649_regs = NULL;
+    if (g_active_profile && g_active_profile->quirks.model1_io) {
+        /* The install put the board's window at IO_BASE (model1io.h); the
+         * Z80 reads the controls through io_5649.h's model. */
+        const game_quirks_t *q = &g_active_profile->quirks;
+        g_io5649_controls = (io5649_controls_t){ q->wheel.left, q->wheel.right, q->wheel.accel,
+                                                 q->wheel.brake, q->wheel.shift_up, q->wheel.shift_down };
+        g_io5649_held_fn     = input_board_held;
+        g_io5649_from_net_fn = input_board_from_net;
+        g_model1io_vr4       = q->model1_io_vr4;
+        LOG_INFO("input: Model 1 I/O board");
+        return;
+    }
     for (int i = 0; i < bus->region_count; i++) {
         if (bus->regions[i].base == IO_BASE) {
-            bus->regions[i].read_cb = input_io_read_cb;
+            if (g_active_profile && g_active_profile->quirks.io_5649) input_attach_5649(&bus->regions[i]);
+            else if (g_active_profile && g_active_profile->quirks.lightgun) input_attach_lightgun(&bus->regions[i]);
+            else if (g_active_profile && g_active_profile->quirks.four_player_sides) input_attach_sides(&bus->regions[i]);
+            else if (g_active_profile && g_active_profile->quirks.sled) input_attach_sled(&bus->regions[i]);
+            else { bus->regions[i].read_cb = input_io_read_cb; bus->regions[i].write_cb = input_io_write_cb; }
             mem_regions_changed(bus);
             LOG_INFO("input: I/O port read callback attached @ 0x%08X", IO_BASE);
             return;

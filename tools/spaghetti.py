@@ -4,7 +4,7 @@
 Runs lizard (pip install lizard) over src/ and prints the share of
 hand-written function code that sits in functions too branchy to follow.
 
-  python3 tools/spaghetti.py [--threshold 20] [--top 25]
+  python3 tools/spaghetti.py [--threshold 20] [--top 25] [--params 8]
 
 Branchiness is lizard's *modified* cyclomatic complexity (-m: a whole switch
 counts as one decision, so a flat dispatch table is not penalised for its
@@ -98,6 +98,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--threshold', type=int, default=20, help='modified CCN above which a function counts (20)')
     ap.add_argument('--top', type=int, default=25, help='list this many of the worst')
+    ap.add_argument('--params', type=int, default=0, metavar='N',
+                    help='also list every function taking N or more parameters')
     a = ap.parse_args()
 
     every = list(functions())
@@ -130,6 +132,12 @@ def main():
     print(f'\nworst {a.top} (modified CCN, lines, params):')
     for f in sorted((f for f in hand if f['fn'] not in DISPATCH), key=lambda f: -f['mccn'])[:a.top]:
         print(f'  {f["mccn"]:4d} {f["nloc"]:5d} {f["params"]:3d}  {f["file"]}:{f["line"]} {f["fn"]}')
+
+    if a.params:
+        long = sorted((f for f in hand if f['params'] >= a.params), key=lambda f: (-f['params'], f['file']))
+        print(f'\n{len(long)} functions take {a.params} or more parameters (params, file, function):')
+        for f in long:
+            print(f'  {f["params"]:3d}  {f["file"]}:{f["line"]} {f["fn"]}')
 
 
 if __name__ == '__main__':

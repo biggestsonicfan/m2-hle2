@@ -93,6 +93,45 @@ static I960_HOT_INLINE uint32_t reg_src(i960_cpu_t *cpu, int idx, int mode) {
 static inline double i960_bits_to_double(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
 static inline uint64_t i960_double_to_bits(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
 
+/* movre's 80-bit extended real as three words (fraction low, fraction high,
+ * sign and exponent), to and from the double an FP register holds, in integer
+ * bit operations only (MAME double_to_extended / extended_to_double). */
+static inline void i960_double_to_ext(double d, uint32_t w[3]) {
+    uint64_t u = i960_double_to_bits(d), m = u & 0x000FFFFFFFFFFFFFull, frac;
+    uint32_t sign = (uint32_t)(u >> 63) << 15, E = (uint32_t)(u >> 52) & 0x7FFu, e;
+    if (E == 0x7FFu)  { frac = 1ull << 63 | m << 11; e = 0x7FFFu; }
+    else if (E)       { frac = 1ull << 63 | m << 11; e = E - 1023u + 16383u; }
+    else if (!m)      { frac = 0; e = 0; }
+    else {                                          /* denormal: normalize */
+        int z = 0;
+        while (!(m << z >> 63)) z++;
+        frac = m << z; e = 15372u - (uint32_t)z;
+    }
+    w[0] = (uint32_t)frac; w[1] = (uint32_t)(frac >> 32); w[2] = sign | e;
+}
+
+static inline double i960_ext_to_double(const uint32_t w[3]) {
+    uint64_t frac = (uint64_t)w[0] | (uint64_t)w[1] << 32, sign = (uint64_t)(w[2] >> 15 & 1u) << 63;
+    int32_t e = (int32_t)(w[2] & 0x7FFFu);
+    if (e == 0x7FFF)
+        return i960_bits_to_double(sign | (frac << 1 ? 0x7FF8000000000000ull | (frac & ~(1ull << 63)) >> 11
+                                                     : 0x7FF0000000000000ull));
+    if (!frac) return i960_bits_to_double(sign);
+    if (!e) e = 1;
+    while (!(frac >> 63)) { frac <<= 1; e--; }      /* integer bit to bit 63 */
+    int32_t E = e - 16383 + 1023;                   /* the double's biased exponent */
+    int sh = 11;                                    /* fraction bits that go */
+    if (E <= 0) { sh += 1 - E; E = 0; }
+    if (sh > 64) return i960_bits_to_double(sign);
+    uint64_t q = sh == 64 ? 0 : frac >> sh, rem = frac << (64 - sh), half = 1ull << 63;
+    if (rem > half || (rem == half && (q & 1u))) q++;   /* to nearest, even */
+    /* q holds the integer bit for a normal (bit 52) and none for a denormal; a
+     * carry out of it moves the exponent up one, which the add below does. */
+    uint64_t bits = E ? ((uint64_t)(E - 1) << 52) + q : q;
+    if (bits >= 0x7FF0000000000000ull) bits = 0x7FF0000000000000ull;
+    return i960_bits_to_double(sign | bits);
+}
+
 static inline double i960_nan_result(double r, double a, double b) {
     if (r == r) return r;
     if (a != a) return i960_bits_to_double(i960_double_to_bits(a) | I960_QNAN_BIT);
@@ -284,6 +323,59 @@ static inline unsigned i960_cycle_cost(uint32_t word1) {
     return g_i960_cyc[op];
 }
 
+#include "i960_timing.h"
+
+//--- Frames in memory ---------------------------------------------------------
+
+/* flushreg: the cached frames above frame_flushed go to memory at their FPs
+ * (i960.h, frame_flushed). The model keeps each frame's return IP in the
+ * callee's set; memory gets the hardware's layout, the IP in the caller's r2,
+ * at the FP rounded down to a frame as MAME's flush does (Sega Rally's boot
+ * reinitialises with an unaligned FP, then flushes and returns to 0x590).
+ * pfp is the caller's FP, as `call` sets it. */
+static inline void i960_flushreg(i960_cpu_t *cpu, memory_bus_t *bus) {
+    int depth = cpu->frame_depth;
+    for (int d = cpu->frame_flushed; d < depth; d++) {
+        local_regs_t f = cpu->frame_stack[d];
+        f.rip = d + 1 < depth ? cpu->frame_stack[d + 1].rip : cpu->locals.rip;
+        for (int i = 0; i < 16; i++) mem_write32(bus, (cpu->frame_fp[d] & ~(uint32_t)FRAME_ALIGN_MASK) + 4u * (uint32_t)i, f.r[i]);
+    }
+    cpu->frame_flushed = depth;
+    cpu->frame_mem = 1;
+}
+
+/* `ret` into a frame flushreg left in memory: FP from pfp, the locals from
+ * there, the IP from its r2. The cached frame below is that one unless a task
+ * switch rewrote pfp (Dynamite Cop's longjmp, 0x2E80); then every cached frame
+ * is another task's, all in memory already, and the cache empties. Interrupt
+ * returns go as the cached `ret`'s. */
+static inline void i960_ret_mem(i960_cpu_t *cpu, memory_bus_t *bus) {
+    uint32_t fp = cpu->locals.pfp & ~(uint32_t)FRAME_ALIGN_MASK;
+    bool rt7 = (cpu->locals.pfp & 7u) == 7u && (cpu->sfr.pc & 2u);
+    uint32_t rt7_pc = rt7 ? mem_read32(bus, cpu->globals.fp - 16u) : 0;
+    uint32_t rt7_ac = rt7 ? mem_read32(bus, cpu->globals.fp - 12u) : 0;
+    bool irq = false;
+    int d = cpu->frame_depth - 1;
+    if (d >= 0 && (cpu->frame_fp[d] & ~(uint32_t)FRAME_ALIGN_MASK) == fp) {
+        cpu->frame_depth = cpu->frame_flushed = d;
+        irq = cpu->frame_irq[d] != 0;
+        cpu->frame_irq[d] = 0;
+    } else {
+        cpu->frame_depth = cpu->frame_flushed = 0;   /* another task's frame */
+    }
+    if (irq) {
+        cpu->sfr.ac = cpu->frame_irq_ac[d];
+        cpu->sfr.pc = cpu->frame_irq_pc[d];
+    } else if (rt7) {
+        cpu->sfr.ac = rt7_ac;
+        cpu->sfr.pc = rt7_pc;
+    }
+    for (int i = 0; i < 16; i++) cpu->locals.r[i] = mem_read32(bus, fp + 4u * (uint32_t)i);
+    cpu->sfr.ip = cpu->locals.rip;
+    cpu->locals.rip = mem_read32(bus, (cpu->locals.pfp & ~(uint32_t)FRAME_ALIGN_MASK) + 8u);
+    cpu->globals.fp = fp;
+}
+
 //--- Execute one instruction --------------------------------------------------
 
 
@@ -304,7 +396,8 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
     mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
     int instr_len = 4;
     /* The board's clock: the timers and the vblank count these (irq_timer.h). */
-    cpu->cycles += i960_cycle_cost(word1);
+    if (M2_UNLIKELY(g_i960_bt_on)) i960_bt_charge(cpu, ip, word1, word2, i960_cycle_cost(word1));
+    else cpu->cycles += i960_cycle_cost(word1);
 
     uint32_t class = (word1 >> 28) & 0xF;
 
@@ -330,7 +423,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                 case 0x09: // call
                 {
                     // Save current frame
-                    if (cpu->frame_depth < FRAME_STACK_DEPTH) {
+                    if (i960_frame_room(cpu)) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
                         cpu->frame_irq[cpu->frame_depth] = 0;
                         cpu->frame_fp[cpu->frame_depth] = cpu->globals.fp;
@@ -342,7 +435,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                     }
 
                     // New frame: pfp = old FP, rip = return address
-                    uint32_t old_fp = cpu->locals.pfp;
+                    uint32_t old_fp = cpu->globals.fp;
                     uint32_t old_sp = cpu->locals.sp;
                     memset(&cpu->locals, 0, sizeof(local_regs_t));
                     cpu->locals.pfp = old_fp;
@@ -357,14 +450,32 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
 
                 case 0x0A: // ret
                 {
+                    if (M2_UNLIKELY(cpu->frame_mem && cpu->frame_depth <= cpu->frame_flushed)) {
+                        i960_ret_mem(cpu, bus);
+                        return 0;
+                    }
                     if (cpu->frame_depth > 0) {
                         uint32_t return_ip = cpu->locals.rip;
+                        /* Return status 7 in pfp, set by the program, is an
+                         * interrupt return from a frame it built: PC and AC
+                         * come from FP-16 and FP-12 (MAME do_ret, supervisor
+                         * only). Virtual-On's boot (0xA30) drops from priority
+                         * 31 to 0 that way; ignored, no interrupt ever came. */
+                        bool rt7 = (cpu->locals.pfp & 7u) == 7u && (cpu->sfr.pc & 2u);
+                        uint32_t rt7_pc = 0, rt7_ac = 0;
+                        if (M2_UNLIKELY(rt7)) {
+                            rt7_pc = mem_read32(bus, cpu->globals.fp - 16u);
+                            rt7_ac = mem_read32(bus, cpu->globals.fp - 12u);
+                        }
                         cpu->frame_depth--;
                         cpu->locals = cpu->frame_stack[cpu->frame_depth];
                         if (cpu->frame_irq[cpu->frame_depth]) {   /* interrupt return */
                             cpu->sfr.ac = cpu->frame_irq_ac[cpu->frame_depth];
                             cpu->sfr.pc = cpu->frame_irq_pc[cpu->frame_depth];
                             cpu->frame_irq[cpu->frame_depth] = 0;
+                        } else if (M2_UNLIKELY(rt7)) {
+                            cpu->sfr.ac = rt7_ac;
+                            cpu->sfr.pc = rt7_pc;
                         }
                         cpu->sfr.ip = return_ip;
                         cpu->globals.fp = cpu->frame_fp[cpu->frame_depth];
@@ -524,12 +635,13 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                 case 0x598: // shro (shift right ordinal)
                     reg_write(cpu, dst_idx, (src1 < 32) ? (src2 >> src1) : 0);
                     break;
-                case 0x59a: // shrdi (shift right double integer)
+                case 0x59a: // shrdi: shift right DIVIDING integer, rounds toward zero (MAME i960.cpp)
                 {
-                    // 64-bit shift right: concatenate dst:src2, shift by src1, result in dst
-                    uint64_t wide = ((uint64_t)reg_read(cpu, dst_idx) << 32) | src2;
-                    uint32_t shift = src1 & 63;
-                    reg_write(cpu, dst_idx, (uint32_t)(wide >> shift));
+                    int32_t v = (int32_t)src2;
+                    uint32_t r = 0;
+                    if (src1 < 32)
+                        r = (uint32_t)((v < 0 && (src2 & ((1u << src1) - 1))) ? (v >> src1) + 1 : v >> src1);
+                    reg_write(cpu, dst_idx, r);
                     break;
                 }
                 case 0x59b: // shri (shift right integer / arithmetic)
@@ -795,6 +907,8 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
 
                                 memset(&cpu->locals, 0, sizeof(local_regs_t));
                                 cpu->frame_depth = 0;
+                                cpu->frame_flushed = 0;
+                                cpu->frame_mem = 0;
                                 cpu->prcb = new_prcb;
 
                                 uint32_t new_isp = mem_read32(bus, new_prcb + PRCB_INTR_STACK);
@@ -828,7 +942,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                     cpu->sfr.pc |= 0x2000;
                     break;
                 case 0x66d: // flushreg
-                    // Flush register cache to memory - noop for us
+                    i960_flushreg(cpu, bus);
                     break;
                 case 0x66f: // syncf
                     // Synchronize faults - noop for us
@@ -953,12 +1067,17 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                     FP_DST_WRITE(v);
                     break;
                 }
-                case 0x675: // cvtilr
+                case 0x675: // cvtilr: the result is a LONG real (a register pair)
                 {
                     int32_t i = m1 ? (int32_t)i960_real_to_int32(cpu->fp_regs[src1_idx & 3])
                                    : (int32_t)reg_read(cpu, src1_idx);
                     double v = (double)i;
-                    FP_DST_WRITE(v);
+                    if (m3) cpu->fp_regs[dst_idx & 3] = v;
+                    else {
+                        uint64_t u = i960_double_to_bits(v);
+                        reg_write(cpu, dst_idx & 0x1E, (uint32_t)u);
+                        reg_write(cpu, (dst_idx & 0x1E) + 1, (uint32_t)(u >> 32));
+                    }
                     break;
                 }
 
@@ -1058,6 +1177,124 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                     break;
                 }
 
+                // Long reals: an integer operand is the register PAIR from the
+                // even register named (low word first), holding an IEEE double
+                // (MAME get_1_rifl / set_rifl). STF never uses them; Sega Rally
+                // does, in the code it copies into work RAM at boot.
+                #define FP_PAIR_AS_DOUBLE(idx) i960_bits_to_double( \
+                    (uint64_t)reg_read(cpu, (idx) & 0x1E) | (uint64_t)reg_read(cpu, ((idx) & 0x1E) + 1) << 32)
+                #define FP_SRC1L (m1 ? FP_LIT_OR_REG(src1_idx) : FP_PAIR_AS_DOUBLE(src1_idx))
+                #define FP_SRC2L (m2 ? FP_LIT_OR_REG(src2_idx) : FP_PAIR_AS_DOUBLE(src2_idx))
+                #define FP_DST_WRITEL(val) do { \
+                    double v_ = (val); \
+                    if (m3) cpu->fp_regs[dst_idx & 3] = v_; \
+                    else { uint64_t u_ = i960_double_to_bits(v_); \
+                           reg_write(cpu, dst_idx & 0x1E, (uint32_t)u_); \
+                           reg_write(cpu, (dst_idx & 0x1E) + 1, (uint32_t)(u_ >> 32)); } \
+                } while (0)
+
+                case 0x6D9: // movrl
+                    FP_DST_WRITEL(FP_SRC1L);
+                    break;
+                case 0x6E1: // movre (MAME: the encoding Dead or Alive saves fp0-fp3 with)
+                case 0x6E9: // movre: three registers from a multiple of 4, or an FP one
+                {
+                    uint32_t w[3];
+                    if (!m1) {
+                        w[0] = reg_read(cpu, src1_idx & 0x1C);
+                        w[1] = reg_read(cpu, (src1_idx & 0x1C) + 1);
+                        w[2] = reg_read(cpu, (src1_idx & 0x1C) + 2) & 0xFFFFu;
+                    } else i960_double_to_ext(FP_LIT_OR_REG(src1_idx), w);
+                    if (!m3)
+                        for (int k = 0; k < 3; k++) reg_write(cpu, (dst_idx & 0x1C) + k, w[k]);
+                    else if (dst_idx < 4) cpu->fp_regs[dst_idx] = i960_ext_to_double(w);
+                    break;
+                }
+                case 0x79F: // addrl
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b + a, b, a));
+                    break;
+                }
+                case 0x79D: // subrl
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b - a, b, a));
+                    break;
+                }
+                case 0x79C: // mulrl
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b * a, b, a));
+                    break;
+                }
+                case 0x79B: // divrl (MAME: a plain divide, x/0 is an infinity)
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(i960_nan_result(b / a, b, a));
+                    break;
+                }
+                case 0x694: // cmporl
+                case 0x695: // cmprl (MAME cmp_d: unordered leaves no bit set)
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    if (a < b)       set_cc(cpu, CC_L);
+                    else if (a == b) set_cc(cpu, CC_E);
+                    else if (a > b)  set_cc(cpu, CC_G);
+                    else             set_cc(cpu, CC_NO);
+                    break;
+                }
+
+                // The rest of the FPU, single and long (MAME i960.cpp 68.x / 69.x).
+                // STF uses none of these; Sega Rally does. Host libm stands in for
+                // the 80960KB's microcode, as it does in MAME.
+                case 0x680: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(atan2(b, a), b, a)); break; }  // atanr
+                case 0x690: { double a = FP_SRC1L, b = FP_SRC2L; FP_DST_WRITEL(i960_nan_result(atan2(b, a), b, a)); break; }  // atanrl
+                case 0x681: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(b * log2(a + 1.0), b, a)); break; }  // logepr
+                case 0x682: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(b * log2(a), b, a)); break; }  // logr
+                case 0x692: { double a = FP_SRC1L, b = FP_SRC2L; FP_DST_WRITEL(i960_nan_result(b * log2(a), b, a)); break; }  // logrl
+                case 0x683: { double a = FP_SRC1, b = FP_SRC2;   FP_DST_WRITE (i960_nan_result(fmod(b, a), b, a)); break; }  // remr
+                case 0x689: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(pow(2.0, a) - 1.0, a, a)); break; }  // expr
+                case 0x699: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(pow(2.0, a) - 1.0, a, a)); break; }  // exprl
+                case 0x68A: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(logb(a), a, a)); break; }  // logbnr
+                case 0x69A: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(logb(a), a, a)); break; }  // logbnrl
+                case 0x68B: { double a = FP_SRC1;  FP_DST_WRITE (i960_round_ac(cpu, a)); break; }  // roundr
+                case 0x69B: { double a = FP_SRC1L; FP_DST_WRITEL(i960_round_ac(cpu, a)); break; }  // roundrl
+                case 0x68C: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(sin(a), a, a)); break; }  // sinr
+                case 0x69C: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(sin(a), a, a)); break; }  // sinrl
+                case 0x68D: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(cos(a), a, a)); break; }  // cosr
+                case 0x69D: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(cos(a), a, a)); break; }  // cosrl
+                case 0x68E: { double a = FP_SRC1;  FP_DST_WRITE (i960_nan_result(tan(a), a, a)); break; }  // tanr
+                case 0x69E: { double a = FP_SRC1L; FP_DST_WRITEL(i960_nan_result(tan(a), a, a)); break; }  // tanrl
+                case 0x698: // sqrtrl
+                {
+                    double v = FP_SRC1L;
+                    FP_DST_WRITEL(i960_nan_result(sqrt(v), v, v));
+                    break;
+                }
+                case 0x6E2: // cpysre: |src1| with src2's sign
+                {
+                    double a = FP_SRC1L, b = FP_SRC2L;
+                    FP_DST_WRITEL(b >= 0.0 ? fabs(a) : -fabs(a));
+                    break;
+                }
+                case 0x676: // scalerl: src2 * 2^src1 (src1 an integer)
+                {
+                    int32_t n = (int32_t)reg_read(cpu, src1_idx);
+                    FP_DST_WRITEL(ldexp(FP_SRC2L, n));
+                    break;
+                }
+                case 0x677: // scaler
+                {
+                    int32_t n = (int32_t)reg_read(cpu, src1_idx);
+                    FP_DST_WRITE(ldexp(FP_SRC2, n));
+                    break;
+                }
+
+                #undef FP_PAIR_AS_DOUBLE
+                #undef FP_SRC1L
+                #undef FP_SRC2L
+                #undef FP_DST_WRITEL
                 #undef FP_SRC1
                 #undef FP_SRC2
                 #undef FP_DST_WRITE
@@ -1157,7 +1394,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                     return 0;
                 case 0x86: // callx (call indirect)
                 {
-                    if (cpu->frame_depth < FRAME_STACK_DEPTH) {
+                    if (i960_frame_room(cpu)) {
                         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
                         cpu->frame_irq[cpu->frame_depth] = 0;
                         cpu->frame_fp[cpu->frame_depth] = cpu->globals.fp;
@@ -1168,9 +1405,9 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
                         return -1;
                     }
                     uint32_t old_sp = cpu->locals.sp;
-                    uint32_t old_pfp = cpu->locals.pfp;
+                    uint32_t old_fp = cpu->globals.fp;
                     memset(&cpu->locals, 0, sizeof(local_regs_t));
-                    cpu->locals.pfp = old_pfp;
+                    cpu->locals.pfp = old_fp;
                     cpu->globals.fp = (old_sp + FRAME_ALIGN_MASK) & ~FRAME_ALIGN_MASK;
                     cpu->locals.sp = cpu->globals.fp + 64;
                     cpu->locals.rip = ip + instr_len;

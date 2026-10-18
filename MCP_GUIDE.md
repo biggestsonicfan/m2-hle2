@@ -44,7 +44,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--log <path>` | Write the session log here instead of `m2hle.log`; `--log off` writes no file (the log window still has it) |
 | `--log-level SPEC` | Drop lines below a level: `warn`, or per channel (the `mem:` / `netplay:` / `sound:` tag a line starts with), e.g. `warn,mem=error,netplay=debug`. Levels are `debug`, `info`, `warn`, `error`, `off`. A dropped line is dropped everywhere: the file, the log window and the MCP log. The file takes 64 MB whatever the level, then only errors (1 MB more) |
 | `--rom <path>` | Auto-load this ROM zip on startup. A directory of region images (`--export-roms`) loads too, with no zip, interleave or CRC pass; its name picks the profile as a zip's does |
-| `--export-roms DIR` | With `--rom <zip>`: write the set into DIR as one straight image per region (`maincpu.bin`, `main_data.bin`, `copro_data.bin`, `polygons.bin`, `textures.bin`, `audiocpu.bin`, `samples.bin`), exactly as they sit in memory after the load, then quit. Name DIR after the set (`sfight`) |
+| `--export-roms DIR` | With `--rom <zip>`: write the set into DIR as one straight image per region (`maincpu.bin`, `main_data.bin`, `copro_data.bin`, `polygons.bin`, `textures.bin`, `audiocpu.bin`, `samples.bin`, and `tgp_tables.bin` for a Model 2A set), exactly as they sit in memory after the load, then quit. Name DIR after the set (`sfight`) |
 | `--run` | Start executing immediately after ROM load |
 | `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
 | `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
@@ -325,7 +325,19 @@ Set the active-high held mask the game's input read is served, in the
 `0x500700` bit layout (see the table under "STF memory map"). `"0x1000"` holds
 P1 Down, `"0x0"` releases everything. It replaces the whole mask
 (`g_input.held`, the same one the window's keyboard drives). Returns `held`. This is the only safe way to drive a
-netplay session (see below).
+netplay session (see below). On a four-player cabinet (Air Walkers) `far`
+sets players 3 and 4 the same way, player 3 on player 1's bits and player 4
+on player 2's (`g_input.far_held`; left out, it stays as it was). The board
+reads them only outside netplay, replays and follows. Returns `far` too.
+
+**`set_gun(player: int = 0, x: float = 0.5, y: float = 0.5, offscreen: int = 0, on: int = 1)`**
+On a light-gun profile (The House of the Dead), aim a gun as the window's
+mouse would: `x` and `y` run 0..1 across and down the picture, `offscreen: 1`
+points it off the picture (a shot there reloads), `on: 0` hands it back to the
+pad's walk. Fire with `set_input` (P1 trigger `0x100`, reload `0x400`; P2
+`0x200` / `0x800`). Ignored by a board in a session, a follow or a replay,
+whose guns follow the pad word. Returns `ad_x` / `ad_y`, where the board's gun
+pointed at its last read (the A/D values the game sees).
 
 ### Breakpoints
 
@@ -578,6 +590,13 @@ then `overlay.swap.last` is `ok`, `rolled_back` (the new file would not load and
 running again) or `failed`. `README.md`, "Putting a new overlay build on a live stream", has
 the details. JSON-escape the path: `"C:\\fly\\flyoverlay.dll"`.
 
+**`announce(note, title = "WELCOME")`** — the same toast in green over the bottom of the game
+box for 4 s, after any already waiting; the one the emulator raises by itself when somebody
+comes into the room it is in ("WELCOME  test1 came into the room.") or a GGPO lobby match
+starts ("WELCOME  flychallenger came into the match."). It needs no plugin and does
+not move the board. One not up within 20 s (nothing composing frames: headless with no A/V
+client) is dropped. `get_status`'s `overlay.announce` has `up`, `queued`, `shown` and `note`.
+
 ### Netplay (RPCN)
 
 The netplay window's buttons, as bridge commands — enough to hold a lobby open,
@@ -727,6 +746,19 @@ fly behind it.
 | `end`, `disconnect` | end the match; leave the lobby |
 
 Test against a local ggpo-server, never the live one.
+
+### Game scripts (M2emulator's Lua)
+
+Bridge-only JSON commands for the game's script, `<scripts>/<set>.lua`
+(docs/invariants/scripts.md). The last three are refused while a session
+(netplay, GGPO, a replay, a follow) owns the board.
+
+| cmd | fields | does |
+|---|---|---|
+| `script_status` | | `loaded`, `running`, `frames`, `path`, `error`, `options` (`key`, `name`, `value`, `values`) |
+| `script_option` | `key`, `value` | sets an option to its `value`th value; `changefunc` runs |
+| `script_eval` | `code` | runs a chunk in the script's state; `result` is its return values, tab-joined |
+| `script_reload` | | reads the script again and runs it from the start |
 
 ### Captures and diagnostics
 

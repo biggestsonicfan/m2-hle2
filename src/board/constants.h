@@ -14,7 +14,7 @@
 
 #define FRAME_STACK_DEPTH          64
 #define FRAME_ALIGN_MASK           63
-#define EMU_STEPS_PER_SLICE        500000  /* a cap: a slice is a vblank, 416,667 cycles */
+#define EMU_STEPS_PER_SLICE        500000  /* a cap: a slice is a vblank, 434,600 cycles */
 
 /* ---- Display ------------------------------------------------------------- */
 
@@ -41,7 +41,7 @@
 
 /* Work RAM */
 #define RAM2_BASE                  0x00200000
-#define RAM2_SIZE                  0x000CF218
+#define RAM2_SIZE                  0x00040000   /* MAME: 0x00200000-0x0023ffff */
 #define RAM_BASE                   0x00500000
 #define RAM_SIZE                   0x00100000
 
@@ -64,6 +64,8 @@
 
 #define COPRO_CONTROL1_BASE        0x00980000
 #define COPRO_CONTROL1_SIZE        0x00000024
+#define TGP_ID_BASE                0x00980030
+#define TGP_ID_SIZE                0x00000010
 #define GEO_CTL1_BASE              0x00980008
 #define GEO_CTL1_SIZE              0x00000004
 #define COPRO_STATUS_BASE          0x00980014
@@ -95,11 +97,9 @@
 #define V_SYNC_SIZE                0x00000001
 #define TMAPGFX_BASE               0x01080000
 #define TMAPGFX_SIZE               0x00080000
-/* Extended video/work RAM — fills the gap between TMAPGFX and PALETTE.
- * Used by fvipers (and likely all Model 2B titles) for collision tables,
- * display lists, and other per-frame scratch data. */
-#define VID_EXT_RAM_BASE           0x01100000
-#define VID_EXT_RAM_SIZE           0x00700000
+/* TILE .. TMAPGFX again, a mirror (MAME: mirror 0x100000 / 0x110000). */
+#define TILE_HI_BASE               0x01100000
+#define TMAPGFX_HI_BASE            0x01180000
 
 #define PALETTE_BASE               0x01800000
 #define PALETTE_SIZE               0x00004000
@@ -112,10 +112,18 @@
 #define IO_BASE                    0x01C00000
 #define IO_SIZE                    0x00000044
 #define IO_IDLE_FILL               0xFF      /* hardware idle state, not 0x00 */
+/* The I/O board answers 0x00..0x1F; the rest of the window reads 0. Every CRX
+ * map in MAME (model2a/2b/2c_crx_mem) maps the board there and nothing at
+ * 0x20..0x3F, and only a write at 0x40. Virtua Fighter 2 writes 1 to 0x24 and
+ * reads it back to tell a Model 1 I/O board (dual-port RAM, which echoes) from
+ * a 315-5649: echoed, it waited for the Model 1 board forever (Pinboard #1046). */
+#define IO_BOARD_SPAN              0x00000020
 #define SERIAL_BASE                0x01C80000
 #define SERIAL_SIZE                0x00000003
 #define BACK_BASE                  0x01D00000
 #define BACK_SIZE                  0x00010000
+#define COMM_STATUS_BASE           0x01A04000  /* link board CN / FG, mirrored +0x10000 */
+#define COMM_STATUS_SIZE           0x00000004
 
 /* Cartridge / extra ROM data */
 #define MAIN_DATA_BASE             0x02000000
@@ -162,10 +170,6 @@
 #define LUMA_SIZE                  0x00020000
 #define LUMA2_BASE                 0x12800000
 #define LUMA2_SIZE                 0x00020000
-
-/* Framebuffer */
-#define FRAMEBUFFER_BASE           0x12C00000
-#define FRAMEBUFFER_SIZE           0x00080000
 
 /* IAC */
 #define IAC_BASE                   0xFF000000

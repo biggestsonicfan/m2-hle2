@@ -671,79 +671,105 @@ static inline void rpcn_pb_int_filter_eq(pb_writer_t *w, uint16_t id, uint32_t n
     pb_end_sub(w, f);
 }
 
+/* A room password as the server takes it: a FIXED 8 BYTES
+ * (SceNpMatching2SessionPassword), zero-padded or cut. The server compares the
+ * raw arrays, so a password padded any other way would never match. */
+static inline void rpcn_pb_password(pb_writer_t *w, uint32_t field, const char *password) {
+    char fixed[8];
+    memset(fixed, 0, sizeof(fixed));
+    size_t given = strlen(password);
+    memcpy(fixed, password, given < sizeof(fixed) ? given : sizeof(fixed));
+    pb_bytes(w, field, fixed, sizeof(fixed));
+}
+
+/* sigOptParam (CreateRoom field 17) — THE FIELD THAT MAKES PEERS REACHABLE. All
+ * three of its fields are uint8/uint16 wrappers read with get_verified(), so
+ * omitting any one is Malformed rather than a default. Mesh (1) is "everyone
+ * connects to everyone"; for two players that is star without needing a hub id. */
+static inline void rpcn_pb_sig_mesh(pb_writer_t *w) {
+    uint32_t sig = pb_begin_sub(w, 17);
+    pb_wrapped(w, 1, 1);                        /* type = SignalingMesh */
+    pb_wrapped(w, 2, 0);                        /* flag = 0 — bit 0 would disable it */
+    pb_wrapped(w, 3, 0);                        /* hubMemberId — unused by mesh */
+    pb_end_sub(w, sig);
+}
+
 /*
+ * A room to create: everything CreateRoom carries but the ComId and world.
  * `room_bin` / `member_bin` seed the room's shared state and the creator's own
  * attribute (room.h), so the room is never seen without them. Either may be
  * null, which leaves the attribute empty. `relay_ms` is RPCN_ROOM_INT_ATTR_RELAY,
  * left unset at 0. `ints` (may be null) are more searchable ints, the room's
- * rules (room.h, match_rules_t); one for the relay id is ignored.
+ * rules (room.h, match_rules_t); one for the relay id is ignored. A PS3-shaped
+ * room (rpcn_ps3_create_room) reads only `max_slot` and the two attributes.
  */
+typedef struct {
+    uint32_t                max_slot;
+    const char             *password;      /* null or empty: an open room */
+    uint32_t                flag_attr;
+    const uint8_t          *room_bin;
+    uint32_t                room_len;
+    const uint8_t          *member_bin;
+    uint32_t                member_len;
+    uint32_t                relay_ms;
+    const rpcn_int_attrs_t *ints;
+} rpcn_room_spec_t;
+
+/* roomPassword and passwordSlotMask (CreateRoom fields 9 and 11). */
+static inline void rpcn_pb_room_lock(pb_writer_t *w, const char *password, uint32_t max_slot) {
+    /* TWO RULES, BOTH ENFORCED SILENTLY BY THE SERVER — get either wrong and
+     * the room ends up with NO password while still looking protected here.
+     *
+     * 1. The password is a FIXED 8 BYTES (SceNpMatching2SessionPassword).
+     *    room_manager.rs takes it only `if pb.room_password.len() == 8` and
+     *    otherwise just logs "Invalid password length" and leaves the room
+     *    open. So pad/truncate to 8.
+     * 2. passwordSlotMask marks WHICH SLOTS the password guards, and defaults
+     *    to 0 — meaning every slot is public. A joiner sending no password
+     *    takes req_slot(false) and walks straight into a "private" room.
+     *    Marking all maxSlot slots private (the mask is MSB-first: slot i =
+     *    bit 63-i) is what actually gates the room, and is also how a browser
+     *    tells a locked room from an open one, since the search reply exposes
+     *    privateSlotNum but no password flag. */
+    rpcn_pb_password(w, 9, password);                           /* roomPassword */
+
+    uint64_t slot_mask = 0;
+    for (uint32_t i = 0; i < max_slot && i < 64; i++) slot_mask |= (1ull << (63 - i));
+    pb_varint(w, 11, slot_mask);                                /* passwordSlotMask */
+}
+
+/* roomSearchableIntAttrExternal (CreateRoom field 6): the relay id when there
+ * is one, then the rules in `ints` (may be null), all but the relay's slot. */
+static inline void rpcn_pb_room_ints(pb_writer_t *w, uint32_t relay_ms, const rpcn_int_attrs_t *ints) {
+    if (relay_ms) rpcn_pb_int_attr(w, 6, RPCN_ROOM_INT_ATTR_RELAY, relay_ms);
+    for (uint32_t i = 1; ints && i < 8; i++)
+        if (ints->mask & (1u << i)) rpcn_pb_int_attr(w, 6, (uint16_t)(0x4C + i), ints->value[i]);
+}
+
 static inline uint64_t rpcn_create_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
-                                        uint32_t max_slot, const char *password,
-                                        uint32_t flag_attr,
-                                        const uint8_t *room_bin, uint32_t room_len,
-                                        const uint8_t *member_bin, uint32_t member_len,
-                                        uint32_t relay_ms, const rpcn_int_attrs_t *ints) {
+                                        const rpcn_room_spec_t *r) {
     uint8_t pb[512];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
     pb_varint(&w, 1, world_id);                 /* worldId */
-    pb_varint(&w, 3, max_slot);                 /* maxSlot */
-    if (flag_attr != 0) {
+    pb_varint(&w, 3, r->max_slot);              /* maxSlot */
+    if (r->flag_attr != 0) {
         /* flagAttr. A bare varint, unlike the uint8/uint16 fields around it — the
          * proto types it uint32, so it is not one of the flatbuffers-era wrappers. */
-        pb_varint(&w, 4, flag_attr);
+        pb_varint(&w, 4, r->flag_attr);
     }
-    if (room_bin && room_len)                   /* roomBinAttrInternal */
-        rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, room_bin, room_len);
-    if (relay_ms)                               /* roomSearchableIntAttrExternal */
-        rpcn_pb_int_attr(&w, 6, RPCN_ROOM_INT_ATTR_RELAY, relay_ms);
-    for (uint32_t i = 1; ints && i < 8; i++)
-        if (ints->mask & (1u << i)) rpcn_pb_int_attr(&w, 6, (uint16_t)(0x4C + i), ints->value[i]);
-    if (password && *password) {
-        /* TWO RULES, BOTH ENFORCED SILENTLY BY THE SERVER — get either wrong and
-         * the room ends up with NO password while still looking protected here.
-         *
-         * 1. The password is a FIXED 8 BYTES (SceNpMatching2SessionPassword).
-         *    room_manager.rs takes it only `if pb.room_password.len() == 8` and
-         *    otherwise just logs "Invalid password length" and leaves the room
-         *    open. So pad/truncate to 8.
-         * 2. passwordSlotMask marks WHICH SLOTS the password guards, and defaults
-         *    to 0 — meaning every slot is public. A joiner sending no password
-         *    takes req_slot(false) and walks straight into a "private" room.
-         *    Marking all maxSlot slots private (the mask is MSB-first: slot i =
-         *    bit 63-i) is what actually gates the room, and is also how a browser
-         *    tells a locked room from an open one, since the search reply exposes
-         *    privateSlotNum but no password flag. */
-        char fixed[8];
-        memset(fixed, 0, sizeof(fixed));
-        size_t given = strlen(password);
-        memcpy(fixed, password, given < sizeof(fixed) ? given : sizeof(fixed));
-        pb_bytes(&w, 9, fixed, sizeof(fixed));                       /* roomPassword */
-
-        uint64_t slot_mask = 0;
-        for (uint32_t i = 0; i < max_slot && i < 64; i++) slot_mask |= (1ull << (63 - i));
-        pb_varint(&w, 11, slot_mask);                                /* passwordSlotMask */
-    }
-    if (member_bin && member_len)               /* roomMemberBinAttrInternal */
-        rpcn_pb_bin_attr(&w, 15, RPCN_MEMBER_BIN_ATTR_ID, member_bin, member_len);
+    if (r->room_bin && r->room_len)             /* roomBinAttrInternal */
+        rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, r->room_bin, r->room_len);
+    rpcn_pb_room_ints(&w, r->relay_ms, r->ints);  /* roomSearchableIntAttrExternal */
+    if (r->password && *r->password) rpcn_pb_room_lock(&w, r->password, r->max_slot);
+    if (r->member_bin && r->member_len)         /* roomMemberBinAttrInternal */
+        rpcn_pb_bin_attr(&w, 15, RPCN_MEMBER_BIN_ATTR_ID, r->member_bin, r->member_len);
     /* teamId is NOT optional despite proto3: room_manager.rs does
      * `pb.team_id.get_verified()?` and Option<Uint8>::get_verified() returns
      * Malformed when the field is absent. It is a uint8 WRAPPER submessage, so it
      * has to be written as { uint32 value = 1 }, not a bare varint. */
     pb_wrapped(&w, 16, 0);
-
-    /* sigOptParam — THE FIELD THAT MAKES PEERS REACHABLE. All three of its fields
-     * are uint8/uint16 wrappers read with get_verified(), so omitting any one is
-     * Malformed rather than a default. Mesh (1) is "everyone connects to
-     * everyone"; for two players that is star without needing a hub id. */
-    {
-        uint32_t sig = pb_begin_sub(&w, 17);
-        pb_wrapped(&w, 1, 1);                   /* type = SignalingMesh */
-        pb_wrapped(&w, 2, 0);                   /* flag = 0 — bit 0 would disable it */
-        pb_wrapped(&w, 3, 0);                   /* hubMemberId — unused by mesh */
-        pb_end_sub(&w, sig);
-    }
+    rpcn_pb_sig_mesh(&w);                       /* sigOptParam */
 
     if (!w.ok) { rpcn_fail(c, "CreateRoom: protobuf overflow"); return 0; }
 
@@ -760,15 +786,8 @@ static inline uint64_t rpcn_join_room(rpcn_client_t *c, const char *com_id, uint
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
     pb_varint(&w, 1, room_id);                  /* roomId */
-    if (password && *password) {
-        /* Same fixed 8 bytes as CreateRoom — the server compares the raw arrays,
-         * so a password padded differently here would simply never match. */
-        char fixed[8];
-        memset(fixed, 0, sizeof(fixed));
-        size_t given = strlen(password);
-        memcpy(fixed, password, given < sizeof(fixed) ? given : sizeof(fixed));
-        pb_bytes(&w, 2, fixed, sizeof(fixed));                       /* roomPassword */
-    }
+    if (password && *password)                  /* roomPassword, fixed 8 bytes as CreateRoom's */
+        rpcn_pb_password(&w, 2, password);
     if (member_bin && member_len)               /* roomMemberBinAttrInternal */
         rpcn_pb_bin_attr(&w, 4, RPCN_MEMBER_BIN_ATTR_ID, member_bin, member_len);
     pb_wrapped(&w, 6, 0);                       /* teamId — mandatory here too */
@@ -969,26 +988,18 @@ static inline uint64_t rpcn_ps3_join_room(rpcn_client_t *c, const char *com_id, 
  * and mesh signaling.
  */
 static inline uint64_t rpcn_ps3_create_room(rpcn_client_t *c, const char *com_id, uint32_t world_id,
-                                            uint32_t max_slot, const uint32_t int_attr[8],
-                                            const uint8_t *room_bin, uint32_t room_len,
-                                            const uint8_t *member_bin, uint32_t member_len) {
+                                            const rpcn_room_spec_t *r, const uint32_t int_attr[8]) {
     uint8_t pb[512];
     pb_writer_t w;
     pb_writer_init(&w, pb, sizeof(pb));
     pb_varint(&w, 1, world_id);
-    pb_varint(&w, 3, max_slot);
+    pb_varint(&w, 3, r->max_slot);
     pb_varint(&w, 4, 0x04000000u);                              /* flagAttr */
-    rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, room_bin, room_len);
+    rpcn_pb_bin_attr(&w, 5, RPCN_ROOM_BIN_ATTR_ID, r->room_bin, r->room_len);
     for (uint32_t i = 0; i < 8; i++) rpcn_pb_int_attr(&w, 6, (uint16_t)(0x4C + i), int_attr[i]);
-    rpcn_pb_bin_attr(&w, 15, RPCN_MEMBER_BIN_ATTR_ID, member_bin, member_len);
+    rpcn_pb_bin_attr(&w, 15, RPCN_MEMBER_BIN_ATTR_ID, r->member_bin, r->member_len);
     pb_wrapped(&w, 16, 0xFF);                                   /* teamId */
-    {
-        uint32_t sig = pb_begin_sub(&w, 17);
-        pb_wrapped(&w, 1, 1);                                   /* mesh */
-        pb_wrapped(&w, 2, 0);
-        pb_wrapped(&w, 3, 0);
-        pb_end_sub(&w, sig);
-    }
+    rpcn_pb_sig_mesh(&w);                                       /* sigOptParam */
     if (!w.ok) { rpcn_fail(c, "CreateRoom: protobuf overflow"); return 0; }
     uint8_t payload[640];
     uint32_t n = rpcn_frame_room_payload(payload, sizeof(payload), com_id, pb, w.used);
@@ -1478,15 +1489,31 @@ static inline uint32_t rpcn_split_strings(const uint8_t *p, uint32_t size,
     return got;
 }
 
+/* The Twitch start's reply: the device code to show, where to enter it, and how
+ * long it lives. */
+typedef struct {
+    char     flow_id[128];
+    char     user_code[32];
+    char     verification_uri[256];
+    uint32_t expires_in;
+    uint32_t interval_s;
+} rpcn_twitch_code_t;
+
+/* A poll's reply once the code is approved: the account and its login token. */
+typedef struct {
+    char npid[20];
+    char online_name[32];
+    char avatar_url[256];
+    char login_token[80];
+} rpcn_twitch_login_t;
+
 /* Reply: flow_id, user_code, verification_uri (strings), then u32 expires_in and
- * u32 interval. */
+ * u32 interval, as the server sent them (0 included). */
 static inline bool rpcn_parse_twitch_start(const uint8_t *payload, uint32_t size,
-                                           char *flow_id, uint32_t flow_cap,
-                                           char *user_code, uint32_t code_cap,
-                                           char *uri, uint32_t uri_cap,
-                                           uint32_t *out_expires, uint32_t *out_interval) {
-    char *outs[3] = { flow_id, user_code, uri };
-    uint32_t caps[3] = { flow_cap, code_cap, uri_cap };
+                                           rpcn_twitch_code_t *code) {
+    char *outs[3] = { code->flow_id, code->user_code, code->verification_uri };
+    uint32_t caps[3] = { sizeof(code->flow_id), sizeof(code->user_code),
+                         sizeof(code->verification_uri) };
     if (rpcn_split_strings(payload, size, outs, caps, 3) != 3) return false;
 
     /* The two u32s sit after the three terminators; find where they start rather
@@ -1497,19 +1524,17 @@ static inline bool rpcn_parse_twitch_start(const uint8_t *payload, uint32_t size
         at++;
     }
     if (at + 8 > size) return false;
-    if (out_expires)  *out_expires  = rpcn_get_u32(payload + at);
-    if (out_interval) *out_interval = rpcn_get_u32(payload + at + 4);
+    code->expires_in = rpcn_get_u32(payload + at);
+    code->interval_s = rpcn_get_u32(payload + at + 4);
     return true;
 }
 
 /* Reply: npid, online_name, avatar_url, login_token — all strings. */
 static inline bool rpcn_parse_twitch_poll(const uint8_t *payload, uint32_t size,
-                                          char *npid, uint32_t npid_cap,
-                                          char *online_name, uint32_t name_cap,
-                                          char *avatar, uint32_t avatar_cap,
-                                          char *login_token, uint32_t token_cap) {
-    char *outs[4] = { npid, online_name, avatar, login_token };
-    uint32_t caps[4] = { npid_cap, name_cap, avatar_cap, token_cap };
+                                          rpcn_twitch_login_t *login) {
+    char *outs[4] = { login->npid, login->online_name, login->avatar_url, login->login_token };
+    uint32_t caps[4] = { sizeof(login->npid), sizeof(login->online_name),
+                         sizeof(login->avatar_url), sizeof(login->login_token) };
     return rpcn_split_strings(payload, size, outs, caps, 4) == 4;
 }
 

@@ -109,7 +109,7 @@ static void test_capture(void) {
     inbox_t in;
     memset(&in, 0, sizeof(in));
     rudp_peer_t p;
-    rudp_peer_init(&p, 0x0100007F, 3658, 1, wire_send, w, inbox_deliver, &in);
+    rudp_peer_init(&p, 0x0100007F, 3658, 1, (rudp_io_t){ wire_send, w, inbox_deliver, &in });
     p.ch[0].isn = 0x4A3A; p.ch[0].my_id = 0x6BE29AD2;
     p.ch[1].isn = 0xBF92; p.ch[1].my_id = 0xC4AC47BE;
     p.ch[2].isn = 0xBD3A; p.ch[2].my_id = 0xD244110A;
@@ -133,7 +133,7 @@ static void test_capture(void) {
      * each with a SYN-ACK acknowledging ISN+1 and carrying the channel's flags. */
     memset(w, 0, sizeof(*w));
     rudp_peer_t q;
-    rudp_peer_init(&q, 0x0100007F, 3658, 2, wire_send, w, inbox_deliver, &in);
+    rudp_peer_init(&q, 0x0100007F, 3658, 2, (rudp_io_t){ wire_send, w, inbox_deliver, &in });
     uint8_t dg[256] = { 1, 0, 1, 0, 1, 0 };
     uint32_t n = 6 + hex(ps3_syns, dg + 6);
     rudp_on_datagram(&q, dg, n, 2000);
@@ -226,8 +226,8 @@ static void test_pair(void) {
     memset(&ia, 0, sizeof(ia));
     memset(&ib, 0, sizeof(ib));
     rudp_peer_t a, b;
-    rudp_peer_init(&a, 1, 1, 11, wire_send, ab, inbox_deliver, &ia);
-    rudp_peer_init(&b, 2, 2, 22, wire_send, ba, inbox_deliver, &ib);
+    rudp_peer_init(&a, 1, 1, 11, (rudp_io_t){ wire_send, ab, inbox_deliver, &ia });
+    rudp_peer_init(&b, 2, 2, 22, (rudp_io_t){ wire_send, ba, inbox_deliver, &ib });
     uint64_t now = 1000;
     rudp_connect_all(&a, now);
     rudp_connect_all(&b, now);
@@ -237,8 +237,8 @@ static void test_pair(void) {
     /* One end late: b only starts once a's SYNs have been waiting. */
     wire_t *ab2 = calloc(1, sizeof(wire_t)), *ba2 = calloc(1, sizeof(wire_t));
     rudp_peer_t c, e;
-    rudp_peer_init(&c, 1, 1, 33, wire_send, ab2, inbox_deliver, &ia);
-    rudp_peer_init(&e, 2, 2, 44, wire_send, ba2, inbox_deliver, &ib);
+    rudp_peer_init(&c, 1, 1, 33, (rudp_io_t){ wire_send, ab2, inbox_deliver, &ia });
+    rudp_peer_init(&e, 2, 2, 44, (rudp_io_t){ wire_send, ba2, inbox_deliver, &ib });
     rudp_connect_all(&c, now);
     run_pair(&c, &e, ab2, ba2, &now, 5);
     rudp_connect_all(&e, now);

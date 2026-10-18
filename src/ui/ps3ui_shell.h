@@ -9,7 +9,8 @@
  *                the prompt the PS3 draws, in the same arcade lettering, since
  *                the PS3's board is not running yet at its title
  *   MAIN MENU    Arcade / Offline Versus / Online Battle / Help & Options
- *   ARCADE       difficulty, rounds, time, attack, barriers, game type
+ *   ARCADE       difficulty, rounds, time, attack, barriers, game type (STF's
+ *                rows; another game sets its own, ps3ui_rules_t)
  *   VERSUS       the same without difficulty; needs a second pad (START on it)
  *   ONLINE       ps3ui_app.h, the online lobby
  *   GAME         the board, alone; SELECT opens the pause menu
@@ -82,6 +83,48 @@ static const uint8_t ps3ui_set_max[PS3UI_SETS] = { 5, 3, 3, 4, 9, 3 };
 static const uint8_t ps3ui_set_arcade_def[PS3UI_SETS] = { 1, 0, 1, 1, 4, 0 };
 static const uint8_t ps3ui_set_versus_def[PS3UI_SETS] = { 1, 1, 1, 1, 4, 0 };
 
+/* One game's ARCADE / VERSUS rows. The record apply_settings gets is the PS3's
+ * GameMode_Set one (8 bytes): s[0] row 0, s[1] 1 (!trial), s[2] 0, then s[3 +
+ * k] = row rec[k] -- STF's order is time, rounds, attack, barriers, type.
+ * versus_first rows are left out of VERSUS (STF: Difficulty). no_versus /
+ * no_online: why the mode cannot run for this game, or NULL. online_arcade:
+ * Online Battle writes the ARCADE rows first (Virtual-On: each cabinet's own
+ * settings, free play with them, which the boot into the link's role keeps). */
+typedef struct {
+    int n, versus_first;
+    const char *const *label;
+    const char *const (*values)[10];
+    const uint8_t *max, *arcade_def, *versus_def;
+    uint8_t rec[5];
+    const char *no_versus, *no_online;
+    int online_arcade;
+} ps3ui_rules_t;
+
+static const ps3ui_rules_t ps3ui_rules_stf = {
+    PS3UI_SETS, 1, ps3ui_set_label, ps3ui_set_values, ps3ui_set_max, ps3ui_set_arcade_def, ps3ui_set_versus_def,
+    { PS3UI_SET_TIME, PS3UI_SET_ROUNDS, PS3UI_SET_ATTACK, PS3UI_SET_BARRIERS, PS3UI_SET_TYPE }, NULL, NULL,
+};
+
+/* Virtual-On (PS3 NPJB00321's Arcade menu; vonj_apply_menu_settings). The
+ * PS3's versus mode runs two boards in one process (its board API at
+ * 0x4550E0, init(board_count)); this emulator runs one. Online Battle opens
+ * the lobby: a room's match links this cabinet's comm board to the other
+ * player's (netplay_member_start_link, VIRTUAL-ON-PS3.md "RPCN"). */
+static const char *const ps3ui_von_label[3] = { "Difficulty", "Rounds to win", "Time limit" };
+static const char *const ps3ui_von_values[3][10] = {
+    { "Easy", "Normal", "Hard", "Very Hard" },
+    { "1", "2", "3", "4", "5" },
+    { "30", "60", "90", "No limit" },
+};
+static const uint8_t ps3ui_von_max[3] = { 3, 4, 3 };
+static const uint8_t ps3ui_von_def[3] = { 1, 0, 2 };
+static const ps3ui_rules_t ps3ui_rules_von = {
+    3, 1, ps3ui_von_label, ps3ui_von_values, ps3ui_von_max, ps3ui_von_def, ps3ui_von_def,
+    { 2, 1, 0xFF, 0xFF, 0xFF },
+    "Versus needs both cabinets of a Twin: two boards, which this emulator does not run yet.",
+    NULL, 1,
+};
+
 static const char *const ps3ui_btn_names[PS3UI_BTN_CODES] = { "Unused", "P", "K", "G", "P+G", "P+K", "K+G", "P+K+G" };
 static const char *const ps3ui_type_names[PS3UI_TYPES] = { "Standard", "Arcade stick 1", "Arcade stick 2",
                                                            "Arcade stick 3", "Arcade stick 4", "Arcade stick 5" };
@@ -123,6 +166,7 @@ enum { PS3UI_SHDLG_NONE, PS3UI_SHDLG_EXIT_GAME };
 typedef struct {
     ps3ui_host_t host;
     ps3ui_app_t *online;
+    const ps3ui_rules_t *rules; /* the game's ARCADE / VERSUS rows: STF's unless set */
     ps3ui_sh_screen_t scr;
     int cursor, main_cursor, options_cursor, pause_cursor;
     int options_from_pause;
@@ -155,11 +199,20 @@ static void ps3ui_shell_init(ps3ui_shell_t *sh, ps3ui_host_t host, ps3ui_app_t *
     sh->host = host;
     sh->online = online;
     sh->scr = PS3UI_SH_TITLE;
+    sh->rules = &ps3ui_rules_stf;
     memcpy(sh->arcade, ps3ui_set_arcade_def, PS3UI_SETS);
     memcpy(sh->versus, ps3ui_set_versus_def, PS3UI_SETS);
     memcpy(sh->ctl, ps3ui_presets, sizeof sh->ctl);
     sh->music = sh->se = 5;
     ps3ui_win_open(&sh->bar, &ps3ui_n_cmn_base, "sousa_win");
+}
+
+/* Another game's ARCADE / VERSUS rows, at their defaults. */
+static void ps3ui_shell_set_rules(ps3ui_shell_t *sh, const ps3ui_rules_t *r)
+{
+    sh->rules = r;
+    memcpy(sh->arcade, r->arcade_def, (size_t)r->n);
+    memcpy(sh->versus, r->versus_def, (size_t)r->n);
 }
 
 /* The pad's buttons as the current Controls type sets them. */
@@ -251,27 +304,34 @@ static int ps3ui_sh_value(ps3ui_shell_t *sh, int v, int max)
     return v;
 }
 
-/* The 8 bytes NetGameMode_Set takes: difficulty, !trial, 0, time, rounds,
- * attack, barriers, type. */
-static void ps3ui_shell_settings_bytes(const uint8_t v[PS3UI_SETS], uint8_t s[8])
+/* The 8 bytes NetGameMode_Set takes: row 0, !trial, 0, then the rows in the
+ * rules' order (STF: difficulty, 1, 0, time, rounds, attack, barriers, type). */
+static void ps3ui_shell_settings_bytes(const ps3ui_rules_t *r, const uint8_t v[PS3UI_SETS], uint8_t s[8])
 {
-    s[0] = v[PS3UI_SET_DIFFICULTY];
+    s[0] = v[0];
     s[1] = 1;
     s[2] = 0;
-    s[3] = v[PS3UI_SET_TIME];
-    s[4] = v[PS3UI_SET_ROUNDS];
-    s[5] = v[PS3UI_SET_ATTACK];
-    s[6] = v[PS3UI_SET_BARRIERS];
-    s[7] = v[PS3UI_SET_TYPE];
+    for (int k = 0; k < 5; k++)
+        s[3 + k] = r->rec[k] < r->n ? v[r->rec[k]] : 0;
 }
 
 static void ps3ui_shell_start_game(ps3ui_shell_t *sh, int versus)
 {
     uint8_t s[8];
-    ps3ui_shell_settings_bytes(versus ? sh->versus : sh->arcade, s);
+    ps3ui_shell_settings_bytes(sh->rules, versus ? sh->versus : sh->arcade, s);
     if (sh->host.apply_settings)
         sh->host.apply_settings(sh->host.user, s, versus);
     ps3ui_shell_go(sh, PS3UI_SH_GAME);
+}
+
+/* Online Battle's settings: the ARCADE rows, for a game whose cabinets each keep their own. */
+static void ps3ui_sh_apply_online(ps3ui_shell_t *sh)
+{
+    uint8_t s[8];
+    if (!sh->rules->online_arcade || !sh->host.apply_settings)
+        return;
+    ps3ui_shell_settings_bytes(sh->rules, sh->arcade, s);
+    sh->host.apply_settings(sh->host.user, s, 0);
 }
 
 /* ---- update --------------------------------------------------------------------- */
@@ -296,9 +356,10 @@ static const char *const ps3ui_pause_rows[4] = { "Resume Game", "Help & Options"
 
 static void ps3ui_sh_update_settings_menu(ps3ui_shell_t *sh, int versus)
 {
+    const ps3ui_rules_t *rl = sh->rules;
     uint8_t *v = versus ? sh->versus : sh->arcade;
-    int first = versus ? 1 : 0;                  /* VERSUS has no Difficulty row */
-    int rows = PS3UI_SETS - first;
+    int first = versus ? rl->versus_first : 0;   /* VERSUS has no Difficulty row */
+    int rows = rl->n - first;
     if (versus && !sh->two_p) {
         if (sh->pressed2 & (PS3UI_PAD_START | PS3UI_PAD_CROSS))
             sh->two_p = 1;                       /* the second pad claims 2P */
@@ -308,7 +369,7 @@ static void ps3ui_sh_update_settings_menu(ps3ui_shell_t *sh, int versus)
     }
     ps3ui_sh_move(sh, rows);
     int r = sh->cursor + first;
-    v[r] = (uint8_t)ps3ui_sh_value(sh, v[r], ps3ui_set_max[r]);
+    v[r] = (uint8_t)ps3ui_sh_value(sh, v[r], rl->max[r]);
     if (ps3ui_sh_hit(sh, PS3UI_PAD_CIRCLE))
         ps3ui_shell_go(sh, PS3UI_SH_MAIN);
     else if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS))
@@ -354,13 +415,24 @@ static void ps3ui_sh_update_credits(ps3ui_shell_t *sh)
         ps3ui_shell_go(sh, PS3UI_SH_OPTIONS);
 }
 
+/* A mode the game cannot run here says why, in a dialog, and stays put. */
+static const char *ps3ui_sh_main_refusal(const ps3ui_shell_t *sh, int row)
+{
+    return row == 1 ? sh->rules->no_versus : row == 2 ? sh->rules->no_online : NULL;
+}
+
 static void ps3ui_sh_update_main(ps3ui_shell_t *sh)
 {
     ps3ui_sh_move(sh, 4);                    /* no wrap; o does nothing here */
-    if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS)) {
+    const char *no = ps3ui_sh_main_refusal(sh, sh->cursor);
+    if (no && ps3ui_sh_hit(sh, PS3UI_PAD_CROSS)) {
+        sh->dlg_kind = PS3UI_SHDLG_NONE;
+        ps3ui_dialog_ask(&sh->dlg, no, 0);
+    } else if (ps3ui_sh_hit(sh, PS3UI_PAD_CROSS)) {
         if (sh->cursor == 0) ps3ui_shell_go(sh, PS3UI_SH_ARCADE);
         if (sh->cursor == 1) ps3ui_shell_go(sh, PS3UI_SH_VERSUS);
         if (sh->cursor == 2) {
+            ps3ui_sh_apply_online(sh);
             ps3ui_shell_go(sh, PS3UI_SH_ONLINE);
             ps3ui_app_open(sh->online);
         }
@@ -412,23 +484,27 @@ static void ps3ui_sh_update_pause(ps3ui_shell_t *sh)
     }
 }
 
-/* The pad this frame: the dialog's if one is up, else the screen's. */
-static void ps3ui_sh_update(ps3ui_shell_t *sh)
+/* Online Battle: the lobby has the screen until it is left. */
+static void ps3ui_sh_update_online(ps3ui_shell_t *sh)
 {
-    /* the online task's VS prompt is on screen and has the pad */
-    if (sh->scr != PS3UI_SH_ONLINE && ps3ui_app_view(sh->online) == PS3UI_VIEW_OVERLAY)
-        return;
+    if (!sh->online->open)
+        ps3ui_shell_go(sh, PS3UI_SH_MAIN);
+    else if (ps3ui_sh_hit(sh, PS3UI_PAD_SELECT))
+        ps3ui_app_ask_leave_link(sh->online);   /* a linked match has no result to leave at */
+}
 
-    if (ps3ui_dialog_showing(&sh->dlg)) {
-        int r = ps3ui_dialog_update(&sh->dlg, sh->pressed);
-        if (r == 0 && sh->dlg_kind == PS3UI_SHDLG_EXIT_GAME) {
-            if (sh->host.reset_board)
-                sh->host.reset_board(sh->host.user);
-            ps3ui_shell_go(sh, PS3UI_SH_MAIN);
-        }
-        return;
+static void ps3ui_sh_update_dialog(ps3ui_shell_t *sh)
+{
+    int r = ps3ui_dialog_update(&sh->dlg, sh->pressed);
+    if (r == 0 && sh->dlg_kind == PS3UI_SHDLG_EXIT_GAME) {
+        if (sh->host.reset_board)
+            sh->host.reset_board(sh->host.user);
+        ps3ui_shell_go(sh, PS3UI_SH_MAIN);
     }
+}
 
+static void ps3ui_sh_update_screen(ps3ui_shell_t *sh)
+{
     switch (sh->scr) {
     case PS3UI_SH_TITLE:
         if (ps3ui_sh_hit(sh, PS3UI_PAD_START | PS3UI_PAD_CROSS))
@@ -441,10 +517,7 @@ static void ps3ui_sh_update(ps3ui_shell_t *sh)
     case PS3UI_SH_CONTROLS: ps3ui_sh_update_controls(sh); break;
     case PS3UI_SH_SETTINGS: ps3ui_sh_update_volume(sh); break;
     case PS3UI_SH_CREDITS: ps3ui_sh_update_credits(sh); break;
-    case PS3UI_SH_ONLINE:
-        if (!sh->online->open)
-            ps3ui_shell_go(sh, PS3UI_SH_MAIN);   /* the lobby was left */
-        break;
+    case PS3UI_SH_ONLINE: ps3ui_sh_update_online(sh); break;
     case PS3UI_SH_GAME:
         if (!sh->netplay && ps3ui_sh_hit(sh, PS3UI_PAD_SELECT)) {
             ps3ui_shell_go(sh, PS3UI_SH_PAUSE);  /* SELECT pauses; START is the arcade's */
@@ -455,15 +528,36 @@ static void ps3ui_sh_update(ps3ui_shell_t *sh)
     }
 }
 
+/* The pad this frame: the dialog's if one is up, else the screen's. */
+static void ps3ui_sh_update(ps3ui_shell_t *sh)
+{
+    /* the online task's VS prompt is on screen and has the pad */
+    if (sh->scr != PS3UI_SH_ONLINE && ps3ui_app_view(sh->online) == PS3UI_VIEW_OVERLAY)
+        return;
+    if (ps3ui_dialog_showing(&sh->dlg))
+        ps3ui_sh_update_dialog(sh);
+    else
+        ps3ui_sh_update_screen(sh);
+}
+
+/* choice_win_0N, the menu window with room for n rows (2..6) */
+static const char *ps3ui_sh_choice_win(int n)
+{
+    static const char *const names[5] = { "choice_win_02", "choice_win_03", "choice_win_04", "choice_win_05",
+                                          "choice_win_06" };
+    return names[(n < 2 ? 2 : n > 6 ? 6 : n) - 2];
+}
+
 /* the windows each screen shows */
 static void ps3ui_sh_windows(ps3ui_shell_t *sh)
 {
     switch (sh->scr) {
     case PS3UI_SH_MAIN: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_04");
         ps3ui_win_open(&sh->msg, &ps3ui_n_cmn_base, "cmn_win_b_01"); break;
-    case PS3UI_SH_ARCADE: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_06");
+    case PS3UI_SH_ARCADE: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, ps3ui_sh_choice_win(sh->rules->n));
         ps3ui_win_open(&sh->msg, &ps3ui_n_cmn_base, "cmn_win_b_01"); break;
-    case PS3UI_SH_VERSUS: ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, "choice_win_05");
+    case PS3UI_SH_VERSUS:
+        ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, ps3ui_sh_choice_win(sh->rules->n - sh->rules->versus_first));
         ps3ui_win_open(&sh->msg, &ps3ui_n_cmn_base, "cmn_win_b_01"); break;
     case PS3UI_SH_OPTIONS:
         ps3ui_win_open(&sh->main, &ps3ui_n_cmn_base, sh->no_controls ? "choice_win_02" : "choice_win_03");
@@ -494,10 +588,9 @@ static void ps3ui_shell_frame(ps3ui_shell_t *sh, uint32_t pad, uint32_t pad2, in
 /* ---- draw ------------------------------------------------------------------------- */
 
 /* A value list (ARCADE / VERSUS / Settings): ps3ui_draw_values. */
-static void ps3ui_sh_draw_values(ps3ui_canvas_t *cv, ps3ui_shell_t *sh, const char *title, const char *const *labels,
-                                 const char *const *values, const int *is_default, int n, int dim)
+static void ps3ui_sh_draw_values(ps3ui_canvas_t *cv, ps3ui_shell_t *sh, const ps3ui_value_list_t *l)
 {
-    ps3ui_draw_values(cv, &sh->main, sh->cursor, sh->cursor_t, title, labels, values, is_default, n, dim);
+    ps3ui_draw_values(cv, &sh->main, sh->cursor, sh->cursor_t, l);
 }
 
 static void ps3ui_sh_draw_list(ps3ui_canvas_t *cv, ps3ui_shell_t *sh, const char *title, const char *const *rows,
@@ -526,11 +619,11 @@ static void ps3ui_sh_draw_explain(ps3ui_canvas_t *cv, ps3ui_shell_t *sh, const c
 {
     ps3ui_slots_t s = { 0 };
     ps3ui_win_draw(cv, &sh->msg, 0, 0, &s);
-    float x0, y0, x1, y1;
-    if (!ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &x0, &y0) || !ps3ui_slot_xy(&s, "p_txt_02_rb", 1, 1, &x1, &y1))
+    ps3ui_box_t box;
+    if (!ps3ui_slot_box(&s, "p_txt_01_lt", "p_txt_02_rb", &box))
         return;
     ps3ui_text_style_t st = ps3ui_style_text(37.0f);
-    ps3ui_text_box(cv, &st, x0, y0, x1, y1, text, ps3ui_slot_alpha(&s, "p_txt_01_lt"), 0);
+    ps3ui_text_box(cv, &st, box, text, ps3ui_slot_alpha(&s, "p_txt_01_lt"), 0);
 }
 
 static void ps3ui_sh_draw_controls(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
@@ -617,6 +710,48 @@ static void ps3ui_sh_draw_credits(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
     ps3ui_sh_draw_explain(cv, sh, about);
 }
 
+static void ps3ui_sh_draw_main(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
+{
+    ps3ui_sh_draw_list(cv, sh, "MAIN MENU", ps3ui_main_rows, 4, sh->cursor);
+    const char *no = ps3ui_sh_main_refusal(sh, sh->cursor);
+    ps3ui_sh_draw_explain(cv, sh, no ? no
+                                  : sh->no_controls && sh->cursor == 3 ? ps3ui_main_explain_nc
+                                                                       : ps3ui_main_explain[sh->cursor]);
+}
+
+/* Arcade's and Offline Versus' rule settings; Versus has no first row and is
+ * dimmed until Player 2 presses START. */
+static void ps3ui_sh_draw_rules(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
+{
+    const ps3ui_rules_t *rl = sh->rules;
+    int versus = sh->scr == PS3UI_SH_VERSUS, first = versus ? rl->versus_first : 0, n = rl->n - first;
+    const uint8_t *v = versus ? sh->versus : sh->arcade;
+    const uint8_t *def = versus ? rl->versus_def : rl->arcade_def;
+    ps3ui_value_list_t l = { .title = versus ? "OFFLINE VERSUS" : "ARCADE", .n = n, .dim = versus && !sh->two_p };
+    for (int i = 0; i < n; i++) {
+        l.labels[i] = rl->label[i + first];
+        l.values[i] = rl->values[i + first][v[i + first]];
+        l.is_default[i] = v[i + first] == def[i + first];
+    }
+    ps3ui_sh_draw_values(cv, sh, &l);
+    ps3ui_sh_draw_explain(cv, sh, versus && !sh->two_p
+                              ? "Two controllers are needed. Press the START button on Player 2's controller."
+                              : "Press the cross button to start.");
+}
+
+static void ps3ui_sh_draw_settings(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
+{
+    char m[8], e[8];
+    snprintf(m, sizeof m, "%d", sh->music);
+    snprintf(e, sizeof e, "%d", sh->se);
+    ps3ui_value_list_t l = { .title = "SETTINGS",
+                             .labels = { "Volume: Music", "Volume: Sound Effects" },
+                             .values = { m, e },
+                             .is_default = { sh->music == 5, sh->se == 5 },
+                             .n = 2 };
+    ps3ui_sh_draw_values(cv, sh, &l);
+}
+
 static const char *ps3ui_shell_hints(const ps3ui_shell_t *sh)
 {
     if (ps3ui_dialog_showing(&sh->dlg))
@@ -647,29 +782,12 @@ static void ps3ui_shell_draw(ps3ui_shell_t *sh, ps3ui_canvas_t *cv)
         ps3ui_draw_bg(cv, 100.0f);
     switch (sh->scr) {
     case PS3UI_SH_MAIN:
-        ps3ui_sh_draw_list(cv, sh, "MAIN MENU", ps3ui_main_rows, 4, sh->cursor);
-        ps3ui_sh_draw_explain(cv, sh, sh->no_controls && sh->cursor == 3 ? ps3ui_main_explain_nc
-                                                                        : ps3ui_main_explain[sh->cursor]);
+        ps3ui_sh_draw_main(cv, sh);
         break;
     case PS3UI_SH_ARCADE:
-    case PS3UI_SH_VERSUS: {
-        int versus = sh->scr == PS3UI_SH_VERSUS, first = versus ? 1 : 0, n = PS3UI_SETS - first;
-        const uint8_t *v = versus ? sh->versus : sh->arcade;
-        const uint8_t *def = versus ? ps3ui_set_versus_def : ps3ui_set_arcade_def;
-        const char *labels[PS3UI_SETS], *values[PS3UI_SETS];
-        int is_def[PS3UI_SETS];
-        for (int i = 0; i < n; i++) {
-            labels[i] = ps3ui_set_label[i + first];
-            values[i] = ps3ui_set_values[i + first][v[i + first]];
-            is_def[i] = v[i + first] == def[i + first];
-        }
-        ps3ui_sh_draw_values(cv, sh, versus ? "OFFLINE VERSUS" : "ARCADE", labels, values, is_def, n,
-                             versus && !sh->two_p);
-        ps3ui_sh_draw_explain(cv, sh, versus && !sh->two_p
-                                  ? "Two controllers are needed. Press the START button on Player 2's controller."
-                                  : "Press the cross button to start.");
+    case PS3UI_SH_VERSUS:
+        ps3ui_sh_draw_rules(cv, sh);
         break;
-    }
     case PS3UI_SH_OPTIONS:
         ps3ui_sh_draw_list(cv, sh, "HELP & OPTIONS", sh->no_controls ? ps3ui_option_rows_nc : ps3ui_option_rows,
                            sh->no_controls ? 2 : 3, sh->cursor);
@@ -680,16 +798,9 @@ static void ps3ui_shell_draw(ps3ui_shell_t *sh, ps3ui_canvas_t *cv)
     case PS3UI_SH_CONTROLS:
         ps3ui_sh_draw_controls(cv, sh);
         break;
-    case PS3UI_SH_SETTINGS: {
-        static const char *const labels[2] = { "Volume: Music", "Volume: Sound Effects" };
-        char m[8], e[8];
-        snprintf(m, sizeof m, "%d", sh->music);
-        snprintf(e, sizeof e, "%d", sh->se);
-        const char *values[2] = { m, e };
-        int is_def[2] = { sh->music == 5, sh->se == 5 };
-        ps3ui_sh_draw_values(cv, sh, "SETTINGS", labels, values, is_def, 2, 0);
+    case PS3UI_SH_SETTINGS:
+        ps3ui_sh_draw_settings(cv, sh);
         break;
-    }
     case PS3UI_SH_PAUSE:
         ps3ui_sh_draw_list(cv, sh, "1P PAUSE", ps3ui_pause_rows, 4, sh->pause_cursor);
         break;

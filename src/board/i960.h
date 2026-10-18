@@ -1,6 +1,7 @@
 #ifndef I960_H
 #define I960_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include "constants.h"
@@ -92,11 +93,21 @@ typedef struct i960_cpu {
      * into ROM; STF's compiler never addresses through fp. */
     uint32_t       frame_fp[FRAME_STACK_DEPTH];
 
+    /* `flushreg` puts the cached frames in memory, each at its FP in the
+     * hardware's layout (r0 pfp, r1 sp, r2 the IP the frame resumes at), and a
+     * `ret` into one loads it back from there, at pfp. frame_stack[d] for d <
+     * frame_flushed is stale then. frame_mem says a flush ever happened, so a
+     * `ret` with nothing cached reads memory instead of halting. Dynamite Cop's
+     * task switch (0x2E80) rewrites the frame it returns into that way. */
+    int            frame_flushed;
+    int            frame_mem;
+
     // Running state
     int            halted;
 
     /* Clock cycles the instructions run so far cost, at MAME's per-opcode
-     * estimates (i960_cycle_cost). Only live board timers read it. */
+     * estimates (i960_cycle_cost), or the board's (i960_timing.h). Only
+     * live board timers read it. */
     uint64_t       cycles;
 
     /* The PRCB the processor was started or last re-initialised with (IAC
@@ -105,8 +116,52 @@ typedef struct i960_cpu {
     uint32_t       prcb;
 } i960_cpu_t;
 
+/* How the i960 is charged: MAME's per-opcode table (i960_cycle_cost), or, for a
+ * profile that sets game_quirks_t.i960_board_timing, the table plus what the
+ * board's caches and wait states add (i960_timing.h). The board model's
+ * state -- the cache tags, the load scoreboard, the cycle's remainder -- is
+ * board state that profile saves (savestate_extra), and a reset clears it.
+ * The hooks that charge a run of instructions themselves (m2_spin.h,
+ * m2_texload.h) decline while it is on. */
+#define I960_CYC_ONE  1024u
+#define I960_BT_LINES 32u
+typedef struct {
+    uint32_t tag[I960_BT_LINES];  /* line number + 1 held by each cache line, 0 empty */
+    uint32_t last_line;           /* the line the last instruction ended in */
+    uint32_t next_ip;             /* where the last instruction falls through to */
+    uint32_t pend0, pend1;        /* registers the last load / the one before fill */
+    uint32_t brrun;               /* line + 1 that runs on from a branch's missed line, 0 none */
+    uint8_t  prev_op, prev_valid, last_valid, pad;
+    uint8_t  line_ld, line_st, pad2[2];  /* the line holds a long instruction / only long stores */
+} i960_bt_t;
+static bool      g_i960_bt_on;
+static i960_bt_t g_i960_bt;
+static uint32_t  g_i960_cyc_frac;
+/* --i960-timing: -1 the profile's choice, 0 the table, 1 the board's. */
+static int       g_i960_timing_force = -1;
+
+/* Room to push a frame. A full cache drops the frames flushreg already put in
+ * memory (i960.h, frame_flushed): a program that switches tasks never pops
+ * them, as Dynamite Cop's main loop does not (0x142C, a frame a pass). */
+static inline bool i960_frame_room(i960_cpu_t *cpu) {
+    if (cpu->frame_depth < FRAME_STACK_DEPTH) return true;
+    int k = cpu->frame_flushed;
+    if (k <= 0) return false;
+    size_t n = (size_t)(cpu->frame_depth - k);
+    memmove(cpu->frame_stack,  cpu->frame_stack + k,  n * sizeof cpu->frame_stack[0]);
+    memmove(cpu->frame_irq,    cpu->frame_irq + k,    n * sizeof cpu->frame_irq[0]);
+    memmove(cpu->frame_irq_ac, cpu->frame_irq_ac + k, n * sizeof cpu->frame_irq_ac[0]);
+    memmove(cpu->frame_irq_pc, cpu->frame_irq_pc + k, n * sizeof cpu->frame_irq_pc[0]);
+    memmove(cpu->frame_fp,     cpu->frame_fp + k,     n * sizeof cpu->frame_fp[0]);
+    cpu->frame_depth   = (int)n;
+    cpu->frame_flushed = 0;
+    return true;
+}
+
 static inline void i960_reset(i960_cpu_t *cpu) {
     memset(cpu, 0, sizeof(i960_cpu_t));
+    g_i960_cyc_frac = 0;
+    memset(&g_i960_bt, 0, sizeof g_i960_bt);
 }
 
 #endif // I960_H

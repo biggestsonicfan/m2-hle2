@@ -522,6 +522,7 @@ a.tool.github { color: var(--text); }
 .pause-btn .play-icon, .pause-btn[aria-pressed="true"] .pause-icon { display: none; }
 .pause-btn[aria-pressed="true"] .play-icon { display: inline; }
 .bar:has(.pause-btn[aria-pressed="true"]) { opacity: 1; }
+.replay-finish-btn .rec-stop { color: #E5484D; }
 .paused-label {
   position: fixed;
   top: 50%;
@@ -793,6 +794,9 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
 /* The Picture tab (m2hle-shader.js) */
 .picture { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0.2rem 16px 0.8rem; }
 .picture-advanced { margin-top: 0.3rem; max-width: 46rem; }
+.picture-filter { display: flex; }
+.picture-arcade { color: var(--text); }
+.picture-filter select { max-width: 100%; }
 .picture-advanced label { flex-direction: column; }
 .picture-advanced select { align-self: flex-start; max-width: 100%; }
 .shader-warn { margin: 0.6rem 0 0; padding: 0.45rem 0.7rem; border-left: 4px solid var(--warn); background: rgba(2, 9, 24, 0.5); color: var(--text); }
@@ -805,12 +809,20 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
 .shader-param { display: grid !important; grid-template-columns: minmax(8rem, 1fr) minmax(6rem, 2fr) 3.5rem; align-items: center; gap: 0.6rem; margin: 0 !important; }
 .shader-param output { font-variant-numeric: tabular-nums; text-align: right; color: var(--text); }
 .shader-param input[type=range] { width: 100%; min-width: 0; }
+.crt-pots { max-width: 46rem; }
+.crt-pots .crt-group { margin: 0.5rem 0 0; font-size: 0.85rem; color: var(--text); }
 .picture code { font: 0.8125rem var(--font-mono); }
 
 /* The Replay tab (m2hle-replay.js). */
 .replay { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0.2rem 16px 0.8rem; max-width: 46rem; }
 .replay p { margin: 0.25rem 0; }
 .replay-label { margin: 0.4rem 0; padding: 0.4rem 0.6rem; border-left: 2px solid var(--text); }
+.cheats-text { box-sizing: border-box; width: 100%; min-height: 14rem; margin: 0.4rem 0; resize: vertical; font: 0.85rem/1.35 "PS3 Mono", monospace; color: var(--text); background: rgba(0, 0, 0, 0.35); border: 1px solid var(--text); padding: 0.4rem; tab-size: 4; }
+.cheats-options label { display: flex; gap: 0.6rem; align-items: center; margin: 0.25rem 0; }
+.cheats-draw { position: fixed; pointer-events: none; z-index: 1; }
+.replay-steps { padding-left: 1.2rem; }
+.replay-steps li { margin: 0.2rem 0; }
+.replay-steps-icon { vertical-align: -2px; }
 .replay-time-row input[type=range] { flex: 1 1 auto; min-width: 10rem; }
 .replay-list { list-style: none; margin: 0; padding: 0; }
 .replay-list li { padding: 0.35rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.12); }
@@ -952,3 +964,8 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--sel-line); }
 /* The GGPO lobby's chat (m2hle-ggpo.js): a few lines, then it scrolls. */
 .gg-chat { max-height: 8rem; min-height: 3rem; margin: 0.5rem 0; white-space: pre-wrap; }
 #gg-say { width: 100%; }
+
+/* ---- Report an issue (m2hle-report.js) ---- */
+.rp-img { display: block; width: 100%; height: auto; margin: 0 0 0.5rem; border: 1px solid rgba(0, 255, 255, 0.4); image-rendering: pixelated; }
+.rp-text { display: block; box-sizing: border-box; width: 100%; margin-top: 0.3rem; resize: vertical; font: inherit; }
+.rp-label { display: block; font-size: 0.875rem; color: var(--dim); }

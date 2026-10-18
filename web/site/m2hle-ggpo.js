@@ -13,11 +13,44 @@
  */
 'use strict';
 
+/* The lobby's own error text (st.error) and a player's state come from the
+ * server and pass through as they are. */
+m2hleLang.add({
+  en: {
+    'gg.challenge': 'Challenge',
+    'gg.user.state': '{name} ({state})',
+    'gg.incoming': '{name} challenges you.',
+    'gg.outgoing': 'Waiting for {name} to answer...',
+    'gg.link': 'Link: {how}.',
+    'gg.link.finding': 'finding each other',
+    'gg.link.direct': 'direct',
+    'gg.link.server': 'through the server',
+    'gg.btn.match': 'GGPO match',
+    'gg.btn.lobby': 'GGPO lobby',
+    'gg.signin.missing': 'A name and a password, please.',
+  },
+  ja: {
+    'gg.challenge': '挑戦する',
+    'gg.user.state': '{name}（{state}）',
+    'gg.incoming': '{name}から挑戦が届きました。',
+    'gg.outgoing': '{name}の返事を待っています…',
+    'gg.link': '接続：{how}。',
+    'gg.link.finding': '相手を探しています',
+    'gg.link.direct': 'ダイレクト',
+    'gg.link.server': 'サーバー経由',
+    'gg.btn.match': 'GGPO対戦',
+    'gg.btn.lobby': 'GGPOロビー',
+    'gg.signin.missing': '名前とパスワードを入力してください。',
+  },
+});
+
 const m2hleGgpo = (() => {
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const KEY = 'm2hle.ggpo';     /* { user, pass }: this origin's localStorage, as RPCN's sign-in is */
   const views = ['gg-off', 'gg-busy', 'gg-signin', 'gg-twitch', 'gg-channel', 'gg-match'];
+
+  const t = m2hleLang.t;
 
   let M = null;
   let st = null;
@@ -75,12 +108,12 @@ const m2hleGgpo = (() => {
     for (const u of others) {
       const li = document.createElement('li');
       const name = document.createElement('span');
-      name.textContent = u.name + (u.state && u.state !== 'idle' ? ` (${u.state})` : '');
+      name.textContent = u.state && u.state !== 'idle' ? t('gg.user.state', { name: u.name, state: u.state }) : u.name;
       li.append(name);
       if (u.state === 'idle' && !st.challenging && !st.challenged_by) {
         const b = document.createElement('button');
         b.className = 'tool';
-        b.textContent = 'Challenge';
+        b.textContent = t('gg.challenge');
         b.addEventListener('click', () => post('challenge', u.name));
         li.append(b);
       }
@@ -94,9 +127,9 @@ const m2hleGgpo = (() => {
     setText('gg-game', st.game);
     renderUsers();
     $('gg-incoming').hidden = !st.challenged_by;
-    setText('gg-incoming-text', st.challenged_by ? `${st.challenged_by} challenges you.` : '');
+    setText('gg-incoming-text', st.challenged_by ? t('gg.incoming', { name: st.challenged_by }) : '');
     $('gg-outgoing').hidden = !st.challenging;
-    setText('gg-outgoing-text', st.challenging ? `Waiting for ${st.challenging} to answer...` : '');
+    setText('gg-outgoing-text', st.challenging ? t('gg.outgoing', { name: st.challenging }) : '');
     const chat = $('gg-chat');
     const lines = (st.chat || []).join('\n');
     if (chat.textContent !== lines) { chat.textContent = lines; chat.scrollTop = chat.scrollHeight; }
@@ -104,8 +137,8 @@ const m2hleGgpo = (() => {
 
   function renderMatch() {
     setText('gg-opponent', st.opponent || '?');
-    const how = !st.peer_known ? 'finding each other' : st.direct ? 'direct' : 'through the server';
-    setText('gg-link', `Link: ${how}.`);
+    const how = !st.peer_known ? 'finding' : st.direct ? 'direct' : 'server';
+    setText('gg-link', t('gg.link', { how: t('gg.link.' + how) }));
   }
 
   function render() {
@@ -149,7 +182,7 @@ const m2hleGgpo = (() => {
     if (!st.ok) return;
     advance();
     render();
-    $('btn-ggpo-label').textContent = st.stage === 'match' ? 'GGPO match' : 'GGPO lobby';
+    $('btn-ggpo-label').textContent = t(st.stage === 'match' ? 'gg.btn.match' : 'gg.btn.lobby');
   }
 
   function connect() {
@@ -159,7 +192,7 @@ const m2hleGgpo = (() => {
 
   function signIn(kind) {
     const user = $('gg-user').value.trim(), pass = $('gg-pass').value;
-    if (!user || !pass) { setText('gg-error', 'A name and a password, please.'); $('gg-error').hidden = false; return; }
+    if (!user || !pass) { setText('gg-error', t('gg.signin.missing')); $('gg-error').hidden = false; return; }
     pending = $('gg-remember').checked ? { user, pass } : null;
     post(kind, user, pass);
   }
