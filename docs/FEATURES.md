@@ -397,7 +397,10 @@ RetroArch keeps `m2hle-rpcn.cfg` and `m2hle-ggpo.cfg` in its saves folder instea
   window, Stop, Finish the replay) or `--replay FILE`. Browser: the **Replay** drawer, which keeps
   the same `.m2replay` files in the browser and can download them. The page hides the format
   choice for Sega Rally, so it saves the game's own format (each course's clip) unless the
-  inputs format was picked earlier for STF in that browser.
+  inputs format was picked earlier for STF in that browser. The page's game list
+  (`web/site/m2hle-games.js`) still says Sega Rally has no replay format of its own, so the page
+  hides the format choice and its replay text describes button recording, which is not what is
+  saved.
 - [NATIVE-REPLAY.md](NATIVE-REPLAY.md) has the details.
 
 **Savestates:** a zip like m2emulator's `.sta`.
