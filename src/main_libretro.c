@@ -397,6 +397,38 @@ static bool lr_option_offered(const char *key) {
     return GEMS_AVAILABLE || strncmp(key, "m2hle_gems_", 11) != 0;
 }
 
+static bool g_game_loaded;
+
+/* A row that is one game's (its program, its I/O board) is hidden while
+ * another game is loaded (Pinboard #1058): Daytona showed STF's sound driver
+ * and Gems rows. With no game loaded every row shows. */
+static bool lr_option_applies(const char *key) {
+    const game_profile_t *p = g_game_loaded ? g_active_profile : NULL;
+    if (!p) return true;
+    if (!strcmp(key, "m2hle_stf_version") || !strcmp(key, "m2hle_sound_driver") || !strncmp(key, "m2hle_gems_", 11))
+        return !strcmp(profile_rom_set(p), "sfight");
+    if (!strncmp(key, "m2hle_wheel_", 12)) return p->quirks.io_5649;
+    if (!strcmp(key, "m2hle_ffb"))         return p->quirks.model1_io;
+    return true;
+}
+
+/* The frontend asks before it draws the list; the core also calls it at load
+ * and unload, for a frontend that never asks. True when a row changed. */
+static bool RETRO_CALLCONV lr_update_display(void) {
+    static bool shown[sizeof option_defs / sizeof option_defs[0]];
+    static bool sent;
+    bool changed = false;
+    for (size_t i = 0; option_defs[i].key; i++) {
+        bool on = lr_option_applies(option_defs[i].key);
+        struct retro_core_option_display d = { option_defs[i].key, on };
+        env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &d);
+        changed |= !sent || shown[i] != on;
+        shown[i] = on;
+    }
+    sent = true;
+    return changed;
+}
+
 static void lr_set_options(void) {
     static bool pruned;
     if (!pruned) {
@@ -411,6 +443,8 @@ static void lr_set_options(void) {
         /* Its answer says whether the frontend groups options into categories,
          * NOT whether it took them (libretro.h). */
         env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &options_v2);
+        static struct retro_core_options_update_display_callback display = { lr_update_display };
+        env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK, &display);
         return;
     }
     /* An old frontend: the v0 table, first value is the default. */
@@ -444,7 +478,6 @@ static void lr_set_options(void) {
 /* ---- The board ---------------------------------------------------------------- */
 
 static bool g_sound_on;
-static bool g_game_loaded;
 static bool g_halt_reported;
 static size_t g_lr_state_size;  /* retro_serialize_size, once a load */
 static savestate_rom_t g_lr_state_rom;  /* the loaded ROM's id, with g_lr_state_size */
@@ -2372,6 +2405,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game) {
     emu_run(&state.emu);
     lr_lua_load();
     g_game_loaded = true;
+    lr_update_display();   /* the rows of the game just loaded */
     g_lr_state_size = 0;   /* a state's size depends on the profile */
     /* A state is the build's struct layouts: it does not cross to another
      * architecture or byte order (savestate.h's LAYOUT refuses it). */
@@ -2403,6 +2437,7 @@ RETRO_API void retro_unload_game(void) {
     m2lua_unload();   /* End(), and the script's ROM patches off the set going */
     romset_free(&state.romset);
     g_game_loaded = false;
+    lr_update_display();
 }
 
 RETRO_API void retro_reset(void) {
