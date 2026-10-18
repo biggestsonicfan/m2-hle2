@@ -44,7 +44,7 @@ mcp_server\.venv\Scripts\python.exe mcp_server\server.py
 | `--log <path>` | Write the session log here instead of `m2hle.log`; `--log off` writes no file (the log window still has it) |
 | `--log-level SPEC` | Drop lines below a level: `warn`, or per channel (the `mem:` / `netplay:` / `sound:` tag a line starts with), e.g. `warn,mem=error,netplay=debug`. Levels are `debug`, `info`, `warn`, `error`, `off`. A dropped line is dropped everywhere: the file, the log window and the MCP log. The file takes 64 MB whatever the level, then only errors (1 MB more) |
 | `--rom <path>` | Auto-load this ROM zip on startup. A directory of region images (`--export-roms`) loads too, with no zip, interleave or CRC pass; its name picks the profile as a zip's does |
-| `--export-roms DIR` | With `--rom <zip>`: write the set into DIR as one straight image per region (`maincpu.bin`, `main_data.bin`, `copro_data.bin`, `polygons.bin`, `textures.bin`, `audiocpu.bin`, `samples.bin`), exactly as they sit in memory after the load, then quit. Name DIR after the set (`sfight`) |
+| `--export-roms DIR` | With `--rom <zip>`: write the set into DIR as one straight image per region (`maincpu.bin`, `main_data.bin`, `copro_data.bin`, `polygons.bin`, `textures.bin`, `audiocpu.bin`, `samples.bin`, and `tgp_tables.bin` for a Model 2A set), exactly as they sit in memory after the load, then quit. Name DIR after the set (`sfight`) |
 | `--run` | Start executing immediately after ROM load |
 | `--nvram-dir DIR` | Keep the game's backup RAM (settings, region, bookkeeping) in `DIR/<set>/backup1`, MAME's file, and load it at boot. On by default for a window, in the per-user folder (`%APPDATA%\m2hle2\nvram`, `~/.config/m2hle2/nvram`); this turns it on for `--headless` and `--kiosk` too |
 | `--no-nvram` | Keep no backup RAM: every boot is blank, as `--headless` and `--kiosk` are by default |
@@ -271,6 +271,42 @@ vector. Returns `resets`, the number performed so far. Refused with no ROM set
 loaded, and while a netplay session is at the barrier, playing or watching -- there it
 would reset one board of several. `tools/grade-reset.mjs` is built on it.
 
+**`save_state(path: str)`** / **`load_state(path: str)`** -- write the whole
+board to a savestate (a zip, one entry per component, like m2emulator's `.sta`;
+see `src/core/savestate.h`) or put it back. Both run at the next slice edge and
+reply `{"ok":true,"frame":N}` with the board's frame; the run state is left
+alone, so stop first if the board must not move between the save and what you
+do next. A load is refused for a file from another ROM set or another build's
+struct layout, inside a netplay session and under SKY EYE; the error comes back
+as `{"error":"..."}` and the board is untouched. `--load-state FILE` does the
+load at launch (headless: a failed load exits 1). Paths are on the emulator's
+machine.
+
+**`follow_lead(dir: str, every: int, join: int, off: int)`** -- lead a one-way
+follow (`src/core/follow.h`, issue #228): from the next slice the board writes
+`follow.json`, a join point `seg-N.sta` and a feed `seg-N.feed` into `dir`, and
+any number of followers (the web build's `?follow=`) replay it. The feed carries
+the input word each slice read, every `write_memory`, the HLE settings and a
+frame check per frame. `every` is frames between join points (default five
+minutes); a reset, a state load, a single step, a COP command or SKY EYE end the
+segment and start the next at once, since a feed cannot carry them. `join:1`
+starts a new segment now, `off:1` stops, and no argument only reads. The reply
+says the segment, the feed's size and `join_ms`, how long the board waited for
+the last join point (~50 ms: the state is snapshotted stored, and a thread
+deflates it to disk beside the board). The leader keeps the newest two segments.
+`--follow-out DIR` / `--follow-every N` do the same at launch.
+
+**`replay(record: int, dir: str, open: str, play: int, stop: int, seek: int, fast: int)`**
+-- online match replays (`src/core/replay.h`, Pinboard #572). `record:1` saves
+every netplay match, RPCN or GGPO (#584), to `dir` (default `<user dir>/replays`) as
+`<p1>-vs-<p2>-<date>-<time>.m2replay`; `open` reads a file and returns its label
+in `info` without touching the board; `play:1` plays it (the board is reset to
+the replay's start), `seek` jumps to a frame, `fast:1` runs unpaced, `stop:1`
+gives the board back from power-on. No argument only reads: `recording`,
+`saved`, `last` (the newest file), `playback` (`frame`, `frames`, `ended`,
+`split`, `why`) and `unplayable` (why this build cannot play the open file).
+`--record-replays`, `--replay-dir DIR` and `--replay FILE` do the same at launch.
+
 **`idle_hold(on: int)`** -- the CPU saver, for a player that is only waiting
 for an online opponent (`--idle-until-match` sets it at launch). While it is on
 and no netplay session owns the board, the board is put back to power-on once
@@ -282,6 +318,17 @@ power-on. `on: 0` lets attract run again; no `on` only reads. Returns `on` and
 `holding` (whether the run loop is holding the board right now); `get_status`
 carries the same pair as `idle_hold`. A `run_frames` still runs its frames.
 
+**`enemy_rank(rank: str | int)`** -- STF's CPU difficulty table, as
+`--enemy-rank` sets it: `"cabinet"` (or -1, the default) plays the table the
+cabinet's ENEMY RANK names; `"easy"`, `"normal"`, `"hard"`, `"hardest"`,
+`"extra1"`, `"extra2"` (or 0..5) play that one. Extra 1 and Extra 2 are the
+two tables the ROM carries and never points at (0x93428, 0x93728); the
+cabinet's byte must stay 0..3, so they are reachable only here. Only the AI
+table changes, as each CPU fight sets up; everything else ENEMY RANK decides
+follows the cabinet. A netplay session plays the cabinet's. No `rank` only
+reads. Returns `rank`, `name` and `netplay`; `get_status` carries `enemy_rank`.
+A profile without the hook answers `ok:false`.
+
 ### Input
 
 **`set_input(held: str = "0x0")`**
@@ -290,6 +337,15 @@ Set the active-high held mask the game's input read is served, in the
 P1 Down, `"0x0"` releases everything. It replaces the whole mask
 (`g_input.held`, the same one the window's keyboard drives). Returns `held`. This is the only safe way to drive a
 netplay session (see below).
+
+**`set_gun(player: int = 0, x: float = 0.5, y: float = 0.5, offscreen: int = 0, on: int = 1)`**
+On a light-gun profile (The House of the Dead), aim a gun as the window's
+mouse would: `x` and `y` run 0..1 across and down the picture, `offscreen: 1`
+points it off the picture (a shot there reloads), `on: 0` hands it back to the
+pad's walk. Fire with `set_input` (P1 trigger `0x100`, reload `0x400`; P2
+`0x200` / `0x800`). Ignored by a board in a session, a follow or a replay,
+whose guns follow the pad word. Returns `ad_x` / `ad_y`, where the board's gun
+pointed at its last read (the A/D values the game sees).
 
 ### Breakpoints
 
@@ -544,6 +600,13 @@ then `overlay.swap.last` is `ok`, `rolled_back` (the new file would not load and
 running again) or `failed`. [TECHNICAL.md, "Putting a new overlay build on a live stream"](TECHNICAL.md#putting-a-new-overlay-build-on-a-live-stream-overlay_swap)
 has the details. JSON-escape the path: `"C:\\fly\\flyoverlay.dll"`.
 
+**`announce(note, title = "WELCOME")`** — the same toast in green over the bottom of the game
+box for 4 s, after any already waiting; the one the emulator raises by itself when somebody
+comes into the room it is in ("WELCOME  test1 came into the room.") or a GGPO lobby match
+starts ("WELCOME  flychallenger came into the match."). It needs no plugin and does
+not move the board. One not up within 20 s (nothing composing frames: headless with no A/V
+client) is dropped. `get_status`'s `overlay.announce` has `up`, `queued`, `shown` and `note`.
+
 ### Netplay (RPCN)
 
 The netplay window's buttons, as bridge commands — enough to hold a lobby open,
@@ -685,6 +748,38 @@ A lobby that holds itself open, in full:
 
 `flystf/rpcn.py` in the [stf-fly](../../stf-fly) sibling is that loop with a fruit
 fly behind it.
+
+### Rollback netplay (the GGPO lobby)
+
+`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (off, connecting, connected, signed in, channel, match, failed), the account, the channel's `users` with their states, a challenge to us (`challenged_by`) or ours (`challenging`), the `match` and `opponent`, whether the match has gone `direct` or still rides the relay, packet counts each way, `error` and the last chat lines, then the board's side: `vs_mode`, `results`, `winner` and `session` (`on`, `running`, `frames`: GGPO's session, its frames counted from the cold boot). The lobby reaches `match` before the cold boot, which zeroes get_status's `frames`, so a driver waiting for the match to run waits on `session.running`, not on get_status (Pinboard #588). The desktop build only; a build without GGPO answers `ok: false`.
+
+`"do"` posts a step first, which the emu thread runs at its next pump, so the reply still shows the stage before it:
+
+| `do` | arguments |
+|---|---|
+| `connect` | `url` (default `wss://ggpo.sonicthefighte.rs/ws`) |
+| `login`, `signup` | `user`, `pass` |
+| `twitch` | starts Twitch sign-in; `twitch_code` / `twitch_uri` then say where to approve it |
+| `join` | `game` (default: the profile's id, e.g. `sfight`) |
+| `challenge` | `user` |
+| `accept`, `decline`, `cancel` | the pending challenge |
+| `chat` | `text` |
+| `end`, `disconnect` | end the match; leave the lobby |
+
+Test against a local ggpo-server, never the live one.
+
+### Game scripts (M2emulator's Lua)
+
+Bridge-only JSON commands for the game's script, `<scripts>/<set>.lua`
+(docs/invariants/scripts.md). The last three are refused while a session
+(netplay, GGPO, a replay, a follow) owns the board.
+
+| cmd | fields | does |
+|---|---|---|
+| `script_status` | | `loaded`, `running`, `frames`, `path`, `error`, `options` (`key`, `name`, `value`, `values`) |
+| `script_option` | `key`, `value` | sets an option to its `value`th value; `changefunc` runs |
+| `script_eval` | `code` | runs a chunk in the script's state; `result` is its return values, tab-joined |
+| `script_reload` | | reads the script again and runs it from the start |
 
 ### Captures and diagnostics
 

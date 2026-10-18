@@ -21,12 +21,18 @@
  * Netplay is pumped from the same place the native run loop pumps it
  * (emu_netplay_pump). With no second thread the emu mutex is never contended;
  * it is still taken, so the shared code does not need to know.
+ *
+ * GGPO (core/emu_ggpo.h, Pinboard #575) is the other way online: the page's
+ * GGPO panel drives the lobby (web_ggpo_post / web_ggpo_status), and its match
+ * rides the lobby's WebSocket, since a page has no UDP. While a session is
+ * wanted, a slice is emu_ggpo_tick's frame instead.
  */
 
 /* net/ first, as in main.c: net_socket.h owns the socket include order. */
 #include "net/netplay.h"
 
 #include <emscripten.h>
+#include <GLES3/gl3.h>   /* glReadPixels, for the page's screenshots */
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,8 +63,14 @@
 #include "ps3ui_app.h"    /* the online lobby, as the PS3 port draws it */
 #include "ps3ui_gpu.h"
 #include "ps3ui_shell.h"   /* the PS3's menus around the board (the Console version) */
+#include "ps3ui_ggpo.h"    /* a GGPO match's go-again prompt, in the lobby's window */
 #include "post_shader.h"   /* the CRT filter and libretro presets over the picture */
+#include "crt_pots.h"      /* the monitor's R/G/B and H/V pots, over the picture */
 #include "json_min.h"
+#include "m2lua.h"         /* the cheats scratchpad: a game script from the page */
+#include "m2lua_wide.h"    /* and the picture it asks for (Model2_SetWideScreen) */
+#include "lightgun_sgl.h"   /* the mouse and touches as light guns, and their crosshairs */
+#include "ffb.h"            /* the drive board's force feedback, for the page to rumble */
 
 /* The single TU that defines g_profiles[] / g_active_profile. Under M2HLE_WEB it
  * registers sfight alone. */
@@ -131,12 +143,13 @@ static struct {
 static struct {
     int      scale;             /* in force */
     int      want;              /* asked for; applied at the top of the next frame */
+    int      cols;              /* the picture's width it was made for (game_render_wide_width) */
     sg_image color, depth;
     sg_view  color_att, depth_att, texture;
 } g_web_rt;
 
 static void web_rt_apply(void) {
-    if (g_web_rt.want == g_web_rt.scale) return;
+    if (g_web_rt.want == g_web_rt.scale && (g_web_rt.scale <= 0 || g_web_rt.cols == game_render_wide_width())) return;
     if (g_web_rt.scale > 0) {
         sg_destroy_view(g_web_rt.texture);
         sg_destroy_view(g_web_rt.depth_att);
@@ -146,7 +159,8 @@ static void web_rt_apply(void) {
     }
     g_web_rt.scale = g_web_rt.want;
     if (g_web_rt.scale <= 0) return;
-    const int w = VIDEO_WIDTH * g_web_rt.scale, h = VIDEO_HEIGHT * g_web_rt.scale;
+    g_web_rt.cols = game_render_wide_width();
+    const int w = g_web_rt.cols * g_web_rt.scale, h = VIDEO_HEIGHT * g_web_rt.scale;
     g_web_rt.color = sg_make_image(&(sg_image_desc){
         .usage = { .color_attachment = true }, .width = w, .height = h,
         .pixel_format = SG_PIXELFORMAT_RGBA8, .sample_count = 1, .label = "web-game-target" });
@@ -175,10 +189,22 @@ static float g_web_audio_chunk[WEB_AUDIO_CHUNK_FRAMES * 2];
 /* What load_active_profile does in main.c once the ROM files are read, and what
  * netplay's cold boot at the barrier repeats: install, then everything mem_init
  * does not reach. Called with no slice in progress (there is one thread). */
+/* The WebGL context's GPU, unmasked where the browser allows it, into out. */
+EM_JS(void, web_gpu_renderer, (char *out, int cap), {
+    let s = '';
+    try {
+        const gl = typeof GLctx !== 'undefined' ? GLctx : null;
+        const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        if (gl) s = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    } catch (e) {}
+    stringToUTF8(s, out, cap);
+});
+
 static void web_install_board(void) {
     g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
     irqt_reset();
     if (g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&state.bus);
         if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
@@ -194,6 +220,10 @@ static void web_install_board(void) {
 /* ---- The PS3 shell (Console version): its host hooks ----------------------- */
 
 static bool  g_web_shell_on;       /* the Console version: the PS3's interface */
+
+/* The shell stands aside while a replay plays (core/replay.h): its menus would
+ * hold the board, and its pad is not the one the replay reads. */
+static bool web_shell_live(void) { return g_web_shell_on && !replay_playing(); }
 static bool  g_web_hold;           /* the shell's menus hold the board still */
 static float g_web_volume = 1.0f;  /* the shell's Settings */
 
@@ -277,12 +307,48 @@ EMSCRIPTEN_KEEPALIVE void web_pause_at(unsigned frame) { g_web_pause_frame = fra
 /* The last slice waited on the other player rather than running. */
 static bool g_web_waited;
 
+/* ?follow= : the board follows another one way (core/follow.h, Pinboard #568).
+ * It sends nothing and takes no input; a slice runs only once the feed holds it. */
+static bool g_web_follow;
+static bool g_web_keep_save = true;  /* web_backup_keep: the set's backup RAM goes in localStorage */
+/* The feed comes in bursts: the leader flushes it every few frames and the page
+ * polls it every 250 ms (m2hle-follow.js). A follower that ran each frame the
+ * moment it landed sat at the live edge and ran dry several times a second, and
+ * every wait starved the sound: garbled music, a dropout eight times a second
+ * (Pinboard #601). So it plays out of a buffer, as a stream does: run dry, it
+ * waits for WEB_FOLLOW_PREROLL frames before it runs on at the board's rate, and
+ * it runs unpaced only when more than WEB_FOLLOW_AHEAD are in hand, back down to
+ * the preroll. */
+#define WEB_FOLLOW_PREROLL 36u   /* 0.6 s: a poll and a flush, with room over */
+#define WEB_FOLLOW_AHEAD 120u    /* 2 s behind the leader before it hurries */
+static bool g_web_follow_fill;   /* ran dry: waiting for the preroll */
+static bool g_web_follow_rush;   /* far behind: running unpaced to the preroll */
+/* How long one callback may spend catching up. Three slices a callback took 25 s
+ * to catch up from a join two thousand frames behind, garbling the sound all the
+ * way; a budget catches up as fast as the machine can and still draws. */
+#define WEB_FOLLOW_RUSH_US 10000
+
+/* The feed holds the follower's next slice, and enough after it to play on. */
+static bool web_follow_ready(void) {
+    if (!follow_slice_ready()) {
+        g_web_follow_fill = g_web_follow;
+        return false;
+    }
+    if (g_web_follow_fill && follow_buffered() < WEB_FOLLOW_PREROLL && !follow_end_seen()) return false;
+    g_web_follow_fill = false;
+    return true;
+}
+
 /* One slice, if netplay allows it. Returns false when the board did not advance
  * (stalled on the peer, or the slice went to the barrier's reset). */
+static bool web_ggpo_slice(void);
+
 static bool web_slice(void) {
+    if (emu_ggpo_wanted()) return web_ggpo_slice();
     netplay_step_t np = emu_netplay_pump(&state.emu);
     g_web_waited = (np == NETPLAY_STEP_WAIT);
     if (np == NETPLAY_STEP_WAIT || np == NETPLAY_STEP_RESET) return false;
+    if ((g_web_follow || replay_play_follows()) && !web_follow_ready()) { g_web_waited = true; return false; }
     if (state.emu.run_state != EMU_RUNNING) return false;
     if (emu_slice_should_stop(&state.emu)) return false;
     while (g_web_script_at < g_web_script_n && g_web_script[g_web_script_at].frame <= g_emu_frames)
@@ -301,6 +367,22 @@ static bool web_slice(void) {
     return true;
 }
 
+/* A GGPO session's slice: one frame, or a frame held while the peer catches
+ * up, which still takes its tick (GGPO's clock is frames). False only while
+ * the session opens or closes. */
+static bool web_ggpo_slice(void) {
+    g_web_waited = false;
+    if (state.emu.run_state != EMU_RUNNING || emu_slice_should_stop(&state.emu)) return false;
+    int64_t t0 = emu_now_us();
+    emu_ggpo_tick_t r = emu_ggpo_tick(&state.emu);
+    if (r == EMU_GGPO_TICK_IDLE) { g_web_waited = true; return false; }
+    uint32_t took = (uint32_t)(emu_now_us() - t0);
+    if (r == EMU_GGPO_TICK_RAN) g_web_perf.slices++;
+    g_web_perf.slice_us += took;
+    if (took > g_web_perf.slice_us_max) g_web_perf.slice_us_max = took;
+    return true;
+}
+
 /* The page's Pause button: the board stands still, picture and all, until it is
  * pressed again. Offline only. In a room or a match the other boards run on, so
  * it is refused there, and a pause that a room catches up with is let go. It is
@@ -314,31 +396,95 @@ static bool web_slice(void) {
  * PS3 has no pause either) and to a program with no shell. */
 static bool g_web_paused;
 static bool g_web_select_tap;   /* one shell frame of SELECT, from the page */
+static bool g_web_shot_want;    /* the page asked for a screenshot (web_shot_arm) */
+static bool g_web_shot_state;   /* ... and a savestate taken with it */
 
-static bool web_pause_refused(void) { return netplay_in_room() || netplay_active(); }
+static bool web_pause_refused(void) { return netplay_in_room() || netplay_active() || emu_ggpo_wanted(); }
 
 /* 1 when the page may offer the button: a game is loaded, no room has us, and
  * the Console shell is not in one of its own menus (which hold the board). */
 EMSCRIPTEN_KEEPALIVE int web_pause_allowed(void) {
     if (!state.romset.loaded || web_pause_refused()) return 0;
-    if (!g_web_shell_on || g_web_paused) return 1;
+    if (!web_shell_live() || g_web_paused) return 1;
     ps3ui_sh_screen_t scr = g_ps3ui_shell.scr;
     return scr == PS3UI_SH_TITLE || scr == PS3UI_SH_GAME || scr == PS3UI_SH_PAUSE;
 }
 /* 0 running, 1 the page's freeze ("Paused" over the picture), 2 the PS3 pause menu. */
 EMSCRIPTEN_KEEPALIVE int web_paused(void) {
-    return g_web_paused ? 1 : g_web_shell_on && g_ps3ui_shell.scr == PS3UI_SH_PAUSE ? 2 : 0;
+    return g_web_paused ? 1 : web_shell_live() && g_ps3ui_shell.scr == PS3UI_SH_PAUSE ? 2 : 0;
 }
 /* Returns web_paused() as it will be. */
 EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
     if (on && !web_pause_allowed()) return web_paused();
-    if (g_web_shell_on && !g_web_paused && g_ps3ui_shell.scr != PS3UI_SH_TITLE) {
+    if (web_shell_live() && !g_web_paused && g_ps3ui_shell.scr != PS3UI_SH_TITLE) {
         bool menu = g_ps3ui_shell.scr == PS3UI_SH_PAUSE;
         if (!!on != menu) g_web_select_tap = true;   /* SELECT opens it, and SELECT again resumes */
         return on ? 2 : 0;
     }
     g_web_paused = on != 0;
     return web_paused();
+}
+
+/* A machine that cannot run much faster than the board would rush for ever, in
+ * silence: one that gains less than WEB_FOLLOW_GAIN frames in WEB_FOLLOW_TRIAL_US
+ * stays behind the leader and plays at the board's rate instead. */
+#define WEB_FOLLOW_TRIAL_US 5000000
+#define WEB_FOLLOW_GAIN 30u
+static bool g_web_follow_slow;
+
+static bool web_follow_rushing(void) {
+    static int64_t  trial_us;
+    static uint32_t trial_held;
+    if (!g_web_follow || g_web_follow_slow) return false;
+    uint32_t held = follow_buffered();
+    int64_t now = emu_now_us();
+    if (held > WEB_FOLLOW_AHEAD && !g_web_follow_rush) {
+        g_web_follow_rush = true;
+        trial_us = now;
+        trial_held = held;
+    } else if (held <= WEB_FOLLOW_PREROLL) {
+        g_web_follow_rush = false;
+    }
+    if (g_web_follow_rush && now - trial_us > WEB_FOLLOW_TRIAL_US) {
+        if (held + WEB_FOLLOW_GAIN > trial_held) {
+            LOG_WARN("follow: %u frames behind and not catching up; playing on behind the leader", held);
+            g_web_follow_slow = true;
+            g_web_follow_rush = false;
+        }
+        trial_us = now;
+        trial_held = held;
+    }
+    return g_web_follow_rush;
+}
+
+/* A netplay watcher behind the fighters takes the extra slices whether it is
+ * owed them or not, until it has caught up (netplay_catching_up); so does a
+ * follower with more than WEB_FOLLOW_AHEAD frames of feed in hand, until it is
+ * back to WEB_FOLLOW_PREROLL. */
+static bool web_catching_up(void) {
+    return netplay_catching_up() || replay_play_unpaced() || web_follow_rushing();
+}
+
+/* Slice n of this callback, which began at `start`, may run. */
+static bool web_slice_due(int n, int64_t start) {
+    bool room = n < WEB_MAX_SLICES_PER_FRAME
+             || (g_web_follow_rush && emu_now_us() - start < WEB_FOLLOW_RUSH_US);
+    return room && (state.owed_us >= WEB_SLICE_DUE_US || web_catching_up());
+}
+
+/* A linked comm board (Pinboard #978): the link's clock in place of the
+ * accumulator (core/link_pace.h). It owes up to LINK_PACE_MAX_DEBT frames
+ * after a late callback, and no catch-up runs it faster: the other cabinet
+ * runs at 60 Hz too. */
+static void web_run_linked(int64_t now) {
+    link_pace_t *p = &state.emu.link_pace;
+    state.owed_us = 0;   /* the accumulator starts afresh when the link ends */
+    link_pace_owed(p, now);
+    while (link_pace_due(p, now) && m2comm_linked()) {
+        uint32_t frames = g_emu_frames;
+        if (!web_slice() || g_emu_frames == frames) break;
+        link_pace_ran(p, m2comm_backlog());
+    }
 }
 
 static void web_run_owed_slices(void) {
@@ -353,6 +499,7 @@ static void web_run_owed_slices(void) {
         state.owed_us = cap;
     }
 
+    emu_ggpo_lobby_pump();   /* the GGPO lobby, running or not */
     if (g_web_paused && web_pause_refused()) g_web_paused = false;   /* a room or a match took over */
     if (state.emu.run_state != EMU_RUNNING || g_web_hold || g_web_paused) {
         /* Not running yet (or held under the shell's menus, or paused), and netplay still
@@ -360,12 +507,12 @@ static void web_run_owed_slices(void) {
          * starts (emu_thread.h, STOPPED branch). */
         emu_netplay_pump(&state.emu);
         state.owed_us = 0;
+        link_pace_stop(&state.emu.link_pace);
         return;
     }
-    /* A netplay watcher behind the fighters takes the extra slices whether it is
-     * owed them or not, until it has caught up (netplay_catching_up). */
-    for (int n = 0; n < WEB_MAX_SLICES_PER_FRAME
-                    && (state.owed_us >= WEB_SLICE_DUE_US || netplay_catching_up()); n++) {
+    if (m2comm_linked()) { web_run_linked(now); return; }
+    link_pace_stop(&state.emu.link_pace);
+    for (int n = 0; web_slice_due(n, now); n++) {
         bool owed = state.owed_us >= WEB_SLICE_DUE_US;
         if (!web_slice()) {
             /* Waiting on the other player: let the time go rather than owe it.
@@ -443,6 +590,10 @@ EMSCRIPTEN_KEEPALIVE int web_sound_driver(void) { return g_shle.on ? 1 : 0; }
 /* What the board produced since the last call goes to the worklet in one chunk. */
 static void web_push_audio(void) {
     if (g_web_audio != WEB_AUDIO_WORKLET) return;
+    if (g_web_follow_rush) {   /* a follower catching up: silence, not the sound sped up */
+        g_sound.out_r = SOUND_LOAD_ACQUIRE(g_sound.out_w);
+        return;
+    }
     int frames = audio_out_drain(g_web_audio_chunk, WEB_AUDIO_CHUNK_FRAMES, g_web_audio_nudge);
     if (g_web_volume != 1.0f)
         for (int i = 0; i < frames * 2; i++) g_web_audio_chunk[i] *= g_web_volume;
@@ -452,20 +603,39 @@ static void web_push_audio(void) {
 
 /* ---- sokol_app callbacks -------------------------------------------------- */
 
+/* --profile=ID (?game= on the page): the game this page plays, picked before
+ * the ROM is asked for, since the profile names the files. */
+static char g_web_profile_arg[32];
+
 static void init(void) {
     log_init();
     LOG_INFO("m2-hle web %s starting", M2HLE_VERSION);
 
     mem_init(&state.bus, NULL, 0);
     i960_reset(&state.cpu);
+    g_emu_script_frame = m2lua_frame_hook;   /* the Cheats tab's script */
+    g_emu_script_reset = m2lua_reset_hook;
     bp_init();
     wp_init();
     if (g_profile_count > 0) g_active_profile = g_profiles[0];
+    if (g_web_profile_arg[0]) {
+        const game_profile_t *p = profile_by_id(g_web_profile_arg);
+        if (p) g_active_profile = p;
+        else {
+            char why[256];
+            if (profile_prepared_message(g_web_profile_arg, why, sizeof why)) LOG_WARN("web: %s", why);
+            else LOG_WARN("web: no profile '%s'", g_web_profile_arg);
+        }
+    }
 
     sg_setup(&(sg_desc){
         .environment = sglue_environment(),
         .logger.func = slog_func,
     });
+    char gpu[256];
+    web_gpu_renderer(gpu, (int)sizeof gpu);
+    g_game_render_vertex_depth = game_render_vertex_depth_exact(gpu);
+    LOG_INFO("web: sort key %s", g_game_render_vertex_depth ? "as vertex z" : "by gl_FragDepth");
     game_render_init();
     post_shader_init();
     video_init(&state.video);
@@ -595,12 +765,27 @@ static uint32_t web_lobby_pad2(void) {
 
 /* What the menus want on screen this callback. */
 static ps3ui_view_t web_view(void) {
-    if (g_web_shell_on) return ps3ui_shell_view(&g_ps3ui_shell);
+    if (web_shell_live()) return ps3ui_shell_view(&g_ps3ui_shell);
     return ps3ui_app_view(&g_ps3ui_app);
 }
 
 static bool web_game_pad(void) {
-    return g_web_shell_on ? ps3ui_shell_game_pad(&g_ps3ui_shell) != 0 : !ps3ui_app_visible(&g_ps3ui_app);
+    return web_shell_live() ? ps3ui_shell_game_pad(&g_ps3ui_shell) != 0 : !ps3ui_app_visible(&g_ps3ui_app);
+}
+
+/* One 60 Hz frame of the Console shell, and of the lobby over it. */
+static void web_shell_frame(ps3ui_app_t *a) {
+    /* the page's Pause: a SELECT for one frame, then let go, so the shell sees a press */
+    uint32_t tap = g_web_select_tap ? PS3UI_PAD_SELECT : 0;
+    g_web_select_tap = false;
+    /* a GGPO match is played from the game screen, as an RPCN one is */
+    if (emu_ggpo_active() && g_ps3ui_shell.scr != PS3UI_SH_GAME) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_GAME);
+    ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad() | tap, web_lobby_pad2(),
+                      netplay_active() || emu_ggpo_active());
+    /* in a room too: the go-again prompt comes up over any shell screen
+     * (a GGPO match's is ps3ui_ggpo_prompt's) */
+    if (!a->ext && (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room()))
+        ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
 }
 
 /* The menus run at 60 Hz whatever the display's rate: their windows, cursors
@@ -612,20 +797,12 @@ static ps3ui_view_t web_lobby_tick(void) {
     bool had = web_game_pad();
     if (!next_us || now - next_us > 250000) next_us = now;
     while (now >= next_us) {
-        if (g_web_shell_on) {
-            /* the page's Pause: a SELECT for one frame, then let go, so the shell sees a press */
-            uint32_t tap = g_web_select_tap ? PS3UI_PAD_SELECT : 0;
-            g_web_select_tap = false;
-            ps3ui_shell_frame(&g_ps3ui_shell, web_lobby_pad() | tap, web_lobby_pad2(), netplay_active());
-            /* in a room too: the go-again prompt comes up over any shell screen */
-            if (g_ps3ui_shell.scr == PS3UI_SH_ONLINE || a->open || netplay_in_room())
-                ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
-        } else {
-            ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
-        }
+        bool ggpo_asks = ps3ui_ggpo_prompt(a, web_lobby_pad());
+        if (web_shell_live()) web_shell_frame(a);
+        else if (!ggpo_asks)  ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
         next_us += 1000000 / EMU_SLICES_PER_SEC;
     }
-    g_web_hold = g_web_shell_on && ps3ui_shell_board_paused(&g_ps3ui_shell);
+    g_web_hold = web_shell_live() && ps3ui_shell_board_paused(&g_ps3ui_shell);
     if (had && !web_game_pad()) input_release_all();   /* the game lets go of what the menus now hold */
     return web_view();
 }
@@ -649,24 +826,35 @@ static void web_count_callback(void) {
 static bool web_keep_picture(bool have_game, bool lobby, bool overlay, bool afford) {
     static uint64_t s_drawn_slices;
     static int      s_drawn_w, s_drawn_h;
+    static unsigned s_drawn_pots;
     const bool board_moved = g_web_perf.slices != s_drawn_slices;
     const bool resized     = sapp_width() != s_drawn_w || sapp_height() != s_drawn_h;
-    if (have_game && !lobby && !overlay && !board_moved && !resized && !g_web_objview_show && !afford) {
+    const bool pots_turned = g_crt_pots.gen != s_drawn_pots;
+    if (have_game && !lobby && !overlay && !board_moved && !resized && !pots_turned && !g_web_objview_show && !afford
+        && !g_web_shot_want) {
         g_web_perf.pictures_skipped++;
         return true;
     }
     s_drawn_slices = g_web_perf.slices;
     s_drawn_w      = sapp_width();
     s_drawn_h      = sapp_height();
+    s_drawn_pots   = g_crt_pots.gen;
     return false;
+}
+
+/* The picture's width in board columns: a script's widescreen (ui/m2lua_wide.h),
+ * else the filter's (the Arcade's CRT is not square-pixelled). */
+static int web_picture_width(void) {
+    return g_game_wide.extra ? game_render_wide_width() : post_shader_picture_width();
 }
 
 /* Record the menus into `cv`: the lobby on its own, or the pause menu over the game. */
 static void web_record_menus(ps3ui_canvas_t *cv, bool overlay) {
     if (overlay) {
         /* over the game: the 16:9 layout fitted to the game's letterboxed picture */
-        int ox, oy, gw, gh;
-        game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &gw, &gh);
+        game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(),
+                                              web_picture_width(), VIDEO_HEIGHT);
+        int ox = r.x, oy = r.y, gw = r.w, gh = r.h;
         ps3ui_gpu_record(cv, sapp_width(), sapp_height());
         ps3ui_canvas_size(cv, sapp_width(), sapp_height());
         float k = (float)gw / 1920.0f;
@@ -677,30 +865,31 @@ static void web_record_menus(ps3ui_canvas_t *cv, bool overlay) {
     } else {
         ps3ui_gpu_record(cv, sapp_width(), sapp_height());
     }
-    if (g_web_shell_on) ps3ui_shell_draw(&g_ps3ui_shell, cv);
+    if (web_shell_live()) ps3ui_shell_draw(&g_ps3ui_shell, cv);
     else                ps3ui_app_draw(&g_ps3ui_app, cv);
 }
 
 /* The game into the filter's own source target, at the render scale, for a
- * filter over the picture (post_shader.h); it only covers the game's 4:3
- * rectangle, gw x gh. */
+ * filter over the picture (post_shader.h); it only covers the game's
+ * rectangle, gw x gh (16:9 in a script's widescreen). */
 static void web_draw_post_source(int gw, int gh, float lerp_t) {
     int sw, sh;
-    post_shader_source_size(VIDEO_WIDTH, VIDEO_HEIGHT, gw, gh, &sw, &sh);
+    post_shader_source_size(game_render_wide_width(), VIDEO_HEIGHT, gw, gh, &sw, &sh);
     post_shader_begin_source(sw, sh, &state.pass_action);
-    game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, 0, 0, sw, sh, lerp_t);
+    game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, (game_rect_t){0, 0, sw, sh}, lerp_t);
     post_shader_end_source();
     post_shader_prepare(gw, gh);
 }
 
-/* The game offscreen at the render scale: N x 496x384. */
+/* The game offscreen at the render scale: N x 496x384 (682 wide in widescreen). */
 static void web_draw_offscreen(float lerp_t) {
     sg_begin_pass(&(sg_pass){
         .action = state.pass_action,
         .attachments = { .colors[0] = g_web_rt.color_att, .depth_stencil = g_web_rt.depth_att },
     });
     game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                    0, 0, VIDEO_WIDTH * g_web_rt.scale, VIDEO_HEIGHT * g_web_rt.scale, lerp_t);
+                    (game_rect_t){0, 0, g_web_rt.cols * g_web_rt.scale, VIDEO_HEIGHT * g_web_rt.scale},
+                    lerp_t);
     sg_end_pass();
 }
 
@@ -712,6 +901,8 @@ typedef struct {
     int   ox, oy, w, h;
     float lerp_t;
 } web_picture_t;
+static void web_shot_done(const web_picture_t *pic);   /* the page's screenshot (Pinboard #653) */
+static void web_cheats_place(const web_picture_t *pic, bool shown);   /* the Cheats tab's drawing */
 
 /* The game in its letterbox, through the filter, from the offscreen target or
  * drawn straight in; then the pause menu over it. */
@@ -719,18 +910,18 @@ static void web_present_game(const web_picture_t *pic, ps3ui_canvas_t *cv) {
     int ox = pic->ox, oy = pic->oy, w = pic->w, h = pic->h;
     if (pic->post)           post_shader_draw(ox, oy, w, h, sapp_width(), sapp_height());
     else if (pic->offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
-    else           game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, pic->lerp_t);
-    if (pic->overlay) {   /* the pause menu over the game */
-        ps3ui_gpu_draw(cv);
-        sgl_draw();
-    }
+    else           game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, (game_rect_t){ox, oy, w, h},
+                                   pic->lerp_t);
+    crt_pots_record(ox, oy, w, h, sapp_width(), sapp_height());
+    if (pic->overlay) ps3ui_gpu_draw(cv);   /* the pause menu over the game */
+    else lightgun_sgl_record(ox, oy, w, h, sapp_width(), sapp_height());
+    sgl_draw();
 }
 
 /* The object viewer in place of the game, letterboxed to the viewer target's own shape. */
 static void web_present_objview(void) {
-    int ox, oy, w, h;
-    game_render_letterbox(sapp_width(), sapp_height(), g_objview.rt_w, g_objview.rt_h, &ox, &oy, &w, &h);
-    game_render_draw_target(g_objview.color_tex, true, ox, oy, w, h);
+    game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(), g_objview.rt_w, g_objview.rt_h);
+    game_render_draw_target(g_objview.color_tex, true, r.x, r.y, r.w, r.h);
 }
 
 /* The object viewer's passes, then the swapchain pass: the lobby, the object
@@ -785,6 +976,7 @@ static void frame(void) {
 
     const int64_t render_t0 = emu_now_us();
     if (g_web_perf.gpu_timing) EM_ASM({ Module.m2hleFrameBegin(); });
+    m2lua_wide_apply();
     web_rt_apply();
 
     static ps3ui_canvas_t lobby_cv;
@@ -796,9 +988,13 @@ static void frame(void) {
     }
 
     /* A filter over the picture (post_shader.h) reads the game from a target of
-     * its own, at the render scale, and only covers the game's 4:3 rectangle. */
-    game_render_letterbox(sapp_width(), sapp_height(), VIDEO_WIDTH, VIDEO_HEIGHT, &pic.ox, &pic.oy, &pic.w, &pic.h);
+     * its own, at the render scale, and only covers the game's rectangle. */
+    game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(),
+                                          web_picture_width(), VIDEO_HEIGHT);
+    pic.ox = r.x; pic.oy = r.y; pic.w = r.w; pic.h = r.h;
+    crt_pots_place(&pic.ox, &pic.oy, &pic.w, &pic.h);
     post_shader_set_input_scale(g_web_rt.want);
+    web_cheats_place(&pic, game && !pic.overlay && !g_web_objview_show);
     pic.post = game && !g_web_objview_show && post_shader_active();
     if (pic.post) web_draw_post_source(pic.w, pic.h, pic.lerp_t);
 
@@ -807,6 +1003,7 @@ static void frame(void) {
     if (pic.offscreen) web_draw_offscreen(pic.lerp_t);
 
     web_present(&pic, &lobby_cv);
+    if (g_web_shot_want) web_shot_done(&pic);
     web_count_render(render_t0);
 }
 
@@ -824,6 +1021,87 @@ static void cleanup(void) {
 }
 
 static uint32_t g_web_pad;   /* the actions the page holds (gamepads, touch buttons, keyboard): web_pad_set */
+static int g_web_cheats_rect[4];   /* the picture on the canvas: web_cheats_place */
+
+/* The drive board's force (ffb.h, Pinboard #1047) for the page's pads to
+ * rumble (m2hle-pad.js): the strong motor's top byte << 16 | the weak's << 8
+ * | the command. 0 when the game has no drive board. */
+EMSCRIPTEN_KEEPALIVE unsigned web_ffb(void) {
+    ffb_out_t o = ffb_poll();
+    return (unsigned)(o.strong >> 8) << 16 | (unsigned)(o.weak >> 8) << 8 | o.effect.cmd;
+}
+
+/* The page's canvas asks before its context menu: not while a right click reloads a gun. */
+EMSCRIPTEN_KEEPALIVE int web_lightgun_on(void) { return lightgun_host_on(); }
+
+/* The Controls panel's flash on each shot (lightgun_host.h): frames of white, 0 off. */
+EMSCRIPTEN_KEEPALIVE void web_set_gun_flash(int frames) {
+    char v[12];
+    snprintf(v, sizeof v, "%d", frames);
+    lightgun_host_option("--gun-flash", v);
+}
+
+/* Player 1's light gun on the canvas (Pinboard #1040): the mouse aims it, the
+ * left button is the trigger and the right one reloads; a finger aims and
+ * fires where it lands, or reloads when it lands off the picture. Only while
+ * the game has the pad and its picture is up; lightgun.h ignores the pointer
+ * in a session, a follow or a replay. Coordinates are the framebuffer's, as
+ * the picture's rectangle is. */
+static int64_t g_web_gun_touch = -1;   /* the finger holding the gun, or -1 */
+static void web_gun_event(const sapp_event *ev) {
+    if (!lightgun_host_on()) return;
+    const int *r = g_web_cheats_rect;
+    const bool live = web_game_pad() && r[2] > 0;
+    const float rx = (float)r[0], ry = (float)r[1], rw = (float)r[2], rh = (float)r[3];
+    switch (ev->type) {
+    case SAPP_EVENTTYPE_MOUSE_MOVE:
+    case SAPP_EVENTTYPE_MOUSE_ENTER:
+        if (live && g_web_gun_touch < 0) lightgun_host_aim(0, ev->mouse_x, ev->mouse_y, rx, ry, rw, rh);
+        break;
+    case SAPP_EVENTTYPE_MOUSE_LEAVE:
+        if (g_web_gun_touch < 0) lightgun_host_aim_away(0);
+        break;
+    case SAPP_EVENTTYPE_MOUSE_DOWN:
+        if (!live || g_web_gun_touch >= 0) break;
+        lightgun_host_aim(0, ev->mouse_x, ev->mouse_y, rx, ry, rw, rh);
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT)  lightgun_host_button(0, LIGHTGUN_HOST_TRIGGER, true);
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_RIGHT) lightgun_host_button(0, LIGHTGUN_HOST_RELOAD, true);
+        break;
+    case SAPP_EVENTTYPE_MOUSE_UP:
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT)  lightgun_host_button(0, LIGHTGUN_HOST_TRIGGER, false);
+        if (ev->mouse_button == SAPP_MOUSEBUTTON_RIGHT) lightgun_host_button(0, LIGHTGUN_HOST_RELOAD, false);
+        break;
+    case SAPP_EVENTTYPE_TOUCHES_BEGAN:
+        for (int i = 0; i < ev->num_touches; i++) {
+            const sapp_touchpoint *t = &ev->touches[i];
+            if (!t->changed || g_web_gun_touch >= 0 || !live) continue;
+            g_web_gun_touch = (int64_t)t->identifier;
+            lightgun_host_aim(0, t->pos_x, t->pos_y, rx, ry, rw, rh);
+            bool on = t->pos_x >= rx && t->pos_x <= rx + rw && t->pos_y >= ry && t->pos_y <= ry + rh;
+            lightgun_host_button(0, on ? LIGHTGUN_HOST_TRIGGER : LIGHTGUN_HOST_RELOAD, true);
+        }
+        break;
+    case SAPP_EVENTTYPE_TOUCHES_MOVED:
+        for (int i = 0; i < ev->num_touches; i++) {
+            const sapp_touchpoint *t = &ev->touches[i];
+            if (t->changed && live && (int64_t)t->identifier == g_web_gun_touch)
+                lightgun_host_aim(0, t->pos_x, t->pos_y, rx, ry, rw, rh);
+        }
+        break;
+    case SAPP_EVENTTYPE_TOUCHES_ENDED:
+    case SAPP_EVENTTYPE_TOUCHES_CANCELLED:
+        for (int i = 0; i < ev->num_touches; i++) {
+            const sapp_touchpoint *t = &ev->touches[i];
+            if (!t->changed || (int64_t)t->identifier != g_web_gun_touch) continue;
+            g_web_gun_touch = -1;
+            lightgun_host_button(0, LIGHTGUN_HOST_TRIGGER, false);
+            lightgun_host_button(0, LIGHTGUN_HOST_RELOAD, false);
+        }
+        break;
+    default:
+        break;
+    }
+}
 
 static void event(const sapp_event *ev) {
     /* No keys here: the page reads the keyboard through the player's own
@@ -831,7 +1109,33 @@ static void event(const sapp_event *ev) {
      * touch buttons through web_pad_set. Mapping sokol's key codes as well would
      * press the default keys on top of the remapped ones. */
     /* A tab that loses focus never sees the key-up: let go of everything. */
-    if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) { input_reset(); g_web_pad = 0; }
+    if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) {
+        input_reset();
+        g_web_pad = 0;
+        lightgun_host_release_all();
+        g_web_gun_touch = -1;
+        return;
+    }
+    web_gun_event(ev);
+}
+
+/* The page's switches that carry a value (--name=value). */
+static void web_value_arg(const char *a) {
+    if (!strncmp(a, "--profile=", 10)) snprintf(g_web_profile_arg, sizeof g_web_profile_arg, "%s", a + 10);
+    /* --region=usa|japan|export, from the page's ?lang= (m2hle-game.js,
+     * Pinboard #942): the board's country, over a saved one too. */
+    else if (!strncmp(a, "--region=", 9)) {
+        int r = game_region_parse(a + 9);
+        if (r >= 0) { g_region = r; g_region_over_saved = 1; }
+    }
+    /* --wheel-center=N, --wheel-range=N, --wheel-speed=N (board/io_5649.h). */
+    else if (!strncmp(a, "--wheel-", 8) && strchr(a, '=')) {
+        char opt[32];
+        size_t n = (size_t)(strchr(a, '=') - a);
+        if (n < sizeof opt) { memcpy(opt, a, n); opt[n] = 0; io5649_wheel_option(opt, a + n + 1); }
+    }
+    else if (!strncmp(a, "--gun-flash=", 12)) lightgun_host_option("--gun-flash", a + 12);
+    else if (!strncmp(a, "--ffb-gain=", 11)) ffb_option("--ffb-gain", a + 11);   /* 0-100 */
 }
 
 sapp_desc sokol_main(int argc, char *argv[]) {
@@ -854,6 +1158,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
          * the interpolated ones), --pictures-all never gives them up. */
         else if (!strcmp(a, "--pictures-board-rate")) g_web_pictures = WEB_PICTURES_BOARD_RATE;
         else if (!strcmp(a, "--pictures-all"))        g_web_pictures = WEB_PICTURES_ALL;
+        else web_value_arg(a);
     }
     return (sapp_desc){
         .init_cb      = init,
@@ -875,40 +1180,76 @@ sapp_desc sokol_main(int argc, char *argv[]) {
 
 /* ---- What the page calls -------------------------------------------------- */
 
+/* The other zips of a split set (a clone's parent: von.zip beside vonj.zip),
+ * given before web_rom_load, which reads them with its own and frees them. */
+static uint8_t *g_web_rom_extra[RL_MEM_ZIPS - 1];
+static int      g_web_rom_extra_len[RL_MEM_ZIPS - 1];
+static int      g_web_rom_extra_n;
+
+static void web_rom_extra_free(void) {
+    for (int i = 0; i < g_web_rom_extra_n; i++) free(g_web_rom_extra[i]);
+    g_web_rom_extra_n = 0;
+}
+
+/* One more zip for the next web_rom_load, which takes `zip` over (a malloc'd
+ * buffer the page filled). 0, or -1 when it holds as many as it can. */
+EMSCRIPTEN_KEEPALIVE int web_rom_extra(uint8_t *zip, int len) {
+    if (!zip || len <= 0 || g_web_rom_extra_n >= RL_MEM_ZIPS - 1) { free(zip); return -1; }
+    g_web_rom_extra[g_web_rom_extra_n] = zip;
+    g_web_rom_extra_len[g_web_rom_extra_n++] = len;
+    return 0;
+}
+
+/* The active profile's parent set, "von.zip", or "" for a set of its own: the
+ * zip the page asks for when a split clone's files are missing. */
+EMSCRIPTEN_KEEPALIVE const char *web_rom_parent(void) {
+    return g_active_profile && g_active_profile->parent_zip_name ? g_active_profile->parent_zip_name : "";
+}
+
 /*
- * Load the ROM set from the bytes of the one zip the player picked. `zip` is a
- * malloc'd buffer the page filled; this takes it over and frees it before
- * returning, because the zip is 18 MB that nothing needs once the regions are
- * extracted. Strict: every file must be in the zip by CRC (rom_loader.h).
+ * Load the ROM set from the bytes of the zip the player picked, and of any
+ * web_rom_extra gave (a split clone's parent). `zip` is a malloc'd buffer the
+ * page filled; this takes it over and frees it, and the extras, before
+ * returning, because a zip is 18 MB that nothing needs once the regions are
+ * extracted. Strict: every file must be in one of the zips by CRC (rom_loader.h).
  *
  * Returns 0 and starts the board, or -1 (web_rom_missing names what was not
  * found) or -2 (no profile).
  */
 EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
-    if (!zip || len <= 0) { free(zip); return -1; }
-    if (!g_active_profile) { free(zip); return -2; }
+    if (!zip || len <= 0 || !g_active_profile) {
+        free(zip);
+        web_rom_extra_free();
+        return g_active_profile ? -1 : -2;
+    }
 
     state.emu.run_state = EMU_STOPPED;
+    replay_game_loaded();   /* a recording ends; a replay lets go of the board */
+    /* The last game's script and its text go: the page hands the new set's over. */
+    m2lua_load_source(NULL, NULL, &state.bus, &state.romset, false);
     rl_mem_zip_set(zip, (size_t)len, true);
+    for (int i = 0; i < g_web_rom_extra_n; i++)
+        rl_mem_zip_add(g_web_rom_extra[i], (size_t)g_web_rom_extra_len[i]);
     int rc = g_active_profile->load_fn(&state.romset, NULL, NULL);
-    /* Drop the pointer, keep the report: the page reads it after a failed load. */
+    /* Drop the pointers, keep the report: the page reads it after a failed load. */
     rl_mem_zip_clear();
     free(zip);
+    web_rom_extra_free();
     if (rc != 0) return -1;
     /* The model lookup is built from the ROM's model table: a new set needs a new one. */
     geo3d_lookup_invalidate();
 
     /* The set's backup RAM, kept in this browser's localStorage. A scripted run
      * (?script=) boots blank, so that two runs of a script are the same run. */
-    if (g_backup_want != 0 && g_web_script_n == 0)
-        backup_ram_open(profile_rom_set(g_active_profile), true);
+    if (g_backup_want != 0 && g_web_script_n == 0 && !g_web_follow)
+        backup_ram_open(profile_rom_set(g_active_profile), g_web_keep_save);
     web_install_board();
     emu_run(&state.emu);
     state.last_us = 0;
     state.owed_us = 0;
     LOG_INFO("web: '%s' loaded; reset IP = 0x%08X", g_active_profile->id, state.cpu.sfr.ip);
     /* The Console version is the PS3 port as a player meets it: its menus. */
-    g_web_shell_on = !strcmp(g_active_profile->id, "sfight_console");
+    g_web_shell_on = !g_web_follow && !strcmp(g_active_profile->id, "sfight_console");
     if (g_web_shell_on) {
         ps3ui_shell_init(&g_ps3ui_shell, (ps3ui_host_t){ web_shell_reset, web_shell_apply, web_shell_volume, NULL },
                          &g_ps3ui_app);
@@ -918,9 +1259,274 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     return 0;
 }
 
+/* ---- Cheats: the game's script from the page (core/m2lua.h, Pinboard #958) --
+ *
+ * M2emulator's SCRIPTS\<set>.lua, typed into the drawer's Cheats tab rather
+ * than read from a file; the page keeps the text per set in localStorage and
+ * hands it over at each game load. A session (netplay, GGPO, a replay, a
+ * follow) keeps it but does not run it: its ROM patches come off, and it runs
+ * again from its start when the session ends. Text and rectangles are drawn by
+ * the page over the picture (web_cheats_draw); no images, no files. */
+static char g_web_cheats_json[16384];
+
+/* The game's ROM set, the page's key for its scratchpad ("" before a game). */
+EMSCRIPTEN_KEEPALIVE const char *web_cheats_romset(void) {
+    return g_active_profile ? profile_rom_set(g_active_profile) : "";
+}
+
+/* The script's state (m2lua_status_json), for the page. */
+EMSCRIPTEN_KEEPALIVE const char *web_cheats_status(void) {
+    m2lua_status_json(g_web_cheats_json, (int)sizeof g_web_cheats_json, emu_script_may_run());
+    return g_web_cheats_json;
+}
+
+/* The scratchpad's text for the game loaded ("" for none): it runs now, Init()
+ * and all, or when the session that has the board lets go. 1 when it runs or
+ * waits, 0 on an error (web_cheats_status says which). */
+EMSCRIPTEN_KEEPALIVE int web_cheats_set(const char *src) {
+    if (!g_active_profile) return 0;
+    return m2lua_load_source(profile_rom_set(g_active_profile), src, &state.bus, &state.romset,
+                             emu_script_may_run()) ? 1 : 0;
+}
+
+/* Option key to its value'th value; refused while a session has the board. */
+EMSCRIPTEN_KEEPALIVE int web_cheats_option(const char *key, int value) {
+    int i = key ? m2lua_option_index(key) : -1;
+    if (i < 0 || !emu_script_may_run() || g_m2lua.suspended) return 0;
+    if (value < 0 || value >= g_m2lua.options[i].nvalues) return 0;
+    m2lua_set_option(i, value);
+    return 1;
+}
+
+/* Input_IsKeyPressed: the page maps KeyboardEvent.code to a DirectInput code. */
+EMSCRIPTEN_KEEPALIVE void web_cheats_key(int dik, int down) { m2lua_set_key(dik, down != 0); }
+
+/* Where the game's picture was last put on the canvas, for the page's drawing
+ * over it and the light guns; w 0 while it is not shown (the lobby, the pause
+ * menu, no game). */
+static void web_cheats_place(const web_picture_t *pic, bool shown) {
+    g_web_cheats_rect[0] = pic->ox;
+    g_web_cheats_rect[1] = pic->oy;   /* sg_apply_viewport's, from the top left */
+    g_web_cheats_rect[2] = shown ? pic->w : 0;
+    g_web_cheats_rect[3] = pic->h;
+}
+
+static void web_cheats_draw_item(int *at, const m2lua_draw_t *d, bool first) {
+    float size = M2LUA_TEXT_SIZE;
+    int bold = 0;
+    if (d->font >= 0 && d->font < M2LUA_FONT_MAX) {
+        size = g_m2lua.fonts[d->font].size;
+        bold = g_m2lua.fonts[d->font].bold;
+    }
+    char esc[M2LUA_TEXT_MAX * 6 + 1];
+    json_escape(esc, (int)sizeof esc, d->text);
+    int cap = (int)sizeof g_web_cheats_json - 2;
+    if (*at < cap)
+        *at += snprintf(g_web_cheats_json + *at, (size_t)(cap - *at),
+                        "%s{\"x\":%.1f,\"y\":%.1f,\"c\":%u,\"s\":%.1f,\"b\":%d,\"t\":\"%s\"}",
+                        first ? "" : ",", d->x, d->y, (unsigned)d->color, size, bold, esc);
+}
+
+/* What PostDraw drew last, in board pixels (496 x 384): {"gen":N,"canvas":
+ * [w,h],"rect":[x,y,w,h] (the picture on the canvas, top-down; w 0: hidden),
+ * "items":[{x,y,c (0xAARRGGBB),s (size),b (bold),t}]}. */
+EMSCRIPTEN_KEEPALIVE const char *web_cheats_draw(void) {
+    static m2lua_draw_t list[M2LUA_DRAW_MAX];
+    int n = 0;
+    uint32_t gen = m2lua_take_draw(list, &n);
+    const int *r = g_web_cheats_rect;
+    int at = snprintf(g_web_cheats_json, sizeof g_web_cheats_json,
+                      "{\"gen\":%u,\"canvas\":[%d,%d],\"rect\":[%d,%d,%d,%d],\"items\":[", (unsigned)gen,
+                      sapp_width(), sapp_height(), r[0], r[1], r[2], r[3]);
+    bool first = true;
+    for (int i = 0; i < n; i++)
+        if (list[i].kind == M2LUA_DRAW_TEXT) { web_cheats_draw_item(&at, &list[i], first); first = false; }
+    if (at > (int)sizeof g_web_cheats_json - 3) at = (int)sizeof g_web_cheats_json - 3;
+    memcpy(g_web_cheats_json + at, "]}", 3);
+    return g_web_cheats_json;
+}
+
+/* ---- ?follow= (core/follow.h) ------------------------------------------------
+ *
+ * The page fetches the leader's follow.json, calls web_follow_begin with its
+ * profile BEFORE web_rom_load (the profile picks the ROM files and the hooks),
+ * then hands over the join point and the feed as they arrive. The board waits
+ * for each slice's records, runs unpaced while it holds many, and never takes the
+ * page's input: what it reads is the leader's. No backup RAM (the state carries
+ * the leader's), no shell. A split or an END is the page's cue to join again. */
+static char g_web_follow_err[160];
+
+/* 0, or -1 when there is no such profile. */
+EMSCRIPTEN_KEEPALIVE int web_follow_begin(const char *profile) {
+    const game_profile_t *p = profile && *profile ? profile_by_id(profile) : NULL;
+    if (profile && *profile && !p) return -1;
+    if (p) g_active_profile = p;
+    g_web_follow = true;
+    return 0;
+}
+
+/* Join at a segment's state (a malloc'd buffer, freed here). 0, or -1 with
+ * web_follow_error saying why. */
+EMSCRIPTEN_KEEPALIVE int web_follow_join(uint8_t *data, int len) {
+    const char *err = !g_web_follow ? "not following" : !state.romset.loaded ? "no game loaded"
+                    : data && len > 0 ? follow_join(&state.emu, data, (size_t)len) : "no state";
+    free(data);
+    snprintf(g_web_follow_err, sizeof g_web_follow_err, "%s", err ? err : "");
+    if (err) return -1;
+    if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+    state.owed_us = 0;
+    return 0;
+}
+
+/* The next bytes of the joined segment's feed (a malloc'd buffer, freed here). */
+EMSCRIPTEN_KEEPALIVE int web_follow_feed(uint8_t *data, int len) {
+    const char *err = data && len > 0 ? follow_feed(data, (size_t)len) : NULL;
+    free(data);
+    if (err) { snprintf(g_web_follow_err, sizeof g_web_follow_err, "%s", err); return -1; }
+    return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE const char *web_follow_error(void) { return g_web_follow_err; }
+
+/* {"joined","ended","split","why","frame","buffered","checks","rams","bytes"} */
+EMSCRIPTEN_KEEPALIVE const char *web_follow_status(void) {
+    static char buf[400];
+    const follow_sub_t *F = &g_follow;
+    char why[160];
+    size_t w = 0;
+    for (const char *c = F->why; *c && w + 2 < sizeof why; c++)
+        if (*c != '"' && *c != '\\' && (unsigned char)*c >= 0x20) why[w++] = *c;
+    why[w] = 0;
+    snprintf(buf, sizeof buf,
+             "{\"joined\":%d,\"ended\":%d,\"split\":%d,\"why\":\"%s\",\"frame\":%u,"
+             "\"buffered\":%u,\"checks\":%u,\"rams\":%u}",
+             F->joined ? 1 : 0, F->ended ? 1 : 0, F->split ? 1 : 0, why, (unsigned)g_emu_frames,
+             follow_buffered(), F->checks, F->rams);
+    return buf;
+}
+
+/* ---- Replays (core/replay.h, Pinboard #572) -----------------------------------
+ *
+ * The page keeps the files (m2hle-replay.js, in IndexedDB); the board only
+ * records and plays. With the switch on, each online match the board plays ends
+ * as a zip in a slot the page polls (web_replay_ready_len), takes and frees.
+ * PLAYBACK hands a file's bytes to web_replay_open, shows its label
+ * (web_replay_info) and asks; Play takes the board over until Stop, which boots
+ * the player's own game again. */
+static char g_web_replay_err[200];
+
+static int web_replay_result(const char *err) {
+    snprintf(g_web_replay_err, sizeof g_web_replay_err, "%s", err ? err : "");
+    return err ? -1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE void web_replay_set_record(int on) { g_replay_rec.want = on != 0; }
+EMSCRIPTEN_KEEPALIVE int  web_replay_record(void)       { return g_replay_rec.want ? 1 : 0; }
+/* 1 saves the inputs feed, 0 the game's own replay (the default). */
+EMSCRIPTEN_KEEPALIVE void web_replay_set_format(int inputs) {
+    g_replay_rec.format = inputs ? REPLAY_SAVE_INPUTS : REPLAY_SAVE_NATIVE;
+}
+/* 1 plays a replay's inputs when it has them, 0 the game's own view. */
+EMSCRIPTEN_KEEPALIVE void web_replay_set_view(int inputs) {
+    g_replay_play.view = inputs ? REPLAY_VIEW_INPUTS : REPLAY_VIEW_AUTO;
+}
+
+/* The finished match's zip: its length (0 when none waits), bytes and name.
+ * web_replay_ready_free once the page has copied it out. */
+EMSCRIPTEN_KEEPALIVE int         web_replay_ready_len(void)  { return (int)g_replay_rec.ready_len; }
+EMSCRIPTEN_KEEPALIVE uint8_t    *web_replay_ready_data(void) { return g_replay_rec.ready; }
+EMSCRIPTEN_KEEPALIVE const char *web_replay_ready_name(void) { return g_replay_rec.ready_name; }
+EMSCRIPTEN_KEEPALIVE void web_replay_ready_free(void) {
+    free(g_replay_rec.ready);
+    g_replay_rec.ready = NULL;
+    g_replay_rec.ready_len = 0;
+    g_replay_rec.ready_name[0] = '\0';
+}
+
+/* Open a file's bytes (a malloc'd buffer, freed here): 0, or -1 with
+ * web_replay_error saying why. Nothing plays yet. */
+EMSCRIPTEN_KEEPALIVE int web_replay_open(uint8_t *data, int len) {
+    const char *err = data && len > 0 ? replay_open(data, (size_t)len) : "an empty file";
+    free(data);
+    return web_replay_result(err);
+}
+
+/* The open replay's label, replay.json as it was saved ("" when none is open). */
+EMSCRIPTEN_KEEPALIVE const char *web_replay_info(void) {
+    return g_replay_play.loaded ? g_replay_play.json : "";
+}
+
+EMSCRIPTEN_KEEPALIVE int web_replay_play(void) {
+    if (!state.romset.loaded) return web_replay_result("load the game first");
+    if (g_replay_play.loaded) replay__check_playable();   /* the game may have changed since it opened */
+    g_web_paused = false;
+    int rc = web_replay_result(replay_play_start(&state.emu));
+    if (rc == 0) {
+        input_release_all();
+        if (state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+        state.owed_us = 0;
+    }
+    return rc;
+}
+
+EMSCRIPTEN_KEEPALIVE void web_replay_stop(void) {
+    replay_play_stop();
+    if (state.romset.loaded && state.emu.run_state != EMU_RUNNING) emu_run(&state.emu);
+}
+
+EMSCRIPTEN_KEEPALIVE int web_replay_seek(unsigned frame) {
+    return web_replay_result(replay_play_seek(&state.emu, frame));
+}
+
+EMSCRIPTEN_KEEPALIVE void web_replay_fast(int on) { g_replay_play.fast = on != 0; }
+
+/* The bar's Finish replay (Pinboard #861): save the local game recorded so
+ * far, now (replay_rec_finish_local). Says what became of it ("" when nothing
+ * was being recorded); a saved one waits in web_replay_ready_* as ever. */
+EMSCRIPTEN_KEEPALIVE const char *web_replay_finish(void) {
+    const char *said = replay_rec_finish_local();
+    return said ? said : "";
+}
+
+EMSCRIPTEN_KEEPALIVE const char *web_replay_error(void) { return g_web_replay_err; }
+
+/* replay_play_status's object, plus "unplayable" (why the open one cannot
+ * play here), "recording", "local" (it is the player's own game, which
+ * web_replay_finish can end) and "saved" (matches recorded since the page opened). */
+EMSCRIPTEN_KEEPALIVE const char *web_replay_status(void) {
+    static char buf[1200];
+    char play[800], why[200], rec_err[200];
+    replay_play_status(play, sizeof play);
+    json_escape(why, sizeof why, g_replay_play.unplayable);
+    json_escape(rec_err, sizeof rec_err, g_replay_rec.error);
+    size_t n = strlen(play);
+    if (n) play[n - 1] = '\0';   /* reopen the object */
+    snprintf(buf, sizeof buf, "%s,\"unplayable\":\"%s\",\"record\":%d,\"format\":%d,\"recording\":%d,"
+             "\"local\":%d,\"saved\":%u,\"rec_error\":\"%s\"}", play, why, g_replay_rec.want ? 1 : 0,
+             g_replay_rec.format == REPLAY_SAVE_INPUTS ? 1 : 0,
+             replay_recording() ? 1 : 0, replay_rec_local() ? 1 : 0,
+             (unsigned)g_replay_rec.saved, rec_err);
+    return buf;
+}
+
 /* The files the last web_rom_load did not find, space separated ("" if none). */
 /* The page is going (pagehide): keep the newest backup RAM. */
 EMSCRIPTEN_KEEPALIVE void web_backup_flush(void) { backup_ram_flush(); }
+
+/* Whether the set's backup RAM goes in localStorage (the arcade's keepSave: Sega
+ * Rally asks first). Off, the board still has it for this visit, blank
+ * at the load, and nothing is written; turned on mid-game, what the board holds
+ * now is stored. Before a load it decides how that load opens it. */
+EMSCRIPTEN_KEEPALIVE void web_backup_keep(int on) {
+    g_web_keep_save = on != 0;
+    if (!g_backup.attached || !g_backup.set[0]) return;
+    g_backup.to_file = g_web_keep_save;
+    g_backup.path[0] = '\0';
+    if (!g_web_keep_save) return;
+    snprintf(g_backup.path, sizeof g_backup.path, "m2hle2.nvram.%s", g_backup.set);
+    g_backup.dirty = true;
+    backup_ram_flush();
+}
 
 EMSCRIPTEN_KEEPALIVE const char *web_rom_missing(void) {
     return g_rl_mem_zip.missing_names;
@@ -930,6 +1536,166 @@ EMSCRIPTEN_KEEPALIVE const char *web_rom_missing(void) {
 EMSCRIPTEN_KEEPALIVE int web_state(void) {
     if (!state.romset.loaded) return 0;
     return state.emu.run_state == EMU_RUNNING ? 1 : 2;
+}
+
+/* ---- Screenshots, savestates and issue reports (Pinboard #653) ------------
+ *
+ * The page's Screenshot and Report an issue (web/site/m2hle-report.js). Offline
+ * only, as Pause is: in a room or a match the board is one of two, and a state
+ * of it says nothing the other machine would agree with.
+ *
+ *   web_shot_arm(with_state)        read the next picture drawn back, and save
+ *                                   the board as it was drawn from (a report's)
+ *   web_shot_w() / _h() / _data()   it, as RGBA rows top first, once taken
+ *   web_shot_pending()              1 until that frame has been drawn
+ *   web_shot_free()
+ *   web_report_hold(on)             freeze the board while the report is open
+ *   web_state_save()                a savestate (core/savestate.h) of the board
+ *   web_state_data() / _len()       now, in the heap until web_state_free()
+ *   web_state_load(data, len)       one back: what a report's state.sta is for
+ *
+ * The picture is the game's rectangle on the canvas as the player sees it: the
+ * render scale, the filter, the pots and a menu over it all included. It is read
+ * in the callback that drew it, because a WebGL canvas without
+ * preserveDrawingBuffer is cleared once the browser has shown it. */
+static uint8_t *g_web_shot;
+static int      g_web_shot_w, g_web_shot_h;
+static uint8_t *g_web_state_buf;
+static size_t   g_web_state_len;
+static const char *g_web_state_err = "";
+
+EMSCRIPTEN_KEEPALIVE int web_report_allowed(void) {
+    return state.romset.loaded && !web_pause_refused() ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE void web_shot_free(void) {
+    free(g_web_shot);
+    g_web_shot = NULL;
+    g_web_shot_w = g_web_shot_h = 0;
+}
+static int web_state_save_now(void);
+
+EMSCRIPTEN_KEEPALIVE int web_shot_arm(int with_state) {
+    if (!web_report_allowed()) return 0;
+    web_shot_free();
+    g_web_shot_want = true;
+    g_web_shot_state = with_state != 0;
+    return 1;
+}
+/* 1 until the frame callback has read the armed picture back. */
+EMSCRIPTEN_KEEPALIVE int web_shot_pending(void) { return g_web_shot_want ? 1 : 0; }
+
+/* The report panel's freeze: the page's Pause, but never the Console's pause
+ * menu, which would cover the picture the report is about. */
+EMSCRIPTEN_KEEPALIVE int web_report_hold(int on) {
+    if (on && !web_report_allowed()) return 0;
+    g_web_paused = on != 0;
+    return g_web_paused ? 1 : 0;
+}
+/* Every getter asks web_report_allowed() again: a room can start between the
+ * arm and the read, and then the picture is dropped, not handed out. */
+static bool web_shot_ready(void) {
+    if (!web_report_allowed()) web_shot_free();
+    return g_web_shot != NULL;
+}
+EMSCRIPTEN_KEEPALIVE int      web_shot_w(void)    { return web_shot_ready() ? g_web_shot_w : 0; }
+EMSCRIPTEN_KEEPALIVE int      web_shot_h(void)    { return web_shot_ready() ? g_web_shot_h : 0; }
+EMSCRIPTEN_KEEPALIVE uint8_t *web_shot_data(void) { return web_shot_ready() ? g_web_shot : NULL; }
+
+/* After the swapchain pass: the game's rectangle (top-left origin, as sokol's
+ * viewport has it) out of the default framebuffer, flipped to top first. */
+static void web_shot_take(int ox, int oy, int w, int h) {
+    g_web_shot_want = false;
+    const int fb_w = sapp_width(), fb_h = sapp_height();
+    if (ox < 0) { w += ox; ox = 0; }
+    if (oy < 0) { h += oy; oy = 0; }
+    if (ox + w > fb_w) w = fb_w - ox;
+    if (oy + h > fb_h) h = fb_h - oy;
+    if (w <= 0 || h <= 0) return;
+    uint8_t *px = malloc((size_t)w * (size_t)h * 4u);
+    if (!px) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(ox, fb_h - oy - h, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    sg_reset_state_cache();
+    const size_t row = (size_t)w * 4u;
+    uint8_t *tmp = malloc(row);
+    if (!tmp) { free(px); return; }
+    for (int y = 0; y < h / 2; y++) {
+        uint8_t *a = px + (size_t)y * row, *b = px + (size_t)(h - 1 - y) * row;
+        memcpy(tmp, a, row); memcpy(a, b, row); memcpy(b, tmp, row);
+    }
+    free(tmp);
+    for (size_t i = 3; i < row * (size_t)h; i += 4) px[i] = 0xFF;   /* the canvas is opaque */
+    g_web_shot = px;
+    g_web_shot_w = w;
+    g_web_shot_h = h;
+}
+
+/* The game's picture, or the whole canvas under the lobby; then the state, if the
+ * page asked for one, whether or not a picture came back. */
+static void web_shot_done(const web_picture_t *pic) {
+    if (!web_report_allowed()) {   /* armed offline, but a room or a match has started since */
+        g_web_shot_want = g_web_shot_state = false;
+        return;
+    }
+    if (pic->lobby) web_shot_take(0, 0, sapp_width(), sapp_height());
+    else            web_shot_take(pic->ox, pic->oy, pic->w, pic->h);
+    if (g_web_shot_state) web_state_save_now();
+    g_web_shot_state = false;
+}
+
+EMSCRIPTEN_KEEPALIVE void web_state_free(void) {
+    free(g_web_state_buf);
+    g_web_state_buf = NULL;
+    g_web_state_len = 0;
+}
+/* 1 and the state is in web_state_data(), or 0 and web_state_error() says why. */
+static int web_state_save_now(void) {
+    web_state_free();
+    if (!web_report_allowed()) { g_web_state_err = "not while playing online"; return 0; }
+    size_t need = 0;
+    const char *err = emu_state_save_mem(&state.emu, NULL, 0, &need);
+    if (!err) {
+        g_web_state_buf = malloc(need);
+        err = g_web_state_buf ? emu_state_save_mem(&state.emu, g_web_state_buf, need, &g_web_state_len)
+                              : "out of memory";
+    }
+    if (err) { web_state_free(); g_web_state_err = err; return 0; }
+    g_web_state_err = "";
+    return 1;
+}
+EMSCRIPTEN_KEEPALIVE int web_state_save(void) { return web_state_save_now(); }
+
+/* What a report says the board was: {"profile","game","frame"}. */
+EMSCRIPTEN_KEEPALIVE const char *web_report_info(void) {
+    static char buf[256];
+    const game_profile_t *p = state.romset.loaded ? g_active_profile : NULL;
+    snprintf(buf, sizeof buf, "{\"profile\":\"%s\",\"game\":\"%s\",\"frame\":%llu}",
+             p && p->id ? p->id : "", p && p->display_name ? p->display_name : "",
+             (unsigned long long)g_emu_frames);
+    return buf;
+}
+/* As the picture's getters: a state saved offline is not handed out online. */
+static bool web_state_ready(void) {
+    if (!web_report_allowed()) web_state_free();
+    return g_web_state_buf != NULL;
+}
+EMSCRIPTEN_KEEPALIVE uint8_t    *web_state_data(void)  { return web_state_ready() ? g_web_state_buf : NULL; }
+EMSCRIPTEN_KEEPALIVE int         web_state_len(void)   { return web_state_ready() ? (int)g_web_state_len : 0; }
+EMSCRIPTEN_KEEPALIVE const char *web_state_error(void) { return g_web_state_err; }
+
+/* Not under a follower or a replay, whose board is the feed's. `data` is the
+ * page's malloc'd copy; this frees it. */
+EMSCRIPTEN_KEEPALIVE int web_state_load(uint8_t *data, int len) {
+    const char *err = NULL;
+    if (!web_report_allowed() || g_web_follow || replay_playing()) err = "not while playing online, following or playing a replay";
+    else err = emu_state_load_mem(&state.emu, data, (size_t)len);
+    free(data);
+    g_web_state_err = err ? err : "";
+    if (err) return 0;
+    state.emu.run_state = EMU_RUNNING;
+    return 1;
 }
 
 /* Let go of every held input. The page calls this when focus moves into its
@@ -955,7 +1721,7 @@ EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
     /* SELECT is the pause menu's (free play needs no coin). Only the board goes
      * without it: g_web_pad keeps it, because web_lobby_pad reads SELECT from
      * there, and a pad that never held it could never open the pause menu. */
-    if (g_web_shell_on)
+    if (web_shell_live())
         changed &= ~(1u << GAME_INPUT_P1_COIN);
     for (int a = 0; a < GAME_INPUT_COUNT; a++) {
         if (!(changed & (1u << a))) continue;
@@ -968,11 +1734,41 @@ EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
 /* The page's "Online" button: the lobby, as the PS3's Online Battle opens it. */
 EMSCRIPTEN_KEEPALIVE void web_lobby_open(void) {
     g_ps3ui_app.default_delay = g_ps3ui_app.default_delay > 0 ? g_ps3ui_app.default_delay : 2;
-    if (g_web_shell_on) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_ONLINE);
+    if (web_shell_live()) ps3ui_shell_go(&g_ps3ui_shell, PS3UI_SH_ONLINE);
     ps3ui_app_open(&g_ps3ui_app);
 }
 EMSCRIPTEN_KEEPALIVE void web_lobby_close(void) { ps3ui_app_close(&g_ps3ui_app); }
 EMSCRIPTEN_KEEPALIVE int  web_lobby_visible(void) { return web_view() != PS3UI_VIEW_GAME; }
+
+/* The GGPO panel (net/ggpo_lobby.h). A step by name ("connect", "login",
+ * "challenge", ...: ggl_cmd_kind_named) and its two strings; 0 for no such
+ * step. The lobby runs it at its next pump. */
+EMSCRIPTEN_KEEPALIVE int web_ggpo_post(const char *kind, const char *a, const char *b) {
+#ifdef M2HLE_GGPO
+    ggl_cmd_kind_t k;
+    if (!ggl_cmd_kind_named(kind, &k)) return 0;
+    if (k == GGL_CMD_CONNECT && (!a || !a[0])) a = GGL_DEFAULT_URL;
+    if (k == GGL_CMD_JOIN && (!a || !a[0])) a = g_active_profile ? g_active_profile->id : "m2";
+    ggl_post(k, a ? a : "", b ? b : "");
+    return 1;
+#else
+    (void)kind; (void)a; (void)b;
+    return 0;
+#endif
+}
+
+/* The lobby's status as JSON (ggl_status_json), or {"ok":false} in a build
+ * without GGPO. */
+EMSCRIPTEN_KEEPALIVE const char *web_ggpo_status(void) {
+#ifdef M2HLE_GGPO
+    static char out[12288];
+    ggl_status_t st = ggl_status();
+    ggl_status_json(out, (int)sizeof out, &st);
+    return out;
+#else
+    return "{\"ok\":false,\"error\":\"this build has no GGPO\"}";
+#endif
+}
 
 /* Game frames since the last board reset. */
 EMSCRIPTEN_KEEPALIVE unsigned web_frames(void) {
@@ -1036,6 +1832,18 @@ EMSCRIPTEN_KEEPALIVE void web_shader_set_mode(int mode) {
     post_shader_set_mode(mode == 1 ? POST_SHADER_CRT : mode == 2 ? POST_SHADER_CUSTOM : POST_SHADER_OFF);
 }
 EMSCRIPTEN_KEEPALIVE int web_shader_mode(void) { return (int)post_shader_mode(); }
+
+/* The Arcade, the board's picture under any filter: 0 off, 1 on. */
+EMSCRIPTEN_KEEPALIVE void web_shader_set_arcade(int on) { post_shader_set_arcade(on != 0); }
+EMSCRIPTEN_KEEPALIVE int web_shader_arcade(void) { return post_shader_arcade() ? 1 : 0; }
+
+/* Depth per pixel, not the board's one key a polygon (geo3d.h): 0 off, 1 on. */
+EMSCRIPTEN_KEEPALIVE void web_set_pixel_depth(int on) { g_geo3d_pixel_depth = on != 0; }
+EMSCRIPTEN_KEEPALIVE int web_pixel_depth(void) { return g_geo3d_pixel_depth; }
+
+/* The monitor's pots (crt_pots.h, CRT_POT_*), from the Picture tab. */
+EMSCRIPTEN_KEEPALIVE void  web_crt_pot_set(int id, float v) { crt_pots_set(id, v); }
+EMSCRIPTEN_KEEPALIVE float web_crt_pot(int id)              { return crt_pots_get(id); }
 
 EMSCRIPTEN_KEEPALIVE void web_shader_files_clear(void) { rs_vfs_clear(); }
 

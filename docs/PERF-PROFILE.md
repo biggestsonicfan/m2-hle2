@@ -148,6 +148,29 @@ So on the device #403's tile work is −17.5% tiles and −11% render (it was �
 its 3D change does not show, and the GEO publish is −7% of the emu thread. Together −9.4% of a
 frame's CPU, 138 → 152 frames a second flat out.
 
+## What the Dreamcast branch has for master (#460)
+
+The Dreamcast port (`idea-340-dreamcast`, DREAMCAST-PORT.md there) was optimised hard for a 200 MHz
+SH-4. Most of it is the SH-4's or the PowerVR's: the store queues, `ftrv`, `FSRRA`, the software
+pager, the model pack, ADX sound, drawing every other frame. What is board code was measured here on
+x86 with `det_digest` over 9,000 frames (attract, then a coin, a start and a punch every 30 frames
+into a fight), every variant byte-identical to its base with `--cpu`:
+
+| Dreamcast change | x86 result | for master? |
+|---|---|---|
+| `MEM_COUNT=0`: no 64-bit bus tallies | instructions −0.2%, cycles unchanged | no: a 64-bit add is one instruction here |
+| `MEM_LE_DIRECT`, `IRQT_COUNT_T=int32_t` | GCC and clang already fold the byte loads on x86 and ARM; 64-bit adds are free | no: SH-4 only |
+| `I960_BLOCKS`, the decoded-block cache | +1.1% time | no |
+| `I960_OPTABLE`, handler-table dispatch | −0.3% time | no |
+| `I960_AOT`, the ROM compiled to C (cover 0.99) | −1.1% time; 14% of i960 instructions compiled | no: little gain, and the generated C holds ROM words, so a CI-built core could not ship it |
+| `m2_spin_timed`, the texture senders' timer-2 wait skipped | ~15,000 passes in 9,000 frames, instructions −0.007% | no: it mattered there because each pass ended a compiled run |
+| tile dirty bits, publishing only the GEO state that changed | master already has both | done |
+| the audit's fixes (#458): Gems traps kept off profile hooks, Gems' NaNs canonical, bufferram bounds that wrapped | correctness | yes, ported |
+
+On x86 the i960 is not where the time goes: the 9,000 frames are 228 G instructions, most of them
+the sound board and the render, so even the AOT's whole gain is about 1%. The handheld's profile
+(above) has the same order, sound board and draw ahead of the i960.
+
 ## How to take one
 
 `perf` comes from `linux-tools-generic` (in the antigravity-dev image; `/usr/local/bin/perf`).

@@ -40,6 +40,18 @@ static volatile int g_replay_stage_pin   = -1;
 static volatile int      g_match_replay = 0;
 static volatile uint32_t g_match_replay_frame = 0;
 
+/* A replay played with the game's own replay code (game_profile_t.native_play,
+ * Pinboard #617): which round of how many, and how far into it, in the frames
+ * the game's key player ran. Written by the profile's hooks; core/replay.h
+ * reads it for its status and seeks. `ended`: the last round has played. */
+typedef struct {
+    bool     on, ended;
+    int      round, rounds;
+    uint32_t frame, frames;     /* in this round */
+    uint32_t total, total_frames;
+} native_play_t;
+static native_play_t g_native_play;
+
 /* At a game frame's end: if armed and attract mode is at the profile's movie
  * step with the movie set up, write the movie state a natural boot has when the
  * replay starts and move on to the replay step. It runs where the game's frame
@@ -79,6 +91,21 @@ static inline void hle_game_frame_edge(memory_bus_t *bus) {
 typedef enum { GAME_REGION_JAPAN = 0, GAME_REGION_USA = 1, GAME_REGION_EXPORT = 2 } game_region_t;
 static volatile int g_region = GAME_REGION_USA;
 
+/* The region wins over saved backup RAM too: a profile that keeps its settings
+ * there (STF) puts g_region in the working copy once the game has loaded them,
+ * so the board plays in that region whatever the save says, and leaves the
+ * saved block itself alone. The web page sets it with --region (from ?lang=,
+ * Pinboard #942): the arcade's shared board and a player's kept save play in
+ * the page's language's region. Off everywhere else, where a saved region is
+ * the player's choice. A netplay session's board has no backup RAM, so the
+ * default hook has put g_region there already and this changes nothing.
+ *
+ * Every profile says what it does with g_region (game_quirks_t.region,
+ * game_region_use_t); a hooked one names the hook that honours this flag
+ * (region.over_saved), and
+ * region_test runs it. */
+static volatile int g_region_over_saved = 0;
+
 /* Versus mode: the cabinet setting Sega's console emulator calls VS mode. When
  * a two-player match is decided the board goes straight back to character
  * select with both players still in, rather than keeping the winner on against
@@ -117,6 +144,38 @@ static volatile int g_game_type     = 0;
  * sets it from its rules. A PS3 match takes the PS3 room's own (g_xplay_secret):
  * with it Off the PS3 offers no hidden fighter online. */
 static volatile int g_hidden_chars = 1;
+
+/* The CPU opponent's AI table (STF's match_enemy_rank_data, picked per fight by
+ * sub_3B22C from the cabinet's ENEMY RANK). -1, the default, plays the
+ * cabinet's; 0..5 plays that table instead: Easy, Normal, Hard, Hardest, and
+ * the two the ROM carries but never points at, Extra 1 (0x93428) and Extra 2
+ * (0x93728). Only the AI table changes (sfight.h enemy_rank_table); the rest
+ * of what ENEMY RANK decides still follows the cabinet's setting. A netplay
+ * session plays the cabinet's (g_hle_netplay_board), so it cannot split two
+ * boards; --enemy-rank, the Profile menu and the PS3 menus' Difficulty set it. */
+static volatile int g_enemy_rank = -1;
+#define ENEMY_RANKS 6
+static const char *const g_enemy_rank_names[ENEMY_RANKS] = {
+    "Easy", "Normal", "Hard", "Hardest", "Extra 1", "Extra 2"
+};
+
+/* "easy", "normal", "hard", "hardest", "extra1" or "extra2" (or 0..5);
+ * "cabinet" is -1. -2 for anything else. */
+static inline int enemy_rank_parse(const char *s) {
+    static const char *const keys[ENEMY_RANKS] = {
+        "easy", "normal", "hard", "hardest", "extra1", "extra2"
+    };
+    if (!s) return -2;
+    if (!strcmp(s, "cabinet") || !strcmp(s, "-1")) return -1;
+    if (s[0] >= '0' && s[0] < '0' + ENEMY_RANKS && !s[1]) return s[0] - '0';
+    for (int i = 0; i < ENEMY_RANKS; i++)
+        if (!strcmp(s, keys[i])) return i;
+    return -2;
+}
+
+/* Up while a netplay session owns the board (netplay_active, set by the run
+ * loop each slice): host-side play settings that no room carries stand down. */
+static volatile int g_hle_netplay_board = 0;
 
 /* The flag byte's game-type bits for Type A..D (0..3). */
 static inline uint8_t game_type_flag_bits(int type) {
@@ -195,6 +254,7 @@ static inline void hle_ret(i960_cpu_t *cpu) {
     if (cpu->frame_depth > 0) {
         uint32_t ret_ip = cpu->locals.rip;
         cpu->frame_depth--;
+        if (cpu->frame_flushed > cpu->frame_depth) cpu->frame_flushed = cpu->frame_depth;
         cpu->locals = cpu->frame_stack[cpu->frame_depth];
         if (cpu->frame_irq[cpu->frame_depth]) {   /* interrupt return, as `ret` */
             cpu->sfr.ac = cpu->frame_irq_ac[cpu->frame_depth];
@@ -213,11 +273,12 @@ static inline void hle_ret(i960_cpu_t *cpu) {
 /* Inject a call to target: push current frame with rip = ret_ip, redirect IP.
  * When target executes `ret`, it returns to ret_ip and the saved frame is restored. */
 static inline void hle_call(i960_cpu_t *cpu, uint32_t target, uint32_t ret_ip) {
-    if (cpu->frame_depth < FRAME_STACK_DEPTH) {
+    if (i960_frame_room(cpu)) {
         cpu->frame_stack[cpu->frame_depth] = cpu->locals;
         cpu->frame_irq[cpu->frame_depth] = 0;
         cpu->frame_fp[cpu->frame_depth] = cpu->globals.fp;
         cpu->locals.rip = ret_ip;
+        cpu->locals.pfp = cpu->globals.fp;   /* same FP: a flushed ret finds it */
         cpu->frame_depth++;
     } else {
         LOG_WARN("hle_call: frame stack full at IP=0x%08X", cpu->sfr.ip);
@@ -309,18 +370,50 @@ static inline void hle_interrupt_on_stack(i960_cpu_t *cpu, memory_bus_t *bus, ui
 static const game_profile_t *s_hle_filter_profile = NULL;
 static uint8_t               s_hle_filter[65536 / 8];
 
+/* Hooks that do not belong to a profile: --gems-i960 (gems.h) puts the Sonic
+ * Gems Collection's C at its trap sites this way, and --ages-i960 (ages.h)
+ * Sega Ages' at FV's patch sites (ages_apply after gems_apply). g_hle_extra_sites lists the
+ * addresses for the filter; g_hle_extra_hook is asked first at any of them and
+ * declines (1) like a profile hook. Bump g_hle_filter_gen after a change. */
+static const uint32_t *g_hle_extra_sites = NULL;
+static size_t          g_hle_extra_count = 0;
+static int (*g_hle_extra_hook)(i960_cpu_t *cpu, memory_bus_t *bus) = NULL;
+static unsigned        g_hle_filter_gen  = 0;
+static unsigned        s_hle_filter_gen  = 0;
+/* Idle loops found in the program rather than named by a profile: homebrew on
+ * a game's board runs the any_program profile, which has no addresses of its
+ * own, so m2_spin_find (m2_spin.h) scans the program at install for the loops
+ * m2_spin_skip can skip and lists them here. They count only while the profile
+ * they were found for is the active one. Bump g_hle_filter_gen after a change. */
+#define HLE_SPIN_SITES_MAX 64
+static uint32_t              g_hle_spin_sites[HLE_SPIN_SITES_MAX];
+static size_t                g_hle_spin_count   = 0;
+static const game_profile_t *g_hle_spin_profile = NULL;
+static int (*g_hle_spin_hook)(i960_cpu_t *cpu, memory_bus_t *bus) = NULL;
+/* Turns the above off for a netplay session (gems_off_for_session). */
+static void (*g_hle_extra_session_off)(void) = NULL;
+
 /* Rebuild the filter if the active profile changed. The run loop does this
  * once per slice (the profile cannot change inside one) and then calls
  * hle_check_synced per instruction; hle_check does both. */
 static inline void hle_filter_sync(void) {
     const game_profile_t *p = g_active_profile;
-    if (s_hle_filter_profile == p) return;
+    if (s_hle_filter_profile == p && s_hle_filter_gen == g_hle_filter_gen) return;
     memset(s_hle_filter, 0, sizeof(s_hle_filter));
     for (size_t i = 0; p && i < p->hook_count; i++) {
         uint32_t k = (p->hooks[i].addr >> 2) & 0xFFFFu;
         s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
     }
+    for (size_t i = 0; g_hle_extra_hook && i < g_hle_extra_count; i++) {
+        uint32_t k = (g_hle_extra_sites[i] >> 2) & 0xFFFFu;
+        s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
+    }
+    for (size_t i = 0; p && p == g_hle_spin_profile && i < g_hle_spin_count; i++) {
+        uint32_t k = (g_hle_spin_sites[i] >> 2) & 0xFFFFu;
+        s_hle_filter[k >> 3] |= (uint8_t)(1u << (k & 7u));
+    }
     s_hle_filter_profile = p;
+    s_hle_filter_gen     = g_hle_filter_gen;
 }
 
 /* A hook may stand in for a run of instructions rather than the one it sits
@@ -351,6 +444,11 @@ static inline int hle_check_synced(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t 
     if (!(s_hle_filter[k >> 3] & (1u << (k & 7u))))
         return 1;
     g_hle_room = room;
+    if (g_hle_extra_hook && g_hle_extra_hook(cpu, bus) == 0) return 0;
+    if (!p) return 1;
+    if (p == g_hle_spin_profile)
+        for (size_t i = 0; i < g_hle_spin_count; i++)
+            if (g_hle_spin_sites[i] == ip) return g_hle_spin_hook(cpu, bus);
     const hle_hook_entry_t *h = p->hooks;
     size_t n = p->hook_count;
     for (size_t i = 0; i < n; i++) {

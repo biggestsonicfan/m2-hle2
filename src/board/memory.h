@@ -2,7 +2,7 @@
  * memory.h — board-level memory bus.
  *
  * The Model 2 address space is ~48 named regions: ROM, work RAM, geometry
- * RAM, COP buffer RAM, tile RAM, palette, texture RAM, framebuffer, plus
+ * RAM, COP buffer RAM, tile RAM, palette, texture RAM, plus
  * a handful of MMIO blocks (IRQ, timers, IO, IAC).
  *
  * Dispatch model: a linear-scanned region table. Each region has a backing
@@ -48,6 +48,7 @@
 #include "../core/watchpoint.h"
 #include "../core/backup_ram.h"
 #include "cop.h"
+#include "eeprom_93c46.h"
 #include "irq_timer.h"
 
 /* ---- Region descriptor --------------------------------------------------- */
@@ -143,12 +144,10 @@ typedef struct memory_bus {
     /* Heap-allocated large regions */
     uint8_t  *main_data;
     uint8_t  *xtra_data;
-    uint8_t  *vid_ext_ram;  /* 0x01100000–0x017FFFFF: collision tables, display lists */
     uint8_t  *texram0;
     uint8_t  *texram1;
     uint8_t   luma[LUMA_SIZE];
     uint8_t   luma2[LUMA2_SIZE];
-    uint8_t  *framebuffer;
 
     /* Region table — linear-scanned in declaration order. */
     mem_region_t regions[MEM_REGIONS_MAX];
@@ -261,6 +260,26 @@ static void coprogram_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int
     if (size == 4) cop_write(val);
 }
 
+/* The coprocessor ID at 0x980030, on every board (MAME tgpid_r, in
+ * model2_base_mem; "Top Skater reads here and discards the result"). STF never
+ * reads it. */
+static uint32_t tgp_id_read_cb(mem_region_t *r, uint32_t addr, int size) {
+    static const uint8_t id[16] = { 0,'T','A','H', 0,'A','K','O', 0,'Z','A','K', 0,'M','T','K' };
+    uint32_t off = addr - r->base, v = 0;
+    for (int k = 0; k < size && off + (uint32_t)k < 16u; k++) v |= (uint32_t)id[off + (uint32_t)k] << (8 * k);
+    return v;
+}
+
+/* Buffer RAM repeats every 128 KB up to 0x97FFFF (MAME .mirror(0x60000)), and
+ * the coprocessor ID sits beside COPRO_CTL. STF touches neither. */
+static void mem__add_base_extras(memory_bus_t *bus) {
+    static const char *const name[3] = { "BUFF_RAM_M1", "BUFF_RAM_M2", "BUFF_RAM_M3" };
+    for (uint32_t i = 0; i < 3u; i++)
+        mem_add_region(bus, name[i], BUFF_RAM_BASE + 0x20000u * (i + 1u), BUFF_RAM_SIZE, bus->buff_ram, 0);
+    mem_region_t *r = mem_add_region(bus, "TGP_ID", TGP_ID_BASE, TGP_ID_SIZE, NULL, 1);
+    if (r) r->read_cb = tgp_id_read_cb;
+}
+
 /* COPRO_CTL (0x980000): plain registers, except that 0x980004 reads the COP's
  * reply-FIFO status (cop_fifo_status), which boot code polls for ready. */
 static uint32_t copro_ctl_read_cb(mem_region_t *r, uint32_t addr, int size) {
@@ -271,6 +290,22 @@ static uint32_t copro_ctl_read_cb(mem_region_t *r, uint32_t addr, int size) {
         v = (v << 8) | b;
     }
     return v;
+}
+
+/* The link (comm) board's two status bytes, 0x01A04000 (CN) and 0x01A04002
+ * (FG), mirrored at 0x01A14000 (MAME m2comm, on every Model 2 board). With no
+ * cable both read 0xFE: bit 0 is the bit last written, and Sega Rally writes 0
+ * and reads it back to decide there is no link (0x5ABE00), which is the only
+ * use seen. Nothing is kept, so a write of 1 would read back 0 here; the
+ * shared RAM at 0x01A00000 is not mapped, as no game has been seen there. */
+static uint32_t comm_status_read_cb(mem_region_t *r, uint32_t addr, int size) {
+    uint32_t off = addr - r->base, v = 0;
+    for (int k = size - 1; k >= 0; k--)
+        v = (v << 8) | (((off + (uint32_t)k) & 1u) ? 0u : 0xFEu);
+    return v;
+}
+static void mem_ignore_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
+    (void)r; (void)addr; (void)val; (void)size;
 }
 
 /* ---- GEO display list (board-level) -------------------------------------
@@ -357,6 +392,25 @@ static struct {
     uint64_t log[(GEO_RS_LOG_BLKS + 63) / 64];
     bool     slots;                                /* texparam and coef */
 } g_geo_dirty[2];
+
+/* Mode, LOD and z-adjust (commands 07/17, 16, 08/18): the geometrizer keeps
+ * them from one list to the next, and a game may send them once, at boot
+ * (hotd sends its mode 2 and LOD 4 in the first lists and never again). The
+ * renderer only walks the lists it draws, so it cannot keep them itself: they
+ * are followed here as each list is applied, and each published list carries
+ * the values it starts with. Savestates and rollback hold all three copies.
+ * *Symptom that surfaced this in hotd:* a state loaded before the board had
+ * sent them drew mode 0, LOD 0: black doors, white zombies. */
+typedef struct { uint32_t mode; float lod; uint32_t zadj; } geo_held_t;
+static struct {
+    geo_held_t live;                               /* after the lists applied so far */
+    geo_held_t pub[2];                             /* at the start of each published list */
+} g_geo_held;
+
+/* The values the list in snap starts with. */
+static inline const geo_held_t *geodl_held_for(const uint32_t *snap) {
+    return &g_geo_held.pub[snap == g_geodl_snaps[0] ? 0 : 1];
+}
 
 static inline void geo_dirty_mark(size_t field, size_t byte_off) {
     size_t b = byte_off / GEO_RS_BLOCK;
@@ -497,11 +551,16 @@ static inline void geodl_apply_state(const uint32_t *L, uint32_t nw, uint32_t rs
                 }
                 break;
             }
-            case 0x07: case 0x17: case 0x08: case 0x18: case 0x10: case 0x16: case 0x1E: len = 1; break;
+            case 0x07: case 0x17: g_geo_held.live.mode = LA(0); len = 1; break;
+            case 0x16: { uint32_t a = LA(0); memcpy(&g_geo_held.live.lod, &a, 4); len = 1; break; }
+            /* the raster keeps (word >> 8) << 8 (model2_v.cpp geo_zsort_mode) */
+            case 0x08: case 0x18: g_geo_held.live.zadj = LA(0) & 0xFFFFFF00u; len = 1; break;
+            case 0x10: case 0x1E: len = 1; break;
             case 0x09: case 0x19: case 0x0D: len = 2; break;
             case 0x0A: case 0x1A: case 0x0C: case 0x1C: len = 3; break;
             case 0x0B: case 0x1B: len = 12; break;
             case 0x1D: len = 2 + 3 * LA(1); break;
+            case 0x0E: len = 33 + 3 * LA(32); break;      /* geo_test */
             case 0x02: case 0x12: len = geodl_direct_len(L, nw, p); break;
             case 0x0F: case 0x1F: len = 0; guard = 0x8000u; break;   /* END */
             default: break;
@@ -526,6 +585,7 @@ static inline void geodl_publish(uint32_t rstart) {
     if (!g_geo.buff) return;
     uint32_t *back = (g_geodl_snap == g_geodl_snaps[0]) ? g_geodl_snaps[1] : g_geodl_snaps[0];
     const uint32_t *live = (const uint32_t *)(const void *)g_geo.buff;
+    g_geo_held.pub[back == g_geodl_snaps[0] ? 0 : 1] = g_geo_held.live;
     if (g_geodl_full_snap) {
         /* geo3d_scan_displaylist walks its own format: give it all of bufferram */
         memcpy(back, live, sizeof g_geodl_snaps[0]);
@@ -538,6 +598,23 @@ static inline void geodl_publish(uint32_t rstart) {
     g_geodl_snap        = back;
     g_geodl_snap_seq++;
     g_geodl_snap_ready  = 1;
+}
+
+/* Both published lists empty, list 0 in front: what a fresh process has. A
+ * board reset leaves them as the last lists drawn, so two processes that ran
+ * differently before a GGPO cold boot would hash them differently ever after
+ * (which buffer is in front is the parity of every list published since the
+ * process began). Emu mutex held; the renderer copes as it does with a load. */
+static inline void geodl_snaps_clear(void) {
+    memset(g_geodl_snaps, 0, sizeof g_geodl_snaps);
+    memcpy(&g_geo_pub[0], &g_geo_live, sizeof g_geo_live);
+    memcpy(&g_geo_pub[1], &g_geo_live, sizeof g_geo_live);
+    memset(&g_geo_held, 0, sizeof g_geo_held);   /* the game sends them again as it boots */
+    g_geodl_snap        = g_geodl_snaps[0];
+    g_geo_rs            = &g_geo_pub[0];
+    g_geodl_snap_rstart = 0;
+    g_geodl_snap_ready  = 0;
+    g_geodl_snap_seq++;
 }
 
 /* GEO base (0x800000). */
@@ -568,9 +645,14 @@ static uint32_t geo_read_cb(mem_region_t *r, uint32_t addr, int size) {
     uint32_t off = addr - GEO_BASE;
     if (off == 0x2008) return g_geo.wstart;
     if (off == 0x3008) return g_geo.rstart;
-    uint32_t v = 0;
-    if (r->data && off + 4 <= r->size) memcpy(&v, r->data + off, 4);
-    return size == 1 ? (v & 0xFF) : size == 2 ? (v & 0xFFFF) : v;
+    (void)r; (void)size;
+    return 0;                                   /* MAME geo_r: anything else reads 0 */
+}
+
+/* MAME geo_prg_r: the geometry FIFO reads all ones. */
+static uint32_t geo_program_read_cb(mem_region_t *r, uint32_t addr, int size) {
+    (void)r; (void)addr;
+    return size == 1 ? 0xFFu : size == 2 ? 0xFFFFu : 0xFFFFFFFFu;
 }
 
 /* GEO_PROGRAM (0x804000): raw list words. */
@@ -624,10 +706,8 @@ static inline uint8_t *mem_region_fresh(uint8_t *have, size_t size) {
 static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size) {
     uint8_t *main_data   = bus->main_data;
     uint8_t *xtra_data   = bus->xtra_data;
-    uint8_t *vid_ext_ram = bus->vid_ext_ram;
     uint8_t *texram0     = bus->texram0;
     uint8_t *texram1     = bus->texram1;
-    uint8_t *framebuffer = bus->framebuffer;
 
     backup_ram_before_reset(bus->back);   /* a reset keeps the battery's contents */
     memset(bus, 0, sizeof(*bus));
@@ -636,10 +716,8 @@ static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t ro
      * these read as NULL, which the atlas upload already treats as "no sheet". */
     bus->main_data   = main_data;
     bus->xtra_data   = xtra_data;
-    bus->vid_ext_ram = vid_ext_ram;
     bus->texram0     = texram0;
     bus->texram1     = texram1;
-    bus->framebuffer = framebuffer;
     bus->rom = rom_data;
     bus->rom_size = rom_size;
     /* Every (re)init is new content: start past any generation a consumer
@@ -652,11 +730,9 @@ static inline void mem_bus_clear(memory_bus_t *bus, uint8_t *rom_data, size_t ro
 static inline int mem_alloc_regions(memory_bus_t *bus) {
     bus->main_data   = mem_region_fresh(bus->main_data,   MAIN_DATA_SIZE);
     bus->xtra_data   = mem_region_fresh(bus->xtra_data,   XTRA_DATA_SIZE);
-    bus->vid_ext_ram = mem_region_fresh(bus->vid_ext_ram, VID_EXT_RAM_SIZE);
     bus->texram0     = mem_region_fresh(bus->texram0,     TEXRAM0_SIZE);
     bus->texram1     = mem_region_fresh(bus->texram1,     TEXRAM1_SIZE);
-    bus->framebuffer = mem_region_fresh(bus->framebuffer, FRAMEBUFFER_SIZE);
-    if (!bus->main_data || !bus->xtra_data || !bus->vid_ext_ram || !bus->texram0 || !bus->texram1 || !bus->framebuffer) {
+    if (!bus->main_data || !bus->xtra_data || !bus->texram0 || !bus->texram1) {
         LOG_ERROR("mem: heap allocation failed");
         return 0;
     }
@@ -680,12 +756,13 @@ static inline void mem_add_regions(memory_bus_t *bus, uint8_t *rom_data, size_t 
     { mem_region_t *r = mem_add_region(bus, "GEO", GEO_BASE, GEO_SIZE, bus->geo, 0);
       if (r) { r->read_cb = geo_read_cb; r->write_cb = geo_write_cb; } }
     { mem_region_t *r = mem_add_region(bus, "GEO_PROGRAM", GEO_PROGRAM_BASE, GEO_PROGRAM_SIZE, bus->geo_program, 0);
-      if (r) r->write_cb = geo_program_write_cb; }
+      if (r) { r->read_cb = geo_program_read_cb; r->write_cb = geo_program_write_cb; } }
     mem_add_region(bus, "GEO_CMD",         GEO_CMD_BASE,         GEO_CMD_SIZE,         bus->geo_cmd,       0);
     { mem_region_t *r = mem_add_region(bus, "COPROGRAM", COPROGRAM_BASE, COPROGRAM_SIZE, bus->coprogram, 0);
       if (r) { r->read_cb = coprogram_read_cb; r->write_cb = coprogram_write_cb; } }
     mem_add_region(bus, "COPRO_SHARC_IOP", COPRO_SHARC_IOP_BASE, COPRO_SHARC_IOP_SIZE, bus->copro_sharc,   0);
     mem_add_region(bus, "BUFF_RAM",        BUFF_RAM_BASE,        BUFF_RAM_SIZE,        bus->buff_ram,      0);
+    mem__add_base_extras(bus);
     /* Wire BUFF_RAM into the SHARC as DM[0x01400000]: the i960 writes animation
      * blobs to BUFF_RAM (0x00900000); 0x25004A4A reads them by word offset.
      * cop_reset() zeroed the field, so set it here (after reset, after alloc). */
@@ -713,15 +790,22 @@ static inline void mem_add_regions(memory_bus_t *bus, uint8_t *rom_data, size_t 
     mem_add_region(bus, "TILE_MIRROR",     TILE_BASE + 0x10000u, 0x10000u,             bus->tile,          0);
     mem_add_region(bus, "TILE",            TILE_BASE,            TILE_SIZE,            bus->tile,          0);
     mem_add_region(bus, "TMAPGFX",         TMAPGFX_BASE,         TMAPGFX_SIZE,         bus->tmapgfx,       0);
-    mem_add_region(bus, "VID_EXT_RAM",     VID_EXT_RAM_BASE,     VID_EXT_RAM_SIZE,     bus->vid_ext_ram,   0);
+    /* The whole tile block repeats at 0x01100000 (MAME: tile RAM mirror
+     * 0x110000, the sync registers and the character RAM mirror 0x100000), and
+     * nothing answers from 0x01200000 to the palette. This span used to be 7 MB
+     * of RAM that no game was seen to touch, and every rewind and rollback
+     * snapshot copied it (Pinboard #590). */
+    mem_add_region(bus, "TILE_MIRROR",     TILE_HI_BASE + 0x10000u, 0x10000u,          bus->tile,          0);
+    mem_add_region(bus, "TILE",            TILE_HI_BASE,         TILE_SIZE,            bus->tile,          0);
+    mem_add_region(bus, "TMAPGFX",         TMAPGFX_HI_BASE,      TMAPGFX_SIZE,         bus->tmapgfx,       0);
     mem_add_region(bus, "PALETTE",         PALETTE_BASE,         PALETTE_SIZE,         bus->palette,       0);
     mem_add_region(bus, "COLORXLAT",       COLORXLAT_BASE,       COLORXLAT_SIZE,       bus->colorxlat,     0);
     mem_add_region(bus, "ZCLIP_3D",        ZCLIP_3D_BASE,        ZCLIP_3D_SIZE,        bus->zclip_3d,      0);
     mem_add_region(bus, "IO",              IO_BASE,              IO_SIZE,              bus->io,            0);
     mem_add_region(bus, "SERIAL",          SERIAL_BASE,          SERIAL_SIZE,          bus->serial,        0);
     mem_add_region(bus, "BACK",            BACK_BASE,            BACK_SIZE,            bus->back,          0);
-    mem_add_region(bus, "MAIN_DATA",       MAIN_DATA_BASE,       MAIN_DATA_SIZE,       bus->main_data,     0);
-    mem_add_region(bus, "XTRA_DATA",       XTRA_DATA_BASE,       XTRA_DATA_SIZE,       bus->xtra_data,     0);
+    mem_add_region(bus, "MAIN_DATA",       MAIN_DATA_BASE,       MAIN_DATA_SIZE,       bus->main_data,     1);
+    mem_add_region(bus, "XTRA_DATA",       XTRA_DATA_BASE,       XTRA_DATA_SIZE,       bus->xtra_data,     1);
     mem_add_region(bus, "UNKNOWN_VID",     UNKNOWN_VID_BASE,     UNKNOWN_VID_SIZE,     bus->unknown_vid,   0);
     mem_add_region(bus, "TEXRAM0_A",       TEXRAM0_ALIAS_BASE,   TEXRAM0_SIZE,         bus->texram0,       0);
     mem_add_region(bus, "TEXRAM0",         TEXRAM0_BASE,         TEXRAM0_SIZE,         bus->texram0,       0);
@@ -730,8 +814,11 @@ static inline void mem_add_regions(memory_bus_t *bus, uint8_t *rom_data, size_t 
     mem_add_region(bus, "TEXRAM1_M",       TEXRAM1_MIRROR_BASE,  TEXRAM1_SIZE,         bus->texram1,       0);
     mem_add_region(bus, "LUMA",            LUMA_BASE,            LUMA_SIZE,            bus->luma,          0);
     mem_add_region(bus, "LUMA2",           LUMA2_BASE,           LUMA2_SIZE,           bus->luma2,         0);
-    mem_add_region(bus, "FRAMEBUFFER",     FRAMEBUFFER_BASE,     FRAMEBUFFER_SIZE,     bus->framebuffer,   0);
     mem_add_region(bus, "IAC",             IAC_BASE,             IAC_SIZE,             bus->iac,           0);
+    for (uint32_t base = COMM_STATUS_BASE; base <= COMM_STATUS_BASE + 0x10000u; base += 0x10000u) {
+        mem_region_t *r = mem_add_region(bus, "COMM", base, COMM_STATUS_SIZE, NULL, 0);
+        if (r) { r->read_cb = comm_status_read_cb; r->write_cb = mem_ignore_write_cb; }
+    }
 }
 
 /* Each region's burst flag and change tracking, by name. */
@@ -740,6 +827,7 @@ static inline void mem_region_flags(memory_bus_t *bus) {
     static const char *const no_burst[] = {
         "GEO", "GEO_PROGRAM", "GEO_CMD", "COPROGRAM", "COPRO_SHARC_IOP", "COPRO_CTL",
         "MIDI", "CPU_CTRL", "IRQ", "TIMERS", "ZCLIP_3D", "IO", "UNKNOWN_VID",
+        "COMM",
     };
     for (int i = 0; i < bus->region_count; i++)
         for (size_t k = 0; k < sizeof no_burst / sizeof no_burst[0]; k++)
@@ -790,6 +878,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
 
     cop_reset();   /* clears g_cop / g_sharc and resets rot[] to identity */
     irqt_reset();  /* timers idle (0xFFFFF), no interrupt pending, vblank phase 0 */
+    eeprom_power_on();   /* erased, the same on every machine (eeprom_93c46.h) */
 
     if (!mem_alloc_regions(bus)) return 0;
 
@@ -806,10 +895,8 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
 static inline void mem_shutdown(memory_bus_t *bus) {
     free(bus->main_data);   bus->main_data   = NULL;
     free(bus->xtra_data);   bus->xtra_data   = NULL;
-    free(bus->vid_ext_ram); bus->vid_ext_ram = NULL;
     free(bus->texram0);     bus->texram0     = NULL;
     free(bus->texram1);     bus->texram1     = NULL;
-    free(bus->framebuffer); bus->framebuffer = NULL;
 }
 
 /* ---- Lookup -------------------------------------------------------------- */
@@ -826,7 +913,7 @@ static inline void mem_shutdown(memory_bus_t *bus) {
  * backwards and letting each region overwrite the pages it reaches leaves every
  * page with its earliest region: that region's if it covers the whole page,
  * MIXED if it covers only part (the rest belongs to a later region or to none). */
-static MEM_NOINLINE void mem_build_pages(memory_bus_t *bus) {
+static void mem_build_region_pages(memory_bus_t *bus) {
     memset(bus->page, MEM_PAGE_NONE, sizeof bus->page);
     for (int i = bus->region_count - 1; i >= 0; i--) {
         const mem_region_t *r = &bus->regions[i];
@@ -838,8 +925,11 @@ static MEM_NOINLINE void mem_build_pages(memory_bus_t *bus) {
             bus->page[p] = whole ? (uint8_t)(i + 1) : MEM_PAGE_MIXED;
         }
     }
-    /* The direct pages: exactly the pages mem_find_region answers with one
-     * region, and only where that region's read (write) is a plain buffer access. */
+}
+
+/* The direct pages: exactly the pages mem_find_region answers with one
+ * region, and only where that region's read (write) is a plain buffer access. */
+static void mem_build_direct_pages(memory_bus_t *bus) {
     memset(bus->rd_page, 0, sizeof bus->rd_page);
     memset(bus->wr_page, 0, sizeof bus->wr_page);
     for (uint32_t p = 0; p < (1u << 16); p++) {
@@ -851,6 +941,11 @@ static MEM_NOINLINE void mem_build_pages(memory_bus_t *bus) {
         if (!r->read_cb) bus->rd_page[p] = at;
         if (!r->write_cb && !r->readonly && !r->change_gen && !r->dirty_kb) bus->wr_page[p] = at;
     }
+}
+
+static MEM_NOINLINE void mem_build_pages(memory_bus_t *bus) {
+    mem_build_region_pages(bus);
+    mem_build_direct_pages(bus);
     bus->maps_live = 1;
     bus->page_ok = 1;
 }

@@ -1,6 +1,10 @@
 name: pages
 
-# The web build (docs/WEB-PORT.md) -> GitHub Pages -> https://play.sonicthefighte.rs
+# The web build (docs/WEB-PORT.md) -> GitHub Pages -> https://arcade.sonicthefighte.rs
+# Every game is on that one site: the front page (home.html) has a box per game,
+# and ?game=ID&profile=PROFILE plays one (web/site/m2hle-games.js, Pinboard #881).
+# play.sonicthefighte.rs and srally.sonicthefighte.rs are aliases that redirect
+# to it (web/aliases/README.md).
 #
 # Every push builds the Emscripten frontend, runs it in headless Chrome, and only
 # then publishes build_web/site/ as the whole website. There is no gh-pages
@@ -16,8 +20,8 @@ name: pages
 #   Settings > Environments > github-pages > Deployment branches: allow `master`
 #     (the environment is created restricted to the default branch, and it was
 #     set to `wasm` while the web frontend lived on that branch)
-#   Settings > Pages > Custom domain: play.sonicthefighte.rs, then Enforce HTTPS
-#   DNS: CNAME  play -> biggestsonicfan.github.io   (DNS only, not proxied, at
+#   Settings > Pages > Custom domain: arcade.sonicthefighte.rs, then Enforce HTTPS
+#   DNS: CNAME  arcade -> biggestsonicfan.github.io   (DNS only, not proxied, at
 #     least until GitHub has issued the certificate)
 # A CNAME file in the site would be ignored: with an Actions deployment the
 # custom domain lives in the settings.
@@ -53,7 +57,7 @@ jobs:
       # The web frontend has no ImGui, so it needs two submodules and no Python.
       # Tracks M2HLE_SUBMODULE_PATHS for M2HLE_WEB in CMakeLists.txt.
       - name: Fetch build submodules
-        run: git submodule update --init vendor/sokol vendor/miniz vendor/stb
+        run: git submodule update --init vendor/sokol vendor/miniz vendor/stb vendor/ggpo vendor/lua
 
       # Pinned on purpose. A toolchain bump can change float code generation, and
       # netplay needs two players' builds to compute the same frames
@@ -118,7 +122,7 @@ jobs:
         run: |
           node tools/web-serve.mjs --site build_web/site --port 8080 &
           sleep 2
-          node tools/web-smoke.mjs --url http://localhost:8080/ --seconds 8 \
+          node tools/web-smoke.mjs --url 'http://localhost:8080/?game=sfight' --seconds 8 \
             --expect-log "game_render_init: complete" --shot smoke.png
 
       - uses: actions/upload-artifact@v7

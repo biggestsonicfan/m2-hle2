@@ -28,6 +28,9 @@
 /* ---- Hook addresses ----------------------------------------------------- */
 
 #define FVIPERS_HOOK_ADDR_FRAME_PACE        0x00011C80
+#define FVIPERS_HOOK_ADDR_COUNTRY_DEFAULT   0x0005E4D4
+#define FVIPERS_HOOK_ADDR_SETTINGS_LOADED   0x000046F4
+#define FVIPERS_HOOK_ADDR_VS_REMATCH        0x0000EAC0
 
 /* ---- ROM loader --------------------------------------------------------- */
 
@@ -212,14 +215,74 @@ static int fvipers_hook_frame_pace(i960_cpu_t *cpu, memory_bus_t *bus) {
  * STF's, writing outcodes to the same 0x50E000 scratch for ground_upper_disp
  * and sub_238E4 to AND, not returning a verdict in g0. */
 
+/*
+ * The region (Pinboard #942, #1025). COUNTRY is the test menu's byte at backup
+ * +0x3350 (0 Japan, 1 USA, 2 Export: the menu at 0x59AB8 wraps it in 0..2);
+ * noclip's fvobjects.js reads it for the signs and the trucks' cabs, 0 Japan's
+ * and anything else the overseas model.
+ *
+ * At boot (0x42E8..0x4518) the backup RAM at 0x1D00000 is checked: its header
+ * at +0x3308 and version 18 at +0x3306, then the settings block from +0x3340
+ * (29 bytes) against the sum at +0x3302. A broken block gets the factory
+ * settings (0x5E358) and a new sum; a bad header gets every initialiser
+ * ("INITIALIZED.", 0x4470). Either way all of it is copied to work RAM at
+ * 0x599000 (0x44E4) and the boot goes on at 0x46F4, which points 0x50016C,
+ * the base every `ldob 0x3350(rN)` reads the country from, at that copy.
+ *
+ * country_default (0x5E4D4, in the factory settings): the two instructions
+ * before it store 0 (Japan) in the backup's and the working copy's COUNTRY.
+ * Put g_region in both. Japan is the ROM's default and MAME's, so --region
+ * japan (the graders') leaves the board as it was.
+ *
+ * settings_loaded (0x46F4): with g_region_over_saved (the web's --region=, or
+ * --region-over-saved), put g_region in the working copy over the one a saved
+ * block brought. The backup keeps its own, and its sum, until the test menu
+ * next writes it.
+ */
+#define FVIPERS_BACKUP_COUNTRY  0x01D03350u
+#define FVIPERS_WORK_COUNTRY    0x0059C350u
+
+static int fvipers_hook_country_default(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    mem_write8(bus, FVIPERS_BACKUP_COUNTRY, (uint8_t)g_region);
+    mem_write8(bus, FVIPERS_WORK_COUNTRY, (uint8_t)g_region);
+    return 1;
+}
+
+static uint32_t fvipers_country(memory_bus_t *bus) { (void)bus; return FVIPERS_WORK_COUNTRY; }
+
+static int fvipers_hook_settings_loaded(i960_cpu_t *cpu, memory_bus_t *bus) {
+    (void)cpu;
+    if (g_region_over_saved) mem_write8(bus, fvipers_country(bus), (uint8_t)g_region);
+    return 1;
+}
+
+/*
+ * vs_rematch (0xEAC0, vs_game_continue_check_ex+0x18): VS mode's rematch, the
+ * twin of sfight.h's sfight_hook_vs_rematch. Sega's PC emulator for FV
+ * (fv-pxd-w64, YAMP's docs/fv-hle-hooks.md, its table index 36) traps this
+ * instruction, `ldob 0x500065, ...`, in VS mode: it ORs 5 into both players'
+ * flag words (0x500248 / 0x50024C, bits 0 and 2) and jumps to 0xF7BC, the
+ * ROM's own "both players continue" path, which sets the flags again and goes
+ * back to character select with both players in. With VS mode off the
+ * instruction runs as it always has, the winner stays on against the CPU.
+ */
+static int fvipers_hook_vs_rematch(i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!g_vs_mode) return 1;
+    mem_write8(bus, 0x00500248, (uint8_t)(mem_read8(bus, 0x00500248) | 5u));
+    mem_write8(bus, 0x0050024C, (uint8_t)(mem_read8(bus, 0x0050024C) | 5u));
+    cpu->sfr.ip = 0x0000F7BC;
+    return 0;
+}
+
 /* ---- Profile object ----------------------------------------------------- */
 
 /*
- * Active hooks: the 1 address confirmed above. STF's _700000_loop and
- * co_processor_error_hang have no FV addresses yet; sfight.h has the handlers
- * to port when they are found.
+ * Active hooks: the frame edge, the region's two and VS mode's. STF's
+ * co_processor_error_hang has no FV address yet; sfight.h has the handler to
+ * port when it is found.
  */
-#define FVIPERS_HOOK_COUNT 1
+#define FVIPERS_HOOK_COUNT 4
 
 static const game_profile_t fvipers_profile = {
     .id               = "fvipers",
@@ -231,13 +294,18 @@ static const game_profile_t fvipers_profile = {
     .hook_count       = FVIPERS_HOOK_COUNT,
     .hooks = {
         { FVIPERS_HOOK_ADDR_FRAME_PACE,        fvipers_hook_frame_pace,       "frame_pace"           },
+        { FVIPERS_HOOK_ADDR_COUNTRY_DEFAULT,   fvipers_hook_country_default,  "country_default"      },
+        { FVIPERS_HOOK_ADDR_SETTINGS_LOADED,   fvipers_hook_settings_loaded,  "settings_loaded"      },
+        { FVIPERS_HOOK_ADDR_VS_REMATCH,        fvipers_hook_vs_rematch,       "vs_rematch"           },
     },
     .input = {
         /* read_sw (0x229C) copies the pad to INTERUPT_FLAGS_HELD (0x500700) and
-         * INTERUPT_FLAGS_MOMENTARY (0x500704), confirmed in IDA. The credits
-         * are not found yet. */
+         * INTERUPT_FLAGS_MOMENTARY (0x500704), confirmed in IDA. The bits are
+         * MAME's INPUT_PORTS_START(vf2), which fvipers uses: IN0 the cabinet
+         * (COIN1 0x01, COIN2 0x02, TEST 0x04, SERVICE1 0x08, START 0x10/0x20),
+         * IN1 player 1 and IN2 player 2 (Punch 0x01, Kick 0x02, Guard 0x04,
+         * down 0x10, up 0x20, right 0x40, left 0x80). */
         .bits = {
-            /* Same I/O board as STF — bit masks are likely identical. */
             [GAME_INPUT_P1_UP]    = 0x00002000,
             [GAME_INPUT_P1_DOWN]  = 0x00001000,
             [GAME_INPUT_P1_LEFT]  = 0x00008000,
@@ -246,6 +314,7 @@ static const game_profile_t fvipers_profile = {
             [GAME_INPUT_P1_B2]    = 0x00000200,
             [GAME_INPUT_P1_B3]    = 0x00000400,
             [GAME_INPUT_P1_START] = 0x00000010,
+            [GAME_INPUT_P1_COIN]  = 0x00000001,
             [GAME_INPUT_P2_UP]    = 0x00200000,
             [GAME_INPUT_P2_DOWN]  = 0x00100000,
             [GAME_INPUT_P2_LEFT]  = 0x00800000,
@@ -254,23 +323,29 @@ static const game_profile_t fvipers_profile = {
             [GAME_INPUT_P2_B2]    = 0x00020000,
             [GAME_INPUT_P2_B3]    = 0x00040000,
             [GAME_INPUT_P2_START] = 0x00000020,
-            [GAME_INPUT_SERVICE]  = 0x00000004,
+            [GAME_INPUT_P2_COIN]  = 0x00000002,
+            [GAME_INPUT_TEST]     = 0x00000004,
+            [GAME_INPUT_SERVICE]  = 0x00000008,
         },
     },
     .quirks = {
         /* Read off the FV ROMs (Pinboard #254). The model table sits where
          * STF's does, at 0xE0004 in mpr-18614/18615, 16 bytes an entry, and the
-         * word before it is its length: 0x1524 = 5412 (STF's says 0x13EF =
-         * 5103). The mesh word is the polygon ROM's word address on the bus
+         * word before it is its last index: 0x1524, so 5413 entries (noclip's
+         * count; docs/NOCLIP-SYNC.md). The mesh word is the polygon ROM's word address on the bus
          * (0x02000000 up), as in STF: all 3711 non-zero ones decode to offsets
          * 0x10-0x9E6104, ascending, inside the 12 MB polygon ROM. */
         .mesh_ptr_subtract  = 0x02000010,
         .mesh_ptr_add       = 0x10,
         .model_table_offset = 0x000E0004,
-        .model_table_count  = 5412,
+        .model_table_count  = 5413,
         .camera_struct_addr = 0x00515598,   /* eye x,y,z (g13+0x18) — confirmed MAME + IDA */
         .camera_angle_addr  = 0x00515584,   /* yaw = high16 (g13+0x06); camera_control ldos/stos 6(g13) */
         .irq_vectors        = true,         /* handlers from the ROM's own table */
+        .enable_68k_sound   = true,
+        .vs_rematch         = true,         /* fvipers_hook_vs_rematch */
+        .region = { .kind = REGION_HOOKED, .factory_default = "country_default",
+                    .over_saved = "settings_loaded", .country = fvipers_country },
     },
 };
 

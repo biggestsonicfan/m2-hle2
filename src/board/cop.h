@@ -44,9 +44,7 @@ typedef struct {
     uint32_t args[COP_ARGS_MAX];
     int      args_received;
 
-    /* Raw command-stream ring buffer for the polygon decoder (geo3d.h).
-     * Size must be a power of 2 and ≥ GEO_CAPTURE_SIZE. */
-    uint32_t geo_capture[GEO_CAPTURE_SIZE];
+    /* Where the raw command-stream ring (g_cop_capture, below) is. */
     int      geo_capture_head;
     int      geo_capture_count;
 
@@ -64,7 +62,7 @@ typedef struct {
     /* COPRO_CTL1 (0x980000), for its upload bit; set by mem_init. While bit 31
      * is up, a FIFO word is a halfword of the SHARC's boot image, not a
      * command (MAME model2b_state::copro_fifo_w). */
-    const uint8_t *ctl;
+    union { const uint8_t *ctl; uint64_t ctl_w; };   /* 8 bytes on every host (savestate.h) */
     uint32_t       upload_words;
 
     /* Reads of an empty reply FIFO. On the board the i960 would stall there
@@ -74,6 +72,13 @@ typedef struct {
 } cop_state_t;
 
 static cop_state_t g_cop = {0};
+
+/* The raw COPROGRAM write stream, for the bridge's get_geo_captures and
+ * dump_geo_stream. It is a debugging record, not board state, so it lives
+ * outside g_cop: a savestate and every rollback / rewind snapshot copies g_cop,
+ * and this 1 MB ring was most of what changed from one frame to the next
+ * (Pinboard #590). Power of 2 (the ring is masked with SIZE-1). */
+static uint32_t g_cop_capture[GEO_CAPTURE_SIZE];
 
 /* sharc_exec.h defines sharc_args_for_cmd / sharc_exec; it transitively
  * includes sharc.h which defines g_sharc and the reply FIFO. */
@@ -87,9 +92,92 @@ static cop_state_t g_cop = {0};
  * argument, 0x30000000 a word the command answered. NULL when not capturing. */
 static void (*g_cop_tap)(uint32_t tag, uint32_t val) = NULL;
 
+/* --gems-cop (gems.h) answers commands with the Sonic Gems Collection's C
+ * instead of sharc_exec. Each is NULL unless it is on: the argument count of a
+ * command word (GEMS_COP_NOT_MINE: sharc_exec takes it; COP_ARGS_STREAM
+ * for the afterimage stream), the command with
+ * its arguments, and the afterimage stream's begin / feed. */
+#define GEMS_COP_NOT_MINE (-2)
+static int  (*g_gems_cop_args)(uint32_t cmd) = NULL;
+static void (*g_gems_cop_exec)(uint32_t cmd, const uint32_t *args, int n) = NULL;
+static void (*g_gems_cop_stream_begin)(void) = NULL;
+static bool (*g_gems_cop_stream_feed)(uint32_t w) = NULL;
+static void (*g_gems_cop_reset)(void) = NULL;
+static bool g_cop_gems_cmd = false;   /* the command in flight is Gems' */
+
+static inline void cop_exec(uint32_t cmd, const uint32_t *args, int n) {
+    if (g_cop_gems_cmd) g_gems_cop_exec(cmd, args, n);
+    else                sharc_exec(cmd, args, n);
+}
+
 static inline void cop_tap_replies(void) {
     if (!g_cop_tap) return;
     for (int k = 0; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
+}
+
+/* Run a command whose arguments are all in, timed and tapped. */
+static inline void cop_run(uint32_t cmd, const uint32_t *args, int n) {
+    int64_t t0 = emu_times_cop_begin();
+    int zone = hprof_enter(HPROF_COP);
+    cop_exec(cmd, args, n);
+    hprof_leave(zone);
+    emu_times_cop_end(t0);
+    cop_tap_replies();
+}
+
+static inline void cop_capture(uint32_t val) {
+    g_cop_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
+    g_cop.geo_capture_head++;
+    if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
+        g_cop.geo_capture_count++;
+}
+
+/* An argument of a fixed-length command: most words are one. */
+static inline void cop_take_arg(uint32_t val) {
+    if (g_cop_tap) g_cop_tap(0x20000000u, val);
+    if (g_cop.args_received < COP_ARGS_MAX)
+        g_cop.args[g_cop.args_received++] = val;
+    if (--g_cop.args_needed == 0) {
+        cop_run(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
+        g_cop.cur_cmd       = 0;
+        g_cop.args_received = 0;
+    }
+}
+
+/* A variable-length command: the handler consumes words until it says it
+ * is done, pushing its answers as it goes so the i960's loop finds each
+ * one waiting where the board would have left it. */
+static inline void cop_take_stream(uint32_t val) {
+    if (g_cop_tap) g_cop_tap(0x20000000u, val);
+    int before = g_sharc.reply_count;
+    int zone   = hprof_enter(HPROF_COP);
+    bool done  = g_cop_gems_cmd ? g_gems_cop_stream_feed(val) : sharc_zanzou_feed(val);
+    hprof_leave(zone);
+    if (g_cop_tap)
+        for (int k = before; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
+    if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
+}
+
+/* A command word: who answers it and how many words follow. */
+static inline void cop_take_cmd(uint32_t val) {
+    if (g_cop_tap) g_cop_tap(0x21000000u, val);
+    g_cop.cur_cmd       = val;
+    g_cop.last_cmd      = val;
+    int gems_n = g_gems_cop_args ? g_gems_cop_args(val) : GEMS_COP_NOT_MINE;
+    g_cop_gems_cmd      = gems_n != GEMS_COP_NOT_MINE;
+    g_cop.args_needed   = g_cop_gems_cmd ? gems_n : sharc_args_for_cmd(val);
+    g_cop.args_received = 0;
+    if (g_cop.args_needed == COP_ARGS_STREAM) {
+        g_sharc.reply_count = 0;
+        g_sharc.reply_idx   = 0;
+        if (g_cop_gems_cmd) g_gems_cop_stream_begin();
+        else                sharc_zanzou_begin();
+        return;
+    }
+    if (g_cop.args_needed == 0) {
+        cop_run(val, NULL, 0);
+        g_cop.cur_cmd = 0;
+    }
 }
 
 /* Called for every 32-bit write to the COPROGRAM region. */
@@ -103,64 +191,10 @@ static inline void cop_write(uint32_t val) {
         return;
     }
 
-    g_cop.geo_capture[g_cop.geo_capture_head & (GEO_CAPTURE_SIZE - 1)] = val;
-    g_cop.geo_capture_head++;
-    if (g_cop.geo_capture_count < GEO_CAPTURE_SIZE)
-        g_cop.geo_capture_count++;
-
-    /* An argument of a fixed-length command: most words are one. */
-    if (g_cop.args_needed > 0) {
-        if (g_cop_tap) g_cop_tap(0x20000000u, val);
-        if (g_cop.args_received < COP_ARGS_MAX)
-            g_cop.args[g_cop.args_received++] = val;
-        if (--g_cop.args_needed == 0) {
-            int64_t t0 = emu_times_cop_begin();
-            int zone = hprof_enter(HPROF_COP);
-            sharc_exec(g_cop.cur_cmd, g_cop.args, g_cop.args_received);
-            hprof_leave(zone);
-            emu_times_cop_end(t0);
-            cop_tap_replies();
-            g_cop.cur_cmd       = 0;
-            g_cop.args_received = 0;
-        }
-        return;
-    }
-
-    /* A variable-length command: the handler consumes words until it says it
-     * is done, pushing its answers as it goes so the i960's loop finds each
-     * one waiting where the board would have left it. */
-    if (g_cop.args_needed == COP_ARGS_STREAM) {
-        if (g_cop_tap) g_cop_tap(0x20000000u, val);
-        int before = g_sharc.reply_count;
-        int zone   = hprof_enter(HPROF_COP);
-        bool done  = sharc_zanzou_feed(val);
-        hprof_leave(zone);
-        if (g_cop_tap)
-            for (int k = before; k < g_sharc.reply_count; k++) g_cop_tap(0x30000000u, g_sharc.reply[k]);
-        if (done) { g_cop.args_needed = 0; g_cop.cur_cmd = 0; }
-        return;
-    }
-
-    if (g_cop_tap) g_cop_tap(0x21000000u, val);
-    g_cop.cur_cmd       = val;
-    g_cop.last_cmd      = val;
-    g_cop.args_needed   = sharc_args_for_cmd(val);
-    g_cop.args_received = 0;
-    if (g_cop.args_needed == COP_ARGS_STREAM) {
-        g_sharc.reply_count = 0;
-        g_sharc.reply_idx   = 0;
-        sharc_zanzou_begin();
-        return;
-    }
-    if (g_cop.args_needed == 0) {
-        int64_t t0 = emu_times_cop_begin();
-        int zone = hprof_enter(HPROF_COP);
-        sharc_exec(val, NULL, 0);
-        hprof_leave(zone);
-        emu_times_cop_end(t0);
-        cop_tap_replies();
-        g_cop.cur_cmd = 0;
-    }
+    cop_capture(val);
+    if (g_cop.args_needed > 0)                    cop_take_arg(val);
+    else if (g_cop.args_needed == COP_ARGS_STREAM) cop_take_stream(val);
+    else                                          cop_take_cmd(val);
 }
 
 /* A game frame ended: the words captured since the last edge are that frame's
@@ -204,12 +238,14 @@ static inline void cop_reset(void) {
     const uint8_t *ctl = g_cop.ctl;       /* the bus's, not COP state */
     memset(&g_cop, 0, sizeof(g_cop));
     g_cop.ctl = ctl;
+    g_cop_gems_cmd = false;
     g_zz.phase = 4;                       /* no stream in flight */
     memset(&g_sharc, 0, sizeof(g_sharc));
     sharc_rot_identity();
     /* firmware init (cpres1 PM 0x20080..): DM[0x30300..2] = 0, 1.0, 2.0 */
     g_sharc.dm[0x301] = 0x3F800000u;
     g_sharc.dm[0x302] = 0x40000000u;
+    if (g_gems_cop_reset) g_gems_cop_reset();
 }
 
 #endif /* COP_H */

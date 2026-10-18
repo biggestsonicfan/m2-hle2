@@ -1,6 +1,6 @@
 # The web gateway
 
-Lets the browser build at **play.sonicthefighte.rs** reach an RPCN server: ours at
+Lets the browser build at **arcade.sonicthefighte.rs** reach an RPCN server: ours at
 **rpcn.sonicthefighte.rs**, or the official one at **np.rpcs3.net**, whichever the
 player picked. A browser tab cannot open TCP or UDP sockets, so each web player
 opens two WebSockets here instead:
@@ -11,8 +11,9 @@ opens two WebSockets here instead:
 | `/gw/dgram` (`/gw/dgram/<name>`) | One UDP socket on the droplet's public address, plus a virtual address from a private pool. One WebSocket message is one datagram: `[ip: 4][port: u16 BE][payload]`. |
 
 The desktop build in a container uses `/gw/dgram` too (`src/net/ws_relay.h`): behind
-Docker Desktop's NAT nobody outside can reach it directly. It sends the play site's
-`Origin`.
+Docker Desktop's NAT nobody outside can reach it directly. It sends the web site's
+`Origin` (play.sonicthefighte.rs before Pinboard #881, so `origins` keeps that
+name next to arcade.sonicthefighte.rs).
 
 Browser-to-browser traffic is routed inside the gateway through the virtual
 addresses; browser-to-desktop goes out of the session's real UDP socket. The
@@ -110,7 +111,7 @@ Everything here is the owner's to do. Order matters only for step 1.
 6. **systemd**: `m2hle-gateway.service` from here. The header of that file has the
    three commands.
 7. **Check it**: `curl https://rpcn.sonicthefighte.rs/gw/health` answers
-   `{"ok":true,...}`. Then open play.sonicthefighte.rs, load the game, and press
+   `{"ok":true,...}`. Then open arcade.sonicthefighte.rs, load the game, and press
    **Play online**.
 
 ## Testing locally

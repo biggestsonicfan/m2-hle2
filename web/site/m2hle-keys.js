@@ -22,6 +22,44 @@
  */
 'use strict';
 
+/* The words (m2hle-lang.js). keys.act.* are the rows' names unless the game has
+ * its own (m2hleGame.labels); m2hle-pad.js and m2hle-touch.js, which load after
+ * this, name their rows with them too. */
+m2hleLang.add({
+  en: {
+    'keys.act.up': 'Up', 'keys.act.down': 'Down', 'keys.act.left': 'Left', 'keys.act.right': 'Right',
+    'keys.act.b1': 'Punch', 'keys.act.b2': 'Kick', 'keys.act.b3': 'Barrier', 'keys.act.b4': 'Button 4',
+    'keys.act.start': 'Start', 'keys.act.coin': 'Coin', 'keys.act.pause': 'Pause',
+    'keys.sub.macros': 'Macros: one press holds several buttons',
+    'keys.sub.page': 'The page: offline only, as the button beside the menu',
+    'keys.none': 'Not set',
+    'keys.remove': 'Remove',
+    'keys.remove.from': 'Remove {key} from {action}',
+    'keys.add': 'Add',
+    'keys.press': 'Press a key…',
+    'keys.who.p1': 'Player 1 {action}',
+    'keys.who.p2': 'Player 2 {action}',
+    'keys.clash': '{key} is on both {first} and {second}.',
+    'keys.space': 'Space',
+  },
+  ja: {
+    'keys.act.up': '上', 'keys.act.down': '下', 'keys.act.left': '左', 'keys.act.right': '右',
+    'keys.act.b1': 'パンチ', 'keys.act.b2': 'キック', 'keys.act.b3': 'バリア', 'keys.act.b4': 'ボタン4',
+    'keys.act.start': 'スタート', 'keys.act.coin': 'コイン', 'keys.act.pause': 'ポーズ',
+    'keys.sub.macros': 'マクロ：1回押すと複数のボタンを同時に押します',
+    'keys.sub.page': 'ページ：オフライン時のみ。メニュー横のボタンと同じです',
+    'keys.none': '未設定',
+    'keys.remove': '削除',
+    'keys.remove.from': '{action}から{key}を削除',
+    'keys.add': '追加',
+    'keys.press': 'キーを押してください…',
+    'keys.who.p1': 'プレイヤー1の{action}',
+    'keys.who.p2': 'プレイヤー2の{action}',
+    'keys.clash': '{key}が{first}と{second}の両方に割り当てられています。',
+    'keys.space': 'スペース',
+  },
+});
+
 const m2hleKeys = (() => {
   const $ = (id) => document.getElementById(id);
   const STORE = 'm2hle.keys';
@@ -30,16 +68,16 @@ const m2hleKeys = (() => {
   /* The rows of the panel; `act` is the player-1 GAME_INPUT_* index (`acts` for a
    * macro), player 2's is 10 further on (src/core/game_profile.h, as in m2hle-pad.js). */
   const ACTIONS = [
-    { id: 'up',    label: 'Up',       act: 0 },
-    { id: 'down',  label: 'Down',     act: 1 },
-    { id: 'left',  label: 'Left',     act: 2 },
-    { id: 'right', label: 'Right',    act: 3 },
-    { id: 'b1',    label: 'Punch',    act: 4 },
-    { id: 'b2',    label: 'Kick',     act: 5 },
-    { id: 'b3',    label: 'Barrier',  act: 6 },
-    { id: 'b4',    label: 'Button 4', act: 7 },
-    { id: 'start', label: 'Start',    act: 8 },
-    { id: 'coin',  label: 'Coin',     act: 9 },
+    { id: 'up',    act: 0 },
+    { id: 'down',  act: 1 },
+    { id: 'left',  act: 2 },
+    { id: 'right', act: 3 },
+    { id: 'b1',    act: 4 },
+    { id: 'b2',    act: 5 },
+    { id: 'b3',    act: 6 },
+    { id: 'b4',    act: 7 },
+    { id: 'start', act: 8 },
+    { id: 'coin',  act: 9 },
     /* Macros: one binding that holds several buttons at once, as the Gems
      * Collection and HD ports offer. Unbound until the player binds them. */
     { id: 'pk',    label: 'P + K',     acts: [4, 5],    macro: true },
@@ -47,9 +85,10 @@ const m2hleKeys = (() => {
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
     /* The page's Pause (m2hle-page.js), not a game button: it holds nothing. */
-    { id: 'pause', label: 'Pause',     acts: [],        page: true },
+    { id: 'pause', acts: [],        page: true },
   ];
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
+  for (const a of ACTIONS) a.label = m2hleGame.labels[a.id] || a.label || m2hleLang.t('keys.act.' + a.id);
   const P2_OFFSET = 10;
 
   /* The desktop build's keys (src/board/input.h): m2emulator's defaults, modified. */
@@ -101,7 +140,7 @@ const m2hleKeys = (() => {
     if ((m = /^Key([A-Z])$/.exec(code))) return m[1];
     if ((m = /^Digit(\d)$/.exec(code))) return m[1];
     if ((m = /^Numpad(.+)$/.exec(code))) return 'Num ' + m[1];
-    if (code === 'Space') return 'Space';
+    if (code === 'Space') return m2hleLang.t('keys.space');
     return code.replace(/(Left|Right)$/, ' ($1)').replace(/([a-z])([A-Z])/g, '$1 $2');
   }
 
@@ -212,13 +251,13 @@ const m2hleKeys = (() => {
       if (a.macro && a === ACTIONS.find((x) => x.macro)) {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
-        sub.textContent = 'Macros: one press holds several buttons';
+        sub.textContent = m2hleLang.t('keys.sub.macros');
         rows.appendChild(sub);
       }
       if (a.page) {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
-        sub.textContent = 'The page: offline only, as the button beside the menu';
+        sub.textContent = m2hleLang.t('keys.sub.page');
         rows.appendChild(sub);
       }
       const tr = document.createElement('li');
@@ -235,15 +274,15 @@ const m2hleKeys = (() => {
       if (list.length === 0) {
         const none = document.createElement('span');
         none.className = 'status';
-        none.textContent = 'Not set';
+        none.textContent = m2hleLang.t('keys.none');
         chips.appendChild(none);
       }
       list.forEach((code, i) => {
         const chip = document.createElement('button');
         chip.className = 'pad-chip';
         chip.type = 'button';
-        chip.title = 'Remove';
-        chip.setAttribute('aria-label', 'Remove ' + keyName(code) + ' from ' + a.label);
+        chip.title = m2hleLang.t('keys.remove');
+        chip.setAttribute('aria-label', m2hleLang.t('keys.remove.from', { key: keyName(code), action: a.label }));
         chip.textContent = keyName(code) + ' ×';
         chip.addEventListener('click', () => { list.splice(i, 1); save(); release(); render(); });
         chips.appendChild(chip);
@@ -254,7 +293,7 @@ const m2hleKeys = (() => {
       add.className = 'tool pad-add';
       add.type = 'button';
       const on = listening && listening.player === player && listening.id === a.id;
-      add.textContent = on ? 'Press a key…' : 'Add';
+      add.textContent = m2hleLang.t(on ? 'keys.press' : 'keys.add');
       add.setAttribute('aria-pressed', String(!!on));
       add.addEventListener('click', () => listen(a.id));
       tr.appendChild(add);
@@ -273,8 +312,8 @@ const m2hleKeys = (() => {
     for (const p of ['p1', 'p2']) {
       for (const a of ACTIONS) {
         for (const c of binds[p][a.id]) {
-          const who = (p === 'p1' ? 'Player 1 ' : 'Player 2 ') + a.label;
-          if (seen.has(c)) out.push(keyName(c) + ' is on both ' + seen.get(c) + ' and ' + who + '.');
+          const who = m2hleLang.t('keys.who.' + p, { action: a.label });
+          if (seen.has(c)) out.push(m2hleLang.t('keys.clash', { key: keyName(c), first: seen.get(c), second: who }));
           else seen.set(c, who);
         }
       }

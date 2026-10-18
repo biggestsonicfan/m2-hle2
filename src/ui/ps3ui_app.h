@@ -169,57 +169,67 @@ static void ps3ui_text_right(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, f
     ps3ui_rich(cv, st, x - ps3ui_rich_width(st, s), top + 42.0f * st->cap / 37.0f, s, a);
 }
 
-/* Word-wrap `s` into the box [x0, x1] (Text_Printf flag 0x800), from the top
- * of the box as the explain and info windows print, or with PS3UI_TB_VCENTRE
- * centred in [y0, y1] as Lobby_DrawStatusWin measures and centres its text.
+/* The box from slot `lt`'s top left to slot `rb`'s bottom right; 0 when the
+ * layout lacks either. */
+static int ps3ui_slot_box(const ps3ui_slots_t *s, const char *lt, const char *rb, ps3ui_box_t *box)
+{
+    return ps3ui_slot_xy(s, lt, 0, 0, &box->x0, &box->y0) && ps3ui_slot_xy(s, rb, 1, 1, &box->x1, &box->y1);
+}
+
+/* One line of `p` that fits `width`, broken at its last space if it has to be,
+ * into `line` (159 characters at most). Returns where the next line starts. */
+static const char *ps3ui__wrap_line(const ps3ui_text_style_t *st, const char *p, float width, char line[160])
+{
+    const char *q = p;
+    const char *brk = NULL;
+    while (*q && *q != '\n') {
+        char test[160];
+        int tl = (int)(q - p) + 1;
+        if (tl >= 159)
+            break;
+        memcpy(test, p, (size_t)tl);
+        test[tl] = 0;
+        if (ps3ui_rich_width(st, test) > width && brk)
+            break;
+        if (*q == ' ')
+            brk = q;
+        q++;
+    }
+    const char *end = q;
+    if (*q && *q != '\n' && brk)
+        end = brk;
+    int len = (int)(end - p);
+    if (len > 159)
+        len = 159;
+    memcpy(line, p, (size_t)len);
+    line[len] = 0;
+    p = end;
+    while (*p == ' ')
+        p++;
+    if (*p == '\n')
+        p++;
+    return p;
+}
+
+/* Word-wrap `s` into the box (Text_Printf flag 0x800), from the top of the
+ * box as the explain and info windows print, or with PS3UI_TB_VCENTRE
+ * centred in it as Lobby_DrawStatusWin measures and centres its text.
  * Lines are left-aligned, as the PS3's are; PS3UI_TB_HCENTRE centres them. */
 enum { PS3UI_TB_HCENTRE = 1, PS3UI_TB_VCENTRE = 2 };
-static void ps3ui_text_box(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, float x0, float y0, float x1, float y1,
-                           const char *s, float a, int flags)
+static void ps3ui_text_box(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, ps3ui_box_t box, const char *s, float a,
+                           int flags)
 {
     char lines[8][160];
     int n = 0;
-    const char *p = s;
-    while (*p && n < 8) {
-        char line[160] = "";
-        int len = 0;
-        const char *q = p;
-        const char *brk = NULL;
-        while (*q && *q != '\n') {
-            char test[160];
-            int tl = (int)(q - p) + 1;
-            if (tl >= 159)
-                break;
-            memcpy(test, p, (size_t)tl);
-            test[tl] = 0;
-            if (ps3ui_rich_width(st, test) > x1 - x0 && brk)
-                break;
-            if (*q == ' ')
-                brk = q;
-            q++;
-        }
-        const char *end = q;
-        if (*q && *q != '\n' && brk)
-            end = brk;
-        len = (int)(end - p);
-        if (len > 159)
-            len = 159;
-        memcpy(line, p, (size_t)len);
-        line[len] = 0;
-        snprintf(lines[n++], sizeof lines[0], "%s", line);
-        p = end;
-        while (*p == ' ')
-            p++;
-        if (*p == '\n')
-            p++;
-    }
+    for (const char *p = s; *p && n < 8; n++)
+        p = ps3ui__wrap_line(st, p, box.x1 - box.x0, lines[n]);
     float lh = 46.0f * st->cap / 37.0f + 8.0f;
-    float top = flags & PS3UI_TB_VCENTRE ? (y0 + y1) * 0.5f - (lh * (float)n - 8.0f) * 0.5f : y0;
+    float top = flags & PS3UI_TB_VCENTRE ? (box.y0 + box.y1) * 0.5f - (lh * (float)n - 8.0f) * 0.5f : box.y0;
     for (int i = 0; i < n; i++) {
         if (flags & PS3UI_TB_HCENTRE)
-            ps3ui_text_centre(cv, st, (x0 + x1) * 0.5f, top + lh * (float)i, lines[i], a);
+            ps3ui_text_centre(cv, st, (box.x0 + box.x1) * 0.5f, top + lh * (float)i, lines[i], a);
         else
-            ps3ui_text_left(cv, st, x0, top + lh * (float)i, lines[i], a);
+            ps3ui_text_left(cv, st, box.x0, top + lh * (float)i, lines[i], a);
     }
 }
 
@@ -459,6 +469,9 @@ typedef struct {
     uint32_t res_seen;          /* st.results already asked about */
     int prompt_only;            /* opened by a result alone (the session came from elsewhere):
                                    the answer closes the task again */
+    int ext;                    /* the prompt is a host's (GGPO), not the room's: */
+    char ext_name[2][33];       /*   the two sides' names, */
+    int ext_pick;               /*   and the answer: -1 none yet, 0 play again, 1 exit */
 
     /* the on-screen keyboard (ours) */
     int osk_field;              /* 0 = name, 1 = password, 2 = e-mail token */
@@ -628,6 +641,7 @@ static void ps3ui_app_close(ps3ui_app_t *a)
 {
     a->open = 0;
     a->prompt_only = 0;
+    a->ext = 0;
     a->scr = PS3UI_SCR_NONE;
 }
 
@@ -667,24 +681,28 @@ static int ps3ui_move(ps3ui_app_t *a, int *cur, int n, int wrap)
 
 /* ---- the room, read off the status --------------------------------------------- */
 
-/* The two fighters of the next match: the room's fighters when a match is
- * under way, else the front of the line (1P/2P entries first), as room.h
- * picks them. Returns member indices, -1 for an empty side. */
-static void ps3ui_fighters(const netplay_status_t *st, int out[2])
+/* The room's fighters, when a match is under way: the members on a side. */
+static void ps3ui_fighters_sided(const netplay_status_t *st, int out[2])
 {
-    out[0] = out[1] = -1;
     for (uint32_t i = 0; i < st->member_count; i++) {
         int side = st->members[i].side;
         if (side == 0 || side == 1)
             out[side] = (int)i;
     }
-    if (out[0] >= 0 || out[1] >= 0)
-        return;
-    /* nobody on a side yet: by entry, then by line */
+}
+
+/* Nobody on a side yet: the 1P and 2P entries take theirs. */
+static void ps3ui_fighters_by_entry(const netplay_status_t *st, int out[2])
+{
     for (int want = 1; want <= 2; want++)
         for (uint32_t i = 0; i < st->member_count; i++)
             if (st->members[i].data.entry == want && out[want - 1] < 0)
                 out[want - 1] = (int)i;
+}
+
+/* Then the front of the line, watchers left out, fills what is still empty. */
+static void ps3ui_fighters_by_line(const netplay_status_t *st, int out[2])
+{
     for (int pos = 0; pos < (int)ROOM_MAX_MEMBERS; pos++)
         for (uint32_t i = 0; i < st->member_count; i++) {
             if (st->members[i].line_pos != pos || (int)i == out[0] || (int)i == out[1])
@@ -696,6 +714,19 @@ static void ps3ui_fighters(const netplay_status_t *st, int out[2])
             else if (out[1] < 0)
                 out[1] = (int)i;
         }
+}
+
+/* The two fighters of the next match: the room's fighters when a match is
+ * under way, else the front of the line (1P/2P entries first), as room.h
+ * picks them. Returns member indices, -1 for an empty side. */
+static void ps3ui_fighters(const netplay_status_t *st, int out[2])
+{
+    out[0] = out[1] = -1;
+    ps3ui_fighters_sided(st, out);
+    if (out[0] >= 0 || out[1] >= 0)
+        return;
+    ps3ui_fighters_by_entry(st, out);
+    ps3ui_fighters_by_line(st, out);
 }
 
 /* ---- screens: update ------------------------------------------------------------ */
@@ -1060,7 +1091,8 @@ static void ps3ui_update_result(ps3ui_app_t *a)
 #define PS3UI_AGAIN_SETTLE 60.0f
 #define PS3UI_AGAIN_QUIET  30
 
-static void ps3ui_update_again(ps3ui_app_t *a)
+/* 0 Play again (or the time ran out), 1 Exit, -1 not yet. */
+static int ps3ui_again_pick(ps3ui_app_t *a)
 {
     a->result_t += 1.0f;
     if (!a->again_live && a->result_t > PS3UI_AGAIN_SETTLE && a->again_quiet >= PS3UI_AGAIN_QUIET)
@@ -1071,9 +1103,16 @@ static void ps3ui_update_again(ps3ui_app_t *a)
         ps3ui_move(a, &a->cursor, 2, 0);
         pick = ps3ui_hit(a, PS3UI_PAD_CROSS) ? a->cursor : ps3ui_hit(a, PS3UI_PAD_CIRCLE) ? 0 : -1;
     }
-    if (a->result_t >= PS3UI_AGAIN_FRAMES)
-        pick = 0;
-    if (pick == 1) {
+    return a->result_t >= PS3UI_AGAIN_FRAMES ? 0 : pick;
+}
+
+static void ps3ui_update_again(ps3ui_app_t *a)
+{
+    int pick = ps3ui_again_pick(a);
+    if (pick >= 0 && a->ext) {
+        a->ext_pick = pick;             /* the host acts on it (ps3ui_app_ext_answer) */
+        ps3ui_app_close(a);
+    } else if (pick == 1) {
         ps3ui_post(a, NETPLAY_CMD_LEAVE_ROOM);
         if (a->prompt_only)
             ps3ui_app_close(a);
@@ -1142,6 +1181,37 @@ static void ps3ui_app_ask_again(ps3ui_app_t *a)
     ps3ui_app_go(a, PS3UI_SCR_AGAIN);
 }
 
+/* The same prompt for a session that is not netplay.h's (GGPO's lobby): the
+ * host says who won and who played, and reads the answer back. */
+static void ps3ui_app_ask_ext(ps3ui_app_t *a, int winner_side, const char *name_1p, const char *name_2p)
+{
+    if (!a->open)
+        ps3ui_app_open(a);
+    a->prompt_only = 1;
+    a->ext = 1;
+    a->ext_pick = -1;
+    snprintf(a->ext_name[0], sizeof a->ext_name[0], "%s", name_1p ? name_1p : "");
+    snprintf(a->ext_name[1], sizeof a->ext_name[1], "%s", name_2p ? name_2p : "");
+    ps3ui_app_ask_again(a);
+    a->result_side = winner_side;
+}
+
+/* The answer to ps3ui_app_ask_ext, once: -1 while there is none. */
+static int ps3ui_app_ext_answer(ps3ui_app_t *a)
+{
+    int pick = a->ext_pick;
+    a->ext_pick = -1;
+    return pick;
+}
+
+/* The host's session ended under the prompt: it goes, unanswered. */
+static void ps3ui_app_ext_cancel(ps3ui_app_t *a)
+{
+    if (a->ext)
+        ps3ui_app_close(a);
+    a->ext_pick = -1;
+}
+
 /* The session moved to another state. */
 static void ps3ui_follow_state(ps3ui_app_t *a)
 {
@@ -1192,11 +1262,33 @@ static void ps3ui_follow_online(ps3ui_app_t *a)
         ps3ui_app_go(a, PS3UI_SCR_MENU);
 }
 
+/* A linked match (Virtual-On's comm boards, netplay_member_start_link) runs no
+ * session: the room stays IN_ROOM. So the game is given the screen here, the
+ * room kept behind it for SELECT's question (ps3ui_app_ask_leave_link). A
+ * leave already answered (the menu) waits for the room to go. */
+static int ps3ui_follow_link(ps3ui_app_t *a)
+{
+    if (!a->st.comm.open)
+        return 0;
+    if (a->dialog != PS3UI_DLG_LEAVE && a->scr != PS3UI_SCR_MENU)
+        a->scr = PS3UI_SCR_NONE;
+    return 1;
+}
+
+/* SELECT in a linked match: there is no result to leave at, so ask now. */
+static void ps3ui_app_ask_leave_link(ps3ui_app_t *a)
+{
+    if (!a->open || !a->st.comm.open || a->scr != PS3UI_SCR_NONE || a->dialog)
+        return;
+    ps3ui_app_go(a, PS3UI_SCR_ROOM);
+    ps3ui_app_ask(a, PS3UI_DLG_LEAVE, "Do you want to exit this session?");
+}
+
 /* In a room or at its barrier: the result first, then the room or VS screen. */
 static void ps3ui_follow_room(ps3ui_app_t *a)
 {
     const netplay_status_t *st = &a->st;
-    if (a->scr == PS3UI_SCR_RESULT)
+    if (ps3ui_follow_link(a) || a->scr == PS3UI_SCR_RESULT)
         return;
     /* a result has come in: show it first */
     if (st->room.match != a->last_match) {
@@ -1409,13 +1501,10 @@ static void ps3ui_app_ready_fx(ps3ui_app_t *a)
     }
 }
 
-/* One frame of the task. `held` is the pad in PS3UI_PAD_* bits. */
-static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
+/* The room's part of a frame: the result prompt, or the lobby's screens.
+ * Returns 0 when the task is closed. */
+static int ps3ui_app_room_frame(ps3ui_app_t *a)
 {
-    a->frame++;
-    ps3ui_app_pad(a, held);
-    if (a->be.get_status)
-        a->be.get_status(&a->st);       /* read even while closed: the host reports from it */
     /* The prompt does not wait for the lobby to have been opened: a session
      * joined from the web page's panel, or by RetroArch's autojoin, never
      * opened it, and those players need the way out as much as anyone. So
@@ -1425,22 +1514,37 @@ static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
     if (!a->open) {
         a->res_seen = a->st.results;
         if (!res_new)
-            return;
+            return 0;
         ps3ui_app_open(a);
         a->prompt_only = 1;
         ps3ui_app_ask_again(a);
     }
-    if (a->prompt_only) {
-        if (!ps3ui_app_prompt(a, in_room, res_new))
+    if (a->prompt_only)
+        return ps3ui_app_prompt(a, in_room, res_new);
+    /* The lobby is open. A VS result comes while still PLAYING and is
+     * asked about there (ps3ui_follow); any other result ends the match,
+     * and the room screens show it (PS3UI_SCR_RESULT), the way out on them. */
+    if (a->st.state != NETPLAY_PLAYING)
+        a->res_seen = a->st.results;
+    ps3ui_follow(a);
+    ps3ui_app_update_screen(a);
+    return 1;
+}
+
+/* One frame of the task. `held` is the pad in PS3UI_PAD_* bits. */
+static void ps3ui_app_frame(ps3ui_app_t *a, uint32_t held)
+{
+    a->frame++;
+    ps3ui_app_pad(a, held);
+    if (a->be.get_status)
+        a->be.get_status(&a->st);       /* read even while closed: the host reports from it */
+    if (a->ext) {
+        if (a->scr == PS3UI_SCR_AGAIN)
+            ps3ui_update_again(a);
+        if (!a->open)
             return;
-    } else {
-        /* The lobby is open. A VS result comes while still PLAYING and is
-         * asked about there (ps3ui_follow); any other result ends the match,
-         * and the room screens show it (PS3UI_SCR_RESULT), the way out on them. */
-        if (a->st.state != NETPLAY_PLAYING)
-            a->res_seen = a->st.results;
-        ps3ui_follow(a);
-        ps3ui_app_update_screen(a);
+    } else if (!ps3ui_app_room_frame(a)) {
+        return;
     }
     /* READY effects start when a fighter's flag goes up */
     if (a->scr == PS3UI_SCR_VS)
@@ -1569,15 +1673,28 @@ static const char *ps3ui_rule_value(const ps3ui_app_t *a, int id, char *buf, siz
     }
 }
 
+/* What a value list shows: its title and n rows of label, value and whether
+ * the value is the default. `dim` halves the text and hides the cursor (VERSUS
+ * before a second pad). */
+#define PS3UI_VALUE_ROWS 8
+typedef struct {
+    const char *title;
+    const char *labels[PS3UI_VALUE_ROWS];
+    const char *values[PS3UI_VALUE_ROWS];
+    int is_default[PS3UI_VALUE_ROWS];
+    int n;
+    int dim;
+} ps3ui_value_list_t;
+
 /* A value list, as TaskMenuArcade_Draw, TaskOptionSetting_Draw and
  * TaskMultiMenuRule_Draw draw one: the label left at p_txt_01_lt, the value
  * right-aligned at p_txt_03_rt, green (0x00F040) while it is the default, and
- * the arrows round the current row's value. `dim` halves the text and hides
- * the cursor (VERSUS before a second pad). */
-static void ps3ui_draw_values(ps3ui_canvas_t *cv, const ps3ui_win_t *w, int cursor, float cursor_t, const char *title,
-                              const char *const *labels, const char *const *values, const int *is_default, int n,
-                              int dim)
+ * the arrows round the current row's value. */
+static void ps3ui_draw_values(ps3ui_canvas_t *cv, const ps3ui_win_t *w, int cursor, float cursor_t,
+                              const ps3ui_value_list_t *l)
 {
+    const char *title = l->title;
+    int dim = l->dim;
     ps3ui_slots_t s = { 0 };
     ps3ui_win_draw(cv, w, 0, 0, &s);
     float lx, ly, rx, ry, ex, ey, tx, ty;
@@ -1587,14 +1704,14 @@ static void ps3ui_draw_values(ps3ui_canvas_t *cv, const ps3ui_win_t *w, int curs
     if (!dim && w->state == PS3UI_WIN_IDLE && ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey))
         ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, ey + 54.0f * (float)cursor, cursor_t);
     ps3ui_text_style_t st = ps3ui_style_text(37.0f);
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < l->n; i++) {
         float y = ly + 54.0f * (float)i;
-        ps3ui_text_left(cv, &st, lx, y, labels[i], alpha);
+        ps3ui_text_left(cv, &st, lx, y, l->labels[i], alpha);
         ps3ui_text_style_t vs = st;
-        vs.rgb = is_default[i] ? 0x00F040 : 0xFFFFFF;
-        ps3ui_text_right(cv, &vs, rx, y, values[i], alpha);
+        vs.rgb = l->is_default[i] ? 0x00F040 : 0xFFFFFF;
+        ps3ui_text_right(cv, &vs, rx, y, l->values[i], alpha);
         if (i == cursor && !dim) {
-            float vw = ps3ui_rich_width(&vs, values[i]);
+            float vw = ps3ui_rich_width(&vs, l->values[i]);
             ps3ui_draw_value_arrows(cv, &st, rx - vw * 0.5f, y, vw, alpha);
         }
     }
@@ -1610,11 +1727,11 @@ static void ps3ui_draw_message(ps3ui_canvas_t *cv, ps3ui_app_t *a, const char *t
 {
     ps3ui_slots_t s = { 0 };
     ps3ui_win_draw(cv, &a->msg, 0, 0, &s);
-    float x0, y0, x1, y1;
-    if (!ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &x0, &y0) || !ps3ui_slot_xy(&s, "p_txt_02_rb", 1, 1, &x1, &y1))
+    ps3ui_box_t box;
+    if (!ps3ui_slot_box(&s, "p_txt_01_lt", "p_txt_02_rb", &box))
         return;
     ps3ui_text_style_t st = ps3ui_style_text(37.0f);
-    ps3ui_text_box(cv, &st, x0, y0, x1, y1, text, ps3ui_slot_alpha(&s, "p_txt_01_lt"), 0);
+    ps3ui_text_box(cv, &st, box, text, ps3ui_slot_alpha(&s, "p_txt_01_lt"), 0);
 }
 
 /* The status window (connect_win): its text wrapped, left-aligned and centred
@@ -1624,11 +1741,11 @@ static void ps3ui_draw_status(ps3ui_canvas_t *cv, ps3ui_app_t *a, const char *te
 {
     ps3ui_slots_t s = { 0 };
     ps3ui_win_draw(cv, &a->main, 0, 0, &s);
-    float x0, y0, x1, y1;
-    if (!ps3ui_slot_xy(&s, "p_connect_01_lt", 0, 0, &x0, &y0) || !ps3ui_slot_xy(&s, "p_connect_02_rb", 1, 1, &x1, &y1))
+    ps3ui_box_t box;
+    if (!ps3ui_slot_box(&s, "p_connect_01_lt", "p_connect_02_rb", &box))
         return;
     ps3ui_text_style_t st = ps3ui_style_text(37.0f);
-    ps3ui_text_box(cv, &st, x0, y0, x1, y1, text, ps3ui_slot_alpha(&s, "p_connect_01_lt"), PS3UI_TB_VCENTRE);
+    ps3ui_text_box(cv, &st, box, text, ps3ui_slot_alpha(&s, "p_connect_01_lt"), PS3UI_TB_VCENTRE);
 }
 
 /* The panel right of the room rows: four labels at p_txt_01_lt, font 1 at 32,
@@ -1721,15 +1838,22 @@ static const char *ps3ui_search_message(const ps3ui_app_t *a, char *buf, size_t 
     return buf;
 }
 
+/* What every member row of the room shares: the two fighters' rows and the
+ * name and tag styles. */
+typedef struct {
+    int f[2];
+    ps3ui_text_style_t name, tag;
+} ps3ui_member_rows_t;
+
 /* One member's row of the room: link icon, name, and the 1P / 2P or ENTRY tag. */
-static void ps3ui_draw_room_member(ps3ui_canvas_t *cv, const netplay_member_status_t *m, int i, const int f[2],
-                                   const ps3ui_text_style_t *name, ps3ui_text_style_t *tag, float px, float py,
-                                   float alpha)
+static void ps3ui_draw_room_member(ps3ui_canvas_t *cv, const ps3ui_member_rows_t *rows,
+                                   const netplay_member_status_t *m, int i, float px, float py, float alpha)
 {
+    const int *f = rows->f;
     if (!m->is_me)
         ps3ui_draw_image(cv, ps3ui_sprite(ps3ui_net_icon(m->rtt_ms)), ps3ui_mat_translate(px, py), alpha,
                          PS3UI_BLEND_NORMAL, NULL);
-    ps3ui_text(cv, name, px + 240.0f, py + 2.0f + 42.0f, m->npid, alpha);
+    ps3ui_text(cv, &rows->name, px + 240.0f, py + 2.0f + 42.0f, m->npid, alpha);
     const char *t = NULL;
     uint32_t rgb = 0xFF0000;
     if (i == f[0] || i == f[1]) {
@@ -1740,9 +1864,10 @@ static void ps3ui_draw_room_member(ps3ui_canvas_t *cv, const netplay_member_stat
         rgb = m->data.entry == 1 ? 0xFF0000 : 0x0000FF;
     }
     if (t) {
-        tag->rgb = rgb;
+        ps3ui_text_style_t tag = rows->tag;
+        tag.rgb = rgb;
         /* baseline 47 of the 56 cell, scaled to 32 and centred on the row's 24 */
-        ps3ui_text(cv, tag, px + 750.0f - ps3ui_text_width(tag, t) * 0.5f, py + 24.0f - 16.0f + 47.0f * 32.0f / 56.0f,
+        ps3ui_text(cv, &tag, px + 750.0f - ps3ui_text_width(&tag, t) * 0.5f, py + 24.0f - 16.0f + 47.0f * 32.0f / 56.0f,
                    t, alpha);
     }
 }
@@ -1772,10 +1897,9 @@ static void ps3ui_draw_room_list(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     ps3ui_draw_room_info(cv, &s, &st->room_rules, alpha);
     /* ENTRY 1P / 1P tags: font 2 set 24 wide and 32 high, centred on (750, 24)
      * of the row. Font 2's own cell is 56 with a cap of 40. */
-    ps3ui_text_style_t name = ps3ui_style_name(), tag = ps3ui_style_title(40.0f * 32.0f / 56.0f);
-    tag.wscale = 24.0f / 32.0f;
-    int f[2];
-    ps3ui_fighters(st, f);
+    ps3ui_member_rows_t rows = { .name = ps3ui_style_name(), .tag = ps3ui_style_title(40.0f * 32.0f / 56.0f) };
+    rows.tag.wscale = 24.0f / 32.0f;
+    ps3ui_fighters(st, rows.f);
     for (int i = 0; i < PS3UI_ROWS; i++) {
         char slot[16];
         snprintf(slot, sizeof slot, "p_player%d_lt", i + 1);
@@ -1783,13 +1907,13 @@ static void ps3ui_draw_room_list(ps3ui_canvas_t *cv, ps3ui_app_t *a)
             continue;
         if ((uint32_t)i >= st->max_slot) {
             /* a row past the room's size: covered */
-            ps3ui_fill_rect(cv, px - 37.0f, py - 11.0f, px - 37.0f + 880.0f, py - 11.0f + 70.0f, 0x000000, 0.5f * alpha,
-                            PS3UI_BLEND_NORMAL);
+            ps3ui_fill_rect(cv, (ps3ui_box_t){ px - 37.0f, py - 11.0f, px - 37.0f + 880.0f, py - 11.0f + 70.0f }, 0x000000,
+                            0.5f * alpha, PS3UI_BLEND_NORMAL);
             continue;
         }
         if ((uint32_t)i >= st->member_count)
             continue;
-        ps3ui_draw_room_member(cv, &st->members[i], i, f, &name, &tag, px, py, alpha);
+        ps3ui_draw_room_member(cv, &rows, &st->members[i], i, px, py, alpha);
     }
     const char *msg = st->member_count >= 2 ? "Now accepting match entries. The top players in 1P Entry and 2P Entry get priority."
                                             : "Please wait.";
@@ -1822,6 +1946,71 @@ static void ps3ui_draw_vs(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     ps3ui_draw_vs_lobby(cv, &v);    /* background, bar and hints included */
 }
 
+/* One side of the result: WINNER / LOSER over its head, its name below. */
+static void ps3ui_draw_result_side(ps3ui_canvas_t *cv, const ps3ui_app_t *a, ps3ui_slots_t *s, int i, int fighter)
+{
+    static const char *const head[2] = { "p_end1p_head_ct", "p_end2p_head_ct" };
+    static const char *const txt[2] = { "p_end1p_txt_lt", "p_end2p_txt_lt" };
+    float x, y;
+    float al = ps3ui_slot_alpha(s, head[i]);
+    if (a->result_side >= 0 && ps3ui_slot_xy(s, head[i], 0.5f, 0, &x, &y)) {
+        bool won = a->result_side == i;
+        const char *w = won ? "WINNER" : "LOSER";
+        ps3ui_text_style_t t = ps3ui_style_title(40.0f);
+        float tw = ps3ui_text_width(&t, w);
+        ps3ui_text(cv, &t, x - tw * 0.5f, y + 47.0f + 3.0f, w, al);    /* white, 3 lower */
+        t.rgb = won ? 0x792323 : 0x0A4A84;
+        ps3ui_text(cv, &t, x - tw * 0.5f, y + 47.0f, w, al);
+    }
+    const char *name = NULL;
+    if (a->ext)
+        name = a->ext_name[i];
+    else if (fighter >= 0)
+        name = a->st.members[fighter].npid;
+    if (name && ps3ui_slot_xy(s, txt[i], 0, 0, &x, &y)) {
+        ps3ui_text_style_t n = ps3ui_style_name();
+        ps3ui_text(cv, &n, x + 84.0f, y + 42.0f, name, ps3ui_slot_alpha(s, txt[i]));
+    }
+}
+
+/* The seconds left to answer, in the timer window. */
+static void ps3ui_draw_result_timer(ps3ui_canvas_t *cv, const ps3ui_app_t *a, ps3ui_slots_t *ts)
+{
+    float x, y;
+    if (!ps3ui_slot_xy(ts, "p_timer_c", 0.5f, 0.5f, &x, &y))
+        return;
+    char buf[8];
+    int left = (int)((600.0f - a->result_t) / 60.0f);
+    snprintf(buf, sizeof buf, "%02d", left < 0 ? 0 : left);
+    ps3ui_text_style_t t = ps3ui_style_title(40.0f);
+    ps3ui_text(cv, &t, x - ps3ui_text_width(&t, buf) * 0.5f, y + 20.0f, buf, ps3ui_slot_alpha(ts, "p_timer_c"));
+}
+
+/* The choices: "Return to setup screen", or Play again / Exit with the cursor. */
+static void ps3ui_draw_result_menu(ps3ui_canvas_t *cv, const ps3ui_app_t *a, ps3ui_slots_t *s)
+{
+    float lx, ly, rx, ry;
+    if (!ps3ui_slot_xy(s, "p_txt_01_lt", 0, 0, &lx, &ly) || !ps3ui_slot_xy(s, "p_txt_02_rb", 1, 1, &rx, &ry))
+        return;
+    ps3ui_text_style_t st = ps3ui_style_text(37.0f);
+    float ex, ey;
+    float alpha = ps3ui_slot_alpha(s, "p_txt_01_lt");
+    /* The row under the window's rule (p_txt_ok, the info window's OK
+     * box): Exit goes there, as the pause list puts Exit Game one row
+     * further down, over the rule. A second row at the 54 pitch sat on
+     * the rule itself. */
+    float ox, oy = ly + 108.0f;
+    int again = a->scr == PS3UI_SCR_AGAIN;
+    if (again)
+        ps3ui_slot_xy(s, "p_txt_ok_01_lt", 0, 0, &ox, &oy);
+    float cy = again && a->cursor == 1 ? oy : ly;
+    if (ps3ui_slot_xy(s, "p_win_edg_lt", 0, 0, &ex, &ey) && a->main.state == PS3UI_WIN_IDLE)
+        ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, cy - 4.0f, a->cursor_t);
+    ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly, again ? "Play again" : "Return to setup screen", alpha);
+    if (again)
+        ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, oy, "Exit", alpha);
+}
+
 /* The result (vs_end_menu_PS3): WINNER / LOSER over each side, the names. */
 static void ps3ui_draw_result(ps3ui_canvas_t *cv, ps3ui_app_t *a)
 {
@@ -1830,52 +2019,10 @@ static void ps3ui_draw_result(ps3ui_canvas_t *cv, ps3ui_app_t *a)
     ps3ui_win_draw(cv, &a->timer, 0, 0, &ts);
     int f[2];
     ps3ui_fighters(&a->st, f);
-    static const char *const head[2] = { "p_end1p_head_ct", "p_end2p_head_ct" };
-    static const char *const txt[2] = { "p_end1p_txt_lt", "p_end2p_txt_lt" };
-    for (int i = 0; i < 2; i++) {
-        float x, y;
-        float al = ps3ui_slot_alpha(&s, head[i]);
-        if (a->result_side >= 0 && ps3ui_slot_xy(&s, head[i], 0.5f, 0, &x, &y)) {
-            const char *w = a->result_side == i ? "WINNER" : "LOSER";
-            ps3ui_text_style_t t = ps3ui_style_title(40.0f);
-            float tw = ps3ui_text_width(&t, w);
-            ps3ui_text(cv, &t, x - tw * 0.5f, y + 47.0f + 3.0f, w, al);    /* white, 3 lower */
-            t.rgb = a->result_side == i ? 0x792323 : 0x0A4A84;
-            ps3ui_text(cv, &t, x - tw * 0.5f, y + 47.0f, w, al);
-        }
-        if (f[i] >= 0 && ps3ui_slot_xy(&s, txt[i], 0, 0, &x, &y)) {
-            ps3ui_text_style_t n = ps3ui_style_name();
-            ps3ui_text(cv, &n, x + 84.0f, y + 42.0f, a->st.members[f[i]].npid, ps3ui_slot_alpha(&s, txt[i]));
-        }
-    }
-    float x, y;
-    if (ps3ui_slot_xy(&ts, "p_timer_c", 0.5f, 0.5f, &x, &y)) {
-        char buf[8];
-        int left = (int)((600.0f - a->result_t) / 60.0f);
-        snprintf(buf, sizeof buf, "%02d", left < 0 ? 0 : left);
-        ps3ui_text_style_t t = ps3ui_style_title(40.0f);
-        ps3ui_text(cv, &t, x - ps3ui_text_width(&t, buf) * 0.5f, y + 20.0f, buf, ps3ui_slot_alpha(&ts, "p_timer_c"));
-    }
-    float lx, ly, rx, ry;
-    if (ps3ui_slot_xy(&s, "p_txt_01_lt", 0, 0, &lx, &ly) && ps3ui_slot_xy(&s, "p_txt_02_rb", 1, 1, &rx, &ry)) {
-        ps3ui_text_style_t st = ps3ui_style_text(37.0f);
-        float ex, ey;
-        float alpha = ps3ui_slot_alpha(&s, "p_txt_01_lt");
-        /* The row under the window's rule (p_txt_ok, the info window's OK
-         * box): Exit goes there, as the pause list puts Exit Game one row
-         * further down, over the rule. A second row at the 54 pitch sat on
-         * the rule itself. */
-        float ox, oy = ly + 108.0f;
-        int again = a->scr == PS3UI_SCR_AGAIN;
-        if (again)
-            ps3ui_slot_xy(&s, "p_txt_ok_01_lt", 0, 0, &ox, &oy);
-        float cy = again && a->cursor == 1 ? oy : ly;
-        if (ps3ui_slot_xy(&s, "p_win_edg_lt", 0, 0, &ex, &ey) && a->main.state == PS3UI_WIN_IDLE)
-            ps3ui_draw_cursor(cv, &ps3ui_n_cmn_base, "cursor_cmn01_46", ex, cy - 4.0f, a->cursor_t);
-        ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, ly, again ? "Play again" : "Return to setup screen", alpha);
-        if (again)
-            ps3ui_text_centre(cv, &st, (lx + rx) * 0.5f, oy, "Exit", alpha);
-    }
+    for (int i = 0; i < 2; i++)
+        ps3ui_draw_result_side(cv, a, &s, i, f[i]);
+    ps3ui_draw_result_timer(cv, a, &ts);
+    ps3ui_draw_result_menu(cv, a, &s);
 }
 
 /* Our on-screen keyboard, in the same window language: a large common window,
@@ -1909,7 +2056,7 @@ static void ps3ui_draw_osk(ps3ui_canvas_t *cv, ps3ui_app_t *a)
         float y = ey + 54.0f * (float)(a->osk_row + 1);
         int cols = a->osk_row == 4 ? PS3UI_OSK_ACTS : 10;
         float w = (rx - lx) / (float)cols;
-        ps3ui_fill_rect(cv, lx + w * (float)a->osk_col, y + 2.0f, lx + w * (float)(a->osk_col + 1), y + 52.0f,
+        ps3ui_fill_rect(cv, (ps3ui_box_t){ lx + w * (float)a->osk_col, y + 2.0f, lx + w * (float)(a->osk_col + 1), y + 52.0f },
                         0x00BAFF, 0.3f * alpha, PS3UI_BLEND_ADD);
     }
     for (int r = 0; r < 4; r++)
@@ -2003,15 +2150,14 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
         case PS3UI_SCR_OSK: ps3ui_draw_osk(cv, a); break;
         case PS3UI_SCR_MENU: ps3ui_draw_menu(cv, a, ps3ui_str_title, ps3ui_str_menu, 5, NULL); break;
         case PS3UI_SCR_RULE: {
-            int ids[8], n = ps3ui_rule_list(a, ids);
-            const char *labels[8], *values[8];
-            int is_def[8];
-            char buf[8][24];
-            for (int i = 0; i < n; i++) {
-                labels[i] = ps3ui_rule_label[ids[i]];
-                values[i] = ps3ui_rule_value(a, ids[i], buf[i], sizeof buf[i], &is_def[i]);
+            int ids[PS3UI_VALUE_ROWS];
+            ps3ui_value_list_t l = { .title = ps3ui_str_title, .n = ps3ui_rule_list(a, ids) };
+            char buf[PS3UI_VALUE_ROWS][24];
+            for (int i = 0; i < l.n; i++) {
+                l.labels[i] = ps3ui_rule_label[ids[i]];
+                l.values[i] = ps3ui_rule_value(a, ids[i], buf[i], sizeof buf[i], &l.is_default[i]);
             }
-            ps3ui_draw_values(cv, &a->main, a->cursor, a->cursor_t, ps3ui_str_title, labels, values, is_def, n, 0);
+            ps3ui_draw_values(cv, &a->main, a->cursor, a->cursor_t, &l);
             break;
         }
         case PS3UI_SCR_CONNECT:

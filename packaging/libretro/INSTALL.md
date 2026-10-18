@@ -107,10 +107,17 @@ The first start takes a few seconds while the game loads its textures.
 Controller port 1 is player 1 and port 2 is player 2. Remap buttons in
 **Quick Menu > Controls** as with any other core.
 
-The table is the Arcade version's. The Console version (the default) is on free play, so
+In Sonic the Fighters the table is the Arcade version's. The Console version (the default) is on free play, so
 there is no coin: press **Start** to play, and **Select** opens the pause menu. Its punch, kick
 and guard buttons are set in **Help & Options > Controls** (see the README). In the Arcade
 version, press **Select** to insert a coin, then **Start**.
+
+**The House of the Dead** plays with a light gun: set the port's device to
+**Light gun** (**Quick Menu > Controls > Port 1 Controls > Device Type**), and
+RetroArch's mouse or gun aims it. Its trigger fires, its reload (or a shot off
+the picture) reloads, and its Start and Select are Start and Insert coin. On a
+RetroPad the d-pad walks the gun, Button 1 fires and Button 2 reloads. In an
+online match the gun follows the pad, so both players' boards see the same aim.
 
 ### Core options
 
@@ -131,8 +138,18 @@ Open **Quick Menu > Core Options** while the game runs.
 The RPCN lobby is not in this menu: the core draws it in the game, as the PS3 release does (see
 below).
 
-Savestates, rewind and run-ahead don't work with this core. RetroArch says the core doesn't
-support save states if you try.
+Save and load state, rewind and fast-forward work, except that a state can't be loaded (or the
+game rewound) during an online match. Each state is about 16 MB and takes a few milliseconds to
+save on a PC, so rewind can save one every frame; RetroArch's rewind buffer needs a few hundred MB
+to go back more than a few seconds. Run-ahead is still best left off: it saves and loads a state
+every frame and runs the board twice. While fast-forwarding, the core draws only one frame in
+four.
+
+If Settings > Frame Throttle has no Rewind entry, or the Rewind hotkey says the core lacks
+serialized save state support, RetroArch is still reading its cache of an older core's `.info`
+(`core_info.cache`, beside the `.info` files). The core notices this when a game loads and leaves a
+`core_info.refresh` marker there, which RetroArch takes up at once; if Rewind is still missing,
+restart RetroArch. If the core cannot write the marker, it names the cache file to delete.
 
 ### Online play
 
@@ -150,7 +167,7 @@ Use RetroArch's own **Netplay** menu:
 The host is player 1 and the first player to join is player 2. Both games restart when player 2
 joins. Both players need **the same build** of the core; RetroArch refuses a mismatch.
 
-**RPCN** (plays against the m2-hle desktop emulator and play.sonicthefighte.rs)
+**RPCN** (plays against the m2-hle desktop emulator and arcade.sonicthefighte.rs)
 
 1. Set **Online play** to **RPCN**, then close and reload the game.
 2. Choose **Online Battle** from the game's main menu. (The Arcade version opens the lobby at
@@ -275,8 +292,9 @@ undid it.
       <core name="m2hle" features="netplay" />
 ```
 
-This lets EmulationStation offer RetroArch's netplay for the core. Leave out `rewind` and
-`autosave`: they need savestates, which this core doesn't have.
+This lets EmulationStation offer RetroArch's netplay for the core. `rewind` works too
+(`features="netplay rewind"`), but it saves a 16 MB state every frame, which a handheld feels
+more than a PC does, and the handheld's memory limits how far back it can go.
 
 This one is still an edit to the OS's file, so an OS upgrade undoes it. Where
 `es_features.cfg` is a link to the OS's read-only copy, the script skips this step, and only
@@ -338,7 +356,7 @@ What it does:
    a backup and also updates the updater. It won't replace the core while RetroArch is running.
 
 If the standalone m2-hle emulator (the `m2hle-rocknix-arm64.zip` build) is installed too, the
-same entry updates that as well. Each one is checked and installed separately.
+same entry updates that as well, though CI no longer builds a new one. Each one is checked and installed separately.
 
 Over ssh:
 

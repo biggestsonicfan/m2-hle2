@@ -226,6 +226,7 @@ static int load_rom(const char *zip, bool sound) {
     g_active_profile->install_fn(&romset, &cpu, &bus);
 
     if (sound && g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&bus);
         if (romset.audiocpu && romset.audiocpu_size > 0)
@@ -323,9 +324,8 @@ __attribute__((noinline)) static void render_frame(void) {
                        .color_format = SG_PIXELFORMAT_RGBA8,
                        .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL },
     });
-    int ox, oy, w, h;
-    game_render_letterbox(FB_W, FB_H, VIDEO_WIDTH, VIDEO_HEIGHT, &ox, &oy, &w, &h);
-    game_frame_draw(&video, &geo3d, &bus, &romset, ox, oy, w, h, lerp_t);
+    game_frame_draw(&video, &geo3d, &bus, &romset,
+                    game_render_letterbox(FB_W, FB_H, VIDEO_WIDTH, VIDEO_HEIGHT), lerp_t);
     sg_end_pass();
     sg_commit();
 

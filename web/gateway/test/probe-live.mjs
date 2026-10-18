@@ -17,7 +17,7 @@
 import { WebSocket } from 'ws';
 
 const base = (process.argv[2] || 'wss://rpcn.sonicthefighte.rs/gw').replace(/\/$/, '');
-const ORIGIN = 'https://play.sonicthefighte.rs';
+const ORIGIN = 'https://arcade.sonicthefighte.rs';
 const TAG = [100, 127, 255, 254];
 let failed = false;
 const ok = (cond, what) => { console.log(`${cond ? 'ok  ' : 'FAIL'}  ${what}`); if (!cond) failed = true; };
@@ -45,6 +45,11 @@ ok(h.ok === true, `health: ${JSON.stringify(h)}`);
 
 const bad = await open('stream', 'https://example.com');
 ok(bad.status === 403, `foreign origin refused (${bad.status || bad.err})`);
+
+/* The site's old name: native builds from before Pinboard #881 send it (ws_relay.h). */
+const old = await open('stream', 'https://play.sonicthefighte.rs');
+ok(!old.err && !old.status, `old site name admitted (${old.err || old.status || 'ok'})`);
+if (!old.err && !old.status) old.ws.close();
 
 const s = await open('stream');
 ok(!s.err && !s.status, `stream opened (${s.err || s.status || 'ok'})`);

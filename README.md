@@ -1,8 +1,9 @@
 # m2-hle2
 
 A **Sega Model 2 arcade emulator**. It plays *Sonic the Fighters* (1996), online too, in a
-browser, on a PC, on a handheld or in RetroArch. *Fighting Vipers* boots on it as well, and so
-does homebrew written for the board.
+browser, on a PC, on a handheld or in RetroArch. *Sega Rally Championship*, *Virtual-On*,
+*Dynamite Cop*, *Fighting Vipers*, *The House of the Dead*, *Daytona USA* and *Dead or Alive*
+run on it as well, and so does homebrew written for the board.
 
 - Everything it can do: [docs/FEATURES.md](docs/FEATURES.md)
 - How it works, for developers: [docs/TECHNICAL.md](docs/TECHNICAL.md)
@@ -10,8 +11,8 @@ does homebrew written for the board.
 
 ## Play
 
-**In a browser:** open **[play.sonicthefighte.rs](https://play.sonicthefighte.rs)** and give it
-your ROM set. There is nothing to install. Keyboard, gamepad and touch all work, and **Online
+**In a browser:** open **[arcade.sonicthefighte.rs](https://arcade.sonicthefighte.rs)**, pick a game and
+give it your ROM set. There is nothing to install. Keyboard, gamepad and touch all work, and **Online
 Battle** plays other people from the page.
 
 **On a computer or a handheld:** download the newest build from the

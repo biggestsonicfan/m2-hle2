@@ -389,6 +389,34 @@ static inline bool room_all_ready(const room_state_t *s, const room_member_t *m,
  *
  * False when there are fewer than two players.
  */
+/* One player's sort key in room_pick_fighters: its place in the line, raised by
+ * the class its entry request puts it in. Only the first 1P and the first 2P
+ * request win a class of their own. */
+static inline uint32_t room_fight_key(uint32_t place, const room_member_t *mm, bool *have_1p,
+                                      bool *have_2p) {
+    uint8_t e = mm->known ? mm->data.entry : ROOM_ENTRY_NONE;
+    if (e == ROOM_ENTRY_1P && !*have_1p) { *have_1p = true; return place; }
+    if (e == ROOM_ENTRY_2P && !*have_2p) { *have_2p = true; return place | 0x04000000u; }
+    if (e != ROOM_ENTRY_NONE)            return place | 0x40000000u;
+    return place | 0x80000000u;
+}
+
+/* The two smallest of `count` (at least two) keys, the smaller in *a. */
+static inline void room_two_lowest(const uint32_t *key, uint32_t count, uint32_t *a, uint32_t *b) {
+    *a = 0; *b = 1;
+    if (key[1] < key[0]) { *a = 1; *b = 0; }
+    for (uint32_t i = 2; i < count; i++) {
+        if (key[i] < key[*a])      { *b = *a; *a = i; }
+        else if (key[i] < key[*b]) { *b = i; }
+    }
+}
+
+/* A filler's key, between the classes (the port's own test: any of the top four
+ * bits, which a 2P entrant's 0x04000000 is not). */
+static inline uint32_t room_filler_key(uint32_t k) {
+    return (k & 0xF0000000u) ? ((k & 0x00FFFFFFu) | 0x02000000u) : k;
+}
+
 static inline bool room_pick_fighters(const room_state_t *s, const room_member_t *m, uint32_t n,
                                       uint16_t out[2]) {
     uint32_t key[ROOM_MAX_MEMBERS];
@@ -399,33 +427,19 @@ static inline bool room_pick_fighters(const room_state_t *s, const room_member_t
     for (uint32_t i = 0; i < s->line_count; i++) {
         const room_member_t *mm = room_find(m, n, s->line[i]);
         if (!mm || (mm->data.flags & ROOM_MEMBER_WATCH)) continue;
-        uint32_t k = i;
-        uint8_t  e = mm->known ? mm->data.entry : ROOM_ENTRY_NONE;
-        if (e == ROOM_ENTRY_1P && !have_1p)      { have_1p = true; }
-        else if (e == ROOM_ENTRY_2P && !have_2p) { have_2p = true; k |= 0x04000000u; }
-        else if (e != ROOM_ENTRY_NONE)           { k |= 0x40000000u; }
-        else                                     { k |= 0x80000000u; }
-        key[count] = k;
+        key[count] = room_fight_key(i, mm, &have_1p, &have_2p);
         id[count]  = mm->id;
         count++;
     }
     out[0] = out[1] = ROOM_NO_MEMBER;
     if (count < 2) return false;
 
-    /* The two smallest keys. */
-    uint32_t a = 0, b = 1;
-    if (key[b] < key[a]) { a = 1; b = 0; }
-    for (uint32_t i = 2; i < count; i++) {
-        if (key[i] < key[a])      { b = a; a = i; }
-        else if (key[i] < key[b]) { b = i; }
-    }
+    uint32_t a, b;
+    room_two_lowest(key, count, &a, &b);
 
-    /* Fillers between the classes (the port's own test: any of the top four
-     * bits, which a 2P entrant's 0x04000000 is not), then side order. */
-    uint32_t ka = (key[a] & 0xF0000000u) ? ((key[a] & 0x00FFFFFFu) | 0x02000000u) : key[a];
-    uint32_t kb = (key[b] & 0xF0000000u) ? ((key[b] & 0x00FFFFFFu) | 0x02000000u) : key[b];
-    if (ka <= kb) { out[0] = id[a]; out[1] = id[b]; }
-    else          { out[0] = id[b]; out[1] = id[a]; }
+    /* Fillers between the classes, then side order. */
+    if (room_filler_key(key[a]) <= room_filler_key(key[b])) { out[0] = id[a]; out[1] = id[b]; }
+    else                                                    { out[0] = id[b]; out[1] = id[a]; }
     return true;
 }
 

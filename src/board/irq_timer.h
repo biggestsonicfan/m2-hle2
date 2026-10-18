@@ -193,4 +193,15 @@ static inline void irqt_reset(void) {
     irqt__horizon();
 }
 
+/* 0x98000C read (MAME videoctl_r, on every Model 2 board): a frame-number bit
+ * over the low two bits the game wrote. In 30 Hz render mode (0x10000000 bit 2
+ * clear) bit 2 is frame bit 1, so it flips every other vblank; at 60 Hz, every
+ * vblank. Sega Rally polls it at boot to wait out frames, Virtual-On before it
+ * starts its COP. */
+static inline uint32_t irqt_videoctl(bool mode60, uint8_t written) {
+    irqt_flush();
+    uint32_t fn = (uint32_t)g_irqt.vbl_count;
+    return (mode60 ? (fn & 1u) << 2 : (fn & 2u) << 1) | (written & 3u);
+}
+
 #endif /* IRQ_TIMER_H */

@@ -43,6 +43,7 @@
  * loop below calls into netplay, which would otherwise be a cycle). */
 #include "thread_mutex.h"
 #include "emu_times.h"    /* emu_now_us, and get_status's "emu" timings */
+#include "link_pace.h"    /* a linked comm board's 60 Hz (Pinboard #978) */
 
 /* ---- CPU saver: hold the board until a match ----------------------------
  *
@@ -111,6 +112,9 @@ typedef struct {
 
     /* Frame-pace deadline tracking */
     int64_t      frame_deadline_us;
+    /* The clock while the comm board is linked (link_pace.h): it stands in
+     * for frame_deadline_us then. */
+    link_pace_t  link_pace;
 
     /* Set before transitioning from STOPPED→RUNNING so the run loop executes
      * the current instruction once before re-checking breakpoints. Without
@@ -126,6 +130,16 @@ typedef struct {
      * reset_count is how the asker learns it happened. */
     volatile int      request_reset;
     volatile uint32_t reset_count;
+
+    /* A savestate asked for from outside the emu thread (the MCP bridge's
+     * `save_state` / `load_state`, the window's menu): 1 save, 2 load, to or
+     * from state_path. Serviced where request_reset is, between slices.
+     * state_count moves when it has been, and state_error says how
+     * ("" for done). */
+    volatile int      request_state;
+    char              state_path[1024];
+    volatile uint32_t state_count;
+    char              state_error[160];
 
     /* Frames left before the board stops itself (emu_run_frames), 0 for none.
      * Counted down at the frame edge in emu_slice_finish, so the stop lands
@@ -267,6 +281,141 @@ static inline void emu_board_reset_state(void) {
     g_frame_clock.frame  = 0;
 }
 
+/* ---- Savestates (Pinboard #423) ---------------------------------------------
+ *
+ * savestate.h writes the board; the run loop's latches above are passed to it
+ * here, since they are this file's statics. Serviced between slices, under the
+ * mutex (emu_netplay_pump), like a board reset. */
+#include "savestate.h"
+#include "rollback.h"
+
+static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
+    savestate_emu_t e;
+    memset(&e, 0, sizeof e);
+    e.total_steps        = ctx->total_steps;
+    e.timer_cycles_seen  = s_timer_cycles_seen;
+    e.frame_clock_sample = g_frame_clock.sample;
+    e.frame_clock_frame  = g_frame_clock.frame;
+    e.irq_in_service     = s_irq_in_service;
+    e.irq_baseline_depth = s_irq_baseline_depth;
+    e.irq_from_table     = s_irq_from_table;
+    e.irq_slices         = s_irq_slices;
+    e.vblank_edge        = g_vblank_edge;
+    e.slice_capped       = ctx->slice_capped;
+    e.emu_frames         = g_emu_frames;
+    e.irqt_sound_kick    = g_irqt_sound_kick;
+    e.irqt_vblank        = g_irqt_vblank;
+    return e;
+}
+
+static inline void emu_state_put_latches(emu_thread_ctx_t *ctx, const savestate_emu_t *e) {
+    ctx->total_steps     = e->total_steps;
+    s_timer_cycles_seen  = e->timer_cycles_seen;
+    s_irq_in_service     = e->irq_in_service != 0;
+    s_irq_baseline_depth = e->irq_baseline_depth;
+    s_irq_from_table     = e->irq_from_table != 0;
+    s_irq_slices         = e->irq_slices;
+    g_vblank_edge        = e->vblank_edge;
+    ctx->slice_capped    = e->slice_capped;
+    g_emu_frames         = e->emu_frames;
+    g_dl_frame_now       = e->emu_frames;   /* its mirror, which the match_replay jump stamps */
+    g_irqt_sound_kick    = e->irqt_sound_kick;
+    g_irqt_vblank        = e->irqt_vblank;
+    g_frame_clock.sample = e->frame_clock_sample;
+    g_frame_clock.frame  = e->frame_clock_frame;
+}
+
+/* Save or load now. The caller holds the mutex (or has no other thread).
+ * NULL on success, else why not. */
+static inline const char *emu_state_save_now(emu_thread_ctx_t *ctx, const char *path) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e = emu_state_latches(ctx);
+    return savestate_save(path, ctx->cpu, ctx->bus, &e);
+}
+
+/* A load's last step, from a file or from memory: the run loop's latches, and
+ * what follows the board without being part of it. */
+static inline const char *emu_state_loaded(emu_thread_ctx_t *ctx, const char *err, const savestate_emu_t *e) {
+    if (err) return err;
+    emu_state_put_latches(ctx, e);
+    emu_attn_bump();
+    ctx->cpu_prev_snapshot = *ctx->cpu;
+    ctx->cpu_snapshot      = *ctx->cpu;
+    return NULL;
+}
+
+static inline const char *emu_state_load_now(emu_thread_ctx_t *ctx, const char *path) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e;
+    return emu_state_loaded(ctx, savestate_load(path, ctx->cpu, ctx->bus, &e), &e);
+}
+
+/* The same in memory, for a host that keeps the state itself (libretro's
+ * retro_serialize). `buf` NULL asks only for the size. */
+static inline const char *emu_state_save_mem(emu_thread_ctx_t *ctx, void *buf, size_t cap, size_t *len) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e = emu_state_latches(ctx);
+    return savestate_save_mem(buf, cap, len, ctx->cpu, ctx->bus, &e);
+}
+
+static inline const char *emu_state_load_mem(emu_thread_ctx_t *ctx, const void *data, size_t size) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    savestate_emu_t e;
+    return emu_state_loaded(ctx, savestate_load_mem(data, size, ctx->cpu, ctx->bus, &e), &e);
+}
+
+/* The flat state (rollback.h) in memory: libretro's serialize, which
+ * RetroArch's rewind calls every frame (Pinboard #585). `rom` is the loaded
+ * ROM's savestate_rom_id, worked out once by the caller. The part list is
+ * rebuilt each time (a few dozen pointers): it is the running profile's, and
+ * a GGPO session builds the same one. */
+static inline size_t emu_state_flat_size(emu_thread_ctx_t *ctx) {
+    rollback_layout(ctx->cpu, ctx->bus);
+    return rollback_flat_size();
+}
+
+static inline const char *emu_state_flat_save(emu_thread_ctx_t *ctx, void *buf, const savestate_rom_t *rom) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    rollback_layout(ctx->cpu, ctx->bus);
+    savestate_emu_t e = emu_state_latches(ctx);
+    rollback_flat_save(buf, rom, &e);
+    return NULL;
+}
+
+static inline const char *emu_state_flat_load(emu_thread_ctx_t *ctx, const void *data, size_t size,
+                                              const savestate_rom_t *rom) {
+    if (g_sky_eye.phase != SKY_EYE_OFF) return "SKY EYE is holding the stage; leave it first";
+    rollback_layout(ctx->cpu, ctx->bus);
+    savestate_emu_t e;
+    const char *err = rollback_flat_check(data, size, rom);
+    if (!err) rollback_flat_load(data, ctx->bus, &e);
+    return emu_state_loaded(ctx, err, &e);
+}
+
+/* A board followed one way from another (Pinboard #568): the leader writes its
+ * inputs and writes to a feed, a follower runs on them. Hooked into the slice. */
+#include "follow.h"
+#include "replay.h"   /* recorded online matches, and their playback (Pinboard #572) */
+
+/* A game script's hooks (core/m2lua.h, Pinboard #958), set by a host that runs
+ * scripts and called with the emu mutex held: at each vblank, and before and
+ * after every board reset. NULL: no scripts. A script writes the board and
+ * patches its ROM, so may_run is false while a session, a replay or a follow
+ * owns it: the script stops and its patches come off. */
+static void (*g_emu_script_frame)(bool may_run);
+static void (*g_emu_script_reset)(bool may_run, bool before);
+static inline bool emu_ggpo_active(void);
+static inline bool emu_script_may_run(void) {
+    return !netplay_active() && !emu_ggpo_active() && !replay_playing() &&
+           !follow_following() && !follow_leading();
+}
+static inline void emu_script_frame(bool frame) {
+    if (frame && g_emu_script_frame) g_emu_script_frame(emu_script_may_run());
+}
+static inline void emu_script_reset(bool before) {
+    if (g_emu_script_reset) g_emu_script_reset(emu_script_may_run(), before);
+}
+
 /* ---- The sound UART ---------------------------------------------------------
  *
  * The game's sound handler (STF send_sound_code) sends ONE byte of a queued
@@ -311,9 +460,10 @@ static inline void emu_board_reset_state(void) {
  * in slots 18-31 over sd_flag and the rest (issue #112): the sd_flag sequencer
  * then read a command code as a pointer (unmapped reads at IP 0x3F5AC). */
 static inline bool emu_sound_pending(emu_thread_ctx_t *ctx, const game_quirks_t *q) {
-    if (!q->sound_queue_count_addr) return false;
-    uint32_t cnt = mem_read8(ctx->bus, q->sound_queue_count_addr);
-    if (cnt > g_sound.queue_hi) g_sound.queue_hi = cnt;
+    if (q->sound_queue_count_addr) {        /* STF's queue, for the stats */
+        uint32_t cnt = mem_read8(ctx->bus, q->sound_queue_count_addr);
+        if (cnt > g_sound.queue_hi) g_sound.queue_hi = cnt;
+    }
     if (!(g_irqt.intena & 0x400u)) return false;
     irqt_raise(0x400u);                      /* bit 10 = sound */
     return true;
@@ -372,8 +522,13 @@ static inline void emu_service_irq(emu_thread_ctx_t *ctx) {
     i960_cpu_t          *cpu = ctx->cpu;
     const game_quirks_t *q   = &g_active_profile->quirks;
 
+    /* A board following a feed (a replay, core/replay.h) goes by the flags
+     * its leader went by. */
+    uint32_t board = follow_board_flags();
+    g_hle_netplay_board = (board & FOLLOW_BOARD_SESSION) != 0;
+
     /* Auto-skip the boot warning screen by holding its ack flag at 1. */
-    if ((g_warning_skip || netplay_active()) && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
+    if ((board & FOLLOW_BOARD_WARNING) && q->warning_skip_addr) mem_write32(ctx->bus, q->warning_skip_addr, 1);
 
     /* Did the in-service handler return? (frame unwound to/below baseline) */
     if (s_irq_in_service && cpu->frame_depth <= s_irq_baseline_depth)
@@ -412,6 +567,10 @@ static inline void emu_service_sound_again(emu_thread_ctx_t *ctx) {
 /* Slice start: the cycles run since the clock was last brought up to date. */
 static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
     i960_cycle_table_init();
+    i960_bt_init();
+    g_i960_bt_on = g_i960_timing_force >= 0 ? g_i960_timing_force != 0
+                 : g_active_profile && g_active_profile->quirks.i960_board_timing;
+    if (g_i960_bt_on) i960_bt_areas(ctx->bus->cpu_ctrl);
     i960_cpu_t *cpu = ctx->cpu;
     /* A board loaded or reset by a host that does not call
      * emu_board_reset_state starts its count again under us. */
@@ -458,6 +617,48 @@ static inline bool emu_sound_slice_end(bool frame) {
 
 /* ---- Run loop ------------------------------------------------------------ */
 
+/* A savestate the UI asked for. A load inside a session would change this board
+ * and not the peer's, so it is refused there, and on a linked comm board, whose
+ * time is the link's (link_pace.h); a save is only a read, and is not.
+ * A loaded state ends a follow lead and a recording: neither saw it coming. */
+static inline void emu_state_request_pump(emu_thread_ctx_t *ctx, netplay_step_t step) {
+    int state = ctx->request_state;
+    if (!state) return;
+    ctx->request_state = 0;
+    const char *err;
+    emu_mutex_lock(&ctx->mutex);
+    if (state == 2) {
+        if (step != NETPLAY_STEP_OFF) err = "a netplay session owns the board";
+        else if (m2comm_linked())     err = "the board is linked to another cabinet";
+        else if (replay_playing())    err = "a replay is playing";
+        else                          err = emu_state_load_now(ctx, ctx->state_path);
+        if (!err) { follow_lead_break("state loaded"); replay_rec_break("state loaded"); }
+    } else {
+        err = emu_state_save_now(ctx, ctx->state_path);
+    }
+    snprintf(ctx->state_error, sizeof ctx->state_error, "%s", err ? err : "");
+    emu_mutex_unlock(&ctx->mutex);
+    ctx->state_count++;
+}
+
+/* A linked comm board's reset into the room's role (net/comm_role.h), once the
+ * game can hold it: a cold boot, so the step count starts again as at the
+ * barrier's (see emu_netplay_pump). A link is not a lockstep session: its
+ * board is reset alone, never while a session steps it. */
+static inline void emu_comm_role_pump(emu_thread_ctx_t *ctx, netplay_step_t step) {
+    if (step != NETPLAY_STEP_OFF || !comm_role_waiting()) return;
+    emu_mutex_lock(&ctx->mutex);
+    if (netplay_comm_role_reset(ctx->bus)) {
+        replay_rec_break("comm link role");
+        replay_play_yield();
+        follow_lead_break("comm link role");
+        ctx->total_steps       = 0;
+        ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+        ctx->cpu_snapshot      = *ctx->cpu;
+    }
+    emu_mutex_unlock(&ctx->mutex);
+}
+
 /* Pump netplay and hand back what this slice may do.
  *
  * OUTSIDE the emu mutex on purpose: a TLS connect blocks for seconds, and
@@ -481,11 +682,17 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
      * reset, back in their own settings (netplay_empty_room_pump). */
     bool alone = step == NETPLAY_STEP_OFF && netplay_take_empty_restart();
 
+    emu_state_request_pump(ctx, step);
+
     if (step == NETPLAY_STEP_RESET || asked || alone) {
         emu_mutex_lock(&ctx->mutex);
+        emu_script_reset(true);
+        replay_rec_break("board reset");
+        replay_play_yield();   /* a session takes the board from a replay */
         if (alone)      netplay_restart_alone();
         else if (asked) asked = netplay_reset_board_now();
         else            netplay_do_reset();
+        follow_lead_break("board reset");
         /* THE STEP COUNT IS PART OF THE BOARD, because the frame check hashes
          * it -- `netplay_frame_check` calls it "the instruction count since
          * reset" and it has to actually be one. Left running, it carries the
@@ -497,9 +704,14 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         ctx->total_steps       = 0;
         ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
         ctx->cpu_snapshot      = *ctx->cpu;
+        /* After the step count is zeroed: the replay's state carries it, and
+         * every frame check of the feed hashes it. */
+        if (step == NETPLAY_STEP_RESET && !asked && !alone) replay_session_reset(ctx);
+        emu_script_reset(false);
         emu_mutex_unlock(&ctx->mutex);
         if (asked) ctx->reset_count++;
     }
+    emu_comm_role_pump(ctx, step);
     return step;
 }
 
@@ -670,6 +882,8 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * program is doing then: the frame is the board's, not the game's. */
     g_vblank_edge = 0;
     g_geodl_full_snap = g_active_profile && g_active_profile->quirks.geo_displaylist;
+    follow_slice_begin(ctx);   /* follow.h: latch or replay this slice's inputs */
+    replay_slice_begin(ctx);   /* replay.h: record a netplay match's */
     emu_slice_irq_stale(ctx);
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);
@@ -752,7 +966,10 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->total_steps += steps;
     ctx->slice_capped = (i >= max_steps);
     bool frame = g_vblank_edge != 0;
+    follow_slice_end(ctx, frame);
+    replay_slice_end(ctx, frame);
     if (frame) emu_slice_frame_edge(ctx);
+    emu_script_frame(frame);
     emu_slice_after(ctx, frame, prof_t0, steps);
     hprof_leave(hzone);
 }
@@ -775,6 +992,7 @@ static inline void emu_slice_count_frame(emu_thread_ctx_t *ctx) {
      * here, at the frame boundary every board in a room shares. */
     int versus_result = g_versus_result;
     g_versus_result = 0;
+    replay_frame_result(ctx, versus_result);
     netplay_end_frame(&ctx->cpu_snapshot, ctx->total_steps, versus_result);
     if (sndcap_on()) sndcap_frame(g_emu_frames, mem_read32(ctx->bus, 0x500020));
     /* A PS3 match plays on the board as it is, with no reset: from here on
@@ -853,6 +1071,8 @@ static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
         bool reset = netplay_reset_board_now();
         if (reset) {
             ctx->total_steps       = 0;    /* as the barrier's reset: see emu_netplay_pump */
+            follow_lead_break("idle hold");
+            replay_rec_break("idle hold");
             ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
             ctx->cpu_snapshot      = *ctx->cpu;
             ctx->frame_deadline_us = 0;
@@ -865,9 +1085,27 @@ static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
     emu_nap_us(EMU_IDLE_POLL_US);
 }
 
+_Static_assert(LINK_PACE_FRAME_US == EMU_SLICE_US, "a linked board's frame is the board's frame");
+
+/* A linked comm board's frame (link_pace.h): 60 Hz whatever asked for other,
+ * up to LINK_PACE_MAX_DEBT frames repaid after a hitch, the rest dropped. */
+static inline void emu_pace_linked(emu_thread_ctx_t *ctx, int64_t work_t1) {
+    ctx->frame_deadline_us = 0;   /* the solo clock starts afresh when the link ends */
+    bool budget_hit = ctx->frame_budget_hit != 0;   /* not slept out, as emu_pace_frame's */
+    ctx->frame_budget_hit = 0;
+    int64_t now = emu_now_us();
+    int64_t sleep_us = link_pace_slept(&ctx->link_pace, now, m2comm_backlog()) - now;
+    if (sleep_us > 0 && !budget_hit) {
+        emu_sleep_us(sleep_us);
+        g_emu_times.pace_us += emu_now_us() - work_t1;
+    }
+}
+
 /* Pace the board to 60 Hz after a slice that reached its vblank: sleep out to
  * the next 16.67ms tick, measured from work_t1, where the slice's work ended. */
 static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
+    if (m2comm_linked()) { emu_pace_linked(ctx, work_t1); return; }
+    link_pace_stop(&ctx->link_pace);
     int64_t now = emu_now_us();
     if (ctx->frame_deadline_us == 0) {
         ctx->frame_deadline_us = now + EMU_SLICE_US;
@@ -895,7 +1133,7 @@ static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
      * frame per call. */
     bool budget_hit = ctx->frame_budget_hit != 0;
     ctx->frame_budget_hit = 0;
-    if (unthrottled || netplay_catching_up()) ctx->frame_deadline_us = 0;
+    if (unthrottled || netplay_catching_up() || replay_play_unpaced()) ctx->frame_deadline_us = 0;
     else if (sleep_us > 0 && !budget_hit) {
         emu_sleep_us(sleep_us);
         g_emu_times.pace_us += emu_now_us() - work_t1;
@@ -920,7 +1158,13 @@ static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice
         g_emu_times.net_us += emu_now_us() - slice_start;
         return false;
     }
-    if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget) {
+    /* A replay holds the board where its feed ends (or splits), still. */
+    if (np_step == NETPLAY_STEP_OFF && replay_play_follows() && !follow_slice_ready()) {
+        emu_sleep_ms(2);
+        g_emu_times.net_us += emu_now_us() - slice_start;
+        return false;
+    }
+    if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget && !replay_playing()) {
         emu_idle_hold(ctx);
         g_emu_times.net_us += emu_now_us() - slice_start;
         return false;
@@ -928,9 +1172,14 @@ static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice
     return true;
 }
 
+/* Rollback netplay (Pinboard #575): its step stands in for the one below. */
+#include "emu_ggpo.h"
+
 /* The run loop's RUNNING state: one slice, then its pacing. False when no
  * slice ran and the loop goes straight round again. */
 static inline bool emu_run_running(emu_thread_ctx_t *ctx) {
+    emu_ggpo_lobby_pump();
+    if (emu_ggpo_wanted()) return emu_ggpo_step(ctx);
     if (emu_slice_should_stop(ctx)) return false;
     int64_t slice_start = emu_now_us();
 
@@ -978,6 +1227,7 @@ static inline void emu_run_stepping(emu_thread_ctx_t *ctx) {
 /* The run loop's STOPPED state. Netplay still has to breathe: the login, the
  * room and the peer handshake all happen before anybody presses Run. */
 static inline void emu_run_stopped(emu_thread_ctx_t *ctx) {
+    emu_ggpo_lobby_pump();
     ctx->idle_holding = 0;
     emu_netplay_pump(ctx);
     /* ...and a session that is PLAYING cannot, from here: the pump keeps
@@ -1021,6 +1271,7 @@ static void emu_thread_run_loop(emu_thread_ctx_t *ctx) {
             last_sps_time   = now;
         }
     }
+    emu_ggpo_shutdown(ctx);
     hprof_shutdown();                   /* a run cut short still writes its report */
 }
 
@@ -1042,8 +1293,14 @@ static void *emu_thread_proc(void *p) {
  * with emu_slice_body / emu_slice_finish (the web build, which has one thread).
  * thread_alive stays 0, which is also what tells emu_sound_restart and
  * emu_sound_midi there is no run loop to lock out. */
+/* A light gun's host pointer aims only a board this host's hands drive (lightgun.h). */
+static int emu_board_remote(void) {
+    return replay__session_live() || follow_following() || g_replay_play.on || g_native_play.on;
+}
+
 static inline void emu_ctx_init(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, memory_bus_t *bus) {
     memset(ctx, 0, sizeof(*ctx));
+    g_lightgun_remote_fn = emu_board_remote;
     ctx->cpu = cpu;
     ctx->bus = bus;
     ctx->run_state = EMU_STOPPED;
@@ -1076,6 +1333,7 @@ static inline void emu_thread_shutdown(emu_thread_ctx_t *ctx) {
     /* The sound thread stays parked for the life of the process, but must not
      * be mid-run when the host frees the sample ROMs it reads. */
     sound_settle();
+    replay_rec_shutdown();   /* keep a match being recorded, and wait for its writer */
     emu_mutex_destroy(&ctx->mutex);
     LOG_INFO("emu: thread stopped");
 }

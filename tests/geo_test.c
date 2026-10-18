@@ -39,7 +39,7 @@ static geo3d_models_t test_models(const romset_t *rs, const game_quirks_t *q) {
         .main_data = rs->main_data, .main_data_size = rs->main_data_size,
         .polygons  = rs->polygons,  .polygons_size  = rs->polygons_size,
         .materials = rs->textures,  .materials_size = rs->textures_size,
-        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+        .table = profile_model_table(q),
         .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add,
     };
 }
@@ -50,13 +50,15 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
                          int *tris_up, int *tris_flat, int *planes) {
     static geo3d_cmesh_t m;
     *tris_up = *tris_flat = *planes = 0;
-    uint32_t toff = q->model_table_offset + (uint32_t)idx * MODEL_ENTRY_SIZE;
+    const model_table_t table = profile_model_table(q);
+    model_entry_t e;
+    model_entry_read(&table, rs->main_data, rs->main_data_size, (uint32_t)idx, &e);
     memset(&m, 0, sizeof m);
     m.model_idx = idx;
-    m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
-    m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
+    m.uv_ptr  = e.uv_ptr;
+    m.mat_ptr = e.mat_ptr;
     m.md = test_models(rs, q);
-    uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
+    uint32_t mesh = model_mesh_offset(e.mesh_ptr, q->mesh_ptr_subtract, q->mesh_ptr_add);
     if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
     geo3d_mesh_layers(&m);
     printf("info: model %d mat_ptr=%06X uv_ptr=%06X layered faces:", idx, m.mat_ptr, m.uv_ptr);
@@ -84,13 +86,15 @@ static void layer_counts(const romset_t *rs, const game_quirks_t *q, int idx,
 /* GEO_TEST_DUMP=<model>: every face the ranking touched. */
 static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
     static geo3d_cmesh_t m;
-    uint32_t toff = q->model_table_offset + (uint32_t)idx * MODEL_ENTRY_SIZE;
+    const model_table_t table = profile_model_table(q);
+    model_entry_t e;
+    model_entry_read(&table, rs->main_data, rs->main_data_size, (uint32_t)idx, &e);
     memset(&m, 0, sizeof m);
     m.model_idx = idx;
-    m.uv_ptr  = read_u32_le(rs->main_data + toff + 0);
-    m.mat_ptr = read_u32_le(rs->main_data + toff + 4);
+    m.uv_ptr  = e.uv_ptr;
+    m.mat_ptr = e.mat_ptr;
     m.md = test_models(rs, q);
-    uint32_t mesh = read_u32_le(rs->main_data + toff + 8) * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add;
+    uint32_t mesh = model_mesh_offset(e.mesh_ptr, q->mesh_ptr_subtract, q->mesh_ptr_add);
     if (!geo3d_mesh_build(&m, mesh, m.mat_ptr != 0, m.uv_ptr != 0)) return;
     geo3d_mesh_layers(&m);
     printf("dump: model %d, %d faces\n", idx, m.n_faces);
@@ -113,6 +117,72 @@ static void layer_dump(const romset_t *rs, const game_quirks_t *q, int idx) {
     free(m.sv); free(m.faces);
 }
 
+static int tri_finite(const geo3d_tri_t *t) {
+    return finite_f(t->x0) && finite_f(t->y0) && finite_f(t->z0) &&
+           finite_f(t->x1) && finite_f(t->y1) && finite_f(t->z1) &&
+           finite_f(t->x2) && finite_f(t->y2) && finite_f(t->z2);
+}
+
+/* Decode every model in model space: most are meshes, none has a coordinate
+ * that is not finite. Returns the richest model. */
+static int check_decode_all(const geo3d_models_t *md) {
+    int      nonempty = 0;
+    long     total_tris = 0, total_lines = 0;
+    int      bad_coord = 0;
+    int      best_idx = -1, best_tris = 0;
+
+    for (uint32_t m = 0; m < md->table.count; m++) {
+        geo3d_tris_reset();
+        geo3d_lines_reset();
+        geo3d_decode_model(md, (int)m, NULL /* model space (no transform) */, 1.0f, 1.0f, 1.0f);
+        int nt = g_geo3d_tris.count, nl = g_geo3d_lines.count;
+        if (nt > 0 || nl > 0) nonempty++;
+        total_tris  += nt;
+        total_lines += nl;
+        if (nt > best_tris) { best_tris = nt; best_idx = (int)m; }
+        for (int i = 0; i < nt; i++)
+            if (!tri_finite(&g_geo3d_tris.tris[i])) { bad_coord++; break; }
+    }
+
+    printf("info: models scanned=%u nonempty=%d total_tris=%ld total_lines=%ld bad_coord_models=%d\n",
+           md->table.count, nonempty, total_tris, total_lines, bad_coord);
+    printf("info: richest model = index %d with %d triangles\n", best_idx, best_tris);
+
+    CHECK(nonempty > 1000, "thousands of models decode to non-empty meshes");
+    CHECK(total_tris > 100000, "decoder emits a large body of triangles");
+    CHECK(bad_coord == 0, "all emitted triangle coordinates are finite");
+    CHECK(best_tris > 0 && best_idx >= 0, "found a richly-detailed model");
+    return best_idx;
+}
+
+/* What ranking costs: it runs once per mesh, the first time a model is
+ * drawn, so the slowest model is a first-sight hitch. */
+static void rank_cost(const romset_t *rs, const game_quirks_t *q, const geo3d_models_t *md) {
+    static geo3d_cmesh_t mm;
+    double worst = 0.0, total = 0.0;
+    int worst_idx = -1;
+    for (uint32_t m = 0; m < md->table.count; m++) {
+        model_entry_t e;
+        model_entry_read(&md->table, rs->main_data, rs->main_data_size, m, &e);
+        if (!e.mesh_ptr) continue;
+        memset(&mm, 0, sizeof mm);
+        mm.model_idx = (int)m;
+        mm.uv_ptr  = e.uv_ptr;
+        mm.mat_ptr = e.mat_ptr;
+        mm.md = *md;
+        clock_t t0 = clock();
+        if (geo3d_mesh_build(&mm, model_mesh_offset(e.mesh_ptr, q->mesh_ptr_subtract, q->mesh_ptr_add), mm.mat_ptr != 0, mm.uv_ptr != 0)) {
+            geo3d_mesh_layers(&mm);
+            double ms = 1000.0 * (double)(clock() - t0) / CLOCKS_PER_SEC;
+            total += ms;
+            if (ms > worst) { worst = ms; worst_idx = (int)m; }
+            free(mm.sv); free(mm.faces);
+        }
+    }
+    printf("info: mesh build + ranking, every model: %.0f ms total, slowest model %d at %.1f ms\n",
+           total, worst_idx, worst);
+}
+
 int main(void) {
     static romset_t rs;
     if (sfight_load(&rs, test_rom("sfight.zip"), test_rom("schamp.zip")) != 0) {
@@ -126,36 +196,7 @@ int main(void) {
         return 0;
     }
 
-    int      nonempty = 0;
-    long     total_tris = 0, total_lines = 0;
-    int      bad_coord = 0;
-    int      best_idx = -1, best_tris = 0;
-
-    for (uint32_t m = 0; m < q->model_table_count; m++) {
-        geo3d_tris_reset();
-        geo3d_lines_reset();
-        geo3d_decode_model(&md, (int)m, NULL /* model space (no transform) */, 1.0f, 1.0f, 1.0f);
-        int nt = g_geo3d_tris.count, nl = g_geo3d_lines.count;
-        if (nt > 0 || nl > 0) nonempty++;
-        total_tris  += nt;
-        total_lines += nl;
-        if (nt > best_tris) { best_tris = nt; best_idx = (int)m; }
-        for (int i = 0; i < nt; i++) {
-            const geo3d_tri_t *t = &g_geo3d_tris.tris[i];
-            if (!finite_f(t->x0)||!finite_f(t->y0)||!finite_f(t->z0)||
-                !finite_f(t->x1)||!finite_f(t->y1)||!finite_f(t->z1)||
-                !finite_f(t->x2)||!finite_f(t->y2)||!finite_f(t->z2)) { bad_coord++; break; }
-        }
-    }
-
-    printf("info: models scanned=%u nonempty=%d total_tris=%ld total_lines=%ld bad_coord_models=%d\n",
-           q->model_table_count, nonempty, total_tris, total_lines, bad_coord);
-    printf("info: richest model = index %d with %d triangles\n", best_idx, best_tris);
-
-    CHECK(nonempty > 1000, "thousands of models decode to non-empty meshes");
-    CHECK(total_tris > 100000, "decoder emits a large body of triangles");
-    CHECK(bad_coord == 0, "all emitted triangle coordinates are finite");
-    CHECK(best_tris > 0 && best_idx >= 0, "found a richly-detailed model");
+    int best_idx = check_decode_all(&md);
 
     /* Re-decode the richest model and sanity-check bounds + winding (2 tris/quad
      * means tri count is even for an all-quad model; mixed tri/quad is allowed). */
@@ -180,33 +221,7 @@ int main(void) {
     printf("info: model 188: %d triangles layered, %d at layer 0, %d faces on a plane\n", up, flat, planes);
     CHECK(up == 4 && flat == 60, "model 188: the JACKPOT panels lie over the cabinet");
 
-    /* What ranking costs: it runs once per mesh, the first time a model is
-     * drawn, so the slowest model is a first-sight hitch. */
-    {
-        static geo3d_cmesh_t mm;
-        double worst = 0.0, total = 0.0;
-        int worst_idx = -1;
-        for (uint32_t m = 0; m < q->model_table_count; m++) {
-            uint32_t toff = q->model_table_offset + m * MODEL_ENTRY_SIZE;
-            uint32_t mp = read_u32_le(rs.main_data + toff + 8);
-            if (!mp) continue;
-            memset(&mm, 0, sizeof mm);
-            mm.model_idx = (int)m;
-            mm.uv_ptr  = read_u32_le(rs.main_data + toff + 0);
-            mm.mat_ptr = read_u32_le(rs.main_data + toff + 4);
-            mm.md = md;
-            clock_t t0 = clock();
-            if (geo3d_mesh_build(&mm, mp * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mm.mat_ptr != 0, mm.uv_ptr != 0)) {
-                geo3d_mesh_layers(&mm);
-                double ms = 1000.0 * (double)(clock() - t0) / CLOCKS_PER_SEC;
-                total += ms;
-                if (ms > worst) { worst = ms; worst_idx = (int)m; }
-                free(mm.sv); free(mm.faces);
-            }
-        }
-        printf("info: mesh build + ranking, every model: %.0f ms total, slowest model %d at %.1f ms\n",
-               total, worst_idx, worst);
-    }
+    rank_cost(&rs, q, &md);
 
     romset_free(&rs);
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

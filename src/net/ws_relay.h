@@ -30,9 +30,11 @@
  * above it can tell a relayed client from a direct one.
  *
  * The gateway admits a WebSocket only from an Origin in its list (it exists to
- * stop other web pages' scripts). A native client has no page; it sends the play
- * site's, WS_RELAY_ORIGIN. It also pings each socket every 30 s and closes one
- * that does not answer, so ws_relay_recv answers pings, and has to be called.
+ * stop other web pages' scripts). A native client has no page; it sends the web
+ * site's, WS_RELAY_ORIGIN. Builds from before Pinboard #881 send the site's old
+ * name, play.sonicthefighte.rs, so the gateway keeps that on its list too. It
+ * also pings each socket every 30 s and closes one that does not answer, so
+ * ws_relay_recv answers pings, and has to be called.
  *
  * wss:// goes through tls.h with ordinary chain and name validation (the gateway
  * sits behind Caddy's Let's Encrypt certificate). ws:// is plain TCP, for a
@@ -70,7 +72,7 @@
 
 /* Must match SIGNALING_TAG in web/gateway/rules.mjs (and web_socket.h). */
 #define WS_RELAY_SIGNALING_TAG_BYTES { 100, 127, 255, 254 }
-#define WS_RELAY_ORIGIN    "https://play.sonicthefighte.rs"
+#define WS_RELAY_ORIGIN    "https://arcade.sonicthefighte.rs"
 #define WS_RELAY_DGRAM_MAX 1200          /* the gateway's limits.maxPayload */
 #define WS_RELAY_TIMEOUT_MS 8000
 

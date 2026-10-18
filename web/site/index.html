@@ -3,8 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sonic the Fighters</title>
-<meta name="description" content="Play Sonic the Fighters in your browser, online, with your own copy of the game.">
+<title>Model 2 Arcade</title>
+<meta name="description" content="Play Sega Model 2 arcade games in your browser, with your own copy of the game.">
+<!-- Which game (?game=ID&profile=PROFILE). Without one, the front page with a box
+     per game: before anything else loads, so no emulator starts behind it.
+     sfight.html and srallyc.html are this page with that game's words above, for a
+     link preview, which runs no script (web/stamp-site.cmake). -->
+<script src="m2hle-lang.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-lang-menu.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-games.js?v=@M2HLE_VERSION@"></script>
+<script>if (!m2hleGames.picked) location.replace('home.html' + m2hleLang.query());</script>
+<!-- The old hosts' storage, brought over once (m2hle-migrate.js): this origin, then theirs. -->
+<meta name="m2hle-migrate" content="https://arcade.sonicthefighte.rs https://play.sonicthefighte.rs https://srally.sonicthefighte.rs">
+<script src="m2hle-migrate.js?v=@M2HLE_VERSION@"></script>
 <meta name="theme-color" content="#001735">
 <!-- The two faces the first screen shows, asked for before the stylesheet names
      them. Same URLs as m2hle.css's @font-face (stamped there too), so they are
@@ -12,6 +23,9 @@
 <link rel="preload" href="fonts/text.woff2?v=@M2HLE_VERSION@" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/title.woff2?v=@M2HLE_VERSION@" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="m2hle.css?v=@M2HLE_VERSION@">
+<!-- The arcade's scores service (code.robkrum.com/rob/scores.sonicthefighte.rs). It was
+     arcade.sonicthefighte.rs until that name became this site (Pinboard #881). -->
+<meta name="stf-arcade-api" content="https://scores.sonicthefighte.rs">
 </head>
 <body>
 
@@ -47,25 +61,25 @@
   </defs>
 </svg>
 
-<canvas id="canvas" tabindex="0" aria-label="The game screen"></canvas>
+<canvas id="canvas" tabindex="0" aria-label="The game screen" data-i18n-aria="ui.canvas"></canvas>
 
 <!-- Over the game when a room has emptied with the board still in VS mode
      (netplay_empty_room_pump). It takes no clicks: the button that answers it is
      the game's. -->
 <div id="np-empty" class="np-empty ps-win" role="status" hidden>
-  <p class="ps-title np-empty-title">Online Battle</p>
-  <p>There are no other players in the lobby.</p>
-  <p>Press any button to restart the game.</p>
+  <p class="ps-title np-empty-title" data-i18n="ui.menu.lobby">Online Battle</p>
+  <p data-i18n="ui.empty.none">There are no other players in the lobby.</p>
+  <p data-i18n="ui.empty.press">Press any button to restart the game.</p>
 </div>
 
 <!-- Over the game while the lobby drawn on it (ps3ui_app.h, PS3UI_SCR_TWITCH) waits
      for a Twitch approval. The canvas can only print the address and the code; this
      makes them a link and a copy button. The account panel has its own. -->
 <div id="np-twitch-float" class="np-twitch-float ps-win" hidden>
-  <p id="np-twitch-float-code" class="np-code" aria-label="Your Twitch sign-in code"></p>
+  <p id="np-twitch-float-code" class="np-code" aria-label="Your Twitch sign-in code" data-i18n-aria="ui.twitch.code"></p>
   <p class="np-row">
-    <button id="np-twitch-float-copy" class="tool">Copy code</button>
-    <a id="np-twitch-float-link" class="tool primary" target="_blank" rel="noopener noreferrer" hidden>Open Twitch</a>
+    <button id="np-twitch-float-copy" class="tool" data-i18n="ui.twitch.copy">Copy code</button>
+    <a id="np-twitch-float-link" class="tool primary" target="_blank" rel="noopener noreferrer" hidden data-i18n="ui.twitch.open">Open Twitch</a>
   </p>
 </div>
 
@@ -77,30 +91,31 @@
       <div class="ps-head"><h1 class="ps-title">Sonic the Fighters</h1></div>
       <div class="ps-body">
         <section id="step-loading">
-          <p class="lead">Starting up&hellip;</p>
+          <p class="lead" data-i18n="step.loading">Starting up&hellip;</p>
         </section>
 
         <section id="step-rom" hidden>
-          <p class="lead">Add your copy of the game to begin.</p>
-          <input id="file" type="file" accept=".zip,application/zip" class="visually-hidden">
+          <p class="lead" data-i18n="step.rom">Add your copy of the game to begin.</p>
+          <input id="file" type="file" accept=".zip,application/zip" multiple class="visually-hidden">
           <label id="drop" class="drop ps-selected" for="file">
             <svg class="ps-glyph drop-glyph" aria-hidden="true"><use href="#ps-cross"/></svg>
-            <strong>Choose your game file</strong>
-            <span>or drop it here</span>
+            <strong data-i18n="step.choose">Choose your game file</strong>
+            <span data-i18n="step.drop">or drop it here</span>
             <span class="hint">A merged <code>sfight.zip</code> or <code>schamp.zip</code></span>
           </label>
           <p id="rom-error" class="error" hidden></p>
-          <p class="fine">Your file stays on this computer. It is read by this page and is never uploaded.</p>
+          <p class="fine" data-i18n="step.private">Your file stays on this computer. It is read by this page and is never uploaded.</p>
         </section>
 
         <section id="step-busy" hidden>
-          <p class="lead">Reading your game file&hellip;</p>
+          <p class="lead" data-i18n="step.busy">Reading your game file&hellip;</p>
           <p class="ps-loading" aria-hidden="true"><span></span><span></span><span></span></p>
         </section>
 
         <section id="step-fatal" hidden>
-          <p class="lead">This browser could not start the game.</p>
+          <p class="lead" data-i18n="step.fatal">This browser could not start the game.</p>
           <p id="fatal-text" class="error"></p>
+          <button id="fatal-reload" class="tool" data-i18n="step.reload" hidden>Reload</button>
         </section>
       </div>
     </div>
@@ -110,14 +125,17 @@
   <footer class="ps-hintbar">
     <p class="ps-strip">
       <span id="build"></span> &middot;
-      <a href="https://github.com/biggestsonicfan/m2-hle2" target="_blank" rel="noopener noreferrer">Source on GitHub</a> &middot;
-      Fonts: Anybody, M&nbsp;PLUS&nbsp;1p and M&nbsp;PLUS&nbsp;1&nbsp;Code, under the SIL Open Font License
+      <a id="all-games" href="home.html" data-i18n="site.games">All games</a> &middot;
+      <a href="https://github.com/biggestsonicfan/m2-hle2" target="_blank" rel="noopener noreferrer" data-i18n="site.source">Source on GitHub</a> &middot;
+      <span data-i18n="ui.fonts">Fonts: Anybody, M&nbsp;PLUS&nbsp;1p and M&nbsp;PLUS&nbsp;1&nbsp;Code, under the SIL Open Font License</span>
       (<a href="fonts/OFL-Anybody.txt" target="_blank">Anybody</a>,
       <a href="fonts/OFL-MPLUS.txt" target="_blank">M+</a>,
-      <a href="fonts/OFL-MPLUS1Code.txt" target="_blank">M+ Code</a>)
+      <a href="fonts/OFL-MPLUS1Code.txt" target="_blank">M+ Code</a>) &middot;
+      <span data-i18n="ui.ggpo.credit">Rollback netplay:</span> <a href="https://github.com/pond3r/ggpo" target="_blank" rel="noopener noreferrer">GGPO</a><span data-i18n="ui.mit">, under the MIT License</span>
+      (<a href="fonts/MIT-GGPO.txt" target="_blank" data-i18n="ui.license">license</a>)
     </p>
     <div class="ps-hints">
-      <label for="file" class="ps-hint hint-rom"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-cross"/></svg>:Choose file</label>
+      <label for="file" class="ps-hint hint-rom"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-cross"/></svg><span data-i18n="hint.rom">:Choose file</span></label>
     </div>
   </footer>
 </main>
@@ -127,107 +145,107 @@
      web_lobby_open); this panel keeps what a pad and an on-screen keyboard do
      badly -- making an account with an e-mail address, sending its code again --
      and the match controls, for anyone who wants them in the page. -->
-<aside id="online" class="online ps-win" hidden aria-label="RPCN account">
+<aside id="online" class="online ps-win" hidden aria-label="RPCN account" data-i18n-aria="ui.menu.online">
   <div class="online-head ps-head">
-    <h2 class="ps-title">RPCN account</h2>
-    <button id="np-close" class="tool ps-back" aria-label="Close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
+    <h2 class="ps-title" data-i18n="ui.menu.online">RPCN account</h2>
+    <button id="np-close" class="tool ps-back" aria-label="Close" data-i18n-aria="ui.close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg><span data-i18n="ui.back">Back</span></button>
   </div>
-  <p class="np-to-lobby-row fine left">The lobby is on the game screen.
-    <button id="np-to-lobby" class="linkish" type="button" hidden>Open Online Battle</button></p>
+  <p class="np-to-lobby-row fine left"><span data-i18n="ui.np.lobbyhere">The lobby is on the game screen.</span>
+    <button id="np-to-lobby" class="linkish" type="button" hidden data-i18n="ui.np.tolobby">Open Online Battle</button></p>
 
   <section id="np-signin">
     <div id="np-returning" hidden>
-      <p class="lead">Welcome back, <strong id="np-returning-name"></strong>.</p>
-      <p class="fine">On <span id="np-returning-server"></span>.</p>
-      <button id="np-continue" class="tool primary big">Continue</button>
-      <p class="fine"><button id="np-not-me" class="linkish">Not you? Sign out</button></p>
+      <p class="lead"><span data-i18n="ui.np.welcome">Welcome back, </span><strong id="np-returning-name"></strong><span data-i18n="ui.np.welcome.end">.</span></p>
+      <p class="fine"><span data-i18n="ui.np.on">On </span><span id="np-returning-server"></span><span data-i18n="ui.np.on.end">.</span></p>
+      <button id="np-continue" class="tool primary big" data-i18n="ui.np.continue">Continue</button>
+      <p class="fine"><button id="np-not-me" class="linkish" data-i18n="ui.np.notme">Not you? Sign out</button></p>
     </div>
     <div id="np-fresh">
-      <p class="lead">Sign in to find someone to play.</p>
-      <button id="np-twitch-start" class="tool primary big">Sign in with Twitch</button>
-      <p class="fine">Twitch sign-in is on the sonicthefighte.rs server.</p>
+      <p class="lead" data-i18n="ui.np.lead">Sign in to find someone to play.</p>
+      <button id="np-twitch-start" class="tool primary big" data-i18n="ui.twitch.signin">Sign in with Twitch</button>
+      <p class="fine" data-i18n="ui.np.twitchserver">Twitch sign-in is on the sonicthefighte.rs server.</p>
       <p id="np-twitch-error" class="error" hidden></p>
-      <p class="np-or"><span>or use an RPCN account</span></p>
-      <label class="np-server">Server
+      <p class="np-or"><span data-i18n="ui.np.or">or use an RPCN account</span></p>
+      <label class="np-server"><span data-i18n="ui.np.server">Server</span>
         <select id="np-server" class="tool">
-          <option value="np.rpcs3.net">RPCN, the official server (np.rpcs3.net)</option>
+          <option value="np.rpcs3.net" data-i18n="ui.np.official">RPCN, the official server (np.rpcs3.net)</option>
           <option value="rpcn.sonicthefighte.rs">sonicthefighte.rs</option>
         </select>
       </label>
-      <p class="fine left">An account belongs to one server. Either way the sign-in passes through
+      <p class="fine left" data-i18n="ui.np.gateway">An account belongs to one server. Either way the sign-in passes through
         this site's gateway, because a browser cannot reach RPCN directly.</p>
       <div class="np-tabs" role="tablist">
-        <button id="np-tab-signin" class="tab" role="tab" aria-selected="true" aria-controls="np-form-signin">Sign in</button>
-        <button id="np-tab-create" class="tab" role="tab" aria-selected="false" aria-controls="np-form-create">Create an account</button>
+        <button id="np-tab-signin" class="tab" role="tab" aria-selected="true" aria-controls="np-form-signin" data-i18n="ui.signin">Sign in</button>
+        <button id="np-tab-create" class="tab" role="tab" aria-selected="false" aria-controls="np-form-create" data-i18n="ui.np.createtab">Create an account</button>
       </div>
       <form id="np-form-signin" class="np-form" autocomplete="on">
-        <label>Name <input id="np-signin-name" name="username" autocomplete="username" required maxlength="16"></label>
-        <label>Password <input id="np-signin-password" name="password" type="password" autocomplete="current-password" required maxlength="127"></label>
+        <label><span data-i18n="ui.name">Name</span> <input id="np-signin-name" name="username" autocomplete="username" required maxlength="16"></label>
+        <label><span data-i18n="ui.password">Password</span> <input id="np-signin-password" name="password" type="password" autocomplete="current-password" required maxlength="127"></label>
         <details id="np-code-box">
-          <summary>The server e-mailed me a code</summary>
-          <label>Code from the e-mail <input id="np-signin-token" autocomplete="one-time-code" maxlength="63"></label>
-          <p class="fine left">No e-mail? <button id="np-resend" class="linkish" type="button">Send it again</button></p>
+          <summary data-i18n="ui.np.emailed">The server e-mailed me a code</summary>
+          <label><span data-i18n="ui.np.code">Code from the e-mail</span> <input id="np-signin-token" autocomplete="one-time-code" maxlength="63"></label>
+          <p class="fine left"><span data-i18n="ui.np.noemail">No e-mail?</span> <button id="np-resend" class="linkish" type="button" data-i18n="ui.np.resend">Send it again</button></p>
         </details>
         <p id="np-signin-note" class="status" role="status" hidden></p>
-        <button class="tool primary" type="submit">Sign in</button>
+        <button class="tool primary" type="submit" data-i18n="ui.signin">Sign in</button>
       </form>
       <form id="np-form-create" class="np-form" autocomplete="on" hidden>
-        <label>Name <input id="np-create-name" name="username" autocomplete="username" required maxlength="16"
-               pattern="[A-Za-z0-9_\-]{3,16}" title="3 to 16 letters, digits, - or _"></label>
-        <label>Password <input id="np-create-password" name="new-password" type="password" autocomplete="new-password" required maxlength="63"></label>
-        <label>E-mail <input id="np-create-email" type="email" autocomplete="email" required maxlength="127"></label>
-        <p class="fine left">Your e-mail is kept by the server for your account and is not shown to anyone.</p>
-        <button class="tool primary" type="submit">Create account</button>
+        <label><span data-i18n="ui.name">Name</span> <input id="np-create-name" name="username" autocomplete="username" required maxlength="16"
+               pattern="[A-Za-z0-9_\-]{3,16}" title="3 to 16 letters, digits, - or _" data-i18n-title="ui.np.namerule"></label>
+        <label><span data-i18n="ui.password">Password</span> <input id="np-create-password" name="new-password" type="password" autocomplete="new-password" required maxlength="63"></label>
+        <label><span data-i18n="ui.np.email">E-mail</span> <input id="np-create-email" type="email" autocomplete="email" required maxlength="127"></label>
+        <p class="fine left" data-i18n="ui.np.emailkept">Your e-mail is kept by the server for your account and is not shown to anyone.</p>
+        <button class="tool primary" type="submit" data-i18n="ui.createaccount">Create account</button>
         <p id="np-create-status" class="status" role="status"></p>
         <p id="np-create-error" class="error" hidden></p>
       </form>
-      <p class="fine">Your sign-in is remembered in this browser until you sign out.</p>
+      <p class="fine" data-i18n="ui.np.remembered">Your sign-in is remembered in this browser until you sign out.</p>
     </div>
   </section>
 
   <section id="np-twitch" hidden>
     <p id="np-twitch-lead" class="lead"></p>
     <div id="np-twitch-code-box" hidden>
-      <p id="np-twitch-code" class="np-code" aria-label="Your sign-in code"></p>
+      <p id="np-twitch-code" class="np-code" aria-label="Your sign-in code" data-i18n-aria="ui.np.signincode"></p>
       <p class="np-row">
-        <button id="np-twitch-copy" class="tool">Copy code</button>
-        <a id="np-twitch-link" class="tool primary" target="_blank" rel="noopener noreferrer" hidden>Open Twitch</a>
+        <button id="np-twitch-copy" class="tool" data-i18n="ui.twitch.copy">Copy code</button>
+        <a id="np-twitch-link" class="tool primary" target="_blank" rel="noopener noreferrer" hidden data-i18n="ui.twitch.open">Open Twitch</a>
       </p>
-      <p class="status">Waiting for Twitch…</p>
+      <p class="status" data-i18n="ui.twitch.waiting">Waiting for Twitch…</p>
     </div>
-    <button class="tool np-cancel">Cancel</button>
+    <button class="tool np-cancel" data-i18n="ui.cancel">Cancel</button>
   </section>
 
   <section id="np-busy" hidden>
-    <p id="np-busy-text" class="lead">Signing in…</p>
+    <p id="np-busy-text" class="lead" data-i18n="ui.np.signingin">Signing in…</p>
   </section>
 
   <section id="np-failed" hidden>
-    <p class="lead">That didn't work.</p>
+    <p class="lead" data-i18n="ui.np.failed">That didn't work.</p>
     <p id="np-failed-text" class="error"></p>
-    <button id="np-failed-back" class="tool primary">Back</button>
+    <button id="np-failed-back" class="tool primary" data-i18n="ui.back">Back</button>
   </section>
 
   <section id="np-lobby" hidden>
-    <p class="np-me">Signed in as <strong id="np-me"></strong> on <span id="np-me-server"></span> · <button id="np-signout" class="linkish">Sign out</button></p>
-    <button id="np-create-match" class="tool primary big">Create a match</button>
-    <h3>Open matches <span id="np-rooms-count" class="count-box"></span></h3>
+    <p class="np-me"><span data-i18n="ui.me">Signed in as </span><strong id="np-me"></strong><span data-i18n="ui.me.on"> on </span><span id="np-me-server"></span><span data-i18n="ui.me.end"> · </span><button id="np-signout" class="linkish" data-i18n="ui.signout">Sign out</button></p>
+    <button id="np-create-match" class="tool primary big" data-i18n="ui.np.creatematch">Create a match</button>
+    <h3><span data-i18n="ui.np.open">Open matches</span> <span id="np-rooms-count" class="count-box"></span></h3>
     <ul id="np-rooms" class="np-rooms"></ul>
     <p id="np-rooms-empty" class="status"><span id="np-rooms-empty-text"></span></p>
     <p id="np-quality" class="status"></p>
     <details class="np-advanced">
-      <summary>Advanced</summary>
-      <label>Input delay
+      <summary data-i18n="ui.advanced">Advanced</summary>
+      <label><span data-i18n="ui.np.delay">Input delay</span>
         <select id="np-delay" class="tool">
-          <option value="auto" id="np-delay-auto">Automatic</option>
-          <option value="2">2 frames</option>
-          <option value="3">3 frames</option>
-          <option value="4">4 frames</option>
-          <option value="5">5 frames</option>
-          <option value="6">6 frames</option>
+          <option value="auto" id="np-delay-auto" data-i18n="ui.np.auto">Automatic</option>
+          <option value="2" data-i18n="ui.np.frames2">2 frames</option>
+          <option value="3" data-i18n="ui.np.frames3">3 frames</option>
+          <option value="4" data-i18n="ui.np.frames4">4 frames</option>
+          <option value="5" data-i18n="ui.np.frames5">5 frames</option>
+          <option value="6" data-i18n="ui.np.frames6">6 frames</option>
         </select>
       </label>
-      <label>Players in the room
+      <label><span data-i18n="ui.np.size">Players in the room</span>
         <select id="np-size" class="tool">
           <option value="2">2</option>
           <option value="3">3</option>
@@ -236,135 +254,228 @@
           <option value="8">8</option>
         </select>
       </label>
-      <label>Private match password <input id="np-private" maxlength="8" autocomplete="off" placeholder="none"></label>
-      <label id="np-damage-row" hidden>Damage
+      <label><span data-i18n="ui.np.private">Private match password</span> <input id="np-private" maxlength="8" autocomplete="off" placeholder="none" data-i18n-placeholder="ui.np.none"></label>
+      <label id="np-damage-row" hidden><span data-i18n="ui.np.damage">Damage</span>
         <select id="np-damage" class="tool">
-          <option value="normal">NORMAL (catch-up damage)</option>
+          <option value="normal" data-i18n="ui.np.normal">NORMAL (catch-up damage)</option>
           <option value="real">REAL</option>
         </select>
       </label>
-      <p class="fine left">The web version plays other people on the web version.</p>
+      <p class="fine left" data-i18n="ui.np.webonly">The web version plays other people on the web version.</p>
     </details>
   </section>
 
   <section id="np-room" hidden>
     <p id="np-room-lead" class="lead"></p>
     <ul id="np-members" class="np-rooms"></ul>
-    <button id="np-start" class="tool primary big" hidden>Ready</button>
-    <p id="np-room-hint" class="fine">Every game in the room restarts together when a match begins. Two play;
+    <button id="np-start" class="tool primary big" hidden data-i18n="ui.np.ready">Ready</button>
+    <p id="np-room-hint" class="fine" data-i18n="ui.np.roomhint">Every game in the room restarts together when a match begins. Two play;
       the winner stays on and the loser goes to the back of the line.</p>
     <p id="np-room-ping" class="np-ping" hidden></p>
     <p id="np-room-status" class="status"></p>
     <p id="np-rtt-warn" class="fine left" hidden></p>
     <p id="np-desync" class="error" hidden></p>
     <p class="np-row">
-      <button id="np-stop" class="tool" hidden>End match</button>
-      <button id="np-leave" class="tool">Leave</button>
+      <button id="np-stop" class="tool" hidden data-i18n="ui.endmatch">End match</button>
+      <button id="np-leave" class="tool" data-i18n="ui.np.leave">Leave</button>
     </p>
+  </section>
+</aside>
+
+<!-- GGPO (m2hle-ggpo.js, Pinboard #575): the other way to play online. Its own
+     lobby server, a channel per game, challenges by name, and rollback netplay. -->
+<aside id="ggpo" class="online ps-win" hidden aria-label="GGPO lobby" data-i18n-aria="ui.menu.ggpo">
+  <div class="online-head ps-head">
+    <h2 class="ps-title" data-i18n="ui.menu.ggpo">GGPO lobby</h2>
+    <button id="gg-close" class="tool ps-back" aria-label="Close" data-i18n-aria="ui.close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg><span data-i18n="ui.back">Back</span></button>
+  </div>
+  <p id="gg-error" class="error" hidden></p>
+
+  <section id="gg-off">
+    <p class="lead" data-i18n="ui.gg.lead">Rollback netplay on ggpo.sonicthefighte.rs: a separate lobby and accounts from RPCN.</p>
+    <button id="gg-connect" class="tool primary big" data-i18n="ui.gg.connect">Connect</button>
+  </section>
+
+  <section id="gg-busy" hidden>
+    <p class="status" data-i18n="ui.gg.connecting">Connecting...</p>
+  </section>
+
+  <section id="gg-signin" hidden>
+    <label><span data-i18n="ui.name">Name</span> <input id="gg-user" maxlength="31" autocomplete="username"></label>
+    <label><span data-i18n="ui.password">Password</span> <input id="gg-pass" type="password" maxlength="63" autocomplete="current-password"></label>
+    <label class="check"><input id="gg-remember" type="checkbox" checked> <span data-i18n="ui.gg.remember">Remember me in this browser</span></label>
+    <p class="np-row">
+      <button id="gg-login" class="tool primary" data-i18n="ui.signin">Sign in</button>
+      <button id="gg-signup" class="tool" data-i18n="ui.createaccount">Create account</button>
+      <button id="gg-twitch-start" class="tool" hidden data-i18n="ui.twitch.signin">Sign in with Twitch</button>
+    </p>
+  </section>
+
+  <section id="gg-twitch" hidden>
+    <p class="lead"><span data-i18n="ui.gg.enter">Enter </span><strong id="gg-twitch-code"></strong><span data-i18n="ui.gg.at"> at </span>
+      <a id="gg-twitch-link" href="https://www.twitch.tv/activate" target="_blank" rel="noopener noreferrer">twitch.tv/activate</a><span data-i18n="ui.gg.at.end">.</span></p>
+  </section>
+
+  <section id="gg-channel" hidden>
+    <p class="np-me"><span data-i18n="ui.me">Signed in as </span><strong id="gg-me"></strong><span data-i18n="ui.me.in"> in </span><span id="gg-game"></span><span data-i18n="ui.me.end"> · </span><button id="gg-signout" class="linkish" data-i18n="ui.signout">Sign out</button></p>
+    <div id="gg-incoming" class="np-row" hidden>
+      <span id="gg-incoming-text"></span>
+      <button id="gg-accept" class="tool primary" data-i18n="ui.gg.accept">Accept</button>
+      <button id="gg-decline" class="tool" data-i18n="ui.gg.decline">Decline</button>
+    </div>
+    <div id="gg-outgoing" class="np-row" hidden>
+      <span id="gg-outgoing-text"></span>
+      <button id="gg-cancel" class="tool" data-i18n="ui.cancel">Cancel</button>
+    </div>
+    <h3 data-i18n="ui.gg.here">Players here</h3>
+    <ul id="gg-users" class="np-rooms"></ul>
+    <p id="gg-users-empty" class="status" data-i18n="ui.gg.nobody">Nobody else is here yet.</p>
+    <pre id="gg-chat" class="log gg-chat"></pre>
+    <input id="gg-say" maxlength="200" placeholder="Say something (Enter)" data-i18n-placeholder="ui.gg.say" autocomplete="off">
+    <p class="fine left" data-i18n="ui.gg.fine">A match restarts both games together. The web version's match goes through the server.</p>
+  </section>
+
+  <section id="gg-match" hidden>
+    <p class="lead"><span data-i18n="ui.gg.playing">Playing </span><strong id="gg-opponent"></strong><span data-i18n="ui.gg.playing.end">.</span></p>
+    <p id="gg-link" class="status"></p>
+    <p class="np-row"><button id="gg-end" class="tool" data-i18n="ui.endmatch">End match</button></p>
+  </section>
+</aside>
+
+<!-- Report an issue (m2hle-report.js, Pinboard #653): the frozen frame, a savestate
+     of it and the console, zipped for a GitHub issue. Offline only. -->
+<aside id="report" class="online ps-win" hidden aria-label="Report an issue" data-i18n-aria="ui.menu.report">
+  <div class="online-head ps-head">
+    <h2 class="ps-title" data-i18n="ui.menu.report">Report an issue</h2>
+    <button id="rp-close" class="tool ps-back" aria-label="Close" data-i18n-aria="ui.close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg><span data-i18n="ui.back">Back</span></button>
+  </div>
+  <p id="rp-error" class="error" hidden></p>
+  <section id="rp-busy" hidden>
+    <p class="status" data-i18n="ui.rp.taking">Taking the picture...</p>
+  </section>
+  <section id="rp-ready" hidden>
+    <p class="lead" data-i18n="ui.rp.paused">The game is paused on this frame until you close this panel.</p>
+    <img id="rp-img" class="rp-img" alt="The frame this report is about" data-i18n-alt="ui.rp.img">
+    <p class="fine left"><span id="rp-frame"></span><span data-i18n="ui.rp.comma">, </span><span id="rp-state"></span><span data-i18n="ui.rp.end">.</span></p>
+    <label class="rp-label"><span data-i18n="ui.rp.what">What went wrong?</span> <textarea id="rp-text" class="rp-text" rows="6" maxlength="4000"
+      placeholder="What you did, what you saw, and what you expected instead." data-i18n-placeholder="ui.rp.placeholder"></textarea></label>
+    <p class="np-row">
+      <button id="rp-zip" class="tool primary" data-i18n="ui.rp.zip">Download report</button>
+      <button id="rp-issue" class="tool" data-i18n="ui.rp.issue">Open an issue on GitHub</button>
+      <button id="rp-copy" class="tool" data-i18n="ui.rp.copy">Copy text</button>
+    </p>
+    <p id="rp-saved" class="fine left" hidden data-i18n="ui.rp.saved">Saved. Attach the zip to the issue by dragging it into GitHub's text box.</p>
+    <p class="fine left" data-i18n="ui.rp.holds">The zip holds the picture, a savestate of the board on this frame (state.sta),
+      the console and your browser and GPU. Dropping it on a running game loads the state back.</p>
   </section>
 </aside>
 
 <!-- Controller mapping (m2hle-pad.js) and the touch buttons (m2hle-touch.js). Kept in
      this browser's localStorage. On a touch screen the touch section is moved first. -->
-<aside id="controls" class="online controls ps-win" hidden aria-label="Controls">
+<aside id="controls" class="online controls ps-win" hidden aria-label="Controls" data-i18n-aria="ui.menu.controls">
   <div class="online-head ps-head">
-    <h2 class="ps-title">Controls</h2>
-    <button id="pad-close" class="tool ps-back" aria-label="Close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
+    <h2 class="ps-title" data-i18n="ui.menu.controls">Controls</h2>
+    <button id="pad-close" class="tool ps-back" aria-label="Close" data-i18n-aria="ui.close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg><span data-i18n="ui.back">Back</span></button>
   </div>
   <section id="touch-section" class="ctl-section">
-    <h3>Touch buttons</h3>
-    <label class="ctl-select">Show them
+    <h3 data-i18n="ui.touch">Touch buttons</h3>
+    <label class="ctl-select"><span data-i18n="ui.touch.show">Show them</span>
       <select id="touch-show" class="tool">
-        <option value="auto">On touch screens</option>
-        <option value="on">Always</option>
-        <option value="off">Never</option>
+        <option value="auto" data-i18n="ui.touch.auto">On touch screens</option>
+        <option value="on" data-i18n="ui.touch.on">Always</option>
+        <option value="off" data-i18n="ui.touch.off">Never</option>
       </select>
     </label>
-    <label id="touch-vibrate-row" class="pad-check" hidden><input id="touch-vibrate" type="checkbox"> Vibrate on each press</label>
-    <p class="np-row"><button id="touch-customize" class="tool primary">Change size, look and placement</button></p>
+    <label id="touch-vibrate-row" class="pad-check" hidden><input id="touch-vibrate" type="checkbox"> <span data-i18n="ui.touch.vibrate">Vibrate on each press</span></label>
+    <p class="np-row"><button id="touch-customize" class="tool primary" data-i18n="ui.touch.customize">Change size, look and placement</button></p>
   </section>
   <section id="pad-section" class="ctl-section">
-  <h3>Controller</h3>
+  <h3 data-i18n="ui.pad">Controller</h3>
   <p id="pad-status" class="status" role="status"></p>
-  <p class="fine left">Pick <strong>Add</strong>, then press the button or push the stick you want. Click a button's name to remove it. Rows light up while you hold them. <strong>Pause</strong> is unset to begin with: give it a button (binding one to Pause takes it off its game row, so Select can go from Coin to Pause).</p>
+  <p class="fine left" data-i18n-html="ui.pad.how">Pick <strong>Add</strong>, then press the button or push the stick you want. Click a button's name to remove it. Rows light up while you hold them. <strong>Pause</strong> is unset to begin with: give it a button (binding one to Pause takes it off its game row, so Select can go from Coin to Pause).</p>
   <ul id="pad-rows" class="pad-rows"></ul>
-  <label class="pad-check"><input id="pad-p2" type="checkbox" checked> A second controller plays player 2</label>
-  <p class="np-row"><button id="pad-reset" class="tool">Reset to defaults</button></p>
-  <p class="fine left">These settings are remembered in this browser and apply to every controller.</p>
+  <label class="pad-check"><input id="pad-p2" type="checkbox" checked> <span data-i18n="ui.pad.p2">A second controller plays player 2</span></label>
+  <label id="gun-flash-row" class="pad-check" hidden><input id="gun-flash" type="checkbox"> <span data-i18n="ui.pad.gunflash">Flash the screen white on each shot, for a light gun that reads the screen</span></label>
+  <p class="np-row"><button id="pad-reset" class="tool" data-i18n="ui.reset">Reset to defaults</button></p>
+  <p class="fine left" data-i18n="ui.pad.kept">These settings are remembered in this browser and apply to every controller.</p>
   </section>
   <section id="key-section" class="ctl-section">
-  <h3>Keyboard</h3>
-  <div class="np-tabs" role="tablist" aria-label="Player">
-    <button id="key-tab-p1" class="tab" role="tab" aria-selected="true" aria-controls="key-rows">Player 1</button>
-    <button id="key-tab-p2" class="tab" role="tab" aria-selected="false" aria-controls="key-rows">Player 2</button>
+  <h3 data-i18n="ui.keys">Keyboard</h3>
+  <div class="np-tabs" role="tablist" aria-label="Player" data-i18n-aria="ui.keys.player">
+    <button id="key-tab-p1" class="tab" role="tab" aria-selected="true" aria-controls="key-rows" data-i18n="ui.keys.p1">Player 1</button>
+    <button id="key-tab-p2" class="tab" role="tab" aria-selected="false" aria-controls="key-rows" data-i18n="ui.keys.p2">Player 2</button>
   </div>
-  <p class="fine left">Pick <strong>Add</strong>, then press the key you want (Escape cancels). Click a key's name to remove it. Keys are matched by where they are on the keyboard, not by the letter printed on them.</p>
+  <p class="fine left" data-i18n-html="ui.keys.how">Pick <strong>Add</strong>, then press the key you want (Escape cancels). Click a key's name to remove it. Keys are matched by where they are on the keyboard, not by the letter printed on them.</p>
   <ul id="key-rows" class="pad-rows"></ul>
-  <p class="fine left">The <strong>Pause</strong> row (P and the Pause key to start with) pauses the game, as the button beside the menu does (in the Console version, during a game, it opens the PS3's pause menu, as SELECT does). Offline only: a match online cannot wait for one player. A key is either a game key or Pause: binding it to one takes it off the other.</p>
+  <p class="fine left" data-i18n-html="ui.keys.pause">The <strong>Pause</strong> row (P and the Pause key to start with) pauses the game, as the button beside the menu does (in the Console version, during a game, it opens the PS3's pause menu, as SELECT does). Offline only: a match online cannot wait for one player. A key is either a game key or Pause: binding it to one takes it off the other.</p>
   <p id="key-clash" class="status" role="status" hidden></p>
-  <p class="np-row"><button id="key-reset" class="tool">Reset to defaults</button></p>
+  <p class="np-row"><button id="key-reset" class="tool" data-i18n="ui.reset">Reset to defaults</button></p>
   </section>
-  <p class="fine left credits">Fonts: Anybody, M&nbsp;PLUS&nbsp;1p and M&nbsp;PLUS&nbsp;1&nbsp;Code, under the SIL Open Font License
+  <p class="fine left credits" data-i18n-html="ui.credits">Fonts: Anybody, M&nbsp;PLUS&nbsp;1p and M&nbsp;PLUS&nbsp;1&nbsp;Code, under the SIL Open Font License
     (<a href="fonts/OFL-Anybody.txt" target="_blank">Anybody</a>,
     <a href="fonts/OFL-MPLUS.txt" target="_blank">M+</a>,
-    <a href="fonts/OFL-MPLUS1Code.txt" target="_blank">M+ Code</a>).</p>
+    <a href="fonts/OFL-MPLUS1Code.txt" target="_blank">M+ Code</a>).
+    Rollback netplay: <a href="https://github.com/pond3r/ggpo" target="_blank" rel="noopener noreferrer">GGPO</a>
+    by GroundStorm Studios, under the MIT License (<a href="fonts/MIT-GGPO.txt" target="_blank">license</a>).</p>
 </aside>
 
 <!-- The touch buttons (m2hle-touch.js): laid over the game canvas, one layout for
      holding the phone upright and one for holding it sideways. -->
 <div id="touch" class="touch" hidden aria-hidden="true"></div>
-<div id="touch-edit" class="touch-edit ps-win" hidden role="dialog" aria-label="Customize touch buttons">
-  <p class="te-hint">Drag a button to move it. Tap one to size or hide it. <span id="te-orient"></span></p>
+<div id="touch-edit" class="touch-edit ps-win" hidden role="dialog" aria-label="Customize touch buttons" data-i18n-aria="ui.te">
+  <p class="te-hint"><span data-i18n="ui.te.hint">Drag a button to move it. Tap one to size or hide it.</span> <span id="te-orient"></span></p>
   <div class="te-row">
-    <span class="te-what">All buttons</span>
-    <label>Size <input id="te-size" type="range" min="50" max="200" step="5"></label>
-    <label>Opacity <input id="te-opacity" type="range" min="10" max="100" step="5"></label>
-    <label class="te-check"><input id="te-outline" type="checkbox"> Outline</label>
+    <span class="te-what" data-i18n="ui.te.all">All buttons</span>
+    <label><span data-i18n="ui.te.size">Size</span> <input id="te-size" type="range" min="50" max="200" step="5"></label>
+    <label><span data-i18n="ui.te.opacity">Opacity</span> <input id="te-opacity" type="range" min="10" max="100" step="5"></label>
+    <label class="te-check"><input id="te-outline" type="checkbox"> <span data-i18n="ui.te.outline">Outline</span></label>
   </div>
   <div class="te-row">
-    <span id="te-sel" class="te-what">Tap a button</span>
-    <label>Size <input id="te-one" type="range" min="50" max="200" step="5" disabled></label>
-    <button id="te-hide" class="tool" disabled>Hide</button>
+    <span id="te-sel" class="te-what" data-i18n="ui.te.tap">Tap a button</span>
+    <label><span data-i18n="ui.te.size">Size</span> <input id="te-one" type="range" min="50" max="200" step="5" disabled></label>
+    <button id="te-hide" class="tool" disabled data-i18n="ui.te.hide">Hide</button>
   </div>
   <div class="te-row">
-    <button id="te-move" class="tool">Move this bar</button>
-    <button id="te-reset" class="tool">Reset this layout</button>
+    <button id="te-move" class="tool" data-i18n="ui.te.move">Move this bar</button>
+    <button id="te-reset" class="tool" data-i18n="ui.te.reset">Reset this layout</button>
     <span class="spacer"></span>
-    <button id="te-done" class="tool primary">Done</button>
+    <button id="te-done" class="tool primary" data-i18n="ui.done">Done</button>
   </div>
 </div>
 
 <!-- The tools drawer: a lag check and the emulator's log (m2hle-tools.js). It sits
      in the page's column, so opening it makes the game smaller, not covered. -->
-<section id="drawer" class="drawer" hidden aria-label="Tools">
+<section id="drawer" class="drawer" hidden aria-label="Tools" data-i18n-aria="ui.tools">
   <div class="drawer-head" role="tablist">
-    <button id="tab-lag" class="tab" role="tab" aria-controls="pane-lag">Lag check</button>
-    <button id="tab-console" class="tab" role="tab" aria-controls="pane-console">Console</button>
-    <button id="tab-picture" class="tab" role="tab" aria-controls="pane-picture">Picture</button>
+    <button id="tab-lag" class="tab" role="tab" aria-controls="pane-lag" data-i18n="ui.tab.lag">Lag check</button>
+    <button id="tab-console" class="tab" role="tab" aria-controls="pane-console" data-i18n="ui.menu.console">Console</button>
+    <button id="tab-picture" class="tab" role="tab" aria-controls="pane-picture" data-i18n="ui.menu.picture">Picture</button>
+    <button id="tab-replay" class="tab" role="tab" aria-controls="pane-replay" data-i18n="ui.menu.replay">Replay</button>
+    <button id="tab-cheats" class="tab" role="tab" aria-controls="pane-cheats" data-i18n="ui.menu.cheats">Cheats</button>
     <span class="spacer"></span>
-    <button id="drawer-close" class="tool ps-back" aria-label="Close tools"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg>Back</button>
+    <button id="drawer-close" class="tool ps-back" aria-label="Close tools" data-i18n-aria="ui.tools.close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg><span data-i18n="ui.back">Back</span></button>
   </div>
 
   <div id="pane-lag" class="pane" role="tabpanel">
     <div class="pane-bar">
-      <button id="lag-start" class="tool primary">Check for lag (5 seconds)</button>
-      <button id="lag-copy" class="tool" hidden>Copy report</button>
-      <span id="lag-status" class="status" role="status">Play as usual while it measures: it times the game, the picture and the sound.</span>
+      <button id="lag-start" class="tool primary" data-i18n="ui.lag.start">Check for lag (5 seconds)</button>
+      <button id="lag-copy" class="tool" hidden data-i18n="ui.lag.copy">Copy report</button>
+      <span id="lag-status" class="status" role="status" data-i18n="ui.lag.status">Play as usual while it measures: it times the game, the picture and the sound.</span>
       <span class="spacer"></span>
       <span class="bar-setting">
-      <label class="status" for="render-scale">Picture</label>
+      <label class="status" for="render-scale" data-i18n="ui.lag.scale">Picture</label>
       <select id="render-scale" class="tool">
-        <option value="0">Full resolution</option>
-        <option value="3">Medium (1488&times;1152)</option>
-        <option value="2">Low (992&times;768)</option>
-        <option value="1">Arcade (496&times;384)</option>
+        <option value="0" data-i18n="ui.lag.full">Full resolution</option>
+        <option value="3" data-i18n="ui.lag.medium">Medium (1488&times;1152)</option>
+        <option value="2" data-i18n="ui.lag.low">Low (992&times;768)</option>
+        <option value="1" data-i18n="ui.lag.arcade">Arcade (496&times;384)</option>
       </select>
       </span>
       <span class="bar-setting">
-      <label class="status" for="sound-driver">Sound</label>
-      <select id="sound-driver" class="tool" title="Who runs the game's sound program. The lighter driver runs it as ordinary code instead of emulating the sound board's CPU: up to a tenth less work per frame, for slower computers and phones.">
-        <option value="0">Sound CPU (exact)</option>
-        <option value="1">Lighter driver</option>
+      <label class="status" for="sound-driver" data-i18n="ui.lag.sound">Sound</label>
+      <select id="sound-driver" class="tool" data-i18n-title="ui.lag.soundtitle" title="Who runs the game's sound program. The lighter driver runs it as ordinary code instead of emulating the sound board's CPU: up to a tenth less work per frame, for slower computers and phones.">
+        <option value="0" data-i18n="ui.lag.cpu">Sound CPU (exact)</option>
+        <option value="1" data-i18n="ui.lag.lighter">Lighter driver</option>
       </select>
       </span>
     </div>
@@ -373,99 +484,241 @@
 
   <div id="pane-console" class="pane" role="tabpanel" hidden>
     <div class="pane-bar">
-      <button id="filter-general" class="tool filter" aria-pressed="true">General <span id="count-general" class="count">0</span></button>
-      <button id="filter-warning" class="tool filter filter-warning" aria-pressed="true">Warnings <span id="count-warning" class="count">0</span></button>
-      <button id="filter-error" class="tool filter filter-error" aria-pressed="true">Errors <span id="count-error" class="count">0</span></button>
+      <button id="filter-general" class="tool filter" aria-pressed="true"><span data-i18n="ui.log.general">General</span> <span id="count-general" class="count">0</span></button>
+      <button id="filter-warning" class="tool filter filter-warning" aria-pressed="true"><span data-i18n="ui.log.warnings">Warnings</span> <span id="count-warning" class="count">0</span></button>
+      <button id="filter-error" class="tool filter filter-error" aria-pressed="true"><span data-i18n="ui.log.errors">Errors</span> <span id="count-error" class="count">0</span></button>
       <span class="spacer"></span>
-      <button id="log-copy" class="tool primary">Copy</button>
-      <button id="log-clear" class="tool">Clear</button>
+      <button id="log-copy" class="tool primary" data-i18n="ui.copy">Copy</button>
+      <button id="log-clear" class="tool" data-i18n="ui.log.clear">Clear</button>
     </div>
-    <div id="log" class="log" role="log" tabindex="0" aria-label="Emulator log"></div>
-    <p id="log-empty" class="status log-empty">Nothing to show with these filters.</p>
+    <div id="log" class="log" role="log" tabindex="0" aria-label="Emulator log" data-i18n-aria="ui.log"></div>
+    <p id="log-empty" class="status log-empty" data-i18n="ui.log.empty">Nothing to show with these filters.</p>
   </div>
 
   <!-- A filter over the game's 4:3 picture (m2hle-shader.js, src/ui/post_shader.h). -->
   <div id="pane-picture" class="pane" role="tabpanel" hidden>
     <div class="picture">
-      <details class="np-advanced picture-advanced">
-        <summary>Advanced: CRT filter and shaders</summary>
-        <p class="shader-warn">These filters draw the picture a second time on your graphics chip, every frame,
-          and can cut performance. If the game slows down or stutters, set the filter back to None.</p>
-        <label>Filter
-          <select id="shader-mode" class="tool">
-            <option value="0">None</option>
-            <option value="1">CRT (Lost Judgment's scanlines, from YAMP)</option>
-            <option value="2" id="shader-mode-custom" disabled>Your shader (load one below)</option>
-          </select>
-        </label>
-        <p class="fine left">Filters cover only the game's picture. They read it at the size chosen under
-          Feels laggy? &rarr; Picture; for your own shader, &ldquo;Full resolution&rdquo; means the arcade's 496&times;384.</p>
+      <h3 class="shader-h" data-i18n="ui.pic.arcade">Arcade</h3>
+      <label class="pad-check picture-arcade"><input id="shader-arcade" type="checkbox">
+        <span data-i18n="ui.pic.board">A real board's picture: its tone, ghosting and noise, shown 4:3</span></label>
+      <p class="fine left" data-i18n="ui.pic.measured">Measured from a real Model 2B board's video. It goes on first; the filter below,
+        if any, goes over it.</p>
+      <h3 class="shader-h" data-i18n="ui.pic.depth">Depth</h3>
+      <label class="pad-check picture-arcade"><input id="shader-pixdepth" type="checkbox">
+        <span data-i18n="ui.pic.pixdepth">Sort every pixel by its own depth</span></label>
+      <p class="fine left" data-i18n="ui.pic.depthfine">The board sorts each polygon by one depth, so a large polygon that starts near the
+        camera covers what stands on it: the Tornado's wing hides the backs of Sonic's shoes in the attract
+        intro, on the real board too. Off is the board.</p>
+      <h3 class="shader-h" data-i18n="ui.pic.filter">Filter</h3>
+      <label class="picture-filter">
+        <select id="shader-mode" class="tool" aria-label="Filter" data-i18n-aria="ui.pic.filter">
+          <option value="0" data-i18n="ui.pic.none">None</option>
+          <option value="1" data-i18n="ui.pic.crt">CRT (Lost Judgment's scanlines, from YAMP)</option>
+          <option value="2" id="shader-mode-custom" disabled data-i18n="ui.pic.yours">Your shader (load one under Advanced)</option>
+        </select>
+      </label>
+      <p class="shader-warn" data-i18n="ui.pic.warn">A filter draws the picture a second time on your graphics chip, every frame,
+        and can cut performance. If the game slows down or stutters, set it back to None.</p>
+      <p class="fine left" data-i18n-html="ui.pic.cover">Filters cover only the game's picture. They read it at the size chosen under
+        Feels laggy? &rarr; Picture; for your own shader, &ldquo;Full resolution&rdquo; means the arcade's 496&times;384.</p>
 
-        <h3 class="shader-h">Your own shader</h3>
-        <p class="fine left">A libretro GLSL shader: a <code>.glslp</code> preset with the <code>.glsl</code> files and
+      <!-- The monitor's own pots (m2hle-crt.js, src/ui/crt_pots.h). -->
+      <h3 class="shader-h" data-i18n="ui.pic.monitor">Monitor adjustments</h3>
+      <p class="fine left" data-i18n="ui.pic.pots">The pots on an arcade monitor's chassis: each gun's drive (gain) and cutoff (bias),
+        and where the picture sits and how big it is. They cost nothing and work with any filter.</p>
+      <div id="crt-pots" class="shader-params crt-pots"></div>
+      <p class="np-row shader-row"><button id="crt-reset" class="tool" data-i18n="ui.pic.resetall">Reset all</button></p>
+      <details class="np-advanced picture-advanced">
+        <summary data-i18n="ui.pic.advanced">Advanced: your own shader</summary>
+        <h3 class="shader-h" data-i18n="ui.pic.own">Your own shader</h3>
+        <p class="fine left" data-i18n-html="ui.pic.ownfine">A libretro GLSL shader: a <code>.glslp</code> preset with the <code>.glsl</code> files and
           textures it uses, or a single <code>.glsl</code>, from
           <a href="https://github.com/libretro/glsl-shaders" target="_blank" rel="noopener noreferrer">libretro's glsl-shaders</a>.
           Pick the files, or a folder that holds them. Slang presets (<code>.slangp</code>) don't work in a browser.</p>
         <p class="np-row shader-row">
-          <button id="shader-files" class="tool">Choose files&hellip;</button>
-          <button id="shader-folder" class="tool">Choose a folder&hellip;</button>
-          <button id="shader-forget" class="tool" hidden>Forget this shader</button>
+          <button id="shader-files" class="tool" data-i18n="ui.pic.files">Choose files&hellip;</button>
+          <button id="shader-folder" class="tool" data-i18n="ui.pic.folder">Choose a folder&hellip;</button>
+          <button id="shader-forget" class="tool" hidden data-i18n="ui.pic.forget">Forget this shader</button>
         </p>
         <input id="shader-file-input" type="file" multiple hidden
                accept=".glslp,.glsl,.inc,.png,.jpg,.jpeg,.bmp,.tga">
         <input id="shader-folder-input" type="file" webkitdirectory multiple hidden>
-        <select id="shader-preset" class="tool" hidden aria-label="Which shader to use"></select>
+        <select id="shader-preset" class="tool" hidden aria-label="Which shader to use" data-i18n-aria="ui.pic.which"></select>
         <p id="shader-status" class="status" role="status"></p>
         <div id="shader-params-box" hidden>
-          <p class="np-row shader-row"><strong>Parameters</strong> <button id="shader-reset" class="tool">Reset</button></p>
+          <p class="np-row shader-row"><strong data-i18n="ui.pic.params">Parameters</strong> <button id="shader-reset" class="tool" data-i18n="ui.pic.reset">Reset</button></p>
           <div id="shader-params" class="shader-params"></div>
         </div>
       </details>
     </div>
   </div>
+
+  <!-- Replays of games and online matches (m2hle-replay.js, src/core/replay.h). -->
+  <div id="pane-replay" class="pane" role="tabpanel" hidden>
+    <div class="replay">
+      <h3 class="shader-h" data-i18n="ui.rep.head">REPLAY</h3>
+      <p class="np-row"><label><input id="replay-record" type="checkbox">
+        <span data-i18n="ui.rep.record">Save a replay of every game and online match</span></label>
+        <span id="replay-recording" class="status" hidden data-i18n="ui.rep.recording">&middot; recording this match</span></p>
+      <p class="np-row"><label><input id="replay-download" type="checkbox">
+        <span data-i18n="ui.rep.download">Download each one to this computer too</span></label></p>
+      <p class="np-row"><label><input id="replay-as-inputs" type="checkbox">
+        <span data-i18n="ui.rep.asinputs">Save the buttons from power-on instead of the game's own replay</span></label></p>
+      <p class="np-row"><label><input id="replay-view-inputs" type="checkbox">
+        <span data-i18n="ui.rep.viewinputs">Play a replay's buttons from power-on when it has them</span></label></p>
+      <ol class="fine left replay-steps">
+        <li><b data-i18n="ui.rep.start">Start:</b> <span data-i18n-html="ui.rep.start1">tick <i>Save a replay&hellip;</i> above, then</span> <span id="replay-step-start" data-i18n="ui.rep.startwhat">start a
+          game (insert a coin, then press Start) or an online match</span><span data-i18n-html="ui.rep.start2">. Recording starts by itself and <i>recording this match</i> shows beside the tick.</span></li>
+        <li><b data-i18n="ui.rep.stop">Stop:</b> <span data-i18n="ui.rep.stop1">a game is saved by itself when it ends and the game goes back to its attract screen;
+          an online match when it is decided. To save a game now (free play and continues can keep it
+          going for ever), press the red</span> <svg class="replay-steps-icon" viewBox="0 0 16 16" width="14" height="14" aria-label="Finish replay" data-i18n-aria="ui.rep.finishicon"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="5" y="5" width="6" height="6" fill="#E5484D"/></svg> <span data-i18n="ui.rep.stop2">button at the top right, left of Pause. It shows
+          only while your game is being recorded.</span> <span id="replay-step-kept" data-i18n="ui.rep.kept">A game shorter than about 10 seconds
+          is not kept, nor, unless you save the buttons from power-on, one with no round finished yet.</span></li>
+        <li><b data-i18n="ui.rep.watch">Watch:</b> <span data-i18n-html="ui.rep.watch1">press <i>Watch</i> on one below, or open a file with PLAYBACK. <i>Stop</i> gives
+          you your game back, from power-on.</span></li>
+      </ol>
+      <p id="replay-about" class="fine left" data-i18n="ui.rep.about">Replays are kept in this browser and listed below. A replay is each round in the
+        game's own replay format, the one attract plays, a few KB a round; with the buttons from
+        power-on it is the match's start and both players' buttons, a few hundred KB, and plays the
+        whole game. It plays only on the same game.</p>
+      <p id="replay-rec-error" class="status" role="status"></p>
+
+      <h3 class="shader-h" data-i18n="ui.rep.playback">PLAYBACK</h3>
+      <p class="np-row">
+        <button id="replay-playback" class="tool primary" data-i18n="ui.rep.open">PLAYBACK: open a replay file&hellip;</button>
+        <input id="replay-file" type="file" accept=".m2replay,.zip" hidden>
+      </p>
+      <div id="replay-label" class="replay-label" hidden>
+        <p id="replay-file-name" class="fine left"></p>
+        <p id="replay-who" class="lead"></p>
+        <p id="replay-stage"></p>
+        <p id="replay-how"></p>
+        <p id="replay-when"></p>
+        <p id="replay-by" class="fine left"></p>
+        <p class="np-row"><label><input id="replay-hide" type="checkbox"> <span data-i18n="ui.rep.hide">Hide the result</span></label></p>
+        <p id="replay-result"></p>
+        <div id="replay-ask">
+          <p data-i18n="ui.rep.ask">Play this replay? It takes over the game until you stop it.</p>
+          <p class="np-row">
+            <button id="replay-play" class="tool primary" data-i18n="ui.rep.play">Play</button>
+            <button id="replay-notnow" class="tool" data-i18n="ui.rep.notnow">Not now</button>
+            <button id="replay-keep" class="tool" data-i18n="ui.rep.keep">Keep it in this browser</button>
+          </p>
+        </div>
+        <p id="replay-unplayable" class="status" hidden></p>
+      </div>
+      <div id="replay-controls" hidden>
+        <p class="np-row replay-time-row">
+          <input id="replay-seek" type="range" min="0" max="1" value="0" aria-label="Time" data-i18n-aria="ui.rep.time">
+          <span id="replay-time" class="status"></span>
+        </p>
+        <p class="np-row">
+          <button id="replay-restart" class="tool" data-i18n="ui.rep.restart">Restart</button>
+          <label><input id="replay-fast" type="checkbox"> <span data-i18n="ui.rep.fast">Fast forward</span></label>
+          <button id="replay-stop" class="tool primary" data-i18n="ui.rep.stopbtn">Stop</button>
+        </p>
+        <p id="replay-end" class="status" role="status"></p>
+      </div>
+      <p id="replay-status" class="status" role="status"></p>
+
+      <h3 class="shader-h" data-i18n="ui.rep.kepthead">Kept in this browser</h3>
+      <p id="replay-none" class="fine left" data-i18n="ui.rep.none">None yet.</p>
+      <ul id="replay-list" class="replay-list"></ul>
+    </div>
+  </div>
+
+  <!-- The game's script, typed in and kept in this browser (m2hle-cheats.js,
+       src/core/m2lua.h): M2emulator's SCRIPTS\<set>.lua, without the file. -->
+  <div id="pane-cheats" class="pane" role="tabpanel" hidden>
+    <div class="replay cheats">
+      <h3 class="shader-h" data-i18n="ui.cheat.head">CHEATS</h3>
+      <p class="fine left" data-i18n="ui.cheat.about">A Lua script for this game, as M2emulator's scripts are written: Init, Frame and
+        PostDraw, an Options table, I960_Write*, Romset_Patch* and the rest, in Lua 5.5. It is kept in this
+        browser for this game, and runs from when you press Run until you turn it off, the next time
+        too. It does not run during an online match, a replay or a follow: its patches come off, and it
+        starts again when that ends.</p>
+      <textarea id="cheats-text" class="cheats-text" rows="14" spellcheck="false" autocomplete="off"
+        aria-label="The game's script" data-i18n-aria="ui.cheat.text"></textarea>
+      <p class="np-row">
+        <button id="cheats-run" class="tool primary" data-i18n="ui.cheat.run">Run</button>
+        <button id="cheats-off" class="tool" data-i18n="ui.cheat.off">Turn off</button>
+        <button id="cheats-example" class="tool" data-i18n="ui.cheat.example">Example</button>
+      </p>
+      <p id="cheats-status" class="status" role="status"></p>
+      <h3 id="cheats-opt-head" class="shader-h" hidden data-i18n="ui.cheat.options">OPTIONS</h3>
+      <div id="cheats-options" class="cheats-options"></div>
+    </div>
+  </div>
 </section>
 
+<!-- What the game's script draws (PostDraw), over the picture (m2hle-cheats.js). -->
+<canvas id="cheats-draw" class="cheats-draw" aria-hidden="true" hidden></canvas>
+
 <!-- A few buttons float in the top-right corner, over the canvas, so the game gets the
-     whole window: the source link, Pause (offline play only) and the menu that holds
+     whole window: the source link, Finish replay (while your own game is being
+     recorded), Pause (offline play only) and the menu that holds
      everything else. Keys are
      listed under Controls. The menu's buttons keep their ids -- the panels and the
      test scripts press them by id, whether or not the menu is open. Online Battle
      opens the lobby on the game screen; RPCN account (btn-online) is the page's own
      panel for what that lobby leaves to a keyboard. -->
-<p id="paused" class="paused-label" hidden>Paused</p>
+<p id="paused" class="paused-label" hidden data-i18n="ui.paused">Paused</p>
 
 <footer class="bar">
   <div class="bar-tools">
     <a id="github" class="tool github" href="https://github.com/biggestsonicfan/m2-hle2" target="_blank" rel="noopener noreferrer"
-       title="The emulator's source on GitHub" aria-label="The emulator's source on GitHub"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
+       title="The emulator's source on GitHub" aria-label="The emulator's source on GitHub" data-i18n-title="ui.github" data-i18n-aria="ui.github"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
+    <button id="btn-replay-finish" class="tool replay-finish-btn" hidden
+            title="Finish the replay: save your game so far" aria-label="Finish the replay" data-i18n-title="ui.finish.title" data-i18n-aria="ui.finish"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect class="rec-stop" x="5" y="5" width="6" height="6" fill="currentColor"/></svg></button>
     <button id="btn-pause" class="tool pause-btn" aria-pressed="false" hidden
-            title="Pause (P)" aria-label="Pause"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path class="pause-icon" fill="currentColor" d="M3 2h3.5v12H3zM9.5 2H13v12H9.5z"/><path class="play-icon" fill="currentColor" d="M4 2l10 6-10 6z"/></svg></button>
+            title="Pause (P)" aria-label="Pause" data-i18n-title="ui.pause.title" data-i18n-aria="ui.pause"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path class="pause-icon" fill="currentColor" d="M3 2h3.5v12H3zM9.5 2H13v12H9.5z"/><path class="play-icon" fill="currentColor" d="M4 2l10 6-10 6z"/></svg></button>
     <button id="btn-menu" class="tool menu-btn" aria-expanded="false" aria-controls="menu" aria-haspopup="true"
-            title="Menu" aria-label="Menu"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M1 3h14v2H1zM1 7h14v2H1zM1 11h14v2H1z"/></svg></button>
+            title="Menu" aria-label="Menu" data-i18n-title="ui.menu" data-i18n-aria="ui.menu"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M1 3h14v2H1zM1 7h14v2H1zM1 11h14v2H1z"/></svg></button>
   </div>
   <div id="menu" class="menu ps-win" hidden>
-    <p class="ps-title menu-title" aria-hidden="true">Menu</p>
-    <button id="btn-lobby" class="tool online-btn" hidden><span id="btn-lobby-label">Online Battle</span></button>
-    <button id="btn-online" class="tool account-btn" aria-expanded="false" aria-controls="online" hidden><span id="btn-online-label">RPCN account</span></button>
-    <button id="btn-fullscreen" class="tool" hidden>Fullscreen</button>
-    <button id="btn-controls" class="tool" aria-expanded="false" aria-controls="controls">Controls</button>
-    <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer">Feels laggy?</button>
-    <button id="btn-console" class="tool" aria-expanded="false" aria-controls="drawer">Console <span id="console-badge" class="badge" hidden></span></button>
-    <button id="btn-picture" class="tool" aria-expanded="false" aria-controls="drawer">Picture</button>
+    <p class="ps-title menu-title" aria-hidden="true" data-i18n="ui.menu">Menu</p>
+    <button id="btn-lobby" class="tool online-btn" hidden><span id="btn-lobby-label" data-i18n="ui.menu.lobby">Online Battle</span></button>
+    <button id="btn-online" class="tool account-btn" aria-expanded="false" aria-controls="online" hidden><span id="btn-online-label" data-i18n="ui.menu.online">RPCN account</span></button>
+    <button id="btn-ggpo" class="tool account-btn" aria-expanded="false" aria-controls="ggpo" hidden><span id="btn-ggpo-label" data-i18n="ui.menu.ggpo">GGPO lobby</span></button>
+    <button id="btn-fullscreen" class="tool" hidden data-i18n="ui.menu.fullscreen">Fullscreen</button>
+    <button id="btn-controls" class="tool" aria-expanded="false" aria-controls="controls" data-i18n="ui.menu.controls">Controls</button>
+    <button id="btn-lag" class="tool" aria-expanded="false" aria-controls="drawer" data-i18n="ui.menu.lag">Feels laggy?</button>
+    <button id="btn-console" class="tool" aria-expanded="false" aria-controls="drawer"><span data-i18n="ui.menu.console">Console</span> <span id="console-badge" class="badge" hidden></span></button>
+    <button id="btn-picture" class="tool" aria-expanded="false" aria-controls="drawer" data-i18n="ui.menu.picture">Picture</button>
+    <button id="btn-replay" class="tool" aria-expanded="false" aria-controls="drawer" data-i18n="ui.menu.replay">Replay</button>
+    <button id="btn-cheats" class="tool" aria-expanded="false" aria-controls="drawer" data-i18n="ui.menu.cheats">Cheats</button>
+    <button id="btn-shot" class="tool" hidden data-i18n="ui.menu.shot">Screenshot</button>
+    <button id="btn-report" class="tool" aria-expanded="false" aria-controls="report" hidden data-i18n="ui.menu.report">Report an issue</button>
   </div>
 </footer>
 
 <!-- ?v= is the build: see web/stamp-site.cmake. Every script is this site's own and
      none comes from anywhere else: the netplay sign-in is remembered in this origin's
      localStorage, which any script on the page could read. Keep it that way (CI checks). -->
+<!-- The page's own words in the visit's language (m2hle-lang-menu.js), before the
+     scripts below read or fill it; what they write later is theirs to translate. -->
+<script>m2hleLang.apply(document);</script>
+<script src="m2hle-nozoom.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-game.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-keys.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-tools.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-objview.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-shader.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-crt.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-netplay.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-ggpo.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-pad.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-touch.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-follow.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-replay.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-cheats.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-report.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-page.js?v=@M2HLE_VERSION@"></script>
 <script async src="m2hle.js?v=@M2HLE_VERSION@"></script>
+<!-- The arcade: asks whether to share high scores and usage, and if so boots the game on
+     the shared board. arcade/ is a copy of the scores.sonicthefighte.rs repository's
+     src/public client; only its API calls leave this site. The game runs without it.
+     m2hle-game.js loads it with ?game=: each game has its own board and words, and
+     Sega Rally's never mention the Fly. -->
 </body>
 </html>

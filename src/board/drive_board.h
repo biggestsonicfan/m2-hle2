@@ -1,0 +1,73 @@
+/*
+ * drive_board.h — the driving cabinet's drive board: the wheel's force
+ * feedback, as its commands (board-level; Pinboard #1047).
+ *
+ * Daytona USA's wheel is turned by a motor on the drive board (838-10646, a
+ * Z80 running epr-16488a; MAME sj25_0207_01 runs the program but wires it to
+ * nothing). The game sends it one byte at a time through the Model 1 I/O
+ * board's port E (model1io.h keeps the last one as `drive`). The board's ROM
+ * is not in the sets we load, so the commands are decoded here, not run.
+ *
+ * What the game sends (Daytona ROM 0x1BD5C, called each frame for the
+ * player's car at 0x501220; queued at 0x502900, sent one a frame by 0x1C4A8).
+ * A command is sent again only when it changes, so each is a state the board
+ * holds until the next:
+ *   0x20-0x27  standing or slow (car +0x18 < 64): 0x27 at rest, falling to 0x20
+ *   0x38-0x3F  faster: 0x38 | (speed - 63) >> 6, rising with speed
+ *   0x42 for 20 frames, then 0x32 for 12, over and over, while the car moves
+ *              with surface bits 2-3 of +0x1BE / +0x1C0 set
+ *   0x50, 0x60 bit 8 of +0x1C0 / +0x1BE (at most one a 32 frames)
+ *   0x53, 0x63 contact (+0x9D 0x10 or 0x0A; which of the two is +0xF1 bit 1)
+ *   0x57, 0x67 a crash (+0xF0 0x20 or 0x0A; which is +0x00 bits 23 / 25)
+ *   0x10       spinning (+0xD2 1..0x50), or stopped with those surface bits
+ *   0x27       also while +0xD8 is -112 or 400
+ *   0x52/0x62/0x42  when +0x281 is 0..2 (outside the race)
+ *   0x00-0x0F, 0x71, 0xFF  at power-on and the race start: set-up, no force
+ * The high nibble is the effect and the low three bits its strength (0-7).
+ * Sega's later drive boards keep the families (Supermodel's DriveBoard.cpp,
+ * Scud Race: 0x1x centring, 0x2x friction, 0x5x / 0x6x turn the wheel right /
+ * left). 0x3x and 0x4x are read from how Daytona uses them: friction that
+ * fades as the car speeds up hands over to 0x3x, which grows from there, so
+ * 0x3x is the centring at speed; 0x4x pulses on and off, a shake. The side of
+ * 0x5x / 0x6x is Supermodel's; the game alone does not tell it.
+ *
+ * Nothing on the board reads the drive board back (port E reads 0xFF), so
+ * this is output only: it changes no frame, and needs no savestate of its own
+ * (the command is model1io's `drive`, already in the state).
+ */
+#ifndef M2HLE_DRIVE_BOARD_H
+#define M2HLE_DRIVE_BOARD_H
+
+#include <stdint.h>
+
+typedef enum {
+    DRIVE_NONE = 0,      /* set-up, test or unknown: the motor is free */
+    DRIVE_SPRING,        /* 0x1x: centring, standing (0x10: none) */
+    DRIVE_FRICTION,      /* 0x2x: heavy wheel */
+    DRIVE_CENTER,        /* 0x3x: centring that grows with speed */
+    DRIVE_VIBRATE,       /* 0x4x: shake */
+    DRIVE_PUSH,          /* 0x5x right, 0x6x left */
+} drive_kind_t;
+
+typedef struct {
+    uint8_t cmd;
+    uint8_t kind;        /* drive_kind_t */
+    uint8_t level;       /* 0-7 */
+    int8_t  dir;         /* DRIVE_PUSH: +1 right, -1 left; else 0 */
+} drive_effect_t;
+
+static inline drive_effect_t drive_board_decode(uint8_t cmd) {
+    drive_effect_t e = { cmd, DRIVE_NONE, (uint8_t)(cmd & 7u), 0 };
+    switch (cmd >> 4) {
+        case 0x1: e.kind = DRIVE_SPRING;   break;
+        case 0x2: e.kind = DRIVE_FRICTION; break;
+        case 0x3: e.kind = DRIVE_CENTER;   break;
+        case 0x4: e.kind = DRIVE_VIBRATE;  break;
+        case 0x5: e.kind = DRIVE_PUSH; e.dir = +1; break;
+        case 0x6: e.kind = DRIVE_PUSH; e.dir = -1; break;
+        default:  e.level = 0; break;
+    }
+    return e;
+}
+
+#endif /* M2HLE_DRIVE_BOARD_H */

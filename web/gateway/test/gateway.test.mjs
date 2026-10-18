@@ -14,7 +14,7 @@ import { WebSocket } from 'ws';
 import { startGateway } from '../gateway.mjs';
 import { SIGNALING_TAG, ipv4, ipv4Text } from '../rules.mjs';
 
-const ORIGIN = 'https://play.sonicthefighte.rs';
+const ORIGIN = 'https://arcade.sonicthefighte.rs';
 let gw, rpcn, signaling, sigPort, lastSignaling;
 let rpcn2, signaling2, lastSignaling2;       /* a second upstream, chosen by name */
 

@@ -75,6 +75,22 @@
  *            rankings) in DIR/<set>/backup1 instead of the per-user
  *            ~/.config/m2hle2/nvram (core/backup_ram.h).
  * --no-nvram  boot with blank backup RAM every time and keep nothing.
+ * --versus   Versus on this machine (Virtual-On): start a second m2hle beside
+ *            this one, each a cabinet with its own window and pad, their comm
+ *            boards linked over 127.0.0.1 (net/comm_local.h). This window is
+ *            the MASTER and plays the first pad; the other is the SLAVE and
+ *            plays the second. Closing either ends the Versus. Windowed
+ *            (640x480 unless --window). Not with --netplay.
+ * --pad N    only the Nth gamepad (0 the first) plays here; default all.
+ * --window-at X,Y  put the window there.
+ * --versus-slave PORT:TOKEN  the SLAVE that --versus starts (not for players).
+ * --scripts DIR  the game scripts' folder (M2emulator's Lua, core/m2lua.h):
+ *            <set>.lua there runs with the game. Default scripts/ in the
+ *            working directory, else beside the executable.
+ * --no-scripts  run no game script.
+ * --script-option CODE  set the script's options, in the libretro core's
+ *            cheat codes: <key>=<value> (the value's index or name), several
+ *            joined by '+'. May be given more than once.
  */
 #include <stdarg.h>
 #include <stdbool.h>
@@ -82,6 +98,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>    /* stat: is scripts/ a folder */
+#include <unistd.h>      /* readlink: scripts/ beside the executable */
 
 #include <SDL3/SDL.h>
 #include <GLES3/gl3.h>
@@ -89,6 +107,7 @@
 #include "sokol_gfx.h"
 #include "sokol_log.h"
 #include "sokol_debugtext.h"
+#include "sokol_gl.h"        /* a script's PostDraw images (scripts_draw) */
 
 #include "constants.h"
 #include "log.h"
@@ -107,12 +126,29 @@
 #include "input.h"
 #include "audio_out.h"   /* audio_out_cb: drains g_sound's ring (only its callback is used here) */
 #include "miniz.h"
+#include "net/comm_local.h"   /* --versus: the two cabinets' link over 127.0.0.1 */
+#include "child_proc.h"   /* --versus: the SLAVE's process */
+#include "m2lua.h"       /* M2emulator's game scripts (Pinboard #972) */
+#include "m2lua_wide.h"  /* and the picture they ask for */
+/* Video_CreateSurfaceFromFile's PNGs (M2emulator loads only PNG). Static, from
+ * memory: m2lua.h reads the file. */
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_STDIO
+#define STBI_ONLY_PNG
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "stb_image.h"
+#pragma GCC diagnostic pop
 
 /* registry.h is the single TU that defines g_profiles[] / g_profile_count /
  * g_active_profile and pulls in every per-game profile header. */
 #include "registry.h"
+#include "lightgun_sgl.h"   /* the mouse and touches as light guns (Pinboard #1040) */
+#include "ffb.h"           /* the drive board's force feedback (Pinboard #1047) */
 
 #define MAX_SHOTS 16
+#define MAX_SCRIPT_OPTS 16
 
 static struct {
     memory_bus_t     bus;
@@ -150,8 +186,19 @@ static struct {
     bool        net_host;           /* host a room as soon as the sign-in completes */
     const char *net_room_pass;      /* the rooms hosted here are locked with it */
     int         net_delay;          /* 0 = the stored value */
-} opt = { .render_fps = 30.0, .render_scale = 1, .linear = true };
+    bool        versus;             /* --versus: the MASTER, starting the SLAVE */
+    uint16_t    versus_port;        /* --versus-slave: the MASTER's port; 0 = not a SLAVE */
+    uint32_t    versus_token;
+    int         pad;                /* --pad: the only gamepad that plays here; -1 = all */
+    bool        win_at;
+    int         win_x, win_y;
+    const char *scripts_dir;        /* --scripts; NULL = the default */
+    bool        no_scripts;
+    int         script_opt_count;
+    const char *script_opt[MAX_SCRIPT_OPTS];   /* --script-option codes */
+} opt = { .render_fps = 30.0, .render_scale = 1, .linear = true, .pad = -1 };
 
+static bool g_sdtx_on;              /* sokol's debug text is set up: --osd, the lobby or a script's text */
 static bool g_sound_on;             /* the sound board is attached (sound_start succeeded) */
 
 /* ---- Gamepad ------------------------------------------------------------- */
@@ -209,11 +256,17 @@ static bool apply_pad_map(const char *list) {
  * event so the d-pad and stick cannot release each other's direction. */
 static bool g_pad_held[GAME_INPUT_COUNT];
 
+/* --pad: only that gamepad plays this window; the others play another's. */
+static bool pad_plays_here(int i) {
+    return opt.pad < 0 || i == opt.pad;
+}
+
 static void pad_refresh(void) {
     bool now[GAME_INPUT_COUNT] = {0};
     int count = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&count);
     for (int i = 0; ids && i < count; i++) {
+        if (!pad_plays_here(i)) continue;
         SDL_Gamepad *pad = SDL_GetGamepadFromID(ids[i]);
         if (!pad) continue;
         const int dead = 16000;
@@ -244,6 +297,120 @@ static void lobby_pad_release(void) {
         if (g_pad_held[a]) input_action_up(a);
         g_pad_held[a] = false;
     }
+}
+
+/* ---- Force feedback (ffb.h, Pinboard #1047) ------------------------------- */
+
+/* The drive board's force on the pads that play here: a wheel SDL can drive
+ * gets the push, the spring, the friction and the shake as haptic effects,
+ * set when the command changes; every other pad rumbles, renewed each
+ * rendered frame while it does. */
+#define FFB_PADS 4
+
+static struct {
+    SDL_JoystickID id;              /* 0: a free slot */
+    SDL_Haptic    *haptic;          /* NULL: rumble only */
+    int            fx[4];           /* constant, spring, friction, sine; -1 if none */
+    bool           on[4];
+} g_ffb_pad[FFB_PADS];
+static int  g_ffb_last = -1;        /* the command last played; -1: play it again */
+static bool g_ffb_rumbling;
+
+static const Uint32 g_ffb_type[4] = { SDL_HAPTIC_CONSTANT, SDL_HAPTIC_SPRING, SDL_HAPTIC_FRICTION, SDL_HAPTIC_SINE };
+
+/* Effect k (g_ffb_type) at strength v, along the wheel. */
+static SDL_HapticEffect ffb_effect(int k, int v) {
+    SDL_HapticEffect e;
+    SDL_zero(e);
+    e.type = (Uint16)g_ffb_type[k];
+    if (k == 0) {
+        e.constant.direction.type = SDL_HAPTIC_STEERING_AXIS;
+        e.constant.length = SDL_HAPTIC_INFINITY;
+        e.constant.level = (Sint16)v;
+    } else if (k == 3) {
+        e.periodic.direction.type = SDL_HAPTIC_STEERING_AXIS;
+        e.periodic.length = SDL_HAPTIC_INFINITY;
+        e.periodic.period = 60;   /* ms */
+        e.periodic.magnitude = (Sint16)v;
+    } else {
+        e.condition.direction.type = SDL_HAPTIC_STEERING_AXIS;
+        e.condition.length = SDL_HAPTIC_INFINITY;
+        e.condition.right_sat[0] = e.condition.left_sat[0] = 0xFFFF;
+        e.condition.right_coeff[0] = e.condition.left_coeff[0] = (Sint16)v;
+    }
+    return e;
+}
+
+static void ffb_close_pad(int s) {
+    if (g_ffb_pad[s].haptic) SDL_CloseHaptic(g_ffb_pad[s].haptic);
+    memset(&g_ffb_pad[s], 0, sizeof g_ffb_pad[s]);
+}
+
+/* A wheel's four effects, made once and updated in place. */
+static void ffb_open_haptic(int s, SDL_Gamepad *pad) {
+    SDL_Joystick *joy = SDL_GetGamepadJoystick(pad);
+    if (!joy || !SDL_IsJoystickHaptic(joy)) return;
+    SDL_Haptic *h = SDL_OpenHapticFromJoystick(joy);
+    if (!h) return;
+    Uint32 has = SDL_GetHapticFeatures(h);
+    int made = 0;
+    for (int k = 0; k < 4; k++) {
+        SDL_HapticEffect e = ffb_effect(k, 0);
+        g_ffb_pad[s].fx[k] = (has & g_ffb_type[k]) ? SDL_CreateHapticEffect(h, &e) : -1;
+        if (g_ffb_pad[s].fx[k] >= 0) made++;
+    }
+    if (!made) { SDL_CloseHaptic(h); return; }
+    if (has & SDL_HAPTIC_AUTOCENTER) SDL_SetHapticAutocenter(h, 0);   /* the game's spring centres it */
+    g_ffb_pad[s].haptic = h;
+    printf("m2hle: force feedback on %s\n", SDL_GetGamepadName(pad));
+}
+
+static void ffb_haptic_play(int s, const ffb_out_t *o) {
+    SDL_Haptic *h = g_ffb_pad[s].haptic;
+    const int v[4] = { o->push, o->spring, o->friction, o->shake };
+    for (int k = 0; k < 4; k++) {
+        int id = g_ffb_pad[s].fx[k];
+        if (id < 0) continue;
+        if (!v[k]) {
+            if (g_ffb_pad[s].on[k]) SDL_StopHapticEffect(h, id);
+            g_ffb_pad[s].on[k] = false;
+            continue;
+        }
+        SDL_HapticEffect e = ffb_effect(k, v[k]);
+        SDL_UpdateHapticEffect(h, id, &e);
+        if (!g_ffb_pad[s].on[k]) SDL_RunHapticEffect(h, id, 1);
+        g_ffb_pad[s].on[k] = true;
+    }
+}
+
+static void ffb_update(void) {
+    ffb_out_t o = ffb_poll();
+    bool rumble = o.strong || o.weak, changed = o.effect.cmd != g_ffb_last;
+    if (!changed && !rumble && !g_ffb_rumbling) return;
+    int count = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&count);
+    for (int s = 0; s < FFB_PADS; s++) {   /* forget the pads that went */
+        bool here = false;
+        for (int i = 0; ids && i < count && !here; i++) here = ids[i] == g_ffb_pad[s].id;
+        if (g_ffb_pad[s].id && !here) ffb_close_pad(s);
+    }
+    for (int i = 0; ids && i < count; i++) {
+        SDL_Gamepad *pad = SDL_GetGamepadFromID(ids[i]);
+        if (!pad || !pad_plays_here(i)) continue;
+        int s = 0;
+        while (s < FFB_PADS && g_ffb_pad[s].id != ids[i]) s++;
+        if (s == FFB_PADS) {
+            for (s = 0; s < FFB_PADS && g_ffb_pad[s].id; s++) {}
+            if (s == FFB_PADS) continue;
+            g_ffb_pad[s].id = ids[i];
+            ffb_open_haptic(s, pad);
+        }
+        if (g_ffb_pad[s].haptic) { if (changed) ffb_haptic_play(s, &o); }
+        else SDL_RumbleGamepad(pad, o.strong, o.weak, rumble ? 100 : 0);
+    }
+    SDL_free(ids);
+    g_ffb_last = o.effect.cmd;
+    g_ffb_rumbling = rumble;
 }
 
 /* Keyboard, for desktop runs: the debugger's layout (input.h). */
@@ -301,6 +468,7 @@ static SDL_AudioStream *sound_start(void) {
         fprintf(stderr, "m2hle: could not open audio (%s); running silent\n", SDL_GetError());
         return NULL;
     }
+    sound_select_board(g_active_profile->quirks.model1_sound);
     sound_reset();
     sound_attach(&state.bus);
     sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
@@ -321,36 +489,22 @@ static SDL_AudioStream *sound_start(void) {
 /* ---- ROM loading (main.c load_active_profile; the sound board: sound_start) */
 
 static bool load_rom(const char *zip) {
-    const char *sep = strrchr(zip, '/');
-    const char *base = sep ? sep + 1 : zip;
-    const char *dot = strrchr(base, '.');
-    char id[64] = {0};
-    size_t n = dot ? (size_t)(dot - base) : strlen(base);
-    if (n >= sizeof id) n = sizeof id - 1;
-    memcpy(id, base, n);
-
+    char id[64];
+    profile_set_from_path(zip, id, sizeof id);
     const game_profile_t *want = opt.profile ? profile_by_id(opt.profile) : NULL;
     if (opt.profile && !want) fprintf(stderr, "m2hle: --profile %s: no such profile; using the default\n", opt.profile);
     g_active_profile = profile_for_rom_set(id, want);
     if (!g_active_profile) {
-        fprintf(stderr, "m2hle: no profile for ROM set '%s'. Supported:", id);
-        for (size_t i = 0; i < g_profile_count; i++) fprintf(stderr, " %s", profile_rom_set(g_profiles[i]));
-        fprintf(stderr, "\n");
+        char msg[256];
+        profile_missing_message(id, msg, sizeof msg);
+        fprintf(stderr, "m2hle: %s\n", msg);
         return false;
     }
 
     /* MAME clone fall-through: the parent zip sits next to the picked one. A
      * merged set carries the parent's files itself, so a missing parent is fine. */
-    char parent[1024] = {0};
-    const char *parent_ptr = NULL;
-    if (g_active_profile->parent_zip_name) {
-        size_t dir_len = sep ? (size_t)(sep - zip + 1) : 0;
-        if (dir_len + strlen(g_active_profile->parent_zip_name) < sizeof parent) {
-            memcpy(parent, zip, dir_len);
-            strcat(parent, g_active_profile->parent_zip_name);
-            parent_ptr = parent;
-        }
-    }
+    char parent[1024];
+    const char *parent_ptr = profile_parent_path(g_active_profile, zip, parent, sizeof parent);
     sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
     if (romset_load(&state.romset, g_active_profile->load_fn, zip, parent_ptr) != 0) {
         fprintf(stderr, "m2hle: could not load '%s' as %s\n", zip, g_active_profile->display_name);
@@ -372,6 +526,185 @@ static bool load_rom(const char *zip) {
     input_reset();
     input_attach(&state.bus);
     return true;
+}
+
+/* ---- Game scripts (core/m2lua.h, Pinboard #972) ------------------------------
+ *
+ * The desktop's and the libretro core's: <dir>/<set>.lua runs with the game,
+ * through the emu thread's hooks, and never while a netplay session has the
+ * board (emu_script_may_run). Its options are set from the command line in the
+ * libretro core's cheat codes; PostDraw's text is drawn with sokol's 8x8 font
+ * and its PNGs with sokol_gl,
+ * and Model2_SetWideScreen and the stretches shape the picture (ui/m2lua_wide.h). */
+
+static bool scripts_is_dir(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+/* scripts/ in the working directory, else beside the executable (main.c's). */
+static void scripts_default_dir(char *out, size_t cap) {
+    snprintf(out, cap, "scripts");
+    if (scripts_is_dir(out)) return;
+    char exe[512] = "";
+    long n = (long)readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0) return;
+    exe[n] = 0;
+    char *slash = strrchr(exe, '/');
+    if (slash) snprintf(out, cap, "%.*s/scripts", (int)(slash - exe), exe);
+}
+
+/* --script-option codes onto the options; before the emu thread runs. */
+static void scripts_apply_options(void) {
+    static int want[M2LUA_OPTION_MAX];
+    m2lua_cheat_defaults(want);
+    for (int i = 0; i < opt.script_opt_count; i++)
+        if (!m2lua_cheat_code(opt.script_opt[i], want))
+            fprintf(stderr, "m2hle: --script-option %s: no such option or value\n", opt.script_opt[i]);
+    m2lua_cheat_apply(want);
+}
+
+static uint8_t *scripts_decode(const uint8_t *buf, int len, int *w, int *h) {
+    int comp;
+    return stbi_load_from_memory(buf, len, w, h, &comp, 4);
+}
+
+/* After load_rom, before the emu thread: the game's script, Init and all. */
+static void scripts_load(void) {
+    char dir[512];
+    if (opt.scripts_dir) snprintf(dir, sizeof dir, "%s", opt.scripts_dir);
+    else                 scripts_default_dir(dir, sizeof dir);
+    m2lua_set_dir(dir);
+    g_m2lua_decode_image = scripts_decode;   /* Init may load its images */
+    g_m2lua.disabled   = opt.no_scripts;
+    g_emu_script_frame = m2lua_frame_hook;
+    g_emu_script_reset = m2lua_reset_hook;
+    if (!m2lua_load(profile_rom_set(g_active_profile), &state.bus, &state.romset)) {
+        if (g_m2lua.error[0]) fprintf(stderr, "m2hle: script not run: %s\n", g_m2lua.error);
+        return;
+    }
+    scripts_apply_options();
+    printf("m2hle: script %s (%d option%s)\n", g_m2lua.path, g_m2lua.noptions,
+           g_m2lua.noptions == 1 ? "" : "s");
+}
+
+/* PostDraw's images: one texture per loaded surface, made again when the
+ * script loads another into its slot (gen), let go when it releases it. Drawn
+ * as sokol_gl quads with the image's alpha, under the text. */
+static struct {
+    bool         ready;
+    sgl_pipeline pip;
+    sg_sampler   smp;
+    sg_image     img[M2LUA_SURFACE_MAX];
+    sg_view      view[M2LUA_SURFACE_MAX];
+    uint32_t     gen[M2LUA_SURFACE_MAX];
+} g_script_img;
+
+static void scripts_images_setup(void) {
+    sgl_setup(&(sgl_desc_t){ .logger.func = slog_func });
+    sg_pipeline_desc pd = { 0 };
+    pd.colors[0].blend = (sg_blend_state){
+        .enabled = true,
+        .src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA, .dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+        .src_factor_alpha = SG_BLENDFACTOR_ZERO,    .dst_factor_alpha = SG_BLENDFACTOR_ONE };
+    g_script_img.pip = sgl_make_pipeline(&pd);
+    g_script_img.smp = sg_make_sampler(&(sg_sampler_desc){
+        .min_filter = SG_FILTER_LINEAR, .mag_filter = SG_FILTER_LINEAR,
+        .wrap_u = SG_WRAP_CLAMP_TO_EDGE, .wrap_v = SG_WRAP_CLAMP_TO_EDGE });
+    g_script_img.ready = true;
+}
+
+static void scripts_image_drop(int i) {
+    if (g_script_img.view[i].id) sg_destroy_view(g_script_img.view[i]);
+    if (g_script_img.img[i].id)  sg_destroy_image(g_script_img.img[i]);
+    g_script_img.view[i].id = g_script_img.img[i].id = 0;
+    g_script_img.gen[i] = 0;
+}
+
+/* Upload what the script loaded since the last frame, free what it released. */
+static void scripts_images_sync(void) {
+    emu_mutex_lock(&g_m2lua.draw_mutex);
+    for (int i = 0; i < M2LUA_SURFACE_MAX; i++) {
+        m2lua_surface_t *s = &g_m2lua.surfaces[i];
+        if (!s->used) {
+            free(s->rgba);
+            s->rgba = NULL;
+            if (g_script_img.img[i].id) scripts_image_drop(i);
+            continue;
+        }
+        if (g_script_img.gen[i] == s->gen) continue;
+        scripts_image_drop(i);
+        g_script_img.img[i] = sg_make_image(&(sg_image_desc){
+            .width = s->w, .height = s->h, .pixel_format = SG_PIXELFORMAT_RGBA8,
+            .data.mip_levels[0] = { s->rgba, (size_t)s->w * (size_t)s->h * 4u },
+            .label = "script-surface" });
+        g_script_img.view[i] = sg_make_view(&(sg_view_desc){ .texture.image = g_script_img.img[i] });
+        g_script_img.gen[i] = s->gen;
+    }
+    emu_mutex_unlock(&g_m2lua.draw_mutex);
+}
+
+static void scripts_images_shutdown(void) {
+    if (!g_script_img.ready) return;
+    for (int i = 0; i < M2LUA_SURFACE_MAX; i++) scripts_image_drop(i);
+    sgl_shutdown();
+}
+
+/* One image at board (x, y), its own size times k (as M2emulator, which drew
+ * it 1:1 on a 496 x 384 screen), recorded for sgl_draw. */
+static void scripts_image(const m2lua_draw_t *d, float x, float y, float k) {
+    int i = d->surface;
+    if (i < 0 || i >= M2LUA_SURFACE_MAX || !g_script_img.view[i].id) return;
+    float x1 = x + (float)g_m2lua.surfaces[i].w * k, y1 = y + (float)g_m2lua.surfaces[i].h * k;
+    sgl_texture(g_script_img.view[i], g_script_img.smp);
+    sgl_begin_quads();
+    sgl_v2f_t2f(x,  y,  0.0f, 0.0f);
+    sgl_v2f_t2f(x1, y,  1.0f, 0.0f);
+    sgl_v2f_t2f(x1, y1, 1.0f, 1.0f);
+    sgl_v2f_t2f(x,  y1, 0.0f, 1.0f);
+    sgl_end();
+}
+
+/* One string at window (x, y), in its font's size (sdtx's cell is 8 pixels). */
+static void scripts_text(const m2lua_draw_t *d, int fb_w, int fb_h, float x, float y, float k) {
+    bool font = d->font >= 0 && g_m2lua.fonts[d->font].used;
+    float cell = (font ? g_m2lua.fonts[d->font].size : M2LUA_TEXT_SIZE) * k;
+    if (cell < 4.0f) cell = 4.0f;
+    float s = cell / 8.0f;
+    sdtx_canvas((float)fb_w / s, (float)fb_h / s);
+    sdtx_origin(0.0f, 0.0f);
+    sdtx_pos(x / cell, y / cell);
+    sdtx_color4b((uint8_t)(d->color >> 16), (uint8_t)(d->color >> 8), (uint8_t)d->color,
+                 (uint8_t)(d->color >> 24));
+    sdtx_puts(d->text);
+}
+
+/* PostDraw's list over the picture at (ox, oy, w, h): board pixels scaled with
+ * it. Images first (sgl_draw here), then the text, before the frame's one
+ * sdtx_draw. */
+static void scripts_draw(int fb_w, int fb_h, int ox, int oy, int w, int h) {
+    static m2lua_draw_t list[M2LUA_DRAW_MAX];
+    int n = 0;
+    if (!g_m2lua.loaded) return;
+    if (!g_script_img.ready) scripts_images_setup();
+    scripts_images_sync();
+    m2lua_take_draw(list, &n);
+    if (n == 0) return;
+    float k = (float)h / (float)VIDEO_HEIGHT, kx = (float)w / (float)VIDEO_WIDTH;
+    sg_apply_viewport(0, 0, fb_w, fb_h, true);
+    sg_apply_scissor_rect(0, 0, fb_w, fb_h, true);
+    sgl_defaults();
+    sgl_enable_texture();
+    sgl_load_pipeline(g_script_img.pip);
+    sgl_matrix_mode_projection();
+    sgl_ortho(0.0f, (float)fb_w, (float)fb_h, 0.0f, -1.0f, 1.0f);
+    for (int i = 0; i < n; i++) {
+        const m2lua_draw_t *d = &list[i];
+        float x = (float)ox + d->x * kx, y = (float)oy + d->y * k;
+        if (d->kind == M2LUA_DRAW_SURFACE) scripts_image(d, x, y, k);
+        else                               scripts_text(d, fb_w, fb_h, x, y, k);
+    }
+    sgl_draw();
 }
 
 /* The last lines of the in-memory log, for a failure with file logging off. */
@@ -585,7 +918,44 @@ static void verify_fill(int w, int h) {
 
 /* ---- Main ------------------------------------------------------------------ */
 
+/* --versus, --versus-slave, --pad, --window-at: the arguments argv[i] takes
+ * (val its value, NULL if none), 0 if a is none of them, -1 if its value is bad. */
+static int parse_versus_arg(const char *a, const char *val) {
+    if (!strcmp(a, "--versus")) { opt.versus = true; return 1; }
+    if (!val) return 0;
+    if (!strcmp(a, "--versus-slave")) {
+        unsigned port = 0, token = 0;
+        if (sscanf(val, "%u:%u", &port, &token) != 2 || !port || port > 65535u) return -1;
+        opt.versus_port  = (uint16_t)port;
+        opt.versus_token = token;
+        return 2;
+    }
+    if (!strcmp(a, "--pad")) { opt.pad = atoi(val); return 2; }
+    if (!strcmp(a, "--window-at")) {
+        if (sscanf(val, "%d,%d", &opt.win_x, &opt.win_y) != 2) return -1;
+        opt.win_at = true;
+        return 2;
+    }
+    return 0;
+}
+
+/* A Versus is two windows, not with --netplay. */
+static bool versus_args_check(void) {
+    if (!opt.versus && !opt.versus_port) return true;
+    if (opt.netplay) {
+        fprintf(stderr, "m2hle: --versus is this machine's two cabinets; it does not go with --netplay\n");
+        return false;
+    }
+    if (opt.versus && opt.versus_port) return false;
+    if (opt.win_w <= 0 || opt.win_h <= 0) {
+        opt.win_w = 640;   /* two cabinets, two windows: neither fullscreen */
+        opt.win_h = 480;
+    }
+    return true;
+}
+
 static bool parse_args(int argc, char **argv) {
+    int used;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         bool more = i + 1 < argc;
@@ -597,6 +967,14 @@ static bool parse_args(int argc, char **argv) {
             g_region = r;
         }
         else if (!strcmp(a, "--vs-mode"))           g_vs_mode = 1;
+        else if (more && io5649_wheel_option(a, argv[i + 1])) i++;
+        else if (more && lightgun_host_option(a, argv[i + 1])) i++;   /* --gun-flash N */
+        else if (more && ffb_option(a, argv[i + 1]))          i++;
+        else if (!strcmp(a, "--enemy-rank") && more) {  /* cabinet | easy..hardest | extra1 | extra2 */
+            int r = enemy_rank_parse(argv[++i]);
+            if (r < -1) return false;
+            g_enemy_rank = r;
+        }
         else if (!strcmp(a, "--no-nvram"))          g_backup_want = 0;
         else if (!strcmp(a, "--nvram-dir") && more) {
             snprintf(g_backup_dir, sizeof g_backup_dir, "%s", argv[++i]);
@@ -642,12 +1020,20 @@ static bool parse_args(int argc, char **argv) {
         else if (!strcmp(a, "--net-delay") && more)  opt.net_delay = atoi(argv[++i]);
         else if (!strcmp(a, "--net-host"))           opt.net_host = opt.netplay = true;
         else if (!strcmp(a, "--net-room-pass") && more) opt.net_room_pass = argv[++i];
+        else if ((used = parse_versus_arg(a, more ? argv[i + 1] : NULL)) != 0) {
+            if (used < 0) return false;
+            i += used - 1;
+        }
         else if (!strcmp(a, "--filter") && more) {
             const char *f = argv[++i];
             if (!strcmp(f, "linear")) opt.linear = true;
             else if (!strcmp(f, "nearest")) opt.linear = false;
             else return false;
         }
+        else if (!strcmp(a, "--scripts") && more)    opt.scripts_dir = argv[++i];
+        else if (!strcmp(a, "--no-scripts"))         opt.no_scripts = true;
+        else if (!strcmp(a, "--script-option") && more && opt.script_opt_count < MAX_SCRIPT_OPTS)
+            opt.script_opt[opt.script_opt_count++] = argv[++i];
         else if (!strcmp(a, "--max-temp") && more)   opt.max_temp = atof(argv[++i]);
         else if (!strcmp(a, "--shot") && more && opt.shot_count < MAX_SHOTS) {
             char *spec = argv[++i], *colon = strchr(spec, ':');
@@ -659,6 +1045,7 @@ static bool parse_args(int argc, char **argv) {
         else if (a[0] != '-' && !opt.rom)            opt.rom = a;
         else { fprintf(stderr, "m2hle: bad argument '%s'\n", a); return false; }
     }
+    if (!versus_args_check()) return false;
     return opt.rom != NULL;
 }
 
@@ -760,6 +1147,7 @@ static void sdl_netplay_reset_cb(void *ctx) {
     g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
     irqt_reset();
     if (g_sound_on) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&state.bus);
         sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
@@ -834,19 +1222,87 @@ static bool lobby_event(const SDL_Event *ev, bool *pad_changed) {
     return toggle || used;
 }
 
+/* The board was reset under the pad (netplay's barrier, a Versus's role
+ * boot): it holds nothing now, so press again whatever is still down. */
+static void pad_resync(bool *pad_changed) {
+    if (!g_pad_resync) return;
+    g_pad_resync = 0;
+    memset(g_pad_held, 0, sizeof g_pad_held);
+    *pad_changed = true;
+}
+
 /* Who holds the pad after this round of events. */
 static void lobby_pad_settle(bool *pad_changed) {
-    /* The board was reset under the pad (netplay's barrier): it holds nothing
-     * now, so press again whatever is still down. */
-    if (g_pad_resync) {
-        g_pad_resync = 0;
-        memset(g_pad_held, 0, sizeof g_pad_held);
-        *pad_changed = true;
-    }
     static bool lobby_was_open;
     if (lobby_was_open && !g_lobby.open) *pad_changed = true;
     lobby_was_open = g_lobby.open;
     if (g_lobby.open) *pad_changed = false;   /* the lobby has the pad */
+}
+
+/* Player 1's light gun on the mouse or a finger (Pinboard #1040), as on the
+ * web page (main_web.c, web_gun_event): the mouse aims, its left button fires
+ * and its right one reloads; a finger fires where it lands, or reloads when it
+ * lands off the picture. render_frame keeps where the picture went, in
+ * framebuffer pixels (w 0 while the lobby hides it), and the framebuffer's
+ * pixels per window unit, which SDL's mouse is in. lightgun.h ignores the
+ * pointer in a session. */
+static float g_gun_rect[4], g_gun_px_x = 1.0f, g_gun_px_y = 1.0f, g_gun_fb[2];
+static SDL_FingerID g_gun_finger;
+static bool g_gun_finger_on;
+
+static void gun_aim_px(float x, float y) {
+    lightgun_host_aim(0, x, y, g_gun_rect[0], g_gun_rect[1], g_gun_rect[2], g_gun_rect[3]);
+}
+
+static void gun_event(const SDL_Event *ev) {
+    if (!lightgun_host_on()) return;
+    const bool live = g_gun_rect[2] > 0.0f;
+    switch (ev->type) {
+        case SDL_EVENT_MOUSE_MOTION:
+            if (ev->motion.which != SDL_TOUCH_MOUSEID && live && !g_gun_finger_on)
+                gun_aim_px(ev->motion.x * g_gun_px_x, ev->motion.y * g_gun_px_y);
+            break;
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            if (!g_gun_finger_on) lightgun_host_aim_away(0);
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP: {
+            if (ev->button.which == SDL_TOUCH_MOUSEID) break;
+            const bool down = ev->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+            if (down && (!live || g_gun_finger_on)) break;
+            if (down) gun_aim_px(ev->button.x * g_gun_px_x, ev->button.y * g_gun_px_y);
+            if (ev->button.button == SDL_BUTTON_LEFT)  lightgun_host_button(0, LIGHTGUN_HOST_TRIGGER, down);
+            if (ev->button.button == SDL_BUTTON_RIGHT) lightgun_host_button(0, LIGHTGUN_HOST_RELOAD, down);
+            break;
+        }
+        case SDL_EVENT_FINGER_DOWN: {
+            if (g_gun_finger_on || !live) break;
+            const float x = ev->tfinger.x * g_gun_fb[0], y = ev->tfinger.y * g_gun_fb[1];
+            const float *r = g_gun_rect;
+            g_gun_finger = ev->tfinger.fingerID;
+            g_gun_finger_on = true;
+            gun_aim_px(x, y);
+            bool on = x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3];
+            lightgun_host_button(0, on ? LIGHTGUN_HOST_TRIGGER : LIGHTGUN_HOST_RELOAD, true);
+            break;
+        }
+        case SDL_EVENT_FINGER_MOTION:
+            if (g_gun_finger_on && ev->tfinger.fingerID == g_gun_finger && live)
+                gun_aim_px(ev->tfinger.x * g_gun_fb[0], ev->tfinger.y * g_gun_fb[1]);
+            break;
+        case SDL_EVENT_FINGER_UP:
+        case SDL_EVENT_FINGER_CANCELED:
+            if (!g_gun_finger_on || ev->tfinger.fingerID != g_gun_finger) break;
+            g_gun_finger_on = false;
+            lightgun_host_button(0, LIGHTGUN_HOST_TRIGGER, false);
+            lightgun_host_button(0, LIGHTGUN_HOST_RELOAD, false);
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            g_gun_finger_on = false;
+            lightgun_host_release_all();
+            break;
+        default: break;
+    }
 }
 
 /* Drain SDL's queue: the keyboard and gamepads into the board's inputs.
@@ -856,6 +1312,7 @@ static bool poll_events(void) {
     bool running = true, pad_changed = false;
     while (SDL_PollEvent(&ev)) {
         if (opt.netplay && lobby_event(&ev, &pad_changed)) continue;
+        gun_event(&ev);
         switch (ev.type) {
             case SDL_EVENT_QUIT: running = false; break;
             case SDL_EVENT_KEY_DOWN:
@@ -866,6 +1323,7 @@ static bool poll_events(void) {
                 input_action_up(key_to_action(ev.key.scancode));
                 break;
             case SDL_EVENT_GAMEPAD_ADDED:
+                g_ffb_last = -1;   /* give the new pad the force now */
                 if (SDL_OpenGamepad(ev.gdevice.which))
                     printf("m2hle: gamepad %s\n", SDL_GetGamepadNameForID(ev.gdevice.which));
                 pad_changed = true;
@@ -882,6 +1340,7 @@ static bool poll_events(void) {
             default: break;
         }
     }
+    pad_resync(&pad_changed);
     if (opt.netplay) lobby_pad_settle(&pad_changed);
     if (pad_changed) pad_refresh();
     return running;
@@ -917,10 +1376,163 @@ static bool gl_window_open(void) {
     SDL_GL_MakeCurrent(g_window, g_gl);
     /* Paced by the render timer below; vsync on top would stall a skipped frame. */
     SDL_GL_SetSwapInterval(opt.render_fps >= 59.0 ? 1 : 0);
+    if (opt.win_at) SDL_SetWindowPosition(g_window, opt.win_x, opt.win_y);
     SDL_HideCursor();
     printf("m2hle %s: %s on %s (%s)\n", M2HLE_VERSION, g_active_profile->display_name,
            (const char *)glGetString(GL_RENDERER), SDL_GetCurrentVideoDriver());
     return true;
+}
+
+/* ---- Versus on this machine (--versus) ----------------------------------------- */
+/*
+ * Two cabinets, as the arcade's Versus is: this process and a second one it
+ * starts, each running one board, their comm boards linked over 127.0.0.1
+ * (net/comm_local.h). The link is netplay's comm link without the room: the
+ * MASTER is this window, the SLAVE the other, each boots into its role
+ * (comm_role.h, through the netplay reset hook) and is paced by the link
+ * (link_pace.h). Each window plays one pad, so the pads go on being read
+ * while the other window has the focus.
+ */
+
+static child_proc_t g_versus_child;
+static bool         g_versus_child_up;
+static char       **g_versus_cmdline;   /* argv as given: parse_args cuts --shot's in two */
+
+static void versus_keep_cmdline(int argc, char **argv) {
+    g_versus_cmdline = calloc((size_t)argc + 1u, sizeof *g_versus_cmdline);
+    for (int i = 0; g_versus_cmdline && i < argc; i++) g_versus_cmdline[i] = SDL_strdup(argv[i]);
+}
+
+#define VERSUS_ARGS_MAX 96
+static char  g_versus_buf[VERSUS_ARGS_MAX][320];
+static char *g_versus_argv[VERSUS_ARGS_MAX + 1];
+
+/* A file of the SLAVE's: the MASTER's name with "-slave" before its extension,
+ * so the two cabinets do not write one log or one screenshot. */
+static void versus_slave_file(char *out, size_t cap, const char *path) {
+    const char *dot = strrchr(path, '.'), *slash = strrchr(path, '/');
+    if (!dot || (slash && dot < slash)) dot = path + strlen(path);
+    snprintf(out, cap, "%.*s-slave%s", (int)(dot - path), path, dot);
+}
+
+static bool versus_arg(int *n, const char *fmt, ...) {
+    if (*n >= VERSUS_ARGS_MAX) return false;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_versus_buf[*n], sizeof g_versus_buf[*n], fmt, ap);
+    va_end(ap);
+    g_versus_argv[*n] = g_versus_buf[*n];
+    (*n)++;
+    return true;
+}
+
+/* A file argument's value for the SLAVE: --log's renamed, --shot's FRAME:FILE
+ * with FILE renamed. */
+static bool versus_file_arg(int *n, const char *a, const char *val) {
+    char file[300];
+    if (!strcmp(a, "--log")) {
+        versus_slave_file(file, sizeof file, val);
+        return versus_arg(n, "%s", file);
+    }
+    const char *colon = strchr(val, ':');
+    versus_slave_file(file, sizeof file, colon ? colon + 1 : val);
+    return versus_arg(n, "%.*s:%s", colon ? (int)(colon - val) : 0, val, file);
+}
+
+/* Copy argv[*i] (and its value) to the SLAVE's command line, unless it is the
+ * MASTER's alone (--versus, --pad, --window-at). False when it is full. */
+static bool versus_copy_arg(int *n, char **argv, int argc, int *i) {
+    const char *a = argv[*i];
+    bool more = *i + 1 < argc;
+    if (!strcmp(a, "--versus")) return true;
+    if ((!strcmp(a, "--pad") || !strcmp(a, "--window-at")) && more) { ++*i; return true; }
+    if (!versus_arg(n, "%s", a)) return false;
+    if (more && (!strcmp(a, "--log") || !strcmp(a, "--shot"))) return versus_file_arg(n, a, argv[++*i]);
+    return true;
+}
+
+/* The SLAVE's command line: this one without what is the MASTER's alone,
+ * its files renamed, and its end of the link. */
+static bool versus_slave_argv(int argc, int x, int y) {
+    char **argv = g_versus_cmdline;
+    if (!argv) return false;
+    int n = 0;
+    bool ok = versus_arg(&n, "%s", argv[0]);
+    for (int i = 1; i < argc && ok; i++) ok = versus_copy_arg(&n, argv, argc, &i);
+    ok = ok && versus_arg(&n, "--versus-slave") && versus_arg(&n, "%u:%u", g_comm_local.port, g_comm_local.token)
+            && versus_arg(&n, "--pad") && versus_arg(&n, "1")
+            && versus_arg(&n, "--window-at") && versus_arg(&n, "%d,%d", x, y);
+    g_versus_argv[n] = NULL;
+    return ok;
+}
+
+/* The MASTER's window on the left of where it would be, the SLAVE's on the right. */
+static void versus_place(int *slave_x, int *slave_y) {
+    int x = 0, y = 0, w = 0, h = 0;
+    SDL_GetWindowPosition(g_window, &x, &y);
+    SDL_GetWindowSize(g_window, &w, &h);
+    if (!opt.win_at) {
+        x -= w / 2 + 8;
+        SDL_SetWindowPosition(g_window, x, y);
+    }
+    *slave_x = x + w + 16;
+    *slave_y = y;
+}
+
+/* The link, and on the MASTER the SLAVE's process. Before the emu thread. */
+static bool versus_start(int argc) {
+    if (!opt.versus && !opt.versus_port) return true;
+    SDL_srand(0);
+    uint16_t epoch = (uint16_t)(SDL_rand_bits() | 1u);
+    bool master = opt.versus;
+    if (master ? !comm_local_listen(&g_comm_local, SDL_rand_bits(), epoch)
+               : !comm_local_connect(&g_comm_local, opt.versus_port, opt.versus_token, epoch)) {
+        fprintf(stderr, "m2hle: --versus: no UDP socket on 127.0.0.1\n");
+        return false;
+    }
+    if (master) {
+        if (opt.pad < 0) opt.pad = 0;
+        int sx, sy;
+        versus_place(&sx, &sy);
+        if (!versus_slave_argv(argc, sx, sy) || !child_proc_start(&g_versus_child, g_versus_argv)) {
+            fprintf(stderr, "m2hle: --versus: could not start the second cabinet\n");
+            comm_local_close(&g_comm_local);
+            return false;
+        }
+        g_versus_child_up = true;
+    }
+    netplay_set_reset_hook(sdl_netplay_reset_cb, NULL);
+    comm_local_begin(&g_comm_local);
+    char title[96];
+    snprintf(title, sizeof title, "m2hle Versus: %s cabinet (pad %d)", comm_role_name(g_comm_local.role),
+             opt.pad + 1);
+    SDL_SetWindowTitle(g_window, title);
+    printf("m2hle: Versus: this window is the %s cabinet, pad %d; link on 127.0.0.1:%u\n",
+           comm_role_name(g_comm_local.role), opt.pad + 1, g_comm_local.port);
+    fflush(stdout);
+    return true;
+}
+
+/* Two windows, one pad each: a pad plays its window with the focus on the
+ * other. Before SDL_Init. */
+static void versus_before_sdl(void) {
+    if (opt.versus || opt.versus_port) SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+}
+
+/* The MASTER's run loop ends once the other window is closed. */
+static bool versus_other_gone(void) {
+    return g_versus_child_up && !child_proc_alive(&g_versus_child);
+}
+
+static void versus_stop(void) {
+    if (!opt.versus && !opt.versus_port) return;
+    const comm_link_t *l = &g_comm_local.link;
+    printf("m2hle: Versus: sent %u took %u (stale %u torn %u too big %u overflow %u), "
+           "ring %s, node %u of %u\n", l->sent, l->taken, l->stale, l->torn, l->too_big, l->overflow,
+           g_m2comm_link.alive == M2COMM_LINK_UP ? "up" : "down", g_m2comm_link.id, g_m2comm_link.count);
+    comm_local_close(&g_comm_local);
+    if (g_versus_child_up) child_proc_stop(&g_versus_child);
+    g_versus_child_up = false;
 }
 
 /* sokol and the renderers on the new context. 0, or the exit code. */
@@ -933,7 +1545,8 @@ static int gfx_start(void) {
     });
     if (!sg_isvalid()) { fprintf(stderr, "m2hle: sokol_gfx setup failed\n"); return 1; }
     if (opt.stats) { sg_enable_stats(); g_game_frame_gl_counts = true; }   /* the "gl per render" line */
-    if (opt.osd || opt.netplay)
+    g_sdtx_on = opt.osd || opt.netplay || g_m2lua.loaded;
+    if (g_sdtx_on)
         sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_cpc(), .logger.func = slog_func });
     g_video_force_cpu_tiles = opt.cpu_tiles;
     if (opt.verify_fill && opt.render_scale <= 0) {
@@ -957,7 +1570,7 @@ static struct {
 } g_rt;
 
 static void game_target_make(void) {
-    g_rt.w = VIDEO_WIDTH * opt.render_scale;
+    g_rt.w = game_render_wide_width() * opt.render_scale;
     g_rt.h = VIDEO_HEIGHT * opt.render_scale;
     if (opt.render_scale <= 0) return;
     g_rt.color = sg_make_image(&(sg_image_desc){
@@ -1071,6 +1684,13 @@ static void stats_report(Uint64 now, bool audio) {
     memset(&g_game_frame_times, 0, sizeof g_game_frame_times);
 }
 
+/* The target at the picture's width, after a script turned widescreen on or off. */
+static void game_target_fit(void) {
+    if (!m2lua_wide_apply()) return;
+    game_target_destroy();
+    game_target_make();
+}
+
 /* ---- One render ------------------------------------------------------------------ */
 
 /* Bring the tile layers and the 3D up to the board's latest frame. Returns how
@@ -1102,14 +1722,32 @@ static Uint64 frame_prepare(void) {
 /* Where the picture goes on a fb_w x fb_h screen: letterboxed to fit, or at
  * --display-scale, centred, when that fits. */
 static void screen_rect(int fb_w, int fb_h, int *ox, int *oy, int *w, int *h) {
-    game_render_letterbox(fb_w, fb_h, VIDEO_WIDTH, VIDEO_HEIGHT, ox, oy, w, h);
-    if (opt.display_scale > 0 && VIDEO_WIDTH * opt.display_scale <= fb_w
+    const int pic_w = game_render_wide_width();
+    game_rect_t r = game_render_letterbox(fb_w, fb_h, pic_w, VIDEO_HEIGHT);
+    *ox = r.x; *oy = r.y; *w = r.w; *h = r.h;
+    if (opt.display_scale > 0 && pic_w * opt.display_scale <= fb_w
             && VIDEO_HEIGHT * opt.display_scale <= fb_h) {
-        *w  = VIDEO_WIDTH * opt.display_scale;
+        *w  = pic_w * opt.display_scale;
         *h  = VIDEO_HEIGHT * opt.display_scale;
         *ox = (fb_w - *w) / 2;
         *oy = (fb_h - *h) / 2;
     }
+}
+
+/* Where the light guns aim from this frame (gun_event), and their crosshairs. */
+static void gun_place(int fb_w, int fb_h, int ox, int oy, int w, int h) {
+    int win_w = 0, win_h = 0;
+    SDL_GetWindowSize(g_window, &win_w, &win_h);
+    g_gun_px_x = win_w > 0 ? (float)fb_w / (float)win_w : 1.0f;
+    g_gun_px_y = win_h > 0 ? (float)fb_h / (float)win_h : 1.0f;
+    g_gun_fb[0] = (float)fb_w;
+    g_gun_fb[1] = (float)fb_h;
+    g_gun_rect[0] = (float)ox; g_gun_rect[1] = (float)oy;
+    g_gun_rect[2] = (float)w;  g_gun_rect[3] = (float)h;
+    if (!lightgun_host_on() || w <= 0) return;
+    if (!g_script_img.ready) scripts_images_setup();   /* sgl_setup */
+    lightgun_sgl_record(ox, oy, w, h, fb_w, fb_h);
+    sgl_draw();
 }
 
 static const sg_pass_action g_pass_action = {
@@ -1126,6 +1764,7 @@ static void render_frame(void) {
     SDL_GetWindowSizeInPixels(g_window, &fb_w, &fb_h);
     cpu_start += frame_prepare();
     float lerp_t = game_frame_lerp();
+    game_target_fit();
 
     int ox, oy, w, h;
     screen_rect(fb_w, fb_h, &ox, &oy, &w, &h);
@@ -1136,7 +1775,7 @@ static void render_frame(void) {
             .attachments = { .colors[0] = g_rt.color_att, .depth_stencil = g_rt.depth_att },
         });
         game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset,
-                        0, 0, g_rt.w, g_rt.h, lerp_t);
+                        (game_rect_t){0, 0, g_rt.w, g_rt.h}, lerp_t);
         sg_end_pass();
         if (opt.gl_finish) {
             /* The game pass is the tile layer quads and the 3D fills: its GPU
@@ -1160,13 +1799,18 @@ static void render_frame(void) {
     if (show_game && opt.render_scale > 0)
         game_render_draw_target(g_rt.texture, opt.linear, ox, oy, w, h);
     else if (show_game)
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, ox, oy, w, h, lerp_t);
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, (game_rect_t){ox, oy, w, h}, lerp_t);
+    if (show_game) {
+        game_rect_t board = game_render_tile_rect((game_rect_t){ ox, oy, w, h }, false);
+        scripts_draw(fb_w, fb_h, board.x, board.y, board.w, board.h);
+    }
+    gun_place(fb_w, fb_h, ox, oy, show_game ? w : 0, h);
     if (opt.osd) {
         osd_update(SDL_GetTicksNS());
         osd_draw(fb_w, fb_h);
     }
     if (opt.netplay) lobby_draw(fb_w, fb_h, SDL_GetTicksNS());
-    if (opt.osd || opt.netplay) sdtx_draw();
+    if (g_sdtx_on) sdtx_draw();
     int pzone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
     sg_end_pass();
     sg_commit();
@@ -1212,12 +1856,14 @@ static int run_loop(bool audio) {
     int rc = 0;
     for (bool running = true; running; ) {
         running = poll_events();
+        ffb_update();
         if (state.cpu.halted) {
             fprintf(stderr, "m2hle: CPU halted at 0x%08X\n", state.cpu.sfr.ip);
             dump_log_tail(12);
             return 1;
         }
         if (opt.exit_after && g_emu_frames >= opt.exit_after) break;
+        if (versus_other_gone()) { printf("m2hle: Versus: the other cabinet's window closed\n"); break; }
 
         if (period_ns) {
             Uint64 now = SDL_GetTicksNS();
@@ -1236,10 +1882,13 @@ static int run_loop(bool audio) {
 }
 
 int main(int argc, char **argv) {
+    versus_keep_cmdline(argc, argv);
     if (!parse_args(argc, argv)) {
         fprintf(stderr, "usage: m2hle [--rom] <set.zip> [--render-fps N] [--window WxH] [--stats] [--osd]\n"
                         "             [--log FILE] [--log-level SPEC] [--pad-map LIST] [--shot FRAME:FILE] [--exit-after N]\n"
-                        "             [--netplay] [--net-config FILE] [--net-delay N]\n");
+                        "             [--netplay] [--net-config FILE] [--net-delay N]\n"
+                        "             [--versus] [--pad N] [--window-at X,Y]\n"
+                        "             [--scripts DIR] [--no-scripts] [--script-option KEY=VALUE]\n");
         return 2;
     }
     if (opt.pad_map && !apply_pad_map(opt.pad_map)) return 2;
@@ -1258,7 +1907,9 @@ int main(int argc, char **argv) {
     bp_init();
     wp_init();
     if (!load_rom(opt.rom)) { dump_log_tail(12); return 1; }
+    scripts_load();
 
+    versus_before_sdl();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "m2hle: SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -1270,12 +1921,18 @@ int main(int argc, char **argv) {
     game_target_make();
 
     if (opt.netplay) netplay_start();
+    if (!versus_start(argc)) return 1;
     emu_thread_init(&state.emu, &state.cpu, &state.bus);
     emu_run(&state.emu);
 
     rc = run_loop(audio != NULL);
 
     emu_thread_shutdown(&state.emu);
+    versus_stop();   /* after the emu thread: it reads the link's socket */
+    if (g_m2lua.loaded)
+        printf("m2hle: script %s: %llu frames%s%s\n", g_m2lua.path, (unsigned long long)g_m2lua.frames,
+               g_m2lua.error[0] ? ", last error: " : "", g_m2lua.error);
+    m2lua_unload();       /* End(), and the script's ROM patches off */
     backup_ram_flush();   /* the board has stopped: what it holds now is final */
     if (opt.netplay) netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
     if (audio) SDL_DestroyAudioStream(audio);   /* after the emu thread: no more ring writes */
@@ -1286,7 +1943,8 @@ int main(int argc, char **argv) {
         printf("verify-gpu-tiles: %llu composed frames checked, %llu differed\n",
                (unsigned long long)g_vt.frames, (unsigned long long)g_vt.bad_frames);
     game_target_destroy();
-    if (opt.osd || opt.netplay) sdtx_shutdown();
+    scripts_images_shutdown();
+    if (g_sdtx_on) sdtx_shutdown();
     game_render_shutdown();
     video_shutdown(&state.video);
     sg_shutdown();

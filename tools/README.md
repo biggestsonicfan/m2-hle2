@@ -1051,6 +1051,62 @@ Two differences are left:
   convert. Song 0x10 has the largest spectral difference left, −4.2 dB at
   8-16 kHz, and its channel 15 is one of these.
 
+**Absolute pitch** (2026-10-14, `pitch`, Pinboard #837). The checks above only ask
+whether a key keeps the same pitch on the board. `pitch` asks whether it is the
+pitch the SF2 gives it. M2MidiDec writes every sample at 44.1 kHz with root key
+60 and no tuning generators. Each zone's overriding root key (96 minus byte 3 of
+a melody record, or the drum record's transpose) is therefore the whole pitch: a
+note sounds at 100·(note − root) cents, plus the bend. On the board, a key-on's
+pitch is 1200·OCT + 1200·log2(1 + FNS/1024) cents from 44.1 kHz. Over all 25
+songs (88 s or the MIDI's end), 62,854 of 65,004 notes have a key-on within 12 ms:
+
+- 99.43% are within 1 cent, which is the FNS step. 99.50% are within 5 cents.
+- Each program's median is 0 to −0.3 c, so M2MidiDec drops no fine tuning.
+- **Pitch-bend range is 2 semitones.** The MIDIs carry no RPN 0, so a synth uses
+  GM's default of 2. Fitting the bent notes gives 1.87-2.05, and the leftover
+  error (up to 5 c, e.g. song 0x0F) is the driver's bend step.
+- **The other 0.5% are channels without the right program change**, so a synth
+  plays them on program 0:
+  - Song 0x17 channel 14: 76 notes, +200 c. The driver keeps three fixed
+    effect tracks, loaded at boot from the table at 0x608080 (global pointer 4), on MIDI channels
+    13-15 with instruments 80, 81 and 82. M2MidiDec writes a program change only
+    for a song's own track-init records, so these channels have none. The
+    channel's notes fit programs 80-82 exactly.
+  - Song 0x10 channels 14 and 15: 113 and 30 notes, +800 and +2400 c. These are
+    the same fixed tracks (instruments 81 and 82). Nothing switches them to
+    another instrument: no song or effect in the music table sends a program
+    change on channels 13-16, and song 0x10's `A0 07 0E` library entry has no
+    track there. Pitch does not tell the kits apart here: the fit scored 11, 80
+    and 81 at 100% on channel 14, and 11, 80 and 82 on channel 15. Over the
+    whole song, keys 52 (134 notes) and 36 (40) have the same root key under
+    each (64 and 48). Key 53 (28 notes, 14 in the first 88 s) has root 53 in kit
+    11 and 65 in 80-82, an octave apart, yet both scored, because the fit takes
+    any key-on within 12 ms at the expected pitch. So the program comes from the
+    driver, not from the fit. The records at 0x608081 are `89 0C 50 F1`,
+    `89 0D 51 F1` and `89 0E 52 F1`: flag, channel, instrument (+2,
+    `shle_program`), volume (+3). M2MidiDec should start every song with
+    programs 80, 81 and 82 and volume 0xF1 on channels 13-15, not program 11.
+    The board settles it: replayed to 57 s, each of the first key-53 notes on
+    channel 14 (47.7, 49.4 and 51.0 s, where nothing else on the channel
+    sounds) keys one voice at -1200 c, root 65, and nothing at 0 c but the
+    drum pair every bar has, so it plays instrument 81, and M2MidiDec should
+    emit program 81 on channel 14 rather than list these as a known mismatch.
+    The fix belongs in M2MidiDec, not in our post-pass: its `DecodeMidiData`
+    (`M2MidiDec.c`) writes the song-start events, and its `DoCommandA0` case
+    0x07 already turns the same 16-byte records into a program change and
+    volume 7, but only for global pointer 3 (`TRK_INIT_ID`, a song's `A0 07`).
+    It never reads pointer 4; `DecodeMidiData` should run those records once
+    before a song's first segment. Until it does, `grade-midi.py fix` is where
+    this project would add them.
+  - A few notes on song 0x10 channel 12 and song 0x17 channel 2: 32 of 393 and
+    26 of 777, with an explicit program 0.
+
+  Two of the level outliers above (0x17/14 and 0x10/15) are these same
+  channels. The MIDI files are wrong there, not the board.
+- About 1,300 more notes have a key-on at their pitch, but 12-100 ms away, mostly
+  drums on channel 16. That is the timing difference already described, not
+  pitch.
+
 **MAME as the third point.** A fresh 90 s attract capture (claude_mame
 `1d6dbfafe53`, the Linux build), replayed through the board, grades as before:
 72.7% of notes within 30 ms, envelope 0.987. Over song 0x10 before the first
@@ -1090,6 +1146,44 @@ The first five columns of the two `det_digest` outputs (frame, check, work
 RAM, buffer RAM, COP) must be identical: the i960 only sees the UART, which
 board time clocks. `--pcm FILE` writes each run's audio, for a gameplay
 comparison. The numbers are in docs/SCSP.md.
+
+## Savestates
+
+`det_digest --save-at F:FILE` writes a savestate at the edge of frame F and
+`--load FILE` starts from one; both restart the sample hash there. A run that
+loads the state must print the same rows from frame F on as the run that saved
+it, and the same sample hash:
+
+```sh
+det_digest $ROMS_DIR/sfight.zip --frames 900 --save-at 400:s.sta --out a.txt
+det_digest $ROMS_DIR/sfight.zip --frames 900 --load s.sta --out b.txt
+diff <(awk '$1>400' a.txt) b.txt   # empty
+```
+
+Run it after adding state to the board that a save would have to carry. With
+`--mem` both go through the in-memory path the libretro core uses
+(`emu_state_save_mem` / `emu_state_load_mem`, a stored zip padded to the size
+the core reports), and the result must be the same.
+
+## Following a board one way
+
+`det_digest --follow-out DIR` leads a follow (`src/core/follow.h`, issue #228)
+from the first frame, a segment every `--follow-every N` frames, all kept;
+`--poke F:ADDR:HEX` writes bytes at frame F the way the bridge's `write_memory`
+does, so they go into the feed. `--follow DIR:N` follows from segment N to the
+end of the last one, holding every frame check, and exits 1 on a split. Its rows
+must equal the leader's from the join on, natively and in the wasm build:
+
+```sh
+det_digest $ROMS_DIR/sfight.zip --frames 2400 --script "..." --follow-out f --follow-every 500 \
+    --poke 520:500100:01020304 --poke 1750:59C342:02 --out lead.txt
+det_digest $ROMS_DIR/sfight.zip --frames 2400 --follow f:1 --out fol.txt   # 5 segments, 2400 checks held
+node build_web/det_digest.js $ROMS_DIR/sfight.zip --frames 2400 --follow f:1 --out folw.txt
+cmp fol.txt folw.txt
+```
+
+Run it after adding a way for the bridge or the host to change the board: if
+the feed cannot carry it, it has to end the segment (`follow_lead_break`).
 
 ## The netplay reset
 
@@ -1382,6 +1476,28 @@ both logs cover is judged, so a long RPCS3 log with other sessions in it is fine
 is the yardstick: that capture lost nothing, never retransmitted, and its longest input silence was
 0.7 s.
 
+## The Model 2A TGP against the PS2 port (`grade-tgp.py`)
+
+The TGP core (`src/board/tgp.h`) follows MAME's mb86233.cpp, so MAME cannot catch a bug in it.
+Sega's PS2 port of Sega Rally (SLPM-62703) has the same commands as plain C over floats, so
+`python3 tools/grade-tgp.py LOG` replays every command the i960 sent on a model of those
+functions and holds our TGP's replies to them. LOG is det_digest's `--cop` log of srallyc, which
+on a Model 2A board is the TGP's conversation, with the program's own FIFO reads marking where
+each command starts:
+
+    det_digest $ROMS_DIR/srallyc.zip --profile srallyc --frames 3000 \
+        --cop 1:3000:/dev/shm/tgp.log --out /dev/shm/digest.txt
+
+It grades 0x26 (read matrix), 0x2C (transform a point), 0x2F (normalise), 0x43 (a vector slot),
+0x58 (distance) and 0x5C (edge cross), and through them every matrix and slot op. The script's
+header lists the PS2 function each is modelled on. It exits 1 when an error is over `--limit`
+(1e-3), relative to 1 + |value|.
+
+*What it found (Pinboard #661):* every 0x58 distance was 0.01-1.8% long. The TGP's square root
+moves x into d beside the op that makes its first guess, and with MAME's order the guess was lost
+(tgp.h, `tgp_alu_d`). Over 3000 frames of attract the largest error is now 1.7e-7 for 0x58
+and under 1e-4 for every command (0x5C's worst is a difference of near-equal products).
+
 ## `tools/mame` and `tests/`
 
 The MAME side runs under the sibling `claude_mame` checkout (its
@@ -1399,7 +1515,7 @@ defaults are the Windows paths, so point `$MAME_EXE` (the `.mjs` graders) or
 | `mame/match-replay.lua`, `mame/osage-select.lua` | the autoboot scripts behind `match-replay.mjs --mame` and `grade-osage.mjs --mame` (above) |
 | `mame/snd-capture.lua`, `mame/snd_capture.py`, `mame/snd_compare.py` | the sound board's capture and comparison (see "The sound board") |
 | `grade-sound-hle.py` | the sound driver in C (`--sound-hle`) against the driver on the 68000, over `snd_replay` inputs: notes matched by what they play, timing, holds, audio per window, lasting driver-state differences (see "The driver in C against the 68000") |
-| `grade-midi.py` | the board's music against ValleyBell's M2MidiDec: per-song `snd_replay` inputs, the MIDIs corrected to the board's tempo and channels, then notes, pitch, lengths, levels and spectra (see "Music against M2MidiDec") |
+| `grade-midi.py` | the board's music against ValleyBell's M2MidiDec: per-song `snd_replay` inputs, the MIDIs corrected to the board's tempo and channels, then notes, pitch (and absolute pitch against the SF2's root keys), lengths, levels and spectra (see "Music against M2MidiDec") |
 | `tests/cop_replay.c` | replays a coprocessor capture through `sharc_exec()`, command by command with the arguments the firmware read, and checks every word it answers: `cop_replay <prefix> [examples-per-op] [only-op-hex]`. `$COPRO_ROM` names the COP data ROM; `OSAGE=<file>` dumps every `Fn_osage` call and `DRAWS=<file>` the draws as CSV, and `RESYNC` / `STATE_EXACT` tune the matrix-state check (`STATE_EXACT`: any differing bit is a bad state, not only 1e-3) |
 | `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips. Run it from two builds and `cmp` the five outputs to prove a sound-board change bit-exact (`tools/snd_stimuli.py` writes four more inputs; see "Holding a sound-board change to the same bits") |
 | `tests/scsp_fuzz.c`, `tests/m68k_fuzz.c` | the SCSP under random register traffic, and the whole sound board running random code: each writes one file to `cmp` between two builds or two compilers. `scsp_fuzz <out> [scenarios] [samples]`, `m68k_fuzz <out> [scenarios] [samples] [run]` (`$ROMDIR`) |

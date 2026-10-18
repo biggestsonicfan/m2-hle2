@@ -39,6 +39,14 @@ int main(void) {
     mem_write16(&bus, TILE_BASE + 0x11442, 0xA5A5);
     CHECK(mem_read16(&bus, TILE_BASE + 0x1442) == 0xA5A5, "tile RAM mirrors at 0x01010000");
 
+    /* The whole tile block repeats at 0x01100000, and nothing answers above
+     * 0x011FFFFF until the palette (MAME model2.cpp). */
+    CHECK(mem_read16(&bus, TILE_HI_BASE + 0x1442) == 0xA5A5, "tile RAM mirrors at 0x01100000");
+    CHECK(mem_read16(&bus, TILE_HI_BASE + 0x11442) == 0xA5A5, "tile RAM mirrors at 0x01110000");
+    mem_write32(&bus, TMAPGFX_HI_BASE + 0x40, 0x5A5A1234);
+    CHECK(mem_read32(&bus, TMAPGFX_BASE + 0x40) == 0x5A5A1234, "character RAM mirrors at 0x01180000");
+    CHECK(mem_find_region(&bus, 0x01200000) == NULL, "0x01200000 is unmapped");
+
     /* Round-trips at each width in work RAM. */
     mem_write8(&bus, RAM_BASE + 0x10, 0xAB);
     CHECK(mem_read8(&bus, RAM_BASE + 0x10) == 0xAB, "write8/read8 round-trip");
@@ -52,9 +60,40 @@ int main(void) {
     CHECK(mem_read32(&bus, RAM_BASE + 0x30) == 0xDEADBEEF, "write32/read32 round-trip");
     CHECK(mem_read8(&bus, RAM_BASE + 0x33) == 0xDE, "write32 is little-endian (high byte last)");
 
-    /* Heap region round-trip (MAIN_DATA). */
-    mem_write32(&bus, MAIN_DATA_BASE + 0x4000, 0xCAFEF00D);
-    CHECK(mem_read32(&bus, MAIN_DATA_BASE + 0x4000) == 0xCAFEF00D, "MAIN_DATA round-trip");
+    /* MAIN_DATA is data ROM: a profile fills the buffer, the CPU only reads it. */
+    memcpy(bus.main_data + 0x4000, "\x0D\xF0\xFE\xCA", 4);
+    CHECK(mem_read32(&bus, MAIN_DATA_BASE + 0x4000) == 0xCAFEF00D, "MAIN_DATA reads its buffer");
+    mem_write32(&bus, MAIN_DATA_BASE + 0x4000, 0x12345678);
+    CHECK(mem_read32(&bus, MAIN_DATA_BASE + 0x4000) == 0xCAFEF00D, "MAIN_DATA ignores a CPU write");
+
+    /* Buffer RAM repeats every 128 KB up to 0x97FFFF (MAME .mirror(0x60000)). */
+    mem_write32(&bus, BUFF_RAM_BASE + 0x60010, 0x5A5AA5A5);
+    CHECK(mem_read32(&bus, BUFF_RAM_BASE + 0x10) == 0x5A5AA5A5, "bufferram mirror at 0x960000");
+    CHECK(mem_read32(&bus, BUFF_RAM_BASE + 0x20010) == 0x5A5AA5A5, "bufferram mirror at 0x920000");
+
+    /* The coprocessor ID (MAME tgpid_r) and the GEO reads (geo_r, geo_prg_r). */
+    CHECK(mem_read32(&bus, TGP_ID_BASE) == 0x48415400u, "TGP ID reads \\0TAH");
+    CHECK(mem_read32(&bus, GEO_BASE + 0x10) == 0, "GEO reads 0 off its two registers");
+    CHECK(mem_read32(&bus, GEO_PROGRAM_BASE) == 0xFFFFFFFFu, "GEO FIFO reads all ones");
+
+    /* GEO command 0x0E (geo_test) is 32 FIFO-test words, a block count and
+     * three words a block. Test words that read as a polygon write and an END
+     * are data: the write is not made, and the list goes on past them. */
+    {
+        uint32_t L[48] = {0};
+        uint32_t n = 0;
+        L[n++] = 0x0Eu << 23;
+        L[n++] = 0x05u << 23; L[n++] = 0x20; L[n++] = 1; L[n++] = 0xBADu;
+        L[n++] = 0x0Fu << 23;
+        for (uint32_t k = 5; k < 32; k++) L[n++] = 1u << k;
+        L[n++] = 1; L[n++] = 0; L[n++] = 0; L[n++] = 0;       /* one block */
+        L[n++] = 0x05u << 23; L[n++] = 0x10; L[n++] = 1; L[n++] = 0xABCD1234u;
+        L[n++] = 0x0Fu << 23;
+        g_geo_live.polyram[0][0x10] = g_geo_live.polyram[0][0x20] = 0;
+        geodl_apply_state(L, n, 0, NULL);
+        CHECK(g_geo_live.polyram[0][0x10] == 0xABCD1234u, "geo_test is stepped over whole");
+        CHECK(g_geo_live.polyram[0][0x20] == 0, "geo_test's words are not run as commands");
+    }
 
     /* TEXRAM mirror aliases the same buffer. */
     mem_write32(&bus, TEXRAM0_BASE + 0x100, 0x11223344);
@@ -136,16 +175,37 @@ int main(void) {
      * mem_init on the emu thread while the frame callback is decoding texture
      * RAM through a pointer it loaded earlier; a block that moved is a block
      * that was freed under it. Cleared in place is the whole contract. */
-    uint8_t *before[6] = { bus.main_data, bus.xtra_data, bus.vid_ext_ram,
-                           bus.texram0,   bus.texram1,   bus.framebuffer };
+    uint8_t *before[4] = { bus.main_data, bus.xtra_data, bus.texram0, bus.texram1 };
     ok = mem_init(&bus, NULL, 0);
-    uint8_t *after[6]  = { bus.main_data, bus.xtra_data, bus.vid_ext_ram,
-                           bus.texram0,   bus.texram1,   bus.framebuffer };
+    uint8_t *after[4]  = { bus.main_data, bus.xtra_data, bus.texram0, bus.texram1 };
     CHECK(ok, "mem_init succeeds a second time");
-    CHECK(memcmp(before, after, sizeof(before)) == 0, "re-init keeps all six heap regions where they were");
+    CHECK(memcmp(before, after, sizeof(before)) == 0, "re-init keeps all four heap regions where they were");
     CHECK(mem_read32(&bus, TEXRAM0_BASE + 0x100) == 0, "re-init clears TEXRAM0");
     CHECK(mem_read32(&bus, MAIN_DATA_BASE + 0x4000) == 0, "re-init clears MAIN_DATA");
     CHECK(mem_read8(&bus, IO_BASE) == 0xFF, "IO region is 0xFF again after re-init");
+
+    /* The geometrizer's mode, LOD and z-adjust outlive a list (memory.h,
+     * g_geo_held): hotd sends mode 2 and LOD 4 in its first lists only, and a
+     * state loaded before those drew untextured when only the renderer kept
+     * them. Each published list carries the values it starts with. */
+    {
+        uint32_t *L = (uint32_t *)(void *)bus.buff_ram, p = 0x10000u >> 2;
+        float lod = 4.0f; uint32_t lodw; memcpy(&lodw, &lod, 4);
+        L[p + 0] = 0x07u << 23; L[p + 1] = 2u;                 /* mode 2 */
+        L[p + 2] = 0x16u << 23; L[p + 3] = lodw;               /* LOD 4 */
+        L[p + 4] = 0x08u << 23; L[p + 5] = 0x408000FFu;        /* z-adjust */
+        L[p + 6] = 0x0Fu << 23;                                /* END */
+        geodl_publish(0x10000u);
+        const geo_held_t *h = geodl_held_for(g_geodl_snap);
+        CHECK(h->mode == 0 && h->lod == 0.0f, "a list starts with the values from before it");
+        CHECK(g_geo_held.live.mode == 2 && g_geo_held.live.lod == 4.0f && g_geo_held.live.zadj == 0x40800000u,
+              "mode, LOD and z-adjust are followed as the list is applied");
+        L[p + 0] = 0x0Fu << 23;                                /* a list that sends none */
+        geodl_publish(0x10000u);
+        h = geodl_held_for(g_geodl_snap);
+        CHECK(h->mode == 2 && h->lod == 4.0f && h->zadj == 0x40800000u,
+              "the next list starts with them though it never sends them");
+    }
 
     mem_shutdown(&bus);
 
