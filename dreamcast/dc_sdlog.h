@@ -53,6 +53,8 @@ static struct {
     /* for the SD line: bytes written, lost to a full buffer; writes and their time */
     uint32_t  in, written, dropped, writes, errors;
     uint64_t  us_write, us_max;
+    volatile uint32_t rounds;   /* the writer's wake-ups, empty ones too (sl_drain) */
+    kthread_t *thd;
     kos_blockdev_t bd;
 } g_sl = { .fd = -1, .line_start = 1 };
 
@@ -126,8 +128,19 @@ static void *sl_thread(void *arg) {
     for (;;) {
         thd_sleep(1000);
         sl_flush();
+        g_sl.rounds++;
     }
     return NULL;
+}
+
+/* What is printed so far, onto the card before a stop (dc_assert): the
+ * writer's own rounds waited for, two, so one began after the last line (it
+ * takes the locks a write needs; a stop may come with them held, hence the
+ * limit). Not from an interrupt or the writer. */
+static void sl_drain(uint32_t ms) {
+    if (g_sl.fd < 0 || !g_sl.thd || irq_inside_int() || thd_get_current() == g_sl.thd) return;
+    uint32_t r = g_sl.rounds;
+    for (uint32_t t = 0; t < ms && g_sl.rounds - r < 2u; t += 50) thd_sleep(50);
 }
 
 /* The SD line, for the stats: KB in and written, writes, their ms (the
@@ -155,7 +168,7 @@ static int sl_init(void) {
     if (r < 0) return r;
     printf("m2-hle2 sdlog %s (partition type %02x, %u MB)\n", g_sl.name + 4, type,
            (unsigned)(sd_get_size() >> 20));
-    thd_create(1, sl_thread, NULL);
+    g_sl.thd = thd_create(1, sl_thread, NULL);
     return 0;
 }
 
