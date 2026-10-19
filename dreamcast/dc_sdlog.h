@@ -15,12 +15,20 @@
  * at a time: the writer's time is the emulator's (its own SD line says how
  * much). No card, or one KOS cannot read, and the game runs as it would
  * without: one line on screen says why.
+ *
+ * The card may also be the one the game runs from: DreamShell's ISO loader
+ * (isoldr) reads the GDI off an SD card on the same port, inside the GD-ROM
+ * syscalls, and only while KOS's cdrom layer holds the G1 ATA lock (a command,
+ * or a DMA read the vblank finishes). So every touch of the card here holds that
+ * lock too, a chunk at a time, so a disc read waits at most one chunk (Pinboard
+ * #1314). With a real disc the lock costs only that wait.
  */
 #ifndef DC_SDLOG_H
 #define DC_SDLOG_H
 
 #include <kos.h>
 #include <dc/sd.h>
+#include <dc/g1ata.h>
 #include <kos/blockdev.h>
 #include <kos/dbgio.h>
 #include <fat/fs_fat.h>
@@ -31,6 +39,7 @@
 #ifndef DC_SDLOG_BUF
 #define DC_SDLOG_BUF (32u << 10)   /* bytes held between writes: some 10 s of HUD=prof */
 #endif
+#define DC_SDLOG_CHUNK 4096u        /* bytes written a lock: what a disc read can wait behind */
 
 static struct {
     char      buf[2][DC_SDLOG_BUF];
@@ -94,9 +103,18 @@ static void sl_flush(void) {
     irq_restore(old);
     if (!n) return;
     uint64_t t0 = timer_us_gettime64();
-    ssize_t w = write(g_sl.fd, g_sl.buf[full], n);
-    if (w != (ssize_t)n || fs_fat_sync("/sd") < 0) g_sl.errors++;
-    if (w > 0) g_sl.written += (uint32_t)w;
+    uint32_t done = 0;
+    while (done < n) {
+        uint32_t c = n - done < DC_SDLOG_CHUNK ? n - done : DC_SDLOG_CHUNK;
+        g1_ata_mutex_lock();
+        ssize_t w = write(g_sl.fd, g_sl.buf[full] + done, c);
+        g1_ata_mutex_unlock();
+        if (w > 0) { done += (uint32_t)w; g_sl.written += (uint32_t)w; }
+        if (w != (ssize_t)c) { g_sl.errors++; break; }
+    }
+    g1_ata_mutex_lock();
+    if (fs_fat_sync("/sd") < 0) g_sl.errors++;
+    g1_ata_mutex_unlock();
     uint64_t us = timer_us_gettime64() - t0;
     g_sl.writes++;
     g_sl.us_write += us;
@@ -125,13 +143,26 @@ static int sl_fail(const char *why) { g_sl.why = why; return -1; }
 
 /* The card up and a new file on it, printf into the buffer: 0; or -1, and
  * g_sl.why says why (the caller selects another device). */
+static int sl_init_card(uint8_t *type);
 static int sl_init(void) {
     g_sl.t0 = timer_us_gettime64();
     dbgio_add_handler(&s_sl_dbgio);
     dbgio_dev_select("sdlog");
     uint8_t type = 0;
+    g1_ata_mutex_lock();
+    int r = sl_init_card(&type);
+    g1_ata_mutex_unlock();
+    if (r < 0) return r;
+    printf("m2-hle2 sdlog %s (partition type %02x, %u MB)\n", g_sl.name + 4, type,
+           (unsigned)(sd_get_size() >> 20));
+    thd_create(1, sl_thread, NULL);
+    return 0;
+}
+
+/* sl_init's part on the card, under the G1 lock. */
+static int sl_init_card(uint8_t *type) {
     if (sd_init() < 0) return sl_fail("no SD card on the serial port");
-    if (sd_blockdev_for_partition(0, &g_sl.bd, &type) < 0) return sl_fail("the card has no MBR partition");
+    if (sd_blockdev_for_partition(0, &g_sl.bd, type) < 0) return sl_fail("the card has no MBR partition");
     if (fs_fat_init() < 0 || fs_fat_mount("/sd", &g_sl.bd, FS_FAT_MOUNT_READWRITE) < 0)
         return sl_fail("the card's first partition is not FAT");
     /* the first M2LOGnnn.TXT not on the card: one file a boot */
@@ -143,9 +174,6 @@ static int sl_init(void) {
         if (g_sl.fd < 0) return sl_fail("cannot make a file on the card (read-only?)");
     }
     if (g_sl.fd < 0) return sl_fail("M2LOG000-999.TXT all taken");
-    printf("m2-hle2 sdlog %s (partition type %02x, %u MB)\n", g_sl.name + 4, type,
-           (unsigned)(sd_get_size() >> 20));
-    thd_create(1, sl_thread, NULL);
     return 0;
 }
 
