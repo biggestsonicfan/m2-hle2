@@ -349,7 +349,9 @@ since boot:
 What goes in: the boot's lines, the board's log (`[INFO]`, `[WARN]`, ...), every
 2 s the stats rows (with `HUD=prof` the panel's lines, tag and window number
 first, whole and without their check; not the per-frame `LV`), and the halt
-message with the log's last lines. It all goes through a dbgio device
+message with the log's last lines; a stop (a failed assert, the watchdog's hang)
+writes its reason and return addresses, as the blue screen shows them, and waits
+for them to reach the card first (up to 3 s). It all goes through a dbgio device
 (`dc_sdlog.h`) into 32 KB of RAM; a thread writes that to the card once a
 second and syncs the FAT, so a pulled card or power loses about a second.
 
@@ -364,6 +366,28 @@ without; the line says why (`sd off: no SD card on the serial port`).
 The serial port is the card's: `SDLOG=1` refuses `LINK=1`. A dcload-serial
 console also uses the port (KallistiOS's SPI driver will not start under it);
 dcload-ip is fine.
+
+### From DreamShell's SD card
+
+The card can also be the one the disc runs from (Pinboard #1314). DreamShell's
+ISO loader (isoldr, SD build) reads the GDI off the same card inside the GD-ROM
+syscalls. Put the four files of `build-disc.sh`'s GDI (`m2hle2.gdi`,
+`track01.iso`, `track02.raw`, `track03.iso`) in a folder of their own,
+`/games/STF/` at the root of the card, and start it from DreamShell's Games
+menu or the ISO Loader with its default settings. The logs land in the card's
+root beside `DS/` and `games/`.
+
+The two take turns on the card through KallistiOS's G1 ATA lock, the one its
+cdrom layer holds over every drive command: the log writes 4 KB a turn, and
+the pager's own GD-ROM syscalls (`dc_pager.h`) hold it too. Before they did,
+the writer met isoldr mid-read and a ROM page came back unreadable some 30 s in.
+With a real disc the lock costs only that wait.
+
+Tested in Flycast (the patch below) with DreamShell 4.0.4's
+`DS/firmware/bios/ds/bootloader_retail.bios` as `dc_boot.bin` (the HLE BIOS
+off): DreamShell boots from the image, isoldr starts `/sd/games/STF/m2hle2.gdi`,
+and the attract runs while the log grows. The card's speed and isoldr's timing
+on a console are untested.
 
 Flycast with `tools/flycast-sdcard.patch` has a card: `FLYCAST_SDCARD=<image>`
 plugs a raw image in at boot. Make one, and read the logs back, with fdisk and
