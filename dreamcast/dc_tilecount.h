@@ -84,7 +84,7 @@ static void dc_tc_blk_layer(dc_tc_key_t *k, const uint16_t *w, const uint8_t *gf
     uint16_t hscr = w[0x5000 + t], vscr = w[0x5004 + t], ctrl = w[0x5004 + (t & 2)];
     int mode = (ctrl & 0x6000) >> 13;
     if ((vscr & 0x8000) || (mode && (t & 1))) return;
-    const uint16_t *maskw = w + ((t & 2) ? 0x6800 : 0x6000);
+    const s24_pass_t p = { .w = w, .t = t, .mode = mode };
     int vy = vscr & 0x1FF;
     k->req = dc_tc_mix(dc_tc_mix(k->req, t), vy);
     k->src = dc_tc_mix(dc_tc_mix(k->src, t), vy);
@@ -92,7 +92,7 @@ static void dc_tc_blk_layer(dc_tc_key_t *k, const uint16_t *w, const uint8_t *gf
         uint16_t row = (hscr & 0x8000) ? w[0x4000 + 0x200 * t + y] : hscr;
         int h = row & 0x1FF, ty = (y + vy) & 511;
         s24_line_t ln;
-        s24_line_split(&ln, maskw, t, mode, vscr, row, h, y);
+        s24_line_split(&ln, &p, vscr, row, h, y);
         for (int x = bx * 8; x < bx * 8 + 8; x += 7) {
             int l = x < ln.split_x ? ln.split_l : ln.split_l ^ 1;
             bool hid = !mode && (ln.mask[x >> 7] & (0x8000 >> ((x & 127) >> 3)));
