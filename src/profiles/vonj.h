@@ -326,6 +326,7 @@ static inline void vonj_match_info(memory_bus_t *bus, game_match_info_t *out) {
         .enable_68k_sound = true, \
         .irq_vectors      = true, \
         .board_vblank     = true, \
+        .twin_levers      = true, \
         /* Neither program has a country setting: vonj is Japan's, von the \
          * USA's (MAME's von, vonu: other program ROMs, not a setting). */ \
         .region           = { .kind = REGION_PROGRAM_ROM, \

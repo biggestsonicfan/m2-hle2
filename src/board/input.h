@@ -268,6 +268,11 @@ static inline void input_action_up(int act) {
         if (g_input_holds[a]) g_input.held |= g_active_profile->input.bits[a] & bit;
 }
 
+/* Is the profile's cabinet one player on two levers (quirks.twin_levers)? */
+static inline bool input_twin_levers(void) {
+    return g_active_profile && g_active_profile->quirks.twin_levers;
+}
+
 /* Does the profile's cabinet seat four (players 3 and 4 have controls)? */
 static inline bool input_four_players(void) {
     return g_active_profile && g_active_profile->quirks.four_player_sides;

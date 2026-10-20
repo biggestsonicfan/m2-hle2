@@ -83,6 +83,29 @@ On the web the driving games carry these keys in `m2hle-games.js`
 overwrite each other. SDL3 has the same driving map; F1 stays its lobby key
 there, so its service button is 9 alone.
 
+### Virtual-On (Pinboard #1352)
+
+| Input | m2emulator (`_von_Inputs`) | m2-hle2 |
+|---|---|---|
+| Left lever | arrows | arrows; a pad's d-pad and left stick |
+| Left trigger / dash | Z / X | Z / X; a pad's L2 / L1 |
+| Right lever | first joystick | I J K L; a pad's right stick and face buttons (north up) |
+| Right trigger / dash | joystick buttons 1 / 2 | Del / End; a pad's R2 / R1 |
+| Both triggers / both dashes | none | C / V |
+| Start, Coin, Service, Test | 1, 5, F1, F2 | the same |
+
+The keyboard was already m2emulator's. A pad was not: m2emulator plays the
+right lever on the first joystick, so one keyboard and one pad play the
+cabinet, but our desktop, SDL3 and libretro builds gave every pad player 1's
+actions, the left lever alone, and the right lever was keyboard only. A
+twin-lever profile (`quirks.twin_levers`, `input_twin_levers`) now plays both
+levers on every pad, with the web's layout (`TWIN_DEFAULTS`, `m2hle-pad.js`):
+`sdl_pads.h` for the desktop and SDL3 (the face buttons and bumpers are the
+layout's there, not `--pad-map` binds), `lr_twin_binds` for libretro (on
+every port, each a whole cabinet). L1 + R1 is then both dashes, so it no
+longer opens the lobby: on SDL3 Guide (or F1) does, on libretro L + R +
+Select.
+
 Three profiles called IN0 0x04 SERVICE: Sonic the Fighters, Virtual-On and
 the m2snake homebrew. It is the test switch (MAME's `PORT_SERVICE_NO_TOGGLE`,
 m2emulator's Test); they now read TEST 0x04 and SERVICE 0x08 like every

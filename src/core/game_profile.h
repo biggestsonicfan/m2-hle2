@@ -227,6 +227,11 @@ typedef struct {
      * players 1 and 2 or 3 and 4 (input.h, input_attach_sides). */
     bool     four_player_sides;
 
+    /* One cabinet with two levers (Virtual-On): the right lever is player 2's
+     * directions, B1 and B2. A host pad then plays both levers, its right
+     * stick the right one (input.h, input_twin_levers; web m2hle-pad.js). */
+    bool     twin_levers;
+
     /* Two light guns on the 315-5649's second serial channel (lightgun.h):
      * input_attach serves their positions, off-screen bits and triggers. Each
      * gun's held bits (its pad walks it; reload is the shot off the screen)

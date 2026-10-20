@@ -485,6 +485,10 @@ static inline void controls_devices(bool pads_on) {
 static inline void controls_tab_gamepad(bool pads_on) {
     igTextWrapped("The d-pad and the left stick are player 1's directions; a driving game's wheel is "
                   "the stick, R2 the accelerator and L2 the brake. A held button lights its row.");
+    if (input_twin_levers())
+        igTextWrapped("This game is one player on two levers: the right stick and the face buttons "
+                      "(north up) are the right lever, L2 / R2 the left / right shot and L1 / R1 the "
+                      "dashes.");
     if (pads_on && controls_pick_combo("Gamepad", &g_pad_pick, "Any gamepad", true)) {
         controls_pads_changed(pads_on);
         controls_save();
@@ -502,6 +506,10 @@ static inline void controls_tab_gamepad(bool pads_on) {
         igTableSetColumnIndex(0);
         igTextUnformatted(g_pad_binds[b].name);
         igTableSetColumnIndex(1);
+        if (input_twin_levers() && pad_twin_button(g_pad_binds[b].button)) {
+            igTextDisabled("the twin-lever layout");
+            continue;
+        }
         snprintf(id, sizeof id, "##pad%d", b);
         if (controls_acts_combo(id, &g_pad_binds[b].acts)) { controls_pads_changed(pads_on); controls_save(); }
     }
