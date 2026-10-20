@@ -4,7 +4,7 @@
  * The frontend (RetroArch, or ROCKNIX's RetroArch on the handheld) owns the
  * window, the GL context, the audio device, the controllers and their
  * remapping, the menus and the frame pacing. This file is the board and the
- * glue: one retro_run is one 60 Hz slice, stepped on the frontend's thread with
+ * glue: one retro_run is one board frame (57.52 Hz), stepped on the frontend's thread with
  * emu_slice_body / emu_slice_finish -- the slice every other host runs, the way
  * the web build (main_web.c) steps it, since there is no emu thread here either.
  *
@@ -1850,8 +1850,11 @@ static float   g_dc_x[2], g_dc_y[2];
 static void lr_push_audio(void) {
     if (!g_sound_on) {
         /* Silence at the board's rate, so the frontend's audio clock still runs. */
-        static int16_t silence[(SOUND_RATE / EMU_SLICES_PER_SEC + 1) * 2];
-        audio_batch_cb(silence, SOUND_RATE / EMU_SLICES_PER_SEC);
+        static int16_t silence[(SOUND_FRAME_NUM / SOUND_FRAME_DEN + 1) * 2];
+        static uint32_t frac;
+        frac += SOUND_FRAME_NUM;
+        audio_batch_cb(silence, frac / SOUND_FRAME_DEN);
+        frac %= SOUND_FRAME_DEN;
         return;
     }
     const float R = 0.99715f;   /* ~20 Hz at 44.1 kHz */
@@ -1954,7 +1957,7 @@ static bool lr_run_pkt(uint32_t local_held) {
     }
 }
 
-/* A linked comm board (Pinboard #978): the frames its 60 Hz clock owes now,
+/* A linked comm board (Pinboard #978): the frames its 57.52 Hz clock owes now,
  * none to LINK_PACE_MAX_DEBT, not one a retro_run. RetroArch calls at the
  * display's rate, and as fast as it can under fast-forward; neither may change
  * how fast this cabinet runs against the other (core/link_pace.h). The first
@@ -2360,7 +2363,7 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info) {
     info->geometry.max_width    = VIDEO_WIDTH * LR_MAX_SCALE;
     info->geometry.max_height   = VIDEO_HEIGHT * LR_MAX_SCALE;
     info->geometry.aspect_ratio = LR_ASPECT;
-    info->timing.fps            = (double)EMU_SLICES_PER_SEC;
+    info->timing.fps            = EMU_FRAME_HZ;
     info->timing.sample_rate    = (double)SOUND_RATE;
 }
 

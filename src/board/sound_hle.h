@@ -84,7 +84,8 @@
 #define SHLE_T_NEGSMP     0x601100u
 
 /* Board time, in 1/16 of a 68000 clock period. The driver reloads a timer in
- * its handler, so a period is (255 - reload) samples plus the time from the
+ * its handler, so a period is (256 - reload) samples (scsp.h, the timers)
+ * plus the time from the
  * timer firing to the reload: 255 clock periods when nothing is in the way
  * (the interrupt is taken 68 periods after the timer fires, and the reload is
  * written 187 periods into the handler). Timers B and C share interrupt level
@@ -92,7 +93,8 @@
  * and timer A's (level 1) stretch what they interrupt. Measured on the board
  * (snd_replay traces, $SND_TRACE): the handlers' lengths are below, and with
  * them timer B comes out 50.015 samples in attract and 50.054 under an
- * effects storm. The interrupt also waits for the instruction it lands in to
+ * effects storm (measured on MAME's 255 - reload; a sample more with the
+ * board's). The interrupt also waits for the instruction it lands in to
  * end, and that depends on what the main loop is doing: 13 clock periods on
  * average, but 37 inside a refill, whose movem.l take 76-88 each (a trace of
  * the board under the effects storm: 24% of its time in refills). So the
@@ -1722,7 +1724,7 @@ static uint32_t shle_code_hash(void) {
 /* ---- the run ------------------------------------------------------------------------ */
 
 static inline uint64_t shle_period(uint8_t reload, unsigned prescale) {
-    return (((uint64_t)(255u - reload)) << prescale) << 8;
+    return (((uint64_t)(256u - reload)) << prescale) << 8;
 }
 
 /* A handler that ran `dur` clock periods from `at`: the main loop was

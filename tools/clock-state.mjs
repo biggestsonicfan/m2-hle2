@@ -5,7 +5,8 @@
  * SLICE-CLOCKS.md's acceptance test. The board is driven to a state's entry
  * (`--from`) and run to whatever the ROM hands over to (`--to`), and the frame
  * counter and the SCSP's sample counter are read either side. The ratio is the
- * number that matters: 44100 / 60 = 735 samples a game frame everywhere, or the
+ * number that matters: 44,100 x 434,600 / 25 MHz = 766.6 samples a game frame
+ * everywhere (735 before Pinboard #1360), or the
  * board's audio clock is running at a different rate from its video clock.
  *
  * Unlike bench-state this is not a timing, so there is nothing to average: one
@@ -86,7 +87,7 @@ for (let i = 0; i < exes.length; i++) {
     const m = await measure(exes[i], tag, PORT + i);
     console.log(`  ${tag}  ${exes[i]}`);
     console.log(`     ${m.frames} frames, ${m.samples.toLocaleString()} samples = ` +
-                `${(m.samples / m.frames).toFixed(1)} a frame (735 is right), ` +
+                `${(m.samples / m.frames).toFixed(1)} a frame (766.6 is right), ` +
                 `${(m.steps / 1e6).toFixed(2)}M instructions, entered at frame ~${m.at}`);
     console.log(`     MIDI: ${m.writes} bytes, ${m.drains} catch-up steps, ` +
                 `${Number.isNaN(m.holds) ? '?' : m.holds} held to a later slice, ${m.drops} dropped`);

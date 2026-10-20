@@ -60,7 +60,11 @@
 #define SOUND_OUT_FRAMES          16384u   /* host output ring, stereo frames (power of 2) */
 #define SOUND_CODE_LOG            512u     /* i960 commands kept (power of 2) */
 #define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_uart_make_room) */
-#define SOUND_AHEAD_MAX           735      /* at most a frame of samples run ahead of it (44100 / 60) */
+/* A vblank's samples: 44,100 x 434,600 / 25,000,000 = 766.63 (irq_timer.h's
+ * frame; the real board, Pinboard #1360), as SOUND_FRAME_NUM / SOUND_FRAME_DEN. */
+#define SOUND_FRAME_NUM           (SOUND_RATE * 4346u)
+#define SOUND_FRAME_DEN           250000u
+#define SOUND_AHEAD_MAX           766      /* at most a frame of samples run ahead of it */
 
 /* The sound board runs on a thread of its own ("The sound thread", below)
  * everywhere but the web build, which has one thread. */
@@ -1271,15 +1275,15 @@ static inline bool sound_uart_make_room(bool for_game) {
     }
 }
 
-/* One emu slice (1/60 s) of sound, less what was run early inside it, handed
+/* One board frame of sound (766 or 767 samples), less what was run early inside it, handed
  * to the sound thread (see above): the samples are there once sound_settle
  * returns, and g_sound.out_due is the clock they end on. The
  * remainder carries from slice to slice and is reset with the board: two
  * boards cold-booted together have to put the same samples in every slice. */
-static inline void sound_run_slice(uint32_t slices_per_sec) {
-    g_sound.slice_frac += SOUND_RATE;
-    uint32_t n = g_sound.slice_frac / slices_per_sec;
-    g_sound.slice_frac -= n * slices_per_sec;
+static inline void sound_run_slice(void) {
+    g_sound.slice_frac += SOUND_FRAME_NUM;
+    uint32_t n = g_sound.slice_frac / SOUND_FRAME_DEN;
+    g_sound.slice_frac -= n * SOUND_FRAME_DEN;
     uint32_t early = (uint32_t)g_sound.ahead < n ? (uint32_t)g_sound.ahead : n;
     g_sound.ahead -= (int32_t)early;
     sound_advance(n - early, true);

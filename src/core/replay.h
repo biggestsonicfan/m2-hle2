@@ -447,7 +447,7 @@ static inline size_t replay__json(const replay_meta_t *m, int native_n, char *ou
     replay__json_str(out, cap, &n, "ended", m->why);
     replay__json_str(out, cap, &n, "stopped", m->manual ? "manual" : "automatic");
     replay__json_int(out, cap, &n, "frames", m->frames);
-    replay__json_int(out, cap, &n, "seconds", (m->frames + 30) / 60);
+    replay__json_int(out, cap, &n, "seconds", (long long)(((uint64_t)m->frames * 4346u + 125000u) / 250000u));   /* 17.384 ms a frame */
     replay__json_int(out, cap, &n, "native_rounds", native_n);
     for (int i = 0; i < FOLLOW_SET_WORDS; i++) {
         char key[16];

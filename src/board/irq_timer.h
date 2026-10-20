@@ -57,10 +57,11 @@ typedef struct {
 
 /* The video frame is the board's: a 16 MHz dot clock over 656 x 424, 57.52 Hz
  * (MAME's model2 screen), which is 434,600 cycles of the i960's 25 MHz. The
- * hosts still show a frame each 1/60 s and the sound board is charged 735
- * samples a vblank (emu_sound_slice_end), so only the i960 side keeps the
- * board's rate: what it can do between two vblanks. That is what games budget
- * against. Fighting Vipers' texture loader starts a block only once 405,000
+ * hosts run a frame each 17,384 µs and the sound board is charged 766.63
+ * samples a vblank (emu_sound_slice_end), as the real board does (its video,
+ * Pinboard #1360); until then they ran 60 a second at 735, and only the i960
+ * kept the board's rate. What it can do between two vblanks is what games
+ * budget against. Fighting Vipers' texture loader starts a block only once 405,000
  * cycles of the frame have gone; a 60 Hz frame of 416,667 left it 11,667
  * cycles to do so where the board leaves 29,600, so it loaded 2.5 times
  * slower and Grace's ponytail drew from a sheet not loaded yet (Pinboard

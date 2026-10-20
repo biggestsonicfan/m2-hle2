@@ -25,6 +25,7 @@ EBOOT (Ghidra) and checked against a PS3-vs-PS3 match captured through RPCS3's `
   it comes from the round trip the owner writes into the room. It ticks at 60 Hz of WALL CLOCK: compare
   `now > next_tick + 100 ms`, never subtract -- the subtraction underflowed, ticked on every pump,
   sampled at twice real time, and the PS3 abandoned every match 25 s in.
+  - A PS3 match paces our board to that 60 Hz too (`netplay_host_frame_us`); every other session runs at the board's own 57.52 Hz (Pinboard #1360). Paced at 57.52 it fell 2.5 frames a second behind the sampling and caught up in `ps3_link_hurry` bursts.
 - **A PS3 drops a SyncStart that arrives before its lockstep task is running**, yet its network layer
   still answers it. Our board reaches its forced START sooner, so our SyncStart went unheard until the
   5 s resend. Send ours again when theirs arrives (`ss_echoed`).

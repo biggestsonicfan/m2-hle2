@@ -15,7 +15,8 @@
  * as wasm under Node, a slice of STF with the sound board costs ~1.5 ms.
  *
  * Pacing is by time, not by callback count. requestAnimationFrame follows the
- * display (60, 120, 144 Hz...) and the board runs at EMU_SLICES_PER_SEC, so an
+ * display (60, 120, 144 Hz...) and the board runs at its own 57.52 Hz
+ * (EMU_SLICE_US), so an
  * accumulator decides how many slices a callback owes.
  *
  * Netplay is pumped from the same place the native run loop pumps it
@@ -734,7 +735,7 @@ static bool web_afford_picture(void) {
     last_us = now;
 
     if (gap_ema < 1.0 || picture_ema <= 0.0) return true;    /* nothing measured yet */
-    const double per_second = (double)EMU_SLICES_PER_SEC * slice_ema + (1000000.0 / gap_ema) * picture_ema;
+    const double per_second = EMU_FRAME_HZ * slice_ema + (1000000.0 / gap_ema) * picture_ema;
     return per_second <= (double)WEB_PICTURE_BUDGET_US;
 }
 
@@ -803,7 +804,7 @@ static ps3ui_view_t web_lobby_tick(void) {
         bool ggpo_asks = ps3ui_ggpo_prompt(a, web_lobby_pad());
         if (web_shell_live()) web_shell_frame(a);
         else if (!ggpo_asks)  ps3ui_app_frame(a, ps3ui_app_visible(a) ? web_lobby_pad() : 0);
-        next_us += 1000000 / EMU_SLICES_PER_SEC;
+        next_us += 1000000 / 60;
     }
     g_web_hold = web_shell_live() && ps3ui_shell_board_paused(&g_ps3ui_shell);
     if (had && !web_game_pad()) input_release_all();   /* the game lets go of what the menus now hold */

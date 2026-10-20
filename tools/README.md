@@ -1009,7 +1009,10 @@ It took four corrections to get there, and none of them is the board's:
 - **Tempo.** M2MidiDec writes a fixed 1.1719 ms a tick (853 Hz). The driver's
   sequencer ticks on timer B: 50.0146 samples, 1.1341 ms, 882 Hz, the same as
   MAME. So the MIDIs run 3.3% slow. Every song fitted a rate of 0.968. After
-  `fix` sets the tempo, the fitted rate is 1.000 ± 0.0005.
+  `fix` sets the tempo, the fitted rate is 1.000 ± 0.0005. (Measured before
+  Pinboard #1360: an SCSP timer now fires after 256 − reload ticks, so timer B
+  is 51.0146 samples, 1.1568 ms, and `fix` uses that. The real board's video
+  puts it at ~51.3, 1.164 ms, closer to M2MidiDec's 1.1719 than MAME is.)
 - **MIDI channel 10 is melodic in STF.** The drum kit (instrument 11) is on
   channel 16, and channel 10 carries programs 2, 8, 9, 10, 18 and 22. A GM synth
   sends channel 10 to bank 128, where the SF2 has no such presets. So 3714 of
@@ -1497,6 +1500,51 @@ header lists the PS2 function each is modelled on. It exits 1 when an error is o
 moves x into d beside the op that makes its first guess, and with MAME's order the guess was lost
 (tgp.h, `tgp_alu_d`). Over 3000 frames of attract the largest error is now 1.7e-7 for 0x58
 and under 1e-4 for every command (0x5C's worst is a difference of near-equal products).
+
+## The real board's video (`grade-hw-video.py`)
+
+MAME is the oracle for what the board computes. For when things happen, a
+recording of the board itself is better (Pinboard #1360). The Pinboard upload
+`2026-10-20 15-33-37.mp4` is an OBS capture of a Model 2B running STF Japan:
+448x346 at 60 fps, AAC 48 kHz, 104 s from the middle of the WARNING screen to
+the winner after the attract fight.
+
+```
+python3 tools/grade-hw-video.py --video "<uploads>/2026-10-20 15-33-37.mp4" \
+    --exe build/Release/m2hle [--rom $ROMS_DIR/sfight.zip] [--work DIR [--reuse]]
+```
+
+It runs m2hle headless for 112 s of wall time (`--nowarnskip --no-nvram`, Japan)
+and reads its raw A/V stream. Colour and luminosity are not graded. The
+measurements:
+
+- **pictures:** m2hle's frames are registered onto the capture (one fixed
+  scale and offset, `REG`, fitted once) and DTW-aligned on luma patterns, each
+  with its own mean and contrast taken out.
+- **rate:** the capture repeats a frame every 23.9 (the board shows 57.49 Hz,
+  against 57.524 in theory). Over the replayed fight, m2hle and the board
+  advance the same number of board frames (0.9996).
+- **loads:** reported, not graded. m2hle finishes the intro's loads in fewer
+  board frames than the board does: 26 frames ahead by the fight, in steps
+  around 13, 19, 33, 45 and 58 s. Open.
+- **pitch:** the scale between the two Welch spectra on a log-frequency axis.
+- **tempo:** a log-band spectrogram match, one per second, searched ±5 s around
+  where the matched frame's sound is. Its slope against capture time is emu
+  audio time over board audio time.
+- **sync:** where a frame's sound lands against the frame, from the same match
+  and the stream's sample stamps. Windows with no motion (the title) are left
+  out: there any frame matches.
+
+Measured (`--reuse` regrades a recording kept in `--work`):
+
+| | pictures | rate (fight) | tempo 13-51 / 63-74 / 78-96 s | sync, 13-95 s | pitch |
+|---|---|---|---|---|---|
+| master (735 samples a frame, timer 255 − reload) | 0.196 | 0.9996 | +2.60 / +2.67 / +2.62% | −0.09..+1.48 s, FAIL | 1.0000 |
+| #1360 (766.63, 256 − reload) | 0.196 | 0.9996 | +0.62 / +0.78 / +0.99% | −0.16..+0.11 s | 1.0000 |
+
+The rest of the tempo gap, under 1%, is open (sound-board.md, "The real
+board"). The capture and the registration belong to this one video. Another
+capture needs its own `REG` and segment times.
 
 ## `tools/mame` and `tests/`
 

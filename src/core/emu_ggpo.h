@@ -722,7 +722,7 @@ static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) {
         emu_slice_stop(ctx);
         return true;
     }
-    /* A held or a waiting frame still takes its 60 Hz tick: GGPO's clock is
+    /* A held or a waiting frame still takes its frame tick (the board's 57.52 Hz): GGPO's clock is
      * frames, and polling flat out would only send the peer more. */
     emu_pace_frame(ctx, t1);
     return true;
