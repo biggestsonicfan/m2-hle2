@@ -42,6 +42,7 @@
 #include <kos.h>
 #include <dc/cdrom.h>
 #include <dc/syscalls.h>
+#include <dc/g1ata.h>
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -119,7 +120,7 @@ _Static_assert(MEM_PAGE_SHIFT == PG_SHIFT, "build with -DMEM_PAGE_SHIFT=14");
 
 /* ---- the drive -------------------------------------------------------------- */
 
-static int pg_read_cmd(void *dst, uint32_t fad, uint32_t nsec) {
+static int pg_read_cmd_locked(void *dst, uint32_t fad, uint32_t nsec) {
     cd_read_params_t p = { .start_sec = fad, .num_sec = nsec, .buffer = dst, .is_test = 0 };
     cd_cmd_chk_status_t st;
     gdc_cmd_hnd_t h;
@@ -140,6 +141,18 @@ static int pg_read_cmd(void *dst, uint32_t fad, uint32_t nsec) {
     syscall_gdrom_abort_command(h);   /* or the drive is still busy with it at the next read */
     syscall_gdrom_exec_server();
     return -1;
+}
+
+/* A command holds the G1 ATA lock from send to done, as KOS's cdrom layer
+ * does: the "drive" may be DreamShell's isoldr reading an SD card in these
+ * syscalls, the card the SD log (dc_sdlog.h) writes from its own thread
+ * meanwhile (thd_pass above). Unheld, the two met on the card and a page came
+ * back unreadable (Pinboard #1314). Threads only: the pager has no IRQ caller. */
+static int pg_read_cmd(void *dst, uint32_t fad, uint32_t nsec) {
+    g1_ata_mutex_lock();
+    int r = pg_read_cmd_locked(dst, fad, nsec);
+    g1_ata_mutex_unlock();
+    return r;
 }
 
 /* A command to the drive, counted and timed: a real drive's seek is what

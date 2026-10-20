@@ -282,13 +282,20 @@ static void dc_text(int row, const char *s) {
     dp_text_frame();
 }
 
-/* dc_assert's return addresses, four to a row from row y. */
-static void dc_assert_stack(int y) {
-    char l[64];
-    uintptr_t sp, ra[24];
+/* The return addresses above the caller: n of them, at most 24. */
+static int dc_assert_ra(uintptr_t ra[24]) {
+    uintptr_t sp;
     int n = 0;
     __asm__ volatile("mov r15, %0" : "=r"(sp));
     while (n < 24 && arch_stk_unwind_step(sp, &ra[n], &sp)) n++;
+    return n;
+}
+
+/* dc_assert's return addresses, four to a row from row y. */
+static void dc_assert_stack(int y) {
+    char l[64];
+    uintptr_t ra[24];
+    int n = dc_assert_ra(ra);
     for (int i = 0; i < n; i += 4) {
         int k = 0;
         for (int j = i; j < n && j < i + 4; j++) k += snprintf(l + k, sizeof l - k, "%08lx ", (unsigned long)ra[j]);
@@ -297,6 +304,25 @@ static void dc_assert_stack(int y) {
     }
 }
 
+#if DC_SDLOG
+#include "dc_sdlog.h"
+
+/* The stop into the SD log too, as the screen has it, and onto the card while
+ * the threads still run (Pinboard #1314): with no screen to read, the card is
+ * all a console run leaves. */
+static void dc_assert_sdlog(const char *file, int line, const char *expr, const char *msg, const char *func) {
+    uintptr_t ra[24];
+    int n = dc_assert_ra(ra);
+    printf("m2-hle2 stopped: %s, board frame %u\n", line ? "an assertion failed" : "a hang", (unsigned)g_emu_frames);
+    printf("  %s%s%s\n", expr ? expr : "?", msg ? ": " : "", msg ? msg : "");
+    if (line) printf("  %s:%d in %s\n", file ? file : "?", line, func ? func : "?");
+    printf("  called from:");
+    for (int i = 0; i < n; i++) printf(" %08lx", (unsigned long)ra[i]);
+    printf("\n");
+    sl_drain(3000);
+}
+#endif
+
 /* A failed assert, KOS's or ours (dc_fatal), on screen: no serial console in
  * the field. The PVR may be in any state, so the frame buffer is drawn into
  * directly once the last render has had time to land; the watchdog stands
@@ -304,8 +330,11 @@ static void dc_assert_stack(int y) {
  * stack walk finds (saved PRs after a call); out/pass2.syms or addr2line on
  * m2hle2.elf names them. */
 static void dc_assert(const char *file, int line, const char *expr, const char *msg, const char *func) {
-    irq_disable();
     dc_wd_stop();
+#if DC_SDLOG
+    dc_assert_sdlog(file, line, expr, msg, func);
+#endif
+    irq_disable();
     spu_disable();
     for (volatile uint32_t i = 0; i < 20000000u; i++) {}   /* a render in flight lands (~0.1 s) */
     vid_set_mode(DM_640x480, PM_RGB565);
@@ -350,9 +379,6 @@ static void dc_stop(const char *why) {
 #include "dc_jit_test.h"
 #if DC_HUD_PROF
 #include "dc_prof.h"
-#endif
-#if DC_SDLOG
-#include "dc_sdlog.h"
 #endif
 #ifdef IB_WHY
 static char g_calib[64];
@@ -1123,6 +1149,11 @@ static void dc_stats_rows(dc_stats_t *s, uint64_t t2, const dc_window_t *w) {
              g_geo3d_mesh_clears, g_geo3d_mesh_evicts, (unsigned)(g_geo3d_arena_used >> 10));
     STATS_PRINT(line);
     dp_text(17, line);
+#if DC_TILE_COUNT
+    dc_tc_row(line, sizeof line);
+    STATS_PRINT(line);
+    dp_text(13, line);
+#endif
     unsigned sl = s->slices ? s->slices : 1;
     dc_cpu_stats_t c = dc_stats_cpu(s, sl);
     snprintf(line, sizeof line, "i960 %u ms (cop %u) /slice, %u%% blk %u%% aot, %u steps", c.i960, c.cop, c.blk, c.aot, c.steps);

@@ -2224,6 +2224,81 @@ B's `SC` row: 6 scenes, 167 textures staged, 49 adopted, 1212 KB read.
   stf-lolo for a console to price; only a real drive can say what the extra
   seeks cost against the draw's own reads.
 
+## Title tiles against the last request: nothing repeats (#571, at 216bf2d)
+
+The question was whether the tile generators redraw cells they drew the
+frame before with the same request, so that a skip could pay for the title's
+tile time. `make TILECOUNT=1` (`dreamcast/dc_tilecount.h`, off by default and
+compiled out) hashes each cell's request before its generator runs and
+compares it with the same cell's last one. The HUD's row 13 gives one total
+per 2 s window: `TC ls a/b/c cpu a/b/c`, where a = the request matches,
+b = the char id changed but its source bytes match, and c = new.
+
+- **The line-scroll key** (`dp_ls_cell`, tilemap 2 or 0 into the strips'
+  textures) is the entry (char id, palette bank, category bit), `opaque`,
+  the bank's 16 colours in both formats, and the char's 32 bytes. The board
+  has no flip bits, and the scroll belongs to the strips, not the cell.
+- **The CPU key** (`dp_ls_rest` / `tile_cpu_draw`, per 8x8 block over each
+  row's span) holds only what `s24_draw_tilemap` and `s24_draw_line` read.
+  A tilemap they return from (`vscr & 0x8000`, or the odd one of a split
+  pair) adds nothing. The rest add their 9-bit V scroll (`vscr & 0x1FF`),
+  then, per line, at the block's first and last pixel: the column in the
+  cell (`(x - (row & 0x1FF)) & 511`), the tilemap `s24_line_split` picks,
+  whether its mask bit hides the pixel, and the entry and 4 bytes sampled
+  there. A block writes pens (`bank16 + nibble`), so colours are not part of
+  it. The first version also hashed a disabled tilemap's scroll, the scroll
+  and control words' high bits and the whole mask word; the recount below
+  drops them.
+
+Both runs used #463's protocol: Flycast's libretro core, power-on, a shot
+every 20 s, with the Makefile defaults plus `AOT`, `RAMP4096=0` and
+`HASH_FRAME=1500`. The default build's `.text` and `.data` match 216bf2d's
+byte for byte. Only the version string differs.
+
+| run | title shot | fps | `tl` (ms/frame) | `TC ls` | `TC cpu` |
+|---|---|---|---|---|---|
+| off (TILECOUNT=0) | f3127, 120 s | 8.4 | 110 | | |
+| on (TILECOUNT=1) | f2966, 140 s | 4.1 | 165 | 0 / 0 / 0 | 0 / 0 / 26784 |
+| recount, trimmed key | f3214, the starfield | 5.0 | 192 | 0 / 0 / 0 | 0 / 0 / 29760 |
+| recount, board frames 3094-3127 | the 110 ms window | | | 0 / 0 / 0 | 0 / 0 / 101184 |
+
+The first on run's window was not the one behind the 110 ms: it was before
+the starfield. The recount's window is the starfield title, the same scene
+as the off run's f3127, and its `TC` and `tl` are reset together
+(`dc_stats_window`, every 2 s, both counted only in `dp_frame`). 29760 is
+10 x 2976 at 5.0 shown fps, the whole view on every frame. Not one block
+repeats its request. The same build's fight window reads cpu 207/0/300, so
+the key does match when the request repeats.
+
+f3214 is still a later window than the 110 ms one. A second off run, with a
+shot every 2 s, puts the 110 ms window (8.4 fps, `tl 110`) between the HUD's
+f3093 and f3127. The last row counts only board frames 3094-3127
+(`EXTRA="-DDC_TC_FROM=3094u -DDC_TC_TO=3127u"`; every draw still updates the
+last request, so the first counted frame is held against the frame before).
+It reads `TC f ls 0/0/0 cpu 0/0/101184 d34`: 34 redraws, every block of the
+view on each (34 x 2976), and not one repeats its request.
+
+- **Under half, so no skip.** On the title, no cell matches its last request
+  (0%), and none differs only by a char id with identical bytes. Two attract
+  windows of the same run do no better: the flight reads ls 0/0/9624 and
+  cpu 480/0/3592 (12%), and GET 8 EMERALDS reads cpu 350/0/4734 (7%). A request skip on
+  the title would skip nothing, so it was not built. The counter stays off.
+- **29760 is 10 x 2976, every block of the screen on each of the window's 10
+  frames** (5.0 shown fps over 2 s; the first run's 26784 was taken to be
+  9 x 2976, uncounted), and the line-scroll column is empty. On the title at this tip,
+  the CPU redraws the whole tile layer every frame, and every block's
+  request is new. #358 measured 5-6 ms here with the starfield on the
+  strips. The 110 ms (114 ms in #463) says the title no longer takes that
+  path. Why was not chased here.
+- **The counter's cost** is its own hashing: 55 ms a frame more on the
+  title, which is why the on run reached the title later and at half the
+  fps. Its shot shows the title before the starfield is drawn in.
+- **The frame-1500 hash at 216bf2d is 109e8406, not 634d853f.** The same
+  source built against gems-c a7459d4 (the pointer before f20ba86) gives
+  634d853f. So f20ba86, the COP's float arithmetic under the SHARC's
+  rounding (#565), moved it. That is a change to the board, not to the
+  tiles. 109e8406 is the hash to hold from f20ba86 on.
+
 ## The AOT was off, and its map was stale (#509)
 
 The ask was a faster ahead-of-time compiler. Two things stood before the
@@ -2408,6 +2483,94 @@ How it was checked, on `LINK=1` builds of the tree before and after:
   warnings, line for line (`-Wall -Wextra`); the text is 1.4 KB smaller
   (1,699,280 against 1,700,704) and `.data` and `.bss` are within 200 bytes.
 
+## Why the title's 110 ms frames are not line-scrolled (#573)
+
+#571 (PR #267) found that the slow title window, board frames 3094-3127
+(`tl 110`, 8.4 fps, starfield up), redraws all 2,976 blocks on the CPU every
+frame, and that no block repeats its request. The line-scroll strips that
+brought the title to 5-6 ms in #358 draw nothing there. This is the reason.
+
+**The line that decides it** is `dp_ls_ok` (dc_pvr.h:1071):
+
+    if (!(w[0x5000 + t] & 0x8000) || (w[0x5004 + t] & 0xE000)) return false;
+
+For t = 2, `w[0x5006]` is tilemap 2's V scroll and pair 2/3's control word
+(bits 14:13 the split mode). In these frames the game sets bit 13: **pair 2/3
+is in split mode 1**, a horizontal split at line `-vscroll`. Tilemap 3 draws
+on one side of the line and tilemap 2 on the other. So `dp_tiles_ls`
+(dc_pvr.h:1260) sets `ls` false, `g_ls.on` drops, and `dp_tiles_redraw`
+(dc_pvr.h:1332) takes `tile_cpu_draw` for all four tilemaps. The game also
+steps the V scroll by 8 every frame. That moves the split line and tilemap 2
+with it, so every block changes each frame (tile RAM KB 40, the scroll
+registers) and the draw goes full.
+
+**Measured, not read off the screen.** Tile RAM at every game frame edge
+(`det_digest --gems --profile sfight_console --raw 1000000:10000:FILE`, the
+board `tools/dc-lockstep.py --boot` holds the Dreamcast to). The mode and
+sub-mode come from `--peek 500030`. Each stretch is checked with dp_ls_ok's
+three conditions:
+
+| board frames | sub-mode | `0x5006` | tilemap 2 on the PVR? |
+|---|---|---|---|
+| 681-2930 | 05, the title (#358's 5-6 ms) | `0x0000` | yes: line scroll on, mode 0, no mask on the view |
+| 2931-3253 | 06-08, the title's exit | `0x3FF8` down to `0x3618`, -8 a frame | **no: mode 1** (`& 0xE000` = `0x2000`) |
+| 3254- | 09, 0A | | no: line scroll off |
+
+At board frame 3094 `0x5006` = `0x3B10`, so the split is at line 240 with
+tilemap 3 above it. At 3127 it is `0x3A08`, line 504: below the view, so
+tilemap 3 covers the whole view. Line scroll (`0x5002` bit 15) stays on for
+the whole stretch, and the window mask is not a reason here. The only
+condition that fails is the mode.
+
+So the 110 ms window is not the #358 title gone back to the CPU. It is the
+title's exit, which #358's strips never covered: they draw tilemap 2 alone,
+in mode 0. To put it on the PVR, the strip path would have to take a mode-1
+pair: tilemap 3 as well, cut at the split line. That is not done here.
+Nothing was built or benched for this, and nothing in the build changed.
+
+### Can the strips draw that split? No: the reject is required (#574)
+
+The line-scroll blit cannot express a mode-1 split. Read from the code at
+28e54c3; nothing built, benched or dumped.
+
+**What mode 1 asks for** (`s24_line_split`, tile_renderer.h:146): on each
+line, one tilemap of the pair draws on one side of `v = -vscroll` and the
+other tilemap on the other side. Both use tilemap 2's scroll registers, since
+"the even tilemap draws both" (:239). So the picture needs tilemap 3's cells
+on the lines on its side of the split.
+
+**What the blit has.** Two things are missing:
+
+- **No texture holds tilemap 3.** The blit keeps one texture pair per
+  tilemap it draws, `dp_ls_t t2, t0;` (dc_pvr.h:150). Pair 2/3 gets only
+  tilemap 2's 0x1000 entries:
+
+      dp_ls_draw(&g_ls.t2, n + 0x2000, bus->tmapgfx, ls_all, true, chars, banks);   /* :1266 */
+
+  While the strips are on, the CPU side does not draw tilemap 3 either.
+  `dp_ls_rest` is "tile_cpu_draw less tilemaps 2 and 3" (:1166), and
+  `dp_tiles_copy` stops copying KBs 16-31, which hold both tilemaps' cells
+  (:1290).
+- **A strip has no line range.** `dp_ls_strips` covers every line of the
+  view with the one texture it is given:
+
+      for (int y = DC_VIEW_Y; y < vy1; ) {   /* :1146 */
+
+  Nothing in `dp_ls_t` (`h[]`, `vy`) stops a run at the split line or swaps
+  textures there.
+
+If `dp_ls_ok` passed mode 1, the strips would draw tilemap 2 on tilemap 3's
+side as well. At board frame 3127, where the split is below the view, that is
+the whole view, and nothing would draw tilemap 3. So the check at :1071 is
+required for a correct picture. It is not a guard that could be relaxed.
+
+**So the ~110 ms is the cost of a required CPU wipe**, under the PVR path as
+it stands. This line of work (title tile skip #571, line-scroll reason #573,
+this) is closed. A PVR split would be a new path, not a missing check on this
+one. It would need a third texture pair filled from `n + 0x3000`, kept on the
+CPU-copy side too, and strips cut at the split line, choosing tilemap 2's or
+tilemap 3's texture on each side. It is not proposed or built here.
+
 ## Toolchain and runtime traps
 
 - **`uint32_t` is `long` on sh-elf.** `%u` / `%x` with a `uint32_t` is a format
@@ -2494,7 +2657,10 @@ and 1750 is how a bench catches it.
 - **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
   behind, and tilemap 0 too when its pair is laid out the same way (#481).
   A per-line scroll on tilemap 1 or 3, or a window mask on the view, still
-  redraws whole lines on the CPU. The attract's
+  redraws whole lines on the CPU, and so does a pair in a split mode: the
+  title's exit (board frames 2931-3253, ~110 ms of tiles) puts pair 2/3 in
+  mode 1 (#573; #574: the strips cannot draw a split, so that is a required
+  CPU wipe). The attract's
   "REVENGE OF DR. ROBOTONIC" banner costs ~18-27 ms a frame.
 - **The 3D decode (title: 46-76 ms).** Now mostly the cached path. The SH-4's
   `ftrv` for the vertex transform, and the store queues for the vertex
