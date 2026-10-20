@@ -987,8 +987,9 @@ static void netplay_start(void) {
     if (lobby_can_sign_in()) lobby_sign_in();
 }
 
-/* The netplay lobby takes the pad and the keyboard while it is open: L1+R1,
- * Guide or F1 toggle it; the d-pad moves, A picks and B closes, both on
+/* The netplay lobby takes the pad and the keyboard while it is open: L1+R1
+ * (not on a twin-lever game, where they are the two dashes), Guide or F1
+ * toggle it; the d-pad moves, A picks and B closes, both on
  * release, so the button is up again before the game resumes. True if the
  * event was the lobby's and the game must not see it. */
 static bool lobby_event(const SDL_Event *ev, bool *pad_changed) {
@@ -997,7 +998,7 @@ static bool lobby_event(const SDL_Event *ev, bool *pad_changed) {
         SDL_Gamepad *pad = SDL_GetGamepadFromID(ev->gbutton.which);
         int b = ev->gbutton.button;
         if (b == SDL_GAMEPAD_BUTTON_GUIDE) toggle = true;
-        else if (pad && ((b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
+        else if (pad && !input_twin_levers() && ((b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
                           && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
                       || (b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER
                           && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))))

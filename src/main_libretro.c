@@ -602,11 +602,62 @@ static const lr_bind_t lr_binds[] = {
 };
 #define LR_BIND_COUNT (int)(sizeof lr_binds / sizeof lr_binds[0])
 
+/* A twin-lever game (input_twin_levers, Virtual-On): each pad plays both
+ * levers, as the web's TWIN_DEFAULTS (m2hle-pad.js). The d-pad and left stick
+ * are the left lever; the right stick and the face buttons where they sit
+ * (X up, B down) the right one; L2 / R2 shoot with the left / right lever and
+ * L / R dash. L + R is then both dashes, so the lobby wants Select too. */
+static const lr_bind_t lr_twin_binds[] = {
+    { RETRO_DEVICE_ID_JOYPAD_UP,     GAME_INPUT_P1_UP,    -1 },
+    { RETRO_DEVICE_ID_JOYPAD_DOWN,   GAME_INPUT_P1_DOWN,  -1 },
+    { RETRO_DEVICE_ID_JOYPAD_LEFT,   GAME_INPUT_P1_LEFT,  -1 },
+    { RETRO_DEVICE_ID_JOYPAD_RIGHT,  GAME_INPUT_P1_RIGHT, -1 },
+    { RETRO_DEVICE_ID_JOYPAD_X,      GAME_INPUT_P2_UP,    -1 },
+    { RETRO_DEVICE_ID_JOYPAD_B,      GAME_INPUT_P2_DOWN,  -1 },
+    { RETRO_DEVICE_ID_JOYPAD_Y,      GAME_INPUT_P2_LEFT,  -1 },
+    { RETRO_DEVICE_ID_JOYPAD_A,      GAME_INPUT_P2_RIGHT, -1 },
+    { RETRO_DEVICE_ID_JOYPAD_L2,     GAME_INPUT_P1_B1,    -1 },
+    { RETRO_DEVICE_ID_JOYPAD_L,      GAME_INPUT_P1_B2,    -1 },
+    { RETRO_DEVICE_ID_JOYPAD_R2,     GAME_INPUT_P2_B1,    -1 },
+    { RETRO_DEVICE_ID_JOYPAD_R,      GAME_INPUT_P2_B2,    -1 },
+    { RETRO_DEVICE_ID_JOYPAD_START,  GAME_INPUT_P1_START, -1 },
+    { RETRO_DEVICE_ID_JOYPAD_SELECT, GAME_INPUT_P1_COIN,  -1 },
+    { RETRO_DEVICE_ID_JOYPAD_L3,     GAME_INPUT_TEST,     -1 },
+    { RETRO_DEVICE_ID_JOYPAD_R3,     GAME_INPUT_SERVICE,  -1 },
+};
+#define LR_TWIN_BIND_COUNT (int)(sizeof lr_twin_binds / sizeof lr_twin_binds[0])
+
+/* The lobby's chord: L + R, and Select on a twin-lever game. */
+static bool lr_lobby_chord(void) {
+    return input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L)
+        && input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R)
+        && (!input_twin_levers() || input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT));
+}
+
 static void lr_set_input_descriptors(void) {
     static const char *names[] = { "Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3",
                                    "Button 4", "Start", "Coin", "Test", "Service" };
-    struct retro_input_descriptor desc[4 * LR_BIND_COUNT + 3];
+    static const char *twin_names[] = { "Left lever up", "Left lever down", "Left lever left", "Left lever right",
+        "Right lever up", "Right lever down", "Right lever left", "Right lever right", "Left shot", "Left dash",
+        "Right shot", "Right dash", "Start", "Coin", "Test", "Service" };
+    struct retro_input_descriptor desc[4 * LR_BIND_COUNT + 2 * LR_TWIN_BIND_COUNT + 9];
     int n = 0;
+    if (input_twin_levers()) {
+        for (unsigned port = 0; port < 2; port++) {
+            for (int i = 0; i < LR_TWIN_BIND_COUNT; i++)
+                desc[n++] = (struct retro_input_descriptor){ port, RETRO_DEVICE_JOYPAD, 0, lr_twin_binds[i].id, twin_names[i] };
+            desc[n++] = (struct retro_input_descriptor){ port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
+                                                         RETRO_DEVICE_ID_ANALOG_X, "Left lever" };
+            desc[n++] = (struct retro_input_descriptor){ port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT,
+                                                         RETRO_DEVICE_ID_ANALOG_X, "Right lever" };
+        }
+        if (opt.online != LR_ONLINE_RETROARCH)
+            desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,
+                                                         "Coin (online lobby with L + R)" };
+        desc[n] = (struct retro_input_descriptor){ 0, 0, 0, 0, NULL };
+        env_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
+        return;
+    }
     /* Ports 3 and 4 are players 3 and 4 of a four-player cabinet (Air Walkers). */
     unsigned ports = input_four_players() ? 4 : 2;
     for (unsigned port = 0; port < ports; port++)
@@ -665,9 +716,34 @@ static uint32_t lr_port_gun(unsigned port) {
 /* One port's pad as the board's held mask, the d-pad and left stick both
  * steering. Ports 3 and 4 (players 3 and 4, g_input.far_held) take player 1's
  * and player 2's bits, as input_far_down does. */
+static uint32_t lr_port_held_twin(unsigned port) {
+    const game_input_map_t *in = &g_active_profile->input;
+    const int dead = 16000;
+    int ax = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
+    int ay = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
+    int rx = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
+    int ry = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
+    uint32_t held = 0;
+    for (int i = 0; i < LR_TWIN_BIND_COUNT; i++) {
+        int act = lr_twin_binds[i].p1;
+        if (port > 0 && (act == GAME_INPUT_TEST || act == GAME_INPUT_SERVICE)) continue;
+        if (lr_btn(port, lr_twin_binds[i].id)) held |= in->bits[act];
+    }
+    if (ay < -dead) held |= in->bits[GAME_INPUT_P1_UP];
+    if (ay >  dead) held |= in->bits[GAME_INPUT_P1_DOWN];
+    if (ax < -dead) held |= in->bits[GAME_INPUT_P1_LEFT];
+    if (ax >  dead) held |= in->bits[GAME_INPUT_P1_RIGHT];
+    if (ry < -dead) held |= in->bits[GAME_INPUT_P2_UP];
+    if (ry >  dead) held |= in->bits[GAME_INPUT_P2_DOWN];
+    if (rx < -dead) held |= in->bits[GAME_INPUT_P2_LEFT];
+    if (rx >  dead) held |= in->bits[GAME_INPUT_P2_RIGHT];
+    return held;
+}
+
 static uint32_t lr_port_held(unsigned port) {
     const game_input_map_t *in = &g_active_profile->input;
     const int dead = 16000;
+    if (input_twin_levers() && port < 2) return lr_port_held_twin(port);
     int ax = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
     int ay = input_state_cb(port, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
     uint32_t held = 0;
@@ -1248,7 +1324,7 @@ static bool lr_shell_input(bool *board_paused) {
 static bool lr_lobby_input(void) {
     static bool lr_was;
     ps3ui_app_t *a = &g_ps3ui_app;
-    bool lr = lr_btn(0, RETRO_DEVICE_ID_JOYPAD_L) && lr_btn(0, RETRO_DEVICE_ID_JOYPAD_R);
+    bool lr = lr_lobby_chord();
     if (lr && !lr_was && !a->open) ps3ui_app_open(a);
     lr_was = lr;
     uint32_t pad = lr_lobby_pad();
@@ -2221,7 +2297,7 @@ static bool lr_ggpo_pad(const ggl_status_t *st) {
     uint32_t pad = lr_lobby_pad();
     uint32_t hit = pad & ~g_lrg.pad_was;
     g_lrg.pad_was = pad;
-    bool lr = lr_btn(0, RETRO_DEVICE_ID_JOYPAD_L) && lr_btn(0, RETRO_DEVICE_ID_JOYPAD_R);
+    bool lr = lr_lobby_chord();
     bool lr_hit = lr && !g_lrg.lr_was;
     g_lrg.lr_was = lr;
     if (st->in_from[0]) {

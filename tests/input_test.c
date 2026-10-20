@@ -13,6 +13,7 @@
 #include <stdio.h>
 
 #include "sfight.h"        /* profile, load/install */
+#include "vonj.h"          /* the twin levers (Pinboard #1352) */
 #include "emu_thread.h"    /* emu thread */
 #include "input.h"         /* g_input, input_attach, input_io_read_cb */
 #include "lightgun_host.h"  /* the trigger's flash (Pinboard #1045) */
@@ -145,6 +146,29 @@ int main(void) {
               input_keycode_to_action(SAPP_KEYCODE_PAGE_DOWN) == -1,
               "a racing cabinet: Up accelerates, Down brakes, Z X C V the views, Q / W shift");
         input_keys_default(g_active_profile);
+    }
+
+    /* ---- (A1c) Virtual-On: m2emulator's _von_Inputs, one player on two levers ---- */
+    {
+        const game_profile_t *was = g_active_profile;
+        CHECK(!input_twin_levers(), "STF is not a twin-lever cabinet");
+        g_active_profile = &von_profile;
+        bool von_twin = input_twin_levers();
+        g_active_profile = &vonj_profile;
+        input_keys_default(g_active_profile);
+        const uint32_t *vb = g_active_profile->input.bits;
+        CHECK(von_twin && input_twin_levers() && !input_keys_driving(g_active_profile) &&
+              input_keycode_to_action(SAPP_KEYCODE_UP) == GAME_INPUT_P1_UP &&
+              input_keycode_to_action(SAPP_KEYCODE_LEFT) == GAME_INPUT_P1_LEFT &&
+              input_keycode_to_action(SAPP_KEYCODE_Z) == GAME_INPUT_P1_B1 &&
+              input_keycode_to_action(SAPP_KEYCODE_X) == GAME_INPUT_P1_B2 &&
+              vb[GAME_INPUT_P1_UP] == 0x2000 && vb[GAME_INPUT_P1_LEFT] == 0x8000 &&
+              vb[GAME_INPUT_P1_B1] == VONJ_L_SHOT && vb[GAME_INPUT_P1_B2] == VONJ_L_DASH &&
+              vb[GAME_INPUT_P2_UP] == 0x200000 && vb[GAME_INPUT_P2_B1] == VONJ_R_SHOT &&
+              vb[GAME_INPUT_P2_B2] == VONJ_R_DASH && vb[GAME_INPUT_P1_START] == 0x10 &&
+              vb[GAME_INPUT_P1_COIN] == 0x01 && vb[GAME_INPUT_SERVICE] == 0x08 && vb[GAME_INPUT_TEST] == 0x04,
+              "Virtual-On: arrows the left lever, Z its trigger, X its dash, the right lever on IN2 (m2emulator's)");
+        g_active_profile = was;
     }
 
     /* ---- (A2) a light gun's flash: off by default, N drawn frames a pull ---- */

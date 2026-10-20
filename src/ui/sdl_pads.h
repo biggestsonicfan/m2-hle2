@@ -267,16 +267,43 @@ static void wheel_close(SDL_JoystickID id) {
     if (joy) SDL_CloseJoystick(joy);
 }
 
+/* A twin-lever game (input_twin_levers, Virtual-On) on one pad, as the web's
+ * TWIN_DEFAULTS (m2hle-pad.js): the right stick and the face buttons where they
+ * sit (north up, south down) are the right lever, the triggers shoot (L2 left,
+ * R2 right) and the bumpers dash. These buttons are the layout's, not binds. */
+static bool pad_twin_button(SDL_GamepadButton b) {
+    return b == SDL_GAMEPAD_BUTTON_SOUTH || b == SDL_GAMEPAD_BUTTON_EAST || b == SDL_GAMEPAD_BUTTON_WEST
+        || b == SDL_GAMEPAD_BUTTON_NORTH || b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
+        || b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER;
+}
+
+static void pad_twin_actions(SDL_Gamepad *pad, bool *now) {
+    const int dead = 16000;
+    int rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
+    int ry = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+    now[GAME_INPUT_P2_UP]    |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_NORTH) || ry < -dead;
+    now[GAME_INPUT_P2_DOWN]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH) || ry >  dead;
+    now[GAME_INPUT_P2_LEFT]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_WEST)  || rx < -dead;
+    now[GAME_INPUT_P2_RIGHT] |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST)  || rx >  dead;
+    now[GAME_INPUT_P1_B1] |= SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)  > dead;
+    now[GAME_INPUT_P2_B1] |= SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > dead;
+    now[GAME_INPUT_P1_B2] |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    now[GAME_INPUT_P2_B2] |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+}
+
 /* One pad's actions into now[]: the d-pad and left stick steer, the binds press. */
 static void pad_actions(SDL_Gamepad *pad, bool *now) {
     const int dead = 16000;
+    const bool twin = input_twin_levers();
     int ax = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
     int ay = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
     now[GAME_INPUT_P1_UP]    |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_UP)    || ay < -dead;
     now[GAME_INPUT_P1_DOWN]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)  || ay >  dead;
     now[GAME_INPUT_P1_LEFT]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)  || ax < -dead;
     now[GAME_INPUT_P1_RIGHT] |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || ax >  dead;
+    if (twin) pad_twin_actions(pad, now);
     for (int b = 0; b < PAD_BIND_COUNT; b++) {
+        if (twin && pad_twin_button(g_pad_binds[b].button)) continue;
         if (!g_pad_binds[b].acts || !SDL_GetGamepadButton(pad, g_pad_binds[b].button)) continue;
         for (int a = 0; a < GAME_INPUT_COUNT; a++)
             if (g_pad_binds[b].acts & ACT(a)) now[a] = true;
