@@ -1170,10 +1170,10 @@ static void dp_ls_rest(tile_cpu_t *c, const uint8_t *gfx, const int16_t *x0, con
     for (int y = 0; y < VIDEO_HEIGHT; y++)
         for (int x = x0[y]; x < x1[y]; x++)
             c->bg[y * VIDEO_WIDTH + x] = c->fg[y * VIDEO_WIDTH + x] = TILE_PEN_NONE;
-    s24_draw_tilemap(c->words, gfx, 1, 0, false, c->bg, x0, x1);
-    s24_draw_tilemap(c->words, gfx, 0, 0, false, c->bg, x0, x1);
-    s24_draw_tilemap(c->words, gfx, 1, 1, false, c->fg, x0, x1);
-    s24_draw_tilemap(c->words, gfx, 0, 1, false, c->fg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 1, 0, false }, c->bg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 0, 0, false }, c->bg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 1, 1, false }, c->fg, x0, x1);
+    s24_draw_tilemap((s24_pass_t){ c->words, gfx, 0, 1, false }, c->fg, x0, x1);
 }
 
 /* m2-sdk's tile framebuffer (m2_tilefb.h) gives every screen cell a char of its
@@ -1711,8 +1711,8 @@ static uint32_t geo3d_dc_sface_memo(const geo3d_sface_t *F, float r, float g, fl
 /* Whether the strip pack was recorded from the models md names. */
 static bool geo3d_strips_match(const dcs_head_t *h, const geo3d_models_t *md) {
     return h && md->materials == g_dp_rs_textures && md->polygons_size == h->polygons_size &&
-           md->materials_size == h->textures_size && md->table_off == h->table_off &&
-           md->table_count == h->table_count && md->mesh_ptr_subtract == h->mesh_ptr_subtract &&
+           md->materials_size == h->textures_size && md->table.off == h->table_off &&
+           md->table.count == h->table_count && md->mesh_ptr_subtract == h->mesh_ptr_subtract &&
            md->mesh_ptr_add == h->mesh_ptr_add;
 }
 
@@ -1799,9 +1799,10 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
     if (!g_geodl_snap_ready || !rs->main_data || !rs->polygons) { geo->captured_count = 0; return; }
     const uint32_t *snap = g_geodl_snap;
     g_geo_rs = geodl_raster_for(snap);
-    bool walked = geo3d_scan_geo_list(geo, snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
-                                      (int16_t)mem_read16(bus, H_SYNC_BASE), (int16_t)mem_read16(bus, V_SYNC_BASE),
-                                      rs->main_data, rs->main_data_size, q->model_table_offset, q->model_table_count);
+    const model_table_t table = profile_model_table(q);
+    const geo3d_rom_t rom = { rs->main_data, rs->main_data_size, &table };
+    bool walked = geo3d_scan_geo_list(geo, &(const geo3d_list_t){ snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart },
+                                      (int16_t)mem_read16(bus, H_SYNC_BASE), (int16_t)mem_read16(bus, V_SYNC_BASE), &rom);
     GEO3D_LAP(WALK);
     if (!walked) { geo->captured_count = 0; return; }
     g_geo3d_palram = bus->palette;
@@ -1810,6 +1811,11 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
     g_geo3d_flat_list = 1;
     const int count = geo->captured_count;
     int windows = geo->geo_windows > 0 ? geo->geo_windows : 1;
+    const geo3d_models_t md = {   /* geo3d_models_of (game_render.h), which this build has not */
+        .main_data = rs->main_data, .main_data_size = rs->main_data_size,
+        .polygons  = rs->polygons,  .polygons_size  = rs->polygons_size,
+        .materials = rs->textures,  .materials_size = rs->textures_size,
+        .table = table, .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add };
     for (int i = 0; i < count; ) {
         const captured_model_t *c0 = &geo->captured[i];
         int j = i;
@@ -1845,15 +1851,11 @@ static void dp_decode(geo3d_state_t *geo, memory_bus_t *bus, const romset_t *rs)
             g_geo3d_lod = cm->geo_lod;
             GEO3D_LAP(RUN);
             if (cm->direct_len) {
-                geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len,
-                                    rs->textures, rs->textures_size, rs->main_data, rs->main_data_size,
+                geo3d_decode_direct(geo->direct_words + cm->direct_off, cm->direct_len, &md,
                                     cm->gproj[0], cm->gproj[1]);
                 GEO3D_LAP(DIRECT);
             } else {
-                geo3d_models_t from = {
-                    rs->main_data, rs->main_data_size, rs->polygons, rs->polygons_size,
-                    rs->textures, rs->textures_size, q->model_table_offset, q->model_table_count,
-                    q->mesh_ptr_subtract, q->mesh_ptr_add, NULL, 0 };
+                geo3d_models_t from = md;
                 if (cm->model_idx < 0) {
                     uint32_t word = cm->dbg_mesh_ptr & 0x7FFFu;
                     from.obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(cm->dbg_mesh_ptr & 0x01000000u) ? 1 : 0][word];

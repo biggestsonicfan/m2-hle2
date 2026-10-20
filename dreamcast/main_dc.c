@@ -159,12 +159,11 @@ static geo3d_state_t    geo;
 /* ---- The ROM, as windows ---------------------------------------------------- */
 
 /* memory.h's g_mem_window: the board's MAIN_DATA and XTRA_DATA are the ROM's
- * main_data (STF's XTRA_DATA is its second 16 MB, sfight_install), and
- * VID_EXT_RAM is anonymous. Everything else the board allocates. */
+ * main_data (STF's XTRA_DATA is its second 16 MB, sfight_install). Everything
+ * else the board allocates. */
 static uint8_t *dc_window(const char *name, size_t size) {
     if (!strcmp(name, "MAIN_DATA") && rs.main_data_size >= size) return rs.main_data;
     if (!strcmp(name, "XTRA_DATA") && rs.main_data_size >= 0x1000000u + size) return rs.main_data + 0x1000000u;
-    if (!strcmp(name, "VID_EXT_RAM")) return pg_anon(0, (uint32_t)size);
     return NULL;
 }
 
@@ -397,16 +396,16 @@ static void dc_boot_sincos(void) {
 }
 
 /* The pager's cache, in bytes: the frame pool takes what the board leaves.
- * Texture RAM (2 MB), its framebuffer (0.5 MB) and the heap's own use come
- * out of what is free now. The mesh cache has its own block (GEO3D_MESH_ARENA). */
+ * Texture RAM (2 MB) and the heap's own use come out of what is free now
+ * (the board's 0.5 MB framebuffer went with master's #590: the cache has it). The mesh cache has its own block (GEO3D_MESH_ARENA). */
 static uint32_t dc_boot_cache_size(void) {
 #if DC_RAMP_4096
     /* RAMP4096 (#554): the table's extra 86016 bytes of BSS are already out of
      * the heap, and the cache pays for them below. Probe as if they were still
      * free, or the 256 KB step takes another 256 KB on top (1024 - 84, #553). */
-    const uint32_t keep_ = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10) - 86016u;
+    const uint32_t keep_ = TEXRAM0_SIZE + TEXRAM1_SIZE + (512u << 10) - 86016u;
 #else
-    const uint32_t keep_ = TEXRAM0_SIZE + TEXRAM1_SIZE + FRAMEBUFFER_SIZE + (512u << 10);
+    const uint32_t keep_ = TEXRAM0_SIZE + TEXRAM1_SIZE + (512u << 10);
 #endif
     /* SCENE= (#567): its tables and code (25-48 KB) are out of the heap the same
      * way, and took a whole step of cache with them, so a fight faulted twice as often. */
@@ -557,7 +556,7 @@ static void dc_boot(uint32_t *cache, uint32_t *left) {
     bool sound = ds_init() == 0;
     dc_boot_sincos();
     *cache = dc_boot_cache();
-    if (pg_init(&dc_layout_sfight, *cache, VID_EXT_RAM_SIZE) != 0 || dc_romset() != 0)
+    if (pg_init(&dc_layout_sfight, *cache, 0) != 0 || dc_romset() != 0)
         dc_stop("the disc lacks a ROM file (dc_layout.h)");
     g_mem_window = dc_window;
     if (sound) dc_add_sound_hook();

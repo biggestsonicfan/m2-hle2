@@ -1,0 +1,29 @@
+/* The arcade's banner and panel (stf-arcade.mjs). Prefixed stfa- to stay out of the page's way. */
+.stfa-banner {
+  position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); z-index: 1000;
+  width: min(36rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow: auto;
+  background: #10162a; color: #e8ecf6; border: 2px solid #3d6fff; border-radius: 8px;
+  padding: 1rem 1.2rem; font: 15px/1.45 system-ui, sans-serif; box-shadow: 0 6px 30px #000a;
+}
+.stfa-banner h2 { margin: 0 0 .5rem; font-size: 1.2rem; }
+.stfa-banner p { margin: .5rem 0; }
+.stfa-banner a { color: #9db7ff; }
+.stfa-banner label { display: block; margin: .4rem 0; }
+.stfa-buttons { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .8rem; }
+.stfa-buttons button, .stfa-open {
+  font: inherit; padding: .45rem .8rem; border-radius: 5px; cursor: pointer;
+  border: 1px solid #3d6fff; background: #1d2a55; color: #fff;
+}
+.stfa-buttons button:first-child { background: #3d6fff; }
+.stfa-open { position: fixed; left: .5rem; bottom: .5rem; z-index: 999; font-size: 12px; opacity: .75; }
+.stfa-mine { max-height: 12rem; overflow: auto; background: #0008; padding: .5rem; font-size: 12px; }
+.stfa-note {
+  position: fixed; left: 50%; top: 1rem; transform: translateX(-50%); z-index: 1001;
+  background: #3d6fff; color: #fff; padding: .6rem 1rem; border-radius: 6px; font: 14px system-ui, sans-serif;
+}
+/* m2-hle2's tools drawer (Lag check, Console, Picture, Replay) opens at the foot of the page:
+ * sit on top of it, not over it. --drawer-h is its height, from the page's m2hle.css. */
+body:has(#drawer:not([hidden])) .stfa-open { bottom: calc(var(--drawer-h, 0px) + .5rem); }
+body:has(#drawer:not([hidden])) .stfa-banner {
+  bottom: calc(var(--drawer-h, 0px) + 1rem); max-height: calc(100vh - var(--drawer-h, 0px) - 2rem);
+}

@@ -13,6 +13,7 @@
  *
  *   det_digest <merged sfight zip> [--frames N] [--script "449:c,460:,..."]
  *              [--from F] [--out FILE] [--cop FROM:TO:FILE] [--trace F:FILE]
+ *              [--profile ID]
  *
  * Script keys are the web build's ?script= (main_web.c): at frame N hold exactly
  * these; u d l r, 1-4 the buttons, s start, c coin; an uppercase letter is the
@@ -24,7 +25,8 @@
  *
  * --cop FROM:TO:FILE writes every word of the COP conversation during those
  * frames (g_cop_tap: command/argument words in, replies out), one per line with
- * its frame, so the first differing reply names the command that split.
+ * its frame, so the first differing reply names the command that split. On a
+ * Model 2A board it is the TGP's conversation (g_tgp_tap), tagged the same way.
  *
  * --inputs FILE replays a netplay session's input log (netplay.h, "The session
  * input log"): each frame gets the two players' words the session ran on, and
@@ -57,10 +59,40 @@
  * each range ("hexaddr:hexlen,...") in address order. The two files line up
  * record for record, for tools/dc-lockstep.py --boot.
  *
+ * --follow-out DIR leads a one-way follow (core/follow.h) from the first frame:
+ * DIR gets seg-N.sta / seg-N.feed, a segment every --follow-every frames, all
+ * of them kept. --poke F:ADDR:HEX writes those bytes at the start of frame F as
+ * the MCP bridge's write_memory does (recorded in the feed). --follow DIR:N
+ * follows from segment N on, into the next segment at each END, feeding the
+ * feed a few hundred bytes at a time; its lines from the join on are the
+ * leader's, and the last line on stderr says how many frame checks held.
+ *
  * --region japan|usa|export powers up in that region (USA by default, as the
  * emulator does); --nowarnskip leaves the Japan warning screen in, ~640 game
  * frames, as MAME does. --peek HEXADDR adds that byte to each line (the mode
  * at 50002A, the sub-mode at 500030), to pair frames with a MAME log.
+ * --peek32 HEXADDR adds that word, signed (Sega Rally's LOD budget at
+ * 20AAC0). --i960-timing table|board charges the i960 MAME's table or the
+ * board's timing (i960_timing.h) whatever the profile says.
+ *
+ * --m2comm-phantom links the comm board (board/m2comm.h) to a second cabinet
+ * in this process that answers with the board's own window, so a linked
+ * game's ring comes up and its packets come back; a split set (vonj) takes
+ * its parent zip from beside the one named. --m2comm-udp is the same phantom
+ * with the two cabinets on either end of a pair of UDP sockets on 127.0.0.1,
+ * their datagrams packed and sent as the room's channel sends them
+ * (src/net/comm_link.h); the link's counts go to stderr at the end.
+ * --room-role host|guest (with one of those) stands in for the room's role
+ * (Pinboard #969): the board boots alone, then net/comm_role.h resets it into
+ * the role -- host MASTER, guest SLAVE, the phantom the other -- through the
+ * same emu_comm_role_pump the emulator runs, and only then plugs it in;
+ * stderr says when, and what the game made of it.
+ * --link-host-hz HZ (with one of those) runs the board on a host called HZ
+ * times a second of virtual time: one frame a call alone, and linked what
+ * core/link_pace.h says is due (Pinboard #978), a master phantom passing on
+ * its own 60 Hz clock; --link-host-jitter US moves each call up to US early
+ * or late, --link-unpaced runs one frame a call linked too. stderr: board
+ * frames per linked second, and how many of the phantom's messages were lost.
  *
  * --model-map F0:F1:FILE decodes every display list of frames F0..F1 as the
  * Dreamcast's renderer does, uncut, and writes each run of 64-byte lines of
@@ -96,6 +128,11 @@
 #include "sound.h"
 #include "input.h"
 #include "registry.h"
+#include "gems.h"
+#include "m2comm_loop.h"
+#ifndef __EMSCRIPTEN__
+#include "comm_link_loop.h"
+#endif
 
 /* --model-map: the 3D decoder's ROM reads come through mdlmap_rom. */
 static const uint8_t *mdlmap_rom(const void *p, uint32_t n);
@@ -125,8 +162,11 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 /* Every sample the board makes, folded in as it is made (on the sound thread). */
 static uint64_t snd_out_hash = FNV0, snd_out_n;
 static FILE *snd_pcm;          /* --pcm FILE */
+static bool snd_replaying;   /* --rewind: frames run a second time are not hashed */
+
 static void snd_out_tap(int16_t l, int16_t r, uint64_t index, void *ud) {
     (void)index; (void)ud;
+    if (snd_replaying) return;
     int16_t lr[2] = { l, r };
     snd_out_hash = fnv(snd_out_hash, lr, sizeof lr);
     if (snd_pcm) fwrite(lr, sizeof lr, 1, snd_pcm);
@@ -169,22 +209,326 @@ static void raw_frame(memory_bus_t *bus) {
  * from one. A loaded run prints what the saving run would have printed after F,
  * line for line, and its sample hash (the last lines) covers the samples after
  * F in both. With --mem the state goes through memory as the libretro core's
- * retro_serialize / retro_unserialize take it (stored, padded to its size),
- * and the file holds that buffer. */
+ * retro_serialize / retro_unserialize take it (rollback.h's flat state, padded
+ * to its size), and the file holds that buffer; a zip state loads that way too.
+ *
+ * --rewind K does what RetroArch's rewind does to the core (Pinboard #585): a
+ * flat state every frame, and at every K-th frame, the first time it is
+ * reached, the state from K frames back loaded and the K frames run again.
+ * Frames are printed and samples hashed only the first time, so the output has
+ * to be the plain run's (the samples with --no-sound-thread, which makes them
+ * inside their own slice). *
+ *
+ * --gems-i960 / --gems-cop / --gems-verify are m2hle's (core/gems.h): Sega's C
+ * from Gems Collection in place of the trapped i960 functions and the COP
+ * firmware, or each trap run both ways. A build without vendor/gems-c logs
+ * that they do nothing. --gems-verify's tallies go to the log at the end. */
+static const char *follow_out, *follow_in;
+static uint32_t    follow_every;
+#define POKE_MAX 16
+static struct { uint32_t frame, addr, n; uint8_t b[64]; } pokes[POKE_MAX];
+static int poke_n;
+
+static bool parse_poke(const char *a) {
+    char hex[129] = {0};
+    if (poke_n >= POKE_MAX || sscanf(a, "%u:%x:%128s", &pokes[poke_n].frame, &pokes[poke_n].addr, hex) != 3)
+        return false;
+    uint32_t n = 0;
+    for (; hex[n * 2] && hex[n * 2 + 1] && n < 64; n++) {
+        char b[3] = { hex[n * 2], hex[n * 2 + 1], 0 };
+        pokes[poke_n].b[n] = (uint8_t)strtoul(b, NULL, 16);
+    }
+    pokes[poke_n++].n = n;
+    return n > 0;
+}
+
+static uint8_t *read_file(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *p = (uint8_t *)malloc(n > 0 ? (size_t)n : 1);
+    if (p && fread(p, 1, (size_t)n, f) != (size_t)n) { free(p); p = NULL; }
+    fclose(f);
+    *len = (size_t)n;
+    return p;
+}
+
+/* The web build's load: the zip read whole, strict by CRC, and a split set's
+ * parent (vonj's von.zip) from the same folder, as the page fetches both. */
+static int load_zip_set(const char *path) {
+    size_t len = 0, plen = 0;
+    uint8_t *zip = read_file(path, &len), *pzip = NULL;
+    if (!zip) { fprintf(stderr, "cannot read %s\n", path); return -1; }
+    rl_mem_zip_set(zip, len, true);
+    const char *parent = g_active_profile->parent_zip_name, *slash = strrchr(path, '/');
+    if (parent && parent[0]) {
+        char ppath[1024];
+        snprintf(ppath, sizeof ppath, "%.*s%s", slash ? (int)(slash - path + 1) : 0, path, parent);
+        if ((pzip = read_file(ppath, &plen)) != NULL) rl_mem_zip_add(pzip, plen);
+    }
+    int rc = g_active_profile->load_fn(&romset, NULL, NULL);
+    rl_mem_zip_clear();
+    free(zip);
+    free(pzip);
+    if (rc != 0) fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names);
+    return rc;
+}
+
+/* The follower's side: one segment's state and feed, the feed handed over a
+ * piece at a time as a page would fetch it. */
+static struct { char dir[900]; uint32_t seg; uint8_t *feed; size_t len, at; uint32_t segs, checks; } fol;
+
+static bool follow_open_seg(emu_thread_ctx_t *emu) {
+    char path[1024];
+    size_t n;
+    snprintf(path, sizeof path, "%s/seg-%u.sta", fol.dir, fol.seg);
+    uint8_t *st = read_file(path, &n);
+    if (!st) return false;
+    fol.checks += g_follow.checks;
+    const char *err = follow_join(emu, st, n);
+    free(st);
+    if (err) { fprintf(stderr, "follow: %s: %s\n", path, err); return false; }
+    free(fol.feed);
+    snprintf(path, sizeof path, "%s/seg-%u.feed", fol.dir, fol.seg);
+    fol.feed = read_file(path, &fol.len);
+    fol.at = 0;
+    fol.segs++;
+    fprintf(stderr, "follow: joined segment %u at frame %u\n", fol.seg, (unsigned)g_emu_frames);
+    return fol.feed != NULL;
+}
+
+/* True when the next slice may run: feed more, or move on to the next segment. */
+static bool follow_next_ready(emu_thread_ctx_t *emu) {
+    for (;;) {
+        if (follow_slice_ready()) return true;
+        if (g_follow.split) return false;
+        if (g_follow.ended) {
+            fol.seg++;
+            if (!follow_open_seg(emu)) return false;
+            continue;
+        }
+        if (fol.at >= fol.len) return false;
+        size_t n = fol.len - fol.at < 333 ? fol.len - fol.at : 333;
+        const char *err = follow_feed(fol.feed + fol.at, n);
+        if (err) { fprintf(stderr, "follow: %s\n", err); return false; }
+        fol.at += n;
+    }
+}
+
+/* --m2comm-phantom: the comm board linked to a second cabinet that sends the
+ * board's own window back (m2comm_loop.h). The game's cabinet role has to say
+ * MASTER (Virtual-On: --poke F:1D00028:01). */
+static bool m2comm_phantom, m2comm_udp;
+
+/* --room-role: the role the room would give this machine (GAME_LINK_ALONE:
+ * none, the phantom plugged in at once). The board's end of the link counts
+ * what the board sends, and when. */
+static game_link_role_t     room_role = GAME_LINK_ALONE;
+static const m2comm_peer_t *room_board_peer;
+static uint32_t room_first_send = UINT32_MAX, room_cn = UINT32_MAX, room_sends, room_early;
+
+static void room_board_send(void *ctx, const uint8_t *msg, uint32_t len) {
+    (void)ctx;
+    if (!room_sends++) room_first_send = g_emu_frames;
+    if (!g_m2comm.enabled) room_early++;   /* before its ROM started the comm board: never */
+    room_board_peer->send(room_board_peer->ctx, msg, len);
+}
+
+static uint32_t room_board_recv(void *ctx, uint8_t *msg, uint32_t cap) {
+    (void)ctx;
+    return room_board_peer->recv(room_board_peer->ctx, msg, cap);
+}
+
+static uint32_t room_board_pending(void *ctx) {
+    (void)ctx;
+    return room_board_peer->pending ? room_board_peer->pending(room_board_peer->ctx) : 0u;
+}
+
+static const m2comm_peer_t room_board = { NULL, room_board_send, room_board_recv, room_board_pending };
+
+/* The phantom on the board's comm link, over UDP if asked (and built for it):
+ * plugged in now, or, with --room-role, at the reset into the role. */
+static void m2comm_phantom_link(void) {
+    if (!m2comm_phantom && !m2comm_udp) return;
+    uint8_t other = room_role == GAME_LINK_SLAVE ? 1 : 2;   /* the phantom's role byte */
+    const m2comm_peer_t *peer = NULL;
+#ifndef __EMSCRIPTEN__
+    if (m2comm_udp && !(peer = comm_udp_phantom_open(other, 0x700u))) {
+        fprintf(stderr, "m2comm-udp: no sockets\n");
+        return;
+    }
+#endif
+    if (!peer) peer = m2comm_phantom_open(other, 0x700u);
+    if (room_role == GAME_LINK_ALONE) { m2comm_set_peer(peer); return; }
+    room_board_peer = peer;
+    comm_role_begin(room_role, &room_board);
+}
+
+/* A board frame: the phantom's own pass if it is the master, and while the
+ * board waits for its role, the emulator's frame-edge reset into it. */
+static bool link_host_on(void);
+
+static void m2comm_phantom_pass(void) {
+#ifndef __EMSCRIPTEN__
+    if (m2comm_udp) comm_udp_phantom_frame();
+    else
+#endif
+    if (m2comm_phantom) m2comm_phantom_frame();
+}
+
+static void m2comm_phantom_frame_edge(emu_thread_ctx_t *ctx) {
+    if (!link_host_on() || !m2comm_linked()) m2comm_phantom_pass();   /* linked: on its own clock */
+    if (comm_role_linked() && g_m2comm.enabled && room_cn == UINT32_MAX) room_cn = g_emu_frames - 1u;
+    emu_comm_role_pump(ctx, NETPLAY_STEP_OFF);
+}
+
+static void m2comm_phantom_report(void) {
+    if (room_role != GAME_LINK_ALONE) {
+        fprintf(stderr, "room role: %s; %s", comm_role_name(room_role),
+                comm_role_linked() ? "" : "never reset into it\n");
+        if (comm_role_linked())
+            fprintf(stderr, "reset into it after %u frames alone (frames count from it); the ROM started its comm "
+                    "board in frame %u, first send in frame %u (%u sends, %u before the start); ring %s, "
+                    "node %u of %u, took %u sent %u\n",
+                    g_comm_role.waited, room_cn, room_first_send, room_sends, room_early,
+                    g_m2comm_link.alive == M2COMM_LINK_UP ? "up" : "down",
+                    g_m2comm_link.id, g_m2comm_link.count, g_m2comm_link.taken, g_m2comm_link.sent);
+        if (!strncmp(g_active_profile->id, "von", 3))
+            fprintf(stderr, "vonj: role byte %u, link_ID %u, 503A08 %u, net_flag %u, packets in (cRecn+4) %u\n",
+                    mem_read8(&bus, 0x01D00028u), mem_read8(&bus, 0x005770B1u), mem_read32(&bus, 0x00503A08u),
+                    mem_read8(&bus, 0x005770B0u), mem_read32(&bus, 0x005024F4u));
+    }
+#ifndef __EMSCRIPTEN__
+    if (!m2comm_udp) return;
+    const comm_link_t *b = &g_comm_udp_board.link, *p = &g_comm_udp_phantom.link;
+    fprintf(stderr, "m2comm-udp: board sent %u took %u (stale %u torn %u too big %u overflow %u), "
+            "largest packed %u B, %u datagrams %u B; phantom sent %u took %u\n",
+            b->sent, b->taken, b->stale, b->torn, b->too_big, b->overflow, b->packed_peak,
+            g_comm_udp_board.wire_dgrams, g_comm_udp_board.wire_bytes, p->sent, p->taken);
+#endif
+}
+
+/* --link-host-hz HZ: the board on a host that is called HZ times a second of
+ * virtual time (retro_run, the page's frame callback), each call up to
+ * --link-host-jitter US early or late. Alone it runs one frame a call, as
+ * the frontends do; linked, the frames core/link_pace.h says are due
+ * (Pinboard #978), and a master phantom passes on its own 60 Hz clock, a
+ * cabinet whose host keeps time. --link-unpaced runs one a call linked too,
+ * as before #978. stderr: the board's frames per linked second, and what the
+ * link lost. */
+static double   link_host_hz;
+static int32_t  link_host_jitter_us;
+static bool     link_unpaced;
+static uint64_t link_host_call;            /* calls so far */
+static int64_t  link_host_now;             /* this call's time, us */
+static uint32_t link_host_in_call;         /* frames run in it */
+static int64_t  link_phantom_next;         /* the phantom master's next pass */
+static uint32_t link_rng = 0x9E3779B9u;
+static link_pace_t link_host_pace;
+static struct {
+    int64_t  t0, t1;
+    uint64_t frames, calls, multi;
+    uint32_t most, f0;
+} link_stat = { -1, 0, 0, 0, 0, 0, 0 };
+
+static bool link_host_on(void) { return link_host_hz > 0.0; }
+
+static void link_host__next_call(void) {
+    if (link_host_in_call > link_stat.most) link_stat.most = link_host_in_call;
+    if (link_host_in_call > 1) link_stat.multi++;
+    link_host_call++;
+    link_host_in_call = 0;
+    int32_t j = 0;
+    if (link_host_jitter_us) {
+        link_rng = link_rng * 1664525u + 1013904223u;
+        j = (int32_t)((link_rng >> 8) % (uint32_t)(2 * link_host_jitter_us + 1)) - link_host_jitter_us;
+    }
+    link_host_now = (int64_t)((double)link_host_call * 1e6 / link_host_hz) + j;
+    if (m2comm_linked() && link_stat.t0 >= 0) link_stat.calls++;
+}
+
+/* Before a board frame: the host call it runs in. */
+static void link_host_frame_start(void) {
+    if (!m2comm_linked()) {
+        link_pace_stop(&link_host_pace);
+        link_host__next_call();
+        return;
+    }
+    if (link_stat.t0 < 0) {   /* the link came up: its clock starts at this call */
+        link_host__next_call();
+        link_stat.t0 = link_host_now;
+        link_stat.f0 = g_emu_frames;
+        link_phantom_next = link_host_now;
+    }
+    if (link_unpaced) { if (link_host_in_call) link_host__next_call(); }
+    else {
+        link_pace_owed(&link_host_pace, link_host_now);
+        while (!link_pace_due(&link_host_pace, link_host_now)) {
+            link_host__next_call();
+            link_pace_owed(&link_host_pace, link_host_now);
+        }
+    }
+    for (; link_phantom_next <= link_host_now; link_phantom_next += LINK_PACE_FRAME_US) m2comm_phantom_pass();
+    link_host_in_call++;
+}
+
+/* After a board frame. */
+static void link_host_frame_end(void) {
+    if (!m2comm_linked() || link_stat.t0 < 0) return;
+    if (!link_unpaced) link_pace_ran(&link_host_pace, m2comm_backlog());
+    link_stat.frames++;
+    link_stat.t1 = link_host_now;
+}
+
+static void link_host_report(void) {
+    if (!link_host_on()) return;
+    if (link_stat.t0 < 0) { fprintf(stderr, "link host: %.2f Hz, never linked\n", link_host_hz); return; }
+    double secs = (double)(link_stat.t1 - link_stat.t0) / 1e6;
+    uint32_t lost = g_m2comm_board_in.dropped;
+#ifndef __EMSCRIPTEN__
+    if (m2comm_udp) lost = g_comm_udp_board.link.overflow;
+#endif
+    fprintf(stderr, "link host: %.2f Hz (+-%d us)%s; linked from frame %u, %.2f s: %llu board frames, "
+            "%.2f a second, at most %u a call (%llu calls with two or more), %llu dropped, %u trims; "
+            "the board lost %u of the phantom's messages, took %u\n",
+            link_host_hz, link_host_jitter_us, link_unpaced ? ", unpaced" : "", link_stat.f0, secs,
+            (unsigned long long)link_stat.frames, secs > 0 ? (double)link_stat.frames / secs : 0.0,
+            link_stat.most, (unsigned long long)link_stat.multi, (unsigned long long)link_host_pace.dropped,
+            link_host_pace.trims, lost, g_m2comm_link.taken);
+}
+
+/* main_web.c web_install_board, which is also what a netplay reset runs (and
+ * net/comm_role.h's, through the reset hook). */
+static void install_board(void *ctx) {
+    (void)ctx;
+    g_active_profile->install_fn(&romset, &cpu, &bus);
+    if (g_gems_i960 || g_gems_cop || g_gems_verify) gems_apply(profile_rom_set(g_active_profile));
+    irqt_reset();
+    if (g_active_profile->quirks.enable_68k_sound) {
+        sound_reset();
+        sound_attach(&bus);
+        if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
+        if (romset.samples && romset.samples_size > 0)   sound_load_samples(romset.samples, (uint32_t)romset.samples_size);
+    }
+    input_reset();
+    input_attach(&bus);
+    emu_board_reset_state();
+}
+
 static const char *load_path;
 static uint32_t    save_frame;
 static char        save_path[1024];
 static bool        state_mem;
 
 static const char *mem_state_save(emu_thread_ctx_t *emu, const char *path) {
-    size_t size = 0;
-    const char *err = emu_state_save_mem(emu, NULL, 0, &size);
-    if (err) return err;
-    size += 4096;   /* as main_libretro.c's LR_STATE_SLACK */
+    size_t len = emu_state_flat_size(emu);
+    size_t size = len + 4096;   /* as main_libretro.c's LR_STATE_SLACK */
     uint8_t *buf = (uint8_t *)malloc(size);
     if (!buf) return "out of memory";
-    size_t len = 0;
-    err = emu_state_save_mem(emu, buf, size, &len);
+    savestate_rom_t rom = savestate_rom_id(emu->bus);
+    const char *err = emu_state_flat_save(emu, buf, &rom);
     if (!err) {
         memset(buf + len, 0, size - len);
         FILE *f = fopen(path, "wb");
@@ -205,9 +549,107 @@ static const char *mem_state_load(emu_thread_ctx_t *emu, const char *path) {
     const char *err = NULL;
     if (!buf || size <= 0 || fread(buf, 1, (size_t)size, f) != (size_t)size) err = "cannot read the file";
     fclose(f);
-    if (!err) err = emu_state_load_mem(emu, buf, (size_t)size);
+    if (!err && rollback_flat_is(buf, (size_t)size)) {
+        savestate_rom_t rom = savestate_rom_id(emu->bus);
+        (void)emu_state_flat_size(emu);
+        err = emu_state_flat_load(emu, buf, (size_t)size, &rom);
+    } else if (!err) err = emu_state_load_mem(emu, buf, (size_t)size);
     free(buf);
     return err;
+}
+
+/* --rewind K: a ring of K + 1 flat states, one a frame. */
+static uint32_t rewind_k;
+static struct {
+    uint8_t        *buf;
+    size_t          size;
+    savestate_rom_t rom;
+    uint32_t        top;       /* the furthest frame reached */
+    uint32_t        jump_to;   /* a frame to go back to before the next one, or 0 */
+    uint32_t        loads;
+    int64_t         save_us, load_us;
+    uint32_t        saves;
+    uint64_t        moved[ROLLBACK_PARTS_MAX];   /* --rewind-census: 64-byte lines that changed */
+    uint32_t        compared;
+} rw;
+static bool rewind_census;
+
+/* What RetroArch's rewind sees of a frame: per part, the 64-byte lines that
+ * differ from the frame before. */
+static void rewind_count(const uint8_t *now, const uint8_t *prev) {
+    size_t off = ROLLBACK_FLAT_HEAD;
+    for (int i = 0; i < g_rollback.n; i++) {
+        size_t n = g_rollback.part[i].n;
+        for (size_t o = 0; o < n; o += 64) {
+            size_t len = n - o < 64 ? n - o : 64;
+            if (memcmp(now + off + o, prev + off + o, len)) rw.moved[i]++;
+        }
+        off += n;
+    }
+    rw.compared++;
+}
+
+static bool rewind_init(emu_thread_ctx_t *emu) {
+    rw.size = emu_state_flat_size(emu);
+    rw.rom  = savestate_rom_id(emu->bus);
+    rw.buf  = (uint8_t *)malloc(rw.size * (rewind_k + 1));
+    return rw.buf != NULL;
+}
+
+/* After frame f: keep its state, and go back K frames before the next one if
+ * f is a K-th frame reached for the first time. Returns whether f is new. */
+static bool rewind_frame(emu_thread_ctx_t *emu, uint32_t f) {
+    int64_t t0 = emu_now_us();
+    const char *err = emu_state_flat_save(emu, rw.buf + rw.size * (f % (rewind_k + 1)), &rw.rom);
+    rw.save_us += emu_now_us() - t0;
+    rw.saves++;
+    if (err) { fprintf(stderr, "--rewind: %s\n", err); exit(2); }
+    if (rewind_census && f > 1)
+        rewind_count(rw.buf + rw.size * (f % (rewind_k + 1)), rw.buf + rw.size * ((f - 1) % (rewind_k + 1)));
+    bool fresh = f > rw.top;
+    if (fresh) rw.top = f;
+    if (fresh && f > rewind_k && f % rewind_k == 0) rw.jump_to = f - rewind_k;
+    return fresh;
+}
+
+static void rewind_jump(emu_thread_ctx_t *emu) {
+    if (!rw.jump_to) return;
+    int64_t t0 = emu_now_us();
+    const char *err = emu_state_flat_load(emu, rw.buf + rw.size * (rw.jump_to % (rewind_k + 1)), rw.size, &rw.rom);
+    rw.load_us += emu_now_us() - t0;
+    rw.loads++;
+    if (err) { fprintf(stderr, "--rewind: %s\n", err); exit(2); }
+    if (g_emu_frames != rw.jump_to) { fprintf(stderr, "--rewind: loaded frame %u for %u\n", g_emu_frames, rw.jump_to); exit(2); }
+    rw.jump_to = 0;
+}
+
+/* The top of each slice: goes back if a jump is due, and says whether the
+ * frame about to run has run before. True when it went back. */
+static bool rewind_slice(emu_thread_ctx_t *emu) {
+    bool back = rewind_k && rw.jump_to;
+    if (back) rewind_jump(emu);
+    snd_replaying = rewind_k && g_emu_frames < rw.top;
+    return back;
+}
+
+/* "--rewind K": K + 1 states of ~16 MB each are kept, so K is capped. */
+static bool rewind_arg(const char *v) {
+    rewind_k = (uint32_t)atoi(v);
+    if (rewind_k >= 1 && rewind_k <= 60) return true;
+    fprintf(stderr, "--rewind K: 1..60\n");
+    return false;
+}
+
+static void rewind_report(void) {
+    if (!rewind_k) return;
+    fprintf(stderr, "rewind: %u states of %zu bytes, %.0f us a save; %u loads, %.0f us a load\n",
+            rw.saves, rw.size, rw.saves ? (double)rw.save_us / rw.saves : 0.0,
+            rw.loads, rw.loads ? (double)rw.load_us / rw.loads : 0.0);
+    if (!rewind_census || !rw.compared) return;
+    fprintf(stderr, "%-14s %9s %12s\n", "part", "bytes", "lines/frame");
+    for (int i = 0; i < g_rollback.n; i++)
+        fprintf(stderr, "%-14s %9zu %12.1f\n", g_rollback.part[i].name, g_rollback.part[i].n,
+                (double)rw.moved[i] / rw.compared);
 }
 
 static uint32_t keys_mask(const char *p, const char *end) {
@@ -386,16 +828,29 @@ static const uint8_t *mdlmap_rom(const void *p, uint32_t n) {
     return b;
 }
 
+/* The display list walked as game_frame.h walks it, on the profile's model
+ * table (the Dreamcast's recorders below). */
+static bool dc_scan_list(geo3d_state_t *geo, const uint32_t *snap, const model_table_t *table) {
+    const geo3d_rom_t rom = { romset.main_data, romset.main_data_size, table };
+    return geo3d_scan_geo_list(geo, &(const geo3d_list_t){ snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart },
+                               (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE), &rom);
+}
+
+/* Entry idx of the model table, as the board reads it; false when it is
+ * past the table or holds no mesh. */
+static bool dc_model_entry(const model_table_t *table, int32_t idx, model_entry_t *e) {
+    return idx >= 0 && model_entry_read(table, romset.main_data, romset.main_data_size, (uint32_t)idx, e) && e->mesh_ptr;
+}
+
 static void mdlmap_frame(void) {
     static geo3d_state_t geo;
     const game_quirks_t *q = &g_active_profile->quirks;
+    const model_table_t table = profile_model_table(q);
     if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
     for (int r = 0; r < 2; r++)
         if (!mdlmap_first[r]) mdlmap_first[r] = calloc((r ? romset.textures_size : romset.polygons_size) / MDLMAP_LINE + 1, 4);
     const uint32_t *snap = g_geodl_snap;
-    if (!geo3d_scan_geo_list(&geo, snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
-                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
-                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    if (!dc_scan_list(&geo, snap, &table)) return;
     g_geo_rs = geodl_raster_for(snap);
     g_geo3d_palram = bus.palette;
     g_geo3d_palram_size = PALETTE_SIZE;
@@ -405,7 +860,7 @@ static void mdlmap_frame(void) {
         .main_data = romset.main_data, .main_data_size = romset.main_data_size,
         .polygons  = romset.polygons,  .polygons_size  = romset.polygons_size,
         .materials = romset.textures,  .materials_size = romset.textures_size,
-        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+        .table = table,
         .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add,
     };
     for (int k = 0; k < geo.captured_count; k++) {
@@ -438,18 +893,15 @@ static uint32_t  spkey_n;
 static void spkey_frame(void) {
     static geo3d_state_t geo;
     const game_quirks_t *q = &g_active_profile->quirks;
+    const model_table_t table = profile_model_table(q);
     if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
     if (!spkey) spkey = calloc(SPKEY_SLOTS, sizeof *spkey);
-    if (!geo3d_scan_geo_list(&geo, g_geodl_snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
-                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
-                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    if (!dc_scan_list(&geo, g_geodl_snap, &table)) return;
     for (int k = 0; k < geo.captured_count; k++) {
         const captured_model_t *cm = &geo.captured[k];
-        if (cm->direct_len || cm->model_idx < 0 || (uint32_t)cm->model_idx >= q->model_table_count) continue;
-        uint32_t toff = q->model_table_offset + (uint32_t)cm->model_idx * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE > romset.main_data_size) continue;
-        if (!read_u32_le(romset.main_data + toff + 8)) continue;
-        uint32_t mat = read_u32_le(romset.main_data + toff + 4), uv = read_u32_le(romset.main_data + toff + 0);
+        model_entry_t ent;
+        if (cm->direct_len || !dc_model_entry(&table, cm->model_idx, &ent)) continue;
+        uint32_t mat = ent.mat_ptr, uv = ent.uv_ptr;
         if (cm->tha != 0xFFFFFFFFu) mat = cm->tha;
         if (cm->tpa != 0xFFFFFFFFu) uv = cm->tpa;
         if ((mat && (mat & 0x800000u)) || (uv && (uv & 0x800000u))) continue;   /* texture RAM: decoded every time */
@@ -586,18 +1038,14 @@ static void txp_frame(void) {
     static geo3d_state_t geo;
     static uint8_t blob[4u << 20], cut[32768];
     const game_quirks_t *q = &g_active_profile->quirks;
+    const model_table_t table = profile_model_table(q);
     if (!g_geodl_snap_ready || !romset.main_data || !romset.polygons) return;
-    if (!geo3d_scan_geo_list(&geo, g_geodl_snap, BUFF_RAM_SIZE / 4, g_geodl_snap_rstart,
-                             (int16_t)mem_read16(&bus, H_SYNC_BASE), (int16_t)mem_read16(&bus, V_SYNC_BASE),
-                             romset.main_data, romset.main_data_size, q->model_table_offset, q->model_table_count)) return;
+    if (!dc_scan_list(&geo, g_geodl_snap, &table)) return;
     for (int k = 0; k < geo.captured_count; k++) {
         const captured_model_t *cm = &geo.captured[k];
-        if (cm->direct_len || cm->model_idx < 0 || (uint32_t)cm->model_idx >= q->model_table_count) continue;
-        uint32_t toff = q->model_table_offset + (uint32_t)cm->model_idx * MODEL_ENTRY_SIZE;
-        if ((size_t)toff + MODEL_ENTRY_SIZE > romset.main_data_size) continue;
-        uint32_t raw = read_u32_le(romset.main_data + toff + 8);
-        if (!raw) continue;
-        uint32_t mat = read_u32_le(romset.main_data + toff + 4), uv = read_u32_le(romset.main_data + toff + 0);
+        model_entry_t ent;
+        if (cm->direct_len || !dc_model_entry(&table, cm->model_idx, &ent)) continue;
+        uint32_t raw = ent.mesh_ptr, mat = ent.mat_ptr, uv = ent.uv_ptr;
         if (cm->tha != 0xFFFFFFFFu) mat = cm->tha;
         if (cm->tpa != 0xFFFFFFFFu) uv = cm->tpa;
         if ((mat && (mat & 0x800000u)) || (uv && (uv & 0x800000u))) continue;   /* texture RAM: not in the strip pack */
@@ -613,7 +1061,7 @@ static void txp_frame(void) {
                                 .md = { .polygons = romset.polygons, .materials = romset.textures,
                                         .main_data = romset.main_data,
                                         .polygons_size = romset.polygons_size, .materials_size = romset.textures_size,
-                                        .table_off = q->model_table_offset, .table_count = q->model_table_count,
+                                        .table = table,
                                         .mesh_ptr_subtract = q->mesh_ptr_subtract, .mesh_ptr_add = q->mesh_ptr_add } };
             if (geo3d_mesh_build(&m, raw * 4u - q->mesh_ptr_subtract + q->mesh_ptr_add, mat != 0, uv != 0) &&
                 dcs_blob(&m, blob, sizeof blob)) {
@@ -989,11 +1437,11 @@ static int load_rom_dir(const char *dir) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip, a folder of region images, or the PS3 stf_rom folder> [--frames N] [--script S] [--from F] [--out FILE] [--profile ID] [--save-at F:FILE] [--load FILE] [--mem]\n");
+        fprintf(stderr, "usage: det_digest <merged sfight zip, a folder of region images, or the PS3 stf_rom folder> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem] [--profile ID] [--gems-i960] [--gems-cop] [--gems-verify]\n");
         return 2;
     }
     uint32_t frames = 3600, from = 0;
-    uint32_t peek_addr = 0;
+    uint32_t peek_addr = 0, peek32_addr = 0;
     bool frames_given = false, sound_cols = false, cpu_cols = false;
     const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL, *profile_id = "sfight";
     for (int i = 2; i < argc; i++) {
@@ -1008,11 +1456,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
         else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
         else if (!strcmp(argv[i], "--spin-i960"))               g_spin_skip = 0;
+        else if (!strcmp(argv[i], "--i960-timing") && i + 1 < argc)
+            g_i960_timing_force = !strcmp(argv[++i], "board") ? 1 : !strcmp(argv[i], "table") ? 0 : -1;
         else if (!strcmp(argv[i], "--live-timers"))             ;   /* always on now */
         else if (!strcmp(argv[i], "--nowarnskip"))              g_warning_skip = 0;
         else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--region") && i + 1 < argc) { const char *r = argv[++i]; g_region = !strcmp(r, "japan") ? GAME_REGION_JAPAN : !strcmp(r, "export") ? GAME_REGION_EXPORT : GAME_REGION_USA; }
         else if (!strcmp(argv[i], "--peek")   && i + 1 < argc) peek_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
+        else if (!strcmp(argv[i], "--peek32") && i + 1 < argc) peek32_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
 #if I960_BLOCKS
         else if (!strcmp(argv[i], "--census") && i + 1 < argc) {
@@ -1083,7 +1534,31 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--follow-out")   && i + 1 < argc) follow_out = argv[++i];
+        else if (!strcmp(argv[i], "--follow-every") && i + 1 < argc) follow_every = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--follow") && i + 1 < argc) follow_in = argv[++i];
+        else if (!strcmp(argv[i], "--poke") && i + 1 < argc) {
+            if (!parse_poke(argv[++i])) { fprintf(stderr, "--poke F:ADDR:HEX\n"); return 2; }
+        }
+        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
         else if (!strcmp(argv[i], "--mem")) state_mem = true;
+        else if (!strcmp(argv[i], "--m2comm-phantom")) m2comm_phantom = true;
+        else if (!strcmp(argv[i], "--m2comm-udp")) m2comm_udp = true;
+        else if (!strcmp(argv[i], "--link-host-hz") && i + 1 < argc) link_host_hz = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--link-host-jitter") && i + 1 < argc) link_host_jitter_us = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--link-unpaced")) link_unpaced = true;
+        else if (!strcmp(argv[i], "--room-role") && i + 1 < argc) {
+            const char *r = argv[++i];
+            room_role = !strcmp(r, "host") ? GAME_LINK_MASTER : !strcmp(r, "guest") ? GAME_LINK_SLAVE : GAME_LINK_ALONE;
+            if (room_role == GAME_LINK_ALONE) { fprintf(stderr, "--room-role host|guest\n"); return 2; }
+        }
+        else if (!strcmp(argv[i], "--gems-i960"))   g_gems_i960 = true;
+        else if (!strcmp(argv[i], "--gems-cop"))    g_gems_cop = true;
+        else if (!strcmp(argv[i], "--gems-verify")) g_gems_verify = true;
+        else if (!strcmp(argv[i], "--rewind-census")) rewind_census = true;
+        else if (!strcmp(argv[i], "--rewind") && i + 1 < argc) {
+            if (!rewind_arg(argv[++i])) return 2;
+        }
         else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
             if (sscanf(argv[++i], "%u:%1023s", &save_frame, save_path) != 2) {
                 fprintf(stderr, "--save-at F:FILE\n");
@@ -1097,6 +1572,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
             g_cop_tap = cop_tap;
+            g_tgp_tap = cop_tap;
         }
     }
 
@@ -1128,35 +1604,17 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ROM load from %s failed\n", argv[1]);
             return 2;
         }
-    } else {
-        FILE *f = fopen(argv[1], "rb");
-        if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        uint8_t *zip = (uint8_t *)malloc((size_t)len);
-        if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", argv[1]); return 2; }
-        fclose(f);
-        rl_mem_zip_set(zip, (size_t)len, true);
-        int rc = g_active_profile->load_fn(&romset, NULL, NULL);
-        rl_mem_zip_clear();
-        free(zip);
-        if (rc != 0) { fprintf(stderr, "ROM load failed; missing: %s\n", g_rl_mem_zip.missing_names); return 2; }
+    } else if (load_zip_set(argv[1]) != 0) {
+        return 2;
     }
 
-    /* main_web.c web_install_board, which is also what a netplay reset runs. */
-    g_active_profile->install_fn(&romset, &cpu, &bus);
-    if (g_gems_i960 || g_gems_cop) gems_apply(profile_rom_set(g_active_profile));
-    irqt_reset();
-    if (g_active_profile->quirks.enable_68k_sound) {
-        sound_reset();
-        sound_attach(&bus);
-        if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
-        if (romset.samples && romset.samples_size > 0)   sound_load_samples(romset.samples, (uint32_t)romset.samples_size);
+    if (room_role != GAME_LINK_ALONE && !m2comm_phantom && !m2comm_udp) {
+        fprintf(stderr, "--room-role needs --m2comm-phantom or --m2comm-udp\n");
+        return 2;
     }
-    input_reset();
-    input_attach(&bus);
-    emu_board_reset_state();
+    install_board(NULL);
+    netplay_set_reset_hook(install_board, NULL);
+    m2comm_phantom_link();
     emu_ctx_init(&emu, &cpu, &bus);
     emu_run(&emu);
     if (raw_out) { raw_bus = &bus; raw_cpu = &cpu; g_game_frame_edge_cb = raw_frame; }
@@ -1172,14 +1630,37 @@ int main(int argc, char **argv) {
 
     FILE *out = out_path ? fopen(out_path, "wb") : stdout;
     if (!out) { fprintf(stderr, "cannot write %s\n", out_path); return 2; }
+    if (follow_out) {
+        const char *err = follow_lead_start(follow_out, follow_every ? follow_every : 1000000000u);
+        if (err) { fprintf(stderr, "--follow-out %s: %s\n", follow_out, err); return 2; }
+        g_follow_lead.keep = 0;
+    }
+    if (follow_in) {
+        const char *c = strrchr(follow_in, ':');
+        if (!c) { fprintf(stderr, "--follow DIR:SEG\n"); return 2; }
+        snprintf(fol.dir, sizeof fol.dir, "%.*s", (int)(c - follow_in), follow_in);
+        fol.seg = (uint32_t)atoi(c + 1);
+        if (!follow_open_seg(&emu)) { fprintf(stderr, "--follow: no segment %u in %s\n", fol.seg, fol.dir); return 2; }
+    }
 
+    if (rewind_k && !rewind_init(&emu)) { fprintf(stderr, "--rewind: out of memory\n"); return 2; }
     int at = 0;
+    bool frame_edge = true;
     uint64_t slices = 0;
     uint32_t mismatches = 0, first_mismatch = UINT32_MAX;
     while (g_emu_frames < frames) {
+        if (rewind_slice(&emu)) at = 0;   /* the script again from its start, up to the frame gone back to */
         /* Inputs change only on a frame boundary, as the lockstep's do. */
         while (at < script_n && script[at].frame <= g_emu_frames) g_input.held = script[at++].held;
         if (in_n && g_emu_frames < in_n) g_input.held = words_mask(in_w0[g_emu_frames], in_w1[g_emu_frames]);
+        for (int p = 0; p < poke_n; p++) {
+            if (pokes[p].frame != g_emu_frames || !pokes[p].n) continue;
+            follow_bus_write(&bus, pokes[p].addr, false, pokes[p].b, pokes[p].n);
+            follow_lead_write(pokes[p].addr, false, pokes[p].b, pokes[p].n);
+            pokes[p].n = 0;
+        }
+        if (follow_in && !follow_next_ready(&emu)) break;
+        if (frame_edge && link_host_on()) link_host_frame_start();
 #if I960_BLOCKS
         if (census_out && g_emu_frames + 1 >= census_from && g_emu_frames + 1 <= census_to) census_slice(&emu);
         else
@@ -1190,6 +1671,9 @@ int main(int argc, char **argv) {
         else                                              emu_slice_body(&emu);
         emu_slice_result_t r = emu_slice_finish(&emu);
         slices++;
+        frame_edge = r == EMU_SLICE_FRAME;
+        if (r == EMU_SLICE_FRAME && link_host_on()) link_host_frame_end();
+        if (r == EMU_SLICE_FRAME) m2comm_phantom_frame_edge(&emu);
         if (r == EMU_SLICE_STOPPED) {
             fprintf(stderr, "board stopped at frame %u, IP 0x%08X\n", (unsigned)g_emu_frames, cpu.sfr.ip);
             break;
@@ -1215,6 +1699,7 @@ int main(int argc, char **argv) {
             snd_out_hash = FNV0; snd_out_n = 0;
             fprintf(stderr, "saved %s at frame %u\n", save_path, (unsigned)g_emu_frames);
         }
+        if (r == EMU_SLICE_FRAME && rewind_k && !rewind_frame(&emu, g_emu_frames)) continue;
         if (r != EMU_SLICE_FRAME || g_emu_frames < from) continue;
         uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
         uint64_t ram  = fnv(fnv(FNV0, bus.ram, RAM_SIZE), bus.ram2, RAM2_SIZE);
@@ -1235,10 +1720,24 @@ int main(int argc, char **argv) {
                     (unsigned long long)g_sound.out_total);
         }
         if (peek_addr) fprintf(out, " %02x", mem_read8(&bus, peek_addr));
+        if (peek32_addr) fprintf(out, " %d", (int32_t)mem_read32(&bus, peek32_addr));
         fputc('\n', out);
     }
     if (out != stdout) fclose(out);
     gems_verify_report();
+    if (follow_out) {
+        fprintf(stderr, "follow: led %u segments, the last join point took %u ms\n", g_follow_lead.seg, g_follow_lead.join_ms);
+        follow_lead_stop();
+    }
+    if (follow_in) {
+        fprintf(stderr, "follow: %u segments, %u frame checks held%s%s%s\n", fol.segs, fol.checks + g_follow.checks,
+                g_follow.split ? "; SPLIT: " : "", g_follow.split ? g_follow.why : "",
+                g_follow.ended ? "; the feed ended" : "");
+        if (g_follow.split) return 1;
+    }
+    rewind_report();
+    m2comm_phantom_report();
+    link_host_report();
     fprintf(stderr, "texload: %llu rows in C\n", (unsigned long long)g_texload_rows);
     fprintf(stderr, "spin: %llu idle iterations skipped\n", (unsigned long long)g_spin_iters);
     if (cop_out) fclose(cop_out);
@@ -1265,6 +1764,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "sound: %s; i960 commands %u, bytes that waited a slice %llu, midi drops %u\n",
             g_shle.on ? "driver in C (--sound-hle)" : "68000", g_sound.code_n,
             (unsigned long long)g_sound.midi_holds, g_sound.scsp.mi_drops);
+    gems_verify_report();
     if (in_n) {
         if (mismatches) fprintf(stderr, "input log: %u of %u frames' checks differ, the first at session frame %u\n",
                                 (unsigned)mismatches, (unsigned)g_emu_frames, (unsigned)first_mismatch);

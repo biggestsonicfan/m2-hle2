@@ -24,7 +24,7 @@ vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb` is enough to b
 That is the default frontend, the ImGui debugger (D3D11 on Windows, GL core on Linux, Metal on
 macOS). `-DM2HLE_FRONTEND=sdl3` builds a fullscreen SDL3 / GLES 3 host with no ImGui for
 handhelds (see [packaging/rocknix/](packaging/rocknix/)), and `-DM2HLE_FRONTEND=web` the
-Emscripten browser build that deploys to play.sonicthefighte.rs, with online play, remappable keys, gamepads and
+Emscripten browser build that deploys to arcade.sonicthefighte.rs, with online play, remappable keys, gamepads and
 touch buttons (see [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md)).
 `-DM2HLE_FRONTEND=libretro` builds a RetroArch core (see [packaging/libretro/](packaging/libretro/)).
 These three need only `vendor/sokol`, `vendor/miniz` and `vendor/stb`.
@@ -83,12 +83,12 @@ the next game cheaper instead of being spent on a single ROM set.
 | SCSP audio | Register-level chip (slots, timers, DSP) run one sample at a time in lockstep with the 68000; host output via sokol_audio |
 | Input | Interrupt-driven, through the real 315-5649 I/O ports; optional button macros (`--macros`, or `--macro a=b1+b2` per key; `--pad-map north=b1+b2` on the handheld; the Controls panel in the browser) |
 | Debug UI | CPU / memory / bus stats / COP / 3D / object viewer / 68K / breakpoint windows |
-| Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
+| Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); GGPO rollback through its own lobby (desktop, web and libretro builds); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
 | PS3-release menus | The Console profile's title, main menu, Arcade / Offline Versus settings and online lobby, redrawn after the PS3 release (libretro core and web build) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
-| Picture filters | Lost Judgment's CRT scanlines, as YAMP ports them (every build), or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--crt`, `--shader`; the browser's Picture tab |
+| Picture filters | The Arcade switch (a real board's tone curve, ghosting, noise and 4:3 shape; every build), and over it Lost Judgment's CRT scanlines, as YAMP ports them, or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--arcade`, `--crt`, `--shader`; the browser's Picture tab. Depth per pixel (`--pixel-depth`, off by default) draws each pixel at its own depth instead of the board's one sort key a polygon |
 
 Game profiles live in [src/profiles/](src/profiles/): `sfight_console`, `sfight`, `fvipers`,
 `m2snake` (the web build carries the two Sonic the Fighters profiles only).
@@ -252,10 +252,71 @@ RPCN through a WebSocket gateway on the RPCN host ([web/gateway/](web/gateway/))
 [yampnet](https://github.com/biggestsonicfan/YAMPnet), the netplay plugin for YAMP, which
 worked the RPCN protocol out first.
 
+### Rollback netplay (GGPO)
+
+Every build can also play with rollback instead of lockstep, through
+[GGPO](https://github.com/pond3r/ggpo): the board runs on at once, guessing the other player's
+input, and rewinds and runs again when the real input differs. Matches are found on the GGPO
+lobby, `ggpo.sonicthefighte.rs`: sign in, join the game's
+channel and challenge a player. The match goes peer to peer when the two machines can reach each
+other, and through the lobby's relay when they cannot.
+
+```
+m2hle --rom sfight.zip --ggpo-lobby default --ggpo-user NAME --ggpo-pass PASSWORD --ggpo-challenge FRIEND
+m2hle --rom sfight.zip --ggpo-lobby default --ggpo-user FRIEND --ggpo-pass PASSWORD --ggpo-accept NAME
+```
+
+`--ggpo-signup` creates the account first, and `--ggpo-delay N` sets the local input delay
+(2 frames by default). `--ggpo-remote IP:PORT --ggpo-player 1|2 --ggpo-local PORT` plays straight
+to an address with no lobby. Over the MCP bridge, `{"cmd":"ggpo_lobby"}` reports and drives the
+lobby.
+
+On the website, the menu's GGPO lobby button opens a panel to sign in (or sign up, or with
+Twitch), see who is in the game's channel, challenge them and chat. A browser has no UDP, so its
+matches always go through the lobby's server; a browser plays desktop players and other browsers
+alike.
+
+In RetroArch, set the core option Online play to GGPO and fill `m2hle-ggpo.cfg` in the saves folder
+(written on the first load): `user=` / `pass=` (no user signs in with Twitch and writes the account
+back), `challenge=NAME` and `accept=NAME|any`, and optionally `url=`. In the game, L + R lists who is
+free to challenge.
+
+## Game scripts (Lua)
+
+M2emulator's scripts run here too, in Lua 5.5: put `<set>.lua` (`sfight.lua`, `vonj.lua`, ...)
+in a `scripts` folder in the working directory or beside the executable, or name another with
+`--scripts DIR` (`--no-scripts` turns them off). `Init`, `Reset`, `Frame`, `PostDraw`, `End`, the
+`Options` table (the **Script** menu), `I960_Read*/Write*`, `Romset_Read*/Patch*`, `Video_DrawText`
+and `Input_IsKeyPressed` work as they did there, and Lua 5.5's own `& | ~ << >>` work beside
+`AND`/`OR`/`SHL`. On the web the drawer's **Cheats** tab is the script: type it in, press Run, and
+it is kept in that browser for the game. A script never runs during an online match, a replay
+or a follow; its ROM patches come off and it starts again when that ends.
+[docs/invariants/scripts.md](docs/invariants/scripts.md) has the details.
+
 ## Picture filters
 
 A filter goes over the game's 4:3 picture only, never over the rest of the window. Filters draw
 the picture a second time every frame, so they can cost frame rate on a weak GPU.
+
+The **Arcade** is a switch of its own, not one of the filters: it makes the game's picture a
+real Model 2B board's first, and whichever filter is chosen then goes over it (#646). Each
+colour goes through c^0.76, which is what the owner's board does to this emulator's picture
+(measured from its captured video against the same frames here). The colours and their balance
+stay as they are; the mid-tones get brighter. It also has the board's signal and monitor (#643):
+the ghost every edge trails to its right (+7%, then a ripple of 2-3% fading over ~25 pixels), the
+capture's noise (0.5-1.5% of white, new every frame), and the picture shown 4:3, as the cabinet's
+monitor shows it, instead of with square pixels. Every build.
+
+**Depth per pixel** is another switch, off by default, and it is not the board (#668). The board
+sorts each polygon by one key, so where faces cross, the whole of one wins: in the attract
+intro the Tornado's wing hides the backs of Sonic's shoes, on the real board as here. With the
+switch each pixel is drawn at its own depth, so the shoes come in front of the wing. It works
+both ways: a part the board shows only through its sort is hidden too (the dark wedge at the
+wing's tip in the same shot lies behind the wing). On a GLES device (the handhelds) it costs
+frame rate, since the fill then writes its depth and the GPU's early depth test is lost. Every
+build: the Video menu, `--pixel-depth`, the libretro core's Depth option, the browser's Picture tab.
+
+The filters:
 
 - **CRT (Lost Judgment's)** -- the CRT filter Lost Judgment's arcade cabinets put on Sonic the
   Fighters, as YAMP reverse-engineered it: one scanline per Model 2 line, a faint aperture
@@ -269,11 +330,14 @@ the picture a second time every frame, so they can cost frame rate on a weak GPU
 
 ```
 m2hle --rom sfight.zip --crt                            # the CRT filter
+m2hle --rom sfight.zip --arcade                         # the real board's picture (--no-arcade: off)
+m2hle --rom sfight.zip --arcade --crt                   # the board's picture, the CRT over it
 m2hle --rom sfight.zip --shader crt/crt-geom.glslp      # a libretro preset (GL builds)
 m2hle --rom sfight.zip --shader-scale 2                 # the picture the filter reads: 1-4 x 496x384
+m2hle --rom sfight.zip --pixel-depth                    # depth per pixel, not the board (--no-pixel-depth: off)
 ```
 
-On the desktop the **Video** menu picks the filter, loads a preset, sets its parameters and is
+On the desktop the **Video** menu switches the Arcade and depth per pixel, picks the filter, loads a preset, sets its parameters and is
 remembered in `video.cfg` beside the netplay settings (`%APPDATA%\m2hle2`, `~/.config/m2hle2`);
 the command line applies over it for one run. In the browser it is the menu's **Picture** tab:
 choose a preset's files or a whole folder, and only the files the preset uses are kept (in the
@@ -504,6 +568,8 @@ host side is [src/ui/overlay_host.h](src/ui/overlay_host.h).
   its EBOOT: the rules the rooms of eight and the PS3 cross-play follow.
 - [WEB-PORT.md](WEB-PORT.md) and [WEB-NETPLAY.md](WEB-NETPLAY.md) — the browser build and its
   netplay gateway; the gateway itself is [web/gateway/](web/gateway/README.md).
+- [MODEL2A-TGP.md](MODEL2A-TGP.md) and [SEGA-RALLY-PS2.md](SEGA-RALLY-PS2.md) — what the Sega
+  Rally recomp and the PS2 port say about Model 2A and `srallyc`: maps, not oracles.
 - [SLICE-CLOCKS.md](SLICE-CLOCKS.md) — how the sound board is charged against the i960's
   frame, and the alternatives not taken.
 - [packaging/libretro/](packaging/libretro/README.md) and [packaging/rocknix/](packaging/rocknix/README.md)

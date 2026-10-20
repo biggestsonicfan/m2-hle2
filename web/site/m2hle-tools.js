@@ -23,9 +23,176 @@
  */
 'use strict';
 
+/* The lag check's words (Pinboard #944). What goes to the log stays English. */
+m2hleLang.add({
+  en: {
+    'tools.copied': 'Copied',
+    'tools.copyFailed': 'Copy failed',
+    'tools.lag.notRunning': 'Start the game first: there is nothing to measure until it is running.',
+    'tools.lag.measuring': 'Measuring. Keep playing... {s}',
+    'tools.lag.checked': 'Checked {s} seconds of play.',
+    'tools.lag.again': 'Check again',
+    'tools.lag.done': 'Done. Run the check again to compare.',
+    'tools.action.lowerRes': 'Draw the game at lower resolution',
+    'tools.action.lighterSound': 'Use the lighter sound driver',
+    'tools.tip.sound': 'The button below swaps the emulated sound CPU for a lighter driver: up to a tenth less work per frame, and the music sounds the same.',
+    'tools.tip.closeCpu': 'Close other tabs and programs, especially anything else using the CPU.',
+    'tools.tip.chargerCpu': 'On a laptop, plug in the charger and turn off battery saver: both slow the CPU down.',
+    'tools.tip.chrome': 'Chrome and Edge run this kind of code fastest.',
+    'tools.tip.close': 'Close other tabs and programs.',
+    'tools.tip.charger': 'On a laptop, plug in the charger and turn off battery saver.',
+    'tools.hidden.title': 'This tab was in the background during the check',
+    'tools.hidden.evidence': 'Browsers all but stop a tab nobody is looking at, so these numbers describe that, not the game.',
+    'tools.hidden.tip': 'Run the check again with the game in front, while playing.',
+    'tools.cpuSlow.title': 'This computer is not keeping up with the emulation',
+    'tools.cpuSlow.evidence': 'The game ran at {speed} of 60 frames a second. Emulating one frame took {slice} ms on average (worst {sliceMax}) and preparing the picture {render} ms; together they have to fit in 16.7.',
+    'tools.cpuTight.title': 'This computer is only just keeping up',
+    'tools.cpuTight.evidence': 'The game is at full speed ({speed}), but emulating a frame takes {slice} ms and the picture {render} ms of the 16.7 available, so anything else the computer does will cost frames.',
+    'tools.turns.title': 'The browser is not giving the game enough turns to run',
+    'tools.turns.evidence': 'The game ran at {speed} of 60 frames a second, but the emulator itself was only busy {busy}% of the time. The page was called {rate} times a second, and the game can catch up at most three frames per call.',
+    'tools.turns.tip': 'Something outside the emulator is holding the page up: see the findings below.',
+    'tools.soft.title': 'The browser is drawing in software: graphics acceleration is off',
+    'tools.soft.evidence': 'It reports its renderer as "{renderer}", and drew {rate} frames a second.',
+    'tools.soft.tip.accel': 'Turn on "Use graphics acceleration when available" in the browser\'s settings (System), then restart it.',
+    'tools.soft.tip.driver': 'If it is already on, the graphics driver may be blocked or out of date: update it.',
+    'tools.gpu.title': 'The graphics card is the bottleneck',
+    'tools.gpu.evidence': 'Each frame took the GPU {gpu} ms, at {w}x{h} ({mp} million pixels). It has 16.7 ms for 60 frames a second.',
+    'tools.gpu.tip': 'Make the browser window smaller, or use the button below.',
+    'tools.half.title': 'The picture is being drawn at 30 frames a second',
+    'tools.half.evidence.slow': 'The browser called the page {rate} times a second. Exactly half of 60 usually means something is rationing frames rather than struggling.',
+    'tools.half.evidence': 'The browser called the page {rate} times a second. The game itself still ran at full speed ({speed}), so it plays correctly but looks choppy. Exactly half of 60 usually means something is rationing frames rather than struggling.',
+    'tools.half.tip.power': 'Turn off battery saver / low power mode, and plug in the charger.',
+    'tools.half.tip.hz': 'Check the display is set to 60 Hz or more, not 30.',
+    'tools.half.tip.big': 'If the window is large or the screen is 4K, the GPU may be settling on every other frame: try the button below.',
+    'tools.few.title': 'The browser is drawing too few frames',
+    'tools.few.evidence': 'It drew {rate} frames a second while the emulator needed only {need} ms of each one. Canvas: {w}x{h} ({mp} million pixels), renderer "{renderer}".',
+    'tools.few.evidence.noGpu': 'It drew {rate} frames a second while the emulator needed only {need} ms of each one; this browser does not let the page time the GPU, so this is an inference. Canvas: {w}x{h} ({mp} million pixels), renderer "{renderer}".',
+    'tools.few.tip.smaller': 'Make the window smaller, or use the button below: if that fixes it, it was the GPU.',
+    'tools.few.tip.video': 'Close other tabs showing video or animation.',
+    'tools.softOk.title': 'The browser is drawing in software',
+    'tools.softOk.evidence': 'Renderer: "{renderer}". It is keeping up right now, but it is using the CPU to do the GPU\'s job.',
+    'tools.softOk.tip': 'Turn on graphics acceleration in the browser\'s settings and restart it.',
+    'tools.stutter.title': 'Stutter: some frames arrived late',
+    'tools.stutter.ours': '{n} frames in {s} s came more than 25 ms after the one before (worst gap {gap} ms). The emulator had slow frames of its own (worst emulation {slice} ms, worst picture {render} ms), which is normal while the game loads a new scene and not in the middle of a fight.',
+    'tools.stutter.outside': '{n} frames in {s} s came more than 25 ms after the one before (worst gap {gap} ms). The emulator\'s own work never took longer than {worst} ms, so the pauses came from outside it: the browser, other tabs, or the system.',
+    'tools.stutter.tip.fight': 'If it happens mid-fight, run the check again then and copy the report.',
+    'tools.stutter.tip.ext': 'Browser extensions that touch every page can do this: try a private window.',
+    'tools.dropout.one.title': 'The sound dropped out {n} time',
+    'tools.dropout.many.title': 'The sound dropped out {n} times',
+    'tools.dropout.cpu': 'The audio queue ran empty (it holds about {ms} ms). The sound is made a frame at a time, so this follows from the slow frames above rather than being a problem of its own.',
+    'tools.dropout.late': 'The audio queue ran empty (it holds about {ms} ms). The sound is made a frame at a time, so this follows from late frames rather than being a problem of its own.',
+    'tools.dropout.tip.cpu': 'It will stop when the game runs at full speed.',
+    'tools.dropout.tip.late': 'Fix the late frames first. If the sound still breaks up, add ?audioms=80 to the address for a deeper queue (sound will be slightly later).',
+    'tools.device.title': 'Your audio device adds {ms} ms of delay',
+    'tools.device.evidence': 'That is the browser\'s own report for the output device, on top of the {queue} ms this page queues. Bluetooth headphones and speakers are the usual cause.',
+    'tools.device.tip': 'Use wired headphones or the computer\'s speakers if sound behind the picture bothers you.',
+    'tools.noisy.title': 'The emulator is complaining {n} times a second',
+    'tools.noisy.evidence': 'It logged {n} warnings or errors in {s} s. Each one costs a little time; more to the point, it means the game is doing something the emulator does not handle yet, and what follows may be drawn or played wrong.',
+    'tools.noisy.evidence.worst': 'It logged {n} warnings or errors in {s} s, most often: "{worst}". Each one costs a little time; more to the point, it means the game is doing something the emulator does not handle yet, and what follows may be drawn or played wrong.',
+    'tools.noisy.tip': 'Open the Console tab, press Copy, and send it with a note of what was on screen.',
+    'tools.wait.title': 'Waiting for the other player',
+    'tools.wait.one': 'The game paused {n} time in {s} s because the other player\'s input had not arrived (frame delay {delay}).',
+    'tools.wait.many': 'The game paused {n} times in {s} s because the other player\'s input had not arrived (frame delay {delay}).',
+    'tools.wait.tip.delay': 'A higher frame delay absorbs a slower connection, at the cost of slightly later controls.',
+    'tools.wait.tip.wifi': 'Wi-Fi on either side is the usual cause: a cable helps more than anything else.',
+    'tools.ok.title': 'Nothing here is running slowly',
+    'tools.ok.evidence': 'The game ran at {speed} of 60 frames a second and the browser drew {rate}. Emulation took {slice} ms a frame and the picture {render} ms, of 16.7 available. {late} late frames; sound queue {queue} ms.',
+    'tools.ok.evidence.gpu': 'The game ran at {speed} of 60 frames a second and the browser drew {rate}. Emulation took {slice} ms a frame and the picture {render} ms, of 16.7 available; the GPU took {gpu} ms. {late} late frames; sound queue {queue} ms.',
+    'tools.ok.tip.outside': 'If the controls still feel late, the delay is outside this page: a TV not in game mode, a wireless keyboard or controller, or the display itself.',
+    'tools.ok.tip.again': 'If it only happens sometimes, run this check again while it is happening.',
+    'tools.sound.nextMatch': 'The new sound driver starts with the next match.',
+    'tools.sound.none': 'This game has no lighter sound driver: it keeps the sound CPU.',
+    'tools.sound.changed': 'Sound driver changed. The music comes back with the game\'s next tune.',
+  },
+  ja: {
+    'tools.copied': 'コピーしました',
+    'tools.copyFailed': 'コピーできませんでした',
+    'tools.lag.notRunning': '先にゲームを始めてください。動いていないと測れません。',
+    'tools.lag.measuring': '計測中。そのまま遊んでください… {s}',
+    'tools.lag.checked': '{s} 秒間のプレイを調べました。',
+    'tools.lag.again': 'もう一度チェック',
+    'tools.lag.done': '完了。もう一度チェックして比べてください。',
+    'tools.action.lowerRes': 'ゲームを低い解像度で描く',
+    'tools.action.lighterSound': '軽いサウンドドライバーを使う',
+    'tools.tip.sound': '下のボタンで、エミュレートしたサウンドCPUを軽いドライバーに切り替えます。1フレームの処理が最大で1割ほど減り、音楽は変わりません。',
+    'tools.tip.closeCpu': 'ほかのタブやプログラム、特にCPUを使っているものを閉じてください。',
+    'tools.tip.chargerCpu': 'ノートパソコンなら充電器をつなぎ、省電力モードを切ってください。どちらもCPUを遅くします。',
+    'tools.tip.chrome': 'この種の処理は Chrome と Edge がいちばん速く動きます。',
+    'tools.tip.close': 'ほかのタブやプログラムを閉じてください。',
+    'tools.tip.charger': 'ノートパソコンなら充電器をつなぎ、省電力モードを切ってください。',
+    'tools.hidden.title': 'チェック中、このタブは裏に回っていました',
+    'tools.hidden.evidence': 'ブラウザは見られていないタブをほぼ止めてしまうため、この数値はゲームではなくその状態を表しています。',
+    'tools.hidden.tip': 'ゲームを前面に出し、遊びながらもう一度チェックしてください。',
+    'tools.cpuSlow.title': 'このコンピューターはエミュレーションに追いついていません',
+    'tools.cpuSlow.evidence': 'ゲームは秒間60フレーム中 {speed} フレームで動きました。1フレームのエミュレーションに平均 {slice} ms（最大 {sliceMax}）、画面の準備に {render} ms かかりました。合わせて 16.7 ms に収まる必要があります。',
+    'tools.cpuTight.title': 'このコンピューターはぎりぎりで追いついています',
+    'tools.cpuTight.evidence': 'ゲームは全速（{speed}）で動いていますが、使える 16.7 ms のうち、1フレームのエミュレーションに {slice} ms、画面に {render} ms かかっています。コンピューターがほかの処理をするとフレームを落とします。',
+    'tools.turns.title': 'ブラウザがゲームに十分な実行の機会を与えていません',
+    'tools.turns.evidence': 'ゲームは秒間60フレーム中 {speed} フレームで動きましたが、エミュレーター自体が働いていたのは {busy}% の時間だけでした。ページが呼ばれたのは秒間 {rate} 回で、1回につき追いつけるのは最大3フレームです。',
+    'tools.turns.tip': 'エミュレーターの外の何かがページを止めています。下の項目を見てください。',
+    'tools.soft.title': 'ブラウザがソフトウェアで描画しています（グラフィックアクセラレーションがオフ）',
+    'tools.soft.evidence': 'レンダラーは「{renderer}」で、秒間 {rate} フレームを描きました。',
+    'tools.soft.tip.accel': 'ブラウザの設定（システム）で「グラフィックアクセラレーションが使用可能な場合は使用する」をオンにし、ブラウザを再起動してください。',
+    'tools.soft.tip.driver': 'すでにオンなら、グラフィックドライバーがブロックされているか古い可能性があります。更新してください。',
+    'tools.gpu.title': 'グラフィックカードがボトルネックです',
+    'tools.gpu.evidence': 'GPUは1フレームに {gpu} ms かかりました（{w}x{h}、{mp} 百万ピクセル）。秒間60フレームには 16.7 ms しかありません。',
+    'tools.gpu.tip': 'ブラウザのウィンドウを小さくするか、下のボタンを使ってください。',
+    'tools.half.title': '画面が秒間30フレームで描かれています',
+    'tools.half.evidence.slow': 'ブラウザがページを呼んだのは秒間 {rate} 回です。60のちょうど半分なら、たいていは処理が追いつかないのではなく、何かがフレームを制限しています。',
+    'tools.half.evidence': 'ブラウザがページを呼んだのは秒間 {rate} 回です。ゲーム自体は全速（{speed}）で動いているので正しく遊べますが、カクついて見えます。60のちょうど半分なら、たいていは処理が追いつかないのではなく、何かがフレームを制限しています。',
+    'tools.half.tip.power': '省電力モードを切り、充電器をつないでください。',
+    'tools.half.tip.hz': 'ディスプレイが30Hzではなく60Hz以上に設定されているか確認してください。',
+    'tools.half.tip.big': 'ウィンドウが大きいか4K画面なら、GPUが1フレームおきの描画に落ち着いているのかもしれません。下のボタンを試してください。',
+    'tools.few.title': 'ブラウザが描くフレームが少なすぎます',
+    'tools.few.evidence': '秒間 {rate} フレームしか描かれませんでしたが、エミュレーターが1フレームに使ったのは {need} ms だけです。キャンバス：{w}x{h}（{mp} 百万ピクセル）、レンダラー「{renderer}」。',
+    'tools.few.evidence.noGpu': '秒間 {rate} フレームしか描かれませんでしたが、エミュレーターが1フレームに使ったのは {need} ms だけです。このブラウザではページからGPUの時間を測れないため、これは推測です。キャンバス：{w}x{h}（{mp} 百万ピクセル）、レンダラー「{renderer}」。',
+    'tools.few.tip.smaller': 'ウィンドウを小さくするか、下のボタンを使ってください。それで直ればGPUが原因です。',
+    'tools.few.tip.video': '動画やアニメーションを表示しているほかのタブを閉じてください。',
+    'tools.softOk.title': 'ブラウザがソフトウェアで描画しています',
+    'tools.softOk.evidence': 'レンダラー：「{renderer}」。今は追いついていますが、GPUの仕事をCPUでしています。',
+    'tools.softOk.tip': 'ブラウザの設定でグラフィックアクセラレーションをオンにし、再起動してください。',
+    'tools.stutter.title': 'カクつき：遅れて届いたフレームがあります',
+    'tools.stutter.ours': '{s} 秒間に {n} フレームが、前のフレームから 25 ms 以上遅れて届きました（最大の間隔 {gap} ms）。エミュレーター自体にも遅いフレームがありました（エミュレーション最大 {slice} ms、画面最大 {render} ms）。ゲームが新しい場面を読み込むときなら普通のことですが、対戦の最中なら普通ではありません。',
+    'tools.stutter.outside': '{s} 秒間に {n} フレームが、前のフレームから 25 ms 以上遅れて届きました（最大の間隔 {gap} ms）。エミュレーター自体の処理は最大でも {worst} ms だったので、止まった原因はその外、ブラウザやほかのタブ、システムにあります。',
+    'tools.stutter.tip.fight': '対戦中に起きるなら、そのときにもう一度チェックしてレポートをコピーしてください。',
+    'tools.stutter.tip.ext': 'すべてのページに作用するブラウザ拡張機能が原因のこともあります。シークレットウィンドウで試してください。',
+    'tools.dropout.one.title': '音が {n} 回途切れました',
+    'tools.dropout.many.title': '音が {n} 回途切れました',
+    'tools.dropout.cpu': '音声キュー（約 {ms} ms 分）が空になりました。音は1フレームずつ作られるので、これはそれ自体の問題ではなく、上の遅いフレームによるものです。',
+    'tools.dropout.late': '音声キュー（約 {ms} ms 分）が空になりました。音は1フレームずつ作られるので、これはそれ自体の問題ではなく、遅れたフレームによるものです。',
+    'tools.dropout.tip.cpu': 'ゲームが全速で動けば、音の途切れはなくなります。',
+    'tools.dropout.tip.late': 'まず遅れるフレームを直してください。それでも音が途切れるなら、アドレスに ?audioms=80 を付けるとキューが深くなります（音は少し遅れます）。',
+    'tools.device.title': 'オーディオ機器が {ms} ms の遅延を加えています',
+    'tools.device.evidence': 'これはブラウザが出力機器について報告した値で、このページのキュー {queue} ms に上乗せされます。よくある原因は Bluetooth のヘッドホンやスピーカーです。',
+    'tools.device.tip': '音が画面より遅れるのが気になるなら、有線のヘッドホンかコンピューターのスピーカーを使ってください。',
+    'tools.noisy.title': 'エミュレーターが秒間 {n} 回警告を出しています',
+    'tools.noisy.evidence': '{s} 秒間に警告やエラーが {n} 件記録されました。1件ごとに少し時間がかかりますが、それより問題なのは、ゲームがエミュレーター未対応のことをしているということで、この先の描画や音が正しくないかもしれません。',
+    'tools.noisy.evidence.worst': '{s} 秒間に警告やエラーが {n} 件記録されました。いちばん多いのは「{worst}」です。1件ごとに少し時間がかかりますが、それより問題なのは、ゲームがエミュレーター未対応のことをしているということで、この先の描画や音が正しくないかもしれません。',
+    'tools.noisy.tip': 'ログのタブを開いて「コピー」を押し、そのとき画面に何が出ていたかを添えて送ってください。',
+    'tools.wait.title': '相手プレイヤーを待っています',
+    'tools.wait.one': '相手プレイヤーの入力が届かず、{s} 秒間にゲームが {n} 回止まりました（入力遅延 {delay}）。',
+    'tools.wait.many': '相手プレイヤーの入力が届かず、{s} 秒間にゲームが {n} 回止まりました（入力遅延 {delay}）。',
+    'tools.wait.tip.delay': '入力遅延を大きくすると遅い回線を吸収できますが、操作が少し遅れます。',
+    'tools.wait.tip.wifi': 'よくある原因はどちらかの Wi-Fi です。有線接続がいちばん効きます。',
+    'tools.ok.title': '遅くなっているところはありません',
+    'tools.ok.evidence': 'ゲームは秒間60フレーム中 {speed} フレームで動き、ブラウザは {rate} フレームを描きました。使える 16.7 ms のうち、エミュレーションは1フレーム {slice} ms、画面は {render} ms でした。遅れたフレーム {late}、音声キュー {queue} ms。',
+    'tools.ok.evidence.gpu': 'ゲームは秒間60フレーム中 {speed} フレームで動き、ブラウザは {rate} フレームを描きました。使える 16.7 ms のうち、エミュレーションは1フレーム {slice} ms、画面は {render} ms、GPUは {gpu} ms でした。遅れたフレーム {late}、音声キュー {queue} ms。',
+    'tools.ok.tip.outside': 'それでも操作が遅く感じるなら、遅延はこのページの外にあります。ゲームモードでないテレビ、ワイヤレスのキーボードやコントローラー、ディスプレイ自体などです。',
+    'tools.ok.tip.again': 'ときどきしか起きないなら、起きているときにもう一度チェックしてください。',
+    'tools.sound.nextMatch': '新しいサウンドドライバーは次の対戦から使われます。',
+    'tools.sound.none': 'このゲームには軽いサウンドドライバーがありません。サウンドCPUのままです。',
+    'tools.sound.changed': 'サウンドドライバーを変更しました。音楽はゲームの次の曲から戻ります。',
+  },
+});
+
 const m2hleTools = (() => {
   const $ = (id) => document.getElementById(id);
   const t0 = performance.now();
+
+  const tr = (key, vars) => m2hleLang.t(key, vars);
+  /* A key's English, filled the same way: for the log, which is not translated. */
+  const english = (key, vars) => m2hleLang.LANGS.en.strings[key]
+    .replace(/\{(\w+)\}/g, (s, k) => (vars && k in vars ? vars[k] : s));
   let ready = false;            /* the emulator's exports exist, and its GL context */
 
   /* ---- Keys typed into the drawer stay in the drawer ---------------------------
@@ -171,7 +338,7 @@ const m2hleTools = (() => {
 
   function consoleText() {
     const which = ['general', 'warning', 'error'].filter((k) => shown[k]);
-    const out = ['Sonic the Fighters (m2-hle web) -- console', ...systemInfo(),
+    const out = [m2hleGame.title + ' (m2-hle web) -- console', ...systemInfo(),
                  'Showing    ' + which.join(', ') + (dropped ? '   (' + dropped + ' older lines were discarded)' : ''), ''];
     for (const l of lines) if (shown[l.level]) out.push(shownText(l));
     return out.join('\n');
@@ -194,7 +361,7 @@ const m2hleTools = (() => {
       ta.remove();
     }
     const was = button.textContent;
-    button.textContent = ok ? 'Copied' : 'Copy failed';
+    button.textContent = tr(ok ? 'tools.copied' : 'tools.copyFailed');
     setTimeout(() => { button.textContent = was; }, 1500);
   }
 
@@ -298,145 +465,131 @@ const m2hleTools = (() => {
    * to try, and sometimes something this page can do about it right now. */
   function reason(m) {
     const out = [];
-    const find = (level, title, evidence, tips, action) => out.push({ level, title, evidence, tips: tips || [], action });
-    const megapixels = m.canvasW * m.canvasH / 1e6;
-    const lowerRes = m.renderScale === 0 || m.renderScale > 2
-      ? { label: 'Draw the game at lower resolution', run: () => setRenderScale(2) } : null;
-    const lighterSound = m.soundDriver === 0
-      ? { label: 'Use the lighter sound driver', run: () => setSoundDriver(1) } : null;
-    const soundTip = lighterSound
-      ? ['The button below swaps the emulated sound CPU for a lighter driver: up to a tenth less work per frame, and the music sounds the same.'] : [];
+    const find = (level, id, vars, evidence, tips, action) => out.push({
+      level, title: tr('tools.' + id + '.title', vars), titleEn: english('tools.' + id + '.title', vars),
+      evidence, tips: (tips || []).map((k) => tr(k)), action });
 
     if (m.hidden) {
-      find('info', 'This tab was in the background during the check',
-           'Browsers all but stop a tab nobody is looking at, so these numbers describe that, not the game.',
-           ['Run the check again with the game in front, while playing.']);
+      find('info', 'hidden', null, tr('tools.hidden.evidence'), ['tools.hidden.tip']);
       return out;                 /* nothing measured then means anything */
     }
 
-    const slow = m.speed < 57;
-    const cpuBound = m.busy > 0.7 || m.sliceMs + m.renderMs > 13;
-    if (slow && cpuBound) {
-      find('bad', 'This computer is not keeping up with the emulation',
-           'The game ran at ' + f1(m.speed) + ' of 60 frames a second. Emulating one frame took ' + f1(m.sliceMs) +
-           ' ms on average (worst ' + f1(m.sliceMaxMs) + ') and preparing the picture ' + f1(m.renderMs) +
-           ' ms; together they have to fit in 16.7.',
-           ['Close other tabs and programs, especially anything else using the CPU.',
-            'On a laptop, plug in the charger and turn off battery saver: both slow the CPU down.',
-            'Chrome and Edge run this kind of code fastest.', ...soundTip], lighterSound);
-    } else if (cpuBound) {
-      find('warn', 'This computer is only just keeping up',
-           'The game is at full speed (' + f1(m.speed) + '), but emulating a frame takes ' + f1(m.sliceMs) +
-           ' ms and the picture ' + f1(m.renderMs) + ' ms of the 16.7 available, so anything else the computer does will cost frames.',
-           ['Close other tabs and programs.', 'On a laptop, plug in the charger and turn off battery saver.', ...soundTip],
-           lighterSound);
-    } else if (slow) {
-      find('bad', 'The browser is not giving the game enough turns to run',
-           'The game ran at ' + f1(m.speed) + ' of 60 frames a second, but the emulator itself was only busy ' +
-           Math.round(m.busy * 100) + '% of the time. The page was called ' + f1(m.drawRate) +
-           ' times a second, and the game can catch up at most three frames per call.',
-           ['Something outside the emulator is holding the page up: see the findings below.']);
-    }
-
-    /* Everything from here to the sound is also what a slow CPU looks like. When the
-     * CPU is already the answer these are its symptoms, not more causes, and listing
-     * them sends people after the wrong thing. */
-    let drawExplained = false;    /* too few frames drawn, and a finding already says why */
-    if (m.drawRate < 50 && !cpuBound) {
-      drawExplained = true;
-      const near30 = m.drawRate > 27 && m.drawRate < 33;
-      if (m.software) {
-        find('bad', 'The browser is drawing in software: graphics acceleration is off',
-             'It reports its renderer as "' + m.renderer + '", and drew ' + f1(m.drawRate) + ' frames a second.',
-             ['Turn on "Use graphics acceleration when available" in the browser\'s settings (System), then restart it.',
-              'If it is already on, the graphics driver may be blocked or out of date: update it.'], lowerRes);
-      } else if (m.gpuMs !== null && m.gpuMs > 12) {
-        find('bad', 'The graphics card is the bottleneck',
-             'Each frame took the GPU ' + f1(m.gpuMs) + ' ms, at ' + m.canvasW + 'x' + m.canvasH + ' (' + f1(megapixels) +
-             ' million pixels). It has 16.7 ms for 60 frames a second.',
-             ['Make the browser window smaller, or use the button below.'], lowerRes);
-      } else if (near30) {
-        find(slow ? 'bad' : 'warn', 'The picture is being drawn at 30 frames a second',
-             'The browser called the page ' + f1(m.drawRate) + ' times a second. ' +
-             (slow ? '' : 'The game itself still ran at full speed (' + f1(m.speed) + '), so it plays correctly but looks choppy. ') +
-             'Exactly half of 60 usually means something is rationing frames rather than struggling.',
-             ['Turn off battery saver / low power mode, and plug in the charger.',
-              'Check the display is set to 60 Hz or more, not 30.',
-              'If the window is large or the screen is 4K, the GPU may be settling on every other frame: try the button below.'],
-             lowerRes);
-      } else {
-        find(slow ? 'bad' : 'warn', 'The browser is drawing too few frames',
-             'It drew ' + f1(m.drawRate) + ' frames a second while the emulator needed only ' + f1(m.sliceMs + m.renderMs) +
-             ' ms of each one' + (m.gpuMs === null ? '; this browser does not let the page time the GPU, so this is an inference' : '') +
-             '. Canvas: ' + m.canvasW + 'x' + m.canvasH + ' (' + f1(megapixels) + ' million pixels), renderer "' + m.renderer + '".',
-             ['Make the window smaller, or use the button below: if that fixes it, it was the GPU.',
-              'Close other tabs showing video or animation.'], lowerRes);
-      }
-    } else if (m.software) {
-      find('warn', 'The browser is drawing in software',
-           'Renderer: "' + m.renderer + '". It is keeping up right now, but it is using the CPU to do the GPU\'s job.',
-           ['Turn on graphics acceleration in the browser\'s settings and restart it.']);
-    }
-
-    if (!cpuBound && !drawExplained && (m.longFrames >= Math.max(2, m.seconds * 0.5) || m.worstGapMs > 70)) {
-      const ours = m.sliceMaxMs > 20 || m.renderMaxMs > 20;
-      find('warn', 'Stutter: some frames arrived late',
-           m.longFrames + ' frames in ' + f1(m.seconds) + ' s came more than 25 ms after the one before (worst gap ' +
-           f1(m.worstGapMs) + ' ms). ' + (ours
-             ? 'The emulator had slow frames of its own (worst emulation ' + f1(m.sliceMaxMs) + ' ms, worst picture ' +
-               f1(m.renderMaxMs) + ' ms), which is normal while the game loads a new scene and not in the middle of a fight.'
-             : 'The emulator\'s own work never took longer than ' + f1(Math.max(m.sliceMaxMs, m.renderMaxMs)) +
-               ' ms, so the pauses came from outside it: the browser, other tabs, or the system.'),
-           ours ? ['If it happens mid-fight, run the check again then and copy the report.']
-                : ['Close other tabs and programs.', 'Browser extensions that touch every page can do this: try a private window.']);
-    }
-
-    if (m.dropouts > 0) {
-      find('warn', 'The sound dropped out ' + m.dropouts + ' time' + (m.dropouts === 1 ? '' : 's'),
-           'The audio queue ran empty (it holds about ' + Math.round(m.audio.targetMs || 0) + ' ms). The sound is made a frame at a time, so this follows from ' +
-           (cpuBound ? 'the slow frames above' : 'late frames') + ' rather than being a problem of its own.',
-           [cpuBound ? 'It will stop when the game runs at full speed.'
-                     : 'Fix the late frames first. If the sound still breaks up, add ?audioms=80 to the address for a deeper queue (sound will be slightly later).']);
-    }
-    const deviceMs = (m.audio.baseMs || 0) + (m.audio.outputMs || 0);
-    if (deviceMs > 90) {
-      find('warn', 'Your audio device adds ' + Math.round(deviceMs) + ' ms of delay',
-           'That is the browser\'s own report for the output device, on top of the ' + Math.round(m.audio.queueMs || 0) +
-           ' ms this page queues. Bluetooth headphones and speakers are the usual cause.',
-           ['Use wired headphones or the computer\'s speakers if sound behind the picture bothers you.']);
-    }
-
-    if (m.complaints / m.seconds > 10) {
-      const worst = lines.filter((l) => l.level !== 'general').sort((x, y) => y.n - x.n)[0];
-      find('warn', 'The emulator is complaining ' + Math.round(m.complaints / m.seconds) + ' times a second',
-           'It logged ' + m.complaints + ' warnings or errors in ' + f1(m.seconds) + ' s' +
-           (worst ? ', most often: "' + worst.text + '"' : '') + '. Each one costs a little time; more to the ' +
-           'point, it means the game is doing something the emulator does not handle yet, and what follows may be drawn or played wrong.',
-           ['Open the Console tab, press Copy, and send it with a note of what was on screen.']);
-    }
-
-    if (m.netplay === 'playing' && m.stalls > 0) {
-      find('warn', 'Waiting for the other player',
-           'The game paused ' + m.stalls + ' time' + (m.stalls === 1 ? '' : 's') + ' in ' + f1(m.seconds) +
-           ' s because the other player\'s input had not arrived (frame delay ' + m.netDelay + ').',
-           ['A higher frame delay absorbs a slower connection, at the cost of slightly later controls.',
-            'Wi-Fi on either side is the usual cause: a cable helps more than anything else.']);
-    }
+    const c = {
+      slow: m.speed < 57,
+      cpuBound: m.busy > 0.7 || m.sliceMs + m.renderMs > 13,
+      lowerRes: m.renderScale === 0 || m.renderScale > 2
+        ? { label: tr('tools.action.lowerRes'), run: () => setRenderScale(2) } : null,
+      lighterSound: m.soundDriver === 0
+        ? { label: tr('tools.action.lighterSound'), run: () => setSoundDriver(1) } : null,
+    };
+    reasonCpu(m, c, find);
+    const drawExplained = reasonDraw(m, c, find);
+    reasonStutter(m, c, drawExplained, find);
+    reasonSound(m, c, find);
+    reasonOther(m, find);
 
     if (!out.some((f) => f.level === 'bad' || f.level === 'warn')) {
-      find('ok', 'Nothing here is running slowly',
-           'The game ran at ' + f1(m.speed) + ' of 60 frames a second and the browser drew ' + f1(m.drawRate) +
-           '. Emulation took ' + f1(m.sliceMs) + ' ms a frame and the picture ' + f1(m.renderMs) + ' ms, of 16.7 available' +
-           (m.gpuMs !== null ? '; the GPU took ' + f1(m.gpuMs) + ' ms' : '') + '. ' + m.longFrames + ' late frames; sound queue ' +
-           Math.round(m.audio.queueMs || 0) + ' ms.',
-           ['If the controls still feel late, the delay is outside this page: a TV not in game mode, a wireless keyboard or controller, or the display itself.',
-            'If it only happens sometimes, run this check again while it is happening.']);
+      find('ok', 'ok', null, tr(m.gpuMs !== null ? 'tools.ok.evidence.gpu' : 'tools.ok.evidence', {
+        speed: f1(m.speed), rate: f1(m.drawRate), slice: f1(m.sliceMs), render: f1(m.renderMs),
+        gpu: m.gpuMs !== null ? f1(m.gpuMs) : '', late: m.longFrames, queue: Math.round(m.audio.queueMs || 0) }),
+      ['tools.ok.tip.outside', 'tools.ok.tip.again']);
     }
     return out;
   }
 
+  function reasonCpu(m, c, find) {
+    const soundTip = c.lighterSound ? ['tools.tip.sound'] : [];
+    if (c.slow && c.cpuBound) {
+      find('bad', 'cpuSlow', null, tr('tools.cpuSlow.evidence',
+        { speed: f1(m.speed), slice: f1(m.sliceMs), sliceMax: f1(m.sliceMaxMs), render: f1(m.renderMs) }),
+      ['tools.tip.closeCpu', 'tools.tip.chargerCpu', 'tools.tip.chrome', ...soundTip], c.lighterSound);
+    } else if (c.cpuBound) {
+      find('warn', 'cpuTight', null, tr('tools.cpuTight.evidence',
+        { speed: f1(m.speed), slice: f1(m.sliceMs), render: f1(m.renderMs) }),
+      ['tools.tip.close', 'tools.tip.charger', ...soundTip], c.lighterSound);
+    } else if (c.slow) {
+      find('bad', 'turns', null, tr('tools.turns.evidence',
+        { speed: f1(m.speed), busy: Math.round(m.busy * 100), rate: f1(m.drawRate) }),
+      ['tools.turns.tip']);
+    }
+  }
+
+  /* Everything from here to the sound is also what a slow CPU looks like. When the
+   * CPU is already the answer these are its symptoms, not more causes, and listing
+   * them sends people after the wrong thing. Returns whether too few frames were
+   * drawn and a finding already says why. */
+  function reasonDraw(m, c, find) {
+    if (m.drawRate < 50 && !c.cpuBound) {
+      const near30 = m.drawRate > 27 && m.drawRate < 33;
+      const canvas = { w: m.canvasW, h: m.canvasH, mp: f1(m.canvasW * m.canvasH / 1e6), renderer: m.renderer };
+      const level = c.slow ? 'bad' : 'warn';
+      if (m.software) {
+        find('bad', 'soft', null, tr('tools.soft.evidence', { renderer: m.renderer, rate: f1(m.drawRate) }),
+          ['tools.soft.tip.accel', 'tools.soft.tip.driver'], c.lowerRes);
+      } else if (m.gpuMs !== null && m.gpuMs > 12) {
+        find('bad', 'gpu', null, tr('tools.gpu.evidence', { gpu: f1(m.gpuMs), ...canvas }),
+          ['tools.gpu.tip'], c.lowerRes);
+      } else if (near30) {
+        find(level, 'half', null, tr(c.slow ? 'tools.half.evidence.slow' : 'tools.half.evidence',
+          { rate: f1(m.drawRate), speed: f1(m.speed) }),
+        ['tools.half.tip.power', 'tools.half.tip.hz', 'tools.half.tip.big'], c.lowerRes);
+      } else {
+        find(level, 'few', null, tr(m.gpuMs === null ? 'tools.few.evidence.noGpu' : 'tools.few.evidence',
+          { rate: f1(m.drawRate), need: f1(m.sliceMs + m.renderMs), ...canvas }),
+        ['tools.few.tip.smaller', 'tools.few.tip.video'], c.lowerRes);
+      }
+      return true;
+    }
+    if (m.software) {
+      find('warn', 'softOk', null, tr('tools.softOk.evidence', { renderer: m.renderer }), ['tools.softOk.tip']);
+    }
+    return false;
+  }
+
+  /* Late frames: the emulator's, or the browser's. */
+  function reasonStutter(m, c, drawExplained, find) {
+    if (!c.cpuBound && !drawExplained && (m.longFrames >= Math.max(2, m.seconds * 0.5) || m.worstGapMs > 70)) {
+      const ours = m.sliceMaxMs > 20 || m.renderMaxMs > 20;
+      find('warn', 'stutter', null, tr(ours ? 'tools.stutter.ours' : 'tools.stutter.outside', {
+        n: m.longFrames, s: f1(m.seconds), gap: f1(m.worstGapMs), slice: f1(m.sliceMaxMs), render: f1(m.renderMaxMs),
+        worst: f1(Math.max(m.sliceMaxMs, m.renderMaxMs)) }),
+      ours ? ['tools.stutter.tip.fight'] : ['tools.tip.close', 'tools.stutter.tip.ext']);
+    }
+  }
+
+  /* The sound: dropouts, which follow from late frames, and a slow device. */
+  function reasonSound(m, c, find) {
+    if (m.dropouts > 0) {
+      find('warn', m.dropouts === 1 ? 'dropout.one' : 'dropout.many', { n: m.dropouts },
+        tr(c.cpuBound ? 'tools.dropout.cpu' : 'tools.dropout.late', { ms: Math.round(m.audio.targetMs || 0) }),
+        [c.cpuBound ? 'tools.dropout.tip.cpu' : 'tools.dropout.tip.late']);
+    }
+    const deviceMs = (m.audio.baseMs || 0) + (m.audio.outputMs || 0);
+    if (deviceMs > 90) {
+      find('warn', 'device', { ms: Math.round(deviceMs) },
+        tr('tools.device.evidence', { queue: Math.round(m.audio.queueMs || 0) }), ['tools.device.tip']);
+    }
+  }
+
+  /* The emulator's own complaints, and the other player. */
+  function reasonOther(m, find) {
+    if (m.complaints / m.seconds > 10) {
+      const worst = lines.filter((l) => l.level !== 'general').sort((x, y) => y.n - x.n)[0];
+      find('warn', 'noisy', { n: Math.round(m.complaints / m.seconds) },
+        tr(worst ? 'tools.noisy.evidence.worst' : 'tools.noisy.evidence',
+          { n: m.complaints, s: f1(m.seconds), worst: worst ? worst.text : '' }),
+        ['tools.noisy.tip']);
+    }
+
+    if (m.netplay === 'playing' && m.stalls > 0) {
+      find('warn', 'wait', null,
+        tr(m.stalls === 1 ? 'tools.wait.one' : 'tools.wait.many', { n: m.stalls, s: f1(m.seconds), delay: m.netDelay }),
+        ['tools.wait.tip.delay', 'tools.wait.tip.wifi']);
+    }
+  }
+
   function reportText(m, findings) {
-    const out = ['Sonic the Fighters (m2-hle web) -- lag check', ...systemInfo(), ''];
+    const out = [m2hleGame.title + ' (m2-hle web) -- lag check', ...systemInfo(), ''];
     for (const f of findings) {
       out.push('[' + f.level.toUpperCase() + '] ' + f.title, '    ' + f.evidence);
       for (const t of f.tips) out.push('    - ' + t);
@@ -470,7 +623,7 @@ const m2hleTools = (() => {
     seconds = seconds || 5;
     const status = $('lag-status'), list = $('lag-findings'), start = $('lag-start');
     if (!ready || Module._web_state() !== 1) {
-      status.textContent = 'Start the game first: there is nothing to measure until it is running.';
+      status.textContent = tr('tools.lag.notRunning');
       return null;
     }
     start.disabled = true;
@@ -480,12 +633,12 @@ const m2hleTools = (() => {
     $('canvas').focus();
     const pending = measure(seconds);
     for (let s = seconds; s > 0; s--) {
-      status.textContent = 'Measuring. Keep playing... ' + s;
+      status.textContent = tr('tools.lag.measuring', { s });
       await sleep(1000);
     }
     const m = await pending;
     const findings = reason(m);
-    status.textContent = 'Checked ' + f1(m.seconds) + ' seconds of play.';
+    status.textContent = tr('tools.lag.checked', { s: f1(m.seconds) });
     for (const f of findings) {
       const card = document.createElement('article');
       card.className = 'finding finding-' + f.level;
@@ -500,16 +653,16 @@ const m2hleTools = (() => {
         const b = document.createElement('button');
         b.className = 'tool';
         b.textContent = f.action.label;
-        b.addEventListener('click', () => { f.action.run(); b.textContent = 'Done. Run the check again to compare.'; b.disabled = true; });
+        b.addEventListener('click', () => { f.action.run(); b.textContent = tr('tools.lag.done'); b.disabled = true; });
         card.appendChild(b);
       }
       list.appendChild(card);
     }
     lastReport = reportText(m, findings);
-    add('lag check: ' + findings.map((f) => '[' + f.level + '] ' + f.title).join('; '));
+    add('lag check: ' + findings.map((f) => '[' + f.level + '] ' + f.titleEn).join('; '));
     $('lag-copy').hidden = false;
     start.disabled = false;
-    start.textContent = 'Check again';
+    start.textContent = tr('tools.lag.again');
     return { measurements: m, findings, text: lastReport };
   }
 
@@ -535,11 +688,8 @@ const m2hleTools = (() => {
     if (!ready) return;
     const now = Module._web_set_sound_driver(n);
     if (Module._web_state() === 0) return;           /* no game yet: it starts with this one */
-    $('lag-status').textContent = !now
-      ? 'The new sound driver starts with the next match.'
-      : Module._web_sound_driver() !== n
-        ? 'This game has no lighter sound driver: it keeps the sound CPU.'
-        : 'Sound driver changed. The music comes back with the game\'s next tune.';
+    $('lag-status').textContent = tr(!now ? 'tools.sound.nextMatch'
+      : Module._web_sound_driver() !== n ? 'tools.sound.none' : 'tools.sound.changed');
   }
 
   /* ---- The drawer ---------------------------------------------------------------------- */
@@ -549,7 +699,7 @@ const m2hleTools = (() => {
     const same = !drawer.hidden && !$('pane-' + tab).hidden;
     if (same) { closeDrawer(); return; }
     drawer.hidden = false;
-    for (const t of ['lag', 'console', 'picture']) {
+    for (const t of ['lag', 'console', 'picture', 'replay', 'cheats']) {
       $('pane-' + t).hidden = t !== tab;
       $('tab-' + t).setAttribute('aria-selected', String(t === tab));
       $('btn-' + t).setAttribute('aria-expanded', String(t === tab));
@@ -561,7 +711,7 @@ const m2hleTools = (() => {
 
   function closeDrawer() {
     $('drawer').hidden = true;
-    for (const t of ['lag', 'console', 'picture']) $('btn-' + t).setAttribute('aria-expanded', 'false');
+    for (const t of ['lag', 'console', 'picture', 'replay', 'cheats']) $('btn-' + t).setAttribute('aria-expanded', 'false');
     $('canvas').focus();
   }
 
@@ -572,6 +722,10 @@ const m2hleTools = (() => {
     $('tab-console').addEventListener('click', () => openDrawer('console'));
     $('btn-picture').addEventListener('click', () => openDrawer('picture'));
     $('tab-picture').addEventListener('click', () => openDrawer('picture'));
+    $('btn-replay').addEventListener('click', () => openDrawer('replay'));
+    $('tab-replay').addEventListener('click', () => openDrawer('replay'));
+    $('btn-cheats').addEventListener('click', () => openDrawer('cheats'));
+    $('tab-cheats').addEventListener('click', () => openDrawer('cheats'));
     $('drawer-close').addEventListener('click', closeDrawer);
     $('lag-start').addEventListener('click', () => diagnose(5));
     $('lag-copy').addEventListener('click', (e) => copy(lastReport, e.currentTarget));
@@ -623,5 +777,5 @@ const m2hleTools = (() => {
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { add, print, printErr, frameBegin, frameEnd, diagnose, reason, onReady, consoleText, openDrawer };
+  return { add, print, printErr, frameBegin, frameEnd, diagnose, reason, onReady, consoleText, openDrawer, systemInfo, copy };
 })();
