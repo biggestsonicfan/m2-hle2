@@ -329,6 +329,68 @@ static void test_exg(void) {
     S.cpu.d[0]=0x11111111; S.cpu.d[1]=0x22222222; S.cpu.pc=0x1000; w16(0x1000,0xC141); m68k_step(&S); /* exg d0,d1 */
     CHECKEQ("exg d0,d1 -> d0", S.cpu.d[0], 0x22222222);
     CHECKEQ("exg d0,d1 -> d1", S.cpu.d[1], 0x11111111);
+    setup();
+    S.cpu.a[0]=0x1000; S.cpu.a[1]=0x2000; S.cpu.pc=0x1000; w16(0x1000,0xC149); m68k_step(&S); /* exg a0,a1 */
+    CHECKEQ("exg a0,a1 -> a0", S.cpu.a[0], 0x2000);
+    CHECKEQ("exg a0,a1 -> a1", S.cpu.a[1], 0x1000);
+    setup();
+    S.cpu.d[0]=0x11111111; S.cpu.a[1]=0x2000; S.cpu.pc=0x1000; w16(0x1000,0xC189); m68k_step(&S); /* exg d0,a1 */
+    CHECKEQ("exg d0,a1 -> d0", S.cpu.d[0], 0x2000);
+    CHECKEQ("exg d0,a1 -> a1", S.cpu.a[1], 0x11111111);
+}
+
+/* and.l d6,($0ED8).w = 0xCDB8 0x0ED8, from Dynamite Cop's sound driver: it was
+ * taken for an EXG, which left the PC on the extension word. */
+static void test_and_to_mem(void) {
+    setup();
+    S.cpu.d[6]=0xFFFFFFFE; S.cpu.a[6]=0x1234; S.cpu.pc=0x1000; w16(0x1000,0xCDB8); w16(0x1002,0x0ED8); w32(0x0ED8,0x0000000F);
+    m68k_step(&S);
+    CHECKEQ("and.l d6,(abs).w: memory", r32(0x0ED8), 0x0000000E);
+    CHECKEQ("and.l d6,(abs).w: pc past the extension", S.cpu.pc, 0x1004);
+    CHECKEQ("and.l d6,(abs).w: a6 untouched", S.cpu.a[6], 0x1234);
+    CHECKEQ("and.l d6,(abs).w: d6 untouched", S.cpu.d[6], 0xFFFFFFFE);
+}
+
+static void test_bcd(void) {
+    setup();
+    S.cpu.d[0]=0x45; S.cpu.d[1]=0x38; S.cpu.pc=0x1000; w16(0x1000,0xC300); m68k_step(&S); /* abcd d0,d1 */
+    CHECKEQ("abcd 45+38", S.cpu.d[1] & 0xFF, 0x83);
+    CHECK("abcd 45+38: no carry", !(S.cpu.sr & (M68K_SR_C | M68K_SR_X)));
+    setup();
+    S.cpu.d[0]=0x55; S.cpu.d[1]=0x66; S.cpu.sr |= M68K_SR_X | M68K_SR_Z; S.cpu.pc=0x1000; w16(0x1000,0xC300); m68k_step(&S);
+    CHECKEQ("abcd 55+66+X", S.cpu.d[1] & 0xFF, 0x22);
+    CHECK("abcd 55+66+X: carry", (S.cpu.sr & (M68K_SR_C | M68K_SR_X)) == (M68K_SR_C | M68K_SR_X));
+    CHECK("abcd 55+66+X: Z cleared", !(S.cpu.sr & M68K_SR_Z));
+    setup();
+    S.cpu.d[0]=0x38; S.cpu.d[1]=0x45; S.cpu.pc=0x1000; w16(0x1000,0x8300); m68k_step(&S); /* sbcd d0,d1 */
+    CHECKEQ("sbcd 45-38", S.cpu.d[1] & 0xFF, 0x07);
+    setup();
+    S.cpu.d[0]=0x01; S.cpu.d[1]=0x00; S.cpu.pc=0x1000; w16(0x1000,0x8300); m68k_step(&S);
+    CHECKEQ("sbcd 00-01", S.cpu.d[1] & 0xFF, 0x99);
+    CHECK("sbcd 00-01: borrow", S.cpu.sr & M68K_SR_C);
+    setup();                                                  /* abcd -(a0),-(a1) */
+    S.cpu.a[0]=0x2001; S.cpu.a[1]=0x3001; MEM[0x2000]=0x19; MEM[0x3000]=0x23; S.cpu.pc=0x1000; w16(0x1000,0xC308); m68k_step(&S);
+    CHECKEQ("abcd -(a0),-(a1)", MEM[0x3000], 0x42);
+    CHECKEQ("abcd -(a0),-(a1): a0", S.cpu.a[0], 0x2000);
+    CHECKEQ("abcd -(a0),-(a1): a1", S.cpu.a[1], 0x3000);
+    setup();
+    S.cpu.d[2]=0x25; S.cpu.pc=0x1000; w16(0x1000,0x4802); m68k_step(&S); /* nbcd d2 */
+    CHECKEQ("nbcd 25", S.cpu.d[2] & 0xFF, 0x75);
+    CHECK("nbcd 25: borrow", S.cpu.sr & M68K_SR_C);
+}
+
+static void test_tas_chk(void) {
+    setup();
+    S.cpu.a[0]=0x2000; MEM[0x2000]=0x00; S.cpu.pc=0x1000; w16(0x1000,0x4AD0); m68k_step(&S); /* tas (a0) */
+    CHECKEQ("tas (a0): memory", MEM[0x2000], 0x80);
+    CHECK("tas (a0): Z from the old byte", S.cpu.sr & M68K_SR_Z);
+    setup();                                                  /* chk.w ($0010).w,d4 */
+    S.cpu.d[4]=5; S.cpu.pc=0x1000; w16(0x1000,0x49B8); w16(0x1002,0x0010); w16(0x0010,9); m68k_step(&S);
+    CHECKEQ("chk.w (abs).w,d4: pc past the extension", S.cpu.pc, 0x1004);
+    CHECKEQ("chk.w (abs).w,d4: d4 untouched", S.cpu.d[4], 5);
+    setup();                                                  /* chk.w d0,d4 = 0x4980, not EXT */
+    S.cpu.d[0]=9; S.cpu.d[4]=0x8005; S.cpu.pc=0x1000; w16(0x1000,0x4980); m68k_step(&S);
+    CHECKEQ("chk.w d0,d4: not ext", S.cpu.d[4], 0x8005);
 }
 
 static void test_scc(void) {
@@ -400,6 +462,9 @@ int main(void) {
     test_bit_ops();
     test_shifts();
     test_exg();
+    test_and_to_mem();
+    test_bcd();
+    test_tas_chk();
     test_scc();
     test_addsub_flags();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

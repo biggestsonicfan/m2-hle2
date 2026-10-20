@@ -8,6 +8,55 @@
  */
 'use strict';
 
+/* The words (m2hle-lang.js). rom.missing.* are m2hle-lang.js's own. */
+m2hleLang.add({
+  en: {
+    'page.gl.lost': 'The browser took the graphics away (the WebGL context was lost). Reload the page to carry on.',
+    'page.no.wasm': 'It does not support WebAssembly.',
+    'page.zip.bad': 'That file could not be read as a zip. Choose your {id}.zip.',
+    'page.zip.missing': 'This zip is missing {file}, which {title} needs.',
+    'page.sfight.bad': 'That file could not be read as a zip. Choose your merged sfight.zip or schamp.zip, ' +
+                       'or sfight.zip and schamp.zip together.',
+    'page.sfight.schamp': 'This zip does not have the Sonic the Fighters program files ({file}). ' +
+                          'It looks like a split "schamp" set: add sfight.zip too, or choose a merged set.',
+    'page.sfight.split': 'This zip is missing {file}, which the game needs. It looks like a split ' +
+                         '"sfight" set, which keeps those files in a separate schamp.zip: add schamp.zip too, ' +
+                         'or choose a merged set.',
+    'page.follow.bad': 'Cannot follow: {error}',
+    'page.memory': 'Not enough memory to read that file.',
+    'page.unreadable': 'That file could not be read.',
+    'page.fetch': 'Could not fetch {what}.',
+    'page.build': 'Build {version}',
+    'page.fs.enter': 'Fullscreen',
+    'page.fs.exit': 'Exit fullscreen',
+    'page.pause': 'Pause',
+    'page.resume': 'Resume',
+    'page.pause.key': '{action} ({key})',
+  },
+  ja: {
+    'page.gl.lost': 'ブラウザがグラフィックスを解放しました（WebGL コンテキストの消失）。続けるにはページを再読み込みしてください。',
+    'page.no.wasm': 'WebAssembly に対応していません。',
+    'page.zip.bad': 'このファイルは zip として読み込めませんでした。{id}.zip を選んでください。',
+    'page.zip.missing': 'この zip には {title} に必要な {file} がありません。',
+    'page.sfight.bad': 'このファイルは zip として読み込めませんでした。マージ済みの sfight.zip または schamp.zip、' +
+                       'もしくは sfight.zip と schamp.zip を一緒に選んでください。',
+    'page.sfight.schamp': 'この zip にはソニック・ザ・ファイターズのプログラムファイル（{file}）がありません。' +
+                          'スプリットの「schamp」セットのようです。sfight.zip も追加するか、マージ済みのセットを選んでください。',
+    'page.sfight.split': 'この zip にはゲームに必要な {file} がありません。スプリットの「sfight」セットのようです。' +
+                         'これらのファイルは別の schamp.zip にあるので、schamp.zip も追加するか、マージ済みのセットを選んでください。',
+    'page.follow.bad': 'フォローできません：{error}',
+    'page.memory': 'メモリが足りないため、ファイルを読み込めません。',
+    'page.unreadable': 'ファイルを読み込めませんでした。',
+    'page.fetch': '{what} を取得できませんでした。',
+    'page.build': 'ビルド {version}',
+    'page.fs.enter': '全画面',
+    'page.fs.exit': '全画面を終了',
+    'page.pause': 'ポーズ',
+    'page.resume': '再開',
+    'page.pause.key': '{action}（{key}）',
+  },
+});
+
 const $ = (id) => document.getElementById(id);
 
 /* The build this page belongs to, stamped into index.html (web/stamp-site.cmake).
@@ -28,26 +77,69 @@ function fatal(text) {
   show('step-fatal');
 }
 
+/* A browser may take the WebGL context away (a phone's GPU reset, memory pressure).
+ * sokol cannot build its resources again, so the picture went black while the
+ * board and the sound ran on (Pinboard #601). A follower reloads and joins again;
+ * a player is told, since a reload ends the game. One reload a minute at most, so
+ * a context lost at every start does not reload for ever. */
+$('canvas').addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  m2hleTools.add('the browser took the graphics away (WebGL context lost)', 'error');
+  if (new URLSearchParams(location.search).has('follow') && performance.now() > 60000) {
+    location.reload();
+    return;
+  }
+  $('fatal-reload').hidden = false;
+  $('fatal-reload').onclick = () => location.reload();
+  fatal(m2hleLang.t('page.gl.lost'));
+});
+
 /* What a failed load means, in words a player can act on. The emulator matches
- * files by checksum, so it knows exactly which ones the zip does not hold. */
+ * files by checksum, so it knows exactly which ones the zips do not hold. A
+ * clone set (vonj, sfight) can come split, its parent's files in their own zip
+ * (von.zip, schamp.zip): the page then holds on to what it has and asks for the
+ * parent (`held`, below). */
 function explainMissing(missing) {
   const names = missing.split(' ').filter(Boolean);
-  if (names.length === 0) {
-    return 'That file could not be read as a zip. Choose your merged sfight.zip or schamp.zip.';
+  const parent = Module.UTF8ToString(Module._web_rom_parent());
+  if (m2hleGame.id !== 'sfight' && names.length > 0 && parent && held.length > 0) {
+    return m2hleLang.t(held.length > 1 ? 'rom.missing.more' : 'rom.missing.parent',
+                       { file: names[0], parent: parent });
   }
+  if (m2hleGame.id !== 'sfight') {
+    return names.length === 0
+      ? m2hleLang.t('page.zip.bad', { id: m2hleGame.id })
+      : m2hleLang.t('page.zip.missing', { file: names[0], title: m2hleGame.title });
+  }
+  if (names.length === 0) return m2hleLang.t('page.sfight.bad');
   const first = names[0];
-  if (/^epr-1900[12]\./.test(first)) {
-    return 'This zip does not have the Sonic the Fighters program files (' + first + '). ' +
-           'It looks like a split "schamp" set. You need a merged set: one zip that holds ' +
-           'both sfight and schamp.';
-  }
-  return 'This zip is missing ' + first + ', which the game needs. It looks like a split ' +
-         '"sfight" set, which keeps those files in a separate schamp.zip. You need a merged ' +
-         'set: one zip that holds both.';
+  if (/^epr-1900[12]\./.test(first)) return m2hleLang.t('page.sfight.schamp', { file: first });
+  return m2hleLang.t('page.sfight.split', { file: first });
 }
 
-function loadZip(bytes) {
+/* The zips the page can give the emulator at once (RL_MEM_ZIPS, rom_loader.h). */
+const MAX_ZIPS = 4;
+/* The zips of a load that missed files, kept for the next pick: one set split in
+ * two zips can be picked one at a time. */
+let held = [];
+
+/* `zips`: the bytes of each zip, one set's files across them. */
+function loadZip(zips) {
   show('step-busy');
+  /* ?follow= names the leader's profile before the game loads (m2hle-follow.js), and
+   * the arcade (stf-arcade.mjs, if it loaded) puts the shared board in localStorage. */
+  followReady.then(() => window.stfArcade && window.stfArcade.ready)
+    .then(() => loadZipNow(zips), (e) => romError(m2hleLang.t('page.follow.bad', { error: e.message })));
+}
+
+/* A malloc'd copy of `bytes` in the emulator's heap, or 0. */
+function heapCopy(bytes) {
+  const ptr = Module._malloc(bytes.length);
+  if (ptr) Module.HEAPU8.set(bytes, ptr);   /* HEAPU8 read AFTER malloc: growth replaces the view */
+  return ptr;
+}
+
+function loadZipNow(zips) {
   /* Let the "reading" text paint before the (synchronous) extraction runs. */
   requestAnimationFrame(() => setTimeout(() => {
     /* ?script= and ?pause= : a run whose inputs are keyed to game frames, so it is
@@ -61,10 +153,23 @@ function loadZip(bytes) {
     }
     if (params.get('pause')) Module._web_pause_at(Number(params.get('pause')) >>> 0);
 
-    const ptr = Module._malloc(bytes.length);
-    if (!ptr) { romError('Not enough memory to read that file.'); return; }
-    Module.HEAPU8.set(bytes, ptr);           /* HEAPU8 read AFTER malloc: growth replaces the view */
-    const rc = Module._web_rom_load(ptr, bytes.length);   /* takes ownership of ptr */
+    /* The first zip is web_rom_load's, the others go before it (web_rom_extra);
+     * both take the buffers over. */
+    const ptrs = zips.map(heapCopy);
+    if (ptrs.includes(0)) {
+      ptrs.forEach((p) => p && Module._free(p));
+      romError(m2hleLang.t('page.memory'));
+      return;
+    }
+    ptrs.slice(1).forEach((p, i) => Module._web_rom_extra(p, zips[i + 1].length));
+    const ptr = ptrs[0];
+    /* Keep this game's save in localStorage, or not: the arcade asks (Sega Rally asks
+     * first; without the arcade, Sonic the Fighters' is kept, as before, and a game
+     * that says keepSave in m2hle-games.js). */
+    Module._web_backup_keep(window.stfArcade ? (window.stfArcade.keepSave() ? 1 : 0)
+                                             : (m2hleGame.id === 'sfight' || m2hleGame.keepSave ? 1 : 0));
+    const rc = Module._web_rom_load(ptr, zips[0].length);   /* takes ownership of ptr */
+    held = rc !== 0 && zips.length < MAX_ZIPS ? zips : [];
     if (rc !== 0) {
       romError(explainMissing(Module.UTF8ToString(Module._web_rom_missing())));
       return;
@@ -74,7 +179,11 @@ function loadZip(bytes) {
     /* Backup RAM (the test menu's settings, rankings) is kept once a minute;
      * this keeps the last of it when the tab goes. */
     addEventListener('pagehide', () => Module._web_backup_flush());
-    m2hleNetplay.onGame();
+    if (m2hleFollow.active) m2hleFollow.onGame();   /* no netplay: the board is the leader's */
+    else { m2hleNetplay.onGame(); m2hleGgpo.onGame(); }
+    m2hleReport.onGame();
+    m2hleCheats.onGame();
+    if (window.stfArcade) window.stfArcade.onGame(m2hleFollow.active ? 'follow' : 'solo');
     m2hleTouch.onGame();
     pauseOnGame();
     $('canvas').focus();
@@ -89,6 +198,8 @@ function loadZip(bytes) {
  * does nothing while they arrive). The GPU work stops with the frames, the sound
  * with the AudioContext (audioStart). Measure per browser: WEB-NETPLAY.md 5.3. */
 let runWorker = null;
+/* Settled once ?follow='s profile is in (at once without one). */
+let followReady = Promise.resolve();
 
 function keepRunning() {
   if (runWorker) return;
@@ -111,11 +222,14 @@ function romError(text) {
   show('step-rom');
 }
 
-function readFile(file) {
-  if (!file) return;
+/* The picked or dropped files, after the zips a failed load left (`held`). */
+function readFiles(files) {
+  files = Array.from(files || []).slice(0, MAX_ZIPS);
+  if (files.length === 0) return;
   $('rom-error').hidden = true;
-  file.arrayBuffer().then((buf) => loadZip(new Uint8Array(buf)),
-                          () => romError('That file could not be read.'));
+  Promise.all(files.map((f) => f.arrayBuffer()))
+    .then((bufs) => loadZip(held.concat(bufs.map((b) => new Uint8Array(b))).slice(-MAX_ZIPS)),
+          () => romError(m2hleLang.t('page.unreadable')));
 }
 
 /* ---- Sound ------------------------------------------------------------------
@@ -282,14 +396,16 @@ function debugStart() {
 function buildLine() {
   const el = $('build');
   const sha = /-([0-9a-f]{7,40})$/.exec(VERSION);
-  if (!sha) { el.textContent = 'Build ' + VERSION; return; }
-  el.textContent = 'Build ';
+  if (!sha) { el.textContent = m2hleLang.t('page.build', { version: VERSION }); return; }
+  /* The link goes where the language puts the version. */
+  const [before, after] = m2hleLang.t('page.build').split('{version}');
+  el.textContent = before;
   const a = document.createElement('a');
   a.href = 'https://github.com/biggestsonicfan/m2-hle2/commit/' + sha[1];
   a.target = '_blank';
   a.rel = 'noopener noreferrer';
   a.textContent = VERSION;
-  el.appendChild(a);
+  el.append(a, after || '');
 }
 
 /* ---- Emscripten ------------------------------------------------------------ */
@@ -298,7 +414,8 @@ var Module = {
   canvas: $('canvas'),
   /* ?args=--fill-ref,--no-mesh-cache reaches main_web.c as argv: the switches that
    * turn one render optimisation off each, for finding which one drew it wrong. */
-  arguments: (params.get('args') || '').split(',').filter((a) => /^--[a-z-]+$/.test(a)),
+  arguments: (params.get('args') || '').split(',').filter((a) => /^--[a-z-]+$/.test(a))
+    .concat(m2hleGame.args),   /* the game, and Sega Rally's wheel (m2hle-game.js) */
   locateFile: (path) => versioned(path),      /* m2hle.wasm */
   /* Everything the emulator prints, into the Console (and on to devtools). */
   print: m2hleTools.print,
@@ -315,36 +432,43 @@ var Module = {
 
   /* Called from main_web.c's init(), once the exports can be used. */
   onM2hleReady() {
+    followReady = m2hleFollow.prepare(Module);
+    if (m2hleFollow.refused) m2hleTools.add('?follow= names another site: not followed', 'warning');
     show('step-rom');
     buildLine();
     m2hleTools.onReady();
     m2hleObjview.onReady();
     m2hleShader.onReady();
+    m2hleCrt.onReady();
+    m2hleReplay.onReady(Module);
+    m2hleCheats.onReady(Module);
+    m2hleReport.onReady(Module);
     m2hleNetplay.onReady(Module);
+    m2hleGgpo.onReady(Module);
     m2hlePad.onReady();
     debugStart();
     /* Development only: ?rom=<path> loads a zip from THIS site, so a headless
-     * browser can boot the game with no file dialog. A production site hosts no
-     * ROMs, so there is nothing for it to find; other origins are refused. */
-    const dev = new URLSearchParams(location.search).get('rom');
-    if (dev) {
-      const url = new URL(dev, location.href);
-      if (url.origin === location.origin) {
-        fetch(url).then((r) => r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.status)))
-                  .then((buf) => loadZip(new Uint8Array(buf)))
-                  .catch((e) => romError('Could not fetch ' + url.pathname + ' (' + e.message + ').'));
-      }
+     * browser can boot the game with no file dialog; a split set gives one per
+     * zip (?rom=vonj.zip&rom=von.zip). A production site hosts no ROMs, so there
+     * is nothing for it to find; other origins are refused. */
+    const urls = new URLSearchParams(location.search).getAll('rom')
+      .map((dev) => new URL(dev, location.href)).filter((url) => url.origin === location.origin);
+    if (urls.length > 0) {
+      Promise.all(urls.map((url) => fetch(url)
+        .then((r) => r.ok ? r.arrayBuffer() : Promise.reject(new Error(url.pathname + ': ' + r.status)))))
+        .then((bufs) => loadZip(bufs.map((b) => new Uint8Array(b))))
+        .catch((e) => romError(m2hleLang.t('page.fetch', { what: e.message })));
     }
   },
 };
 
 if (typeof WebAssembly !== 'object') {
-  fatal('It does not support WebAssembly.');
+  fatal(m2hleLang.t('page.no.wasm'));
 }
 
 /* ---- The file picker and the drop zone ------------------------------------- */
 
-$('file').addEventListener('change', (e) => readFile(e.target.files[0]));
+$('file').addEventListener('change', (e) => { readFiles(e.target.files); e.target.value = ''; });
 
 const drop = $('drop');
 for (const type of ['dragenter', 'dragover']) {
@@ -354,8 +478,9 @@ for (const type of ['dragleave', 'drop']) {
   window.addEventListener(type, (e) => { e.preventDefault(); drop.classList.remove('over'); });
 }
 window.addEventListener('drop', (e) => {
-  if ($('step-rom').hidden) return;
-  readFile(e.dataTransfer && e.dataTransfer.files[0]);
+  const files = e.dataTransfer ? e.dataTransfer.files : [];
+  if (!$('step-rom').hidden) readFiles(files);
+  else if ($('panel').hidden) m2hleReport.loadFile(files[0]);   /* a savestate, or a report's zip (m2hle-report.js) */
 });
 
 /* ---- The menu ----------------------------------------------------------------
@@ -410,7 +535,7 @@ if (fsRequest && (document.fullscreenEnabled || document.webkitFullscreenEnabled
     if (p && p.catch) p.catch((e) => m2hleTools.add('fullscreen refused: ' + e.message, 'warning'));
   });
   const label = () => {
-    btn.textContent = fsElement() ? 'Exit fullscreen' : 'Fullscreen';
+    btn.textContent = m2hleLang.t(fsElement() ? 'page.fs.exit' : 'page.fs.enter');
     btn.setAttribute('aria-pressed', String(!!fsElement()));
     /* Going either way leaves this button focused, and a focused button in the
      * bar is one the keyboard could be driving: hand the keys back to the game. */
@@ -435,8 +560,9 @@ function pauseRender() {
   btn.hidden = !Module._web_pause_allowed();
   btn.setAttribute('aria-pressed', String(on));
   const key = m2hleKeys.binds.p1.pause[0];
-  btn.title = (on ? 'Resume' : 'Pause') + (key ? ' (' + m2hleKeys.keyName(key) + ')' : '');
-  btn.setAttribute('aria-label', on ? 'Resume' : 'Pause');
+  const action = m2hleLang.t(on ? 'page.resume' : 'page.pause');
+  btn.title = key ? m2hleLang.t('page.pause.key', { action, key: m2hleKeys.keyName(key) }) : action;
+  btn.setAttribute('aria-label', action);
   $('paused').hidden = how !== 1;   /* the PS3's menu says so itself */
 }
 

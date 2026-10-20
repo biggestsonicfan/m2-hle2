@@ -4,11 +4,13 @@ The `sdl3` frontend — fullscreen SDL3 window, GLES 3, no ImGui and no Python i
 the build — runs on the RK3566 at 58–60 game fps. This directory is what turns
 the binary into something EmulationStation launches.
 
-CI builds it on every push to `master`
-(`.github/workflows/canary.yml`, job `rocknix`) and attaches
-`m2hle-rocknix-arm64.zip` to the rolling `canary` release:
-
-    https://github.com/biggestsonicfan/m2-hle2/releases/download/canary/m2hle-rocknix-arm64.zip
+**CI no longer builds it** (Pinboard #566): the RetroArch core
+(`packaging/libretro`, `m2hle-libretro-linux-arm64.zip` on the `canary`
+release) has replaced it on the handhelds. The `m2hle-rocknix-arm64.zip` the
+release may still carry is the last one CI built, and the updater below will
+not find a newer one. To build it yourself, cross-compile the `sdl3` frontend
+in debian:trixie with `aarch64.cmake` (absolute path) and pack the binary with
+the scripts and `.cfg` files in this directory.
 
 ## Install
 

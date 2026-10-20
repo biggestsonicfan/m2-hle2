@@ -444,32 +444,34 @@ static inline void rpcn_session_set_peer_addr(rpcn_session_t *s, rpcn_peer_t *p,
  * from the host's address. The LAN peer used to drop every one of them as a
  * stray, and both sat at the barrier until someone left (issue #108). A peer
  * already heard from is never moved. */
-static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port,
-                                     bool punch) {
-    if (!p) return false;
-    uint64_t now = net_now_ms();
-    if (p->heard) {
-        if (p->ip == ip && p->port == port) { p->last_heard_ms = now; return true; }
-        /* A member already heard from moves only once the old address has gone
-         * quiet, and then by the rules of first contact: a punch from anywhere,
-         * a game packet from the same address on another port. Their NAT made a
-         * new mapping (a router that timed the old one out, a phone or laptop
-         * that changed networks); they still send to us, and nothing they sent
-         * reached the match before this, so the stall timer ended it. */
-        if (now - p->last_heard_ms < RPCN_PEER_QUIET_MS) return false;
-        if (ip != p->ip && !punch) return false;
-        char was[32];
-        net_addr_text(was, sizeof(was), p->ip, p->port);
-        p->ip   = ip;
-        p->port = port;
-        p->alt_ip = 0;
-        p->alt_port = 0;
-        p->last_heard_ms = now;
-        p->last_punch_ms = 0;   /* answer at once: their side may be looking for us too */
-        rpcn_session_note(s, "%s went quiet at %s and is now heard from %s; following them",
-                          rpcn_peer_name(p), was, rpcn_peer_addr_text(p));
-        return true;
-    }
+/* A member already heard from. They move only once the old address has gone
+ * quiet, and then by the rules of first contact: a punch from anywhere, a game
+ * packet from the same address on another port. Their NAT made a new mapping (a
+ * router that timed the old one out, a phone or laptop that changed networks);
+ * they still send to us, and nothing they sent reached the match before this, so
+ * the stall timer ended it. */
+static inline bool rpcn_session_rehear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port,
+                                       bool punch, uint64_t now) {
+    if (p->ip == ip && p->port == port) { p->last_heard_ms = now; return true; }
+    if (now - p->last_heard_ms < RPCN_PEER_QUIET_MS) return false;
+    if (ip != p->ip && !punch) return false;
+    char was[32];
+    net_addr_text(was, sizeof(was), p->ip, p->port);
+    p->ip   = ip;
+    p->port = port;
+    p->alt_ip = 0;
+    p->alt_port = 0;
+    p->last_heard_ms = now;
+    p->last_punch_ms = 0;   /* answer at once: their side may be looking for us too */
+    rpcn_session_note(s, "%s went quiet at %s and is now heard from %s; following them",
+                      rpcn_peer_name(p), was, rpcn_peer_addr_text(p));
+    return true;
+}
+
+/* The first datagram from a member: a game packet only from the address we were
+ * told (or the second one we know), a punch from anywhere. */
+static inline bool rpcn_session_first_contact(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip,
+                                              uint16_t port, bool punch, uint64_t now) {
     bool elsewhere = p->ip && p->ip != ip && !(p->alt_ip && p->alt_ip == ip);
     if (elsewhere && !punch) return false;
     char told[32];
@@ -489,6 +491,14 @@ static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t
                                    : "link established with %s at %s",
                           rpcn_peer_name(p), rpcn_peer_addr_text(p));
     return true;
+}
+
+static inline bool rpcn_session_hear(rpcn_session_t *s, rpcn_peer_t *p, uint32_t ip, uint16_t port,
+                                     bool punch) {
+    if (!p) return false;
+    uint64_t now = net_now_ms();
+    if (p->heard) return rpcn_session_rehear(s, p, ip, port, punch, now);
+    return rpcn_session_first_contact(s, p, ip, port, punch, now);
 }
 
 /* ---- The member list ----------------------------------------------------- */
@@ -1384,25 +1394,31 @@ static inline void rpcn_session_update(rpcn_session_t *s) {
 
 /* ---- Rooms --------------------------------------------------------------- */
 
-/* `room_bin` and `member_bin` are the room's first shared state and our own
- * attribute (room.h), so nobody ever sees the room without them. `ints` (may be
- * null) are its rules, in the searchable ints a search filters on. */
-static inline bool rpcn_session_host(rpcn_session_t *s, uint32_t max_slot, const char *password,
-                                     uint32_t flag_attr,
-                                     const uint8_t *room_bin, uint32_t room_len,
-                                     const uint8_t *member_bin, uint32_t member_len,
-                                     const rpcn_int_attrs_t *ints) {
+/* Ready to create a room of `spec`: signed in and out of any room, with
+ * max_slot held to 2..RPCN_ROOM_MAX_MEMBERS in the copy it fills. */
+static inline bool rpcn_session_host_begin(rpcn_session_t *s, const rpcn_room_spec_t *spec,
+                                           rpcn_room_spec_t *out) {
     if (s->stage != RPCN_STAGE_ONLINE) {
         rpcn_session_fail(s, "cannot host before discovery has finished");
         return false;
     }
     rpcn_session_clear_room(s);
     s->is_host = true;
-    if (max_slot < 2) max_slot = 2;
-    if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
-    s->pending_room = rpcn_create_room(&s->client, s->com_id, s->world_id, max_slot, password,
-                                       flag_attr, room_bin, room_len, member_bin, member_len,
-                                       rpcn_session_relay_ms(s), ints);
+    *out = *spec;
+    if (out->max_slot < 2) out->max_slot = 2;
+    if (out->max_slot > RPCN_ROOM_MAX_MEMBERS) out->max_slot = RPCN_ROOM_MAX_MEMBERS;
+    return true;
+}
+
+/* `room_bin` and `member_bin` are the room's first shared state and our own
+ * attribute (room.h), so nobody ever sees the room without them. `ints` (may be
+ * null) are its rules, in the searchable ints a search filters on. The session
+ * fills in `relay_ms` itself. */
+static inline bool rpcn_session_host(rpcn_session_t *s, const rpcn_room_spec_t *spec) {
+    rpcn_room_spec_t r;
+    if (!rpcn_session_host_begin(s, spec, &r)) return false;
+    r.relay_ms = rpcn_session_relay_ms(s);
+    s->pending_room = rpcn_create_room(&s->client, s->com_id, s->world_id, &r);
     if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
     return true;
 }
@@ -1423,19 +1439,11 @@ static inline bool rpcn_session_join(rpcn_session_t *s, uint64_t room_id, const 
 
 /* A room in the PS3 port's own shape (ps3_link.h, rpcn_ps3_create_room): its
  * rules in the eight searchable ints, and a teamId of 0xFF. */
-static inline bool rpcn_session_host_ps3(rpcn_session_t *s, uint32_t max_slot, const uint32_t int_attr[8],
-                                         const uint8_t *room_bin, uint32_t room_len,
-                                         const uint8_t *member_bin, uint32_t member_len) {
-    if (s->stage != RPCN_STAGE_ONLINE) {
-        rpcn_session_fail(s, "cannot host before discovery has finished");
-        return false;
-    }
-    rpcn_session_clear_room(s);
-    s->is_host = true;
-    if (max_slot < 2) max_slot = 2;
-    if (max_slot > RPCN_ROOM_MAX_MEMBERS) max_slot = RPCN_ROOM_MAX_MEMBERS;
-    s->pending_room = rpcn_ps3_create_room(&s->client, s->com_id, s->world_id, max_slot, int_attr,
-                                           room_bin, room_len, member_bin, member_len);
+static inline bool rpcn_session_host_ps3(rpcn_session_t *s, const rpcn_room_spec_t *spec,
+                                         const uint32_t int_attr[8]) {
+    rpcn_room_spec_t r;
+    if (!rpcn_session_host_begin(s, spec, &r)) return false;
+    s->pending_room = rpcn_ps3_create_room(&s->client, s->com_id, s->world_id, &r, int_attr);
     if (!s->pending_room) { rpcn_session_fail(s, "%s", rpcn_last_error(&s->client)); return false; }
     return true;
 }
@@ -1854,17 +1862,8 @@ typedef struct {
     rpcn_client_t       client;
     rpcn_twitch_state_t state;
 
-    char     flow_id[128];
-    char     user_code[32];
-    char     verification_uri[256];
-    uint32_t expires_in;
-    uint32_t interval_s;
-
-    /* What the flow yields. */
-    char     npid[20];
-    char     online_name[32];
-    char     avatar_url[256];
-    char     login_token[80];
+    rpcn_twitch_code_t  code;    /* the start's reply */
+    rpcn_twitch_login_t login;   /* what the flow yields */
 
     uint64_t pending;
     uint64_t deadline_ms;    /* when the device code dies */
@@ -1948,20 +1947,15 @@ static inline bool rpcn_twitch_on_start_reply(rpcn_twitch_t *t, const rpcn_packe
         rpcn_twitch_fail(t, "%s", rpcn_twitch_error_text(pkt->error));
         return false;
     }
-    uint32_t expires = 0, interval = 0;
-    if (!rpcn_parse_twitch_start(pkt->payload, pkt->payload_size,
-                                 t->flow_id, sizeof(t->flow_id),
-                                 t->user_code, sizeof(t->user_code),
-                                 t->verification_uri, sizeof(t->verification_uri),
-                                 &expires, &interval)) {
+    if (!rpcn_parse_twitch_start(pkt->payload, pkt->payload_size, &t->code)) {
         rpcn_twitch_fail(t, "the server's Twitch reply could not be read");
         return false;
     }
     t->started_ok   = true;
-    t->expires_in   = expires ? expires : 900;
-    t->interval_s   = interval ? interval : 5;
-    t->deadline_ms  = net_now_ms() + (uint64_t)t->expires_in * 1000ull;
-    t->next_poll_ms = net_now_ms() + (uint64_t)t->interval_s * 1000ull;
+    if (!t->code.expires_in) t->code.expires_in = 900;
+    if (!t->code.interval_s) t->code.interval_s = 5;
+    t->deadline_ms  = net_now_ms() + (uint64_t)t->code.expires_in * 1000ull;
+    t->next_poll_ms = net_now_ms() + (uint64_t)t->code.interval_s * 1000ull;
     t->state        = RPCN_TWITCH_WAITING;
     return true;
 }
@@ -1973,13 +1967,13 @@ static inline bool rpcn_twitch_on_poll_reply(rpcn_twitch_t *t, const rpcn_packet
     switch (pkt->error) {
         case RPCN_ERR_TWITCH_PENDING:
             /* The overwhelmingly normal answer: they have not clicked yet. */
-            t->next_poll_ms = net_now_ms() + (uint64_t)t->interval_s * 1000ull;
+            t->next_poll_ms = net_now_ms() + (uint64_t)t->code.interval_s * 1000ull;
             return true;
         case RPCN_ERR_TWITCH_SLOW_DOWN:
             /* A rate limit, not a failure. Back off by a whole extra
              * interval rather than retrying at the same cadence, or the
              * next poll earns the same answer. */
-            t->next_poll_ms = net_now_ms() + (uint64_t)(t->interval_s * 2u) * 1000ull;
+            t->next_poll_ms = net_now_ms() + (uint64_t)(t->code.interval_s * 2u) * 1000ull;
             return true;
         case RPCN_OK:
             break;
@@ -1988,11 +1982,7 @@ static inline bool rpcn_twitch_on_poll_reply(rpcn_twitch_t *t, const rpcn_packet
             return false;
     }
 
-    if (!rpcn_parse_twitch_poll(pkt->payload, pkt->payload_size,
-                                t->npid, sizeof(t->npid),
-                                t->online_name, sizeof(t->online_name),
-                                t->avatar_url, sizeof(t->avatar_url),
-                                t->login_token, sizeof(t->login_token))) {
+    if (!rpcn_parse_twitch_poll(pkt->payload, pkt->payload_size, &t->login)) {
         rpcn_twitch_fail(t, "the server's Twitch reply could not be read");
         return false;
     }
@@ -2033,10 +2023,10 @@ static inline void rpcn_twitch_send_next(rpcn_twitch_t *t) {
     }
 
     if (t->state == RPCN_TWITCH_WAITING && !t->pending && net_now_ms() >= t->next_poll_ms) {
-        t->pending = rpcn_twitch_poll_flow(&t->client, t->flow_id);
+        t->pending = rpcn_twitch_poll_flow(&t->client, t->code.flow_id);
         if (!t->pending) { rpcn_twitch_fail(t, "%s", rpcn_last_error(&t->client)); return; }
         /* Re-armed by whichever status comes back. */
-        t->next_poll_ms = net_now_ms() + (uint64_t)t->interval_s * 1000ull;
+        t->next_poll_ms = net_now_ms() + (uint64_t)t->code.interval_s * 1000ull;
     }
 }
 

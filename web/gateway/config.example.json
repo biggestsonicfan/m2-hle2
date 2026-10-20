@@ -1,7 +1,7 @@
 {
   "listen": { "host": "127.0.0.1", "port": 8787 },
   "trustProxy": true,
-  "origins": ["https://play.sonicthefighte.rs", "https://biggestsonicfan.github.io"],
+  "origins": ["https://arcade.sonicthefighte.rs", "https://play.sonicthefighte.rs", "https://biggestsonicfan.github.io"],
 
   "rpcn": {
     "host": "127.0.0.1",

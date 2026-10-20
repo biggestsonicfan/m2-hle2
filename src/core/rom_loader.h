@@ -56,8 +56,11 @@ static inline uint8_t *file_load(const char *path, size_t *out_size) {
 
 /*
  * A ROM set held in memory instead of on disk: the web build is handed the bytes
- * of the one zip the player picked and has no file system to put them in. While
+ * of the zips the player picked and has no file system to put them in. While
  * g_rl_mem_zip is set, zip_extract_from_set ignores its zip paths and reads here.
+ * It holds one zip, or a few: a split clone set is the clone's zip and its
+ * parent's (vonj.zip and von.zip, Pinboard #940), and a file is looked for in
+ * each of them, in the order they were given.
  *
  * Entries are found BY CRC32, out of the zip's central directory, which costs no
  * decompression. A merged MAME set is one zip holding a parent and its clones,
@@ -70,24 +73,39 @@ static inline uint8_t *file_load(const char *path, size_t *out_size) {
  * back to its name with a warning. On disk a mismatch is a use case (hacked
  * sets); over netplay one different byte is a desync, so the web build is strict.
  */
+#define RL_MEM_ZIPS 4
+
 static struct {
-    const uint8_t *data;
-    size_t         size;
+    const uint8_t *data[RL_MEM_ZIPS];
+    size_t         size[RL_MEM_ZIPS];
+    int            count;                   /* 0: read from disk */
     bool           strict;
     int            missing;                 /* files the last load did not find */
     char           missing_names[512];      /* their names, space separated, for the UI */
 } g_rl_mem_zip;
 
+/* The first zip; rl_mem_zip_add gives the others (a split set's parent). */
 static inline void rl_mem_zip_set(const uint8_t *data, size_t size, bool strict) {
     memset(&g_rl_mem_zip, 0, sizeof(g_rl_mem_zip));
-    g_rl_mem_zip.data   = data;
-    g_rl_mem_zip.size   = size;
     g_rl_mem_zip.strict = strict;
+    g_rl_mem_zip.data[0] = data;
+    g_rl_mem_zip.size[0] = size;
+    g_rl_mem_zip.count   = 1;
+}
+
+/* One more zip after rl_mem_zip_set's. 0, or -1 when there is no room. */
+static inline int rl_mem_zip_add(const uint8_t *data, size_t size) {
+    if (g_rl_mem_zip.count < 1 || g_rl_mem_zip.count >= RL_MEM_ZIPS) return -1;
+    g_rl_mem_zip.data[g_rl_mem_zip.count] = data;
+    g_rl_mem_zip.size[g_rl_mem_zip.count] = size;
+    g_rl_mem_zip.count++;
+    return 0;
 }
 
 static inline void rl_mem_zip_clear(void) {
-    g_rl_mem_zip.data = NULL;
-    g_rl_mem_zip.size = 0;
+    memset(g_rl_mem_zip.data, 0, sizeof(g_rl_mem_zip.data));
+    memset(g_rl_mem_zip.size, 0, sizeof(g_rl_mem_zip.size));
+    g_rl_mem_zip.count = 0;
 }
 
 static inline void rl_mem_zip_note_missing(const char *filename) {
@@ -100,14 +118,16 @@ static inline void rl_mem_zip_note_missing(const char *filename) {
     }
 }
 
-static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, uint32_t expected_crc) {
+/* The file out of in-memory zip `z`, by CRC (by name too, when not strict). */
+static inline uint8_t *zip_extract_mem_one(int z, const char *filename, size_t *out_size,
+                                           uint32_t expected_crc) {
 #ifdef M2HLE_NO_ZIP
-    (void)filename; (void)out_size; (void)expected_crc;
+    (void)z; (void)filename; (void)out_size; (void)expected_crc;
     return NULL;
 #else
     mz_zip_archive zip;
     memset(&zip, 0, sizeof(zip));
-    if (!mz_zip_reader_init_mem(&zip, g_rl_mem_zip.data, g_rl_mem_zip.size, 0)) return NULL;
+    if (!mz_zip_reader_init_mem(&zip, g_rl_mem_zip.data[z], g_rl_mem_zip.size[z], 0)) return NULL;
 
     void *data = NULL;
     mz_uint count = mz_zip_reader_get_num_files(&zip);
@@ -122,6 +142,13 @@ static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, u
     mz_zip_reader_end(&zip);
     return (uint8_t *)data;
 #endif
+}
+
+static inline uint8_t *zip_extract_mem(const char *filename, size_t *out_size, uint32_t expected_crc) {
+    uint8_t *data = NULL;
+    for (int z = 0; z < g_rl_mem_zip.count && !data; z++)
+        data = zip_extract_mem_one(z, filename, out_size, expected_crc);
+    return data;
 }
 
 /* crc (optional) gets the file's CRC-32 as the zip's directory records it. That
@@ -151,6 +178,30 @@ static inline uint8_t *zip_extract(const char *zippath, const char *filename,
 #endif
 }
 
+/* The file in the zip whose CRC-32 is `crc`, whatever it is called. MAME finds
+ * a set's files by CRC, so older dumps that name them differently still load
+ * (Sega Rally's srallyc.zip from 2010 has "epr-17888.12" for MAME's
+ * "epr-17888c.12", and the two copro_data ROMs' IC numbers swapped). */
+static inline uint8_t *zip_extract_by_crc(const char *zippath, uint32_t crc, size_t *out_size) {
+#ifdef M2HLE_NO_ZIP
+    (void)zippath; (void)crc; (void)out_size;
+    return NULL;
+#else
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_file(&zip, zippath, 0)) return NULL;
+    void *data = NULL;
+    mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count && !data; i++) {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st) || st.m_is_directory) continue;
+        if ((uint32_t)st.m_crc32 == crc) data = mz_zip_reader_extract_to_heap(&zip, i, out_size, 0);
+    }
+    mz_zip_reader_end(&zip);
+    return (uint8_t *)data;
+#endif
+}
+
 /* Try the child zip first (e.g. sfight.zip), fall back to the parent
  * (e.g. schamp.zip) for files shared via MAME's clone mechanism.
  * Verifies CRC32 — mismatches log a warning but the buffer is still
@@ -158,7 +209,7 @@ static inline uint8_t *zip_extract(const char *zippath, const char *filename,
 static inline uint8_t *zip_extract_from_set(const char *child_zip, const char *parent_zip,
                                             const char *filename, size_t *out_size,
                                             uint32_t expected_crc) {
-    if (g_rl_mem_zip.data) {
+    if (g_rl_mem_zip.count > 0) {
         uint8_t *mem = zip_extract_mem(filename, out_size, expected_crc);
         if (!mem) {
             rl_mem_zip_note_missing(filename);
@@ -170,6 +221,8 @@ static inline uint8_t *zip_extract_from_set(const char *child_zip, const char *p
     uint32_t actual = 0;
     if (child_zip)  data = zip_extract(child_zip,  filename, out_size, &actual);
     if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size, &actual);
+    if (!data && child_zip  && (data = zip_extract_by_crc(child_zip,  expected_crc, out_size))) actual = expected_crc;
+    if (!data && parent_zip && (data = zip_extract_by_crc(parent_zip, expected_crc, out_size))) actual = expected_crc;
     if (!data) { LOG_ERROR("ROM not found: %s", filename); return NULL; }
 
     if (actual != expected_crc) {
@@ -227,6 +280,8 @@ typedef struct romset {
     uint8_t *textures;    size_t textures_size;
     uint8_t *audiocpu;    size_t audiocpu_size;
     uint8_t *samples;     size_t samples_size;
+    /* The CPU board's coprocessor tables (Model 2 / 2A TGP: opr-14742a/43a). */
+    uint8_t *tgp_tables;  size_t tgp_tables_size;
     bool     loaded;
 } romset_t;
 
@@ -238,6 +293,7 @@ static inline void romset_free(romset_t *rs) {
     free(rs->textures);
     free(rs->audiocpu);
     free(rs->samples);
+    free(rs->tgp_tables);
     memset(rs, 0, sizeof(*rs));
 }
 
@@ -248,17 +304,18 @@ static inline void romset_free(romset_t *rs) {
  * interleave or byte swap, no CRC pass. `--export-roms DIR` writes one from a
  * zip. The directory's name picks the profile, as the zip's basename does. A
  * region whose file is missing stays NULL, as it does for a set without it. */
-static const char *const k_romset_files[7] = {
+#define ROMSET_FILES 8
+static const char *const k_romset_files[ROMSET_FILES] = {
     "maincpu.bin", "main_data.bin", "copro_data.bin", "polygons.bin",
-    "textures.bin", "audiocpu.bin", "samples.bin",
+    "textures.bin", "audiocpu.bin", "samples.bin", "tgp_tables.bin",
 };
 
 static inline uint8_t **romset_region(romset_t *rs, int i, size_t **size) {
-    uint8_t **r[7] = { &rs->maincpu, &rs->main_data, &rs->copro_data, &rs->polygons,
-                       &rs->textures, &rs->audiocpu, &rs->samples };
-    size_t *z[7] = { &rs->maincpu_size, &rs->main_data_size, &rs->copro_data_size,
-                     &rs->polygons_size, &rs->textures_size, &rs->audiocpu_size,
-                     &rs->samples_size };
+    uint8_t **r[ROMSET_FILES] = { &rs->maincpu, &rs->main_data, &rs->copro_data, &rs->polygons,
+                                  &rs->textures, &rs->audiocpu, &rs->samples, &rs->tgp_tables };
+    size_t *z[ROMSET_FILES] = { &rs->maincpu_size, &rs->main_data_size, &rs->copro_data_size,
+                                &rs->polygons_size, &rs->textures_size, &rs->audiocpu_size,
+                                &rs->samples_size, &rs->tgp_tables_size };
     *size = z[i];
     return r[i];
 }
@@ -270,7 +327,7 @@ static inline bool romset_is_dir(const char *path) {
 
 static inline int romset_load_dir(romset_t *rs, const char *dir) {
     romset_free(rs);
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < ROMSET_FILES; i++) {
         char path[1024];
         size_t *size;
         uint8_t **region = romset_region(rs, i, &size);
@@ -289,7 +346,7 @@ static inline int romset_save_dir(const romset_t *rs, const char *dir) {
 #else
     mkdir(dir, 0777);
 #endif
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < ROMSET_FILES; i++) {
         char path[1024];
         size_t *size;
         uint8_t **region = romset_region((romset_t *)rs, i, &size);

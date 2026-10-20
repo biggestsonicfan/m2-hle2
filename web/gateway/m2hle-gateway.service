@@ -4,7 +4,7 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now m2hle-gateway
 #   journalctl -u m2hle-gateway -f
 [Unit]
-Description=m2-hle web gateway (play.sonicthefighte.rs <-> RPCN)
+Description=m2-hle web gateway (arcade.sonicthefighte.rs <-> RPCN)
 After=network-online.target
 Wants=network-online.target
 

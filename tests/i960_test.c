@@ -10,6 +10,7 @@
  *   - call/ret frame: FP (g15) = SP aligned to 64, SP = FP + 64, locals zeroed,
  *     pfp/sp/rip saved; ret puts the caller's g15 back
  *   - modpc: mask from src2, new bits from src/dst, which gets the old PC
+ *   - shrdi divides: arithmetic shift rounded toward zero, dst not read
  * plus a few plain ALU / load-store sanity checks.
  *
  * Code is assembled by hand into work RAM and executed via i960_step().
@@ -68,6 +69,75 @@ static i960_cpu_t   cpu;
 
 static void put(uint32_t addr, uint32_t w) { mem_write32(&bus, addr, w); }
 static uint32_t cc(void) { return cpu.sfr.ac & AC_CC_MASK; }
+
+/* shrdi is a dividing shift: arithmetic, rounded toward zero. Sega Rally
+ * halves (pedal byte - 0x30) with it; a 64-bit "double" shift took the
+ * destination's old bits and made -16 into 0x7FFFFFF8. */
+static void test_shrdi(uint32_t CODE) {
+    static const struct { int32_t v; int n; int32_t want; } sd[] = {
+        { -16, 1, -8 }, { -15, 1, -7 }, { 15, 1, 7 }, { -1, 4, 0 }, { -48, 0, -48 },
+    };
+    int ok = 1;
+    for (unsigned k = 0; k < sizeof sd / sizeof sd[0]; k++) {
+        i960_reset(&cpu);
+        cpu.globals.g[4] = (uint32_t)sd[k].v;
+        cpu.globals.g[5] = 0x12345678;
+        cpu.sfr.ip = CODE;
+        put(CODE, enc_reg(0x59a, G(5), G(4), 0, sd[k].n, 1, 0)); /* shrdi n, g4, g5 */
+        i960_step(&cpu, &bus);
+        if ((int32_t)cpu.globals.g[5] != sd[k].want) ok = 0;
+    }
+    CHECK(ok, "shrdi shifts right dividing (rounds toward zero), ignoring the old dst");
+}
+
+/* The game's wait table moves the board timing's costs a cycle a word for
+ * each wait it differs from STF's, where the costs were measured (Pinboard
+ * #763), and by the DRAM bit where the area and its measurement differ on it
+ * (#772). STF's table leaves the measured areas; Sega Rally's puts program ROM
+ * at 4 waits and its backup SRAM at 4; a word that is not a count (0,
+ * External) leaves the area alone. */
+static void put_table(uint8_t *t, const uint32_t *w) {
+    for (int a = 0; a < I960_BT_AREAS; a++)
+        for (int b = 0; b < 4; b++) t[4 * a + b] = (uint8_t)(w[a] >> (8 * b));
+}
+
+/* Every region the bench measured under its own area keeps that cost. */
+static int measured_kept(void) {
+    for (int r = 0; r < I960_BT_REGIONS; r++) {
+        if (r == I960_BT_BACK || r == I960_BT_DLRAM) continue;
+        for (int n = 1; n <= 4; n++)
+            if (g_i960_bt_ld[r][n] != g_i960_bt_ld0[r][n] || g_i960_bt_st[r][n] != g_i960_bt_st0[r][n]) return 0;
+    }
+    return 1;
+}
+
+static void test_area_waits(void) {
+    static const uint32_t stf[I960_BT_AREAS]  = { 4, 2, 0x42, 2, 1, 2, 0x10, 0x10, 0x20, 0x10, 0x10, 0x10, 0x10, 0x10 };
+    static const uint32_t rally[I960_BT_AREAS] = { 0x10, 2, 0x42, 2, 0x10, 0x10, 0x10, 0x10, 8, 0x10, 0x10, 0x10, 0x10, 0x10 };
+    uint8_t t[I960_BT_AREAS * 4];
+    i960_bt_init();
+    put_table(t, stf);
+    i960_bt_areas(t);
+    CHECK(measured_kept() && g_i960_bt_fill[I960_BT_ROM] == 0 && g_i960_bt_brfill[I960_BT_ROM] == 0
+          && g_i960_bt_fill[I960_BT_RAM] == -4 * I960_BT_WAIT + I960_BT_FILL_DRAM,
+          "STF's wait table leaves the measured costs; code in 1-wait DRAM fills 2.8 cycles sooner");
+    CHECK(g_i960_bt_ld[I960_BT_DLRAM][1] == g_i960_bt_ld0[I960_BT_RAM][1] - I960_BT(0.84375)
+          && g_i960_bt_st[I960_BT_DLRAM][1] == g_i960_bt_st0[I960_BT_RAM][1] - I960_BT(0.47265625)
+          && g_i960_bt_ld[I960_BT_DLRAM][4] == g_i960_bt_ld0[I960_BT_RAM][4] - I960_BT(1.1875),
+          "download RAM is work RAM without the DRAM bit");
+    CHECK(g_i960_bt_ld[I960_BT_BACK][1] == g_i960_bt_ld0[I960_BT_BACK][1] + 3 * I960_BT_WAIT - I960_BT(1.109375),
+          "backup SRAM at 4 waits costs 3 a word over work RAM, less the DRAM bit");
+    put_table(t, rally);
+    i960_bt_areas(t);
+    CHECK(g_i960_bt_ld[I960_BT_ROM][2] == g_i960_bt_ld0[I960_BT_ROM][2] + 4 * I960_BT_WAIT
+          && g_i960_bt_fill[I960_BT_ROM] == 8 * I960_BT_WAIT && g_i960_bt_brfill[I960_BT_ROM] == 12 * I960_BT_WAIT,
+          "program ROM at 4 waits: +2 a word, +8 a line fill, +12 a branch's");
+    memset(t, 0, sizeof t);
+    i960_bt_areas(t);
+    CHECK(g_i960_bt_ld[I960_BT_ROM][1] == g_i960_bt_ld0[I960_BT_ROM][1] && g_i960_bt_fill[I960_BT_RAM] == 0
+          && g_i960_bt_ld[I960_BT_DLRAM][1] == g_i960_bt_ld0[I960_BT_DLRAM][1],
+          "an unwritten table leaves the measured costs");
+}
 
 int main(void) {
     mem_init(&bus, NULL, 0);
@@ -143,7 +213,7 @@ int main(void) {
     CHECK(cpu.sfr.ip == CODE + 0x80, "call branches to IP+disp");
     CHECK(cpu.frame_depth == 1, "call pushes a frame");
     CHECK(cpu.locals.rip == CODE + 4, "call saves return IP in rip");
-    CHECK(cpu.locals.pfp == 0x0000AAAA, "call preserves pfp into new frame");
+    CHECK(cpu.locals.pfp == 0x00000FC0, "call puts the caller's FP in pfp");
     CHECK(cpu.globals.fp == 0x1040, "call: g15/fp is SP aligned up to 64 bytes (0x1010 -> 0x1040)");
     CHECK(cpu.locals.sp == 0x1080, "call: SP starts a frame (64 bytes) above FP");
     CHECK(cpu.locals.r[7] == 0, "call zeroes new frame locals");
@@ -152,6 +222,45 @@ int main(void) {
     CHECK(cpu.frame_depth == 0, "ret pops the frame");
     CHECK(cpu.locals.r[7] == 0xDEAD, "ret restores caller locals");
     CHECK(cpu.globals.fp == 0x0FC0, "ret restores the caller's g15/fp");
+
+    /* ---- ret with return status 7: an interrupt return ------------------- */
+    /* pfp & 7 == 7 in supervisor mode: the PC and AC saved under the frame
+     * (FP-16, FP-12) come back (MAME do_ret). Virtual-On's boot code (0xA30)
+     * drops from priority 31 to 0 this way. */
+    i960_reset(&cpu);
+    cpu.locals.pfp = 0;
+    cpu.locals.sp  = RAM_BASE + 0x2010;
+    cpu.globals.fp = RAM_BASE + 0x1FC0;
+    cpu.sfr.pc = 0x001F0002;
+    cpu.sfr.ip = CODE;
+    put(CODE,        enc_ctrl(0x09, 0x80));  /* call +0x80 */
+    put(CODE + 0x80, enc_ctrl(0x0A, 0));     /* ret        */
+    i960_step(&cpu, &bus);   /* call */
+    cpu.locals.pfp |= 7u;
+    put(cpu.globals.fp - 16u, 0x00000000);   /* saved PC: user, priority 0 */
+    put(cpu.globals.fp - 12u, 0x00003001);   /* saved AC */
+    i960_step(&cpu, &bus);   /* ret */
+    CHECK(cpu.sfr.ip == CODE + 4, "ret (status 7) returns to saved rip");
+    CHECK(cpu.sfr.pc == 0, "ret (status 7) restores the PC saved at FP-16");
+    CHECK(cpu.sfr.ac == 0x00003001, "ret (status 7) restores the AC saved at FP-12");
+
+    /* ---- movre: three registers <-> an FP register, 80-bit ---------------- */
+    i960_reset(&cpu);
+    cpu.globals.g[4] = 0;
+    cpu.globals.g[5] = 0xC0000000u;          /* 1.5: mantissa 1.1b, explicit integer bit */
+    cpu.globals.g[6] = 0xABCD3FFFu;          /* exponent 0x3FFF; the high half is ignored */
+    cpu.sfr.ip = CODE;
+    put(CODE,     enc_reg(0x6E1, 0, 0, 0, G(4), 0, 1));     /* movre g4, fp0 */
+    put(CODE + 4, enc_reg(0x6E1, L(8), 0, 0, 0, 1, 0));     /* movre fp0, r8 */
+    put(CODE + 8, enc_reg(0x6E9, L(12), 0, 0, 22, 1, 0));   /* movre 0f1.0, r12 */
+    i960_step(&cpu, &bus);
+    CHECK(cpu.fp_regs[0] == 1.5, "movre reads an extended real from three registers");
+    i960_step(&cpu, &bus);
+    CHECK(cpu.locals.r[8] == 0 && cpu.locals.r[9] == 0xC0000000u && cpu.locals.r[10] == 0x3FFFu,
+          "movre writes an FP register as an extended real");
+    i960_step(&cpu, &bus);
+    CHECK(cpu.locals.r[12] == 0 && cpu.locals.r[13] == 0x80000000u && cpu.locals.r[14] == 0x3FFFu,
+          "movre writes the literal 1.0 as an extended real");
 
     /* ---- modpc src, mask, src/dst ---------------------------------------- */
     /* The boot code's `modpc r4, r4, r5` with r4 = 0x1F0000 (the priority
@@ -210,6 +319,9 @@ int main(void) {
     put(CODE, enc_reg(0x5dc, G(0), 0, 0, L(8), 0, 0));  /* movl r8, g0 */
     i960_step(&cpu, &bus);
     CHECK(cpu.globals.g[0] == 0xA && cpu.globals.g[1] == 0xB, "movl r8, g0 copies r8:r9 into g0:g1");
+
+    test_shrdi(CODE);
+    test_area_waits();
 
     /* ---- concmpi only compares when CC bit 2 (less) is clear ------------- */
     /* The range test `cmpi x, lo; concmpi x, hi` is lo <= x <= hi. STF's
