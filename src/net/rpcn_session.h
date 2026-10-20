@@ -518,6 +518,21 @@ static inline void rpcn_session_clear_room(rpcn_session_t *s) {
     s->room_rev++;
 }
 
+/* What the server says of a member, into its peer slot (`fresh`: just taken). */
+static inline rpcn_peer_t *rpcn_session_fill_peer(rpcn_session_t *s, rpcn_peer_t *p, const rpcn_member_info_t *m, bool fresh) {
+    if (m->npid[0]) snprintf(p->npid, sizeof(p->npid), "%s", m->npid);
+    p->flag_attr = m->flag_attr;
+    p->team_id   = m->team_id;
+    if (m->bin_len) {
+        memcpy(p->bin, m->bin, m->bin_len);
+        p->bin_len = m->bin_len;
+    }
+    if (m->flag_attr & RPCN_MEMBER_FLAG_OWNER) s->owner_id = m->member_id;
+    if (fresh && s->log) rpcn_session_note(s, "%s is in the room (member %u)", rpcn_peer_name(p), m->member_id);
+    s->room_rev++;
+    return p;
+}
+
 /* Add a member or refresh what we know of one. Its address is kept: the server's
  * member data carries none. */
 static inline rpcn_peer_t *rpcn_session_upsert_member(rpcn_session_t *s, const rpcn_member_info_t *m) {
@@ -541,17 +556,7 @@ static inline rpcn_peer_t *rpcn_session_upsert_member(rpcn_session_t *s, const r
         p->member_id = m->member_id;
         fresh = true;
     }
-    if (m->npid[0]) snprintf(p->npid, sizeof(p->npid), "%s", m->npid);
-    p->flag_attr = m->flag_attr;
-    p->team_id   = m->team_id;
-    if (m->bin_len) {
-        memcpy(p->bin, m->bin, m->bin_len);
-        p->bin_len = m->bin_len;
-    }
-    if (m->flag_attr & RPCN_MEMBER_FLAG_OWNER) s->owner_id = m->member_id;
-    if (fresh && s->log) rpcn_session_note(s, "%s is in the room (member %u)", rpcn_peer_name(p), m->member_id);
-    s->room_rev++;
-    return p;
+    return rpcn_session_fill_peer(s, p, m, fresh);
 }
 
 static inline void rpcn_session_remove_member(rpcn_session_t *s, uint16_t member_id) {
@@ -939,6 +944,21 @@ static inline bool rpcn_addr_is_private(uint32_t ip_be) {
         || (ip >> 20) == (172u << 4 | 1u) || (ip >> 16) == (192u << 8 | 168u);
 }
 
+/* Two players behind one public address are told each other's LAN address on
+ * port 3658 whatever port they really have (RPCN hardcodes it), and a player
+ * whose 3658 was taken is on one of the next few (rpcn_session_start). Knock
+ * on those too until one answers: the punch names us, so they adopt the port
+ * it came from. */
+static inline void rpcn_session_punch_lan_ports(rpcn_session_t *s, const rpcn_peer_t *p,
+                                                const uint8_t *punch) {
+    if (p->heard || p->port != RPCN_P2P_PORT || !rpcn_addr_is_private(p->ip)) return;
+    for (uint16_t k = 1; k < RPCN_P2P_PORT_TRIES; k++) {
+        uint16_t port = (uint16_t)(RPCN_P2P_PORT + k);
+        if (p->ip == s->client.local_ip && port == s->client.local_port) continue;
+        rpcn_send_to(&s->client, p->ip, port, punch, RPCN_PUNCH_SIZE);
+    }
+}
+
 static inline void rpcn_session_pump_punch(rpcn_session_t *s) {
     uint8_t punch[RPCN_PUNCH_SIZE];
     memcpy(punch, g_rpcn_punch_tag, sizeof(g_rpcn_punch_tag));
@@ -953,17 +973,7 @@ static inline void rpcn_session_pump_punch(rpcn_session_t *s) {
         rpcn_send_to(&s->client, p->ip, p->port, punch, sizeof(punch));
         if (!p->heard && p->alt_ip && p->alt_port && (p->alt_ip != p->ip || p->alt_port != p->port))
             rpcn_send_to(&s->client, p->alt_ip, p->alt_port, punch, sizeof(punch));
-        /* Two players behind one public address are told each other's LAN
-         * address on port 3658 whatever port they really have (RPCN hardcodes
-         * it), and a player whose 3658 was taken is on one of the next few
-         * (rpcn_session_start). Knock on those too until one answers: the
-         * punch names us, so they adopt the port it came from. */
-        if (!p->heard && p->port == RPCN_P2P_PORT && rpcn_addr_is_private(p->ip))
-            for (uint16_t k = 1; k < RPCN_P2P_PORT_TRIES; k++) {
-                uint16_t port = (uint16_t)(RPCN_P2P_PORT + k);
-                if (p->ip == s->client.local_ip && port == s->client.local_port) continue;
-                rpcn_send_to(&s->client, p->ip, port, punch, sizeof(punch));
-            }
+        rpcn_session_punch_lan_ports(s, p, punch);
     }
 }
 
@@ -1783,6 +1793,18 @@ static inline bool rpcn_account_resend(rpcn_account_t *a, const char *server, ui
     return true;
 }
 
+/* The job fails because the connection closed before the reply came. Say why
+ * when the transport knows. On the web it is often the gateway, not RPCN, that
+ * closed -- one that does not serve this server refuses the socket -- and "the
+ * server hung up" sent issue #109 looking at RPCN, which answers Create fine. */
+static inline void rpcn_account_closed(rpcn_account_t *a) {
+    const char *why = a->client.error[0] ? a->client.error : tls_last_error(&a->client.tls);
+    if (why && *why)
+        rpcn_account_fail(a, "the connection closed before the server answered: %s", why);
+    else
+        rpcn_account_fail(a, "the server closed the connection without answering");
+}
+
 static inline void rpcn_account_update(rpcn_account_t *a) {
     if (a->state != RPCN_ACCOUNT_WORKING) return;
 
@@ -1808,15 +1830,7 @@ static inline void rpcn_account_update(rpcn_account_t *a) {
     }
 
     if (!rpcn_is_connected(&a->client)) {
-        /* Say why when the transport knows. On the web it is often the gateway,
-         * not RPCN, that closed -- one that does not serve this server refuses
-         * the socket -- and "the server hung up" sent issue #109 looking at
-         * RPCN, which answers Create fine. */
-        const char *why = a->client.error[0] ? a->client.error : tls_last_error(&a->client.tls);
-        if (why && *why)
-            rpcn_account_fail(a, "the connection closed before the server answered: %s", why);
-        else
-            rpcn_account_fail(a, "the server closed the connection without answering");
+        rpcn_account_closed(a);
         return;
     }
     if (a->deadline_ms != 0 && net_now_ms() > a->deadline_ms)

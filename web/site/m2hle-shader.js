@@ -14,9 +14,12 @@
  * back on the next visit without the whole folder being stored.
  *
  * Beside them, Depth per pixel (geo3d.h): not the board's one sort key a polygon.
+ * And, for a game whose colours depend on its cabinet (Daytona USA's Twin and
+ * Deluxe), the cabinet to show live (core/cabinet_picture.h, web_set_cabinet).
  *
  * Stored, per browser: the Arcade (localStorage m2hle.arcade, 0 or 1), Depth per
- * pixel (m2hle.pixelDepth, 0 or 1), the
+ * pixel (m2hle.pixelDepth, 0 or 1), the cabinet (m2hle.cabinet.<rom set>, its
+ * id or "" for the test menu's), the
  * filter (m2hle.shaderMode; an old 3 was the CRT with the Arcade), the custom
  * shader's files (IndexedDB m2hle-shader), its parameter values
  * (localStorage m2hle.shaderParams, by preset name).
@@ -168,6 +171,35 @@ const m2hleShader = (() => {
     Module._web_set_pixel_depth(on ? 1 : 0);
     $('shader-pixdepth').checked = on;
     if (remember) store.set(KEY_PIXDEPTH, on ? '1' : '0');
+  }
+
+  /* A game has loaded: its cabinets, if its colours depend on one, and the one
+   * this browser last showed for it. */
+  let cabinetKey = '';
+  function onGame() {
+    if (!ready) return;
+    const sel = $('shader-cabinet');
+    while (sel.options.length > 1) sel.remove(1);
+    const n = Module._web_cabinet_count();
+    cabinetKey = 'm2hle.cabinet.' + Module.UTF8ToString(Module._web_cheats_romset());
+    for (let i = 0; i < n; i++) {
+      const id = Module.UTF8ToString(Module._web_cabinet_id(i));
+      const opt = document.createElement('option');
+      opt.value = id;
+      const key = 'ui.pic.cab.' + id, said = m2hleLang.t(key);
+      if (said && said !== key) { opt.textContent = said; opt.dataset.i18n = key; }   /* follows a language switch */
+      else opt.textContent = Module.UTF8ToString(Module._web_cabinet_label(i));
+      sel.appendChild(opt);
+    }
+    $('shader-cabinet-box').hidden = n === 0;
+    const want = n ? store.get(cabinetKey) || '' : '';
+    setCabinet([...sel.options].some((o) => o.value === want) ? want : '', false);
+  }
+
+  function setCabinet(id, remember = true) {
+    withString(id, (p) => Module._web_set_cabinet(p));
+    $('shader-cabinet').value = id;
+    if (remember && cabinetKey) store.set(cabinetKey, id);
   }
 
   function refreshCustom() {
@@ -419,6 +451,7 @@ const m2hleShader = (() => {
     $('shader-mode').addEventListener('change', (e) => setMode(Number(e.target.value)));
     $('shader-arcade').addEventListener('change', (e) => { if (ready) setArcade(e.target.checked); });
     $('shader-pixdepth').addEventListener('change', (e) => { if (ready) setPixelDepth(e.target.checked); });
+    $('shader-cabinet').addEventListener('change', (e) => { if (ready) setCabinet(e.target.value); });
     $('shader-files').addEventListener('click', () => $('shader-file-input').click());
     $('shader-folder').addEventListener('click', () => $('shader-folder-input').click());
     for (const id of ['shader-file-input', 'shader-folder-input']) {
@@ -453,5 +486,5 @@ const m2hleShader = (() => {
       ', depth per pixel ' + ($('shader-pixdepth').checked ? 'ON (not the board)' : 'off');
   }
 
-  return { onReady, setMode, setArcade, setPixelDepth, summary };
+  return { onReady, onGame, setMode, setArcade, setPixelDepth, summary };
 })();

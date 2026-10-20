@@ -176,6 +176,13 @@ static inline float sharc_angle_to_rad(int32_t fp) {
 static const uint8_t *g_sharc_copro_rom      = NULL;
 static size_t         g_sharc_copro_rom_size = 0;
 
+/* Fn_area_table_gen (0x3A) as Fighting Vipers' COP program has it (PM 0x20B8A):
+ * bins of 1/16 unit, not STF's 1/8, and a P1 ball of radius 0 keeps its mask
+ * (sharc_coli.h). The program is the game's upload, which the HLE does not
+ * run, so the profile says which one it is: mem_init clears it, fvipers_install
+ * sets it after. */
+static bool           g_sharc_area_fv        = false;
+
 /* sin/cos of a signed 16-bit angle the way the firmware takes them (_L202C1):
  * straight out of the ROM, sin at DM 0x1C10000 + angle, cos 0x20000 further on.
  * The tables are rounded to six decimals, so cos(0x4000) is exactly 0 and
@@ -288,16 +295,18 @@ static inline int32_t sharc_logb(float x) {
 }
 
 /* _L205D0 and its inline copies: num / d by RECIPS and three Newton steps with
- * two = 2.0. *last gets the step register's final value, which atan2 goes on
- * to use. */
-static inline float sharc_fw_div_ex(float num, float d, float *last) {
+ * two = 2.0. *last gets the step register's final value (f3), which atan2 goes
+ * on to use, *f12_out what it leaves in f12, which Fn_tri_shin goes on to use. */
+static inline float sharc_fw_div_regs(float num, float d, float *last, float *f12_out) {
     float f3 = sharc_recips(d), f4 = num, f12 = f3 * d;
     f4 = f3 * f4; f3 = 2.0f - f12;
     f12 = f3 * f12; f4 = f3 * f4; f3 = 2.0f - f12;
     f12 = f3 * f12; f4 = f3 * f4; f3 = 2.0f - f12;
     if (last) *last = f3;
+    if (f12_out) *f12_out = f12;
     return f3 * f4;
 }
+static inline float sharc_fw_div_ex(float num, float d, float *last) { return sharc_fw_div_regs(num, d, last, NULL); }
 static inline float sharc_fw_div(float num, float d) { return sharc_fw_div_ex(num, d, NULL); }
 
 /* _L2029B: 1/sqrt(x) by RSQRTS and three Newton steps; 0 for a zero input */
@@ -326,15 +335,25 @@ static inline float sharc_fw_sqrt(float x) {
     return x * f4;
 }
 
-/* _L202D1: atan2(y, x) in radians, [-pi, pi]. The coefficients are the ones
- * _L20154 writes to DM 0x30290 at boot. */
+/* _L202D1's coefficients, DM 0x30290..0x3029B. STF's firmware writes them
+ * itself at boot (_L20154); Fighting Vipers' does not, and its i960 writes
+ * them with 0x24804949 instead, each 1 ulp above STF's but SQRT3, EPS and
+ * the 0 (Pinboard #1334). A word nobody wrote (still 0) is STF's. */
+static const uint32_t SHARC_ATAN_STF[12] = {
+    0x3E8930A2u, 0x3FDDB3D7u, 0x39800000u, 0xBF3853ADu, 0xBFB854A7u, 0x4098123Bu,
+    0x408A3F7Du, 0x00000000u, 0x3F060A91u, 0x3FC90FDAu, 0x3F860A91u, 0x40490FDAu,
+};
+static inline float sharc_atan_k(int i) {
+    uint32_t v = g_sharc.dm[0x290 + i];
+    return sharc_bits_to_float(v ? v : SHARC_ATAN_STF[i]);
+}
+
+/* _L202D1: atan2(y, x) in radians, [-pi, pi], with the coefficients in DM. */
 static inline float sharc_fw_atan2(float y, float x) {
-    const float TAN15 = sharc_bits_to_float(0x3E8930A2u), SQRT3 = sharc_bits_to_float(0x3FDDB3D7u),
-                EPS   = sharc_bits_to_float(0x39800000u),
-                P0 = sharc_bits_to_float(0xBF3853ADu), P1 = sharc_bits_to_float(0xBFB854A7u),
-                Q0 = sharc_bits_to_float(0x4098123Bu), Q1 = sharc_bits_to_float(0x408A3F7Du),
-                HALF_PI = sharc_bits_to_float(0x3FC90FDAu), PI = sharc_bits_to_float(0x40490FDAu);
-    const float OCTANT[4] = { 0.0f, sharc_bits_to_float(0x3F060A91u), HALF_PI, sharc_bits_to_float(0x3F860A91u) };
+    const float TAN15 = sharc_atan_k(0), SQRT3 = sharc_atan_k(1), EPS = sharc_atan_k(2),
+                P0 = sharc_atan_k(3), P1 = sharc_atan_k(4), Q0 = sharc_atan_k(5), Q1 = sharc_atan_k(6),
+                HALF_PI = sharc_atan_k(9), PI = sharc_atan_k(11);
+    const float OCTANT[4] = { sharc_atan_k(7), sharc_atan_k(8), HALF_PI, sharc_atan_k(10) };
     uint32_t xb = sharc_float_to_bits(x), yb = sharc_float_to_bits(y);
     float f0 = y, f15;
     if (!(xb & 0x7F800000u)) {                               /* _L2032F: pass treats a denormal as zero */

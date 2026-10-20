@@ -14,6 +14,7 @@
 
 #include "sokol_gfx.h"
 
+#include "cabinet_picture.h"   /* the Picture menu's cabinet: its colour tables */
 #include "constants.h"
 #include "cop.h"
 #include "emu_thread.h"
@@ -102,6 +103,29 @@ static inline void game_frame_prepare(video_state_t *video, geo3d_state_t *geo3d
     emu_twin_ui_leave(twin);
 }
 
+/* Upload the texture atlas and the luma/colorxlat tables the game changed. */
+static inline void game_frame__upload(memory_bus_t *bus) {
+    /* Decode both 4-bit luma texture banks → GPU atlas for textured fills, and
+     * upload the luma/colorxlat tables — each only when a write changed its RAM
+     * since the last upload (sampled before uploading, so a write that lands
+     * meanwhile uploads again next frame). The atlas is 4 MB: re-sending it
+     * every frame was the largest single cost on a handheld GPU. */
+    static bool     s_atlas_valid = false, s_luts_valid = false;
+    static uint32_t s_atlas_gen, s_luts_gen;
+    uint32_t tex_gen = bus->gen_tex, lut_gen = bus->gen_lut + cabinet_picture_gen();
+    if (!s_atlas_valid || tex_gen != s_atlas_gen) {
+        game_render_upload_atlas(bus->texram0, bus->texram1, TEXRAM0_SIZE,
+                                 bus->tex_dirty[0], bus->tex_dirty[1]);
+        s_atlas_valid = true;
+        s_atlas_gen   = tex_gen;
+    }
+    if (!s_luts_valid || lut_gen != s_luts_gen) {
+        game_render_upload_luts(bus->luma, cabinet_picture_xlat(bus));
+        s_luts_valid = true;
+        s_luts_gen   = lut_gen;
+    }
+}
+
 /* Draw the game into the viewport vp of the current pass.
  * Layer order: back colour → background tiles → 3D scene → foreground/HUD. */
 static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
@@ -111,25 +135,7 @@ static inline void game_frame_draw(video_state_t *video, geo3d_state_t *geo3d,
     emu_mutex_t *twin = emu_twin_ui_enter();
     int64_t t0 = emu_now_us();
     int zone = hprof_enter(HPROF_UPLOAD);   /* host_prof.h */
-    /* Decode both 4-bit luma texture banks → GPU atlas for textured fills, and
-     * upload the luma/colorxlat tables — each only when a write changed its RAM
-     * since the last upload (sampled before uploading, so a write that lands
-     * meanwhile uploads again next frame). The atlas is 4 MB: re-sending it
-     * every frame was the largest single cost on a handheld GPU. */
-    static bool     s_atlas_valid = false, s_luts_valid = false;
-    static uint32_t s_atlas_gen, s_luts_gen;
-    uint32_t tex_gen = bus->gen_tex, lut_gen = bus->gen_lut;
-    if (!s_atlas_valid || tex_gen != s_atlas_gen) {
-        game_render_upload_atlas(bus->texram0, bus->texram1, TEXRAM0_SIZE,
-                                 bus->tex_dirty[0], bus->tex_dirty[1]);
-        s_atlas_valid = true;
-        s_atlas_gen   = tex_gen;
-    }
-    if (!s_luts_valid || lut_gen != s_luts_gen) {
-        game_render_upload_luts(bus->luma, bus->colorxlat);
-        s_luts_valid = true;
-        s_luts_gen   = lut_gen;
-    }
+    game_frame__upload(bus);
     int64_t t1 = emu_now_us();
     g_game_frame_times.upload_us += t1 - t0;
     hprof_enter(HPROF_TILES);

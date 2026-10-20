@@ -48,6 +48,7 @@
  * it is stated so the dependency is visible from the file that has it. */
 #include "net/netplay.h"   /* the lobby, over the bridge — see the netplay section */
 #include "ffb.h"          /* get_status reports the drive board ("drive") */
+#include "cabinet_picture.h" /* set_camera's cabinet: another cabinet's colours */
 #include "m2_texload.h"   /* get_status reports the texture loader in C */
 
 #ifdef _WIN32
@@ -148,6 +149,23 @@ static void mcp_link_pace_json(const emu_thread_ctx_t *emu, char *out, int cap) 
              (unsigned long long)emu->link_pace.dropped, emu->link_pace.trims);
 }
 
+/* get_status's game fields: the frame count, whether the ROM set is in, the
+ * attract's match replay, the idle hold, the texture loader and the CPU rank. */
+static void mcp_status_game_json(const mcp_bridge_t *b, char *out, int cap) {
+    snprintf(out, (size_t)cap,
+             "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
+             "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
+             "\"texload\":{\"hle\":%s,\"rows\":%llu},"
+             "\"enemy_rank\":%d",
+             g_emu_frames,
+             (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
+             g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
+             g_match_replay_frame,
+             g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
+             g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
+             (int)g_enemy_rank);
+}
+
 static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
     mcp_bridge_t *b = &g_mcp;
     int running = b->emu && emu_is_running(b->emu);
@@ -200,6 +218,8 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
     emu_times_json(et, (int)sizeof et, restart_max);
     char lp[160];
     mcp_link_pace_json(b->emu, lp, (int)sizeof lp);
+    char game[384];
+    mcp_status_game_json(b, game, (int)sizeof game);
     /* The drive board's force, as the hosts play it (ffb.h). */
     ffb_out_t fo = ffb_poll();
     char dv[160];
@@ -210,21 +230,12 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
-             "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
-             "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
-             "\"texload\":{\"hle\":%s,\"rows\":%llu},"
-             "\"enemy_rank\":%d,"
+             "%s,"
              "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"link_pace\":%s,\"drive\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, (unsigned long long)steps, profile_id,
-             g_emu_frames,
-             (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
-             g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame,
-             g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
-             g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
-             (int)g_enemy_rank,
+             game,
              av, ov, rt, et, lp, dv, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
@@ -340,6 +351,8 @@ static void mcp_set_camera_depth(const char *req) {
      * the board's flat key (geo3d_flat_depth); the layers are the object viewer's. */
     if (mcp_json_get_str(req,"zflat",   v,sizeof v)) g_geo3d_zflat = (atoi(v) != 0);
     if (mcp_json_get_str(req,"pixdepth",v,sizeof v)) g_geo3d_pixel_depth = (atoi(v) != 0);
+    /* The Picture menu's cabinet (cabinet_picture.h): "twin", "deluxe", "" the board's own. */
+    if (mcp_json_get_str(req,"cabinet", v,sizeof v)) cabinet_picture_choose(v);
     /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
     if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
 }
@@ -1107,16 +1120,10 @@ static void mcp_cmd_reset_sound(const char *req, char *resp, int cap) {
              restart ? "true" : "false", n, g_sound.m68k.cpu.pc, sc->mi_drops, sc->mi_hi);
 }
 
-static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
-    char *p = resp; int left = cap, n;
-    int fe = g_cop.geo_frame_end, fs = g_cop.geo_frame_start;
-    int total = fe - fs;
-    if (total <= 0 || total > GEO_CAPTURE_SIZE) {
-        total = g_cop.geo_capture_count;
-        if (total > GEO_CAPTURE_SIZE) total = GEO_CAPTURE_SIZE;
-        fe = g_cop.geo_capture_head;
-    }
-    int head = fe;
+/* dump_geo_stream's reply after its first line: the captured commands, each
+ * with its arguments, from p on, left bytes free. */
+static inline void mcp_geo_stream_cmds(char *p, int left, int total, int head) {
+    int n;
 #define DAPPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); p += n; left -= n; } while(0)
     DAPPEND("{\"ok\":true,\"total\":%d,\"cmds\":[", total);
     int first = 1;
@@ -1137,6 +1144,19 @@ static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
     }
     DAPPEND("]}");
 #undef DAPPEND
+}
+
+static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
+    char *p = resp; int left = cap;
+    int fe = g_cop.geo_frame_end, fs = g_cop.geo_frame_start;
+    int total = fe - fs;
+    if (total <= 0 || total > GEO_CAPTURE_SIZE) {
+        total = g_cop.geo_capture_count;
+        if (total > GEO_CAPTURE_SIZE) total = GEO_CAPTURE_SIZE;
+        fe = g_cop.geo_capture_head;
+    }
+    int head = fe;
+    mcp_geo_stream_cmds(p, left, total, head);
 }
 
 static void mcp_cmd_dump_midi_log(char *resp, int cap) {
@@ -1349,6 +1369,24 @@ static void mcp_cmd_clear_all_breakpoints(char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"removed\":%d}", removed);
 }
 
+/* The reply: why the board stopped, where, and what a watchpoint saw. */
+static void mcp_wait_stop_reply(char *resp, int cap, int running, int halted, uint32_t ip, uint32_t elapsed) {
+    const char *reason = running                  ? "timeout"
+                       : halted                   ? "halted"
+                       : g_wp.hit                 ? "watchpoint"
+                       : g_bp.hit_addr            ? "breakpoint"
+                       : g_sharc.unknown_trigger_cmd ? "cop_unknown"
+                       : "stopped";
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"stopped\":%s,\"reason\":\"%s\","
+             "\"ip\":\"0x%08X\",\"elapsed_ms\":%u,"
+             "\"cop_cmd\":\"0x%08X\",\"cop_ip\":\"0x%08X\","
+             "\"wp_addr\":\"0x%08X\",\"wp_val\":\"0x%08X\",\"wp_ip\":\"0x%08X\",\"wp_write\":%s}",
+             running ? "false" : "true", reason, ip, elapsed,
+             g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip,
+             g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip, g_wp.hit_write ? "true" : "false");
+}
+
 /*
  * Block until the emulator stops running (breakpoint, halt, or manual stop),
  * or until timeout_ms elapses.  Returns the stop reason and final IP.
@@ -1377,20 +1415,7 @@ static void mcp_cmd_wait_for_stop(const char *req, char *resp, int cap) {
         ip = g_mcp.emu->cpu_snapshot.sfr.ip;
         emu_mutex_unlock(&g_mcp.emu->mutex);
     }
-    const char *reason = running                  ? "timeout"
-                       : halted                   ? "halted"
-                       : g_wp.hit                 ? "watchpoint"
-                       : g_bp.hit_addr            ? "breakpoint"
-                       : g_sharc.unknown_trigger_cmd ? "cop_unknown"
-                       : "stopped";
-    snprintf(resp, (size_t)cap,
-             "{\"ok\":true,\"stopped\":%s,\"reason\":\"%s\","
-             "\"ip\":\"0x%08X\",\"elapsed_ms\":%u,"
-             "\"cop_cmd\":\"0x%08X\",\"cop_ip\":\"0x%08X\","
-             "\"wp_addr\":\"0x%08X\",\"wp_val\":\"0x%08X\",\"wp_ip\":\"0x%08X\",\"wp_write\":%s}",
-             running ? "false" : "true", reason, ip, elapsed,
-             g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip,
-             g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip, g_wp.hit_write ? "true" : "false");
+    mcp_wait_stop_reply(resp, cap, running, halted, ip, elapsed);
 }
 
 /* ---- Command dispatch ---------------------------------------------------- */
@@ -1456,6 +1481,24 @@ static void mcp_cmd_dump_geo_list(const char *req, char *resp, int cap) {
              ok ? "true" : "false", head[0], head[1], (int16_t)sync[0], (int16_t)sync[1]);
 }
 
+/* Copies size bytes of the bus at addr into buf and counts the ones that
+ * are not zero. */
+static uint32_t mcp_dump_snapshot(uint32_t addr, uint32_t size, uint8_t *buf) {
+    /* One consistent snapshot: the i960 must not write half of texture RAM
+     * between the first byte and the last. Copy under the emu mutex, write the
+     * file outside it — disk I/O inside the critical section stalls the UI. */
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; i < size; i++) {
+        uint8_t b = mem_read8(g_mcp.bus, addr + i);
+        buf[i] = b;
+        if (b) nonzero++;
+    }
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    return nonzero;
+}
+
 static void mcp_cmd_dump_memory_file(const char *req, char *resp, int cap) {
     uint32_t addr = 0, size = 0;
     char path[512] = {0};
@@ -1473,18 +1516,7 @@ static void mcp_cmd_dump_memory_file(const char *req, char *resp, int cap) {
     uint8_t *buf = (uint8_t *)malloc(size ? size : 1);
     if (!buf) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return; }
 
-    /* One consistent snapshot: the i960 must not write half of texture RAM
-     * between the first byte and the last. Copy under the emu mutex, write the
-     * file outside it — disk I/O inside the critical section stalls the UI. */
-    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
-    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
-    uint32_t nonzero = 0;
-    for (uint32_t i = 0; i < size; i++) {
-        uint8_t b = mem_read8(g_mcp.bus, addr + i);
-        buf[i] = b;
-        if (b) nonzero++;
-    }
-    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    uint32_t nonzero = mcp_dump_snapshot(addr, size, buf);
 
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -1607,6 +1639,31 @@ static void mcp_cmd_run_frames(const char *req, char *resp, int cap) {
              reason, (unsigned)((emu_now_us() - t0) / 1000));
 }
 
+/* The quirks of the game whose model table dump_model reads, or NULL with the
+ * error in resp: no ROM yet, no profile, or first past the end of the table. */
+static const game_quirks_t *mcp_dump_model_quirks(uint32_t first, char *resp, int cap) {
+    /* `loaded` and not merely allocated. The regions are calloc'd before they
+     * are filled, and a profile resolves in between — decoding out of the gap
+     * reads zero mesh pointers and reports every model empty, which looks like
+     * a decoder that agrees about nothing rather than like a race. */
+    if (!g_mcp.romset || !g_mcp.romset->loaded ||
+        !g_mcp.romset->main_data || !g_mcp.romset->polygons) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"no ROM loaded yet\"}"); return NULL;
+    }
+    if (!g_active_profile) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no game profile\"}"); return NULL;
+    }
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (first >= q->model_table_count) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"model %u is past the table's %u\"}",
+                 first, q->model_table_count);
+        return NULL;
+    }
+    return q;
+}
+
 /* Decode model-table entries and write the triangles out as a file.
  *
  * This is the emulator's own index-array polygon decoder — the one in geo3d.h,
@@ -1637,25 +1694,8 @@ static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
     if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
     }
-    /* `loaded` and not merely allocated. The regions are calloc'd before they
-     * are filled, and a profile resolves in between — decoding out of the gap
-     * reads zero mesh pointers and reports every model empty, which looks like
-     * a decoder that agrees about nothing rather than like a race. */
-    if (!g_mcp.romset || !g_mcp.romset->loaded ||
-        !g_mcp.romset->main_data || !g_mcp.romset->polygons) {
-        snprintf(resp, (size_t)cap,
-                 "{\"ok\":false,\"error\":\"no ROM loaded yet\"}"); return;
-    }
-    if (!g_active_profile) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no game profile\"}"); return;
-    }
-    const game_quirks_t *q = &g_active_profile->quirks;
-    if (first >= q->model_table_count) {
-        snprintf(resp, (size_t)cap,
-                 "{\"ok\":false,\"error\":\"model %u is past the table's %u\"}",
-                 first, q->model_table_count);
-        return;
-    }
+    const game_quirks_t *q = mcp_dump_model_quirks(first, resp, cap);
+    if (!q) return;
     if (count > q->model_table_count - first) count = q->model_table_count - first;
 
     FILE *f = fopen(path, "wb");
@@ -1967,6 +2007,22 @@ static bool mcp_dl_write_index(const mcp_dl_req_t *q, size_t n, size_t nmarks, i
     return true;
 }
 
+/* The side files asked for, each only if every one before it was written. */
+static bool mcp_dl_write_extras(const mcp_dl_req_t *q, size_t nmarks) {
+    if (q->slots && !mcp_dl_dump(q->path, ".slots.bin", q->slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks))
+        return false;
+    if (q->unit && !mcp_dl_dump(q->path, ".unit.bin", q->unit, sizeof(float) * MCP_DL_UNIT_PER_MARK, nmarks))
+        return false;
+    if (q->blocks && !mcp_dl_dump(q->path, ".blocks.bin", q->blocks, q->bbytes, nmarks))
+        return false;
+    if (q->cop_bufram) {
+        bool b = mcp_dl_dump(q->path, ".bufram.bin", q->cop_bufram, 1, BUFF_RAM_SIZE);
+        bool d = mcp_dl_dump(q->path, ".dm.bin", q->cop_dm, sizeof(uint32_t), 0x1000);
+        if (!b || !d) return false;
+    }
+    return true;
+}
+
 /* The capture's files, each only if every one before it was written:
  * <path>.bin (address, value pairs), <path>.json, and those asked for --
  * <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
@@ -1984,18 +2040,7 @@ static bool mcp_dl_write(const mcp_dl_req_t *q, size_t n, size_t nmarks, int ove
     }
     fclose(f);
     if (!ok || !mcp_dl_write_index(q, n, nmarks, overflow)) return false;
-    if (q->slots && !mcp_dl_dump(q->path, ".slots.bin", q->slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks))
-        return false;
-    if (q->unit && !mcp_dl_dump(q->path, ".unit.bin", q->unit, sizeof(float) * MCP_DL_UNIT_PER_MARK, nmarks))
-        return false;
-    if (q->blocks && !mcp_dl_dump(q->path, ".blocks.bin", q->blocks, q->bbytes, nmarks))
-        return false;
-    if (q->cop_bufram) {
-        bool b = mcp_dl_dump(q->path, ".bufram.bin", q->cop_bufram, 1, BUFF_RAM_SIZE);
-        bool d = mcp_dl_dump(q->path, ".dm.bin", q->cop_dm, sizeof(uint32_t), 0x1000);
-        if (!b || !d) return false;
-    }
-    return true;
+    return mcp_dl_write_extras(q, nmarks);
 }
 
 static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {

@@ -499,6 +499,19 @@ static inline bool savestate__entries(mz_zip_archive *zp, mz_uint level, const i
         && savestate__add_extra(zp, level);
 }
 
+/* The finished archive into `tmp`, the file beside the state's final name.
+ * NULL on success, else what went wrong. */
+static inline const char *savestate__write_tmp(const char *tmp, const void *zbuf, size_t zlen) {
+    FILE *f = fopen(tmp, "wb");
+    const char *err = NULL;
+    if (!f) err = "cannot open the file for writing";
+    else {
+        if (fwrite(zbuf, 1, zlen, f) != zlen) err = "short write";
+        if (fclose(f) != 0 && !err) err = "close failed";
+    }
+    return err;
+}
+
 /* Write the board to `path`. Call between slices, with the emu mutex held
  * where there is one. NULL on success, else what went wrong. */
 static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu,
@@ -522,13 +535,7 @@ static inline const char *savestate_save(const char *path, const i960_cpu_t *cpu
      * leaves the previous state whole. */
     char tmp[1100];
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    FILE *f = fopen(tmp, "wb");
-    const char *err = NULL;
-    if (!f) err = "cannot open the file for writing";
-    else {
-        if (fwrite(zbuf, 1, zlen, f) != zlen) err = "short write";
-        if (fclose(f) != 0 && !err) err = "close failed";
-    }
+    const char *err = savestate__write_tmp(tmp, zbuf, zlen);
     mz_zip_writer_end(&z);   /* frees zbuf */
     if (!err) {
 #ifdef _WIN32

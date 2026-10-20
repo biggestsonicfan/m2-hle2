@@ -626,6 +626,18 @@ static void ps3ui_sh_draw_explain(ps3ui_canvas_t *cv, ps3ui_shell_t *sh, const c
     ps3ui_text_box(cv, &st, box, text, ps3ui_slot_alpha(&s, "p_txt_01_lt"), 0);
 }
 
+/* The end of ps3ui_sh_draw_controls: the labels on the pad diagram. */
+static inline void ps3ui_sh_draw_pad_labels(ps3ui_canvas_t *cv, const ps3ui_slots_t *s,
+                                            ps3ui_text_style_t st, float alpha)
+{
+    float x, y;
+    /* the pad diagram's two labels */
+    if (ps3ui_slot_xy(s, "p_controls_txt_01_c", 0.5f, 0.5f, &x, &y))
+        ps3ui_text_centre(cv, &st, x, y - 21.0f, "Pause Menu", alpha);
+    if (ps3ui_slot_xy(s, "p_controls_txt_02_c", 0.5f, 0.5f, &x, &y))
+        ps3ui_text_centre(cv, &st, x, y - 21.0f, "Move", alpha);
+}
+
 static void ps3ui_sh_draw_controls(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
 {
     ps3ui_slots_t s = { 0 };
@@ -668,11 +680,7 @@ static void ps3ui_sh_draw_controls(ps3ui_canvas_t *cv, ps3ui_shell_t *sh)
                 ps3ui_draw_value_arrows(cv, &st, rx - vw * 0.5f, yy, vw, alpha);
             }
         }
-    /* the pad diagram's two labels */
-    if (ps3ui_slot_xy(&s, "p_controls_txt_01_c", 0.5f, 0.5f, &x, &y))
-        ps3ui_text_centre(cv, &st, x, y - 21.0f, "Pause Menu", alpha);
-    if (ps3ui_slot_xy(&s, "p_controls_txt_02_c", 0.5f, 0.5f, &x, &y))
-        ps3ui_text_centre(cv, &st, x, y - 21.0f, "Move", alpha);
+    ps3ui_sh_draw_pad_labels(cv, &s, st, alpha);
 }
 
 /* CREDITS: name left, licence right, the rows from credits_top; the explain

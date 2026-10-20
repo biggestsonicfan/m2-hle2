@@ -185,6 +185,7 @@ function loadZipNow(zips) {
     else { m2hleNetplay.onGame(); m2hleGgpo.onGame(); }
     m2hleReport.onGame();
     m2hleCheats.onGame();
+    m2hleShader.onGame();
     if (window.stfArcade) window.stfArcade.onGame(m2hleFollow.active ? 'follow' : 'solo');
     m2hleTouch.onGame();
     pauseOnGame();

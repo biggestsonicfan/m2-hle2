@@ -143,10 +143,15 @@ static inline void sharc_coli_trans_xz(float X, float Z, float ox, float oy, flo
 
 /* ---- Fn_area_table_gen (0x3A, PM 0x20DDF): per axis, P0's balls (swept from
  *      the previous to the current position, grown by their radii) mark 64 bins
- *      of 1/8 unit; a P1 ball keeps the P0 balls whose extent overlaps its own. */
+ *      of 1/8 unit; a P1 ball keeps the P0 balls whose extent overlaps its own.
+ *      Fighting Vipers' copy (PM 0x20B8A, g_sharc_area_fv) loads 16.0 for 8.0 in
+ *      both loops, so its bins are 1/16 unit and cover -2..+2 units, and skips
+ *      the mask store for a P1 ball of radius 0, which keeps 0xFFFFFFFF
+ *      (Pinboard #1351, #1353). */
 
 /* axis d: P0's balls mark the bin of each one's low end in lo, high end in hi */
 static inline void sharc_coli_area_mark(uint32_t d, uint32_t k0, uint32_t *sh0, uint32_t lo[64], uint32_t hi[64]) {
+    const float S = g_sharc_area_fv ? 16.0f : 8.0f;
     uint32_t bit = 1;
     for (uint32_t i = 0; i < 32u; i++, bit <<= 1) {
         float a = sharc_dm_getf(0x1403F40u + d + 3u * i), b = sharc_dm_getf(0x1403FA0u + d + 3u * i);
@@ -157,9 +162,9 @@ static inline void sharc_coli_area_mark(uint32_t d, uint32_t k0, uint32_t *sh0, 
         uint32_t cur = *sh0; *sh0 >>= 1;
         if ((cur & 1u) && k0 != 4u) R = R * sharc_dm_getf(0x306F0u);
         float f0 = a - R, f1 = b + R;
-        float u = f0 * 8.0f; u = u + 32.0f; u = u - 0.5f;
+        float u = f0 * S; u = u + 32.0f; u = u - 0.5f;
         lo[(int32_t)u & 63] |= bit;
-        u = f1 * 8.0f; u = u + 32.0f; u = u - 0.5f;
+        u = f1 * S; u = u + 32.0f; u = u - 0.5f;
         hi[(int32_t)u & 63] |= bit;
     }
 }
@@ -167,20 +172,22 @@ static inline void sharc_coli_area_mark(uint32_t d, uint32_t k0, uint32_t *sh0, 
 /* axis d: each P1 ball keeps, in its candidate mask, the P0 balls whose bins
  * overlap its own extent */
 static inline void sharc_coli_area_keep(uint32_t d, uint32_t k1, uint32_t *sh1, const uint32_t lo[64], const uint32_t hi[64]) {
+    const float S = g_sharc_area_fv ? 16.0f : 8.0f;
     for (uint32_t j = 0; j < 32u; j++) {
         float a = sharc_dm_getf(0x1407F40u + d + 3u * j), b = sharc_dm_getf(0x1407FA0u + d + 3u * j);
         if (b - a < 0.0f) { float t = a; a = b; b = t; }
         uint32_t Rb = sharc_dm_get(0x30700u + j), mask = 0;
+        if (Rb == 0 && g_sharc_area_fv) continue;      /* FV: no store, the mask stays */
         if (Rb != 0) {
             float R = sharc_bits_to_float(Rb);
             uint32_t cur = *sh1; *sh1 >>= 1;
             if ((cur & 1u) && k1 != 4u) R = R * sharc_dm_getf(0x307F0u);
             float f0 = a - R, f1 = b + R;
-            float u = f0 * 8.0f; u = u + 32.0f;
+            float u = f0 * S; u = u + 32.0f;
             if (!(u < 0.0f) && !(u - 64.0f >= 0.0f)) {
                 u = u - 0.5f;
                 mask = hi[(int32_t)u & 63];
-                float v = f1 * 8.0f; v = v + 32.0f;
+                float v = f1 * S; v = v + 32.0f;
                 if (!(v < 0.0f) && !(v - 64.0f >= 0.0f)) {
                     v = v - 0.5f;
                     mask &= lo[(int32_t)v & 63];

@@ -204,6 +204,27 @@ static inline void pkt_lockstep_stop(pkt_lockstep_t *p) {
     p->state = PKT_OFF;
 }
 
+/* Joiner only: the host's hello, which starts the round or turns this core away. */
+static inline void pkt_lockstep_on_hello(pkt_lockstep_t *p, const lockstep_header_t *h, const void *buf, size_t len) {
+    if (p->is_host || len < sizeof(pkt_hello_t)) return;
+    pkt_hello_t hello;
+    memcpy(&hello, buf, sizeof hello);
+    if (hello.magic != PKT_HELLO_MAGIC || hello.version != PKT_HELLO_VERSION) {
+        pkt_lockstep_end(p, "the host runs an incompatible core version");
+        return;
+    }
+    if (hello.game_tag != p->game_tag) {
+        pkt_lockstep_end(p, "the host is running a different game");
+        return;
+    }
+    p->have_peer   = true;
+    p->peer_id     = 0;
+    p->frame_delay = hello.frame_delay;
+    p->generation  = h->generation & 0x1Fu;
+    pkt_begin_round(p);
+    pkt_note(p, "Netplay: joined as player 2 (input delay %u) - both boards restart now", p->frame_delay);
+}
+
 static inline void pkt_lockstep_receive(pkt_lockstep_t *p, const void *buf, size_t len, uint64_t now_ms) {
     if (len < sizeof(lockstep_header_t) || p->state == PKT_OFF || p->state == PKT_ENDED) return;
     lockstep_header_t h;
@@ -211,23 +232,7 @@ static inline void pkt_lockstep_receive(pkt_lockstep_t *p, const void *buf, size
     p->last_peer_ms = now_ms;
 
     if (h.type == PKT_PACKET_HELLO) {
-        if (p->is_host || len < sizeof(pkt_hello_t)) return;
-        pkt_hello_t hello;
-        memcpy(&hello, buf, sizeof hello);
-        if (hello.magic != PKT_HELLO_MAGIC || hello.version != PKT_HELLO_VERSION) {
-            pkt_lockstep_end(p, "the host runs an incompatible core version");
-            return;
-        }
-        if (hello.game_tag != p->game_tag) {
-            pkt_lockstep_end(p, "the host is running a different game");
-            return;
-        }
-        p->have_peer   = true;
-        p->peer_id     = 0;
-        p->frame_delay = hello.frame_delay;
-        p->generation  = h.generation & 0x1Fu;
-        pkt_begin_round(p);
-        pkt_note(p, "Netplay: joined as player 2 (input delay %u) - both boards restart now", p->frame_delay);
+        pkt_lockstep_on_hello(p, &h, buf, len);
         return;
     }
     if (h.session != p->game_tag) return;

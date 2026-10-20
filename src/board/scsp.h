@@ -823,6 +823,21 @@ static inline int32_t scsp_sel(int32_t m, int32_t a, int32_t b) { return (a & m)
     }
 #define SCSP_DSP_KIND4(K) SCSP_DSP_KIND(K) SCSP_DSP_KIND(K + 1) SCSP_DSP_KIND(K + 2) SCSP_DSP_KIND(K + 3)
 
+/* scsp_dsp_step's input bank, filled from MEMS, MIXS and EXTS. */
+static inline void scsp_dsp_inputs(const scsp_dsp_t *d, int32_t *in) {
+    memcpy(in, d->mems, sizeof d->mems);
+    for (int i = 0; i < 16; i++) in[0x20 + i] = (int32_t)((uint32_t)d->mixs[i] << 4);
+    in[0x30] = d->exts[0] * 256;
+    in[0x31] = d->exts[1] * 256;
+}
+
+/* scsp_dsp_step's end: DEC down a step and MIXS cleared, unless the program ended early. */
+static inline void scsp_dsp_step_end(scsp_dsp_t *d, int run) {
+    if (run < d->last_step) return;   /* the program ended on a bad IRA: no DEC, MIXS kept */
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+}
+
 static void scsp_dsp_step(scsp_t *s) {
     scsp_dsp_t *d = &s->dsp;
     if (d->stopped) return;
@@ -833,10 +848,7 @@ static void scsp_dsp_step(scsp_t *s) {
     /* The input bank IRA indexes: MEMS, then MIXS << 4, then EXTS << 8. MEMS
      * is written back below, and only the step writes it. */
     int32_t in[0x40];
-    memcpy(in, d->mems, sizeof d->mems);
-    for (int i = 0; i < 16; i++) in[0x20 + i] = (int32_t)((uint32_t)d->mixs[i] << 4);
-    in[0x30] = d->exts[0] * 256;
-    in[0x31] = d->exts[1] * 256;
+    scsp_dsp_inputs(d, in);
 
     int32_t *temp = d->temp;
     const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
@@ -894,9 +906,7 @@ static void scsp_dsp_step(scsp_t *s) {
     }
     memcpy(d->mems, in, sizeof d->mems);
     memcpy(d->efreg, efreg, sizeof d->efreg);
-    if (run < d->last_step) return;   /* the program ended on a bad IRA: no DEC, MIXS kept */
-    d->dec--;
-    memset(d->mixs, 0, sizeof d->mixs);
+    scsp_dsp_step_end(d, run);
 }
 
 /* ---- interrupts ------------------------------------------------------------------- */

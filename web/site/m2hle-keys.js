@@ -33,6 +33,10 @@ m2hleLang.add({
     'keys.act.start': 'Start', 'keys.act.coin': 'Coin', 'keys.act.pause': 'Pause',
     'keys.sub.macros': 'Macros: one press holds several buttons',
     'keys.sub.page': 'The page: offline only, as the button beside the menu',
+    'keys.act.service': 'Service', 'keys.act.test': 'Test',
+    'keys.act.gearn': 'Neutral', 'keys.act.gear1': '1st gear', 'keys.act.gear2': '2nd gear',
+    'keys.act.gear3': '3rd gear', 'keys.act.gear4': '4th gear',
+    'keys.sub.cab': 'The cabinet: player 1 only',
     'keys.none': 'Not set',
     'keys.remove': 'Remove',
     'keys.remove.from': 'Remove {key} from {action}',
@@ -49,6 +53,10 @@ m2hleLang.add({
     'keys.act.start': 'スタート', 'keys.act.coin': 'コイン', 'keys.act.pause': 'ポーズ',
     'keys.sub.macros': 'マクロ：1回押すと複数のボタンを同時に押します',
     'keys.sub.page': 'ページ：オフライン時のみ。メニュー横のボタンと同じです',
+    'keys.act.service': 'サービス', 'keys.act.test': 'テスト',
+    'keys.act.gearn': 'ニュートラル', 'keys.act.gear1': '1速', 'keys.act.gear2': '2速',
+    'keys.act.gear3': '3速', 'keys.act.gear4': '4速',
+    'keys.sub.cab': '筐体：プレイヤー1のみ',
     'keys.none': '未設定',
     'keys.remove': '削除',
     'keys.remove.from': '{action}から{key}を削除',
@@ -85,9 +93,19 @@ const m2hleKeys = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* The cabinet's own switches, player 1's tab only: the board's Service and
+     * Test, and a racing game's gear buttons (m2hleGame.gears), one per gate of
+     * the lever (src/board/io_5649.h). Unbound until the player binds them. */
+    { id: 'service', act: 20, cab: true },
+    { id: 'test',    act: 21, cab: true },
+    { id: 'gearn',   act: 22, cab: true, gears: true },
+    { id: 'gear1',   act: 23, cab: true, gears: true },
+    { id: 'gear2',   act: 24, cab: true, gears: true },
+    { id: 'gear3',   act: 25, cab: true, gears: true },
+    { id: 'gear4',   act: 26, cab: true, gears: true },
     /* The page's Pause (m2hle-page.js), not a game button: it holds nothing. */
     { id: 'pause', acts: [],        page: true },
-  ];
+  ].filter((a) => !a.gears || m2hleGame.gears);
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   for (const a of ACTIONS) a.label = m2hleGame.labels[a.id] || a.label || m2hleLang.t('keys.act.' + a.id);
   const P2_OFFSET = 10;
@@ -97,10 +115,12 @@ const m2hleKeys = (() => {
   const DEFAULTS = {
     p1: { up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'],
           b1: ['KeyZ'], b2: ['KeyX'], b3: ['KeyC'], b4: ['KeyV'], start: ['Digit1'], coin: ['Digit5'],
-          pk: [], pb: [], kb: [], pkb: [], pause: ['KeyP', 'Pause'] },
+          pk: [], pb: [], kb: [], pkb: [], service: ['F1', 'Digit9'], test: ['F2'],
+          gearn: [], gear1: [], gear2: [], gear3: [], gear4: [], pause: ['KeyP', 'Pause'] },
     p2: { up: ['KeyI'], down: ['KeyK'], left: ['KeyJ'], right: ['KeyL'],
           b1: ['Delete'], b2: ['End'], b3: ['PageDown'], b4: ['Home'], start: ['Digit2'], coin: ['Digit6'],
-          pk: [], pb: [], kb: [], pkb: [], pause: [] },
+          pk: [], pb: [], kb: [], pkb: [], service: [], test: [],
+          gearn: [], gear1: [], gear2: [], gear3: [], gear4: [], pause: [] },
   };
   for (const p of ['p1', 'p2']) Object.assign(DEFAULTS[p], (m2hleGame.keys || {})[p]);
 
@@ -154,7 +174,7 @@ const m2hleKeys = (() => {
     let m = 0;
     for (const p of ['p1', 'p2']) {
       const shift = p === 'p2' ? P2_OFFSET : 0;
-      for (const a of ACTIONS) if (binds[p][a.id].includes(code)) m |= a.mask << shift;
+      for (const a of ACTIONS) if (!(a.cab && shift) && binds[p][a.id].includes(code)) m |= a.mask << shift;
     }
     return m >>> 0;
   }
@@ -251,10 +271,17 @@ const m2hleKeys = (() => {
     }
     rows.textContent = '';
     for (const a of ACTIONS) {
+      if (a.cab && player !== 'p1') continue;
       if (a.macro && a === ACTIONS.find((x) => x.macro)) {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
         sub.textContent = m2hleLang.t('keys.sub.macros');
+        rows.appendChild(sub);
+      }
+      if (a.cab && a === ACTIONS.find((x) => x.cab)) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = m2hleLang.t('keys.sub.cab');
         rows.appendChild(sub);
       }
       if (a.page) {
@@ -331,9 +358,12 @@ const m2hleKeys = (() => {
     }
     $('key-reset').addEventListener('click', () => { binds = clone(DEFAULTS); save(); release(); stopListening(); });
     /* The panel's Close button, the Controls button and Escape all go through
-     * m2hlePad.toggle; this hears about it by watching the panel. */
-    new MutationObserver(() => { if ($('controls').hidden) listening = null; render(); })
-      .observe($('controls'), { attributes: true, attributeFilter: ['hidden'] });
+     * m2hlePad.toggle, and its tabs hide this section; this hears about both by watching. */
+    const hiddenWatch = new MutationObserver(() => {
+      if ($('controls').hidden || $('key-section').hidden) listening = null;
+      render();
+    });
+    for (const id of ['controls', 'key-section']) hiddenWatch.observe($(id), { attributes: true, attributeFilter: ['hidden'] });
     if (navigator.keyboard && navigator.keyboard.getLayoutMap) {
       navigator.keyboard.getLayoutMap().then((m) => { layout = m; render(); }).catch(() => {});
     }

@@ -461,20 +461,24 @@ static inline uint8_t sound_rom_byte(const sound_state_t *ss, uint32_t a) {
     return o < ss->samples_size ? ss->samples[o] : 0;
 }
 
+/* A read of the SCSP's registers, `off` bytes into them; a peek leaves the
+ * chip as it was. */
+static inline uint32_t sound__scsp_bus_read(sound_state_t *ss, uint32_t off, int sz, int peek) {
+    if (peek) {
+        uint16_t w = scsp_peek16(&ss->scsp, off & ~1u);
+        if (sz == 1) return (off & 1) ? (w & 0xFFu) : (uint32_t)(w >> 8);
+        if (sz == 2) return w;
+        return ((uint32_t)w << 16) | scsp_peek16(&ss->scsp, (off & ~1u) + 2);
+    }
+    uint32_t v = scsp_read(&ss->scsp, off, sz);
+    if (sndcap_on()) sndcap_scsp(0, off, v, sz);
+    return v;
+}
+
 static uint32_t sound_bus_read(sound_state_t *ss, uint32_t addr, int sz, int peek) {
     addr &= 0xFFFFFFu;
-    if (addr >= M68K_SCSP_BASE && addr < M68K_SCSP_BASE + M68K_SCSP_SIZE) {
-        uint32_t off = addr - M68K_SCSP_BASE;
-        if (peek) {
-            uint16_t w = scsp_peek16(&ss->scsp, off & ~1u);
-            if (sz == 1) return (off & 1) ? (w & 0xFFu) : (uint32_t)(w >> 8);
-            if (sz == 2) return w;
-            return ((uint32_t)w << 16) | scsp_peek16(&ss->scsp, (off & ~1u) + 2);
-        }
-        uint32_t v = scsp_read(&ss->scsp, off, sz);
-        if (sndcap_on()) sndcap_scsp(0, off, v, sz);
-        return v;
-    }
+    if (addr >= M68K_SCSP_BASE && addr < M68K_SCSP_BASE + M68K_SCSP_SIZE)
+        return sound__scsp_bus_read(ss, addr - M68K_SCSP_BASE, sz, peek);
     /* The hot paths: sound RAM, and the program ROM the driver runs from (every
      * opcode fetch), each read in place when the whole access lies inside it.
      * sound_rom_byte, a byte at a time through every region test, was an

@@ -217,13 +217,19 @@ static inline int objview__fill_pct(const uint8_t *p, size_t n, size_t stride) {
     return taken ? (int)((hits * 100) / taken) : 0;
 }
 
-static inline void objview_probe(const romset_t *rs, memory_bus_t *bus, objview_ready_t *out) {
-    memset(out, 0, sizeof *out);
+/* What the board has loaded and drawn: the ROM, the profile and its model
+ * table, the frame, and the models the last frame drew. */
+static inline void objview_probe_board(const romset_t *rs, objview_ready_t *out) {
     out->rom_loaded = (rs && rs->loaded && rs->main_data && rs->polygons) ? 1 : 0;
     out->profile    = g_active_profile ? 1 : 0;
     out->frames     = g_emu_frames;
     out->models     = g_active_profile ? g_active_profile->quirks.model_table_count : 0;
     out->captures   = g_geo3d_state ? g_geo3d_state->captured_count : 0;
+}
+
+static inline void objview_probe(const romset_t *rs, memory_bus_t *bus, objview_ready_t *out) {
+    memset(out, 0, sizeof *out);
+    objview_probe_board(rs, out);
     if (bus) {
         int t0 = objview__fill_pct(bus->texram0, TEXRAM0_SIZE, 1021);
         int t1 = objview__fill_pct(bus->texram1, TEXRAM1_SIZE, 1021);
@@ -469,6 +475,14 @@ static inline void objview__discard_target(void) {
     g_objview.rt_h = 0;
 }
 
+/* Whether both images of the offscreen target and both its attachments were made. */
+static inline bool objview__target_valid(void) {
+    return sg_query_image_state(g_objview.color_img) == SG_RESOURCESTATE_VALID &&
+           sg_query_image_state(g_objview.depth_img) == SG_RESOURCESTATE_VALID &&
+           sg_query_view_state(g_objview.color_att)  == SG_RESOURCESTATE_VALID &&
+           sg_query_view_state(g_objview.depth_att)  == SG_RESOURCESTATE_VALID;
+}
+
 /*
  * (Re)create the offscreen target at w x h.
  *
@@ -514,10 +528,7 @@ static inline bool objview__ensure_target(int w, int h) {
         g_objview.color_tex = sg_make_view(&(sg_view_desc){
             .texture.image = g_objview.color_img, .label = "objview-color-tex" });
 
-    if (sg_query_image_state(g_objview.color_img) != SG_RESOURCESTATE_VALID ||
-        sg_query_image_state(g_objview.depth_img) != SG_RESOURCESTATE_VALID ||
-        sg_query_view_state(g_objview.color_att)  != SG_RESOURCESTATE_VALID ||
-        sg_query_view_state(g_objview.depth_att)  != SG_RESOURCESTATE_VALID) {
+    if (!objview__target_valid()) {
         objview__discard_target();
         return false;
     }

@@ -280,16 +280,9 @@ static void shle_sfx_order_close(uint8_t d2) {
         if ((shle_rb(v + 2) & 0x08) && shle_rb(v + 5) > d2) shle_wb(v + 5, shle_rb(v + 5) - 1);
 }
 
-/* loc_6025FC / loc_60263E: a free voice round-robin, or the oldest music voice
- * (a released one first). 0 = none to be had. */
-static uint32_t shle_alloc_music(void) {
-    uint32_t a1 = G32(0x141A);
-    for (int n = 0; n < 32; n++) {
-        if (a1 == SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }
-        if (a1 < SHLE_VOICES || a1 > SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }  /* not in the driver: a corrupt pointer */
-        if (shle_rb(a1 + 2) == 0) { SG32(0x141A, a1 + 16); return a1; }
-        a1 += 16;
-    }
+/* loc_60263E: no voice free, so the oldest music voice is taken (a released
+ * one first), cut and its stream cleared. 0 = none to be had. */
+static uint32_t shle_steal_music(void) {
     uint8_t d6 = 0xFF; uint32_t pick = 0;
     for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
         uint8_t f = shle_rb(v + 2);
@@ -310,6 +303,19 @@ static uint32_t shle_alloc_music(void) {
     shle_music_order_close(d6, true);
     SG8(0x141E, G8(0x141E) - 1);
     return pick;
+}
+
+/* loc_6025FC / loc_60263E: a free voice round-robin, or the oldest music voice
+ * (a released one first). 0 = none to be had. */
+static uint32_t shle_alloc_music(void) {
+    uint32_t a1 = G32(0x141A);
+    for (int n = 0; n < 32; n++) {
+        if (a1 == SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }
+        if (a1 < SHLE_VOICES || a1 > SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }  /* not in the driver: a corrupt pointer */
+        if (shle_rb(a1 + 2) == 0) { SG32(0x141A, a1 + 16); return a1; }
+        a1 += 16;
+    }
+    return shle_steal_music();
 }
 
 /* loc_601C7A: an effect voice. Under byte_60807C of them, any free voice;
@@ -801,6 +807,21 @@ static void shle_release(uint32_t v, uint8_t ch) {
     }
 }
 
+/* Every voice playing the note in 0x1415 / 0x1416 on the current channel lets
+ * go of it; one with flag 0x02 (held for the pedal) or 0x10 set is left alone. */
+static void shle_release_note(void) {
+    uint8_t ch = G8(0x140E) & 0xF;
+    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
+        if (shle_rb(v + 3) != G8(0x1415) || shle_rb(v + 4) != ch || shle_rw(v + 6) != G16(0x1416)) continue;
+        uint8_t f = shle_rb(v + 2);
+        if (f & 0x12) continue;
+        f &= 0x7F;
+        shle_wb(v + 2, f);
+        if (!f) continue;
+        shle_release(v, ch);
+    }
+}
+
 static void shle_note_off_voices(uint32_t t, uint8_t d4, uint8_t d2) {
     uint32_t d3 = shle_rb(t + 2) & 0x7Fu;
     uint32_t a2 = shle_ml(SHLE_P_INSDATA);
@@ -822,16 +843,7 @@ static void shle_note_off_voices(uint32_t t, uint8_t d4, uint8_t d2) {
         d4 = (uint8_t)((d4 + shle_mb(a2 + 3)) & 0x7F);
         SG8(0x1415, shle_mb(SHLE_T_OCTNOTE + d4));
     }
-    uint8_t ch = G8(0x140E) & 0xF;
-    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
-        if (shle_rb(v + 3) != G8(0x1415) || shle_rb(v + 4) != ch || shle_rw(v + 6) != G16(0x1416)) continue;
-        uint8_t f = shle_rb(v + 2);
-        if (f & 0x12) continue;
-        f &= 0x7F;
-        shle_wb(v + 2, f);
-        if (!f) continue;
-        shle_release(v, ch);
-    }
+    shle_release_note();
 }
 
 static void shle_note_off(uint32_t t, uint32_t p) {

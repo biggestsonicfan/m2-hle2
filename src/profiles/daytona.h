@@ -165,17 +165,22 @@ DAYTONA_RECIPE(daytonagtx, "model1io.zip")
  * at 0x1D00080 -- and else from the ROM's factory block at 0x39D60. A copy is
  * valid when its first 8 bytes are the factory block's ("SEGA" ...) and the
  * u16 at +8 is the CRC (ROM 0x292D8: table at 0x39DE0, seed 0) of +0x0A..+0x7F.
- * The byte at +0x0B is LINK ID: 0 SINGLE, 1 MASTER, 2 SLAVE.
+ * The byte at +0x0B is LINK ID: 0 SINGLE, 1 MASTER, 2 SLAVE; +0x7C counts the
+ * boots.
  *
  * The factory value is MASTER: this is the twin cabinet's set, and a board alone
  * waits for its other half, prints CANCELLED and reboots (ROM 0x1B5F4), forever.
  * An operator sets SINGLE in the test menu; a blank board here gets the same
- * block that leaves: the factory one, SINGLE, with its CRC. A block the player's
- * backup RAM already holds is left alone. */
-#define DAYTONA_SETTINGS      0x80u
-#define DAYTONA_FACTORY       0x39D60u
-#define DAYTONA_CRC_TABLE     0x39DE0u
-#define DAYTONA_SETTINGS_LINK 0x0Bu
+ * block that leaves: the factory one, SINGLE, with its CRC. A valid block in
+ * the player's backup RAM is always left alone, MASTER included: the game
+ * writes the factory settings with a good CRC both when it boots blank and when
+ * the test menu sets MASTER, so the two cannot be told apart (Pinboard #1056).
+ * Libretro runs this again after the .srm arrives, so a blank .srm is fixed. */
+#define DAYTONA_SETTINGS       0x80u
+#define DAYTONA_FACTORY        0x39D60u
+#define DAYTONA_CRC_TABLE      0x39DE0u
+#define DAYTONA_SETTINGS_LINK  0x0Bu
+#define DAYTONA_SETTINGS_BOOTS 0x7Cu
 
 /* Where a build keeps its factory block; the CRC table follows it at +0x80
  * (in every build here: found by the boot's `ldl 0x2xxxxx` of the block
@@ -210,6 +215,46 @@ static inline void daytona_settings_single(memory_bus_t *bus, const uint8_t *rom
     b[9] = (uint8_t)(crc >> 8);
 }
 
+/* The colour tables by cabinet (Pinboard #1056). The settings' +0x1A is CABINET
+ * (0 DELUXE, 1 TWIN, 2 UPLIGHT; the factory block's is TWIN), and the boot
+ * (ROM 0xA74, once: nothing else writes 0x01810000-0x0181BFFF) builds the three
+ * channels' tables from it, the same 32 rows of 256 halfwords each: for colour
+ * c (0..31), entry j < 64 is (c * j * step + base) >> 6, no base where c * j is
+ * 0, and 0xFFFF where that passes 255; the 192 after it are (step * c + top) >> 1,
+ * 0 for c = 0. Twin and Uplight take step 10, base 0x1920, top 0xC9; Deluxe,
+ * whose projector is darker in the shadows, 12, 0x1160 and 0x8B. The Picture
+ * menu shows either live (core/cabinet_picture.h); the board keeps its own. */
+static const game_cabinet_t daytona_cabinets[] = {
+    { "twin",   "Twin" },
+    { "deluxe", "Deluxe" },
+};
+
+static inline void daytona_cabinet_xlat(int which, uint8_t *xlat) {
+    const bool dx = which == 1;
+    const uint32_t step = dx ? 12u : 10u, end = dx ? 0x300u : 0x280u;
+    const uint32_t base = dx ? 0x1160u : 0x1920u, top = dx ? 0x8Bu : 0xC9u;
+    uint32_t at = 0;
+    for (uint32_t c = 0; c < 32; c++) {
+        for (uint32_t j = 0; j < end; j += step) {
+            uint32_t v = c * j;
+            if (v) v += base;
+            v >>= 6;
+            if (v >= 256) v = 0xFFFFu;
+            for (uint32_t ch = 0; ch < 3; ch++) {
+                xlat[ch * 0x4000u + at]      = (uint8_t)v;
+                xlat[ch * 0x4000u + at + 1u] = (uint8_t)(v >> 8);
+            }
+            at += 2;
+        }
+        const uint32_t flat = c ? (step * c + top) >> 1 : 0;
+        for (uint32_t k = 0; k < 192; k++, at += 2)
+            for (uint32_t ch = 0; ch < 3; ch++) {
+                xlat[ch * 0x4000u + at]      = (uint8_t)flat;
+                xlat[ch * 0x4000u + at + 1u] = 0;
+            }
+    }
+}
+
 /* The original Model 2 (model2o.h) with the Model 1 I/O board (model1io.h). */
 static inline void daytona_install_build(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus,
                                          const daytona_build_t *k) {
@@ -229,10 +274,15 @@ static inline void daytona_install_build(const romset_t *rs, i960_cpu_t *cpu, me
     savestate_extra("daytona", "M1SOUND", &g_sound.m1, sizeof g_sound.m1);
 }
 
+/* name##_backup is the profile's backup_fn: libretro runs it again once the
+ * .srm has arrived (Pinboard #1056). */
 #define DAYTONA_INSTALL(name, factory_at) \
     static inline void name##_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) { \
         static const daytona_build_t k = { factory_at }; \
         daytona_install_build(rs, cpu, bus, &k); \
+    } \
+    static inline void name##_backup(const romset_t *rs, memory_bus_t *bus) { \
+        if (rs->maincpu) daytona_settings_single(bus, rs->maincpu, rs->maincpu_size, factory_at); \
     }
 DAYTONA_INSTALL(daytona,    DAYTONA_FACTORY)
 DAYTONA_INSTALL(daytona93,  0)
@@ -284,6 +334,8 @@ static uint32_t daytona_gtx_read_cb(mem_region_t *r, uint32_t addr, int size) {
     return v;
 }
 
+static inline void daytonagtx_backup(const romset_t *rs, memory_bus_t *bus) { daytonagtx_base_backup(rs, bus); }
+
 static inline void daytonagtx_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
     daytonagtx_base_install(rs, cpu, bus);
     if (!rs->loaded || !g_daytona_gtx_prot) return;
@@ -318,6 +370,12 @@ static inline void daytonagtx_install(const romset_t *rs, i960_cpu_t *cpu, memor
     [GAME_INPUT_P1_UP]    = 0x00002000, \
     [GAME_INPUT_P1_RIGHT] = 0x00004000, \
     [GAME_INPUT_P1_LEFT]  = 0x00008000, \
+    /* A gear's own button (io_5649.h): bits no port reads. */ \
+    [GAME_INPUT_GEAR_N]   = 0x00010000, \
+    [GAME_INPUT_GEAR_1]   = 0x00020000, \
+    [GAME_INPUT_GEAR_2]   = 0x00040000, \
+    [GAME_INPUT_GEAR_3]   = 0x00080000, \
+    [GAME_INPUT_GEAR_4]   = 0x00100000, \
 } }
 
 /* noclip games.js `daytona` (Rev A): 3190 entries of 20 bytes (the explorer
@@ -350,6 +408,10 @@ static const game_profile_t daytona_profile = {
     .board        = BOARD_MODEL2,
     .load_fn      = daytona_load,
     .install_fn   = daytona_install,
+    .backup_fn    = daytona_backup,
+    .cabinets        = daytona_cabinets,
+    .cabinet_count   = 2,
+    .cabinet_xlat_fn = daytona_cabinet_xlat,
     .input        = DAYTONA_INPUT,
     .quirks       = DAYTONA_QUIRKS(0x83fbb4, 3190),
 };
@@ -364,6 +426,7 @@ static const game_profile_t daytona_profile = {
     static const game_profile_t name##_profile = { \
         .id = #name, .display_name = title, .parent_zip_name = "daytona.zip", \
         .board = BOARD_MODEL2, .load_fn = load, .install_fn = name##_install, \
+        .backup_fn = name##_backup, \
         .input = DAYTONA_INPUT, .quirks = DAYTONA_QUIRKS(table, count), \
     };
 /* noclip games.js `daytona93`: its own table, 2822 entries. */

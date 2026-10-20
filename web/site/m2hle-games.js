@@ -16,7 +16,10 @@
  * was a front page. A bare visit, one with only ?lang=, or an unknown ?game=,
  * is the front page.
  *
- * Each game's profiles must be in the web build (registry.h, M2HLE_WEB).
+ * Each game's profiles must be in the web build (registry.h, M2HLE_WEB). A
+ * site profile can also be one of them booted in a fixed country: `runs` names
+ * the emulator's profile and `region` the --region= it gets over the page's
+ * language (m2hle-game.js; Fighting Vipers' Japanese game, Pinboard #1350).
  *
  * A game's words are English; `i18n` holds another language's (m2hle-lang.js,
  * ?lang=), any of title, blurb, romHint, labels, and a profile's name and about
@@ -28,9 +31,11 @@ const m2hleGames = (() => {
   /* A racing cabinet's keys over m2hle-keys.js's defaults, m2emulator's layout
    * as on the desktop (src/board/input.h INPUT_KEYS_DRIVING, Pinboard #1347):
    * the arrows drive (Up the accelerator, Down the brake), Z X C V the view
-   * buttons (player 2's B3 / B4 are Daytona's VR3 / VR4), Q / W the shifts. */
+   * buttons (player 2's B3 / B4 are Daytona's VR3 / VR4), Q / W the shifts,
+   * A S D F the gears 1-4 and G neutral. */
   const DRIVING_KEYS = {
-    p1: { up: ['KeyW'], down: ['KeyQ'], b1: ['ArrowUp'], b2: ['ArrowDown'], b3: ['KeyZ'], b4: ['KeyX'] },
+    p1: { up: ['KeyW'], down: ['KeyQ'], b1: ['ArrowUp'], b2: ['ArrowDown'], b3: ['KeyZ'], b4: ['KeyX'],
+          gear1: ['KeyA'], gear2: ['KeyS'], gear3: ['KeyD'], gear4: ['KeyF'], gearn: ['KeyG'] },
     p2: { b3: ['KeyC'], b4: ['KeyV'] },
   };
 
@@ -74,6 +79,7 @@ const m2hleGames = (() => {
       labels: { up: 'Shift up', down: 'Shift down', left: 'Steer left', right: 'Steer right',
                 b1: 'Accelerator', b2: 'Brake', b3: 'View change', b4: 'Unused' },
       keys: DRIVING_KEYS,
+      gears: true,                         /* a button per gate as well (io_5649.h) */
       /* No replay format of its own: a replay is always the buttons from the
        * game's start (src/core/replay.h, replay__saves_inputs). */
       ownReplay: false,
@@ -175,6 +181,11 @@ const m2hleGames = (() => {
       blurb: 'Armoured street fighters in caged arenas: break the armour, then the walls.',
       profiles: [
         { id: 'fvipers', name: 'Rev D', about: 'Revision D' },
+        /* The same set and profile booted as the Japanese game on any page
+         * (src/profiles/fvipers.h's COUNTRY hooks, Pinboard #1350); the
+         * Japanese page boots fvipers as that already. */
+        { id: 'fvipers_japan', runs: 'fvipers', region: 'japan', name: 'Rev D Japan',
+          about: 'Revision D, the Japanese game' },
         { id: 'fvipersb', name: 'Rev B', about: 'Revision B', soon: true },
       ],
       romHint: 'Your <code>fvipers.zip</code> (Fighting Vipers, Revision D)',
@@ -189,6 +200,7 @@ const m2hleGames = (() => {
           title: 'ファイティングバイパーズ',
           blurb: 'アーマーをまとった喧嘩屋たちが金網の中で激突。アーマーを砕き、壁をぶち破れ。',
           profiles: { fvipers: { name: 'リビジョン D', about: 'リビジョン D' },
+                      fvipers_japan: { name: 'リビジョン D 日本', about: 'リビジョン D（日本版）' },
                       fvipersb: { name: 'リビジョン B', about: 'リビジョン B' } },
           romHint: 'お持ちの <code>fvipers.zip</code>（ファイティングバイパーズ、リビジョン D）',
           labels: { b1: 'パンチ', b2: 'キック', b3: 'ガード', b4: '未使用' },
@@ -250,6 +262,8 @@ const m2hleGames = (() => {
       labels: { up: 'Shift up', down: 'Shift down', left: 'Steer left', right: 'Steer right',
                 b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
       keys: DRIVING_KEYS,
+      /* A button per gate of the lever as well as Shift up / down (io_5649.h). */
+      gears: true,
       ownReplay: false,
       /* A shared board (arcade/games.mjs); the save stays in the browser too,
        * even when the arcade cannot be reached (m2hle-page.js). */
@@ -430,7 +444,9 @@ const m2hleGames = (() => {
     return (g.profiles.find((p) => p.id === want && !p.soon) || g.profiles[0]).id;
   }
 
-  /* { id, profile } for this visit, or null for the front page. */
+  /* { id, profile, entry, region } for this visit, or null for the front page:
+   * `entry` is the site profile picked, `profile` the emulator's that runs it,
+   * `region` the country it fixes (none: the page's language picks). */
   function pick(loc) {
     const q = new URLSearchParams(loc.search);
     const page = (/\/([a-z0-9_]+)\.html$/.exec(loc.pathname) || [])[1];
@@ -444,8 +460,9 @@ const m2hleGames = (() => {
     else if ([...q.keys()].some((k) => k !== 'lang')) id = 'sfight';
     if (!id) return null;
     const profiles = GAMES[id].profiles;
-    const profile = profiles.find((p) => p.id === (q.get('profile') || (alias && alias.profile)) && !p.soon);
-    return { id, profile: profile ? profile.id : first(id) };
+    const want = q.get('profile') || (alias && alias.profile);
+    const p = profiles.find((e) => e.id === want && !e.soon) || profiles.find((e) => e.id === first(id));
+    return { id, profile: p.runs || p.id, entry: p.id, region: p.region || null };
   }
 
   /* The link that plays a game, relative to the site's root, in this page's

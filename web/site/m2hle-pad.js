@@ -36,6 +36,7 @@ m2hleLang.add({
     'pad.axis': 'Axis {n} {dir}',
     'pad.sub.macros': 'Macros: one press holds several buttons',
     'pad.sub.page': 'The page: offline only, as the button beside the menu',
+    'pad.sub.cab': 'The cabinet: the first pad only',
     'pad.none': 'Not set',
     'pad.remove': 'Remove',
     'pad.remove.from': 'Remove {button} from {action}',
@@ -63,6 +64,7 @@ m2hleLang.add({
     'pad.axis': '軸{n} {dir}',
     'pad.sub.macros': 'マクロ：1回押すと複数のボタンを同時に押します',
     'pad.sub.page': 'ページ：オフライン時のみ。メニュー横のボタンと同じです',
+    'pad.sub.cab': '筐体：1台目のパッドのみ',
     'pad.none': '未設定',
     'pad.remove': '削除',
     'pad.remove.from': '{action}から{button}を削除',
@@ -122,11 +124,21 @@ const m2hlePad = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* The cabinet's own switches, the first pad only: the board's Service and
+     * Test, and a racing game's gear buttons (m2hleGame.gears), one per gate of
+     * the lever (src/board/io_5649.h). Unbound until the player binds them. */
+    { id: 'service', act: 20, cab: true },
+    { id: 'test',    act: 21, cab: true },
+    { id: 'gearn',   act: 22, cab: true, gears: true },
+    { id: 'gear1',   act: 23, cab: true, gears: true },
+    { id: 'gear2',   act: 24, cab: true, gears: true },
+    { id: 'gear3',   act: 25, cab: true, gears: true },
+    { id: 'gear4',   act: 26, cab: true, gears: true },
     /* The page's Pause (m2hle-page.js), not a game button: it holds nothing.
      * Unbound until the player binds it, as every standard button has a job. */
     { id: 'pause', acts: [],        page: true },
   ];
-  const ACTIONS = ALL.filter((a) => (TWIN ? !a.macro : !a.twin));
+  const ACTIONS = ALL.filter((a) => (TWIN ? !a.macro : !a.twin) && (!a.gears || m2hleGame.gears));
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   for (const a of ACTIONS) a.label = m2hleGame.labels[a.id] || a.label || m2hleLang.t('keys.act.' + a.id);
   const P2_OFFSET = 10;
@@ -146,6 +158,7 @@ const m2hlePad = (() => {
     start: [{ b: 9 }],
     coin:  [{ b: 8 }],
     pk: [], pb: [], kb: [], pkb: [], pause: [],
+    service: [], test: [], gearn: [], gear1: [], gear2: [], gear3: [], gear4: [],
   };
 
   /* A twin-stick game on a standard pad, as YAMP's full set does it: the d-pad and
@@ -167,7 +180,7 @@ const m2hlePad = (() => {
     b3: [], b4: [],
     start:  [{ b: 9 }],
     coin:   [{ b: 8 }],
-    pause: [],
+    pause: [], service: [], test: [],
   };
 
   /* Sega's Saturn Twin Stick (HSS-0151) through a Bliss-Box adapter, which the
@@ -194,7 +207,7 @@ const m2hlePad = (() => {
     rdash:  [{ b: 7 }],
     b3: [], b4: [],
     start:  [{ b: 5 }],
-    coin: [], pause: [],
+    coin: [], pause: [], service: [], test: [],
   };
 
   /* Bliss-Box: vendor 16d0, product 0d04 and up, one per port. Chrome names a pad
@@ -223,6 +236,8 @@ const m2hlePad = (() => {
   let keyMask = 0;            /* what the keyboard holds (m2hle-keys.js, setKeys) */
   let pauseHeld = false;      /* a pad held Pause at the last poll */
   const PAUSE_ROW = 1 << ACTIONS.findIndex((a) => a.id === 'pause');
+  /* The cabinet rows' action bits: only the first pad presses them. */
+  const CAB_BITS = ACTIONS.reduce((m, a) => (a.cab ? m | a.mask : m), 0);
 
   function load() {
     try {
@@ -324,7 +339,7 @@ const m2hlePad = (() => {
 
     let mask = 0, far = 0, pause = false;
     list.forEach((pad, i) => {
-      const r = padRows(pad), m = rowActions(r);
+      const r = padRows(pad), m = i === 0 ? rowActions(r) : rowActions(r) & ~CAB_BITS;
       if (farPad(i)) far |= i === 3 ? m << P2_OFFSET : m;
       else mask |= (i === 1 && secondIsP2 && !TWIN) ? m << P2_OFFSET : m;
       pause = pause || !!(r & PAUSE_ROW);
@@ -534,6 +549,12 @@ const m2hlePad = (() => {
         sub.textContent = m2hleLang.t('pad.sub.macros');
         rows.appendChild(sub);
       }
+      if (a.cab && a === ACTIONS.find((x) => x.cab)) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = m2hleLang.t('pad.sub.cab');
+        rows.appendChild(sub);
+      }
       if (a.page) {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
@@ -609,12 +630,26 @@ const m2hlePad = (() => {
     });
   }
 
+  /* The panel's tabs: Keyboard, Controller, Touch. Until one is picked it opens
+   * on Keyboard, or on Touch on a phone (the touch buttons are what it is for there). */
+  const TABS = { keys: 'key-section', pad: 'pad-section', touch: 'touch-section' };
+  let tabPicked = null;
+
+  function showTab(tab) {
+    if (tab !== 'pad') stopListening();
+    for (const t in TABS) {
+      $('ctl-tab-' + t).setAttribute('aria-selected', String(t === tab));
+      $(TABS[t]).hidden = t !== tab;
+    }
+  }
+
   function toggle(open) {
     const panel = $('controls');
     if (open === undefined) open = panel.hidden;
     if (!open) stopListening();
     /* Play online opens in the same place: one at a time. */
     if (open && !$('online').hidden) $('np-close').click();
+    if (open) showTab(tabPicked || (matchMedia('(pointer: coarse)').matches || !$('touch').hidden ? 'touch' : 'keys'));
     panel.hidden = !open;
     $('btn-controls').setAttribute('aria-expanded', String(open));
     shownHeld = -1;
@@ -626,6 +661,7 @@ const m2hlePad = (() => {
     load();
     $('btn-controls').addEventListener('click', () => toggle());
     $('pad-close').addEventListener('click', () => toggle(false));
+    for (const t in TABS) $('ctl-tab-' + t).addEventListener('click', () => { tabPicked = t; showTab(t); });
     $('btn-online').addEventListener('click', () => toggle(false));
     $('pad-reset').addEventListener('click', () => { sets = defaultSets(); secondIsP2 = true; save(); stopListening(); });
     $('pad-p2').addEventListener('change', (e) => { secondIsP2 = e.target.checked; save(); render(); });

@@ -60,7 +60,7 @@ static struct {
 static const char *const g_ctl_action_label[GAME_INPUT_COUNT] = {
     "Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Button 4", "Start", "Coin",
     "Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Button 4", "Start", "Coin",
-    "Service", "Test",
+    "Service", "Test", "Gear N", "Gear 1", "Gear 2", "Gear 3", "Gear 4",
 };
 
 /* A pad option from the command line, applied again over each profile's file. */
@@ -329,17 +329,22 @@ static inline void controls_tab_keyboard(void) {
     controls_keys_rows(GAME_INPUT_P2_UP, GAME_INPUT_P2_COIN);
     igTableNextRow(); igTableSetColumnIndex(0); igSeparatorText("Cabinet");
     controls_keys_rows(GAME_INPUT_SERVICE, GAME_INPUT_TEST);
+    if (g_active_profile && g_active_profile->input.bits[GAME_INPUT_GEAR_N]) {
+        igTableNextRow(); igTableSetColumnIndex(0); igSeparatorText("Gears");
+        controls_keys_rows(GAME_INPUT_GEAR_N, GAME_INPUT_GEAR_4);
+    }
     igEndTable();
 }
 
 #if M2HLE_PADS
 /* What a pad button or wheel button can press: one player-1 action, the
- * cabinet's two, or the usual button combos. */
+ * cabinet's two, a racing cabinet's gears, or the usual button combos. */
 static const uint32_t g_ctl_pad_choices[] = {
     0, ACT(GAME_INPUT_P1_B1), ACT(GAME_INPUT_P1_B2), ACT(GAME_INPUT_P1_B3), ACT(GAME_INPUT_P1_B4),
     ACT(GAME_INPUT_P1_START), ACT(GAME_INPUT_P1_COIN),
     ACT(GAME_INPUT_P1_UP), ACT(GAME_INPUT_P1_DOWN), ACT(GAME_INPUT_P1_LEFT), ACT(GAME_INPUT_P1_RIGHT),
     ACT(GAME_INPUT_SERVICE), ACT(GAME_INPUT_TEST),
+    ACT(GAME_INPUT_GEAR_N), ACT(GAME_INPUT_GEAR_1), ACT(GAME_INPUT_GEAR_2), ACT(GAME_INPUT_GEAR_3), ACT(GAME_INPUT_GEAR_4),
     ACT(GAME_INPUT_P1_B1) | ACT(GAME_INPUT_P1_B2), ACT(GAME_INPUT_P1_B1) | ACT(GAME_INPUT_P1_B3),
     ACT(GAME_INPUT_P1_B2) | ACT(GAME_INPUT_P1_B3), ACT(GAME_INPUT_P1_B1) | ACT(GAME_INPUT_P1_B2) | ACT(GAME_INPUT_P1_B3),
     ACT(GAME_INPUT_P1_B3) | ACT(GAME_INPUT_P1_B4),

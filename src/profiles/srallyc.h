@@ -290,6 +290,12 @@ static const game_profile_t srallyc_profile = {
             [GAME_INPUT_P1_UP]    = 0x00002000,
             [GAME_INPUT_P1_RIGHT] = 0x00004000,
             [GAME_INPUT_P1_LEFT]  = 0x00008000,
+            /* A gear's own button (io_5649.h): bits no port reads. */
+            [GAME_INPUT_GEAR_N]   = 0x00010000,
+            [GAME_INPUT_GEAR_1]   = 0x00020000,
+            [GAME_INPUT_GEAR_2]   = 0x00040000,
+            [GAME_INPUT_GEAR_3]   = 0x00080000,
+            [GAME_INPUT_GEAR_4]   = 0x00100000,
         },
     },
     .quirks = {

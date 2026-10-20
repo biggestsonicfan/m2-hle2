@@ -406,6 +406,14 @@ static void shc_dma_reg_w(int ch, uint32_t reg, uint32_t v)
     *f[reg & 7] = v;
 }
 
+/* Writes DMA6/7's control register (IOP 0x1C, 0x1D); a start is not emulated. */
+static inline void shc_dma_control_w(uint32_t reg, uint32_t v)
+{
+        g_shc.dma[reg - 0x16].control = v;
+        if (v & 1)
+            LOG_WARN("sharc: DMA%u start (%08X) not emulated", (unsigned)(reg - 0x16), (unsigned)v);
+}
+
 static void shc_iop_w(uint32_t reg, uint32_t v)
 {
     if (reg == 0x00) {
@@ -416,9 +424,7 @@ static void shc_iop_w(uint32_t reg, uint32_t v)
     } else if (reg >= 0x08 && reg <= 0x0f) {
         g_shc.msgr[reg - 8] = v;
     } else if (reg == 0x1c || reg == 0x1d) {
-        g_shc.dma[reg - 0x16].control = v;
-        if (v & 1)
-            LOG_WARN("sharc: DMA%u start (%08X) not emulated", (unsigned)(reg - 0x16), (unsigned)v);
+        shc_dma_control_w(reg, v);
     } else if (reg >= 0x40 && reg <= 0x4f) {
         shc_dma_reg_w(reg < 0x48 ? 6 : 7, reg, v);
     } else if (reg > 0x03 && reg != 0x14 && reg != 0x17 && reg != 0x20) {

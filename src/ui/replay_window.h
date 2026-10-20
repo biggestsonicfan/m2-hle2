@@ -80,22 +80,9 @@ static inline void replay_ui_formats(void) {
     }
 }
 
-static inline void replay_ui_menu(emu_thread_ctx_t *ctx, ImGuiFileDialog *fd) {
-    if (!igBeginMenu("Replays")) return;
-    bool rec = g_replay_rec.want;
-    if (igMenuItemBoolPtr("Record matches", NULL, &rec, true)) {
-        g_replay_rec.want = rec;
-        replay_settings_save();
-    }
-    replay_ui_formats();
-    if (igMenuItem("Play a replay...")) replay_ui_open_dialog(fd);
-    igMenuItemBoolPtr("Replay window", NULL, &g_replay_ui.show, true);
-    if (replay_playing() && igMenuItem("Stop the replay")) {
-        replay_ui_lock(ctx);
-        replay_play_stop();
-        replay_ui_unlock(ctx);
-    }
-    igSeparator();
+/* The foot of the Replays menu: where replays are saved, what is recording,
+ * and the item that finishes a local game's replay now. */
+static inline void replay_ui_menu_status(emu_thread_ctx_t *ctx) {
     char dir[512];
     if (replay_dir(dir, sizeof dir)) {
         igTextDisabled("saved in %s", dir);
@@ -113,6 +100,25 @@ static inline void replay_ui_menu(emu_thread_ctx_t *ctx, ImGuiFileDialog *fd) {
         if (said) LOG_INFO("replay: %s", said);
     }
     if (g_replay_rec.error[0])  igTextDisabled("%s", g_replay_rec.error);
+}
+
+static inline void replay_ui_menu(emu_thread_ctx_t *ctx, ImGuiFileDialog *fd) {
+    if (!igBeginMenu("Replays")) return;
+    bool rec = g_replay_rec.want;
+    if (igMenuItemBoolPtr("Record matches", NULL, &rec, true)) {
+        g_replay_rec.want = rec;
+        replay_settings_save();
+    }
+    replay_ui_formats();
+    if (igMenuItem("Play a replay...")) replay_ui_open_dialog(fd);
+    igMenuItemBoolPtr("Replay window", NULL, &g_replay_ui.show, true);
+    if (replay_playing() && igMenuItem("Stop the replay")) {
+        replay_ui_lock(ctx);
+        replay_play_stop();
+        replay_ui_unlock(ctx);
+    }
+    igSeparator();
+    replay_ui_menu_status(ctx);
     igEndMenu();
 }
 

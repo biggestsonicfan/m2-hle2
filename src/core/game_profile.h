@@ -67,6 +67,9 @@ typedef enum {
     GAME_INPUT_P2_B1, GAME_INPUT_P2_B2, GAME_INPUT_P2_B3, GAME_INPUT_P2_B4,
     GAME_INPUT_P2_START, GAME_INPUT_P2_COIN,
     GAME_INPUT_SERVICE, GAME_INPUT_TEST,
+    /* A racing cabinet's four-speed lever, one button a gate (MAME's GEARS
+     * port): a press puts the lever there and it stays (io_5649.h). */
+    GAME_INPUT_GEAR_N, GAME_INPUT_GEAR_1, GAME_INPUT_GEAR_2, GAME_INPUT_GEAR_3, GAME_INPUT_GEAR_4,
     GAME_INPUT_COUNT
 } game_input_t;
 
@@ -271,6 +274,19 @@ typedef void (*game_install_fn)(const struct romset *rs,
                                 struct i960_cpu *cpu,
                                 struct memory_bus *bus);
 
+/* Settings a blank battery lacks and the board needs, into bus->back. */
+typedef void (*game_backup_fn)(const struct romset *rs, struct memory_bus *bus);
+
+/* A cabinet the game's colour tables can be built for (core/cabinet_picture.h):
+ * Daytona's CABINET setting, read at boot, picks Twin's or Deluxe's. */
+typedef struct {
+    const char *id;       /* "twin": what the front ends store */
+    const char *label;    /* "Twin" */
+} game_cabinet_t;
+/* Cabinet `which` (an index into the profile's cabinets)'s colour tables, as
+ * the game builds them at boot: COLORXLAT_SIZE bytes, colorxlat's layout. */
+typedef void (*game_cabinet_xlat_fn)(int which, uint8_t *colorxlat);
+
 /* Who fights whom, and where, as a replay labels it (core/replay.h). Read off
  * the board by the profile; -1 / NULL where it does not know. A one-player
  * game (players 1, Sega Rally's race) has side 0 only: its car in chara[0],
@@ -348,6 +364,15 @@ typedef struct game_profile {
 
     game_load_fn      load_fn;
     game_install_fn   install_fn;
+    /* install_fn calls it after mem_init has put the battery back; a frontend
+     * that hands the battery to the board after install_fn (libretro's .srm,
+     * backup_ram_reload) calls it again. NULL: none. */
+    game_backup_fn    backup_fn;
+    /* The cabinets the Picture menu can show live (core/cabinet_picture.h).
+     * NULL: the game has one picture. */
+    const game_cabinet_t *cabinets;
+    int                   cabinet_count;
+    game_cabinet_xlat_fn  cabinet_xlat_fn;
 
     hle_hook_entry_t  hooks[HLE_HOOK_TABLE_MAX];
     size_t            hook_count;

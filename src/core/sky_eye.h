@@ -157,6 +157,21 @@ static inline void sky_eye_enter(int phase) {
     LOG_INFO("sky_eye: %s (frame %u of the request)", SKY_EYE_PHASE_NAME[phase], g_sky_eye.total_frames);
 }
 
+/* One settle poll: digest texture RAM, and go ready after enough polls with
+ * the same digest, or back to settling when it changes. */
+static inline void sky_eye_settle_poll(memory_bus_t *bus) {
+    uint32_t nz = 0;
+    uint64_t h = sky_eye_digest(bus->texram0, TEXRAM0_SIZE, 0xCBF29CE484222325ull, &nz);
+    g_sky_eye.nonzero = nz * 8u;
+    int same = h == g_sky_eye.digest && g_sky_eye.nonzero > SKY_EYE_MIN_NONZERO;
+    g_sky_eye.digest = h;
+    g_sky_eye.stable = same ? g_sky_eye.stable + 1 : 0;
+    if (g_sky_eye.phase == SKY_EYE_SETTLING && g_sky_eye.stable >= SKY_EYE_STABLE_POLLS)
+        sky_eye_enter(SKY_EYE_READY);
+    else if (g_sky_eye.phase == SKY_EYE_READY && !same)
+        sky_eye_enter(SKY_EYE_SETTLING);
+}
+
 /* The frame edge (emu_thread.h): hold the stage, watch it arrive and settle. */
 static inline void sky_eye_edge(memory_bus_t *bus) {
     if (g_sky_eye.phase == SKY_EYE_OFF) return;
@@ -187,16 +202,7 @@ static inline void sky_eye_edge(memory_bus_t *bus) {
         }
         if (g_sky_eye.phase_frames % SKY_EYE_POLL_FRAMES) break;
         if (!bus->texram0) break;
-        uint32_t nz = 0;
-        uint64_t h = sky_eye_digest(bus->texram0, TEXRAM0_SIZE, 0xCBF29CE484222325ull, &nz);
-        g_sky_eye.nonzero = nz * 8u;
-        int same = h == g_sky_eye.digest && g_sky_eye.nonzero > SKY_EYE_MIN_NONZERO;
-        g_sky_eye.digest = h;
-        g_sky_eye.stable = same ? g_sky_eye.stable + 1 : 0;
-        if (g_sky_eye.phase == SKY_EYE_SETTLING && g_sky_eye.stable >= SKY_EYE_STABLE_POLLS)
-            sky_eye_enter(SKY_EYE_READY);
-        else if (g_sky_eye.phase == SKY_EYE_READY && !same)
-            sky_eye_enter(SKY_EYE_SETTLING);
+        sky_eye_settle_poll(bus);
         break;
     default: break;
     }
@@ -225,6 +231,19 @@ static inline int sky_eye_angle(double rad) {
     return a >= 0x8000 ? (int)(a - 0x10000) : (int)a;
 }
 
+/* The value of one `key=value` pair of `len` bytes at `s`, %-decoded into `out`. */
+static void sky_eye_param_value(const char *s, size_t kl, size_t len, char *out, size_t cap) {
+    size_t o = 0;
+    for (size_t i = kl + 1; i < len && o + 1 < cap; i++) {
+        if (s[i] == '%' && i + 2 < len && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
+            char hx[3] = { s[i + 1], s[i + 2], 0 };
+            out[o++] = (char)strtol(hx, NULL, 16);
+            i += 2;
+        } else out[o++] = s[i] == '+' ? ' ' : s[i];
+    }
+    out[o] = 0;
+}
+
 /* One `key=` value out of a link's fragment or query, %-decoded. */
 static int sky_eye_param(const char *link, const char *key, char *out, size_t cap) {
     size_t kl = strlen(key);
@@ -234,15 +253,7 @@ static int sky_eye_param(const char *link, const char *key, char *out, size_t ca
         const char *amp = strchr(s, '&');
         size_t len = amp ? (size_t)(amp - s) : strlen(s);
         if (len > kl && !strncmp(s, key, kl) && s[kl] == '=') {
-            size_t o = 0;
-            for (size_t i = kl + 1; i < len && o + 1 < cap; i++) {
-                if (s[i] == '%' && i + 2 < len && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
-                    char hx[3] = { s[i + 1], s[i + 2], 0 };
-                    out[o++] = (char)strtol(hx, NULL, 16);
-                    i += 2;
-                } else out[o++] = s[i] == '+' ? ' ' : s[i];
-            }
-            out[o] = 0;
+            sky_eye_param_value(s, kl, len, out, cap);
             return 1;
         }
         if (!amp) break;

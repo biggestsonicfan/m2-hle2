@@ -899,6 +899,7 @@ static inline int mem_init(memory_bus_t *bus, uint8_t *rom_data, size_t rom_size
     memset(bus->io, IO_IDLE_FILL, sizeof(bus->io));
 
     cop_reset();   /* clears g_cop / g_sharc and resets rot[] to identity */
+    g_sharc_area_fv = false;   /* STF's COP program until the profile says otherwise */
     irqt_reset();  /* timers idle (0xFFFFF), no interrupt pending, vblank phase 0 */
     eeprom_power_on();   /* erased, the same on every machine (eeprom_93c46.h) */
 

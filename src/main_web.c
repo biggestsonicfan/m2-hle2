@@ -71,6 +71,7 @@
 #include "m2lua_wide.h"    /* and the picture it asks for (Model2_SetWideScreen) */
 #include "lightgun_sgl.h"   /* the mouse and touches as light guns, and their crosshairs */
 #include "ffb.h"            /* the drive board's force feedback, for the page to rumble */
+#include "cabinet_picture.h" /* the Picture tab's cabinet: another cabinet's colours, live */
 #include "wheel_host.h"     /* the page's analog wheel and pedals (Pinboard #1082) */
 
 /* The single TU that defines g_profiles[] / g_active_profile. Under M2HLE_WEB it
@@ -959,6 +960,25 @@ static void web_count_render(int64_t render_t0) {
     if (render_us > g_web_perf.render_us_max) g_web_perf.render_us_max = render_us;
 }
 
+/* Where the game goes on the page, and the passes drawn before the
+ * swapchain's (the filter's source, the offscreen render scale). */
+static void web_place_picture(web_picture_t *pic, bool game) {
+    /* A filter over the picture (post_shader.h) reads the game from a target of
+     * its own, at the render scale, and only covers the game's rectangle. */
+    game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(),
+                                          web_picture_width(), VIDEO_HEIGHT);
+    pic->ox = r.x; pic->oy = r.y; pic->w = r.w; pic->h = r.h;
+    crt_pots_place(&pic->ox, &pic->oy, &pic->w, &pic->h);
+    post_shader_set_input_scale(g_web_rt.want);
+    web_cheats_place(pic, game && !pic->overlay && !g_web_objview_show);
+    pic->post = game && !g_web_objview_show && post_shader_active();
+    if (pic->post) web_draw_post_source(pic->w, pic->h, pic->lerp_t);
+
+    /* Offscreen first, when there is a render scale: the game at N x 496x384. */
+    pic->offscreen = game && !pic->post && g_web_rt.scale > 0;
+    if (pic->offscreen) web_draw_offscreen(pic->lerp_t);
+}
+
 static void frame(void) {
     web_count_callback();
 
@@ -989,20 +1009,7 @@ static void frame(void) {
         pic.lerp_t = game_frame_lerp();
     }
 
-    /* A filter over the picture (post_shader.h) reads the game from a target of
-     * its own, at the render scale, and only covers the game's rectangle. */
-    game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(),
-                                          web_picture_width(), VIDEO_HEIGHT);
-    pic.ox = r.x; pic.oy = r.y; pic.w = r.w; pic.h = r.h;
-    crt_pots_place(&pic.ox, &pic.oy, &pic.w, &pic.h);
-    post_shader_set_input_scale(g_web_rt.want);
-    web_cheats_place(&pic, game && !pic.overlay && !g_web_objview_show);
-    pic.post = game && !g_web_objview_show && post_shader_active();
-    if (pic.post) web_draw_post_source(pic.w, pic.h, pic.lerp_t);
-
-    /* Offscreen first, when there is a render scale: the game at N x 496x384. */
-    pic.offscreen = game && !pic.post && g_web_rt.scale > 0;
-    if (pic.offscreen) web_draw_offscreen(pic.lerp_t);
+    web_place_picture(&pic, game);
 
     web_present(&pic, &lobby_cv);
     if (g_web_shot_want) web_shot_done(&pic);
@@ -1871,6 +1878,19 @@ EMSCRIPTEN_KEEPALIVE int web_shader_arcade(void) { return post_shader_arcade() ?
 /* Depth per pixel, not the board's one key a polygon (geo3d.h): 0 off, 1 on. */
 EMSCRIPTEN_KEEPALIVE void web_set_pixel_depth(int on) { g_geo3d_pixel_depth = on != 0; }
 EMSCRIPTEN_KEEPALIVE int web_pixel_depth(void) { return g_geo3d_pixel_depth; }
+
+/* The Picture tab's cabinet (core/cabinet_picture.h): the game's cabinets, and
+ * the one to show live ("" = whatever its test menu is set to). */
+EMSCRIPTEN_KEEPALIVE int web_cabinet_count(void) {
+    return g_active_profile && g_active_profile->cabinet_xlat_fn ? g_active_profile->cabinet_count : 0;
+}
+EMSCRIPTEN_KEEPALIVE const char *web_cabinet_id(int i) {
+    return i >= 0 && i < web_cabinet_count() ? g_active_profile->cabinets[i].id : "";
+}
+EMSCRIPTEN_KEEPALIVE const char *web_cabinet_label(int i) {
+    return i >= 0 && i < web_cabinet_count() ? g_active_profile->cabinets[i].label : "";
+}
+EMSCRIPTEN_KEEPALIVE void web_set_cabinet(const char *id) { cabinet_picture_choose(id); }
 
 /* The monitor's pots (crt_pots.h, CRT_POT_*), from the Picture tab. */
 EMSCRIPTEN_KEEPALIVE void  web_crt_pot_set(int id, float v) { crt_pots_set(id, v); }

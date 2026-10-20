@@ -236,6 +236,21 @@ static inline void av__cap_gl_read(sg_image img, GLenum fmt, int w, int h, size_
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
         glReadPixels(0, 0, w, h, fmt, GL_UNSIGNED_BYTE, (void *)offset);
 }
+
+/* Copy slot `idx`'s mapped pack buffer into `dst`; false if it would not map. */
+static inline bool av__cap_gl_copy(uint32_t idx, uint8_t *dst) {
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, g_av_cap.pbo[idx]);
+    const uint8_t *p = (const uint8_t *)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
+                                                         (GLsizeiptr)g_av_cap.bytes,
+                                                         GL_MAP_READ_BIT);
+    bool ok = p != NULL;
+    if (ok && g_av_cap.nv12) memcpy(dst, p, g_av_cap.bytes);   /* both planes, in order */
+    else if (ok)             av__cap_copy_out(p, (uint32_t)g_av_cap.w * 4u, dst);
+    if (p) glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    sg_reset_state_cache();
+    return ok;
+}
 #endif
 
 static inline void av__cap_issue(uint32_t idx) {
@@ -334,17 +349,7 @@ static inline bool av__cap_map(uint32_t idx, uint8_t *dst) {
     glDeleteSync(g_av_cap.fence[idx]);
     g_av_cap.fence[idx] = 0;
     if (!done) return false;               /* abandon these pixels, keep the pace */
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, g_av_cap.pbo[idx]);
-    const uint8_t *p = (const uint8_t *)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
-                                                         (GLsizeiptr)g_av_cap.bytes,
-                                                         GL_MAP_READ_BIT);
-    bool ok = p != NULL;
-    if (ok && g_av_cap.nv12) memcpy(dst, p, g_av_cap.bytes);   /* both planes, in order */
-    else if (ok)             av__cap_copy_out(p, (uint32_t)g_av_cap.w * 4u, dst);
-    if (p) glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    sg_reset_state_cache();
-    return ok;
+    return av__cap_gl_copy(idx, dst);
 
 #else
     (void)idx; (void)dst;

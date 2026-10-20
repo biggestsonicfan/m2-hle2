@@ -370,37 +370,20 @@
   </section>
 </aside>
 
-<!-- Controller mapping (m2hle-pad.js) and the touch buttons (m2hle-touch.js). Kept in
-     this browser's localStorage. On a touch screen the touch section is moved first. -->
+<!-- Keyboard (m2hle-keys.js), controller mapping (m2hle-pad.js) and the touch buttons
+     (m2hle-touch.js), one tab each (m2hle-pad.js switches them). Kept in this browser's
+     localStorage. Keyboard opens first; on a touch screen, Touch does. -->
 <aside id="controls" class="online controls ps-win" hidden aria-label="Controls" data-i18n-aria="ui.menu.controls">
   <div class="online-head ps-head">
     <h2 class="ps-title" data-i18n="ui.menu.controls">Controls</h2>
     <button id="pad-close" class="tool ps-back" aria-label="Close" data-i18n-aria="ui.close"><svg class="ps-glyph" aria-hidden="true"><use href="#ps-circle"/></svg><span data-i18n="ui.back">Back</span></button>
   </div>
-  <section id="touch-section" class="ctl-section">
-    <h3 data-i18n="ui.touch">Touch buttons</h3>
-    <label class="ctl-select"><span data-i18n="ui.touch.show">Show them</span>
-      <select id="touch-show" class="tool">
-        <option value="auto" data-i18n="ui.touch.auto">On touch screens</option>
-        <option value="on" data-i18n="ui.touch.on">Always</option>
-        <option value="off" data-i18n="ui.touch.off">Never</option>
-      </select>
-    </label>
-    <label id="touch-vibrate-row" class="pad-check" hidden><input id="touch-vibrate" type="checkbox"> <span data-i18n="ui.touch.vibrate">Vibrate on each press</span></label>
-    <p class="np-row"><button id="touch-customize" class="tool primary" data-i18n="ui.touch.customize">Change size, look and placement</button></p>
-  </section>
-  <section id="pad-section" class="ctl-section">
-  <h3 data-i18n="ui.pad">Controller</h3>
-  <p id="pad-status" class="status" role="status"></p>
-  <p class="fine left" data-i18n-html="ui.pad.how">Pick <strong>Add</strong>, then press the button or push the stick you want. Click a button's name to remove it. Rows light up while you hold them. <strong>Pause</strong> is unset to begin with: give it a button (binding one to Pause takes it off its game row, so Select can go from Coin to Pause).</p>
-  <ul id="pad-rows" class="pad-rows"></ul>
-  <label class="pad-check"><input id="pad-p2" type="checkbox" checked> <span data-i18n="ui.pad.p2">A second controller plays player 2</span></label>
-  <label id="gun-flash-row" class="pad-check" hidden><input id="gun-flash" type="checkbox"> <span data-i18n="ui.pad.gunflash">Flash the screen white on each shot, for a light gun that reads the screen</span></label>
-  <p class="np-row"><button id="pad-reset" class="tool" data-i18n="ui.reset">Reset to defaults</button></p>
-  <p class="fine left" data-i18n="ui.pad.kept">These settings are remembered in this browser and apply to every controller.</p>
-  </section>
-  <section id="key-section" class="ctl-section">
-  <h3 data-i18n="ui.keys">Keyboard</h3>
+  <div class="np-tabs ctl-tabs" role="tablist" aria-label="Controls" data-i18n-aria="ui.menu.controls">
+    <button id="ctl-tab-keys" class="tab" role="tab" aria-selected="true" aria-controls="key-section" data-i18n="ui.keys">Keyboard</button>
+    <button id="ctl-tab-pad" class="tab" role="tab" aria-selected="false" aria-controls="pad-section" data-i18n="ui.pad">Controller</button>
+    <button id="ctl-tab-touch" class="tab" role="tab" aria-selected="false" aria-controls="touch-section" data-i18n="ui.touch">Touch</button>
+  </div>
+  <section id="key-section" class="ctl-section" role="tabpanel" aria-labelledby="ctl-tab-keys">
   <div class="np-tabs" role="tablist" aria-label="Player" data-i18n-aria="ui.keys.player">
     <button id="key-tab-p1" class="tab" role="tab" aria-selected="true" aria-controls="key-rows" data-i18n="ui.keys.p1">Player 1</button>
     <button id="key-tab-p2" class="tab" role="tab" aria-selected="false" aria-controls="key-rows" data-i18n="ui.keys.p2">Player 2</button>
@@ -410,6 +393,26 @@
   <p class="fine left" data-i18n-html="ui.keys.pause">The <strong>Pause</strong> row (P and the Pause key to start with) pauses the game, as the button beside the menu does (in the Console version, during a game, it opens the PS3's pause menu, as SELECT does). Offline only: a match online cannot wait for one player. A key is either a game key or Pause: binding it to one takes it off the other.</p>
   <p id="key-clash" class="status" role="status" hidden></p>
   <p class="np-row"><button id="key-reset" class="tool" data-i18n="ui.reset">Reset to defaults</button></p>
+  </section>
+  <section id="pad-section" class="ctl-section" role="tabpanel" aria-labelledby="ctl-tab-pad" hidden>
+  <p id="pad-status" class="status" role="status"></p>
+  <p class="fine left" data-i18n-html="ui.pad.how">Pick <strong>Add</strong>, then press the button or push the stick you want. Click a button's name to remove it. Rows light up while you hold them. <strong>Pause</strong> is unset to begin with: give it a button (binding one to Pause takes it off its game row, so Select can go from Coin to Pause).</p>
+  <ul id="pad-rows" class="pad-rows"></ul>
+  <label class="pad-check"><input id="pad-p2" type="checkbox" checked> <span data-i18n="ui.pad.p2">A second controller plays player 2</span></label>
+  <label id="gun-flash-row" class="pad-check" hidden><input id="gun-flash" type="checkbox"> <span data-i18n="ui.pad.gunflash">Flash the screen white on each shot, for a light gun that reads the screen</span></label>
+  <p class="np-row"><button id="pad-reset" class="tool" data-i18n="ui.reset">Reset to defaults</button></p>
+  <p class="fine left" data-i18n="ui.pad.kept">These settings are remembered in this browser and apply to every controller.</p>
+  </section>
+  <section id="touch-section" class="ctl-section" role="tabpanel" aria-labelledby="ctl-tab-touch" hidden>
+    <label class="ctl-select"><span data-i18n="ui.touch.show">Show them</span>
+      <select id="touch-show" class="tool">
+        <option value="auto" data-i18n="ui.touch.auto">On touch screens</option>
+        <option value="on" data-i18n="ui.touch.on">Always</option>
+        <option value="off" data-i18n="ui.touch.off">Never</option>
+      </select>
+    </label>
+    <label id="touch-vibrate-row" class="pad-check" hidden><input id="touch-vibrate" type="checkbox"> <span data-i18n="ui.touch.vibrate">Vibrate on each press</span></label>
+    <p class="np-row"><button id="touch-customize" class="tool primary" data-i18n="ui.touch.customize">Change size, look and placement</button></p>
   </section>
   <p class="fine left credits" data-i18n-html="ui.credits">Fonts: Anybody, M&nbsp;PLUS&nbsp;1p and M&nbsp;PLUS&nbsp;1&nbsp;Code, under the SIL Open Font License
     (<a href="fonts/OFL-Anybody.txt" target="_blank">Anybody</a>,
@@ -509,6 +512,17 @@
       <p class="fine left" data-i18n="ui.pic.depthfine">The board sorts each polygon by one depth, so a large polygon that starts near the
         camera covers what stands on it: the Tornado's wing hides the backs of Sonic's shoes in the attract
         intro, on the real board too. Off is the board.</p>
+      <div id="shader-cabinet-box" hidden>
+        <h3 class="shader-h" data-i18n="ui.pic.cabinet">Cabinet</h3>
+        <label class="picture-filter">
+          <select id="shader-cabinet" class="tool" aria-label="Cabinet" data-i18n-aria="ui.pic.cabinet">
+            <option value="" data-i18n="ui.pic.cab.board">As the test menu sets it</option>
+          </select>
+        </label>
+        <p class="fine left" data-i18n="ui.pic.cabfine">The game builds its colours once at boot for the cabinet its
+          test menu names: a Deluxe cabinet's are darker in the shadows than a Twin's. This shows another
+          cabinet's colours at once, with no reboot; the game itself is not changed.</p>
+      </div>
       <h3 class="shader-h" data-i18n="ui.pic.filter">Filter</h3>
       <label class="picture-filter">
         <select id="shader-mode" class="tool" aria-label="Filter" data-i18n-aria="ui.pic.filter">

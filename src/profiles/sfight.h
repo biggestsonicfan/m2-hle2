@@ -760,6 +760,16 @@ static inline uint16_t sfight_make_crc(const uint8_t *p, uint32_t n) {
     return crc;
 }
 
+/* Read the block the game runs on, through its own pointer. Before the boot
+ * check sets it this is not a usable address; take the work copy then. */
+static inline void sfight_read_settings(memory_bus_t *bus, uint8_t blk[SFIGHT_SETTINGS_LEN]) {
+    uint32_t base = mem_read32(bus, SFIGHT_SETTINGS_PTR);
+    uint32_t src  = (base == 0x00599000u || base == 0x01D00000u)
+                  ? base + 0x3340u : SFIGHT_SETTINGS_WORK;
+    for (uint32_t i = 0; i < SFIGHT_SETTINGS_LEN; i++)
+        blk[i] = (uint8_t)mem_read8(bus, src + i);
+}
+
 /*
  * Apply the PS3 menu settings s[8] (sfight_menu_settings_t's layout) to the
  * board: versus = 0 is Settings_ApplyArcade, non-zero Settings_ApplyRoomRules.
@@ -784,14 +794,8 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     unsigned b = s[6] < 10 ? s[6] : 0;
     uint8_t  barriers = (uint8_t)(b + 1);
 
-    /* Read the block the game runs on, through its own pointer. Before the boot
-     * check sets it this is not a usable address; take the work copy then. */
-    uint32_t base = mem_read32(bus, SFIGHT_SETTINGS_PTR);
-    uint32_t src  = (base == 0x00599000u || base == 0x01D00000u)
-                  ? base + 0x3340u : SFIGHT_SETTINGS_WORK;
     uint8_t blk[SFIGHT_SETTINGS_LEN];
-    for (uint32_t i = 0; i < SFIGHT_SETTINGS_LEN; i++)
-        blk[i] = (uint8_t)mem_read8(bus, src + i);
+    sfight_read_settings(bus, blk);
 
     if (!versus) {
         blk[0x00] = rounds[r];

@@ -858,17 +858,23 @@ static void ps3ui_osk_done(ps3ui_app_t *a)
     ps3ui_app_go(a, PS3UI_SCR_CONNECT);
 }
 
+/* The d-pad on the keyboard: rows wrap, and a column past the shorter
+ * action row is pulled back onto it. */
+static void ps3ui_osk_move(ps3ui_app_t *a)
+{
+    if (ps3ui_hit(a, PS3UI_PAD_UP)) a->osk_row = (a->osk_row + 4) % 5;
+    if (ps3ui_hit(a, PS3UI_PAD_DOWN)) a->osk_row = (a->osk_row + 1) % 5;
+    int cols = a->osk_row == 4 ? PS3UI_OSK_ACTS : 10;
+    if (a->osk_col >= cols) a->osk_col = cols - 1;
+    if (ps3ui_hit(a, PS3UI_PAD_LEFT)) a->osk_col = (a->osk_col + cols - 1) % cols;
+    if (ps3ui_hit(a, PS3UI_PAD_RIGHT)) a->osk_col = (a->osk_col + 1) % cols;
+}
+
 static void ps3ui_update_osk(ps3ui_app_t *a)
 {
     char *t = a->osk_text[a->osk_field];
     size_t len = strlen(t);
-    int cols = a->osk_row == 4 ? PS3UI_OSK_ACTS : 10;
-    if (ps3ui_hit(a, PS3UI_PAD_UP)) a->osk_row = (a->osk_row + 4) % 5;
-    if (ps3ui_hit(a, PS3UI_PAD_DOWN)) a->osk_row = (a->osk_row + 1) % 5;
-    cols = a->osk_row == 4 ? PS3UI_OSK_ACTS : 10;
-    if (a->osk_col >= cols) a->osk_col = cols - 1;
-    if (ps3ui_hit(a, PS3UI_PAD_LEFT)) a->osk_col = (a->osk_col + cols - 1) % cols;
-    if (ps3ui_hit(a, PS3UI_PAD_RIGHT)) a->osk_col = (a->osk_col + 1) % cols;
+    ps3ui_osk_move(a);
     if (ps3ui_hit(a, PS3UI_PAD_SQUARE) && len)   /* delete */
         t[len - 1] = 0;
     if (ps3ui_hit(a, PS3UI_PAD_TRIANGLE) && len + 1 < 20)
@@ -1284,12 +1290,9 @@ static void ps3ui_app_ask_leave_link(ps3ui_app_t *a)
     ps3ui_app_ask(a, PS3UI_DLG_LEAVE, "Do you want to exit this session?");
 }
 
-/* In a room or at its barrier: the result first, then the room or VS screen. */
-static void ps3ui_follow_room(ps3ui_app_t *a)
+/* A new match number: note it, and with a result in the lobby, show it (1). */
+static int ps3ui_follow_result(ps3ui_app_t *a, const netplay_status_t *st)
 {
-    const netplay_status_t *st = &a->st;
-    if (ps3ui_follow_link(a) || a->scr == PS3UI_SCR_RESULT)
-        return;
     /* a result has come in: show it first */
     if (st->room.match != a->last_match) {
         uint16_t prev = a->last_match;
@@ -1298,9 +1301,20 @@ static void ps3ui_follow_room(ps3ui_app_t *a)
             a->result_side = st->room.last_result;
             a->result_t = 0.0f;
             ps3ui_app_go(a, PS3UI_SCR_RESULT);
-            return;
+            return 1;
         }
     }
+    return 0;
+}
+
+/* In a room or at its barrier: the result first, then the room or VS screen. */
+static void ps3ui_follow_room(ps3ui_app_t *a)
+{
+    const netplay_status_t *st = &a->st;
+    if (ps3ui_follow_link(a) || a->scr == PS3UI_SCR_RESULT)
+        return;
+    if (ps3ui_follow_result(a, st))
+        return;
     int two = st->member_count <= 2 || st->max_slot <= 2;
     ps3ui_screen_t want = two && st->member_count >= 2 ? PS3UI_SCR_VS : PS3UI_SCR_ROOM;
     if (st->state == NETPLAY_SYNCING)

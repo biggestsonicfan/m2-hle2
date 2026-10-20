@@ -219,17 +219,14 @@ static inline bool emu_ggpo_solo_wanted(void) {
     return g_twin.on || !g_m2comm_link.peer;
 }
 
-/* One side's word from one key set; the cabinet's service/test only on 1P. */
+/* One side's word from one key set; the cabinet's bits (service, test, gears) only on 1P. */
 static inline uint32_t emu_ggpo__word(uint32_t held, const uint32_t *bits, bool cabinet) {
     uint32_t word = 0;
     for (int i = 0; i < 10; i++)
         if (bits[i] && (held & bits[i])) word |= 1u << i;
-    if (cabinet) {
-        if (g_netplay.bit_p1[NP_BIT_SERVICE] && (held & g_netplay.bit_p1[NP_BIT_SERVICE]))
-            word |= 1u << NP_BIT_SERVICE;
-        if (g_netplay.bit_p1[NP_BIT_TEST] && (held & g_netplay.bit_p1[NP_BIT_TEST]))
-            word |= 1u << NP_BIT_TEST;
-    }
+    if (cabinet)
+        for (int i = NP_BIT_SERVICE; i < NP_BIT_COUNT; i++)
+            if (g_netplay.bit_p1[i] && (held & g_netplay.bit_p1[i])) word |= 1u << i;
     return word;
 }
 

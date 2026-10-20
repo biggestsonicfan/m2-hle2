@@ -219,6 +219,13 @@ static struct retro_core_option_v2_definition option_defs[] = {
       NULL, "video",
       { { "board", "Board" }, { "pixel", "Per pixel" }, { NULL, NULL } },
       "board" },
+    { "m2hle_cabinet", "Cabinet colours", NULL,
+      "Daytona USA builds its colour tables for the cabinet its test menu is set to: Deluxe's projector is "
+      "darker in the shadows than Twin's monitor. Switch between them at once; the board and its settings stay "
+      "as they are. Test menu: whatever CABINET is set to, as the board shows it. Other games have one picture.",
+      NULL, "video",
+      { { "board", "Test menu" }, { "twin", "Twin" }, { "deluxe", "Deluxe" }, { NULL, NULL } },
+      "board" },
     { "m2hle_stf_version", "Sonic the Fighters version", NULL,
       "Console: the game as Sega's console release runs it, with Honey, Metal Sonic and Robotnik selectable "
       "(Start on Amy, Sonic or Bean at character select). Arcade: the arcade board as it shipped. Each has its own "
@@ -365,6 +372,7 @@ static void lr_read_live_options(void) {
         g_ps3ui_app.default_delay = opt.net_delay;
     }
     if ((v = lr_var("m2hle_depth")))      g_geo3d_pixel_depth = !strcmp(v, "pixel");
+    if ((v = lr_var("m2hle_cabinet")))    cabinet_picture_choose(strcmp(v, "board") ? v : NULL);
     if ((v = lr_var("m2hle_draw_rate")))  opt.draw_every = strcmp(v, "30") ? 1 : 2;
     if ((v = lr_var("m2hle_sound_thread"))) g_sound_thread_want = strcmp(v, "disabled") != 0;   /* from the next slice */
     if ((v = lr_var("m2hle_heat_guard"))) {
@@ -458,6 +466,7 @@ static void lr_set_options(void) {
         { "m2hle_gems_cop",   "Gems C: coprocessor; disabled|enabled" },
         { "m2hle_sound_thread", "Sound board on its own core; enabled|disabled" },
         { "m2hle_depth",      "Depth; board|pixel" },
+        { "m2hle_cabinet",    "Cabinet colours; board|twin|deluxe" },
         { "m2hle_draw_rate",  "Draw rate; 60|30" },
         { "m2hle_heat_guard", "Heat guard; " LR_DEFAULT_HEAT "|off|80|85|90" },
         { "m2hle_online",     "Online play; retroarch|rpcn|ggpo" },
@@ -634,13 +643,26 @@ static bool lr_lobby_chord(void) {
         && (!input_twin_levers() || input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT));
 }
 
+/* A racing cabinet's gear buttons (io_5649.h) on player 1's shoulders, laid
+ * out as the lever's H: L 1st, L2 2nd, R 3rd, R2 4th. Neutral has no RetroPad
+ * button left: shift down from 1st. L + R still opens the lobby. */
+static const struct { unsigned id; int act; const char *name; } lr_gear_binds[] = {
+    { RETRO_DEVICE_ID_JOYPAD_L,  GAME_INPUT_GEAR_1, "1st gear" },
+    { RETRO_DEVICE_ID_JOYPAD_L2, GAME_INPUT_GEAR_2, "2nd gear" },
+    { RETRO_DEVICE_ID_JOYPAD_R,  GAME_INPUT_GEAR_3, "3rd gear" },
+    { RETRO_DEVICE_ID_JOYPAD_R2, GAME_INPUT_GEAR_4, "4th gear" },
+};
+#define LR_GEAR_BIND_COUNT (int)(sizeof lr_gear_binds / sizeof lr_gear_binds[0])
+
+static bool lr_has_gears(void) { return g_active_profile && g_active_profile->input.bits[GAME_INPUT_GEAR_1]; }
+
 static void lr_set_input_descriptors(void) {
     static const char *names[] = { "Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3",
                                    "Button 4", "Start", "Coin", "Test", "Service" };
     static const char *twin_names[] = { "Left lever up", "Left lever down", "Left lever left", "Left lever right",
         "Right lever up", "Right lever down", "Right lever left", "Right lever right", "Left shot", "Left dash",
         "Right shot", "Right dash", "Start", "Coin", "Test", "Service" };
-    struct retro_input_descriptor desc[4 * LR_BIND_COUNT + 2 * LR_TWIN_BIND_COUNT + 9];
+    struct retro_input_descriptor desc[4 * LR_BIND_COUNT + 2 * LR_TWIN_BIND_COUNT + LR_GEAR_BIND_COUNT + 9];
     int n = 0;
     if (input_twin_levers()) {
         for (unsigned port = 0; port < 2; port++) {
@@ -665,7 +687,10 @@ static void lr_set_input_descriptors(void) {
             if (port > 0 && lr_binds[i].p2 < 0) continue;
             desc[n++] = (struct retro_input_descriptor){ port, RETRO_DEVICE_JOYPAD, 0, lr_binds[i].id, names[i] };
         }
-    if (opt.online != LR_ONLINE_RETROARCH) {
+    if (lr_has_gears())
+        for (int i = 0; i < LR_GEAR_BIND_COUNT; i++)
+            desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, lr_gear_binds[i].id, lr_gear_binds[i].name };
+    else if (opt.online != LR_ONLINE_RETROARCH) {
         desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L, "Online lobby (with R)" };
         desc[n++] = (struct retro_input_descriptor){ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Online lobby (with L)" };
     }
@@ -757,6 +782,9 @@ static uint32_t lr_port_held(unsigned port) {
         if (lr_binds[i].id == RETRO_DEVICE_ID_JOYPAD_RIGHT) on |= ax >  dead;
         if (on) held |= in->bits[act];
     }
+    if (port == 0 && lr_has_gears())
+        for (int i = 0; i < LR_GEAR_BIND_COUNT; i++)
+            if (lr_btn(0, lr_gear_binds[i].id)) held |= in->bits[lr_gear_binds[i].act];
     return held | lr_port_gun(port);
 }
 
@@ -787,9 +815,7 @@ static uint32_t lr_held_to_word(uint32_t held) {
     uint32_t word = 0;
     for (int i = 0; i < 10; i++)
         if (in->bits[p1[i]] && (held & in->bits[p1[i]])) word |= 1u << i;
-    if (in->bits[GAME_INPUT_SERVICE] && (held & in->bits[GAME_INPUT_SERVICE])) word |= 1u << NP_BIT_SERVICE;
-    if (in->bits[GAME_INPUT_TEST]    && (held & in->bits[GAME_INPUT_TEST]))    word |= 1u << NP_BIT_TEST;
-    return word;
+    return word | np_cabinet_word(held, in);
 }
 
 /* Two players' words into the board's held mask: netplay_apply_inputs, whose
@@ -805,8 +831,7 @@ static void lr_apply_words(uint32_t w0, uint32_t w1) {
         if (w0 & (1u << i)) held |= in->bits[p1[i]];
         if (w1 & (1u << i)) held |= in->bits[p2[i]];
     }
-    if (w0 & (1u << NP_BIT_SERVICE)) held |= in->bits[GAME_INPUT_SERVICE];
-    if (w0 & (1u << NP_BIT_TEST))    held |= in->bits[GAME_INPUT_TEST];
+    held |= np_cabinet_held(w0, in);
     g_input.net_held = held;
     g_input.use_net  = 1;
 }
@@ -2591,36 +2616,8 @@ static bool lr_run_ggpo(uint32_t held) {
     return true;
 }
 
-RETRO_API void retro_run(void) {
-    hprof_tick();   /* the in-process profiler: M2HLE_HOSTPROF or /tmp/m2hle-hostprof (host_prof.h) */
-    bool updated = false;
-    if (env_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
-        lr_read_options(false);   /* a new size is announced by lr_draw */
-    }
-
-    if (g_backup_reload) {
-        g_backup_reload = false;
-        backup_ram_reload(state.bus.back);
-    }
-
-    input_poll_cb();
-    uint32_t held = g_shell_on ? lr_port_held_shell(0) : lr_port_held(0) | lr_wheel();
-    /* Port 2 is the second player on this machine -- not in a session, where
-     * each machine is one player. */
-    bool in_session = lr_in_session();
-    if (!in_session) held |= g_shell_on ? lr_port_held_shell(1) : lr_port_held(1);
-    /* Ports 3 and 4: players 3 and 4 of a four-player cabinet, only on this
-     * machine too (the board reads them only outside a session). */
-    uint32_t far_bits = !in_session && input_four_players() ? lr_port_held(2) | lr_port_held(3) : 0;
-    bool board_paused = false;
-    if (g_shell_on && !lr_shell_input(&board_paused)) held = far_bits = 0;
-    if (!in_session) held = lr_script_held(held);
-    g_input.far_held = far_bits;
-
-    if (opt.online == LR_ONLINE_RPCN) lr_rpcn_toasts();
-
-    hprof_phase(0);   /* the frame log's phases: 0 input, 1 board, 2 audio, 3-5 lr_draw, 6 sound wait */
-    int64_t snd_wait0 = g_emu_times.sound_wait_us;
+/* This frame's board, run the way the online mode runs it. */
+static bool lr_run_frame(uint32_t held, bool board_paused) {
     bool ran;
     if (board_paused) {
         ran = false;   /* the shell's menus: the board waits, as the PS3 suspends it */
@@ -2642,6 +2639,41 @@ RETRO_API void retro_run(void) {
             lr_message(g_pkt.note, 240);
         }
     }
+    return ran;
+}
+
+RETRO_API void retro_run(void) {
+    hprof_tick();   /* the in-process profiler: M2HLE_HOSTPROF or /tmp/m2hle-hostprof (host_prof.h) */
+    bool updated = false;
+    if (env_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
+        lr_read_options(false);   /* a new size is announced by lr_draw */
+    }
+
+    if (g_backup_reload) {
+        g_backup_reload = false;
+        backup_ram_reload(state.bus.back);
+        if (g_active_profile->backup_fn) g_active_profile->backup_fn(&state.romset, &state.bus);
+    }
+
+    input_poll_cb();
+    uint32_t held = g_shell_on ? lr_port_held_shell(0) : lr_port_held(0) | lr_wheel();
+    /* Port 2 is the second player on this machine -- not in a session, where
+     * each machine is one player. */
+    bool in_session = lr_in_session();
+    if (!in_session) held |= g_shell_on ? lr_port_held_shell(1) : lr_port_held(1);
+    /* Ports 3 and 4: players 3 and 4 of a four-player cabinet, only on this
+     * machine too (the board reads them only outside a session). */
+    uint32_t far_bits = !in_session && input_four_players() ? lr_port_held(2) | lr_port_held(3) : 0;
+    bool board_paused = false;
+    if (g_shell_on && !lr_shell_input(&board_paused)) held = far_bits = 0;
+    if (!in_session) held = lr_script_held(held);
+    g_input.far_held = far_bits;
+
+    if (opt.online == LR_ONLINE_RPCN) lr_rpcn_toasts();
+
+    hprof_phase(0);   /* the frame log's phases: 0 input, 1 board, 2 audio, 3-5 lr_draw, 6 sound wait */
+    int64_t snd_wait0 = g_emu_times.sound_wait_us;
+    bool ran = lr_run_frame(held, board_paused);
 
     g_lr_runs++;
     if (!ran) g_lr_skips++;

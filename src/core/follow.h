@@ -429,6 +429,24 @@ static inline void follow_lead_write(uint32_t addr, bool rom, const uint8_t *dat
     free(p);
 }
 
+/* The slice's input word, latched for the board and recorded when it changes. */
+static inline void follow__lead_latch(follow_lead_t *L) {
+    /* The board reads one word for the whole slice: the host's keys can move
+     * under it on another thread, and the follower has to see what it saw. */
+    uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
+    L->use_net_was = g_input.use_net;
+    L->latched     = true;
+    g_input.net_held = held;
+    g_input.use_net  = 1;
+    if (!L->held_known || held != L->held) {
+        uint8_t p[4];
+        follow_put32(p, held);
+        follow__lead_rec(FOLLOW_INPUT, L->slice, p, 4);
+        L->held = held;
+        L->held_known = true;
+    }
+}
+
 static inline void follow__lead_begin(emu_thread_ctx_t *ctx) {
     follow_lead_t *L = &g_follow_lead;
     if (!L->join_due && L->every && L->seg_frames >= L->every && L->slice == 0)
@@ -451,20 +469,7 @@ static inline void follow__lead_begin(emu_thread_ctx_t *ctx) {
         L->board = board;
         L->board_known = true;
     }
-    /* The board reads one word for the whole slice: the host's keys can move
-     * under it on another thread, and the follower has to see what it saw. */
-    uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
-    L->use_net_was = g_input.use_net;
-    L->latched     = true;
-    g_input.net_held = held;
-    g_input.use_net  = 1;
-    if (!L->held_known || held != L->held) {
-        uint8_t p[4];
-        follow_put32(p, held);
-        follow__lead_rec(FOLLOW_INPUT, L->slice, p, 4);
-        L->held = held;
-        L->held_known = true;
-    }
+    follow__lead_latch(L);
 }
 
 static inline void follow__check_payload(emu_thread_ctx_t *ctx, uint32_t frame, uint32_t slices,

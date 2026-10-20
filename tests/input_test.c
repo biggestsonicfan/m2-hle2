@@ -56,6 +56,32 @@ int main(void) {
           input_combo_parse("p2:B1+b3") == ((1u << GAME_INPUT_P2_B1) | (1u << GAME_INPUT_P2_B3)) &&
           input_combo_parse("b1+b5") == 0 && input_combo_parse("") == 0,
           "combo text parses to action masks, and junk to 0");
+    CHECK(input_combo_parse("service") == (1u << GAME_INPUT_SERVICE) &&
+          input_combo_parse("p1:test") == (1u << GAME_INPUT_TEST) &&
+          input_combo_parse("gearn") == (1u << GAME_INPUT_GEAR_N) &&
+          input_combo_parse("gear3+b1") == ((1u << GAME_INPUT_GEAR_3) | (1u << GAME_INPUT_P1_B1)) &&
+          input_combo_parse("p2:gear1") == 0 && input_combo_parse("p3:service") == 0 &&
+          input_combo_parse("gear5") == 0,
+          "the cabinet's service, test and gear buttons parse, for player 1 only (Pinboard #1137)");
+    {   /* a gear button puts the lever in its gate and it stays there (io_5649.h) */
+        io5649_controls_t saved = g_io5649_controls;
+        g_io5649_controls = (io5649_controls_t){ .shift_up = 1u, .shift_down = 2u,
+                                                 .gear = { 4u, 8u, 16u, 32u, 64u } };
+        io5649_reset();
+        io5649_shift(32u);                       /* 3rd */
+        int third = g_io5649.gear;
+        uint8_t lever3 = io5649_gearbox();
+        io5649_shift(0);                         /* let go: stays in 3rd */
+        int held = g_io5649.gear;
+        io5649_shift(1u);                        /* shift up from there */
+        int fourth = g_io5649.gear;
+        io5649_shift(4u);                        /* N */
+        int neutral = g_io5649.gear;
+        CHECK(third == 3 && lever3 == (0x8F | 6 << 4) && held == 3 && fourth == 4 && neutral == 0,
+              "gear buttons latch the lever's gate, and shifts go on from it");
+        g_io5649_controls = saved;
+        io5649_reset();
+    }
     CHECK(input_keycode_by_name("A") == SAPP_KEYCODE_A && input_keycode_by_name("kp1") == SAPP_KEYCODE_KP_1 &&
           input_keycode_by_name("f12") == SAPP_KEYCODE_F12 && input_keycode_by_name("pageup") == SAPP_KEYCODE_PAGE_UP &&
           input_keycode_by_name("nope") == -1,
@@ -103,6 +129,12 @@ int main(void) {
               "action masks write as the combo text that parses back to them");
         CHECK(input_action_by_name("p2_start") == GAME_INPUT_P2_START && input_action_by_name("test") == GAME_INPUT_TEST &&
               input_action_by_name("p3_up") == -1, "actions by their controls-file names");
+        bool gears_ok = true;
+        for (int a = GAME_INPUT_GEAR_N; a <= GAME_INPUT_GEAR_4; a++)
+            if (input_action_by_name(g_input_action_names[a]) != a
+                || input_combo_parse(input_combo_format(1u << a, buf, sizeof buf)) != 1u << a) gears_ok = false;
+        CHECK(gears_ok && !strcmp(input_combo_format(1u << GAME_INPUT_GEAR_3, buf, sizeof buf), "gear3"),
+              "a gear's button has a controls-file name, and writes as the text that parses back to it");
 
         g_input_keys[GAME_INPUT_P1_B1][0] = SAPP_KEYCODE_SPACE;   /* B1 on Space, Z free */
         g_input_keys[GAME_INPUT_P1_B2][1] = SAPP_KEYCODE_SPACE;   /* ...and B2's second key too */
@@ -143,8 +175,11 @@ int main(void) {
               input_keycode_to_action(SAPP_KEYCODE_V) == GAME_INPUT_P2_B4 &&
               input_keycode_to_action(SAPP_KEYCODE_W) == GAME_INPUT_P1_UP &&
               input_keycode_to_action(SAPP_KEYCODE_Q) == GAME_INPUT_P1_DOWN &&
+              input_keycode_to_action(SAPP_KEYCODE_A) == GAME_INPUT_GEAR_1 &&
+              input_keycode_to_action(SAPP_KEYCODE_F) == GAME_INPUT_GEAR_4 &&
+              input_keycode_to_action(SAPP_KEYCODE_G) == GAME_INPUT_GEAR_N &&
               input_keycode_to_action(SAPP_KEYCODE_PAGE_DOWN) == -1,
-              "a racing cabinet: Up accelerates, Down brakes, Z X C V the views, Q / W shift");
+              "a racing cabinet: Up accelerates, Down brakes, Z X C V the views, Q / W shift, A S D F G the gears");
         input_keys_default(g_active_profile);
     }
 

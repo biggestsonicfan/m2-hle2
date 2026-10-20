@@ -719,9 +719,7 @@ static uint32_t words_mask(uint32_t w0, uint32_t w1) {
         if (w0 & (1u << i)) held |= in->bits[p1[i]];
         if (w1 & (1u << i)) held |= in->bits[p2[i]];
     }
-    if (w0 & (1u << NP_BIT_SERVICE)) held |= in->bits[GAME_INPUT_SERVICE];
-    if (w0 & (1u << NP_BIT_TEST))    held |= in->bits[GAME_INPUT_TEST];
-    return held;
+    return held | np_cabinet_held(w0, in);
 }
 
 static void parse_script(const char *s) {

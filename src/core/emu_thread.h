@@ -875,9 +875,12 @@ static inline void emu_slice_after(emu_thread_ctx_t *ctx, bool frame, int64_t pr
         pcprof_frame((int32_t)(emu_now_us() - prof_t0), (uint32_t)steps, g_emu_frames);
 }
 
-static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
+/* Before the i960's part of a slice: the profiler's start and zone, this
+ * slice's inputs, the timers and the interrupts due. Returns the profiler's
+ * start time; the zone goes to *hzone for emu_slice_body to leave. */
+static inline int64_t emu_slice_begin(emu_thread_ctx_t *ctx, int *hzone) {
     int64_t  prof_t0 = g_pcprof_on ? emu_now_us() : 0;
-    int      hzone   = hprof_enter(HPROF_I960);   /* host_prof.h; COP and sound tag themselves */
+    *hzone = hprof_enter(HPROF_I960);   /* host_prof.h; COP and sound tag themselves */
     /* A slice runs the board to its next vblank (irq_timer.h), whatever the
      * program is doing then: the frame is the board's, not the game's. */
     g_vblank_edge = 0;
@@ -888,6 +891,12 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
+    return prof_t0;
+}
+
+static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
+    int      hzone;
+    int64_t  prof_t0 = emu_slice_begin(ctx, &hzone);
     int max_steps = g_emu_steps_per_slice;
     /* The step count is accumulated in a register and written back once.
      * ctx->total_steps is volatile -- netplay hashes it into every frame's

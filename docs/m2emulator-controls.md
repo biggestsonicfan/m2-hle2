@@ -70,7 +70,7 @@ python3 tools/m2emu-controls/m2emu_controls.py --exe <m2emulator>/EMULATOR.EXE \
 | Test (IN0 0x04) | F2 | F3 | **F2** |
 | Driving: accel / brake | Up / Down (and axes) | P1 B1 / B2 = Z / X | **Up / Down** |
 | Driving: VR 1-4 | Z X C V | C V and P2 B3 / B4 | **Z X C V** |
-| Driving: gears 1-4, N | A S D F, G | no gear inputs | not yet (#1137 adds them) |
+| Driving: gears 1-4, N | A S D F, G | no gear inputs | **A S D F, G** |
 
 Driving games are the profiles with a wheel accelerator and brake
 (`input_keys_driving`: Daytona USA and Sega Rally). On them the arrows' Up
@@ -110,10 +110,12 @@ Three profiles called IN0 0x04 SERVICE: Sonic the Fighters, Virtual-On and
 the m2snake homebrew. It is the test switch (MAME's `PORT_SERVICE_NO_TOGGLE`,
 m2emulator's Test); they now read TEST 0x04 and SERVICE 0x08 like every
 other profile. That changes which bit a netplay peer's SERVICE / TEST sends,
-so `NETPLAY_PROTO_REV` went to 35.
+so `NETPLAY_PROTO_REV` went to 35 (37 once merged over master's 36).
 
-Left for when #1137 lands: its gear actions on A S D F G, and the web's
-service / test rows on F1 / F2.
+With #1137's gear buttons merged, the driving map has them on A S D F G
+(desktop, SDL3 and the web), and the web's Service / Test rows are on F1
+(and 9) / F2 like the desktop's. #1353 took rev 36 first, so the IN0 change
+is rev 37 on master.
 
 ## Every layout
 

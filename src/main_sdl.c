@@ -16,8 +16,9 @@
  * --pad-map  comma-separated button=action pairs overriding the defaults, e.g.
  *            "south=b1,east=b2,west=b3". Buttons: south east west north start
  *            back l1 r1 l3 r3 guide; actions: b1 b2 b3 b4 start coin service
- *            test none, or a combo that holds several at once (a "macro"),
- *            e.g. "north=b1+b2,l3=b1+b2+b3".
+ *            test none, a racing cabinet's gearn gear1 gear2 gear3 gear4 (one
+ *            button a gate, Daytona and Sega Rally), or a combo that holds
+ *            several at once (a "macro"), e.g. "north=b1+b2,l3=b1+b2+b3".
  * --shot     save a PNG of the first rendered frame at or after game frame N.
  * --exit-after  quit after N game frames (for scripted checks).
  * --host-prof START:SECS[:FILE]  sample the process's own CPU time for SECS
@@ -223,6 +224,11 @@ static int key_to_action(SDL_Scancode sc) {
             case SDL_SCANCODE_V:    return GAME_INPUT_P2_B4;
             case SDL_SCANCODE_W:    return GAME_INPUT_P1_UP;    /* shift up */
             case SDL_SCANCODE_Q:    return GAME_INPUT_P1_DOWN;  /* shift down */
+            case SDL_SCANCODE_A:    return GAME_INPUT_GEAR_1;   /* a gear's button */
+            case SDL_SCANCODE_S:    return GAME_INPUT_GEAR_2;
+            case SDL_SCANCODE_D:    return GAME_INPUT_GEAR_3;
+            case SDL_SCANCODE_F:    return GAME_INPUT_GEAR_4;
+            case SDL_SCANCODE_G:    return GAME_INPUT_GEAR_N;
             default:                break;
         }
     }
@@ -987,29 +993,48 @@ static void netplay_start(void) {
     if (lobby_can_sign_in()) lobby_sign_in();
 }
 
+/* lobby_event's pad button press: Guide or L1+R1 (not on a twin-lever game,
+ * where they are the two dashes) toggle the lobby; while it is open, the d-pad
+ * moves and A or B is held for its release. */
+static void lobby_pad_down(const SDL_Event *ev, bool *toggle, bool *used) {
+    SDL_Gamepad *pad = SDL_GetGamepadFromID(ev->gbutton.which);
+    int b = ev->gbutton.button;
+    if (b == SDL_GAMEPAD_BUTTON_GUIDE) *toggle = true;
+    else if (pad && !input_twin_levers() && ((b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
+                      && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
+                  || (b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER
+                      && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))))
+        *toggle = true;
+    else if (g_lobby.open) {
+        *used = true;
+        if (b == SDL_GAMEPAD_BUTTON_DPAD_UP)   lobby_move(-1);
+        if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) lobby_move(+1);
+        if (b == SDL_GAMEPAD_BUTTON_SOUTH || b == SDL_GAMEPAD_BUTTON_EAST)
+            g_lobby.pressed = b;
+    }
+}
+
+/* lobby_event's key press: F1 toggles the lobby; while it is open, every key
+ * but Escape is the lobby's, the arrows moving, Return picking, Backspace closing. */
+static void lobby_key_down(const SDL_Event *ev, bool *toggle, bool *used) {
+    if (ev->key.scancode == SDL_SCANCODE_F1) *toggle = true;
+    else if (g_lobby.open && ev->key.scancode != SDL_SCANCODE_ESCAPE) {
+        *used = true;
+        if (ev->key.scancode == SDL_SCANCODE_UP)        lobby_move(-1);
+        if (ev->key.scancode == SDL_SCANCODE_DOWN)      lobby_move(+1);
+        if (ev->key.scancode == SDL_SCANCODE_RETURN)    lobby_activate();
+        if (ev->key.scancode == SDL_SCANCODE_BACKSPACE) lobby_show(false);
+    }
+}
+
 /* The netplay lobby takes the pad and the keyboard while it is open: L1+R1
- * (not on a twin-lever game, where they are the two dashes), Guide or F1
- * toggle it; the d-pad moves, A picks and B closes, both on
- * release, so the button is up again before the game resumes. True if the
- * event was the lobby's and the game must not see it. */
+ * (not on a twin-lever game), Guide or F1 toggle it; the d-pad moves, A picks
+ * and B closes, both on release, so the button is up again before the game
+ * resumes. True if the event was the lobby's and the game must not see it. */
 static bool lobby_event(const SDL_Event *ev, bool *pad_changed) {
     bool toggle = false, used = false;
     if (ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-        SDL_Gamepad *pad = SDL_GetGamepadFromID(ev->gbutton.which);
-        int b = ev->gbutton.button;
-        if (b == SDL_GAMEPAD_BUTTON_GUIDE) toggle = true;
-        else if (pad && !input_twin_levers() && ((b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
-                          && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))
-                      || (b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER
-                          && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER))))
-            toggle = true;
-        else if (g_lobby.open) {
-            used = true;
-            if (b == SDL_GAMEPAD_BUTTON_DPAD_UP)   lobby_move(-1);
-            if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) lobby_move(+1);
-            if (b == SDL_GAMEPAD_BUTTON_SOUTH || b == SDL_GAMEPAD_BUTTON_EAST)
-                g_lobby.pressed = b;
-        }
+        lobby_pad_down(ev, &toggle, &used);
     } else if (ev->type == SDL_EVENT_GAMEPAD_BUTTON_UP && g_lobby.open) {
         used = true;
         if (ev->gbutton.button == g_lobby.pressed) {
@@ -1018,14 +1043,7 @@ static bool lobby_event(const SDL_Event *ev, bool *pad_changed) {
             else lobby_show(false);
         }
     } else if (ev->type == SDL_EVENT_KEY_DOWN && !ev->key.repeat) {
-        if (ev->key.scancode == SDL_SCANCODE_F1) toggle = true;
-        else if (g_lobby.open && ev->key.scancode != SDL_SCANCODE_ESCAPE) {
-            used = true;
-            if (ev->key.scancode == SDL_SCANCODE_UP)        lobby_move(-1);
-            if (ev->key.scancode == SDL_SCANCODE_DOWN)      lobby_move(+1);
-            if (ev->key.scancode == SDL_SCANCODE_RETURN)    lobby_activate();
-            if (ev->key.scancode == SDL_SCANCODE_BACKSPACE) lobby_show(false);
-        }
+        lobby_key_down(ev, &toggle, &used);
     } else if (ev->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && g_lobby.open) {
         used = true;
     }
@@ -1557,6 +1575,29 @@ static const sg_pass_action g_pass_action = {
     .depth     = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f },
 };
 
+/* What the screen pass draws: the game picture (or the lobby's black), the
+ * scripts' layer, the OSD, the lobby and the debug text. */
+static void render_screen(int fb_w, int fb_h, int ox, int oy, int w, int h, float lerp_t) {
+    /* The lobby is drawn on black, to be read; over a match, on the match. */
+    if (opt.netplay) lobby_update(SDL_GetTicksNS());
+    bool show_game = !(opt.netplay && g_lobby.open && !netplay_state_running(g_lobby.st.state));
+    if (show_game && opt.render_scale > 0)
+        game_render_draw_target(g_rt.texture, opt.linear, ox, oy, w, h);
+    else if (show_game)
+        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, (game_rect_t){ox, oy, w, h}, lerp_t);
+    if (show_game) {
+        game_rect_t board = game_render_tile_rect((game_rect_t){ ox, oy, w, h }, false);
+        scripts_draw(fb_w, fb_h, board.x, board.y, board.w, board.h);
+    }
+    gun_place(fb_w, fb_h, ox, oy, show_game ? w : 0, h);
+    if (opt.osd) {
+        osd_update(SDL_GetTicksNS());
+        osd_draw(fb_w, fb_h);
+    }
+    if (opt.netplay) lobby_draw(fb_w, fb_h, SDL_GetTicksNS());
+    if (g_sdtx_on) sdtx_draw();
+}
+
 /* Draw the board's latest frame, the OSD and the lobby, and present it. */
 static void render_frame(void) {
     static int shots_done;
@@ -1595,24 +1636,7 @@ static void render_frame(void) {
                        .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
                        .gl.framebuffer = 0 },
     });
-    /* The lobby is drawn on black, to be read; over a match, on the match. */
-    if (opt.netplay) lobby_update(SDL_GetTicksNS());
-    bool show_game = !(opt.netplay && g_lobby.open && !netplay_state_running(g_lobby.st.state));
-    if (show_game && opt.render_scale > 0)
-        game_render_draw_target(g_rt.texture, opt.linear, ox, oy, w, h);
-    else if (show_game)
-        game_frame_draw(&state.video, &state.geo3d, &state.bus, &state.romset, (game_rect_t){ox, oy, w, h}, lerp_t);
-    if (show_game) {
-        game_rect_t board = game_render_tile_rect((game_rect_t){ ox, oy, w, h }, false);
-        scripts_draw(fb_w, fb_h, board.x, board.y, board.w, board.h);
-    }
-    gun_place(fb_w, fb_h, ox, oy, show_game ? w : 0, h);
-    if (opt.osd) {
-        osd_update(SDL_GetTicksNS());
-        osd_draw(fb_w, fb_h);
-    }
-    if (opt.netplay) lobby_draw(fb_w, fb_h, SDL_GetTicksNS());
-    if (g_sdtx_on) sdtx_draw();
+    render_screen(fb_w, fb_h, ox, oy, w, h, lerp_t);
     int pzone = hprof_enter(HPROF_PRESENT);   /* host_prof.h */
     sg_end_pass();
     sg_commit();
@@ -1683,6 +1707,39 @@ static int run_loop(bool audio) {
     return rc;
 }
 
+/* After the run loop: the emu thread first, then what it used (the link, the
+ * scripts, backup RAM, netplay, sound), the --verify-* reports, then the video
+ * and SDL. */
+static void shut_down(SDL_AudioStream *audio) {
+    emu_thread_shutdown(&state.emu);
+    versus_stop();   /* after the emu thread: it reads the link's socket */
+    if (g_m2lua.loaded)
+        printf("m2hle: script %s: %llu frames%s%s\n", g_m2lua.path, (unsigned long long)g_m2lua.frames,
+               g_m2lua.error[0] ? ", last error: " : "", g_m2lua.error);
+    m2lua_unload();       /* End(), and the script's ROM patches off */
+    backup_ram_flush();   /* the board has stopped: what it holds now is final */
+    if (opt.netplay) netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
+    if (audio) SDL_DestroyAudioStream(audio);   /* after the emu thread: no more ring writes */
+    if (opt.verify_fill)
+        printf("verify-fill: %llu frames of fills checked, %llu differed, %llu skipped (vertex buffer uploaded twice)\n",
+               (unsigned long long)g_vf.frames, (unsigned long long)g_vf.bad_frames, (unsigned long long)g_vf.skipped);
+    if (opt.verify_gpu_tiles)
+        printf("verify-gpu-tiles: %llu composed frames checked, %llu differed\n",
+               (unsigned long long)g_vt.frames, (unsigned long long)g_vt.bad_frames);
+    game_target_destroy();
+    scripts_images_shutdown();
+    if (g_sdtx_on) sdtx_shutdown();
+    game_render_shutdown();
+    video_shutdown(&state.video);
+    sg_shutdown();
+    SDL_GL_DestroyContext(g_gl);
+    SDL_DestroyWindow(g_window);
+    SDL_Quit();
+    romset_free(&state.romset);
+    mem_shutdown(&state.bus);
+    log_file_close();
+}
+
 int main(int argc, char **argv) {
     versus_keep_cmdline(argc, argv);
     if (!parse_args(argc, argv)) {
@@ -1730,32 +1787,6 @@ int main(int argc, char **argv) {
 
     rc = run_loop(audio != NULL);
 
-    emu_thread_shutdown(&state.emu);
-    versus_stop();   /* after the emu thread: it reads the link's socket */
-    if (g_m2lua.loaded)
-        printf("m2hle: script %s: %llu frames%s%s\n", g_m2lua.path, (unsigned long long)g_m2lua.frames,
-               g_m2lua.error[0] ? ", last error: " : "", g_m2lua.error);
-    m2lua_unload();       /* End(), and the script's ROM patches off */
-    backup_ram_flush();   /* the board has stopped: what it holds now is final */
-    if (opt.netplay) netplay_shutdown();   /* after the emu thread: it is the only thing that pumps it */
-    if (audio) SDL_DestroyAudioStream(audio);   /* after the emu thread: no more ring writes */
-    if (opt.verify_fill)
-        printf("verify-fill: %llu frames of fills checked, %llu differed, %llu skipped (vertex buffer uploaded twice)\n",
-               (unsigned long long)g_vf.frames, (unsigned long long)g_vf.bad_frames, (unsigned long long)g_vf.skipped);
-    if (opt.verify_gpu_tiles)
-        printf("verify-gpu-tiles: %llu composed frames checked, %llu differed\n",
-               (unsigned long long)g_vt.frames, (unsigned long long)g_vt.bad_frames);
-    game_target_destroy();
-    scripts_images_shutdown();
-    if (g_sdtx_on) sdtx_shutdown();
-    game_render_shutdown();
-    video_shutdown(&state.video);
-    sg_shutdown();
-    SDL_GL_DestroyContext(g_gl);
-    SDL_DestroyWindow(g_window);
-    SDL_Quit();
-    romset_free(&state.romset);
-    mem_shutdown(&state.bus);
-    log_file_close();
+    shut_down(audio);
     return rc;
 }

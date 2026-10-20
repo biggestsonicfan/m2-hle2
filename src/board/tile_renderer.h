@@ -191,30 +191,39 @@ static inline void s24_cell_load(s24_cell_t *cl, const s24_pass_t *p, int l, int
     cl->dead = !opaque && !(g[0] | g[1] | g[2] | g[3]);
 }
 
+/* For s24_draw_line: the length of the run that starts at screen x (tx in the
+ * tilemap), cut at the cell's edge, the mask group's or the split's, and at
+ * xe; *l is the tilemap the run is drawn from. */
+static inline int s24_line_run(const s24_pass_t *p, const s24_line_t *ln, int x, int tx, int xe,
+                               int *l) {
+    int run = 8 - (tx & 7);                  /* to the cell's edge */
+    *l = p->t;
+    if (p->mode) {
+        if (x < ln->split_x) {
+            *l = ln->split_l;
+            if (x + run > ln->split_x) run = ln->split_x - x;
+        } else *l = ln->split_l ^ 1;
+    } else {
+        int g = 8 - (x & 7);                 /* to the mask group's edge */
+        if (g < run) run = g;
+    }
+    if (x + run > xe) run = xe - x;
+    return run;
+}
+
 /* Line y of s24_draw_tilemap, over [xs, xe). The walk goes a run at a time:
  * a run stays in one cell, one window-mask group (8 screen pixels) and one
  * side of the split, so the cell, the mask bit and the tilemap are looked at
  * once per run, not once per pixel. */
 static inline void s24_draw_line(const s24_pass_t *p, const s24_line_t *ln, int h, int ty,
                                  uint16_t *drow, int xs, int xe) {
-    int        t = p->t, mode = p->mode;
+    int        mode = p->mode;
     bool       opaque = p->opaque;
     int        cell = (ty >> 3) * 64;        /* the tilemap row's first cell */
     s24_cell_t cl = { .cur = -1 };
     for (int x = xs, run; x < xe; x += run) {
-        int tx = (x - h) & 511;
-        run = 8 - (tx & 7);                  /* to the cell's edge */
-        int l = t;
-        if (mode) {
-            if (x < ln->split_x) {
-                l = ln->split_l;
-                if (x + run > ln->split_x) run = ln->split_x - x;
-            } else l = ln->split_l ^ 1;
-        } else {
-            int g = 8 - (x & 7);             /* to the mask group's edge */
-            if (g < run) run = g;
-        }
-        if (x + run > xe) run = xe - x;
+        int tx = (x - h) & 511, l;
+        run = s24_line_run(p, ln, x, tx, xe, &l);
         if (!mode && (ln->mask[x >> 7] & (0x8000 >> ((x & 127) >> 3)))) continue;
         int key = (l << 6) | (tx >> 3);
         if (key != cl.cur) {
@@ -515,18 +524,24 @@ static inline void tile_pen_lut(const memory_bus_t *bus, uint8_t lut[0x8000][3])
  * palette change, not 32768 built with a division each, and the CPU
  * compositor's pen colours (tile_compose_cpu) come from the same 96 values.
  * --verify-gpu-tiles holds this to tile_pen_lut. */
-static inline void video_pen_channels(const memory_bus_t *bus, uint8_t chan[3][32]) {
+/* From colour tables in colorxlat's layout: the bus's, or the Picture menu's
+ * cabinet's (core/cabinet_picture.h). */
+static inline void video_pen_channels_xlat(const uint8_t *colorxlat, uint8_t chan[3][32]) {
     int loaded = 0;
     for (int c5 = 0; c5 < 32 && !loaded; c5++)
         for (int ch = 0; ch < 3 && !loaded; ch++)
-            if (bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u]) loaded = 1;
+            if (colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u]) loaded = 1;
     for (int ch = 0; ch < 3; ch++)
         for (int c5 = 0; c5 < 32; c5++) {
             if (!loaded) { chan[ch][c5] = (uint8_t)(c5 << 3); continue; }
-            int v = bus->colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u];
+            int v = colorxlat[((uint32_t)ch * 0x2000u + 0x40u + ((uint32_t)c5 << 8)) * 2u];
             int g = (v - 64) * 255 / 191;
             chan[ch][c5] = (uint8_t)(g < 0 ? 0 : g);
         }
+}
+
+static inline void video_pen_channels(const memory_bus_t *bus, uint8_t chan[3][32]) {
+    video_pen_channels_xlat(bus->colorxlat, chan);
 }
 
 #endif /* TILE_RENDERER_H */

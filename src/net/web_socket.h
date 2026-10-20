@@ -250,6 +250,16 @@ static char g_web_upstream[128];
 /* The gateway's default upstream: ours, rpcn.sonicthefighte.rs. */
 #define WEB_GATEWAY_DEFAULT_UPSTREAM "rpcn.sonicthefighte.rs"
 
+/* Whether `name` is only letters, digits, dots and dashes. */
+static inline bool m2ws_host_name(const char *name) {
+    bool plain = true;
+    for (const char *c = name; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')
+              || *c == '.' || *c == '-'))
+            plain = false;
+    return plain;
+}
+
 /*
  * "<gateway>/<path>" for the default upstream, "<gateway>/<path>/<name>" for
  * any other, into `out`.
@@ -268,11 +278,7 @@ static inline void m2ws_url(char *out, size_t cap, const char *path) {
     size_t n = strlen(g_web_gateway_url);
     while (n && g_web_gateway_url[n - 1] == '/') n--;
     const char *name = g_web_upstream;
-    bool plain = true;
-    for (const char *c = name; *c; c++)
-        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')
-              || *c == '.' || *c == '-'))
-            plain = false;
+    bool plain = m2ws_host_name(name);
     bool named = name[0] && strcasecmp(name, WEB_GATEWAY_DEFAULT_UPSTREAM) != 0;
     snprintf(out, cap, "%.*s/%s%s%s", (int)n, g_web_gateway_url, path,
              named ? "/" : "", named ? (plain ? name : "invalid") : "");

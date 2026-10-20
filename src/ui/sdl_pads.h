@@ -110,13 +110,13 @@ static void pad_pick_parse(pad_pick_t *p, const char *v) {
     snprintf(p->name, sizeof p->name, "%s", v[n] ? v + n + 1 : "?");
 }
 
-/* An action, or a combo of player-1 actions ("b1+b2"); false if neither. */
+/* An action, or a combo of player-1 actions ("b1+b2") and the cabinet's own
+ * (service, test, gearn, gear1-gear4); false if neither. */
 static bool actions_by_name(const char *s, uint32_t *acts) {
     if (!strcmp(s, "none"))    { *acts = 0; return true; }
-    if (!strcmp(s, "service")) { *acts = ACT(GAME_INPUT_SERVICE); return true; }
-    if (!strcmp(s, "test"))    { *acts = ACT(GAME_INPUT_TEST); return true; }
     *acts = input_combo_parse(s);
-    return *acts && !(*acts >> GAME_INPUT_P2_UP);   /* the pad plays player 1 */
+    uint32_t p2 = ((1u << (GAME_INPUT_P2_COIN + 1)) - 1) & ~((1u << GAME_INPUT_P2_UP) - 1);
+    return *acts && !(*acts & p2);   /* the pad plays player 1 */
 }
 
 static bool apply_pad_map(const char *list) {

@@ -18,7 +18,9 @@
  *     centre when neither is, `speed` A/D steps a frame. `center` and `range`
  *     are the pot's adjustment: full lock reads center ± range.
  *   - each pedal reads its released or pressed value.
- *   - UP / DOWN shift the gear lever one gate on each press (N, 1st .. 4th).
+ *   - UP / DOWN shift the gear lever one gate on each press (N, 1st .. 4th),
+ *     and a gear's own button (GAME_INPUT_GEAR_N .. GEAR_4, MAME's GEARS port)
+ *     puts it in that gate; either way it stays there until the next shift.
  *
  * The defaults are the cabinet's spec, from the Sega Rally Championship
  * owner's manual (input test, FIG 8.4): HANDLE centre 7DH-83H, full left under
@@ -69,9 +71,11 @@
 #define IO5649_STEPS_MAX     64      /* frames caught up at one read */
 #define IO5649_AXIS_MAX      32767   /* io5649_host_analog's full scale */
 
-/* The held bits that drive it; a profile fills these from its input map. */
+/* The held bits that drive it; a profile fills these from its input map.
+ * gear[g] is the button for gate g (0 = N, 1..4). */
 typedef struct {
     uint32_t left, right, accel, brake, shift_up, shift_down;
+    uint32_t gear[5];
 } io5649_controls_t;
 
 /* The pot adjustment: host settings (--wheel-center, --wheel-range,
@@ -171,6 +175,8 @@ static inline void io5649_shift(uint32_t held) {
     g_io5649.prev_held = held;
     if (pressed & g_io5649_controls.shift_up)   g_io5649.gear = io5649_clamp(g_io5649.gear + 1, 0, 4);
     if (pressed & g_io5649_controls.shift_down) g_io5649.gear = io5649_clamp(g_io5649.gear - 1, 0, 4);
+    for (int g = 0; g < 5; g++)
+        if (pressed & g_io5649_controls.gear[g]) g_io5649.gear = g;
 }
 
 /* Turn the wheel for the frames since the last read. */

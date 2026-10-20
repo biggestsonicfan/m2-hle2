@@ -387,6 +387,15 @@ static inline char *rs_unquote(char *v) {
     return rs_trim(v);
 }
 
+/* One `key = value` line, cut at its '=' in place; a line with none is left out. */
+static inline void rs_parse_kv(rs_kvs_t *t, char *l, const char *base) {
+    char *eq = strchr(l, '=');
+    if (eq) {
+        *eq = '\0';
+        rs_kvs_set(t, rs_trim(l), rs_unquote(eq + 1), base);
+    }
+}
+
 static inline bool rs_parse_file(rs_kvs_t *t, const char *path, int depth, char *err, size_t errlen) {
     if (depth > 8) { snprintf(err, errlen, "%s: #reference nests too deeply", rs_path_base(path)); return false; }
     uint8_t *data; size_t len;
@@ -404,11 +413,7 @@ static inline bool rs_parse_file(rs_kvs_t *t, const char *path, int depth, char 
             rs_path_join(base, rs_unquote(l + 10), ref, sizeof ref);
             ok = rs_parse_file(t, ref, depth + 1, err, errlen);
         } else if (*l && *l != '#' && !(l[0] == '/' && l[1] == '/')) {
-            char *eq = strchr(l, '=');
-            if (eq) {
-                *eq = '\0';
-                rs_kvs_set(t, rs_trim(l), rs_unquote(eq + 1), base);
-            }
+            rs_parse_kv(t, l, base);
         }
         line = nl;
     }
@@ -1101,13 +1106,10 @@ static inline void rs_gl_err(const char *fmt, const char *a, const char *b) {
     snprintf(g_rs_gl.err, sizeof g_rs_gl.err, fmt, a, b);
 }
 
-/* The source with its own #version taken out (returned in `ver`) and its
- * parameter pragmas blanked, which some GLSL ES compilers reject. */
-static inline char *rs_gl_strip(const char *src, char *ver, size_t vercap) {
-    size_t n = strlen(src);
-    char *out = (char *)malloc(n + 1);
-    if (!out) return NULL;
-    memcpy(out, src, n + 1);
+/* For rs_gl_strip: the first #version in `out`, if it starts a word, blanked
+ * in place, and what followed it on its line, trimmed, into `ver` ("" when
+ * there is none). */
+static inline void rs_gl_take_version(char *out, char *ver, size_t vercap) {
     ver[0] = '\0';
     char *v = strstr(out, "#version");
     if (v && (v == out || v[-1] == '\n' || v[-1] == '\r' || v[-1] == ' ' || v[-1] == '\t')) {
@@ -1120,6 +1122,16 @@ static inline char *rs_gl_strip(const char *src, char *ver, size_t vercap) {
         snprintf(ver, vercap, "%s", rs_trim(tmp));
         memset(v, ' ', (size_t)(e - v));
     }
+}
+
+/* The source with its own #version taken out (returned in `ver`) and its
+ * parameter pragmas blanked, which some GLSL ES compilers reject. */
+static inline char *rs_gl_strip(const char *src, char *ver, size_t vercap) {
+    size_t n = strlen(src);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, src, n + 1);
+    rs_gl_take_version(out, ver, vercap);
     for (char *p = out; (p = strstr(p, "#pragma parameter")) != NULL; ) {
         while (*p && *p != '\n' && *p != '\r') *p++ = ' ';
     }
@@ -1152,19 +1164,27 @@ static inline GLuint rs_gl_compile(GLenum stage, const char *version, const char
     return sh;
 }
 
+/* For rs_gl_rewrite: the first of from[0..n) that stands at src + i as a
+ * whole word, its length in `k`; -1 when none does, or src + i does not start
+ * a word. */
+static inline int rs_gl_word_at(const char *src, size_t i, const char *const *from, int n, size_t *k) {
+    const bool edge = i == 0 || !(isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_');
+    int hit = -1;
+    for (int t = 0; edge && t < n && hit < 0; t++) {
+        *k = strlen(from[t]);
+        if (!strncmp(src + i, from[t], *k) && !(isalnum((unsigned char)src[i + *k]) || src[i + *k] == '_')) hit = t;
+    }
+    return hit;
+}
+
 /* `src` with whole-word tokens replaced: from[i] becomes to[i]. */
 static inline char *rs_gl_rewrite(const char *src, const char *const *from, const char *const *to, int n) {
     size_t len = strlen(src), cap = len + len / 2 + 64, o = 0;
     char *out = (char *)malloc(cap);
     if (!out) return NULL;
     for (size_t i = 0; i < len; ) {
-        const bool edge = i == 0 || !(isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_');
-        int hit = -1;
         size_t k = 0;
-        for (int t = 0; edge && t < n && hit < 0; t++) {
-            k = strlen(from[t]);
-            if (!strncmp(src + i, from[t], k) && !(isalnum((unsigned char)src[i + k]) || src[i + k] == '_')) hit = t;
-        }
+        const int hit = rs_gl_word_at(src, i, from, n, &k);
         const char *put = hit >= 0 ? to[hit] : NULL;
         size_t need = put ? strlen(put) : 1;
         if (o + need + 1 >= cap) {
@@ -1311,6 +1331,12 @@ static inline bool rs_gl_program_hoist(char **body, const char *log, bool es, in
     return true;
 }
 
+/* Globals GLSL ES will not initialise: move them into main() and try
+ * the same version again, a few times, as each move can expose the next. */
+static inline bool rs_gl_program_retry(const rs_gl_tries_t *tr, size_t t, size_t round, char **body, const char *log, int *hoisted) {
+    return tr->es && tr->how[t] != RS_AS_LEGACY && round < 12 && rs_gl_program_hoist(body, log, tr->es, hoisted);
+}
+
 /* The error for a pass none of the attempts took. */
 static inline void rs_gl_program_fail(const char *name, const char *first_ver, int first_hoisted, const char *first) {
     char what[192];
@@ -1339,9 +1365,7 @@ static inline GLuint rs_gl_program(const char *src, const char *name) {
     for (size_t t = 0, round = 0; t < sizeof tr.ver / sizeof tr.ver[0] && !prog; ) {
         if (!tr.ver[t] || (tr.how[t] == RS_AS_LEGACY && tr.has_ext)) { t++; continue; }
         prog = rs_gl_attempt(body, tr.ver[t], tr.how[t], tr.es, name, log, sizeof log);
-        /* Globals GLSL ES will not initialise: move them into main() and try
-         * the same version again, a few times, as each move can expose the next. */
-        if (!prog && tr.es && tr.how[t] != RS_AS_LEGACY && round < 12 && rs_gl_program_hoist(&body, log, tr.es, &hoisted)) {
+        if (!prog && rs_gl_program_retry(&tr, t, round, &body, log, &hoisted)) {
             round++;
             continue;
         }
@@ -1399,9 +1423,9 @@ static inline void rs_gl_bind_add(rs_gl_pass_t *gp, const char *prefix, int kind
     gp->n_bind++;
 }
 
-static inline void rs_gl_introspect(rs_gl_pass_t *gp, int index, const rs_preset_t *p) {
-    GLuint prog = gp->prog;
-    glUseProgram(prog);
+/* The vertex attributes the pass reads: the position, the colour and up to
+ * eight texture coordinates, under their own names or the ruby-prefixed ones. */
+static inline void rs_gl_attribs(rs_gl_pass_t *gp, GLuint prog) {
     gp->a_pos = gp->a_color = -1;
     gp->n_tex_attr = 0;
     GLint count = 0;
@@ -1416,6 +1440,12 @@ static inline void rs_gl_introspect(rs_gl_pass_t *gp, int index, const rs_preset
         else if (!strcmp(bare, "COLOR") || !strcmp(bare, "Color"))    gp->a_color = loc;
         else if (gp->n_tex_attr < 8) gp->a_tex[gp->n_tex_attr++] = loc;   /* TexCoord, OrigTexCoord, ... */
     }
+}
+
+static inline void rs_gl_introspect(rs_gl_pass_t *gp, int index, const rs_preset_t *p) {
+    GLuint prog = gp->prog;
+    glUseProgram(prog);
+    rs_gl_attribs(gp, prog);
     gp->u_mvp         = rs_gl_loc(prog, "MVPMatrix");
     gp->u_frame_count = rs_gl_loc(prog, "FrameCount");
     gp->u_frame_dir   = rs_gl_loc(prog, "FrameDirection");
@@ -1505,13 +1535,18 @@ static inline GLenum rs_gl_target(GLuint *tex, GLuint *fbo, int w, int h, GLenum
     return ifmt;
 }
 
-static inline void rs_gl_destroy(void) {
+/* Free every pass's program, framebuffer and texture. */
+static inline void rs_gl_passes_free(void) {
     for (int i = 0; i < RS_MAX_PASSES + 1; i++) {
         rs_gl_pass_t *gp = &g_rs_gl.pass[i];
         if (gp->prog) glDeleteProgram(gp->prog);
         if (gp->fbo) glDeleteFramebuffers(1, &gp->fbo);
         if (gp->tex) glDeleteTextures(1, &gp->tex);
     }
+}
+
+static inline void rs_gl_destroy(void) {
+    rs_gl_passes_free();
     for (int i = 0; i < RS_MAX_LUTS; i++) if (g_rs_gl.lut_tex[i]) glDeleteTextures(1, &g_rs_gl.lut_tex[i]);
     rs_gl_target_free(&g_rs_gl.orig);
     for (int i = 0; i < RS_MAX_HISTORY; i++) rs_gl_target_free(&g_rs_gl.hist[i]);
@@ -1524,6 +1559,18 @@ static inline void rs_gl_destroy(void) {
     memcpy(err, g_rs_gl.err, sizeof err);
     memset(&g_rs_gl, 0, sizeof g_rs_gl);
     memcpy(g_rs_gl.err, err, sizeof err);
+}
+
+/* Upload `p`'s LUTs into the runner's textures, mipmapped where asked. */
+static inline void rs_gl_upload_luts(const rs_preset_t *p) {
+    for (int l = 0; l < p->n_luts; l++) {
+        glGenTextures(1, &g_rs_gl.lut_tex[l]);
+        glBindTexture(GL_TEXTURE_2D, g_rs_gl.lut_tex[l]);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, p->lut[l].w, p->lut[l].h, 0, GL_RGBA, GL_UNSIGNED_BYTE, p->lut[l].rgba);
+        if (p->lut[l].mipmap) glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 /* Build the programs and upload the LUTs for `p`, which must outlive the runner. */
@@ -1557,14 +1604,7 @@ static inline bool rs_gl_create(rs_preset_t *p) {
     }
     glUseProgram(0);
 
-    for (int l = 0; l < p->n_luts; l++) {
-        glGenTextures(1, &g_rs_gl.lut_tex[l]);
-        glBindTexture(GL_TEXTURE_2D, g_rs_gl.lut_tex[l]);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, p->lut[l].w, p->lut[l].h, 0, GL_RGBA, GL_UNSIGNED_BYTE, p->lut[l].rgba);
-        if (p->lut[l].mipmap) glGenerateMipmap(GL_TEXTURE_2D);
-    }
-    glBindTexture(GL_TEXTURE_2D, 0);
+    rs_gl_upload_luts(p);
 
     /* VertexCoord then TexCoord, 0..1. The first four vertices are the
      * offscreen passes' quad; the second four put v = 0 at the TOP of the
@@ -1592,9 +1632,9 @@ static inline int rs_gl_dim(rs_scale_type_t t, float s, int src, int vp) {
     return n < 1 ? 1 : n > 8192 ? 8192 : n;
 }
 
-/* Sizes for this frame; targets remade where they changed. */
-static inline void rs_gl_layout(int sw, int sh, int vw, int vh) {
-    rs_preset_t *p = g_rs_gl.preset;
+/* The source frame's target and the history's, remade where the source
+ * size or the first pass's mipmapping changed (which drops the history). */
+static inline void rs_gl_layout_orig(const rs_preset_t *p, int sw, int sh) {
     bool orig_mips = p->pass[0].mipmap_input;
     if (g_rs_gl.orig.w != sw || g_rs_gl.orig.h != sh || g_rs_gl.orig.mips != orig_mips || !g_rs_gl.orig.tex) {
         rs_gl_target(&g_rs_gl.orig.tex, &g_rs_gl.orig.fbo, sw, sh, GL_RGBA8);
@@ -1606,6 +1646,12 @@ static inline void rs_gl_layout(int sw, int sh, int vw, int vh) {
         rs_gl_target_t *h = &g_rs_gl.hist[i];
         if (!h->tex) { rs_gl_target(&h->tex, &h->fbo, sw, sh, GL_RGBA8); h->w = sw; h->h = sh; }
     }
+}
+
+/* Sizes for this frame; targets remade where they changed. */
+static inline void rs_gl_layout(int sw, int sh, int vw, int vh) {
+    rs_preset_t *p = g_rs_gl.preset;
+    rs_gl_layout_orig(p, sw, sh);
     int w = sw, h = sh;
     for (int i = 0; i < g_rs_gl.n - 1; i++) {
         rs_gl_pass_t *gp = &g_rs_gl.pass[i];

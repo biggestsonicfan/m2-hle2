@@ -799,6 +799,18 @@ static inline bool ps3_sio_gate(ps3_link_t *L) {
     return true;
 }
 
+/* A long input packet from 1P may carry the input delay 1P set. */
+static inline void ps3_sio_take_delay(ps3_link_t *L, const uint8_t *pkt, uint32_t len) {
+    ps3_sio_t *S = &L->sio;
+    if (len == 68 && S->side != 0 && (pkt[5] & 0x80u)) {
+        int32_t d = (pkt[5] >> 3) & 0xF;
+        if (d > 1) {
+            S->delay = ps3_clamp_delay(d);
+            ps3_note(L, "PS3: 1P set the input delay to %d frames", S->delay);
+        }
+    }
+}
+
 /* SyncIo_OnSyncIoMsg_evt10 / _OnSyncIoTcpMsg_evt11: an input packet. */
 static inline void ps3_sio_on_input(ps3_link_t *L, const uint8_t *pkt, uint32_t len) {
     ps3_sio_t *S = &L->sio;
@@ -810,13 +822,7 @@ static inline void ps3_sio_on_input(ps3_link_t *L, const uint8_t *pkt, uint32_t 
     uint32_t n = (len == 16) ? 10u : 60u;
     const uint8_t *in = pkt + ((len == 16) ? 6 : 8);
     for (uint32_t k = 0; k < n && f - (int32_t)k >= 0; k++) ps3_ring_put(S, side, par, f - (int32_t)k, in[k]);
-    if (len == 68 && S->side != 0 && (pkt[5] & 0x80u)) {
-        int32_t d = (pkt[5] >> 3) & 0xF;
-        if (d > 1) {
-            S->delay = ps3_clamp_delay(d);
-            ps3_note(L, "PS3: 1P set the input delay to %d frames", S->delay);
-        }
-    }
+    ps3_sio_take_delay(L, pkt, len);
     if (S->newest < f) S->newest = f;
 }
 
