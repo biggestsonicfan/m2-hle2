@@ -84,6 +84,30 @@ if(M2HLE_GEMS_DIR)
     include_directories("${M2HLE_GEMS_DIR}")
 endif()
 
+# Sega's own C for Fighting Vipers' patched i960 functions, from Sega Ages 2500
+# Vol. 19 (src/core/ages.h; --ages-i960, --ages-verify). The owner's ages-c
+# repository, which carries ages-decomp as its submodule decomp/: point this
+# at a checkout holding ages_impl.h. Empty (the default): none. As with Gems,
+# its ages_all.h is generated, not tracked: gen_all.py writes it beside itself.
+set(M2HLE_AGES_DIR "" CACHE PATH "Directory with ages_impl.h (Sega Ages 2500 Fighting Vipers C); empty: none")
+if(M2HLE_AGES_DIR)
+    if(NOT EXISTS "${M2HLE_AGES_DIR}/ages_impl.h")
+        message(FATAL_ERROR "M2HLE_AGES_DIR: no ages_impl.h in ${M2HLE_AGES_DIR}")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${M2HLE_AGES_DIR}/gen_all.py"
+                    RESULT_VARIABLE _ages_rc OUTPUT_QUIET ERROR_VARIABLE _ages_err)
+    if(NOT _ages_rc EQUAL 0)
+        message(FATAL_ERROR "M2HLE_AGES_DIR: gen_all.py failed: ${_ages_err}"
+                "(it needs the decomp/ submodule: git submodule update --init decomp)")
+    endif()
+    file(GLOB _ages_inputs CONFIGURE_DEPENDS "${M2HLE_AGES_DIR}/fn/*.h")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ages_inputs}
+                 "${M2HLE_AGES_DIR}/gen_all.py" "${M2HLE_AGES_DIR}/decomp/FV/FN/INDEX.md")
+    add_compile_definitions(M2HLE_AGES)
+    include_directories("${M2HLE_AGES_DIR}")
+endif()
+
 # A build to debug a running emulator with (tools/build-debug.sh). Debug and
 # RelWithDebInfo keep the frame pointer, so perf, gdb and the crash backtrace
 # (core/crash_trace.h) can walk the stack. M2HLE_SANITIZE adds sanitizers, e.g.
@@ -153,13 +177,19 @@ endif()
 # Vendored dependencies are git submodules. Fail early and usefully if the
 # tree was cloned without them.
 # ---------------------------------------------------------------------------
-if(M2HLE_SDL3 OR M2HLE_WEB OR M2HLE_LIBRETRO)
-    set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz vendor/stb)
-    set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c stb/stb_truetype.h)
+if(M2HLE_WEB)
+    set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz vendor/stb vendor/lua)
+    set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c stb/stb_truetype.h lua/onelua.c)
+elseif(M2HLE_LIBRETRO)
+    set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz vendor/stb vendor/lua)
+    set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c stb/stb_truetype.h lua/onelua.c)
+elseif(M2HLE_SDL3)
+    set(M2HLE_SUBMODULE_PATHS vendor/sokol vendor/miniz vendor/stb vendor/lua)
+    set(M2HLE_SUBMODULE_PROBES sokol/sokol_gfx.h miniz/miniz.c stb/stb_truetype.h lua/onelua.c)
 else()
-    set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb)
+    set(M2HLE_SUBMODULE_PATHS vendor/imgui vendor/dear_bindings vendor/sokol vendor/miniz vendor/ImGuiFileDialog vendor/imgui_club vendor/stb vendor/lua)
     set(M2HLE_SUBMODULE_PROBES imgui/imgui.h dear_bindings/dear_bindings.py sokol/sokol_gfx.h miniz/miniz.c ImGuiFileDialog/ImGuiFileDialog.cpp stb/stb_truetype.h
-                               imgui_club/imgui_memory_editor/imgui_memory_editor.h)
+                               imgui_club/imgui_memory_editor/imgui_memory_editor.h lua/onelua.c)
 endif()
 foreach(probe ${M2HLE_SUBMODULE_PROBES})
     if(NOT EXISTS ${VENDOR}/${probe})
@@ -187,6 +217,20 @@ if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     endif()
 endif()
 
+# Rollback netplay (cmake/ggpo.cmake): the desktop (its command line and the
+# MCP bridge), the web build (its GGPO panel) and the libretro core (the
+# "ggpo" online option). Not the handheld. The submodule is optional, so a
+# checkout without vendor/ggpo still builds, without GGPO.
+option(M2HLE_GGPO "Build GGPO rollback netplay into the desktop, web and libretro frontends" ON)
+if(M2HLE_GGPO AND NOT M2HLE_FRONTEND STREQUAL "sdl3")
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/vendor/ggpo/src/lib/ggpo/main.cpp)
+        include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ggpo.cmake)
+    else()
+        message(STATUS "vendor/ggpo is not checked out: building without GGPO "
+                       "(git submodule update --init vendor/ggpo)")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # miniz (C)
 # miniz's normal CMake build generates miniz_export.h via
@@ -203,6 +247,22 @@ add_library(miniz STATIC
     ${VENDOR}/miniz/miniz_zip.c
 )
 target_include_directories(miniz PUBLIC ${VENDOR}/miniz ${MINIZ_GEN_DIR})
+
+# ---------------------------------------------------------------------------
+# Lua 5.5 (C), the game scripts' language (core/m2lua.h, Pinboard #958): the
+# library half of onelua.c, every core and standard library in one unit.
+# Every frontend links it: the desktop, the web (the page's scratchpad), the
+# libretro core and the handheld (Pinboard #972).
+# ---------------------------------------------------------------------------
+add_library(lua55 STATIC EXCLUDE_FROM_ALL ${VENDOR}/lua/onelua.c)
+target_compile_definitions(lua55 PRIVATE MAKE_LIB)
+if(MSVC)
+    target_compile_definitions(lua55 PRIVATE _CRT_SECURE_NO_WARNINGS)
+elseif(NOT WIN32 AND NOT EMSCRIPTEN)
+    target_compile_definitions(lua55 PRIVATE LUA_USE_POSIX)   # mkstemp, popen
+    target_link_libraries(lua55 PUBLIC m)
+endif()
+target_include_directories(lua55 PUBLIC ${VENDOR}/lua)
 
 # ---------------------------------------------------------------------------
 # sdl3 frontend: m2hle from src/main_sdl.c, then stop — nothing below (ImGui,
@@ -222,13 +282,14 @@ if(M2HLE_SDL3)
     # No debugger here to arm the board's breakpoint/watchpoint/capture hooks
     # (src/core/build_features.h).
     target_compile_definitions(m2hle PRIVATE M2HLE_DEV_TOOLS=0)
-    target_link_libraries(m2hle PRIVATE sokol_gfx miniz SDL3::SDL3 Threads::Threads m)
+    target_link_libraries(m2hle PRIVATE sokol_gfx miniz lua55 SDL3::SDL3 Threads::Threads m)
     target_include_directories(m2hle PRIVATE
         ${SRC}
         ${SRC}/board
         ${SRC}/core
         ${SRC}/ui
         ${SRC}/profiles
+        ${VENDOR}/stb    # stb_image: a script's PostDraw PNGs
     )
     install(TARGETS m2hle RUNTIME DESTINATION bin)
     return()
@@ -246,6 +307,7 @@ if(M2HLE_LIBRETRO)
     endif()
     # Only the retro_* API leaves the library (libretro.h marks it default).
     set_target_properties(miniz PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+    set_target_properties(lua55 PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
 
     add_library(sokol_gfx STATIC ${SRC}/sokol_gfx_impl.c)
     set_target_properties(sokol_gfx PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
@@ -277,6 +339,10 @@ if(M2HLE_LIBRETRO)
     endif()
 
     add_library(m2hle_libretro SHARED ${SRC}/main_libretro.c)
+    if(TARGET ggpo)
+        set_target_properties(ggpo PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden)
+        target_link_libraries(m2hle_libretro PRIVATE ggpo)   # the "ggpo" online option
+    endif()
     set_target_properties(m2hle_libretro PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden)
     # RetroArch's names: m2hle_libretro.dll / .so / .dylib, and on Android
     # m2hle_libretro_android.so.
@@ -288,8 +354,12 @@ if(M2HLE_LIBRETRO)
     # RetroArch loads it. Make it a link error instead, where the linker can.
     if(NOT WIN32 AND NOT APPLE)
         target_link_options(m2hle_libretro PRIVATE -Wl,-z,defs)
+        # Nothing a static library brings in leaves the core either: the
+        # NDK links libc++ statically for GGPO, and its std:: symbols keep
+        # default visibility. retro_* are in main_libretro.c, not a library.
+        target_link_options(m2hle_libretro PRIVATE -Wl,--exclude-libs,ALL)
     endif()
-    target_link_libraries(m2hle_libretro PRIVATE sokol_gfx miniz)
+    target_link_libraries(m2hle_libretro PRIVATE sokol_gfx miniz lua55)
     target_compile_definitions(m2hle_libretro PRIVATE M2HLE_DEV_TOOLS=0)   # src/core/build_features.h
     target_include_directories(m2hle_libretro PRIVATE
         ${VENDOR}/stb
@@ -329,7 +399,10 @@ if(M2HLE_WEB)
 
     add_executable(m2hle ${SRC}/main_web.c)
     target_compile_definitions(m2hle PRIVATE M2HLE_WEB M2HLE_DEV_TOOLS=0)   # src/core/build_features.h
-    target_link_libraries(m2hle PRIVATE sokol miniz)
+    target_link_libraries(m2hle PRIVATE sokol miniz lua55)
+    if(TARGET ggpo)
+        target_link_libraries(m2hle PRIVATE ggpo)   # the GGPO panel (core/emu_ggpo.h)
+    endif()
     target_include_directories(m2hle PRIVATE
         ${VENDOR}/stb
         ${SRC}
@@ -524,7 +597,10 @@ if(WIN32)
 else()
     add_executable(m2hle ${SRC}/main.c ${SRC}/ui/mem_edit.cpp)
 endif()
-target_link_libraries(m2hle PRIVATE sokol miniz imguifiledialog)
+target_link_libraries(m2hle PRIVATE sokol miniz imguifiledialog lua55)
+if(TARGET ggpo)
+    target_link_libraries(m2hle PRIVATE ggpo)   # --ggpo-* (core/emu_ggpo.h)
+endif()
 # The debug dumps (model_tex.txt, cam_ours.csv, the texture extractor, the COP
 # stream) are this build's alone: the handheld, libretro and web builds write no
 # debug files (geo3d.h, GEO3D_DUMP_TEX).
@@ -590,6 +666,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(mem_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/mem_test.c)
     add_executable(i960_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/i960_test.c)
     add_executable(rom_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/rom_test.c)
+    add_executable(prepared_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/prepared_test.c)
     add_executable(emu_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/emu_test.c)
     add_executable(boot_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/boot_test.c)
     add_executable(cop_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/cop_test.c)
@@ -604,6 +681,11 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     target_compile_definitions(scsp_dsp_test_masks PRIVATE SCSP_DSP_MASKS=1)
     # the RAM ranges the lazy SCSP runs slots and the DSP on by (scsp.h, "The chip's own time")
     add_executable(scsp_lazy_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/scsp_lazy_test.c)
+    # the Model 2A TGP: a float op and a transfer into d in one instruction
+    add_executable(tgp_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/tgp_test.c)
+    # the Model 2C TGPx4: the empty-FIFO stall, the IFE wait, the ALU's corners
+    add_executable(tgpx4_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/tgpx4_test.c)
+    add_executable(sharc_cpu_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/sharc_cpu_test.c)
     # Netplay: the lockstep engine, the protobuf codec and the ComId standard.
     # No server; part (G) opens loopback sockets — see the header of tests/net_test.c.
     add_executable(net_test  ${CMAKE_CURRENT_SOURCE_DIR}/tests/net_test.c)
@@ -615,15 +697,54 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(audio_out_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_out_test.c)
     # libretro GLSL presets (ui/retro_shader.h): parsing, paths, parameters, LUTs. No GL.
     add_executable(retro_shader_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/retro_shader_test.c)
+    # RetroArch's core info cache (core/ra_info_cache.h): the stale-rewind check, rzip and JSON.
+    add_executable(ra_info_cache_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/ra_info_cache_test.c)
+    target_link_libraries(ra_info_cache_test PRIVATE miniz)
     # The PS3 release's game settings (profiles/sfight.h sfight_apply_menu_settings) on a bus:
     # the bytes, the backup RAM CRC, the defaults. No ROM.
     add_executable(sfight_settings_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/sfight_settings_test.c)
     target_link_libraries(sfight_settings_test PRIVATE miniz sokol)
+    # The region (core/hle_hooks.h g_region): every profile says what it does
+    # with it, and the hooks that put it in the games' settings. No ROM.
+    add_executable(region_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/region_test.c)
+    target_link_libraries(region_test PRIVATE miniz sokol)
+    # Sega Rally's own replay format (profiles/srallyc_native.h): a race's clip
+    # taken and put back, the ending played from attract. No ROM.
+    add_executable(srallyc_native_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/srallyc_native_test.c)
+    target_link_libraries(srallyc_native_test PRIVATE miniz sokol)
+    # The comm board's link to another cabinet (board/m2comm.h): two nodes in
+    # one process over datagram queues. No ROM.
+    add_executable(m2comm_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/m2comm_test.c)
+    # A linked comm board's datagrams over the room's socket (net/comm_link.h):
+    # packing, copies and late datagrams, two boards over UDP on 127.0.0.1. No ROM.
+    add_executable(comm_link_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/comm_link_test.c)
+    # The room's cabinet role for a linked comm board (net/comm_role.h): the
+    # profile's role byte with the ROM's CRC, the reset into it. No ROM.
+    add_executable(comm_role_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/comm_role_test.c)
+    target_link_libraries(comm_role_test PRIVATE miniz sokol)
+    # A Versus's two cabinets on one machine (net/comm_local.h): the hello,
+    # both ways over 127.0.0.1, strangers dropped. No ROM.
+    add_executable(comm_local_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/comm_local_test.c)
+    target_link_libraries(comm_local_test PRIVATE miniz sokol)
+    # A linked board's 60 Hz clock (core/link_pace.h): called and sleeping
+    # hosts, and two cabinets whose clocks drift apart. No ROM.
+    add_executable(link_pace_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/link_pace_test.c)
+    # The game scripts (core/m2lua.h): the bit helpers, the I960 and Romset
+    # calls on a bus, Options, the callbacks' order. No ROM.
+    add_executable(m2lua_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/m2lua_test.c)
+    target_link_libraries(m2lua_test PRIVATE miniz lua55)
     # Not a ctest: replays a MAME capture of the COP conversation (needs a capture file).
     add_executable(cop_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/cop_replay.c)
     target_include_directories(cop_replay PRIVATE ${TEST_INCLUDES})
     if(MSVC)
         target_compile_definitions(cop_replay PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    # Not a ctest: replays a MAME capture of a Model 2B game's SHARC COP traffic
+    # (tools/mame-sharc-tap.lua) and checks every word the SHARC writes back.
+    add_executable(sharc_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/sharc_replay.c)
+    target_include_directories(sharc_replay PRIVATE ${TEST_INCLUDES})
+    if(MSVC)
+        target_compile_definitions(sharc_replay PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
     # Not a ctest: replays a MAME sound capture's MIDI stream through the sound board.
     add_executable(snd_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/snd_replay.c)
@@ -678,7 +799,13 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(MSVC)
         target_compile_definitions(det_digest PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
+    if(WIN32)   # UDP on 127.0.0.1: comm_link_test, comm_local_test, det_digest --m2comm-udp
+        target_link_libraries(comm_link_test PRIVATE ws2_32)
+        target_link_libraries(comm_local_test PRIVATE ws2_32)
+        target_link_libraries(det_digest PRIVATE ws2_32)
+    endif()
     target_link_libraries(rom_test   PRIVATE miniz)
+    target_link_libraries(prepared_test PRIVATE miniz)
     target_link_libraries(boot_test  PRIVATE miniz)
     target_link_libraries(geo_test   PRIVATE miniz)
     # emu_test/input_test pull input.h -> sokol_app.h (and sokol_gfx through the
@@ -688,8 +815,8 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     # audio_out.h calls into sokol_audio (its device path is not under test).
     target_link_libraries(audio_out_test PRIVATE sokol)
 
-    foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test audio_out_test
-              scsp_dsp_test scsp_dsp_test_masks scsp_lazy_test sfight_settings_test retro_shader_test)
+    foreach(t mem_test i960_test rom_test prepared_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test audio_out_test
+              scsp_dsp_test scsp_dsp_test_masks scsp_lazy_test tgp_test tgpx4_test sharc_cpu_test sfight_settings_test region_test srallyc_native_test retro_shader_test ra_info_cache_test m2comm_test comm_link_test comm_role_test comm_local_test link_pace_test m2lua_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -700,9 +827,9 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     # Windows. m2hle, emu_test and input_test get it through sokol; the rest link
     # nothing that carries it.
     if(NOT WIN32)
-        foreach(t mem_test i960_test rom_test emu_test boot_test cop_test geo_test m68k_test
+        foreach(t mem_test i960_test rom_test prepared_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test audio_out_test scsp_dsp_test scsp_dsp_test_masks
-                  scsp_lazy_test retro_shader_test cop_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test ps3ui_render)
+                  scsp_lazy_test tgp_test tgpx4_test sharc_cpu_test retro_shader_test ra_info_cache_test cop_replay sharc_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test region_test srallyc_native_test ps3ui_render m2comm_test comm_link_test comm_role_test comm_local_test link_pace_test m2lua_test)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

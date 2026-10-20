@@ -132,7 +132,20 @@ static mcp_bridge_t g_mcp = {0};
 #define mcp_json_get_int  json_get_int
 #define mcp_json_escape   json_escape
 
+/* The game scripts' script_* commands (ui/m2lua_mcp.h, Pinboard #958): set by
+ * a host that runs them; NULL elsewhere, and they are unknown. */
+static void (*g_mcp_script_cmd)(const char *cmd, const char *req, char *resp, int cap);
+
 /* ---- Command handlers ---------------------------------------------------- */
+
+/* A linked comm board's 60 Hz clock (link_pace.h): frames run on it, the owed
+ * ones dropped past its cap, and the SLAVE's early ones. */
+static void mcp_link_pace_json(const emu_thread_ctx_t *emu, char *out, int cap) {
+    if (!emu) { snprintf(out, (size_t)cap, "null"); return; }
+    snprintf(out, (size_t)cap, "{\"linked\":%s,\"frames\":%llu,\"dropped\":%llu,\"trims\":%u}",
+             m2comm_linked() ? "true" : "false", (unsigned long long)emu->link_pace.frames,
+             (unsigned long long)emu->link_pace.dropped, emu->link_pace.trims);
+}
 
 static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
     mcp_bridge_t *b = &g_mcp;
@@ -184,6 +197,8 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
      * (emu_times.h); a watcher's reading leaves it be. */
     char et[1024];
     emu_times_json(et, (int)sizeof et, restart_max);
+    char lp[160];
+    mcp_link_pace_json(b->emu, lp, (int)sizeof lp);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
@@ -192,7 +207,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
              "\"texload\":{\"hle\":%s,\"rows\":%llu},"
              "\"enemy_rank\":%d,"
-             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
+             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"link_pace\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, (unsigned long long)steps, profile_id,
@@ -203,7 +218,7 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
              g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
              g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
              (int)g_enemy_rank,
-             av, ov, rt, et, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
+             av, ov, rt, et, lp, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
 /* {"cmd":"prof","on":1} arms the i960 address profiler (clearing it),
@@ -293,6 +308,7 @@ static void mcp_set_camera_depth(const char *req) {
     /* 0: a game frame's faces take the half rule (zsort / zrecede) instead of
      * the board's flat key (geo3d_flat_depth); the layers are the object viewer's. */
     if (mcp_json_get_str(req,"zflat",   v,sizeof v)) g_geo3d_zflat = (atoi(v) != 0);
+    if (mcp_json_get_str(req,"pixdepth",v,sizeof v)) g_geo3d_pixel_depth = (atoi(v) != 0);
     /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
     if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
 }
@@ -317,11 +333,12 @@ static void mcp_cmd_set_camera(const char *req, char *resp, int cap) {
     mcp_set_camera_fill(req);
     snprintf(resp,(size_t)cap,
              "{\"ok\":true,\"cam\":[%.2f,%.2f,%.2f],\"rot\":[%.3f,%.3f],\"fov\":%.1f,"
-             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zflat\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"zadjust\":\"0x%08X\"}",
+             "\"lines\":%d,\"tris\":%d,\"test\":%d,\"zflat\":%d,\"zlayers\":%d,\"layer_faces\":%llu,\"zadjust\":\"0x%08X\",\"pixdepth\":%d}",
              g_geo3d_state->cam_x,g_geo3d_state->cam_y,g_geo3d_state->cam_z,
              g_geo3d_state->rot_y,g_geo3d_state->rot_x,g_geo3d_state->fov_deg,
              g_geo3d_lines.count, g_geo3d_tris.count, g_geo3d_state->test_triangle ? 1 : 0,
-             g_geo3d_zflat, g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces, g_geo3d_zadjust);
+             g_geo3d_zflat, g_geo3d_layers, (unsigned long long)g_geo3d_layer_faces, g_geo3d_zadjust,
+             g_geo3d_pixel_depth);
 }
 
 static void mcp_cmd_get_registers(char *resp, int cap) {
@@ -543,6 +560,7 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
     char rom_s[8] = {0};
     const bool rom = mcp_json_get_str(req, "rom", rom_s, sizeof rom_s) && atoi(rom_s) != 0;
     int count = 0;
+    static uint8_t wrote[sizeof hexdata / 2];
     int locked = g_mcp.emu && g_mcp.emu->thread_alive;
     if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
     for (int i = 0; hexdata[i*2] && hexdata[i*2+1]; i++) {
@@ -556,8 +574,10 @@ static void mcp_cmd_write_memory(const char *req, char *resp, int cap) {
         } else {
             mem_write8(g_mcp.bus, a, b);
         }
-        count++;
+        wrote[count++] = b;
     }
+    follow_lead_write(addr, rom, wrote, (uint32_t)count);   /* follow.h: a follower makes it too */
+    replay_rec_write(addr, rom, wrote, (uint32_t)count);    /* replay.h: and a replay plays it back */
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"bytes_written\":%d}", count);
 }
@@ -945,6 +965,21 @@ static void mcp_cmd_overlay_swap(const char *req, char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"queued\":true}");
 }
 
+/* announce: a green toast over the bottom of the game box for a few seconds,
+ * after any already waiting (ui/overlay_host.h, "ANNOUNCEMENTS") -- the one a
+ * player coming into the room raises by itself.
+ *
+ *   {"cmd":"announce","note":"test1 came into the room."}
+ *
+ * optional: "title" (WELCOME). get_status's overlay.announce follows it. */
+static void mcp_cmd_announce(const char *req, char *resp, int cap) {
+    char title[64] = "", note[256] = "";
+    json_get_str_unescaped(req, "title", title, (int)sizeof title);
+    json_get_str_unescaped(req, "note",  note,  (int)sizeof note);
+    overlay_host_announce(title, note);
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"queued\":true}");
+}
+
 /* snd_watch: arm or read the streaming watchdog (board/sound.h).
  *
  *   {"cmd":"snd_watch","on":1}   arm it, clearing the counters
@@ -1054,12 +1089,12 @@ static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
     int first = 1;
     for (int i = 0; i < total && left > 96; ) {
         int idx = (head - total + i + GEO_CAPTURE_SIZE) & (GEO_CAPTURE_SIZE - 1);
-        uint32_t cmd = g_cop.geo_capture[idx];
+        uint32_t cmd = g_cop_capture[idx];
         int na = sharc_args_for_cmd(cmd);
         if (na < 0) na = 0;
         DAPPEND("%s{\"c\":\"0x%08X\",\"a\":[", first ? "" : ",", cmd); first = 0;
         for (int j = 0; j < na && j < 8; j++) {
-            uint32_t a = g_cop.geo_capture[(idx + 1 + j) & (GEO_CAPTURE_SIZE - 1)];
+            uint32_t a = g_cop_capture[(idx + 1 + j) & (GEO_CAPTURE_SIZE - 1)];
             float f; memcpy(&f, &a, 4);
             if (f == f && fabsf(f) > 1e-5f && fabsf(f) < 1e6f) DAPPEND("%s%.3f", j ? "," : "", f);
             else DAPPEND("%s\"0x%X\"", j ? "," : "", a);
@@ -1469,6 +1504,44 @@ static void mcp_cmd_wait_frames(const char *req, char *resp, int cap) {
              g_emu_frames, advanced, advanced >= count ? "true" : "false", elapsed);
 }
 
+/* run_frames' refusals: no board to run, or one already running. Writes the
+ * error reply and answers true if there is one. */
+static bool mcp_run_frames_refused(char *resp, int cap) {
+    if (!g_mcp.emu || !g_mcp.emu->thread_alive) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emu not started\"}"); return true;
+    }
+    if (emu_is_running(g_mcp.emu)) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"must be stopped to run_frames\"}"); return true;
+    }
+    return false;
+}
+
+/* Wait for the emu thread to stop itself, or stop it at the timeout and wait
+ * for that. Answers true if it timed out. */
+static bool mcp_run_frames_wait(int64_t t0, int64_t limit) {
+    bool timed_out = false;
+    while (emu_is_running(g_mcp.emu)) {
+        if (emu_now_us() - t0 >= limit) { timed_out = true; break; }
+        emu_nap_us(250);
+    }
+    if (timed_out) {
+        emu_stop(g_mcp.emu);
+        while (emu_is_running(g_mcp.emu) && g_mcp.emu->thread_alive) emu_nap_us(250);
+    }
+    return timed_out;
+}
+
+/* Why the run ended, first match wins. */
+static const char *mcp_run_frames_reason(unsigned advanced, uint32_t count, bool timed_out) {
+    int halted = g_mcp.cpu && g_mcp.cpu->halted;
+    return advanced >= count ? "frames"
+         : timed_out         ? "timeout"
+         : halted            ? "halted"
+         : g_wp.hit          ? "watchpoint"
+         : g_bp.hit_addr     ? "breakpoint"
+         : "stopped";
+}
+
 /* Run exactly N game frames from a stopped board, then stop, in one request.
  *
  * emu_run + wait_frames + emu_stop overshoots by however many frames go by
@@ -1484,35 +1557,16 @@ static void mcp_cmd_run_frames(const char *req, char *resp, int cap) {
     mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
     if (count < 1) count = 1;
     if (timeout_ms > 300000) timeout_ms = 300000;
-    if (!g_mcp.emu || !g_mcp.emu->thread_alive) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"emu not started\"}"); return;
-    }
-    if (emu_is_running(g_mcp.emu)) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"must be stopped to run_frames\"}"); return;
-    }
+    if (mcp_run_frames_refused(resp, cap)) return;
 
     unsigned start = g_emu_frames;
     int64_t  t0    = emu_now_us();
     int64_t  limit = (int64_t)timeout_ms * 1000;
     g_bp.hit_addr = 0;   /* so a stop below can say whether a breakpoint made it */
     emu_run_frames(g_mcp.emu, count);
-    bool timed_out = false;
-    while (emu_is_running(g_mcp.emu)) {
-        if (emu_now_us() - t0 >= limit) { timed_out = true; break; }
-        emu_nap_us(250);
-    }
-    if (timed_out) {
-        emu_stop(g_mcp.emu);
-        while (emu_is_running(g_mcp.emu) && g_mcp.emu->thread_alive) emu_nap_us(250);
-    }
+    bool timed_out = mcp_run_frames_wait(t0, limit);
     unsigned advanced = g_emu_frames - start;
-    int halted = g_mcp.cpu && g_mcp.cpu->halted;
-    const char *reason = advanced >= count ? "frames"
-                       : timed_out         ? "timeout"
-                       : halted            ? "halted"
-                       : g_wp.hit          ? "watchpoint"
-                       : g_bp.hit_addr     ? "breakpoint"
-                       : "stopped";
+    const char *reason = mcp_run_frames_reason(advanced, count, timed_out);
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"frames\":%u,\"advanced\":%u,\"reached\":%s,"
              "\"reason\":\"%s\",\"elapsed_ms\":%u}",
@@ -1719,6 +1773,41 @@ typedef struct {
 
 #define MCP_DL_UNIT_PER_MARK (sizeof g_sharc.rot_cache / sizeof(float))
 
+/* probes: "hexaddr[:size],..." -- a size of 1 or 2 is kept, anything else
+ * reads 4 bytes. */
+static void mcp_dl_parse_probes(mcp_dl_req_t *q, char *probes) {
+    for (char *tok = strtok(probes, ","); tok && q->np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
+        char *colon = strchr(tok, ':');
+        q->paddr[q->np] = (uint32_t)strtoul(tok, NULL, 16);
+        uint32_t sz = colon ? (uint32_t)strtoul(colon + 1, NULL, 10) : 4;
+        q->psize[q->np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
+    }
+}
+
+/* blocks: "hexaddr:hexlen,..." -- whole ranges copied at every mark into
+ * <path>.blocks.bin, capmarks x (sum of lengths) bytes. */
+static void mcp_dl_parse_blocks(mcp_dl_req_t *q, char *blockspec) {
+    for (char *tok = strtok(blockspec, ","); tok && q->nb < DL_MAX_BLOCKS; tok = strtok(NULL, ",")) {
+        char *colon = strchr(tok, ':');
+        if (!colon) continue;
+        uint32_t len = (uint32_t)strtoul(colon + 1, NULL, 16);
+        if (!len || q->bbytes + len > DL_BLOCK_BYTES) continue;
+        q->baddr[q->nb] = (uint32_t)strtoul(tok, NULL, 16); q->blen[q->nb++] = len; q->bbytes += len;
+    }
+}
+
+/* The tap's address window, kept inside the tap's own. */
+static void mcp_dl_clamp_window(mcp_dl_req_t *q) {
+    if (q->lo < DL_TAP_LO) q->lo = DL_TAP_LO;
+    if (q->hi > DL_TAP_HI || q->hi <= q->lo) q->hi = DL_TAP_HI;
+}
+
+/* At least one frame and at most a minute of them; at most 64M words. */
+static void mcp_dl_clamp_size(mcp_dl_req_t *q) {
+    if (q->frames == 0 || q->frames > 3600) q->frames = q->frames ? 3600 : 1;
+    if (q->max_words > 64u * 1024u * 1024u) q->max_words = 64u * 1024u * 1024u;
+}
+
 /* The request's options, clamped. False when it names no path. */
 static bool mcp_dl_parse(const char *req, mcp_dl_req_t *q) {
     char probes[2048] = {0}, blockspec[512] = {0};
@@ -1736,32 +1825,15 @@ static bool mcp_dl_parse(const char *req, mcp_dl_req_t *q) {
     mcp_json_get_u32(req, "run", &q->want_run);
     mcp_json_get_u32(req, "lo", &q->lo);
     mcp_json_get_u32(req, "hi", &q->hi);
-    if (q->lo < DL_TAP_LO) q->lo = DL_TAP_LO;
-    if (q->hi > DL_TAP_HI || q->hi <= q->lo) q->hi = DL_TAP_HI;
+    mcp_dl_clamp_window(q);
     mcp_json_get_u32(req, "frames", &q->frames);
     mcp_json_get_u32(req, "max_words", &q->max_words);
     mcp_json_get_u32(req, "timeout_ms", &q->timeout_ms);
     mcp_json_get_str(req, "probes", probes, sizeof(probes));
     if (!mcp_json_get_str(req, "path", q->path, sizeof(q->path))) return false;
-    if (q->frames == 0 || q->frames > 3600) q->frames = q->frames ? 3600 : 1;
-    if (q->max_words > 64u * 1024u * 1024u) q->max_words = 64u * 1024u * 1024u;
-
-    for (char *tok = strtok(probes, ","); tok && q->np < DL_MAX_PROBES; tok = strtok(NULL, ",")) {
-        char *colon = strchr(tok, ':');
-        q->paddr[q->np] = (uint32_t)strtoul(tok, NULL, 16);
-        uint32_t sz = colon ? (uint32_t)strtoul(colon + 1, NULL, 10) : 4;
-        q->psize[q->np++] = (uint8_t)(sz == 1 || sz == 2 ? sz : 4);
-    }
-
-    /* blocks: "hexaddr:hexlen,..." -- whole ranges copied at every mark into
-     * <path>.blocks.bin, capmarks x (sum of lengths) bytes. */
-    for (char *tok = strtok(blockspec, ","); tok && q->nb < DL_MAX_BLOCKS; tok = strtok(NULL, ",")) {
-        char *colon = strchr(tok, ':');
-        if (!colon) continue;
-        uint32_t len = (uint32_t)strtoul(colon + 1, NULL, 16);
-        if (!len || q->bbytes + len > DL_BLOCK_BYTES) continue;
-        q->baddr[q->nb] = (uint32_t)strtoul(tok, NULL, 16); q->blen[q->nb++] = len; q->bbytes += len;
-    }
+    mcp_dl_clamp_size(q);
+    mcp_dl_parse_probes(q, probes);
+    mcp_dl_parse_blocks(q, blockspec);
     return true;
 }
 
@@ -1970,7 +2042,7 @@ static void mcp_netplay_cfg_strings(const char *req, netplay_config_t *cfg) {
         snprintf(cfg->server, sizeof(cfg->server), "%s", s);
     if (mcp_json_get_str(req, "user", s, sizeof(s)))
         snprintf(cfg->npid, sizeof(cfg->npid), "%s", s);
-    if (mcp_json_get_str(req, "pass", s, sizeof(s))) {
+    if (json_get_str_unescaped(req, "pass", s, sizeof(s))) {
         snprintf(cfg->password, sizeof(cfg->password), "%s", s);
         /* The token is NOT dropped here any more. It used to be, so that a
          * password login did not go out carrying somebody's Twitch token --
@@ -2282,6 +2354,21 @@ static void mcp_np_status_room(mcp_np_out_t *o, const netplay_status_t *st) {
     mcp_np_append(o, "]}");
 }
 
+/* A linked comm board (netplay_comm_open): the role it booted into, the board
+ * frames of CN 1 and of the first send (-1: not yet), the ring and the link. */
+static void mcp_np_status_comm(mcp_np_out_t *o, const netplay_status_t *st) {
+    const struct netplay_comm_status *c = &st->comm;
+    mcp_np_append(o, ",\"comm\":{\"open\":%s,\"linked\":%s,\"role\":\"%s\",\"waited\":%u,"
+              "\"cn_frame\":%d,\"first_send\":%d,\"early\":%u,\"ring\":{\"up\":%s,\"node\":%u,"
+              "\"nodes\":%u,\"sent\":%u,\"taken\":%u},\"sent\":%u,\"taken\":%u,\"stale\":%u,"
+              "\"torn\":%u,\"too_big\":%u,\"overflow\":%u,\"packed_peak\":%u,\"pending\":%u}",
+              mcp_tf(c->open), mcp_tf(c->linked), comm_role_name((game_link_role_t)c->role), c->waited,
+              c->cn_frame == UINT32_MAX ? -1 : (int)c->cn_frame,
+              c->first_send == UINT32_MAX ? -1 : (int)c->first_send, c->early,
+              mcp_tf(c->ring_up == M2COMM_LINK_UP), c->node, c->nodes, c->ring_sent, c->ring_taken,
+              c->sent, c->taken, c->stale, c->torn, c->too_big, c->overflow, c->packed_peak, c->pending);
+}
+
 /* PS3 cross-play (net/ps3_link.h): the PS3 room's phase, our side, the
  * lockstep's counters, and each member's signaling and RUDP channels
  * (0 idle, 1 SYN sent, 2 SYN received, 3 open, 4 closed). */
@@ -2375,6 +2462,7 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
     mcp_np_append(&o, ",\"frame\":%u,\"stalls\":%u,\"generation\":%u,\"seed\":\"0x%08X\"",
               st.frame, st.stalls, st.generation, st.seed);
     if (st.ps3) mcp_np_status_ps3(&o, &st);
+    if (st.comm.open) mcp_np_status_comm(&o, &st);
     /* The room emptied with the board still in its VS mode: any input restarts
      * the game (netplay_empty_room_pump). */
     mcp_np_append(&o, ",\"empty_room\":%s", mcp_tf(st.empty_room));
@@ -2389,6 +2477,76 @@ static void mcp_cmd_netplay_status(const char *req, char *resp, int cap) {
     mcp_np_status_twitch(&o, &st);
     if (want_rooms) mcp_np_status_rooms(&o, &st);
     mcp_np_status_log(&o, &st, want_log);
+}
+
+/*
+ * {"cmd":"ggpo_lobby"} -- the GGPO lobby (net/ggpo_lobby.h, Pinboard #575):
+ * its stage, the channel's players, challenges, the match and its path.
+ * "do" posts a step first: connect (url, or the default server), login /
+ * signup (user, pass), twitch, join (game, else the profile's id), challenge
+ * (user), accept, decline, cancel, chat (text), end, disconnect. The emu
+ * thread runs it at its next pump, so a reply shows the stage before it.
+ */
+#ifdef M2HLE_GGPO
+/* The step's two strings, by what that step reads. */
+static void mcp_ggl_args(const char *req, ggl_cmd_kind_t kind, char *a, int na, char *b, int nb) {
+    a[0] = b[0] = '\0';
+    switch (kind) {
+    case GGL_CMD_CONNECT:
+        if (!mcp_json_get_str(req, "url", a, na)) snprintf(a, (size_t)na, "%s", GGL_DEFAULT_URL);
+        break;
+    case GGL_CMD_LOGIN: case GGL_CMD_SIGNUP:
+        mcp_json_get_str(req, "user", a, na);
+        json_get_str_unescaped(req, "pass", b, nb);
+        break;
+    case GGL_CMD_JOIN:
+        if (!mcp_json_get_str(req, "game", a, na))
+            snprintf(a, (size_t)na, "%s", g_active_profile ? g_active_profile->id : "m2");
+        break;
+    case GGL_CMD_CHALLENGE: mcp_json_get_str(req, "user", a, na); break;
+    case GGL_CMD_CHAT:      json_get_str_unescaped(req, "text", a, na); break;
+    default: break;
+    }
+}
+
+#endif
+
+static void mcp_cmd_ggpo_lobby(const char *req, char *resp, int cap) {
+#ifdef M2HLE_GGPO
+    char what[16], a[256], b[128];
+    if (mcp_json_get_str(req, "do", what, sizeof what)) {
+        ggl_cmd_kind_t kind;
+        if (!ggl_cmd_kind_named(what, &kind)) {
+            snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown step\"}");
+            return;
+        }
+        mcp_ggl_args(req, kind, a, sizeof a, b, sizeof b);
+        ggl_post(kind, a, b);
+    }
+    ggl_status_t st = ggl_status();
+    ggl_status_json(resp, cap, &st);
+    /* The board's own say: a match plays in VS mode, so after a result both
+     * go back to select, and `results` counting on is the rematch (a
+     * driver like the fly's follows it; Pinboard #579). */
+    int winner = 0;
+    uint32_t n = emu_ggpo_results(&winner);
+    /* And whether GGPO has the board yet. The lobby says "match" a pass
+     * before the cold boot, which zeroes get_status's "frames"; a driver
+     * that waits for frames to move from a reading taken in between waits
+     * for ever (Pinboard #588). "running" is GGPO's own word, and "frames"
+     * the session's, from 0 at the cold boot. */
+    size_t len = strlen(resp);
+    if (len && resp[len - 1] == '}')
+        snprintf(resp + len - 1, (size_t)cap - (len - 1),
+                 ",\"vs_mode\":%s,\"results\":%u,\"winner\":%d,"
+                 "\"session\":{\"on\":%s,\"running\":%s,\"frames\":%u}}",
+                 g_vs_mode ? "true" : "false", (unsigned)n, winner,
+                 g_ggpo.on ? "true" : "false", g_ggpo.on && g_ggpo.running ? "true" : "false",
+                 g_ggpo.on ? (unsigned)g_ggpo.frames : 0u);
+#else
+    (void)req;
+    snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"this build has no GGPO\"}");
+#endif
 }
 
 /*
@@ -2616,6 +2774,134 @@ static void mcp_cmd_objview_list(const char *req, char *resp, int cap) {
     objview_cmd_list(req, g_mcp.romset, resp, cap);
 }
 
+/*
+ * {"cmd":"follow_lead","dir":"..."} -- lead a one-way follow (core/follow.h,
+ * Pinboard #568): from the next slice the board writes its join points and
+ * its feed into `dir`, which a follower (the web build's ?follow=) reads.
+ * "every":N frames between join points (default five minutes); "join":1 starts
+ * a new one at the next slice; "off":1 stops. No arguments only reads.
+ */
+/* The follow_lead reply: where the leader is. */
+static void mcp_follow_lead_reply(const char *err, char *resp, int cap) {
+    const follow_lead_t *L = &g_follow_lead;
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":%s%s%s%s,\"on\":%s,\"dir\":\"%s\",\"seg\":%u,\"frame\":%u,\"every\":%u,"
+             "\"feed_bytes\":%llu,\"join_ms\":%u,\"join_due\":%s,\"last_error\":\"%s\"}",
+             err ? "false" : "true", err ? ",\"error\":\"" : "", err ? err : "", err ? "\"" : "",
+             L->on ? "true" : "false", L->dir, L->seg, L->frame, L->every,
+             (unsigned long long)L->bytes, L->join_ms, L->join_due ? "true" : "false", L->error);
+}
+
+static void mcp_cmd_follow_lead(const char *req, char *resp, int cap) {
+    char dir[512] = {0};
+    uint32_t every = 0, v = 0;
+    const char *err = NULL;
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    mcp_json_get_u32(req, "every", &every);
+    if (mcp_json_get_u32(req, "off", &v) && v)        follow_lead_stop();
+    else if (mcp_json_get_str(req, "dir", dir, sizeof dir)) err = follow_lead_start(dir, every);
+    else if (mcp_json_get_u32(req, "join", &v) && v)  follow_lead_break("asked for");
+    if (every && g_follow_lead.on) g_follow_lead.every = every;
+    mcp_follow_lead_reply(err, resp, cap);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+}
+
+/*
+ * {"cmd":"replay", ...} -- recorded matches (core/replay.h, Pinboard #572, #617).
+ * "record":0|1 turns recording on or off ("dir" sets the folder), "format":
+ * "native"|"inputs" picks what a recording saves, "view":"native"|"inputs"|"auto"
+ * which way the next "play" plays it; "open":PATH
+ * opens a replay file and answers its label in "info"; "play":1 plays it from
+ * the start, "stop":1 gives the board back; "seek":FRAME, "fast":0|1.
+ * "native":N puts round N of the open replay into the board in the game's own
+ * replay formats (replay_native_install, Pinboard #602). "finish":1 saves the
+ * local game being recorded now, as the page's Finish replay does (Pinboard
+ * #861; "finished" says what became of it). No arguments only reads.
+ */
+/* The replay command's settings: "dir", "record", "fast", "format", "view". */
+static const char *mcp_replay_settings(const char *req) {
+    char path[512] = {0};
+    uint32_t v = 0;
+    if (mcp_json_get_str(req, "dir", path, sizeof path))
+        snprintf(g_replay_rec.dir, sizeof g_replay_rec.dir, "%s", path);
+    if (mcp_json_get_u32(req, "record", &v)) g_replay_rec.want = v != 0;
+    if (mcp_json_get_u32(req, "fast", &v))   g_replay_play.fast = v != 0;
+    char word[16];
+    int pick;
+    if (mcp_json_get_str(req, "format", word, sizeof word)) {
+        if ((pick = replay_format_parse(word, false)) < 0) return "format is native or inputs";
+        g_replay_rec.format = pick;
+    }
+    if (mcp_json_get_str(req, "view", word, sizeof word)) {
+        if ((pick = replay_format_parse(word, true)) < 0) return "view is native, inputs or auto";
+        g_replay_play.view = pick;
+    }
+    return NULL;
+}
+
+static char g_mcp_replay_finished[64];   /* the last "finish":1's outcome */
+
+static const char *mcp_replay_finish(void) {
+    const char *said = replay_rec_finish_local();
+    snprintf(g_mcp_replay_finished, sizeof g_mcp_replay_finished, "%s", said ? said : "");
+    return said ? NULL : "no local game is being recorded";
+}
+
+static const char *mcp_replay_do(const char *req) {
+    emu_thread_ctx_t *ctx = g_mcp.emu;
+    const char *err = mcp_replay_settings(req);
+    if (err) return err;
+    char path[512] = {0};
+    uint32_t v = 0;
+    if (mcp_json_get_str(req, "open", path, sizeof path)) return replay_open_file(path);
+    if (mcp_json_get_u32(req, "stop", &v) && v) { replay_play_stop(); return NULL; }
+    if (mcp_json_get_u32(req, "play", &v) && v) return ctx ? replay_play_start(ctx) : "no board";
+    if (mcp_json_get_u32(req, "seek", &v)) return ctx ? replay_play_seek(ctx, v) : "no board";
+    if (mcp_json_get_u32(req, "native", &v)) return ctx ? replay_native_install(ctx, (int)v) : "no board";
+    if (mcp_json_get_u32(req, "finish", &v) && v) return mcp_replay_finish();
+    return NULL;
+}
+
+static void mcp_cmd_replay(const char *req, char *resp, int cap) {
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    const char *err = mcp_replay_do(req);
+    char play[800], last[700], rerr[200], unplayable[200];
+    replay_play_status(play, sizeof play);
+    json_escape(last, sizeof last, g_replay_rec.last);
+    json_escape(rerr, sizeof rerr, g_replay_rec.error);
+    json_escape(unplayable, sizeof unplayable, g_replay_play.unplayable);
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":%s%s%s%s,\"record\":%d,\"format\":\"%s\",\"recording\":%d,\"local\":%d,"
+             "\"finished\":\"%s\",\"saved\":%u,\"last\":\"%s\","
+             "\"record_error\":\"%s\",\"playback\":%s,\"unplayable\":\"%s\",\"info\":%s}",
+             err ? "false" : "true", err ? ",\"error\":\"" : "", err ? err : "", err ? "\"" : "",
+             g_replay_rec.want ? 1 : 0, g_replay_rec.format == REPLAY_SAVE_INPUTS ? "inputs" : "native",
+             replay_recording() ? 1 : 0, replay_rec_local() ? 1 : 0, g_mcp_replay_finished,
+             g_replay_rec.saved, last, rerr,
+             play, unplayable, g_replay_play.json[0] ? g_replay_play.json : "null");
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+}
+
+/* Commands that change the board in a way a follow feed cannot carry: the
+ * segment ends, and the next slice starts another (core/follow.h). */
+static void mcp_follow_break_after(const char *cmd) {
+    static const char *const changes[] = {
+        "sky_eye", "match_replay", "emu_step", "cop_exec", "reset_sound",
+        "netplay_host", "netplay_join", "netplay_start", "netplay_force_start", "netplay_watch",
+    };
+    if (!g_follow_lead.on) return;
+    for (size_t i = 0; i < sizeof changes / sizeof changes[0]; i++) {
+        if (strcmp(cmd, changes[i])) continue;
+        int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+        if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+        follow_lead_break(cmd);
+        if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+        return;
+    }
+}
+
 static void mcp_dispatch(const char *req, char *resp, int cap) {
     char cmd[64] = {0};
     if (!mcp_json_get_str(req, "cmd", cmd, sizeof(cmd))) {
@@ -2676,6 +2962,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "snd_watch")                == 0) mcp_cmd_snd_watch(req, resp, cap);
     else if (strcmp(cmd, "quit")                     == 0) mcp_cmd_quit(resp, cap);
     else if (strcmp(cmd, "overlay_swap")             == 0) mcp_cmd_overlay_swap(req, resp, cap);
+    else if (strcmp(cmd, "announce")                 == 0) mcp_cmd_announce(req, resp, cap);
     else if (strcmp(cmd, "reset_sound")              == 0) mcp_cmd_reset_sound(req, resp, cap);
     else if (strcmp(cmd, "dump_midi_log")            == 0) mcp_cmd_dump_midi_log(resp, cap);
     else if (strcmp(cmd, "sound_codes")              == 0) mcp_cmd_sound_codes(req, resp, cap);
@@ -2702,6 +2989,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     }
     else if (strcmp(cmd, "dump_geo_stream")          == 0) mcp_cmd_dump_geo_stream(resp, cap);
     else if (strcmp(cmd, "netplay_status")           == 0) mcp_cmd_netplay_status(req, resp, cap);
+    else if (strcmp(cmd, "ggpo_lobby")               == 0) mcp_cmd_ggpo_lobby(req, resp, cap);
     else if (strcmp(cmd, "netplay_connect")          == 0) mcp_cmd_netplay_connect(req, resp, cap);
     else if (strcmp(cmd, "netplay_host")             == 0) mcp_cmd_netplay_host(req, resp, cap);
     else if (strcmp(cmd, "netplay_join")             == 0) mcp_cmd_netplay_join(req, resp, cap);
@@ -2718,7 +3006,11 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "load_state")               == 0) mcp_cmd_state(req, resp, cap, 1);
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
     else if (strcmp(cmd, "enemy_rank")               == 0) mcp_cmd_enemy_rank(req, resp, cap);
+    else if (strcmp(cmd, "follow_lead")              == 0) mcp_cmd_follow_lead(req, resp, cap);
+    else if (strcmp(cmd, "replay")                   == 0) mcp_cmd_replay(req, resp, cap);
+    else if (strncmp(cmd, "script_", 7) == 0 && g_mcp_script_cmd) g_mcp_script_cmd(cmd, req, resp, cap);
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
+    mcp_follow_break_after(cmd);
 }
 
 /* The read-only port's commands: looks that neither pause the board nor

@@ -2,7 +2,7 @@
 /*
  * web-serve.mjs — serve the web build locally.
  *
- *   node tools/web-serve.mjs [--site build_web/site] [--port 8080] [--rom path/to/merged.zip]
+ *   node tools/web-serve.mjs [--site build_web/site] [--port 8080] [--rom path/to/merged.zip]...
  *
  * A static server for build_web/site with the MIME types a browser insists on
  * (.wasm must be application/wasm to be compiled while it streams).
@@ -11,6 +11,11 @@
  * parameter can boot the game with no file dialog:
  *
  *   http://localhost:8080/?rom=/dev-rom.zip
+ *
+ * A split set is two zips: give --rom for each, and each is also served under its
+ * own name at /dev-rom/<name> (Pinboard #940):
+ *
+ *   --rom vonj.zip --rom von.zip   ->  /vonj.html?rom=/dev-rom/vonj.zip&rom=/dev-rom/von.zip
  *
  * That is what lets a headless browser test the build. The zip is served from
  * where it already is and is never copied into the site directory, so it cannot
@@ -29,7 +34,9 @@ const opt = (name, fallback) => {
 };
 const site = path.resolve(opt('--site', 'build_web/site'));
 const port = Number(opt('--port', '8080'));
-const rom = opt('--rom', null);
+const roms = args.flatMap((a, i) => (a === '--rom' && i + 1 < args.length ? [args[i + 1]] : []));
+const rom = roms[0] || null;
+const romByName = new Map(roms.map((r) => ['/dev-rom/' + path.basename(r), path.resolve(r)]));
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -60,6 +67,7 @@ function send(res, file) {
 http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (rom && url.pathname === '/dev-rom.zip') { send(res, path.resolve(rom)); return; }
+  if (romByName.has(url.pathname)) { send(res, romByName.get(url.pathname)); return; }
   let rel = decodeURIComponent(url.pathname);
   if (rel.endsWith('/')) rel += 'index.html';
   const file = path.join(site, rel);
@@ -68,4 +76,5 @@ http.createServer((req, res) => {
 }).listen(port, '127.0.0.1', () => {
   console.log(`serving ${site}`);
   console.log(`  http://localhost:${port}/` + (rom ? `?rom=/dev-rom.zip   (${rom})` : ''));
+  if (roms.length > 1) console.log('  ?' + [...romByName.keys()].map((k) => 'rom=' + k).join('&'));
 });

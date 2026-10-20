@@ -21,6 +21,8 @@ static float ps3ui__fall(float d, float s, float p)
     return d <= 0.0f ? 1.0f : expf(-powf(d / s, p));
 }
 
+static float ps3ui__clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+
 static float ps3ui__smooth(float e0, float e1, float x)
 {
     float t = (x - e0) / (e1 - e0);
@@ -115,60 +117,68 @@ static ps3ui__c4 ps3ui__pla_udr(float d)
 static float ps3ui__shadow_side(float d) { return 49.0f * ps3ui__fall(d, 3.15f, 1.35f); }
 static float ps3ui__shadow_bottom(float d) { return 162.0f * ps3ui__fall(d, 9.95f, 2.1f); }
 
+/* Black at alpha a: the drop shadows. */
+static ps3ui__c4 ps3ui__shade(float a)
+{
+    ps3ui__c4 c = ps3ui__hex4(0, 0);
+    c.a = a;
+    return c;
+}
+
+/* The side piece: its shadow, the border, then the panel's left edge. */
+static ps3ui__c4 ps3ui__pla_side_px(int x)
+{
+    if (x < 8) return ps3ui__shade(ps3ui__shadow_side((float)(7 - x)));
+    return x < 11 ? ps3ui__hex4(PS3UI__BORDER, 0xFF) : ps3ui__pla_side((float)(x - 11));
+}
+
+/* The bottom piece: the rim light, the border, then the shadow below. */
+static ps3ui__c4 ps3ui__pla_udr_px(int y)
+{
+    if (y < 10) return ps3ui__pla_udr((float)(9 - y));
+    if (y < 13) return ps3ui__hex4(PS3UI__BORDER, 0xFF);
+    return ps3ui__shade(ps3ui__shadow_bottom((float)(y - 13)));
+}
+
+/* The top corner: the side shadow fades in below the corner. */
+static ps3ui__c4 ps3ui__pla_ovr_cnr_px(int x, int y)
+{
+    if (x < 8) {
+        float f = ((float)y - 7.0f) / 11.0f;
+        f = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+        return ps3ui__shade(ps3ui__shadow_side((float)(7 - x)) * f);
+    }
+    if (y < 3 || x < 11) return ps3ui__hex4(PS3UI__BORDER, 0xFF);
+    return ps3ui__max4(ps3ui__pla_top((float)(y - 3)), ps3ui__pla_side((float)(x - 11)));
+}
+
+/* The bottom corner: the bottom shadow, the side shadow, the border, the panel. */
+static ps3ui__c4 ps3ui__pla_udr_cnr_px(int x, int y)
+{
+    if (y >= 13)
+        return ps3ui__shade(ps3ui__shadow_bottom((float)(y - 13)) * ps3ui__smooth(0.0f, 20.0f, (float)x));
+    if (x < 8) return ps3ui__shade(y < 10 ? ps3ui__shadow_side((float)(7 - x)) : 0.0f);
+    if (x < 11 || y >= 10) return ps3ui__hex4(PS3UI__BORDER, 0xFF);
+    return ps3ui__max4(ps3ui__pla_udr((float)(9 - y)), ps3ui__pla_side((float)(x - 11)));
+}
+
+static ps3ui__c4 ps3ui__pla_px(int id, int x, int y)
+{
+    switch (id) {
+    case PS3UI_SPR_HW_PLA_OVR_MID:
+        return y < 3 ? ps3ui__hex4(PS3UI__BORDER, 0xFF) : ps3ui__pla_top((float)(y - 3));
+    case PS3UI_SPR_HW_PLA_SIDE: return ps3ui__pla_side_px(x);
+    case PS3UI_SPR_HW_PLA_UDR_MID: return ps3ui__pla_udr_px(y);
+    case PS3UI_SPR_HW_PLA_OVR_CNR: return ps3ui__pla_ovr_cnr_px(x, y);
+    case PS3UI_SPR_HW_PLA_UDR_CNR: return ps3ui__pla_udr_cnr_px(x, y);
+    default: return ps3ui__hex4(PS3UI__PANEL, PS3UI__PANEL_A);
+    }
+}
+
 static void ps3ui__paint_pla(ps3ui_image_t *im, int id)
 {
-    ps3ui__c4 border = ps3ui__hex4(PS3UI__BORDER, 0xFF), black = ps3ui__hex4(0, 0);
     for (int y = 0; y < im->h; y++)
-        for (int x = 0; x < im->w; x++) {
-            ps3ui__c4 c = ps3ui__hex4(PS3UI__PANEL, PS3UI__PANEL_A);
-            switch (id) {
-            case PS3UI_SPR_HW_PLA_OVR_MID:
-                c = y < 3 ? border : ps3ui__pla_top((float)(y - 3));
-                break;
-            case PS3UI_SPR_HW_PLA_SIDE:
-                if (x < 8) {
-                    black.a = ps3ui__shadow_side((float)(7 - x));
-                    c = black;
-                } else {
-                    c = x < 11 ? border : ps3ui__pla_side((float)(x - 11));
-                }
-                break;
-            case PS3UI_SPR_HW_PLA_UDR_MID:
-                if (y < 10) c = ps3ui__pla_udr((float)(9 - y));
-                else if (y < 13) c = border;
-                else { black.a = ps3ui__shadow_bottom((float)(y - 13)); c = black; }
-                break;
-            case PS3UI_SPR_HW_PLA_OVR_CNR:
-                if (x < 8) {
-                    /* the side shadow fades in below the corner */
-                    float f = ((float)y - 7.0f) / 11.0f;
-                    f = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
-                    black.a = ps3ui__shadow_side((float)(7 - x)) * f;
-                    c = black;
-                } else if (y < 3 || x < 11) {
-                    c = border;
-                } else {
-                    c = ps3ui__max4(ps3ui__pla_top((float)(y - 3)), ps3ui__pla_side((float)(x - 11)));
-                }
-                break;
-            case PS3UI_SPR_HW_PLA_UDR_CNR:
-                if (y >= 13) {
-                    black.a = ps3ui__shadow_bottom((float)(y - 13)) * ps3ui__smooth(0.0f, 20.0f, (float)x);
-                    c = black;
-                } else if (x < 8) {
-                    black.a = y < 10 ? ps3ui__shadow_side((float)(7 - x)) : 0.0f;
-                    c = black;
-                } else if (x < 11 || y >= 10) {
-                    c = border;
-                } else {
-                    c = ps3ui__max4(ps3ui__pla_udr((float)(9 - y)), ps3ui__pla_side((float)(x - 11)));
-                }
-                break;
-            default:
-                break;
-            }
-            ps3ui__put(im, x, y, c);
-        }
+        for (int x = 0; x < im->w; x++) ps3ui__put(im, x, y, ps3ui__pla_px(id, x, y));
 }
 
 /* ---- white "pillow" plates ----------------------------------------------- */
@@ -204,27 +214,34 @@ static void ps3ui__paint_plate(ps3ui_image_t *im, float mid, int top, int bottom
 
 /* ---- the header tab: a white plate whose lower edge curves up to the right -- */
 
+/* The tab's outer lower edge at column centre fx: flat at 49, then an arc
+ * curving up to the right of cx. */
+static float ps3ui__tab_edge(float fx)
+{
+    const float cx = 87.0f, cy = -126.1f, r = 175.1f;
+    if (fx <= cx)
+        return 49.0f;
+    float q = r * r - (fx - cx) * (fx - cx);
+    return q > 0.0f ? cy + sqrtf(q) : 0.0f;
+}
+
+/* One pixel of the stem below the tab, where the rail joins. */
+static ps3ui__c4 ps3ui__tab_stem_px(int x, ps3ui__c4 grey)
+{
+    if (x < 3 || (x >= 13 && x < 16)) return grey;
+    if (x < 13) return ps3ui__hex4(0xFFFFFF, 0xFF);
+    return ps3ui__hex4(0xF8FAFF, 0);
+}
+
 /* One pixel of the tab, above the dots. */
 static ps3ui__c4 ps3ui__tab_px(int x, int y, ps3ui__c4 grey)
 {
-    const float cx = 87.0f, cy = -126.1f, r = 175.1f;   /* outer lower edge, right of cx */
-    float fx = (float)x + 0.5f;
-    float edge = 49.0f;                          /* outer lower edge at this x */
-    if (fx > cx) {
-        float q = r * r - (fx - cx) * (fx - cx);
-        edge = q > 0.0f ? cy + sqrtf(q) : 0.0f;
-    }
-    /* the stem below the tab, where the rail joins */
-    if (y >= 49) {
-        if (x < 3 || (x >= 13 && x < 16)) return grey;
-        else if (x < 13) return ps3ui__hex4(0xFFFFFF, 0xFF);
-        else return ps3ui__hex4(0xF8FAFF, 0);
-    }
+    float edge = ps3ui__tab_edge((float)x + 0.5f);   /* outer lower edge at this x */
+    if (y >= 49)
+        return ps3ui__tab_stem_px(x, grey);
     float fy = (float)y + 0.5f;
     /* coverage of the area above the edge, and above edge-3 (inside the border) */
-    float cov = edge - fy + 0.5f, inner = edge - 3.0f - fy + 0.5f;
-    cov = cov < 0.0f ? 0.0f : cov > 1.0f ? 1.0f : cov;
-    inner = inner < 0.0f ? 0.0f : inner > 1.0f ? 1.0f : inner;
+    float cov = ps3ui__clamp01(edge - fy + 0.5f), inner = ps3ui__clamp01(edge - 3.0f - fy + 0.5f);
     if (cov <= 0.0f)
         return ps3ui__hex4(0xF8FAFF, 0);
     if (y < 3 || x < 3 || inner <= 0.0f) {
@@ -282,9 +299,9 @@ static void ps3ui__paint_glass(ps3ui_image_t *im, int side)
 
 /* ---- lettering: a glyph of the title face fitted into a measured box ------- */
 
-static void ps3ui__glyph_path(ps3ui_path_t *p, int font, int cp, float x0, float y0, float x1, float y1,
-                              float shear)
+static void ps3ui__glyph_path(ps3ui_path_t *p, int font, int cp, ps3ui_box_t b, float shear)
 {
+    float x0 = b.x0, y0 = b.y0, x1 = b.x1, y1 = b.y1;
     ps3ui_text_init();
     const stbtt_fontinfo *fi = &g_ps3ui_text.info[font];
     int ix0, iy0, ix1, iy1;
@@ -321,7 +338,7 @@ static float *ps3ui__letters(int w, int h, const ps3ui__letter_t *l, int n, floa
         ps3ui_path_reset(&p);
         /* the box is the sheared ink's extent; fit the upright glyph to it */
         float slant = (y1 - y0) * shear;
-        ps3ui__glyph_path(&p, PS3UI_FONT_TITLE, l[i].cp, l[i].x0, y0, l[i].x1 - slant, y1, shear);
+        ps3ui__glyph_path(&p, PS3UI_FONT_TITLE, l[i].cp, (ps3ui_box_t){ l[i].x0, y0, l[i].x1 - slant, y1 }, shear);
         ps3ui_path_cover(&p, m, w, h);
     }
     return m;
@@ -578,8 +595,6 @@ static ps3ui__c4 ps3ui__ramp(const ps3ui__stop_t *s, int n, float v)
     return ps3ui__hex4(s[n - 1].rgb, s[n - 1].a);
 }
 
-static float ps3ui__clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
-
 /* ---- the small header tab (hw_ovr_line_cnr_s) ------------------------------ */
 
 static void ps3ui__paint_tab_s(ps3ui_image_t *im)
@@ -671,25 +686,33 @@ static void ps3ui__paint_cursor(ps3ui_image_t *im, int top, int bottom, int left
 
 /* ---- the info window's translucent navy frame (match_sel_info_*) ----------- */
 
+/* The fill, under the two-pixel left edge and top rim (the top wins). */
+static ps3ui__c4 ps3ui__sel_info_edges(int x, int y, int top, int left)
+{
+    if (top && y < 2) return ps3ui__hex4(0x002145, 0xE6);
+    if (left && x < 2) return x == 0 ? ps3ui__hex4(0x001F41, 0xD7) : ps3ui__hex4(0x001A3C, 0xBF);
+    return ps3ui__hex4(0x011937, 0xB3);
+}
+
+/* The bottom rim's two rows, b up from the bottom. */
+static ps3ui__c4 ps3ui__sel_info_rim(int x, int b, int left)
+{
+    if (left && x < 2) {
+        /* the rim rounds into the left edge */
+        if (x == 0 && b == 1) return ps3ui__hex4(0x082442, 0xD1);
+        if (x == b) return ps3ui__hex4(0x1E3552, 0xB9);
+        return ps3ui__hex4(0x4A5973, 0xC5);
+    }
+    return b == 1 ? ps3ui__hex4(0x3A4E6C, 0xBF) : ps3ui__hex4(0x425573, 0xC2);
+}
+
 static void ps3ui__paint_sel_info(ps3ui_image_t *im, int top, int bottom, int left)
 {
     int h = im->h;
     for (int y = 0; y < h; y++)
         for (int x = 0; x < im->w; x++) {
-            ps3ui__c4 c = ps3ui__hex4(0x011937, 0xB3);
             int b = h - 1 - y;
-            if (left && x < 2) c = x == 0 ? ps3ui__hex4(0x001F41, 0xD7) : ps3ui__hex4(0x001A3C, 0xBF);
-            if (top && y < 2) c = ps3ui__hex4(0x002145, 0xE6);
-            if (bottom && b < 2) {
-                ps3ui__c4 r = b == 1 ? ps3ui__hex4(0x3A4E6C, 0xBF) : ps3ui__hex4(0x425573, 0xC2);
-                if (left && x < 2) {
-                    /* the rim rounds into the left edge */
-                    if (x == 0 && b == 1) r = ps3ui__hex4(0x082442, 0xD1);
-                    else if (x == b) r = ps3ui__hex4(0x1E3552, 0xB9);
-                    else r = ps3ui__hex4(0x4A5973, 0xC5);
-                }
-                c = r;
-            }
+            ps3ui__c4 c = bottom && b < 2 ? ps3ui__sel_info_rim(x, b, left) : ps3ui__sel_info_edges(x, y, top, left);
             ps3ui__put(im, x, y, c);
         }
 }
@@ -718,39 +741,55 @@ static ps3ui__c4 ps3ui__sel_row(int y, int h)
 
 static const uint32_t ps3ui__sel_edge[3] = { 0x0162A6, 0x0768AB, 0x0473B0 };
 
+/* The top corner's outer 3x3 (x and y 0..2): the bevel. */
+static ps3ui__c4 ps3ui__sel_top_outer(int x, int y)
+{
+    if (x > y) return ps3ui__hex4(0x005B9E, 255);
+    if (x == 0 && y == 2) return ps3ui__hex4(0x0065A5, 255);
+    /* the bevel's highlight runs in along the diagonal */
+    return ps3ui__hex4(x == y && y < 2 ? 0x067FBD : 0x0892CE, 255);
+}
+
+/* The top corner's inner 3x3 (x and y 3..5): the dark band, cut back along
+ * the diagonal. */
+static void ps3ui__sel_top_inner(ps3ui__c4 *c, int x, int y)
+{
+    if (y > x) *c = ps3ui__hex4(0x0572AC, 0x65);
+    else if (y == x && x > 3) *c = ps3ui__hex4(0x00244A, 0xD3);
+    else if (x == 3) *c = ps3ui__hex4(0x00244A, 0xB7);
+}
+
 /* The side plate's top-left corner and the dark band under it. Returns 1 if
  * (x, y) is one of its pixels. */
 static int ps3ui__sel_top(ps3ui__c4 *c, int x, int y)
 {
-    if (y < 3 && x <= y) {
-        /* the bevel's highlight runs in along the diagonal */
-        *c = ps3ui__hex4(x == y && y < 2 ? 0x067FBD : 0x0892CE, 255);
-        if (x == 0 && y == 2) *c = ps3ui__hex4(0x0065A5, 255);
-    } else if (y < 3 && x < 3) {
-        *c = ps3ui__hex4(0x005B9E, 255);
-    } else if (y >= 3 && y <= 5 && x >= 3 && x < 6) {
-        /* the dark band is cut back along the diagonal */
-        if (y - 3 > x - 3) *c = ps3ui__hex4(0x0572AC, 0x65);
-        else if (y - 3 == x - 3 && x > 3) *c = ps3ui__hex4(0x00244A, 0xD3);
-        else if (x == 3) *c = ps3ui__hex4(0x00244A, 0xB7);
-    } else {
-        return 0;
-    }
+    if (y < 3 && x < 3) *c = ps3ui__sel_top_outer(x, y);
+    else if (y >= 3 && y <= 5 && x >= 3 && x < 6) ps3ui__sel_top_inner(c, x, y);
+    else return 0;
     return 1;
+}
+
+/* The bottom corner's inner 3x3 (x and b 3..5): the dark band's diagonal. */
+static ps3ui__c4 ps3ui__sel_bottom_inner(int x, int b)
+{
+    if (b - 3 < 5 - x) return ps3ui__hex4(0x003F62, b == 5 && x == 4 ? 0x81 : 0x65);
+    if (b == 4 && x == 3) return ps3ui__hex4(0x002439, 0xBA);
+    return ps3ui__hex4(0x002439, 0xF3);
+}
+
+/* The bottom corner's outer 3x3 (x and b 0..2): the edge's last rows. */
+static void ps3ui__sel_bottom_outer(ps3ui__c4 *c, int x, int b)
+{
+    if (b == 2) *c = ps3ui__hex4(x == 2 ? 0x005A8B : ps3ui__sel_edge[x], 255);
+    else if (b == 1 && x == 1) *c = ps3ui__hex4(0x005DA2, 255);
+    else if (b == 1 && x == 0) *c = ps3ui__hex4(0x0061A5, 255);
 }
 
 /* The bottom-left corner, `b` rows from the bottom. */
 static void ps3ui__sel_bottom(ps3ui__c4 *c, int x, int b)
 {
-    if (b >= 3 && b <= 5 && x >= 3 && x < 6) {
-        if (b - 3 < 5 - x) *c = ps3ui__hex4(0x003F62, b == 5 && x == 4 ? 0x81 : 0x65);
-        else if (b == 4 && x == 3) *c = ps3ui__hex4(0x002439, 0xBA);
-        else *c = ps3ui__hex4(0x002439, 0xF3);
-    } else if (b < 3 && x < 3) {
-        if (b == 2) *c = ps3ui__hex4(x == 2 ? 0x005A8B : ps3ui__sel_edge[x], 255);
-        else if (b == 1 && x == 1) *c = ps3ui__hex4(0x005DA2, 255);
-        else if (b == 1 && x == 0) *c = ps3ui__hex4(0x0061A5, 255);
-    }
+    if (b >= 3 && b <= 5 && x >= 3 && x < 6) *c = ps3ui__sel_bottom_inner(x, b);
+    else if (b < 3 && x < 3) ps3ui__sel_bottom_outer(c, x, b);
 }
 
 static void ps3ui__paint_sel(ps3ui_image_t *im, int side)

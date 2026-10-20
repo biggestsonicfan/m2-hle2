@@ -41,9 +41,16 @@ static const char *const app_icon_glyph_2[APP_ICON_GLYPH_H] = {
     "XXXXX",
 };
 
-/* Signed distance to a rounded rect: negative inside, 0 on the edge. */
-static inline float app_icon__sdf(float px, float py,
-                                  float x0, float y0, float x1, float y1, float r) {
+/* The plate: a rounded rect from (x0, y0) to (x1, y1), corner radius `rad`,
+ * with a rim `rim` wide inside its edge. */
+typedef struct {
+    float x0, y0, x1, y1;
+    float rad, rim;
+} app_icon_plate_t;
+
+/* Signed distance to the plate's outline: negative inside, 0 on the edge. */
+static inline float app_icon__sdf(float px, float py, const app_icon_plate_t *pl) {
+    const float x0 = pl->x0, y0 = pl->y0, x1 = pl->x1, y1 = pl->y1, r = pl->rad;
     const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
     const float hx = (x1 - x0) * 0.5f - r, hy = (y1 - y0) * 0.5f - r;
     float dx = fabsf(px - cx) - hx, dy = fabsf(py - cy) - hy;
@@ -62,14 +69,14 @@ static inline uint8_t app_icon__u8(float v) {
 
 /* How many of a pixel's 4x4 subsamples fall on the plate (*in) and how many
  * of those on its rim (*on_rim). */
-static inline void app_icon__coverage(int x, int y, float x0, float y0, float x1, float y1,
-                                      float rad, float rim, int *in, int *on_rim) {
+static inline void app_icon__coverage(int x, int y, const app_icon_plate_t *pl,
+                                      int *in, int *on_rim) {
     for (int sy = 0; sy < 4; sy++) {
         for (int sx = 0; sx < 4; sx++) {
             const float px = (float)x + ((float)sx + 0.5f) * 0.25f;
             const float py = (float)y + ((float)sy + 0.5f) * 0.25f;
-            const float d  = app_icon__sdf(px, py, x0, y0, x1, y1, rad);
-            if (d <= 0.0f) { (*in)++; if (d >= -rim) (*on_rim)++; }
+            const float d  = app_icon__sdf(px, py, pl);
+            if (d <= 0.0f) { (*in)++; if (d >= -pl->rim) (*on_rim)++; }
         }
     }
 }
@@ -78,9 +85,11 @@ static inline void app_icon__coverage(int x, int y, float x0, float y0, float x1
 static inline void app_icon__plate(int size, uint8_t *rgba) {
     const float fs    = (float)size;
     const float inset = fs * 0.025f;          /* leave the outermost pixel clear */
-    const float rad   = fs * 0.20f;
-    const float rim   = fs * 0.055f;          /* rim: one crisp pixel at 16px */
-    const float x0 = inset, y0 = inset, x1 = fs - inset, y1 = fs - inset;
+    const app_icon_plate_t pl = {
+        .x0 = inset, .y0 = inset, .x1 = fs - inset, .y1 = fs - inset,
+        .rad = fs * 0.20f,
+        .rim = fs * 0.055f,                   /* rim: one crisp pixel at 16px */
+    };
 
     for (int y = 0; y < size; y++) {
         /* Vertical gradient down the plate: board blue into near-black. */
@@ -90,7 +99,7 @@ static inline void app_icon__plate(int size, uint8_t *rgba) {
         const float bb = 0.260f + (0.105f - 0.260f) * t;
         for (int x = 0; x < size; x++) {
             int in = 0, on_rim = 0;
-            app_icon__coverage(x, y, x0, y0, x1, y1, rad, rim, &in, &on_rim);
+            app_icon__coverage(x, y, &pl, &in, &on_rim);
             const float a  = (float)in / 16.0f;
             const float rf = (a > 0.0f) ? ((float)on_rim / 16.0f) / a : 0.0f;
             /* Rim cyan mixed over the body by how much of the pixel it covers. */

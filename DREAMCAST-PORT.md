@@ -2472,6 +2472,68 @@ Nothing was built or benched for this, and nothing in the build changed.
 - **KOS's newlib has no `sched_yield` and no `FIONREAD`.** thread_mutex.h uses
   `thd_pass`, and net_socket.h stubs the ioctl.
 
+## Master merged, and the build Sonic alone (#1038)
+
+The branch was 180 commits behind master (Virtual-On, Dynamite Cop, Sega
+Rally, Fighting Vipers, the Lua scripts, the model table API). Merged
+(`bc984d5`), the port follows master's names: `mem_ea`,
+`geo3d_board_cull` taking the three projected corners as an array,
+`s24_draw_tilemap`, `geo3d_scan_geo_list`, and the models' table through
+`model_table_make` / `model_entry_read` (`dc_strips.h`, the det_digest
+recorders). The frame-1500 hash moved from 109e8406 to 2b3fa4c6 with the
+merge: master's board draws the attract fight differently (the DR row counts
+2563 triangles where the old branch drew 2531), and the merged board is what
+master computes: `det_digest --gems-i960 --gems-cop` on the host is
+board-identical to master's over 4000 frames.
+
+**Then the lean build.** Master's board carries the other games, and the
+Dreamcast, which plays Sonic the Fighters from a disc made for it, was
+linking them: the 2B COP's SHARC interpreter, the TGP and TGPx4 cores, the
+315-5881, the Sega Rally and Virtual-On profiles, 430 KB of text; the
+native replay recorders of `sfight_native.h`, 316 KB of statics for rounds a
+build with no zip (`M2HLE_NO_ZIP`) can never save; and the C port of STF's
+sound driver, 20 KB, in a build whose sound RAM is 4 KB (its sound is
+`dc_sound.h`). Now:
+
+- `-DM2HLE_STF_ONLY` (the Makefile) leaves the other games' profiles out of
+  `registry.h`; the three prepared profiles stay (they are tables).
+- `sfight_native.h` under `M2HLE_NO_ZIP` is four inert entry points and an
+  empty hook list. The recorders' hooks only read the board unless a native
+  replay is playing, so the board runs the same without them. They are out of
+  `PROFILE_HOOKS` too, so the compiled code runs through those ten addresses.
+- `sound_hle.h` under a `SOUND_RAM_SIZE` below 512 KB is `shle_run`,
+  `shle_reset` and `shle_driver_known` as empty bodies.
+
+That is 934 KB (text and bss together) back, and the pager's cache, which
+takes what memalign leaves in 256 KB steps, grew from 1196 KB to 2220 KB.
+With the room, `AOT_COVER` is 0.995 by default for STF (306 KB more compiled
+code, cache 1708 KB).
+
+The bench (`HUD=prof FRAME512=1 FILL=0 FPS_CAP=60`, Gems, fight frames
+3500-3900, Flycast's libretro core; emulated time, deterministic run to run).
+B2's `ld` is page loads in the window and B3's `rd` the drive reads behind
+them:
+
+| | total ms | slice | draw | scan | loads | reads | cache KB | text |
+|---|---|---|---|---|---|---|---|---|
+| base 436e2df | 13659 | 5386 | 8259 | 6479 | 691 | 738 | 1196 | 1,758,168 |
+| master merged | 14005 | 5411 | 8578 | 6798 | 695 | 743 | 1196 | 1,984,768 |
+| STF only, no recorders | 13959 | 5356 | 8588 | 6796 | 189 | 236 | 2220 | 1,814,264 |
+| + `AOT_COVER=0.995` | 13768 | 5181 | 8572 | 6789 | 372 | 419 | 1708 | 2,120,200 |
+| + the sound driver out (the disc) | 13732 | 5134 | 8580 | 6797 | 275 | 323 | 1964 | 2,136,156 |
+
+The merge made the scan 5% slower; the board changed under it (the hash,
+the triangle count, the mesh cache's fills), so how much is master's code
+and how much its scene was not separated. The lean build's gain in emulated
+time is small (the slice 4% shorter at 0.995); its gain is the drive: a
+fight loads a quarter of the pages the merged build did, and every page
+load on a console is a GD-ROM seek the emulator's clock does not charge.
+
+The hash row: `dc_hash_frame` writes it once, to text row 15, and the prof
+panel's FT row overwrites it two seconds later, so `tools/hud_read.py --raw`
+over screenshots taken every 0.6 s while the LV row's frame is between 1200
+and 1750 is how a bench catches it.
+
 ## Next optimization targets
 
 - **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
@@ -2487,9 +2549,10 @@ Nothing was built or benched for this, and nothing in the build changed.
   texture fields) would let the mesh arena (768 KB) hold more.
 - **The i960 slice (~13 ms a frame in the bench after #509).** A third of a
   fight's frame: Gems' C, the compiled code, the COP, and 7% still
-  interpreted. A wider `AOT_COVER` needs memory the board does not have
-  (#509), so smaller compiled code (104 bytes of SH-4 an instruction) is what
-  would buy more of it. Keeping the hot `cpu` / `bus` state in the 8 KB
+  interpreted. `AOT_COVER` is 0.995 since #1038 freed the memory for it; the
+  next step is smaller compiled code (104 bytes of SH-4 an instruction), and
+  the rest of the board's text (what `sh-elf-nm --size-sort` lists that STF
+  never calls) is more cache. Keeping the hot `cpu` / `bus` state in the 8 KB
   operand-cache RAM mode.
 - **Optional:** modifier-volume shadows; dropping SDL2 and GLdc for KOS's
   `snd_stream` directly.

@@ -657,19 +657,29 @@ static inline bool sound_uart_rxrdy(const sound_state_t *ss) { return ss->scsp.m
 static void sound_run(uint32_t n);                      /* below */
 static inline bool sound_uart_make_room(bool for_game);  /* below; both callbacks need it */
 
+/* The i8251 sits at 0x9C0000 on a 2B board, its status a word on (umask32
+ * 0x000000ff), and at 0x01C80000 on a 2A, its status a halfword on (umask16
+ * 0x00ff; model2a_install names that region UART_2A). MAME model2.cpp. */
+static inline bool sound_uart_region(const mem_region_t *r) {
+    return r->base == MIDI_BASE || strcmp(r->name, "UART_2A") == 0;
+}
+static inline uint32_t sound_uart_status_off(const mem_region_t *r) {
+    return r->base == MIDI_BASE ? 4u : 2u;
+}
+
 static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
-    (void)r; (void)size;
+    (void)size;
     sound_settle();
     g_sound.read_count++;
-    if ((addr - MIDI_BASE) == 0) {           /* i8251 data: the received byte */
+    if ((addr - r->base) == 0) {             /* i8251 data: the received byte */
         scsp_t *s = &g_sound.scsp;
         if (s->mo_r == s->mo_w) return 0u;
         uint8_t b = s->mo[s->mo_r];
         s->mo_r = (uint8_t)((s->mo_r + 1u) & 31u);
         return b;
     }
-    /* i8251 status at +4: TxRDY (bit 0), RxRDY (bit 1) and TxEMPTY (bit 2) as the line stands */
-    if ((addr - MIDI_BASE) != 4) return 0u;
+    /* i8251 status: TxRDY (bit 0), RxRDY (bit 1) and TxEMPTY (bit 2) as the line stands */
+    if ((addr - r->base) != sound_uart_status_off(r)) return 0u;
     sound_uart_service(&g_sound, g_sound.m68k.cpu.cycles);
     /* A program that polls TxRDY instead of taking the interrupt (m2-pacman's
      * flush loop) would otherwise see the holding register full for the rest of
@@ -681,10 +691,10 @@ static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
 }
 
 static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
-    (void)r; (void)size;
+    (void)size;
     sound_settle();
     if (sndcap_on()) sndcap_put(1, addr, (val & 0xFFu) | 0xFF0000u, 0);
-    if ((addr - MIDI_BASE) != 0) return;                   /* +4 is the UART's control register */
+    if ((addr - r->base) != 0) return;                     /* the other address is the control register */
     g_sound.write_count++;
     if (g_sound.midi_log_n < 64) {
         g_sound.midi_log[g_sound.midi_log_n]    = (uint8_t)val;
@@ -781,7 +791,7 @@ static inline void sound_attach(memory_bus_t *bus) {
     g_sound.detached = false;
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
-        if (r->base == MIDI_BASE) {
+        if (sound_uart_region(r)) {
             r->read_cb  = sound_midi_read_cb;
             r->write_cb = sound_midi_write_cb;
             mem_regions_changed(bus);
@@ -807,7 +817,7 @@ static inline void sound_detach(memory_bus_t *bus) {
     g_sound.detached = true;
     for (int i = 0; i < bus->region_count; i++) {
         mem_region_t *r = &bus->regions[i];
-        if (r->base == MIDI_BASE) {
+        if (sound_uart_region(r)) {
             r->read_cb  = NULL;
             r->write_cb = NULL;
             mem_regions_changed(bus);
@@ -839,8 +849,14 @@ static inline void sound_set_tap(void (*fn)(int16_t, int16_t, uint64_t, void *),
     g_sound_tap    = fn;      /* last: ud has to be in place before the first call */
 }
 
+/* Set while rollback netplay runs frames again (core/emu_ggpo.h): the host
+ * heard those samples the first time, so the clock moves on and nothing goes
+ * out. Set and cleared with the sound thread settled. */
+static int g_sound_mute;
+
 static inline void sound_out_push(int16_t l, int16_t r) {
     uint64_t index = g_sound.out_total++;
+    if (g_sound_mute) return;
     if (g_sound_tap) g_sound_tap(l, r, index, g_sound_tap_ud);
     uint32_t w = g_sound.out_w;
     if (((w + 1) & (SOUND_OUT_FRAMES - 1)) == g_sound.out_r) { g_sound.out_dropped++; return; }
@@ -862,16 +878,57 @@ static volatile int g_sound_out_reader;
 static void (*g_sound_step_trace)(uint32_t pc, uint64_t cycles, void *ud);
 static void  *g_sound_step_trace_ud;
 
+/* sound_run with the driver in C (sound_hle.h): timed as the 68000 is. */
+static void sound_run_hle(uint32_t n) {
+    int64_t t0 = emu_now_us();
+    shle_run(n);
+    g_emu_times.sound_us      += emu_now_us() - t0;
+    g_emu_times.sound_samples += n;
+}
+
+/* One step of the 68000 inside a sample's budget: an interrupt taken, an
+ * instruction run, or the rest of the budget spent halted or stopped.
+ * Answers 0 when the budget is gone that way, 1 to carry on.
+ *
+ * The 68000 samples its interrupt lines while an instruction runs,
+ * SOUND_IPL_LEAD periods before it ends (MAME's m68000 loads the pending
+ * interrupt where the microcode moves IR to IRD, with the instruction's last
+ * prefetch): a timer that expires later than that, or a byte the serial line
+ * lands later than that, is only acted on after the next instruction. The
+ * mask it compares against is the one the instruction leaves: after an RTE
+ * that lowers it, a pending interrupt is taken before the next instruction
+ * (MAME's trace shows timer C's handler entered straight from timer B's RTE;
+ * a rule that let one instruction run first put the two handlers 70 clocks
+ * further apart, every period). Measurable in the driver's timer periods,
+ * fire to fire: MAME has 50.014 samples for timer B and 505.437 for timer A
+ * over 90 s of attract (tools/README.md, "The sound board"). */
+static inline int sound_step(m68k_state_t *m) {
+    if (m->cpu.halted) { g_sound.budget = 0; return 0; }
+    uint64_t c0 = m->cpu.cycles;
+    uint64_t sampled = c0 >= SOUND_IPL_LEAD ? c0 - SOUND_IPL_LEAD : 0;
+    scsp_timers(&g_sound.scsp, sampled);
+    if (g_sound.uart.count) sound_uart_service(&g_sound, sampled);
+    int lvl = scsp_irq_level(&g_sound.scsp);
+    int ipl = m68k_ipl(&m->cpu);
+    if (lvl > ipl && m68k_interrupt(m, lvl)) {
+        g_sound.irqs[lvl]++;
+        if (sndcap_on()) sndcap_put(4, (uint32_t)lvl, 0, m->cpu.pc);
+    } else if (m->cpu.stopped) {
+        m->cpu.cycles += (uint64_t)g_sound.budget;   /* time passes while it waits */
+        g_sound.budget = 0;
+        return 0;
+    } else {
+        if (g_sound_step_trace) g_sound_step_trace(m->cpu.pc, c0, g_sound_step_trace_ud);
+        m68k_step_core(m);
+    }
+    g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
+    return 1;
+}
+
 /* Run the board for n output samples. */
 static void sound_run(uint32_t n) {
     if (!g_sound.rom_loaded || g_sound.detached) return;
-    if (g_shle.on) {
-        int64_t t0 = emu_now_us();
-        shle_run(n);
-        g_emu_times.sound_us      += emu_now_us() - t0;
-        g_emu_times.sound_samples += n;
-        return;
-    }
+    if (g_shle.on) { sound_run_hle(n); return; }
     m68k_state_t *m = &g_sound.m68k;
     int64_t run_t0 = emu_now_us();
     int zone = hprof_enter(HPROF_M68K);
@@ -879,43 +936,7 @@ static void sound_run(uint32_t n) {
     for (uint32_t i = 0; i < n; i++) {
         if (g_snd_watch.on) snd_watch_sample();
         g_sound.budget += SOUND_CYCLES_PER_SAMPLE;
-        while (g_sound.budget > 0) {
-            if (m->cpu.halted) { g_sound.budget = 0; break; }
-            uint64_t c0 = m->cpu.cycles;
-            /* The 68000 samples its interrupt lines while an instruction
-             * runs, SOUND_IPL_LEAD periods before it ends (MAME's m68000 loads
-             * the pending interrupt where the microcode moves IR to IRD, with
-             * the instruction's last prefetch): a timer that expires later
-             * than that, or a byte the serial line lands later than that, is
-             * only acted on after the next instruction. The mask it compares
-             * against is the one the instruction leaves: after an RTE that
-             * lowers it, a pending interrupt is taken before the next
-             * instruction (MAME's trace shows timer C's handler entered
-             * straight from timer B's RTE; a rule that let one instruction run
-             * first put the two handlers 70 clocks further apart, every
-             * period). Measurable in the driver's timer periods, fire to fire:
-             * MAME has 50.014 samples for timer B and 505.437 for timer A over
-             * 90 s of attract (tools/README.md, "The sound board"). */
-            uint64_t sampled = c0 >= SOUND_IPL_LEAD ? c0 - SOUND_IPL_LEAD : 0;
-            scsp_timers(&g_sound.scsp, sampled);
-            if (g_sound.uart.count) sound_uart_service(&g_sound, sampled);
-            int lvl = scsp_irq_level(&g_sound.scsp);
-            int ipl = m68k_ipl(&m->cpu);
-            if (lvl > ipl && m68k_interrupt(m, lvl)) {
-                g_sound.irqs[lvl]++;
-                if (sndcap_on()) sndcap_put(4, (uint32_t)lvl, 0, m->cpu.pc);
-            } else if (m->cpu.stopped) {
-                m->cpu.cycles += (uint64_t)g_sound.budget;   /* time passes while it waits */
-                g_sound.budget = 0;
-                break;
-            } else {
-                if (g_sound_step_trace) g_sound_step_trace(m->cpu.pc, c0, g_sound_step_trace_ud);
-                m68k_step_core(m);
-                g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
-                continue;
-            }
-            g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
-        }
+        while (g_sound.budget > 0 && sound_step(m)) {}
         /* The chip owes the sample and makes it when something needs it
          * (scsp.h, "The chip's own time"). The watchdog and a capture look at
          * the slots every sample, so they have them made every sample. */

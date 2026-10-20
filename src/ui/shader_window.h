@@ -5,12 +5,15 @@
  * The choice lives in video.cfg beside the per-user netplay settings
  * (netplay_cfg_path's directory: %APPDATA%\m2hle2, ~/.config/m2hle2):
  *
- *   filter=off|crt|custom
+ *   arcade=0|1                (the board's picture, under the filter)
+ *   pixdepth=0|1              (depth per pixel, not the board's one key a polygon; geo3d.h)
+ *   filter=off|crt|custom     (an old filter=arcade is arcade=1 with the CRT)
  *   preset=<path to the .glslp or .glsl>
  *   input_scale=0..4          (0 = automatic)
  *   param.<NAME>=<value>      (the custom preset's parameters)
  *
- * The command line (--crt, --shader, --shader-scale, --no-shader) applies over
+ * The command line (--crt, --shader, --shader-scale, --no-shader, --arcade, --no-arcade,
+ * --pixel-depth, --no-pixel-depth) applies over
  * it for that run and is not written back.
  */
 #ifndef SHADER_WINDOW_H
@@ -42,6 +45,18 @@ static inline const char *shader_ui_cfg_path(void) {
     return g_shader_ui.cfg_path;
 }
 
+/* video.cfg's names for the filters. */
+static const char *const shader_ui_filter_name[] = {
+    [POST_SHADER_OFF] = "off", [POST_SHADER_CRT] = "crt",
+    [POST_SHADER_CUSTOM] = "custom",
+};
+
+static inline post_shader_mode_t shader_ui_filter_named(const char *name) {
+    for (int i = 0; i < (int)(sizeof shader_ui_filter_name / sizeof *shader_ui_filter_name); i++)
+        if (!strcmp(name, shader_ui_filter_name[i])) return (post_shader_mode_t)i;
+    return POST_SHADER_OFF;
+}
+
 static inline void shader_ui_save(void) {
     const char *path = shader_ui_cfg_path();
     char tmp[700];
@@ -49,7 +64,9 @@ static inline void shader_ui_save(void) {
     FILE *f = fopen(tmp, "w");
     if (!f) { LOG_WARN("shader: cannot write %s", tmp); return; }
     const post_shader_mode_t m = post_shader_mode();
-    fprintf(f, "filter=%s\n", m == POST_SHADER_CRT ? "crt" : m == POST_SHADER_CUSTOM ? "custom" : "off");
+    fprintf(f, "arcade=%d\n", post_shader_arcade() ? 1 : 0);
+    fprintf(f, "pixdepth=%d\n", g_geo3d_pixel_depth ? 1 : 0);
+    fprintf(f, "filter=%s\n", shader_ui_filter_name[m]);
     if (post_shader_custom_path()[0]) fprintf(f, "preset=%s\n", post_shader_custom_path());
     fprintf(f, "input_scale=%d\n", post_shader_input_scale());
     for (int i = 0; i < post_shader_param_count(); i++) {
@@ -61,12 +78,34 @@ static inline void shader_ui_save(void) {
     if (rename(tmp, path) != 0) LOG_WARN("shader: cannot replace %s", path);
 }
 
+typedef struct { char name[RS_NAME]; float v; } shader_ui_param_t;
+
+/* The saved preset, with its parameters. */
+static inline void shader_ui_load_preset(const char *preset, const shader_ui_param_t *params, int n_params) {
+    if (!preset[0] || !post_shader_custom_supported()) return;
+    if (!post_shader_load(preset)) {
+        LOG_WARN("shader: the saved preset %s did not load: %s", preset, post_shader_error());
+        return;
+    }
+    for (int i = 0; i < n_params; i++) post_shader_set_param(params[i].name, params[i].v);
+}
+
+/* The saved filter. Before #646 the Arcade was a filter, the CRT with the board's picture. */
+static inline void shader_ui_set_filter(const char *filter) {
+    if (!strcmp(filter, "arcade")) {
+        post_shader_set_arcade(true);
+        filter = "crt";
+    }
+    const post_shader_mode_t mode = shader_ui_filter_named(filter);
+    post_shader_set_mode(mode == POST_SHADER_CUSTOM && !post_shader_custom_loaded() ? POST_SHADER_OFF : mode);
+}
+
 /* After post_shader_init, with the GL context current. */
 static inline void shader_ui_load(void) {
     FILE *f = fopen(shader_ui_cfg_path(), "r");
     if (!f) return;
     char line[1024], filter[16] = "off", preset[RS_PATH] = "";
-    struct { char name[RS_NAME]; float v; } params[RS_MAX_PARAMS];
+    shader_ui_param_t params[RS_MAX_PARAMS];
     int n_params = 0;
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = '\0';
@@ -75,6 +114,8 @@ static inline void shader_ui_load(void) {
         *eq = '\0';
         const char *k = line, *v = eq + 1;
         if (!strcmp(k, "filter"))           snprintf(filter, sizeof filter, "%s", v);
+        else if (!strcmp(k, "arcade"))      post_shader_set_arcade(atoi(v) != 0);
+        else if (!strcmp(k, "pixdepth"))    g_geo3d_pixel_depth = atoi(v) != 0;
         else if (!strcmp(k, "preset"))      snprintf(preset, sizeof preset, "%s", v);
         else if (!strcmp(k, "input_scale")) post_shader_set_input_scale(atoi(v));
         else if (!strncmp(k, "param.", 6) && n_params < RS_MAX_PARAMS) {
@@ -83,16 +124,8 @@ static inline void shader_ui_load(void) {
         }
     }
     fclose(f);
-    if (preset[0] && post_shader_custom_supported()) {
-        if (post_shader_load(preset)) {
-            for (int i = 0; i < n_params; i++) post_shader_set_param(params[i].name, params[i].v);
-        } else {
-            LOG_WARN("shader: the saved preset %s did not load: %s", preset, post_shader_error());
-        }
-    }
-    if (!strcmp(filter, "crt")) post_shader_set_mode(POST_SHADER_CRT);
-    else if (!strcmp(filter, "custom") && post_shader_custom_loaded()) post_shader_set_mode(POST_SHADER_CUSTOM);
-    else post_shader_set_mode(POST_SHADER_OFF);
+    shader_ui_load_preset(preset, params, n_params);
+    shader_ui_set_filter(filter);
 }
 
 static inline void shader_ui_open_dialog(ImGuiFileDialog *fd) {
@@ -103,10 +136,24 @@ static inline void shader_ui_open_dialog(ImGuiFileDialog *fd) {
     IGFD_OpenDialog(fd, "OpenShader", "Load a libretro GLSL shader", "Libretro GLSL{.glslp,.glsl}", cfg);
 }
 
-/* The Video menu, in the main menu bar. */
-static inline void shader_ui_menu(ImGuiFileDialog *fd) {
-    if (!igBeginMenu("Video")) return;
-    const post_shader_mode_t m = post_shader_mode();
+/* The Video menu's Arcade switch, then the built-in filters: none, the CRT. */
+static inline void shader_ui_builtin_items(post_shader_mode_t m) {
+    if (igMenuItemEx("Arcade (the real board's picture)", NULL, post_shader_arcade(), true)) {
+        post_shader_set_arcade(!post_shader_arcade());
+        shader_ui_save();
+    }
+    igSetItemTooltip("The picture of a real Model 2B board, measured from its captured video: brighter "
+                     "mid-tones, the ghost its signal trails to the right of edges, its noise, and the "
+                     "picture 4:3, as its monitor shows it. Applied first; the filter below goes over it.");
+    if (igMenuItemEx("Depth per pixel (not the board)", NULL, g_geo3d_pixel_depth != 0, true)) {
+        g_geo3d_pixel_depth = !g_geo3d_pixel_depth;
+        shader_ui_save();
+    }
+    igSetItemTooltip("The board sorts each polygon by one depth, so a large polygon that starts near the "
+                     "camera covers what stands on it (the Tornado's wing hides the backs of Sonic's shoes "
+                     "in the attract intro, on the real board too). This sorts every pixel by its own depth "
+                     "instead. Off is the board.");
+    igSeparator();
     if (igMenuItemEx("No filter", NULL, m == POST_SHADER_OFF, true)) {
         post_shader_set_mode(POST_SHADER_OFF);
         shader_ui_save();
@@ -117,6 +164,13 @@ static inline void shader_ui_menu(ImGuiFileDialog *fd) {
     }
     igSetItemTooltip("Scanlines and an aperture grille, as Lost Judgment's arcade cabinets show "
                      "Sonic the Fighters (ported from YAMP). Costs GPU time.");
+}
+
+/* The Video menu, in the main menu bar. */
+static inline void shader_ui_menu(ImGuiFileDialog *fd) {
+    if (!igBeginMenu("Video")) return;
+    const post_shader_mode_t m = post_shader_mode();
+    shader_ui_builtin_items(m);
     if (post_shader_custom_loaded()) {
         char label[RS_NAME + 32];
         snprintf(label, sizeof label, "Custom: %s", post_shader_custom_name());
@@ -151,7 +205,7 @@ static inline void shader_ui_menu(ImGuiFileDialog *fd) {
         igEndMenu();
     }
     igSetItemTooltip("The resolution the game is drawn at before the filter reads it. Automatic is the "
-                     "window's size for the CRT filter and 1x for a custom shader.");
+                     "window's size for the CRT and the Arcade and 1x for a custom shader.");
     igSeparator();
     igTextDisabled("Filters can cut performance. Turn one off if the game slows down.");
     if (post_shader_error()[0]) {

@@ -26,7 +26,8 @@
  *   - an interrupt is pending, or not one whole iteration ends before the
  *     horizon;
  *   - the slice has fewer instructions left than two (g_hle_room);
- *   - a data watchpoint is armed, or the debugger steps.
+ *   - a data watchpoint is armed, or the debugger steps;
+ *   - the i960 is charged the board's timing, not MAME's table (i960_timing.h).
  *
  * `--spin-i960` turns it off, and det_digest --cpu holds the two against each
  * other frame by frame.
@@ -75,7 +76,7 @@ static inline bool m2_spin_match(memory_bus_t *bus, uint32_t ip, uint32_t *ld, u
 /* Skip the idle iterations of the load + compare-and-branch loop at the IP;
  * 1 leaves it to the i960. */
 static inline int m2_spin_skip(i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (!g_spin_skip || g_hle_room < 2 || wp_armed()) return 1;
+    if (!g_spin_skip || g_hle_room < 2 || wp_armed() || g_i960_bt_on) return 1;
     if (g_irqt.intreq & g_irqt.intena & 0x03FFu) return 1;
 
     uint32_t ip = cpu->sfr.ip, ld, ea, cb;
@@ -105,6 +106,16 @@ static inline int m2_spin_skip(i960_cpu_t *cpu, memory_bus_t *bus) {
     return 0;
 }
 
+/* An absolute ldob/ldos/ld from work RAM, then a compare-and-branch back to it. */
+static inline bool m2_spin_is_loop(memory_bus_t *bus, uint32_t a) {
+    uint32_t ld = mem_read32(bus, a), lop = ld >> 24;
+    if ((lop != 0x80 && lop != 0x88 && lop != 0x90) || (ld & 0x3C00u) != 0x3000u) return false;
+    uint32_t ea = mem_read32(bus, a + 4u), cb = mem_read32(bus, a + 8u), cop = cb >> 24;
+    if (ea < 0x00500000u || ea > 0x005FFFFFu) return false;
+    if (!((cop >= 0x31 && cop <= 0x36) || (cop >= 0x39 && cop <= 0x3E))) return false;
+    return (cb & 0x00001FFCu) == 0x1FF8u;                               /* disp -8: back to the load */
+}
+
 /* Find the loops m2_spin_skip takes in a program and hook them for `prof`
  * (hle_hooks.h, g_hle_spin_sites): for a profile with no addresses of its own,
  * homebrew on a game's board. The scan matches the words m2_spin_skip checks,
@@ -113,15 +124,8 @@ static inline int m2_spin_skip(i960_cpu_t *cpu, memory_bus_t *bus) {
  * (det_digest), so compiled code stops at each. Returns how many. */
 static inline size_t m2_spin_find(memory_bus_t *bus, uint32_t size, const game_profile_t *prof) {
     size_t n = 0;
-    for (uint32_t a = 0; a + 12u <= size && n < HLE_SPIN_SITES_MAX; a += 4) {
-        uint32_t ld = mem_read32(bus, a), lop = ld >> 24;
-        if ((lop != 0x80 && lop != 0x88 && lop != 0x90) || (ld & 0x3C00u) != 0x3000u) continue;
-        uint32_t ea = mem_read32(bus, a + 4u), cb = mem_read32(bus, a + 8u), cop = cb >> 24;
-        if (ea < 0x00500000u || ea > 0x005FFFFFu) continue;
-        if (!((cop >= 0x31 && cop <= 0x36) || (cop >= 0x39 && cop <= 0x3E))) continue;
-        if ((cb & 0x00001FFCu) != 0x1FF8u) continue;                    /* disp -8: back to the load */
-        g_hle_spin_sites[n++] = a;
-    }
+    for (uint32_t a = 0; a + 12u <= size && n < HLE_SPIN_SITES_MAX; a += 4)
+        if (m2_spin_is_loop(bus, a)) g_hle_spin_sites[n++] = a;
     g_hle_spin_count   = n;
     g_hle_spin_profile = n ? prof : NULL;
     g_hle_spin_hook    = m2_spin_skip;

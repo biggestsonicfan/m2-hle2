@@ -102,8 +102,12 @@ RetroArch's **Quick Menu > Controls** remaps on top, as with any core.
 - **Sound board** off is silent and cheaper on a handheld. An online match turns it on anyway,
   because the other player's board always runs it and the two games have to match.
 
-Savestates work (RetroArch's save and load state, about 16 MB each). A state cannot be loaded
-during an online match: the other player's board would not have it.
+Savestates, rewind and fast-forward work. A state is about 16 MB and takes a few milliseconds to
+save, few enough for RetroArch to take one every frame for rewind; give rewind a buffer of a few
+hundred MB. While RetroArch fast-forwards, the core draws one frame in four, since the drawing is
+what holds it back. A state cannot be loaded, nor a match rewound, during an online match: the
+other player's board would not have it. A RetroArch that cached an older core's `.info` hides
+Rewind until it reads the new one; the core has it read the new one when a game loads.
 
 ## Online play
 
@@ -116,7 +120,7 @@ same moment and runs them in lockstep from there.
   savestates and can't run this core, so the core carries the match itself over RetroArch's
   connection.
 - **RPCN**: the same rooms as the m2-hle desktop emulator and the website
-  (play.sonicthefighte.rs), in the PS3 release's own online lobby, drawn by the core and
+  (arcade.sonicthefighte.rs), in the PS3 release's own online lobby, drawn by the core and
   driven with the pad. Set **Online play** to RPCN and reload the game, then choose **Online
   Battle** from the main menu (the Arcade version opens the lobby at load, and L + R together
   open it again). Signing in needs no keyboard:

@@ -1,6 +1,6 @@
 # WEB-NETPLAY.md
 
-Netplay on **play.sonicthefighte.rs**: the WebAssembly build of *Sonic the Fighters* signing in to `rpcn.sonicthefighte.rs`, finding a match and playing it.
+Netplay on **arcade.sonicthefighte.rs** (play.sonicthefighte.rs until Pinboard #881): the WebAssembly build of *Sonic the Fighters* signing in to `rpcn.sonicthefighte.rs`, finding a match and playing it.
 
 This expands [WEB-PORT.md](WEB-PORT.md) sections 3.4, 4, 5 and milestones M3–M4, and replaces them where the two disagree.
 

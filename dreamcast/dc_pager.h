@@ -21,8 +21,9 @@
  *     Frames are evicted by a clock: a frame used since the hand last passed
  *     is kept. A page the board writes (MAIN_DATA, XTRA_DATA) is pinned: it
  *     would come back off the disc without the write.
- *   - anonymous: zero until first touched, then pinned (vid_ext_ram, 7 MB of
- *     which a game uses a little). pg_anon_clear() zeroes them for a reset.
+ *   - anonymous: zero until first touched, then pinned (pg_anon; none since
+ *     the board stopped having a VID_EXT_RAM buffer, #590). pg_anon_clear()
+ *     zeroes them for a reset.
  *
  * The model pack (MODELS.PAK, tools/dc_mdlpack.py): the polygon and texture
  * ROM bytes the 3D decoder reads, scene by scene, in the order the game first

@@ -43,13 +43,18 @@ From the repo root:
 . $KOS_BASE/environ.sh
 make -C dreamcast OUT=/tmp/dc
 # or with STF's i960 code compiled ahead of time (~1.5x the i960's speed;
-# AOT_COVER=0.99 by default, DREAMCAST-PORT.md #394 and #509)
+# AOT_COVER=0.995 by default, DREAMCAST-PORT.md #394, #509 and #1038)
 make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # GEMS=<dir> (default: vendor/gems-c, the submodule, if it is checked out:
 # git submodule update --init --recursive vendor/gems-c) builds in Sega's
 # C from Sonic Gems Collection; GEMS= leaves it out. Its gems_all.h is made by
 # its gen_all.py (python3) when make starts. OPTAB=1 dispatches the interpreter through a handler table (off: it
 # saves under 1% here and costs 136 KB).
+# The build is Sonic the Fighters alone (-DM2HLE_STF_ONLY, DREAMCAST-PORT.md
+# #1038): the other games' profiles and their cores (the SHARC interpreter,
+# the TGPs, the 315-5881) are out, as are the native replay recorders
+# (M2HLE_NO_ZIP: no replays) and the C sound driver (4 KB of sound RAM); the
+# ~930 KB they took is the page cache's and the wider AOT's.
 # FRAME512=1 makes the frame 512x384 in the middle of the 640x480 signal
 # (DREAMCAST-PORT.md #471; Flycast stretches it unless its libretro core has
 # tools/flycast-frame512.patch, #499). VIEW=x,y,w,h shows only that

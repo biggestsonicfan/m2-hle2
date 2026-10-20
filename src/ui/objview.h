@@ -377,9 +377,10 @@ static inline bool objview__decode(const romset_t *rs, memory_bus_t *bus,
     /* The model table's material pointer is what the single-model browser
      * colours an untextured face with; keep the two agreeing. */
     float cr = 1.0f, cg = 1.0f, cb = 1.0f;
-    uint32_t toff = q->model_table_offset + (uint32_t)model * MODEL_ENTRY_SIZE;
-    if ((size_t)toff + MODEL_ENTRY_SIZE <= rs->main_data_size)
-        material_ptr_to_color(read_u32_le(rs->main_data + toff + 4), &cr, &cg, &cb);
+    model_table_t table = profile_model_table(q);
+    model_entry_t e;
+    if (model_entry_read(&table, rs->main_data, rs->main_data_size, (uint32_t)model, &e))
+        material_ptr_to_color(e.mat_ptr, &cr, &cg, &cb);
 
     /* geo3d_decode_model keeps its scratch in statics, so only one decode may be
      * in flight anywhere. The bridge's model dump raises the same flag. */

@@ -19,6 +19,10 @@ tools/README.md, "Music against M2MidiDec"):
                                    <mid-dir>/SONG_XX.MID; with --wav, the
                                    spectrum of <board-dir>/songXX.wav against
                                    <render-dir>/SONG_XX.wav
+  pitch <mid-dir> <board-dir> <sf2> [--secs 88] [songs...]
+                                   each note's pitch on the board against the
+                                   one the SF2's root key and the MIDI's bend
+                                   give it, in cents
 
 The whole run, from a sfight set (epr-19021.31 is the sound program):
 
@@ -31,6 +35,7 @@ The whole run, from a sfight set (epr-19021.31 is the sound program):
   for s in ...; do fluidsynth -ni -f lin.cfg -g 0.05 -R 0 -C 0 -r 44100 \\
       -F render/SONG_$s.wav stf.sf2 midfix/SONG_$s.MID; done
   python tools/grade-midi.py grade midfix board --wav render
+  python tools/grade-midi.py pitch midfix board stf.sf2
 
 numpy only.
 """
@@ -116,6 +121,17 @@ def midi_write(path, div, tracks):
     open(path, 'wb').write(b''.join(out))
 
 
+def _channel_state(ch, kind, data):
+    """The (field, value) a program change, volume, expression or bend sets, else None."""
+    if kind == 0xC0:
+        return 'prog', data[0]
+    if kind == 0xB0 and data[0] in (7, 11):
+        return ('vol' if data[0] == 7 else 'expr'), data[1]
+    if kind == 0xE0:
+        return 'bend', (data[0] | data[1] << 7) - 8192
+    return None
+
+
 def midi_notes(path):
     """Note-ons in seconds, with the channel state each one starts under and its length."""
     div, tracks = midi_parse(path)
@@ -127,7 +143,7 @@ def midi_notes(path):
             evs.append((tick, i, st, data))
     evs.sort(key=lambda e: (e[0], e[1]))
     tempo, t, last = 500000, 0.0, 0
-    prog, vol, expr = [0] * 16, [100] * 16, [127] * 16
+    state = [dict(prog=0, vol=100, expr=127, bend=0) for _ in range(16)]
     sounding, out = {}, []
     for tick, _, st, data in evs:
         t += (tick - last) * tempo / div / 1e6; last = tick
@@ -136,20 +152,56 @@ def midi_notes(path):
                 tempo = int.from_bytes(data[1:4], 'big')
             continue
         ch, kind = st & 0x0F, st & 0xF0
-        if kind == 0xC0:
-            prog[ch] = data[0]
-        elif kind == 0xB0 and data[0] == 7:
-            vol[ch] = data[1]
-        elif kind == 0xB0 and data[0] == 11:
-            expr[ch] = data[1]
+        cs = _channel_state(ch, kind, data)
+        if cs:
+            state[ch][cs[0]] = cs[1]
         elif kind in (0x80, 0x90):
             key = (ch, data[0])
             if key in sounding:            # a note-off, or a new note-on on a sounding key
                 n = out[sounding.pop(key)]; n['dur'] = t - n['t']
             if kind == 0x90 and data[1]:
                 sounding[key] = len(out)
-                out.append(dict(t=t, ch=ch, note=data[0], vel=data[1], vol=vol[ch], expr=expr[ch],
-                                prog=prog[ch], dur=math.inf))
+                out.append(dict(t=t, ch=ch, note=data[0], vel=data[1], dur=math.inf, **state[ch]))
+    return out
+
+
+# ---------------------------------------------------------------- the SF2
+
+def _riff(d, p, end):
+    while p < end:
+        n = struct.unpack_from('<I', d, p + 4)[0]
+        yield d[p:p + 4], p + 8, n
+        p += 8 + n + (n & 1)
+
+
+def _recs(blob, fmt):
+    k = struct.calcsize(fmt)
+    return [struct.unpack_from(fmt, blob, i) for i in range(0, len(blob) - k + 1, k)]
+
+
+def _gens(bags, gens, b):
+    return {op: amt for op, amt in gens[bags[b][0]:bags[b + 1][0]]}
+
+
+def sf2_roots(path):
+    """{program: [(lo key, hi key, root key)]} of bank 0. M2MidiDec writes every
+    sample at 44.1 kHz with no tuning generators, so the root key is the whole pitch."""
+    d = open(path, 'rb').read()
+    pd = {}
+    for cid, p, n in _riff(d, 12, len(d)):
+        if cid == b'LIST' and d[p:p + 4] == b'pdta':
+            pd = {c.decode(): d[q:q + m] for c, q, m in _riff(d, p + 4, p + n)}
+    phdr, inst = _recs(pd['phdr'], '<20sHHHIII'), _recs(pd['inst'], '<20sH')
+    pbag, ibag = _recs(pd['pbag'], '<HH'), _recs(pd['ibag'], '<HH')
+    pgen, igen = _recs(pd['pgen'], '<Hh'), _recs(pd['igen'], '<Hh')
+    out = {}
+    for i, h in enumerate(phdr[:-1]):
+        ins = [_gens(pbag, pgen, b).get(41) for b in range(h[3], phdr[i + 1][3])]
+        ins = [x for x in ins if x is not None]
+        if h[2] != 0 or not ins:
+            continue
+        zs = [_gens(ibag, igen, b) for b in range(inst[ins[0]][1], inst[ins[0] + 1][1])]
+        out[h[1]] = [(z[43] & 0xFF, (z[43] >> 8) & 0xFF, z[58]) for z in zs if 43 in z and 58 in z]
     return out
 
 
@@ -381,11 +433,79 @@ def cmd_grade(mid_dir, board_dir, wav_dir, secs, songs):
               'Furthest: ' + ', '.join(f'{k[0]:02X}/{k[1] + 1}/{k[2]} {v:+.1f}' for v, k, n in rows[:6]))
 
 
+def pitch_rows(mn, on, r, off, span, roots):
+    """(note, expected cents, board - expected) per note, each paired with the
+    unused key-on within 12 ms nearest its pitch; None when there is none."""
+    bt, used, rows = np.array([e['t'] for e in on]), set(), []
+    for n in mn:
+        x = n['t'] * r + off
+        if x >= span:
+            break
+        z = [root for lo, hi, root in roots.get(n['prog'], []) if lo <= n['note'] <= hi]
+        if not z:
+            rows.append((n, None, None)); continue
+        exp = 100 * (n['note'] - z[0]) + 200 * n['bend'] / 8192     # GM's 2-semitone bend
+        k = [j for j in np.nonzero(abs(bt - x) < 0.012)[0] if j not in used]
+        if not k:
+            rows.append((n, exp, None)); continue
+        j = min(k, key=lambda j: abs(on[j]['cents'] - exp)); used.add(j)
+        rows.append((n, exp, on[j]['cents'] - exp))
+    return rows
+
+
+def pitch_report(rows):
+    d = np.array([x[2] for s, x in rows if x[2] is not None])
+    print(f'\n{len(rows)} notes, {len(d)} paired with a key-on, '
+          f'{sum(1 for s, x in rows if x[1] is None)} with no SF2 zone; of the paired, '
+          + ', '.join(f'{np.mean(abs(d) <= t) * 100:.2f}% within {t} c' for t in (1, 5, 50)))
+    g = collections.defaultdict(list)
+    for s, (n, e, dd) in rows:
+        if dd is not None:
+            g[(s, n['ch'], n['prog'])].append(dd)
+    bad = sorted(((np.mean(abs(np.array(v)) > 5), k, len(v), np.median(v)) for k, v in g.items()),
+                 key=lambda x: -x[0] * x[2])
+    print('(song, MIDI channel 1-16, program) groups with notes off by more than 5 c: '
+          + (', '.join(f'{k[0]:02X}/{k[1] + 1}/{k[2]} {f * n:.0f} of {n} (median {m:+.0f} c)'
+                       for f, k, n, m in bad[:8] if f > 0) or 'none'))
+
+
+def cmd_pitch(mid_dir, board_dir, sf2, secs, songs):
+    roots = sf2_roots(sf2)
+    print('song  notes  paired  within 1 c  within 5 c  median c')
+    rows = []
+    for s in songs:
+        mn = midi_notes(os.path.join(mid_dir, f'SONG_{s:02X}.MID'))
+        on, t0 = board_capture(os.path.join(board_dir, f'song{s:02X}'), s)
+        if not mn or not on:
+            continue
+        r, off, sc, med = fit(onsets([n['t'] for n in mn]), onsets([e['t'] for e in on]))
+        span = min(secs, on[-1]['t'] + 0.5, mn[-1]['t'] * r + off + 0.5)
+        rs = pitch_rows(mn, on, r, off, span, roots)
+        rows += [(s, x) for x in rs]
+        d = np.array([x[2] for x in rs if x[2] is not None] or [math.nan])
+        print(f'{s:02X}  {len(rs):6d}  {len(d):6d}  {np.mean(abs(d) <= 1) * 100:9.2f}%  '
+              f'{np.mean(abs(d) <= 5) * 100:9.2f}%  {np.median(d):+7.1f}', flush=True)
+    pitch_report(rows)
+
+
+def _opts(rest):
+    secs, songs = 88.0, []
+    while rest:
+        a = rest.pop(0)
+        if a == '--secs':
+            secs = float(rest.pop(0))
+        else:
+            songs.append(int(a, 16))
+    return secs, songs or range(0x19)
+
+
 def main(argv):
     if len(argv) >= 2 and argv[0] == 'stim':
         return cmd_stim(argv[1])
     if len(argv) >= 3 and argv[0] == 'fix':
         return cmd_fix(argv[1], argv[2])
+    if len(argv) >= 4 and argv[0] == 'pitch':
+        return cmd_pitch(argv[1], argv[2], argv[3], *_opts(argv[4:]))
     if len(argv) >= 3 and argv[0] == 'grade':
         rest, wav_dir, secs, songs = argv[3:], None, 88.0, []
         while rest:
