@@ -7,9 +7,9 @@
  * between the sound board and the device, so its depth is the latency we choose,
  * and the reason this exists: see "The push model" in audio_out.h.
  *
- * What the depth has to cover is how unevenly chunks arrive. The board makes 735
- * frames per 60 Hz slice and the page runs a slice per display frame, so chunks
- * land every ~16.7 ms -- unless the page drops a frame, and then nothing lands
+ * What the depth has to cover is how unevenly chunks arrive. The board makes ~767
+ * frames per 57.52 Hz slice and the page runs about a slice per display frame, so
+ * chunks land every ~17 ms -- unless the page drops a frame, and then nothing lands
  * for ~33 ms and two arrive together. `target` is sized for that.
  *
  *   buffering  Nothing plays until the ring holds `target` frames. Without this

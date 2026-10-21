@@ -262,7 +262,7 @@ const m2hleNetplay = (() => {
   function autoDelay() {
     const rtt = rttMs();
     if (rtt === null) return 2;
-    return Math.max(2, Math.min(6, Math.ceil(rtt / 16.7) + 1));
+    return Math.max(2, Math.min(6, Math.ceil(rtt / FRAME_MS) + 1));
   }
 
   /* Round trip to a member of the room, peer to peer, or null before the first
@@ -271,7 +271,7 @@ const m2hleNetplay = (() => {
 
   /* Frames of input delay a round trip needs: an input has `delay` frames to
    * make the one-way trip, half the round trip. */
-  const FRAME_MS = 1000 / 60;
+  const FRAME_MS = 4346 / 250;   /* the board's frame, 17.384 ms (57.52 Hz, Pinboard #1360) */
   function framesFor(rtt) { return Math.max(1, Math.ceil(rtt / 2 / FRAME_MS)); }
 
   /* How a match with this round trip and this input delay will play. Lockstep

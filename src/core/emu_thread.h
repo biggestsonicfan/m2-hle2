@@ -1119,6 +1119,13 @@ static inline void emu_pace_linked(emu_thread_ctx_t *ctx, int64_t work_t1) {
     }
 }
 
+/* The host frame the board is paced to: the board's own 17,384 us, or a PS3
+ * match's 60 Hz (netplay_host_frame_us). */
+static inline int64_t emu_host_frame_us(void) {
+    uint32_t us = netplay_host_frame_us();
+    return us ? (int64_t)us : (int64_t)EMU_SLICE_US;
+}
+
 /* Pace the board to its 57.52 Hz after a slice that reached its vblank (60 Hz
  * in a PS3 match, netplay_host_frame_us): sleep out to the next 17.38 ms tick,
  * measured from work_t1, where the slice's work ended. */
@@ -1126,15 +1133,14 @@ static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
     if (m2comm_linked()) { emu_pace_linked(ctx, work_t1); return; }
     link_pace_stop(&ctx->link_pace);
     int64_t now = emu_now_us();
-    uint32_t frame_us = netplay_host_frame_us();   /* a PS3 match: its 60 Hz */
-    if (!frame_us) frame_us = EMU_SLICE_US;
+    int64_t frame_us = emu_host_frame_us();
     if (ctx->frame_deadline_us == 0) {
         ctx->frame_deadline_us = now + frame_us;
     } else {
         ctx->frame_deadline_us += frame_us;
         /* Catch-up clamp: if we've fallen >1 frame behind (paused
          * in debugger, heavy host load), reset rather than spin. */
-        if (ctx->frame_deadline_us < now - (int64_t)frame_us) {
+        if (ctx->frame_deadline_us < now - frame_us) {
             ctx->frame_deadline_us = now + frame_us;
         }
     }

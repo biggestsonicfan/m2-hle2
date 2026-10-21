@@ -16,7 +16,7 @@
  *
  * Pacing is by time, not by callback count. requestAnimationFrame follows the
  * display (60, 120, 144 Hz...) and the board runs at its own 57.52 Hz
- * (EMU_SLICE_US), so an
+ * (EMU_SLICE_US; a PS3 match the PS3's 60, emu_host_frame_us), so an
  * accumulator decides how many slices a callback owes.
  *
  * Netplay is pumped from the same place the native run loop pumps it
@@ -86,7 +86,7 @@
 /* A slice is due once this much of its period has gone by. Below 1.0 so that a
  * 60 Hz display, whose callbacks land a hair early or late around 16.67 ms, gets
  * exactly one slice per callback instead of a 0-then-2 stutter. */
-#define WEB_SLICE_DUE_US ((int64_t)EMU_SLICE_US * 85 / 100)
+#define WEB_SLICE_DUE_US (emu_host_frame_us() * 85 / 100)
 
 /* The page is showing the object viewer in place of the game (see the
  * web_objview_* exports at the end of this file). Declared here because
@@ -496,7 +496,8 @@ static void web_run_owed_slices(void) {
     if (state.last_us == 0) state.last_us = now;
     state.owed_us += now - state.last_us;
     state.last_us  = now;
-    const int64_t cap = (int64_t)EMU_SLICE_US * WEB_MAX_SLICES_PER_FRAME;
+    const int64_t frame_us = emu_host_frame_us();
+    const int64_t cap = frame_us * WEB_MAX_SLICES_PER_FRAME;
     if (state.owed_us > cap) {
         /* Board time that will never be run: the game fell behind the wall clock. */
         if (state.emu.run_state == EMU_RUNNING) g_web_perf.forgiven_us += (uint64_t)(state.owed_us - cap);
@@ -531,7 +532,7 @@ static void web_run_owed_slices(void) {
             if (g_web_waited) state.owed_us = 0;
             break;
         }
-        if (owed) state.owed_us -= EMU_SLICE_US;   /* a catch-up slice owes nothing back */
+        if (owed) state.owed_us -= frame_us;   /* a catch-up slice owes nothing back */
     }
 }
 
@@ -1829,7 +1830,8 @@ EMSCRIPTEN_KEEPALIVE const char *web_perf(int reset) {
               * frame can be blamed on a stage rather than on "the picture". */
              "\"draw_frames\":%llu,\"compose_us\":%lld,\"scan_us\":%lld,"
              "\"upload_us\":%lld,\"draw3d_us\":%lld,\"tiles_us\":%lld,"
-             "\"netplay\":\"%s\",\"netplay_stalls\":%u,\"netplay_delay\":%u}",
+             "\"netplay\":\"%s\",\"netplay_stalls\":%u,\"netplay_delay\":%u,"
+             "\"frame_us\":%lld}",   /* full speed: the board's frame, or a PS3 match's */
              (double)emu_now_us(),
              (unsigned long long)g_web_perf.callbacks, (unsigned long long)g_web_perf.slices, (unsigned)g_emu_frames,
              (unsigned long long)g_web_perf.slice_us, (unsigned long long)g_web_perf.render_us,
@@ -1841,7 +1843,8 @@ EMSCRIPTEN_KEEPALIVE const char *web_perf(int reset) {
              (long long)g_game_frame_times.compose_us, (long long)g_game_frame_times.scan_us,
              (long long)g_game_frame_times.upload_us, (long long)g_game_frame_times.draw3d_us,
              (long long)g_game_frame_times.tiles_us,
-             netplay_state_text(np.state), np.stalls, (unsigned)g_netplay.cfg.frame_delay);
+             netplay_state_text(np.state), np.stalls, (unsigned)g_netplay.cfg.frame_delay,
+             (long long)emu_host_frame_us());
     if (reset) g_web_perf.slice_us_max = g_web_perf.render_us_max = g_web_perf.gap_us_max = 0;
     return out;
 }
