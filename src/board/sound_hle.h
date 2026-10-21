@@ -84,50 +84,56 @@
 #define SHLE_T_NEGSMP     0x601100u
 
 /* Board time, in 1/16 of a 68000 clock period. The driver reloads a timer in
- * its handler, so a period is (255 - reload) samples plus the time from the
- * timer firing to the reload: 255 clock periods when nothing is in the way
- * (the interrupt is taken 68 periods after the timer fires, and the reload is
- * written 187 periods into the handler). Timers B and C share interrupt level
+ * its handler, so a period is (256 - reload) samples (scsp.h, the timers)
+ * plus the time from the
+ * timer firing to the reload: about 290 clock periods when nothing is in the
+ * way (the interrupt is taken ~74 periods after the timer fires, and the
+ * reload is written 216 periods into the handler). Timers B and C share interrupt level
  * 2, so one's handler waits for the other's; the MIDI byte handler (level 3)
  * and timer A's (level 1) stretch what they interrupt. Measured on the board
  * (snd_replay traces, $SND_TRACE): the handlers' lengths are below, and with
  * them timer B comes out 50.015 samples in attract and 50.054 under an
- * effects storm. The interrupt also waits for the instruction it lands in to
- * end, and that depends on what the main loop is doing: 13 clock periods on
- * average, but 37 inside a refill, whose movem.l take 76-88 each (a trace of
+ * effects storm (measured on MAME's 255 - reload and one wait state; a
+ * sample more with the board's rule, and the lengths are now the 68000's
+ * with two wait states, sound.h SOUND_BUS_WAIT: each one re-measured from
+ * snd_replay traces of both, Pinboard #1418). The interrupt also waits for the instruction it lands in to
+ * end, and that depends on what the main loop is doing: about 13 clock periods
+ * on average, but 42 inside a refill, whose movem.l take 76 (in, from sample
+ * ROM) and 104 (out, to sound RAM) (a trace of
  * the board under the effects storm: 24% of its time in refills). So the
  * latency grows with the refill work, which the HLE knows: the chunks it
  * copies (SHLE_CHUNK_CYCLES). Without it the music ran 0.05% fast under load
  * and drifted tens of ms a minute. */
 #define SHLE_T16          16u
-#define SHLE_IRQ_LAT      70u          /* timer fires -> handler entered, main loop idle */
-#define SHLE_RELOAD_AT    187u         /* handler entered -> reload written (B and C) */
-#define SHLE_RELOAD_AT_A  170u
-#define SHLE_DUR_B        580u         /* Int2_Timer, timer B, before any event it queues */
-#define SHLE_DUR_C        900u         /* Int2_Timer, timer C */
-#define SHLE_DUR_EVENT    650u         /* each event a sequencer queues */
-#define SHLE_DUR_MIDI     535u         /* Int3_MidiIn, one byte */
-#define SHLE_DUR_A        4000u        /* Interrupt1, timer A */
-#define SHLE_CHUNK_CYCLES 2752u        /* a refill: 16 x (movem.l in, movem.l out with its wait states, adda) */
-#define SHLE_REFILL_WAIT  24u          /* extra wait for an interrupt landing in one: 37 - 13 */
+#define SHLE_IRQ_LAT      76u          /* timer fires -> handler entered, main loop idle */
+#define SHLE_RELOAD_AT    216u         /* handler entered -> reload written (B and C) */
+#define SHLE_RELOAD_AT_A  198u
+#define SHLE_DUR_B        653u         /* Int2_Timer, timer B, before any event it queues */
+#define SHLE_DUR_C        995u         /* Int2_Timer, timer C */
+#define SHLE_DUR_EVENT    715u         /* each event a sequencer queues */
+#define SHLE_DUR_MIDI     594u         /* Int3_MidiIn, one byte */
+#define SHLE_DUR_A        4260u        /* Interrupt1, timer A */
+#define SHLE_CHUNK_CYCLES 3008u        /* a refill: 16 x (movem.l in, movem.l out with its wait states, adda) */
+#define SHLE_REFILL_WAIT  29u          /* extra wait for an interrupt landing in one: 42 - 13 */
 /* The driver clears its RAM, runs a 2.3 s delay loop and only then takes an
  * interrupt: the first one on the board is at this clock period after reset.
  * The i960's bytes wait in the SCSP's MIDI buffer until then. */
-#define SHLE_BOOT_CYCLES  33193169ull
+#define SHLE_BOOT_CYCLES  33609600ull
 /* ...and it writes the SCSP (InitSCSP, which cuts every voice) this long
  * after reset: until then whatever was playing plays on. The same after a
  * restart (MIDI byte 0xFF), measured on the board from the byte. */
-#define SHLE_INIT_CYCLES  4506800ull
+#define SHLE_INIT_CYCLES  4768970ull
 /* What fills that 0.4 s: a delay loop (0x1500 x 58 clock periods), then a
- * clear of all 512 KB of sound RAM a long at a time, 8 clock periods a byte.
+ * clear of all 512 KB of sound RAM a long at a time, 8.5 clock periods a byte.
  * The voices' windows go to zero as it passes them, so what was playing falls
  * silent well before InitSCSP. */
 #define SHLE_CLEAR_DELAY  311808ull
-#define SHLE_CLEAR_BYTE   8u
+#define SHLE_CLEAR_BYTE2  17u            /* twice the clear's clock periods a byte */
 
 /* The main loop's pass over the 32 slots, where each streaming slot gets its
- * refill step: 11129 clock periods median on the board (43 samples). */
-#define SHLE_PASS_SAMPLES 43u
+ * refill step: 11129 clock periods median on the board with one wait state,
+ * 4% more with two (45 samples). */
+#define SHLE_PASS_SAMPLES 45u
 
 /* The main loop's time. It takes one queued event per pass over a slot, in
  * between the streaming, so an event waits for the one before it; a burst of
@@ -136,9 +142,9 @@
  * (0.320 s for set 0's 134,116 bytes, interrupts included, which the
  * handlers' own lengths add). Clock periods, fitted to the board (snd_replay
  * traces, the bgm stimulus). */
-#define SHLE_COST_EVENT   600u
-#define SHLE_COST_KEYON   8000u
-#define SHLE_COST_BYTE    23u
+#define SHLE_COST_EVENT   625u
+#define SHLE_COST_KEYON   8320u
+#define SHLE_COST_BYTE    24u
 
 typedef struct {
     bool     on;             /* the HLE runs the sound board */
@@ -1722,7 +1728,7 @@ static uint32_t shle_code_hash(void) {
 /* ---- the run ------------------------------------------------------------------------ */
 
 static inline uint64_t shle_period(uint8_t reload, unsigned prescale) {
-    return (((uint64_t)(255u - reload)) << prescale) << 8;
+    return (((uint64_t)(256u - reload)) << prescale) << 8;
 }
 
 /* A handler that ran `dur` clock periods from `at`: the main loop was
@@ -1843,7 +1849,7 @@ static inline uint64_t shle_next_due(void) {
 /* EntryPoint's clear of sound RAM, as far as it has got by `now`. */
 static void shle_clear_step(scsp_t *s, uint64_t now) {
     if (!g_shle.restart_at || now <= g_shle.clear_at || g_shle.cleared >= SOUND_RAM_SIZE) return;
-    uint64_t to = (now - g_shle.clear_at) / SHLE_CLEAR_BYTE;
+    uint64_t to = (now - g_shle.clear_at) * 2u / SHLE_CLEAR_BYTE2;
     if (to > SOUND_RAM_SIZE) to = SOUND_RAM_SIZE;
     if (to <= g_shle.cleared) return;
     scsp_ram_touch(s, g_shle.cleared, (uint32_t)to - g_shle.cleared, 1);

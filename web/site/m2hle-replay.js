@@ -176,8 +176,9 @@ async function replayLabelOf(bytes) {
 
 /* ---- Text ------------------------------------------------------------------- */
 
+/* A replay counts board frames, 17.384 ms each (57.52 Hz, Pinboard #1360). */
 const replayClock = (frames) => {
-  const s = Math.floor(frames / 60);
+  const s = Math.floor(frames * 4346 / 250000);
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 };
 

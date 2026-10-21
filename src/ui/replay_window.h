@@ -185,8 +185,9 @@ static inline void replay_ui_controls(emu_thread_ctx_t *ctx) {
     int last = P->frames ? (int)P->frames : 1;
     if (!g_replay_ui.dragging) g_replay_ui.seek_to = (int)frame;
     char lbl[48];
-    snprintf(lbl, sizeof lbl, "%u:%02u / %u:%02u", frame / 3600, frame / 60 % 60,
-             P->frames / 3600, P->frames / 60 % 60);
+    uint32_t at_s  = (uint32_t)((uint64_t)frame * 4346u / 250000u);       /* 17.384 ms a board frame */
+    uint32_t len_s = (uint32_t)((uint64_t)P->frames * 4346u / 250000u);
+    snprintf(lbl, sizeof lbl, "%u:%02u / %u:%02u", at_s / 60, at_s % 60, len_s / 60, len_s % 60);
     igSliderIntEx("##time", &g_replay_ui.seek_to, 0, last, lbl, 0);
     g_replay_ui.dragging = igIsItemActive();
     if (igIsItemDeactivatedAfterEdit()) {

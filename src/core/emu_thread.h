@@ -68,14 +68,23 @@ static volatile int g_idle_hold;
 /* ---- Tuning -------------------------------------------------------------- */
 
 #define EMU_CPU_HZ           25000000               /* i960 KB on Model 2 = 25 MHz */
-#define EMU_SLICES_PER_SEC   60
-#define EMU_SLICE_US         (1000000 / EMU_SLICES_PER_SEC)  /* ~16667 µs */
+/* A slice is a board frame, and the hosts run them at the board's rate: 434,600
+ * cycles (irq_timer.h) is 17,384 µs, 57.524 frames a second. The real board's
+ * video repeats a frame about every 24 on a 60 Hz capture, and its attract
+ * fight advances 57.50 frames a second (Pinboard #1360). */
+#define EMU_SLICE_US         17384
+#define EMU_FRAME_HZ         ((double)EMU_CPU_HZ / IRQT_FRAME_CYCLES)  /* 57.524 */
+_Static_assert((int64_t)EMU_SLICE_US * EMU_CPU_HZ == (int64_t)IRQT_FRAME_CYCLES * 1000000,
+               "a slice is the board's frame");
+_Static_assert(SOUND_FRAME_NUM == SOUND_RATE * (IRQT_FRAME_CYCLES / 100) &&
+               SOUND_FRAME_DEN == EMU_CPU_HZ / 100 && IRQT_FRAME_CYCLES % 100 == 0,
+               "the sound board is charged the board's frame");
 /* EMU_STEPS_PER_SLICE is in constants.h (500,000): a cap above the 434,600
  * cycles to a vblank, so a slice reaches its vblank whatever the program does,
  * since an instruction costs at least a cycle. */
 
 /* The i960 steps one slice may run before it ends short of the vblank. A
- * host too slow for a vblank's worth in 16.7 ms sets it lower, so a busy
+ * host too slow for a vblank's worth in 17.4 ms sets it lower, so a busy
  * frame spreads over more slices that each fit. The vblank, the timers and the
  * sound board all keep the board's own clock, so the board runs the same:
  * det_digest at 150,000 differs only in frame 1's RAM, where the warning skip
@@ -605,13 +614,13 @@ static inline void emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t 
 
 /* ---- The sound board against the board's clock ---------------------------
  *
- * The sound board is charged a frame of samples at each vblank, 735 at
- * 44.1 kHz. Mid-frame it still advances as far as the MIDI conversation needs:
+ * The sound board is charged a frame of samples at each vblank, 766.63 at
+ * 44.1 kHz (766 or 767, the remainder carried). Mid-frame it still advances as far as the MIDI conversation needs:
  * sound_uart_make_room runs it early and `ahead` owes those samples back at the
  * edge. What it never does is gain time (SLICE-CLOCKS.md). */
 static inline bool emu_sound_slice_end(bool frame) {
     if (!frame) return false;
-    sound_run_slice(EMU_SLICES_PER_SEC);
+    sound_run_slice();
     return true;
 }
 
@@ -1110,23 +1119,32 @@ static inline void emu_pace_linked(emu_thread_ctx_t *ctx, int64_t work_t1) {
     }
 }
 
-/* Pace the board to 60 Hz after a slice that reached its vblank: sleep out to
- * the next 16.67ms tick, measured from work_t1, where the slice's work ended. */
+/* The host frame the board is paced to: the board's own 17,384 us, or a PS3
+ * match's 60 Hz (netplay_host_frame_us). */
+static inline int64_t emu_host_frame_us(void) {
+    uint32_t us = netplay_host_frame_us();
+    return us ? (int64_t)us : (int64_t)EMU_SLICE_US;
+}
+
+/* Pace the board to its 57.52 Hz after a slice that reached its vblank (60 Hz
+ * in a PS3 match, netplay_host_frame_us): sleep out to the next 17.38 ms tick,
+ * measured from work_t1, where the slice's work ended. */
 static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
     if (m2comm_linked()) { emu_pace_linked(ctx, work_t1); return; }
     link_pace_stop(&ctx->link_pace);
     int64_t now = emu_now_us();
+    int64_t frame_us = emu_host_frame_us();
     if (ctx->frame_deadline_us == 0) {
-        ctx->frame_deadline_us = now + EMU_SLICE_US;
+        ctx->frame_deadline_us = now + frame_us;
     } else {
-        ctx->frame_deadline_us += EMU_SLICE_US;
+        ctx->frame_deadline_us += frame_us;
         /* Catch-up clamp: if we've fallen >1 frame behind (paused
          * in debugger, heavy host load), reset rather than spin. */
-        if (ctx->frame_deadline_us < now - (int64_t)EMU_SLICE_US) {
-            ctx->frame_deadline_us = now + EMU_SLICE_US;
+        if (ctx->frame_deadline_us < now - frame_us) {
+            ctx->frame_deadline_us = now + frame_us;
         }
     }
-    /* M2HLE_UNTHROTTLE=1: no 60 Hz pacing, for automated runs that
+    /* M2HLE_UNTHROTTLE=1: no pacing, for automated runs that
      * have to reach rare states (the UI still gets the mutex, since
      * every frame boundary unlocks it). */
     static int unthrottled = -1;
@@ -1137,7 +1155,7 @@ static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
     /* The frame that ended an emu_run_frames is not slept out here:
      * the asker is waiting on the stop. The deadline stands, so the
      * first frame of the next run waits out both ticks and the
-     * board still keeps 60 Hz. A client that answers within the
+     * board still keeps its rate. A client that answers within the
      * tick thinks for free, where sleeping first would add a
      * frame per call. */
     bool budget_hit = ctx->frame_budget_hit != 0;

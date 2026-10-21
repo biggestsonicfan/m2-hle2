@@ -45,11 +45,11 @@ m2hleLang.add({
     'tools.hidden.evidence': 'Browsers all but stop a tab nobody is looking at, so these numbers describe that, not the game.',
     'tools.hidden.tip': 'Run the check again with the game in front, while playing.',
     'tools.cpuSlow.title': 'This computer is not keeping up with the emulation',
-    'tools.cpuSlow.evidence': 'The game ran at {speed} of 60 frames a second. Emulating one frame took {slice} ms on average (worst {sliceMax}) and preparing the picture {render} ms; together they have to fit in 16.7.',
+    'tools.cpuSlow.evidence': 'The game ran at {speed} of {full} frames a second. Emulating one frame took {slice} ms on average (worst {sliceMax}) and preparing the picture {render} ms; together they have to fit in {budget}.',
     'tools.cpuTight.title': 'This computer is only just keeping up',
-    'tools.cpuTight.evidence': 'The game is at full speed ({speed}), but emulating a frame takes {slice} ms and the picture {render} ms of the 16.7 available, so anything else the computer does will cost frames.',
+    'tools.cpuTight.evidence': 'The game is at full speed ({speed}), but emulating a frame takes {slice} ms and the picture {render} ms of the {budget} available, so anything else the computer does will cost frames.',
     'tools.turns.title': 'The browser is not giving the game enough turns to run',
-    'tools.turns.evidence': 'The game ran at {speed} of 60 frames a second, but the emulator itself was only busy {busy}% of the time. The page was called {rate} times a second, and the game can catch up at most three frames per call.',
+    'tools.turns.evidence': 'The game ran at {speed} of {full} frames a second, but the emulator itself was only busy {busy}% of the time. The page was called {rate} times a second, and the game can catch up at most three frames per call.',
     'tools.turns.tip': 'Something outside the emulator is holding the page up: see the findings below.',
     'tools.soft.title': 'The browser is drawing in software: graphics acceleration is off',
     'tools.soft.evidence': 'It reports its renderer as "{renderer}", and drew {rate} frames a second.',
@@ -96,8 +96,8 @@ m2hleLang.add({
     'tools.wait.tip.delay': 'A higher frame delay absorbs a slower connection, at the cost of slightly later controls.',
     'tools.wait.tip.wifi': 'Wi-Fi on either side is the usual cause: a cable helps more than anything else.',
     'tools.ok.title': 'Nothing here is running slowly',
-    'tools.ok.evidence': 'The game ran at {speed} of 60 frames a second and the browser drew {rate}. Emulation took {slice} ms a frame and the picture {render} ms, of 16.7 available. {late} late frames; sound queue {queue} ms.',
-    'tools.ok.evidence.gpu': 'The game ran at {speed} of 60 frames a second and the browser drew {rate}. Emulation took {slice} ms a frame and the picture {render} ms, of 16.7 available; the GPU took {gpu} ms. {late} late frames; sound queue {queue} ms.',
+    'tools.ok.evidence': 'The game ran at {speed} of {full} frames a second and the browser drew {rate}. Emulation took {slice} ms a frame and the picture {render} ms, of {budget} available. {late} late frames; sound queue {queue} ms.',
+    'tools.ok.evidence.gpu': 'The game ran at {speed} of {full} frames a second and the browser drew {rate}. Emulation took {slice} ms a frame and the picture {render} ms, of {budget} available; the GPU took {gpu} ms. {late} late frames; sound queue {queue} ms.',
     'tools.ok.tip.outside': 'If the controls still feel late, the delay is outside this page: a TV not in game mode, a wireless keyboard or controller, or the display itself.',
     'tools.ok.tip.again': 'If it only happens sometimes, run this check again while it is happening.',
     'tools.sound.nextMatch': 'The new sound driver starts with the next match.',
@@ -124,11 +124,11 @@ m2hleLang.add({
     'tools.hidden.evidence': 'ブラウザは見られていないタブをほぼ止めてしまうため、この数値はゲームではなくその状態を表しています。',
     'tools.hidden.tip': 'ゲームを前面に出し、遊びながらもう一度チェックしてください。',
     'tools.cpuSlow.title': 'このコンピューターはエミュレーションに追いついていません',
-    'tools.cpuSlow.evidence': 'ゲームは秒間60フレーム中 {speed} フレームで動きました。1フレームのエミュレーションに平均 {slice} ms（最大 {sliceMax}）、画面の準備に {render} ms かかりました。合わせて 16.7 ms に収まる必要があります。',
+    'tools.cpuSlow.evidence': 'ゲームは秒間{full}フレーム中 {speed} フレームで動きました。1フレームのエミュレーションに平均 {slice} ms（最大 {sliceMax}）、画面の準備に {render} ms かかりました。合わせて {budget} ms に収まる必要があります。',
     'tools.cpuTight.title': 'このコンピューターはぎりぎりで追いついています',
-    'tools.cpuTight.evidence': 'ゲームは全速（{speed}）で動いていますが、使える 16.7 ms のうち、1フレームのエミュレーションに {slice} ms、画面に {render} ms かかっています。コンピューターがほかの処理をするとフレームを落とします。',
+    'tools.cpuTight.evidence': 'ゲームは全速（{speed}）で動いていますが、使える {budget} ms のうち、1フレームのエミュレーションに {slice} ms、画面に {render} ms かかっています。コンピューターがほかの処理をするとフレームを落とします。',
     'tools.turns.title': 'ブラウザがゲームに十分な実行の機会を与えていません',
-    'tools.turns.evidence': 'ゲームは秒間60フレーム中 {speed} フレームで動きましたが、エミュレーター自体が働いていたのは {busy}% の時間だけでした。ページが呼ばれたのは秒間 {rate} 回で、1回につき追いつけるのは最大3フレームです。',
+    'tools.turns.evidence': 'ゲームは秒間{full}フレーム中 {speed} フレームで動きましたが、エミュレーター自体が働いていたのは {busy}% の時間だけでした。ページが呼ばれたのは秒間 {rate} 回で、1回につき追いつけるのは最大3フレームです。',
     'tools.turns.tip': 'エミュレーターの外の何かがページを止めています。下の項目を見てください。',
     'tools.soft.title': 'ブラウザがソフトウェアで描画しています（グラフィックアクセラレーションがオフ）',
     'tools.soft.evidence': 'レンダラーは「{renderer}」で、秒間 {rate} フレームを描きました。',
@@ -175,8 +175,8 @@ m2hleLang.add({
     'tools.wait.tip.delay': '入力遅延を大きくすると遅い回線を吸収できますが、操作が少し遅れます。',
     'tools.wait.tip.wifi': 'よくある原因はどちらかの Wi-Fi です。有線接続がいちばん効きます。',
     'tools.ok.title': '遅くなっているところはありません',
-    'tools.ok.evidence': 'ゲームは秒間60フレーム中 {speed} フレームで動き、ブラウザは {rate} フレームを描きました。使える 16.7 ms のうち、エミュレーションは1フレーム {slice} ms、画面は {render} ms でした。遅れたフレーム {late}、音声キュー {queue} ms。',
-    'tools.ok.evidence.gpu': 'ゲームは秒間60フレーム中 {speed} フレームで動き、ブラウザは {rate} フレームを描きました。使える 16.7 ms のうち、エミュレーションは1フレーム {slice} ms、画面は {render} ms、GPUは {gpu} ms でした。遅れたフレーム {late}、音声キュー {queue} ms。',
+    'tools.ok.evidence': 'ゲームは秒間{full}フレーム中 {speed} フレームで動き、ブラウザは {rate} フレームを描きました。使える {budget} ms のうち、エミュレーションは1フレーム {slice} ms、画面は {render} ms でした。遅れたフレーム {late}、音声キュー {queue} ms。',
+    'tools.ok.evidence.gpu': 'ゲームは秒間{full}フレーム中 {speed} フレームで動き、ブラウザは {rate} フレームを描きました。使える {budget} ms のうち、エミュレーションは1フレーム {slice} ms、画面は {render} ms、GPUは {gpu} ms でした。遅れたフレーム {late}、音声キュー {queue} ms。',
     'tools.ok.tip.outside': 'それでも操作が遅く感じるなら、遅延はこのページの外にあります。ゲームモードでないテレビ、ワイヤレスのキーボードやコントローラー、ディスプレイ自体などです。',
     'tools.ok.tip.again': 'ときどきしか起きないなら、起きているときにもう一度チェックしてください。',
     'tools.sound.nextMatch': '新しいサウンドドライバーは次の対戦から使われます。',
@@ -189,10 +189,14 @@ const m2hleTools = (() => {
   const $ = (id) => document.getElementById(id);
   const t0 = performance.now();
 
-  const tr = (key, vars) => m2hleLang.t(key, vars);
+  /* Full speed and its frame budget, for {full} and {budget} in the findings: the
+   * board's 57.52 Hz (a PS3 match's 60), from web_perf's frame_us. */
+  let pace = { full: '57.5', budget: '17.4' };
+  const withPace = (vars) => ({ ...pace, ...(vars || {}) });
+  const tr = (key, vars) => m2hleLang.t(key, withPace(vars));
   /* A key's English, filled the same way: for the log, which is not translated. */
-  const english = (key, vars) => m2hleLang.LANGS.en.strings[key]
-    .replace(/\{(\w+)\}/g, (s, k) => (vars && k in vars ? vars[k] : s));
+  const english = (key, vars) => { vars = withPace(vars); return m2hleLang.LANGS.en.strings[key]
+    .replace(/\{(\w+)\}/g, (s, k) => (k in vars ? vars[k] : s)); };
   let ready = false;            /* the emulator's exports exist, and its GL context */
 
   /* ---- Keys typed into the drawer stay in the drawer ---------------------------
@@ -436,6 +440,8 @@ const m2hleTools = (() => {
     const T = Math.max(0.001, (b.now_us - a.now_us) / 1e6);
     const d = (k) => b[k] - a[k];
     const g = gpuInfo();
+    const frameUs = b.frame_us || 1e6 / 60;
+    pace = { full: (1e6 / frameUs).toFixed(1), budget: (frameUs / 1000).toFixed(1) };
     return {
       seconds: T, hidden,
       drawRate: d('callbacks') / T,                   /* frames the browser let us draw, per second */
@@ -444,7 +450,8 @@ const m2hleTools = (() => {
        * interpolating between them (main_web.c, web_afford_picture). */
       pictureRate: (d('callbacks') - d('pictures_skipped')) / T,
       skipped: d('pictures_skipped'),
-      speed: d('slices') / T,                         /* emulated frames per second: 60 is full speed */
+      speed: d('slices') / T,                         /* emulated frames per second: fullHz is full speed */
+      fullHz: 1e6 / frameUs,
       sliceMs: d('slices') ? d('slice_us') / d('slices') / 1000 : 0,
       sliceMaxMs: b.slice_us_max / 1000,
       renderMs: d('callbacks') ? d('render_us') / d('callbacks') / 1000 : 0,
@@ -476,7 +483,7 @@ const m2hleTools = (() => {
     }
 
     const c = {
-      slow: m.speed < 57,
+      slow: m.speed < m.fullHz * 0.95,
       cpuBound: m.busy > 0.7 || m.sliceMs + m.renderMs > 13,
       lowerRes: m.renderScale === 0 || m.renderScale > 2
         ? { label: tr('tools.action.lowerRes'), run: () => setRenderScale(2) } : null,
@@ -597,7 +604,7 @@ const m2hleTools = (() => {
       out.push('');
     }
     out.push('Measurements over ' + f1(m.seconds) + ' s:',
-      '  game speed        ' + f1(m.speed) + ' / 60 fps',
+      '  game speed        ' + f1(m.speed) + ' / ' + f1(m.fullHz) + ' fps',
       '  drawn             ' + f1(m.pictureRate) + ' fps' +
                               (m.skipped ? ' (of ' + f1(m.drawRate) + ' the display asked for; the rest would have been interpolated between board frames)' : ''),
       '  emulation         ' + f1(m.sliceMs) + ' ms avg, ' + f1(m.sliceMaxMs) + ' worst',

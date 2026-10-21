@@ -1381,10 +1381,15 @@ static void scsp_w16_timer(scsp_t *s, unsigned r, uint16_t v) {
      * timers inside the interrupt handler, a few hundred periods after
      * they fire, and that delay is part of every period (MAME measures
      * 49.9 samples fire to fire for a 49-sample timer). Rounding to whole
-     * samples plays the music 2% fast. MAME: 255 leaves a running timer
-     * running. */
+     * samples plays the music 2% fast. The count runs from the reload up
+     * through 0xFF and fires as it wraps: 256 - reload ticks. MAME fires at
+     * 255 - reload (Mednafen loads the reload on the next tick and fires at
+     * 0xFF, 255 to 256 after the write), and against the real board that
+     * played STF's music 2.0% fast (timer B 50.01 samples where the board's
+     * video measures 51.3; Pinboard #1360).
+     * MAME: 255 leaves a running timer running. */
     if (reload != 255) {
-        s->tim_due[t] = *s->clock + (((uint64_t)(255u - reload) << ((v >> 8) & 7)) << 8);
+        s->tim_due[t] = *s->clock + (((uint64_t)(256u - reload) << ((v >> 8) & 7)) << 8);
         scsp_timer_next(s);
     }
 }

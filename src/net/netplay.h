@@ -231,8 +231,14 @@
  *    P1 ball's mask alone, as its own program does, where it ran STF's 1/8
  *    (Pinboard #1353). 35 is #1347's (PR #505).
  * 37: 35's test/service swap, landing after 36: a 36 build has it the old way.
+ * 38: the sound board is charged the board's frame, 766.63 samples a vblank,
+ *    not 735, and an SCSP timer fires after 256 - reload ticks, not MAME's
+ *    255: the real board's music tempo and its sound-to-game timing (Pinboard
+ *    #1360). The hosts run at the board's 57.52 Hz. The sound 68000 pays two
+ *    wait states a sound RAM / SCSP bus cycle, not MAME's one (Pinboard #1418,
+ *    same revision: 38 had not shipped).
  */
-#define NETPLAY_PROTO_REV 37
+#define NETPLAY_PROTO_REV 38
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
@@ -4557,6 +4563,15 @@ static inline void netplay_restart_alone(void) {
  * on. So while the next few frames are already in hand, the run loop skips its
  * sleep and lets the watcher catch up.
  */
+/* The host frame a session paces the board to, in us. A PS3 samples its lockstep
+ * once per 60 Hz host frame of wall clock (ps3_link_pump), so a PS3 match runs
+ * our board at 60 Hz too; otherwise it falls 2.5 frames a second behind and
+ * catches up in bursts (ps3_link_hurry). Everything else runs at the board's
+ * own 57.52 Hz (Pinboard #1360). 0 = the board's frame. */
+static inline uint32_t netplay_host_frame_us(void) {
+    return g_netplay.ps3 && g_netplay.ps3link.match ? PS3_TICK_US : 0u;
+}
+
 #define NETPLAY_CATCH_UP_FRAMES 6u
 static inline bool netplay_catching_up(void) {
     if (g_netplay.ps3) return ps3_link_hurry(&g_netplay.ps3link);

@@ -60,7 +60,12 @@
 #define SOUND_OUT_FRAMES          16384u   /* host output ring, stereo frames (power of 2) */
 #define SOUND_CODE_LOG            512u     /* i960 commands kept (power of 2) */
 #define SOUND_AHEAD_STEP          16       /* samples per catch-up step (see sound_uart_make_room) */
-#define SOUND_AHEAD_MAX           735      /* at most a frame of samples run ahead of it (44100 / 60) */
+/* A vblank's samples: 44,100 x 434,600 / 25,000,000 = 766.63 (irq_timer.h's
+ * frame; the real board, Pinboard #1360), as SOUND_FRAME_NUM / SOUND_FRAME_DEN. */
+#define SOUND_FRAME_NUM           (SOUND_RATE * 4346u)
+#define SOUND_FRAME_DEN           250000u
+#define SOUND_AHEAD_MAX           766      /* at most a frame of samples run ahead of it */
+#define SOUND_BUS_WAIT            2u       /* wait states a sound RAM / SCSP bus cycle (sound_map_pages) */
 
 /* The sound board runs on a thread of its own ("The sound thread", below)
  * everywhere but the web build, which has one thread. */
@@ -530,13 +535,16 @@ static inline void sound_map_pages(sound_state_t *ss) {
         m[0xF0] = ss->ram;
         return;
     }
-    /* MAME model2.cpp model2_snd: one wait state on every sound RAM and SCSP
-     * access ("the same waitstate weights as Saturn"). Measured in its timer
-     * handlers: the interrupt-to-reload latency is 166 / 200 clocks against
-     * 128 / 160 without them. */
+    /* Two wait states on every sound RAM and SCSP bus cycle: 6 clocks, not the
+     * 68000's 4, as Mednafen's Saturn charges them (ss/sound.cpp,
+     * SoundCPU_BusRead / BusWrite). MAME's model2_snd charges one ("the same
+     * waitstate weights as Saturn"), and against the real board's video that
+     * played STF's music 0.6-1.0% fast and pulled the sound 2.1 ms a second
+     * ahead of the pictures; with two it is 0.1-0.6% and 0.1 ms, and three
+     * overshoots (Pinboard #1418). */
     memset(ss->m68k.wmap, 0, sizeof ss->m68k.wmap);
-    for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++) ss->m68k.wmap[pg] = 1;
-    ss->m68k.wmap[M68K_SCSP_BASE >> 16] = 1;
+    for (uint32_t pg = 0; pg < 0x080000u >> 16; pg++) ss->m68k.wmap[pg] = SOUND_BUS_WAIT;
+    ss->m68k.wmap[M68K_SCSP_BASE >> 16] = SOUND_BUS_WAIT;
     /* Not the pages the DSP keeps its delay line in: the chip makes its samples
      * late (scsp.h, "The chip's own time"), so a read there has to go through
      * sound_bus_read and have the DSP catch up first. */
@@ -1271,15 +1279,15 @@ static inline bool sound_uart_make_room(bool for_game) {
     }
 }
 
-/* One emu slice (1/60 s) of sound, less what was run early inside it, handed
+/* One board frame of sound (766 or 767 samples), less what was run early inside it, handed
  * to the sound thread (see above): the samples are there once sound_settle
  * returns, and g_sound.out_due is the clock they end on. The
  * remainder carries from slice to slice and is reset with the board: two
  * boards cold-booted together have to put the same samples in every slice. */
-static inline void sound_run_slice(uint32_t slices_per_sec) {
-    g_sound.slice_frac += SOUND_RATE;
-    uint32_t n = g_sound.slice_frac / slices_per_sec;
-    g_sound.slice_frac -= n * slices_per_sec;
+static inline void sound_run_slice(void) {
+    g_sound.slice_frac += SOUND_FRAME_NUM;
+    uint32_t n = g_sound.slice_frac / SOUND_FRAME_DEN;
+    g_sound.slice_frac -= n * SOUND_FRAME_DEN;
     uint32_t early = (uint32_t)g_sound.ahead < n ? (uint32_t)g_sound.ahead : n;
     g_sound.ahead -= (int32_t)early;
     sound_advance(n - early, true);

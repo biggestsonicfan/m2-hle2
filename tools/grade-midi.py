@@ -50,7 +50,7 @@ import numpy as np
 
 CLK = 11289600.0                    # 68000 clock periods a second
 RATE = 44100
-TIMER_B = 50.0146                   # samples per sequencer tick (the board's timer B, = MAME's)
+TIMER_B = 51.0146                   # samples per sequencer tick (the board's timer B: 256 - reload, Pinboard #1360; MAME's is 50.0142)
 DRUM_SWAP = (9, 12)                 # STF's MIDI channel 10 is melodic: move it to 13
 
 

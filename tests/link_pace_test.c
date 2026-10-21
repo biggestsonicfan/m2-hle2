@@ -1,12 +1,13 @@
 /*
- * link_pace_test.c -- a linked comm board's 60 Hz clock (core/link_pace.h,
- * Pinboard #978), on simulated hosts and a simulated pair of cabinets. No ROM.
+ * link_pace_test.c -- a linked comm board's clock, the board's 57.52 Hz
+ * (core/link_pace.h, Pinboard #978, #1360), on simulated hosts and a simulated
+ * pair of cabinets. No ROM.
  *
  * A called host (retro_run, the page's frame callback) at the display's rate,
- * from 30 Hz to fast-forward, runs the board at 60 Hz; a 60 Hz one with jitter
- * runs one frame a call. A late call repays at most LINK_PACE_MAX_DEBT frames
- * and drops the rest. A sleeping host (the emu thread) keeps 60 Hz across a
- * slow frame. Two cabinets whose clocks drift apart, each taking one of the
+ * from 30 Hz to fast-forward, runs the board at 57.52 Hz; one at the board's
+ * rate with jitter runs one frame a call. A late call repays at most
+ * LINK_PACE_MAX_DEBT frames and drops the rest. A sleeping host (the emu
+ * thread) keeps the rate across a slow frame. Two cabinets whose clocks drift apart, each taking one of the
  * other's frames a board frame from an inbox that keeps the 8 newest (as
  * net/comm_link.h does), lose none of them with the backlog trim and lose
  * them without it. The real board on the link: det_digest --link-host-hz.
@@ -30,6 +31,10 @@ static int32_t jitter(int32_t span) {   /* -span..span */
     g_rng = g_rng * 1664525u + 1013904223u;
     return (int32_t)((g_rng >> 8) % (uint32_t)(2 * span + 1)) - span;
 }
+
+#define LP_MINUTE ((uint64_t)60000000 / LINK_PACE_FRAME_US)   /* 3451 board frames (3451.5) */
+#define LP_HZ     (1e6 / LINK_PACE_FRAME_US)
+#define LP_IN_MINUTE(n) ((n) >= LP_MINUTE - 1 && (n) <= LP_MINUTE + 2)
 
 /* ---- a called host ---- */
 
@@ -69,21 +74,21 @@ static void test_called_hosts(void) {
     char msg[160];
     for (size_t i = 0; i < sizeof rates / sizeof rates[0]; i++) {
         called_t c = run_called(rates[i], 0, 60);
-        snprintf(msg, sizeof msg, "%.2f Hz host: %llu board frames in 60 s (3600), at most %u a call",
-                 rates[i], (unsigned long long)c.frames, c.most);
-        CHECK(c.frames >= 3599 && c.frames <= 3601 && c.most <= 2, msg);
+        snprintf(msg, sizeof msg, "%.2f Hz host: %llu board frames in 60 s (%llu), at most %u a call",
+                 rates[i], (unsigned long long)c.frames, (unsigned long long)LP_MINUTE, c.most);
+        CHECK(LP_IN_MINUTE(c.frames) && c.most <= 2, msg);
     }
-    called_t j = run_called(60.0, 4000, 60);
-    snprintf(msg, sizeof msg, "60 Hz host, +-4 ms jitter: %llu frames, %llu calls with none and %llu with two or more",
+    called_t j = run_called(LP_HZ, 4000, 60);
+    snprintf(msg, sizeof msg, "a host at the board's rate, +-4 ms jitter: %llu frames, %llu calls with none and %llu with two or more",
              (unsigned long long)j.frames, (unsigned long long)j.zero, (unsigned long long)j.multi);
-    CHECK(j.frames >= 3599 && j.frames <= 3601 && !j.zero && !j.multi, msg);
+    CHECK(LP_IN_MINUTE(j.frames) && !j.zero && !j.multi, msg);
     called_t s = run_called(10.0, 0, 60);
     snprintf(msg, sizeof msg, "10 Hz host: %u frames a call, %llu in 60 s (it cannot keep up; the rest is dropped)",
              s.most, (unsigned long long)s.frames);
     CHECK(s.most == LINK_PACE_MAX_DEBT && s.frames >= 600u * LINK_PACE_MAX_DEBT - 4u, msg);
 }
 
-/* A 60 Hz host that stalls for half a second: four frames, then one a call. */
+/* A host at the board's rate that stalls for half a second: four frames, then one a call. */
 static void test_hitch(void) {
     link_pace_t p; memset(&p, 0, sizeof p);
     called_t c; memset(&c, 0, sizeof c);
@@ -118,7 +123,7 @@ static void test_sleeping_host(void) {
     char msg[160];
     snprintf(msg, sizeof msg, "sleeping host, a 40 ms frame every 10 s: %u frames in 60 s, %u run back to back",
              frames, back_to_back);
-    CHECK(frames >= 3599 && frames <= 3601 && back_to_back >= 6 && back_to_back <= 18 && !p.dropped, msg);
+    CHECK(LP_IN_MINUTE(frames) && back_to_back >= 6 && back_to_back <= 18 && !p.dropped, msg);
 }
 
 /* ---- two cabinets ---- */

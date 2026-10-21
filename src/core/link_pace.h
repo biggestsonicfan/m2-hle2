@@ -3,7 +3,7 @@
  * #978, step 4 of the RPCN plan in VIRTUAL-ON-PS3.md).
  *
  * Two cabinets on a link each run their own board; neither waits for the
- * other. What keeps them together is that both run at 60 Hz of wall time and
+ * other. What keeps them together is that both run at the board's 57.52 Hz of wall time and
  * take one of the other's frames per board frame (board/m2comm.h). Alone, a
  * host that cannot keep up runs the board slow, and fast-forward runs it fast:
  * nobody loses by it but the player. Linked, both are wrong:
@@ -20,7 +20,7 @@
  *     a hidden tab) the rest is dropped, not repaid: a long stall must not
  *     come back as a burst.
  *   - Nothing runs it faster: fast-forward, unthrottled runs and a watcher's
- *     catch-up get the same 60 Hz.
+ *     catch-up get the same 57.52 Hz.
  *   - The two wall clocks still drift apart, by a frame every minute or so at
  *     a few hundred ppm, and a dropped debt puts the slave frames behind for
  *     good. The master's frames then pile up in the slave's peer (comm_link.h
@@ -46,8 +46,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define LINK_PACE_HZ         60
-#define LINK_PACE_FRAME_US   (1000000 / LINK_PACE_HZ)   /* emu_thread.h EMU_SLICE_US */
+#define LINK_PACE_FRAME_US   17384   /* emu_thread.h EMU_SLICE_US: the board's 57.52 Hz */
 #define LINK_PACE_MAX_DEBT   4u    /* frames owed at most: 1/15 s of catch-up */
 #define LINK_PACE_EARLY_US   (LINK_PACE_FRAME_US / 2)   /* how early a called host may run one */
 #define LINK_PACE_BACKLOG    2u    /* the peer's messages waiting that count as a backlog */
