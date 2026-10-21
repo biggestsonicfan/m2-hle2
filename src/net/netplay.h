@@ -234,7 +234,9 @@
  * 38: the sound board is charged the board's frame, 766.63 samples a vblank,
  *    not 735, and an SCSP timer fires after 256 - reload ticks, not MAME's
  *    255: the real board's music tempo and its sound-to-game timing (Pinboard
- *    #1360). The hosts run at the board's 57.52 Hz.
+ *    #1360). The hosts run at the board's 57.52 Hz. The sound 68000 pays two
+ *    wait states a sound RAM / SCSP bus cycle, not MAME's one (Pinboard #1418,
+ *    same revision: 38 had not shipped).
  */
 #define NETPLAY_PROTO_REV 38
 

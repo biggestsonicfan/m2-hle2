@@ -1541,8 +1541,10 @@ Measured (`--reuse` regrades a recording kept in `--work`):
 |---|---|---|---|---|---|
 | master (735 samples a frame, timer 255 − reload) | 0.196 | 0.9996 | +2.60 / +2.67 / +2.62% | −0.09..+1.48 s, FAIL | 1.0000 |
 | #1360 (766.63, 256 − reload) | 0.196 | 0.9996 | +0.62 / +0.78 / +0.99% | −0.16..+0.11 s | 1.0000 |
+| #1418 (+ two 68000 wait states, not one) | 0.196 | 0.9996 | +0.35 / +0.63 / +0.14% | −0.01..+0.20 s, drift −0.1 ms/s | 1.0000 |
+| (three wait states, rejected) | | | −0.05 / +0.25 / −1.17% | −0.01..+0.40 s, FAIL | |
 
-The rest of the tempo gap, under 1%, is open (sound-board.md, "The real
+The wait states are Mednafen's Saturn rule too (sound-board.md, "The real
 board"). The capture and the registration belong to this one video. Another
 capture needs its own `REG` and segment times.
 
