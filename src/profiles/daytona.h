@@ -401,6 +401,30 @@ static inline void daytonagtx_install(const romset_t *rs, i960_cpu_t *cpu, memor
     .mesh_ptr_add       = 0x10, \
 }
 
+/* The car's meters (Pinboard #1361), found in RAM against the HUD on Rev A:
+ *   0x501220  the player's car (0x505180 in a race; the next cars follow at
+ *             0x300 apart), a pointer into work RAM
+ *   car+0x18  speed, int32 km/h: the HUD's number (299 on the rolling start)
+ *   car+0x14C gear, byte 0-3 = 1st-4th (0 too while the start drives itself;
+ *             AT changes it as MT does)
+ *   car+0x154 the engine, int16 rpm: 8500 at the limiter (the tacho reads to
+ *             10); about 23 rpm per km/h in 4th, 30 in 3rd
+ * Attract's demo race fills them too. Not checked on the clones. */
+#define DAYTONA_CAR_PTR 0x00501220u
+
+static void daytona_dash(memory_bus_t *bus, game_dash_t *out) {
+    uint32_t car = mem_peek32(bus, DAYTONA_CAR_PTR);
+    if (car < 0x00500000u || car > 0x0051FE00u) return;
+    out->on      = true;
+    out->speed   = (int)mem_peek32(bus, car + 0x18);
+    out->gear    = (int)mem_peek8(bus, car + 0x14C) + 1;
+    out->rpm     = (int)(int16_t)mem_peek16(bus, car + 0x154);
+    out->rpm_lo  = 5000;
+    out->rpm_max = 8500;
+    if (out->speed < 0 || out->speed > 999) out->speed = -1;
+    if (out->gear > 4) out->gear = -1;
+}
+
 static const game_profile_t daytona_profile = {
     .id           = "daytona",
     .display_name = "Daytona USA (Japan, Rev A)",
@@ -412,6 +436,7 @@ static const game_profile_t daytona_profile = {
     .cabinets        = daytona_cabinets,
     .cabinet_count   = 2,
     .cabinet_xlat_fn = daytona_cabinet_xlat,
+    .dash         = daytona_dash,
     .input        = DAYTONA_INPUT,
     .quirks       = DAYTONA_QUIRKS(0x83fbb4, 3190),
 };

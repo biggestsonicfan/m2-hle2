@@ -769,6 +769,10 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     add_executable(link_pace_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/link_pace_test.c)
     # The drive board's commands and the force the hosts play (core/ffb.h). No ROM.
     add_executable(ffb_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/ffb_test.c)
+    # The reports a Fanatec base gets for a game's meters (core/fanatec_proto.h). No device.
+    add_executable(fanatec_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/fanatec_test.c)
+    # The reports a Logitech G25 (G27, DFGT, DFP) gets: mode switch, range, force (core/lg4ff_proto.h). No device.
+    add_executable(lg4ff_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/lg4ff_test.c)
     # A host's analog wheel and pedals on the 315-5649 (ui/wheel_host.h). No ROM.
     add_executable(wheel_host_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/wheel_host_test.c)
     # The game scripts (core/m2lua.h): the bit helpers, the I960 and Romset
@@ -863,12 +867,30 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
             target_compile_definitions(pads_test PRIVATE _CRT_SECURE_NO_WARNINGS)
         endif()
         add_test(NAME pads_test COMMAND pads_test)
+        # A Fanatec base's LEDs and display (ui/fanatec.h) on a pretend base: SDL's
+        # hidapi calls are the test's own.
+        add_executable(fanatec_host_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/fanatec_host_test.c)
+        target_include_directories(fanatec_host_test PRIVATE ${TEST_INCLUDES})
+        target_link_libraries(fanatec_host_test PRIVATE SDL3::SDL3)
+        if(MSVC)
+            target_compile_definitions(fanatec_host_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+        endif()
+        add_test(NAME fanatec_host_test COMMAND fanatec_host_test)
+        # A G25 without Logitech's software (ui/lg4ff.h) on a pretend wheel: the
+        # mode switch, the range and the force; SDL's hidapi calls are the test's own.
+        add_executable(lg4ff_host_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/lg4ff_host_test.c)
+        target_include_directories(lg4ff_host_test PRIVATE ${TEST_INCLUDES})
+        target_link_libraries(lg4ff_host_test PRIVATE SDL3::SDL3)
+        if(MSVC)
+            target_compile_definitions(lg4ff_host_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+        endif()
+        add_test(NAME lg4ff_host_test COMMAND lg4ff_host_test)
     endif()
     # audio_out.h calls into sokol_audio (its device path is not under test).
     target_link_libraries(audio_out_test PRIVATE sokol)
 
     foreach(t mem_test i960_test rom_test prepared_test emu_test boot_test cop_test geo_test m68k_test input_test net_test ps3net_test tile_test heat_test audio_out_test
-              scsp_dsp_test scsp_dsp_test_masks scsp_lazy_test tgp_test tgpx4_test z80_test sharc_cpu_test sfight_settings_test region_test srallyc_native_test retro_shader_test ra_info_cache_test m2comm_test comm_link_test comm_role_test comm_local_test link_pace_test ffb_test wheel_host_test m2lua_test)
+              scsp_dsp_test scsp_dsp_test_masks scsp_lazy_test tgp_test tgpx4_test z80_test sharc_cpu_test sfight_settings_test region_test srallyc_native_test retro_shader_test ra_info_cache_test m2comm_test comm_link_test comm_role_test comm_local_test link_pace_test ffb_test fanatec_test lg4ff_test wheel_host_test m2lua_test)
         target_include_directories(${t} PRIVATE ${TEST_INCLUDES})
         if(MSVC)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -881,7 +903,7 @@ if(M2HLE_BUILD_TESTS AND NOT EMSCRIPTEN)
     if(NOT WIN32)
         foreach(t mem_test i960_test rom_test prepared_test emu_test boot_test cop_test geo_test m68k_test
                   input_test net_test ps3net_test tile_test heat_test audio_out_test scsp_dsp_test scsp_dsp_test_masks
-                  scsp_lazy_test tgp_test tgpx4_test z80_test sharc_cpu_test retro_shader_test ra_info_cache_test cop_replay sharc_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test region_test srallyc_native_test ps3ui_render m2comm_test comm_link_test comm_role_test comm_local_test link_pace_test ffb_test wheel_host_test m2lua_test)
+                  scsp_lazy_test tgp_test tgpx4_test z80_test sharc_cpu_test retro_shader_test ra_info_cache_test cop_replay sharc_replay snd_replay snd_bench scsp_fuzz m68k_fuzz i960_fuzz sfight_settings_test region_test srallyc_native_test ps3ui_render m2comm_test comm_link_test comm_role_test comm_local_test link_pace_test ffb_test fanatec_test lg4ff_test wheel_host_test m2lua_test)
             target_link_libraries(${t} PRIVATE m)
         endforeach()
     endif()

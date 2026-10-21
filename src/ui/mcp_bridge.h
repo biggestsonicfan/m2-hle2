@@ -226,17 +226,23 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
     snprintf(dv, sizeof dv,
              "{\"cmd\":%u,\"kind\":%u,\"level\":%u,\"dir\":%d,\"strong\":%u,\"weak\":%u,\"push\":%d}",
              fo.effect.cmd, fo.effect.kind, fo.effect.level, fo.effect.dir, fo.strong, fo.weak, fo.push);
+    /* A racing game's meters, as a Fanatec wheel shows them (game_dash_t, fanatec.h). */
+    game_dash_t dash = { .speed = -1, .gear = -1 };
+    if (g_active_profile && g_active_profile->dash) g_active_profile->dash(b->bus, &dash);
+    char da[128];
+    snprintf(da, sizeof da, "{\"on\":%s,\"speed\":%d,\"gear\":%d,\"rpm\":%d}",
+             dash.on ? "true" : "false", dash.speed, dash.gear, dash.rpm);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
              "%s,"
-             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"link_pace\":%s,\"drive\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
+             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"link_pace\":%s,\"drive\":%s,\"dash\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, (unsigned long long)steps, profile_id,
              game,
-             av, ov, rt, et, lp, dv, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
+             av, ov, rt, et, lp, dv, da, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
 /* {"cmd":"prof","on":1} arms the i960 address profiler (clearing it),

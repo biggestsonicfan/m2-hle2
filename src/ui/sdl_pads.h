@@ -492,6 +492,13 @@ static void ffb_update(void) {
     g_ffb_rumbling = rumble;
 }
 
+/* A wheel (wheel_is) whose force SDL plays: lg4ff.h leaves it to us then. */
+static bool ffb_wheel_haptic(void) {
+    for (int s = 0; s < FFB_PADS; s++)
+        if (g_ffb_pad[s].haptic && wheel_is(g_ffb_pad[s].id)) return true;
+    return false;
+}
+
 /* Every force off (the window lost the focus, or the run ends): the wheels'
  * effects go with their haptics, made again by the next ffb_update. */
 static void ffb_stop_all(void) {

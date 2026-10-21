@@ -89,6 +89,11 @@
  *            A gamepad steers with its left stick and pedals with its
  *            triggers (R2, L2); the wheel's force goes to whichever has it
  *            (--ffb-gain N, 0-100).
+ * --fanatec gear|speed|off  a Fanatec base's rev LEDs and display show a
+ *            racing game's rpm and its gear (default) or speed (fanatec.h).
+ * --g25-range N  a Logitech G25, G27 or DFGT turns N degrees (default 270;
+ *            0 leaves it). --g25 off leaves those wheels alone: no mode
+ *            switch, no range, no force of ours (lg4ff.h, LOGITECH.md).
  * --wheel-buttons N=action,...  that wheel's buttons, e.g. "4=up,5=down" (the
  *            gear lever), actions as --pad-map's.
  * --window-at X,Y  put the window there.
@@ -155,6 +160,8 @@
 #include "registry.h"
 #include "lightgun_sgl.h"   /* the mouse and touches as light guns (Pinboard #1040) */
 #include "sdl_pads.h"      /* gamepads, wheels, force feedback (Pinboard #1047, #1082) */
+#include "fanatec.h"       /* a Fanatec base's rev LEDs and display (Pinboard #1361) */
+#include "lg4ff.h"         /* a Logitech G25 without Logitech's software (Pinboard #1370) */
 
 #define MAX_SHOTS 16
 #define MAX_SCRIPT_OPTS 16
@@ -788,6 +795,8 @@ static bool parse_args(int argc, char **argv) {
         else if (more && io5649_wheel_option(a, argv[i + 1])) i++;
         else if (more && lightgun_host_option(a, argv[i + 1])) i++;   /* --gun-flash N */
         else if (more && ffb_option(a, argv[i + 1]))          i++;
+        else if (more && fanatec_option(a, argv[i + 1]))      i++;   /* --fanatec gear|speed|off */
+        else if (more && lg4ff_option(a, argv[i + 1]))        i++;   /* --g25 off, --g25-range N */
         else if (!strcmp(a, "--wheel-axes") && more)    { if (!wheel_axes_option(argv[++i])) return false; }
         else if (!strcmp(a, "--wheel-buttons") && more) { if (!wheel_buttons_option(argv[++i])) return false; }
         else if (!strcmp(a, "--enemy-rank") && more) {  /* cabinet | easy..hardest | extra1 | extra2 */
@@ -1682,6 +1691,8 @@ static int run_loop(bool audio) {
     for (bool running = true; running; ) {
         running = poll_events();
         ffb_update();
+        { ffb_out_t fo = ffb_poll(); lg4ff_update(&fo, ffb_wheel_haptic()); }
+        fanatec_update(&state.bus);
         if (state.cpu.halted) {
             fprintf(stderr, "m2hle: CPU halted at 0x%08X\n", state.cpu.sfr.ip);
             dump_log_tail(12);
@@ -1733,6 +1744,8 @@ static void shut_down(SDL_AudioStream *audio) {
     sg_shutdown();
     SDL_GL_DestroyContext(g_gl);
     SDL_DestroyWindow(g_window);
+    lg4ff_shutdown();
+    fanatec_shutdown();
     SDL_Quit();
     romset_free(&state.romset);
     mem_shutdown(&state.bus);

@@ -19,6 +19,11 @@
  * the roster's order. The clones' programs are other builds, so an address in
  * the program ROM is 2.1's only.
  *
+ * Names in quotes are Sega's, for 2.1: the 301 symbols celsowm's vf2-decomp
+ * recovered (decomp/i960/original_symbols.csv; VF2-DECOMP.md). The draw at
+ * 0x7CB8 is in `set_obj` (0x7C60); 0x500064 is written by `change_scene`
+ * (0x1FCC0).
+ *
  * Controls: MAME INPUT_PORTS_START(vf2), which Fighting Vipers shares: IN0 the
  * cabinet's (COIN1 0x01, COIN2 0x02, TEST 0x04, SERVICE 0x08, START1 0x10,
  * START2 0x20), IN1 player 1 and IN2 player 2 (Punch 0x01, Kick 0x02, Guard
@@ -32,7 +37,7 @@
  * (median 0.01% of pixels > 48 off). The second and third demo fights drift
  * from MAME, and MAME's attract is back at the logo by counter ~8100 while
  * ours is still at the ranking. That is the game's random numbers, not our
- * board (Pinboard #1061). Its rand at 0x94D0 (2.1) adds the four free-running
+ * board (Pinboard #1061). Its rand at 0x94D0 (2.1; Sega's `rand`) adds the four free-running
  * board timers (0xF00000..0xF0000C, 25 MHz) into its state at 0x500098, as
  * STF's 0x66B0 does, so each value depends on the exact cycle of the call,
  * and the state already differs from MAME's at boot. The first demo fight
@@ -43,7 +48,8 @@
  * loop), work RAM stays in step with MAME to counter 8300, the fights and the
  * ranking's initials are MAME's, and both are back at the logo by 8150. What
  * is left differs by one frame, from the logo (our 60 Hz vblank against
- * MAME's 57.52, as for Virtual-On in docs/invariants/memory-bus.md).
+ * MAME's 57.52, as for Virtual-On in docs/invariants/memory-bus.md; measured
+ * before #1075 made the frame the board's 434,600 cycles, not re-measured).
  */
 #ifndef PROFILES_VF2_H
 #define PROFILES_VF2_H
@@ -165,10 +171,11 @@ static inline void vf2_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t
  * strings at 2.1's 0x78092). 0x50016C holds the block's base: 0x1D00000 while
  * the boot checks it, then the copy in work RAM at 0x599000, which the game
  * reads from (`ldob 0x3350(base)`: Japan shows the "only in Japan" screen at
- * 0xA804, USA changes the attract at 0x21F4).
+ * 0xA804, `WARNING_INT`; USA changes the attract at 0x21F4, in `check_credit`).
  *
- * At boot (2.1's 0x6DDC8) a bad "VIRTUA FIGHTER 2" signature or block checksum
- * runs the factory defaults (0x6010C), which store COUNTRY in both copies; then
+ * At boot (2.1's 0x6DDC8, in `check_sram_all`) a bad "VIRTUA FIGHTER 2"
+ * signature or block checksum runs the factory defaults (0x6010C,
+ * `sram_clear_for_game_assign`), which store COUNTRY in both copies; then
  * every boot copies backup RAM to 0x599000 and points 0x50016C at it (0x6E19C).
  *
  * country_default: the instruction after the defaults' two `stob r15` (r15 = 0,

@@ -1109,6 +1109,21 @@ static MEM_FORCE_INLINE uint32_t mem_read32(memory_bus_t *bus, uint32_t addr) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* The host's look at plain memory (a wheel's dashboard, Pinboard #1361), from
+ * any thread: no counters, no callbacks, no warnings, so the board cannot tell.
+ * 0 where the address is not plain memory. A value the board is writing may
+ * be half old. */
+static inline uint32_t mem_peek8(const memory_bus_t *bus, uint32_t addr) {
+    const uint8_t *p = bus->rd_page[addr >> 16];
+    return p ? p[addr & 0xFFFFu] : 0;
+}
+static inline uint32_t mem_peek16(const memory_bus_t *bus, uint32_t addr) {
+    return mem_peek8(bus, addr) | (mem_peek8(bus, addr + 1) << 8);
+}
+static inline uint32_t mem_peek32(const memory_bus_t *bus, uint32_t addr) {
+    return mem_peek16(bus, addr) | (mem_peek16(bus, addr + 2) << 16);
+}
+
 /* The two words at addr, as mem_read32(addr) and mem_read32(addr + 4) return
  * them: the CPU's instruction fetch. When both lie in the region the last fetch
  * came from and that region is plain memory (unshadowed, no read callback, with

@@ -69,6 +69,8 @@
 #include "net/comm_local.h"   /* --comm-master / --comm-slave: two boards linked on 127.0.0.1 */
 #if M2HLE_PADS
 #include "sdl_pads.h"         /* gamepads, racing wheels and force feedback through SDL3 (#1082) */
+#include "fanatec.h"          /* a Fanatec base's rev LEDs and display (#1361) */
+#include "lg4ff.h"            /* a Logitech G25 without Logitech's software (#1370) */
 #endif
 #include "controls_window.h"  /* the Controls window: devices and keys, per profile (#1147) */
 #if defined(__linux__)
@@ -995,6 +997,9 @@ static void pads_frame(void) {
     if (!g_pads_focused) return;
     if (changed) pad_refresh();
     ffb_update();
+    ffb_out_t fo = ffb_poll();
+    lg4ff_update(&fo, ffb_wheel_haptic());
+    fanatec_update(&state.bus);
 }
 
 static bool pads_running(void) { return g_pads_on; }
@@ -1003,7 +1008,7 @@ static void pads_focus(bool focused) {
     if (!g_pads_on || focused == g_pads_focused) return;
     g_pads_focused = focused;
     if (focused) pad_refresh();
-    else { lobby_pad_release(); ffb_stop_all(); }
+    else { lobby_pad_release(); ffb_stop_all(); lg4ff_release(); fanatec_release(); }
 }
 #endif
 
@@ -1783,7 +1788,7 @@ static void frame(void) {
 static void cleanup(void) {
     kiosk_shutdown();      /* take the tray icon down before the window goes */
 #if M2HLE_PADS
-    if (g_pads_on) { lobby_pad_release(); ffb_stop_all(); SDL_Quit(); g_pads_on = false; }
+    if (g_pads_on) { lobby_pad_release(); ffb_stop_all(); lg4ff_shutdown(); fanatec_shutdown(); SDL_Quit(); g_pads_on = false; }
 #endif
     /* First: the writer thread is still sending out of slots the renderer owns
      * and the target below is about to go. It keeps both rings — the audio tap
@@ -1949,6 +1954,10 @@ sapp_desc sokol_main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--no-pads") == 0) {
             g_no_pads = 1;            /* no gamepads or wheels */
 #if M2HLE_PADS
+        } else if (i + 1 < argc && fanatec_option(argv[i], argv[i + 1])) {
+            i++;                      /* --fanatec gear|speed|off (fanatec.h) */
+        } else if (i + 1 < argc && lg4ff_option(argv[i], argv[i + 1])) {
+            i++;                      /* --g25 off, --g25-range N (lg4ff.h) */
         } else if (i + 1 < argc && sdl_pads_option(argv[i], argv[i + 1])) {
             /* --pad-map, --pad N, --wheel-axes, --wheel-buttons, --ffb-gain (sdl_pads.h) */
             if (sdl_pads_option(argv[i], argv[i + 1]) < 0) LOG_WARN("%s %s: not understood", argv[i], argv[i + 1]);

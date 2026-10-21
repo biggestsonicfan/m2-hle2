@@ -335,6 +335,21 @@ typedef const char *(*game_native_play_fn)(const game_native_round_t *rounds, in
  * session is recorded while it is. */
 typedef bool (*game_in_play_fn)(struct memory_bus *bus);
 
+/* A racing game's dashboard (Pinboard #1361): what its cabinet's meters show,
+ * for a host's wheel to show too (ui/fanatec.h: a Fanatec wheel's rev LEDs and
+ * display). Read from the game's RAM on the host thread with mem_peek*, never
+ * the board's own reads: it changes no frame. */
+typedef struct {
+    bool on;          /* a car the player drives is on the track */
+    int  speed;       /* km/h, as the cabinet's meter shows it; -1 not known */
+    int  gear;        /* 0 neutral, 1.. a gear; -1 the game has none */
+    int  rpm;         /* the engine; 0 not known */
+    int  rpm_lo;      /* where the rev lights start, */
+    int  rpm_max;     /* ...and where the engine's limiter cuts in (all lit) */
+} game_dash_t;
+
+typedef void (*game_dash_fn)(struct memory_bus *bus, game_dash_t *out);
+
 /* A linked cabinet's role (Pinboard #969): what the room makes this machine's
  * board on a comm-board link (VIRTUAL-ON-PS3.md, "RPCN"). */
 typedef enum { GAME_LINK_ALONE, GAME_LINK_MASTER, GAME_LINK_SLAVE } game_link_role_t;
@@ -389,6 +404,9 @@ typedef struct game_profile {
     game_native_put_fn  native_put;
     game_native_play_fn native_play;
     game_in_play_fn     in_play;
+
+    /* The car's meters (game_dash_t). NULL: the game has none. */
+    game_dash_fn        dash;
 
     /* The cabinet role for a comm-board link (net/comm_role.h). NULL: the game
      * has no link. */
