@@ -9,7 +9,7 @@ winner. Colour and luminosity are not graded: each frame is a luma pattern with
 its own mean and contrast taken out.
 
   python3 tools/grade-hw-video.py --video <mp4> --exe <m2hle> [--rom sfight.zip]
-                                  [--work DIR] [--secs 112] [--keep]
+                                  [--work DIR] [--secs 112] [--keep] [--emu-args '...']
 
 It runs m2hle headless (--profile sfight --region japan --nowarnskip
 --no-nvram) for --secs of wall time, reads its raw A/V stream (--av-port,
@@ -88,7 +88,7 @@ def record(args, work):
         pass                              # never the per-user netplay.cfg (it holds a Twitch login)
     cmd = [args.exe, '--headless', '--net-config', os.path.join(work, 'net.cfg'), '--rom', args.rom,
            '--profile', 'sfight', '--region', 'japan', '--nowarnskip', '--no-nvram', '--run',
-           '--av-port', str(port), '--av-size', f'{EMU_W}x{EMU_H}']
+           '--av-port', str(port), '--av-size', f'{EMU_W}x{EMU_H}'] + args.emu_args.split()
     log = open(os.path.join(work, 'emu.log'), 'w')
     proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT)
     try:
@@ -235,6 +235,7 @@ def main():
     ap.add_argument('--work')
     ap.add_argument('--secs', type=float, default=112.0)
     ap.add_argument('--keep', action='store_true')
+    ap.add_argument('--emu-args', default='', help="more m2hle options (e.g. '--i960-timing table')")
     ap.add_argument('--reuse', action='store_true', help="grade --work's last recording again (rec.npz)")
     args = ap.parse_args()
     work = args.work or tempfile.mkdtemp(prefix='grade-hw-video-')

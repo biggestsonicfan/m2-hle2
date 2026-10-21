@@ -1511,7 +1511,8 @@ the winner after the attract fight.
 
 ```
 python3 tools/grade-hw-video.py --video "<uploads>/2026-10-20 15-33-37.mp4" \
-    --exe build/Release/m2hle [--rom $ROMS_DIR/sfight.zip] [--work DIR [--reuse]]
+    --exe build/Release/m2hle [--rom $ROMS_DIR/sfight.zip] [--work DIR [--reuse]] \
+    [--emu-args '--i960-timing board']
 ```
 
 It runs m2hle headless for 112 s of wall time (`--nowarnskip --no-nvram`, Japan)
@@ -1526,7 +1527,18 @@ measurements:
   advance the same number of board frames (0.9996).
 - **loads:** reported, not graded. m2hle finishes the intro's loads in fewer
   board frames than the board does: 26 frames ahead by the fight, in steps
-  around 13, 19, 33, 45 and 58 s. Open.
+  around 13, 19, 33, 45 and 58 s. It is real, not the alignment (Pinboard
+  #1418): scene cuts found without the DTW step at the loads too, the black
+  screen at 44 s lasts 10.5 board frames on the board and 6 here, and MAME
+  cuts within a frame of m2hle everywhere. Those loads are
+  `_ScrollCG_Initialize` (0x2E5B0) copying scroll CG halfword by halfword
+  (`ldis` data ROM, `stis` into the tile chip's character RAM at
+  0x01080000, ~176k a load). MAME's table charges no waits there; the
+  board pays ~16 cycles more an iteration. The board timing model files
+  that RAM under I/O and charges tile RAM's benched 47 cycles a word, so
+  `--emu-args '--i960-timing board'` overshoots (loads +48 frames). No bench
+  has timed character RAM or a halfword store, so the gap stays open until
+  one does: setting the cost from this video would fit it to a picture.
 - **pitch:** the scale between the two Welch spectra on a log-frequency axis.
 - **tempo:** a log-band spectrogram match, one per second, searched ±5 s around
   where the matched frame's sound is. Its slope against capture time is emu
