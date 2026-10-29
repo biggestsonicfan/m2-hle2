@@ -7,33 +7,19 @@ name: batocera
 #   buildroot  batocera's buildroot builds the package, from this commit's
 #              GitHub tarball, for an x86_64 PC (OpenGL) and an ARM board
 #              (OpenGL ES 3).
-# Nothing is published: the cores are artifacts, for a look.
+# The canary calls it (canary.yml, job batocera) on every push and PR, and
+# publishes the two cores as m2hle-libretro-batocera-<arch>.zip. On its own it
+# runs once a week, because batocera.linux moves under the package too, and by hand.
 on:
-  push:
-    branches: [master]
-    paths:
-      - 'packaging/batocera/**'
-      - 'packaging/libretro/m2hle_libretro.info'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - '.gitmodules'
-      - '.github/workflows/batocera.yml'
-  pull_request:
-    branches: [master]
-    paths:
-      - 'packaging/batocera/**'
-      - 'packaging/libretro/m2hle_libretro.info'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - '.gitmodules'
-      - '.github/workflows/batocera.yml'
+  workflow_call:
   workflow_dispatch:
-  # batocera.linux moves under the package too: once a week, whatever changed.
   schedule:
     - cron: '0 5 * * 1'
 
+# github.workflow is the caller's name when the canary calls it, so the
+# canary's run and a run of its own never cancel each other.
 concurrency:
-  group: batocera-${{ github.ref }}
+  group: batocera-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -198,14 +184,17 @@ jobs:
           other=$("$NM" -D --defined-only "$CORE" | awk '$2 == "T" && $3 !~ /^retro_/' | wc -l)
           [ "$other" -eq 0 ] || { "$NM" -D --defined-only "$CORE" | awk '$2 == "T" && $3 !~ /^retro_/'; exit 1; }
 
+      # A zip, as the canary's other cores: both arches' files have the same
+      # names, and the canary's publish job merges every m2hle-* artifact.
       - name: Package
         run: |
-          mkdir -p dist
+          mkdir -p dist/stage
           cp "$RUNNER_TEMP/out/target/usr/lib/libretro/m2hle_libretro.so" \
-             "$RUNNER_TEMP/out/target/usr/share/libretro/info/m2hle_libretro.info" dist/
+             "$RUNNER_TEMP/out/target/usr/share/libretro/info/m2hle_libretro.info" dist/stage/
+          cd dist/stage && zip -r ../m2hle-libretro-batocera-${{ matrix.arch }}.zip ./*
 
       - uses: actions/upload-artifact@v7
         with:
-          name: m2hle-batocera-${{ matrix.arch }}
-          path: dist/*
+          name: m2hle-libretro-batocera-${{ matrix.arch }}
+          path: dist/*.zip
           retention-days: 14
