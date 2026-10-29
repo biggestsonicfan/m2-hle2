@@ -27,6 +27,14 @@
  * volume 0x7F of 128, mixed at 1.0 into both speakers beside the SCSP
  * (model2.cpp topskatr), here resampled to the board's 44.1 kHz.
  *
+ * Headroom: Top Skater's music is mastered to full scale (ffmpeg decodes
+ * the same ROM windows to +-1.0), so every SCSP sound over it summed past 16
+ * bits and clipped (MAME's float mix clips the same way at its output). The
+ * cabinet sums the two DACs as analog, where nothing clips, so the DSB2's
+ * sum is scaled by DSB2_MIX_NUM/DEN (3/4, -2.5 dB) before it is saturated:
+ * the balance stays MAME's and the attract plays without a clipped sample.
+ * The Z80 DSB's music peaks near half scale (stcc) and stays at 1.0.
+ *
  * The board's TX line goes nowhere (MAME connects nothing back to the i960),
  * so nothing here is read by the main board: it is audio only, and leaves
  * every frame and det_digest as they were.
@@ -70,6 +78,8 @@
 
 #define DSB2_CPU_HZ     8000000u
 #define DSB2_OUT_HZ     44100u        /* SOUND_RATE */
+#define DSB2_MIX_NUM    3             /* the 68000 DSB's headroom (above) */
+#define DSB2_MIX_DEN    4
 #define DSB2_MPEG_HZ    32000u
 #define DSB2_ROM_SIZE   0x20000u
 #define DSB2_RAM_SIZE   0x20000u
@@ -434,7 +444,7 @@ static inline void dsb2_mpeg_next(dsb2_t *d, int16_t *l, int16_t *r) {
 }
 
 /* One 44.1 kHz output sample: run the 68000 to it, then the music into l, r
- * (added, saturating). Called once per board sample from sound_out_push. */
+ * (added, the 68000 DSB's sum scaled for headroom, saturating). Called once per board sample from sound_out_push. */
 static inline void dsb2_sample(int16_t *l, int16_t *r) {
     dsb2_t *d = &g_dsb2;
     dsb2_state_t *s = &d->st;
@@ -455,6 +465,7 @@ static inline void dsb2_sample(int16_t *l, int16_t *r) {
     int32_t ml = s->prev_l + (int32_t)(((int64_t)(s->cur_l - s->prev_l) * f) / (int32_t)DSB2_OUT_HZ);
     int32_t mr = s->prev_r + (int32_t)(((int64_t)(s->cur_r - s->prev_r) * f) / (int32_t)DSB2_OUT_HZ);
     int32_t ol = *l + ml, or_ = *r + mr;
+    if (!d->z80) { ol = ol * DSB2_MIX_NUM / DSB2_MIX_DEN; or_ = or_ * DSB2_MIX_NUM / DSB2_MIX_DEN; }
     *l = (int16_t)(ol > 32767 ? 32767 : ol < -32768 ? -32768 : ol);
     *r = (int16_t)(or_ > 32767 ? 32767 : or_ < -32768 ? -32768 : or_);
 }
